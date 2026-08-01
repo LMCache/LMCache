@@ -415,6 +415,68 @@ class TestBigtableL2Adapter:
 
         adapter.close()
 
+    def test_circuit_breaker_rearms_after_cooldown(self):
+        """A transient outage must not disable L2 for the process lifetime."""
+        cfg = create_test_config()
+        cfg.breaker_initial_cooldown_s = 0.05
+        cfg.breaker_max_cooldown_s = 0.4
+        adapter = BigtableL2Adapter(cfg)
+        try:
+            key = create_test_key(1)
+            obj = create_test_memory_obj(10, 128)
+
+            _BACKEND_ERROR.set(DeadlineExceeded("Simulated gRPC Timeout"))
+            for _ in range(adapter.max_connection_failures):
+                adapter.submit_store_task([key], [obj])
+                assert wait_for_event(adapter.get_store_event_fd())
+                adapter.pop_completed_store_tasks()
+            assert adapter.report_status()["connection_disabled"] is True
+
+            # Backend recovers; once the cooldown lapses the next store
+            # probes Bigtable instead of short-circuiting.
+            _BACKEND_ERROR.set(None)
+            time.sleep(0.1)
+
+            task_id = adapter.submit_store_task([key], [obj])
+            assert wait_for_event(adapter.get_store_event_fd())
+            results = adapter.pop_completed_store_tasks()
+            assert results[task_id].is_successful()
+
+            status = adapter.report_status()
+            assert status["connection_disabled"] is False
+            assert status["connection_failures"] == 0
+            with _BACKEND_LOCK:
+                assert _BACKEND_DATA
+        finally:
+            adapter.close()
+
+    def test_circuit_breaker_failure_count_stops_at_threshold(self):
+        """In-flight failures landing after the trip must not accumulate."""
+        cfg = create_test_config()
+        adapter = BigtableL2Adapter(cfg)
+        try:
+            obj = create_test_memory_obj(10, 128)
+            _BACKEND_ERROR.set(DeadlineExceeded("Simulated gRPC Timeout"))
+
+            task_ids = [
+                adapter.submit_store_task([create_test_key(i)], [obj])
+                for i in range(10)
+            ]
+            # Completions coalesce on the eventfd, so drain by task id
+            # rather than expecting one notification per submit.
+            pending = set(task_ids)
+            deadline = time.monotonic() + 5.0
+            while pending and time.monotonic() < deadline:
+                wait_for_event(adapter.get_store_event_fd(), timeout=0.2)
+                pending -= set(adapter.pop_completed_store_tasks())
+            assert not pending
+
+            status = adapter.report_status()
+            assert status["connection_disabled"] is True
+            assert status["connection_failures"] == adapter.max_connection_failures
+        finally:
+            adapter.close()
+
     def test_sharder_and_key_encoder(self):
         # First Party
         from lmcache.v1.distributed.l2_adapters.bigtable_key_encoder import (

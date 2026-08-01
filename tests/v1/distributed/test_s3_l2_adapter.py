@@ -666,6 +666,134 @@ class TestCircuitBreaker:
         bm = adapter.query_load_result(tid)
         assert bm is not None and bm.test(0) is False
 
+    def test_failure_count_stops_at_the_threshold(self, adapter):
+        """In-flight failures landing after the trip must not accumulate.
+
+        Requests already dispatched when the breaker trips still report
+        their outcome. Counting those inflates ``connection_failures`` well
+        past ``max_connection_failures`` and, once the breaker can re-arm,
+        would keep pushing the cooldown out for an outage already handled.
+        """
+        _BACKEND.set_error("CONNECTION_REFUSED: mock")
+
+        task_ids = [
+            adapter.submit_store_task([create_object_key(i)], [create_memory_obj()])
+            for i in range(10)
+        ]
+        # Completions coalesce on the eventfd, so drain by task id rather
+        # than expecting one notification per submit.
+        pending = set(task_ids)
+        deadline = time.monotonic() + 5.0
+        while pending and time.monotonic() < deadline:
+            wait_for_event_fd(adapter.get_store_event_fd(), timeout=0.2)
+            pending -= set(adapter.pop_completed_store_tasks())
+        assert not pending
+
+        status = adapter.report_status()
+        assert status["connection_disabled"] is True
+        assert status["connection_failures"] == adapter.max_connection_failures
+
+
+class TestCircuitBreakerRecovery:
+    @pytest.fixture
+    def fast_breaker_adapter(self):
+        """Adapter whose breaker re-arms almost immediately."""
+        config = S3L2AdapterConfig(
+            s3_endpoint="s3://test-bucket",
+            s3_region="us-east-1",
+            s3_prefer_http2=False,
+            s3_num_io_threads=1,
+            max_capacity_gb=0.001,
+            s3_breaker_initial_cooldown_s=0.05,
+            s3_breaker_max_cooldown_s=0.4,
+        )
+        a = S3L2Adapter(config)
+        yield a
+        a.close()
+
+    @staticmethod
+    def _trip(adapter) -> None:
+        _BACKEND.set_error("CONNECTION_REFUSED: mock")
+        for i in range(adapter.max_connection_failures):
+            adapter.submit_store_task([create_object_key(i)], [create_memory_obj()])
+            wait_for_event_fd(adapter.get_store_event_fd(), timeout=2.0)
+            adapter.pop_completed_store_tasks()
+        assert adapter.report_status()["connection_disabled"] is True
+
+    def test_recovers_once_the_endpoint_comes_back(self, fast_breaker_adapter):
+        adapter = fast_breaker_adapter
+        self._trip(adapter)
+
+        _BACKEND.set_error(None)
+        time.sleep(0.1)  # outlast the 0.05s cooldown
+
+        put_before = _BACKEND.counts()["put"]
+        key = create_object_key(99)
+        tid = adapter.submit_store_task([key], [create_memory_obj()])
+        wait_for_event_fd(adapter.get_store_event_fd(), timeout=2.0)
+        completed = adapter.pop_completed_store_tasks()
+
+        assert completed[tid].is_successful()
+        assert _BACKEND.counts()["put"] > put_before  # the probe reached S3
+
+        status = adapter.report_status()
+        assert status["connection_disabled"] is False
+        assert status["is_healthy"] is True
+        assert status["connection_failures"] == 0
+        assert status["breaker_retry_in_seconds"] == 0.0
+
+    def test_reports_time_until_the_next_probe(self, fast_breaker_adapter):
+        adapter = fast_breaker_adapter
+        self._trip(adapter)
+
+        retry_in = adapter.report_status()["breaker_retry_in_seconds"]
+        assert 0.0 < retry_in <= 0.05
+
+    def test_retrips_with_a_doubled_cooldown_while_still_failing(
+        self, fast_breaker_adapter
+    ):
+        adapter = fast_breaker_adapter
+        self._trip(adapter)  # cooldown 0.05 -> next trip uses 0.10
+
+        # Error stays injected: the probe and its two successors fail, so
+        # the breaker re-trips on a longer cooldown.
+        time.sleep(0.1)
+        for i in range(adapter.max_connection_failures):
+            adapter.submit_store_task([create_object_key(i)], [create_memory_obj()])
+            wait_for_event_fd(adapter.get_store_event_fd(), timeout=2.0)
+            adapter.pop_completed_store_tasks()
+
+        status = adapter.report_status()
+        assert status["connection_disabled"] is True
+        assert 0.05 < status["breaker_retry_in_seconds"] <= 0.1
+
+    def test_cooldown_is_capped(self, fast_breaker_adapter):
+        adapter = fast_breaker_adapter
+        # 0.05 -> 0.1 -> 0.2 -> 0.4 -> would be 0.8, capped at 0.4.
+        for _ in range(5):
+            _BACKEND.set_error("CONNECTION_REFUSED: mock")
+            for i in range(adapter.max_connection_failures):
+                adapter.submit_store_task([create_object_key(i)], [create_memory_obj()])
+                wait_for_event_fd(adapter.get_store_event_fd(), timeout=2.0)
+                adapter.pop_completed_store_tasks()
+            assert adapter.report_status()["breaker_retry_in_seconds"] <= 0.4
+            time.sleep(0.45)
+
+    def test_success_resets_the_cooldown_growth(self, fast_breaker_adapter):
+        adapter = fast_breaker_adapter
+        self._trip(adapter)  # cooldown now 0.1 for the next trip
+
+        _BACKEND.set_error(None)
+        time.sleep(0.1)
+        adapter.submit_store_task([create_object_key(7)], [create_memory_obj()])
+        wait_for_event_fd(adapter.get_store_event_fd(), timeout=2.0)
+        adapter.pop_completed_store_tasks()
+
+        # A clean round trip rearms the backoff, so the next trip waits the
+        # initial cooldown again rather than the doubled one.
+        self._trip(adapter)
+        assert adapter.report_status()["breaker_retry_in_seconds"] <= 0.05
+
 
 # =============================================================================
 # Listener notifications
@@ -741,6 +869,45 @@ class TestConfig:
         assert cfg.aws_access_key_id == "id"
         assert cfg.aws_secret_access_key == "secret"
         assert cfg.max_capacity_gb == 2.5
+
+    def test_breaker_cooldown_defaults(self):
+        cfg = S3L2AdapterConfig.from_dict(
+            {"s3_endpoint": "s3://b", "s3_region": "us-east-1"}
+        )
+        assert cfg.s3_breaker_initial_cooldown_s == 5.0
+        assert cfg.s3_breaker_max_cooldown_s == 300.0
+
+    def test_from_dict_parses_breaker_cooldowns(self):
+        cfg = S3L2AdapterConfig.from_dict(
+            {
+                "s3_endpoint": "s3://b",
+                "s3_region": "us-east-1",
+                "s3_breaker_initial_cooldown_s": 1,
+                "s3_breaker_max_cooldown_s": 60.5,
+            }
+        )
+        assert cfg.s3_breaker_initial_cooldown_s == 1.0
+        assert cfg.s3_breaker_max_cooldown_s == 60.5
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"s3_breaker_initial_cooldown_s": 0},
+            {"s3_breaker_initial_cooldown_s": -1.0},
+            {"s3_breaker_initial_cooldown_s": True},
+            {"s3_breaker_initial_cooldown_s": "5"},
+            {"s3_breaker_max_cooldown_s": 0},
+            # max below initial would make the backoff shrink on each trip
+            {
+                "s3_breaker_initial_cooldown_s": 30.0,
+                "s3_breaker_max_cooldown_s": 10.0,
+            },
+        ],
+    )
+    def test_from_dict_rejects_invalid_breaker_cooldowns(self, overrides):
+        d = {"s3_endpoint": "s3://b", "s3_region": "us-east-1", **overrides}
+        with pytest.raises(ValueError):
+            S3L2AdapterConfig.from_dict(d)
 
     def test_help_nonempty(self):
         assert isinstance(S3L2AdapterConfig.help(), str)
@@ -879,9 +1046,16 @@ class TestS3L2AdapterListKeys:
 
     def test_circuit_breaker_blocks_listing(self, adapter):
         # When the connection is disabled, listing must surface a
-        # clear error instead of issuing a doomed request.
-        with adapter._lock:
-            adapter._connection_disabled = True
+        # clear error instead of issuing a doomed request. Trip the
+        # breaker the way the endpoint would, so its cooldown is armed
+        # and the block is not lifted by the very next call.
+        _BACKEND.set_error("CONNECTION_REFUSED: mock")
+        for i in range(adapter.max_connection_failures):
+            adapter.submit_store_task([create_object_key(i)], [create_memory_obj()])
+            wait_for_event_fd(adapter.get_store_event_fd(), timeout=2.0)
+            adapter.pop_completed_store_tasks()
+        assert adapter.report_status()["connection_disabled"] is True
+
         with pytest.raises(RuntimeError) as exc:
             adapter.list_l2_keys()
         assert "disabled" in str(exc.value)

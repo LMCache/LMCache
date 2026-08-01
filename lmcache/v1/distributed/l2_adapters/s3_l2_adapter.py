@@ -22,6 +22,7 @@ from urllib.parse import urlencode
 import asyncio
 import ctypes
 import threading
+import time
 import xml.etree.ElementTree as ET
 
 if TYPE_CHECKING:
@@ -327,6 +328,11 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
     - max_capacity_gb (float): aggregate capacity used by
       ``get_usage()``; ``0`` disables aggregate eviction
       (``usage_fraction == -1.0``).
+    - s3_breaker_initial_cooldown_s (float): how long the circuit
+      breaker stays open after it trips, before the adapter re-probes
+      the endpoint. Doubles on every consecutive trip.
+    - s3_breaker_max_cooldown_s (float): upper bound for the doubled
+      cooldown.
     """
 
     def __init__(
@@ -340,6 +346,8 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
         aws_access_key_id: Optional[str] = None,
         aws_secret_access_key: Optional[str] = None,
         max_capacity_gb: float = 0.0,
+        s3_breaker_initial_cooldown_s: float = 5.0,
+        s3_breaker_max_cooldown_s: float = 300.0,
     ):
         self.s3_endpoint = s3_endpoint
         self.s3_region = s3_region
@@ -350,6 +358,8 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
         self.aws_access_key_id = aws_access_key_id
         self.aws_secret_access_key = aws_secret_access_key
         self.max_capacity_gb = max_capacity_gb
+        self.s3_breaker_initial_cooldown_s = s3_breaker_initial_cooldown_s
+        self.s3_breaker_max_cooldown_s = s3_breaker_max_cooldown_s
 
     @classmethod
     def from_dict(cls, d: dict) -> "S3L2AdapterConfig":
@@ -384,6 +394,19 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
         if not isinstance(max_cap, (int, float)) or isinstance(max_cap, bool):
             raise ValueError("max_capacity_gb must be a number")
 
+        def _pos_float(key, default):
+            v = d.get(key, default)
+            if not isinstance(v, (int, float)) or isinstance(v, bool) or v <= 0:
+                raise ValueError(f"{key} must be a positive number")
+            return float(v)
+
+        initial_cooldown = _pos_float("s3_breaker_initial_cooldown_s", 5.0)
+        max_cooldown = _pos_float("s3_breaker_max_cooldown_s", 300.0)
+        if max_cooldown < initial_cooldown:
+            raise ValueError(
+                "s3_breaker_max_cooldown_s must be >= s3_breaker_initial_cooldown_s"
+            )
+
         cfg = cls(
             s3_endpoint=endpoint,
             s3_region=region,
@@ -394,6 +417,8 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
             aws_access_key_id=_opt_str("aws_access_key_id"),
             aws_secret_access_key=_opt_str("aws_secret_access_key"),
             max_capacity_gb=float(max_cap),
+            s3_breaker_initial_cooldown_s=initial_cooldown,
+            s3_breaker_max_cooldown_s=max_cooldown,
         )
         cfg.eviction_config = cls._parse_eviction_config(d)
         return cfg
@@ -412,6 +437,10 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
             "- aws_access_key_id / aws_secret_access_key (str): static creds; "
             "when unset, boto3 resolves credentials\n"
             "- max_capacity_gb (float): capacity for get_usage (0 = disabled)\n"
+            "- s3_breaker_initial_cooldown_s (float): circuit-breaker open "
+            "time before re-probing the endpoint (default 5.0)\n"
+            "- s3_breaker_max_cooldown_s (float): cap for the doubled "
+            "cooldown (default 300.0)\n"
             "- eviction (dict): optional, see L2AdapterConfigBase"
         )
 
@@ -435,9 +464,12 @@ class S3L2Adapter(L2AdapterInterface):
     a concurrent load is about to read.
 
     Circuit breaker: after ``max_connection_failures`` consecutive
-    connection-class errors, ``connection_disabled`` is set; all
-    subsequent submits short-circuit and record failure without
-    touching S3.
+    connection-class errors, ``connection_disabled`` is set and all
+    submits short-circuit, recording failure without touching S3. The
+    breaker re-arms itself once ``s3_breaker_initial_cooldown_s`` has
+    elapsed, so a transient outage does not disable L2 for the lifetime
+    of the process; an endpoint that is still broken re-trips and the
+    cooldown doubles up to ``s3_breaker_max_cooldown_s``.
     """
 
     max_connection_failures = 3
@@ -516,9 +548,13 @@ class S3L2Adapter(L2AdapterInterface):
         # Cached HEAD-verified object sizes (keyed by S3 object name).
         self._object_size_cache: dict[str, int] = {}
 
-        # Circuit breaker state.
+        # Circuit breaker state. ``_breaker_reopen_at`` is a
+        # ``time.monotonic()`` deadline; once it passes, the next submit
+        # re-arms the breaker and probes the endpoint again.
         self._connection_failures = 0
         self._connection_disabled = False
+        self._breaker_cooldown_s = config.s3_breaker_initial_cooldown_s
+        self._breaker_reopen_at = 0.0
 
         self._lock = threading.Lock()
 
@@ -569,7 +605,7 @@ class S3L2Adapter(L2AdapterInterface):
         with self._lock:
             task_id = self._next_task_id
             self._next_task_id += 1
-            if self._connection_disabled:
+            if self._breaker_blocks_locked():
                 self._completed_store_tasks[task_id] = L2StoreResult(False, 0)
                 disabled = True
             else:
@@ -601,7 +637,7 @@ class S3L2Adapter(L2AdapterInterface):
         with self._lock:
             task_id = self._next_task_id
             self._next_task_id += 1
-            if self._connection_disabled:
+            if self._breaker_blocks_locked():
                 self._completed_lookup_tasks[task_id] = Bitmap(len(keys))
                 disabled = True
             else:
@@ -643,7 +679,7 @@ class S3L2Adapter(L2AdapterInterface):
         with self._lock:
             task_id = self._next_task_id
             self._next_task_id += 1
-            if self._connection_disabled:
+            if self._breaker_blocks_locked():
                 self._completed_load_tasks[task_id] = Bitmap(len(keys))
                 disabled = True
             else:
@@ -673,7 +709,7 @@ class S3L2Adapter(L2AdapterInterface):
 
         # Filter out locked keys — they're being read right now.
         with self._lock:
-            if self._connection_disabled:
+            if self._breaker_blocks_locked():
                 return
             deletable = [k for k in keys if self._locked_keys.get(k, 0) == 0]
 
@@ -740,7 +776,7 @@ class S3L2Adapter(L2AdapterInterface):
             prefix = f"{model_name}@"
 
         with self._lock:
-            if self._connection_disabled:
+            if self._breaker_blocks_locked():
                 raise RuntimeError(
                     "S3 connection disabled (circuit-broken); listing unavailable"
                 )
@@ -763,6 +799,11 @@ class S3L2Adapter(L2AdapterInterface):
         with self._lock:
             failures = self._connection_failures
             disabled = self._connection_disabled
+            retry_in = (
+                max(0.0, self._breaker_reopen_at - time.monotonic())
+                if disabled
+                else 0.0
+            )
         usage = self.get_usage()
         return {
             "is_healthy": self._loop_thread.is_alive() and not disabled,
@@ -771,6 +812,7 @@ class S3L2Adapter(L2AdapterInterface):
             "region": self._region,
             "connection_failures": failures,
             "connection_disabled": disabled,
+            "breaker_retry_in_seconds": retry_in,
             "current_size_bytes": usage.total_bytes_used,
             "max_capacity_bytes": usage.total_capacity_bytes,
         }
@@ -1008,6 +1050,32 @@ class S3L2Adapter(L2AdapterInterface):
         )
         return s3_req, body_chunks, captured
 
+    def _breaker_blocks_locked(self) -> bool:
+        """Whether the circuit breaker should reject a new request.
+
+        The caller must hold ``self._lock``. When the breaker is open but
+        its cooldown has elapsed, this re-arms the adapter (clearing the
+        failure count) and returns False so the request that triggered
+        the check probes the endpoint. An endpoint that is still broken
+        re-trips after ``max_connection_failures`` further errors, with
+        the cooldown doubled by ``_record_connection_outcome``.
+
+        Returns:
+            True to short-circuit the request, False to let it through.
+        """
+        if not self._connection_disabled:
+            return False
+        if time.monotonic() < self._breaker_reopen_at:
+            return True
+        self._connection_disabled = False
+        self._connection_failures = 0
+        logger.info(
+            "S3L2Adapter re-arming after %.1fs cooldown; probing %s",
+            self._breaker_cooldown_s,
+            self._endpoint,
+        )
+        return False
+
     def _record_connection_outcome(self, error_msg: Optional[str]) -> None:
         """Update the circuit breaker under the lock."""
         with self._lock:
@@ -1015,8 +1083,15 @@ class S3L2Adapter(L2AdapterInterface):
                 if self._connection_failures > 0:
                     logger.info("S3L2Adapter connection recovered")
                 self._connection_failures = 0
+                self._breaker_cooldown_s = self._config.s3_breaker_initial_cooldown_s
                 return
             if not _is_connection_error(error_msg):
+                return
+            if self._connection_disabled:
+                # Outcome of a request that was already in flight when the
+                # breaker tripped. Counting it would inflate the failure
+                # tally and re-arm the cooldown for an outage already
+                # accounted for.
                 return
             self._connection_failures += 1
             logger.error(
@@ -1027,9 +1102,16 @@ class S3L2Adapter(L2AdapterInterface):
             )
             if self._connection_failures >= self.max_connection_failures:
                 self._connection_disabled = True
+                self._breaker_reopen_at = time.monotonic() + self._breaker_cooldown_s
                 logger.error(
-                    "S3L2Adapter disabled after %d consecutive connection failures",
+                    "S3L2Adapter disabled after %d consecutive connection "
+                    "failures; re-probing in %.1fs",
                     self.max_connection_failures,
+                    self._breaker_cooldown_s,
+                )
+                self._breaker_cooldown_s = min(
+                    self._breaker_cooldown_s * 2.0,
+                    self._config.s3_breaker_max_cooldown_s,
                 )
 
     # ------------------------------------------------------------------
