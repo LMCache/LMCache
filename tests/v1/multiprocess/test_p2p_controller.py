@@ -16,6 +16,7 @@ from lmcache.native_storage_ops import Bitmap
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey, TrimPolicy
 from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import P2PL2AdapterConfig
 from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
+from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 from lmcache.v1.multiprocess.config import CoordinatorConfig, P2PConfig
 from lmcache.v1.multiprocess.modules.p2p_controller import (
     _MAX_MISSES,
@@ -370,6 +371,34 @@ def test_reconcile_removes_peer_after_grace():
     assert controller.report_status()["p2p_peers"] == []
 
 
+def test_reconcile_retries_removal_after_timeout():
+    """A timed-out removal stays tracked and is retried next cycle."""
+    controller, ctx = _make_controller()
+    ctx.storage_manager.add_l2_adapter.return_value = 7
+    ctx.storage_manager.delete_l2_adapter.side_effect = [
+        LMCacheTimeoutError("boom"),
+        None,
+    ]
+
+    controller._apply_state(_P2PState.REGISTERED, {"peerA": _peer("peerA")})
+    for _ in range(_MAX_MISSES):
+        controller._apply_state(_P2PState.REGISTERED, {})
+
+    failed = controller._apply_state(_P2PState.REGISTERED, {})
+
+    assert failed.message.endswith("added=0 removed=0")
+    assert controller.report_status()["p2p_peers"] == ["peerA"]
+    ctx.storage_manager.delete_l2_adapter.assert_called_once_with(7)
+
+    retried = controller._apply_state(_P2PState.REGISTERED, {})
+
+    assert retried.message.endswith("added=0 removed=1")
+    assert [
+        call.args[0] for call in ctx.storage_manager.delete_l2_adapter.call_args_list
+    ] == [7, 7]
+    assert controller.report_status()["p2p_peers"] == []
+
+
 def test_reconcile_readds_on_url_change():
     """A peer whose advertised url changes is removed and re-added."""
     controller, ctx = _make_controller()
@@ -382,6 +411,27 @@ def test_reconcile_readds_on_url_change():
     assert ctx.storage_manager.add_l2_adapter.call_count == 2
     latest = ctx.storage_manager.add_l2_adapter.call_args.args[0]
     assert latest.peer_transfer_channel_server_url == "b:2"
+
+
+def test_reconcile_does_not_replace_changed_peer_after_removal_timeout():
+    """A changed peer is not replaced until its old adapter is removed."""
+    controller, ctx = _make_controller()
+    ctx.storage_manager.add_l2_adapter.return_value = 7
+    ctx.storage_manager.delete_l2_adapter.side_effect = LMCacheTimeoutError("boom")
+
+    controller._apply_state(
+        _P2PState.REGISTERED,
+        {"peerA": _peer("peerA", url="a:1")},
+    )
+    failed = controller._apply_state(
+        _P2PState.REGISTERED,
+        {"peerA": _peer("peerA", url="b:2")},
+    )
+
+    assert failed.message.endswith("added=0 removed=0")
+    ctx.storage_manager.delete_l2_adapter.assert_called_once_with(7)
+    assert ctx.storage_manager.add_l2_adapter.call_count == 1
+    assert controller.report_status()["p2p_peers"] == ["peerA"]
 
 
 def test_close_removes_all_adapters():
