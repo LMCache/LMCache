@@ -32,6 +32,10 @@ import (
 const (
 	testEngineName = "test-engine"
 	testNamespace  = "default"
+
+	kvRoleBoth     = "kv_both"
+	kvRoleProducer = "kv_producer"
+	kvRoleConsumer = "kv_consumer"
 )
 
 // --- helpers ---
@@ -931,7 +935,7 @@ func TestBuildConnectionConfigMap_Default(t *testing.T) {
 			config["kv_connector_module_path"],
 		)
 	}
-	if config["kv_role"] != "kv_both" {
+	if config["kv_role"] != kvRoleBoth {
 		t.Fatalf("expected kv_role=kv_both, got %v", config["kv_role"])
 	}
 
@@ -978,7 +982,7 @@ func TestBuildConnectionConfigMap_PDPrefiller(t *testing.T) {
 	if config["kv_connector"] != "MultiConnector" {
 		t.Fatalf("expected kv_connector=MultiConnector, got %v", config["kv_connector"])
 	}
-	if config["kv_role"] != "kv_producer" {
+	if config["kv_role"] != kvRoleProducer {
 		t.Fatalf("expected kv_role=kv_producer, got %v", config["kv_role"])
 	}
 
@@ -992,7 +996,7 @@ func TestBuildConnectionConfigMap_PDPrefiller(t *testing.T) {
 	if nixl["kv_connector"] != "NixlConnector" {
 		t.Fatalf("first connector must be NixlConnector, got %v", nixl["kv_connector"])
 	}
-	if nixl["kv_role"] != "kv_producer" {
+	if nixl["kv_role"] != kvRoleProducer {
 		t.Fatalf("NixlConnector role must be kv_producer, got %v", nixl["kv_role"])
 	}
 	if nixl["kv_load_failure_policy"] != "fail" {
@@ -1003,7 +1007,7 @@ func TestBuildConnectionConfigMap_PDPrefiller(t *testing.T) {
 	if lmc["kv_connector"] != "LMCacheMPConnector" {
 		t.Fatalf("second connector must be LMCacheMPConnector, got %v", lmc["kv_connector"])
 	}
-	if lmc["kv_role"] != "kv_both" {
+	if lmc["kv_role"] != kvRoleBoth {
 		t.Fatalf("LMCacheMPConnector role must be kv_both, got %v", lmc["kv_role"])
 	}
 	lmcExtra := lmc["kv_connector_extra_config"].(map[string]any)
@@ -1024,13 +1028,13 @@ func TestBuildConnectionConfigMap_PDDecoder(t *testing.T) {
 		t.Fatalf("invalid JSON: %v", err)
 	}
 
-	if config["kv_role"] != "kv_consumer" {
+	if config["kv_role"] != kvRoleConsumer {
 		t.Fatalf("expected kv_role=kv_consumer, got %v", config["kv_role"])
 	}
 
 	outer := config["kv_connector_extra_config"].(map[string]any)
 	nixl := outer["connectors"].([]any)[0].(map[string]any)
-	if nixl["kv_role"] != "kv_consumer" {
+	if nixl["kv_role"] != kvRoleConsumer {
 		t.Fatalf("NixlConnector role must be kv_consumer, got %v", nixl["kv_role"])
 	}
 }

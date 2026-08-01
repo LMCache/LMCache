@@ -74,6 +74,7 @@ func BuildConnectionConfigMap(engine *lmcachev1alpha1.LMCacheEngine) *corev1.Con
 //
 // The ConfigMap carries two data keys:
 //   - "kv-transfer-config.json": the full MultiConnector JSON for --kv-transfer-config.
+//
 // Parameters:
 //   - name, namespace: the owning engine's identity.
 //   - lmcacheConnectorName: inner LMCache connector name (e.g. "LMCacheMPConnector").
@@ -97,9 +98,9 @@ func buildPDConnectionConfigMap(
 
 	// NixlConnector inner config.
 	nixlConnector := map[string]any{
-		"kv_connector":            "NixlConnector",
-		"kv_role":                 kvRole,
-		"kv_load_failure_policy":  derefString(pd.NixlLoadFailurePolicy, "fail"),
+		"kv_connector":           "NixlConnector",
+		"kv_role":                kvRole,
+		"kv_load_failure_policy": derefString(pd.NixlLoadFailurePolicy, "fail"),
 	}
 	if pd.EnforceHandshakeCompat != nil {
 		nixlConnector["kv_connector_extra_config"] = map[string]any{
