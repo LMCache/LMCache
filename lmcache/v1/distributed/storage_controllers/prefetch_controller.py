@@ -141,6 +141,9 @@ class InFlightPrefetchRequest:
     keys: list[ObjectKey]
     layout_desc: MemoryLayoutDesc
     phase: PrefetchPhase
+    prefetch_policy: PrefetchPolicy
+    """Policy captured when this request entered the lookup phase."""
+
     extra_count: int = 0
     """Extra read locks per key (on top of the default 1) to acquire when
     transitioning from write-locked to read-locked.  Must match the
@@ -226,6 +229,7 @@ class PrefetchController(StorageControllerInterface):
             desc.index: desc for desc in adapter_descriptors
         }
         self._policy = policy
+        self._policy_lock = threading.Lock()
         self._max_in_flight = max_in_flight
 
         # Adapters that are being drained and will be removed after all
@@ -452,6 +456,18 @@ class PrefetchController(StorageControllerInterface):
             "num_active_adapters": len(self._l2_adapters) - len(self._draining),
             "num_draining_adapters": len(self._draining),
         }
+
+    def update_policy(self, policy: PrefetchPolicy) -> None:
+        """Replace the policy used for future prefetch requests.
+
+        Requests that already entered the lookup phase retain their captured
+        policy through load planning and completion.
+
+        Args:
+            policy: New policy instance to use for future requests.
+        """
+        with self._policy_lock:
+            self._policy = policy
 
     def get_adapter_state_observations(
         self,
@@ -762,6 +778,7 @@ class PrefetchController(StorageControllerInterface):
             self._complete_request(request_id, Bitmap(len(spec.keys)))
             return
 
+        prefetch_policy = self._get_policy()
         pending_lookup_tasks: dict[int, L2TaskId] = {}
         for adapter_id, adapter in routing_adapters.items():
             task_id = adapter.submit_lookup_and_lock_task(spec.keys, spec.layout_desc)
@@ -772,6 +789,7 @@ class PrefetchController(StorageControllerInterface):
             keys=spec.keys,
             layout_desc=spec.layout_desc,
             phase=PrefetchPhase.LOOKUP,
+            prefetch_policy=prefetch_policy,
             extra_count=spec.extra_count,
             policy=spec.policy,
             attn_desc=spec.attn_desc,
@@ -811,7 +829,7 @@ class PrefetchController(StorageControllerInterface):
             for adapter_id, desc in self._adapter_descriptors.items()
             if adapter_id not in self._draining
         ]
-        load_plan = self._policy.select_load_plan(
+        load_plan = request.prefetch_policy.select_load_plan(
             request.keys,
             request.lookup_results,
             routing_descriptors,
@@ -849,7 +867,7 @@ class PrefetchController(StorageControllerInterface):
         if request.mode is PrefetchMode.WARM:
             retentions = [True] * len(keys_to_reserve)
         else:
-            retentions = self._policy.select_l1_retentions(
+            retentions = request.prefetch_policy.select_l1_retentions(
                 keys_to_reserve,
             )
         write_results = l1_mgr.reserve_write(
@@ -1214,3 +1232,8 @@ class PrefetchController(StorageControllerInterface):
                 len(request.keys),
             )
         self._in_flight_requests.clear()
+
+    def _get_policy(self) -> PrefetchPolicy:
+        """Return the current policy for a newly started request."""
+        with self._policy_lock:
+            return self._policy

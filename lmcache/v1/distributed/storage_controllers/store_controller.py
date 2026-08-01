@@ -183,6 +183,9 @@ class InFlightStoreTask:
     """The subset of keys for which reserve_read succeeded
     (i.e., keys holding an L1 read lock that must be released)."""
 
+    policy: StorePolicy
+    """Policy captured when this task was planned."""
+
     l2_store_result: bool | None = None
     """L2 outcome (True=success, False=failure, None=still in flight)."""
 
@@ -239,6 +242,7 @@ class StoreController(StorageControllerInterface):
             desc.index: desc for desc in adapter_descriptors
         }
         self._policy = policy
+        self._policy_lock = threading.Lock()
 
         # Adapters that are being drained and will be removed after all
         # the in-flight operations are done.
@@ -333,6 +337,19 @@ class StoreController(StorageControllerInterface):
             "num_active_adapters": len(self._l2_adapters) - num_draining,
             "num_draining_adapters": num_draining,
         }
+
+    def update_policy(self, policy: StorePolicy) -> None:
+        """Replace the policy used for future store planning.
+
+        In-flight tasks retain the policy instance captured when they were
+        submitted, so changing the controller policy does not change the L1
+        deletion decision for work already in progress.
+
+        Args:
+            policy: New policy instance to use for future store tasks.
+        """
+        with self._policy_lock:
+            self._policy = policy
 
     def add_adapter(
         self,
@@ -580,7 +597,9 @@ class StoreController(StorageControllerInterface):
             for adapter_id, desc in self._adapter_descriptors.items()
             if adapter_id not in self._draining
         ]
-        plan = self._policy.select_store_targets(keys, routing_descriptors)
+        with self._policy_lock:
+            policy = self._policy
+        plan = policy.select_store_targets(keys, routing_descriptors)
 
         l1_mgr = self._l1_manager
 
@@ -659,6 +678,7 @@ class StoreController(StorageControllerInterface):
                 adapter_index=adapter_index,
                 keys=successful_keys,
                 read_locked_keys=list(successful_keys),
+                policy=policy,
             )
             self._status_in_flight_count += 1
 
@@ -759,7 +779,7 @@ class StoreController(StorageControllerInterface):
                 adapter_index,
                 len(task.keys),
             )
-            delete_keys = self._policy.select_l1_deletions(task.keys)
+            delete_keys = task.policy.select_l1_deletions(task.keys)
             if delete_keys:
                 l1_mgr.delete(delete_keys)
         else:

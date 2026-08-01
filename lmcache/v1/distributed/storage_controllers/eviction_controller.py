@@ -101,6 +101,7 @@ class L1EvictionController(EvictionController):
     ):
         super().__init__()
         self._eviction_config = eviction_config
+        self._config_lock = threading.Lock()
         self._eviction_policy = CreateEvictionPolicy(eviction_config)
         self._l1_manager = l1_manager
         self._listener = L1EvictionPolicy(self._eviction_policy)
@@ -109,13 +110,36 @@ class L1EvictionController(EvictionController):
         self._last_extra_log = time.monotonic()
 
     def report_status(self) -> dict:
+        with self._config_lock:
+            eviction_policy = self._eviction_config.eviction_policy
+            trigger_watermark = self._eviction_config.trigger_watermark
+            eviction_ratio = self._eviction_config.eviction_ratio
         return {
             "is_healthy": self._thread.is_alive(),
             "thread_alive": self._thread.is_alive(),
-            "eviction_policy": self._eviction_config.eviction_policy,
-            "trigger_watermark": self._eviction_config.trigger_watermark,
-            "eviction_ratio": self._eviction_config.eviction_ratio,
+            "eviction_policy": eviction_policy,
+            "trigger_watermark": trigger_watermark,
+            "eviction_ratio": eviction_ratio,
         }
+
+    def update_tunables(
+        self,
+        trigger_watermark: float | None,
+        eviction_ratio: float | None,
+    ) -> None:
+        """Update numeric L1 eviction tunables for future loop ticks.
+
+        Args:
+            trigger_watermark: New trigger watermark, or ``None`` to retain
+                the current value.
+            eviction_ratio: New eviction ratio, or ``None`` to retain the
+                current value.
+        """
+        with self._config_lock:
+            if trigger_watermark is not None:
+                self._eviction_config.trigger_watermark = trigger_watermark
+            if eviction_ratio is not None:
+                self._eviction_config.eviction_ratio = eviction_ratio
 
     def _publish_skipped(self, usage: float, watermark: float) -> None:
         """Publish a below-watermark loop tick (no eviction this cycle)."""
@@ -158,13 +182,14 @@ class L1EvictionController(EvictionController):
         )
 
     def eviction_loop(self):
-        watermark = self._eviction_config.trigger_watermark
-        eviction_ratio = self._eviction_config.eviction_ratio
-
         while not self._stop_flag.is_set():
             time.sleep(1)
+            with self._config_lock:
+                watermark = self._eviction_config.trigger_watermark
+                eviction_ratio = self._eviction_config.eviction_ratio
+                extra_logging_enabled = self._eviction_config.extra_logging_enabled
             used_bytes, total_bytes = self._l1_manager.get_memory_usage()
-            if self._eviction_config.extra_logging_enabled:
+            if extra_logging_enabled:
                 self._maybe_log_memory_usage(used_bytes, total_bytes)
             usage = 0 if total_bytes == 0 else used_bytes / total_bytes
             if usage < watermark:
@@ -271,6 +296,45 @@ class L2EvictionController(StorageControllerInterface):
                 s for s in self._adapter_states if s.adapter_id != adapter_id
             ]
 
+    def update_tunables(
+        self,
+        adapter_id: int,
+        trigger_watermark: float | None,
+        eviction_ratio: float | None,
+    ) -> None:
+        """Update one adapter's eviction tunables for future loop ticks.
+
+        Args:
+            adapter_id: Stable StorageManager adapter id.
+            trigger_watermark: New watermark, or ``None`` to retain it.
+            eviction_ratio: New ratio, or ``None`` to retain it.
+
+        Raises:
+            KeyError: If the adapter has no active eviction state.
+        """
+        with self._states_lock:
+            for state in self._adapter_states:
+                if state.adapter_id != adapter_id:
+                    continue
+                if trigger_watermark is not None:
+                    state.eviction_config.trigger_watermark = trigger_watermark
+                if eviction_ratio is not None:
+                    state.eviction_config.eviction_ratio = eviction_ratio
+                return
+        raise KeyError(adapter_id)
+
+    def get_policy_status(self) -> dict[int, dict[str, object]]:
+        """Return current policy and tunable values keyed by adapter id."""
+        with self._states_lock:
+            return {
+                state.adapter_id: {
+                    "eviction_policy": state.eviction_config.eviction_policy,
+                    "trigger_watermark": state.eviction_config.trigger_watermark,
+                    "eviction_ratio": state.eviction_config.eviction_ratio,
+                }
+                for state in self._adapter_states
+            }
+
     def report_status(self) -> dict:
         # NOTE: ``usage.bytes_by_cache_salt`` is intentionally NOT
         # surfaced here. A deployment can have 10k+ salts, so embedding
@@ -280,14 +344,24 @@ class L2EvictionController(StorageControllerInterface):
         # ``StorageManager.get_usage_bytes_by_cache_salt``).
         adapter_statuses = []
         with self._states_lock:
-            states = list(self._adapter_states)
-        for state in states:
-            usage = state.adapter.get_usage()
+            states = [
+                (
+                    state.adapter_id,
+                    state.adapter,
+                    state.eviction_config.eviction_policy,
+                    state.eviction_config.trigger_watermark,
+                    state.eviction_config.eviction_ratio,
+                )
+                for state in self._adapter_states
+            ]
+        for adapter_id, adapter, eviction_policy, watermark, ratio in states:
+            usage = adapter.get_usage()
             adapter_statuses.append(
                 {
-                    "eviction_policy": state.eviction_config.eviction_policy,
-                    "trigger_watermark": state.eviction_config.trigger_watermark,
-                    "eviction_ratio": state.eviction_config.eviction_ratio,
+                    "adapter_id": adapter_id,
+                    "eviction_policy": eviction_policy,
+                    "trigger_watermark": watermark,
+                    "eviction_ratio": ratio,
                     "current_usage": usage.usage_fraction,
                     "total_bytes_used": usage.total_bytes_used,
                     "total_capacity_bytes": usage.total_capacity_bytes,
