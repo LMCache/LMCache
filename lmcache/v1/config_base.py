@@ -188,24 +188,40 @@ def _resolve_config_aliases(
     config_aliases: dict,
     deprecated_configs: dict,
 ) -> dict:
-    """Resolve configuration aliases and handle deprecated configurations."""
+    """Resolve configuration aliases and handle deprecated configurations.
+
+    For each key in ``config_dict`` the resolution order is:
+
+    - If the key is listed in ``deprecated_configs``, a deprecation warning is
+      logged, independently of how the key is subsequently resolved.
+    - If the key is a current, valid key in ``config_definitions`` it is kept
+      as-is. This is checked before ``config_aliases`` so that a name which is
+      both a live key and a legacy alias keeps its current-key meaning.
+    - Otherwise, if the key is an alias in ``config_aliases``, its value is
+      remapped to the current key it points to. This happens for every alias,
+      not only those that are also listed in ``deprecated_configs``.
+    - Otherwise, if the key is deprecated but has no alias mapping, it is kept
+      under its original name for backward compatibility.
+    - Any remaining key is unknown and is dropped with a warning.
+    """
     resolved = {}
 
     # Process each key in the input
     for key, value in config_dict.items():
+        # Deprecation warnings are independent of how the key is resolved.
         if key in deprecated_configs:
-            # Log deprecation warning
             logger.warning("%s (source: %s)", deprecated_configs[key], source)
 
-            # Map to new key if alias exists
-            if key in config_aliases:
-                new_key = config_aliases[key]
-                resolved[new_key] = value
-            else:
-                # Keep deprecated key for backward compatibility
-                resolved[key] = value
-        elif key in config_definitions:
-            # Valid configuration key
+        if key in config_definitions:
+            # A current, valid key. Checked before aliases so a name that is
+            # both a live key and a legacy alias keeps its current meaning.
+            resolved[key] = value
+        elif key in config_aliases:
+            # A deprecated/alternate name: remap to its current key.
+            resolved[config_aliases[key]] = value
+        elif key in deprecated_configs:
+            # Deprecated key with no alias mapping and not a current key: keep
+            # it under its original name for backward compatibility.
             resolved[key] = value
         else:
             # Unknown configuration key
