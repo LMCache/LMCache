@@ -54,6 +54,8 @@ allowlist = {
   "tests/test_*.py",
   "tests/cli/**/test_*.py",
   "tests/disagg/test_*.py",
+  "tests/v1/mp_coordinator/**/test_*.py",
+  "tests/v1/mp_observability/**/test_*.py",
   "tests/v1/multiprocess/**/test_*.py",
   "tests/v1/distributed/**/test_*.py",
   "tests/v1/test_xpu_connector.py",
