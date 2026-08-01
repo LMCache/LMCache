@@ -56,6 +56,10 @@ LMCACHE_LOG="/tmp/build_${BUILD_ID}_lmcache.log"
 CHUNK_SIZE="${CHUNK_SIZE:-944}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-1500}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.8}"
+# Registration/messaging timeout for the vLLM-side MP connector, and the
+# LMCache server L1 pool size; overridable for slower / smaller boxes.
+MQ_TIMEOUT="${MQ_TIMEOUT:-30}"
+L1_SIZE_GB="${L1_SIZE_GB:-80}"
 # Readiness timeout per vLLM launch. This is owned by the test (a 48B TP-shard
 # load is slow) and deliberately does NOT reuse MAX_WAIT_SECONDS, which
 # run-single-test.sh pre-exports to 300s -- that would shadow the value here.
@@ -113,7 +117,7 @@ launch_vllm() {
         --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
         --port "$saved_port" \
         --block-size 944 \
-        --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_load_failure_policy\": \"recompute\", \"kv_connector_extra_config\": {\"lmcache.mp.port\": $LMCACHE_PORT, \"lmcache.mp.mq_timeout\": 30}}" \
+        --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_load_failure_policy\": \"recompute\", \"kv_connector_extra_config\": {\"lmcache.mp.port\": $LMCACHE_PORT, \"lmcache.mp.mq_timeout\": $MQ_TIMEOUT}}" \
         > "$log_file" 2>&1 &
     VLLM_PID=$!
     echo "$VLLM_PID" >> "$PID_FILE"
@@ -225,7 +229,7 @@ lmcache server \
     --host localhost \
     --port "$LMCACHE_PORT" \
     --chunk-size "$CHUNK_SIZE" \
-    --l1-size-gb 80 \
+    --l1-size-gb "$L1_SIZE_GB" \
     --eviction-policy LRU \
     --max-workers 4 \
     > "$LMCACHE_LOG" 2>&1 &
@@ -288,10 +292,30 @@ if cmp -s "$OUT_A" "$OUT_B"; then
     echo "PASS: vLLM-run and LMCache-retrieve outputs are identical."
 else
     echo "FAILED: outputs differ between the cold run and the LMCache-served run."
-    echo "--- vLLM run (first 400 chars) ---"
-    head -c 400 "$OUT_A"; echo
-    echo "--- LMCache retrieve run (first 400 chars) ---"
-    head -c 400 "$OUT_B"; echo
+    python3 - "$OUT_A" "$OUT_B" <<'PYEOF'
+import sys
+
+a = open(sys.argv[1]).read()
+b = open(sys.argv[2]).read()
+n = min(len(a), len(b))
+div = next((i for i in range(n) if a[i] != b[i]), n)
+print(f"output lengths: vllm_run={len(a)} chars, retrieve_run={len(b)} chars")
+print(f"first divergence at char {div}")
+lo = max(0, div - 120)
+print(f"--- vLLM run, chars [{lo}:{div + 200}] ---")
+print(repr(a[lo:div + 200]))
+print(f"--- retrieve run, chars [{lo}:{div + 200}] ---")
+print(repr(b[lo:div + 200]))
+PYEOF
+    echo "--- vLLM run (full output) ---"
+    cat "$OUT_A"; echo
+    echo "--- LMCache retrieve run (full output) ---"
+    cat "$OUT_B"; echo
+    echo "--- LMCache server: last Retrieved lines ---"
+    grep "Retrieved" "$LMCACHE_LOG" | tail -5 || true
+    echo "--- vLLM restart log: connector / hit lines ---"
+    grep -iE "external|hit|lmcache" "/tmp/build_${BUILD_ID}_vllm_restart.log" \
+        | tail -15 || true
     failed=1
 fi
 
