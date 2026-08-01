@@ -2124,16 +2124,15 @@ def lmcache_memcpy_async(
     Python fallback for lmcache_memcpy_async.
 
     - Tensor mode (non-CUDA devices like HPU): uses .to(device) + copy_()
-    - Pointer mode with libcudart: uses synchronous cudaMemcpy (cudaMemcpyDefault)
+    - Pointer mode with an available CUDA runtime: uses synchronous cudaMemcpy
+      with an explicit transfer direction
     - Pointer mode without libcudart: uses CPU tensor copy
 
-    Unlike the C++ version (which uses cudaMemcpyAsync and must split copies
-    at cudaHostRegister boundaries), this Python fallback does NOT need
-    alignment-based chunking because:
-    - cudaMemcpy (synchronous) handles cross-cudaHostRegister boundaries
-      internally via staging buffers
-    - CPU tensor copy has no alignment constraints
-    - Tensor mode bypasses raw pointers entirely
+    Pointer-mode CUDA copies are split at ``host_buffer_alignments`` boundaries
+    to keep every transfer within one cudaHostRegister region. This matches
+    the native implementation and is required for lazy pinned allocations.
+    The copies remain synchronous, so the fallback preserves plan ordering
+    without requiring stream management.
 
     dest:
         - If int: raw memory pointer (used for CUDA/CPU devices where we
@@ -2152,6 +2151,10 @@ def lmcache_memcpy_async(
         host_buffer_alignments & (host_buffer_alignments - 1) != 0
     ):
         raise ValueError("host_buffer_alignments must be power of two")
+    if nbytes < 0:
+        raise ValueError("nbytes must be non-negative")
+    if host_buffer_offset < 0:
+        raise ValueError("host_buffer_offset must be non-negative")
 
     # 2. Validate direction
     if int(direction) not in (int(TransferDirection.H2D), int(TransferDirection.D2H)):
@@ -2183,22 +2186,48 @@ def lmcache_memcpy_async(
             "dest and src must be both int (pointer mode) "
             "or both torch.Tensor (tensor mode)"
         )
+    if nbytes == 0:
+        return
 
     libcudart = _get_copy_lib()
-    if libcudart is not None and hasattr(libcudart, "cudaMemcpy"):
-        try:
-            # Synchronous cudaMemcpy handles cross-cudaHostRegister boundaries
-            # internally — no manual alignment splitting needed.
+    if (
+        torch.cuda.is_available()
+        and libcudart is not None
+        and hasattr(libcudart, "cudaMemcpy")
+    ):
+        cuda_memcpy = libcudart.cudaMemcpy
+        cuda_memcpy.restype = ctypes.c_int
+        cuda_memcpy.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_size_t,
+            ctypes.c_int,
+        ]
+        memcpy_kind = (
+            1  # cudaMemcpyHostToDevice
+            if int(direction) == int(TransferDirection.H2D)
+            else 2  # cudaMemcpyDeviceToHost
+        )
+        copied_bytes = 0
+        alignment_mask = host_buffer_alignments - 1
+        while copied_bytes < nbytes:
+            aligned_region_end = (
+                (copied_bytes + host_buffer_offset) & ~alignment_mask
+            ) + host_buffer_alignments
+            copy_end = min(host_buffer_offset + nbytes, aligned_region_end)
+            copy_nbytes = copy_end - copied_bytes - host_buffer_offset
             ret = libcudart.cudaMemcpy(
-                ctypes.c_void_p(dest),
-                ctypes.c_void_p(src),
-                ctypes.c_size_t(nbytes),
-                ctypes.c_int(4),  # cudaMemcpyDefault
+                ctypes.c_void_p(dest + copied_bytes),
+                ctypes.c_void_p(src + copied_bytes),
+                ctypes.c_size_t(copy_nbytes),
+                ctypes.c_int(memcpy_kind),
             )
             if ret != 0:
-                raise RuntimeError(f"cudaMemcpy failed with error code {ret}")
-        except AttributeError:
-            raise
+                raise RuntimeError(
+                    f"cudaMemcpy failed with error code {ret} after copying "
+                    f"{copied_bytes} of {nbytes} bytes"
+                )
+            copied_bytes += copy_nbytes
     else:
         # Pure CPU copy — no alignment constraints.
         _copy_bytes_with_tensor(dest, src, nbytes)

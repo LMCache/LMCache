@@ -2959,3 +2959,69 @@ def test_alloc_pinned_ptr_is_page_aligned(size: int) -> None:
             assert buf[i] == ((i & 0xFF) ^ 0xA5)
     finally:
         _py_ops.free_pinned_ptr(ptr)
+
+
+@pytest.mark.parametrize(
+    ("direction", "expected_kind"),
+    [
+        (_py_ops.TransferDirection.H2D, 1),
+        (_py_ops.TransferDirection.D2H, 2),
+    ],
+)
+def test_lmcache_memcpy_async_splits_registered_host_ranges(
+    direction: _py_ops.TransferDirection, expected_kind: int
+) -> None:
+    """Keep pointer copies within registered host-memory ranges."""
+
+    class FakeCudaMemcpy:
+        """Record CUDA memcpy calls without dereferencing their pointers."""
+
+        def __init__(self) -> None:
+            self.calls: list[tuple[int, int, int, int]] = []
+
+        def __call__(
+            self,
+            dest: ctypes.c_void_p,
+            src: ctypes.c_void_p,
+            nbytes: ctypes.c_size_t,
+            kind: ctypes.c_int,
+        ) -> int:
+            if dest.value is None or src.value is None:
+                raise ValueError("cudaMemcpy received a null pointer")
+            self.calls.append(
+                (
+                    dest.value,
+                    src.value,
+                    int(nbytes.value),
+                    int(kind.value),
+                )
+            )
+            return 0
+
+    class FakeCudaRuntime:
+        """Expose the minimal CUDA runtime API used by the fallback."""
+
+        def __init__(self) -> None:
+            self.cudaMemcpy = FakeCudaMemcpy()
+
+    runtime = FakeCudaRuntime()
+    destination = 0x100000
+    source = 0x200000
+    with (
+        unittest.mock.patch.object(_py_ops, "_get_copy_lib", return_value=runtime),
+        unittest.mock.patch("torch.cuda.is_available", return_value=True),
+    ):
+        _py_ops.lmcache_memcpy_async(
+            destination,
+            source,
+            100,
+            direction,
+            32,
+            64,
+        )
+
+    assert runtime.cudaMemcpy.calls == [
+        (destination, source, 32, expected_kind),
+        (destination + 32, source + 32, 64, expected_kind),
+        (destination + 96, source + 96, 4, expected_kind),
+    ]
