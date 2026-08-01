@@ -71,6 +71,8 @@ The random-dropping example, being the simplest example that demonstrates
 decode throughput improvement, does **not** need this patch or flag. It only
 works with the KV cache.
 
+This patch has been tested on vLLM versions 0.23.0 until 0.25.1.
+
 ## Dataset
 
 The notebooks load the 
