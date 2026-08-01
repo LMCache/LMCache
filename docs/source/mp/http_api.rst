@@ -245,7 +245,65 @@ Example:
      }'
 
 The update is node-local and process-local in Phase 1; it is not persisted
-across restarts and does not fan out through the MP coordinator.
+across restarts. The coordinator fan-out endpoints below can now target the
+registered MP fleet.
+
+**Coordinator runtime management policy**
+
+The MP coordinator exposes direct proxies for a registered node:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 10 55 35
+
+   * - Method
+     - Path
+     - Purpose
+   * - GET
+     - ``/instances/{instance_id}/config/policies``
+     - Read one node's policy state.
+   * - POST
+     - ``/instances/{instance_id}/config/policies/validate``
+     - Validate one node's update without applying it.
+   * - PATCH
+     - ``/instances/{instance_id}/config/policies``
+     - Apply one node's update.
+
+Fleet operations address every currently registered node:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 10 45 45
+
+   * - Method
+     - Path
+     - Purpose
+   * - POST
+     - ``/fleet/config/policies/validate``
+     - Validate the update on every node; no update is applied.
+   * - PATCH
+     - ``/fleet/config/policies``
+     - Validate every node, then apply concurrently.
+
+Fleet bodies wrap the node-local update and can provide per-node optimistic
+versions because versions are local to each MP server:
+
+.. code-block:: json
+
+   {
+     "update": {
+       "store_policy": "skip_l1",
+       "l1_eviction": {"tunables": {"eviction_ratio": 0.1}}
+     },
+     "expected_versions": {"node-a": 4, "node-b": 7}
+   }
+
+Fleet ``PATCH`` is a validation barrier followed by best-effort apply. Any
+validation failure prevents all ``PATCH`` calls. A failure after validation
+returns ``status: "partial"`` with one result per node; there is no rollback
+or cross-node transaction in this phase. Transport failures are reported as
+``502`` and version conflicts as ``409``. A fleet request must use
+``expected_versions`` rather than the node-local ``update.expected_version``.
 
 **Observability**
 
