@@ -183,3 +183,68 @@ def test_reading_an_undeclared_field_is_rejected() -> None:
 
     with pytest.raises(ViewFieldError):
         view.field("used_byte")
+
+
+def test_first_batch_from_an_instance_is_never_a_gap() -> None:
+    """There is nothing to compare the first sequence number against."""
+    view = View()
+
+    assert view.observe_batch("node-a", 41) == 0
+    assert view.sequence_gaps == 0
+
+
+def test_contiguous_batches_report_no_loss() -> None:
+    """A forwarder that lands every batch leaves the view trusted."""
+    view = View()
+    used_bytes = view.declare("used_bytes", FoldKind.ACCUMULATIVE)
+
+    view.observe_batch("node-a", 1)
+    view.observe_batch("node-a", 2)
+    view.observe_batch("node-a", 3)
+
+    assert view.sequence_gaps == 0
+    assert used_bytes.trusted
+
+
+def test_a_sequence_gap_costs_trust_the_same_as_a_bus_drop() -> None:
+    """The coordinator advances seq before publishing, so loss leaves a hole."""
+    view = View()
+    used_bytes = view.declare("used_bytes", FoldKind.ACCUMULATIVE)
+    view.observe_batch("node-a", 1)
+
+    missed = view.observe_batch("node-a", 4)
+
+    assert missed == 2
+    assert view.sequence_gaps == 2
+    assert view.loss_marks == 2
+    assert not used_bytes.trusted
+
+
+def test_sequences_are_tracked_per_instance() -> None:
+    """Two nodes number their batches independently."""
+    view = View()
+    view.observe_batch("node-a", 7)
+    view.observe_batch("node-b", 1)
+
+    assert view.observe_batch("node-a", 8) == 0
+    assert view.observe_batch("node-b", 2) == 0
+    assert view.sequence_gaps == 0
+
+
+def test_a_repeated_sequence_number_is_rejected() -> None:
+    """An ordered forwarder never emits the same number twice."""
+    view = View()
+    view.observe_batch("node-a", 5)
+
+    with pytest.raises(ValueError):
+        view.observe_batch("node-a", 5)
+
+
+def test_both_loss_sources_add_up() -> None:
+    """A bus discard and a lost batch are the same kind of damage."""
+    view = View()
+    view.observe_dropped_events(3)
+    view.observe_batch("node-a", 1)
+    view.observe_batch("node-a", 3)
+
+    assert view.loss_marks == 4

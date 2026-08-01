@@ -79,9 +79,9 @@ class ViewField:
         self._fold_kind = fold_kind
         self._owner = owner
         self._values: dict[str, float] = {}
-        # Drop count at the last point this field is known to have matched
+        # Loss count at the last point this field is known to have matched
         # reality. A convergent field never consults it.
-        self._clean_at_drops = owner.dropped_events_seen
+        self._clean_at_loss = owner.loss_marks
 
     @property
     def name(self) -> str:
@@ -99,11 +99,11 @@ class ViewField:
 
         A convergent field is always trusted, since a dropped event only makes
         a key look older than it is. An accumulative field is trusted only
-        while no events have been dropped since its last reconciliation.
+        while no loss has been observed since its last reconciliation.
         """
         if self._fold_kind is FoldKind.CONVERGENT:
             return True
-        return self._owner.dropped_events_seen == self._clean_at_drops
+        return self._owner.loss_marks == self._clean_at_loss
 
     def set(self, key: str, value: float) -> None:
         """Assign a value for one key.
@@ -152,7 +152,7 @@ class ViewField:
                 here are removed.
         """
         self._values = dict(absolute_values)
-        self._clean_at_drops = self._owner.dropped_events_seen
+        self._clean_at_loss = self._owner.loss_marks
 
     def get(self, key: str) -> float:
         """Return the value for one key, or ``0.0`` when it is unknown.
@@ -215,6 +215,8 @@ class View:
         """Initialize an empty view with no observed drops."""
         self._fields: dict[str, ViewField] = {}
         self._dropped_events_seen: int = 0
+        self._sequence_gaps: int = 0
+        self._last_seq: dict[str, int] = {}
         self._reads: list[str] = []
         self._recording: bool = False
 
@@ -222,6 +224,23 @@ class View:
     def dropped_events_seen(self) -> int:
         """Total events the bus has reported dropping, as last observed."""
         return self._dropped_events_seen
+
+    @property
+    def sequence_gaps(self) -> int:
+        """Number of gaps seen in the per-instance batch sequence."""
+        return self._sequence_gaps
+
+    @property
+    def loss_marks(self) -> int:
+        """Every loss signal this view has observed, from either source.
+
+        The bus reports its own discards through a counter, and the
+        coordinator's forwarding layer advances its per-instance sequence
+        number before it attempts to publish, so a failed publish shows up
+        downstream as a gap rather than as silence. Both are folded here
+        because an accumulative field cannot tell them apart.
+        """
+        return self._dropped_events_seen + self._sequence_gaps
 
     @property
     def degraded(self) -> bool:
@@ -247,6 +266,42 @@ class View:
                 f"{self._dropped_events_seen} to {total_dropped}"
             )
         self._dropped_events_seen = total_dropped
+
+    def observe_batch(self, instance_id: str, seq: int) -> int:
+        """Record a forwarded batch and report how many were missed.
+
+        The coordinator stamps each outgoing batch with a per-instance
+        sequence number and advances that number before it attempts to
+        publish, so a batch lost on the way here leaves a hole rather than
+        going unnoticed. Feeding batches through this method turns that hole
+        into the same loss signal a bus discard produces.
+
+        Args:
+            instance_id: Node the batch came from.
+            seq: Sequence number carried by the batch.
+
+        Returns:
+            How many batches were missed immediately before this one, zero
+            when the sequence is contiguous or this is the first batch seen
+            from that instance.
+
+        Raises:
+            ValueError: If the sequence repeats or moves backwards for an
+                instance, which no ordered forwarder should produce.
+        """
+        previous = self._last_seq.get(instance_id)
+        if previous is None:
+            self._last_seq[instance_id] = seq
+            return 0
+        if seq <= previous:
+            raise ValueError(
+                f"instance '{instance_id}' sequence went from {previous} "
+                f"to {seq}"
+            )
+        missed = seq - previous - 1
+        self._last_seq[instance_id] = seq
+        self._sequence_gaps += missed
+        return missed
 
     def declare(self, name: str, fold_kind: FoldKind) -> ViewField:
         """Create a field on this view.
