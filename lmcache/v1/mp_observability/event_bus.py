@@ -83,9 +83,26 @@ class EventSubscriber(ABC):
         ...
 
     def register(self, bus: EventBus) -> None:
-        """Subscribe all declared handlers to *bus*."""
+        """Subscribe all declared handlers to *bus*.
+
+        A subclass that overrides :meth:`on_periodic` is also wired to the
+        drain loop's timer, so it does not have to borrow an unrelated event
+        to get a clock.
+        """
         for event_type, callback in self.get_subscriptions().items():
             bus.subscribe(event_type, callback)
+        if type(self).on_periodic is not EventSubscriber.on_periodic:
+            bus.register_periodic(self.on_periodic)
+
+    def on_periodic(self) -> None:  # noqa: B027
+        """Optional timer hook.  Called on every drain loop iteration.
+
+        Runs on the drain thread, the same thread as the event callbacks, so
+        an implementation may touch the same state without extra locking.
+        The interval is the drain loop's wait timeout, so treat this as "at
+        least this often" and check the clock rather than counting calls.
+        """
+        pass
 
     def shutdown(self) -> None:  # noqa: B027
         """Optional cleanup hook.  Called by ``EventBus.stop()``."""
@@ -115,6 +132,7 @@ class EventBus:
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._registered_subscribers: list[EventSubscriber] = []
+        self._periodics: list[Callable[[], None]] = []
         self._discard_count: int = 0
         self._last_discard_warning: float = 0.0
         self._subscriber_exception_counts: dict[str, int] = {}
@@ -146,6 +164,18 @@ class EventBus:
         """Register a callback for a specific event type (thread-safe)."""
         with self._lock:
             self._subscribers[event_type].append(callback)
+
+    def register_periodic(self, hook: Callable[[], None]) -> None:
+        """Register a callable invoked once per drain loop iteration.
+
+        This exists so a subscriber that needs a clock does not have to
+        subscribe to an unrelated event and inherit that event's cadence.
+
+        Args:
+            hook: Zero argument callable, run on the drain thread.
+        """
+        with self._lock:
+            self._periodics.append(hook)
 
     def register_subscriber(self, subscriber: EventSubscriber) -> None:
         """Register an ``EventSubscriber`` and wire up its callbacks."""
@@ -308,6 +338,44 @@ class EventBus:
             self._wake.wait(timeout=0.1)
             self._wake.clear()
             self._drain_all()
+            self._run_periodics()
+
+    def _count_callback_exception(self, cb: Callable[..., None]) -> str:
+        """Attribute a callback failure to its owner and count it.
+
+        Args:
+            cb: The callable that raised.
+
+        Returns:
+            The name the failure was counted against.
+        """
+        instance = getattr(cb, "__self__", None)
+        name = (
+            type(instance).__name__
+            if instance is not None
+            else getattr(cb, "__qualname__", repr(cb))
+        )
+        with self._lock:
+            self._subscriber_exception_counts[name] = (
+                self._subscriber_exception_counts.get(name, 0) + 1
+            )
+        return name
+
+    def _run_periodics(self) -> None:
+        """Call every registered timer hook once, isolating failures.
+
+        A hook that raises is counted and logged like a subscriber callback,
+        because the drain thread carries every other subscriber and must not
+        die for one of them.
+        """
+        with self._lock:
+            snapshot = list(self._periodics)
+        for hook in snapshot:
+            try:
+                hook()
+            except Exception:
+                self._count_callback_exception(hook)
+                logger.exception("EventBus: error in periodic hook")
 
     def _drain_all(self) -> None:
         """Pop all queued events and dispatch to subscribers."""
@@ -337,16 +405,7 @@ class EventBus:
                 try:
                     cb(event)
                 except Exception:
-                    instance = getattr(cb, "__self__", None)
-                    name = (
-                        type(instance).__name__
-                        if instance is not None
-                        else getattr(cb, "__qualname__", repr(cb))
-                    )
-                    with self._lock:
-                        self._subscriber_exception_counts[name] = (
-                            self._subscriber_exception_counts.get(name, 0) + 1
-                        )
+                    name = self._count_callback_exception(cb)
                     logger.exception(
                         "EventBus: error in callback %s for %s",
                         name,
