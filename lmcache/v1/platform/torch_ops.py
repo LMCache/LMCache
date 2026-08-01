@@ -2124,15 +2124,15 @@ def lmcache_memcpy_async(
     Python fallback for lmcache_memcpy_async.
 
     - Tensor mode (non-CUDA devices like HPU): uses .to(device) + copy_()
-    - Pointer mode with an available CUDA runtime: uses synchronous cudaMemcpy
-      with an explicit transfer direction
+    - Pointer mode with an available CUDA runtime: uses cudaMemcpyAsync on the
+      current CUDA stream with an explicit transfer direction
     - Pointer mode without libcudart: uses CPU tensor copy
 
     Pointer-mode CUDA copies are split at ``host_buffer_alignments`` boundaries
     to keep every transfer within one cudaHostRegister region. This matches
     the native implementation and is required for lazy pinned allocations.
-    The copies remain synchronous, so the fallback preserves plan ordering
-    without requiring stream management.
+    Each copy is enqueued on the current CUDA stream, matching the native
+    implementation and preserving the caller's stream dependencies.
 
     dest:
         - If int: raw memory pointer (used for CUDA/CPU devices where we
@@ -2193,21 +2193,24 @@ def lmcache_memcpy_async(
     if (
         torch.cuda.is_available()
         and libcudart is not None
-        and hasattr(libcudart, "cudaMemcpy")
+        and hasattr(libcudart, "cudaMemcpyAsync")
     ):
-        cuda_memcpy = libcudart.cudaMemcpy
-        cuda_memcpy.restype = ctypes.c_int
-        cuda_memcpy.argtypes = [
+        cuda_memcpy_async = libcudart.cudaMemcpyAsync
+        cuda_memcpy_async.restype = ctypes.c_int
+        cuda_memcpy_async.argtypes = [
             ctypes.c_void_p,
             ctypes.c_void_p,
             ctypes.c_size_t,
             ctypes.c_int,
+            ctypes.c_void_p,
         ]
         memcpy_kind = (
             1  # cudaMemcpyHostToDevice
             if int(direction) == int(TransferDirection.H2D)
             else 2  # cudaMemcpyDeviceToHost
         )
+        stream = torch.cuda.current_stream()
+        stream_handle = ctypes.c_void_p(stream.cuda_stream)
         copied_bytes = 0
         alignment_mask = host_buffer_alignments - 1
         while copied_bytes < nbytes:
@@ -2216,15 +2219,16 @@ def lmcache_memcpy_async(
             ) + host_buffer_alignments
             copy_end = min(host_buffer_offset + nbytes, aligned_region_end)
             copy_nbytes = copy_end - copied_bytes - host_buffer_offset
-            ret = libcudart.cudaMemcpy(
+            ret = cuda_memcpy_async(
                 ctypes.c_void_p(dest + copied_bytes),
                 ctypes.c_void_p(src + copied_bytes),
                 ctypes.c_size_t(copy_nbytes),
                 ctypes.c_int(memcpy_kind),
+                stream_handle,
             )
             if ret != 0:
                 raise RuntimeError(
-                    f"cudaMemcpy failed with error code {ret} after copying "
+                    f"cudaMemcpyAsync failed with error code {ret} after copying "
                     f"{copied_bytes} of {nbytes} bytes"
                 )
             copied_bytes += copy_nbytes

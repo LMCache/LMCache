@@ -2973,11 +2973,11 @@ def test_lmcache_memcpy_async_splits_registered_host_ranges(
 ) -> None:
     """Keep pointer copies within registered host-memory ranges."""
 
-    class FakeCudaMemcpy:
+    class FakeCudaMemcpyAsync:
         """Record CUDA memcpy calls without dereferencing their pointers."""
 
         def __init__(self) -> None:
-            self.calls: list[tuple[int, int, int, int]] = []
+            self.calls: list[tuple[int, int, int, int, int]] = []
 
         def __call__(
             self,
@@ -2985,15 +2985,17 @@ def test_lmcache_memcpy_async_splits_registered_host_ranges(
             src: ctypes.c_void_p,
             nbytes: ctypes.c_size_t,
             kind: ctypes.c_int,
+            stream: ctypes.c_void_p,
         ) -> int:
-            if dest.value is None or src.value is None:
-                raise ValueError("cudaMemcpy received a null pointer")
+            if dest.value is None or src.value is None or stream.value is None:
+                raise ValueError("cudaMemcpyAsync received a null pointer")
             self.calls.append(
                 (
                     dest.value,
                     src.value,
                     int(nbytes.value),
                     int(kind.value),
+                    stream.value,
                 )
             )
             return 0
@@ -3002,7 +3004,12 @@ def test_lmcache_memcpy_async_splits_registered_host_ranges(
         """Expose the minimal CUDA runtime API used by the fallback."""
 
         def __init__(self) -> None:
-            self.cudaMemcpy = FakeCudaMemcpy()
+            self.cudaMemcpyAsync = FakeCudaMemcpyAsync()
+
+    class FakeCudaStream:
+        """Expose the raw CUDA stream handle used by cudaMemcpyAsync."""
+
+        cuda_stream = 0x123456
 
     runtime = FakeCudaRuntime()
     destination = 0x100000
@@ -3010,6 +3017,7 @@ def test_lmcache_memcpy_async_splits_registered_host_ranges(
     with (
         unittest.mock.patch.object(_py_ops, "_get_copy_lib", return_value=runtime),
         unittest.mock.patch("torch.cuda.is_available", return_value=True),
+        unittest.mock.patch("torch.cuda.current_stream", return_value=FakeCudaStream()),
     ):
         _py_ops.lmcache_memcpy_async(
             destination,
@@ -3020,8 +3028,20 @@ def test_lmcache_memcpy_async_splits_registered_host_ranges(
             64,
         )
 
-    assert runtime.cudaMemcpy.calls == [
-        (destination, source, 32, expected_kind),
-        (destination + 32, source + 32, 64, expected_kind),
-        (destination + 96, source + 96, 4, expected_kind),
+    assert runtime.cudaMemcpyAsync.calls == [
+        (destination, source, 32, expected_kind, FakeCudaStream.cuda_stream),
+        (
+            destination + 32,
+            source + 32,
+            64,
+            expected_kind,
+            FakeCudaStream.cuda_stream,
+        ),
+        (
+            destination + 96,
+            source + 96,
+            4,
+            expected_kind,
+            FakeCudaStream.cuda_stream,
+        ),
     ]
