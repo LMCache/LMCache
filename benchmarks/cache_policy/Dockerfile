@@ -58,12 +58,17 @@ WORKDIR /app
 # Only the two requirement sets this suite actually needs at import
 # time (torch, numpy, sortedcontainers, msgspec, ... transitively
 # required by lmcache/v1/storage_backend/cache_policy/ and
-# lmcache/tools/cache_policy_bench/), plus figure generation.
+# lmcache/tools/cache_policy_bench/), plus the *exact* pinned
+# matplotlib/numpy versions in requirements-figures.txt -- pinning here
+# (rather than a bare `pip install matplotlib`) is what makes figures
+# rendered by this image reproducible run-to-run and machine-to-machine,
+# instead of picking up whatever matplotlib happens to be latest.
 COPY requirements/common.txt requirements/test.txt requirements/
+COPY benchmarks/cache_policy/requirements-figures.txt benchmarks/cache_policy/requirements-figures.txt
 RUN pip install --extra-index-url https://download.pytorch.org/whl/cpu \
         -r requirements/common.txt \
         -r requirements/test.txt \
-    && pip install matplotlib
+        -r benchmarks/cache_policy/requirements-figures.txt
 
 COPY . .
 

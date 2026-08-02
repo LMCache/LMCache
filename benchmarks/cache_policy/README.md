@@ -347,6 +347,11 @@ a repo checkout under the conda env from `environment.yml`, or the
 since the freeze-illustration figure does a small one-off replay through
 the real simulator.
 
+**Using Docker instead of conda?** See
+[`DOCKER.md`](DOCKER.md) for the Docker-only install + reproduction
+walkthrough (build the image, run the deterministic check, run the
+tests, rebuild the figures) -- no local Python setup required.
+
 ### Full path: rerun the experiments from scratch
 
 Only needed if you want the committed JSON itself to reflect a fresh
