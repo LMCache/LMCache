@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Pinned versions actually used to render benchmarks/cache_policy/report/
+# figures, for anyone who only needs to rebuild the figures rather than
+# set up the full benchmark suite.
+#
+# NOTE: this file alone is *not* sufficient to run
+# report/generate_figures.py -- its freeze-illustration figure does a
+# small one-off replay through the real simulator, which imports
+# `lmcache` (and therefore lmcache's own dependencies, e.g. torch).
+# `lmcache` must be importable (PYTHONPATH=. against a repo checkout, or
+# the conda env in environment.yml / the Dockerfile) in addition to
+# installing this file.
+matplotlib==3.10.9
+numpy==2.2.6

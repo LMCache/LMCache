@@ -257,19 +257,22 @@ COST_AWARE ADMISSION_LRU ADMISSION_COST_AWARE`, the full 3-scale x
 3-cache-size x 6-bootstrap-repeat grid matching `cost-aware-policy-eval.md`'s
 rigor exactly (superseding the original thin 2-scale/1-cache-size
 verification; full data in
-[`results/admission_control/real_data/real_dataset_ci.json`](../../../../../benchmarks/cache_policy/results/admission_control/real_data/real_dataset_ci.json)):
+[`results/real_data/real_dataset_ci.json`](../../../../../benchmarks/cache_policy/results/real_data/real_dataset_ci.json)).
+Numbers below reflect the post-bugfix rerun (see `cost-aware-policy-eval.md`'s
+errata notice) -- `results/admission_control/real_data/` held a stale
+pre-fix copy of this same experiment and has been removed:
 
 | Scale | Cache | LRU | COST_AWARE | ADMISSION_LRU | ADMISSION_COST_AWARE |
 |---|---|---:|---:|---:|---:|
-| 500 | 50 MiB | 10.0% [9.3,10.9] | 2.7% [2.0,3.6] | **13.8% [13.3,14.3]** | 4.0% [3.3,4.8] |
-| 500 | 100 MiB | 18.0% [17.2,18.7] | 10.4% [9.4,11.9] | **23.6% [22.7,24.5]** | 11.5% [10.2,13.3] |
-| 500 | 200 MiB | **52.1% [51.5,52.6]** | 28.6% [27.3,30.5] | 38.9% [38.0,39.8] | 30.7% [29.4,32.5] |
-| 2,000 | 50 MiB | 3.2% [2.7,3.9] | 0.0% [0.0,0.1] | **4.9% [4.6,5.3]** | 0.6% [0.5,0.7] |
-| 2,000 | 100 MiB | 5.2% [4.7,5.7] | 0.5% [0.4,0.6] | **7.9% [7.5,8.3]** | 1.6% [1.4,1.7] |
-| 2,000 | 200 MiB | 8.8% [7.9,9.8] | 3.1% [2.9,3.3] | **13.1% [12.6,13.6]** | 4.2% [3.9,4.5] |
-| 5,000 | 50 MiB | 1.6% [1.4,1.8] | 0.0% [0.0,0.0] | **3.2% [3.0,3.3]** | 0.2% [0.2,0.2] |
-| 5,000 | 100 MiB | 2.8% [2.4,3.1] | 0.0% [0.0,0.0] | **5.1% [5.0,5.2]** | 0.5% [0.5,0.6] |
-| 5,000 | 200 MiB | 4.8% [4.4,5.1] | 0.5% [0.4,0.6] | **8.2% [8.0,8.4]** | 1.5% [1.4,1.6] |
+| 500 | 50 MiB | 10.0% [9.3,10.9] | 9.2% [8.6,9.9] | **16.0% [15.6,16.4]** | 11.6% [10.3,12.9] |
+| 500 | 100 MiB | 18.0% [17.2,18.7] | 19.5% [19.0,20.1] | **25.3% [24.6,26.0]** | 23.5% [22.7,24.4] |
+| 500 | 200 MiB | **52.1% [51.5,52.6]** | 43.2% [41.8,44.7] | 38.9% [38.0,39.8] | 40.2% [39.4,41.1] |
+| 2,000 | 50 MiB | 3.2% [2.7,3.9] | 3.0% [2.6,3.5] | **5.9% [5.6,6.3]** | 4.9% [4.4,5.4] |
+| 2,000 | 100 MiB | 5.2% [4.7,5.7] | 5.1% [4.5,5.7] | **9.4% [9.1,9.9]** | 6.6% [6.1,7.1] |
+| 2,000 | 200 MiB | 8.8% [7.9,9.8] | 8.6% [8.0,9.2] | **15.2% [14.8,15.6]** | 10.3% [9.7,10.9] |
+| 5,000 | 50 MiB | 1.6% [1.4,1.8] | 1.6% [1.4,1.8] | **3.6% [3.4,3.8]** | 3.0% [2.8,3.2] |
+| 5,000 | 100 MiB | 2.8% [2.4,3.1] | 2.8% [2.6,3.0] | **5.8% [5.6,5.9]** | 4.5% [4.4,4.7] |
+| 5,000 | 200 MiB | 4.8% [4.4,5.1] | 4.6% [4.4,4.8] | **8.8% [8.6,9.1]** | 6.9% [6.6,7.2] |
 
 ### Finding 4 -- `ADMISSION_LRU` wins 8 of 9 cells, often by a wide margin, with tight non-overlapping CIs
 
@@ -277,8 +280,8 @@ At every scale/cache-size combination except one, `ADMISSION_LRU` has the
 highest hit rate of all five policies tested, with confidence intervals
 that don't overlap the next-best policy's -- a genuine, statistically
 robust effect, not noise. The relative improvement over plain `LRU`
-generally grows with eviction pressure: +38% at 500 conversations/50 MiB,
-+82% at 5,000 conversations/50 MiB. `ADMISSION_COST_AWARE` also beats
+generally grows with eviction pressure: +60% at 500 conversations/50 MiB,
++125% at 5,000 conversations/50 MiB. `ADMISSION_COST_AWARE` also beats
 plain `COST_AWARE` in every cell (a consistent rescue effect, as found in
 the earlier thin verification), but never catches up to `ADMISSION_LRU`.
 

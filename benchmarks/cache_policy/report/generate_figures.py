@@ -537,6 +537,50 @@ def fig_latency_distribution(raw_rows: list[dict], out: Path) -> None:
     plt.close(fig)
 
 
+def fig_admission_vs_lfu(paired_comparison: dict, out: Path) -> None:
+    """
+    ADMISSION_LRU vs. LFU paired hit-rate difference across cache sizes,
+    from ``compare_admission_vs_lfu.py``'s output -- no hardcoded diff
+    numbers, everything here is read from that committed JSON.
+    """
+    analysis = paired_comparison["analysis"]
+    comparisons = sorted(
+        paired_comparison["comparisons"], key=lambda c: c["cache_capacity_mib"]
+    )
+
+    xs = list(range(len(comparisons)))
+    means = [c["hit_rate_diff_percentage_points"] for c in comparisons]
+    los = [
+        c["hit_rate_diff_percentage_points"] - c["hit_rate_diff_ci_lo"] * 100
+        for c in comparisons
+    ]
+    his = [
+        c["hit_rate_diff_ci_hi"] * 100 - c["hit_rate_diff_percentage_points"]
+        for c in comparisons
+    ]
+    colors = ["#2ca02c" if c["holm_reject_at_p05"] else "#888888" for c in comparisons]
+
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    ax.bar(xs, means, yerr=[los, his], capsize=4, color=colors, width=0.5)
+    ax.axhline(0, color="black", linewidth=0.8)
+    ax.set_xticks(xs)
+    ax.set_xticklabels([f"{c['cache_capacity_mib']:.0f} MiB" for c in comparisons])
+    ax.set_ylabel(
+        f"{analysis['candidate_policy']} - {analysis['baseline_policy']} "
+        "hit rate (percentage points)"
+    )
+    n_seeds = comparisons[0]["n_seeds"] if comparisons else 0
+    ax.set_title(
+        f"{analysis['candidate_policy']} vs. {analysis['baseline_policy']} "
+        f"({analysis['workload_name']}), paired 95% CI, n={n_seeds} paired seeds\n"
+        "Green = Holm-significant at alpha=0.05 across the 3-capacity family"
+    )
+    ax.grid(alpha=0.3, axis="y")
+    fig.tight_layout()
+    fig.savefig(out / "fig10_admission_vs_lfu.png")
+    plt.close(fig)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -554,6 +598,8 @@ def main() -> None:
     windowed_ablation = _load(_AC_RESULTS / "windowed_admission_control_ablation.json")
     real_paired = _load(_REAL_DATA / "real_dataset_paired_diff.json")
     real_raw = _load(_REAL_DATA / "real_dataset_raw.json")
+    with open(_AC_RESULTS / "admission_vs_lfu_paired.json", encoding="utf-8") as f:
+        admission_vs_lfu = json.load(f)
 
     fig_hit_rate_vs_cache_size_multiseed(multiseed_ci, out)
     fig_latency_vs_cache_size_multiseed(multiseed_ci, out)
@@ -564,8 +610,9 @@ def main() -> None:
     fig_multi_round_chat_case_study(chat_case_study, out)
     fig_freeze_illustration(out)
     fig_latency_distribution(real_raw, out)
+    fig_admission_vs_lfu(admission_vs_lfu, out)
 
-    print(f"Wrote 9 figures to {out}")
+    print(f"Wrote 10 figures to {out}")
 
 
 if __name__ == "__main__":

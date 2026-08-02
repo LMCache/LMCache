@@ -45,8 +45,10 @@ for the full write-up, methodology limitations, and results.
 - `benchmarks/cache_policy/stats.py` -- dependency-free percentile-bootstrap
   confidence interval helper.
 - `benchmarks/cache_policy/real_dataset_eval.py` -- statistically robust
-  real-data evaluation: repeated bootstrap-resampled runs with confidence
-  intervals, swept across corpus scale and cache size.
+  real-data evaluation: repeated subsample-without-replacement runs
+  (paired across policies by seed) with confidence intervals, swept
+  across corpus scale and cache size -- see "Real-data (ShareGPT)
+  testing" below for why this is not a classical bootstrap.
 - `tests/benchmarks/test_cache_policy_bench_real_data.py` -- edge-case /
   adversarial stress tests on real data (near-empty cache, capacity-cliff
   monotonicity, pathologically long conversations, high concurrent
@@ -153,9 +155,26 @@ your system.) This produces `benchmarks/multi_round_qa/ShareGPT.json`
 validity filtering). Both files are large and git-ignored -- see
 `.gitignore`. The tokenizer download requires network access to
 HuggingFace; unauthenticated requests work but are rate-limited (set
-`HF_TOKEN` for faster/higher-limit downloads).
+`HF_TOKEN` for faster/higher-limit downloads). `data_preprocessing.py`
+tokenizes "gpt" turns with `--model` (default
+`mistralai/Mistral-7B-Instruct-v0.2`).
 
-### 2. Statistically robust evaluation (bootstrap CI + scale sweep)
+**Corpus provenance for the committed `results/real_data/` and
+`results/admission_control/` artifacts** -- the exact `ShareGPT.json`
+used to produce them:
+
+- Downloaded from the URL in the `curl` command above.
+- Processed with `python data_preprocessing.py --parse 1.0 --trace
+  ShareGPT_V3_unfiltered_cleaned_split.json` (tokenizer:
+  `mistralai/Mistral-7B-Instruct-v0.2`, the script's default).
+- 35,399 conversations after filtering.
+- Expected SHA-256:
+  `ba3f477c3ee8f2d5ce7411c4bdbf869bbd895c869a3fdad574d55165e7f546d5`
+  (verify with `sha256sum benchmarks/multi_round_qa/ShareGPT.json`). A
+  different corpus snapshot will not reproduce the committed numbers
+  exactly, since ShareGPT is not versioned upstream.
+
+### 2. Statistically robust evaluation (repeated subsampling + scale sweep)
 
 ```bash
 python benchmarks/cache_policy/real_dataset_eval.py \
@@ -164,16 +183,20 @@ python benchmarks/cache_policy/real_dataset_eval.py \
 ```
 
 Runs every (policy, corpus-scale, cache-size) cell `--repeats` times (default
-6), each with a fresh bootstrap resample of the conversation corpus
-(`--scales`, default `500 2000 5000` conversations), and reports mean +
-95% CI per cell via `benchmarks/cache_policy/stats.py::bootstrap_ci` --
-not single-run point estimates. This directly addresses the wall-clock-
-jitter problem noted in the evaluation doc's methodology section
-(`CostAwareEvictionPolicy` uses real `time.monotonic()` for recency decay).
-Writes both the raw per-repeat rows and the aggregated-with-CI table as
-JSON (and CSV, git-ignored). `COST_AWARE` is significantly slower per run
-than the other policies (see Finding 3 in the evaluation doc) --
-budget more time as `--scales`/`--repeats` grow.
+6). Each repeat draws a conversation subsample without replacement (see
+`real_dataset_eval.py`'s module docstring); policies are paired because
+every policy receives the same subsample seed at a given repeat. The
+resulting intervals (via
+`benchmarks/cache_policy/stats.py::bootstrap_ci`/`paired_bootstrap_ci_diff`)
+describe sensitivity to the selected corpus subset -- they are not a
+classical full-corpus bootstrap, and should not be described as one. This
+directly addresses the wall-clock-jitter problem noted in the evaluation
+doc's methodology section (`CostAwareEvictionPolicy` uses real
+`time.monotonic()` for recency decay). Writes both the raw per-repeat rows
+and the aggregated-with-CI table as JSON (and CSV, git-ignored).
+`COST_AWARE` is significantly slower per run than the other policies (see
+Finding 3 in the evaluation doc) -- budget more time as
+`--scales`/`--repeats` grow.
 
 ### 3. Edge-case / stress tests
 
@@ -257,11 +280,13 @@ python benchmarks/cache_policy/robustness_sweep.py \
     -o benchmarks/cache_policy/results/admission_control
 
 # Full real-data statistical validation (reuses real_dataset_eval.py --policies)
+# -- writes to results/real_data/, the single canonical ShareGPT results
+# directory; do not write a second copy under results/admission_control/.
 python benchmarks/cache_policy/real_dataset_eval.py \
     --sharegpt-path benchmarks/multi_round_qa/ShareGPT.json \
     --policies LRU LFU COST_AWARE ADMISSION_LRU ADMISSION_COST_AWARE \
     --scales 500 2000 5000 --cache-sizes-mib 50 100 200 --repeats 6 \
-    -o benchmarks/cache_policy/results/admission_control/real_data
+    -o benchmarks/cache_policy/results/real_data
 
 # Stress tests (ADMISSION_LRU already in POLICIES lists in both files)
 LMCACHE_SHAREGPT_PATH=benchmarks/multi_round_qa/ShareGPT.json \
@@ -292,28 +317,55 @@ cache-size) combination:
 `sweep_results.json` (from a `--quick` run) so you can see the schema
 without running anything.
 
-## PDF report
+## Report and reproducibility
 
-`report/` contains the evaluation report deliverable
-(`report/cache_policy_evaluation_report.pdf`) plus the scripts that
-generate it end to end from the committed result artifacts under
-`results/`:
+`report/cache_policy_evaluation_report.pdf` is the final submitted report.
+**It is not generated by this repository** -- there is deliberately no
+script or documented command here that (re)builds the PDF, so there is
+never any ambiguity about which document is authoritative. What *is*
+reproducible from the repository, exactly, is every quantitative figure
+and table used in that report: each one is rendered by
+[`report/generate_figures.py`](report/generate_figures.py) from a
+checked-in JSON result file, mapped one-to-one in
+[`report/FIGURE_SOURCES.md`](report/FIGURE_SOURCES.md).
+
+### Fast path: rebuild the figures from committed results
 
 ```bash
-# Reproducibility environment (CPU-only; see environment.yml for scope)
-conda env create -f benchmarks/cache_policy/environment.yml
-conda activate lmcache-cache-policy-bench
-pip install -e . --no-deps
-
-python benchmarks/cache_policy/report/generate_figures.py \
-    -o benchmarks/cache_policy/report/figures
-python benchmarks/cache_policy/report/build_report.py \
-    -o benchmarks/cache_policy/report/cache_policy_evaluation_report.pdf
+./benchmarks/cache_policy/reproduce_figures.sh
 ```
 
-`generate_figures.py` reads only already-committed JSON result files
-(plus one cheap one-off replay for the freeze-illustration figure) -- it
-does not re-run any of the sweeps above, so it's fast and deterministic.
-Re-run the sweep/ablation/robustness/real-data scripts documented above
-first if you want the report to reflect a fresh benchmark run rather than
-the committed results.
+This regenerates
+[`results/admission_control/admission_vs_lfu_paired.json`](results/admission_control/admission_vs_lfu_paired.json)
+(the committed ADMISSION_LRU-vs-LFU statistical comparison, computed by
+[`compare_admission_vs_lfu.py`](compare_admission_vs_lfu.py) from
+`multiseed_sweep_raw.json`) and then every PNG under `report/figures/`,
+using only already-committed JSON -- no sweeps are re-run, so it's fast
+and deterministic. It needs `lmcache` importable (`PYTHONPATH=.` against
+a repo checkout under the conda env from `environment.yml`, or the
+`Dockerfile` image); `requirements-figures.txt` alone is not sufficient,
+since the freeze-illustration figure does a small one-off replay through
+the real simulator.
+
+### Full path: rerun the experiments from scratch
+
+Only needed if you want the committed JSON itself to reflect a fresh
+benchmark run rather than trusting what's checked in. These can take a
+while and are not bundled into one script:
+
+```bash
+PYTHONPATH=. python benchmarks/cache_policy/main_sweep_multiseed.py \
+    -o benchmarks/cache_policy/results/admission_control
+
+PYTHONPATH=. python benchmarks/cache_policy/run_admission_control_ablation.py \
+    -o benchmarks/cache_policy/results/admission_control
+
+PYTHONPATH=. python benchmarks/cache_policy/real_dataset_eval.py \
+    --sharegpt-path benchmarks/multi_round_qa/ShareGPT.json \
+    -o benchmarks/cache_policy/results/real_data
+```
+
+(See "Full `AdmissionControlledPolicy` evaluation" above for the
+complete set of sweep/ablation/robustness/real-data commands, including
+policy lists.) Re-run `./reproduce_figures.sh` afterward to render the
+figures from the newly-written JSON.

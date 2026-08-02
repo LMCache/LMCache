@@ -156,3 +156,6 @@ operator/Dockerfile.cross
 docs/source/locale/**/*.mo
 baseline_artifacts/
 baseline_artifacts/
+
+# Local benchmark virtualenv (benchmarks/cache_policy/)
+.venv_bench/
