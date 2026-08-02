@@ -612,7 +612,7 @@ def run_server_bench(
 
         # Import the wrapper class once per mode, outside the per-rank
         # loop: importing ``CudaIPCWrapper`` on a non-CUDA host pulls in
-        # ``torch.cuda``-specific symbols and can crash, so it must stay
+        # CUDA-specific symbols from torch and can crash, so it must stay
         # behind the ``use_gpu`` gate; keeping it in the loop just paid
         # the same cost every rank without adding any safety.
         if use_gpu:
