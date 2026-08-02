@@ -442,6 +442,99 @@ class TestSingleAdapterPrefetch:
 class TestMultiAdapterPrefetch:
     """Test PrefetchController with multiple MockL2Adapters."""
 
+    def test_load_submission_failure_releases_resources(self, l1_manager, monkeypatch):
+        """A failed load submission completes and releases L1/L2 locks."""
+        adapter = make_adapter()
+        layout = make_layout()
+        keys = [make_object_key(0)]
+        store_keys_in_l2(adapter, keys, layout)
+        submit_calls = 0
+
+        def fail_submit_load(keys, objects):
+            nonlocal submit_calls
+            submit_calls += 1
+            raise RuntimeError("injected load submission failure")
+
+        monkeypatch.setattr(adapter, "submit_load_task", fail_submit_load)
+        ctrl = PrefetchController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultPrefetchPolicy(),
+        )
+        ctrl.start()
+
+        try:
+            req_id = ctrl.submit_prefetch_request(PrefetchRequestSpec(keys, layout))
+            result = wait_for_prefetch_result(ctrl, req_id)
+
+            assert result == 0
+            assert submit_calls == 1
+            assert ctrl.report_status()["in_flight_request_count"] == 0
+            assert wait_for_condition(lambda: adapter.debug_get_locked_key_count() == 0)
+
+            write_results = l1_manager.reserve_write(
+                keys=keys,
+                is_temporary=[False],
+                layout_desc=layout,
+                mode="new",
+            )
+            assert write_results[keys[0]][0] == L1Error.SUCCESS
+            l1_manager.finish_write(keys)
+            l1_manager.delete(keys)
+        finally:
+            ctrl.stop()
+            adapter.close()
+
+    def test_partial_load_submission_failure_completes(self, l1_manager, monkeypatch):
+        """Other adapters finish when one adapter rejects load submission."""
+        adapters = [make_adapter(), make_adapter()]
+        descriptors = [make_descriptor(i) for i in range(2)]
+        layout = make_layout()
+        keys = [make_object_key(i) for i in range(2)]
+        store_keys_in_l2(adapters[0], keys[:1], layout)
+        store_keys_in_l2(adapters[1], keys[1:], layout)
+
+        def fail_submit_load(keys, objects):
+            raise RuntimeError("injected load submission failure")
+
+        monkeypatch.setattr(adapters[1], "submit_load_task", fail_submit_load)
+        ctrl = PrefetchController(
+            l1_manager=l1_manager,
+            l2_adapters=adapters,
+            adapter_descriptors=descriptors,
+            policy=DefaultPrefetchPolicy(),
+        )
+        ctrl.start()
+
+        try:
+            req_id = ctrl.submit_prefetch_request(PrefetchRequestSpec(keys, layout))
+            result = wait_for_prefetch_result(ctrl, req_id)
+
+            assert result == 1
+            assert ctrl.report_status()["in_flight_request_count"] == 0
+            for adapter in adapters:
+                assert wait_for_condition(
+                    lambda adapter=adapter: adapter.debug_get_locked_key_count() == 0
+                )
+
+            assert l1_manager.unsafe_read([keys[0]])[keys[0]][0] == L1Error.SUCCESS
+            l1_manager.finish_read([keys[0]])
+
+            write_results = l1_manager.reserve_write(
+                keys=[keys[1]],
+                is_temporary=[False],
+                layout_desc=layout,
+                mode="new",
+            )
+            assert write_results[keys[1]][0] == L1Error.SUCCESS
+            l1_manager.finish_write([keys[1]])
+            l1_manager.delete([keys[1]])
+        finally:
+            ctrl.stop()
+            for adapter in adapters:
+                adapter.close()
+
     def test_disjoint_adapters(self, l1_manager):
         """Adapter 0 has {0,1}, adapter 1 has {2,3} → full prefix of 4."""
         adapters = [make_adapter(), make_adapter()]
