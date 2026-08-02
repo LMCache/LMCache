@@ -11,6 +11,9 @@ The store policy makes two decisions after data is written to L1:
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
+# Third Party
+import blake3
+
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.l2_adapters.config import (
@@ -141,6 +144,46 @@ def create_store_policy(name: str) -> StorePolicy:
     return _STORE_POLICY_REGISTRY[name]()
 
 
+# -----------------------------------------------------------------------------
+# Striped hashing utility (shared by StripedStorePolicy and
+# StripedPrefetchPolicy so that store and lookup always agree on which
+# adapter owns a key).
+# -----------------------------------------------------------------------------
+
+
+def striped_adapter_index_for_key(
+    key: ObjectKey,
+    num_adapters: int,
+) -> int:
+    """Deterministically pick an adapter index for *key*.
+
+    Uses BLAKE3 on the key's string representation for a deterministic,
+    cross-process-stable hash.  Python's built-in ``hash()`` is
+    randomized per process via ``PYTHONHASHSEED`` (Python 3.3+), so
+    it would route the same key to different adapters after a server
+    restart — orphaning persistent L2 data.
+
+    BLAKE3 is already a dependency of LMCache (used by
+    :class:`~lmcache.v1.multiprocess.token_hasher.TokenHasher` as the
+    default hash algorithm).  It is faster than MD5 for larger inputs
+    and is available on FIPS-mode systems where MD5 may be disabled.
+
+    Args:
+        key: The object key to route.
+        num_adapters: Number of available adapters.
+
+    Returns:
+        Adapter index in ``[0, num_adapters)``.
+    """
+    h = blake3.blake3(str(key).encode())
+    return int.from_bytes(h.digest()[:8], "big") % num_adapters
+
+
+# -----------------------------------------------------------------------------
+# Concrete store policy classes
+# -----------------------------------------------------------------------------
+
+
 class DefaultStorePolicy(StorePolicy):
     """
     Default store policy: store all keys to all adapters,
@@ -209,5 +252,94 @@ class BufferOnlyStorePolicy(DefaultStorePolicy):
         return list(keys)
 
 
+class StripedStorePolicy(StorePolicy):
+    """Striped store policy: distribute keys across adapters by hash.
+
+    Each key is assigned to exactly one adapter via a BLAKE3-based
+    hash of the key, i.e. ``blake3(str(key)) % len(adapters)``, spreading
+    write (and read) pressure evenly across multiple SSDs.  Unlike
+    :class:`DefaultStorePolicy` which mirrors every key to every adapter,
+    this policy stores each key only once, sacrificing redundancy for
+    throughput and capacity.
+
+    Pair with multiple ``--l2-adapter`` instances pointing to different
+    SSD paths and ``--l2-store-policy striped`` to enable.  Use the
+    matching :class:`StripedPrefetchPolicy`
+    (``--l2-prefetch-policy striped``) so the lookup phase only queries
+    the adapter that owns each key instead of broadcasting to all
+    adapters.
+    """
+
+    @staticmethod
+    def _adapter_index_for_key(
+        key: ObjectKey,
+        num_adapters: int,
+    ) -> int:
+        """Deterministically pick an adapter index for *key*.
+
+        Delegates to :func:`striped_adapter_index_for_key`; see that
+        function for rationale.
+
+        Args:
+            key: The object key to route.
+            num_adapters: Number of available adapters.
+
+        Returns:
+            Adapter index in ``[0, num_adapters)``.
+        """
+        return striped_adapter_index_for_key(key, num_adapters)
+
+    def select_store_targets(
+        self,
+        keys: list[ObjectKey],
+        adapters: list[AdapterDescriptor],
+    ) -> dict[int, list[ObjectKey]]:
+        """Assign each key to exactly one adapter via hash-based striping.
+
+        Args:
+            keys: Keys that were just written to L1.
+            adapters: Descriptors of available L2 adapters.
+
+        Returns:
+            Mapping from adapter index to the list of keys assigned to
+            that adapter. Each key appears in exactly one adapter's
+            list. If ``adapters`` is empty, returns an empty dict (no
+            L2 storage).
+        """
+        if not adapters:
+            return {}
+
+        num_adapters = len(adapters)
+        # Pre-sort by index for deterministic modulo mapping
+        sorted_adapters = sorted(adapters, key=lambda a: a.index)
+        result: dict[int, list[ObjectKey]] = {ad.index: [] for ad in sorted_adapters}
+
+        for key in keys:
+            slot = self._adapter_index_for_key(key, num_adapters)
+            adapter_id = sorted_adapters[slot].index
+            result[adapter_id].append(key)
+
+        return result
+
+    def select_l1_deletions(
+        self,
+        keys: list[ObjectKey],
+    ) -> list[ObjectKey]:
+        """Never delete from L1 (same as DefaultStorePolicy).
+
+        Args:
+            keys: Keys that were successfully stored to L2.
+
+        Returns:
+            Empty list (keep all keys in L1).
+        """
+        return []
+
+
+# -----------------------------------------------------------------------------
+# Registrations
+# -----------------------------------------------------------------------------
+
 register_store_policy("default", DefaultStorePolicy)
 register_store_policy("skip_l1", BufferOnlyStorePolicy)
+register_store_policy("striped", StripedStorePolicy)
