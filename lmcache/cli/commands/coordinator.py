@@ -139,6 +139,21 @@ class CoordinatorCommand(BaseCommand):
                 "before closing them (default: 10)."
             ),
         )
+        parser.add_argument(
+            "--disable-metrics",
+            action="store_true",
+            default=None,
+            help="Disable OpenTelemetry metrics (enabled by default).",
+        )
+        parser.add_argument(
+            "--otlp-endpoint",
+            type=str,
+            default=None,
+            help=(
+                "OTLP gRPC endpoint for metrics push mode. When unset, "
+                "Prometheus scrapes /metrics on the coordinator HTTP port."
+            ),
+        )
 
     def execute(self, args: argparse.Namespace) -> None:
         """Build the coordinator config and serve the app with uvicorn.
@@ -163,6 +178,9 @@ class CoordinatorCommand(BaseCommand):
             # First Party
             from lmcache.v1.mp_coordinator.app import create_app
             from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
+            from lmcache.v1.mp_coordinator.observability import (
+                init_coordinator_metrics,
+            )
         except ImportError:
             print(
                 "The 'lmcache coordinator' command requires the full lmcache "
@@ -187,12 +205,16 @@ class CoordinatorCommand(BaseCommand):
                 ("hash_algorithm", args.hash_algorithm),
                 ("blend_probe_stride", args.blend_probe_stride),
                 ("timeout_keep_alive", args.timeout_keep_alive),
+                ("otlp_endpoint", args.otlp_endpoint),
             )
             if value is not None
         }
+        if args.disable_metrics is not None:
+            overrides["metrics_enabled"] = not args.disable_metrics
         if overrides:
             config = dataclasses.replace(config, **overrides)
 
+        init_coordinator_metrics(config)
         app = create_app(config)
         uvicorn.run(
             app,
