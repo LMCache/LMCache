@@ -15,16 +15,20 @@ suite documentation; this file only covers the Docker workflow.
   already-committed input data, with no dependence on host fonts, OS,
   or matplotlib version.
 - The **figure PNGs** (`report/figures/*.png`) are rendered from those
-  same numbers. Building this image (step 1) pins the exact
-  matplotlib/numpy versions from `requirements-figures.txt` specifically
-  so figure rendering is consistent; verified (`git status` clean after
-  step 4 below) that this image reproduces every committed figure
-  **byte-for-byte**, not just numerically. That said, matplotlib's exact
-  pixel output can in principle still depend on the platform's
-  font/anti-aliasing stack even with the package version pinned, so
-  don't be alarmed if a PNG comes out a few pixels different on some
-  other OS/architecture -- treat the JSON as the ground truth and the
-  PNG as a rendering of it (see the note in step 4).
+  same numbers, and `requirements-figures.txt` fully pins matplotlib and
+  every one of its rendering-relevant transitive dependencies
+  (`fonttools`, `pillow`, `kiwisolver`, `contourpy`, etc. -- not just
+  matplotlib/numpy themselves). **This is necessary but was not, by
+  itself, sufficient**: testing found that a `docker build` reusing
+  Docker's layer cache could still produce a build whose figures differed
+  from a `--no-cache` build with the exact same pinned dependency
+  versions installed (confirmed via `pip freeze` -- same versions, still
+  different pixels on ~5-10% of each figure). Three independent
+  `docker build --no-cache` runs, by contrast, agreed byte-for-byte with
+  each other every time. **Always pass `--no-cache` when reproducibility
+  matters** (step 1 below) -- a plain `docker build` that reuses cached
+  layers is not a reliable way to reproduce these figures, even though
+  it reliably reproduces everything else in this suite.
 - `report/cache_policy_evaluation_report.pdf` is the final submitted
   report and is **not** rebuilt by this image or any script here -- see
   "Report and reproducibility" in `README.md`.
@@ -34,15 +38,21 @@ suite documentation; this file only covers the Docker workflow.
 From the repository root:
 
 ```bash
-docker build -f benchmarks/cache_policy/Dockerfile -t lmcache-cache-policy-bench .
+docker build --no-cache -f benchmarks/cache_policy/Dockerfile -t lmcache-cache-policy-bench .
 ```
 
+`--no-cache` is required, not optional, if you intend to reproduce the
+committed figures exactly -- see the note above. It costs a full
+re-download of the CPU torch wheel (a few minutes), but a cached rebuild
+has been observed to silently produce different figure pixels despite
+installing identical pinned package versions.
+
 This installs `requirements/common.txt`, `requirements/test.txt`, and
-the pinned `requirements-figures.txt` (matplotlib/numpy) on top of
-`python:3.11-slim` -- matching `environment.yml`'s Python version and
-this repo's own pinned figure-rendering versions. `lmcache` itself is
-never `pip install`-ed; it's imported via `PYTHONPATH=/app` (set in the
-image), exactly like the conda-based instructions in `README.md`.
+the fully-pinned `requirements-figures.txt` on top of `python:3.11-slim`
+-- matching `environment.yml`'s Python version and this repo's own
+pinned figure-rendering versions. `lmcache` itself is never `pip
+install`-ed; it's imported via `PYTHONPATH=/app` (set in the image),
+exactly like the conda-based instructions in `README.md`.
 
 ## 2. Run the deterministic-reproducibility check (inside the container)
 
@@ -99,16 +109,17 @@ git status
 git diff --stat benchmarks/cache_policy/results/admission_control/admission_vs_lfu_paired.json
 ```
 
-The JSON diff should be empty, and `git status` should show **no
-changes at all** -- on the reference build (Linux container, pinned
-matplotlib 3.10.9/numpy 2.2.6), every figure PNG came out byte-identical
-to what's committed, not just numerically equivalent. If you do see a
-figure PNG reported as modified on your machine, that's still not
-necessarily a problem: matplotlib's pixel output can in principle depend
-on the host's font/anti-aliasing stack even with the package version
-pinned. Check whether the *numbers* changed by diffing the JSON the
-figure is sourced from (see `report/FIGURE_SOURCES.md`) before treating
-a PNG-only diff as a real reproducibility failure.
+The JSON diff should be empty, and `git status` should show **no changes
+at all** -- verified end to end with this exact command against a fresh
+`docker build --no-cache` image: every one of the 10 figures and the
+JSON came out byte-identical to what's already committed, and running
+this same command a second time against the same image reproduced that
+result again. If you built with `--no-cache` and still see a figure PNG
+reported as modified, check whether the *numbers* changed by diffing the
+JSON the figure is sourced from (see `report/FIGURE_SOURCES.md`) before
+assuming a real reproducibility failure -- but also double check you
+actually used `--no-cache`, since that's the one variable observed to
+matter.
 
 ## 5. (Optional, slow) Full experiment rerun, including real ShareGPT data
 

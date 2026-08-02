@@ -12,8 +12,12 @@
 # native extensions, so the build stays simple (no compiler toolchain,
 # no NO_NATIVE_EXT dance).
 #
-# Build (from the repository root):
-#   docker build -f benchmarks/cache_policy/Dockerfile -t lmcache-cache-policy-bench .
+# Build (from the repository root). --no-cache is required if you want
+# the figures rebuilt from this image to match the committed ones
+# exactly -- a cached rebuild has been observed to produce different
+# figure pixels despite installing identical pinned package versions
+# (see DOCKER.md for the full explanation):
+#   docker build --no-cache -f benchmarks/cache_policy/Dockerfile -t lmcache-cache-policy-bench .
 #
 # Run the deterministic-reproducibility check (fast, self-contained, no
 # external data required -- this is the default command):
