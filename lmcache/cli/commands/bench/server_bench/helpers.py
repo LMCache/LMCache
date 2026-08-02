@@ -256,8 +256,27 @@ def _make_key(
 # across all allocation / gather / scatter helpers keeps the bench in
 # sync with the detector contract regardless of transfer mode.
 def _is_mla_kv_size(kv_size: int) -> bool:
-    """``kv_size == 1`` marks a single-plane KV group (MLA / fused-K/V)."""
+    """``kv_size == 1`` marks a single-plane KV group (MLA / fused-K/V).
+
+    Single source of truth for "is this group MLA?". Derived helpers
+    (:func:`_make_alloc_shape`, :func:`_tensor_is_mla`) express the same
+    contract in shape-space so that alloc / gather / scatter / checksum
+    paths never diverge.
+    """
     return kv_size == 1
+
+
+def _tensor_is_mla(t: "torch.Tensor") -> bool:
+    """Inverse of :func:`_is_mla_kv_size` at the tensor level.
+
+    Client tensors produced by :func:`_make_alloc_shape` are rank-3
+    ``(NB, BS, hidden)`` for MLA groups and rank-5
+    ``(kv, NB, BS, NH, HS)`` for classical K/V groups. Checking
+    ``dim() == 3`` here (instead of scattering the literal across
+    gather / scatter / checksum) keeps every consumer routed through
+    the same rule the allocator used.
+    """
+    return t.dim() == 3
 
 
 def _make_alloc_shape(
@@ -478,7 +497,7 @@ def _send_register_kv_cache(
     # not representable in a single data-mode register, so we default
     # to non-MLA in that case.
     kv_size_hint = hints_d.get("kv_size", 2)
-    use_mla = isinstance(kv_size_hint, int) and kv_size_hint == 1
+    use_mla = isinstance(kv_size_hint, int) and _is_mla_kv_size(kv_size_hint)
     payload = RegisterEngineDrivenContextPayload(
         instance_id=instance_id,
         model_name=model_name,
@@ -661,17 +680,17 @@ def _gather_paged_to_flat_chunks(
     num_chunks = num_blocks // blocks_per_chunk
     num_layers = len(tensors)
     # Client tensors are rank-3 ``(NB, BS, hidden)`` in MLA mode and
-    # rank-5 ``(kv, NB, BS, NH, HS)`` otherwise. The block-axis lives at
-    # dim 0 for MLA and dim 1 for classical; per-layer flats stack into a
-    # 3D or 4D chunk to match the server's single-plane / split-K/V
-    # commit shape.
-    first_is_mla = bool(tensors) and tensors[0].dim() == 3
+    # rank-5 ``(kv, NB, BS, NH, HS)`` otherwise (see
+    # :func:`_tensor_is_mla`). The block-axis lives at dim 0 for MLA
+    # and dim 1 for classical; per-layer flats stack into a 3D or 4D
+    # chunk to match the server's single-plane / split-K/V commit shape.
+    first_is_mla = bool(tensors) and _tensor_is_mla(tensors[0])
     chunks: list[torch.Tensor] = []
     for c in range(num_chunks):
         start_b = block_offset + c * blocks_per_chunk
         per_layer: list[torch.Tensor] = []
         for t in tensors:
-            if t.dim() == 3:
+            if _tensor_is_mla(t):
                 # MLA: (NB, BS, hidden) -> (chunk_size, hidden).
                 sliced = t.narrow(0, start_b, blocks_per_chunk)
                 _, bs, hidden = sliced.shape
@@ -720,10 +739,12 @@ def _scatter_flat_chunks_to_paged(
         # MLA chunks are 3D ``(NL, chunk, hidden)`` (kv_size == 1 is
         # folded away by the server), classical K/V chunks are 4D
         # ``(kv, NL, chunk, hidden)``. Client tensors match: MLA rank-3
-        # ``(NB, BS, hidden)`` vs. classical rank-5 ``(kv, NB, BS, NH, HS)``.
-        chunk_is_mla = chunk.dim() == 3
+        # ``(NB, BS, hidden)`` vs. classical rank-5 ``(kv, NB, BS, NH, HS)``
+        # -- both derived from the same :func:`_is_mla_kv_size` contract
+        # via :func:`_tensor_is_mla`.
+        chunk_is_mla = _tensor_is_mla(chunk)
         for layer_idx, t in enumerate(tensors):
-            if t.dim() == 3:
+            if _tensor_is_mla(t):
                 # MLA: block axis at dim 0.
                 target = t.narrow(0, start_b, blocks_per_chunk)
                 flat = chunk[layer_idx] if chunk_is_mla else chunk[:, layer_idx]
@@ -776,7 +797,7 @@ def _compute_client_checksums(
             # ``contiguous().numpy().tobytes()`` survives non-contiguous
             # slices and dtype quirks (bfloat16 has no numpy view, but
             # uint8 reinterpret works after slice).
-            block_dim = 0 if t.dim() == 3 else 1
+            block_dim = 0 if _tensor_is_mla(t) else 1
             view = t.narrow(block_dim, start_b, end_b - start_b).contiguous()
             h.update(view.view(torch.uint8).numpy().tobytes())
         checksums.append(h.hexdigest())
@@ -797,7 +818,7 @@ def _zero_fill_client_blocks(
     pages were never overwritten in the first place).
     """
     for t in tensors:
-        block_dim = 0 if t.dim() == 3 else 1
+        block_dim = 0 if _tensor_is_mla(t) else 1
         t.narrow(block_dim, block_offset, num_blocks).zero_()
 
 

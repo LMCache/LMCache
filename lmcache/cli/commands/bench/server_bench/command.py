@@ -57,6 +57,7 @@ from lmcache.cli.commands.bench.server_bench.helpers import (
     _allocate_cpu_shm_kv_cache,
     _allocate_gpu_kv_cache,
     _get_chunk_size,
+    _is_mla_kv_size,
     _process_request,
     _require_full_install,
     _send_register_kv_cache,
@@ -578,13 +579,22 @@ def run_server_bench(
         # shutdown.
         tp_size = max(1, int(getattr(args, "tp_size", 1)))
         # Explicit --use-mla wins; otherwise infer MLA from the shape
-        # spec (kv_size == 1 marks an MLA single-plane group).
-        use_mla = bool(getattr(args, "use_mla", False)) or kv_size_disp == 1
+        # spec via ``_is_mla_kv_size`` (kv_size == 1 marks an MLA
+        # single-plane group). Routing all shape-derived MLA checks
+        # through ``_is_mla_kv_size`` keeps this file, the helpers
+        # module, and the server detector agreeing on one contract.
+        use_mla = bool(getattr(args, "use_mla", False)) or (
+            isinstance(kv_size_disp, int) and _is_mla_kv_size(kv_size_disp)
+        )
         # Fail fast when --use-mla is set but the shape spec still
         # declares a two-plane KV group: allocation would build rank-5
         # classical tensors while the server expects the MLA single-
         # plane layout, and the mismatch only surfaces mid-run.
-        if use_mla and kv_size_disp not in (1, "mixed"):
+        if (
+            use_mla
+            and isinstance(kv_size_disp, int)
+            and not _is_mla_kv_size(kv_size_disp)
+        ):
             raise ValueError(
                 "--use-mla requires --kvcache-shape-spec with kv_size=1 "
                 "(single-plane MLA group), got kv_size=%s" % kv_size_disp
@@ -600,15 +610,24 @@ def run_server_bench(
         workers: list[WorkerContext] = []
         registered_instance_ids: list[int] = []
 
+        # Import the wrapper class once per mode, outside the per-rank
+        # loop: importing ``CudaIPCWrapper`` on a non-CUDA host pulls in
+        # ``torch.cuda``-specific symbols and can crash, so it must stay
+        # behind the ``use_gpu`` gate; keeping it in the loop just paid
+        # the same cost every rank without adding any safety.
+        if use_gpu:
+            # First Party
+            from lmcache.v1.platform.cuda.ipc_wrapper import CudaIPCWrapper
+        else:
+            # First Party
+            from lmcache.v1.platform.cpu.shm import CpuShmTensorWrapper
+
         for rank in range(tp_size):
             instance_id = _INSTANCE_ID_BASE + rank
             # MLA: every vLLM rank folds into kv_worker_id 0.
             # Non-MLA: kv_worker_id == vLLM rank.
             kv_worker_id = 0 if use_mla else rank
             if use_gpu:
-                # First Party
-                from lmcache.v1.platform.cuda.ipc_wrapper import CudaIPCWrapper
-
                 allocated = _allocate_gpu_kv_cache(groups=layer_groups)
                 log(
                     "[rank %d] Allocated %d GPU tensors on %s"
@@ -617,9 +636,6 @@ def run_server_bench(
                 kv_wrappers: KVCache = [CudaIPCWrapper(t) for t in allocated]
                 client_kv_tensors = allocated
             else:
-                # First Party
-                from lmcache.v1.platform.cpu.shm import CpuShmTensorWrapper
-
                 shm_prefix = CpuShmTensorWrapper.SHM_NAME_PREFIX + "%s_r%d" % (
                     os.getpid(),
                     rank,
