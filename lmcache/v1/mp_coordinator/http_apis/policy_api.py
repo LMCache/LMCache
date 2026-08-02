@@ -124,6 +124,7 @@ async def _proxy_direct(
     instance_id: str,
     method: str,
     body: dict[str, Any] | None = None,
+    endpoint: str = "/config/policies",
 ) -> JSONResponse:
     """Proxy one node-local request through the registry."""
     ctx = get_context(request)
@@ -135,7 +136,7 @@ async def _proxy_direct(
         )
     try:
         status_code, payload = await _policy_manager.request(
-            target, _client_or_503(request), method, body
+            target, _client_or_503(request), method, body, endpoint
         )
     except httpx.HTTPError as error:
         raise HTTPException(
@@ -153,7 +154,7 @@ async def _validate_target(
     """Validate one target and turn transport errors into result records."""
     try:
         status_code, payload = await _policy_manager.request(
-            target, client, "POST", body
+            target, client, "POST", body, "/config/policies/validate"
         )
     except httpx.HTTPError as error:
         return _error_result(target.instance_id, error)
@@ -210,7 +211,7 @@ async def _apply_target(
     """Apply one target after the fleet validation barrier."""
     try:
         status_code, payload = await _policy_manager.request(
-            target, client, "PATCH", body
+            target, client, "PATCH", body, "/config/policies"
         )
     except httpx.HTTPError as error:
         return _error_result(target.instance_id, error)
@@ -228,7 +229,13 @@ async def validate_instance_policies(
     instance_id: str, body: RuntimePolicyUpdateRequest, request: Request
 ) -> JSONResponse:
     """Proxy node-local policy validation through the coordinator."""
-    return await _proxy_direct(request, instance_id, "POST", _direct_body(body))
+    return await _proxy_direct(
+        request,
+        instance_id,
+        "POST",
+        _direct_body(body),
+        "/config/policies/validate",
+    )
 
 
 @router.patch("/instances/{instance_id}/config/policies", response_model=None)

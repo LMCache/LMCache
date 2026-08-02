@@ -75,6 +75,8 @@ def test_direct_policy_proxy_preserves_node_response() -> None:
         assert patched.json()["version"] == 4
 
     assert calls[0][0:2] == ("GET", "/config/policies")
+    assert calls[1][0:2] == ("POST", "/config/policies/validate")
+    assert calls[2][0:2] == ("PATCH", "/config/policies")
     validation_body = calls[1][2]
     patch_body = calls[2][2]
     assert validation_body is not None
@@ -131,6 +133,10 @@ def test_fleet_validate_is_all_target_and_does_not_apply() -> None:
         assert len(response.json()["results"]) == 2
 
     assert [method for method, _, _ in calls] == ["POST", "POST"]
+    assert [path for _, path, _ in calls] == [
+        "/config/policies/validate",
+        "/config/policies/validate",
+    ]
 
 
 def test_fleet_patch_uses_validation_barrier_and_per_node_versions() -> None:
@@ -161,6 +167,12 @@ def test_fleet_patch_uses_validation_barrier_and_per_node_versions() -> None:
     }
     assert patch_bodies == {4, 7}
     assert len([method for method, _, _ in calls if method == "PATCH"]) == 2
+    assert {path for method, path, _ in calls if method == "POST"} == {
+        "/config/policies/validate"
+    }
+    assert {path for method, path, _ in calls if method == "PATCH"} == {
+        "/config/policies"
+    }
 
 
 def test_fleet_patch_forwards_explicit_expected_versions() -> None:
