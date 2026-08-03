@@ -724,6 +724,7 @@ def is_layer_list(engine_kv_format: EngineKVFormat) -> bool:
         int(EngineKVFormat.NL_X_NB_BS_NH_TWO_HS),
         int(EngineKVFormat.NL_X_NB_NH_BS_CS),
         int(EngineKVFormat.NL_X_NB_BS_NH_CS),
+        int(EngineKVFormat.NL_X_NB_BSV_BSS),
     )
 
 
@@ -732,6 +733,7 @@ def is_mla(engine_kv_format: EngineKVFormat) -> bool:
     return int(engine_kv_format) in (
         int(EngineKVFormat.NL_X_NB_BS_HS),
         int(EngineKVFormat.NL_X_NBBS_ONE_HS),
+        int(EngineKVFormat.NL_X_NB_BSV_BSS),
     )
 
 

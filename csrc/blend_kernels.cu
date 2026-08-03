@@ -93,9 +93,12 @@ void execute_cb_retrieve_plan(const torch::Device& device,
                       "CBRopeVar.slot_idx out of range: ", rope.slot_idx);
           // The K plane is the slot buffer's first plane, so its base pointer
           // is the slot base for both split K/V (kv_size 2) and fused-packed
-          // / key-only (kv_size 1) layouts.
+          // / key-only (kv_size 1) layouts. rope_base_offset shifts the base
+          // to the first rope-carrying element for layouts whose rope dims
+          // trail the row (MLA latents); 0 everywhere else.
           rope_keys.push_back(
-              static_cast<uintptr_t>(group.temp_buffer_ptrs[rope.slot_idx]));
+              static_cast<uintptr_t>(group.temp_buffer_ptrs[rope.slot_idx]) +
+              static_cast<uintptr_t>(group.rope_base_offset));
           rope_old.push_back(rope.old_st);
           rope_new.push_back(rope.cur_st);
           if (static_cast<int>(rope_keys.size()) == MAX_FUSED_TRANSFER_CHUNKS) {

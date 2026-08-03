@@ -135,6 +135,9 @@ enum class EngineKVFormat : int {
   Like NL_X_NB_NH_BS_CS but tokens before heads; the device transfer kernels
   treat it as NHD with kv_size == 1 and hs == content_size.
   */
+
+  // vLLM DSA indexer k-cache [NB,BS,132] u8, paged [BSxvals][BSxscales]; kv 1
+  NL_X_NB_BSV_BSS = 14,
 };
 
 // __host__ __device__ under CUDA/HIP so the kernels can call these; the guard
@@ -170,13 +173,17 @@ LMC_KV_FORMAT_HD constexpr bool is_layer_list(EngineKVFormat f) {
          f == EngineKVFormat::NL_X_NB_NH_BS_TWO_HS ||
          f == EngineKVFormat::NL_X_NB_BS_NH_TWO_HS ||
          f == EngineKVFormat::NL_X_NB_NH_BS_CS ||
-         f == EngineKVFormat::NL_X_NB_BS_NH_CS;
+         f == EngineKVFormat::NL_X_NB_BS_NH_CS ||
+         f == EngineKVFormat::NL_X_NB_BSV_BSS;
 }
 
 // Multi-head Latent Attention: a single latent KV head (no separate K/V split).
+// The blocked-scale indexer cache transfers like MLA (single plane,
+// kv_size == 1); only its paged addressing differs.
 LMC_KV_FORMAT_HD constexpr bool is_mla(EngineKVFormat f) {
-  return f == EngineKVFormat::NL_X_NB_BS_HS ||   // vLLM MLA
-         f == EngineKVFormat::NL_X_NBBS_ONE_HS;  // SGLang MLA
+  return f == EngineKVFormat::NL_X_NB_BS_HS ||     // vLLM MLA
+         f == EngineKVFormat::NL_X_NBBS_ONE_HS ||  // SGLang MLA
+         f == EngineKVFormat::NL_X_NB_BSV_BSS;     // DSA indexer (blocked)
 }
 
 // vLLM fused K/V: K and V packed in the trailing dim (2 * head_size), no

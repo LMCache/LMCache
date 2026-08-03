@@ -8,16 +8,20 @@ import time
 # Third Party
 import pytest
 
-torch = pytest.importorskip("torch", reason="torch required")
-if not torch.cuda.is_available():
-    pytest.skip("CUDA not available", allow_module_level=True)
+# First Party
+from lmcache import torch_dev, torch_device_type
+
+pytestmark = pytest.mark.cuda
+
+if torch_device_type != "cuda" or not torch_dev.is_available():
+    pytest.skip("requires available CUDA runtime", allow_module_level=True)
 
 lmc_ops = pytest.importorskip("lmcache.c_ops", reason="lmcache.c_ops not built")
 if not hasattr(lmc_ops, "record_event_on_stream"):
     pytest.skip("record_event_on_stream not available", allow_module_level=True)
 
 # Third Party
-import cupy  # noqa: E402
+cupy = pytest.importorskip("cupy", reason="cupy required")  # noqa: E402
 
 # First Party
 from lmcache.v1.mp_observability.event import Event, EventType  # noqa: E402
@@ -61,7 +65,7 @@ class TestRecordAndDrain:
             stream.ptr,
             "mp.store.start",
             "sess-1",
-            {"device": "cuda:0"},
+            {"device": f"{torch_device_type}:0"},
             {},
         )
         stream.synchronize()
@@ -72,7 +76,7 @@ class TestRecordAndDrain:
         assert name == "mp.store.start"
         assert sid == "sess-1"
         assert ts > 0.0
-        assert str_meta == {"device": "cuda:0"}
+        assert str_meta == {"device": f"{torch_device_type}:0"}
         assert int_meta == {}
 
     def test_int_metadata_preserved(self, stream):
@@ -80,7 +84,7 @@ class TestRecordAndDrain:
             stream.ptr,
             "mp.store.end",
             "sess-2",
-            {"device": "cuda:0"},
+            {"device": f"{torch_device_type}:0"},
             {"stored_count": 42},
         )
         stream.synchronize()
@@ -88,7 +92,7 @@ class TestRecordAndDrain:
         events = lmc_ops.drain_recorded_events()
         assert len(events) == 1
         _, _, _, str_meta, int_meta = events[0]
-        assert str_meta == {"device": "cuda:0"}
+        assert str_meta == {"device": f"{torch_device_type}:0"}
         assert int_meta == {"stored_count": 42}
 
     def test_multiple_events_ordered(self, stream):
@@ -149,7 +153,7 @@ class TestEventBusIntegration:
             Event(
                 event_type=EventType.MP_STORE_START,
                 session_id="req-1",
-                metadata={"device": "cuda:0"},
+                metadata={"device": f"{torch_device_type}:0"},
             ),
         )
         stream.synchronize()
@@ -160,7 +164,7 @@ class TestEventBusIntegration:
         evt = received[0]
         assert evt.event_type is EventType.MP_STORE_START
         assert evt.session_id == "req-1"
-        assert evt.metadata["device"] == "cuda:0"
+        assert evt.metadata["device"] == f"{torch_device_type}:0"
         assert evt.timestamp > 0.0
 
     def test_int_metadata_roundtrip(self, stream, bus):
@@ -173,7 +177,7 @@ class TestEventBusIntegration:
             Event(
                 event_type=EventType.MP_STORE_END,
                 session_id="req-2",
-                metadata={"device": "cuda:0", "stored_count": 10},
+                metadata={"device": f"{torch_device_type}:0", "stored_count": 10},
             ),
         )
         stream.synchronize()
@@ -182,7 +186,7 @@ class TestEventBusIntegration:
 
         assert len(received) == 1
         assert received[0].metadata["stored_count"] == 10
-        assert received[0].metadata["device"] == "cuda:0"
+        assert received[0].metadata["device"] == f"{torch_device_type}:0"
 
     def test_disabled_bus_skips_recording(self, stream):
         disabled_bus = EventBus(EventBusConfig(enabled=False))
@@ -191,7 +195,7 @@ class TestEventBusIntegration:
             Event(
                 event_type=EventType.MP_STORE_START,
                 session_id="req-3",
-                metadata={"device": "cuda:0"},
+                metadata={"device": f"{torch_device_type}:0"},
             ),
         )
         stream.synchronize()

@@ -14,6 +14,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
@@ -44,10 +45,11 @@ from lmcache.v1.memory_management import MemoryObjMetadata, TensorMemoryObj
 # InMemoryMetricReader; controllers bind their instruments to it.
 from tests.v1.mp_observability.subscribers.metrics.otel_setup import reader as _reader
 
-pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="CUDA is not available"
-)
-
+if not torch_dev.is_available():
+    pytest.skip(
+        f"Requires available {torch_device_type} runtime",
+        allow_module_level=True,
+    )
 
 # =============================================================================
 # Helpers
