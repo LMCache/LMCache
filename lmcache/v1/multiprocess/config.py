@@ -12,6 +12,11 @@ import math
 import os
 import uuid
 
+# First Party
+from lmcache.logging import init_logger
+
+logger = init_logger(__name__)
+
 
 @dataclass
 class MPServerConfig:
@@ -609,6 +614,24 @@ def add_coordinator_args(
         help="Seconds between cache-event flush attempts (must be > 0). "
         "Defaults to LMCACHE_COORDINATOR_EVENT_FLUSH_INTERVAL, then 1.0.",
     )
+    # Deprecated pre-v0.5.3 aliases, hidden from --help. Released deployers
+    # (operator <= v0.5.2, charts) still render these names into server args,
+    # and rejecting them crashes the pod on startup. Remove once those
+    # deployers are out of the support matrix.
+    group.add_argument(
+        "--coordinator-l2-event-reporting",
+        dest="coordinator_l2_event_reporting",
+        action="store_true",
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    group.add_argument(
+        "--coordinator-l2-event-flush-interval",
+        dest="coordinator_l2_event_flush_interval",
+        type=float,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
     return parser
 
 
@@ -620,6 +643,11 @@ def parse_args_to_coordinator_config(
     A flag value takes precedence over its environment variable. The heartbeat
     interval is validated here so a malformed value fails fast at startup
     (runtime best-effort only covers coordinator *reachability*, not config).
+
+    The event-reporting flags also accept their deprecated pre-v0.5.3
+    spellings (``--coordinator-l2-event-*``), logging a deprecation warning
+    when used. Precedence per setting: new flag > deprecated flag > env var
+    > default.
 
     Args:
         args: Parsed arguments from the argument parser.
@@ -661,15 +689,31 @@ def parse_args_to_coordinator_config(
             "coordinator heartbeat interval must be a finite number > 0, "
             "got %s" % heartbeat_interval
         )
+    # Deprecated pre-v0.5.3 flag spellings. Precedence within each setting:
+    # new flag > deprecated flag > env var > default.
+    deprecated_reporting = getattr(args, "coordinator_l2_event_reporting", None)
     if args.coordinator_event_reporting is not None:
         event_reporting = args.coordinator_event_reporting
+    elif deprecated_reporting is not None:
+        logger.warning(
+            "--coordinator-l2-event-reporting is deprecated, "
+            "use --coordinator-event-reporting instead"
+        )
+        event_reporting = deprecated_reporting
     else:
         event_reporting = os.getenv(
             "LMCACHE_COORDINATOR_EVENT_REPORTING", ""
         ).lower() in ("1", "true", "yes")
 
+    deprecated_flush = getattr(args, "coordinator_l2_event_flush_interval", None)
     if args.coordinator_event_flush_interval is not None:
         event_flush_interval = args.coordinator_event_flush_interval
+    elif deprecated_flush is not None:
+        logger.warning(
+            "--coordinator-l2-event-flush-interval is deprecated, "
+            "use --coordinator-event-flush-interval instead"
+        )
+        event_flush_interval = deprecated_flush
     else:
         raw = os.getenv("LMCACHE_COORDINATOR_EVENT_FLUSH_INTERVAL")
         if raw:
