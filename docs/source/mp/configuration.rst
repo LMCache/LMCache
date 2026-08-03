@@ -273,6 +273,15 @@ The DMA path is selected automatically by platform: **cuFile**
 `ROCm/hipFile <https://github.com/ROCm/hipFile>`_) on AMD ROCm. The same
 flags apply to both; no configuration change is needed to switch vendors.
 
+**uGDS** (``libugds.so``) is a third, opt-in backend selected with
+``--gds-l1-backend ugds``. It is a user-space GPUDirect Storage library that
+builds NVMe commands and rings doorbells from user space, so its IO path issues
+no syscall. Unlike cuFile and hipFile it does not use a filesystem: the slab is
+mapped directly onto a raw character device, and ``--gds-l1-path`` must name
+that device (for example ``/dev/ugds_drv0``) rather than a directory. The first
+``--l1-size-gb`` bytes of the device are the slab, so the device must be at
+least that large and must not hold anything else.
+
 .. note::
 
    AMD hipFile requires ROCm >= 7.2.0. The zero-copy GPUDirect fast path
@@ -280,6 +289,15 @@ flags apply to both; no configuration change is needed to switch vendors.
    ``amdgpu-dkms >= 30.20.1``, and the slab on a local NVMe ext4/xfs
    filesystem; where those are unavailable hipFile transparently falls back to
    a host-bounce compatibility path (correct, but not zero-copy).
+
+.. note::
+
+   uGDS requires its kernel module loaded and the NVMe device bound to it, and
+   ``libugds.so`` reachable through the loader (``LD_LIBRARY_PATH`` or
+   ``ldconfig``). Because the device is claimed by ``ugds_drv`` rather than the
+   kernel NVMe driver, it carries no filesystem and cannot be shared with any
+   other consumer while in use. See the
+   `uGDS project <https://github.com/ScaleX-IO/uGDS>`_ for setup.
 
 .. list-table::
    :header-rows: 1
@@ -290,13 +308,18 @@ flags apply to both; no configuration change is needed to switch vendors.
      - Description
    * - ``--gds-l1-path``
      - Not set
-     - NVMe directory for the GDS L1 slab. Setting this enables the GDS L1
-       tier; one shared slab per process lives at
+     - NVMe directory for the GDS L1 slab, or the raw device path when
+       ``--gds-l1-backend ugds`` is used. Setting this enables the GDS L1
+       tier; with cuFile or hipFile one shared slab per process lives at
        ``<path>/lmcache_gds_slab.bin``.
+   * - ``--gds-l1-backend``
+     - ``auto``
+     - GDS implementation: ``auto``, ``cufile``, ``hipfile``, or ``ugds``.
+       ``auto`` selects cuFile on CUDA and hipFile on ROCm.
    * - ``--gds-l1-use-direct-io`` / ``--no-gds-l1-use-direct-io``
      - ``True``
      - Open the slab with ``O_DIRECT`` (required for the GDS DMA fast path on
-       ext4).
+       ext4). Ignored by ``ugds``, whose IO bypasses the kernel entirely.
 
 L1 Manager TTLs
 ----------------

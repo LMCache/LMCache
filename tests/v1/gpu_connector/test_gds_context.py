@@ -64,9 +64,39 @@ def _gds_available() -> bool:
     return os.path.exists("/proc/driver/nvidia-fs/stats")
 
 
+def _ugds_device() -> str:
+    """Return the opt-in uGDS test device, or an empty string when unset.
+
+    These tests write to the raw device, destroying whatever occupies the slab
+    range. They are therefore opt-in via ``UGDS_TEST_DEVICE`` rather than
+    probing for any ``/dev/ugds_drv*``: on a host with several bound devices,
+    probing could overwrite one the caller did not intend to sacrifice.
+    """
+    device = os.environ.get("UGDS_TEST_DEVICE", "")
+    if not device or not os.path.exists(device):
+        return ""
+    if not torch.cuda.is_available():
+        return ""
+    # Standard
+    import ctypes
+
+    try:
+        ctypes.CDLL("libugds.so")
+    except OSError:
+        return ""
+    return device
+
+
 requires_gds = pytest.mark.skipif(
     not _gds_available(),
     reason="needs CUDA + nvidia-fs or ROCm + libhipfile.so (real GPUDirect Storage)",
+)
+requires_ugds = pytest.mark.skipif(
+    not _ugds_device(),
+    reason=(
+        "set UGDS_TEST_DEVICE to a scratch uGDS device (e.g. /dev/ugds_drv0); "
+        "also needs CUDA and libugds.so. These tests overwrite the device."
+    ),
 )
 
 
@@ -152,6 +182,7 @@ def _reset_singleton():
     get_gds_context.cache_clear()
     yield
     get_gds_context.cache_clear()
+    ca.select_backend("auto")
 
 
 class TestSingleton:
@@ -196,6 +227,68 @@ class TestRegisterGpuBuffer:
         ctx.register_gpu_buffer(buf)
 
         assert sizes == [16 << 20, 16 << 20, 8 << 20]
+
+
+class TestUgdsInitialization:
+    def test_raw_device_is_registered_without_file_operations(self, monkeypatch):
+        # Arbitrary fake device path; everything below is mocked. The asserts
+        # reuse it to verify file_location is passed through verbatim (the
+        # file backends would append a slab filename instead).
+        device = "/dev/ugds_drv7"
+        opened: list[tuple[str, int]] = []
+        registered_fds: list[int] = []
+        wrapped: list[tuple[int, int, str]] = []
+
+        class FakeAsyncHandle:
+            @classmethod
+            def from_fd(cls, fd, handle, path, writable=False):
+                wrapped.append((fd, handle, path))
+                return cls()
+
+            def close(self):
+                return None
+
+        monkeypatch.setattr(ca, "select_backend", lambda name: "ugds")
+        monkeypatch.setattr(
+            ca,
+            "register_handle",
+            lambda fd: registered_fds.append(fd) or 0xBEEF,
+        )
+        monkeypatch.setattr(ca, "AsyncHandle", FakeAsyncHandle)
+        monkeypatch.setattr(
+            os,
+            "makedirs",
+            lambda *args, **kwargs: pytest.fail(
+                "uGDS initialization must not create a directory"
+            ),
+        )
+        monkeypatch.setattr(
+            os,
+            "posix_fallocate",
+            lambda *args, **kwargs: pytest.fail(
+                "uGDS initialization must not preallocate a slab file"
+            ),
+        )
+        monkeypatch.setattr(
+            os, "open", lambda path, flags, *args: opened.append((path, flags)) or 33
+        )
+
+        ctx = GDSContext()
+        cfg = GdsL1Config(
+            file_location=device,
+            size_in_bytes=64 << 20,
+            backend="ugds",
+        )
+        ctx.initialize(cfg)
+
+        assert ctx.initialized is True
+        # The raw device is opened O_RDWR exactly once: no O_CREAT/O_TRUNC
+        # (nothing to create or truncate) and no O_DIRECT (uGDS IO bypasses
+        # the kernel).
+        assert opened == [(device, os.O_RDWR)]
+        assert registered_fds == [33]
+        assert wrapped == [(33, 0xBEEF, device)]
+        ctx.close()
 
 
 class TestResolveBuffer:
@@ -270,6 +363,47 @@ class TestPerStreamRegistration:
         ctx.deregister_gpu_buffer(buf_a)
         assert dereg_str == [22, 11]
         assert len(dereg_buf) == 3  # all three slots deregistered
+
+
+@requires_ugds
+def test_ugds_context_roundtrip():
+    """Round-trip a multi-region chunk through the LMCache uGDS L1 path."""
+    cfg = GdsL1Config(
+        file_location=_ugds_device(),
+        size_in_bytes=64 << 20,
+        backend="ugds",
+    )
+    chunk_bytes = 24 << 20
+    ctx = GDSContext()
+    ctx.initialize(cfg)
+    try:
+        buffer = torch.empty(chunk_bytes, dtype=torch.uint8, device="cuda")
+        ctx.register_gpu_buffer(buffer)
+        manager = GDSL1MemoryManager(cfg)
+        error, objects = manager.allocate(
+            MemoryLayoutDesc(
+                shapes=[torch.Size([chunk_bytes])],
+                dtypes=[torch.uint8],
+            ),
+            1,
+        )
+        assert error == L1Error.SUCCESS
+
+        expected = (torch.arange(chunk_bytes, dtype=torch.int64) % 251).to(torch.uint8)
+        buffer.copy_(expected.cuda())
+        torch.cuda.synchronize()
+        ctx.transfer_async(objects[0], buffer, SlabDirection.WRITE)
+        torch.cuda.synchronize()
+
+        buffer.zero_()
+        torch.cuda.synchronize()
+        ctx.transfer_async(objects[0], buffer, SlabDirection.READ)
+        torch.cuda.synchronize()
+
+        assert torch.equal(buffer.cpu(), expected)
+        ctx.deregister_gpu_buffer(buffer)
+    finally:
+        ctx.close()
 
 
 @requires_gds
