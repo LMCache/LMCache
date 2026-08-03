@@ -68,7 +68,7 @@ lmcache/v1/mp_coordinator/
     usage_manager.py    # per-salt L2 usage view (a router consumer)
     eviction_manager.py # LRU + trigger-watermark driven eviction loop, pin tracking
     prefetch_manager.py # dispatches warm prefetch to a named MP server
-    resync_manager.py   # startup backfill of directory L2 view + LRU from GET /cache/objects
+    resync_manager.py   # startup backfill of directory + views from GET /cache/objects
   http_apis/
     __init__.py
     dependencies.py     # shared FastAPI dependencies (registry, blend directory, ...)
@@ -171,9 +171,9 @@ usage stream:
   fleet). Also tracks the pins taken via `POST /cache/pins` so pinned keys
   are excluded from eviction and delete.
 - `resync_manager.py` — one-shot startup pass that paginates one mp
-  server's `GET /cache/objects` and backfills the key directory's L2 view
-  (placements, and with them the usage ledger) plus the eviction LRU, so a
-  fresh coordinator does not start from zero.
+  server's `GET /cache/objects` and backfills the key directory's L2
+  placements plus the router's consumers (usage view, eviction LRU), so
+  a fresh coordinator does not start from zero.
 - `prefetch_manager.py` — implements `POST /cache/prefetches` dispatch to a
   named mp server and proxies status polls.
 

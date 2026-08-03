@@ -236,6 +236,30 @@ class TestResyncFrom:
         assert usage.l2_usage("alice") == 50
 
     @pytest.mark.asyncio
+    async def test_malformed_page_stops_without_recording(self):
+        """A page missing ``shared`` (or ``adapter``) is rejected
+        wholesale: recording it under a guessed identity would leave
+        placements no DELETE event can ever remove."""
+        usage, _eviction, resync = _make_components()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "adapter": "fs",
+                    # no "shared" field
+                    "entries": [_entry(chunk_hash_hex="aa", size_bytes=100)],
+                    "next_page_token": None,
+                },
+            )
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            total = await resync.resync_from(_instance(), client)
+
+        assert total == 0
+        assert usage.l2_usage("alice") == 0
+
+    @pytest.mark.asyncio
     async def test_constructor_rejects_non_positive_page_size(self):
         with pytest.raises(ValueError):
             L2ResyncManager(KeyDirectory(), CacheEventRouter(), page_size=0)

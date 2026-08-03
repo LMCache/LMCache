@@ -15,7 +15,6 @@ in ``app.py``, not a router change.
 
 # Standard
 from typing import Protocol
-import threading
 
 # First Party
 from lmcache.v1.mp_coordinator.api import CacheEventBatch
@@ -45,25 +44,24 @@ class CacheEventRouter:
 
     Consumers attach via :meth:`register_consumer` after construction
     (mirroring ``EventBus.register_subscriber``); the router takes no
-    dependency on any of them. Thread-safe as long as each consumer's
-    ``consume`` is.
+    dependency on any of them. The router itself keeps no locks: routing
+    is thread-safe as long as each consumer's ``consume`` is.
     """
 
     def __init__(self) -> None:
-        self._lock = threading.Lock()
         self._consumers: list[CacheEventConsumer] = []
 
     def register_consumer(self, consumer: CacheEventConsumer) -> None:
         """Register a consumer for all subsequently routed batches.
 
-        Consumers are invoked in registration order. Thread-safe;
-        intended to be called during wiring, before batches flow.
+        Consumers are invoked in registration order. Call during wiring,
+        before batches flow (``create_app`` does); registration is not
+        synchronized against concurrent :meth:`route` calls.
 
         Args:
             consumer: The consumer to fan batches out to.
         """
-        with self._lock:
-            self._consumers.append(consumer)
+        self._consumers.append(consumer)
 
     def route(self, batch: CacheEventBatch) -> None:
         """Deliver one batch to every consumer.

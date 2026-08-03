@@ -98,8 +98,8 @@ variables:
      - ``True``
      - When ``True``, the coordinator runs a one-shot L2 resync on
        startup that paginates an MP server's ``GET /cache/objects`` and
-       backfills the key directory's L2 view (placements and usage) plus
-       the eviction tracker from existing L2 contents.
+       backfills the key directory's L2 placements plus the
+       usage/eviction trackers from existing L2 contents.
        Disable to start from empty trackers (handy for tests, or
        deployments that start the coordinator before any MP server).
    * - ``LMCACHE_MP_COORDINATOR_RESYNC_POLL_INTERVAL``
@@ -432,9 +432,9 @@ S3 delete is idempotent.
 **Startup resync.** On boot, the coordinator waits up to
 ``LMCACHE_MP_COORDINATOR_RESYNC_MAX_WAIT`` seconds for the first MP
 server to register, then paginates its
-``GET /cache/objects`` and seeds the in-memory usage + eviction trackers
-with whatever is already resident in L2 — so a fresh coordinator
-does not start from zero usage. Set
+``GET /cache/objects`` and seeds the key directory and the usage +
+eviction trackers with whatever is already resident in L2 — so a fresh
+coordinator does not start from zero usage. Set
 ``LMCACHE_MP_COORDINATOR_ENABLE_STARTUP_RESYNC=False`` to skip this
 phase. Best-effort: resync failures are logged and the manager gives
 up; the ongoing usage-event stream from MP servers eventually corrects

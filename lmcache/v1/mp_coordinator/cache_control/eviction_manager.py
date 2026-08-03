@@ -80,6 +80,14 @@ class L2EvictionManager:
         L2 accesses touch, L2 deletes drop; other tiers are ignored
         (per-salt byte accounting lives in the L2 usage view).
 
+        A delete drops the key from the LRU only once its **last** L2
+        placement is gone: usage is per placement, so while another
+        copy still holds bytes the key must stay evictable — otherwise
+        those bytes could exceed quota with nothing for the planner to
+        select. This reads the usage view *after* it consumed the same
+        batch, which the router guarantees by registration order (see
+        ``create_app``).
+
         Args:
             batch: The applied batch.
         """
@@ -92,7 +100,8 @@ class L2EvictionManager:
             elif batch.event_type == CacheEventType.ACCESS:
                 self.on_lookup(key)
             elif batch.event_type == CacheEventType.DELETE:
-                self.on_remove(key)
+                if self._usage_manager.get_key_size(key) == 0:
+                    self.on_remove(key)
 
     def on_store(self, key: ObjectKey) -> None:
         """Register a stored key in the LRU. Per-salt bytes are

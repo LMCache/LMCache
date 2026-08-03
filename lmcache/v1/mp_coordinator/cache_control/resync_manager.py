@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Coordinator-side L2 resync.
 
-On boot, paginates an MP server's ``GET /cache/objects``, synthesizes
-``STORE`` batches, and feeds them to the key directory (placements) and
+On boot, paginates an MP server's ``GET /cache/objects`` (the default
+adapter, as before), synthesizes ``STORE`` batches, and feeds them to
+the key directory (placements) and
 — through the ``CacheEventRouter`` — to every registered consumer (the
 usage view, the eviction LRU), so quota enforcement starts from a
 representative baseline rather than zero. The directory side goes
@@ -73,10 +74,12 @@ class L2ResyncManager:
         http_client: httpx.AsyncClient,
         request_timeout: float = 30.0,
     ) -> int:
-        """Page through ``instance``'s L2 keys and record each one.
+        """Page through ``instance``'s default-adapter L2 keys.
 
-        Returns the number of keys recorded; stops early on HTTP
-        failure and returns the partial count.
+        Returns the number of keys recorded; stops early with the
+        partial count on HTTP failure or on a page missing ``adapter`` /
+        ``shared`` (guessing the placement identity would leave
+        placements no ``DELETE`` event can remove).
         """
         url = f"http://{instance.ip}:{instance.http_port}/cache/objects"
         page_token: str | None = None
@@ -99,6 +102,17 @@ class L2ResyncManager:
                     pages,
                     total,
                     exc,
+                )
+                return total
+            if not body.get("adapter") or "shared" not in body:
+                logger.warning(
+                    "Resync from %s: malformed page %d (adapter=%r, "
+                    "shared present=%s); stopping (recorded %d so far)",
+                    instance.instance_id,
+                    pages,
+                    body.get("adapter"),
+                    "shared" in body,
+                    total,
                 )
                 return total
             pages += 1
@@ -132,8 +146,8 @@ class L2ResyncManager:
                     seq=pages,
                     event_type=CacheEventType.STORE,
                     tier=Tier.L2,
-                    backend=str(body.get("adapter", "")) or "unknown",
-                    shared=bool(body.get("shared", False)),
+                    backend=str(body["adapter"]),
+                    shared=bool(body["shared"]),
                     entries=batch_entries,
                 )
                 self._key_directory.reconcile(batch)

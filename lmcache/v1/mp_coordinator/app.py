@@ -98,6 +98,8 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
         chunk_size=config.chunk_size, probe_stride=config.blend_probe_stride
     )
     event_router = CacheEventRouter()
+    # Order matters: the eviction manager's delete handling reads the
+    # usage view for the same batch, so the usage view must consume first.
     event_router.register_consumer(usage_manager)
     event_router.register_consumer(eviction_manager)
     resync_manager = L2ResyncManager(

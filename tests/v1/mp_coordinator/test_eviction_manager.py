@@ -596,9 +596,57 @@ def test_consume_maps_l2_events_onto_the_lru():
     plan = ctrl.compute_eviction_plan()
     assert plan["a"][0] == k2  # k1 touched to MRU
 
-    ctrl.consume(_l2_batch(CacheEventType.DELETE, k2))
+    # Production registration order: the usage view consumes first.
     kd.consume(_l2_batch(CacheEventType.DELETE, k2))
+    ctrl.consume(_l2_batch(CacheEventType.DELETE, k2))
     assert ctrl.compute_eviction_plan()["a"] == [k1]
+
+
+def test_consume_keeps_key_in_lru_while_another_placement_remains():
+    """Deleting one of a key's L2 placements must not drop it from the
+    LRU: the remaining copy's bytes still count against quota, so the
+    key must stay selectable by the planner."""
+    ctrl, _, kd = _setup(eviction_ratio=1.0)
+    k = _make_key("a")
+
+    def _both(event_type, batch):
+        kd.consume(batch)  # usage view first (production order)
+        ctrl.consume(batch)
+
+    private = _l2_batch(CacheEventType.STORE, k, 100)
+    shared = CacheEventBatch(
+        instance_id="node-b",
+        incarnation=1,
+        seq=1,
+        event_type=CacheEventType.STORE,
+        tier=Tier.L2,
+        backend="s3",
+        shared=True,
+        entries=[CacheEventEntry(key=k.to_encoded_object_key(), size_bytes=100)],
+    )
+    for b in (private, shared):
+        _both(b.event_type, b)
+
+    # Delete the private copy; the shared copy remains.
+    delete_private = _l2_batch(CacheEventType.DELETE, k)
+    _both(delete_private.event_type, delete_private)
+    assert kd.get_key_size(k) == 100
+    assert ctrl.compute_eviction_plan()["a"] == [k]  # still evictable
+
+    # Delete the last placement: now the LRU lets go.
+    delete_shared = CacheEventBatch(
+        instance_id="node-b",
+        incarnation=1,
+        seq=2,
+        event_type=CacheEventType.DELETE,
+        tier=Tier.L2,
+        backend="s3",
+        shared=True,
+        entries=[CacheEventEntry(key=k.to_encoded_object_key())],
+    )
+    _both(delete_shared.event_type, delete_shared)
+    assert kd.get_key_size(k) == 0
+    assert ctrl.compute_eviction_plan() == {}
 
 
 def test_consume_ignores_l1_batches():
