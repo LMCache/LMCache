@@ -193,17 +193,39 @@ class VLLMPagedMemXPUConnectorV2(GPUConnectorInterface):
         vllm_cached = kwargs.get("vllm_cached_tokens", 0)
         skip_prefix_n_tokens = min(end - start, max(0, vllm_cached - start))
 
-        lmc_ops.multi_layer_kv_transfer(
-            memory_obj.tensor,
-            kv_cache_pointers,
-            slot_mapping[start:end],
-            self.device,
-            self.page_buffer_size,
-            lmc_ops.TransferDirection.H2D,
-            self.engine_kv_format,
-            self.block_size,
-            skip_prefix_n_tokens,
-        )
+        if self.gpu_buffer is None or end - start != self.gpu_buffer.shape[2]:
+            lmc_ops.multi_layer_kv_transfer(
+                memory_obj.tensor,
+                kv_cache_pointers,
+                slot_mapping[start:end],
+                self.device,
+                self.page_buffer_size,
+                lmc_ops.TransferDirection.H2D,
+                self.engine_kv_format,
+                self.block_size,
+                skip_prefix_n_tokens,
+            )
+        else:
+            # memobj -> gpu_buffer -> kvcaches
+            # Stage the host-resident memory object into the device
+            # intermediate buffer first, then run the XPU transfer kernel
+            # reading from that device buffer. The SYCL kernel can only
+            # safely access device (USM) memory; reading the host pool
+            # tensor directly causes a GPU hang / DEVICE_LOST on XPU.
+            assert self.gpu_buffer.device == self.device
+            tmp_gpu_buffer = self.gpu_buffer[:, :, : end - start, :]
+            tmp_gpu_buffer.copy_(memory_obj.tensor, non_blocking=True)
+            lmc_ops.multi_layer_kv_transfer(
+                tmp_gpu_buffer,
+                kv_cache_pointers,
+                slot_mapping[start:end],
+                self.device,
+                self.page_buffer_size,
+                lmc_ops.TransferDirection.H2D,
+                self.engine_kv_format,
+                self.block_size,
+                skip_prefix_n_tokens,
+            )
 
     @_lmcache_nvtx_annotate
     def from_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
