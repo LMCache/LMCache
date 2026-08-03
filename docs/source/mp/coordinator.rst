@@ -628,6 +628,152 @@ Usage events arrive on the fleet cache-event stream
 endpoint. See ``docs/design/v1/mp_coordinator/cache_events.md`` for the
 batch format and routing semantics.
 
+Key directory
+-------------
+
+The ``/directory`` group is a read-only operator view of the fleet-wide key
+directory: which keys are cached, where (instance / tier / backend), and what
+token ids each chunk holds. The directory is **eventually consistent soft
+state** built from the servers' cache-event stream -- every answer is a hint to
+be validated at the owning server, never a guarantee.
+
+``GET /directory/keys``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+List cached keys and their placements, one page at a time.
+
+**Query parameters:**
+
+.. list-table::
+   :header-rows: 1
+   :widths: 22 14 64
+
+   * - Parameter
+     - Default
+     - Description
+   * - ``tier``
+     - ``all``
+     - Keep placements on this tier (``l1`` / ``l2``; ``all`` keeps every
+       tier).
+   * - ``instance_id``
+     - *(empty)*
+     - Keep placements reported by this MP server (empty keeps every
+       instance).
+   * - ``backend``
+     - *(empty)*
+     - Keep placements on this backend, e.g. ``dram`` / ``fs`` (empty keeps
+       every backend).
+   * - ``offset``
+     - ``0``
+     - Matching keys to skip (pagination).
+   * - ``limit``
+     - ``1000``
+     - Maximum keys to return (1 to 10000).
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {
+      "total": 2,
+      "keys": [
+        {
+          "key": {
+            "chunk_hash_hex": "aa12...",
+            "model_name": "meta-llama/Llama-3.1-8B-Instruct",
+            "kv_rank": 0,
+            "object_group_id": 0,
+            "cache_salt": ""
+          },
+          "placements": [
+            {
+              "instance_id": "server-1",
+              "incarnation": 1719000000,
+              "tier": "l1",
+              "backend": "dram",
+              "size_bytes": 1048576,
+              "shared": false
+            }
+          ],
+          "num_tokens": 256
+        }
+      ]
+    }
+
+``total`` counts every key with at least one placement matching the filters;
+``keys`` is the requested page of them, each with **only its matching
+placements**. ``num_tokens`` reports how many token ids the directory knows for
+the key's chunk (``0`` = unknown) -- fetch the actual tokens via
+``POST /directory/token_ids``, which exists precisely so listing pages stay
+small. Pages of a changing directory may skip or repeat keys (snapshot
+semantics).
+
+**HTTP status codes:**
+
+- ``200``: page returned (an empty directory returns ``{"total": 0, "keys": []}``).
+- ``422``: invalid parameter (negative ``offset``, ``limit`` out of range,
+  unknown ``tier``).
+
+**Example:**
+
+.. code-block:: bash
+
+    # Everything on server-1's L1:
+    curl -s "http://localhost:9300/directory/keys?tier=l1&instance_id=server-1&limit=100"
+
+``POST /directory/token_ids``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Return the token ids cached chunks hold, for the given keys (e.g. keys taken
+from ``GET /directory/keys`` or ``POST /directory/lookup``).
+
+**Request body:**
+
+.. code-block:: json
+
+    {
+      "keys": [
+        {
+          "chunk_hash_hex": "aa12...",
+          "model_name": "meta-llama/Llama-3.1-8B-Instruct",
+          "kv_rank": 0,
+          "object_group_id": 0,
+          "cache_salt": ""
+        }
+      ]
+    }
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {
+      "results": [
+        {
+          "key": {"chunk_hash_hex": "aa12...", "model_name": "...", "kv_rank": 0,
+                  "object_group_id": 0, "cache_salt": ""},
+          "token_ids": [15496, 11, 995]
+        }
+      ]
+    }
+
+One result per requested key, in request order. ``token_ids`` is empty when the
+directory has no tokens for the key's chunk (never stored with token reporting
+on, or not yet re-reported after an event gap).
+
+**HTTP status codes:**
+
+- ``200``: results returned.
+- ``422``: a key is malformed (e.g. ``chunk_hash_hex`` is not valid hex).
+
+**Example:**
+
+.. code-block:: bash
+
+    curl -s -X POST http://localhost:9300/directory/token_ids \
+      -H 'Content-Type: application/json' \
+      -d '{"keys": [{"chunk_hash_hex": "aa12...", "model_name": "m", "kv_rank": 0}]}'
+
 Cache control
 -------------
 

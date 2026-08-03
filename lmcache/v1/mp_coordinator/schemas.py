@@ -225,13 +225,11 @@ class DirectoryEventsRequest(BaseModel):
 
         Raises:
             ValueError: If an entry's key cannot convert into an
-                ``ObjectKey`` or its ``content_hash_hex`` is not valid
-                hex (surfaced as 422).
+                ``ObjectKey`` (surfaced as 422).
         """
         for batch in value:
             for entry in batch.entries:
                 entry.key.to_object_key()
-                bytes.fromhex(entry.content_hash_hex)
         return value
 
 
@@ -280,6 +278,82 @@ class DirectoryLookupResponse(BaseModel):
     """
 
     results: list[DirectoryKeyPlacements] = Field(default_factory=list)
+
+
+class DirectoryKeyInfo(BaseModel):
+    """One listed directory key.
+
+    Attributes:
+        key: The listed key.
+        placements: The key's placements that matched the listing filters.
+        num_tokens: Token ids known for the key's chunk (``0`` = unknown).
+    """
+
+    key: EncodedObjectKey
+    placements: list[Placement] = Field(default_factory=list)
+    num_tokens: int = 0
+
+
+class DirectoryListResponse(BaseModel):
+    """Reply to ``GET /directory/keys``.
+
+    Attributes:
+        total: Keys with at least one placement matching the filters.
+        keys: The requested page of them, in directory iteration order.
+    """
+
+    total: int = 0
+    keys: list[DirectoryKeyInfo] = Field(default_factory=list)
+
+
+class TokenIdsRequest(BaseModel):
+    """Body of ``POST /directory/token_ids``.
+
+    Attributes:
+        keys: The keys whose chunks' token ids to return.
+    """
+
+    keys: list[EncodedObjectKey] = Field(default_factory=list)
+
+    @field_validator("keys")
+    @classmethod
+    def _validate_keys(cls, value: list[EncodedObjectKey]) -> list[EncodedObjectKey]:
+        """Reject undecodable keys at request validation (surfaced as 422).
+
+        Args:
+            value: The hydrated keys.
+
+        Returns:
+            The unchanged keys once each converts to an ``ObjectKey``.
+
+        Raises:
+            ValueError: If a key cannot convert into an ``ObjectKey``.
+        """
+        for encoded in value:
+            encoded.to_object_key()
+        return value
+
+
+class KeyTokenIds(BaseModel):
+    """Token ids for one requested key.
+
+    Attributes:
+        key: The requested key, echoed back.
+        token_ids: The chunk's token ids; empty when unknown.
+    """
+
+    key: EncodedObjectKey
+    token_ids: list[int] = Field(default_factory=list)
+
+
+class TokenIdsResponse(BaseModel):
+    """Reply to ``POST /directory/token_ids``.
+
+    Attributes:
+        results: One entry per requested key, in request order.
+    """
+
+    results: list[KeyTokenIds] = Field(default_factory=list)
 
 
 class TokenPlacementLookupRequest(BaseModel):

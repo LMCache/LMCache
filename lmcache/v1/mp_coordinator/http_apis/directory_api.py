@@ -3,22 +3,31 @@
 
 The ``/directory`` surface, thin over the :class:`KeyDirectory` carried on
 the typed :class:`CoordinatorContext`: cache-event ingestion from MP
-servers, placement lookup, and stats. See
+servers, placement lookup, key/token-id listing, and stats. See
 ``docs/design/v1/mp_coordinator/key_directory.md``.
 """
 
+# Standard
+import asyncio
+
 # Third Party
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 
 # First Party
+from lmcache.v1.distributed.api import Tier
 from lmcache.v1.mp_coordinator.http_apis.dependencies import get_context
 from lmcache.v1.mp_coordinator.key_directory import ApplyResult, DirectoryStats
 from lmcache.v1.mp_coordinator.schemas import (
     DirectoryEventsRequest,
     DirectoryEventsResponse,
+    DirectoryKeyInfo,
     DirectoryKeyPlacements,
+    DirectoryListResponse,
     DirectoryLookupRequest,
     DirectoryLookupResponse,
+    KeyTokenIds,
+    TokenIdsRequest,
+    TokenIdsResponse,
     TokenPlacementLookupRequest,
     TokenPlacementLookupResponse,
 )
@@ -125,6 +134,81 @@ async def lookup_placements_by_tokens(
                 obj_keys, ctx.key_directory.lookup(obj_keys), strict=True
             )
         ],
+    )
+
+
+@router.get("/directory/keys")
+async def list_directory_keys(
+    request: Request,
+    tier: Tier = Tier.ALL,
+    instance_id: str = "",
+    backend: str = "",
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=1000, ge=1, le=10000),
+) -> DirectoryListResponse:
+    """List directory keys and their placements, one page at a time.
+
+    A snapshot for inspection: pages of a changing directory may skip
+    or repeat keys.
+
+    Args:
+        request: The FastAPI request carrying the coordinator context.
+        tier: Keep placements on this tier (``all`` keeps every tier).
+        instance_id: Keep placements reported by this instance (empty
+            keeps every instance).
+        backend: Keep placements on this backend (empty keeps every
+            backend).
+        offset: Matching keys to skip.
+        limit: Maximum keys to return.
+
+    Returns:
+        The number of keys matching the filters plus the requested page,
+        each key with its matching placements and the number of token
+        ids known for its chunk.
+    """
+    directory = get_context(request).key_directory
+
+    def _scan() -> DirectoryListResponse:
+        total, page = directory.list_keys(tier, instance_id, backend, offset, limit)
+        token_ids = directory.get_token_ids([key.chunk_hash for key in page])
+        return DirectoryListResponse(
+            total=total,
+            keys=[
+                DirectoryKeyInfo(
+                    key=key.to_encoded_object_key(),
+                    placements=placements,
+                    num_tokens=len(tokens),
+                )
+                for (key, placements), tokens in zip(
+                    page.items(), token_ids, strict=True
+                )
+            ],
+        )
+
+    # ``total`` walks every matching record — keep the scan off the event loop.
+    return await asyncio.to_thread(_scan)
+
+
+@router.post("/directory/token_ids")
+async def lookup_token_ids(body: TokenIdsRequest, request: Request) -> TokenIdsResponse:
+    """Return the known token ids for each requested key.
+
+    Args:
+        body: The keys whose chunks' token ids to return.
+
+    Returns:
+        One result per requested key, in request order — ``token_ids``
+        is empty for chunks the directory has no tokens for.
+    """
+    directory = get_context(request).key_directory
+    chunk_hashes = [encoded.to_object_key().chunk_hash for encoded in body.keys]
+    return TokenIdsResponse(
+        results=[
+            KeyTokenIds(key=encoded, token_ids=list(token_ids))
+            for encoded, token_ids in zip(
+                body.keys, directory.get_token_ids(chunk_hashes), strict=True
+            )
+        ]
     )
 
 

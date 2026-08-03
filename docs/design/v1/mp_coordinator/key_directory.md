@@ -43,16 +43,59 @@ Entry semantics by event type:
 
 - `STORE` — upsert the placement at its identity: fleet-scoped
 `(tier, backend)` when the batch is `shared`, else
-`(instance, tier, backend)`; re-store replaces the size. Records the entry's
-`content_hash` (when present) as the back-pointer that will keep content
-index (I2) deletes O(1) once I2 lands (M2).
+`(instance, tier, backend)`; re-store replaces the size. A new record
+joins its chunk's token binding; an entry carrying `token_ids` fills
+the binding's tokens (see below).
 - `DELETE` — remove that placement identity (owners report evictions as
 deletes too). Removing an absent placement/key is a no-op. A key with no
-remaining placements is dropped from the directory.
+remaining placements is dropped from the directory (leaving its chunk's
+token binding).
 - `ACCESS` — refresh the key's `last_access` recency (max of batch `ts`);
 never creates records, and carries no placement identity — its
 `backend` may be empty (`tier`/`backend` are ignored on apply). `ts` is
 emitter wall-clock and is never compared across instances.
+
+## Token index (chunk hash → token ids + keys)
+
+The directory can answer "what token ids does this chunk hold?" and
+"which keys share this chunk?" from the `STORE` entries themselves.
+Every store entry carries its chunk's `token_ids` — a deliberate wire
+trade: tokens ride once per rank/group/tier placement in exchange for a
+self-contained protocol (no per-chunk canonical entry, no cross-entry
+ordering to reason about). Bindings are keyed by `ObjectKey.chunk_hash`
+— the identity every entry and every lookup already carries — so the
+coordinator does no hashing at all.
+
+The lookups this serves:
+
+- **key → tokens**: `key.chunk_hash` → binding
+  (`get_token_ids(chunk_hashes)`, exposed as `POST /directory/token_ids`).
+- **prefix tokens → keys**: stateless — `lookup_tokens` recomputes keys
+  from the sequence; no index involved.
+- **fragment tokens → keys** (blend-style, follow-up): rolling
+  fingerprints over the query discover candidate bindings, the query
+  window is verified against `binding.token_ids` (exact), and the
+  binding's keys give the placements. Discovery uses blend's cheap
+  polynomial hash family; the index itself never needs a
+  content-addressed key because every hit is token-verified.
+
+Lifecycle is record lifecycle — bounded structurally, not configured:
+every record joins its chunk's binding at creation and leaves when it
+is dropped (delete, incarnation fencing, `drop_instance`); the binding
+dies with the chunk's last key. A binding's tokens stay empty until one
+of its entries was stamped (the emitter's token cache is bounded) — an
+empty binding is a lookup miss, never an error, repaired by the chunk's
+next stamped entry. Eventually consistent soft state, like the rest of
+the directory.
+
+Non-goal (deliberate): identical content stored under different
+prefixes has different chunk hashes and binds per chunk — a
+position-independent content-hash index (cross-prefix dedup, lookup by
+content identity) is not required by the lookups above and can be
+layered on later coordinator-side, since the tokens already arrive.
+
+Emission is the emitter's side of the contract — see
+[cache_events.md](cache_events.md).
 
 ## Shared pools
 
@@ -130,6 +173,14 @@ for unknown keys.
 APIs do; requires `model_name` / `world_size` / `cache_salt` since key
 identity includes them) and return each key's placements.
 Position-independent token matching arrives with the content index (M2).
+- `GET /directory/keys` — paginated listing (`offset`/`limit`) with
+`tier`/`instance_id`/`backend` filters; each row carries the key, its
+matching placements, recency, and `num_tokens` — a cheap indicator of
+whether the chunk's tokens are known. Full token ids are deliberately
+not inlined (a page repeats each chunk across its ranks/groups; fetch
+content via `/directory/token_ids` for exactly the keys that need it).
+- `POST /directory/token_ids` — the key → token-ids lookup: one result
+per requested key, `token_ids` empty for unknown chunks.
 - `GET /directory/stats` — key/placement counts plus per-instance stream
 state (`incarnation`, `last_seq`, `gap_detected`, `num_l1_keys` from
 the fencing index), for observability and the future replay trigger;

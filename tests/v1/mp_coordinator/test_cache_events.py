@@ -142,6 +142,128 @@ def test_l1_store_access_delete_events_map_to_batches():
     assert all(b.instance_id == "node-a" and b.incarnation == 7 for b in batches)
 
 
+def test_tokens_stored_events_publish_no_batches():
+    """Token-binding events only feed the stamping cache; they produce
+    no batches of their own."""
+    sink = _RecordingSink()
+    subscriber = _subscriber(sink)
+
+    _dispatch(
+        subscriber,
+        Event(
+            event_type=EventType.MP_TOKENS_STORED,
+            metadata={
+                "chunk_hashes": [_key(1).chunk_hash],
+                "token_chunks": [[1, 2]],
+            },
+        ),
+    )
+    subscriber.flush()
+
+    assert sink.published == []
+
+
+def test_tokens_event_stamps_store_entries():
+    """Bindings arrive before write-finished events (store publishes them
+    at submission), so every STORE entry of a known chunk carries the
+    chunk's token ids."""
+    sink = _RecordingSink()
+    subscriber = _subscriber(sink)
+
+    rank1_key = ObjectKey(chunk_hash=_key(1).chunk_hash, model_name="m", kv_rank=1)
+    _dispatch(
+        subscriber,
+        Event(
+            event_type=EventType.MP_TOKENS_STORED,
+            metadata={
+                "chunk_hashes": [_key(1).chunk_hash],
+                "token_chunks": [[1, 2]],
+            },
+        ),
+        Event(
+            event_type=EventType.L1_WRITE_FINISHED,
+            metadata={
+                "keys": [_key(1), rank1_key, _key(2)],
+                "meta": [_meta(100), _meta(100), _meta(200)],
+            },
+        ),
+        Event(
+            event_type=EventType.L2_KEYS_STORED,
+            metadata={"keys": [_key(1)], "sizes": [100], "backend": "fs"},
+        ),
+        Event(
+            event_type=EventType.L1_KEYS_EVICTED,
+            metadata={"keys": [_key(1)], "meta": [_meta(100)]},
+        ),
+    )
+    subscriber.flush()
+
+    [batches] = sink.published
+    l1_store, l2_store, delete = batches
+    # Every entry of the known chunk is stamped; unknown chunks stay empty.
+    assert [e.token_ids for e in l1_store.entries] == [[1, 2], [1, 2], []]
+    assert l2_store.entries[0].token_ids == [1, 2]
+    # Deletes never carry tokens.
+    assert delete.entries[0].token_ids == []
+
+
+def test_token_binding_cache_is_lru_bounded():
+    sink = _RecordingSink()
+    subscriber = CacheEventSubscriber(
+        sink=sink,
+        instance_id="node-a",
+        incarnation=7,
+        flush_interval=3600.0,
+        token_binding_cache_size=1,
+    )
+
+    _dispatch(
+        subscriber,
+        Event(
+            event_type=EventType.MP_TOKENS_STORED,
+            metadata={
+                "chunk_hashes": [_key(1).chunk_hash, _key(2).chunk_hash],
+                "token_chunks": [[1, 2], [3, 4]],
+            },
+        ),
+        Event(
+            event_type=EventType.L1_WRITE_FINISHED,
+            metadata={"keys": [_key(1), _key(2)], "meta": [_meta(100), _meta(200)]},
+        ),
+    )
+    subscriber.flush()
+
+    [batches] = sink.published
+    store = batches[-1]
+    # Only the most recently reported pair survives a capacity of 1.
+    assert [e.token_ids for e in store.entries] == [[], [3, 4]]
+
+
+def test_token_binding_cache_size_below_one_rejected():
+    with pytest.raises(ValueError, match="token_binding_cache_size"):
+        CacheEventSubscriber(
+            sink=_RecordingSink(),
+            instance_id="node-a",
+            incarnation=7,
+            token_binding_cache_size=0,
+        )
+
+
+def test_mismatched_token_chunks_raise():
+    subscriber = _subscriber(_RecordingSink())
+    with pytest.raises(ValueError):
+        _dispatch(
+            subscriber,
+            Event(
+                event_type=EventType.MP_TOKENS_STORED,
+                metadata={
+                    "chunk_hashes": [_key(1).chunk_hash, _key(2).chunk_hash],
+                    "token_chunks": [[1, 2]],
+                },
+            ),
+        )
+
+
 def test_l1_events_split_batches_by_medium():
     """A hybrid DRAM+DAX store emits one batch per medium, and deletes
     target the same per-medium identity the stores reported."""
@@ -537,6 +659,41 @@ def test_http_sink_feeds_the_directory_end_to_end():
             assert instance["gap_detected"] is False
 
     asyncio.run(_verify())
+
+
+def test_token_bindings_feed_the_key_directory_end_to_end():
+    """Token-binding event + store events -> emitter -> HTTP sink ->
+    coordinator app -> key directory bindings, with the synchronous sink."""
+    config = MPCoordinatorConfig(health_check_interval=0.0, eviction_check_interval=0.0)
+    app = create_app(config)
+    asgi = httpx.ASGITransport(app=app)
+
+    sink = HttpCacheEventSink("http://coordinator")
+    sink._client = httpx.Client(  # noqa: SLF001 — test-only transport swap
+        transport=_SyncASGITransport(asgi), base_url="http://coordinator"
+    )
+    subscriber = _subscriber(sink)
+    _dispatch(
+        subscriber,
+        Event(
+            event_type=EventType.MP_TOKENS_STORED,
+            metadata={
+                "chunk_hashes": [_key(1).chunk_hash, _key(2).chunk_hash],
+                "token_chunks": [[1, 2], [3, 4]],
+            },
+        ),
+        Event(
+            event_type=EventType.L2_KEYS_STORED,
+            metadata={"keys": [_key(1), _key(2)], "sizes": [100, 200], "backend": "fs"},
+        ),
+    )
+    subscriber.flush()
+
+    key_directory = app.state.ctx.key_directory
+    assert key_directory.get_token_ids([_key(1).chunk_hash, _key(2).chunk_hash]) == [
+        (1, 2),
+        (3, 4),
+    ]
 
 
 def test_http_sink_raises_publish_error_on_http_failure():
