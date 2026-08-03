@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 #
-# Aggregate per-platform nightly vLLM CPU verification results and
-# either pin the version (all passed) or create/update a tracking
-# issue (any platform failed).
+# Aggregate per-platform nightly vLLM CPU verification results, pin every
+# platform that passed and open/update a tracking issue when any of them
+# failed.
+#
+# Each OS resolves its own vllm nightly (the pytorch CPU index does not
+# carry the same torch build for every platform), so results are recorded
+# per OS rather than requiring one shared version across all of them.
+# pin-tested-vllm.sh writes latest_tested_vllm_<os>.txt accordingly.
 #
 # Expects artifacts under verify-results/*/verify_result.json (one
 # subdirectory per platform, from download-artifact).
@@ -16,8 +21,23 @@
 #
 # Reads from env (set by caller):
 #   PIN_SCRIPT           -- path to pin-tested-vllm.sh
+#   EXPECTED_OSS         -- space separated OS list the matrix should have
+#                           produced; a missing artifact is reported as a
+#                           failure instead of being silently dropped
+#   DRY_RUN              -- 1 to run the pin script in dry-run mode and
+#                           skip all issue mutations
 
 set -euo pipefail
+
+ISSUE_SEARCH='Nightly CPU vLLM verify FAILED in:title'
+
+# Find the open tracking issue, if any. Restricted to titles so we never
+# touch an issue that merely mentions the phrase in its body.
+find_tracking_issue() {
+    gh issue list --repo "$GITHUB_REPOSITORY" \
+        --search "$ISSUE_SEARCH" --state open \
+        --limit 1 --json number -q '.[0].number // ""' 2>/dev/null || true
+}
 
 # ── Parse per-platform artifacts ────────────────────────────────────
 declare -A OS_STATUS OS_VERSION OS_REASON
@@ -41,14 +61,30 @@ print("\t".join([
     OS_STATUS["$os"]="$st"
     OS_VERSION["$os"]="$ver"
     OS_REASON["$os"]="$rsn"
-    echo "  $os  status=$st  version=$ver"
 done
 
-total="${#OS_STATUS[@]}"
+# A cancelled job or a failed artifact upload leaves no result file at
+# all. Treat that as a failure of the expected platform, otherwise the
+# run would look like "everything that reported is green".
+for os in ${EXPECTED_OSS:-}; do
+    if [ -z "${OS_STATUS[$os]:-}" ]; then
+        OS_STATUS["$os"]="failed"
+        OS_VERSION["$os"]=""
+        OS_REASON["$os"]="no verify result artifact produced on $os"
+    fi
+done
+
+# Sort so log order, CSV append order and issue table order are stable
+# across runs; bash iterates associative arrays in hash order.
+ALL_OSS="$(printf '%s\n' "${!OS_STATUS[@]}" | sort)"
+
+total=0
 passed=0
 failed_oss=""
 success_oss=""
-for os in "${!OS_STATUS[@]}"; do
+for os in $ALL_OSS; do
+    total=$((total + 1))
+    echo "  $os  status=${OS_STATUS[$os]}  version=${OS_VERSION[$os]}"
     if [ "${OS_STATUS[$os]}" = "ok" ]; then
         passed=$((passed + 1))
         success_oss="$success_oss $os"
@@ -61,64 +97,75 @@ echo "=== Summary: $passed / $total platforms passed ==="
 NOW="$(date -u +'%Y-%m-%d')"
 
 if [ "$total" -eq 0 ]; then
-    echo "::warning::No verify results found — both platforms may have"
-    echo "failed before producing artifacts. Skipping pin/report."
+    echo "::warning::No verify results found and EXPECTED_OSS is empty —" \
+        "nothing to pin or report."
     exit 0
 fi
 
-# ── All platforms passed: pin as tested ─────────────────────────────
-if [ "$passed" -eq "$total" ]; then
-    echo "All platforms passed — marking as tested."
+# ── Record one row per platform ─────────────────────────────────────
+# Every platform is pinned independently: a green ubuntu leg still
+# publishes its version even when macOS is broken, and vice versa.
+for os in $ALL_OSS; do
+    if [ "${OS_STATUS[$os]}" = "ok" ]; then
+        pin_status=tested
+        pin_version="${OS_VERSION[$os]}"
+        pin_reason=""
+    else
+        pin_status=failed
+        pin_version=""
+        pin_reason="${OS_REASON[$os]}"
+    fi
 
-    VLLM_VER=""
-    for os in $success_oss; do
-        VLLM_VER="${OS_VERSION[$os]}"
-        [ -n "$VLLM_VER" ] && break
-    done
+    # A single bad platform must not abort the loop, or the issue below
+    # would never be created.
+    if ! CI_PLATFORM=github_actions \
+        PIN_VLLM_STATUS="$pin_status" \
+        PIN_VLLM_REASON="$pin_reason" \
+        PIN_VLLM_DRY_RUN="${DRY_RUN:-0}" \
+        OS_PLATFORM="$os" \
+        VLLM_VERSION="$pin_version" \
+        bash "${PIN_SCRIPT}"; then
+        printf '::warning::Failed to record %s result for %s\n' \
+            "$pin_status" "$os"
+    fi
+done
+
+# ── All platforms passed: close any open tracking issue ─────────────
+if [ "$passed" -eq "$total" ]; then
+    printf '::notice::vLLM verified on all %s CPU platforms\n' "$total"
 
     if [ "${DRY_RUN:-0}" = "1" ]; then
-        printf '::notice::[DRY-RUN] Would pin vLLM %s as tested\n' \
-            "${VLLM_VER}"
+        echo "::notice::[DRY-RUN] would close the tracking issue if open"
         exit 0
     fi
 
-    export CI_PLATFORM=github_actions
-    export PIN_VLLM_STATUS=tested
-    export VLLM_VERSION="${VLLM_VER}"
-    bash "${PIN_SCRIPT}"
-
-    printf '::notice::vLLM %s verified on all CPU platforms\n' \
-        "${VLLM_VER}"
-
-    EXISTING="$(gh issue list --repo "$GITHUB_REPOSITORY" \
-        --search "Nightly CPU vLLM verify FAILED" --state open \
-        --limit 1 --json number -q '.[0].number // ""' 2>/dev/null || true)"
+    EXISTING="$(find_tracking_issue)"
     if [ -n "$EXISTING" ]; then
         # Best-effort: the issue may already be closed/edited by a human,
         # which must not fail the (successful) pin run.
         gh issue comment "$EXISTING" \
-            --body "Resolved: all platforms passed on $NOW (vLLM ${VLLM_VER})." \
+            --body "Resolved: all platforms passed on $NOW." \
             2>/dev/null || true
         gh issue close "$EXISTING" --reason completed 2>/dev/null || true
     fi
     exit 0
 fi
 
-# ── Some platforms failed: record + issue ───────────────────────────
-echo "Some platforms FAILED — recording failure rows."
-
+# ── Some platforms failed: build the report ─────────────────────────
 BODY="One or more CPU platforms failed the nightly vLLM verification"
 BODY="$BODY on **$NOW**.\n\n"
 BODY="$BODY**Run:** $GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
 BODY="$BODY/actions/runs/$GITHUB_RUN_ID\n\n"
+BODY="$BODY Each platform resolves its own vLLM nightly, so the versions"
+BODY="$BODY below are not expected to match.\n\n"
 BODY="$BODY| Platform | Status | vLLM Version |\n"
 BODY="$BODY| --- | --- | --- |\n"
-for os in $success_oss $failed_oss; do
+for os in $ALL_OSS; do
     st="${OS_STATUS[$os]}"
     ver="${OS_VERSION[$os]}"
     emoji=":white_check_mark:"
     [ "$st" != "ok" ] && emoji=":x:"
-    BODY="$BODY| $os | $emoji $st | $ver |\n"
+    BODY="$BODY| $os | $emoji $st | ${ver:-n/a} |\n"
 done
 BODY="$BODY\n**Failure details:**\n"
 for os in $failed_oss; do
@@ -129,29 +176,18 @@ BODY="$BODY*This issue was auto-created by the nightly vLLM CPU"
 BODY="$BODY verification workflow.*"
 
 if [ "${DRY_RUN:-0}" = "1" ]; then
-    echo "::notice::[DRY-RUN] Would record failures and create issue:"
+    echo "::notice::[DRY-RUN] would create or update issue with body:"
     printf '%b\n' "$BODY"
     exit 0
 fi
 
-for os in $failed_oss; do
-    export CI_PLATFORM=github_actions
-    export PIN_VLLM_STATUS=failed
-    export OS_PLATFORM="$os"
-    export PIN_VLLM_REASON="${OS_REASON[$os]}"
-    bash "${PIN_SCRIPT}"
-done
-
-ISSUE_TITLE="Nightly CPU vLLM verify FAILED — $NOW"
-EXISTING="$(gh issue list --repo "$GITHUB_REPOSITORY" \
-    --search "Nightly CPU vLLM verify FAILED" --state open \
-    --limit 1 --json number -q '.[0].number // ""' 2>/dev/null || true)"
+EXISTING="$(find_tracking_issue)"
 if [ -n "$EXISTING" ]; then
     gh issue comment "$EXISTING" --body "$(printf '%b' "$BODY")"
     printf '::warning::Commented on existing issue #%s\n' "$EXISTING"
 else
-    gh issue create --title "$ISSUE_TITLE" \
+    gh issue create --title "Nightly CPU vLLM verify FAILED — $NOW" \
         --body "$(printf '%b' "$BODY")" \
-        --label "CI" --label "bug"
+        --label "ci/cd" --label "bug"
     echo "::warning::Created new vLLM verify failure issue"
 fi

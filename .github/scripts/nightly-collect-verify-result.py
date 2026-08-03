@@ -13,6 +13,7 @@ import os
 INSTALL_VLLM = os.environ.get("INSTALL_VLLM_OUTCOME", "")
 INSTALL_LMC = os.environ.get("INSTALL_LMC_OUTCOME", "")
 VERIFY = os.environ.get("VERIFY_OUTCOME", "")
+MATRIX_OS = os.environ["MATRIX_OS"]
 
 is_ok = VERIFY == "success"
 version = os.environ.get("VERIFY_VERSION", "")
@@ -20,14 +21,14 @@ version = os.environ.get("VERIFY_VERSION", "")
 if is_ok:
     reason = ""
 elif INSTALL_VLLM != "success":
-    reason = "vLLM CPU nightly install failed on " + os.environ["MATRIX_OS"]
+    reason = "vLLM CPU nightly install failed on " + MATRIX_OS
 elif INSTALL_LMC != "success":
-    reason = "LMCache CPU install failed on " + os.environ["MATRIX_OS"]
+    reason = "LMCache CPU install failed on " + MATRIX_OS
 else:
-    reason = "vLLM + LMCache import verification failed on " + os.environ["MATRIX_OS"]
+    reason = "vLLM + LMCache import verification failed on " + MATRIX_OS
 
 result = {
-    "os": os.environ["MATRIX_OS"],
+    "os": MATRIX_OS,
     "status": "ok" if is_ok else "failed",
     "vllm_version": version if is_ok else "",
     "reason": reason,

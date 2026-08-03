@@ -344,7 +344,7 @@ jobs:
 
       - name: Upload verify result
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: verify-result-${{ matrix.os }}
           path: verify_result.json
@@ -375,7 +375,7 @@ jobs:
           python-version: "3.12"
 
       - name: Download verify results
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           pattern: verify-result-*
           path: verify-results
@@ -384,4 +384,5 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PIN_SCRIPT: ${{ github.workspace }}/.buildkite/k3_tests/multiprocess/scripts/pin-tested-vllm.sh
+          EXPECTED_OSS: 'ubuntu-22.04 macos-latest'
         run: bash .github/scripts/nightly-aggregate-vllm-verify.sh

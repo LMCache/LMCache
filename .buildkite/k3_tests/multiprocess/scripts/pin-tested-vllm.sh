@@ -10,7 +10,13 @@
 #   PIN_VLLM_STATUS=tested.
 # Callers that record a failure MUST also set PIN_VLLM_REASON and
 #   PIN_VLLM_STATUS=failed so the CSV row carries a human-readable
-#   reason field.
+#   reason field. A failure row does not need a version: when the caller
+#   runs on a machine without vllm installed, VLLM_VERSION degrades to
+#   "unknown" instead of aborting the run.
+#
+# Set PIN_VLLM_DRY_RUN=1 to resolve everything and print the record that
+# would be written without cloning, committing or pushing anything. Use
+# it to exercise this script from pull-request CI.
 #
 # Two files are maintained on the dedicated branch:
 #   tested_vllm_versions.csv  -- JSON Lines, append-only history. Each line
@@ -22,6 +28,12 @@
 #                                just `head -n1` keep working; trailing
 #                                key=value lines let new consumers skip
 #                                the live GitHub API lookup entirely.
+#                                When OS_PLATFORM is set the name becomes
+#                                latest_tested_vllm_<os>.txt, because each
+#                                OS resolves its own vllm nightly and a
+#                                shared file would let one OS clobber the
+#                                other. Buildkite leaves OS_PLATFORM empty
+#                                and keeps the original filename.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
@@ -46,11 +58,32 @@ case "${CI_PLATFORM}" in
         ;;
 esac
 
+# ── Pin status & reason ─────────────────────────────────────────────────
+# Default to "tested" so existing buildkite callers (which only invoke
+# this script on success) stay unchanged. Resolved before the version
+# lookup below because it decides whether a missing version is fatal.
+PIN_VLLM_STATUS="${PIN_VLLM_STATUS:-tested}"
+PIN_VLLM_REASON="${PIN_VLLM_REASON:-}"
+
+# Per-platform OS identifier (e.g. ubuntu-22.04, macos-latest, or
+# empty for buildkite which runs on a single OS).
+OS_PLATFORM="${OS_PLATFORM:-}"
+
 # ── Resolve the version that's actually installed ────────────────────
-VLLM_VERSION="${VLLM_VERSION:-$(python -c 'import vllm; print(vllm.__version__)')}"
+# `|| true` keeps `set -e` from killing the script when vllm is absent:
+# a failure row is recorded from an aggregator runner that never installs
+# vllm, and losing that row would also lose the failure notification.
+if [[ -z "${VLLM_VERSION:-}" ]]; then
+    VLLM_VERSION="$(python -c 'import vllm; print(vllm.__version__)' \
+        2>/dev/null || true)"
+fi
 if [[ -z "${VLLM_VERSION}" ]]; then
-    echo "[ERROR] could not read vllm.__version__ from the live env" >&2
-    exit 1
+    if [[ "${PIN_VLLM_STATUS}" == "tested" ]]; then
+        echo "[ERROR] could not read vllm.__version__ from the live env" >&2
+        exit 1
+    fi
+    echo "[WARN] no vllm version available; recording it as 'unknown'" >&2
+    VLLM_VERSION="unknown"
 fi
 echo "Verified vLLM version: ${VLLM_VERSION}"
 
@@ -114,9 +147,14 @@ fi
 WORK_DIR="/tmp/pin_vllm_$$"
 trap 'rm -rf "${WORK_DIR}"' EXIT
 
-echo "--- Preparing ${CI_BRANCH} branch from ${CI_REPO}"
-if ! git clone --depth=1 --branch "${CI_BRANCH}" "${CI_REPO_URL}" \
+PIN_VLLM_DRY_RUN="${PIN_VLLM_DRY_RUN:-0}"
+
+if [[ "${PIN_VLLM_DRY_RUN}" == "1" ]]; then
+    echo "--- [DRY-RUN] skipping clone of ${CI_REPO} ${CI_BRANCH}"
+    mkdir -p "${WORK_DIR}"
+elif ! git clone --depth=1 --branch "${CI_BRANCH}" "${CI_REPO_URL}" \
         "${WORK_DIR}" 2>/dev/null; then
+    echo "--- Preparing ${CI_BRANCH} branch from ${CI_REPO}"
     # Branch does not exist yet -- create an orphan with no parent history.
     rm -rf "${WORK_DIR}"
     mkdir -p "${WORK_DIR}"
@@ -131,7 +169,13 @@ fi
 
 # ── Update files ────────────────────────────────────────────────────────
 HISTORY_FILE="${WORK_DIR}/tested_vllm_versions.csv"
-LATEST_FILE="${WORK_DIR}/latest_tested_vllm.txt"
+# Each OS resolves its own nightly, so give each one its own pointer file
+# instead of letting the last writer win. Buildkite keeps the plain name.
+if [[ -n "${OS_PLATFORM}" ]]; then
+    LATEST_FILE="${WORK_DIR}/latest_tested_vllm_${OS_PLATFORM}.txt"
+else
+    LATEST_FILE="${WORK_DIR}/latest_tested_vllm.txt"
+fi
 
 TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
@@ -159,15 +203,6 @@ esac
 BUILD_URL="${BUILD_URL:-}"
 BUILD_NUMBER="${BUILD_NUMBER:-}"
 COMMIT_SHA="${COMMIT_SHA:-}"
-
-# Per-platform OS identifier (e.g. ubuntu-22.04, macos-latest, or
-# empty for buildkite which runs on a single OS).
-OS_PLATFORM="${OS_PLATFORM:-}"
-
-# Pin status & reason. Default to "tested" so existing buildkite
-# callers (which only invoke this script on success) stay unchanged.
-PIN_VLLM_STATUS="${PIN_VLLM_STATUS:-tested}"
-PIN_VLLM_REASON="${PIN_VLLM_REASON:-}"
 
 # Append-only history (JSON Lines). Built via python so quoting is safe.
 # Use a quoted heredoc (<<'PY') to disable Bash expansion inside the script,
@@ -216,12 +251,23 @@ if [[ "${PIN_VLLM_STATUS}" == "tested" ]]; then
         printf 'full_sha=%s\n' "${VLLM_FULL_SHA}"
         printf 'archive_index_url=%s\n' "${VLLM_ARCHIVE_INDEX}"
     } > "${LATEST_FILE}"
-    git -C "${WORK_DIR}" add "${LATEST_FILE}"
 fi
 
 # ── Commit + push ───────────────────────────────────────────────────────
 cd "${WORK_DIR}"
-git add tested_vllm_versions.csv
+
+if [[ "${PIN_VLLM_DRY_RUN}" == "1" ]]; then
+    echo "--- [DRY-RUN] would append to $(basename "${HISTORY_FILE}"):"
+    tail -n1 "${HISTORY_FILE}"
+    if [[ -f "${LATEST_FILE}" ]]; then
+        echo "--- [DRY-RUN] would write $(basename "${LATEST_FILE}"):"
+        cat "${LATEST_FILE}"
+    fi
+    echo "--- [DRY-RUN] nothing pushed to ${CI_REPO} ${CI_BRANCH}"
+    exit 0
+fi
+
+git add -A
 
 if git diff --cached --quiet 2>/dev/null; then
     echo "No changes to commit (version unchanged?)."
