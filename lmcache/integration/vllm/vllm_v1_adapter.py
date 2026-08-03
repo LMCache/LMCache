@@ -163,7 +163,6 @@ class RequestTracker:
                 local cache hit) and new tokens that will be scheduled.
             lmcache_cached_tokens (int): the number of tokens that are
                 cached in LMCache.
-            request_priority (int): the priority of the request
             skip_save (bool): whether the request cache should be saved
         """
         # vLLM 0.9.0 update: request.block_ids changed from list[int] to

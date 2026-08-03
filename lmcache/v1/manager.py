@@ -65,7 +65,6 @@ class LMCacheManager:
         Args:
             config: LMCache engine configuration
             service_factory: Factory for creating service components
-            role: The role string ("scheduler" or "worker")
             connector: Reference to LMCacheConnectorV1Impl for internal
                        API server
         """

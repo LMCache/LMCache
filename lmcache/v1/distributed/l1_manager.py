@@ -449,7 +449,7 @@ class L1Manager:
             keys: The list of object keys to reserve write access for.
             is_temporary: The list of booleans indicating whether each key is
                 temporary.
-            shape_spec: The memory layout description for the objects to be
+            layout_desc: The memory layout description for the objects to be
                 allocated.
             mode (Literal["new", "update", "all"]): Reservation mode.
             - "new": Reserve only new objects that do not exist.
