@@ -111,9 +111,19 @@ func TestBuildCBEngineDaemonSet_GPUAndSecurity(t *testing.T) {
 
 	podSpec := ds.Spec.Template.Spec
 
-	// hostIPC required for CUDA IPC with the node-local engine.
-	if !podSpec.HostIPC {
-		t.Fatal("expected HostIPC=true")
+	// CUDA IPC with the node-local engine is wired via the /dev/shm hostPath
+	// mount by default; hostIPC is opt-in via spec.hostIPC.
+	if podSpec.HostIPC {
+		t.Fatal("expected HostIPC=false by default")
+	}
+	foundShm := false
+	for _, v := range podSpec.Volumes {
+		if v.Name == devShmVolumeName && v.HostPath != nil && v.HostPath.Path == devShmPath {
+			foundShm = true
+		}
+	}
+	if !foundShm {
+		t.Fatal("expected the lmcache-dev-shm hostPath volume by default")
 	}
 	// runtimeClassName=nvidia for the default (nvidia) vendor.
 	if podSpec.RuntimeClassName == nil || *podSpec.RuntimeClassName != nvidiaRuntimeClass {
@@ -216,10 +226,13 @@ func TestBuildCBEngineDaemonSet_AMDNoRuntimeClass(t *testing.T) {
 	if podSpec.RuntimeClassName != nil {
 		t.Fatalf("expected nil RuntimeClassName for AMD, got %q", *podSpec.RuntimeClassName)
 	}
-	// hostIPC is still injected for AMD (privileged stays at its default false
-	// here since the fixture does not opt in).
-	if !podSpec.HostIPC {
-		t.Fatal("expected HostIPC=true even for AMD")
+	// The HIP IPC path is unverified without a shared IPC namespace, so AMD
+	// deployments opt into hostIPC explicitly (privileged stays at its default
+	// false here since the fixture does not opt in).
+	engine.Spec.HostIPC = ptr(true)
+	ds = BuildCBEngineDaemonSet(engine)
+	if !ds.Spec.Template.Spec.HostIPC {
+		t.Fatal("expected HostIPC=true when spec.hostIPC=true for AMD")
 	}
 }
 
