@@ -10,8 +10,13 @@
 # per OS rather than requiring one shared version across all of them.
 # pin-tested-vllm.sh writes latest_tested_vllm_<os>.txt accordingly.
 #
+# Results come from cpu_device.yml, whose matrix is (os x model), so one
+# OS contributes several legs. An OS is only pinned as tested when every
+# one of its legs passed the full CPU device suite (server bench + e2e);
+# "importable" is not enough.
+#
 # Expects artifacts under verify-results/*/verify_result.json (one
-# subdirectory per platform, from download-artifact).
+# subdirectory per matrix leg, from download-artifact).
 #
 # Required env:
 #   GITHUB_TOKEN         -- for gh CLI and pin-tested-vllm.sh push
@@ -39,8 +44,10 @@ find_tracking_issue() {
         --limit 1 --json number -q '.[0].number // ""' 2>/dev/null || true
 }
 
-# ── Parse per-platform artifacts ────────────────────────────────────
-declare -A OS_STATUS OS_VERSION OS_REASON
+# ── Parse per-leg artifacts and fold them per OS ────────────────────
+# OS_LEGS keeps the individual "model=status" verdicts for the report;
+# OS_STATUS is the folded result: failed as soon as any leg failed.
+declare -A OS_STATUS OS_VERSION OS_REASON OS_LEGS
 for d in verify-results/*/; do
     f="${d}verify_result.json"
     if [ ! -f "$f" ]; then
@@ -48,18 +55,28 @@ for d in verify-results/*/; do
     fi
     # Read all fields in a single python3 invocation (tab-separated) to
     # avoid spawning one interpreter per field.
-    IFS=$'\t' read -r os st ver rsn < <(python3 -c '
+    IFS=$'\t' read -r os model st ver rsn < <(python3 -c '
 import json, sys
 d = json.load(open(sys.argv[1]))
 print("\t".join([
     d["os"],
+    d.get("model", "-"),
     d["status"],
     d.get("vllm_version", ""),
     d.get("reason", ""),
 ]))
 ' "$f")
+    OS_LEGS["$os"]="${OS_LEGS[$os]:-} ${model}=${st}"
+    # Record a version from any leg that reported one, even a failing
+    # one, so the report can name the build that broke.
+    [ -n "$ver" ] && OS_VERSION["$os"]="$ver"
+
+    # First failure decides the OS verdict and keeps its reason; a later
+    # passing leg must not overwrite it.
+    if [ "${OS_STATUS[$os]:-}" = "failed" ]; then
+        continue
+    fi
     OS_STATUS["$os"]="$st"
-    OS_VERSION["$os"]="$ver"
     OS_REASON["$os"]="$rsn"
 done
 
@@ -71,6 +88,7 @@ for os in ${EXPECTED_OSS:-}; do
         OS_STATUS["$os"]="failed"
         OS_VERSION["$os"]=""
         OS_REASON["$os"]="no verify result artifact produced on $os"
+        OS_LEGS["$os"]=" none"
     fi
 done
 
@@ -84,7 +102,8 @@ failed_oss=""
 success_oss=""
 for os in $ALL_OSS; do
     total=$((total + 1))
-    echo "  $os  status=${OS_STATUS[$os]}  version=${OS_VERSION[$os]}"
+    echo "  $os  status=${OS_STATUS[$os]}  version=${OS_VERSION[$os]:-}" \
+        " legs:${OS_LEGS[$os]:-}"
     if [ "${OS_STATUS[$os]}" = "ok" ]; then
         passed=$((passed + 1))
         success_oss="$success_oss $os"
@@ -158,14 +177,14 @@ BODY="$BODY**Run:** $GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
 BODY="$BODY/actions/runs/$GITHUB_RUN_ID\n\n"
 BODY="$BODY Each platform resolves its own vLLM nightly, so the versions"
 BODY="$BODY below are not expected to match.\n\n"
-BODY="$BODY| Platform | Status | vLLM Version |\n"
-BODY="$BODY| --- | --- | --- |\n"
+BODY="$BODY| Platform | Status | vLLM Version | Legs |\n"
+BODY="$BODY| --- | --- | --- | --- |\n"
 for os in $ALL_OSS; do
     st="${OS_STATUS[$os]}"
-    ver="${OS_VERSION[$os]}"
+    ver="${OS_VERSION[$os]:-}"
     emoji=":white_check_mark:"
     [ "$st" != "ok" ] && emoji=":x:"
-    BODY="$BODY| $os | $emoji $st | ${ver:-n/a} |\n"
+    BODY="$BODY| $os | $emoji $st | ${ver:-n/a} |${OS_LEGS[$os]:-} |\n"
 done
 BODY="$BODY\n**Failure details:**\n"
 for os in $failed_oss; do
