@@ -23,17 +23,6 @@ logger = init_logger(__name__)
 class CudaDeviceOps(DeviceOps):
     device_type: ClassVar[str] = "cuda"
 
-    def ensure_native(self) -> None:
-        if self._native_bound:
-            return
-        self._native_bound = True  # set early to prevent repeated attempts
-        try:
-            # First Party
-            import lmcache.c_ops as native
-        except ImportError:
-            logger.warning(
-                "lmcache.c_ops compiled extension not found; "
-                "CudaDeviceOps stays on the torch baseline for all ops."
-            )
-            return
-        self.bind_native(native)
+    logger.warning(
+        " testing cuda using python fallbacks!!!! to be reverted before merging!!!"
+    )
