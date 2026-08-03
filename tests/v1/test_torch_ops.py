@@ -4,6 +4,7 @@ from typing import Any, Union
 import ctypes
 import os
 import time
+import unittest.mock
 
 # Third Party
 import pytest
@@ -17,6 +18,11 @@ from lmcache.v1.multiprocess.native_completion import (
 )
 from lmcache.v1.platform import torch_ops as _py_ops
 
+pytestmark = pytest.mark.skipif(
+    torch_device_type != "cuda",
+    reason="requires cuda torch_device_type",
+)
+
 # ==========================================
 # 0. utils functions.
 # ==========================================
@@ -27,31 +33,22 @@ def device_sync(device: str) -> None:
     """Synchronize device operations.
 
     Args:
-        device: Device string.
+        device: Device string ("cuda", "xpu", or "cpu")
 
-    For CPU, synchronization is a no-op.
+    This function synchronizes operations for GPU devices:
+    - For CUDA devices, calls torch.cuda.synchronize()
+    - For XPU devices, calls torch.xpu.synchronize()
+    - For CPU, no synchronization is needed (returns immediately)
     """
-    if device == "cpu":
-        return
-
-    device_module = getattr(torch, device, None)
-    if device_module is not None and hasattr(device_module, "synchronize"):
-        device_module.synchronize()
-
-
-def _is_accelerator_device(device: str) -> bool:
-    return device != "cpu"
-
-
-def _is_device_available(device: str) -> bool:
-    if device == "cpu":
-        return True
-    device_module = getattr(torch, device, None)
-    return bool(
-        device_module is not None
-        and hasattr(device_module, "is_available")
-        and device_module.is_available()
-    )
+    if device == "cuda":
+        torch.cuda.synchronize()
+    elif device == "xpu":
+        if hasattr(torch, "xpu") and torch.xpu.is_available():
+            torch.xpu.synchronize()
+    else:
+        # TODO: add more device here
+        pass
+    # CPU requires no synchronization
 
 
 # ==========================================
@@ -62,11 +59,19 @@ def _is_device_available(device: str) -> bool:
 def _build_backend_params() -> list:
     """Build pytest parameter list for the backend fixture.
 
-    Returns one entry per available backend on the active torch_device_type.
+    Returns one entry per available backend configuration:
+    - cuda_c_ops: uses lmcache.c_ops (requires CUDA and the CUDA extension)
+    - cuda_py_ops: uses lmcache.v1.platform.torch_ops with GPU visible
+    - cpy_py_ops: uses lmcache.v1.platform.torch_ops with GPU mocked away
+    - xpu_sycl_ops: uses lmcache.xpu_ops (requires XPU and the SYCL extension)
+    - xpu_py_ops: uses lmcache.v1.platform.torch_ops with XPU visible
     """
-    params = [pytest.param(("cpu_py_ops", _py_ops, "cpu"), id="cpu_py_ops")]
+    params = []
+    cuda_available = torch.cuda.is_available()
 
-    if torch_device_type == "cuda":
+    params.append(pytest.param(("cpu_py_ops", _py_ops, "cpu"), id="cpu_py_ops"))
+
+    if cuda_available:
         try:
             # First Party
             import lmcache.c_ops as cuda_c_ops
@@ -86,7 +91,7 @@ def _build_backend_params() -> list:
                 pytest.param(("cuda_py_ops", _py_ops, "cpu"), id="cuda_cpu_py_ops")
             )
 
-    elif torch_device_type == "xpu":
+    if hasattr(torch, "xpu") and torch.xpu.is_available():
         try:
             # First Party
             import lmcache.c_ops as xpu_sycl_ops
@@ -108,8 +113,17 @@ _results: dict[tuple[str, str], dict[str, Any]] = {}
 
 @pytest.fixture(scope="module", params=_BACKEND_PARAMS)
 def backend(request: pytest.FixtureRequest) -> Any:
-    """Yield (backend_id, ops_module, device) for each backend config."""
-    yield request.param
+    """Yield (backend_id, ops_module, device) for each backend config.
+
+    For the cpu_py_ops variant, torch.cuda.is_available is patched to
+    return False so the scenario code behaves as if no GPU is present.
+    """
+    backend_id, ops, device = request.param
+    if backend_id == "cpu_py_ops":
+        with unittest.mock.patch("torch.cuda.is_available", return_value=False):
+            yield backend_id, ops, device
+    else:
+        yield backend_id, ops, device
 
 
 # ==========================================
@@ -123,7 +137,7 @@ def scenario_get_gpu_pci_bus_id(ops: Any, device: str) -> dict[str, torch.Tensor
 
     is_valid = isinstance(res, str) and len(res) > 0
 
-    if not _is_device_available(device):
+    if torch.cuda.is_available() is False:
         # for non cuda device, not expecting a valid return
         # but crash should not happen
         # and we mock a valid return here
@@ -249,7 +263,7 @@ def scenario_lmcache_memcpy_async(ops: Any, device: str) -> dict[str, torch.Tens
     gpu_buffer = torch.zeros(buf_size, dtype=torch.uint8, device=device)
 
     dst_host = torch.zeros(buf_size, dtype=torch.uint8)
-    if _is_accelerator_device(device):
+    if device in ("cuda", "xpu"):
         dst_host = dst_host.pin_memory()
 
     h2d_dir = ops.TransferDirection.H2D
@@ -258,7 +272,7 @@ def scenario_lmcache_memcpy_async(ops: Any, device: str) -> dict[str, torch.Tens
     # Decide mode based on the running device.
     # The native CUDA/XPU backend only accepts a tensor of uint64 pointers;
     # only the Python fallback supports list[Tensor].
-    use_tensor_mode = device not in ("cpu", torch_device_type)
+    use_tensor_mode = device not in ("cpu", "cuda", "xpu")
 
     # (host_buffer_offset, nbytes) boundary test cases:
     #   (0,  64): exactly one aligned block from the start
@@ -381,7 +395,7 @@ def scenario_load_and_reshape_flash(ops: Any, device: str) -> dict[str, torch.Te
         mem_obj_shape = (2, num_layers, len(slot_mapping_temp), num_heads * head_size)
         mem_obj_tensor = torch.zeros(mem_obj_shape, dtype=dtype, device=dst_device)
 
-        if _is_accelerator_device(device):
+        if device in ("cuda", "xpu"):
             mem_obj_tensor = mem_obj_tensor.pin_memory()
 
         for layer_id in range(num_layers):
@@ -472,7 +486,7 @@ def scenario_reshape_and_cache_back_flash(
         src_buffer[0, :, i, :] = val  # Key
         src_buffer[1, :, i, :] = val + 0.5  # Value
 
-    if _is_accelerator_device(device):
+    if device in ("cuda", "xpu"):
         src_buffer = src_buffer.pin_memory()
 
     # 3. Prepare Destination (Empty Cache)
@@ -1182,7 +1196,7 @@ def scenario_multi_layer_kv_transfer(ops: Any, device: str) -> dict[str, torch.T
     # Decide mode based on the running device.
     # The native CUDA/XPU backend only accepts a tensor of uint64 pointers;
     # only the Python fallback supports list[Tensor].
-    use_tensor_list = device not in ("cpu", torch_device_type)
+    use_tensor_list = device not in ("cpu", "cuda", "xpu")
 
     for engine_kv_format, is_mla, bs_arg in format_cases:
         k_or_v_size = 1 if is_mla else 2
@@ -1194,7 +1208,7 @@ def scenario_multi_layer_kv_transfer(ops: Any, device: str) -> dict[str, torch.T
             # ── 1. LMCache Tensor ──
             lmc_shape = (k_or_v_size, num_layers, num_tokens, head_size)
             key_value = torch.zeros(lmc_shape, dtype=dtype, device="cpu")
-            if _is_accelerator_device(device):
+            if device in ("cuda", "xpu"):
                 key_value = key_value.pin_memory()
 
             if not direction:  # LMC → Paged
@@ -1415,7 +1429,7 @@ def scenario_multi_layer_kv_transfer_unilateral(
     # Decide mode based on the running device.
     # The native CUDA/XPU backend only accepts a tensor of uint64 pointers;
     # only the Python fallback supports list[Tensor].
-    use_tensor_list = device not in ("cpu", torch_device_type)
+    use_tensor_list = device not in ("cpu", "cuda", "xpu")
 
     for engine_kv_format, is_mla in format_cases:
         k_or_v_size = 1 if is_mla else 2
@@ -1426,7 +1440,7 @@ def scenario_multi_layer_kv_transfer_unilateral(
             # ── 1. LMCache Tensor ──
             lmc_shape = (k_or_v_size, num_layers, num_tokens, head_size)
             lmc_tensor = torch.zeros(lmc_shape, dtype=dtype, device="cpu")
-            if _is_accelerator_device(device):
+            if device in ("cuda", "xpu"):
                 lmc_tensor = lmc_tensor.pin_memory()
 
             if not direction:  # LMC → Paged
@@ -1814,20 +1828,17 @@ def scenario_multi_layer_block_kv_transfer(
     - skip_prefix_n_blocks > 0
     - num_blocks > blocks_per_chunk (multi-chunk)
     """
-    if device == "xpu":
-        pytest.skip("multi_layer_block_kv_transfer is not supported on xpu yet")
-
     results = {}
 
     # C++ bindings (cuda_c_ops, xpu_sycl_ops) expect uint64 pointer tensors for
     # paged_buffer_ptrs_tensor and list[int] for lmcache_objects_ptrs.
     # The Python fallback also supports both modes on cpu/cuda (pointer inputs
     # are reconstructed internally via _tensor_from_ptr).
-    use_tensor_list = device not in ("cpu", torch_device_type)
+    use_tensor_list = device not in ("cpu", "cuda")
 
     def _alloc_chunks(shape: tuple[int, ...], count: int) -> list[torch.Tensor]:
         chunks = [torch.zeros(shape, dtype=dtype) for _ in range(count)]
-        if device == torch_device_type and _is_accelerator_device(device):
+        if device in ("cuda"):
             chunks = [chunk.pin_memory() for chunk in chunks]
         return chunks
 
@@ -2750,14 +2761,10 @@ def scenario_record_drain_event(ops: Any, device: str) -> dict[str, torch.Tensor
     assert ops.drain_recorded_events() == []
 
     ops.record_event_on_stream(
-        0,
-        "mp.store.start",
-        "sess-1",
-        {"device": f"{torch_device_type}:0"},
-        {"count": 10},
+        0, "mp.store.start", "sess-1", {"device": "cuda:0"}, {"count": 10}
     )
     ops.record_event_on_stream(
-        0, "mp.store.end", "sess-1", {"device": f"{torch_device_type}:0"}, {"count": 10}
+        0, "mp.store.end", "sess-1", {"device": "cuda:0"}, {"count": 10}
     )
     device_sync(device)
     result = ops.drain_recorded_events()
@@ -2773,9 +2780,9 @@ def scenario_record_drain_event(ops: Any, device: str) -> dict[str, torch.Tensor
     assert sid1 == "sess-1"
     assert ts0 > 0.0
     assert ts1 >= ts0  # timestamps must be monotonically non-decreasing
-    assert str_meta0 == {"device": f"{torch_device_type}:0"}
+    assert str_meta0 == {"device": "cuda:0"}
     assert int_meta0 == {"count": 10}
-    assert str_meta1 == {"device": f"{torch_device_type}:0"}
+    assert str_meta1 == {"device": "cuda:0"}
     assert int_meta1 == {"count": 10}
 
     # Drain clears the buffer

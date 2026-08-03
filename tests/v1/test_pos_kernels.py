@@ -3,6 +3,7 @@
 from unittest.mock import MagicMock
 
 # Third Party
+import pytest
 import torch
 
 # First Party
@@ -17,6 +18,10 @@ except ImportError:
     set_current_vllm_config = None
 
 
+@pytest.mark.skipif(
+    getattr(getattr(torch.ops, "_C", None), "rotary_embedding", None) is None,
+    reason="rotary_embedding custom op is unavailable",
+)
 def test_rope():
     head_dim = 128
     max_position_embeddings = 8192
