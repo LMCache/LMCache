@@ -120,15 +120,11 @@ func BuildContainerArgs(spec *lmcachev1alpha1.LMCacheEngineSpec) []string {
 			args = append(args,
 				"--coordinator-heartbeat-interval", formatFloat(derefFloat64(c.HeartbeatInterval, 5.0)),
 			)
-			// Flag names have no "l2-" infix: the server reports the key
-			// directory's store/access/delete stream alongside L2 usage, so
-			// it spells these --coordinator-event-*. The CRD fields keep
-			// their l2Event* names for API compatibility.
-			if derefBool(c.L2EventReporting, false) {
+			if derefBool(c.EventReporting, false) {
 				args = append(args, "--coordinator-event-reporting")
 			}
 			args = append(args,
-				"--coordinator-event-flush-interval", formatFloat(derefFloat64(c.L2EventFlushInterval, 1.0)),
+				"--coordinator-event-flush-interval", formatFloat(derefFloat64(c.EventFlushInterval, 1.0)),
 			)
 		}
 	}

@@ -573,15 +573,16 @@ The global-CacheBlend knobs (`blendChunkSize`, `blendProbeStride`) render into t
   what you are doing (e.g. the coordinator runs outside the cluster and must
   reach the server through a specific externally-routable address); an incorrect
   value silently breaks coordinator-to-server connectivity.
-- `heartbeatInterval`, `l2EventReporting`, `l2EventFlushInterval`. The two
-  event fields are emitted as `--coordinator-event-reporting` /
-  `--coordinator-event-flush-interval` — no `l2-` infix. The server renamed the
-  flags (#4292) when event reporting grew to cover the key directory's
-  store/access/delete stream alongside L2 usage; the CRD fields keep their
-  `l2Event*` names because renaming them is a breaking API change. The flag
-  spellings are a hard contract: an unknown flag makes `lmcache server` exit 2
-  and the DaemonSet crash-loop, so `coordinator_test.go` asserts the exact
-  strings.
+- `heartbeatInterval`, `eventReporting`, `eventFlushInterval`. The event
+  fields map to `--coordinator-event-reporting` /
+  `--coordinator-event-flush-interval`. Both the flags (#4292) and the CRD
+  fields (formerly `l2EventReporting` / `l2EventFlushInterval`) dropped the
+  `l2` prefix when event reporting grew to cover the key directory's
+  store/access/delete stream alongside L2 usage. The field rename is breaking:
+  unknown CRD fields are pruned silently, so manifests still using the old
+  spellings fall back to the defaults. The flag spellings are a hard contract:
+  an unknown flag makes `lmcache server` exit 2 and the DaemonSet crash-loop,
+  so `coordinator_test.go` asserts the exact strings.
 
 When `coordinator` is unset, the server emits no `--coordinator-url` and does not
 register (unchanged behavior).

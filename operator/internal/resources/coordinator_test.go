@@ -144,8 +144,8 @@ func TestBuildContainerArgs_CoordinatorURL(t *testing.T) {
 	engine := minimalEngine()
 	url := "http://my-coordinator.default.svc:9300"
 	engine.Spec.Coordinator = &lmcachev1alpha1.CoordinatorConnectionSpec{
-		URL:              ptr(url),
-		L2EventReporting: ptr(true),
+		URL:            ptr(url),
+		EventReporting: ptr(true),
 	}
 
 	args := BuildContainerArgs(&engine.Spec)

@@ -327,13 +327,13 @@ func (in *CoordinatorConnectionSpec) DeepCopyInto(out *CoordinatorConnectionSpec
 		*out = new(float64)
 		**out = **in
 	}
-	if in.L2EventReporting != nil {
-		in, out := &in.L2EventReporting, &out.L2EventReporting
+	if in.EventReporting != nil {
+		in, out := &in.EventReporting, &out.EventReporting
 		*out = new(bool)
 		**out = **in
 	}
-	if in.L2EventFlushInterval != nil {
-		in, out := &in.L2EventFlushInterval, &out.L2EventFlushInterval
+	if in.EventFlushInterval != nil {
+		in, out := &in.EventFlushInterval, &out.EventFlushInterval
 		*out = new(float64)
 		**out = **in
 	}

@@ -69,8 +69,8 @@ func validateCoordinatorConnectionSpec(conn *CoordinatorConnectionSpec) field.Er
 	if conn.HeartbeatInterval != nil && *conn.HeartbeatInterval <= 0 {
 		errs = append(errs, field.Invalid(connPath.Child("heartbeatInterval"), *conn.HeartbeatInterval, "must be greater than 0"))
 	}
-	if conn.L2EventFlushInterval != nil && *conn.L2EventFlushInterval <= 0 {
-		errs = append(errs, field.Invalid(connPath.Child("l2EventFlushInterval"), *conn.L2EventFlushInterval, "must be greater than 0"))
+	if conn.EventFlushInterval != nil && *conn.EventFlushInterval <= 0 {
+		errs = append(errs, field.Invalid(connPath.Child("eventFlushInterval"), *conn.EventFlushInterval, "must be greater than 0"))
 	}
 
 	return errs

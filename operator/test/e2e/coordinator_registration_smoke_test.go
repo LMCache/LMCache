@@ -88,8 +88,8 @@ var _ = Describe("LMCacheCoordinator registration smoke (GPU)", Ordered, func() 
 		lmc, err := utils.NewLMCFromFixture("lmc_runtime.yaml", nsName, "coord-engine")
 		Expect(err).NotTo(HaveOccurred())
 		lmc.Spec.Coordinator = &lmcachev1alpha1.CoordinatorConnectionSpec{
-			Ref:              &corev1.LocalObjectReference{Name: coordinatorName},
-			L2EventReporting: boolPtr(true),
+			Ref:            &corev1.LocalObjectReference{Name: coordinatorName},
+			EventReporting: boolPtr(true),
 		}
 		Expect(utils.ApplyLMC(ctx, k8sClient, lmc)).To(Succeed())
 

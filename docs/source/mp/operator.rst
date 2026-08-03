@@ -1104,8 +1104,8 @@ explicit endpoint:
         ref:
           name: my-coordinator       # or: url: http://my-coordinator.default.svc:9300
         heartbeatInterval: 5          # seconds; must be > 0
-        l2EventReporting: false       # report L2 store/lookup events for fleet eviction
-        l2EventFlushInterval: 1       # seconds between event batch flushes; must be > 0
+        eventReporting: false         # report cache events for fleet-wide tracking/eviction
+        eventFlushInterval: 1         # seconds between event batch flushes; must be > 0
 
 .. list-table::
    :header-rows: 1
@@ -1122,25 +1122,26 @@ explicit endpoint:
      - ``5``
      - Seconds between server heartbeats to the coordinator; must be > 0.
        Emitted as ``--coordinator-heartbeat-interval``.
-   * - ``l2EventReporting``
+   * - ``eventReporting``
      - ``false``
      - Enable reporting cache events to the coordinator: the key directory's
        store/access/delete stream (fleet-wide placement tracking) and the L2
        usage stream (quota tracking and eviction).  When true, the operator
        emits ``--coordinator-event-reporting``.
-   * - ``l2EventFlushInterval``
+   * - ``eventFlushInterval``
      - ``1``
      - Seconds between cache-event batch flushes; must be > 0.  Emitted as
        ``--coordinator-event-flush-interval`` whenever a coordinator is
-       configured.
+       configured.  See :doc:`coordinator` for the flag semantics.
 
 .. note::
 
-   The CRD field names keep their ``l2Event*`` spelling for API
-   compatibility, but the server flags they map to have no ``l2-`` infix
-   (``--coordinator-event-reporting``, ``--coordinator-event-flush-interval``),
-   because the server reports the key directory's event stream alongside L2
-   usage.  See :doc:`coordinator` for the flag semantics.
+   These fields were previously named ``l2EventReporting`` /
+   ``l2EventFlushInterval``.  They were renamed (dropping the ``l2``
+   prefix, matching the server's flag rename) because event reporting
+   covers the key directory's event stream alongside L2 usage.  Manifests
+   using the old spellings must be updated: unknown CRD fields are pruned
+   silently, so the old names would quietly fall back to the defaults.
 
 Coordinator CRD Spec Reference
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

@@ -356,17 +356,17 @@ type CoordinatorConnectionSpec struct {
 	// +kubebuilder:default=5
 	HeartbeatInterval *float64 `json:"heartbeatInterval,omitempty"`
 
-	// l2EventReporting enables reporting L2 store/lookup events to the
-	// coordinator for fleet-wide usage tracking and eviction.
+	// eventReporting enables reporting cache events to the coordinator: the
+	// key directory's store/access/delete stream and the L2 usage stream.
 	// +optional
 	// +kubebuilder:default=false
-	L2EventReporting *bool `json:"l2EventReporting,omitempty"`
+	EventReporting *bool `json:"eventReporting,omitempty"`
 
-	// l2EventFlushInterval is the seconds between L2 event flush attempts; must
-	// be > 0.
+	// eventFlushInterval is the seconds between cache-event flush attempts;
+	// must be > 0.
 	// +optional
 	// +kubebuilder:default=1
-	L2EventFlushInterval *float64 `json:"l2EventFlushInterval,omitempty"`
+	EventFlushInterval *float64 `json:"eventFlushInterval,omitempty"`
 }
 
 // LMCacheEngineSpec defines the desired state of LMCacheEngine.
