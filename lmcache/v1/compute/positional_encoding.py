@@ -65,12 +65,14 @@ class FusedRope:
     def fused_encode(self, old_positions, new_positions, k):
         num_tokens = k.shape[0]
         k = k.view(num_tokens, -1, self.head_size)
+        if self.cos_sin_cache.device != k.device:
+            self.cos_sin_cache = self.cos_sin_cache.to(k.device)
         lmc_ops.rotary_embedding_k_fused(
             old_positions,
             new_positions,
             k,
             self.head_size,
-            self.cos_sin_cache.to(k.device),
+            self.cos_sin_cache,
             self.is_neox_style,
         )
         k = k.view(num_tokens, -1)
