@@ -269,6 +269,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # NOTE: macos-latest is Apple Silicon (arm64). If the vLLM CPU
+        # nightly stops publishing an arm64 macOS wheel, this leg will fail
+        # every night and (by design) keep the tracking issue open. If that
+        # becomes noisy, either switch to macos-13 (x86_64) or pin a known
+        # good build via VLLM_CPU_NIGHTLY_SPEC in the macOS install step.
         os: [ubuntu-22.04, macos-latest]
     permissions:
       contents: read

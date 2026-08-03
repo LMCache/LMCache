@@ -26,10 +26,18 @@ for d in verify-results/*/; do
     if [ ! -f "$f" ]; then
         continue
     fi
-    os="$(python3 -c "import json; print(json.load(open('$f'))['os'])")"
-    st="$(python3 -c "import json; print(json.load(open('$f'))['status'])")"
-    ver="$(python3 -c "import json; print(json.load(open('$f')).get('vllm_version',''))")"
-    rsn="$(python3 -c "import json; print(json.load(open('$f')).get('reason',''))")"
+    # Read all fields in a single python3 invocation (tab-separated) to
+    # avoid spawning one interpreter per field.
+    IFS=$'\t' read -r os st ver rsn < <(python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+print("\t".join([
+    d["os"],
+    d["status"],
+    d.get("vllm_version", ""),
+    d.get("reason", ""),
+]))
+' "$f")
     OS_STATUS["$os"]="$st"
     OS_VERSION["$os"]="$ver"
     OS_REASON["$os"]="$rsn"
@@ -84,11 +92,14 @@ if [ "$passed" -eq "$total" ]; then
 
     EXISTING="$(gh issue list --repo "$GITHUB_REPOSITORY" \
         --search "Nightly CPU vLLM verify FAILED" --state open \
-        --limit 1 --json number -q '.[0].number // ""')"
+        --limit 1 --json number -q '.[0].number // ""' 2>/dev/null || true)"
     if [ -n "$EXISTING" ]; then
+        # Best-effort: the issue may already be closed/edited by a human,
+        # which must not fail the (successful) pin run.
         gh issue comment "$EXISTING" \
-            --body "Resolved: all platforms passed on $NOW (vLLM ${VLLM_VER})."
-        gh issue close "$EXISTING" --reason completed
+            --body "Resolved: all platforms passed on $NOW (vLLM ${VLLM_VER})." \
+            2>/dev/null || true
+        gh issue close "$EXISTING" --reason completed 2>/dev/null || true
     fi
     exit 0
 fi

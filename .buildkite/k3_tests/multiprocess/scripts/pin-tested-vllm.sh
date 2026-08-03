@@ -143,13 +143,22 @@ case "${CI_PLATFORM}" in
         COMMIT_SHA="${COMMIT_SHA:-${BUILDKITE_COMMIT:-}}"
         ;;
     github_actions)
+        BUILD_NUMBER="${BUILD_NUMBER:-${GITHUB_RUN_ID:-}}"
         if [[ -n "${GITHUB_RUN_ID:-}" ]]; then
-            BUILD_NUMBER="${BUILD_NUMBER:-${GITHUB_RUN_ID}}"
-            BUILD_URL="${BUILD_URL:-${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}}"
+            BUILD_URL="${BUILD_URL:-${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-}/actions/runs/${GITHUB_RUN_ID}}"
+        else
+            BUILD_URL="${BUILD_URL:-}"
         fi
         COMMIT_SHA="${COMMIT_SHA:-${GITHUB_SHA:-}}"
         ;;
 esac
+
+# Final safety net: guarantee these are always defined regardless of the
+# CI_PLATFORM branch taken above, so the `set -u` heredoc below never trips
+# on an unbound variable.
+BUILD_URL="${BUILD_URL:-}"
+BUILD_NUMBER="${BUILD_NUMBER:-}"
+COMMIT_SHA="${COMMIT_SHA:-}"
 
 # Per-platform OS identifier (e.g. ubuntu-22.04, macos-latest, or
 # empty for buildkite which runs on a single OS).
