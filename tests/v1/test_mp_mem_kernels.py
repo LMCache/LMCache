@@ -364,7 +364,7 @@ def test_block_transfer_roundtrip(
         is_mla,
         TOKENS_PER_OBJECT,
     )
-    getattr(torch, torch_device_type).synchronize()
+    torch_dev.synchronize()
 
     # H2D: mem_objects -> target
     call_block_kernel(
@@ -381,7 +381,7 @@ def test_block_transfer_roundtrip(
         is_mla,
         TOKENS_PER_OBJECT,
     )
-    getattr(torch, torch_device_type).synchronize()
+    torch_dev.synchronize()
 
     # Verify: target[h2d_block] == source[d2h_block]
     for i in range(TOTAL_BLOCKS):
@@ -462,7 +462,7 @@ def test_block_transfer_skip_prefix(engine_kv_format, nl, nh, hs, is_mla, dtype)
         TOKENS_PER_OBJECT,
         skip_prefix_n_blocks=skip,
     )
-    getattr(torch, torch_device_type).synchronize()
+    torch_dev.synchronize()
 
     # H2D with skip
     call_block_kernel(
@@ -480,7 +480,7 @@ def test_block_transfer_skip_prefix(engine_kv_format, nl, nh, hs, is_mla, dtype)
         TOKENS_PER_OBJECT,
         skip_prefix_n_blocks=skip,
     )
-    getattr(torch, torch_device_type).synchronize()
+    torch_dev.synchronize()
 
     # Non-skipped blocks should match
     for i in range(skip, TOTAL_BLOCKS):

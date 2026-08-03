@@ -20,7 +20,7 @@ pytestmark = [
 ]
 
 # First Party
-if (hasattr(torch, torch_device_type) and getattr(torch, torch_device_type).is_available()):
+if torch_dev.is_available():
     try:
         # First Party
         import lmcache.c_ops as lmc_ops
@@ -116,8 +116,8 @@ def test_extract_and_load_back(num_tokens):
     kv_tuple_list = []
     memory_obj_old_list = []
     chunk_size = 256
-    start_event = getattr(torch, torch_device_type).Event(enable_timing=True)
-    end_event = getattr(torch, torch_device_type).Event(enable_timing=True)
+    start_event = torch_dev.Event(enable_timing=True)
+    end_event = torch_dev.Event(enable_timing=True)
     start_event.record()
     for layer_id in range(num_layers):
         key_cache = kv_cache[layer_id][0].reshape(-1, num_heads, head_size)
@@ -141,14 +141,14 @@ def test_extract_and_load_back(num_tokens):
             )
         memory_obj_old_list.append(memory_obj_old)
     end_event.record()
-    getattr(torch, torch_device_type).synchronize()
+    torch_dev.synchronize()
     elapsed_time_ms = start_event.elapsed_time(end_event)
     print("Old extract time: ", elapsed_time_ms / 1000)
 
     # New extract (zero-copy kernels)
     memory_obj_new_list = []
-    start_event = getattr(torch, torch_device_type).Event(enable_timing=True)
-    end_event = getattr(torch, torch_device_type).Event(enable_timing=True)
+    start_event = torch_dev.Event(enable_timing=True)
+    end_event = torch_dev.Event(enable_timing=True)
     start_event.record()
     slot_mapping_chunked = torch.split(slot_mapping, chunk_size)
     for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
@@ -168,7 +168,7 @@ def test_extract_and_load_back(num_tokens):
         memory_obj_new_list.append(memory_obj_new)
     end_event.record()
     # wait for all the operations to finish
-    getattr(torch, torch_device_type).synchronize()
+    torch_dev.synchronize()
     elapsed_time_ms = start_event.elapsed_time(end_event)
     print("New extract time: ", elapsed_time_ms / 1000)
     check_mem_obj_equal(
@@ -238,8 +238,8 @@ def test_multi_layer_kernel(num_tokens, engine_kv_format):
 
     # layer by layer extract
     memory_obj_old_list = []
-    start_event = getattr(torch, torch_device_type).Event(enable_timing=True)
-    end_event = getattr(torch, torch_device_type).Event(enable_timing=True)
+    start_event = torch_dev.Event(enable_timing=True)
+    end_event = torch_dev.Event(enable_timing=True)
     start_event.record()
     slot_mapping_chunked = torch.split(slot_mapping, chunk_size)
     for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
@@ -259,7 +259,7 @@ def test_multi_layer_kernel(num_tokens, engine_kv_format):
         memory_obj_old_list.append(memory_obj_old)
     end_event.record()
     # wait for all the operations to finish
-    getattr(torch, torch_device_type).synchronize()
+    torch_dev.synchronize()
     elapsed_time_ms = start_event.elapsed_time(end_event)
     print("Old extract time: ", elapsed_time_ms / 1000)
 
@@ -271,8 +271,8 @@ def test_multi_layer_kernel(num_tokens, engine_kv_format):
         kv_cache_pointers[i] = kv_cache[i].data_ptr()
 
     memory_obj_new_list = []
-    start_event = getattr(torch, torch_device_type).Event(enable_timing=True)
-    end_event = getattr(torch, torch_device_type).Event(enable_timing=True)
+    start_event = torch_dev.Event(enable_timing=True)
+    end_event = torch_dev.Event(enable_timing=True)
     start_event.record()
     slot_mapping_chunked = torch.split(slot_mapping, chunk_size)
     for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
@@ -295,7 +295,7 @@ def test_multi_layer_kernel(num_tokens, engine_kv_format):
 
     end_event.record()
     # wait for all the operations to finish
-    getattr(torch, torch_device_type).synchronize()
+    torch_dev.synchronize()
     elapsed_time_ms = start_event.elapsed_time(end_event)
     print("New extract time: ", elapsed_time_ms / 1000)
 
@@ -370,8 +370,8 @@ def test_multi_layer_kernel_use_mla(num_tokens, head_size, engine_kv_format):
 
     # layer by layer extract
     memory_obj_old_list = []
-    start_event = getattr(torch, torch_device_type).Event(enable_timing=True)
-    end_event = getattr(torch, torch_device_type).Event(enable_timing=True)
+    start_event = torch_dev.Event(enable_timing=True)
+    end_event = torch_dev.Event(enable_timing=True)
     start_event.record()
     slot_mapping_chunked = torch.split(slot_mapping, chunk_size)
     for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
@@ -392,7 +392,7 @@ def test_multi_layer_kernel_use_mla(num_tokens, head_size, engine_kv_format):
         memory_obj_old_list.append(memory_obj_old)
     end_event.record()
     # wait for all the operations to finish
-    getattr(torch, torch_device_type).synchronize()
+    torch_dev.synchronize()
     elapsed_time_ms = start_event.elapsed_time(end_event)
     print("Old extract time: ", elapsed_time_ms / 1000)
 
@@ -404,8 +404,8 @@ def test_multi_layer_kernel_use_mla(num_tokens, head_size, engine_kv_format):
         kv_cache_pointers[i] = kv_cache[i].data_ptr()
 
     memory_obj_new_list = []
-    start_event = getattr(torch, torch_device_type).Event(enable_timing=True)
-    end_event = getattr(torch, torch_device_type).Event(enable_timing=True)
+    start_event = torch_dev.Event(enable_timing=True)
+    end_event = torch_dev.Event(enable_timing=True)
     start_event.record()
     slot_mapping_chunked = torch.split(slot_mapping, chunk_size)
     for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
@@ -426,7 +426,7 @@ def test_multi_layer_kernel_use_mla(num_tokens, head_size, engine_kv_format):
 
     end_event.record()
     # wait for all the operations to finish
-    getattr(torch, torch_device_type).synchronize()
+    torch_dev.synchronize()
     elapsed_time_ms = start_event.elapsed_time(end_event)
     print("New extract time: ", elapsed_time_ms / 1000)
 
@@ -613,7 +613,7 @@ def test_multi_layer_kernel_hnd(num_tokens, engine_kv_format):
             head_size=head_size,
         )
         memory_obj_list.append(memory_obj)
-    getattr(torch, torch_device_type).synchronize()
+    torch_dev.synchronize()
 
     # H2D: write back into a fresh paged cache
     kv_cache_new = generate_kv_cache_paged_list_tensors(
@@ -643,7 +643,7 @@ def test_multi_layer_kernel_hnd(num_tokens, engine_kv_format):
             block_size,
             head_size=head_size,
         )
-    getattr(torch, torch_device_type).synchronize()
+    torch_dev.synchronize()
 
     check_paged_kv_cache_equal(
         kv_cache,
@@ -766,13 +766,13 @@ def test_lmcache_memcpy_async():
     # Launch default cuda copy
     with pytest.raises(RuntimeError):
         big_gpu_tensor.copy_(big_cpu_tensor, non_blocking=True)
-        getattr(torch, torch_device_type).synchronize()
+        torch_dev.synchronize()
 
     # Launc default cuda copy for a small page
     big_gpu_tensor[: elements_per_chunk // 2].copy_(
         big_cpu_tensor[: elements_per_chunk // 2], non_blocking=True
     )
-    getattr(torch, torch_device_type).synchronize()
+    torch_dev.synchronize()
 
     check_gpu_and_cpu_equal(
         big_gpu_tensor[: elements_per_chunk // 2],
@@ -809,7 +809,7 @@ def test_lmcache_memcpy_async():
             start,
             chunk_size,
         )
-        getattr(torch, torch_device_type).synchronize()
+        torch_dev.synchronize()
 
         check_gpu_and_cpu_equal(
             big_gpu_tensor[start // dtype.itemsize : end // dtype.itemsize],
@@ -837,7 +837,7 @@ def test_lmcache_memcpy_async():
             start,
             chunk_size,
         )
-        getattr(torch, torch_device_type).synchronize()
+        torch_dev.synchronize()
 
         check_gpu_and_cpu_equal(
             big_gpu_tensor[start // dtype.itemsize : end // dtype.itemsize],
@@ -935,7 +935,7 @@ def test_lmcache_memcpy_async_int8_hidden132():
             start_bytes,
             chunk_size,
         )
-        getattr(torch, torch_device_type).synchronize()
+        torch_dev.synchronize()
 
         check_equal(
             gpu_tensor[start_bytes:end_bytes],
@@ -965,7 +965,7 @@ def test_lmcache_memcpy_async_int8_hidden132():
             start_bytes,
             chunk_size,
         )
-        getattr(torch, torch_device_type).synchronize()
+        torch_dev.synchronize()
 
         check_equal(
             gpu_src[start_bytes:end_bytes],

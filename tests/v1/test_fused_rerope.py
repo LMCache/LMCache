@@ -26,7 +26,7 @@ except Exception:  # allow running as a plain script (bench) without pytest
 
 
 # First Party
-from lmcache import torch_device_type
+from lmcache import torch_dev, torch_device_type
 
 try:
     # First Party
@@ -37,9 +37,13 @@ except Exception:  # CPU-only / no built c_ops (e.g. the unit-test runner)
     lmc_ops = None
     _HAS_STRIDED = False
 
-# These tests need CUDA and the built c_ops carrying the strided kernel; without
-# both they skip cleanly (keeps CPU-only pytest collection from erroring).
-_REQ = (hasattr(torch, torch_device_type) and getattr(torch, torch_device_type).is_available()) and _HAS_STRIDED
+# These tests need CUDA, an available torch device backend, and a built c_ops
+# carrying the strided kernel.
+_REQ = torch_dev.is_available() and torch_device_type == "cuda" and _HAS_STRIDED
+
+# Module-level skip keeps every pytest case consistent without repeating
+# per-function decorators.
+pytestmark = _skipif(not _REQ, reason="requires CUDA + built c_ops")
 
 
 def _make_inputs(n_tokens, n_heads, head_size, max_pos, dtype, device, seed=0):
@@ -77,7 +81,6 @@ def _option2_strided(packed, old_pos, new_pos, cos_sin, head_size, is_neox=True)
     )
 
 
-@_skipif(not _REQ, reason="requires CUDA + built c_ops")
 def test_option2_matches_option1_and_preserves_v():
     dev, dtype = torch_device_type, torch.bfloat16
     packed, old_pos, new_pos, cos_sin = _make_inputs(
@@ -88,7 +91,7 @@ def test_option2_matches_option1_and_preserves_v():
 
     _option1_copy(p1, old_pos, new_pos, cos_sin, 64)
     _option2_strided(p2, old_pos, new_pos, cos_sin, 64)
-    getattr(torch, torch_device_type).synchronize()
+    torch_dev.synchronize()
 
     # K rotated identically by both paths.
     assert torch.equal(p1[:, :, 0, :], p2[:, :, 0, :]), "option2 K != option1 K"
@@ -102,15 +105,14 @@ def test_option2_matches_option1_and_preserves_v():
 def _bench(fn, packed, *args, iters=200):
     # In place, no per-iter clone, so the timing isolates the op (not a full
     # KV clone). Bounded rotary cos/sin keeps repeated rotation numerically safe.
-    getattr(torch, torch_device_type).synchronize()
+    torch_dev.synchronize()
     t0 = time.perf_counter()
     for _ in range(iters):
         fn(packed, *args)
-    getattr(torch, torch_device_type).synchronize()
+    torch_dev.synchronize()
     return (time.perf_counter() - t0) / iters * 1e3  # ms/iter
 
 
-@_skipif(not _REQ, reason="requires CUDA + built c_ops")
 def test_bench_option1_vs_option2(capsys):
     # Timing report; run with `pytest -s` to see the table.
     with capsys.disabled():
