@@ -42,6 +42,7 @@ from lmcache.v1.gpu_connector.gpu_ops import lmcache_memcpy_async_h2d
 from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.mp_coordinator.blend_client import PENDING
 from lmcache.v1.mp_observability.event import Event, EventType
+from lmcache.v1.multiprocess.config import resolve_retrieve_lanes
 from lmcache.v1.multiprocess.custom_types import (
     CBMatchResult,
     CBUnifiedLookupResult,
@@ -65,7 +66,10 @@ from lmcache.v1.multiprocess.token_hasher import (
     rolling_hash_windows_numba,
     update_table_id_numba,
 )
-from lmcache.v1.platform.base.cache_context import BaseCacheContext
+from lmcache.v1.platform.base.cache_context import (
+    BaseCacheContext,
+    TransferLane,
+)
 import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
@@ -91,6 +95,14 @@ _TORCH_TO_AT_SCALAR = {
 # Default for cb_register_rope's wire-typed group_rot parameter (legacy: no
 # declared windows). Never mutated — the handler only iterates it.
 _EMPTY_GROUP_ROT: list[list[int]] = []
+
+# Retrieve scatter lanes (context-provisioned; see
+# BaseCacheContext.next_retrieve_lane): private streams so concurrent
+# retrieves overlap instead of serializing on the one context stream.
+# 1 = stock behavior. CB_RETRIEVE_LANES is blend's alias.
+_CB_RETRIEVE_LANES = resolve_retrieve_lanes(
+    "LMCACHE_RETRIEVE_LANES", "CB_RETRIEVE_LANES"
+)
 
 
 @dataclass
@@ -557,18 +569,17 @@ class BlendV3Module(InstanceLivenessTarget):
         # key must include the worker or later ranks skip work they never did.
         self._cb_applied_match_ranges: "OrderedDict[tuple[str, int | None], set[tuple[bytes, int, int]]]" = OrderedDict()  # noqa: E501
 
-        # Request-invariant retrieve-plan specs per GPU context (entries die
-        # with the context). The cached tuple holds the rope_state it was
-        # resolved against so a re-registration invalidates by identity.
-        self._cb_plan_invariants: "weakref.WeakKeyDictionary[Any, tuple]" = (
+        # Request-invariant retrieve-plan specs, ctx -> {lane_idx: tuple}
+        # (specs embed a lane's staging pointers; entries die with the
+        # context). The cached rope_state doubles as the validity check.
+        self._cb_plan_invariants: "weakref.WeakKeyDictionary[Any, dict[int, tuple]]" = (
             weakref.WeakKeyDictionary()
-        )
-        # Persistent pinned + device slot-mapping staging per GPU context,
+        )  # noqa: E501
+        # Pinned + device slot-mapping staging, ctx -> {lane_idx: entry},
         # grown on demand (see _cb_slot_buffers).
-        self._cb_slot_staging: "weakref.WeakKeyDictionary[Any, tuple]" = (
+        self._cb_slot_staging: "weakref.WeakKeyDictionary[Any, dict[int, list]]" = (
             weakref.WeakKeyDictionary()
         )
-
         # Non-blocking cb_unified_lookup poll state (submit-once, poll-on-recall)
         # so the handler never holds a worker thread across the L2->L1 loads.
         self._cb_jobs: dict[str, _CBUnifiedJob] = {}
@@ -789,27 +800,46 @@ class BlendV3Module(InstanceLivenessTarget):
             "legacy" if not norm_rot else str(norm_rot),
         )
 
-        # Pre-warm the retrieve-plan invariants + slot-mapping staging for
-        # this instance, off the retrieve critical path.
+        # Pre-warm every lane's staging + plan invariants off the retrieve
+        # critical path.
         try:
             entry = self._transfer_module.get_and_touch_context_entry(instance_id)
             ctx = entry.cache_context if entry is not None else None
             if ctx is not None:
-                self._cb_slot_buffers(
-                    ctx, ctx.kv_layer_groups_manager.num_kernel_groups, 1 << 16
-                )
                 rope_state = self._cb_rope_state[instance_id]
                 max_batch = ctx.max_batch_size
-                if self._cb_plan_invariants.get(ctx) is None:
-                    resolved = self._resolve_cb_plan_invariants(
-                        ctx, rope_state, max_batch
+                num_groups = ctx.kv_layer_groups_manager.num_kernel_groups
+                lanes, created = ctx.prewarm_retrieve_lanes(_CB_RETRIEVE_LANES)
+                per_lane = self._cb_plan_invariants.setdefault(ctx, {})
+                extra_bytes = 0
+                for lane in lanes:
+                    slot_entry = self._cb_slot_buffers(
+                        ctx, num_groups, 1 << 16, lane.index
                     )
-                    if resolved is not None:
-                        self._cb_plan_invariants[ctx] = (
-                            rope_state,
-                            max_batch,
-                            resolved,
+                    # Idempotent registrations: don't re-resolve warm lanes.
+                    if per_lane.get(lane.index) is None:
+                        resolved = self._resolve_cb_plan_invariants(
+                            ctx, rope_state, max_batch, buffers=lane.buffers
                         )
+                        if resolved is not None:
+                            per_lane[lane.index] = (rope_state, max_batch, resolved)
+                    if lane.index > 0:  # lane 0 rides the context's staging
+                        assert lane.buffers is not None
+                        assert lane.block_ids_buffer is not None
+                        extra_bytes += (
+                            int(lane.buffers.buffer.nbytes)
+                            + int(lane.block_ids_buffer.nbytes)
+                            + int(slot_entry[0].nbytes)
+                            + int(slot_entry[2].nbytes)
+                        )
+                if created:
+                    logger.info(
+                        "CB retrieve: pre-warmed %d scatter lane(s) for "
+                        "instance %d (%.1f MiB extra staging beyond lane 0)",
+                        len(lanes),
+                        instance_id,
+                        extra_bytes / (1 << 20),
+                    )
         except Exception:
             logger.debug("CB plan pre-warm skipped", exc_info=True)
 
@@ -1698,6 +1728,7 @@ class BlendV3Module(InstanceLivenessTarget):
         rope_state: _CBRopeState,
         batch_len: int,
         slots_to_rope: list[tuple[int, int, int]],
+        buffers: Any = None,
     ) -> None:
         """Re-RoPE the given tmp-pool slots in place (K-only, per kernel group).
 
@@ -1708,6 +1739,8 @@ class BlendV3Module(InstanceLivenessTarget):
             slots_to_rope (list[tuple[int, int, int]]): ``(slot_idx, old_st,
                 cur_st)`` per shifted slot — re-RoPE K from stored position
                 ``old_st`` to new position ``cur_st``.
+            buffers: Temp-buffer provider (a scatter lane's private staging);
+                None => the context's own buffers.
 
         Raises:
             RuntimeError: On a compressed (compress_ratio != 1) layout, a
@@ -1716,11 +1749,13 @@ class BlendV3Module(InstanceLivenessTarget):
         """
         if not slots_to_rope:
             return
+        if buffers is None:
+            buffers = gpu_context
         num_groups = gpu_context.kv_layer_groups_manager.num_kernel_groups
         for group_idx in range(num_groups):
             group = gpu_context.kv_layer_groups_manager.kernel_groups[group_idx]
             all_slots = [
-                gpu_context.get_temp_kernel_group_buffer(slot_idx, group_idx)
+                buffers.get_temp_kernel_group_buffer(slot_idx, group_idx)
                 for slot_idx in range(batch_len)
             ]
             rot = rope_state.rot_for_group(group.engine_group_idx, all_slots[0].dtype)
@@ -1808,6 +1843,7 @@ class BlendV3Module(InstanceLivenessTarget):
         resolved_groups: "list[tuple[torch.Tensor, int]]",
         batch: "list[tuple[CBMatchResult, Any]]",
         head_size: int,
+        buffers: Any = None,
     ) -> None:
         """Scatter one tmp-slot batch into the paged KV, one launch per
         (kernel group, tmp slot), straight from each slot's contiguous buffer
@@ -1820,7 +1856,11 @@ class BlendV3Module(InstanceLivenessTarget):
             resolved_groups: Per kernel group ``(block_ids, block_size)``.
             batch: ``(match, memory_obj)`` pairs; slot ``i`` holds ``batch[i]``.
             head_size: RoPE head size forwarded to the kernel.
+            buffers: Temp-buffer provider (a scatter lane's private staging);
+                None => the context's own buffers.
         """
+        if buffers is None:
+            buffers = gpu_context
         kgm = gpu_context.kv_layer_groups_manager
         tok_counts = [int(r.cur_ed - r.cur_st) for (r, _) in batch]
         pos = torch.cat(
@@ -1844,9 +1884,7 @@ class BlendV3Module(InstanceLivenessTarget):
             page_buffer_size = kgm.kernel_groups[group_idx].shape_desc.nb * group_bs
             tok_off = 0
             for slot_idx, n_tok in enumerate(tok_counts):
-                key_value = gpu_context.get_temp_kernel_group_buffer(
-                    slot_idx, group_idx
-                )
+                key_value = buffers.get_temp_kernel_group_buffer(slot_idx, group_idx)
                 if n_tok < key_value.shape[2]:
                     # Partial chunk: narrow to the real token count (the
                     # kernel scatters size(2) tokens). Slicing dim 2 breaks
@@ -1866,11 +1904,22 @@ class BlendV3Module(InstanceLivenessTarget):
                 tok_off += n_tok
 
     def _cb_slot_buffers(
-        self, gpu_context: BaseCacheContext, num_groups: int, n_pos: int
-    ) -> "tuple[torch.Tensor, Any, torch.Tensor]":
-        """Return ``(pinned, pinned_np, device)`` slot-mapping staging of at
-        least ``(num_groups, n_pos)``, reused across requests per context."""
-        entry = self._cb_slot_staging.get(gpu_context)
+        self,
+        gpu_context: BaseCacheContext,
+        num_groups: int,
+        n_pos: int,
+        lane_idx: int = 0,
+    ) -> "list":
+        """Return ``[pinned, pinned_np, device, h2d_guard]`` slot-mapping
+        staging of at least ``(num_groups, n_pos)``, reused across requests
+        per (context, lane) — per-lane so one lane's queued H2D is safe from
+        another's rebuild. ``h2d_guard`` (event or None, stamped by the plan
+        builder at lanes > 1) guards same-lane pinned reuse."""
+        lanes = self._cb_slot_staging.get(gpu_context)
+        if lanes is None:
+            lanes = {}
+            self._cb_slot_staging[gpu_context] = lanes
+        entry = lanes.get(lane_idx)
         if entry is None or entry[0].shape[0] < num_groups or entry[0].shape[1] < n_pos:
             cap = max(n_pos, 1 << 16)
             if entry is not None:
@@ -1884,8 +1933,8 @@ class BlendV3Module(InstanceLivenessTarget):
             dev = torch.empty(
                 (num_groups, cap), dtype=torch.int64, device=gpu_context.device
             )
-            entry = (pinned, pinned.numpy(), dev)
-            self._cb_slot_staging[gpu_context] = entry
+            entry = [pinned, pinned.numpy(), dev, None]
+            lanes[lane_idx] = entry
         return entry
 
     def _resolve_cb_plan_invariants(
@@ -1893,19 +1942,25 @@ class BlendV3Module(InstanceLivenessTarget):
         gpu_context: BaseCacheContext,
         rope_state: _CBRopeState,
         max_batch: int,
+        buffers: Any = None,
     ) -> "tuple[list[Any], list[torch.Tensor]] | None":
-        """Resolve the request-invariant plan half (cached per context in
-        ``_cb_plan_invariants``).
+        """Resolve the request-invariant plan half (cached per (context,
+        scatter lane) in ``_cb_plan_invariants``).
+
+        ``buffers`` is the temp-buffer provider whose pointers the specs
+        embed — a lane's private staging, or None for the context's own.
 
         Returns ``(group_specs, object_group_buffers)`` with slot-mapping
         fields as placeholders for the per-request stamp, or ``None`` on an
         unsupported layout (compressed / kv_size / dtype / head geometry).
         """
+        if buffers is None:
+            buffers = gpu_context
         kgm = gpu_context.kv_layer_groups_manager
         group_specs: list[Any] = []
         for group_idx in range(kgm.num_kernel_groups):
             group = kgm.kernel_groups[group_idx]
-            buf0 = gpu_context.get_temp_kernel_group_buffer(0, group_idx)
+            buf0 = buffers.get_temp_kernel_group_buffer(0, group_idx)
             num_layers, slot_tokens, hidden_dim = (
                 int(buf0.shape[1]),
                 int(buf0.shape[2]),
@@ -1917,7 +1972,7 @@ class BlendV3Module(InstanceLivenessTarget):
                     group_idx
                 ).data_ptr(),
                 temp_buffer_ptrs=[
-                    gpu_context.get_temp_kernel_group_buffer(slot, group_idx).data_ptr()
+                    buffers.get_temp_kernel_group_buffer(slot, group_idx).data_ptr()
                     for slot in range(max_batch)
                 ],
                 num_layers=num_layers,
@@ -1983,8 +2038,7 @@ class BlendV3Module(InstanceLivenessTarget):
                 )
             )
         object_group_buffers = [
-            gpu_context.get_temp_object_group_buffer(slot, 0)
-            for slot in range(max_batch)
+            buffers.get_temp_object_group_buffer(slot, 0) for slot in range(max_batch)
         ]
         return group_specs, object_group_buffers
 
@@ -1995,11 +2049,15 @@ class BlendV3Module(InstanceLivenessTarget):
         cpu_block_tables: "list[tuple[np.ndarray, int]]",
         runs: "list[list[tuple[CBMatchResult, Any]]]",
         max_batch: int,
+        lane: "TransferLane | None" = None,
     ) -> "tuple[list[Any], tuple[Any, Any, Any, Any], list[torch.Tensor]] | None":
         """Build the whole native retrieve plan: eligibility gates, cached
         invariant specs stamped with this request's slot mappings, and the
         numpy-vectorized int64 work tables for
         ``execute_cb_retrieve_plan_flat`` (layouts in the pybind docstring).
+
+        ``lane`` selects the scatter lane whose staging the plan embeds
+        (None => lane 0 / the context's own buffers).
 
         Returns:
             ``(group_specs, (staging, ropes, scatters, step_offsets),
@@ -2015,24 +2073,29 @@ class BlendV3Module(InstanceLivenessTarget):
             if not isinstance(memory_obj.parent(), LazyMemoryAllocator):
                 return None
 
+        lane_idx = 0 if lane is None else lane.index
+        lane_buffers = None if lane is None else lane.buffers
+
         # Specs are invariant per paged registration except the slot-mapping
-        # fields: cache them per context, re-stamp per request (the full
-        # resolve costs dozens of torch-view creations under the shared GIL).
+        # fields: cache them per (context, lane) — they embed the lane's
+        # staging pointers — and re-stamp per request (the full resolve
+        # costs dozens of torch-view creations under the shared GIL).
         # The cached rope_state reference doubles as the validity check: a
         # re-registration swaps the object, so identity comparison is sound.
-        cached = self._cb_plan_invariants.get(gpu_context)
+        per_lane = self._cb_plan_invariants.setdefault(gpu_context, {})
+        cached = per_lane.get(lane_idx)
         if cached is not None and not (
             cached[0] is rope_state and cached[1] == max_batch
         ):
             cached = None
         if cached is None:
             resolved = self._resolve_cb_plan_invariants(
-                gpu_context, rope_state, max_batch
+                gpu_context, rope_state, max_batch, buffers=lane_buffers
             )
             if resolved is None:
                 return None
             cached = (rope_state, max_batch, resolved)
-            self._cb_plan_invariants[gpu_context] = cached
+            per_lane[lane_idx] = cached
         group_specs, object_group_buffers = cached[2]
         num_groups = len(group_specs)
         wave = max_batch // 2
@@ -2087,9 +2150,16 @@ class BlendV3Module(InstanceLivenessTarget):
                 ]
             )
         n_pos = int(pos_np.shape[0])
-        pinned, pinned_np, dev_buf = self._cb_slot_buffers(
-            gpu_context, num_groups, n_pos
-        )
+        slot_entry = self._cb_slot_buffers(gpu_context, num_groups, n_pos, lane_idx)
+        pinned, pinned_np, dev_buf = slot_entry[0], slot_entry[1], slot_entry[2]
+        if slot_entry[3] is not None:
+            # Same-lane pinned reuse guard (armed only at lanes > 1): the
+            # previous request's H2D of these pinned rows queues behind its
+            # vllm_event wait, so rewriting them before it executes would
+            # corrupt that request's slot mappings — wait for it (cheap: it
+            # precedes the lane's bulk copies).
+            slot_entry[3].synchronize()
+            slot_entry[3] = None
         div_mod: "dict[int, tuple[np.ndarray, np.ndarray]]" = {}
         for gi, ((block_ids_np, group_bs), spec) in enumerate(
             zip(cpu_block_tables, group_specs, strict=True)
@@ -2107,6 +2177,12 @@ class BlendV3Module(InstanceLivenessTarget):
             # copies spec contents at call time.
             spec.slot_mapping_base = int(dev_buf[gi].data_ptr())
             spec.slot_mapping_capacity = n_pos
+        if lane is not None and lane.guarded:
+            # Arm the reuse guard for this lane's next request (records on
+            # the ambient stream = the lane's; see synchronize() above).
+            guard = torch_dev.Event()
+            guard.record()
+            slot_entry[3] = guard
         # The device staging must outlive the native call.
         keepalive = [dev_buf]
 
@@ -2225,6 +2301,11 @@ class BlendV3Module(InstanceLivenessTarget):
         rope_state = self._cb_rope_state[instance_id]
         chunk_size = self._ctx.chunk_size
 
+        # This request's scatter lane (see _CB_RETRIEVE_LANES): its stream +
+        # staging so concurrent retrieves overlap instead of serializing.
+        lane = gpu_context.next_retrieve_lane(_CB_RETRIEVE_LANES)
+        lane_buffers = gpu_context if lane.buffers is None else lane.buffers
+
         _retrieve_t0 = time.perf_counter()
 
         def _noop_success(reason: str = "?") -> tuple[bytes, bool]:
@@ -2250,7 +2331,7 @@ class BlendV3Module(InstanceLivenessTarget):
                 )
             with (
                 torch_dev.device(gpu_context.device),
-                torch_dev.stream(gpu_context.stream),
+                torch_dev.stream(lane.stream),
             ):
                 check_interprocess_event_support()
                 done_event = torch_dev.Event(interprocess=True)
@@ -2355,13 +2436,17 @@ class BlendV3Module(InstanceLivenessTarget):
 
         with (
             torch_dev.device(gpu_context.device),
-            torch_dev.stream(gpu_context.stream),
+            torch_dev.stream(lane.stream),
         ):
             check_interprocess_event_support()
             event = torch_dev.Event(interprocess=True)
 
             # One staged block-id tensor per engine group, indexed by group.
-            block_ids_per_group_gpu = gpu_context.stage_block_ids(gpu_block_ids)
+            # Lanes >= 1 stage into their private buffer: the shared one may
+            # still be read by kernels queued on another lane's stream.
+            block_ids_per_group_gpu = gpu_context.stage_block_ids(
+                gpu_block_ids, out=lane.block_ids_buffer
+            )
 
             # Resolve each kernel group's block table + block size once. Select
             # by engine_group_idx (kernel groups may share one, e.g. MiniMax-M3).
@@ -2388,7 +2473,7 @@ class BlendV3Module(InstanceLivenessTarget):
                 cpu_block_tables.append((block_ids_np[eg_idx], group_bs))
 
             self._event_bus.publish_on_stream(
-                gpu_context.cupy_stream,
+                lane.cupy_stream,
                 Event(
                     event_type=EventType.CB_RETRIEVE_START,
                     session_id=key.request_id,
@@ -2408,7 +2493,8 @@ class BlendV3Module(InstanceLivenessTarget):
             vllm_event = torch_dev.Event.from_ipc_handle(
                 gpu_context.device, event_ipc_handle
             )
-            vllm_event.wait(stream=gpu_context.stream)
+            # Order this lane's scatter after the caller's forward event.
+            vllm_event.wait(stream=lane.stream)
 
             # Stage marks for the scatter_ms log line (CPU enqueue wall time):
             # fetch = L1 prefetched read, plan = flat-plan table build,
@@ -2453,7 +2539,7 @@ class BlendV3Module(InstanceLivenessTarget):
                     # applied match. Re-RoPE is folded in (n_shifted) — it is
                     # interleaved per-batch, so not a separate span.
                     self._event_bus.publish_on_stream(
-                        gpu_context.cupy_stream,
+                        lane.cupy_stream,
                         Event(
                             event_type=EventType.CB_SCATTER_START,
                             session_id=key.request_id,
@@ -2488,7 +2574,12 @@ class BlendV3Module(InstanceLivenessTarget):
                     # c_ops, non-lazy objects, max_batch < 2, or size mismatch).
                     _stage_t = time.perf_counter()
                     native_flat = self._build_cb_retrieve_plan_flat(
-                        gpu_context, rope_state, cpu_block_tables, runs, max_batch
+                        gpu_context,
+                        rope_state,
+                        cpu_block_tables,
+                        runs,
+                        max_batch,
+                        lane=lane,
                     )
                     _stage_ms["plan"] = (time.perf_counter() - _stage_t) * 1000
                     if native_flat is not None:
@@ -2508,10 +2599,11 @@ class BlendV3Module(InstanceLivenessTarget):
                             batch = run[batch_start : batch_start + max_batch]
                             batch_len = len(batch)
 
-                            # (a) H2D fill into per-chunk tmp slots.
+                            # (a) H2D fill into per-chunk tmp slots (the
+                            # lane's own, so lanes never share slots).
                             for slot_idx, (_, memory_obj) in enumerate(batch):
                                 # Single object group => object_group_idx=0.
-                                flat_slot = gpu_context.get_temp_object_group_buffer(
+                                flat_slot = lane_buffers.get_temp_object_group_buffer(
                                     slot_idx, 0
                                 )
                                 lmcache_memcpy_async_h2d(memory_obj, flat_slot)
@@ -2523,7 +2615,11 @@ class BlendV3Module(InstanceLivenessTarget):
                                 if r.old_st != r.cur_st
                             ]
                             self._apply_cb_rope_batched(
-                                gpu_context, rope_state, batch_len, slots_to_rope
+                                gpu_context,
+                                rope_state,
+                                batch_len,
+                                slots_to_rope,
+                                buffers=lane_buffers,
                             )
 
                             # (c) Per-token slot scatter: partial vLLM blocks
@@ -2533,12 +2629,13 @@ class BlendV3Module(InstanceLivenessTarget):
                                 resolved_groups,
                                 batch,
                                 rope_state.head_size,
+                                buffers=lane_buffers,
                             )
 
                     applied_now = {(r.hash, r.cur_st, r.cur_ed) for r, _ in pairs}
 
                     self._event_bus.publish_on_stream(
-                        gpu_context.cupy_stream,
+                        lane.cupy_stream,
                         Event(
                             event_type=EventType.CB_SCATTER_END,
                             session_id=key.request_id,
@@ -2547,7 +2644,7 @@ class BlendV3Module(InstanceLivenessTarget):
             except Exception:
                 logger.exception("Error during retrieving prefetched results")
                 self._event_bus.publish_on_stream(
-                    gpu_context.cupy_stream,
+                    lane.cupy_stream,
                     Event(
                         event_type=EventType.CB_RETRIEVE_END,
                         session_id=key.request_id,
@@ -2555,7 +2652,7 @@ class BlendV3Module(InstanceLivenessTarget):
                     ),
                 )
                 self._event_bus.publish_on_stream(
-                    gpu_context.cupy_stream,
+                    lane.cupy_stream,
                     Event(
                         event_type=EventType.CB_REQUEST_END,
                         session_id=key.request_id,
@@ -2568,7 +2665,7 @@ class BlendV3Module(InstanceLivenessTarget):
 
             event.record()
             self._event_bus.publish_on_stream(
-                gpu_context.cupy_stream,
+                lane.cupy_stream,
                 Event(
                     event_type=EventType.CB_RETRIEVE_END,
                     session_id=key.request_id,
@@ -2597,7 +2694,7 @@ class BlendV3Module(InstanceLivenessTarget):
             {k: round(v, 1) for k, v in _stage_ms.items()},
         )
         self._event_bus.publish_on_stream(
-            gpu_context.cupy_stream,
+            lane.cupy_stream,
             Event(
                 event_type=EventType.CB_REQUEST_END,
                 session_id=key.request_id,

@@ -4,7 +4,7 @@
 # Standard
 from dataclasses import dataclass
 from itertools import islice
-from typing import Generator, Sequence
+from typing import Any, Generator, Sequence
 import threading
 import time
 
@@ -31,6 +31,7 @@ from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_management import GDSMemoryObject, MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType
+from lmcache.v1.multiprocess.config import resolve_retrieve_lanes
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
     KVCache,
@@ -59,6 +60,12 @@ logger = init_logger(__name__)
 _HAS_NATIVE_OBJECT_GROUP_TRANSFER: bool = hasattr(
     lmc_ops, "execute_object_group_transfer"
 )
+
+# Retrieve scatter lanes (context-provisioned; see
+# BaseCacheContext.next_retrieve_lane): concurrent retrieves otherwise
+# serialize on the single per-context stream, each request's completion
+# event draining behind the previous requests' copies. 1 = stock behavior.
+_RETRIEVE_LANES = resolve_retrieve_lanes("LMCACHE_RETRIEVE_LANES")
 
 
 def get_layout_desc(
@@ -134,9 +141,12 @@ def batched_iteration_with_skip(
 def downsample_and_stage_block_ids(
     cache_context: BaseCacheContext,
     block_ids: list[list[int]],
+    out: "torch.Tensor | None" = None,
 ) -> list[torch.Tensor]:
     """Cut the block id lists to skip the unneeded blocks in a chunk and
-    stage it into GPU tensors for later use.
+    stage it into GPU tensors for later use. ``out`` is a caller-owned
+    staging destination (retrieve scatter lanes); None => the context's
+    shared buffer.
 
     This mainly targets the case where a portion of the blocks are not
     needed for every chunk, such as deepseek v4's swa cache.
@@ -204,7 +214,7 @@ def downsample_and_stage_block_ids(
         block_ids[kernel_group_id] = new_block_ids
 
     # Stage the cut block ids into GPU tensors
-    block_ids_gpu = cache_context.stage_block_ids(block_ids)
+    block_ids_gpu = cache_context.stage_block_ids(block_ids, out=out)
     return block_ids_gpu
 
 
@@ -246,6 +256,7 @@ def _run_object_group_transfer_plan(
     batch_size: int,
     skip_first_n_tokens: int,
     direction: "lmc_ops.TransferDirection",
+    buffers: Any = None,
 ) -> None:
     """Plan and execute one object group's transfer in a single native call.
 
@@ -268,11 +279,15 @@ def _run_object_group_transfer_plan(
         batch_size: Number of memory objects per batched copy.
         skip_first_n_tokens: Tokens to skip writing at the start of the range.
         direction: H2D (retrieve) or D2H (store).
+        buffers: Temp-buffer provider (a retrieve scatter lane's private
+            staging); None => the context's own buffers.
 
     Raises:
         ValueError: If a None entry is found in memory_objs when direction is
             H2D, or if an object's size does not match its GPU staging buffer.
     """
+    if buffers is None:
+        buffers = cache_context
     lmcache_chunk_size = cache_context.lmcache_tokens_per_chunk
     kv_groups_manager = cache_context.kv_layer_groups_manager
     object_group = kv_groups_manager.object_groups[object_group_id]
@@ -302,7 +317,7 @@ def _run_object_group_transfer_plan(
         paged_ptrs = cache_context.get_kernel_group_kv_pointers(kernel_group_id)
         block_ids_tensor = block_ids_gpu[kernel_group_id]
         temp_buffers = [
-            cache_context.get_temp_kernel_group_buffer(slot, kernel_group_id)
+            buffers.get_temp_kernel_group_buffer(slot, kernel_group_id)
             for slot in range(max_batch_size)
         ]
 
@@ -321,7 +336,7 @@ def _run_object_group_transfer_plan(
 
     # Temp object-group staging buffers (reused per batch slot, like above).
     object_group_buffers = [
-        cache_context.get_temp_object_group_buffer(slot, object_group_id)
+        buffers.get_temp_object_group_buffer(slot, object_group_id)
         for slot in range(max_batch_size)
     ]
 
@@ -417,6 +432,7 @@ def transfer_kv_per_object_group(
     batch_size: int,
     skip_first_n_tokens: int,
     direction: "lmc_ops.TransferDirection",
+    buffers: Any = None,
 ) -> None:
     """Helper function to transfer memory objects of a single object group
     to/from GPU, with batching support.
@@ -437,6 +453,8 @@ def transfer_kv_per_object_group(
             the retrieve range. This avoids overwriting APC-shared GPU blocks that
             may be read concurrently by other requests.
         direction: The transfer direction, H2D (retrieve) or D2H (store).
+        buffers: Temp-buffer provider (a retrieve scatter lane's private
+            staging); None => the context's own buffers.
 
     Raises:
         ValueError: If it founds None entry in memory_objs when direction is H2D.
@@ -444,6 +462,8 @@ def transfer_kv_per_object_group(
         This function expects the caller to stage the block ids (list[list[int]])
         into GPU tensors and pass them in as `block_ids_gpu`.
     """
+    if buffers is None:
+        buffers = cache_context
     if _HAS_NATIVE_OBJECT_GROUP_TRANSFER and not any(
         isinstance(mo, GDSMemoryObject) for mo in memory_objs
     ):
@@ -455,6 +475,7 @@ def transfer_kv_per_object_group(
             batch_size,
             skip_first_n_tokens,
             direction,
+            buffers=buffers,
         )
         return
 
@@ -504,9 +525,7 @@ def transfer_kv_per_object_group(
             for chunk_idx, memory_obj in enumerate(memory_object_batch):
                 lmcache_memcpy_async_h2d(
                     memory_obj,
-                    cache_context.get_temp_object_group_buffer(
-                        chunk_idx, object_group_id
-                    ),
+                    buffers.get_temp_object_group_buffer(chunk_idx, object_group_id),
                 )
 
         # Do paged KV copy
@@ -548,9 +567,7 @@ def transfer_kv_per_object_group(
                 kernel_group_id
             )
             tmp_gpu_buffers_batched = [
-                cache_context.get_temp_kernel_group_buffer(
-                    i, kernel_group_id
-                ).data_ptr()
+                buffers.get_temp_kernel_group_buffer(i, kernel_group_id).data_ptr()
                 for i in range(batch_len)
             ]
             lmc_ops.multi_layer_block_kv_transfer(
@@ -569,9 +586,7 @@ def transfer_kv_per_object_group(
         if not is_h2d:
             for chunk_idx, memory_obj in enumerate(memory_object_batch):
                 lmcache_memcpy_async_d2h(
-                    cache_context.get_temp_object_group_buffer(
-                        chunk_idx, object_group_id
-                    ),
+                    buffers.get_temp_object_group_buffer(chunk_idx, object_group_id),
                     memory_obj,
                 )
 
@@ -905,6 +920,18 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 event_backend=event_backend,
             )
 
+        # Pre-warm retrieve lanes off the retrieve critical path.
+        try:
+            _, created = cache_context.prewarm_retrieve_lanes(_RETRIEVE_LANES)
+            if created > 1:
+                logger.info(
+                    "Pre-warmed %d retrieve scatter lane(s) for instance %d",
+                    created,
+                    instance_id,
+                )
+        except Exception:
+            logger.debug("retrieve-lane pre-warm skipped", exc_info=True)
+
         logger.info(
             "Registered KV cache for GPU ID %d with %d layers",
             instance_id,
@@ -1193,6 +1220,12 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         )
         num_chunks = len(obj_keys_per_obj_group[0])
 
+        # This request's scatter lane (see _RETRIEVE_LANES): its own stream +
+        # staging, so concurrent retrieves overlap instead of serializing on
+        # the context stream. Lane 0 == the context's stream/buffers.
+        lane = cache_context.next_retrieve_lane(_RETRIEVE_LANES)
+        lane_buffers = cache_context if lane.buffers is None else lane.buffers
+
         # CPU-synchronous sentinel: a GPU retrieve is about to be enqueued.
         # Must be published via publish() (not publish_on_stream) so the
         # drain thread sees it before MP_REQUEST_END can race MP_RETRIEVE_END.
@@ -1205,7 +1238,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         )
 
         self._ctx.event_bus.publish_on_stream(
-            cache_context.cupy_stream,
+            lane.cupy_stream,
             Event(
                 event_type=EventType.MP_RETRIEVE_START,
                 session_id=key.request_id,
@@ -1226,7 +1259,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
 
         with (
             torch_dev.device(cache_context.device),
-            torch_dev.stream(cache_context.stream),
+            torch_dev.stream(lane.stream),
         ):
             event = event_backend.create_event(cache_context.device)
 
@@ -1249,17 +1282,20 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                     num_chunks,
                     blocks_per_chunk,
                 )
-                event_backend.record_event(event, cache_context.stream)
+                event_backend.record_event(event, lane.stream)
                 return event_backend.export_event(event, cache_context.device), False
 
-            # Cut and stage all block_ids to GPU once before the transfer
+            # Cut and stage all block_ids to GPU once before the transfer.
+            # Lanes >= 1 stage into their private buffer: the shared one may
+            # still be read by kernels queued on another lane's stream.
             block_ids_per_group_gpu = downsample_and_stage_block_ids(
-                cache_context, gpu_block_ids
+                cache_context, gpu_block_ids, out=lane.block_ids_buffer
             )
             producer_event = event_backend.import_event(
                 event_ipc_handle, cache_context.device
             )
-            event_backend.wait_event(producer_event, cache_context.stream)
+            # Order this lane's transfer after the caller's forward event.
+            event_backend.wait_event(producer_event, lane.stream)
 
             prefetched_keys: list[ObjectKey] = []
             total_bytes = 0
@@ -1285,6 +1321,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                             batch_size=cache_context.max_batch_size,
                             skip_first_n_tokens=skip_first_n_tokens,
                             direction=lmc_ops.TransferDirection.H2D,
+                            buffers=lane_buffers,
                         )
                         # Extend only after the copy is enqueued: on exception,
                         # read_prefetched_results releases this group's locks
@@ -1294,10 +1331,11 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 logger.exception("Cannot retrieve keys due to exception")
                 retrieve_succeeded = False
             finally:
-                event_backend.record_event(event, cache_context.stream)
+                event_backend.record_event(event, lane.stream)
                 if prefetched_keys:
+                    # Release read locks when THIS lane's copies complete.
                     submit_callback_to_stream(
-                        cache_context.cupy_stream,
+                        lane.cupy_stream,
                         "finish_read_prefetched",
                         prefetched_keys,
                     )
@@ -1307,7 +1345,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                     else 0
                 )
                 self._ctx.event_bus.publish_on_stream(
-                    cache_context.cupy_stream,
+                    lane.cupy_stream,
                     Event(
                         event_type=EventType.MP_RETRIEVE_END,
                         session_id=key.request_id,

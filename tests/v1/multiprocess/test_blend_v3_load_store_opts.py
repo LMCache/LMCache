@@ -1023,3 +1023,90 @@ def test_native_plan_falls_back_for_compressed_group():
         )
         is None
     )
+
+
+# ---------------------------------------------------------------------------
+# Scatter lanes: blend consumes the cache context's lane API. Pool-mechanics
+# coverage (round-robin, pre-warm, lanes=1 passthrough, degrade) lives in
+# tests/v1/platform/test_gpu_cache_context.py; here we pin blend's per-lane
+# plan-invariant isolation.
+# ---------------------------------------------------------------------------
+
+
+@native_retrieve_plan_required
+def test_native_plan_invariants_are_per_lane():
+    """Two lanes on one context cache separate invariant specs (each lane's
+    specs embed that lane's staging pointers) and separate slot-mapping
+    staging; the plan's staging table targets the lane's own buffers."""
+    # Third Party
+    import numpy as np
+
+    # First Party
+    from lmcache.v1.platform.base.cache_context import TransferLane
+
+    eng, gpu_context, rope_state, obj_bytes = _build_plan_engine_and_context()
+
+    # A second, lane-private buffer provider with identical geometry.
+    # Third Party
+    import torch
+
+    lane_kv = {
+        (slot, group): torch.zeros_like(gpu_context.get_temp_kernel_group_buffer(0, 0))
+        for slot in range(2)
+        for group in range(2)
+    }
+    lane_obj = [torch.zeros(obj_bytes, dtype=torch.uint8) for _ in range(2)]
+    lane_bufs = MagicMock()
+    lane_bufs.get_temp_kernel_group_buffer.side_effect = lambda s, g: lane_kv[(s, g)]
+    lane_bufs.get_temp_object_group_buffer.side_effect = lambda s, og: lane_obj[s]
+    lane1 = TransferLane(
+        1, stream=None, cupy_stream=None, buffers=lane_bufs, guarded=False
+    )
+
+    def pair(cur_st, cur_ed, old_st):
+        return (
+            SimpleNamespace(cur_st=cur_st, cur_ed=cur_ed, old_st=old_st),
+            _lazy_memory_obj(obj_bytes, address=cur_st * 1000),
+        )
+
+    cpu_block_tables = [
+        (np.array([10, 11, 12], dtype=np.int64), 4),
+        (np.array([20, 21, 22], dtype=np.int64), 4),
+    ]
+
+    plan0 = eng._build_cb_retrieve_plan_flat(
+        gpu_context, rope_state, cpu_block_tables, [[pair(0, 4, 100)]], max_batch=2
+    )
+    plan1 = eng._build_cb_retrieve_plan_flat(
+        gpu_context,
+        rope_state,
+        cpu_block_tables,
+        [[pair(0, 4, 100)]],
+        max_batch=2,
+        lane=lane1,
+    )
+    assert plan0 is not None and plan1 is not None
+    specs0, (staging0, *_), keep0 = plan0
+    specs1, (staging1, *_), keep1 = plan1
+
+    # Separate invariant caches per lane: distinct spec objects, and lane 1's
+    # temp pointers come from the lane's private buffers.
+    assert specs1[0] is not specs0[0]
+    assert staging1[0, 0] == lane_obj[0].data_ptr()
+    assert staging0[0, 0] == gpu_context.get_temp_object_group_buffer(0, 0).data_ptr()
+
+    # Separate slot-mapping staging per lane (distinct device buffers).
+    assert keep1[0] is not keep0[0]
+    assert specs1[0].slot_mapping_base == keep1[0][0].data_ptr()
+
+    # Lane identity is stable: rebuilding on lane 1 reuses its own cache.
+    plan1b = eng._build_cb_retrieve_plan_flat(
+        gpu_context,
+        rope_state,
+        cpu_block_tables,
+        [[pair(4, 8, 200)]],
+        max_batch=2,
+        lane=lane1,
+    )
+    assert plan1b is not None
+    assert plan1b[0][0] is specs1[0]

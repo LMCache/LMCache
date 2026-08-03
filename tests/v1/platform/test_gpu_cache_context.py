@@ -546,5 +546,160 @@ class TestGPUCacheContextReportStatus:
             assert 0 <= group["object_group_idx"] < manager.num_object_groups
 
 
+# ---------------------------------------------------------------------------
+# Retrieve scatter lanes: the context provisions N transfer streams + staging
+# ---------------------------------------------------------------------------
+
+
+class TestRetrieveLanes:
+    def test_resolve_retrieve_lanes_env_contract(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """LMCACHE_RETRIEVE_LANES governs every path; a consumer-passed
+        alias (blend's CB_RETRIEVE_LANES) applies only where passed; default
+        2; clamped >= 1."""
+        # First Party
+        from lmcache.v1.multiprocess.config import resolve_retrieve_lanes
+
+        both = ("LMCACHE_RETRIEVE_LANES", "CB_RETRIEVE_LANES")
+        monkeypatch.delenv("LMCACHE_RETRIEVE_LANES", raising=False)
+        monkeypatch.delenv("CB_RETRIEVE_LANES", raising=False)
+        assert resolve_retrieve_lanes("LMCACHE_RETRIEVE_LANES") == 2
+        assert resolve_retrieve_lanes(*both) == 2
+
+        monkeypatch.setenv("CB_RETRIEVE_LANES", "4")
+        assert resolve_retrieve_lanes(*both) == 4  # alias reaches blend...
+        assert resolve_retrieve_lanes("LMCACHE_RETRIEVE_LANES") == 2  # ...only
+
+        monkeypatch.setenv("LMCACHE_RETRIEVE_LANES", "3")
+        assert resolve_retrieve_lanes(*both) == 3  # primary wins
+
+        monkeypatch.setenv("LMCACHE_RETRIEVE_LANES", "0")
+        assert resolve_retrieve_lanes(*both) == 1  # clamped: 1 = stock
+
+    def test_lanes1_is_passthrough(self) -> None:
+        """num_lanes=1 hands out lane 0 forever: the context's own stream
+        and staging (buffers None), unguarded, nothing allocated — the
+        stock single-stream behavior."""
+        ctx = _make_context(_SINGLE_GROUP)
+        lane = ctx.next_retrieve_lane(1)
+        assert lane.index == 0
+        assert lane.stream is ctx.stream
+        assert lane.cupy_stream is ctx.cupy_stream
+        assert lane.buffers is None and lane.block_ids_buffer is None
+        assert lane.guarded is False
+        assert ctx._temp_buffer_clones == []  # no staging clone allocated
+        for _ in range(3):
+            assert ctx.next_retrieve_lane(1) is lane
+
+    def test_multi_lane_round_robin_and_provisioning(self) -> None:
+        """num_lanes=2: lanes alternate 0,1,0,1 (same objects reused); lane 1
+        owns a real stream distinct from the context's plus staging with the
+        context's exact geometry; both lanes are guarded."""
+        ctx = _make_context(_SINGLE_GROUP)
+        lane0 = ctx.next_retrieve_lane(2)
+        lane1 = ctx.next_retrieve_lane(2)
+        assert (lane0.index, lane1.index) == (0, 1)
+        assert ctx.next_retrieve_lane(2) is lane0
+        assert ctx.next_retrieve_lane(2) is lane1
+        assert lane0.guarded and lane1.guarded
+
+        assert lane1.stream is not ctx.stream
+        assert lane1.stream.cuda_stream != ctx.stream.cuda_stream
+        # Private staging: identical geometry, distinct memory, GDS-tracked
+        # for close() deregistration.
+        assert lane1.buffers is ctx._temp_buffer_clones[0]
+        assert lane1.buffers.buffer.nbytes == ctx._temp_buffer.buffer.nbytes
+        assert lane1.buffers.buffer.data_ptr() != ctx._temp_buffer.buffer.data_ptr()
+        assert (
+            lane1.buffers.get_temp_kernel_group_buffer(0, 0).shape
+            == ctx.get_temp_kernel_group_buffer(0, 0).shape
+        )
+        assert lane1.block_ids_buffer is not None
+        assert lane1.block_ids_buffer.shape == ctx.block_ids_buffer_.shape
+        assert lane1.block_ids_buffer.data_ptr() != ctx.block_ids_buffer_.data_ptr()
+
+    def test_prewarm_creates_all_then_reuses(self) -> None:
+        """prewarm_retrieve_lanes creates every lane up front without moving
+        the round-robin counter; next_retrieve_lane reuses the pre-warmed
+        objects; re-pre-warming creates 0."""
+        ctx = _make_context(_SINGLE_GROUP)
+        lanes, created = ctx.prewarm_retrieve_lanes(2)
+        assert created == 2
+        assert [lane.index for lane in lanes] == [0, 1]
+        # Counter untouched: assignment starts at lane 0, reusing objects.
+        assert ctx.next_retrieve_lane(2) is lanes[0]
+        assert ctx.next_retrieve_lane(2) is lanes[1]
+        lanes2, created2 = ctx.prewarm_retrieve_lanes(2)
+        assert created2 == 0
+        assert lanes2[0] is lanes[0] and lanes2[1] is lanes[1]
+        assert len(ctx._temp_buffer_clones) == 1  # only lane 1 allocated
+
+    def test_base_class_degrades_to_single_lane(self) -> None:
+        """A platform whose context does not support multi-lane transfer
+        (BaseCacheContext default) always runs lane 0, whatever the
+        requested count."""
+        # First Party
+        from lmcache.v1.platform.base.cache_context import BaseCacheContext
+
+        class _SingleLaneCtx:
+            supports_retrieve_lanes = BaseCacheContext.supports_retrieve_lanes
+            _make_retrieve_lane = BaseCacheContext._make_retrieve_lane
+            _retrieve_lane_slots = BaseCacheContext._retrieve_lane_slots
+            next_retrieve_lane = BaseCacheContext.next_retrieve_lane
+            prewarm_retrieve_lanes = BaseCacheContext.prewarm_retrieve_lanes
+
+            def __init__(self) -> None:
+                self.retrieve_lanes_: list = []
+                self.retrieve_lane_next_ = 0
+                self.retrieve_lane_count_: int | None = None
+                self.stream = object()
+                self.cupy_stream = object()
+
+        ctx = _SingleLaneCtx()
+        lane = ctx.next_retrieve_lane(4)  # type: ignore[misc]
+        assert lane.index == 0
+        assert lane.stream is ctx.stream
+        assert lane.guarded is False
+        assert ctx.next_retrieve_lane(4) is lane  # type: ignore[misc]
+        lanes, created = ctx.prewarm_retrieve_lanes(4)  # type: ignore[misc]
+        assert created == 0 and lanes == [lane]
+
+    def test_lane_count_is_sticky_per_context(self) -> None:
+        """The first provisioning call fixes the lane count; a later caller
+        with a different resolved count (blend alias vs standard path) does
+        not re-shape the round-robin modulus mid-flight."""
+        ctx = _make_context(_SINGLE_GROUP)
+        lane0 = ctx.next_retrieve_lane(2)
+        lane1 = ctx.next_retrieve_lane(2)
+        # A later, larger request keeps the 2-lane modulus and objects.
+        assert ctx.next_retrieve_lane(4) is lane0
+        assert ctx.next_retrieve_lane(4) is lane1
+        lanes, created = ctx.prewarm_retrieve_lanes(4)
+        assert created == 0
+        assert len(lanes) == 2
+        assert len(ctx._temp_buffer_clones) == 1  # still only lane 1's clone
+
+    def test_stage_block_ids_out_targets_caller_buffer(self) -> None:
+        """The out= seam lanes use for private block-id staging: views alias
+        the caller's buffer; omitting it keeps the shared one (stock)."""
+        ctx = _make_context(_SINGLE_GROUP)
+        lane_buf = torch.zeros(8, dtype=torch.long, device=_DEVICE)
+        views = ctx.stage_block_ids([[3, 1], [7, 5, 9]], out=lane_buf)
+        torch.cuda.synchronize()
+        assert [v.tolist() for v in views] == [[3, 1], [7, 5, 9]]
+        assert lane_buf[:5].tolist() == [3, 1, 7, 5, 9]
+
+        views = ctx.stage_block_ids([[2, 4]])
+        torch.cuda.synchronize()
+        assert views[0].tolist() == [2, 4]
+        assert ctx.block_ids_buffer_[:2].tolist() == [2, 4]
+
+        with pytest.raises(ValueError, match="exceeds the pre-allocated buffer"):
+            ctx.stage_block_ids(
+                [[1, 2, 3]], out=torch.zeros(2, dtype=torch.long, device=_DEVICE)
+            )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

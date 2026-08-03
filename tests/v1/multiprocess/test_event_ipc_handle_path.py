@@ -211,7 +211,8 @@ def test_server_store_and_retrieve_delegate_event_ordering(
     monkeypatch.setattr(
         lmcache_driven_transfer,
         "downsample_and_stage_block_ids",
-        lambda cache_context, block_ids: block_ids,
+        # out= is the retrieve scatter lanes' private staging destination.
+        lambda cache_context, block_ids, out=None: block_ids,
     )
     monkeypatch.setattr(
         lmcache_driven_transfer,
@@ -251,6 +252,16 @@ def test_server_store_and_retrieve_delegate_event_ordering(
         device=torch.device("cpu"),
         stream="transfer-stream",
         cupy_stream="cupy-stream",
+        # Retrieve scatter lanes: this double always hands out lane 0 (the
+        # context's own stream), i.e. the stock single-lane behavior.
+        next_retrieve_lane=lambda num_lanes: SimpleNamespace(
+            index=0,
+            stream="transfer-stream",
+            cupy_stream="cupy-stream",
+            buffers=None,
+            block_ids_buffer=None,
+            guarded=False,
+        ),
         max_batch_size=1,
         kv_layer_groups_manager=SimpleNamespace(
             num_object_groups=1,

@@ -33,6 +33,38 @@ if TYPE_CHECKING:
     import lmcache.c_ops as lmc_ops
 
 
+class TransferLane:
+    """One retrieve transfer queue on a cache context: a stream + private
+    staging. Lane 0 aliases the context's own stream/buffers (``buffers`` /
+    ``block_ids_buffer`` None => use the context). ``guarded`` (context
+    runs >1 lanes) arms consumers' same-lane staging reuse guards."""
+
+    __slots__ = (
+        "index",
+        "stream",
+        "cupy_stream",
+        "buffers",
+        "block_ids_buffer",
+        "guarded",
+    )
+
+    def __init__(
+        self,
+        index: int,
+        stream: Any,
+        cupy_stream: Any,
+        buffers: Any = None,
+        block_ids_buffer: "torch.Tensor | None" = None,
+        guarded: bool = False,
+    ) -> None:
+        self.index = index
+        self.stream = stream
+        self.cupy_stream = cupy_stream
+        self.buffers = buffers
+        self.block_ids_buffer = block_ids_buffer
+        self.guarded = guarded
+
+
 class BaseCacheContext(ABC):
     """Abstract base for GPU and CPU cache contexts.
 
@@ -67,6 +99,12 @@ class BaseCacheContext(ABC):
         self.kv_layer_groups_manager_ = kv_layer_groups_manager
         self.block_ids_buffer_ = block_ids_buffer
         self.lmcache_tokens_per_chunk = lmcache_tokens_per_chunk
+        # Retrieve scatter lanes (see next_retrieve_lane); the count is
+        # resolved once at first use, lanes created lazily or by
+        # prewarm_retrieve_lanes.
+        self.retrieve_lanes_: "list[TransferLane | None]" = []
+        self.retrieve_lane_next_ = 0
+        self.retrieve_lane_count_: "int | None" = None
 
     # ------------------------------------------------------------------
     # Abstract -- subclasses MUST implement
@@ -243,12 +281,18 @@ class BaseCacheContext(ABC):
         )
 
     def stage_block_ids(
-        self, block_ids_per_group: list[list[int]]
+        self,
+        block_ids_per_group: list[list[int]],
+        out: "torch.Tensor | None" = None,
     ) -> list[torch.Tensor]:
-        """Stage per-group block IDs into the shared staging buffer.
+        """Stage per-group block IDs into the shared staging buffer, or into
+        ``out``: retrieve lanes pass their private buffer so one lane's
+        staging cannot overwrite block IDs another lane's queued kernels
+        still read.
 
         Returns one non-overlapping view per LMCache group.
         """
+        buffer = self.block_ids_buffer_ if out is None else out
         offsets = [0]
         flat: array.array = array.array("q")
         for view_block_ids in block_ids_per_group:
@@ -256,19 +300,88 @@ class BaseCacheContext(ABC):
             offsets.append(len(flat))
 
         total = offsets[-1]
-        if total > self.block_ids_buffer_.shape[0]:
+        if total > buffer.shape[0]:
             raise ValueError(
                 "block ID total %d exceeds the pre-allocated buffer "
-                "size %d" % (total, self.block_ids_buffer_.shape[0])
+                "size %d" % (total, buffer.shape[0])
             )
         if total:
             cpu_tensor = torch.frombuffer(flat, dtype=torch.long)
-            self.block_ids_buffer_[:total].copy_(cpu_tensor, non_blocking=True)
+            buffer[:total].copy_(cpu_tensor, non_blocking=True)
 
         return [
-            self.block_ids_buffer_[offsets[i] : offsets[i + 1]]
-            for i in range(len(block_ids_per_group))
+            buffer[offsets[i] : offsets[i + 1]] for i in range(len(block_ids_per_group))
         ]
+
+    # ------------------------------------------------------------------
+    # Retrieve scatter lanes
+    # ------------------------------------------------------------------
+    # Concurrent retrieves serialize on the single per-context stream:
+    # request N's completion event drains behind requests 1..N-1. Lanes are
+    # extra transfer streams, each with private staging, so requests'
+    # copies overlap; per-lane stream ordering keeps staging reuse safe
+    # without locks. 1 lane = stock behavior.
+
+    def supports_retrieve_lanes(self) -> bool:
+        """Whether this platform can provision extra transfer streams +
+        staging. Base: single-lane only (lane 0 is always safe)."""
+        return False
+
+    def _make_retrieve_lane(self, index: int, guarded: bool) -> TransferLane:
+        """Build lane ``index``. Lane 0 aliases the context's own stream and
+        staging (nothing allocated); platforms answering True to
+        :meth:`supports_retrieve_lanes` must provision lanes >= 1."""
+        if index == 0:
+            return TransferLane(0, self.stream, self.cupy_stream, guarded=guarded)
+        raise NotImplementedError(
+            f"{type(self).__name__} does not provision retrieve lanes >= 1"
+        )
+
+    def _retrieve_lane_slots(self, num_lanes: int) -> int:
+        """Resolve the lane count once per context (first provisioning
+        wins) and size the slot list, so consumers with different resolved
+        counts share one stable round-robin modulus."""
+        if self.retrieve_lane_count_ is None:
+            self.retrieve_lane_count_ = (
+                max(1, num_lanes) if self.supports_retrieve_lanes() else 1
+            )
+            self.retrieve_lanes_ = [None] * self.retrieve_lane_count_
+        return self.retrieve_lane_count_
+
+    def next_retrieve_lane(self, num_lanes: int) -> TransferLane:
+        """Round-robin the next retrieve lane, creating it on first use.
+
+        ``num_lanes`` is the consumer-resolved count (policy lives with the
+        consumers); 1 => always lane 0, i.e. the stock single-stream
+        behavior. A context's transfers run on its one affinity thread, so
+        the counter needs no lock.
+        """
+        n = self._retrieve_lane_slots(num_lanes)
+        idx = self.retrieve_lane_next_ % n
+        self.retrieve_lane_next_ = (idx + 1) % n
+        lane = self.retrieve_lanes_[idx]
+        if lane is None:
+            lane = self._make_retrieve_lane(idx, guarded=n > 1)
+            self.retrieve_lanes_[idx] = lane
+        return lane
+
+    def prewarm_retrieve_lanes(
+        self, num_lanes: int
+    ) -> "tuple[list[TransferLane], int]":
+        """Create every lane now, off the retrieve critical path. Leaves
+        the round-robin counter untouched.
+
+        Returns:
+            ``(lanes, created)``: all lanes in index order and how many this
+            call created (0 => already warm, e.g. a re-registration).
+        """
+        n = self._retrieve_lane_slots(num_lanes)
+        created = 0
+        for idx in range(n):
+            if self.retrieve_lanes_[idx] is None:
+                self.retrieve_lanes_[idx] = self._make_retrieve_lane(idx, guarded=n > 1)
+                created += 1
+        return [lane for lane in self.retrieve_lanes_ if lane is not None], created
 
     # ------------------------------------------------------------------
     # Derived properties (pure helpers)

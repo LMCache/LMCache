@@ -694,3 +694,17 @@ def parse_args_to_coordinator_config(
         event_reporting=event_reporting,
         event_flush_interval=event_flush_interval,
     )
+
+
+def resolve_retrieve_lanes(*env_names: str, default: int = 2) -> int:
+    """Retrieve scatter-lane count from the first set env var, clamped >= 1.
+
+    Policy for BaseCacheContext's lane API: ``LMCACHE_RETRIEVE_LANES``
+    governs every retrieve path; blend also passes ``CB_RETRIEVE_LANES`` as
+    an alias. 1 = stock single-stream behavior.
+    """
+    for name in env_names:
+        raw = os.getenv(name)
+        if raw is not None:
+            return max(1, int(raw))
+    return default

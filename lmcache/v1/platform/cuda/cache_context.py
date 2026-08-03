@@ -36,7 +36,7 @@ from lmcache.v1.multiprocess.group_view import (
     EngineGroupInfo,
     engine_group_layer_indices,
 )
-from lmcache.v1.platform.base.cache_context import BaseCacheContext
+from lmcache.v1.platform.base.cache_context import BaseCacheContext, TransferLane
 
 logger = init_logger(__name__)
 
@@ -409,6 +409,9 @@ class GPUCacheContext(BaseCacheContext):
             device=self.device_,
             max_batch_size=4,
         )
+        # Extra staging buffers handed out via clone_temp_buffer() (retrieve
+        # scatter lanes); tracked so close() deregisters them.
+        self._temp_buffer_clones: list[_TempGPUBuffer] = []
 
         # GPU streams
         self.cuda_stream_ = torch_dev.Stream(device=self.device_)
@@ -435,10 +438,87 @@ class GPUCacheContext(BaseCacheContext):
 
     def close(self) -> None:
         """
-        Deregister this context's GDS staging buffer (reverse of __init__).
+        Deregister this context's GDS staging buffer (reverse of __init__),
+        plus any scatter-lane clones handed out by clone_temp_buffer().
         """
         with torch_dev.stream(self.cuda_stream_):
             get_gds_context().deregister_gpu_buffer(self._temp_buffer.buffer)
+            for clone in self._temp_buffer_clones:
+                get_gds_context().deregister_gpu_buffer(clone.buffer)
+        self._temp_buffer_clones.clear()
+
+    def supports_retrieve_lanes(self) -> bool:
+        """CUDA contexts can provision extra transfer streams + staging."""
+        return True
+
+    def _make_retrieve_lane(self, index: int, guarded: bool) -> TransferLane:
+        """Provision retrieve lane ``index``: lane 0 aliases the context's
+        stream/staging; lanes >= 1 get their own stream, a staging clone
+        (GDS-registered on the lane stream, deregistered in close()), and a
+        private block-id buffer sized like the shared one."""
+        if index == 0:
+            return super()._make_retrieve_lane(index, guarded)
+        # Third Party
+        import cupy
+
+        with torch_dev.device(self.device_):
+            stream = torch_dev.Stream(device=self.device_)
+            cupy_stream = cupy.cuda.ExternalStream(
+                stream.cuda_stream, self.device_.index
+            )
+            with torch_dev.stream(stream):
+                buffers = self.clone_temp_buffer()
+                block_ids_buffer = torch.empty(
+                    self.block_ids_buffer_.shape[0],
+                    dtype=torch.long,
+                    device=self.device_,
+                )
+                self._warm_retrieve_lane(buffers, block_ids_buffer)
+            stream.synchronize()
+        return TransferLane(
+            index, stream, cupy_stream, buffers, block_ids_buffer, guarded=guarded
+        )
+
+    def _warm_retrieve_lane(
+        self, buffers: _TempGPUBuffer, block_ids_buffer: torch.Tensor
+    ) -> None:
+        """Exercise a fresh lane once on the ambient (lane) stream: CUDA
+        lazy module loading makes the first launch of a not-yet-loaded
+        kernel serialize against all in-flight work in the process, so no
+        first-launch (or first pinned-alloc / IPC-event init) may remain
+        once traffic starts."""
+        buffers.buffer[:4096].fill_(0)
+        for kg_idx in range(self.kv_layer_groups_manager_.num_kernel_groups):
+            buffers.get_temp_kernel_group_buffer(0, kg_idx).view(-1)[:1024].fill_(0)
+        pinned = torch.zeros(4096, dtype=torch.uint8, pin_memory=True)
+        buffers.buffer[:4096].copy_(pinned, non_blocking=True)
+        self.stage_block_ids([[0]], out=block_ids_buffer)
+        event = torch_dev.Event(interprocess=True)
+        event.record()
+        event.ipc_handle()
+        event.query()
+
+    def clone_temp_buffer(self) -> _TempGPUBuffer:
+        """Allocate an extra staging buffer with the context's exact
+        geometry, exposing the same get_temp_*_buffer surface. Used for
+        retrieve lanes' private staging; GDS-registered on the caller's
+        current stream and deregistered in close()."""
+        clone = _TempGPUBuffer(
+            kv_layer_groups_manager=self.kv_layer_groups_manager_,
+            lmcache_tokens_per_chunk=self.lmcache_tokens_per_chunk,
+            device=self.device_,
+            max_batch_size=self._temp_buffer.max_batch_size,
+        )
+        get_gds_context().register_gpu_buffer(clone.buffer)
+        self._temp_buffer_clones.append(clone)
+        logger.info(
+            "Allocated temp-buffer clone #%d (%.1f MiB) on %s for a retrieve "
+            "scatter lane",
+            len(self._temp_buffer_clones),
+            clone.buffer.nbytes / (1 << 20),
+            str(self.device_),
+        )
+        return clone
 
     @property
     def stream(self) -> Any:
