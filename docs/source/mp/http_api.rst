@@ -121,6 +121,17 @@ compatibility with the vLLM-embedded API server.
      - Enumerate the live cache adapters (``type_name``, ``tier``, ``primary``,
        ``reconfigurable``). Supersedes ``/reconfigure/backends``.
    * - GET
+     - ``/config/policies``
+     - Return runtime management-policy state, version, and hot-update
+       capabilities.
+   * - POST
+     - ``/config/policies/validate``
+     - Validate a runtime policy update without applying it.
+   * - PATCH
+     - ``/config/policies``
+     - Apply a node-local runtime update to store, prefetch, or eviction policy
+       settings.
+   * - GET
      - ``/version``
      - Combined version string (``"<version>-<commit_id>"``).
    * - GET
@@ -202,6 +213,97 @@ compatibility with the vLLM-embedded API server.
    * - POST
      - ``/reconfigure/{backend}/{operation}``
      - Apply one runtime reconfiguration operation to a backend adapter.
+
+**Runtime management policy**
+
+``GET /config/policies`` reports the current runtime policy version and the
+fields that can be updated without restarting the server. Phase 1 supports
+the registered ``store_policy`` and ``prefetch_policy`` selectors, plus the
+L1 and configured L2 eviction ``trigger_watermark`` and ``eviction_ratio``
+tunables. Eviction policy classes remain stateful and cannot be replaced at
+runtime.
+
+Use ``POST /config/policies/validate`` before ``PATCH /config/policies`` when
+an orchestrator wants to validate a change before applying it. Include the
+version returned by ``GET`` as ``expected_version`` to reject stale writes.
+Updates are not retroactive: store changes affect future store plans,
+prefetch changes affect future prefetch requests, and eviction tunables are
+read on the next eviction loop tick.
+
+Example:
+
+.. code-block:: bash
+
+   curl -s http://localhost:8080/config/policies
+
+   curl -s -X PATCH http://localhost:8080/config/policies \
+     -H 'Content-Type: application/json' \
+     -d '{
+       "expected_version": 0,
+       "store_policy": "skip_l1",
+       "l1_eviction": {"tunables": {"eviction_ratio": 0.1}}
+     }'
+
+The update is node-local and process-local in Phase 1; it is not persisted
+across restarts. The coordinator fan-out endpoints below can now target the
+registered MP fleet.
+
+**Coordinator runtime management policy**
+
+The MP coordinator exposes direct proxies for a registered node:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 10 55 35
+
+   * - Method
+     - Path
+     - Purpose
+   * - GET
+     - ``/instances/{instance_id}/config/policies``
+     - Read one node's policy state.
+   * - POST
+     - ``/instances/{instance_id}/config/policies/validate``
+     - Validate one node's update without applying it.
+   * - PATCH
+     - ``/instances/{instance_id}/config/policies``
+     - Apply one node's update.
+
+Fleet operations address every currently registered node:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 10 45 45
+
+   * - Method
+     - Path
+     - Purpose
+   * - POST
+     - ``/fleet/config/policies/validate``
+     - Validate the update on every node; no update is applied.
+   * - PATCH
+     - ``/fleet/config/policies``
+     - Validate every node, then apply concurrently.
+
+Fleet bodies wrap the node-local update and can provide per-node optimistic
+versions because versions are local to each MP server:
+
+.. code-block:: json
+
+   {
+     "update": {
+       "store_policy": "skip_l1",
+       "l1_eviction": {"tunables": {"eviction_ratio": 0.1}}
+     },
+     "expected_versions": {"node-a": 4, "node-b": 7}
+   }
+
+Fleet ``PATCH`` is a validation barrier followed by best-effort apply. Any
+validation failure prevents all ``PATCH`` calls. A failure after validation
+returns ``status: "partial"`` with one result per node; there is no rollback
+or cross-node transaction in this phase. Transport failures are reported as
+``502`` and version conflicts as ``409``. A fleet request must use
+``expected_versions`` rather than the node-local ``update.expected_version``.
 
 **Observability**
 

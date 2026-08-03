@@ -37,6 +37,7 @@ class EventType(Enum):
     SM_READ_PREFETCHED_FINISHED = "sm.read.prefetched_finished"
     SM_WRITE_RESERVED = "sm.write.reserved"
     SM_WRITE_FINISHED = "sm.write.finished"
+    RUNTIME_POLICY_UPDATED = "runtime.policy.updated"
 
     # L2 Store Controller events
     L2_STORE_SUBMITTED = "l2.store.submitted"
