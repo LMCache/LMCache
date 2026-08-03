@@ -156,8 +156,34 @@ func TestBuildContainerArgs_CoordinatorURL(t *testing.T) {
 	if got := findArgValue(t, args, "--coordinator-heartbeat-interval"); got != "5" {
 		t.Errorf("--coordinator-heartbeat-interval = %q, want 5", got)
 	}
-	if !slices.Contains(args, "--coordinator-l2-event-reporting") {
-		t.Errorf("expected --coordinator-l2-event-reporting flag")
+	// Flag spellings are a contract with `lmcache server`: an unknown flag
+	// makes argparse exit 2, so every engine pod crash-loops. Assert the exact
+	// names (no "l2-" infix) rather than just their presence.
+	if !slices.Contains(args, "--coordinator-event-reporting") {
+		t.Errorf("expected --coordinator-event-reporting flag, got %v", args)
+	}
+	if got := findArgValue(t, args, "--coordinator-event-flush-interval"); got != "1" {
+		t.Errorf("--coordinator-event-flush-interval = %q, want 1", got)
+	}
+}
+
+func TestBuildContainerArgs_CoordinatorEventReportingDisabled(t *testing.T) {
+	engine := minimalEngine()
+	engine.Spec.Coordinator = &lmcachev1alpha1.CoordinatorConnectionSpec{
+		URL: ptr("http://my-coordinator.default.svc:9300"),
+	}
+
+	args := BuildContainerArgs(&engine.Spec)
+
+	// --coordinator-event-reporting is store_true upstream, so it must be
+	// omitted (not passed a value) when reporting is off. The flush interval
+	// is still emitted: it carries a value and applies whenever the
+	// coordinator URL is set.
+	if slices.Contains(args, "--coordinator-event-reporting") {
+		t.Errorf("expected no --coordinator-event-reporting when disabled, got %v", args)
+	}
+	if got := findArgValue(t, args, "--coordinator-event-flush-interval"); got != "1" {
+		t.Errorf("--coordinator-event-flush-interval = %q, want 1", got)
 	}
 }
 
