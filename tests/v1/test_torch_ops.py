@@ -7,6 +7,7 @@ import time
 import unittest.mock
 
 # Third Party
+import numpy as np
 import pytest
 import torch
 
@@ -2801,6 +2802,416 @@ def scenario_record_drain_event(ops: Any, device: str) -> dict[str, torch.Tensor
 # 3. Registry
 # ==========================================
 
+
+def scenario_object_group_transfer_plan(
+    ops: Any, device: str
+) -> dict[str, torch.Tensor] | None:
+    """Round-trip split-KV and heterogeneous fused-KV object-group plans."""
+    if not hasattr(ops, "execute_object_group_transfer"):
+        return None
+
+    use_pointer_plan = device in ("cpu", "cuda")
+
+    def object_plan_address(tensor: torch.Tensor) -> int | torch.Tensor:
+        """Return the representation accepted by object-group transfer plans."""
+        return tensor.data_ptr() if use_pointer_plan else tensor
+
+    # Split-KV layout: cover the ordinary two-plane object-buffer reconstruction
+    # path in addition to the fused layout below.
+    split_kv_desc = ops.PageBufferShapeDesc()
+    split_kv_desc.kv_size = 2
+    split_kv_desc.nl = 1
+    split_kv_desc.nb = 2
+    split_kv_desc.bs = 2
+    split_kv_desc.nh = 1
+    split_kv_desc.hs = 2
+    split_kv_desc.element_size = torch.float32.itemsize
+    if ops is _py_ops:
+        split_kv_desc.dtype = torch.float32
+
+    split_kv_paged = torch.zeros((2, 2, 2, 1, 2), dtype=torch.float32, device=device)
+    split_kv_paged_ptrs = torch.tensor(
+        [split_kv_paged.data_ptr()], dtype=torch.uint64, device=device
+    )
+    split_kv_block_ids = torch.tensor([0, 1], dtype=torch.int64, device=device)
+    split_kv_input = torch.tensor(
+        [
+            [[[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0]]],
+            [[[11.0, 12.0], [13.0, 14.0], [15.0, 16.0], [17.0, 18.0]]],
+        ],
+        dtype=torch.float32,
+    )
+    split_kv_temp_input = torch.zeros_like(split_kv_input, device=device)
+    split_kv_h2d_group = ops.KernelGroupSpec(
+        (
+            object_plan_address(split_kv_paged_ptrs)
+            if use_pointer_plan
+            else [split_kv_paged]
+        ),
+        [object_plan_address(split_kv_temp_input)],
+        split_kv_desc,
+        4,
+        ops.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS,
+        object_plan_address(split_kv_block_ids),
+        split_kv_block_ids.numel(),
+    )
+    split_kv_h2d_step = ops.BatchStep(
+        [
+            ops.StagingCopy(
+                object_plan_address(split_kv_temp_input),
+                object_plan_address(split_kv_input),
+                split_kv_input.nbytes,
+                0,
+            )
+        ],
+        [ops.LaunchVar(0, 0, 2, 1, 0)],
+    )
+    ops.execute_object_group_transfer(
+        ops.TransferDirection.H2D,
+        torch.device(device),
+        64,
+        [split_kv_h2d_group],
+        [split_kv_h2d_step],
+    )
+    device_sync(device)
+
+    split_kv_temp_output = torch.zeros_like(split_kv_temp_input)
+    split_kv_output = torch.zeros_like(split_kv_input)
+    split_kv_d2h_group = ops.KernelGroupSpec(
+        (
+            object_plan_address(split_kv_paged_ptrs)
+            if use_pointer_plan
+            else [split_kv_paged]
+        ),
+        [object_plan_address(split_kv_temp_output)],
+        split_kv_desc,
+        4,
+        ops.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS,
+        object_plan_address(split_kv_block_ids),
+        split_kv_block_ids.numel(),
+    )
+    split_kv_d2h_step = ops.BatchStep(
+        [
+            ops.StagingCopy(
+                object_plan_address(split_kv_output),
+                object_plan_address(split_kv_temp_output),
+                split_kv_output.nbytes,
+                0,
+            )
+        ],
+        [ops.LaunchVar(0, 0, 2, 1, 0)],
+    )
+    ops.execute_object_group_transfer(
+        ops.TransferDirection.D2H,
+        torch.device(device),
+        64,
+        [split_kv_d2h_group],
+        [split_kv_d2h_step],
+    )
+    device_sync(device)
+    expected_split_kv_paged = (
+        split_kv_input[:, 0].reshape(2, 2, 2, 2).permute(1, 0, 2, 3).unsqueeze(3)
+    )
+    torch.testing.assert_close(split_kv_paged.detach().cpu(), expected_split_kv_paged)
+    torch.testing.assert_close(split_kv_output, split_kv_input)
+
+    # Fused-KV layout: cover groups with different block geometries packed into
+    # each staged object.
+    dtype = torch.float32
+    chunk_size = 4
+    num_objects = 2
+    group_a_shape = (1, chunk_size, 8)
+    group_b_shape = (1, chunk_size, 12)
+    group_a_bytes = torch.empty(group_a_shape, dtype=dtype).nbytes
+    group_b_bytes = torch.empty(group_b_shape, dtype=dtype).nbytes
+    object_bytes = group_a_bytes + group_b_bytes
+
+    host_input = torch.empty(num_objects * object_bytes, dtype=torch.uint8)
+    for object_idx in range(num_objects):
+        object_offset = object_idx * object_bytes
+        host_input[object_offset : object_offset + group_a_bytes].view(dtype).view(
+            group_a_shape
+        ).copy_(
+            torch.arange(np.prod(group_a_shape), dtype=dtype).reshape(group_a_shape)
+            + object_idx * 100
+        )
+        host_input[object_offset + group_a_bytes : object_offset + object_bytes].view(
+            dtype
+        ).view(group_b_shape).copy_(
+            torch.arange(np.prod(group_b_shape), dtype=dtype).reshape(group_b_shape)
+            + object_idx * 1000
+        )
+
+    def _group_buffer(
+        storage: torch.Tensor, object_idx: int, group_offset: int, nbytes: int
+    ) -> torch.Tensor:
+        """Return one typed group view in an object-group staging buffer."""
+        offset = object_idx * object_bytes + group_offset
+        return storage[offset : offset + nbytes].view(dtype)
+
+    def _shape_desc(block_size: int, num_heads: int, content_size: int) -> Any:
+        """Build the descriptor for one fused NHD group."""
+        desc = ops.PageBufferShapeDesc()
+        desc.kv_size = 1
+        desc.nl = 1
+        desc.nb = 4
+        desc.bs = block_size
+        desc.nh = num_heads
+        desc.hs = content_size
+        desc.element_size = dtype.itemsize
+        return desc
+
+    paged_a = torch.zeros((4, 2, 2, 4), dtype=dtype, device=device)
+    paged_b = torch.zeros((4, 4, 2, 6), dtype=dtype, device=device)
+    block_ids_a = torch.tensor([2, 0, 3, 1], dtype=torch.int64, device=device)
+    block_ids_b = torch.tensor([3, 1], dtype=torch.int64, device=device)
+    paged_a_buffers: int | list[torch.Tensor]
+    paged_b_buffers: int | list[torch.Tensor]
+    if use_pointer_plan:
+        paged_a_ptrs = torch.tensor(
+            [paged_a.data_ptr()], dtype=torch.uint64, device=device
+        )
+        paged_b_ptrs = torch.tensor(
+            [paged_b.data_ptr()], dtype=torch.uint64, device=device
+        )
+        paged_a_buffers = paged_a_ptrs.data_ptr()
+        paged_b_buffers = paged_b_ptrs.data_ptr()
+    else:
+        paged_a_buffers = [paged_a]
+        paged_b_buffers = [paged_b]
+
+    temp_storage = torch.zeros(
+        num_objects * object_bytes, dtype=torch.uint8, device=device
+    )
+    group_a_temps = [
+        _group_buffer(temp_storage, object_idx, 0, group_a_bytes).view(group_a_shape)
+        for object_idx in range(num_objects)
+    ]
+    group_b_temps = [
+        _group_buffer(temp_storage, object_idx, group_a_bytes, group_b_bytes).view(
+            group_b_shape
+        )
+        for object_idx in range(num_objects)
+    ]
+    group_a_plan_buffers: list[int] | list[torch.Tensor] = (
+        [buffer.data_ptr() for buffer in group_a_temps]
+        if use_pointer_plan
+        else group_a_temps
+    )
+    group_b_plan_buffers: list[int] | list[torch.Tensor] = (
+        [buffer.data_ptr() for buffer in group_b_temps]
+        if use_pointer_plan
+        else group_b_temps
+    )
+    h2d_staging = []
+    for object_idx in range(num_objects):
+        offset = object_idx * object_bytes
+        h2d_staging.append(
+            ops.StagingCopy(
+                temp_storage.data_ptr() + offset
+                if use_pointer_plan
+                else temp_storage[offset : offset + object_bytes],
+                host_input.data_ptr() + offset
+                if use_pointer_plan
+                else host_input[offset : offset + object_bytes],
+                object_bytes,
+                0,
+            )
+        )
+    groups = [
+        ops.KernelGroupSpec(
+            paged_a_buffers,
+            group_a_plan_buffers,
+            _shape_desc(2, 2, 4),
+            chunk_size,
+            ops.EngineKVFormat.NL_X_NB_BS_NH_CS,
+            object_plan_address(block_ids_a),
+            block_ids_a.numel(),
+        ),
+        ops.KernelGroupSpec(
+            paged_b_buffers,
+            group_b_plan_buffers,
+            _shape_desc(4, 2, 6),
+            chunk_size,
+            ops.EngineKVFormat.NL_X_NB_BS_NH_CS,
+            object_plan_address(block_ids_b),
+            block_ids_b.numel(),
+        ),
+    ]
+    launches = [
+        ops.LaunchVar(0, 0, block_ids_a.numel(), num_objects, 0),
+        ops.LaunchVar(1, 0, block_ids_b.numel(), num_objects, 0),
+    ]
+    ops.execute_object_group_transfer(
+        ops.TransferDirection.H2D,
+        torch.device(device),
+        64,
+        groups,
+        [ops.BatchStep(h2d_staging, launches)],
+    )
+    device_sync(device)
+
+    output = torch.zeros_like(host_input)
+    temp_output = torch.zeros_like(temp_storage)
+    group_a_output_temps = [
+        _group_buffer(temp_output, object_idx, 0, group_a_bytes).view(group_a_shape)
+        for object_idx in range(num_objects)
+    ]
+    group_b_output_temps = [
+        _group_buffer(temp_output, object_idx, group_a_bytes, group_b_bytes).view(
+            group_b_shape
+        )
+        for object_idx in range(num_objects)
+    ]
+    d2h_groups = [
+        ops.KernelGroupSpec(
+            paged_a_buffers,
+            [buffer.data_ptr() for buffer in group_a_output_temps]
+            if use_pointer_plan
+            else group_a_output_temps,
+            _shape_desc(2, 2, 4),
+            chunk_size,
+            ops.EngineKVFormat.NL_X_NB_BS_NH_CS,
+            object_plan_address(block_ids_a),
+            block_ids_a.numel(),
+        ),
+        ops.KernelGroupSpec(
+            paged_b_buffers,
+            [buffer.data_ptr() for buffer in group_b_output_temps]
+            if use_pointer_plan
+            else group_b_output_temps,
+            _shape_desc(4, 2, 6),
+            chunk_size,
+            ops.EngineKVFormat.NL_X_NB_BS_NH_CS,
+            object_plan_address(block_ids_b),
+            block_ids_b.numel(),
+        ),
+    ]
+    d2h_staging = []
+    for object_idx in range(num_objects):
+        offset = object_idx * object_bytes
+        d2h_staging.append(
+            ops.StagingCopy(
+                output.data_ptr() + offset
+                if use_pointer_plan
+                else output[offset : offset + object_bytes],
+                temp_output.data_ptr() + offset
+                if use_pointer_plan
+                else temp_output[offset : offset + object_bytes],
+                object_bytes,
+                0,
+            )
+        )
+    ops.execute_object_group_transfer(
+        ops.TransferDirection.D2H,
+        torch.device(device),
+        64,
+        d2h_groups,
+        [ops.BatchStep(d2h_staging, launches)],
+    )
+    device_sync(device)
+    torch.testing.assert_close(output, host_input)
+    return {
+        "object_group_split_kv": split_kv_output.detach().cpu(),
+        "object_group_fused_heterogeneous": output,
+    }
+
+
+def scenario_cb_retrieve_plan_flat(
+    ops: Any, device: str
+) -> dict[str, torch.Tensor] | None:
+    """Exercise equivalent Tensor-backed and pointer-backed CB retrieve plans."""
+    if not hasattr(ops, "execute_cb_retrieve_plan_flat"):
+        return None
+    use_pointer_plan = device in ("cpu", "cuda")
+
+    def cb_plan_address(tensor: torch.Tensor) -> int | torch.Tensor:
+        """Return the representation accepted by CacheBlend retrieve plans."""
+        return tensor.data_ptr() if use_pointer_plan else tensor
+
+    paged = torch.zeros((2, 2, 2, 2), dtype=torch.float32, device=device)
+    paged_ptrs = torch.tensor([paged.data_ptr()], dtype=torch.uint64, device=device)
+    slot_mapping = torch.tensor([0, 3], dtype=torch.int64, device=device)
+    staged = torch.tensor(
+        [[[[2.0, 3.0], [7.0, 11.0]]], [[[5.0, 13.0], [17.0, 19.0]]]],
+        dtype=torch.float32,
+    )
+    temp = torch.zeros_like(staged, device=device)
+    cos_sin = torch.tensor(
+        [[1.0, 0.0], [0.0, 1.0], [1.0, 0.0]], dtype=torch.float32, device=device
+    )
+    spec = ops.CBGroupSpec(
+        cb_plan_address(paged_ptrs) if use_pointer_plan else [paged],
+        [cb_plan_address(temp)],
+        1,
+        2,
+        2,
+        torch.float32.itemsize,
+        ops.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS,
+        4,
+        2,
+        2,
+        cb_plan_address(slot_mapping),
+        slot_mapping.numel(),
+        cb_plan_address(cos_sin),
+        2,
+        1,
+        2,
+        6,
+        True,
+    )
+    if not use_pointer_plan:
+        assert spec.slot_mapping_base is slot_mapping
+    spec.slot_mapping_capacity = 2
+    assert spec.slot_mapping_capacity == 2
+
+    ops.execute_cb_retrieve_plan_flat(
+        torch.device(device),
+        64,
+        [spec],
+        (
+            [ops.StagingCopy(temp, staged, staged.nbytes, 0)]
+            if not use_pointer_plan
+            else np.array(
+                [[temp.data_ptr(), staged.data_ptr(), staged.nbytes, 0]],
+                dtype=np.int64,
+            )
+        ),
+        np.array([[0, 0, 0, 1]], dtype=np.int64),
+        np.array([[0, 0, 0, 2]], dtype=np.int64),
+        np.array([[1, 1, 1]], dtype=np.int64),
+    )
+    device_sync(device)
+
+    expected_keys = staged[0, 0].reshape(2, 1, 2).clone()
+    _py_ops.rotary_embedding_k_fused(
+        torch.tensor([0, 1]),
+        torch.tensor([1, 2]),
+        expected_keys,
+        2,
+        cos_sin.cpu(),
+        True,
+    )
+    result = paged.detach().cpu()
+    torch.testing.assert_close(result[0, 0, 0], expected_keys[0, 0])
+    torch.testing.assert_close(result[1, 0, 1], expected_keys[1, 0])
+    torch.testing.assert_close(result[0, 1, 0], staged[1, 0, 0])
+    torch.testing.assert_close(result[1, 1, 1], staged[1, 0, 1])
+
+    if ops is _py_ops:
+        with pytest.raises(ValueError, match="staging table"):
+            ops.execute_cb_retrieve_plan_flat(
+                device,
+                64,
+                [spec],
+                np.empty((1, 3), dtype=np.int64),
+                np.empty((0, 4), dtype=np.int64),
+                np.empty((0, 4), dtype=np.int64),
+                np.empty((0, 3), dtype=np.int64),
+            )
+    return {"cb_retrieve_paged": result}
+
+
 # cover pybind list in csrc/pybind.cpp
 SCENARIO_REGISTRY = {
     "transfer_direction_enum": scenario_transfer_direction_enum,
@@ -2825,6 +3236,8 @@ SCENARIO_REGISTRY = {
     "record_drain_completion": scenario_record_drain_completion,
     "dispatcher_integration": scenario_dispatcher_integration,
     "record_drain_event": scenario_record_drain_event,
+    "object_group_transfer_plan": scenario_object_group_transfer_plan,
+    "cb_retrieve_plan_flat": scenario_cb_retrieve_plan_flat,
 }
 
 

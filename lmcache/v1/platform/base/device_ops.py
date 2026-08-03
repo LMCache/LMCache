@@ -15,14 +15,20 @@ from typing import TYPE_CHECKING, ClassVar
 
 if TYPE_CHECKING:
     # Third Party
+    import numpy as np
     import torch
 
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.platform import ops_types, torch_ops
 from lmcache.v1.platform.ops_types import (
+    BatchStep,
+    CBGroupSpec,
     EngineKVFormat,
+    KernelGroupSpec,
+    LaunchVar,
     PageBufferShapeDesc,
+    StagingCopy,
     TransferDirection,
     set_shape_desc_dtype,
 )
@@ -52,6 +58,11 @@ class DeviceOps:
     EngineKVFormat = EngineKVFormat
     GPUKVFormat = EngineKVFormat  # back-compat alias
     PageBufferShapeDesc = PageBufferShapeDesc
+    StagingCopy = StagingCopy
+    LaunchVar = LaunchVar
+    BatchStep = BatchStep
+    KernelGroupSpec = KernelGroupSpec
+    CBGroupSpec = CBGroupSpec
     set_shape_desc_dtype = staticmethod(set_shape_desc_dtype)
 
     def __init__(self) -> None:
@@ -240,3 +251,44 @@ class DeviceOps:
 
     def rotary_embedding_k_fused(self, *args, **kwargs):
         return torch_ops.rotary_embedding_k_fused(*args, **kwargs)
+
+    def rotary_embedding_k_fused_strided(self, *args, **kwargs):
+        return torch_ops.rotary_embedding_k_fused_strided(*args, **kwargs)
+
+    def execute_object_group_transfer(
+        self,
+        direction: ops_types.TransferDirection,
+        device: "torch.device | str",
+        host_buffer_alignment: int,
+        kernel_group_specs: "list[ops_types.KernelGroupSpec]",
+        batch_steps: "list[ops_types.BatchStep]",
+    ) -> None:
+        """Execute a serial object-group transfer plan on this backend."""
+        return torch_ops.execute_object_group_transfer(
+            direction,
+            device,
+            host_buffer_alignment,
+            kernel_group_specs,
+            batch_steps,
+        )
+
+    def execute_cb_retrieve_plan_flat(
+        self,
+        device: "torch.device | str",
+        host_buffer_alignment: int,
+        group_specs: "list[ops_types.CBGroupSpec]",
+        staging: "np.ndarray",
+        ropes: "np.ndarray",
+        scatters: "np.ndarray",
+        step_offsets: "np.ndarray",
+    ) -> None:
+        """Execute a serial flattened CacheBlend retrieve plan on this backend."""
+        return torch_ops.execute_cb_retrieve_plan_flat(
+            device,
+            host_buffer_alignment,
+            group_specs,
+            staging,
+            ropes,
+            scatters,
+            step_offsets,
+        )

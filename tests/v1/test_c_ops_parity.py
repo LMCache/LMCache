@@ -213,22 +213,13 @@ def _has_real_names(params):
 # These are native-only with no torch fallback; call sites guard with hasattr.
 # NOTE: execute_object_group_transfer previously had a signature-only stub
 # (raised NotImplementedError unconditionally) — not a real fallback.
-_EXCLUDED_FUNCS: set[str] = {
-    "execute_object_group_transfer",
-    "execute_cb_retrieve_plan_flat",
-}
+_EXCLUDED_FUNCS: set[str] = set()
 
 # Plan types (StagingCopy, LaunchVar, BatchStep, KernelGroupSpec)
 # are native-only with no torch fallback — auto-discovered by bind_native.
 # NOTE: these previously had signature-only stubs (raised NotImplementedError
 # unconditionally) — not real fallbacks.
-_EXCLUDED_DESCS: set[str] = {
-    "StagingCopy",
-    "LaunchVar",
-    "BatchStep",
-    "KernelGroupSpec",
-    "CBGroupSpec",
-}
+_EXCLUDED_DESCS: set[str] = set()
 
 _fallback_callables = _public_callables(fallback)
 _c_ops_callables = _public_callables(c_ops) if HAS_C_OPS else {}
