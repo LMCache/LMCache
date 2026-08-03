@@ -656,15 +656,6 @@ when buffering the entry (before the request finishes). This is
 essentially eager offload with CPU-side buffering, which defeats the
 purpose of lazy offload (avoiding immediate D2H cost).
 
-**Option C: Accept reallocation as a cache miss**
-
-Treat reallocated blocks as a cache miss — the KV data is lost, but the
-system remains correct. This is acceptable if:
-- The workload has low GPU memory pressure (reallocation is rare).
-- The threshold is set high enough (e.g. 80%) to trigger before most
-  blocks are reallocated.
-- Dropped stores are logged for monitoring.
-
 **Recommendation**: Use **Option A** (hash check before D2H). It is
 low-cost (just a pointer dereference per block) and prevents silent data
 corruption. Blocks that were reallocated are skipped (logged as dropped
