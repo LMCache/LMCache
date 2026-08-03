@@ -105,18 +105,25 @@ caller-provided load buffers during prefetch.
   exposes a fallback count and a bounded bucket sample instead of retaining the
   complete fallback bucket set. Empty ``cache_salt`` values also use default
   NVMe placement with no directive.
-- With ``fdp_data_placement_policy="cache_salt_rank"``, ``cache_salt`` uses the
-  same ``bucket:suffix`` interpretation as ``cache_salt_prefix``. The policy
-  preserves tenant bucket isolation and lazily assigns separate placement
-  identifiers to ``kv_rank`` streams inside each bucket, up to the visible node
-  GPU count. Applications using fewer GPUs consume fewer identifiers. Extra
-  ranks, or new buckets that cannot obtain an identifier, store with no FDP
-  directive rather than sharing another bucket's identifiers.
-- ``cache_salt_rank`` is intended for multi-tenant GPU nodes backed by FDP SSDs
-  with many usable placement identifiers, typically 128 or more. On 8-GPU nodes
-  with large-memory accelerators, multiple applications may share the node by
-  using different GPU subsets; 128 identifiers can cover up to 16 applications
-  with eight rank streams each, while 256 identifiers can cover up to 32.
+- With ``fdp_data_placement_policy="cache_salt_rank"``, placement is keyed by
+  the case-insensitive ``cache_salt`` bucket prefix and the local rank encoded
+  in ``kv_rank``. The suffix after ``":"`` remains part of the object key but
+  does not affect FDP placement. For example, ``batch:app-a`` and
+  ``batch:app-b`` share the ``batch`` bucket: local rank 0 from both
+  applications shares one placement identifier, local rank 1 shares another,
+  and so on. Each bucket can use at most the detected visible GPU count worth
+  of placement identifiers. Extra ranks, or buckets that cannot obtain an
+  identifier, store with no FDP directive.
+- Sharing placement identifiers within a bucket can be intentional because the
+  available FDP placement-identifier pool is finite. Operators can assign the
+  same prefix to applications with similar cache lifetimes, or use a distinct
+  prefix for each application when placement isolation is required. For
+  example, ``app01:<suffix>`` through ``app16:<suffix>`` can provide 16
+  application buckets with eight rank streams each, consuming up to 128
+  placement identifiers when at least 128 identifiers are available and the
+  adapter detects at least eight visible GPUs. Applications using the same
+  prefix share the placement identifiers for equal local ranks instead of
+  receiving separate sets.
 - Bucket-to-placement assignments are process-local. Restart recovery does not
   need them for correctness because ``cache_salt`` is part of the object key,
   but first-seen FDP placement assignments may change after adapter restart.
