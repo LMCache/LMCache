@@ -463,46 +463,231 @@ def drain(self, target_ratio: float = 0.5) -> list[PendingStoreEntry]:
     return drained
 ```
 
-### 2.6 Interaction with `request_finished`
+### 2.6 GPU Block Protection: Touch and Free
 
-When a request finishes:
-1. `request_finished` returns `True` — vLLM holds the blocks.
-2. The pending store entries for this request remain in the buffer queue.
-3. Eventually the threshold triggers, the entries are drained and
-   submitted as store ops.
-4. The worker's `get_finished` reports the request_id only after all
-   stores complete.
-5. vLLM then releases the blocks.
+Following the same pattern as vLLM's `SimpleCPUOffloadConnector`
+(Section 1.3.1), LMCache lazy offload uses **explicit touch/free
+ref_cnt pairs** to protect GPU blocks during in-flight D2H transfers,
+rather than holding blocks via `request_finished`.
 
-No special handling is needed at `request_finished` time — the existing
-async store lifecycle already guarantees blocks are held until stores
-complete.
+#### 2.6.1 `request_finished` Always Returns `False`
 
-### 2.7 Edge Case: Queue Overflow Without Trigger
+```python
+# Scheduler-side request_finished (both eager and lazy modes)
+def request_finished(self, request_id: str, block_ids) -> tuple[bool, dict | None]:
+    """Always returns (False, None). GPU blocks for in-flight stores are
+    protected by explicit touch()/free_blocks() ref_cnt pairs, so vLLM can
+    free the request's blocks immediately."""
+    
+    # Clean up request-level tracking (metadata, pending entries, etc.)
+    self._cleanup_request_tracking(request_id)
+    
+    return False, None
+```
 
-If many short requests finish quickly but the threshold is never reached
-(e.g. low load), entries could accumulate indefinitely. Mitigations:
+This means vLLM's scheduler immediately decrements `ref_cnt` on all the
+request's blocks when it finishes. The connector does **not** hold
+blocks hostage via the return value — it relies on its own `touch()`
+calls to keep in-flight blocks alive.
 
-- **Time-based fallback**: If an entry has been in the queue longer than
-  N seconds (or N steps), force-drain it regardless of threshold.
-- **Request-finished flush**: When `request_finished` is called, if the
-  request still has pending entries in the queue, mark them as
-  high-priority for the next drain cycle.
+#### 2.6.2 Lazy Offload: Touch on Drain, Free on Completion
 
-### 2.8 Worker-Side: No Changes Required
+When the pending store queue reaches the threshold and entries are
+drained for submission, the scheduler **touches** the GPU blocks to
+prevent eviction during the async D2H transfer:
 
-The worker receives standard `LoadStoreOp` objects in the connector
-metadata and calls `submit_store_request` as usual. It is unaware of
-whether the store was triggered eagerly or lazily — the interface is
-identical.
+```python
+# In build_connector_meta, when threshold is reached:
+if self._pending_store_queue.should_offload:
+    entries = self._pending_store_queue.drain()
+    
+    for entry in entries:
+        # Get GPU blocks for this entry
+        gpu_blocks = []
+        for block_ids_group in entry.block_ids:
+            gpu_blocks.extend([
+                self._gpu_block_pool.blocks[bid] for bid in block_ids_group
+            ])
+        
+        # Touch GPU blocks to prevent eviction during async D2H copy
+        self._gpu_block_pool.touch(gpu_blocks)
+        
+        # Create store op and emit to worker
+        store_op = self._create_store_op(entry)
+        store_ops.append(store_op)
+        
+        # Track touched blocks for this store (for later free)
+        self._touched_blocks[store_op.store_id] = gpu_blocks
+```
 
-### 2.9 Summary
+When the D2H transfer completes (reported by worker via connector output
+or completion callback), the scheduler **frees** the touched blocks:
+
+```python
+# When worker reports store completion for store_id:
+def _on_store_completion(self, store_id: str):
+    # Retrieve the touched GPU blocks for this store
+    gpu_blocks = self._touched_blocks.pop(store_id)
+    
+    # Free the ref_cnt added by touch()
+    self._gpu_block_pool.free_blocks(gpu_blocks)
+```
+
+#### 2.6.3 ref_cnt Lifecycle
+
+This creates the same **balanced ref_cnt lifecycle** as
+SimpleCPUOffloadConnector:
+
+```
+                    Lazy Store (GPU->LMCache Server)
+                    ---------------------------------
+
+Request active:     vLLM holds blocks [ref_cnt >= 1]
+
+Request finishes:   request_finished() returns False
+                    vLLM frees request blocks [ref_cnt -= 1]
+                    -> blocks enter free queue (ref_cnt = 0)
+
+Buffer phase:       entries sit in PendingStoreQueue
+                    blocks remain in free queue (ref_cnt = 0)
+                    (MAY be allocated to other requests)
+
+Threshold reached:  drain() triggered
+                    gpu_pool.touch(blocks) [ref_cnt += 1]
+                    -> blocks removed from free queue
+                    -> protected from eviction/reuse
+
+D2H in-flight:      blocks held by touch ref [ref_cnt >= 1]
+
+D2H completes:      gpu_pool.free_blocks(blocks) [ref_cnt -= 1]
+                    -> if ref_cnt = 0, back to free queue
+```
+
+Key insight: **Blocks may be reallocated to other requests during the
+buffer phase** (between request finish and threshold trigger). When
+`touch()` is called at drain time:
+
+- If the block was **not reallocated**: `touch()` bumps `ref_cnt` from
+  0 to 1, protecting it during D2H.
+- If the block was **reallocated**: `touch()` bumps `ref_cnt` from N to
+  N+1 (where N >= 1 from the new request). The block now has multiple
+  owners.
+
+After D2H completes, `free_blocks()` decrements `ref_cnt`. If the block
+was reallocated, it stays alive because the new request still holds it.
+
+#### 2.6.4 Handling Block Reallocation: Read-Before-Overwrite Risk
+
+The above ref_cnt lifecycle is correct from a memory management
+perspective, but there is a **data corruption risk**: if a block is
+reallocated to a new request and **overwritten** before the deferred
+D2H transfer reads it, the store will copy stale or wrong KV data.
+
+**Example Timeline:**
+
+```
+Step 10:  Request A finishes. Blocks [0,1,2] freed (ref_cnt = 0).
+          Blocks enter free queue.
+          Entry buffered: (req_A, blocks=[0,1,2], tokens=[...])
+
+Step 15:  Request B starts. vLLM allocates block 0 from free queue.
+          Request B writes new KV data to block 0.
+
+Step 20:  Threshold reached. drain() touches blocks [0,1,2].
+          touch(block 0): ref_cnt 1 -> 2 (req_B + touch)
+          Submit D2H for blocks [0,1,2].
+
+Step 21:  D2H reads block 0 -> WRONG DATA (req_B's data, not req_A's)
+```
+
+**Mitigation Options:**
+
+**Option A: Check block hash before D2H**
+
+When draining, verify that each GPU block's `block_hash` still matches
+the hash recorded in the `PendingStoreEntry` at buffer time:
+
+```python
+for entry in drained_entries:
+    gpu_blocks = self._get_gpu_blocks_for_entry(entry)
+    
+    # Verify blocks have not been overwritten
+    valid = True
+    for i, gpu_block in enumerate(gpu_blocks):
+        if gpu_block.block_hash != entry.expected_block_hashes[i]:
+            # Block was reallocated and overwritten. Skip this store.
+            logger.warning(
+                f"Block {gpu_block.block_id} was reallocated "
+                f"(expected hash {entry.expected_block_hashes[i]}, "
+                f"got {gpu_block.block_hash}), skipping store"
+            )
+            valid = False
+            break
+    
+    if not valid:
+        continue  # Skip this entry, do not touch or submit
+    
+    # Blocks still valid - proceed with touch and store
+    self._gpu_block_pool.touch(gpu_blocks)
+    store_ops.append(self._create_store_op(entry))
+    self._touched_blocks[store_op.store_id] = gpu_blocks
+```
+
+This requires `PendingStoreEntry` to record the `block_hash` of each GPU
+block at buffer time:
+
+```python
+@dataclass
+class PendingStoreEntry:
+    request_id: str
+    token_ids: list[int]
+    block_ids: list[list[int]]
+    expected_block_hashes: list[BlockHash]  # NEW: snapshot at buffer time
+    start: int
+    end: int
+    cache_salt: str
+    num_gpu_blocks: int
+```
+
+**Option B: Copy-on-write during buffer phase**
+
+Immediately copy the GPU block data to a temporary CPU pinned buffer
+when buffering the entry (before the request finishes). This is
+essentially eager offload with CPU-side buffering, which defeats the
+purpose of lazy offload (avoiding immediate D2H cost).
+
+**Option C: Accept reallocation as a cache miss**
+
+Treat reallocated blocks as a cache miss — the KV data is lost, but the
+system remains correct. This is acceptable if:
+- The workload has low GPU memory pressure (reallocation is rare).
+- The threshold is set high enough (e.g. 80%) to trigger before most
+  blocks are reallocated.
+- Dropped stores are logged for monitoring.
+
+**Recommendation**: Use **Option A** (hash check before D2H). It is
+low-cost (just a pointer dereference per block) and prevents silent data
+corruption. Blocks that were reallocated are skipped (logged as dropped
+stores), which is semantically equivalent to never buffering that entry
+in the first place.
+
+#### 2.6.5 Scheduler and Worker Implementation Summary
+
+| Phase | Action |
+|-------|--------|
+| **Buffer phase** | Record `PendingStoreEntry` with `expected_block_hashes` snapshot |
+| **request_finished** | Always return `False` (vLLM frees blocks immediately) |
+| **Threshold trigger** | Drain queue, verify hashes, `touch()` valid blocks, emit store ops |
+| **Store submission** | Track `store_id -> touched_blocks` mapping |
+| **D2H completion** | `free_blocks()` for the touched blocks |
+
+### 2.7 Summary
 
 | Aspect | Description |
 |--------|-------------|
 | **When to buffer** | Every step in `build_connector_meta`, when new storable chunks are detected |
 | **What to buffer** | `PendingStoreEntry` containing token_ids, block_ids, start/end (all info needed for key construction) |
-| **When to flush** | When total buffered GPU blocks ≥ threshold (configurable ratio of total GPU blocks) |
-| **How to flush** | FIFO partial drain → emit as store ops in connector metadata |
-| **Worker changes** | None — receives standard store ops |
+| **When to flush** | When total buffered GPU blocks >= threshold (configurable ratio of total GPU blocks) |
+| **How to flush** | FIFO partial drain -> emit as store ops in connector metadata |
+| **Worker changes** | Yes — metadata extension, `_lazy_deferred_requests` tracking, guarded `get_finished`, deferred `request_finished` cleanup |
 | **Server changes** | None — receives standard STORE requests |
