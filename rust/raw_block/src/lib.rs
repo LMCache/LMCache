@@ -232,6 +232,21 @@ fn os_err(msg: &str) -> PyErr {
     PyOSError::new_err((errno(), msg.to_string()))
 }
 
+// Convert an NVMe passthrough ioctl return value to a Python result.
+// Negative values are syscall errors reported through errno, while positive
+// values are NVMe command completion status codes returned by the kernel.
+fn check_nvme_ioctl_result(rc: libc::c_int, msg: &str) -> Result<(), PyErr> {
+    if rc < 0 {
+        return Err(os_err(msg));
+    }
+    if rc > 0 {
+        return Err(PyRuntimeError::new_err(format!(
+            "{msg}: NVMe status 0x{rc:x}"
+        )));
+    }
+    Ok(())
+}
+
 // Low-level write loop that retries until all bytes are written.
 // This isolates the raw syscalls from Python-facing logic.
 fn pwrite_from_ptr(
@@ -438,9 +453,7 @@ fn nvme_identify_ns(fd: RawFd, nsid: u32) -> Result<NvmeIdNs, PyErr> {
     // SAFETY: ioctl with properly initialized command structure
     let rc = unsafe { libc::ioctl(fd, NVME_IOCTL_ADMIN_CMD, &cmd as *const NvmePassthruCmd) };
 
-    if rc < 0 {
-        return Err(os_err("NVMe identify namespace ioctl failed"));
-    }
+    check_nvme_ioctl_result(rc, "NVMe identify namespace ioctl failed")?;
 
     Ok(id_ns)
 }
@@ -467,9 +480,7 @@ fn nvme_fdp_reclaim_unit_handle_status(
     // SAFETY: ioctl with properly initialized command structure.
     let rc = unsafe { libc::ioctl(fd, NVME_IOCTL_IO_CMD, &mut cmd as *mut NvmePassthruCmd) };
 
-    if rc < 0 {
-        return Err(os_err("NVMe FDP reclaim unit handle status ioctl failed"));
-    }
+    check_nvme_ioctl_result(rc, "NVMe FDP reclaim unit handle status ioctl failed")?;
 
     Ok(())
 }
@@ -536,6 +547,16 @@ fn placement_id_to_u16(pid: i32) -> PyResult<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn check_nvme_ioctl_result_accepts_success() {
+        assert!(check_nvme_ioctl_result(0, "NVMe ioctl failed").is_ok());
+    }
+
+    #[test]
+    fn check_nvme_ioctl_result_rejects_nvme_status() {
+        assert!(check_nvme_ioctl_result(1, "NVMe ioctl failed").is_err());
+    }
 
     #[test]
     fn placement_id_to_u16_accepts_valid_bounds() {
