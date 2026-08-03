@@ -288,6 +288,76 @@ for an explanation of all build arguments.
 Verify Installation
 -------------------
 
+Run both checks from the same virtual environment that will launch vLLM or the
+LMCache server:
+
 .. code-block:: bash
 
-    python -c "import lmcache.c_ops"
+    python - <<'PY'
+    import importlib.util
+    import lmcache
+
+    print("lmcache package:", lmcache.__file__)
+    print("native extension available:", importlib.util.find_spec("lmcache.c_ops") is not None)
+    PY
+
+The second line should print ``True`` for a GPU/native-extension install. For a
+source-only install created with ``NO_NATIVE_EXT=1``, ``False`` is expected.
+
+Troubleshoot import and extension failures
+------------------------------------------
+
+Use these checks when ``import lmcache.c_ops`` fails, vLLM reports an undefined
+symbol, or a freshly installed environment appears to import an older LMCache
+copy.
+
+1. Confirm that Python is using the environment you just installed into:
+
+   .. code-block:: bash
+
+       python -c "import sys, lmcache; print(sys.executable); print(lmcache.__file__)"
+       python -m pip show lmcache
+
+   If ``sys.executable`` or ``lmcache.__file__`` points outside the expected
+   virtual environment, reactivate the environment and reinstall LMCache there.
+
+2. Check CUDA and PyTorch before rebuilding native extensions:
+
+   .. code-block:: bash
+
+       nvidia-smi
+       python - <<'PY'
+       import torch
+       print("torch:", torch.__version__)
+       print("torch CUDA:", torch.version.cuda)
+       print("CUDA available:", torch.cuda.is_available())
+       PY
+
+   The CUDA family used by PyTorch should match the LMCache wheel or the local
+   toolchain used for a source build. For CUDA 12.9, install from the ``cu129``
+   wheel instructions above; for CUDA 13.0, use the default CUDA 13 wheels.
+
+3. Rebuild from a clean source checkout when symbols do not match:
+
+   .. code-block:: bash
+
+       python -m pip uninstall -y lmcache
+       python -m pip cache purge
+       uv pip install -r requirements/build.txt
+       uv pip install -e . --no-build-isolation
+
+   ``--no-build-isolation`` is important because it builds LMCache against the
+   ``torch`` already installed in the active environment instead of downloading a
+   different build dependency into an isolated environment.
+
+4. If you intentionally do not need native GPU extensions, install the
+   source-only variant and verify that Python can still import the top-level
+   package:
+
+   .. code-block:: bash
+
+       NO_NATIVE_EXT=1 uv pip install -e .
+       python -c "import lmcache; print(lmcache.__file__)"
+
+   Do not use this mode for workloads that require ``lmcache.c_ops`` or CUDA
+   kernels.
