@@ -28,9 +28,12 @@ import torch
 
 # First Party
 from lmcache.v1.distributed.api import (
+    AttnWindowDesc,
     MemoryLayoutDesc,
     ObjectKey,
     PrefetchHandle,
+    PrefetchMode,
+    PrefetchRequestSpec,
     TrimPolicy,
 )
 
@@ -244,6 +247,46 @@ def _dec_trim_policy(name: str) -> TrimPolicy:
     return TrimPolicy[name]
 
 
+def _enc_prefetch_mode(m: PrefetchMode) -> str:
+    return m.name
+
+
+def _dec_prefetch_mode(name: str) -> PrefetchMode:
+    return PrefetchMode[name]
+
+
+def _enc_attn_window(d: AttnWindowDesc) -> list[int]:
+    return list(d.num_chunks_in_sw)
+
+
+def _dec_attn_window(num_chunks_in_sw: list[int]) -> AttnWindowDesc:
+    return AttnWindowDesc(num_chunks_in_sw=list(num_chunks_in_sw))
+
+
+def _enc_prefetch_request_spec(s: PrefetchRequestSpec) -> dict[str, Any]:
+    # Delegate each field to its registered codec so the struct survives
+    # component-type changes (keys/layout/policy/attn/mode all have codecs).
+    return {
+        "keys": [encode_value(k) for k in s.keys],
+        "layout_desc": encode_value(s.layout_desc),
+        "extra_count": s.extra_count,
+        "policy": encode_value(s.policy),
+        "attn_desc": encode_value(s.attn_desc),
+        "mode": encode_value(s.mode),
+    }
+
+
+def _dec_prefetch_request_spec(d: dict[str, Any]) -> PrefetchRequestSpec:
+    return PrefetchRequestSpec(
+        keys=[decode_value(k) for k in d["keys"]],
+        layout_desc=decode_value(d["layout_desc"]),
+        extra_count=d["extra_count"],
+        policy=decode_value(d["policy"]),
+        attn_desc=decode_value(d["attn_desc"]),
+        mode=decode_value(d["mode"]),
+    )
+
+
 def _enc_set(s: set) -> list:
     return [encode_value(x) for x in s]
 
@@ -281,8 +324,24 @@ register_codec(
     TypeCodec(tag="torch.dtype", encode=_enc_torch_dtype, decode=_dec_torch_dtype),
 )
 register_codec(
+    AttnWindowDesc,
+    TypeCodec(tag="AttnWindowDesc", encode=_enc_attn_window, decode=_dec_attn_window),
+)
+register_codec(
     TrimPolicy,
     TypeCodec(tag="TrimPolicy", encode=_enc_trim_policy, decode=_dec_trim_policy),
+)
+register_codec(
+    PrefetchMode,
+    TypeCodec(tag="PrefetchMode", encode=_enc_prefetch_mode, decode=_dec_prefetch_mode),
+)
+register_codec(
+    PrefetchRequestSpec,
+    TypeCodec(
+        tag="PrefetchRequestSpec",
+        encode=_enc_prefetch_request_spec,
+        decode=_dec_prefetch_request_spec,
+    ),
 )
 register_codec(
     set,

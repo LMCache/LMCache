@@ -75,23 +75,6 @@ class TestGPUKVFormatEnum:
 
         assert hasattr(lmc_ops.EngineKVFormat, "NB_NL_TWO_NH_BS_HS")
 
-    def test_is_cross_layer_format(self) -> None:
-        # First Party
-        from lmcache.v1.gpu_connector.utils import is_cross_layer_format
-        import lmcache.c_ops as lmc_ops
-
-        assert is_cross_layer_format(lmc_ops.EngineKVFormat.NB_NL_TWO_BS_NH_HS)
-        assert is_cross_layer_format(lmc_ops.EngineKVFormat.NB_NL_TWO_NH_BS_HS)
-        assert not is_cross_layer_format(lmc_ops.EngineKVFormat.NL_X_NB_BS_HS)
-
-    def test_is_hnd(self) -> None:
-        # First Party
-        from lmcache.v1.gpu_connector.utils import is_hnd
-        import lmcache.c_ops as lmc_ops
-
-        assert is_hnd(lmc_ops.EngineKVFormat.NB_NL_TWO_NH_BS_HS)
-        assert not is_hnd(lmc_ops.EngineKVFormat.NB_NL_TWO_BS_NH_HS)
-
 
 @pytest.mark.skipif(not _has_lmc_ops(), reason="lmcache C ops not built")
 class TestNormalizeTRTLLM:
@@ -363,32 +346,32 @@ class TestRawCudaIPCWrapperType:
     def test_is_subclass(self) -> None:
         # First Party
         from lmcache.v1.multiprocess.custom_types import (
-            CudaIPCWrapper,
-            RawCudaIPCWrapper,
+            DeviceIPCWrapper,
         )
+        from lmcache.v1.platform.cuda.ipc_wrapper import RawCudaIPCWrapper
 
-        assert issubclass(RawCudaIPCWrapper, CudaIPCWrapper)
+        assert issubclass(RawCudaIPCWrapper, DeviceIPCWrapper)
 
     def test_kvcache_typing_unchanged(self) -> None:
-        """``KVCache = list[CudaIPCWrapper]`` should accept subclass items
+        """``KVCache = list[DeviceIPCWrapper]`` should accept concrete wrappers
         — load-bearing for msgspec ext-code reuse over ZMQ.
         """
         # First Party
         from lmcache.v1.multiprocess.custom_types import (
-            CudaIPCWrapper,
+            DeviceIPCWrapper,
             KVCache,
-            RawCudaIPCWrapper,
         )
+        from lmcache.v1.platform.cuda.ipc_wrapper import RawCudaIPCWrapper
 
-        assert KVCache == list[CudaIPCWrapper]
-        # Static check substitute: a Raw* instance fits the list type.
-        assert issubclass(RawCudaIPCWrapper, CudaIPCWrapper)
+        assert KVCache == list[DeviceIPCWrapper]
+        # Static check substitute: a concrete wrapper fits the list type.
+        assert issubclass(RawCudaIPCWrapper, DeviceIPCWrapper)
 
     def test_serde_uses_shared_ext_code(self) -> None:
-        """Ext code 1 dispatches to ``CudaIPCWrapper`` (shared with subclass)."""
+        """Ext code 1 dispatches via ``DeviceIPCWrapper`` for all wrappers."""
         # First Party
         from lmcache.v1.multiprocess import custom_types
 
         registry = custom_types._CUSTOMERIZED_SERIALIZERS  # noqa: PLC2701
-        assert custom_types.CudaIPCWrapper in registry
-        assert registry[custom_types.CudaIPCWrapper].code == 1
+        assert custom_types.DeviceIPCWrapper in registry
+        assert registry[custom_types.DeviceIPCWrapper].code == 1

@@ -38,12 +38,21 @@ Recipe pages for the validated hybrid-attention architectures:
    * - Qwen3.5 / Qwen3.6 series
      - Mamba / GDN + full
      - :doc:`/recipes/qwen3_5`
+   * - Kimi-Linear
+     - KDA linear-attention + MLA full
+     - :doc:`/recipes/kimi_linear`
+   * - Kimi K3
+     - KDA linear-attention + MLA full
+     - :doc:`/recipes/kimi_k3`
    * - DeepSeek-V4-Flash
      - Sparse-MLA (multiple KV groups)
      - :doc:`/recipes/deepseek_v4_flash`
    * - GLM 5.1/5.2
      - Dynamic Sparse Attention (multiple KV groups)
      - :doc:`/recipes/glm5_2`
+   * - MiniMax-M3
+     - Sparse attention + lightning indexer (mixed KV formats in one group)
+     - :doc:`/recipes/minimax_m3`
 
 .. toctree::
    :hidden:
@@ -53,8 +62,11 @@ Recipe pages for the validated hybrid-attention architectures:
    /recipes/gemma4
    /recipes/gpt_oss
    /recipes/qwen3_5
+   /recipes/kimi_linear
+   /recipes/kimi_k3
    /recipes/deepseek_v4_flash
    /recipes/glm5_2
+   /recipes/minimax_m3
 
 What Works
 ----------
@@ -93,12 +105,39 @@ detects the model's KV cache groups automatically at registration time.
    back to a single unified group). You do not need
    ``--no-disable-hybrid-kv-cache-manager`` or any related flag.
 
+Object-group separation
+-----------------------
+
+At KV-cache registration LMCache buckets a hybrid model's layers into **object
+groups** — the unit it stores and retrieves as one object. By default
+(``--separate-object-groups``, on) each distinct cross-chunk attention window
+becomes its own object group: full-attention layers form one group, and each
+sliding-window size (mamba / GDN included) forms another. Pass
+``--no-separate-object-groups`` to keep every layer in a single full-attention
+object group instead (the previous behavior).
+
+.. code-block:: bash
+
+   # default: one object group per attention window
+   lmcache server --chunk-size 256 --l1-size-gb 100
+
+   # opt out: a single full-attention object group for all layers
+   lmcache server --chunk-size 256 --l1-size-gb 100 --no-separate-object-groups
+
+The flag is transparent to correctness — prefix caching and KV reuse behave the
+same either way, and a non-hybrid model (a single attention behavior) always
+resolves to one object group regardless of the setting. Separation organizes
+storage by attention window so that each group's cross-chunk window is tracked
+independently.
+
 Mamba / Linear-Attention Hybrids
 --------------------------------
 
 Models that interleave **Mamba / Gated-DeltaNet (GDN) linear-attention layers**
 with full attention — the Qwen3.5 and Qwen3.6 series (``Qwen/Qwen3.5-0.8B``,
-``Qwen/Qwen3.6-27B``, …), Qwen3-Next, and other GDN hybrids — are supported.
+``Qwen/Qwen3.6-27B``, …), Qwen3-Next, Kimi-Linear
+(``moonshotai/Kimi-Linear-48B-A3B-Instruct``), Kimi K3
+(``moonshotai/Kimi-K3``), and other GDN hybrids — are supported.
 Unlike a paged key/value cache, their linear-attention layers keep a recurrent
 **state cache** (a convolution + SSM state). LMCache reinterprets that state as
 an opaque page at registration time, so prefix caching and KV reuse work end to
@@ -165,6 +204,12 @@ example:
    * - ``Qwen/Qwen3.5-0.8B``
      - 544
      - 1
+   * - ``moonshotai/Kimi-Linear-48B-A3B-Instruct``
+     - 944
+     - 2
+   * - ``moonshotai/Kimi-K3``
+     - 768
+     - 8
 
 Step 2 — derive the three required flags from ``N``
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -216,12 +261,6 @@ Caveats
 
 See the :doc:`Qwen3.5 / Qwen3.6 recipe <../recipes/qwen3_5>` for the validated
 end-to-end commands and the per-model block sizes.
-
-What Is Not Supported Yet
--------------------------
-
-- **DeepSeek-V4-style compressed / indexer caches** are not yet handled by the
-  multiprocess connector.
 
 Verifying Correctness
 ---------------------

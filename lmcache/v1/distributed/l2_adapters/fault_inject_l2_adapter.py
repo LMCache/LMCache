@@ -27,13 +27,14 @@ import threading
 
 if TYPE_CHECKING:
     # First Party
+    from lmcache.native_storage_ops import Bitmap
+    from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
     from lmcache.v1.distributed.internal_api import L1MemoryDesc
+    from lmcache.v1.distributed.internal_api import L2AdapterListener, L2StoreResult
+    from lmcache.v1.memory_management import MemoryObj
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.native_storage_ops import Bitmap
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
-from lmcache.v1.distributed.internal_api import L2AdapterListener, L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import (
     AdapterUsage,
     L2AdapterInterface,
@@ -46,7 +47,6 @@ from lmcache.v1.distributed.l2_adapters.config import (
 from lmcache.v1.distributed.l2_adapters.factory import (
     register_l2_adapter_factory,
 )
-from lmcache.v1.memory_management import MemoryObj
 
 logger = init_logger(__name__)
 
@@ -383,6 +383,11 @@ class FaultInjectL2Adapter(L2AdapterInterface):
     def register_listener(self, listener: L2AdapterListener) -> None:
         """Forward the listener registration to the inner adapter."""
         self._inner.register_listener(listener)
+
+    def set_backend_name(self, name: str) -> None:
+        """Forward the backend name to the inner adapter (which owns the
+        listener-notify funnel that tags cache events)."""
+        self._inner.set_backend_name(name)
 
     def delete(self, keys: list[ObjectKey]) -> None:
         """Delegate the delete to the inner adapter."""

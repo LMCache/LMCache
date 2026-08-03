@@ -232,8 +232,10 @@ class RawBlockCore:
 
         if not self.device_path:
             raise ValueError("RawBlockCore requires a non-empty device_path")
-        if self.block_align <= 0:
-            raise ValueError("block_align must be > 0")
+        if self.block_align <= 0 or (self.block_align & (self.block_align - 1)) != 0:
+            raise ValueError(
+                f"block_align must be a power of 2, got {self.block_align}"
+            )
         if self.header_bytes < 24:
             raise ValueError("header_bytes must be >= 24")
         if self.header_bytes % self.block_align != 0:
@@ -1581,7 +1583,6 @@ class RawBlockCore:
                 "meta_version": self.meta_version,
                 "data_base_offset": self._data_base_offset,
                 "next_slot": self._next_slot,
-                "free_slots": list(self._free_slots),
                 "entries": {
                     encoded_key: {
                         "offset": entry.offset,
@@ -1707,6 +1708,12 @@ class RawBlockCore:
         if checkpoint_device_path and checkpoint_device_path != self.device_path:
             logger.warning("Device metadata device_path mismatch; ignoring metadata")
             return False
+        if int(data.get("block_align", self.block_align)) != self.block_align:
+            logger.warning("Device metadata block_align mismatch; ignoring metadata")
+            return False
+        if int(data.get("header_bytes", self.header_bytes)) != self.header_bytes:
+            logger.warning("Device metadata header_bytes mismatch; ignoring metadata")
+            return False
         if int(data.get("slot_bytes", self.slot_bytes)) != self.slot_bytes:
             logger.warning("Device metadata slot_bytes mismatch; ignoring metadata")
             return False
@@ -1737,35 +1744,9 @@ class RawBlockCore:
             )
             return False
 
-        raw_free_slots = data.get("free_slots", [])
-        if not isinstance(raw_free_slots, list):
-            logger.warning("Device metadata free_slots is invalid; ignoring metadata")
-            return False
-        free_slots: list[int] = []
-        seen_slots: set[int] = set()
-        for raw_slot in raw_free_slots:
-            try:
-                slot = int(raw_slot)
-            except Exception:
-                logger.warning(
-                    "Device metadata free_slots contains non-integer; ignoring metadata"
-                )
-                return False
-            if slot < 0 or slot >= self._max_slots:
-                logger.warning(
-                    "Device metadata free_slots contains out-of-range slot %d; "
-                    "ignoring metadata",
-                    slot,
-                )
-                return False
-            if slot in seen_slots:
-                continue
-            seen_slots.add(slot)
-            free_slots.append(slot)
-
         with self._lock:
             self._next_slot = next_slot
-            self._free_slots = free_slots
+            self._free_slots = []
             self._index.clear()
             self._lock_refcnt.clear()
 
@@ -1821,8 +1802,11 @@ class RawBlockCore:
                 self._offset_to_slot(int(entry.offset))
                 for entry in self._index.values()
             }
+            # Rebuild from committed entries instead of trusting checkpoint
+            # free_slots. A crash-time checkpoint can otherwise preserve a slot
+            # reserved by an uncommitted in-flight write as neither used nor free.
             self._free_slots = [
-                slot for slot in self._free_slots if slot not in used_slots
+                slot for slot in range(self._next_slot) if slot not in used_slots
             ]
 
             self._meta_dirty_total = 0

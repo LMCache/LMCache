@@ -84,6 +84,14 @@ class Bitmap:
         """Set every bit in ``indices`` to 1 (positions >= size ignored)."""
         ...
 
+    def set_range(self, start: int, end: int) -> None:
+        """Set every bit in the half-open range ``[start, end)`` to 1.
+
+        ``end`` is clamped to the bitmap size. Fills whole bytes, so far cheaper
+        than per-bit ``set`` for a contiguous span.
+        """
+        ...
+
     def clear(self, index: int) -> None:
         """Clear the bit at the specified index to 0."""
         ...
@@ -107,6 +115,14 @@ class Bitmap:
 
     def count_leading_ones(self) -> int:
         """Return the number of leading ones."""
+        ...
+
+    def highest_set_bit(self) -> int:
+        """Index of the highest set bit, or ``-1`` if no bit is set.
+
+        The value is signed so the empty bitmap is representable (an unsigned
+        index could not encode it).
+        """
         ...
 
     def __and__(self, other: Bitmap) -> Bitmap:
@@ -150,6 +166,50 @@ class Bitmap:
     def __repr__(self) -> str:
         """String representation: '1' for set bits, '0' for clear bits."""
         ...
+
+def fold(
+    found: Bitmap,
+    num_chunks: int,
+    num_ranks: int,
+    group_windows: Sequence[int],
+) -> Bitmap:
+    """Fold per-(group, chunk, rank) presence into servable prefix lengths.
+
+    Args:
+        found: Group-major / chunk-major / rank-minor presence bitmap of length
+            ``len(group_windows) * num_chunks * num_ranks``.
+        num_chunks: Number of LMCache chunks in the request.
+        num_ranks: Number of kv_rank shards per chunk.
+        group_windows: Per-object-group cross-chunk window size in chunks;
+            ``<= 0`` means full attention.
+
+    Returns:
+        A bitmap of size ``num_chunks + 1``; bit ``L`` set iff every object
+        group can serve a length-``L`` prefix. Bit 0 is always set.
+    """
+    ...
+
+def unfold(
+    hit_length: int,
+    num_chunks: int,
+    num_ranks: int,
+    group_windows: Sequence[int],
+) -> Bitmap:
+    """Expand a model-wide hit length into the per-group retain mask.
+
+    Args:
+        hit_length: Model-wide prefix hit length in chunks (clamped to
+            ``num_chunks``).
+        num_chunks: Number of LMCache chunks in the request.
+        num_ranks: Number of kv_rank shards per chunk.
+        group_windows: Per-object-group cross-chunk window size in chunks;
+            ``<= 0`` means full attention.
+
+    Returns:
+        Retain mask of length ``len(group_windows) * num_chunks * num_ranks``
+        (all ranks of each retained ``(group, chunk)`` set).
+    """
+    ...
 
 class ParallelPatternMatcher:
     """

@@ -5,13 +5,16 @@ Most tests are pure (no cuFile): they exercise the public interface
 (singleton/no-op semantics, the <=16 MiB region split observed at the ``ca``
 cuFile seam, and the registered-region mapping driven through
 :meth:`GDSContext.transfer_async`). The ``test_gds_*_roundtrip`` tests
-exercise the real cuFile DMA path and are skipped unless CUDA + nvidia-fs
-(real GDS) are present.
+exercise the real GDS DMA path (cuFile on NVIDIA, hipFile on AMD ROCm) and are
+skipped unless that stack is present (see :func:`_gds_available`).
 """
 
 # Standard
+from collections.abc import Iterator
+from pathlib import Path
 from types import SimpleNamespace
 import os
+import tempfile
 
 # Third Party
 import pytest
@@ -23,13 +26,14 @@ from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.distributed.config import GdsL1Config
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.memory_manager import GDSL1MemoryManager
-from lmcache.v1.gpu_connector import _cufile_async as ca
+from lmcache.v1.gpu_connector import _gds_async as ca
 from lmcache.v1.gpu_connector.gds_context import (
     GDSContext,
     SlabDirection,
     get_gds_context,
     initialize_gds_context,
 )
+from lmcache.v1.memory_management import GDSMemoryObject
 
 
 def _fake_stream(handle: int):
@@ -37,10 +41,109 @@ def _fake_stream(handle: int):
     return SimpleNamespace(cuda_stream=handle, synchronize=lambda: None)
 
 
+def _gds_available() -> bool:
+    """Whether a real GPUDirect Storage stack is present for the roundtrip tests.
+
+    NVIDIA: CUDA plus the nvidia-fs kernel module (``/proc/driver/nvidia-fs``).
+    AMD ROCm: a loadable ``libhipfile.so`` (the hipFile GPU IO library). When
+    the GDS-capable driver/filesystem is absent hipFile still round-trips
+    correctly via its host-bounce fallback, so library loadability is a
+    sufficient gate for the correctness checks below.
+    """
+    if not torch.cuda.is_available():
+        return False
+    if torch.version.hip is not None:
+        # Standard
+        import ctypes
+
+        try:
+            ctypes.CDLL("libhipfile.so")
+        except OSError:
+            return False
+        return True
+    return os.path.exists("/proc/driver/nvidia-fs/stats")
+
+
 requires_gds = pytest.mark.skipif(
-    not (torch.cuda.is_available() and os.path.exists("/proc/driver/nvidia-fs/stats")),
-    reason="needs CUDA + nvidia-fs (real GPUDirect Storage)",
+    not _gds_available(),
+    reason="needs CUDA + nvidia-fs or ROCm + libhipfile.so (real GPUDirect Storage)",
 )
+
+
+def _skip_unless_gds_registrable(directory: Path) -> None:
+    """Skip the calling test when ``directory`` cannot back a GDS slab file.
+
+    Creates a small preallocated file in ``directory``, opens it with
+    ``O_DIRECT``, and registers it with the GDS driver, mirroring how
+    ``GDSContext`` opens its slab. Registration fails on filesystems the
+    driver does not support; on NVIDIA, nvidia-fs rejects files on
+    device-mapper volumes (LVM) with cuFile error 5008 whenever cuFile compat
+    mode is disabled.
+
+    Args:
+        directory: The directory in which the roundtrip test would place the
+            GDS slab file.
+    """
+    probe_path = directory / ".gds_registration_probe"
+    try:
+        fd = os.open(probe_path, os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            os.posix_fallocate(fd, 0, 4096)
+        finally:
+            os.close(fd)
+        fd = os.open(probe_path, os.O_RDWR | os.O_DIRECT)
+        try:
+            handle = ca.register_handle(fd)
+            ca.deregister_handle(handle)
+        finally:
+            os.close(fd)
+    except (OSError, RuntimeError) as exc:
+        # OSError: open/fallocate; RuntimeError: cufile/hipfile registration.
+        pytest.skip(
+            f"GDS driver cannot register files under {directory} ({exc}); "
+            "point LMCACHE_GDS_TEST_DIR at a GDS-capable filesystem"
+        )
+    finally:
+        probe_path.unlink(missing_ok=True)
+
+
+@pytest.fixture
+def gds_slab_dir(tmp_path: Path) -> Iterator[Path]:
+    """Directory holding the GDS slab file for the real-DMA roundtrip tests.
+
+    On NVIDIA the directory must be named explicitly via the
+    ``LMCACHE_GDS_TEST_DIR`` environment variable, pointing at a GDS-capable
+    filesystem (e.g. ext4 on a directly attached NVMe device); otherwise the
+    roundtrip tests are skipped. pytest's ``tmp_path`` is deliberately not
+    used as a fallback: it lives on the OS disk rather than a data disk set
+    up for GDS, and OS disks commonly use LVM/device-mapper volumes that
+    nvidia-fs cannot register, where cuFile either fails with error 5008 or,
+    with compat mode enabled, silently falls back to POSIX IO, so a passing
+    test would not have exercised the DMA path it claims to.
+
+    On AMD ROCm ``tmp_path`` is used when the variable is unset: per
+    :func:`_gds_available`, library loadability is a sufficient gate for
+    these correctness checks because the hipFile host-bounce fallback still
+    round-trips correctly, so no GDS-capable filesystem is required.
+
+    The resolved directory is probed with a small registration first and the
+    test is skipped, rather than failed, when the driver rejects it.
+    """
+    override = os.environ.get("LMCACHE_GDS_TEST_DIR", "")
+    if not override:
+        if torch.version.hip is None:
+            pytest.skip(
+                "set LMCACHE_GDS_TEST_DIR to a directory on a GDS-capable "
+                "filesystem to run the real-DMA roundtrip tests (pytest's "
+                "tmp_path may silently use the POSIX compat fallback)"
+            )
+        _skip_unless_gds_registrable(tmp_path)
+        yield tmp_path
+        return
+    with tempfile.TemporaryDirectory(dir=override, prefix="lmcache_gds_test_") as d:
+        slab_dir = Path(d)
+        _skip_unless_gds_registrable(slab_dir)
+        yield slab_dir
 
 
 @pytest.fixture(autouse=True)
@@ -170,10 +273,10 @@ class TestPerStreamRegistration:
 
 
 @requires_gds
-def test_gds_two_stream_write_read(tmp_path):
+def test_gds_two_stream_write_read(gds_slab_dir: Path):
     """Two CUDA streams each register their own buffer and round-trip a chunk
     through real cuFile DMA; verify the data stays isolated per stream."""
-    cfg = GdsL1Config(file_location=str(tmp_path), size_in_bytes=64 << 20)
+    cfg = GdsL1Config(file_location=str(gds_slab_dir), size_in_bytes=64 << 20)
     chunk_bytes = 8 << 20
     ctx = GDSContext()
     ctx.initialize(cfg)
@@ -226,9 +329,9 @@ def test_gds_two_stream_write_read(tmp_path):
 
 
 @requires_gds
-def test_gds_write_read_roundtrip(tmp_path):
+def test_gds_write_read_roundtrip(gds_slab_dir: Path):
     """Cold write then read of a chunk through the real cuFile DMA path."""
-    cfg = GdsL1Config(file_location=str(tmp_path), size_in_bytes=64 << 20)
+    cfg = GdsL1Config(file_location=str(gds_slab_dir), size_in_bytes=64 << 20)
     ctx = GDSContext()
     ctx.initialize(cfg)
     try:
@@ -243,6 +346,7 @@ def test_gds_write_read_roundtrip(tmp_path):
         )
         assert err == L1Error.SUCCESS
         mem_obj = objs[0]
+        assert isinstance(mem_obj, GDSMemoryObject)
 
         buf.fill_(0xAB)
         torch.cuda.synchronize()
@@ -260,13 +364,13 @@ def test_gds_write_read_roundtrip(tmp_path):
 
 
 @requires_gds
-def test_gds_chunk_larger_than_region_roundtrip(tmp_path):
+def test_gds_chunk_larger_than_region_roundtrip(gds_slab_dir: Path):
     """A chunk larger than the 16 MiB cuFile region cap round-trips correctly.
 
     Exercises the multi-region registration and the split (per-segment) DMA
     path: a 24 MiB chunk is registered/transferred as a 16 MiB + 8 MiB pair.
     """
-    cfg = GdsL1Config(file_location=str(tmp_path), size_in_bytes=64 << 20)
+    cfg = GdsL1Config(file_location=str(gds_slab_dir), size_in_bytes=64 << 20)
     ctx = GDSContext()
     ctx.initialize(cfg)
     try:
@@ -281,6 +385,7 @@ def test_gds_chunk_larger_than_region_roundtrip(tmp_path):
         )
         assert err == L1Error.SUCCESS
         mem_obj = objs[0]
+        assert isinstance(mem_obj, GDSMemoryObject)
 
         # Position-dependent pattern: a mis-offset or swapped segment (e.g. the
         # second segment using the wrong slab offset) would corrupt the bytes

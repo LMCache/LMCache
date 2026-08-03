@@ -101,6 +101,45 @@ def test_raw_block_core_delete_and_missing_load(tmp_path):
         core.close()
 
 
+@pytest.mark.parametrize(
+    ("field_name", "mismatched_value"),
+    [
+        ("block_align", 8192),
+        ("header_bytes", 8192),
+    ],
+)
+def test_raw_block_core_rejects_checkpoint_layout_mismatch(
+    tmp_path,
+    field_name,
+    mismatched_value,
+):
+    path = make_raw_block_file(tmp_path)
+    config = make_raw_block_core_config(path)
+    core = RawBlockCore(config, key_namespace="object")
+
+    try:
+        state = {
+            "version": 1,
+            "device_path": str(path),
+            "capacity_bytes": core.capacity_bytes,
+            "block_align": core.block_align,
+            "header_bytes": core.header_bytes,
+            "slot_bytes": core.slot_bytes,
+            "meta_total_bytes": core.meta_total_bytes,
+            "meta_magic": core.meta_magic_text,
+            "meta_version": core.meta_version,
+            "data_base_offset": core.data_base_offset(),
+            "next_slot": 0,
+            "free_slots": [],
+            "entries": {},
+        }
+        state[field_name] = mismatched_value
+
+        assert core.apply_loaded_state(state) is False
+    finally:
+        core.close()
+
+
 def test_raw_block_core_recovers_checkpoint_from_temp_file(tmp_path):
     path = make_raw_block_file(tmp_path)
     config = make_raw_block_core_config(path)
@@ -123,3 +162,67 @@ def test_raw_block_core_recovers_checkpoint_from_temp_file(tmp_path):
         assert memory_obj_bytes(loaded) == payload
     finally:
         recovered.close()
+
+
+def test_raw_block_core_rebuilds_missing_free_slots_from_checkpoint(tmp_path):
+    path = make_raw_block_file(tmp_path)
+    config = make_raw_block_core_config(path)
+    existing = encode_object_key(make_object_key(41))
+    recovered = encode_object_key(make_object_key(42))
+    existing_payload = b"already-committed"
+    recovered_payload = b"recovered-hole"
+
+    core = RawBlockCore(config, key_namespace="object")
+    try:
+        put_result = core.put_many([existing], [make_memory_obj(existing_payload)])
+        assert put_result.results == [True]
+
+        committed_offset = core.entry_offset(existing.encoded)
+        assert committed_offset == core.data_base_offset()
+
+        applied = core.apply_loaded_state(
+            {
+                "version": 1,
+                "device_path": str(path),
+                "capacity_bytes": core.capacity_bytes,
+                "block_align": core.block_align,
+                "header_bytes": core.header_bytes,
+                "slot_bytes": core.slot_bytes,
+                "meta_total_bytes": core.meta_total_bytes,
+                "meta_magic": core.meta_magic_text,
+                "meta_version": core.meta_version,
+                "data_base_offset": core.data_base_offset(),
+                # Simulates a checkpoint taken after slot 1 was reserved but
+                # before its key was committed into the metadata index.
+                "next_slot": 2,
+                # Older checkpoints include free_slots; keep this empty to
+                # verify recovery ignores stale/missing free-list data and
+                # reconstructs reusable slots from entries plus next_slot.
+                "free_slots": [],
+                "entries": {
+                    existing.encoded: {
+                        "offset": committed_offset,
+                        "size": len(existing_payload),
+                        "shape": [len(existing_payload)],
+                        "dtype": "uint8",
+                        "fmt": "BINARY",
+                        "cached_positions": None,
+                    }
+                },
+            }
+        )
+
+        assert applied is True
+        status = core.report_status()
+        assert status["next_slot"] == 2
+        assert status["free_slot_count"] == 1
+
+        put_recovered = core.put_many([recovered], [make_memory_obj(recovered_payload)])
+
+        assert put_recovered.results == [True]
+        assert core.entry_offset(recovered.encoded) == (
+            core.data_base_offset() + core.slot_bytes
+        )
+        assert core.report_status()["next_slot"] == 2
+    finally:
+        core.close()

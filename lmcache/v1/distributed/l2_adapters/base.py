@@ -16,12 +16,14 @@ import threading
 if TYPE_CHECKING:
     # First Party
     from lmcache.native_storage_ops import Bitmap
+    from lmcache.v1.distributed.api import KeyListPage, MemoryLayoutDesc, ObjectKey
+    from lmcache.v1.distributed.internal_api import L2AdapterListener, L2StoreResult
+    from lmcache.v1.memory_management import MemoryObj
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import KeyListPage, MemoryLayoutDesc, ObjectKey
-from lmcache.v1.distributed.internal_api import L2AdapterListener, L2StoreResult
-from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.mp_observability.event import Event, EventType
+from lmcache.v1.mp_observability.event_bus import get_event_bus
 
 logger = init_logger(__name__)
 
@@ -128,6 +130,8 @@ class L2AdapterInterface(ABC):
                 per-bucket byte counts regardless of this value.
         """
         self._listeners: list[L2AdapterListener] = []
+        self._backend_name: str = ""
+        self._event_bus = get_event_bus()
 
         # Centralized byte accounting. Subclasses pass ``sizes`` to
         # ``_notify_keys_stored`` / ``_notify_keys_deleted`` and the base
@@ -354,6 +358,23 @@ class L2AdapterInterface(ABC):
         """Register a listener to receive L2 adapter events."""
         self._listeners.append(listener)
 
+    def set_backend_name(self, name: str) -> None:
+        """Set the registered adapter type name used to tag cache events.
+
+        Called by the storage manager right after construction (initial
+        and runtime-added adapters alike).
+
+        Args:
+            name: The registered adapter type name (e.g. ``"fs"``;
+                non-empty).
+
+        Raises:
+            ValueError: If ``name`` is empty.
+        """
+        if not name:
+            raise ValueError("backend name must be non-empty")
+        self._backend_name = name
+
     def _notify_keys_stored(self, keys: list[ObjectKey], sizes: list[int]) -> None:
         """Update byte accounting and notify listeners that ``keys`` were
         stored. ``sizes[i]`` is the byte size of ``keys[i]``.
@@ -379,12 +400,28 @@ class L2AdapterInterface(ABC):
                 )
         for listener in self._listeners:
             listener.on_l2_keys_stored(keys, sizes)
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.L2_KEYS_STORED,
+                metadata={
+                    "keys": keys,
+                    "sizes": sizes,
+                    "backend": self._backend_name,
+                },
+            )
+        )
 
     def _notify_keys_accessed(self, keys: list[ObjectKey]) -> None:
         # ``_notify_keys_accessed`` carries no byte impact — only LRU
         # bookkeeping cares about it, so no accounting is needed here.
         for listener in self._listeners:
             listener.on_l2_keys_accessed(keys)
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.L2_KEYS_ACCESSED,
+                metadata={"keys": keys, "backend": self._backend_name},
+            )
+        )
 
     def _notify_keys_deleted(self, keys: list[ObjectKey], sizes: list[int]) -> None:
         """Update byte accounting and notify listeners that ``keys`` were
@@ -431,6 +468,12 @@ class L2AdapterInterface(ABC):
                     self._bytes_by_cache_salt[salt] = new_total
         for listener in self._listeners:
             listener.on_l2_keys_deleted(keys)
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.L2_KEYS_DELETED,
+                metadata={"keys": keys, "backend": self._backend_name},
+            )
+        )
 
     #####################
     # Eviction Interface

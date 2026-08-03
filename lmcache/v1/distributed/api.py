@@ -8,6 +8,7 @@ Could be implemented by native code in the future
 
 # Standard
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 import enum
 
 # Third Party
@@ -15,9 +16,38 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 
 logger = init_logger(__name__)
+
+
+class Tier(str, enum.Enum):
+    """A cache tier.
+
+    Subclasses ``str`` so it validates from / compares equal to the bare wire
+    value (``Tier.L2 == "l2"``) and serializes as that value. ``ALL`` is only
+    valid for operations that explicitly support multiple tiers.
+    """
+
+    L1 = "l1"
+    L2 = "l2"
+    ALL = "all"
+
+
+class L1BackendType(str, enum.Enum):
+    """The storage medium backing the L1 tier (a closed set, unlike L2
+    backends, which are an open adapter-type registry).
+
+    Subclasses ``str`` so it compares equal to and serializes as the bare
+    wire value (``L1BackendType.DRAM == "dram"``).
+    """
+
+    DRAM = "dram"
+    DEVDAX = "devdax"
+    GDS = "gds"
 
 
 class TrimPolicy(enum.Enum):
@@ -31,6 +61,22 @@ class TrimPolicy(enum.Enum):
     PREFIX = enum.auto()
     SEGMENTED_PREFIX = enum.auto()
     SPARSE = enum.auto()
+
+
+class PrefetchMode(enum.Enum):
+    """The intent of a prefetch request.
+
+    ``LOOKUP`` -- prefetch for an imminent reader: loaded keys are pinned for
+    the requesting workers, and whether they persist or are dropped after use
+    follows the configured prefetch policy.
+
+    ``WARM`` -- speculative pre-warm with no imminent reader: loaded keys are
+    retained and left unpinned (immediately resident and evictable), so a later
+    lookup can hit them.
+    """
+
+    LOOKUP = enum.auto()
+    WARM = enum.auto()
 
 
 @dataclass(frozen=True)
@@ -242,6 +288,74 @@ class MemoryLayoutDesc:
 
 
 @dataclass(frozen=True)
+class AttnWindowDesc:
+    """Per-object-group cross-chunk attention windows, in LMCache chunks.
+
+    ``num_chunks_in_sw[g]`` is the number of trailing prefix chunks that must
+    be present for object group ``g`` to serve a cache hit. ``-1`` means full
+    attention (the whole prefix); ``w >= 1`` is a sliding window of ``w``
+    chunks (mamba is ``1``).
+    """
+
+    num_chunks_in_sw: list[int]
+
+    def __post_init__(self) -> None:
+        for w in self.num_chunks_in_sw:
+            if w == 0 or w < -1:
+                raise ValueError(
+                    "AttnWindowDesc: each window must be -1 (full attention) "
+                    f"or >= 1 chunk, got {w}"
+                )
+
+    @property
+    def num_object_groups(self) -> int:
+        """Number of object groups this descriptor covers."""
+        return len(self.num_chunks_in_sw)
+
+    def is_full_attention(self, object_group_idx: int) -> bool:
+        """Whether the object group depends on the entire prefix.
+
+        Args:
+            object_group_idx: 0-based object group index.
+
+        Returns:
+            True if the group attends to the whole prefix, False if it uses a
+            bounded sliding window.
+        """
+        return self.num_chunks_in_sw[object_group_idx] < 0
+
+
+DEFAULT_ATTN_WINDOW_DESC = AttnWindowDesc(num_chunks_in_sw=[-1])
+"""A single full-attention object group; the default when no per-object-group
+windows are supplied."""
+
+
+@dataclass(frozen=True)
+class PrefetchRequestSpec:
+    """Immutable inputs of a single L2 prefetch request.
+
+    Bundles the caller-supplied arguments that travel together into the
+    prefetch controller's submission queue. See
+    ``PrefetchController._start_lookup_phase`` for per-field semantics.
+
+    Attributes:
+        keys: Object keys to prefetch; order defines the prefix.
+        layout_desc: Memory layout for L1 write-buffer allocation.
+        extra_count: Extra read locks per key beyond the default 1.
+        policy: Retained-subset policy (see :class:`TrimPolicy`).
+        attn_desc: Cross-chunk attention windows, in object-group order.
+        mode: Prefetch intent (see :class:`PrefetchMode`).
+    """
+
+    keys: list[ObjectKey]
+    layout_desc: MemoryLayoutDesc
+    extra_count: int = 0
+    policy: TrimPolicy = TrimPolicy.PREFIX
+    attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC
+    mode: PrefetchMode = PrefetchMode.LOOKUP
+
+
+@dataclass(frozen=True)
 class PrefetchHandle:
     """Opaque handle returned by ``StorageManager.submit_prefetch_task``.
 
@@ -271,7 +385,7 @@ class PrefetchHandle:
 
 
 def ipc_key_to_object_keys(
-    ipc_key: IPCCacheServerKey,
+    ipc_key: "IPCCacheServerKey",
     chunk_hashes: list[bytes],
     object_group_ids: list[int],
 ) -> list[list[ObjectKey]]:

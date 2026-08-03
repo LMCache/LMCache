@@ -113,6 +113,9 @@ lmcache/experimental/tests
 # PyCharm
 .idea/
 
+# JetBrains run configurations
+.run/
+
 # VSCode
 .vscode/
 
@@ -151,3 +154,6 @@ operator/Dockerfile.cross
 
 # Compiled gettext catalogs (built from .po at HTML build time)
 docs/source/locale/**/*.mo
+
+# CodeBuddy
+.codebuddy

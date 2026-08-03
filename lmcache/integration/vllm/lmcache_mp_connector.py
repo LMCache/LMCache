@@ -39,6 +39,7 @@ import zmq
 # First Party
 from lmcache import torch_dev
 from lmcache.banner import print_banner_once
+from lmcache.integration.vllm.experimental import dispatch
 from lmcache.integration.vllm.kv_cache_group_edits import (
     apply_kv_cache_group_edits,
     validate_kv_cache_groups,
@@ -46,7 +47,12 @@ from lmcache.integration.vllm.kv_cache_group_edits import (
 from lmcache.integration.vllm.kv_cache_groups import (
     create_engine_group_infos_from_vllm,
 )
-from lmcache.integration.vllm.utils import mla_enabled, vllm_layout_hints
+from lmcache.integration.vllm.utils import (
+    apply_mm_hashes_to_token_ids,
+    extract_mm_features,
+    mla_only,
+    vllm_layout_hints,
+)
 from lmcache.utils import init_logger as lmcache_init_logger
 from lmcache.v1.multiprocess.group_view import slice_block_ids_per_group
 
@@ -57,6 +63,7 @@ try:
         LMCacheMPWorkerAdapter,
         LoadStoreOp,
         ParallelStrategy,
+        send_lmcache_request,
     )
 
     try:
@@ -101,6 +108,40 @@ logger = lmcache_init_logger(__name__)
 
 
 # Helper functions
+def _has_preemption_reqs(scheduler_output: SchedulerOutput) -> bool:
+    """Return whether the scheduler output contains preemption-related requests.
+
+    Checks for the presence of resumed or preempted requests in the
+    scheduler output.
+
+    A preemption is detected if:
+    - ``scheduled_cached_reqs.resumed_req_ids``: Requests resumed from
+      preemption this step.
+    - ``scheduler_output.preempted_req_ids``: Requests preempted this step.
+
+    Args:
+        scheduler_output: The vLLM scheduler output for this step.
+
+    Returns:
+        True if preemption-related requests exist, False otherwise.
+    """
+    cached_reqs = getattr(scheduler_output, "scheduled_cached_reqs", None)
+
+    # Primary signal: requests resumed from preemption this step.
+    resumed_ids = getattr(cached_reqs, "resumed_req_ids", None)
+    if resumed_ids:
+        logger.warning("<preempted> by resumed requests: %s", resumed_ids)
+        return True
+
+    # Primary signal: requests preempted this step.
+    preempted_ids = getattr(scheduler_output, "preempted_req_ids", None)
+    if preempted_ids:
+        logger.warning("<preempted> by preempted requests: %s", preempted_ids)
+        return True
+
+    return False
+
+
 def validate_mamba_step_alignment(vllm_config: VllmConfig) -> None:
     """Reject scheduler configs that can skip Mamba state snapshots.
 
@@ -140,6 +181,7 @@ def validate_mamba_step_alignment(vllm_config: VllmConfig) -> None:
 
 def build_parallel_strategy_from_vllm_config(
     vllm_config: "VllmConfig",
+    n_servers: int,
 ) -> ParallelStrategy:
     """Build a ParallelStrategy from a vLLM config.
 
@@ -147,17 +189,19 @@ def build_parallel_strategy_from_vllm_config(
 
     Args:
         vllm_config: The vLLM configuration object.
+        n_servers: Number of LMCache servers backing this deployment.
 
     Returns:
         The constructed ParallelStrategy.
     """
     pc = vllm_config.parallel_config
     return ParallelStrategy(
-        use_mla=mla_enabled(vllm_config.model_config),
+        mla_only=mla_only(vllm_config.model_config),
         vllm_world_size=pc.world_size,
         vllm_worker_id=pc.rank,
         tp_size=pc.tensor_parallel_size,
         pp_size=pc.pipeline_parallel_size,
+        n_servers=n_servers,
     )
 
 
@@ -205,6 +249,8 @@ class LMCacheMPRequestTracker:
 
     cache_salt: str = ""
 
+    mm_adjusted_prompt_ids: list[int] = field(default_factory=list)
+
     def __init__(self, request: "Request"):
         self.request_id = request.request_id
         self.cache_salt: str = request.cache_salt or ""
@@ -214,6 +260,12 @@ class LMCacheMPRequestTracker:
         self.num_vllm_hit_tokens = 0
         self.num_lmcache_hit_tokens = 0
         self.state = LMCacheMPRequestState.PREFETCHING
+        self.mm_adjusted_prompt_ids = []
+        mm_hashes, mm_positions = extract_mm_features(request)
+        if mm_hashes and mm_positions:
+            prompt_ids = torch.tensor(request.prompt_token_ids)
+            apply_mm_hashes_to_token_ids(prompt_ids, mm_hashes, mm_positions)
+            self.mm_adjusted_prompt_ids = prompt_ids.tolist()
 
     ####
     # Check the state of the request
@@ -264,6 +316,15 @@ class LMCacheMPRequestTracker:
             engine_group_idx: len(blocks)
             for engine_group_idx, blocks in self.allocated_block_ids.items()
         }
+
+    def get_token_ids(self) -> list[int]:
+        """Return the token ids to use for LMCache key derivation."""
+        if not self.mm_adjusted_prompt_ids:
+            return list(self.all_token_ids)
+        num_prompt_tokens = len(self.mm_adjusted_prompt_ids)
+        return self.mm_adjusted_prompt_ids + list(
+            self.all_token_ids[num_prompt_tokens:]
+        )
 
     ####
     # For debugging
@@ -364,7 +425,7 @@ class LMCacheMPRequestMetadata:
                 start_token_idx,
                 end_token_idx,
             )
-            token_ids = list(tracker.all_token_ids)
+            token_ids = tracker.get_token_ids()
             op = LoadStoreOp(
                 token_ids=token_ids,
                 block_ids=block_ids,
@@ -431,7 +492,7 @@ class LMCacheMPRequestMetadata:
                 start_token_idx,
                 end_token_idx,
             )
-            token_ids = list(tracker.all_token_ids)
+            token_ids = tracker.get_token_ids()
 
             # Compute how many tokens at the start of the retrieve range
             # overlap with APC-shared blocks. The server must skip writing
@@ -463,6 +524,7 @@ class LMCacheMPConnectorMetadata(KVConnectorMetadata):
     def __init__(self):
         super().__init__()
         self.requests: list[LMCacheMPRequestMetadata] = []
+        self.need_flush_before_forward: bool = False
 
     def add_request_metadata(self, request_metadata: LMCacheMPRequestMetadata):
         self.requests.append(request_metadata)
@@ -480,10 +542,34 @@ class LMCacheMPConnectorMetadata(KVConnectorMetadata):
                 f"num_blocks={len(req_meta.op.flat_block_ids)}, "
                 f"block_ids={req_meta.op.block_ids})"
             )
-        return "[" + "\n".join(request_strs) + "]"
+        return (
+            f"need_flush_before_forward={self.need_flush_before_forward}; ["
+            + "\n".join(request_strs)
+            + "]"
+        )
 
     def __repr__(self):
         return self.__str__()
+
+
+def _ensure_zmq_scheme(server_url: str) -> str:
+    """Ensure a ZMQ server URL carries a transport scheme.
+
+    ZeroMQ requires an explicit transport (e.g. ``tcp://``) in the address;
+    a bare ``host:port`` such as ``127.0.0.1:5557`` is rejected with
+    ``ZMQError: Invalid argument``. Users naturally configure
+    ``lmcache.mp.host`` as a plain IP/hostname, so prepend ``tcp://`` when no
+    scheme is present.
+
+    Args:
+        server_url: A server URL, with or without a ``<scheme>://`` prefix.
+
+    Returns:
+        The URL with a transport scheme, defaulting to ``tcp://``.
+    """
+    if "://" in server_url:
+        return server_url
+    return f"tcp://{server_url}"
 
 
 class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
@@ -491,8 +577,15 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
     The connector for LMCache multi-process mode.
 
     Extra configs (kv_transfer_config.extra_config):
+
+    Multi-server deployment:
+    - lmcache.mp.server_urls: server URL list or comma-separated string,
+      e.g. "tcp://host1:6667,tcp://host2:6667".
+
+    Single-server deployment:
     - lmcache.mp.host: the host of the LMCache server.
     - lmcache.mp.port: the port of the LMCache server.
+
     - lmcache.mp.mq_timeout: timeout (seconds) for message queue requests.
     - lmcache.mp.heartbeat_interval: interval (seconds) between server
       heartbeat pings.
@@ -511,23 +604,78 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         validate_kv_cache_groups(getattr(self, "_kv_cache_config", None))
 
         assert vllm_config.kv_transfer_config is not None
-        server_host = vllm_config.kv_transfer_config.get_from_extra_config(
-            "lmcache.mp.host", "tcp://localhost"
+
+        # Multi-server: prefer lmcache.mp.server_urls (list or comma-separated
+        # string) over the single-server lmcache.mp.host / lmcache.mp.port.
+        server_urls_cfg = vllm_config.kv_transfer_config.get_from_extra_config(
+            "lmcache.mp.server_urls", None
         )
-        server_port = vllm_config.kv_transfer_config.get_from_extra_config(
-            "lmcache.mp.port", 5555
+        if server_urls_cfg:
+            if isinstance(server_urls_cfg, list):
+                server_urls = [u.strip() for u in server_urls_cfg if u.strip()]
+            else:
+                server_urls = [
+                    u.strip() for u in server_urls_cfg.split(",") if u.strip()
+                ]
+        else:
+            # Legacy single-server fallback.
+            server_host = vllm_config.kv_transfer_config.get_from_extra_config(
+                "lmcache.mp.host", "tcp://localhost"
+            )
+            server_port = vllm_config.kv_transfer_config.get_from_extra_config(
+                "lmcache.mp.port", 5555
+            )
+            server_urls = [f"{server_host}:{server_port}"]
+
+        # Normalize so a bare host:port (no transport scheme) is accepted;
+        # ZMQ requires an explicit transport such as ``tcp://``.
+        server_urls = [_ensure_zmq_scheme(u) for u in server_urls]
+
+        # The server count is derived from lmcache.mp.server_urls.
+        n_servers = len(server_urls)
+
+        assert vllm_config.parallel_config.world_size % n_servers == 0, (
+            f"world_size ({vllm_config.parallel_config.world_size}) must be "
+            f"divisible by n_servers ({n_servers})"
         )
 
-        server_url = f"{server_host}:{server_port}"
+        # Multi-server + DP is not supported yet.
+        dp_size = getattr(vllm_config.parallel_config, "data_parallel_size", 1)
+        if n_servers > 1 and dp_size > 1:
+            raise ValueError(
+                "LMCacheMPConnector multi-server mode (n_servers > 1) does not "
+                f"support data parallelism yet; got dp_size={dp_size}. "
+                "DP across multiple LMCache servers will be "
+                "supported in a follow-up PR."
+            )
+
+        # Multi-server + MLA: only TP is supported (no PP).
+        # PP splits layers across nodes, which would cause per-piece
+        # reader counts to vary per (server, pp_stage) pair and break
+        # the single-``tp_size`` LOOKUP / FREE_LOOKUP_LOCKS protocol.
+        # Non-MLA mode is not affected by this restriction.
+        if n_servers > 1:
+            pp_size = vllm_config.parallel_config.pipeline_parallel_size
+            if pp_size > 1:
+                raise ValueError(
+                    "LMCacheMPConnector multi-server mode only supports "
+                    "tensor parallelism (TP), not pipeline parallelism (PP). "
+                    f"Got pp_size={pp_size}."
+                )
+
         zmq_context = zmq.Context.instance()
-        parallel_strategy = build_parallel_strategy_from_vllm_config(vllm_config)
+        parallel_strategy = build_parallel_strategy_from_vllm_config(
+            vllm_config, n_servers
+        )
+
+        self.dispatcher = None
 
         if self.role == KVConnectorRole.SCHEDULER:
             # Banner from the scheduler role only, so tensor-parallel
             # deployments print it once rather than once per worker.
             print_banner_once(sys.stderr)
             self.scheduler_adapter = LMCacheMPSchedulerAdapter(
-                server_url=server_url,
+                server_urls=server_urls,
                 context=zmq_context,
                 model_name=vllm_config.model_config.model,
                 vllm_block_size=vllm_config.cache_config.block_size,
@@ -536,14 +684,39 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             )
             self.request_trackers: dict[str, LMCacheMPRequestTracker] = {}
         elif self.role == KVConnectorRole.WORKER:
+            # Node routing: a worker connects only to its local LMCache server.
+            # Global ranks are assigned to nodes in contiguous blocks:
+            #   node 0 → ranks [0, ranks_per_node),
+            #   node 1 → [ranks_per_node, 2 * ranks_per_node), ...
+            ranks_per_node = parallel_strategy.vllm_world_size // n_servers
+            local_server_url = server_urls[
+                parallel_strategy.vllm_worker_id // ranks_per_node
+            ]
             self.worker_adapter = LMCacheMPWorkerAdapter(
-                server_url=server_url,
+                server_url=local_server_url,
                 context=zmq_context,
                 model_name=vllm_config.model_config.model,
                 vllm_block_size=vllm_config.cache_config.block_size,
                 parallel_strategy=parallel_strategy,
                 extra_config=vllm_config.kv_transfer_config.kv_connector_extra_config,
             )
+            if self.transfer_intermediate_tensors:
+                # First Party
+                from lmcache.integration.vllm.experimental import (
+                    FeatureContext,
+                    init_dispatcher,
+                )
+                from lmcache.v1.multiprocess.modules.experimental import TRANSFER_QUERY
+
+                ctx = FeatureContext(
+                    worker_adapter=self.worker_adapter,
+                    send_lmcache_request=send_lmcache_request,
+                )
+                requested = (
+                    {TRANSFER_QUERY} if self.transfer_intermediate_tensors else set()
+                )
+                self.dispatcher = init_dispatcher(ctx, requested)
+                self.worker_adapter.dispatcher = self.dispatcher
         else:
             raise ValueError(f"Unknown KVConnectorRole: {self.role}")
 
@@ -591,6 +764,16 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
     def role(self) -> KVConnectorRole:
         return self._role
 
+    @property
+    def transfer_intermediate_tensors(self) -> bool:
+        cfg = self._vllm_config.kv_transfer_config
+        if cfg is None:
+            return False
+        vllm_transfer = cfg.get_from_extra_config(
+            "lmcache.mp.transfer_intermediate_tensors", False
+        )
+        return vllm_transfer
+
     # ==============================
     # Worker-side methods
     # ==============================
@@ -620,15 +803,26 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         kv_cache_config = getattr(self, "_kv_cache_config", None)
         # Must precede both group-info creation and transfer registration so
         # they see the same edited views.
-        kv_caches = apply_kv_cache_group_edits(kv_cache_config, kv_caches)
+        layout_hints = vllm_layout_hints()
+        kv_caches = apply_kv_cache_group_edits(
+            kv_cache_config, kv_caches, layout_hints=layout_hints
+        )
         engine_group_infos = create_engine_group_infos_from_vllm(
             kv_cache_config,
             kv_caches,
-            layout_hints=vllm_layout_hints(),
+            layout_hints=layout_hints,
         )
         self.worker_adapter.register_kv_caches(
             kv_caches, engine_group_infos=engine_group_infos
         )
+        if self.dispatcher is not None:
+            dispatch(
+                self.dispatcher,
+                "register",
+                kv_caches=kv_caches,
+                kv_cache_config=kv_cache_config,
+                vllm_config=self._vllm_config,
+            )
         return
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
@@ -663,9 +857,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         if len(request_ids) == 0:
             return
 
-        with torch_dev.stream(torch_dev.current_stream()):
-            event = torch_dev.Event(interprocess=True)
-            event.record()
+        event = torch_dev.Event(interprocess=True)
+        event.record()
 
         self.worker_adapter.batched_submit_retrieve_requests(
             request_ids, ops, event, cache_salts=cache_salts
@@ -703,6 +896,15 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             attn_metadata (AttentionMetadata): the attention metadata.
             **kwargs: additional arguments for the save operation.
         """
+        if self.dispatcher is not None:
+            dispatch(
+                self.dispatcher,
+                "save_kv_layer",
+                layer_name=layer_name,
+                metadata=self._get_connector_metadata(),
+                attn_metadata=attn_metadata,
+                **kwargs,
+            )
         return
 
     def wait_for_save(self):
@@ -713,11 +915,6 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         This prevents overwrites of paged KV buffer before saving done.
         """
-        # In MLA scenario, only the first rank of the pipeline group
-        # needs to save the KV cache.
-        if not self.worker_adapter.is_kv_writer:
-            return
-
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, LMCacheMPConnectorMetadata)
 
@@ -732,15 +929,41 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             cache_salts.append(meta.cache_salt)
 
         if len(request_ids) == 0:
+            if self.dispatcher is not None:
+                dispatch(self.dispatcher, "wait_for_save", event=None)
             return
 
-        with torch_dev.stream(torch_dev.current_stream()):
-            event = torch_dev.Event(interprocess=True)
-            event.record()
+        event = torch_dev.Event(interprocess=True)
+        event.record()
 
         self.worker_adapter.batched_submit_store_requests(
             request_ids, ops, event, cache_salts=cache_salts
         )
+        if self.dispatcher is not None:
+            dispatch(self.dispatcher, "wait_for_save", event=event)
+
+    # TODO: How does lmcache driven path handle preemption?
+    # NOTE1: handle_preemptions is called by vllm each step regardless
+    #        preemption really happens or not.
+    # NOTE2: preemption hint is managed by KVConnectorRole.SCHEDULER,
+    #        that's why here we have to judge preemption by
+    #        need_flush_before_forward flag which is set by SCHEDULER.
+    def handle_preemptions(self, kv_connector_metadata: KVConnectorMetadata) -> None:
+        """Flush async engine-driven stores only when scheduler metadata requests it.
+
+        Args:
+            kv_connector_metadata: Connector metadata produced by the scheduler;
+                only acts when it is a :class:`LMCacheMPConnectorMetadata` with
+                ``need_flush_before_forward=True``.
+        """
+        worker_adapter = getattr(self, "worker_adapter", None)
+        if self.role != KVConnectorRole.WORKER or worker_adapter is None:
+            return
+        need_flush_before_forward = (
+            isinstance(kv_connector_metadata, LMCacheMPConnectorMetadata)
+            and kv_connector_metadata.need_flush_before_forward
+        )
+        worker_adapter.handle_preemptions(need_flush_before_forward)
 
     def get_finished(
         self, finished_req_ids: set[str]
@@ -790,6 +1013,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """
         if hasattr(self, "worker_adapter"):
             self.worker_adapter.shutdown()
+        if hasattr(self, "scheduler_adapter"):
+            self.scheduler_adapter.shutdown()
         return None
 
     def get_kv_connector_stats(self) -> "KVConnectorStats | None":
@@ -841,7 +1066,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         self.scheduler_adapter.maybe_submit_lookup_request(
             request.request_id,
-            token_ids=list(request.all_token_ids),
+            token_ids=tracker.get_token_ids(),
             cache_salt=tracker.cache_salt,
         )
 
@@ -942,10 +1167,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
                 if free_end > 0:
                     self.scheduler_adapter.free_lookup_locks(
-                        token_ids=list(tracker.all_token_ids),
+                        token_ids=tracker.get_token_ids(),
                         start=0,
                         end=free_end,
                         request_id=request.request_id,
+                        cache_salt=tracker.cache_salt,
                     )
                     logger.debug(
                         "Free locks of tokens %d-%d since it is cached by vLLM.",
@@ -966,6 +1192,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             scheduler_output (SchedulerOutput): the scheduler output object.
         """
         metadata = LMCacheMPConnectorMetadata()
+        metadata.need_flush_before_forward = _has_preemption_reqs(scheduler_output)
 
         self._process_retrieve_requests(metadata)
         self._process_new_requests(scheduler_output, metadata)
@@ -1031,7 +1258,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # Notify LMCache to end the session for this request
         self.scheduler_adapter.end_session(request.request_id)
 
-        return True, return_params
+        return True, (return_params or None)
 
     def request_finished_all_groups(
         self,
@@ -1204,7 +1431,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 RequestAllocationRecord(
                     req_id=new_request.req_id,
                     new_block_ids=list(primary_block_ids),
-                    new_token_ids=list(tracker.all_token_ids[:total_tokens]),
+                    new_token_ids=tracker.get_token_ids()[:total_tokens],
                 )
             )
 
@@ -1229,7 +1456,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             tokens_per_block = self._group_tokens_per_block[0]
             start_token = (total_blocks - num_new_blocks) * tokens_per_block
             end_token = total_blocks * tokens_per_block
-            new_token_ids = list(tracker.all_token_ids[start_token:end_token])
+            new_token_ids = tracker.get_token_ids()[start_token:end_token]
             records.append(
                 RequestAllocationRecord(
                     req_id=request_id,

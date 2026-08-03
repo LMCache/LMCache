@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from concurrent.futures import Future
+from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any, Callable, List, Optional, Sequence, Union
 import threading
 import time
@@ -16,12 +17,14 @@ from lmcache.observability import LMCStatsMonitor, PrometheusLogger
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 from lmcache.v1.cache_controller.message import OpType
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.memory_allocators.mixed_memory_allocator import MixedMemoryAllocator
+from lmcache.v1.memory_allocators.paged_cpu_gpu_memory_allocator import (
+    PagedCpuGpuMemoryAllocator,
+)
 from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
     MemoryFormat,
     MemoryObj,
-    MixedMemoryAllocator,
-    PagedCpuGpuMemoryAllocator,
 )
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
@@ -179,7 +182,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
             try:
                 on_complete_callback(key)
             except Exception as e:
-                logger.warning(f"on_complete_callback failed for key {key}: {e}")
+                logger.warning("on_complete_callback failed for key %s: %s", key, e)
 
         return None
 
@@ -269,19 +272,16 @@ class LocalCPUBackend(AllocatorBackendInterface):
             return True
 
     def remove(self, key: CacheEngineKey, force: bool = True) -> bool:
-        if force:
-            self.cpu_lock.acquire()
-        if key not in self.hot_cache:
+        lock_context = self.cpu_lock if force else nullcontext()
+        with lock_context:
+            if key not in self.hot_cache:
+                return False
+
+            memory_obj = self.hot_cache.pop(key)
+            memory_obj.ref_count_down()
+
             if force:
-                self.cpu_lock.release()
-            return False
-
-        memory_obj = self.hot_cache.pop(key)
-        memory_obj.ref_count_down()
-
-        if force:
-            self.cache_policy.update_on_force_evict(key)
-            self.cpu_lock.release()
+                self.cache_policy.update_on_force_evict(key)
 
         if self.batched_msg_sender is not None:
             self.batched_msg_sender.add_kv_op(
@@ -336,10 +336,14 @@ class LocalCPUBackend(AllocatorBackendInterface):
             max_usable_memory = max(0, system_available_memory_gb - reserve_cpu_size)
             effective_cpu_size = min(configured_cpu_size, max_usable_memory)
             logger.info(
-                f"Adjusted CPU memory size from {configured_cpu_size:.2f} GB "
-                f"to {effective_cpu_size:.2f} GB "
-                f"(system available: {system_available_memory_gb:.2f} GB, "
-                f"reserve: {reserve_cpu_size:.2f} GB)"
+                "Adjusted CPU memory size from %.2f GB "
+                "to %.2f GB "
+                "(system available: %.2f GB, "
+                "reserve: %.2f GB)",
+                configured_cpu_size,
+                effective_cpu_size,
+                system_available_memory_gb,
+                reserve_cpu_size,
             )
             assert effective_cpu_size > 0
             return effective_cpu_size
@@ -373,7 +377,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
 
         # Detect the numa mapping
         numa_mapping = NUMADetector.get_numa_mapping(config)
-        logger.info(f"NUMA mapping {numa_mapping}")
+        logger.info("NUMA mapping %s", numa_mapping)
 
         # Calculate effective CPU memory size
         cpu_size = self._calculate_effective_cpu_size(cpu_size, config, metadata)
@@ -403,8 +407,10 @@ class LocalCPUBackend(AllocatorBackendInterface):
                 origin_cpu_size_bytes // chunk_size_bytes * chunk_size_bytes
             )
             logger.info(
-                f"Auto align cpu size bytes, origin: {origin_cpu_size_bytes}, "
-                f"aligned: {align_cpu_size_bytes}, chunk size: {chunk_size_bytes}"
+                "Auto align cpu size bytes, origin: %s, aligned: %s, chunk size: %s",
+                origin_cpu_size_bytes,
+                align_cpu_size_bytes,
+                chunk_size_bytes,
             )
             paged_mem_allocator.init_cpu_memory_allocator(
                 align_cpu_size_bytes,
@@ -480,11 +486,13 @@ class LocalCPUBackend(AllocatorBackendInterface):
                 )
             elif config.enable_lazy_memory_allocator:
                 logger.info(
-                    f"LazyMixedMemoryAllocator is disabled because "
-                    f"cpu_size ({cpu_size:.2f} GB) does not exceed "
-                    f"lazy_memory_safe_size "
-                    f"({config.lazy_memory_safe_size:.2f} GB). "
-                    f"Using MixedMemoryAllocator instead."
+                    "LazyMixedMemoryAllocator is disabled because "
+                    "cpu_size (%.2f GB) does not exceed "
+                    "lazy_memory_safe_size "
+                    "(%.2f GB). "
+                    "Using MixedMemoryAllocator instead.",
+                    cpu_size,
+                    config.lazy_memory_safe_size,
                 )
 
             # For io_uring, use paged memory allocator so that fixed buffer support
@@ -511,8 +519,11 @@ class LocalCPUBackend(AllocatorBackendInterface):
                 logger.info(
                     "LocalCPUBackend: using MixedMemoryAllocator with use_paging=True "
                     "for io_uring fixed buffer support. "
-                    f"Auto align cpu size bytes, origin: {origin_cpu_size_bytes}, "
-                    f"aligned: {align_cpu_size_bytes}, chunk size: {chunk_size_bytes}"
+                    "Auto align cpu size bytes, origin: %s, "
+                    "aligned: %s, chunk size: %s",
+                    origin_cpu_size_bytes,
+                    align_cpu_size_bytes,
+                    chunk_size_bytes,
                 )
 
                 kwargs = {
@@ -605,8 +616,8 @@ class LocalCPUBackend(AllocatorBackendInterface):
         rust_block_align = int(extra.get("rust_raw_block.block_align", 4096))
         if not self._is_power_of_two(rust_block_align):
             raise ValueError(
-                "extra_config['rust_raw_block.block_align'] must be a positive "
-                "power of two when O_DIRECT or io_uring alignment is enabled"
+                "extra_config['rust_raw_block.block_align'] must be a power "
+                "of two when O_DIRECT or io_uring alignment is enabled"
             )
         return rust_block_align
 
@@ -638,7 +649,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
         (we use the async serializer to handle this)
         """
         logger.debug(
-            f"Allocating memory in local cpu backend with busy loop: {busy_loop}"
+            "Allocating memory in local cpu backend with busy loop: %s", busy_loop
         )
         if fmt is None:
             if self.layerwise:
@@ -672,7 +683,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
                         # and don't need to wait for other requests yet
                         wait_other_requests = False
                         logger.debug(
-                            f"Evicting {len(evict_keys)} chunks from cpu memory"
+                            "Evicting %d chunks from cpu memory", len(evict_keys)
                         )
                         # remove
                         self.batched_remove(evict_keys, force=False)
@@ -694,7 +705,8 @@ class LocalCPUBackend(AllocatorBackendInterface):
                 logger.warning(
                     "No eviction candidates found in local cpu backend. "
                     "Local cpu memory is under pressure. "
-                    f"Waiting for {time_to_wait} seconds before retrying."
+                    "Waiting for %s seconds before retrying.",
+                    time_to_wait,
                 )
                 # self.memory_allocator.memcheck()
                 # do not hold the lock during sleep
@@ -706,8 +718,9 @@ class LocalCPUBackend(AllocatorBackendInterface):
 
             num_attempts += 1
             logger.debug(
-                f"Unable to allocate memory object after {num_attempts}"
-                " attempts of local cpu backend allocate()"
+                "Unable to allocate memory object after %d"
+                " attempts of local cpu backend allocate()",
+                num_attempts,
             )
 
         self.stats_monitor.update_local_cpu_evict_metrics(evict_keys_count)
@@ -742,8 +755,8 @@ class LocalCPUBackend(AllocatorBackendInterface):
         (we use the async serializer to handle this)
         """
         logger.debug(
-            f"Batched allocating memory in local cpu backend"
-            f" with busy loop: {busy_loop}"
+            "Batched allocating memory in local cpu backend with busy loop: %s",
+            busy_loop,
         )
         if fmt is None:
             if self.layerwise:
@@ -808,7 +821,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
                             self.memory_allocator.batched_free(old_mem_objs)
 
                             logger.debug(
-                                f"Evicting {len(old_mem_objs)} chunks from cpu memory"
+                                "Evicting %d chunks from cpu memory", len(old_mem_objs)
                             )
                             break
                     if wait_other_requests:
@@ -828,7 +841,8 @@ class LocalCPUBackend(AllocatorBackendInterface):
                 logger.warning(
                     "No eviction candidates found in local cpu backend. "
                     "Local cpu memory is under pressure. "
-                    f"Waiting for {time_to_wait} seconds before retrying."
+                    "Waiting for %s seconds before retrying.",
+                    time_to_wait,
                 )
                 # self.memory_allocator.memcheck()
                 # do not hold the lock during sleep
@@ -842,8 +856,9 @@ class LocalCPUBackend(AllocatorBackendInterface):
 
             num_attempts += 1
             logger.debug(
-                f"Unable to allocate memory object after {num_attempts}"
-                " attempts of local cpu backend batched_allocate()"
+                "Unable to allocate memory object after %d"
+                " attempts of local cpu backend batched_allocate()",
+                num_attempts,
             )
         self.stats_monitor.update_local_cpu_evict_metrics(evict_keys_count)
         return memory_objs
@@ -874,12 +889,18 @@ class LocalCPUBackend(AllocatorBackendInterface):
             # full: [kv_size, num_layers, chunk_tokens, hidden_dim]
             chunk_bytes = kv_size * num_layers * chunk_tokens * hidden_dim * dtype_size
         logger.debug(
-            f"Stats received: num_layers={num_layers}, kv_size={kv_size}, "
-            f"chunk_tokens={chunk_tokens}, head_dim={head_size}, "
-            f"dtype_size={dtype_size}, "
-            f"hidden_dim={hidden_dim}"
+            "Stats received: num_layers=%s, kv_size=%s, "
+            "chunk_tokens=%s, head_dim=%s, "
+            "dtype_size=%s, "
+            "hidden_dim=%s",
+            num_layers,
+            kv_size,
+            chunk_tokens,
+            head_size,
+            dtype_size,
+            hidden_dim,
         )
-        logger.debug(f"Calculated bytes per chunk per rank: {chunk_bytes}")
+        logger.debug("Calculated bytes per chunk per rank: %s", chunk_bytes)
         return chunk_bytes
 
     def calculate_chunk_budget(self) -> int:

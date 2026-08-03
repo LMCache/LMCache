@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 import argparse
 import asyncio
 import contextlib
+import time
 
 # Third Party
 from fastapi import FastAPI
@@ -19,7 +20,11 @@ from lmcache.v1.distributed.config import (
     l1_exposes_single_memory_region,
     parse_args_to_config,
 )
-from lmcache.v1.mp_coordinator.l2.event_listener import L2EventListener
+from lmcache.v1.mp_coordinator.cache_control.event_listener import L2EventListener
+from lmcache.v1.mp_coordinator.cache_events import (
+    CacheEventSubscriber,
+    HttpCacheEventSink,
+)
 from lmcache.v1.mp_coordinator.registrar import keep_registered
 from lmcache.v1.mp_observability.config import (
     ObservabilityConfig,
@@ -43,6 +48,8 @@ from lmcache.v1.multiprocess.config import (
 from lmcache.v1.multiprocess.http_api_registry import (
     HTTPAPIRegistry,
 )
+from lmcache.v1.multiprocess.http_apis.dependencies import build_context
+from lmcache.v1.multiprocess.http_apis.error_handlers import register_error_handlers
 from lmcache.v1.multiprocess.mp_runtime_plugin_launcher import (
     MPRuntimePluginLauncher,
 )
@@ -65,7 +72,7 @@ async def lifespan(app: FastAPI):
     Manage the lifecycle of the LMCache HTTP server.
 
     On startup: Initialize ZMQ server and cache engine.
-    On shutdown: Clean up ZMQ server resources.
+    On shutdown: Clean up ZMQ server and cache engine resources.
     """
     # Startup
     logger.info(
@@ -106,6 +113,9 @@ async def lifespan(app: FastAPI):
 
     app.state.zmq_server = zmq_server
     app.state.engine = engine
+    # Typed per-app context the cache handlers resolve via ``get_context``
+    # (built now that the engine is ready).
+    app.state.context = build_context(engine)
     app.state.plugin_launcher = plugin_launcher
 
     # Optionally register this server with an MP coordinator (enabled when
@@ -131,27 +141,45 @@ async def lifespan(app: FastAPI):
                 mq_port=mp_config.port if mp_config.p2p_config.enabled else 0,
             )
         )
-    # Optionally report L2 store/lookup events to the coordinator for
-    # fleet-wide usage tracking and eviction. Registers as a listener on
-    # all L2 adapters and flushes batched events on a timer.
+    # Optionally report cache events to the coordinator (one flag gates
+    # both streams until they are unified): the legacy L2 usage stream
+    # (/quota/events) for quota tracking and eviction, and the key
+    # directory stream for fleet-wide placement tracking.
     coordinator_l2_event_client = None
     coordinator_l2_event_task = None
     if (
         coordinator_client is not None
         and coordinator_config is not None
         and coordinator_config.url
-        and coordinator_config.l2_event_reporting
+        and coordinator_config.event_reporting
     ):
         coordinator_l2_event_client = L2EventListener(
             coordinator_client,
             coordinator_config.url,
             instance_id=mp_config.instance_id,
-            flush_interval=coordinator_config.l2_event_flush_interval,
+            flush_interval=coordinator_config.event_flush_interval,
         )
         if engine.storage_manager is not None:
             engine.storage_manager.register_l2_listener(coordinator_l2_event_client)
         coordinator_l2_event_task = asyncio.create_task(
             coordinator_l2_event_client.run()
+        )
+
+    # Coordinator event stream
+    if (
+        coordinator_client is not None
+        and coordinator_config.url
+        and coordinator_config.event_reporting
+    ):
+        get_event_bus().register_subscriber(
+            CacheEventSubscriber(
+                sink=HttpCacheEventSink(coordinator_config.url),
+                instance_id=mp_config.instance_id,
+                # Server start time: fences out placements this instance
+                # reported before a restart (its pools restarted empty).
+                incarnation=int(time.time()),
+                flush_interval=coordinator_config.event_flush_interval,
+            )
         )
 
     app.state.coordinator_client = coordinator_client
@@ -185,6 +213,7 @@ async def lifespan(app: FastAPI):
     get_event_bus().stop()
     if hasattr(app.state, "zmq_server") and app.state.zmq_server is not None:
         app.state.zmq_server.close()
+    engine.close()
     logger.info("LMCache HTTP server stopped")
 
 
@@ -193,6 +222,10 @@ app = FastAPI(title="LMCache HTTP API", version="1.0.0", lifespan=lifespan)
 # Automatically discover and register all HTTP API endpoints
 registry = HTTPAPIRegistry(app)
 registry.register_all_apis()
+
+# Map cache-control domain errors to HTTP responses centrally, so routes need
+# no try/except (auto-discovery finds routers, not exception handlers).
+register_error_handlers(app)
 
 
 def run_http_server(
@@ -215,7 +248,9 @@ def run_http_server(
 
     Raises:
         ValueError: If P2P is enabled without a coordinator URL, or with an L1
-            tier that is not a single registerable memory region.
+            tier that is not a single registerable memory region; or if
+            coordinator event reporting is enabled with observability
+            disabled (the cache-event stream rides the event bus).
     """
     if mp_config.p2p_config.enabled:
         if not coordinator_config.url:
@@ -230,6 +265,11 @@ def run_http_server(
                 "can register; it is incompatible with GDS L1 (--gds-l1-path) "
                 "and Device-DAX L1 (--l1-devdax-path)."
             )
+    if coordinator_config.event_reporting and not obs_config.enabled:
+        raise ValueError(
+            "--coordinator-event-reporting rides the observability event "
+            "bus: remove --disable-observability to report cache events."
+        )
     _configs["mp"] = mp_config
     _configs["storage_manager"] = storage_manager_config
     _configs["observability"] = obs_config

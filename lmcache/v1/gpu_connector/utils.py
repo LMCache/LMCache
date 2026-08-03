@@ -7,6 +7,7 @@
 # callers keep working unchanged.
 # mypy: disable-error-code="union-attr,call-overload"
 # Standard
+from collections.abc import Hashable, Sequence
 from typing import TYPE_CHECKING, Optional, Union
 
 # Third Party
@@ -14,17 +15,18 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.python_ops_fallback import set_shape_desc_dtype
 from lmcache.utils import EngineType, lmcache_deprecate
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.gpu_connector.kv_format import (
     concrete_shape,
     describe_shape,
     detect_format,
+    extract_kv_cache_shapes,
     get_spec,
     get_spec_class,
 )
 from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache, LayoutHints
+from lmcache.v1.platform.ops_types import set_shape_desc_dtype
 
 if TYPE_CHECKING:
     # First Party
@@ -42,7 +44,7 @@ def assert_contiguous(tensor: torch.Tensor) -> None:
     LMCache transfer kernels assume logical and physical views match for
     coalesced memory accesses. Used at boundaries where we receive a
     tensor we can't or shouldn't permute (e.g. raw CUDA-IPC reconstruction
-    in :class:`~lmcache.v1.multiprocess.custom_types.RawCudaIPCWrapper`).
+    in :class:`~lmcache.v1.platform.cuda.ipc_wrapper.RawCudaIPCWrapper`).
 
     Raises:
         ValueError: If *tensor* has a nonzero storage offset, or is
@@ -85,25 +87,9 @@ def assert_layerwise_gpu_connector(gpu_connector: "GPUConnectorInterface"):
     assert isinstance(gpu_connector, valid_connectors)
 
 
-def is_cross_layer_format(engine_kv_format: "lmc_ops.EngineKVFormat") -> bool:
-    """Return ``True`` if *engine_kv_format* stores all layers in one tensor.
-
-    Cross-layer formats -- ``NB_NL_TWO_BS_NH_HS`` (vLLM, NHD) and
-    ``NB_NL_TWO_NH_BS_HS`` (TRT-LLM, HND) -- are represented as a single
-    bare :class:`torch.Tensor` rather than a list-of-tensors keyed by
-    layer index.
-    """
-    return get_spec_class(engine_kv_format).is_cross_layer
-
-
-def is_hnd(engine_kv_format: "lmc_ops.EngineKVFormat") -> bool:
-    """Return ``True`` if the Engine KV Format uses an HND physical layout."""
-    return get_spec_class(engine_kv_format).is_hnd
-
-
 def is_mla(engine_kv_format: "lmc_ops.EngineKVFormat") -> bool:
     """Return ``True`` for a Multi-head Latent Attention (MLA) layout."""
-    return get_spec_class(engine_kv_format).is_mla
+    return lmc_ops.is_mla(engine_kv_format)
 
 
 def get_engine_kv_shape_description(engine_kv_format: "lmc_ops.EngineKVFormat") -> str:
@@ -223,6 +209,77 @@ def normalize_kv_and_discover_format(
     return detect_format(kv_caches, serving_engine, layout_hints)
 
 
+def normalize_and_discover_per_layer_formats(
+    kv_caches: "DiscoverableKVCache",
+    layer_index_groups: "Sequence[Sequence[int]]",
+    serving_engine: EngineType,
+    layout_hints: "LayoutHints | None" = None,
+) -> "tuple[DiscoverableKVCache, list[lmc_ops.EngineKVFormat]]":
+    """Normalize the KV caches and return one Engine KV format per layer.
+
+    Reports each layer's own format, so models whose layers do not all share one
+    format -- e.g. a K+V main cache (``kv_size=2``) alongside a key-only MLA index
+    cache (``kv_size=1``) -- get a correct per-layer format rather than a single
+    model-wide one.
+
+    Args:
+        kv_caches: The registered KV caches: a per-layer list, or a single fused
+            tensor for cross-layer formats.
+        layer_index_groups: Layer indices of each engine group (one inner
+            sequence per group). Empty means a single non-hybrid group.
+        serving_engine: Which serving engine produced the caches.
+        layout_hints: See :class:`LayoutHints`.
+
+    Returns:
+        ``(normalized_kv_caches, engine_kv_formats)``: the canonical KV cache
+        structure and one format per layer (length equals the layer count),
+        ready for :func:`lmcache.v1.kv_layer_groups.group_layers_by_identity`.
+    """
+
+    # Detect the whole structure once. A format that isn't a per-layer list (a
+    # cross-layer tensor, or a K/V-split) is single-format -- return it whole.
+    extracted_shapes = extract_kv_cache_shapes(kv_caches)
+    if len(extracted_shapes) == 1:
+        whole_format, whole_normalized = detect_format(
+            kv_caches, serving_engine, layout_hints
+        )
+        if not lmc_ops.is_layer_list(whole_format):
+            return whole_normalized, [whole_format] * get_num_layers(
+                whole_normalized, whole_format
+            )
+
+    # Per-layer list: re-detect per engine group, split by tensor shape so a group
+    # that mixes layouts gets the right format per layer.
+    groups = layer_index_groups or [range(len(kv_caches))]
+    detected: dict[int, tuple[DiscoverableKVCache, "lmc_ops.EngineKVFormat"]] = {}
+    for indices in groups:
+        layers_by_shape: dict[Hashable, list[int]] = {}
+        for i in indices:
+            shape = getattr(kv_caches[i], "shape", None)
+            key = tuple(shape) if shape is not None else None
+            layers_by_shape.setdefault(key, []).append(i)
+        for same_shape_indices in layers_by_shape.values():
+            fmt, normalized = detect_format(
+                [kv_caches[i] for i in same_shape_indices],
+                serving_engine,
+                layout_hints,
+            )
+            for sub_idx, layer_idx in enumerate(same_shape_indices):
+                detected[layer_idx] = (normalized[sub_idx], fmt)
+
+    # A layer in no group (cross-layer KV sharing) keeps its own tensor and is
+    # skipped downstream; give it any detected format so every layer has one.
+    fallback_format = next(fmt for _, fmt in detected.values())
+    normalized_per_layer = [
+        detected[i][0] if i in detected else kv_caches[i] for i in range(len(kv_caches))
+    ]
+    engine_kv_formats = [
+        detected[i][1] if i in detected else fallback_format
+        for i in range(len(kv_caches))
+    ]
+    return normalized_per_layer, engine_kv_formats
+
+
 def get_num_layers(
     kv_caches: DiscoverableKVCache, engine_kv_format: "lmc_ops.EngineKVFormat"
 ) -> int:
@@ -268,6 +325,13 @@ def get_page_buffer_size(
 ) -> int:
     """Return the page buffer size (num_blocks * block_size) from ``kv_caches``."""
     return get_spec(kv_caches, engine_kv_format).page_buffer_size()
+
+
+def get_kv_size(
+    kv_caches: DiscoverableKVCache, engine_kv_format: "lmc_ops.EngineKVFormat"
+) -> int:
+    """Return the K/V axis size (2 for split K/V, 1 for fused)."""
+    return get_spec(kv_caches, engine_kv_format).kv_size()
 
 
 def get_num_heads(
@@ -356,9 +420,12 @@ def assert_is_vllm_flash_attn_or_flash_infer(
         lmc_ops.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS,
         lmc_ops.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS,
         lmc_ops.EngineKVFormat.NL_X_NB_TWO_NH_BS_HS,
-        # Blocks-first fused K/V (vLLM CPU): a per-layer non-MLA layout that
-        # shares this transfer path even though it is not literally flash-*.
+        # Blocks-first fused K/V (HND and NHD): per-layer non-MLA layouts that
+        # share this transfer path even though they are not literally flash-*.
         lmc_ops.EngineKVFormat.NL_X_NB_NH_BS_TWO_HS,
+        lmc_ops.EngineKVFormat.NL_X_NB_BS_NH_TWO_HS,
+        lmc_ops.EngineKVFormat.NL_X_NB_NH_BS_CS,
+        lmc_ops.EngineKVFormat.NL_X_NB_BS_NH_CS,
     )
 
 
@@ -385,6 +452,7 @@ def assert_is_vllm_mla_or_flash_attn_or_flash_infer(
         lmc_ops.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS,
         lmc_ops.EngineKVFormat.NL_X_NB_TWO_NH_BS_HS,
         lmc_ops.EngineKVFormat.NL_X_NB_BS_HS,
+        lmc_ops.EngineKVFormat.NL_X_NB_BSV_BSS,
     )
 
 
@@ -421,6 +489,7 @@ def get_device(kv_caches: DiscoverableKVCache) -> torch.device:
 _BLOCK_AXIS_FORMATS: frozenset = frozenset(
     {
         lmc_ops.EngineKVFormat.NL_X_NB_BS_HS,
+        lmc_ops.EngineKVFormat.NL_X_NB_BSV_BSS,
     }
 )
 
@@ -470,20 +539,14 @@ def resolve_block_stride_and_log_layout(
         # - SGL MHA: outer list is K/V (length 2), inner list is
         #   per-layer; K & V share shape/stride by construction.
         # - Other formats: ``kv_caches`` is already a per-layer list.
-        if engine_kv_format in (
-            lmc_ops.EngineKVFormat.NB_NL_TWO_BS_NH_HS,
-            lmc_ops.EngineKVFormat.NB_NL_TWO_NH_BS_HS,
-        ):
+        if lmc_ops.is_cross_layer(engine_kv_format):
             if not isinstance(kv_caches, torch.Tensor):
                 raise TypeError(
                     "Cross-layer EngineKVFormat expects a single backing "
                     f"torch.Tensor, got {type(kv_caches).__name__}."
                 )
             return kv_caches
-        if engine_kv_format in (
-            lmc_ops.EngineKVFormat.TWO_X_NL_X_NBBS_NH_HS,
-            lmc_ops.EngineKVFormat.TWO_X_NL_X_NB_BS_NH_HS,
-        ):
+        if lmc_ops.is_kv_list(engine_kv_format):
             return kv_caches[0][layer_idx]  # type: ignore[index,return-value]
         return kv_caches[layer_idx]  # type: ignore[index,return-value]
 
@@ -585,7 +648,7 @@ def make_page_buffer_shape_desc(
         A populated ``PageBufferShapeDesc``.
     """
     desc = lmc_ops.PageBufferShapeDesc()
-    desc.kv_size = 1 if is_mla(engine_kv_format) else 2
+    desc.kv_size = get_kv_size(kv_caches, engine_kv_format)
     desc.nl = num_layers_in_group
     desc.nb = num_blocks
     desc.bs = block_size

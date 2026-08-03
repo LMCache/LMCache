@@ -101,8 +101,11 @@ Both names point at the same image; only the hostnames differ.
 
 - **PodSecurity admission**: test namespaces are pre-labeled
   `pod-security.kubernetes.io/enforce=privileged` so the operator's
-  DaemonSet (which sets `hostIPC=true` + `privileged=true`) is accepted
-  at admission time. Harmless on clusters that don't enforce PodSecurity.
+  DaemonSet (which always sets `hostIPC=true`, and `privileged=true` only
+  when `spec.privileged` is enabled) is accepted at admission time.
+  `hostIPC=true` alone is rejected by the `baseline`/`restricted` profiles,
+  so the label is required regardless of `privileged`. Harmless on clusters
+  that don't enforce PodSecurity.
 - **SCC (Security Context Constraints)**: M1 smokes never wait for
   DaemonSet pods to schedule, so SCC isn't a blocker. If you need pods
   to actually run later (M2/M3 GPU tier), grant the LMCache
