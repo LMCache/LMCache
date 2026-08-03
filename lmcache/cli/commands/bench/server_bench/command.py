@@ -52,6 +52,8 @@ from lmcache import torch_dev
 from lmcache.cli.commands.bench.server_bench.helpers import (
     _DEFAULT_SHAPE_SPEC,
     DTYPE_MAP,
+    ServerTaintedError,
+    ServerTaintedInterrupt,
     _allocate_cpu_shm_kv_cache,
     _allocate_gpu_kv_cache,
     _get_chunk_size,
@@ -399,6 +401,13 @@ def run_server_bench(
     total_checksum_ok = 0
     total_checksum_fail = 0
 
+    # Fail-close run health. ``run_error`` is the first invalidating reason
+    # (empty => valid); ``server_tainted`` means cleanup could not confirm the
+    # server is safe to reuse; ``interrupted`` maps a Ctrl-C to exit 130.
+    run_error = ""
+    server_tainted = False
+    interrupted = False
+
     # Latency collectors: keyed by (pass_label, op_type).
     # Each entry is a list of latency values in ms.
     cold_lookup_ms: list[float] = []
@@ -577,6 +586,11 @@ def run_server_bench(
         # ``REGISTER_KV_CACHE`` protocol since ``CpuShmTensorWrapper``
         # is a ``DeviceIPCWrapper`` subclass on the wire. In data mode
         # we fall through to the non-GPU registration protocol.
+        # REGISTER is submit-then-unknown: once submitted the server may have
+        # created the context even if the reply times out. Mark it registered
+        # *before* the call so the ``finally`` best-effort UNREGISTERs it on
+        # any outcome (a no-op server-side if it was never created).
+        registered = True
         register_result = _send_register_kv_cache(
             client,
             layout_hints=layout_hints,
@@ -587,11 +601,14 @@ def run_server_bench(
         )
         log("REGISTER_KV_CACHE: %s" % ("OK" if register_result else "FAIL"))
         log("")
-        # Mark the registration so the ``finally`` block knows to send the
-        # matching UNREGISTER. The data-mode register returns a response
-        # object (truthy) and the handle-mode register returns a bool;
-        # either way a truthy result means the server holds our context.
-        registered = bool(register_result)
+        if not register_result:
+            # A failed / timed-out REGISTER invalidates the run and taints the
+            # server (its context state is unknown); the workload must not
+            # start, but teardown still best-effort UNREGISTERs.
+            run_error = (
+                "REGISTER_KV_CACHE failed (timeout or rejection); server effect unknown"
+            )
+            server_tainted = True
 
         # In data mode the server reply carries the SHM pool name
         # and size; the bench mmaps the same pool so STORE/RETRIEVE
@@ -608,6 +625,9 @@ def run_server_bench(
             seq_iter: itertools.count | range = range(args.start, args.end)
         else:
             seq_iter = itertools.count(args.start)
+        if run_error:
+            # Setup already failed (e.g. REGISTER): do not start the workload.
+            seq_iter = range(0)
 
         http_base = args.url.rstrip("/")
 
@@ -617,6 +637,12 @@ def run_server_bench(
         # RETRIEVE. Handle mode keeps the legacy server-side
         # ``/cache/checksums`` path.
         client_tensors = None if use_handle else client_kv_tensors
+
+        # Checksum verification is expected in data mode (client-side hashing)
+        # or whenever an HTTP endpoint is configured (server-side hashing). A
+        # run that expects it but cannot produce comparable digests is invalid:
+        # "unable to verify" must never pass as "verified".
+        checksum_expected = client_tensors is not None or bool(http_base)
 
         # Record only the steady-state load, not the one-time registration.
         if profiler is not None:
@@ -641,11 +667,25 @@ def run_server_bench(
                 client_tensors=client_tensors,
                 server_pool=server_pool,
             )
-            if cold_result is not None:
-                if cold_result.lookup_ms is not None:
-                    cold_lookup_ms.append(cold_result.lookup_ms)
-                if cold_result.store_ms is not None:
-                    cold_store_ms.append(cold_result.store_ms)
+            # A ``None`` result means the request was smaller than one chunk:
+            # a pair pass that stores / verifies nothing cannot be benchmarked,
+            # so the run is invalid rather than silently skipped.
+            if cold_result is None:
+                run_error = (
+                    "seq %d cold: request smaller than one chunk; nothing to "
+                    "benchmark" % seq_no
+                )
+                break
+            if cold_result.server_tainted:
+                server_tainted = True
+            if cold_result.failure:
+                # Fail-close: stop issuing requests against a broken server.
+                run_error = "seq %d cold: %s" % (seq_no, cold_result.failure)
+                break
+            if cold_result.lookup_ms is not None:
+                cold_lookup_ms.append(cold_result.lookup_ms)
+            if cold_result.store_ms is not None:
+                cold_store_ms.append(cold_result.store_ms)
 
             time.sleep(args.interval)
 
@@ -665,44 +705,97 @@ def run_server_bench(
                 client_tensors=client_tensors,
                 server_pool=server_pool,
             )
-            if warm_result is not None:
-                if warm_result.lookup_ms is not None:
-                    warm_lookup_ms.append(warm_result.lookup_ms)
-                if warm_result.retrieve_ms is not None:
-                    warm_retrieve_ms.append(warm_result.retrieve_ms)
+            if warm_result is None:
+                run_error = (
+                    "seq %d warm: request smaller than one chunk; nothing to "
+                    "benchmark" % seq_no
+                )
+                break
+            if warm_result.server_tainted:
+                server_tainted = True
+            if warm_result.failure:
+                run_error = "seq %d warm: %s" % (seq_no, warm_result.failure)
+                break
+            if warm_result.lookup_ms is not None:
+                warm_lookup_ms.append(warm_result.lookup_ms)
+            if warm_result.retrieve_ms is not None:
+                warm_retrieve_ms.append(warm_result.retrieve_ms)
 
-            # Compare checksums
             total_requests += 1
-            cold_checksums = cold_result.checksums if cold_result else None
-            warm_checksums = warm_result.checksums if warm_result else None
-            if cold_checksums and warm_checksums:
-                if cold_checksums == warm_checksums:
+
+            # Pair protocol: the cold pass just stored this sequence, so the
+            # warm pass must hit every chunk. A short hit means the STORE was
+            # not fully retrievable -- invalidate rather than report it clean.
+            if warm_result.hit_chunks < warm_result.total_chunks:
+                run_error = (
+                    "seq %d: warm pass hit %d/%d chunks; the cold STORE was not "
+                    "fully retrievable"
+                    % (seq_no, warm_result.hit_chunks, warm_result.total_chunks)
+                )
+                break
+
+            # Checksum oracle (fail-close). When verification is expected, both
+            # digests must be present, cover every chunk, and match exactly; a
+            # missing / short / mismatched digest all invalidate the run, so an
+            # unverifiable result can never pass as verified. When verification
+            # is not expected (handle mode with no HTTP endpoint) there is no
+            # oracle to enforce.
+            cold_checksums = cold_result.checksums
+            warm_checksums = warm_result.checksums
+            if checksum_expected:
+                expected = warm_result.total_chunks
+                verified = (
+                    cold_checksums is not None
+                    and warm_checksums is not None
+                    and len(cold_checksums) == expected
+                    and len(warm_checksums) == expected
+                    and cold_checksums == warm_checksums
+                )
+                if verified:
                     total_checksum_ok += 1
                     log("  [seq %d] CHECKSUM MATCH OK" % seq_no)
                 else:
                     total_checksum_fail += 1
-                    log("  [seq %d] CHECKSUM MISMATCH!" % seq_no)
-                    for i, (c, w) in enumerate(
-                        zip(
-                            cold_checksums,
-                            warm_checksums,
-                            strict=False,
-                        )
-                    ):
-                        log(
-                            "    chunk %d: cold=%s warm=%s %s"
-                            % (
-                                i,
-                                c[:12],
-                                w[:12],
-                                ("OK" if c == w else "FAIL"),
+                    log("  [seq %d] CHECKSUM VERIFICATION FAILED" % seq_no)
+                    if cold_checksums is not None and warm_checksums is not None:
+                        for i, (c, w) in enumerate(
+                            zip(cold_checksums, warm_checksums, strict=False)
+                        ):
+                            log(
+                                "    chunk %d: cold=%s warm=%s %s"
+                                % (i, c[:12], w[:12], ("OK" if c == w else "FAIL"))
                             )
+                    run_error = (
+                        "seq %d: checksum verification failed (cold=%s warm=%s, "
+                        "expected %d chunks)"
+                        % (
+                            seq_no,
+                            "none" if cold_checksums is None else len(cold_checksums),
+                            "none" if warm_checksums is None else len(warm_checksums),
+                            expected,
                         )
+                    )
+                    break
 
             log("")
             time.sleep(args.interval)
+    except ServerTaintedInterrupt as exc:
+        # A Ctrl-C whose cleanup could not be confirmed: keep exit 130 AND
+        # flag the server for restart.
+        interrupted = True
+        server_tainted = True
+        run_error = run_error or ("interrupted: %s" % exc)
+        log("\nStopping (server state unconfirmed)...")
     except KeyboardInterrupt:
+        # A plain Ctrl-C: the run is invalid and must exit 130.
+        interrupted = True
+        run_error = run_error or "interrupted by user (Ctrl-C)"
         log("\nStopping...")
+    except ServerTaintedError as exc:
+        # A request failed and its cleanup could not confirm clean state.
+        server_tainted = True
+        run_error = run_error or ("request failed: %s" % exc)
+        log("\n[error] %s" % exc)
     finally:
         # Stop recording once load ends, before teardown
         if profiler is not None:
@@ -713,6 +806,12 @@ def run_server_bench(
         # one context entry per bench run. Must run while the client is
         # still connected, hence before ``client.close()``.
         if registered:
+            # A cleanup that cannot be confirmed invalidates the run AND marks
+            # the server unsafe to reuse -- otherwise the summary could read
+            # "Valid: yes / Server reuse safe: no" with latency still shown.
+            # ``_call`` only converts a TimeoutError, so any other error (or a
+            # Ctrl-C) is caught here rather than allowed to skip the remaining
+            # mmap / client / SHM cleanup below.
             try:
                 ok = _send_unregister_kv_cache(
                     client,
@@ -720,7 +819,20 @@ def run_server_bench(
                     use_handle=use_handle,
                 )
                 log("UNREGISTER_KV_CACHE: %s" % ("OK" if ok else "FAIL"))
-            except zmq.ZMQError as exc:
+                if not ok:
+                    server_tainted = True
+                    run_error = run_error or (
+                        "UNREGISTER_KV_CACHE timed out; server may still hold "
+                        "the context (restart required)"
+                    )
+            except BaseException as exc:  # noqa: BLE001 - cleanup must not abort
+                server_tainted = True
+                if isinstance(exc, KeyboardInterrupt):
+                    interrupted = True
+                run_error = run_error or (
+                    "UNREGISTER_KV_CACHE failed (%s: %s); server state unknown"
+                    % (type(exc).__name__, exc)
+                )
                 log("  [warning] UNREGISTER_KV_CACHE failed: %s" % exc)
         # Release the bench-side mmap of the server SHM pool first
         # (data mode only; ``server_pool`` stays ``None`` otherwise).
@@ -741,19 +853,36 @@ def run_server_bench(
             except OSError:
                 pass
 
-    # Emit structured metrics summary.
+    # A run that completed no request pairs (an empty --start/--end range, or
+    # setup that failed before the first request) has nothing to report and is
+    # not a valid benchmark.
+    if total_requests == 0 and not run_error:
+        run_error = "no request pairs completed (empty --start/--end range?)"
+
+    # Emit the summary. On an invalid run the performance sections are
+    # suppressed -- the numbers are not trustworthy -- but the validity
+    # verdict and server-reuse-safety are always reported.
+    invalid = bool(run_error)
+    server_reuse_safe = not server_tainted
     _emit_server_bench_metrics(
         command=command,
         args=args,
         total_requests=total_requests,
         total_checksum_ok=total_checksum_ok,
         total_checksum_fail=total_checksum_fail,
+        valid=not invalid,
+        server_reuse_safe=server_reuse_safe,
+        run_error=run_error,
         cold_lookup_ms=cold_lookup_ms,
         cold_store_ms=cold_store_ms,
         warm_lookup_ms=warm_lookup_ms,
         warm_retrieve_ms=warm_retrieve_ms,
     )
     log("Done.")
+    if invalid:
+        # Fail-close exit: a Ctrl-C keeps the conventional 130, any other
+        # failure exits 1, so callers never read a broken run as success.
+        sys.exit(130 if interrupted else 1)
 
 
 def _emit_server_bench_metrics(
@@ -762,27 +891,36 @@ def _emit_server_bench_metrics(
     total_requests: int,
     total_checksum_ok: int,
     total_checksum_fail: int,
+    valid: bool = True,
+    server_reuse_safe: bool = True,
+    run_error: str = "",
     cold_lookup_ms: list[float] | None = None,
     cold_store_ms: list[float] | None = None,
     warm_lookup_ms: list[float] | None = None,
     warm_retrieve_ms: list[float] | None = None,
 ) -> None:
-    """Emit server bench summary using the CLI metrics system.
+    """Emit the server bench summary using the CLI metrics system.
+
+    The validity verdict is always reported, but the performance sections
+    (checksum pass rate and per-operation latencies) are emitted only for a
+    *valid* run: a failed / interrupted / server-tainted run must not present
+    confident-looking numbers.
 
     Args:
         command: The owning :class:`BaseCommand` instance.
         args: Parsed CLI arguments.
-        total_requests: Total number of request pairs processed.
+        total_requests: Total number of request pairs completed.
         total_checksum_ok: Number of requests with matching checksums.
         total_checksum_fail: Number of requests with mismatched checksums.
+        valid: Whether the run's numbers are trustworthy.
+        server_reuse_safe: Whether the dedicated server can be reused (``False``
+            when cleanup could not confirm clean state).
+        run_error: The first invalidating reason (empty when ``valid``).
         cold_lookup_ms: Per-request cold lookup latencies (ms).
         cold_store_ms: Per-request cold store latencies (ms).
         warm_lookup_ms: Per-request warm lookup latencies (ms).
         warm_retrieve_ms: Per-request warm retrieve latencies (ms).
     """
-    if total_requests == 0:
-        return
-
     metrics = command.create_metrics("Server Bench Result", args, width=64)
 
     cfg_section = metrics.add_section("config", "Configuration")
@@ -795,7 +933,17 @@ def _emit_server_bench_metrics(
     cfg_section.add("interval", "Interval (s)", args.interval)
 
     result_section = metrics.add_section("results", "Results")
+    result_section.add("valid", "Valid", "yes" if valid else "no")
+    result_section.add(
+        "server_reuse_safe", "Server reuse safe", "yes" if server_reuse_safe else "no"
+    )
     result_section.add("total_requests", "Total requests", total_requests)
+    if not valid:
+        # Suppress the performance summary: the run is not trustworthy.
+        result_section.add("error", "Error", run_error or "run invalid")
+        metrics.emit()
+        return
+
     result_section.add("checksum_ok", "Checksum OK", total_checksum_ok)
     result_section.add("checksum_fail", "Checksum FAIL", total_checksum_fail)
     if total_requests > 0:
