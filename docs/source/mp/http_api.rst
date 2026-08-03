@@ -706,7 +706,7 @@ adapter must be configured, else ``503``; a pure ``l1`` delete needs no adapter.
 
 Per-key successful L2 deletions fire ``on_l2_keys_deleted`` on the
 adapter's listeners — when the coordinator is wired (see
-``--coordinator-l2-event-reporting``), the deletions show up at the
+``--coordinator-event-reporting``), the deletions show up at the
 coordinator's ``POST /quota/events`` as ``"type": "delete"`` events. The
 coordinator's eviction + usage trackers learn about the deletion from
 that event flow, not from the response of this call.

@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from lmcache.v1.mp_observability.event_bus import EventBus
 
 # First Party
+from lmcache.v1.mp_observability.gc_monitor import GCMonitorConfig
 from lmcache.v1.mp_observability.subscribers.logging.lookup_hash import (
     LookupHashLogConfig,
 )
@@ -62,6 +63,11 @@ class ObservabilityConfig:
     lookup_hash_log: LookupHashLogConfig = field(default_factory=LookupHashLogConfig)
     """Configuration for lookup hash file logging.  Disabled by default
     (empty ``output_dir``)."""
+
+    gc_monitor: GCMonitorConfig = field(default_factory=GCMonitorConfig)
+    """Configuration for CPython garbage-collection timing.  Disabled by
+    default.  The monitor logs directly rather than publishing events, so it
+    is independent of every other flag here including :attr:`enabled`."""
 
     extra_logging_enabled: bool = False
     """Register the periodic extra-stats logging subscriber (opt-in):
@@ -206,6 +212,36 @@ def add_observability_args(
         "Oldest files are deleted when this limit is exceeded. Default is 100.",
     )
 
+    gc_group = parser.add_argument_group(
+        "GC Monitoring",
+        "Time CPython garbage collections so their pauses can be "
+        "correlated with request tail latency",
+    )
+    gc_group.add_argument(
+        "--enable-gc-monitor",
+        action="store_true",
+        default=False,
+        help="Time every CPython garbage collection and log the slow ones at "
+        "INFO. Disabled by default.",
+    )
+    gc_group.add_argument(
+        "--gc-monitor-min-pause-ms",
+        type=float,
+        default=1.0,
+        help="Only log garbage collections that took at least this many "
+        "milliseconds. Default is 1.0; 0 logs every collection, including "
+        "the very frequent sub-millisecond gen-0 sweeps.",
+    )
+    gc_group.add_argument(
+        "--gc-monitor-top-objects",
+        type=int,
+        default=0,
+        help="Include a breakdown of the N most common object types in each "
+        "logged collection. This walks the whole generation on EVERY "
+        "collection and can itself cost hundreds of milliseconds on a large "
+        "cache. Default is 0 (off); use only while debugging.",
+    )
+
     extra_group = parser.add_argument_group(
         "Extra Logging",
         "Periodic INFO-level L0<->L1 throughput/token stats per GPU and "
@@ -276,6 +312,11 @@ def parse_args_to_observability_config(
             rotation_interval_sec=args.lookup_hash_log_rotation_interval,
             rotation_max_size=args.lookup_hash_log_rotation_max_size,
             max_files=args.lookup_hash_log_max_files,
+        ),
+        gc_monitor=GCMonitorConfig(
+            enabled=args.enable_gc_monitor,
+            min_pause_ms=args.gc_monitor_min_pause_ms,
+            top_objects=args.gc_monitor_top_objects,
         ),
         extra_logging_enabled=args.enable_extra_logging,
         extra_logging_interval=args.extra_logging_interval,

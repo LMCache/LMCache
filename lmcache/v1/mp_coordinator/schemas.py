@@ -5,6 +5,8 @@ These Pydantic models are the wire contract between the coordinator and mp
 servers. The coordinator uses them to validate requests and shape responses; an
 mp server (when it registers) imports the same models to build its request
 bodies and parse replies, so both sides agree on the schema in one place.
+
+This module holds HTTP models only.
 """
 
 # Standard
@@ -18,7 +20,9 @@ import numpy as np
 
 # First Party
 from lmcache.v1.distributed.api import EncodedObjectKey  # noqa: F401  re-exported
-from lmcache.v1.distributed.tiers import Tier
+from lmcache.v1.distributed.api import Tier
+from lmcache.v1.mp_coordinator.api import CacheEventBatch
+from lmcache.v1.mp_coordinator.key_directory import Placement
 
 
 def encode_tokens(tokens: "list[int] | np.ndarray") -> str:
@@ -245,6 +249,120 @@ class StatusListResponse(BaseModel):
 
     total_gb: float
     by_cache_salt: list[StatusResponse]
+
+
+# -- Key directory -----------------------------------------------------------
+
+
+class DirectoryEventsRequest(BaseModel):
+    """Body of ``POST /directory/events``.
+
+    Attributes:
+        batches: Event batches to apply, in emission order per instance.
+    """
+
+    batches: list[CacheEventBatch] = Field(default_factory=list)
+
+    @field_validator("batches")
+    @classmethod
+    def _validate_batches(cls, value: list[CacheEventBatch]) -> list[CacheEventBatch]:
+        """Enforce encoding-level constraints on every entry.
+
+        Args:
+            value: The hydrated batches.
+
+        Returns:
+            The unchanged batches once every constraint holds.
+
+        Raises:
+            ValueError: If an entry's key cannot convert into an
+                ``ObjectKey`` or its ``content_hash_hex`` is not valid
+                hex (surfaced as 422).
+        """
+        for batch in value:
+            for entry in batch.entries:
+                entry.key.to_object_key()
+                bytes.fromhex(entry.content_hash_hex)
+        return value
+
+
+class DirectoryEventsResponse(BaseModel):
+    """Reply to ``POST /directory/events``.
+
+    Attributes:
+        applied: Batches applied to the directory.
+        duplicates: Batches dropped as already-applied replays.
+        stale: Batches dropped for carrying an outdated incarnation.
+    """
+
+    applied: int = 0
+    duplicates: int = 0
+    stale: int = 0
+
+
+class DirectoryLookupRequest(BaseModel):
+    """Body of ``POST /directory/lookup``.
+
+    Attributes:
+        keys: The keys to resolve to placements.
+    """
+
+    keys: list[EncodedObjectKey] = Field(default_factory=list)
+
+
+class DirectoryKeyPlacements(BaseModel):
+    """Placements for one requested key.
+
+    Attributes:
+        key: The requested key, echoed back.
+        placements: Known placements; empty when the directory knows
+            nothing about the key.
+    """
+
+    key: EncodedObjectKey
+    placements: list[Placement] = Field(default_factory=list)
+
+
+class DirectoryLookupResponse(BaseModel):
+    """Reply to ``POST /directory/lookup``.
+
+    Attributes:
+        results: One entry per requested key, in request order.
+    """
+
+    results: list[DirectoryKeyPlacements] = Field(default_factory=list)
+
+
+class TokenPlacementLookupRequest(BaseModel):
+    """Body of ``POST /directory/lookup_tokens``.
+
+    Resolves ``token_ids`` to the object keys of their complete chunks
+    (the same fan-out the pin APIs use) and returns each key's placements.
+
+    Attributes:
+        model_name: Model whose rank fan-out to use when resolving keys.
+        world_size: World size selecting the per-rank fan-out.
+        token_ids: The token sequence to resolve.
+        cache_salt: Per-tenant isolation salt applied to the produced keys.
+    """
+
+    model_name: str
+    world_size: int = Field(ge=1)
+    token_ids: list[int] = Field(default_factory=list)
+    cache_salt: str = ""
+
+
+class TokenPlacementLookupResponse(BaseModel):
+    """Reply to ``POST /directory/lookup_tokens``.
+
+    Attributes:
+        chunks: Number of complete chunks the token sequence resolved to.
+        results: One entry per resolved key (``chunks`` x per-rank
+            fan-out), each echoing the key with its known placements.
+    """
+
+    chunks: int = 0
+    results: list[DirectoryKeyPlacements] = Field(default_factory=list)
 
 
 # -- Global CacheBlend fingerprint directory ------------------------------

@@ -22,6 +22,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache import torch_dev
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
@@ -148,8 +149,8 @@ def create_interleaved_lookup_keys(
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="CUDA is required for tensor parallel tests",
+    not torch_dev.is_available(),
+    reason="Requires torch_device_type",
 )
 class TestStorageManagerTPLookup:
     """
@@ -425,8 +426,8 @@ class TestStorageManagerTPLookup:
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="CUDA is required for tensor parallel tests",
+    not torch_dev.is_available(),
+    reason="Requires torch_device_type",
 )
 class TestStorageManagerTPStoreRetrieve:
     """Tests for store and retrieve operations with tensor parallel."""
@@ -512,8 +513,8 @@ class TestStorageManagerTPStoreRetrieve:
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="CUDA is required for tensor parallel tests",
+    not torch_dev.is_available(),
+    reason="Requires torch_device_type",
 )
 class TestTPEdgeCases:
     """Edge case tests for tensor parallel support."""
@@ -642,8 +643,8 @@ class TestTPEdgeCases:
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="CUDA is required for tensor parallel tests",
+    not torch_dev.is_available(),
+    reason="Requires torch_device_type",
 )
 class TestTPIntegration:
     """Integration tests simulating real TP workflows."""

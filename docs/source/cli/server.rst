@@ -73,11 +73,12 @@ Commonly used flags include:
    * - ``--coordinator-heartbeat-interval SECONDS``
      - Seconds between heartbeats (``> 0``, default ``5``). Keep well below the
        coordinator's instance timeout.
-   * - ``--coordinator-l2-event-reporting``
-     - Enable reporting L2 store/lookup events to the coordinator for
-       fleet-wide usage tracking and quota-based eviction.
-   * - ``--coordinator-l2-event-flush-interval SECONDS``
-     - Seconds between L2 event batch flushes (``> 0``, default ``1``).
+   * - ``--coordinator-event-reporting``
+     - Enable reporting cache events to the coordinator: the key
+       directory's store/access/delete stream (fleet-wide placement
+       tracking) and the L2 usage stream (quota tracking and eviction).
+   * - ``--coordinator-event-flush-interval SECONDS``
+     - Seconds between cache-event batch flushes (``> 0``, default ``1``).
    * - ``--p2p-advertise-url HOST:PORT``
      - Enable P2P KV cache sharing and advertise this server's
        transfer-channel endpoint to peers (e.g. ``10.0.0.1:8500``). Setting it

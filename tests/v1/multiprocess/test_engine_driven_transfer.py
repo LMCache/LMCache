@@ -262,8 +262,8 @@ def _default_key(tokens: int = 8) -> "IPCCacheServerKey":
 def test_wrap_kv_caches_wraps_all_tensors() -> None:
     """Verify wrap_kv_caches wraps all provided KV tensors."""
     # First Party
-    from lmcache.integration.vllm import vllm_multi_process_adapter as adapter_mod
     from lmcache.v1.platform import get_device_spec
+    from lmcache.v1.platform.kv_wrap import wrap_kv_caches
 
     kv_caches = _make_kv_caches()
 
@@ -289,7 +289,7 @@ def test_wrap_kv_caches_wraps_all_tensors() -> None:
                     return_value=_FakeWrapper,
                 )
             )
-        wrapped = adapter_mod.wrap_kv_caches(kv_caches)
+        wrapped = wrap_kv_caches(kv_caches)
 
     assert len(wrapped) == len(kv_caches)
 
@@ -434,6 +434,7 @@ def test_create_transfer_context_handle_mode_unsupported_device_raises(
         create_transfer_context({"layer_0": torch.randn(2, 2)}, mode="lmcache_driven")
 
 
+@pytest.mark.musa
 def test_musa_data_context_keeps_layout_validation_device_agnostic(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -479,6 +480,7 @@ def test_musa_data_context_keeps_layout_validation_device_agnostic(
     )
 
 
+@pytest.mark.musa
 def test_musa_data_context_store_uses_device_agnostic_gather(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -552,6 +554,7 @@ def test_musa_data_context_store_uses_device_agnostic_gather(
     assert "prefer_musa_native" not in captured_kwargs
 
 
+@pytest.mark.musa
 def test_musa_data_context_retrieve_uses_device_agnostic_scatter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
