@@ -917,11 +917,13 @@ class TestNixlBufferDeviceCpuValidation:
         config = self._nixl_cpu_defaults()
         config.validate()  # Should not raise
 
+    @pytest.mark.cuda
     def test_gpu_mode_still_requires_nixl_buffer_size(self):
         config = self._nixl_cpu_defaults(nixl_buffer_device=torch_device_type)
         with pytest.raises(AssertionError):
             config.validate()
 
+    @pytest.mark.cuda
     def test_gpu_mode_accepts_nixl_buffer_size(self):
         config = self._nixl_cpu_defaults(
             nixl_buffer_device=torch_device_type, nixl_buffer_size=2**30
@@ -949,6 +951,7 @@ class TestNixlBufferDeviceCpuValidation:
         with pytest.raises(ValueError, match="has not been validated end-to-end"):
             config.validate()
 
+    @pytest.mark.cuda
     def test_gpu_mode_accepts_enable_p2p(self):
         """The P2P + NIXL storage combo is only rejected in CPU mode; the
         GPU-mode path doesn't touch LocalCPUBackend's allocator."""
@@ -1027,6 +1030,7 @@ class TestNixlUseHugepagesDeprecation:
         assert config.local_cpu_use_hugepages is True
         assert "nixl_use_hugepages" not in config.extra_config
 
+    @pytest.mark.cuda
     def test_gpu_mode_drops_flag_without_aliasing(self):
         """In GPU mode the flag was always a no-op; alias would be misleading
         (LocalCPUBackend's hugepages should not be toggled by a NIXL knob in
