@@ -5,12 +5,21 @@
 # Future
 from __future__ import annotations
 
+# Standard
+from collections import OrderedDict
+from typing import Any
+
 # Third Party
 from opentelemetry import metrics
 
 # First Party
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventCallback, EventSubscriber
+
+# Cap on outstanding START timestamps awaiting their END. A lookup abandoned
+# mid-poll never sends its END, so unmatched STARTs are normal; evict the
+# oldest rather than grow without bound.
+_MAX_PENDING_PHASES = 8192
 
 
 class BlendMetricsSubscriber(EventSubscriber):
@@ -40,10 +49,70 @@ class BlendMetricsSubscriber(EventSubscriber):
     - ``lmcache_blend.store_final_failures``         — store_final failures
     - ``lmcache_blend.fingerprints_registered``      — chunks in fingerprint table
     - ``lmcache_blend.chunks_evicted``               — evicted from fingerprint table
+
+    V3 phase metrics — the sub-legs of the unified lookup and the retrieve
+    scatter. Each ``*_duration`` pairs the phase's START/END events by session,
+    so the numbers match the same-named trace spans (see
+    ``docs/design/v1/mp_observability/blend_v3_observability.md``):
+
+    - ``lmcache_blend.lookup_duration``              — cb.lookup, incl. poll waits
+    - ``lmcache_blend.fingerprint_match_duration``   — local fingerprint match
+    - ``lmcache_blend.prefix_lookup_duration``       — prefix leg (L1+L2)
+    - ``lmcache_blend.coordinator_match_duration``   — fleet-directory match leg
+    - ``lmcache_blend.sparse_prefetch_duration``     — non-prefix L2->L1 prefetch
+    - ``lmcache_blend.retrieve_duration``            — cb.retrieve (GPU-timed)
+    - ``lmcache_blend.scatter_duration``             — L1->paged scatter (GPU-timed)
+    - ``lmcache_blend.fingerprint_matches``          — chunks matched per lookup
+    - ``lmcache_blend.coordinator_matches``          — segments from the coordinator
+    - ``lmcache_blend.coordinator_match_timeouts``   — match legs past their deadline
+    - ``lmcache_blend.sparse_prefetch_l2_keys``      — keys needing an L2 read
+    - ``lmcache_blend.sparse_prefetch_found_keys``   — those keys that landed in L1
+    - ``lmcache_blend.scatter_tokens``               — tokens written into paged KV
+    - ``lmcache_blend.scatter_prefix_chunks``        — chunks written as-is
+    - ``lmcache_blend.scatter_shifted_chunks``       — chunks re-RoPE'd on the way in
+    - ``lmcache_blend.scatter_dropped_chunks``       — matches past the allocated slots
+    - ``lmcache_blend.retrieve_noops``               — retrieves that scattered
+      nothing, labeled by ``reason``
     """
+
+    # Phase name per START / END event. Both directions must map to the same
+    # name, which is the histogram suffix and the trace-span basename.
+    _PHASE_BY_START: dict[EventType, str] = {
+        EventType.CB_LOOKUP_START: "lookup",
+        EventType.CB_FINGERPRINT_MATCH_START: "fingerprint_match",
+        EventType.CB_PREFIX_LOOKUP_START: "prefix_lookup",
+        EventType.CB_COORDINATOR_MATCH_START: "coordinator_match",
+        EventType.CB_SPARSE_PREFETCH_START: "sparse_prefetch",
+        EventType.CB_RETRIEVE_START: "retrieve",
+        EventType.CB_SCATTER_START: "scatter",
+    }
+
+    _PHASE_BY_END: dict[EventType, str] = {
+        EventType.CB_LOOKUP_END: "lookup",
+        EventType.CB_FINGERPRINT_MATCH_END: "fingerprint_match",
+        EventType.CB_PREFIX_LOOKUP_END: "prefix_lookup",
+        EventType.CB_COORDINATOR_MATCH_END: "coordinator_match",
+        EventType.CB_SPARSE_PREFETCH_END: "sparse_prefetch",
+        EventType.CB_RETRIEVE_END: "retrieve",
+        EventType.CB_SCATTER_END: "scatter",
+    }
 
     def __init__(self) -> None:
         meter = metrics.get_meter("lmcache.blend")
+
+        # (phase, session_id) -> START timestamp, bounded LRU.
+        self._phase_starts: OrderedDict[tuple[str, str], float] = OrderedDict()
+        self._phase_hists: dict[str, Any] = {
+            phase: meter.create_histogram(
+                f"lmcache_blend.{phase}_duration",
+                description=(
+                    f"Wall-clock duration of the CB {phase} phase, measured "
+                    "between its START and END events for one request."
+                ),
+                unit="ms",
+            )
+            for phase in dict.fromkeys(self._PHASE_BY_START.values())
+        }
 
         self._lookup_requests = meter.create_counter(
             "lmcache_blend.lookup_requests",
@@ -145,6 +214,54 @@ class BlendMetricsSubscriber(EventSubscriber):
             "lmcache_blend.chunks_evicted",
             description="Stale chunks evicted from the fingerprint table",
         )
+        self._fingerprint_matches = meter.create_counter(
+            "lmcache_blend.fingerprint_matches",
+            description="Chunks returned by the local fingerprint matcher",
+        )
+        self._coordinator_matches = meter.create_counter(
+            "lmcache_blend.coordinator_matches",
+            description="Segments returned by the coordinator fleet directory",
+        )
+        self._coordinator_match_timeouts = meter.create_counter(
+            "lmcache_blend.coordinator_match_timeouts",
+            description=(
+                "Coordinator match legs abandoned at their deadline (the "
+                "lookup proceeds local-only, so reuse silently shrinks)"
+            ),
+        )
+        self._sparse_prefetch_l2_keys = meter.create_counter(
+            "lmcache_blend.sparse_prefetch_l2_keys",
+            description="Non-prefix keys the sparse prefetch had to read from L2",
+        )
+        self._sparse_prefetch_found_keys = meter.create_counter(
+            "lmcache_blend.sparse_prefetch_found_keys",
+            description="Sparse-prefetch keys that became L1-resident",
+        )
+        self._scatter_tokens = meter.create_counter(
+            "lmcache_blend.scatter_tokens",
+            description="Tokens written from L1 into the request's paged KV",
+            unit="tokens",
+        )
+        self._scatter_prefix_chunks = meter.create_counter(
+            "lmcache_blend.scatter_prefix_chunks",
+            description="Scattered chunks kept at their stored position (no re-RoPE)",
+        )
+        self._scatter_shifted_chunks = meter.create_counter(
+            "lmcache_blend.scatter_shifted_chunks",
+            description="Scattered chunks re-RoPE'd to a new position",
+        )
+        self._scatter_dropped_chunks = meter.create_counter(
+            "lmcache_blend.scatter_dropped_chunks",
+            description="Matched chunks dropped for exceeding the allocated slots",
+        )
+        self._retrieve_noops = meter.create_counter(
+            "lmcache_blend.retrieve_noops",
+            description=(
+                "CB retrieves that returned success without scattering "
+                "anything, labeled by reason. Each one degrades its request "
+                "to a full recompute."
+            ),
+        )
 
     def get_subscriptions(self) -> dict[EventType, EventCallback]:
         """Return the mapping of event types to handler callbacks."""
@@ -153,18 +270,55 @@ class BlendMetricsSubscriber(EventSubscriber):
             EventType.CB_LOOKUP_END: self._on_lookup_end,
             EventType.CB_RETRIEVE_START: self._on_retrieve_start,
             EventType.CB_RETRIEVE_END: self._on_retrieve_end,
+            EventType.CB_RETRIEVE_NOOP: self._on_retrieve_noop,
             EventType.CB_STORE_PRE_COMPUTED_START: self._on_store_pre_start,
             EventType.CB_STORE_PRE_COMPUTED_END: self._on_store_pre_end,
             EventType.CB_STORE_FINAL_START: self._on_store_final_start,
             EventType.CB_STORE_FINAL_END: self._on_store_final_end,
             EventType.CB_FINGERPRINTS_REGISTERED: self._on_fingerprints_registered,
             EventType.CB_CHUNKS_EVICTED: self._on_chunks_evicted,
+            EventType.CB_FINGERPRINT_MATCH_START: self._on_phase_start,
+            EventType.CB_FINGERPRINT_MATCH_END: self._on_fingerprint_match_end,
+            EventType.CB_PREFIX_LOOKUP_START: self._on_phase_start,
+            EventType.CB_PREFIX_LOOKUP_END: self._on_phase_end,
+            EventType.CB_COORDINATOR_MATCH_START: self._on_phase_start,
+            EventType.CB_COORDINATOR_MATCH_END: self._on_coordinator_match_end,
+            EventType.CB_SPARSE_PREFETCH_START: self._on_sparse_prefetch_start,
+            EventType.CB_SPARSE_PREFETCH_END: self._on_sparse_prefetch_end,
+            EventType.CB_SCATTER_START: self._on_scatter_start,
+            EventType.CB_SCATTER_END: self._on_phase_end,
         }
+
+    # ------------------------------------------------------------------
+    # Phase duration pairing
+    # ------------------------------------------------------------------
+
+    def _on_phase_start(self, event: Event) -> None:
+        """Stash a phase START timestamp for the matching END to consume."""
+        phase = self._PHASE_BY_START[event.event_type]
+        self._phase_starts[(phase, event.session_id)] = event.timestamp
+        self._phase_starts.move_to_end((phase, event.session_id))
+        while len(self._phase_starts) > _MAX_PENDING_PHASES:
+            self._phase_starts.popitem(last=False)
+
+    def _on_phase_end(self, event: Event) -> None:
+        """Record the phase duration in ms, if its START was seen."""
+        phase = self._PHASE_BY_END[event.event_type]
+        start_ts = self._phase_starts.pop((phase, event.session_id), None)
+        if start_ts is None:
+            return  # no matching START (evicted, or the bus started mid-request)
+        dt_ms = (event.timestamp - start_ts) * 1000.0
+        if dt_ms < 0:
+            # GPU-callback timestamps can invert against a CPU-timestamped pair.
+            return
+        self._phase_hists[phase].record(dt_ms)
 
     def _on_lookup_start(self, event: Event) -> None:
         self._lookup_requests.add(1)
+        self._on_phase_start(event)
 
     def _on_lookup_end(self, event: Event) -> None:
+        self._on_phase_end(event)
         self._lookup_requested_tokens.add(event.metadata["requested_tokens"])
         self._lookup_hit_tokens.add(event.metadata["hit_tokens"])
         self._lookup_prefix_hit_tokens.add(event.metadata.get("prefix_hit_tokens", 0))
@@ -183,10 +337,41 @@ class BlendMetricsSubscriber(EventSubscriber):
     def _on_retrieve_start(self, event: Event) -> None:
         self._retrieve_requests.add(1)
         self._retrieve_chunks.add(event.metadata["num_chunks"])
+        self._on_phase_start(event)
 
     def _on_retrieve_end(self, event: Event) -> None:
+        self._on_phase_end(event)
         if not event.metadata.get("success", True):
             self._retrieve_failures.add(1)
+
+    def _on_retrieve_noop(self, event: Event) -> None:
+        reason = str(event.metadata.get("reason", "unknown"))
+        self._retrieve_noops.add(1, attributes={"reason": reason})
+
+    def _on_fingerprint_match_end(self, event: Event) -> None:
+        self._on_phase_end(event)
+        self._fingerprint_matches.add(event.metadata.get("matches", 0))
+
+    def _on_coordinator_match_end(self, event: Event) -> None:
+        self._on_phase_end(event)
+        self._coordinator_matches.add(event.metadata.get("matches", 0))
+        if event.metadata.get("timed_out"):
+            self._coordinator_match_timeouts.add(1)
+
+    def _on_sparse_prefetch_start(self, event: Event) -> None:
+        self._on_phase_start(event)
+        self._sparse_prefetch_l2_keys.add(event.metadata.get("l2_keys", 0))
+
+    def _on_sparse_prefetch_end(self, event: Event) -> None:
+        self._on_phase_end(event)
+        self._sparse_prefetch_found_keys.add(event.metadata.get("found_keys", 0))
+
+    def _on_scatter_start(self, event: Event) -> None:
+        self._on_phase_start(event)
+        self._scatter_tokens.add(event.metadata.get("scattered_tokens", 0))
+        self._scatter_prefix_chunks.add(event.metadata.get("n_prefix", 0))
+        self._scatter_shifted_chunks.add(event.metadata.get("n_shifted", 0))
+        self._scatter_dropped_chunks.add(event.metadata.get("dropped", 0))
 
     def _on_store_pre_start(self, event: Event) -> None:
         self._store_pre_computed_requests.add(1)

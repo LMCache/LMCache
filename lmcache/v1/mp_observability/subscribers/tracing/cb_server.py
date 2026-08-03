@@ -7,7 +7,7 @@ Opens at ``CB_REQUEST_START``; closes at ``CB_REQUEST_END``, deferred until
 any in-flight GPU store/retrieve callbacks complete **and** until
 ``CB_STORE_FINAL_SUBMITTED`` has been received (if a retrieve was submitted).
 
-On the HIT path the lifecycle is:
+On the V2 HIT path the lifecycle is:
 
   CB_RETRIEVE_SUBMITTED → [retrieve GPU op] → CB_RETRIEVE_END
       → [inference, ~hundreds of ms, pending_gpu_ops==0 here]
@@ -22,6 +22,12 @@ conditions hold simultaneously:
 
 * ``_pending_gpu_ops[sid] == 0``
 * ``sid not in _waiting_for_store_final``
+
+V3 ends the request at ``CB_RETRIEVE_END``, so its ``CB_RETRIEVE_SUBMITTED``
+carries ``expects_store_final=False``: the bridge stays empty and the root close
+is gated on ``_pending_gpu_ops`` alone. The sentinel still matters there — at
+TP>1, a worker whose retrieve is a no-op publishes ``CB_REQUEST_END`` on the CPU
+while another worker's scatter is still on the stream.
 
 ``cb.request`` is the trace root: blend_v3 owns the CB lookup end-to-end (prefix
 + non-prefix legs, direct against the storage manager), so a CB request never
@@ -164,6 +170,7 @@ class BlendTracingSubscriber(EventSubscriber):
             # Point events
             EventType.CB_FINGERPRINTS_REGISTERED: self._on_point,
             EventType.CB_CHUNKS_EVICTED: self._on_point,
+            EventType.CB_RETRIEVE_NOOP: self._on_point,
         }
 
     # ------------------------------------------------------------------
@@ -222,8 +229,10 @@ class BlendTracingSubscriber(EventSubscriber):
         """Increment the in-flight GPU-ops counter and update store-final tracking.
 
         ``CB_RETRIEVE_SUBMITTED`` marks the session as waiting for a store_final,
-        bridging the inference gap where ``_pending_gpu_ops`` is transiently 0.
-        ``CB_STORE_FINAL_SUBMITTED`` clears that marker (store_final has arrived).
+        bridging the inference gap where ``_pending_gpu_ops`` is transiently 0 —
+        unless it carries ``expects_store_final=False`` (V3, where marking it
+        would hold the root span open forever). ``CB_STORE_FINAL_SUBMITTED``
+        clears that marker (store_final has arrived).
 
         Args:
             event: One of ``CB_STORE_PRE_COMPUTED_SUBMITTED``,
@@ -234,7 +243,8 @@ class BlendTracingSubscriber(EventSubscriber):
         sid = event.session_id
         self._pending_gpu_ops[sid] = self._pending_gpu_ops.get(sid, 0) + 1
         if event.event_type == EventType.CB_RETRIEVE_SUBMITTED:
-            self._waiting_for_store_final.add(sid)
+            if event.metadata.get("expects_store_final", True):
+                self._waiting_for_store_final.add(sid)
         elif event.event_type == EventType.CB_STORE_FINAL_SUBMITTED:
             self._waiting_for_store_final.discard(sid)
 
@@ -389,7 +399,11 @@ class BlendTracingSubscriber(EventSubscriber):
         """Emit an instant span for point events (no paired END).
 
         Args:
-            event: ``CB_FINGERPRINTS_REGISTERED`` or ``CB_CHUNKS_EVICTED``.
+            event: ``CB_FINGERPRINTS_REGISTERED``, ``CB_CHUNKS_EVICTED``, or
+                ``CB_RETRIEVE_NOOP``. The first two run outside the originating
+                request's span and so routinely land as trace roots of their
+                own; only ``CB_RETRIEVE_NOOP`` reliably nests under
+                ``cb.request``.
         """
         if not _HAS_OTEL:
             return

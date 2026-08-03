@@ -36,7 +36,11 @@ def _make_engine_with_mocked_matcher():
     eng_mock._token_range_matcher = MagicMock()
     eng_mock._pending_fp_lock = threading.Lock()
     eng_mock._pending_fp_hashes = set()
-    # Bind the real drainer method to our mock.
+    eng_mock._event_bus = MagicMock()
+    # Bind the real drainer + its registration-event helper to our mock.
+    eng_mock._emit_fingerprints_registered = (
+        v3_mod.BlendV3Module._emit_fingerprints_registered.__get__(eng_mock)
+    )
     eng_mock._drain_fingerprint_queue = (
         v3_mod.BlendV3Module._drain_fingerprint_queue.__get__(eng_mock)
     )
@@ -55,9 +59,9 @@ def test_fingerprint_queue_drains_in_order():
     worker.start()
     try:
         jobs = [
-            ([1, 2, 3], [b"h1"], 0, 0),
-            ([4, 5, 6], [b"h2"], 1, 3),
-            ([7, 8, 9], [b"h3"], 0, 6),
+            ([1, 2, 3], [b"h1"], 0, 0, "req-a"),
+            ([4, 5, 6], [b"h2"], 1, 3, "req-b"),
+            ([7, 8, 9], [b"h3"], 0, 6, "req-c"),
         ]
         for j in jobs:
             eng._fingerprint_queue.put(j)
@@ -100,8 +104,8 @@ def test_fingerprint_worker_survives_kernel_exception():
     worker = threading.Thread(target=eng._drain_fingerprint_queue, daemon=True)
     worker.start()
     try:
-        eng._fingerprint_queue.put(([1], [b"h1"], 0, 0))
-        eng._fingerprint_queue.put(([2], [b"h2"], 0, 1))
+        eng._fingerprint_queue.put(([1], [b"h1"], 0, 0, "req-a"))
+        eng._fingerprint_queue.put(([2], [b"h2"], 0, 1, "req-b"))
         deadline = time.monotonic() + 2.0
         while (
             eng._token_range_matcher.on_new_token_hashes.call_count < 2

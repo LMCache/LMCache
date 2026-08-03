@@ -146,6 +146,12 @@ class EventType(Enum):
     CB_SCATTER_START = "cb.scatter.start"
     CB_SCATTER_END = "cb.scatter.end"
 
+    # CB V3 retrieve that returned success without scattering anything, so the
+    # request degrades to a full recompute. Point event (CPU), published only
+    # when reuse was actually lost. Metadata: ``reason`` (str, a fixed
+    # low-cardinality code — it is a metric attribute), ``dropped_matches``.
+    CB_RETRIEVE_NOOP = "cb.retrieve.noop"
+
     # Cache Blending (CB) events — lifecycle sentinels (CPU-synchronous)
     CB_REQUEST_START = "cb.request.start"
     CB_STORE_PRE_COMPUTED_SUBMITTED = "cb.store_pre_computed.submitted"

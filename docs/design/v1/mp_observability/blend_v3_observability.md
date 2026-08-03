@@ -39,7 +39,7 @@ cb.request                         [scheduler — root]  request_id, model, worl
 │  │  └─ cb.lookup                 [SERVER]  ← cross-process child; attr prefix_chunks
 │  │     ├─ cb.fingerprint_match   [server]  n_probes, table_hits, matches (token-stride=1, any offset)
 │  │     │  (cb.coordinator_match instead, when a coordinator is configured)  matches, timed_out
-│  │     │  (no cb.prefix_lookup span — prefix is traced by mp.lookup_prefetch)
+│  │     ├─ cb.prefix_lookup       [server]  prefix leg (L1+L2); attr prefix_chunks
 │  │     ├─ cb.sparse_prefetch     [server]  n_keys, l1_hits, l2_misses
 │  │     │  └─ cb.l2_load          [server·IO]  chunks, bytes, ms        (coalesced L2→L1)
 │  │     └─ cb.classify            [server]  found, stale, per_rank_ok
@@ -99,7 +99,7 @@ timing is GPU-accurate):
 |---|---|---|
 | `CB_FINGERPRINT_MATCH_*` | `cb.fingerprint_match` | CPU |
 | `CB_COORDINATOR_MATCH_*` | `cb.coordinator_match` (fleet directory leg; mutually exclusive with the local matcher) | CPU + IO |
-| (prefix lookup) | `mp.lookup_prefetch` (reused; `prefix_chunks` attr on `cb.lookup`) | CPU |
+| `CB_PREFIX_LOOKUP_*` | `cb.prefix_lookup` (blend_v3 owns the submit/poll, so it is a CB span, not `mp.lookup_prefetch`) | CPU + IO |
 | `CB_SPARSE_PREFETCH_*` | `cb.sparse_prefetch` (+ existing L2 prefetch span as `cb.l2_load`) | CPU + IO |
 | `CB_SCATTER_*` | `cb.scatter` (re-RoPE folded in via `n_shifted`) | `publish_on_stream` (GPU) |
 
@@ -126,11 +126,23 @@ is `cur_st >= prefix coverage`), so they sum without double-counting. Both
 components are also recorded individually on `cb.request` so a dashboard can
 split prefix-reuse vs re-RoPE'd non-prefix reuse.
 
-**Metrics (already present, keep):** the `lmcache_blend.*` counters
-(`lookup_requests`, `lookup_hit_tokens`, `lookup_storage_hits`,
-`lookup_stale_chunks`, `retrieve_requests`, `retrieve_failures`,
-`chunks_evicted`, …). Note the V2-only store counters won't populate under V3 —
-document, or recompute the "stored" notion from the unified path.
+**Metrics.** The existing `lmcache_blend.*` counters stay.  Every sub-span event
+above also feeds a metric — a `*_duration` histogram per leg plus counters for
+their payloads — so the phase breakdown survives trace sampling.  See
+[METRICS.md](METRICS.md) § *CB V3 Phase Metrics* for the full list.
+
+Three V3-specific wiring points that are easy to get wrong:
+
+- **No-op retrieves.** A retrieve that drops its matches returns *success*, so
+  `CB_RETRIEVE_NOOP` → `lmcache_blend.retrieve_noops{reason}` is the only signal.
+  `reason` must stay a fixed code, never interpolated — it is a metric attribute.
+- **`CB_RETRIEVE_SUBMITTED`.** V3 must publish it with
+  `expects_store_final=False`: at TP>1 a worker whose retrieve is a no-op
+  publishes `CB_REQUEST_END` on the CPU while another worker's scatter is still
+  on the stream, which would otherwise close `cb.request` early.
+- **The V2-only store counters** (`store_pre_computed_*`, `store_final_*`) stay
+  flat under V3, whose store goes through `LMCacheDrivenTransfer` and is already
+  observed by `mp.store`.  What V3 adds is `CB_FINGERPRINTS_REGISTERED`.
 
 ## 4. vLLM-plugin side — what to expose
 
@@ -184,13 +196,20 @@ each side; Option A only adds the *cross*-process edge.
 1. **Plugin OTel** — make `_cb_span` dual-mode (OTel + JSONL); reuse vLLM's tracer;
    gate with `CB_TRACING`. (plugin repo)
 2. **V3 server sub-spans** — add the §3(a) events + `SPAN_DEFS`; simplify the
-   §3(b) V3 deferral. (LMCache) — **DONE**: `cb.fingerprint_match` /
-   `cb.sparse_prefetch` nest under `cb.lookup` (prefix lookup reuses
-   `mp.lookup_prefetch`; `prefix_chunks` is a `cb.lookup` attr); `cb.scatter`
-   (re-RoPE folded) nests under `cb.retrieve`; `hit_rate` = prefix + non-prefix.
+   §3(b) V3 deferral. (LMCache) — **DONE**: `cb.fingerprint_match`,
+   `cb.prefix_lookup` and `cb.sparse_prefetch` nest under `cb.lookup`
+   (blend_v3 owns the prefix leg, so it is a CB-namespace span rather than
+   `mp.lookup_prefetch`); `cb.coordinator_match` replaces the local matcher when
+   a coordinator is configured; `cb.scatter` (re-RoPE folded) nests under
+   `cb.retrieve`; `hit_rate` = prefix + segmented-prefix + non-prefix.
    `cb.l2_load` GB/s is already covered by the existing `L2ThroughputSubscriber`
    (`L2_LOAD_TASK_*`), correlated by request; nesting that span under
    `cb.sparse_prefetch` is a cross-subsystem follow-up.
+2b. **V3 metrics + emission gaps** — **DONE**: every sub-span event also feeds a
+   histogram/counter (above); `CB_RETRIEVE_SUBMITTED`,
+   `CB_FINGERPRINTS_REGISTERED`, the real `no_gpu_context` flag, the
+   read-failure `CB_RETRIEVE_END`, and `CB_RETRIEVE_NOOP` are now emitted on the
+   V3 path.
 3. **Cross-process link** — add the optional `trace_context` RPC field; inject on
    the plugin side, extract on the server side. (both repos, in lockstep)
 4. **Dashboards** — one trace view + the `lmcache_blend.*` / plugin latency metrics
