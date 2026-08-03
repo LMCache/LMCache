@@ -58,8 +58,7 @@ allowlist = {
   "tests/v1/mp_observability/**/test_*.py",
   "tests/v1/multiprocess/**/test_*.py",
   "tests/v1/distributed/**/test_*.py",
-  "tests/v1/test_xpu_connector.py",
-  "tests/v1/test_torch_ops.py",
+  "tests/v1/test_*.py",
 }
 selected: set[str] = set()
 
@@ -81,7 +80,7 @@ fi
 log "discovered ${#XPU_TEST_FILES[@]} XPU-related test files"
 printf '  %s\n' "${XPU_TEST_FILES[@]}"
 
-PYTEST_ARGS=(-q --maxfail=1 -m "not cuda")
+PYTEST_ARGS=(-q --maxfail=1 -m "not cuda and not musa and not sglang")
 if [ -n "${TEST_SELECTOR:-}" ]; then
   PYTEST_ARGS+=(-k "${TEST_SELECTOR}")
 fi
