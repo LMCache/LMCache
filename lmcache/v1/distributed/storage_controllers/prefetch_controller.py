@@ -923,15 +923,25 @@ class PrefetchController(StorageControllerInterface):
             return
 
         ## Step 7: submit load tasks per adapter
+        submitted_keys: list[ObjectKey] = []
         for adapter_idx, bitmap in trimmed_plan.items():
             per_adapter_keys = bitmap.gather(request.keys)
             per_adapter_objs = [
                 request.write_reserved_objs[key] for key in per_adapter_keys
             ]
-            task_id = self._l2_adapters[adapter_idx].submit_load_task(
-                per_adapter_keys, per_adapter_objs
-            )
+            try:
+                task_id = self._l2_adapters[adapter_idx].submit_load_task(
+                    per_adapter_keys, per_adapter_objs
+                )
+            except Exception:
+                logger.exception(
+                    "Prefetch request %d: failed to submit load task to adapter %d",
+                    request.request_id,
+                    adapter_idx,
+                )
+                continue
             request.pending_load_tasks[adapter_idx] = task_id
+            submitted_keys.extend(per_adapter_keys)
             # Per-adapter byte accounting for L2_LOAD_TASK_* throughput
             # events.  Uniform layout per chunk -> size * count.
             total_bytes = (
@@ -972,11 +982,9 @@ class PrefetchController(StorageControllerInterface):
                 event_type=EventType.L2_PREFETCH_LOAD_SUBMITTED,
                 metadata={
                     "request_id": request.request_id,
-                    "key_count": len(reserved_key_set),
-                    "adapter_count": len(trimmed_plan),
-                    "key_count_per_salt": Counter(
-                        k.cache_salt for k in reserved_key_set
-                    ),
+                    "key_count": len(submitted_keys),
+                    "adapter_count": len(request.pending_load_tasks),
+                    "key_count_per_salt": Counter(k.cache_salt for k in submitted_keys),
                 },
             )
         )
@@ -984,9 +992,12 @@ class PrefetchController(StorageControllerInterface):
         logger.debug(
             "Prefetch request %d: submitted load tasks to %d adapters for %d keys",
             request.request_id,
-            len(trimmed_plan),
-            len(reserved_key_set),
+            len(request.pending_load_tasks),
+            len(submitted_keys),
         )
+
+        if request.all_loads_done():
+            self._finalize_load(request)
 
     def _update_lookup_results(
         self, request_id: PrefetchRequestId, prefix_hit_count: int
