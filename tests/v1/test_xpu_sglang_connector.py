@@ -10,7 +10,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache import torch_device_type
+from lmcache import torch_dev, torch_device_type
 from lmcache.v1.gpu_connector import xpu_connectors
 from lmcache.v1.gpu_connector.xpu_connectors import (
     SGLangLayerwiseXPUConnector,
@@ -24,7 +24,14 @@ from tests.v1.utils import (
     generate_sglang_kv_cache_paged_list_tensors,
 )
 
-pytestmark = [pytest.mark.xpu, pytest.mark.sglang]
+pytestmark = [
+    pytest.mark.xpu,
+    pytest.mark.sglang,
+    pytest.mark.skipif(
+        not (torch_dev.is_available() and torch_device_type == "xpu"),
+        reason="requires available xpu runtime",
+    ),
+]
 
 
 def _current_xpu_device() -> torch.device:

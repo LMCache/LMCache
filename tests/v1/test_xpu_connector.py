@@ -10,7 +10,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache import torch_device_type
+from lmcache import torch_dev, torch_device_type
 from lmcache.v1.gpu_connector.utils import get_dtype
 from lmcache.v1.gpu_connector.xpu_connectors import (
     VLLMBufferLayerwiseXPUConnector,
@@ -27,7 +27,13 @@ from lmcache.v1.memory_allocators.tensor_memory_allocator import TensorMemoryAll
 from lmcache.v1.memory_management import MemoryFormat
 from lmcache.v1.metadata import LMCacheMetadata
 
-pytestmark = pytest.mark.xpu
+pytestmark = [
+    pytest.mark.xpu,
+    pytest.mark.skipif(
+        not (torch_dev.is_available() and torch_device_type == "xpu"),
+        reason="requires available xpu runtime",
+    ),
+]
 
 try:
     # First Party
