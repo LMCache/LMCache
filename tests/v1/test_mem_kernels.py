@@ -731,10 +731,6 @@ def test_single_layer_kernel_hnd(num_tokens, token_major, engine_kv_format):
     )
 
 
-@pytest.mark.skipif(
-    not (torch_dev.is_available() and torch_device_type == "cuda"),
-    reason="Requires CUDA runtime (cudart)",
-)
 def test_lmcache_memcpy_async():
     # Register 4 memory regions and try to launch copy
     chunk_size = 1 << 26
@@ -850,10 +846,6 @@ def test_lmcache_memcpy_async():
         rt.cudaHostUnregister(ptr + i * chunk_size)
 
 
-@pytest.mark.skipif(
-    not (torch_dev.is_available() and torch_device_type == "cuda"),
-    reason="Requires CUDA runtime (cudart)",
-)
 def test_lmcache_memcpy_async_int8_hidden132():
     """Test lmcache_memcpy_async with int8 dtype and hidden_size=132.
 
