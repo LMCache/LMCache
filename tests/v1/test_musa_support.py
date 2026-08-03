@@ -25,8 +25,6 @@ import importlib
 import pytest
 import torch
 
-pytestmark = pytest.mark.musa
-
 # First Party
 from lmcache.utils import EngineType
 from lmcache.v1.config import LMCacheEngineConfig
@@ -34,6 +32,8 @@ from lmcache.v1.gpu_connector import CreateGPUConnector
 from lmcache.v1.metadata import LMCacheMetadata
 import lmcache as lmc
 import lmcache.v1.gpu_connector as gpu_connector_module
+
+pytestmark = pytest.mark.musa
 
 # ---------------------------------------------------------------------------
 # Helpers

@@ -3,7 +3,6 @@
 from unittest.mock import MagicMock
 
 # Third Party
-import pytest
 import torch
 
 # First Party

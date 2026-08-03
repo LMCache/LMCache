@@ -64,9 +64,7 @@ def _build_backend_params() -> list:
 
     Returns one entry per available backend on the active torch_device_type.
     """
-    params = [
-        pytest.param(("cpu_py_ops", _py_ops, "cpu"), id="cpu_py_ops")
-    ]
+    params = [pytest.param(("cpu_py_ops", _py_ops, "cpu"), id="cpu_py_ops")]
 
     if torch_device_type == "cuda":
         try:
@@ -110,8 +108,7 @@ _results: dict[tuple[str, str], dict[str, Any]] = {}
 
 @pytest.fixture(scope="module", params=_BACKEND_PARAMS)
 def backend(request: pytest.FixtureRequest) -> Any:
-    """Yield (backend_id, ops_module, device) for each backend config.
-    """
+    """Yield (backend_id, ops_module, device) for each backend config."""
     yield request.param
 
 
@@ -2753,7 +2750,11 @@ def scenario_record_drain_event(ops: Any, device: str) -> dict[str, torch.Tensor
     assert ops.drain_recorded_events() == []
 
     ops.record_event_on_stream(
-        0, "mp.store.start", "sess-1", {"device": f"{torch_device_type}:0"}, {"count": 10}
+        0,
+        "mp.store.start",
+        "sess-1",
+        {"device": f"{torch_device_type}:0"},
+        {"count": 10},
     )
     ops.record_event_on_stream(
         0, "mp.store.end", "sess-1", {"device": f"{torch_device_type}:0"}, {"count": 10}

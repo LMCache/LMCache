@@ -2,11 +2,13 @@
 
 # Standard
 import random
-from lmcache import torch_dev, torch_device_type
 
 # Third Party
 import pytest
 import torch
+
+# First Party
+from lmcache import torch_dev, torch_device_type
 
 pytest.importorskip(
     "lmcache.c_ops",
@@ -311,7 +313,9 @@ TOTAL_BLOCKS = NUM_MEMORY_OBJECTS * BLOCKS_PER_OBJECT  # 64
 @pytest.mark.parametrize(
     "dtype", [torch.bfloat16, torch.float8_e4m3fn], ids=["bf16", "fp8"]
 )
-@pytest.mark.parametrize("mem_device", [torch_device_type, "cpu"], ids=["mem_gpu", "mem_cpu"])
+@pytest.mark.parametrize(
+    "mem_device", [torch_device_type, "cpu"], ids=["mem_gpu", "mem_cpu"]
+)
 def test_block_transfer_roundtrip(
     engine_kv_format, nl, nh, hs, is_mla, dtype, mem_device
 ):

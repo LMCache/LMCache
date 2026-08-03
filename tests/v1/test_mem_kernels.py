@@ -11,6 +11,14 @@ import torch
 from lmcache import torch_dev, torch_device_type
 from lmcache.v1.memory_allocators.pin_memory_allocator import PinMemoryAllocator
 
+# Local
+from .utils import (
+    check_mem_obj_equal,
+    check_paged_kv_cache_equal,
+    generate_kv_cache_paged,
+    generate_kv_cache_paged_list_tensors,
+)
+
 pytestmark = [
     pytest.mark.cuda,
     pytest.mark.skipif(
@@ -20,13 +28,10 @@ pytestmark = [
 ]
 
 # First Party
-if torch_dev.is_available():
-    try:
-        # First Party
-        import lmcache.c_ops as lmc_ops
-    except ImportError:
-        lmc_ops = None
-else:
+try:
+    # First Party
+    import lmcache.c_ops as lmc_ops
+except ImportError:
     lmc_ops = None
 
 # Mock c_ops when not available
@@ -49,14 +54,6 @@ if lmc_ops is None:
         TransferDirection = MockTransferDirection
 
     lmc_ops = MockCOps()
-
-# Local
-from .utils import (
-    check_mem_obj_equal,
-    check_paged_kv_cache_equal,
-    generate_kv_cache_paged,
-    generate_kv_cache_paged_list_tensors,
-)
 
 
 def _tuple_kv_to_blob(
@@ -935,7 +932,9 @@ def test_lmcache_memcpy_async_int8_hidden132():
         )
 
     # D2H copy: write known values to GPU, copy back to CPU, verify
-    gpu_src = torch.randint(-128, 127, (total_elements,), dtype=dtype, device=torch_device_type)
+    gpu_src = torch.randint(
+        -128, 127, (total_elements,), dtype=dtype, device=torch_device_type
+    )
     cpu_dst = torch.zeros(total_elements, dtype=dtype, device="cpu")
 
     # Register cpu_dst for D2H

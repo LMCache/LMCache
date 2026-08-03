@@ -25,6 +25,7 @@ pytestmark = [
     ),
 ]
 
+
 def _has_lmc_ops() -> bool:
     try:
         # First Party

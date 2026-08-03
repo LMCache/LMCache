@@ -149,7 +149,12 @@ class TestValidateNixlBackend:
 
     def test_doca_memos_cuda_with_index_is_rejected(self) -> None:
         # device strings may carry an index suffix (e.g. f"{torch_device_type}:0")
-        assert NixlStorageConfig.validate_nixl_backend("DOCA_MEMOS", f"{torch_device_type}:0") is False
+        assert (
+            NixlStorageConfig.validate_nixl_backend(
+                "DOCA_MEMOS", f"{torch_device_type}:0"
+            )
+            is False
+        )
 
 
 class TestCreatePool:

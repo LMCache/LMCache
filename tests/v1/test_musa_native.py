@@ -9,11 +9,11 @@ import sys
 import pytest
 import torch
 
-pytestmark = pytest.mark.musa
-
 # First Party
 from lmcache.v1.platform import torch_ops as py_ops
 from lmcache.v1.platform.musa import native_kv_transfer as musa_native
+
+pytestmark = pytest.mark.musa
 
 
 def _make_native_module() -> ModuleType:
