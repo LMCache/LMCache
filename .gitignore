@@ -154,3 +154,6 @@ operator/Dockerfile.cross
 
 # Compiled gettext catalogs (built from .po at HTML build time)
 docs/source/locale/**/*.mo
+
+# CodeBuddy
+.codebuddy
