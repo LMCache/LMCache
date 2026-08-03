@@ -15,6 +15,7 @@ many loads are in flight at once, which is the property the fix is about.
 # Standard
 from pathlib import Path
 from typing import cast
+import mmap
 import threading
 import time
 
@@ -32,14 +33,30 @@ from lmcache.v1.memory_management import MemoryObj
 
 
 class _Buf:
-    """Minimal MemoryObj stand-in: just the ``byte_array`` the FS adapter uses."""
+    """MemoryObj stand-in for the O_DIRECT tests below.
+
+    Backed by an anonymous ``mmap``, which the kernel always returns
+    page-aligned, rather than a plain ``bytearray``. A ``bytearray``'s address
+    comes from the general-purpose allocator and is not guaranteed aligned to
+    the device block size -- O_DIRECT constrains the buffer address as well as
+    the transfer length, and an unaligned buffer here is exactly the pre-fix
+    failure mode from #4364/#4367, just relocated into the test double. It
+    reliably passed on NVMe/XFS in development (allocator luck: small
+    same-sized allocations happened to land aligned) and reliably failed on a
+    CI runner with a different allocator arena layout -- reproduced locally by
+    deliberately offsetting a bytearray-backed buffer by 3 bytes, which fails
+    this file's O_DIRECT tests every time; an mmap-backed buffer passes every
+    time under the same forced offset test.
+    """
 
     def __init__(self, data: bytes) -> None:
-        self._data = bytearray(data)
+        self._mmap = mmap.mmap(-1, len(data))
+        self._mmap.write(data)
+        self._mmap.seek(0)
 
     @property
     def byte_array(self) -> memoryview:
-        return memoryview(self._data)
+        return memoryview(self._mmap)
 
 
 def _key(i: int) -> ObjectKey:
