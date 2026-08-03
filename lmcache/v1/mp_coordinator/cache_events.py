@@ -170,11 +170,18 @@ class CacheEventSubscriber(EventSubscriber):
             EventType.L2_KEYS_STORED: self._on_l2_store,
             EventType.L2_KEYS_DELETED: self._on_l2_delete,
             EventType.L2_KEYS_ACCESSED: self._on_l2_access,
-            # TODO: decouple the flush tick from the eviction loop (e.g. a
-            # bus-owned periodic hook) so cache-event freshness does not
-            # silently depend on the eviction loop's cadence.
-            EventType.L1_EVICTION_LOOP_TICK: self._on_tick,
         }
+
+    def on_periodic(self) -> None:
+        """Flush on the bus timer rather than on another component's cadence.
+
+        This used to ride ``L1_EVICTION_LOOP_TICK``, which tied cache event
+        freshness to the eviction loop, so a slow or stalled eviction loop
+        silently stopped refreshing the coordinator's view. Runs on the drain
+        thread, the same thread as the handlers, so the buffer needs no extra
+        locking.
+        """
+        self._flush_if_due()
 
     def flush(self) -> None:
         """Drain the buffer and publish one batch per pending batch.
@@ -217,9 +224,6 @@ class CacheEventSubscriber(EventSubscriber):
         self._sink.close()
 
     # -- Event handlers (bus drain thread) ------------------------------------
-
-    def _on_tick(self, event: Event) -> None:
-        self._flush_if_due()
 
     def _on_l1_store(self, event: Event) -> None:
         self._record_l1_placements(CacheEventType.STORE, event)
