@@ -6,7 +6,7 @@ Distributed multi-tier storage manager for MP mode
 # Standard
 from contextlib import contextmanager
 from dataclasses import replace
-from typing import Iterator, Literal, Optional
+from typing import Iterator, Literal, Optional, cast
 import threading
 import time
 
@@ -34,6 +34,14 @@ from lmcache.v1.distributed.l2_adapters.reconfiguration import (
 )
 from lmcache.v1.distributed.l2_adapters.serde_wrapper import SerdeL2AdapterWrapper
 from lmcache.v1.distributed.quota_manager import QuotaManager
+from lmcache.v1.distributed.runtime_policy import (
+    RuntimePolicyError,
+    RuntimePolicyUpdate,
+    RuntimePolicyUpdateResult,
+    RuntimePolicyValidation,
+    validate_eviction_policy,
+    validate_eviction_value,
+)
 from lmcache.v1.distributed.serde import create_serde_processor
 from lmcache.v1.distributed.storage_controllers import (
     L1EvictionController,
@@ -44,10 +52,13 @@ from lmcache.v1.distributed.storage_controllers import (
 )
 from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
     create_prefetch_policy,
+    get_registered_prefetch_policies,
 )
 from lmcache.v1.distributed.storage_controllers.store_policy import (
     AdapterDescriptor,
+    StorePolicy,
     create_store_policy,
+    get_registered_store_policies,
 )
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
@@ -68,6 +79,10 @@ class StorageManager:
     def __init__(self, config: StorageManagerConfig):
         self._l1_manager = L1Manager(config.l1_manager_config)
         self._event_bus = get_event_bus()
+        self._runtime_policy_lock = threading.Lock()
+        self._runtime_policy_version = 0
+        self._runtime_store_policy_name = config.store_policy
+        self._runtime_prefetch_policy_name = config.prefetch_policy
 
         # L1 eviction controller
         self._eviction_controller = L1EvictionController(
@@ -985,8 +1000,11 @@ class StorageManager:
         l2_eviction = self._l2_eviction_controller.report_status()
         adapters = [a.report_status() for _id, _desc, a in self._snapshot_adapters()]
         children = [l1, store, prefetch, l1_eviction, l2_eviction] + adapters
+        with self._runtime_policy_lock:
+            runtime_policy_version = self._runtime_policy_version
         return {
             "is_healthy": all(c["is_healthy"] for c in children),
+            "runtime_policy_version": runtime_policy_version,
             "l1_manager": l1,
             "store_controller": store,
             "prefetch_controller": prefetch,
@@ -995,6 +1013,179 @@ class StorageManager:
             "l2_adapters": adapters,
             "num_l2_adapters": len(adapters),
         }
+
+    def get_runtime_policy(self) -> dict[str, object]:
+        """Return runtime policy state and hot-update capabilities."""
+        with self._runtime_policy_lock:
+            return self._get_runtime_policy_locked()
+
+    def _get_runtime_policy_locked(self) -> dict[str, object]:
+        """Return runtime policy state and hot-update capabilities.
+
+        Returns:
+            A JSON-serializable mapping containing the monotonic runtime
+            policy version, current selector names, and capability metadata.
+        """
+        version = self._runtime_policy_version
+        store_policy = self._runtime_store_policy_name
+        prefetch_policy = self._runtime_prefetch_policy_name
+
+        l1_status = self._eviction_controller.report_status()
+        l2_status = self._l2_eviction_controller.get_policy_status()
+        l2_capabilities: list[dict[str, object]] = []
+        for adapter_id, descriptor, _adapter in self._snapshot_adapters():
+            eviction = l2_status.get(adapter_id)
+            if eviction is None:
+                l2_capabilities.append(
+                    {
+                        "adapter_id": adapter_id,
+                        "adapter_name": descriptor.type_name,
+                        "eviction_enabled": False,
+                        "policy": None,
+                        "policy_hot_swappable": False,
+                        "stateful": True,
+                        "runtime_tunables": {},
+                    }
+                )
+                continue
+            l2_capabilities.append(
+                {
+                    "adapter_id": adapter_id,
+                    "adapter_name": descriptor.type_name,
+                    "eviction_enabled": True,
+                    "policy": eviction["eviction_policy"],
+                    "policy_hot_swappable": False,
+                    "stateful": True,
+                    "runtime_tunables": self._eviction_tunable_capabilities(
+                        cast(float, eviction["trigger_watermark"]),
+                        cast(float, eviction["eviction_ratio"]),
+                    ),
+                }
+            )
+
+        return {
+            "version": version,
+            "capabilities": {
+                "store_policy": {
+                    "current": store_policy,
+                    "registered": get_registered_store_policies(),
+                    "hot_swappable": True,
+                    "stateful": False,
+                    "effective_on": "next_store_plan",
+                },
+                "prefetch_policy": {
+                    "current": prefetch_policy,
+                    "registered": get_registered_prefetch_policies(),
+                    "hot_swappable": True,
+                    "stateful": False,
+                    "effective_on": "next_prefetch_request",
+                },
+                "l1_eviction": {
+                    "policy": l1_status["eviction_policy"],
+                    "policy_hot_swappable": False,
+                    "stateful": True,
+                    "runtime_tunables": self._eviction_tunable_capabilities(
+                        float(l1_status["trigger_watermark"]),
+                        float(l1_status["eviction_ratio"]),
+                    ),
+                },
+                "l2_eviction": l2_capabilities,
+            },
+        }
+
+    def validate_runtime_policy_update(
+        self,
+        update: RuntimePolicyUpdate,
+    ) -> RuntimePolicyValidation:
+        """Validate a runtime policy update without mutating controllers.
+
+        Args:
+            update: Parsed node-local policy update.
+
+        Returns:
+            The current version, changed field names, and effective-on
+            semantics for the update.
+
+        Raises:
+            RuntimePolicyError: If the update is invalid or unsafe to apply.
+        """
+        with self._runtime_policy_lock:
+            with self._lifecycle_lock:
+                return self._validate_runtime_policy_update_locked(update)
+
+    def update_runtime_policy(
+        self,
+        update: RuntimePolicyUpdate,
+    ) -> RuntimePolicyUpdateResult:
+        """Atomically apply a validated node-local runtime policy update.
+
+        Args:
+            update: Parsed node-local policy update.
+
+        Returns:
+            The new runtime version and the fields that were applied.
+
+        Raises:
+            RuntimePolicyError: If the update is invalid or unsafe to apply.
+        """
+        with self._runtime_policy_lock:
+            with self._lifecycle_lock:
+                validation = self._validate_runtime_policy_update_locked(update)
+                if not validation.changed_fields:
+                    return RuntimePolicyUpdateResult(
+                        status="unchanged",
+                        version=self._runtime_policy_version,
+                        applied=(),
+                        effective_on={},
+                    )
+
+                store_policy: StorePolicy | None = None
+                if update.store_policy is not None:
+                    store_policy = create_store_policy(update.store_policy)
+                prefetch_policy = None
+                if update.prefetch_policy is not None:
+                    prefetch_policy = create_prefetch_policy(update.prefetch_policy)
+
+                if store_policy is not None:
+                    self._store_controller.update_policy(store_policy)
+                    self._runtime_store_policy_name = str(update.store_policy)
+                if prefetch_policy is not None:
+                    self._prefetch_controller.update_policy(prefetch_policy)
+                    self._runtime_prefetch_policy_name = str(update.prefetch_policy)
+
+                l1_eviction = update.l1_eviction
+                if l1_eviction is not None:
+                    self._eviction_controller.update_tunables(
+                        l1_eviction.trigger_watermark,
+                        l1_eviction.eviction_ratio,
+                    )
+
+                for l2_update in update.l2_eviction:
+                    self._l2_eviction_controller.update_tunables(
+                        l2_update.adapter_id,
+                        l2_update.tunables.trigger_watermark,
+                        l2_update.tunables.eviction_ratio,
+                    )
+
+                old_version = self._runtime_policy_version
+                self._runtime_policy_version += 1
+                self._event_bus.publish(
+                    Event(
+                        event_type=EventType.RUNTIME_POLICY_UPDATED,
+                        metadata={
+                            "old_version": old_version,
+                            "new_version": self._runtime_policy_version,
+                            "changed_fields": list(validation.changed_fields),
+                            "source": "http",
+                        },
+                    )
+                )
+                return RuntimePolicyUpdateResult(
+                    status="updated",
+                    version=self._runtime_policy_version,
+                    applied=validation.changed_fields,
+                    effective_on=validation.effective_on,
+                )
 
     def register_l2_listener(self, listener: L2AdapterListener) -> None:
         """Register a listener on all current and future L2 adapters.
@@ -1019,6 +1210,207 @@ class StorageManager:
             True if memory is consistent, False otherwise.
         """
         return self._l1_manager.memcheck()
+
+    def _validate_runtime_policy_update_locked(
+        self,
+        update: RuntimePolicyUpdate,
+    ) -> RuntimePolicyValidation:
+        """Validate *update* while ``_runtime_policy_lock`` is held."""
+        if (
+            update.expected_version is not None
+            and update.expected_version != self._runtime_policy_version
+        ):
+            raise RuntimePolicyError(
+                code="version_conflict",
+                status_code=409,
+                field="expected_version",
+                current=self._runtime_policy_version,
+                requested=update.expected_version,
+                message=(
+                    "runtime policy version changed; read the current policy "
+                    "and retry the update"
+                ),
+            )
+        if update.restart_required_fields:
+            field = update.restart_required_fields[0]
+            raise RuntimePolicyError(
+                code="restart_required",
+                field=field,
+                message=f"{field} affects startup-only storage semantics",
+            )
+        if update.unsupported_fields:
+            field = update.unsupported_fields[0]
+            raise RuntimePolicyError(
+                code="unsupported_field",
+                field=field,
+                message=f"runtime policy does not support field {field!r}",
+            )
+
+        changed_fields: list[str] = []
+        effective_on: dict[str, str] = {}
+
+        def record(field: str, effective: str) -> None:
+            changed_fields.append(field)
+            effective_on[field] = effective
+
+        if update.store_policy is not None:
+            try:
+                create_store_policy(update.store_policy)
+            except ValueError as exc:
+                raise RuntimePolicyError(
+                    code="invalid_policy",
+                    field="store_policy",
+                    requested=update.store_policy,
+                    message=str(exc),
+                ) from exc
+            if update.store_policy != self._runtime_store_policy_name:
+                record("store_policy", "next_store_plan")
+
+        if update.prefetch_policy is not None:
+            try:
+                create_prefetch_policy(update.prefetch_policy)
+            except ValueError as exc:
+                raise RuntimePolicyError(
+                    code="invalid_policy",
+                    field="prefetch_policy",
+                    requested=update.prefetch_policy,
+                    message=str(exc),
+                ) from exc
+            if update.prefetch_policy != self._runtime_prefetch_policy_name:
+                record("prefetch_policy", "next_prefetch_request")
+
+        l1_status = self._eviction_controller.report_status()
+        if update.l1_eviction is not None:
+            tunables = update.l1_eviction
+            if not tunables.has_value():
+                raise RuntimePolicyError(
+                    code="invalid_update",
+                    field="l1_eviction",
+                    message="l1_eviction must contain a policy or tunable",
+                )
+            current_policy = str(l1_status["eviction_policy"])
+            validate_eviction_policy("l1_eviction.policy", tunables.policy)
+            if tunables.policy is not None and tunables.policy != current_policy:
+                raise RuntimePolicyError(
+                    code="state_migration_required",
+                    field="l1_eviction.policy",
+                    current=current_policy,
+                    requested=tunables.policy,
+                    message=(
+                        "changing the eviction policy class requires a policy "
+                        "snapshot/import contract"
+                    ),
+                )
+            validate_eviction_value(
+                "l1_eviction.trigger_watermark", tunables.trigger_watermark
+            )
+            validate_eviction_value(
+                "l1_eviction.eviction_ratio", tunables.eviction_ratio
+            )
+            if (
+                tunables.trigger_watermark is not None
+                and tunables.trigger_watermark != float(l1_status["trigger_watermark"])
+            ):
+                record("l1_eviction.trigger_watermark", "next_eviction_loop_tick")
+            if tunables.eviction_ratio is not None and tunables.eviction_ratio != float(
+                l1_status["eviction_ratio"]
+            ):
+                record("l1_eviction.eviction_ratio", "next_eviction_loop_tick")
+
+        active_adapter_ids = {
+            adapter_id
+            for adapter_id, _descriptor, _adapter in self._snapshot_adapters()
+        }
+        l2_status = self._l2_eviction_controller.get_policy_status()
+        seen_adapter_ids: set[int] = set()
+        for l2_update in update.l2_eviction:
+            adapter_id = l2_update.adapter_id
+            if adapter_id in seen_adapter_ids:
+                raise RuntimePolicyError(
+                    code="duplicate_l2_adapter",
+                    field=f"l2_eviction[{adapter_id}]",
+                    requested=adapter_id,
+                    message=f"adapter id {adapter_id} appears more than once",
+                )
+            seen_adapter_ids.add(adapter_id)
+            if adapter_id not in active_adapter_ids:
+                raise RuntimePolicyError(
+                    code="unknown_l2_adapter",
+                    status_code=404,
+                    field=f"l2_eviction[{adapter_id}]",
+                    requested=adapter_id,
+                    message=f"L2 adapter {adapter_id} is not active",
+                )
+            current = l2_status.get(adapter_id)
+            if current is None:
+                raise RuntimePolicyError(
+                    code="eviction_not_configured",
+                    field=f"l2_eviction[{adapter_id}]",
+                    requested=adapter_id,
+                    message=f"L2 adapter {adapter_id} has no eviction policy",
+                )
+            tunables = l2_update.tunables
+            if not tunables.has_value():
+                raise RuntimePolicyError(
+                    code="invalid_update",
+                    field=f"l2_eviction[{adapter_id}]",
+                    message="the adapter update must contain a policy or tunable",
+                )
+            current_policy = str(current["eviction_policy"])
+            policy_field = f"l2_eviction[{adapter_id}].policy"
+            validate_eviction_policy(policy_field, tunables.policy)
+            if tunables.policy is not None and tunables.policy != current_policy:
+                raise RuntimePolicyError(
+                    code="state_migration_required",
+                    field=policy_field,
+                    current=current_policy,
+                    requested=tunables.policy,
+                    message=(
+                        "changing the eviction policy class requires a policy "
+                        "snapshot/import contract"
+                    ),
+                )
+            watermark_field = f"l2_eviction[{adapter_id}].trigger_watermark"
+            ratio_field = f"l2_eviction[{adapter_id}].eviction_ratio"
+            validate_eviction_value(watermark_field, tunables.trigger_watermark)
+            validate_eviction_value(ratio_field, tunables.eviction_ratio)
+            if (
+                tunables.trigger_watermark is not None
+                and tunables.trigger_watermark
+                != cast(float, current["trigger_watermark"])
+            ):
+                record(watermark_field, "next_eviction_loop_tick")
+            if tunables.eviction_ratio is not None and tunables.eviction_ratio != cast(
+                float, current["eviction_ratio"]
+            ):
+                record(ratio_field, "next_eviction_loop_tick")
+
+        return RuntimePolicyValidation(
+            version=self._runtime_policy_version,
+            changed_fields=tuple(changed_fields),
+            effective_on=effective_on,
+        )
+
+    @staticmethod
+    def _eviction_tunable_capabilities(
+        trigger_watermark: float,
+        eviction_ratio: float,
+    ) -> dict[str, dict[str, object]]:
+        """Build capability metadata for the two Phase 1 eviction knobs."""
+        return {
+            "trigger_watermark": {
+                "current": trigger_watermark,
+                "minimum": 0.0,
+                "maximum": 1.0,
+                "effective_on": "next_eviction_loop_tick",
+            },
+            "eviction_ratio": {
+                "current": eviction_ratio,
+                "minimum": 0.0,
+                "maximum": 1.0,
+                "effective_on": "next_eviction_loop_tick",
+            },
+        }
 
     def _snapshot_adapters(
         self,
