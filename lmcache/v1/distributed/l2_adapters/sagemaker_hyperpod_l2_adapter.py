@@ -351,7 +351,6 @@ class SageMakerHyperPodL2Adapter(L2AdapterInterface):
             :meth:`query_lookup_and_lock_result` after the lookup event fd
             fires. Retained leases are held until :meth:`submit_unlock`.
         """
-        del group_layout_descs
         task_id = self._allocate_task_id()
         if self._closed:
             with self._lock:
