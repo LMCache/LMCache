@@ -2487,14 +2487,20 @@ def scenario_multi_layer_block_kv_transfer(
                 f"SGLang NB kv={kv} layer={i} mismatch"
             )
 
-    # --- vLLM KV tuple per-layer ---
-    # CUDA c_ops has no transfer for this format, so run it only on CPU.
-    if device == "cpu":
+    # --- vLLM per-layer (K, V) tuple format ---
+    # This format (NL_X_TWO_X_NB_BS_NH_HS) is implemented only in the Python
+    # fallback; the compiled c_ops/xpu_ops backends have no transfer for it,
+    # so exercise it solely on the Python-fallback backend (any device).
+    if ops is _py_ops:
         torch.manual_seed(707)
         paged_tuple = [
             (
-                torch.randn(num_blocks, block_size, num_heads, head_size, dtype=dtype),
-                torch.randn(num_blocks, block_size, num_heads, head_size, dtype=dtype),
+                torch.randn(
+                    num_blocks, block_size, num_heads, head_size, dtype=dtype
+                ).to(device),
+                torch.randn(
+                    num_blocks, block_size, num_heads, head_size, dtype=dtype
+                ).to(device),
             )
             for _ in range(num_layers)
         ]

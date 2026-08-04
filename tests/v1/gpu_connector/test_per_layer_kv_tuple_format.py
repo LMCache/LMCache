@@ -33,10 +33,7 @@ def _per_layer_kv_tuple_caches() -> list[list[torch.Tensor]]:
     ``[NB, BS, NH, HS]`` tensors.
     """
     torch.manual_seed(0)
-    return [
-        [torch.randn(NB, BS, NH, HS) for _ in range(2)]
-        for _ in range(NL)
-    ]
+    return [[torch.randn(NB, BS, NH, HS) for _ in range(2)] for _ in range(NL)]
 
 
 def test_discovery_preserves_per_layer_kv_tuple_structure() -> None:
