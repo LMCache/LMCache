@@ -434,6 +434,7 @@ def test_create_transfer_context_handle_mode_unsupported_device_raises(
         create_transfer_context({"layer_0": torch.randn(2, 2)}, mode="lmcache_driven")
 
 
+@pytest.mark.musa
 def test_musa_data_context_keeps_layout_validation_device_agnostic(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -479,6 +480,7 @@ def test_musa_data_context_keeps_layout_validation_device_agnostic(
     )
 
 
+@pytest.mark.musa
 def test_musa_data_context_store_uses_device_agnostic_gather(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -552,6 +554,7 @@ def test_musa_data_context_store_uses_device_agnostic_gather(
     assert "prefer_musa_native" not in captured_kwargs
 
 
+@pytest.mark.musa
 def test_musa_data_context_retrieve_uses_device_agnostic_scatter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

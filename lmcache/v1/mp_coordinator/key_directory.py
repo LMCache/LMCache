@@ -24,8 +24,7 @@ import threading
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import ObjectKey
-from lmcache.v1.distributed.tiers import Tier
+from lmcache.v1.distributed.api import ObjectKey, Tier
 from lmcache.v1.mp_coordinator.api import (
     CacheEventBatch,
     CacheEventEntry,

@@ -164,7 +164,7 @@ def test_lookup_and_lock_submits_skip_l2_and_returns_task_id():
     assert task_id == 0
     (spec,), kwargs = ctx.storage_manager.submit_prefetch_task.call_args
     assert spec.keys == keys
-    assert spec.layout_desc is layout_desc
+    assert spec.group_layout_descs[0] is layout_desc
     assert kwargs["skip_l2"] is True
     assert spec.policy is TrimPolicy.SPARSE
     # A second call gets a distinct id.

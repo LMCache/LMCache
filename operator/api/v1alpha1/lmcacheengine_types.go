@@ -227,6 +227,47 @@ type L2BackendSpec struct {
 	// +kubebuilder:default=8
 	// +kubebuilder:validation:Minimum=1
 	PrefetchMaxInFlight *int32 `json:"prefetchMaxInFlight,omitempty"`
+
+	// serde configures a transform applied to KV bytes on their way to
+	// and from the L2 adapter (whichever of resp or raw is configured).
+	// Exactly one serde type must be set.
+	// +optional
+	Serde *L2SerdeSpec `json:"serde,omitempty"`
+}
+
+// L2SerdeSpec selects and configures the serde for the L2 backend. It
+// renders to the "serde" sub-dict of the --l2-adapter JSON. Exactly one
+// serde type must be set.
+type L2SerdeSpec struct {
+	// aesgcm enables at-rest encryption of KV bytes in the L2 tier,
+	// keyed per cache_salt. L1 (host RAM) and L0 (GPU) remain plaintext.
+	// +optional
+	AESGCM *AESGCMSerdeSpec `json:"aesgcm,omitempty"`
+}
+
+// AESGCMSerdeSpec configures the aesgcm encryption serde. The operator
+// mounts the referenced master-key Secret into the engine pods.
+type AESGCMSerdeSpec struct {
+	// masterKeySecretRef names a user-created Secret in the engine's
+	// namespace holding the master key under the "master" data key. The
+	// Secret is mounted directly into the engine pods; the reference is
+	// same-namespace only, so creating an engine CR cannot be used to
+	// read Secrets from other namespaces. The operator never generates
+	// key material.
+	MasterKeySecretRef corev1.LocalObjectReference `json:"masterKeySecretRef"`
+
+	// keyProvider selects how per-cache_salt keys are obtained from the
+	// master key. Only "hkdf" (HKDF-SHA256 derivation) is implemented.
+	// +optional
+	// +kubebuilder:default="hkdf"
+	// +kubebuilder:validation:Enum=hkdf
+	KeyProvider *string `json:"keyProvider,omitempty"`
+
+	// aesBits selects the AES key size (128 or 256).
+	// +optional
+	// +kubebuilder:default=128
+	// +kubebuilder:validation:Enum=128;256
+	AESBits *int32 `json:"aesBits,omitempty"`
 }
 
 // RESPL2AdapterSpec configures a RESP (Redis/Valkey) L2 adapter.

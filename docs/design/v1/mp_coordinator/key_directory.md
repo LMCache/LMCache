@@ -45,8 +45,9 @@ index (I2) deletes O(1) once I2 lands (M2).
 deletes too). Removing an absent placement/key is a no-op. A key with no
 remaining placements is dropped from the directory.
 - `ACCESS` — refresh the key's `last_access` recency (max of batch `ts`);
-never creates records. `ts` is emitter wall-clock and is never compared
-across instances.
+never creates records, and carries no placement identity — its
+`backend` may be empty (`tier`/`backend` are ignored on apply). `ts` is
+emitter wall-clock and is never compared across instances.
 
 ## Structures
 
@@ -96,12 +97,12 @@ itself produces (`Placement`, `ApplyResult`, stats) and its private
 records.
 - **`schemas.py`** — HTTP models only. 
 
-## Deliberately out of scope (follow-ups)
+MP-server emission of the `CacheEvent` stream (L1 + L2, `incarnation` =
+server start time) is implemented — see
+[cache_events.md](cache_events.md). Re-basing the legacy
+`/quota/events` stream on the same emitter is still open.
 
-- **MP-server emission** of the generalized `CacheEvent` stream (extending
-today's `L2EventListener`, which still feeds `/quota/events` with the
-legacy schema) — including where `incarnation` comes from (server start
-time) and L1 store/evict hooks.
+## Deliberately out of scope (follow-ups)
 - **Resync integration**: acting on `gap_detected` (digest/resync
 backstop, `UNCONFIRMED` placement decay) — extends today's
 `L2ResyncManager` pattern to L1.

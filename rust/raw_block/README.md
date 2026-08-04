@@ -33,8 +33,12 @@ use NVMe passthrough via the io_uring command interface for direct device access
 - Requires `io_engine="io_uring"` to be set.
 - Supports `max_data_transfer_size` parameter to split large transfers into
   smaller chunks that fit within device limits.
+- Requires `alignment` to be a multiple of the NVMe namespace LBA size. An
+  incompatible value is rejected when the device opens.
 - When `use_uring_cmd=True`, `use_odirect` is ignored for NVMe namespace
   character devices.
+- SQE build failures are returned by `wait_iouring` after the worker releases
+  the request's global and per-batch in-flight accounting.
 
 ## MP Mode Integration
 

@@ -1163,6 +1163,12 @@ impl RawBlockDevice {
             let id_ns = nvme_identify_ns(fd, nsid)?;
             let lba_shift = nvme_get_lba_shift(&id_ns)?;
             let lba_size = nvme_get_lba_size(&id_ns)?;
+            if alignment == 0 || !alignment.is_multiple_of(lba_size as usize) {
+                return Err(PyValueError::new_err(format!(
+                    "alignment ({alignment}) must be a non-zero multiple of NVMe LBA size \
+                     ({lba_size})"
+                )));
+            }
 
             (Some(nsid), Some(lba_shift), Some(lba_size), Some(id_ns))
         } else {
@@ -1703,7 +1709,7 @@ impl RawBlockDevice {
                             // - If the buffer was pre-registered with register_fixed_buffers(),
                             //   we use ReadFixed/WriteFixed for true zero-copy I/O
                             // - Otherwise we use regular Read/Write with user-space pointers
-                            let mut batch: Vec<IoSubmission> = std::mem::take(&mut *q);
+                            let batch: Vec<IoSubmission> = std::mem::take(&mut *q);
                             let batch_len = batch.len();
 
                             let available = ring_size - ring_clone.submission_len();
@@ -1718,19 +1724,33 @@ impl RawBlockDevice {
 
                             drop(q);
 
-                            // Track user_data values for each submission to clean up in_flight entries
-                            // if submit() fails or returns partial count
+                            // Track only successfully built submissions so submit results
+                            // remain aligned even when one build fails in the middle.
                             let mut user_data_list: Vec<u64> = Vec::with_capacity(to_submit_count);
+                            let mut built_submissions: Vec<IoSubmission> =
+                                Vec::with_capacity(to_submit_count);
                             for sub in batch.iter().take(to_submit_count) {
                                 let user_data = next_user_data;
                                 next_user_data = next_user_data.wrapping_add(1);
-                                user_data_list.push(user_data);
-                                in_flight.insert(user_data, sub.clone());
-
-                                // Build and submit SQE
-                                let _ = build_and_submit_sqe(&ring_clone, sub, user_data);
+                                match build_and_submit_sqe(&ring_clone, sub, user_data) {
+                                    Ok(()) => {
+                                        user_data_list.push(user_data);
+                                        built_submissions.push(sub.clone());
+                                        in_flight.insert(user_data, sub.clone());
+                                    }
+                                    Err(e) => {
+                                        sub.completion.set(Err(e));
+                                        decrement_in_flight(
+                                            &in_flight_count_clone,
+                                            &in_flight_cvar_clone,
+                                            &batch_in_flight_clone,
+                                            sub.batch_id,
+                                        );
+                                    }
+                                }
                             }
 
+                            let built_count = built_submissions.len();
                             let submit_result = match &ring_clone {
                                 IoUringWrapper::Standard(ring) => {
                                     let ring = ring.lock().unwrap();
@@ -1746,14 +1766,14 @@ impl RawBlockDevice {
                                 Ok(submitted) => {
                                     // Any remaining requests in batch that weren't submitted
                                     // will be retried in the next iteration of the loop
-                                    if submitted < to_submit_count {
+                                    if submitted < built_count {
                                         // Remove in_flight entries for unsubmitted requests
                                         for user_data in user_data_list[submitted..].iter() {
                                             in_flight.remove(user_data);
                                         }
                                         // Put unsubmitted requests back in the queue for retry
                                         let unsubmitted: Vec<_> =
-                                            batch[submitted..to_submit_count].to_vec();
+                                            built_submissions[submitted..].to_vec();
                                         if !unsubmitted.is_empty() {
                                             let mut q = queue_clone.lock().unwrap();
                                             // Insert unsubmitted requests back at the front preserving order
@@ -1773,9 +1793,8 @@ impl RawBlockDevice {
                                                 in_flight.remove(user_data);
                                             }
                                             // Put unsubmitted requests back in queue for next iteration
-                                            if to_submit_count > 0 {
-                                                let unsubmitted: Vec<_> =
-                                                    batch[..to_submit_count].to_vec();
+                                            if built_count > 0 {
+                                                let unsubmitted = built_submissions.clone();
                                                 let mut q = queue_clone.lock().unwrap();
                                                 // Insert unsubmitted requests back at the front preserving order
                                                 q.splice(0..0, unsubmitted);
@@ -1787,7 +1806,7 @@ impl RawBlockDevice {
                                             for user_data in user_data_list.iter() {
                                                 in_flight.remove(user_data);
                                             }
-                                            for sub in batch.iter_mut().take(to_submit_count) {
+                                            for sub in built_submissions.iter_mut() {
                                                 let batch_id = sub.batch_id;
                                                 sub.completion.set(Err(PyRuntimeError::new_err(
                                                     format!("io_uring submit error: {:?}", e),

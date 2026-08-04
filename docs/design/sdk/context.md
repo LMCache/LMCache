@@ -1,28 +1,30 @@
-# KV Cache SDK
+# LMCache SDK
 
 > Status: out-of-process, CPU-only client for the LMCache multiprocess (MP) server.
 
 ## Goal
 
-A small Python surface for moving KV cache tensors in and out of a running LMCache MP
-server, addressed by **token ids** — so an ML engineer can retrieve a prefix's KV, edit it,
-and store it back (e.g. token-dropping inside a KV connector).
+A small Python surface for moving **KV cache** (and **query**) tensors in and out of a
+running LMCache MP server, addressed by **token ids** — so an ML engineer can retrieve a
+prefix's KV, edit it, and store it back (e.g. token-dropping inside a KV connector). One
+`LMCacheSDKContext` serves either kind, selected by `LMCacheSDKCacheKind` (`KV` / `QUERY`).
+Retrieve / store / close are **methods** on the context.
 
 ```py
-import lmcache.sdk.kvcache as lmc_sdk
+import lmcache.sdk.kvcache as kvcache   # query tensors: lmcache.sdk.qcache
 
-ctx = lmc_sdk.connect(
+ctx = kvcache.connect(
     url="tcp://localhost:5555",       # ZMQ url
     http_url="http://localhost:9000", # HTTP url for retrieving KV cache shape
     model_name="Qwen/Qwen3-8B",
 )
-kv = lmc_sdk.retrieve(ctx, tokens=[1, 2, 3, ...])  # [2, L, hit_tokens, D] or None
+kv = ctx.retrieve(tokens=[1, 2, 3, ...])   # [2, L, hit_tokens, D] or None
 # ... edit kv ...
-ok = lmc_sdk.store(ctx, kv=kv, tokens=[4, 5, 6, ...])
-lmc_sdk.close(ctx)
+ok = ctx.store(kv=kv, tokens=[4, 5, 6, ...])
+ctx.close()
 ```
 
-See the [token-dropping example](../../../examples/kvcache_sdk/e2e_kv_edit.py).
+See the [token-dropping example](../../../examples/kvcache_sdk/e2e_kv_edit.ipynb).
 
 The model layout must already be registered in the server by a vLLM instance that called
 `REGISTER_KV_CACHE`; the SDK reads that layout from `/status` and `/config` to configure itself.
@@ -34,7 +36,7 @@ The SDK is a **separate, CPU-only process** from the LMCache server.
 ```
 SDK process                                  LMCache MP server
 -----------                                  -----------------
-LMCacheKVCacheContext
+LMCacheSDKContext
   ├ ContiguousTransferWrapper
   │   └ EngineDrivenContext{Shm,Pickle} ──MQ──▶ EngineDrivenTransferModule
   │                                             └ StorageManager (L1 pool, locks, prefetch)
@@ -51,7 +53,8 @@ LMCacheKVCacheContext
 
 ## Registration handshake
 
-`connect()` builds the context, then `register_kv_caches()` runs once:
+`connect()` builds the context, then `register_caches()` runs once (for the `QUERY` kind the
+model name is suffixed `##query`, so the lookups below use that key):
 
 1. HTTP `/config` → `chunk_size`.
 2. HTTP `/status` → the `cache_context_meta` entry for `model_name`: `world_size` and the GPU
@@ -70,16 +73,18 @@ LMCacheKVCacheContext
 
 ## Public API
 
-Module functions in `lmcache.sdk.kvcache`; `LMCacheKVCacheContext` / `KVCacheSDKError` are
-exported from `lmcache.sdk`.
+`connect()` lives in `lmcache.sdk.kvcache` (KV) and `lmcache.sdk.qcache` (query); the
+`lmcache.sdk.connect(kind, ...)` helper dispatches by `LMCacheSDKCacheKind`. Both return an
+`LMCacheSDKContext`, on which retrieve / store / close are **methods**. `LMCacheSDKContext` /
+`LMCacheSDKCacheKind` / `LMCacheSDKError` are exported from `lmcache.sdk`.
 
 - **`connect(url, http_url, model_name, timeout=60.0)`** — open the MQ client, fetch config,
-  run the handshake.
-- **`retrieve(ctx, tokens, cache_salt="")`** → contiguous CPU `[2, num_layers, hit_tokens,
+  run the handshake; returns an `LMCacheSDKContext`.
+- **`ctx.retrieve(tokens, cache_salt="")`** → contiguous CPU `[2, num_layers, hit_tokens,
   hidden_dim]` for the cached prefix, or `None` (empty/sub-chunk input, or nothing cached).
-- **`store(ctx, kv, tokens, cache_salt="")`** → `bool`. `kv` is `[2, L, T, D]`; `len(tokens)`
+- **`ctx.store(kv, tokens, cache_salt="")`** → `bool`. `kv` is `[2, L, T, D]`; `len(tokens)`
   must equal `T`; both are truncated to whole chunks before storing.
-- **`close(ctx)`** — shut down the MQ client and ZMQ context.
+- **`ctx.close()`** — shut down the MQ client and ZMQ context.
 
 ## Cache addressing
 
@@ -114,3 +119,6 @@ slots into one contiguous tensor → `commit_retrieve`. `end_session` always run
 - **`world_size == 1` only**, and a **single non-hybrid kernel group** only.
 - **Model must be pre-registered** by a vLLM instance (`REGISTER_KV_CACHE`); the SDK reads the
   GPU layout from `/status` and cannot derive it from `model_name` alone.
+- **Query (Q) kind** (`kind=LMCacheSDKCacheKind.QUERY`, keyed under `<model>##query`) is served
+  by the same context; its layout is registered by the vLLM worker's Q ring (`REGISTER_Q_CACHE`)
+  rather than `REGISTER_KV_CACHE`.

@@ -452,6 +452,7 @@ def assert_is_vllm_mla_or_flash_attn_or_flash_infer(
         lmc_ops.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS,
         lmc_ops.EngineKVFormat.NL_X_NB_TWO_NH_BS_HS,
         lmc_ops.EngineKVFormat.NL_X_NB_BS_HS,
+        lmc_ops.EngineKVFormat.NL_X_NB_BSV_BSS,
     )
 
 
@@ -488,6 +489,7 @@ def get_device(kv_caches: DiscoverableKVCache) -> torch.device:
 _BLOCK_AXIS_FORMATS: frozenset = frozenset(
     {
         lmc_ops.EngineKVFormat.NL_X_NB_BS_HS,
+        lmc_ops.EngineKVFormat.NL_X_NB_BSV_BSS,
     }
 )
 

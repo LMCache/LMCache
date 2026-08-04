@@ -112,10 +112,12 @@ if [[ -n "${PINNED_VLLM_VERSION:-}" ]]; then
         PINNED_VLLM_INDEX_ARGS+=(--extra-index-url "${archive_url}")
     fi
 else
-    VLLM_INSTALL_SPEC="vllm[runai,tensorizer,flashinfer]"
+    # ">=0.0.0.dev0" explicitly limits vLLM to be the only pre-release
+    # package.
+    VLLM_INSTALL_SPEC="vllm[runai,tensorizer,flashinfer]>=0.0.0.dev0"
     echo "Installing latest vLLM nightly (no pin)"
 fi
-uv pip install -U "${VLLM_INSTALL_SPEC}" --pre \
+uv pip install -U "${VLLM_INSTALL_SPEC}" \
     --reinstall-package transformers \
     --reinstall-package tokenizers \
     --reinstall-package huggingface-hub \
