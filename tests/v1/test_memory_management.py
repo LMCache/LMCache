@@ -19,6 +19,7 @@ from lmcache.v1.memory_allocators.paged_tensor_memory_allocator import (
 from lmcache.v1.memory_allocators.pin_memory_allocator import PinMemoryAllocator
 from lmcache.v1.memory_allocators.tensor_memory_allocator import TensorMemoryAllocator
 from lmcache.v1.memory_management import (
+    AddressManager,
     BytesBufferMemoryObj,
     MemoryFormat,
     MemoryObjMetadata,
@@ -695,6 +696,38 @@ class TestLazyMemoryAllocator:
         assert memory_obj is not None
         assert memory_obj.is_valid()
 
+        allocator.close()
+
+    def test_allocated_tensors_are_page_aligned(self, lazy_allocator_cls):
+        """Every allocation must be page-aligned for full-rate H2D DMA reads.
+
+        The GPU copy engine needs a 128 B-aligned source pointer to DMA-read
+        at full rate (a misaligned source costs ~35% of H2D bandwidth on the
+        retrieve path), while torch.empty CPU tensors land at page + 64 B.
+        The allocator page-aligns its pool base; combined with the
+        AddressManager.ALIGN_BYTES placement of objects within the pool,
+        every handed-out tensor must therefore be page-aligned.
+        """
+        allocator = lazy_allocator_cls(
+            init_size=self.INIT_SIZE,
+            final_size=self.FINAL_SIZE,
+        )
+
+        # Odd shapes exercise non-trivial offsets within the pool.
+        shapes = [
+            torch.Size([3, 5, 7]),
+            torch.Size([1000]),
+            torch.Size([513, 129]),
+        ]
+        memory_objs = []
+        for shape in shapes:
+            memory_obj = allocator.allocate(shape, torch.bfloat16)
+            assert memory_obj is not None
+            assert memory_obj.tensor is not None
+            assert memory_obj.tensor.data_ptr() % AddressManager.ALIGN_BYTES == 0
+            memory_objs.append(memory_obj)
+
+        allocator.batched_free(memory_objs)
         allocator.close()
 
     def test_allocate_returns_none_when_out_of_memory(self, lazy_allocator_cls):

@@ -109,9 +109,19 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
             buf = arr_type.from_address(ptr)
             self._buffer = torch.frombuffer(buf, dtype=torch.uint8)
         else:
-            self._buffer = torch.empty(
-                self._final_size, dtype=torch.uint8, device="cpu", pin_memory=False
+            # torch's CPU allocator returns 64 B-aligned pointers (page + 64 B),
+            # but the GPU copy engine needs a 128 B-aligned source for full-rate
+            # DMA reads (~35% H2D loss otherwise); keep a page-aligned view.
+            self._raw_buffer = torch.empty(
+                self._final_size + AddressManager.ALIGN_BYTES,
+                dtype=torch.uint8,
+                device="cpu",
+                pin_memory=False,
             )
+            align_offset = (-self._raw_buffer.data_ptr()) % AddressManager.ALIGN_BYTES
+            self._buffer = self._raw_buffer[
+                align_offset : align_offset + self._final_size
+            ]
 
         # Pin the first `curr_size` bytes (aligned to the internal chunk size)
         self._pin_memory_chunk(0, self._curr_size)
