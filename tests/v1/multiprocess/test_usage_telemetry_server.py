@@ -15,9 +15,9 @@ import time
 
 # Third Party
 import pytest
-import torch
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.v1.distributed.config import (
     EvictionConfig,
     L1ManagerConfig,
@@ -28,9 +28,9 @@ from lmcache.v1.mp_observability.config import DEFAULT_OBSERVABILITY_CONFIG
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.server import run_cache_server
 
-if not torch.cuda.is_available():
+if not torch_dev.is_available():
     pytest.skip(
-        "MP cache server requires an accelerator device",
+        f"requires available {torch_device_type} runtime",
         allow_module_level=True,
     )
 

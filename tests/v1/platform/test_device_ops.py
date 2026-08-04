@@ -15,6 +15,7 @@ import inspect
 import pytest
 
 # First Party
+from lmcache import torch_device_type
 from lmcache.v1.platform import resolve_device_ops
 from lmcache.v1.platform.base.device_ops import DeviceOps
 from lmcache.v1.platform.base.device_spec import DeviceSpec
@@ -279,13 +280,13 @@ def test_unregistered_accelerator_fails_fast(
     isolated_registry: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A requested accelerator with no registered class is a hard error."""
-    table = {k: v for k, v in isolated_registry.items() if k != "cuda"}
+    table = {k: v for k, v in isolated_registry.items() if k != torch_device_type}
     monkeypatch.setattr(platform_pkg, "_DEVICE_REGISTRY", table)
     with pytest.raises(
         RuntimeError,
         match="refusing to silently fall back to the torch baseline",
     ):
-        resolve_device_ops("cuda")
+        resolve_device_ops(torch_device_type)
 
 
 def test_unknown_accelerator_fails_fast_without_registry_edits() -> None:

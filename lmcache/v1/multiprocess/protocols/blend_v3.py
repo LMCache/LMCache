@@ -23,12 +23,23 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
     return {
         # Register rope state on a previously-registered instance.
         # Payload: (instance_id, cos_sin_caches_ipc, head_size, is_neox_style,
-        #           group_to_cache).
+        #           group_to_cache, group_rot).
         # cos_sin_caches_ipc: one IPC handle per distinct rope (dual-RoPE
         # models send two); group_to_cache maps engine group
-        # idx -> cache idx (empty = all groups use cache 0). Returns: None.
+        # idx -> cache idx (empty = all groups use cache 0).
+        # group_rot: per-engine-group rope window [offset_elems, width_elems]
+        # ([] entry = skip that group's re-RoPE; empty list = legacy
+        # inference). MLA models must declare it — see cb_register_rope.
+        # Returns: None.
         "CB_REGISTER_ROPE_V3": ProtocolDefinition(
-            payload_classes=[int, list[DeviceIPCWrapper], int, bool, list[int]],
+            payload_classes=[
+                int,
+                list[DeviceIPCWrapper],
+                int,
+                bool,
+                list[int],
+                list[list[int]],
+            ],
             response_class=None,
             handler_type=HandlerType.SYNC,
         ),

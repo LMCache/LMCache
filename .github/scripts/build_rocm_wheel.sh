@@ -29,6 +29,11 @@ apt-get install -y -q --no-install-recommends \
     python3.12 python3.12-dev python3.12-venv
 curl -sS https://bootstrap.pypa.io/get-pip.py | python3.12
 
+# The repo is bind-mounted from the CI runner (owned by a non-root UID) while
+# this container runs as root, so git refuses to operate on it. setup.py's
+# version/git introspection runs during the wheel build, so mark it safe.
+git config --global --add safe.directory /work/LMCache
+
 PY=python3.12
 $PY --version
 

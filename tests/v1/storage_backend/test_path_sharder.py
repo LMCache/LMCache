@@ -63,7 +63,12 @@ class TestPathSharder:
         try:
             paths = [os.path.join(base, f"nvme{i}") for i in range(3)]
             csv = ",".join(paths)
-            PathSharder(csv, strategy="by_gpu", dst_device=f"{torch_device_type}:0", create_dirs=True)
+            PathSharder(
+                csv,
+                strategy="by_gpu",
+                dst_device=f"{torch_device_type}:0",
+                create_dirs=True,
+            )
             for p in paths:
                 assert os.path.isdir(p)
         finally:
@@ -84,13 +89,17 @@ class TestPathSharder:
 
     def test_whitespace_only_raises(self):
         with pytest.raises(ValueError, match="At least one path"):
-            PathSharder("  , ,  ", strategy="by_gpu", dst_device=f"{torch_device_type}:0")
+            PathSharder(
+                "  , ,  ", strategy="by_gpu", dst_device=f"{torch_device_type}:0"
+            )
 
     def test_unsupported_strategy_raises(self):
         d = tempfile.mkdtemp()
         try:
             with pytest.raises(ValueError, match="Unsupported path sharding"):
-                PathSharder(d, strategy="round_robin", dst_device=f"{torch_device_type}:0")
+                PathSharder(
+                    d, strategy="round_robin", dst_device=f"{torch_device_type}:0"
+                )
         finally:
             shutil.rmtree(d, ignore_errors=True)
 
@@ -139,7 +148,7 @@ class TestPathSharder:
         return_value=1,
     )
     def test_bare_cuda_uses_current_device(self, _cur, _avail):
-        """Bare 'cuda' resolves to torch_dev.current_device()."""
+        """Bare active device type resolves to torch_dev.current_device()."""
         dirs = [tempfile.mkdtemp() for _ in range(3)]
         try:
             csv = ",".join(dirs)
@@ -154,7 +163,7 @@ class TestPathSharder:
         return_value=False,
     )
     def test_bare_cuda_no_gpu_selects_first(self, _avail):
-        """Bare 'cuda' with no GPU falls back to device 0."""
+        """Bare active device type with no GPU falls back to device 0."""
         dirs = [tempfile.mkdtemp() for _ in range(3)]
         try:
             csv = ",".join(dirs)
@@ -192,11 +201,11 @@ class TestPathSharder:
         return_value=2,
     )
     def test_malformed_device_empty_index_falls_back(self, _cur, _avail):
-        """'cuda:' (no int) falls back to current_device."""
+        """'<active>:' (no int) falls back to current_device."""
         dirs = [tempfile.mkdtemp() for _ in range(3)]
         try:
             csv = ",".join(dirs)
-            s = PathSharder(csv, strategy="by_gpu", dst_device="cuda:")
+            s = PathSharder(csv, strategy="by_gpu", dst_device=f"{torch_device_type}:")
             assert s.selected == dirs[2]
         finally:
             for d in dirs:
@@ -207,11 +216,15 @@ class TestPathSharder:
         return_value=False,
     )
     def test_malformed_device_non_numeric_falls_back(self, _avail):
-        """'cuda:foo' falls back to 0 when CUDA is unavailable."""
+        """'<active>:foo' falls back to 0 when GPU is unavailable."""
         dirs = [tempfile.mkdtemp() for _ in range(3)]
         try:
             csv = ",".join(dirs)
-            s = PathSharder(csv, strategy="by_gpu", dst_device="cuda:foo")
+            s = PathSharder(
+                csv,
+                strategy="by_gpu",
+                dst_device=f"{torch_device_type}:foo",
+            )
             assert s.selected == dirs[0]
         finally:
             for d in dirs:

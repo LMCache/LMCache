@@ -20,6 +20,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache import torch_device_type
 from lmcache.v1.platform import get_device_spec
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.cache_context import create_cache_context
@@ -141,7 +142,7 @@ class _FakeCPUContext(_FakeContext):
 
 
 class _FakeCUDAContext(_FakeContext):
-    device_type = "cuda"
+    device_type = torch_device_type
 
 
 def _patch_hook(
@@ -170,9 +171,9 @@ def test_dispatches_by_cpu_device_type(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_dispatches_by_cuda_device_type(monkeypatch: pytest.MonkeyPatch) -> None:
     """Wrappers reporting a non-cpu device type must route to the
     matching registered class -- no isinstance branching."""
-    _patch_hook(monkeypatch, "cuda", _FakeCUDAContext)
+    _patch_hook(monkeypatch, torch_device_type, _FakeCUDAContext)
 
-    wrappers = [_FakeWrapper("cuda")]
+    wrappers = [_FakeWrapper(torch_device_type)]
     ctx = create_cache_context(wrappers, lmcache_tokens_per_chunk=128)  # type: ignore[arg-type]
 
     assert isinstance(ctx, _FakeCUDAContext)
@@ -184,13 +185,12 @@ def test_empty_kv_caches_raises() -> None:
         create_cache_context([])
 
 
-@pytest.mark.cuda
 def test_mixed_device_types_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     """Cross-device batches are unsupported and must fail loudly."""
     _patch_hook(monkeypatch, "cpu", _FakeCPUContext)
-    _patch_hook(monkeypatch, "cuda", _FakeCUDAContext)
+    _patch_hook(monkeypatch, torch_device_type, _FakeCUDAContext)
 
-    wrappers = [_FakeWrapper("cpu"), _FakeWrapper("cuda")]
+    wrappers = [_FakeWrapper("cpu"), _FakeWrapper(torch_device_type)]
     with pytest.raises(ValueError, match="share one"):
         create_cache_context(wrappers)  # type: ignore[arg-type]
 

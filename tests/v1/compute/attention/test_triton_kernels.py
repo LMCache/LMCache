@@ -13,7 +13,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache import torch_device_type
+from lmcache import torch_dev, torch_device_type
 from lmcache.v1.compute.attention.metadata import _block_mask_to_csr
 from lmcache.v1.compute.attention.triton_kernels import (
     block_sparse_attention,
@@ -138,6 +138,11 @@ class TestCausalPrefillAttention:
 class TestBlockSparseAttention:
     """Tests for block_sparse_attention kernel."""
 
+    pytestmark = pytest.mark.skipif(
+        not (torch_dev.is_available() and torch_device_type == "cuda"),
+        reason="Block-sparse Triton tests require CUDA backend",
+    )
+
     def _make_full_mask_csr(self, num_q_blocks, num_kv_blocks, device):
         """CSR for a fully dense mask (all blocks attended)."""
         mask = torch.ones(num_q_blocks, num_kv_blocks, dtype=torch.bool, device=device)
@@ -177,7 +182,9 @@ class TestBlockSparseAttention:
         v = torch.randn(N, H, D, device=torch_device_type, dtype=torch.float16)
 
         num_q_blocks = (M + BS - 1) // BS
-        indptr = torch.zeros(num_q_blocks + 1, dtype=torch.int32, device=torch_device_type)
+        indptr = torch.zeros(
+            num_q_blocks + 1, dtype=torch.int32, device=torch_device_type
+        )
         indices = torch.zeros(0, dtype=torch.int32, device=torch_device_type)
 
         out, lse = block_sparse_attention(
@@ -236,7 +243,9 @@ class TestMergeAttentionOutputs:
         M, H, D = 64, 4, 64
         o1 = torch.randn(M, H, D, device=torch_device_type, dtype=torch.float16)
         o2 = torch.randn(M, H, D, device=torch_device_type, dtype=torch.float16)
-        lse1 = torch.full((M, H), float("-inf"), dtype=torch.float32, device=torch_device_type)
+        lse1 = torch.full(
+            (M, H), float("-inf"), dtype=torch.float32, device=torch_device_type
+        )
         lse2 = torch.ones(M, H, dtype=torch.float32, device=torch_device_type)
 
         merged = merge_attention_outputs(o1, lse1, o2, lse2)
@@ -247,8 +256,12 @@ class TestMergeAttentionOutputs:
         M, H, D = 64, 4, 64
         o1 = torch.randn(M, H, D, device=torch_device_type, dtype=torch.float16)
         o2 = torch.randn(M, H, D, device=torch_device_type, dtype=torch.float16)
-        lse1 = torch.full((M, H), float("-inf"), dtype=torch.float32, device=torch_device_type)
-        lse2 = torch.full((M, H), float("-inf"), dtype=torch.float32, device=torch_device_type)
+        lse1 = torch.full(
+            (M, H), float("-inf"), dtype=torch.float32, device=torch_device_type
+        )
+        lse2 = torch.full(
+            (M, H), float("-inf"), dtype=torch.float32, device=torch_device_type
+        )
 
         merged = merge_attention_outputs(o1, lse1, o2, lse2)
         assert not torch.isnan(merged).any()

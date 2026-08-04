@@ -24,7 +24,7 @@ from collections.abc import Sequence
 # Third Party
 import pytest
 import torch
-pytestmark = pytest.mark.cuda
+
 # First Party
 from lmcache import torch_device_type
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager  # noqa: E402
@@ -34,6 +34,14 @@ from lmcache.v1.platform.cuda.cache_context import (  # noqa: E402
     _TempGPUBuffer,
 )
 import lmcache.c_ops as lmc_ops  # noqa: E402
+
+pytestmark = [
+    pytest.mark.cuda,
+    pytest.mark.skipif(
+        torch_device_type == "xpu",
+        reason="CUDA IPC cache-context tests are not supported on XPU",
+    ),
+]
 
 _DEVICE = torch.device(torch_device_type)
 
