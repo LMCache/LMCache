@@ -11,6 +11,16 @@
 // This test drives exactly that shape, a length aligned buffer at a
 // deliberately unaligned address, and asserts the store still lands and reads
 // back byte identical.
+//
+// What this test does NOT cover: the runtime refusal path. odirect_alignment_ok
+// is evaluated before open(), so a misaligned buffer is caught there and
+// is_direct_io_refusal / note_odirect_refused / the IoError retry branches are
+// never entered. Reaching those needs open() or write() to refuse O_DIRECT on a
+// filesystem that accepted it, which no skew value can force and which tmpfs no
+// longer produces on current kernels. Covering them deterministically means
+// interposing open/write/read to return a chosen errno, the same approach #4359
+// took on the Python side. Until that exists those branches are reviewed rather
+// than exercised.
 
 #include "fs/connector.h"
 
@@ -30,7 +40,19 @@ namespace {
 
 constexpr size_t kAlign = 4096;
 constexpr size_t kPayload = 8192;  // multiple of kAlign, so the length gate passes
-constexpr size_t kSkew = 512;      // shifts the address off a kAlign boundary
+// The skew has to be misaligned against the DEVICE's logical sector size, not
+// merely against kAlign. The connector checks alignment against statvfs
+// f_bsize, but the kernel enforces O_DIRECT against the device's
+// logical_block_size, and the two differ. On the #4364 reproduction host
+// (XFS on NVMe RAID-0) f_bsize is 4096 while logical_block_size is 512, so a
+// skew of 512 sits off a 4096 boundary and is still a legal O_DIRECT address:
+// open() and write() both succeed and the test passes with and without the
+// fix. That was measured on that host, PASS on both trees, before this value
+// was changed.
+// Every real logical_block_size is a power of two, and an odd offset is never
+// a multiple of a power of two greater than one, so an odd skew is misaligned
+// on any device rather than only on the ones that happened to be tried.
+constexpr size_t kSkew = 1;
 constexpr int kPollAttempts = 300;
 
 std::vector<Completion> await_completion(FSConnector& connector) {

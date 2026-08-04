@@ -40,6 +40,16 @@ bool is_direct_io_refusal(int err) {
 // address. Every transfer here starts at offset zero, so the other two are
 // checked. Length alone is not enough, because a pinned host allocator can
 // return a block sized region at an address that is not block aligned.
+//
+// block_size reaches here as statvfs f_bsize, which is the filesystem's block
+// size and not the device logical_block_size the kernel actually enforces for
+// O_DIRECT. On mainstream setups f_bsize is a multiple of that sector size, so
+// this check is the conservative side and anything it accepts the kernel
+// accepts too. The gap only bites in the other direction, when choosing a
+// deliberately misaligned address for a test: a buffer off an f_bsize boundary
+// can still be a legal O_DIRECT address on a device with a smaller sector, and
+// the O_DIRECT regression test passed with and without the fix for exactly
+// that reason until its skew was changed.
 bool odirect_alignment_ok(size_t block_size, size_t len, const void* buf) {
   if (block_size == 0) return false;
   if (len % block_size != 0) return false;
