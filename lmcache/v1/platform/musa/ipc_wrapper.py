@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Optional MUSA IPC wrapper used by the Stage4 MP handle path.
+"""Optional TorchMUSA IPC wrapper for MP handle transfer.
 
 The MUSA handle path is deliberately fail-closed. This module exposes a
-``DeviceIPCWrapper`` subclass for the platform registry to auto-discover, but
-it only constructs wrappers when the user explicitly enables the path and every
-required handle-path capability is present.
+``DeviceIPCWrapper`` subclass for platform discovery, but it only constructs
+wrappers when the user explicitly enables the path and TorchMUSA exposes the
+required memory IPC APIs. Event IPC and server-side block transfer are checked
+independently because they belong to the later full transfer path.
 """
 
 # Standard
@@ -12,7 +13,6 @@ from typing import ClassVar, Protocol, cast
 import importlib
 import inspect
 import os
-import threading
 
 # Third Party
 import torch
@@ -22,29 +22,53 @@ from lmcache.v1.gpu_connector.kv_format.contiguity import (
     attempt_permute_to_contiguous_view,
 )
 from lmcache.v1.gpu_connector.utils import assert_contiguous
-from lmcache.v1.platform.base_ipc_wrapper import DeviceIPCWrapper
+from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
 
 ENV_MUSA_HANDLE_TRANSFER = "LMCACHE_MUSA_HANDLE_TRANSFER"
 
 _REQUIRED_TORCH_MUSA_IPC_SYMBOLS = (
-    "ipc_get_mem_handle",
-    "ipc_open_mem_handle",
+    "export_tensor",
+    "open_tensor",
+)
+
+_REQUIRED_TORCH_MUSA_EVENT_SYMBOLS = (
+    "ipc_handle",
+    "record",
+    "wait",
+    "query",
+    "synchronize",
 )
 
 
+class _TorchMusaIPCOwner(Protocol):
+    """Receiver-side owner returned by ``torch.musa.ipc.open_tensor``."""
+
+    @property
+    def tensor(self) -> torch.Tensor:
+        """Return the imported tensor while the owner is open."""
+        ...
+
+    def close(self) -> None:
+        """Release the receiver-side IPC mapping."""
+        ...
+
+
 class _TorchMusaIPCModule(Protocol):
-    """TorchMUSA surface required by the Stage4.1 handle capability gate."""
+    """Public ``torch.musa.ipc`` surface required by LMCache."""
 
-    def ipc_get_mem_handle(self, tensor: torch.Tensor) -> object:
+    def export_tensor(self, tensor: torch.Tensor) -> object:
         """Export a MUSA tensor as a process-portable IPC handle."""
+        ...
 
-    def ipc_open_mem_handle(
+    def open_tensor(
         self,
-        handle: bytes,
-        nbytes: int,
-        device_index: int,
-    ) -> object:
-        """Import a MUSA IPC handle in the current process."""
+        handle: object,
+        *,
+        device: object | None = None,
+        stream: object | None = None,
+    ) -> _TorchMusaIPCOwner:
+        """Open a MUSA tensor handle in the current process."""
+        ...
 
 
 def is_musa_handle_transfer_enabled() -> bool:
@@ -55,6 +79,25 @@ def is_musa_handle_transfer_enabled() -> bool:
         "yes",
         "on",
     )
+
+
+def get_torch_musa_module() -> object | None:
+    """Return the TorchMUSA module when this PyTorch build exposes it.
+
+    Returns:
+        ``torch.musa`` when present, otherwise ``None``.
+    """
+    if not hasattr(torch, "musa"):
+        # torch_musa registers torch.musa as an import side effect.
+        try:
+            importlib.import_module("torch_musa")
+        except Exception:
+            # Optional native dependencies can fail with ImportError, OSError,
+            # or a backend-specific initialization exception.
+            pass
+    if not hasattr(torch, "musa"):
+        return None
+    return torch.musa  # type: ignore[attr-defined]
 
 
 def is_torch_musa_available() -> bool:
@@ -71,114 +114,129 @@ def is_torch_musa_available() -> bool:
         return False
 
 
-def get_torch_musa_module() -> object | None:
-    """Return the TorchMUSA module when this PyTorch build exposes it.
+def check_torch_musa_ipc_support(torch_musa: object) -> bool:
+    """Return whether TorchMUSA exposes the required memory IPC API.
+
+    Args:
+        torch_musa: Candidate ``torch.musa`` module.
 
     Returns:
-        ``torch.musa`` when present, otherwise ``None``.
+        ``True`` when ``torch.musa.ipc`` provides tensor export and import.
     """
-    if not hasattr(torch, "musa"):
-        # torch_musa registers torch.musa as an import side effect.
-        try:
-            importlib.import_module("torch_musa")
-        except ImportError:
-            pass
-    if not hasattr(torch, "musa"):
-        return None
-    return torch.musa  # type: ignore[attr-defined]
-
-
-def check_torch_musa_ipc_support(torch_musa: object) -> bool:
-    """Return whether TorchMUSA exposes memory IPC primitives."""
+    ipc_module = getattr(torch_musa, "ipc", None)
     return all(
-        callable(getattr(torch_musa, symbol, None))
+        callable(getattr(ipc_module, symbol, None))
         for symbol in _REQUIRED_TORCH_MUSA_IPC_SYMBOLS
     )
 
 
 def check_torch_musa_event_support(torch_musa: object) -> bool:
-    """Return whether TorchMUSA exposes IPC event ordering primitives."""
+    """Return whether TorchMUSA exposes the required event IPC API.
+
+    Args:
+        torch_musa: Candidate ``torch.musa`` module.
+
+    Returns:
+        ``True`` when TorchMUSA events support interprocess construction,
+        import, export, record, wait, query, and synchronization.
+    """
     event_cls = getattr(torch_musa, "Event", None)
-    if event_cls is None or not hasattr(event_cls, "from_ipc_handle"):
+    if event_cls is None or not callable(getattr(event_cls, "from_ipc_handle", None)):
         return False
-    return _has_interprocess_parameter(event_cls) or _has_interprocess_parameter(
-        getattr(event_cls, "__new__", None)
+    supports_interprocess = _has_interprocess_parameter(
+        event_cls
+    ) or _has_interprocess_parameter(getattr(event_cls, "__new__", None))
+    if not supports_interprocess:
+        supports_interprocess = _can_create_interprocess_event(event_cls)
+    return supports_interprocess and all(
+        callable(getattr(event_cls, symbol, None))
+        for symbol in _REQUIRED_TORCH_MUSA_EVENT_SYMBOLS
     )
 
 
 def is_musa_block_transfer_available() -> bool:
     """Return whether server-side MUSA block transfer is production-ready.
 
-    Stage4.1 only adds the safe integration boundary. Until Stage4.3 wires and
-    validates the server-side MUSA block-transfer primitive, forced MUSA handle
-    mode must remain unavailable even if TorchMUSA memory/event IPC exists.
+    Memory and event IPC can be validated independently. Forced MUSA handle
+    mode remains unavailable until the server-side MUSA block-transfer
+    primitive is implemented and validated.
+
+    Returns:
+        ``False`` while the server-side block-transfer path is unavailable.
     """
     return False
+
+
+def is_musa_memory_ipc_available() -> bool:
+    """Return whether the opt-in TorchMUSA memory IPC API is available.
+
+    Returns:
+        ``True`` when the feature is enabled and TorchMUSA provides tensor
+        export and import.
+    """
+    if not is_musa_handle_transfer_enabled() or not is_torch_musa_available():
+        return False
+    torch_musa = get_torch_musa_module()
+    return torch_musa is not None and check_torch_musa_ipc_support(torch_musa)
+
+
+def is_musa_event_ipc_available() -> bool:
+    """Return whether the opt-in TorchMUSA event IPC API is available.
+
+    Returns:
+        ``True`` when the feature is enabled and TorchMUSA provides all event
+        operations required by :class:`MusaEventIPCBackend`.
+    """
+    if not is_musa_handle_transfer_enabled() or not is_torch_musa_available():
+        return False
+    torch_musa = get_torch_musa_module()
+    return torch_musa is not None and check_torch_musa_event_support(torch_musa)
 
 
 def is_musa_handle_transfer_available() -> bool:
     """Return whether forced MUSA MP handle mode may be selected.
 
-    Availability requires all four conditions:
-    - explicit user opt-in through :data:`ENV_MUSA_HANDLE_TRANSFER`;
-    - a visible TorchMUSA runtime;
-    - TorchMUSA memory IPC and interprocess event support;
-    - a validated server-side MUSA block-transfer primitive.
+    Returns:
+        ``True`` only when memory IPC, event IPC, and server-side block
+        transfer are all available.
     """
-    if not is_musa_handle_transfer_enabled():
-        return False
-    if not is_torch_musa_available():
-        return False
-    torch_musa = get_torch_musa_module()
     return (
-        torch_musa is not None
-        and check_torch_musa_ipc_support(torch_musa)
-        and check_torch_musa_event_support(torch_musa)
+        is_musa_memory_ipc_available()
+        and is_musa_event_ipc_available()
         and is_musa_block_transfer_available()
     )
 
 
 class MusaIPCWrapper(DeviceIPCWrapper):
-    """Wire-compatible wrapper for MUSA memory IPC handles.
+    """Wire-compatible wrapper for TorchMUSA memory IPC handles."""
 
-    The class subclasses :class:`DeviceIPCWrapper` so it shares the
-    device-agnostic ``KVCache = list[DeviceIPCWrapper]`` msgspec wire type with
-    CUDA and CPU wrappers. Pickle preserves the subclass identity, and the
-    receiver calls this class's :meth:`to_tensor` implementation to reconstruct
-    a MUSA tensor.
-    """
-
-    #: ``torch.device.type`` this wrapper handles. Kept as a class-level
-    #: constant so external tooling / tests can introspect the binding.
     device_type: ClassVar[str] = "musa"
 
-    _discovered_device_mapping: dict[str, int] = {}
-    _device_mapping_lock = threading.Lock()
+    _opened_handle: _TorchMusaIPCOwner | None
 
     @classmethod
     def wrap(cls, tensor: torch.Tensor) -> "MusaIPCWrapper":
-        """Factory used by
-        :func:`~lmcache.v1.platform.resolve_kv_wrapper_factory`.
+        """Create a wire wrapper for a MUSA tensor.
 
         Args:
-            tensor: A MUSA tensor to export through TorchMUSA IPC.
+            tensor: MUSA tensor to export.
 
         Returns:
-            A new :class:`MusaIPCWrapper` wrapping ``tensor`` for the
-            multiprocess wire.
+            A wrapper carrying the TorchMUSA tensor IPC handle.
         """
         return cls(tensor)
 
     def __init__(self, tensor: torch.Tensor) -> None:
-        """Export a MUSA tensor through the TorchMUSA IPC runtime.
+        """Export a contiguous MUSA tensor through TorchMUSA IPC.
 
         Args:
             tensor: A contiguous MUSA tensor to export.
 
         Raises:
             ValueError: If ``tensor`` is not a MUSA tensor or cannot be
-                represented as a zero-offset contiguous view.
-            RuntimeError: If the Stage4 MUSA handle capability is unavailable.
+                represented as a contiguous view.
+            RuntimeError: If the opt-in TorchMUSA memory IPC capability is
+                unavailable.
         """
         tensor_view = attempt_permute_to_contiguous_view(tensor)
         if (
@@ -189,19 +247,17 @@ class MusaIPCWrapper(DeviceIPCWrapper):
         tensor = tensor_view
         assert_contiguous(tensor)
 
-        module = _torch_musa_module_if_ready()
-        if module is None:
+        ipc_module = _torch_musa_ipc_module_if_ready()
+        if ipc_module is None:
             raise RuntimeError(
-                "MUSA IPC handle transfer is not available. Set "
+                "MUSA memory IPC is not available. Set "
                 f"{ENV_MUSA_HANDLE_TRANSFER}=1 with compatible TorchMUSA "
-                "memory/event IPC support and a validated MUSA block-transfer "
-                "backend, or use MP transfer mode 'engine_driven' or 'auto'."
+                "memory IPC support, or use MP transfer mode "
+                "'engine_driven' or 'auto'."
             )
 
-        self._musa_ipc_handle = _coerce_ipc_handle(module.ipc_get_mem_handle(tensor))
-        self._nbytes = tensor.untyped_storage().nbytes()
-
-        self.handle = None
+        self.handle = ipc_module.export_tensor(tensor)
+        self._opened_handle = None
         self.dtype = tensor.dtype
         self.shape = tuple(tensor.shape)
         self.stride = tuple(tensor.stride())
@@ -213,27 +269,49 @@ class MusaIPCWrapper(DeviceIPCWrapper):
         )
 
     def to_tensor(self) -> torch.Tensor:
-        """Reconstruct the MUSA tensor in this process."""
-        module = _torch_musa_module_if_ready()
-        if module is None:
-            raise RuntimeError(
-                "MUSA IPC handle transfer is not available in the receiver process."
-            )
+        """Reconstruct the MUSA tensor in the current process.
 
-        device_index = self._get_device_index_from_uuid(self.device_uuid)
-        raw = module.ipc_open_mem_handle(
-            self._musa_ipc_handle,
-            self._nbytes,
-            device_index,
-        )
-        if isinstance(raw, torch.Tensor):
-            tensor = raw
-        else:
-            tensor = torch.from_dlpack(raw)
+        Returns:
+            The imported tensor owned by this wrapper.
 
-        if tensor.dtype == torch.uint8 and self.dtype != torch.uint8:
-            tensor = tensor.view(self.dtype)
-        return tensor.as_strided(self.shape, self.stride, self.storage_offset)
+        Raises:
+            RuntimeError: If the opt-in TorchMUSA memory IPC capability is
+                unavailable in the receiver.
+        """
+        owner = self._opened_handle
+        if owner is None:
+            ipc_module = _torch_musa_ipc_module_if_ready()
+            if ipc_module is None:
+                raise RuntimeError(
+                    "MUSA memory IPC is not available in the receiver process."
+                )
+            # The TorchMUSA handle carries its producer ordinal and UUID;
+            # open_tensor resolves them against receiver-visible devices.
+            owner = ipc_module.open_tensor(self.handle)
+            self._opened_handle = owner
+        return owner.tensor
+
+    def close(self) -> None:
+        """Release the receiver-side TorchMUSA tensor owner, if opened.
+
+        Calling this method more than once has no effect.
+        """
+        owner = self._opened_handle
+        if owner is None:
+            return
+        owner.close()
+        self._opened_handle = None
+
+    def __getstate__(self) -> dict[str, object]:
+        """Return transport state without receiver-local owner state."""
+        state = self.__dict__.copy()
+        state.pop("_opened_handle", None)
+        return state
+
+    def __setstate__(self, state: dict[str, object]) -> None:
+        """Restore transport state with no receiver-local open owner."""
+        self.__dict__.update(state)
+        self._opened_handle = None
 
     @classmethod
     def _get_device_uuid(cls, device_index: int) -> str:
@@ -248,66 +326,22 @@ class MusaIPCWrapper(DeviceIPCWrapper):
         name = getattr(props, "name", "musa")
         return f"{name}:{device_index}"
 
-    @classmethod
-    def _discover_devices(cls) -> None:
-        """Discover visible MUSA devices and cache their identifiers."""
-        if not is_torch_musa_available():
-            return
 
-        with cls._device_mapping_lock:
-            if cls._discovered_device_mapping:
-                return
-
-            for i in range(torch.musa.device_count()):  # type: ignore[attr-defined]
-                device_uuid = cls._get_device_uuid(i)
-                cls._discovered_device_mapping[device_uuid] = i
-
-    @classmethod
-    def _get_device_index_from_uuid(cls, device_uuid: str) -> int:
-        """Resolve the sender's MUSA device identifier in this process."""
-        cls._discover_devices()
-
-        with cls._device_mapping_lock:
-            device_index = cls._discovered_device_mapping.get(device_uuid)
-
-        if device_index is None:
-            raise RuntimeError(
-                f"MUSA device UUID {device_uuid} not found in visible devices. "
-                "Please make sure the worker and server see the same MUSA devices."
-            )
-        return device_index
-
-
-def _torch_musa_module_if_ready() -> _TorchMusaIPCModule | None:
-    """Return TorchMUSA when all handle-path capability gates pass."""
-    if not is_musa_handle_transfer_enabled():
-        return None
-    if not is_torch_musa_available():
+def _torch_musa_ipc_module_if_ready() -> _TorchMusaIPCModule | None:
+    """Return ``torch.musa.ipc`` when memory IPC is available."""
+    if not is_musa_memory_ipc_available():
         return None
     module = get_torch_musa_module()
-    if (
-        module is None
-        or not check_torch_musa_ipc_support(module)
-        or not check_torch_musa_event_support(module)
-        or not is_musa_block_transfer_available()
-    ):
+    if module is None:
         return None
-    return cast(_TorchMusaIPCModule, module)
-
-
-def _coerce_ipc_handle(handle: object) -> bytes:
-    """Normalize a MUSA IPC handle into bytes for pickle/msgspec transport."""
-    if isinstance(handle, bytes):
-        return handle
-    if isinstance(handle, bytearray):
-        return bytes(handle)
-    if isinstance(handle, memoryview):
-        return handle.tobytes()
-    raise TypeError("MUSA IPC handle must be bytes-like")
+    ipc_module = getattr(module, "ipc", None)
+    if ipc_module is None:
+        return None
+    return cast(_TorchMusaIPCModule, ipc_module)
 
 
 def _has_interprocess_parameter(obj: object) -> bool:
-    """Return whether ``obj`` accepts the ``interprocess`` event parameter."""
+    """Return whether ``obj`` accepts the ``interprocess`` parameter."""
     if not callable(obj):
         return False
     try:
@@ -315,3 +349,19 @@ def _has_interprocess_parameter(obj: object) -> bool:
     except (TypeError, ValueError):
         return False
     return "interprocess" in signature.parameters
+
+
+def _can_create_interprocess_event(event_cls: object) -> bool:
+    """Return whether an opaque Event binding accepts interprocess events.
+
+    Some C/pybind-backed classes do not expose a useful signature even though
+    their public constructor supports ``interprocess=True``. The probe keeps
+    the capability check aligned with the operation used by the backend.
+    """
+    if not callable(event_cls):
+        return False
+    try:
+        event_cls(interprocess=True)  # type: ignore[operator]
+    except Exception:
+        return False
+    return True

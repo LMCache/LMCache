@@ -35,26 +35,20 @@ class VLLM_Detector(EngineDetector):
         is_hnd = kv_layout == "HND"
 
         # Blocks-first fused K/V is the only rank-4 vLLM layout, so its raw rank
-        # identifies it unambiguously (the post-split 5-D shape would collide
-        # with flash-infer when num_heads == 2). The two middle axes are NH/BS
+        # identifies it unambiguously (a 5-D split would collide with
+        # flash-infer when num_heads == 2). The two middle axes are NH/BS
         # (HND) or BS/NH (NHD) -- indistinguishable from the shape alone, so the
-        # resolved kv_layout decides. Split [NB, *, *, 2*HS] into
-        # [NB, *, *, 2, HS].
+        # resolved kv_layout decides. The tensor is kept raw: the trailing axis
+        # is the per-head content size (2 * head_size, K/V packed).
         if (
             isinstance(kv_caches, list)
             and kv_caches
             and isinstance(kv_caches[0], torch.Tensor)
             and kv_caches[0].dim() == 4
         ):
-            fused_dim = kv_caches[0].shape[3]
-            if fused_dim % 2 != 0:
-                raise ValueError(
-                    f"blocks-first fused trailing dim {fused_dim} is not 2 * head_size"
-                )
-            split = [t.reshape(*t.shape[:3], 2, fused_dim // 2) for t in kv_caches]
             if is_hnd:
-                return lmc_ops.EngineKVFormat.NL_X_NB_NH_BS_TWO_HS, split
-            return lmc_ops.EngineKVFormat.NL_X_NB_BS_NH_TWO_HS, split
+                return lmc_ops.EngineKVFormat.NL_X_NB_NH_BS_CS, kv_caches
+            return lmc_ops.EngineKVFormat.NL_X_NB_BS_NH_CS, kv_caches
 
         list_depth, tensor_ndim, first_tensor = measure_list_depth_until_tensor(
             kv_caches
@@ -71,6 +65,8 @@ class VLLM_Detector(EngineDetector):
                 if is_hnd:
                     return lmc_ops.EngineKVFormat.NL_X_NB_TWO_NH_BS_HS, kv_caches
                 return lmc_ops.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS, kv_caches
-        if list_depth == 1 and tensor_ndim == 3:  # MLA
+        if list_depth == 1 and tensor_ndim == 3:  # MLA (or DSA indexer cache)
+            if first_tensor.dtype == torch.uint8 and int(first_tensor.shape[-1]) == 132:
+                return lmc_ops.EngineKVFormat.NL_X_NB_BSV_BSS, kv_caches
             return lmc_ops.EngineKVFormat.NL_X_NB_BS_HS, kv_caches
         return None, kv_caches

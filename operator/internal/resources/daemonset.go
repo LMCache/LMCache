@@ -42,7 +42,22 @@ const (
 	// serverPortName is the name of the engine's serving port on the container
 	// and the node-local Service.
 	serverPortName = "server"
+
+	// l2EncryptionKeyMountDir is where the L2 encryption master-key Secret is
+	// mounted inside the engine container.
+	l2EncryptionKeyMountDir = "/etc/lmcache/keys"
+
+	// l2EncryptionKeyFileName is the required data key in the user-provided
+	// master-key Secret and thus the file name under the mount dir.
+	l2EncryptionKeyFileName = "master"
+
+	// l2EncryptionKeyVolumeName is the pod volume name for the master-key mount.
+	l2EncryptionKeyVolumeName = "l2-master-key"
 )
+
+// l2EncryptionKeyPath is the in-container path of the mounted L2 encryption
+// master key, referenced as master_key_path in the serde config.
+const l2EncryptionKeyPath = l2EncryptionKeyMountDir + "/" + l2EncryptionKeyFileName
 
 // BuildDaemonSet constructs a DaemonSet for the given LMCacheEngine.
 func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
@@ -175,6 +190,31 @@ func buildDaemonSetCore(
 	// LMCache and vLLM pods (cudaIpcOpenMemHandle requires shared /dev/shm).
 	volumes := append([]corev1.Volume{}, spec.Volumes...)
 	volumeMounts := append([]corev1.VolumeMount{}, spec.VolumeMounts...)
+
+	// Mount the L2 encryption master key (user-created Secret in the engine's
+	// namespace) read-only at the path the serde config references. Only the
+	// "master" data key is projected; a missing Secret or missing key fails
+	// the mount with a pod event and self-heals once the Secret is fixed.
+	if spec.L2Backend != nil && spec.L2Backend.Serde != nil && spec.L2Backend.Serde.AESGCM != nil {
+		keyMode := int32(0o400)
+		volumes = append(volumes, corev1.Volume{
+			Name: l2EncryptionKeyVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: spec.L2Backend.Serde.AESGCM.MasterKeySecretRef.Name,
+					Items: []corev1.KeyToPath{
+						{Key: l2EncryptionKeyFileName, Path: l2EncryptionKeyFileName},
+					},
+					DefaultMode: &keyMode,
+				},
+			},
+		})
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name:      l2EncryptionKeyVolumeName,
+			MountPath: l2EncryptionKeyMountDir,
+			ReadOnly:  true,
+		})
+	}
 
 	// Build container args. Auth credentials are handled via env vars
 	// (LMCACHE_RESP_USERNAME / LMCACHE_RESP_PASSWORD) injected above,

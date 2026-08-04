@@ -179,7 +179,10 @@ policy evicts a fraction of the least-recently-used keys.
      - Description
    * - ``--eviction-policy``
      - *(required)*
-     - Policy name: ``LRU`` or ``noop``.
+     - Policy name: ``LRU``, ``IsolatedLRU``, or ``noop``. ``IsolatedLRU``
+       maintains one LRU list per ``cache_salt`` and relies on per-salt
+       quotas registered via the ``/quota`` HTTP endpoints; see
+       :doc:`/mp/configuration` for the full description.
    * - ``--eviction-trigger-watermark``
      - ``0.8``
      - L1 usage fraction [0, 1] above which eviction is triggered.

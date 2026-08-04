@@ -17,6 +17,7 @@ from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
     PrefetchHandle,
+    PrefetchRequestSpec,
     TrimPolicy,
 )
 from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import P2PL2AdapterConfig
@@ -244,10 +245,16 @@ class P2PController:
 
         # NOTE: skip_l2=True -- only objects already resident in L1 are locked.
         handle = self._ctx.storage_manager.submit_prefetch_task(
-            keys,
-            layout_desc,
+            PrefetchRequestSpec(
+                keys=keys,
+                # TODO(KuntaiDu): pass per-group layout descs once L2
+                # adapters' submit_lookup_and_lock_task takes them (see the
+                # matching TODO in prefetch_controller._start_lookup_phase).
+                # Follow-up immediately after this PR.
+                group_layout_descs={0: layout_desc},
+                policy=TrimPolicy.SPARSE,
+            ),
             external_request_id=f"p2p-{task_id}",
-            policy=TrimPolicy.SPARSE,
             skip_l2=True,
         )
 

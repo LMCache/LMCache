@@ -199,7 +199,9 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
         try:
             with self._lock:
                 self._store_tasks[wrapped_id] = state
-                serde_task_id = self._serde.submit_serialize(objects, temp_objs)
+                serde_task_id = self._serde.submit_serialize(
+                    objects, temp_objs, state.keys
+                )
                 self._serde_to_store[serde_task_id] = wrapped_id
         except Exception:
             logger.exception(
@@ -327,6 +329,11 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
     def register_listener(self, listener: L2AdapterListener) -> None:
         # Listeners track what's actually stored — which is inner's job.
         self._inner.register_listener(listener)
+
+    def set_backend_name(self, name: str) -> None:
+        """Forward the backend name to the inner adapter (which owns the
+        listener-notify funnel that tags cache events)."""
+        self._inner.set_backend_name(name)
 
     def report_status(self) -> dict:
         inner_status = self._inner.report_status()
@@ -515,10 +522,12 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
 
             src_objs: list[MemoryObj] = []
             dst_objs: list[MemoryObj] = []
+            sel_keys: list[ObjectKey] = []
             for i in range(len(state.keys)):
                 if bitmap.test(i):
                     src_objs.append(state.temp_objs[i])
                     dst_objs.append(state.dst_objs[i])
+                    sel_keys.append(state.keys[i])
 
             if not src_objs:
                 # Inner loaded nothing — skip deserialize, finalize.
@@ -528,7 +537,7 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
 
             state.load_bitmap = bitmap
             try:
-                serde_id = self._serde.submit_deserialize(src_objs, dst_objs)
+                serde_id = self._serde.submit_deserialize(src_objs, dst_objs, sel_keys)
             except Exception:
                 logger.exception(
                     "Serde wrapper: submit_deserialize raised for task %d",

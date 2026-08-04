@@ -18,6 +18,7 @@ import torch
 
 # First Party
 from lmcache.integration.vllm import vllm_multi_process_adapter as adapter_mod
+from lmcache.integration.vllm.experimental.dispatcher import Dispatcher
 from lmcache.integration.vllm.vllm_multi_process_adapter import (
     HeartbeatThread,
     LMCacheMPWorkerAdapter,
@@ -99,7 +100,7 @@ def _make_worker_adapter(
     network boundary must already be patched (see ``fake_adapter``).
     ``extra_config`` forwards ``lmcache.mp.*`` overrides."""
     parallel_strategy = ParallelStrategy(
-        use_mla=False,
+        mla_only=False,
         vllm_world_size=1,
         vllm_worker_id=0,
         tp_size=1,
@@ -152,6 +153,7 @@ def fake_adapter(monkeypatch):
     fake_client = MagicMock(name="mq_client")
     monkeypatch.setattr(adapter_mod, "MessageQueueClient", lambda *a, **kw: fake_client)
     monkeypatch.setattr(adapter_mod, "get_lmcache_chunk_size", lambda *a, **kw: 256)
+    monkeypatch.setattr(adapter_mod, "get_experimental", lambda *a, **kw: set())
 
     future = MagicMock(name="future")
     future.result.return_value = None
@@ -163,7 +165,14 @@ def fake_adapter(monkeypatch):
     monkeypatch.setattr(adapter_mod, "HeartbeatThread", FakeHeartbeatThread)
 
     # KV-cache wrapping pulls in CUDA IPC; bypass for unit tests.
-    monkeypatch.setattr(adapter_mod, "wrap_kv_caches", lambda kv: list(kv.values()))
+    # First Party
+    from lmcache.v1.multiprocess.transfer_context import worker_transfer
+
+    monkeypatch.setattr(
+        worker_transfer,
+        "wrap_kv_caches",
+        lambda kv: list(kv.values()),
+    )
     # ``vllm_layout_hints`` returns a ``LayoutHints`` (TypedDict / dict at
     # runtime); stub it with an empty dict.
     monkeypatch.setattr(
@@ -644,11 +653,19 @@ def test_register_uses_local_context_when_self_transfer_ctx_nulled(
     fake_client = MagicMock(name="mq_client")
     monkeypatch.setattr(adapter_mod, "MessageQueueClient", lambda *a, **kw: fake_client)
     monkeypatch.setattr(adapter_mod, "get_lmcache_chunk_size", lambda *a, **kw: 256)
+    monkeypatch.setattr(adapter_mod, "get_experimental", lambda *a, **kw: set())
     future = MagicMock(name="future")
     future.result.return_value = None
     monkeypatch.setattr(adapter_mod, "send_lmcache_request", lambda *a, **kw: future)
     monkeypatch.setattr(adapter_mod, "HeartbeatThread", FakeHeartbeatThread)
-    monkeypatch.setattr(adapter_mod, "wrap_kv_caches", lambda kv: list(kv.values()))
+    # First Party
+    from lmcache.v1.multiprocess.transfer_context import worker_transfer
+
+    monkeypatch.setattr(
+        worker_transfer,
+        "wrap_kv_caches",
+        lambda kv: list(kv.values()),
+    )
     monkeypatch.setattr("lmcache.integration.vllm.utils.vllm_layout_hints", lambda: {})
     local_ctx = MagicMock(name="local_transfer_ctx")
     monkeypatch.setattr(
@@ -656,7 +673,7 @@ def test_register_uses_local_context_when_self_transfer_ctx_nulled(
     )
 
     parallel_strategy = ParallelStrategy(
-        use_mla=False,
+        mla_only=False,
         vllm_world_size=1,
         vllm_worker_id=0,
         tp_size=1,
@@ -748,3 +765,36 @@ def test_recover_callback_rebuilds_transfer_ctx_without_closing_previous(
     assert len(contexts) == 3
     assert adapter.transfer_ctx is contexts[2]
     contexts[1].close.assert_not_called()
+
+
+# For the experimental dispatcher
+def test_enabled_feature_receives_reclaim_and_shutdown(fake_adapter):
+    """get_finished reclaims ring blocks and shutdown unregisters the ring."""
+    adapter, _, _ = fake_adapter
+    assert adapter.dispatcher is None
+
+    dispatcher = MagicMock(spec=Dispatcher)
+    adapter.dispatcher = dispatcher
+
+    adapter.get_finished(set())
+    adapter.shutdown()
+
+    dispatcher.reclaim.assert_called_once_with()
+    dispatcher.shutdown.assert_called_once_with()
+
+
+@pytest.mark.parametrize("ring_ok", [True, False])
+def test_recovery_reports_the_ring_re_registration_result(fake_adapter, ring_ok):
+    """A worker whose Q ring failed to re-register must not be reported
+    healthy: the server would have no Q context, so every later STORE_Q would
+    raise. The success path must still report healthy so the health event can
+    be set."""
+    adapter, _, _ = fake_adapter
+    dispatcher = MagicMock(spec=Dispatcher)
+    dispatcher.reregister.return_value = ring_ok
+    adapter.dispatcher = dispatcher
+    fake_tensor = MagicMock()
+    fake_tensor.device.type = "cuda"
+    adapter.register_kv_caches({"layer.0": fake_tensor})
+
+    assert adapter._reregister_kv_caches_callback() is ring_ok

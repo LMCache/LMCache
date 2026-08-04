@@ -19,6 +19,7 @@ import torch
 nixl = pytest.importorskip("nixl")
 
 # First Party
+from lmcache import torch_device_type  # noqa: E402
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey  # noqa: E402
 from lmcache.v1.distributed.internal_api import (  # noqa: E402
     L1MemoryDesc,
@@ -65,6 +66,18 @@ class _RecordingListener(L2AdapterListener):
 PAGE_SIZE = 4096  # 4 KB per page
 NUM_BUFFER_PAGES = 20  # pages in the registered memory buffer
 MAX_CAPACITY_GB = 0.001  # ~1 MB
+
+if torch_device_type == "xpu":
+    pytest.skip(
+        (
+            "Skip on XPU: in vllm/vllm-openai-xpu:v0.26.0, "
+            "NIXL dynamic store backends are unavailable at runtime "
+            "(including POSIX), adapter init can fail with "
+            "NIXL_ERR_NOT_FOUND, so this suite is not runnable "
+            "on XPU in the current test environment."
+        ),
+        allow_module_level=True,
+    )
 
 # =============================================================================
 # Test Helpers
