@@ -22,8 +22,9 @@ import (
 
 // ValidateSpec validates the CacheBlendEngineSpec and returns any validation
 // errors. It mirrors LMCacheEngine.ValidateSpec and additionally enforces the
-// CacheBlend invariants: chunkSize == 256, recompRatio in (0, 1], and
-// checkLayer >= 0.
+// CacheBlend invariants: chunkSize == 256, recompRatio in (0, 1], checkLayer
+// >= 0, blockSize >= 1, a non-empty attentionBackend, and no PYTHONPATH in
+// injection.env.
 func (e *CacheBlendEngine) ValidateSpec() field.ErrorList {
 	var errs field.ErrorList
 	spec := &e.Spec
@@ -77,12 +78,35 @@ func (e *CacheBlendEngine) ValidateSpec() field.ErrorList {
 	injPath := field.NewPath("spec", "injection")
 	if spec.Injection == nil {
 		errs = append(errs, field.Required(injPath, "must be specified for CacheBlend injection"))
-	} else if spec.Injection.PayloadImage == nil {
-		errs = append(errs, field.Required(injPath.Child("payloadImage"),
-			"must be specified for CacheBlend injection"))
-	} else if spec.Injection.PayloadImage.Repository == nil || *spec.Injection.PayloadImage.Repository == "" {
-		errs = append(errs, field.Required(injPath.Child("payloadImage", "repository"),
-			"must be a non-empty string"))
+	} else {
+		if spec.Injection.PayloadImage == nil {
+			errs = append(errs, field.Required(injPath.Child("payloadImage"),
+				"must be specified for CacheBlend injection"))
+		} else if spec.Injection.PayloadImage.Repository == nil || *spec.Injection.PayloadImage.Repository == "" {
+			errs = append(errs, field.Required(injPath.Child("payloadImage", "repository"),
+				"must be a non-empty string"))
+		}
+
+		if spec.Injection.BlockSize != nil && *spec.Injection.BlockSize < 1 {
+			errs = append(errs, field.Invalid(injPath.Child("blockSize"),
+				*spec.Injection.BlockSize, "must be >= 1"))
+		}
+
+		if spec.Injection.AttentionBackend != nil && *spec.Injection.AttentionBackend == "" {
+			errs = append(errs, field.Invalid(injPath.Child("attentionBackend"),
+				*spec.Injection.AttentionBackend,
+				`must be a backend name or "none" to omit the flag`))
+		}
+
+		// PYTHONPATH is owned by the plugin staging (the injected /cb-plugin
+		// prepend); an env override here would break plugin discovery.
+		for i := range spec.Injection.Env {
+			if spec.Injection.Env[i].Name == "PYTHONPATH" {
+				errs = append(errs, field.Invalid(injPath.Child("env").Index(i),
+					spec.Injection.Env[i].Name,
+					"PYTHONPATH is managed by the CacheBlend plugin staging and cannot be set here"))
+			}
+		}
 	}
 
 	errs = append(errs, validateL2BackendSpec(spec.L2Backend)...)

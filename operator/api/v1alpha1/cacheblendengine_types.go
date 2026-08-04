@@ -18,12 +18,13 @@ package v1alpha1
 
 import (
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // CacheBlendChunkSize is the only chunk size CacheBlend supports. The blend
-// matcher requires chunk_size == vLLM --block-size (64) * 4 == 256, so the
-// CacheBlendEngine server is locked to this value (see design §4).
+// matcher requires chunk_size == 256 (the default vLLM --block-size of 64 * 4),
+// so the CacheBlendEngine server is locked to this value (see design §4).
 const CacheBlendChunkSize int32 = 256
 
 // Cudagraph mode constants for CacheBlendEngine injection.
@@ -34,6 +35,22 @@ const (
 	CudagraphPiecewise = "piecewise"
 	// CudagraphFullDecodeOnly enables full CUDA graphs for decode only.
 	CudagraphFullDecodeOnly = "full_decode_only"
+)
+
+// Injection constants for CacheBlendEngine.
+const (
+	// DefaultCBBlockSize is the vLLM --block-size the webhook injects unless
+	// overridden by injection.blockSize.
+	DefaultCBBlockSize int32 = 64
+
+	// DefaultCBAttentionBackend is the vLLM --attention-backend the webhook
+	// injects unless overridden by injection.attentionBackend.
+	DefaultCBAttentionBackend = "CUSTOM"
+
+	// AttentionBackendNone is the injection.attentionBackend sentinel that makes
+	// the webhook omit the --attention-backend flag entirely, for models whose
+	// arch adapter takes over the CB attention role (e.g. all-sparse-MLA models).
+	AttentionBackendNone = "none"
 )
 
 // BlendSpec defines the CacheBlend tunables injected into the vLLM connect-config.
@@ -52,6 +69,14 @@ type BlendSpec struct {
 	// +optional
 	// +kubebuilder:default=0.15
 	RecompRatio *float64 `json:"recompRatio,omitempty"`
+
+	// extraConfig holds additional kv_connector_extra_config entries merged into
+	// the connection ConfigMap JSON (e.g. "cb.partial_bucket": 4096 for models
+	// whose arch adapter needs it). Values are arbitrary JSON scalars/objects.
+	// Entries are merged last and can override any auto-generated key, mirroring
+	// extraArgs semantics.
+	// +optional
+	ExtraConfig map[string]apiextensionsv1.JSON `json:"extraConfig,omitempty"`
 }
 
 // InjectionSpec defines the defaults the mutating webhook reads when injecting
@@ -87,6 +112,34 @@ type InjectionSpec struct {
 	// +kubebuilder:default="eager"
 	// +kubebuilder:validation:Enum=eager;piecewise;full_decode_only
 	Cudagraph *string `json:"cudagraph,omitempty"`
+
+	// blockSize is the vLLM --block-size the webhook injects. The default (64)
+	// pairs with the fixed chunk size of 256 and fits most models; models whose
+	// KV page size differs (e.g. sparse-attention models with a 128-token page)
+	// need it raised to match. A user-supplied --block-size on the pod is
+	// overwritten with this value.
+	// +optional
+	// +kubebuilder:default=64
+	// +kubebuilder:validation:Minimum=1
+	BlockSize *int32 `json:"blockSize,omitempty"`
+
+	// attentionBackend is the vLLM --attention-backend the webhook injects.
+	// "CUSTOM" (default) routes attention through the CB backend that owns the
+	// FULL_RECOMP / CHECK / PARTIAL pipeline. Set to "none" to omit the flag
+	// entirely for models whose arch adapter takes over that role (e.g.
+	// all-sparse-MLA models, where the CB backend would attach to zero layers).
+	// +optional
+	// +kubebuilder:default="CUSTOM"
+	// +kubebuilder:validation:MinLength=1
+	AttentionBackend *string `json:"attentionBackend,omitempty"`
+
+	// env holds additional environment variables the webhook sets on the target
+	// vLLM container (e.g. VLLM_USE_FLASHINFER_MOE_FP8=0 to route fp8 MoE through
+	// the CB backend). A same-name variable already on the container is
+	// overwritten; PYTHONPATH cannot be overridden here (the plugin staging owns
+	// it).
+	// +optional
+	Env []corev1.EnvVar `json:"env,omitempty"`
 }
 
 // CacheBlendEngineSpec defines the desired state of CacheBlendEngine. It mirrors

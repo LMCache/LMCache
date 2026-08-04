@@ -18,6 +18,8 @@ package v1alpha1
 
 import (
 	"testing"
+
+	corev1 "k8s.io/api/core/v1"
 )
 
 // ptr is defined in lmcacheengine_test.go (same package); reuse it here.
@@ -555,5 +557,98 @@ func TestCBValidateSpec_L2BothSet(t *testing.T) {
 	errs := e.ValidateSpec()
 	if len(errs) != 1 {
 		t.Fatalf("expected 1 error, got %d: %v", len(errs), errs)
+	}
+}
+
+// --- Configurable injection (blockSize / attentionBackend / env) ---
+
+func TestCBSetDefaults_InjectionArgDefaults(t *testing.T) {
+	e := &CacheBlendEngine{Spec: CacheBlendEngineSpec{L1: L1BackendSpec{SizeGB: 10}}}
+	e.SetDefaults()
+	if e.Spec.Injection.BlockSize == nil || *e.Spec.Injection.BlockSize != DefaultCBBlockSize {
+		t.Fatalf("expected BlockSize=%d, got %v", DefaultCBBlockSize, e.Spec.Injection.BlockSize)
+	}
+	if e.Spec.Injection.AttentionBackend == nil || *e.Spec.Injection.AttentionBackend != DefaultCBAttentionBackend {
+		t.Fatalf("expected AttentionBackend=%s, got %v", DefaultCBAttentionBackend, e.Spec.Injection.AttentionBackend)
+	}
+}
+
+func TestCBSetDefaults_InjectionArgsPreserved(t *testing.T) {
+	e := &CacheBlendEngine{Spec: CacheBlendEngineSpec{
+		L1: L1BackendSpec{SizeGB: 10},
+		Injection: &InjectionSpec{
+			BlockSize:        ptr(int32(128)),
+			AttentionBackend: ptr(AttentionBackendNone),
+		},
+	}}
+	e.SetDefaults()
+	if *e.Spec.Injection.BlockSize != 128 {
+		t.Fatalf("expected BlockSize preserved at 128, got %d", *e.Spec.Injection.BlockSize)
+	}
+	if *e.Spec.Injection.AttentionBackend != AttentionBackendNone {
+		t.Fatalf("expected AttentionBackend preserved at none, got %s", *e.Spec.Injection.AttentionBackend)
+	}
+}
+
+func TestCBValidateSpec_BlockSizeInvalid(t *testing.T) {
+	inj := validCBInjection()
+	inj.BlockSize = ptr(int32(0))
+	e := &CacheBlendEngine{Spec: CacheBlendEngineSpec{
+		L1:        L1BackendSpec{SizeGB: 10},
+		Injection: inj,
+	}}
+	errs := e.ValidateSpec()
+	if len(errs) != 1 {
+		t.Fatalf("expected 1 error, got %d: %v", len(errs), errs)
+	}
+	if errs[0].Field != "spec.injection.blockSize" {
+		t.Fatalf("expected field spec.injection.blockSize, got %s", errs[0].Field)
+	}
+}
+
+func TestCBValidateSpec_AttentionBackendEmptyInvalid(t *testing.T) {
+	inj := validCBInjection()
+	inj.AttentionBackend = ptr("")
+	e := &CacheBlendEngine{Spec: CacheBlendEngineSpec{
+		L1:        L1BackendSpec{SizeGB: 10},
+		Injection: inj,
+	}}
+	errs := e.ValidateSpec()
+	if len(errs) != 1 {
+		t.Fatalf("expected 1 error, got %d: %v", len(errs), errs)
+	}
+	if errs[0].Field != "spec.injection.attentionBackend" {
+		t.Fatalf("expected field spec.injection.attentionBackend, got %s", errs[0].Field)
+	}
+}
+
+func TestCBValidateSpec_AttentionBackendNoneValid(t *testing.T) {
+	inj := validCBInjection()
+	inj.AttentionBackend = ptr(AttentionBackendNone)
+	e := &CacheBlendEngine{Spec: CacheBlendEngineSpec{
+		L1:        L1BackendSpec{SizeGB: 10},
+		Injection: inj,
+	}}
+	if errs := e.ValidateSpec(); len(errs) != 0 {
+		t.Fatalf("expected no errors, got %v", errs)
+	}
+}
+
+func TestCBValidateSpec_InjectionEnvPythonPathRejected(t *testing.T) {
+	inj := validCBInjection()
+	inj.Env = []corev1.EnvVar{
+		{Name: "VLLM_USE_FLASHINFER_MOE_FP8", Value: "0"},
+		{Name: "PYTHONPATH", Value: "/evil"},
+	}
+	e := &CacheBlendEngine{Spec: CacheBlendEngineSpec{
+		L1:        L1BackendSpec{SizeGB: 10},
+		Injection: inj,
+	}}
+	errs := e.ValidateSpec()
+	if len(errs) != 1 {
+		t.Fatalf("expected 1 error, got %d: %v", len(errs), errs)
+	}
+	if errs[0].Field != "spec.injection.env[1]" {
+		t.Fatalf("expected field spec.injection.env[1], got %s", errs[0].Field)
 	}
 }

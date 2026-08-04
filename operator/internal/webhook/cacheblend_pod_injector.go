@@ -165,8 +165,8 @@ func (p *CacheBlendPodInjector) Handle(ctx context.Context, req admission.Reques
 	// M3: read-only mount on the target container.
 	target.VolumeMounts = appendVolumeMountIfAbsent(target.VolumeMounts, BuildCBVolumeMount())
 
-	// M4: PYTHONPATH on the target container.
-	target.Env = BuildCBPodEnv(target.Env)
+	// M4: PYTHONPATH + injection.env on the target container.
+	target.Env = BuildCBPodEnv(target.Env, engine.Spec.Injection.Env)
 
 	// M5: required vLLM args. Pass "" for the kv-transfer-config JSON when the
 	// user already supplies one so BuildCBArgs leaves their value untouched.
@@ -174,8 +174,7 @@ func (p *CacheBlendPodInjector) Handle(ctx context.Context, req admission.Reques
 	if userHasKVTransferConfig {
 		kvForArgs = ""
 	}
-	cudagraph := deref(engine.Spec.Injection.Cudagraph)
-	target.Args = BuildCBArgs(target.Args, kvForArgs, cudagraph)
+	target.Args = BuildCBArgs(target.Args, kvForArgs, engine.Spec.Injection)
 
 	// M7: append injection pull secrets (annotation override wins) to the pod's
 	// imagePullSecrets, deduped (private payload image).

@@ -416,17 +416,27 @@ The spec **mirrors `LMCacheEngineSpec`** (image, server, l1, eviction, prometheu
 l2Backend, scheduling, overrides, imagePullSecrets) and adds:
 
 - `blend.checkLayer` (default 1) and `blend.recompRatio` (default 0.15) — CB
-  tunables fed to the vLLM connector.
+  tunables fed to the vLLM connector — plus `blend.extraConfig`, a free-form
+  map of additional `kv_connector_extra_config` entries (e.g.
+  `"cb.partial_bucket": 4096`) merged last, so an entry can override any
+  auto-generated key (mirroring `extraArgs` semantics).
 - `injection` — what the webhook injects into vLLM pods: `payloadImage` (an
   `ImageSpec` — `repository`/`tag`/`pullPolicy`, like `spec.image` — for the
   private `lmcache-cacheblend` init-container image; set `repository` explicitly,
   the inherited engine-image default is not a valid payload), `imagePullSecrets`
   (appended to the vLLM pod so the private payload image can pull — the Secret
   must exist in the vLLM pod's namespace), `targetContainer` (default: first
-  container), and `cudagraph` (`eager`|`piecewise`|`full_decode_only`, default
-  `eager`).
+  container), `cudagraph` (`eager`|`piecewise`|`full_decode_only`, default
+  `eager`), `blockSize` (default 64 — raise it for models whose KV page size
+  differs, e.g. sparse-attention models with a 128-token page), `attentionBackend`
+  (default `CUSTOM`; the sentinel `none` omits the flag entirely for models whose
+  arch adapter takes over the CB attention role, e.g. all-sparse-MLA models), and
+  `env` (extra env vars set on the target vLLM container, e.g.
+  `VLLM_USE_FLASHINFER_MOE_FP8=0` for fp8-MoE models; `PYTHONPATH` is rejected —
+  the plugin staging owns it).
 - `server.chunkSize` defaults to **256** and is validated to equal 256 (the blend
-  matcher requires `chunk_size == vLLM --block-size * 4`).
+  matcher requires `chunk_size == 256`; with the default `--block-size 64` that
+  is block\_size × 4).
 
 ### The blend engine (controller)
 
@@ -455,7 +465,8 @@ The `<name>-connection` ConfigMap carries the **`CBKVConnector`**
     "lmcache.mp.host": "tcp://<name>.<namespace>.svc.cluster.local",
     "lmcache.mp.port": "<server.port>",
     "cb.check_layer": <blend.checkLayer>,
-    "cb.recomp_ratio": <blend.recompRatio>
+    "cb.recomp_ratio": <blend.recompRatio>,
+    ...<blend.extraConfig entries, merged last>
   }
 }
 ```
@@ -477,8 +488,8 @@ webhook then applies:
 |---|---|
 | pod `hostIPC: true` | required for CUDA IPC with the node-local engine |
 | `cb-plugin` emptyDir + payload init container | the busybox payload `cp -a`'s the pure-Python plugin tree onto the shared volume |
-| readOnly mount + `PYTHONPATH=/cb-plugin` on the vLLM container | vLLM discovers the plugin via its `vllm.general_plugins` entry point |
-| append required vLLM args | `--attention-backend CUSTOM`, `--kv-transfer-config <from the connection ConfigMap>`, `--block-size 64`, `--pipeline-parallel-size 1`, `--no-enable-chunked-prefill`, `--no-async-scheduling`, `--enforce-eager` (or the configured cudagraph) |
+| readOnly mount + `PYTHONPATH=/cb-plugin` + `injection.env` on the vLLM container | vLLM discovers the plugin via its `vllm.general_plugins` entry point; `injection.env` entries follow (same-name vars overwritten, `PYTHONPATH` never) |
+| append required vLLM args | `--attention-backend <injection.attentionBackend, default CUSTOM; omitted when "none">`, `--kv-transfer-config <from the connection ConfigMap>`, `--block-size <injection.blockSize, default 64>`, `--pipeline-parallel-size 1`, `--no-enable-chunked-prefill`, `--no-async-scheduling`, `--enforce-eager` (or the configured cudagraph) |
 | append `injection.imagePullSecrets` | so the private payload image can pull |
 | stamp `lmcache.ai/cacheblend-injected: "true"` | idempotency guard |
 

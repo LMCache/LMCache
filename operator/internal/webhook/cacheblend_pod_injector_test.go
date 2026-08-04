@@ -42,6 +42,11 @@ const (
 	testNamespace  = "vllm-ns"
 	testPodName    = "vllm-pod"
 	testSvcHost    = "tcp://cb.vllm-ns.svc.cluster.local"
+
+	// Default injected values (pinned by SetDefaults; overridable via
+	// spec.injection.attentionBackend / spec.injection.blockSize).
+	cbValAttentionBackend = lmcachev1alpha1.DefaultCBAttentionBackend
+	cbValBlockSize        = "64"
 )
 
 // newTestScheme returns a scheme with clientgo + the lmcache v1alpha1 types.
@@ -411,6 +416,109 @@ var _ = Describe("CacheBlendPodInjector", func() {
 
 			Expect(c.Args).To(ContainElement("--attention-backend=CUSTOM"))
 			Expect(c.Args).NotTo(ContainElement("--attention-backend=FLASH_ATTN"))
+		})
+
+		It("injects the engine's injection.blockSize, overwriting a user-supplied value", func() {
+			engine := newTestEngine(func(e *lmcachev1alpha1.CacheBlendEngine) {
+				bs := int32(128)
+				e.Spec.Injection.BlockSize = &bs
+			})
+			injector := newPodInjector(engine, true)
+			pod := vllmPod(func(p *corev1.Pod) {
+				p.Spec.Containers[0].Args = []string{"--block-size", "64", "--model", "m"}
+			})
+
+			resp := injector.Handle(ctx, makeRequest(pod))
+			out := applyResponse(pod, resp)
+			c := findContainer(out, "vllm")
+
+			Expect(argsHasFlagValue(c.Args, cbFlagBlockSize, "128")).To(BeTrue())
+			Expect(countFlag(c.Args, cbFlagBlockSize)).To(Equal(1))
+		})
+
+		It("injects a non-default injection.attentionBackend value", func() {
+			engine := newTestEngine(func(e *lmcachev1alpha1.CacheBlendEngine) {
+				ab := "FLASH_ATTN_CB"
+				e.Spec.Injection.AttentionBackend = &ab
+			})
+			injector := newPodInjector(engine, true)
+			pod := vllmPod(nil)
+
+			resp := injector.Handle(ctx, makeRequest(pod))
+			out := applyResponse(pod, resp)
+			c := findContainer(out, "vllm")
+
+			Expect(argsHasFlagValue(c.Args, cbFlagAttentionBackend, "FLASH_ATTN_CB")).To(BeTrue())
+		})
+
+		It(`omits --attention-backend when injection.attentionBackend is "none"`, func() {
+			engine := newTestEngine(func(e *lmcachev1alpha1.CacheBlendEngine) {
+				ab := lmcachev1alpha1.AttentionBackendNone
+				e.Spec.Injection.AttentionBackend = &ab
+			})
+			injector := newPodInjector(engine, true)
+			pod := vllmPod(nil)
+
+			resp := injector.Handle(ctx, makeRequest(pod))
+			out := applyResponse(pod, resp)
+			c := findContainer(out, "vllm")
+
+			By("the flag is absent while the rest of the injection applies")
+			Expect(argsHasFlag(c.Args, cbFlagAttentionBackend)).To(BeFalse())
+			Expect(argsHasFlagValue(c.Args, cbFlagBlockSize, cbValBlockSize)).To(BeTrue())
+		})
+
+		It(`leaves a user-supplied --attention-backend untouched when "none"`, func() {
+			engine := newTestEngine(func(e *lmcachev1alpha1.CacheBlendEngine) {
+				ab := lmcachev1alpha1.AttentionBackendNone
+				e.Spec.Injection.AttentionBackend = &ab
+			})
+			injector := newPodInjector(engine, true)
+			pod := vllmPod(func(p *corev1.Pod) {
+				p.Spec.Containers[0].Args = []string{"--attention-backend", "FLASH_ATTN", "--model", "m"}
+			})
+
+			resp := injector.Handle(ctx, makeRequest(pod))
+			out := applyResponse(pod, resp)
+			c := findContainer(out, "vllm")
+
+			Expect(argsHasFlagValue(c.Args, cbFlagAttentionBackend, "FLASH_ATTN")).To(BeTrue())
+		})
+
+		It("applies injection.env to the target container, overwriting same-name vars", func() {
+			engine := newTestEngine(func(e *lmcachev1alpha1.CacheBlendEngine) {
+				e.Spec.Injection.Env = []corev1.EnvVar{
+					{Name: "VLLM_USE_FLASHINFER_MOE_FP8", Value: "0"},
+					{Name: "EXISTING", Value: "new"},
+				}
+			})
+			injector := newPodInjector(engine, true)
+			pod := vllmPod(func(p *corev1.Pod) {
+				p.Spec.Containers[0].Env = []corev1.EnvVar{{Name: "EXISTING", Value: "old"}}
+			})
+
+			resp := injector.Handle(ctx, makeRequest(pod))
+			out := applyResponse(pod, resp)
+			c := findContainer(out, "vllm")
+
+			Expect(envValue(c, "VLLM_USE_FLASHINFER_MOE_FP8")).To(Equal("0"))
+			Expect(envValue(c, "EXISTING")).To(Equal("new"))
+		})
+
+		It("never lets injection.env override the staged PYTHONPATH", func() {
+			// ValidateSpec rejects PYTHONPATH in injection.env; the builder skips
+			// it as defense in depth for engines admitted before that rule.
+			engine := newTestEngine(func(e *lmcachev1alpha1.CacheBlendEngine) {
+				e.Spec.Injection.Env = []corev1.EnvVar{{Name: "PYTHONPATH", Value: "/evil"}}
+			})
+			injector := newPodInjector(engine, true)
+			pod := vllmPod(nil)
+
+			resp := injector.Handle(ctx, makeRequest(pod))
+			out := applyResponse(pod, resp)
+			c := findContainer(out, "vllm")
+
+			Expect(envValue(c, pythonPathEnvName)).To(Equal(cbPluginMountPath))
 		})
 
 		It("skips + stamps when the user already supplies --kv-transfer-config", func() {

@@ -19,7 +19,7 @@ spec:
   # server:
   #   port: 6566                  # MP port the CB connector dials (default 6566)
   #   httpPort: 8080              # HTTP frontend port (health, admin)
-  #   chunkSize: 256              # FIXED at 256 (must equal vLLM --block-size * 4)
+  #   chunkSize: 256              # FIXED at 256 (default vLLM --block-size 64 * 4)
   #   maxWorkers: 1               # default, worker threads
   #   hashAlgorithm: blake3       # builtin | sha256_cbor | blake3
 
@@ -31,6 +31,8 @@ spec:
   # blend:
   #   checkLayer: 1               # default, cb.check_layer
   #   recompRatio: 0.15           # default, cb.recomp_ratio
+  #   extraConfig:                # extra kv_connector_extra_config entries,
+  #     cb.partial_bucket: 4096   # merged last (can override the keys above)
 
   # -- Injection: how the webhook injects the plugin into annotated vLLM pods --
   injection:
@@ -49,6 +51,13 @@ spec:
     #   - name: my-registry-secret
     # targetContainer: ""          # default: first container; name the vLLM container
     # cudagraph: eager             # eager | piecewise | full_decode_only (never full)
+    # blockSize: 64                # injected --block-size; raise for models whose KV
+    #                              # page size differs (e.g. 128 for sparse-attention)
+    # attentionBackend: CUSTOM     # injected --attention-backend; "none" omits the
+    #                              # flag (models whose arch adapter owns attention)
+    # env:                         # extra env vars on the vLLM container
+    #   - name: VLLM_USE_FLASHINFER_MOE_FP8
+    #     value: "0"               # e.g. required for fp8-MoE models
 
   # -- Eviction --
   # eviction:

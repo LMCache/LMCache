@@ -21,6 +21,8 @@ limitations under the License.
 package webhook
 
 import (
+	"strconv"
+
 	corev1 "k8s.io/api/core/v1"
 
 	lmcachev1alpha1 "github.com/LMCache/LMCache/api/v1alpha1"
@@ -58,17 +60,17 @@ var cbStaging = payloadStaging{
 
 // CacheBlend-required vLLM flag names and fixed values (design §7 M5). The
 // CacheBlend matcher and connector hard-require these; several fail loudly,
-// --no-async-scheduling fails silently (MoE garble).
+// --no-async-scheduling fails silently (MoE garble). --attention-backend and
+// --block-size values come from spec.injection (defaults CUSTOM / 64, pinned by
+// SetDefaults); the rest are fixed.
 const (
 	cbFlagAttentionBackend = "--attention-backend"
-	cbValAttentionBackend  = "CUSTOM"
 
 	cbFlagKVTransferConfig = "--kv-transfer-config"
 
 	cbFlagNoChunkedPrefill = "--no-enable-chunked-prefill"
 
 	cbFlagBlockSize = "--block-size"
-	cbValBlockSize  = "64"
 
 	cbFlagPipelineParallelSize = "--pipeline-parallel-size"
 	cbValPipelineParallelSize  = "1"
@@ -107,18 +109,42 @@ func BuildCBVolumeMount() corev1.VolumeMount {
 }
 
 // BuildCBPodEnv returns the env list for the target vLLM container with
-// PYTHONPATH set to (or prepended with) /cb-plugin (M4). It is set on the
-// container, never the pod, so every spawned worker inherits it; it never sets
-// VLLM_PLUGINS (design §9.8). An existing PYTHONPATH is prepended, not replaced,
-// so /cb-plugin:<existing> keeps the plugin discoverable without dropping the
-// user's path entries.
+// PYTHONPATH set to (or prepended with) /cb-plugin (M4), followed by the
+// engine's injection.env entries (e.g. VLLM_USE_FLASHINFER_MOE_FP8=0). It is set
+// on the container, never the pod, so every spawned worker inherits it; it never
+// sets VLLM_PLUGINS (design §9.8). An existing PYTHONPATH is prepended, not
+// replaced, so /cb-plugin:<existing> keeps the plugin discoverable without
+// dropping the user's path entries. An injection.env entry whose name matches an
+// existing container variable overwrites it (spec wins, mirroring the args
+// replace semantics); PYTHONPATH overrides are rejected by ValidateSpec and
+// skipped here as defense in depth.
 //
 // Parameters:
 //   - existing: the target container's current env list (may be nil).
+//   - injected: the engine's injection.env entries (may be nil).
 //
-// Returns a new env list; the input is not mutated.
-func BuildCBPodEnv(existing []corev1.EnvVar) []corev1.EnvVar {
-	return cbStaging.prependPythonPath(existing)
+// Returns a new env list; the inputs are not mutated.
+func BuildCBPodEnv(existing, injected []corev1.EnvVar) []corev1.EnvVar {
+	env := cbStaging.prependPythonPath(existing)
+	for _, v := range injected {
+		if v.Name == "PYTHONPATH" {
+			continue
+		}
+		env = applyEnvVar(env, v)
+	}
+	return env
+}
+
+// applyEnvVar appends-or-replaces v in env by name: a same-name entry is
+// overwritten in place, otherwise v is appended. Returns the slice.
+func applyEnvVar(env []corev1.EnvVar, v corev1.EnvVar) []corev1.EnvVar {
+	for i := range env {
+		if env[i].Name == v.Name {
+			env[i] = v
+			return env
+		}
+	}
+	return append(env, v)
 }
 
 // cudagraphArgs returns the cudagraph-mode flag set for the given mode. "eager"
@@ -157,25 +183,39 @@ func cudagraphArgs(cudagraph string) []string {
 //   - existingArgs: the target container's current args (may be nil).
 //   - kvTransferConfigJSON: the CBKVConnector JSON from the engine's connection
 //     ConfigMap, or "" to skip injecting/replacing --kv-transfer-config.
-//   - cudagraph: the cudagraph mode (eager|piecewise|full_decode_only).
+//   - injection: the engine's (defaulted) injection spec, carrying the cudagraph
+//     mode, block size, and attention backend ("none" omits the flag).
 //
 // Returns a new args slice; the input is not mutated.
-func BuildCBArgs(existingArgs []string, kvTransferConfigJSON, cudagraph string) []string {
+func BuildCBArgs(
+	existingArgs []string,
+	kvTransferConfigJSON string,
+	injection *lmcachev1alpha1.InjectionSpec,
+) []string {
 	args := make([]string, len(existingArgs))
 	copy(args, existingArgs)
 
-	args = applyArg(args, cbFlagAttentionBackend, cbValAttentionBackend)
+	// attentionBackend "none" omits the flag entirely: some models route the CB
+	// attention role through an arch adapter instead of the CUSTOM backend.
+	backend := injectedAttentionBackend(injection)
+	if backend != lmcachev1alpha1.AttentionBackendNone {
+		args = applyArg(args, cbFlagAttentionBackend, backend)
+	}
 	if kvTransferConfigJSON != "" {
 		args = applyArg(args, cbFlagKVTransferConfig, kvTransferConfigJSON)
 	}
 	args = applyBareFlag(args, cbFlagNoChunkedPrefill)
-	args = applyArg(args, cbFlagBlockSize, cbValBlockSize)
+	args = applyArg(args, cbFlagBlockSize, injectedBlockSize(injection))
 	args = applyArg(args, cbFlagPipelineParallelSize, cbValPipelineParallelSize)
 	args = applyBareFlag(args, cbFlagNoAsyncScheduling)
 
 	// cudagraphArgs returns either a single bare flag (--enforce-eager), a
 	// [flag, value] pair (full_decode_only), or nil (piecewise). Apply with
 	// append-or-replace semantics so a user's pre-existing value is overwritten.
+	cudagraph := ""
+	if injection != nil && injection.Cudagraph != nil {
+		cudagraph = *injection.Cudagraph
+	}
 	switch cg := cudagraphArgs(cudagraph); len(cg) {
 	case 1:
 		args = applyBareFlag(args, cg[0])
@@ -184,6 +224,26 @@ func BuildCBArgs(existingArgs []string, kvTransferConfigJSON, cudagraph string) 
 	}
 
 	return args
+}
+
+// injectedAttentionBackend returns the --attention-backend value to inject,
+// falling back to the default (CUSTOM) when the injection spec does not carry
+// one (SetDefaults normally pins it).
+func injectedAttentionBackend(injection *lmcachev1alpha1.InjectionSpec) string {
+	if injection == nil || injection.AttentionBackend == nil || *injection.AttentionBackend == "" {
+		return lmcachev1alpha1.DefaultCBAttentionBackend
+	}
+	return *injection.AttentionBackend
+}
+
+// injectedBlockSize returns the --block-size value to inject as a string,
+// falling back to the default (64) when the injection spec does not carry one
+// (SetDefaults normally pins it).
+func injectedBlockSize(injection *lmcachev1alpha1.InjectionSpec) string {
+	if injection == nil || injection.BlockSize == nil || *injection.BlockSize < 1 {
+		return strconv.Itoa(int(lmcachev1alpha1.DefaultCBBlockSize))
+	}
+	return strconv.Itoa(int(*injection.BlockSize))
 }
 
 // applyArg appends-or-replaces a "--flag value" pair in args (design §9.1). It

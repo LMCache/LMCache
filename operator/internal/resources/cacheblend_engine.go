@@ -142,7 +142,9 @@ func BuildCBEngineMetricsService(engine *lmcachev1alpha1.CacheBlendEngine) *core
 // the CBKVConnector kv-transfer-config JSON (design §7). The JSON points vLLM at
 // the node-local Service (lmcache.mp.host) and carries the blend tunables
 // cb.check_layer and cb.recomp_ratio read from spec.Blend (defaults are pinned by
-// SetDefaults: checkLayer=1, recompRatio=0.15).
+// SetDefaults: checkLayer=1, recompRatio=0.15), plus any spec.Blend.extraConfig
+// entries merged last (they can override the auto-generated keys, mirroring
+// extraArgs semantics).
 func BuildCBConnectionConfigMap(engine *lmcachev1alpha1.CacheBlendEngine) *corev1.ConfigMap {
 	spec := &engine.Spec
 	// Use the same default (5555) as BuildContainerArgs/getServerPort so the
@@ -160,6 +162,13 @@ func BuildCBConnectionConfigMap(engine *lmcachev1alpha1.CacheBlendEngine) *corev
 	extra := map[string]any{
 		"cb.check_layer":  checkLayer,
 		"cb.recomp_ratio": recompRatio,
+	}
+	if spec.Blend != nil {
+		// apiextensionsv1.JSON marshals as its raw JSON value, so numbers,
+		// strings, and objects all round-trip into the config verbatim.
+		for k, v := range spec.Blend.ExtraConfig {
+			extra[k] = v
+		}
 	}
 
 	return buildConnectionConfigMapCore(
