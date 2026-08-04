@@ -59,7 +59,10 @@ variables:
        fleet.
    * - ``LMCACHE_MP_COORDINATOR_HEALTH_CHECK_INTERVAL``
      - ``10``
-     - Seconds between health-check sweeps. ``0`` disables eviction.
+     - Seconds between health-check sweeps that expire stale MP-server
+       registrations. ``0`` disables the stale-instance eviction loop; it does
+       **not** affect the ``/quota`` L2 eviction loop (see
+       ``LMCACHE_MP_COORDINATOR_EVICTION_CHECK_INTERVAL`` below).
    * - ``LMCACHE_MP_COORDINATOR_EVICTION_CHECK_INTERVAL``
      - ``5``
      - Seconds between L2 eviction sweeps. ``0`` disables the loop.
@@ -142,13 +145,15 @@ Kubernetes downward API); an explicit flag wins over the env var.
      - ``LMCACHE_COORDINATOR_HEARTBEAT_INTERVAL``
      - Seconds between heartbeats (must be ``> 0``, default ``5``). Keep it well
        below the coordinator's ``INSTANCE_TIMEOUT``.
-   * - ``--coordinator-l2-event-reporting``
-     - ``LMCACHE_COORDINATOR_L2_EVENT_REPORTING``
-     - Enable reporting L2 store/lookup events to the coordinator for
-       fleet-wide usage tracking and quota-based eviction.
-   * - ``--coordinator-l2-event-flush-interval``
-     - ``LMCACHE_COORDINATOR_L2_EVENT_FLUSH_INTERVAL``
-     - Seconds between L2 event batch flushes (must be ``> 0``, default ``1``).
+   * - ``--coordinator-event-reporting``
+     - ``LMCACHE_COORDINATOR_EVENT_REPORTING``
+     - Enable reporting cache events to the coordinator: the key
+       directory's store/access/delete stream (fleet-wide placement
+       tracking) and the L2 usage stream (quota tracking and eviction).
+   * - ``--coordinator-event-flush-interval``
+     - ``LMCACHE_COORDINATOR_EVENT_FLUSH_INTERVAL``
+     - Seconds between cache-event batch flushes (must be ``> 0``, default
+       ``1``).
 
 The server registers under its stable identity (``--instance-id`` / OTel
 ``service.instance.id``); if the flag is not passed, the server mints a
@@ -170,6 +175,9 @@ The coordinator's HTTP surface (base URL ``http://localhost:9300``) groups into:
   eviction.
 - **Cache control** -- the ``/cache`` group: cache operations dispatched to a
   named server (warm prefetch, pin/unpin, and delete, with more to come).
+- **CacheBlend fingerprint directory** -- the ``/blend`` group: the fleet-wide
+  fingerprint index blend-enabled MP servers publish to on STORE and query on
+  LOOKUP. Server-to-coordinator only; not usually called by hand.
 
 Each endpoint is documented below. Success is ``200`` unless noted, and
 ``{cache_salt}`` uses the ``_default`` sentinel for the empty salt. The wire
@@ -397,7 +405,7 @@ cycle):
         -H 'Content-Type: application/json' -d '{"default_limit_gb": 0}'
     # -> {"default_limit_gb": 0.0}
 
-When MP servers enable ``--coordinator-l2-event-reporting``, they stream L2
+When MP servers enable ``--coordinator-event-reporting``, they stream L2
 ``store``, ``lookup``, and ``delete`` events to the coordinator, which aggregates
 per-``cache_salt`` usage, enforces quotas, and selects LRU keys to evict. Each
 batch carries the server's ``instance_id`` and a monotonically increasing
@@ -896,9 +904,9 @@ of L2 keys pinned (chunks times the per-rank fan-out).
 
 .. note::
 
-   **Requires L2 event reporting.** The coordinator can only exclude keys from
+   **Requires event reporting.** The coordinator can only exclude keys from
    eviction for a salt it is tracking, which requires the MP servers started with
-   ``--coordinator-l2-event-reporting`` (see `Connecting MP servers`_).
+   ``--coordinator-event-reporting`` (see `Connecting MP servers`_).
 
 ``DELETE /cache/pins``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -981,3 +989,138 @@ sequence returns ``status`` ``"noop"``.
             "force": false
         }'
     # -> {"instance_id": "server-1", "requested": 12, "affected": 24, "skipped": 0, "status": "deleted"}
+
+CacheBlend fingerprint directory
+--------------------------------
+
+The ``/blend`` group is the fleet-wide fingerprint index behind CacheBlend
+cross-request reuse. Blend-enabled MP servers publish chunk fingerprints on
+STORE (``POST /blend/fingerprints``) and query them on LOOKUP
+(``POST /blend/match``); the index is chunked at
+``LMCACHE_MP_COORDINATOR_CHUNK_SIZE`` tokens and rolling-hash-matched at
+``LMCACHE_MP_COORDINATOR_BLEND_PROBE_STRIDE``. These endpoints are
+server-to-coordinator; they are not usually called by hand.
+
+The wire types (``StoreRangeModel``, ``BlendFingerprintRequest``,
+``BlendMatchRequest``, ``GlobalMatchModel`` and their responses) live in
+``lmcache/v1/mp_coordinator/schemas.py``.
+
+``POST /blend/fingerprints``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Register stored chunk fingerprints (idempotent).
+
+**Request body:**
+
+.. list-table::
+   :header-rows: 1
+   :widths: 22 14 64
+
+   * - Field
+     - Type
+     - Description
+   * - ``ranges``
+     - list
+     - Stored token ranges. Each entry carries ``model_scope`` (the reuse
+       scope, typically the model name), ``tokens`` (the raw stored token
+       ids), ``object_keys`` (the shared-L2 storage key per chunk, in order),
+       and ``old_st_base`` (the token position of the range's first token).
+       The directory chunks ``tokens`` at the coordinator's chunk size and
+       hashes each chunk; chunk ``i`` maps to ``object_keys[i]``.
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {"inserted": 3}
+
+``inserted`` reports how many fingerprints were newly registered (existing
+entries are left in place; re-publishing is safe).
+
+**HTTP status codes:**
+
+- ``200``: fingerprints processed.
+- ``422``: request body fails field-level validation.
+
+``DELETE /blend/fingerprints``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Evict fingerprints by shared-L2 storage key (idempotent). MP servers call this
+when the underlying L2 objects are dropped, so the directory does not keep
+handing out stale matches.
+
+**Request body:**
+
+.. list-table::
+   :header-rows: 1
+   :widths: 22 14 64
+
+   * - Field
+     - Type
+     - Description
+   * - ``object_keys``
+     - list[string]
+     - Storage keys whose fingerprint entries should be removed. Unknown keys
+       are ignored.
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {"removed": 2}
+
+``removed`` reports how many entries were actually evicted.
+
+**HTTP status codes:**
+
+- ``200``: keys processed.
+- ``422``: request body fails field-level validation.
+
+``POST /blend/match``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Match a request's token buffer against the directory and return the reusable
+chunks.
+
+**Request body:**
+
+.. list-table::
+   :header-rows: 1
+   :widths: 22 14 64
+
+   * - Field
+     - Type
+     - Description
+   * - ``model_scope``
+     - string
+     - Reuse scope to match within (typically the model name).
+   * - ``tokens_b64``
+     - string
+     - Request tokens packed as base64 little-endian ``uint32`` (see
+       ``encode_tokens`` / ``decode_tokens`` in ``schemas.py``). The
+       coordinator hashes them at
+       ``LMCACHE_MP_COORDINATOR_CHUNK_SIZE`` positions striding by
+       ``LMCACHE_MP_COORDINATOR_BLEND_PROBE_STRIDE``.
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {
+      "matches": [
+        {"object_key": "ab12...", "old_st": 0,    "cur_st": 512},
+        {"object_key": "cd34...", "old_st": 256,  "cur_st": 768}
+      ]
+    }
+
+Each entry names one reusable chunk: ``object_key`` is the shared-L2 key,
+``old_st`` is its token position in the stored sequence (re-RoPE source), and
+``cur_st`` is the position in the request (re-RoPE target). Matches are sorted
+ascending by ``cur_st``. An empty request or an unknown ``model_scope``
+returns ``{"matches": []}``.
+
+**HTTP status codes:**
+
+- ``200``: match completed (an empty match list is not an error).
+- ``422``: ``tokens_b64`` is not valid base64 or not a whole number of
+  ``uint32`` tokens.

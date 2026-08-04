@@ -49,8 +49,10 @@ __device__ inline size_t calculate_engine_global_offset(
     // Flash Infer HND: L tensors [NB, 2, NH, BS, HS]
     return engine_block_idx * shape_desc.kv_size * scalars_per_block +
            k_or_v * scalars_per_block;
-  } else if constexpr (format == EngineKVFormat::NL_X_NB_BS_HS) {
-    // MLA: L tensors [NB, BS, HS]
+  } else if constexpr (format == EngineKVFormat::NL_X_NB_BS_HS ||
+                       format == EngineKVFormat::NL_X_NB_BSV_BSS) {
+    // MLA: L tensors [NB, BS, HS]; blocked-scale shares the block base,
+    // only its within-block layout differs (handled in the transfer body).
     return engine_block_idx * scalars_per_block;
   } else if constexpr (format == EngineKVFormat::TWO_X_NL_X_NBBS_NH_HS) {
     // SGLang MHA (in-process): 2L tensors [NBBS, NH, HS]
@@ -71,6 +73,14 @@ __device__ inline size_t calculate_engine_global_offset(
     // Fused-K/V NHD: L tensors [NB, BS, NH, 2*HS]; same empty K/V axis as
     // NL_X_NB_NH_BS_TWO_HS (kv_size == 1, hs == 2 * head_size), tokens
     // before heads within a block.
+    return engine_block_idx * scalars_per_block;
+  } else if constexpr (format == EngineKVFormat::NL_X_NB_NH_BS_CS) {
+    // Content-size HND: L tensors [NB, NH, BS, CS]; same empty K/V axis as
+    // NL_X_NB_NH_BS_TWO_HS (kv_size == 1, hs == content_size).
+    return engine_block_idx * scalars_per_block;
+  } else if constexpr (format == EngineKVFormat::NL_X_NB_BS_NH_CS) {
+    // Content-size NHD: L tensors [NB, BS, NH, CS]; same empty K/V axis as
+    // NL_X_NB_NH_BS_CS, tokens before heads within a block.
     return engine_block_idx * scalars_per_block;
   } else if constexpr (format == EngineKVFormat::NB_NL_TWO_NH_BS_HS) {
     // TRT-LLM cross-layer HND: single tensor [NB, NL, 2, NH, BS, HS]
@@ -95,7 +105,8 @@ __device__ inline size_t calculate_engine_local_offset(
   if constexpr (format == EngineKVFormat::NB_NL_TWO_NH_BS_HS ||
                 format == EngineKVFormat::NL_X_TWO_NB_NH_BS_HS ||
                 format == EngineKVFormat::NL_X_NB_TWO_NH_BS_HS ||
-                format == EngineKVFormat::NL_X_NB_NH_BS_TWO_HS) {
+                format == EngineKVFormat::NL_X_NB_NH_BS_TWO_HS ||
+                format == EngineKVFormat::NL_X_NB_NH_BS_CS) {
     // HND: [NH, BS, HS] — heads are outermost within a block
     size_t scalars_per_head_block =
         shape_desc.bs * scalars_per_head;  // BS * HS
@@ -214,6 +225,29 @@ __device__ void multi_layer_block_transfer_single_block(
     paged_buffer_layer_ptr = (ScalarType*)paged_buffer_ptrs[layer_idx];
   }
 
+  if constexpr (format == EngineKVFormat::NL_X_NB_BSV_BSS) {
+    // Blocked page [BSxvals][BSxscales] vs token-major chunk row: two
+    // copies per token (host pins <=4B units, so scale is whole units).
+    const size_t spt = shape_desc.scalars_per_token<ScalarType>();
+    const size_t scale_units = 4 / sizeof(ScalarType);
+    const size_t val_units = spt - scale_units;
+    for (int t = 0; t < shape_desc.bs; ++t) {
+      ScalarType* eng_vals =
+          paged_buffer_layer_ptr + engine_global_offset + t * val_units;
+      ScalarType* eng_scale = paged_buffer_layer_ptr + engine_global_offset +
+                              shape_desc.bs * val_units + t * scale_units;
+      ScalarType* lmc_row = lmcache_object + lmcache_global_offset + t * spt;
+      if constexpr (lmcache_to_engine) {
+        warp_copy<ScalarType>(eng_vals, lmc_row, val_units);
+        warp_copy<ScalarType>(eng_scale, lmc_row + val_units, scale_units);
+      } else {
+        warp_copy<ScalarType>(lmc_row, eng_vals, val_units);
+        warp_copy<ScalarType>(lmc_row + val_units, eng_scale, scale_units);
+      }
+    }
+    return;
+  }
+
   for (int token_offset = 0; token_offset < shape_desc.bs; ++token_offset) {
     const size_t engine_local_offset =
         calculate_engine_local_offset<ScalarType, format>(token_offset,
@@ -309,6 +343,15 @@ __global__ void multi_layer_block_transfer_kernel(
     case EngineKVFormat::NL_X_NB_BS_NH_TWO_HS:                          \
       LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_BS_NH_TWO_HS);   \
       break;                                                            \
+    case EngineKVFormat::NL_X_NB_NH_BS_CS:                              \
+      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_NH_BS_CS);       \
+      break;                                                            \
+    case EngineKVFormat::NL_X_NB_BS_NH_CS:                              \
+      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_BS_NH_CS);       \
+      break;                                                            \
+    case EngineKVFormat::NL_X_NB_BSV_BSS:                               \
+      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_BSV_BSS);        \
+      break;                                                            \
     default:                                                            \
       TORCH_CHECK(false, "Unsupported EngineKVFormat: ",                \
                   static_cast<int>(engine_kv_format));                  \
@@ -395,6 +438,16 @@ void multi_layer_block_kv_transfer(
   int head_bytes = shape_desc.hs * shape_desc.element_size;
   TORCH_CHECK(head_bytes % sizeof(uint16_t) == 0, "head_size * element_size (",
               head_bytes, ") must be divisible by 2 for vectorized access");
+
+  if (engine_kv_format == EngineKVFormat::NL_X_NB_BSV_BSS) {
+    // Blocked-scale indexer cache: the per-token fp32 scale must be a whole
+    // number of transfer units, so pin 4-byte units regardless of row width.
+    TORCH_CHECK(head_bytes % sizeof(uint32_t) == 0,
+                "NL_X_NB_BSV_BSS row bytes (", head_bytes,
+                ") must be divisible by 4");
+    LAUNCH_TEMPLATED(uint32_t);
+    return;
+  }
 
   if (head_bytes % sizeof(uint4) == 0) {
     LAUNCH_TEMPLATED(uint4);  // 16 bytes per copy

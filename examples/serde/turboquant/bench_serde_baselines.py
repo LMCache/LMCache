@@ -14,7 +14,7 @@ import time
 import torch
 
 # First Party
-from lmcache.v1.distributed.api import MemoryLayoutDesc
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.serde.fp8 import (
     Fp8QuantizationDeserializer,
     Fp8QuantizationSerializer,
@@ -101,12 +101,14 @@ def benchmark_one(
     src = _FakeMemoryObj(original)
     enc = _FakeMemoryObj(compressed)
     dec = _FakeMemoryObj(recovered)
+    # fp8 / TurboQuant ignore the key; pass an empty ObjectKey.
+    key = ObjectKey(chunk_hash=b"", model_name="", kv_rank=0)
 
     for _ in range(warmup):
-        written = serializer.serialize(src, enc)
+        written = serializer.serialize(src, enc, key)
         if written != n_bytes:
             raise RuntimeError(f"written={written}, expected={n_bytes}")
-        deserializer.deserialize(enc, dec)
+        deserializer.deserialize(enc, dec, key)
     sync()
 
     encode_times = []
@@ -115,14 +117,14 @@ def benchmark_one(
     for _ in range(iters):
         sync()
         t0 = time.perf_counter()
-        written = serializer.serialize(src, enc)
+        written = serializer.serialize(src, enc, key)
         sync()
         t1 = time.perf_counter()
 
         if written != n_bytes:
             raise RuntimeError(f"written={written}, expected={n_bytes}")
 
-        deserializer.deserialize(enc, dec)
+        deserializer.deserialize(enc, dec, key)
         sync()
         t2 = time.perf_counter()
 

@@ -10,11 +10,11 @@ The concrete implementations live in their respective sub-packages:
 
 :func:`create_cache_context` keeps the dispatch out of the call site
 in :mod:`lmcache.v1.multiprocess.server`. Selection is data-driven
-and delegated to the :class:`~lmcache.v1.platform.base_device_spec.
+and delegated to the :class:`~lmcache.v1.platform.base.device_spec.
 DeviceSpec` registry maintained by :mod:`lmcache.v1.platform`: each
 backend sub-package ships a ``DeviceSpec`` subclass whose
 ``create_cache_context`` hook lazy-imports and instantiates the
-matching :class:`~lmcache.v1.platform.base_cache_context.
+matching :class:`~lmcache.v1.platform.base.cache_context.
 BaseCacheContext`. Adding a new accelerator therefore requires
 *zero* edits to this module -- just implement
 ``DeviceSpec.create_cache_context`` in the sub-package's
@@ -34,7 +34,7 @@ from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import KVCache
 from lmcache.v1.platform import get_device_spec
-from lmcache.v1.platform.base_cache_context import BaseCacheContext
+from lmcache.v1.platform.base.cache_context import BaseCacheContext
 
 if TYPE_CHECKING:
     # First Party
@@ -65,7 +65,7 @@ def create_cache_context(
     layout_hints: LayoutHints | None = None,
     engine_group_infos: "Sequence[EngineGroupInfo]" = (),
     engine_type: EngineType = EngineType.VLLM,
-    separate_object_groups: bool = True,
+    separate_object_groups: bool = False,
     full_sw_kv: bool = False,
 ) -> BaseCacheContext:
     """Create the appropriate cache context for *kv_caches*.
@@ -88,9 +88,9 @@ def create_cache_context(
             Forwarded verbatim to the concrete context constructor.
         engine_group_infos: Engine-neutral KV cache group metadata.
         engine_type: Which serving engine produced the caches.
-        separate_object_groups: When True (default), split kernel groups into
-            one object group per sliding-window size; when False, a single
-            full-attention object group.
+        separate_object_groups: When True, split kernel groups into
+            one object group per sliding-window size; when False (default),
+            a single full-attention object group.
         full_sw_kv: When True, sliding-window groups store/transfer full
             per-chunk KV (no sub-chunk window cutting) so chunks stay valid for
             reuse at any position; see

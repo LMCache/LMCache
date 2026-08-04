@@ -30,7 +30,7 @@ All of them live behind a single msgspec ext code 1 and a single `KVCache = list
 
 ## What the base class owns
 
-`DeviceIPCWrapper` (in `platform/base_ipc_wrapper.py`) provides the parts that every
+`DeviceIPCWrapper` (in `platform/base/ipc_wrapper.py`) provides the parts that every
 transport shares:
 
 - **Interface fields** — `dtype`, `shape`, `stride`, `storage_offset`, `device_uuid`. Subclasses populate these in `__init__`; the base uses them for equality and the receiving side uses them to rebuild the logical view.
@@ -52,7 +52,7 @@ transport shares:
 | `CudaIPCWrapper` | `cuda` | `UntypedStorage._share_cuda_()` | `_new_shared_cuda` + `set_()` |
 | `RawCudaIPCWrapper` | `cuda` | `cudaIpcGetMemHandle` (raw ptr) | `cudaIpcOpenMemHandle` → CuPy → DLPack |
 | `CpuShmTensorWrapper` | `cpu` | POSIX `shm_open` | `mmap` same segment |
-| `MusaIPCWrapper` | `musa` | TorchMUSA memory IPC handle | `ipc_open_mem_handle` + DLPack / tensor view |
+| `MusaIPCWrapper` | `musa` | TorchMUSA IPC API | `torch.musa.ipc.export_tensor` + `open_tensor` |
 
 ## Platform registration
 
@@ -82,6 +82,7 @@ needed:
 
 ## Backward compatibility
 
-- Wire format is unchanged. Still ext code 1, still `pickle`-over-`Ext`. Previously serialized payloads round-trip.
+- The wire envelope remains ext code 1 and `pickle`-over-`Ext`. MUSA sender and receiver processes must use compatible `MusaIPCWrapper` versions because the payload carries a TorchMUSA tensor handle.
+- `MusaIPCWrapper` keeps the receiver-side `open_tensor()` owner alive locally and excludes that owner from serialized state.
 - `CudaIPCWrapper` / `RawCudaIPCWrapper` keep their names, fields, and behavior; only their base class changed. Existing callers and the TRT-LLM adapter are unaffected.
 - The single `isinstance`-based equality check now uses `type(self) is type(other)`, which is stricter and correct.

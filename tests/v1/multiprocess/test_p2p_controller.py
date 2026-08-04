@@ -162,11 +162,11 @@ def test_lookup_and_lock_submits_skip_l2_and_returns_task_id():
     task_id = controller.p2p_lookup_and_lock(keys, layout_desc)
 
     assert task_id == 0
-    args, kwargs = ctx.storage_manager.submit_prefetch_task.call_args
-    assert args[0] == keys
-    assert args[1] is layout_desc
+    (spec,), kwargs = ctx.storage_manager.submit_prefetch_task.call_args
+    assert spec.keys == keys
+    assert spec.group_layout_descs[0] is layout_desc
     assert kwargs["skip_l2"] is True
-    assert kwargs["policy"] is TrimPolicy.SPARSE
+    assert spec.policy is TrimPolicy.SPARSE
     # A second call gets a distinct id.
     assert controller.p2p_lookup_and_lock(keys, layout_desc) == 1
 

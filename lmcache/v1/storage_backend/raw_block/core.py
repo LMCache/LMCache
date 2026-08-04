@@ -234,8 +234,10 @@ class RawBlockCore:
 
         if not self.device_path:
             raise ValueError("RawBlockCore requires a non-empty device_path")
-        if self.block_align <= 0:
-            raise ValueError("block_align must be > 0")
+        if self.block_align <= 0 or (self.block_align & (self.block_align - 1)) != 0:
+            raise ValueError(
+                f"block_align must be a power of 2, got {self.block_align}"
+            )
         if self.header_bytes < 24:
             raise ValueError("header_bytes must be >= 24")
         if self.header_bytes % self.block_align != 0:
@@ -1708,6 +1710,12 @@ class RawBlockCore:
         checkpoint_device_path = data.get("device_path")
         if checkpoint_device_path and checkpoint_device_path != self.device_path:
             logger.warning("Device metadata device_path mismatch; ignoring metadata")
+            return False
+        if int(data.get("block_align", self.block_align)) != self.block_align:
+            logger.warning("Device metadata block_align mismatch; ignoring metadata")
+            return False
+        if int(data.get("header_bytes", self.header_bytes)) != self.header_bytes:
+            logger.warning("Device metadata header_bytes mismatch; ignoring metadata")
             return False
         if int(data.get("slot_bytes", self.slot_bytes)) != self.slot_bytes:
             logger.warning("Device metadata slot_bytes mismatch; ignoring metadata")

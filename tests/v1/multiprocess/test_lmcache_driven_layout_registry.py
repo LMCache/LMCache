@@ -28,6 +28,7 @@ class _FakeKVLayerGroupsManager:
 class _FakeGPUContext:
     """Small stand-in for GPUCacheContext used by registration tests."""
 
+    device: torch.device = torch.device("cpu")
     num_layers: int = 2
     kv_layer_groups_manager: _FakeKVLayerGroupsManager = _FakeKVLayerGroupsManager()
 
@@ -161,7 +162,28 @@ def test_registry_attn_desc_roundtrip() -> None:
         "m", 2, _layout(), attn_desc=AttnWindowDesc(num_chunks_in_sw=[-1, 2])
     )
 
-    assert registry.find_attn_desc("m", 2).num_chunks_in_sw == [-1, 2]
+    desc = registry.find_attn_desc("m", 2)
+    assert desc.num_chunks_in_sw == [-1, 2]
+    assert desc.world_size == 2
+
+
+def test_registry_derives_group_layout_descs_when_not_given() -> None:
+    """A registration without group_layout_descs (engine-driven, blend,
+    qstore) still yields one shared-layout entry per object group, so
+    lookups never hit the missing-group-layouts error path."""
+    # First Party
+    from lmcache.v1.distributed.api import AttnWindowDesc
+    from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
+
+    registry = LayoutDescRegistry()
+    layout = _layout()
+    registry.register("m", 1, layout)
+    assert registry.find_group_layout_descs("m", 1) == {0: layout}
+
+    registry.register(
+        "m2", 1, layout, attn_desc=AttnWindowDesc(num_chunks_in_sw=[-1, 2])
+    )
+    assert registry.find_group_layout_descs("m2", 1) == {0: layout, 1: layout}
 
 
 def test_registry_attn_desc_raises_when_unregistered() -> None:

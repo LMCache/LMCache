@@ -36,8 +36,12 @@ use NVMe passthrough via the io_uring command interface for direct device access
 - Requires `io_engine="io_uring"` to be set.
 - Supports `max_data_transfer_size` parameter to split large transfers into
   smaller chunks that fit within device limits.
+- Requires `alignment` to be a multiple of the NVMe namespace LBA size. An
+  incompatible value is rejected when the device opens.
 - When `use_uring_cmd=True`, `use_odirect` is ignored for NVMe namespace
   character devices.
+- SQE build failures are returned by `wait_iouring` after the worker releases
+  the request's global and per-batch in-flight accounting.
 
 ## MP Mode Integration
 
@@ -248,6 +252,11 @@ The crate provides safe Rust bindings to the Linux io_uring API and is included 
 [dependencies]
 io-uring = "0.7"
 ```
+- `alignment` and `block_align` must be powers of two, such as 4096.
+- O_DIRECT requires aligned offsets and I/O lengths. `batched_write` rejects
+  requests whose offset or `total_len` is not a multiple of the configured
+  alignment; misaligned write buffers are copied through an aligned bounce
+  buffer.
 
 ## Build
 
@@ -328,6 +337,8 @@ Notes:
   file used only by LMCache.
 - For `use_uring_cmd=true`, `device_path` must use the NVMe character
   device node (e.g., `/dev/ng0n1`) instead of the block device node.
+- `block_align` must be a power of two. `slot_bytes`, `header_bytes`, and
+  `meta_total_bytes` must be multiples of `block_align`.
 - With `use_odirect=true`, LMCache MP L1 alignment must be at least
   `block_align`.
 - Restart recovery uses the metadata checkpoint region on the same device.

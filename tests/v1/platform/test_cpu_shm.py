@@ -49,6 +49,32 @@ def test_migrate_to_shm_and_wrap_zero_copy_view():
         shm_unlink(wrapper.shm_name)
 
 
+def test_migrate_normalizes_layout_in_place_on_caller_tensor():
+    """Layout normalization must not detach migration from the caller's tensor.
+
+    ``attempt_permute_to_contiguous_view`` returns a *new view* object; the
+    migration must still re-point the caller's tensor (its storage, and its
+    shape/stride to the stride-truthful layout) and key the unlink finalizer
+    on it. Regression for the premature-unlink bug where the finalizer was
+    attached to the temporary view and the segment vanished on return.
+    """
+    # Torch-contiguous, but the size-1 dims hide the true inner extent:
+    # the stride-truthful layout is (8, 32, 1, 1).
+    src = torch.zeros(8 * 32, dtype=torch.float32).as_strided(
+        (8, 1, 1, 32), (32, 1, 1, 1)
+    )
+    wrapper = migrate_to_shm_and_wrap(src)
+    try:
+        assert tuple(src.shape) == (8, 32, 1, 1)
+        assert wrapper.shape == (8, 32, 1, 1)
+        # Writes via the caller's tensor land in the SHM segment.
+        src.add_(3.0)
+        view = wrapper.to_tensor()
+        assert torch.equal(view, src)
+    finally:
+        shm_unlink(wrapper.shm_name)
+
+
 def test_migrate_handles_empty_tensor():
     """Empty tensors must not call ``mmap`` (length 0 is EINVAL).
 
@@ -210,10 +236,10 @@ def test_wrap_kv_caches_unlinks_partial_batch_on_failure(monkeypatch):
     the failed batch.
     """
     # First Party
-    from lmcache.integration.vllm import vllm_multi_process_adapter as adapter
+    from lmcache.v1.platform import kv_wrap
     from lmcache.v1.platform.cpu.shm import shm_map_readwrite
 
-    real_wrap = adapter.wrap_one_kv_cache
+    real_wrap = kv_wrap.wrap_one_kv_cache
     state = {"n": 0, "first_name": None}
 
     def flaky_wrap(tensor):
@@ -224,12 +250,12 @@ def test_wrap_kv_caches_unlinks_partial_batch_on_failure(monkeypatch):
         state["first_name"] = w.shm_name
         return w
 
-    monkeypatch.setattr(adapter, "wrap_one_kv_cache", flaky_wrap)
+    monkeypatch.setattr(kv_wrap, "wrap_one_kv_cache", flaky_wrap)
 
     t1 = torch.zeros((2, 2), dtype=torch.float32)
     t2 = torch.zeros((2, 2), dtype=torch.float32)
     with pytest.raises(RuntimeError, match="simulated migration failure"):
-        adapter.wrap_kv_caches({"a": t1, "b": t2})
+        kv_wrap.wrap_kv_caches({"a": t1, "b": t2})
 
     # The first iteration's SHM segment must no longer be openable.
     nbytes = t1.numel() * t1.element_size()
