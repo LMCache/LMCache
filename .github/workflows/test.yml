@@ -113,6 +113,7 @@ jobs:
       - name: "Run non-CUDA unit tests"
         run: |
           pytest --ignore=tests/disagg \
+            -m "not cuda and not xpu and not musa" \
             --ignore=tests/v1/multiprocess/ \
             --ignore=tests/v1/distributed/ \
             --ignore=tests/v1/mp_observability/ \

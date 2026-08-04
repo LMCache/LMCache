@@ -29,6 +29,12 @@ import torch
 from lmcache import torch_device_type
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager  # noqa: E402
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo  # noqa: E402
+
+# Skip this module before importing CUDA cache context on environments
+# without CuPy support.
+pytest.importorskip("cupy", reason="GPU cache context tests require cupy")
+
+# First Party
 from lmcache.v1.platform.cuda.cache_context import (  # noqa: E402
     GPUCacheContext,
     _TempGPUBuffer,
