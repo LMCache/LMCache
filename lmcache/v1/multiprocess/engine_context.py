@@ -2,7 +2,7 @@
 """Shared context and layout descriptor registry for engine modules."""
 
 # Standard
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TypedDict
 import threading
 
@@ -45,6 +45,8 @@ class _LayoutDescEntry:
     attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC
     """Cross-chunk attention windows of all object groups, in object-group
     order. Defaults to a single full-attention group."""
+    group_layout_descs: dict[int, MemoryLayoutDesc] | None = None
+    """Per-group layout descriptors, or ``None`` if all share ``layout_desc``."""
 
 
 class LayoutDescRegistry:
@@ -68,6 +70,7 @@ class LayoutDescRegistry:
         world_size: int,
         layout_desc: MemoryLayoutDesc,
         attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC,
+        group_layout_descs: dict[int, MemoryLayoutDesc] | None = None,
     ) -> None:
         """Register a layout descriptor for a (model_name, world_size) pair.
 
@@ -80,8 +83,17 @@ class LayoutDescRegistry:
             layout_desc: The memory layout descriptor.
             attn_desc: Cross-chunk attention windows of all object groups, in
                 object-group order. Defaults to a single full-attention group.
+            group_layout_descs: Maps object_group_id to that group's layout
+                (each group is a separate keyed allocation); ``None`` derives
+                one entry per object group in ``attn_desc``, all sharing
+                ``layout_desc``.
         """
         key = (model_name, world_size)
+        attn_desc = replace(attn_desc, world_size=world_size)
+        if group_layout_descs is None:
+            group_layout_descs = {
+                gid: layout_desc for gid in range(attn_desc.num_object_groups)
+            }
         with self._lock:
             entry = self._registry.get(key)
             if entry is None:
@@ -89,11 +101,13 @@ class LayoutDescRegistry:
                     layout_desc=layout_desc,
                     ref_count=1,
                     attn_desc=attn_desc,
+                    group_layout_descs=group_layout_descs,
                 )
                 return
 
             entry.layout_desc = layout_desc
             entry.attn_desc = attn_desc
+            entry.group_layout_descs = group_layout_descs
             entry.ref_count += 1
 
     def unregister(self, model_name: str, world_size: int) -> None:
@@ -134,6 +148,16 @@ class LayoutDescRegistry:
                 return None
             return entry.layout_desc
 
+    def find_group_layout_descs(
+        self, model_name: str, world_size: int
+    ) -> dict[int, MemoryLayoutDesc] | None:
+        """Look up per-object-group layout descriptors, or ``None``."""
+        with self._lock:
+            entry = self._registry.get((model_name, world_size))
+            if entry is None:
+                return None
+            return entry.group_layout_descs
+
     def find_attn_desc(self, model_name: str, world_size: int) -> AttnWindowDesc:
         """Look up the attention-window descriptor for a pair.
 
@@ -171,7 +195,8 @@ class MPCacheServerContext:
         chunk_size: Chunk size for KV cache operations.
         hash_algorithm: Hash algorithm for token hashing.
         separate_object_groups: Whether to split kernel groups into one object
-            group per sliding-window size at KV-cache registration. Default True.
+            group per sliding-window size at KV-cache registration. Default
+            False.
     """
 
     def __init__(
@@ -179,7 +204,7 @@ class MPCacheServerContext:
         storage_manager_config: StorageManagerConfig,
         chunk_size: int = 256,
         hash_algorithm: str = "blake3",
-        separate_object_groups: bool = True,
+        separate_object_groups: bool = False,
         full_sw_kv: bool = False,
     ) -> None:
         self._chunk_size = chunk_size
