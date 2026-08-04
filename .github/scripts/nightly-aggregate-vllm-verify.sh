@@ -125,13 +125,17 @@ fi
 # Every platform is pinned independently: a green ubuntu leg still
 # publishes its version even when macOS is broken, and vice versa.
 for os in $ALL_OSS; do
+    # Record the observed version on failure rows too: the CSV is the
+    # append-only history used to answer "which builds broke before", and
+    # dropping it there left a useless "unknown". Only the latest_*.txt
+    # pointer is gated on status, and the pin script still falls back to
+    # "unknown" when no leg ever reported a version.
+    pin_version="${OS_VERSION[$os]:-}"
     if [ "${OS_STATUS[$os]}" = "ok" ]; then
         pin_status=tested
-        pin_version="${OS_VERSION[$os]}"
         pin_reason=""
     else
         pin_status=failed
-        pin_version=""
         pin_reason="${OS_REASON[$os]}"
     fi
 
