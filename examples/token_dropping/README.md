@@ -23,6 +23,19 @@ smaller model and
 | --- | --- | --- |
 | [random_token_dropping.ipynb](./random_token_dropping.ipynb) | Drops a random subset of past tokens. Uses the KV cache only. | No |
 | [snapkv_token_dropping.ipynb](./snapkv_token_dropping.ipynb) | SnapKV: keeps the first and last window, as well as the tokens the recent-window queries attend to most. Needs each request's query tensor to score importance. | Yes |
+| [rkv_token_dropping.ipynb](./rkv_token_dropping.ipynb) | R-KV: SnapKV's importance term minus a **redundancy** term, so a token is kept only if it is both attended-to and says something new. Three optimized variants live in [rkv_variants/](./rkv_variants). | Yes |
+
+R-KV's redundancy term compares all pairs of keys, which is $O(n^2)$ in both
+time and memory. [rkv_token_dropping.ipynb](./rkv_token_dropping.ipynb)
+implements it the way the paper describes it; the three notebooks in
+[rkv_variants/](./rkv_variants) are standalone alternatives that make it
+cheaper:
+
+| Notebook | Redundancy term | Exact? | VRAM |
+| --- | --- | --- | --- |
+| [rkv_variant_cpu_exact.ipynb](./rkv_variants/rkv_variant_cpu_exact.ipynb) | Rewritten as one inner product, so the $n \times n$ matrix never exists. | Yes | None |
+| [rkv_variant_gpu_exact.ipynb](./rkv_variants/rkv_variant_gpu_exact.ipynb) | The same rewrite, tiled over rows on the GPU. Fastest of the four. | Yes | ~1.55 GiB |
+| [rkv_variant_buffered_cpu.ipynb](./rkv_variants/rkv_variant_buffered_cpu.ipynb) | Keys compared only inside a chunk, making the matrix block-diagonal. | No, ~96% token agreement | None |
 
 [snapkv_colab.ipynb](./snapkv_colab.ipynb) is a demonstration done in Google
 Colab Notebook, which can also be accessed here:
