@@ -38,6 +38,22 @@ def _wait_until_up(base_url: str, timeout: float = 5.0) -> None:
     raise RuntimeError("coordinator did not come up")
 
 
+def _wait_until_instances_empty(base_url: str, timeout: float = 3.0) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            instances = requests.get(f"{base_url}/instances", timeout=0.5).json()[
+                "instances"
+            ]
+            if not instances:
+                return True
+        except requests.RequestException:
+            # The server is shutting down test requests quickly; keep polling.
+            pass
+        time.sleep(0.1)
+    return False
+
+
 def _serve(config: MPCoordinatorConfig):
     """Start the coordinator in a background thread; return (server, thread)."""
     server = uvicorn.Server(
@@ -93,12 +109,7 @@ def test_health_loop_evicts_stale_instance():
         assert requests.get(f"{base}/instances", timeout=2).json()["instances"]
 
         # Never heartbeat -> the health loop evicts it within a couple seconds.
-        deadline = time.time() + 3.0
-        while time.time() < deadline:
-            if not requests.get(f"{base}/instances", timeout=2).json()["instances"]:
-                break
-            time.sleep(0.1)
-        assert requests.get(f"{base}/instances", timeout=2).json()["instances"] == []
+        assert _wait_until_instances_empty(base, timeout=3.0)
     finally:
         server.should_exit = True
         thread.join(timeout=5.0)

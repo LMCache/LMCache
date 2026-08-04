@@ -22,6 +22,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache import torch_dev
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
@@ -148,8 +149,8 @@ def create_interleaved_lookup_keys(
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="CUDA is required for tensor parallel tests",
+    not torch_dev.is_available(),
+    reason="Requires torch_device_type",
 )
 class TestStorageManagerTPLookup:
     """
@@ -183,7 +184,7 @@ class TestStorageManagerTPLookup:
         # Create interleaved lookup keys for scheduler-style lookup
         lookup_keys = create_interleaved_lookup_keys(num_chunks, world_size)
         handle = storage_manager.submit_prefetch_task(
-            PrefetchRequestSpec(lookup_keys, test_layout)
+            PrefetchRequestSpec(lookup_keys, {0: test_layout})
         )
         found_count = storage_manager.query_prefetch_status(handle).count_leading_ones()
 
@@ -213,7 +214,7 @@ class TestStorageManagerTPLookup:
         # Create interleaved lookup keys for scheduler-style lookup
         lookup_keys = create_interleaved_lookup_keys(num_chunks, world_size)
         handle = storage_manager.submit_prefetch_task(
-            PrefetchRequestSpec(lookup_keys, test_layout)
+            PrefetchRequestSpec(lookup_keys, {0: test_layout})
         )
         found_count = storage_manager.query_prefetch_status(handle).count_leading_ones()
 
@@ -247,7 +248,7 @@ class TestStorageManagerTPLookup:
         # Create interleaved lookup keys for scheduler-style lookup
         lookup_keys = create_interleaved_lookup_keys(num_chunks, world_size)
         handle = storage_manager.submit_prefetch_task(
-            PrefetchRequestSpec(lookup_keys, test_layout)
+            PrefetchRequestSpec(lookup_keys, {0: test_layout})
         )
         found_count = storage_manager.query_prefetch_status(handle).count_leading_ones()
 
@@ -283,7 +284,7 @@ class TestStorageManagerTPLookup:
         # Request 5 chunks with scheduler-style interleaved lookup
         lookup_keys = create_interleaved_lookup_keys(num_requested_chunks, world_size)
         handle = storage_manager.submit_prefetch_task(
-            PrefetchRequestSpec(lookup_keys, test_layout)
+            PrefetchRequestSpec(lookup_keys, {0: test_layout})
         )
         found_count = storage_manager.query_prefetch_status(handle).count_leading_ones()
 
@@ -328,7 +329,7 @@ class TestStorageManagerTPLookup:
         # Request 5 chunks with scheduler-style interleaved lookup
         lookup_keys = create_interleaved_lookup_keys(5, world_size)
         handle = storage_manager.submit_prefetch_task(
-            PrefetchRequestSpec(lookup_keys, test_layout)
+            PrefetchRequestSpec(lookup_keys, {0: test_layout})
         )
         found_count = storage_manager.query_prefetch_status(handle).count_leading_ones()
 
@@ -370,7 +371,7 @@ class TestStorageManagerTPLookup:
         # Scheduler-style interleaved lookup
         lookup_keys = create_interleaved_lookup_keys(num_chunks, world_size)
         handle = storage_manager.submit_prefetch_task(
-            PrefetchRequestSpec(lookup_keys, test_layout)
+            PrefetchRequestSpec(lookup_keys, {0: test_layout})
         )
         found_count = storage_manager.query_prefetch_status(handle).count_leading_ones()
 
@@ -404,7 +405,7 @@ class TestStorageManagerTPLookup:
         # Scheduler-style interleaved lookup
         lookup_keys = create_interleaved_lookup_keys(num_chunks, world_size)
         handle = storage_manager.submit_prefetch_task(
-            PrefetchRequestSpec(lookup_keys, test_layout)
+            PrefetchRequestSpec(lookup_keys, {0: test_layout})
         )
         found_count = storage_manager.query_prefetch_status(handle).count_leading_ones()
 
@@ -425,8 +426,8 @@ class TestStorageManagerTPLookup:
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="CUDA is required for tensor parallel tests",
+    not torch_dev.is_available(),
+    reason="Requires torch_device_type",
 )
 class TestStorageManagerTPStoreRetrieve:
     """Tests for store and retrieve operations with tensor parallel."""
@@ -453,7 +454,7 @@ class TestStorageManagerTPStoreRetrieve:
 
         # Prefetch to secure both entries
         handle = storage_manager.submit_prefetch_task(
-            PrefetchRequestSpec([key_w0, key_w1], test_layout)
+            PrefetchRequestSpec([key_w0, key_w1], {0: test_layout})
         )
         _ = storage_manager.query_prefetch_status(handle)
 
@@ -485,7 +486,7 @@ class TestStorageManagerTPStoreRetrieve:
 
         # Prefetch to secure all entries
         handle = storage_manager.submit_prefetch_task(
-            PrefetchRequestSpec(all_keys, test_layout)
+            PrefetchRequestSpec(all_keys, {0: test_layout})
         )
         _ = storage_manager.query_prefetch_status(handle)
 
@@ -512,8 +513,8 @@ class TestStorageManagerTPStoreRetrieve:
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="CUDA is required for tensor parallel tests",
+    not torch_dev.is_available(),
+    reason="Requires torch_device_type",
 )
 class TestTPEdgeCases:
     """Edge case tests for tensor parallel support."""
@@ -536,7 +537,7 @@ class TestTPEdgeCases:
 
         # Lookup should find all chunks
         handle = storage_manager.submit_prefetch_task(
-            PrefetchRequestSpec(storage_keys, test_layout)
+            PrefetchRequestSpec(storage_keys, {0: test_layout})
         )
         found_count = storage_manager.query_prefetch_status(handle).count_leading_ones()
         assert found_count == num_chunks
@@ -581,7 +582,7 @@ class TestTPEdgeCases:
 
         # All keys should be found
         handle = storage_manager.submit_prefetch_task(
-            PrefetchRequestSpec(lookup_keys, test_layout)
+            PrefetchRequestSpec(lookup_keys, {0: test_layout})
         )
         found_count = storage_manager.query_prefetch_status(handle).count_leading_ones()
         assert found_count == num_chunks * world_size
@@ -621,7 +622,7 @@ class TestTPEdgeCases:
 
         # Lookup all keys
         handle = storage_manager.submit_prefetch_task(
-            PrefetchRequestSpec(storage_keys, test_layout)
+            PrefetchRequestSpec(storage_keys, {0: test_layout})
         )
         found_count = storage_manager.query_prefetch_status(handle).count_leading_ones()
         assert found_count == world_size
@@ -642,8 +643,8 @@ class TestTPEdgeCases:
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="CUDA is required for tensor parallel tests",
+    not torch_dev.is_available(),
+    reason="Requires torch_device_type",
 )
 class TestTPIntegration:
     """Integration tests simulating real TP workflows."""
@@ -687,7 +688,7 @@ class TestTPIntegration:
                     )
                 )
         handle = storage_manager.submit_prefetch_task(
-            PrefetchRequestSpec(lookup_keys, test_layout)
+            PrefetchRequestSpec(lookup_keys, {0: test_layout})
         )
         found_count = storage_manager.query_prefetch_status(handle).count_leading_ones()
 
@@ -757,7 +758,7 @@ class TestTPIntegration:
                     )
                 )
         handle = storage_manager.submit_prefetch_task(
-            PrefetchRequestSpec(lookup_keys, test_layout)
+            PrefetchRequestSpec(lookup_keys, {0: test_layout})
         )
         found_count = storage_manager.query_prefetch_status(handle).count_leading_ones()
         assert found_count == num_chunks * world_size
