@@ -8,6 +8,7 @@ import torch
 # First Party
 from lmcache.integration.vllm.utils import (
     apply_mm_hashes_to_token_ids,
+    hex_hash_to_int,
     hex_hash_to_int16,
 )
 
@@ -78,7 +79,7 @@ def test_apply_mm_hashes_to_token_ids_handles_non_hex_mm_hash() -> None:
     mm_positions = [DummyPlaceholderRange(offset=2, length=4)]
 
     out = apply_mm_hashes_to_token_ids(token_ids.clone(), mm_hashes, mm_positions)
-    expected_val = hex_hash_to_int16(mm_hashes[0])
+    expected_val = hex_hash_to_int(mm_hashes[0])
     assert out[2:6].tolist() == [expected_val] * 4
 
 
@@ -102,11 +103,44 @@ def test_apply_mm_hashes_to_token_ids_multiple_placeholders_and_length_mismatch(
     ]
 
     out = apply_mm_hashes_to_token_ids(token_ids.clone(), mm_hashes, mm_positions)
-    v0 = hex_hash_to_int16(mm_hashes[0])
-    v1 = hex_hash_to_int16(mm_hashes[1])
+    v0 = hex_hash_to_int(mm_hashes[0])
+    v1 = hex_hash_to_int(mm_hashes[1])
 
     assert out[0:3].tolist() == [v0] * 3
     assert out[5:9].tolist() == [v1] * 4
     # Other regions remain unchanged.
     assert out[3:5].tolist() == [0, 0]
     assert out[9:12].tolist() == [0, 0, 0]
+
+
+def test_apply_mm_hashes_keeps_identifiers_that_share_their_low_16_bits_apart() -> None:
+    # Two distinct multimodal identifiers whose hex digests agree on the last
+    # four hex digits. Truncating to 16 bits maps them onto the same filler
+    # token, so two images sharing a prompt would hash to the same chunk key
+    # and one request would be served the other's KV cache.
+    hash_a = "d34dd8790f1c4b0a9e6b2c5f8a1d3e7b4c9f0a2d6e8b1c3f5a7d9e0b2c4f6a8d"
+    hash_b = "7a65eaf5c2b8d4e60193f7a2c5b8e1d40a6f3c9b2e5d8a1f4c7b0e3d6a9f6a8d"
+    assert hash_a != hash_b
+    assert hex_hash_to_int16(hash_a) == hex_hash_to_int16(hash_b)
+
+    mm_positions = [DummyPlaceholderRange(offset=1, length=3)]
+    out_a = apply_mm_hashes_to_token_ids(
+        torch.zeros(6, dtype=torch.long), [hash_a], mm_positions
+    )
+    out_b = apply_mm_hashes_to_token_ids(
+        torch.zeros(6, dtype=torch.long), [hash_b], mm_positions
+    )
+    assert out_a.tolist() != out_b.tolist()
+
+
+def test_hex_hash_to_int_stays_within_the_signed_64_bit_range() -> None:
+    identifiers = [
+        "d34dd8790f1c4b0a9e6b2c5f8a1d3e7b4c9f0a2d6e8b1c3f5a7d9e0b2c4f6a8d",
+        "chatcmpl-a2a48871c4aad192-image-0",
+        "0x" + "f" * 64,
+        "",
+    ]
+    for identifier in identifiers:
+        value = hex_hash_to_int(identifier)
+        assert 0 <= value < 2**63
+        assert value == hex_hash_to_int(identifier)
