@@ -200,6 +200,49 @@ steps:
         plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
         artifact_paths: ["*.log"]
 
+      # Engine-driven HMA verifies both transport backends end-to-end. Both
+      # matrix entries use the dshm pod: pickle remains lazy and ignores the
+      # mount, while SHM disables lazy L1 allocation and maps the pool.
+      - label: ":electric_plug: hma_lm_eval_gemma4_engine_driven / {{matrix.transport}}"
+        command: |
+          export LMCACHE_MP_TRANSFER_MODE="engine_driven"
+          export ENGINE_DRIVEN_TRANSPORT="{{matrix.transport}}"
+          case "{{matrix.transport}}" in
+            pickle)
+              export L1_USE_LAZY="true"
+              # Pickle sends complete hybrid KV payloads through one MQ
+              # connection. Limit this correctness-only job's request
+              # concurrency so queued payloads do not exhaust the RPC budget;
+              # the SHM matrix entry retains the regular 50-way stress load.
+              export NUM_CONCURRENT="4"
+              export LIMIT="30"
+              export STORE_DRAIN_SECONDS="180"
+              export LMCACHE_MQ_TIMEOUT="300"
+              ;;
+            shm)
+              export L1_USE_LAZY="false"
+              ;;
+          esac
+          .buildkite/k3_tests/multiprocess/run.sh hma_lm_eval_gemma4_engine_driven
+        matrix:
+          setup:
+            transport:
+              - "pickle"
+              - "shm"
+        timeout_in_minutes: 60
+        retry: *flaky-retry
+        env:
+          MODEL: "google/gemma-4-31B-it"
+          SCORE_TOLERANCE: "0.03"
+          ATTENTION_BACKEND: "auto"
+          GPU_MEMORY_UTILIZATION: "0.85"
+          MAX_WAIT_SECONDS: "600"
+          LIMIT: "100"
+          CPU_BUFFER_SIZE: "80"
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-1gpu-dshm } }]
+        artifact_paths: ["*.log"]
+
       - label: ":compression: fault_tolerance"
         command: .buildkite/k3_tests/multiprocess/run.sh fault_tolerance
         timeout_in_minutes: 30
