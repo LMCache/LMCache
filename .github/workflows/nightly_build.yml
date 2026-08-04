@@ -4,19 +4,6 @@ on:
   schedule:
     - cron: '30 7 * * *'
   workflow_dispatch:
-  # TEMPORARY: lets this PR trigger a real (non-dry-run) nightly-verify-cpu-vllm
-  # + nightly-pin-or-report-vllm run so the fix can be checked end-to-end.
-  # Scoped to the files this PR touches so no unrelated PR fires it.
-  # Remove this `pull_request:` block once verified.
-  pull_request:
-    paths:
-      - '.github/workflows/nightly_build.yml'
-      - '.github/workflows/cpu_device.yml'
-      - '.github/scripts/nightly-aggregate-vllm-verify.sh'
-      - '.github/scripts/nightly-collect-verify-result.py'
-      - '.github/scripts/install_vllm_cpu.sh'
-      - '.github/scripts/install_lmcache_cpu.sh'
-      - '.buildkite/k3_tests/multiprocess/scripts/pin-tested-vllm.sh'
 
 permissions:
   contents: read
@@ -25,9 +12,6 @@ jobs:
   nightly-wheels:
     name: Build and publish nightly wheels
     runs-on: ubuntu-latest
-    # Skip on the temporary pull_request trigger above: no need to build
-    # and publish CUDA wheels just to test the CPU vLLM verify path.
-    if: github.event_name != 'pull_request'
     permissions:
       contents: write
     steps:
@@ -132,9 +116,6 @@ jobs:
   nightly-build:
     name: Build image
     runs-on: ubuntu-latest
-    # Skip on the temporary pull_request trigger above: same reasoning as
-    # nightly-wheels, this job needs no coverage from the CPU vLLM test.
-    if: github.event_name != 'pull_request'
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
