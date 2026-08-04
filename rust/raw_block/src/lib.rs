@@ -195,16 +195,39 @@ const O_DIRECT: i32 = libc::O_DIRECT;
 const O_DIRECT: i32 = 0;
 const RING_SIZE: usize = 256;
 
-fn parse_use_iouring(io_engine: Option<String>, use_iouring: bool) -> PyResult<bool> {
+/// Parsed I/O engine selection.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum IoEngineKind {
+    Posix,
+    IoUring,
+    #[cfg(feature = "blkio")]
+    Libblkio,
+}
+
+fn parse_io_engine(io_engine: Option<String>, use_iouring: bool) -> PyResult<IoEngineKind> {
     match io_engine {
         Some(engine) if !engine.is_empty() => match engine.as_str() {
-            "posix" => Ok(false),
-            "io_uring" => Ok(true),
-            other => Err(PyValueError::new_err(format!(
-                "io_engine must be one of posix, io_uring; got {other}"
-            ))),
+            "posix" => Ok(IoEngineKind::Posix),
+            "io_uring" => Ok(IoEngineKind::IoUring),
+            #[cfg(feature = "blkio")]
+            "libblkio" => Ok(IoEngineKind::Libblkio),
+            other => {
+                #[cfg(feature = "blkio")]
+                let valid = "posix, io_uring, libblkio";
+                #[cfg(not(feature = "blkio"))]
+                let valid = "posix, io_uring";
+                Err(PyValueError::new_err(format!(
+                    "io_engine must be one of {valid}; got {other}"
+                )))
+            }
         },
-        _ => Ok(use_iouring),
+        _ => {
+            if use_iouring {
+                Ok(IoEngineKind::IoUring)
+            } else {
+                Ok(IoEngineKind::Posix)
+            }
+        }
     }
 }
 
@@ -272,6 +295,7 @@ fn pwrite_from_ptr(
 // Low-level read loop that retries until all bytes are read.
 // We treat EOF as an error because the caller expects a full read.
 fn pread_into(fd: RawFd, offset: u64, mut dst: *mut u8, mut size: usize) -> Result<(), PyErr> {
+
     let mut off = offset;
     while size > 0 {
         // SAFETY: pread writes into dst for size bytes.
@@ -291,6 +315,44 @@ fn pread_into(fd: RawFd, offset: u64, mut dst: *mut u8, mut size: usize) -> Resu
         size -= n;
     }
     Ok(())
+}
+
+// Unified block-write helper that dispatches to either pwrite or blkio.
+//
+// `bstate` is `(blkio_handle, blkio_queue, is_blkio)` obtained from
+// `RawBlockDevice::blkio_state()`.  When `is_blkio` is false, the standard
+// `pwrite_from_ptr` syscall path is used.
+#[allow(unused_variables)]
+fn do_block_write(
+    fd: RawFd,
+    bstate: (usize, usize, bool),
+    offset: u64,
+    ptr: *const u8,
+    len: usize,
+) -> Result<(), PyErr> {
+    let (_handle, _queue, is_blkio) = bstate;
+    #[cfg(feature = "blkio")]
+    if is_blkio {
+        return blkio_device::do_aligned_io(_handle, _queue, false, offset, ptr as *mut u8, len);
+    }
+    pwrite_from_ptr(fd, offset, ptr, len)
+}
+
+// Unified block-read helper that dispatches to either pread or blkio.
+#[allow(unused_variables)]
+fn do_block_read(
+    fd: RawFd,
+    bstate: (usize, usize, bool),
+    offset: u64,
+    dst: *mut u8,
+    len: usize,
+) -> Result<(), PyErr> {
+    let (_handle, _queue, is_blkio) = bstate;
+    #[cfg(feature = "blkio")]
+    if is_blkio {
+        return blkio_device::do_aligned_io(_handle, _queue, true, offset, dst, len);
+    }
+    pread_into(fd, offset, dst, len)
 }
 
 // Determine file/device size in bytes (ioctl for block device, fstat fallback).
@@ -446,7 +508,8 @@ fn nvme_uring_cmd_prep(
     let lba_size = 1usize << lba_shift;
 
     // Validate offset alignment
-    if !(offset as usize).is_multiple_of(lba_size) {
+    #[allow(clippy::manual_is_multiple_of)]
+    if (offset as usize) % lba_size != 0 {
         return Err(PyValueError::new_err(format!(
             "offset must be aligned to LBA size ({} bytes), got offset={}",
             lba_size, offset
@@ -454,7 +517,8 @@ fn nvme_uring_cmd_prep(
     }
 
     // Validate length alignment
-    if !len.is_multiple_of(lba_size) {
+    #[allow(clippy::manual_is_multiple_of)]
+    if len % lba_size != 0 {
         return Err(PyValueError::new_err(format!(
             "length must be aligned to LBA size ({} bytes), got len={}",
             lba_size, len
@@ -926,6 +990,30 @@ struct RawBlockDevice {
     batched_completions: Arc<Mutex<HashMap<u64, Vec<Arc<IoCompletion>>>>>,
     // Counter for generating unique batch IDs
     next_batch_id: Arc<AtomicU64>,
+    // libblkio handle and queue (only used when io_engine = libblkio).
+    // Stored as usize to satisfy Send/Sync (raw pointers do not impl Send).
+    #[cfg(feature = "blkio")]
+    blkio_handle: usize,
+    #[cfg(feature = "blkio")]
+    blkio_queue: usize,
+}
+
+impl RawBlockDevice {
+    /// Returns `(blkio_handle, blkio_queue, is_blkio)`.
+    ///
+    /// All three values are `Copy` and can be moved into closures passed to
+    /// `py.allow_threads()`.  When the `blkio` feature is disabled the
+    /// handle/queue are always 0 and `is_blkio` is always `false`.
+    fn blkio_state(&self) -> (usize, usize, bool) {
+        #[cfg(feature = "blkio")]
+        {
+            (self.blkio_handle, self.blkio_queue, self.blkio_handle != 0)
+        }
+        #[cfg(not(feature = "blkio"))]
+        {
+            (0, 0, false)
+        }
+    }
 }
 
 /// RAII guard for a raw file descriptor
@@ -976,8 +1064,16 @@ impl RawBlockDevice {
         use_uring_cmd: bool,
         io_engine: Option<String>,
         iouring_queue_depth: usize,
+        #[allow(unused_variables)] blkio_driver: Option<String>,
     ) -> PyResult<Self> {
-        let use_iouring = parse_use_iouring(io_engine, use_iouring)?;
+        if alignment == 0 || (alignment & (alignment - 1)) != 0 {
+            return Err(PyValueError::new_err(format!(
+                "alignment must be a power of two, got {alignment}"
+            )));
+        }
+
+        let engine = parse_io_engine(io_engine, use_iouring)?;
+        let use_iouring = engine == IoEngineKind::IoUring;
         let iouring_queue_depth = iouring_queue_depth.max(1);
         // use_uring_cmd requires use_iouring to be enabled
         if use_uring_cmd && !use_iouring {
@@ -985,6 +1081,42 @@ impl RawBlockDevice {
                 "use_uring_cmd requires use_iouring to be enabled",
             ));
         }
+
+        // ---- libblkio path: delegate entirely to blkio_device helpers ----
+        #[cfg(feature = "blkio")]
+        if engine == IoEngineKind::Libblkio {
+            let driver = blkio_driver.as_deref().unwrap_or("io_uring");
+            let (bh, bq, size) =
+                blkio_device::blkio_open_device(&path, writable, use_odirect, driver)?;
+            return Ok(Self {
+                fd: -1, // no fd — blkio manages its own
+                size,
+                closed: AtomicBool::new(false),
+                use_odirect,
+                alignment,
+                use_iouring: false,
+                use_uring_cmd: false,
+                nvme_nsid: None,
+                nvme_lba_shift: None,
+                nvme_lba_size: None,
+                ring: None,
+                queue: None,
+                worker: None,
+                shutdown: None,
+                fixed_buffer_map: Arc::new(Mutex::new(HashMap::new())),
+                fixed_buffers_registered: Arc::new(AtomicBool::new(false)),
+                in_flight_count: Arc::new(AtomicU64::new(0)),
+                in_flight_cvar: Arc::new(Condvar::new()),
+                batch_in_flight: Arc::new(Mutex::new(HashMap::new())),
+                batch_ready: None,
+                batched_buffer_objs: Arc::new(Mutex::new(HashMap::new())),
+                batched_completions: Arc::new(Mutex::new(HashMap::new())),
+                next_batch_id: Arc::new(AtomicU64::new(1)),
+                blkio_handle: bh,
+                blkio_queue: bq,
+            });
+        }
+
         let cpath =
             CString::new(path.clone()).map_err(|_| PyValueError::new_err("path contains NUL"))?;
         let mut flags = if writable {
@@ -1809,6 +1941,10 @@ impl RawBlockDevice {
             next_batch_id: next_batch_id_opt.unwrap_or_else(|| Arc::new(AtomicU64::new(1))),
             batch_in_flight: batch_in_flight_opt
                 .unwrap_or_else(|| Arc::new(Mutex::new(HashMap::new()))),
+            #[cfg(feature = "blkio")]
+            blkio_handle: 0,
+            #[cfg(feature = "blkio")]
+            blkio_queue: 0,
         })
     }
 
@@ -1843,7 +1979,8 @@ impl RawBlockDevice {
             use_uring_cmd = false,
             alignment = 4096,
             io_engine = None,
-            iouring_queue_depth = RING_SIZE
+            iouring_queue_depth = RING_SIZE,
+            blkio_driver = None
         )
     )]
     #[allow(clippy::too_many_arguments)]
@@ -1856,6 +1993,7 @@ impl RawBlockDevice {
         alignment: usize,
         io_engine: Option<String>,
         iouring_queue_depth: usize,
+        blkio_driver: Option<String>,
     ) -> PyResult<Self> {
         Self::new_internal(
             path,
@@ -1866,11 +2004,15 @@ impl RawBlockDevice {
             use_uring_cmd,
             io_engine,
             iouring_queue_depth,
+            blkio_driver,
         )
     }
 
     // Expose cached size to Python.
     fn size_bytes(&self) -> PyResult<u64> {
+        if self.closed.load(Ordering::Relaxed) {
+            return Err(PyRuntimeError::new_err("device is closed"));
+        }
         Ok(self.size)
     }
 
@@ -2474,8 +2616,9 @@ impl RawBlockDevice {
         }
 
         // Check if the buffer is aligned for O_DIRECT
+        #[allow(clippy::manual_is_multiple_of)]
         let ptr_aligned = if self.use_odirect {
-            (ptr as usize).is_multiple_of(align)
+            (ptr as usize) % align == 0
         } else {
             true
         };
@@ -2831,18 +2974,19 @@ impl RawBlockDevice {
         // to `allow_threads` must own plain data and cannot borrow `view`.
         // We still keep `view` alive until I/O finishes, then release it below.
         let ptr_usize = ptr as usize;
+        let bstate = self.blkio_state();
         let res = py.allow_threads(move || {
             let src = ptr_usize as *const u8;
             let src_aligned = (src as usize) % align == 0;
             if total_len == payload_len && !self.use_odirect {
                 // direct write without padding
-                return pwrite_from_ptr(fd, offset, src, payload_len);
+                return do_block_write(fd, bstate, offset, src, payload_len);
             }
 
             if self.use_odirect && src_aligned {
                 if total_len == payload_len {
                     // Fully aligned fast path: no copies.
-                    return pwrite_from_ptr(fd, offset, src, total_len);
+                    return do_block_write(fd, bstate, offset, src, total_len);
                 }
 
                 // Hybrid path for O_DIRECT with padding:
@@ -2854,7 +2998,7 @@ impl RawBlockDevice {
                 // This keeps copy cost proportional to tail size, not payload size.
                 let aligned_prefix = payload_len / align * align;
                 if aligned_prefix > 0 {
-                    pwrite_from_ptr(fd, offset, src, aligned_prefix)?;
+                    do_block_write(fd, bstate, offset, src, aligned_prefix)?;
                 }
                 let tail_payload = payload_len - aligned_prefix;
                 let tail_total = total_len - aligned_prefix;
@@ -2879,7 +3023,7 @@ impl RawBlockDevice {
                             );
                         }
                     }
-                    pwrite_from_ptr(fd, tail_offset, bounce.as_ptr(), tail_total)?;
+                    do_block_write(fd, bstate, tail_offset, bounce.as_ptr(), tail_total)?;
                 }
                 return Ok(());
             }
@@ -2902,7 +3046,7 @@ impl RawBlockDevice {
                     );
                 }
             }
-            pwrite_from_ptr(fd, offset, bounce.as_ptr(), total_len)
+            do_block_write(fd, bstate, offset, bounce.as_ptr(), total_len)
         });
         // Always release the CPython buffer view once the blocking I/O closure
         // completes. This decrements exporter-side view count correctly.
@@ -2971,17 +3115,18 @@ impl RawBlockDevice {
         // Same pattern as write path: move raw address into closure-safe value
         // while retaining `view` lifetime until closure completion.
         let dst_usize = ptr as usize;
+        let bstate = self.blkio_state();
         let res = py.allow_threads(move || {
             let dst = dst_usize as *mut u8;
             let dst_aligned = (dst as usize) % align == 0;
             if total_len == payload_len && !self.use_odirect {
-                return pread_into(fd, offset, dst, payload_len);
+                return do_block_read(fd, bstate, offset, dst, payload_len);
             }
 
             if self.use_odirect && dst_aligned {
                 if cap >= total_len {
                     // Fully aligned fast path: no copies.
-                    return pread_into(fd, offset, dst, total_len);
+                    return do_block_read(fd, bstate, offset, dst, total_len);
                 }
 
                 // Hybrid path for O_DIRECT with smaller destination capacity:
@@ -2993,7 +3138,7 @@ impl RawBlockDevice {
                 // honoring O_DIRECT aligned read requirements.
                 let aligned_prefix = payload_len / align * align;
                 if aligned_prefix > 0 {
-                    pread_into(fd, offset, dst, aligned_prefix)?;
+                    do_block_read(fd, bstate, offset, dst, aligned_prefix)?;
                 }
                 let tail_payload = payload_len - aligned_prefix;
                 let tail_total = total_len - aligned_prefix;
@@ -3002,7 +3147,7 @@ impl RawBlockDevice {
                         .checked_add(aligned_prefix as u64)
                         .ok_or_else(|| PyValueError::new_err("offset overflow"))?;
                     let bounce = AlignedBuf::new(tail_total, align)?;
-                    pread_into(fd, tail_offset, bounce.as_mut_ptr(), tail_total)?;
+                    do_block_read(fd, bstate, tail_offset, bounce.as_mut_ptr(), tail_total)?;
                     unsafe {
                         if tail_payload > 0 {
                             libc::memcpy(
@@ -3020,7 +3165,7 @@ impl RawBlockDevice {
             // read aligned size into temporary aligned memory, then copy the
             // requested payload portion to Python output buffer.
             let bounce = AlignedBuf::new(round_up(total_len, align), align)?;
-            pread_into(fd, offset, bounce.as_mut_ptr(), total_len)?;
+            do_block_read(fd, bstate, offset, bounce.as_mut_ptr(), total_len)?;
             unsafe {
                 libc::memcpy(
                     dst as *mut libc::c_void,
@@ -3078,6 +3223,16 @@ impl RawBlockDevice {
             let _ = handle.join();
         }
 
+        // Clean up blkio resources if this device was opened via libblkio.
+        #[cfg(feature = "blkio")]
+        if self.blkio_handle != 0 {
+            blkio_device::blkio_close_device(self.blkio_handle);
+            self.blkio_handle = 0;
+            self.blkio_queue = 0;
+            self.closed.store(true, Ordering::Relaxed);
+            return Ok(());
+        }
+
         let rc = unsafe { libc::close(self.fd) };
         if rc != 0 {
             return Err(os_err("close failed"));
@@ -3105,7 +3260,5 @@ impl Drop for RawBlockDevice {
 #[pymodule]
 fn lmcache_rust_raw_block_io(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<RawBlockDevice>()?;
-    #[cfg(feature = "blkio")]
-    m.add_class::<blkio_device::BlkioBlockDevice>()?;
     Ok(())
 }

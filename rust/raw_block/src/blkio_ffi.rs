@@ -2,8 +2,9 @@
 
 //! Raw FFI bindings for the libblkio C library.
 //!
-//! Only the subset of the API used by [`BlkioBlockDevice`](super::blkio_device::BlkioBlockDevice)
-//! is declared here.  Types match `<blkio.h>` from libblkio >= 1.3.
+//! Only the subset of the API used by [`RawBlockDevice`](super::RawBlockDevice)
+//! (when `io_engine = "libblkio"`) is declared here.  Types match
+//! `<blkio.h>` from libblkio >= 1.3.
 
 #![allow(non_camel_case_types, dead_code)]
 

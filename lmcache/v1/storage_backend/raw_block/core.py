@@ -41,7 +41,7 @@ logger = init_logger(__name__)
 _DEFAULT_META_MAGIC = b"LMCIDX01"
 _DEFAULT_META_VERSION = 1
 _META_HEADER_STRUCT = struct.Struct("<8sIQQI")
-RAW_BLOCK_IO_ENGINES = frozenset({"posix", "io_uring"})
+RAW_BLOCK_IO_ENGINES = frozenset({"posix", "io_uring", "libblkio"})
 DEFAULT_IOURING_QUEUE_DEPTH = 256
 
 
@@ -149,6 +149,7 @@ class RawBlockCoreConfig:
     io_engine: str = "posix"
     iouring_queue_depth: int = DEFAULT_IOURING_QUEUE_DEPTH
     use_uring_cmd: bool = False
+    blkio_driver: Optional[str] = None
 
 
 @dataclass
@@ -222,6 +223,7 @@ class RawBlockCore:
         self.io_engine = normalize_raw_block_io_engine(config.io_engine)
         self.iouring_queue_depth = int(config.iouring_queue_depth)
         self.use_uring_cmd = bool(config.use_uring_cmd)
+        self.blkio_driver: Optional[str] = config.blkio_driver
         if self.use_uring_cmd and self.use_odirect:
             logger.warning(
                 "RawBlockCore: use_odirect is ignored for NVMe namespace "
@@ -422,6 +424,7 @@ class RawBlockCore:
                 io_engine=self.io_engine,
                 iouring_queue_depth=self.iouring_queue_depth,
                 use_uring_cmd=self.use_uring_cmd,
+                blkio_driver=self.blkio_driver,
             )
         return self._raw
 

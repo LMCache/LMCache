@@ -17,6 +17,9 @@ checkpointing, recovery, and MP task orchestration all live in Python.
 - `posix` (default): synchronous Linux `pread` / `pwrite`.
 - `io_uring`: direct Rust io_uring syscall path using the existing worker,
   batch, and `wait_iouring` machinery.
+- `libblkio` (requires `blkio` cargo feature): delegates I/O to
+  [libblkio](https://gitlab.com/libblkio/libblkio), which manages its own
+  `io_uring` instance internally.
 
 `use_iouring=True` remains accepted for backward compatibility. If `io_engine`
 is explicitly set, it wins over the legacy flag.
@@ -95,25 +98,25 @@ No fixed numbers are included here because results are host/device/workload depe
 - O_DIRECT requires aligned offset, size, and user buffer address.
 - io_uring backend requires Linux kernel 5.1+.
 
-## libblkio I/O Backend (`BlkioBlockDevice`)
+## libblkio I/O Engine
 
 The crate can optionally link against
-[libblkio](https://gitlab.com/libblkio/libblkio) to provide a second
-block-device class, `BlkioBlockDevice`.  libblkio manages its own
+[libblkio](https://gitlab.com/libblkio/libblkio) to provide a
+`libblkio` I/O engine for `RawBlockDevice`.  libblkio manages its own
 `io_uring` instance internally, so the Python-side io_uring worker thread
 is not used.
 
-### When to use which backend
+### When to use which engine
 
-| Backend | Class | Best for |
-|---------|-------|----------|
-| `rust` (default) | `RawBlockDevice` | Standard NVMe I/O; full io_uring batching and fixed-buffer support via the Rust worker thread |
-| `libblkio` | `BlkioBlockDevice` | Environments that already depend on libblkio (e.g. NIXL integration); single-queue synchronous I/O via the libblkio `io_uring` driver |
+| Engine | Best for |
+|--------|----------|
+| `posix` (default) | Simple synchronous I/O; widest compatibility |
+| `io_uring` | High-throughput NVMe I/O; full io_uring batching and fixed-buffer support via the Rust worker thread |
+| `libblkio` | Environments that already depend on libblkio (e.g. NIXL integration); single-queue synchronous I/O via the libblkio `io_uring` driver |
 
 ### Prerequisites
 
-Install `libblkio` development headers (see `csrc/storage_backends/blkio/README.md`
-for detailed instructions):
+Install `libblkio` development headers:
 
 ```bash
 # Ubuntu/Debian
@@ -131,8 +134,8 @@ pip install maturin
 maturin develop --release --features blkio
 ```
 
-Without `--features blkio`, only `RawBlockDevice` is compiled and
-`BlkioBlockDevice` is not available.
+Without `--features blkio`, only `posix` and `io_uring` engines are
+available; `io_engine="libblkio"` will raise `ValueError`.
 
 ### Cargo feature flag
 
@@ -149,13 +152,14 @@ feature is active.  If pkg-config is not available, it falls back to
 ### Usage
 
 ```python
-from lmcache_rust_raw_block_io import BlkioBlockDevice
+from lmcache_rust_raw_block_io import RawBlockDevice
 
-dev = BlkioBlockDevice(
+dev = RawBlockDevice(
     "/dev/nvme0n1",
     writable=True,
     use_odirect=True,
     alignment=4096,
+    io_engine="libblkio",
 )
 print(dev.size_bytes())
 
@@ -168,29 +172,30 @@ dev.pread_into(offset=0, out=out, payload_len=100, total_len=4096)
 dev.close()
 ```
 
-`BlkioBlockDevice` exposes the same synchronous methods as
-`RawBlockDevice` (`pwrite_from_buffer`, `pread_into`, `size_bytes`,
+When `io_engine="libblkio"`, `RawBlockDevice` supports the same
+synchronous methods (`pwrite_from_buffer`, `pread_into`, `size_bytes`,
 `close`) but does **not** support the async io_uring batch methods
 (`batched_write`, `batched_read`, `wait_iouring`, `register_fixed_buffers`).
 
-### Selecting the backend from `RustRawBlockBackend`
+An optional `blkio_driver` parameter selects the libblkio driver (default:
+`"io_uring"`).
 
-Set `rust_raw_block.io_backend` in the plugin's `extra_config`:
+### Selecting the engine from `RustRawBlockBackend`
+
+Set `rust_raw_block.io_engine` in the plugin's `extra_config`:
 
 ```yaml
 extra_config:
   rust_raw_block.device_path: "/dev/nvme0n1"
-  rust_raw_block.io_backend: "libblkio"   # "rust" (default) or "libblkio"
+  rust_raw_block.io_engine: "libblkio"
   rust_raw_block.use_odirect: true
+  # rust_raw_block.blkio_driver: "io_uring"   # optional, defaults to "io_uring"
 ```
-
-When `io_backend` is `"libblkio"`, the Python-side `use_uring` flag is
-automatically disabled (libblkio manages io_uring internally).
 
 ### Testing
 
 ```bash
-# All BlkioBlockDevice tests (smoke + integration; no device needed)
+# All libblkio engine tests (smoke + integration; no device needed)
 pytest -xvs tests/v1/storage_backend/test_blkio_block_device.py
 
 # With O_DIRECT on a real block device or loopback

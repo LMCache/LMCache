@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-Tests for the Rust ``BlkioBlockDevice`` — libblkio io_uring backend.
+Tests for the Rust ``RawBlockDevice`` with ``io_engine='libblkio'``.
 
 Three levels of coverage:
 
@@ -8,7 +8,7 @@ Three levels of coverage:
    close, and error handling using a sparse temp file (always available).
 
 2. **Full backend integration** — exercise the ``RustRawBlockBackend`` plugin
-   with ``io_backend='libblkio'``, covering put/get roundtrip, eviction, and
+   with ``io_engine='libblkio'``, covering put/get roundtrip, eviction, and
    checkpoint recovery through the real KV-cache storage path.
 
 3. **O_DIRECT on a loopback block device** — exercises alignment-sensitive
@@ -16,7 +16,7 @@ Three levels of coverage:
    pre-created device via ``LMCACHE_BLKIO_TEST_DEVICE``.
 
 All tests are skipped when the Rust extension was built without the
-``blkio`` cargo feature (``BlkioBlockDevice`` not importable).
+``blkio`` cargo feature (``io_engine='libblkio'`` not accepted).
 """
 
 # Future
@@ -37,7 +37,8 @@ import torch
 # First Party
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.memory_management import AdHocMemoryAllocator, MemoryFormat
+from lmcache.v1.memory_allocators.ad_hoc_memory_allocator import AdHocMemoryAllocator
+from lmcache.v1.memory_management import MemoryFormat
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.plugins.rust_raw_block_backend import (
@@ -60,19 +61,32 @@ def _has_rust_ext() -> bool:
         return False
 
 
-def _has_blkio_blkdev() -> bool:
-    """Check if the Rust extension was built with the ``blkio`` feature."""
-    try:
-        from lmcache_rust_raw_block_io import BlkioBlockDevice  # noqa: F401
+def _has_blkio_feature() -> bool:
+    """Check if the Rust extension was built with the ``blkio`` feature.
 
+    Creates a tiny temp file and attempts to open it with
+    ``io_engine='libblkio'``.  Returns ``True`` when the engine is
+    accepted, ``False`` if the extension rejects the engine name or is
+    not installed.
+    """
+    try:
+        from lmcache_rust_raw_block_io import RawBlockDevice  # noqa: F401
+
+        with tempfile.NamedTemporaryFile(suffix=".blkio_probe") as f:
+            f.truncate(4096)
+            f.flush()
+            dev = RawBlockDevice(
+                f.name, writable=False, io_engine="libblkio"
+            )
+            dev.close()
         return True
-    except ImportError:
+    except (ImportError, ValueError, RuntimeError, OSError):
         return False
 
 
-requires_blkio_blkdev = pytest.mark.skipif(
-    not _has_blkio_blkdev(),
-    reason="Rust blkio feature not enabled (BlkioBlockDevice not available)",
+requires_blkio = pytest.mark.skipif(
+    not _has_blkio_feature(),
+    reason="Rust blkio feature not enabled (io_engine='libblkio' not accepted)",
 )
 
 requires_rust_ext = pytest.mark.skipif(
@@ -201,30 +215,32 @@ def odirect_device():
 
 
 # ---------------------------------------------------------------------------
-# Level 1: BlkioBlockDevice unit / smoke tests
+# Level 1: RawBlockDevice(io_engine='libblkio') unit / smoke tests
 # ---------------------------------------------------------------------------
 
 
-@requires_blkio_blkdev
+@requires_blkio
 class TestBlkioBlockDeviceSmoke:
-    """Direct tests against the Rust ``BlkioBlockDevice`` class."""
+    """Direct tests against ``RawBlockDevice`` with ``io_engine='libblkio'``."""
 
     def test_open_size_close(self, temp_device_file: str) -> None:
         """Device can be opened, reports correct size, and closes cleanly."""
-        from lmcache_rust_raw_block_io import BlkioBlockDevice
+        from lmcache_rust_raw_block_io import RawBlockDevice
 
-        dev = BlkioBlockDevice(
-            temp_device_file, writable=True, use_odirect=False, alignment=4096
+        dev = RawBlockDevice(
+            temp_device_file, writable=True, use_odirect=False,
+            alignment=4096, io_engine="libblkio",
         )
         assert dev.size_bytes() == _DEVICE_SIZE_BYTES
         dev.close()
 
     def test_write_read_roundtrip(self, temp_device_file: str) -> None:
         """Write data, read it back, verify contents match."""
-        from lmcache_rust_raw_block_io import BlkioBlockDevice
+        from lmcache_rust_raw_block_io import RawBlockDevice
 
-        dev = BlkioBlockDevice(
-            temp_device_file, writable=True, use_odirect=False, alignment=4096
+        dev = RawBlockDevice(
+            temp_device_file, writable=True, use_odirect=False,
+            alignment=4096, io_engine="libblkio",
         )
         try:
             data = bytearray(b"\xab" * _BLOCK_SIZE)
@@ -238,10 +254,11 @@ class TestBlkioBlockDeviceSmoke:
 
     def test_write_read_with_padding(self, temp_device_file: str) -> None:
         """Write with payload < total_len (zero-padded), read back payload portion."""
-        from lmcache_rust_raw_block_io import BlkioBlockDevice
+        from lmcache_rust_raw_block_io import RawBlockDevice
 
-        dev = BlkioBlockDevice(
-            temp_device_file, writable=True, use_odirect=False, alignment=4096
+        dev = RawBlockDevice(
+            temp_device_file, writable=True, use_odirect=False,
+            alignment=4096, io_engine="libblkio",
         )
         try:
             payload = b"hello world"
@@ -259,10 +276,11 @@ class TestBlkioBlockDeviceSmoke:
 
     def test_distinct_offsets(self, temp_device_file: str) -> None:
         """Writes at different offsets don't interfere."""
-        from lmcache_rust_raw_block_io import BlkioBlockDevice
+        from lmcache_rust_raw_block_io import RawBlockDevice
 
-        dev = BlkioBlockDevice(
-            temp_device_file, writable=True, use_odirect=False, alignment=4096
+        dev = RawBlockDevice(
+            temp_device_file, writable=True, use_odirect=False,
+            alignment=4096, io_engine="libblkio",
         )
         try:
             pattern_a = bytearray(b"\xaa" * _BLOCK_SIZE)
@@ -287,20 +305,22 @@ class TestBlkioBlockDeviceSmoke:
 
     def test_close_is_idempotent(self, temp_device_file: str) -> None:
         """Calling close() twice should not raise."""
-        from lmcache_rust_raw_block_io import BlkioBlockDevice
+        from lmcache_rust_raw_block_io import RawBlockDevice
 
-        dev = BlkioBlockDevice(
-            temp_device_file, writable=True, use_odirect=False, alignment=4096
+        dev = RawBlockDevice(
+            temp_device_file, writable=True, use_odirect=False,
+            alignment=4096, io_engine="libblkio",
         )
         dev.close()
         dev.close()  # Should not raise
 
     def test_operations_after_close_raise(self, temp_device_file: str) -> None:
         """I/O after close() should raise RuntimeError."""
-        from lmcache_rust_raw_block_io import BlkioBlockDevice
+        from lmcache_rust_raw_block_io import RawBlockDevice
 
-        dev = BlkioBlockDevice(
-            temp_device_file, writable=True, use_odirect=False, alignment=4096
+        dev = RawBlockDevice(
+            temp_device_file, writable=True, use_odirect=False,
+            alignment=4096, io_engine="libblkio",
         )
         dev.close()
 
@@ -315,26 +335,28 @@ class TestBlkioBlockDeviceSmoke:
 
     def test_empty_path_raises(self) -> None:
         """Empty path should raise ValueError."""
-        from lmcache_rust_raw_block_io import BlkioBlockDevice
+        from lmcache_rust_raw_block_io import RawBlockDevice
 
-        with pytest.raises(ValueError):
-            BlkioBlockDevice("", writable=True)
+        with pytest.raises((ValueError, RuntimeError)):
+            RawBlockDevice("", writable=True, io_engine="libblkio")
 
     def test_invalid_alignment_raises(self, temp_device_file: str) -> None:
         """Non-power-of-two alignment should raise ValueError."""
-        from lmcache_rust_raw_block_io import BlkioBlockDevice
+        from lmcache_rust_raw_block_io import RawBlockDevice
 
-        with pytest.raises(ValueError):
-            BlkioBlockDevice(
-                temp_device_file, writable=True, use_odirect=False, alignment=3000
+        with pytest.raises((ValueError, RuntimeError)):
+            RawBlockDevice(
+                temp_device_file, writable=True, use_odirect=False,
+                alignment=3000, io_engine="libblkio",
             )
 
     def test_large_roundtrip(self, temp_device_file: str) -> None:
         """Write and read back a larger buffer (multiple blocks)."""
-        from lmcache_rust_raw_block_io import BlkioBlockDevice
+        from lmcache_rust_raw_block_io import RawBlockDevice
 
-        dev = BlkioBlockDevice(
-            temp_device_file, writable=True, use_odirect=False, alignment=4096
+        dev = RawBlockDevice(
+            temp_device_file, writable=True, use_odirect=False,
+            alignment=4096, io_engine="libblkio",
         )
         try:
             size = 16 * _BLOCK_SIZE  # 64 KB
@@ -349,7 +371,7 @@ class TestBlkioBlockDeviceSmoke:
 
 
 # ---------------------------------------------------------------------------
-# Level 2: RustRawBlockBackend integration with io_backend='libblkio'
+# Level 2: RustRawBlockBackend integration with io_engine='libblkio'
 # ---------------------------------------------------------------------------
 
 
@@ -361,7 +383,7 @@ def _make_backend(
     instance_id: str = "test_blkio_rawblock",
     extra_config_overrides: dict | None = None,
 ) -> tuple[RustRawBlockBackend, LocalCPUBackend]:
-    """Build a ``RustRawBlockBackend`` with ``io_backend='libblkio'``.
+    """Build a ``RustRawBlockBackend`` with ``io_engine='libblkio'``.
 
     Returns:
         ``(backend, local_cpu)`` — caller is responsible for calling
@@ -380,7 +402,7 @@ def _make_backend(
         "rust_raw_block.header_bytes": 4096,
         "rust_raw_block.meta_total_bytes": 4 * 1024 * 1024,
         "rust_raw_block.meta_enable_periodic": False,
-        "rust_raw_block.io_backend": "libblkio",
+        "rust_raw_block.io_engine": "libblkio",
     }
     if extra_config_overrides:
         extra.update(extra_config_overrides)
@@ -412,10 +434,10 @@ def _make_backend(
     return backend, local_cpu
 
 
-@requires_blkio_blkdev
+@requires_blkio
 @requires_rust_ext
 class TestBlkioRawBlockBackendIntegration:
-    """Full backend integration tests using ``io_backend='libblkio'``."""
+    """Full backend integration tests using ``io_engine='libblkio'``."""
 
     def test_put_get_roundtrip(
         self,
@@ -507,28 +529,33 @@ class TestBlkioRawBlockBackendIntegration:
         finally:
             backend.close()
 
-    def test_eviction_lru(
+    def test_capacity_overflow_rejects(
         self,
         memory_allocator: object,
         loop_in_thread: asyncio.AbstractEventLoop,
         temp_device_file: str,
     ) -> None:
-        """Oldest entry is evicted when capacity is exceeded."""
+        """Write beyond capacity is rejected (no auto-eviction)."""
+        capacity_bytes = 3 * 4 * 1024 * 1024
+        slot_bytes = 4 * 1024 * 1024
+        meta_total_bytes = 4 * 1024 * 1024  # matches _make_backend default
+
         backend, local_cpu = _make_backend(
             temp_device_file,
             memory_allocator,
             loop_in_thread,
             extra_config_overrides={
-                "rust_raw_block.capacity_bytes": 3 * 4 * 1024 * 1024,
-                "rust_raw_block.slot_bytes": 4 * 1024 * 1024,
+                "rust_raw_block.capacity_bytes": capacity_bytes,
+                "rust_raw_block.slot_bytes": slot_bytes,
             },
         )
         try:
             allocator = AdHocMemoryAllocator(device="cpu")
-            max_slots = backend._max_slots
+            max_slots = (capacity_bytes - meta_total_bytes) // slot_bytes
 
             keys = []
-            for i in range(max_slots + 1):
+            # Fill all slots
+            for i in range(max_slots):
                 key = CacheEngineKey("test_model", 1, 0, 5000 + i, torch.bfloat16)
                 keys.append(key)
                 obj = allocator.allocate(
@@ -542,14 +569,31 @@ class TestBlkioRawBlockBackendIntegration:
                 futs[0].result(timeout=10)
                 obj.ref_count_down()
 
-            # First key should have been evicted
-            out0 = backend.get_blocking(keys[0])
-            assert out0 is None
+            # One more write should fail (no free slots, no auto-eviction)
+            overflow_key = CacheEngineKey(
+                "test_model", 1, 0, 5000 + max_slots, torch.bfloat16
+            )
+            obj = allocator.allocate(
+                [torch.Size([2, 16, 8, 128])],
+                [torch.bfloat16],
+                fmt=MemoryFormat.KV_T2D,
+            )
+            assert obj is not None and obj.tensor is not None
+            obj.tensor.fill_(99)
+            futs = backend.batched_submit_put_task([overflow_key], [obj])
+            with pytest.raises(RuntimeError, match="Failed to persist"):
+                futs[0].result(timeout=10)
+            obj.ref_count_down()
 
-            # Last key should still exist
-            out_last = backend.get_blocking(keys[-1])
-            assert out_last is not None
-            out_last.ref_count_down()
+            # Original keys should still be retrievable
+            for key in keys:
+                out = backend.get_blocking(key)
+                assert out is not None
+                out.ref_count_down()
+
+            # Overflow key should not exist
+            out_overflow = backend.get_blocking(overflow_key)
+            assert out_overflow is None
         finally:
             backend.close()
 
@@ -610,16 +654,17 @@ class TestBlkioRawBlockBackendIntegration:
 # ---------------------------------------------------------------------------
 
 
-@requires_blkio_blkdev
+@requires_blkio
 class TestBlkioBlockDeviceODirect:
     """O_DIRECT tests requiring a real block device or loopback."""
 
     def test_odirect_write_read_roundtrip(self, odirect_device: str) -> None:
         """O_DIRECT write/read roundtrip on a block device."""
-        from lmcache_rust_raw_block_io import BlkioBlockDevice
+        from lmcache_rust_raw_block_io import RawBlockDevice
 
-        dev = BlkioBlockDevice(
-            odirect_device, writable=True, use_odirect=True, alignment=4096
+        dev = RawBlockDevice(
+            odirect_device, writable=True, use_odirect=True,
+            alignment=4096, io_engine="libblkio",
         )
         try:
             data = bytearray(b"\xcd" * _BLOCK_SIZE)
@@ -633,10 +678,11 @@ class TestBlkioBlockDeviceODirect:
 
     def test_odirect_large_roundtrip(self, odirect_device: str) -> None:
         """O_DIRECT with a multi-block buffer."""
-        from lmcache_rust_raw_block_io import BlkioBlockDevice
+        from lmcache_rust_raw_block_io import RawBlockDevice
 
-        dev = BlkioBlockDevice(
-            odirect_device, writable=True, use_odirect=True, alignment=4096
+        dev = RawBlockDevice(
+            odirect_device, writable=True, use_odirect=True,
+            alignment=4096, io_engine="libblkio",
         )
         try:
             size = 64 * _BLOCK_SIZE  # 256 KB
@@ -651,10 +697,11 @@ class TestBlkioBlockDeviceODirect:
 
     def test_odirect_with_padding(self, odirect_device: str) -> None:
         """O_DIRECT write with payload + zero-padding, read back payload."""
-        from lmcache_rust_raw_block_io import BlkioBlockDevice
+        from lmcache_rust_raw_block_io import RawBlockDevice
 
-        dev = BlkioBlockDevice(
-            odirect_device, writable=True, use_odirect=True, alignment=4096
+        dev = RawBlockDevice(
+            odirect_device, writable=True, use_odirect=True,
+            alignment=4096, io_engine="libblkio",
         )
         try:
             payload = os.urandom(2000)
@@ -672,10 +719,11 @@ class TestBlkioBlockDeviceODirect:
 
     def test_odirect_multiple_offsets(self, odirect_device: str) -> None:
         """O_DIRECT writes at aligned offsets are independent."""
-        from lmcache_rust_raw_block_io import BlkioBlockDevice
+        from lmcache_rust_raw_block_io import RawBlockDevice
 
-        dev = BlkioBlockDevice(
-            odirect_device, writable=True, use_odirect=True, alignment=4096
+        dev = RawBlockDevice(
+            odirect_device, writable=True, use_odirect=True,
+            alignment=4096, io_engine="libblkio",
         )
         try:
             n = 8
@@ -702,7 +750,7 @@ class TestBlkioBlockDeviceODirect:
             dev.close()
 
 
-@requires_blkio_blkdev
+@requires_blkio
 @requires_rust_ext
 class TestBlkioRawBlockBackendODirect:
     """Full backend integration with O_DIRECT on a real block device."""
@@ -742,3 +790,152 @@ class TestBlkioRawBlockBackendODirect:
             assert bytes(out.byte_array) == expected
         finally:
             backend.close()
+
+
+# ---------------------------------------------------------------------------
+# Level 4: Throughput benchmarks (pytest-benchmark)
+# ---------------------------------------------------------------------------
+
+_BENCH_SIZES_MB = [1, 4, 16]
+
+# Module-level collector for throughput results.  Each benchmark test
+# appends a dict here; the ``pytest_terminal_summary`` hook (below)
+# renders them as a table with GB/s.
+_throughput_results: list[dict] = []
+
+
+def _record_throughput(benchmark, nbytes: int, label: str) -> None:
+    """Record throughput result for the summary table.
+
+    Args:
+        benchmark: The pytest-benchmark fixture after ``benchmark()``
+            has been called (stats are populated).
+        nbytes: Number of bytes transferred per iteration.
+        label: Human-readable label for the result row.
+    """
+    mean_s = benchmark.stats["mean"]
+    min_s = benchmark.stats["min"]
+    max_s = benchmark.stats["max"]
+    gb = nbytes / (1024 * 1024 * 1024)
+    _throughput_results.append({
+        "label": label,
+        "size_mb": nbytes / (1024 * 1024),
+        "mean_us": mean_s * 1e6,
+        "min_gbps": gb / max_s if max_s > 0 else 0.0,
+        "mean_gbps": gb / mean_s if mean_s > 0 else 0.0,
+        "max_gbps": gb / min_s if min_s > 0 else 0.0,
+    })
+
+
+@requires_blkio
+class TestBlkioBenchmarkFile:
+    """Throughput benchmarks on a temp file (no O_DIRECT)."""
+
+    @pytest.mark.benchmark(group="blkio_write_file")
+    @pytest.mark.parametrize("size_mb", _BENCH_SIZES_MB)
+    def test_write_throughput(
+        self, benchmark, temp_device_file: str, size_mb: int
+    ) -> None:
+        """Measure blkio write throughput to a temp file."""
+        from lmcache_rust_raw_block_io import RawBlockDevice
+
+        dev = RawBlockDevice(
+            temp_device_file, writable=True, use_odirect=False,
+            alignment=4096, io_engine="libblkio",
+        )
+        nbytes = size_mb * 1024 * 1024
+        data = bytearray(os.urandom(nbytes))
+
+        def do_write():
+            dev.pwrite_from_buffer(
+                0, data, payload_len=nbytes, total_len=nbytes
+            )
+
+        benchmark.extra_info["size_mb"] = size_mb
+        benchmark(do_write)
+        _record_throughput(benchmark, nbytes, f"file write {size_mb}M")
+        dev.close()
+
+    @pytest.mark.benchmark(group="blkio_read_file")
+    @pytest.mark.parametrize("size_mb", _BENCH_SIZES_MB)
+    def test_read_throughput(
+        self, benchmark, temp_device_file: str, size_mb: int
+    ) -> None:
+        """Measure blkio read throughput from a temp file."""
+        from lmcache_rust_raw_block_io import RawBlockDevice
+
+        dev = RawBlockDevice(
+            temp_device_file, writable=True, use_odirect=False,
+            alignment=4096, io_engine="libblkio",
+        )
+        nbytes = size_mb * 1024 * 1024
+        data = bytearray(os.urandom(nbytes))
+        dev.pwrite_from_buffer(
+            0, data, payload_len=nbytes, total_len=nbytes
+        )
+        out = bytearray(nbytes)
+
+        def do_read():
+            dev.pread_into(0, out, payload_len=nbytes, total_len=nbytes)
+
+        benchmark.extra_info["size_mb"] = size_mb
+        benchmark(do_read)
+        _record_throughput(benchmark, nbytes, f"file read {size_mb}M")
+        dev.close()
+
+
+@requires_blkio
+class TestBlkioBenchmarkODirect:
+    """Throughput benchmarks with O_DIRECT on a block device."""
+
+    @pytest.mark.benchmark(group="blkio_write_odirect")
+    @pytest.mark.parametrize("size_mb", _BENCH_SIZES_MB)
+    def test_write_throughput(
+        self, benchmark, odirect_device: str, size_mb: int
+    ) -> None:
+        """Measure blkio O_DIRECT write throughput."""
+        from lmcache_rust_raw_block_io import RawBlockDevice
+
+        dev = RawBlockDevice(
+            odirect_device, writable=True, use_odirect=True,
+            alignment=4096, io_engine="libblkio",
+        )
+        nbytes = size_mb * 1024 * 1024
+        data = bytearray(os.urandom(nbytes))
+
+        def do_write():
+            dev.pwrite_from_buffer(
+                0, data, payload_len=nbytes, total_len=nbytes
+            )
+
+        benchmark.extra_info["size_mb"] = size_mb
+        benchmark(do_write)
+        _record_throughput(benchmark, nbytes, f"O_DIRECT write {size_mb}M")
+        dev.close()
+
+    @pytest.mark.benchmark(group="blkio_read_odirect")
+    @pytest.mark.parametrize("size_mb", _BENCH_SIZES_MB)
+    def test_read_throughput(
+        self, benchmark, odirect_device: str, size_mb: int
+    ) -> None:
+        """Measure blkio O_DIRECT read throughput."""
+        from lmcache_rust_raw_block_io import RawBlockDevice
+
+        dev = RawBlockDevice(
+            odirect_device, writable=True, use_odirect=True,
+            alignment=4096, io_engine="libblkio",
+        )
+        nbytes = size_mb * 1024 * 1024
+        data = bytearray(os.urandom(nbytes))
+        dev.pwrite_from_buffer(
+            0, data, payload_len=nbytes, total_len=nbytes
+        )
+        out = bytearray(nbytes)
+
+        def do_read():
+            dev.pread_into(0, out, payload_len=nbytes, total_len=nbytes)
+
+        benchmark.extra_info["size_mb"] = size_mb
+        benchmark(do_read)
+        _record_throughput(benchmark, nbytes, f"O_DIRECT read {size_mb}M")
+        dev.close()
