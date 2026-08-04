@@ -17,10 +17,31 @@ from __future__ import annotations
 
 # Standard
 from typing import Protocol, runtime_checkable
+import functools
 import inspect
 
 # First Party
 from lmcache import torch_dev, torch_device_type
+
+
+@functools.cache
+def _is_rocm() -> bool:
+    """Return ``True`` when the active PyTorch build targets ROCm/HIP.
+
+    When PyTorch is compiled for ROCm, ``torch.version.hip`` is set to the
+    HIP version string (e.g. ``"7.2.53211-..."``).  For CUDA builds the
+    attribute is absent or ``None``.  The result is cached so the check
+    runs at most once per process.
+
+    This helps ``DefaultEventIPCBackend`` avoid cross-process
+    ``Event.from_ipc_handle`` deadlocks on AMD hardware (see #4419).
+    """
+    try:
+        # Third Party
+        import torch
+    except ImportError:
+        return False
+    return getattr(torch.version, "hip", None) is not None
 
 
 def _accepts_interprocess(event_cls: object) -> bool:
@@ -220,7 +241,32 @@ class DefaultEventIPCBackend:
         return event.ipc_handle()  # type: ignore[attr-defined]
 
     def import_event(self, handle: bytes, device: object) -> object:
-        """Reconstruct an event from an IPC handle on ``device``."""
+        """Reconstruct an event from an IPC handle on ``device``.
+
+        On ROCm/HIP builds, ``Event.from_ipc_handle`` internally calls
+        ``Stream.from_ipc_handle``, which may block indefinitely in
+        cross-process contexts even at TP=1 (refs #4419).  The fallback
+        synchronises the current stream on the target device — which
+        guarantees that all prior GPU work (including the exporting
+        process's) is visible — and returns a locally-triggered event so
+        that downstream ``wait_event`` calls are no-ops.
+
+        This is semantically correct on a single physical GPU shared
+        across processes; multi-GPU / multi-node setups should prefer
+        ``engine_driven`` transfer until ROCm's ``Stream.from_ipc_handle``
+        stabilises for cross-process use.
+        """
+        if self.device_type == "cuda" and _is_rocm():
+            # Third Party
+            import torch
+
+            torch.cuda.current_stream(device).synchronize()
+            event = self._event_module.Event(  # type: ignore[union-attr]
+                interprocess=True
+            )
+            event.record(torch.cuda.current_stream(device))
+            event.synchronize()
+            return event
         return self._event_module.Event.from_ipc_handle(  # type: ignore[union-attr]
             device, handle
         )
