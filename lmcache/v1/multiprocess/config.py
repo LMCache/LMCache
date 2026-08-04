@@ -219,9 +219,9 @@ class CoordinatorConfig:
     the coordinator's ``INSTANCE_TIMEOUT``."""
 
     event_reporting: bool = False
-    """When ``True``, report cache events to the coordinator: the key
-    directory's store/access/delete stream (fleet-wide placement tracking)
-    and the L2 usage stream (quota tracking and eviction)."""
+    """When ``True``, stream cache store/access/delete events to the
+    coordinator, feeding the key directory (fleet-wide placement
+    tracking) and, for L2 events, usage/quota tracking and eviction."""
 
     event_flush_interval: float = 1.0
     """Seconds between cache-event flush attempts to the coordinator."""
@@ -602,9 +602,9 @@ def add_coordinator_args(
         "--coordinator-event-reporting",
         action="store_true",
         default=None,
-        help="Report cache events to the coordinator: the key directory's "
-        "store/access/delete stream (placement tracking) and the L2 usage "
-        "stream (quota tracking and eviction). Defaults to "
+        help="Stream cache store/access/delete events to the coordinator, "
+        "feeding the key directory (placement tracking) and, for L2 "
+        "events, usage/quota tracking and eviction. Defaults to "
         "LMCACHE_COORDINATOR_EVENT_REPORTING; unset disables.",
     )
     group.add_argument(

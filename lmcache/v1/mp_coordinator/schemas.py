@@ -10,7 +10,6 @@ This module holds HTTP models only.
 """
 
 # Standard
-from enum import Enum
 from typing import Annotated
 import base64
 
@@ -170,57 +169,7 @@ class QuotaConfigResponse(BaseModel):
     default_limit_gb: float | None
 
 
-# -- Usage tracking ----------------------------------------------------------
-
-
-class EventType(str, Enum):
-    """Cache events reported by an MP server."""
-
-    STORE = "store"
-    LOOKUP = "lookup"
-    DELETE = "delete"
-
-
-class UsageEvent(BaseModel):
-    """A single cache event reported by an MP server.
-
-    Attributes:
-        type: The event type.
-        key: The cache key this event applies to.
-        bytes: Bytes stored (``store`` only; ``0`` for other types).
-    """
-
-    type: EventType
-    key: EncodedObjectKey
-    bytes: int = Field(ge=0)
-
-
-class ReportUsageRequest(BaseModel):
-    """Body of ``POST /quota/events``.
-
-    Attributes:
-        instance_id: Identifier of the MP server that produced this batch.
-        seq: Monotonically increasing sequence number scoped to this
-            ``instance_id``. Starts at 1 for the first flush after the
-            server starts.
-        events: Batch of store/lookup events to record.
-        tier: Cache tier the events apply to (only ``l2`` is supported today).
-    """
-
-    instance_id: str
-    seq: int = Field(ge=1)
-    events: list[UsageEvent]
-    tier: Tier = Tier.L2
-
-
-class ReportUsageResponse(BaseModel):
-    """Reply to ``POST /quota/events``.
-
-    Attributes:
-        recorded: Number of events processed.
-    """
-
-    recorded: int
+# -- Usage / quota status ----------------------------------------------------
 
 
 class StatusResponse(BaseModel):
