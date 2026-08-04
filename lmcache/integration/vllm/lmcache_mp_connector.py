@@ -44,11 +44,16 @@ from lmcache.integration.vllm.kv_cache_group_edits import (
 from lmcache.integration.vllm.kv_cache_groups import (
     create_engine_group_infos_from_vllm,
 )
+from lmcache.integration.vllm.lazy_offload_pending_store import (
+    LazyOffloadPendingStore,
+    PendingStoreItem,
+)
 from lmcache.integration.vllm.lmcache_mp_metadata import (
     LMCacheMPConnectorMetadata,
     LMCacheMPRequestMetadata,
     LMCacheMPRequestState,
     LMCacheMPRequestTracker,
+    LMCacheMPWorkerMetadata,
 )
 from lmcache.integration.vllm.utils import (
     mla_only,
@@ -98,6 +103,7 @@ if TYPE_CHECKING:
         PromMetricT,
     )
     from vllm.forward_context import ForwardContext
+    from vllm.v1.core.block_pool import BlockPool
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
@@ -320,6 +326,12 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         self.dispatcher = None
 
+        # Lazy offload configuration: when enabled, store operations are
+        # deferred until some threshold is reached, rather than submitted at every step
+        self.lazy_offload = vllm_config.kv_transfer_config.get_from_extra_config(
+            "lmcache.mp.lazy_offload", False
+        )
+
         if self.role == KVConnectorRole.SCHEDULER:
             # Banner from the scheduler role only, so tensor-parallel
             # deployments print it once rather than once per worker.
@@ -333,6 +345,15 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 extra_config=vllm_config.kv_transfer_config.kv_connector_extra_config,
             )
             self.request_trackers: dict[str, LMCacheMPRequestTracker] = {}
+
+            # GPU block pool reference
+            self._gpu_block_pool: BlockPool | None = None
+
+            # Initialize pending store for lazy offload mode
+            if self.lazy_offload:
+                self._pending_store = LazyOffloadPendingStore(
+                    vllm_config.kv_transfer_config.kv_connector_extra_config
+                )
         elif self.role == KVConnectorRole.WORKER:
             # Node routing: a worker connects only to its local LMCache server.
             # Global ranks are assigned to nodes in contiguous blocks:
@@ -635,6 +656,17 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # logger.error("Finished req ids: %s, %s", val[0], val[1])
         return val
 
+    def build_connector_worker_meta(self):
+        if not self.lazy_offload:
+            return None
+        completed_store_requests = self.worker_adapter.get_completed_store_requests()
+        if completed_store_requests:
+            return LMCacheMPWorkerMetadata(
+                completed_store_requests=completed_store_requests
+            )
+        else:
+            return None
+
     def get_block_ids_with_load_errors(self) -> set[int]:
         """
         Get the set of block IDs that failed to load.
@@ -676,6 +708,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
     # ==============================
     # Scheduler-side methods
     # ==============================
+
+    def bind_gpu_block_pool(self, gpu_block_pool: BlockPool) -> None:
+        """Bind GPU block pool so that we can touch blocks during stores.
+        Called by Scheduler after kv_cache_manager is ready."""
+        if self.role == KVConnectorRole.SCHEDULER:
+            logger.info("Bind GPU block pool in LMCacheMPConnector")
+            self._gpu_block_pool = gpu_block_pool
 
     def get_num_new_matched_tokens(
         self,
@@ -864,7 +903,21 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             connector_output (KVConnectorOutput): the worker-side
                 connectors output.
         """
-        return
+        if not self.lazy_offload:
+            return
+        if not self._gpu_block_pool:
+            raise ValueError("Lazy offload is enabled but gpu block pool is not binded")
+        meta = connector_output.kv_connector_worker_meta
+        if not isinstance(meta, LMCacheMPWorkerMetadata):
+            return
+        for req_id, count in meta.completed_store_requests.items():
+            if self.scheduler_adapter.update_pending_store_count(req_id, count):
+                block_hashes = self._pending_store.get_block_hashes(req_id)
+                self._gpu_block_pool.free_blocks(
+                    [self._gpu_block_pool.blocks[bid] for bid in block_hashes.keys()]
+                )
+                self._pending_store.remove_block_hashes(req_id)
+                # TODO: touch all keys in lmcache mp server
 
     def request_finished(
         self,
@@ -905,10 +958,12 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         # Clean up request tracker to prevent memory leak
         self._cleanup_request_tracker(request.request_id)
+
+        # have not been offloaded, the touch operation in end_session is incorrect
         # Notify LMCache to end the session for this request
         self.scheduler_adapter.end_session(request.request_id)
 
-        return True, (return_params or None)
+        return not self.lazy_offload, (return_params or None)
 
     def request_finished_all_groups(
         self,
@@ -1023,7 +1078,23 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 self._group_tokens_per_block,
             )
             if r_meta is not None:
-                metadata.add_request_metadata(r_meta)
+                # In lazy_offload mode, add to pending queue instead of immediate store
+                if self.lazy_offload:
+                    if self._gpu_block_pool:
+                        block_hashes = {
+                            bid: self._gpu_block_pool.blocks[bid].block_hash
+                            for bid in r_meta.op.flat_block_ids
+                        }
+                        self._pending_store.add(
+                            PendingStoreItem(metadata=r_meta), block_hashes
+                        )
+                    else:
+                        raise ValueError(
+                            "Lazy offload is enabled but no GPU block pool is binded"
+                        )
+                else:
+                    metadata.add_request_metadata(r_meta)
+        self._process_lazy_offload_store_requests(metadata)
 
     def _process_cached_requests(
         self,
@@ -1053,7 +1124,55 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             )
 
             if r_meta is not None:
-                metadata.add_request_metadata(r_meta)
+                # In lazy_offload mode, add to pending queue instead of immediate store
+                if self.lazy_offload:
+                    if self._gpu_block_pool:
+                        block_hashes = {
+                            bid: self._gpu_block_pool.blocks[bid].block_hash
+                            for bid in r_meta.op.flat_block_ids
+                        }
+                        self._pending_store.add(
+                            PendingStoreItem(metadata=r_meta), block_hashes
+                        )
+                    else:
+                        raise ValueError(
+                            "Lazy offload is enabled but no GPU block pool is binded"
+                        )
+                else:
+                    metadata.add_request_metadata(r_meta)
+        self._process_lazy_offload_store_requests(metadata)
+
+    def _process_lazy_offload_store_requests(
+        self, metadata: LMCacheMPConnectorMetadata
+    ):
+        if not self.lazy_offload or not self._pending_store.should_offload():
+            return
+
+        if not self._gpu_block_pool:
+            raise ValueError("Lazy offload is enabled but no GPU block pool is binded")
+
+        for item in self._pending_store.select_items():
+            request_id = item.metadata.request_id
+            old_block_hashes = self._pending_store.get_block_hashes(request_id)
+            gpu_block_ids = old_block_hashes.keys()
+            self._gpu_block_pool.touch(
+                [self._gpu_block_pool.blocks[bid] for bid in gpu_block_ids]
+            )
+            new_block_hashes = {
+                bid: self._gpu_block_pool.blocks[bid].block_hash
+                for bid in gpu_block_ids
+            }
+            if old_block_hashes == new_block_hashes:
+                metadata.add_request_metadata(item.metadata)
+            else:
+                logger.warning(
+                    "Block hashes mismatch for request %s, trigger lazy offload failed",
+                    item.metadata.request_id,
+                )
+                self._gpu_block_pool.free_blocks(
+                    [self._gpu_block_pool.blocks[bid] for bid in gpu_block_ids]
+                )
+                self._pending_store.remove_block_hashes(request_id)
 
     def _report_block_allocation_deltas(
         self,

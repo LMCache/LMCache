@@ -634,6 +634,11 @@ class LMCacheMPSchedulerAdapter:
         self._heartbeats: dict[str, HeartbeatThread] = {}
         self._heartbeat_lock = threading.Lock()
 
+        # For TP/PP: track partial store completions across steps.
+        # Events must be reported by all world_size workers before considered complete.
+        self._expected_worker_count = parallel_strategy.vllm_world_size
+        self._store_request_pending_counts: dict[str, int] = {}
+
     @property
     def world_size(self) -> int:
         """Get the kv world size."""
@@ -1005,6 +1010,25 @@ class LMCacheMPSchedulerAdapter:
             cache_salt=cache_salt,
         )
 
+    def update_pending_store_count(self, req_id: str, count: int) -> bool:
+        """
+        Update the pending store count for a request.
+
+        Args:
+            req_id: The request ID.
+            count: The number of workers that have finished the request.
+
+        Returns:
+            True if the store request is finished, False otherwise.
+        """
+        total = self._store_request_pending_counts.get(req_id, 0) + count
+        if total >= self._expected_worker_count:
+            self._store_request_pending_counts.pop(req_id, None)
+            return True
+        else:
+            self._store_request_pending_counts[req_id] = total
+            return False
+
 
 class LMCacheMPWorkerAdapter:
     def __init__(
@@ -1172,6 +1196,15 @@ class LMCacheMPWorkerAdapter:
                 ),
             },
         )
+
+        self.lazy_offload = (
+            extra_config.get("lmcache.mp.lazy_offload", False)
+            if extra_config
+            else False
+        )
+
+        # Completed store requests to report via build_connector_worker_meta
+        self._completed_store_requests: dict[str, int] = {}
 
     @property
     def is_healthy(self) -> bool:
@@ -1601,6 +1634,10 @@ class LMCacheMPWorkerAdapter:
             # first and deletes the request, so we must not also report it
             # in finished_sending.
             ret_stores -= finished_retrieves
+            if self.lazy_offload:
+                for req_id in ret_stores:
+                    self._completed_store_requests[req_id] = 1
+                return None, finished_retrieves
             return ret_stores, finished_retrieves
 
         finished_stores = set()
@@ -1668,7 +1705,19 @@ class LMCacheMPWorkerAdapter:
                 kv_rank=self.worker_id,
             )
 
+        if self.lazy_offload:
+            for req_id in ret_stores:
+                self._completed_store_requests[req_id] = 1
+            return None, finished_retrieves
         return ret_stores, finished_retrieves
+
+    def get_completed_store_requests(self) -> dict[str, int] | None:
+        """Return completed store requests since the last call."""
+        if not self._completed_store_requests:
+            return None
+        completed_store_requests = self._completed_store_requests
+        self._completed_store_requests = {}
+        return completed_store_requests
 
     def num_blocks_per_chunk(self) -> int:
         """
