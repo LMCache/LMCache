@@ -9,10 +9,8 @@ only for the duration of this module's import (see _install_nixl_mock_if_absent)
 """
 
 # Standard
-from typing import Any
 from unittest.mock import MagicMock
 import asyncio
-import importlib
 import sys
 import types
 
@@ -82,25 +80,18 @@ _NIXL_MOCK_KEYS = _install_nixl_mock_if_absent()
 
 
 # First Party
-lmcache_module = importlib.import_module("lmcache")
-torch_dev = lmcache_module.torch_dev
-torch_device_type = lmcache_module.torch_device_type
-
-CacheEngineKey = importlib.import_module("lmcache.utils").CacheEngineKey
-LMCacheEngineConfig = importlib.import_module("lmcache.v1.config").LMCacheEngineConfig
-PagedTensorMemoryAllocator = importlib.import_module(
-    "lmcache.v1.memory_allocators.paged_tensor_memory_allocator"
-).PagedTensorMemoryAllocator
-memory_management_module = importlib.import_module("lmcache.v1.memory_management")
-MemoryFormat = memory_management_module.MemoryFormat
-LMCacheMetadata = importlib.import_module("lmcache.v1.metadata").LMCacheMetadata
-CreateStorageBackends = importlib.import_module(
-    "lmcache.v1.storage_backend"
-).CreateStorageBackends
-LocalCPUBackend = importlib.import_module(
-    "lmcache.v1.storage_backend.local_cpu_backend"
-).LocalCPUBackend
-nixl_module = importlib.import_module("lmcache.v1.storage_backend.nixl_storage_backend")
+from lmcache import torch_dev, torch_device_type  # noqa: E402
+from lmcache.utils import CacheEngineKey  # noqa: E402
+from lmcache.v1.config import LMCacheEngineConfig  # noqa: E402
+from lmcache.v1.memory_allocators.paged_tensor_memory_allocator import (  # noqa: E402
+    PagedTensorMemoryAllocator,
+)
+from lmcache.v1.memory_management import MemoryFormat  # noqa: E402
+from lmcache.v1.metadata import LMCacheMetadata  # noqa: E402
+from lmcache.v1.storage_backend import CreateStorageBackends  # noqa: E402
+from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend  # noqa: E402
+import lmcache.v1.memory_management as memory_management_module  # noqa: E402
+import lmcache.v1.storage_backend.nixl_storage_backend as nixl_module  # noqa: E402
 
 # nixl_module has now captured whatever it needs from the (possibly fake) nixl
 # package. Drop the fake from sys.modules so it cannot leak into other test
@@ -114,7 +105,7 @@ for _name in _NIXL_MOCK_KEYS:
 # ---------------------------------------------------------------------------
 
 
-def _make_metadata() -> Any:
+def _make_metadata() -> LMCacheMetadata:
     return LMCacheMetadata(
         model_name="test_model",
         world_size=1,
@@ -126,7 +117,7 @@ def _make_metadata() -> Any:
     )
 
 
-def _nixl_cpu_config(pool_size: int = 0) -> Any:
+def _nixl_cpu_config(pool_size: int = 0) -> LMCacheEngineConfig:
     config = LMCacheEngineConfig.from_defaults(
         chunk_size=256,
         local_cpu=True,
@@ -150,14 +141,14 @@ def _nixl_cpu_config(pool_size: int = 0) -> Any:
     return config
 
 
-def _nixl_gpu_config(pool_size: int = 0) -> Any:
+def _nixl_gpu_config(pool_size: int = 0) -> LMCacheEngineConfig:
     config = _nixl_cpu_config(pool_size)
     config.nixl_buffer_device = torch_device_type
     config.nixl_buffer_size = 1024 * 1024
     return config
 
 
-def _make_paged_allocator(metadata: Any) -> Any:
+def _make_paged_allocator(metadata: LMCacheMetadata) -> PagedTensorMemoryAllocator:
     shapes = metadata.get_shapes()
     dtypes = metadata.get_dtypes()
     chunk_bytes = sum(
@@ -172,7 +163,9 @@ def _make_paged_allocator(metadata: Any) -> Any:
     )
 
 
-def _make_local_cpu_paged(monkeypatch, metadata: Any, local_cpu: bool = True) -> Any:
+def _make_local_cpu_paged(
+    monkeypatch, metadata: LMCacheMetadata, local_cpu: bool = True
+) -> LocalCPUBackend:
     """LocalCPUBackend with memory_allocator = MixedMemoryAllocator(use_paging=True).
 
     Sized to exactly 4 chunks so tests that need to drive the pool to
@@ -207,7 +200,7 @@ def _make_local_cpu_paged(monkeypatch, metadata: Any, local_cpu: bool = True) ->
     return LocalCPUBackend(config=config, metadata=metadata, dst_device="cpu")
 
 
-def _make_local_cpu_flat(metadata: Any) -> Any:
+def _make_local_cpu_flat(metadata: LMCacheMetadata) -> LocalCPUBackend:
     """LocalCPUBackend memory_allocator = MixedMemoryAllocator(use_paging=False)."""
     config = LMCacheEngineConfig.from_defaults(
         chunk_size=256, local_cpu=True, lmcache_instance_id="test_flat"
@@ -265,7 +258,7 @@ def _build_static(monkeypatch, metadata, config, local_cpu_backend=None):
     return backend, loop
 
 
-def _make_key(idx: int) -> Any:
+def _make_key(idx: int) -> CacheEngineKey:
     """Unique CacheEngineKey for tests."""
     return CacheEngineKey(
         model_name="test_model",
@@ -657,7 +650,7 @@ class TestAllocatorMethodsRouteThroughLocalCpu:
             local_cpu.memory_allocator.close()
 
 
-def _scheduler_metadata() -> Any:
+def _scheduler_metadata() -> LMCacheMetadata:
     return LMCacheMetadata(
         model_name="test_model",
         world_size=1,
