@@ -94,7 +94,7 @@ jobs:
                   --exclude libc10_cuda.so
                   --exclude libcudart.so.12
                   -w {dest_dir} {wheel}
-                CIBW_TEST_COMMAND: "python -c 'import lmcache.c_ops'"
+                CIBW_TEST_COMMAND: "python {project}/.github/scripts/assert_native_ops.py"
               run: |
                 python -m cibuildwheel --output-dir dist
 
