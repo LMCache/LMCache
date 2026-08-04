@@ -68,6 +68,14 @@ GPU_RELEASE_TIMEOUT="${GPU_RELEASE_TIMEOUT:-180}"
 # resumed state shows up within the first few tokens, but a longer generation
 # makes an accidental match astronomically unlikely.
 MAX_TOKENS="${MAX_TOKENS:-128}"
+# Share Triton autotune winners between the two vLLM launches. Without this,
+# each launch re-benchmarks @triton.autotune kernels and can select different
+# configs; the KDA prefill kernels are numerically config-sensitive, so the
+# two greedy runs can then diverge without any KV corruption. With the shared
+# cache, launch 2 reuses launch 1's tuned configs and the exact-match
+# comparison below is sound.
+export TRITON_CACHE_AUTOTUNING=1
+export TRITON_CACHE_DIR="/tmp/build_${BUILD_ID}_triton_cache"
 # Seconds to let async LMCache stores drain before restarting vLLM.
 STORE_DRAIN_SECONDS="${STORE_DRAIN_SECONDS:-20}"
 ENGINE_DRIVEN_TRANSPORT="${ENGINE_DRIVEN_TRANSPORT:-}"
@@ -127,7 +135,7 @@ launch_vllm() {
         --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
         --port "$saved_port" \
         --block-size 944 \
-        --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_load_failure_policy\": \"recompute\", \"kv_connector_extra_config\": {\"lmcache.mp.port\": $LMCACHE_PORT, \"lmcache.mp.mq_timeout\": 30}}" \
+        --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_load_failure_policy\": \"recompute\", \"kv_connector_extra_config\": {\"lmcache.mp.port\": $LMCACHE_PORT, \"lmcache.mp.mq_timeout\": 120}}" \
         > "$log_file" 2>&1 &
     VLLM_PID=$!
     echo "$VLLM_PID" >> "$PID_FILE"
