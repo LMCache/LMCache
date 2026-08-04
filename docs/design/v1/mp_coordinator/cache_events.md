@@ -93,7 +93,7 @@ listener plumbing or a dedicated flush task:
   (`keys`+`sizes`+`backend`), `l2.keys.accessed`, and `l2.keys.deleted`
   events; the backend name is the registered adapter type and the
   optional `shared` flag comes from the adapter config, both stamped by
-  the storage manager via `set_backend_name` at build time — so
+  the storage manager via `set_backend_identity` at build time — so
   **runtime-added adapters emit automatically**. Batches carry the
   `shared` flag; for shared batches the backend type name identifies
   the pool fleet-wide (one pool per backend type), so the directory

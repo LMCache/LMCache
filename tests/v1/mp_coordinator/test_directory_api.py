@@ -178,7 +178,6 @@ def test_stats_reports_counts_and_gap_flag():
         assert instance["last_seq"] == 6
         assert instance["gap_detected"] is True
         assert instance["num_l1_keys"] == 2
-        assert instance["num_l2_keys"] == 1
 
 
 # -- Request validation ------------------------------------------------------

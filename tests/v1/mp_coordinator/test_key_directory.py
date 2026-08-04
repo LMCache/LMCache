@@ -139,11 +139,9 @@ def test_removal_of_one_tier_keeps_the_other():
     [placements] = directory.lookup([_key(1)])
     assert [(p.tier, p.backend) for p in placements] == [(Tier.L2, "fs")]
     # ``num_l1_keys`` counts the fencing index; the L1 delete removed
-    # the key from it, while the L2 placement stays visible in
-    # ``num_l2_keys``.
-    stats = directory.stats().instances["node-a"]
-    assert stats.num_l1_keys == 0
-    assert stats.num_l2_keys == 1
+    # the key from it even though L2 still holds it (the placement
+    # itself stays visible via lookup / the keys listing).
+    assert directory.stats().instances["node-a"].num_l1_keys == 0
 
 
 def test_removal_of_unknown_key_is_noop():
@@ -322,11 +320,9 @@ def test_stats_counts_keys_and_placements():
     assert stats.num_keys == 2
     assert stats.num_placements == 3
     assert stats.instances["node-a"].num_l1_keys == 2
-    assert stats.instances["node-a"].num_l2_keys == 0
     # node-b reported only an L2 placement: absent from the L1 fencing
-    # index, visible in the read-time L2 count.
+    # index (its placement stays visible via lookup / the keys listing).
     assert stats.instances["node-b"].num_l1_keys == 0
-    assert stats.instances["node-b"].num_l2_keys == 1
 
 
 # -- Shared locations ----------------------------------------------------------

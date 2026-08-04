@@ -76,7 +76,7 @@ class L2EvictionManager:
     def consume(self, batch: CacheEventBatch) -> None:
         """Apply one directory-applied cache-event batch to the LRU.
 
-        The :class:`CacheEventRouter` consumer hook: L2 stores register,
+        The :class:`CacheEventBroadcaster` consumer hook: L2 stores register,
         L2 accesses touch, L2 deletes drop; other tiers are ignored
         (per-salt byte accounting lives in the L2 usage view).
 
@@ -85,8 +85,8 @@ class L2EvictionManager:
         copy still holds bytes the key must stay evictable — otherwise
         those bytes could exceed quota with nothing for the planner to
         select. This reads the usage view *after* it consumed the same
-        batch, which the router guarantees by registration order (see
-        ``create_app``).
+        batch, which the broadcaster guarantees by registration order
+        (see ``create_app``).
 
         Args:
             batch: The applied batch.

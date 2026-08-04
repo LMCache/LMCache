@@ -4,8 +4,8 @@
 The global key directory is the source of truth for placements; this
 manager maintains the **usage view** of it — per-salt L2 byte totals —
 from the same applied cache-event stream (it is a
-:class:`~lmcache.v1.mp_coordinator.cache_control.event_router.CacheEventConsumer`
-registered on the ``CacheEventRouter``).
+:class:`~lmcache.v1.mp_coordinator.cache_control.event_broadcaster.CacheEventConsumer`
+registered on the ``CacheEventBroadcaster``).
 """
 
 # Future
@@ -46,7 +46,7 @@ class L2UsageManager:
     def consume(self, batch: CacheEventBatch) -> None:
         """Apply one directory-applied cache-event batch to the view.
 
-        The :class:`CacheEventRouter` consumer hook: L2 ``STORE``
+        The :class:`CacheEventBroadcaster` consumer hook: L2 ``STORE``
         upserts placement bytes (delta on re-store), L2 ``DELETE``
         removes them; ``ACCESS`` and other tiers are ignored.
 

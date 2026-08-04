@@ -1067,7 +1067,7 @@ class StorageManager:
         descriptor = AdapterDescriptor(index=adapter_id, config=config)
         # Stamp the registered type name so the adapter's cache events on
         # the observability bus carry their backend identity.
-        adapter.set_backend_name(descriptor.type_name, shared=config.shared)
+        adapter.set_backend_identity(descriptor.type_name, shared=config.shared)
         return adapter_id, adapter, descriptor
 
     def _should_enable_l2_eviction(

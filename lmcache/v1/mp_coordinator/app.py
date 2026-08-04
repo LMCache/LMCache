@@ -31,7 +31,9 @@ import httpx
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.quota_manager import QuotaManager
 from lmcache.v1.mp_coordinator.blend_directory import GlobalBlendMatcher
-from lmcache.v1.mp_coordinator.cache_control.event_router import CacheEventRouter
+from lmcache.v1.mp_coordinator.cache_control.event_broadcaster import (
+    CacheEventBroadcaster,
+)
 from lmcache.v1.mp_coordinator.cache_control.eviction_manager import (
     L2EvictionManager,
 )
@@ -97,14 +99,14 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
     blend_directory = GlobalBlendMatcher(
         chunk_size=config.chunk_size, probe_stride=config.blend_probe_stride
     )
-    event_router = CacheEventRouter()
+    event_broadcaster = CacheEventBroadcaster()
     # Order matters: the eviction manager's delete handling reads the
     # usage view for the same batch, so the usage view must consume first.
-    event_router.register_consumer(usage_manager)
-    event_router.register_consumer(eviction_manager)
+    event_broadcaster.register_consumer(usage_manager)
+    event_broadcaster.register_consumer(eviction_manager)
     resync_manager = L2ResyncManager(
         key_directory=key_directory,
-        event_router=event_router,
+        event_broadcaster=event_broadcaster,
         page_size=config.resync_page_size,
     )
 
@@ -116,7 +118,7 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
         prefetch_manager=prefetch_manager,
         token_hasher=token_hasher,
         key_directory=key_directory,
-        event_router=event_router,
+        event_broadcaster=event_broadcaster,
     )
 
     async def _health_loop() -> None:

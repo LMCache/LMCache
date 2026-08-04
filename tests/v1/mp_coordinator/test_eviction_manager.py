@@ -580,7 +580,7 @@ def test_drop_pins_unknown_key_is_noop():
 
 
 # =============================================================================
-# consume (CacheEventRouter consumer hook)
+# consume (CacheEventBroadcaster consumer hook)
 # =============================================================================
 
 

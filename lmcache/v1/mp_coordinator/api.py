@@ -62,11 +62,7 @@ class CacheEventBatch:
     """A batch of same-typed cache events from one MP server.
 
     Attributes:
-        instance_id: The emitter's stream id (non-empty). MP servers use
-            their instance id; a shared medium's controller (which
-            drives pool evictions) reports under its own stable id.
-            Distinct emitters must use distinct ids, since ``seq``
-            dedup and ordering are per stream.
+        instance_id: The emitter's unique ID (non-empty).
         incarnation: The emitter's restart counter (non-negative). A
             higher value fences off all placements reported by lower
             values of the same ``instance_id``.

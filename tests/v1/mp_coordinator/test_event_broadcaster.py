@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the cache-event router (consumer registration + fan-out)."""
+"""Tests for the cache-event broadcaster (consumer registration + fan-out)."""
 
 # First Party
 from lmcache.v1.distributed.api import ObjectKey, Tier
@@ -8,7 +8,9 @@ from lmcache.v1.mp_coordinator.api import (
     CacheEventEntry,
     CacheEventType,
 )
-from lmcache.v1.mp_coordinator.cache_control.event_router import CacheEventRouter
+from lmcache.v1.mp_coordinator.cache_control.event_broadcaster import (
+    CacheEventBroadcaster,
+)
 
 
 class _RecordingConsumer:
@@ -35,26 +37,26 @@ def _batch(seq: int = 1) -> CacheEventBatch:
 
 def test_route_fans_out_to_consumers_in_registration_order():
     log: list[tuple[str, CacheEventBatch]] = []
-    router = CacheEventRouter()
-    router.register_consumer(_RecordingConsumer("first", log))
-    router.register_consumer(_RecordingConsumer("second", log))
+    broadcaster = CacheEventBroadcaster()
+    broadcaster.register_consumer(_RecordingConsumer("first", log))
+    broadcaster.register_consumer(_RecordingConsumer("second", log))
 
     batch = _batch()
-    router.route(batch)
+    broadcaster.broadcast(batch)
 
     assert log == [("first", batch), ("second", batch)]
 
 
 def test_route_with_no_consumers_is_a_noop():
-    CacheEventRouter().route(_batch())
+    CacheEventBroadcaster().broadcast(_batch())
 
 
 def test_consumer_registered_later_sees_only_later_batches():
     log: list[tuple[str, CacheEventBatch]] = []
-    router = CacheEventRouter()
+    broadcaster = CacheEventBroadcaster()
     first, second = _batch(seq=1), _batch(seq=2)
-    router.route(first)
-    router.register_consumer(_RecordingConsumer("late", log))
-    router.route(second)
+    broadcaster.broadcast(first)
+    broadcaster.register_consumer(_RecordingConsumer("late", log))
+    broadcaster.broadcast(second)
 
     assert log == [("late", second)]

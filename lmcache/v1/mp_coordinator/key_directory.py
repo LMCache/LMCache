@@ -83,20 +83,13 @@ class InstanceDirectoryStats:
         gap_detected: ``True`` if a ``seq`` gap was observed for the
             instance's stream.
         num_l1_keys: Number of keys the stream has reported L1
-            placements for (the fencing index). Approximate for shared
-            pools: a counted placement may since have been deleted or
-            re-reported by another emitter.
-        num_l2_keys: Number of keys currently holding an L2 placement
-            whose last reporter is this instance (computed from the
-            placements at read time; L2 is not fenced, so this survives
-            the stream's restarts).
+            placements for (eventually consistent).
     """
 
     incarnation: int
     last_seq: int
     gap_detected: bool
     num_l1_keys: int
-    num_l2_keys: int
 
 
 @dataclass(frozen=True)
@@ -254,23 +247,15 @@ class KeyDirectory:
             ``instance_id``.
         """
         with self._lock:
-            num_placements = 0
-            l2_keys_by_instance: dict[str, int] = {}
-            for record in self._records.values():
-                num_placements += len(record.placements)
-                for reporter in {
-                    p.instance_id for p in record.placements if p.tier == Tier.L2
-                }:
-                    l2_keys_by_instance[reporter] = (
-                        l2_keys_by_instance.get(reporter, 0) + 1
-                    )
+            num_placements = sum(
+                len(record.placements) for record in self._records.values()
+            )
             instances = {
                 instance_id: InstanceDirectoryStats(
                     incarnation=state.incarnation,
                     last_seq=state.last_seq,
                     gap_detected=state.gap_detected,
                     num_l1_keys=len(state.keys),
-                    num_l2_keys=l2_keys_by_instance.get(instance_id, 0),
                 )
                 for instance_id, state in self._instances.items()
             }

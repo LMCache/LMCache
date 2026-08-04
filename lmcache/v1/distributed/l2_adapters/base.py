@@ -359,7 +359,7 @@ class L2AdapterInterface(ABC):
         """Register a listener to receive L2 adapter events."""
         self._listeners.append(listener)
 
-    def set_backend_name(self, name: str, shared: bool = False) -> None:
+    def set_backend_identity(self, name: str, shared: bool = False) -> None:
         """Set the identity used to tag this adapter's cache events.
 
         Called by the storage manager right after construction (initial

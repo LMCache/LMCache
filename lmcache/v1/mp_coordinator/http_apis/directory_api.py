@@ -49,7 +49,7 @@ async def report_cache_events(
     for batch in body.batches:
         result = ctx.key_directory.apply_batch(batch)
         if result == ApplyResult.APPLIED:
-            ctx.event_router.route(batch)
+            ctx.event_broadcaster.broadcast(batch)
             response.applied += 1
         elif result == ApplyResult.DUPLICATE:
             response.duplicates += 1

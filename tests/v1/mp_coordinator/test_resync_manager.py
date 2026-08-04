@@ -10,7 +10,9 @@ import pytest
 
 # First Party
 from lmcache.v1.distributed.quota_manager import QuotaManager
-from lmcache.v1.mp_coordinator.cache_control.event_router import CacheEventRouter
+from lmcache.v1.mp_coordinator.cache_control.event_broadcaster import (
+    CacheEventBroadcaster,
+)
 from lmcache.v1.mp_coordinator.cache_control.eviction_manager import L2EvictionManager
 from lmcache.v1.mp_coordinator.cache_control.resync_manager import L2ResyncManager
 from lmcache.v1.mp_coordinator.cache_control.usage_manager import L2UsageManager
@@ -36,7 +38,7 @@ def _make_components() -> tuple[_Components, L2EvictionManager, L2ResyncManager]
     directory = KeyDirectory()
     usage = L2UsageManager()
     eviction = L2EvictionManager(QuotaManager(), usage, eviction_ratio=1.0)
-    router = CacheEventRouter()
+    router = CacheEventBroadcaster()
     router.register_consumer(usage)
     router.register_consumer(eviction)
     resync = L2ResyncManager(directory, router, page_size=2)
@@ -262,7 +264,7 @@ class TestResyncFrom:
     @pytest.mark.asyncio
     async def test_constructor_rejects_non_positive_page_size(self):
         with pytest.raises(ValueError):
-            L2ResyncManager(KeyDirectory(), CacheEventRouter(), page_size=0)
+            L2ResyncManager(KeyDirectory(), CacheEventBroadcaster(), page_size=0)
 
 
 # =============================================================================

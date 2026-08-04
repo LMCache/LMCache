@@ -131,10 +131,9 @@ APIs do; requires `model_name` / `world_size` / `cache_salt` since key
 identity includes them) and return each key's placements.
 Position-independent token matching arrives with the content index (M2).
 - `GET /directory/stats` — key/placement counts plus per-instance stream
-state (`incarnation`, `last_seq`, `gap_detected`, and per-tier key
-counts: `num_l1_keys` from the fencing index, `num_l2_keys` computed
-from the placements at read time), for observability and the future
-replay trigger.
+state (`incarnation`, `last_seq`, `gap_detected`, `num_l1_keys` from
+the fencing index), for observability and the future replay trigger;
+per-key L2 detail lives on the keys listing endpoint.
 
 Type placement:
 
@@ -152,7 +151,7 @@ MP-server emission of the `CacheEvent` stream (L1 + L2, `incarnation` =
 server start time) is implemented — see
 [cache_events.md](cache_events.md). It is the fleet's single event
 stream: `/directory/events` ingestion fans applied batches out to the
-router's registered consumers (`CacheEventRouter`) — derived views such
+router's registered consumers (`CacheEventBroadcaster`) — derived views such
 as the per-salt L2 usage view and the eviction LRU (see
 [l2_usage_and_eviction.md](l2_usage_and_eviction.md)).
 

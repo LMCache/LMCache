@@ -18,7 +18,9 @@ import httpx
 
 # First Party
 from lmcache.v1.distributed.quota_manager import QuotaManager
-from lmcache.v1.mp_coordinator.cache_control.event_router import CacheEventRouter
+from lmcache.v1.mp_coordinator.cache_control.event_broadcaster import (
+    CacheEventBroadcaster,
+)
 from lmcache.v1.mp_coordinator.cache_control.eviction_manager import L2EvictionManager
 from lmcache.v1.mp_coordinator.cache_control.prefetch_manager import PrefetchManager
 from lmcache.v1.mp_coordinator.cache_control.usage_manager import L2UsageManager
@@ -42,7 +44,7 @@ class CoordinatorContext:
             (configured to match the fleet's ``chunk_size`` / ``hash_algorithm``).
         key_directory: Fleet-wide key → placements directory built from
             MP-server cache events (eventually consistent).
-        event_router: Fans directory-applied cache-event batches out to
+        event_broadcaster: Fans directory-applied cache-event batches out to
             the registered consumers.
     """
 
@@ -53,7 +55,7 @@ class CoordinatorContext:
     prefetch_manager: PrefetchManager
     token_hasher: TokenHasher
     key_directory: KeyDirectory
-    event_router: CacheEventRouter
+    event_broadcaster: CacheEventBroadcaster
 
 
 def get_context(request: Request) -> CoordinatorContext:

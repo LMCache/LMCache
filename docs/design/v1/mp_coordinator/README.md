@@ -64,7 +64,7 @@ lmcache/v1/mp_coordinator/
   blend_client.py       # mp-server-side blend publish/evict/match client
   cache_control/
     __init__.py
-    event_router.py     # fans directory-applied events to registered consumers
+    event_broadcaster.py     # fans directory-applied events to registered consumers
     usage_manager.py    # per-salt L2 usage view (a router consumer)
     eviction_manager.py # LRU + trigger-watermark driven eviction loop, pin tracking
     prefetch_manager.py # dispatches warm prefetch to a named MP server
@@ -158,7 +158,7 @@ liveness.
 The `cache_control/` package owns everything downstream of the fleet-wide L2
 usage stream:
 
-- `event_router.py` — fans directory-applied cache events (from
+- `event_broadcaster.py` — fans directory-applied cache events (from
   `POST /directory/events`) to its registered `CacheEventConsumer`s.
   Adding a consumer is a wiring change in `app.py`, not a router change.
 - `usage_manager.py` — the per-`cache_salt` L2 byte totals, maintained

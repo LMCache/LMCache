@@ -142,7 +142,7 @@ def test_pin_then_unpin_tracks_l2_eviction():
             client.put("/quota/config", json={"default_limit_gb": 0}).status_code == 200
         )
         for k in keys:
-            ctx.event_router.route(
+            ctx.event_broadcaster.broadcast(
                 CacheEventBatch(
                     instance_id="mp-1",
                     incarnation=1,

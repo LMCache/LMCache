@@ -4,7 +4,7 @@
 On boot, paginates an MP server's ``GET /cache/objects`` (the default
 adapter, as before), synthesizes ``STORE`` batches, and feeds them to
 the key directory (placements) and
-— through the ``CacheEventRouter`` — to every registered consumer (the
+— through the ``CacheEventBroadcaster`` — to every registered consumer (the
 usage view, the eviction LRU), so quota enforcement starts from a
 representative baseline rather than zero. The directory side goes
 through :meth:`KeyDirectory.reconcile` — no stream-cursor bookkeeping —
@@ -34,8 +34,8 @@ from lmcache.v1.mp_coordinator.api import (
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.mp_coordinator.cache_control.event_router import (
-        CacheEventRouter,
+    from lmcache.v1.mp_coordinator.cache_control.event_broadcaster import (
+        CacheEventBroadcaster,
     )
     from lmcache.v1.mp_coordinator.key_directory import KeyDirectory
     from lmcache.v1.mp_coordinator.registry import InstanceRegistry, MPInstance
@@ -50,7 +50,7 @@ class L2ResyncManager:
     Args:
         key_directory: The fleet key directory; backfilled via its
             gate-bypassing :meth:`KeyDirectory.reconcile`.
-        event_router: The applied-batch fan-out; every synthesized
+        event_broadcaster: The applied-batch fan-out; every synthesized
             batch is routed to the registered consumers.
         page_size: ``page_size`` forwarded to the MP server's
             ``/cache/objects`` endpoint.
@@ -59,13 +59,13 @@ class L2ResyncManager:
     def __init__(
         self,
         key_directory: KeyDirectory,
-        event_router: CacheEventRouter,
+        event_broadcaster: CacheEventBroadcaster,
         page_size: int = 1000,
     ) -> None:
         if page_size <= 0:
             raise ValueError(f"page_size must be positive (got {page_size})")
         self._key_directory = key_directory
-        self._event_router = event_router
+        self._event_broadcaster = event_broadcaster
         self._page_size = page_size
 
     async def resync_from(
@@ -151,7 +151,7 @@ class L2ResyncManager:
                     entries=batch_entries,
                 )
                 self._key_directory.reconcile(batch)
-                self._event_router.route(batch)
+                self._event_broadcaster.broadcast(batch)
             page_token = body.get("next_page_token")
             if page_token is None:
                 break

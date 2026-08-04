@@ -36,7 +36,7 @@ MP server (store/lookup)
         ▼
   POST /directory/events ──▶ Coordinator
                         ├─ KeyDirectory: seq dedup / fencing, placements
-                        └─ CacheEventRouter (applied batches → consumers):
+                        └─ CacheEventBroadcaster (applied batches → consumers):
                            ├─ L2UsageManager.consume: per-salt byte view
                            └─ L2EvictionManager.consume: per-salt LRU
                         (QuotaManager: per-salt byte limits)
@@ -72,7 +72,7 @@ boundary (``obj.to_encoded_object_key()`` in ``cache_events.py``).
 The per-salt L2 byte totals are a **derived view of the global key
 directory**, constructed and maintained in this manager rather than
 inside the directory itself: it is a ``CacheEventConsumer`` registered
-on the ``CacheEventRouter``, so it sees exactly the batches the
+on the ``CacheEventBroadcaster``, so it sees exactly the batches the
 directory applied. Accounting mirrors the directory's placement
 identity — re-storing a placement delta-adjusts, two private copies of
 one key count twice, N reporters of one shared pool count once — and
@@ -149,7 +149,7 @@ accounting lives in ``L2UsageManager``; the eviction manager only tracks order.
 
 Event ingestion happens on ``POST /directory/events`` (the fleet
 cache-event stream); the key directory applies each batch and the
-``CacheEventRouter`` fans applied batches to its registered consumers
+``CacheEventBroadcaster`` fans applied batches to its registered consumers
 (the usage view and the eviction LRU; each ``consume`` filters to
 ``l2``), so replayed batches cannot double-count.
 

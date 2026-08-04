@@ -8,7 +8,7 @@ every registered :class:`CacheEventConsumer` (today: the eviction LRU).
 Any future ingestion path (e.g. a message-queue consumer) calls the same
 router, so consumers are independent of the transport — and the router
 is independent of the consumers: they attach through
-:meth:`CacheEventRouter.register_consumer` (the same registration shape
+:meth:`CacheEventBroadcaster.register_consumer` (the same registration shape
 as ``EventBus.register_subscriber``), so adding one is a wiring change
 in ``app.py``, not a router change.
 """
@@ -39,7 +39,7 @@ class CacheEventConsumer(Protocol):
         ...
 
 
-class CacheEventRouter:
+class CacheEventBroadcaster:
     """Fans one applied cache-event batch out to every registered consumer.
 
     Consumers attach via :meth:`register_consumer` after construction
@@ -63,7 +63,7 @@ class CacheEventRouter:
         """
         self._consumers.append(consumer)
 
-    def route(self, batch: CacheEventBatch) -> None:
+    def broadcast(self, batch: CacheEventBatch) -> None:
         """Deliver one batch to every consumer.
 
         Call only for batches the key directory applied — replays and
