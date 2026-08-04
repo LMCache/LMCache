@@ -244,6 +244,13 @@ jobs:
           CACHE_MARKER: ${{ matrix.model.cache_marker }}
         run: bash .github/scripts/download_gh_release_model.sh
 
+      # The three e2e steps below cover the three worker-side transfer
+      # paths exactly once: engine-driven splits into pickle and shm data
+      # modes, and lmcache-driven is the IPC handle path.
+      #
+      # Never pass a bare `engine_driven` here: LMCACHE_E2E_DATA_MODE then
+      # defaults to shm, so the step silently becomes a second copy of the
+      # shm leg below instead of testing anything new.
       - name: vLLM e2e — Engine-driven (pickle)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -254,9 +261,11 @@ jobs:
           VLLM_PORT_E2E=18000 \
             bash .github/scripts/cpu_device_test.sh vllm_e2e
 
-      # POSIX SHM transport is Linux-only.
+      # Runs on macOS too: POSIX SHM turns out to work there. The runner
+      # has been executing this exact configuration all along via the
+      # mislabelled `engine_driven` step this replaces, which reports
+      # "Transport mode confirmed: shm" on Darwin.
       - name: vLLM e2e — Engine-driven (shm)
-        if: runner.os == 'Linux'
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
@@ -266,11 +275,17 @@ jobs:
           VLLM_PORT_E2E=18001 \
             bash .github/scripts/cpu_device_test.sh vllm_e2e
 
-      - name: vLLM e2e — Engine-driven
+      # Exercises LMCacheDrivenTransferContext (server-side IPC handle
+      # path) rather than the worker-side gather/scatter copy. On CPU it
+      # resolves to CpuShmTensorWrapper, bound to the device through
+      # CpuDeviceSpec.ipc_wrapper_cls (lmcache/v1/platform/cpu/shm.py).
+      # `Server bench — LMCache-driven` already covers this transport,
+      # but nothing covered it end-to-end through vLLM.
+      - name: vLLM e2e — LMCache-driven
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          LMCACHE_E2E_TRANSPORT_MODE=engine_driven \
+          LMCACHE_E2E_TRANSPORT_MODE=lmcache_driven \
           LMCACHE_HTTP_PORT_E2E=18084 \
           LMCACHE_ZMQ_PORT_E2E=15559 \
           VLLM_PORT_E2E=18002 \
