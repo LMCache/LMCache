@@ -315,6 +315,6 @@ jobs:
       - name: Aggregate and pin / report
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PIN_SCRIPT: ${{ github.workspace }}/.buildkite/k3_tests/multiprocess/scripts/pin-tested-vllm.sh
+          PIN_SCRIPT: ${{ github.workspace }}/.github/scripts/pin-tested-vllm.sh
           EXPECTED_OSS: 'ubuntu-22.04 macos-latest'
         run: bash .github/scripts/nightly-aggregate-vllm-verify.sh

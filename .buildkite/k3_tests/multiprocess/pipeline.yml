@@ -301,7 +301,7 @@ steps:
     if: build.env("VERIFY_AND_PIN_VLLM") =~ /true/
     command: |
       .buildkite/k3_tests/multiprocess/run.sh vllm_bench
-      bash .buildkite/k3_tests/multiprocess/scripts/pin-tested-vllm.sh
+      bash .github/scripts/pin-tested-vllm.sh
     timeout_in_minutes: 30
     agents: { queue: "k8s" }
     plugins:

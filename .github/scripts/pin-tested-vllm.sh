@@ -5,6 +5,10 @@
 #   buildkite       -- resolves metadata from BUILDKITE_* env vars
 #   github_actions  -- resolves metadata from GITHUB_* env vars
 #
+# Lives in .github/scripts/ rather than under .buildkite/ because it serves
+# both platforms, same as run-cpu-e2e-validation.sh next to it; the
+# buildkite pipeline invokes it by path.
+#
 # Target branch controlled by PIN_VLLM_BRANCH (defaults below per-platform).
 # Callers that run the script only on success should set
 #   PIN_VLLM_STATUS=tested.
@@ -36,7 +40,7 @@
 #                                and keeps the original filename.
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${REPO_ROOT}"
 
 export GIT_TERMINAL_PROMPT=0
