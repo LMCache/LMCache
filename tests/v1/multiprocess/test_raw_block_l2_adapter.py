@@ -74,7 +74,7 @@ def test_raw_block_l2_adapter_store_lookup_load_roundtrip(tmp_path):
         assert store_result.bytes_transferred() == RAW_BLOCK_CI_SLOT_BYTES
 
         lookup_task_id = adapter.submit_lookup_and_lock_task(
-            [key, missing_key], _EMPTY_LAYOUT
+            [key, missing_key], {0: _EMPTY_LAYOUT}
         )
         assert wait_for_event_fd(adapter.get_lookup_and_lock_event_fd())
         lookup_bitmap = adapter.query_lookup_and_lock_result(lookup_task_id)
@@ -111,7 +111,7 @@ def test_raw_block_l2_adapter_delete_makes_key_miss(tmp_path):
 
         adapter.delete([key])
 
-        lookup_task_id = adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+        lookup_task_id = adapter.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         assert wait_for_event_fd(adapter.get_lookup_and_lock_event_fd())
         lookup_bitmap = adapter.query_lookup_and_lock_result(lookup_task_id)
         assert lookup_bitmap is not None

@@ -168,7 +168,7 @@ def test_event_fds_are_distinct_and_registered():
 # ---------------------------------------------------------------------------
 
 
-def test_lookup_forwards_layout_desc_and_returns_addresses():
+def test_lookup_forwards_group_layout_descs_and_returns_addresses():
     keys = [_key(0), _key(1), _key(2)]
     addresses = [
         TransferChannelAddress(offset=100, size=10),
@@ -178,13 +178,15 @@ def test_lookup_forwards_layout_desc_and_returns_addresses():
     with _adapter() as (adapter, mq, _tc_ctx, _tc, _notifier):
         mq.submit_request.side_effect = _lookup_side_effect(42, addresses)
 
-        task_id = adapter.submit_lookup_and_lock_task(keys, _LAYOUT)
+        group_layout_descs = {0: _LAYOUT}
+        task_id = adapter.submit_lookup_and_lock_task(keys, group_layout_descs)
 
-        # The real layout_desc is forwarded into the lookup payload.
+        # The real group_layout_descs dict is forwarded into the lookup
+        # payload.
         lookup_call = mq.submit_request.call_args_list[0]
         assert lookup_call.args[0] == RequestType.P2P_LOOKUP_AND_LOCK
-        assert lookup_call.args[1] == [keys, _LAYOUT]
-        assert lookup_call.args[1][1] is _LAYOUT
+        assert lookup_call.args[1] == [keys, group_layout_descs]
+        assert lookup_call.args[1][1] is group_layout_descs
 
         bitmap = adapter.query_lookup_and_lock_result(task_id)
         assert bitmap is not None
@@ -212,7 +214,7 @@ def test_lookup_query_not_ready_then_ready():
             return _FakeFuture(value=None)
 
         mq.submit_request.side_effect = _dispatch
-        task_id = adapter.submit_lookup_and_lock_task(keys, _LAYOUT)
+        task_id = adapter.submit_lookup_and_lock_task(keys, {0: _LAYOUT})
 
         # First pulse: peer not ready yet.
         assert adapter.query_lookup_and_lock_result(task_id) is None
@@ -231,7 +233,7 @@ def test_lookup_submit_timeout_yields_miss():
             return _FakeFuture(value=None)
 
         mq.submit_request.side_effect = _dispatch
-        task_id = adapter.submit_lookup_and_lock_task(keys, _LAYOUT)
+        task_id = adapter.submit_lookup_and_lock_task(keys, {0: _LAYOUT})
 
         bitmap = adapter.query_lookup_and_lock_result(task_id)
         assert bitmap is not None
@@ -253,7 +255,7 @@ def test_lookup_deadline_expired_yields_miss():
             return _FakeFuture(value=None)
 
         mq.submit_request.side_effect = _dispatch
-        task_id = adapter.submit_lookup_and_lock_task(keys, _LAYOUT)
+        task_id = adapter.submit_lookup_and_lock_task(keys, {0: _LAYOUT})
         time.sleep(0.02)
         bitmap = adapter.query_lookup_and_lock_result(task_id)
         assert bitmap is not None

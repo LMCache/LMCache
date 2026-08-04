@@ -243,7 +243,7 @@ class L2AdapterInterface(ABC):
     def submit_lookup_and_lock_task(
         self,
         keys: list[ObjectKey],
-        layout_desc: MemoryLayoutDesc,
+        group_layout_descs: dict[int, MemoryLayoutDesc],
     ) -> L2TaskId:
         """
         Submit a lookup and lock task to look up and lock a batch of objects
@@ -251,9 +251,10 @@ class L2AdapterInterface(ABC):
 
         Args:
             keys (list[ObjectKey]): the list of keys to be looked up and locked.
-            layout_desc (MemoryLayoutDesc): the memory layout of the objects.
-                This is an advisory hint; most adapters ignore it. The P2P
-                adapter forwards it to the peer cache server.
+            group_layout_descs (dict[int, MemoryLayoutDesc]): maps
+                object_group_id to that group's memory layout. This is an
+                advisory hint; most adapters ignore it. The P2P adapter
+                forwards it to the peer cache server.
 
         Returns:
             L2TaskId: the task id of the submitted lookup and lock task.

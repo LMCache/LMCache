@@ -309,10 +309,10 @@ class FaultInjectL2Adapter(L2AdapterInterface):
     # -- lookup and lock (pure delegation) ------------------------------------
 
     def submit_lookup_and_lock_task(
-        self, keys: list[ObjectKey], layout_desc: MemoryLayoutDesc
+        self, keys: list[ObjectKey], group_layout_descs: dict[int, MemoryLayoutDesc]
     ) -> L2TaskId:
         """Delegate the lookup-and-lock task to the inner adapter (not faulted)."""
-        return self._inner.submit_lookup_and_lock_task(keys, layout_desc)
+        return self._inner.submit_lookup_and_lock_task(keys, group_layout_descs)
 
     def query_lookup_and_lock_result(self, task_id: L2TaskId) -> Bitmap | None:
         """Delegate to the inner adapter; lookup results are passed through.
