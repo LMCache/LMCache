@@ -449,7 +449,7 @@ def test_lookup_partial_exception_preserves_hits(
 
     lookup_id = adapter.submit_lookup_and_lock_task(
         [existing, failing],
-        _EMPTY_LAYOUT,
+        {0: _EMPTY_LAYOUT},
     )
     _wait(adapter.get_lookup_and_lock_event_fd())
     result = adapter.query_lookup_and_lock_result(lookup_id)
