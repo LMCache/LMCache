@@ -160,6 +160,14 @@ ignore-regex = '"image/[^"]+": "[A-Za-z0-9+/=]+"'
 [tool.cibuildwheel]
 build = "cp3*-manylinux_x86_64"
 
+# The wheel's *runtime* dep on torch is deliberately unpinned (see
+# requirements/common.txt), so pip would install the latest torch into the test
+# environment and check the wheel against a torch it was never built for.
+# Derive a constraint from the build pin above -- one source of truth -- so the
+# smoke test exercises the pairing the wheel was actually built for. torchvision
+# is what would otherwise drag torch forward during the wheel install.
+before-all = "grep -oE 'torch==[0-9][0-9.]*' /project/pyproject.toml | head -1 > /project/cibw-constraints.txt && cat /project/cibw-constraints.txt"
+
 # see https://developer.nvidia.com/cuda-gpus for compute capabilities
 # "CUDA-Enabled Datacenter Products"
 # 7.5:  T4
@@ -170,7 +178,7 @@ build = "cp3*-manylinux_x86_64"
 # 10.0: GB200, B200
 # 12.0: RTX 50-series (PTX)
 # CUDA 13 dropped support for compute capability 7.0 (Volta).
-environment = {TORCH_CUDA_ARCH_LIST = "7.5;8.0;8.6;8.9;9.0;10.0;12.0", ENABLE_CXX11_ABI = "1", PIP_EXTRA_INDEX_URL = "https://download.pytorch.org/whl/cu130"}
+environment = {TORCH_CUDA_ARCH_LIST = "7.5;8.0;8.6;8.9;9.0;10.0;12.0", ENABLE_CXX11_ABI = "1", PIP_EXTRA_INDEX_URL = "https://download.pytorch.org/whl/cu130", PIP_CONSTRAINT = "/project/cibw-constraints.txt"}
 
 # Use the PyTorch manylinux image version '2_28' that contains CUDA 13.0
 manylinux-x86_64-image = "docker.io/pytorch/manylinux2_28-builder:cuda13.0"
