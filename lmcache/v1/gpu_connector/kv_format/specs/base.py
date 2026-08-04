@@ -35,6 +35,10 @@ _LABELS = {
     "NH": "NH",
     "HS": "HS",
     "CS": "CS",
+    # Blocked-scale indexer cache: per-block value / scale regions. Rendered
+    # symbolically; the logical per-layer tensor is [NB, BS, HS(=132)].
+    "BSV": "BSxVALS",
+    "BSS": "BSxSCALES",
 }
 _ACCESSORS = {
     "NB": "num_blocks",
@@ -44,6 +48,10 @@ _ACCESSORS = {
     "HS": "head_size",
     "CS": "head_size",
     "PBS": "page_buffer_size",
+    # Blocked-scale regions: sized by tokens per block (the value/scale byte
+    # widths are format constants, not per-model geometry).
+    "BSxVALS": "block_size",
+    "BSxSCALES": "block_size",
 }
 
 
