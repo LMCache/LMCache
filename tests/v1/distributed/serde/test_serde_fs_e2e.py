@@ -190,7 +190,7 @@ class TestFp8SerdeFsRoundTrip:
         assert sm.report_status()["l1_manager"]["total_object_count"] == 0
 
         # ---- Step 4: prefetch (disk load + fp8 deserialize) ----
-        handle = sm.submit_prefetch_task(PrefetchRequestSpec(keys, layout))
+        handle = sm.submit_prefetch_task(PrefetchRequestSpec(keys, {0: layout}))
         prefix_hits = wait_for_prefetch_status(sm, handle)
         assert prefix_hits is not None, "Prefetch never completed"
         assert prefix_hits == len(keys), (

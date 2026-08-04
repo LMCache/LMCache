@@ -804,7 +804,7 @@ def test_storage_manager_dax_adapter_roundtrip(tmp_path):
             timeout=5.0,
         )
 
-        handle = sm.submit_prefetch_task(PrefetchRequestSpec([key], layout))
+        handle = sm.submit_prefetch_task(PrefetchRequestSpec([key], {0: layout}))
         assert wait_for_condition(
             lambda: sm.query_prefetch_lookup_hits(handle) is not None,
             timeout=5.0,

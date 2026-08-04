@@ -184,7 +184,7 @@ class TestStorageManagerTPLookup:
         # Create interleaved lookup keys for scheduler-style lookup
         lookup_keys = create_interleaved_lookup_keys(num_chunks, world_size)
         handle = storage_manager.submit_prefetch_task(
-            PrefetchRequestSpec(lookup_keys, test_layout)
+            PrefetchRequestSpec(lookup_keys, {0: test_layout})
         )
         found_count = storage_manager.query_prefetch_status(handle).count_leading_ones()
 
@@ -214,7 +214,7 @@ class TestStorageManagerTPLookup:
         # Create interleaved lookup keys for scheduler-style lookup
         lookup_keys = create_interleaved_lookup_keys(num_chunks, world_size)
         handle = storage_manager.submit_prefetch_task(
-            PrefetchRequestSpec(lookup_keys, test_layout)
+            PrefetchRequestSpec(lookup_keys, {0: test_layout})
         )
         found_count = storage_manager.query_prefetch_status(handle).count_leading_ones()
 
@@ -248,7 +248,7 @@ class TestStorageManagerTPLookup:
         # Create interleaved lookup keys for scheduler-style lookup
         lookup_keys = create_interleaved_lookup_keys(num_chunks, world_size)
         handle = storage_manager.submit_prefetch_task(
-            PrefetchRequestSpec(lookup_keys, test_layout)
+            PrefetchRequestSpec(lookup_keys, {0: test_layout})
         )
         found_count = storage_manager.query_prefetch_status(handle).count_leading_ones()
 
@@ -284,7 +284,7 @@ class TestStorageManagerTPLookup:
         # Request 5 chunks with scheduler-style interleaved lookup
         lookup_keys = create_interleaved_lookup_keys(num_requested_chunks, world_size)
         handle = storage_manager.submit_prefetch_task(
-            PrefetchRequestSpec(lookup_keys, test_layout)
+            PrefetchRequestSpec(lookup_keys, {0: test_layout})
         )
         found_count = storage_manager.query_prefetch_status(handle).count_leading_ones()
 
@@ -329,7 +329,7 @@ class TestStorageManagerTPLookup:
         # Request 5 chunks with scheduler-style interleaved lookup
         lookup_keys = create_interleaved_lookup_keys(5, world_size)
         handle = storage_manager.submit_prefetch_task(
-            PrefetchRequestSpec(lookup_keys, test_layout)
+            PrefetchRequestSpec(lookup_keys, {0: test_layout})
         )
         found_count = storage_manager.query_prefetch_status(handle).count_leading_ones()
 
@@ -371,7 +371,7 @@ class TestStorageManagerTPLookup:
         # Scheduler-style interleaved lookup
         lookup_keys = create_interleaved_lookup_keys(num_chunks, world_size)
         handle = storage_manager.submit_prefetch_task(
-            PrefetchRequestSpec(lookup_keys, test_layout)
+            PrefetchRequestSpec(lookup_keys, {0: test_layout})
         )
         found_count = storage_manager.query_prefetch_status(handle).count_leading_ones()
 
@@ -405,7 +405,7 @@ class TestStorageManagerTPLookup:
         # Scheduler-style interleaved lookup
         lookup_keys = create_interleaved_lookup_keys(num_chunks, world_size)
         handle = storage_manager.submit_prefetch_task(
-            PrefetchRequestSpec(lookup_keys, test_layout)
+            PrefetchRequestSpec(lookup_keys, {0: test_layout})
         )
         found_count = storage_manager.query_prefetch_status(handle).count_leading_ones()
 
@@ -454,7 +454,7 @@ class TestStorageManagerTPStoreRetrieve:
 
         # Prefetch to secure both entries
         handle = storage_manager.submit_prefetch_task(
-            PrefetchRequestSpec([key_w0, key_w1], test_layout)
+            PrefetchRequestSpec([key_w0, key_w1], {0: test_layout})
         )
         _ = storage_manager.query_prefetch_status(handle)
 
@@ -486,7 +486,7 @@ class TestStorageManagerTPStoreRetrieve:
 
         # Prefetch to secure all entries
         handle = storage_manager.submit_prefetch_task(
-            PrefetchRequestSpec(all_keys, test_layout)
+            PrefetchRequestSpec(all_keys, {0: test_layout})
         )
         _ = storage_manager.query_prefetch_status(handle)
 
@@ -537,7 +537,7 @@ class TestTPEdgeCases:
 
         # Lookup should find all chunks
         handle = storage_manager.submit_prefetch_task(
-            PrefetchRequestSpec(storage_keys, test_layout)
+            PrefetchRequestSpec(storage_keys, {0: test_layout})
         )
         found_count = storage_manager.query_prefetch_status(handle).count_leading_ones()
         assert found_count == num_chunks
@@ -582,7 +582,7 @@ class TestTPEdgeCases:
 
         # All keys should be found
         handle = storage_manager.submit_prefetch_task(
-            PrefetchRequestSpec(lookup_keys, test_layout)
+            PrefetchRequestSpec(lookup_keys, {0: test_layout})
         )
         found_count = storage_manager.query_prefetch_status(handle).count_leading_ones()
         assert found_count == num_chunks * world_size
@@ -622,7 +622,7 @@ class TestTPEdgeCases:
 
         # Lookup all keys
         handle = storage_manager.submit_prefetch_task(
-            PrefetchRequestSpec(storage_keys, test_layout)
+            PrefetchRequestSpec(storage_keys, {0: test_layout})
         )
         found_count = storage_manager.query_prefetch_status(handle).count_leading_ones()
         assert found_count == world_size
@@ -688,7 +688,7 @@ class TestTPIntegration:
                     )
                 )
         handle = storage_manager.submit_prefetch_task(
-            PrefetchRequestSpec(lookup_keys, test_layout)
+            PrefetchRequestSpec(lookup_keys, {0: test_layout})
         )
         found_count = storage_manager.query_prefetch_status(handle).count_leading_ones()
 
@@ -758,7 +758,7 @@ class TestTPIntegration:
                     )
                 )
         handle = storage_manager.submit_prefetch_task(
-            PrefetchRequestSpec(lookup_keys, test_layout)
+            PrefetchRequestSpec(lookup_keys, {0: test_layout})
         )
         found_count = storage_manager.query_prefetch_status(handle).count_leading_ones()
         assert found_count == num_chunks * world_size
