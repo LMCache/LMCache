@@ -123,42 +123,29 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
             buf = arr_type.from_address(ptr)
             self._buffer = torch.frombuffer(buf, dtype=torch.uint8)
         else:
-            # torch.empty() guarantees only 64-byte alignment (c10::alloc_cpu
-            # calls posix_memalign(&p, 64, n)), but TensorMemoryAllocator hands
-            # out objects at `base + k * align_bytes`, so what every consumer
-            # actually observes is the alignment of this base.  Over-allocate
-            # and slice to an aligned offset, the same technique as
-            # _alloc_page_aligned_pinned_view in lmcache/v1/platform/torch_ops.py.
-            #
-            # This matters because get_l1_memory_desc() advertises align_bytes
-            # to consumers that require it for correctness, not just speed:
-            # O_DIRECT rejects an unaligned buffer address with EINVAL, and
-            # cudaHostRegister (used by _pin_memory_chunk below, which derives
-            # its pointer from this buffer) wants page alignment too.  Without
-            # this, a 4096-byte promise was delivered as a 64-byte-aligned
-            # pointer and the promise silently did not hold.
+            # torch.empty() only guarantees 64-byte alignment, but consumers of
+            # get_l1_memory_desc() (O_DIRECT, RDMA/GDS) need the buffer base
+            # itself aligned to align_bytes. Over-allocate and slice to an
+            # aligned offset, matching _alloc_page_aligned_pinned_view in
+            # lmcache/v1/platform/torch_ops.py.
             backing = torch.empty(
                 self._final_size + align_bytes - 1,
                 dtype=torch.uint8,
                 device="cpu",
                 pin_memory=False,
             )
-            # Distance from the backing pointer to the next aligned boundary.
             offset = (-backing.data_ptr()) % align_bytes
-            # The slice shares storage with `backing`, so holding the slice keeps
-            # the allocation alive; no separate reference is needed.
+            # Slice shares storage with `backing`; no separate reference needed.
             self._buffer = backing[offset : offset + self._final_size]
 
-        # The alignment contract is load-bearing for O_DIRECT and for RDMA/GDS
-        # consumers, and a violation is otherwise invisible until a transfer
-        # fails, so check it here rather than letting it surface as EINVAL.
+        # Fail loudly here rather than let a misaligned buffer surface as an
+        # O_DIRECT EINVAL somewhere downstream.
         base_ptr = self._buffer.data_ptr()
         if base_ptr % align_bytes != 0:
             raise RuntimeError(
-                f"LazyMemoryAllocator buffer base {base_ptr:#x} is not aligned to "
-                f"align_bytes={align_bytes} (remainder "
-                f"{base_ptr % align_bytes}). Consumers that require this "
-                f"alignment, such as O_DIRECT file I/O, would fail with EINVAL."
+                f"LazyMemoryAllocator buffer base {base_ptr:#x} is not aligned "
+                f"to align_bytes={align_bytes} (remainder "
+                f"{base_ptr % align_bytes})."
             )
 
         # Pin the first `curr_size` bytes (aligned to the internal chunk size)
