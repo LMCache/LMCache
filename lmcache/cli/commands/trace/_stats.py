@@ -22,6 +22,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import csv
 import json
+import math
 import statistics
 import threading
 
@@ -88,11 +89,11 @@ def _percentile(sorted_values: list[float], pct: float) -> float:
         return sorted_values[0]
     if pct >= 100:
         return sorted_values[-1]
-    # bisect_left gives the insertion index; the nearest-rank formula
-    # maps p to ceil(p/100 * N) which equals floor((p/100 * N - eps) + 1).
+    # Multiply before dividing: 7/100.0 rounds up, so (7/100.0) * 100 is
+    # 7.000000000000001 and ceil() would pick rank 8 rather than 7.
     n = len(sorted_values)
-    idx = max(0, min(n - 1, int((pct / 100.0) * n)))
-    return sorted_values[idx]
+    rank = math.ceil(pct * n / 100.0)
+    return sorted_values[max(rank, 1) - 1]
 
 
 class ReplayStatsCollector:
