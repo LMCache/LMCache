@@ -999,7 +999,18 @@ class TestProcessRequestMultiWorker:
                 )
             )
 
-        with patch.object(sv_helpers, "_call", side_effect=fake_call):
+        # ``_make_event_handle`` creates a real CUDA-IPC event via
+        # ``check_interprocess_event_support()``, which requires a
+        # backend that supports ``Event(interprocess=True)`` (e.g.
+        # CUDA). This test only exercises the STORE/RETRIEVE
+        # fan-out/dispatch logic, so stub it out to keep the test
+        # backend-agnostic -- it would otherwise fail on XPU/CPU-only
+        # runners with "Backend '<device>' does not support
+        # interprocess=True parameter for Events".
+        with (
+            patch.object(sv_helpers, "_call", side_effect=fake_call),
+            patch.object(sv_helpers, "_make_event_handle", return_value=b""),
+        ):
             _process_request(
                 client=None,  # type: ignore[arg-type]  # unused: _call mocked
                 seq_no=0,
