@@ -415,11 +415,11 @@ Group `lmcache.lmcache.ai`, `v1alpha1`, kind `CacheBlendEngine` (shortName `cbe`
 The spec **mirrors `LMCacheEngineSpec`** (image, server, l1, eviction, prometheus,
 l2Backend, scheduling, overrides, imagePullSecrets) and adds:
 
-- `blend.checkLayer` (default 1) and `blend.recompRatio` (default 0.15) — CB
-  tunables fed to the vLLM connector — plus `blend.extraConfig`, a free-form
-  map of additional `kv_connector_extra_config` entries (e.g.
-  `"cb.partial_bucket": 4096`) merged last, so an entry can override any
-  auto-generated key (mirroring `extraArgs` semantics).
+- `blend.checkLayer` (default 1), `blend.recompRatio` (default 0.15), and
+  `blend.partialBucket` (unset by default — emits `cb.partial_bucket`, the
+  PARTIAL row-count padding bucket fp8-MoE models need to keep the Triton
+  autotuner from re-tuning per CB step) — CB tunables fed to the vLLM
+  connector.
 - `injection` — what the webhook injects into vLLM pods: `payloadImage` (an
   `ImageSpec` — `repository`/`tag`/`pullPolicy`, like `spec.image` — for the
   private `lmcache-cacheblend` init-container image; set `repository` explicitly,
@@ -466,7 +466,7 @@ The `<name>-connection` ConfigMap carries the **`CBKVConnector`**
     "lmcache.mp.port": "<server.port>",
     "cb.check_layer": <blend.checkLayer>,
     "cb.recomp_ratio": <blend.recompRatio>,
-    ...<blend.extraConfig entries, merged last>
+    "cb.partial_bucket": <blend.partialBucket, only when set>
   }
 }
 ```

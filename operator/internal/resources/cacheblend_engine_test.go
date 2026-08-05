@@ -22,7 +22,6 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
-	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	lmcachev1alpha1 "github.com/LMCache/LMCache/api/v1alpha1"
@@ -349,15 +348,10 @@ func TestBuildCBConnectionConfigMap_CustomBlendAndPort(t *testing.T) {
 	}
 }
 
-func TestBuildCBConnectionConfigMap_BlendExtraConfig(t *testing.T) {
+func TestBuildCBConnectionConfigMap_PartialBucket(t *testing.T) {
 	engine := minimalCBEngine()
 	engine.Spec.Blend = &lmcachev1alpha1.BlendSpec{
-		ExtraConfig: map[string]apiextensionsv1.JSON{
-			"cb.partial_bucket": {Raw: []byte(`4096`)},
-			"cb.custom_flag":    {Raw: []byte(`"strided"`)},
-			// Merged last: an extraConfig key overrides the auto-generated one.
-			"cb.recomp_ratio": {Raw: []byte(`0.3`)},
-		},
+		PartialBucket: ptr(int32(4096)),
 	}
 
 	cm := BuildCBConnectionConfigMap(engine)
@@ -366,15 +360,24 @@ func TestBuildCBConnectionConfigMap_BlendExtraConfig(t *testing.T) {
 	if extra["cb.partial_bucket"] != float64(4096) {
 		t.Fatalf("expected cb.partial_bucket=4096, got %v", extra["cb.partial_bucket"])
 	}
-	if extra["cb.custom_flag"] != "strided" {
-		t.Fatalf("expected cb.custom_flag=strided, got %v", extra["cb.custom_flag"])
-	}
-	if extra["cb.recomp_ratio"] != 0.3 {
-		t.Fatalf("expected extraConfig to override cb.recomp_ratio to 0.3, got %v", extra["cb.recomp_ratio"])
-	}
-	// The untouched auto-generated keys are still present.
+	// The auto-generated keys are still present (defaults: blend was replaced
+	// wholesale, so the builder falls back to checkLayer=1, recompRatio=0.15).
 	if extra["cb.check_layer"] != float64(1) {
 		t.Fatalf("expected cb.check_layer=1, got %v", extra["cb.check_layer"])
+	}
+	if extra["cb.recomp_ratio"] != 0.15 {
+		t.Fatalf("expected cb.recomp_ratio=0.15, got %v", extra["cb.recomp_ratio"])
+	}
+}
+
+func TestBuildCBConnectionConfigMap_PartialBucketOmittedWhenUnset(t *testing.T) {
+	engine := minimalCBEngine()
+
+	cm := BuildCBConnectionConfigMap(engine)
+	_, extra := parseCBConnectionConfig(t, cm)
+
+	if _, present := extra["cb.partial_bucket"]; present {
+		t.Fatalf("expected cb.partial_bucket omitted when unset, got %v", extra["cb.partial_bucket"])
 	}
 }
 

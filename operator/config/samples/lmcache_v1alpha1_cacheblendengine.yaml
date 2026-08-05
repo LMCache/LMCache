@@ -31,8 +31,8 @@ spec:
   # blend:
   #   checkLayer: 1               # default, cb.check_layer
   #   recompRatio: 0.15           # default, cb.recomp_ratio
-  #   extraConfig:                # extra kv_connector_extra_config entries,
-  #     cb.partial_bucket: 4096   # merged last (can override the keys above)
+  #   partialBucket: 4096         # cb.partial_bucket; PARTIAL row padding for
+  #                               # fp8-MoE models (unset = disabled)
 
   # -- Injection: how the webhook injects the plugin into annotated vLLM pods --
   injection:

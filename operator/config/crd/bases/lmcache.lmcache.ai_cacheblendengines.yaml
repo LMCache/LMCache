@@ -979,16 +979,18 @@ spec:
                     format: int32
                     minimum: 0
                     type: integer
-                  extraConfig:
-                    additionalProperties:
-                      x-kubernetes-preserve-unknown-fields: true
+                  partialBucket:
                     description: |-
-                      extraConfig holds additional kv_connector_extra_config entries merged into
-                      the connection ConfigMap JSON (e.g. "cb.partial_bucket": 4096 for models
-                      whose arch adapter needs it). Values are arbitrary JSON scalars/objects.
-                      Entries are merged last and can override any auto-generated key, mirroring
-                      extraArgs semantics.
-                    type: object
+                      partialBucket pads PARTIAL row counts to a multiple of this bucket size.
+                      It is surfaced to the connector as
+                      kv_connector_extra_config["cb.partial_bucket"] and is needed on fp8-MoE
+                      models, where every distinct row count is a fresh M shape and the Triton
+                      autotuner re-tunes all MoE layers per CB step without it (multi-second
+                      TTFT spikes). Unset (the default) omits the key, leaving the padding
+                      disabled.
+                    format: int32
+                    minimum: 1
+                    type: integer
                   recompRatio:
                     default: 0.15
                     description: |-

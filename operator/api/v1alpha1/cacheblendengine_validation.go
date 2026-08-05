@@ -23,8 +23,8 @@ import (
 // ValidateSpec validates the CacheBlendEngineSpec and returns any validation
 // errors. It mirrors LMCacheEngine.ValidateSpec and additionally enforces the
 // CacheBlend invariants: chunkSize == 256, recompRatio in (0, 1], checkLayer
-// >= 0, blockSize >= 1, a non-empty attentionBackend, and no PYTHONPATH in
-// injection.env.
+// >= 0, partialBucket >= 1, blockSize >= 1, a non-empty attentionBackend, and
+// no PYTHONPATH in injection.env.
 func (e *CacheBlendEngine) ValidateSpec() field.ErrorList {
 	var errs field.ErrorList
 	spec := &e.Spec
@@ -67,6 +67,11 @@ func (e *CacheBlendEngine) ValidateSpec() field.ErrorList {
 			if rr <= 0.0 || rr > 1.0 {
 				errs = append(errs, field.Invalid(blendPath.Child("recompRatio"), rr, "must be in (0.0, 1.0]"))
 			}
+		}
+
+		if spec.Blend.PartialBucket != nil && *spec.Blend.PartialBucket < 1 {
+			errs = append(errs, field.Invalid(blendPath.Child("partialBucket"),
+				*spec.Blend.PartialBucket, "must be >= 1"))
 		}
 	}
 

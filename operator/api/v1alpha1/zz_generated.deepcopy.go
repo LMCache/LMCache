@@ -21,8 +21,8 @@ limitations under the License.
 package v1alpha1
 
 import (
-	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	"k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
 )
@@ -66,12 +66,10 @@ func (in *BlendSpec) DeepCopyInto(out *BlendSpec) {
 		*out = new(float64)
 		**out = **in
 	}
-	if in.ExtraConfig != nil {
-		in, out := &in.ExtraConfig, &out.ExtraConfig
-		*out = make(map[string]v1.JSON, len(*in))
-		for key, val := range *in {
-			(*out)[key] = *val.DeepCopy()
-		}
+	if in.PartialBucket != nil {
+		in, out := &in.PartialBucket, &out.PartialBucket
+		*out = new(int32)
+		**out = **in
 	}
 }
 
@@ -159,7 +157,7 @@ func (in *CacheBlendEngineSpec) DeepCopyInto(out *CacheBlendEngineSpec) {
 	}
 	if in.ImagePullSecrets != nil {
 		in, out := &in.ImagePullSecrets, &out.ImagePullSecrets
-		*out = make([]corev1.LocalObjectReference, len(*in))
+		*out = make([]v1.LocalObjectReference, len(*in))
 		copy(*out, *in)
 	}
 	if in.Server != nil {
@@ -200,7 +198,7 @@ func (in *CacheBlendEngineSpec) DeepCopyInto(out *CacheBlendEngineSpec) {
 	}
 	if in.ResourceOverrides != nil {
 		in, out := &in.ResourceOverrides, &out.ResourceOverrides
-		*out = new(corev1.ResourceRequirements)
+		*out = new(v1.ResourceRequirements)
 		(*in).DeepCopyInto(*out)
 	}
 	if in.LogLevel != nil {
@@ -217,33 +215,33 @@ func (in *CacheBlendEngineSpec) DeepCopyInto(out *CacheBlendEngineSpec) {
 	}
 	if in.Affinity != nil {
 		in, out := &in.Affinity, &out.Affinity
-		*out = new(corev1.Affinity)
+		*out = new(v1.Affinity)
 		(*in).DeepCopyInto(*out)
 	}
 	if in.Tolerations != nil {
 		in, out := &in.Tolerations, &out.Tolerations
-		*out = make([]corev1.Toleration, len(*in))
+		*out = make([]v1.Toleration, len(*in))
 		for i := range *in {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
 	}
 	if in.Env != nil {
 		in, out := &in.Env, &out.Env
-		*out = make([]corev1.EnvVar, len(*in))
+		*out = make([]v1.EnvVar, len(*in))
 		for i := range *in {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
 	}
 	if in.Volumes != nil {
 		in, out := &in.Volumes, &out.Volumes
-		*out = make([]corev1.Volume, len(*in))
+		*out = make([]v1.Volume, len(*in))
 		for i := range *in {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
 	}
 	if in.VolumeMounts != nil {
 		in, out := &in.VolumeMounts, &out.VolumeMounts
-		*out = make([]corev1.VolumeMount, len(*in))
+		*out = make([]v1.VolumeMount, len(*in))
 		for i := range *in {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
@@ -316,7 +314,7 @@ func (in *CoordinatorConnectionSpec) DeepCopyInto(out *CoordinatorConnectionSpec
 	*out = *in
 	if in.Ref != nil {
 		in, out := &in.Ref, &out.Ref
-		*out = new(corev1.LocalObjectReference)
+		*out = new(v1.LocalObjectReference)
 		**out = **in
 	}
 	if in.URL != nil {
@@ -441,7 +439,7 @@ func (in *InjectionSpec) DeepCopyInto(out *InjectionSpec) {
 	}
 	if in.ImagePullSecrets != nil {
 		in, out := &in.ImagePullSecrets, &out.ImagePullSecrets
-		*out = make([]corev1.LocalObjectReference, len(*in))
+		*out = make([]v1.LocalObjectReference, len(*in))
 		copy(*out, *in)
 	}
 	if in.TargetContainer != nil {
@@ -466,7 +464,7 @@ func (in *InjectionSpec) DeepCopyInto(out *InjectionSpec) {
 	}
 	if in.Env != nil {
 		in, out := &in.Env, &out.Env
-		*out = make([]corev1.EnvVar, len(*in))
+		*out = make([]v1.EnvVar, len(*in))
 		for i := range *in {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
@@ -632,7 +630,7 @@ func (in *LMCacheCoordinatorSpec) DeepCopyInto(out *LMCacheCoordinatorSpec) {
 	}
 	if in.ImagePullSecrets != nil {
 		in, out := &in.ImagePullSecrets, &out.ImagePullSecrets
-		*out = make([]corev1.LocalObjectReference, len(*in))
+		*out = make([]v1.LocalObjectReference, len(*in))
 		copy(*out, *in)
 	}
 	if in.Replicas != nil {
@@ -692,7 +690,7 @@ func (in *LMCacheCoordinatorSpec) DeepCopyInto(out *LMCacheCoordinatorSpec) {
 	}
 	if in.ResourceOverrides != nil {
 		in, out := &in.ResourceOverrides, &out.ResourceOverrides
-		*out = new(corev1.ResourceRequirements)
+		*out = new(v1.ResourceRequirements)
 		(*in).DeepCopyInto(*out)
 	}
 	if in.LogLevel != nil {
@@ -709,33 +707,33 @@ func (in *LMCacheCoordinatorSpec) DeepCopyInto(out *LMCacheCoordinatorSpec) {
 	}
 	if in.Affinity != nil {
 		in, out := &in.Affinity, &out.Affinity
-		*out = new(corev1.Affinity)
+		*out = new(v1.Affinity)
 		(*in).DeepCopyInto(*out)
 	}
 	if in.Tolerations != nil {
 		in, out := &in.Tolerations, &out.Tolerations
-		*out = make([]corev1.Toleration, len(*in))
+		*out = make([]v1.Toleration, len(*in))
 		for i := range *in {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
 	}
 	if in.Env != nil {
 		in, out := &in.Env, &out.Env
-		*out = make([]corev1.EnvVar, len(*in))
+		*out = make([]v1.EnvVar, len(*in))
 		for i := range *in {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
 	}
 	if in.Volumes != nil {
 		in, out := &in.Volumes, &out.Volumes
-		*out = make([]corev1.Volume, len(*in))
+		*out = make([]v1.Volume, len(*in))
 		for i := range *in {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
 	}
 	if in.VolumeMounts != nil {
 		in, out := &in.VolumeMounts, &out.VolumeMounts
-		*out = make([]corev1.VolumeMount, len(*in))
+		*out = make([]v1.VolumeMount, len(*in))
 		for i := range *in {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
@@ -867,7 +865,7 @@ func (in *LMCacheEngineSpec) DeepCopyInto(out *LMCacheEngineSpec) {
 	}
 	if in.ImagePullSecrets != nil {
 		in, out := &in.ImagePullSecrets, &out.ImagePullSecrets
-		*out = make([]corev1.LocalObjectReference, len(*in))
+		*out = make([]v1.LocalObjectReference, len(*in))
 		copy(*out, *in)
 	}
 	if in.Server != nil {
@@ -903,7 +901,7 @@ func (in *LMCacheEngineSpec) DeepCopyInto(out *LMCacheEngineSpec) {
 	}
 	if in.ResourceOverrides != nil {
 		in, out := &in.ResourceOverrides, &out.ResourceOverrides
-		*out = new(corev1.ResourceRequirements)
+		*out = new(v1.ResourceRequirements)
 		(*in).DeepCopyInto(*out)
 	}
 	if in.LogLevel != nil {
@@ -920,33 +918,33 @@ func (in *LMCacheEngineSpec) DeepCopyInto(out *LMCacheEngineSpec) {
 	}
 	if in.Affinity != nil {
 		in, out := &in.Affinity, &out.Affinity
-		*out = new(corev1.Affinity)
+		*out = new(v1.Affinity)
 		(*in).DeepCopyInto(*out)
 	}
 	if in.Tolerations != nil {
 		in, out := &in.Tolerations, &out.Tolerations
-		*out = make([]corev1.Toleration, len(*in))
+		*out = make([]v1.Toleration, len(*in))
 		for i := range *in {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
 	}
 	if in.Env != nil {
 		in, out := &in.Env, &out.Env
-		*out = make([]corev1.EnvVar, len(*in))
+		*out = make([]v1.EnvVar, len(*in))
 		for i := range *in {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
 	}
 	if in.Volumes != nil {
 		in, out := &in.Volumes, &out.Volumes
-		*out = make([]corev1.Volume, len(*in))
+		*out = make([]v1.Volume, len(*in))
 		for i := range *in {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
 	}
 	if in.VolumeMounts != nil {
 		in, out := &in.VolumeMounts, &out.VolumeMounts
-		*out = make([]corev1.VolumeMount, len(*in))
+		*out = make([]v1.VolumeMount, len(*in))
 		for i := range *in {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
@@ -1029,7 +1027,7 @@ func (in *LMCacheInjectionSpec) DeepCopyInto(out *LMCacheInjectionSpec) {
 	}
 	if in.ImagePullSecrets != nil {
 		in, out := &in.ImagePullSecrets, &out.ImagePullSecrets
-		*out = make([]corev1.LocalObjectReference, len(*in))
+		*out = make([]v1.LocalObjectReference, len(*in))
 		copy(*out, *in)
 	}
 	if in.TargetContainer != nil {
@@ -1114,7 +1112,7 @@ func (in *RawL2AdapterSpec) DeepCopyInto(out *RawL2AdapterSpec) {
 	*out = *in
 	if in.Config != nil {
 		in, out := &in.Config, &out.Config
-		*out = make(map[string]v1.JSON, len(*in))
+		*out = make(map[string]apiextensionsv1.JSON, len(*in))
 		for key, val := range *in {
 			(*out)[key] = *val.DeepCopy()
 		}

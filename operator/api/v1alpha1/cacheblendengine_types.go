@@ -18,7 +18,6 @@ package v1alpha1
 
 import (
 	corev1 "k8s.io/api/core/v1"
-	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -70,13 +69,16 @@ type BlendSpec struct {
 	// +kubebuilder:default=0.15
 	RecompRatio *float64 `json:"recompRatio,omitempty"`
 
-	// extraConfig holds additional kv_connector_extra_config entries merged into
-	// the connection ConfigMap JSON (e.g. "cb.partial_bucket": 4096 for models
-	// whose arch adapter needs it). Values are arbitrary JSON scalars/objects.
-	// Entries are merged last and can override any auto-generated key, mirroring
-	// extraArgs semantics.
+	// partialBucket pads PARTIAL row counts to a multiple of this bucket size.
+	// It is surfaced to the connector as
+	// kv_connector_extra_config["cb.partial_bucket"] and is needed on fp8-MoE
+	// models, where every distinct row count is a fresh M shape and the Triton
+	// autotuner re-tunes all MoE layers per CB step without it (multi-second
+	// TTFT spikes). Unset (the default) omits the key, leaving the padding
+	// disabled.
 	// +optional
-	ExtraConfig map[string]apiextensionsv1.JSON `json:"extraConfig,omitempty"`
+	// +kubebuilder:validation:Minimum=1
+	PartialBucket *int32 `json:"partialBucket,omitempty"`
 }
 
 // InjectionSpec defines the defaults the mutating webhook reads when injecting
