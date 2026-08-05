@@ -3714,6 +3714,53 @@ def test_hybrid_subchunk_retrieve_recalculates_prefix_skip(
     assert captured_skip_tokens == [0]
 
 
+def test_scatter_keeps_temporary_pinned_chunks_until_h2d_finishes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pickle tensors stay alive until their asynchronous H2D reads finish."""
+    # First Party
+    from lmcache.v1.multiprocess.transfer_context import base
+
+    kv_caches = _make_kv_caches(num_layers=1, num_blocks=2)
+    chunks = [torch.zeros(2, 1, 4, 16)]
+    transfer_started = False
+    synchronized = False
+    staged_chunks: list[torch.Tensor] = []
+
+    monkeypatch.setattr(base, "_LMC_OPS_BLOCK_TRANSFER_ACCEPTS_TENSOR", False)
+    monkeypatch.setattr(torch.Tensor, "is_pinned", lambda _tensor: False)
+
+    def _pin_memory(tensor: torch.Tensor) -> torch.Tensor:
+        staged = tensor.clone()
+        staged_chunks.append(staged)
+        return staged
+
+    def _transfer(*_args: Any, **_kwargs: Any) -> None:
+        nonlocal transfer_started
+        transfer_started = True
+
+    def _synchronize() -> None:
+        nonlocal synchronized
+        assert transfer_started
+        assert staged_chunks
+        synchronized = True
+
+    monkeypatch.setattr(torch.Tensor, "pin_memory", _pin_memory)
+    monkeypatch.setattr(
+        "lmcache.c_ops.multi_layer_block_kv_transfer",
+        _transfer,
+    )
+    monkeypatch.setattr(base.torch_dev, "synchronize", _synchronize)
+
+    base.scatter_cpu_to_paged_kv(
+        kv_caches,
+        block_ids=[0],
+        chunks=chunks,
+        blocks_per_chunk=1,
+    )
+    assert synchronized
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Step 5: Engine-driven multi-object-group SHM transfers
 # ──────────────────────────────────────────────────────────────────────────────

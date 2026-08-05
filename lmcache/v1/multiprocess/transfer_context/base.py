@@ -656,10 +656,8 @@ def gather_paged_kv_to_cpu(
         else:
             chunks = _target_out
 
-    # Fast path: The async GPU copy might still be in progress.
-    # We intentionally omit synchronization here for performance.
-    # WARNING: The caller MUST explicitly call `torch_dev.synchronize()`
-    # before consuming these chunks to ensure data validity.
+    # Fast path for caller-owned pinned chunks: the async GPU copy might still
+    # be in progress. The caller must synchronize before releasing them.
 
     return chunks
 
@@ -693,6 +691,11 @@ def scatter_cpu_to_paged_kv(
     Raises:
         ValueError: If ``block_ids`` is shorter than
             ``len(chunks) * blocks_per_chunk``.
+
+    Note:
+        When unpinned input tensors require temporary pinned staging buffers,
+        this function synchronizes before returning so those buffers remain
+        alive until the asynchronous host-to-device transfer completes.
     """
     # First Party
     from lmcache.v1.gpu_connector.utils import (
@@ -783,6 +786,7 @@ def scatter_cpu_to_paged_kv(
         # Defensive check: Ensure all incoming CPU chunks are pinned memory.
         # Otherwise, the underlying CUDA kernel may throw an Illegal
         # Memory Access error during H2D transfer.
+        uses_temporary_pinned_chunks = False
         if not all(chunk.is_pinned() for chunk in chunks):
             logger.warning(
                 "Received unpinned CPU tensors in scatter_cpu_to_paged_kv. "
@@ -793,6 +797,7 @@ def scatter_cpu_to_paged_kv(
                 chunk.pin_memory() if not chunk.is_pinned() else chunk
                 for chunk in chunks
             ]
+            uses_temporary_pinned_chunks = True
 
         # Compiled C++/CUDA/XPU: requires int64 pointer tensor and list[int].
         _ptrs_np = np.array(
@@ -834,6 +839,11 @@ def scatter_cpu_to_paged_kv(
                 engine_kv_format,
                 skip_prefix_n_blocks if i == 0 else 0,
             )
+        if uses_temporary_pinned_chunks:
+            # Pickle deserialization produces unpinned tensors. Keep their
+            # temporary pinned copies alive until the asynchronous H2D reads
+            # complete; otherwise they can be freed between hybrid groups.
+            torch_dev.synchronize()
     # Fast path: The async GPU copy might still be in progress.
     # We intentionally omit synchronization here for performance.
     # WARNING: The caller MUST explicitly call `torch_dev.synchronize()`
