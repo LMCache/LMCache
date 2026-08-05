@@ -6,6 +6,7 @@
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <unistd.h>
+#include <atomic>
 #include <cstring>
 #include <filesystem>
 #include <string>
@@ -30,6 +31,10 @@ struct WorkerFSConn {
   // If > 0, trigger filesystem readahead by issuing a small
   // initial read of this many bytes before reading the rest.
   size_t read_ahead_size = 0;
+  // Shared with the owning FSConnector. Latched the first time any worker
+  // learns this path refuses O_DIRECT, so the other workers stop paying for
+  // an attempt that is known to fail. Set once, never cleared.
+  std::atomic<bool>* odirect_refused = nullptr;
 };
 
 class FSConnector : public ConnectorBase<WorkerFSConn> {
@@ -74,6 +79,8 @@ class FSConnector : public ConnectorBase<WorkerFSConn> {
   bool use_odirect_;
   size_t disk_block_size_;
   size_t read_ahead_size_;
+  // See WorkerFSConn::odirect_refused.
+  std::atomic<bool> odirect_refused_{false};
 };
 
 }  // namespace connector
