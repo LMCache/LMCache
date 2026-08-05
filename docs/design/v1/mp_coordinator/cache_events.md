@@ -114,8 +114,10 @@ listener plumbing or a dedicated flush task:
   vocabulary (writes → `STORE`, evictions/deletes → `DELETE`, split per
   actual L1 medium from the event metadata; touches → `ACCESS`). The
   token-binding events produce no batches of their own: the subscriber
-  remembers their chunk-hash → token-ids pairs (LRU-bounded cache,
-  default 65536) and stamps `token_ids` onto every L1/L2 `STORE` entry,
+  remembers their chunk-hash → token-ids pairs (LRU cache bounded at
+  65536; passing the bound evicts the oldest half in one batch, so
+  eviction — and its warning — stays rare) and stamps `token_ids` onto
+  every L1/L2 `STORE` entry,
   so token bindings ride the store events themselves. Tokens are
   therefore repeated per rank/group/tier placement — an accepted wire
   trade for a self-contained protocol (see

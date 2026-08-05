@@ -209,8 +209,10 @@ def test_tokens_event_stamps_store_entries():
     assert delete.entries[0].token_ids == []
 
 
-def test_token_binding_cache_is_lru_bounded(monkeypatch):
-    monkeypatch.setattr(cache_events, "_TOKEN_BINDING_CACHE_SIZE", 1)
+def test_token_binding_cache_evicts_oldest_down_to_half(monkeypatch):
+    """Passing the bound drops the oldest bindings in one batch, down to
+    half the bound, so the newest survive to stamp their STOREs."""
+    monkeypatch.setattr(cache_events, "_TOKEN_BINDING_CACHE_SIZE", 2)
     sink = _RecordingSink()
     subscriber = CacheEventSubscriber(
         sink=sink,
@@ -219,32 +221,33 @@ def test_token_binding_cache_is_lru_bounded(monkeypatch):
         flush_interval=3600.0,
     )
 
+    keys = [_key(1), _key(2), _key(3)]
     _dispatch(
         subscriber,
         Event(
             event_type=EventType.MP_TOKENS,
             metadata={
-                "chunk_hashes": [_key(1).chunk_hash, _key(2).chunk_hash],
-                "token_chunks": [[1, 2], [3, 4]],
+                "chunk_hashes": [key.chunk_hash for key in keys],
+                "token_chunks": [[1, 2], [3, 4], [5, 6]],
             },
         ),
         Event(
             event_type=EventType.L1_WRITE_FINISHED,
-            metadata={"keys": [_key(1), _key(2)], "meta": [_meta(100), _meta(200)]},
+            metadata={"keys": keys, "meta": [_meta(100)] * 3},
         ),
     )
     subscriber.flush()
 
     [batches] = sink.published
     store = batches[-1]
-    # Only the most recently reported pair survives a capacity of 1.
-    assert [e.token_ids for e in store.entries] == [[], [3, 4]]
+    # Bound 2 -> evict to 1: only the newest binding is left.
+    assert [e.token_ids for e in store.entries] == [[], [], [5, 6]]
 
 
 def test_token_binding_eviction_warns(monkeypatch, caplog):
     """Dropping bindings means later STOREs lose their token ids, so the
-    subscriber says so (throttled)."""
-    monkeypatch.setattr(cache_events, "_TOKEN_BINDING_CACHE_SIZE", 1)
+    subscriber says so."""
+    monkeypatch.setattr(cache_events, "_TOKEN_BINDING_CACHE_SIZE", 2)
     subscriber = CacheEventSubscriber(
         sink=_RecordingSink(),
         instance_id="node-a",
@@ -257,12 +260,13 @@ def test_token_binding_eviction_warns(monkeypatch, caplog):
             Event(
                 event_type=EventType.MP_TOKENS,
                 metadata={
-                    "chunk_hashes": [_key(1).chunk_hash, _key(2).chunk_hash],
-                    "token_chunks": [[1, 2], [3, 4]],
+                    "chunk_hashes": [_key(i).chunk_hash for i in (1, 2, 3)],
+                    "token_chunks": [[1, 2], [3, 4], [5, 6]],
                 },
             ),
         )
-    assert "Token binding cache full" in caplog.text
+    assert "Token binding cache hit its 2-entry bound" in caplog.text
+    assert "evicted the 2 oldest bindings" in caplog.text
 
 
 def test_mismatched_token_chunks_raise():

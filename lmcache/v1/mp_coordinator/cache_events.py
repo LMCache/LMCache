@@ -41,10 +41,6 @@ _DEFAULT_FLUSH_INTERVAL = 1.0
 # token-binding event and its last (async L2) store event.
 _TOKEN_BINDING_CACHE_SIZE = 65536
 
-# Seconds between token-binding eviction warnings (the cache evicts once
-# per store while full, so an unthrottled warning would flood).
-_EVICTION_WARNING_INTERVAL = 60.0
-
 
 class CacheEventPublishError(Exception):
     """A sink failed to deliver a list of cache-event batches."""
@@ -166,9 +162,6 @@ class CacheEventSubscriber(EventSubscriber):
         self._incarnation = incarnation
         self._flush_interval = flush_interval
         self._last_flush = time.monotonic()
-        # Token-binding eviction bookkeeping (warning throttle).
-        self._evicted_bindings = 0
-        self._last_eviction_warning = 0.0
         self._seq = 0
         # Consecutive same-identity entries append to the last pending
         # batch; an identity change starts a new one (order-preserving).
@@ -278,22 +271,22 @@ class CacheEventSubscriber(EventSubscriber):
         for chunk_hash, chunk in zip(chunk_hashes, token_chunks, strict=True):
             self._token_bindings[chunk_hash] = tuple(chunk)
             self._token_bindings.move_to_end(chunk_hash)
+        if len(self._token_bindings) <= _TOKEN_BINDING_CACHE_SIZE:
+            return
+        # Evict in one batch down to half the bound: the next eviction is
+        # then thousands of stores away, so this stays a rare event (and
+        # a rare log line) instead of firing on every store while full.
         evicted = 0
-        while len(self._token_bindings) > _TOKEN_BINDING_CACHE_SIZE:
+        while len(self._token_bindings) > _TOKEN_BINDING_CACHE_SIZE // 2:
             self._token_bindings.popitem(last=False)
             evicted += 1
-        if evicted:
-            self._evicted_bindings += evicted
-            now = time.monotonic()
-            if now - self._last_eviction_warning >= _EVICTION_WARNING_INTERVAL:
-                self._last_eviction_warning = now
-                logger.warning(
-                    "Token binding cache full (%d entries): evicted %d binding(s) "
-                    "so far; STORE events for evicted chunks carry no token ids "
-                    "(stores completing far behind their submission)",
-                    _TOKEN_BINDING_CACHE_SIZE,
-                    self._evicted_bindings,
-                )
+        logger.warning(
+            "Token binding cache hit its %d-entry bound: evicted the %d oldest "
+            "bindings; STORE events for those chunks carry no token ids "
+            "(stores completing far behind their submission)",
+            _TOKEN_BINDING_CACHE_SIZE,
+            evicted,
+        )
 
     def _on_l2_delete(self, event: Event) -> None:
         self._record_l2_keys(CacheEventType.DELETE, event)
