@@ -79,7 +79,6 @@ export TRITON_CACHE_DIR="/tmp/build_${BUILD_ID}_triton_cache"
 # Seconds to let async LMCache stores drain before restarting vLLM.
 STORE_DRAIN_SECONDS="${STORE_DRAIN_SECONDS:-20}"
 ENGINE_DRIVEN_TRANSPORT="${ENGINE_DRIVEN_TRANSPORT:-}"
-L1_LAZY_ARG=""
 
 case "$ENGINE_DRIVEN_TRANSPORT" in
     ""|pickle|shm) ;;
@@ -88,10 +87,6 @@ case "$ENGINE_DRIVEN_TRANSPORT" in
         exit 1
         ;;
 esac
-
-if [ "${L1_USE_LAZY:-true}" = "false" ]; then
-    L1_LAZY_ARG="--no-l1-use-lazy"
-fi
 
 RESULTS_DIR="${RESULTS_DIR:-/tmp/lmcache_ci_results_${BUILD_ID}}"
 TP_DIR="$RESULTS_DIR/kimi_linear_tp"
@@ -270,7 +265,6 @@ lmcache server \
     --port "$LMCACHE_PORT" \
     --chunk-size "$CHUNK_SIZE" \
     --l1-size-gb 80 \
-    $L1_LAZY_ARG \
     --eviction-policy LRU \
     --max-workers 4 \
     > "$LMCACHE_LOG" 2>&1 &
