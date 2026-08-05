@@ -410,9 +410,11 @@ L2 Adapters
 
 The ``L2AdapterInterface`` (in ``base.py``) defines three async task methods:
 
-- ``submit_store_task(key, data)`` -- Push data to L2.
-- ``submit_lookup_and_lock_task(keys)`` -- Check if keys exist in L2.
-- ``submit_load_task(keys, layout_desc)`` -- Load data from L2 into L1.
+- ``submit_store_task(keys, objects)`` -- Push memory objects to L2.
+- ``submit_lookup_and_lock_task(keys, group_layout_descs)`` -- Check if
+  keys exist in L2 and lock them for a subsequent load.
+- ``submit_load_task(keys, objects)`` -- Load data from L2 into the
+  caller-provided memory objects in L1.
 
 The factory function ``create_l2_adapter()`` (in ``__init__.py``) uses
 ``isinstance()`` on the config type to instantiate the correct adapter.
