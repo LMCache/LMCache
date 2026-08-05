@@ -11,6 +11,7 @@ This module provides GPU-side KV cache management functionality, including:
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 import array
+import functools
 
 # Third Party
 import torch
@@ -18,6 +19,7 @@ import torch
 if TYPE_CHECKING:
     # Third Party
     import cupy
+
 
 # First Party
 from lmcache import torch_dev
@@ -39,6 +41,66 @@ from lmcache.v1.multiprocess.group_view import (
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 
 logger = init_logger(__name__)
+
+
+@functools.cache
+def _is_rocm() -> bool:
+    """Return ``True`` when the active PyTorch build targets ROCm/HIP.
+
+    On ROCm builds ``torch.version.hip`` is a version string; on CUDA
+    builds it is ``None``.  Cached so the check runs at most once.
+    """
+    return getattr(torch.version, "hip", None) is not None
+
+
+class _RocmTorchStreamAdapter:
+    """cupy.cuda.ExternalStream drop-in backed by a torch HIP stream.
+
+    LMCache uses ``cupy.cuda.ExternalStream`` purely as a thin handle
+    around an already-existing torch stream: it exposes ``.ptr`` (the
+    raw stream handle handed to native ``_lmc_ops`` recorders) and
+    ``launch_host_func`` (best-effort telemetry callbacks on the
+    event bus).  On AMD ROCm the cupy build shipped in the runtime is a
+    CUDA build and raises ``cudaErrorInsufficientDriver`` the moment any
+    of its runtime entry points (e.g. ``streamIsCapturing`` inside
+    ``launch_host_func``) is touched, which breaks context registration.
+
+    This adapter reproduces the small surface LMCache relies on using the
+    underlying torch stream, so no cupy runtime call is made on ROCm.  It
+    mirrors the synchronous-callback semantics already used by the
+    CPU-platform ``StubStream``.
+    """
+
+    def __init__(self, torch_stream: "torch.cuda.Stream") -> None:
+        self._torch_stream = torch_stream
+        # cupy's ``ExternalStream.ptr`` and torch's ``Stream.cuda_stream``
+        # are both the same underlying HIP stream handle, so native
+        # recorders that take a raw stream pointer accept either.
+        self.ptr = torch_stream.cuda_stream
+
+    def launch_host_func(self, func, *args, **kwargs) -> None:
+        """Run ``func`` synchronously (best-effort, never propagates).
+
+        ``cupy.cuda.Stream.launch_host_func`` schedules a host callback on
+        the stream's completion queue.  These callbacks are best-effort
+        telemetry, so invoking them synchronously is semantically safe.
+        """
+        try:
+            func(*args, **kwargs)
+        except Exception:  # noqa: BLE001 - callbacks must not disrupt transfer
+            pass
+
+    def synchronize(self) -> None:
+        self._torch_stream.synchronize()
+
+    def wait_event(self, event) -> None:
+        self._torch_stream.wait_event(event)
+
+    def wait_stream(self, stream) -> None:
+        self._torch_stream.wait_stream(stream)
+
+    def record_event(self, event=None):
+        return self._torch_stream.record_event(event)
 
 
 def unwrap_kv_cache_tensors(kv_caches: KVCache) -> list[torch.Tensor]:
@@ -418,12 +480,17 @@ class GPUCacheContext(BaseCacheContext):
         with torch_dev.stream(self.cuda_stream_):
             get_gds_context().register_gpu_buffer(self._temp_buffer.buffer)
 
-        # Third Party
-        import cupy
+        if _is_rocm():
+            # ROCm: cupy is a CUDA build here and raises
+            # cudaErrorInsufficientDriver; back the stream with torch.
+            self.cupy_stream_ = _RocmTorchStreamAdapter(self.cuda_stream_)
+        else:
+            # Third Party
+            import cupy
 
-        self.cupy_stream_: "cupy.cuda.Stream" = cupy.cuda.ExternalStream(
-            self.cuda_stream_.cuda_stream, self.device_.index
-        )
+            self.cupy_stream_ = cupy.cuda.ExternalStream(
+                self.cuda_stream_.cuda_stream, self.device_.index
+            )
 
         # Extra initialization
         self.cupy_stream_.launch_host_func(
@@ -561,12 +628,17 @@ class PlainGPUCacheContext:
 
         # GPU streams
         self._cuda_stream = torch_dev.Stream(device=self._device)
-        # Third Party
-        import cupy
+        if _is_rocm():
+            # ROCm: cupy is a CUDA build here and raises
+            # cudaErrorInsufficientDriver; back the stream with torch.
+            self._cupy_stream = _RocmTorchStreamAdapter(self._cuda_stream)
+        else:
+            # Third Party
+            import cupy
 
-        self._cupy_stream: "cupy.cuda.Stream" = cupy.cuda.ExternalStream(
-            self._cuda_stream.cuda_stream, self._device.index
-        )
+            self._cupy_stream = cupy.cuda.ExternalStream(
+                self._cuda_stream.cuda_stream, self._device.index
+            )
 
         # Extra initialization
         self._cupy_stream.launch_host_func(
