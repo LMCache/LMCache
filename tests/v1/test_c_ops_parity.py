@@ -209,16 +209,17 @@ def _has_real_names(params):
 
 # ── Discover the intersection automatically ──
 
-# Functions intentionally excluded from parity checks.
-# These are native-only with no torch fallback; call sites guard with hasattr.
-# NOTE: execute_object_group_transfer previously had a signature-only stub
-# (raised NotImplementedError unconditionally) — not a real fallback.
+# Functions temporarily excluded from parity checks.
+# Please add entries here sparingly: this list is a CI workaround for APIs with
+# special requirements, not a declaration that an op may remain native-only.
+# The goal is for every public c_ops function to have a working torch_ops
+# fallback; remove an entry once that fallback is implemented.
 _EXCLUDED_FUNCS: set[str] = set()
 
-# Plan types (StagingCopy, LaunchVar, BatchStep, KernelGroupSpec)
-# are native-only with no torch fallback — auto-discovered by bind_native.
-# NOTE: these previously had signature-only stubs (raised NotImplementedError
-# unconditionally) — not real fallbacks.
+# Descriptor classes temporarily excluded from parity checks.
+# Please add entries here sparingly for the same reason as _EXCLUDED_FUNCS:
+# exclusions are intended only to unblock CI for special cases, and each public
+# c_ops descriptor should ultimately have a working torch_ops fallback.
 _EXCLUDED_DESCS: set[str] = set()
 
 _fallback_callables = _public_callables(fallback)
