@@ -7,7 +7,6 @@ app."""
 # Standard
 from dataclasses import asdict
 import asyncio
-import logging
 import threading
 
 # Third Party
@@ -244,29 +243,39 @@ def test_token_binding_cache_evicts_oldest_down_to_half(monkeypatch):
     assert [e.token_ids for e in store.entries] == [[], [], [5, 6]]
 
 
-def test_token_binding_eviction_warns(monkeypatch, caplog):
+def test_token_binding_eviction_warns(monkeypatch):
     """Dropping bindings means later STOREs lose their token ids, so the
     subscriber says so."""
     monkeypatch.setattr(cache_events, "_TOKEN_BINDING_CACHE_SIZE", 2)
+    warnings: list[str] = []
+    # The module logger does not propagate (see ``lmcache.logging``), so
+    # record the call instead of relying on root-handler capture.
+    monkeypatch.setattr(
+        cache_events.logger,
+        "warning",
+        lambda msg, *args: warnings.append(msg % args),
+    )
     subscriber = CacheEventSubscriber(
         sink=_RecordingSink(),
         instance_id="node-a",
         incarnation=7,
         flush_interval=3600.0,
     )
-    with caplog.at_level(logging.WARNING):
-        _dispatch(
-            subscriber,
-            Event(
-                event_type=EventType.MP_TOKENS,
-                metadata={
-                    "chunk_hashes": [_key(i).chunk_hash for i in (1, 2, 3)],
-                    "token_chunks": [[1, 2], [3, 4], [5, 6]],
-                },
-            ),
-        )
-    assert "Token binding cache hit its 2-entry bound" in caplog.text
-    assert "evicted the 2 oldest bindings" in caplog.text
+    _dispatch(
+        subscriber,
+        Event(
+            event_type=EventType.MP_TOKENS,
+            metadata={
+                "chunk_hashes": [_key(i).chunk_hash for i in (1, 2, 3)],
+                "token_chunks": [[1, 2], [3, 4], [5, 6]],
+            },
+        ),
+    )
+    assert warnings == [
+        "Token binding cache hit its 2-entry bound: evicted the 2 oldest "
+        "bindings; STORE events for those chunks carry no token ids "
+        "(stores completing far behind their submission)"
+    ]
 
 
 def test_mismatched_token_chunks_raise():
