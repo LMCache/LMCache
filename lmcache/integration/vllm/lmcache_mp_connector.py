@@ -1163,6 +1163,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 for bid in gpu_block_ids
             }
             if old_block_hashes == new_block_hashes:
+                # remove block hashes and free blocks until store is done
                 metadata.add_request_metadata(item.metadata)
             else:
                 logger.warning(
