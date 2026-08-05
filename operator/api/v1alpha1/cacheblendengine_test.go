@@ -18,8 +18,6 @@ package v1alpha1
 
 import (
 	"testing"
-
-	corev1 "k8s.io/api/core/v1"
 )
 
 // ptr is defined in lmcacheengine_test.go (same package); reuse it here.
@@ -657,24 +655,5 @@ func TestCBValidateSpec_AttentionBackendNoneValid(t *testing.T) {
 	}}
 	if errs := e.ValidateSpec(); len(errs) != 0 {
 		t.Fatalf("expected no errors, got %v", errs)
-	}
-}
-
-func TestCBValidateSpec_InjectionEnvPythonPathRejected(t *testing.T) {
-	inj := validCBInjection()
-	inj.Env = []corev1.EnvVar{
-		{Name: "VLLM_USE_FLASHINFER_MOE_FP8", Value: "0"},
-		{Name: "PYTHONPATH", Value: "/evil"},
-	}
-	e := &CacheBlendEngine{Spec: CacheBlendEngineSpec{
-		L1:        L1BackendSpec{SizeGB: 10},
-		Injection: inj,
-	}}
-	errs := e.ValidateSpec()
-	if len(errs) != 1 {
-		t.Fatalf("expected 1 error, got %d: %v", len(errs), errs)
-	}
-	if errs[0].Field != "spec.injection.env[1]" {
-		t.Fatalf("expected field spec.injection.env[1], got %s", errs[0].Field)
 	}
 }

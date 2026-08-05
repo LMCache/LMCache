@@ -55,9 +55,6 @@ spec:
     #                              # page size differs (e.g. 128 for sparse-attention)
     # attentionBackend: CUSTOM     # injected --attention-backend; "none" omits the
     #                              # flag (models whose arch adapter owns attention)
-    # env:                         # extra env vars on the vLLM container
-    #   - name: VLLM_USE_FLASHINFER_MOE_FP8
-    #     value: "0"               # e.g. required for fp8-MoE models
 
   # -- Eviction --
   # eviction:

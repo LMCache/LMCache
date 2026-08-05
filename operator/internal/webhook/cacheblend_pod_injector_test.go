@@ -485,42 +485,6 @@ var _ = Describe("CacheBlendPodInjector", func() {
 			Expect(argsHasFlagValue(c.Args, cbFlagAttentionBackend, "FLASH_ATTN")).To(BeTrue())
 		})
 
-		It("applies injection.env to the target container, overwriting same-name vars", func() {
-			engine := newTestEngine(func(e *lmcachev1alpha1.CacheBlendEngine) {
-				e.Spec.Injection.Env = []corev1.EnvVar{
-					{Name: "VLLM_USE_FLASHINFER_MOE_FP8", Value: "0"},
-					{Name: "EXISTING", Value: "new"},
-				}
-			})
-			injector := newPodInjector(engine, true)
-			pod := vllmPod(func(p *corev1.Pod) {
-				p.Spec.Containers[0].Env = []corev1.EnvVar{{Name: "EXISTING", Value: "old"}}
-			})
-
-			resp := injector.Handle(ctx, makeRequest(pod))
-			out := applyResponse(pod, resp)
-			c := findContainer(out, "vllm")
-
-			Expect(envValue(c, "VLLM_USE_FLASHINFER_MOE_FP8")).To(Equal("0"))
-			Expect(envValue(c, "EXISTING")).To(Equal("new"))
-		})
-
-		It("never lets injection.env override the staged PYTHONPATH", func() {
-			// ValidateSpec rejects PYTHONPATH in injection.env; the builder skips
-			// it as defense in depth for engines admitted before that rule.
-			engine := newTestEngine(func(e *lmcachev1alpha1.CacheBlendEngine) {
-				e.Spec.Injection.Env = []corev1.EnvVar{{Name: "PYTHONPATH", Value: "/evil"}}
-			})
-			injector := newPodInjector(engine, true)
-			pod := vllmPod(nil)
-
-			resp := injector.Handle(ctx, makeRequest(pod))
-			out := applyResponse(pod, resp)
-			c := findContainer(out, "vllm")
-
-			Expect(envValue(c, pythonPathEnvName)).To(Equal(cbPluginMountPath))
-		})
-
 		It("skips + stamps when the user already supplies --kv-transfer-config", func() {
 			engine := newTestEngine(nil)
 			injector := newPodInjector(engine, true)

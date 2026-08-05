@@ -23,8 +23,7 @@ import (
 // ValidateSpec validates the CacheBlendEngineSpec and returns any validation
 // errors. It mirrors LMCacheEngine.ValidateSpec and additionally enforces the
 // CacheBlend invariants: chunkSize == 256, recompRatio in (0, 1], checkLayer
-// >= 0, partialBucket >= 1, blockSize >= 1, a non-empty attentionBackend, and
-// no PYTHONPATH in injection.env.
+// >= 0, partialBucket >= 1, blockSize >= 1, and a non-empty attentionBackend.
 func (e *CacheBlendEngine) ValidateSpec() field.ErrorList {
 	var errs field.ErrorList
 	spec := &e.Spec
@@ -101,16 +100,6 @@ func (e *CacheBlendEngine) ValidateSpec() field.ErrorList {
 			errs = append(errs, field.Invalid(injPath.Child("attentionBackend"),
 				*spec.Injection.AttentionBackend,
 				`must be a backend name or "none" to omit the flag`))
-		}
-
-		// PYTHONPATH is owned by the plugin staging (the injected /cb-plugin
-		// prepend); an env override here would break plugin discovery.
-		for i := range spec.Injection.Env {
-			if spec.Injection.Env[i].Name == "PYTHONPATH" {
-				errs = append(errs, field.Invalid(injPath.Child("env").Index(i),
-					spec.Injection.Env[i].Name,
-					"PYTHONPATH is managed by the CacheBlend plugin staging and cannot be set here"))
-			}
 		}
 	}
 

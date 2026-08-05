@@ -109,42 +109,18 @@ func BuildCBVolumeMount() corev1.VolumeMount {
 }
 
 // BuildCBPodEnv returns the env list for the target vLLM container with
-// PYTHONPATH set to (or prepended with) /cb-plugin (M4), followed by the
-// engine's injection.env entries (e.g. VLLM_USE_FLASHINFER_MOE_FP8=0). It is set
-// on the container, never the pod, so every spawned worker inherits it; it never
-// sets VLLM_PLUGINS (design §9.8). An existing PYTHONPATH is prepended, not
-// replaced, so /cb-plugin:<existing> keeps the plugin discoverable without
-// dropping the user's path entries. An injection.env entry whose name matches an
-// existing container variable overwrites it (spec wins, mirroring the args
-// replace semantics); PYTHONPATH overrides are rejected by ValidateSpec and
-// skipped here as defense in depth.
+// PYTHONPATH set to (or prepended with) /cb-plugin (M4). It is set on the
+// container, never the pod, so every spawned worker inherits it; it never sets
+// VLLM_PLUGINS (design §9.8). An existing PYTHONPATH is prepended, not replaced,
+// so /cb-plugin:<existing> keeps the plugin discoverable without dropping the
+// user's path entries.
 //
 // Parameters:
 //   - existing: the target container's current env list (may be nil).
-//   - injected: the engine's injection.env entries (may be nil).
 //
-// Returns a new env list; the inputs are not mutated.
-func BuildCBPodEnv(existing, injected []corev1.EnvVar) []corev1.EnvVar {
-	env := cbStaging.prependPythonPath(existing)
-	for _, v := range injected {
-		if v.Name == "PYTHONPATH" {
-			continue
-		}
-		env = applyEnvVar(env, v)
-	}
-	return env
-}
-
-// applyEnvVar appends-or-replaces v in env by name: a same-name entry is
-// overwritten in place, otherwise v is appended. Returns the slice.
-func applyEnvVar(env []corev1.EnvVar, v corev1.EnvVar) []corev1.EnvVar {
-	for i := range env {
-		if env[i].Name == v.Name {
-			env[i] = v
-			return env
-		}
-	}
-	return append(env, v)
+// Returns a new env list; the input is not mutated.
+func BuildCBPodEnv(existing []corev1.EnvVar) []corev1.EnvVar {
+	return cbStaging.prependPythonPath(existing)
 }
 
 // cudagraphArgs returns the cudagraph-mode flag set for the given mode. "eager"

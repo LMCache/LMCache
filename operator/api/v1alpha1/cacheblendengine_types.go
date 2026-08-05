@@ -134,14 +134,6 @@ type InjectionSpec struct {
 	// +kubebuilder:default="CUSTOM"
 	// +kubebuilder:validation:MinLength=1
 	AttentionBackend *string `json:"attentionBackend,omitempty"`
-
-	// env holds additional environment variables the webhook sets on the target
-	// vLLM container (e.g. VLLM_USE_FLASHINFER_MOE_FP8=0 to route fp8 MoE through
-	// the CB backend). A same-name variable already on the container is
-	// overwritten; PYTHONPATH cannot be overridden here (the plugin staging owns
-	// it).
-	// +optional
-	Env []corev1.EnvVar `json:"env,omitempty"`
 }
 
 // CacheBlendEngineSpec defines the desired state of CacheBlendEngine. It mirrors
