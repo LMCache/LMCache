@@ -52,7 +52,7 @@ jobs:
 
       - name: Build cu13.0 nightly wheel
         env:
-          CIBW_TEST_COMMAND: "python -c 'import lmcache.c_ops'"
+          CIBW_TEST_COMMAND: "python {project}/.github/scripts/assert_native_ops.py"
         run: |
           python -m cibuildwheel --output-dir dist/cu130
 
@@ -78,7 +78,7 @@ jobs:
       - name: Build cu12.9 nightly wheel
         env:
           CIBW_MANYLINUX_X86_64_IMAGE: docker.io/pytorch/manylinux2_28-builder:cuda12.9
-          CIBW_ENVIRONMENT: 'TORCH_CUDA_ARCH_LIST="7.0;7.5;8.0;8.6;8.9;9.0;10.0" ENABLE_CXX11_ABI=1 LMCACHE_CUDA_MAJOR=12 PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cu129'
+          CIBW_ENVIRONMENT: 'TORCH_CUDA_ARCH_LIST="7.0;7.5;8.0;8.6;8.9;9.0;10.0" ENABLE_CXX11_ABI=1 LMCACHE_CUDA_MAJOR=12 PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cu129 PIP_CONSTRAINT=/project/cibw-constraints.txt'
           CIBW_REPAIR_WHEEL_COMMAND_LINUX: >-
             auditwheel repair
             --plat manylinux_2_28_x86_64
@@ -90,7 +90,7 @@ jobs:
             --exclude libc10_cuda.so
             --exclude libcudart.so.12
             -w {dest_dir} {wheel}
-          CIBW_TEST_COMMAND: "python -c 'import lmcache.c_ops'"
+          CIBW_TEST_COMMAND: "python {project}/.github/scripts/assert_native_ops.py"
         run: |
           python -m cibuildwheel --output-dir dist/cu129
 
@@ -261,3 +261,60 @@ jobs:
         run: |
           docker push lmcache/standalone:nightly-cu129
           docker push lmcache/standalone:nightly-${{ env.NOW }}-cu129
+
+  nightly-verify-cpu-vllm:
+    name: CPU device tests
+    # Reuse the PR-gating CPU device suite (server bench + vLLM e2e over
+    # two models) rather than keeping a second, weaker copy of the install
+    # steps here: "today's nightly is importable" says very little, while
+    # this actually serves traffic through LMCache. nightly_verify also
+    # lifts cpu_device.yml's macOS wheel pin so the newest build is what
+    # gets exercised, and makes each leg upload its verdict for the pin
+    # job below.
+    uses: ./.github/workflows/cpu_device.yml
+    with:
+      nightly_verify: true
+    # HF_TOKEN for the e2e model pulls; reusable workflows get no secrets
+    # otherwise.
+    secrets: inherit
+    permissions:
+      contents: read
+      pull-requests: read
+
+  nightly-pin-or-report-vllm:
+    name: Pin or report vLLM
+    needs: nightly-verify-cpu-vllm
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      issues: write
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout code
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          fetch-depth: 1
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Download verify results
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          pattern: verify-result-*
+          path: verify-results
+
+      - name: Aggregate and pin / report
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PIN_SCRIPT: ${{ github.workspace }}/.github/scripts/pin-tested-vllm.sh
+          EXPECTED_OSS: 'ubuntu-22.04 macos-latest'
+        run: bash .github/scripts/nightly-aggregate-vllm-verify.sh

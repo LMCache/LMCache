@@ -226,7 +226,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
     def submit_lookup_and_lock_task(
         self,
         keys: list[ObjectKey],
-        layout_desc: MemoryLayoutDesc,
+        group_layout_descs: dict[int, MemoryLayoutDesc],
     ) -> L2TaskId:
         key_strings = [_object_key_to_string(k) for k in keys]
 
