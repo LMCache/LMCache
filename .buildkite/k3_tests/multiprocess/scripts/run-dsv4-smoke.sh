@@ -135,6 +135,7 @@ vllm serve "$MODEL" \
     --load-format dummy \
     --enforce-eager \
     --no-enable-prefix-caching \
+    --kv-cache-dtype fp8 \
     --gpu-memory-utilization 0.85 \
     --max-model-len 8192 \
     --max-num-seqs 8 \
