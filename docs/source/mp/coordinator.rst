@@ -752,6 +752,22 @@ forms -- supply exactly one:
       "cache_salt": ""
     }
 
+**Request body** (keys form):
+
+.. code-block:: json
+
+    {
+      "keys": [
+        {
+          "chunk_hash_hex": "aa12...",
+          "model_name": "meta-llama/Llama-3.1-8B-Instruct",
+          "kv_rank": 0,
+          "object_group_id": 0,
+          "cache_salt": ""
+        }
+      ]
+    }
+
 **Response** (``200 OK``):
 
 .. code-block:: json
