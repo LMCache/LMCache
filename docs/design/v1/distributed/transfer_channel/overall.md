@@ -98,7 +98,7 @@ The normal way application code obtains a context:
 
 | Function | Purpose |
 |---|---|
-| `initialize_transfer_channel_context(transfer_channel_type, l1_memory_desc, listen_url, advertise_url, **kwargs)` | Create the process-global context via the registered factory. Raises if one already exists, or if the type is unknown. `**kwargs` are forwarded to the factory (e.g. `backends=["UCX"]` for nixl). |
+| `initialize_transfer_channel_context(transfer_channel_type, l1_memory_desc, listen_url, advertise_url, **kwargs)` | Create the process-global context via the registered factory. Raises if one already exists, or if the type is unknown. `**kwargs` are forwarded to the factory (e.g. `backends=["UCX"]` and `mr_slice_bytes` for nixl). |
 | `get_transfer_channel_context()` | Return the global context (raises if not initialized). |
 | `delete_transfer_channel_context()` | Close and clear the global context. |
 
@@ -110,8 +110,9 @@ typically obtained from `L1MemoryManager.get_l1_memory_desc()`.
 
 ## How a read flows
 
-1. **Register.** Each peer builds a context, which registers its whole L1 buffer
-   with the transport and binds its handshake server.
+1. **Register.** Each peer builds a context, which registers its L1 buffer with
+   the transport (as one region or as `mr_slice_bytes`-capped slices) and binds
+   its handshake server.
 2. **Connect / handshake.** The reader calls
    `get_transfer_channel_client(peer_url)`. If no client exists, the context
    dials the peer's server and exchanges transport metadata (agent identity and
@@ -140,8 +141,17 @@ default). It self-registers under the type name `"nixl"` at import time. Notable
 points:
 
 - **One agent per context.** The context creates a single `nixl_agent`, registers
-  the whole L1 buffer once, and builds a page-granular transfer-descriptor list
+  the L1 buffer once, and builds a page-granular transfer-descriptor list
   over `[base, base+size)` using `align_bytes` as the page size.
+- **Sliced memory registration.** `mr_slice_bytes` caps the size of each
+  memory-registration slice (0 = one region covering the whole buffer). RDMA
+  reads whose *destination* sits in a single registered region larger than
+  ~4 GiB run at ~55% of line rate (NIC translation-cache pressure on the
+  requester; measured 9.3 → 6.0 GB/s on 100 GbE RoCE), so the MP server's
+  `P2PConfig` defaults to 3.5 GiB slices. Slice boundaries are rounded down to
+  `align_bytes` multiples so no transfer page straddles two registrations, and
+  nixl/UCX transparently splits reads that span a slice boundary — the
+  page-index math and the descriptor list are unaffected by slicing.
 - **Handshake over ZMQ.** Metadata is exchanged over a ZMQ `REP`/`REQ` socket
   (not the LMCache MQ — that would be overkill and would leak transfer-channel
   functions into the global MQ). The messages are a small `msgspec` tagged union

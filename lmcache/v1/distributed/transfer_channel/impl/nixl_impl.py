@@ -317,6 +317,7 @@ class NixlTransferChannelContext(TransferChannelContext):
         listen_url: str,
         advertise_url: str,
         backends: Optional[list[str]] = None,
+        mr_slice_bytes: int = 0,
     ) -> None:
         """
         Creates the transfer channel context using nixl.
@@ -326,6 +327,16 @@ class NixlTransferChannelContext(TransferChannelContext):
             listen_url: The URL to listen on for incoming connections.
             advertise_url: The URL to advertise to peers for them to connect to us.
             backends: Optional list of nixl backends to use (e.g., ["UCX"])
+            mr_slice_bytes: Maximum bytes per memory-registration slice; 0
+                registers the whole buffer as a single region. RDMA-read
+                throughput on the requesting peer drops sharply once a single
+                registration exceeds ~4 GiB (NIC translation-cache pressure),
+                so large L1 buffers should be sliced. Reads spanning a slice
+                boundary are split transparently by nixl.
+
+        Raises:
+            ValueError: If ``mr_slice_bytes`` is negative, or positive but
+                smaller than the buffer's alignment.
         """
         nixl_agent, nixl_agent_config = _load_nixl()
 
@@ -335,12 +346,36 @@ class NixlTransferChannelContext(TransferChannelContext):
         self.advertise_url = advertise_url
         backends = backends if backends else ["UCX"]
 
+        if mr_slice_bytes < 0:
+            raise ValueError(f"mr_slice_bytes must be >= 0, got {mr_slice_bytes}")
+        if 0 < mr_slice_bytes < self._align:
+            raise ValueError(
+                f"mr_slice_bytes ({mr_slice_bytes}) must be at least the "
+                f"buffer alignment ({self._align})"
+            )
+
         self.agent_name = str(uuid.uuid4())
         self.agent = nixl_agent(self.agent_name, nixl_agent_config(backends=backends))
 
-        # Register the whole L1 buffer once (CPU/DRAM, fixed nixl dev_id=0).
+        # Register the L1 buffer (CPU/DRAM, fixed nixl dev_id=0), either as one
+        # region or as slices of at most mr_slice_bytes. Slice boundaries are
+        # rounded down to align-page multiples so no xfer page straddles two
+        # registrations.
         ptr, size = l1_memory_desc.ptr, l1_memory_desc.size
-        self._reg_descs = self.agent.get_reg_descs([(ptr, size, 0, "")], "cpu")
+        if mr_slice_bytes > 0:
+            slice_bytes = mr_slice_bytes - (mr_slice_bytes % self._align)
+            reg_list = [
+                (addr, min(slice_bytes, ptr + size - addr), 0, "")
+                for addr in range(ptr, ptr + size, slice_bytes)
+            ]
+            logger.info(
+                "Registering L1 as %d MR slices of <=%d bytes each",
+                len(reg_list),
+                slice_bytes,
+            )
+        else:
+            reg_list = [(ptr, size, 0, "")]
+        self._reg_descs = self.agent.get_reg_descs(reg_list, "cpu")
         self.agent.register_memory(self._reg_descs)
 
         # Build + prep a page-granular local xfer dlist over the whole buffer.
@@ -610,7 +645,9 @@ def create_nixl_transfer_channel_context(
         listen_url: ``host:port`` this peer's server binds to.
         advertise_url: ``host:port`` this peer advertises as its identity.
         **kwargs: Accepts ``backends`` (an optional list of nixl backends,
-            e.g. ``["UCX"]``).
+            e.g. ``["UCX"]``) and ``mr_slice_bytes`` (maximum bytes per
+            memory-registration slice; 0, the default, registers the whole
+            buffer as one region).
 
     Returns:
         A new ``NixlTransferChannelContext`` instance.
@@ -620,6 +657,7 @@ def create_nixl_transfer_channel_context(
         listen_url=listen_url,
         advertise_url=advertise_url,
         backends=kwargs.get("backends"),
+        mr_slice_bytes=kwargs.get("mr_slice_bytes", 0),
     )
 
 

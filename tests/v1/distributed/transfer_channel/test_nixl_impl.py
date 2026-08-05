@@ -234,3 +234,65 @@ def test_connecting_registers_clients_on_both_sides(fresh_contexts):
 def test_server_is_available_from_context(shared_contexts):
     ctx_a, _, _, _ = shared_contexts
     assert ctx_a.get_transfer_channel_server() is not None
+
+
+# =========================================================
+# MR slicing (mr_slice_bytes)
+# =========================================================
+def test_sliced_registration_serves_read_across_slice_boundary():
+    """With mr_slice_bytes=1024 the 4096-byte buffer registers as 4 slices;
+    a read spanning the destination's first slice boundary must still land
+    intact (nixl splits transfers across registration slices transparently).
+    """
+    ctx_a = ctx_b = None
+    buf_a = torch.zeros(_BUF_SIZE, dtype=torch.uint8)
+    buf_b = torch.arange(0, 256, dtype=torch.uint8).repeat(_BUF_SIZE // 256)
+    desc_a = L1MemoryDesc(ptr=buf_a.data_ptr(), size=buf_a.numel(), align_bytes=_ALIGN)
+    desc_b = L1MemoryDesc(ptr=buf_b.data_ptr(), size=buf_b.numel(), align_bytes=_ALIGN)
+    url_a, url_b = _next_url(), _next_url()
+    try:
+        ctx_a = NixlTransferChannelContext(
+            desc_a, listen_url=url_a, advertise_url=url_a, mr_slice_bytes=1024
+        )
+        ctx_b = NixlTransferChannelContext(
+            desc_b, listen_url=url_b, advertise_url=url_b, mr_slice_bytes=1024
+        )
+        client = ctx_a.get_transfer_channel_client(ctx_b.advertise_url)
+
+        # [768, 1792) crosses the slice boundary at 1024 on both sides.
+        local = ctx_a.get_transfer_channel_address([(768, 1024)])
+        remote = ctx_b.get_transfer_channel_address([(768, 1024)])
+        task_id = client.submit_read(local, remote)
+
+        result = _wait_finished(client, task_id)
+        assert result.is_finished() is True
+        assert result.succeeded_mask == [True]
+        assert torch.equal(buf_a[768:1792], buf_b[768:1792])
+        # Regions outside the read stay untouched.
+        assert torch.count_nonzero(buf_a[:768]) == 0
+        assert torch.count_nonzero(buf_a[1792:]) == 0
+    finally:
+        if ctx_a is not None:
+            ctx_a.close()
+        if ctx_b is not None:
+            ctx_b.close()
+
+
+def test_mr_slice_bytes_negative_raises_value_error():
+    buf = torch.zeros(_BUF_SIZE, dtype=torch.uint8)
+    desc = L1MemoryDesc(ptr=buf.data_ptr(), size=buf.numel(), align_bytes=_ALIGN)
+    url = _next_url()
+    with pytest.raises(ValueError):
+        NixlTransferChannelContext(
+            desc, listen_url=url, advertise_url=url, mr_slice_bytes=-1
+        )
+
+
+def test_mr_slice_bytes_below_alignment_raises_value_error():
+    buf = torch.zeros(_BUF_SIZE, dtype=torch.uint8)
+    desc = L1MemoryDesc(ptr=buf.data_ptr(), size=buf.numel(), align_bytes=_ALIGN)
+    url = _next_url()
+    with pytest.raises(ValueError):
+        NixlTransferChannelContext(
+            desc, listen_url=url, advertise_url=url, mr_slice_bytes=_ALIGN - 1
+        )
