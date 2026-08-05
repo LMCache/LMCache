@@ -113,6 +113,21 @@ def test_memory_layout_desc_mq_roundtrip():
     assert all(isinstance(d, torch.dtype) for d in decoded.dtypes)
 
 
+def test_group_layout_descs_mq_roundtrip():
+    """The mq encode/decode dispatch must round-trip the per-group layout
+    dict carried by P2P_LOOKUP_AND_LOCK, including its torch.Size /
+    torch.dtype fields."""
+    descs = {0: _make_layout_desc(), 1: _make_layout_desc()}
+    decoded = msgspec_decode(
+        msgspec_encode(descs, cls=dict[int, MemoryLayoutDesc]),
+        cls=dict[int, MemoryLayoutDesc],
+    )
+    assert decoded == descs
+    for desc in decoded.values():
+        assert all(isinstance(s, torch.Size) for s in desc.shapes)
+        assert all(isinstance(d, torch.dtype) for d in desc.dtypes)
+
+
 def test_memory_layout_desc_empty_mq_roundtrip():
     """An empty layout descriptor must round-trip through the mq dispatch."""
     desc = MemoryLayoutDesc(shapes=[], dtypes=[])
