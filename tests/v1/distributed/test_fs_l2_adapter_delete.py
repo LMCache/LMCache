@@ -4,7 +4,7 @@
 ``delete`` unlinks each key's backing file and fires
 ``on_l2_keys_deleted``; store/load fire ``on_l2_keys_stored`` /
 ``on_l2_keys_accessed``. Together these drive the base class's byte
-accounting and feed the coordinator's ``L2EventListener``.
+accounting and feed the coordinator's cache-event stream.
 """
 
 # Standard
@@ -89,7 +89,7 @@ def _bufs(payloads: list[bytes]) -> list[MemoryObj]:
 def _lookup_and_wait(adp: FSL2Adapter, keys: list[ObjectKey]) -> list[bool]:
     """Submit a lookup and poll until its hit bitmap is available."""
     task_id = adp.submit_lookup_and_lock_task(
-        keys, MemoryLayoutDesc(shapes=[], dtypes=[])
+        keys, {0: MemoryLayoutDesc(shapes=[], dtypes=[])}
     )
     deadline = time.monotonic() + 5.0
     while time.monotonic() < deadline:

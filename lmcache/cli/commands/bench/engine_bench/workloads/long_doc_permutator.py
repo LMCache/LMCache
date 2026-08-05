@@ -14,6 +14,12 @@ Stress axes (controlled by config):
     3. Chunk Homogeneity           -> vocab_size
     4. Prefix Domination           -> system_prompt_length
     5. Concurrency                 -> num_inflight_requests
+
+Context and system-prompt lengths are exact token counts, not estimates:
+all synthetic text is built from words that encode to exactly one token
+under the model's own tokenizer (see
+:mod:`lmcache.cli.commands.bench.engine_bench.tokenizers`).  This workload
+therefore requires a loadable tokenizer.
 """
 
 # Standard
@@ -27,6 +33,11 @@ import random
 from lmcache.cli.commands.bench.engine_bench.progress import ProgressMonitor
 from lmcache.cli.commands.bench.engine_bench.request_sender import RequestSender
 from lmcache.cli.commands.bench.engine_bench.stats import StatsCollector
+from lmcache.cli.commands.bench.engine_bench.tokenizers import (
+    TokenPool,
+    build_single_token_pool,
+    try_load_tokenizer,
+)
 from lmcache.cli.commands.bench.engine_bench.workloads.base import BaseWorkload
 from lmcache.logging import init_logger
 
@@ -76,13 +87,14 @@ class LongDocPermutatorConfig:
 
         Args:
             num_contexts: Number of unique context documents.
-            context_length: Token length of each context.
-            system_prompt_length: Token length of the shared system prompt.
-                Use 0 for no system prompt.
+            context_length: Exact token length of each context.
+            system_prompt_length: Exact token length of the shared system
+                prompt.  Use 0 for no system prompt.
             num_permutations: Number of distinct permutations to send.
                 Capped at N! where N = num_contexts.
-            vocab_size: Vocabulary pool size for context generation.
-                Smaller values increase chunk hash collision risk.
+            vocab_size: Number of distinct single-token words to sample
+                context content from.  Smaller values increase chunk hash
+                collision risk.
             num_inflight_requests: Max concurrent in-flight requests.
 
         Returns:
@@ -103,91 +115,48 @@ class LongDocPermutatorConfig:
 # ---------------------------------------------------------------------------
 
 
-def _generate_vocab_pool(size: int, seed: int = 42) -> list[str]:
-    """Generate a vocabulary pool of ``size`` unique pseudo-words.
-
-    Deterministically generates synthetic words so every token is unique.
+def _generate_system_prompt(length: int, pool: TokenPool, seed: int = 42) -> str:
+    """Generate a deterministic shared system prompt of ``length`` tokens.
 
     Args:
-        size: Number of unique words to generate.
+        length: Exact token length of the system prompt.
+        pool: Single-token words to sample from.
         seed: Random seed for reproducibility.
 
     Returns:
-        Sorted list of unique pseudo-words.
-    """
-    rng = random.Random(seed)
-    vowels = "aeiou"
-    consonants = "bcdfghjklmnpqrstvwxyz"
-    pool: set[str] = set()
-    while len(pool) < size:
-        length = rng.randint(3, 7)
-        word = ""
-        for j in range(length):
-            if j % 2 == 0:
-                word += rng.choice(consonants)
-            else:
-                word += rng.choice(vowels)
-        word = f"{word}{len(pool)}"
-        pool.add(word)
-    return sorted(pool)
-
-
-def _generate_system_prompt(length: int, seed: int = 42) -> str:
-    """Generate a deterministic shared system prompt of ~``length`` tokens.
-
-    Args:
-        length: Approximate token length of the system prompt.
-        seed: Random seed for reproducibility.
-
-    Returns:
-        A string of ``length`` space-separated words.
+        A string that encodes to exactly ``length`` tokens.
     """
     if length == 0:
         return ""
     rng = random.Random(seed)
-    words = [
-        "the",
-        "system",
-        "will",
-        "process",
-        "your",
-        "request",
-        "and",
-        "provide",
-        "an",
-        "answer",
-        "based",
-        "on",
-        "context",
-    ]
-    return " ".join(rng.choices(words, k=length))
+    return pool.join(rng.choices(pool.words, k=length))
 
 
 def _generate_contexts(
     num_contexts: int,
     length: int,
-    vocab_pool: list[str],
+    pool: TokenPool,
     seed: int = 123,
 ) -> list[str]:
-    """Generate ``num_contexts`` unique context blocks of ~``length`` tokens.
+    """Generate ``num_contexts`` unique context blocks of ``length`` tokens.
 
-    Each context draws from ``vocab_pool`` with a per-context seed so the
-    token sequences genuinely diverge.
+    Each context draws from ``pool`` with a per-context seed so the
+    token sequences genuinely diverge — contexts sharing content would
+    collide on chunk hashes and inflate the blend hit rate.
 
     Args:
         num_contexts: Number of context documents to generate.
-        length: Approximate token length of each context.
-        vocab_pool: Pool of words to sample from.
+        length: Exact token length of each context.
+        pool: Single-token words to sample from.
         seed: Base random seed; each context uses seed + i.
 
     Returns:
-        List of context strings.
+        List of context strings, each encoding to exactly ``length`` tokens.
     """
     contexts = []
     for i in range(num_contexts):
         rng = random.Random(seed + i)
-        body = " ".join(rng.choices(vocab_pool, k=length))
-        contexts.append(body)
+        contexts.append(pool.join(rng.choices(pool.words, k=length)))
     return contexts
 
 
@@ -250,23 +219,48 @@ class LongDocPermutatorWorkload(BaseWorkload):
         stats_collector: StatsCollector,
         progress_monitor: ProgressMonitor,
         seed: int = 42,
+        model_name: str | None = None,
     ) -> None:
         super().__init__(request_sender, stats_collector, progress_monitor)
         self._config = config
         self._seed = seed
 
-        vocab_pool = _generate_vocab_pool(config.vocab_size, seed=seed)
+        # The configured lengths are exact token counts, which is only
+        # meaningful against the tokenizer the engine actually uses.  Without
+        # one this workload would silently emit prompts several times larger
+        # than requested, so refuse to run rather than produce numbers that
+        # describe a different operating point than the flags claim.
+        tokenizer = try_load_tokenizer(model_name)
+        if tokenizer is None:
+            raise ValueError(
+                "long-doc-permutator needs a tokenizer to size its contexts "
+                f"in tokens, but none could be loaded for model {model_name!r} "
+                "(auto-detected from the engine when --model is omitted). "
+                "Pass --model with a HuggingFace repo ID or a local path, "
+                "e.g. --model openai/gpt-oss-20b, and make sure transformers "
+                "is installed."
+            )
+
+        pool = build_single_token_pool(tokenizer, config.vocab_size, seed=seed)
         self._system_prompt = _generate_system_prompt(
-            config.system_prompt_length, seed=seed
+            config.system_prompt_length, pool, seed=seed
         )
         self._contexts = _generate_contexts(
-            config.num_contexts, config.context_length, vocab_pool, seed=seed + 1
+            config.num_contexts, config.context_length, pool, seed=seed + 1
         )
         self._permutations = _enumerate_permutations(
             config.num_contexts, config.num_permutations, seed=seed
         )
         self._request_list = self._build_request_list()
         self._request_index = 0
+
+        # Measured rather than derived: the per-message totals are exact by
+        # construction, but joining contexts adds separator tokens whose
+        # count is tokenizer-specific.
+        self._tokens_per_request = sum(
+            len(tokenizer.encode(m["content"], add_special_tokens=False))
+            for m in self._request_list[0][0]
+        )
 
         self._semaphore = asyncio.Semaphore(config.num_inflight_requests)
         self._pending_tasks: set[asyncio.Task] = set()
@@ -297,6 +291,7 @@ class LongDocPermutatorWorkload(BaseWorkload):
             f"  Permutations:        {Y}{actual_perms}{R} "
             f"(of {math.factorial(c.num_contexts)} possible)\n"
             f"  Total requests:      {Y}{total}{R}\n"
+            f"  Tokens per request:  {Y}{self._tokens_per_request}{R} (measured)\n"
             f"  Vocab size:          {Y}{c.vocab_size}{R}\n"
             f"  Max inflight:        {Y}{c.num_inflight_requests}{R}\n"
             f"{B}{'═' * 50}{R}"

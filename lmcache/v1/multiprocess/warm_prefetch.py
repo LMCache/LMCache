@@ -92,7 +92,7 @@ class WarmPrefetchJobs:
         handle = storage_manager.submit_prefetch_task(
             PrefetchRequestSpec(
                 keys=keys,
-                layout_desc=layout_desc,
+                group_layout_descs={0: layout_desc},
                 mode=PrefetchMode.WARM,
                 policy=TrimPolicy.SPARSE,
             )

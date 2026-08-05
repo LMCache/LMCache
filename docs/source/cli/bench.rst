@@ -852,6 +852,80 @@ All groups must share the same ``NB`` and ``BS`` (this is a physical
 constraint of paged KV). Layer counts across groups sum to the total
 layer count registered with the server.
 
+MLA (Multi-head Latent Attention)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Set ``kv_size=1`` to exercise the MLA data path. MLA folds K and V into
+a single latent plane, so each chunk on the wire is
+``(num_layers, chunk_tokens, num_heads * head_size)`` instead of the
+classical ``(2, num_layers, chunk_tokens, num_heads * head_size)``.
+The bench also allocates each per-layer client tensor as rank-3
+``(NB, BS, num_heads * head_size)`` (rather than the classical rank-5
+``(2, NB, BS, NH, HS)``), which is what the server's vLLM detector
+recognises as MLA -- see ``NL_X_NB_BS_HS`` in
+``lmcache/v1/gpu_connector/kv_format/detectors/vllm.py``.
+
+Pure MLA example (DeepSeek-V2-style, 61 layers, single latent head):
+
+.. code-block:: bash
+
+   lmcache bench server \
+       --rpc-url tcp://localhost:15556 \
+       --kvcache-shape-spec "(1,1024,16,1,128):bfloat16:61"
+
+Both transfer modes support MLA:
+
+* ``lmcache_driven`` (GPU default / CPU opt-in): the server discovers
+  ``use_mla`` from the registered tensor shapes -- the bench's rank-3
+  MLA client tensors trip this automatically.
+* ``engine_driven`` (CPU default): the bench derives ``use_mla`` from
+  ``kv_size`` in the spec and sends it on the register payload, so the
+  server sizes its SHM chunks correctly.
+
+.. note::
+
+   Heterogeneous specs that mix ``kv_size=1`` and ``kv_size=2`` groups
+   are fully supported in ``lmcache_driven`` mode -- each layer's
+   rank (3 vs. 5) tells the detector which per-group KV format to
+   use. In ``engine_driven`` mode the server registers a *single*
+   SHM chunk shape per context, so a mixed spec falls back to the
+   classical (non-MLA) layout; use ``lmcache_driven`` when you need
+   true per-group MLA.
+
+Tensor Parallel (TP > 1)
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+``--tp-size N`` (default: 1) simulates a TP world of ``N`` vLLM
+workers against a single LMCache server. Each rank registers its own
+KV cache under a distinct ``instance_id``, so the server holds one
+context per rank -- exactly the layout ``LMCacheMPWorkerAdapter``
+creates in a real deployment. Fan-out for the store / retrieve /
+lookup ops mirrors ``ParallelStrategy`` from the vLLM adapter:
+
+* ``LOOKUP`` fires exactly once per request (scheduler-scoped,
+  ``worker_id=None``).
+* ``RETRIEVE`` fires on **every** rank -- each worker loads its own
+  KV shard back.
+* ``STORE`` fires on **KV writers only**. Non-MLA: every rank is a
+  writer. MLA: only rank 0 is a writer (the latent plane is shared
+  across ranks; storing from every rank would just re-write identical
+  bytes).
+
+Example: MLA + TP=2, exercising rank 0 STORE + both-rank RETRIEVE:
+
+.. code-block:: bash
+
+   lmcache bench server \
+       --rpc-url tcp://localhost:15556 \
+       --mode cpu --transfer-mode lmcache_driven \
+       --kvcache-shape-spec "(1,1024,16,1,128):bfloat16:8" \
+       --tp-size 2
+
+The bench's client-side checksum aggregates writer-rank bytes only,
+so a cold-vs-warm mismatch pinpoints the exact rank whose round trip
+went wrong -- useful for verifying that a new server-side change
+handles per-rank ``instance_id`` routing correctly.
+
 See ``parse_kvcache_shape_spec`` in ``lmcache/v1/kv_layer_groups.py``
 for the authoritative parsing rules and validation errors.
 
