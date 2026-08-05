@@ -309,8 +309,8 @@ def test_create_transfer_context_uses_default_context_on_cpu() -> None:
 def test_resolve_extra_config_default_mp_transfer_mode_is_auto() -> None:
     """Without override the resolved mp_transfer_mode must be ``auto``."""
     # First Party
+    from lmcache.integration.vllm.lmcache_mp_metadata import ExtraConfigDefault
     from lmcache.integration.vllm.vllm_multi_process_adapter import (
-        ExtraConfigDefault,
         _resolve_extra_config,
     )
 
@@ -321,8 +321,8 @@ def test_resolve_extra_config_default_mp_transfer_mode_is_auto() -> None:
 def test_resolve_extra_config_overrides_mp_transfer_mode() -> None:
     """``lmcache.mp.mp_transfer_mode`` override flows through unchanged."""
     # First Party
+    from lmcache.integration.vllm.lmcache_mp_metadata import ExtraConfigDefault
     from lmcache.integration.vllm.vllm_multi_process_adapter import (
-        ExtraConfigDefault,
         _resolve_extra_config,
     )
 
@@ -341,9 +341,9 @@ def test_extra_config_default_lets_env_var_select_mp_transfer_mode(
     buildkite k3-multiprocess CI ``cpu_e2e_validation (server-side copy)``.
     """
     # First Party
+    from lmcache.integration.vllm.lmcache_mp_metadata import ExtraConfigDefault
     from lmcache.integration.vllm.vllm_multi_process_adapter import (
         _EXTRA_CONFIG_KEY_PREFIX,
-        ExtraConfigDefault,
     )
     from lmcache.v1.multiprocess.transfer_context import (
         EngineDrivenTransferContext,

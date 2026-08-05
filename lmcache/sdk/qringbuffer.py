@@ -24,12 +24,12 @@ if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
 
     # First Party
-    from lmcache.integration.vllm.lmcache_mp_connector import (
+    from lmcache.integration.vllm.lmcache_mp_metadata import (
         LMCacheMPConnectorMetadata,
+        LoadStoreOp,
     )
     from lmcache.integration.vllm.vllm_multi_process_adapter import (
         LMCacheMPWorkerAdapter,
-        LoadStoreOp,
         StoreResult,
         _IpcEvent,
     )
