@@ -134,13 +134,20 @@ void launch_calculate_cdf(sycl::queue& queue, const uint8_t* input,
   });
 }
 
-// Largest power-of-two divisor of nchannels, capped at 128.
+// Largest power-of-two divisor of nchannels, capped at 128 and floored at
+// INTEL_SUB_GROUP_SIZE (16). The kernel below is compiled with
+// [[sycl::reqd_sub_group_size(16)]], which requires the work-group size
+// (BLOCK_SIZE, i.e. the local range along dim 1) to always be a multiple
+// of 16 -- a work-group smaller than the required sub-group size triggers
+// a runtime launch failure on real Intel GPU hardware. Channels beyond
+// `nchannels` are already masked out via `in_range`, so it is always
+// safe to round the block size up rather than down.
 int get_block_size_xpu(int nchannels) {
-  static const int kCandidates[] = {128, 64, 32, 16, 8, 4, 2, 1};
+  static const int kCandidates[] = {128, 64, 32, 16};
   for (int bs : kCandidates) {
     if (nchannels % bs == 0) return bs;
   }
-  return 1;
+  return INTEL_SUB_GROUP_SIZE;
 }
 
 }  // namespace
@@ -174,24 +181,11 @@ at::Tensor calculate_cdf_xpu(const at::Tensor& input, int64_t max_bins) {
       reinterpret_cast<const uint8_t*>(contiguous.data_ptr());
   int16_t* out_ptr = output.data_ptr<int16_t>();
 
+  // NOTE: block_size returned by get_block_size_xpu() is always a
+  // multiple of INTEL_SUB_GROUP_SIZE (16) -- see the comment there for
+  // why smaller values are unsafe with reqd_sub_group_size(16).
   const int block_size = get_block_size_xpu(nchannels);
   switch (block_size) {
-    case 1:
-      launch_calculate_cdf<1>(queue, in_ptr, out_ptr, nlayers, ntokens,
-                              nchannels, static_cast<int>(max_bins));
-      break;
-    case 2:
-      launch_calculate_cdf<2>(queue, in_ptr, out_ptr, nlayers, ntokens,
-                              nchannels, static_cast<int>(max_bins));
-      break;
-    case 4:
-      launch_calculate_cdf<4>(queue, in_ptr, out_ptr, nlayers, ntokens,
-                              nchannels, static_cast<int>(max_bins));
-      break;
-    case 8:
-      launch_calculate_cdf<8>(queue, in_ptr, out_ptr, nlayers, ntokens,
-                              nchannels, static_cast<int>(max_bins));
-      break;
     case 16:
       launch_calculate_cdf<16>(queue, in_ptr, out_ptr, nlayers, ntokens,
                                nchannels, static_cast<int>(max_bins));
