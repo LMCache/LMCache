@@ -78,6 +78,20 @@ export TRITON_CACHE_AUTOTUNING=1
 export TRITON_CACHE_DIR="/tmp/build_${BUILD_ID}_triton_cache"
 # Seconds to let async LMCache stores drain before restarting vLLM.
 STORE_DRAIN_SECONDS="${STORE_DRAIN_SECONDS:-20}"
+ENGINE_DRIVEN_TRANSPORT="${ENGINE_DRIVEN_TRANSPORT:-}"
+L1_LAZY_ARG=""
+
+case "$ENGINE_DRIVEN_TRANSPORT" in
+    ""|pickle|shm) ;;
+    *)
+        echo "ERROR: ENGINE_DRIVEN_TRANSPORT must be 'pickle' or 'shm', got '$ENGINE_DRIVEN_TRANSPORT'"
+        exit 1
+        ;;
+esac
+
+if [ "${L1_USE_LAZY:-true}" = "false" ]; then
+    L1_LAZY_ARG="--no-l1-use-lazy"
+fi
 
 RESULTS_DIR="${RESULTS_DIR:-/tmp/lmcache_ci_results_${BUILD_ID}}"
 TP_DIR="$RESULTS_DIR/kimi_linear_tp"
@@ -227,6 +241,28 @@ count_retrieves() {
     grep -c "Retrieved" "$LMCACHE_LOG" 2>/dev/null || true
 }
 
+assert_engine_driven_transport_active() {
+    [ -n "$ENGINE_DRIVEN_TRANSPORT" ] || return 0
+
+    local marker
+    case "$ENGINE_DRIVEN_TRANSPORT" in
+        pickle) marker="Using pickle non-GPU transfer strategy" ;;
+        shm) marker="Using shm non-GPU transfer strategy" ;;
+    esac
+    local max_wait=30
+    local elapsed=0
+    while [ "$elapsed" -lt "$max_wait" ]; do
+        if [ -f "$LMCACHE_LOG" ] && grep -qi "$marker" "$LMCACHE_LOG" 2>/dev/null; then
+            echo "Engine-driven $ENGINE_DRIVEN_TRANSPORT transport confirmed in LMCache log."
+            return 0
+        fi
+        sleep 2
+        elapsed=$((elapsed + 2))
+    done
+    echo "ERROR: LMCache log did not contain '$marker' after ${max_wait}s."
+    return 1
+}
+
 # ── 1. Launch LMCache MP server (kept alive across the vLLM restart) ──
 echo "=== Launching LMCache MP server (port $LMCACHE_PORT) ==="
 lmcache server \
@@ -234,6 +270,7 @@ lmcache server \
     --port "$LMCACHE_PORT" \
     --chunk-size "$CHUNK_SIZE" \
     --l1-size-gb 80 \
+    $L1_LAZY_ARG \
     --eviction-policy LRU \
     --max-workers 4 \
     > "$LMCACHE_LOG" 2>&1 &
@@ -270,6 +307,7 @@ echo ""
 
 # ── 3. vLLM run: compute from scratch, populating LMCache ───
 launch_vllm "/tmp/build_${BUILD_ID}_vllm.log"
+assert_engine_driven_transport_active
 send_completion "$OUT_A" "vLLM run"
 
 echo "Waiting ${STORE_DRAIN_SECONDS}s for LMCache stores to drain..."
