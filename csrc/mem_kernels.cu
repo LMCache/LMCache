@@ -38,9 +38,13 @@ __host__ __device__ __forceinline__ bool is_hnd(
 }
 
 // All paged (non-MLA) formats rely on block_size for offset computation.
+// The blocked-scale indexer format is MLA-like for kv_size but its paged
+// addressing is per-block, so it needs block_size too.
 inline void check_block_size(const EngineKVFormat engine_kv_format,
                              const int block_size) {
-  TORCH_CHECK(is_mla(engine_kv_format) || block_size > 0,
+  TORCH_CHECK((is_mla(engine_kv_format) &&
+               engine_kv_format != EngineKVFormat::NL_X_NB_BSV_BSS) ||
+                  block_size > 0,
               "block_size is required (must be > 0) for EngineKVFormat ",
               static_cast<int>(engine_kv_format));
 }
@@ -297,6 +301,19 @@ __device__ __forceinline__ int64_t page_buffer_offset(
   } else if constexpr (format == EngineKVFormat::NL_X_NB_BS_NH_TWO_HS ||
                        format == EngineKVFormat::NL_X_NB_BS_NH_CS) {
     return token_idx * scalars_per_token + scalar_offset;
+  }
+  // DSA indexer: page [BSxvals][BSxscales]; 4B units, so scale == 1 unit
+  else if constexpr (format == EngineKVFormat::NL_X_NB_BSV_BSS) {
+    const int64_t block_idx = token_idx / block_size;
+    const int block_offset = token_idx % block_size;
+    const int vals = scalars_per_token - 1;
+    const int64_t block_base =
+        block_idx * static_cast<int64_t>(block_size) * scalars_per_token;
+    if (scalar_offset < vals) {
+      return block_base + static_cast<int64_t>(block_offset) * vals +
+             scalar_offset;
+    }
+    return block_base + static_cast<int64_t>(block_size) * vals + block_offset;
   }
 }
 
@@ -617,6 +634,10 @@ void multi_layer_kv_transfer_templated(
 
   lmc::check_block_size(engine_kv_format, block_size);
   lmc::check_head_size(engine_kv_format, head_size_xword);
+  TORCH_CHECK(
+      engine_kv_format != EngineKVFormat::NL_X_NB_BSV_BSS || sizeof(T) == 4,
+      "NL_X_NB_BSV_BSS requires 4-byte transfer units (row bytes "
+      "must be divisible by 4 and not by 8)");
 
   // Fused packs K+V in the trailing dim (kv_size == 1, like MLA): single pass.
   int k_or_v_size =
@@ -670,6 +691,9 @@ void multi_layer_kv_transfer_templated(
       case EngineKVFormat::NL_X_NB_BS_NH_CS:
         LAUNCH_KERNEL_WITH_FORMAT(T, false, EngineKVFormat::NL_X_NB_BS_NH_CS);
         break;
+      case EngineKVFormat::NL_X_NB_BSV_BSS:
+        LAUNCH_KERNEL_WITH_FORMAT(T, false, EngineKVFormat::NL_X_NB_BSV_BSS);
+        break;
       default:
         throw std::runtime_error("Unsupported EngineKVFormat");
     }
@@ -714,6 +738,9 @@ void multi_layer_kv_transfer_templated(
       case EngineKVFormat::NL_X_NB_BS_NH_CS:
         LAUNCH_KERNEL_WITH_FORMAT(T, true, EngineKVFormat::NL_X_NB_BS_NH_CS);
         break;
+      case EngineKVFormat::NL_X_NB_BSV_BSS:
+        LAUNCH_KERNEL_WITH_FORMAT(T, true, EngineKVFormat::NL_X_NB_BSV_BSS);
+        break;
       default:
         throw std::runtime_error("Unsupported EngineKVFormat");
     }
@@ -757,6 +784,10 @@ void multi_layer_kv_transfer_fused_templated(
 
   lmc::check_block_size(engine_kv_format, block_size);
   lmc::check_head_size(engine_kv_format, head_size_xword);
+  TORCH_CHECK(
+      engine_kv_format != EngineKVFormat::NL_X_NB_BSV_BSS || sizeof(T) == 4,
+      "NL_X_NB_BSV_BSS requires 4-byte transfer units (row bytes "
+      "must be divisible by 4 and not by 8)");
 
   int k_or_v_size =
       (::is_mla(engine_kv_format) || ::is_fused_packed(engine_kv_format)) ? 1
@@ -818,6 +849,9 @@ void multi_layer_kv_transfer_fused_templated(
         break;                                                                \
       case EngineKVFormat::NL_X_NB_BS_NH_CS:                                  \
         LAUNCH_FUSED_WITH_FORMAT(T_, DIR, EngineKVFormat::NL_X_NB_BS_NH_CS)   \
+        break;                                                                \
+      case EngineKVFormat::NL_X_NB_BSV_BSS:                                   \
+        LAUNCH_FUSED_WITH_FORMAT(T_, DIR, EngineKVFormat::NL_X_NB_BSV_BSS)    \
         break;                                                                \
       default:                                                                \
         throw std::runtime_error("Unsupported EngineKVFormat");               \

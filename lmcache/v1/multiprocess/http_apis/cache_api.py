@@ -67,7 +67,7 @@ async def list_cache_objects(
     """List cache objects resident in one tier/adapter, paginated.
 
     Responses:
-        200: ``{"adapter", "entries", "next_page_token"}``.
+        200: ``{"adapter", "shared", "entries", "next_page_token"}``.
         400: ``tier`` unsupported or malformed ``page_token``. 404: adapter
             matches none.
         503: server not initialized, no adapters configured, or the adapter does
@@ -151,6 +151,7 @@ _BLOCK_AXIS_BY_FORMAT: dict[Any, int] = {
     lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS: 1,  # [2, NB, BS, NH, HS]
     lmc_ops.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS: 0,  # [NB, 2, BS, NH, HS]
     lmc_ops.EngineKVFormat.NL_X_NB_BS_HS: 0,  # MLA: [NB, BS, HS]
+    lmc_ops.EngineKVFormat.NL_X_NB_BSV_BSS: 0,  # DSA indexer: [NB, BS, 132]
     lmc_ops.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS: 1,  # [2, NB, NH, BS, HS]
     lmc_ops.EngineKVFormat.NL_X_NB_TWO_NH_BS_HS: 0,  # [NB, 2, NH, BS, HS]
 }

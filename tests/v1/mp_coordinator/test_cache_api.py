@@ -10,7 +10,12 @@ from fastapi.testclient import TestClient
 import httpx
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.api import ObjectKey, Tier
+from lmcache.v1.mp_coordinator.api import (
+    CacheEventBatch,
+    CacheEventEntry,
+    CacheEventType,
+)
 from lmcache.v1.mp_coordinator.app import create_app
 from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
 from lmcache.v1.multiprocess.cache_control.key_resolver import resolve_object_keys
@@ -67,7 +72,7 @@ def test_prefetch_submit_then_status_proxy():
             json={"instance_id": "mp-1", "ip": "127.0.0.1", "http_port": 8080},
         )
         # Replace the lifespan's real outbound client with a mock MP server.
-        client.app.state.ctx.outbound_client = _mock_mp_server()
+        client.app.state.outbound_client = _mock_mp_server()
 
         resp = client.post("/cache/prefetches", json=_prefetch_body("mp-1"))
         assert resp.status_code == 200, resp.text
@@ -137,8 +142,19 @@ def test_pin_then_unpin_tracks_l2_eviction():
             client.put("/quota/config", json={"default_limit_gb": 0}).status_code == 200
         )
         for k in keys:
-            ctx.usage_manager.record_stored(k, 1000)
-            ctx.eviction_manager.on_store(k)
+            ctx.event_broadcaster.broadcast(
+                CacheEventBatch(
+                    instance_id="mp-1",
+                    incarnation=1,
+                    seq=1,
+                    event_type=CacheEventType.STORE,
+                    tier=Tier.L2,
+                    backend="fs",
+                    entries=[
+                        CacheEventEntry(key=k.to_encoded_object_key(), size_bytes=1000)
+                    ],
+                )
+            )
         assert ctx.eviction_manager.compute_eviction_plan()["alice"]
 
         resp = client.post("/cache/pins", json=_pin_body())
@@ -255,7 +271,7 @@ def test_delete_short_sequence_is_noop():
             "/instances",
             json={"instance_id": "mp-1", "ip": "127.0.0.1", "http_port": 8080},
         )
-        client.app.state.ctx.outbound_client = _mock_delete_server(deletes)
+        client.app.state.outbound_client = _mock_delete_server(deletes)
 
         body = _delete_body("mp-1")
         body["token_ids"] = [1, 2]  # shorter than one chunk (chunk_size=4)
@@ -291,7 +307,7 @@ def test_delete_all_tier_single_call_both_tiers():
             json={"instance_id": "mp-1", "ip": "127.0.0.1", "http_port": 8080},
         )
         ctx = client.app.state.ctx
-        ctx.outbound_client = _mock_delete_server(deletes)
+        client.app.state.outbound_client = _mock_delete_server(deletes)
         n = len(_resolve_delete(ctx))
         assert n >= 1
 
@@ -317,7 +333,7 @@ def test_delete_non_force_holds_back_l2_pinned_key():
             json={"instance_id": "mp-1", "ip": "127.0.0.1", "http_port": 8080},
         )
         ctx = client.app.state.ctx
-        ctx.outbound_client = _mock_delete_server(deletes)
+        client.app.state.outbound_client = _mock_delete_server(deletes)
         keys = _resolve_delete(ctx)
         ctx.eviction_manager.pin([keys[0]])  # protect one key at L2
 
@@ -340,7 +356,7 @@ def test_delete_force_removes_and_drops_l2_pin():
             json={"instance_id": "mp-1", "ip": "127.0.0.1", "http_port": 8080},
         )
         ctx = client.app.state.ctx
-        ctx.outbound_client = _mock_delete_server(deletes)
+        client.app.state.outbound_client = _mock_delete_server(deletes)
         keys = _resolve_delete(ctx)
         ctx.eviction_manager.pin([keys[0]])
 
@@ -364,7 +380,7 @@ def test_delete_l1_tier_ignores_l2_pins():
             json={"instance_id": "mp-1", "ip": "127.0.0.1", "http_port": 8080},
         )
         ctx = client.app.state.ctx
-        ctx.outbound_client = _mock_delete_server(deletes)
+        client.app.state.outbound_client = _mock_delete_server(deletes)
         keys = _resolve_delete(ctx)
         ctx.eviction_manager.pin([keys[0]])
 
@@ -389,7 +405,7 @@ def test_delete_server_unreachable_returns_502():
             "/instances",
             json={"instance_id": "mp-1", "ip": "127.0.0.1", "http_port": 8080},
         )
-        client.app.state.ctx.outbound_client = httpx.AsyncClient(
+        client.app.state.outbound_client = httpx.AsyncClient(
             transport=httpx.MockTransport(handler)
         )
         resp = client.post("/cache/delete", json=_delete_body("mp-1"))

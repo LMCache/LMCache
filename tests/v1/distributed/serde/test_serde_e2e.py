@@ -244,7 +244,7 @@ class TestSerdeRoundTrip:
         assert get_l1_object_count(sm) == 0
 
         # Prefetch from L2
-        handle = sm.submit_prefetch_task(PrefetchRequestSpec(keys, layout))
+        handle = sm.submit_prefetch_task(PrefetchRequestSpec(keys, {0: layout}))
         hits = wait_for_prefetch_status(sm, handle)
         assert hits == 5, f"Expected 5 L2 hits, got {hits}"
 
@@ -267,7 +267,7 @@ class TestSerdeRoundTrip:
         clear_and_wait_drained(sm)
 
         # Prefetch
-        handle = sm.submit_prefetch_task(PrefetchRequestSpec(keys, layout))
+        handle = sm.submit_prefetch_task(PrefetchRequestSpec(keys, {0: layout}))
         hits = wait_for_prefetch_status(sm, handle)
         assert hits == 3
 
@@ -306,7 +306,7 @@ class TestSerdeDisabled:
         write_and_wait_for_l2(sm, keys, layout)
         clear_and_wait_drained(sm)
 
-        handle = sm.submit_prefetch_task(PrefetchRequestSpec(keys, layout))
+        handle = sm.submit_prefetch_task(PrefetchRequestSpec(keys, {0: layout}))
         hits = wait_for_prefetch_status(sm, handle)
         assert hits == 5
 
@@ -327,7 +327,7 @@ class TestSerdeDisabled:
         write_and_wait_for_l2(sm, keys, layout)
         clear_and_wait_drained(sm)
 
-        handle = sm.submit_prefetch_task(PrefetchRequestSpec(keys, layout))
+        handle = sm.submit_prefetch_task(PrefetchRequestSpec(keys, {0: layout}))
         hits = wait_for_prefetch_status(sm, handle)
         assert hits == 3
         sm.finish_read_prefetched(keys)
@@ -361,7 +361,7 @@ class TestSerdePartialPrefix:
 
         # Request all 5 keys — prefix should be 2 (gap at index 2)
         all_keys = [make_object_key(i) for i in range(5)]
-        handle = sm.submit_prefetch_task(PrefetchRequestSpec(all_keys, layout))
+        handle = sm.submit_prefetch_task(PrefetchRequestSpec(all_keys, {0: layout}))
         hits = wait_for_prefetch_status(sm, handle)
 
         assert hits is not None
@@ -394,7 +394,7 @@ class TestSerdeMemoryStress:
             write_and_wait_for_l2(sm, keys, layout)
             clear_and_wait_drained(sm)
 
-            handle = sm.submit_prefetch_task(PrefetchRequestSpec(keys, layout))
+            handle = sm.submit_prefetch_task(PrefetchRequestSpec(keys, {0: layout}))
             hits = wait_for_prefetch_status(sm, handle)
             assert hits == 3, f"Cycle {cycle}: expected 3 hits, got {hits}"
             sm.finish_read_prefetched(keys)
@@ -425,7 +425,7 @@ class TestSerdeNoHits:
         layout = make_layout()
 
         keys = [make_object_key(i) for i in range(3)]
-        handle = sm.submit_prefetch_task(PrefetchRequestSpec(keys, layout))
+        handle = sm.submit_prefetch_task(PrefetchRequestSpec(keys, {0: layout}))
         hits = wait_for_prefetch_status(sm, handle)
 
         assert hits is not None
@@ -481,7 +481,7 @@ class TestSerdeBufferBounds:
         clear_and_wait_drained(sm)
         assert get_l1_object_count(sm) == 0
 
-        handle = sm.submit_prefetch_task(PrefetchRequestSpec(keys, layout))
+        handle = sm.submit_prefetch_task(PrefetchRequestSpec(keys, {0: layout}))
         hits = wait_for_prefetch_status(sm, handle)
         assert hits == num_keys, f"Expected {num_keys} hits, got {hits}"
 

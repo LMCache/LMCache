@@ -1051,3 +1051,61 @@ class TestNixlUseHugepagesDeprecation:
         }
         config.validate()
         assert config.local_cpu_use_hugepages is True
+
+
+class TestStoreAndRetrieveLocationEnvConversion:
+    """``store_location`` and ``retrieve_locations`` must convert from the
+    environment like every other config option.
+
+    Both options were registered without an ``env_converter``, which made the
+    env-var and dict-import paths raise ``KeyError`` and left
+    ``retrieve_locations`` typed as ``str`` instead of ``list[str]``.
+    """
+
+    def test_update_config_from_env_accepts_store_location(self, monkeypatch):
+        """``LMCACHE_STORE_LOCATION`` is applied instead of raising."""
+        monkeypatch.setenv("LMCACHE_STORE_LOCATION", "LocalDiskBackend")
+        config = LMCacheEngineConfig.from_defaults()
+        config.update_config_from_env()
+        assert config.store_location == "LocalDiskBackend"
+
+    def test_update_config_from_env_accepts_retrieve_locations(self, monkeypatch):
+        """``LMCACHE_RETRIEVE_LOCATIONS`` is applied instead of raising."""
+        monkeypatch.setenv(
+            "LMCACHE_RETRIEVE_LOCATIONS", "LocalCPUBackend,LocalDiskBackend"
+        )
+        config = LMCacheEngineConfig.from_defaults()
+        config.update_config_from_env()
+        assert config.retrieve_locations == ["LocalCPUBackend", "LocalDiskBackend"]
+
+    def test_from_env_parses_retrieve_locations_as_list(self, monkeypatch):
+        """A comma-separated env value becomes ``list[str]``, not ``str``.
+
+        Without conversion the value stays a string, so membership tests match
+        on substrings and report backends that were never configured.
+        """
+        monkeypatch.setenv(
+            "LMCACHE_RETRIEVE_LOCATIONS", "LocalCPUBackend,LocalDiskBackend"
+        )
+        config = LMCacheEngineConfig.from_env()
+        assert config.retrieve_locations == ["LocalCPUBackend", "LocalDiskBackend"]
+        assert "LocalCPU" not in (config.retrieve_locations or [])
+
+    def test_from_env_parses_store_location_as_str(self, monkeypatch):
+        """``store_location`` round-trips through the environment as ``str``."""
+        monkeypatch.setenv("LMCACHE_STORE_LOCATION", "LocalDiskBackend")
+        config = LMCacheEngineConfig.from_env()
+        assert config.store_location == "LocalDiskBackend"
+
+    def test_from_dict_round_trip_preserves_both_options(self):
+        """``to_dict``/``from_dict`` round-trips instead of raising.
+
+        ``load_ec_engine_config`` clones a config through this path, so the
+        failure surfaced for any deployment setting either option.
+        """
+        config = LMCacheEngineConfig.from_defaults()
+        config.retrieve_locations = ["LocalCPUBackend"]
+        config.store_location = "LocalDiskBackend"
+        restored = LMCacheEngineConfig.from_dict(config.to_dict())
+        assert restored.retrieve_locations == ["LocalCPUBackend"]
+        assert restored.store_location == "LocalDiskBackend"
