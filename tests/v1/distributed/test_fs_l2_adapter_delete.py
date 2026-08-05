@@ -4,7 +4,7 @@
 ``delete`` unlinks each key's backing file and fires
 ``on_l2_keys_deleted``; store/load fire ``on_l2_keys_stored`` /
 ``on_l2_keys_accessed``. Together these drive the base class's byte
-accounting and feed the coordinator's ``L2EventListener``.
+accounting and feed the coordinator's cache-event stream.
 """
 
 # Standard
