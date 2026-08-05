@@ -112,8 +112,17 @@ class _KeyRecord:
     """Directory value for one key: its placements plus recency."""
 
     placements: list[Placement] = field(default_factory=list)
-    content_hash_hex: str = ""
     last_access: float = 0.0
+
+
+@dataclass
+class _TokenBinding:
+    """Token ids for one chunk hash plus the keys sharing it (dropped
+    when the last key goes). ``token_ids`` is empty until a
+    token-bearing ``STORE`` entry arrives."""
+
+    token_ids: tuple[int, ...]
+    keys: set[ObjectKey]
 
 
 @dataclass
@@ -137,13 +146,16 @@ class KeyDirectory:
         self._lock = threading.Lock()
         self._records: dict[ObjectKey, _KeyRecord] = {}
         self._instances: dict[str, _InstanceState] = {}
+        # chunk hash → tokens + keys, for chunk hashes of >= 1 record.
+        self._token_bindings: dict[bytes, _TokenBinding] = {}
 
     def apply_batch(self, batch: CacheEventBatch) -> ApplyResult:
         """Apply one event batch to the directory.
 
         Applies incarnation fencing, seq dedup, and gap detection, then
         the entries. Entry application is idempotent: re-storing upserts
-        the placement, deleting an absent placement is a no-op.
+        the placement (and its token binding), deleting an absent
+        placement is a no-op.
 
         Args:
             batch: The event batch to apply.
@@ -207,6 +219,77 @@ class KeyDirectory:
                     )
                 )
             return results
+
+    def get_token_ids(self, chunk_hashes: list[bytes]) -> list[tuple[int, ...]]:
+        """Return the known token ids for each requested chunk hash.
+
+        Args:
+            chunk_hashes: ``ObjectKey.chunk_hash`` values to look up.
+
+        Returns:
+            One token-id tuple per hash, in request order — empty for
+            unknown chunks.
+        """
+        with self._lock:
+            results: list[tuple[int, ...]] = []
+            for chunk_hash in chunk_hashes:
+                binding = self._token_bindings.get(chunk_hash)
+                results.append(binding.token_ids if binding is not None else ())
+            return results
+
+    def list_keys(
+        self,
+        tier: Tier = Tier.ALL,
+        instance_id: str = "",
+        backend: str = "",
+        offset: int = 0,
+        limit: int = 1000,
+    ) -> tuple[int, dict[ObjectKey, list[Placement]]]:
+        """List keys whose placements match the filters, one page at a time.
+
+        A snapshot for inspection: iteration order is the directory's
+        insertion order and is not stable across mutations, so pages of
+        a changing directory may skip or repeat keys.
+
+        Args:
+            tier: Keep placements on this tier (``all`` keeps every tier).
+            instance_id: Keep placements reported by this instance
+                (empty keeps every instance).
+            backend: Keep placements on this backend (empty keeps every
+                backend).
+            offset: Matching keys to skip.
+            limit: Maximum keys to return.
+
+        Returns:
+            ``(total, page)``: the number of keys with at least one
+            matching placement, and the ``[offset, offset + limit)``
+            slice of them as an ordered mapping of key → its matching
+            placements.
+
+        Raises:
+            ValueError: If ``offset`` or ``limit`` is negative.
+        """
+        if offset < 0:
+            raise ValueError(f"offset must be >= 0 (got {offset})")
+        if limit < 0:
+            raise ValueError(f"limit must be >= 0 (got {limit})")
+        with self._lock:
+            total = 0
+            page: dict[ObjectKey, list[Placement]] = {}
+            for key, record in self._records.items():
+                placements = [
+                    p
+                    for p in record.placements
+                    if (tier == Tier.ALL or p.tier == tier)
+                    and (not instance_id or p.instance_id == instance_id)
+                    and (not backend or p.backend == backend)
+                ]
+                if not placements:
+                    continue
+                if total >= offset and len(page) < limit:
+                    page[key] = placements
+                total += 1
+            return total, page
 
     def drop_instance(self, instance_id: str) -> int:
         """Remove every **L1** placement reported by ``instance_id``.
@@ -280,6 +363,7 @@ class KeyDirectory:
             if record is None:
                 record = _KeyRecord()
                 self._records[key] = record
+                self._link_key(key)
             placement = Placement(
                 instance_id=batch.instance_id,
                 incarnation=batch.incarnation,
@@ -293,8 +377,8 @@ class KeyDirectory:
                 record.placements.append(placement)
             else:
                 record.placements[index] = placement
-            if entry.content_hash_hex:
-                record.content_hash_hex = entry.content_hash_hex
+            if entry.token_ids:
+                self._token_bindings[key.chunk_hash].token_ids = tuple(entry.token_ids)
             record.last_access = max(record.last_access, batch.ts)
             if batch.tier == Tier.L1:
                 state.keys.add(key)
@@ -307,6 +391,7 @@ class KeyDirectory:
                 record.placements.pop(index)
             if not record.placements:
                 del self._records[key]
+                self._unlink_key(key)
             if batch.tier == Tier.L1 and not any(
                 p.tier == Tier.L1 and p.instance_id == batch.instance_id
                 for p in record.placements
@@ -355,5 +440,27 @@ class KeyDirectory:
                 record.placements = kept
             else:
                 del self._records[key]
+                self._unlink_key(key)
         state.keys.clear()
         return removed
+
+    def _link_key(self, key: ObjectKey) -> None:
+        """Index ``key`` under its chunk's token binding, creating an
+        empty binding on first reference."""
+        binding = self._token_bindings.get(key.chunk_hash)
+        if binding is None:
+            self._token_bindings[key.chunk_hash] = _TokenBinding(
+                token_ids=(), keys={key}
+            )
+        else:
+            binding.keys.add(key)
+
+    def _unlink_key(self, key: ObjectKey) -> None:
+        """Remove ``key`` from its chunk's token binding, dropping the
+        binding with its last key."""
+        binding = self._token_bindings.get(key.chunk_hash)
+        if binding is None:
+            return
+        binding.keys.discard(key)
+        if not binding.keys:
+            del self._token_bindings[key.chunk_hash]
