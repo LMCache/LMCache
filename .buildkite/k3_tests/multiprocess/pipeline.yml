@@ -148,6 +148,18 @@ steps:
                   - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 128Gi } }
         artifact_paths: ["*.log"]
 
+      # DSV4 uses compressed KV groups and its native FP4 indexer cache. This
+      # is LMCache-driven only: engine-driven compression remains unsupported.
+      - label: ":compression: deepseek_v4_flash_tp_lmcache_driven"
+        command: |
+          export LMCACHE_MP_TRANSFER_MODE="lmcache_driven"
+          .buildkite/k3_tests/multiprocess/run.sh deepseek_v4_flash_tp
+        timeout_in_minutes: 90
+        retry: *flaky-retry
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-2gpu-dshm } }]
+        artifact_paths: ["*.log"]
+
   - group: ":compression: Multiprocess (1-GPU)"
     if: build.env("VERIFY_AND_PIN_VLLM") !~ /true/
     steps:
