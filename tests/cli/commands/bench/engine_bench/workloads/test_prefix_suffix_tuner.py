@@ -329,8 +329,8 @@ class TestPrefixSuffixTunerData:
 
         fake_tok = MagicMock()
         fake_tok.decode = lambda ids, **kw: " ".join(f"id{i}" for i in ids)
-        original = psf._try_load_tokenizer
-        psf._try_load_tokenizer = lambda model_name: fake_tok
+        original = psf.try_load_tokenizer
+        psf.try_load_tokenizer = lambda model_name: fake_tok
         try:
             cfg = _make_workload_config(num_prefixes=8)
             sender = _make_mock_sender()
@@ -340,7 +340,7 @@ class TestPrefixSuffixTunerData:
                 cfg, sender, collector, monitor, seed=42, model_name="mock"
             )
         finally:
-            psf._try_load_tokenizer = original
+            psf.try_load_tokenizer = original
 
         bodies = [p.split(" ", 1)[1] for p in w._prefixes]
         # All 8 prefix bodies should be distinct token-id sequences.

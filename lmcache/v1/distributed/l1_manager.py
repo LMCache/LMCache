@@ -14,8 +14,15 @@ from lmcache.native_storage_ops import TTLLock
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import L1ManagerConfig
 from lmcache.v1.distributed.error import L1Error
-from lmcache.v1.distributed.internal_api import L1ManagerListener
-from lmcache.v1.distributed.memory_manager import L1MemoryManager
+from lmcache.v1.distributed.internal_api import L1ManagerListener, L1ObjectMeta
+from lmcache.v1.distributed.memory_manager import (
+    GDSL1MemoryManager,
+    L1ManagerProtocol,
+    L1MemoryManager,
+)
+from lmcache.v1.distributed.memory_manager.devdax_l1_memory_manager import (
+    DevDaxL1MemoryManager,
+)
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
@@ -184,7 +191,17 @@ class L1Manager:
 
         self._objects: dict[ObjectKey, L1ObjectState] = {}
 
-        self._memory_manager = L1MemoryManager(config.memory_config)
+        # GDS, Device-DAX, and CPU L1 are mutually exclusive tiers. Each tier
+        # owns its backing allocator instead of branching inside the CPU path.
+        self._memory_manager: L1ManagerProtocol
+        if config.gds_l1_config is not None:
+            self._memory_manager = GDSL1MemoryManager(config.gds_l1_config)
+            logger.info("L1Manager: GDS L1 tier enabled; CPU pinned-DRAM L1 disabled")
+        elif config.memory_config.devdax_path:
+            self._memory_manager = DevDaxL1MemoryManager(config.memory_config)
+            logger.info("L1Manager: Device-DAX L1 tier enabled; CPU-only L1 disabled")
+        else:
+            self._memory_manager = L1MemoryManager(config.memory_config)
 
         self._write_ttl_seconds = config.write_ttl_seconds
         self._read_ttl_seconds = config.read_ttl_seconds
@@ -397,6 +414,7 @@ class L1Manager:
             ret[key] = L1Error.SUCCESS
             successful_keys.append(key)
 
+        freed_meta = [self._object_meta(obj) for obj in need_to_free]
         self._memory_manager.free(need_to_free)
 
         for listener in self._registered_listeners:
@@ -411,7 +429,7 @@ class L1Manager:
         self._event_bus.publish(
             Event(
                 event_type=EventType.L1_KEYS_EVICTED,
-                metadata={"keys": need_to_free_keys},
+                metadata={"keys": need_to_free_keys, "meta": freed_meta},
             )
         )
 
@@ -534,6 +552,7 @@ class L1Manager:
         """
         ret: dict[ObjectKey, L1Error] = {}
         successful_keys: list[ObjectKey] = []
+        successful_keys_meta: list[L1ObjectMeta] = []
 
         for key in keys:
             entry = self._objects.get(key, None)
@@ -562,13 +581,14 @@ class L1Manager:
             entry.write_lock.unlock()
             ret[key] = L1Error.SUCCESS
             successful_keys.append(key)
+            successful_keys_meta.append(self._object_meta(entry.memory_obj))
 
         for listener in self._registered_listeners:
             listener.on_l1_keys_write_finished(successful_keys)
         self._event_bus.publish(
             Event(
                 event_type=EventType.L1_WRITE_FINISHED,
-                metadata={"keys": successful_keys},
+                metadata={"keys": successful_keys, "meta": successful_keys_meta},
             )
         )
         return ret
@@ -606,6 +626,7 @@ class L1Manager:
         total = 1 + extra_count
         ret: dict[ObjectKey, L1OperationResult] = {}
         successful_keys: list[ObjectKey] = []
+        successful_keys_meta: list[L1ObjectMeta] = []
 
         for key in keys:
             entry = self._objects.get(key, None)
@@ -635,31 +656,37 @@ class L1Manager:
                 entry.read_lock.lock()
             ret[key] = (L1Error.SUCCESS, entry.memory_obj)
             successful_keys.append(key)
+            successful_keys_meta.append(self._object_meta(entry.memory_obj))
 
         for listener in self._registered_listeners:
             listener.on_l1_keys_finish_write_and_reserve_read(successful_keys)
         self._event_bus.publish(
             Event(
                 event_type=EventType.L1_WRITE_FINISHED_AND_READ_RESERVED,
-                metadata={"keys": successful_keys},
+                metadata={"keys": successful_keys, "meta": successful_keys_meta},
             )
         )
         return ret
 
     @l1_mgr_synchronized
-    def delete(self, keys: list[ObjectKey]) -> dict[ObjectKey, L1Error]:
+    def delete(
+        self, keys: list[ObjectKey], force: bool = False
+    ) -> dict[ObjectKey, L1Error]:
         """Delete the given keys from L1 cache.
 
         Args:
             keys: The list of object keys to delete.
+            force: When True, delete even a read/write-locked key. This may free
+                memory a concurrent store/read still uses (same hazard as
+                :meth:`clear` with ``force=True``); use with care.
 
         Returns:
             A dictionary mapping each object key to an L1Error.
 
         Errors:
             KEY_NOT_EXIST: The key does not exist.
-            KEY_IS_LOCKED: The key is locked (either write-locked or read-locked
-                and cannot be deleted).
+            KEY_IS_LOCKED: The key is write-locked or read-locked and cannot be
+                deleted. Never returned when ``force`` is True.
         """
         need_to_free: list[MemoryObj] = []
         ret: dict[ObjectKey, L1Error] = {}
@@ -671,15 +698,19 @@ class L1Manager:
                 ret[key] = L1Error.KEY_NOT_EXIST
                 continue
 
-            if entry.read_lock.is_locked() or entry.write_lock.is_locked():
+            locked = entry.read_lock.is_locked() or entry.write_lock.is_locked()
+            if locked and not force:
                 ret[key] = L1Error.KEY_IS_LOCKED
                 continue
+            if locked:
+                logger.warning("L1Manager: force-deleting locked key %s", key)
 
             need_to_free.append(entry.memory_obj)
             del self._objects[key]
             ret[key] = L1Error.SUCCESS
             successful_keys.append(key)
 
+        freed_meta = [self._object_meta(obj) for obj in need_to_free]
         self._memory_manager.free(need_to_free)
 
         for listener in self._registered_listeners:
@@ -687,7 +718,7 @@ class L1Manager:
         self._event_bus.publish(
             Event(
                 event_type=EventType.L1_KEYS_EVICTED,
-                metadata={"keys": successful_keys},
+                metadata={"keys": successful_keys, "meta": freed_meta},
             )
         )
         return ret
@@ -700,6 +731,13 @@ class L1Manager:
         """
         for listener in self._registered_listeners:
             listener.on_l1_keys_accessed(keys)
+        if self._event_bus.has_subscribers(EventType.L1_KEYS_ACCESSED):
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.L1_KEYS_ACCESSED,
+                    metadata={"keys": keys},
+                )
+            )
 
     @l1_mgr_synchronized
     def clear(self, force: bool = False) -> None:
@@ -720,6 +758,7 @@ class L1Manager:
             )
             all_keys = list(self._objects.keys())
             all_memory_objs = [entry.memory_obj for entry in self._objects.values()]
+            all_meta = [self._object_meta(obj) for obj in all_memory_objs]
             self._memory_manager.free(all_memory_objs)
             self._objects.clear()
             for listener in self._registered_listeners:
@@ -727,7 +766,7 @@ class L1Manager:
             self._event_bus.publish(
                 Event(
                     event_type=EventType.L1_KEYS_EVICTED,
-                    metadata={"keys": all_keys},
+                    metadata={"keys": all_keys, "meta": all_meta},
                 )
             )
             logger.info(
@@ -750,6 +789,7 @@ class L1Manager:
         for key in keys_to_clear:
             del self._objects[key]
 
+        cleared_meta = [self._object_meta(obj) for obj in objs_to_free]
         self._memory_manager.free(objs_to_free)
 
         if keys_to_clear:
@@ -758,7 +798,7 @@ class L1Manager:
             self._event_bus.publish(
                 Event(
                     event_type=EventType.L1_KEYS_EVICTED,
-                    metadata={"keys": keys_to_clear},
+                    metadata={"keys": keys_to_clear, "meta": cleared_meta},
                 )
             )
 
@@ -875,3 +915,10 @@ class L1Manager:
             num_read_locked,
         )
         return mem_check_result
+
+    def _object_meta(self, memory_obj: MemoryObj) -> L1ObjectMeta:
+        """Build the listener-facing metadata for one resident object."""
+        return L1ObjectMeta(
+            size_bytes=memory_obj.get_size(),
+            backend=self._memory_manager.get_backend_type(memory_obj),
+        )

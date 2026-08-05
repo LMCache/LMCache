@@ -29,7 +29,7 @@ import threading
 # First Party
 from lmcache.logging import init_logger
 from lmcache.native_storage_ops import Bitmap
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
@@ -53,18 +53,15 @@ def _object_key_to_string(key: ObjectKey) -> str:
 
     Unsalted::
 
-        <model_name>@<kv_rank_hex>@<chunk_hash_hex>
+        <model_name>@<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>
 
     Salted (trailing ``cache_salt``)::
 
-        <model_name>@<kv_rank_hex>@<chunk_hash_hex>@<cache_salt>
-
-    Keys with ``cache_salt=""`` produce the 3-field shape, which is
-    bit-identical to the format used before ``cache_salt`` existed —
-    so existing un-salted caches remain valid with no migration.
+        <model_name>@<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>@<cache_salt>
     """
     base = (
-        f"{key.model_name}{_KEY_SEP}{key.kv_rank:08x}{_KEY_SEP}{key.chunk_hash.hex()}"
+        f"{key.model_name}{_KEY_SEP}{key.kv_rank:08x}"
+        f"{_KEY_SEP}{key.object_group_id:x}{_KEY_SEP}{key.chunk_hash.hex()}"
     )
     if key.cache_salt:
         return f"{base}{_KEY_SEP}{key.cache_salt}"
@@ -229,6 +226,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
     def submit_lookup_and_lock_task(
         self,
         keys: list[ObjectKey],
+        group_layout_descs: dict[int, MemoryLayoutDesc],
     ) -> L2TaskId:
         key_strings = [_object_key_to_string(k) for k in keys]
 

@@ -17,9 +17,9 @@ MAX_WORKERS="${MAX_WORKERS:-4}"
 MODEL="${MODEL:-Qwen/Qwen3-14B}"
 BUILD_ID="${BUILD_ID:-local_$$}"
 
-# K8s assigns exactly 2 GPUs as devices 0 and 1
-GPU_FOR_VLLM=0
-GPU_FOR_BASELINE=1
+# K8s assigns exactly 2 GPUs as devices 0 and 1 (overridable for local runs).
+GPU_FOR_VLLM="${GPU_FOR_VLLM:-0}"
+GPU_FOR_BASELINE="${GPU_FOR_BASELINE:-1}"
 echo "Using GPU $GPU_FOR_VLLM for vLLM with LMCache"
 echo "Using GPU $GPU_FOR_BASELINE for vLLM baseline"
 
@@ -68,6 +68,37 @@ fi
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-auto}"
 MAX_MODEL_LEN_ARG="--max-model-len ${MAX_MODEL_LEN}"
 
+# LMCache server chunk size in tokens. Empty -> server default.
+CHUNK_SIZE_ARG=""
+if [ -n "${CHUNK_SIZE:-}" ]; then
+    CHUNK_SIZE_ARG="--chunk-size ${CHUNK_SIZE}"
+fi
+
+# vLLM batch-invariant mode. On by default; GDN/Mamba backends do not support it.
+BATCH_INVARIANT="${BATCH_INVARIANT:-1}"
+
+# Mamba KV cache mode + prefix caching, set only for hybrid Mamba models.
+MAMBA_ARGS=""
+if [ -n "${MAMBA_CACHE_MODE:-}" ]; then
+    MAMBA_ARGS="--mamba-cache-mode ${MAMBA_CACHE_MODE} --enable-prefix-caching"
+fi
+
+# Max tokens per scheduler step. Empty -> vLLM default.
+MAX_NUM_BATCHED_TOKENS_ARG=""
+if [ -n "${MAX_NUM_BATCHED_TOKENS:-}" ]; then
+    MAX_NUM_BATCHED_TOKENS_ARG="--max-num-batched-tokens ${MAX_NUM_BATCHED_TOKENS}"
+fi
+
+# L1 lazy allocation mode. Default is lazy (--l1-use-lazy). Set L1_USE_LAZY=false
+# to disable lazy allocation, which enables POSIX SHM-backed L1 pool for the
+# engine_driven SHM transfer path. When lazy is enabled (default), the SHM pool
+# is disabled and engine_driven falls back to pickle transport.
+L1_LAZY_ARG=""
+if [ "${L1_USE_LAZY:-true}" = "false" ]; then
+    L1_LAZY_ARG="--no-l1-use-lazy"
+    echo "L1 lazy allocation disabled (SHM transport enabled)"
+fi
+
 # Store PIDs in a file so cleanup.sh can find them
 PID_FILE="/tmp/lmcache_mp_pids_${BUILD_ID}"
 > "$PID_FILE"
@@ -76,12 +107,25 @@ PID_FILE="/tmp/lmcache_mp_pids_${BUILD_ID}"
 echo "=== Launching LMCache MP server ==="
 echo "Port: $LMCACHE_PORT"
 
+# Optional GDS L1 slab tier (gds_* tests). When GDS_L1_PATH is set, the L1
+# medium becomes an NVMe slab accessed via cuFile DMA instead of pinned DRAM;
+# --l1-size-gb then sizes the slab. The path must be on a GDS-capable
+# filesystem (local NVMe), provided by the /scratch hostPath mount.
+GDS_L1_ARG=""
+if [ -n "${GDS_L1_PATH:-}" ]; then
+    echo "GDS L1 tier enabled; slab directory: $GDS_L1_PATH"
+    GDS_L1_ARG="--gds-l1-path ${GDS_L1_PATH}"
+fi
+
 CUDA_VISIBLE_DEVICES="${GPU_FOR_VLLM}" \
 lmcache server \
     --l1-size-gb "$CPU_BUFFER_SIZE" \
     --eviction-policy LRU \
     --max-workers "$MAX_WORKERS" \
+    $CHUNK_SIZE_ARG \
     --port "$LMCACHE_PORT" \
+    ${GDS_L1_ARG} \
+    ${L1_LAZY_ARG} \
     > "/tmp/build_${BUILD_ID}_lmcache.log" 2>&1 &
 
 LMCACHE_PID=$!
@@ -105,7 +149,7 @@ echo "Port: $vllm_port"
 CUDA_VISIBLE_DEVICES="${GPU_FOR_VLLM}" \
 VLLM_ENABLE_V1_MULTIPROCESSING=0 \
 VLLM_SERVER_DEV_MODE=1 \
-VLLM_BATCH_INVARIANT=1 \
+VLLM_BATCH_INVARIANT=${BATCH_INVARIANT} \
 PYTHONHASHSEED=0 \
 vllm serve "$MODEL" \
     --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_load_failure_policy\": \"recompute\", \"kv_connector_extra_config\": {\"lmcache.mp.port\": $LMCACHE_PORT, \"lmcache.mp.mq_timeout\": 10}}" \
@@ -115,6 +159,8 @@ vllm serve "$MODEL" \
     $MAX_MODEL_LEN_ARG \
     $ENFORCE_EAGER_ARG \
     $GPU_MEMORY_UTIL_ARG \
+    $MAMBA_ARGS \
+    $MAX_NUM_BATCHED_TOKENS_ARG \
     > "/tmp/build_${BUILD_ID}_vllm.log" 2>&1 &
 
 VLLM_PID=$!

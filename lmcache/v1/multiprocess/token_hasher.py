@@ -56,7 +56,7 @@ class TokenHasher:
 
     This class encapsulates the hash function loading and hash computation
     logic needed by the multiprocess server to convert token IDs into
-    chunk hashes compatible with IPCCacheEngineKey (hash mode).
+    chunk hashes compatible with IPCCacheServerKey (hash mode).
     """
 
     def __init__(self, chunk_size: int = 256, hash_algorithm: str = "blake3"):
@@ -164,7 +164,15 @@ class TokenHasher:
                     none_hash = kv_cache_utils.NONE_HASH
                     logger.info("Initialized NONE_HASH=%s from vLLM", none_hash)
                     return none_hash
-            except (ImportError, AttributeError, ValueError, RuntimeError):
+            except (
+                ImportError,
+                AttributeError,
+                ValueError,
+                RuntimeError,
+                # torch._dynamo.device_interface raises AssertionError
+                # when CudaInterface is defined on non-CUDA platforms.
+                AssertionError,
+            ):
                 pass
 
         # Fallback: compute none_hash using our hash function

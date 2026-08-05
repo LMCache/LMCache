@@ -186,7 +186,7 @@ def register_gauge(
       observe).
 
     Args:
-        meter_name: OTel meter name (e.g. ``lmcache.mp_engine``).
+        meter_name: OTel meter name (e.g. ``lmcache.mp_server``).
         gauge_name: Metric name (e.g.
             ``lmcache_mp.active_prefetch_jobs``).
         description: Human-readable description of the gauge.

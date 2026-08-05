@@ -3,6 +3,7 @@ aiofiles
 blake3
 aiohttp
 awscrt
+cryptography
 cufile-python
 fastapi
 httpx
@@ -44,3 +45,6 @@ torch
 transformers >= 5.4
 uvicorn
 httptools
+cachetools
+google-api-core
+google-cloud-bigtable

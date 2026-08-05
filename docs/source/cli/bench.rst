@@ -744,15 +744,16 @@ Options
    * - ``--mode {gpu,cpu}``
      - ``gpu``
      - Run mode. ``gpu`` allocates real CUDA tensors and uses CUDA IPC
-       (handle path). ``cpu`` allocates POSIX-SHM-backed tensors and
-       uses the data-transfer path (gather/scatter via slot descriptors).
-   * - ``--transfer-mode {auto,handle,data}``
+       (lmcache-driven handle path). ``cpu`` allocates POSIX-SHM-backed tensors
+       and uses the engine-driven (worker-side gather/scatter) path by default.
+   * - ``--transfer-mode {auto,engine_driven,lmcache_driven}``
      - ``auto``
-     - Transport routing for STORE/RETRIEVE. ``handle`` forces the
-       single-shot path (``REGISTER_KV_CACHE`` + ``STORE``/``RETRIEVE``).
-       ``data`` forces the two-phase gather/scatter path
-       (``REGISTER_KV_CACHE_NON_GPU_CONTEXT`` + ``PREPARE``/``COMMIT``).
-       ``auto`` maps gpu→handle and cpu→data.
+     - Transport routing for STORE/RETRIEVE. ``lmcache_driven`` forces the
+       single-shot handle path (``REGISTER_KV_CACHE`` + ``STORE``/``RETRIEVE``),
+       which supports both CUDA IPC and CPU SHM zero-copy transfers.
+       ``engine_driven`` forces the worker-side gather/scatter path
+       (``REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT`` + ``PREPARE``/``COMMIT``).
+       ``auto`` maps gpu→lmcache_driven and cpu→engine_driven.
    * - ``--num-tokens N``
      - ``512``
      - Tokens per synthetic request.
@@ -775,6 +776,45 @@ Options
    * - ``--kvcache-shape-spec SPEC``
      - ``(2,1024,16,8,128):float16:32``
      - KV cache shape spec (see below).
+   * - ``--format FORMAT``
+     - ``terminal``
+     - Stdout output format for the final metrics summary. Available:
+       ``terminal``, ``json``.
+   * - ``--output PATH``
+     - *(unset)*
+     - Save the final metrics summary to a file at PATH (format chosen
+       by ``--format``).
+   * - ``-q`` / ``--quiet``
+     - *(unset)*
+     - Suppress all progress messages during the run. Only the final
+       structured metrics summary is emitted (unless also redirected
+       via ``--output``).
+
+
+CPU mode (no GPU)
+~~~~~~~~~~~~~~~~~
+
+``--mode cpu`` runs the same end-to-end path without a GPU. The server
+runs on a CPU-only host (``StubCPUDevice``); the bench tool allocates
+POSIX-SHM-backed KV tensors and exercises the full RPC path.
+
+By default ``--mode cpu`` uses the engine-driven gather/scatter path
+(``auto`` → ``cpu→engine_driven``). To use the zero-copy SHM
+handle path instead, pass ``--transfer-mode lmcache_driven``:
+
+.. code-block:: bash
+
+   # Terminal 1 -- start the LMCache server (no GPU required)
+   lmcache server \
+       --host localhost --port 5555 \
+       --l1-size-gb 2 --eviction-policy LRU
+
+   # Terminal 2 -- run bench in CPU + lmcache_driven mode
+   lmcache bench server \
+       --rpc-url tcp://localhost:5555 \
+       --url http://localhost:8080 \
+       --mode cpu --transfer-mode lmcache_driven \
+       --start 0 --end 2
 
 
 KV cache shape spec
@@ -812,16 +852,190 @@ All groups must share the same ``NB`` and ``BS`` (this is a physical
 constraint of paged KV). Layer counts across groups sum to the total
 layer count registered with the server.
 
+MLA (Multi-head Latent Attention)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Set ``kv_size=1`` to exercise the MLA data path. MLA folds K and V into
+a single latent plane, so each chunk on the wire is
+``(num_layers, chunk_tokens, num_heads * head_size)`` instead of the
+classical ``(2, num_layers, chunk_tokens, num_heads * head_size)``.
+The bench also allocates each per-layer client tensor as rank-3
+``(NB, BS, num_heads * head_size)`` (rather than the classical rank-5
+``(2, NB, BS, NH, HS)``), which is what the server's vLLM detector
+recognises as MLA -- see ``NL_X_NB_BS_HS`` in
+``lmcache/v1/gpu_connector/kv_format/detectors/vllm.py``.
+
+Pure MLA example (DeepSeek-V2-style, 61 layers, single latent head):
+
+.. code-block:: bash
+
+   lmcache bench server \
+       --rpc-url tcp://localhost:15556 \
+       --kvcache-shape-spec "(1,1024,16,1,128):bfloat16:61"
+
+Both transfer modes support MLA:
+
+* ``lmcache_driven`` (GPU default / CPU opt-in): the server discovers
+  ``use_mla`` from the registered tensor shapes -- the bench's rank-3
+  MLA client tensors trip this automatically.
+* ``engine_driven`` (CPU default): the bench derives ``use_mla`` from
+  ``kv_size`` in the spec and sends it on the register payload, so the
+  server sizes its SHM chunks correctly.
+
+.. note::
+
+   Heterogeneous specs that mix ``kv_size=1`` and ``kv_size=2`` groups
+   are fully supported in ``lmcache_driven`` mode -- each layer's
+   rank (3 vs. 5) tells the detector which per-group KV format to
+   use. In ``engine_driven`` mode the server registers a *single*
+   SHM chunk shape per context, so a mixed spec falls back to the
+   classical (non-MLA) layout; use ``lmcache_driven`` when you need
+   true per-group MLA.
+
+Tensor Parallel (TP > 1)
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+``--tp-size N`` (default: 1) simulates a TP world of ``N`` vLLM
+workers against a single LMCache server. Each rank registers its own
+KV cache under a distinct ``instance_id``, so the server holds one
+context per rank -- exactly the layout ``LMCacheMPWorkerAdapter``
+creates in a real deployment. Fan-out for the store / retrieve /
+lookup ops mirrors ``ParallelStrategy`` from the vLLM adapter:
+
+* ``LOOKUP`` fires exactly once per request (scheduler-scoped,
+  ``worker_id=None``).
+* ``RETRIEVE`` fires on **every** rank -- each worker loads its own
+  KV shard back.
+* ``STORE`` fires on **KV writers only**. Non-MLA: every rank is a
+  writer. MLA: only rank 0 is a writer (the latent plane is shared
+  across ranks; storing from every rank would just re-write identical
+  bytes).
+
+Example: MLA + TP=2, exercising rank 0 STORE + both-rank RETRIEVE:
+
+.. code-block:: bash
+
+   lmcache bench server \
+       --rpc-url tcp://localhost:15556 \
+       --mode cpu --transfer-mode lmcache_driven \
+       --kvcache-shape-spec "(1,1024,16,1,128):bfloat16:8" \
+       --tp-size 2
+
+The bench's client-side checksum aggregates writer-rank bytes only,
+so a cold-vs-warm mismatch pinpoints the exact rank whose round trip
+went wrong -- useful for verifying that a new server-side change
+handles per-rank ``instance_id`` routing correctly.
+
 See ``parse_kvcache_shape_spec`` in ``lmcache/v1/kv_layer_groups.py``
 for the authoritative parsing rules and validation errors.
 
 
-Example output
-~~~~~~~~~~~~~~
+Profiling the server
+~~~~~~~~~~~~~~~~~~~~~
+
+``lmcache bench server`` is a ZMQ client: the store path it exercises
+(hashing, allocation, gather, D2H) runs inside the **server** process, not
+this benchmark. ``--flamegraph on`` therefore attaches the profiler to a
+server pid you supply, records for the duration of the load, and renders a
+flame graph of the server, not of the client.
+
+.. code-block:: bash
+
+   lmcache bench server \
+       --rpc-url tcp://localhost:5555 \
+       --start 0 --end 200 --interval 0.02 \
+       --flamegraph on --flamegraph-mode gil \
+       --profile-server-pid "$(pgrep -f 'lmcache server')"
+
+``--flamegraph-mode`` takes the same six values documented under
+:ref:`lmcache tool flamegraph <lmcache-flamegraph-modes>` (or several
+comma-separated to drive the load once per mode, one SVG each). Because the
+target is a separate, already-running server (not a process this benchmark
+spawns), it profiles by *attaching*, so the same attach-mode caveats
+documented for
+:doc:`lmcache tool flamegraph </cli/tool>` apply here: what each mode
+shows, the ``PYTHONPERFSUPPORT=1`` requirement for naming Python frames in
+the perf/bcc modes, the container privileges each mode needs, and the fact
+that recording a live process is never free.
+
+.. note::
+
+   The one thing unique to ``bench server``: it records *while* it drives
+   load, so the recording overhead lands on the very throughput/latency
+   this benchmark reports. Keep the profiled run short and read those
+   numbers as indicative, not a clean baseline.
+
+
+Output
+~~~~~~
+
+After the run completes (or is interrupted with ``Ctrl-C``), a structured
+metrics summary is printed. The summary includes:
+
+* **Configuration** -- RPC URL, mode, transfer mode, tokens per request,
+  interval.
+* **Results** -- total requests, checksum OK / FAIL counts, pass rate.
+* **Latency sections** -- per-operation latency statistics (count, mean,
+  min, max, p50, p99) for cold lookup, cold store, warm lookup, and warm
+  retrieve.
+
+Use ``--format json`` to get machine-readable output, or ``--output FILE``
+to save the summary to a file.
 
 .. code-block:: text
 
-   Connecting to LMCache MP Server at tcp://localhost:15556 (mode=gpu, transfer=auto) ...
+   ================ Server Bench Result =================
+   ---------------------- Configuration -----------------
+   RPC URL:                          tcp://localhost:15556
+   Mode:                             gpu
+   Transfer mode:                    auto
+   Tokens / request:                 512
+   Interval (s):                     0.5
+   ------------------------- Results --------------------
+   Total requests:                   3
+   Checksum OK:                      3
+   Checksum FAIL:                    0
+   Pass rate (%):                    100.0
+   -------------------- Cold Lookup (ms) ---------------
+   count:                            3
+   mean:                             1.647
+   min:                              1.312
+   max:                              1.823
+   p50:                              1.647
+   p99:                              1.823
+   --------------------- Cold Store (ms) ---------------
+   count:                            3
+   mean:                             1.740
+   min:                              1.521
+   max:                              1.982
+   p50:                              1.740
+   p99:                              1.982
+   -------------------- Warm Lookup (ms) ---------------
+   count:                            3
+   mean:                             1.310
+   min:                              1.102
+   max:                              1.512
+   p50:                              1.310
+   p99:                              1.512
+   ------------------- Warm Retrieve (ms) --------------
+   count:                            3
+   mean:                             1.480
+   min:                              1.321
+   max:                              1.612
+   p50:                              1.480
+   p99:                              1.612
+   =====================================================
+
+
+Example output (progress)
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+During the run, progress messages are printed to stdout (suppressed by
+``-q`` / ``--quiet``):
+
+.. code-block:: text
+
+   Connecting to LMCache MP Server at tcp://localhost:15556 (mode=gpu) ...
    Server chunk_size = 256
    Resolved KV shape spec: (2,1024,16,8,128):float16:32
    [seq=0] LOOKUP cold:  0/2 chunks hit (1.82 ms)
@@ -850,12 +1064,6 @@ Exit codes
    * - ``1``
      - Fatal error (for example, CUDA unavailable in ``--mode gpu``,
        server unreachable, or a checksum mismatch).
-
-.. note::
-
-   ``--transfer-mode handle`` on CPU mode is not yet implemented and
-   will be added in a future release.
-
 
 .. _lmcache-bench-l2:
 
@@ -929,6 +1137,12 @@ support a clean store -> load round-trip.
    ``"use_odirect": true``) or that talk to a remote service without
    a local cache, the default combined run is usually fine.
 
+   O_DIRECT adapters may also require the benchmark L1 buffer to
+   satisfy the adapter's block alignment. Use ``--l1-align-bytes`` to
+   set that alignment, commonly ``4096`` for local block devices. The
+   payload size (``--data-size-kb * 1024``) must be a multiple of the
+   selected alignment.
+
 
 Quick start
 ~~~~~~~~~~~
@@ -952,6 +1166,15 @@ Stress the adapter with more in-flight submits and larger payloads:
        --num-keys 32 --in-flight 4 \
        --data-size-kb 512 \
        --rounds 5 --warmup-rounds 1
+
+Benchmark an O_DIRECT adapter with aligned L1 buffers:
+
+.. code-block:: bash
+
+   lmcache bench l2 \
+       --l2-adapter '{"type":"raw_block","device_path":"/dev/nvme0n1","slot_bytes":4194304,"use_odirect":true,"block_align":4096}' \
+       --data-size-kb 1024 \
+       --l1-align-bytes 4096
 
 Run only one operation (useful to isolate store vs. load throughput):
 
@@ -1019,6 +1242,13 @@ Options
    * - ``--data-size-kb N``
      - ``256``
      - Data size per key, in KiB.
+   * - ``--l1-align-bytes N``
+     - ``1``
+     - Alignment in bytes for benchmark L1 buffers. Use a value
+       at least as large as the adapter's block alignment when
+       benchmarking O_DIRECT backends, for example ``4096`` for local
+       block devices. ``--data-size-kb * 1024`` must be a multiple of
+       this value.
    * - ``--rounds N``
      - ``1``
      - Measurement rounds per operation.
@@ -1044,6 +1274,30 @@ Options
      - *(unset)*
      - Run only the specified operation. When omitted, all three
        operations are run in the order ``store -> lookup -> load``.
+   * - ``--flamegraph {on,off}``
+     - ``off``
+     - Capture a flame graph of the measured phases (``on``) or run the
+       benchmark normally (``off``). When ``on``, the benchmark profiles
+       itself and renders an SVG. Default ``off`` leaves benchmark
+       behavior unchanged. See
+       :ref:`Profiling / flame charts <lmcache-bench-l2-profiling>`.
+   * - ``--flamegraph-mode {on-cpu,off-cpu,wakeup,offwake,wall,gil}``
+     - ``on-cpu``
+     - Flame-graph mode for ``--flamegraph on``. ``on-cpu`` shows
+       where CPU time goes; ``off-cpu`` shows time blocked on I/O /
+       locks (best for I/O-bound adapters); ``offwake`` adds the waker
+       stack to each blocked stack; ``wakeup`` shows the stacks doing
+       the waking. ``wall`` and ``gil`` (``py-spy``) split the chart
+       per thread: wall-clock time, and time holding the interpreter
+       lock.
+   * - ``--flamegraph-output PATH``
+     - *(auto)*
+     - SVG output path. Default:
+       ``/tmp/lmcache_bench_flames/<adapter>.<mode>.svg``.
+   * - ``--flamegraph-scripts-dir DIR``
+     - *(~/FlameGraph)*
+     - Directory with the FlameGraph scripts (``flamegraph.pl``,
+       ``stackcollapse-perf.pl``).
 
 
 Adapter JSON spec
@@ -1166,9 +1420,47 @@ round against the byte pattern that ``store`` wrote (see
    [Verify] OK
 
 Verification is **off** by default because the stricter byte pattern
-also forces every key to allocate its own ``data_size`` buffer
-(otherwise the runner is free to reuse a single shared buffer across
-keys to keep the memory footprint small).
+requires both the store and load object batches to stay resident so the
+loaded data can be compared against the original store pattern.
+
+
+.. _lmcache-bench-l2-profiling:
+
+Profiling / flame charts
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+When ``--flamegraph on`` is passed, the benchmark profiles **its own
+process** (the L2 adapter driven by this microbenchmark's synthetic load)
+and renders a flame graph of the measured phases (to profile a separate
+server or a real process instead, use
+:doc:`lmcache tool flamegraph </cli/tool>`):
+
+.. code-block:: bash
+
+   lmcache bench l2 \
+       --l2-adapter '{"type":"fs","base_path":"/data/lmcache-bench"}' \
+       --rounds 300 --flamegraph on --flamegraph-mode on-cpu
+   #   [Profile] on-cpu recording started (pid=12345) -> .../FSL2Adapter.oncpu.svg
+   #   [Profile] wrote /tmp/lmcache_bench_flames/FSL2Adapter.oncpu.svg
+
+The ``--flamegraph-mode`` values, cost of recording, and tool / sysctl
+requirements are documented under
+:ref:`lmcache tool flamegraph <lmcache-flamegraph-modes>` (or pass several
+comma-separated to profile one benchmark run per mode, one SVG each). What is
+specific to ``bench l2``:
+
+* It **self-profiles**, so on CPython 3.12+ it activates the perf trampolines
+  itself and adapter functions resolve as ``py::<qualname>`` in the
+  ``on-cpu`` / ``off-cpu`` charts with no ``PYTHONPERFSUPPORT`` needed (an
+  attached server cannot). Trampolines cost a few percent, so treat a
+  profiled run's timings as indicative.
+* The recorder runs as a child of the benchmark, so ``wall`` / ``gil`` need
+  ``kernel.yama.ptrace_scope`` at ``0`` (not the attach-mode permissions).
+* Recording covers only the measured work, so use a large ``--rounds``; too
+  short a run captures no samples.
+
+The SVG is written to ``--flamegraph-output`` (default
+``/tmp/lmcache_bench_flames/<adapter>.<mode>.svg``).
 
 
 Exit codes
@@ -1187,5 +1479,7 @@ Exit codes
      - Adapter creation failed, round-trip verification failed, or
        an operation hit a fatal error (e.g. all rounds timed out).
    * - ``2``
-     - The ``--l2-adapter`` JSON / ``L2_ADAPTER_JSON`` env var was
-       missing or could not be parsed.
+     - Invalid invocation: the ``--l2-adapter`` JSON / ``L2_ADAPTER_JSON``
+       env var was missing or could not be parsed, an option value was
+       invalid, or ``--flamegraph on`` was requested but the profiling
+       toolchain is unavailable.

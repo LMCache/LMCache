@@ -6,11 +6,12 @@ from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.serde.utils import make_temp_key
 
 
-def _orig(salt: str = "") -> ObjectKey:
+def _orig(salt: str = "", object_group_id: int = 0) -> ObjectKey:
     return ObjectKey(
         chunk_hash=b"\x00" * 16,
         model_name="model",
         kv_rank=0,
+        object_group_id=object_group_id,
         cache_salt=salt,
     )
 
@@ -25,10 +26,11 @@ def test_make_temp_key_propagates_cache_salt() -> None:
 
 def test_make_temp_key_propagates_other_fields() -> None:
     """Non-hash identity fields are preserved verbatim."""
-    orig = _orig(salt="tenant-X")
+    orig = _orig(salt="tenant-X", object_group_id=3)
     temp = make_temp_key(orig)
     assert temp.model_name == orig.model_name
     assert temp.kv_rank == orig.kv_rank
+    assert temp.object_group_id == orig.object_group_id
 
 
 def test_make_temp_key_differs_from_original() -> None:

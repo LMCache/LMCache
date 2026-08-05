@@ -18,6 +18,9 @@ package v1alpha1
 
 import (
 	"testing"
+
+	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 )
 
 // --- helpers ---
@@ -29,7 +32,7 @@ func ptr[T any](v T) *T { return &v }
 func TestSetDefaults_LogLevelNil(t *testing.T) {
 	e := &LMCacheEngine{Spec: LMCacheEngineSpec{L1: L1BackendSpec{SizeGB: 10}}}
 	e.SetDefaults()
-	if e.Spec.LogLevel == nil || *e.Spec.LogLevel != "INFO" {
+	if e.Spec.LogLevel == nil || *e.Spec.LogLevel != defaultLogLevel {
 		t.Fatalf("expected LogLevel=INFO, got %v", e.Spec.LogLevel)
 	}
 }
@@ -51,7 +54,7 @@ func TestSetDefaults_NodeSelectorDefaultGPU(t *testing.T) {
 	if e.Spec.NodeSelector == nil {
 		t.Fatal("expected default NodeSelector, got nil")
 	}
-	if e.Spec.NodeSelector["nvidia.com/gpu.present"] != "true" {
+	if e.Spec.NodeSelector["nvidia.com/gpu.present"] != labelValueTrue {
 		t.Fatalf("expected nvidia.com/gpu.present=true, got %v", e.Spec.NodeSelector)
 	}
 }
@@ -93,10 +96,10 @@ func TestSetDefaults_GPUVendorAMDPreservesUserNodeSelector(t *testing.T) {
 	e := &LMCacheEngine{Spec: LMCacheEngineSpec{
 		L1:           L1BackendSpec{SizeGB: 10},
 		GPUVendor:    ptr(GPUVendorAMD),
-		NodeSelector: map[string]string{"feature.node.kubernetes.io/amd-gpu": "true"},
+		NodeSelector: map[string]string{"feature.node.kubernetes.io/amd-gpu": labelValueTrue},
 	}}
 	e.SetDefaults()
-	if e.Spec.NodeSelector["feature.node.kubernetes.io/amd-gpu"] != "true" {
+	if e.Spec.NodeSelector["feature.node.kubernetes.io/amd-gpu"] != labelValueTrue {
 		t.Fatalf("expected user-supplied AMD NodeSelector preserved, got %v", e.Spec.NodeSelector)
 	}
 }
@@ -374,5 +377,83 @@ func TestValidateSpec_L2BothSet(t *testing.T) {
 	errs := e.ValidateSpec()
 	if len(errs) != 1 {
 		t.Fatalf("expected 1 error, got %d: %v", len(errs), errs)
+	}
+}
+
+func TestValidateSpec_L2SerdeAESGCMValid(t *testing.T) {
+	e := &LMCacheEngine{Spec: LMCacheEngineSpec{
+		L1: L1BackendSpec{SizeGB: 10},
+		L2Backend: &L2BackendSpec{
+			RESP: &RESPL2AdapterSpec{Host: "redis", Port: 6379},
+			Serde: &L2SerdeSpec{
+				AESGCM: &AESGCMSerdeSpec{
+					MasterKeySecretRef: corev1.LocalObjectReference{Name: "l2-master-key"},
+				},
+			},
+		},
+	}}
+	errs := e.ValidateSpec()
+	if len(errs) != 0 {
+		t.Fatalf("expected no errors, got %v", errs)
+	}
+}
+
+func TestValidateSpec_L2SerdeNoTypeSet(t *testing.T) {
+	e := &LMCacheEngine{Spec: LMCacheEngineSpec{
+		L1: L1BackendSpec{SizeGB: 10},
+		L2Backend: &L2BackendSpec{
+			RESP:  &RESPL2AdapterSpec{Host: "redis", Port: 6379},
+			Serde: &L2SerdeSpec{},
+		},
+	}}
+	errs := e.ValidateSpec()
+	if len(errs) != 1 {
+		t.Fatalf("expected 1 error, got %d: %v", len(errs), errs)
+	}
+	if errs[0].Field != "spec.l2Backend.serde" {
+		t.Fatalf("expected field spec.l2Backend.serde, got %s", errs[0].Field)
+	}
+}
+
+func TestValidateSpec_L2SerdeAESGCMEmptySecretName(t *testing.T) {
+	e := &LMCacheEngine{Spec: LMCacheEngineSpec{
+		L1: L1BackendSpec{SizeGB: 10},
+		L2Backend: &L2BackendSpec{
+			RESP:  &RESPL2AdapterSpec{Host: "redis", Port: 6379},
+			Serde: &L2SerdeSpec{AESGCM: &AESGCMSerdeSpec{}},
+		},
+	}}
+	errs := e.ValidateSpec()
+	if len(errs) != 1 {
+		t.Fatalf("expected 1 error, got %d: %v", len(errs), errs)
+	}
+	if errs[0].Field != "spec.l2Backend.serde.aesgcm.masterKeySecretRef.name" {
+		t.Fatalf("expected field spec.l2Backend.serde.aesgcm.masterKeySecretRef.name, got %s", errs[0].Field)
+	}
+}
+
+func TestValidateSpec_L2SerdeConflictsWithRawSerde(t *testing.T) {
+	e := &LMCacheEngine{Spec: LMCacheEngineSpec{
+		L1: L1BackendSpec{SizeGB: 10},
+		L2Backend: &L2BackendSpec{
+			Raw: &RawL2AdapterSpec{
+				Type: "fs",
+				Config: map[string]apiextensionsv1.JSON{
+					"serde": {Raw: []byte(`{"type": "fp8"}`)},
+				},
+			},
+			Serde: &L2SerdeSpec{
+				AESGCM: &AESGCMSerdeSpec{
+					MasterKeySecretRef: corev1.LocalObjectReference{Name: "l2-master-key"},
+				},
+			},
+		},
+	}}
+	errs := e.ValidateSpec()
+	if len(errs) != 1 {
+		t.Fatalf("expected 1 error, got %d: %v", len(errs), errs)
+	}
+	if errs[0].Field != "spec.l2Backend.serde" {
+		t.Fatalf("expected field spec.l2Backend.serde, got %s", errs[0].Field)
 	}
 }

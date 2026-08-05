@@ -34,6 +34,25 @@ from lmcache.v1.config_base import (
 logger = init_logger(__name__)
 
 
+def _to_hidden_states_retrieve_mode(value: Any) -> str:
+    """Normalize hidden_states_retrieve_mode from YAML/env."""
+    if value is None:
+        return "prefix_strict"
+    s = str(value).strip().lower().replace("-", "_")
+    if s in ("prefix_strict", "prefixstrict"):
+        return "prefix_strict"
+    if s in (
+        "skip_missing_chunks",
+        "skipmissingchunks",
+        "legacy",
+    ):
+        return "skip_missing_chunks"
+    raise ValueError(
+        "hidden_states_retrieve_mode must be 'prefix_strict' or "
+        f"'skip_missing_chunks', got {value!r}"
+    )
+
+
 # Configuration aliases and deprecated mappings
 _CONFIG_ALIASES = {
     # Maps deprecated names to current names
@@ -137,8 +156,12 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "blend_min_tokens": {"type": int, "default": 256, "env_converter": int},
     "blend_special_str": {"type": str, "default": " # # ", "env_converter": str},
-    "retrieve_locations": {"type": Optional[list[str]], "default": None},
-    "store_location": {"type": Optional[str], "default": None},
+    "retrieve_locations": {
+        "type": Optional[list[str]],
+        "default": None,
+        "env_converter": _to_str_list,
+    },
+    "store_location": {"type": Optional[str], "default": None, "env_converter": str},
     # P2P configurations
     "enable_p2p": {
         "type": bool,
@@ -600,6 +623,67 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
             "and environment variables."
         ),
     },
+    # Hidden state caching configurations (vLLM-Omni multi-stage pipeline)
+    "enable_hidden_state_cache": {
+        "type": bool,
+        "default": False,
+        "env_converter": _to_bool,
+        "description": (
+            "Enable caching of thinker hidden states alongside KV cache entries "
+            "for vLLM-Omni multi-stage pipelines. When enabled, hidden states "
+            "are stored in a separate CPU pinned memory pool and share the same "
+            "chunk keys as their corresponding KV entries."
+        ),
+    },
+    "max_hidden_state_cpu_size": {
+        "type": float,
+        "default": 2.0,
+        "env_converter": float,
+        "description": (
+            "Maximum size in GB of pinned CPU memory for the hidden state cache. "
+            "Each chunk-layer tensor is [chunk_size, hidden_dim] float32. "
+            "Sizing formula: num_cached_layers × chunk_size × hidden_dim × 4 bytes. "
+            "Example: Qwen3-Omni with layers=[0,24], chunk_size=256, hidden_dim=5120 "
+            "→ ~10 MB/chunk; 2 GB allows ≈200 chunks (~51K tokens) of prefix. "
+            "If this budget is too small, hidden entries will be evicted before "
+            "their KV counterparts, causing partial-prefix fallback. "
+            "Relevant only when enable_hidden_state_cache=True."
+        ),
+    },
+    "hidden_state_layers": {
+        "type": Optional[list[int]],
+        "default": None,
+        "env_converter": _to_int_list,
+        "description": (
+            "Optional allowlist of **storage layer indices** accepted by "
+            "HiddenStateStore.store_hidden_states. If None (recommended "
+            "default), every layer index passed on store is cached. "
+            "**Semantics depend on the integration:** these are storage "
+            "layer_idx values, not necessarily transformer layer IDs. For "
+            "example, a multi-stage pipeline may use layer_idx 0 for the main "
+            "hidden-state tensor and 1, 2, … for multimodal output slots; "
+            "copying unrelated examples such as [0, 24] as if they were "
+            '"model layers" can **silently drop** rows stored under other '
+            "indices. Leave this unset unless you have verified the exact "
+            "indices your stack writes—consult your integration's docs. "
+            "Relevant only when enable_hidden_state_cache=True."
+        ),
+    },
+    "hidden_states_retrieve_mode": {
+        "type": str,
+        "default": "prefix_strict",
+        "env_converter": _to_hidden_states_retrieve_mode,
+        "description": (
+            "How to assemble hidden_states_out on retrieve() when some KV-hit "
+            "chunks lack a paired hidden entry. "
+            "'prefix_strict' (default): stop at the first missing chunk — "
+            "outputs align with a contiguous token prefix (recommended for "
+            "thinker→talker). "
+            "'skip_missing_chunks': legacy behavior — skip missing chunks and "
+            "concatenate later chunks; tensor length may not match ret_mask. "
+            "Relevant only when enable_hidden_state_cache=True."
+        ),
+    },
 }
 
 
@@ -706,6 +790,12 @@ def _validate_config(self):
     if enable_nixl_storage:
         assert self.extra_config.get("nixl_backend") is not None
         assert self.extra_config.get("nixl_pool_size") is not None
+        if self.extra_config.get(
+            "nixl_presence_cache_only"
+        ) and not self.extra_config.get("nixl_presence_cache"):
+            raise ValueError(
+                "nixl_presence_cache must be true when nixl_presence_cache_only is true"
+            )
         assert self.nixl_buffer_device is not None
         if self.nixl_buffer_device == "cpu":
             # CPU mode shares LocalCPUBackend's pinned pool; nixl_buffer_size
@@ -794,7 +884,7 @@ def _log_config(self):
             value = f"{value} GB"
         config_dict[name] = value
 
-    logger.info(f"LMCache Configuration: {config_dict}")
+    logger.info("LMCache Configuration: %s", config_dict)
     return self
 
 

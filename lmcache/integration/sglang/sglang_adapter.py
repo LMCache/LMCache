@@ -155,14 +155,12 @@ class LMCacheConnector:
         )
         slot_mapping = load_metadata.slot_mapping.to(torch_device_type)
         offset = load_metadata.offset
-
-        assert isinstance(token_ids, torch.Tensor)
-        assert isinstance(slot_mapping, torch.Tensor)
-        assert (len(token_ids) - offset) == len(slot_mapping)
-
+        if (len(token_ids) - offset) != len(slot_mapping):
+            raise ValueError(
+                "Length of token_ids (minus offset) must match slot_mapping length"
+            )
         load_mask = torch.ones_like(token_ids, dtype=torch.bool)
         load_mask[:offset] = False
-
         ret_token_mask = self.lmcache_engine.retrieve(
             token_ids,
             mask=load_mask,
@@ -181,11 +179,8 @@ class LMCacheConnector:
         )
         slot_mapping = store_metadata.kv_indices.to(torch.int64).to(torch_device_type)
         offset = store_metadata.offset
-
-        assert isinstance(token_ids, torch.Tensor)
-        assert isinstance(slot_mapping, torch.Tensor)
-        assert len(token_ids) == len(slot_mapping)
-
+        if len(token_ids) != len(slot_mapping):
+            raise ValueError("Length of token_ids must match slot_mapping length")
         store_mask = torch.ones_like(token_ids, dtype=torch.bool)
 
         self.lmcache_engine.store(
@@ -291,8 +286,10 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
         if retrieve_token_num <= offset:
             self.lmcache_engine.lookup_unpin(lookup_id)
             logger.info(
-                f"LMCache retrieve skipped: lookup={retrieve_token_num}, "
-                f"offset={offset}, no new tokens to retrieve"
+                "LMCache retrieve skipped: lookup=%d, "
+                "offset=%d, no new tokens to retrieve",
+                retrieve_token_num,
+                offset,
             )
             return 0
 
@@ -315,8 +312,10 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
 
         num_new_tokens = retrieve_token_num - offset
         logger.info(
-            f"LMCache retrieve started: lookup={retrieve_token_num}, "
-            f"offset={offset}, retrieve {num_new_tokens} new tokens"
+            "LMCache retrieve started: lookup=%d, offset=%d, retrieve %d new tokens",
+            retrieve_token_num,
+            offset,
+            num_new_tokens,
         )
 
         return num_new_tokens
@@ -328,19 +327,57 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
         )
         store_mask = torch.ones_like(token_ids, dtype=torch.bool)
 
-        lookup_id = str(uuid.uuid4())
-        self.lmcache_engine.lookup(token_ids, lookup_id=lookup_id, pin=True)
-
-        layerwise_storer = self.lmcache_engine.store_layer(
-            token_ids,
-            mask=store_mask,
-            kvcaches=self.kvcaches,
-            slot_mapping=slot_mapping,
-            offset=store_metadata.offset,
-            sync=False,
+        logger.info(
+            "LMCache store_kv started: tokens=%d, num_layers=%d, offset=%d",
+            len(token_ids),
+            self.sgl_config.num_hidden_layers,
+            store_metadata.offset,
         )
-        next(layerwise_storer)
-        for _ in range(self.sgl_config.num_hidden_layers):
-            next(layerwise_storer)
 
-        self.lmcache_engine.lookup_unpin(lookup_id)
+        lookup_id = str(uuid.uuid4())
+        try:
+            self.lmcache_engine.lookup(token_ids, lookup_id=lookup_id, pin=True)
+
+            layerwise_storer = self.lmcache_engine.store_layer(
+                token_ids,
+                mask=store_mask,
+                kvcaches=self.kvcaches,
+                slot_mapping=slot_mapping,
+                offset=store_metadata.offset,
+                sync=False,
+            )
+
+            # Initial next() to start the generator
+            try:
+                next(layerwise_storer)
+            except StopIteration:
+                logger.error(
+                    "store_layer generator stopped prematurely before layer loop"
+                )
+                return
+
+            # Iterate through each layer
+            for layer_idx in range(self.sgl_config.num_hidden_layers):
+                try:
+                    next(layerwise_storer)
+                except StopIteration:
+                    logger.error(
+                        "store_layer generator stopped at layer %d/%d",
+                        layer_idx,
+                        self.sgl_config.num_hidden_layers,
+                    )
+                    break
+
+            self.lmcache_engine.lookup_unpin(lookup_id)
+            logger.info("LMCache store_kv completed: stored %d tokens", len(token_ids))
+        except Exception as e:
+            logger.error(
+                "LMCache store_kv failed: %s: %s",
+                type(e).__name__,
+                e,
+                exc_info=True,
+            )
+            try:
+                self.lmcache_engine.lookup_unpin(lookup_id)
+            except Exception as unpin_err:
+                logger.error("Failed to unpin lookup: %s", unpin_err, exc_info=True)

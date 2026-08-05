@@ -5,13 +5,15 @@ from __future__ import annotations
 # Standard
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Any, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Callable, List, Optional, Tuple, TypeVar, Union
 import asyncio
+import functools
 import hashlib
 import inspect
 import re
 import threading
 import traceback
+import warnings
 
 try:
     # Third Party
@@ -28,6 +30,7 @@ except ImportError:
 
 
 # Third Party
+from cachetools import TTLCache as _TTLCache  # type: ignore
 import torch
 
 # First Party
@@ -700,6 +703,43 @@ def thread_safe(func):
     return wrapper
 
 
+##### Deprecation #####
+F = TypeVar("F", bound=Callable[..., Any])
+
+
+def lmcache_deprecate(reason: str) -> Callable[[F], F]:
+    """Mark a function or method as deprecated.
+
+    Calling the wrapped callable emits a ``DeprecationWarning`` and logs a
+    warning the first time it is invoked, including the supplied reason.
+
+    Args:
+        reason: Human-readable explanation of why the callable is deprecated
+            and, ideally, what to use instead.
+
+    Returns:
+        A decorator that wraps the target callable while preserving its
+        signature and metadata.
+    """
+
+    def decorator(func: F) -> F:
+        warned = False
+
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            nonlocal warned
+            if not warned:
+                message = f"{func.__qualname__} is deprecated: {reason}"
+                warnings.warn(message, DeprecationWarning, stacklevel=2)
+                logger.warning(message)
+                warned = True
+            return func(*args, **kwargs)
+
+        return wrapper  # type: ignore[return-value]
+
+    return decorator
+
+
 #### Thread/asyncio-related utilities ####
 def handle_thread_exception(args):
     """Handle an uncaught exception reported by ``threading``.
@@ -725,7 +765,7 @@ def start_loop_in_thread_with_exceptions(loop: asyncio.AbstractEventLoop):
     def loop_excepthook(loop, context):
         msg = context.get("message", "Unhandled exception in event loop")
         exc = context.get("exception")
-        logger.error(f"[asyncio] {msg}")
+        logger.error("[asyncio] %s", msg)
         if exc:
             traceback.print_exception(type(exc), exc, exc.__traceback__)
 
@@ -740,3 +780,23 @@ def mock_up_broadcast_fn(t: torch.Tensor, i: int) -> None:
 
 def mock_up_broadcast_object_fn(a: Any, i: int) -> None:
     raise NotImplementedError("Calling invalid broadcast object function")
+
+
+class TTLCache:
+    """Thread-safe wrapper around cachetools.TTLCache for existence checks."""
+
+    def __init__(self, max_size: int, ttl_seconds: float):
+        self.cache: _TTLCache = _TTLCache(maxsize=max_size, ttl=ttl_seconds)
+        self.lock = threading.RLock()
+
+    def get(self, key: str) -> Optional[bool]:
+        with self.lock:
+            return self.cache.get(key)
+
+    def put(self, key: str, val: bool):
+        with self.lock:
+            self.cache[key] = val
+
+    def invalidate(self, key: str):
+        with self.lock:
+            self.cache.pop(key, None)

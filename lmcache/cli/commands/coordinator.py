@@ -75,6 +75,70 @@ class CoordinatorCommand(BaseCommand):
                 "(default: 10)."
             ),
         )
+        parser.add_argument(
+            "--eviction-check-interval",
+            type=float,
+            default=None,
+            help=(
+                "Seconds between L2 eviction sweeps; 0 disables the loop (default: 5)."
+            ),
+        )
+        parser.add_argument(
+            "--eviction-ratio",
+            type=float,
+            default=None,
+            help=(
+                "Fraction of tracked keys (by count) to evict per cycle, "
+                "0.0 to 1.0 (default: 0.2)."
+            ),
+        )
+        parser.add_argument(
+            "--trigger-watermark",
+            type=float,
+            default=None,
+            help=(
+                "Eviction fires when usage reaches this fraction of the "
+                "quota, 0.0 (exclusive) to 1.0 (default: 1.0)."
+            ),
+        )
+        parser.add_argument(
+            "--chunk-size",
+            type=int,
+            default=None,
+            help=(
+                "Tokens per KV chunk: the CacheBlend match unit and the unit used "
+                "to resolve pin token_ids to keys. Must equal the MP servers' "
+                "--chunk-size (default: 256)."
+            ),
+        )
+        parser.add_argument(
+            "--hash-algorithm",
+            type=str,
+            default=None,
+            help=(
+                "Token hash algorithm for pin key resolution; must equal the MP "
+                "servers' --hash-algorithm. 'blake3' (default) is self-contained; "
+                "other algorithms require vLLM importable in the coordinator."
+            ),
+        )
+        parser.add_argument(
+            "--blend-probe-stride",
+            type=int,
+            default=None,
+            help=(
+                "Positions between CacheBlend match probes; 1 probes every "
+                "offset for full recall (default: 1)."
+            ),
+        )
+        parser.add_argument(
+            "--timeout-keep-alive",
+            type=int,
+            default=None,
+            help=(
+                "Seconds the HTTP server keeps idle connections open "
+                "before closing them (default: 10)."
+            ),
+        )
 
     def execute(self, args: argparse.Namespace) -> None:
         """Build the coordinator config and serve the app with uvicorn.
@@ -116,6 +180,13 @@ class CoordinatorCommand(BaseCommand):
                 ("port", args.port),
                 ("instance_timeout", args.instance_timeout),
                 ("health_check_interval", args.health_check_interval),
+                ("eviction_check_interval", args.eviction_check_interval),
+                ("eviction_ratio", args.eviction_ratio),
+                ("trigger_watermark", args.trigger_watermark),
+                ("chunk_size", args.chunk_size),
+                ("hash_algorithm", args.hash_algorithm),
+                ("blend_probe_stride", args.blend_probe_stride),
+                ("timeout_keep_alive", args.timeout_keep_alive),
             )
             if value is not None
         }
@@ -123,4 +194,10 @@ class CoordinatorCommand(BaseCommand):
             config = dataclasses.replace(config, **overrides)
 
         app = create_app(config)
-        uvicorn.run(app, host=config.host, port=config.port, log_level="info")
+        uvicorn.run(
+            app,
+            host=config.host,
+            port=config.port,
+            log_level="info",
+            timeout_keep_alive=config.timeout_keep_alive,
+        )

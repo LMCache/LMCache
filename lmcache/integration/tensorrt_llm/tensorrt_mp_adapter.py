@@ -35,11 +35,11 @@ from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType, check_interprocess_event_support
 from lmcache.v1.multiprocess.custom_types import (
-    IPCCacheEngineKey,
-    RawCudaIPCWrapper,
+    IPCCacheServerKey,
 )
 from lmcache.v1.multiprocess.mq import MessageQueueClient, MessagingFuture
 from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
+from lmcache.v1.platform.cuda.ipc_wrapper import RawCudaIPCWrapper
 
 logger = init_logger(__name__)
 
@@ -117,8 +117,8 @@ class LMCacheMPKvConnectorScheduler(KvCacheConnectorScheduler):
         start: int,
         end: int,
         request_id: int,
-    ) -> IPCCacheEngineKey:
-        return IPCCacheEngineKey(
+    ) -> IPCCacheServerKey:
+        return IPCCacheServerKey(
             model_name=self._model_name,
             world_size=self._world_size,
             worker_id=None,
@@ -307,9 +307,9 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
         self,
         token_ids: List[int],
         request_id: int,
-    ) -> IPCCacheEngineKey:
+    ) -> IPCCacheServerKey:
         aligned_end = (len(token_ids) // self._chunk_size) * self._chunk_size
-        return IPCCacheEngineKey(
+        return IPCCacheServerKey(
             model_name=self._model_name,
             world_size=self._world_size,
             worker_id=self._rank,

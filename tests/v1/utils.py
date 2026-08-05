@@ -21,7 +21,11 @@ import torch
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.gpu_connector.gpu_connectors import VLLMPagedMemGPUConnectorV2
-from lmcache.v1.memory_management import AdHocMemoryAllocator, MemoryFormat, MemoryObj
+from lmcache.v1.memory_allocators.ad_hoc_memory_allocator import AdHocMemoryAllocator
+from lmcache.v1.memory_management import (
+    MemoryFormat,
+    MemoryObj,
+)
 from lmcache.v1.metadata import LMCacheMetadata
 
 # Conditional import for CUDA-only operations
@@ -37,18 +41,20 @@ else:
     # First Party
     lmc_ops = None
 
-# Define mock GPUKVFormat enum if c_ops is not available
+# Define mock EngineKVFormat enum if c_ops is not available
 if lmc_ops is None:
 
-    class MockGPUKVFormat:
+    class MockEngineKVFormat:
         NL_X_TWO_NB_BS_NH_HS = 0
         NL_X_NB_TWO_BS_NH_HS = 1
         NL_X_NB_BS_HS = 2
         NL_X_TWO_NB_NH_BS_HS = 3
         NL_X_NB_TWO_NH_BS_HS = 4
+        NL_X_NB_NH_BS_TWO_HS = 5
 
     class MockCOps:
-        GPUKVFormat = MockGPUKVFormat
+        EngineKVFormat = MockEngineKVFormat
+        GPUKVFormat = MockEngineKVFormat
 
     lmc_ops = MockCOps()
 
@@ -290,7 +296,7 @@ def generate_kv_cache_paged_list_tensors(
     num_layers=32,
     head_size=128,
     # default vllm non-MLA flash attention
-    gpu_kv_format=lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS,
+    engine_kv_format=lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
 ):
     """
     Instead of Tuple[Tuple[Tensor, Tensor]], return List[Tensor]
@@ -298,21 +304,24 @@ def generate_kv_cache_paged_list_tensors(
     """
     ret = []
     # only support vllm MLA format for now
-    use_mla = gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NB_BS_HS
+    use_mla = engine_kv_format == lmc_ops.EngineKVFormat.NL_X_NB_BS_HS
     num_heads = 1 if use_mla else 8
     if use_mla:
         shape = [num_blocks, block_size, head_size]
     else:
-        if gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS:
+        if engine_kv_format == lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS:
             shape = [2, num_blocks, block_size, num_heads, head_size]
-        elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS:
+        elif engine_kv_format == lmc_ops.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS:
             shape = [num_blocks, 2, block_size, num_heads, head_size]
-        elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_TWO_NB_NH_BS_HS:
+        elif engine_kv_format == lmc_ops.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS:
             shape = [2, num_blocks, num_heads, block_size, head_size]
-        elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NB_TWO_NH_BS_HS:
+        elif engine_kv_format == lmc_ops.EngineKVFormat.NL_X_NB_TWO_NH_BS_HS:
             shape = [num_blocks, 2, num_heads, block_size, head_size]
+        elif engine_kv_format == lmc_ops.EngineKVFormat.NL_X_NB_NH_BS_TWO_HS:
+            # blocks-first, K/V fused into the trailing dim
+            shape = [num_blocks, num_heads, block_size, 2, head_size]
         else:
-            raise ValueError(f"Unsupported gpu_kv_format: {gpu_kv_format}")
+            raise ValueError(f"Unsupported engine_kv_format: {engine_kv_format}")
 
     for i in range(num_layers):
         # TODO(chunxiaozheng): support more dtypes
@@ -441,13 +450,13 @@ def check_paged_kv_cache_equal(
     slot_mapping,
     num_heads=8,
     head_size=128,
-    gpu_kv_format=lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS,
+    engine_kv_format=lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
 ):
     """
     check whether two paged kv caches are the same at slot_mapping
     """
 
-    if gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS:
+    if engine_kv_format == lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS:
         token_dim = 0
         num_tokens = slot_mapping.shape[0]
         for left_kv_layer, right_kv_layer in zip(left, right, strict=False):
@@ -469,7 +478,7 @@ def check_paged_kv_cache_equal(
             assert (left_k[slot_mapping, :, :] == right_k[slot_mapping, :, :]).all()
             assert (left_v[slot_mapping, :, :] == right_v[slot_mapping, :, :]).all()
 
-    elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS:
+    elif engine_kv_format == lmc_ops.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS:
         token_dim = 0
         num_tokens = slot_mapping.shape[0]
         for left_kv_layer, right_kv_layer in zip(left, right, strict=False):
@@ -495,7 +504,7 @@ def check_paged_kv_cache_equal(
             assert (left_k[slot_mapping, :, :] == right_k[slot_mapping, :, :]).all()
             assert (left_v[slot_mapping, :, :] == right_v[slot_mapping, :, :]).all()
 
-    elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_TWO_NB_NH_BS_HS:
+    elif engine_kv_format == lmc_ops.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS:
         # HND flash attention: [2, num_blocks, num_heads, block_size, head_size]
         # Flatten [num_blocks, num_heads, block_size, head_size] ->
         #   swap to [num_blocks, block_size, num_heads, head_size] ->
@@ -531,7 +540,7 @@ def check_paged_kv_cache_equal(
             assert (left_k[slot_mapping, :, :] == right_k[slot_mapping, :, :]).all()
             assert (left_v[slot_mapping, :, :] == right_v[slot_mapping, :, :]).all()
 
-    elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NB_TWO_NH_BS_HS:
+    elif engine_kv_format == lmc_ops.EngineKVFormat.NL_X_NB_TWO_NH_BS_HS:
         # HND flash infer: [num_blocks, 2, num_heads, block_size, head_size]
         # left_kv_layer[:, 0] -> [num_blocks, num_heads, block_size, head_size]
         num_tokens = slot_mapping.shape[0]
@@ -627,6 +636,13 @@ def check_kv_cache_device(kvs, device):
 
 def create_gpu_connector(hidden_dim, num_layers):
     return VLLMPagedMemGPUConnectorV2(hidden_dim, num_layers)
+
+
+def create_xpu_connector(hidden_dim, num_layers):
+    # First Party
+    from lmcache.v1.gpu_connector.xpu_connectors import VLLMPagedMemXPUConnectorV2
+
+    return VLLMPagedMemXPUConnectorV2(hidden_dim, num_layers)
 
 
 def get_all_methods_from_base(base_class):

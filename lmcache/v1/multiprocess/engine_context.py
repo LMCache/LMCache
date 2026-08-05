@@ -2,21 +2,27 @@
 """Shared context and layout descriptor registry for engine modules."""
 
 # Standard
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TypedDict
 import threading
 
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import (
+    DEFAULT_ATTN_WINDOW_DESC,
+    AttnWindowDesc,
     MemoryLayoutDesc,
     ObjectKey,
     ipc_key_to_object_keys,
 )
 from lmcache.v1.distributed.config import StorageManagerConfig
 from lmcache.v1.distributed.storage_manager import StorageManager
+from lmcache.v1.gpu_connector.gds_context import (
+    get_gds_context,
+    initialize_gds_context,
+)
 from lmcache.v1.mp_observability.event_bus import EventBus, get_event_bus
-from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
+from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.session import SessionManager
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
@@ -36,6 +42,11 @@ class _LayoutDescEntry:
 
     layout_desc: MemoryLayoutDesc
     ref_count: int
+    attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC
+    """Cross-chunk attention windows of all object groups, in object-group
+    order. Defaults to a single full-attention group."""
+    group_layout_descs: dict[int, MemoryLayoutDesc] | None = None
+    """Per-group layout descriptors, or ``None`` if all share ``layout_desc``."""
 
 
 class LayoutDescRegistry:
@@ -58,6 +69,8 @@ class LayoutDescRegistry:
         model_name: str,
         world_size: int,
         layout_desc: MemoryLayoutDesc,
+        attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC,
+        group_layout_descs: dict[int, MemoryLayoutDesc] | None = None,
     ) -> None:
         """Register a layout descriptor for a (model_name, world_size) pair.
 
@@ -68,18 +81,33 @@ class LayoutDescRegistry:
             model_name: The model name.
             world_size: The world size.
             layout_desc: The memory layout descriptor.
+            attn_desc: Cross-chunk attention windows of all object groups, in
+                object-group order. Defaults to a single full-attention group.
+            group_layout_descs: Maps object_group_id to that group's layout
+                (each group is a separate keyed allocation); ``None`` derives
+                one entry per object group in ``attn_desc``, all sharing
+                ``layout_desc``.
         """
         key = (model_name, world_size)
+        attn_desc = replace(attn_desc, world_size=world_size)
+        if group_layout_descs is None:
+            group_layout_descs = {
+                gid: layout_desc for gid in range(attn_desc.num_object_groups)
+            }
         with self._lock:
             entry = self._registry.get(key)
             if entry is None:
                 self._registry[key] = _LayoutDescEntry(
                     layout_desc=layout_desc,
                     ref_count=1,
+                    attn_desc=attn_desc,
+                    group_layout_descs=group_layout_descs,
                 )
                 return
 
             entry.layout_desc = layout_desc
+            entry.attn_desc = attn_desc
+            entry.group_layout_descs = group_layout_descs
             entry.ref_count += 1
 
     def unregister(self, model_name: str, world_size: int) -> None:
@@ -120,8 +148,42 @@ class LayoutDescRegistry:
                 return None
             return entry.layout_desc
 
+    def find_group_layout_descs(
+        self, model_name: str, world_size: int
+    ) -> dict[int, MemoryLayoutDesc] | None:
+        """Look up per-object-group layout descriptors, or ``None``."""
+        with self._lock:
+            entry = self._registry.get((model_name, world_size))
+            if entry is None:
+                return None
+            return entry.group_layout_descs
 
-class MPCacheEngineContext:
+    def find_attn_desc(self, model_name: str, world_size: int) -> AttnWindowDesc:
+        """Look up the attention-window descriptor for a pair.
+
+        Args:
+            model_name: The model name.
+            world_size: The world size.
+
+        Returns:
+            The :class:`AttnWindowDesc` registered for the pair.
+
+        Raises:
+            ValueError: If no descriptor is registered for the pair. Callers
+                must register the KV cache (which establishes the pair) before
+                looking up its windows.
+        """
+        with self._lock:
+            entry = self._registry.get((model_name, world_size))
+            if entry is None:
+                raise ValueError(
+                    f"No attention-window descriptor registered for model "
+                    f"{model_name!r} with world size {world_size}"
+                )
+            return entry.attn_desc
+
+
+class MPCacheServerContext:
     """Shared infrastructure for all engine modules.
 
     Holds the storage manager, token hasher, session manager, event bus,
@@ -132,6 +194,9 @@ class MPCacheEngineContext:
         storage_manager_config: Configuration for the storage manager.
         chunk_size: Chunk size for KV cache operations.
         hash_algorithm: Hash algorithm for token hashing.
+        separate_object_groups: Whether to split kernel groups into one object
+            group per sliding-window size at KV-cache registration. Default
+            False.
     """
 
     def __init__(
@@ -139,8 +204,17 @@ class MPCacheEngineContext:
         storage_manager_config: StorageManagerConfig,
         chunk_size: int = 256,
         hash_algorithm: str = "blake3",
+        separate_object_groups: bool = False,
+        full_sw_kv: bool = False,
     ) -> None:
         self._chunk_size = chunk_size
+        self._separate_object_groups = separate_object_groups
+        self._full_sw_kv = full_sw_kv
+
+        # Initialize the process-global GDS context.
+        # No-op when GDS L1 is disabled (config is None).
+        initialize_gds_context(storage_manager_config.l1_manager_config.gds_l1_config)
+
         self.shm_pool_info: ShmPoolInfo = self._compute_shm_pool_info(
             storage_manager_config
         )
@@ -152,10 +226,30 @@ class MPCacheEngineContext:
         self._event_bus = get_event_bus()
         self._layout_desc_registry = LayoutDescRegistry()
 
+    def close(self) -> None:
+        """
+        Tear down the session manager, storage manager, and the process-global
+        GDS context.
+        """
+        self._session_manager.close()
+        self._storage_manager.close()
+        # Tear down the GDS cuFile context (the shared slab + its handle).
+        get_gds_context().close()
+
     @property
     def chunk_size(self) -> int:
         """Chunk size for KV cache operations."""
         return self._chunk_size
+
+    @property
+    def separate_object_groups(self) -> bool:
+        """Whether to split kernel groups into per-sliding-window object groups."""
+        return self._separate_object_groups
+
+    @property
+    def full_sw_kv(self) -> bool:
+        """Whether sliding-window groups cache full per-chunk KV (no window cutting)."""
+        return self._full_sw_kv
 
     @property
     def storage_manager(self) -> StorageManager:
@@ -182,17 +276,21 @@ class MPCacheEngineContext:
         """Registry mapping (model_name, world_size) to MemoryLayoutDesc."""
         return self._layout_desc_registry
 
-    def resolve_obj_keys(self, key: IPCCacheEngineKey) -> list[ObjectKey]:
-        """Resolve object keys from an IPC cache key.
+    def resolve_obj_keys(
+        self, key: IPCCacheServerKey, object_group_ids: list[int]
+    ) -> list[list[ObjectKey]]:
+        """Resolve per-object-group object keys from an IPC cache key.
 
         Uses the session manager to track token state and the token hasher
         to compute chunk hashes for the requested range.
 
         Args:
             key: IPC cache key describing model/session/token range.
+            object_group_ids: Object group ids to produce keys for.
 
         Returns:
-            Resolved object keys for the requested token range.
+            The i-th element is the list of ObjectKeys for
+            ``object_group_ids[i]``.
 
         Raises:
             ValueError: If ``key.worker_id`` is ``None``.
@@ -204,7 +302,7 @@ class MPCacheEngineContext:
         ]
         if key.worker_id is None:
             raise ValueError("Must resolve keys with worker_id != None")
-        return ipc_key_to_object_keys(key, chunk_hashes)
+        return ipc_key_to_object_keys(key, chunk_hashes, object_group_ids)
 
     @staticmethod
     def _compute_shm_pool_info(
@@ -218,7 +316,7 @@ class MPCacheEngineContext:
         """
         mem_cfg = storage_manager_config.l1_manager_config.memory_config
         shm_name = mem_cfg.shm_name or ""
-        if not shm_name or mem_cfg.use_lazy:
+        if not shm_name or mem_cfg.use_lazy or mem_cfg.devdax_path:
             return {"shm_name": "", "pool_size": 0}
         bare = shm_name.lstrip("/")
         if not bare.startswith("lmcache_l1_pool_"):

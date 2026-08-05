@@ -49,6 +49,32 @@ def test_migrate_to_shm_and_wrap_zero_copy_view():
         shm_unlink(wrapper.shm_name)
 
 
+def test_migrate_normalizes_layout_in_place_on_caller_tensor():
+    """Layout normalization must not detach migration from the caller's tensor.
+
+    ``attempt_permute_to_contiguous_view`` returns a *new view* object; the
+    migration must still re-point the caller's tensor (its storage, and its
+    shape/stride to the stride-truthful layout) and key the unlink finalizer
+    on it. Regression for the premature-unlink bug where the finalizer was
+    attached to the temporary view and the segment vanished on return.
+    """
+    # Torch-contiguous, but the size-1 dims hide the true inner extent:
+    # the stride-truthful layout is (8, 32, 1, 1).
+    src = torch.zeros(8 * 32, dtype=torch.float32).as_strided(
+        (8, 1, 1, 32), (32, 1, 1, 1)
+    )
+    wrapper = migrate_to_shm_and_wrap(src)
+    try:
+        assert tuple(src.shape) == (8, 32, 1, 1)
+        assert wrapper.shape == (8, 32, 1, 1)
+        # Writes via the caller's tensor land in the SHM segment.
+        src.add_(3.0)
+        view = wrapper.to_tensor()
+        assert torch.equal(view, src)
+    finally:
+        shm_unlink(wrapper.shm_name)
+
+
 def test_migrate_handles_empty_tensor():
     """Empty tensors must not call ``mmap`` (length 0 is EINVAL).
 
@@ -127,7 +153,7 @@ def test_shm_create_cleans_up_on_existing_name():
 
 
 def test_to_tensor_view_carries_munmap_finalizer():
-    """``to_tensor`` returns a tensor that releases its mmap on GC."""
+    """``to_tensor`` returns a tensor whose storage releases its mmap on GC."""
     # Standard
     import gc
     import weakref
@@ -136,12 +162,51 @@ def test_to_tensor_view_carries_munmap_finalizer():
     w = migrate_to_shm_and_wrap(src)
     try:
         view = w.to_tensor()
-        # The view must keep ``flat`` alive so its mmap stays valid.
-        assert hasattr(view, "_lmcache_shm_buf")
         ref = weakref.ref(view)
         del view
         gc.collect()
         assert ref() is None
+    finally:
+        del src
+        gc.collect()
+        shm_unlink(w.shm_name)
+
+
+def test_to_tensor_view_survives_reshape_after_original_is_gced():
+    """A reshape view must keep working after the original tensor is GC-ed.
+
+    Regression for the CI ``cpu_e2e_validation (server-side copy)`` segfault
+    where ``normalize_kv_and_discover_format`` reshapes the unwrapped 4D
+    tensor into the canonical 5D ``[NB, NH, BS, 2, HS]`` and the original
+    4D tensor goes out of scope. The reshape view shares the same storage
+    but used to be left without a lifetime hook, so the next read after GC
+    landed on an already-``munmap``-ed page and crashed the LMCache server.
+    """
+    # Standard
+    import gc
+
+    NB, NH, BS, HS = 8, 4, 16, 8
+    src = torch.zeros((NB, NH, BS, 2 * HS), dtype=torch.bfloat16)
+    w = migrate_to_shm_and_wrap(src)
+    try:
+        unwrapped = [w.to_tensor()]
+        normalized = [
+            layer.reshape(*layer.shape[:3], 2, layer.shape[3] // 2)
+            for layer in unwrapped
+        ]
+        # Drop every reference to the 4D unwrapped tensor; only the 5D
+        # reshape view keeps the storage alive now.
+        del unwrapped
+        gc.collect()
+
+        # These ops would segfault before the fix because the SHM mapping
+        # had been munmap-ed when the 4D tensor's finalizer ran.
+        idx = torch.tensor([0, 3, 5], dtype=torch.long)
+        gathered = normalized[0].index_select(0, idx)
+        assert tuple(gathered.shape) == (3, NH, BS, 2, HS)
+        # The SHM segment is freshly mmap'd zeros; just make sure the
+        # bytes are addressable end-to-end so the kernel does not fault.
+        assert gathered.float().abs().sum().item() == 0.0
     finally:
         del src
         gc.collect()
@@ -171,10 +236,10 @@ def test_wrap_kv_caches_unlinks_partial_batch_on_failure(monkeypatch):
     the failed batch.
     """
     # First Party
-    from lmcache.integration.vllm import vllm_multi_process_adapter as adapter
+    from lmcache.v1.platform import kv_wrap
     from lmcache.v1.platform.cpu.shm import shm_map_readwrite
 
-    real_wrap = adapter.wrap_one_kv_cache
+    real_wrap = kv_wrap.wrap_one_kv_cache
     state = {"n": 0, "first_name": None}
 
     def flaky_wrap(tensor):
@@ -185,12 +250,12 @@ def test_wrap_kv_caches_unlinks_partial_batch_on_failure(monkeypatch):
         state["first_name"] = w.shm_name
         return w
 
-    monkeypatch.setattr(adapter, "wrap_one_kv_cache", flaky_wrap)
+    monkeypatch.setattr(kv_wrap, "wrap_one_kv_cache", flaky_wrap)
 
     t1 = torch.zeros((2, 2), dtype=torch.float32)
     t2 = torch.zeros((2, 2), dtype=torch.float32)
     with pytest.raises(RuntimeError, match="simulated migration failure"):
-        adapter.wrap_kv_caches({"a": t1, "b": t2})
+        kv_wrap.wrap_kv_caches({"a": t1, "b": t2})
 
     # The first iteration's SHM segment must no longer be openable.
     nbytes = t1.numel() * t1.element_size()

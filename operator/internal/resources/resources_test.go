@@ -441,6 +441,99 @@ func TestBuildContainerArgs_L2Raw(t *testing.T) {
 	}
 }
 
+func TestBuildContainerArgs_L2SerdeAESGCMRESP(t *testing.T) {
+	spec := &lmcachev1alpha1.LMCacheEngineSpec{
+		L1: lmcachev1alpha1.L1BackendSpec{SizeGB: 10},
+		L2Backend: &lmcachev1alpha1.L2BackendSpec{
+			RESP: &lmcachev1alpha1.RESPL2AdapterSpec{Host: "redis", Port: 6379},
+			Serde: &lmcachev1alpha1.L2SerdeSpec{
+				AESGCM: &lmcachev1alpha1.AESGCMSerdeSpec{
+					MasterKeySecretRef: corev1.LocalObjectReference{Name: "l2-master-key"},
+				},
+			},
+		},
+	}
+	args := BuildContainerArgs(spec)
+
+	l2JSON := findArgValue(t, args, "--l2-adapter")
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(l2JSON), &parsed); err != nil {
+		t.Fatalf("failed to parse L2 JSON: %v", err)
+	}
+	serde, ok := parsed["serde"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected serde sub-dict, got %v", parsed["serde"])
+	}
+	if serde["type"] != "aesgcm" {
+		t.Fatalf("expected serde type=aesgcm, got %v", serde["type"])
+	}
+	if serde["key_provider"] != "hkdf" {
+		t.Fatalf("expected key_provider=hkdf, got %v", serde["key_provider"])
+	}
+	if serde["master_key_path"] != l2EncryptionKeyPath {
+		t.Fatalf("expected master_key_path=%s, got %v", l2EncryptionKeyPath, serde["master_key_path"])
+	}
+	if serde["aes_bits"] != float64(128) {
+		t.Fatalf("expected aes_bits=128, got %v", serde["aes_bits"])
+	}
+}
+
+func TestBuildContainerArgs_L2SerdeAESGCMRawWithOverrides(t *testing.T) {
+	spec := &lmcachev1alpha1.LMCacheEngineSpec{
+		L1: lmcachev1alpha1.L1BackendSpec{SizeGB: 10},
+		L2Backend: &lmcachev1alpha1.L2BackendSpec{
+			Raw: &lmcachev1alpha1.RawL2AdapterSpec{
+				Type: "fs",
+				Config: map[string]apiextensionsv1.JSON{
+					"base_path": {Raw: []byte(`"/data/l2"`)},
+				},
+			},
+			Serde: &lmcachev1alpha1.L2SerdeSpec{
+				AESGCM: &lmcachev1alpha1.AESGCMSerdeSpec{
+					MasterKeySecretRef: corev1.LocalObjectReference{Name: "l2-master-key"},
+					AESBits:            ptr(int32(256)),
+				},
+			},
+		},
+	}
+	args := BuildContainerArgs(spec)
+
+	l2JSON := findArgValue(t, args, "--l2-adapter")
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(l2JSON), &parsed); err != nil {
+		t.Fatalf("failed to parse L2 JSON: %v", err)
+	}
+	if parsed["base_path"] != "/data/l2" {
+		t.Fatalf("expected base_path=/data/l2, got %v", parsed["base_path"])
+	}
+	serde, ok := parsed["serde"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected serde sub-dict, got %v", parsed["serde"])
+	}
+	if serde["aes_bits"] != float64(256) {
+		t.Fatalf("expected aes_bits=256, got %v", serde["aes_bits"])
+	}
+}
+
+func TestBuildContainerArgs_L2NoSerdeConfigured(t *testing.T) {
+	spec := &lmcachev1alpha1.LMCacheEngineSpec{
+		L1: lmcachev1alpha1.L1BackendSpec{SizeGB: 10},
+		L2Backend: &lmcachev1alpha1.L2BackendSpec{
+			RESP: &lmcachev1alpha1.RESPL2AdapterSpec{Host: "redis", Port: 6379},
+		},
+	}
+	args := BuildContainerArgs(spec)
+
+	l2JSON := findArgValue(t, args, "--l2-adapter")
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(l2JSON), &parsed); err != nil {
+		t.Fatalf("failed to parse L2 JSON: %v", err)
+	}
+	if _, ok := parsed["serde"]; ok {
+		t.Fatal("expected no serde sub-dict when none is configured")
+	}
+}
+
 func TestBuildContainerArgs_L2CustomPolicies(t *testing.T) {
 	spec := &lmcachev1alpha1.LMCacheEngineSpec{
 		L1: lmcachev1alpha1.L1BackendSpec{SizeGB: 10},
@@ -633,7 +726,7 @@ func TestBuildDaemonSet_PrometheusDisabled(t *testing.T) {
 	if len(c.Ports) != 2 {
 		t.Fatalf("expected 2 container ports, got %d", len(c.Ports))
 	}
-	if c.Ports[0].Name != "server" { //nolint:goconst // test assertion
+	if c.Ports[0].Name != serverPortName {
 		t.Fatalf("expected port name 'server', got %s", c.Ports[0].Name)
 	}
 }
@@ -723,7 +816,7 @@ func TestBuildDaemonSet_RESPNoAuth(t *testing.T) {
 	c := ds.Spec.Template.Spec.Containers[0]
 
 	// Should use direct command, not shell wrapper
-	if c.Command[0] != "/opt/venv/bin/lmcache" || c.Command[1] != "server" {
+	if c.Command[0] != lmcacheServerBinary || c.Command[1] != serverSubcommand {
 		t.Fatalf("expected lmcache server command, got %v", c.Command)
 	}
 
@@ -756,7 +849,7 @@ func TestBuildDaemonSet_RESPWithAuth(t *testing.T) {
 	c := ds.Spec.Template.Spec.Containers[0]
 
 	// Should use direct python command (no shell wrapper needed)
-	if c.Command[0] != "/opt/venv/bin/lmcache" || c.Command[1] != "server" {
+	if c.Command[0] != lmcacheServerBinary || c.Command[1] != serverSubcommand {
 		t.Fatalf("expected lmcache server command, got %v", c.Command)
 	}
 
@@ -795,6 +888,70 @@ func TestBuildDaemonSet_RESPWithAuth(t *testing.T) {
 	}
 }
 
+func TestBuildDaemonSet_L2AESGCMSerdeMountsMasterKey(t *testing.T) {
+	engine := minimalEngine()
+	engine.Spec.L2Backend = &lmcachev1alpha1.L2BackendSpec{
+		RESP: &lmcachev1alpha1.RESPL2AdapterSpec{Host: "redis", Port: 6379},
+		Serde: &lmcachev1alpha1.L2SerdeSpec{
+			AESGCM: &lmcachev1alpha1.AESGCMSerdeSpec{
+				MasterKeySecretRef: corev1.LocalObjectReference{Name: "l2-master-key"},
+			},
+		},
+	}
+
+	ds := BuildDaemonSet(engine)
+	pod := ds.Spec.Template.Spec
+
+	var vol *corev1.Volume
+	for i := range pod.Volumes {
+		if pod.Volumes[i].Name == l2EncryptionKeyVolumeName {
+			vol = &pod.Volumes[i]
+		}
+	}
+	if vol == nil {
+		t.Fatal("expected l2-master-key volume")
+	}
+	if vol.Secret == nil || vol.Secret.SecretName != "l2-master-key" {
+		t.Fatalf("expected secret volume referencing l2-master-key, got %+v", vol.VolumeSource)
+	}
+	// Only the master data key is projected, regardless of what else the
+	// user's Secret contains.
+	if len(vol.Secret.Items) != 1 || vol.Secret.Items[0].Key != "master" || vol.Secret.Items[0].Path != "master" {
+		t.Fatalf("expected items to project only the master key, got %+v", vol.Secret.Items)
+	}
+	if vol.Secret.DefaultMode == nil || *vol.Secret.DefaultMode != 0o400 {
+		t.Fatalf("expected defaultMode 0400, got %v", vol.Secret.DefaultMode)
+	}
+
+	var mount *corev1.VolumeMount
+	c := pod.Containers[0]
+	for i := range c.VolumeMounts {
+		if c.VolumeMounts[i].Name == l2EncryptionKeyVolumeName {
+			mount = &c.VolumeMounts[i]
+		}
+	}
+	if mount == nil {
+		t.Fatal("expected l2-master-key volume mount")
+	}
+	if mount.MountPath != l2EncryptionKeyMountDir || !mount.ReadOnly {
+		t.Fatalf("expected read-only mount at %s, got %+v", l2EncryptionKeyMountDir, mount)
+	}
+}
+
+func TestBuildDaemonSet_NoSerdeNoMasterKeyMount(t *testing.T) {
+	engine := minimalEngine()
+	engine.Spec.L2Backend = &lmcachev1alpha1.L2BackendSpec{
+		RESP: &lmcachev1alpha1.RESPL2AdapterSpec{Host: "redis", Port: 6379},
+	}
+
+	ds := BuildDaemonSet(engine)
+	for _, v := range ds.Spec.Template.Spec.Volumes {
+		if v.Name == l2EncryptionKeyVolumeName {
+			t.Fatal("unexpected l2-master-key volume without an aesgcm serde")
+		}
+	}
+}
+
 // ===========================
 // BuildLookupService
 // ===========================
@@ -823,7 +980,7 @@ func TestBuildLookupService_Default(t *testing.T) {
 	if svc.Spec.Ports[0].Port != 5555 {
 		t.Fatalf("expected server port 5555, got %d", svc.Spec.Ports[0].Port)
 	}
-	if svc.Spec.Ports[0].Name != "server" {
+	if svc.Spec.Ports[0].Name != serverPortName {
 		t.Fatalf("expected port name server, got %s", svc.Spec.Ports[0].Name)
 	}
 	if svc.Spec.Ports[1].Port != 8080 {
@@ -1103,15 +1260,15 @@ func TestBuildDaemonSet_GPUVendorNvidiaDefault(t *testing.T) {
 	ds := BuildDaemonSet(engine)
 	podSpec := ds.Spec.Template.Spec
 
-	if podSpec.RuntimeClassName == nil || *podSpec.RuntimeClassName != "nvidia" {
+	if podSpec.RuntimeClassName == nil || *podSpec.RuntimeClassName != nvidiaRuntimeClass {
 		t.Fatalf("expected RuntimeClassName=nvidia, got %v", podSpec.RuntimeClassName)
 	}
 
 	c := podSpec.Containers[0]
-	if !hasEnv(c.Env, "NVIDIA_VISIBLE_DEVICES", "all") {
+	if !hasEnvAll(c.Env, "NVIDIA_VISIBLE_DEVICES") {
 		t.Fatal("missing NVIDIA_VISIBLE_DEVICES=all on default (nvidia) vendor")
 	}
-	if !hasEnv(c.Env, "NVIDIA_DRIVER_CAPABILITIES", "all") {
+	if !hasEnvAll(c.Env, "NVIDIA_DRIVER_CAPABILITIES") {
 		t.Fatal("missing NVIDIA_DRIVER_CAPABILITIES=all on default (nvidia) vendor")
 	}
 }
@@ -1136,9 +1293,50 @@ func TestBuildDaemonSet_GPUVendorAMD(t *testing.T) {
 	}
 }
 
-func hasEnv(envs []corev1.EnvVar, name, value string) bool {
+func TestBuildDaemonSet_HostNetworkEnabled(t *testing.T) {
+	engine := minimalEngine()
+	engine.Spec.HostNetwork = ptr(true)
+	engine.SetDefaults()
+
+	ds := BuildDaemonSet(engine)
+	podSpec := ds.Spec.Template.Spec
+
+	if !podSpec.HostNetwork {
+		t.Fatal("expected HostNetwork=true")
+	}
+	if podSpec.DNSPolicy != corev1.DNSClusterFirstWithHostNet {
+		t.Fatalf("expected DNSPolicy=ClusterFirstWithHostNet, got %s", podSpec.DNSPolicy)
+	}
+}
+
+func TestBuildDaemonSet_PrivilegedDefaultFalse(t *testing.T) {
+	// minimalEngine leaves spec.Privileged nil; the operator must not run the
+	// container privileged unless explicitly opted in.
+	ds := BuildDaemonSet(minimalEngine())
+	c := ds.Spec.Template.Spec.Containers[0]
+
+	if c.SecurityContext == nil || c.SecurityContext.Privileged == nil || *c.SecurityContext.Privileged {
+		t.Fatal("expected privileged=false by default")
+	}
+}
+
+func TestBuildDaemonSet_PrivilegedEnabled(t *testing.T) {
+	engine := minimalEngine()
+	engine.Spec.Privileged = ptr(true)
+
+	ds := BuildDaemonSet(engine)
+	c := ds.Spec.Template.Spec.Containers[0]
+
+	if c.SecurityContext == nil || c.SecurityContext.Privileged == nil || !*c.SecurityContext.Privileged {
+		t.Fatal("expected privileged=true when spec.privileged=true")
+	}
+}
+
+// hasEnvAll reports whether envs contains an env var named name set to the
+// literal "all" (the value the GPU passthrough vars are always set to).
+func hasEnvAll(envs []corev1.EnvVar, name string) bool {
 	for _, e := range envs {
-		if e.Name == name && e.Value == value {
+		if e.Name == name && e.Value == "all" {
 			return true
 		}
 	}

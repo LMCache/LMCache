@@ -13,21 +13,24 @@ in L2 adapter configs:
 """
 
 # Standard
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.serde.base import SerdeConfig, SerdeProcessor
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.distributed.serde.base import SerdeConfig, SerdeProcessor
 
 logger = init_logger(__name__)
 
 # name -> factory(kwargs) -> SerdeProcessor.
 # Factories receive the type-specific kwargs (everything except "type").
-_SERDE_FACTORY_REGISTRY: dict[str, Callable[[dict[str, object]], SerdeProcessor]] = {}
+_SERDE_FACTORY_REGISTRY: dict[str, Callable[[dict[str, object]], "SerdeProcessor"]] = {}
 
 
 def register_serde_factory(
-    name: str, factory: Callable[[dict[str, object]], SerdeProcessor]
+    name: str, factory: Callable[[dict[str, object]], "SerdeProcessor"]
 ) -> None:
     """Register a serde factory under a type name.
 
@@ -49,7 +52,7 @@ def get_registered_serde_types() -> list[str]:
     return list(_SERDE_FACTORY_REGISTRY)
 
 
-def create_serde_processor(config: SerdeConfig) -> SerdeProcessor:
+def create_serde_processor(config: "SerdeConfig") -> "SerdeProcessor":
     """Build a SerdeProcessor from a SerdeConfig.
 
     Args:

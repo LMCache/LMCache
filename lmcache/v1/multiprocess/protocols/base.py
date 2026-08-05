@@ -41,15 +41,19 @@ class RequestType(enum.Enum):
     # Engine operations
     REGISTER_KV_CACHE = enum.auto()
     UNREGISTER_KV_CACHE = enum.auto()
+    REGISTER_Q_CACHE = enum.auto()
+    UNREGISTER_Q_CACHE = enum.auto()
+    STORE_Q = enum.auto()
     STORE = enum.auto()
     RETRIEVE = enum.auto()
     LOOKUP = enum.auto()
     QUERY_PREFETCH_STATUS = enum.auto()
+    WAIT_PREFETCH_STATUS = enum.auto()
     QUERY_PREFETCH_LOOKUP_HITS = enum.auto()
     FREE_LOOKUP_LOCKS = enum.auto()
     END_SESSION = enum.auto()
-    REGISTER_KV_CACHE_NON_GPU_CONTEXT = enum.auto()
-    UNREGISTER_KV_CACHE_NON_GPU_CONTEXT = enum.auto()
+    REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT = enum.auto()
+    UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT = enum.auto()
     PREPARE_STORE = enum.auto()
     COMMIT_STORE = enum.auto()
     PREPARE_RETRIEVE = enum.auto()
@@ -83,6 +87,14 @@ class RequestType(enum.Enum):
     CB_UNREGISTER_ROPE_V3 = enum.auto()
     CB_RETRIEVE_PRE_COMPUTED_V3 = enum.auto()
     CB_UNIFIED_LOOKUP = enum.auto()
+
+    # P2P operations
+    P2P_LOOKUP_AND_LOCK = enum.auto()
+    P2P_QUERY_LOOKUP_RESULTS = enum.auto()
+    P2P_UNLOCK_OBJECTS = enum.auto()
+
+    # Experimental transfer intermediate tensor
+    GET_EXPERIMENTAL = enum.auto()
 
 
 @dataclass

@@ -15,16 +15,22 @@
     <a href="https://github.com/LMCache/LMCache/issues/2923">Roadmap</a>
   </h3>
 
+  [![GitHub Repo stars](https://img.shields.io/github/stars/LMCache/LMCache?style=flat&logo=github)](https://github.com/LMCache/LMCache/stargazers)
   [![PyPI](https://img.shields.io/pypi/v/lmcache)](https://pypi.org/project/lmcache/)
   [![PyPI - Downloads](https://img.shields.io/pypi/dm/lmcache)](https://pypi.org/project/lmcache/)
   [![GitHub commit activity](https://img.shields.io/github/commit-activity/w/LMCache/LMCache)](https://github.com/LMCache/LMCache/graphs/commit-activity)
+  [![GitHub contributors](https://img.shields.io/github/contributors/LMCache/LMCache)](https://github.com/LMCache/LMCache/graphs/contributors)
+  [![Good first issues](https://img.shields.io/github/issues/LMCache/LMCache/good%20first%20issue?label=good%20first%20issues&color=7057ff)](https://github.com/LMCache/LMCache/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)
+  [![Slack](https://img.shields.io/badge/Slack-Join%20us-4A154B?logo=slack)](https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-3zxjao8h0-lRfBfnLqbALOtLsWn2ITxA)
   [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/LMCache/LMCache/)
+
+  ⭐ **If LMCache helps you serve LLMs faster and cheaper, [give us a star](https://github.com/LMCache/LMCache) — it helps more teams discover the project.**
 
 </div>
 
 ## Updates
 - [2026/05] 🔥 Agentic workload benchmark on AMD MI300X ([blog](https://blog.lmcache.ai/en/2026/05/12/benchmarking-lmcache-for-multi-turn-agentic-workloads-on-amd-mi300x/)).
-- [2026/04] 🔥 LMCache's new multiprocess(MP) architecture release ([blog](https://blog.lmcache.ai/en/2026/04/03/lmcaches-new-architecture-boosts-moe-inference-performance-by-10x/)).
+- [2026/04] 🔥 LMCache's new multiprocess (MP) architecture release ([blog](https://blog.lmcache.ai/en/2026/04/03/lmcaches-new-architecture-boosts-moe-inference-performance-by-10x/)).
 - [2026/03] LMCache at GTC 2026 ([post](https://www.linkedin.com/posts/lmcache-lab_llm-opensource-nvidiagtc-activity-7442721875664826369-pMAu?utm_source=share&utm_medium=member_desktop&rcm=ACoAADkIIvQBTyG53kXXX70OZdE5rhpllYQqmIA)).
 - [2026/01] LMCache multi-node P2P CPU memory sharing, from experimental feature to production ([blog](https://blog.lmcache.ai/en/2026/01/21/p2p-1/)).
 
