@@ -184,6 +184,7 @@ def test_empty_kv_caches_raises() -> None:
     with pytest.raises(ValueError, match="non-empty"):
         create_cache_context([])
 
+
 @pytest.mark.musa
 @pytest.mark.cuda
 @pytest.mark.xpu
