@@ -3,9 +3,10 @@
 The mp coordinator is a standalone **FastAPI / REST** process that coordinates
 LMCache multi-process (mp) cache servers running across nodes as a fleet. This
 document describes the backbone: the REST API, the instance registry, the
-health-check and eviction loops, and the four domain capabilities that hang off
+health-check and eviction loops, and the five domain capabilities that hang off
 it (fleet membership, quota + fleet-wide L2 eviction, cache control including
-warm prefetch / pin / delete, and the global CacheBlend fingerprint directory).
+warm prefetch / pin / delete, the global CacheBlend fingerprint directory, and
+the fleet-wide [key directory](./key_directory.md) built from cache events).
 
 Code: `lmcache/v1/mp_coordinator/`.
 
@@ -43,6 +44,10 @@ fingerprints in the same shape.
 | `POST /blend/fingerprints` | mp → coordinator | publish stored blend chunk fingerprints |
 | `DELETE /blend/fingerprints` | mp → coordinator | evict blend fingerprints by storage key |
 | `POST /blend/match` | mp → coordinator | rolling-hash match a request against the directory |
+| `POST /directory/events` | mp → coordinator | apply a batch of cache-event batches to the key directory |
+| `POST /directory/lookup` | consumer → coordinator | resolve keys to their known fleet-wide placements |
+| `POST /directory/lookup_tokens` | consumer → coordinator | resolve a token sequence to keys and return their placements |
+| `GET /directory/stats` | operator/tools | point-in-time key/placement counts + per-instance stream state |
 
 For server-initiated work (fleet-wide eviction, warm prefetch) a coordinator
 router resolves an instance's address from the registry (`ip` + `http_port`)
@@ -58,11 +63,13 @@ lmcache/v1/mp_coordinator/
   app.py                # create_app + lifespan + router discovery + health/eviction loops
   __main__.py           # uvicorn entrypoint (`python -m lmcache.v1.mp_coordinator`)
   config.py             # MPCoordinatorConfig (LMCACHE_MP_COORDINATOR_*)
+  api.py                # cross-module contract vocabulary (CacheEvent* types)
   registry.py           # InstanceRegistry + MPInstance (pure membership)
   schemas.py            # Pydantic request/response models (shared wire contract)
   registrar.py          # mp-server-side register/heartbeat/deregister helpers
   blend_directory.py    # GlobalBlendMatcher (chunked rolling-hash directory)
   blend_client.py       # mp-server-side blend publish/evict/match client
+  key_directory.py      # KeyDirectory (fleet-wide placement directory from cache events)
   cache_control/
     __init__.py
     event_broadcaster.py     # fans directory-applied events to registered consumers
@@ -72,12 +79,15 @@ lmcache/v1/mp_coordinator/
     resync_manager.py   # startup backfill of directory + views from GET /cache/objects
   http_apis/
     __init__.py
-    dependencies.py     # shared FastAPI dependencies (registry, blend directory, ...)
+    dependencies.py     # shared FastAPI dependencies + typed CoordinatorContext
     instances_api.py    # /instances REST resource
     health_api.py       # /healthz
     quota_api.py        # /quota/config, /quota/{cache_salt}, /quota
     cache_api.py        # /cache/prefetches, /cache/pins, /cache/delete
     blend_directory_api.py  # /blend/fingerprints, /blend/match
+    directory_api.py    # /directory/events, /directory/lookup, /directory/lookup_tokens, /directory/stats
+  utils/
+    __init__.py
 ```
 
 ## Request flow
@@ -190,6 +200,24 @@ evicts entries when the backing L2 objects are dropped so matches do not go
 stale. The mp-server-side client lives in `blend_client.py`; the wire types
 (`StoreRangeModel`, `BlendMatchRequest`, `GlobalMatchModel`, …) live in
 `schemas.py`.
+
+## Key directory (`key_directory.py`)
+
+`KeyDirectory` is the fleet-wide directory mapping each `ObjectKey` to its
+known placements (which instance holds it, on which tier / backend, at what
+size). It is built purely from `CacheEvent` batches emitted by MP servers to
+`POST /directory/events`, is **eventually consistent, soft state, and never
+on the serving hot path**: every answer is a hint that consumers (P2P
+discovery, cache control, prefetch planning) must validate at the owning
+MP server before touching bytes. Consumers query placements by key
+(`POST /directory/lookup`) or by token sequence (`POST /directory/lookup_tokens`,
+which hashes the token buffer with the fleet's token hasher before looking
+up); `GET /directory/stats` returns key/placement counts plus per-instance
+stream state (incarnation, last applied seq, gap flag). The event vocabulary
+(`CacheEventType`, `CacheEventEntry`, `CacheEventBatch`) lives in `api.py`;
+the HTTP envelopes live in `schemas.py`. See
+[key_directory.md](./key_directory.md) for event application semantics
+(incarnation fencing, seq dedup, gap detection) and structures.
 
 ## Concurrency & lifecycle
 
