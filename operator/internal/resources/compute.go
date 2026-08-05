@@ -120,11 +120,14 @@ func BuildContainerArgs(spec *lmcachev1alpha1.LMCacheEngineSpec) []string {
 			args = append(args,
 				"--coordinator-heartbeat-interval", formatFloat(derefFloat64(c.HeartbeatInterval, 5.0)),
 			)
+			// Renamed from --coordinator-l2-event-* in lmcache v0.5.3; servers
+			// < v0.5.3 reject these spellings at argparse, so this operator
+			// requires lmcache >= v0.5.3 when a coordinator is configured.
 			if derefBool(c.L2EventReporting, false) {
-				args = append(args, "--coordinator-l2-event-reporting")
+				args = append(args, "--coordinator-event-reporting")
 			}
 			args = append(args,
-				"--coordinator-l2-event-flush-interval", formatFloat(derefFloat64(c.L2EventFlushInterval, 1.0)),
+				"--coordinator-event-flush-interval", formatFloat(derefFloat64(c.L2EventFlushInterval, 1.0)),
 			)
 		}
 	}

@@ -91,8 +91,8 @@ def test_cpu_inherits_baseline_verbatim() -> None:
         assert getattr(CpuDeviceOps, name) is getattr(DeviceOps, name), name
 
 
-def test_musa_overrides_only_one_op() -> None:
-    """MusaDeviceOps overrides exactly one hot op; the rest inherit base."""
+def test_musa_overrides_transfer_and_stream_ordering_ops() -> None:
+    """MusaDeviceOps owns transfer and stream-ordering adaptation."""
     musa_mod = pytest.importorskip(
         "lmcache.v1.platform.musa.device_ops",
         reason="musa platform package unavailable",
@@ -102,7 +102,11 @@ def test_musa_overrides_only_one_op() -> None:
         for name in _OP_NAMES
         if getattr(musa_mod.MusaDeviceOps, name) is not getattr(DeviceOps, name)
     ]
-    assert overridden == ["multi_layer_block_kv_transfer"]
+    assert overridden == [
+        "multi_layer_block_kv_transfer",
+        "record_completion_on_stream",
+        "record_event_on_stream",
+    ]
 
 
 def test_musa_override_dispatches_native_first(

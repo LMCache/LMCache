@@ -51,10 +51,13 @@ from lmcache import torch_dev
 # orchestration safe.
 from lmcache.cli.commands.bench.server_bench.helpers import (
     _DEFAULT_SHAPE_SPEC,
+    _INSTANCE_ID_BASE,
     DTYPE_MAP,
+    WorkerContext,
     _allocate_cpu_shm_kv_cache,
     _allocate_gpu_kv_cache,
     _get_chunk_size,
+    _is_mla_kv_size,
     _process_request,
     _require_full_install,
     _send_register_kv_cache,
@@ -124,6 +127,31 @@ def add_server_arguments(parser: argparse.ArgumentParser) -> None:
             "PREPARE/COMMIT). "
             "`auto` keeps the historical mapping: "
             "gpu->lmcache_driven, cpu->engine_driven."
+        ),
+    )
+    parser.add_argument(
+        "--tp-size",
+        type=int,
+        default=1,
+        help=(
+            "Simulated tensor-parallel world size (default: 1). Each "
+            "rank registers its own KV cache under a distinct "
+            "instance_id, and STORE / RETRIEVE fan out per rank the "
+            "same way LMCacheMPWorkerAdapter routes them in a real "
+            "vLLM deployment (MLA -> only rank 0 stores; non-MLA -> "
+            "every rank stores; every rank always retrieves)."
+        ),
+    )
+    parser.add_argument(
+        "--use-mla",
+        action="store_true",
+        default=False,
+        help=(
+            "MLA mode: fold all TP ranks into a single kv_worker "
+            "so only rank 0 writes KV and every rank retrieves "
+            "the shared KV object (default: False). "
+            "Also implied when --kvcache-shape-spec declares "
+            "kv_size=1."
         ),
     )
     parser.add_argument(
@@ -498,6 +526,12 @@ def run_server_bench(
             "num_blocks": num_blocks,
             "block_size": block_size,
             "dtype": dtype_str,
+            # kv_size == 1 marks an MLA group (single-plane KV); the
+            # data-mode register path reads this to set ``use_mla`` on
+            # the server payload. For "mixed" specs the server has no
+            # single plane count, so the bench falls back to first
+            # group's ``kv_size`` in ``_send_register_kv_cache``.
+            "kv_size": kv_size_disp,
         }
         # Tell the server each group's true tokens-per-paged-chunk
         # explicitly. Otherwise the server falls back to the block size
@@ -537,72 +571,133 @@ def run_server_bench(
             )
         )
 
-        # Allocate KV tensors. GPU mode wraps real CUDA tensors
-        # via CUDA IPC; CPU mode allocates POSIX-SHM-backed
-        # tensors so the server can map the same physical pages.
-        # shm_names tracks per-layer SHM segment names allocated
-        # on demand (one per layer) so we can shm_unlink on exit.
+        # Allocate KV tensors and register the cache once per simulated
+        # TP rank. Each rank gets its own SHM prefix / CUDA tensors so
+        # the server holds one context per (instance_id) — mirroring the
+        # multi-process worker layout in vLLM. shm_names aggregates every
+        # rank's per-layer SHM segments for a best-effort cleanup on
+        # shutdown.
+        tp_size = max(1, int(getattr(args, "tp_size", 1)))
+        # Explicit --use-mla wins; otherwise infer MLA from the shape
+        # spec via ``_is_mla_kv_size`` (kv_size == 1 marks an MLA
+        # single-plane group). Routing all shape-derived MLA checks
+        # through ``_is_mla_kv_size`` keeps this file, the helpers
+        # module, and the server detector agreeing on one contract.
+        use_mla = bool(getattr(args, "use_mla", False)) or (
+            isinstance(kv_size_disp, int) and _is_mla_kv_size(kv_size_disp)
+        )
+        # Fail fast when --use-mla is set but the shape spec still
+        # declares a two-plane KV group: allocation would build rank-5
+        # classical tensors while the server expects the MLA single-
+        # plane layout, and the mismatch only surfaces mid-run.
+        if (
+            use_mla
+            and isinstance(kv_size_disp, int)
+            and not _is_mla_kv_size(kv_size_disp)
+        ):
+            raise ValueError(
+                "--use-mla requires --kvcache-shape-spec with kv_size=1 "
+                "(single-plane MLA group), got kv_size=%s" % kv_size_disp
+            )
+        # ``ParallelStrategy.kv_world_size`` folds all TP ranks into a
+        # single kv_worker under MLA; non-MLA keeps one kv_worker per
+        # rank. Bench mirrors that so ``IPCCacheServerKey.worker_id``
+        # and ``.world_size`` line up with what LMCacheMPWorkerAdapter
+        # produces in a real deployment (otherwise LOOKUP expands to
+        # kv_ranks the STORE side never wrote).
+        kv_world_size = 1 if use_mla else tp_size
         shm_names: list[str] = []
+        workers: list[WorkerContext] = []
+        registered_instance_ids: list[int] = []
+
+        # Import the wrapper class once per mode, outside the per-rank
+        # loop: importing ``CudaIPCWrapper`` on a non-CUDA host pulls in
+        # CUDA-specific symbols from torch and can crash, so it must stay
+        # behind the ``use_gpu`` gate; keeping it in the loop just paid
+        # the same cost every rank without adding any safety.
         if use_gpu:
             # First Party
             from lmcache.v1.platform.cuda.ipc_wrapper import CudaIPCWrapper
-
-            allocated = _allocate_gpu_kv_cache(groups=layer_groups)
-            log(
-                "Allocated %d GPU tensors on %s" % (len(allocated), allocated[0].device)
-            )
-            kv_wrappers: KVCache = [CudaIPCWrapper(t) for t in allocated]
-            # Keep the CUDA tensors alive for the lifetime of the
-            # bench process -- storage may be reclaimed otherwise --
-            # and reuse the same list as the client-side data-mode
-            # source/sink for the round-trip self-check.
-            client_kv_tensors = allocated
         else:
             # First Party
             from lmcache.v1.platform.cpu.shm import CpuShmTensorWrapper
 
-            shm_prefix = CpuShmTensorWrapper.SHM_NAME_PREFIX + str(os.getpid())
-            cpu_tensors, cpu_wrappers, shm_names = _allocate_cpu_shm_kv_cache(
-                groups=layer_groups, shm_prefix=shm_prefix
+        for rank in range(tp_size):
+            instance_id = _INSTANCE_ID_BASE + rank
+            # MLA: every vLLM rank folds into kv_worker_id 0.
+            # Non-MLA: kv_worker_id == vLLM rank.
+            kv_worker_id = 0 if use_mla else rank
+            if use_gpu:
+                allocated = _allocate_gpu_kv_cache(groups=layer_groups)
+                log(
+                    "[rank %d] Allocated %d GPU tensors on %s"
+                    % (rank, len(allocated), allocated[0].device)
+                )
+                kv_wrappers: KVCache = [CudaIPCWrapper(t) for t in allocated]
+                client_kv_tensors = allocated
+            else:
+                shm_prefix = CpuShmTensorWrapper.SHM_NAME_PREFIX + "%s_r%d" % (
+                    os.getpid(),
+                    rank,
+                )
+                cpu_tensors, cpu_wrappers, rank_shm_names = _allocate_cpu_shm_kv_cache(
+                    groups=layer_groups, shm_prefix=shm_prefix
+                )
+                shm_names.extend(rank_shm_names)
+                log(
+                    "[rank %d] Allocated %d CPU SHM tensors (prefix=%s)"
+                    % (rank, len(cpu_tensors), shm_prefix)
+                )
+                kv_wrappers = list(cpu_wrappers)
+                client_kv_tensors = cpu_tensors
+
+            # Register KV cache before any store/retrieve. Handle mode
+            # (GPU CUDA-IPC / CPU POSIX-SHM) shares REGISTER_KV_CACHE;
+            # data mode falls through to the engine-driven register.
+            register_result = _send_register_kv_cache(
+                client,
+                instance_id=instance_id,
+                world_size=kv_world_size,
+                layout_hints=layout_hints,
+                kv_caches=kv_wrappers if use_handle else None,
+                use_gpu=use_gpu,
+                use_handle=use_handle,
+                engine_group_infos=engine_group_infos,
             )
             log(
-                "Allocated %d CPU SHM tensors (prefix=%s)"
-                % (len(cpu_tensors), shm_prefix)
+                "[rank %d] REGISTER_KV_CACHE: %s"
+                % (rank, "OK" if register_result else "FAIL")
             )
-            kv_wrappers = list(cpu_wrappers)
-            client_kv_tensors = cpu_tensors
+            if not register_result:
+                continue
+            registered_instance_ids.append(instance_id)
 
-        # Register KV cache before any store/retrieve. In handle mode
-        # both GPU (CUDA-IPC) and CPU (POSIX-SHM) paths share the same
-        # ``REGISTER_KV_CACHE`` protocol since ``CpuShmTensorWrapper``
-        # is a ``DeviceIPCWrapper`` subclass on the wire. In data mode
-        # we fall through to the non-GPU registration protocol.
-        register_result = _send_register_kv_cache(
-            client,
-            layout_hints=layout_hints,
-            kv_caches=kv_wrappers if use_handle else None,
-            use_gpu=use_gpu,
-            use_handle=use_handle,
-            engine_group_infos=engine_group_infos,
-        )
-        log("REGISTER_KV_CACHE: %s" % ("OK" if register_result else "FAIL"))
+            # Data-mode register replies with the server's SHM pool name
+            # for this instance; each rank mmaps its own pool so PREPARE
+            # / COMMIT can hand out zero-copy slot views per worker.
+            rank_server_pool: "mmap.mmap | None" = None
+            if not use_handle and not isinstance(register_result, bool):
+                shm_name = getattr(register_result, "shm_name", "")
+                pool_size = getattr(register_result, "pool_size", 0)
+                if shm_name and pool_size > 0:
+                    rank_server_pool = shm_open_pool_as_mmap(shm_name, pool_size)
+
+            workers.append(
+                WorkerContext(
+                    kv_worker_id=kv_worker_id,
+                    kv_world_size=kv_world_size,
+                    instance_id=instance_id,
+                    client_tensors=None if use_handle else client_kv_tensors,
+                    server_pool=rank_server_pool,
+                    # MLA: only rank 0 stores; non-MLA: every rank stores.
+                    is_kv_writer=(rank == 0) if use_mla else True,
+                )
+            )
         log("")
-        # Mark the registration so the ``finally`` block knows to send the
-        # matching UNREGISTER. The data-mode register returns a response
-        # object (truthy) and the handle-mode register returns a bool;
-        # either way a truthy result means the server holds our context.
-        registered = bool(register_result)
-
-        # In data mode the server reply carries the SHM pool name
-        # and size; the bench mmaps the same pool so STORE/RETRIEVE
-        # can exchange tensor data via slot descriptors instead of
-        # round-tripping pickle through the RPC layer.
-        server_pool: "mmap.mmap | None" = None
-        if not use_handle and not isinstance(register_result, bool):
-            shm_name = getattr(register_result, "shm_name", "")
-            pool_size = getattr(register_result, "pool_size", 0)
-            if shm_name and pool_size > 0:
-                server_pool = shm_open_pool_as_mmap(shm_name, pool_size)
+        # ``registered`` retained purely as a boolean summary for a
+        # possible future log line; the ``finally`` block iterates the
+        # concrete instance-id list to send matching UNREGISTERs.
+        registered = bool(registered_instance_ids)
 
         if args.end is not None:
             seq_iter: itertools.count | range = range(args.start, args.end)
@@ -610,13 +705,6 @@ def run_server_bench(
             seq_iter = itertools.count(args.start)
 
         http_base = args.url.rstrip("/")
-
-        # In data mode the server has no paged ``kv_tensors`` view to
-        # hash, so we self-check on the client: cold pass captures
-        # ground truth, warm pass zero-fills + re-hashes after
-        # RETRIEVE. Handle mode keeps the legacy server-side
-        # ``/cache/checksums`` path.
-        client_tensors = None if use_handle else client_kv_tensors
 
         # Record only the steady-state load, not the one-time registration.
         if profiler is not None:
@@ -638,8 +726,8 @@ def run_server_bench(
                 num_engine_group_infos=num_engine_group_infos,
                 use_gpu=use_gpu,
                 use_handle=use_handle,
-                client_tensors=client_tensors,
-                server_pool=server_pool,
+                workers=workers,
+                world_size=kv_world_size,
             )
             if cold_result is not None:
                 if cold_result.lookup_ms is not None:
@@ -662,8 +750,8 @@ def run_server_bench(
                 num_engine_group_infos=num_engine_group_infos,
                 use_gpu=use_gpu,
                 use_handle=use_handle,
-                client_tensors=client_tensors,
-                server_pool=server_pool,
+                workers=workers,
+                world_size=kv_world_size,
             )
             if warm_result is not None:
                 if warm_result.lookup_ms is not None:
@@ -707,26 +795,35 @@ def run_server_bench(
         # Stop recording once load ends, before teardown
         if profiler is not None:
             profiler.stop(log)
-        # Deregister our context from the server before tearing down the
-        # client. Otherwise the server keeps the registration (and the
-        # CUDA-IPC / POSIX-SHM mappings it holds) alive forever, leaking
-        # one context entry per bench run. Must run while the client is
-        # still connected, hence before ``client.close()``.
-        if registered:
+        # Deregister every rank we managed to register before tearing
+        # down the client. Otherwise the server keeps each rank's
+        # registration (and the CUDA-IPC / POSIX-SHM mappings it holds)
+        # alive forever, leaking one context entry per rank per bench
+        # run. Must run while the client is still connected, hence
+        # before ``client.close()``.
+        for _instance_id in locals().get("registered_instance_ids", []) or []:
             try:
                 ok = _send_unregister_kv_cache(
                     client,
-                    instance_id=0,
+                    instance_id=_instance_id,
                     use_handle=use_handle,
                 )
-                log("UNREGISTER_KV_CACHE: %s" % ("OK" if ok else "FAIL"))
+                log(
+                    "[iid %d] UNREGISTER_KV_CACHE: %s"
+                    % (_instance_id, "OK" if ok else "FAIL")
+                )
             except zmq.ZMQError as exc:
-                log("  [warning] UNREGISTER_KV_CACHE failed: %s" % exc)
-        # Release the bench-side mmap of the server SHM pool first
+                log(
+                    "  [warning] UNREGISTER_KV_CACHE failed for "
+                    "iid %d: %s" % (_instance_id, exc)
+                )
+        # Release the bench-side mmap of every worker's SHM pool
         # (data mode only; ``server_pool`` stays ``None`` otherwise).
-        if "server_pool" in locals() and server_pool is not None:
+        for _w in locals().get("workers", []) or []:
+            if _w.server_pool is None:
+                continue
             try:
-                server_pool.close()
+                _w.server_pool.close()
             except (BufferError, ValueError):
                 pass
         client.close()

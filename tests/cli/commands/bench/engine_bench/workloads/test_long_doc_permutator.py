@@ -2,7 +2,7 @@
 """Tests for long-doc-permutator workload config and workload."""
 
 # Standard
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 import asyncio
 import math
 import time
@@ -12,14 +12,18 @@ import pytest
 
 # First Party
 from lmcache.cli.commands.bench.engine_bench.stats import RequestResult
+from lmcache.cli.commands.bench.engine_bench.tokenizers import build_single_token_pool
+from lmcache.cli.commands.bench.engine_bench.workloads import long_doc_permutator as ldp
 from lmcache.cli.commands.bench.engine_bench.workloads.long_doc_permutator import (
     LongDocPermutatorConfig,
     LongDocPermutatorWorkload,
     _enumerate_permutations,
     _generate_contexts,
     _generate_system_prompt,
-    _generate_vocab_pool,
 )
+
+# Local
+from ..fake_tokenizer import FakeTokenizer, make_fake_tokenizer
 
 # ---------------------------------------------------------------------------
 # LongDocPermutatorConfig — direct construction
@@ -118,72 +122,50 @@ class TestLongDocPermutatorConfigResolve:
 # ---------------------------------------------------------------------------
 
 
-class TestGenerateVocabPool:
-    def test_returns_correct_size(self) -> None:
-        pool = _generate_vocab_pool(100)
-        assert len(pool) == 100
-
-    def test_all_unique(self) -> None:
-        pool = _generate_vocab_pool(200)
-        assert len(pool) == len(set(pool))
-
-    def test_deterministic(self) -> None:
-        pool1 = _generate_vocab_pool(50, seed=42)
-        pool2 = _generate_vocab_pool(50, seed=42)
-        assert pool1 == pool2
-
-    def test_different_seeds_differ(self) -> None:
-        pool1 = _generate_vocab_pool(50, seed=1)
-        pool2 = _generate_vocab_pool(50, seed=2)
-        assert pool1 != pool2
-
-    def test_returns_sorted(self) -> None:
-        pool = _generate_vocab_pool(100)
-        assert pool == sorted(pool)
-
-
 class TestGenerateSystemPrompt:
-    def test_empty_for_zero_length(self) -> None:
-        assert _generate_system_prompt(0) == ""
+    def test_empty_for_zero_length(self, fake_tokenizer: FakeTokenizer) -> None:
+        pool = build_single_token_pool(fake_tokenizer, 100)
+        assert _generate_system_prompt(0, pool) == ""
 
-    def test_approximate_length(self) -> None:
-        prompt = _generate_system_prompt(50)
-        # Space-separated words → len(words) == length
-        assert len(prompt.split()) == 50
+    def test_exact_token_length(self, fake_tokenizer: FakeTokenizer) -> None:
+        pool = build_single_token_pool(fake_tokenizer, 100)
+        prompt = _generate_system_prompt(50, pool)
+        assert len(fake_tokenizer.encode(prompt)) == 50
 
-    def test_deterministic(self) -> None:
-        p1 = _generate_system_prompt(30, seed=42)
-        p2 = _generate_system_prompt(30, seed=42)
-        assert p1 == p2
+    def test_deterministic(self, fake_tokenizer: FakeTokenizer) -> None:
+        pool = build_single_token_pool(fake_tokenizer, 100)
+        assert _generate_system_prompt(30, pool, seed=42) == (
+            _generate_system_prompt(30, pool, seed=42)
+        )
 
-    def test_different_seeds_differ(self) -> None:
-        p1 = _generate_system_prompt(30, seed=1)
-        p2 = _generate_system_prompt(30, seed=2)
-        assert p1 != p2
+    def test_different_seeds_differ(self, fake_tokenizer: FakeTokenizer) -> None:
+        pool = build_single_token_pool(fake_tokenizer, 100)
+        assert _generate_system_prompt(30, pool, seed=1) != (
+            _generate_system_prompt(30, pool, seed=2)
+        )
 
 
 class TestGenerateContexts:
-    def test_correct_count(self) -> None:
-        pool = _generate_vocab_pool(200)
+    def test_correct_count(self, fake_tokenizer: FakeTokenizer) -> None:
+        pool = build_single_token_pool(fake_tokenizer, 200)
         contexts = _generate_contexts(4, 50, pool)
         assert len(contexts) == 4
 
-    def test_approximate_length(self) -> None:
-        pool = _generate_vocab_pool(200)
-        contexts = _generate_contexts(3, 100, pool)
-        for ctx in contexts:
-            assert len(ctx.split()) == 100
+    def test_exact_token_length(self, fake_tokenizer: FakeTokenizer) -> None:
+        pool = build_single_token_pool(fake_tokenizer, 200)
+        for ctx in _generate_contexts(3, 100, pool):
+            assert len(fake_tokenizer.encode(ctx)) == 100
 
-    def test_contexts_are_unique(self) -> None:
-        pool = _generate_vocab_pool(500)
+    def test_contexts_are_unique(self, fake_tokenizer: FakeTokenizer) -> None:
+        pool = build_single_token_pool(fake_tokenizer, 250)
         contexts = _generate_contexts(5, 200, pool)
         assert len(set(contexts)) == 5
 
-    def test_deterministic(self) -> None:
-        pool = _generate_vocab_pool(200, seed=42)
-        c1 = _generate_contexts(3, 50, pool, seed=10)
-        c2 = _generate_contexts(3, 50, pool, seed=10)
-        assert c1 == c2
+    def test_deterministic(self, fake_tokenizer: FakeTokenizer) -> None:
+        pool = build_single_token_pool(fake_tokenizer, 200)
+        assert _generate_contexts(3, 50, pool, seed=10) == (
+            _generate_contexts(3, 50, pool, seed=10)
+        )
 
 
 class TestEnumeratePermutations:
@@ -261,19 +243,24 @@ def _make_mock_sender() -> MagicMock:
 def _make_workload(
     config: LongDocPermutatorConfig | None = None,
     seed: int = 42,
+    tokenizer: FakeTokenizer | None = None,
 ) -> tuple[LongDocPermutatorWorkload, MagicMock, MagicMock, MagicMock]:
     if config is None:
         config = _make_config()
+    if tokenizer is None:
+        tokenizer = make_fake_tokenizer()
     sender = _make_mock_sender()
     collector = MagicMock()
     monitor = MagicMock()
-    workload = LongDocPermutatorWorkload(
-        config,
-        sender,
-        collector,
-        monitor,
-        seed=seed,
-    )
+    with patch.object(ldp, "try_load_tokenizer", return_value=tokenizer):
+        workload = LongDocPermutatorWorkload(
+            config,
+            sender,
+            collector,
+            monitor,
+            seed=seed,
+            model_name="fake-model",
+        )
     return workload, sender, collector, monitor
 
 
@@ -285,8 +272,28 @@ def _make_workload(
 class TestLongDocPermutatorWorkloadInit:
     def test_system_prompt_built(self) -> None:
         cfg = _make_config(system_prompt_length=20)
-        w, *_ = _make_workload(cfg)
-        assert len(w._system_prompt.split()) == 20
+        tokenizer = make_fake_tokenizer()
+        w, *_ = _make_workload(cfg, tokenizer=tokenizer)
+        assert len(tokenizer.encode(w._system_prompt)) == 20
+
+    def test_contexts_have_exact_token_length(self) -> None:
+        cfg = _make_config(num_contexts=3, context_length=25)
+        tokenizer = make_fake_tokenizer()
+        w, *_ = _make_workload(cfg, tokenizer=tokenizer)
+        for ctx in w._contexts:
+            assert len(tokenizer.encode(ctx)) == 25
+
+    def test_raises_without_tokenizer(self) -> None:
+        """A tokenizer is required: the length flags are token counts."""
+        with patch.object(ldp, "try_load_tokenizer", return_value=None):
+            with pytest.raises(ValueError, match="needs a tokenizer"):
+                LongDocPermutatorWorkload(
+                    _make_config(),
+                    _make_mock_sender(),
+                    MagicMock(),
+                    MagicMock(),
+                    model_name=None,
+                )
 
     def test_system_prompt_empty_when_zero(self) -> None:
         cfg = _make_config(system_prompt_length=0)

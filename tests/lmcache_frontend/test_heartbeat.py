@@ -138,7 +138,7 @@ def test_send_heartbeat_uses_version_from_target_nodes(patched_httpx):
 def test_status_reports_running_flag():
     svc = HeartbeatService()
     status = svc.status()
-    assert status["running"] in (False, None)
+    assert status["running"] is False
     assert "startup_time" in status
     assert "current_time" in status
 

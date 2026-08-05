@@ -233,7 +233,7 @@ def test_store_lookup_load_and_unlock(adapter: SageMakerHyperPodL2Adapter) -> No
     assert store_result.is_successful()
     assert store_result.bytes_transferred() == source.get_size()
 
-    lookup_id = adapter.submit_lookup_and_lock_task([key, _key(99)], _EMPTY_LAYOUT)
+    lookup_id = adapter.submit_lookup_and_lock_task([key, _key(99)], {0: _EMPTY_LAYOUT})
     _wait(adapter.get_lookup_and_lock_event_fd())
     lookup = adapter.query_lookup_and_lock_result(lookup_id)
     assert lookup is not None
@@ -449,7 +449,7 @@ def test_lookup_partial_exception_preserves_hits(
 
     lookup_id = adapter.submit_lookup_and_lock_task(
         [existing, failing],
-        _EMPTY_LAYOUT,
+        {0: _EMPTY_LAYOUT},
     )
     _wait(adapter.get_lookup_and_lock_event_fd())
     result = adapter.query_lookup_and_lock_result(lookup_id)
@@ -602,7 +602,7 @@ def test_close_releases_leases_once_without_ttl_retry(
     _wait(adapter.get_store_event_fd())
     assert adapter.pop_completed_store_tasks()[store_id].is_successful()
 
-    lookup_id = adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+    lookup_id = adapter.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
     _wait(adapter.get_lookup_and_lock_event_fd())
     lookup = adapter.query_lookup_and_lock_result(lookup_id)
     assert lookup is not None and lookup.test(0)
@@ -692,7 +692,7 @@ def test_load_reacquires_when_retained_lease_expired(
     assert client is not None
     client.lease_expires_in = 0.0
 
-    lookup_id = adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+    lookup_id = adapter.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
     _wait(adapter.get_lookup_and_lock_event_fd())
     lookup = adapter.query_lookup_and_lock_result(lookup_id)
     assert lookup is not None and lookup.test(0)
