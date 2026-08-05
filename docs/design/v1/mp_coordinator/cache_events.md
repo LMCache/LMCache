@@ -100,14 +100,16 @@ listener plumbing or a dedicated flush task:
   deduplicates shared-storage placements across emitters (see
   `key_directory.md` — Shared pools).
   The LMCache-driven store path additionally publishes
-  `mp.tokens.stored` (parallel `chunk_hashes` + `token_chunks`) at
+  `mp.tokens` (parallel `chunk_hashes` + `token_chunks`) at
   store submission — ordered ahead of the store's write-finished
   events, built only when the event has a subscriber, so the cost is
   zero with event reporting off (and no hashing anywhere: the directory
   indexes tokens by the chunk hash already in every key). Only
   worker 0 reports: bindings depend on token content alone, so one
-  report covers every rank's keys. Other store paths (blend
-  pre-computed docs, experimental qstore) do not emit bindings yet.
+  report covers every rank's keys. Other store paths (engine-driven
+  transfer, blend pre-computed docs, experimental qstore) do not emit
+  bindings yet — the engine-driven path can publish the same event from
+  its ``commit_store`` when it needs directory tokens.
 - **`CacheEventSubscriber`** maps those events onto the directory
   vocabulary (writes → `STORE`, evictions/deletes → `DELETE`, split per
   actual L1 medium from the event metadata; touches → `ACCESS`). The

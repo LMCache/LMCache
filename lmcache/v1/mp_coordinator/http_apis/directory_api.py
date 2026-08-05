@@ -25,11 +25,6 @@ from lmcache.v1.mp_coordinator.schemas import (
     DirectoryListResponse,
     DirectoryLookupRequest,
     DirectoryLookupResponse,
-    KeyTokenIds,
-    TokenIdsRequest,
-    TokenIdsResponse,
-    TokenPlacementLookupRequest,
-    TokenPlacementLookupResponse,
 )
 from lmcache.v1.multiprocess.cache_control.key_resolver import resolve_object_keys
 
@@ -71,67 +66,54 @@ async def report_cache_events(
 async def lookup_placements(
     body: DirectoryLookupRequest, request: Request
 ) -> DirectoryLookupResponse:
-    """Resolve keys to their known placements across the fleet.
+    """Resolve keys — or a request's token sequence — to placements.
+
+    The tokens form hashes ``token_ids`` with the fleet's token hasher
+    and expands each complete chunk into its per-rank object keys.
+    Chunk hashes are prefix-chained, so ``token_ids`` must be the
+    request's full sequence from position 0; trailing incomplete chunks
+    are ignored.
 
     Args:
-        body: The keys to resolve.
+        body: Either the keys to resolve or the token sequence and its
+            key-resolution parameters.
 
     Returns:
-        One result per requested key, in request order; placements are
-        empty for unknown keys.
-    """
-    directory = get_context(request).key_directory
-    keys = [encoded.to_object_key() for encoded in body.keys]
-    return DirectoryLookupResponse(
-        results=[
-            DirectoryKeyPlacements(key=encoded, placements=placements)
-            for encoded, placements in zip(
-                body.keys, directory.lookup(keys), strict=True
-            )
-        ]
-    )
-
-
-@router.post("/directory/lookup_tokens")
-async def lookup_placements_by_tokens(
-    body: TokenPlacementLookupRequest, request: Request
-) -> TokenPlacementLookupResponse:
-    """Resolve a token sequence to keys and return their placements.
-
-    Hashes ``token_ids`` with the fleet's token hasher, expands each
-    complete chunk into its per-rank object keys, and looks each key up
-    in the directory.
-
-    Args:
-        body: The token sequence and the key-resolution parameters.
-
-    Returns:
-        Chunk count plus one result per resolved key; empty when the
-        sequence is shorter than one chunk.
+        Chunk count plus one result per resolved key, in request order,
+        each with its known placements and the chunk's token ids
+        (both empty when the directory knows nothing about the key).
 
     Raises:
         HTTPException: 400 when the token sequence exceeds the
             per-request cap or a key field is invalid.
     """
     ctx = get_context(request)
-    try:
-        obj_keys, chunks = resolve_object_keys(
-            token_hasher=ctx.token_hasher,
-            model_name=body.model_name,
-            world_size=body.world_size,
-            token_ids=body.token_ids,
-            cache_salt=body.cache_salt,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return TokenPlacementLookupResponse(
+    if body.keys:
+        encoded_keys = list(body.keys)
+        obj_keys = [encoded.to_object_key() for encoded in encoded_keys]
+        chunks = len(obj_keys)
+    else:
+        try:
+            obj_keys, chunks = resolve_object_keys(
+                token_hasher=ctx.token_hasher,
+                model_name=body.model_name,
+                world_size=body.world_size,
+                token_ids=body.token_ids,
+                cache_salt=body.cache_salt,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        encoded_keys = [key.to_encoded_object_key() for key in obj_keys]
+    placements = ctx.key_directory.lookup(obj_keys)
+    token_ids = ctx.key_directory.get_token_ids([key.chunk_hash for key in obj_keys])
+    return DirectoryLookupResponse(
         chunks=chunks,
         results=[
             DirectoryKeyPlacements(
-                key=key.to_encoded_object_key(), placements=placements
+                key=encoded, placements=key_placements, token_ids=list(tokens)
             )
-            for key, placements in zip(
-                obj_keys, ctx.key_directory.lookup(obj_keys), strict=True
+            for encoded, key_placements, tokens in zip(
+                encoded_keys, placements, token_ids, strict=True
             )
         ],
     )
@@ -187,29 +169,6 @@ async def list_directory_keys(
 
     # ``total`` walks every matching record — keep the scan off the event loop.
     return await asyncio.to_thread(_scan)
-
-
-@router.post("/directory/token_ids")
-async def lookup_token_ids(body: TokenIdsRequest, request: Request) -> TokenIdsResponse:
-    """Return the known token ids for each requested key.
-
-    Args:
-        body: The keys whose chunks' token ids to return.
-
-    Returns:
-        One result per requested key, in request order — ``token_ids``
-        is empty for chunks the directory has no tokens for.
-    """
-    directory = get_context(request).key_directory
-    chunk_hashes = [encoded.to_object_key().chunk_hash for encoded in body.keys]
-    return TokenIdsResponse(
-        results=[
-            KeyTokenIds(key=encoded, token_ids=list(token_ids))
-            for encoded, token_ids in zip(
-                body.keys, directory.get_token_ids(chunk_hashes), strict=True
-            )
-        ]
-    )
 
 
 @router.get("/directory/stats")

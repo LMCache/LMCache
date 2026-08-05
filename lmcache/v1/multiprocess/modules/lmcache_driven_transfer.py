@@ -1066,7 +1066,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             # is enqueued so the token bindings precede the write-finished
             # events on the bus.
             if key.worker_id == 0 and self._ctx.event_bus.has_subscribers(
-                EventType.MP_TOKENS_STORED
+                EventType.MP_TOKENS
             ):
                 self._publish_token_bindings(key, obj_keys_per_obj_group[0])
 
@@ -1164,53 +1164,6 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         return (
             event_backend.export_event(event, cache_context.device),
             store_succeeded,
-        )
-
-    def _publish_token_bindings(
-        self, key: IPCCacheServerKey, obj_keys: list[ObjectKey]
-    ) -> None:
-        """Publish one ``MP_TOKENS_STORED`` event for ``key``'s chunks.
-
-        Pairs each complete chunk in ``[key.start, key.end)`` with its
-        ObjectKey chunk hash. Must be called at store submission — before
-        the write-finished events can reach the bus — so the cache-event
-        subscriber can stamp token ids onto the STORE entries. A store
-        that later fails leaves only unused cache entries (bounded).
-
-        Args:
-            key: The IPC key of the store being submitted.
-            obj_keys: One ObjectKey per complete chunk, in chunk order.
-        """
-        token_ids = list(key.token_ids)
-        chunk_size = self._ctx.chunk_size
-        effective_len = min(len(token_ids), key.end)
-        num_complete = effective_len - effective_len % chunk_size
-        token_chunks = [
-            token_ids[offset : offset + chunk_size]
-            for offset in range(key.start, num_complete, chunk_size)
-        ]
-        if not token_chunks:
-            return
-        if len(obj_keys) != len(token_chunks):
-            logger.warning(
-                "Skipping token bindings for request %s: %d resolved keys "
-                "vs %d complete chunks in [%d, %d)",
-                key.request_id,
-                len(obj_keys),
-                len(token_chunks),
-                key.start,
-                key.end,
-            )
-            return
-        self._ctx.event_bus.publish(
-            Event(
-                event_type=EventType.MP_TOKENS_STORED,
-                session_id=key.request_id,
-                metadata={
-                    "chunk_hashes": [obj_key.chunk_hash for obj_key in obj_keys],
-                    "token_chunks": token_chunks,
-                },
-            )
         )
 
     @_lmcache_nvtx_annotate
@@ -1403,4 +1356,51 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         return (
             event_backend.export_event(event, cache_context.device),
             retrieve_succeeded,
+        )
+
+    def _publish_token_bindings(
+        self, key: IPCCacheServerKey, obj_keys: list[ObjectKey]
+    ) -> None:
+        """Publish one ``MP_TOKENS`` event for ``key``'s chunks.
+
+        Pairs each complete chunk in ``[key.start, key.end)`` with its
+        ObjectKey chunk hash. Must be called at store submission — before
+        the write-finished events can reach the bus — so the cache-event
+        subscriber can stamp token ids onto the STORE entries. A store
+        that later fails leaves only unused cache entries (bounded).
+
+        Args:
+            key: The IPC key of the store being submitted.
+            obj_keys: One ObjectKey per complete chunk, in chunk order.
+        """
+        token_ids = list(key.token_ids)
+        chunk_size = self._ctx.chunk_size
+        effective_len = min(len(token_ids), key.end)
+        num_complete = effective_len - effective_len % chunk_size
+        token_chunks = [
+            token_ids[offset : offset + chunk_size]
+            for offset in range(key.start, num_complete, chunk_size)
+        ]
+        if not token_chunks:
+            return
+        if len(obj_keys) != len(token_chunks):
+            logger.warning(
+                "Skipping token bindings for request %s: %d resolved keys "
+                "vs %d complete chunks in [%d, %d)",
+                key.request_id,
+                len(obj_keys),
+                len(token_chunks),
+                key.start,
+                key.end,
+            )
+            return
+        self._ctx.event_bus.publish(
+            Event(
+                event_type=EventType.MP_TOKENS,
+                session_id=key.request_id,
+                metadata={
+                    "chunk_hashes": [obj_key.chunk_hash for obj_key in obj_keys],
+                    "token_chunks": token_chunks,
+                },
+            )
         )

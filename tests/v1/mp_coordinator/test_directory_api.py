@@ -123,7 +123,7 @@ def _lookup_tokens_body(n_tokens: int, model: str = "m") -> dict:
 
 def test_lookup_tokens_short_sequence_resolves_no_chunks():
     with _client() as client:
-        resp = client.post("/directory/lookup_tokens", json=_lookup_tokens_body(10))
+        resp = client.post("/directory/lookup", json=_lookup_tokens_body(10))
         assert resp.status_code == 200
         assert resp.json() == {"chunks": 0, "results": []}
 
@@ -131,9 +131,7 @@ def test_lookup_tokens_short_sequence_resolves_no_chunks():
 def test_lookup_tokens_roundtrip():
     with _client() as client:
         # Resolve one full chunk; nothing stored yet -> empty placements.
-        first = client.post(
-            "/directory/lookup_tokens", json=_lookup_tokens_body(256)
-        ).json()
+        first = client.post("/directory/lookup", json=_lookup_tokens_body(256)).json()
         assert first["chunks"] == 1
         assert len(first["results"]) == 1
         assert first["results"][0]["placements"] == []
@@ -142,9 +140,7 @@ def test_lookup_tokens_roundtrip():
         key = first["results"][0]["key"]
         _post_events(client, [_batch(entries=[{"key": key, "size_bytes": 64}])])
 
-        second = client.post(
-            "/directory/lookup_tokens", json=_lookup_tokens_body(256)
-        ).json()
+        second = client.post("/directory/lookup", json=_lookup_tokens_body(256)).json()
         [placement] = second["results"][0]["placements"]
         assert placement["instance_id"] == "node-a"
         assert placement["size_bytes"] == 64
@@ -153,7 +149,7 @@ def test_lookup_tokens_roundtrip():
 def test_lookup_tokens_invalid_model_name_is_400():
     with _client() as client:
         resp = client.post(
-            "/directory/lookup_tokens", json=_lookup_tokens_body(256, model="a@b")
+            "/directory/lookup", json=_lookup_tokens_body(256, model="a@b")
         )
         assert resp.status_code == 400
 
@@ -230,25 +226,41 @@ def test_list_keys_endpoint_filters_and_paginates():
         assert client.get("/directory/keys", params={"offset": -1}).status_code == 422
 
 
-def test_token_ids_endpoint_returns_tokens_per_key():
+def test_lookup_keys_form_returns_placements_and_tokens():
     with _client() as client:
         entry = {"key": _key(h="aa"), "size_bytes": 1, "token_ids": [1, 2, 3]}
         _post_events(client, [_batch(entries=[entry])])
 
         resp = client.post(
-            "/directory/token_ids",
-            json={"keys": [_key(h="aa"), _key(h="ff")]},
+            "/directory/lookup", json={"keys": [_key(h="aa"), _key(h="ff")]}
         )
         assert resp.status_code == 200
-        results = resp.json()["results"]
+        body = resp.json()
+        assert body["chunks"] == 2
+        results = body["results"]
         assert results[0]["token_ids"] == [1, 2, 3]
+        assert len(results[0]["placements"]) == 1
         assert results[1]["token_ids"] == []  # unknown chunk
+        assert results[1]["placements"] == []
 
 
-def test_token_ids_malformed_key_is_rejected():
+def test_lookup_malformed_key_is_rejected():
     with _client() as client:
-        resp = client.post("/directory/token_ids", json={"keys": [_key(h="zz")]})
+        resp = client.post("/directory/lookup", json={"keys": [_key(h="zz")]})
         assert resp.status_code == 422
+
+
+def test_lookup_requires_exactly_one_form():
+    with _client() as client:
+        both = client.post(
+            "/directory/lookup",
+            json={"keys": [_key()], "token_ids": [1, 2], "model_name": "m"},
+        )
+        assert both.status_code == 422
+        neither = client.post("/directory/lookup", json={})
+        assert neither.status_code == 422
+        no_model = client.post("/directory/lookup", json={"token_ids": [1, 2]})
+        assert no_model.status_code == 422
 
 
 # -- Request validation ------------------------------------------------------

@@ -39,7 +39,11 @@ _DEFAULT_FLUSH_INTERVAL = 1.0
 
 # Token-binding cache bound: covers the window between a chunk's
 # token-binding event and its last (async L2) store event.
-_DEFAULT_TOKEN_BINDING_CACHE_SIZE = 65536
+_TOKEN_BINDING_CACHE_SIZE = 65536
+
+# Seconds between token-binding eviction warnings (the cache evicts once
+# per store while full, so an unthrottled warning would flood).
+_EVICTION_WARNING_INTERVAL = 60.0
 
 
 class CacheEventPublishError(Exception):
@@ -143,13 +147,9 @@ class CacheEventSubscriber(EventSubscriber):
             fences out placements reported before a restart.
         flush_interval: Minimum seconds between event-driven flushes
             (must be >= 0).
-        token_binding_cache_size: LRU bound on the chunk-hash →
-            token-ids pairs remembered from token-binding events to
-            stamp ``STORE`` entries (must be >= 1).
 
     Raises:
-        ValueError: If ``flush_interval`` is negative or
-            ``token_binding_cache_size`` < 1.
+        ValueError: If ``flush_interval`` is negative.
     """
 
     def __init__(
@@ -158,21 +158,17 @@ class CacheEventSubscriber(EventSubscriber):
         instance_id: str,
         incarnation: int,
         flush_interval: float = _DEFAULT_FLUSH_INTERVAL,
-        token_binding_cache_size: int = _DEFAULT_TOKEN_BINDING_CACHE_SIZE,
     ) -> None:
         if flush_interval < 0:
             raise ValueError(f"flush_interval must be >= 0 (got {flush_interval})")
-        if token_binding_cache_size < 1:
-            raise ValueError(
-                f"token_binding_cache_size must be >= 1 "
-                f"(got {token_binding_cache_size})"
-            )
         self._sink = sink
         self._instance_id = instance_id
         self._incarnation = incarnation
         self._flush_interval = flush_interval
-        self._token_binding_cache_size = token_binding_cache_size
         self._last_flush = time.monotonic()
+        # Token-binding eviction bookkeeping (warning throttle).
+        self._evicted_bindings = 0
+        self._last_eviction_warning = 0.0
         self._seq = 0
         # Consecutive same-identity entries append to the last pending
         # batch; an identity change starts a new one (order-preserving).
@@ -192,7 +188,7 @@ class CacheEventSubscriber(EventSubscriber):
             EventType.L2_KEYS_STORED: self._on_l2_store,
             EventType.L2_KEYS_DELETED: self._on_l2_delete,
             EventType.L2_KEYS_ACCESSED: self._on_l2_access,
-            EventType.MP_TOKENS_STORED: self._on_tokens_stored,
+            EventType.MP_TOKENS: self._on_tokens,
             # TODO: decouple the flush tick from the eviction loop (e.g. a
             # bus-owned periodic hook) so cache-event freshness does not
             # silently depend on the eviction loop's cadence.
@@ -276,14 +272,28 @@ class CacheEventSubscriber(EventSubscriber):
             shared=event.metadata.get("shared", False),
         )
 
-    def _on_tokens_stored(self, event: Event) -> None:
+    def _on_tokens(self, event: Event) -> None:
         chunk_hashes: list[bytes] = event.metadata["chunk_hashes"]
         token_chunks: list[list[int]] = event.metadata["token_chunks"]
         for chunk_hash, chunk in zip(chunk_hashes, token_chunks, strict=True):
             self._token_bindings[chunk_hash] = tuple(chunk)
             self._token_bindings.move_to_end(chunk_hash)
-        while len(self._token_bindings) > self._token_binding_cache_size:
+        evicted = 0
+        while len(self._token_bindings) > _TOKEN_BINDING_CACHE_SIZE:
             self._token_bindings.popitem(last=False)
+            evicted += 1
+        if evicted:
+            self._evicted_bindings += evicted
+            now = time.monotonic()
+            if now - self._last_eviction_warning >= _EVICTION_WARNING_INTERVAL:
+                self._last_eviction_warning = now
+                logger.warning(
+                    "Token binding cache full (%d entries): evicted %d binding(s) "
+                    "so far; STORE events for evicted chunks carry no token ids "
+                    "(stores completing far behind their submission)",
+                    _TOKEN_BINDING_CACHE_SIZE,
+                    self._evicted_bindings,
+                )
 
     def _on_l2_delete(self, event: Event) -> None:
         self._record_l2_keys(CacheEventType.DELETE, event)

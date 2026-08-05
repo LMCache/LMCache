@@ -36,7 +36,6 @@ fingerprints in the same shape.
 | `GET /quota` | operator | fleet-wide usage summary |
 | `POST /directory/events` | mp → coordinator | fleet cache-event ingest (key directory + usage/eviction fan-out) |
 | `GET /directory/keys` | operator/tools | paginated key listing with tier/instance/backend filters |
-| `POST /directory/token_ids` | operator/tools | token ids for the given keys |
 | `POST /cache/prefetches` | operator/scheduler | submit warm prefetch to a named server |
 | `GET /cache/prefetches/{instance_id}/{request_id}` | operator/scheduler | poll a warm prefetch |
 | `POST/DELETE /cache/pins` | operator | pin / unpin keys against fleet-wide eviction |

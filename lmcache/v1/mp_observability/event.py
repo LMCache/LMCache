@@ -75,12 +75,9 @@ class EventType(Enum):
     # Chunk hash logging events
     MP_LOOKUP = "mp.lookup"
 
-    # Per-chunk token bindings for a submitted store. Metadata (parallel
-    # lists): chunk_hashes (list[bytes], the chunks' ObjectKey prefix
-    # hashes) and token_chunks (list[list[int]]). Published before the
-    # store's write-finished events so consumers can stamp token ids
-    # onto the subsequent STORE events.
-    MP_TOKENS_STORED = "mp.tokens.stored"
+    # Per-chunk token bindings. Metadata (parallel lists):
+    # chunk_hashes (list[bytes]) and token_chunks (list[list[int]]).
+    MP_TOKENS = "mp.tokens"
 
     # MP Server lifecycle sentinels (CPU-synchronous)
     MP_REQUEST_START = "mp.request.start"

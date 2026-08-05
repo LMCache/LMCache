@@ -69,9 +69,10 @@ coordinator does no hashing at all.
 The lookups this serves:
 
 - **key → tokens**: `key.chunk_hash` → binding
-  (`get_token_ids(chunk_hashes)`, exposed as `POST /directory/token_ids`).
-- **prefix tokens → keys**: stateless — `lookup_tokens` recomputes keys
-  from the sequence; no index involved.
+  (`get_token_ids(chunk_hashes)`, served by `POST /directory/lookup`'s
+  keys form).
+- **prefix tokens → keys**: stateless — `POST /directory/lookup`'s
+  tokens form recomputes keys from the sequence; no index involved.
 - **fragment tokens → keys** (blend-style, follow-up): rolling
   fingerprints over the query discover candidate bindings, the query
   window is verified against `binding.token_ids` (exact), and the
@@ -165,22 +166,22 @@ optimization (M6), not a semantic change.
 - `POST /directory/events` — apply `CacheEventBatch` batches (list
 order; per-instance emission order required). Duplicates and stale
 batches are counted in the response, not errors.
-- `POST /directory/lookup` — resolve keys to placements (POST because the
-key list rides in the body). One result per key, request order, empty
-for unknown keys.
-- `POST /directory/lookup_tokens` — resolve a token sequence to keys
-(prefix-exact: the fleet `TokenHasher` + per-rank fan-out, as the pin
-APIs do; requires `model_name` / `world_size` / `cache_salt` since key
-identity includes them) and return each key's placements.
-Position-independent token matching arrives with the content index (M2).
+- `POST /directory/lookup` — resolve content to placements **and** token
+ids, in either direction (POST because the payload rides in the body).
+Supply exactly one of: `keys` (resolve keys directly) or `token_ids`
+(prefix-exact resolution via the fleet `TokenHasher` + per-rank fan-out,
+as the pin APIs do; requires `model_name` / `world_size` / `cache_salt`
+since key identity includes them — and the sequence must be the
+request's whole prefix, since chunk hashes are prefix-chained). One
+result per resolved key, request order, both fields empty for unknown
+keys. Position-independent token matching arrives with the content
+index (M2).
 - `GET /directory/keys` — paginated listing (`offset`/`limit`) with
 `tier`/`instance_id`/`backend` filters; each row carries the key, its
 matching placements, recency, and `num_tokens` — a cheap indicator of
 whether the chunk's tokens are known. Full token ids are deliberately
 not inlined (a page repeats each chunk across its ranks/groups; fetch
-content via `/directory/token_ids` for exactly the keys that need it).
-- `POST /directory/token_ids` — the key → token-ids lookup: one result
-per requested key, `token_ids` empty for unknown chunks.
+content via `/directory/lookup` for exactly the keys that need it).
 - `GET /directory/stats` — key/placement counts plus per-instance stream
 state (`incarnation`, `last_seq`, `gap_detected`, `num_l1_keys` from
 the fencing index), for observability and the future replay trigger;

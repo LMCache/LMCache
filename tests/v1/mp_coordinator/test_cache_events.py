@@ -7,6 +7,7 @@ app."""
 # Standard
 from dataclasses import asdict
 import asyncio
+import logging
 import threading
 
 # Third Party
@@ -31,6 +32,7 @@ from lmcache.v1.mp_coordinator.cache_events import (
 from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventBus, EventBusConfig
+import lmcache.v1.mp_coordinator.cache_events as cache_events
 
 
 def _key(hash_byte: int) -> ObjectKey:
@@ -151,7 +153,7 @@ def test_tokens_stored_events_publish_no_batches():
     _dispatch(
         subscriber,
         Event(
-            event_type=EventType.MP_TOKENS_STORED,
+            event_type=EventType.MP_TOKENS,
             metadata={
                 "chunk_hashes": [_key(1).chunk_hash],
                 "token_chunks": [[1, 2]],
@@ -174,7 +176,7 @@ def test_tokens_event_stamps_store_entries():
     _dispatch(
         subscriber,
         Event(
-            event_type=EventType.MP_TOKENS_STORED,
+            event_type=EventType.MP_TOKENS,
             metadata={
                 "chunk_hashes": [_key(1).chunk_hash],
                 "token_chunks": [[1, 2]],
@@ -207,20 +209,20 @@ def test_tokens_event_stamps_store_entries():
     assert delete.entries[0].token_ids == []
 
 
-def test_token_binding_cache_is_lru_bounded():
+def test_token_binding_cache_is_lru_bounded(monkeypatch):
+    monkeypatch.setattr(cache_events, "_TOKEN_BINDING_CACHE_SIZE", 1)
     sink = _RecordingSink()
     subscriber = CacheEventSubscriber(
         sink=sink,
         instance_id="node-a",
         incarnation=7,
         flush_interval=3600.0,
-        token_binding_cache_size=1,
     )
 
     _dispatch(
         subscriber,
         Event(
-            event_type=EventType.MP_TOKENS_STORED,
+            event_type=EventType.MP_TOKENS,
             metadata={
                 "chunk_hashes": [_key(1).chunk_hash, _key(2).chunk_hash],
                 "token_chunks": [[1, 2], [3, 4]],
@@ -239,14 +241,28 @@ def test_token_binding_cache_is_lru_bounded():
     assert [e.token_ids for e in store.entries] == [[], [3, 4]]
 
 
-def test_token_binding_cache_size_below_one_rejected():
-    with pytest.raises(ValueError, match="token_binding_cache_size"):
-        CacheEventSubscriber(
-            sink=_RecordingSink(),
-            instance_id="node-a",
-            incarnation=7,
-            token_binding_cache_size=0,
+def test_token_binding_eviction_warns(monkeypatch, caplog):
+    """Dropping bindings means later STOREs lose their token ids, so the
+    subscriber says so (throttled)."""
+    monkeypatch.setattr(cache_events, "_TOKEN_BINDING_CACHE_SIZE", 1)
+    subscriber = CacheEventSubscriber(
+        sink=_RecordingSink(),
+        instance_id="node-a",
+        incarnation=7,
+        flush_interval=3600.0,
+    )
+    with caplog.at_level(logging.WARNING):
+        _dispatch(
+            subscriber,
+            Event(
+                event_type=EventType.MP_TOKENS,
+                metadata={
+                    "chunk_hashes": [_key(1).chunk_hash, _key(2).chunk_hash],
+                    "token_chunks": [[1, 2], [3, 4]],
+                },
+            ),
         )
+    assert "Token binding cache full" in caplog.text
 
 
 def test_mismatched_token_chunks_raise():
@@ -255,7 +271,7 @@ def test_mismatched_token_chunks_raise():
         _dispatch(
             subscriber,
             Event(
-                event_type=EventType.MP_TOKENS_STORED,
+                event_type=EventType.MP_TOKENS,
                 metadata={
                     "chunk_hashes": [_key(1).chunk_hash, _key(2).chunk_hash],
                     "token_chunks": [[1, 2]],
@@ -676,7 +692,7 @@ def test_token_bindings_feed_the_key_directory_end_to_end():
     _dispatch(
         subscriber,
         Event(
-            event_type=EventType.MP_TOKENS_STORED,
+            event_type=EventType.MP_TOKENS,
             metadata={
                 "chunk_hashes": [_key(1).chunk_hash, _key(2).chunk_hash],
                 "token_chunks": [[1, 2], [3, 4]],

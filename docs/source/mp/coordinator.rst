@@ -704,7 +704,7 @@ List cached keys and their placements, one page at a time.
 ``keys`` is the requested page of them, each with **only its matching
 placements**. ``num_tokens`` reports how many token ids the directory knows for
 the key's chunk (``0`` = unknown) -- fetch the actual tokens via
-``POST /directory/token_ids``, which exists precisely so listing pages stay
+``POST /directory/lookup``, which exists precisely so listing pages stay
 small. Pages of a changing directory may skip or repeat keys (snapshot
 semantics).
 
@@ -721,26 +721,35 @@ semantics).
     # Everything on server-1's L1:
     curl -s "http://localhost:9300/directory/keys?tier=l1&instance_id=server-1&limit=100"
 
-``POST /directory/token_ids``
+``POST /directory/lookup``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Return the token ids cached chunks hold, for the given keys (e.g. keys taken
-from ``GET /directory/keys`` or ``POST /directory/lookup``).
+Resolve cache content to its placements and token ids. One endpoint, two
+forms -- supply exactly one:
 
-**Request body:**
+* **keys form** -- ``{"keys": [...]}``: resolve keys you already have (e.g.
+  from ``GET /directory/keys``).
+* **tokens form** -- ``{"token_ids": [...], "model_name": ..., "world_size":
+  ..., "cache_salt": ...}``: resolve a request's tokens to the keys of its
+  complete chunks (the same fan-out the pin APIs use).
+
+.. important::
+
+   ``token_ids`` must be the request's **whole** token sequence from position
+   0, not one chunk's worth. Chunk hashes are prefix-chained -- each chunk's
+   key depends on every token before it -- so a mid-request slice resolves to
+   different (nonexistent) keys. Trailing tokens that do not fill a chunk are
+   ignored.
+
+**Request body** (tokens form):
 
 .. code-block:: json
 
     {
-      "keys": [
-        {
-          "chunk_hash_hex": "aa12...",
-          "model_name": "meta-llama/Llama-3.1-8B-Instruct",
-          "kv_rank": 0,
-          "object_group_id": 0,
-          "cache_salt": ""
-        }
-      ]
+      "token_ids": [15496, 11, 995, 314],
+      "model_name": "meta-llama/Llama-3.1-8B-Instruct",
+      "world_size": 1,
+      "cache_salt": ""
     }
 
 **Response** (``200 OK``):
@@ -748,29 +757,46 @@ from ``GET /directory/keys`` or ``POST /directory/lookup``).
 .. code-block:: json
 
     {
+      "chunks": 1,
       "results": [
         {
           "key": {"chunk_hash_hex": "aa12...", "model_name": "...", "kv_rank": 0,
                   "object_group_id": 0, "cache_salt": ""},
+          "placements": [
+            {"instance_id": "server-1", "incarnation": 1770000000, "tier": "l1",
+             "backend": "dram", "size_bytes": 8388608, "shared": false}
+          ],
           "token_ids": [15496, 11, 995]
         }
       ]
     }
 
-One result per requested key, in request order. ``token_ids`` is empty when the
+``chunks`` is the number of complete chunks the tokens resolved to (keys form:
+the number of keys requested); ``results`` has one entry per resolved key, in
+request order (tokens form: ``chunks`` x the per-rank fan-out). ``placements``
+is empty for keys the directory does not know; ``token_ids`` is empty when the
 directory has no tokens for the key's chunk (never stored with token reporting
 on, or not yet re-reported after an event gap).
 
 **HTTP status codes:**
 
 - ``200``: results returned.
-- ``422``: a key is malformed (e.g. ``chunk_hash_hex`` is not valid hex).
+- ``400``: the token sequence exceeds the per-request cap, or a resolution
+  parameter is invalid (e.g. ``model_name`` contains ``@``).
+- ``422``: neither or both forms supplied, ``model_name`` missing with
+  ``token_ids``, or a key is malformed (e.g. ``chunk_hash_hex`` is not hex).
 
-**Example:**
+**Examples:**
 
 .. code-block:: bash
 
-    curl -s -X POST http://localhost:9300/directory/token_ids \
+    # Tokens form -- where is this prompt cached, and what does each chunk hold?
+    curl -s -X POST http://localhost:9300/directory/lookup \
+      -H 'Content-Type: application/json' \
+      -d '{"token_ids": [15496, 11, 995], "model_name": "m", "world_size": 1}'
+
+    # Keys form -- keys taken from GET /directory/keys:
+    curl -s -X POST http://localhost:9300/directory/lookup \
       -H 'Content-Type: application/json' \
       -d '{"keys": [{"chunk_hash_hex": "aa12...", "model_name": "m", "kv_rank": 0}]}'
 
