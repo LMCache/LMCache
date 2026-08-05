@@ -13,5 +13,5 @@ env:
   CB_PLUGIN_DIR: "/tmp/cb-plugin"  # clone destination in the pod
 
 steps:
-  - label: ":pipeline: Upload pipeline"
-    command: bash .buildkite/k3_tests/common_scripts/upload-pipeline.sh .buildkite/k3_tests/blend/pipeline.yml
+  - label: ":white_check_mark: Tests disabled"
+    command: echo "Non-multiprocess K3 tests are disabled."
