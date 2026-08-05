@@ -184,7 +184,9 @@ def test_empty_kv_caches_raises() -> None:
     with pytest.raises(ValueError, match="non-empty"):
         create_cache_context([])
 
-
+@pytest.mark.musa
+@pytest.mark.cuda
+@pytest.mark.xpu
 def test_mixed_device_types_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     """Cross-device batches are unsupported and must fail loudly."""
     _patch_hook(monkeypatch, "cpu", _FakeCPUContext)

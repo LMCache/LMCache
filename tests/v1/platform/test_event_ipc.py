@@ -219,7 +219,7 @@ def test_cpu_device_spec_exposes_cached_default_event_backend() -> None:
     assert isinstance(spec.event_ipc_backend, DefaultEventIPCBackend)
     assert spec.event_ipc_backend is spec.event_ipc_backend
 
-
+@pytest.mark.cuda
 def test_cuda_device_spec_exposes_cached_default_event_backend() -> None:
     spec = CudaDeviceSpec()
     assert isinstance(spec.event_ipc_backend, DefaultEventIPCBackend)

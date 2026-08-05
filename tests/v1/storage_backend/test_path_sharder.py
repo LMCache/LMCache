@@ -147,6 +147,9 @@ class TestPathSharder:
         "lmcache.v1.storage_backend.path_sharder.torch_dev.current_device",
         return_value=1,
     )
+    @pytest.mark.cuda
+    @pytest.mark.musa
+    @pytest.mark.xpu
     def test_bare_cuda_uses_current_device(self, _cur, _avail):
         """Bare active device type resolves to torch_dev.current_device()."""
         dirs = [tempfile.mkdtemp() for _ in range(3)]

@@ -279,7 +279,9 @@ def test_cpu_without_registered_spec_falls_back_to_base_device_ops(
     monkeypatch.setattr(platform_pkg, "_DEVICE_REGISTRY", table)
     assert type(resolve_device_ops("cpu")) is DeviceOps
 
-
+@pytest.mark.musa
+@pytest.mark.cuda
+@pytest.mark.xpu
 def test_unregistered_accelerator_fails_fast(
     isolated_registry: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
