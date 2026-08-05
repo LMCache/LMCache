@@ -57,7 +57,7 @@ class CacheEventSink(ABC):
 
         Raises:
             CacheEventPublishError: If delivery failed. Retrying and
-                dropping are both safe (dedup / gap-flagged resync).
+                dropping are both safe (dedup / gap-flagged replay).
         """
         raise NotImplementedError
 
@@ -113,12 +113,13 @@ class HttpCacheEventSink(CacheEventSink):
 @dataclass
 class _PendingBatch:
     """A buffered batch-to-be: entries sharing one ``(event_type, tier,
-    backend)`` identity. Becomes exactly one :class:`CacheEventBatch` at
-    flush, which stamps ``seq`` and ``ts``."""
+    backend, shared)`` identity. Becomes exactly one
+    :class:`CacheEventBatch` at flush, which stamps ``seq`` and ``ts``."""
 
     event_type: CacheEventType
     tier: Tier
     backend: str
+    shared: bool
     entries: list[CacheEventEntry]
 
 
@@ -195,6 +196,7 @@ class CacheEventSubscriber(EventSubscriber):
                 tier=pending.tier,
                 backend=pending.backend,
                 entries=pending.entries,
+                shared=pending.shared,
                 ts=ts,
             )
             for offset, pending in enumerate(pending_batches)
@@ -249,6 +251,7 @@ class CacheEventSubscriber(EventSubscriber):
                 CacheEventEntry(key=key.to_encoded_object_key(), size_bytes=size)
                 for key, size in zip(keys, sizes, strict=True)
             ],
+            shared=event.metadata.get("shared", False),
         )
 
     def _on_l2_delete(self, event: Event) -> None:
@@ -285,6 +288,7 @@ class CacheEventSubscriber(EventSubscriber):
             Tier.L2,
             event.metadata["backend"],
             [CacheEventEntry(key=key.to_encoded_object_key()) for key in keys],
+            shared=event.metadata.get("shared", False),
         )
 
     def _record(
@@ -293,6 +297,7 @@ class CacheEventSubscriber(EventSubscriber):
         tier: Tier,
         backend: str,
         entries: list[CacheEventEntry],
+        shared: bool = False,
     ) -> None:
         """Buffer ``entries``, then flush if the flush interval elapsed."""
         if not entries:
@@ -303,6 +308,7 @@ class CacheEventSubscriber(EventSubscriber):
             and last.event_type == event_type
             and last.tier == tier
             and last.backend == backend
+            and last.shared == shared
         ):
             last.entries.extend(entries)
         else:
@@ -311,6 +317,7 @@ class CacheEventSubscriber(EventSubscriber):
                     event_type=event_type,
                     tier=tier,
                     backend=backend,
+                    shared=shared,
                     entries=list(entries),
                 )
             )
