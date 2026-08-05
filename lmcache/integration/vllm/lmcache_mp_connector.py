@@ -80,6 +80,7 @@ except ImportError:
     from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration import (  # type: ignore[no-redef]
         LMCacheMPSchedulerAdapter,
         LMCacheMPWorkerAdapter,
+        ParallelStrategy,
     )
 
     # First Party
