@@ -56,8 +56,7 @@ launch_vllm() {
         --max-model-len "$MAX_MODEL_LEN" \
         --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
         --attention_config.use_fp4_indexer_cache=True \
-        # DeepGEMM MegaMoE requires SM100; Marlin supports the CI's SM90 GPUs.
-        --moe-backend marlin \
+        --moe-backend deep_gemm_mega_moe \
         --tokenizer-mode deepseek_v4 \
         --port "$saved_port" \
         --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_load_failure_policy\":\"recompute\", \"kv_connector_extra_config\":{\"lmcache.mp.port\":$LMCACHE_PORT, \"lmcache.mp.mq_timeout\":300}}" \
