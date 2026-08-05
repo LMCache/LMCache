@@ -370,7 +370,7 @@ class PrefetchController(StorageControllerInterface):
             )
             register_gauge(
                 "lmcache.l2_prefetch",
-                "lmcache_mp.l2_adapters",
+                "lmcache_mp.l2_prefetch_adapters",
                 (
                     "Count of L2 adapters attached to the prefetch controller, "
                     "tagged by ``state`` (active or draining)."
