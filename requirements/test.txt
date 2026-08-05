@@ -8,8 +8,11 @@ pytest-html>=3.2,<5.0  # 4.x requires external assets; 3.2 is stable
 jinja2<3.2
 python-multipart
 openai
-# Regenerates the mp-mode gRPC stubs (lmcache_mq_pb2*.py) at test time --
+# Regenerates the mp-mode gRPC stubs (lmcache_mq_pb2*.py) at import time --
 # those files are not checked into git and are generated lazily on first
-# import. Keep the major.minor aligned with ``grpcio`` in common.txt so
-# the generated gencode matches the protobuf runtime.
-grpcio-tools>=1.62
+# import. The UPPER bound matters: a too-new grpcio-tools emits 7.x protobuf
+# gencode, but the protobuf *runtime* in CI is capped at 6.x (by vllm), and
+# protobuf refuses to load gencode newer than its runtime. Keep grpcio-tools
+# below the release that bumped gencode to 7.x so the self-healing generation
+# stays compatible.
+grpcio-tools>=1.62,<1.80
