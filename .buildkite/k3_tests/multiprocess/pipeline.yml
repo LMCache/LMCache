@@ -33,6 +33,43 @@ x-pod-1gpu: &pod-1gpu
     - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 1Gi } }
 
 steps:
+  # 4-GPU group is listed first so the heaviest job gets scheduled before the
+  # 2- and 1-GPU jobs.
+  - group: ":compression: Multiprocess (4-GPU)"
+    if: build.env("VERIFY_AND_PIN_VLLM") !~ /true/
+    steps:
+      # L1 + slot-compression KV correctness for DeepSeek-V4-Flash (sparse-MLA
+      # + fp8, TP=4). The model's KV cache groups mix block geometries
+      # (tokens_per_block 256/64/8/4) and pack several logical tokens per
+      # physical slot; the test stores one long request through LMCache's
+      # slot-compression path, resets vLLM's local prefix cache (LMCache
+      # preserved), re-sends the identical request now served from the L1 CPU
+      # pool, and asserts the two greedy outputs are byte-identical. The 160GB
+      # fp8 TP-shard load (plus the weight download on a cold hf-cache node)
+      # needs the long timeout.
+      - label: ":compression: dsv4_flash_tp"
+        command: .buildkite/k3_tests/multiprocess/run.sh dsv4_flash_tp
+        timeout_in_minutes: 90
+        retry: *flaky-retry
+        agents: { queue: "k8s" }
+        plugins:
+          - kubernetes:
+              podSpec:
+                containers:
+                  - name: container-0
+                    image: lmcache/ci-base:latest
+                    imagePullPolicy: Never
+                    resources: { limits: { "nvidia.com/gpu": "4" } }
+                    volumeMounts:
+                      - { name: hf-cache, mountPath: /root/.cache/huggingface }
+                      - { name: dshm, mountPath: /dev/shm }
+                volumes:
+                  - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
+                  # TP=4 NCCL + vLLM shared memory; the 1Gi used by the
+                  # smaller pods is too tight for four ranks.
+                  - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 8Gi } }
+        artifact_paths: ["*.log"]
+
   - group: ":compression: Multiprocess (2-GPU)"
     if: build.env("VERIFY_AND_PIN_VLLM") !~ /true/
     steps:
