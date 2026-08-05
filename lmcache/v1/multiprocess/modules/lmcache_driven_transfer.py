@@ -1364,22 +1364,26 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         """Publish one ``MP_TOKENS`` event for ``key``'s chunks.
 
         Pairs each complete chunk in ``[key.start, key.end)`` with its
-        ObjectKey chunk hash. Must be called at store submission — before
-        the write-finished events can reach the bus — so the cache-event
-        subscriber can stamp token ids onto the STORE entries. A store
-        that later fails leaves only unused cache entries (bounded).
+        ObjectKey chunk hash and token position. Must be called at store
+        submission, before the write-finished events reach the bus, so the
+        cache-event subscriber can stamp them onto the STORE entries. A
+        store that later fails leaves only unused cache entries.
 
         Args:
             key: The IPC key of the store being submitted.
             obj_keys: One ObjectKey per complete chunk, in chunk order.
         """
-        token_ids = list(key.token_ids)
+        # Complete chunks in [key.start, key.end) paired with the absolute
+        # position of each chunk's first token. Prefix-chained chunk hashes
+        # imply a position without revealing it, so it is reported here. A
+        # trailing partial chunk has no stored KV to bind to.
         chunk_size = self._ctx.chunk_size
+        token_ids = list(key.token_ids)
         effective_len = min(len(token_ids), key.end)
         num_complete = effective_len - effective_len % chunk_size
+        token_offsets = list(range(key.start, num_complete, chunk_size))
         token_chunks = [
-            token_ids[offset : offset + chunk_size]
-            for offset in range(key.start, num_complete, chunk_size)
+            token_ids[offset : offset + chunk_size] for offset in token_offsets
         ]
         if not token_chunks:
             return
@@ -1401,6 +1405,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 metadata={
                     "chunk_hashes": [obj_key.chunk_hash for obj_key in obj_keys],
                     "token_chunks": token_chunks,
+                    "token_offsets": token_offsets,
                 },
             )
         )

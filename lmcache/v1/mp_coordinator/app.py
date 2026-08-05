@@ -30,7 +30,6 @@ import httpx
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.quota_manager import QuotaManager
-from lmcache.v1.mp_coordinator.blend_directory import GlobalBlendMatcher
 from lmcache.v1.mp_coordinator.cache_control.event_broadcaster import (
     CacheEventBroadcaster,
 )
@@ -77,12 +76,18 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
     Returns:
         A configured FastAPI application. ``app.state`` carries the shared
         collaborators (``config``, ``registry``, ``quota_manager``,
-        ``key_directory``, ``blend_directory``); all
+        ``key_directory``); all
         ``http_apis`` routers are registered.
     """
     registry = InstanceRegistry()
     quota_manager = QuotaManager()
     key_directory = KeyDirectory()
+    if config.enable_blend_lookup:
+        # Only now does the directory hash chunk content: chunk_size is the
+        # match window (the fleet chunk), blend_probe_stride the probe density.
+        key_directory.enable_blend_lookup(
+            chunk_size=config.chunk_size, probe_stride=config.blend_probe_stride
+        )
     usage_manager = L2UsageManager()
     eviction_manager = L2EvictionManager(
         quota_manager=quota_manager,
@@ -95,9 +100,6 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
     # chunk size and hash algorithm (see MPCoordinatorConfig).
     token_hasher = TokenHasher(
         chunk_size=config.chunk_size, hash_algorithm=config.hash_algorithm
-    )
-    blend_directory = GlobalBlendMatcher(
-        chunk_size=config.chunk_size, probe_stride=config.blend_probe_stride
     )
     event_broadcaster = CacheEventBroadcaster()
     # Order matters: the eviction manager's delete handling reads the
@@ -182,11 +184,10 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
 
     app = FastAPI(title="LMCache MP Coordinator", version="1.0.0", lifespan=lifespan)
     app.state.ctx = ctx
-    # Out-of-context collaborators kept on app.state directly: ``config`` and the
-    # blend directory (its own router), plus ``resync_manager`` for the lifespan.
+    # Out-of-context collaborators kept on app.state directly: ``config``,
+    # plus ``resync_manager`` for the lifespan.
     app.state.config = config
     app.state.resync_manager = resync_manager
-    app.state.blend_directory = blend_directory
 
     apis_path = Path(__file__).parent / "http_apis"
     package = f"{__package__}.http_apis"
