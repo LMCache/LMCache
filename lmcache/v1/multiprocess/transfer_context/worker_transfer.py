@@ -1278,9 +1278,10 @@ class EngineDrivenTransferContext(TransferContext):
             layout_hints,
         )
 
-        # Preserve legacy registration for dense layouts. Hybrid layouts carry
-        # their complete immutable metadata to the server.
-        if len(object_group_layout_descs) == 1:
+        # Preserve legacy registration only for a single kernel group. Hybrid
+        # models can pack multiple kernel groups into one object group, so the
+        # number of object groups alone cannot distinguish them from dense KV.
+        if transfer_metadata is not None and len(transfer_metadata.kernel_groups) == 1:
             wire_engine_group_infos = []
             wire_obj_shapes = []
             wire_obj_dtype_strs = []

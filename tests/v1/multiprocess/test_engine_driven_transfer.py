@@ -2824,6 +2824,48 @@ def _make_fake_transfer_metadata() -> Any:
     )
 
 
+def _make_fake_hybrid_transfer_metadata_in_one_object_group() -> Any:
+    """Build hybrid metadata whose two kernel groups share one object group."""
+    # First Party
+    from lmcache.v1.multiprocess.transfer_plan import (
+        KernelGroupTransferMetadata,
+        KVTransferMetadata,
+        ObjectGroupTransferMetadata,
+    )
+    import lmcache.c_ops as lmc_ops
+
+    kernel_groups = tuple(
+        KernelGroupTransferMetadata(
+            kernel_group_id=index,
+            engine_group_id=index,
+            layer_indices=(index,),
+            blocks_per_chunk=2,
+            blocks_per_window=2,
+            slots_per_chunk_in_window=8,
+            kv_size=2,
+            num_layers=1,
+            hidden_dim_size=16,
+            slots_per_block=4,
+            tokens_per_block=4,
+            dtype=torch.float32,
+            engine_kv_format=lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
+        )
+        for index in range(2)
+    )
+    return KVTransferMetadata(
+        num_chunks_in_sw=(-1,),
+        tokens_per_chunk=8,
+        kernel_groups=kernel_groups,
+        object_groups=(
+            ObjectGroupTransferMetadata(
+                object_group_id=0,
+                kernel_group_ids=(0, 1),
+                sw_size_chunks=-1,
+            ),
+        ),
+    )
+
+
 def test_build_multi_group_wire_fields_returns_transfer_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2970,7 +3012,7 @@ def test_build_multi_group_wire_fields_legacy_returns_none_transfer_metadata(
 def test_worker_register_multi_group_stores_transfer_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Single-object-group registration keeps the legacy context metadata."""
+    """Single-kernel-group registration keeps the legacy context metadata."""
     # First Party
     from lmcache.v1.distributed.api import DEFAULT_ATTN_WINDOW_DESC, MemoryLayoutDesc
     from lmcache.v1.multiprocess.group_view import EngineGroupInfo
@@ -3041,6 +3083,91 @@ def test_worker_register_multi_group_stores_transfer_metadata(
     assert isinstance(meta, EngineDrivenContextMetadata)
     assert meta.transfer_metadata is None
     assert meta.object_group_layout_descs == []
+
+
+def test_worker_register_keeps_hybrid_metadata_in_one_object_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hybrid registration keeps its plan when groups share one object group."""
+    # First Party
+    from lmcache.v1.distributed.api import DEFAULT_ATTN_WINDOW_DESC, MemoryLayoutDesc
+    from lmcache.v1.multiprocess.group_view import EngineGroupInfo
+    from lmcache.v1.multiprocess.transfer_context import (
+        EngineDrivenTransferContext,
+        worker_transfer,
+    )
+    import lmcache.c_ops as lmc_ops
+
+    hybrid_metadata = _make_fake_hybrid_transfer_metadata_in_one_object_group()
+    fixed_layout = MemoryLayoutDesc(
+        shapes=[
+            torch.Size([2, 1, 8, 16]),
+            torch.Size([2, 1, 8, 16]),
+        ],
+        dtypes=[torch.float32, torch.float32],
+    )
+    captured_metadata: list[Any] = []
+
+    monkeypatch.setattr(
+        worker_transfer,
+        "compute_kv_layout",
+        lambda *_a, **_kw: (
+            4,
+            1,
+            16,
+            "float32",
+            lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
+            2,
+        ),
+    )
+    monkeypatch.setattr(
+        worker_transfer,
+        "_build_multi_group_wire_fields",
+        lambda *_a, **_kw: (
+            [
+                EngineGroupInfo(engine_group_id=0, layer_indices=(0,)),
+                EngineGroupInfo(engine_group_id=1, layer_indices=(1,)),
+            ],
+            [[[2, 1, 8, 16], [2, 1, 8, 16]]],
+            [["float32", "float32"]],
+            [-1],
+            [fixed_layout],
+            DEFAULT_ATTN_WINDOW_DESC,
+            hybrid_metadata,
+        ),
+    )
+
+    def _fake_create(metadata: Any, *_args: Any, **_kwargs: Any) -> MagicMock:
+        captured_metadata.append(metadata)
+        return MagicMock()
+
+    monkeypatch.setattr(
+        worker_transfer,
+        "create_engine_driven_context",
+        _fake_create,
+    )
+    future = MagicMock()
+    future.result.return_value = RegisterEngineDrivenContextResponse()
+
+    EngineDrivenTransferContext().register(
+        instance_id=1,
+        kv_caches=_make_kv_caches(),
+        model_name="m",
+        world_size=1,
+        blocks_in_chunk=2,
+        mq_client=MagicMock(),
+        mq_timeout=1.0,
+        send_request=MagicMock(return_value=future),
+        engine_group_infos=[
+            EngineGroupInfo(engine_group_id=0, layer_indices=(0,)),
+            EngineGroupInfo(engine_group_id=1, layer_indices=(1,)),
+        ],
+    )
+
+    assert len(captured_metadata) == 1
+    metadata = captured_metadata[0]
+    assert metadata.transfer_metadata is hybrid_metadata
+    assert metadata.object_group_layout_descs == [fixed_layout]
 
 
 def test_worker_register_uses_representative_layout_for_heterogeneous_kv(

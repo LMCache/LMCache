@@ -365,6 +365,11 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
                         gather_done.synchronize()
 
                     # --- Phase 3: commit ---
+                    # Pickle serializes CPU tensors immediately. A copy-stream
+                    # event only orders work on that stream; it does not make
+                    # the D2H buffers safe for CPU serialization.
+                    if preparation is None:
+                        torch_dev.synchronize()
                     with self._commit_lock:
                         if transfer_metadata is None:
                             ok = engine_driven_context.commit_store(

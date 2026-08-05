@@ -309,6 +309,42 @@ def test_sync_engine_driven_context_finishes_gather_before_pickle_commit(
     ctx.close()
 
 
+def test_async_engine_driven_context_finishes_gather_before_pickle_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Async pickle commit must wait for its D2H buffers to become CPU-readable."""
+
+    class _OrderedTorchDev(_FakeTorchDev):
+        def __init__(self, gather_gate: threading.Event) -> None:
+            super().__init__(gather_gate)
+            self.synchronize_calls = 0
+
+        def synchronize(self) -> None:
+            self.synchronize_calls += 1
+
+    gather_gate = threading.Event()
+    gather_gate.set()
+    fake = _OrderedTorchDev(gather_gate)
+    monkeypatch.setattr(async_engine_driven, "torch_dev", fake)
+    _install_fake_gather(monkeypatch)
+    ctx = AsyncEngineDrivenTransferContext(commit_workers=1)
+
+    def _commit(_chunks: list[torch.Tensor]) -> bool:
+        assert fake.synchronize_calls == 1
+        return True
+
+    ctx._engine_driven_context = (
+        _FakeStoreContext(commit_impl=_commit)  # type: ignore[assignment]
+    )
+
+    future = ctx.submit_store(
+        "r1", object(), 1, {"k": torch.zeros(1)}, [[0]], _FakeEvent(gather_gate), 1
+    )
+
+    assert future.result(timeout=1) is True
+    ctx.close()
+
+
 def test_sync_engine_driven_context_has_no_async_resources() -> None:
     ctx = EngineDrivenTransferContext()
     assert not hasattr(ctx, "_copy_stream")
