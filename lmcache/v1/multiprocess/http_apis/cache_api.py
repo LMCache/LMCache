@@ -67,7 +67,7 @@ async def list_cache_objects(
     """List cache objects resident in one tier/adapter, paginated.
 
     Responses:
-        200: ``{"adapter", "entries", "next_page_token"}``.
+        200: ``{"adapter", "shared", "entries", "next_page_token"}``.
         400: ``tier`` unsupported or malformed ``page_token``. 404: adapter
             matches none.
         503: server not initialized, no adapters configured, or the adapter does

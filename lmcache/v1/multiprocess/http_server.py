@@ -20,7 +20,6 @@ from lmcache.v1.distributed.config import (
     l1_exposes_single_memory_region,
     parse_args_to_config,
 )
-from lmcache.v1.mp_coordinator.cache_control.event_listener import L2EventListener
 from lmcache.v1.mp_coordinator.cache_events import (
     CacheEventSubscriber,
     HttpCacheEventSink,
@@ -141,31 +140,7 @@ async def lifespan(app: FastAPI):
                 mq_port=mp_config.port if mp_config.p2p_config.enabled else 0,
             )
         )
-    # Optionally report cache events to the coordinator (one flag gates
-    # both streams until they are unified): the legacy L2 usage stream
-    # (/quota/events) for quota tracking and eviction, and the key
-    # directory stream for fleet-wide placement tracking.
-    coordinator_l2_event_client = None
-    coordinator_l2_event_task = None
-    if (
-        coordinator_client is not None
-        and coordinator_config is not None
-        and coordinator_config.url
-        and coordinator_config.event_reporting
-    ):
-        coordinator_l2_event_client = L2EventListener(
-            coordinator_client,
-            coordinator_config.url,
-            instance_id=mp_config.instance_id,
-            flush_interval=coordinator_config.event_flush_interval,
-        )
-        if engine.storage_manager is not None:
-            engine.storage_manager.register_l2_listener(coordinator_l2_event_client)
-        coordinator_l2_event_task = asyncio.create_task(
-            coordinator_l2_event_client.run()
-        )
-
-    # Coordinator event stream
+    # Optionally report cache events to the coordinator
     if (
         coordinator_client is not None
         and coordinator_config.url
@@ -184,7 +159,6 @@ async def lifespan(app: FastAPI):
 
     app.state.coordinator_client = coordinator_client
     app.state.coordinator_registration_task = coordinator_registration_task
-    app.state.coordinator_l2_event_task = coordinator_l2_event_task
 
     logger.info("LMCache HTTP server initialized")
 
@@ -192,11 +166,6 @@ async def lifespan(app: FastAPI):
 
     # Shutdown
     logger.info("Shutting down LMCache HTTP server...")
-    coordinator_l2_event_task = getattr(app.state, "coordinator_l2_event_task", None)
-    if coordinator_l2_event_task is not None:
-        coordinator_l2_event_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await coordinator_l2_event_task
     coordinator_registration_task = getattr(
         app.state, "coordinator_registration_task", None
     )

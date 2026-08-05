@@ -330,10 +330,10 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
         # Listeners track what's actually stored — which is inner's job.
         self._inner.register_listener(listener)
 
-    def set_backend_name(self, name: str) -> None:
-        """Forward the backend name to the inner adapter (which owns the
-        listener-notify funnel that tags cache events)."""
-        self._inner.set_backend_name(name)
+    def set_backend_identity(self, name: str, shared: bool = False) -> None:
+        """Forward the event-tagging identity to the inner adapter (which
+        owns the listener-notify funnel that tags cache events)."""
+        self._inner.set_backend_identity(name, shared)
 
     def report_status(self) -> dict:
         inner_status = self._inner.report_status()

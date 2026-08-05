@@ -241,6 +241,35 @@ def test_l2_events_map_with_backend_and_sizes():
     assert all(b.tier == Tier.L2 and b.backend == "fs" for b in batches)
 
 
+def test_l2_shared_flag_rides_the_batch():
+    """An adapter mounting a shared pool tags its events; the subscriber
+    keeps shared and private runs in distinct batches."""
+    sink = _RecordingSink()
+    subscriber = _subscriber(sink)
+    _dispatch(
+        subscriber,
+        Event(
+            event_type=EventType.L2_KEYS_STORED,
+            metadata={
+                "keys": [_key(1)],
+                "sizes": [100],
+                "backend": "fs",
+                "shared": True,
+            },
+        ),
+        Event(
+            event_type=EventType.L2_KEYS_STORED,
+            metadata={"keys": [_key(2)], "sizes": [200], "backend": "fs"},
+        ),
+    )
+    subscriber.flush()
+    [batches] = sink.published
+    assert [(b.backend, b.shared) for b in batches] == [
+        ("fs", True),
+        ("fs", False),
+    ]
+
+
 def test_interleaved_events_preserve_total_order():
     # store k1, delete k1, re-store k1: the re-store must not be
     # reordered before the delete, or the directory ends up empty.

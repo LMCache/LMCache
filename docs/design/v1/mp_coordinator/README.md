@@ -34,7 +34,7 @@ fingerprints in the same shape.
 | `PUT/GET /quota/config` | operator | fleet-wide quota configuration |
 | `PUT/GET/DELETE /quota/{cache_salt}` | operator | per-tenant byte budgets |
 | `GET /quota` | operator | fleet-wide usage summary |
-| `POST /quota/events` | mp → coordinator | L2 usage event ingest |
+| `POST /directory/events` | mp → coordinator | fleet cache-event ingest (key directory + usage/eviction fan-out) |
 | `POST /cache/prefetches` | operator/scheduler | submit warm prefetch to a named server |
 | `GET /cache/prefetches/{instance_id}/{request_id}` | operator/scheduler | poll a warm prefetch |
 | `POST/DELETE /cache/pins` | operator | pin / unpin keys against fleet-wide eviction |
@@ -64,17 +64,17 @@ lmcache/v1/mp_coordinator/
   blend_client.py       # mp-server-side blend publish/evict/match client
   cache_control/
     __init__.py
-    event_listener.py   # in-process forwarding of MP-server L2 events
+    event_broadcaster.py     # fans directory-applied events to registered consumers
+    usage_manager.py    # per-salt L2 usage view (a router consumer)
     eviction_manager.py # LRU + trigger-watermark driven eviction loop, pin tracking
-    usage_manager.py    # per-salt usage aggregation
     prefetch_manager.py # dispatches warm prefetch to a named MP server
-    resync_manager.py   # startup resync of usage/eviction from an MP server's GET /cache/objects
+    resync_manager.py   # startup backfill of directory + views from GET /cache/objects
   http_apis/
     __init__.py
     dependencies.py     # shared FastAPI dependencies (registry, blend directory, ...)
     instances_api.py    # /instances REST resource
     health_api.py       # /healthz
-    quota_api.py        # /quota/config, /quota/{cache_salt}, /quota, /quota/events
+    quota_api.py        # /quota/config, /quota/{cache_salt}, /quota
     cache_api.py        # /cache/prefetches, /cache/pins, /cache/delete
     blend_directory_api.py  # /blend/fingerprints, /blend/match
 ```
@@ -158,8 +158,12 @@ liveness.
 The `cache_control/` package owns everything downstream of the fleet-wide L2
 usage stream:
 
-- `usage_manager.py` — aggregates `POST /quota/events` into per-`cache_salt`
-  bytes and per-key LRU state.
+- `event_broadcaster.py` — fans directory-applied cache events (from
+  `POST /directory/events`) to its registered `CacheEventConsumer`s.
+  Adding a consumer is a wiring change in `app.py`, not a router change.
+- `usage_manager.py` — the per-`cache_salt` L2 byte totals, maintained
+  as a derived **view** of the key directory by consuming the same
+  applied event stream (a router consumer).
 - `eviction_manager.py` — every `EVICTION_CHECK_INTERVAL` seconds, walks
   salts over their trigger watermark and dispatches `DELETE /cache/objects`
   requests (chunked at `MAX_DELETE_BATCH`) to a uniformly random registered
@@ -167,12 +171,12 @@ usage stream:
   fleet). Also tracks the pins taken via `POST /cache/pins` so pinned keys
   are excluded from eviction and delete.
 - `resync_manager.py` — one-shot startup pass that paginates one mp
-  server's `GET /cache/objects` and seeds usage + LRU trackers, so a fresh
-  coordinator does not start from zero.
+  server's `GET /cache/objects` and backfills the key directory's L2
+  placements plus the router's consumers (usage view, eviction LRU), so
+  a fresh coordinator does not start from zero.
 - `prefetch_manager.py` — implements `POST /cache/prefetches` dispatch to a
   named mp server and proxies status polls.
-- `event_listener.py` — in-process handler that plugs the usage stream into
-  the manager collaborators.
+
 
 ## Global CacheBlend directory (`blend_directory.py`)
 
@@ -200,8 +204,8 @@ stale. The mp-server-side client lives in `blend_client.py`; the wire types
 - Registration is idempotent: re-registering replaces the entry. The registry
   is ephemeral — rebuilt from heartbeats after a coordinator restart. Durable
   state (registered quotas) belongs in an external store, not here; the
-  startup resync pass reconstructs usage + LRU from an mp server's
-  `GET /cache/objects` on boot.
+  startup resync pass backfills the key directory's L2 view (placements
+  and usage) plus the LRU from an mp server's `GET /cache/objects` on boot.
 
 ## Running
 

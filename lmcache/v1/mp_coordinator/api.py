@@ -62,7 +62,7 @@ class CacheEventBatch:
     """A batch of same-typed cache events from one MP server.
 
     Attributes:
-        instance_id: The emitting MP server (non-empty).
+        instance_id: The emitter's unique ID (non-empty).
         incarnation: The emitter's restart counter (non-negative). A
             higher value fences off all placements reported by lower
             values of the same ``instance_id``.
@@ -77,6 +77,9 @@ class CacheEventBatch:
             identity); empty for ``access``, which only refreshes
             key-level recency and carries no placement identity.
         entries: The affected keys.
+        shared: ``True`` when the backend is a storage domain mounted by
+            several instances (e.g. one S3 bucket or CXL pool). ``False``
+            (default) marks the storage private to this instance.
         ts: Emitter wall-clock seconds for the batch (``0.0`` if unknown).
     """
 
@@ -87,6 +90,7 @@ class CacheEventBatch:
     tier: Tier
     backend: str
     entries: list[CacheEventEntry] = field(default_factory=list)
+    shared: bool = False
     ts: float = 0.0
 
     def __post_init__(self) -> None:

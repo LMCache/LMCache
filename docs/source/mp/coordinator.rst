@@ -98,7 +98,8 @@ variables:
      - ``True``
      - When ``True``, the coordinator runs a one-shot L2 resync on
        startup that paginates an MP server's ``GET /cache/objects`` and
-       backfills usage + eviction trackers from existing L2 contents.
+       backfills the key directory's L2 placements plus the
+       usage/eviction trackers from existing L2 contents.
        Disable to start from empty trackers (handy for tests, or
        deployments that start the coordinator before any MP server).
    * - ``LMCACHE_MP_COORDINATOR_RESYNC_POLL_INTERVAL``
@@ -147,9 +148,9 @@ Kubernetes downward API); an explicit flag wins over the env var.
        below the coordinator's ``INSTANCE_TIMEOUT``.
    * - ``--coordinator-event-reporting``
      - ``LMCACHE_COORDINATOR_EVENT_REPORTING``
-     - Enable reporting cache events to the coordinator: the key
-       directory's store/access/delete stream (fleet-wide placement
-       tracking) and the L2 usage stream (quota tracking and eviction).
+     - Stream cache store/access/delete events to the coordinator,
+       feeding the key directory (fleet-wide placement tracking) and,
+       for L2 events, usage/quota tracking and eviction.
    * - ``--coordinator-event-flush-interval``
      - ``LMCACHE_COORDINATOR_EVENT_FLUSH_INTERVAL``
      - Seconds between cache-event batch flushes (must be ``> 0``, default
@@ -405,11 +406,14 @@ cycle):
         -H 'Content-Type: application/json' -d '{"default_limit_gb": 0}'
     # -> {"default_limit_gb": 0.0}
 
-When MP servers enable ``--coordinator-event-reporting``, they stream L2
-``store``, ``lookup``, and ``delete`` events to the coordinator, which aggregates
-per-``cache_salt`` usage, enforces quotas, and selects LRU keys to evict. Each
-batch carries the server's ``instance_id`` and a monotonically increasing
-sequence number (``seq``) scoped to that instance, enabling future gap detection.
+When MP servers enable ``--coordinator-event-reporting``, they stream cache
+``store``, ``access``, and ``delete`` events to the coordinator's
+``POST /directory/events``. Applied ``l2`` batches also feed the quota side:
+the coordinator aggregates per-``cache_salt`` usage, enforces quotas, and
+selects LRU keys to evict. Each batch carries the server's ``instance_id``,
+``incarnation``, and a monotonically increasing sequence number (``seq``)
+scoped to that instance, so replays are deduplicated and lost batches are
+detected.
 
 **Active eviction loop.** Every
 ``LMCACHE_MP_COORDINATOR_EVICTION_CHECK_INTERVAL`` seconds, the
@@ -420,7 +424,7 @@ server. Because all MP servers share the same backing L2 (e.g. one S3
 bucket), one dispatch evicts the keys for the whole fleet. The MP
 server's L2 adapter fires ``on_l2_keys_deleted`` listeners after the
 delete completes; those listeners ship ``delete`` events back through
-``POST /quota/events``, which is what updates the coordinator's LRU +
+``POST /directory/events``, which is what updates the coordinator's LRU +
 per-salt totals. Dispatch failures or no-instances-registered fall
 through to the next cycle — at-least-once semantics, safe because the
 S3 delete is idempotent.
@@ -428,9 +432,9 @@ S3 delete is idempotent.
 **Startup resync.** On boot, the coordinator waits up to
 ``LMCACHE_MP_COORDINATOR_RESYNC_MAX_WAIT`` seconds for the first MP
 server to register, then paginates its
-``GET /cache/objects`` and seeds the in-memory usage + eviction trackers
-with whatever is already resident in L2 — so a fresh coordinator
-does not start from zero usage. Set
+``GET /cache/objects`` and seeds the key directory and the usage +
+eviction trackers with whatever is already resident in L2 — so a fresh
+coordinator does not start from zero usage. Set
 ``LMCACHE_MP_COORDINATOR_ENABLE_STARTUP_RESYNC=False`` to skip this
 phase. Best-effort: resync failures are logged and the manager gives
 up; the ongoing usage-event stream from MP servers eventually corrects
@@ -619,68 +623,10 @@ entry has the same fields as the ``GET /quota/{cache_salt}`` response.
     curl -s http://localhost:9300/quota
     # -> {"total_gb": 0.005, "by_cache_salt": [...]}
 
-``POST /quota/events``
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Ingest a batch of usage events. Sent automatically by reporting MP servers; not
-usually called by hand.
-
-**Request body:**
-
-.. list-table::
-   :header-rows: 1
-   :widths: 18 16 66
-
-   * - Field
-     - Type
-     - Description
-   * - ``instance_id``
-     - string
-     - The MP server that produced this batch.
-   * - ``seq``
-     - int
-     - Monotonic per-instance sequence number (``>= 1``); supports future gap
-       detection of lost batches.
-   * - ``tier``
-     - string
-     - Optional (default ``l2``). Cache tier the events apply to.
-   * - ``events``
-     - list[object]
-     - The events to record. Each is ``{"type", "key", "bytes"}``: ``type`` is
-       ``"store"``, ``"lookup"``, or ``"delete"``; ``key`` is the encoded object
-       key; ``bytes`` (``>= 0``) is the stored size — counted for ``store`` and
-       ignored for ``lookup`` / ``delete`` (a ``delete`` subtracts the size
-       recorded at the original ``store``).
-
-**Response** (``200 OK``):
-
-.. code-block:: json
-
-    {"recorded": 3}
-
-``recorded`` is the number of events processed.
-
-**HTTP status codes:**
-
-- ``200``: events processed.
-- ``422``: request body fails field-level validation.
-
-**Example:**
-
-.. code-block:: bash
-
-    curl -s -X POST http://localhost:9300/quota/events \
-        -H 'Content-Type: application/json' \
-        -d '{
-            "instance_id": "server-1",
-            "seq": 1,
-            "events": [
-                {"type": "store",  "key": {"chunk_hash_hex": "aa", "model_name": "m", "kv_rank": 0, "cache_salt": "user-a"}, "bytes": 1024},
-                {"type": "lookup", "key": {"chunk_hash_hex": "aa", "model_name": "m", "kv_rank": 0, "cache_salt": "user-a"}, "bytes": 0},
-                {"type": "delete", "key": {"chunk_hash_hex": "aa", "model_name": "m", "kv_rank": 0, "cache_salt": "user-a"}, "bytes": 0}
-            ]
-        }'
-    # -> {"recorded": 3}
+Usage events arrive on the fleet cache-event stream
+(``POST /directory/events``); there is no separate quota ingestion
+endpoint. See ``docs/design/v1/mp_coordinator/cache_events.md`` for the
+batch format and routing semantics.
 
 Cache control
 -------------
