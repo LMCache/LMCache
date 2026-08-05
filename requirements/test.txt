@@ -8,3 +8,8 @@ pytest-html>=3.2,<5.0  # 4.x requires external assets; 3.2 is stable
 jinja2<3.2
 python-multipart
 openai
+# Regenerates the mp-mode gRPC stubs (lmcache_mq_pb2*.py) at test time --
+# those files are not checked into git and are generated lazily on first
+# import. Keep the major.minor aligned with ``grpcio`` in common.txt so
+# the generated gencode matches the protobuf runtime.
+grpcio-tools>=1.62

@@ -1,82 +1,69 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Generated protobuf / gRPC stubs (kept out of git).
+"""Generated protobuf / gRPC stubs.
 
-The ``*_pb2.py`` / ``*_pb2_grpc.py`` modules live here on disk but are
-never checked in.  They are produced from the ``.proto`` sources under
-``../proto/`` by :mod:`._generate`, which we invoke automatically on
-first import (and again if the previously generated stubs turn out to
-be incompatible with the local ``protobuf`` runtime -- typical after a
-python-environment change).
+The ``*_pb2.py`` / ``*_pb2_grpc.py`` modules are produced from
+``../proto/lmcache_mq.proto`` by :mod:`._generate`.  They are **not**
+checked into git (see ``.gitignore``); the ``.proto`` file is the single
+source of truth.  On first import this package generates them lazily, so
+neither developers nor CI have to run a manual codegen step -- they only
+need ``grpcio-tools`` available at generation time (it ships in
+``requirements/test.txt``).
 
 Regenerate manually after editing the ``.proto`` source::
 
     python -m lmcache.v1.multiprocess.transport.grpc_impl._proto_gen._generate
 
-Requires ``grpcio-tools`` at generation time; a missing toolchain or
-an unrecoverable version mismatch raises ``ImportError``, which the
-parent ``transport/__init__.py`` swallows just like a missing
-``grpcio``.
+``grpcio-tools`` is only needed at generation time (dev / CI), never on
+the pure-runtime install path once the stubs exist.
 """
 
 # Standard
-from pathlib import Path
 import importlib
 import os
 
-# First Party
-from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import _generate
 
-_HERE = Path(__file__).resolve().parent
-_PB2 = _HERE / "lmcache_mq_pb2.py"
-_PB2_GRPC = _HERE / "lmcache_mq_pb2_grpc.py"
-_PKG = "lmcache.v1.multiprocess.transport.grpc_impl._proto_gen"
-_HEALTHCHECK_ENV = "LMCACHE_MQ_PROTO_GEN_HEALTHCHECK"
+def _import_stubs():
+    """Import and return the ``(pb2, pb2_grpc)`` module pair.
 
-
-def _try_import():
-    """Import the two stub modules; propagate any failure to the caller.
-
-    A version-mismatched ``*_pb2.py`` raises
-    :class:`google.protobuf.runtime_version.VersionError` at import time,
-    which subclasses ``Exception`` (not ``ImportError``); catch broadly
-    so we can wipe and regenerate for any kind of stale-stub failure.
+    Raises ``ImportError`` if the stubs have not been generated yet.
     """
-    pb2 = importlib.import_module(_PKG + ".lmcache_mq_pb2")
-    pb2_grpc = importlib.import_module(_PKG + ".lmcache_mq_pb2_grpc")
+    base = __name__
+    pb2 = importlib.import_module(f"{base}.lmcache_mq_pb2")
+    pb2_grpc = importlib.import_module(f"{base}.lmcache_mq_pb2_grpc")
     return pb2, pb2_grpc
 
 
-def _wipe_stubs() -> None:
-    for path in (_PB2, _PB2_GRPC):
-        path.unlink(missing_ok=True)
+def _generate_stubs_once():
+    """Generate the stubs by shelling out to :mod:`._generate`.
 
+    Raises ``ImportError`` with an actionable message if generation
+    fails (e.g. ``grpcio-tools`` missing).
+    """
+    # First Party
+    from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import _generate
 
-def _load_or_generate():
-    # Inside _generate's health-check subprocess we must never
-    # regenerate: propagate whatever the import raises so the parent
-    # sees a non-zero rc and can wipe the stubs itself.
-    if os.environ.get(_HEALTHCHECK_ENV) == "1":
-        return _try_import()
-
-    if _PB2.exists() and _PB2_GRPC.exists():
-        try:
-            return _try_import()
-        except Exception:
-            # Stubs on disk are stale (e.g. protobuf gencode/runtime
-            # mismatch after a venv switch); regenerate below.
-            _wipe_stubs()
-
-    rc = _generate.main()
-    if rc != 0 or not (_PB2.exists() and _PB2_GRPC.exists()):
+    if _generate.main() != 0:
         raise ImportError(
-            "failed to generate gRPC stubs for LMCache mp transport; "
-            "install 'grpcio-tools' (matching your grpc runtime) or run "
-            "'python -m lmcache.v1.multiprocess.transport."
-            "grpc_impl._proto_gen._generate' manually"
+            "gRPC stubs for the mp transport are missing and could not be "
+            "generated. Install the dev/test extras (which include "
+            "grpcio-tools), or run: python -m lmcache.v1.multiprocess."
+            "transport.grpc_impl._proto_gen._generate"
         )
-    return _try_import()
 
 
-lmcache_mq_pb2, lmcache_mq_pb2_grpc = _load_or_generate()
+# ``_generate`` re-imports this package inside its health-check
+# subprocess; the env flag breaks that recursion so a genuinely broken
+# generation surfaces as the original ImportError instead of looping.
+_IN_HEALTHCHECK = os.environ.get("LMCACHE_MQ_PROTO_GEN_HEALTHCHECK") == "1"
+
+try:
+    lmcache_mq_pb2, lmcache_mq_pb2_grpc = _import_stubs()
+except ImportError:
+    if _IN_HEALTHCHECK:
+        lmcache_mq_pb2 = None  # type: ignore[assignment]
+        lmcache_mq_pb2_grpc = None  # type: ignore[assignment]
+    else:
+        _generate_stubs_once()
+        lmcache_mq_pb2, lmcache_mq_pb2_grpc = _import_stubs()
 
 __all__ = ["lmcache_mq_pb2", "lmcache_mq_pb2_grpc"]
