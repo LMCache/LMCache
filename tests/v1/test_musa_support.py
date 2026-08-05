@@ -212,7 +212,7 @@ def test_create_gpu_connector_layerwise_rejected_on_hpu(
     Previously, ``use_layerwise=True`` on HPU silently fell through into
     ``VLLMPagedMemLayerwiseGPUConnector`` — the CUDA layerwise connector —
     which then crashed on HPU tensors when constructing
-     ``torch.cuda.Stream()``. The guard must reject this combination with a
+    ``torch.cuda.Stream()``. The guard must reject this combination with a
     clear error before any device-specific construction.
     """
     _patch_device(monkeypatch, "hpu")

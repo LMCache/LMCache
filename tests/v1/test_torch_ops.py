@@ -11,17 +11,12 @@ import pytest
 import torch
 
 # First Party
-from lmcache import torch_device_type
 from lmcache.v1.multiprocess.native_completion import (
     DeviceHostFuncDispatcher,
     submit_callback_to_stream,
 )
 from lmcache.v1.platform import torch_ops as _py_ops
 
-pytestmark = pytest.mark.skipif(
-    torch_device_type != "cuda",
-    reason="requires cuda torch_device_type",
-)
 
 # ==========================================
 # 0. utils functions.

@@ -288,7 +288,7 @@ class TestTRTLLMGPUConnector:
         # First Party
         from lmcache.v1.gpu_connector.gpu_connectors import TRTLLMGPUConnector
 
-        device = torch.device(torch_device_type)
+        device = torch.device(f"{torch_device_type}:0")
         c = TRTLLMGPUConnector(
             num_kv_heads=2,
             head_dim=64,
@@ -306,7 +306,7 @@ class TestTRTLLMGPUConnector:
         # First Party
         from lmcache.v1.gpu_connector.gpu_connectors import TRTLLMGPUConnector
 
-        device = torch.device(torch_device_type)
+        device = torch.device(f"{torch_device_type}:0")
         c = TRTLLMGPUConnector(
             num_kv_heads=2,
             head_dim=64,
@@ -323,7 +323,7 @@ class TestTRTLLMGPUConnector:
         # First Party
         from lmcache.v1.gpu_connector.gpu_connectors import TRTLLMGPUConnector
 
-        device = torch.device(torch_device_type)
+        device = torch.device(f"{torch_device_type}:0")
         nh, bs, hs = 2, 16, 64
         nb, nl, kv = 4, 4, 2
         flat = nh * bs * hs
