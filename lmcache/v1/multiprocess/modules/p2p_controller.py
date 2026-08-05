@@ -12,10 +12,14 @@ import httpx
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.native_storage_ops import Bitmap
 from lmcache.v1.distributed.api import (
+    AttnWindowDesc,
     MemoryLayoutDesc,
     ObjectKey,
     PrefetchHandle,
+    PrefetchRequestSpec,
+    TrimPolicy,
 )
 from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import P2PL2AdapterConfig
 from lmcache.v1.distributed.transfer_channel import (
@@ -222,16 +226,17 @@ class P2PController:
     def p2p_lookup_and_lock(
         self,
         keys: list[ObjectKey],
-        layout_desc: MemoryLayoutDesc,
+        group_layout_descs: dict[int, MemoryLayoutDesc],
     ) -> int:
         """Submit a lookup and lock.
 
-        After L2 prefetch is enabled, the found chunks will be feteched
-        from L2 to L1.
+        Read-locks every L1-resident key (sparse; gaps allowed), not only
+        the contiguous prefix.
 
         Args:
             keys: the list of object keys to look up and lock.
-            layout_desc: memory layout description of the objects.
+            group_layout_descs: memory layout of the objects, per object
+                group.
 
         Returns:
             A unique task id (int) for querying the lookup status later
@@ -242,8 +247,16 @@ class P2PController:
 
         # NOTE: skip_l2=True -- only objects already resident in L1 are locked.
         handle = self._ctx.storage_manager.submit_prefetch_task(
-            keys,
-            layout_desc,
+            PrefetchRequestSpec(
+                keys=keys,
+                group_layout_descs=group_layout_descs,
+                # SPARSE + skip_l2 never folds windows; the attn_desc only
+                # has to cover the same object groups as group_layout_descs.
+                attn_desc=AttnWindowDesc(
+                    num_chunks_in_sw=[-1] * len(group_layout_descs)
+                ),
+                policy=TrimPolicy.SPARSE,
+            ),
             external_request_id=f"p2p-{task_id}",
             skip_l2=True,
         )
@@ -252,7 +265,7 @@ class P2PController:
             self._jobs[task_id] = _P2PLookupJob(handle=handle, keys=keys)
 
         logger.debug(
-            "P2P lookup submitted: task_id=%d, %d keys, %d L1 prefix hits",
+            "P2P lookup submitted: task_id=%d, %d keys, %d L1 hits",
             task_id,
             len(keys),
             len(handle.l1_found_indices),
@@ -295,7 +308,7 @@ class P2PController:
             # Still in progress (only possible once L2 prefetch is enabled).
             return None
 
-        addresses = self._build_addresses(job, found.count_leading_ones())
+        addresses = self._build_addresses(job, found)
 
         with self._job_lock:
             self._jobs.pop(task_id, None)
@@ -321,23 +334,24 @@ class P2PController:
     def _build_addresses(
         self,
         job: _P2PLookupJob,
-        hit_count: int,
+        found: Bitmap,
     ) -> list[TransferChannelAddress]:
         """Build the per-key transfer addresses for a completed lookup.
 
-        The first ``hit_count`` keys form the locked L1 prefix; their addresses
-        are read via ``unsafe_read``. Every remaining key gets an invalid
-        address.
+        Keys at set indices of ``found`` are the locked L1 hits; their
+        addresses are read via ``unsafe_read``. Every other key gets an
+        invalid address.
         """
         addresses = [_INVALID_ADDRESS] * len(job.keys)
-        if hit_count == 0:
+        found_indices = found.get_indices_list()
+        if not found_indices:
             return addresses
 
-        found_keys = job.keys[:hit_count]
+        found_keys = [job.keys[i] for i in found_indices]
         good_keys, good_objs = self._ctx.storage_manager.unsafe_read(found_keys)
         obj_by_key = dict(zip(good_keys, good_objs, strict=True))
 
-        for i, key in enumerate(found_keys):
+        for i, key in zip(found_indices, found_keys, strict=True):
             obj = obj_by_key.get(key)
             if obj is None:
                 # Locked but unreadable (e.g. evicted under a race); leave it

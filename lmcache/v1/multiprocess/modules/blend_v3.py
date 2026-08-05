@@ -7,12 +7,14 @@ retrieve scatters into the request's paged blocks.
 """
 
 # Standard
-from dataclasses import dataclass
+from collections import OrderedDict
+from dataclasses import dataclass, field
 from queue import Empty as QueueEmpty
 from queue import Queue
 from typing import TYPE_CHECKING, Any
 import threading
 import time
+import weakref
 
 if TYPE_CHECKING:
     # First Party
@@ -31,11 +33,13 @@ from lmcache.logging import init_logger
 from lmcache.utils import check_interprocess_event_support
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
+    PrefetchRequestSpec,
     TrimPolicy,
     ipc_key_to_object_keys,
 )
 from lmcache.v1.distributed.storage_manager import PrefetchHandle
 from lmcache.v1.gpu_connector.gpu_ops import lmcache_memcpy_async_h2d
+from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.mp_coordinator.blend_client import PENDING
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.custom_types import (
@@ -61,19 +65,111 @@ from lmcache.v1.multiprocess.token_hasher import (
     rolling_hash_windows_numba,
     update_table_id_numba,
 )
-from lmcache.v1.platform.base_cache_context import BaseCacheContext
+from lmcache.v1.platform.base.cache_context import BaseCacheContext
 import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
 
+#: Distinct no-op-success reasons already reported (bounded: a fixed set of
+#: call sites), so the log costs nothing after the first occurrence of each.
+_NOOP_REASONS_SEEN: set[str] = set()
+
+# Plan-then-execute retrieve: one native call enqueues all fill/rope/scatter
+# in a single GIL release, with the plan encoded as numpy int64 tables (one
+# pybind crossing). The Python wave loop stays as fallback for c_ops builds
+# that predate the op (and for inputs the planner declines).
+_HAS_NATIVE_RETRIEVE_PLAN = hasattr(lmc_ops, "execute_cb_retrieve_plan_flat")
+
+# torch dtype -> at::ScalarType (rope dispatch); missing -> Python fallback.
+_TORCH_TO_AT_SCALAR = {
+    torch.float16: 5,  # at::ScalarType::Half
+    torch.float32: 6,  # at::ScalarType::Float
+    torch.bfloat16: 15,  # at::ScalarType::BFloat16
+}
+
+
+# Default for cb_register_rope's wire-typed group_rot parameter (legacy: no
+# declared windows). Never mutated — the handler only iterates it.
+_EMPTY_GROUP_ROT: list[list[int]] = []
+
 
 @dataclass
 class _CBRopeState:
-    """Per-instance RoPE state IPC-shared from vLLM; dangles on reallocate."""
+    """Per-instance RoPE state IPC-shared from vLLM; dangles on reallocate.
+
+    Models with per-layer-type RoPE (distinct local/global theta)
+    register one cache per distinct rope and a per-layer index into
+    ``cos_sin_caches``.
+    """
 
     head_size: int
     is_neox_style: bool  # NeoX = contiguous halves; else GPT-J.
-    cos_sin_cache: torch.Tensor
+    cos_sin_caches: list[torch.Tensor]
+    group_to_cache: list[int]  # engine group idx -> cache idx; empty = cache 0
+    # Per-group rotation window ``(offset_elems, width_elems)``; ``None``
+    # skips re-RoPE for the group, empty list = legacy inferred geometry.
+    # Required for MLA: inference would rotate the latent's content dims.
+    group_rot: "list[tuple[int, int] | None]" = field(default_factory=list)
+
+    def rot_for_group(
+        self, engine_group_idx: int, dtype: "torch.dtype | None" = None
+    ) -> "tuple[int, int] | None":
+        """The rotation window for one kernel group.
+
+        Args:
+            engine_group_idx: The kernel group's engine group index.
+            dtype: The kernel group's buffer dtype, when known. One engine
+                group can hold several *kernel* groups (GLM: the bf16 latent
+                and the uint8 fp8 index cache both sit in engine group 0), so
+                under a DECLARED map a non-float kernel group is skipped —
+                the rope kernel cannot rotate quantized rows, and the
+                declared window describes the family's float plane. Legacy
+                registrations keep today's behavior (no dtype-based skip).
+
+        Returns:
+            ``(offset_elems, width_elems)``, or ``None`` when the group's
+            re-RoPE is skipped (declared ``[]``, or non-float under a
+            declared map). Legacy registrations (empty ``group_rot``) get
+            ``(0, head_size)``.
+
+        Raises:
+            RuntimeError: If ``engine_group_idx`` is outside a non-empty map.
+        """
+        if not self.group_rot:
+            return (0, self.head_size)
+        if dtype is not None and not dtype.is_floating_point:
+            return None
+        if engine_group_idx >= len(self.group_rot):
+            raise RuntimeError(
+                f"CB re-RoPE: engine group {engine_group_idx} has no rope "
+                f"geometry (map covers {len(self.group_rot)} groups)."
+            )
+        return self.group_rot[engine_group_idx]
+
+    def cache_for_group(self, engine_group_idx: int) -> torch.Tensor:
+        """The cos/sin cache for one engine group.
+
+        Engine groups partition layers by attention type, and rope follows
+        attention type (sliding=local theta, full=global theta),
+        so each engine group has exactly one cache.
+
+        Args:
+            engine_group_idx: The kernel group's engine group index.
+
+        Returns:
+            The group's cos/sin cache tensor.
+
+        Raises:
+            RuntimeError: If ``engine_group_idx`` is outside the map.
+        """
+        if not self.group_to_cache:
+            return self.cos_sin_caches[0]
+        if engine_group_idx >= len(self.group_to_cache):
+            raise RuntimeError(
+                f"CB re-RoPE: engine group {engine_group_idx} has no rope "
+                f"cache mapping (map covers {len(self.group_to_cache)} groups)."
+            )
+        return self.cos_sin_caches[self.group_to_cache[engine_group_idx]]
 
 
 @dataclass
@@ -323,6 +419,108 @@ def _unique_token_coverage(results: list[CBMatchResult]) -> int:
     return coverage
 
 
+def _group_slot_mappings(
+    resolved_groups: "list[tuple[torch.Tensor, int]]", pos: torch.Tensor
+) -> "list[torch.Tensor]":
+    """Per-group paged slot ids for the logical positions ``pos``
+    (``block_ids[pos // bs] * bs + pos % bs``). The div/mod pair is shared
+    across groups with the same block size — dispatch count is the cost that
+    matters under the shared GIL."""
+    div_mod: "dict[int, tuple[torch.Tensor, torch.Tensor]]" = {}
+    mappings: "list[torch.Tensor]" = []
+    for group_block_ids, group_bs in resolved_groups:
+        pair = div_mod.get(group_bs)
+        if pair is None:
+            pair = (pos // group_bs, pos % group_bs)
+            div_mod[group_bs] = pair
+        mappings.append(group_block_ids[pair[0]] * group_bs + pair[1])
+    return mappings
+
+
+def _cb_group_rope_geometry(
+    group: Any,
+    kv_size: int,
+    hidden_dim: int,
+    head_size: int,
+    group_idx: int,
+    rot: "tuple[int, int] | None" = None,
+) -> "tuple[bool, int, int, int]":
+    """Per-group re-RoPE geometry rules, shared by the batched rope path and
+    the retrieve-plan builder so they cannot drift.
+
+    Fused blocks-first K/V packs K+V into a doubled head dim (kv_size==1);
+    detect it so only the K half is re-RoPE'd in place. kv_size==1 without
+    fused packing is the M3 key-only index side cache; kv_size==2 is main
+    K/V. In every case only the K plane is rotated.
+
+    ``rot`` is the declared ``(offset_elems, width_elems)`` rotation window;
+    offset > 0 means MLA (rope dims trail the row) — the row is one "head"
+    and only ``[offset, offset + width)`` rotates. MLA groups must arrive
+    with ``rot`` set: undeclared, a 576-wide latent passes the inference
+    checks below as 9 x 64 heads and its content dims get rotated.
+
+    Returns:
+        ``(fused_packed, per_head, n_heads, rot_offset)`` — per-head width is
+        ``2 * head_size`` for fused-packed layouts; ``rot_offset`` is the
+        element offset of the rotation window within each per-head row (0
+        for every non-MLA layout).
+
+    Raises:
+        RuntimeError: On a compressed (compress_ratio != 1) layout, a
+            kv_size other than 2 (K/V) or 1 (key-only index), a
+            head_size/hidden_dim mismatch, or a declared window that does
+            not fit the row.
+    """
+    if group.tokens_per_block != group.slots_per_block:
+        raise RuntimeError(
+            f"CB v3: group {group_idx} is compressed "
+            f"(tokens_per_block={group.tokens_per_block}, "
+            f"slots_per_block={group.slots_per_block}); "
+            f"compressed layouts unsupported."
+        )
+    if rot is not None and rot[0] > 0:
+        rot_offset, rot_width = rot
+        if kv_size != 1:
+            raise RuntimeError(
+                f"CB v3: group {group_idx} declares an MLA rope window "
+                f"{rot} but has kv_size={kv_size}; MLA latents are a "
+                "single plane (kv_size 1)."
+            )
+        if rot_offset + rot_width != hidden_dim:
+            raise RuntimeError(
+                f"CB v3: group {group_idx} rope window {rot} does not end "
+                f"the row (hidden_dim={hidden_dim}); MLA latents are "
+                "[content | rope]."
+            )
+        return False, hidden_dim, 1, rot_offset
+    if kv_size not in (1, 2):
+        raise RuntimeError(
+            f"CB v3: group {group_idx} has kv_size={kv_size}; only K/V "
+            "(2), fused-packed K/V, key-only (1), and declared-MLA "
+            "layouts are supported."
+        )
+    _ekf = getattr(group, "engine_kv_format", None)
+    # Both spellings of blocks-first fused K/V must be recognised. The vLLM
+    # detector used to split the trailing 2*head_size axis and report
+    # *_TWO_HS; it now keeps the tensor raw and reports *_CS. Matching only
+    # *_TWO_HS leaves fused_packed False on current vLLM, which halves
+    # per_head, doubles n_heads, and re-RoPEs across the V plane.
+    fused_packed = _ekf is not None and int(_ekf) in (
+        int(lmc_ops.EngineKVFormat.NL_X_NB_NH_BS_TWO_HS),
+        int(lmc_ops.EngineKVFormat.NL_X_NB_BS_NH_TWO_HS),
+        int(lmc_ops.EngineKVFormat.NL_X_NB_NH_BS_CS),
+        int(lmc_ops.EngineKVFormat.NL_X_NB_BS_NH_CS),
+    )
+    per_head = head_size * (2 if fused_packed else 1)
+    n_heads = hidden_dim // per_head
+    if n_heads * per_head != hidden_dim:
+        raise RuntimeError(
+            f"CB rope: group {group_idx} hidden_dim ({hidden_dim}) not a "
+            f"multiple of per-head width ({per_head}; fused={fused_packed})."
+        )
+    return fused_packed, per_head, n_heads, 0
+
+
 class BlendV3Module(InstanceLivenessTarget):
     """Paged-aware V3 CacheBlend. Wraps LMCacheDrivenTransfer STORE to register
     fingerprints; serves CB rope/lookup/retrieve RPCs; reads cross-module
@@ -335,6 +533,16 @@ class BlendV3Module(InstanceLivenessTarget):
         coordinator: "BlendCoordinatorClient | None" = None,
         enable_segmented_prefix: bool = False,
     ):
+        # CacheBlend assumes every chunk lives in one object per rank; a
+        # separated-group layout would silently mismatch its fingerprint and
+        # retrieve paths, so refuse it outright.
+        # TODO(Weishu): support separate object groups in CacheBlend.
+        if ctx.separate_object_groups:
+            raise RuntimeError(
+                "CacheBlend only supports the single-object-group layout; "
+                "run without --separate-object-groups (it is off by default)."
+            )
+
         self._ctx = ctx
         self._transfer_module = lmcache_driven_transfer
         # Server config (--enable-segmented-prefix): retain the gapped prefix on
@@ -351,6 +559,25 @@ class BlendV3Module(InstanceLivenessTarget):
         # L2 opt: cache TP-expanded obj_keys at lookup, pop at retrieve.
         self._lookup_obj_keys_cache: dict[str, dict[bytes, list]] = {}
         self._lookup_obj_keys_lock = threading.Lock()
+
+        # vLLM may call retrieve twice per request (partial- then full-block
+        # alloc): ranges already scattered, so the repeat call skips them.
+        # Bounded LRU keyed by (request id, WORKER id) -- at TP>1 each worker
+        # issues its own retrieve and scatters into its own KV buffers, so the
+        # key must include the worker or later ranks skip work they never did.
+        self._cb_applied_match_ranges: "OrderedDict[tuple[str, int | None], set[tuple[bytes, int, int]]]" = OrderedDict()  # noqa: E501
+
+        # Request-invariant retrieve-plan specs per GPU context (entries die
+        # with the context). The cached tuple holds the rope_state it was
+        # resolved against so a re-registration invalidates by identity.
+        self._cb_plan_invariants: "weakref.WeakKeyDictionary[Any, tuple]" = (
+            weakref.WeakKeyDictionary()
+        )
+        # Persistent pinned + device slot-mapping staging per GPU context,
+        # grown on demand (see _cb_slot_buffers).
+        self._cb_slot_staging: "weakref.WeakKeyDictionary[Any, tuple]" = (
+            weakref.WeakKeyDictionary()
+        )
 
         # Non-blocking cb_unified_lookup poll state (submit-once, poll-on-recall)
         # so the handler never holds a worker thread across the L2->L1 loads.
@@ -441,69 +668,160 @@ class BlendV3Module(InstanceLivenessTarget):
     def cb_register_rope(
         self,
         instance_id: int,
-        cos_sin_cache_ipc: DeviceIPCWrapper,
+        cos_sin_caches_ipc: list[DeviceIPCWrapper],
         head_size: int,
         is_neox_style: bool,
+        group_to_cache: list[int],
+        # Annotation must equal the protocol payload class exactly — the MQ
+        # server's add_handler signature check (mq.py same_type) is strict.
+        # Direct (non-wire) callers may still pass tuples/None entries; the
+        # normalization below accepts them.
+        group_rot: list[list[int]] = _EMPTY_GROUP_ROT,
     ) -> None:
         """Bolt CB re-RoPE state onto an already-registered KV-cache instance.
 
         Idempotent; ``REGISTER_KV_CACHE`` must precede this. Strips any
-        YaRN/longrope mscale baked into the rope cache so re-RoPE stays a pure
-        rotation.
+        YaRN/longrope mscale baked into each rope cache so re-RoPE stays a
+        pure rotation.
 
         Args:
             instance_id (int): KV-cache instance to attach rope state to.
-            cos_sin_cache_ipc (DeviceIPCWrapper): IPC handle to vLLM's cos/sin
-                rope cache.
+            cos_sin_caches_ipc (list[DeviceIPCWrapper]): IPC handles to vLLM's
+                cos/sin rope cache(s) — one per distinct rope (dual-RoPE
+                models send local/global); single-rope models send one.
             head_size (int): Rotary head dimension.
             is_neox_style (bool): True for NeoX (contiguous halves), else GPT-J.
+            group_to_cache (list[int]): Per-engine-group index into the
+                caches list; empty means every group uses cache 0.
+            group_rot: Per-engine-group rotation window ``(offset_elems,
+                width_elems)`` into each token row, or ``None`` per entry to
+                skip that group's re-RoPE. Empty/omitted = legacy inference
+                (rotate ``head_size`` dims at offset 0). MLA models must
+                declare this — e.g. GLM/DeepSeek latents are
+                ``(kv_lora_rank, qk_rope_head_dim)`` — because a single-plane
+                MLA row is indistinguishable from a key-only cache to the
+                legacy inference and would get its content dims rotated.
 
         Raises:
-            ValueError: If ``instance_id`` has no registered KV cache.
+            ValueError: If ``instance_id`` has no registered KV cache, the
+                cache list is empty, ``group_to_cache`` references a missing
+                cache or does not cover every engine group of the registered
+                model, or a ``group_rot`` entry is malformed.
         """
-        if self._transfer_module.get_and_touch_context_entry(instance_id) is None:
+        entry = self._transfer_module.get_and_touch_context_entry(instance_id)
+        if entry is None:
             raise ValueError(
                 f"Instance {instance_id} has no paged KV cache registered; "
                 "send REGISTER_KV_CACHE before CB_REGISTER_ROPE_V3."
             )
-
-        cos_sin_cache = cos_sin_cache_ipc.to_tensor()
-        # YaRN/longrope bake an mscale m into the rope cache (cos²+sin²=m²≠1).
-        # vLLM already folds m into stored K, but CB re-RoPE assumes a pure
-        # rotation, so an un-normalized m injects an m² error per K element
-
-        _c32 = cos_sin_cache.to(torch.float32)
-        _half = _c32.shape[1] // 2
-        _m = float((_c32[:, :_half] ** 2 + _c32[:, _half:] ** 2).mean().sqrt())
-        if abs(_m - 1.0) >= 1e-3:
-            logger.info(
-                "CB re-RoPE: stripping rope-cache mscale=%.4f (m²=%.4f → K "
-                "inflation if uncorrected) → unit magnitude",
-                _m,
-                _m * _m,
+        if not cos_sin_caches_ipc:
+            raise ValueError("CB_REGISTER_ROPE_V3 requires >=1 cos/sin cache.")
+        if group_to_cache:
+            if min(group_to_cache) < 0 or max(group_to_cache) >= len(
+                cos_sin_caches_ipc
+            ):
+                raise ValueError(
+                    f"group_to_cache {group_to_cache} contains indices outside "
+                    f"[0, {len(cos_sin_caches_ipc)}) for the sent cache(s)."
+                )
+            # Fail at registration, not mid-retrieve: every engine group of
+            # the registered model must have a cache mapping.
+            max_eg_idx = max(
+                (
+                    g.engine_group_idx
+                    for g in entry.cache_context.kv_layer_groups_manager.kernel_groups
+                ),
+                default=-1,
             )
-            cos_sin_cache = (_c32 / _m).to(cos_sin_cache.dtype)
-        else:
-            logger.info(
-                "CB re-RoPE: rope-cache magnitude≈%.4f (unit); no mscale "
-                "normalization needed",
-                _m,
-            )
+            if len(group_to_cache) <= max_eg_idx:
+                raise ValueError(
+                    f"group_to_cache covers {len(group_to_cache)} engine "
+                    f"group(s) but the registered model has engine groups up "
+                    f"to index {max_eg_idx}."
+                )
+
+        # Normalize declared rope windows (serialization turns tuples into
+        # lists); validate here so a bad registration fails loudly instead of
+        # mid-retrieve.
+        norm_rot: "list[tuple[int, int] | None]" = []
+        for eg_idx, rot_entry in enumerate(group_rot or []):
+            if rot_entry is None or len(rot_entry) == 0:
+                # None (direct call) / [] (wire encoding): skip this group.
+                norm_rot.append(None)
+                continue
+            if len(rot_entry) != 2 or int(rot_entry[0]) < 0 or int(rot_entry[1]) <= 0:
+                raise ValueError(
+                    f"group_rot[{eg_idx}] = {rot_entry!r}: expected "
+                    "(offset >= 0, width > 0) or None."
+                )
+            norm_rot.append((int(rot_entry[0]), int(rot_entry[1])))
+
+        cos_sin_caches: list[torch.Tensor] = []
+        for cache_idx, cache_ipc in enumerate(cos_sin_caches_ipc):
+            cos_sin_cache = cache_ipc.to_tensor()
+            # YaRN/longrope bake an mscale m into the rope cache
+            # (cos²+sin²=m²≠1). vLLM already folds m into stored K, but CB
+            # re-RoPE assumes a pure rotation, so an un-normalized m injects
+            # an m² error per K element.
+            _c32 = cos_sin_cache.to(torch.float32)
+            _half = _c32.shape[1] // 2
+            _m = float((_c32[:, :_half] ** 2 + _c32[:, _half:] ** 2).mean().sqrt())
+            if abs(_m - 1.0) >= 1e-3:
+                logger.info(
+                    "CB re-RoPE: cache %d: stripping rope-cache mscale=%.4f "
+                    "(m²=%.4f → K inflation if uncorrected) → unit magnitude",
+                    cache_idx,
+                    _m,
+                    _m * _m,
+                )
+                cos_sin_cache = (_c32 / _m).to(cos_sin_cache.dtype)
+            cos_sin_caches.append(cos_sin_cache)
+
         self._cb_rope_state[instance_id] = _CBRopeState(
             head_size=head_size,
             is_neox_style=is_neox_style,
-            cos_sin_cache=cos_sin_cache,
+            cos_sin_caches=cos_sin_caches,
+            group_to_cache=list(group_to_cache),
+            group_rot=norm_rot,
         )
 
         logger.info(
             "Registered CB rope state for instance %d "
-            "(cos_sin_cache shape=%s dtype=%s, head_size=%d, is_neox=%s)",
+            "(%d cache(s), shapes=%s dtype=%s, head_size=%d, is_neox=%s, "
+            "group_map=%s, group_rot=%s)",
             instance_id,
-            tuple(cos_sin_cache.shape),
-            cos_sin_cache.dtype,
+            len(cos_sin_caches),
+            [tuple(c.shape) for c in cos_sin_caches],
+            cos_sin_caches[0].dtype,
             head_size,
             is_neox_style,
+            "uniform" if not group_to_cache else str(group_to_cache),
+            "legacy" if not norm_rot else str(norm_rot),
         )
+
+        # Pre-warm the retrieve-plan invariants + slot-mapping staging for
+        # this instance, off the retrieve critical path.
+        try:
+            entry = self._transfer_module.get_and_touch_context_entry(instance_id)
+            ctx = entry.cache_context if entry is not None else None
+            if ctx is not None:
+                self._cb_slot_buffers(
+                    ctx, ctx.kv_layer_groups_manager.num_kernel_groups, 1 << 16
+                )
+                rope_state = self._cb_rope_state[instance_id]
+                max_batch = ctx.max_batch_size
+                if self._cb_plan_invariants.get(ctx) is None:
+                    resolved = self._resolve_cb_plan_invariants(
+                        ctx, rope_state, max_batch
+                    )
+                    if resolved is not None:
+                        self._cb_plan_invariants[ctx] = (
+                            rope_state,
+                            max_batch,
+                            resolved,
+                        )
+        except Exception:
+            logger.debug("CB plan pre-warm skipped", exc_info=True)
 
     def cb_unregister_rope(self, instance_id: int) -> None:
         """Drop the instance's CB rope state; the paged KV cache is left intact.
@@ -664,10 +982,16 @@ class BlendV3Module(InstanceLivenessTarget):
             expanded_uidx.append(uidx)
 
         handle: PrefetchHandle = self._ctx.storage_manager.submit_prefetch_task(
-            uniq_keys,
-            layout_desc,
+            PrefetchRequestSpec(
+                keys=uniq_keys,
+                # TODO(Weishu): cacheblend assumes the single-object-group
+                # layout (enforced at server startup by requiring
+                # --no-separate-object-groups); support separate object
+                # groups here.
+                group_layout_descs={0: layout_desc},
+                policy=TrimPolicy.SPARSE,
+            ),
             external_request_id=key.request_id,
-            policy=TrimPolicy.SPARSE,
         )
         return handle, per_hash_obj_keys, expanded_uidx
 
@@ -704,6 +1028,16 @@ class BlendV3Module(InstanceLivenessTarget):
                 found_cb_match_result.append(r)
             else:
                 stale_hashes.append(r.hash)
+        # Stale drops silently shrink coverage (a fully-stale classify turns a
+        # matched request into a full recompute) — log so it is diagnosable.
+        if stale_hashes:
+            logger.warning(
+                "CB sparse classify for %s: %d found, %d stale of %d submitted",
+                key.request_id,
+                len(found_cb_match_result),
+                len(stale_hashes),
+                len(matches),
+            )
 
         # Reset strikes for confirmed hashes.
         if found_cb_match_result:
@@ -816,11 +1150,13 @@ class BlendV3Module(InstanceLivenessTarget):
         extra_count = compute_extra_count(tp_size, world_size)
         obj_keys = ipc_key_to_object_keys(key, chunk_hashes, [0])[0]
         handle = self._ctx.storage_manager.submit_prefetch_task(
-            obj_keys,
-            layout_desc,
-            extra_count=extra_count,
+            PrefetchRequestSpec(
+                keys=obj_keys,
+                group_layout_descs={0: layout_desc},
+                extra_count=extra_count,
+                policy=policy,
+            ),
             external_request_id=rid,
-            policy=policy,
         )
         return handle, world_size
 
@@ -853,11 +1189,16 @@ class BlendV3Module(InstanceLivenessTarget):
             # NOTE(Kuntai): assumes uniform world size and prefix-ordered keys
             # that break at the first miss.
             leading = bm.count_leading_ones() // ws
-            retained = (
-                sorted({ki // ws for ki in bm.get_indices_list()})
-                if segmented
-                else None
-            )
+            # Retain a chunk only if EVERY rank shard loaded (AND across the ws
+            # shards); a chunk missing any rank's shard is demoted to a gap.
+            if segmented:
+                shard_counts: dict[int, int] = {}
+                for ki in bm.get_indices_list():
+                    c = ki // ws
+                    shard_counts[c] = shard_counts.get(c, 0) + 1
+                retained = sorted(c for c, n in shard_counts.items() if n == ws)
+            else:
+                retained = None
         else:
             # No GPU context / no full chunk: nothing loaded.
             leading, retained = 0, ([] if segmented else None)
@@ -1383,60 +1724,477 @@ class BlendV3Module(InstanceLivenessTarget):
                 ``old_st`` to new position ``cur_st``.
 
         Raises:
-            RuntimeError: On a compressed (compress_ratio != 1) or MLA
-                (kv_size != 2) layout, or a head_size/hidden_dim mismatch.
+            RuntimeError: On a compressed (compress_ratio != 1) layout, a
+                kv_size other than 2 (K/V) or 1 (key-only index), or a
+                head_size/hidden_dim mismatch.
         """
         if not slots_to_rope:
             return
         num_groups = gpu_context.kv_layer_groups_manager.num_kernel_groups
         for group_idx in range(num_groups):
             group = gpu_context.kv_layer_groups_manager.kernel_groups[group_idx]
-            if group.tokens_per_block != group.slots_per_block:
-                raise RuntimeError(
-                    f"CB v3: group {group_idx} is compressed "
-                    f"(tokens_per_block={group.tokens_per_block}, "
-                    f"slots_per_block={group.slots_per_block}); "
-                    f"compressed layouts unsupported."
-                )
             all_slots = [
                 gpu_context.get_temp_kernel_group_buffer(slot_idx, group_idx)
                 for slot_idx in range(batch_len)
             ]
-            if all_slots[0].shape[0] != 2:
-                raise RuntimeError(
-                    f"CB v3: group {group_idx} has kv_size={all_slots[0].shape[0]}; "
-                    "MLA layouts unsupported."
-                )
+            rot = rope_state.rot_for_group(group.engine_group_idx, all_slots[0].dtype)
+            if rot is None:
+                # Skipped group (declared [], or quantized under a declared
+                # map): scattered as-is, positions left stale.
+                continue
             num_layers, slots, hidden_dim = all_slots[0].shape[1:]
-            n_heads = hidden_dim // rope_state.head_size
-            if n_heads * rope_state.head_size != hidden_dim:
-                raise RuntimeError(
-                    f"CB rope: group {group_idx} hidden_dim ({hidden_dim}) "
-                    f"not a multiple of head_size ({rope_state.head_size})."
-                )
-            slot_positions = torch.arange(
-                slots, device=all_slots[0].device, dtype=torch.long
+            fused_packed, per_head, n_heads, rot_offset = _cb_group_rope_geometry(
+                group,
+                int(all_slots[0].shape[0]),
+                int(hidden_dim),
+                rope_state.head_size,
+                group_idx,
+                rot,
             )
-            for slot_idx, old_st, cur_st in slots_to_rope:
-                tmp = all_slots[slot_idx]
-                k_flat = tmp[0].reshape(num_layers * slots, hidden_dim)
-                old_positions = (old_st + slot_positions).repeat(num_layers)
-                new_positions = (cur_st + slot_positions).repeat(num_layers)
-                k_view = k_flat.view(-1, n_heads, rope_state.head_size)
-                lmc_ops.rotary_embedding_k_fused(
-                    old_positions,
-                    new_positions,
-                    k_view,
-                    rope_state.head_size,
-                    rope_state.cos_sin_cache,
-                    rope_state.is_neox_style,
+            # Per-group rope cache: dual-RoPE models rotate each
+            # kernel group with its own theta's cos/sin.
+            group_cos_sin = rope_state.cache_for_group(group.engine_group_idx)
+            if rot_offset > 0 and int(group_cos_sin.shape[1]) != rot[1]:
+                raise RuntimeError(
+                    f"CB re-RoPE: group {group_idx} declares rope width "
+                    f"{rot[1]} but the cos/sin cache has rot_dim "
+                    f"{int(group_cos_sin.shape[1])}."
                 )
+            # slot ramp tiled across layers is invariant per (num_layers,
+            # slots) — cache it; each shifted slot then just adds its offset.
+            device = all_slots[0].device
+            sp_key = (str(device), num_layers, slots)
+            sp_cache = getattr(self, "_cb_sp_rep_cache", None)
+            if sp_cache is None:
+                sp_cache = {}
+                self._cb_sp_rep_cache = sp_cache
+            slot_positions_rep = sp_cache.get(sp_key)
+            if slot_positions_rep is None:
+                slot_positions_rep = torch.arange(
+                    slots, device=device, dtype=torch.long
+                ).repeat(num_layers)
+                sp_cache[sp_key] = slot_positions_rep
+            for slot_idx, old_st, cur_st in slots_to_rope:
+                # reshape returns an in-place view (tmp slots are contiguous).
+                k_view = all_slots[slot_idx][0].reshape(
+                    num_layers * slots, n_heads, per_head
+                )
+                if rot_offset > 0:
+                    # MLA latent: rotate only the trailing rope window. The
+                    # slice advances data_ptr to the window start; the kernel
+                    # addresses rows via the explicit head_stride (the full
+                    # row width), so the non-contiguous view is safe. It then
+                    # rotates rot_dim (= window width) dims from that base —
+                    # the content dims [0, rot_offset) are never touched.
+                    lmc_ops.rotary_embedding_k_fused_strided(
+                        old_st + slot_positions_rep,
+                        cur_st + slot_positions_rep,
+                        k_view[..., rot_offset:],
+                        per_head - rot_offset,  # window width
+                        per_head,  # head_stride: the full latent row
+                        group_cos_sin,
+                        rope_state.is_neox_style,
+                    )
+                elif fused_packed:
+                    # Strided kernel rotates only the K half of each slot.
+                    lmc_ops.rotary_embedding_k_fused_strided(
+                        old_st + slot_positions_rep,
+                        cur_st + slot_positions_rep,
+                        k_view,
+                        rope_state.head_size,
+                        per_head,  # head_stride: hop over the packed V half
+                        group_cos_sin,
+                        rope_state.is_neox_style,
+                    )
+                else:
+                    lmc_ops.rotary_embedding_k_fused(
+                        old_st + slot_positions_rep,
+                        cur_st + slot_positions_rep,
+                        k_view,
+                        rope_state.head_size,
+                        group_cos_sin,
+                        rope_state.is_neox_style,
+                    )
+
+    def _scatter_batch_to_paged(
+        self,
+        gpu_context: BaseCacheContext,
+        resolved_groups: "list[tuple[torch.Tensor, int]]",
+        batch: "list[tuple[CBMatchResult, Any]]",
+        head_size: int,
+    ) -> None:
+        """Scatter one tmp-slot batch into the paged KV, one launch per
+        (kernel group, tmp slot), straight from each slot's contiguous buffer
+        (no ``torch.cat``). A partially filled slot is narrowed first: the
+        kernel scatters ``size(2)`` tokens, so a full-capacity buffer would
+        mis-align every later slot against ``slot_mapping``.
+
+        Args:
+            gpu_context (GPUCacheContext): The instance's GPU cache context.
+            resolved_groups: Per kernel group ``(block_ids, block_size)``.
+            batch: ``(match, memory_obj)`` pairs; slot ``i`` holds ``batch[i]``.
+            head_size: RoPE head size forwarded to the kernel.
+        """
+        kgm = gpu_context.kv_layer_groups_manager
+        tok_counts = [int(r.cur_ed - r.cur_st) for (r, _) in batch]
+        pos = torch.cat(
+            [
+                torch.arange(
+                    r.cur_st,
+                    r.cur_ed,
+                    device=gpu_context.device,
+                    dtype=torch.long,
+                )
+                for (r, _) in batch
+            ]
+        )
+        slot_mappings = _group_slot_mappings(resolved_groups, pos)
+        for group_idx in range(kgm.num_kernel_groups):
+            _, group_bs = resolved_groups[group_idx]
+            slot_mapping = slot_mappings[group_idx]
+            # Per-group block count: under HMA the sliding group has fewer
+            # blocks than the full group, so gpu_context.num_blocks (group
+            # 0's) would truncate the other groups' bounds check.
+            page_buffer_size = kgm.kernel_groups[group_idx].shape_desc.nb * group_bs
+            tok_off = 0
+            for slot_idx, n_tok in enumerate(tok_counts):
+                key_value = gpu_context.get_temp_kernel_group_buffer(
+                    slot_idx, group_idx
+                )
+                if n_tok < key_value.shape[2]:
+                    # Partial chunk: narrow to the real token count (the
+                    # kernel scatters size(2) tokens). Slicing dim 2 breaks
+                    # contiguity, so this one slot pays a small copy.
+                    key_value = key_value[:, :, :n_tok].contiguous()
+                lmc_ops.multi_layer_kv_transfer(
+                    key_value,
+                    gpu_context.get_kernel_group_kv_pointers(group_idx),
+                    slot_mapping[tok_off : tok_off + n_tok],
+                    gpu_context.device,
+                    page_buffer_size,
+                    lmc_ops.TransferDirection.H2D,
+                    gpu_context.get_engine_kv_format(group_idx),
+                    block_size=group_bs,
+                    head_size=head_size,
+                )
+                tok_off += n_tok
+
+    def _cb_slot_buffers(
+        self, gpu_context: BaseCacheContext, num_groups: int, n_pos: int
+    ) -> "tuple[torch.Tensor, Any, torch.Tensor]":
+        """Return ``(pinned, pinned_np, device)`` slot-mapping staging of at
+        least ``(num_groups, n_pos)``, reused across requests per context."""
+        entry = self._cb_slot_staging.get(gpu_context)
+        if entry is None or entry[0].shape[0] < num_groups or entry[0].shape[1] < n_pos:
+            cap = max(n_pos, 1 << 16)
+            if entry is not None:
+                cap = max(cap, int(entry[0].shape[1]))
+            # Pin only for CUDA contexts (CPU-device unit tests have no CUDA).
+            pinned = torch.empty(
+                (num_groups, cap),
+                dtype=torch.int64,
+                pin_memory=(gpu_context.device.type == "cuda"),
+            )
+            dev = torch.empty(
+                (num_groups, cap), dtype=torch.int64, device=gpu_context.device
+            )
+            entry = (pinned, pinned.numpy(), dev)
+            self._cb_slot_staging[gpu_context] = entry
+        return entry
+
+    def _resolve_cb_plan_invariants(
+        self,
+        gpu_context: BaseCacheContext,
+        rope_state: _CBRopeState,
+        max_batch: int,
+    ) -> "tuple[list[Any], list[torch.Tensor]] | None":
+        """Resolve the request-invariant plan half (cached per context in
+        ``_cb_plan_invariants``).
+
+        Returns ``(group_specs, object_group_buffers)`` with slot-mapping
+        fields as placeholders for the per-request stamp, or ``None`` on an
+        unsupported layout (compressed / kv_size / dtype / head geometry).
+        """
+        kgm = gpu_context.kv_layer_groups_manager
+        group_specs: list[Any] = []
+        for group_idx in range(kgm.num_kernel_groups):
+            group = kgm.kernel_groups[group_idx]
+            buf0 = gpu_context.get_temp_kernel_group_buffer(0, group_idx)
+            num_layers, slot_tokens, hidden_dim = (
+                int(buf0.shape[1]),
+                int(buf0.shape[2]),
+                int(buf0.shape[3]),
+            )
+            group_bs = group.tokens_per_block
+            spec_common = dict(
+                paged_kv_ptrs=gpu_context.get_kernel_group_kv_pointers(
+                    group_idx
+                ).data_ptr(),
+                temp_buffer_ptrs=[
+                    gpu_context.get_temp_kernel_group_buffer(slot, group_idx).data_ptr()
+                    for slot in range(max_batch)
+                ],
+                num_layers=num_layers,
+                slot_tokens=slot_tokens,
+                hidden_elems=hidden_dim,
+                element_size=buf0.element_size(),
+                engine_kv_format=gpu_context.get_engine_kv_format(group_idx),
+                page_buffer_size=group.shape_desc.nb * group_bs,
+                block_size=group_bs,
+                head_size=rope_state.head_size,
+                slot_mapping_base=0,
+                slot_mapping_capacity=0,
+                is_neox=rope_state.is_neox_style,
+            )
+            rot = rope_state.rot_for_group(group.engine_group_idx, buf0.dtype)
+            if rot is None:
+                # Skipped group (declared [] or quantized): staging + scatter
+                # only. cos_sin_cache == 0 disables native rope, so the
+                # rope-only fields are never read and the dtype gate below
+                # must not run (a uint8 group would knock every group off
+                # the native plan).
+                group_specs.append(
+                    lmc_ops.CBGroupSpec(
+                        cos_sin_cache=0,
+                        rot_dim=0,
+                        rope_num_kv_heads=1,
+                        rope_head_stride=hidden_dim,
+                        key_scalar_type=0,
+                        **spec_common,
+                    )
+                )
+                continue
+            at_scalar = _TORCH_TO_AT_SCALAR.get(buf0.dtype)
+            if at_scalar is None:
+                return None
+            try:
+                # Same rules as _apply_cb_rope_batched (shared helper); the
+                # planner declines instead of raising -- the Python fallback
+                # handles (or reports) the layout.
+                _fused, per_head, n_heads, rot_offset = _cb_group_rope_geometry(
+                    group,
+                    int(buf0.shape[0]),
+                    hidden_dim,
+                    rope_state.head_size,
+                    group_idx,
+                    rot,
+                )
+            except RuntimeError:
+                return None
+            group_cos_sin = rope_state.cache_for_group(group.engine_group_idx)
+            if rot_offset > 0 and int(group_cos_sin.shape[1]) != rot[1]:
+                return None
+
+            group_specs.append(
+                lmc_ops.CBGroupSpec(
+                    cos_sin_cache=group_cos_sin.data_ptr(),
+                    rot_dim=int(group_cos_sin.shape[1]),
+                    rope_num_kv_heads=n_heads,
+                    rope_head_stride=per_head,
+                    key_scalar_type=at_scalar,
+                    rope_base_offset=rot_offset * buf0.element_size(),
+                    **spec_common,
+                )
+            )
+        object_group_buffers = [
+            gpu_context.get_temp_object_group_buffer(slot, 0)
+            for slot in range(max_batch)
+        ]
+        return group_specs, object_group_buffers
+
+    def _build_cb_retrieve_plan_flat(
+        self,
+        gpu_context: BaseCacheContext,
+        rope_state: _CBRopeState,
+        cpu_block_tables: "list[tuple[np.ndarray, int]]",
+        runs: "list[list[tuple[CBMatchResult, Any]]]",
+        max_batch: int,
+    ) -> "tuple[list[Any], tuple[Any, Any, Any, Any], list[torch.Tensor]] | None":
+        """Build the whole native retrieve plan: eligibility gates, cached
+        invariant specs stamped with this request's slot mappings, and the
+        numpy-vectorized int64 work tables for
+        ``execute_cb_retrieve_plan_flat`` (layouts in the pybind docstring).
+
+        Returns:
+            ``(group_specs, (staging, ropes, scatters, step_offsets),
+            keepalive)`` or ``None`` -> Python fallback loop.
+        """
+        if not _HAS_NATIVE_RETRIEVE_PLAN or max_batch < 2:
+            return None
+        pairs = [pair for run in runs for pair in run]
+        if not pairs:
+            return None
+        # Native staging requires the lazy-allocator (pin-chunked) host path.
+        for _, memory_obj in pairs:
+            if not isinstance(memory_obj.parent(), LazyMemoryAllocator):
+                return None
+
+        # Specs are invariant per paged registration except the slot-mapping
+        # fields: cache them per context, re-stamp per request (the full
+        # resolve costs dozens of torch-view creations under the shared GIL).
+        # The cached rope_state reference doubles as the validity check: a
+        # re-registration swaps the object, so identity comparison is sound.
+        cached = self._cb_plan_invariants.get(gpu_context)
+        if cached is not None and not (
+            cached[0] is rope_state and cached[1] == max_batch
+        ):
+            cached = None
+        if cached is None:
+            resolved = self._resolve_cb_plan_invariants(
+                gpu_context, rope_state, max_batch
+            )
+            if resolved is None:
+                return None
+            cached = (rope_state, max_batch, resolved)
+            self._cb_plan_invariants[gpu_context] = cached
+        group_specs, object_group_buffers = cached[2]
+        num_groups = len(group_specs)
+        wave = max_batch // 2
+
+        n = len(pairs)
+        # One row per chunk: cur_st, cur_ed, old_st, src ptr, nbytes, host off.
+        chunk_table = np.array(
+            [
+                (
+                    r.cur_st,
+                    r.cur_ed,
+                    r.old_st,
+                    memory_obj.data_ptr,
+                    memory_obj.get_size(),
+                    memory_obj.meta.address,
+                )
+                for r, memory_obj in pairs
+            ],
+            dtype=np.int64,
+        )
+        cur_st, cur_ed, old_st = (
+            chunk_table[:, 0],
+            chunk_table[:, 1],
+            chunk_table[:, 2],
+        )
+        src, nbytes, host_off = (
+            chunk_table[:, 3],
+            chunk_table[:, 4],
+            chunk_table[:, 5],
+        )
+        buf_bytes = int(object_group_buffers[0].nbytes)
+        if (nbytes != buf_bytes).any():
+            # Size mismatch: the fallback path raises the descriptive error.
+            return None
+
+        # Shared logical positions + per-group slot mappings, in numpy on
+        # pinned staging with one async H2D per group (persistent buffers).
+        # The old device-side arange/div/mod chain cost 25-160 ms per request
+        # in CUDA alloc/sync contention with the engine context; this path is
+        # sub-ms CPU math + copies that ride the ambient stream (FIFO before
+        # the native exec's kernels).
+        run_iter = [run for run in runs if run]
+        if len(run_iter) == 1:
+            pos_np = np.arange(
+                run_iter[0][0][0].cur_st, run_iter[0][-1][0].cur_ed, dtype=np.int64
+            )
+        else:
+            pos_np = np.concatenate(
+                [
+                    np.arange(run[0][0].cur_st, run[-1][0].cur_ed, dtype=np.int64)
+                    for run in run_iter
+                ]
+            )
+        n_pos = int(pos_np.shape[0])
+        pinned, pinned_np, dev_buf = self._cb_slot_buffers(
+            gpu_context, num_groups, n_pos
+        )
+        div_mod: "dict[int, tuple[np.ndarray, np.ndarray]]" = {}
+        for gi, ((block_ids_np, group_bs), spec) in enumerate(
+            zip(cpu_block_tables, group_specs, strict=True)
+        ):
+            pair = div_mod.get(group_bs)
+            if pair is None:
+                pair = np.divmod(pos_np, group_bs)
+                div_mod[group_bs] = pair
+            q, rem = pair
+            out = pinned_np[gi, :n_pos]
+            np.multiply(block_ids_np[q], group_bs, out=out)
+            out += rem
+            dev_buf[gi, :n_pos].copy_(pinned[gi, :n_pos], non_blocking=True)
+            # Safe to mutate: one handler per context, and the native call
+            # copies spec contents at call time.
+            spec.slot_mapping_base = int(dev_buf[gi].data_ptr())
+            spec.slot_mapping_capacity = n_pos
+        # The device staging must outlive the native call.
+        keepalive = [dev_buf]
+
+        # Waves of `wave` chunks per run, alternating slot halves.
+        slot_of = np.empty(n, dtype=np.int64)
+        slot_arange = np.arange(wave, dtype=np.int64)
+        step_lens: list[int] = []
+        i0 = 0
+        for run in runs:
+            m = len(run)
+            for w0 in range(0, m, wave):
+                batch_len = min(wave, m - w0)
+                slot_base = (len(step_lens) % 2) * wave
+                slot_of[i0 : i0 + batch_len] = slot_base + slot_arange[:batch_len]
+                step_lens.append(batch_len)
+                i0 += batch_len
+        chunks_per_step = np.asarray(step_lens, dtype=np.int64)
+        n_steps = len(step_lens)
+
+        n_tok = cur_ed - cur_st
+        tok_off = np.zeros(n, dtype=np.int64)
+        np.cumsum(n_tok[:-1], out=tok_off[1:])
+
+        obj_buf_ptrs = np.asarray(
+            [buf.data_ptr() for buf in object_group_buffers], dtype=np.int64
+        )
+        staging = np.stack([obj_buf_ptrs[slot_of], src, nbytes, host_off], axis=1)
+
+        groups_arr = np.arange(num_groups, dtype=np.int64)
+        shifted = old_st != cur_st
+        n_shifted = int(shifted.sum())
+        ropes = np.stack(
+            [
+                np.tile(groups_arr, n_shifted),
+                np.repeat(slot_of[shifted], num_groups),
+                np.repeat(old_st[shifted], num_groups),
+                np.repeat(cur_st[shifted], num_groups),
+            ],
+            axis=1,
+        )
+        scatters = np.stack(
+            [
+                np.tile(groups_arr, n),
+                np.repeat(slot_of, num_groups),
+                np.repeat(tok_off, num_groups),
+                np.repeat(n_tok, num_groups),
+            ],
+            axis=1,
+        )
+
+        staging_end = np.cumsum(chunks_per_step)
+        step_of_chunk = np.repeat(np.arange(n_steps, dtype=np.int64), chunks_per_step)
+        shifted_per_step = np.bincount(
+            step_of_chunk[shifted], minlength=n_steps
+        ).astype(np.int64, copy=False)
+        step_offsets = np.stack(
+            [
+                staging_end,
+                np.cumsum(shifted_per_step) * num_groups,
+                staging_end * num_groups,
+            ],
+            axis=1,
+        )
+        return (
+            group_specs,
+            (staging, ropes, scatters, step_offsets),
+            keepalive,
+        )
 
     def cb_retrieve_pre_computed(
         self,
         key: IPCCacheServerKey,
         cb_match_result: list[CBMatchResult],
-        gpu_block_ids: list[int],
+        gpu_block_ids: list[list[int]],
         instance_id: int,
         event_ipc_handle: bytes,
     ) -> tuple[bytes, bool]:
@@ -1453,7 +2211,9 @@ class BlendV3Module(InstanceLivenessTarget):
             key (IPCCacheServerKey): The request key.
             cb_match_result (list[CBMatchResult]): Matched ranges to scatter
                 (prefix-hit and shifted), any order.
-            gpu_block_ids (list[int]): This request's full paged block table.
+            gpu_block_ids (list[list[int]]): This request's paged block table
+                per engine (kernel) group; single-group models pass [[...]].
+                Mirrors the engine RETRIEVE/STORE per-group block-id contract.
             instance_id (int): Target KV-cache instance.
             event_ipc_handle (bytes): IPC handle to the forward's CUDA event.
 
@@ -1480,7 +2240,75 @@ class BlendV3Module(InstanceLivenessTarget):
         chunk_size = self._ctx.chunk_size
 
         _retrieve_t0 = time.perf_counter()
+
+        def _noop_success(reason: str = "?") -> tuple[bytes, bool]:
+            """Zero-work success return: must export a fresh recorded event
+            from THIS process -- echoing the caller's own handle back makes
+            the worker re-import it (CUDA "invalid device context").
+
+            ``reason`` is logged once per distinct value. Every one of these
+            paths silently turns a matched request into a full recompute --
+            recall stays correct, only the speedup vanishes -- so a run that
+            drops all its matches is otherwise indistinguishable from a
+            working one except by its TTFT. Logging the reason is what makes
+            "CB engaged but was not faster" diagnosable.
+            """
+            if reason not in _NOOP_REASONS_SEEN:
+                _NOOP_REASONS_SEEN.add(reason)
+                logger.info(
+                    "CB v3 retrieve: no-op success (%s) — %d match(es) dropped, "
+                    "request falls back to full recompute. Logged once per "
+                    "distinct reason.",
+                    reason,
+                    len(cb_match_result),
+                )
+            with (
+                torch_dev.device(gpu_context.device),
+                torch_dev.stream(gpu_context.stream),
+            ):
+                check_interprocess_event_support()
+                done_event = torch_dev.Event(interprocess=True)
+                done_event.record()
+                handle = done_event.ipc_handle()
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.CB_REQUEST_END,
+                    session_id=key.request_id,
+                )
+            )
+            return handle, True
+
         cb_match_result = sorted(cb_match_result, key=lambda r: r.cur_st)
+        # vLLM may call retrieve twice (partial- then full-block alloc); skip
+        # ranges already scattered (blocks never move mid-prefill), returning
+        # before the obj-key/prefetched-read machinery (~7-20 ms).
+        applied_ranges = self._cb_applied_match_ranges
+        applied_key = (key.request_id, key.worker_id)
+        prior_applied = applied_ranges.get(applied_key)
+        if prior_applied:
+            cb_match_result = [
+                r
+                for r in cb_match_result
+                if (r.hash, r.cur_st, r.cur_ed) not in prior_applied
+            ]
+            if not cb_match_result:
+                return _noop_success("all ranges already applied for this worker")
+        applied_now: "set[tuple[bytes, int, int]]" = set()
+        # Partial-alloc first call: every match can be beyond the allocated
+        # slots -> return before the obj-key machinery. Read locks stay held
+        # for the full-alloc follow-up, as the in-loop drop path leaves them.
+        if cb_match_result:
+            try:
+                slot_bound = min(
+                    len(gpu_block_ids[kg.engine_group_idx]) * kg.tokens_per_block
+                    for kg in gpu_context.kv_layer_groups_manager.kernel_groups
+                )
+            except (IndexError, TypeError):
+                slot_bound = None
+            if slot_bound is not None and all(
+                r.cur_ed > slot_bound for r in cb_match_result
+            ):
+                return _noop_success(f"every match beyond slot_bound={slot_bound}")
         # L2 opt: reuse lookup's obj_keys cache; fall back to re-resolve.
         with self._lookup_obj_keys_lock:
             cached = self._lookup_obj_keys_cache.pop(key.request_id, None)
@@ -1520,13 +2348,9 @@ class BlendV3Module(InstanceLivenessTarget):
         n_shifted = len(cb_match_result) - n_non_shifted
 
         if not all_obj_keys:
-            self._event_bus.publish(
-                Event(
-                    event_type=EventType.CB_REQUEST_END,
-                    session_id=key.request_id,
-                )
-            )
-            return event_ipc_handle, True
+            # Same latent hazard as the guards above: this used to echo the
+            # caller's own event handle back.
+            return _noop_success("no object keys resolved for the matches")
 
         logger.debug("CB V3 retrieving object keys: %s", all_obj_keys)
 
@@ -1550,8 +2374,32 @@ class BlendV3Module(InstanceLivenessTarget):
             check_interprocess_event_support()
             event = torch_dev.Event(interprocess=True)
 
-            # Staged once (single group), sliced per chunk inside the loop.
-            all_block_ids_gpu = gpu_context.stage_block_ids([gpu_block_ids])[0]
+            # One staged block-id tensor per engine group, indexed by group.
+            block_ids_per_group_gpu = gpu_context.stage_block_ids(gpu_block_ids)
+
+            # Resolve each kernel group's block table + block size once. Select
+            # by engine_group_idx (kernel groups may share one, e.g. MiniMax-M3).
+            # The CPU (numpy) tables feed the native plan's slot-mapping math;
+            # the GPU tensors feed the Python fallback loop.
+            kgm = gpu_context.kv_layer_groups_manager
+            block_ids_np = [np.asarray(b, dtype=np.int64) for b in gpu_block_ids]
+            resolved_groups: list[tuple[torch.Tensor, int]] = []
+            cpu_block_tables: "list[tuple[np.ndarray, int]]" = []
+            for group_idx in range(num_groups):
+                eg_idx = kgm.kernel_groups[group_idx].engine_group_idx
+                if eg_idx >= len(block_ids_per_group_gpu):
+                    # Engine groups have independent block tables under HMA;
+                    # substituting another group's table would scatter KV into
+                    # the wrong physical blocks (silent corruption).
+                    raise ValueError(
+                        f"CB retrieve: kernel group {group_idx} maps to engine "
+                        f"group {eg_idx}, but only "
+                        f"{len(block_ids_per_group_gpu)} block table(s) were "
+                        "provided."
+                    )
+                group_bs = kgm.kernel_groups[group_idx].tokens_per_block
+                resolved_groups.append((block_ids_per_group_gpu[eg_idx], group_bs))
+                cpu_block_tables.append((block_ids_np[eg_idx], group_bs))
 
             self._event_bus.publish_on_stream(
                 gpu_context.cupy_stream,
@@ -1576,17 +2424,32 @@ class BlendV3Module(InstanceLivenessTarget):
             )
             vllm_event.wait(stream=gpu_context.stream)
 
+            # Stage marks for the scatter_ms log line (CPU enqueue wall time):
+            # fetch = L1 prefetched read, plan = flat-plan table build,
+            # exec = native kernel enqueue (H2D + re-RoPE + scatter).
+            _stage_ms: dict[str, float] = {}
+            _stage_t = time.perf_counter()
             try:
                 with self._ctx.storage_manager.read_prefetched_results(
                     all_obj_keys
                 ) as memory_objs:
+                    _stage_ms["fetch"] = (time.perf_counter() - _stage_t) * 1000
                     if memory_objs is None:
-                        return event_ipc_handle, False
+                        # Read failed: return a valid server event + False, never
+                        # the client's own handle (self-import raises
+                        # cudaErrorDeviceUninitialized, crashing TP).
+                        event.record()
+                        return event.ipc_handle(), False
 
                     # Per-token scatter handles any cur_st; just bound the
                     # matched range to the allocated slots.
                     pairs: list[tuple[CBMatchResult, Any]] = []
-                    num_slots = int(all_block_ids_gpu.numel()) * tokens_per_block
+                    # Bound by the smallest group: under HMA the sliding group
+                    # has fewer blocks than the full group, so [0] isn't safe.
+                    num_slots = min(
+                        int(block_ids.numel()) * group_bs
+                        for block_ids, group_bs in resolved_groups
+                    )
                     for r, memory_obj in zip(cb_match_result, memory_objs, strict=True):
                         if r.cur_ed > num_slots:
                             logger.warning(
@@ -1633,6 +2496,27 @@ class BlendV3Module(InstanceLivenessTarget):
                             runs.append([r_obj])
 
                     max_batch = gpu_context.max_batch_size
+
+                    # Fast path: one native call for the whole request; the
+                    # per-wave Python loop is the fallback (returns None on old
+                    # c_ops, non-lazy objects, max_batch < 2, or size mismatch).
+                    _stage_t = time.perf_counter()
+                    native_flat = self._build_cb_retrieve_plan_flat(
+                        gpu_context, rope_state, cpu_block_tables, runs, max_batch
+                    )
+                    _stage_ms["plan"] = (time.perf_counter() - _stage_t) * 1000
+                    if native_flat is not None:
+                        plan_group_specs, plan_tables, _plan_keepalive = native_flat
+                        _stage_t = time.perf_counter()
+                        lmc_ops.execute_cb_retrieve_plan_flat(
+                            gpu_context.device,
+                            LazyMemoryAllocator.PIN_CHUNK_SIZE,
+                            plan_group_specs,
+                            *plan_tables,
+                        )
+                        _stage_ms["exec"] = (time.perf_counter() - _stage_t) * 1000
+                        runs = []  # plan covers every wave; skip the loop
+
                     for run in runs:
                         for batch_start in range(0, len(run), max_batch):
                             batch = run[batch_start : batch_start + max_batch]
@@ -1658,41 +2542,14 @@ class BlendV3Module(InstanceLivenessTarget):
 
                             # (c) Per-token slot scatter: partial vLLM blocks
                             # shared with recomputed tokens stay disjoint.
-                            bs = tokens_per_block
-                            pos = torch.cat(
-                                [
-                                    torch.arange(
-                                        r.cur_st,
-                                        r.cur_ed,
-                                        device=gpu_context.device,
-                                        dtype=torch.long,
-                                    )
-                                    for (r, _) in batch
-                                ]
+                            self._scatter_batch_to_paged(
+                                gpu_context,
+                                resolved_groups,
+                                batch,
+                                rope_state.head_size,
                             )
-                            slot_mapping = all_block_ids_gpu[pos // bs] * bs + (
-                                pos % bs
-                            )
-                            page_buffer_size = gpu_context.num_blocks * bs
-                            for group_idx in range(num_groups):
-                                tmp_buffers = [
-                                    gpu_context.get_temp_kernel_group_buffer(
-                                        slot_idx, group_idx
-                                    )
-                                    for slot_idx in range(batch_len)
-                                ]
-                                key_value = torch.cat(tmp_buffers, dim=2)
-                                lmc_ops.multi_layer_kv_transfer(
-                                    key_value,
-                                    gpu_context.get_kernel_group_kv_pointers(group_idx),
-                                    slot_mapping,
-                                    gpu_context.device,
-                                    page_buffer_size,
-                                    lmc_ops.TransferDirection.H2D,
-                                    gpu_context.engine_kv_format,
-                                    block_size=bs,
-                                    head_size=rope_state.head_size,
-                                )
+
+                    applied_now = {(r.hash, r.cur_st, r.cur_ed) for r, _ in pairs}
 
                     self._event_bus.publish_on_stream(
                         gpu_context.cupy_stream,
@@ -1718,7 +2575,10 @@ class BlendV3Module(InstanceLivenessTarget):
                         session_id=key.request_id,
                     ),
                 )
-                return event_ipc_handle, False
+                # Valid server event + False (never echo the client handle; see
+                # the memory_objs-None path above).
+                event.record()
+                return event.ipc_handle(), False
 
             event.record()
             self._event_bus.publish_on_stream(
@@ -1730,15 +2590,25 @@ class BlendV3Module(InstanceLivenessTarget):
                 ),
             )
 
+        # Record scattered ranges for the repeat-call guard (bounded LRU).
+        if applied_now:
+            applied_entry = applied_ranges.setdefault(applied_key, set())
+            applied_entry.update(applied_now)
+            applied_ranges.move_to_end(applied_key)
+            while len(applied_ranges) > 4096:
+                applied_ranges.popitem(last=False)
+
         _scatter_ms = (time.perf_counter() - _retrieve_t0) * 1000
         logger.info(
             "Retrieved pre-computed for %d match results into request %s "
-            "paged blocks (scatter_ms=%.2f, non_shifted=%d shifted=%d)",
+            "paged blocks (scatter_ms=%.2f, non_shifted=%d shifted=%d, "
+            "stages_ms=%s)",
             len(cb_match_result),
             key.request_id,
             _scatter_ms,
             n_non_shifted,
             n_shifted,
+            {k: round(v, 1) for k, v in _stage_ms.items()},
         )
         self._event_bus.publish_on_stream(
             gpu_context.cupy_stream,

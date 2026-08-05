@@ -22,7 +22,7 @@ from lmcache.v1.distributed.bitmap_ops.fold import _fold_python, _unfold_python
 
 
 def _make_presence(num_chunks: int, present_per_group: list[list[int]]) -> Bitmap:
-    """Build a group-major presence bitmap.
+    """Build a chunk-major presence bitmap (single rank).
 
     Args:
         num_chunks: chunks per group.
@@ -30,13 +30,14 @@ def _make_presence(num_chunks: int, present_per_group: list[list[int]]) -> Bitma
             available for object group g.
 
     Returns:
-        A group-major Bitmap of length ``len(present_per_group) * num_chunks``.
+        A chunk-major Bitmap of length ``num_chunks * len(present_per_group)``;
+        bit ``j * num_groups + g``.
     """
-    bm = Bitmap(len(present_per_group) * num_chunks)
+    num_groups = len(present_per_group)
+    bm = Bitmap(num_chunks * num_groups)
     for group_idx, chunks in enumerate(present_per_group):
-        base = group_idx * num_chunks
         for j in chunks:
-            bm.set(base + j)
+            bm.set(j * num_groups + group_idx)
     return bm
 
 
@@ -98,8 +99,9 @@ def test_full_plus_sliding_window_worked_example():
     found = _make_presence(num_chunks, [[0, 1, 2, 3], [2, 3, 4]])
     hit, mask = fold_unfold(found, num_chunks, [FULL_ATTENTION_WINDOW, 2])
     assert hit == 4
-    # A (full) needs chunks 0..3 -> flat 0,1,2,3 ; B (w=2) needs 2..3 -> flat 7,8
-    assert mask.get_indices_list() == [0, 1, 2, 3, 7, 8]
+    # chunk-major (2 groups): bit j*2 + g.
+    # A (full) needs chunks 0..3 -> {0,2,4,6}; B (w=2) needs 2..3 -> {5,7}
+    assert mask.get_indices_list() == [0, 2, 4, 5, 6, 7]
 
 
 def test_sliding_window_does_not_block_long_prefix_when_tail_present():
@@ -108,8 +110,9 @@ def test_sliding_window_does_not_block_long_prefix_when_tail_present():
     found = _make_presence(num_chunks, [[0, 1, 2, 3, 4, 5], [4, 5]])
     hit, mask = fold_unfold(found, num_chunks, [FULL_ATTENTION_WINDOW, 2])
     assert hit == 6
-    # full needs 0..5 ; window-2 needs 4..5 -> flat 6*1 + {4,5} = {10,11}
-    assert mask.get_indices_list() == [0, 1, 2, 3, 4, 5, 10, 11]
+    # chunk-major (2 groups): bit j*2 + g.
+    # full needs 0..5 -> {0,2,4,6,8,10}; window-2 needs 4..5 -> {9,11}
+    assert mask.get_indices_list() == [0, 2, 4, 6, 8, 9, 10, 11]
 
 
 def test_mamba_window_one():
@@ -118,7 +121,9 @@ def test_mamba_window_one():
     found = _make_presence(num_chunks, [[0, 1, 2, 3], [3]])
     hit, mask = fold_unfold(found, num_chunks, [FULL_ATTENTION_WINDOW, 1])
     assert hit == 4
-    assert mask.get_indices_list() == [0, 1, 2, 3, 7]  # full 0..3 + mamba {3}
+    # chunk-major (2 groups): bit j*2 + g.
+    # full 0..3 -> {0,2,4,6}; mamba (w=1) chunk 3 -> {7}
+    assert mask.get_indices_list() == [0, 2, 4, 6, 7]
 
 
 # --------------------------------------------------------------------------- #
@@ -141,8 +146,10 @@ def test_all_full_is_require_all_intersection(group_a, group_b, expected_hit):
     windows = [FULL_ATTENTION_WINDOW, FULL_ATTENTION_WINDOW]
     hit, mask = fold_unfold(found, num_chunks, windows)
     assert hit == expected_hit
-    # both groups retain the same first `hit` chunks
-    expected = list(range(expected_hit)) + [num_chunks + j for j in range(expected_hit)]
+    # both groups retain the same first `hit` chunks; chunk-major (bit j*2 + g)
+    # makes the two groups' cells of each retained chunk adjacent, so the
+    # retained set is the contiguous prefix [0, hit * num_groups).
+    expected = list(range(expected_hit * 2))
     assert mask.get_indices_list() == expected
 
 
@@ -168,17 +175,17 @@ def _make_ranked(
     num_ranks: int,
     present_per_group: list[list[tuple[int, int]]],
 ) -> Bitmap:
-    """Build a group-major / chunk-major / rank-minor presence bitmap.
+    """Build a chunk-major / group / rank-minor presence bitmap.
 
     present_per_group[g] is the list of ``(chunk, rank)`` present for group g.
     """
     num_groups = len(present_per_group)
-    stride = num_chunks * num_ranks
-    bm = Bitmap(num_groups * stride)
+    chunk_stride = num_groups * num_ranks
+    bm = Bitmap(num_chunks * chunk_stride)
     for group_idx, cells in enumerate(present_per_group):
-        gbase = group_idx * stride
+        gbase = group_idx * num_ranks
         for chunk, rank in cells:
-            bm.set(gbase + chunk * num_ranks + rank)
+            bm.set(chunk * chunk_stride + gbase + rank)
     return bm
 
 
@@ -210,9 +217,11 @@ def test_ranked_full_plus_sw_expands_all_ranks():
     found = _make_ranked(4, 2, [g0, g1])
     hit, mask = fold_unfold_ranked(found, 4, 2, [FULL_ATTENTION_WINDOW, 1])
     assert hit == 4
-    # group0 full -> chunks 0..3 (ranks 0,1): flat 0..7
-    # group1 w=1 -> chunk 3 only (ranks 0,1): group base = 4*2 = 8, chunk3 -> 8+6,8+7
-    assert mask.get_indices_list() == [0, 1, 2, 3, 4, 5, 6, 7, 14, 15]
+    # chunk-major ranked: bit j*(num_groups*num_ranks) + g*num_ranks + r
+    #   = j*4 + g*2 + r.
+    # group0 full -> chunks 0..3 (ranks 0,1): {0,1,4,5,8,9,12,13}
+    # group1 w=1 -> chunk 3 (ranks 0,1): 3*4 + 2 + r = {14,15}
+    assert mask.get_indices_list() == [0, 1, 4, 5, 8, 9, 12, 13, 14, 15]
 
 
 def test_ranked_invalid_num_ranks_raises():
@@ -340,10 +349,11 @@ class TestUnfoldOperator:
 
     def test_full_plus_sliding_window(self):
         # hit=4, full group keeps [0,4), window-2 group keeps [2,4); 2 ranks.
+        # chunk-major: bit j*(num_groups*num_ranks) + g*num_ranks + r = j*4 + g*2 + r.
         mask = unfold(4, 5, 2, [FULL_ATTENTION_WINDOW, 2])
-        stride = 5 * 2
-        expected = [0, 1, 2, 3, 4, 5, 6, 7]  # full: chunks 0..3 x 2 ranks
-        expected += [stride + 4, stride + 5, stride + 6, stride + 7]  # win: c2,c3
+        # full (g0) chunks 0..3 ranks 0,1 -> {0,1,4,5,8,9,12,13}
+        # window-2 (g1) chunks 2,3 ranks 0,1 -> {10,11,14,15}
+        expected = [0, 1, 4, 5, 8, 9, 10, 11, 12, 13, 14, 15]
         assert mask.get_indices_list() == expected
 
     def test_zero_hit_is_empty(self):
@@ -436,11 +446,12 @@ def _reference_longest_hit(num_chunks, group_present, group_windows):
 def _expected_retained_indices(hit, num_chunks, num_ranks, group_windows):
     """The ranked retain-mask indices the pipeline should produce for ``hit``."""
     indices = []
-    stride = num_chunks * num_ranks
+    num_groups = len(group_windows)
+    chunk_stride = num_groups * num_ranks
     for g, window in enumerate(group_windows):
         lo, hi = unfold_range(hit, window)
         for j in range(lo, hi):
-            base = g * stride + j * num_ranks
+            base = j * chunk_stride + g * num_ranks
             indices.extend(range(base, base + num_ranks))
     return sorted(indices)
 
@@ -453,11 +464,12 @@ class TestEndToEndAgainstVllmStyleReference:
         self, num_chunks, num_ranks, group_windows, present_cells, expected_hit=None
     ):
         # present_cells[g] = set of (chunk, rank) present for group g.
-        stride = num_chunks * num_ranks
-        bm = Bitmap(len(group_windows) * stride)
+        num_groups = len(group_windows)
+        chunk_stride = num_groups * num_ranks
+        bm = Bitmap(num_chunks * chunk_stride)
         for g, cells in enumerate(present_cells):
             for chunk, rank in cells:
-                bm.set(g * stride + chunk * num_ranks + rank)
+                bm.set(chunk * chunk_stride + g * num_ranks + rank)
         hit, mask = fold_unfold_ranked(bm, num_chunks, num_ranks, group_windows)
 
         # Reference: a chunk is present for a group only if all ranks present.

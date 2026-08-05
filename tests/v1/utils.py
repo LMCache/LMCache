@@ -21,7 +21,11 @@ import torch
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.gpu_connector.gpu_connectors import VLLMPagedMemGPUConnectorV2
-from lmcache.v1.memory_management import AdHocMemoryAllocator, MemoryFormat, MemoryObj
+from lmcache.v1.memory_allocators.ad_hoc_memory_allocator import AdHocMemoryAllocator
+from lmcache.v1.memory_management import (
+    MemoryFormat,
+    MemoryObj,
+)
 from lmcache.v1.metadata import LMCacheMetadata
 
 # Conditional import for CUDA-only operations
@@ -632,6 +636,13 @@ def check_kv_cache_device(kvs, device):
 
 def create_gpu_connector(hidden_dim, num_layers):
     return VLLMPagedMemGPUConnectorV2(hidden_dim, num_layers)
+
+
+def create_xpu_connector(hidden_dim, num_layers):
+    # First Party
+    from lmcache.v1.gpu_connector.xpu_connectors import VLLMPagedMemXPUConnectorV2
+
+    return VLLMPagedMemXPUConnectorV2(hidden_dim, num_layers)
 
 
 def get_all_methods_from_base(base_class):

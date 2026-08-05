@@ -48,6 +48,9 @@ def _build(name: str):
         ],
         "NL_X_NBBS_ONE_HS": lambda: [_t(PBS, 1, HS) for _ in range(NL)],
         "NL_X_NB_NH_BS_TWO_HS": lambda: [_t(NB, NH, BS, 2, HS) for _ in range(NL)],
+        "NL_X_NB_BS_NH_TWO_HS": lambda: [_t(NB, BS, NH, 2, HS) for _ in range(NL)],
+        "NL_X_NB_NH_BS_CS": lambda: [_t(NB, NH, BS, 2 * HS) for _ in range(NL)],
+        "NL_X_NB_BS_NH_CS": lambda: [_t(NB, BS, NH, 2 * HS) for _ in range(NL)],
     }
     return builders[name]()
 
@@ -57,9 +60,6 @@ def _build(name: str):
 _RAISE = object()
 GOLDEN = {
     "NB_NL_TWO_BS_NH_HS": dict(
-        is_mla=False,
-        is_hnd=False,
-        is_cross_layer=True,
         shape_desc="[NB, NL, 2, BS, NH, HS]",
         num_layers=NL,
         num_blocks=NB,
@@ -73,9 +73,6 @@ GOLDEN = {
         concrete="[7, 5, 2, 3, 2, 4]",
     ),
     "NB_NL_TWO_NH_BS_HS": dict(
-        is_mla=False,
-        is_hnd=True,
-        is_cross_layer=True,
         shape_desc="[NB, NL, 2, NH, BS, HS]",
         num_layers=NL,
         num_blocks=NB,
@@ -89,9 +86,6 @@ GOLDEN = {
         concrete="[7, 5, 2, 2, 3, 4]",
     ),
     "NL_X_TWO_NB_BS_NH_HS": dict(
-        is_mla=False,
-        is_hnd=False,
-        is_cross_layer=False,
         shape_desc="NL x [2, NB, BS, NH, HS]",
         num_layers=NL,
         num_blocks=NB,
@@ -105,9 +99,6 @@ GOLDEN = {
         concrete="5 x [2, 7, 3, 2, 4]",
     ),
     "NL_X_NB_TWO_BS_NH_HS": dict(
-        is_mla=False,
-        is_hnd=False,
-        is_cross_layer=False,
         shape_desc="NL x [NB, 2, BS, NH, HS]",
         num_layers=NL,
         num_blocks=NB,
@@ -121,9 +112,6 @@ GOLDEN = {
         concrete="5 x [7, 2, 3, 2, 4]",
     ),
     "NL_X_TWO_NB_NH_BS_HS": dict(
-        is_mla=False,
-        is_hnd=True,
-        is_cross_layer=False,
         shape_desc="NL x [2, NB, NH, BS, HS]",
         num_layers=NL,
         num_blocks=NB,
@@ -137,9 +125,6 @@ GOLDEN = {
         concrete="5 x [2, 7, 2, 3, 4]",
     ),
     "NL_X_NB_TWO_NH_BS_HS": dict(
-        is_mla=False,
-        is_hnd=True,
-        is_cross_layer=False,
         shape_desc="NL x [NB, 2, NH, BS, HS]",
         num_layers=NL,
         num_blocks=NB,
@@ -153,9 +138,6 @@ GOLDEN = {
         concrete="5 x [7, 2, 2, 3, 4]",
     ),
     "NL_X_NB_BS_HS": dict(
-        is_mla=True,
-        is_hnd=False,
-        is_cross_layer=False,
         shape_desc="NL x [NB, BS, HS]",
         num_layers=NL,
         num_blocks=NB,
@@ -169,9 +151,6 @@ GOLDEN = {
         concrete="5 x [7, 3, 4]",
     ),
     "TWO_X_NL_X_NBBS_NH_HS": dict(
-        is_mla=False,
-        is_hnd=False,
-        is_cross_layer=False,
         shape_desc="2 x NL x [PBS, NH, HS]",
         num_layers=NL,
         num_blocks=_RAISE,
@@ -185,9 +164,6 @@ GOLDEN = {
         concrete="2 x 5 x [21, 2, 4]",
     ),
     "TWO_X_NL_X_NB_BS_NH_HS": dict(
-        is_mla=False,
-        is_hnd=False,
-        is_cross_layer=False,
         shape_desc="2 x NL x [NB, BS, NH, HS]",
         num_layers=NL,
         num_blocks=NB,
@@ -201,9 +177,6 @@ GOLDEN = {
         concrete="2 x 5 x [7, 3, 2, 4]",
     ),
     "NL_X_NBBS_ONE_HS": dict(
-        is_mla=True,
-        is_hnd=False,
-        is_cross_layer=False,
         shape_desc="NL x [PBS, 1, HS]",
         num_layers=NL,
         num_blocks=_RAISE,
@@ -217,9 +190,6 @@ GOLDEN = {
         concrete="5 x [21, 1, 4]",
     ),
     "NL_X_NB_NH_BS_TWO_HS": dict(
-        is_mla=False,
-        is_hnd=True,
-        is_cross_layer=False,
         shape_desc="NL x [NB, NH, BS, 2, HS]",
         num_layers=NL,
         num_blocks=NB,
@@ -227,10 +197,51 @@ GOLDEN = {
         page_buffer_size=PBS,
         num_heads=NH,
         hidden_dim=NH * HS,
-        head_size=HS,
+        head_size=HS * 2,
         tokens_per_layer=PBS,
         elements_per_layer=NB * NH * BS * HS * 2,
         concrete="5 x [7, 2, 3, 2, 4]",
+    ),
+    "NL_X_NB_BS_NH_TWO_HS": dict(
+        shape_desc="NL x [NB, BS, NH, 2, HS]",
+        num_layers=NL,
+        num_blocks=NB,
+        block_size=BS,
+        page_buffer_size=PBS,
+        num_heads=NH,
+        hidden_dim=NH * HS,
+        head_size=HS * 2,
+        tokens_per_layer=PBS,
+        elements_per_layer=NB * BS * NH * HS * 2,
+        concrete="5 x [7, 3, 2, 2, 4]",
+    ),
+    # CS formats: head_size is the raw trailing content dim (CS == 2 * HS),
+    # so hidden_dim == num_heads * head_size holds.
+    "NL_X_NB_NH_BS_CS": dict(
+        shape_desc="NL x [NB, NH, BS, CS]",
+        num_layers=NL,
+        num_blocks=NB,
+        block_size=BS,
+        page_buffer_size=PBS,
+        num_heads=NH,
+        hidden_dim=NH * HS * 2,
+        head_size=HS * 2,
+        tokens_per_layer=PBS,
+        elements_per_layer=NB * NH * BS * HS * 2,
+        concrete="5 x [7, 2, 3, 8]",
+    ),
+    "NL_X_NB_BS_NH_CS": dict(
+        shape_desc="NL x [NB, BS, NH, CS]",
+        num_layers=NL,
+        num_blocks=NB,
+        block_size=BS,
+        page_buffer_size=PBS,
+        num_heads=NH,
+        hidden_dim=NH * HS * 2,
+        head_size=HS * 2,
+        tokens_per_layer=PBS,
+        elements_per_layer=NB * BS * NH * HS * 2,
+        concrete="5 x [7, 3, 2, 8]",
     ),
 }
 
@@ -244,12 +255,18 @@ def case(request):
     return name, getattr(lmc_ops.EngineKVFormat, name), GOLDEN[name]
 
 
+# Must run before any other test constructs the deprecated specs:
+# lmcache_deprecate warns only on the first call per process.
+def test_deprecated_two_hs_specs_warn():
+    for name in ("NL_X_NB_NH_BS_TWO_HS", "NL_X_NB_BS_NH_TWO_HS"):
+        with pytest.warns(DeprecationWarning, match=name):
+            get_spec(_build(name), getattr(lmc_ops.EngineKVFormat, name))
+
+
 def test_static_metadata(case):
+    # The format's static layout flags are pinned in test_kv_format_classification
+    # (read via lmc_ops); here we only freeze the symbolic shape.
     name, fmt, gold = case
-    cls = get_spec_class(fmt)
-    assert cls.is_mla == gold["is_mla"], name
-    assert cls.is_hnd == gold["is_hnd"], name
-    assert cls.is_cross_layer == gold["is_cross_layer"], name
     assert describe_shape(fmt) == gold["shape_desc"], name
 
 
@@ -288,9 +305,9 @@ def test_data_ptrs_shape(case):
     kv = _build(name)
     spec = get_spec(kv, fmt)
     ptrs = spec.data_ptrs(list(range(NL)))
-    if gold["is_cross_layer"]:
+    if lmc_ops.is_cross_layer(fmt):
         assert len(ptrs) == 1, name  # single base pointer
-    elif name.startswith("TWO_X_NL_X"):
+    elif lmc_ops.is_kv_list(fmt):
         assert len(ptrs) == 2 * NL, name  # K's then V's
     else:
         assert len(ptrs) == NL, name  # one per layer

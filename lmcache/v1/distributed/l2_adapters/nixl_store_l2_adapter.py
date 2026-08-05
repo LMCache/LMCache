@@ -530,7 +530,7 @@ class NixlStoreL2Adapter(L2AdapterInterface):
     #####################
 
     def submit_lookup_and_lock_task(
-        self, keys: list[ObjectKey], layout_desc: MemoryLayoutDesc
+        self, keys: list[ObjectKey], group_layout_descs: dict[int, MemoryLayoutDesc]
     ) -> L2TaskId:
         with self._lock:
             task_id = self._get_next_task_id()
@@ -578,7 +578,9 @@ class NixlStoreL2Adapter(L2AdapterInterface):
         with self._lock:
             return self._completed_load_tasks.pop(task_id, None)
 
-    def close(self):
+    def close(self) -> None:
+        """Close the adapter and release its event-loop and NIXL resources."""
+
         # Stop the event loop and wait for the thread to finish
         async def _stop_tasks():
             tasks = [
@@ -591,19 +593,27 @@ class NixlStoreL2Adapter(L2AdapterInterface):
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
 
-        if self._loop.is_running():
-            future = asyncio.run_coroutine_threadsafe(_stop_tasks(), self._loop)
+        # Gate on is_closed() rather than is_running(): the loop thread may not
+        # have reached run_forever() yet, and skipping the stop below would leave
+        # join() blocking forever. Both threadsafe calls are valid on a loop that
+        # has not started; their callbacks run once it does.
+        if not self._loop.is_closed():
+            try:
+                future = asyncio.run_coroutine_threadsafe(_stop_tasks(), self._loop)
 
-            future.result(timeout=5)  # Wait for tasks to be cancelled, with a timeout
-
-            self._loop.call_soon_threadsafe(self._loop.stop)
+                # Wait for tasks to be cancelled, with a timeout
+                future.result(timeout=5)
+            finally:
+                self._loop.call_soon_threadsafe(self._loop.stop)
 
         self._loop_thread.join()
-        self._loop.close()
-
-        self._store_efd.close()
-        self._lookup_efd.close()
-        self._load_efd.close()
+        try:
+            self.nixl_agent.close()
+        finally:
+            self._loop.close()
+            self._store_efd.close()
+            self._lookup_efd.close()
+            self._load_efd.close()
 
     #####################
     # Eviction Interface

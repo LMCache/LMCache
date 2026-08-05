@@ -217,7 +217,7 @@ policy — no special "disable" flag is needed.
 ### 4. HTTP API for Quota Management
 
 The existing FastAPI HTTP server (`lmcache/v1/multiprocess/http_server.py`)
-already serves `/healthcheck`, `/status`, and `/clear-cache`.
+already serves `/healthcheck`, `/status`, and `/cache/clear`.
 Add quota management endpoints:
 
 ```

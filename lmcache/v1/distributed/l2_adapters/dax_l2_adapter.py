@@ -323,6 +323,7 @@ class DaxL2Adapter(L2AdapterInterface):
         self._store_executor: Optional[ThreadPoolExecutor] = None
         self._lookup_executor: Optional[ThreadPoolExecutor] = None
         self._load_executor: Optional[ThreadPoolExecutor] = None
+        self._copy_executor: Optional[ThreadPoolExecutor] = None
 
         self._next_task_id: L2TaskId = 0
         self._completed_store_tasks: dict[L2TaskId, L2StoreResult] = {}
@@ -354,6 +355,10 @@ class DaxL2Adapter(L2AdapterInterface):
             self._load_executor = ThreadPoolExecutor(
                 max_workers=config.num_load_workers,
                 thread_name_prefix="dax-l2-load",
+            )
+            self._copy_executor = ThreadPoolExecutor(
+                max_workers=8,
+                thread_name_prefix="dax-l2-copy",
             )
         except Exception:
             self.close()
@@ -434,7 +439,7 @@ class DaxL2Adapter(L2AdapterInterface):
         return completed
 
     def submit_lookup_and_lock_task(
-        self, keys: list[ObjectKey], layout_desc: MemoryLayoutDesc
+        self, keys: list[ObjectKey], group_layout_descs: dict[int, MemoryLayoutDesc]
     ) -> L2TaskId:
         """Submit an asynchronous lookup-and-lock task.
 
@@ -604,9 +609,11 @@ class DaxL2Adapter(L2AdapterInterface):
             store_executor = self._store_executor
             lookup_executor = self._lookup_executor
             load_executor = self._load_executor
+            copy_executor = self._copy_executor
             self._store_executor = None
             self._lookup_executor = None
             self._load_executor = None
+            self._copy_executor = None
 
         if store_executor is not None:
             store_executor.shutdown(wait=True)
@@ -614,6 +621,8 @@ class DaxL2Adapter(L2AdapterInterface):
             lookup_executor.shutdown(wait=True)
         if load_executor is not None:
             load_executor.shutdown(wait=True)
+        if copy_executor is not None:
+            copy_executor.shutdown(wait=True)
 
         with self._device_lock:
             entries = list(self._devices)
@@ -1133,15 +1142,47 @@ class DaxL2Adapter(L2AdapterInterface):
         loaded_keys: list[ObjectKey] = []
 
         try:
+            # coalesced DAX load path: group by device under the lock, copy
+            # outside it (device cores take their own reservation locks), and
+            # parallelize sub-batches across an inline pool — ctypes.memmove
+            # releases the GIL, so copies genuinely overlap.
+            groups: dict[int, tuple[DaxDeviceEntry, list[int]]] = {}
             with self._device_lock:
-                for i, (key, obj) in enumerate(zip(keys, objects, strict=True)):
+                for i, key in enumerate(keys):
                     entry = self._find_device_for_key_locked(key, lock=False)
                     if entry is None:
                         continue
-                    loaded = entry.core.load_many_into([key], [obj])[0]
-                    if loaded:
+                    groups.setdefault(entry.device_id, (entry, []))[1].append(i)
+
+            sub_batches: list[tuple[DaxDeviceEntry, list[int]]] = []
+            _SUB = 8  # chunks per copy task (~0.5 GiB at 64 MiB chunks)
+            for entry, idxs in groups.values():
+                for s in range(0, len(idxs), _SUB):
+                    sub_batches.append((entry, idxs[s : s + _SUB]))
+
+            def _load_sub(
+                batch: tuple[DaxDeviceEntry, list[int]],
+            ) -> tuple[list[int], list[bool]]:
+                entry, idxs = batch
+                gkeys = [keys[i] for i in idxs]
+                gobjs = [objects[i] for i in idxs]
+                try:
+                    return idxs, entry.core.load_many_into(gkeys, gobjs)
+                except Exception:
+                    logger.exception("Sub-batch DAX load failed")
+                    return idxs, [False] * len(idxs)
+
+            copy_pool = self._copy_executor
+            if len(sub_batches) <= 1 or copy_pool is None:
+                results = [_load_sub(b) for b in sub_batches]
+            else:
+                results = list(copy_pool.map(_load_sub, sub_batches))
+
+            for idxs, flags in results:
+                for i, ok in zip(idxs, flags, strict=True):
+                    if ok:
                         bitmap.set(i)
-                        loaded_keys.append(key)
+                        loaded_keys.append(keys[i])
         except Exception:
             logger.exception("DAX L2 load failed")
         finally:

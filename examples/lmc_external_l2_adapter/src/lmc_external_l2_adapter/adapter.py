@@ -181,9 +181,9 @@ class InMemoryL2Adapter(L2AdapterInterface):
     # ---- lookup & lock -------------------------------------
 
     def submit_lookup_and_lock_task(
-        self, keys: list[ObjectKey], layout_desc: MemoryLayoutDesc
+        self, keys: list[ObjectKey], group_layout_descs: dict[int, MemoryLayoutDesc]
     ) -> L2TaskId:
-        # TODO: this example ignores layout_desc; a real adapter may need it (the hint is forwarded by the P2P adapter).
+        # TODO: this example ignores group_layout_descs; a real adapter may need it (the hint is forwarded by the P2P adapter).
         with self._lock:
             tid = self._alloc_id()
         self._loop.call_soon_threadsafe(self._do_lookup, keys, tid)

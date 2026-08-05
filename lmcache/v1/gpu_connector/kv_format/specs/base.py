@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 """Per-format geometry interface for GPU KV caches.
 
-Each :class:`KVFormatSpec` describes one ``EngineKVFormat``: static facts
-(MLA/HND/cross-layer) plus methods that read geometry off a normalized
-``kv_caches``. The enum is the single source of truth for which formats exist;
-engine identity lives only in detection. The format -> spec table is in
-``registry.py``.
+Each :class:`KVFormatSpec` holds the geometry accessors for one
+``EngineKVFormat`` -- methods that read shape off a normalized ``kv_caches``.
+The format's static facts (MLA and the structural shape) live on the
+``EngineKVFormat`` enum itself (``csrc/engine_kv_format.h``, read via
+``lmc_ops``), shared with the device kernels. The enum is the single source of
+truth for which formats exist; engine identity lives only in detection. The
+format -> spec table is in ``registry.py``.
 """
 
 # Standard
@@ -32,6 +34,11 @@ _LABELS = {
     "BS": "BS",
     "NH": "NH",
     "HS": "HS",
+    "CS": "CS",
+    # Blocked-scale indexer cache: per-block value / scale regions. Rendered
+    # symbolically; the logical per-layer tensor is [NB, BS, HS(=132)].
+    "BSV": "BSxVALS",
+    "BSS": "BSxSCALES",
 }
 _ACCESSORS = {
     "NB": "num_blocks",
@@ -39,7 +46,12 @@ _ACCESSORS = {
     "BS": "block_size",
     "NH": "num_heads",
     "HS": "head_size",
+    "CS": "head_size",
     "PBS": "page_buffer_size",
+    # Blocked-scale regions: sized by tokens per block (the value/scale byte
+    # widths are format constants, not per-model geometry).
+    "BSxVALS": "block_size",
+    "BSxSCALES": "block_size",
 }
 
 
@@ -78,8 +90,11 @@ class KVFormatSpec(ABC):
     since one format may come from many (engine, backend) pairs.
 
     Class attributes: ``engine_kv_format`` (the format this describes, its
-    identity), ``is_mla`` / ``is_hnd`` / ``is_cross_layer`` (layout flags), and
-    ``attention_backends`` (diagnostic labels; first is the representative).
+    identity) and ``attention_backends`` (diagnostic labels; first is the
+    representative). The format's static facts -- ``is_mla`` and the structural
+    shape ``is_cross_layer`` / ``is_kv_list`` / ``is_layer_list`` -- live on the
+    ``EngineKVFormat`` itself (``csrc/engine_kv_format.h``, read via ``lmc_ops``),
+    shared with the device kernels.
 
     Method usage by mode -- every spec is consumed through the ``get_*``
     facade in ``gpu_connector.utils``:
@@ -101,9 +116,6 @@ class KVFormatSpec(ABC):
     """
 
     engine_kv_format: ClassVar["lmc_ops.EngineKVFormat"]
-    is_mla: ClassVar[bool] = False
-    is_hnd: ClassVar[bool] = False
-    is_cross_layer: ClassVar[bool] = False
     attention_backends: ClassVar[tuple[str, ...]] = ()
 
     def __init__(self, kv_caches: DiscoverableKVCache) -> None:
@@ -128,6 +140,12 @@ class KVFormatSpec(ABC):
         """Return ``num_blocks * block_size`` (or the fused PBS axis).
 
         Non-MP only (see the class docstring).
+        """
+
+    @abstractmethod
+    def kv_size(self) -> int:
+        """Return the number of dimensions for "KV". For normal specs, it's 2.
+        Some specs has a fused KV (e.g., MLA, or new vLLM format), so it's 1.
         """
 
     @abstractmethod

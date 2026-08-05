@@ -22,7 +22,6 @@ import lmcache.c_ops as lmc_ops
 
 class NL_X_NB_TWO_NH_BS_HS_Spec(KVFormatSpec):
     engine_kv_format = lmc_ops.EngineKVFormat.NL_X_NB_TWO_NH_BS_HS
-    is_hnd = True
     attention_backends = ("vLLM non-MLA flash infer (HND layout)",)
 
     def num_layers(self) -> int:
@@ -36,6 +35,9 @@ class NL_X_NB_TWO_NH_BS_HS_Spec(KVFormatSpec):
 
     def page_buffer_size(self) -> int:
         return self.kv_caches[0].shape[0] * self.kv_caches[0].shape[3]
+
+    def kv_size(self) -> int:
+        return 2
 
     def num_heads(self, layer_idx: int = 0) -> int:
         return self.kv_caches[layer_idx].shape[2]

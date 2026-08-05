@@ -113,6 +113,40 @@ spec:
     raw:
       type: string              # adapter type name (nixl_store, fs, mock, raw_block, etc.)
       config: map[string]any    # type-specific config as free-form map
+    # Optional: serde transform on KV bytes to/from the L2 adapter. Renders
+    # a "serde" sub-dict into the --l2-adapter JSON; applies to whichever
+    # adapter is configured. Exactly one serde type must be set (only aesgcm
+    # today; other server-side serdes like fp8/turboquant can gain typed
+    # fields here later, or be set via raw.config.serde).
+    serde:
+      # aesgcm: at-rest encryption keyed per cache_salt. The referenced
+      # Secret is mounted directly into the engine pods, read-only at
+      # /etc/lmcache/keys/master (only the "master" data key is projected).
+      # The operator never reads or writes the Secret and never generates
+      # key material; provenance/rotation stay with the user. The reference
+      # is same-namespace only, so CR-create permission cannot be leveraged
+      # to read Secrets from other namespaces (confused deputy). See
+      # docs/design/v1/distributed/serde/aesgcm.md for the threat/key models.
+      aesgcm:
+        masterKeySecretRef:     # REQUIRED, user-created Secret with a "master" data key,
+          name: string          # in the engine's namespace (same-namespace only)
+        keyProvider: string     # default: hkdf (only implemented provider)
+        aesBits: int            # default: 128 (or 256)
+
+  # -- Connection-injection webhook defaults (optional) --
+  # Read by the LMCache mutating webhook for pods bound to this engine. When
+  # unset, the webhook wires only the connection (--kv-transfer-config, hostIPC,
+  # PYTHONHASHSEED). Set injection.payloadImage to ALSO stage an lmcache code
+  # tree into the vLLM container (emptyDir + init container + readOnly mount +
+  # PYTHONPATH=/lmcache-payload), reusing the CacheBlend payload-staging
+  # mechanism so the vLLM client and the engine server run one lmcache build.
+  injection:
+    payloadImage:               # SEPARATE image: ships lmcache under /payload
+      repository: string        # REQUIRED (no valid default)
+      tag: string               # default: latest
+      pullPolicy: string        # default: IfNotPresent
+    imagePullSecrets: []LocalObjectReference  # for a private payload image
+    targetContainer: string     # default: first container
 
   # -- Resources (auto-computed, no user input needed) --
   # The operator derives resource requests/limits from l1.sizeGB:
@@ -143,6 +177,12 @@ spec:
   serviceAccountName: string
   priorityClassName: string
 
+  # -- Security --
+  privileged: bool            # default: false; run the engine container in
+                              # privileged mode. Needed only on clusters where
+                              # the engine cannot see the node GPUs otherwise
+                              # (see "Auto-managed Pod Settings" below).
+
   # -- Extra CLI flags --
   extraArgs: []string         # appended last, can override any auto-generated flag
 ```
@@ -155,13 +195,13 @@ The operator always injects these into the pod spec:
 
 - **`hostIPC: true`** — **required for CUDA IPC between LMCache and vLLM.** LMCache uses `CudaIPCWrapper` which calls PyTorch's `_share_cuda_()` to get a GPU driver-level IPC handle. The handle is serialized and sent over ZMQ TCP. The receiving process reconstructs the tensor via `cudaIpcOpenMemHandle` at the driver level. This call requires both processes to share the same IPC namespace — without `hostIPC: true`, `cudaIpcOpenMemHandle` fails with `cudaErrorMapBufferObjectFailed`. **Both the LMCache pods and vLLM pods must have `hostIPC: true`.**
 - **`runtimeClassName: nvidia`** — uses the NVIDIA container runtime, which injects the host's NVIDIA driver libraries and device files into the container. This is required for CUDA to function inside the pod.
-- **`privileged: true`** (security context) — **required for GPU visibility without explicit GPU resource requests.** LMCache needs access to all GPUs on the node for CUDA IPC and custom data transfer kernels, but it must not claim any GPUs via `nvidia.com/gpu` resource requests (otherwise those GPUs would be unavailable to the serving engine). The combination of `runtimeClassName: nvidia` + `privileged: true` + `NVIDIA_VISIBLE_DEVICES=all` allows the container to see all GPUs without consuming device plugin resources. This means the serving engine (e.g., vLLM) can still request all GPUs on the node.
+- **`NVIDIA_VISIBLE_DEVICES=all`** — gives the engine access to all GPUs on the node for CUDA IPC and custom data transfer kernels without claiming any via `nvidia.com/gpu` resource requests (which would make those GPUs unavailable to the serving engine). The combination of `runtimeClassName: nvidia` + `NVIDIA_VISIBLE_DEVICES=all` lets the container see all GPUs without consuming device-plugin resources, so the serving engine (e.g., vLLM) can still request all GPUs on the node. On most clusters this is sufficient; on some, the engine cannot see the GPUs unless the pod is also privileged — set `spec.privileged: true` to run the engine container privileged (default `false`).
 - **`NVIDIA_VISIBLE_DEVICES=all`** and **`NVIDIA_DRIVER_CAPABILITIES=all`** — env vars that instruct the NVIDIA container runtime to expose all GPUs and all driver capabilities to the container.
 - **`--host 0.0.0.0`** — always passed as a container arg. The server defaults to `--host localhost` which only binds to loopback; the server must bind to all interfaces so the node-local Service can route traffic to it.
 - **No `hostNetwork`** — the operator does **not** use `hostNetwork`. Instead, it creates a ClusterIP Service with `internalTrafficPolicy=Local`. kube-proxy ensures that traffic to the service is routed only to the LMCache pod on the same node. This avoids occupying host ports and reduces the privileged surface area.
 - **No `/dev/shm` emptyDir mount** — the operator intentionally does *not* mount an emptyDir at `/dev/shm`. With `hostIPC: true`, the container already sees the host's `/dev/shm`. Mounting an emptyDir would shadow the host's `/dev/shm` with a private tmpfs, breaking CUDA IPC (`cudaIpcOpenMemHandle` fails because IPC handles written by one pod are invisible to others). If your workload needs a larger `/dev/shm` for non-IPC purposes, add it via `spec.volumes` / `spec.volumeMounts`.
 
-> **Security implications:** The LMCache pods run with `privileged: true` and `hostIPC: true`. This exposes the host's IPC namespace and grants full device access to the container. This is required for GPU visibility and CUDA IPC. Only deploy in trusted environments. Clusters using Pod Security Standards must allow the `privileged` profile for the LMCache namespace — the `baseline` and `restricted` profiles reject these settings.
+> **Security implications:** The LMCache pods run with `hostIPC: true` (required for CUDA IPC), which exposes the host's IPC namespace. When `spec.privileged: true` is set they additionally run privileged, granting full device access to the container. Only deploy in trusted environments. Clusters using Pod Security Standards must allow the `privileged` profile for the LMCache namespace whenever `hostIPC`/`privileged` are in use — the `baseline` and `restricted` profiles reject these settings.
 
 ---
 
@@ -327,7 +367,7 @@ OnEvent(LMCacheEngine create/update/delete):
    - memoryLimit = ceil(memoryRequest * 1.5) Gi
    - containerArgs from all spec fields
 3. RECONCILE DaemonSet (CreateOrUpdate, ownerRef)
-   - Always inject: hostIPC, runtimeClassName: nvidia, privileged: true, --host 0.0.0.0
+   - Always inject: hostIPC, runtimeClassName: nvidia, NVIDIA_VISIBLE_DEVICES=all, --host 0.0.0.0 (privileged only when spec.privileged=true)
 4. RECONCILE node-local lookup Service (internalTrafficPolicy=Local)
 5. RECONCILE headless Service for metrics
 6. RECONCILE connection ConfigMap
@@ -394,8 +434,9 @@ l2Backend, scheduling, overrides, imagePullSecrets) and adds:
 DaemonSet running `lmcache server --engine-type blend` (plus
 `--l1-align-bytes 16777216`), a node-local lookup Service, a metrics Service, and
 a `<name>-connection` ConfigMap. **GPU model is identical to `LMCacheEngine`**:
-`privileged` + `runtimeClassName: nvidia` + `NVIDIA_VISIBLE_DEVICES=all` +
-`hostIPC: true`, with **no `nvidia.com/gpu` device-plugin claim** — the engine
+`runtimeClassName: nvidia` + `NVIDIA_VISIBLE_DEVICES=all` + `hostIPC: true` (and
+`privileged` when `spec.privileged=true`), with **no `nvidia.com/gpu`
+device-plugin claim** — the engine
 *shares* the vLLM GPU rather than reserving one, because the blend server scatters
 re-RoPE'd KV directly into vLLM's paged KV over **same-device CUDA IPC**. The
 engine resource builders are the same name/spec-keyed cores used by
@@ -452,6 +493,16 @@ container that does not exist on the pod (`target-container-not-found`). It does
 when the engine comes up. Args are emitted in two-token form
 (`--attention-backend CUSTOM`); the replace-not-duplicate dedup still recognizes a
 user-supplied `--flag=value`.
+
+> **Shared with the LMCache injector.** The emptyDir + payload init container +
+> readOnly mount + `PYTHONPATH` staging (rows 2–3 above) is generic — the standard
+> `LMCacheEngine` injector (`/mutate-lmcache--v1-pod`) reuses it (under
+> `internal/webhook/payload_staging.go`) to optionally stage an `lmcache` build
+> when `LMCacheEngine.spec.injection.payloadImage` is set. There the staging is
+> **additive and optional**: the connection wiring always runs, and an unset (or
+> absent) `injection.payloadImage` simply stages nothing — it never skips the
+> whole injection. The LMCache staging uses its own names (`lmcache-payload`
+> volume, `/lmcache-payload` mount) so both injectors can fire on one pod.
 
 ### Prerequisites
 

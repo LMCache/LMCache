@@ -49,8 +49,10 @@ __device__ inline size_t calculate_engine_global_offset(
     // Flash Infer HND: L tensors [NB, 2, NH, BS, HS]
     return engine_block_idx * shape_desc.kv_size * scalars_per_block +
            k_or_v * scalars_per_block;
-  } else if constexpr (format == EngineKVFormat::NL_X_NB_BS_HS) {
-    // MLA: L tensors [NB, BS, HS]
+  } else if constexpr (format == EngineKVFormat::NL_X_NB_BS_HS ||
+                       format == EngineKVFormat::NL_X_NB_BSV_BSS) {
+    // MLA: L tensors [NB, BS, HS]; blocked-scale shares the block base,
+    // only its within-block layout differs (handled in the transfer body).
     return engine_block_idx * scalars_per_block;
   } else if constexpr (format == EngineKVFormat::TWO_X_NL_X_NBBS_NH_HS) {
     // SGLang MHA (in-process): 2L tensors [NBBS, NH, HS]
@@ -60,6 +62,25 @@ __device__ inline size_t calculate_engine_global_offset(
     return engine_block_idx * scalars_per_block;
   } else if constexpr (format == EngineKVFormat::NL_X_NBBS_ONE_HS) {
     // SGLang MLA: L tensors [NBBS, 1, HS]
+    return engine_block_idx * scalars_per_block;
+  } else if constexpr (format == EngineKVFormat::NL_X_NB_NH_BS_TWO_HS) {
+    // Fused-K/V HND: L tensors [NB, NH, BS, 2*HS], handled like
+    // NL_X_TWO_NB_NH_BS_HS but with an empty K/V axis: the desc carries
+    // kv_size == 1 and hs == 2 * head_size, so k_or_v is always 0 and each
+    // head copy moves the packed K+V pair.
+    return engine_block_idx * scalars_per_block;
+  } else if constexpr (format == EngineKVFormat::NL_X_NB_BS_NH_TWO_HS) {
+    // Fused-K/V NHD: L tensors [NB, BS, NH, 2*HS]; same empty K/V axis as
+    // NL_X_NB_NH_BS_TWO_HS (kv_size == 1, hs == 2 * head_size), tokens
+    // before heads within a block.
+    return engine_block_idx * scalars_per_block;
+  } else if constexpr (format == EngineKVFormat::NL_X_NB_NH_BS_CS) {
+    // Content-size HND: L tensors [NB, NH, BS, CS]; same empty K/V axis as
+    // NL_X_NB_NH_BS_TWO_HS (kv_size == 1, hs == content_size).
+    return engine_block_idx * scalars_per_block;
+  } else if constexpr (format == EngineKVFormat::NL_X_NB_BS_NH_CS) {
+    // Content-size NHD: L tensors [NB, BS, NH, CS]; same empty K/V axis as
+    // NL_X_NB_NH_BS_CS, tokens before heads within a block.
     return engine_block_idx * scalars_per_block;
   } else if constexpr (format == EngineKVFormat::NB_NL_TWO_NH_BS_HS) {
     // TRT-LLM cross-layer HND: single tensor [NB, NL, 2, NH, BS, HS]
@@ -83,7 +104,9 @@ __device__ inline size_t calculate_engine_local_offset(
   size_t scalars_per_token = shape_desc.scalars_per_token<ScalarType>();
   if constexpr (format == EngineKVFormat::NB_NL_TWO_NH_BS_HS ||
                 format == EngineKVFormat::NL_X_TWO_NB_NH_BS_HS ||
-                format == EngineKVFormat::NL_X_NB_TWO_NH_BS_HS) {
+                format == EngineKVFormat::NL_X_NB_TWO_NH_BS_HS ||
+                format == EngineKVFormat::NL_X_NB_NH_BS_TWO_HS ||
+                format == EngineKVFormat::NL_X_NB_NH_BS_CS) {
     // HND: [NH, BS, HS] — heads are outermost within a block
     size_t scalars_per_head_block =
         shape_desc.bs * scalars_per_head;  // BS * HS
@@ -202,6 +225,29 @@ __device__ void multi_layer_block_transfer_single_block(
     paged_buffer_layer_ptr = (ScalarType*)paged_buffer_ptrs[layer_idx];
   }
 
+  if constexpr (format == EngineKVFormat::NL_X_NB_BSV_BSS) {
+    // Blocked page [BSxvals][BSxscales] vs token-major chunk row: two
+    // copies per token (host pins <=4B units, so scale is whole units).
+    const size_t spt = shape_desc.scalars_per_token<ScalarType>();
+    const size_t scale_units = 4 / sizeof(ScalarType);
+    const size_t val_units = spt - scale_units;
+    for (int t = 0; t < shape_desc.bs; ++t) {
+      ScalarType* eng_vals =
+          paged_buffer_layer_ptr + engine_global_offset + t * val_units;
+      ScalarType* eng_scale = paged_buffer_layer_ptr + engine_global_offset +
+                              shape_desc.bs * val_units + t * scale_units;
+      ScalarType* lmc_row = lmcache_object + lmcache_global_offset + t * spt;
+      if constexpr (lmcache_to_engine) {
+        warp_copy<ScalarType>(eng_vals, lmc_row, val_units);
+        warp_copy<ScalarType>(eng_scale, lmc_row + val_units, scale_units);
+      } else {
+        warp_copy<ScalarType>(lmc_row, eng_vals, val_units);
+        warp_copy<ScalarType>(lmc_row + val_units, eng_scale, scale_units);
+      }
+    }
+    return;
+  }
+
   for (int token_offset = 0; token_offset < shape_desc.bs; ++token_offset) {
     const size_t engine_local_offset =
         calculate_engine_local_offset<ScalarType, format>(token_offset,
@@ -291,6 +337,21 @@ __global__ void multi_layer_block_transfer_kernel(
     case EngineKVFormat::NB_NL_TWO_NH_BS_HS:                            \
       LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NB_NL_TWO_NH_BS_HS);     \
       break;                                                            \
+    case EngineKVFormat::NL_X_NB_NH_BS_TWO_HS:                          \
+      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_NH_BS_TWO_HS);   \
+      break;                                                            \
+    case EngineKVFormat::NL_X_NB_BS_NH_TWO_HS:                          \
+      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_BS_NH_TWO_HS);   \
+      break;                                                            \
+    case EngineKVFormat::NL_X_NB_NH_BS_CS:                              \
+      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_NH_BS_CS);       \
+      break;                                                            \
+    case EngineKVFormat::NL_X_NB_BS_NH_CS:                              \
+      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_BS_NH_CS);       \
+      break;                                                            \
+    case EngineKVFormat::NL_X_NB_BSV_BSS:                               \
+      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_BSV_BSS);        \
+      break;                                                            \
     default:                                                            \
       TORCH_CHECK(false, "Unsupported EngineKVFormat: ",                \
                   static_cast<int>(engine_kv_format));                  \
@@ -378,6 +439,16 @@ void multi_layer_block_kv_transfer(
   TORCH_CHECK(head_bytes % sizeof(uint16_t) == 0, "head_size * element_size (",
               head_bytes, ") must be divisible by 2 for vectorized access");
 
+  if (engine_kv_format == EngineKVFormat::NL_X_NB_BSV_BSS) {
+    // Blocked-scale indexer cache: the per-token fp32 scale must be a whole
+    // number of transfer units, so pin 4-byte units regardless of row width.
+    TORCH_CHECK(head_bytes % sizeof(uint32_t) == 0,
+                "NL_X_NB_BSV_BSS row bytes (", head_bytes,
+                ") must be divisible by 4");
+    LAUNCH_TEMPLATED(uint32_t);
+    return;
+  }
+
   if (head_bytes % sizeof(uint4) == 0) {
     LAUNCH_TEMPLATED(uint4);  // 16 bytes per copy
   } else if (head_bytes % sizeof(uint32_t) == 0) {
@@ -388,3 +459,85 @@ void multi_layer_block_kv_transfer(
 }
 
 #undef LAUNCH_TEMPLATED
+
+void execute_object_group_transfer(
+    TransferDirection direction, const torch::Device& device,
+    size_t host_buffer_alignment,
+    const std::vector<KernelGroupSpec>& kernel_group_specs,
+    const std::vector<BatchStep>& batch_steps) {
+  // Set the device guard once for the whole plan so every staging copy and
+  // kernel launch below is enqueued on this device's current stream, in order.
+  const at::cuda::OptionalCUDAGuard device_guard(device);
+  const bool is_h2d = (direction == TransferDirection::H2D);
+  const auto int64_opts = at::TensorOptions().dtype(at::kLong).device(device);
+
+  const auto do_staging = [&](const std::vector<StagingCopy>& staging) {
+    for (const auto& copy : staging) {
+      lmcache_memcpy_async(copy.dest, copy.src, copy.nbytes, direction,
+                           copy.host_offset, host_buffer_alignment);
+    }
+  };
+
+  for (const auto& step : batch_steps) {
+    // H2D stages CPU->GPU temp buffers before the kernel reads them; D2H stages
+    // GPU->CPU after the kernel writes them. The per-step ordering must be
+    // preserved because temp buffers are reused across steps.
+    if (is_h2d) {
+      do_staging(step.staging);
+    }
+    for (const auto& launch : step.launches) {
+      TORCH_CHECK(
+          launch.group_idx >= 0 &&
+              launch.group_idx < static_cast<int>(kernel_group_specs.size()),
+          "LaunchVar.group_idx out of range: ", launch.group_idx);
+      const KernelGroupSpec& group = kernel_group_specs[launch.group_idx];
+      TORCH_CHECK(launch.num_objects >= 1 &&
+                      launch.num_objects <=
+                          static_cast<int>(group.lmcache_objects_ptrs.size()),
+                  "LaunchVar.num_objects (", launch.num_objects,
+                  ") exceeds available temp buffers (",
+                  group.lmcache_objects_ptrs.size(), ")");
+      // Bounds-check the block_ids slice before the kernel dereferences it on
+      // device: an out-of-range offset/length would otherwise be a silent
+      // out-of-bounds device read (CUDA fault or garbage), not a clean error.
+      TORCH_CHECK(launch.block_ids_offset >= 0,
+                  "LaunchVar.block_ids_offset must be non-negative, got ",
+                  launch.block_ids_offset);
+      TORCH_CHECK(launch.total_blocks >= 0,
+                  "LaunchVar.total_blocks must be non-negative, got ",
+                  launch.total_blocks);
+      TORCH_CHECK(launch.block_ids_offset + launch.total_blocks <=
+                      group.block_ids_capacity,
+                  "LaunchVar block_ids slice [", launch.block_ids_offset, ", ",
+                  launch.block_ids_offset + launch.total_blocks,
+                  ") exceeds block_ids capacity ", group.block_ids_capacity);
+
+      // Wrap the plan's pre-resolved raw device addresses as non-owning tensor
+      // views so we can reuse the existing multi_layer_block_kv_transfer entry
+      // point without touching any of its code. The backing storage is owned by
+      // the caller's tensors (kept alive for the duration of this call); these
+      // views only carry the pointer/shape each launch needs. Downstream only
+      // reads paged_buffer_ptrs_tensor.data_ptr() and block_ids.{data_ptr,
+      // size(0)}.
+      const uintptr_t block_ids_addr =
+          group.block_ids_base +
+          static_cast<uintptr_t>(launch.block_ids_offset) * sizeof(int64_t);
+      const at::Tensor paged_buffer_ptrs_tensor = at::from_blob(
+          reinterpret_cast<void*>(group.paged_buffer_ptrs), {1}, int64_opts);
+      const at::Tensor block_ids = at::from_blob(
+          reinterpret_cast<void*>(block_ids_addr),
+          {static_cast<int64_t>(launch.total_blocks)}, int64_opts);
+      std::vector<int64_t> lmcache_objects_ptrs(
+          group.lmcache_objects_ptrs.begin(),
+          group.lmcache_objects_ptrs.begin() + launch.num_objects);
+
+      multi_layer_block_kv_transfer(
+          paged_buffer_ptrs_tensor, std::move(lmcache_objects_ptrs), block_ids,
+          device, direction, group.shape_desc, group.lmcache_chunk_size,
+          group.engine_kv_format, launch.skip_prefix_n_blocks);
+    }
+    if (!is_h2d) {
+      do_staging(step.staging);
+    }
+  }
+}

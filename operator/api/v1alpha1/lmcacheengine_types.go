@@ -61,6 +61,39 @@ type ImageSpec struct {
 	PullPolicy *string `json:"pullPolicy,omitempty"`
 }
 
+// LMCacheInjectionSpec configures optional lmcache code-payload staging for vLLM
+// pods bound to this engine. When payloadImage is unset the webhook wires only
+// the connection (--kv-transfer-config); when set it also copies the payload
+// tree into the vLLM container and prepends PYTHONPATH so vLLM imports that
+// lmcache instead of the one baked into its image, keeping the vLLM client and
+// the engine server on one build.
+type LMCacheInjectionSpec struct {
+	// payloadImage is a purpose-built init-container image (repository/tag/
+	// pullPolicy, like spec.image) that ships an unpacked lmcache tree under
+	// /payload and copies it to $SHARED_DIR on start (see
+	// docker/Dockerfile.payload); the vLLM container imports it via PYTHONPATH.
+	//
+	// repository has no usable default — the ImageSpec default
+	// (lmcache/vllm-openai) is NOT a payload — so it must be set explicitly. For
+	// private registries, imagePullSecrets must reference Secret(s) in the vLLM
+	// pod's namespace.
+	// +optional
+	PayloadImage *ImageSpec `json:"payloadImage,omitempty"`
+
+	// imagePullSecrets are appended to the vLLM pod's spec.imagePullSecrets so a
+	// PRIVATE payload init-container image can pull. The referenced Secret(s)
+	// must already exist in the vLLM pod's namespace; the operator does not copy
+	// them cross-namespace.
+	// +optional
+	ImagePullSecrets []corev1.LocalObjectReference `json:"imagePullSecrets,omitempty"`
+
+	// targetContainer is the name of the vLLM container to inject into. Empty
+	// (the default) selects the first container; a per-pod annotation may
+	// override it.
+	// +optional
+	TargetContainer *string `json:"targetContainer,omitempty"`
+}
+
 // ServerSpec defines server configuration mapping to server.py argparse.
 type ServerSpec struct {
 	// port is the server listening port.
@@ -194,6 +227,47 @@ type L2BackendSpec struct {
 	// +kubebuilder:default=8
 	// +kubebuilder:validation:Minimum=1
 	PrefetchMaxInFlight *int32 `json:"prefetchMaxInFlight,omitempty"`
+
+	// serde configures a transform applied to KV bytes on their way to
+	// and from the L2 adapter (whichever of resp or raw is configured).
+	// Exactly one serde type must be set.
+	// +optional
+	Serde *L2SerdeSpec `json:"serde,omitempty"`
+}
+
+// L2SerdeSpec selects and configures the serde for the L2 backend. It
+// renders to the "serde" sub-dict of the --l2-adapter JSON. Exactly one
+// serde type must be set.
+type L2SerdeSpec struct {
+	// aesgcm enables at-rest encryption of KV bytes in the L2 tier,
+	// keyed per cache_salt. L1 (host RAM) and L0 (GPU) remain plaintext.
+	// +optional
+	AESGCM *AESGCMSerdeSpec `json:"aesgcm,omitempty"`
+}
+
+// AESGCMSerdeSpec configures the aesgcm encryption serde. The operator
+// mounts the referenced master-key Secret into the engine pods.
+type AESGCMSerdeSpec struct {
+	// masterKeySecretRef names a user-created Secret in the engine's
+	// namespace holding the master key under the "master" data key. The
+	// Secret is mounted directly into the engine pods; the reference is
+	// same-namespace only, so creating an engine CR cannot be used to
+	// read Secrets from other namespaces. The operator never generates
+	// key material.
+	MasterKeySecretRef corev1.LocalObjectReference `json:"masterKeySecretRef"`
+
+	// keyProvider selects how per-cache_salt keys are obtained from the
+	// master key. Only "hkdf" (HKDF-SHA256 derivation) is implemented.
+	// +optional
+	// +kubebuilder:default="hkdf"
+	// +kubebuilder:validation:Enum=hkdf
+	KeyProvider *string `json:"keyProvider,omitempty"`
+
+	// aesBits selects the AES key size (128 or 256).
+	// +optional
+	// +kubebuilder:default=128
+	// +kubebuilder:validation:Enum=128;256
+	AESBits *int32 `json:"aesBits,omitempty"`
 }
 
 // RESPL2AdapterSpec configures a RESP (Redis/Valkey) L2 adapter.
@@ -299,7 +373,7 @@ type CoordinatorConnectionSpec struct {
 type LMCacheEngineSpec struct {
 	// gpuVendor selects the GPU vendor. "nvidia" (default) requires the NVIDIA
 	// GPU Operator's "nvidia" RuntimeClass; "amd" runs on the default container
-	// runtime with privileged: true.
+	// runtime.
 	// +optional
 	// +kubebuilder:default="nvidia"
 	// +kubebuilder:validation:Enum=nvidia;amd
@@ -337,6 +411,12 @@ type LMCacheEngineSpec struct {
 	// the server does not register with any coordinator.
 	// +optional
 	Coordinator *CoordinatorConnectionSpec `json:"coordinator,omitempty"`
+
+	// injection defines the defaults the LMCache mutating webhook reads for pods
+	// bound to this engine. When unset, the webhook wires only the connection;
+	// set injection.payloadImage to also stage an lmcache code payload.
+	// +optional
+	Injection *LMCacheInjectionSpec `json:"injection,omitempty"`
 
 	// resourceOverrides allows overriding auto-computed resource requirements.
 	// +optional
@@ -394,6 +474,15 @@ type LMCacheEngineSpec struct {
 	// +optional
 	// +kubebuilder:default=false
 	HostNetwork *bool `json:"hostNetwork,omitempty"`
+
+	// privileged runs the engine container in privileged mode. On some clusters
+	// this is required for the engine to see all node GPUs (for CUDA IPC) without
+	// claiming any via the nvidia.com/gpu device plugin; on many clusters
+	// NVIDIA_VISIBLE_DEVICES=all already grants that visibility without it, so it
+	// defaults to false.
+	// +optional
+	// +kubebuilder:default=false
+	Privileged *bool `json:"privileged,omitempty"`
 
 	// extraArgs are additional CLI flags appended to the server command.
 	// They are appended last and can override any auto-generated flag.
