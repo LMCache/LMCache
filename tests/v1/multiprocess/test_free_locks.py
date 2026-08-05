@@ -159,9 +159,9 @@ def test_adapter_free_lookup_locks_sends_request():
     """LMCacheMPSchedulerAdapter.free_lookup_locks should send a FREE_LOOKUP_LOCKS
     request with the correct key payload."""
     # First Party
-    from lmcache.integration.vllm.lmcache_mp_metadata import ParallelStrategy
     from lmcache.integration.vllm.vllm_multi_process_adapter import (
         LMCacheMPSchedulerAdapter,
+        ParallelStrategy,
     )
 
     adapter = LMCacheMPSchedulerAdapter.__new__(LMCacheMPSchedulerAdapter)
@@ -210,9 +210,9 @@ def test_adapter_free_lookup_locks_key_matches_lookup():
     """The key created by free_lookup_locks should match the key created by
     maybe_submit_lookup_request (no_worker_id_version, same start/end)."""
     # First Party
-    from lmcache.integration.vllm.lmcache_mp_metadata import ParallelStrategy
     from lmcache.integration.vllm.vllm_multi_process_adapter import (
         LMCacheMPSchedulerAdapter,
+        ParallelStrategy,
     )
 
     adapter = LMCacheMPSchedulerAdapter.__new__(LMCacheMPSchedulerAdapter)

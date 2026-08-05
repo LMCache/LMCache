@@ -17,54 +17,12 @@ from lmcache.integration.vllm.utils import (
     apply_mm_hashes_to_token_ids,
     extract_mm_features,
 )
+from lmcache.integration.vllm.vllm_multi_process_adapter import LoadStoreOp
 from lmcache.v1.multiprocess.group_view import slice_block_ids_per_group
 
 if TYPE_CHECKING:
     # Third Party
     from vllm.v1.request import Request
-
-
-@dataclass
-class LoadStoreOp:
-    token_ids: list[int]
-    """Token IDs for the load/store operation"""
-
-    block_ids: list[list[int]]
-    """Block IDs for the load/store operation, indexed by engine KV cache
-    group (one inner list per engine group). Worker submit paths expand
-    this to LMCache KV group order before sending requests to the server.
-    """
-
-    start: int = 0
-    """Start token index"""
-
-    end: int = 0
-    """End token index"""
-
-    skip_first_n_tokens: int = 0
-    """Number of tokens to skip writing at the beginning of the retrieve
-    range. Used to avoid overwriting APC-shared GPU blocks during retrieve."""
-
-    @property
-    def flat_block_ids(self) -> list[int]:
-        """Return all block IDs flattened for group-blind error paths.
-
-        Handles both the normal ``list[list[int]]`` format and the
-        IPC-flattened ``list[int]`` format that vLLM v0.19.0 produces when
-        ``SchedulerOutput`` serializes single-element nested lists across
-        process boundaries (e.g. ``[[20, 21]]`` → ``[20, 21]``).
-        Returns an empty list when ``block_ids`` is empty.
-        """
-        if not self.block_ids:
-            return []
-        # Defend against IPC serialization flattening [[20, 21, …]] → [20, 21, …]
-        if isinstance(self.block_ids[0], int):
-            return list(self.block_ids)
-        return [
-            block_id
-            for group_block_ids in self.block_ids
-            for block_id in group_block_ids
-        ]
 
 
 class LMCacheMPRequestState(enum.Enum):
@@ -412,87 +370,3 @@ class LMCacheMPConnectorMetadata(KVConnectorMetadata):
 
     def __repr__(self):
         return self.__str__()
-
-
-@dataclass
-class ParallelStrategy:
-    mla_only: bool
-    """
-    True only for pure-MLA models. This flag indicates whether the KV cache
-    tensor is replicated across TP ranks.
-    """
-
-    vllm_world_size: int
-    """Number of workers managed by one vLLM scheduler (TP × PP; excludes DP).
-
-    Mirrors ``vllm.parallel_config.world_size``.
-    """
-
-    vllm_worker_id: int
-    """This worker's rank within its scheduler group."""
-
-    tp_size: int
-    """The tensor parallel size."""
-
-    pp_size: int
-    """The pipeline parallel size."""
-
-    n_servers: int
-    """Number of LMCache servers backing this deployment"""
-
-    @property
-    def kv_world_size(self) -> int:
-        """Number of pieces a single token chunk's KV cache is split into
-        on the LMCache server storage."""
-        if self.mla_only:
-            # In this PR we do not support PP + TP + MLA in multi-server mode.
-            # A precondition check enforces pp_size == 1, so kv_world_size for
-            # MLA can be derived as world_size / tp_size.
-            return self.vllm_world_size // self.tp_size
-        return self.vllm_world_size // self.n_servers
-
-    @property
-    def kv_worker_id(self) -> int:
-        """Index of the piece of a single token chunk's KV cache
-        that the current worker is responsible for,
-        in ``[0, kv_world_size)``."""
-        if self.mla_only:
-            return self.vllm_worker_id // self.tp_size
-        return self.vllm_worker_id % (self.vllm_world_size // self.n_servers)
-
-    @property
-    def kv_tp_size(self) -> int:
-        """Tensor-parallel size as seen from a single LMCache server."""
-        return self.tp_size // self.n_servers
-
-    @property
-    def is_kv_writer(self) -> bool:
-        """Whether this rank is responsible for storing KV."""
-        if not self.mla_only:
-            return True
-        # MLA-only: only first rank per node is a writer.
-        return self.vllm_worker_id % (self.tp_size // self.n_servers) == 0
-
-
-class ExtraConfigDefault(enum.Enum):
-    """Centralized default values for extra_config keys.
-
-    Each member's *name* is the key used in the extra_config dict,
-    and its *value* is the default.
-    """
-
-    # Timeout (seconds) for blocking MQ requests: initial
-    # chunk-size query, KV cache registration/unregistration,
-    # and other synchronous operations.
-    mq_timeout = 300.0
-    # Interval (seconds) between periodic heartbeat pings
-    # to the server.
-    heartbeat_interval = 10.0
-    # Routing mode for ``create_transfer_context``: ``auto`` keeps the
-    # historical CUDA -> lmcache_driven / others -> engine_driven dispatch;
-    # ``lmcache_driven`` forces the IPC / SHM zero-copy path where the
-    # LMCache server pulls data via device handles;
-    # ``engine_driven`` forces the worker-side gather/scatter copy path.
-    # Mirrors the ``LMCACHE_MP_TRANSFER_MODE`` env var; this extra_config
-    # key wins when both are set.
-    mp_transfer_mode = "auto"

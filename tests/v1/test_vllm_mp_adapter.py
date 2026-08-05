@@ -19,10 +19,11 @@ import torch
 # First Party
 from lmcache.integration.vllm import vllm_multi_process_adapter as adapter_mod
 from lmcache.integration.vllm.experimental.dispatcher import Dispatcher
-from lmcache.integration.vllm.lmcache_mp_metadata import LoadStoreOp, ParallelStrategy
 from lmcache.integration.vllm.vllm_multi_process_adapter import (
     HeartbeatThread,
     LMCacheMPWorkerAdapter,
+    LoadStoreOp,
+    ParallelStrategy,
 )
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.protocol import RequestType

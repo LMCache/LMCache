@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Any, Literal
 import torch
 import zmq
 from lmcache import torch_dev
-from lmcache.integration.vllm.lmcache_mp_metadata import LoadStoreOp, ParallelStrategy
 from lmcache.integration.vllm.utils import mla_only
 from lmcache.utils import init_logger as lmcache_init_logger
 from lmcache.utils import check_interprocess_event_support
@@ -29,6 +28,8 @@ try:
     from lmcache.integration.vllm.vllm_multi_process_adapter import (
         LMCacheMPSchedulerAdapter,
         LMCacheMPWorkerAdapter,
+        LoadStoreOp,
+        ParallelStrategy,
     )
 
     try:
@@ -45,6 +46,8 @@ except ImportError:
     from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration import (
         LMCacheMPSchedulerAdapter,
         LMCacheMPWorkerAdapter,
+        LoadStoreOp,
+        ParallelStrategy,
     )
 
 if TYPE_CHECKING:

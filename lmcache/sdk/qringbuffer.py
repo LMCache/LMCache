@@ -26,10 +26,10 @@ if TYPE_CHECKING:
     # First Party
     from lmcache.integration.vllm.lmcache_mp_metadata import (
         LMCacheMPConnectorMetadata,
-        LoadStoreOp,
     )
     from lmcache.integration.vllm.vllm_multi_process_adapter import (
         LMCacheMPWorkerAdapter,
+        LoadStoreOp,
         StoreResult,
         _IpcEvent,
     )

@@ -49,7 +49,6 @@ from lmcache.integration.vllm.lmcache_mp_metadata import (
     LMCacheMPRequestMetadata,
     LMCacheMPRequestState,
     LMCacheMPRequestTracker,
-    ParallelStrategy,
 )
 from lmcache.integration.vllm.utils import (
     mla_only,
@@ -62,6 +61,7 @@ try:
     from lmcache.integration.vllm.vllm_multi_process_adapter import (
         LMCacheMPSchedulerAdapter,
         LMCacheMPWorkerAdapter,
+        ParallelStrategy,
         send_lmcache_request,
     )
 
