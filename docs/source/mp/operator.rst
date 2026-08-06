@@ -953,6 +953,11 @@ Deploying a CacheBlendEngine
         # Secret must exist in the vLLM pod's namespace.
         imagePullSecrets:
           - name: my-registry-secret
+        # Route attention through the CB backend.  Most models need this for
+        # blending; the default ("none") leaves --attention-backend unmanaged.
+        # Keep "none" only for models whose arch adapter owns the attention
+        # role (e.g. all-sparse-MLA).
+        attentionBackend: CUSTOM
 
 The engine runs ``lmcache server --engine-type blend`` as a DaemonSet and
 emits a ``my-cacheblend-connection`` ConfigMap with the ``CBKVConnector``
@@ -997,10 +1002,12 @@ not reach ``vllm serve``:
 
 The webhook injects the plugin init container, ``PYTHONPATH``, ``hostIPC``, the
 private-image pull secret, and the required CacheBlend vLLM flags
-(``--attention-backend CUSTOM``, ``--kv-transfer-config`` from the engine's
-connection ConfigMap, ``--block-size 64``, ``--pipeline-parallel-size 1``,
-``--no-enable-chunked-prefill``, ``--no-async-scheduling``, ``--enforce-eager``).
-You supply only the model and your non-CacheBlend flags.
+(``--attention-backend`` from ``injection.attentionBackend`` -- omitted on the
+default ``none``, so set ``CUSTOM`` as above, ``--kv-transfer-config`` from the
+engine's connection ConfigMap, ``--block-size`` from ``injection.blockSize``
+(default 64), ``--pipeline-parallel-size 1``, ``--no-enable-chunked-prefill``,
+``--no-async-scheduling``, ``--enforce-eager``).  You supply only the model and
+your non-CacheBlend flags.
 
 Verifying Injection
 ~~~~~~~~~~~~~~~~~~~~~
@@ -1042,6 +1049,12 @@ Spec Reference above) and adds:
    * - ``blend.recompRatio``
      - ``0.15``
      - Fraction of non-prefix-hit tokens recomputed (``cb.recomp_ratio``).
+   * - ``blend.partialBucket``
+     - unset
+     - Pads PARTIAL row counts to a multiple of this bucket
+       (``cb.partial_bucket``).  Needed on fp8-MoE models, where every distinct
+       row count is a fresh M shape and the Triton autotuner re-tunes all MoE
+       layers per CB step without it.  Unset omits the key (padding disabled).
    * - ``injection.payloadImage``
      - *required*
      - The (private) cacheblend-plugin init-container image
@@ -1056,9 +1069,19 @@ Spec Reference above) and adds:
    * - ``injection.cudagraph``
      - ``eager``
      - ``eager`` | ``piecewise`` | ``full_decode_only`` (never ``full``).
+   * - ``injection.blockSize``
+     - ``64``
+     - The injected vLLM ``--block-size`` (a user-supplied value on the pod is
+       overwritten).  Raise it for models whose KV page size differs (e.g. 128
+       for sparse-attention models).
+   * - ``injection.attentionBackend``
+     - ``none``
+     - The injected vLLM ``--attention-backend``.  ``none`` (default) omits the
+       flag and leaves a user-supplied value untouched; set ``CUSTOM`` to route
+       attention through the CB backend (most models need this for blending).
 
-``server.chunkSize`` defaults to ``256`` and must equal 256 (the blend matcher
-requires ``chunk_size == vLLM --block-size * 4``).
+``server.chunkSize`` defaults to ``256`` and must equal 256 (with the default
+``--block-size 64`` that is ``block_size * 4``).
 
 LMCacheCoordinator
 ------------------
