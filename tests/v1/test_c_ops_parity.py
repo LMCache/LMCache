@@ -24,7 +24,10 @@ import re
 import pytest
 
 # First Party
-from lmcache.v1.platform import torch_ops as fallback
+from lmcache.v1.platform.base.device_ops import DeviceOps
+
+fallback = DeviceOps()
+assert type(fallback) is DeviceOps
 
 try:
     # First Party
