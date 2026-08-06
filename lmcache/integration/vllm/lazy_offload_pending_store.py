@@ -126,6 +126,8 @@ class FIFOOffloadPolicy(OffloadPolicy):
                 to_offload.append(self._pending_items[req_id])
                 del self._pending_items[req_id]
                 self._finished_requests_count -= 1
+            if len(to_offload) >= count:
+                break
         return to_offload
 
 
@@ -156,12 +158,13 @@ class LazyOffloadPendingStore:
         else:
             raise ValueError(f"Unknown offload policy: {policy}")
 
-        # TODO: support more flexible select count
+        # TODO(chunxiaozheng): support more flexible select count
         self._select_count = (
             configs.get("lmcache.mp.lazy_offload_select_count", 10) if configs else 10
         )
 
-        # TODO: use gpu block pool to judge should offload and select items
+        # TODO(chunxiaozheng): use gpu block pool to judge should offload
+        #  and select items
         # GPU block pool reference
         self._gpu_block_pool: "BlockPool | None" = None
 
