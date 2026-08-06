@@ -5,6 +5,7 @@ from contextlib import ExitStack, contextmanager
 from enum import IntEnum
 from typing import TYPE_CHECKING, Any, Callable, Protocol
 from unittest.mock import MagicMock, PropertyMock, patch
+import logging
 import os
 import pickle
 import sys
@@ -1402,6 +1403,38 @@ def test_server_store_and_retrieve_cpu_chunks(
     recovered_chunks: list[torch.Tensor] = pickle.loads(cpu_data)
     assert len(recovered_chunks) == 1
     assert torch.allclose(recovered_chunks[0], payload)
+
+
+@pytest.mark.parametrize("has_timing", [False, True])
+def test_successful_store_is_logged_after_request_cleanup(
+    server_module_factory: ServerModuleFactory,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    has_timing: bool,
+) -> None:
+    """A successful CPU store must remain visible without session timing."""
+    storage = MagicMock()
+    memory_obj = MagicMock()
+    memory_obj.tensor = torch.zeros(2, 2, 8, 16)
+    storage.reserve_write.return_value = {"obj": memory_obj}
+    session = MagicMock()
+    session.get_hashes.return_value = [b"h"]
+    session.extras = {"store_start_time": 0.0} if has_timing else {}
+    module, _, _, _ = server_module_factory(mock_storage=storage, mock_session=session)
+    module.register_kv_cache_engine_driven_context(
+        _default_register_payload(instance_id=2)
+    )
+    payload = torch.ones(2, 2, 8, 16)
+    monkeypatch.setattr(
+        logging.getLogger("lmcache.v1.multiprocess.modules.engine_driven_transfer"),
+        "handlers",
+        [caplog.handler],
+    )
+    with caplog.at_level("INFO"):
+        assert module.commit_store(_default_key(), 2, pickle.dumps([payload]))
+    assert torch.equal(memory_obj.tensor, payload)
+    assert "Stored 8 tokens" in caplog.text
+    assert ("request already finished" in caplog.text) is not has_timing
 
 
 def test_server_shm_commit_store_allows_noop_when_all_keys_exist(
