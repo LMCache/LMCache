@@ -1141,18 +1141,18 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
 
     def _lazy_initialize_buffer(self, kv_caches):
         """
-        Lazily initialize the GPU buffer allocator if it is not initialized yet.
-        Currently, we use the `kv_caches` (kv cache pointer) to determine
-        the gpu buffer size in gpu connector.
-        Also, the first request might be a bit slower due to buffer creation.
-        """
-        if self.use_gpu and self.gpu_buffer_allocator is None:
-            logger.info("Lazily initializing GPU buffer.")
-            # NOTE (Jiayi): We use the first layer to determine the gpu buffer size.
-            # NOTE (Jiayi): Using the exact number of tokens in the first layer
-            # is okay since fragmentation shouldn't exist in the `gpu_buffer_allocator`
-            # in layerwise mode.
+        Lazily initialize KV format metadata and, when enabled, the GPU buffer
+        allocator.
 
+        `kv_caches` is used to discover the engine KV layout (required for both
+        direct and buffered transfers). When `use_gpu` is true, the first layer's
+        capacity is also used to size the GPU buffer pool via `elements_per_layer`.
+
+        The first call may be slower due to lazy format discovery; creating the
+        buffer pool adds extra cost when `use_gpu` is enabled.
+        """
+        if not hasattr(self, "engine_kv_format"):
+            # Infer format and per-layer capacity from the first layer's tensor shape.
             self.engine_kv_format, kv_caches = normalize_kv_and_discover_format(
                 kv_caches, EngineType.VLLM, layout_hints=self.layout_hints
             )
@@ -1164,6 +1164,11 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
             self.elements_per_layer = get_elements_per_layer(
                 kv_caches, self.engine_kv_format
             )
+
+        if self.use_gpu and self.gpu_buffer_allocator is None:
+            # NOTE (Jiayi): Size the pool from one layer's full paged capacity
+            # (`elements_per_layer`). Using the first layer is safe in layerwise mode
+            # because the allocator does not suffer from cross-layer fragmentation.
             logger.info(
                 "Lazily initializing GPU buffer (max tokens=%s).",
                 self.tokens_per_layer,
@@ -1277,7 +1282,7 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
                         lmc_ops.single_layer_kv_transfer(
                             memory_obj.tensor,
                             self.kvcaches[layer_id],
-                            slot_mapping_full,
+                            slot_mapping[start:end],
                             lmc_ops.TransferDirection.H2D,
                             self.engine_kv_format,
                             token_major=True,
