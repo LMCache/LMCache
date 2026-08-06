@@ -1085,6 +1085,8 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
 
             reserved_dict: dict[ObjectKey, MemoryObj] = {}
             all_dict: dict[ObjectKey, MemoryObj] = {}
+            retain_keys: list[ObjectKey] = []
+            retain_sizes: list[int] = []
             total_bytes: int = 0
             store_succeeded = False
             try:
@@ -1104,6 +1106,20 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                             iter(reserved_dict.values())
                         ).get_size() * len(reserved_dict)
 
+                    if key.retention_ttl_sec > 0:
+                        # Retain every chunk of this store, whether written
+                        # now or already cached: a ttl store must also extend
+                        # chunks that earlier requests stored. Sizes come from
+                        # the group layout (uniform per group).
+                        chunk_bytes = sum(
+                            shape.numel() * dtype.itemsize
+                            for shape, dtype in zip(
+                                layout_desc.shapes, layout_desc.dtypes, strict=True
+                            )
+                        )
+                        retain_keys.extend(obj_keys)
+                        retain_sizes.extend([chunk_bytes] * len(obj_keys))
+
                     # Keys not in reserved_dict (skipped by the storage manager)
                     # become None entries; the helper skips them for D2H.
                     memory_objs: list[MemoryObj | None] = [
@@ -1122,6 +1138,10 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                     )
 
                 store_succeeded = True
+                if retain_keys:
+                    self._ctx.storage_manager.retention_manager.note_stored(
+                        retain_keys, retain_sizes, key.retention_ttl_sec
+                    )
             except Exception:
                 logger.exception("Cannot store keys due to exception")
             finally:

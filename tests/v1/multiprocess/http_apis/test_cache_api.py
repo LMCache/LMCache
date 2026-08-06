@@ -19,6 +19,7 @@ import pytest
 
 # First Party
 from lmcache.v1.distributed.api import KeyEntry, KeyListPage, ObjectKey
+from lmcache.v1.distributed.retention_manager import RetentionManager
 from lmcache.v1.multiprocess.cache_control.object_service import MAX_DELETE_BATCH
 from lmcache.v1.multiprocess.http_apis.cache_api import router as cache_router
 from lmcache.v1.multiprocess.http_apis.dependencies import build_context
@@ -82,6 +83,9 @@ class _FakeStorageManager:
     l1_skip: int = 0
     # Records (keys, force) for each delete_l1_keys call.
     l1_delete_calls: list[tuple[list, bool]] = field(default_factory=list)
+    retention_manager: RetentionManager = field(
+        default_factory=lambda: RetentionManager(max_retained_bytes=1_000_000)
+    )
 
     def l2_adapters(self) -> list[tuple[_FakeDescriptor, _FakeAdapter]]:
         return [(_FakeDescriptor(type_name=n), a) for n, a in self.adapters]
@@ -122,6 +126,57 @@ def _sm_with(*entries: tuple[str, _FakeAdapter]) -> _FakeStorageManager:
 
 
 class TestDeleteObjectsEndpoint:
+    def test_l2_delete_releases_retention(self):
+        primary = _FakeAdapter()
+        sm = _sm_with(("s3", primary))
+        key = ObjectKey(
+            chunk_hash=b"\x00\x00\x00\x01",
+            model_name="llama",
+            kv_rank=0,
+            cache_salt="alice",
+        )
+        sm.retention_manager.note_stored([key], [100], ttl_sec=300)
+        assert not sm.retention_manager.is_evictable(key)
+        client = TestClient(_make_app(sm))
+
+        resp = client.request(
+            "DELETE",
+            "/cache/objects",
+            json={
+                "keys": [
+                    {
+                        "chunk_hash_hex": _hex(1),
+                        "model_name": "llama",
+                        "kv_rank": 0,
+                        "cache_salt": "alice",
+                    }
+                ],
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        assert sm.retention_manager.is_evictable(key)
+        assert sm.retention_manager.report_status()["retained_keys"] == 0
+
+    def test_l1_delete_keeps_retention(self):
+        primary = _FakeAdapter()
+        sm = _sm_with(("s3", primary))
+        key = ObjectKey(chunk_hash=b"\x00\x00\x00\x01", model_name="llama", kv_rank=0)
+        sm.retention_manager.note_stored([key], [100], ttl_sec=300)
+        client = TestClient(_make_app(sm))
+
+        resp = client.request(
+            "DELETE",
+            "/cache/objects",
+            json={
+                "tier": "l1",
+                "keys": [
+                    {"chunk_hash_hex": _hex(1), "model_name": "llama", "kv_rank": 0}
+                ],
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        assert not sm.retention_manager.is_evictable(key)
+
     def test_happy_path_defaults_to_primary(self):
         primary = _FakeAdapter()
         secondary = _FakeAdapter()
