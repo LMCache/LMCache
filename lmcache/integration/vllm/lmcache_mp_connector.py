@@ -713,9 +713,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """Bind GPU block pool so that we can touch blocks during stores.
         Called by Scheduler after kv_cache_manager is ready."""
         if self.role == KVConnectorRole.SCHEDULER:
-            logger.info("Bind GPU block pool in LMCacheMPConnector")
+            logger.info("Bind GPU block pool in LMCacheMPConnector scheduler")
             self._gpu_block_pool = gpu_block_pool
-            if self._pending_store:
+            if self.lazy_offload:
                 self._pending_store.bind_gpu_block_pool(gpu_block_pool)
 
     def get_num_new_matched_tokens(
