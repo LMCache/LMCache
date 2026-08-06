@@ -140,9 +140,9 @@ class LazyOffloadPendingStore:
 
         # TODO: use gpu block pool to judge should offload and select items
         # GPU block pool reference
-        self._gpu_block_pool: BlockPool | None = None
+        self._gpu_block_pool: "BlockPool | None" = None
 
-    def bind_gpu_block_pool(self, gpu_block_pool: BlockPool) -> None:
+    def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:
         """Bind the GPU block pool to the pending store."""
         self._gpu_block_pool = gpu_block_pool
 

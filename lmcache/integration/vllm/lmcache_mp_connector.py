@@ -347,7 +347,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             self.request_trackers: dict[str, LMCacheMPRequestTracker] = {}
 
             # GPU block pool reference
-            self._gpu_block_pool: BlockPool | None = None
+            self._gpu_block_pool: "BlockPool | None" = None
 
             # Initialize pending store for lazy offload mode
             if self.lazy_offload:
@@ -709,7 +709,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
     # Scheduler-side methods
     # ==============================
 
-    def bind_gpu_block_pool(self, gpu_block_pool: BlockPool) -> None:
+    def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:
         """Bind GPU block pool so that we can touch blocks during stores.
         Called by Scheduler after kv_cache_manager is ready."""
         if self.role == KVConnectorRole.SCHEDULER:
