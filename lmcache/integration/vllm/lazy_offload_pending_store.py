@@ -10,6 +10,9 @@ from typing import TYPE_CHECKING
 from lmcache.utils import init_logger as lmcache_init_logger
 
 if TYPE_CHECKING:
+    # Third Party
+    from vllm.v1.core.block_pool import BlockPool
+
     # First Party
     from lmcache.integration.vllm.lmcache_mp_connector import LMCacheMPRequestMetadata
 
@@ -134,6 +137,14 @@ class LazyOffloadPendingStore:
 
         # check if the block hashes are the same when trigger offload
         self._request_block_hashes: dict[str, dict[int, bytes]] = {}
+
+        # TODO: use gpu block pool to judge should offload and select items
+        # GPU block pool reference
+        self._gpu_block_pool: BlockPool | None = None
+
+    def bind_gpu_block_pool(self, gpu_block_pool: BlockPool) -> None:
+        """Bind the GPU block pool to the pending store."""
+        self._gpu_block_pool = gpu_block_pool
 
     def add(self, item: PendingStoreItem, block_hashes: dict[int, bytes]) -> None:
         """Add a pending store item to the pending store."""
