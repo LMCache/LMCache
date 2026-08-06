@@ -61,6 +61,11 @@ Commonly used flags include:
      - L1 fill ratio at which eviction begins.
    * - ``--eviction-ratio RATIO``
      - Fraction of L1 cleared per eviction cycle.
+   * - ``--retention-max-fraction RATIO``
+     - Fraction of total L2 capacity that ttl-retained chunks may shield
+       from eviction (``0`` disables retention, default). Must stay below
+       the eviction trigger watermark so eviction always has unshielded
+       keys to take.
    * - ``--max-workers N``
      - Number of server worker processes.
    * - ``--coordinator-url URL``
