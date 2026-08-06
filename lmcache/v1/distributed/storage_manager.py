@@ -147,7 +147,9 @@ class StorageManager:
                     )
                 )
         self._l2_eviction_controller = L2EvictionController(
-            l2_eviction_states, quota_manager=self._quota_manager
+            l2_eviction_states,
+            quota_manager=self._quota_manager,
+            retention_manager=self._retention_manager,
         )
         self._l2_eviction_controller.start()
 

@@ -488,6 +488,14 @@ def add_storage_manager_args(
         help="The fraction of memory to evict when triggered (0.0 to 1.0). "
         "Default is 0.2.",
     )
+    eviction_group.add_argument(
+        "--retention-max-fraction",
+        type=float,
+        default=0.0,
+        help="Fraction of total L2 capacity that explicit retention may "
+        "shield from eviction. 0 disables retention. Must be below the "
+        "eviction trigger watermark. Default is 0.0.",
+    )
 
     # L2 Policies
     # Import here to break circular dependency:
@@ -621,6 +629,7 @@ def parse_args_to_config(
         l1_manager_config=l1_manager_config,
         eviction_config=eviction_config,
         l2_adapter_config=l2_adapter_config,
+        retention_max_fraction=args.retention_max_fraction,
         store_policy=args.l2_store_policy,
         prefetch_policy=args.l2_prefetch_policy,
         prefetch_max_in_flight=args.l2_prefetch_max_in_flight,
