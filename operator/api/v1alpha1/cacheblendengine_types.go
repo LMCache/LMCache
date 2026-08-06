@@ -132,10 +132,11 @@ type InjectionSpec struct {
 	BlockSize *int32 `json:"blockSize,omitempty"`
 
 	// attentionBackend is the vLLM --attention-backend the webhook injects.
-	// "none" (the default) omits the flag entirely, leaving any user-supplied
-	// value on the pod untouched. Set to "CUSTOM" to route attention through
-	// the CB backend that owns the FULL_RECOMP / CHECK / PARTIAL pipeline —
-	// most models need this for blending; models whose arch adapter takes over
+	// "none" (the default, case-sensitive) omits the flag entirely, leaving
+	// any user-supplied value on the pod untouched; any other value is
+	// injected verbatim. Set to "CUSTOM" to route attention through the CB
+	// backend that owns the FULL_RECOMP / CHECK / PARTIAL pipeline — most
+	// models need this for blending; models whose arch adapter takes over
 	// that role (e.g. all-sparse-MLA) keep "none".
 	// +optional
 	// +kubebuilder:default="none"

@@ -558,7 +558,7 @@ func TestCBValidateSpec_L2BothSet(t *testing.T) {
 	}
 }
 
-// --- Configurable injection (blockSize / attentionBackend / env) ---
+// --- Configurable injection (blockSize / attentionBackend / partialBucket) ---
 
 func TestCBSetDefaults_InjectionArgDefaults(t *testing.T) {
 	e := &CacheBlendEngine{Spec: CacheBlendEngineSpec{L1: L1BackendSpec{SizeGB: 10}}}

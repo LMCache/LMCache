@@ -61,8 +61,8 @@ var cbStaging = payloadStaging{
 // CacheBlend-required vLLM flag names and fixed values (design §7 M5). The
 // CacheBlend matcher and connector hard-require these; several fail loudly,
 // --no-async-scheduling fails silently (MoE garble). --attention-backend and
-// --block-size values come from spec.injection (defaults CUSTOM / 64, pinned by
-// SetDefaults); the rest are fixed.
+// --block-size values come from spec.injection (defaults: "none" — flag
+// omitted — and 64, pinned by SetDefaults); the rest are fixed.
 const (
 	cbFlagAttentionBackend = "--attention-backend"
 
@@ -203,8 +203,8 @@ func BuildCBArgs(
 }
 
 // injectedAttentionBackend returns the --attention-backend value to inject,
-// falling back to the default (CUSTOM) when the injection spec does not carry
-// one (SetDefaults normally pins it).
+// falling back to the default ("none", i.e. the flag is omitted) when the
+// injection spec does not carry one (SetDefaults normally pins it).
 func injectedAttentionBackend(injection *lmcachev1alpha1.InjectionSpec) string {
 	if injection == nil || injection.AttentionBackend == nil || *injection.AttentionBackend == "" {
 		return lmcachev1alpha1.DefaultCBAttentionBackend
@@ -214,7 +214,9 @@ func injectedAttentionBackend(injection *lmcachev1alpha1.InjectionSpec) string {
 
 // injectedBlockSize returns the --block-size value to inject as a string,
 // falling back to the default (64) when the injection spec does not carry one
-// (SetDefaults normally pins it).
+// (SetDefaults normally pins it) or carries a value below 1 (unreachable via
+// the API server, which enforces the CRD minimum; guarded here for direct
+// callers on an unvalidated spec).
 func injectedBlockSize(injection *lmcachev1alpha1.InjectionSpec) string {
 	if injection == nil || injection.BlockSize == nil || *injection.BlockSize < 1 {
 		return strconv.Itoa(int(lmcachev1alpha1.DefaultCBBlockSize))

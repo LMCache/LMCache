@@ -41,6 +41,10 @@ spec:
     # namespace (name must match the spec's pullSecretName constant).
     imagePullSecrets:
       - name: cacheblend-registry
+    # Route attention through the CB backend. The spec default is "none"
+    # (flag unmanaged); the smoke test asserts the injected
+    # "--attention-backend CUSTOM" and the CUSTOM backend log banner.
+    attentionBackend: CUSTOM
 
   # Place the engine on the GPU worker so the vLLM pod (same nodeSelector)
   # co-schedules — CacheBlend's CUDA-IPC KV handoff requires colocation.
