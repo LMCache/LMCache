@@ -59,8 +59,7 @@ var cbStaging = payloadStaging{
 }
 
 // CacheBlend-required vLLM flag names and fixed values (design §7 M5). The
-// CacheBlend matcher and connector hard-require these; several fail loudly,
-// --no-async-scheduling fails silently (MoE garble). --attention-backend and
+// CacheBlend matcher and connector hard-require these. --attention-backend and
 // --block-size values come from spec.injection (defaults: "none" — flag
 // omitted — and 64, pinned by SetDefaults); the rest are fixed.
 const (
@@ -74,8 +73,6 @@ const (
 
 	cbFlagPipelineParallelSize = "--pipeline-parallel-size"
 	cbValPipelineParallelSize  = "1"
-
-	cbFlagNoAsyncScheduling = "--no-async-scheduling"
 
 	// cudagraph mode flags. Eager (default) forces --enforce-eager; full
 	// decode-only enables decode graphs while never using full graphs in prefill
@@ -183,7 +180,6 @@ func BuildCBArgs(
 	args = applyBareFlag(args, cbFlagNoChunkedPrefill)
 	args = applyArg(args, cbFlagBlockSize, injectedBlockSize(injection))
 	args = applyArg(args, cbFlagPipelineParallelSize, cbValPipelineParallelSize)
-	args = applyBareFlag(args, cbFlagNoAsyncScheduling)
 
 	// cudagraphArgs returns either a single bare flag (--enforce-eager), a
 	// [flag, value] pair (full_decode_only), or nil (piecewise). Apply with

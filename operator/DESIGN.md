@@ -491,7 +491,7 @@ webhook then applies:
 | pod `hostIPC: true` | required for CUDA IPC with the node-local engine |
 | `cb-plugin` emptyDir + payload init container | the busybox payload `cp -a`'s the pure-Python plugin tree onto the shared volume |
 | readOnly mount + `PYTHONPATH=/cb-plugin` on the vLLM container | vLLM discovers the plugin via its `vllm.general_plugins` entry point |
-| append required vLLM args | `--attention-backend <injection.attentionBackend; omitted on the default "none">`, `--kv-transfer-config <from the connection ConfigMap>`, `--block-size <injection.blockSize, default 64>`, `--pipeline-parallel-size 1`, `--no-enable-chunked-prefill`, `--no-async-scheduling`, `--enforce-eager` (or the configured cudagraph) |
+| append required vLLM args | `--attention-backend <injection.attentionBackend; omitted on the default "none">`, `--kv-transfer-config <from the connection ConfigMap>`, `--block-size <injection.blockSize, default 64>`, `--pipeline-parallel-size 1`, `--no-enable-chunked-prefill`, `--enforce-eager` (or the configured cudagraph) |
 | append `injection.imagePullSecrets` | so the private payload image can pull |
 | stamp `lmcache.ai/cacheblend-injected: "true"` | idempotency guard |
 

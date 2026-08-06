@@ -273,8 +273,8 @@ var _ = Describe("CacheBlendPodInjector", func() {
 				"--block-size=64")
 			Expect(argsHasFlagValue(c.Args, cbFlagPipelineParallelSize, cbValPipelineParallelSize)).To(BeTrue(),
 				"--pipeline-parallel-size=1")
-			Expect(argsHasFlag(c.Args, cbFlagNoAsyncScheduling)).To(BeTrue(),
-				"--no-async-scheduling")
+			Expect(argsHasFlag(c.Args, "--no-async-scheduling")).To(BeFalse(),
+				"async scheduling is left to vLLM's default, not forced off")
 			Expect(argsHasFlag(c.Args, cbFlagEnforceEager)).To(BeTrue(),
 				"default cudagraph eager -> --enforce-eager")
 

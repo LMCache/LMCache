@@ -4,7 +4,7 @@
 # to CacheBlend dependency injection via the mutating webhook. The webhook
 # appends the CacheBlend vLLM flags (--attention-backend CUSTOM,
 # --kv-transfer-config <engine>, --block-size 64, --pipeline-parallel-size 1,
-# --no-enable-chunked-prefill, --no-async-scheduling, --enforce-eager), the
+# --no-enable-chunked-prefill, --enforce-eager), the
 # cb-plugin init container + emptyDir + PYTHONPATH, hostIPC=true, and the
 # engine's payload imagePullSecrets.
 #

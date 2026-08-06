@@ -86,7 +86,7 @@ var _ = Describe("CacheBlendPodInjector webhook (envtest)", Ordered, func() {
 		Expect(argsHasFlagValue(c.Args, "--block-size", "64")).To(BeTrue())
 		Expect(argsHasFlagValue(c.Args, "--pipeline-parallel-size", "1")).To(BeTrue())
 		Expect(c.Args).To(ContainElement("--no-enable-chunked-prefill"))
-		Expect(c.Args).To(ContainElement("--no-async-scheduling"))
+		Expect(c.Args).NotTo(ContainElement("--no-async-scheduling"))
 		kv := argsFlagValue(c.Args, "--kv-transfer-config")
 		Expect(kv).To(ContainSubstring("CBKVConnector"))
 		Expect(kv).To(ContainSubstring("tcp://" + testEngineName + "." + testNamespace + ".svc"))

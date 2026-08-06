@@ -9,7 +9,7 @@
 # CUSTOM there, as the companion sample does; omitted on the default "none" —
 # --kv-transfer-config <node-local engine>, --block-size <injection.blockSize,
 # default 64>, --pipeline-parallel-size 1, --no-enable-chunked-prefill,
-# --no-async-scheduling, --enforce-eager); and the private-payload imagePullSecrets.
+# --enforce-eager); and the private-payload imagePullSecrets.
 #
 # PREREQUISITES (else injection silently no-ops or the pod is rejected):
 #   1. A CacheBlendEngine named below exists IN THIS NAMESPACE and is reconciled

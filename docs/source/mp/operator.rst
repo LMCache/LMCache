@@ -1006,7 +1006,7 @@ private-image pull secret, and the required CacheBlend vLLM flags
 default ``none``, so set ``CUSTOM`` as above, ``--kv-transfer-config`` from the
 engine's connection ConfigMap, ``--block-size`` from ``injection.blockSize``
 (default 64), ``--pipeline-parallel-size 1``, ``--no-enable-chunked-prefill``,
-``--no-async-scheduling``, ``--enforce-eager``).  You supply only the model and
+``--enforce-eager``).  You supply only the model and
 your non-CacheBlend flags.
 
 Verifying Injection
