@@ -385,3 +385,71 @@ def test_block_allocation_record_list_serialization():
     assert decoded[1].req_id == "req-2"
     assert decoded[1].new_block_ids == []
     assert decoded[1].new_token_ids == [40, 50]
+
+
+def test_ipc_cache_engine_key_retention_roundtrip():
+    """The retention ttl survives encode/decode and stays out of cache identity."""
+    plain = IPCCacheServerKey.from_token_ids(
+        model_name="test_model",
+        world_size=4,
+        worker_id=1,
+        token_ids=list(range(256)),
+        start=0,
+        end=256,
+        request_id="r1",
+    )
+    retained = IPCCacheServerKey(
+        model_name="test_model",
+        world_size=4,
+        worker_id=1,
+        token_ids=tuple(range(256)),
+        start=0,
+        end=256,
+        request_id="r2",
+        retention_ttl_sec=3600,
+    )
+
+    decoded = msgspec.msgpack.decode(
+        msgspec.msgpack.encode(retained), type=IPCCacheServerKey
+    )
+    assert decoded.retention_ttl_sec == 3600
+
+    # Same content -> same cache entry, with or without retention.
+    assert decoded == plain
+    assert hash(decoded) == hash(plain)
+
+    copy = decoded.no_worker_id_version()
+    assert copy.retention_ttl_sec == 3600
+
+
+def test_ipc_cache_engine_key_retention_wire_default():
+    """A payload encoded without the retention field decodes to 0."""
+    payload = {
+        "model_name": "test_model",
+        "world_size": 4,
+        "worker_id": 1,
+        "token_ids": list(range(8)),
+        "start": 0,
+        "end": 8,
+        "request_id": "r1",
+        "cache_salt": "",
+    }
+
+    decoded = msgspec.msgpack.decode(
+        msgspec.msgpack.encode(payload), type=IPCCacheServerKey
+    )
+    assert decoded.retention_ttl_sec == 0
+
+
+def test_ipc_cache_engine_key_negative_retention_rejected():
+    with pytest.raises(ValueError):
+        IPCCacheServerKey(
+            model_name="m",
+            world_size=1,
+            worker_id=0,
+            token_ids=(1,),
+            start=0,
+            end=1,
+            request_id="r",
+            retention_ttl_sec=-1,
+        )
