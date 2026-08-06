@@ -89,8 +89,10 @@ echo "vLLM baseline port: $VLLM_BASELINE_PORT"
 echo "Results dir: $RESULTS_DIR"
 echo ""
 
-# Tests that handle their own server lifecycle (different GPU/model config)
-SELF_CONTAINED_TESTS=" deadlock p2p kimi_linear_tp "
+# Tests that handle their own server lifecycle (different GPU/model config).
+# These bypass launch-processes.sh / wait-for-servers.sh entirely; instead
+# the per-test script boots LMCache + vLLM with the exact flags it needs.
+SELF_CONTAINED_TESTS=" deadlock dsv4_smoke "
 
 # Tests that compare against a baseline vLLM (no LMCache) on a second GPU.
 # Only these need the baseline server (and thus a 2-GPU pod); everything
@@ -173,12 +175,12 @@ case "$TEST_NAME" in
     http_api)
         exec_script="${SCRIPT_DIR}/run-http-api.sh"
         ;;
-    gds_smoke_test)
-        exec_script="${SCRIPT_DIR}/run-gds-smoke.sh"
+    dsv4_smoke)
+        exec_script="${SCRIPT_DIR}/run-dsv4-smoke.sh"
         ;;
     *)
         echo "Unknown test: $TEST_NAME"
-        echo "Valid tests: lm_eval, lm_eval_preemption, hma_lm_eval_gemma4, vllm_bench, long_doc_qa, long_doc_qa_l2, fault_tolerance, deadlock, restart_recovery, cache_stats, http_api, gds_smoke_test, p2p, kimi_linear_tp"
+        echo "Valid tests: lm_eval, hma_lm_eval_gemma4, vllm_bench, long_doc_qa, long_doc_qa_l2, fault_tolerance, deadlock, restart_recovery, cache_stats, http_api, dsv4_smoke"
         exit 1
         ;;
 esac

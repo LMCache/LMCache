@@ -1,7 +1,8 @@
 # Multiprocess tests — one step per test, run in parallel.
 # Each step gets its own K8s pod with the exact GPU count it needs.
-# Tests are grouped by GPU requirement; the 2-GPU group is listed first so
-# these heavier jobs get scheduled before 1-GPU jobs.
+# Tests are grouped by GPU requirement; the heavier groups are listed first so
+# they get scheduled before lighter jobs.
+#   4-GPU: large MoE models (e.g. DeepSeek-V4-Flash) with TP=4.
 #   2-GPU: LMCache+vLLM on GPU 0, baseline on GPU 1 (or TP=2 across both).
 #   1-GPU: LMCache+vLLM on GPU 0 only (no baseline server).
 
@@ -33,6 +34,30 @@ x-pod-1gpu: &pod-1gpu
     - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 1Gi } }
 
 steps:
+  - group: ":compression: Multiprocess (4-GPU)"
+    steps:
+      # Smoke test: can DeepSeek-V4-Flash boot end-to-end through the LMCache
+      # MP connector and serve a request out of L1 on a repeat? Uses
+      # --load-format dummy to skip weight download (model is 284B), so the
+      # whole job finishes in a few minutes. Not an accuracy gate.
+      - label: ":compression: dsv4_smoke"
+        command: .buildkite/k3_tests/multiprocess/run.sh dsv4_smoke
+        timeout_in_minutes: 30
+        agents: { queue: "k8s" }
+        plugins:
+          - kubernetes:
+              podSpec: &pod-4gpu
+                containers:
+                  - name: container-0
+                    image: lmcache/ci-base:latest
+                    imagePullPolicy: Never
+                    resources: { limits: { "nvidia.com/gpu": "4" } }
+                    volumeMounts:
+                      - { name: hf-cache, mountPath: /root/.cache/huggingface }
+                volumes:
+                  - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
+        artifact_paths: ["*.log"]
+
   - group: ":compression: Multiprocess (2-GPU)"
     if: build.env("VERIFY_AND_PIN_VLLM") !~ /true/
     steps:
