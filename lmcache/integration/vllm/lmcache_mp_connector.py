@@ -917,6 +917,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 self._gpu_block_pool.free_blocks(
                     [self._gpu_block_pool.blocks[bid] for bid in gpu_block_ids]
                 )
+                self._pending_store.remove_request_gpu_block_ids(req_id)
                 self.scheduler_adapter.end_session(req_id)
 
     def request_finished(
