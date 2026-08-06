@@ -30,7 +30,10 @@ const (
 	PhaseFailed   = "Failed"
 )
 
-// PD disaggregation role constants.
+// PDRolePrefiller and PDRoleDecoder are the canonical values for the
+// lmcache.ai/pd-role pod annotation. They tell the webhook which
+// kv-transfer-config key to inject (prefiller → kv_producer,
+// decoder → kv_consumer).
 const (
 	PDRolePrefiller = "prefiller"
 	PDRoleDecoder   = "decoder"
@@ -335,17 +338,14 @@ type CoordinatorConnectionSpec struct {
 }
 
 // PDSpec configures PD (Prefill-Decode) disaggregation for a vLLM engine.
-// When set, the engine's connection ConfigMap emits a MultiConnector that
-// wraps NixlConnector (direct GPU-GPU KV transfer) and the engine's LMCache
-// connector instead of a bare LMCacheMPConnector / CBKVConnector.
-// The webhook also injects VLLM_NIXL_SIDE_CHANNEL_HOST (from the pod's
-// status.hostIP via the downward API) and VLLM_NIXL_SIDE_CHANNEL_PORT.
+// When set, the engine's connection ConfigMap emits two MultiConnector configs —
+// one for the prefiller role (kv_producer) and one for the decoder role
+// (kv_consumer). The webhook selects the correct config based on the
+// lmcache.ai/pd-role annotation on each vLLM pod, so a single LMCacheEngine
+// DaemonSet instance serves both prefiller and decoder vLLM pods on a node.
+// The webhook also injects VLLM_NIXL_SIDE_CHANNEL_HOST (status.podIP) and
+// VLLM_NIXL_SIDE_CHANNEL_PORT into opted-in pods.
 type PDSpec struct {
-	// role is the PD role. "prefiller" sets kv_role=kv_producer on both the
-	// outer MultiConnector and the inner NixlConnector; "decoder" uses kv_consumer.
-	// +kubebuilder:validation:Enum=prefiller;decoder
-	Role string `json:"role"`
-
 	// nixlSideChannelPort is the port the NIXL agent advertises for
 	// side-channel negotiation. Use distinct values for prefiller and decoder
 	// when both roles run on the same node (e.g. local testing).

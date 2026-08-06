@@ -1,24 +1,30 @@
 # vLLM Prefiller + Decoder Deployments for standard PD disaggregation.
 #
-# Each Deployment opts in to the LMCache webhook, which injects:
-#   - pod hostIPC=true
-#   - --kv-transfer-config <MultiConnector JSON from the engine ConfigMap>
+# Both Deployments opt in to the LMCache webhook and point at the SAME
+# LMCacheEngine. The webhook selects the correct MultiConnector config key
+# based on the lmcache.ai/pd-role annotation on each pod:
+#
+#   pd-role: prefiller  →  kv-transfer-config-prefiller.json  (kv_producer)
+#   pd-role: decoder    →  kv-transfer-config-decoder.json    (kv_consumer)
+#
+# The webhook injects into each opted-in pod:
+#   - hostIPC=true
+#   - --kv-transfer-config <MultiConnector JSON>
 #   - PYTHONHASHSEED=0
-#   - VLLM_NIXL_SIDE_CHANNEL_HOST (downward API, pod's own IP via status.podIP)
-#   - VLLM_NIXL_SIDE_CHANNEL_PORT (from spec.pd.nixlSideChannelPort on the engine CR)
+#   - VLLM_NIXL_SIDE_CHANNEL_HOST (downward API status.podIP)
+#   - VLLM_NIXL_SIDE_CHANNEL_PORT (from spec.pd.nixlSideChannelPort on the engine)
 #
 # PREREQUISITES:
-#   1. LMCacheEngine "prefiller-cache" (pd.role=prefiller, port 5557) is Ready.
-#   2. LMCacheEngine "decoder-cache"   (pd.role=decoder,   port 5558) is Ready.
-#   3. The webhook is deployed (make deploy) and cert-manager is installed.
-#   4. This namespace is labeled pod-security.kubernetes.io/enforce=privileged.
+#   1. LMCacheEngine "lmcache-engine" (pd block set) is Ready
+#      (see lmcache_v1alpha1_lmcacheengine_pd_prefiller.yaml).
+#   2. The webhook is deployed (make deploy) and cert-manager is installed.
+#   3. This namespace is labeled pod-security.kubernetes.io/enforce=privileged.
 #
 # After creation, verify injection on a pod:
 #   kubectl get pod -l app=pd-prefiller -o yaml | \
 #     grep -E "hostIPC|kv-transfer-config|NIXL|lmcache-injected"
 #
-# Then deploy the pd-router pointing --prefill and --decode at the Services
-# below (pd-prefiller:8001, pd-decoder:8002).
+# Then send requests via the pd-router Service on port 30000.
 ---
 # ── Prefiller vLLM ──────────────────────────────────────────────────────────
 apiVersion: apps/v1
@@ -35,20 +41,17 @@ spec:
     metadata:
       labels:
         app: pd-prefiller
-        # Opt in to the LMCache webhook.
         lmcache.ai/lmcache-inject: "true"
       annotations:
-        # Bind to the prefiller LMCacheEngine (must be in the same namespace).
-        lmcache.ai/lmcache-engine: "prefiller-cache"
+        lmcache.ai/lmcache-engine: "lmcache-engine"
+        lmcache.ai/pd-role: "prefiller"
     spec:
       runtimeClassName: nvidia
-      # Do NOT set hostIPC here — the webhook injects hostIPC=true.
-      # Do NOT mount an emptyDir at /dev/shm — hostIPC shares the host /dev/shm.
+      # Do NOT set hostIPC — the webhook injects hostIPC=true.
+      # Do NOT add --kv-transfer-config — the webhook injects it.
       containers:
         - name: vllm
           image: lmcache/vllm-openai:latest-nightly
-          # Args-only launch (ENTRYPOINT is ["vllm","serve"]).
-          # Do NOT add --kv-transfer-config — the webhook injects it.
           args:
             - "meta-llama/Llama-3.1-8B-Instruct"
             - "--served-model-name"
@@ -104,7 +107,8 @@ spec:
         app: pd-decoder
         lmcache.ai/lmcache-inject: "true"
       annotations:
-        lmcache.ai/lmcache-engine: "decoder-cache"
+        lmcache.ai/lmcache-engine: "lmcache-engine"
+        lmcache.ai/pd-role: "decoder"
     spec:
       runtimeClassName: nvidia
       containers:
@@ -149,7 +153,6 @@ spec:
       targetPort: 8002
 ---
 # ── vLLM Router ─────────────────────────────────────────────────────────────
-# Runs pd-router in PD disaggregation mode. Adjust image/version as needed.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -168,25 +171,26 @@ spec:
       containers:
         - name: router
           image: vllm/vllm-router:nightly
-          command:
-            - vllm-router
+          command: ["/bin/sh", "-c"]
           args:
-            - "--policy"
-            - "round_robin"
-            - "--vllm-pd-disaggregation"
-            - "--prefill"
-            - "http://pd-prefiller:8001"
-            - "--decode"
-            - "http://pd-decoder:8002"
-            - "--host"
-            - "0.0.0.0"
-            - "--port"
-            - "30000"
-            - "--intra-node-data-parallel-size"
-            - "1"
+            - |
+              exec vllm-router \
+                --policy round_robin \
+                --vllm-pd-disaggregation \
+                --prefill http://pd-prefiller.default.svc.cluster.local:8001 \
+                --decode  http://pd-decoder.default.svc.cluster.local:8002 \
+                --host 0.0.0.0 \
+                --port 30000 \
+                --intra-node-data-parallel-size 1
           ports:
             - name: http
               containerPort: 30000
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
 ---
 apiVersion: v1
 kind: Service

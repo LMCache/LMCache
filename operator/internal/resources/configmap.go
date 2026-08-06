@@ -65,15 +65,26 @@ func BuildConnectionConfigMap(engine *lmcachev1alpha1.LMCacheEngine) *corev1.Con
 	)
 }
 
+// kvTransferConfigPrefillerDataKey and kvTransferConfigDecoderDataKey are the
+// ConfigMap keys for PD roles. The webhook selects between them based on the
+// lmcache.ai/pd-role pod annotation. Pods without the annotation fall back to
+// kvTransferConfigDataKey (bare LMCacheMPConnector, no NIXL).
+const (
+	kvTransferConfigPrefillerDataKey = "kv-transfer-config-prefiller.json"
+	kvTransferConfigDecoderDataKey   = "kv-transfer-config-decoder.json"
+)
+
 // buildPDConnectionConfigMap produces a MultiConnector ConfigMap for PD
-// disaggregation. The outer connector is MultiConnector; the inner connectors
-// are NixlConnector (for direct GPU-GPU KV transfer) and an LMCache connector
-// (LMCacheMPConnector or CBKVConnector, caller-selected). Both connectors
-// inherit their kv_role from pd.Role (prefiller → kv_producer; decoder →
-// kv_consumer). The LMCache connector always uses kv_both.
+// disaggregation. It generates configs for both PD roles and a non-PD fallback
+// so that a single LMCacheEngine DaemonSet can serve prefiller, decoder, and
+// plain (non-PD) vLLM pods. The webhook selects the correct key based on the
+// lmcache.ai/pd-role pod annotation; pods without the annotation fall back to
+// kv-transfer-config.json (bare LMCacheMPConnector, no NIXL).
 //
-// The ConfigMap carries two data keys:
-//   - "kv-transfer-config.json": the full MultiConnector JSON for --kv-transfer-config.
+// The ConfigMap carries three data keys:
+//   - kvTransferConfigDataKey (kv-transfer-config.json):  bare LMCacheMPConnector (fallback)
+//   - kvTransferConfigPrefillerDataKey: MultiConnector JSON with kv_role=kv_producer
+//   - kvTransferConfigDecoderDataKey:   MultiConnector JSON with kv_role=kv_consumer
 //
 // Parameters:
 //   - name, namespace: the owning engine's identity.
@@ -91,12 +102,40 @@ func buildPDConnectionConfigMap(
 	pd *lmcachev1alpha1.PDSpec,
 	lmcacheExtra map[string]any,
 ) *corev1.ConfigMap {
-	kvRole := "kv_producer"
-	if pd.Role == lmcachev1alpha1.PDRoleDecoder {
-		kvRole = "kv_consumer"
-	}
+	svcHost := fmt.Sprintf("%s.%s.svc.cluster.local", LookupServiceName(name), namespace)
+	prefillerJSON := buildMultiConnectorJSON("kv_producer", lmcacheConnectorName, lmcacheModulePath, svcHost, port, pd, lmcacheExtra)
+	decoderJSON := buildMultiConnectorJSON("kv_consumer", lmcacheConnectorName, lmcacheModulePath, svcHost, port, pd, lmcacheExtra)
 
-	// NixlConnector inner config.
+	// Fallback: bare LMCacheMPConnector config (no NIXL) for pods that don't
+	// set the pd-role annotation. Reuses buildConnectionConfigMapCore so the
+	// JSON is identical to a non-PD engine's config.
+	fallbackCM := buildConnectionConfigMapCore(name, namespace, lmcacheConnectorName, lmcacheModulePath, port, lmcacheExtra)
+	fallbackJSON := fallbackCM.Data["kv-transfer-config.json"]
+
+	return &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      ConnectionConfigMapName(name),
+			Namespace: namespace,
+			Labels:    StandardLabels(name),
+		},
+		Data: map[string]string{
+			"kv-transfer-config.json":        fallbackJSON,
+			kvTransferConfigPrefillerDataKey: string(prefillerJSON),
+			kvTransferConfigDecoderDataKey:   string(decoderJSON),
+		},
+	}
+}
+
+// buildMultiConnectorJSON constructs the MultiConnector kv-transfer-config JSON
+// for a single role. kvRole must be "kv_producer" or "kv_consumer".
+func buildMultiConnectorJSON(
+	kvRole string,
+	lmcacheConnectorName, lmcacheModulePath string,
+	svcHost string,
+	port int32,
+	pd *lmcachev1alpha1.PDSpec,
+	lmcacheExtra map[string]any,
+) []byte {
 	nixlConnector := map[string]any{
 		"kv_connector":           "NixlConnector",
 		"kv_role":                kvRole,
@@ -108,8 +147,6 @@ func buildPDConnectionConfigMap(
 		}
 	}
 
-	// LMCache inner connector config.
-	svcHost := fmt.Sprintf("%s.%s.svc.cluster.local", LookupServiceName(name), namespace)
 	lmcacheConnectorExtra := map[string]any{
 		"lmcache.mp.host": fmt.Sprintf("tcp://%s", svcHost),
 		"lmcache.mp.port": fmt.Sprintf("%d", port),
@@ -125,7 +162,6 @@ func buildPDConnectionConfigMap(
 		lmcacheConnector["kv_connector_module_path"] = lmcacheModulePath
 	}
 
-	// Outer MultiConnector config.
 	config := map[string]any{
 		"kv_connector": "MultiConnector",
 		"kv_role":      kvRole,
@@ -134,21 +170,11 @@ func buildPDConnectionConfigMap(
 		},
 	}
 
-	configJSON, err := json.MarshalIndent(config, "", "  ")
+	b, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
 		panic(fmt.Sprintf("BUG: failed to marshal connector config: %v", err))
 	}
-
-	return &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      ConnectionConfigMapName(name),
-			Namespace: namespace,
-			Labels:    StandardLabels(name),
-		},
-		Data: map[string]string{
-			"kv-transfer-config.json": string(configJSON),
-		},
-	}
+	return b
 }
 
 // buildConnectionConfigMapCore is the shared core for the <engine>-connection

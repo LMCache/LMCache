@@ -969,13 +969,20 @@ func TestBuildConnectionConfigMap_CustomPort(t *testing.T) {
 func TestBuildConnectionConfigMap_PDPrefiller(t *testing.T) {
 	engine := minimalEngine()
 	engine.Spec.PD = &lmcachev1alpha1.PDSpec{
-		Role:                lmcachev1alpha1.PDRolePrefiller,
 		NixlSideChannelPort: ptr(int32(5557)),
 	}
 	cm := BuildConnectionConfigMap(engine)
 
+	// PD ConfigMap must contain both prefiller and decoder keys.
+	if _, ok := cm.Data[kvTransferConfigPrefillerDataKey]; !ok {
+		t.Fatalf("missing key %q", kvTransferConfigPrefillerDataKey)
+	}
+	if _, ok := cm.Data[kvTransferConfigDecoderDataKey]; !ok {
+		t.Fatalf("missing key %q", kvTransferConfigDecoderDataKey)
+	}
+
 	var config map[string]any
-	if err := json.Unmarshal([]byte(cm.Data["kv-transfer-config.json"]), &config); err != nil {
+	if err := json.Unmarshal([]byte(cm.Data[kvTransferConfigPrefillerDataKey]), &config); err != nil {
 		t.Fatalf("invalid JSON: %v", err)
 	}
 
@@ -1018,13 +1025,11 @@ func TestBuildConnectionConfigMap_PDPrefiller(t *testing.T) {
 
 func TestBuildConnectionConfigMap_PDDecoder(t *testing.T) {
 	engine := minimalEngine()
-	engine.Spec.PD = &lmcachev1alpha1.PDSpec{
-		Role: lmcachev1alpha1.PDRoleDecoder,
-	}
+	engine.Spec.PD = &lmcachev1alpha1.PDSpec{}
 	cm := BuildConnectionConfigMap(engine)
 
 	var config map[string]any
-	if err := json.Unmarshal([]byte(cm.Data["kv-transfer-config.json"]), &config); err != nil {
+	if err := json.Unmarshal([]byte(cm.Data[kvTransferConfigDecoderDataKey]), &config); err != nil {
 		t.Fatalf("invalid JSON: %v", err)
 	}
 
@@ -1043,13 +1048,12 @@ func TestBuildConnectionConfigMap_PDEnforceHandshakeCompat(t *testing.T) {
 	engine := minimalEngine()
 	handshakeCompat := false
 	engine.Spec.PD = &lmcachev1alpha1.PDSpec{
-		Role:                   lmcachev1alpha1.PDRolePrefiller,
 		EnforceHandshakeCompat: &handshakeCompat,
 	}
 	cm := BuildConnectionConfigMap(engine)
 
 	var config map[string]any
-	if err := json.Unmarshal([]byte(cm.Data["kv-transfer-config.json"]), &config); err != nil {
+	if err := json.Unmarshal([]byte(cm.Data[kvTransferConfigPrefillerDataKey]), &config); err != nil {
 		t.Fatalf("invalid JSON: %v", err)
 	}
 

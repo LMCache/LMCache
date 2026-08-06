@@ -27,7 +27,6 @@ import (
 
 func pdSpec(port int32) *lmcachev1alpha1.PDSpec {
 	return &lmcachev1alpha1.PDSpec{
-		Role:                lmcachev1alpha1.PDRolePrefiller,
 		NixlSideChannelPort: &port,
 	}
 }
@@ -59,7 +58,7 @@ var _ = Describe("BuildPDEnv", func() {
 	})
 
 	It("uses the default port when NixlSideChannelPort is nil", func() {
-		pd := &lmcachev1alpha1.PDSpec{Role: lmcachev1alpha1.PDRolePrefiller}
+		pd := &lmcachev1alpha1.PDSpec{}
 		out := BuildPDEnv(nil, pd)
 
 		var portVar *corev1.EnvVar

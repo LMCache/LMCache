@@ -1,23 +1,28 @@
-# LMCacheEngine — PD disaggregation PREFILLER role.
+# LMCacheEngine — PD (Prefill-Decode) disaggregation.
 #
-# This engine runs alongside the prefiller vLLM pod. The connection ConfigMap
-# it generates contains a MultiConnector config:
-#   MultiConnector(kv_producer)
-#     ├── NixlConnector(kv_producer)   — direct GPU-GPU KV transfer to decoder
-#     └── LMCacheMPConnector(kv_both)  — node-local KV cache (prefix reuse)
+# A single LMCacheEngine DaemonSet serves BOTH prefiller and decoder vLLM pods
+# on every node. The connection ConfigMap it generates contains three keys:
+#
+#   kv-transfer-config.json            — bare LMCacheMPConnector (fallback, no NIXL)
+#   kv-transfer-config-prefiller.json  — MultiConnector(kv_producer)
+#   kv-transfer-config-decoder.json    — MultiConnector(kv_consumer)
+#
+# The webhook selects the correct key based on the lmcache.ai/pd-role annotation
+# on each vLLM pod (see vllm_pd_disaggregation.yaml).
 #
 # The webhook also injects into opted-in vLLM pods:
 #   VLLM_NIXL_SIDE_CHANNEL_HOST = pod's own IP (downward API status.podIP)
-#   VLLM_NIXL_SIDE_CHANNEL_PORT = spec.pd.nixlSideChannelPort (5557 here)
+#   VLLM_NIXL_SIDE_CHANNEL_PORT = spec.pd.nixlSideChannelPort (5558 default)
 #
 # PREREQUISITES:
-#   1. Apply the decoder LMCacheEngine (lmcache_v1alpha1_lmcacheengine_pd_decoder.yaml).
-#   2. Deploy the prefiller vLLM with the opt-in label/annotation (see vllm_pd_disaggregation.yaml).
+#   1. Deploy this engine.
+#   2. Deploy prefiller and decoder vLLM pods with the opt-in annotations
+#      (see vllm_pd_disaggregation.yaml).
 #   3. Deploy a vllm-router pointing at the prefiller and decoder vLLM Services.
 apiVersion: lmcache.lmcache.ai/v1alpha1
 kind: LMCacheEngine
 metadata:
-  name: prefiller-cache
+  name: lmcache-engine
   namespace: default
 spec:
   l1:
@@ -31,15 +36,11 @@ spec:
   eviction:
     policy: LRU
 
-  # PD disaggregation: prefiller role.
-  # Use a distinct nixlSideChannelPort from the decoder to avoid collision
-  # when both roles run on the same node (e.g. in single-node testing).
+  # PD disaggregation: generates both prefiller and decoder MultiConnector configs.
   pd:
-    role: prefiller
-    nixlSideChannelPort: 5557         # decoder must use a different port
-    nixlLoadFailurePolicy: fail       # abort if NixlConnector cannot reach decoder
+    nixlSideChannelPort: 5558
+    nixlLoadFailurePolicy: fail
 
   # -- Scheduling --
   # nodeSelector:
   #   nvidia.com/gpu.present: "true"
-  #   lmcache.ai/role: prefiller      # optional: pin to prefiller nodes
