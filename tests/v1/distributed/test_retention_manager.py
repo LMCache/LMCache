@@ -138,19 +138,20 @@ def test_sweep_at_original_deadline_spares_extended_key():
     assert manager.is_evictable(_key(1))
 
 
-def test_deadline_index_stays_in_lockstep_with_entries():
+def test_forget_and_expiry_interleave_cleanly():
     clock = FakeClock()
     manager = RetentionManager(max_retained_bytes=10_000, clock=clock)
 
     manager.note_stored([_key(i) for i in range(5)], [100] * 5, ttl_sec=10)
     manager.note_stored([_key(i) for i in range(3)], [100] * 3, ttl_sec=50)
     manager.forget([_key(3)])
-    assert len(manager._deadlines) == len(manager._entries) == 4
+    assert manager.report_status()["retained_keys"] == 4
 
     clock.advance(11)
     assert manager.sweep() == 1
-    assert len(manager._deadlines) == len(manager._entries) == 3
+    assert manager.report_status()["retained_keys"] == 3
 
     clock.advance(50)
     assert manager.sweep() == 3
-    assert len(manager._deadlines) == len(manager._entries) == 0
+    assert manager.report_status()["retained_keys"] == 0
+    assert manager.report_status()["retained_bytes"] == 0

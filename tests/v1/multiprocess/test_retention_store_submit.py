@@ -3,10 +3,12 @@
 
 # Standard
 from types import SimpleNamespace
+from typing import cast
 
 # First Party
 from lmcache.integration.vllm.vllm_multi_process_adapter import (
     LMCacheMPWorkerAdapter,
+    ParallelStrategy,
 )
 
 
@@ -14,7 +16,9 @@ def _bare_worker_adapter() -> LMCacheMPWorkerAdapter:
     """Adapter with only the attrs _create_key needs; no ZMQ or heartbeat."""
     adapter = object.__new__(LMCacheMPWorkerAdapter)
     adapter.model_name = "test_model"
-    adapter.parallel_strategy = SimpleNamespace(kv_world_size=1, kv_worker_id=0)
+    adapter.parallel_strategy = cast(
+        ParallelStrategy, SimpleNamespace(kv_world_size=1, kv_worker_id=0)
+    )
     return adapter
 
 

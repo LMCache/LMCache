@@ -72,12 +72,21 @@ class RetentionManager:
     ) -> int:
         """Register (or extend) retention for freshly stored keys.
 
-        Extending an already-retained key is always allowed and costs no
-        budget. New keys are admitted while the retained total stays
-        within the budget; the rest are skipped and counted as
-        rejections.
+        Thread-safe. Extending an already-retained key is always allowed,
+        never shortens its deadline, and costs no budget. New keys are
+        admitted while the retained total stays within the budget; the
+        rest are skipped and counted as rejections.
 
-        Returns the number of keys registered or extended.
+        Args:
+            keys: Chunk keys covered by the store, including chunks that
+                were already cached. Same length as sizes.
+            sizes: Byte size of each key's chunk, charged against the
+                budget when the key is newly registered.
+            ttl_sec: Seconds from now to shield the keys. Values <= 0
+                make the call a no-op.
+
+        Returns:
+            The number of keys registered or extended.
         """
         if ttl_sec <= 0 or not keys:
             return 0
@@ -120,7 +129,15 @@ class RetentionManager:
         return self._max_retained_bytes
 
     def is_evictable(self, key: ObjectKey) -> bool:
-        """False while the key's retention window is still open."""
+        """Whether eviction may take the key.
+
+        Args:
+            key: The chunk key an eviction pass is considering.
+
+        Returns:
+            False while the key's retention window is still open; True
+            otherwise, including for keys that were never registered.
+        """
         with self._lock:
             entry = self._entries.get(key)
             if entry is None:
@@ -128,7 +145,13 @@ class RetentionManager:
             return entry[0] <= self._clock()
 
     def forget(self, keys: list[ObjectKey]) -> None:
-        """Drop entries for keys deleted outside the eviction loop."""
+        """Drop entries for keys deleted outside the eviction loop.
+
+        Args:
+            keys: Keys whose data was removed (e.g. an adapter clear);
+                their budget bytes are released immediately. Unknown
+                keys are ignored.
+        """
         with self._lock:
             for key in keys:
                 entry = self._entries.pop(key, None)
@@ -137,7 +160,11 @@ class RetentionManager:
                     self._retained_bytes -= entry[1]
 
     def sweep(self) -> int:
-        """Drop expired entries so their keys rejoin the LRU pool."""
+        """Drop expired entries so their keys rejoin the LRU pool.
+
+        Returns:
+            The number of entries that expired.
+        """
         now = self._clock()
         expired = 0
         with self._lock:
@@ -148,7 +175,15 @@ class RetentionManager:
             self._num_expirations += expired
         return expired
 
-    def report_status(self) -> dict:
+    def report_status(self) -> dict[str, int]:
+        """Snapshot of ledger state and lifetime counters.
+
+        Returns:
+            A dict with "retained_keys" (live entries), "retained_bytes"
+            (bytes currently shielded), "max_retained_bytes" (configured
+            budget, 0 = disabled), and the lifetime counters "stamps",
+            "extends", "expirations", and "budget_rejections".
+        """
         with self._lock:
             return {
                 "retained_keys": len(self._entries),
