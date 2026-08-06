@@ -736,8 +736,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         assert ret % self.scheduler_adapter.lmcache_tokens_per_chunk == 0
 
-        # Update num stored tokens for the tracker
-        tracker.increase_num_stored_tokens(ret)
+        # Update num stored tokens for the tracker. A retention request
+        # deliberately skips this: its store op must also cover the
+        # already-cached prefix so the server can extend those chunks'
+        # retention windows. Reserve mode "new" skips the re-copy, so
+        # the wider op stores nothing twice.
+        if tracker.retention_ttl_sec <= 0:
+            tracker.increase_num_stored_tokens(ret)
 
         # Save the vllm and lmcache hit tokens. The vLLM hit count is
         # rounded down to a boundary aligned for every engine group (e.g.
