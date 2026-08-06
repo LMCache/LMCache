@@ -40,7 +40,9 @@ var _ = Describe("CacheBlendPodInjector webhook (envtest)", Ordered, func() {
 		Expect(client.IgnoreAlreadyExists(k8sClient.Create(envtestCtx, ns))).To(Succeed())
 
 		By("creating the CacheBlendEngine and its connection ConfigMap")
-		engine := newTestEngine(nil)
+		// Opt in to --attention-backend CUSTOM (the spec default is "none",
+		// which omits the flag) so the full M5 flag set is exercised end to end.
+		engine := newTestEngine(withCustomBackend)
 		Expect(k8sClient.Create(envtestCtx, engine)).To(Succeed())
 		Expect(k8sClient.Create(envtestCtx, resources.BuildCBConnectionConfigMap(engine))).To(Succeed())
 	})

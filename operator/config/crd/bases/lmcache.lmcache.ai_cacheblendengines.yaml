@@ -1298,13 +1298,14 @@ spec:
                   to this engine.
                 properties:
                   attentionBackend:
-                    default: CUSTOM
+                    default: none
                     description: |-
                       attentionBackend is the vLLM --attention-backend the webhook injects.
-                      "CUSTOM" (default) routes attention through the CB backend that owns the
-                      FULL_RECOMP / CHECK / PARTIAL pipeline. Set to "none" to omit the flag
-                      entirely for models whose arch adapter takes over that role (e.g.
-                      all-sparse-MLA models, where the CB backend would attach to zero layers).
+                      "none" (the default) omits the flag entirely, leaving any user-supplied
+                      value on the pod untouched. Set to "CUSTOM" to route attention through
+                      the CB backend that owns the FULL_RECOMP / CHECK / PARTIAL pipeline —
+                      most models need this for blending; models whose arch adapter takes over
+                      that role (e.g. all-sparse-MLA) keep "none".
                     minLength: 1
                     type: string
                   blockSize:

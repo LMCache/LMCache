@@ -43,11 +43,20 @@ const (
 	testPodName    = "vllm-pod"
 	testSvcHost    = "tcp://cb.vllm-ns.svc.cluster.local"
 
-	// Default injected values (pinned by SetDefaults; overridable via
-	// spec.injection.attentionBackend / spec.injection.blockSize).
-	cbValAttentionBackend = lmcachev1alpha1.DefaultCBAttentionBackend
-	cbValBlockSize        = "64"
+	// Explicit CUSTOM backend used by tests that opt in via
+	// spec.injection.attentionBackend (the default is "none": flag omitted).
+	cbValAttentionBackend = lmcachev1alpha1.AttentionBackendCustom
+	// Default injected --block-size (pinned by SetDefaults; overridable via
+	// spec.injection.blockSize).
+	cbValBlockSize = "64"
 )
+
+// withCustomBackend mutates an engine to opt in to --attention-backend CUSTOM
+// injection (the spec default is "none", which omits the flag).
+func withCustomBackend(e *lmcachev1alpha1.CacheBlendEngine) {
+	ab := lmcachev1alpha1.AttentionBackendCustom
+	e.Spec.Injection.AttentionBackend = &ab
+}
 
 // newTestScheme returns a scheme with clientgo + the lmcache v1alpha1 types.
 func newTestScheme() *runtime.Scheme {
@@ -256,8 +265,8 @@ var _ = Describe("CacheBlendPodInjector", func() {
 			Expect(envValue(c, pythonPathEnvName)).To(Equal(cbPluginMountPath))
 
 			By("M5: required vLLM args asserted individually")
-			Expect(argsHasFlagValue(c.Args, cbFlagAttentionBackend, cbValAttentionBackend)).To(BeTrue(),
-				"--attention-backend=CUSTOM")
+			Expect(argsHasFlag(c.Args, cbFlagAttentionBackend)).To(BeFalse(),
+				"default attentionBackend none -> flag omitted")
 			Expect(argsHasFlag(c.Args, cbFlagNoChunkedPrefill)).To(BeTrue(),
 				"--no-enable-chunked-prefill")
 			Expect(argsHasFlagValue(c.Args, cbFlagBlockSize, cbValBlockSize)).To(BeTrue(),
@@ -387,7 +396,7 @@ var _ = Describe("CacheBlendPodInjector", func() {
 
 	Describe("append-or-replace arg semantics", func() {
 		It("replaces a pre-existing --attention-backend value", func() {
-			engine := newTestEngine(nil)
+			engine := newTestEngine(withCustomBackend)
 			injector := newPodInjector(engine, true)
 			pod := vllmPod(func(p *corev1.Pod) {
 				p.Spec.Containers[0].Args = []string{"--attention-backend", "FLASH_ATTN", "--model", "m"}
@@ -404,7 +413,7 @@ var _ = Describe("CacheBlendPodInjector", func() {
 		})
 
 		It("replaces a pre-existing --attention-backend=value (single-token form)", func() {
-			engine := newTestEngine(nil)
+			engine := newTestEngine(withCustomBackend)
 			injector := newPodInjector(engine, true)
 			pod := vllmPod(func(p *corev1.Pod) {
 				p.Spec.Containers[0].Args = []string{"--attention-backend=FLASH_ATTN", "--model", "m"}
@@ -436,6 +445,18 @@ var _ = Describe("CacheBlendPodInjector", func() {
 			Expect(countFlag(c.Args, cbFlagBlockSize)).To(Equal(1))
 		})
 
+		It(`injects --attention-backend CUSTOM when injection.attentionBackend opts in`, func() {
+			engine := newTestEngine(withCustomBackend)
+			injector := newPodInjector(engine, true)
+			pod := vllmPod(nil)
+
+			resp := injector.Handle(ctx, makeRequest(pod))
+			out := applyResponse(pod, resp)
+			c := findContainer(out, "vllm")
+
+			Expect(argsHasFlagValue(c.Args, cbFlagAttentionBackend, cbValAttentionBackend)).To(BeTrue())
+		})
+
 		It("injects a non-default injection.attentionBackend value", func() {
 			engine := newTestEngine(func(e *lmcachev1alpha1.CacheBlendEngine) {
 				ab := "FLASH_ATTN_CB"
@@ -451,11 +472,8 @@ var _ = Describe("CacheBlendPodInjector", func() {
 			Expect(argsHasFlagValue(c.Args, cbFlagAttentionBackend, "FLASH_ATTN_CB")).To(BeTrue())
 		})
 
-		It(`omits --attention-backend when injection.attentionBackend is "none"`, func() {
-			engine := newTestEngine(func(e *lmcachev1alpha1.CacheBlendEngine) {
-				ab := lmcachev1alpha1.AttentionBackendNone
-				e.Spec.Injection.AttentionBackend = &ab
-			})
+		It(`omits --attention-backend by default (attentionBackend "none")`, func() {
+			engine := newTestEngine(nil)
 			injector := newPodInjector(engine, true)
 			pod := vllmPod(nil)
 
@@ -468,11 +486,8 @@ var _ = Describe("CacheBlendPodInjector", func() {
 			Expect(argsHasFlagValue(c.Args, cbFlagBlockSize, cbValBlockSize)).To(BeTrue())
 		})
 
-		It(`leaves a user-supplied --attention-backend untouched when "none"`, func() {
-			engine := newTestEngine(func(e *lmcachev1alpha1.CacheBlendEngine) {
-				ab := lmcachev1alpha1.AttentionBackendNone
-				e.Spec.Injection.AttentionBackend = &ab
-			})
+		It(`leaves a user-supplied --attention-backend untouched by default`, func() {
+			engine := newTestEngine(nil)
 			injector := newPodInjector(engine, true)
 			pod := vllmPod(func(p *corev1.Pod) {
 				p.Spec.Containers[0].Args = []string{"--attention-backend", "FLASH_ATTN", "--model", "m"}
@@ -542,7 +557,7 @@ var _ = Describe("CacheBlendPodInjector", func() {
 			By("the vLLM container is mutated")
 			vllm := findContainer(out, "vllm")
 			Expect(envValue(vllm, pythonPathEnvName)).To(Equal(cbPluginMountPath))
-			Expect(argsHasFlagValue(vllm.Args, cbFlagAttentionBackend, cbValAttentionBackend)).To(BeTrue())
+			Expect(argsHasFlagValue(vllm.Args, cbFlagBlockSize, cbValBlockSize)).To(BeTrue())
 
 			By("the sidecar container is untouched")
 			sidecar := findContainer(out, "sidecar")
@@ -567,7 +582,7 @@ var _ = Describe("CacheBlendPodInjector", func() {
 			out := applyResponse(pod, resp)
 
 			vllm := findContainer(out, "vllm")
-			Expect(argsHasFlagValue(vllm.Args, cbFlagAttentionBackend, cbValAttentionBackend)).To(BeTrue())
+			Expect(argsHasFlagValue(vllm.Args, cbFlagBlockSize, cbValBlockSize)).To(BeTrue())
 			sidecar := findContainer(out, "sidecar")
 			Expect(sidecar.Args).To(Equal([]string{"sleep"}))
 		})

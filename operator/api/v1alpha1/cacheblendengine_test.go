@@ -576,15 +576,15 @@ func TestCBSetDefaults_InjectionArgsPreserved(t *testing.T) {
 		L1: L1BackendSpec{SizeGB: 10},
 		Injection: &InjectionSpec{
 			BlockSize:        ptr(int32(128)),
-			AttentionBackend: ptr(AttentionBackendNone),
+			AttentionBackend: ptr(AttentionBackendCustom),
 		},
 	}}
 	e.SetDefaults()
 	if *e.Spec.Injection.BlockSize != 128 {
 		t.Fatalf("expected BlockSize preserved at 128, got %d", *e.Spec.Injection.BlockSize)
 	}
-	if *e.Spec.Injection.AttentionBackend != AttentionBackendNone {
-		t.Fatalf("expected AttentionBackend preserved at none, got %s", *e.Spec.Injection.AttentionBackend)
+	if *e.Spec.Injection.AttentionBackend != AttentionBackendCustom {
+		t.Fatalf("expected AttentionBackend preserved at CUSTOM, got %s", *e.Spec.Injection.AttentionBackend)
 	}
 }
 

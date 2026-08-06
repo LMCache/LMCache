@@ -53,8 +53,10 @@ spec:
     # cudagraph: eager             # eager | piecewise | full_decode_only (never full)
     # blockSize: 64                # injected --block-size; raise for models whose KV
     #                              # page size differs (e.g. 128 for sparse-attention)
-    # attentionBackend: CUSTOM     # injected --attention-backend; "none" omits the
-    #                              # flag (models whose arch adapter owns attention)
+    # attentionBackend: none       # default: the webhook does not manage
+    #                              # --attention-backend. Set CUSTOM to route
+    #                              # attention through the CB backend (most
+    #                              # models need this for blending)
 
   # -- Eviction --
   # eviction:

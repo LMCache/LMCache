@@ -42,14 +42,20 @@ const (
 	// overridden by injection.blockSize.
 	DefaultCBBlockSize int32 = 64
 
-	// DefaultCBAttentionBackend is the vLLM --attention-backend the webhook
-	// injects unless overridden by injection.attentionBackend.
-	DefaultCBAttentionBackend = "CUSTOM"
-
 	// AttentionBackendNone is the injection.attentionBackend sentinel that makes
-	// the webhook omit the --attention-backend flag entirely, for models whose
-	// arch adapter takes over the CB attention role (e.g. all-sparse-MLA models).
+	// the webhook omit the --attention-backend flag entirely, leaving any
+	// user-supplied value on the pod untouched.
 	AttentionBackendNone = "none"
+
+	// AttentionBackendCustom routes attention through the CB backend that owns
+	// the FULL_RECOMP / CHECK / PARTIAL pipeline. Most models need this; set it
+	// explicitly via injection.attentionBackend.
+	AttentionBackendCustom = "CUSTOM"
+
+	// DefaultCBAttentionBackend is the injection.attentionBackend default:
+	// "none" — the webhook does not manage --attention-backend unless the CR
+	// asks it to.
+	DefaultCBAttentionBackend = AttentionBackendNone
 )
 
 // BlendSpec defines the CacheBlend tunables injected into the vLLM connect-config.
@@ -126,12 +132,13 @@ type InjectionSpec struct {
 	BlockSize *int32 `json:"blockSize,omitempty"`
 
 	// attentionBackend is the vLLM --attention-backend the webhook injects.
-	// "CUSTOM" (default) routes attention through the CB backend that owns the
-	// FULL_RECOMP / CHECK / PARTIAL pipeline. Set to "none" to omit the flag
-	// entirely for models whose arch adapter takes over that role (e.g.
-	// all-sparse-MLA models, where the CB backend would attach to zero layers).
+	// "none" (the default) omits the flag entirely, leaving any user-supplied
+	// value on the pod untouched. Set to "CUSTOM" to route attention through
+	// the CB backend that owns the FULL_RECOMP / CHECK / PARTIAL pipeline —
+	// most models need this for blending; models whose arch adapter takes over
+	// that role (e.g. all-sparse-MLA) keep "none".
 	// +optional
-	// +kubebuilder:default="CUSTOM"
+	// +kubebuilder:default="none"
 	// +kubebuilder:validation:MinLength=1
 	AttentionBackend *string `json:"attentionBackend,omitempty"`
 }
