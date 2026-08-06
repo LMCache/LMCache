@@ -23,8 +23,12 @@ from __future__ import annotations
 
 # Standard
 from collections.abc import Callable
+import operator
 import threading
 import time
+
+# Third Party
+from sortedcontainers import SortedKeyList
 
 # First Party
 from lmcache.logging import init_logger
@@ -52,6 +56,8 @@ class RetentionManager:
         self._max_retained_bytes = max_retained_bytes
         # ObjectKey -> (deadline, size_bytes)
         self._entries: dict[ObjectKey, tuple[float, int]] = {}
+        # (deadline, key) ordered by deadline; in lockstep with _entries.
+        self._deadlines = SortedKeyList(key=operator.itemgetter(0))
         self._retained_bytes = 0
         self._num_stamps = 0
         self._num_extends = 0
@@ -82,7 +88,9 @@ class RetentionManager:
                 entry = self._entries.get(key)
                 if entry is not None:
                     if deadline > entry[0]:
+                        self._deadlines.remove((entry[0], key))
                         self._entries[key] = (deadline, entry[1])
+                        self._deadlines.add((deadline, key))
                     self._num_extends += 1
                     accepted += 1
                     continue
@@ -90,6 +98,7 @@ class RetentionManager:
                     self._num_budget_rejections += 1
                     continue
                 self._entries[key] = (deadline, size)
+                self._deadlines.add((deadline, key))
                 self._retained_bytes += size
                 self._num_stamps += 1
                 accepted += 1
@@ -124,19 +133,20 @@ class RetentionManager:
             for key in keys:
                 entry = self._entries.pop(key, None)
                 if entry is not None:
+                    self._deadlines.remove((entry[0], key))
                     self._retained_bytes -= entry[1]
 
     def sweep(self) -> int:
         """Drop expired entries so their keys rejoin the LRU pool."""
         now = self._clock()
+        expired = 0
         with self._lock:
-            expired = [
-                key for key, (deadline, _) in self._entries.items() if deadline <= now
-            ]
-            for key in expired:
+            while self._deadlines and self._deadlines[0][0] <= now:
+                _, key = self._deadlines.pop(0)
                 self._retained_bytes -= self._entries.pop(key)[1]
-            self._num_expirations += len(expired)
-        return len(expired)
+                expired += 1
+            self._num_expirations += expired
+        return expired
 
     def report_status(self) -> dict:
         with self._lock:

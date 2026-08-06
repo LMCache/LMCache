@@ -119,3 +119,38 @@ def test_nonpositive_ttl_is_a_noop():
     assert manager.note_stored([_key(1)], [100], ttl_sec=0) == 0
     assert manager.note_stored([_key(1)], [100], ttl_sec=-5) == 0
     assert manager.report_status()["retained_keys"] == 0
+
+
+def test_sweep_at_original_deadline_spares_extended_key():
+    clock = FakeClock()
+    manager = RetentionManager(max_retained_bytes=1000, clock=clock)
+
+    manager.note_stored([_key(1)], [100], ttl_sec=10)
+    clock.advance(5)
+    manager.note_stored([_key(1)], [100], ttl_sec=100)
+
+    clock.advance(10)
+    assert manager.sweep() == 0
+    assert not manager.is_evictable(_key(1))
+
+    clock.advance(100)
+    assert manager.sweep() == 1
+    assert manager.is_evictable(_key(1))
+
+
+def test_deadline_index_stays_in_lockstep_with_entries():
+    clock = FakeClock()
+    manager = RetentionManager(max_retained_bytes=10_000, clock=clock)
+
+    manager.note_stored([_key(i) for i in range(5)], [100] * 5, ttl_sec=10)
+    manager.note_stored([_key(i) for i in range(3)], [100] * 3, ttl_sec=50)
+    manager.forget([_key(3)])
+    assert len(manager._deadlines) == len(manager._entries) == 4
+
+    clock.advance(11)
+    assert manager.sweep() == 1
+    assert len(manager._deadlines) == len(manager._entries) == 3
+
+    clock.advance(50)
+    assert manager.sweep() == 3
+    assert len(manager._deadlines) == len(manager._entries) == 0
