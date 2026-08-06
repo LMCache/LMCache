@@ -154,48 +154,37 @@ enum class EngineKVFormat : int {
 // Exactly one structural shape (cross_layer / kv_list / layer_list) is true per
 // format. The remaining flags are modifiers layered on top of it.
 struct FormatFacts {
-  bool is_cross_layer;  // all layers in one fused tensor
-  bool is_kv_list;      // keys and values in two top-level lists
-  bool is_layer_list;   // one list entry per layer
-  bool is_mla;          // MLA: single latent KV head (no separate K/V)
-  bool is_hnd;          // heads before block tokens (HND layout)
-  bool is_fused_packed; // K/V packed in trailing dim (kv_size == 1)
-  bool is_two_major;    // size-2 K/V axis precedes the block axis
-  bool is_pbs_fused;    // paged buffer size fused into one axis
+  bool is_cross_layer;   // all layers in one fused tensor
+  bool is_kv_list;       // keys and values in two top-level lists
+  bool is_layer_list;    // one list entry per layer
+  bool is_mla;           // MLA: single latent KV head (no separate K/V)
+  bool is_hnd;           // heads before block tokens (HND layout)
+  bool is_fused_packed;  // K/V packed in trailing dim (kv_size == 1)
+  bool is_two_major;     // size-2 K/V axis precedes the block axis
+  bool is_pbs_fused;     // paged buffer size fused into one axis
 };
 
 // clang-format off
 LMC_KV_FORMAT_HD constexpr FormatFacts FORMAT_FACTS[] = {
-    /*  0 NB_NL_TWO_BS_NH_HS      */ {true,  false, false, false,
-                                      false, false, false, false},
-    /*  1 NL_X_TWO_NB_BS_NH_HS    */ {false, false, true,  false,
-                                      false, false, true,  false},
-    /*  2 NL_X_NB_TWO_BS_NH_HS    */ {false, false, true,  false,
-                                      false, false, false, false},
-    /*  3 NL_X_NB_BS_HS           */ {false, false, true,  true,
-                                      false, false, false, false},
-    /*  4 TWO_X_NL_X_NBBS_NH_HS   */ {false, true,  false, false,
-                                      false, false, false, false},
-    /*  5 NL_X_NBBS_ONE_HS        */ {false, false, true,  true,
-                                      false, false, false, true},
-    /*  6 NL_X_TWO_NB_NH_BS_HS    */ {false, false, true,  false,
-                                      true,  false, true,  false},
-    /*  7 NL_X_NB_TWO_NH_BS_HS    */ {false, false, true,  false,
-                                      true,  false, false, false},
-    /*  8 NB_NL_TWO_NH_BS_HS      */ {true,  false, false, false,
-                                      true,  false, false, false},
-    /*  9 TWO_X_NL_X_NB_BS_NH_HS  */ {false, true,  false, false,
-                                      false, false, false, false},
-    /* 10 NL_X_NB_NH_BS_TWO_HS    */ {false, false, true,  false,
-                                      true,  true,  false, false},
-    /* 11 NL_X_NB_BS_NH_TWO_HS    */ {false, false, true,  false,
-                                      false, true,  false, false},
-    /* 12 NL_X_NB_NH_BS_CS        */ {false, false, true,  false,
-                                      true,  true,  false, false},
-    /* 13 NL_X_NB_BS_NH_CS        */ {false, false, true,  false,
-                                      false, true,  false, false},
-    /* 14 NL_X_NB_BSV_BSS         */ {false, false, true,  true,
-                                      false, false, false, false},
+    /*  0 NB_NL_TWO_BS_NH_HS      */ {.is_cross_layer = true},
+    /*  1 NL_X_TWO_NB_BS_NH_HS    */ {.is_layer_list = true,  .is_two_major = true},
+    /*  2 NL_X_NB_TWO_BS_NH_HS    */ {.is_layer_list = true},
+    /*  3 NL_X_NB_BS_HS           */ {.is_layer_list = true,  .is_mla = true},
+    /*  4 TWO_X_NL_X_NBBS_NH_HS   */ {.is_kv_list = true},
+    /*  5 NL_X_NBBS_ONE_HS        */ {.is_layer_list = true,  .is_mla = true,
+                                      .is_pbs_fused = true},
+    /*  6 NL_X_TWO_NB_NH_BS_HS    */ {.is_layer_list = true,  .is_hnd = true,
+                                      .is_two_major = true},
+    /*  7 NL_X_NB_TWO_NH_BS_HS    */ {.is_layer_list = true,  .is_hnd = true},
+    /*  8 NB_NL_TWO_NH_BS_HS      */ {.is_cross_layer = true, .is_hnd = true},
+    /*  9 TWO_X_NL_X_NB_BS_NH_HS  */ {.is_kv_list = true},
+    /* 10 NL_X_NB_NH_BS_TWO_HS    */ {.is_layer_list = true,  .is_hnd = true,
+                                      .is_fused_packed = true},
+    /* 11 NL_X_NB_BS_NH_TWO_HS    */ {.is_layer_list = true,  .is_fused_packed = true},
+    /* 12 NL_X_NB_NH_BS_CS        */ {.is_layer_list = true,  .is_hnd = true,
+                                      .is_fused_packed = true},
+    /* 13 NL_X_NB_BS_NH_CS        */ {.is_layer_list = true,  .is_fused_packed = true},
+    /* 14 NL_X_NB_BSV_BSS         */ {.is_layer_list = true,  .is_mla = true},
 };
 // clang-format on
 
