@@ -244,6 +244,12 @@ class StorageManagerConfig:
     )
     """ The configuration for L2 adapters. """
 
+    retention_max_fraction: float = 0.0
+    """ Fraction of total L2 capacity that retention may shield from
+    eviction. 0 disables retention. When set, it must stay below every
+    adapter's trigger_watermark so the eviction loop always has
+    evictable keys. """
+
     store_policy: str = "default"
     """ The L2 store policy name. """
 
@@ -301,6 +307,17 @@ def validate_storage_manager_config(config: StorageManagerConfig) -> None:
         and config.l1_manager_config.memory_config.devdax_path
     ):
         raise ValueError("gds-l1-path cannot be used with l1-devdax-path")
+
+    if config.retention_max_fraction > 0:
+        for ac in config.l2_adapter_config.adapters:
+            if ac.eviction_config is None:
+                continue
+            if config.retention_max_fraction >= ac.eviction_config.trigger_watermark:
+                raise ValueError(
+                    f"retention_max_fraction ({config.retention_max_fraction}) "
+                    "must be below the L2 trigger_watermark "
+                    f"({ac.eviction_config.trigger_watermark})"
+                )
 
     memory_config = config.l1_manager_config.memory_config
     if not (memory_config.devdax_path and memory_config.devdax_size_in_bytes):
