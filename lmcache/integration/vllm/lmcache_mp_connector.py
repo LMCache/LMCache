@@ -46,7 +46,6 @@ from lmcache.integration.vllm.kv_cache_groups import (
 )
 from lmcache.integration.vllm.lazy_offload_pending_store import (
     LazyOffloadPendingStore,
-    PendingStoreItem,
 )
 from lmcache.integration.vllm.lmcache_mp_metadata import (
     LMCacheMPConnectorMetadata,
@@ -914,11 +913,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             return
         for req_id, count in meta.completed_store_requests.items():
             if self.scheduler_adapter.update_pending_store_count(req_id, count):
-                block_hashes = self._pending_store.get_block_hashes(req_id)
+                gpu_block_ids = self._pending_store.get_request_gpu_block_ids(req_id)
                 self._gpu_block_pool.free_blocks(
-                    [self._gpu_block_pool.blocks[bid] for bid in block_hashes.keys()]
+                    [self._gpu_block_pool.blocks[bid] for bid in gpu_block_ids]
                 )
-                self._pending_store.remove_block_hashes(req_id)
                 self.scheduler_adapter.end_session(req_id)
 
     def request_finished(
@@ -965,7 +963,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # Notify LMCache to end the session for this request
         self.scheduler_adapter.end_session(request.request_id)
 
-        return not self.lazy_offload, (return_params or None)
+        if self.lazy_offload:
+            self._pending_store.mark_req_finished(request.request_id)
+            return False, (return_params or None)
+        return True, (return_params or None)
 
     def request_finished_all_groups(
         self,
@@ -1082,18 +1083,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             if r_meta is not None:
                 # In lazy_offload mode, add to pending queue instead of immediate store
                 if self.lazy_offload:
-                    if self._gpu_block_pool:
-                        block_hashes = {
-                            bid: self._gpu_block_pool.blocks[bid].block_hash
-                            for bid in r_meta.op.flat_block_ids
-                        }
-                        self._pending_store.add(
-                            PendingStoreItem(metadata=r_meta), block_hashes
-                        )
-                    else:
-                        raise ValueError(
-                            "Lazy offload is enabled but no GPU block pool is binded"
-                        )
+                    self._pending_store.add(r_meta)
                 else:
                     metadata.add_request_metadata(r_meta)
         self._process_lazy_offload_store_requests(metadata)
@@ -1128,18 +1118,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             if r_meta is not None:
                 # In lazy_offload mode, add to pending queue instead of immediate store
                 if self.lazy_offload:
-                    if self._gpu_block_pool:
-                        block_hashes = {
-                            bid: self._gpu_block_pool.blocks[bid].block_hash
-                            for bid in r_meta.op.flat_block_ids
-                        }
-                        self._pending_store.add(
-                            PendingStoreItem(metadata=r_meta), block_hashes
-                        )
-                    else:
-                        raise ValueError(
-                            "Lazy offload is enabled but no GPU block pool is binded"
-                        )
+                    self._pending_store.add(r_meta)
                 else:
                     metadata.add_request_metadata(r_meta)
         self._process_lazy_offload_store_requests(metadata)
@@ -1151,31 +1130,34 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             return
 
         if not self._gpu_block_pool:
-            raise ValueError("Lazy offload is enabled but no GPU block pool is binded")
+            raise ValueError("Lazy offload is enabled but no GPU block pool is bound")
 
         for item in self._pending_store.select_items():
-            request_id = item.metadata.request_id
-            old_block_hashes = self._pending_store.get_block_hashes(request_id)
-            gpu_block_ids = old_block_hashes.keys()
-            self._gpu_block_pool.touch(
-                [self._gpu_block_pool.blocks[bid] for bid in gpu_block_ids]
-            )
-            new_block_hashes = {
-                bid: self._gpu_block_pool.blocks[bid].block_hash
-                for bid in gpu_block_ids
-            }
-            if old_block_hashes == new_block_hashes:
-                # remove block hashes and free blocks until store is done
-                metadata.add_request_metadata(item.metadata)
-            else:
-                logger.warning(
-                    "Block hashes mismatch for request %s, trigger lazy offload failed",
-                    item.metadata.request_id,
-                )
-                self._gpu_block_pool.free_blocks(
+            request_id = item.request_id
+            for meta, old_block_hashes in item.metadatas:
+                gpu_block_ids = list(old_block_hashes.keys())
+                self._gpu_block_pool.touch(
                     [self._gpu_block_pool.blocks[bid] for bid in gpu_block_ids]
                 )
-                self._pending_store.remove_block_hashes(request_id)
+                new_block_hashes = {
+                    bid: self._gpu_block_pool.blocks[bid].block_hash
+                    for bid in gpu_block_ids
+                }
+                if old_block_hashes == new_block_hashes:
+                    # remove block hashes and free blocks until store is done
+                    metadata.add_request_metadata(meta)
+                    self._pending_store.update_request_gpu_block_ids(
+                        request_id, gpu_block_ids
+                    )
+                else:
+                    logger.warning(
+                        "Part block hashes mismatch for request %s, skip it",
+                        request_id,
+                    )
+                    self._gpu_block_pool.free_blocks(
+                        [self._gpu_block_pool.blocks[bid] for bid in gpu_block_ids]
+                    )
+                    break
 
     def _report_block_allocation_deltas(
         self,

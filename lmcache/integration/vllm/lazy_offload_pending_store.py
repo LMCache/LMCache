@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Standard
 from abc import ABC, abstractmethod
-from collections.abc import Iterator
-from dataclasses import dataclass
+from collections import defaultdict
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 # First Party
@@ -26,10 +26,16 @@ class PendingStoreItem:
     Represents a pending store operation in the lazy offload queue.
 
     Attributes:
-        metadata: The store metadata to be submitted.
+        request_id: The request id of the pending store request.
+        metadatas: The store metadata to be submitted.
+        is_finished: Whether the request is finished.
     """
 
-    metadata: "LMCacheMPRequestMetadata"
+    request_id: str
+    metadatas: list[tuple["LMCacheMPRequestMetadata", dict[int, bytes]]] = field(
+        default_factory=list
+    )
+    is_finished: bool = False
 
 
 # TODO: support more offload policies
@@ -42,8 +48,13 @@ class OffloadPolicy(ABC):
     """
 
     @abstractmethod
-    def add(self, item: PendingStoreItem):
-        """Add a pending store item to the queue or other data structures."""
+    def add(self, meta: "LMCacheMPRequestMetadata", block_hashes: dict[int, bytes]):
+        """Add a pending store item to the pending store."""
+        ...
+
+    @abstractmethod
+    def mark_req_finished(self, req_id: str):
+        """Mark the pending store item finished."""
         ...
 
     @abstractmethod
@@ -56,14 +67,14 @@ class OffloadPolicy(ABC):
         ...
 
     @abstractmethod
-    def select_items(self, count: int) -> Iterator[PendingStoreItem]:
+    def select_items(self, count: int) -> list[PendingStoreItem]:
         """Select which items to offload from the queue.
 
         Args:
             count: The number of items to select.
 
         Returns:
-            A Iterator of PendingStoreItem.
+            A list of PendingStoreItem.
         """
         ...
 
@@ -79,28 +90,43 @@ class FIFOOffloadPolicy(OffloadPolicy):
         Args:
             configs: The configuration for the FIFO offload policy.
         """
-        self.pending_items: list[PendingStoreItem] = []
-        self.threshold = (
+        self._pending_items: dict[str, PendingStoreItem] = {}
+        self._threshold = (
             configs.get("lmcache.mp.lazy_offload_threshold", 100) if configs else 100
         )
+        self._finished_requests_count = 0
         logger.info(
             "lazy offload enabled with FIFO policy, offload threshold: %d",
-            self.threshold,
+            self._threshold,
         )
 
-    def add(self, item: PendingStoreItem):
-        """Add a pending store item to the queue."""
-        self.pending_items.append(item)
+    def add(self, meta: "LMCacheMPRequestMetadata", block_hashes: dict[int, bytes]):
+        if meta.request_id not in self._pending_items:
+            self._pending_items[meta.request_id] = PendingStoreItem(
+                request_id=meta.request_id
+            )
+        self._pending_items[meta.request_id].metadatas.append((meta, block_hashes))
+
+    def mark_req_finished(self, req_id: str):
+        if req_id in self._pending_items:
+            self._pending_items[req_id].is_finished = True
+            self._finished_requests_count += 1
+        else:
+            raise ValueError(
+                f"mark req finished failed: req_id: {req_id} not in pending_items"
+            )
 
     def should_offload(self) -> bool:
-        """Trigger offload when pending count >= threshold."""
-        return len(self.pending_items) >= self.threshold
+        return self._finished_requests_count >= self._threshold
 
-    def select_items(self, count: int) -> Iterator[PendingStoreItem]:
-        """Yield the first batch_size items (FIFO order)."""
-        to_offload = self.pending_items[:count]
-        self.pending_items = self.pending_items[count:]
-        return iter(to_offload)
+    def select_items(self, count: int) -> list[PendingStoreItem]:
+        to_offload = []
+        for req_id in list(self._pending_items.keys()):
+            if self._pending_items[req_id].is_finished:
+                to_offload.append(self._pending_items[req_id])
+                del self._pending_items[req_id]
+                self._finished_requests_count -= 1
+        return to_offload
 
 
 class LazyOffloadPendingStore:
@@ -135,27 +161,33 @@ class LazyOffloadPendingStore:
             configs.get("lmcache.mp.lazy_offload_select_count", 10) if configs else 10
         )
 
-        # check if the block hashes are the same when trigger offload
-        self._request_block_hashes: dict[str, dict[int, bytes]] = {}
-
         # TODO: use gpu block pool to judge should offload and select items
         # GPU block pool reference
         self._gpu_block_pool: "BlockPool | None" = None
+
+        # save all request block ids for free
+        self._request_block_ids: dict[str, list[int]] = defaultdict(list)
 
     def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:
         """Bind the GPU block pool to the pending store."""
         self._gpu_block_pool = gpu_block_pool
 
-    def add(self, item: PendingStoreItem, block_hashes: dict[int, bytes]) -> None:
-        """Add a pending store item to the pending store."""
-        self._request_block_hashes[item.metadata.request_id] = block_hashes
-        self._policy.add(item)
+    def add(self, meta: "LMCacheMPRequestMetadata") -> None:
+        """Add a pending store meta to the pending store."""
+        if self._gpu_block_pool:
+            block_hashes = {
+                bid: self._gpu_block_pool.blocks[bid].block_hash
+                for bid in meta.op.flat_block_ids
+            }
+            self._policy.add(meta, block_hashes)
+        else:
+            raise ValueError("gpu block pool not bound")
 
     def should_offload(self) -> bool:
         """Check if the queue should be drained based on the policy."""
         return self._policy.should_offload()
 
-    def select_items(self) -> Iterator[PendingStoreItem]:
+    def select_items(self) -> list[PendingStoreItem]:
         """
         Drain items from the queue according to the policy.
 
@@ -164,8 +196,15 @@ class LazyOffloadPendingStore:
         """
         return self._policy.select_items(self._select_count)
 
-    def get_block_hashes(self, request_id: str) -> dict[int, bytes]:
-        return self._request_block_hashes.get(request_id, {})
+    def mark_req_finished(self, req_id: str):
+        self._policy.mark_req_finished(req_id)
 
-    def remove_block_hashes(self, request_id: str) -> None:
-        self._request_block_hashes.pop(request_id, None)
+    def update_request_gpu_block_ids(self, req_id: str, block_ids: list[int]):
+        self._request_block_ids[req_id].extend(block_ids)
+
+    def get_request_gpu_block_ids(self, req_id: str) -> list[int]:
+        return self._request_block_ids[req_id]
+
+    def remove_request_gpu_block_ids(self, req_id: str):
+        if req_id in self._request_block_ids:
+            del self._request_block_ids[req_id]
