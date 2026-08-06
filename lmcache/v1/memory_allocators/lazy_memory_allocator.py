@@ -84,17 +84,13 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
             final_size (int): Final size of the memory allocation in bytes.
             align_bytes (int, optional): Alignment for the underlying allocations.
                 Must be a positive power of two. The buffer's base address is
-                aligned to this value, not merely the offsets within it, because
-                consumers reached via ``get_l1_memory_desc()`` rely on the
-                absolute alignment of the pointers they receive.
+                aligned to this value, not merely the offsets within it.
 
         Raises:
             ValueError: If ``align_bytes`` is not a positive power of two.
             RuntimeError: If the platform does not support memory pinning, or if
                 the allocated buffer could not be aligned to ``align_bytes``.
         """
-        # Same requirement, and same wording, as DevDaxMemoryAllocator: the
-        # base-alignment arithmetic below assumes a positive power of two.
         if align_bytes <= 0 or align_bytes & (align_bytes - 1) != 0:
             raise ValueError("align_bytes must be a positive power of two")
 
@@ -125,9 +121,7 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         else:
             # torch.empty() only guarantees 64-byte alignment, but consumers of
             # get_l1_memory_desc() (O_DIRECT, RDMA/GDS) need the buffer base
-            # itself aligned to align_bytes. Over-allocate and slice to an
-            # aligned offset, matching _alloc_page_aligned_pinned_view in
-            # lmcache/v1/platform/torch_ops.py.
+            # itself aligned to align_bytes.
             backing = torch.empty(
                 self._final_size + align_bytes - 1,
                 dtype=torch.uint8,
