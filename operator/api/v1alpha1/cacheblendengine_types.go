@@ -75,13 +75,10 @@ type BlendSpec struct {
 	// +kubebuilder:default=0.15
 	RecompRatio *float64 `json:"recompRatio,omitempty"`
 
-	// partialBucket pads PARTIAL row counts to a multiple of this bucket size.
-	// It is surfaced to the connector as
-	// kv_connector_extra_config["cb.partial_bucket"] and is needed on fp8-MoE
-	// models, where every distinct row count is a fresh M shape and the Triton
-	// autotuner re-tunes all MoE layers per CB step without it (multi-second
-	// TTFT spikes). Unset (the default) omits the key, leaving the padding
-	// disabled.
+	// partialBucket pads PARTIAL row counts to a multiple of this bucket size,
+	// surfaced to the connector as kv_connector_extra_config["cb.partial_bucket"].
+	// Unset (the default) omits the key, leaving the padding disabled. Needed
+	// on fp8-MoE models (see DESIGN.md).
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	PartialBucket *int32 `json:"partialBucket,omitempty"`
@@ -121,23 +118,18 @@ type InjectionSpec struct {
 	// +kubebuilder:validation:Enum=eager;piecewise;full_decode_only
 	Cudagraph *string `json:"cudagraph,omitempty"`
 
-	// blockSize is the vLLM --block-size the webhook injects. The default (64)
-	// pairs with the fixed chunk size of 256 and fits most models; models whose
-	// KV page size differs (e.g. sparse-attention models with a 128-token page)
-	// need it raised to match. A user-supplied --block-size on the pod is
-	// overwritten with this value.
+	// blockSize is the vLLM --block-size the webhook injects; a user-supplied
+	// value on the pod is overwritten. Raise it for models whose KV page size
+	// is not 64 (see DESIGN.md).
 	// +optional
 	// +kubebuilder:default=64
 	// +kubebuilder:validation:Minimum=1
 	BlockSize *int32 `json:"blockSize,omitempty"`
 
 	// attentionBackend is the vLLM --attention-backend the webhook injects.
-	// "none" (the default, case-sensitive) omits the flag entirely, leaving
-	// any user-supplied value on the pod untouched; any other value is
-	// injected verbatim. Set to "CUSTOM" to route attention through the CB
-	// backend that owns the FULL_RECOMP / CHECK / PARTIAL pipeline — most
-	// models need this for blending; models whose arch adapter takes over
-	// that role (e.g. all-sparse-MLA) keep "none".
+	// "none" (the default, case-sensitive) omits the flag and leaves a
+	// user-supplied value on the pod untouched; any other value is injected
+	// verbatim. Most models need "CUSTOM" for blending (see DESIGN.md).
 	// +optional
 	// +kubebuilder:default="none"
 	// +kubebuilder:validation:MinLength=1

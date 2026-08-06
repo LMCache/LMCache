@@ -206,7 +206,7 @@ func BuildCBArgs(
 // falling back to the default ("none", i.e. the flag is omitted) when the
 // injection spec does not carry one (SetDefaults normally pins it).
 func injectedAttentionBackend(injection *lmcachev1alpha1.InjectionSpec) string {
-	if injection == nil || injection.AttentionBackend == nil || *injection.AttentionBackend == "" {
+	if injection == nil || injection.AttentionBackend == nil {
 		return lmcachev1alpha1.DefaultCBAttentionBackend
 	}
 	return *injection.AttentionBackend
@@ -214,11 +214,9 @@ func injectedAttentionBackend(injection *lmcachev1alpha1.InjectionSpec) string {
 
 // injectedBlockSize returns the --block-size value to inject as a string,
 // falling back to the default (64) when the injection spec does not carry one
-// (SetDefaults normally pins it) or carries a value below 1 (unreachable via
-// the API server, which enforces the CRD minimum; guarded here for direct
-// callers on an unvalidated spec).
+// (SetDefaults normally pins it).
 func injectedBlockSize(injection *lmcachev1alpha1.InjectionSpec) string {
-	if injection == nil || injection.BlockSize == nil || *injection.BlockSize < 1 {
+	if injection == nil || injection.BlockSize == nil {
 		return strconv.Itoa(int(lmcachev1alpha1.DefaultCBBlockSize))
 	}
 	return strconv.Itoa(int(*injection.BlockSize))
