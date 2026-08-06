@@ -128,6 +128,13 @@ Source: ``lmcache/v1/multiprocess/config.py``
        ``--no-separate-object-groups`` to keep all layers in a single
        full-attention object group. Transparent to correctness; a non-hybrid
        model always resolves to one object group. See :doc:`/mp/hybrid_models`.
+   * - ``--enable NAME [NAME ...]``
+     - ``[]``
+     - Zero or more experimental transfer modules to enable in the MP
+       server. Currently the only recognized option is ``transfer_query``,
+       which loads the query-tensor transfer module used by the KV-cache
+       SDK (see :doc:`/mp/sdk`). Modules are registered in
+       ``lmcache/v1/multiprocess/modules/experimental/__init__.py``.
 
 Lookup Hash Logging
 -------------------
