@@ -919,7 +919,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                     [self._gpu_block_pool.blocks[bid] for bid in block_hashes.keys()]
                 )
                 self._pending_store.remove_block_hashes(req_id)
-                # TODO: touch all keys in lmcache mp server
+                self.scheduler_adapter.end_session(req_id)
 
     def request_finished(
         self,
