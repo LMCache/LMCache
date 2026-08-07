@@ -21,3 +21,5 @@ import lmcache.c_ops as lmc_ops
 class NL_X_NB_BSV_BSS_Spec(NL_X_NB_BS_HS_Spec):
     engine_kv_format = lmc_ops.EngineKVFormat.NL_X_NB_BSV_BSS
     attention_backends = ("vLLM MLA",)
+    is_layer_list = True
+    is_mla = True

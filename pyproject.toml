@@ -12,7 +12,7 @@ requires = [
     "packaging>=24.2",
     "setuptools>=77.0.3,<81.0.0",
     "setuptools_scm>=8",
-    "torch==2.13.0",
+    "torch==2.11.0",
     "wheel",
 ]
 build-backend = "setuptools.build_meta"
@@ -158,7 +158,15 @@ skip = "operator/config/crd/bases/*,lmcache/integration/vllm/lmcache_mp_connecto
 ignore-regex = '"image/[^"]+": "[A-Za-z0-9+/=]+"'
 
 [tool.cibuildwheel]
-build = "cp3*-manylinux_x86_64"
+build = "cp3*-manylinux_x86_64 cp3*-manylinux_aarch64"
+
+# The wheel's *runtime* dep on torch is deliberately unpinned (see
+# requirements/common.txt), so pip would install the latest torch into the test
+# environment and check the wheel against a torch it was never built for.
+# Derive a constraint from the build pin above -- one source of truth -- so the
+# smoke test exercises the pairing the wheel was actually built for. torchvision
+# is what would otherwise drag torch forward during the wheel install.
+before-all = "grep -oE 'torch==[0-9][0-9.]*' /project/pyproject.toml | head -1 > /project/cibw-constraints.txt && cat /project/cibw-constraints.txt"
 
 # see https://developer.nvidia.com/cuda-gpus for compute capabilities
 # "CUDA-Enabled Datacenter Products"
@@ -167,18 +175,21 @@ build = "cp3*-manylinux_x86_64"
 # 8.6:  A40, A10, A16, A2
 # 8.9:  L4, L40, L40S
 # 9.0:  GH200, H200, H100
-# 10.0: GB200, B200
-# 12.0: RTX 50-series (PTX)
+# 10.0: GB200, B200; also GB300, B300 (sm_103) via the SM100 family / forward-compat
+# 11.0: Thor (SM110)
+# 12.0: RTX 50-series, RTX Pro; DGX Spark / GB10 (sm_121) via the SM120 family
 # CUDA 13 dropped support for compute capability 7.0 (Volta).
-environment = {TORCH_CUDA_ARCH_LIST = "7.5;8.0;8.6;8.9;9.0;10.0;12.0", ENABLE_CXX11_ABI = "1", PIP_EXTRA_INDEX_URL = "https://download.pytorch.org/whl/cu130"}
+environment = {TORCH_CUDA_ARCH_LIST = "7.5;8.0;8.6;8.9;9.0;10.0;11.0;12.0", ENABLE_CXX11_ABI = "1", PIP_EXTRA_INDEX_URL = "https://download.pytorch.org/whl/cu130", PIP_CONSTRAINT = "/project/cibw-constraints.txt"}
 
 # Use the PyTorch manylinux image version '2_28' that contains CUDA 13.0
 manylinux-x86_64-image = "docker.io/pytorch/manylinux2_28-builder:cuda13.0"
+# aarch64 (Grace-Blackwell) CUDA 13.0 builder image (glibc 2.28 based).
+manylinux-aarch64-image = "docker.io/pytorch/manylinuxaarch64-builder:cuda13.0"
 
 [tool.cibuildwheel.linux]
 repair-wheel-command = """
 auditwheel repair \
-  --plat manylinux_2_28_x86_64 \
+  --plat manylinux_2_28_$(uname -m) \
   --exclude libtorch.so \
   --exclude libtorch_cuda.so \
   --exclude libtorch_python.so \

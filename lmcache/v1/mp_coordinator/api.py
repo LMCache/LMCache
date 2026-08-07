@@ -39,13 +39,14 @@ class CacheEventEntry:
         key: The object key the change applies to.
         size_bytes: Bytes committed for the key (``store`` only; ``0``
             otherwise).
-        content_hash_hex: Hex of the chunk's position-independent content
-            hash; empty when the emitter does not compute it.
+        token_ids: The chunk's token ids, stamped on ``store`` entries
+            (empty when the emitter no longer holds them); the directory
+            indexes them by the key's chunk hash.
     """
 
     key: EncodedObjectKey
     size_bytes: int = 0
-    content_hash_hex: str = ""
+    token_ids: list[int] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         """Enforce intrinsic invariants.
@@ -62,7 +63,7 @@ class CacheEventBatch:
     """A batch of same-typed cache events from one MP server.
 
     Attributes:
-        instance_id: The emitting MP server (non-empty).
+        instance_id: The emitter's unique ID (non-empty).
         incarnation: The emitter's restart counter (non-negative). A
             higher value fences off all placements reported by lower
             values of the same ``instance_id``.
@@ -77,6 +78,9 @@ class CacheEventBatch:
             identity); empty for ``access``, which only refreshes
             key-level recency and carries no placement identity.
         entries: The affected keys.
+        shared: ``True`` when the backend is a storage domain mounted by
+            several instances (e.g. one S3 bucket or CXL pool). ``False``
+            (default) marks the storage private to this instance.
         ts: Emitter wall-clock seconds for the batch (``0.0`` if unknown).
     """
 
@@ -87,6 +91,7 @@ class CacheEventBatch:
     tier: Tier
     backend: str
     entries: list[CacheEventEntry] = field(default_factory=list)
+    shared: bool = False
     ts: float = 0.0
 
     def __post_init__(self) -> None:

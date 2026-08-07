@@ -66,12 +66,12 @@ jobs:
                 NO_NATIVE_EXT=1 python -m build --sdist
 
             - name: Build CUDA wheels with cibuildwheel
-              # Configuration is set in pyproject.toml
-              # this will build lmcache with the latest version of torch
-              # building from source will be required if a serving engine uses
-              # an earlier non-ABI compatible version of torch
+              # Configuration is set in pyproject.toml. The torch pin there
+              # tracks the latest *stable* vLLM release, because that is the
+              # torch the published wheel is installed next to; building from
+              # source is required for any other torch.
               env:
-                CIBW_TEST_COMMAND: "python -c 'import lmcache.c_ops'"
+                CIBW_TEST_COMMAND: "python {project}/.github/scripts/assert_native_ops.py"
               run: |
                 python -m cibuildwheel --output-dir dist
 
