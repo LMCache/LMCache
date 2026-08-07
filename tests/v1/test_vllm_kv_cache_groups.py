@@ -51,6 +51,14 @@ class MLAAttentionSpec:
 
 
 @dataclass
+class MambaSpec:
+    """Align-mode Mamba/linear-attention spec (detected by class name)."""
+
+    block_size: int
+    mamba_cache_mode: str = "align"
+
+
+@dataclass
 class UniformTypeKVCacheSpecs:
     block_size: int
     kv_cache_specs: "dict[str, object]" = field(default_factory=dict)
@@ -183,6 +191,40 @@ def test_conversion_defaults_sliding_window_for_non_sw_spec():
         MockKVCacheConfig(
             kv_cache_groups=[
                 MockKVCacheGroup(["layer.0"], MockKVCacheSpec(block_size=16))
+            ]
+        ),
+        _same_shape_caches(["layer.0"]),
+    )
+
+    assert [group.sw_size_tokens for group in spec] == [-1]
+
+
+def test_conversion_resolves_mamba_align_window():
+    """An align-mode Mamba group carries a one-block cross-chunk window
+    (sw_size_tokens == block_size), so it becomes a 1-chunk sliding window
+    downstream; full attention stays -1."""
+    spec = create_engine_group_infos_from_vllm(
+        MockKVCacheConfig(
+            kv_cache_groups=[
+                MockKVCacheGroup(["layer.0"], FullAttentionSpec(block_size=16)),
+                MockKVCacheGroup(["layer.1"], MambaSpec(block_size=16)),
+            ]
+        ),
+        _same_shape_caches(["layer.0", "layer.1"]),
+    )
+
+    assert [group.sw_size_tokens for group in spec] == [-1, 16]
+
+
+def test_conversion_mamba_non_align_not_windowed():
+    """Only align mode keeps a reusable per-block snapshot; other Mamba cache
+    modes are not treated as a sliding window."""
+    spec = create_engine_group_infos_from_vllm(
+        MockKVCacheConfig(
+            kv_cache_groups=[
+                MockKVCacheGroup(
+                    ["layer.0"], MambaSpec(block_size=16, mamba_cache_mode="none")
+                ),
             ]
         ),
         _same_shape_caches(["layer.0"]),
