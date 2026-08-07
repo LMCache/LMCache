@@ -41,16 +41,22 @@ except ImportError:
 # ── Helpers ──
 
 
-def _public_callables(module):
-    """Return {name: obj} for all public, non-dunder, non-enum callables."""
+def _public_callables(namespace):
+    """Return public, non-enum callables declared by a module or instance.
+
+    Module namespaces exclude re-exported callables. Instance namespaces expose
+    their public bound methods, whose ``__module__`` identifies the defining
+    class module rather than the instance.
+    """
+    module_name = getattr(namespace, "__name__", None)
     return {
         name: obj
-        for name, obj in inspect.getmembers(module)
+        for name, obj in inspect.getmembers(namespace)
         if not name.startswith("_")
         and callable(obj)
         and not inspect.isclass(obj)  # classes tested by descriptor/enum tests
         and not hasattr(obj, "__members__")  # exclude pybind11 enums
-        and getattr(obj, "__module__", None) == getattr(module, "__name__", None)
+        and (module_name is None or getattr(obj, "__module__", None) == module_name)
     }
 
 

@@ -176,25 +176,113 @@ class DeviceOps:
             skip_prefix_n_blocks,
         )
 
-    def multi_layer_kv_transfer(self, *args, **kwargs):
-        return torch_ops.multi_layer_kv_transfer(*args, **kwargs)
+    def multi_layer_kv_transfer(
+        self,
+        key_value: "torch.Tensor",
+        key_value_ptrs: "torch.Tensor | list[torch.Tensor]",
+        slot_mapping: "torch.Tensor",
+        paged_memory_device: "torch.device",
+        page_buffer_size: int,
+        direction: ops_types.TransferDirection,
+        engine_kv_format: ops_types.EngineKVFormat,
+        block_size: int = 0,
+        head_size: int = 0,
+        skip_prefix_n_tokens: int = 0,
+    ) -> None:
+        return torch_ops.multi_layer_kv_transfer(
+            key_value,
+            key_value_ptrs,
+            slot_mapping,
+            paged_memory_device,
+            page_buffer_size,
+            direction,
+            engine_kv_format,
+            block_size,
+            head_size,
+            skip_prefix_n_tokens,
+        )
 
-    def multi_layer_kv_transfer_unilateral(self, *args, **kwargs):
-        return torch_ops.multi_layer_kv_transfer_unilateral(*args, **kwargs)
+    def multi_layer_kv_transfer_unilateral(
+        self,
+        key_value: "torch.Tensor",
+        key_value_ptrs: "torch.Tensor | list[torch.Tensor]",
+        slot_mapping: "torch.Tensor",
+        paged_memory_device: "torch.device",
+        page_buffer_size: int,
+        direction: ops_types.TransferDirection,
+        engine_kv_format: ops_types.EngineKVFormat,
+    ) -> None:
+        return torch_ops.multi_layer_kv_transfer_unilateral(
+            key_value,
+            key_value_ptrs,
+            slot_mapping,
+            paged_memory_device,
+            page_buffer_size,
+            direction,
+            engine_kv_format,
+        )
 
-    def single_layer_kv_transfer(self, *args, **kwargs):
-        return torch_ops.single_layer_kv_transfer(*args, **kwargs)
+    def single_layer_kv_transfer(
+        self,
+        lmc_key_value_cache: "torch.Tensor",
+        vllm_key_value_cache: "torch.Tensor",
+        slot_mapping: "torch.Tensor",
+        direction: ops_types.TransferDirection,
+        engine_kv_format: ops_types.EngineKVFormat,
+        token_major: bool = False,
+    ) -> None:
+        return torch_ops.single_layer_kv_transfer(
+            lmc_key_value_cache,
+            vllm_key_value_cache,
+            slot_mapping,
+            direction,
+            engine_kv_format,
+            token_major,
+        )
 
-    def single_layer_kv_transfer_sgl(self, *args, **kwargs):
-        return torch_ops.single_layer_kv_transfer_sgl(*args, **kwargs)
+    def single_layer_kv_transfer_sgl(
+        self,
+        lmc_key_value_cache: "torch.Tensor",
+        sgl_key_cache: "torch.Tensor",
+        sgl_value_cache: "torch.Tensor",
+        slot_mapping: "torch.Tensor",
+        direction: ops_types.TransferDirection,
+        token_major: bool = False,
+    ) -> None:
+        return torch_ops.single_layer_kv_transfer_sgl(
+            lmc_key_value_cache,
+            sgl_key_cache,
+            sgl_value_cache,
+            slot_mapping,
+            direction,
+            token_major,
+        )
 
     # ── Ops: KV reshape ──────────────────────────────────────────────
 
-    def load_and_reshape_flash(self, *args, **kwargs):
-        return torch_ops.load_and_reshape_flash(*args, **kwargs)
+    def load_and_reshape_flash(
+        self,
+        key_value: "torch.Tensor",
+        key_cache: "torch.Tensor",
+        value_cache: "torch.Tensor",
+        slot_mapping: "torch.Tensor",
+        layer_idx: int,
+    ) -> None:
+        return torch_ops.load_and_reshape_flash(
+            key_value, key_cache, value_cache, slot_mapping, layer_idx
+        )
 
-    def reshape_and_cache_back_flash(self, *args, **kwargs):
-        return torch_ops.reshape_and_cache_back_flash(*args, **kwargs)
+    def reshape_and_cache_back_flash(
+        self,
+        key_value: "torch.Tensor",
+        key_cache: "torch.Tensor",
+        value_cache: "torch.Tensor",
+        slot_mapping: "torch.Tensor",
+        layer_idx: int,
+    ) -> None:
+        return torch_ops.reshape_and_cache_back_flash(
+            key_value, key_cache, value_cache, slot_mapping, layer_idx
+        )
 
     # ── Ops: codec ───────────────────────────────────────────────────
 
@@ -232,11 +320,26 @@ class DeviceOps:
     def drain_recorded_events(self):
         return torch_ops.drain_recorded_events()
 
-    def record_completion_on_stream(self, *args, **kwargs):
-        return torch_ops.record_completion_on_stream(*args, **kwargs)
+    def record_completion_on_stream(
+        self, cuda_stream_ptr: int, kind: str, payload: bytes
+    ) -> None:
+        return torch_ops.record_completion_on_stream(cuda_stream_ptr, kind, payload)
 
-    def record_event_on_stream(self, *args, **kwargs):
-        return torch_ops.record_event_on_stream(*args, **kwargs)
+    def record_event_on_stream(
+        self,
+        cuda_stream_ptr: int,
+        event_type_name: str,
+        session_id: str,
+        str_metadata: dict[str, str],
+        int_metadata: dict[str, int],
+    ) -> None:
+        return torch_ops.record_event_on_stream(
+            cuda_stream_ptr,
+            event_type_name,
+            session_id,
+            str_metadata,
+            int_metadata,
+        )
 
     # ── Ops: misc ────────────────────────────────────────────────────
 
@@ -246,14 +349,61 @@ class DeviceOps:
     def get_gpu_pci_bus_id(self, device_id=0):
         return torch_ops.get_gpu_pci_bus_id(device_id)
 
-    def lmcache_memcpy_async(self, *args, **kwargs):
-        return torch_ops.lmcache_memcpy_async(*args, **kwargs)
+    def lmcache_memcpy_async(
+        self,
+        dest: "int | torch.Tensor",
+        src: "int | torch.Tensor",
+        nbytes: int,
+        direction: ops_types.TransferDirection,
+        host_buffer_offset: int,
+        host_buffer_alignments: int,
+    ) -> None:
+        return torch_ops.lmcache_memcpy_async(
+            dest,
+            src,
+            nbytes,
+            direction,
+            host_buffer_offset,
+            host_buffer_alignments,
+        )
 
-    def rotary_embedding_k_fused(self, *args, **kwargs):
-        return torch_ops.rotary_embedding_k_fused(*args, **kwargs)
+    def rotary_embedding_k_fused(
+        self,
+        old_positions: "torch.Tensor",
+        new_positions: "torch.Tensor",
+        key: "torch.Tensor",
+        head_size: int,
+        cos_sin_cache: "torch.Tensor",
+        is_neox: bool,
+    ) -> None:
+        return torch_ops.rotary_embedding_k_fused(
+            old_positions,
+            new_positions,
+            key,
+            head_size,
+            cos_sin_cache,
+            is_neox,
+        )
 
-    def rotary_embedding_k_fused_strided(self, *args, **kwargs):
-        return torch_ops.rotary_embedding_k_fused_strided(*args, **kwargs)
+    def rotary_embedding_k_fused_strided(
+        self,
+        old_positions: "torch.Tensor",
+        new_positions: "torch.Tensor",
+        key: "torch.Tensor",
+        head_size: int,
+        head_stride: int,
+        cos_sin_cache: "torch.Tensor",
+        is_neox: bool,
+    ) -> None:
+        return torch_ops.rotary_embedding_k_fused_strided(
+            old_positions,
+            new_positions,
+            key,
+            head_size,
+            head_stride,
+            cos_sin_cache,
+            is_neox,
+        )
 
     def execute_object_group_transfer(
         self,
