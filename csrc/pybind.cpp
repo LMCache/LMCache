@@ -39,6 +39,8 @@ PYBIND11_MODULE(c_ops, m) {
       .value("NL_X_NB_NH_BS_CS", EngineKVFormat::NL_X_NB_NH_BS_CS)
       .value("NL_X_NB_BS_NH_CS", EngineKVFormat::NL_X_NB_BS_NH_CS)
       .value("NL_X_NB_BSV_BSS", EngineKVFormat::NL_X_NB_BSV_BSS)
+      .value("NL_X_TWO_NB_NH_ONE_BS_HS",
+             EngineKVFormat::NL_X_TWO_NB_NH_ONE_BS_HS)
       .export_values();
   // Format classification, shared with the device kernels (engine_kv_format.h).
   m.def(

@@ -104,6 +104,9 @@ class EngineKVFormat(IntEnum):
     # c_ops only (no pure-torch transfer path)
     NL_X_NB_BSV_BSS = 14
 
+    # vLLM-RBLN non-MLA HND [2,NB,NH,1,BS,HS]; RblnDeviceOps only
+    NL_X_TWO_NB_NH_ONE_BS_HS = 15
+
 
 # Backward-compat alias
 GPUKVFormat = EngineKVFormat
