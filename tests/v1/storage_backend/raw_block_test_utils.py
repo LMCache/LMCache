@@ -260,8 +260,8 @@ def require_fdp_char_device_path() -> str:
     return device_path
 
 
-def install_native_storage_ops_fallback() -> None:
-    """Install a small native_storage_ops fallback for test environments.
+def install_lmache_native_fallback() -> None:
+    """Install a small lmache_native fallback for test environments.
 
     Args:
         None.
@@ -270,10 +270,8 @@ def install_native_storage_ops_fallback() -> None:
         None.
     """
     try:
-        native_storage_ops = importlib.import_module("lmcache.native_storage_ops")
-        if hasattr(native_storage_ops, "Bitmap") and hasattr(
-            native_storage_ops, "TTLLock"
-        ):
+        lmache_native = importlib.import_module("lmcache.lmache_native")
+        if hasattr(lmache_native, "Bitmap") and hasattr(lmache_native, "TTLLock"):
             return
     except Exception:
         pass
@@ -340,7 +338,16 @@ def install_native_storage_ops_fallback() -> None:
     class TTLLock:
         pass
 
-    fallback_module = types.ModuleType("lmcache.native_storage_ops")
+    fallback_module = types.ModuleType("lmcache.lmache_native")
     fallback_module.__dict__["Bitmap"] = Bitmap
     fallback_module.__dict__["TTLLock"] = TTLLock
-    sys.modules["lmcache.native_storage_ops"] = fallback_module
+    # Relocated KV-format / transfer types and format predicates, so
+    # ``lmcache.v1.platform.ops_types`` can import them from the fallback.
+    fallback_module.__dict__["EngineKVFormat"] = object
+    fallback_module.__dict__["GPUKVFormat"] = object
+    fallback_module.__dict__["TransferDirection"] = object
+    fallback_module.__dict__["is_cross_layer"] = lambda _: False
+    fallback_module.__dict__["is_kv_list"] = lambda _: False
+    fallback_module.__dict__["is_layer_list"] = lambda _: False
+    fallback_module.__dict__["is_mla"] = lambda _: False
+    sys.modules["lmcache.lmache_native"] = fallback_module
