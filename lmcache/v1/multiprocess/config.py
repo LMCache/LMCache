@@ -6,6 +6,7 @@ Configuration for the multiprocess (ZMQ) server and HTTP frontend.
 
 # Standard
 from dataclasses import dataclass, field
+from typing import Literal
 import argparse
 import json
 import math
@@ -61,7 +62,9 @@ class MPServerConfig:
     L1-resident (served by the sparse leg as L1 hits, the hole recomputed)
     instead of truncating the prefix at the gap. No effect for other engines."""
 
-    supported_transfer_mode: str = "auto"
+    supported_transfer_mode: Literal["lmcache_driven", "engine_driven", "auto"] = (
+        "lmcache_driven"
+    )
     """Transfer mode: 'lmcache_driven' for server-driven transfer
     (STORE/RETRIEVE, supports CUDA IPC and CPU SHM), 'engine_driven' for
     engine-driven transfer (PREPARE/COMMIT), or 'auto' to enable both."""
@@ -75,7 +78,7 @@ class MPServerConfig:
     """Peer-to-peer configuration. P2P is enabled when its advertise URL is
     set."""
 
-    shm_name: str | None = None
+    shm_name: str | None = ""
     """SHM segment name for engine-driven KV transfer.
     None: auto-allocate (default). "": force pickle. Other: use that name."""
 
@@ -313,7 +316,7 @@ def add_mp_server_args(
     mp_group.add_argument(
         "--supported-transfer-mode",
         type=str,
-        default="auto",
+        default="lmcache_driven",
         choices=["lmcache_driven", "engine_driven", "auto"],
         help="Supported transfer mode: 'lmcache_driven' for server-driven "
         "transfer (STORE/RETRIEVE, supports CUDA IPC and CPU SHM), "
@@ -340,7 +343,7 @@ def add_mp_server_args(
     mp_group.add_argument(
         "--shm-name",
         type=str,
-        default=None,
+        default="",
         help="SHM segment name for engine-driven KV transfer. "
         "Default (not specified): auto-allocate. "
         'Set to "" to force pickle path (disable SHM). '
