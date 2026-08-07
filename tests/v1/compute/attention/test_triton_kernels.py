@@ -21,8 +21,6 @@ from lmcache.v1.compute.attention.triton_kernels import (
     merge_attention_outputs,
 )
 
-# Skip entire module when no GPU available
-pytestmark = pytest.mark.cuda
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

@@ -39,10 +39,13 @@ from tests.v1.utils import create_test_memory_obj, has_cufile, has_hipfile
 # fail with CU_FILE_IO_NOT_SUPPORTED (err=5027).
 _TEST_TMPDIR = os.environ.get("LMCACHE_TEST_TMPDIR") or None
 
-pytestmark = pytest.mark.skipif(
-    torch_device_type == "xpu",
-    reason="GDS backend tests are not supported on XPU",
-)
+pytestmark = [
+    pytest.mark.cuda,
+    pytest.mark.skipif(
+        not (torch_dev.is_available() and torch_device_type == "cuda"),
+        reason="GDS backend tests are not supported on non-CUDA devices",
+    ),
+]
 
 
 def create_test_config(gds_path: str, gds_path_sharding: str = "by_gpu"):
