@@ -1090,7 +1090,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                     self._pending_store.add(r_meta)
                 else:
                     metadata.add_request_metadata(r_meta)
-        self._process_lazy_offload_store_requests(metadata)
+        # if scheduler_output.total_num_scheduled_tokens is 0,
+        # vllm `gpu_model_runner` will call `kv_connector_no_forward`
+        # in `execute_model`, which will result in lose some store ops.
+        # So we only trigger lazy offload when
+        # scheduler_output.total_num_scheduled_tokens > 0
+        if scheduler_output.total_num_scheduled_tokens:
+            self._process_lazy_offload_store_requests(metadata)
 
     def _process_cached_requests(
         self,
@@ -1125,7 +1131,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                     self._pending_store.add(r_meta)
                 else:
                     metadata.add_request_metadata(r_meta)
-        self._process_lazy_offload_store_requests(metadata)
+        # if scheduler_output.total_num_scheduled_tokens is 0,
+        # vllm `gpu_model_runner` will call `kv_connector_no_forward`
+        # in `execute_model`, which will result in lose some store ops.
+        # So we only trigger lazy offload when
+        # scheduler_output.total_num_scheduled_tokens > 0
+        if scheduler_output.total_num_scheduled_tokens:
+            self._process_lazy_offload_store_requests(metadata)
 
     def _process_lazy_offload_store_requests(
         self, metadata: LMCacheMPConnectorMetadata
