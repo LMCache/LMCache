@@ -18,15 +18,15 @@
 
 namespace py = pybind11;
 
-// NOTE: ``EngineKVFormat``, ``TransferDirection`` and the format-classification
-// predicates (is_cross_layer / is_kv_list / is_layer_list / is_mla) are no
-// longer bound here. They were relocated to the device-independent
-// ``lmache_native`` module (built from csrc/storage_manager/pybind.cpp) so they
-// are available without the CUDA extension. A backward-compatibility shim in
-// ``lmcache/__init__.py`` re-exports them from ``lmache_native`` under the
-// ``lmcache.c_ops`` namespace.
-
 PYBIND11_MODULE(c_ops, m) {
+  // NOTE: ``TransferDirection`` and ``EngineKVFormat`` (and the format
+  // predicates is_cross_layer / is_kv_list / is_layer_list / is_mla) are owned
+  // exclusively by the device-independent ``lmache_native`` module
+  // (csrc/storage_manager/pybind.cpp). They are NOT exported here. ``c_ops``
+  // functions that need a transfer direction accept the underlying ``int`` and
+  // cast it to the C++ enum, so callers pass ``TransferDirection.H2D.value``
+  // (an int) instead of the enum object.
+
   m.def(
       "multi_layer_kv_transfer",
       [](torch::Tensor& key_value, const torch::Tensor& key_value_ptrs,
@@ -83,8 +83,15 @@ PYBIND11_MODULE(c_ops, m) {
       py::arg("token_major") = false);
   m.def("load_and_reshape_flash", &load_and_reshape_flash);
   m.def("reshape_and_cache_back_flash", &reshape_and_cache_back_flash);
-  m.def("lmcache_memcpy_async", &lmcache_memcpy_async,
-        py::call_guard<py::gil_scoped_release>());
+  m.def(
+      "lmcache_memcpy_async",
+      [](uintptr_t dest, uintptr_t src, size_t nbytes, int direction,
+         size_t host_buffer_offset, size_t host_buffer_alignment) {
+        return lmcache_memcpy_async(dest, src, nbytes,
+                                    static_cast<TransferDirection>(direction),
+                                    host_buffer_offset, host_buffer_alignment);
+      },
+      py::call_guard<py::gil_scoped_release>());
   m.def("encode_fast_new", &encode_cuda_new);
   m.def("decode_fast_new", &decode_cuda_new);
   m.def("decode_fast_prefsum", &decode_cuda_prefsum);
