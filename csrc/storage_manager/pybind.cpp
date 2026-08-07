@@ -47,15 +47,15 @@ PYBIND11_MODULE(lmache_native, m) {
       .value("H2D", TransferDirection::H2D)
       .value("D2H", TransferDirection::D2H);
 
-  m.def("is_kv_list", &lmcache::is_kv_list, py::arg("format"),
+  m.def("is_kv_list", &is_kv_list, py::arg("format"),
         "Return whether the format stores KV as a list of per-token KV "
         "tensors (kv_size == 2).");
-  m.def("is_layer_list", &lmcache::is_layer_list, py::arg("format"),
+  m.def("is_layer_list", &is_layer_list, py::arg("format"),
         "Return whether the format stores one list entry per layer.");
-  m.def("is_cross_layer", &lmcache::is_cross_layer, py::arg("format"),
+  m.def("is_cross_layer", &is_cross_layer, py::arg("format"),
         "Return whether the format stacks KV from different layers into a "
         "single tensor.");
-  m.def("is_mla", &lmcache::is_mla, py::arg("format"),
+  m.def("is_mla", &is_mla, py::arg("format"),
         "Return whether the format is an MLA variant (single latent KV "
         "head).");
 
