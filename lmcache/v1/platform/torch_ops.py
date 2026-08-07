@@ -643,26 +643,15 @@ def multi_layer_kv_transfer(
     valid_slots = slots_kv[valid_mask_kv].to(paged_memory_device)
 
     # 2. Determine architecture variant and tensor dimensions.
-    is_mla = _format_spec(engine_kv_format).is_mla
-    is_flash_infer = int(engine_kv_format) == int(EngineKVFormat.NL_X_NB_TWO_BS_NH_HS)
-    is_blocked_scale = int(engine_kv_format) == int(EngineKVFormat.NL_X_NB_BSV_BSS)
-    is_hnd_split = int(engine_kv_format) in (
-        int(EngineKVFormat.NL_X_TWO_NB_NH_BS_HS),
-        int(EngineKVFormat.NL_X_NB_TWO_NH_BS_HS),
-    )
-    is_hnd_split_blocks_first = int(engine_kv_format) == int(
-        EngineKVFormat.NL_X_NB_TWO_NH_BS_HS
-    )
-    is_fused_packed_hnd = int(engine_kv_format) in (
-        int(EngineKVFormat.NL_X_NB_NH_BS_TWO_HS),
-        int(EngineKVFormat.NL_X_NB_NH_BS_CS),
-    )
-    is_fused_packed_nhd = int(engine_kv_format) in (
-        int(EngineKVFormat.NL_X_NB_BS_NH_TWO_HS),
-        int(EngineKVFormat.NL_X_NB_BS_NH_CS),
-    )
+    uses_mla = is_mla(engine_kv_format)
+    is_blocked_scale = _is_blocked_scale_format(engine_kv_format)
+    is_hnd_split = _is_hnd_split_format(engine_kv_format)
+    is_hnd_split_blocks_first = _is_blocks_first_hnd_split_format(engine_kv_format)
+    is_fused_packed_hnd = _is_fused_hnd_format(engine_kv_format)
+    is_fused_packed_nhd = _is_fused_nhd_format(engine_kv_format)
+    is_flash_infer = _is_flash_infer_format(engine_kv_format)
 
-    if is_mla and page_buffer_size == 0:
+    if uses_mla and page_buffer_size == 0:
         page_buffer_size = int(valid_slots.max().item()) + 1
 
     num_layers = key_value.size(1)
@@ -701,7 +690,7 @@ def multi_layer_kv_transfer(
     # (used when wrapping a raw pointer).
     layer_shape: Tuple[int, ...]
 
-    if is_mla:
+    if uses_mla:
         layer_shape = (page_buffer_size, hidden_size)
     elif is_flash_infer:
         num_blocks = page_buffer_size // block_size
@@ -741,7 +730,7 @@ def multi_layer_kv_transfer(
             )
 
         # --- B. Vectorized bulk data transfer. ---
-        if is_mla:
+        if uses_mla:
             # Paged layout : [page_buffer_size, hidden_size]
             # key_value layout: [1, num_layers, num_tokens, hidden_size]
             if int(direction) == int(TransferDirection.H2D):
@@ -871,11 +860,11 @@ def multi_layer_kv_transfer_unilateral(
         H2D = LMCache  -> PagedBuffer
         D2H = PagedBuffer -> LMCache
     """
-    is_mla = _format_spec(engine_kv_format).is_mla
+    uses_mla = is_mla(engine_kv_format)
 
     # MLA case collapses back to multi_layer_kv_transfer
     # (vLLM and SGLang indexing are compatible)
-    if is_mla:
+    if uses_mla:
         return multi_layer_kv_transfer(
             key_value,
             key_value_ptrs,
@@ -961,6 +950,56 @@ def _is_pbs_fused_format(engine_kv_format: EngineKVFormat) -> bool:
     return _format_spec(engine_kv_format).is_pbs_fused
 
 
+def _is_blocked_scale_format(engine_kv_format: EngineKVFormat) -> bool:
+    """Return True when a format stores values and scales in separate block regions."""
+    return _format_spec(engine_kv_format).is_blocked_scale
+
+
+def _is_hnd_split_format(engine_kv_format: EngineKVFormat) -> bool:
+    """Return True for per-layer HND formats with a separate K/V axis."""
+    return (
+        is_layer_list(engine_kv_format)
+        and _is_hnd_format(engine_kv_format)
+        and not _is_fused_kv_format(engine_kv_format)
+    )
+
+
+def _is_blocks_first_hnd_split_format(engine_kv_format: EngineKVFormat) -> bool:
+    """Return True when an HND split format stores blocks before its K/V axis."""
+    return _is_hnd_split_format(engine_kv_format) and not _is_two_major_format(
+        engine_kv_format
+    )
+
+
+def _is_fused_hnd_format(engine_kv_format: EngineKVFormat) -> bool:
+    """Return True for per-layer HND formats with K/V packed in the content axis."""
+    return (
+        is_layer_list(engine_kv_format)
+        and _is_fused_kv_format(engine_kv_format)
+        and _is_hnd_format(engine_kv_format)
+    )
+
+
+def _is_fused_nhd_format(engine_kv_format: EngineKVFormat) -> bool:
+    """Return True for per-layer NHD formats with K/V packed in the content axis."""
+    return (
+        is_layer_list(engine_kv_format)
+        and _is_fused_kv_format(engine_kv_format)
+        and not _is_hnd_format(engine_kv_format)
+    )
+
+
+def _is_flash_infer_format(engine_kv_format: EngineKVFormat) -> bool:
+    """Return True for per-layer NHD formats with a blocks-first K/V axis."""
+    return (
+        is_layer_list(engine_kv_format)
+        and not is_mla(engine_kv_format)
+        and not _is_fused_kv_format(engine_kv_format)
+        and not _is_hnd_format(engine_kv_format)
+        and not _is_two_major_format(engine_kv_format)
+    )
+
+
 _ELEMENT_SIZE_TO_DTYPE: dict[int, torch.dtype] = {
     # Maps the byte width of a KV-cache element to a representative torch dtype.
     # Only widths that commonly appear in KV caches are listed; 1-byte entries
@@ -1002,31 +1041,24 @@ def _per_layer_paged_shape(
         A tuple representing the shape needed to reconstruct one layer's tensor
         from a raw pointer via :func:`_tensor_from_ptr`.
     """
-    fmt = int(engine_kv_format)
-    if fmt == int(EngineKVFormat.NL_X_NBBS_ONE_HS):
-        return (nb * bs, 1, hs)
-    if fmt == int(EngineKVFormat.NL_X_NB_BS_HS):
+    if is_mla(engine_kv_format):
+        if _is_pbs_fused_format(engine_kv_format):
+            return (nb * bs, 1, hs)
         return (nb, bs, hs)
-    if fmt == int(EngineKVFormat.NL_X_TWO_NB_NH_BS_HS):
-        return (2, nb, nh, bs, hs)
-    if fmt == int(EngineKVFormat.NL_X_NB_TWO_NH_BS_HS):
-        return (nb, 2, nh, bs, hs)
-    if fmt in (
-        int(EngineKVFormat.NL_X_NB_NH_BS_TWO_HS),
-        int(EngineKVFormat.NL_X_NB_NH_BS_CS),
-    ):
+    if _is_fused_hnd_format(engine_kv_format):
         # Blocks-first fused KV (HND): the desc's hs is the packed
         # 2 * head_size, so each layer is the raw [NB, NH, BS, 2 * HS].
         return (nb, nh, bs, hs)
-    if fmt in (
-        int(EngineKVFormat.NL_X_NB_BS_NH_TWO_HS),
-        int(EngineKVFormat.NL_X_NB_BS_NH_CS),
-    ):
+    if _is_fused_nhd_format(engine_kv_format):
         # Blocks-first fused KV (NHD): tokens before heads.
         return (nb, bs, nh, hs)
-    if fmt == int(EngineKVFormat.NL_X_TWO_NB_BS_NH_HS):
+    if _is_two_major_format(engine_kv_format):
+        if _is_hnd_format(engine_kv_format):
+            return (2, nb, nh, bs, hs)
         return (2, nb, bs, nh, hs)
-    # Covers NL_X_NB_TWO_BS_NH_HS and any future NHD variants.
+    if _is_hnd_format(engine_kv_format):
+        return (nb, 2, nh, bs, hs)
+    # Covers NL_X_NB_TWO_BS_NH_HS and future NHD variants.
     return (nb, 2, bs, nh, hs)
 
 
@@ -1427,9 +1459,9 @@ def multi_layer_block_kv_transfer(
 
 def _pointer_count_for_format(engine_kv_format: EngineKVFormat, num_layers: int) -> int:
     """Return the number of paged-buffer addresses used by a KV format."""
-    if _is_cross_layer_format(engine_kv_format):
+    if is_cross_layer(engine_kv_format):
         return 1
-    if _is_sglang_mha_format(engine_kv_format):
+    if is_kv_list(engine_kv_format):
         return 2 * num_layers
     return num_layers
 
@@ -1440,7 +1472,7 @@ def _object_buffer_shape(
     engine_kv_format: EngineKVFormat,
 ) -> tuple[int, ...]:
     """Return the temporary object-buffer shape for a block-transfer plan."""
-    if _is_mla_format(engine_kv_format):
+    if is_mla(engine_kv_format):
         return (int(shape_desc.nl), lmcache_chunk_size, int(shape_desc.hs))
     if _is_fused_kv_format(engine_kv_format):
         return (
@@ -1671,7 +1703,7 @@ def _cb_temp_buffer(
         raise ValueError(f"CB slot index out of range: {slot_idx}")
     kv_size = (
         1
-        if _is_mla_format(group._engine_kv_format)
+        if is_mla(group._engine_kv_format)
         or _is_fused_kv_format(group._engine_kv_format)
         else 2
     )
@@ -2488,9 +2520,9 @@ def single_layer_kv_transfer(
     valid_token_indices = torch.nonzero(valid_mask_kv, as_tuple=True)[0]
     valid_slots = slots_kv[valid_mask_kv].to(paged_memory_device)
 
-    is_mla = _format_spec(engine_kv_format).is_mla
+    uses_mla = is_mla(engine_kv_format)
 
-    if is_mla:
+    if uses_mla:
         # ── MLA format ──
         # vllm: [num_blocks, block_size, head_size]
         # lmc:  [num_tokens, aligned_head_size]

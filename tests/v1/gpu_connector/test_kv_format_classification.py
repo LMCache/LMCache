@@ -37,23 +37,23 @@ EXPECTED = {
 }
 
 # Facts that only the spec carries (no c_ops predicate mirrors them):
-# (is_hnd, is_fused_packed, is_two_major, is_pbs_fused) per format.
+# (is_hnd, is_fused_packed, is_two_major, is_pbs_fused, is_blocked_scale) per format.
 EXPECTED_SPEC_FACTS = {
-    F.NB_NL_TWO_BS_NH_HS: (False, False, False, False),
-    F.NB_NL_TWO_NH_BS_HS: (True, False, False, False),
-    F.TWO_X_NL_X_NBBS_NH_HS: (False, False, False, True),
-    F.TWO_X_NL_X_NB_BS_NH_HS: (False, False, False, False),
-    F.NL_X_TWO_NB_BS_NH_HS: (False, False, True, False),
-    F.NL_X_NB_TWO_BS_NH_HS: (False, False, False, False),
-    F.NL_X_TWO_NB_NH_BS_HS: (True, False, True, False),
-    F.NL_X_NB_TWO_NH_BS_HS: (True, False, False, False),
-    F.NL_X_NB_NH_BS_TWO_HS: (True, True, False, False),
-    F.NL_X_NB_BS_NH_TWO_HS: (False, True, False, False),
-    F.NL_X_NB_NH_BS_CS: (True, True, False, False),
-    F.NL_X_NB_BS_NH_CS: (False, True, False, False),
-    F.NL_X_NB_BS_HS: (False, False, False, False),
-    F.NL_X_NBBS_ONE_HS: (False, False, False, True),
-    F.NL_X_NB_BSV_BSS: (False, False, False, False),
+    F.NB_NL_TWO_BS_NH_HS: (False, False, False, False, False),
+    F.NB_NL_TWO_NH_BS_HS: (True, False, False, False, False),
+    F.TWO_X_NL_X_NBBS_NH_HS: (False, False, False, True, False),
+    F.TWO_X_NL_X_NB_BS_NH_HS: (False, False, False, False, False),
+    F.NL_X_TWO_NB_BS_NH_HS: (False, False, True, False, False),
+    F.NL_X_NB_TWO_BS_NH_HS: (False, False, False, False, False),
+    F.NL_X_TWO_NB_NH_BS_HS: (True, False, True, False, False),
+    F.NL_X_NB_TWO_NH_BS_HS: (True, False, False, False, False),
+    F.NL_X_NB_NH_BS_TWO_HS: (True, True, False, False, False),
+    F.NL_X_NB_BS_NH_TWO_HS: (False, True, False, False, False),
+    F.NL_X_NB_NH_BS_CS: (True, True, False, False, False),
+    F.NL_X_NB_BS_NH_CS: (False, True, False, False, False),
+    F.NL_X_NB_BS_HS: (False, False, False, False, False),
+    F.NL_X_NBBS_ONE_HS: (False, False, False, True, False),
+    F.NL_X_NB_BSV_BSS: (False, False, False, False, True),
 }
 
 
@@ -90,7 +90,13 @@ def test_spec_facts_match_predicates():
 def test_spec_only_facts_match_golden():
     for fmt, expected in EXPECTED_SPEC_FACTS.items():
         spec = get_spec_class(fmt)
-        got = (spec.is_hnd, spec.is_fused_packed, spec.is_two_major, spec.is_pbs_fused)
+        got = (
+            spec.is_hnd,
+            spec.is_fused_packed,
+            spec.is_two_major,
+            spec.is_pbs_fused,
+            spec.is_blocked_scale,
+        )
         assert got == expected, f"{fmt}: got {got}, expected {expected}"
 
 
