@@ -10,11 +10,12 @@ Rebellions NPUs. The engine is
 |---|---|---|
 | multiprocess, engine-driven | yes | `gather_paged_kv_to_cpu` / `scatter_cpu_to_paged_kv`, dispatching to `RblnDeviceOps.multi_layer_block_kv_transfer` |
 | multiprocess, LMCache-driven | **no** | refused up front |
-| in-process | not yet | `CreateGPUConnector` still raises for `rbln`; a follow-up adds the connector |
+| in-process | yes | `VLLMPagedMemRBLNConnectorV2`, via `CreateGPUConnector` |
 
-Multiprocess is the mode that matters first, and it is self-contained: the MP
-path builds no GPU connector at all, resolving layouts through
-`normalize_kv_and_discover_format` and moving KV through `RblnDeviceOps`.
+Multiprocess is self-contained: the MP path builds no GPU connector at all,
+resolving layouts through `normalize_kv_and_discover_format` and moving KV
+through `RblnDeviceOps`. The in-process path goes through the connector, but
+resolves the layout through the same helper.
 
 `torch.rbln` comes from
 [torch-rbln](https://github.com/RBLN-SW/torch-rbln) through a torch backend
@@ -86,10 +87,24 @@ Consequences of the format being first-class:
 - **No transfer kernel handles format 15.** RBLN has no compiled
   block-transfer extension in tree, and the CUDA / SYCL kernels never see an
   RBLN cache, so their `default:` arm rejecting the format is correct rather
-  than a gap. `csrc` therefore carries only the enum value, its
-  `is_layer_list` classification, and the two pybind registrations.
+  than a gap. `csrc` therefore carries only the enum value, its `FORMAT_FACTS`
+  row, and the two pybind registrations.
 
-The multiprocess path reaches the layout through `compute_kv_layout` / gather /
-scatter, all of which resolve it via `normalize_kv_and_discover_format` and
-never touch a connector -- which is why the format must be recognised by
-detection rather than by a connector.
+Both paths report the same format for the same cache, and both apply the
+squeeze at the same depth -- where the paged tensors are indexed:
+
+| path | reaches the layout through | squeezes in |
+|---|---|---|
+| multiprocess | `compute_kv_layout` / gather / scatter, no connector involved | `RblnDeviceOps.multi_layer_block_kv_transfer` |
+| in-process | `VLLMPagedMemRBLNConnectorV2` | the connector's slot-indexing helper, which needs the 5-D views anyway |
+
+That is why the format has to be recognised by detection rather than by a
+connector: the MP path never builds one.
+
+One consequence for the in-process path: **HND means tokens are not contiguous
+within a layer** -- the head axis sits between blocks and block tokens. The flat
+`view(num_blocks * block_size, hidden_dim)` reshape the NHD connectors use would
+silently address the wrong slots, and `permute(...).reshape(...)` would copy the
+whole cache. `VLLMPagedMemRBLNConnectorV2` resolves the slot mapping into
+`(block, offset)` pairs and uses advanced indexing, touching only the tokens in
+the request.

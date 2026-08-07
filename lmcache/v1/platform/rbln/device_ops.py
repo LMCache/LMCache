@@ -17,8 +17,10 @@ instead and never permutes.
 
 **Scope of the head-major chunk.** On RBLN the only caller of this op is the
 multiprocess engine-driven pair, ``gather_paged_kv_to_cpu`` /
-``scatter_cpu_to_paged_kv``; the LMCache-driven path is refused by
-:meth:`RblnDeviceSpec.is_handle_transfer_available`. That pair
+``scatter_cpu_to_paged_kv``: the in-process connector
+(:class:`~lmcache.v1.gpu_connector.rbln_connector.VLLMPagedMemRBLNConnectorV2`)
+addresses slots directly and never calls it, and the LMCache-driven path is
+refused by :meth:`RblnDeviceSpec.is_handle_transfer_available`. That pair
 writes and reads the chunk with the same code and the cache server treats it
 as an opaque byte range, so the head-major interpretation round-trips. Any
 future caller that hands an RBLN chunk to a token-major reader would break

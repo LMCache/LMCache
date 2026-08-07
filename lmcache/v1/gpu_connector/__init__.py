@@ -228,6 +228,13 @@ def CreateGPUConnector(
             )
 
             return VLLMPagedMemHPUConnectorV2.from_metadata(metadata, use_gpu, device)
+        elif torch_device_type == "rbln":
+            # First Party
+            from lmcache.v1.gpu_connector.rbln_connector import (
+                VLLMPagedMemRBLNConnectorV2,
+            )
+
+            return VLLMPagedMemRBLNConnectorV2.from_metadata(metadata, use_gpu, device)
         else:
             raise RuntimeError(f"No supported {torch_device_type} connector found.")
 
