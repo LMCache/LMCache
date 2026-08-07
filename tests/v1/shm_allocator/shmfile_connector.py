@@ -213,10 +213,11 @@ class ShmFileConnector(RemoteConnector):
 
     async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):
         """Write memory_obj data to a file via the worker."""
-        tensor = memory_obj.tensor
-        assert tensor is not None
-        buf_ptr = tensor.data_ptr()
-        buf_size = tensor.numel() * tensor.element_size()
+        # Use the underlying contiguous byte buffer instead of tensor views.
+        # This keeps pointer/length consistent even if logical tensor views
+        # are reshaped or narrowed.
+        buf_ptr = memory_obj.data_ptr
+        buf_size = memory_obj.get_size()
 
         path = self._file_path(key)
         resp = await asyncio.to_thread(
@@ -253,8 +254,10 @@ class ShmFileConnector(RemoteConnector):
             memory_obj.ref_count_down()
             return None
 
-        buf_ptr = tensor.data_ptr()
-        buf_size = tensor.numel() * tensor.element_size()
+        # READ writes raw bytes into the allocator buffer, so use MemoryObj's
+        # contiguous byte span directly instead of a dtype/shape tensor view.
+        buf_ptr = memory_obj.data_ptr
+        buf_size = memory_obj.get_size()
 
         resp = await asyncio.to_thread(
             self._send_cmd,
