@@ -40,8 +40,13 @@ git config --global --add safe.directory /work/LMCache
 
 # oneAPI toolchain env for icpx/dpcpp.
 if [[ -f /opt/intel/oneapi/setvars.sh ]]; then
+    export OCL_ICD_FILENAMES="${OCL_ICD_FILENAMES:-}"
+    # oneAPI setvars can trip over unset optional vars in some images.
+    # Load it with nounset disabled, then restore nounset for the rest.
+    set +u
     # shellcheck disable=SC1091
-    source /opt/intel/oneapi/setvars.sh || true
+    source /opt/intel/oneapi/setvars.sh >/dev/null 2>&1 || true
+    set -u
 fi
 
 $PY --version
@@ -111,3 +116,4 @@ readelf -d "$SO" | grep NEEDED || true
 
 echo "=== final XPU wheel ==="
 ls -la /work/LMCache/dist/
+echo "Install hint (runtime image): docker run --rm --shm-size=4g -v /path/to/LMCache:/work/LMCache --entrypoint bash <xpu-runtime-image> -lc 'python3 -m pip install --no-deps /work/LMCache/dist/*.whl'"

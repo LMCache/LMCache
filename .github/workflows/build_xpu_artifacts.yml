@@ -7,6 +7,10 @@ name: Build XPU Artifacts
 # torch and oneAPI/SYCL runtime libraries, so the wheel binds to the host torch
 # and userspace drivers at runtime -- like the ROCm/CUDA variant flows.
 #
+# Runtime install guidance (manual and scripted validation):
+# - launch runtime containers with --shm-size=4g to avoid /dev/shm starvation.
+# - install LMCache wheel with --no-deps to preserve pinned torch/oneAPI stack.
+#
 # Uploaded as the `release-xpu-artifacts` GHA artifact. The XPU wheel carries a
 # +xpu local version and is published to a dedicated v{tag}-xpu GitHub Release
 # (not PyPI), mirroring cu129/rocm flows.
@@ -19,7 +23,7 @@ env:
     # Version pins that define the wheel's ABI target, consolidated here as the
     # single place to update. Keep torch minor and oneAPI toolchain aligned with
     # the upstream Intel vLLM runtime image used for install/run.
-    XPU_IMAGE: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:ee0da84ab9e04ac7610e28580af62c365e898389-xpu
+    XPU_IMAGE: vllm/vllm-openai-xpu:v0.26.0
     TORCH_XPU_SPEC: torch==2.12.0+xpu
     TORCH_XPU_INDEX: https://download.pytorch.org/whl/xpu
 
@@ -87,6 +91,24 @@ jobs:
                   --entrypoint bash "${XPU_IMAGE}" \
                   /work/LMCache/.github/scripts/build_xpu_wheel.sh
 
+            - name: Smoke-check wheel install in XPU runtime image
+              run: |
+                docker run --rm \
+                  --shm-size=4g \
+                  -v "${PWD}:/work/LMCache" \
+                  --entrypoint bash "${XPU_IMAGE}" \
+                  -lc '
+                    set -euxo pipefail
+                    WHEEL=$(ls /work/LMCache/dist/*.whl | head -n 1)
+                    python3 -m pip install --no-deps "$WHEEL"
+                    python3 - <<"PY"
+import lmcache
+import torch
+print("LMCache import OK")
+print("Torch:", torch.__version__)
+PY
+                  '
+
             - name: Upload XPU release artifacts to GHA
               uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
               with:
@@ -95,4 +117,5 @@ jobs:
 
 # On-device validation requires Intel GPU hardware and is not available on
 # GitHub-hosted runners. Run manual validation by installing this wheel in an
-# Intel XPU runtime image and executing XPU kernel tests.
+# Intel XPU runtime image and executing XPU kernel tests. Use --shm-size=4g and
+# install the wheel with --no-deps in that runtime environment.
