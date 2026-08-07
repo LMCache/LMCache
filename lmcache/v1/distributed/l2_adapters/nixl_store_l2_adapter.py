@@ -22,7 +22,7 @@ from nixl._api import (
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.native_storage_ops import Bitmap
+from lmcache.lmache_native import Bitmap
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.internal_api import L1MemoryDesc, L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId

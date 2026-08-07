@@ -28,7 +28,7 @@ import google.auth
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.native_storage_ops import Bitmap
+from lmcache.lmache_native import Bitmap
 from lmcache.utils import TTLCache
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.internal_api import L2StoreResult

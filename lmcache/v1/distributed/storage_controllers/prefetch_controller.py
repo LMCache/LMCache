@@ -57,7 +57,7 @@ import threading
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.native_storage_ops import Bitmap
+from lmcache.lmache_native import Bitmap
 from lmcache.v1.distributed.api import (
     DEFAULT_ATTN_WINDOW_DESC,
     AttnWindowDesc,

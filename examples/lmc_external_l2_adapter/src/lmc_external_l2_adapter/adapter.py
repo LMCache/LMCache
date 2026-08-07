@@ -16,11 +16,11 @@ import threading
 import time
 
 # Third Party
-import torch  # noqa: F401  # must precede native_storage_ops
+import torch  # noqa: F401  # must precede lmache_native
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.native_storage_ops import Bitmap
+from lmcache.lmache_native import Bitmap
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import (

@@ -28,7 +28,7 @@ class CommonExtSpec:
 
 COMMON_EXTENSIONS: list[CommonExtSpec] = [
     CommonExtSpec(
-        name="native_storage_ops",
+        name="lmache_native",
         sources=[
             "csrc/storage_manager/bitmap.cpp",
             "csrc/storage_manager/fold.cpp",
@@ -37,7 +37,7 @@ COMMON_EXTENSIONS: list[CommonExtSpec] = [
             "csrc/storage_manager/ttl_lock.cpp",
             "csrc/storage_manager/utils.cpp",
         ],
-        include_dirs=["csrc/storage_manager"],
+        include_dirs=["csrc/storage_manager", "csrc"],
     ),
     CommonExtSpec(
         name="lmcache_redis",

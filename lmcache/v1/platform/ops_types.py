@@ -27,82 +27,135 @@ if TYPE_CHECKING:
     import torch
 
 
-class TransferDirection(IntEnum):
-    """Specifies the direction of a memory transfer.
+# The device-independent KV-format / transfer types now live in the compiled
+# ``lmache_native`` module (built from c_src/storage_manager/pybind.cpp). When
+# the extension is available we re-export the native definitions so the Python
+# and C++ sides share one source of truth; otherwise we fall back to the
+# pure-Python IntEnum declarations below so the CPU-only build still works.
+try:
+    # First Party
+    from lmache_native import (  # type: ignore
+        EngineKVFormat,
+        TransferDirection,
+        is_cross_layer,
+        is_kv_list,
+        is_layer_list,
+        is_mla,
+    )
+except Exception:  # pragma: no cover - native ext not built
+    EngineKVFormat = None  # type: ignore[assignment]
+    TransferDirection = None  # type: ignore[assignment]
+    is_cross_layer = None  # type: ignore[assignment]
+    is_kv_list = None  # type: ignore[assignment]
+    is_layer_list = None  # type: ignore[assignment]
+    is_mla = None  # type: ignore[assignment]
 
-    Inherits from IntEnum so that members compare equal to plain ints
-    and to native pybind11 enum members with the same integer value.
-    Several call sites (and the fallback ops themselves) use
-    ``int(direction)`` to compare across backend / fallback boundaries.
-    """
 
-    H2D = 0
-    D2H = 1
+if EngineKVFormat is None:  # pragma: no cover - native ext not built
 
+    class TransferDirection(IntEnum):
+        """Specifies the direction of a memory transfer.
 
-class EngineKVFormat(IntEnum):
-    """Enumeration of different engine KV cache memory layouts."""
+        Inherits from IntEnum so that members compare equal to plain ints
+        and to native pybind11 enum members with the same integer value.
+        Several call sites (and the fallback ops themselves) use
+        ``int(direction)`` to compare across backend / fallback boundaries.
+        """
 
-    # used by: vLLM CROSS_LAYER mode
-    NB_NL_TWO_BS_NH_HS = 0
+        H2D = 0
+        D2H = 1
 
-    # used by: vLLM non-MLA flash attention
-    NL_X_TWO_NB_BS_NH_HS = 1
+    class EngineKVFormat(IntEnum):
+        """Enumeration of different engine KV cache memory layouts."""
 
-    # used by: vLLM non-MLA flash infer
-    NL_X_NB_TWO_BS_NH_HS = 2
+        # used by: vLLM CROSS_LAYER mode
+        NB_NL_TWO_BS_NH_HS = 0
 
-    # used by: vLLM MLA
-    NL_X_NB_BS_HS = 3
+        # used by: vLLM non-MLA flash attention
+        NL_X_TWO_NB_BS_NH_HS = 1
 
-    # used by: SGLang MHA (flash attention and flash infer)
-    TWO_X_NL_X_NBBS_NH_HS = 4
+        # used by: vLLM non-MLA flash infer
+        NL_X_NB_TWO_BS_NH_HS = 2
 
-    # used by: SGLang MLA
-    NL_X_NBBS_ONE_HS = 5
+        # used by: vLLM MLA
+        NL_X_NB_BS_HS = 3
 
-    # used by: vLLM non-MLA flash attention (HND layout)
-    NL_X_TWO_NB_NH_BS_HS = 6
+        # used by: SGLang MHA (flash attention and flash infer)
+        TWO_X_NL_X_NBBS_NH_HS = 4
 
-    # used by: vLLM non-MLA flash infer (HND layout)
-    NL_X_NB_TWO_NH_BS_HS = 7
+        # used by: SGLang MLA
+        NL_X_NBBS_ONE_HS = 5
 
-    # used by: TRT-LLM cross-layer (HND layout)
-    NB_NL_TWO_NH_BS_HS = 8
+        # used by: vLLM non-MLA flash attention (HND layout)
+        NL_X_TWO_NB_NH_BS_HS = 6
 
-    # used by: SGLang MHA via the MP daemon path
-    TWO_X_NL_X_NB_BS_NH_HS = 9
+        # used by: vLLM non-MLA flash infer (HND layout)
+        NL_X_NB_TWO_NH_BS_HS = 7
 
-    # DEPRECATED: superseded by NL_X_NB_NH_BS_CS; no longer produced by
-    # detection.
-    # used by: vLLM non-MLA blocks-first attention with K/V fused into the
-    # trailing dim. Per-layer physical shape
-    # [num_blocks, num_heads, block_size, 2, head_size] -- the K/V "2" axis is
-    # second-to-last, recovered by splitting the fused [..., 2 * head_size].
-    NL_X_NB_NH_BS_TWO_HS = 10
+        # used by: TRT-LLM cross-layer (HND layout)
+        NB_NL_TWO_NH_BS_HS = 8
 
-    # DEPRECATED: superseded by NL_X_NB_BS_NH_CS; no longer produced by
-    # detection.
-    # used by: vLLM non-MLA blocks-first attention (NHD layout) with K/V fused
-    # into the trailing dim. Per-layer physical shape
-    # [num_blocks, block_size, num_heads, 2, head_size] -- like
-    # NL_X_NB_NH_BS_TWO_HS but tokens before heads.
-    NL_X_NB_BS_NH_TWO_HS = 11
+        # used by: SGLang MHA via the MP daemon path
+        TWO_X_NL_X_NB_BS_NH_HS = 9
 
-    # used by: vLLM non-MLA blocks-first attention (HND layout, unified KV
-    # cache) with K/V fused into the trailing content dim. Per-layer physical
-    # shape [num_blocks, num_heads, block_size, content_size].
-    NL_X_NB_NH_BS_CS = 12
+        # DEPRECATED: superseded by NL_X_NB_NH_BS_CS; no longer produced by
+        # detection.
+        NL_X_NB_NH_BS_TWO_HS = 10
 
-    # used by: vLLM non-MLA blocks-first attention (NHD layout, unified KV
-    # cache) with K/V fused into the trailing content dim. Per-layer physical
-    # shape [num_blocks, block_size, num_heads, content_size] -- like
-    # NL_X_NB_NH_BS_CS but tokens before heads.
-    NL_X_NB_BS_NH_CS = 13
+        # DEPRECATED: superseded by NL_X_NB_BS_NH_CS; no longer produced by
+        # detection.
+        NL_X_NB_BS_NH_TWO_HS = 11
 
-    # vLLM DSA indexer k-cache [NB,BS,132] u8, paged [BSxvals][BSxscales];
-    # c_ops only (no pure-torch transfer path)
-    NL_X_NB_BSV_BSS = 14
+        # used by: vLLM non-MLA blocks-first attention (HND layout, unified KV
+        # cache) with K/V fused into the trailing content dim.
+        NL_X_NB_NH_BS_CS = 12
+
+        # used by: vLLM non-MLA blocks-first attention (NHD layout, unified KV
+        # cache) with K/V fused into the trailing content dim.
+        NL_X_NB_BS_NH_CS = 13
+
+        # vLLM DSA indexer k-cache [NB,BS,132] u8, paged [BSxvals][BSxscales];
+        # c_ops only (no pure-torch transfer path)
+        NL_X_NB_BSV_BSS = 14
+
+    def is_kv_list(engine_kv_format: EngineKVFormat) -> bool:
+        """Fallback predicate: KV stored as a list of per-token KV tensors."""
+        return engine_kv_format in (
+            EngineKVFormat.TWO_X_NL_X_NBBS_NH_HS,
+            EngineKVFormat.TWO_X_NL_X_NB_BS_NH_HS,
+        )
+
+    def is_layer_list(engine_kv_format: EngineKVFormat) -> bool:
+        """Fallback predicate: one list entry per layer."""
+        return engine_kv_format in (
+            EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
+            EngineKVFormat.NL_X_NB_TWO_BS_NH_HS,
+            EngineKVFormat.NL_X_NB_BS_HS,
+            EngineKVFormat.NL_X_NBBS_ONE_HS,
+            EngineKVFormat.NL_X_TWO_NB_NH_BS_HS,
+            EngineKVFormat.NL_X_NB_TWO_NH_BS_HS,
+            EngineKVFormat.NB_NL_TWO_NH_BS_HS,
+            EngineKVFormat.NL_X_NB_NH_BS_TWO_HS,
+            EngineKVFormat.NL_X_NB_BS_NH_TWO_HS,
+            EngineKVFormat.NL_X_NB_NH_BS_CS,
+            EngineKVFormat.NL_X_NB_BS_NH_CS,
+            EngineKVFormat.NL_X_NB_BSV_BSS,
+        )
+
+    def is_cross_layer(engine_kv_format: EngineKVFormat) -> bool:
+        """Fallback predicate: layers fused into a single tensor."""
+        return engine_kv_format in (
+            EngineKVFormat.NB_NL_TWO_BS_NH_HS,
+            EngineKVFormat.NB_NL_TWO_NH_BS_HS,
+        )
+
+    def is_mla(engine_kv_format: EngineKVFormat) -> bool:
+        """Fallback predicate: MLA variant (single latent KV head)."""
+        return engine_kv_format in (
+            EngineKVFormat.NL_X_NB_BS_HS,
+            EngineKVFormat.NL_X_NBBS_ONE_HS,
+            EngineKVFormat.NL_X_NB_BSV_BSS,
+        )
 
 
 # Backward-compat alias
