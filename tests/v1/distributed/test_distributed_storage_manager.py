@@ -208,6 +208,23 @@ def wait_for_sparse_found(
 class TestStorageManagerBasic:
     """Tests for basic functionality of StorageManager."""
 
+    def test_has_l1_object(self, basic_storage_manager_config, basic_layout):
+        """Present after reserve, gone after delete, False for unknown keys."""
+        storage_manager = StorageManager(basic_storage_manager_config)
+        object_key = make_object_key(chunk_hash=424242)
+
+        assert not storage_manager.has_l1_object(object_key)
+
+        storage_manager.reserve_write([object_key], basic_layout, mode="new")
+        assert storage_manager.has_l1_object(object_key)
+        storage_manager.finish_write([object_key])
+        assert storage_manager.has_l1_object(object_key)
+
+        storage_manager.delete_l1_keys([object_key], force=True)
+        assert not storage_manager.has_l1_object(object_key)
+
+        storage_manager.close()
+
     def test_basic_reserve_write(self, basic_storage_manager_config, basic_layout):
         """Test basic reserve and write functionality."""
         storage_manager = StorageManager(basic_storage_manager_config)

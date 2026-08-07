@@ -244,6 +244,18 @@ class StorageManager:
 
         return result
 
+    def has_l1_object(self, key: ObjectKey) -> bool:
+        """Whether L1 currently holds an entry for the key.
+
+        Args:
+            key: The object key to look up.
+
+        Returns:
+            True if an L1 entry exists (written or being written),
+            False otherwise.
+        """
+        return self._l1_manager.get_object_state(key) is not None
+
     @enable_tracing()
     def finish_write(
         self,
