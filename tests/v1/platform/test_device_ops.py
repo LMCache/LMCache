@@ -191,7 +191,7 @@ def test_bind_native_shadows_baseline_for_present_ops() -> None:
     ops = DeviceOps()
     ops.bind_native(_FakeNativeModule())
 
-    assert ops.multi_layer_kv_transfer() == "native-mlt"  # type: ignore[call-arg]
+    assert ops.multi_layer_kv_transfer() == "native-mlt"  # type: ignore[call-arg, func-returns-value]
     assert ops.calculate_cdf(None, 0) == "native-cdf"  # type: ignore[call-arg]
 
     # Other instances still see the torch baseline.
