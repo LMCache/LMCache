@@ -628,6 +628,194 @@ Usage events arrive on the fleet cache-event stream
 endpoint. See ``docs/design/v1/mp_coordinator/cache_events.md`` for the
 batch format and routing semantics.
 
+Key directory
+-------------
+
+The ``/directory`` group is a read-only operator view of the fleet-wide key
+directory: which keys are cached, where (instance / tier / backend), and what
+token ids each chunk holds. The directory is **eventually consistent soft
+state** built from the servers' cache-event stream -- every answer is a hint to
+be validated at the owning server, never a guarantee.
+
+``GET /directory/keys``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+List cached keys and their placements, one page at a time.
+
+**Query parameters:**
+
+.. list-table::
+   :header-rows: 1
+   :widths: 22 14 64
+
+   * - Parameter
+     - Default
+     - Description
+   * - ``tier``
+     - ``all``
+     - Keep placements on this tier (``l1`` / ``l2``; ``all`` keeps every
+       tier).
+   * - ``instance_id``
+     - *(empty)*
+     - Keep placements reported by this MP server (empty keeps every
+       instance).
+   * - ``backend``
+     - *(empty)*
+     - Keep placements on this backend, e.g. ``dram`` / ``fs`` (empty keeps
+       every backend).
+   * - ``offset``
+     - ``0``
+     - Matching keys to skip (pagination).
+   * - ``limit``
+     - ``1000``
+     - Maximum keys to return (1 to 10000).
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {
+      "total": 2,
+      "keys": [
+        {
+          "key": {
+            "chunk_hash_hex": "aa12...",
+            "model_name": "meta-llama/Llama-3.1-8B-Instruct",
+            "kv_rank": 0,
+            "object_group_id": 0,
+            "cache_salt": ""
+          },
+          "placements": [
+            {
+              "instance_id": "server-1",
+              "incarnation": 1719000000,
+              "tier": "l1",
+              "backend": "dram",
+              "size_bytes": 1048576,
+              "shared": false
+            }
+          ],
+          "num_tokens": 256
+        }
+      ]
+    }
+
+``total`` counts every key with at least one placement matching the filters;
+``keys`` is the requested page of them, each with **only its matching
+placements**. ``num_tokens`` reports how many token ids the directory knows for
+the key's chunk (``0`` = unknown) -- fetch the actual tokens via
+``POST /directory/lookup``, which exists precisely so listing pages stay
+small. Pages of a changing directory may skip or repeat keys (snapshot
+semantics).
+
+**HTTP status codes:**
+
+- ``200``: page returned (an empty directory returns ``{"total": 0, "keys": []}``).
+- ``422``: invalid parameter (negative ``offset``, ``limit`` out of range,
+  unknown ``tier``).
+
+**Example:**
+
+.. code-block:: bash
+
+    # Everything on server-1's L1:
+    curl -s "http://localhost:9300/directory/keys?tier=l1&instance_id=server-1&limit=100"
+
+``POST /directory/lookup``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Resolve cache content to its placements and token ids. One endpoint, two
+forms -- supply exactly one:
+
+* **keys form** -- ``{"keys": [...]}``: resolve keys you already have (e.g.
+  from ``GET /directory/keys``).
+* **tokens form** -- ``{"token_ids": [...], "model_name": ..., "world_size":
+  ..., "cache_salt": ...}``: resolve a request's tokens to the keys of its
+  complete chunks (the same fan-out the pin APIs use).
+
+.. important::
+
+   ``token_ids`` must be the request's **whole** token sequence from position
+   0, not one chunk's worth. Chunk hashes are prefix-chained -- each chunk's
+   key depends on every token before it -- so a mid-request slice resolves to
+   different (nonexistent) keys. Trailing tokens that do not fill a chunk are
+   ignored.
+
+**Request body** (tokens form):
+
+.. code-block:: json
+
+    {
+      "token_ids": [15496, 11, 995, 314],
+      "model_name": "meta-llama/Llama-3.1-8B-Instruct",
+      "world_size": 1,
+      "cache_salt": ""
+    }
+
+**Request body** (keys form):
+
+.. code-block:: json
+
+    {
+      "keys": [
+        {
+          "chunk_hash_hex": "aa12...",
+          "model_name": "meta-llama/Llama-3.1-8B-Instruct",
+          "kv_rank": 0,
+          "object_group_id": 0,
+          "cache_salt": ""
+        }
+      ]
+    }
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {
+      "chunks": 1,
+      "results": [
+        {
+          "key": {"chunk_hash_hex": "aa12...", "model_name": "...", "kv_rank": 0,
+                  "object_group_id": 0, "cache_salt": ""},
+          "placements": [
+            {"instance_id": "server-1", "incarnation": 1770000000, "tier": "l1",
+             "backend": "dram", "size_bytes": 8388608, "shared": false}
+          ],
+          "token_ids": [15496, 11, 995]
+        }
+      ]
+    }
+
+``chunks`` is the number of complete chunks the tokens resolved to (keys form:
+the number of keys requested); ``results`` has one entry per resolved key, in
+request order (tokens form: ``chunks`` x the per-rank fan-out). ``placements``
+is empty for keys the directory does not know; ``token_ids`` is empty when the
+directory has no tokens for the key's chunk (never stored with token reporting
+on, or not yet re-reported after an event gap).
+
+**HTTP status codes:**
+
+- ``200``: results returned.
+- ``400``: the token sequence exceeds the per-request cap, or a resolution
+  parameter is invalid (e.g. ``model_name`` contains ``@``).
+- ``422``: neither or both forms supplied, ``model_name`` missing with
+  ``token_ids``, or a key is malformed (e.g. ``chunk_hash_hex`` is not hex).
+
+**Examples:**
+
+.. code-block:: bash
+
+    # Tokens form -- where is this prompt cached, and what does each chunk hold?
+    curl -s -X POST http://localhost:9300/directory/lookup \
+      -H 'Content-Type: application/json' \
+      -d '{"token_ids": [15496, 11, 995], "model_name": "m", "world_size": 1}'
+
+    # Keys form -- keys taken from GET /directory/keys:
+    curl -s -X POST http://localhost:9300/directory/lookup \
+      -H 'Content-Type: application/json' \
+      -d '{"keys": [{"chunk_hash_hex": "aa12...", "model_name": "m", "kv_rank": 0}]}'
+
 Cache control
 -------------
 

@@ -2,7 +2,8 @@
 """MP-server-side cache-event emission for the coordinator key directory.
 
 A :class:`CacheEventSubscriber` on the observability event bus turns the
-storage layer's L1/L2 key events into ordered :class:`CacheEventBatch`
+storage layer's L1/L2 key events (plus the store path's token-binding
+events) into ordered :class:`CacheEventBatch`
 lists and delivers them through a :class:`CacheEventSink` — the
 transport seam (HTTP today, a message queue later). Mapping, batching,
 and delivery all run on the bus's drain thread; there is no dedicated
@@ -12,6 +13,7 @@ emission thread or task. See
 
 # Standard
 from abc import ABC, abstractmethod
+from collections import OrderedDict
 from dataclasses import dataclass
 import time
 
@@ -34,6 +36,10 @@ from lmcache.v1.mp_observability.event_bus import EventCallback, EventSubscriber
 logger = init_logger(__name__)
 
 _DEFAULT_FLUSH_INTERVAL = 1.0
+
+# Token-binding cache bound: covers the window between a chunk's
+# token-binding event and its last (async L2) store event.
+_TOKEN_BINDING_CACHE_SIZE = 65536
 
 
 class CacheEventPublishError(Exception):
@@ -160,9 +166,13 @@ class CacheEventSubscriber(EventSubscriber):
         # Consecutive same-identity entries append to the last pending
         # batch; an identity change starts a new one (order-preserving).
         self._pending_batches: list[_PendingBatch] = []
+        # Chunk hash → token ids from token-binding events (published
+        # ahead of the write-finished events), used to stamp STORE
+        # entries. LRU-bounded; a miss stamps nothing.
+        self._token_bindings: OrderedDict[bytes, tuple[int, ...]] = OrderedDict()
 
     def get_subscriptions(self) -> dict[EventType, EventCallback]:
-        """Return the storage key events this subscriber consumes."""
+        """Return the bus events this subscriber consumes."""
         return {
             EventType.L1_WRITE_FINISHED: self._on_l1_store,
             EventType.L1_WRITE_FINISHED_AND_READ_RESERVED: self._on_l1_store,
@@ -171,6 +181,7 @@ class CacheEventSubscriber(EventSubscriber):
             EventType.L2_KEYS_STORED: self._on_l2_store,
             EventType.L2_KEYS_DELETED: self._on_l2_delete,
             EventType.L2_KEYS_ACCESSED: self._on_l2_access,
+            EventType.MP_TOKENS: self._on_tokens,
             # TODO: decouple the flush tick from the eviction loop (e.g. a
             # bus-owned periodic hook) so cache-event freshness does not
             # silently depend on the eviction loop's cadence.
@@ -248,10 +259,33 @@ class CacheEventSubscriber(EventSubscriber):
             Tier.L2,
             event.metadata["backend"],
             [
-                CacheEventEntry(key=key.to_encoded_object_key(), size_bytes=size)
+                self._store_entry(key, size)
                 for key, size in zip(keys, sizes, strict=True)
             ],
             shared=event.metadata.get("shared", False),
+        )
+
+    def _on_tokens(self, event: Event) -> None:
+        chunk_hashes: list[bytes] = event.metadata["chunk_hashes"]
+        token_chunks: list[list[int]] = event.metadata["token_chunks"]
+        for chunk_hash, chunk in zip(chunk_hashes, token_chunks, strict=True):
+            self._token_bindings[chunk_hash] = tuple(chunk)
+            self._token_bindings.move_to_end(chunk_hash)
+        if len(self._token_bindings) <= _TOKEN_BINDING_CACHE_SIZE:
+            return
+        # Evict in one batch down to half the bound: the next eviction is
+        # then thousands of stores away, so this stays a rare event (and
+        # a rare log line) instead of firing on every store while full.
+        evicted = 0
+        while len(self._token_bindings) > _TOKEN_BINDING_CACHE_SIZE // 2:
+            self._token_bindings.popitem(last=False)
+            evicted += 1
+        logger.warning(
+            "Token binding cache hit its %d-entry bound: evicted the %d oldest "
+            "bindings; STORE events for those chunks carry no token ids "
+            "(stores completing far behind their submission)",
+            _TOKEN_BINDING_CACHE_SIZE,
+            evicted,
         )
 
     def _on_l2_delete(self, event: Event) -> None:
@@ -268,14 +302,12 @@ class CacheEventSubscriber(EventSubscriber):
         keys: list[ObjectKey] = event.metadata["keys"]
         metadata: list[L1ObjectMeta] = event.metadata["meta"]
         by_backend: dict[L1BackendType, list[CacheEventEntry]] = {}
+        is_store = event_type is CacheEventType.STORE
         for key, meta in zip(keys, metadata, strict=True):
             by_backend.setdefault(meta.backend, []).append(
-                CacheEventEntry(
-                    key=key.to_encoded_object_key(),
-                    size_bytes=meta.size_bytes
-                    if event_type is CacheEventType.STORE
-                    else 0,
-                )
+                self._store_entry(key, meta.size_bytes)
+                if is_store
+                else CacheEventEntry(key=key.to_encoded_object_key())
             )
         for backend, entries in by_backend.items():
             self._record(event_type, Tier.L1, backend.value, entries)
@@ -289,6 +321,15 @@ class CacheEventSubscriber(EventSubscriber):
             event.metadata["backend"],
             [CacheEventEntry(key=key.to_encoded_object_key()) for key in keys],
             shared=event.metadata.get("shared", False),
+        )
+
+    def _store_entry(self, key: ObjectKey, size_bytes: int) -> CacheEventEntry:
+        """Build a STORE entry, stamping the chunk's token ids when the
+        token-binding cache knows the chunk."""
+        return CacheEventEntry(
+            key=key.to_encoded_object_key(),
+            size_bytes=size_bytes,
+            token_ids=list(self._token_bindings.get(key.chunk_hash, ())),
         )
 
     def _record(

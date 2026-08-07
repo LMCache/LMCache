@@ -39,13 +39,14 @@ class CacheEventEntry:
         key: The object key the change applies to.
         size_bytes: Bytes committed for the key (``store`` only; ``0``
             otherwise).
-        content_hash_hex: Hex of the chunk's position-independent content
-            hash; empty when the emitter does not compute it.
+        token_ids: The chunk's token ids, stamped on ``store`` entries
+            (empty when the emitter no longer holds them); the directory
+            indexes them by the key's chunk hash.
     """
 
     key: EncodedObjectKey
     size_bytes: int = 0
-    content_hash_hex: str = ""
+    token_ids: list[int] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         """Enforce intrinsic invariants.

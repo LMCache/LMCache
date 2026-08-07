@@ -99,9 +99,29 @@ listener plumbing or a dedicated flush task:
   the pool fleet-wide (one pool per backend type), so the directory
   deduplicates shared-storage placements across emitters (see
   `key_directory.md` — Shared pools).
+  The LMCache-driven store path additionally publishes
+  `mp.tokens` (parallel `chunk_hashes` + `token_chunks`) at
+  store submission — ordered ahead of the store's write-finished
+  events, built only when the event has a subscriber, so the cost is
+  zero with event reporting off (and no hashing anywhere: the directory
+  indexes tokens by the chunk hash already in every key). Only
+  worker 0 reports: bindings depend on token content alone, so one
+  report covers every rank's keys. Other store paths (engine-driven
+  transfer, blend pre-computed docs, experimental qstore) do not emit
+  bindings yet — the engine-driven path can publish the same event from
+  its ``commit_store`` when it needs directory tokens.
 - **`CacheEventSubscriber`** maps those events onto the directory
   vocabulary (writes → `STORE`, evictions/deletes → `DELETE`, split per
-  actual L1 medium from the event metadata; touches → `ACCESS`).
+  actual L1 medium from the event metadata; touches → `ACCESS`). The
+  token-binding events produce no batches of their own: the subscriber
+  remembers their chunk-hash → token-ids pairs (LRU cache bounded at
+  65536; passing the bound evicts the oldest half in one batch, so
+  eviction — and its warning — stays rare) and stamps `token_ids` onto
+  every L1/L2 `STORE` entry,
+  so token bindings ride the store events themselves. Tokens are
+  therefore repeated per rank/group/tier placement — an accepted wire
+  trade for a self-contained protocol (see
+  [key_directory.md](key_directory.md) — Token index).
   `ACCESS` batches carry an **empty backend**: the directory only
   refreshes key-level recency on access, so there is no placement
   identity to name — the vocabulary requires a non-empty backend for

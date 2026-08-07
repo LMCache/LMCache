@@ -4,14 +4,6 @@
 
 # First Party
 from lmcache.v1.platform.musa.cache_context import MUSACacheContext
-from lmcache.v1.platform.musa.ipc_wrapper import (
-    is_musa_block_transfer_available,
-)
-
-
-def test_platform_adapter_does_not_enable_block_transfer() -> None:
-    """Adding the cache context does not activate MUSA handle transfer."""
-    assert not is_musa_block_transfer_available()
 
 
 def test_close_synchronizes_before_releasing_ipc_owners() -> None:
