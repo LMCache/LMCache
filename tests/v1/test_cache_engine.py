@@ -44,10 +44,13 @@ from .utils import (
 # required for GDS tests (cuFile err=5027 on overlayfs/tmpfs).
 _TEST_TMPDIR = os.environ.get("LMCACHE_TEST_TMPDIR") or None
 
-pytestmark = pytest.mark.skipif(
-    not (torch_dev.is_available() and torch_device_type == "cuda"),
-    reason="Requires CUDA backend",
-)
+pytestmark = [
+    pytest.mark.cuda,
+    pytest.mark.skipif(
+        not (torch_dev.is_available() and torch_device_type == "cuda"),
+        reason="Requires CUDA backend",
+    ),
+]
 
 
 def get_expected_count(token_len, save_unfull_chunk, chunk_size):
@@ -68,7 +71,6 @@ def get_expected_count(token_len, save_unfull_chunk, chunk_size):
 
 
 @pytest.mark.parametrize("save_unfull_chunk", [False, True])
-@pytest.mark.cuda
 def test_paged_same_retrieve_store(save_unfull_chunk, autorelease_v1):
     device = torch_device_type
     num_tokens = 2000
@@ -150,7 +152,6 @@ def test_paged_same_retrieve_store(save_unfull_chunk, autorelease_v1):
 @pytest.mark.parametrize("backend", ["cpu", "local_disk", "remote", "remote_cachegen"])
 @pytest.mark.parametrize("save_unfull_chunk", [False, True])
 @pytest.mark.parametrize("lmserver_v1_process", ["cpu"], indirect=True)
-@pytest.mark.cuda
 def test_paged_retrieve_prefix(
     chunk_size, backend, save_unfull_chunk, lmserver_v1_process, autorelease_v1
 ):
@@ -268,7 +269,6 @@ def test_paged_retrieve_prefix(
 )
 @pytest.mark.parametrize("save_unfull_chunk", [False, True])
 @pytest.mark.parametrize("lmserver_v1_process", ["cpu"], indirect=True)
-@pytest.mark.cuda
 def test_paged_store_offset(
     chunk_size, backend, save_unfull_chunk, lmserver_v1_process, autorelease_v1
 ):
@@ -376,7 +376,6 @@ def test_paged_store_offset(
     ],
 )
 @pytest.mark.parametrize("save_unfull_chunk", [False, True])
-@pytest.mark.cuda
 def test_paged_mixed_retrieve(chunk_size, backend, save_unfull_chunk, autorelease_v1):
     device = torch_device_type
     num_tokens = 2000
@@ -522,7 +521,6 @@ def test_paged_mixed_retrieve(chunk_size, backend, save_unfull_chunk, autoreleas
 
 
 @pytest.mark.parametrize("save_unfull_chunk", [False, True])
-@pytest.mark.cuda
 def test_paged_store_kv_tensors_mask(save_unfull_chunk, autorelease_v1):
     device = torch_device_type
     num_tokens = 1000
@@ -696,7 +694,6 @@ def test_paged_store_kv_tensors_mask(save_unfull_chunk, autorelease_v1):
 )
 @pytest.mark.parametrize("save_unfull_chunk", [False, True])
 @pytest.mark.parametrize("lmserver_v1_process", ["cpu"], indirect=True)
-@pytest.mark.cuda
 def test_paged_hierarchy_retrieve(
     chunk_size,
     backend,
@@ -840,7 +837,6 @@ def test_paged_hierarchy_retrieve(
     ],
 )
 @pytest.mark.parametrize("save_unfull_chunk", [False, True])
-@pytest.mark.cuda
 def test_paged_prefetch_retrieve(
     backend, prefetch_from, save_unfull_chunk, autorelease_v1
 ):
@@ -964,7 +960,6 @@ def test_paged_prefetch_retrieve(
         subprocess.run(shlex.split("rm -rf local/disk_test/local_disk/"))
 
 
-@pytest.mark.cuda
 def test_async_lookup_and_prefetch_layerwise(autorelease_v1):
     # Regression: before the fix, async_lookup_and_prefetch sent chunk-level
     # CacheEngineKey objects into batched_async_contains, but store_layer
@@ -1035,7 +1030,6 @@ def test_async_lookup_and_prefetch_layerwise(autorelease_v1):
     )
 
 
-@pytest.mark.cuda
 def test_async_lookup_and_prefetch_layerwise_partial_layer_missing(autorelease_v1):
     # When a single per-layer key is missing for one chunk, that chunk must be
     # rounded down to a miss (the `// keys_per_chunk` round-down path).
@@ -1120,7 +1114,6 @@ def test_async_lookup_and_prefetch_layerwise_partial_layer_missing(autorelease_v
 @pytest.mark.parametrize("save_unfull_chunk", [False, True])
 @pytest.mark.no_shared_allocator
 @pytest.mark.parametrize("lmserver_v1_process", ["cpu"], indirect=True)
-@pytest.mark.cuda
 def test_paged_mem_leak(
     chunk_size, backend, save_unfull_chunk, lmserver_v1_process, autorelease_v1
 ):
@@ -1212,7 +1205,6 @@ def test_paged_mem_leak(
 )
 @pytest.mark.parametrize("save_unfull_chunk", [False, True])
 @pytest.mark.no_shared_allocator
-@pytest.mark.cuda
 def test_paged_retrieve_after_eviction(
     chunk_size, backend, save_unfull_chunk, autorelease_v1
 ):
@@ -1354,7 +1346,6 @@ def test_builder(autorelease_v1):
 
 
 @pytest.mark.no_shared_allocator
-@pytest.mark.cuda
 def test_force_store_wait(autorelease_v1):
     device = torch_device_type
     num_tokens = 10000
@@ -1420,7 +1411,6 @@ def test_force_store_wait(autorelease_v1):
             assert engine.lookup(t) == expected_count
 
 
-@pytest.mark.cuda
 def test_builder_destroy(autorelease_v1):
     """Test the destroy method of LMCacheEngineBuilder"""
     instance_id = "test_destroy"
@@ -1469,7 +1459,6 @@ def test_builder_destroy(autorelease_v1):
     LMCacheEngineBuilder.destroy("non_existent_id")  # Should not raise
 
 
-@pytest.mark.cuda
 def test_builder_destroy_multiple_instances(autorelease_v1):
     """Test destroying one instance doesn't affect others"""
     instance_id1 = "test_destroy_1"
@@ -1524,7 +1513,6 @@ def test_builder_destroy_multiple_instances(autorelease_v1):
 
 
 @pytest.mark.parametrize("save_unfull_chunk", [False, True])
-@pytest.mark.cuda
 @pytest.mark.skipif(
     not has_cufile(),
     reason="Requires NVIDIA cuFile (libcufile.so). "
