@@ -21,6 +21,7 @@ deployment operators), different transports, and independent opt-outs.
 | `continuous.py` | `ContinuousUsageContext` interval counters and lifespan histogram |
 | `metric_specs.py` | `MetricSpec` (map-reduce metric contract) and the default metric registry (not re-exported from the package root) |
 | `mp_continuous.py` | `MPContinuousUsageReporter` — buffers/reduces/sends the `MetricSpec` metrics for the MP server (not re-exported from the package root) |
+| `l1_usage.py` | `L1UsageReporter` — L1 pool occupancy for the MP server (not re-exported from the package root) |
 | `l2_usage.py` | `L2ConnectorUsageReporter` — per-L2-adapter-type traffic + occupancy for the MP server (not re-exported from the package root) |
 | `mp.py` | MP server `MPUsageContext`, `InitializeMPUsageContext` |
 
@@ -52,6 +53,7 @@ phone home is a dataclass there, and nowhere else. The contract:
 | Continuous (single-process) | `LMCacheStatsLogger.log_worker`, every `LMCACHE_USAGE_TRACK_INTERVAL` s (default 600) | `ContinuousContextMessage`, `CacheLifespanMessage` |
 | Continuous (MP server) | EventBus (`MP_RETRIEVE_END`, `MP_STORE_END`; lmcache-driven transfers only), flushed every `LMCACHE_USAGE_TRACK_INTERVAL` s | `ContinuousContextMessage`; empty intervals double as heartbeats |
 | L2 connector usage (MP server) | EventBus traffic (`L2_STORE_COMPLETED`, `L2_LOAD_TASK_SUBMITTED`) + flush-time `StorageManager` occupancy probe, same interval | `L2ConnectorUsageMessage`, one per active L2 adapter type |
+| L1 usage (MP server) | Flush-time `StorageManager` occupancy probe, same interval | `L1UsageMessage`, one per interval |
 
 Model and KV-layout information only become visible to the MP server when
 a serving engine registers its KV caches; a registration-time report

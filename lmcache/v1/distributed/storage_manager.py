@@ -799,6 +799,16 @@ class StorageManager:
             out_by_type.setdefault(desc.type_name, []).append(usage)
         return out_by_type
 
+    def get_l1_usage(self) -> tuple[int, int]:
+        """Current occupancy of the L1 memory pool.
+
+        Backing data for usage telemetry's L1 occupancy reporting.
+
+        Returns:
+            Tuple of ``(used_bytes, total_bytes)``.
+        """
+        return self._l1_manager.get_memory_usage()
+
     def get_usage_bytes_by_cache_salt(self) -> dict[str, int]:
         """Aggregate ``cache_salt`` byte usage across every L2 adapter.
 

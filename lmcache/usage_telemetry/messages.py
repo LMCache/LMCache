@@ -299,6 +299,26 @@ class L2ConnectorUsageMessage(UsageMessage):
 
 
 @dataclass
+class L1UsageMessage(UsageMessage):
+    """Interval occupancy of an MP cache server's L1 pool.
+
+    One message per flush interval, probed at flush time.
+    """
+
+    ENDPOINT: ClassVar[str] = "l1-usage"
+
+    active_seconds: float
+    """Seconds covered by this interval."""
+    bytes_used: int
+    """Bytes currently held in L1; ``-1`` when the probe failed."""
+    capacity_bytes: int
+    """Total L1 pool capacity in bytes; ``0`` when the probe failed."""
+    sequence_number: int
+    uptime_seconds: float
+    """Seconds since the reporting process started."""
+
+
+@dataclass
 class ContinuousContextMessage(UsageMessage):
     """Interval counters flushed periodically by the continuous reporters.
 

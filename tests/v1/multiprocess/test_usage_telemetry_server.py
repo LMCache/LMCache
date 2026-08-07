@@ -190,6 +190,28 @@ def test_server_emits_usage_reports(monkeypatch, tmp_path):
         assert payload["unbounded_adapters"] == 1
         assert payload["sequence_number"] >= 1
         assert payload["session_id"] == mp_payload["session_id"]
+
+        # The L1 reporter emits one L1UsageMessage per interval with the
+        # pool's live occupancy.
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and not any(
+            payload["message_type"] == "L1UsageMessage" for _, payload in sink.received
+        ):
+            time.sleep(0.1)
+        l1_usage = [
+            (path, payload)
+            for path, payload in sink.received
+            if payload["message_type"] == "L1UsageMessage"
+        ]
+        assert l1_usage, "no L1UsageMessage received"
+        path, payload = l1_usage[0]
+        assert path == "/l1-usage"
+        assert payload["deployment_mode"] == "mp_server"
+        assert payload["active_seconds"] > 0
+        assert payload["bytes_used"] >= 0
+        assert payload["capacity_bytes"] == 1 << 30
+        assert payload["sequence_number"] >= 1
+        assert payload["session_id"] == mp_payload["session_id"]
     finally:
         process.terminate()
         process.join(timeout=10)
