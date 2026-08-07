@@ -5,6 +5,7 @@
 from dataclasses import dataclass
 from itertools import islice
 from typing import Any, Generator, Sequence
+import os
 import threading
 import time
 
@@ -778,6 +779,12 @@ def transfer_kv_layerwise(
 
     main_stream = cache_context.stream
     pin_chunk_size = LazyMemoryAllocator.PIN_CHUNK_SIZE
+    # Keep native layerwise fusion strictly behind the same MP flag so
+    # per-chunk behavior remains unchanged.
+    use_native_layerwise_plan = (
+        _HAS_NATIVE_OBJECT_GROUP_TRANSFER
+        and bool(os.environ.get("LMCACHE_MP_LAYERWISE_ENABLED", ""))
+    )
 
     # Flatten all valid chunks for single-launch-per-layer optimization.
     # In the existing temp buffer (4 full-chunk slots per kernel group),
@@ -853,91 +860,246 @@ def transfer_kv_layerwise(
                 0, kernel_group_id
             ).data_ptr()
             all_gpu_ptrs: list[int] = []
+            src_offset = kg_byte_offset + layer_local_idx * per_layer_bytes
 
-            for chunk_local_idx, (_, memory_obj) in enumerate(all_chunks_flat):
-                gpu_dst = buffer_base + chunk_local_idx * per_layer_bytes
-
-                src_offset = (
-                    kg_byte_offset + layer_local_idx * per_layer_bytes
-                )
-                src_ptr = memory_obj.data_ptr + src_offset
-                lmc_ops.lmcache_memcpy_async(
-                    gpu_dst, src_ptr, per_layer_bytes,
-                    lmc_ops.TransferDirection.H2D,
-                    memory_obj.meta.address,
-                    pin_chunk_size,
-                )
-                all_gpu_ptrs.append(gpu_dst)
-
-            lmc_ops.multi_layer_block_kv_transfer(
-                single_layer_kv_ptr,
-                all_gpu_ptrs,
-                info["all_block_ids"],
-                cache_context.device,
-                lmc_ops.TransferDirection.H2D,
-                single_layer_sd,
-                slots_per_chunk,
-                cache_context.get_engine_kv_format(kernel_group_id),
-                info["all_skip_blocks"],
-            )
-        else:
-            # --- Fallback: batched (very long sequences exceeding buffer) ---
-            blocks_per_chunk = info["blocks_per_chunk"]
-            blocks_per_window = info["blocks_per_window"]
-
-            for start_object_idx, memory_object_batch in batch_plan:
-                batch_len = len(memory_object_batch)
-                batch_start_token = start_object_idx * lmcache_chunk_size
-                skip_tokens_in_chunk = (
-                    max(batch_start_token, skip_first_n_tokens)
-                    - batch_start_token
-                )
-
-                tmp_gpu_buffers_batched: list[int] = []
-                for chunk_idx, memory_obj in enumerate(memory_object_batch):
-                    full_kg_buffer = (
-                        cache_context.get_temp_kernel_group_buffer(
-                            chunk_idx, kernel_group_id
+            if use_native_layerwise_plan:
+                staging: list["lmc_ops.StagingCopy"] = []
+                for chunk_local_idx, (_, memory_obj) in enumerate(all_chunks_flat):
+                    gpu_dst = buffer_base + chunk_local_idx * per_layer_bytes
+                    src_ptr = memory_obj.data_ptr + src_offset
+                    all_gpu_ptrs.append(gpu_dst)
+                    staging.append(
+                        lmc_ops.StagingCopy(
+                            gpu_dst,
+                            src_ptr,
+                            per_layer_bytes,
+                            memory_obj.meta.address,
                         )
                     )
-                    gpu_dst = full_kg_buffer.data_ptr()
-                    src_offset = (
-                        kg_byte_offset + layer_local_idx * per_layer_bytes
-                    )
+
+                all_block_ids = info["all_block_ids"]
+                layer_spec = lmc_ops.KernelGroupSpec(
+                    single_layer_kv_ptr.data_ptr(),
+                    all_gpu_ptrs,
+                    single_layer_sd,
+                    slots_per_chunk,
+                    cache_context.get_engine_kv_format(kernel_group_id),
+                    all_block_ids.data_ptr(),
+                    all_block_ids.numel(),
+                )
+                layer_launch = lmc_ops.LaunchVar(
+                    0,
+                    0,
+                    all_block_ids.numel(),
+                    len(all_gpu_ptrs),
+                    info["all_skip_blocks"],
+                )
+                lmc_ops.execute_object_group_transfer(
+                    lmc_ops.TransferDirection.H2D,
+                    cache_context.device,
+                    pin_chunk_size,
+                    [layer_spec],
+                    [lmc_ops.BatchStep(staging, [layer_launch])],
+                )
+            else:
+                for chunk_local_idx, (_, memory_obj) in enumerate(all_chunks_flat):
+                    gpu_dst = buffer_base + chunk_local_idx * per_layer_bytes
                     src_ptr = memory_obj.data_ptr + src_offset
                     lmc_ops.lmcache_memcpy_async(
-                        gpu_dst, src_ptr, per_layer_bytes,
+                        gpu_dst,
+                        src_ptr,
+                        per_layer_bytes,
                         lmc_ops.TransferDirection.H2D,
                         memory_obj.meta.address,
                         pin_chunk_size,
                     )
-                    tmp_gpu_buffers_batched.append(full_kg_buffer.data_ptr())
-
-                orig_skip_blocks = cache_context.calculate_num_blocks(
-                    skip_tokens_in_chunk, kernel_group_id
-                )
-                recalculated_skip_blocks = _recalculate_blocks_to_skip(
-                    blocks_per_chunk, blocks_per_window, orig_skip_blocks,
-                )
-                start_block_pos = start_object_idx * blocks_per_window
-                end_block_pos = (
-                    (start_object_idx + batch_len) * blocks_per_window
-                )
-                block_ids_curr_batch = block_ids_gpu[kernel_group_id][
-                    start_block_pos:end_block_pos
-                ]
+                    all_gpu_ptrs.append(gpu_dst)
 
                 lmc_ops.multi_layer_block_kv_transfer(
                     single_layer_kv_ptr,
-                    tmp_gpu_buffers_batched,
-                    block_ids_curr_batch,
+                    all_gpu_ptrs,
+                    info["all_block_ids"],
                     cache_context.device,
                     lmc_ops.TransferDirection.H2D,
                     single_layer_sd,
                     slots_per_chunk,
                     cache_context.get_engine_kv_format(kernel_group_id),
-                    recalculated_skip_blocks,
+                    info["all_skip_blocks"],
                 )
+        else:
+            # --- Fallback: batched (very long sequences exceeding buffer) ---
+            blocks_per_chunk = info["blocks_per_chunk"]
+            blocks_per_window = info["blocks_per_window"]
+
+            if use_native_layerwise_plan:
+                # Fused native path: one execute_object_group_transfer
+                # call per layer with one BatchStep per batch.
+                first_start_obj = batch_plan[0][0]
+                last_batch_start, last_batch_objs = batch_plan[-1]
+                last_end_obj = last_batch_start + len(last_batch_objs)
+                full_start_block = first_start_obj * blocks_per_window
+                full_end_block = last_end_obj * blocks_per_window
+                full_block_ids = block_ids_gpu[kernel_group_id][
+                    full_start_block:full_end_block
+                ]
+
+                all_gpu_ptrs_batched: list[int] = []
+                batch_steps: list = []
+                ptr_offset = 0
+
+                for start_object_idx, memory_object_batch in batch_plan:
+                    batch_len = len(memory_object_batch)
+                    batch_start_token = (
+                        start_object_idx * lmcache_chunk_size
+                    )
+                    skip_tokens_in_chunk = (
+                        max(batch_start_token, skip_first_n_tokens)
+                        - batch_start_token
+                    )
+
+                    staging: list = []
+                    for chunk_idx, memory_obj in enumerate(
+                        memory_object_batch
+                    ):
+                        full_kg_buffer = (
+                            cache_context.get_temp_kernel_group_buffer(
+                                chunk_idx, kernel_group_id
+                            )
+                        )
+                        gpu_dst = full_kg_buffer.data_ptr()
+                        src_ptr = (
+                            memory_obj.data_ptr
+                            + kg_byte_offset
+                            + layer_local_idx * per_layer_bytes
+                        )
+                        staging.append(
+                            lmc_ops.StagingCopy(
+                                gpu_dst,
+                                src_ptr,
+                                per_layer_bytes,
+                                memory_obj.meta.address,
+                            )
+                        )
+                        all_gpu_ptrs_batched.append(gpu_dst)
+
+                    orig_skip_blocks = (
+                        cache_context.calculate_num_blocks(
+                            skip_tokens_in_chunk, kernel_group_id
+                        )
+                    )
+                    recalculated_skip_blocks = (
+                        _recalculate_blocks_to_skip(
+                            blocks_per_chunk,
+                            blocks_per_window,
+                            orig_skip_blocks,
+                        )
+                    )
+                    batch_block_start = (
+                        (start_object_idx - first_start_obj)
+                        * blocks_per_window
+                    )
+                    batch_num_blocks = batch_len * blocks_per_window
+
+                    launch = lmc_ops.LaunchVar(
+                        ptr_offset,
+                        batch_block_start,
+                        batch_num_blocks,
+                        batch_len,
+                        recalculated_skip_blocks,
+                    )
+                    batch_steps.append(
+                        lmc_ops.BatchStep(staging, [launch])
+                    )
+                    ptr_offset += batch_len
+
+                layer_spec = lmc_ops.KernelGroupSpec(
+                    single_layer_kv_ptr.data_ptr(),
+                    all_gpu_ptrs_batched,
+                    single_layer_sd,
+                    slots_per_chunk,
+                    cache_context.get_engine_kv_format(kernel_group_id),
+                    full_block_ids.data_ptr(),
+                    full_block_ids.numel(),
+                )
+                lmc_ops.execute_object_group_transfer(
+                    lmc_ops.TransferDirection.H2D,
+                    cache_context.device,
+                    pin_chunk_size,
+                    [layer_spec],
+                    batch_steps,
+                )
+            else:
+                for start_object_idx, memory_object_batch in batch_plan:
+                    batch_len = len(memory_object_batch)
+                    batch_start_token = (
+                        start_object_idx * lmcache_chunk_size
+                    )
+                    skip_tokens_in_chunk = (
+                        max(batch_start_token, skip_first_n_tokens)
+                        - batch_start_token
+                    )
+
+                    tmp_gpu_buffers_batched: list[int] = []
+                    for chunk_idx, memory_obj in enumerate(
+                        memory_object_batch
+                    ):
+                        full_kg_buffer = (
+                            cache_context.get_temp_kernel_group_buffer(
+                                chunk_idx, kernel_group_id
+                            )
+                        )
+                        gpu_dst = full_kg_buffer.data_ptr()
+                        src_offset = (
+                            kg_byte_offset
+                            + layer_local_idx * per_layer_bytes
+                        )
+                        src_ptr = memory_obj.data_ptr + src_offset
+                        lmc_ops.lmcache_memcpy_async(
+                            gpu_dst, src_ptr, per_layer_bytes,
+                            lmc_ops.TransferDirection.H2D,
+                            memory_obj.meta.address,
+                            pin_chunk_size,
+                        )
+                        tmp_gpu_buffers_batched.append(
+                            full_kg_buffer.data_ptr()
+                        )
+
+                    orig_skip_blocks = (
+                        cache_context.calculate_num_blocks(
+                            skip_tokens_in_chunk, kernel_group_id
+                        )
+                    )
+                    recalculated_skip_blocks = (
+                        _recalculate_blocks_to_skip(
+                            blocks_per_chunk,
+                            blocks_per_window,
+                            orig_skip_blocks,
+                        )
+                    )
+                    start_block_pos = (
+                        start_object_idx * blocks_per_window
+                    )
+                    end_block_pos = (
+                        (start_object_idx + batch_len)
+                        * blocks_per_window
+                    )
+                    block_ids_curr_batch = block_ids_gpu[
+                        kernel_group_id
+                    ][start_block_pos:end_block_pos]
+
+                    lmc_ops.multi_layer_block_kv_transfer(
+                        single_layer_kv_ptr,
+                        tmp_gpu_buffers_batched,
+                        block_ids_curr_batch,
+                        cache_context.device,
+                        lmc_ops.TransferDirection.H2D,
+                        single_layer_sd,
+                        slots_per_chunk,
+                        cache_context.get_engine_kv_format(
+                            kernel_group_id
+                        ),
+                        recalculated_skip_blocks,
+                    )
 
         # Record IPC event so vLLM can start attention for this layer.
         if global_layer_idx < len(layer_events):
