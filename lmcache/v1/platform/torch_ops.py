@@ -690,7 +690,10 @@ def multi_layer_kv_transfer(
     # (used when wrapping a raw pointer).
     layer_shape: Tuple[int, ...]
 
-    if uses_mla:
+    if is_blocked_scale:
+        num_blocks = page_buffer_size // block_size
+        layer_shape = (num_blocks, block_size, hidden_size)
+    elif uses_mla:
         layer_shape = (page_buffer_size, hidden_size)
     elif is_flash_infer:
         num_blocks = page_buffer_size // block_size
@@ -711,9 +714,6 @@ def multi_layer_kv_transfer(
         num_blocks = page_buffer_size // block_size
         num_heads = hidden_size // (2 * head_size)
         layer_shape = (num_blocks, block_size, num_heads, 2 * head_size)
-    elif is_blocked_scale:
-        num_blocks = page_buffer_size // block_size
-        layer_shape = (num_blocks, block_size, hidden_size)
     else:
         layer_shape = (2, page_buffer_size, hidden_size)
 
@@ -730,7 +730,19 @@ def multi_layer_kv_transfer(
             )
 
         # --- B. Vectorized bulk data transfer. ---
-        if uses_mla:
+        if is_blocked_scale:
+            # Paged layout: [BS x values][BS x 4-byte scales] per block.
+            # key_value stores each token as the canonical [values | scale] row.
+            paged_flat = paged_tensor.reshape(-1)
+            if int(direction) == int(TransferDirection.H2D):
+                lmc_valid = key_value[0, layer_id, valid_mask_kv, :]
+                paged_flat[blocked_row_offsets] = lmc_valid.to(paged_tensor.device)
+            else:
+                gathered = paged_flat[blocked_row_offsets]
+                key_value[0, layer_id, valid_mask_kv, :] = gathered.to(
+                    kv_device, non_blocking=False
+                )
+        elif uses_mla:
             # Paged layout : [page_buffer_size, hidden_size]
             # key_value layout: [1, num_layers, num_tokens, hidden_size]
             if int(direction) == int(TransferDirection.H2D):
@@ -803,18 +815,6 @@ def multi_layer_kv_transfer(
                 key_value[0, layer_id, valid_mask_kv, :] = paged_logical.index_select(
                     0, valid_slots
                 ).to(kv_device, non_blocking=False)
-        elif is_blocked_scale:
-            # Paged layout: [BS x values][BS x 4-byte scales] per block.
-            # key_value stores each token as the canonical [values | scale] row.
-            paged_flat = paged_tensor.reshape(-1)
-            if int(direction) == int(TransferDirection.H2D):
-                lmc_valid = key_value[0, layer_id, valid_mask_kv, :]
-                paged_flat[blocked_row_offsets] = lmc_valid.to(paged_tensor.device)
-            else:
-                gathered = paged_flat[blocked_row_offsets]
-                key_value[0, layer_id, valid_mask_kv, :] = gathered.to(
-                    kv_device, non_blocking=False
-                )
         else:
             # Paged layout : [2, page_buffer_size, hidden_size]
             # key_value layout: [2, num_layers, num_tokens, hidden_size]
