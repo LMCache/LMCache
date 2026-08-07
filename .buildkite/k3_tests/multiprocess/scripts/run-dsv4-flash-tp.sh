@@ -13,6 +13,16 @@
 #   real model with the L1 (CPU pool) tier enabled. L1 is the only storage
 #   tier configured here, so a served retrieve proves the L1 path.
 #
+# Hardware requirement:
+#   Hopper (SM90) or datacenter Blackwell (SM100). DeepSeek-V4-Flash's fp8
+#   block-scaled linears and sparse-attention indexer both go through DeepGEMM,
+#   which ships kernels for those two architectures only. On SM120 (RTX 50 /
+#   RTX PRO 6000 Blackwell) weight loading aborts in DeepGEMM's scale-factor
+#   layout transform ("Unknown SF transformation", csrc/apis/layout.hpp:60):
+#   vLLM's SM120 enablement (vllm-project/vllm#43477) is merged, but its pinned
+#   DeepGEMM revision carries no SM120 code. See vllm-project/vllm#41063. The
+#   pipeline step is therefore gated behind RUN_DSV4_TEST=true.
+#
 # This test is self-contained: it launches its own LMCache server + a TP=N
 # vLLM instead of using launch-processes.sh / wait-for-servers.sh, since it
 # needs tensor parallelism and the model's dedicated launch flags

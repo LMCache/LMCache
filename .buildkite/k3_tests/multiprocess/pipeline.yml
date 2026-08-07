@@ -35,8 +35,18 @@ x-pod-1gpu: &pod-1gpu
 steps:
   # 4-GPU group is listed first so the heaviest job gets scheduled before the
   # 2- and 1-GPU jobs.
+  #
+  # Opt-in only: DeepSeek-V4-Flash needs DeepGEMM's SM90 (Hopper) or SM100
+  # (datacenter Blackwell) kernels, and the default agent fleet is SM120
+  # (RTX PRO 6000 Blackwell). vLLM's SM120 enablement (vllm-project/vllm#43477)
+  # is merged, but its pinned DeepGEMM revision carries no SM120 code, so
+  # weight loading aborts in DeepGEMM's scale-factor layout transform
+  # ("Unknown SF transformation", csrc/apis/layout.hpp:60). Tracked upstream in
+  # vllm-project/vllm#41063; the block lifts once vLLM's DeepGEMM pin
+  # (cmake/external_projects/deepgemm.cmake) moves to a branch with SM120
+  # kernels. Until then, run with RUN_DSV4_TEST=true on a Hopper or B200 agent.
   - group: ":compression: Multiprocess (4-GPU)"
-    if: build.env("VERIFY_AND_PIN_VLLM") !~ /true/
+    if: build.env("VERIFY_AND_PIN_VLLM") !~ /true/ && build.env("RUN_DSV4_TEST") == "true"
     steps:
       # L1 + slot-compression KV correctness for DeepSeek-V4-Flash (sparse-MLA
       # + fp8, TP=4). The model's KV cache groups mix block geometries
