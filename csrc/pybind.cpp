@@ -59,7 +59,7 @@ PYBIND11_MODULE(c_ops, m) {
   m.def(
       "single_layer_kv_transfer",
       [](torch::Tensor& lmc_key_value_cache,
-         torch::Tensor& vllm_key_value_cache, const torch::Tensor& slot_mapping,
+         torch::Tensor& vllm_key_value_cache, torch::Tensor& slot_mapping,
          int direction, int engine_kv_format, const bool token_major = false) {
         return single_layer_kv_transfer(
             lmc_key_value_cache, vllm_key_value_cache, slot_mapping,
@@ -72,7 +72,7 @@ PYBIND11_MODULE(c_ops, m) {
   m.def(
       "single_layer_kv_transfer_sgl",
       [](torch::Tensor& lmc_key_value_cache, torch::Tensor& sgl_key_cache,
-         torch::Tensor& sgl_value_cache, const torch::Tensor& slot_mapping,
+         torch::Tensor& sgl_value_cache, torch::Tensor& slot_mapping,
          int direction, const bool token_major = false) {
         return single_layer_kv_transfer_sgl(
             lmc_key_value_cache, sgl_key_cache, sgl_value_cache, slot_mapping,
