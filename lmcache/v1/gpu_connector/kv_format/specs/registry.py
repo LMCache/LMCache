@@ -37,16 +37,30 @@ def _discover_specs() -> dict["lmc_ops.EngineKVFormat", type[KVFormatSpec]]:
 
 SPECS = _discover_specs()
 
+# Indexed by enum *value*: the native pybind ``EngineKVFormat`` and the
+# pure-Python fallback one are distinct types with the same members, and both
+# reach this table (e.g. from ``lmcache.v1.platform.torch_ops``).
+_SPECS_BY_VALUE = {int(fmt): spec for fmt, spec in SPECS.items()}
+
 
 def get_spec_class(fmt: "lmc_ops.EngineKVFormat") -> type[KVFormatSpec]:
-    """Return the spec class for *fmt*, for static facts (``is_mla``, ...).
+    """Return the spec class for *fmt* -- the owner of its static facts.
+
+    Args:
+        fmt: The Engine KV format to look up.
+
+    Returns:
+        The :class:`KVFormatSpec` subclass declaring *fmt*, which carries the
+        format's static layout facts (``is_mla``, ``is_hnd``, the structural
+        shape, ``attention_backends``, ...) as class attributes.
 
     Raises:
         ValueError: If *fmt* has no spec.
     """
-    if fmt not in SPECS:
+    spec = _SPECS_BY_VALUE.get(int(fmt))
+    if spec is None:
         raise ValueError(f"Unknown Engine KV Format: {fmt}")
-    return SPECS[fmt]
+    return spec
 
 
 def get_spec(

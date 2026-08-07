@@ -31,9 +31,14 @@ def _batch(
     size_bytes: int = 1024,
     shared: bool = False,
     ts: float = 0.0,
+    token_ids: list[int] | None = None,
 ) -> CacheEventBatch:
     entries = [
-        CacheEventEntry(key=k.to_encoded_object_key(), size_bytes=size_bytes)
+        CacheEventEntry(
+            key=k.to_encoded_object_key(),
+            size_bytes=size_bytes,
+            token_ids=token_ids or [],
+        )
         for k in (keys or [_key(0xAA)])
     ]
     return CacheEventBatch(
@@ -286,6 +291,165 @@ def test_drop_instance_removes_all_its_placements():
 def test_drop_unknown_instance_returns_zero():
     directory = KeyDirectory()
     assert directory.drop_instance("ghost") == 0
+
+
+# -- Token bindings ----------------------------------------------------------
+
+
+def _chash(hash_byte: int) -> bytes:
+    return bytes([hash_byte]) * 4
+
+
+def _rank_key(hash_byte: int, kv_rank: int) -> ObjectKey:
+    return ObjectKey(chunk_hash=_chash(hash_byte), model_name="m", kv_rank=kv_rank)
+
+
+def test_binding_links_on_store_and_drops_on_delete():
+    directory = KeyDirectory()
+    directory.apply_batch(_batch(seq=1, keys=[_key(1)], token_ids=[1, 2]))
+    assert directory.get_token_ids([_chash(1)]) == [(1, 2)]
+
+    directory.apply_batch(
+        _batch(seq=2, event_type=CacheEventType.DELETE, keys=[_key(1)])
+    )
+    assert directory.get_token_ids([_chash(1)]) == [()]
+
+
+def test_binding_survives_until_last_record_of_the_chunk():
+    """Records sharing a chunk hash (ranks/groups) hold one binding."""
+    directory = KeyDirectory()
+    directory.apply_batch(
+        _batch(seq=1, keys=[_key(1), _rank_key(1, 1)], token_ids=[1, 2])
+    )
+
+    directory.apply_batch(
+        _batch(seq=2, event_type=CacheEventType.DELETE, keys=[_key(1)])
+    )
+    assert directory.get_token_ids([_chash(1)]) == [(1, 2)]
+
+    directory.apply_batch(
+        _batch(seq=3, event_type=CacheEventType.DELETE, keys=[_rank_key(1, 1)])
+    )
+    assert directory.get_token_ids([_chash(1)]) == [()]
+
+
+def test_chunks_bind_independently():
+    directory = KeyDirectory()
+    directory.apply_batch(_batch(seq=1, keys=[_key(1)], token_ids=[1, 2]))
+    directory.apply_batch(_batch(seq=2, keys=[_key(2)], token_ids=[3, 4]))
+
+    directory.apply_batch(
+        _batch(seq=3, event_type=CacheEventType.DELETE, keys=[_key(1)])
+    )
+    assert directory.get_token_ids([_chash(1), _chash(2)]) == [(), (3, 4)]
+
+
+def test_token_less_entry_links_empty_binding():
+    """An entry the emitter could not stamp still links its key; the
+    chunk's next stamped entry fills the tokens in."""
+    directory = KeyDirectory()
+    directory.apply_batch(_batch(seq=1, keys=[_rank_key(1, 1)]))
+    assert directory.get_token_ids([_chash(1)]) == [()]
+
+    directory.apply_batch(_batch(seq=2, keys=[_key(1)], token_ids=[1, 2]))
+    assert directory.get_token_ids([_chash(1)]) == [(1, 2)]
+
+    # The unstamped record still holds its reference.
+    directory.apply_batch(
+        _batch(seq=3, event_type=CacheEventType.DELETE, keys=[_key(1)])
+    )
+    assert directory.get_token_ids([_chash(1)]) == [(1, 2)]
+
+
+def test_untagged_record_heals_on_restore():
+    directory = KeyDirectory()
+    directory.apply_batch(_batch(seq=1, keys=[_key(1)]))
+    assert directory.get_token_ids([_chash(1)]) == [()]
+
+    directory.apply_batch(_batch(seq=2, keys=[_key(1)], token_ids=[1, 2]))
+    assert directory.get_token_ids([_chash(1)]) == [(1, 2)]
+
+    directory.apply_batch(
+        _batch(seq=3, event_type=CacheEventType.DELETE, keys=[_key(1)])
+    )
+    assert directory.get_token_ids([_chash(1)]) == [()]
+
+
+def test_restore_with_new_tokens_rebinds():
+    directory = KeyDirectory()
+    directory.apply_batch(_batch(seq=1, keys=[_key(1)], token_ids=[1, 2]))
+    directory.apply_batch(_batch(seq=2, keys=[_key(1)], token_ids=[3, 4]))
+
+    assert directory.get_token_ids([_chash(1)]) == [(3, 4)]
+
+
+def test_fencing_releases_bindings():
+    directory = KeyDirectory()
+    directory.apply_batch(_batch(seq=1, keys=[_key(1)], token_ids=[1, 2]))
+
+    directory.apply_batch(_batch(seq=1, incarnation=2, keys=[_key(9)]))
+    assert directory.get_token_ids([_chash(1)]) == [()]
+
+
+def test_drop_instance_releases_bindings():
+    directory = KeyDirectory()
+    directory.apply_batch(_batch(seq=1, keys=[_key(1)], token_ids=[1, 2]))
+
+    directory.drop_instance("node-a")
+    assert directory.get_token_ids([_chash(1)]) == [()]
+
+
+# -- Listing -------------------------------------------------------------------
+
+
+def test_list_keys_returns_pages_of_matching_keys():
+    directory = KeyDirectory()
+    directory.apply_batch(_batch(seq=1, keys=[_key(1)], token_ids=[1, 2]))
+    directory.apply_batch(_batch(seq=2, keys=[_key(2)]))
+
+    total, page = directory.list_keys()
+    assert total == 2
+    assert set(page) == {_key(1), _key(2)}
+    assert len(page[_key(1)]) == 1
+
+
+def test_list_keys_filters_keep_matching_placements_only():
+    directory = KeyDirectory()
+    directory.apply_batch(_batch(seq=1, tier=Tier.L1, backend="dram", keys=[_key(1)]))
+    directory.apply_batch(_batch(seq=2, tier=Tier.L2, backend="fs", keys=[_key(1)]))
+    directory.apply_batch(
+        _batch(instance_id="node-b", tier=Tier.L1, backend="dram", keys=[_key(2)])
+    )
+
+    total, page = directory.list_keys(tier=Tier.L2)
+    assert total == 1
+    assert [(p.tier, p.backend) for p in page[_key(1)]] == [(Tier.L2, "fs")]
+
+    _, node_b = directory.list_keys(instance_id="node-b")
+    assert set(node_b) == {_key(2)}
+
+    assert directory.list_keys(backend="fs")[0] == 1
+    assert directory.list_keys(backend="valkey")[0] == 0
+
+
+def test_list_keys_paginates_with_stable_total():
+    directory = KeyDirectory()
+    directory.apply_batch(_batch(seq=1, keys=[_key(1), _key(2), _key(3)]))
+
+    first_total, first = directory.list_keys(offset=0, limit=2)
+    rest_total, rest = directory.list_keys(offset=2, limit=2)
+    assert first_total == rest_total == 3
+    assert len(first) == 2
+    assert len(rest) == 1
+    assert set(first) | set(rest) == {_key(1), _key(2), _key(3)}
+
+
+def test_list_keys_rejects_negative_paging():
+    directory = KeyDirectory()
+    with pytest.raises(ValueError, match="offset"):
+        directory.list_keys(offset=-1)
+    with pytest.raises(ValueError, match="limit"):
+        directory.list_keys(limit=-1)
 
 
 # -- Intrinsic invariants ------------------------------------------------------
