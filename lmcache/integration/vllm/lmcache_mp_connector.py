@@ -651,7 +651,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             The finished saves/sends req ids must belong to a set provided in a
             call to this method (this call or a prior one).
         """
-        val = self.worker_adapter.get_finished(finished_req_ids)
+        if self.lazy_offload:
+            val = self.worker_adapter.get_finished_with_lazy_offload()
+        else:
+            val = self.worker_adapter.get_finished(finished_req_ids)
         # logger.error("Finished req ids: %s, %s", val[0], val[1])
         return val
 

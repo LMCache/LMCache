@@ -1634,10 +1634,6 @@ class LMCacheMPWorkerAdapter:
             # first and deletes the request, so we must not also report it
             # in finished_sending.
             ret_stores -= finished_retrieves
-            if self.lazy_offload:
-                for req_id in ret_stores:
-                    self._completed_store_requests[req_id] = 1
-                return None, finished_retrieves
             return ret_stores, finished_retrieves
 
         finished_stores = set()
@@ -1705,11 +1701,122 @@ class LMCacheMPWorkerAdapter:
                 kv_rank=self.worker_id,
             )
 
-        if self.lazy_offload:
-            for req_id in ret_stores:
+        return ret_stores, finished_retrieves
+
+    @_lmcache_nvtx_annotate
+    def get_finished_with_lazy_offload(
+        self,
+    ) -> tuple[set[str] | None, set[str] | None]:
+        """
+        Check and get the finished store and retrieve requests in lazy offload mode.
+
+        Returns:
+            A tuple of two sets:
+            - The first set contains the finished store request ids.
+                In lazy offload mode, return None directly.
+            - The second set contains the finished retrieve request ids,
+                including retrieves dropped at submit time while unhealthy
+                (reported exactly once; blocks already in error_block_ids).
+        """
+        if not self.lazy_offload:
+            raise ValueError(
+                "get_finished_with_lazy_offload is only available in lazy offload mode"
+            )
+
+        if self.dispatcher is not None:
+            dispatch(self.dispatcher, "reclaim")
+
+        # If unhealthy, drain all pending futures immediately
+        if not self.is_healthy:
+            finished_stores = set(self.store_futures.keys())
+            finished_retrieves = set()
+            for request_id, (
+                _r_future,
+                r_block_ids,
+            ) in self.retrieve_futures.items():
+                finished_retrieves.add(request_id)
+                self.error_block_ids.update(r_block_ids)
+            self.store_futures.clear()
+            self.retrieve_futures.clear()
+            self.store_events.clear()
+            self.retrieve_events.clear()
+
+            # Retrieves dropped at submit time still must be reported,
+            # exactly once, or async loads hang in WAITING_FOR_REMOTE_KVS.
+            # Swap-drain (not update-then-clear): a concurrent
+            # submit_retrieve_request add lands in the old set (reported now)
+            # or the fresh set (reported next call), never lost.
+            dropped = self._dropped_retrieves
+            self._dropped_retrieves = set()
+            finished_retrieves.update(dropped)
+
+            for req_id in finished_stores:
                 self._completed_store_requests[req_id] = 1
             return None, finished_retrieves
-        return ret_stores, finished_retrieves
+
+        finished_stores = set()
+        finished_retrieves = set()
+        for request_id, s_future in self.store_futures.items():
+            if not s_future.query():
+                continue
+
+            s_result = s_future.result(timeout=60)
+            finished_stores.add(request_id)
+
+            if not s_result:
+                logger.error(
+                    "Something went wrong when processing the "
+                    "store request for request_id=%s",
+                    request_id,
+                )
+
+        for request_id, (r_future, _) in self.retrieve_futures.items():
+            if not r_future.query():
+                continue
+
+            r_result = r_future.result(timeout=60)
+            finished_retrieves.add(request_id)
+
+            if not r_result:
+                logger.error(
+                    "Something went wrong when processing the "
+                    "retrieve request for request_id=%s, result=%s",
+                    request_id,
+                    r_result,
+                )
+
+        # Remove the finished requests from the tracking dicts
+        for request_id in finished_stores:
+            self.store_futures.pop(request_id, None)
+            self.store_events.pop(request_id, None)
+        for request_id in finished_retrieves:
+            self.retrieve_futures.pop(request_id, None)
+            self.retrieve_events.pop(request_id, None)
+
+        # Retrieves dropped while unhealthy still must be reported,
+        # exactly once, or async loads hang in WAITING_FOR_REMOTE_KVS. No
+        # finished_sending dedup is needed (unlike the unhealthy branch): a
+        # dropped retrieve's request is parked in WAITING_FOR_REMOTE_KVS until
+        # this report, so it cannot also be engine-finished in the same call.
+        # Swap-drain so a concurrent submit_retrieve_request add is never lost.
+        dropped = self._dropped_retrieves
+        self._dropped_retrieves = set()
+        finished_retrieves.update(dropped)
+
+        # the invocation of `get_finished` means that
+        # these requests' KV caches are already fully stored.
+        # or the requests normally ends without any store.
+        if finished_stores:
+            self.request_telemetry.on_request_store_finished(
+                request_ids_set=finished_stores,
+                model_name=self.model_name,
+                world_size=self.world_size,
+                kv_rank=self.worker_id,
+            )
+
+        for req_id in finished_stores:
+            self._completed_store_requests[req_id] = 1
+        return None, finished_retrieves
 
     def get_completed_store_requests(self) -> dict[str, int] | None:
         """Return completed store requests since the last call."""
