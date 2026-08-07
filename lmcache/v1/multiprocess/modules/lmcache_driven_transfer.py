@@ -28,6 +28,7 @@ from lmcache.v1.gpu_connector.gpu_ops import (
     lmcache_memcpy_async_h2d,
 )
 from lmcache.v1.gpu_connector.utils import LayoutHints
+from lmcache.v1.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_management import GDSMemoryObject, MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType
@@ -129,6 +130,47 @@ def batched_iteration_with_skip(
     while batch := tuple(islice(it, batch_size)):
         yield batch_start_idx, batch
         batch_start_idx += len(batch)
+
+
+def all_null_chunk_masks(
+    block_ids: Sequence[Sequence[int]],
+    object_groups: Sequence[ObjectGroupInfo],
+    blocks_per_chunk: Sequence[int],
+    num_chunks: int,
+) -> list[list[bool]]:
+    """Mark, per object group, the chunks whose engine block ids are all null.
+
+    A chunk is null for an object group when every block id of every kernel
+    group in that group is 0 (the vLLM null block). Align-mode Mamba/linear
+    layers produce such chunks: only the block holding the last recurrent state
+    is real, so every earlier chunk is null. These chunks must not be stored --
+    the null block carries no valid KV, and object keys are content hashes, so
+    committing them would serve garbage to a later prefix hit.
+
+    Args:
+        block_ids: Raw per-kernel-group engine block ids (before any downsample),
+            indexed by kernel-group index.
+        object_groups: The object groups, indexed by object-group id.
+        blocks_per_chunk: Blocks in one chunk per kernel group, indexed by
+            kernel-group index.
+        num_chunks: Number of chunks in the request.
+
+    Returns:
+        ``mask[g][i]`` is True iff chunk ``i`` is all-null for object group ``g``.
+    """
+    masks: list[list[bool]] = []
+    for group in object_groups:
+        chunk_null: list[bool] = []
+        for i in range(num_chunks):
+            is_null = True
+            for kg in group.kernel_group_indices:
+                bpc = blocks_per_chunk[kg]
+                if any(block_ids[kg][i * bpc : (i + 1) * bpc]):
+                    is_null = False
+                    break
+            chunk_null.append(is_null)
+        masks.append(chunk_null)
+    return masks
 
 
 def downsample_and_stage_block_ids(
@@ -1041,6 +1083,17 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 event_backend.record_event(event, cache_context.stream)
                 return event_backend.export_event(event, cache_context.device), False
 
+            # Chunks whose block ids are all the null block (e.g. align-mode
+            # Mamba chunks holding no real state) carry no valid KV and must not
+            # be committed. Computed on the raw block ids before downsampling
+            # mutates them.
+            skipped_chunks = all_null_chunk_masks(
+                gpu_block_ids,
+                cache_context.kv_layer_groups_manager.object_groups,
+                blocks_per_chunk,
+                num_chunks,
+            )
+
             block_ids_per_group_gpu = downsample_and_stage_block_ids(
                 cache_context, gpu_block_ids
             )
@@ -1092,13 +1145,17 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             try:
                 for obj_group_id in range(num_object_groups):
                     obj_keys = obj_keys_per_obj_group[obj_group_id]
+                    skip_mask = skipped_chunks[obj_group_id]
+                    keys_to_reserve = [
+                        k for i, k in enumerate(obj_keys) if not skip_mask[i]
+                    ]
                     layout_desc = get_layout_desc(
                         cache_context,
                         self._ctx.chunk_size,
                         object_group_id=obj_group_id,
                     )
                     reserved_dict = self._ctx.storage_manager.reserve_write(
-                        obj_keys, layout_desc, "new"
+                        keys_to_reserve, layout_desc, "new"
                     )
                     all_dict.update(reserved_dict)
                     if reserved_dict:
@@ -1125,8 +1182,9 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                         retain_keys.extend(group_retain)
                         retain_sizes.extend([chunk_bytes] * len(group_retain))
 
-                    # Keys not in reserved_dict (skipped by the storage manager)
-                    # become None entries; the helper skips them for D2H.
+                    # Keys not in reserved_dict (all-null chunks skipped above, or
+                    # skipped by the storage manager) become None entries; the
+                    # helper skips them for D2H.
                     memory_objs: list[MemoryObj | None] = [
                         reserved_dict.get(obj_key) for obj_key in obj_keys
                     ]
@@ -1308,21 +1366,39 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             )
             event_backend.wait_event(producer_event, cache_context.stream)
 
+            # Per object group, the prefetch only locked the in-window suffix
+            # (the last ``num_chunks_in_sw`` chunks; the whole prefix for full
+            # attention, where the value is < 0). Read and transfer only those.
+            attn_desc = cache_context.kv_layer_groups_manager.get_attn_desc()
+            group_skips = [
+                0 if window < 0 else max(0, num_chunks - window)
+                for window in attn_desc.num_chunks_in_sw
+            ]
+            expected_retained = sum(num_chunks - skip for skip in group_skips)
+
             prefetched_keys: list[ObjectKey] = []
             total_bytes = 0
             retrieve_succeeded = True
             try:
                 for obj_group_id in range(num_object_groups):
-                    obj_keys = obj_keys_per_obj_group[obj_group_id]
+                    skip = group_skips[obj_group_id]
+                    in_window_keys = obj_keys_per_obj_group[obj_group_id][skip:]
                     with self._ctx.storage_manager.read_prefetched_results(
-                        obj_keys
-                    ) as memory_objs:
-                        if not memory_objs or len(memory_objs) != len(obj_keys):
+                        in_window_keys
+                    ) as window_objs:
+                        if not window_objs or len(window_objs) != len(in_window_keys):
                             logger.error("Some keys not found during retrieve!")
                             retrieve_succeeded = False
                             break
 
-                        total_bytes += sum(mo.get_size() for mo in memory_objs)
+                        total_bytes += sum(mo.get_size() for mo in window_objs)
+
+                        # None-pad the skipped prefix to full length so the
+                        # transfer's ``num_objects_to_skip`` and block-id slicing
+                        # line up unchanged; the None entries are never read.
+                        memory_objs: list[MemoryObj | None] = [None] * skip + list(
+                            window_objs
+                        )
 
                         transfer_kv_per_object_group(
                             cache_context,
@@ -1336,7 +1412,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                         # Extend only after the copy is enqueued: on exception,
                         # read_prefetched_results releases this group's locks
                         # itself, and a key must not be released twice.
-                        prefetched_keys.extend(obj_keys)
+                        prefetched_keys.extend(in_window_keys)
             except Exception:
                 logger.exception("Cannot retrieve keys due to exception")
                 retrieve_succeeded = False
@@ -1350,7 +1426,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                     )
                 num_tokens = (
                     num_chunks * self._ctx.chunk_size
-                    if len(prefetched_keys) == num_chunks * num_object_groups
+                    if len(prefetched_keys) == expected_retained
                     else 0
                 )
                 self._ctx.event_bus.publish_on_stream(

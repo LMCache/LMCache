@@ -141,39 +141,38 @@ def _has_preemption_reqs(scheduler_output: SchedulerOutput) -> bool:
 
 
 def validate_mamba_step_alignment(vllm_config: VllmConfig) -> None:
-    """Reject scheduler configs that can skip Mamba state snapshots.
+    """Reject scheduler configs whose steps cannot advance a whole Mamba block.
 
     In ``mamba_cache_mode="align"`` vLLM snapshots the recurrent state only at
-    the end of each scheduler step, and a step that advances more than one
-    block fills the skipped block-table positions with the null block
-    (``MambaManager.allocate_new_blocks``). LMCache keys chunks by token hash,
-    so a skipped boundary would be stored as null-block garbage under a valid
-    key and silently corrupt any request that later resumes from that prefix.
-    Requiring ``block_size <= max_num_batched_tokens < 2 * block_size`` makes
-    vLLM's block-aligned splitting (``Scheduler._mamba_block_aligned_split``)
-    advance every mid-prefill step by exactly one block, so every chunk
-    boundary holds a real snapshot.
+    the end of each scheduler step, on the last block the step advanced. A step
+    advancing more than one block fills the skipped block-table positions with
+    the null block (``MambaManager.allocate_new_blocks``); LMCache handles those
+    safely -- ``store`` never commits an all-null-block chunk and ``retrieve``
+    loads only each object group's sliding-window suffix -- so
+    ``max_num_batched_tokens`` may exceed ``2 * block_size`` (with
+    ``--separate-object-groups``). Only the lower bound remains: a step must
+    advance at least one full block, or vLLM's block-aligned splitting
+    (``Scheduler._mamba_block_aligned_split``) yields empty chunks and prefill
+    cannot progress.
 
     Args:
         vllm_config: The vLLM config; only Mamba-hybrid models in ``align``
             cache mode are constrained, others pass.
 
     Raises:
-        ValueError: If ``max_num_batched_tokens`` is not in
-            ``[block_size, 2 * block_size)``.
+        ValueError: If ``max_num_batched_tokens < block_size``.
     """
     if getattr(vllm_config.cache_config, "mamba_cache_mode", "none") != "align":
         return
     block_size = vllm_config.cache_config.block_size
     max_batched = vllm_config.scheduler_config.max_num_batched_tokens
-    if not (block_size <= max_batched < 2 * block_size):
+    if max_batched < block_size:
         raise ValueError(
             f"Mamba-hybrid models with LMCache require "
-            f"block_size <= max_num_batched_tokens < 2 * block_size so every "
-            f"prefill step advances exactly one block and every block boundary "
-            f"gets a state snapshot; got max_num_batched_tokens={max_batched}, "
-            f"block_size={block_size}. Set --max-num-batched-tokens "
-            f"{block_size}."
+            f"max_num_batched_tokens >= block_size so every prefill step "
+            f"advances at least one full block; got "
+            f"max_num_batched_tokens={max_batched}, block_size={block_size}. "
+            f"Set --max-num-batched-tokens to at least {block_size}."
         )
 
 
