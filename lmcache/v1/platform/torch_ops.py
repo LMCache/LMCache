@@ -372,6 +372,31 @@ def _alloc_page_aligned_pinned_view(size: int) -> Tuple[torch.Tensor, int]:
     return aligned_view, aligned_view.data_ptr()
 
 
+# Every static fact about a format lives on its ``KVFormatSpec``; the public
+# ``is_*`` helpers below only look it up. They mirror the c_ops predicates
+# (csrc/engine_kv_format.h) -- the parity test pins them to the same names and
+# signatures.
+def _format_spec(engine_kv_format: EngineKVFormat) -> "type[KVFormatSpec]":
+    """Return the spec class owning *engine_kv_format*'s static layout facts.
+
+    Args:
+        engine_kv_format: The format to look up.
+
+    Returns:
+        The ``KVFormatSpec`` subclass declared for the format.
+
+    Raises:
+        ValueError: If the format has no spec.
+    """
+    # Imported lazily, not at module scope: the specs package reads
+    # ``lmcache.c_ops``, whose shim is installed only once this module (the
+    # torch baseline behind it) has been imported.
+    # First Party
+    from lmcache.v1.gpu_connector.kv_format.specs.registry import get_spec_class
+
+    return get_spec_class(engine_kv_format)
+
+
 def alloc_pinned_numa_ptr(size: int, numa_id: int = 0) -> int:
     """Non-CUDA equivalent of allocating pinned memory with NUMA awareness.
     On XPU, uses pin_memory=True (SYCL USM host allocation) for fast transfers.
@@ -737,31 +762,6 @@ def multi_layer_kv_transfer_unilateral(
             else:
                 gathered = paged_tensor.index_select(0, valid_slots)
                 key_value[kv_idx, layer_id, valid_mask_kv, :] = gathered.to(kv_device)
-
-
-# Every static fact about a format lives on its ``KVFormatSpec``; the helpers
-# below only look it up. The four public ones mirror the c_ops predicates
-# (csrc/engine_kv_format.h) -- the parity test pins them to the same names and
-# signatures.
-def _format_spec(engine_kv_format: EngineKVFormat) -> "type[KVFormatSpec]":
-    """Return the spec class owning *engine_kv_format*'s static layout facts.
-
-    Args:
-        engine_kv_format: The format to look up.
-
-    Returns:
-        The ``KVFormatSpec`` subclass declared for the format.
-
-    Raises:
-        ValueError: If the format has no spec.
-    """
-    # Imported lazily, not at module scope: the specs package reads
-    # ``lmcache.c_ops``, whose shim is installed only once this module (the
-    # torch baseline behind it) has been imported.
-    # First Party
-    from lmcache.v1.gpu_connector.kv_format.specs.registry import get_spec_class
-
-    return get_spec_class(engine_kv_format)
 
 
 def is_cross_layer(engine_kv_format: EngineKVFormat) -> bool:

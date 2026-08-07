@@ -153,15 +153,16 @@ enum class EngineKVFormat : int {
 // the two sides can never drift; the predicates below are one-line lookups.
 // Exactly one structural shape (cross_layer / kv_list / layer_list) is true per
 // format. The remaining flags are modifiers layered on top of it.
+// Every field defaults to false; the table below only sets the true ones.
 struct FormatFacts {
-  bool is_cross_layer;   // all layers in one fused tensor
-  bool is_kv_list;       // keys and values in two top-level lists
-  bool is_layer_list;    // one list entry per layer
-  bool is_mla;           // MLA: single latent KV head (no separate K/V)
-  bool is_hnd;           // heads before block tokens (HND layout)
-  bool is_fused_packed;  // K/V packed in trailing dim (kv_size == 1)
-  bool is_two_major;     // size-2 K/V axis precedes the block axis
-  bool is_pbs_fused;     // paged buffer size fused into one axis
+  bool is_cross_layer = false;   // all layers in one fused tensor
+  bool is_kv_list = false;       // keys and values in two top-level lists
+  bool is_layer_list = false;    // one list entry per layer
+  bool is_mla = false;           // MLA: single latent KV head (no separate K/V)
+  bool is_hnd = false;           // heads before block tokens (HND layout)
+  bool is_fused_packed = false;  // K/V packed in trailing dim (kv_size == 1)
+  bool is_two_major = false;     // size-2 K/V axis precedes the block axis
+  bool is_pbs_fused = false;     // paged buffer size fused into one axis
 };
 
 // clang-format off
