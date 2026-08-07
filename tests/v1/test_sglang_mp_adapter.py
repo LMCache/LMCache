@@ -7,15 +7,14 @@ returns a pollable future -- an already-completed one on the no-op paths
 completion future on the happy path -- and never blocks on the result."""
 
 # Standard
+from types import SimpleNamespace
+from typing import cast
+from unittest.mock import MagicMock
 import threading
 
 # Third Party
 import pytest
 import torch
-
-# The adapter imports ``sglang`` at module load; skip cleanly where it's absent
-# (sglang is an optional integration, not a hard LMCache dependency).
-pytest.importorskip("sglang")
 
 # First Party
 from lmcache.integration.sglang import multi_process_adapter as adapter_mod
@@ -23,7 +22,11 @@ from lmcache.integration.sglang.multi_process_adapter import (
     LMCacheMPConnector,
     _completed_future,
 )
-from lmcache.integration.sglang.sglang_adapter import StoreMetadata
+from lmcache.integration.sglang.sglang_adapter import (
+    LMCacheLayerwiseConnector,
+    LoadMetadata,
+    StoreMetadata,
+)
 from lmcache.v1.multiprocess.futures import MessagingFuture
 
 _CHUNK_SIZE = 256
@@ -60,20 +63,24 @@ class _SpyFuture(MessagingFuture):
     def __init__(self) -> None:
         super().__init__()
         self.result_called = False
+        self.retained_references: list[object] = []
 
     def result(self, timeout=None):
         self.result_called = True
         return super().result(timeout)
 
+    def retain_reference(self, value: object) -> None:
+        self.retained_references.append(value)
+        super().retain_reference(value)
+
 
 class _FakeRaw:
-    """Stand-in for ``send_lmcache_request``'s return; hands back a preset
-    future from ``to_cuda_future`` so no CUDA event is needed."""
+    """Stand-in returning a preset platform-aware completion future."""
 
     def __init__(self, future: MessagingFuture) -> None:
         self._future = future
 
-    def to_cuda_future(self, device=None) -> MessagingFuture:
+    def to_device_future(self, device=None) -> MessagingFuture:
         return self._future
 
 
@@ -104,6 +111,91 @@ def test_completed_future_resolves_to_given_result() -> None:
     done_false = _completed_future(False)
     assert done_false.query() is True
     assert done_false.result(timeout=0) is False
+
+
+def test_wrap_sglang_kv_caches_uses_platform_wrapper_in_kv_order(
+    monkeypatch,
+) -> None:
+    """Registration dispatches each tensor through the platform wrapper."""
+    k_pool = [torch.tensor([1]), torch.tensor([2])]
+    v_pool = [torch.tensor([3]), torch.tensor([4])]
+    wrapped_tensors: list[torch.Tensor] = []
+
+    def wrap_one(tensor: torch.Tensor) -> object:
+        wrapped_tensors.append(tensor)
+        return SimpleNamespace(tensor=tensor)
+
+    monkeypatch.setattr(
+        adapter_mod,
+        "wrap_one_kv_cache",
+        wrap_one,
+        raising=False,
+    )
+
+    wrapped = adapter_mod._wrap_sglang_kv_caches(k_pool, v_pool)
+    wrapped_namespaces = cast(list[SimpleNamespace], wrapped)
+
+    assert wrapped_tensors == [*k_pool, *v_pool]
+    assert [wrapper.tensor for wrapper in wrapped_namespaces] == [*k_pool, *v_pool]
+
+
+def test_wrap_sglang_kv_caches_requires_full_handle_capability(
+    monkeypatch,
+) -> None:
+    """Registration fails before export when a platform capability is absent."""
+    monkeypatch.setattr(
+        adapter_mod,
+        "get_device_spec",
+        lambda _device_type: SimpleNamespace(
+            is_handle_transfer_available=lambda: False
+        ),
+    )
+
+    with pytest.raises(ValueError, match="required memory IPC, event IPC"):
+        adapter_mod._wrap_sglang_kv_caches(
+            [torch.tensor([1])],
+            [torch.tensor([2])],
+        )
+
+
+def test_wrap_sglang_kv_caches_rejects_mismatched_layers() -> None:
+    """Registration rejects a wire payload that cannot split into K/V pairs."""
+    with pytest.raises(ValueError, match="matching K and V layers"):
+        adapter_mod._wrap_sglang_kv_caches(
+            [torch.tensor([1]), torch.tensor([2])],
+            [torch.tensor([3])],
+        )
+
+
+@pytest.mark.parametrize(
+    ("k_pool", "v_pool", "message"),
+    [
+        ([], [torch.tensor([1])], "non-empty K and V pools"),
+        ([torch.tensor([1])], [], "non-empty K and V pools"),
+        (
+            [torch.tensor([1]), torch.tensor([2])],
+            [torch.tensor([3])],
+            "matching K and V layers",
+        ),
+    ],
+)
+def test_mp_connector_validates_pools_before_opening_mq(
+    k_pool: list[torch.Tensor],
+    v_pool: list[torch.Tensor],
+    message: str,
+) -> None:
+    """Invalid registration fails before reading the first tensor or opening MQ."""
+    with pytest.raises(ValueError, match=message):
+        LMCacheMPConnector(
+            sgl_config=SimpleNamespace(model_path="test-model"),
+            tp_size=1,
+            rank=0,
+            page_size=2,
+            host="127.0.0.1",
+            port=5556,
+            k_pool=k_pool,
+            v_pool=v_pool,
+        )
 
 
 def test_store_kv_async_unhealthy_returns_failed_future_no_send(monkeypatch) -> None:
@@ -163,6 +255,67 @@ def test_store_kv_async_happy_path_returns_daemon_future_without_blocking(
     # It returns the daemon's own future, and must NOT have blocked on it.
     assert future is sentinel
     assert sentinel.result_called is False
-    # The exporting CUDA event must be pinned to the future so it isn't
+    # The exporting device event must be pinned to the future so it isn't
     # garbage-collected before the daemon waits on its IPC handle.
-    assert hasattr(future, "_export_event")
+    assert len(sentinel.retained_references) == 1
+    assert isinstance(sentinel.retained_references[0], _FakeEvent)
+
+
+def test_submit_retrieve_retains_exported_device_event(monkeypatch) -> None:
+    """The producer event outlives daemon import through the returned future."""
+    connector = _make_connector(healthy=True)
+    connector.mq_client = object()  # type: ignore[assignment]
+    connector.instance_id = 123
+    connector.device = "cpu"
+    connector.model_name = "test-model"
+    connector.tp_size = 1
+    connector.worker_id = 0
+    sentinel = _SpyFuture()
+    monkeypatch.setattr(adapter_mod, "torch_dev", _FakeTorchDev)
+    monkeypatch.setattr(
+        adapter_mod,
+        "send_lmcache_request",
+        lambda mq_client, request_type, payload: _FakeRaw(sentinel),
+    )
+
+    future = connector._submit_retrieve(
+        request_id="request-1",
+        token_ids=[1, 2],
+        offset=0,
+        matched_end=2,
+        block_ids=[0],
+    )
+
+    assert future is sentinel
+    assert len(sentinel.retained_references) == 1
+    assert isinstance(sentinel.retained_references[0], _FakeEvent)
+
+
+def test_layerwise_load_forwards_partial_slot_mapping_offset() -> None:
+    """Layerwise retrieval tells the GPU connector where its slot map begins."""
+    connector = object.__new__(LMCacheLayerwiseConnector)
+    connector.lmcache_engine = MagicMock()
+    connector.lmcache_engine.lookup.return_value = 6
+    connector.lmcache_engine.retrieve_layer.return_value = iter([None, None, None])
+    connector.sgl_config = SimpleNamespace(num_hidden_layers=2)
+    connector.tp_size = 1
+    connector.rank = 0
+    connector.tp_group = None
+    connector.kvcaches = [[], []]
+    connector.layerwise_retrievers = []
+    connector.layer_load_layer = []
+    connector.lookup_id_list = []
+    metadata = LoadMetadata(
+        token_ids=list(range(8)),
+        slot_mapping=torch.tensor([10, 11, 12, 13, 14]),
+        offset=3,
+    )
+
+    assert connector.start_load_kv(metadata) == 3
+
+    retrieve_kwargs = connector.lmcache_engine.retrieve_layer.call_args.kwargs
+    assert retrieve_kwargs["offset"] == 3
+    assert torch.equal(
+        retrieve_kwargs["slot_mapping"].cpu(),
+        metadata.slot_mapping.cpu(),
+    )
