@@ -62,10 +62,11 @@ Commonly used flags include:
    * - ``--eviction-ratio RATIO``
      - Fraction of L1 cleared per eviction cycle.
    * - ``--retention-max-fraction RATIO``
-     - Fraction of total L2 capacity that ttl-retained chunks may shield
-       from eviction (``0`` disables retention, default). Must stay below
-       the eviction trigger watermark so eviction always has unshielded
-       keys to take.
+     - Fraction of the eviction-enabled L2 adapter's capacity that
+       ttl-retained chunks may shield from eviction (``0`` disables
+       retention, default). Requires at most one eviction-enabled adapter
+       and must stay below its eviction trigger watermark so eviction
+       always has unshielded keys to take.
    * - ``--max-workers N``
      - Number of server worker processes.
    * - ``--coordinator-url URL``

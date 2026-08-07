@@ -245,10 +245,10 @@ class StorageManagerConfig:
     """ The configuration for L2 adapters. """
 
     retention_max_fraction: float = 0.0
-    """ Fraction of total L2 capacity that retention may shield from
-    eviction. 0 disables retention. When set, it must stay below every
-    adapter's trigger_watermark so the eviction loop always has
-    evictable keys. """
+    """ Fraction of the eviction-enabled L2 adapter's capacity that
+    retention may shield from eviction. 0 disables retention. Requires
+    at most one eviction-enabled adapter and must stay below its
+    trigger_watermark. """
 
     store_policy: str = "default"
     """ The L2 store policy name. """
@@ -309,14 +309,24 @@ def validate_storage_manager_config(config: StorageManagerConfig) -> None:
         raise ValueError("gds-l1-path cannot be used with l1-devdax-path")
 
     if config.retention_max_fraction > 0:
-        for ac in config.l2_adapter_config.adapters:
-            if ac.eviction_config is None:
-                continue
-            if config.retention_max_fraction >= ac.eviction_config.trigger_watermark:
+        eviction_configs = [
+            ec
+            for ac in config.l2_adapter_config.adapters
+            if (ec := ac.eviction_config) is not None
+        ]
+        if len(eviction_configs) > 1:
+            raise ValueError(
+                "retention_max_fraction supports at most one eviction-enabled "
+                f"L2 adapter (got {len(eviction_configs)}): the default store "
+                "policy replicates chunks to every adapter, so one budget "
+                "cannot keep each adapter below its eviction watermark"
+            )
+        for ec in eviction_configs:
+            if config.retention_max_fraction >= ec.trigger_watermark:
                 raise ValueError(
                     f"retention_max_fraction ({config.retention_max_fraction}) "
                     "must be below the L2 trigger_watermark "
-                    f"({ac.eviction_config.trigger_watermark})"
+                    f"({ec.trigger_watermark})"
                 )
 
     memory_config = config.l1_manager_config.memory_config

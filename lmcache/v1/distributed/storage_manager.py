@@ -109,9 +109,10 @@ class StorageManager:
         # just a dict protected by a lock and has no OS resources.
         self._quota_manager = QuotaManager()
 
-        # Retention budget: a fraction of total L2 capacity. The fraction
-        # is validated against adapter watermarks at config time; capacity
-        # is taken at boot, so adapters added at runtime do not grow the
+        # Retention budget: a fraction of the eviction-enabled adapter's
+        # capacity (validation caps retention configs at one such adapter,
+        # so this sum is that adapter's capacity, or zero). Capacity is
+        # taken at boot, so adapters added at runtime do not grow the
         # budget.
         l2_capacity_bytes = 0
         for adapter_id, ac in zip(

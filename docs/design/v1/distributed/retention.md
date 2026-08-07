@@ -84,10 +84,12 @@ expired budget; keys deleted outside the loop are dropped via ``forget``.
 
 - ``retention_max_fraction`` (``StorageManagerConfig``; server CLI
   ``--retention-max-fraction``, default ``0`` = disabled): fraction of
-  total L2 capacity retention may shield. Capacity is summed over
-  eviction-enabled adapters at boot; adapters added at runtime do not grow
-  the budget.
-- Config validation rejects a fraction at or above any adapter's
+  the eviction-enabled adapter's capacity retention may shield. Capacity
+  is taken at boot; adapters added at runtime do not grow the budget.
+- While retention is enabled, config validation requires at most one
+  eviction-enabled adapter -- the default store policy replicates chunks
+  to every adapter, so one budget cannot keep several adapters below
+  their watermarks -- and rejects a fraction at or above that adapter's
   ``trigger_watermark``.
 - ``report_status()`` on the eviction controller gains a ``retention``
   section: live keys/bytes, budget, and the lifetime ``stamps`` /
