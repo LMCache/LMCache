@@ -5,6 +5,7 @@
 from dataclasses import dataclass, replace
 from typing import TypedDict
 import threading
+import os
 
 # First Party
 from lmcache.logging import init_logger
@@ -210,6 +211,9 @@ class MPCacheServerContext:
         self._chunk_size = chunk_size
         self._separate_object_groups = separate_object_groups
         self._full_sw_kv = full_sw_kv
+        self._layerwise_loading: bool = bool(
+            os.environ.get("LMCACHE_MP_LAYERWISE_ENABLED", "")
+        )
 
         # Initialize the process-global GDS context.
         # No-op when GDS L1 is disabled (config is None).
@@ -240,6 +244,11 @@ class MPCacheServerContext:
     def chunk_size(self) -> int:
         """Chunk size for KV cache operations."""
         return self._chunk_size
+
+    @property
+    def layerwise_loading(self) -> bool:
+        """Whether per-layer store/retrieve is enabled."""
+        return self._layerwise_loading
 
     @property
     def separate_object_groups(self) -> bool:

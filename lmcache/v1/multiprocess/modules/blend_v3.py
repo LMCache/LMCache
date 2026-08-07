@@ -1477,6 +1477,7 @@ class BlendV3Module(InstanceLivenessTarget):
         instance_id: int,
         gpu_block_ids: list[list[int]],
         event_ipc_handle: bytes,
+        layerwise: bool = False,
     ) -> tuple[bytes, bool]:
         """Paged store, then register the stored chunks as match fingerprints.
 
@@ -1491,13 +1492,15 @@ class BlendV3Module(InstanceLivenessTarget):
             instance_id (int): Target KV-cache instance.
             gpu_block_ids (list[list[int]]): Per-layer-group paged block IDs.
             event_ipc_handle (bytes): IPC handle to the producer's CUDA event.
+            layerwise (bool): If True, use per-layer storage.
 
         Returns:
             tuple[bytes, bool]: The underlying ``LMCacheDrivenTransfer.store`` result
             (event handle, success).
         """
         result = self._transfer_module.store(
-            key, instance_id, gpu_block_ids, event_ipc_handle
+            key, instance_id, gpu_block_ids, event_ipc_handle,
+            layerwise=layerwise,
         )
 
         # The matcher is engine-shared; only worker 0 registers.

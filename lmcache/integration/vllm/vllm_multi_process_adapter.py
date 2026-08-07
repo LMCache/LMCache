@@ -1138,7 +1138,7 @@ class LMCacheMPWorkerAdapter:
         # layerwise transfer and return LayerwiseDeviceMessagingFuture
         # so wait_for_layer_load can synchronize per layer.
         self._layerwise_loading: bool = bool(
-            os.environ.get("LMCACHE_MP_LAYERWISE_LOADING", False)
+            os.environ.get("LMCACHE_MP_LAYERWISE_ENABLED", False)
         )
 
         # The store requests that have finished execution in LMCache
@@ -1455,6 +1455,7 @@ class LMCacheMPWorkerAdapter:
             self._block_ids_per_group(op),
             event,
             self.blocks_in_chunk,
+            layerwise=self._layerwise_loading,
         )
         self.store_futures[request_id] = future
         self.store_events[request_id] = event

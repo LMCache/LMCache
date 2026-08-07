@@ -276,7 +276,7 @@ __device__ void multi_layer_block_transfer_single_block(
 
 template <typename ScalarType, bool lmcache_to_engine, EngineKVFormat format>
 __global__ void multi_layer_block_transfer_kernel(
-    MemoryObj4<ScalarType> lmcache_objects,
+    ScalarType** __restrict__ lmcache_object_ptrs,
     ScalarType** __restrict__ paged_buffer_ptrs,
     const int64_t* engine_block_ids,
     const int num_blocks_per_object,  // e.g. 16 for lmcache chunk size =
@@ -297,14 +297,14 @@ __global__ void multi_layer_block_transfer_kernel(
   const int engine_block_idx = engine_block_ids[flat_block_idx];
   multi_layer_block_transfer_single_block<ScalarType, lmcache_to_engine,
                                           format>(
-      lmcache_objects.objects[obj_idx], paged_buffer_ptrs, engine_block_idx,
+      lmcache_object_ptrs[obj_idx], paged_buffer_ptrs, engine_block_idx,
       block_idx_in_object * shape_desc.bs,  // offset in LMCache object
       shape_desc, lmcache_chunk_size);
 }
 
 #define LAUNCH_KERNEL(DIRECTION, FORMAT)                                 \
   multi_layer_block_transfer_kernel<ScalarType, DIRECTION, FORMAT>       \
-      <<<grid, block, 0, stream>>>(lmcache_obj4, paged_buffer_ptrs,      \
+      <<<grid, block, 0, stream>>>(lmcache_ptrs_dev, paged_buffer_ptrs,  \
                                    block_ids_ptr, num_blocks_per_object, \
                                    shape_desc, lmcache_chunk_size,       \
                                    skip_prefix_n_blocks);                \
@@ -371,8 +371,8 @@ void multi_layer_block_kv_transfer_templated(
     EngineKVFormat engine_kv_format, int skip_prefix_n_blocks) {
   // --- Validation ---
   int num_objects = static_cast<int>(lmcache_objects_ptrs.size());
-  TORCH_CHECK(num_objects >= 1 && num_objects <= 4,
-              "Expected 1-4 LMCache objects, got ", num_objects);
+  TORCH_CHECK(num_objects >= 1,
+              "Expected at least 1 LMCache object, got ", num_objects);
 
   int total_blocks = block_ids.size(0);
   TORCH_CHECK(total_blocks % num_objects == 0, "block_ids length (",
@@ -385,22 +385,23 @@ void multi_layer_block_kv_transfer_templated(
               num_blocks_per_object * shape_desc.bs,
               ") must equal lmcache_chunk_size (", lmcache_chunk_size, ")");
 
-  // --- Build MemoryObj4 ---
-  MemoryObj4<ScalarType> lmcache_obj4;
-  lmcache_obj4.num_objects = num_objects;
-  for (int i = 0; i < 4; ++i) {
-    lmcache_obj4.objects[i] =
-        (i < num_objects)
-            ? reinterpret_cast<ScalarType*>(lmcache_objects_ptrs[i])
-            : nullptr;
-  }
-
   // --- Build paged buffer pointer array ---
   ScalarType** paged_buffer_ptrs =
       reinterpret_cast<ScalarType**>(paged_buffer_ptrs_tensor.data_ptr());
 
   const at::cuda::OptionalCUDAGuard device_guard(device);
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+  // --- Upload LMCache object pointers to device ---
+  // Small allocation (N * 8 bytes); caching allocator makes this O(1).
+  // The copy runs on the current stream, so it completes before the kernel.
+  auto gpu_ptrs_tensor = torch::empty(
+      {num_objects}, torch::TensorOptions().dtype(torch::kInt64).device(device));
+  gpu_ptrs_tensor.copy_(torch::from_blob(
+      lmcache_objects_ptrs.data(), {num_objects},
+      torch::TensorOptions().dtype(torch::kInt64)));
+  ScalarType** lmcache_ptrs_dev =
+      reinterpret_cast<ScalarType**>(gpu_ptrs_tensor.data_ptr());
 
   // --- block_ids is a GPU int64 tensor, read directly ---
   const int64_t* block_ids_ptr = block_ids.data_ptr<int64_t>();

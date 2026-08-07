@@ -163,6 +163,19 @@ class ObjectKey:
             for i in range(num_layers)
         ]
 
+    def as_layer0(self) -> "ObjectKey":
+        """Return a copy with layer_id=0 (layer-0 canary key)."""
+        if self.layer_id == 0:
+            return self
+        return ObjectKey(
+            chunk_hash=self.chunk_hash,
+            model_name=self.model_name,
+            kv_rank=self.kv_rank,
+            object_group_id=self.object_group_id,
+            cache_salt=self.cache_salt,
+            layer_id=0,
+        )
+
     def to_encoded_object_key(self) -> "EncodedObjectKey":
         """Return the JSON-safe :class:`EncodedObjectKey` projection."""
         return EncodedObjectKey(

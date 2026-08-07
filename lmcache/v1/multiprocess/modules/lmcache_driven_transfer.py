@@ -92,31 +92,6 @@ def get_layout_desc(
     return MemoryLayoutDesc(shapes=list(shapes), dtypes=list(dtypes))
 
 
-def get_single_layer_layout_desc(
-    cache_context: BaseCacheContext,
-    num_tokens: int,
-    object_group_id: int,
-) -> MemoryLayoutDesc:
-    """Get a single-layer memory layout description for per-layer storage.
-
-    Like ``get_layout_desc`` but with ``num_layers=1`` in each shape,
-    describing the layout of a per-layer MemoryObj.
-    """
-    object_group = cache_context.kv_layer_groups_manager.object_groups[object_group_id]
-    shapes_and_dtypes = [
-        cache_context.get_kernel_group_shape_dtype(num_tokens, kernel_group_idx)
-        for kernel_group_idx in object_group.kernel_group_indices
-    ]
-    shapes = []
-    dtypes = []
-    for shape, dtype in shapes_and_dtypes:
-        # shape is (kv_size, num_layers, num_slots, hidden_dim)
-        # Replace num_layers with 1
-        single_layer_shape = torch.Size((shape[0], 1, shape[2], shape[3]))
-        shapes.append(single_layer_shape)
-        dtypes.append(dtype)
-    return MemoryLayoutDesc(shapes=shapes, dtypes=dtypes)
-
 
 def batched_iteration_with_skip(
     lst: Sequence,
@@ -486,6 +461,7 @@ def transfer_kv_per_object_group(
     batch_size: int,
     skip_first_n_tokens: int,
     direction: "lmcache_native.TransferDirection",
+    kv_contiguous: bool = False,
 ) -> None:
     """Helper function to transfer memory objects of a single object group
     to/from GPU, with batching support.
@@ -513,7 +489,7 @@ def transfer_kv_per_object_group(
         This function expects the caller to stage the block ids (list[list[int]])
         into GPU tensors and pass them in as `block_ids_gpu`.
     """
-    if _HAS_NATIVE_OBJECT_GROUP_TRANSFER and not any(
+    if _HAS_NATIVE_OBJECT_GROUP_TRANSFER and not kv_contiguous and not any(
         isinstance(mo, GDSMemoryObject) for mo in memory_objs
     ):
         _run_object_group_transfer_plan(
@@ -622,13 +598,14 @@ def transfer_kv_per_object_group(
                 ).data_ptr()
                 for i in range(batch_len)
             ]
+            sd = cache_context.get_shape_desc(kernel_group_id)
             device_ops.multi_layer_block_kv_transfer(
                 group_kv_pointers,
                 tmp_gpu_buffers_batched,
                 block_ids_curr_batch,
                 cache_context.device,
                 direction,
-                cache_context.get_shape_desc(kernel_group_id),
+                sd,
                 group_lmcache_chunk_size,
                 cache_context.get_engine_kv_format(kernel_group_id),
                 recalculated_skip_blocks,
@@ -643,144 +620,6 @@ def transfer_kv_per_object_group(
                     ),
                     memory_obj,
                 )
-
-
-
-def _h2d_layer_slice(
-    memory_obj: MemoryObj,
-    gpu_k_dst: int,
-    gpu_v_dst: int,
-    kg_byte_offset: int,
-    layer_local_idx: int,
-    num_layers_in_kg: int,
-    per_layer_bytes: int,
-):
-    """H2D just one layer's K and V data from a MemoryObj.
-
-    Copies two contiguous slices (K and V for one layer) from the
-    host-side MemoryObj into the corresponding positions in the GPU
-    temp buffer.
-
-    Args:
-        memory_obj: Source host memory object.
-        gpu_k_dst: GPU destination pointer for K data.
-        gpu_v_dst: GPU destination pointer for V data.
-        kg_byte_offset: Byte offset of the kernel group within the MemoryObj.
-        layer_local_idx: Index of the layer within the kernel group.
-        num_layers_in_kg: Total number of layers in the kernel group.
-        per_layer_bytes: Bytes per single K (or V) slice for one layer.
-    """
-    src_base = memory_obj.data_ptr + kg_byte_offset
-
-    # K[layer_i] offset within kernel group: layer_i * slots * hidden * elem_size
-    k_src = src_base + layer_local_idx * per_layer_bytes
-    # V[layer_i] offset: (num_layers + layer_i) * slots * hidden * elem_size
-    v_src = src_base + (num_layers_in_kg + layer_local_idx) * per_layer_bytes
-
-    if isinstance(memory_obj.parent(), LazyMemoryAllocator):
-        lmc_ops.lmcache_memcpy_async(
-            gpu_k_dst, k_src, per_layer_bytes,
-            lmc_ops.TransferDirection.H2D,
-            memory_obj.meta.address,
-            LazyMemoryAllocator.PIN_CHUNK_SIZE,
-        )
-        lmc_ops.lmcache_memcpy_async(
-            gpu_v_dst, v_src, per_layer_bytes,
-            lmc_ops.TransferDirection.H2D,
-            memory_obj.meta.address,
-            LazyMemoryAllocator.PIN_CHUNK_SIZE,
-        )
-    else:
-        src_tensor = memory_obj.raw_tensor
-        if src_tensor is None:
-            raise ValueError(
-                "memory_obj.raw_tensor is None in _h2d_layer_slice"
-            )
-        raw = src_tensor.view(torch.uint8)
-        k_off = kg_byte_offset + layer_local_idx * per_layer_bytes
-        v_off = kg_byte_offset + (num_layers_in_kg + layer_local_idx) * per_layer_bytes
-        # Use torch.from_blob-style approach via data_ptr for non-lazy path
-        k_dst_t = torch.tensor([], dtype=torch.uint8, device="cuda").set_(
-            torch.cuda.ByteStorage._new_shared(per_layer_bytes), 0,
-            (per_layer_bytes,),
-        )
-        # Simpler: use the gpu buffer tensors passed by caller
-        # The caller should pass gpu tensor slices instead of raw pointers
-        # for the non-lazy path. For now, fall back to full-chunk H2D.
-        raise NotImplementedError(
-            "Per-layer H2D for non-LazyMemoryAllocator not yet implemented. "
-            "Use LazyMemoryAllocator for per-layer transfer."
-        )
-
-
-def _d2h_layer_slice(
-    gpu_buffer_data_ptr: int,
-    memory_obj: MemoryObj,
-    kg_byte_offset_in_obj: int,
-    layer_local_idx: int,
-    num_layers_in_kg: int,
-    per_kv_bytes: int,
-):
-    """D2H one layer's K and V data from GPU temp buffer to a per-layer MemoryObj.
-
-    The GPU temp buffer layout per kernel group is:
-        [K_layer0, K_layer1, ..., K_layerN, V_layer0, ..., V_layerN]
-
-    The per-layer MemoryObj layout is:
-        [K_data, V_data]  — 2 * per_kv_bytes total
-
-    Args:
-        gpu_buffer_data_ptr: GPU temp buffer data_ptr for the kernel group.
-        memory_obj: Destination per-layer CPU MemoryObj.
-        kg_byte_offset_in_obj: Byte offset of this kernel group within the MemoryObj.
-        layer_local_idx: Index of the layer within the kernel group.
-        num_layers_in_kg: Total number of layers in the kernel group.
-        per_kv_bytes: Bytes for a single K (or V) slice for one layer.
-    """
-    # GPU source offsets within the kernel group buffer
-    k_gpu_src = gpu_buffer_data_ptr + layer_local_idx * per_kv_bytes
-    v_gpu_src = gpu_buffer_data_ptr + (num_layers_in_kg + layer_local_idx) * per_kv_bytes
-
-    # CPU destination offsets within the per-layer MemoryObj
-    # Layout: [K_data | V_data] with optional kg_byte_offset prefix
-    k_cpu_dst = memory_obj.data_ptr + kg_byte_offset_in_obj
-    v_cpu_dst = memory_obj.data_ptr + kg_byte_offset_in_obj + per_kv_bytes
-
-    if isinstance(memory_obj.parent(), LazyMemoryAllocator):
-        lmc_ops.lmcache_memcpy_async(
-            k_cpu_dst, k_gpu_src, per_kv_bytes,
-            lmc_ops.TransferDirection.D2H,
-            memory_obj.meta.address,
-            LazyMemoryAllocator.PIN_CHUNK_SIZE,
-        )
-        lmc_ops.lmcache_memcpy_async(
-            v_cpu_dst, v_gpu_src, per_kv_bytes,
-            lmc_ops.TransferDirection.D2H,
-            memory_obj.meta.address,
-            LazyMemoryAllocator.PIN_CHUNK_SIZE,
-        )
-    else:
-        import ctypes
-        # Non-lazy path: use raw tensor copy
-        dst_tensor = memory_obj.raw_tensor
-        if dst_tensor is None:
-            raise ValueError(
-                "memory_obj.raw_tensor is None in _d2h_layer_slice"
-            )
-        raw_dst = dst_tensor.view(torch.uint8)
-        # Create GPU source views and copy
-        # K slice
-        k_gpu_tensor = torch.empty(
-            per_kv_bytes, dtype=torch.uint8, device="cuda"
-        )
-        k_gpu_tensor.data = torch.UntypedStorage(per_kv_bytes, device="cuda")
-        # Use the simpler approach: create a view into the existing GPU buffer
-        # via torch internal storage at the correct pointer offset
-        # This is complex; for now raise NotImplementedError for non-lazy
-        raise NotImplementedError(
-            "Per-layer D2H for non-LazyMemoryAllocator not yet implemented. "
-            "Use LazyMemoryAllocator for per-layer transfer."
-        )
 
 
 def transfer_kv_layerwise(
@@ -799,6 +638,10 @@ def transfer_kv_layerwise(
     this function copies all chunks for each layer (layer-major).
     After each layer's data is fully on GPU, it records the corresponding
     event so vLLM can start that layer's attention immediately.
+
+    The real pipeline overlap is cross-process: while this server does
+    H2D(i+1)+scatter(i+1), vLLM's attention(i) runs concurrently via
+    IPC event synchronization (same pattern as in-process per-layer).
 
     Args:
         cache_context: The GPU cache context containing KV cache info.
@@ -822,6 +665,14 @@ def transfer_kv_layerwise(
         sw_size_chunks = attn_desc.num_chunks_in_sw[object_group_id]
         num_objects_to_skip = max(0, len(memory_objs) - sw_size_chunks)
 
+    # Validate allocator type once (avoid per-chunk isinstance in hot loop)
+    for mo in memory_objs[num_objects_to_skip:]:
+        if mo is not None and not isinstance(mo.parent(), LazyMemoryAllocator):
+            raise NotImplementedError(
+                "Per-layer H2D for non-LazyMemoryAllocator not yet "
+                "implemented. Use LazyMemoryAllocator for per-layer transfer."
+            )
+
     # Pre-compute per-kernel-group invariants
     kg_infos = []
     for kernel_group_id in kernel_group_ids:
@@ -838,14 +689,14 @@ def transfer_kv_layerwise(
         )
         sd = kg.shape_desc
         slots_per_chunk = cache_context.get_slots_per_chunk_in_sw(kernel_group_id)
-        per_layer_bytes = slots_per_chunk * kg.hidden_dim_size * sd.element_size
+        # per_layer_bytes = K + V for one layer (kv_contiguous layout)
+        per_kv_bytes = slots_per_chunk * kg.hidden_dim_size * sd.element_size
+        per_layer_bytes = sd.kv_size * per_kv_bytes
 
         # Byte offset of this kernel group within the object group buffer
-        # Access the temp buffer's offset map
         kg_byte_offset_in_obj = cache_context._temp_buffer._offset_map.get(
             (0, object_group_id, kernel_group_id)
         )
-        # The offset relative to the object group start
         obj_group_offset = cache_context._temp_buffer._offset_map_object_group_only.get(
             (0, object_group_id)
         )
@@ -856,6 +707,22 @@ def transfer_kv_layerwise(
             )
         kg_byte_offset = kg_byte_offset_in_obj[0] - obj_group_offset[0]
 
+        # Pre-compute single-layer shape descriptor (avoids allocation per layer)
+        single_layer_sd = lmc_ops.PageBufferShapeDesc()
+        single_layer_sd.kv_size = sd.kv_size
+        single_layer_sd.nl = 1
+        single_layer_sd.nb = sd.nb
+        single_layer_sd.bs = sd.bs
+        single_layer_sd.nh = sd.nh
+        single_layer_sd.hs = sd.hs
+        single_layer_sd.element_size = sd.element_size
+        single_layer_sd.block_stride_elems = sd.block_stride_elems
+
+        # Pre-fetch KV pointers (avoids dict lookup per layer)
+        group_kv_pointers = cache_context.get_kernel_group_kv_pointers(
+            kernel_group_id
+        )
+
         kg_infos.append({
             "kernel_group_id": kernel_group_id,
             "kg": kg,
@@ -865,6 +732,8 @@ def transfer_kv_layerwise(
             "per_layer_bytes": per_layer_bytes,
             "kg_byte_offset": kg_byte_offset,
             "sd": sd,
+            "single_layer_sd": single_layer_sd,
+            "group_kv_pointers": group_kv_pointers,
         })
 
     # Build global layer list: (kernel_group_info_idx, layer_local_idx, global_layer_idx)
@@ -877,119 +746,203 @@ def transfer_kv_layerwise(
     # Sort by global layer index to ensure layer-major order
     all_layers.sort(key=lambda x: x[2])
 
-    # Process layer by layer
+    if not all_layers:
+        return
+
+    # Pre-compute batch plan (identical for every layer, avoid re-iteration)
+    batch_plan: list[tuple[int, tuple]] = []
+    for start_object_idx, memory_object_batch in batched_iteration_with_skip(
+        memory_objs, batch_size, skip_count=num_objects_to_skip
+    ):
+        if any(mo is None for mo in memory_object_batch):
+            raise ValueError(
+                "MemoryObj is None for some objects in the batch during "
+                "layerwise H2D transfer."
+            )
+        batch_len = len(memory_object_batch)
+        batch_start_token = start_object_idx * lmcache_chunk_size
+        batch_end_token = batch_start_token + batch_len * lmcache_chunk_size
+        effective_start = max(batch_start_token, skip_first_n_tokens)
+        if effective_start >= batch_end_token:
+            continue
+        batch_plan.append((start_object_idx, memory_object_batch))
+
+    if not batch_plan:
+        # Nothing to transfer; still record events so consumer doesn't hang.
+        for _, _, global_layer_idx in all_layers:
+            if global_layer_idx < len(layer_events):
+                event_backend.record_event(
+                    layer_events[global_layer_idx], cache_context.stream
+                )
+        return
+
+    main_stream = cache_context.stream
+    pin_chunk_size = LazyMemoryAllocator.PIN_CHUNK_SIZE
+
+    # Flatten all valid chunks for single-launch-per-layer optimization.
+    # In the existing temp buffer (4 full-chunk slots per kernel group),
+    # each slot holds nl per-layer entries, giving 4*nl per-layer slots
+    # total -- enough for hundreds of chunks on typical LLMs.
+    all_chunks_flat: list[tuple[int, object]] = []
+    for start_object_idx, memory_object_batch in batch_plan:
+        for local_idx, mo in enumerate(memory_object_batch):
+            all_chunks_flat.append((start_object_idx + local_idx, mo))
+
+    num_active_chunks = len(all_chunks_flat)
+
+    # Pre-compute per-kernel-group block_ids and skip for single-launch path
+    for info in kg_infos:
+        sd = info["sd"]
+        kernel_group_id = info["kernel_group_id"]
+        blocks_per_window = info["blocks_per_window"]
+        blocks_per_chunk = info["blocks_per_chunk"]
+        per_layer_bytes = info["per_layer_bytes"]
+
+        # Flat buffer capacity: total temp buffer bytes / per_layer_bytes
+        total_buffer_bytes = (
+            cache_context.max_batch_size
+            * cache_context.get_temp_kernel_group_buffer(0, kernel_group_id)
+              .nelement()
+            * cache_context.get_temp_kernel_group_buffer(0, kernel_group_id)
+              .element_size()
+        )
+        max_per_layer_slots = total_buffer_bytes // per_layer_bytes
+        info["single_launch"] = num_active_chunks <= max_per_layer_slots
+
+        if info["single_launch"] and num_active_chunks > 0:
+            first_obj_idx = all_chunks_flat[0][0]
+            last_obj_idx = all_chunks_flat[-1][0]
+            first_block = first_obj_idx * blocks_per_window
+            end_block = (last_obj_idx + 1) * blocks_per_window
+            info["all_block_ids"] = block_ids_gpu[kernel_group_id][
+                first_block:end_block
+            ]
+            first_start_token = first_obj_idx * lmcache_chunk_size
+            skip_tokens_first = (
+                max(first_start_token, skip_first_n_tokens)
+                - first_start_token
+            )
+            orig_skip = cache_context.calculate_num_blocks(
+                skip_tokens_first, kernel_group_id
+            )
+            info["all_skip_blocks"] = _recalculate_blocks_to_skip(
+                blocks_per_chunk, blocks_per_window, orig_skip
+            )
+
+    # --- Layer-major loop: H2D + scatter on same stream per layer ---
+    # The real pipeline overlap is cross-process: while this server does
+    # H2D(i+1)+scatter(i+1), vLLM's attention(i) runs concurrently via
+    # IPC event synchronization (same pattern as in-process per-layer).
     for layer_tuple in all_layers:
         kg_info_idx, layer_local_idx, global_layer_idx = layer_tuple
         info = kg_infos[kg_info_idx]
         kernel_group_id = info["kernel_group_id"]
-        kg = info["kg"]
-        blocks_per_chunk = info["blocks_per_chunk"]
-        blocks_per_window = info["blocks_per_window"]
         per_layer_bytes = info["per_layer_bytes"]
         kg_byte_offset = info["kg_byte_offset"]
-        sd = info["sd"]
+        single_layer_sd = info["single_layer_sd"]
+        group_kv_pointers = info["group_kv_pointers"]
+        slots_per_chunk = info["slots_per_chunk"]
 
-        # Get single-layer KV pointer
-        group_kv_pointers = cache_context.get_kernel_group_kv_pointers(
-            kernel_group_id
-        )
-        single_layer_kv_ptr = group_kv_pointers[layer_local_idx:layer_local_idx + 1]
+        single_layer_kv_ptr = group_kv_pointers[
+            layer_local_idx:layer_local_idx + 1
+        ]
 
-        # Create a shape descriptor for single layer
-        single_layer_sd = lmc_ops.PageBufferShapeDesc()
-        single_layer_sd.kv_size = sd.kv_size
-        single_layer_sd.nl = 1  # single layer
-        single_layer_sd.nb = sd.nb
-        single_layer_sd.bs = sd.bs
-        single_layer_sd.nh = sd.nh
-        single_layer_sd.hs = sd.hs
-        single_layer_sd.element_size = sd.element_size
-        single_layer_sd.block_stride_elems = sd.block_stride_elems
+        if info["single_launch"]:
+            # --- Fast path: 1 scatter kernel per layer (matches in-process) ---
+            buffer_base = cache_context.get_temp_kernel_group_buffer(
+                0, kernel_group_id
+            ).data_ptr()
+            all_gpu_ptrs: list[int] = []
 
-        group_lmcache_chunk_size = info["slots_per_chunk"]
+            for chunk_local_idx, (_, memory_obj) in enumerate(all_chunks_flat):
+                gpu_dst = buffer_base + chunk_local_idx * per_layer_bytes
 
-        # For each batch of chunks
-        for start_object_idx, memory_object_batch in batched_iteration_with_skip(
-            memory_objs, batch_size, skip_count=num_objects_to_skip
-        ):
-            if any(mo is None for mo in memory_object_batch):
-                raise ValueError(
-                    "MemoryObj is None for some objects in the batch during "
-                    "layerwise H2D transfer."
+                src_offset = (
+                    kg_byte_offset + layer_local_idx * per_layer_bytes
                 )
-
-            batch_len = len(memory_object_batch)
-            batch_start_token = start_object_idx * lmcache_chunk_size
-            batch_end_token = batch_start_token + batch_len * lmcache_chunk_size
-
-            effective_start = max(batch_start_token, skip_first_n_tokens)
-            if effective_start >= batch_end_token:
-                continue
-
-            skip_tokens_in_chunk = effective_start - batch_start_token
-
-            # H2D just this layer's K and V slices from each chunk
-            # We write to the first layer slot of the temp kernel group buffer
-            tmp_gpu_buffers_batched = []
-            for chunk_idx, memory_obj in enumerate(memory_object_batch):
-                # Get the full kernel group temp buffer for this batch slot
-                full_kg_buffer = cache_context.get_temp_kernel_group_buffer(
-                    chunk_idx, kernel_group_id
+                src_ptr = memory_obj.data_ptr + src_offset
+                lmc_ops.lmcache_memcpy_async(
+                    gpu_dst, src_ptr, per_layer_bytes,
+                    lmc_ops.TransferDirection.H2D,
+                    memory_obj.meta.address,
+                    pin_chunk_size,
                 )
-                # full_kg_buffer shape: (kv_size, num_layers_in_kg, slots, hidden_dim)
-                # We write to [:, 0, :, :] (the first layer slot)
-                # Compute destination pointers for K and V
-                # per_layer_bytes = kv_size * per_kv_bytes (combined K+V)
-                # per_kv_bytes = bytes for just K (or just V) for one layer
-                per_kv_bytes = per_layer_bytes // sd.kv_size
-                # K dest: buffer[0, 0, :, :] = byte offset 0
-                # V dest: compact single-layer layout [K|V], V at per_kv_bytes
-                k_dst = full_kg_buffer.data_ptr()
-                v_dst = full_kg_buffer.data_ptr() + per_kv_bytes
-
-                _h2d_layer_slice(
-                    memory_obj,
-                    k_dst, v_dst,
-                    kg_byte_offset,
-                    layer_local_idx,
-                    kg.num_layers,
-                    per_kv_bytes,
-                )
-                # The kernel will read from [:, 0, :, :] when nl=1
-                tmp_gpu_buffers_batched.append(full_kg_buffer.data_ptr())
-
-            # Paged copy for this single layer
-            orig_skip_blocks = cache_context.calculate_num_blocks(
-                skip_tokens_in_chunk, kernel_group_id
-            )
-            recalculated_skip_blocks = _recalculate_blocks_to_skip(
-                blocks_per_chunk,
-                blocks_per_window,
-                orig_skip_blocks,
-            )
-
-            start_block_pos = start_object_idx * blocks_per_window
-            end_block_pos = (start_object_idx + batch_len) * blocks_per_window
-            block_ids_curr_batch = block_ids_gpu[kernel_group_id][
-                start_block_pos:end_block_pos
-            ]
+                all_gpu_ptrs.append(gpu_dst)
 
             lmc_ops.multi_layer_block_kv_transfer(
                 single_layer_kv_ptr,
-                tmp_gpu_buffers_batched,
-                block_ids_curr_batch,
+                all_gpu_ptrs,
+                info["all_block_ids"],
                 cache_context.device,
                 lmc_ops.TransferDirection.H2D,
                 single_layer_sd,
-                group_lmcache_chunk_size,
+                slots_per_chunk,
                 cache_context.get_engine_kv_format(kernel_group_id),
-                recalculated_skip_blocks,
+                info["all_skip_blocks"],
             )
+        else:
+            # --- Fallback: batched (very long sequences exceeding buffer) ---
+            blocks_per_chunk = info["blocks_per_chunk"]
+            blocks_per_window = info["blocks_per_window"]
 
-        # All chunks for this layer are done — record event
+            for start_object_idx, memory_object_batch in batch_plan:
+                batch_len = len(memory_object_batch)
+                batch_start_token = start_object_idx * lmcache_chunk_size
+                skip_tokens_in_chunk = (
+                    max(batch_start_token, skip_first_n_tokens)
+                    - batch_start_token
+                )
+
+                tmp_gpu_buffers_batched: list[int] = []
+                for chunk_idx, memory_obj in enumerate(memory_object_batch):
+                    full_kg_buffer = (
+                        cache_context.get_temp_kernel_group_buffer(
+                            chunk_idx, kernel_group_id
+                        )
+                    )
+                    gpu_dst = full_kg_buffer.data_ptr()
+                    src_offset = (
+                        kg_byte_offset + layer_local_idx * per_layer_bytes
+                    )
+                    src_ptr = memory_obj.data_ptr + src_offset
+                    lmc_ops.lmcache_memcpy_async(
+                        gpu_dst, src_ptr, per_layer_bytes,
+                        lmc_ops.TransferDirection.H2D,
+                        memory_obj.meta.address,
+                        pin_chunk_size,
+                    )
+                    tmp_gpu_buffers_batched.append(full_kg_buffer.data_ptr())
+
+                orig_skip_blocks = cache_context.calculate_num_blocks(
+                    skip_tokens_in_chunk, kernel_group_id
+                )
+                recalculated_skip_blocks = _recalculate_blocks_to_skip(
+                    blocks_per_chunk, blocks_per_window, orig_skip_blocks,
+                )
+                start_block_pos = start_object_idx * blocks_per_window
+                end_block_pos = (
+                    (start_object_idx + batch_len) * blocks_per_window
+                )
+                block_ids_curr_batch = block_ids_gpu[kernel_group_id][
+                    start_block_pos:end_block_pos
+                ]
+
+                lmc_ops.multi_layer_block_kv_transfer(
+                    single_layer_kv_ptr,
+                    tmp_gpu_buffers_batched,
+                    block_ids_curr_batch,
+                    cache_context.device,
+                    lmc_ops.TransferDirection.H2D,
+                    single_layer_sd,
+                    slots_per_chunk,
+                    cache_context.get_engine_kv_format(kernel_group_id),
+                    recalculated_skip_blocks,
+                )
+
+        # Record IPC event so vLLM can start attention for this layer.
         if global_layer_idx < len(layer_events):
             event_backend.record_event(
-                layer_events[global_layer_idx], cache_context.stream
+                layer_events[global_layer_idx], main_stream
             )
 
 
@@ -1371,6 +1324,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         instance_id: int,
         gpu_block_ids: list[list[int]],
         event_ipc_handle: bytes,
+        layerwise: bool = False,
     ) -> tuple[bytes, bool]:
         """Store the GPU KV cache blocks to CPU.
 
@@ -1381,6 +1335,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             gpu_block_ids: GPU block IDs to store, indexed by LMCache KV
                 group index.
             event_ipc_handle: The IPC handle of the event to wait on.
+            layerwise: Ignored. Retained for API compatibility.
 
         Returns:
             A tuple where the first element is the IPC handle of the event
@@ -1552,6 +1507,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                         batch_size=1,
                         skip_first_n_tokens=0,
                         direction=lmcache_native.TransferDirection.D2H,
+                        kv_contiguous=self._ctx.layerwise_loading,
                     )
 
                 store_succeeded = True
@@ -1598,281 +1554,6 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             event_backend.export_event(event, cache_context.device),
             store_succeeded,
         )
-
-    @_lmcache_nvtx_annotate
-    def store_layerwise(
-        self,
-        key: IPCCacheServerKey,
-        instance_id: int,
-        gpu_block_ids: list[list[int]],
-        event_ipc_handle: bytes,
-    ) -> tuple[bytes, bool]:
-        """Store the GPU KV cache to CPU as per-layer MemoryObjs.
-
-        Like ``store()`` but creates one MemoryObj per (chunk, layer) pair
-        instead of one MemoryObj per chunk with all layers. Each per-layer
-        MemoryObj contains contiguous [K, V] data for a single layer,
-        enabling single-memcpy H2D during per-layer retrieve.
-
-        Same args/returns as ``store()``.
-        """
-        st = time.perf_counter()
-
-        entry = self.get_and_touch_context_entry(instance_id)
-        if entry is None:
-            raise ValueError(f"No GPU context registered for instance ID {instance_id}")
-        cache_context = entry.cache_context
-        model_name = entry.model_name
-        event_backend = entry.event_backend
-        if event_backend is None:
-            raise RuntimeError("Registered cache context has no event backend")
-
-        num_object_groups = cache_context.kv_layer_groups_manager.num_object_groups
-        obj_keys_per_obj_group = self._ctx.resolve_obj_keys(
-            key, list(range(num_object_groups))
-        )
-        num_chunks = len(obj_keys_per_obj_group[0])
-
-        blocks_per_chunk = [
-            cache_context.calculate_num_blocks(self._ctx.chunk_size, group_idx)
-            for group_idx in range(
-                cache_context.kv_layer_groups_manager.num_kernel_groups
-            )
-        ]
-
-        with (
-            torch_dev.device(cache_context.device),
-            torch_dev.stream(cache_context.stream),
-        ):
-            event = event_backend.create_event(cache_context.device)
-
-            if any(
-                len(group_block_ids) < num_chunks * bpc
-                for group_block_ids, bpc in zip(
-                    gpu_block_ids, blocks_per_chunk, strict=True
-                )
-            ):
-                logger.warning(
-                    "STORE_LAYERWISE block ID underflow for request_id=%s; skipping.",
-                    key.request_id,
-                )
-                event_backend.record_event(event, cache_context.stream)
-                return event_backend.export_event(event, cache_context.device), False
-
-            block_ids_per_group_gpu = downsample_and_stage_block_ids(
-                cache_context, gpu_block_ids
-            )
-
-            producer_event = event_backend.import_event(
-                event_ipc_handle, cache_context.device
-            )
-            event_backend.wait_event(producer_event, cache_context.stream)
-
-            self._ctx.event_bus.publish(
-                Event(
-                    event_type=EventType.MP_STORE_SUBMITTED,
-                    session_id=key.request_id,
-                    metadata={"device": str(cache_context.device)},
-                )
-            )
-            self._ctx.event_bus.publish_on_stream(
-                cache_context.cupy_stream,
-                Event(
-                    event_type=EventType.MP_STORE_START,
-                    session_id=key.request_id,
-                    metadata={
-                        "device": str(cache_context.device),
-                        "engine_id": instance_id,
-                        "model_name": model_name,
-                    },
-                ),
-            )
-
-            all_reserved: dict[ObjectKey, MemoryObj] = {}
-            total_bytes: int = 0
-            store_succeeded = False
-            try:
-                for obj_group_id in range(num_object_groups):
-                    obj_keys = obj_keys_per_obj_group[obj_group_id]
-                    object_group = cache_context.kv_layer_groups_manager.object_groups[obj_group_id]
-                    kernel_group_ids = object_group.kernel_group_indices
-
-                    # Get single-layer layout for reserve_write
-                    single_layer_layout = get_single_layer_layout_desc(
-                        cache_context, self._ctx.chunk_size, obj_group_id
-                    )
-
-                    # Compute per-kernel-group info for layer slicing
-                    kg_infos = []
-                    for kernel_group_id in kernel_group_ids:
-                        kg = cache_context.kv_layer_groups_manager.kernel_groups[kernel_group_id]
-                        sd = kg.shape_desc
-                        slots_per_chunk = cache_context.get_slots_per_chunk_in_sw(kernel_group_id)
-                        per_kv_bytes = slots_per_chunk * kg.hidden_dim_size * sd.element_size
-
-                        # Byte offset of this kernel group within the object group
-                        kg_abs_offset = cache_context._temp_buffer._offset_map.get(
-                            (0, obj_group_id, kernel_group_id)
-                        )
-                        obj_group_abs_offset = cache_context._temp_buffer._offset_map_object_group_only.get(
-                            (0, obj_group_id)
-                        )
-                        if kg_abs_offset is None or obj_group_abs_offset is None:
-                            raise ValueError(
-                                f"Cannot find temp buffer offset for kg={kernel_group_id}, og={obj_group_id}"
-                            )
-                        kg_byte_offset_in_obj = kg_abs_offset[0] - obj_group_abs_offset[0]
-
-                        # Single-layer size for this kernel group
-                    single_layer_kg_bytes = sd.kv_size * per_kv_bytes
-                    kg_infos.append({
-                            "kernel_group_id": kernel_group_id,
-                            "kg": kg,
-                            "per_kv_bytes": per_kv_bytes,
-                            "kg_byte_offset_in_obj": kg_byte_offset_in_obj,
-                            "single_layer_kg_bytes": single_layer_kg_bytes,
-                        })
-
-                    # For each chunk: GPU kernel (all layers) → D2H per-layer
-                    for chunk_idx, obj_key in enumerate(obj_keys):
-                        # Split into per-layer keys
-                        num_total_layers = sum(
-                            info["kg"].num_layers for info in kg_infos
-                        )
-                        per_layer_keys = obj_key.split_layers(num_total_layers)
-
-                        # Reserve per-layer MemoryObjs
-                        reserved = self._ctx.storage_manager.reserve_write(
-                            per_layer_keys, single_layer_layout, "new"
-                        )
-                        all_reserved.update(reserved)
-                        if reserved:
-                            total_bytes += next(
-                                iter(reserved.values())
-                            ).get_size() * len(reserved)
-
-                        if not reserved:
-                            continue
-
-                        # GPU kernel: gather all layers from paged GPU → temp buffer
-                        lmcache_chunk_size = cache_context.lmcache_tokens_per_chunk
-
-                        # Stage block IDs for this single chunk
-                        for kernel_group_id in kernel_group_ids:
-                            blocks_per_chunk_kg = cache_context.calculate_num_blocks(
-                                lmcache_chunk_size, kernel_group_id
-                            )
-                            tokens_per_window = min(
-                                lmcache_chunk_size,
-                                cache_context.kv_layer_groups_manager.get_subchunk_sw_size_tokens(kernel_group_id),
-                            )
-                            blocks_per_window = cache_context.calculate_num_blocks(
-                                tokens_per_window, kernel_group_id
-                            )
-
-                            start_block_pos = chunk_idx * blocks_per_window
-                            end_block_pos = (chunk_idx + 1) * blocks_per_window
-                            block_ids_curr = block_ids_per_group_gpu[kernel_group_id][
-                                start_block_pos:end_block_pos
-                            ]
-
-                            group_kv_pointers = cache_context.get_kernel_group_kv_pointers(
-                                kernel_group_id
-                            )
-                            group_lmcache_chunk_size = cache_context.get_slots_per_chunk_in_sw(
-                                kernel_group_id
-                            )
-
-                            lmc_ops.multi_layer_block_kv_transfer(
-                                group_kv_pointers,
-                                [cache_context.get_temp_kernel_group_buffer(
-                                    0, kernel_group_id
-                                ).data_ptr()],
-                                block_ids_curr,
-                                cache_context.device,
-                                lmc_ops.TransferDirection.D2H,
-                                cache_context.get_shape_desc(kernel_group_id),
-                                group_lmcache_chunk_size,
-                                cache_context.get_engine_kv_format(kernel_group_id),
-                                0,  # skip_prefix_n_blocks
-                            )
-
-                        # D2H per-layer: copy each layer's K+V from GPU temp buffer
-                        # to its per-layer MemoryObj
-                        global_layer_idx = 0
-                        sl_kg_offset = 0  # byte offset within single-layer MemObj
-                        for info in kg_infos:
-                            kernel_group_id = info["kernel_group_id"]
-                            kg = info["kg"]
-                            per_kv_bytes = info["per_kv_bytes"]
-                            kg_byte_offset_in_obj = info["kg_byte_offset_in_obj"]
-
-                            gpu_kg_buffer = cache_context.get_temp_kernel_group_buffer(
-                                0, kernel_group_id
-                            )
-
-                            for layer_local_idx in range(kg.num_layers):
-                                layer_key = per_layer_keys[global_layer_idx]
-                                layer_memobj = reserved.get(layer_key)
-                                if layer_memobj is None:
-                                    global_layer_idx += 1
-                                    continue
-
-                                _d2h_layer_slice(
-                                    gpu_kg_buffer.data_ptr(),
-                                    layer_memobj,
-                                    sl_kg_offset,
-                                    layer_local_idx,
-                                    kg.num_layers,
-                                    per_kv_bytes,
-                                )
-                                global_layer_idx += 1
-                            sl_kg_offset += info["single_layer_kg_bytes"]
-
-                store_succeeded = True
-            except Exception:
-                logger.exception("Cannot store_layerwise keys due to exception")
-            finally:
-                event_backend.record_event(event, cache_context.stream)
-                stored_count = len(all_reserved) if store_succeeded else 0
-                if stored_count:
-                    submit_callback_to_stream(
-                        cache_context.cupy_stream,
-                        "finish_write",
-                        list(all_reserved.keys()),
-                    )
-                else:
-                    total_bytes = 0
-                num_tokens = num_chunks * self._ctx.chunk_size if stored_count else 0
-                self._ctx.event_bus.publish_on_stream(
-                    cache_context.cupy_stream,
-                    Event(
-                        event_type=EventType.MP_STORE_END,
-                        session_id=key.request_id,
-                        metadata={
-                            "stored_count": stored_count,
-                            "device": str(cache_context.device),
-                            "engine_id": instance_id,
-                            "model_name": model_name,
-                            "total_bytes": total_bytes,
-                            "num_tokens": num_tokens,
-                        },
-                    ),
-                )
-
-        ed = time.perf_counter()
-        if stored_count:
-            logger.info(
-                "Stored layerwise %d tokens (%d per-layer objects) in %.3f seconds",
-                num_chunks * self._ctx.chunk_size,
-                stored_count,
-                ed - st,
-            )
-        return (
-            event_backend.export_event(event, cache_context.device),
-            store_succeeded,
-        )
-
     @_lmcache_nvtx_annotate
     def retrieve(
         self,

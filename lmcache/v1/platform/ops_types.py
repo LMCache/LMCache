@@ -50,6 +50,7 @@ class PageBufferShapeDesc:
         "element_size",
         "block_stride_elems",
         "dtype",
+        "kv_contiguous",
     )
 
     def __init__(self) -> None:
@@ -64,6 +65,10 @@ class PageBufferShapeDesc:
         # consumer that needs exact addressing must check this.
         self.block_stride_elems: int = 0
         self.dtype: torch.dtype | None = None
+        # When True, the LMCache object layout is (nl, kv_size, slots, hidden)
+        # instead of the default (kv_size, nl, slots, hidden). K and V for
+        # the same layer are adjacent, enabling single-memcpy per-layer H2D.
+        self.kv_contiguous: bool = False
 
 
 class _NativePlanType:

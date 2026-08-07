@@ -270,11 +270,13 @@ class LayerwiseDeviceMessagingFuture(MessagingFuture[T]):
         self._resolved = True
 
     def wait_for_layer(self, layer_idx: int) -> None:
-        """Block until a specific layer's H2D transfer is complete.
+        """Make the current stream wait for a specific layer's transfer.
 
         This waits on the MQ response first (if not yet received), then
-        synchronises the current CUDA/SYCL stream with the event for
-        ``layer_idx``.
+        inserts a stream-ordered dependency so the current GPU stream
+        waits for layer ``layer_idx``'s event without blocking the CPU.
+        This allows the CPU to continue enqueuing work (e.g. the next
+        layer's attention launch) immediately.
 
         Args:
             layer_idx: Global layer index (0-based).
@@ -283,8 +285,9 @@ class LayerwiseDeviceMessagingFuture(MessagingFuture[T]):
             self.raw_future_.wait()
             self._on_raw_future_complete()
         if layer_idx < len(self.layer_events_):
-            self._event_backend.synchronize_event(
-                self.layer_events_[layer_idx], self.device_
+            current_stream = torch_dev.current_stream(self.device_)
+            self._event_backend.wait_event(
+                self.layer_events_[layer_idx], current_stream
             )
 
     def wait(self, timeout: Optional[float] = None) -> bool:
