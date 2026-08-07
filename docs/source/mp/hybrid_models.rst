@@ -108,27 +108,27 @@ detects the model's KV cache groups automatically at registration time.
 Object-group separation
 -----------------------
 
-At KV-cache registration LMCache buckets a hybrid model's layers into **object
-groups** — the unit it stores and retrieves as one object. By default
-(``--separate-object-groups``, on) each distinct cross-chunk attention window
-becomes its own object group: full-attention layers form one group, and each
-sliding-window size (mamba / GDN included) forms another. Pass
-``--no-separate-object-groups`` to keep every layer in a single full-attention
-object group instead (the previous behavior).
+At KV-cache registration LMCache can bucket a hybrid model's layers into
+**object groups** — the unit it stores and retrieves as one object. With
+``--separate-object-groups`` each distinct cross-chunk attention window becomes
+its own object group: full-attention layers form one group, and each
+sliding-window size (mamba / GDN included) forms another. The default is
+**off** — every layer shares a single full-attention object group.
 
 .. code-block:: bash
 
-   # default: one object group per attention window
+   # default: a single full-attention object group for all layers
    lmcache server --chunk-size 256 --l1-size-gb 100
 
-   # opt out: a single full-attention object group for all layers
-   lmcache server --chunk-size 256 --l1-size-gb 100 --no-separate-object-groups
+   # one object group per attention window (required for mamba / GDN hybrids)
+   lmcache server --chunk-size 256 --l1-size-gb 100 --separate-object-groups
 
-The flag is transparent to correctness — prefix caching and KV reuse behave the
-same either way, and a non-hybrid model (a single attention behavior) always
-resolves to one object group regardless of the setting. Separation organizes
-storage by attention window so that each group's cross-chunk window is tracked
-independently.
+For a non-hybrid model (a single attention behavior) the setting makes no
+difference — every layer resolves to one object group either way. For a
+**Mamba / linear-attention hybrid it is required** (see below): it gives the
+linear-attention layers their own cache objects so their recurrent state is
+stored and loaded independently of the full-attention layers — which is what
+lets ``--max-num-batched-tokens`` exceed twice the block size.
 
 Mamba / Linear-Attention Hybrids
 --------------------------------
@@ -211,21 +211,28 @@ example:
      - 768
      - 8
 
-Step 2 — derive the three required flags from ``N``
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Step 2 — derive the required flags from ``N``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-#. **LMCache server** ``--chunk-size`` **= N** (or any multiple of ``N``). This
-   is the rule the connector enforces: LMCache's chunk size must be a multiple
-   of vLLM's unified block size, or registration fails::
+#. **LMCache server** ``--chunk-size`` **= N** (or any multiple of ``N``) **and**
+   ``--separate-object-groups``. The chunk-size rule is enforced by the
+   connector (it must be a multiple of vLLM's unified block size, or
+   registration fails); ``--separate-object-groups`` gives the
+   linear-attention layers their own cache objects and is required for these
+   hybrids::
 
-       lmcache server --chunk-size 784 --l1-size-gb 100 --eviction-policy LRU
+       lmcache server --chunk-size 784 --separate-object-groups \
+           --l1-size-gb 100 --eviction-policy LRU
 
-#. **vLLM** ``--max-num-batched-tokens`` **in [N, 2·N)** — setting it equal to
-   ``N`` is the simple, always-valid choice. Outside this range LMCache raises
-   at engine startup. ``align`` mode snapshots the Mamba state only at the
-   *end* of each scheduler step, so each prefill step must advance exactly one
-   block; a larger budget would let a step skip block boundaries, leaving no
-   snapshot for LMCache to store at those prefixes.
+#. **vLLM** ``--max-num-batched-tokens`` **≥ N** — a scheduler step must advance
+   at least one whole block (``align`` snapshots the Mamba state only at the
+   *end* of each step, on a block boundary). Within ``[N, 2·N)`` every step
+   advances exactly one block, so LMCache snapshots every block boundary — the
+   finest partial-prefix reuse, and ``N`` is the simplest always-valid choice.
+   ``--separate-object-groups`` additionally allows values **≥ 2·N**, which
+   raise prefill throughput with larger steps but snapshot only the last block
+   of each step (cached prefixes then align to step boundaries, not every
+   block).
 
 #. **vLLM** ``--mamba-cache-mode align --enable-prefix-caching`` — ``align`` is
    mandatory (GDN backends do not support the ``all`` mode)::
@@ -236,9 +243,9 @@ Step 2 — derive the three required flags from ``N``
            --kv-transfer-config \
            '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both"}'
 
-So for a freshly-probed model the whole derivation is just: read ``N`` (step 1),
-then pass ``--chunk-size N`` to the server and ``--max-num-batched-tokens N`` to
-vLLM.
+So for a freshly-probed model the whole derivation is: read ``N`` (step 1), then
+pass ``--chunk-size N --separate-object-groups`` to the server and
+``--max-num-batched-tokens N`` to vLLM.
 
 No ``--no-disable-hybrid-kv-cache-manager`` or attention-backend flag is needed;
 ``LMCacheMPConnector`` advertises hybrid support and vLLM auto-selects the GDN

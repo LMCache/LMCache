@@ -21,6 +21,7 @@ import lmcache.c_ops as lmc_ops
 class NB_NL_TWO_BS_NH_HS_Spec(KVFormatSpec):
     engine_kv_format = lmc_ops.EngineKVFormat.NB_NL_TWO_BS_NH_HS
     attention_backends = ("vLLM CROSS_LAYER",)
+    is_cross_layer = True
 
     def num_layers(self) -> int:
         return self.kv_caches.shape[1]
