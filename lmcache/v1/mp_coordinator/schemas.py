@@ -5,20 +5,29 @@ These Pydantic models are the wire contract between the coordinator and mp
 servers. The coordinator uses them to validate requests and shape responses; an
 mp server (when it registers) imports the same models to build its request
 bodies and parse replies, so both sides agree on the schema in one place.
+
+This module holds HTTP models only.
 """
 
 # Standard
-from enum import Enum
 from typing import Annotated
 import base64
 
 # Third Party
-from pydantic import BaseModel, Field, StringConstraints, field_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 import numpy as np
 
 # First Party
 from lmcache.v1.distributed.api import EncodedObjectKey  # noqa: F401  re-exported
-from lmcache.v1.distributed.tiers import Tier
+from lmcache.v1.distributed.api import Tier
+from lmcache.v1.mp_coordinator.api import CacheEventBatch
+from lmcache.v1.mp_coordinator.key_directory import Placement
 
 
 def encode_tokens(tokens: "list[int] | np.ndarray") -> str:
@@ -166,57 +175,7 @@ class QuotaConfigResponse(BaseModel):
     default_limit_gb: float | None
 
 
-# -- Usage tracking ----------------------------------------------------------
-
-
-class EventType(str, Enum):
-    """Cache events reported by an MP server."""
-
-    STORE = "store"
-    LOOKUP = "lookup"
-    DELETE = "delete"
-
-
-class UsageEvent(BaseModel):
-    """A single cache event reported by an MP server.
-
-    Attributes:
-        type: The event type.
-        key: The cache key this event applies to.
-        bytes: Bytes stored (``store`` only; ``0`` for other types).
-    """
-
-    type: EventType
-    key: EncodedObjectKey
-    bytes: int = Field(ge=0)
-
-
-class ReportUsageRequest(BaseModel):
-    """Body of ``POST /quota/events``.
-
-    Attributes:
-        instance_id: Identifier of the MP server that produced this batch.
-        seq: Monotonically increasing sequence number scoped to this
-            ``instance_id``. Starts at 1 for the first flush after the
-            server starts.
-        events: Batch of store/lookup events to record.
-        tier: Cache tier the events apply to (only ``l2`` is supported today).
-    """
-
-    instance_id: str
-    seq: int = Field(ge=1)
-    events: list[UsageEvent]
-    tier: Tier = Tier.L2
-
-
-class ReportUsageResponse(BaseModel):
-    """Reply to ``POST /quota/events``.
-
-    Attributes:
-        recorded: Number of events processed.
-    """
-
-    recorded: int
+# -- Usage / quota status ----------------------------------------------------
 
 
 class StatusResponse(BaseModel):
@@ -245,6 +204,174 @@ class StatusListResponse(BaseModel):
 
     total_gb: float
     by_cache_salt: list[StatusResponse]
+
+
+# -- Key directory -----------------------------------------------------------
+
+
+class DirectoryEventsRequest(BaseModel):
+    """Body of ``POST /directory/events``.
+
+    Attributes:
+        batches: Event batches to apply, in emission order per instance.
+    """
+
+    batches: list[CacheEventBatch] = Field(default_factory=list)
+
+    @field_validator("batches")
+    @classmethod
+    def _validate_batches(cls, value: list[CacheEventBatch]) -> list[CacheEventBatch]:
+        """Enforce encoding-level constraints on every entry.
+
+        Args:
+            value: The hydrated batches.
+
+        Returns:
+            The unchanged batches once every constraint holds.
+
+        Raises:
+            ValueError: If an entry's key cannot convert into an
+                ``ObjectKey`` (surfaced as 422).
+        """
+        for batch in value:
+            for entry in batch.entries:
+                entry.key.to_object_key()
+        return value
+
+
+class DirectoryEventsResponse(BaseModel):
+    """Reply to ``POST /directory/events``.
+
+    Attributes:
+        applied: Batches applied to the directory.
+        duplicates: Batches dropped as already-applied replays.
+        stale: Batches dropped for carrying an outdated incarnation.
+    """
+
+    applied: int = 0
+    duplicates: int = 0
+    stale: int = 0
+
+
+class DirectoryLookupRequest(BaseModel):
+    """Body of ``POST /directory/lookup``.
+
+    Supply exactly one of the two lookup forms:
+
+    * ``keys`` — resolve these keys directly.
+    * ``token_ids`` (with ``model_name`` / ``world_size``) — resolve a
+      request's token sequence to the object keys of its complete
+      chunks, the same fan-out the pin APIs use. Chunk hashes are
+      prefix-chained, so this must be the request's **full** token
+      sequence from position 0; a mid-request slice resolves to
+      different keys. Trailing incomplete chunks are ignored.
+
+    Attributes:
+        keys: The keys to resolve (keys form).
+        token_ids: The request's full token sequence (tokens form).
+        model_name: Model whose rank fan-out to use (tokens form).
+        world_size: World size selecting the per-rank fan-out
+            (tokens form).
+        cache_salt: Per-tenant isolation salt applied to produced keys
+            (tokens form).
+    """
+
+    keys: list[EncodedObjectKey] = Field(default_factory=list)
+    token_ids: list[int] = Field(default_factory=list)
+    model_name: str = ""
+    world_size: int = Field(default=1, ge=1)
+    cache_salt: str = ""
+
+    @field_validator("keys")
+    @classmethod
+    def _validate_keys(cls, value: list[EncodedObjectKey]) -> list[EncodedObjectKey]:
+        """Reject undecodable keys at request validation (surfaced as 422).
+
+        Args:
+            value: The hydrated keys.
+
+        Returns:
+            The unchanged keys once each converts to an ``ObjectKey``.
+
+        Raises:
+            ValueError: If a key cannot convert into an ``ObjectKey``.
+        """
+        for encoded in value:
+            encoded.to_object_key()
+        return value
+
+    @model_validator(mode="after")
+    def _validate_one_form(self) -> "DirectoryLookupRequest":
+        """Enforce that exactly one lookup form is supplied.
+
+        Returns:
+            The unchanged request once exactly one form is present.
+
+        Raises:
+            ValueError: If both or neither of ``keys`` / ``token_ids``
+                is supplied, or the tokens form omits ``model_name``.
+        """
+        if bool(self.keys) == bool(self.token_ids):
+            raise ValueError("supply exactly one of 'keys' or 'token_ids'")
+        if self.token_ids and not self.model_name:
+            raise ValueError("'model_name' is required with 'token_ids'")
+        return self
+
+
+class DirectoryKeyPlacements(BaseModel):
+    """Placements and token ids for one resolved key.
+
+    Attributes:
+        key: The resolved key, echoed back.
+        placements: Known placements; empty when the directory knows
+            nothing about the key.
+        token_ids: The chunk's token ids; empty when unknown.
+    """
+
+    key: EncodedObjectKey
+    placements: list[Placement] = Field(default_factory=list)
+    token_ids: list[int] = Field(default_factory=list)
+
+
+class DirectoryLookupResponse(BaseModel):
+    """Reply to ``POST /directory/lookup``.
+
+    Attributes:
+        chunks: Complete chunks the request resolved to — the token
+            sequence's chunk count (tokens form) or the number of
+            requested keys (keys form).
+        results: One entry per resolved key, in request order (tokens
+            form: ``chunks`` x per-rank fan-out).
+    """
+
+    chunks: int = 0
+    results: list[DirectoryKeyPlacements] = Field(default_factory=list)
+
+
+class DirectoryKeyInfo(BaseModel):
+    """One listed directory key.
+
+    Attributes:
+        key: The listed key.
+        placements: The key's placements that matched the listing filters.
+        num_tokens: Token ids known for the key's chunk (``0`` = unknown).
+    """
+
+    key: EncodedObjectKey
+    placements: list[Placement] = Field(default_factory=list)
+    num_tokens: int = 0
+
+
+class DirectoryListResponse(BaseModel):
+    """Reply to ``GET /directory/keys``.
+
+    Attributes:
+        total: Keys with at least one placement matching the filters.
+        keys: The requested page of them, in directory iteration order.
+    """
+
+    total: int = 0
+    keys: list[DirectoryKeyInfo] = Field(default_factory=list)
 
 
 # -- Global CacheBlend fingerprint directory ------------------------------
@@ -444,4 +571,50 @@ class PinResponse(BaseModel):
 
     requested: int = 0
     affected: int = 0
+    status: str
+
+
+class DeleteRequest(BaseModel):
+    """Body of ``POST /cache/delete`` on the coordinator.
+
+    Attributes:
+        instance_id: Identifier of the target MP server (must be registered).
+        model_name: Model whose layout the target uses to resolve keys.
+        world_size: World size selecting the layout and the per-rank fan-out.
+        token_ids: Prompt tokens whose complete chunks should be deleted.
+        cache_salt: Per-tenant isolation salt applied to the produced keys.
+        tier: Which tier(s) to delete: ``l1`` (L1 only), ``l2`` (L2 only), or
+            ``all`` (both). ``l1`` never touches L2 and vice versa.
+        force: When True, delete even locked/pinned keys -- bypasses L1
+            locks/pins on the node and the coordinator's L2 pin filter.
+    """
+
+    instance_id: str
+    model_name: str
+    world_size: int = Field(ge=1)
+    token_ids: list[int] = Field(default_factory=list)
+    cache_salt: str = ""
+    tier: Tier = Tier.ALL
+    force: bool = False
+
+
+class DeleteResponse(BaseModel):
+    """Reply to ``POST /cache/delete`` on the coordinator.
+
+    Attributes:
+        instance_id: The target MP server the request was dispatched to.
+        requested: Number of whole chunks the token sequence resolved to.
+        affected: Total keys removed across the tiers acted on -- L1 keys deleted
+            by the node plus L2 keys deleted by the coordinator. A chunk resident
+            in both tiers (``tier=all``) contributes to both, so ``affected`` may
+            exceed ``requested`` (which counts chunks, not per-tier keys).
+        skipped: Total keys refused because they were locked/pinned (non-force
+            only) -- L1 keys the node refused plus L2 keys held back for an L2 pin.
+        status: ``"deleted"`` / ``"noop"``.
+    """
+
+    instance_id: str
+    requested: int = 0
+    affected: int = 0
+    skipped: int = 0
     status: str

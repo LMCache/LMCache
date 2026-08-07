@@ -197,7 +197,7 @@ class MockL2Adapter(L2AdapterInterface):
         return completed
 
     def submit_lookup_and_lock_task(
-        self, keys: list[ObjectKey], layout_desc: MemoryLayoutDesc
+        self, keys: list[ObjectKey], group_layout_descs: dict[int, MemoryLayoutDesc]
     ) -> L2TaskId:
         with self._lock:
             task_id = self._get_next_task_id()

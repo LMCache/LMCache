@@ -4,8 +4,9 @@
 A single ``/cache/*`` surface, thin over the typed services in
 ``lmcache/v1/multiprocess/cache_control/`` (resolved via :func:`get_context`):
 
-- Objects   -- ``GET /cache/objects``, ``DELETE /cache/objects``
-  (:class:`ObjectService`). Adapter listing lives in the config group
+- Objects   -- ``GET /cache/objects`` and ``DELETE /cache/objects``
+  (:class:`ObjectService`); the delete is key-addressed and spans L1, L2, or
+  both via its ``tier`` field. Adapter listing lives in the config group
   (``GET /config/adapters``).
 - Prefetch  -- ``POST /cache/prefetches``, ``GET /cache/prefetches/{id}``
   (:class:`PrefetchService`).
@@ -30,7 +31,7 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 from lmcache.utils import compress_slot_mapping
-from lmcache.v1.distributed.tiers import Tier
+from lmcache.v1.distributed.api import Tier
 from lmcache.v1.multiprocess.http_apis.dependencies import get_context
 from lmcache.v1.multiprocess.http_apis.schemas import (
     ChecksumRequest,
@@ -66,7 +67,7 @@ async def list_cache_objects(
     """List cache objects resident in one tier/adapter, paginated.
 
     Responses:
-        200: ``{"adapter", "entries", "next_page_token"}``.
+        200: ``{"adapter", "shared", "entries", "next_page_token"}``.
         400: ``tier`` unsupported or malformed ``page_token``. 404: adapter
             matches none.
         503: server not initialized, no adapters configured, or the adapter does
@@ -81,16 +82,20 @@ async def list_cache_objects(
 async def delete_cache_objects(
     body: DeleteObjectsRequest, request: Request
 ) -> dict[str, object]:
-    """Delete a caller-supplied list of object keys from one tier/adapter.
+    """Delete a caller-supplied list of object keys from L1, L2, or both.
+
+    ``tier`` selects the tier(s) (``l1`` / ``l2`` / ``all``); ``force`` deletes
+    L1 keys even if locked.
 
     Responses:
-        200: ``{"requested", "adapter", "ok"[, "error"]}``.
-        400: batch too large, ``ObjectKey`` invariant violation, or unsupported
-            tier. 404: adapter matches none. 422: body validation.
-        503: server not initialized, or no adapters configured.
+        200: ``{"deleted", "skipped", "ok"[, "error"]}``.
+        400: batch too large or an ``ObjectKey`` invariant violation.
+            404: adapter matches none. 422: body validation.
+        503: server not initialized, or no L2 adapters configured (tier
+            includes L2).
     """
     return await get_context(request).object_service.delete_objects(
-        body.tier, body.adapter, body.keys
+        body.tier, body.adapter, body.keys, body.force
     )
 
 
@@ -146,6 +151,7 @@ _BLOCK_AXIS_BY_FORMAT: dict[Any, int] = {
     lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS: 1,  # [2, NB, BS, NH, HS]
     lmc_ops.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS: 0,  # [NB, 2, BS, NH, HS]
     lmc_ops.EngineKVFormat.NL_X_NB_BS_HS: 0,  # MLA: [NB, BS, HS]
+    lmc_ops.EngineKVFormat.NL_X_NB_BSV_BSS: 0,  # DSA indexer: [NB, BS, 132]
     lmc_ops.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS: 1,  # [2, NB, NH, BS, HS]
     lmc_ops.EngineKVFormat.NL_X_NB_TWO_NH_BS_HS: 0,  # [NB, 2, NH, BS, HS]
 }

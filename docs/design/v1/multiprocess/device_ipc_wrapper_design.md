@@ -30,7 +30,7 @@ All of them live behind a single msgspec ext code 1 and a single `KVCache = list
 
 ## What the base class owns
 
-`DeviceIPCWrapper` (in `platform/base_ipc_wrapper.py`) provides the parts that every
+`DeviceIPCWrapper` (in `platform/base/ipc_wrapper.py`) provides the parts that every
 transport shares:
 
 - **Interface fields** — `dtype`, `shape`, `stride`, `storage_offset`, `device_uuid`. Subclasses populate these in `__init__`; the base uses them for equality and the receiving side uses them to rebuild the logical view.
@@ -52,28 +52,37 @@ transport shares:
 | `CudaIPCWrapper` | `cuda` | `UntypedStorage._share_cuda_()` | `_new_shared_cuda` + `set_()` |
 | `RawCudaIPCWrapper` | `cuda` | `cudaIpcGetMemHandle` (raw ptr) | `cudaIpcOpenMemHandle` → CuPy → DLPack |
 | `CpuShmTensorWrapper` | `cpu` | POSIX `shm_open` | `mmap` same segment |
-| `MusaIPCWrapper` | `musa` | TorchMUSA memory IPC handle | `ipc_open_mem_handle` + DLPack / tensor view |
+| `MusaIPCWrapper` | `musa` | TorchMUSA IPC API | `torch.musa.ipc.export_tensor` + `open_tensor` |
 
 ## Platform registration
 
-The factory lookup (`platform/_registry.py`) keys on `tensor.device.type`, so
-the integration adapter never has an if/elif chain.  Concrete wrappers are
-discovered automatically at runtime — no static `register_kv_wrapper` calls
+The factory lookup (`platform.resolve_kv_wrapper_factory`) keys on
+`tensor.device.type`, so the integration adapter never has an if/elif
+chain.  Concrete wrappers are bound to their device via
+`DeviceSpec.ipc_wrapper_cls` — no static `register_kv_wrapper` calls
 needed:
 
-- Each concrete subclass sets a ``device_type`` ClassVar (e.g. ``"cuda"``)
-  and exposes a ``wrap`` factory classmethod.
-- :func:`~lmcache.v1.platform._registry._discover_wrappers_once` scans
-  ``lmcache.v1.platform`` two levels deep for ``DeviceIPCWrapper`` subclasses
-  on first use, indexes them by ``device_type``, and skips any subclass where
-  ``_is_default_wrapper`` is ``False`` (so ``RawCudaIPCWrapper`` coexists with
-  ``CudaIPCWrapper`` without colliding).
-- Adding a new accelerator backend only requires shipping a sub-package under
-  ``platform/<device>/`` with a ``DeviceIPCWrapper`` subclass — zero changes
-  to the dispatcher or the registry.
+- Each concrete subclass carries a ``device_type`` ClassVar (e.g.
+  ``"cuda"``) for introspection and exposes a ``wrap`` factory
+  classmethod.
+- Each accelerator's :class:`DeviceSpec` subclass (e.g.
+  :class:`CudaDeviceSpec`) overrides
+  :attr:`~DeviceSpec.ipc_wrapper_cls` to return its default
+  wrapper class.
+- :func:`~lmcache.v1.platform.resolve_kv_wrapper_factory` reads that
+  binding off the registered spec and returns the wrapper's ``wrap``
+  classmethod so callers can invoke ``factory(tensor)`` uniformly.
+- ``RawCudaIPCWrapper`` intentionally stays off the spec so it
+  coexists with ``CudaIPCWrapper`` without collision — callers
+  (TRT-LLM adapter) instantiate it directly.
+- Adding a new accelerator backend only requires shipping a sub-package
+  under ``platform/<device>/`` with a ``DeviceSpec`` subclass whose
+  ``ipc_wrapper_cls`` returns the wrapper — zero changes to the
+  dispatcher.
 
 ## Backward compatibility
 
-- Wire format is unchanged. Still ext code 1, still `pickle`-over-`Ext`. Previously serialized payloads round-trip.
+- The wire envelope remains ext code 1 and `pickle`-over-`Ext`. MUSA sender and receiver processes must use compatible `MusaIPCWrapper` versions because the payload carries a TorchMUSA tensor handle.
+- `MusaIPCWrapper` keeps the receiver-side `open_tensor()` owner alive locally and excludes that owner from serialized state.
 - `CudaIPCWrapper` / `RawCudaIPCWrapper` keep their names, fields, and behavior; only their base class changed. Existing callers and the TRT-LLM adapter are unaffected.
 - The single `isinstance`-based equality check now uses `type(self) is type(other)`, which is stricter and correct.

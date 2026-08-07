@@ -49,12 +49,14 @@ import pytest
 import torch
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import (
     L1ManagerConfig,
     L1MemoryManagerConfig,
 )
 from lmcache.v1.distributed.error import L1Error
+from tests.v1.distributed.utils import should_use_lazy_alloc
 
 try:
     # First Party
@@ -65,15 +67,11 @@ except ImportError:
         "Skipping because L1 manager cannot be imported", allow_module_level=True
     )
 
-# Skip all tests in this module if CUDA is not available
-pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="CUDA is not available"
-)
-
-
-def should_use_lazy_alloc() -> bool:
-    """Determine if lazy allocation should be used based on CUDA availability."""
-    return torch.cuda.is_available()
+if not torch_dev.is_available():
+    pytest.skip(
+        f"Requires available {torch_device_type} runtime",
+        allow_module_level=True,
+    )
 
 
 # =============================================================================
@@ -1292,6 +1290,43 @@ class TestDelete:
         assert result[key1] == L1Error.SUCCESS
         assert result[key2] == L1Error.KEY_NOT_EXIST
         assert result[key3] == L1Error.KEY_IS_LOCKED
+
+        manager.close()
+
+    def test_force_delete_removes_write_locked_key(self, basic_l1_config, basic_layout):
+        """force=True deletes a write-locked key that non-force refuses."""
+        manager = L1Manager(basic_l1_config)
+        key = make_object_key(1)
+        manager.reserve_write([key], [False], basic_layout)  # write-locked
+
+        assert manager.delete([key]) == {key: L1Error.KEY_IS_LOCKED}
+        assert manager.delete([key], force=True) == {key: L1Error.SUCCESS}
+        assert manager.get_object_state(key) is None
+
+        manager.close()
+
+    def test_force_delete_removes_read_locked_key(self, basic_l1_config, basic_layout):
+        """force=True deletes a read-locked key that non-force refuses."""
+        manager = L1Manager(basic_l1_config)
+        key = make_object_key(1)
+        manager.reserve_write([key], [False], basic_layout)
+        manager.finish_write([key])
+        manager.reserve_read([key])  # read-locked
+
+        assert manager.delete([key]) == {key: L1Error.KEY_IS_LOCKED}
+        assert manager.delete([key], force=True) == {key: L1Error.SUCCESS}
+        assert manager.get_object_state(key) is None
+
+        manager.close()
+
+    def test_force_delete_missing_key_still_key_not_exist(
+        self, basic_l1_config, basic_layout
+    ):
+        """force does not invent keys: a missing key still reports KEY_NOT_EXIST."""
+        manager = L1Manager(basic_l1_config)
+        key = make_object_key(999)
+
+        assert manager.delete([key], force=True) == {key: L1Error.KEY_NOT_EXIST}
 
         manager.close()
 

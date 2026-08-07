@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import Any, Generator, List, Optional, Union, cast
+from typing import TYPE_CHECKING, Any, Generator, List, Optional, Union, cast
 import os
 
 # Third Party
@@ -34,12 +34,15 @@ from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
 )
-from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.platform.musa.native_kv_transfer import (
     try_native_from_gpu,
     try_native_to_gpu,
 )
 import lmcache.c_ops as lmc_ops
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.metadata import LMCacheMetadata
 
 logger = init_logger(__name__)
 
@@ -86,7 +89,7 @@ class VLLMPagedMemMUSAConnectorV2(VLLMPagedMemGPUConnectorV2):
     @classmethod
     def from_metadata(
         cls,
-        metadata: LMCacheMetadata,
+        metadata: "LMCacheMetadata",
         use_gpu: bool = False,
         device: Optional[torch.device] = None,
         layout_hints: Optional[LayoutHints] = None,
@@ -448,7 +451,7 @@ class VLLMPagedMemLayerwiseMUSAConnector(GPUConnectorInterface):
     @classmethod
     def from_metadata(
         cls,
-        metadata: LMCacheMetadata,
+        metadata: "LMCacheMetadata",
         use_musa: bool = False,
         device: Optional[torch.device] = None,
     ) -> "VLLMPagedMemLayerwiseMUSAConnector":

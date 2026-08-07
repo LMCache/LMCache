@@ -13,6 +13,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache import torch_device_type
 from lmcache.usage_telemetry import (
     USAGE_SCHEMA_VERSION,
     ContinuousUsageContext,
@@ -26,6 +27,12 @@ from lmcache.usage_telemetry import (
     is_usage_tracking_enabled,
 )
 from lmcache.usage_telemetry.guard import swallow_telemetry_errors
+from lmcache.usage_telemetry.metric_specs import MetricSpec
+from lmcache.usage_telemetry.mp_continuous import (
+    InitializeMPContinuousUsage,
+    MPContinuousUsageReporter,
+)
+from lmcache.usage_telemetry.transport import usage_server_url
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.distributed.config import (
     EvictionConfig,
@@ -39,6 +46,8 @@ from lmcache.v1.distributed.l2_adapters.config import (
     get_type_name_for_config,
 )
 from lmcache.v1.metadata import LMCacheMetadata
+from lmcache.v1.mp_observability.event import Event, EventType
+from lmcache.v1.mp_observability.event_bus import EventBus, EventBusConfig
 from lmcache.v1.multiprocess.config import MPServerConfig
 
 
@@ -141,6 +150,20 @@ def make_metadata() -> LMCacheMetadata:
         use_mla=False,
         role="worker",
     )
+
+
+class TestUsageServerUrl:
+    @pytest.mark.parametrize(
+        "base,expected",
+        [
+            ("http://stats.test", "http://stats.test/context"),
+            ("http://stats.test/", "http://stats.test/context"),
+            ("http://stats.test/api/v1", "http://stats.test/api/v1/context"),
+        ],
+    )
+    def test_base_url_path_preserved(self, usage_env, monkeypatch, base, expected):
+        monkeypatch.setenv("LMCACHE_USAGE_TRACK_URL", base)
+        assert usage_server_url("context") == expected
 
 
 class TestOptOut:
@@ -273,11 +296,13 @@ class TestContinuousUsageContext:
         assert usage_payload["sequence_number"] == 1
         assert usage_payload["session_id"] == get_usage_identity().session_id
         assert usage_payload["deployment_mode"] == "single_process"
+        assert usage_payload["uptime_seconds"] >= 0
 
         lifespan_url, lifespan_payload = sender.sent[1]
         assert lifespan_url.endswith("cache-lifespan")
         assert lifespan_payload["message_type"] == "CacheLifespanMessage"
         assert lifespan_payload["sequence_number"] == 1
+        assert lifespan_payload["uptime_seconds"] >= 0
 
         # Counters reset after the flush; a second flush reports zeros with
         # the next sequence number.
@@ -303,6 +328,181 @@ class TestContinuousUsageContext:
         context = ContinuousUsageContext(make_metadata(), sender=RecordingSender())
         histogram = context.list_to_histogram([0.5, 2.0, 3.0], [0, 1, 5, 10])
         assert histogram == {0: 0, 1: 1, 5: 2, 10: 0}
+
+
+def publish_mp_traffic(bus: EventBus) -> None:
+    """Publish one retrieve-end and one store-end event (4 + 2 chunks)."""
+    bus.publish(
+        Event(
+            event_type=EventType.MP_RETRIEVE_END,
+            metadata={
+                "retrieved_count": 4,
+                "device": f"{torch_device_type}:0",
+                "engine_id": 1,
+                "model_name": "test_model",
+                "cache_salt": "",
+                "total_bytes": 4096,
+            },
+        )
+    )
+    bus.publish(
+        Event(
+            event_type=EventType.MP_STORE_END,
+            metadata={
+                "stored_count": 2,
+                "device": f"{torch_device_type}:0",
+                "engine_id": 1,
+                "model_name": "test_model",
+                "total_bytes": 1000,
+            },
+        )
+    )
+
+
+class TestMPContinuous:
+    def test_counters_flush_on_bus_stop(self, usage_env):
+        sender = RecordingSender()
+        bus = EventBus(EventBusConfig(enabled=True))
+        bus.start()
+        reporter = InitializeMPContinuousUsage(bus, chunk_size=256, sender=sender)
+        assert reporter is not None
+
+        publish_mp_traffic(bus)
+        # stop() drains queued events, then the shutdown hook sends the
+        # final flush.
+        bus.stop()
+
+        assert len(sender.sent) == 1
+        url, payload = sender.sent[0]
+        assert url == "http://stats.test/cache-usage"
+        assert payload["message_type"] == "ContinuousContextMessage"
+        assert payload["deployment_mode"] == "mp_server"
+        assert payload["interval_num_hit_tokens"] == 4 * 256
+        assert payload["interval_num_stored_tokens"] == 2 * 256
+        assert payload["interval_stored_kv_size"] == 1000
+        assert payload["sequence_number"] == 1
+        assert payload["uptime_seconds"] >= 0
+        assert payload["session_id"] == get_usage_identity().session_id
+
+    def test_flush_resets_counters(self, usage_env):
+        sender = RecordingSender()
+        bus = EventBus(EventBusConfig(enabled=True))
+        bus.start()
+        reporter = InitializeMPContinuousUsage(bus, chunk_size=256, sender=sender)
+        assert reporter is not None
+        publish_mp_traffic(bus)
+        bus.stop()
+
+        reporter.flush()
+        assert len(sender.sent) == 2
+        assert sender.sent[1][1]["interval_num_hit_tokens"] == 0
+        assert sender.sent[1][1]["interval_num_stored_tokens"] == 0
+        assert sender.sent[1][1]["sequence_number"] == 2
+
+    def test_initialize_returns_none_when_disabled(self, usage_env, monkeypatch):
+        monkeypatch.setenv("LMCACHE_TRACK_USAGE", "false")
+        bus = EventBus(EventBusConfig(enabled=True))
+        assert InitializeMPContinuousUsage(bus, chunk_size=256) is None
+        bus.stop()
+
+    def test_flush_drops_counters_when_disabled(self, usage_env, monkeypatch):
+        sender = RecordingSender()
+        reporter = MPContinuousUsageReporter(chunk_size=256, sender=sender)
+        monkeypatch.setenv("LMCACHE_TRACK_USAGE", "false")
+        reporter.flush()
+        assert sender.sent == []
+        reporter.shutdown()
+
+    def test_raising_sender_does_not_break_flush(self, usage_env):
+        reporter = MPContinuousUsageReporter(chunk_size=256, sender=RaisingSender())
+        reporter.flush()
+        reporter.shutdown()
+
+    def test_malformed_interval_env_does_not_raise(self, usage_env, monkeypatch):
+        monkeypatch.setenv("LMCACHE_USAGE_TRACK_INTERVAL", "10m")
+        # Non-MP: constructed unguarded inside LMCacheStatsLogger.__init__,
+        # so the constructor itself must not raise.
+        context = ContinuousUsageContext.GetOrCreate(make_metadata())
+        assert context.min_logging_interval == 600
+        context.incr_or_send_stats(StubStats(interval_hit_tokens=1))
+        # MP: falls back to the default interval instead of losing telemetry.
+        sender = RecordingSender()
+        reporter = MPContinuousUsageReporter(chunk_size=256, sender=sender)
+        reporter.flush()
+        assert sender.sent
+        reporter.shutdown()
+
+    def test_specs_must_cover_message_fields(self, usage_env):
+        incomplete = [
+            MetricSpec(
+                event_type=EventType.MP_STORE_END,
+                field="interval_stored_kv_size",
+                extract=lambda e: int(e.metadata["total_bytes"]),
+                reduce=sum,
+            )
+        ]
+        with pytest.raises(ValueError, match="exactly once"):
+            MPContinuousUsageReporter(chunk_size=256, specs=incomplete)
+
+    def test_custom_reduce_function(self, usage_env):
+        def max_or_zero(samples):
+            return max(samples, default=0)
+
+        specs = [
+            MetricSpec(
+                event_type=EventType.MP_RETRIEVE_END,
+                field="interval_num_hit_tokens",
+                extract=lambda e: int(e.metadata["retrieved_count"]),
+                reduce=sum,
+            ),
+            MetricSpec(
+                event_type=EventType.MP_STORE_END,
+                field="interval_num_stored_tokens",
+                extract=lambda e: int(e.metadata["stored_count"]),
+                reduce=sum,
+            ),
+            # Largest single store of the interval instead of the total.
+            MetricSpec(
+                event_type=EventType.MP_STORE_END,
+                field="interval_stored_kv_size",
+                extract=lambda e: int(e.metadata["total_bytes"]),
+                reduce=max_or_zero,
+            ),
+        ]
+        sender = RecordingSender()
+        bus = EventBus(EventBusConfig(enabled=True))
+        bus.start()
+        reporter = MPContinuousUsageReporter(chunk_size=256, sender=sender, specs=specs)
+        bus.register_subscriber(reporter)
+        publish_mp_traffic(bus)
+        publish_mp_traffic(bus)
+        bus.stop()
+
+        assert len(sender.sent) == 1
+        payload = sender.sent[0][1]
+        assert payload["interval_num_hit_tokens"] == 8
+        assert payload["interval_num_stored_tokens"] == 4
+        assert payload["interval_stored_kv_size"] == 1000  # max, not 2000
+
+    def test_buffer_overflow_triggers_early_flush(self, usage_env):
+        sender = RecordingSender()
+        bus = EventBus(EventBusConfig(enabled=True))
+        bus.start()
+        reporter = MPContinuousUsageReporter(
+            chunk_size=256, sender=sender, max_buffered_samples=2
+        )
+        bus.register_subscriber(reporter)
+        # 2 store events fill the 2-sample stored-tokens buffer and wake
+        # the flush thread well before the 600 s interval.
+        publish_mp_traffic(bus)
+        publish_mp_traffic(bus)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not sender.sent:
+            time.sleep(0.01)
+        assert sender.sent, "overflow did not trigger an early flush"
+        payload = sender.sent[0][1]
+        assert payload["interval_num_stored_tokens"] == 2 * 2 * 256
+        bus.stop()
 
 
 class TestMPUsage:
@@ -386,7 +586,8 @@ class TestMPUsage:
         assert message_types == ["EnvMessage", "MPServerMessage"]
 
         identity = get_usage_identity()
-        for _, payload in sender.sent:
+        for url, payload in sender.sent:
+            assert url == "http://stats.test/context"
             assert payload["schema_version"] == USAGE_SCHEMA_VERSION
             assert payload["session_id"] == identity.session_id
             assert payload["deployment_mode"] == "mp_server"

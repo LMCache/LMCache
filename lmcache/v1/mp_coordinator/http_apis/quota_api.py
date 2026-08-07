@@ -2,8 +2,10 @@
 """Quota and usage-accounting endpoints on the coordinator (fleet-level).
 
 The ``/quota`` surface, thin over the collaborators on the typed
-:class:`CoordinatorContext` (resolved via :func:`get_context`): quota writes,
-combined quota+usage status reads, and usage-event ingestion from MP servers.
+:class:`CoordinatorContext` (resolved via :func:`get_context`): quota writes
+and combined quota+usage status reads. Usage events arrive through the
+fleet cache-event stream (``POST /directory/events``), routed to the
+usage/eviction consumers by the context's event router.
 This mirrors the MP server's node-local ``/quota`` group; warm-prefetch dispatch
 is genuine cache control and lives in :mod:`cache_api` instead.
 """
@@ -13,15 +15,12 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 # First Party
-from lmcache.v1.distributed.tiers import Tier
+from lmcache.v1.distributed.api import Tier
 from lmcache.v1.mp_coordinator.http_apis.dependencies import get_context
 from lmcache.v1.mp_coordinator.schemas import (
-    EventType,
     QuotaConfigRequest,
     QuotaConfigResponse,
     QuotaResponse,
-    ReportUsageRequest,
-    ReportUsageResponse,
     SetQuotaRequest,
     StatusListResponse,
     StatusResponse,
@@ -188,10 +187,10 @@ async def list_status(request: Request, tier: Tier = Tier.L2) -> StatusListRespo
     """
     _require_supported_tier(tier)
     ctx = get_context(request)
-    tracker = ctx.usage_manager
+    usage_view = ctx.usage_manager
     store = ctx.quota_manager
-    by_salt = tracker.get_all()
-    total = tracker.get_total()
+    by_salt = usage_view.get_all()
+    total = usage_view.get_total()
     quota_entries = {e.cache_salt: e.limit_bytes for e in store.list_quotas()}
     all_salts = sorted(set(by_salt) | set(quota_entries))
     return StatusListResponse(
@@ -208,39 +207,3 @@ async def list_status(request: Request, tier: Tier = Tier.L2) -> StatusListRespo
             for salt in all_salts
         ],
     )
-
-
-# -- Usage-event ingestion ---------------------------------------------------
-
-
-@router.post("/quota/events")
-async def report_events(
-    body: ReportUsageRequest, request: Request
-) -> ReportUsageResponse:
-    """Record a batch of ``store`` / ``lookup`` / ``delete`` events.
-
-    Usage events feed the same per-``cache_salt`` ledger the quota status reads
-    expose, so they live in the ``/quota`` group alongside the quota writes.
-
-    Args:
-        body: Event batch tagged with the reporter's ``instance_id``, ``seq``,
-            and the ``tier`` the events apply to.
-
-    Returns:
-        Number of events processed.
-    """
-    _require_supported_tier(body.tier)
-    ctx = get_context(request)
-    tracker = ctx.usage_manager
-    ctrl = ctx.eviction_manager
-    for event in body.events:
-        ok = event.key.to_object_key()
-        if event.type == EventType.STORE:
-            tracker.record_stored(ok, event.bytes)
-            ctrl.on_store(ok)
-        elif event.type == EventType.LOOKUP:
-            ctrl.on_lookup(ok)
-        elif event.type == EventType.DELETE:
-            tracker.record_evicted(ok)
-            ctrl.on_remove(ok)
-    return ReportUsageResponse(recorded=len(body.events))

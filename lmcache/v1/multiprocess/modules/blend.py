@@ -17,6 +17,7 @@ from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
     PrefetchHandle,
+    PrefetchRequestSpec,
     ipc_key_to_object_keys,
 )
 from lmcache.v1.gpu_connector.gpu_ops import (
@@ -599,8 +600,7 @@ class BlendModule:
             chunk_hashes = [r.hash for r in group]
             obj_keys = ipc_key_to_object_keys(key, chunk_hashes, [0])[0]
             handle = self._ctx.storage_manager.submit_prefetch_task(
-                obj_keys,
-                layout_desc,
+                PrefetchRequestSpec(keys=obj_keys, group_layout_descs={0: layout_desc}),
                 external_request_id=key.request_id,
             )
             prefetch_handles.append(handle)
