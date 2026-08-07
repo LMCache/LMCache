@@ -461,7 +461,7 @@ class BigtableL2Adapter(L2AdapterInterface):
     def submit_lookup_and_lock_task(
         self,
         keys: list[ObjectKey],
-        layout_desc: MemoryLayoutDesc,
+        group_layout_descs: dict[int, MemoryLayoutDesc],
     ) -> L2TaskId:
         """See base class."""
         with self._lock:

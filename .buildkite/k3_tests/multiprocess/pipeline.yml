@@ -16,6 +16,9 @@ x-flaky-retry: &flaky-retry
 
 # Keep the regular 1-GPU pod anchor available after the two lm_eval steps are
 # merged; engine_driven still needs its separate /dev/shm pod below.
+# Every pod mounts a 1Gi /dev/shm: the container runtime default is 64MB and
+# vLLM needs >160MB of shared memory. (The SHM-transport pods below mount a
+# much larger dshm volume instead.)
 x-pod-1gpu: &pod-1gpu
   containers:
     - name: container-0
@@ -24,8 +27,10 @@ x-pod-1gpu: &pod-1gpu
       resources: { limits: { "nvidia.com/gpu": "1" } }
       volumeMounts:
         - { name: hf-cache, mountPath: /root/.cache/huggingface }
+        - { name: dshm, mountPath: /dev/shm }
   volumes:
     - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
+    - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 1Gi } }
 
 steps:
   - group: ":compression: Multiprocess (2-GPU)"
@@ -45,8 +50,10 @@ steps:
                     resources: { limits: { "nvidia.com/gpu": "2" } }
                     volumeMounts: &vol-mounts
                       - { name: hf-cache, mountPath: /root/.cache/huggingface }
+                      - { name: dshm, mountPath: /dev/shm }
                 volumes: &vols
                   - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
+                  - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 1Gi } }
         artifact_paths: ["*.log"]
 
       - label: ":compression: long_doc_qa"
@@ -237,10 +244,12 @@ steps:
                       - { name: hf-cache, mountPath: /root/.cache/huggingface }
                       - { name: scratch, mountPath: /scratch }
                       - { name: udev, mountPath: /run/udev, readOnly: true }
+                      - { name: dshm, mountPath: /dev/shm }
                 volumes:
                   - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
                   - { name: scratch, hostPath: { path: /data/gds-scratch, type: DirectoryOrCreate } }
                   - { name: udev, hostPath: { path: /run/udev, type: Directory } }
+                  - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 1Gi } }
         artifact_paths: ["*.log"]
 
   - group: ":compression: Multiprocess (CPU-only)"
@@ -299,7 +308,7 @@ steps:
     if: build.env("VERIFY_AND_PIN_VLLM") =~ /true/
     command: |
       .buildkite/k3_tests/multiprocess/run.sh vllm_bench
-      bash .buildkite/k3_tests/multiprocess/scripts/pin-tested-vllm.sh
+      bash .github/scripts/pin-tested-vllm.sh
     timeout_in_minutes: 30
     agents: { queue: "k8s" }
     plugins:
@@ -318,6 +327,8 @@ steps:
                         key: GITHUB_TOKEN
                 volumeMounts:
                   - { name: hf-cache, mountPath: /root/.cache/huggingface }
+                  - { name: dshm, mountPath: /dev/shm }
             volumes:
               - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
+              - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 1Gi } }
     artifact_paths: ["*.log"]

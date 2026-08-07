@@ -10,17 +10,22 @@ This module holds HTTP models only.
 """
 
 # Standard
-from enum import Enum
 from typing import Annotated
 import base64
 
 # Third Party
-from pydantic import BaseModel, Field, StringConstraints, field_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 import numpy as np
 
 # First Party
 from lmcache.v1.distributed.api import EncodedObjectKey  # noqa: F401  re-exported
-from lmcache.v1.distributed.tiers import Tier
+from lmcache.v1.distributed.api import Tier
 from lmcache.v1.mp_coordinator.api import CacheEventBatch
 from lmcache.v1.mp_coordinator.key_directory import Placement
 
@@ -170,57 +175,7 @@ class QuotaConfigResponse(BaseModel):
     default_limit_gb: float | None
 
 
-# -- Usage tracking ----------------------------------------------------------
-
-
-class EventType(str, Enum):
-    """Cache events reported by an MP server."""
-
-    STORE = "store"
-    LOOKUP = "lookup"
-    DELETE = "delete"
-
-
-class UsageEvent(BaseModel):
-    """A single cache event reported by an MP server.
-
-    Attributes:
-        type: The event type.
-        key: The cache key this event applies to.
-        bytes: Bytes stored (``store`` only; ``0`` for other types).
-    """
-
-    type: EventType
-    key: EncodedObjectKey
-    bytes: int = Field(ge=0)
-
-
-class ReportUsageRequest(BaseModel):
-    """Body of ``POST /quota/events``.
-
-    Attributes:
-        instance_id: Identifier of the MP server that produced this batch.
-        seq: Monotonically increasing sequence number scoped to this
-            ``instance_id``. Starts at 1 for the first flush after the
-            server starts.
-        events: Batch of store/lookup events to record.
-        tier: Cache tier the events apply to (only ``l2`` is supported today).
-    """
-
-    instance_id: str
-    seq: int = Field(ge=1)
-    events: list[UsageEvent]
-    tier: Tier = Tier.L2
-
-
-class ReportUsageResponse(BaseModel):
-    """Reply to ``POST /quota/events``.
-
-    Attributes:
-        recorded: Number of events processed.
-    """
-
-    recorded: int
+# -- Usage / quota status ----------------------------------------------------
 
 
 class StatusResponse(BaseModel):
@@ -276,13 +231,11 @@ class DirectoryEventsRequest(BaseModel):
 
         Raises:
             ValueError: If an entry's key cannot convert into an
-                ``ObjectKey`` or its ``content_hash_hex`` is not valid
-                hex (surfaced as 422).
+                ``ObjectKey`` (surfaced as 422).
         """
         for batch in value:
             for entry in batch.entries:
                 entry.key.to_object_key()
-                bytes.fromhex(entry.content_hash_hex)
         return value
 
 
@@ -303,66 +256,122 @@ class DirectoryEventsResponse(BaseModel):
 class DirectoryLookupRequest(BaseModel):
     """Body of ``POST /directory/lookup``.
 
+    Supply exactly one of the two lookup forms:
+
+    * ``keys`` — resolve these keys directly.
+    * ``token_ids`` (with ``model_name`` / ``world_size``) — resolve a
+      request's token sequence to the object keys of its complete
+      chunks, the same fan-out the pin APIs use. Chunk hashes are
+      prefix-chained, so this must be the request's **full** token
+      sequence from position 0; a mid-request slice resolves to
+      different keys. Trailing incomplete chunks are ignored.
+
     Attributes:
-        keys: The keys to resolve to placements.
+        keys: The keys to resolve (keys form).
+        token_ids: The request's full token sequence (tokens form).
+        model_name: Model whose rank fan-out to use (tokens form).
+        world_size: World size selecting the per-rank fan-out
+            (tokens form).
+        cache_salt: Per-tenant isolation salt applied to produced keys
+            (tokens form).
     """
 
     keys: list[EncodedObjectKey] = Field(default_factory=list)
+    token_ids: list[int] = Field(default_factory=list)
+    model_name: str = ""
+    world_size: int = Field(default=1, ge=1)
+    cache_salt: str = ""
+
+    @field_validator("keys")
+    @classmethod
+    def _validate_keys(cls, value: list[EncodedObjectKey]) -> list[EncodedObjectKey]:
+        """Reject undecodable keys at request validation (surfaced as 422).
+
+        Args:
+            value: The hydrated keys.
+
+        Returns:
+            The unchanged keys once each converts to an ``ObjectKey``.
+
+        Raises:
+            ValueError: If a key cannot convert into an ``ObjectKey``.
+        """
+        for encoded in value:
+            encoded.to_object_key()
+        return value
+
+    @model_validator(mode="after")
+    def _validate_one_form(self) -> "DirectoryLookupRequest":
+        """Enforce that exactly one lookup form is supplied.
+
+        Returns:
+            The unchanged request once exactly one form is present.
+
+        Raises:
+            ValueError: If both or neither of ``keys`` / ``token_ids``
+                is supplied, or the tokens form omits ``model_name``.
+        """
+        if bool(self.keys) == bool(self.token_ids):
+            raise ValueError("supply exactly one of 'keys' or 'token_ids'")
+        if self.token_ids and not self.model_name:
+            raise ValueError("'model_name' is required with 'token_ids'")
+        return self
 
 
 class DirectoryKeyPlacements(BaseModel):
-    """Placements for one requested key.
+    """Placements and token ids for one resolved key.
 
     Attributes:
-        key: The requested key, echoed back.
+        key: The resolved key, echoed back.
         placements: Known placements; empty when the directory knows
             nothing about the key.
+        token_ids: The chunk's token ids; empty when unknown.
     """
 
     key: EncodedObjectKey
     placements: list[Placement] = Field(default_factory=list)
+    token_ids: list[int] = Field(default_factory=list)
 
 
 class DirectoryLookupResponse(BaseModel):
     """Reply to ``POST /directory/lookup``.
 
     Attributes:
-        results: One entry per requested key, in request order.
-    """
-
-    results: list[DirectoryKeyPlacements] = Field(default_factory=list)
-
-
-class TokenPlacementLookupRequest(BaseModel):
-    """Body of ``POST /directory/lookup_tokens``.
-
-    Resolves ``token_ids`` to the object keys of their complete chunks
-    (the same fan-out the pin APIs use) and returns each key's placements.
-
-    Attributes:
-        model_name: Model whose rank fan-out to use when resolving keys.
-        world_size: World size selecting the per-rank fan-out.
-        token_ids: The token sequence to resolve.
-        cache_salt: Per-tenant isolation salt applied to the produced keys.
-    """
-
-    model_name: str
-    world_size: int = Field(ge=1)
-    token_ids: list[int] = Field(default_factory=list)
-    cache_salt: str = ""
-
-
-class TokenPlacementLookupResponse(BaseModel):
-    """Reply to ``POST /directory/lookup_tokens``.
-
-    Attributes:
-        chunks: Number of complete chunks the token sequence resolved to.
-        results: One entry per resolved key (``chunks`` x per-rank
-            fan-out), each echoing the key with its known placements.
+        chunks: Complete chunks the request resolved to — the token
+            sequence's chunk count (tokens form) or the number of
+            requested keys (keys form).
+        results: One entry per resolved key, in request order (tokens
+            form: ``chunks`` x per-rank fan-out).
     """
 
     chunks: int = 0
     results: list[DirectoryKeyPlacements] = Field(default_factory=list)
+
+
+class DirectoryKeyInfo(BaseModel):
+    """One listed directory key.
+
+    Attributes:
+        key: The listed key.
+        placements: The key's placements that matched the listing filters.
+        num_tokens: Token ids known for the key's chunk (``0`` = unknown).
+    """
+
+    key: EncodedObjectKey
+    placements: list[Placement] = Field(default_factory=list)
+    num_tokens: int = 0
+
+
+class DirectoryListResponse(BaseModel):
+    """Reply to ``GET /directory/keys``.
+
+    Attributes:
+        total: Keys with at least one placement matching the filters.
+        keys: The requested page of them, in directory iteration order.
+    """
+
+    total: int = 0
+    keys: list[DirectoryKeyInfo] = Field(default_factory=list)
 
 
 # -- Global CacheBlend fingerprint directory ------------------------------

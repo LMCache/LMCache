@@ -33,8 +33,12 @@ use NVMe passthrough via the io_uring command interface for direct device access
 - Requires `io_engine="io_uring"` to be set.
 - Supports `max_data_transfer_size` parameter to split large transfers into
   smaller chunks that fit within device limits.
+- Requires `alignment` to be a multiple of the NVMe namespace LBA size. An
+  incompatible value is rejected when the device opens.
 - When `use_uring_cmd=True`, `use_odirect` is ignored for NVMe namespace
   character devices.
+- SQE build failures are returned by `wait_iouring` after the worker releases
+  the request's global and per-batch in-flight accounting.
 
 ## MP Mode Integration
 
@@ -145,6 +149,20 @@ dev = RawBlockDevice(
     max_data_transfer_size=131072,  # Optional: split large transfers
 )
 ```
+
+## FDP Notes
+
+FDP status can be queried from Python when `use_uring_cmd=True`:
+
+```python
+status = dev.fetch_fdp_status()  # [(placement_id, ruh_id), ...]
+```
+
+For writes, omitting `placement_id` leaves the NVMe directive unset
+(`dtype=0, dspec=0`). NVMe default writes use the RUH mapping associated with
+Placement Identifier 0, so LMCache rejects explicit `placement_id=0` at the
+`RawBlockCore` layer. The low-level status query reads the controller-reported
+16-bit `NRUHSD` count.
 
 ## MP Adapter Example
 

@@ -31,6 +31,7 @@ PYBIND11_MODULE(xpu_ops, m) {
       .value("NL_X_NB_BS_NH_TWO_HS", EngineKVFormat::NL_X_NB_BS_NH_TWO_HS)
       .value("NL_X_NB_NH_BS_CS", EngineKVFormat::NL_X_NB_NH_BS_CS)
       .value("NL_X_NB_BS_NH_CS", EngineKVFormat::NL_X_NB_BS_NH_CS)
+      .value("NL_X_NB_BSV_BSS", EngineKVFormat::NL_X_NB_BSV_BSS)
       .export_values();
   m.def("multi_layer_kv_transfer", &multi_layer_kv_transfer,
         py::arg("key_value"), py::arg("key_value_ptrs"),
@@ -59,6 +60,13 @@ PYBIND11_MODULE(xpu_ops, m) {
   m.def("reshape_and_cache_back_flash", &reshape_and_cache_back_flash);
   m.def("lmcache_memcpy_async", &lmcache_memcpy_async,
         py::call_guard<py::gil_scoped_release>());
+
+  // Pinned (USM host) allocation -- SYCL analog of the CUDA alloc_pinned_ptr.
+  // Bound under the same names as csrc/pybind.cpp / python_ops_fallback so
+  // lmcache._get_backend() overrides them by name on XPU.
+  m.def("alloc_pinned_ptr", &alloc_pinned_ptr, py::arg("size"),
+        py::arg("flags") = 0);
+  m.def("free_pinned_ptr", &free_pinned_ptr, py::arg("ptr"));
 
   // CacheGen / RoPE kernels (Intel XPU).  Names match the
   // lmcache.v1.platform.torch_ops baseline so the backend selection in

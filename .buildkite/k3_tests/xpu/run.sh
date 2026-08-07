@@ -36,10 +36,9 @@ uv pip install -r requirements/common.txt -r requirements/test.txt
 
 discover_xpu_tests() {
   python - <<'PY'
-from fnmatch import fnmatch
 from pathlib import Path
 
-root = Path("tests")
+root = Path(".")
 # Temporary allowlist of XPU cases that are known to run in the current
 # vLLM-based XPU image.
 #
@@ -53,20 +52,21 @@ root = Path("tests")
 allowlist = {
   "tests/benchmarks/test_*.py",
   "tests/test_*.py",
-  "tests/v1/multiprocess/test_engine_driven_transfer.py",
-  "tests/v1/test_python_ops_fallback.py",
+  "tests/cli/**/test_*.py",
+  "tests/disagg/test_*.py",
+  "tests/v1/mp_coordinator/**/test_*.py",
+  "tests/v1/mp_observability/**/test_*.py",
+  "tests/v1/multiprocess/**/test_*.py",
+  "tests/v1/distributed/**/test_*.py",
   "tests/v1/test_xpu_connector.py",
   "tests/v1/test_torch_ops.py",
 }
 selected: set[str] = set()
 
-def is_allowlisted(rel: str) -> bool:
-  return any(fnmatch(rel, pattern) for pattern in allowlist)
-
-for path in root.rglob("test_*.py"):
-    rel = path.as_posix()
-    if is_allowlisted(rel):
-      selected.add(rel)
+for pattern in allowlist:
+    for path in root.glob(pattern):
+        if path.is_file():
+            selected.add(path.as_posix())
 
 for rel in sorted(selected):
     print(rel)
@@ -81,7 +81,7 @@ fi
 log "discovered ${#XPU_TEST_FILES[@]} XPU-related test files"
 printf '  %s\n' "${XPU_TEST_FILES[@]}"
 
-PYTEST_ARGS=(-q --maxfail=1)
+PYTEST_ARGS=(-q --maxfail=1 -m "not cuda")
 if [ -n "${TEST_SELECTOR:-}" ]; then
   PYTEST_ARGS+=(-k "${TEST_SELECTOR}")
 fi

@@ -26,10 +26,18 @@ from lmcache.v1.multiprocess.http_apis.error_handlers import register_error_hand
 
 
 @dataclass
+class _FakeConfig:
+    """Minimal adapter config — only ``shared`` is read (listing)."""
+
+    shared: bool = False
+
+
+@dataclass
 class _FakeDescriptor:
-    """Minimal descriptor — only ``type_name`` is read."""
+    """Minimal descriptor — only ``type_name`` and ``config.shared`` are read."""
 
     type_name: str = "s3"
+    config: _FakeConfig = field(default_factory=_FakeConfig)
 
 
 @dataclass

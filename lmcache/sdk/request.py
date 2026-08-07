@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-Public API for LMCacheStream, a wrapper of a logical request going through the SDK.
+Public API for LMCacheRequestStream, a wrapper of a logical request going
+through the SDK.
 """
 
 # Future
 from __future__ import annotations
 
 # Standard
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 import time
@@ -18,13 +19,17 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-import lmcache.sdk.kvcache as lmc_sdk
+from lmcache.sdk.context import (
+    LMCacheSDKCacheKind,
+    LMCacheSDKContext,
+    ModifyFnType,
+)
 
 logger = init_logger(__name__)
 
 
-class LMCacheStreamError(RuntimeError):
-    """Raised when a LMCacheStream operation fails."""
+class LMCacheRequestStreamError(RuntimeError):
+    """Raised when a LMCacheRequestStream operation fails."""
 
 
 @dataclass(frozen=True)
@@ -64,7 +69,7 @@ class TokenEvent:
 
 
 class PostCompletion(Protocol):
-    """Inference function (callable) to be called by stream."""
+    """Inference function (callable) to be called by request stream."""
 
     def __call__(
         self,
@@ -86,60 +91,35 @@ class PostCompletion(Protocol):
 
 
 def create_request(
-    ctx: lmc_sdk.LMCacheKVCacheContext,
+    contexts: Iterable[LMCacheSDKContext],
     post_completion: PostCompletion,
     prompt_token_ids: Sequence[int],
     cache_salt: str = "",
-) -> LMCacheStream:
-    """Create an LMCacheStream for a new request.
+) -> LMCacheRequestStream:
+    """Create an LMCacheRequestStream for a new request.
 
     Args:
-        ctx: The LMCache SDK context used for retrieve/store.
+        contexts: The LMCache SDK contexts used for retrieve/store.
         post_completion: Callable that submits a request to the engine.
         prompt_token_ids: Initial prompt token ids.
         cache_salt: Per-user isolation salt, or empty string.
 
     Returns:
-        A new LMCacheStream.
+        A new LMCacheRequestStream.
     """
-    return LMCacheStream(
-        ctx=ctx,
+    return LMCacheRequestStream(
+        contexts=contexts,
         post_completion=post_completion,
         prompt_token_ids=prompt_token_ids,
         cache_salt=cache_salt,
     )
 
 
-def generate(
-    stream: LMCacheStream,
-    sampling_params: dict[str, Any],
-    suffix_tokens: Sequence[int] = (),
-) -> StreamPerfMetrics:
-    """Run/continue a stream's generate. See LMCacheStream.generate."""
-    return stream.generate(sampling_params, suffix_tokens)
-
-
-def get(
-    stream: LMCacheStream, timeout: float = 30.0, poll_interval: float = 0.2
-) -> torch.Tensor:
-    """Retrieve the cached KV for a stream. See LMCacheStream.retrieve_kv."""
-    return stream.retrieve_kv(timeout=timeout, poll_interval=poll_interval)
-
-
-def update(
-    stream: LMCacheStream,
-    kv: torch.Tensor,
-    tokens: Sequence[int],
-) -> None:
-    """Store edited KV into a stream. See LMCacheStream.update_kv."""
-    stream.update_kv(kv, tokens)
-
-
-class LMCacheStream:
+class LMCacheRequestStream:
     """Handle for one logical request spanning multiple inference passes.
 
     Args:
-        ctx: The LMCache SDK context used for retrieve/store.
+        contexts: The LMCache SDK contexts used for retrieve/store.
         post_completion: Callable for submitting request to inference engine.
         prompt_token_ids: Initial prompt token ids.
         cache_salt: Per-user isolation salt, or empty string.
@@ -147,7 +127,7 @@ class LMCacheStream:
 
     def __init__(
         self,
-        ctx: lmc_sdk.LMCacheKVCacheContext,
+        contexts: Iterable[LMCacheSDKContext],
         post_completion: PostCompletion,
         prompt_token_ids: Sequence[int],
         cache_salt: str = "",
@@ -158,36 +138,44 @@ class LMCacheStream:
         the KV, starting as the prompt), done (the EOS flag), and internal
         output history / suffix-token bookkeeping.
         """
-        self.ctx = ctx
+        self._contexts: dict[LMCacheSDKCacheKind, LMCacheSDKContext] = {}
+        for ctx in contexts:
+            self._contexts[ctx.kind] = ctx
         self.post_completion = post_completion
         self.cache_salt = cache_salt
         self.tokens: list[int] = list(prompt_token_ids)
         self.done: bool = False
         self._decoded: int = 0
         self._text_parts: list[str] = []
-        self._stream_id: str = str(uuid.uuid4())
+        self._request_stream_id: str = str(uuid.uuid4())
         self._suffix_tokens: list[int] = []
 
-    def stream_id(self) -> str:
+    @property
+    def request_stream_id(self) -> str:
         """Return the unique stream id."""
-        return self._stream_id
+        return self._request_stream_id
 
+    @property
     def suffix_tokens(self) -> list[int]:
         """Return the suffix tokens to be appended to the prompt."""
         return self._suffix_tokens
 
+    @property
     def decoded_tokens(self) -> int:
         """Return cumulative tokens decoded across all segments so far."""
         return self._decoded
 
+    @property
     def output_text(self) -> str:
         """Return the concatenated generated text across all segments."""
         return "".join(self._text_parts)
 
+    @property
     def output_tokens(self) -> list[int]:
         """Return the concatenated generated tokens across all segments."""
         return self.tokens
 
+    @property
     def is_done(self) -> bool:
         """Return True if the stream has finished generating."""
         return self.done
@@ -206,7 +194,7 @@ class LMCacheStream:
             throughputs, ttft, tpot — all times in seconds).
 
         Raises:
-            LMCacheStreamError: If post_completion fails mid-stream.
+            LMCacheRequestStreamError: If post_completion fails mid-stream.
         """
         pending = self._suffix_tokens + list(suffix_tokens)
         self._suffix_tokens = []
@@ -228,8 +216,8 @@ class LMCacheStream:
                 time_between_tokens.append(time.perf_counter() - last_token_time)
                 last_token_time = time.perf_counter()
         except Exception as e:
-            raise LMCacheStreamError(
-                f"Stream {self.stream_id} failed during generation: {e}"
+            raise LMCacheRequestStreamError(
+                f"Stream {self.request_stream_id} failed during generation: {e}"
             ) from e
         finally:
             self._decoded += len(gen_tokens)
@@ -253,34 +241,46 @@ class LMCacheStream:
             ttft=time_between_tokens[0] if time_between_tokens else 0.0,
         )
 
-    def retrieve_kv(
-        self, timeout: float = 30.0, poll_interval: float = 0.2
+    def retrieve(
+        self,
+        kind: LMCacheSDKCacheKind,
+        timeout: float = 30.0,
+        poll_interval: float = 0.2,
     ) -> torch.Tensor:
-        """Retrieve the cached KV for the current tokens, polling until ready.
+        """Retrieve the cached tensor for the current tokens, polling until
+        ready.
 
         Args:
-            timeout: Max seconds to wait for the cached KV to appear.
+            kind: The type of cache to retrieve.
+            timeout: Max seconds to wait for the cached tensor to appear.
             poll_interval: Seconds between retrieve attempts.
 
         Returns:
-            The cached KV as a [2, L, hit_tokens, D] tensor (chunk-aligned).
+            The cached tensor (chunk-aligned).
+            KV shape is [2, L, T, D]. Q shape is [1, L, T, D].
 
         Raises:
-            LMCacheStreamError: If no cached KV is available within timeout.
+            LMCacheRequestStreamError: If no cached tensor is available within timeout.
         """
-        deadline = time.perf_counter() + timeout
-        kv = lmc_sdk.retrieve(self.ctx, self.tokens, self.cache_salt)
-        while kv is None and time.perf_counter() < deadline:
-            time.sleep(poll_interval)
-            kv = lmc_sdk.retrieve(self.ctx, self.tokens, self.cache_salt)
-        if kv is None:
-            raise LMCacheStreamError(
-                f"no cached KV for {self.stream_id} after {timeout:.0f}s"
+        ctx = self._contexts.get(kind)
+        if not ctx:
+            raise LMCacheRequestStreamError(
+                f"no context available for cache kind {kind}"
             )
-        return kv
+        deadline = time.perf_counter() + timeout
+        tensor = ctx.retrieve(self.tokens, self.cache_salt)
+        while tensor is None and time.perf_counter() < deadline:
+            time.sleep(poll_interval)
+            tensor = ctx.retrieve(self.tokens, self.cache_salt)
+        if tensor is None:
+            raise LMCacheRequestStreamError(
+                f"no cached {kind} for {self.request_stream_id} after {timeout:.0f}s"
+            )
+        return tensor
 
-    def update_kv(
+    def update(
         self,
+        kind: LMCacheSDKCacheKind,
         kv: torch.Tensor,
         tokens: Sequence[int],
     ) -> None:
@@ -293,17 +293,22 @@ class LMCacheStream:
             kv: The edited KV tensor to store, shape [2, L, T, D].
             tokens: Token ids the KV corresponds to (T must match kv.shape[2]).
         """
-        if not lmc_sdk.store(self.ctx, kv, tokens, self.cache_salt):
+        ctx = self._contexts.get(kind)
+        if not ctx:
+            raise LMCacheRequestStreamError(
+                f"no context available for cache kind {kind}"
+            )
+        if not ctx.store(kv, tokens, self.cache_salt):
             logger.warning(
                 "store reported edited KV already cached for stream %s",
-                self.stream_id,
+                self.request_stream_id,
             )
         self.tokens = list(tokens)
         self.done = False
 
     def modify_kv(
         self,
-        fn: Callable[[torch.Tensor, Sequence[int]], tuple[torch.Tensor, Sequence[int]]],
+        fn: ModifyFnType,
         timeout: float = 30.0,
         poll_interval: float = 0.2,
     ) -> None:
@@ -314,13 +319,21 @@ class LMCacheStream:
         applies fn to the cached prefix, and stores the result via update_kv.
 
         Args:
-            fn: KV editor given (kv[2,L,T,D], tokens[:cached_len]) and returning
-                (new_kv, new_tokens) for the edited prefix.
+            fn: KV editor given Mapping[LMCacheSDKCacheKind, torch.Tensor]
+                for each cache kind used in the modification algorithm,
+                returning (new_kv, new_tokens) for the edited prefix.
         """
-        kv = self.retrieve_kv(timeout=timeout, poll_interval=poll_interval)
-        cached_len = kv.shape[2]
+        cached_len = len(self.tokens)
+        tensors: dict[LMCacheSDKCacheKind, torch.Tensor] = {}
+        for ctx in self._contexts.values():
+            tensors[ctx.kind] = self.retrieve(
+                kind=ctx.kind, timeout=timeout, poll_interval=poll_interval
+            )
+            if ctx.kind == LMCacheSDKCacheKind.KV:
+                cached_len = tensors[ctx.kind].shape[2]
+
         # Tokens past the cached KV: the remainder of chunks that retrieve()
         # (chunk-aligned) didn't return.
         self._suffix_tokens = list(self.tokens[cached_len:]) + self._suffix_tokens
-        new_kv, new_tokens = fn(kv, self.tokens[:cached_len])
-        self.update_kv(new_kv, new_tokens)
+        new_kv, new_tokens = fn(tensors, self.tokens[:cached_len])
+        self.update(kind=LMCacheSDKCacheKind.KV, kv=new_kv, tokens=new_tokens)

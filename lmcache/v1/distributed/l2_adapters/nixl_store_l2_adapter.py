@@ -530,7 +530,7 @@ class NixlStoreL2Adapter(L2AdapterInterface):
     #####################
 
     def submit_lookup_and_lock_task(
-        self, keys: list[ObjectKey], layout_desc: MemoryLayoutDesc
+        self, keys: list[ObjectKey], group_layout_descs: dict[int, MemoryLayoutDesc]
     ) -> L2TaskId:
         with self._lock:
             task_id = self._get_next_task_id()
@@ -593,12 +593,18 @@ class NixlStoreL2Adapter(L2AdapterInterface):
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
 
-        if self._loop.is_running():
-            future = asyncio.run_coroutine_threadsafe(_stop_tasks(), self._loop)
+        # Gate on is_closed() rather than is_running(): the loop thread may not
+        # have reached run_forever() yet, and skipping the stop below would leave
+        # join() blocking forever. Both threadsafe calls are valid on a loop that
+        # has not started; their callbacks run once it does.
+        if not self._loop.is_closed():
+            try:
+                future = asyncio.run_coroutine_threadsafe(_stop_tasks(), self._loop)
 
-            future.result(timeout=5)  # Wait for tasks to be cancelled, with a timeout
-
-            self._loop.call_soon_threadsafe(self._loop.stop)
+                # Wait for tasks to be cancelled, with a timeout
+                future.result(timeout=5)
+            finally:
+                self._loop.call_soon_threadsafe(self._loop.stop)
 
         self._loop_thread.join()
         try:
