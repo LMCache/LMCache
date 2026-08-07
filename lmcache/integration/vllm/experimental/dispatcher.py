@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     import torch
 
     # First Party
-    from lmcache.integration.vllm.lmcache_mp_connector import (
+    from lmcache.integration.vllm.lmcache_mp_metadata import (
         LMCacheMPConnectorMetadata,
     )
     from lmcache.integration.vllm.vllm_multi_process_adapter import (

@@ -70,7 +70,11 @@ def test_gpu_register_inserts_unlatched_entry(monkeypatch) -> None:
     """register_kv_cache inserts an entry that is not yet ping-proven."""
     _stub_gpu_registration_backend(monkeypatch)
     monkeypatch.setattr(
-        gpu_mod, "create_cache_context", lambda *a, **kw: MagicMock(num_layers=2)
+        gpu_mod,
+        "create_cache_context",
+        lambda *a, **kw: MagicMock(
+            num_layers=2, **{"kv_layer_groups_manager.num_object_groups": 1}
+        ),
     )
     monkeypatch.setattr(gpu_mod, "get_layout_desc", lambda *a, **kw: MagicMock())
     module = _bare_gpu_module()
@@ -86,7 +90,11 @@ def test_gpu_noop_register_refreshes_without_latching(monkeypatch) -> None:
     """Re-registering a known instance refreshes last_seen but does not
     rebuild the context or latch the ping-proven flag."""
     _stub_gpu_registration_backend(monkeypatch)
-    create = MagicMock(return_value=MagicMock(num_layers=2))
+    create = MagicMock(
+        return_value=MagicMock(
+            num_layers=2, **{"kv_layer_groups_manager.num_object_groups": 1}
+        )
+    )
     monkeypatch.setattr(gpu_mod, "create_cache_context", create)
     monkeypatch.setattr(gpu_mod, "get_layout_desc", lambda *a, **kw: MagicMock())
     module = _bare_gpu_module()

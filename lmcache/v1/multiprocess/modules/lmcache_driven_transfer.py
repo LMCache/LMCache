@@ -884,15 +884,28 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             separate_object_groups=self._ctx.separate_object_groups,
             full_sw_kv=self._ctx.full_sw_kv,
         )
+        kv_groups_manager = cache_context.kv_layer_groups_manager
+        num_object_groups = kv_groups_manager.num_object_groups
         event_backend = get_event_ipc_backend(cache_context.device)
         event_backend.check_event_support(cache_context.device)
         layout_desc = get_layout_desc(
             cache_context, self._ctx.chunk_size, object_group_id=0
         )
-        kv_groups_manager = cache_context.kv_layer_groups_manager
+        # One layout per object group, also in the single-group case: no
+        # None special-casing downstream (group 0 maps to the merged layout).
+        group_layout_descs = {
+            gid: get_layout_desc(
+                cache_context, self._ctx.chunk_size, object_group_id=gid
+            )
+            for gid in range(num_object_groups)
+        }
         attn_desc = kv_groups_manager.get_attn_desc()
         self._ctx.layout_desc_registry.register(
-            model_name, world_size, layout_desc, attn_desc
+            model_name,
+            world_size,
+            layout_desc,
+            attn_desc,
+            group_layout_descs=group_layout_descs,
         )
 
         with self._lock:
@@ -1047,6 +1060,15 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                     metadata={"device": str(cache_context.device)},
                 )
             )
+
+            # Worker 0 only: bindings depend on token content alone, so one
+            # report covers every rank's keys. Published before finish_write
+            # is enqueued so the token bindings precede the write-finished
+            # events on the bus.
+            if key.worker_id == 0 and self._ctx.event_bus.has_subscribers(
+                EventType.MP_TOKENS
+            ):
+                self._publish_token_bindings(key, obj_keys_per_obj_group[0])
 
             self._ctx.event_bus.publish_on_stream(
                 cache_context.cupy_stream,
@@ -1334,4 +1356,51 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         return (
             event_backend.export_event(event, cache_context.device),
             retrieve_succeeded,
+        )
+
+    def _publish_token_bindings(
+        self, key: IPCCacheServerKey, obj_keys: list[ObjectKey]
+    ) -> None:
+        """Publish one ``MP_TOKENS`` event for ``key``'s chunks.
+
+        Pairs each complete chunk in ``[key.start, key.end)`` with its
+        ObjectKey chunk hash. Must be called at store submission — before
+        the write-finished events can reach the bus — so the cache-event
+        subscriber can stamp token ids onto the STORE entries. A store
+        that later fails leaves only unused cache entries (bounded).
+
+        Args:
+            key: The IPC key of the store being submitted.
+            obj_keys: One ObjectKey per complete chunk, in chunk order.
+        """
+        token_ids = list(key.token_ids)
+        chunk_size = self._ctx.chunk_size
+        effective_len = min(len(token_ids), key.end)
+        num_complete = effective_len - effective_len % chunk_size
+        token_chunks = [
+            token_ids[offset : offset + chunk_size]
+            for offset in range(key.start, num_complete, chunk_size)
+        ]
+        if not token_chunks:
+            return
+        if len(obj_keys) != len(token_chunks):
+            logger.warning(
+                "Skipping token bindings for request %s: %d resolved keys "
+                "vs %d complete chunks in [%d, %d)",
+                key.request_id,
+                len(obj_keys),
+                len(token_chunks),
+                key.start,
+                key.end,
+            )
+            return
+        self._ctx.event_bus.publish(
+            Event(
+                event_type=EventType.MP_TOKENS,
+                session_id=key.request_id,
+                metadata={
+                    "chunk_hashes": [obj_key.chunk_hash for obj_key in obj_keys],
+                    "token_chunks": token_chunks,
+                },
+            )
         )

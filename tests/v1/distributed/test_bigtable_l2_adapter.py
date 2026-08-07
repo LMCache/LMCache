@@ -299,7 +299,7 @@ class TestBigtableL2Adapter:
         adapter.pop_completed_store_tasks()
 
         # Lookup & Lock
-        lookup_task_id = adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+        lookup_task_id = adapter.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         assert wait_for_event(adapter.get_lookup_and_lock_event_fd())
         lookup_res = adapter.query_lookup_and_lock_result(lookup_task_id)
         assert lookup_res is not None
@@ -310,7 +310,9 @@ class TestBigtableL2Adapter:
             assert adapter._locked_keys[key] == 1
 
         # Double lock
-        lookup_task_id_2 = adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+        lookup_task_id_2 = adapter.submit_lookup_and_lock_task(
+            [key], {0: _EMPTY_LAYOUT}
+        )
         assert wait_for_event(adapter.get_lookup_and_lock_event_fd())
         adapter.query_lookup_and_lock_result(lookup_task_id_2)
 
@@ -343,7 +345,7 @@ class TestBigtableL2Adapter:
         adapter.pop_completed_store_tasks()
 
         # Lock key1 only
-        lookup_task_id = adapter.submit_lookup_and_lock_task([key1], _EMPTY_LAYOUT)
+        lookup_task_id = adapter.submit_lookup_and_lock_task([key1], {0: _EMPTY_LAYOUT})
         assert wait_for_event(adapter.get_lookup_and_lock_event_fd())
         adapter.query_lookup_and_lock_result(lookup_task_id)
 
@@ -629,7 +631,7 @@ class TestBigtableL2Adapter:
 
         key = create_test_key(1)
         # Lookup key that doesn't exist
-        lookup_task_id = adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+        lookup_task_id = adapter.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         assert wait_for_event(adapter.get_lookup_and_lock_event_fd())
         adapter.query_lookup_and_lock_result(lookup_task_id)
 
@@ -669,7 +671,7 @@ class TestBigtableL2Adapter:
 
         with mock.patch.object(FakeTable, "read_row", mock_read_row):
             lookup_task_id = adapter.submit_lookup_and_lock_task(
-                [key1, key2], _EMPTY_LAYOUT
+                [key1, key2], {0: _EMPTY_LAYOUT}
             )
             # Allow task to run and block on read_row
             time.sleep(0.1)
@@ -717,7 +719,7 @@ class TestBigtableL2Adapter:
         adapter.register_listener(listener)
 
         # Lookup key that doesn't exist in backend
-        lookup_task_id = adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+        lookup_task_id = adapter.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         assert wait_for_event(adapter.get_lookup_and_lock_event_fd())
         adapter.query_lookup_and_lock_result(lookup_task_id)
 

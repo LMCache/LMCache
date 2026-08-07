@@ -15,6 +15,7 @@ import time
 
 # Third Party
 import pytest
+import torch
 
 # ---------------------------------------------------------------------------
 # S1: async fingerprint registration
@@ -214,6 +215,8 @@ class _FakeTensor:
     def __init__(self, shape):
         self.shape = shape
         self.device = "cpu"
+        # rot_for_group takes the buffer dtype (declared-map quant skip).
+        self.dtype = torch.bfloat16
 
     def __getitem__(self, idx):
         # tmp[0] selects K from the (2, num_layers, slots, hidden_dim) tensor.
@@ -333,13 +336,18 @@ def test_batched_rope_raises_on_compressed_layout():
     gpu_context = MagicMock()
     gpu_context.kv_layer_groups_manager.num_kernel_groups = 1
     gpu_context.kv_layer_groups_manager.kernel_groups = [
-        SimpleNamespace(tokens_per_block=8, slots_per_block=4)
+        SimpleNamespace(tokens_per_block=8, slots_per_block=4, engine_group_idx=0)
     ]
     gpu_context.get_temp_kernel_group_buffer.return_value = SimpleNamespace(
-        shape=(2, 2, 4, 64)
+        shape=(2, 2, 4, 64), dtype=torch.bfloat16
     )
-    rope_state = SimpleNamespace(
-        head_size=32, cos_sin_cache=MagicMock(), is_neox_style=True
+    # Real rope state: the batched path resolves the group's rot window
+    # (rot_for_group) before the geometry check that this test targets.
+    rope_state = v3_mod._CBRopeState(
+        head_size=32,
+        is_neox_style=True,
+        cos_sin_caches=[MagicMock()],
+        group_to_cache=[],
     )
 
     eng = MagicMock(spec=v3_mod.BlendV3Module)
@@ -702,6 +710,20 @@ def test_scatter_narrows_partial_chunk_and_keeps_alignment():
 # ---------------------------------------------------------------------------
 
 
+def _native_retrieve_plan_available() -> bool:
+    """Return whether the C++ native retrieve-plan interfaces are available."""
+    # First Party
+    from lmcache.v1.multiprocess.modules import blend_v3 as v3_mod
+
+    return v3_mod._HAS_NATIVE_RETRIEVE_PLAN and hasattr(v3_mod.lmc_ops, "CBGroupSpec")
+
+
+native_retrieve_plan_required = pytest.mark.skipif(
+    not _native_retrieve_plan_available(),
+    reason="requires native CacheBlend retrieve-plan C++ support",
+)
+
+
 def _build_plan_engine_and_context(
     num_groups: int = 2,
     max_batch: int = 2,
@@ -727,9 +749,11 @@ def _build_plan_engine_and_context(
     for name in (
         "_build_cb_retrieve_plan_flat",
         "_resolve_cb_plan_invariants",
+        "_cb_slot_buffers",
     ):
         setattr(eng, name, getattr(v3_mod.BlendV3Module, name).__get__(eng))
     eng._cb_plan_invariants = weakref.WeakKeyDictionary()
+    eng._cb_slot_staging = weakref.WeakKeyDictionary()
 
     hidden_dim = n_heads * head_size
     gpu_context = MagicMock()
@@ -792,12 +816,14 @@ def _lazy_memory_obj(obj_bytes: int, address: int):
     return obj
 
 
+@native_retrieve_plan_required
 def test_native_plan_specs_stamped_and_cached():
-    """3 chunks, max_batch=2: one slot-mapping tensor per group stamped into
-    the cached invariant specs; a second build for the same context reuses
-    the same spec objects and re-stamps them."""
+    """3 chunks, max_batch=2: per-group slot-mapping rows staged into the
+    persistent device buffer and stamped into the cached invariant specs; a
+    second build for the same context reuses the same spec objects (and the
+    same staging buffer) and re-stamps them."""
     # Third Party
-    import torch
+    import numpy as np
 
     eng, gpu_context, rope_state, obj_bytes = _build_plan_engine_and_context()
 
@@ -809,32 +835,32 @@ def test_native_plan_specs_stamped_and_cached():
 
     # Chunks 0/1 shifted (old != cur), chunk 2 prefix (old == cur).
     runs = [[pair(0, 4, 100), pair(4, 8, 104), pair(8, 12, 8)]]
-    resolved_groups = [
-        (torch.tensor([10, 11, 12], dtype=torch.long), 4),
-        (torch.tensor([20, 21, 22], dtype=torch.long), 4),
+    cpu_block_tables = [
+        (np.array([10, 11, 12], dtype=np.int64), 4),
+        (np.array([20, 21, 22], dtype=np.int64), 4),
     ]
 
     plan = eng._build_cb_retrieve_plan_flat(
-        gpu_context, rope_state, resolved_groups, runs, max_batch=2
+        gpu_context, rope_state, cpu_block_tables, runs, max_batch=2
     )
     assert plan is not None
     group_specs, (_staging, _ropes, _scatters, step_offsets), keepalive = plan
 
     assert len(group_specs) == 2
-    # keepalive: one slot-mapping tensor per group.
-    assert len(keepalive) == 2
-    sm0, sm1 = keepalive
-    assert sm0.tolist() == [40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51]
-    assert sm1.tolist() == [80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91]
-    # Each cached spec is stamped with this request's slot-mapping tensor.
-    assert group_specs[0].slot_mapping_base == sm0.data_ptr()
+    # keepalive: the persistent (num_groups, cap) device staging buffer.
+    assert len(keepalive) == 1
+    dev = keepalive[0]
+    assert dev[0, :12].tolist() == [40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51]
+    assert dev[1, :12].tolist() == [80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91]
+    # Each cached spec is stamped with its row of the staging buffer.
+    assert group_specs[0].slot_mapping_base == dev[0].data_ptr()
     assert group_specs[0].slot_mapping_capacity == 12
-    assert group_specs[1].slot_mapping_base == sm1.data_ptr()
+    assert group_specs[1].slot_mapping_base == dev[1].data_ptr()
     # Wave split: max_batch=2 -> double-buffered waves of 1 chunk each -> 3 steps.
     assert step_offsets.shape[0] == 3
 
     # Second build for the same context reuses the cached invariant specs
-    # (same objects) and re-stamps them for the new request.
+    # (same objects) and the same staging buffer, re-stamped per request.
     def pair2(cur_st, cur_ed, old_st):
         return (
             SimpleNamespace(cur_st=cur_st, cur_ed=cur_ed, old_st=old_st),
@@ -844,17 +870,21 @@ def test_native_plan_specs_stamped_and_cached():
     plan2 = eng._build_cb_retrieve_plan_flat(
         gpu_context,
         rope_state,
-        resolved_groups,
+        cpu_block_tables,
         [[pair2(4, 8, 200)]],
         max_batch=2,
     )
     assert plan2 is not None
     group_specs2, _, keepalive2 = plan2
     assert group_specs2[0] is group_specs[0]  # cached, not rebuilt
-    assert group_specs2[0].slot_mapping_base == keepalive2[0].data_ptr()
+    assert keepalive2[0] is dev  # staging buffer reused, not reallocated
+    assert group_specs2[0].slot_mapping_base == keepalive2[0][0].data_ptr()
     assert group_specs2[0].slot_mapping_capacity == 4
+    # pos 4..8 -> block 11 -> slots 44..47 for group 0.
+    assert keepalive2[0][0, :4].tolist() == [44, 45, 46, 47]
 
 
+@native_retrieve_plan_required
 def test_flat_plan_tables_encode_every_work_item():
     """The flat tables encode one staging row per chunk (dest = its wave
     slot's buffer), rope rows only for shifted chunks x groups, scatter rows
@@ -862,7 +892,6 @@ def test_flat_plan_tables_encode_every_work_item():
     per-step CSR offsets."""
     # Third Party
     import numpy as np
-    import torch
 
     eng, gpu_context, rope_state, obj_bytes = _build_plan_engine_and_context()
 
@@ -874,13 +903,13 @@ def test_flat_plan_tables_encode_every_work_item():
 
     # Chunks 0/1 shifted, chunk 2 prefix (old == cur).
     runs = [[pair(0, 4, 100), pair(4, 8, 104), pair(8, 12, 8)]]
-    resolved_groups = [
-        (torch.tensor([10, 11, 12], dtype=torch.long), 4),
-        (torch.tensor([20, 21, 22], dtype=torch.long), 4),
+    cpu_block_tables = [
+        (np.array([10, 11, 12], dtype=np.int64), 4),
+        (np.array([20, 21, 22], dtype=np.int64), 4),
     ]
 
     plan = eng._build_cb_retrieve_plan_flat(
-        gpu_context, rope_state, resolved_groups, runs, max_batch=2
+        gpu_context, rope_state, cpu_block_tables, runs, max_batch=2
     )
     assert plan is not None
     _specs, (staging, ropes, scatters, step_offsets), _keep = plan
@@ -907,11 +936,11 @@ def test_flat_plan_tables_encode_every_work_item():
     assert bool(np.all(np.diff(step_offsets[:, 1]) >= 0))
 
 
+@native_retrieve_plan_required
 def test_flat_tables_alternate_disjoint_slot_halves():
     """Same double-buffer contract, asserted on the flat-table encoding."""
     # Third Party
     import numpy as np
-    import torch
 
     eng, gpu_context, rope_state, obj_bytes = _build_plan_engine_and_context(
         max_batch=4
@@ -925,12 +954,12 @@ def test_flat_tables_alternate_disjoint_slot_halves():
             for i in range(6)
         ]
     ]
-    resolved_groups = [
-        (torch.arange(12, dtype=torch.long), 4),
-        (torch.arange(12, dtype=torch.long) + 100, 4),
+    cpu_block_tables = [
+        (np.arange(12, dtype=np.int64), 4),
+        (np.arange(12, dtype=np.int64) + 100, 4),
     ]
     plan = eng._build_cb_retrieve_plan_flat(
-        gpu_context, rope_state, resolved_groups, runs, max_batch=4
+        gpu_context, rope_state, cpu_block_tables, runs, max_batch=4
     )
     assert plan is not None
     _specs, (_staging, _ropes, scatters, step_offsets), _keep = plan
@@ -946,31 +975,33 @@ def test_flat_tables_alternate_disjoint_slot_halves():
         c0 = c1
 
 
+@native_retrieve_plan_required
 def test_native_plan_falls_back_for_non_lazy_objects():
     """A non-lazy-allocator memory object disables the native plan."""
     # Third Party
-    import torch
+    import numpy as np
 
     eng, gpu_context, rope_state, obj_bytes = _build_plan_engine_and_context()
     obj = _lazy_memory_obj(obj_bytes, address=0)
     obj.parent.return_value = object()  # not a LazyMemoryAllocator
     runs = [[(SimpleNamespace(cur_st=0, cur_ed=4, old_st=100), obj)]]
-    resolved_groups = [
-        (torch.tensor([10], dtype=torch.long), 4),
-        (torch.tensor([20], dtype=torch.long), 4),
+    cpu_block_tables = [
+        (np.array([10], dtype=np.int64), 4),
+        (np.array([20], dtype=np.int64), 4),
     ]
     assert (
         eng._build_cb_retrieve_plan_flat(
-            gpu_context, rope_state, resolved_groups, runs, max_batch=2
+            gpu_context, rope_state, cpu_block_tables, runs, max_batch=2
         )
         is None
     )
 
 
+@native_retrieve_plan_required
 def test_native_plan_falls_back_for_compressed_group():
     """A compressed group (tokens != slots per block) disables the plan."""
     # Third Party
-    import torch
+    import numpy as np
 
     eng, gpu_context, rope_state, obj_bytes = _build_plan_engine_and_context()
     gpu_context.kv_layer_groups_manager.kernel_groups[1].slots_per_block = 2
@@ -982,13 +1013,13 @@ def test_native_plan_falls_back_for_compressed_group():
             )
         ]
     ]
-    resolved_groups = [
-        (torch.tensor([10], dtype=torch.long), 4),
-        (torch.tensor([20], dtype=torch.long), 4),
+    cpu_block_tables = [
+        (np.array([10], dtype=np.int64), 4),
+        (np.array([20], dtype=np.int64), 4),
     ]
     assert (
         eng._build_cb_retrieve_plan_flat(
-            gpu_context, rope_state, resolved_groups, runs, max_batch=2
+            gpu_context, rope_state, cpu_block_tables, runs, max_batch=2
         )
         is None
     )

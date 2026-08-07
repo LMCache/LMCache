@@ -22,7 +22,10 @@ import numpy as np
 import pytest
 import torch
 
-if not torch.cuda.is_available():
+# First Party
+from lmcache import torch_dev, torch_device_type
+
+if not (torch_dev.is_available() and torch_device_type == "cuda"):
     pytest.skip(
         "CUDA is not available, skipping the test",
         allow_module_level=True,
@@ -102,7 +105,7 @@ def _reference_scatter(
             block_size=_BS,
             head_size=_HS,
         )
-    torch.cuda.synchronize()
+    torch_dev.synchronize()
 
 
 def _run_plan(
@@ -162,7 +165,7 @@ def _run_plan(
         np.asarray(scatters, dtype=np.int64),
         np.asarray(step_offsets, dtype=np.int64),
     )
-    torch.cuda.synchronize()
+    torch_dev.synchronize()
 
 
 @pytest.mark.parametrize("fmt_key", sorted(_CASES))
@@ -174,7 +177,7 @@ def test_overlap_slot_reuse_is_bit_exact(n_chunks, max_batch, fmt_key):
     Covers full packs, partial tail packs, and deep reuse, on both the
     fused-packed and un-fused split-K/V paged layouts."""
     case = _CASES[fmt_key]
-    dev = torch.device("cuda:0")
+    dev = torch.device(torch_device_type)
     torch.manual_seed(n_chunks)
 
     paged_ref = [
