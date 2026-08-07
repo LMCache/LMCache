@@ -601,47 +601,48 @@ class MessageQueueServer:
     def _main_loop(self):
         output_fd = self._output_efd.fileno()
         while not self.is_finished.is_set():
-            socks = dict(self.poller.poll(1000))
-            inbound_state = socks.get(self.socket, None)
-            outbound_state = socks.get(output_fd, None)
+            try:
+                socks = dict(self.poller.poll(1000))
+                inbound_state = socks.get(self.socket, None)
+                outbound_state = socks.get(output_fd, None)
 
-            # Process the incoming requests
-            if inbound_state and inbound_state & zmq.POLLIN:
-                msg = self.socket.recv_multipart()
-                assert len(msg) >= 3, (
-                    "Expected at least 3 message parts "
-                    "[identity, request_uid, request_type, *payloads]"
-                )
+                # Process the incoming requests
+                if inbound_state and inbound_state & zmq.POLLIN:
+                    msg = self.socket.recv_multipart()
+                    identity, b_request_uid, b_request_type, *payloads = msg
+                    request_type = msgspec_decode(b_request_type, cls=RequestType)
 
-                identity, b_request_uid, b_request_type, *payloads = msg
-                request_type = msgspec_decode(b_request_type, cls=RequestType)
-
-                if handler_entry := self.handlers.get(request_type):
-                    try:
-                        self._call_handler(
-                            handler_entry=handler_entry,
-                            payloads=payloads,
-                            prefix_frames=[identity, b_request_uid, b_request_type],
+                    if handler_entry := self.handlers.get(request_type):
+                        try:
+                            self._call_handler(
+                                handler_entry=handler_entry,
+                                payloads=payloads,
+                                prefix_frames=[identity, b_request_uid, b_request_type],
+                            )
+                        except Exception:
+                            logger.exception("Error handling request %s", request_type)
+                    else:
+                        logger.error(
+                            "No handler registered for request type %s", request_type
                         )
-                    except Exception:
-                        logger.exception("Error handling request %s", request_type)
-                else:
-                    logger.error(
-                        "No handler registered for request type %s", request_type
-                    )
-                    logger.error("Available handlers: %s", list(self.handlers.keys()))
+                        logger.error(
+                            "Available handlers: %s", list(self.handlers.keys())
+                        )
 
-            # Send the responses
-            if outbound_state and outbound_state & zmq.POLLIN:
-                # Consume the notifier counter (resets atomically)
-                self._output_efd.consume()
+                # Send the responses
+                if outbound_state and outbound_state & zmq.POLLIN:
+                    # Consume the notifier counter (resets atomically)
+                    self._output_efd.consume()
 
-                # Process the output tasks
-                try:
-                    while frames_to_send := self.output_queue.get_nowait():
-                        self.socket.send_multipart(frames_to_send)
-                except queue.Empty:
-                    pass
+                    # Process the output tasks
+                    try:
+                        while frames_to_send := self.output_queue.get_nowait():
+                            self.socket.send_multipart(frames_to_send)
+                    except queue.Empty:
+                        pass
+            except Exception:  # noqa: BLE001
+                if not self.is_finished.is_set():
+                    logger.exception("Error in message queue server loop")
 
     def _inspect_handler_signature(self, request_type: RequestType, handler) -> bool:
         """Inspect the handler signature to ensure it matches the expected
