@@ -14,14 +14,40 @@
 #   tier configured here, so a served retrieve proves the L1 path.
 #
 # Hardware requirement:
-#   Hopper (SM90) or datacenter Blackwell (SM100). DeepSeek-V4-Flash's fp8
-#   block-scaled linears and sparse-attention indexer both go through DeepGEMM,
-#   which ships kernels for those two architectures only. On SM120 (RTX 50 /
-#   RTX PRO 6000 Blackwell) weight loading aborts in DeepGEMM's scale-factor
-#   layout transform ("Unknown SF transformation", csrc/apis/layout.hpp:60):
-#   vLLM's SM120 enablement (vllm-project/vllm#43477) is merged, but its pinned
-#   DeepGEMM revision carries no SM120 code. See vllm-project/vllm#41063. The
-#   pipeline step is therefore gated behind RUN_DSV4_TEST=true.
+#   Hopper (SM90), datacenter Blackwell (SM100), or workstation Blackwell
+#   (SM120, e.g. RTX PRO 6000). DeepSeek-V4-Flash routes its fp8 block-scaled
+#   linears, MoE experts, hyper-connection prenorm GEMM and attention o_proj
+#   einsum through DeepGEMM, so the arch must have DeepGEMM kernels.
+#
+#   On SM120 the vLLM wheel's *bundled* DeepGEMM does not, which is why this
+#   script provisions one (see "Provision DeepGEMM" below). That is a
+#   workaround for an upstream regression, not a permanent requirement:
+#
+#     vllm#47304 (07-02) pinned deepseek-ai/DeepGEMM@a6b593d2, whose
+#       csrc/apis/layout.hpp dispatches on `arch_major == 10 or == 12`.
+#       SM120 worked.
+#     vllm#50000 (07-30) repointed the pin to vllm-project/DeepGEMM@f5a76426,
+#       a fork branch based off DeepGEMM main. SM120 only ever lived on
+#       nv_dev, so the `== 12` branches silently vanished and weight loading
+#       began aborting at the fallthrough
+#       DG_HOST_UNREACHABLE("Unknown SF transformation"),
+#       csrc/apis/layout.hpp:60.
+#     vllm#51003 (08-04) rebased a CUDA FP8 header fix onto that same
+#       SM120-less base (e21c821f), which is the pin as of writing. Note
+#       tools/install_deepgemm.sh still carries the stale comment
+#       "targeting nv-dev branch due to sm120 support" above that SHA.
+#
+#   Delete this workaround once vLLM's pin carries SM120 again; the guard
+#   below then no-ops on its own, since the bundled DeepGEMM will work.
+#
+#   Disabling DeepGEMM instead (VLLM_USE_DEEP_GEMM=0) does not work on SM120:
+#   only the fp8 linear and MXFP4 MoE call sites are gated by it. Measured on
+#   an SM120 node, that path falls to CutlassFp8BlockScaledMMKernel + MARLIN
+#   and then dies in mhc_pre_broadcast_tilelang, which calls DeepGEMM
+#   unconditionally; patching that one exposes the next wall
+#   (torch.ops._C.cutlass_scaled_mm has no SM120 block-scaled kernel in the
+#   wheel), and behind it DSv4's per-layer _o_proj -> deep_gemm_fp8_o_proj
+#   has no non-DeepGEMM implementation at all.
 #
 # This test is self-contained: it launches its own LMCache server + a TP=N
 # vLLM instead of using launch-processes.sh / wait-for-servers.sh, since it
@@ -87,6 +113,13 @@ VLLM_READY_TIMEOUT="${VLLM_READY_TIMEOUT:-2700}"
 MAX_TOKENS="${MAX_TOKENS:-128}"
 # Seconds to let async LMCache stores drain before the retrieve run.
 STORE_DRAIN_SECONDS="${STORE_DRAIN_SECONDS:-20}"
+
+# vllm-project/DeepGEMM@codex/cuda129-fp8-include-5f33a180: the SM120 branch
+# (nv_dev+situ) carrying the same CUDA FP8 header fix vLLM's current pin was cut
+# for -- i.e. a drop-in replacement for that pin that differs only by having the
+# SM120 kernels. Installed only on SM120; see "Hardware requirement" above.
+DEEPGEMM_SM120_REF="${DEEPGEMM_SM120_REF:-2fd67329ec2942f65ba35d561256ab6ed3b903cb}"
+DEEPGEMM_REPO="${DEEPGEMM_REPO:-https://github.com/vllm-project/DeepGEMM.git}"
 
 RESULTS_DIR="${RESULTS_DIR:-/tmp/lmcache_ci_results_${BUILD_ID}}"
 TP_DIR="$RESULTS_DIR/dsv4_flash_tp"
@@ -164,6 +197,51 @@ count_retrieves() {
     [ -f "$LMCACHE_LOG" ] || { echo 0; return; }
     grep -c "Retrieved" "$LMCACHE_LOG" 2>/dev/null || true
 }
+
+# ── 0. Provision DeepGEMM (SM120 only) ──────────────────────
+# vLLM's _import_deep_gemm() prefers a `deep_gemm` in site-packages over the
+# copy bundled in the wheel, so installing one overrides the arch-incomplete
+# bundled build without rebuilding vLLM. Build steps mirror vLLM's own
+# tools/install_deepgemm.sh. No-op on SM90/SM100, where the bundled copy is
+# correct and must be left alone.
+provision_deepgemm_sm120() {
+    local arch_major
+    arch_major=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader -i 0 \
+        | tr -d ' ' | cut -d. -f1)
+    if [ "$arch_major" != "12" ]; then
+        echo "=== SM${arch_major}0: using vLLM's bundled DeepGEMM ==="
+        return 0
+    fi
+
+    if python3 -c "import deep_gemm" 2>/dev/null; then
+        echo "=== SM120: deep_gemm already present in site-packages ==="
+        return 0
+    fi
+
+    echo "=== SM120: building DeepGEMM @ ${DEEPGEMM_SM120_REF:0:12} ==="
+    local build_dir build_log
+    build_dir="$(mktemp -d)"
+    build_log="$TP_DIR/deepgemm_build.log"
+    if ! {
+        git clone --recursive --shallow-submodules \
+            "$DEEPGEMM_REPO" "$build_dir/deepgemm" &&
+        cd "$build_dir/deepgemm" &&
+        git checkout "$DEEPGEMM_SM120_REF" &&
+        python3 setup.py bdist_wheel &&
+        { command -v uv >/dev/null 2>&1 && uv pip install dist/*.whl \
+            || python3 -m pip install dist/*.whl; }
+    } > "$build_log" 2>&1; then
+        cd "$REPO_ROOT"
+        echo "FAILED to build DeepGEMM. Tail of $build_log:"
+        tail -40 "$build_log"
+        rm -rf "$build_dir"
+        return 1
+    fi
+    cd "$REPO_ROOT"
+    rm -rf "$build_dir"
+    echo "DeepGEMM installed: $(python3 -c 'import deep_gemm; print(deep_gemm.__file__)')"
+}
+provision_deepgemm_sm120
 
 # ── 1. Launch LMCache MP server with an explicit L1 pool ────
 echo "=== Launching LMCache MP server (port $LMCACHE_PORT, L1 ${L1_SIZE_GB}GB) ==="
