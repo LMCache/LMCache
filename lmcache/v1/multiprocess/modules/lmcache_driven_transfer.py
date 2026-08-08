@@ -32,6 +32,7 @@ from lmcache.v1.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_management import GDSMemoryObject, MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType
+from lmcache.v1.mp_observability.event_bus import EventBus
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
     KVCache,
@@ -61,6 +62,7 @@ logger = init_logger(__name__)
 _HAS_NATIVE_OBJECT_GROUP_TRANSFER: bool = hasattr(
     device_ops, "execute_object_group_transfer"
 )
+_HAS_PHASE_TIMING_HARVEST: bool = hasattr(lmc_ops, "harvest_transfer_phase_timings")
 
 
 def get_layout_desc(
@@ -279,6 +281,30 @@ def _recalculate_blocks_to_skip(
     tail_blocks = blocks_to_skip % blocks_per_chunk
     tail_blocks_to_skip = tail_blocks - (blocks_per_chunk - blocks_per_window)
     return full_windows_to_skip * blocks_per_window + max(0, tail_blocks_to_skip)
+
+
+def harvest_and_publish_phase_timings(event_bus: EventBus) -> None:
+    """Drain finished gather/DMA phase timings and publish them on the bus.
+
+    Samples complete asynchronously and belong to transfers enqueued
+    earlier, so publication is decoupled from any single request. No-op
+    when the native op is unavailable or nothing has finished.
+
+    Args:
+        event_bus: Bus that receives the ``MP_TRANSFER_PHASE_SAMPLES``
+            event; see the ``EventType`` docstring for the metadata layout.
+    """
+    if not _HAS_PHASE_TIMING_HARVEST:
+        return
+    samples = lmc_ops.harvest_transfer_phase_timings()
+    if not samples:
+        return
+    event_bus.publish(
+        Event(
+            event_type=EventType.MP_TRANSFER_PHASE_SAMPLES,
+            metadata={"samples": samples},
+        )
+    )
 
 
 def _run_object_group_transfer_plan(
@@ -1196,6 +1222,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             all_dict: dict[ObjectKey, MemoryObj] = {}
             total_bytes: int = 0
             store_succeeded = False
+            reserve_seconds: float = 0.0
             try:
                 for obj_group_id in range(num_object_groups):
                     obj_keys = obj_keys_per_obj_group[obj_group_id]
@@ -1208,9 +1235,12 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                         self._ctx.chunk_size,
                         object_group_id=obj_group_id,
                     )
+                    # CPU share included in the stream-clocked store metric.
+                    reserve_start = time.perf_counter()
                     reserved_dict = self._ctx.storage_manager.reserve_write(
                         keys_to_reserve, layout_desc, "new"
                     )
+                    reserve_seconds += time.perf_counter() - reserve_start
                     all_dict.update(reserved_dict)
                     if reserved_dict:
                         total_bytes += next(
@@ -1264,10 +1294,12 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                             "model_name": model_name,
                             "total_bytes": total_bytes,
                             "num_tokens": num_tokens,
+                            "reserve_seconds": reserve_seconds,
                         },
                     ),
                 )
 
+        harvest_and_publish_phase_timings(self._ctx.event_bus)
         ed = time.perf_counter()
         if stored_count:
             logger.info(
@@ -1509,6 +1541,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                         },
                     ),
                 )
+        harvest_and_publish_phase_timings(self._ctx.event_bus)
         if retrieve_succeeded:
             tokens_retrieved = num_chunks * self._ctx.chunk_size
             ed = time.perf_counter()

@@ -342,6 +342,26 @@ def parse_args_to_observability_config(
     return config
 
 
+def _push_phase_timing_enabled(enabled: bool) -> None:
+    """Push the resolved phase-timing switch to the native plan executor.
+
+    No-op when the compiled extension is unavailable or predates the
+    ``set_phase_timing_enabled`` op.
+
+    Args:
+        enabled: Whether the executor should record gather/DMA CUDA event
+            pairs; follows the observability/metrics master switches.
+    """
+    try:
+        # First Party
+        import lmcache.c_ops as lmc_ops
+    except ImportError:
+        return
+    setter = getattr(lmc_ops, "set_phase_timing_enabled", None)
+    if setter is not None:
+        setter(enabled)
+
+
 def init_observability(
     obs_config: ObservabilityConfig,
     *,
@@ -400,6 +420,8 @@ def init_observability(
         )
     )
 
+    _push_phase_timing_enabled(obs_config.enabled and obs_config.metrics_enabled)
+
     if obs_config.metrics_enabled:
         # First Party
         from lmcache.v1.mp_observability.subscribers.metrics import (
@@ -419,6 +441,7 @@ def init_observability(
             MPTransferCountersSubscriber,
             SMLifecycleSubscriber,
             TimeoutMetricsSubscriber,
+            TransferPhaseSubscriber,
         )
 
         sample_rate = obs_config.metrics_sample_rate
@@ -438,6 +461,7 @@ def init_observability(
         bus.register_subscriber(EngineMetricsSubscriber())
         bus.register_subscriber(EventBusSelfMetricsSubscriber(bus))
         bus.register_subscriber(TimeoutMetricsSubscriber())
+        bus.register_subscriber(TransferPhaseSubscriber())
 
     if obs_config.logging_enabled:
         # First Party

@@ -2,7 +2,51 @@
 
 #include "mp_mem_kernels.cuh"
 
+#include <atomic>
+#include <deque>
+#include <functional>
+#include <mutex>
+
 namespace {
+
+// ---------------------------------------------------------------------------
+// Gather/DMA phase timing. Timed sections push CUDA event pairs into this
+// bounded registry; harvest_transfer_phase_timings() drains completed pairs.
+// ---------------------------------------------------------------------------
+
+struct PhaseTimingRecord {
+  cudaEvent_t start;
+  cudaEvent_t end;
+  int phase;      // TransferPhase value (kernel / staging)
+  int direction;  // TransferDirection value
+  int device_index;
+  int64_t nbytes;
+};
+
+std::mutex g_phase_timing_mutex;
+std::deque<PhaseTimingRecord> g_phase_timing_pending;
+constexpr size_t kPhaseTimingMaxPending = 8192;
+
+// Default on; overwritten at startup via set_phase_timing_enabled.
+std::atomic<bool> g_phase_timing_enabled{true};
+
+bool phase_timing_enabled() {
+  return g_phase_timing_enabled.load(std::memory_order_relaxed);
+}
+
+void destroy_phase_timing_events(PhaseTimingRecord& record) {
+  cudaEventDestroy(record.start);
+  cudaEventDestroy(record.end);
+}
+
+void push_phase_timing(const PhaseTimingRecord& record) {
+  std::lock_guard<std::mutex> lock(g_phase_timing_mutex);
+  if (g_phase_timing_pending.size() >= kPhaseTimingMaxPending) {
+    destroy_phase_timing_events(g_phase_timing_pending.front());
+    g_phase_timing_pending.pop_front();
+  }
+  g_phase_timing_pending.push_back(record);
+}
 
 /**
  * Key logic in the kernel implementation:
@@ -492,66 +536,146 @@ void execute_object_group_transfer(
     }
   };
 
+  // Brackets *body* with a CUDA event pair; degrades to untimed execution on
+  // event-creation failure.
+  const bool timing = phase_timing_enabled();
+  const cudaStream_t timing_stream =
+      timing ? static_cast<cudaStream_t>(at::cuda::getCurrentCUDAStream())
+             : nullptr;
+  const auto timed_section = [&](TransferPhase phase, int64_t nbytes,
+                                 const std::function<void()>& body) {
+    if (!timing || nbytes <= 0) {
+      body();
+      return;
+    }
+    cudaEvent_t start_event = nullptr;
+    cudaEvent_t end_event = nullptr;
+    if (cudaEventCreate(&start_event) != cudaSuccess) {
+      body();
+      return;
+    }
+    if (cudaEventCreate(&end_event) != cudaSuccess) {
+      cudaEventDestroy(start_event);
+      body();
+      return;
+    }
+    cudaEventRecord(start_event, timing_stream);
+    try {
+      body();
+    } catch (...) {
+      cudaEventDestroy(start_event);
+      cudaEventDestroy(end_event);
+      throw;
+    }
+    cudaEventRecord(end_event, timing_stream);
+    push_phase_timing({start_event, end_event, static_cast<int>(phase),
+                       static_cast<int>(direction),
+                       static_cast<int>(device.index()), nbytes});
+  };
+
   for (const auto& step : batch_steps) {
+    // Staged payload; the kernel section moves the same objects, so the
+    // value serves both phases.
+    int64_t step_bytes = 0;
+    for (const auto& copy : step.staging) {
+      step_bytes += static_cast<int64_t>(copy.nbytes);
+    }
+
     // H2D stages CPU->GPU temp buffers before the kernel reads them; D2H stages
     // GPU->CPU after the kernel writes them. The per-step ordering must be
     // preserved because temp buffers are reused across steps.
     if (is_h2d) {
-      do_staging(step.staging);
+      timed_section(TransferPhase::STAGING, step_bytes,
+                    [&] { do_staging(step.staging); });
     }
-    for (const auto& launch : step.launches) {
-      TORCH_CHECK(
-          launch.group_idx >= 0 &&
-              launch.group_idx < static_cast<int>(kernel_group_specs.size()),
-          "LaunchVar.group_idx out of range: ", launch.group_idx);
-      const KernelGroupSpec& group = kernel_group_specs[launch.group_idx];
-      TORCH_CHECK(launch.num_objects >= 1 &&
-                      launch.num_objects <=
-                          static_cast<int>(group.lmcache_objects_ptrs.size()),
-                  "LaunchVar.num_objects (", launch.num_objects,
-                  ") exceeds available temp buffers (",
-                  group.lmcache_objects_ptrs.size(), ")");
-      // Bounds-check the block_ids slice before the kernel dereferences it on
-      // device: an out-of-range offset/length would otherwise be a silent
-      // out-of-bounds device read (CUDA fault or garbage), not a clean error.
-      TORCH_CHECK(launch.block_ids_offset >= 0,
-                  "LaunchVar.block_ids_offset must be non-negative, got ",
-                  launch.block_ids_offset);
-      TORCH_CHECK(launch.total_blocks >= 0,
-                  "LaunchVar.total_blocks must be non-negative, got ",
-                  launch.total_blocks);
-      TORCH_CHECK(launch.block_ids_offset + launch.total_blocks <=
-                      group.block_ids_capacity,
-                  "LaunchVar block_ids slice [", launch.block_ids_offset, ", ",
-                  launch.block_ids_offset + launch.total_blocks,
-                  ") exceeds block_ids capacity ", group.block_ids_capacity);
+    timed_section(TransferPhase::KERNEL, step_bytes, [&] {
+      for (const auto& launch : step.launches) {
+        TORCH_CHECK(
+            launch.group_idx >= 0 &&
+                launch.group_idx < static_cast<int>(kernel_group_specs.size()),
+            "LaunchVar.group_idx out of range: ", launch.group_idx);
+        const KernelGroupSpec& group = kernel_group_specs[launch.group_idx];
+        TORCH_CHECK(launch.num_objects >= 1 &&
+                        launch.num_objects <=
+                            static_cast<int>(group.lmcache_objects_ptrs.size()),
+                    "LaunchVar.num_objects (", launch.num_objects,
+                    ") exceeds available temp buffers (",
+                    group.lmcache_objects_ptrs.size(), ")");
+        // Bounds-check the block_ids slice before the kernel dereferences it on
+        // device: an out-of-range offset/length would otherwise be a silent
+        // out-of-bounds device read (CUDA fault or garbage), not a clean error.
+        TORCH_CHECK(launch.block_ids_offset >= 0,
+                    "LaunchVar.block_ids_offset must be non-negative, got ",
+                    launch.block_ids_offset);
+        TORCH_CHECK(launch.total_blocks >= 0,
+                    "LaunchVar.total_blocks must be non-negative, got ",
+                    launch.total_blocks);
+        TORCH_CHECK(launch.block_ids_offset + launch.total_blocks <=
+                        group.block_ids_capacity,
+                    "LaunchVar block_ids slice [", launch.block_ids_offset,
+                    ", ", launch.block_ids_offset + launch.total_blocks,
+                    ") exceeds block_ids capacity ", group.block_ids_capacity);
 
-      // Wrap the plan's pre-resolved raw device addresses as non-owning tensor
-      // views so we can reuse the existing multi_layer_block_kv_transfer entry
-      // point without touching any of its code. The backing storage is owned by
-      // the caller's tensors (kept alive for the duration of this call); these
-      // views only carry the pointer/shape each launch needs. Downstream only
-      // reads paged_buffer_ptrs_tensor.data_ptr() and block_ids.{data_ptr,
-      // size(0)}.
-      const uintptr_t block_ids_addr =
-          group.block_ids_base +
-          static_cast<uintptr_t>(launch.block_ids_offset) * sizeof(int64_t);
-      const at::Tensor paged_buffer_ptrs_tensor = at::from_blob(
-          reinterpret_cast<void*>(group.paged_buffer_ptrs), {1}, int64_opts);
-      const at::Tensor block_ids = at::from_blob(
-          reinterpret_cast<void*>(block_ids_addr),
-          {static_cast<int64_t>(launch.total_blocks)}, int64_opts);
-      std::vector<int64_t> lmcache_objects_ptrs(
-          group.lmcache_objects_ptrs.begin(),
-          group.lmcache_objects_ptrs.begin() + launch.num_objects);
+        // Wrap the plan's pre-resolved raw device addresses as non-owning
+        // tensor views so we can reuse the existing
+        // multi_layer_block_kv_transfer entry point without touching any of its
+        // code. The backing storage is owned by the caller's tensors (kept
+        // alive for the duration of this call); these views only carry the
+        // pointer/shape each launch needs. Downstream only reads
+        // paged_buffer_ptrs_tensor.data_ptr() and block_ids.{data_ptr,
+        // size(0)}.
+        const uintptr_t block_ids_addr =
+            group.block_ids_base +
+            static_cast<uintptr_t>(launch.block_ids_offset) * sizeof(int64_t);
+        const at::Tensor paged_buffer_ptrs_tensor = at::from_blob(
+            reinterpret_cast<void*>(group.paged_buffer_ptrs), {1}, int64_opts);
+        const at::Tensor block_ids = at::from_blob(
+            reinterpret_cast<void*>(block_ids_addr),
+            {static_cast<int64_t>(launch.total_blocks)}, int64_opts);
+        std::vector<int64_t> lmcache_objects_ptrs(
+            group.lmcache_objects_ptrs.begin(),
+            group.lmcache_objects_ptrs.begin() + launch.num_objects);
 
-      multi_layer_block_kv_transfer(
-          paged_buffer_ptrs_tensor, std::move(lmcache_objects_ptrs), block_ids,
-          device, direction, group.shape_desc, group.lmcache_chunk_size,
-          group.engine_kv_format, launch.skip_prefix_n_blocks);
-    }
+        multi_layer_block_kv_transfer(
+            paged_buffer_ptrs_tensor, std::move(lmcache_objects_ptrs),
+            block_ids, device, direction, group.shape_desc,
+            group.lmcache_chunk_size, group.engine_kv_format,
+            launch.skip_prefix_n_blocks);
+      }
+    });
     if (!is_h2d) {
-      do_staging(step.staging);
+      timed_section(TransferPhase::STAGING, step_bytes,
+                    [&] { do_staging(step.staging); });
     }
   }
+}
+
+void set_phase_timing_enabled(bool enabled) {
+  g_phase_timing_enabled.store(enabled, std::memory_order_relaxed);
+}
+
+std::vector<std::tuple<int, int, int, double, int64_t>>
+harvest_transfer_phase_timings() {
+  std::vector<std::tuple<int, int, int, double, int64_t>> samples;
+  std::lock_guard<std::mutex> lock(g_phase_timing_mutex);
+  for (auto it = g_phase_timing_pending.begin();
+       it != g_phase_timing_pending.end();) {
+    const cudaError_t status = cudaEventQuery(it->end);
+    if (status == cudaErrorNotReady) {
+      (void)cudaGetLastError();  // clear cudaErrorNotReady
+      ++it;
+      continue;
+    }
+    if (status == cudaSuccess) {
+      float elapsed_ms = 0.0f;
+      if (cudaEventElapsedTime(&elapsed_ms, it->start, it->end) ==
+          cudaSuccess) {
+        samples.emplace_back(it->phase, it->direction, it->device_index,
+                             static_cast<double>(elapsed_ms), it->nbytes);
+      }
+    }
+    destroy_phase_timing_events(*it);
+    it = g_phase_timing_pending.erase(it);
+  }
+  return samples;
 }

@@ -3,6 +3,9 @@
 #pragma once
 
 #include <c10/cuda/CUDAGuard.h>
+#include <cstdint>
+#include <tuple>
+#include <vector>
 
 #include "kv_transfer_plan_types.h"
 #include "mem_kernels.cuh"
@@ -23,6 +26,34 @@ struct MemoryObj4 {
 // burst instead of once per copy/launch. See the design in
 // docs/design/v1/multiprocess/modules/ and lmcache_driven_transfer.py.
 // ---------------------------------------------------------------------------
+
+// Timed sections of execute_object_group_transfer, reported by
+// harvest_transfer_phase_timings().
+enum class TransferPhase : int {
+  KERNEL = 0,   // gather/scatter kernel launches (paged blocks <-> staging)
+  STAGING = 1,  // host<->device DMA staging copies
+};
+
+/**
+ * Enable or disable phase-timing recording in the plan executor.
+ * Defaults to enabled; pushed from the observability config at startup.
+ * Thread-safe; takes effect for subsequently executed plans.
+ */
+void set_phase_timing_enabled(bool enabled);
+
+/**
+ * Drain completed gather/DMA phase timing samples.
+ *
+ * Returns the finished CUDA event pairs recorded by
+ * execute_object_group_transfer; unfinished pairs stay queued.
+ *
+ * @return One tuple per finished section:
+ *         (phase, direction, device_index, elapsed_ms, nbytes), with phase a
+ *         TransferPhase value, direction a TransferDirection value, and
+ *         nbytes the step's staged payload (shared by both phases).
+ */
+std::vector<std::tuple<int, int, int, double, int64_t>>
+harvest_transfer_phase_timings();
 
 /**
  * Execute one object group's transfer plan on the current CUDA stream.

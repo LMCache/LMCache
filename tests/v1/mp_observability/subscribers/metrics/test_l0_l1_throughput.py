@@ -394,3 +394,16 @@ class TestEventBusIntegration:
             a.get("engine_id") == "9" and a.get("device") == f"{torch_device_type}:1"
             for a in attrs
         )
+
+
+class TestStringifiedMetadata:
+    """Regression: ``publish_on_stream`` stringifies float metadata at the
+    C++ event-recorder boundary; store-side stats must parse, not compare."""
+
+    def test_string_valued_stats_still_record(self):
+        subscriber = L0L1ThroughputSubscriber()
+        reserve_before = _total_count("lmcache_mp.l0_l1_store_reserve_time")
+        event = _end_event(EventType.MP_STORE_END, "strmeta-req", 10.0, total_bytes=1)
+        event.metadata.update({"reserve_seconds": "0.25"})
+        subscriber.get_subscriptions()[EventType.MP_STORE_END](event)
+        assert _total_count("lmcache_mp.l0_l1_store_reserve_time") == reserve_before + 1
