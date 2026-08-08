@@ -644,7 +644,7 @@ def multi_layer_kv_transfer(
 
     # 2. Determine architecture variant and tensor dimensions.
     uses_mla = is_mla(engine_kv_format)
-    is_blocked_scale = _is_blocked_scale_format(engine_kv_format)
+    is_blocked_scale = engine_kv_format == EngineKVFormat.NL_X_NB_BSV_BSS
     is_hnd_split = _is_hnd_split_format(engine_kv_format)
     is_hnd_split_blocks_first = _is_blocks_first_hnd_split_format(engine_kv_format)
     is_fused_packed_hnd = _is_fused_hnd_format(engine_kv_format)
@@ -948,11 +948,6 @@ def _is_two_major_format(engine_kv_format: EngineKVFormat) -> bool:
 def _is_pbs_fused_format(engine_kv_format: EngineKVFormat) -> bool:
     """Return True when num_blocks and block_size are one folded PBS axis."""
     return _format_spec(engine_kv_format).is_pbs_fused
-
-
-def _is_blocked_scale_format(engine_kv_format: EngineKVFormat) -> bool:
-    """Return True when a format stores values and scales in separate block regions."""
-    return _format_spec(engine_kv_format).is_blocked_scale
 
 
 def _is_hnd_split_format(engine_kv_format: EngineKVFormat) -> bool:

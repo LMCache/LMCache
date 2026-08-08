@@ -97,10 +97,10 @@ class KVFormatSpec(ABC):
     representative) and the format's **static layout facts** -- the structural
     shape (``is_cross_layer`` / ``is_kv_list`` / ``is_layer_list``, exactly one
     true) plus the ``is_mla`` / ``is_hnd`` / ``is_fused_packed`` /
-    ``is_two_major`` / ``is_pbs_fused`` / ``is_blocked_scale`` modifiers. They
-    default to ``False``, so a spec only declares what applies to it. Every
-    consumer reads them through ``get_spec_class(fmt)`` -- no format lists at
-    call sites. The device kernels keep their own copy in
+    ``is_two_major`` / ``is_pbs_fused`` modifiers. They default to ``False``,
+    so a spec only declares what applies to it. Every consumer reads them
+    through ``get_spec_class(fmt)`` -- no format lists at call sites. The
+    device kernels keep their own copy in
     ``csrc/engine_kv_format.h``.
 
     Method usage by mode -- every spec is consumed through the ``get_*``
@@ -147,9 +147,6 @@ class KVFormatSpec(ABC):
     # ``num_blocks`` and ``block_size`` are folded into one PBS axis, which
     # leaves both of them undefined for this format.
     is_pbs_fused: ClassVar[bool] = False
-    # Each block stores token values followed by token scales rather than
-    # contiguous token rows.
-    is_blocked_scale: ClassVar[bool] = False
 
     def __init__(self, kv_caches: DiscoverableKVCache) -> None:
         # Borrowed, not owned: see the class docstring's "Lifetime" note. The
