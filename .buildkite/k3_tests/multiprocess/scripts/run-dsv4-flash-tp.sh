@@ -114,10 +114,22 @@ MAX_TOKENS="${MAX_TOKENS:-128}"
 # Seconds to let async LMCache stores drain before the retrieve run.
 STORE_DRAIN_SECONDS="${STORE_DRAIN_SECONDS:-20}"
 
-# vllm-project/DeepGEMM@codex/cuda129-fp8-include-5f33a180: the SM120 branch
-# (nv_dev+situ) carrying the same CUDA FP8 header fix vLLM's current pin was cut
-# for -- i.e. a drop-in replacement for that pin that differs only by having the
-# SM120 kernels. Installed only on SM120; see "Hardware requirement" above.
+# vllm-project/DeepGEMM@codex/cuda129-fp8-include-5f33a180 (2fd67329).
+#
+# Chosen because it is a strict descendant of vLLM's current pin: `git compare
+# f5a76426...5f33a180` reports ahead_by 96, behind_by 0, so nothing the pinned
+# revision has is lost. It carries the byte-identical one-line commit
+# "[Build] Include CUDA FP8 type in MQA layout header" that produced the pin
+# (e21c821f), on top of nv_dev+situ, which has the SM120 kernels.
+#
+# Not a minimal delta, though: those 96 commits touch 70 files and include
+# SM90 (kv_block=32, next_n=4) and SM100 (paged indexer, MQA logits sync)
+# changes plus an upstream-main sync. That is acceptable here because this
+# install only happens on SM120, where the alternative is not booting at all --
+# but it is why the install is guarded by arch rather than applied everywhere.
+#
+# Its lineage also discharges the TODO vLLM left in deepgemm.cmake,
+# "switch to nv_dev branch after it support situ": nv_dev+situ is exactly that.
 DEEPGEMM_SM120_REF="${DEEPGEMM_SM120_REF:-2fd67329ec2942f65ba35d561256ab6ed3b903cb}"
 DEEPGEMM_REPO="${DEEPGEMM_REPO:-https://github.com/vllm-project/DeepGEMM.git}"
 
