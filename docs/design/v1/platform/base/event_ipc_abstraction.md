@@ -60,6 +60,26 @@ class EventIPCBackend(Protocol):
     def synchronize_event(self, event: object, device: object) -> None: ...
 ```
 
+### Ordering contract
+
+`import_event` must return an event that represents the *producer's* work, on
+the producer's stream, in the producer's process. The imported event is the
+only thing ordering the two processes: the producer records it and ships the
+handle without synchronizing, and the consumer's `wait_event` before touching
+shared KV-cache memory is what keeps it from reading blocks the producer has
+not finished writing.
+
+A backend must therefore not substitute a locally created or already-completed
+event for a real imported one. Doing so makes the consumer's `wait_event` a
+no-op and permits reads of partially written KV-cache blocks. Host-side
+synchronization in the importing process is not a valid substitute either: it
+drains only that process's own streams and carries no ordering relationship to
+the exporting process.
+
+If a device cannot support cross-process event import, it must fail
+`check_event_support` so the caller falls back to a transfer mode that does not
+depend on cross-process ordering, rather than silently degrading correctness.
+
 The lookup entry point is:
 
 ```python
