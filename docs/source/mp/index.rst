@@ -95,18 +95,22 @@ All server entry points share the same ``MPCacheServer`` and
 ``StorageManager`` core. ``MPCacheServer`` is now a thin compositor:
 it holds an ``MPCacheServerContext`` and a list of ``EngineModule``
 instances assembled by ``_build_modules()`` (in ``server.py``)
-based on ``--engine-type`` and ``--supported-transfer-mode``.
+based on ``--engine-type``, ``--supported-transfer-mode``, and
+``--enable``.
 
 **``server.py``** -- The default ZMQ-only server.  Creates an
 ``MPCacheServer``, assembles the engine modules
-(``LookupModule`` + ``ManagementModule`` + ``LMCacheDrivenTransferModule``
+(``LookupModule`` + ``P2PController`` (always loaded) +
+``ManagementModule`` + ``LMCacheDrivenTransferModule``
 and/or ``EngineDrivenTransferModule`` depending on
 ``--supported-transfer-mode`` — ``lmcache_driven`` or ``engine_driven`` loads
 just one,
 ``auto`` (default) loads both — plus a CacheBlend module when
 ``--engine-type`` is set: ``blend`` appends ``BlendV3Module`` (the
 current paged-aware implementation), and ``blend_legacy`` appends
-``BlendModule`` (the original)). Starts a ``MessageQueueServer``,
+``BlendModule`` (the original), plus any experimental transfer
+modules opted into via ``--enable`` (currently ``transfer_query`` →
+``QStoreModule``)). Starts a ``MessageQueueServer``,
 registers handlers for every ``RequestType`` exposed by the loaded
 modules, and blocks in a keep-alive loop.
 
@@ -171,6 +175,21 @@ Communication between vLLM and LMCache uses ZMQ (DEALER/ROUTER pattern).
    * - ``UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT``
      - SYNC
      - Unregister an engine-driven KV cache context.
+   * - ``REGISTER_Q_CACHE``
+     - SYNC
+     - (Experimental) Register a paged Q ring buffer (query-tensor cache)
+       for a vLLM instance. Served by ``QStoreModule``; loaded only when
+       ``--enable transfer_query`` is passed (requires
+       ``--supported-transfer-mode`` ``lmcache_driven`` or ``auto``).
+   * - ``UNREGISTER_Q_CACHE``
+     - SYNC
+     - (Experimental) Unregister a paged Q ring buffer. Loaded only when
+       ``--enable transfer_query`` is passed.
+   * - ``STORE_Q``
+     - BLOCKING
+     - (Experimental) Store paged Q ring blocks. Same shape as ``STORE``
+       but for the query-tensor cache. Loaded only when
+       ``--enable transfer_query`` is passed.
    * - ``STORE``
      - BLOCKING
      - Store KV cache chunks from GPU to L1 (CPU). LMCache-driven
@@ -233,6 +252,11 @@ Communication between vLLM and LMCache uses ZMQ (DEALER/ROUTER pattern).
    * - ``GET_CHUNK_SIZE``
      - SYNC
      - Return the server's chunk size.
+   * - ``GET_EXPERIMENTAL``
+     - SYNC
+     - Return the list of experimental intermediate-tensor transfer
+       types the server was launched with (the values passed via
+       ``--enable``; empty when none are enabled).
    * - ``PING``
      - BLOCKING
      - Liveness ping; the handler always returns ``True``.
@@ -601,11 +625,15 @@ Key Source Files
      - Engine module implementations: ``lookup.py`` (``LookupModule``),
        ``management.py`` (``ManagementModule``), ``lmcache_driven_transfer.py``
        (``LMCacheDrivenTransferModule``), ``engine_driven_transfer.py``
-       (``EngineDrivenTransferModule``), ``blend.py``
+       (``EngineDrivenTransferModule``), ``p2p_controller.py``
+       (``P2PController``, always loaded), ``blend.py``
        (``BlendModule`` / ``BlendEngineV2``, selected by
-       ``--engine-type blend_legacy``), and ``blend_v3.py``
+       ``--engine-type blend_legacy``), ``blend_v3.py``
        (``BlendV3Module``, the paged-aware CacheBlend V3 pipeline
-       selected by ``--engine-type blend``).
+       selected by ``--engine-type blend``), and
+       ``experimental/qstore.py`` (``QStoreModule``, paged Q ring buffer
+       for query-tensor caching; opted into via
+       ``--enable transfer_query``).
    * - ``lmcache/v1/multiprocess/http_server.py``
      - FastAPI wrapper with health check and many other useful APIs
    * - ``lmcache/v1/multiprocess/http_api_registry.py``
