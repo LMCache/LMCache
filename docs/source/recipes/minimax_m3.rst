@@ -77,6 +77,29 @@ Compression support
      - Not validated
      -
 
+MTP (speculative decoding) support
+----------------------------------
+
+**Status:** Not possible with the public checkpoints -- the MTP weights
+were not released.
+
+The ``config.json`` of
+`MiniMaxAI/MiniMax-M3 <https://huggingface.co/MiniMaxAI/MiniMax-M3>`_ (BF16)
+declares a native multi-token-prediction head
+(``num_nextn_predict_layers: 1``), but the checkpoint does not contain the
+MTP layer's weights, and neither does ``MiniMaxAI/MiniMax-M3-MXFP8`` (whose
+config omits the field entirely): both checkpoints hold decoder layers 0-59
+only, with no ``mtp``/``nextn`` tensors and no extra layer index. Enabling
+``--speculative-config '{"method":"mtp","num_speculative_tokens":1}'``
+fails at engine startup with vLLM's checkpoint-completeness check::
+
+   ValueError: Failed to load MTP layer 0 weights from checkpoint.
+
+This is a limitation of the released checkpoints, not of LMCache or vLLM.
+If MiniMax publishes the MTP head weights, the standard MTP spec-config
+above is expected to apply; LMCache accounts for MTP draft-layer KV caches
+automatically (validated on DeepSeek-V4-Flash and Gemma 4).
+
 Caveats
 -------
 
