@@ -83,7 +83,7 @@ class LMCacheMPRequestTracker:
             self.retention_ttl_sec = max(
                 0, int(params.get("lmcache_retention_ttl_sec", 0))
             )
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             self.retention_ttl_sec = 0
         self.all_token_ids = request.all_token_ids
         self.allocated_block_ids = {}
