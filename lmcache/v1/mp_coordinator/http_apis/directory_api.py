@@ -18,6 +18,9 @@ from lmcache.v1.distributed.api import Tier
 from lmcache.v1.mp_coordinator.http_apis.dependencies import get_context
 from lmcache.v1.mp_coordinator.key_directory import ApplyResult, DirectoryStats
 from lmcache.v1.mp_coordinator.schemas import (
+    BlendLookupRequest,
+    BlendLookupResponse,
+    BlendMatchModel,
     DirectoryEventsRequest,
     DirectoryEventsResponse,
     DirectoryKeyInfo,
@@ -25,6 +28,7 @@ from lmcache.v1.mp_coordinator.schemas import (
     DirectoryListResponse,
     DirectoryLookupRequest,
     DirectoryLookupResponse,
+    decode_tokens,
 )
 from lmcache.v1.multiprocess.cache_control.key_resolver import resolve_object_keys
 
@@ -119,6 +123,43 @@ async def lookup_placements(
     )
 
 
+@router.post("/directory/blend-lookup")
+async def blend_lookup(
+    body: BlendLookupRequest, request: Request
+) -> BlendLookupResponse:
+    """Find cached chunk content anywhere inside a query sequence.
+
+    The fragment counterpart to ``/directory/lookup``: the query need not
+    be a prefix, and each match reports both where the content sits in
+    the query and where it sat when stored, so the caller can re-RoPE it.
+
+    Args:
+        body: The query tokens.
+        request: The FastAPI request carrying the coordinator context.
+
+    Returns:
+        Matched chunks, ascending by query position.
+    """
+    directory = get_context(request).key_directory
+    tokens = decode_tokens(body.tokens_b64)
+
+    def _match() -> BlendLookupResponse:
+        """Run the fragment match and shape it for the wire."""
+        return BlendLookupResponse(
+            matches=[
+                BlendMatchModel(
+                    chunk_hash=match.chunk_hash.hex(),
+                    old_st=match.old_st,
+                    cur_st=match.cur_st,
+                )
+                for match in directory.blend_match(tokens)
+            ]
+        )
+
+    # The rolling hash walks the whole query — keep it off the event loop.
+    return await asyncio.to_thread(_match)
+
+
 @router.get("/directory/keys")
 async def list_directory_keys(
     request: Request,
@@ -151,6 +192,7 @@ async def list_directory_keys(
     directory = get_context(request).key_directory
 
     def _scan() -> DirectoryListResponse:
+        """Page the directory and shape the rows for the wire."""
         total, page = directory.list_keys(tier, instance_id, backend, offset, limit)
         token_ids = directory.get_token_ids([key.chunk_hash for key in page])
         return DirectoryListResponse(

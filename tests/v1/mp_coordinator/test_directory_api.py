@@ -8,10 +8,21 @@ from fastapi.testclient import TestClient
 # First Party
 from lmcache.v1.mp_coordinator.app import create_app
 from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
+from lmcache.v1.mp_coordinator.schemas import encode_tokens
 
 
 def _client() -> TestClient:
     config = MPCoordinatorConfig(health_check_interval=0.0, eviction_check_interval=0.0)
+    return TestClient(create_app(config))
+
+
+def _blend_client() -> TestClient:
+    """A coordinator with fragment (blend) lookup turned on."""
+    config = MPCoordinatorConfig(
+        health_check_interval=0.0,
+        eviction_check_interval=0.0,
+        enable_blend_lookup=True,
+    )
     return TestClient(create_app(config))
 
 
@@ -181,12 +192,98 @@ def test_stats_reports_counts_and_gap_flag():
 
 def test_store_entry_with_tokens_populates_bindings():
     with _client() as client:
-        entry = {"key": _key(), "size_bytes": 1024, "token_ids": [1, 2, 3]}
+        entry = {
+            "key": _key(),
+            "size_bytes": 1024,
+            "token_ids": [1, 2, 3],
+            "token_offset": 256,
+        }
         data = _post_events(client, [_batch(entries=[entry])])
         assert data == {"applied": 1, "duplicates": 0, "stale": 0}
 
         key_directory = client.app.state.ctx.key_directory
         assert key_directory.get_token_ids([bytes.fromhex("aa")]) == [(1, 2, 3)]
+
+
+def test_lookup_returns_the_chunks_token_ids():
+    """The normal lookup reports content only — positions are the blend
+    lookup's concern."""
+    with _client() as client:
+        entry = {"key": _key(), "size_bytes": 1024, "token_ids": [1, 2, 3]}
+        _post_events(client, [_batch(entries=[entry])])
+
+        resp = client.post("/directory/lookup", json={"keys": [_key()]})
+        assert resp.status_code == 200
+        [result] = resp.json()["results"]
+        assert result["token_ids"] == [1, 2, 3]
+        assert "token_offset" not in result
+
+
+# -- Blend (fragment) lookup ---------------------------------------------------
+
+
+def _chunk_tokens(first: int, count: int) -> list[int]:
+    return list(range(first, first + count))
+
+
+def _blend_lookup(client: TestClient, tokens: list[int]) -> dict:
+    resp = client.post(
+        "/directory/blend-lookup", json={"tokens_b64": encode_tokens(tokens)}
+    )
+    assert resp.status_code == 200
+    return resp.json()
+
+
+def test_blend_lookup_finds_a_stored_chunk_mid_query():
+    """The fragment form does not require a prefix: content is found at
+    whatever offset it sits at in the query."""
+    chunk_size = MPCoordinatorConfig().chunk_size
+    content = _chunk_tokens(1000, chunk_size)
+    with _blend_client() as client:
+        entry = {
+            "key": _key(),
+            "size_bytes": 1024,
+            "token_ids": content,
+            "token_offset": 512,
+        }
+        _post_events(client, [_batch(entries=[entry])])
+
+        data = _blend_lookup(client, [7, 8, 9] + content + [11, 12])
+
+        assert data["matches"] == [{"chunk_hash": "aa", "old_st": 512, "cur_st": 3}]
+
+
+def test_blend_lookup_without_a_match_is_empty():
+    chunk_size = MPCoordinatorConfig().chunk_size
+    with _blend_client() as client:
+        data = _blend_lookup(client, _chunk_tokens(1, chunk_size + 5))
+        assert data["matches"] == []
+
+
+def test_blend_lookup_rejects_a_malformed_token_buffer():
+    with _blend_client() as client:
+        resp = client.post("/directory/blend-lookup", json={"tokens_b64": "not!b64"})
+        assert resp.status_code == 422
+
+
+def test_blend_lookup_stops_matching_a_deleted_chunk():
+    chunk_size = MPCoordinatorConfig().chunk_size
+    content = _chunk_tokens(1000, chunk_size)
+    with _blend_client() as client:
+        entry = {
+            "key": _key(),
+            "size_bytes": 1024,
+            "token_ids": content,
+            "token_offset": 0,
+        }
+        _post_events(client, [_batch(seq=1, entries=[entry])])
+        assert _blend_lookup(client, content)["matches"]
+
+        _post_events(
+            client,
+            [_batch(seq=2, event_type="delete", entries=[{"key": _key()}])],
+        )
+        assert _blend_lookup(client, content)["matches"] == []
 
 
 # -- Listing + token ids -------------------------------------------------------
@@ -285,3 +382,28 @@ def test_malformed_key_hex_is_rejected():
             json={"batches": [_batch(entries=[{"key": _key(h="zz")}])]},
         )
         assert resp.status_code == 422
+
+
+def test_stats_reports_blend_index_counts():
+    """The e2e ladder needs a way to confirm the fleet index actually got
+    populated from the event stream."""
+    chunk_size = MPCoordinatorConfig().chunk_size
+    content = _chunk_tokens(1000, chunk_size)
+    with _blend_client() as client:
+        assert client.get("/directory/stats").json()["blend"] == {
+            "num_contents": 0,
+            "num_chunks": 0,
+            "table_size": 1024,
+        }
+
+        entry = {
+            "key": _key(),
+            "size_bytes": 1024,
+            "token_ids": content,
+            "token_offset": 0,
+        }
+        _post_events(client, [_batch(entries=[entry])])
+
+        data = client.get("/directory/stats").json()["blend"]
+        assert data["num_contents"] == 1
+        assert data["num_chunks"] == 1
