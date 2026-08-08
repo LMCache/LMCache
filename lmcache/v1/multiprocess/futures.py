@@ -263,10 +263,15 @@ class LayerwiseDeviceMessagingFuture(MessagingFuture[T]):
             return
         event_bytes_list, result = self.raw_future_.result()
         self.result_ = result
-        self.layer_events_ = [
-            self._event_backend.import_event(eb, self.device_)
-            for eb in event_bytes_list
-        ]
+        # Deduplicate: layers sharing a batch have identical handle bytes,
+        # so import each unique handle only once (avoids redundant
+        # cudaIpcOpenEventHandle calls).
+        seen: dict[bytes, object] = {}
+        self.layer_events_ = []
+        for eb in event_bytes_list:
+            if eb not in seen:
+                seen[eb] = self._event_backend.import_event(eb, self.device_)
+            self.layer_events_.append(seen[eb])
         self._resolved = True
 
     def wait_for_layer(self, layer_idx: int) -> None:
