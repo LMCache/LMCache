@@ -645,6 +645,23 @@ def create_xpu_connector(hidden_dim, num_layers):
     return VLLMPagedMemXPUConnectorV2(hidden_dim, num_layers)
 
 
+def create_musa_connector(
+    hidden_dim: int, num_layers: int
+) -> VLLMPagedMemGPUConnectorV2:
+    """Create the MUSA connector used by benchmark tests.
+
+    The MUSA connector discovers model dimensions from the paged KV cache, so
+    ``hidden_dim`` and ``num_layers`` are accepted only to keep the test helper
+    interface consistent across accelerators.
+    """
+    # First Party
+    from lmcache.v1.gpu_connector.musa_connectors import (
+        VLLMPagedMemMUSAConnectorV2,
+    )
+
+    return VLLMPagedMemMUSAConnectorV2(use_gpu=False)
+
+
 def get_all_methods_from_base(base_class):
     """
     Get all public methods defined in the base class (excluding inherited from object).
