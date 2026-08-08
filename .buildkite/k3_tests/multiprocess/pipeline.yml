@@ -40,8 +40,8 @@ steps:
   # DeepGEMM carrying SM120 kernels, because the vLLM wheel's bundled one has
   # none -- an upstream regression (vllm#50000 repointed the DeepGEMM pin onto
   # a base that never had SM120). run-dsv4-flash-tp.sh documents the full
-  # chain and no-ops the build on SM90/SM100. Budgeted inside the 90 min
-  # timeout below.
+  # chain and no-ops the build on SM90/SM100. The build measures ~1-2 min in
+  # CI, well inside the timeout below.
   - group: ":compression: Multiprocess (4-GPU)"
     if: build.env("VERIFY_AND_PIN_VLLM") !~ /true/
     steps:
@@ -52,11 +52,12 @@ steps:
       # slot-compression path, resets vLLM's local prefix cache (LMCache
       # preserved), re-sends the identical request now served from the L1 CPU
       # pool, and asserts the two greedy outputs are byte-identical. The 160GB
-      # fp8 TP-shard load (plus the weight download on a cold hf-cache node,
-      # plus the SM120 DeepGEMM build) needs the long timeout.
+      # fp8 TP-shard load (plus the weight download on a cold hf-cache node)
+      # needs the long timeout. The SM120 DeepGEMM build adds ~1-2 min,
+      # measured in CI, so it does not move this budget.
       - label: ":compression: dsv4_flash_tp"
         command: .buildkite/k3_tests/multiprocess/run.sh dsv4_flash_tp
-        timeout_in_minutes: 120
+        timeout_in_minutes: 90
         retry: *flaky-retry
         agents: { queue: "k8s" }
         plugins:
