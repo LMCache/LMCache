@@ -154,7 +154,9 @@ PYBIND11_MODULE(cuda_ops, m) {
       .def_readwrite("hs", &PageBufferShapeDesc::hs)
       .def_readwrite("element_size", &PageBufferShapeDesc::element_size)
       .def_readwrite("block_stride_elems",
-                     &PageBufferShapeDesc::block_stride_elems);
+                     &PageBufferShapeDesc::block_stride_elems)
+      .def_readwrite("lmcache_kv_interleaved",
+                     &PageBufferShapeDesc::lmcache_kv_interleaved);
   // Object-group transfer plan types (see mp_mem_kernels.cuh). Built on the
   // Python side and consumed by execute_object_group_transfer.
   py::class_<StagingCopy>(m, "StagingCopy")
