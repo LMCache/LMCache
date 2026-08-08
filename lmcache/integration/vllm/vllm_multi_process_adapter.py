@@ -1137,8 +1137,8 @@ class LMCacheMPWorkerAdapter:
         # Per-layer KV loading: when True, retrieve requests use
         # layerwise transfer and return LayerwiseDeviceMessagingFuture
         # so wait_for_layer_load can synchronize per layer.
-        self._layerwise_loading: bool = bool(
-            os.environ.get("LMCACHE_MP_LAYERWISE_ENABLED", False)
+        self._layerwise_loading: bool = (
+            int(os.environ.get("LMCACHE_MP_LAYERWISE_BATCH", "0")) > 0
         )
 
         # The store requests that have finished execution in LMCache

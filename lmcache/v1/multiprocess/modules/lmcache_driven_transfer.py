@@ -779,12 +779,14 @@ def transfer_kv_layerwise(
 
     main_stream = cache_context.stream
     pin_chunk_size = LazyMemoryAllocator.PIN_CHUNK_SIZE
-    # Keep native layerwise fusion strictly behind the same MP flag so
-    # per-chunk behavior remains unchanged.
-    use_native_layerwise_plan = (
-        _HAS_NATIVE_OBJECT_GROUP_TRANSFER
-        and bool(os.environ.get("LMCACHE_MP_LAYERWISE_ENABLED", ""))
+    # Batch N layers per IPC event to reduce cross-process sync
+    # overhead.  0 = layerwise disabled (caller should not reach here);
+    # 1 = one event per layer (original behaviour); N>1 = N layers
+    # transferred + scattered before events are recorded.
+    layerwise_batch_size = max(
+        1, int(os.environ.get("LMCACHE_MP_LAYERWISE_BATCH", "1"))
     )
+    use_native_layerwise_plan = _HAS_NATIVE_OBJECT_GROUP_TRANSFER
 
     # Flatten all valid chunks for single-launch-per-layer optimization.
     # In the existing temp buffer (4 full-chunk slots per kernel group),
@@ -836,11 +838,16 @@ def transfer_kv_layerwise(
                 blocks_per_chunk, blocks_per_window, orig_skip
             )
 
-    # --- Layer-major loop: H2D + scatter on same stream per layer ---
-    # The real pipeline overlap is cross-process: while this server does
-    # H2D(i+1)+scatter(i+1), vLLM's attention(i) runs concurrently via
-    # IPC event synchronization (same pattern as in-process per-layer).
-    for layer_tuple in all_layers:
+    # --- Layer-major loop with N-layer batching ---
+    # When layerwise_batch_size > 1, N layers of H2D + scatter are
+    # submitted in a single execute_object_group_transfer call before
+    # any IPC events are recorded, reducing cross-process sync points.
+    num_all_layers = len(all_layers)
+    pending_specs: list = []
+    pending_steps: list = []
+    pending_event_layers: list[int] = []
+
+    for loop_idx, layer_tuple in enumerate(all_layers):
         kg_info_idx, layer_local_idx, global_layer_idx = layer_tuple
         info = kg_infos[kg_info_idx]
         kernel_group_id = info["kernel_group_id"]
@@ -888,18 +895,15 @@ def transfer_kv_layerwise(
                     all_block_ids.numel(),
                 )
                 layer_launch = lmc_ops.LaunchVar(
-                    0,
+                    len(pending_specs),
                     0,
                     all_block_ids.numel(),
                     len(all_gpu_ptrs),
                     info["all_skip_blocks"],
                 )
-                lmc_ops.execute_object_group_transfer(
-                    lmc_ops.TransferDirection.H2D,
-                    cache_context.device,
-                    pin_chunk_size,
-                    [layer_spec],
-                    [lmc_ops.BatchStep(staging, [layer_launch])],
+                pending_specs.append(layer_spec)
+                pending_steps.append(
+                    lmc_ops.BatchStep(staging, [layer_launch])
                 )
             else:
                 for chunk_local_idx, (_, memory_obj) in enumerate(all_chunks_flat):
@@ -945,7 +949,6 @@ def transfer_kv_layerwise(
 
                 all_gpu_ptrs_batched: list[int] = []
                 batch_steps: list = []
-                ptr_offset = 0
 
                 for start_object_idx, memory_object_batch in batch_plan:
                     batch_len = len(memory_object_batch)
@@ -1001,7 +1004,7 @@ def transfer_kv_layerwise(
                     batch_num_blocks = batch_len * blocks_per_window
 
                     launch = lmc_ops.LaunchVar(
-                        ptr_offset,
+                        0,
                         batch_block_start,
                         batch_num_blocks,
                         batch_len,
@@ -1010,7 +1013,6 @@ def transfer_kv_layerwise(
                     batch_steps.append(
                         lmc_ops.BatchStep(staging, [launch])
                     )
-                    ptr_offset += batch_len
 
                 layer_spec = lmc_ops.KernelGroupSpec(
                     single_layer_kv_ptr.data_ptr(),
@@ -1101,11 +1103,27 @@ def transfer_kv_layerwise(
                         recalculated_skip_blocks,
                     )
 
-        # Record IPC event so vLLM can start attention for this layer.
-        if global_layer_idx < len(layer_events):
-            event_backend.record_event(
-                layer_events[global_layer_idx], main_stream
-            )
+        # Accumulate layer index; at N-layer batch boundary flush
+        # any pending native work and record events for the batch.
+        pending_event_layers.append(global_layer_idx)
+        if (len(pending_event_layers) >= layerwise_batch_size
+                or loop_idx == num_all_layers - 1):
+            if pending_specs:
+                lmc_ops.execute_object_group_transfer(
+                    lmc_ops.TransferDirection.H2D,
+                    cache_context.device,
+                    pin_chunk_size,
+                    pending_specs,
+                    pending_steps,
+                )
+                pending_specs = []
+                pending_steps = []
+            for _gl in pending_event_layers:
+                if _gl < len(layer_events):
+                    event_backend.record_event(
+                        layer_events[_gl], main_stream
+                    )
+            pending_event_layers = []
 
 
 @dataclass

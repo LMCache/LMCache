@@ -211,8 +211,8 @@ class MPCacheServerContext:
         self._chunk_size = chunk_size
         self._separate_object_groups = separate_object_groups
         self._full_sw_kv = full_sw_kv
-        self._layerwise_loading: bool = bool(
-            os.environ.get("LMCACHE_MP_LAYERWISE_ENABLED", "")
+        self._layerwise_loading: bool = (
+            int(os.environ.get("LMCACHE_MP_LAYERWISE_BATCH", "0")) > 0
         )
 
         # Initialize the process-global GDS context.
