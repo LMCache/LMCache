@@ -322,6 +322,13 @@ def validate_storage_manager_config(config: StorageManagerConfig) -> None:
                 "cannot keep each adapter below its eviction watermark"
             )
         for ec in eviction_configs:
+            if ec.eviction_policy == "IsolatedLRU":
+                raise ValueError(
+                    "retention_max_fraction does not support the IsolatedLRU "
+                    "eviction policy: the retention budget has no per-salt "
+                    "dimension, so one tenant could shield the whole budget "
+                    "and starve the rest"
+                )
             if config.retention_max_fraction >= ec.trigger_watermark:
                 raise ValueError(
                     f"retention_max_fraction ({config.retention_max_fraction}) "

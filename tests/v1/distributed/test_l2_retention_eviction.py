@@ -18,15 +18,11 @@ import torch
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.config import EvictionConfig
 from lmcache.v1.distributed.eviction import L2EvictionPolicy
-from lmcache.v1.distributed.eviction_policy.isolated_lru import (
-    IsolatedLRUEvictionPolicy,
-)
 from lmcache.v1.distributed.eviction_policy.lru import LRUEvictionPolicy
 from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import (
     MockL2Adapter,
     MockL2AdapterConfig,
 )
-from lmcache.v1.distributed.quota_manager import QuotaManager
 from lmcache.v1.distributed.retention_manager import RetentionManager
 from lmcache.v1.distributed.storage_controllers.eviction_controller import (
     L2AdapterEvictionState,
@@ -156,48 +152,6 @@ def test_expired_key_rejoins_lru_pool(global_lru_setup):
 
     assert retention.sweep() == 1
     assert retention.report_status()["retained_bytes"] == 0
-
-
-def test_salt_wipe_respects_retention():
-    """The unregistered-salt wipe (allowlist rule) must not delete keys
-    inside an open retention window."""
-    adapter = MockL2Adapter(
-        MockL2AdapterConfig(max_size_gb=0.001, mock_bandwidth_gb=10.0)
-    )
-    policy = IsolatedLRUEvictionPolicy()
-    adapter.register_listener(L2EvictionPolicy(policy))
-    state = L2AdapterEvictionState(
-        adapter_id=0,
-        adapter=adapter,
-        eviction_config=EvictionConfig(
-            eviction_policy="IsolatedLRU",
-            trigger_watermark=0.8,
-            eviction_ratio=1.0,
-        ),
-    )
-    state.eviction_policy = policy
-
-    clock = FakeClock()
-    retention = RetentionManager(max_retained_bytes=100 * OBJ_BYTES, clock=clock)
-    controller = L2EvictionController(
-        [state], quota_manager=QuotaManager(), retention_manager=retention
-    )
-    try:
-        for i in range(4):
-            _store_sync(adapter, _key(i, "alice"), _memory_obj())
-        retention.note_stored([_key(0, "alice")], [OBJ_BYTES], ttl_sec=300)
-
-        # alice has no quota entry -> effective limit 0 -> full wipe.
-        controller._check_and_evict(state)
-
-        assert _key(0, "alice") in adapter._memory_objects
-        assert _key(1, "alice") not in adapter._memory_objects
-
-        clock.advance(301)
-        controller._check_and_evict(state)
-        assert _key(0, "alice") not in adapter._memory_objects
-    finally:
-        adapter.close()
 
 
 def test_report_status_retention_section(global_lru_setup):

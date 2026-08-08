@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Config validation for retention: watermark bound and adapter count."""
 
+# Standard
+from typing import Literal
+
 # Third Party
 import pytest
 
@@ -19,11 +22,13 @@ from lmcache.v1.distributed.l2_adapters.config import (
 from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import MockL2AdapterConfig
 
 
-def _adapter(evicting: bool = True) -> MockL2AdapterConfig:
+def _adapter(
+    evicting: bool = True, policy: Literal["LRU", "IsolatedLRU", "noop"] = "LRU"
+) -> MockL2AdapterConfig:
     config = MockL2AdapterConfig(max_size_gb=0.01, mock_bandwidth_gb=10.0)
     if evicting:
         config.eviction_config = EvictionConfig(
-            eviction_policy="LRU", trigger_watermark=0.8, eviction_ratio=0.2
+            eviction_policy=policy, trigger_watermark=0.8, eviction_ratio=0.2
         )
     return config
 
@@ -70,3 +75,8 @@ def test_non_evicting_adapters_do_not_count():
     validate_storage_manager_config(
         _config(0.7, [_adapter(), _adapter(evicting=False)])
     )
+
+
+def test_isolated_lru_is_rejected():
+    with pytest.raises(ValueError, match="IsolatedLRU"):
+        validate_storage_manager_config(_config(0.7, [_adapter(policy="IsolatedLRU")]))

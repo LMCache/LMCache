@@ -66,7 +66,8 @@ Commonly used flags include:
        ttl-retained chunks may shield from eviction (``0`` disables
        retention, default). Requires at most one eviction-enabled adapter
        and must stay below its eviction trigger watermark so eviction
-       always has unshielded keys to take.
+       always has unshielded keys to take. Incompatible with the
+       per-tenant ``IsolatedLRU`` eviction policy.
    * - ``--max-workers N``
      - Number of server worker processes.
    * - ``--coordinator-url URL``

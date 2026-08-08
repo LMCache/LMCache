@@ -74,8 +74,7 @@ and the deadlines are pushed out.
 ## Eviction integration (`storage_controllers/eviction_controller.py`)
 
 Both L2 eviction branches pass ``RetentionManager.is_evictable`` as the
-``key_eligible_filter``, including the unregistered-salt wipe — the
-retention promise outranks allowlist cleanup. ``is_evictable`` compares the
+``key_eligible_filter``. ``is_evictable`` compares the
 deadline against the clock at ask time, so an expired key is eligible even
 before the next sweep. The loop calls ``sweep()`` once per cycle to release
 expired budget; keys deleted outside the loop are dropped via ``forget``.
@@ -87,9 +86,11 @@ expired budget; keys deleted outside the loop are dropped via ``forget``.
   the eviction-enabled adapter's capacity retention may shield. Capacity
   is taken at boot; adapters added at runtime do not grow the budget.
 - While retention is enabled, config validation requires at most one
-  eviction-enabled adapter -- the default store policy replicates chunks
+  eviction-enabled adapter (the default store policy replicates chunks
   to every adapter, so one budget cannot keep several adapters below
-  their watermarks -- and rejects a fraction at or above that adapter's
+  their watermarks), rejects the per-tenant ``IsolatedLRU`` policy (the
+  budget has no per-salt dimension, so one tenant could capture it
+  all), and rejects a fraction at or above that adapter's
   ``trigger_watermark``.
 - ``report_status()`` on the eviction controller gains a ``retention``
   section: live keys/bytes, budget, and the lifetime ``stamps`` /
