@@ -90,12 +90,7 @@ def test_spec_facts_match_predicates():
 def test_spec_only_facts_match_golden():
     for fmt, expected in EXPECTED_SPEC_FACTS.items():
         spec = get_spec_class(fmt)
-        got = (
-            spec.is_hnd,
-            spec.is_fused_packed,
-            spec.is_two_major,
-            spec.is_pbs_fused,
-        )
+        got = (spec.is_hnd, spec.is_fused_packed, spec.is_two_major, spec.is_pbs_fused)
         assert got == expected, f"{fmt}: got {got}, expected {expected}"
 
 
