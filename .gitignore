@@ -86,6 +86,9 @@ lmcache/experimental/tests
 # benchmark results
 *.csv
 
+# downloaded real-data corpora (large, fetched on demand)
+benchmarks/multi_round_qa/ShareGPT*.json
+
 # disk cache
 /remote_disk
 /local_disk
@@ -157,6 +160,11 @@ operator/Dockerfile.cross
 
 # Compiled gettext catalogs (built from .po at HTML build time)
 docs/source/locale/**/*.mo
+baseline_artifacts/
+baseline_artifacts/
+
+# Local benchmark virtualenv (benchmarks/cache_policy/)
+.venv_bench/
 
 # CodeBuddy
 .codebuddy

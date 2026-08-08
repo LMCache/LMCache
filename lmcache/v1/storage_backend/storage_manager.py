@@ -109,6 +109,13 @@ def allocate_and_copy_objects(
             memory_obj.ref_count_down()
             break
 
+        if hasattr(src_memory_obj, "observed_recompute_tokens"):
+            setattr(
+                memory_obj,
+                "observed_recompute_tokens",
+                getattr(src_memory_obj, "observed_recompute_tokens"),
+            )
+
         with torch_dev.stream(stream):
             memory_obj.tensor.copy_(src_memory_obj.tensor, non_blocking=True)
         allocated_objects.append(memory_obj)
@@ -431,6 +438,26 @@ class StorageManager:
         for cname, (ks, objs) in obj_dict.items():
             for memory_obj in objs:
                 memory_obj.ref_count_down()
+
+    def record_cost_observation(
+        self,
+        key: CacheEngineKey,
+        location: Optional[str] = None,
+        observed_recompute_tokens: Optional[float] = None,
+    ) -> None:
+        """
+        Record a cost observation for a cache key in storage backends.
+        """
+        if observed_recompute_tokens is None:
+            return
+
+        for backend_name, backend in self.storage_backends.items():
+            if location and backend_name != location:
+                continue
+            if hasattr(backend, "cache_policy"):
+                backend.cache_policy.update_cost_observation(
+                    key, observed_recompute_tokens=observed_recompute_tokens
+                )
 
     def get(
         self,

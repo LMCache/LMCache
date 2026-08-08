@@ -1,0 +1,79 @@
+name: Cache policy report figures
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - "dev"
+      - "release-**"
+    paths:
+      - "benchmarks/cache_policy/**"
+      - "lmcache/v1/storage_backend/cache_policy/**"
+      - "lmcache/tools/cache_policy_bench/**"
+      - "tests/benchmarks/test_stats.py"
+      - "tests/benchmarks/test_compare_admission_vs_lfu.py"
+      - ".github/workflows/cache_policy_figures.yml"
+
+env:
+  LC_ALL: en_US.UTF-8
+  PYTHONHASHSEED: 0
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: cache-policy-figures-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  figures:
+    name: Statistics tests + figure reproduction
+    runs-on: ubuntu-latest
+    steps:
+      - name: "Harden Runner"
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            **/pyproject.toml
+            **/requirements/*.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements/test.txt
+          python -m pip install -r requirements/common.txt
+          python -m pip install -r benchmarks/cache_policy/requirements-figures.txt
+
+      - name: Run stats + comparison-script tests
+        run: |
+          pytest tests/benchmarks/test_stats.py \
+            tests/benchmarks/test_compare_admission_vs_lfu.py \
+            -q
+
+      - name: Rebuild report figures from committed results
+        run: ./benchmarks/cache_policy/reproduce_figures.sh
+
+      - name: Verify every figure was produced
+        run: |
+          set -euo pipefail
+          for i in 1 2 3 4 5 6 7 8 9 10; do
+            match=$(ls benchmarks/cache_policy/report/figures/fig${i}_*.png 2>/dev/null)
+            if [ -z "$match" ]; then
+              echo "Missing figure fig${i}_*.png" >&2
+              exit 1
+            fi
+          done

@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Reproducibility environment for the cache-policy benchmark suite and
+# evaluation report (benchmarks/cache_policy/, lmcache/tools/cache_policy_bench/,
+# lmcache/v1/storage_backend/cache_policy/). CPU-only -- no GPU/CUDA
+# required for anything in this suite.
+#
+# lmcache itself is never `pip install`-ed here (not even editable): this
+# benchmark suite imports it via PYTHONPATH pointing at the repo root
+# (see the "Usage" commands below), which is sufficient because nothing
+# in lmcache.tools.cache_policy_bench or lmcache.v1.storage_backend.cache_policy
+# needs the package's native extensions -- see benchmarks/cache_policy/Dockerfile
+# for the from-scratch equivalent of this environment.
+#
+# Usage (must be run from the repository root, so the `-r` paths below
+# resolve correctly):
+#   conda env create -f benchmarks/cache_policy/environment.yml
+#   conda activate lmcache-cache-policy-bench
+#   PYTHONPATH=. python benchmarks/cache_policy/main_sweep_multiseed.py
+name: lmcache-cache-policy-bench
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+      - --extra-index-url https://download.pytorch.org/whl/cpu
+      - -r requirements/common.txt
+      - -r requirements/test.txt
+      - matplotlib>=3.7    # report figures (report/generate_figures.py)

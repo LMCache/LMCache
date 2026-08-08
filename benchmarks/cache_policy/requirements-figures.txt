@@ -1,0 +1,34 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Pinned versions actually used to render benchmarks/cache_policy/report/
+# figures, for anyone who only needs to rebuild the figures rather than
+# set up the full benchmark suite.
+#
+# NOTE: this file alone is *not* sufficient to run
+# report/generate_figures.py -- its freeze-illustration figure does a
+# small one-off replay through the real simulator, which imports
+# `lmcache` (and therefore lmcache's own dependencies, e.g. torch).
+# `lmcache` must be importable (PYTHONPATH=. against a repo checkout, or
+# the conda env in environment.yml / the Dockerfile) in addition to
+# installing this file.
+#
+# Every matplotlib-adjacent transitive dependency is pinned here too
+# (not just matplotlib/numpy themselves): an unpinned `pip install
+# matplotlib` lets pip resolve a *different* fonttools/pillow/kiwisolver/
+# contourpy on every install, and those packages affect text layout and
+# anti-aliased rendering -- an earlier version of this file only pinned
+# the two top-level packages and that was enough, on its own, to make
+# two separate `docker build`s of the same Dockerfile produce visibly
+# different PNGs (5-10% of pixels differing, and two figures even came
+# out a few pixels different in overall size from bbox="tight" cropping
+# reacting to slightly different text metrics). Full pins fix that.
+matplotlib==3.10.9
+numpy==2.2.6
+contourpy==1.3.3
+cycler==0.12.1
+fonttools==4.63.0
+kiwisolver==1.5.0
+packaging==26.2
+pillow==12.3.0
+pyparsing==3.3.2
+python-dateutil==2.9.0.post0

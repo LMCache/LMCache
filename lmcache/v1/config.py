@@ -403,6 +403,16 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": "LRU",
         "env_converter": str,
     },
+    "cost_aware_half_life_seconds": {
+        "type": float,
+        "default": 60.0,
+        "env_converter": float,
+    },
+    "cost_aware_ewma_alpha": {
+        "type": float,
+        "default": 0.2,
+        "env_converter": float,
+    },
     "numa_mode": {
         "type": Optional[str],
         "default": None,

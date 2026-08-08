@@ -1,0 +1,65 @@
+name: Cache policy benchmark (nightly)
+
+on:
+  schedule:
+    - cron: '0 8 * * *'
+  workflow_dispatch:
+
+env:
+  LC_ALL: en_US.UTF-8
+  PYTHONHASHSEED: 0
+
+defaults:
+  run:
+    shell: bash
+
+permissions:
+  contents: read
+
+jobs:
+  cache-policy-sweep:
+    name: Full cache-policy parameter sweep
+    runs-on: ubuntu-latest
+    steps:
+      - name: "Harden Runner"
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            **/pyproject.toml
+            **/requirements/*.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install vllm
+          python -m pip install -r requirements/test.txt
+          python -m pip install -r requirements/common.txt
+
+      - name: Run full cache-policy sweep (pytest, writes CSV/JSON)
+        run: |
+          pytest tests/benchmarks/test_cache_policy_bench.py -m slow -v
+
+      - name: Generate sweep CSV/JSON via the runner CLI
+        run: |
+          python -m lmcache.tools.cache_policy_bench.runner \
+            --sweep \
+            -o benchmarks/cache_policy/results/nightly
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: cache-policy-benchmark-results
+          path: benchmarks/cache_policy/results/nightly/
+          retention-days: 30
