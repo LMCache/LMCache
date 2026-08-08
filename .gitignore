@@ -116,11 +116,17 @@ benchmarks/multi_round_qa/ShareGPT*.json
 # PyCharm
 .idea/
 
+# JetBrains run configurations
+.run/
+
 # VSCode
 .vscode/
 
 # Setuptools scm version
 /lmcache/_version.py
+
+# Torch constraint generated inside the cibuildwheel container (before-all)
+/cibw-constraints.txt
 
 # Generated hip files
 /csrc_hip
@@ -159,3 +165,6 @@ baseline_artifacts/
 
 # Local benchmark virtualenv (benchmarks/cache_policy/)
 .venv_bench/
+
+# CodeBuddy
+.codebuddy

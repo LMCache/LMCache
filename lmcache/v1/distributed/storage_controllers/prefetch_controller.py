@@ -4,17 +4,52 @@ Prefetch Controller: asynchronously prefetches data from L2 adapters into L1.
 
 The controller runs a background thread with an event-driven loop that:
 1. Accepts prefetch requests from external threads via submit_prefetch_request.
-2. Submits lookup_and_lock tasks to all L2 adapters.
-3. Computes a load plan, keeping the keys retained by the TrimPolicy
-   (PREFIX, SEGMENTED_PREFIX, or SPARSE).
+2. Read-locks L1-resident keys so they extend the hit and cannot be
+   evicted mid-request, then submits lookup_and_lock tasks to all L2 adapters.
+3. Computes a load plan over the L1 ∪ L2 union, keeping the keys retained by
+   the TrimPolicy (PREFIX, SEGMENTED_PREFIX, or SPARSE).
 4. Reserves L1 write buffers and submits load tasks to L2 adapters.
 5. On load completion, transitions L1 entries from write-locked to read-locked.
 6. Reports the retained-key bitmap.
+
+Every key counted toward the hit is lock-held from the moment it is
+discovered (L1 read lock or L2 lookup lock) until the request completes —
+there is never an observed-but-unlocked instant.
+
+Key intervals, sliding-window (SW) view — for full attention every in-L1
+key inside the hit is needed (no out-of-window segments); see
+docs/design/v1/distributed/storage_controllers/prefetch_l1_lock_pass.md::
+
+    SW-group keys, chunk order:
+
+    |out of L1-hit sw|in L1-hit sw|out of L2-hit sw|in L2-hit sw| remaining  |
+                                  ^ L1 hit length               ^ L1+L2 hit length
+
+    out of L1-hit sw : in L1, behind the L1 hit's window — never needed again
+    in L1-hit sw     : the window that makes the L1 hit servable
+    out of L2-hit sw : between the L1 hit and the final (L1+L2) window
+    in L2-hit sw     : the final window; ends at the L1+L2 hit length
+    remaining        : past the L1+L2 hit
+
+    Drawn in general position: the two windows can touch, overlap, or
+    coincide (L2 may extend the hit by less than a window, or not at all).
+    Segments may then be empty or overlap; the rightmost applicable
+    segment's action wins.
+
+Each step in the load phase repeats this figure with its per-segment
+actions aligned below it.
+Vocabulary: lock = take an L1 read lock; unlock = return the read lock;
+loading = L1 write reservation carrying an L2 lookup lock. Locking never
+refreshes eviction recency: _finish_request explicitly touches the
+retained keys (L1Manager.touch_keys), the ones the request actually
+serves.
 """
 
 # Standard
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
+from itertools import groupby
+from operator import attrgetter
 from typing import TYPE_CHECKING, Iterable
 import enum
 import select
@@ -29,8 +64,10 @@ from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
     PrefetchMode,
+    PrefetchRequestSpec,
     TrimPolicy,
 )
+from lmcache.v1.distributed.bitmap_ops.fold import fold_unfold_ranked
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
@@ -77,7 +114,8 @@ def build_trim_mask(
     found: Bitmap,
     num_keys: int,
     policy: TrimPolicy = TrimPolicy.PREFIX,
-) -> Bitmap:
+    attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC,
+) -> tuple[int, Bitmap]:
     """Subset of ``found`` to keep (load + read-lock + report); the rest is
     released.
 
@@ -90,13 +128,29 @@ def build_trim_mask(
         found: Bitmap of found keys, over key indices ``0..num_keys-1``.
         num_keys: Total number of requested keys.
         policy: Trim policy to apply (see :class:`TrimPolicy`).
+        attn_desc: Cross-chunk attention windows of all object groups, in
+            object-group order.
 
     Returns:
-        Bitmap of the retained key indices.
+        ``(hit_length, retain_mask)`` — prefix hit in chunks and retained bitmap.
+
+    Raises:
+        ValueError: If ``policy`` is not a known :class:`TrimPolicy`.
     """
+    stride = attn_desc.num_object_groups * attn_desc.world_size
     if policy is TrimPolicy.PREFIX:
-        return Bitmap(num_keys, found.count_leading_ones())
-    return found
+        num_chunks = num_keys // stride
+        hit_length, retain = fold_unfold_ranked(
+            found,
+            num_chunks,
+            attn_desc.world_size,
+            attn_desc.num_chunks_in_sw,
+        )
+        return hit_length, retain
+    elif policy in (TrimPolicy.SEGMENTED_PREFIX, TrimPolicy.SPARSE):
+        hit_chunks = found.count_leading_ones() // stride
+        return hit_chunks, found
+    raise ValueError(f"Unknown TrimPolicy: {policy!r}")
 
 
 def trim_load_plan_with_mask(
@@ -138,7 +192,6 @@ class InFlightPrefetchRequest:
 
     request_id: PrefetchRequestId
     keys: list[ObjectKey]
-    layout_desc: MemoryLayoutDesc
     phase: PrefetchPhase
     extra_count: int = 0
     """Extra read locks per key (on top of the default 1) to acquire when
@@ -160,6 +213,11 @@ class InFlightPrefetchRequest:
     pending_lookup_tasks: dict[int, L2TaskId] = field(default_factory=dict)
     # Lookup phase: adapter_idx -> bitmap (populated as results arrive)
     lookup_results: dict[int, Bitmap] = field(default_factory=dict)
+    # L2 read locks currently held (adapter_idx -> key indices).
+    # _release_l2_locks subtracts keys as their locks are returned.
+    l2_adapter2readlocks: dict[int, Bitmap] = field(default_factory=dict)
+    # True once the prefix hit was stored/published.
+    hit_reported: bool = False
 
     # Load phase: adapter_idx -> bitmap of key indices to load
     load_plan: dict[int, Bitmap] = field(default_factory=dict)
@@ -173,6 +231,12 @@ class InFlightPrefetchRequest:
     # Load phase: keys that were write-reserved in L1
     write_reserved_keys: list[ObjectKey] = field(default_factory=list)
     write_reserved_objs: dict[ObjectKey, "MemoryObj"] = field(default_factory=dict)
+    # Key indices found (and read-locked) in L1 when the request starts.
+    l1_readlocks: Bitmap = field(default_factory=lambda: Bitmap(0))
+
+    group_layout_descs: dict[int, MemoryLayoutDesc] = field(default_factory=dict)
+    """Maps object_group_id to that group's layout (one ``MemoryLayoutDesc``
+    describes a single group's MemoryObj). Covers every object group."""
 
     def all_lookups_done(self) -> bool:
         return len(self.pending_lookup_tasks) == 0
@@ -187,11 +251,14 @@ class PrefetchController(StorageControllerInterface):
 
     The controller:
     1. Accepts prefetch requests via submit_prefetch_request (thread-safe).
-    2. Runs a background thread that submits lookup_and_lock to all adapters.
-    3. Uses PrefetchPolicy to compute a load plan from lookup results.
-    4. Reserves L1 write buffers and submits load tasks to adapters.
-    5. On completion, transitions loaded keys to read-locked state.
-    6. Reports the number of prefix hits via query_prefetch_result.
+    2. Runs a background thread that read-locks L1-resident keys
+       and submits lookup_and_lock to all adapters.
+    3. Computes the load plan based on the found keys in L1 and L2;
+       unlocks L1 keys that fall outside the plan.
+    4. Reserves L1 write buffers (all-or-nothing) and submits load tasks.
+    5. On completion, loaded keys become read-locked for the retriever.
+    6. Reports the L1+L2 hit length via query_lookup_result and the
+       retained-key bitmap via query_prefetch_result.
 
     Args:
         l1_manager: The L1 manager instance.
@@ -239,17 +306,7 @@ class PrefetchController(StorageControllerInterface):
 
         # In-flight request tracking (background thread only)
         self._in_flight_requests: dict[PrefetchRequestId, InFlightPrefetchRequest] = {}
-        self._pending_queue: list[
-            tuple[
-                PrefetchRequestId,
-                list[ObjectKey],
-                MemoryLayoutDesc,
-                int,
-                TrimPolicy,
-                AttnWindowDesc,
-                PrefetchMode,
-            ]
-        ] = []
+        self._pending_queue: list[tuple[PrefetchRequestId, PrefetchRequestSpec]] = []
 
         # Shadow counters for status reporting (updated in background loop)
         self._status_in_flight_count: int = 0
@@ -259,17 +316,7 @@ class PrefetchController(StorageControllerInterface):
 
         # Thread-safe submission queue (external -> background)
         self._submission_lock = threading.Lock()
-        self._submission_queue: list[
-            tuple[
-                PrefetchRequestId,
-                list[ObjectKey],
-                MemoryLayoutDesc,
-                int,
-                TrimPolicy,
-                AttnWindowDesc,
-                PrefetchMode,
-            ]
-        ] = []
+        self._submission_queue: list[tuple[PrefetchRequestId, PrefetchRequestSpec]] = []
         self._next_request_id: PrefetchRequestId = 0
         self._submission_efd = create_event_notifier()
 
@@ -323,7 +370,7 @@ class PrefetchController(StorageControllerInterface):
             )
             register_gauge(
                 "lmcache.l2_prefetch",
-                "lmcache_mp.l2_adapters",
+                "lmcache_mp.l2_prefetch_adapters",
                 (
                     "Count of L2 adapters attached to the prefetch controller, "
                     "tagged by ``state`` (active or draining)."
@@ -347,19 +394,27 @@ class PrefetchController(StorageControllerInterface):
 
     def submit_prefetch_request(
         self,
-        keys: list[ObjectKey],
-        layout_desc: MemoryLayoutDesc,
-        extra_count: int = 0,
-        policy: TrimPolicy = TrimPolicy.PREFIX,
-        attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC,
-        mode: PrefetchMode = PrefetchMode.LOOKUP,
+        spec: PrefetchRequestSpec,
     ) -> PrefetchRequestId:
         """
-        Submit a prefetch request for the given keys.
+        Submit a prefetch request.
 
         Thread-safe. Can be called from any thread.
 
-        The retained subset of found keys is chosen by ``policy`` (see
+        A key counts as found if it is already resident in L1 or any L2
+        adapter reports it. In the interval-figure terms of the module
+        docstring, the request ends with (sliding-window view)::
+
+            |out of L1-hit sw|in L1-hit sw|out of L2-hit sw|in L2-hit sw| remaining  |
+                                          ^ L1 hit length               ^ L1+L2 hit
+            |     unlock     |   locked*  |     unlock     |   locked   |   unlock   |
+
+        locked keys stay read-locked for the retriever until it consumes
+        them; keys in L2 but not in L1 inside the final window are loaded
+        first. (*) the final window when the L2 load lands, else the L1
+        hit's own window.
+
+        The retained subset of found keys is chosen by ``spec.policy`` (see
         :class:`TrimPolicy`).  With the default ``PREFIX`` policy, only the
         **contiguous prefix** of found keys is loaded from L2: if L2 has keys
         {0, 1, 3, 4} but not key 2, only keys {0, 1} are loaded because the gap
@@ -369,22 +424,7 @@ class PrefetchController(StorageControllerInterface):
         request completes.
 
         Args:
-            keys: List of object keys to prefetch from L2 into L1.
-                The ordering defines the prefix: index 0 is the first key.
-            layout_desc: Memory layout for L1 write buffer allocation.
-            extra_count: Extra read locks per key (on top of the default 1)
-                to acquire when transitioning loaded keys from write-locked
-                to read-locked.  Must match the ``extra_count`` used in the
-                corresponding ``submit_prefetch_task`` call so that all TP
-                workers can each consume one read lock.
-            policy: Which retained-subset policy to apply (see
-                :class:`TrimPolicy`).  Defaults to ``PREFIX``.
-            attn_desc: Cross-chunk attention windows of all object groups, in
-                object-group order.
-            mode: The prefetch intent (see :class:`PrefetchMode`).  ``WARM``
-                forces every loaded key permanent and acquires no read lock;
-                ``LOOKUP`` defers retention to the configured
-                :class:`PrefetchPolicy` and read-locks loaded keys.
+            spec: The prefetch request inputs (see :class:`PrefetchRequestSpec`).
 
         Returns:
             A request ID for tracking via query_prefetch_result.
@@ -392,9 +432,7 @@ class PrefetchController(StorageControllerInterface):
         with self._submission_lock:
             request_id = self._next_request_id
             self._next_request_id += 1
-            self._submission_queue.append(
-                (request_id, keys, layout_desc, extra_count, policy, attn_desc, mode)
-            )
+            self._submission_queue.append((request_id, spec))
         self._submission_efd.notify()
         return request_id
 
@@ -777,30 +815,87 @@ class PrefetchController(StorageControllerInterface):
         while (
             self._pending_queue and len(self._in_flight_requests) < self._max_in_flight
         ):
-            request_id, keys, layout_desc, extra_count, policy, attn_desc, mode = (
-                self._pending_queue.pop(0)
-            )
+            request_id, spec = self._pending_queue.pop(0)
             self._status_pending_count -= 1
-            self._start_lookup_phase(
-                request_id, keys, layout_desc, extra_count, policy, attn_desc, mode
-            )
+            self._start_lookup_phase(request_id, spec)
 
     # =========================================================================
     # Lookup phase
     # =========================================================================
 
+    def _lock_l1_keys(
+        self,
+        keys: list[ObjectKey],
+        extra_count: int,
+        policy: TrimPolicy,
+        attn_desc: AttnWindowDesc,
+    ) -> Bitmap:
+        """Read-lock the L1-resident keys the request will hold.
+
+        Locks every key readable in L1, then, for windowed ``PREFIX``
+        retention, releases the read locks on sliding-window chunks behind
+        the L1 hit's own window. Locking does not refresh eviction recency;
+        the LRU signal is sent by ``_finish_request`` for the retained keys
+        only.
+
+        Args:
+            keys: The request's object keys in chunk-major prefix order
+                (chunk 0's object groups x kv_ranks, then chunk 1's, ...).
+                StorageManager has already capped away its own L1 prefix
+                hit, so these keys start past it.
+            extra_count: Extra read locks per locked key.
+            policy: The request's retained-subset policy.
+            attn_desc: Per-group cross-chunk attention windows.
+
+        Returns:
+            Bitmap of the key indices read-locked in L1, after releasing
+            out-of-window sliding-window chunks.
+        """
+        lock_results = self._l1_manager.reserve_read(keys, extra_count=extra_count)
+        l1_readlocks = Bitmap(len(keys))
+        for i, key in enumerate(keys):
+            err, _obj = lock_results[key]
+            if err == L1Error.SUCCESS:
+                l1_readlocks.set(i)
+        if policy is not TrimPolicy.PREFIX:
+            return l1_readlocks
+        hit_length, l1_window = build_trim_mask(
+            l1_readlocks, len(keys), policy, attn_desc
+        )
+        stride = attn_desc.num_object_groups * attn_desc.world_size
+        within_l1_hit = Bitmap(len(keys), hit_length * stride)
+        # evictable: locked SW chunks behind the window, within the L1 prefix
+        # hit -- won't be read again, so release their locks.
+        evictable = l1_readlocks & ~l1_window & within_l1_hit
+        if evictable.popcount() > 0:
+            self._l1_manager.finish_read(
+                evictable.gather(keys), extra_count=extra_count
+            )
+            l1_readlocks = l1_readlocks & ~evictable
+        return l1_readlocks
+
     def _start_lookup_phase(
         self,
         request_id: PrefetchRequestId,
-        keys: list[ObjectKey],
-        layout_desc: MemoryLayoutDesc,
-        extra_count: int = 0,
-        policy: TrimPolicy = TrimPolicy.PREFIX,
-        attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC,
-        mode: PrefetchMode = PrefetchMode.LOOKUP,
+        spec: PrefetchRequestSpec,
     ) -> None:
-        """Submit lookup_and_lock to all live (non-draining) adapters for a
-        new request."""
+        """Read-lock L1-resident keys, then submit lookup_and_lock to all
+        live (non-draining) adapters for a new request."""
+        l1_readlocks = self._lock_l1_keys(
+            spec.keys, spec.extra_count, spec.policy, spec.attn_desc
+        )
+        request = InFlightPrefetchRequest(
+            request_id=request_id,
+            keys=spec.keys,
+            phase=PrefetchPhase.LOOKUP,
+            extra_count=spec.extra_count,
+            policy=spec.policy,
+            attn_desc=spec.attn_desc,
+            mode=spec.mode,
+            group_layout_descs=spec.group_layout_descs,
+            l1_readlocks=l1_readlocks,
+        )
+
         # Skip adapters being drained so a new request never locks keys on
         # an adapter that is on its way out.
         routing_adapters = {
@@ -809,25 +904,15 @@ class PrefetchController(StorageControllerInterface):
             if adapter_id not in self._draining
         }
         if not routing_adapters:
-            self._complete_request(request_id, Bitmap(len(keys)))
+            # No live L2 adapters: finish with whatever L1 alone serves.
+            self._finish_request(request)
             return
 
-        pending_lookup_tasks: dict[int, L2TaskId] = {}
         for adapter_id, adapter in routing_adapters.items():
-            task_id = adapter.submit_lookup_and_lock_task(keys, layout_desc)
-            pending_lookup_tasks[adapter_id] = task_id
-
-        request = InFlightPrefetchRequest(
-            request_id=request_id,
-            keys=keys,
-            layout_desc=layout_desc,
-            phase=PrefetchPhase.LOOKUP,
-            extra_count=extra_count,
-            policy=policy,
-            attn_desc=attn_desc,
-            mode=mode,
-            pending_lookup_tasks=pending_lookup_tasks,
-        )
+            task_id = adapter.submit_lookup_and_lock_task(
+                spec.keys, spec.group_layout_descs
+            )
+            request.pending_lookup_tasks[adapter_id] = task_id
         self._in_flight_requests[request_id] = request
         self._status_in_flight_count += 1
         self._status_lookup_phase_count += 1
@@ -837,9 +922,9 @@ class PrefetchController(StorageControllerInterface):
                 event_type=EventType.L2_PREFETCH_LOOKUP_SUBMITTED,
                 metadata={
                     "request_id": request_id,
-                    "key_count": len(keys),
-                    "adapter_count": len(pending_lookup_tasks),
-                    "key_count_per_salt": Counter(k.cache_salt for k in keys),
+                    "key_count": len(spec.keys),
+                    "adapter_count": len(request.pending_lookup_tasks),
+                    "key_count_per_salt": Counter(k.cache_salt for k in spec.keys),
                 },
             )
         )
@@ -848,14 +933,23 @@ class PrefetchController(StorageControllerInterface):
     # Load phase
     # =========================================================================
     def _transition_to_load_phase(self, request: InFlightPrefetchRequest) -> None:
-        """Compute load plan, reserve L1 buffers, and submit load tasks."""
+        """Compute the L1 ∪ L2 load plan, reserve L1 buffers, and submit
+        load tasks."""
         request.phase = PrefetchPhase.PLAN_AND_LOAD
         self._status_lookup_phase_count -= 1
         self._status_load_phase_count += 1
 
-        # Step 1: get load plan from policy. Exclude draining adapters so no
-        # new load targets them; any keys they locked during lookup fall
-        # outside the plan and get unlocked in _unlock_unneeded_keys.
+        num_keys = len(request.keys)
+
+        # Step 1 — generate what keys should be loaded from L2 to L1.
+        # Potential L2 load candidates:
+        # |out of L1-hit sw|in L1-hit sw|out of L2-hit sw|in L2-hit sw| remaining  |
+        #                               ^ L1 hit length               ^ L1+L2 hit length
+        # |       -        |     -      |   candidate    | candidate  | candidate  |
+        # Exclude draining adapters so no new load targets them; any keys
+        # they locked during lookup fall outside the plan and get unlocked
+        # in _release_l2_locks. Keys already served from L1 never need an
+        # L2 transfer.
         routing_descriptors = [
             desc
             for adapter_id, desc in self._adapter_descriptors.items()
@@ -866,35 +960,104 @@ class PrefetchController(StorageControllerInterface):
             request.lookup_results,
             routing_descriptors,
         )
+        # Keys already in L1 don't need to be loaded from L2.
+        load_plan = trim_load_plan_with_mask(load_plan, ~request.l1_readlocks)
 
-        # Step 2: trim the load plan to the policy's retained subset
-        num_keys = len(request.keys)
-        merged_lookup = merge_bitmaps(load_plan.values(), num_keys)
-        retained = build_trim_mask(merged_lookup, num_keys, request.policy)
+        # Step 2 — calculate the L1 + L2 maximum hit length and the
+        # retained set.
+        union_bitmap = (
+            merge_bitmaps(load_plan.values(), num_keys) | request.l1_readlocks
+        )
+        hit_length, retained = build_trim_mask(
+            union_bitmap,
+            num_keys,
+            request.policy,
+            request.attn_desc,
+        )
         trimmed_plan = trim_load_plan_with_mask(load_plan, retained)
 
         if not trimmed_plan:
-            # Nothing to load after trimming. Unlock all lookup locks and
-            # complete with an empty retained set.
-            self._unlock_all_lookups(request)
-            self._update_lookup_results(request.request_id, 0)
-            self._event_bus.publish(
-                Event(
-                    event_type=EventType.L2_PREFETCH_LOOKUP_COMPLETED,
-                    metadata={
-                        "request_id": request.request_id,
-                        "prefix_hit_count": 0,
-                    },
-                )
-            )
-            self._complete_request(request.request_id, Bitmap(num_keys))
+            # Nothing to load from L2: finish releases all unneeded locks
+            # and reports the L1-only hit.
+            self._finish_request(request)
             return
 
-        # Step 3: reserve L1 write buffers
-        merged_bitmap = merge_bitmaps(trimmed_plan.values(), len(request.keys))
-        keys_to_reserve = merged_bitmap.gather(request.keys)
-        l1_mgr = self._l1_manager
+        # Unlock the keys based on the following figure.
+        # SW keys in L1:
+        # |out of L1-hit sw|in L1-hit sw|out of L2-hit sw|in L2-hit sw| remaining  |
+        #                               ^ L1 hit length               ^ L1+L2 hit length
+        # |     unlock     | keep lock* |     unlock     | keep lock  |   unlock   |
+        # (*) the L1 hit's own window: kept even when outside the final
+        # window, as the fallback promise if the L2 load never lands.
+        _l1_hit, l1_fallback_retain = build_trim_mask(
+            request.l1_readlocks,
+            num_keys,
+            request.policy,
+            request.attn_desc,
+        )
+        stale = request.l1_readlocks & (~retained) & (~l1_fallback_retain)
+        if stale.popcount() > 0:
+            request.l1_readlocks = request.l1_readlocks & (
+                retained | l1_fallback_retain
+            )
+            self._l1_manager.finish_read(
+                stale.gather(request.keys), extra_count=request.extra_count
+            )
 
+        # Step 3 — reserve L1 write buffers for the plan keys.
+        # If any failure (OOM or contention or others) happens,
+        # we fall back to the L1-only longest hit (`l1_fallback_retain`).
+        # SW keys in L2 (and not in L1):
+        # |out of L1-hit sw|in L1-hit sw|out of L2-hit sw|in L2-hit sw| remaining  |
+        #                               ^ L1 hit length               ^ L1+L2 hit length
+        # |       -        |     -      |       -        |  loading   |     -      |
+        keys_to_reserve = merge_bitmaps(trimmed_plan.values(), num_keys).gather(
+            request.keys
+        )
+        reserved = self._reserve_load_buffers(request, keys_to_reserve)
+        if len(reserved) < len(keys_to_reserve):
+            self._finish_request(request)
+            return
+        request.load_plan = trimmed_plan
+
+        # Step 4 — free L2 lookup locks for keys outside the plan.
+        # L2 lookup locks:
+        # |out of L1-hit sw|in L1-hit sw|out of L2-hit sw|in L2-hit sw| remaining  |
+        #                               ^ L1 hit length               ^ L1+L2 hit length
+        # |      free      |    free    |      free      | keep plan  |    free    |
+        self._release_l2_locks(request, keep=request.load_plan)
+
+        # Step 5 — submit loads; report the hit.
+        self._submit_load_tasks(request, trimmed_plan)
+        self._report_lookup_hit(request, hit_length)
+
+    def _reserve_load_buffers(
+        self,
+        request: InFlightPrefetchRequest,
+        keys_to_reserve: list[ObjectKey],
+    ) -> set[ObjectKey]:
+        """Reserve L1 write buffers for the keys to load from L2.
+
+        The keys sit in the loading segment — in L2, not in L1, inside the
+        final window (keys already in L1 were read-locked by
+        ``_lock_l1_keys`` and are not reserved here)::
+
+            |out of L1-hit sw|in L1-hit sw|out of L2-hit sw|in L2-hit sw| remaining  |
+                                          ^ L1 hit length               ^ L1+L2 hit
+            |       -        |     -      |       -        |  loading   |     -      |
+
+        Successful reservations are recorded on
+        ``request.write_reserved_keys`` / ``request.write_reserved_objs``.
+        Failures publish an ``L2_PREFETCH_FAILED`` event; the caller
+        abandons the L2 load if any key failed (all-or-nothing).
+
+        Args:
+            request: The in-flight request the buffers belong to.
+            keys_to_reserve: Keys in the trimmed load plan, in prefix order.
+
+        Returns:
+            The subset of ``keys_to_reserve`` that now holds a write buffer.
+        """
         # WARM retains every loaded key; LOOKUP follows the configured policy.
         if request.mode is PrefetchMode.WARM:
             retentions = [True] * len(keys_to_reserve)
@@ -902,30 +1065,42 @@ class PrefetchController(StorageControllerInterface):
             retentions = self._policy.select_l1_retentions(
                 keys_to_reserve,
             )
-        write_results = l1_mgr.reserve_write(
-            keys=keys_to_reserve,
-            is_temporary=[not r for r in retentions],
-            layout_desc=request.layout_desc,
-            mode="new",
-        )
+        retention_map = dict(zip(keys_to_reserve, retentions, strict=True))
 
-        # Step 4: filter to successfully reserved keys
-        reserved_key_set: set[ObjectKey] = set()
+        # Batch reserve_write by object_group_id so each group uses its own
+        # tensor shapes.
+        write_results: dict[ObjectKey, tuple[L1Error, MemoryObj | None]] = {}
+        by_group = sorted(keys_to_reserve, key=attrgetter("object_group_id"))
+        for gid, group_iter in groupby(by_group, key=attrgetter("object_group_id")):
+            group_keys = list(group_iter)
+            gld = request.group_layout_descs[gid]
+            gr = self._l1_manager.reserve_write(
+                keys=group_keys,
+                is_temporary=[not retention_map[k] for k in group_keys],
+                layout_desc=gld,
+                mode="new",
+            )
+            write_results.update(gr)
+
+        reserved: set[ObjectKey] = set()
         oom_keys: list[ObjectKey] = []
+        contended_keys: list[ObjectKey] = []
         for key, (err, mem_obj) in write_results.items():
             if err == L1Error.SUCCESS and mem_obj is not None:
                 request.write_reserved_keys.append(key)
                 request.write_reserved_objs[key] = mem_obj
-                reserved_key_set.add(key)
-            else:
-                if err == L1Error.OUT_OF_MEMORY:
-                    oom_keys.append(key)
-                logger.debug(
-                    "Prefetch request %d: reserve write failed for %s: %s",
-                    request.request_id,
-                    key,
-                    err,
-                )
+                reserved.add(key)
+                continue
+            if err == L1Error.OUT_OF_MEMORY:
+                oom_keys.append(key)
+            elif err == L1Error.KEY_NOT_WRITABLE:
+                contended_keys.append(key)
+            logger.debug(
+                "Prefetch request %d: reserve write failed for %s: %s",
+                request.request_id,
+                key,
+                err,
+            )
 
         if oom_keys:
             self._event_bus.publish(
@@ -940,39 +1115,34 @@ class PrefetchController(StorageControllerInterface):
                     metadata={"reason": "l1_oom", "keys": oom_keys},
                 )
             )
-
-        # Step 5: recompute load plan excluding failed reservations
-        reserved_bitmap = Bitmap(num_keys)
-        for i, key in enumerate(request.keys):
-            if key in reserved_key_set:
-                reserved_bitmap.set(i)
-
-        retained = build_trim_mask(reserved_bitmap, num_keys, request.policy)
-        trimmed_plan = trim_load_plan_with_mask(load_plan, retained)
-        request.load_plan = trimmed_plan
-
-        ## Step 6: phase 1 unlock — keys locked in lookup but not in plan
-        self._unlock_unneeded_keys(request)
-
-        if not trimmed_plan:
-            # Nothing loadable after filtering
-            if request.write_reserved_keys:
-                l1_mgr.finish_write(request.write_reserved_keys)
-                l1_mgr.delete(request.write_reserved_keys)
-            self._update_lookup_results(request.request_id, 0)
+        if contended_keys:
+            # The key was write-locked by a concurrent request after the L1
+            # lock pass; the caller falls back to the L1-only hit.
             self._event_bus.publish(
                 Event(
-                    event_type=EventType.L2_PREFETCH_LOOKUP_COMPLETED,
-                    metadata={
-                        "request_id": request.request_id,
-                        "prefix_hit_count": 0,
-                    },
+                    event_type=EventType.L2_PREFETCH_FAILED,
+                    metadata={"reason": "l1_contended", "keys": contended_keys},
                 )
             )
-            self._complete_request(request.request_id, Bitmap(num_keys))
-            return
+        return reserved
 
-        ## Step 7: submit load tasks per adapter
+    def _submit_load_tasks(
+        self,
+        request: InFlightPrefetchRequest,
+        trimmed_plan: dict[int, Bitmap],
+    ) -> None:
+        """Submit one load task per adapter in the final trimmed plan.
+
+        Every plan key must hold a write buffer in
+        ``request.write_reserved_objs`` (guaranteed by the caller's
+        reserved-bitmap trim). Publishes ``L2_LOAD_TASK_SUBMITTED`` per
+        adapter and one ``L2_PREFETCH_LOAD_SUBMITTED`` for the batch.
+
+        Args:
+            request: The in-flight request being loaded.
+            trimmed_plan: Final load plan (adapter index -> key indices).
+        """
+        plan_keys: list[ObjectKey] = []
         for adapter_idx, bitmap in trimmed_plan.items():
             per_adapter_keys = bitmap.gather(request.keys)
             per_adapter_objs = [
@@ -982,13 +1152,10 @@ class PrefetchController(StorageControllerInterface):
                 per_adapter_keys, per_adapter_objs
             )
             request.pending_load_tasks[adapter_idx] = task_id
+            plan_keys.extend(per_adapter_keys)
             # Per-adapter byte accounting for L2_LOAD_TASK_* throughput
-            # events.  Uniform layout per chunk -> size * count.
-            total_bytes = (
-                per_adapter_objs[0].get_size() * len(per_adapter_objs)
-                if per_adapter_objs
-                else 0
-            )
+            # events.  Sum individual sizes (groups may differ in size).
+            total_bytes = sum(obj.get_size() for obj in per_adapter_objs)
             request.load_bytes_by_adapter[adapter_idx] = total_bytes
 
             self._event_bus.publish(
@@ -1005,37 +1172,22 @@ class PrefetchController(StorageControllerInterface):
                 )
             )
 
-        ## Step 8: update the lookup result based on the final load plan
-        self._update_lookup_results(request.request_id, retained.count_leading_ones())
-
-        self._event_bus.publish(
-            Event(
-                event_type=EventType.L2_PREFETCH_LOOKUP_COMPLETED,
-                metadata={
-                    "request_id": request.request_id,
-                    "prefix_hit_count": retained.count_leading_ones(),
-                },
-            )
-        )
         self._event_bus.publish(
             Event(
                 event_type=EventType.L2_PREFETCH_LOAD_SUBMITTED,
                 metadata={
                     "request_id": request.request_id,
-                    "key_count": len(reserved_key_set),
+                    "key_count": len(plan_keys),
                     "adapter_count": len(trimmed_plan),
-                    "key_count_per_salt": Counter(
-                        k.cache_salt for k in reserved_key_set
-                    ),
+                    "key_count_per_salt": Counter(k.cache_salt for k in plan_keys),
                 },
             )
         )
-
         logger.debug(
             "Prefetch request %d: submitted load tasks to %d adapters for %d keys",
             request.request_id,
             len(trimmed_plan),
-            len(reserved_key_set),
+            len(plan_keys),
         )
 
     def _update_lookup_results(
@@ -1044,6 +1196,22 @@ class PrefetchController(StorageControllerInterface):
         """Store the prefix-hit count from the lookup phase."""
         with self._lookup_results_lock:
             self._completed_lookups[request_id] = prefix_hit_count
+
+    def _report_lookup_hit(
+        self, request: InFlightPrefetchRequest, prefix_hit_count: int
+    ) -> None:
+        """Store the lookup-phase hit and publish its completion event."""
+        request.hit_reported = True
+        self._update_lookup_results(request.request_id, prefix_hit_count)
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.L2_PREFETCH_LOOKUP_COMPLETED,
+                metadata={
+                    "request_id": request.request_id,
+                    "prefix_hit_count": prefix_hit_count,
+                },
+            )
+        )
 
     def _advance_request(
         self,
@@ -1063,7 +1231,7 @@ class PrefetchController(StorageControllerInterface):
         elif request.phase == PrefetchPhase.PLAN_AND_LOAD:
             self._poll_load_results(request, phase_adapters)
             if request.all_loads_done():
-                self._finalize_load(request)
+                self._finish_request(request)
 
     def _poll_lookup_results(
         self,
@@ -1081,6 +1249,7 @@ class PrefetchController(StorageControllerInterface):
             if result is None:
                 continue
             request.lookup_results[adapter_idx] = result
+            request.l2_adapter2readlocks[adapter_idx] = result
             del request.pending_lookup_tasks[adapter_idx]
 
     def _poll_load_results(
@@ -1112,14 +1281,30 @@ class PrefetchController(StorageControllerInterface):
                 )
             )
 
-    def _finalize_load(self, request: InFlightPrefetchRequest) -> None:
-        """
-        Finalize a completed load: build result bitmap, transition L1
-        state, release read locks outside the retained set, and report the
-        retained-key bitmap.
+    def _finish_request(self, request: InFlightPrefetchRequest) -> None:
+        """Finish a request and free all unnecessary locks.
 
-        Partial load failures can create gaps, so a loaded key may fall
-        outside the policy's retained set; its read lock must be released.
+        The single completion path, with or without an L2 load (with an
+        empty load plan the load steps degenerate to no-ops and every
+        write-reserved buffer is returned).
+
+        Workflow:
+
+        1. Collect per-adapter load results; split loaded vs failed keys.
+        2. Return every L2 read lock still held.
+        3. Loaded keys become read-locked for the retriever (WARM:
+           unlocked); failed keys' buffers are deleted.
+        4. Fold loaded ∪ locked keys to the final hit length / retained set.
+        5. Unlock everything outside the retained set (e.g. out of the
+           final sliding window).
+        6. Report the hit if no earlier step did, then the retained bitmap.
+
+        End state (sliding-window view; loaded keys in the in L2-hit sw
+        segment, L1 locks elsewhere)::
+
+            |out of L1-hit sw|in L1-hit sw|out of L2-hit sw|in L2-hit sw| remaining  |
+                                          ^ L1 hit length               ^ L1+L2 hit
+            |     unlock     |   unlock   |     unlock     |   locked   |   unlock   |
         """
         num_keys = len(request.keys)
 
@@ -1141,15 +1326,22 @@ class PrefetchController(StorageControllerInterface):
         loaded_set = set(loaded_keys)
         failed_keys = [k for k in request.write_reserved_keys if k not in loaded_set]
 
-        # Phase 2 unlock: release L2 locks for all keys in the load plan
-        self._unlock_all_plan_keys(request)
+        # Return every L2 read lock still held.
+        self._release_l2_locks(request, keep={})
 
         l1_mgr = self._l1_manager
 
-        # Transition loaded keys out of write-locked state.
+        # Finish — failed loads delete their buffer; the fold below decides
+        # the final retained set and every read lock outside it is released.
+        # SW keys in L2 (and not in L1):
+        # |out of L1-hit sw|in L1-hit sw|out of L2-hit sw|in L2-hit sw| remaining  |
+        #                               ^ L1 hit length               ^ L1+L2 hit length
+        # |       -        |     -      |       -        |load→locked |     -      |
+        # SW keys in L1:
+        # |     unlock     |   unlock   |     unlock     |   locked   |   unlock   |
         if loaded_keys:
             if request.mode is PrefetchMode.WARM:
-                # Warm: make ready, pin nothing.
+                # Warm: make ready, lock nothing.
                 l1_mgr.finish_write(loaded_keys)
             else:
                 # write-locked -> read-locked; extra_count so each TP worker
@@ -1188,13 +1380,42 @@ class PrefetchController(StorageControllerInterface):
                 )
             )
 
-        # Release read locks for any loaded key outside the retained set
-        # (partial load failures can create gaps).
-        retained = build_trim_mask(result_bitmap, num_keys, request.policy)
-        released_bitmap = result_bitmap & (~retained)
-        released = released_bitmap.gather(request.keys)
-        if released:
-            l1_mgr.finish_read(released, extra_count=request.extra_count)
+        # Include keys served from L1 (read-locked when the request started)
+        # so the fold sees all object groups.
+        result_bitmap = result_bitmap | request.l1_readlocks
+
+        # Release read locks for any key outside the retained set (partial
+        # load failures can create gaps). WARM has no retriever to release
+        # the retained keys later, so it releases everything it holds.
+        hit_length, retained = build_trim_mask(
+            result_bitmap,
+            num_keys,
+            request.policy,
+            request.attn_desc,
+        )
+        if request.mode is PrefetchMode.WARM:
+            if request.l1_readlocks.popcount() > 0:
+                l1_mgr.finish_read(
+                    request.l1_readlocks.gather(request.keys),
+                    extra_count=request.extra_count,
+                )
+                request.l1_readlocks = Bitmap(num_keys)
+        else:
+            released = (result_bitmap & (~retained)).gather(request.keys)
+            if released:
+                l1_mgr.finish_read(released, extra_count=request.extra_count)
+
+        # LRU: the retained keys are the ones this request actually serves;
+        # touch them (locking/unlocking never refreshes recency).
+        retained_keys = retained.gather(request.keys)
+        if retained_keys:
+            l1_mgr.touch_keys(retained_keys)
+
+        # No-load finishes reach here without a reported hit; the load path
+        # already reported at submit time (so the engine never waits on the
+        # load) and is not re-reported.
+        if not request.hit_reported:
+            self._report_lookup_hit(request, hit_length)
 
         self._complete_request(request.request_id, retained)
 
@@ -1202,27 +1423,31 @@ class PrefetchController(StorageControllerInterface):
     # Unlock helpers
     # =========================================================================
 
-    def _unlock_unneeded_keys(self, request: InFlightPrefetchRequest) -> None:
-        """Phase 1 unlock: keys locked in lookup but not in the load plan."""
-        for adapter_idx, lookup_bitmap in request.lookup_results.items():
-            plan_bitmap = request.load_plan.get(adapter_idx, Bitmap(len(request.keys)))
-            to_unlock_bitmap = lookup_bitmap & (~plan_bitmap)
-            unlock_keys = to_unlock_bitmap.gather(request.keys)
+    def _release_l2_locks(
+        self, request: InFlightPrefetchRequest, keep: dict[int, Bitmap]
+    ) -> None:
+        """Release L2 locks in ``request.l2_adapter2readlocks``, except for
+        keys in ``keep``.
+
+        Released keys are subtracted from ``request.l2_adapter2readlocks``,
+        so repeated calls never double-unlock.
+
+        Args:
+            request: The in-flight request whose L2 locks to release.
+            keep: Adapter index -> key indices whose locks stay held (the
+                load plan); pass ``{}`` to release everything still held.
+        """
+        num_keys = len(request.keys)
+        for adapter_idx, held in list(request.l2_adapter2readlocks.items()):
+            keep_bitmap = keep.get(adapter_idx, Bitmap(num_keys))
+            unlock_keys = (held & (~keep_bitmap)).gather(request.keys)
             if unlock_keys:
                 self._l2_adapters[adapter_idx].submit_unlock(unlock_keys)
-
-    def _unlock_all_plan_keys(self, request: InFlightPrefetchRequest) -> None:
-        """Phase 2 unlock: release L2 locks for all keys in the load plan."""
-        for adapter_idx, load_bitmap in request.load_plan.items():
-            unlock_keys = load_bitmap.gather(request.keys)
-            self._l2_adapters[adapter_idx].submit_unlock(unlock_keys)
-
-    def _unlock_all_lookups(self, request: InFlightPrefetchRequest) -> None:
-        """Unlock all keys locked during lookup (nothing to load case)."""
-        for adapter_idx, lookup_bitmap in request.lookup_results.items():
-            unlock_keys = lookup_bitmap.gather(request.keys)
-            if unlock_keys:
-                self._l2_adapters[adapter_idx].submit_unlock(unlock_keys)
+            remaining = held & keep_bitmap
+            if remaining.popcount() == 0:
+                del request.l2_adapter2readlocks[adapter_idx]
+            else:
+                request.l2_adapter2readlocks[adapter_idx] = remaining
 
     # =========================================================================
     # Completion and cleanup
@@ -1255,9 +1480,12 @@ class PrefetchController(StorageControllerInterface):
                 if request.write_reserved_keys:
                     l1_mgr.finish_write(request.write_reserved_keys)
                     l1_mgr.delete(request.write_reserved_keys)
-                self._unlock_all_plan_keys(request)
-            elif request.phase == PrefetchPhase.LOOKUP:
-                self._unlock_all_lookups(request)
+            self._release_l2_locks(request, keep={})
+            if request.l1_readlocks.popcount() > 0:
+                l1_mgr.finish_read(
+                    request.l1_readlocks.gather(request.keys),
+                    extra_count=request.extra_count,
+                )
             logger.warning(
                 "Cleaning up in-flight prefetch request %d (%d keys).",
                 request.request_id,

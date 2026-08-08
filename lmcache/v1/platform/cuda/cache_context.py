@@ -36,7 +36,7 @@ from lmcache.v1.multiprocess.group_view import (
     EngineGroupInfo,
     engine_group_layer_indices,
 )
-from lmcache.v1.platform.base_cache_context import BaseCacheContext
+from lmcache.v1.platform.base.cache_context import BaseCacheContext
 
 logger = init_logger(__name__)
 
@@ -353,7 +353,7 @@ class GPUCacheContext(BaseCacheContext):
         layout_hints: LayoutHints | None = None,
         engine_group_infos: Sequence[EngineGroupInfo] = (),
         engine_type: EngineType = EngineType.VLLM,
-        separate_object_groups: bool = True,
+        separate_object_groups: bool = False,
         full_sw_kv: bool = False,
     ):
         unwrapped = unwrap_kv_cache_tensors(kv_caches)
@@ -396,7 +396,7 @@ class GPUCacheContext(BaseCacheContext):
         )
 
         self.group_kv_pointers_: list[torch.Tensor] = []
-        for idx, group in enumerate(self.kv_layer_groups_manager_.kv_layer_groups):
+        for idx, group in enumerate(self.kv_layer_groups_manager_.kernel_groups):
             ptrs = get_group_data_ptrs(
                 self.kv_caches_, self.get_engine_kv_format(idx), group.layer_indices
             )

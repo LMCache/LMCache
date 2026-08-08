@@ -111,6 +111,34 @@ def _make_raw_block_core(*, use_odirect: bool = False) -> RawBlockCore:
     )
 
 
+@pytest.mark.parametrize("block_align", [0, -1, 3, 4095])
+def test_raw_block_core_rejects_non_power_of_2_block_align(block_align: int) -> None:
+    """RawBlockCore rejects invalid block_align values."""
+    with pytest.raises(ValueError, match="block_align"):
+        RawBlockCore(
+            RawBlockCoreConfig(
+                device_path="/tmp/dummy-does-not-need-to-exist",
+                capacity_bytes=64 * 1024,
+                block_align=block_align,
+                header_bytes=4096,
+                slot_bytes=8192,
+                use_odirect=False,
+                enable_zero_copy=True,
+                meta_total_bytes=16 * 1024,
+                meta_magic=b"LMCIDX01",
+                meta_version=1,
+                meta_checkpoint_interval_sec=60,
+                meta_idle_quiet_ms=100,
+                meta_enable_periodic=False,
+                load_checkpoint_on_init=False,
+                meta_verify_on_load=False,
+                io_engine="posix",
+                iouring_queue_depth=256,
+            ),
+            key_namespace="object",
+        )
+
+
 def _make_byte_obj(size: int) -> TensorMemoryObj:
     raw_data = torch.empty(size, dtype=torch.uint8)
     metadata = MemoryObjMetadata(
@@ -2446,3 +2474,61 @@ def test_rust_raw_block_backend_batched_submit_rolls_back_only_unscheduled_refs(
         obj2.ref_count_down()
     finally:
         backend.close()
+
+
+@pytest.mark.skipif(
+    not _has_ext(), reason="lmcache_rust_raw_block_io extension not installed"
+)
+def test_batched_write_rejects_misaligned_offset():
+    """batched_write raises ValueError for a misaligned offset when use_odirect=True."""
+    # Third Party
+    from lmcache_rust_raw_block_io import RawBlockDevice
+
+    align = 4096
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dev.bin")
+        with open(dev_path, "wb") as f:
+            f.truncate(8 * 1024 * 1024)
+
+        dev = RawBlockDevice(
+            dev_path,
+            writable=True,
+            use_odirect=True,
+            alignment=align,
+            io_engine="io_uring",
+        )
+        try:
+            buf = bytearray(align)
+            with pytest.raises(ValueError, match="aligned offset"):
+                dev.batched_write([1], [buf], [align])  # offset 1 is not aligned
+        finally:
+            dev.close()
+
+
+@pytest.mark.skipif(
+    not _has_ext(), reason="lmcache_rust_raw_block_io extension not installed"
+)
+def test_batched_write_rejects_misaligned_total_len():
+    """batched_write rejects misaligned total_len with O_DIRECT enabled."""
+    # Third Party
+    from lmcache_rust_raw_block_io import RawBlockDevice
+
+    align = 4096
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dev.bin")
+        with open(dev_path, "wb") as f:
+            f.truncate(8 * 1024 * 1024)
+
+        dev = RawBlockDevice(
+            dev_path,
+            writable=True,
+            use_odirect=True,
+            alignment=align,
+            io_engine="io_uring",
+        )
+        try:
+            buf = bytearray(align)
+            with pytest.raises(ValueError, match="aligned total_len"):
+                dev.batched_write([0], [buf], [1])  # total_len 1 is not aligned
+        finally:
+            dev.close()

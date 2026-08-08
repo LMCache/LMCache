@@ -26,10 +26,18 @@ from lmcache.v1.multiprocess.http_apis.error_handlers import register_error_hand
 
 
 @dataclass
+class _FakeConfig:
+    """Minimal adapter config — only ``shared`` is read (listing)."""
+
+    shared: bool = False
+
+
+@dataclass
 class _FakeDescriptor:
-    """Minimal descriptor — only ``type_name`` is read."""
+    """Minimal descriptor — only ``type_name`` and ``config.shared`` are read."""
 
     type_name: str = "s3"
+    config: _FakeConfig = field(default_factory=_FakeConfig)
 
 
 @dataclass
@@ -444,11 +452,9 @@ class _PrefetchBitmap:
 class _PrefetchStorageManager:
     submit_calls: list[dict] = field(default_factory=list)
 
-    def submit_prefetch_task(
-        self, keys, layout_desc, mode=None, **_
-    ) -> _PrefetchHandle:
-        self.submit_calls.append({"keys": list(keys), "mode": mode})
-        return _PrefetchHandle(len(keys))
+    def submit_prefetch_task(self, spec, **_) -> _PrefetchHandle:
+        self.submit_calls.append({"keys": list(spec.keys), "mode": spec.mode})
+        return _PrefetchHandle(len(spec.keys))
 
     def query_prefetch_status(self, handle) -> _PrefetchBitmap:
         return _PrefetchBitmap(handle.total_requested_keys)

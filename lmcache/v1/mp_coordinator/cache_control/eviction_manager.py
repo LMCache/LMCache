@@ -4,7 +4,8 @@
 Periodically compares per-salt usage against ``watermark * quota``;
 when over threshold, dispatches a ``DELETE /cache/objects`` to one registered MP
 server. LRU bookkeeping is updated when the corresponding ``delete``
-event arrives back via ``POST /quota/events``.
+event arrives back on the fleet cache-event stream
+(``POST /directory/events``).
 """
 
 # Future
@@ -12,6 +13,7 @@ from __future__ import annotations
 
 # Standard
 from dataclasses import asdict
+from typing import TYPE_CHECKING
 import asyncio
 
 # Third Party
@@ -19,16 +21,23 @@ import httpx
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.api import Tier
 from lmcache.v1.distributed.eviction_policy.isolated_lru import (
     IsolatedLRUEvictionPolicy,
 )
-from lmcache.v1.distributed.quota_manager import QuotaManager
-from lmcache.v1.mp_coordinator.cache_control.usage_manager import L2UsageManager
-from lmcache.v1.mp_coordinator.registry import InstanceRegistry
+from lmcache.v1.mp_coordinator.api import CacheEventBatch, CacheEventType
 from lmcache.v1.multiprocess.cache_control.object_service import (
     MAX_DELETE_BATCH,
 )
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.distributed.api import ObjectKey
+    from lmcache.v1.distributed.quota_manager import QuotaManager
+    from lmcache.v1.mp_coordinator.cache_control.usage_manager import (
+        L2UsageManager,
+    )
+    from lmcache.v1.mp_coordinator.registry import InstanceRegistry
 
 logger = init_logger(__name__)
 
@@ -38,10 +47,10 @@ class L2EvictionManager:
 
     Args:
         quota_manager: Shared quota registry.
-        usage_manager: Shared usage manager. Writes to the size ledger
-            (``record_stored`` / ``record_evicted``) are the caller's
-            responsibility, paired with :meth:`on_store` /
-            :meth:`on_remove`.
+        usage_manager: The L2 usage view; read for per-salt L2 usage
+            and per-key L2 sizes (maintained from the same applied
+            cache-event stream this manager's :meth:`consume` feeds the
+            LRU from).
         eviction_ratio: Fraction of tracked keys to evict per cycle.
         trigger_watermark: Eviction fires when usage reaches this
             fraction of the quota.
@@ -64,9 +73,39 @@ class L2EvictionManager:
         # its count is > 0. Not persisted across coordinator restarts.
         self._pin_counts: dict[ObjectKey, int] = {}
 
+    def consume(self, batch: CacheEventBatch) -> None:
+        """Apply one directory-applied cache-event batch to the LRU.
+
+        The :class:`CacheEventBroadcaster` consumer hook: L2 stores register,
+        L2 accesses touch, L2 deletes drop; other tiers are ignored
+        (per-salt byte accounting lives in the L2 usage view).
+
+        A delete drops the key from the LRU only once its **last** L2
+        placement is gone: usage is per placement, so while another
+        copy still holds bytes the key must stay evictable — otherwise
+        those bytes could exceed quota with nothing for the planner to
+        select. This reads the usage view *after* it consumed the same
+        batch, which the broadcaster guarantees by registration order
+        (see ``create_app``).
+
+        Args:
+            batch: The applied batch.
+        """
+        if batch.tier != Tier.L2:
+            return
+        for entry in batch.entries:
+            key = entry.key.to_object_key()
+            if batch.event_type == CacheEventType.STORE:
+                self.on_store(key)
+            elif batch.event_type == CacheEventType.ACCESS:
+                self.on_lookup(key)
+            elif batch.event_type == CacheEventType.DELETE:
+                if self._usage_manager.get_key_size(key) == 0:
+                    self.on_remove(key)
+
     def on_store(self, key: ObjectKey) -> None:
-        """Register a stored key in the LRU. Per-salt bytes are the
-        caller's responsibility (see :meth:`L2UsageManager.record_stored`)."""
+        """Register a stored key in the LRU. Per-salt bytes are
+        tracked by the usage view consuming the same event."""
         self._policy.on_keys_created([key])
 
     def on_lookup(self, key: ObjectKey) -> None:
@@ -74,8 +113,8 @@ class L2EvictionManager:
         self._policy.on_keys_touched([key])
 
     def on_remove(self, key: ObjectKey) -> None:
-        """Drop ``key`` from the LRU. Per-salt bytes are the caller's
-        responsibility (see :meth:`L2UsageManager.record_evicted`)."""
+        """Drop ``key`` from the LRU. Per-salt bytes are tracked by
+        the usage view consuming the same event."""
         self._policy.on_keys_removed([key])
 
     def pin(self, keys: list[ObjectKey]) -> None:
@@ -149,10 +188,9 @@ class L2EvictionManager:
 
             if keys_to_evict:
                 eviction_plan[cache_salt] = keys_to_evict
-                sizes = [
-                    self._usage_manager.get_key_size(k) or 0 for k in keys_to_evict
-                ]
-                evict_bytes = sum(sizes)
+                evict_bytes = sum(
+                    self._usage_manager.get_key_size(k) for k in keys_to_evict
+                )
                 logger.info(
                     "Eviction plan for cache_salt=%r: %d keys "
                     "(%d bytes) to free; usage=%d, quota=%d, "
@@ -183,8 +221,8 @@ class L2EvictionManager:
 
         Returns the scheduled plan as soon as the background dispatch
         tasks are spawned. The LRU is not cleared here — that happens
-        when the corresponding ``delete`` event arrives at
-        ``POST /quota/events``. At-least-once semantics; safe because the
+        when the corresponding ``delete`` event arrives on the fleet
+        cache-event stream. At-least-once semantics; safe because the
         underlying delete is idempotent.
         """
         plan = self.compute_eviction_plan()

@@ -53,7 +53,9 @@ Requirements
   start.
 * **An RDMA-capable network** (InfiniBand / RoCE) is strongly recommended for
   production performance. By default P2P uses the ``nixl`` transfer engine,
-  which is shipped with LMCache, so there is nothing extra to install.
+  which ships as the optional ``lmcache[nixl]`` extra — install it with
+  ``uv pip install lmcache[nixl]`` (or ``pip install lmcache[nixl]``) before
+  enabling P2P.
 * **A single, contiguous L1 region.** The transfer channel registers the whole
   L1 buffer for RDMA, so P2P is incompatible with the GDS L1 tier
   (``--gds-l1-path``) and the Device-DAX L1 tier (``--l1-devdax-path``); the
@@ -112,7 +114,8 @@ selected per server with ``--p2p-transfer-engine``.
    * - Engine
      - Description
    * - ``nixl`` (default)
-     - RDMA-based transport, shipped with LMCache. Runs over InfiniBand / RoCE
+     - RDMA-based transport, shipped as the optional ``lmcache[nixl]`` extra
+       (``uv pip install lmcache[nixl]``). Runs over InfiniBand / RoCE
        fabrics.
 
 ``nixl`` is the only backend available today. The transfer engine is a

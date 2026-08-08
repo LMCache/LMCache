@@ -338,20 +338,19 @@ class SageMakerHyperPodL2Adapter(L2AdapterInterface):
     def submit_lookup_and_lock_task(
         self,
         keys: list[ObjectKey],
-        layout_desc: MemoryLayoutDesc,
+        group_layout_descs: dict[int, MemoryLayoutDesc],
     ) -> L2TaskId:
         """Submit a lookup that retains daemon leases for every hit.
 
         Args:
             keys: Object keys to look up.
-            layout_desc: Unused; ai-toolkit leases are layout-independent.
+            group_layout_descs: Unused; ai-toolkit leases are layout-independent.
 
         Returns:
             A task ID whose hit bitmap is queried through
             :meth:`query_lookup_and_lock_result` after the lookup event fd
             fires. Retained leases are held until :meth:`submit_unlock`.
         """
-        del layout_desc
         task_id = self._allocate_task_id()
         if self._closed:
             with self._lock:

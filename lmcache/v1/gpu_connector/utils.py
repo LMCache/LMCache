@@ -15,17 +15,18 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.python_ops_fallback import set_shape_desc_dtype
 from lmcache.utils import EngineType, lmcache_deprecate
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.gpu_connector.kv_format import (
     concrete_shape,
     describe_shape,
     detect_format,
+    extract_kv_cache_shapes,
     get_spec,
     get_spec_class,
 )
 from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache, LayoutHints
+from lmcache.v1.platform.ops_types import set_shape_desc_dtype
 
 if TYPE_CHECKING:
     # First Party
@@ -237,13 +238,15 @@ def normalize_and_discover_per_layer_formats(
 
     # Detect the whole structure once. A format that isn't a per-layer list (a
     # cross-layer tensor, or a K/V-split) is single-format -- return it whole.
-    whole_format, whole_normalized = detect_format(
-        kv_caches, serving_engine, layout_hints
-    )
-    if not lmc_ops.is_layer_list(whole_format):
-        return whole_normalized, [whole_format] * get_num_layers(
-            whole_normalized, whole_format
+    extracted_shapes = extract_kv_cache_shapes(kv_caches)
+    if len(extracted_shapes) == 1:
+        whole_format, whole_normalized = detect_format(
+            kv_caches, serving_engine, layout_hints
         )
+        if not lmc_ops.is_layer_list(whole_format):
+            return whole_normalized, [whole_format] * get_num_layers(
+                whole_normalized, whole_format
+            )
 
     # Per-layer list: re-detect per engine group, split by tensor shape so a group
     # that mixes layouts gets the right format per layer.
@@ -421,6 +424,8 @@ def assert_is_vllm_flash_attn_or_flash_infer(
         # share this transfer path even though they are not literally flash-*.
         lmc_ops.EngineKVFormat.NL_X_NB_NH_BS_TWO_HS,
         lmc_ops.EngineKVFormat.NL_X_NB_BS_NH_TWO_HS,
+        lmc_ops.EngineKVFormat.NL_X_NB_NH_BS_CS,
+        lmc_ops.EngineKVFormat.NL_X_NB_BS_NH_CS,
     )
 
 
@@ -447,6 +452,7 @@ def assert_is_vllm_mla_or_flash_attn_or_flash_infer(
         lmc_ops.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS,
         lmc_ops.EngineKVFormat.NL_X_NB_TWO_NH_BS_HS,
         lmc_ops.EngineKVFormat.NL_X_NB_BS_HS,
+        lmc_ops.EngineKVFormat.NL_X_NB_BSV_BSS,
     )
 
 
@@ -483,6 +489,7 @@ def get_device(kv_caches: DiscoverableKVCache) -> torch.device:
 _BLOCK_AXIS_FORMATS: frozenset = frozenset(
     {
         lmc_ops.EngineKVFormat.NL_X_NB_BS_HS,
+        lmc_ops.EngineKVFormat.NL_X_NB_BSV_BSS,
     }
 )
 
