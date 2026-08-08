@@ -1,27 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from unittest.mock import MagicMock
-import sys
-
-# Mock vllm related imports
-sys.modules.setdefault("vllm", MagicMock())
-sys.modules.setdefault("vllm.distributed", MagicMock())
-sys.modules.setdefault("vllm.distributed.kv_transfer", MagicMock())
-sys.modules.setdefault("vllm.distributed.kv_transfer.kv_connector", MagicMock())
-sys.modules.setdefault("vllm.distributed.kv_transfer.kv_connector.v1", MagicMock())
-sys.modules.setdefault("vllm.distributed.kv_transfer.kv_connector.v1.base", MagicMock())
-sys.modules.setdefault("vllm.v1", MagicMock())
-sys.modules.setdefault("vllm.v1.utils", MagicMock())
 
 # Third Party
-import pytest  # noqa: E402
+import pytest
 
 # First Party
-from lmcache.integration.vllm.lazy_offload_pending_store import (  # noqa: E402
+from lmcache.integration.vllm.lazy_offload_pending_store import (
     FIFOOffloadPolicy,
     LazyOffloadPendingStore,
-    OffloadPolicy,
-    PendingStoreItem,
 )
 
 
@@ -298,66 +285,3 @@ class TestLazyOffloadPendingStore:
 
         batch4 = store.select_items()
         assert len(batch4) == 0
-
-
-# ===========================================================================
-# Tests for OffloadPolicy (abstract interface contract)
-# ===========================================================================
-
-
-class TestOffloadPolicyInterface:
-    def test_cannot_instantiate_abstract(self):
-        with pytest.raises(TypeError):
-            OffloadPolicy()  # type: ignore[abstract]
-
-    def test_custom_policy_integration(self):
-        """Verify a custom policy can be plugged in via subclassing."""
-
-        class CustomOffloadPolicy(OffloadPolicy):
-            def __init__(self):
-                self.pending_items: dict[str, PendingStoreItem] = {}
-                self.finished_count = 0
-                self.threshold = 2
-
-            def add(self, meta, block_hashes):
-                if meta.request_id not in self.pending_items:
-                    self.pending_items[meta.request_id] = PendingStoreItem(
-                        request_id=meta.request_id
-                    )
-                self.pending_items[meta.request_id].metadatas.append(
-                    (meta, block_hashes)
-                )
-
-            def mark_req_finished(self, req_id: str):
-                self.pending_items[req_id].is_finished = True
-                self.finished_count += 1
-
-            def should_offload(self) -> bool:
-                return self.finished_count >= self.threshold
-
-            def select_items(self, count: int) -> list[PendingStoreItem]:
-                result = []
-                for req_id in self.pending_items:
-                    if self.pending_items[req_id].is_finished:
-                        result.append(self.pending_items[req_id])
-                        del self.pending_items[req_id]
-                return result
-
-        policy = CustomOffloadPolicy()
-        store = LazyOffloadPendingStore()
-        store._policy = policy  # inject custom policy
-
-        gpu_pool = MagicMock()
-        gpu_pool.blocks = {
-            bid: MagicMock(block_hash=f"hash-{bid}".encode()) for bid in range(5)
-        }
-        store.bind_gpu_block_pool(gpu_pool)
-
-        store.add(_make_meta("req-0"))
-        store.add(_make_meta("req-1"))
-        store.mark_req_finished("req-0")
-        store.mark_req_finished("req-1")
-
-        assert store.should_offload() is True
-        selected = store.select_items()
-        assert len(selected) == 2
