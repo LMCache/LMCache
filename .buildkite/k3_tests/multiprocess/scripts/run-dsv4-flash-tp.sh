@@ -40,14 +40,16 @@
 #   Delete this workaround once vLLM's pin carries SM120 again; the guard
 #   below then no-ops on its own, since the bundled DeepGEMM will work.
 #
-#   Disabling DeepGEMM instead (VLLM_USE_DEEP_GEMM=0) does not work on SM120:
-#   only the fp8 linear and MXFP4 MoE call sites are gated by it. Measured on
-#   an SM120 node, that path falls to CutlassFp8BlockScaledMMKernel + MARLIN
-#   and then dies in mhc_pre_broadcast_tilelang, which calls DeepGEMM
-#   unconditionally; patching that one exposes the next wall
-#   (torch.ops._C.cutlass_scaled_mm has no SM120 block-scaled kernel in the
-#   wheel), and behind it DSv4's per-layer _o_proj -> deep_gemm_fp8_o_proj
-#   has no non-DeepGEMM implementation at all.
+#   Disabling DeepGEMM instead (VLLM_USE_DEEP_GEMM=0) does not work on SM120.
+#   Only the fp8 linear and FP4 MoE call sites consult is_deep_gemm_supported();
+#   measured on an SM120 node, those do demote (CutlassFp8BlockScaledMMKernel,
+#   MARLIN) and the run then dies in mhc_pre_broadcast_tilelang, which calls
+#   DeepGEMM unconditionally. Patching that gate exposes the next wall --
+#   torch.ops._C.cutlass_scaled_mm has no SM120 block-scaled kernel in the
+#   wheel -- and behind it DSv4's per-layer _o_proj -> deep_gemm_fp8_o_proj,
+#   which has no non-DeepGEMM implementation on the CUDA path. (The ROCm and
+#   XPU model modules define alternative _o_proj implementations, but
+#   _select_dsv4_attn_cls only ever returns CUDA classes here.)
 #
 # This test is self-contained: it launches its own LMCache server + a TP=N
 # vLLM instead of using launch-processes.sh / wait-for-servers.sh, since it
