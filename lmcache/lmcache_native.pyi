@@ -1,8 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # Stub for the lmcache_native C++ extension (implemented in csrc/lmcache_native/).
-#
-# ``native_storage_ops`` was renamed to ``lmcache_native``. The old name is kept
-# as a backward-compatible Python shim (lmcache/native_storage_ops.py).
 
 """Native operations for LMCache (device-independent)."""
 
