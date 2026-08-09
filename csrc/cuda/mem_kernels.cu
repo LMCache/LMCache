@@ -996,6 +996,23 @@ void multi_layer_kv_transfer_fused_templated(
 #undef LAUNCH_FUSED_WITH_FORMAT
 }
 
+// Fused rows are decomposed per head, so the transfer unit must divide the
+// per-head run: the logical half-head for SPLIT_KV_2LTD, the packed CS
+// otherwise. Both always divide the full row width.
+static int transfer_unit_copy_size(const EngineKVFormat engine_kv_format,
+                                   const MemObjKVLayout mem_obj_kv_layout,
+                                   const int num_origin_elements,
+                                   const int element_size,
+                                   const int head_size) {
+  if (::is_fused_packed(engine_kv_format)) {
+    const int per_head_run = mem_obj_kv_layout == MemObjKVLayout::SPLIT_KV_2LTD
+                                 ? head_size / 2
+                                 : head_size;
+    return per_head_run * element_size;
+  }
+  return num_origin_elements * element_size;
+}
+
 void multi_layer_kv_transfer_fused_ptr(
     const std::vector<uintptr_t>& key_values,
     const std::vector<uintptr_t>& slot_mappings, const std::vector<int>& n_toks,
@@ -1006,7 +1023,9 @@ void multi_layer_kv_transfer_fused_ptr(
     const EngineKVFormat engine_kv_format, const int block_size,
     const int head_size, const int64_t block_stride_elems,
     const MemObjKVLayout mem_obj_kv_layout) {
-  int copy_size = num_origin_elements * element_size;
+  int copy_size =
+      transfer_unit_copy_size(engine_kv_format, mem_obj_kv_layout,
+                              num_origin_elements, element_size, head_size);
 #ifndef LAUNCH_FUSED_TRANSFER
   #define LAUNCH_FUSED_TRANSFER(type)                                         \
     do {                                                                      \
@@ -1040,13 +1059,9 @@ void multi_layer_kv_transfer(
     const int head_size, const int skip_prefix_n_tokens,
     const int64_t block_stride_elems, const MemObjKVLayout mem_obj_kv_layout) {
   int num_origin_elements = key_value.size(3);
-  int copy_size = num_origin_elements * key_value.element_size();
-  // Split-KV over a fused engine layout copies half-head runs, so the
-  // transfer unit must divide that granularity; half-head always divides the
-  // row width (row = NH * half-head), so the narrower dispatch stays valid.
-  if (mem_obj_kv_layout == MemObjKVLayout::SPLIT_KV_2LTD && head_size > 1) {
-    copy_size = (head_size / 2) * key_value.element_size();
-  }
+  int copy_size = transfer_unit_copy_size(
+      engine_kv_format, mem_obj_kv_layout, num_origin_elements,
+      static_cast<int>(key_value.element_size()), head_size);
 #ifndef LAUNCH_MULTI_LAYER_KV_TRANSFER
   #define LAUNCH_MULTI_LAYER_KV_TRANSFER(type)                          \
     do {                                                                \
