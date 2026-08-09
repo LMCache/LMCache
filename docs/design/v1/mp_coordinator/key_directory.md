@@ -57,28 +57,51 @@ emitter wall-clock and is never compared across instances.
 
 ## Token index (chunk hash → token ids + keys)
 
-The directory can answer "what token ids does this chunk hold?" and
-"which keys share this chunk?" from the `STORE` entries themselves.
-Every store entry carries its chunk's `token_ids` — a deliberate wire
-trade: tokens ride once per rank/group/tier placement in exchange for a
+The directory can answer "what token ids does this chunk hold?",
+"where in its sequence did it sit?" and "which keys share this chunk?"
+from the `STORE` entries themselves.
+Every store entry carries its chunk's `token_ids` plus its
+`token_offset` — a deliberate wire trade: both ride once per
+rank/group/tier placement in exchange for a
 self-contained protocol (no per-chunk canonical entry, no cross-entry
 ordering to reason about). Bindings are keyed by `ObjectKey.chunk_hash`
 — the identity every entry and every lookup already carries — so the
 coordinator does no hashing at all.
 
+`token_offset` is the position of the chunk's first token in the
+sequence it was stored under, or `UNKNOWN_TOKEN_OFFSET` when no emitter
+reported one — distinct from 0, which is a real position. It cannot be derived: chunk hashes are
+prefix-chained, so the hash *implies* a unique position but does not
+reveal it, and position-dependent reuse (blend re-RoPE, which shifts KV
+from its stored position to the query's) needs the value. It is a
+property of the chunk hash, not of a placement, so it lives on the
+binding; two entries disagreeing about it would mean a hash collision.
+
+**Representation.** Tokens are held as a read-only `uint32` numpy array
+(`TokenBinding.token_ids`), ~1 KB per 256-token chunk against the ~10 KB
+a `tuple[int, ...]` of boxed ints costs — a live-chunk footprint the
+directory pays per chunk, not per placement, since every rank shares one
+binding. It also keeps content comparison against a query window
+vectorized. Token ids outside `uint32` leave the binding unfilled (a
+lookup miss) instead of failing the batch.
+
 The lookups this serves:
 
 - **key → tokens**: `key.chunk_hash` → binding
   (`get_token_ids(chunk_hashes)`, served by `POST /directory/lookup`'s
-  keys form).
+  keys form). Content only — the stored position reaches the blend path
+  as a match's `old_st`, never as a standalone lookup.
 - **prefix tokens → keys**: stateless — `POST /directory/lookup`'s
   tokens form recomputes keys from the sequence; no index involved.
-- **fragment tokens → keys** (blend-style, follow-up): rolling
+- **fragment tokens → keys** (blend-style): rolling
   fingerprints over the query discover candidate bindings, the query
   window is verified against `binding.token_ids` (exact), and the
   binding's keys give the placements. Discovery uses blend's cheap
   polynomial hash family; the index itself never needs a
-  content-addressed key because every hit is token-verified.
+  content-addressed key because every hit is token-verified. Implemented
+  as a derived view over these bindings — see
+  [blend_index.md](blend_index.md), served by `POST
+  /directory/blend-lookup`.
 
 Lifecycle is record lifecycle — bounded structurally, not configured:
 every record joins its chunk's binding at creation and leaves when it
@@ -149,6 +172,7 @@ ObjectKey → _KeyRecord {
     placements: list[Placement],   # ≤1 per placement identity (see STORE)
     content_hash_hex, last_access
 }
+chunk_hash → _TokenBinding { token_ids: uint32[], token_offset, keys }
 instance_id → _InstanceState { incarnation, last_seq, gap_detected, keys }
 ```
 
@@ -215,9 +239,13 @@ the earlier storage-scan resync idea).
 cross-reporter conflict resolution; see Shared pools above).
 - **Registry integration**: calling `drop_instance` from deregistration /
 heartbeat-timeout eviction (the method exists and is tested).
-- **Content index (I2)**, blend rewiring, checkpointing, and the
+- **Blend rewiring**: pointing the mp-server blend lookup at
+`/directory/blend-lookup` and retiring `blend_directory.py` plus the
+per-store fingerprint publish. The coordinator side is done — see
+[blend_index.md](blend_index.md).
+- Checkpointing and the
 `DELETE_PENDING`/pin placement states used by tier-aware cache-control
-directives (M2–M4 of the RFC).
+directives (M3–M4 of the RFC).
 - **Token store (I3)**: the opt-in `content_hash → token_ids` store for
 `key → tokens` introspection, fed by `TOKENS` events and refcounted from
 key records via the `content_hash` back-pointer. Nothing

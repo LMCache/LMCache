@@ -23,12 +23,12 @@ from __future__ import annotations
 
 # Standard
 from dataclasses import fields
-import os
 import threading
 import time
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.usage_telemetry.flush import start_usage_flush_thread
 from lmcache.usage_telemetry.guard import swallow_telemetry_errors
 from lmcache.usage_telemetry.identity import (
     get_usage_identity,
@@ -112,27 +112,15 @@ class MPContinuousUsageReporter(EventSubscriber):
             )
         self._sender = sender if sender is not None else DEFAULT_SENDER
         self._max_buffered_samples = max_buffered_samples
-        # Clamp to >= 1 s: Event.wait(0) would turn the flush loop into a
-        # busy spin. A malformed env value falls back to the default
-        # instead of disabling telemetry.
-        try:
-            flush_interval = float(os.getenv("LMCACHE_USAGE_TRACK_INTERVAL", "600"))
-        except ValueError:
-            logger.debug("Invalid LMCACHE_USAGE_TRACK_INTERVAL", exc_info=True)
-            flush_interval = 600.0
-        self._flush_interval: float = max(flush_interval, 1.0)
         self._lock = threading.Lock()
         self._buffers: dict[str, list[int | float]] = {
             spec.field: [] for spec in self._specs
         }
         self._sequence_number = 0
         self._start_monotonic = time.monotonic()
-        self._stop_event = threading.Event()
-        self._wake = threading.Event()
-        self._flush_thread = threading.Thread(
-            target=self._flush_loop, daemon=True, name="lmcache-usage-report"
+        self._flush_thread = start_usage_flush_thread(
+            "lmcache-usage-continuous", self.flush
         )
-        self._flush_thread.start()
 
     def get_subscriptions(self) -> dict[EventType, EventCallback]:
         subscriptions: dict[EventType, list[MetricSpec]] = {}
@@ -148,8 +136,7 @@ class MPContinuousUsageReporter(EventSubscriber):
 
         Called by ``EventBus.stop()``.
         """
-        self._stop_event.set()
-        self._wake.set()
+        self._flush_thread.stop()
         self.flush()
 
     @swallow_telemetry_errors
@@ -180,20 +167,11 @@ class MPContinuousUsageReporter(EventSubscriber):
         )
         self._sender.send(usage_server_url(message.ENDPOINT), payload)
 
-    def _flush_loop(self) -> None:
-        while True:
-            self._wake.wait(timeout=self._flush_interval)
-            self._wake.clear()
-            if self._stop_event.is_set():
-                return
-            self.flush()
-
     def _make_callback(self, event_specs: list[MetricSpec]) -> EventCallback:
         """Build the drain-thread callback for one event type.
 
-        The callback only buffers samples; a full buffer wakes the flush
-        thread early so memory stays bounded between flushes (the extra
-        message is harmless — the backend sums interval deltas).
+        The callback only buffers samples; a full buffer wakes the
+        flush thread early.
         """
 
         @swallow_telemetry_errors
@@ -209,7 +187,7 @@ class MPContinuousUsageReporter(EventSubscriber):
                     if len(buffer) >= self._max_buffered_samples:
                         overflow = True
             if overflow:
-                self._wake.set()
+                self._flush_thread.wake()
 
         return _on_event
 
