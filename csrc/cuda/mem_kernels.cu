@@ -57,6 +57,18 @@ inline void check_head_size(const EngineKVFormat engine_kv_format,
               static_cast<int>(engine_kv_format));
 }
 
+// Fused formats always need head_size = the packed per-head content width
+// (CS == 2 * HS): the HND legs and the split-KV mapping both decompose rows
+// by head. Checked in element units, before any xword conversion.
+inline void check_fused_head_size(const EngineKVFormat engine_kv_format,
+                                  const int head_size_elements) {
+  TORCH_CHECK(!::is_fused_packed(engine_kv_format) ||
+                  (head_size_elements > 0 && head_size_elements % 2 == 0),
+              "fused-packed formats require head_size = the packed per-head "
+              "content width (> 0 and even), got ",
+              head_size_elements);
+}
+
 // Fused formats admit two LMCache-side layouts that the buffer shape alone
 // cannot distinguish reliably; the caller must declare which one it passes.
 inline void check_mem_obj_kv_layout(const EngineKVFormat engine_kv_format,
@@ -335,17 +347,17 @@ __device__ __forceinline__ int64_t page_buffer_offset(
       return block_idx * block_step + head_idx * block_size * head_size +
              block_offset * head_size + k_or_v * hs_logical + head_offset;
     }
-    const int hs2 = 2 * head_size;  // packed K+V width per head (xword units)
-    const int head_idx = scalar_offset / hs2;
-    const int head_offset = scalar_offset % hs2;
-    const int num_heads = scalars_per_token / hs2;
+    // head_size is the packed K+V width per head (CS, xword units).
+    const int head_idx = scalar_offset / head_size;
+    const int head_offset = scalar_offset % head_size;
+    const int num_heads = scalars_per_token / head_size;
     // vLLM blocks-first pools pass the real per-block step; 0 means tight.
     const int64_t block_step =
         block_stride_xwords > 0
             ? block_stride_xwords
-            : static_cast<int64_t>(num_heads) * block_size * hs2;
-    return block_idx * block_step + head_idx * block_size * hs2 +
-           block_offset * hs2 + head_offset;
+            : static_cast<int64_t>(num_heads) * block_size * head_size;
+    return block_idx * block_step + head_idx * block_size * head_size +
+           block_offset * head_size + head_offset;
   }
   // Fused-K/V NHD — physical per layer: [NB, BS, NH, CS] with CS = 2*HS
   else if constexpr (format == EngineKVFormat::NL_X_NB_BS_NH_TWO_HS ||
@@ -717,6 +729,8 @@ void multi_layer_kv_transfer_templated(
       "NL_X_NB_BSV_BSS requires 4-byte transfer units (row bytes "
       "must be divisible by 4 and not by 8)");
 
+  lmc::check_fused_head_size(engine_kv_format, head_size);
+
   const bool fused_split_kv =
       (mem_obj_kv_layout == MemObjKVLayout::SPLIT_KV_2LTD);
   if (fused_split_kv) {
@@ -724,12 +738,6 @@ void multi_layer_kv_transfer_templated(
                 "SPLIT_KV_2LTD requires a [2, num_layers, num_tokens, "
                 "num_heads*head_size] buffer, got dim 0 = ",
                 key_value.size(0));
-    // Split addressing decomposes the logical row into per-head K/V halves,
-    // so it needs the packed per-head width for NHD and HND alike.
-    TORCH_CHECK(head_size > 0 && head_size % 2 == 0,
-                "SPLIT_KV_2LTD requires head_size = the packed per-head "
-                "content width (> 0 and even), got ",
-                head_size);
     TORCH_CHECK(num_origin_elements % (head_size / 2) == 0,
                 "SPLIT_KV_2LTD buffer width ", num_origin_elements,
                 " is not a multiple of the logical per-head width ",
@@ -739,7 +747,7 @@ void multi_layer_kv_transfer_templated(
                 "FUSED_PACKED requires a [1, num_layers, num_tokens, "
                 "num_heads*2*head_size] buffer, got dim 0 = ",
                 key_value.size(0));
-    TORCH_CHECK(head_size <= 0 || num_origin_elements % head_size == 0,
+    TORCH_CHECK(num_origin_elements % head_size == 0,
                 "FUSED_PACKED buffer width ", num_origin_elements,
                 " is not a multiple of the packed per-head width ", head_size);
   }
@@ -898,6 +906,7 @@ void multi_layer_kv_transfer_fused_templated(
   // 0 means tight; the per-format offset entries compute their own tight step.
   const int64_t block_stride_xwords = block_stride_elems / elements_per_xword;
   lmc::check_mem_obj_kv_layout(engine_kv_format, mem_obj_kv_layout);
+  lmc::check_fused_head_size(engine_kv_format, head_size);
   // The fused-batch entry serves only packed staging buffers (CacheBlend);
   // no caller passes a split-KV object, so that leg stays unimplemented.
   TORCH_CHECK(mem_obj_kv_layout != MemObjKVLayout::SPLIT_KV_2LTD,

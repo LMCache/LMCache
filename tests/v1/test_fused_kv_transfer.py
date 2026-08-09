@@ -321,13 +321,8 @@ def test_split_h2d_matches_reference(backend, fmt):
 def test_packed_d2h_matches_reference(backend, fmt):
     """FUSED_PACKED pins the byte-identical staging behavior (CacheBlend/V3):
     the memobj row is the engine's packed row verbatim."""
-    if backend == "cuda" and fmt in _HND_FORMATS:
-        # Until the head_size contract unification, the CUDA HND packed leg
-        # takes the logical head size; covered after that change.
-        head_size = _GEO.hs_logical
-    else:
-        head_size = _GEO.content_size
     geo = _GEO
+    head_size = geo.content_size
     dev = _device(backend)
     num_tokens = 16
     layers = _sentinel_layers(geo, fmt, dev)
@@ -444,10 +439,7 @@ def test_split_roundtrip(backend, fmt, dtype, geo, num_tokens, skip_prefix):
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 def test_packed_roundtrip(backend, fmt, dtype):
     geo = _GEO
-    if backend == "cuda" and fmt in _HND_FORMATS:
-        head_size = geo.hs_logical
-    else:
-        head_size = geo.content_size
+    head_size = geo.content_size
     dev = _device(backend)
     torch.manual_seed(1)
     layers = [
