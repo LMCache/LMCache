@@ -579,9 +579,26 @@ def multi_layer_kv_transfer(
 
     _check_mem_obj_kv_layout(engine_kv_format, mem_obj_kv_layout)
     if _is_fused_kv_format(engine_kv_format):
-        raise NotImplementedError(
-            "fused-packed formats are not supported by the non-CUDA fallback yet"
+        if block_stride_elems:
+            # This leg rebuilds each paged layer at its tight stride.
+            raise NotImplementedError(
+                "padded block strides are not supported by the non-CUDA "
+                f"fallback, got block_stride_elems={block_stride_elems}"
+            )
+        _multi_layer_kv_transfer_fused_formats(
+            key_value,
+            key_value_ptrs,
+            slot_mapping,
+            paged_memory_device,
+            page_buffer_size,
+            direction,
+            engine_kv_format,
+            block_size,
+            head_size,
+            skip_prefix_n_tokens,
+            mem_obj_kv_layout,
         )
+        return
 
     # TODO: Implement head_size support for HND layouts (NL_X_TWO_NB_NH_BS_HS,
     # NL_X_NB_TWO_NH_BS_HS) as next step.
@@ -690,6 +707,167 @@ def multi_layer_kv_transfer(
                 key_value[:, layer_id, valid_mask_kv, :] = gathered.to(
                     kv_device, non_blocking=False
                 )
+
+
+def _multi_layer_kv_transfer_fused_formats(
+    key_value: torch.Tensor,
+    key_value_ptrs: torch.Tensor | list[torch.Tensor],
+    slot_mapping: torch.Tensor,
+    paged_memory_device: torch.device,
+    page_buffer_size: int,
+    direction: TransferDirection,
+    engine_kv_format: EngineKVFormat,
+    block_size: int,
+    head_size: int,
+    skip_prefix_n_tokens: int,
+    mem_obj_kv_layout: "MemObjKVLayout | int",
+) -> None:
+    """Fused-format (CS / TWO_HS) leg of :func:`multi_layer_kv_transfer`.
+
+    The engine keeps K/V packed per head: rows of ``NH * CS`` scalars where
+    ``CS == 2 * HS``. A ``FUSED_PACKED`` buffer mirrors those rows and copies
+    them verbatim; a ``SPLIT_KV_2LTD`` buffer holds true K/V planes, and each
+    head's packed pair splits into K (leading half) and V (trailing half).
+    ``head_size`` carries the packed per-head content width ``CS``.
+
+    Raises:
+        ValueError: If the buffer shape does not match the declared layout, or
+            ``head_size`` is missing/odd where the addressing needs it.
+    """
+    split = int(mem_obj_kv_layout) == int(MemObjKVLayout.SPLIT_KV_2LTD)
+    is_hnd_fused = _format_spec(engine_kv_format).is_hnd
+    width = key_value.size(3)
+
+    if split:
+        if key_value.size(0) != 2:
+            raise ValueError(
+                "SPLIT_KV_2LTD requires a [2, num_layers, num_tokens, "
+                f"num_heads*head_size] buffer, got dim 0 = {key_value.size(0)}"
+            )
+        if head_size <= 0 or head_size % 2 != 0:
+            raise ValueError(
+                "SPLIT_KV_2LTD requires head_size = the packed per-head "
+                f"content width (> 0 and even), got {head_size}"
+            )
+        if width % (head_size // 2) != 0:
+            raise ValueError(
+                f"SPLIT_KV_2LTD buffer width {width} is not a multiple of "
+                f"the logical per-head width {head_size // 2}"
+            )
+    else:
+        if key_value.size(0) != 1:
+            raise ValueError(
+                "FUSED_PACKED requires a [1, num_layers, num_tokens, "
+                f"num_heads*2*head_size] buffer, got dim 0 = {key_value.size(0)}"
+            )
+        if head_size > 0 and width % head_size != 0:
+            raise ValueError(
+                f"FUSED_PACKED buffer width {width} is not a multiple of "
+                f"the packed per-head width {head_size}"
+            )
+    if is_hnd_fused and head_size <= 0:
+        raise ValueError(
+            "fused HND formats require head_size = the packed per-head content width"
+        )
+
+    kv_device = key_value.device
+    slots_kv = slot_mapping.to(dtype=torch.long).to(kv_device)
+    valid_mask_kv = slots_kv >= 0
+    if skip_prefix_n_tokens > 0:
+        valid_mask_kv[:skip_prefix_n_tokens] = False
+    if not valid_mask_kv.any():
+        return
+
+    valid_slots = slots_kv[valid_mask_kv].to(paged_memory_device)
+    is_h2d = int(direction) == int(TransferDirection.H2D)
+    num_layers = key_value.size(1)
+    packed_width = 2 * width if split else width
+    hs_logical = head_size // 2
+
+    if is_hnd_fused:
+        num_blocks = page_buffer_size // block_size
+        num_heads = packed_width // head_size
+        layer_shape: tuple[int, ...] = (num_blocks, num_heads, block_size, head_size)
+        block_indices = valid_slots // block_size
+        block_offsets = valid_slots % block_size
+    else:
+        layer_shape = (page_buffer_size, packed_width)
+
+    for layer_id in range(num_layers):
+        if isinstance(key_value_ptrs, list):
+            paged_tensor = key_value_ptrs[layer_id].reshape(layer_shape)
+        else:
+            ptr = int(key_value_ptrs[layer_id].item())
+            paged_tensor = _tensor_from_ptr(
+                ptr, layer_shape, key_value.dtype, paged_memory_device
+            )
+
+        if not is_hnd_fused:
+            # NHD: [page_buffer_size, NH * CS] token-major packed rows.
+            if not split:
+                if is_h2d:
+                    lmc_valid = key_value[0, layer_id, valid_mask_kv, :]
+                    paged_tensor.index_copy_(
+                        0, valid_slots, lmc_valid.to(paged_memory_device)
+                    )
+                else:
+                    gathered = paged_tensor.index_select(0, valid_slots)
+                    key_value[0, layer_id, valid_mask_kv, :] = gathered.to(
+                        kv_device, non_blocking=False
+                    )
+                continue
+            num_heads = width // hs_logical
+            rows = paged_tensor.view(page_buffer_size, num_heads, 2, hs_logical)
+            if is_h2d:
+                k = key_value[0, layer_id, valid_mask_kv, :]
+                v = key_value[1, layer_id, valid_mask_kv, :]
+                rows[valid_slots, :, 0, :] = k.view(-1, num_heads, hs_logical).to(
+                    paged_memory_device
+                )
+                rows[valid_slots, :, 1, :] = v.view(-1, num_heads, hs_logical).to(
+                    paged_memory_device
+                )
+            else:
+                gathered = rows[valid_slots]  # (n, NH, 2, HS)
+                key_value[0, layer_id, valid_mask_kv, :] = (
+                    gathered[:, :, 0, :].reshape(-1, width).to(kv_device)
+                )
+                key_value[1, layer_id, valid_mask_kv, :] = (
+                    gathered[:, :, 1, :].reshape(-1, width).to(kv_device)
+                )
+            continue
+
+        # HND: [NB, NH, BS, CS] head-major packed rows.
+        if not split:
+            if is_h2d:
+                lmc_valid = key_value[0, layer_id, valid_mask_kv, :]
+                paged_tensor[block_indices, :, block_offsets, :] = lmc_valid.view(
+                    -1, num_heads, head_size
+                ).to(paged_memory_device)
+            else:
+                gathered = paged_tensor[block_indices, :, block_offsets, :]
+                key_value[0, layer_id, valid_mask_kv, :] = gathered.reshape(
+                    -1, width
+                ).to(kv_device, non_blocking=False)
+            continue
+        heads = paged_tensor.view(num_blocks, num_heads, block_size, 2, hs_logical)
+        if is_h2d:
+            k = key_value[0, layer_id, valid_mask_kv, :]
+            v = key_value[1, layer_id, valid_mask_kv, :]
+            heads[block_indices, :, block_offsets, 0, :] = k.view(
+                -1, num_heads, hs_logical
+            ).to(paged_memory_device)
+            heads[block_indices, :, block_offsets, 1, :] = v.view(
+                -1, num_heads, hs_logical
+            ).to(paged_memory_device)
+        else:
+            gathered = heads[block_indices, :, block_offsets]  # (n, NH, 2, HS)
+            key_value[0, layer_id, valid_mask_kv, :] = (
+                gathered[:, :, 0, :].reshape(-1, width).to(kv_device)
+            )
+            key_value[1, layer_id, valid_mask_kv, :] = (
+                gathered[:, :, 1, :].reshape(-1, width).to(kv_device)
+            )
 
 
 def multi_layer_kv_transfer_unilateral(
