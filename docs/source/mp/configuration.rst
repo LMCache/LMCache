@@ -246,6 +246,20 @@ Source: ``lmcache/v1/distributed/config.py``
    * - ``--l1-init-size-gb``
      - ``20``
      - Initial allocation size (GB) when using lazy allocation.
+   * - ``--l1-numa-mode``
+     - *(not set)*
+     - NUMA placement for the lazy L1 pool.  ``auto`` binds the pool to the
+       current GPU's NUMA node (detected from sysfs); ``manual`` binds it per
+       ``--l1-numa-mapping``; unset keeps first-touch placement.  Only applies
+       with lazy allocation.  Binding requires ``CAP_SYS_NICE`` (absent in
+       default containers); without it the server logs a warning and falls
+       back to default placement.
+   * - ``--l1-numa-mapping``
+     - *(not set)*
+     - GPU-to-NUMA-node mapping for ``--l1-numa-mode manual``, as
+       comma-separated ``gpu:node`` pairs, e.g. ``0:0,1:0,2:1,3:1``.  Use
+       when sysfs detection is unavailable or wrong (some VMs), or to bind
+       the pool to a non-local node deliberately.
    * - ``--l1-align-bytes``
      - ``4096``
      - Alignment size in bytes (default 4 KB).

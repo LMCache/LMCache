@@ -53,42 +53,60 @@ class SystemMemoryDetector:
 
 class NUMADetector:
     @staticmethod
-    def get_numa_mapping(config: LMCacheEngineConfig) -> Optional[NUMAMapping]:
+    def detect(
+        numa_mode: str | None,
+        gpu_to_numa_mapping: dict[int, int] | None = None,
+    ) -> Optional[NUMAMapping]:
+        """Resolve the GPU-to-NUMA mapping for a bare mode string.
+
+        Entry point for callers without an ``LMCacheEngineConfig``.
+
+        Args:
+            numa_mode: ``"auto"`` to detect from sysfs, ``"manual"`` to use
+                *gpu_to_numa_mapping*, ``None`` to disable.
+            gpu_to_numa_mapping: GPU index to NUMA node mapping; required
+                when *numa_mode* is ``"manual"``, ignored otherwise.
+
+        Returns:
+            The resolved mapping, or ``None`` when *numa_mode* is ``None``.
+
+        Raises:
+            ValueError: If *numa_mode* is not ``"auto"``, ``"manual"``, or
+                ``None``, or is ``"manual"`` without a mapping.
         """
-        Get NUMA mapping.
-        """
-        assert config.numa_mode in ["manual", "auto", None], (
-            "NUMA mode must be either 'auto',  'manual', or None."
-            f" Current mode: {config.numa_mode}"
+        if numa_mode is None:
+            return None
+        if numa_mode == "auto":
+            return NUMADetector._read_from_sys()
+        if numa_mode == "manual":
+            if not gpu_to_numa_mapping:
+                raise ValueError("numa_mode 'manual' requires a GPU-to-NUMA mapping.")
+            return NUMAMapping(gpu_to_numa_mapping=gpu_to_numa_mapping)
+        raise ValueError(
+            f"Unsupported numa_mode {numa_mode!r}; expected 'auto', 'manual', or None."
         )
-
-        numa_mapping: Optional[NUMAMapping] = None
-        if config.numa_mode == "manual":
-            numa_mapping = NUMADetector._read_from_config(config)
-        elif config.numa_mode == "auto":
-            numa_mapping = NUMADetector._read_from_sys()
-
-        return numa_mapping
 
     @staticmethod
-    def _read_from_config(config) -> NUMAMapping:
+    def get_numa_mapping(config: LMCacheEngineConfig) -> Optional[NUMAMapping]:
+        """Resolve the NUMA mapping from an engine config.
+
+        Adapter over :meth:`detect` for callers holding an
+        ``LMCacheEngineConfig``; ``"manual"`` mode reads the mapping from
+        ``config.extra_config["gpu_to_numa_mapping"]``.
+
+        Args:
+            config: Engine config carrying ``numa_mode`` and, for manual
+                mode, the mapping in ``extra_config``.
+
+        Returns:
+            The resolved mapping, or ``None`` when NUMA is disabled.
+
+        Raises:
+            ValueError: If ``numa_mode`` is invalid or ``"manual"`` without
+                a mapping in ``extra_config``.
         """
-        Read NUMA mapping from the LMCache configuration.
-        """
-
-        assert config.extra_config is not None, (
-            "NUMA mode is set but extra_config is None. "
-            "Please ensure the configuration is properly set."
-        )
-
-        assert "gpu_to_numa_mapping" in config.extra_config, (
-            "NUMA mode is set to `manual` but gpu_to_numa_mapping is None. "
-            "Please ensure the configuration is properly set."
-        )
-
-        gpu_to_numa_mapping = config.extra_config.get("gpu_to_numa_mapping")
-
-        return NUMAMapping(gpu_to_numa_mapping)
+        mapping = (config.extra_config or {}).get("gpu_to_numa_mapping")
+        return NUMADetector.detect(config.numa_mode, mapping)
 
     @staticmethod
     def _read_from_sys() -> Optional[NUMAMapping]:

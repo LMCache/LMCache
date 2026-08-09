@@ -16,6 +16,7 @@ from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
     MemoryObj,
 )
+from lmcache.v1.system_detection import NUMADetector
 
 logger = init_logger(__name__)
 
@@ -59,8 +60,16 @@ def create_memory_allocator(config: L1MemoryManagerConfig) -> MemoryAllocatorInt
             config.size_in_bytes,
             config.align_bytes,
         )
+        numa_mapping = NUMADetector.detect(config.numa_mode, config.numa_mapping)
+        if numa_mapping is not None:
+            logger.info(
+                "L1 pool NUMA placement enabled: %s", numa_mapping.gpu_to_numa_mapping
+            )
         return LazyMemoryAllocator(
-            config.init_size_in_bytes, config.size_in_bytes, config.align_bytes
+            config.init_size_in_bytes,
+            config.size_in_bytes,
+            config.align_bytes,
+            numa_mapping=numa_mapping,
         )
     else:
         logger.debug(
