@@ -57,6 +57,24 @@ inline void check_head_size(const EngineKVFormat engine_kv_format,
               static_cast<int>(engine_kv_format));
 }
 
+// Fused formats admit two LMCache-side layouts that the buffer shape alone
+// cannot distinguish reliably; the caller must declare which one it passes.
+inline void check_mem_obj_kv_layout(const EngineKVFormat engine_kv_format,
+                                    const MemObjKVLayout mem_obj_kv_layout) {
+  if (::is_fused_packed(engine_kv_format)) {
+    TORCH_CHECK(mem_obj_kv_layout != MemObjKVLayout::UNSPECIFIED,
+                "fused-packed EngineKVFormat ",
+                static_cast<int>(engine_kv_format),
+                " requires an explicit mem_obj_kv_layout "
+                "(SPLIT_KV_2LTD or FUSED_PACKED)");
+  } else {
+    TORCH_CHECK(mem_obj_kv_layout == MemObjKVLayout::UNSPECIFIED,
+                "mem_obj_kv_layout only applies to fused-packed formats; "
+                "EngineKVFormat ",
+                static_cast<int>(engine_kv_format), " must pass UNSPECIFIED");
+  }
+}
+
 template <typename scalar_t>
 __global__ void load_and_reshape_flash_kernel(
     scalar_t* __restrict__ key_value,  // [num_tokens, num_heads, head_size]
@@ -634,7 +652,7 @@ void multi_layer_kv_transfer_templated(
     const torch::Device& paged_memory_device, const int page_buffer_size,
     const TransferDirection direction, const EngineKVFormat engine_kv_format,
     const int block_size, const int head_size, const int skip_prefix_n_tokens,
-    const int64_t block_stride_elems) {
+    const int64_t block_stride_elems, const MemObjKVLayout mem_obj_kv_layout) {
   T* key_value_ptr = get_kernel_ptr<T, torch::Tensor>(key_value);
   T** page_buffer_ptrs =
       get_kernel_ptr<T*, const torch::Tensor>(key_value_ptrs);
@@ -656,10 +674,29 @@ void multi_layer_kv_transfer_templated(
   lmc::check_head_size(engine_kv_format, head_size_xword);
   // 0 means tight; the per-format offset entries compute their own tight step.
   const int64_t block_stride_xwords = block_stride_elems / elements_per_xword;
+  lmc::check_mem_obj_kv_layout(engine_kv_format, mem_obj_kv_layout);
   TORCH_CHECK(
       engine_kv_format != EngineKVFormat::NL_X_NB_BSV_BSS || sizeof(T) == 4,
       "NL_X_NB_BSV_BSS requires 4-byte transfer units (row bytes "
       "must be divisible by 4 and not by 8)");
+
+  if (mem_obj_kv_layout == MemObjKVLayout::SPLIT_KV_2LTD) {
+    TORCH_CHECK(key_value.size(0) == 2,
+                "SPLIT_KV_2LTD requires a [2, num_layers, num_tokens, "
+                "num_heads*head_size] buffer, got dim 0 = ",
+                key_value.size(0));
+    TORCH_CHECK(false,
+                "SPLIT_KV_2LTD addressing for fused-packed formats is not "
+                "implemented yet");
+  } else if (mem_obj_kv_layout == MemObjKVLayout::FUSED_PACKED) {
+    TORCH_CHECK(key_value.size(0) == 1,
+                "FUSED_PACKED requires a [1, num_layers, num_tokens, "
+                "num_heads*2*head_size] buffer, got dim 0 = ",
+                key_value.size(0));
+    TORCH_CHECK(head_size <= 0 || num_origin_elements % head_size == 0,
+                "FUSED_PACKED buffer width ", num_origin_elements,
+                " is not a multiple of the packed per-head width ", head_size);
+  }
 
   // Fused packs K+V in the trailing dim (kv_size == 1, like MLA): single pass.
   int k_or_v_size =
@@ -780,7 +817,8 @@ void multi_layer_kv_transfer_fused_templated(
     const int element_size, const torch::Device& paged_memory_device,
     const int page_buffer_size, const TransferDirection direction,
     const EngineKVFormat engine_kv_format, const int block_size,
-    const int head_size, const int64_t block_stride_elems) {
+    const int head_size, const int64_t block_stride_elems,
+    const MemObjKVLayout mem_obj_kv_layout) {
   const int n_chunks = static_cast<int>(key_values.size());
   TORCH_CHECK(n_chunks >= 1 && n_chunks <= MAX_FUSED_TRANSFER_CHUNKS,
               "fused transfer chunk count out of range: ", n_chunks);
@@ -808,6 +846,12 @@ void multi_layer_kv_transfer_fused_templated(
   lmc::check_head_size(engine_kv_format, head_size_xword);
   // 0 means tight; the per-format offset entries compute their own tight step.
   const int64_t block_stride_xwords = block_stride_elems / elements_per_xword;
+  lmc::check_mem_obj_kv_layout(engine_kv_format, mem_obj_kv_layout);
+  // The fused-batch entry serves only packed staging buffers (CacheBlend);
+  // no caller passes a split-KV object, so that leg stays unimplemented.
+  TORCH_CHECK(mem_obj_kv_layout != MemObjKVLayout::SPLIT_KV_2LTD,
+              "multi_layer_kv_transfer_fused_ptr does not support "
+              "SPLIT_KV_2LTD buffers");
   TORCH_CHECK(
       engine_kv_format != EngineKVFormat::NL_X_NB_BSV_BSS || sizeof(T) == 4,
       "NL_X_NB_BSV_BSS requires 4-byte transfer units (row bytes "
@@ -899,7 +943,8 @@ void multi_layer_kv_transfer_fused_ptr(
     const int element_size, const torch::Device& paged_memory_device,
     const int page_buffer_size, const TransferDirection direction,
     const EngineKVFormat engine_kv_format, const int block_size,
-    const int head_size, const int64_t block_stride_elems) {
+    const int head_size, const int64_t block_stride_elems,
+    const MemObjKVLayout mem_obj_kv_layout) {
   int copy_size = num_origin_elements * element_size;
 #ifndef LAUNCH_FUSED_TRANSFER
   #define LAUNCH_FUSED_TRANSFER(type)                                         \
@@ -908,7 +953,7 @@ void multi_layer_kv_transfer_fused_ptr(
           key_values, slot_mappings, n_toks, page_buffer_ptrs, num_layers,    \
           layout_num_tokens, num_origin_elements, element_size,               \
           paged_memory_device, page_buffer_size, direction, engine_kv_format, \
-          block_size, head_size, block_stride_elems);                         \
+          block_size, head_size, block_stride_elems, mem_obj_kv_layout);      \
     } while (0)
 #endif
   if (copy_size % 8 == 0) {
@@ -932,7 +977,7 @@ void multi_layer_kv_transfer(
     const int page_buffer_size, const TransferDirection direction,
     const EngineKVFormat engine_kv_format, const int block_size,
     const int head_size, const int skip_prefix_n_tokens,
-    const int64_t block_stride_elems) {
+    const int64_t block_stride_elems, const MemObjKVLayout mem_obj_kv_layout) {
   int num_origin_elements = key_value.size(3);
   int copy_size = num_origin_elements * key_value.element_size();
 #ifndef LAUNCH_MULTI_LAYER_KV_TRANSFER
@@ -941,7 +986,8 @@ void multi_layer_kv_transfer(
       multi_layer_kv_transfer_templated<type>(                          \
           key_value, key_value_ptrs, slot_mapping, paged_memory_device, \
           page_buffer_size, direction, engine_kv_format, block_size,    \
-          head_size, skip_prefix_n_tokens, block_stride_elems);         \
+          head_size, skip_prefix_n_tokens, block_stride_elems,          \
+          mem_obj_kv_layout);                                           \
     } while (0)
 #endif
   if (copy_size % 8 == 0) {
