@@ -157,6 +157,14 @@ class LocalCPUBackend(AllocatorBackendInterface):
         with self.cpu_lock:
             keys_in_request = _take_keys_in_request()
             for key in reversed(keys_in_request):
+                # A key can leave hot_cache between the lookup that pinned it and
+                # this touch. update_on_hit assumes it is still there -- the LRU
+                # policy calls hot_cache.move_to_end(key), which raises KeyError --
+                # so skip anything that is gone. This was previously masked: with a
+                # single shared list, the first touch_cache() consumed every
+                # request's keys, so the rest were dropped rather than touched.
+                if key not in self.hot_cache:
+                    continue
                 self.cache_policy.update_on_hit(key, self.hot_cache)
 
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:

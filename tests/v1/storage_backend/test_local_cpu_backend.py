@@ -733,6 +733,30 @@ class TestLocalCPUBackendAllocatorAlignment:
             backend.memory_allocator.close()
 
     @pytest.mark.asyncio
+    async def test_touch_cache_skips_keys_evicted_after_lookup(self, local_cpu_backend):
+        """A key can leave hot_cache between the pinning lookup and touch_cache().
+
+        The LRU policy's update_on_hit calls hot_cache.move_to_end(key), which raises
+        KeyError for a key that is gone. Isolating keys_in_request per request means
+        each request now touches its own keys instead of having them wiped by whoever
+        called touch_cache() first, so stale entries reach update_on_hit for the first
+        time and have to be skipped.
+        """
+        key = create_test_key("evicted_key")
+        local_cpu_backend.submit_put_task(key, create_test_memory_obj())
+
+        assert (
+            await local_cpu_backend.batched_async_contains("req", [key], pin=True) == 1
+        )
+
+        # Drop it behind the lookup's back, as an eviction or explicit removal would.
+        with local_cpu_backend.cpu_lock:
+            local_cpu_backend.hot_cache.pop(key)
+
+        # Must not raise.
+        local_cpu_backend.touch_cache()
+
+    @pytest.mark.asyncio
     async def test_concurrent_pin_lookups_isolate_keys_in_request(
         self, local_cpu_backend
     ):
