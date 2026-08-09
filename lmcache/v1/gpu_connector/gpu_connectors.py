@@ -501,10 +501,10 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
             )
             or 0
         )
-        # This connector's memory objects follow metadata.get_shapes, which for
-        # fused kernel groups is the packed single plane.
+        # This connector's memory objects follow metadata.get_shapes, which
+        # reports true split-KV KV_2LTD shapes for fused kernel groups.
         self.mem_obj_kv_layout = (
-            lmcache_native.MemObjKVLayout.FUSED_PACKED
+            lmcache_native.MemObjKVLayout.SPLIT_KV_2LTD
             if get_spec_class(self.engine_kv_format).is_fused_packed
             else lmcache_native.MemObjKVLayout.UNSPECIFIED
         )
