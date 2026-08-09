@@ -29,9 +29,7 @@ suite documentation; this file only covers the Docker workflow.
   matters** (step 1 below) -- a plain `docker build` that reuses cached
   layers is not a reliable way to reproduce these figures, even though
   it reliably reproduces everything else in this suite.
-- `report/cache_policy_evaluation_report.pdf` is the final submitted
-  report and is **not** rebuilt by this image or any script here -- see
-  "Report and reproducibility" in `README.md`.
+
 
 ## 1. Build the image
 
@@ -98,7 +96,7 @@ docker run --rm \
 ```
 
 This writes a fresh
-`results/admission_control/admission_vs_lfu_paired.json` and all 10 PNGs
+`results/admission_control/admission_vs_lfu_paired.json` and the PNG figure assets
 under `report/figures/` -- from already-committed JSON only, no sweeps
 are re-run (see `report/FIGURE_SOURCES.md` for what feeds each figure).
 
@@ -111,7 +109,7 @@ git diff --stat benchmarks/cache_policy/results/admission_control/admission_vs_l
 
 The JSON diff should be empty, and `git status` should show **no changes
 at all** -- verified end to end with this exact command against a fresh
-`docker build --no-cache` image: every one of the 10 figures and the
+`docker build --no-cache` image: the committed figure assets and the
 JSON came out byte-identical to what's already committed, and running
 this same command a second time against the same image reproduced that
 result again. If you built with `--no-cache` and still see a figure PNG

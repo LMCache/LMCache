@@ -1,16 +1,8 @@
 # Cache-policy performance benchmarks
 
-Performance test suite for `lmcache/v1/storage_backend/cache_policy/` --
-compares `CostAwareEvictionPolicy` against the existing `LRU`, `LFU`,
-`FIFO`, and `MRU` policies under synthetic prefix-cache workloads.
+Benchmark and reproducibility suite for the LMCache cache-policy extensions evaluated in this project, with a primary focus on selective admission control.
 
-This suite is **CPU-only and requires no GPU or running model**. It does
-not measure real inference latency; it replays synthetic request traces
-through the real policy objects (the same `update_on_hit` /
-`update_on_put_with_metadata` / `get_evict_candidates` /
-`update_on_force_evict` calls the storage backend makes -- see
-`lmcache/v1/storage_backend/local_cpu_backend.py`) and scores each request
-with a modeled latency cost function.
+The suite is CPU-only and requires no GPU or running model. It replays request traces through the real LMCache policy objects and evaluates cache-policy behavior under controlled synthetic and ShareGPT-derived workloads. Modeled latency is reported only as a simulator-derived quantity and is not an end-to-end serving measurement.
 
 ## Layout
 
@@ -32,9 +24,7 @@ with a modeled latency cost function.
   frequency sketch's decay window).
 - `benchmarks/cache_policy/robustness_sweep.py` -- checks that a policy
   change generalizes rather than just fixing one benchmark reading: a
-  direct cost-density sanity check plus a Zipf-skew-strength sweep. See
-  the "robustness sweep" section of the evaluation doc for why this
-  exists.
+  direct cost-density sanity check plus a Zipf-skew-strength sweep.
 - `lmcache/tools/cache_policy_bench/sharegpt_workload.py` -- adapts the
   real ShareGPT conversation corpus (via the existing
   `benchmarks/multi_round_qa/` download/preprocess pipeline) into the same
@@ -55,11 +45,9 @@ with a modeled latency cost function.
   improvements (score rebalancing, TinyLFU-style admission control,
   two-tier hierarchical caching) and `compare_directions.py`, the harness
   that ran all of them against both the synthetic suite and real data to
-  find which is worth building for real. See "Direction-finding
-  experiment" in the evaluation doc for the result (admission control
-  won, clearly).
+  find which is worth building for real. These scripts support the exploratory direction-finding stage described in Section 1.4 of the final report.
 - `benchmarks/cache_policy/results/` -- checked-in sample CSV/JSON plus
-  the charts referenced by the evaluation doc. Nightly CI runs write
+  the committed benchmark results and derived artifacts. Nightly CI runs write
   fresh output under `results/nightly/` (uploaded as a workflow
   artifact, not committed).
 
@@ -191,8 +179,7 @@ classical full-corpus bootstrap, and should not be described as one.
 Benchmark runs use a deterministic logical clock for reproducible recency tracking. 
 Writes both the raw per-repeat rows
 and the aggregated-with-CI table as JSON (and CSV, git-ignored).
-`COST_AWARE` is significantly slower per run than the other policies (see
-Finding 3 in the evaluation doc) -- budget more time as
+`COST_AWARE` is significantly slower per run than the other policies, so budget more time as
 `--scales`/`--repeats` grow.
 
 ### 3. Edge-case / stress tests
@@ -212,19 +199,7 @@ low vs. high concurrent conversation fan-out at a fixed cache size.
 
 ## Direction-finding experiment
 
-`experiments/` holds four non-production candidate improvements (score
-rebalancing, TinyLFU-style admission control, two-tier hierarchical
-caching, plus the existing baselines) and a harness that ran all of them
-through both the synthetic suite and real data to find which one is
-actually worth building. See "Direction-finding experiment" in the
-evaluation doc for the result: TinyLFU-style admission control won
-clearly and now ships as a real class,
-`lmcache/v1/storage_backend/cache_policy/admission_control.py`
-(`AdmissionControlledPolicy`, selectable via
-`get_cache_policy("ADMISSION_<INNER>")`, e.g. `"ADMISSION_LRU"`)
-for its design and a report comparing both directions explored. The
-`experiments/` contains the scripts used to compare the candidate policy directions.
-To reproduce the comparison:
+`experiments/` contains the exploratory direction-finding implementations and comparison harness used during development. The comparison covers score rebalancing, admission control, hierarchical caching, and the existing baselines under synthetic and ShareGPT-derived replay workloads. Admission control showed the strongest overall results in this exploratory comparison and was selected for the final implementation and statistical evaluation described in the report.
 
 ```bash
 # Synthetic leg (fast, no corpus needed)
@@ -232,7 +207,7 @@ python benchmarks/cache_policy/experiments/compare_directions.py \
     --synthetic -o benchmarks/cache_policy/results/experiments
 
 # Real-data leg (needs the ShareGPT corpus prepared above; time-boxed --
-# COST_AWARE-derived directions are slow, see Finding 3)
+# COST_AWARE-derived directions are comparatively slow)
 python benchmarks/cache_policy/experiments/compare_directions.py \
     --real-data --sharegpt-path benchmarks/multi_round_qa/ShareGPT.json \
     --scales 500 2000 --cache-sizes-mib 100 --repeats 4 \
@@ -252,8 +227,7 @@ Since `AdmissionControlledPolicy` is a real, registered policy
 scripts above evaluate it directly -- just pass `ADMISSION_*` names, no
 new tooling needed for the synthetic sweep, robustness sweep, or
 real-data validation. Only the `halve_every` ablation needed a new small
-script, `run_admission_control_ablation.py`. See "Experiments 1-4" in
-[`admission-control-policy.md`](../../docs/design/v1/storage_backend/cache_policy/admission-control-policy.md)
+script, `run_admission_control_ablation.py`.
 See the final report for the complete analysis and discussion of limitations.
 
 ```bash
@@ -295,8 +269,8 @@ cache-size) combination:
 
 - `token_hit_rate` -- fraction of tokens served from the prefix cache.
 - `latency_mean_seconds` / `latency_p50_seconds` / `latency_p95_seconds` /
-  `latency_p99_seconds` -- **modeled**, not measured, request latency (see
-  the evaluation doc for why and how).
+  
+latency_mean_seconds / latency_p50_seconds / latency_p95_seconds / latency_p99_seconds -- modeled, not measured, request latency derived from the simulator cost model.
 - `requests_per_second` / `tokens_per_second` -- simulator throughput
   (wall-clock time of the Python simulation loop itself, a CPU-cost proxy
   for the policy's own bookkeeping overhead -- not model throughput).
@@ -313,17 +287,7 @@ without running anything.
 
 ## Report and reproducibility
 
-`report/cache_policy_evaluation_report.pdf` is the final submitted report.
-**It is not generated by this repository** -- there is deliberately no
-script or documented command here that (re)builds the PDF, so there is
-never any ambiguity about which document is authoritative. What *is*
-reproducible from the repository, exactly, is every quantitative figure
-and table used in that report: each one is rendered by
-[`report/generate_figures.py`](report/generate_figures.py) from a
-checked-in JSON result file, mapped one-to-one in
-[`report/FIGURE_SOURCES.md`](report/FIGURE_SOURCES.md).
-
-### Fast path: rebuild the figures from committed results
+The repository provides reproducibility for the benchmark results, derived statistical comparisons, and figure assets used in the final report. Report figures are generated by report/generate_figures.py from checked-in JSON result files, with their sources documented in report/FIGURE_SOURCES.md.
 
 ```bash
 ./benchmarks/cache_policy/reproduce_figures.sh
