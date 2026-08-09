@@ -293,7 +293,7 @@ _CS_FORMATS = [EngineKVFormat.NL_X_NB_BS_NH_CS, EngineKVFormat.NL_X_NB_NH_BS_CS]
 
 
 @pytest.mark.parametrize("backend", _BACKENDS)
-@pytest.mark.parametrize("fmt", _CS_FORMATS)
+@pytest.mark.parametrize("fmt", _FUSED_FORMATS)
 def test_split_d2h_matches_reference(backend, fmt):
     geo = _GEO
     dev = _device(backend)
@@ -323,7 +323,7 @@ def test_split_d2h_matches_reference(backend, fmt):
 
 
 @pytest.mark.parametrize("backend", _BACKENDS)
-@pytest.mark.parametrize("fmt", _CS_FORMATS)
+@pytest.mark.parametrize("fmt", _FUSED_FORMATS)
 def test_split_h2d_matches_reference(backend, fmt):
     geo = _GEO
     dev = _device(backend)
@@ -367,10 +367,10 @@ def test_split_h2d_matches_reference(backend, fmt):
 
 
 @pytest.mark.parametrize("backend", _BACKENDS)
-@pytest.mark.parametrize("fmt", _CS_FORMATS)
+@pytest.mark.parametrize("fmt", _FUSED_FORMATS)
 def test_packed_d2h_matches_reference(backend, fmt):
-    """FUSED_PACKED pins the byte-identical staging behavior (CacheBlend/V3):
-    the memobj row is the engine's packed row verbatim."""
+    """FUSED_PACKED pins the byte-identical behavior of the CacheBlend packed
+    staging buffers: the memobj row is the engine's packed row verbatim."""
     geo = _GEO
     head_size = geo.content_size
     dev = _device(backend)
