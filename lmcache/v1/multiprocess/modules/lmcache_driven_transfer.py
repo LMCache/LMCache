@@ -970,12 +970,15 @@ def transfer_kv_layerwise(
                         )
                     )
 
-                # Block offset within full block_ids for this sub-pass
+                # Block offset within sliced block_ids for this sub-pass
                 first_obj_idx = pass_chunks[0][0]
                 last_obj_idx = pass_chunks[-1][0]
-                block_ids_offset = first_obj_idx * blocks_per_window
+                base_obj_idx = all_chunks_flat[0][0]
+                block_ids_offset = (
+                    (first_obj_idx - base_obj_idx) * blocks_per_window
+                )
                 total_blocks = (
-                    (last_obj_idx + 1) * blocks_per_window - block_ids_offset
+                    (last_obj_idx + 1 - first_obj_idx) * blocks_per_window
                 )
 
                 first_start_token = first_obj_idx * lmcache_chunk_size
