@@ -747,7 +747,8 @@ def _multi_layer_kv_transfer_fused_formats(
         if key_value.size(0) != 2:
             raise ValueError(
                 "SPLIT_KV_2LTD requires a [2, num_layers, num_tokens, "
-                f"num_heads*head_size] buffer, got dim 0 = {key_value.size(0)}"
+                "num_heads * HS] buffer (HS = head_size / 2; the head_size "
+                f"parameter is the packed CS), got dim 0 = {key_value.size(0)}"
             )
         if width % (head_size // 2) != 0:
             raise ValueError(
@@ -758,7 +759,8 @@ def _multi_layer_kv_transfer_fused_formats(
         if key_value.size(0) != 1:
             raise ValueError(
                 "FUSED_PACKED requires a [1, num_layers, num_tokens, "
-                f"num_heads*2*head_size] buffer, got dim 0 = {key_value.size(0)}"
+                "num_heads * CS] buffer (CS = 2 * HS = the head_size "
+                f"parameter), got dim 0 = {key_value.size(0)}"
             )
         if width % head_size != 0:
             raise ValueError(
@@ -971,10 +973,14 @@ def _check_mem_obj_kv_layout(
     """
     layout = int(mem_obj_kv_layout)
     if _is_fused_kv_format(engine_kv_format):
-        if layout == int(MemObjKVLayout.UNSPECIFIED):
+        if layout not in (
+            int(MemObjKVLayout.SPLIT_KV_2LTD),
+            int(MemObjKVLayout.FUSED_PACKED),
+        ):
             raise ValueError(
                 f"fused-packed EngineKVFormat {int(engine_kv_format)} requires "
-                "an explicit mem_obj_kv_layout (SPLIT_KV_2LTD or FUSED_PACKED)"
+                "an explicit mem_obj_kv_layout (SPLIT_KV_2LTD or FUSED_PACKED), "
+                f"got {layout}"
             )
     elif layout != int(MemObjKVLayout.UNSPECIFIED):
         raise ValueError(

@@ -219,6 +219,56 @@ def test_non_fused_format_rejects_layout(layout):
         torch_ops.multi_layer_kv_transfer(**args)
 
 
+def test_unknown_layout_value_rejected():
+    # Bare int on purpose: MemObjKVLayout(99) would raise in the IntEnum
+    # constructor before reaching the entry point's own validation.
+    args = _dummy_transfer_args()
+    args["engine_kv_format"] = EngineKVFormat.NL_X_NB_BS_NH_CS
+    args["mem_obj_kv_layout"] = 99
+    with pytest.raises(ValueError, match="got 99"):
+        torch_ops.multi_layer_kv_transfer(**args)
+
+
+@pytest.mark.skipif(not _CUDA, reason="requires CUDA cuda_ops")
+def test_unknown_layout_value_rejected_cuda():
+    # First Party
+    import lmcache.cuda_ops as lmc_ops
+
+    # pybind11 enums accept undeclared values, so 99 reaches the C++ check.
+    unknown_layout = MemObjKVLayout(99)
+    geo = _GEO
+    fmt = EngineKVFormat.NL_X_NB_BS_NH_CS
+    device = torch.device("cuda")
+    layers = _sentinel_layers(geo, fmt, device)
+    ptrs = torch.tensor(
+        [t.data_ptr() for t in layers], dtype=torch.int64, device=device
+    )
+    num_tokens = 4
+    key_value = torch.zeros(
+        1,
+        geo.num_layers,
+        num_tokens,
+        geo.num_heads * geo.content_size,
+        dtype=torch.int32,
+        device=device,
+    )
+    slot_mapping = torch.arange(num_tokens, dtype=torch.long, device=device)
+    with pytest.raises(RuntimeError, match="mem_obj_kv_layout"):
+        lmc_ops.multi_layer_kv_transfer(
+            key_value,
+            ptrs,
+            slot_mapping,
+            device,
+            geo.page_buffer_size,
+            TransferDirection.D2H,
+            EngineKVFormat(int(fmt)),
+            block_size=geo.block_size,
+            head_size=geo.content_size,
+            skip_prefix_n_tokens=0,
+            mem_obj_kv_layout=unknown_layout,
+        )
+
+
 @pytest.mark.parametrize(
     "layout,dim0",
     [(MemObjKVLayout.SPLIT_KV_2LTD, 1), (MemObjKVLayout.FUSED_PACKED, 2)],
