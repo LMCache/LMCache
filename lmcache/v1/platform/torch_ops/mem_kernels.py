@@ -9,9 +9,14 @@ import torch
 # First Party
 from lmcache.lmcache_native import (
     EngineKVFormat,
+    MemObjKVLayout,
     TransferDirection,
 )
-from lmcache.v1.platform.torch_ops._kv_format import _format_spec, _is_two_major_format
+from lmcache.v1.platform.torch_ops._kv_format import (
+    _format_spec,
+    _is_fused_kv_format,
+    _is_two_major_format,
+)
 from lmcache.v1.platform.torch_ops._tensor_from_ptr import (
     _copy_bytes_with_tensor,
     _get_copy_lib,
@@ -31,6 +36,7 @@ def multi_layer_kv_transfer(
     head_size: int = 0,
     skip_prefix_n_tokens: int = 0,
     block_stride_elems: int = 0,
+    mem_obj_kv_layout: int = 0,
 ):
     """
     Fully vectorized Python fallback for multi_layer_kv_transfer.
@@ -42,6 +48,12 @@ def multi_layer_kv_transfer(
     if not isinstance(key_value_ptrs, (torch.Tensor, list)):
         raise TypeError(
             f"Expected torch.Tensor or list, but got {type(key_value_ptrs).__name__}"
+        )
+
+    _check_mem_obj_kv_layout(engine_kv_format, mem_obj_kv_layout)
+    if _is_fused_kv_format(engine_kv_format):
+        raise NotImplementedError(
+            "fused-packed formats are not supported by the non-CUDA fallback yet"
         )
 
     format_spec = _format_spec(engine_kv_format)
@@ -155,6 +167,33 @@ def multi_layer_kv_transfer(
                 key_value[:, layer_id, valid_mask_kv, :] = gathered.to(
                     kv_device, non_blocking=False
                 )
+
+
+def _check_mem_obj_kv_layout(
+    engine_kv_format: EngineKVFormat,
+    mem_obj_kv_layout: "MemObjKVLayout | int",
+) -> None:
+    """Enforce the mem_obj_kv_layout contract (same rules as the CUDA entry).
+
+    Fused-packed formats must declare the LMCache-side buffer layout
+    explicitly; every other format must pass ``UNSPECIFIED``.
+
+    Raises:
+        ValueError: If a fused format passes ``UNSPECIFIED``, or a non-fused
+            format passes anything else.
+    """
+    layout = int(mem_obj_kv_layout)
+    if _is_fused_kv_format(engine_kv_format):
+        if layout == int(MemObjKVLayout.UNSPECIFIED):
+            raise ValueError(
+                f"fused-packed EngineKVFormat {int(engine_kv_format)} requires "
+                "an explicit mem_obj_kv_layout (SPLIT_KV_2LTD or FUSED_PACKED)"
+            )
+    elif layout != int(MemObjKVLayout.UNSPECIFIED):
+        raise ValueError(
+            "mem_obj_kv_layout only applies to fused-packed formats; "
+            f"EngineKVFormat {int(engine_kv_format)} must pass UNSPECIFIED"
+        )
 
 
 def multi_layer_kv_transfer_unilateral(

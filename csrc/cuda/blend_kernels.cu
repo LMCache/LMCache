@@ -118,7 +118,10 @@ void execute_cb_retrieve_plan(const torch::Device& device,
             group.slot_tokens, group.hidden_elems, group.element_size, device,
             group.page_buffer_size, TransferDirection::H2D,
             group.engine_kv_format, group.block_size, group.head_size,
-            group.block_stride_elems);
+            group.block_stride_elems,
+            is_fused_packed(group.engine_kv_format)
+                ? MemObjKVLayout::FUSED_PACKED
+                : MemObjKVLayout::UNSPECIFIED);
         sc_bufs.clear();
         sc_maps.clear();
         sc_toks.clear();
