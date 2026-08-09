@@ -74,11 +74,13 @@ inline void check_fused_head_size(const EngineKVFormat engine_kv_format,
 inline void check_mem_obj_kv_layout(const EngineKVFormat engine_kv_format,
                                     const MemObjKVLayout mem_obj_kv_layout) {
   if (::is_fused_packed(engine_kv_format)) {
-    TORCH_CHECK(mem_obj_kv_layout != MemObjKVLayout::UNSPECIFIED,
+    TORCH_CHECK(mem_obj_kv_layout == MemObjKVLayout::SPLIT_KV_2LTD ||
+                    mem_obj_kv_layout == MemObjKVLayout::FUSED_PACKED,
                 "fused-packed EngineKVFormat ",
                 static_cast<int>(engine_kv_format),
                 " requires an explicit mem_obj_kv_layout "
-                "(SPLIT_KV_2LTD or FUSED_PACKED)");
+                "(SPLIT_KV_2LTD or FUSED_PACKED), got ",
+                static_cast<int>(mem_obj_kv_layout));
   } else {
     TORCH_CHECK(mem_obj_kv_layout == MemObjKVLayout::UNSPECIFIED,
                 "mem_obj_kv_layout only applies to fused-packed formats; "
@@ -736,7 +738,8 @@ void multi_layer_kv_transfer_templated(
   if (fused_split_kv) {
     TORCH_CHECK(key_value.size(0) == 2,
                 "SPLIT_KV_2LTD requires a [2, num_layers, num_tokens, "
-                "num_heads*head_size] buffer, got dim 0 = ",
+                "num_heads * HS] buffer (HS = head_size / 2; the head_size "
+                "parameter is the packed CS), got dim 0 = ",
                 key_value.size(0));
     TORCH_CHECK(num_origin_elements % (head_size / 2) == 0,
                 "SPLIT_KV_2LTD buffer width ", num_origin_elements,
@@ -745,7 +748,8 @@ void multi_layer_kv_transfer_templated(
   } else if (mem_obj_kv_layout == MemObjKVLayout::FUSED_PACKED) {
     TORCH_CHECK(key_value.size(0) == 1,
                 "FUSED_PACKED requires a [1, num_layers, num_tokens, "
-                "num_heads*2*head_size] buffer, got dim 0 = ",
+                "num_heads * CS] buffer (CS = 2 * HS = the head_size "
+                "parameter), got dim 0 = ",
                 key_value.size(0));
     TORCH_CHECK(num_origin_elements % head_size == 0,
                 "FUSED_PACKED buffer width ", num_origin_elements,
