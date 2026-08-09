@@ -23,6 +23,7 @@ from lmcache.v1.gpu_connector.utils import (
     get_group_data_ptrs,
     get_head_size,
     get_num_blocks,
+    get_spec_class,
     get_tokens_per_layer,
     normalize_and_discover_per_layer_formats,
     normalize_kv_and_discover_format,
@@ -265,6 +266,13 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
             )
             or 0
         )
+        # This connector's memory objects are true split-KV KV_2LTD, so fused
+        # engine formats must be mapped by the kernel's SPLIT addressing.
+        self.mem_obj_kv_layout = (
+            lmcache_native.MemObjKVLayout.SPLIT_KV_2LTD
+            if get_spec_class(self.engine_kv_format).is_fused_packed
+            else lmcache_native.MemObjKVLayout.UNSPECIFIED
+        )
 
         return self.kv_cache_pointers_on_gpu[idx]
 
@@ -332,6 +340,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
             head_size=self.head_size,
             block_stride_elems=self.block_stride_elems,
             skip_prefix_n_tokens=skip_prefix_n_tokens,
+            mem_obj_kv_layout=self.mem_obj_kv_layout,
         )
 
     @_lmcache_nvtx_annotate
@@ -380,6 +389,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
                     block_size=self.block_size,
                     head_size=self.head_size,
                     block_stride_elems=self.block_stride_elems,
+                    mem_obj_kv_layout=self.mem_obj_kv_layout,
                 )
             else:
                 # kvcaches -> gpu_buffer -> memobj
@@ -396,6 +406,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
                     block_size=self.block_size,
                     head_size=self.head_size,
                     block_stride_elems=self.block_stride_elems,
+                    mem_obj_kv_layout=self.mem_obj_kv_layout,
                 )
                 memory_obj.tensor.copy_(tmp_gpu_buffer, non_blocking=True)
 
@@ -485,6 +496,13 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
                 self.kvcaches, self.engine_kv_format, layer_idx=0, group_idx=0
             )
             or 0
+        )
+        # This connector's memory objects follow metadata.get_shapes, which for
+        # fused kernel groups is the packed single plane.
+        self.mem_obj_kv_layout = (
+            lmcache_native.MemObjKVLayout.FUSED_PACKED
+            if get_spec_class(self.engine_kv_format).is_fused_packed
+            else lmcache_native.MemObjKVLayout.UNSPECIFIED
         )
 
         if self.metadata.kv_layer_groups_manager is None:
@@ -579,6 +597,7 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
                 head_size=self.head_size,
                 block_stride_elems=self.block_stride_elems,
                 skip_prefix_n_tokens=skip_prefix_n_tokens,
+                mem_obj_kv_layout=self.mem_obj_kv_layout,
             )
 
     @_lmcache_nvtx_annotate
@@ -610,6 +629,7 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
                         block_size=self.block_size,
                         head_size=self.head_size,
                         block_stride_elems=self.block_stride_elems,
+                        mem_obj_kv_layout=self.mem_obj_kv_layout,
                     )
             else:
                 # kvcaches -> gpu_buffer -> memobj
@@ -629,6 +649,7 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
                         block_size=self.block_size,
                         head_size=self.head_size,
                         block_stride_elems=self.block_stride_elems,
+                        mem_obj_kv_layout=self.mem_obj_kv_layout,
                     )
                     memory_obj_tensor = memory_obj.get_tensor(i)
                     assert memory_obj_tensor is not None
