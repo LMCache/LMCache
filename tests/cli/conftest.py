@@ -2,7 +2,7 @@
 """Shared fixtures for CLI tests.
 
 The CLI arg-registration code transitively imports
-``lmcache.lmache_native`` (a compiled C extension). On CI runners
+``lmcache.lmcache_native`` (a compiled C extension). On CI runners
 without a CUDA build the module is absent, so we insert a lightweight
 stub into ``sys.modules`` for the duration of each CLI test only.
 """
@@ -19,12 +19,12 @@ import types
 # Third Party
 import pytest
 
-_MOD_NAME = "lmcache.lmache_native"
+_MOD_NAME = "lmcache.lmcache_native"
 
 
 @pytest.fixture(autouse=True)
-def _stub_lmache_native() -> Generator[None, None, None]:
-    """Temporarily stub ``lmache_native`` if the extension is not built.
+def _stub_lmcache_native() -> Generator[None, None, None]:
+    """Temporarily stub ``lmcache_native`` if the extension is not built.
 
     The stub is removed from ``sys.modules`` after the test so it does not
     interfere with other test suites that ``importorskip`` the real module.

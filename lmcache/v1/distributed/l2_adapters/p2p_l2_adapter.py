@@ -24,7 +24,7 @@ import time
 import zmq
 
 # First Party
-from lmcache.lmache_native import Bitmap, PeriodicEventNotifier
+from lmcache.lmcache_native import Bitmap, PeriodicEventNotifier
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.internal_api import L1MemoryDesc, L2StoreResult

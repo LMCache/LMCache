@@ -260,8 +260,8 @@ def require_fdp_char_device_path() -> str:
     return device_path
 
 
-def install_lmache_native_fallback() -> None:
-    """Install a small lmache_native fallback for test environments.
+def install_lmcache_native_fallback() -> None:
+    """Install a small lmcache_native fallback for test environments.
 
     Args:
         None.
@@ -270,8 +270,8 @@ def install_lmache_native_fallback() -> None:
         None.
     """
     try:
-        lmache_native = importlib.import_module("lmcache.lmache_native")
-        if hasattr(lmache_native, "Bitmap") and hasattr(lmache_native, "TTLLock"):
+        lmcache_native = importlib.import_module("lmcache.lmcache_native")
+        if hasattr(lmcache_native, "Bitmap") and hasattr(lmcache_native, "TTLLock"):
             return
     except Exception:
         pass
@@ -338,7 +338,7 @@ def install_lmache_native_fallback() -> None:
     class TTLLock:
         pass
 
-    fallback_module = types.ModuleType("lmcache.lmache_native")
+    fallback_module = types.ModuleType("lmcache.lmcache_native")
     fallback_module.__dict__["Bitmap"] = Bitmap
     fallback_module.__dict__["TTLLock"] = TTLLock
     # Relocated KV-format / transfer types and format predicates, so
@@ -350,4 +350,4 @@ def install_lmache_native_fallback() -> None:
     fallback_module.__dict__["is_kv_list"] = lambda _: False
     fallback_module.__dict__["is_layer_list"] = lambda _: False
     fallback_module.__dict__["is_mla"] = lambda _: False
-    sys.modules["lmcache.lmache_native"] = fallback_module
+    sys.modules["lmcache.lmcache_native"] = fallback_module

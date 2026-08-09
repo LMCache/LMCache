@@ -36,7 +36,7 @@ from awscrt.http import HttpHeaders, HttpRequest
 from awscrt.io import ClientTlsContext, TlsConnectionOptions, TlsContextOptions
 
 # First Party
-from lmcache.lmache_native import Bitmap
+from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import KeyEntry, KeyListPage, ObjectKey
 from lmcache.v1.distributed.internal_api import L2StoreResult

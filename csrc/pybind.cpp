@@ -21,7 +21,7 @@ namespace py = pybind11;
 PYBIND11_MODULE(c_ops, m) {
   // NOTE: ``TransferDirection`` and ``EngineKVFormat`` (and the format
   // predicates is_cross_layer / is_kv_list / is_layer_list / is_mla) are owned
-  // exclusively by the device-independent ``lmache_native`` module
+  // exclusively by the device-independent ``lmcache_native`` module
   // (csrc/lmcache_native/pybind.cpp). They are NOT exported here. ``c_ops``
   // functions that need a transfer direction accept the underlying ``int`` and
   // cast it to the C++ enum, so callers pass ``TransferDirection.H2D.value``
@@ -121,10 +121,10 @@ PYBIND11_MODULE(c_ops, m) {
         py::arg("dst_ptrs"), py::arg("sizes"),
         py::call_guard<py::gil_scoped_release>());
   m.def("get_gpu_pci_bus_id", &get_gpu_pci_bus_id);
-  // The KV-format / transfer enums now live in ``lmache_native``. We accept the
-  // underlying integer values here and cast to the C++ enums so this module no
-  // longer needs to register the enums (which would shadow the canonical
-  // lmache_native definitions).
+  // The KV-format / transfer enums now live in ``lmcache_native``. We accept
+  // the underlying integer values here and cast to the C++ enums so this module
+  // no longer needs to register the enums (which would shadow the canonical
+  // lmcache_native definitions).
   m.def(
       "multi_layer_block_kv_transfer",
       [](const torch::Tensor& paged_buffer_ptrs_tensor,

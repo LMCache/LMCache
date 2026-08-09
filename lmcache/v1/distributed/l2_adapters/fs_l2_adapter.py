@@ -29,7 +29,7 @@ import aiofiles
 import aiofiles.os
 
 # First Party
-from lmcache.lmache_native import Bitmap
+from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.internal_api import L2StoreResult

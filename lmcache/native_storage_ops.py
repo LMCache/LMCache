@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Backward-compatible alias for :mod:`lmcache.lmache_native`.
+"""Backward-compatible alias for :mod:`lmcache.lmcache_native`.
 
-``native_storage_ops`` was renamed to ``lmache_native`` to better reflect its
+``native_storage_ops`` was renamed to ``lmcache_native`` to better reflect its
 scope (device-independent KV-format/transfer types, not just storage ops).
 Importing this module now resolves to the renamed extension. New code should
-import :mod:`lmcache.lmache_native` (or the top-level :mod:`lmache_native`)
+import :mod:`lmcache.lmcache_native` (or the top-level :mod:`lmcache_native`)
 directly.
 """
 
@@ -12,6 +12,6 @@ directly.
 import sys
 
 # First Party
-import lmcache.lmache_native as _native
+import lmcache.lmcache_native as _native
 
 sys.modules[__name__] = _native

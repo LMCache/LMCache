@@ -19,7 +19,7 @@ from typing import Callable
 import time
 
 # First Party
-from lmcache.lmache_native import Bitmap
+from lmcache.lmcache_native import Bitmap
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.memory_management import MemoryObj

@@ -11,7 +11,7 @@ import threading
 import httpx
 
 # First Party
-from lmcache.lmache_native import Bitmap
+from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import (
     AttnWindowDesc,

@@ -18,7 +18,7 @@ using lmcache::lmcache_native::TTLLock;
 using lmcache::utils::ParallelPatternMatcher;
 using lmcache::utils::RangePatternMatcher;
 
-PYBIND11_MODULE(lmache_native, m) {
+PYBIND11_MODULE(lmcache_native, m) {
   m.doc() = "Native operations for LMCache (device-independent)";
 
   // Device-independent KV-format and transfer enums. These live in the

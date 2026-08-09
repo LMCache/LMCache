@@ -174,7 +174,7 @@ This pattern is identical to the one used by `MockL2Adapter` and
 ```python
 # my_plugin/adapter.py
 import asyncio, threading
-from lmcache.lmache_native import Bitmap
+from lmcache.lmcache_native import Bitmap
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
     L2TaskId,

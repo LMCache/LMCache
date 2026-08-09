@@ -9,12 +9,12 @@ import time
 import pytest
 
 pytest.importorskip(
-    "lmcache.lmache_native",
-    reason="lmache_native extension not built",
+    "lmcache.lmcache_native",
+    reason="lmcache_native extension not built",
 )
 
 # First Party
-from lmcache.lmache_native import PeriodicEventNotifier
+from lmcache.lmcache_native import PeriodicEventNotifier
 from lmcache.v1.platform import HAS_EVENTFD
 
 

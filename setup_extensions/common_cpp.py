@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Common C++ extension builders shared by all backends.
 
-These extensions (lmache_native, Redis, filesystem)
+These extensions (lmcache_native, Redis, filesystem)
 are always compiled regardless of which backend is selected.
 """
 
@@ -31,7 +31,7 @@ class CommonExtSpec:
 
 COMMON_EXTENSIONS: list[CommonExtSpec] = [
     CommonExtSpec(
-        name="lmache_native",
+        name="lmcache_native",
         sources=[
             "csrc/lmcache_native/bitmap.cpp",
             "csrc/lmcache_native/fold.cpp",

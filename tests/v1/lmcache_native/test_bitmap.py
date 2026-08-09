@@ -7,12 +7,12 @@ import random
 import pytest
 
 pytest.importorskip(
-    "lmcache.lmache_native",
-    reason="lmache_native extension not built",
+    "lmcache.lmcache_native",
+    reason="lmcache_native extension not built",
 )
 
 # First Party
-from lmcache.lmache_native import Bitmap
+from lmcache.lmcache_native import Bitmap
 
 
 class TestBitmapSetClearTest:

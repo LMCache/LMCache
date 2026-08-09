@@ -14,7 +14,7 @@
 namespace py = pybind11;
 
 // TransferDirection / EngineKVFormat enums are owned and registered exclusively
-// by the `lmache_native` module (csrc/lmcache_native/pybind.cpp).
+// by the `lmcache_native` module (csrc/lmcache_native/pybind.cpp).
 // Re-registering them here under a different module triggers pybind11's "type
 // already registered" error, so xpu_ops accepts them as plain ints and casts.
 // Same convention as csrc/pybind.cpp (c_ops).

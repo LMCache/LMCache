@@ -50,9 +50,9 @@ class _FakeDeviceHostFuncDispatcher:
 
 
 @pytest.fixture
-def stub_lmache_native() -> Any:
+def stub_lmcache_native() -> Any:
     """Stub native modules so MP server imports work in source-only test runs."""
-    module = types.ModuleType("lmcache.lmache_native")
+    module = types.ModuleType("lmcache.lmcache_native")
     module_any = cast(Any, module)
     module_any.TTLLock = type("TTLLock", (), {})
     module_any.Bitmap = type("Bitmap", (), {})
@@ -60,7 +60,7 @@ def stub_lmache_native() -> Any:
     with patch.dict(
         sys.modules,
         {
-            "lmcache.lmache_native": module,
+            "lmcache.lmcache_native": module,
             "cupy": MagicMock(),
         },
     ):
@@ -69,7 +69,7 @@ def stub_lmache_native() -> Any:
 
 def test_unregister_one_shared_gpu_layout_keeps_registry_until_last_instance(
     monkeypatch: pytest.MonkeyPatch,
-    stub_lmache_native: Any,
+    stub_lmcache_native: Any,
 ) -> None:
     """Unregistering one shared GPU instance must not remove the shared layout."""
     # First Party

@@ -28,7 +28,7 @@ __all__ = ["__version__", "torch_dev", "torch_device_type"]
 # Backward-compat ``lmcache.c_ops`` shim
 # --------------------------
 # Names relocated from the CUDA ``c_ops`` extension into the device-independent
-# ``lmache_native`` module. They are forwarded here so legacy
+# ``lmcache_native`` module. They are forwarded here so legacy
 # ``lmcache.c_ops.EngineKVFormat`` / ``.TransferDirection`` / ``.is_*`` access
 # keeps working after the relocation.
 _C_OPS_NATIVE_NAMES = (
@@ -48,7 +48,7 @@ def _install_c_ops_shim() -> None:
     Resolves the singleton :class:`DeviceOps` instance for the detected
     device (which calls :meth:`ensure_native` internally), then registers
     a PEP 562 shim module that forwards attribute access to it. Names that
-    were relocated into :mod:`lmache_native` (the KV-format / transfer enums
+    were relocated into :mod:`lmcache_native` (the KV-format / transfer enums
     and format predicates) are forwarded from there so legacy call sites keep
     working.
     """

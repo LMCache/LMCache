@@ -5,7 +5,7 @@
 import pytest
 
 # First Party
-from lmcache.lmache_native import Bitmap
+from lmcache.lmcache_native import Bitmap
 from lmcache.v1.distributed.api import TrimPolicy
 from lmcache.v1.distributed.bitmap_ops import (
     FULL_ATTENTION_WINDOW,

@@ -9,7 +9,7 @@ from typing import Literal
 import threading
 
 # First Party
-from lmcache.lmache_native import TTLLock
+from lmcache.lmcache_native import TTLLock
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import L1ManagerConfig

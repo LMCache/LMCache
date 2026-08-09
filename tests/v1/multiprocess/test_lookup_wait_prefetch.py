@@ -13,7 +13,7 @@ from unittest import mock
 import threading
 
 # First Party
-from lmcache.lmache_native import Bitmap
+from lmcache.lmcache_native import Bitmap
 from lmcache.v1.distributed.api import PrefetchHandle
 from lmcache.v1.multiprocess.modules.lookup import LookupModule, _PrefetchJob
 
