@@ -359,6 +359,63 @@ def test_packed_d2h_matches_reference(backend, fmt):
         assert torch.equal(memobj[0, layer_id].cpu(), expected)
 
 
+# CS = 6 elements is 12 bytes in fp16/bf16 while the full row (NH * CS = 24
+# elements) is 48 bytes: 8-byte dispatch would truncate the per-head width to
+# whole transfer units and break the HND head decomposition. A round-trip is
+# blind to this (the wrong addressing is still a bijection), so this must be
+# reference-checked.
+_NARROW_PACKED_GEO = _Geometry(
+    num_layers=2, num_blocks=4, block_size=4, num_heads=4, hs_logical=3
+)
+
+
+@pytest.mark.parametrize("backend", _BACKENDS)
+@pytest.mark.parametrize("fmt", _FUSED_FORMATS)
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_packed_narrow_head_matches_reference(backend, fmt, dtype):
+    """FUSED_PACKED with an 8-byte-aligned row but unaligned per-head CS:
+    the transfer unit must follow the per-head run, not the row width."""
+    geo = _NARROW_PACKED_GEO
+    dev = _device(backend)
+    torch.manual_seed(2)
+    layers = [
+        torch.randn(geo.layer_shape(fmt), dtype=dtype).to(dev)
+        for _ in range(geo.num_layers)
+    ]
+    num_tokens = 8
+    slots = _shuffled_slot_mapping(geo, num_tokens)
+    memobj = torch.zeros(
+        1,
+        geo.num_layers,
+        num_tokens,
+        geo.num_heads * geo.content_size,
+        dtype=dtype,
+        device=dev,
+    )
+
+    _run_transfer(
+        backend,
+        memobj,
+        layers,
+        slots.to(dev),
+        TransferDirection.D2H,
+        fmt,
+        geo,
+        MemObjKVLayout.FUSED_PACKED,
+        head_size=geo.content_size,
+    )
+
+    for layer_id, layer_t in enumerate(layers):
+        block_idx = slots // geo.block_size
+        block_off = slots % geo.block_size
+        if fmt in _HND_FORMATS:
+            rows = layer_t.cpu()[block_idx, :, block_off, :]
+        else:
+            rows = layer_t.cpu()[block_idx, block_off, :, :]
+        expected = rows.reshape(slots.numel(), -1)
+        assert torch.equal(memobj[0, layer_id].cpu(), expected)
+
+
 # ---------------------------------------------------------------------------
 # Round-trips (random data, both dtypes, partial chunks, skip prefix)
 # ---------------------------------------------------------------------------
