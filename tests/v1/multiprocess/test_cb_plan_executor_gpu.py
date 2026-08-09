@@ -107,7 +107,7 @@ def _reference_scatter(
             lmcache_native.TransferDirection.H2D,
             case.fmt,
             block_size=_BS,
-            head_size=_HS,
+            head_size=case.head_stride,
             mem_obj_kv_layout=case.mem_obj_kv_layout,
         )
     torch_dev.synchronize()
@@ -138,7 +138,9 @@ def _run_plan(
         engine_kv_format=case.fmt,
         page_buffer_size=_NB * _BS,
         block_size=_BS,
-        head_size=_HS,
+        # Spec per-head width: packed CS (== head_stride) for the fused
+        # format, HS for the split one.
+        head_size=case.head_stride,
         slot_mapping_base=slot_mapping.data_ptr(),
         slot_mapping_capacity=slot_mapping.numel(),
         cos_sin_cache=cos_sin.data_ptr(),

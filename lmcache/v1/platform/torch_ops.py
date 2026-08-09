@@ -738,16 +738,16 @@ def _multi_layer_kv_transfer_fused_formats(
     is_hnd_fused = _format_spec(engine_kv_format).is_hnd
     width = key_value.size(3)
 
+    if head_size <= 0 or head_size % 2 != 0:
+        raise ValueError(
+            "fused-packed formats require head_size = the packed per-head "
+            f"content width (> 0 and even), got {head_size}"
+        )
     if split:
         if key_value.size(0) != 2:
             raise ValueError(
                 "SPLIT_KV_2LTD requires a [2, num_layers, num_tokens, "
                 f"num_heads*head_size] buffer, got dim 0 = {key_value.size(0)}"
-            )
-        if head_size <= 0 or head_size % 2 != 0:
-            raise ValueError(
-                "SPLIT_KV_2LTD requires head_size = the packed per-head "
-                f"content width (> 0 and even), got {head_size}"
             )
         if width % (head_size // 2) != 0:
             raise ValueError(
@@ -760,15 +760,11 @@ def _multi_layer_kv_transfer_fused_formats(
                 "FUSED_PACKED requires a [1, num_layers, num_tokens, "
                 f"num_heads*2*head_size] buffer, got dim 0 = {key_value.size(0)}"
             )
-        if head_size > 0 and width % head_size != 0:
+        if width % head_size != 0:
             raise ValueError(
                 f"FUSED_PACKED buffer width {width} is not a multiple of "
                 f"the packed per-head width {head_size}"
             )
-    if is_hnd_fused and head_size <= 0:
-        raise ValueError(
-            "fused HND formats require head_size = the packed per-head content width"
-        )
 
     kv_device = key_value.device
     slots_kv = slot_mapping.to(dtype=torch.long).to(kv_device)

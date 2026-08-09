@@ -717,7 +717,8 @@ def _build_scatter_engine_and_context(
     gpu_context.device = torch.device("cpu")
     gpu_context.kv_layer_groups_manager.num_kernel_groups = num_groups
     gpu_context.kv_layer_groups_manager.kernel_groups = [
-        SimpleNamespace(shape_desc=SimpleNamespace(nb=100)) for _ in range(num_groups)
+        SimpleNamespace(shape_desc=SimpleNamespace(nb=100, hs=32))
+        for _ in range(num_groups)
     ]
     # A real (non-fused) format: _scatter_batch_to_paged reads its spec facts
     # to pick the mem_obj_kv_layout it forwards to the kernel.
@@ -759,9 +760,7 @@ def test_scatter_launches_per_slot_without_cat():
     ]
 
     with patch.object(blend_mod, "device_ops") as ops:
-        eng._scatter_batch_to_paged(
-            gpu_context, resolved_groups, batch, 32, list(range(2))
-        )
+        eng._scatter_batch_to_paged(gpu_context, resolved_groups, batch, list(range(2)))
 
     calls = ops.multi_layer_kv_transfer.call_args_list
     assert len(calls) == 3 * 2  # per (group, slot)
@@ -799,7 +798,7 @@ def test_scatter_narrows_partial_chunk_and_keeps_alignment():
     resolved_groups = [(torch.tensor([10, 11, 12], dtype=torch.long), 4)]
 
     with patch.object(blend_mod, "device_ops") as ops:
-        eng._scatter_batch_to_paged(gpu_context, resolved_groups, batch, 32, [0])
+        eng._scatter_batch_to_paged(gpu_context, resolved_groups, batch, [0])
 
     calls = ops.multi_layer_kv_transfer.call_args_list
     assert len(calls) == 3
@@ -894,7 +893,7 @@ def _build_plan_engine_and_context(
             slots_per_block=4,
             engine_group_idx=0,
             engine_kv_format=lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
-            shape_desc=SimpleNamespace(nb=100),
+            shape_desc=SimpleNamespace(nb=100, hs=head_size),
         )
         for _ in range(num_groups)
     ]
