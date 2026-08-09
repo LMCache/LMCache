@@ -13,6 +13,8 @@ import torch
 from lmcache.v1.platform import torch_ops as py_ops
 from lmcache.v1.platform.musa import native_kv_transfer as musa_native
 
+pytestmark = pytest.mark.musa
+
 
 def _make_native_module() -> ModuleType:
     """Create a fake native module with the Stage2 LMCache ABI."""
