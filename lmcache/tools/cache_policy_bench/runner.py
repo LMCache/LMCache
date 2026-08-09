@@ -5,8 +5,8 @@ CPU-only, policy-pluggable cache-eviction-policy benchmark runner.
 Replays synthetic :mod:`lmcache.tools.cache_policy_bench.workloads` request
 sequences through any
 :class:`~lmcache.v1.storage_backend.cache_policy.base_policy.BaseCachePolicy`
-(driven through the exact same public calls the real storage backend makes
--- see ``lmcache/v1/storage_backend/local_cpu_backend.py``), and reports
+(driven through the standard LMCache cache-policy interface, with
+admission control exercised by the benchmark harness), and reports
 hit-rate, modeled-latency, throughput, and process-memory metrics.
 
 No GPU or model inference is involved; see
@@ -101,16 +101,14 @@ class _SimulatedChunkObj:
 
 
 class _PolicyCache:
-    """Minimal capacity-bounded cache wrapper driving a ``BaseCachePolicy``
-    through the same call sequence as ``LocalCPUBackend``, plus one call
-    ``LocalCPUBackend`` doesn't make yet: ``should_admit`` when the cache is
-    at capacity, so admission-controlled policies (e.g.
-    ``AdmissionControlledPolicy``, selected via ``get_cache_policy`` names
-    prefixed ``ADMISSION_``) are actually exercised by this simulator. See
-    ``docs/design/v1/storage_backend/cache_policy/admission-control-policy.md``
-    for why request-time admission gating isn't wired into any storage
-    backend yet -- this simulator is ahead of production there by design,
-    since exercising the full interface is the point of a benchmark tool.
+    """
+    Minimal capacity-bounded cache wrapper for exercising LMCache
+    cache-policy behavior.
+
+    Standard policy callbacks are invoked during cache hits, insertions,
+    and evictions. When the cache is at capacity, ``should_admit`` is
+    evaluated before eviction so admission-controlled policies can be
+    exercised by the benchmark harness.
     """
 
     def __init__(self, policy: BaseCachePolicy, capacity_chunks: int) -> None:

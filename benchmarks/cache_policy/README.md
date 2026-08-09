@@ -10,9 +10,7 @@ through the real policy objects (the same `update_on_hit` /
 `update_on_put_with_metadata` / `get_evict_candidates` /
 `update_on_force_evict` calls the storage backend makes -- see
 `lmcache/v1/storage_backend/local_cpu_backend.py`) and scores each request
-with a modeled latency cost function. See
-[`docs/design/v1/storage_backend/cache_policy/cost-aware-policy-eval.md`](../../docs/design/v1/storage_backend/cache_policy/cost-aware-policy-eval.md)
-for the full write-up, methodology limitations, and results.
+with a modeled latency cost function.
 
 ## Layout
 
@@ -189,10 +187,9 @@ every policy receives the same subsample seed at a given repeat. The
 resulting intervals (via
 `benchmarks/cache_policy/stats.py::bootstrap_ci`/`paired_bootstrap_ci_diff`)
 describe sensitivity to the selected corpus subset -- they are not a
-classical full-corpus bootstrap, and should not be described as one. This
-directly addresses the wall-clock-jitter problem noted in the evaluation
-doc's methodology section (`CostAwareEvictionPolicy` uses real
-`time.monotonic()` for recency decay). Writes both the raw per-repeat rows
+classical full-corpus bootstrap, and should not be described as one. 
+Benchmark runs use a deterministic logical clock for reproducible recency tracking. 
+Writes both the raw per-repeat rows
 and the aggregated-with-CI table as JSON (and CSV, git-ignored).
 `COST_AWARE` is significantly slower per run than the other policies (see
 Finding 3 in the evaluation doc) -- budget more time as
@@ -224,11 +221,10 @@ evaluation doc for the result: TinyLFU-style admission control won
 clearly and now ships as a real class,
 `lmcache/v1/storage_backend/cache_policy/admission_control.py`
 (`AdmissionControlledPolicy`, selectable via
-`get_cache_policy("ADMISSION_<INNER>")`, e.g. `"ADMISSION_LRU"`) -- see
-[`docs/design/v1/storage_backend/cache_policy/admission-control-policy.md`](../../docs/design/v1/storage_backend/cache_policy/admission-control-policy.md)
+`get_cache_policy("ADMISSION_<INNER>")`, e.g. `"ADMISSION_LRU"`)
 for its design and a report comparing both directions explored. The
-`experiments/` code below remains as the historical record of how that
-recommendation was reached. To reproduce the comparison:
+`experiments/` contains the scripts used to compare the candidate policy directions.
+To reproduce the comparison:
 
 ```bash
 # Synthetic leg (fast, no corpus needed)
@@ -258,9 +254,7 @@ new tooling needed for the synthetic sweep, robustness sweep, or
 real-data validation. Only the `halve_every` ablation needed a new small
 script, `run_admission_control_ablation.py`. See "Experiments 1-4" in
 [`admission-control-policy.md`](../../docs/design/v1/storage_backend/cache_policy/admission-control-policy.md)
-for the full results, including two real bugs this evaluation caught and
-a genuine limitation (strict tie-breaking under low eviction pressure /
-purely one-shot traffic) that the original thin verification missed.
+See the final report for the complete analysis and discussion of limitations.
 
 ```bash
 # Synthetic sweep (reuses runner.py --sweep with an expanded --policies list)
