@@ -98,7 +98,7 @@ timing is GPU-accurate):
 | new event pair | span | timing source |
 |---|---|---|
 | `CB_FINGERPRINT_MATCH_*` | `cb.fingerprint_match` | CPU |
-| `CB_COORDINATOR_MATCH_*` | `cb.coordinator_match` (fleet directory leg; mutually exclusive with the local matcher) | CPU + IO |
+| `CB_COORDINATOR_MATCH_*` | `cb.coordinator_match` (fleet directory leg; additive with the local matcher) | CPU + IO |
 | (prefix lookup) | `mp.lookup_prefetch` (reused; `prefix_chunks` attr on `cb.lookup`) | CPU |
 | `CB_SPARSE_PREFETCH_*` | `cb.sparse_prefetch` (+ existing L2 prefetch span as `cb.l2_load`) | CPU + IO |
 | `CB_SCATTER_*` | `cb.scatter` (re-RoPE folded in via `n_shifted`) | `publish_on_stream` (GPU) |
