@@ -2213,6 +2213,13 @@ class BlendModule(InstanceLivenessTarget):
             # blocks than the full group, so gpu_context.num_blocks (group
             # 0's) would truncate the other groups' bounds check.
             page_buffer_size = kgm.kernel_groups[group_idx].shape_desc.nb * group_bs
+            group_fmt = gpu_context.get_engine_kv_format(group_idx)
+            # The tmp slot buffers keep fused rows packed (kv_size 1 staging).
+            group_layout = (
+                lmcache_native.MemObjKVLayout.FUSED_PACKED
+                if get_spec_class(group_fmt).is_fused_packed
+                else lmcache_native.MemObjKVLayout.UNSPECIFIED
+            )
             tok_off = 0
             for slot_idx, n_tok in enumerate(tok_counts):
                 key_value = gpu_context.get_temp_kernel_group_buffer(
@@ -2230,9 +2237,10 @@ class BlendModule(InstanceLivenessTarget):
                     gpu_context.device,
                     page_buffer_size,
                     lmcache_native.TransferDirection.H2D,
-                    gpu_context.get_engine_kv_format(group_idx),
+                    group_fmt,
                     block_size=group_bs,
                     head_size=head_size,
+                    mem_obj_kv_layout=group_layout,
                 )
                 tok_off += n_tok
 

@@ -710,12 +710,20 @@ def _build_scatter_engine_and_context(
     # Third Party
     import torch
 
+    # First Party
+    import lmcache.lmcache_native as real_lmc_ops
+
     gpu_context = MagicMock()
     gpu_context.device = torch.device("cpu")
     gpu_context.kv_layer_groups_manager.num_kernel_groups = num_groups
     gpu_context.kv_layer_groups_manager.kernel_groups = [
         SimpleNamespace(shape_desc=SimpleNamespace(nb=100)) for _ in range(num_groups)
     ]
+    # A real (non-fused) format: _scatter_batch_to_paged reads its spec facts
+    # to pick the mem_obj_kv_layout it forwards to the kernel.
+    gpu_context.get_engine_kv_format.side_effect = lambda g: (
+        real_lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
+    )
 
     buffers = {
         (slot, group): torch.zeros(2, num_layers, spc, hidden_dim)
