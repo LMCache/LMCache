@@ -1499,7 +1499,10 @@ class BlendV3Module(InstanceLivenessTarget):
             (event handle, success).
         """
         result = self._transfer_module.store(
-            key, instance_id, gpu_block_ids, event_ipc_handle,
+            key,
+            instance_id,
+            gpu_block_ids,
+            event_ipc_handle,
             layerwise=layerwise,
         )
 

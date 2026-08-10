@@ -622,13 +622,17 @@ class LMCacheDrivenTransferContext(TransferContext):
         raw_future = self._send_request(
             self._mq_client,
             RequestType.RETRIEVE,
-            [key, instance_id, block_ids, event_ipc_handle, skip_first_n_tokens,
-             layerwise],
+            [
+                key,
+                instance_id,
+                block_ids,
+                event_ipc_handle,
+                skip_first_n_tokens,
+                layerwise,
+            ],
         )
         if layerwise:
-            return LayerwiseDeviceMessagingFuture(
-                raw_future, device=self._device
-            )
+            return LayerwiseDeviceMessagingFuture(raw_future, device=self._device)
         return raw_future.to_device_future(device=self._device)
 
     def close(self) -> None:

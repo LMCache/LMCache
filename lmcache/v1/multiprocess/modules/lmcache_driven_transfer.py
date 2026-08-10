@@ -4,7 +4,7 @@
 # Standard
 from dataclasses import dataclass
 from itertools import islice
-from typing import Any, Generator, Sequence
+from typing import Any, Generator, Sequence, cast
 import os
 import threading
 import time
@@ -55,6 +55,7 @@ from lmcache.v1.platform.base.event_ipc import (
     get_event_ipc_backend,
 )
 from lmcache.v1.platform.cache_context import create_cache_context
+from lmcache.v1.platform.cuda.cache_context import GPUCacheContext
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
@@ -91,7 +92,6 @@ def get_layout_desc(
     ]
     shapes, dtypes = zip(*shapes_and_dtypes, strict=False)
     return MemoryLayoutDesc(shapes=list(shapes), dtypes=list(dtypes))
-
 
 
 def batched_iteration_with_skip(
@@ -721,20 +721,22 @@ def transfer_kv_layerwise(
             per_kv_bytes = slots_per_chunk * kg.hidden_dim_size * sd.element_size
             per_layer_bytes = sd.kv_size * per_kv_bytes
 
-            kg_byte_offset_in_obj = cache_context._temp_buffer._offset_map.get(
+            _tb = cast("GPUCacheContext", cache_context)._temp_buffer
+            kg_byte_offset_in_obj = _tb._offset_map.get(
                 (0, object_group_id, kernel_group_id)
             )
-            obj_group_offset = cache_context._temp_buffer._offset_map_object_group_only.get(
+            obj_group_offset = _tb._offset_map_object_group_only.get(
                 (0, object_group_id)
             )
             if kg_byte_offset_in_obj is None or obj_group_offset is None:
                 raise ValueError(
-                    f"Cannot find temp buffer offset for kernel_group={kernel_group_id}, "
+                    f"Cannot find temp buffer offset for "
+                    f"kernel_group={kernel_group_id}, "
                     f"object_group={object_group_id}"
                 )
             kg_byte_offset = kg_byte_offset_in_obj[0] - obj_group_offset[0]
 
-            single_layer_sd = lmc_ops.PageBufferShapeDesc()
+            single_layer_sd = device_ops.PageBufferShapeDesc()
             single_layer_sd.kv_size = sd.kv_size
             single_layer_sd.nl = 1
             single_layer_sd.nb = sd.nb
@@ -749,18 +751,20 @@ def transfer_kv_layerwise(
                 kernel_group_id
             )
 
-            kg_infos.append({
-                "kernel_group_id": kernel_group_id,
-                "kg": kg,
-                "blocks_per_chunk": blocks_per_chunk,
-                "blocks_per_window": blocks_per_window,
-                "slots_per_chunk": slots_per_chunk,
-                "per_layer_bytes": per_layer_bytes,
-                "kg_byte_offset": kg_byte_offset,
-                "sd": sd,
-                "single_layer_sd": single_layer_sd,
-                "group_kv_pointers": group_kv_pointers,
-            })
+            kg_infos.append(
+                {
+                    "kernel_group_id": kernel_group_id,
+                    "kg": kg,
+                    "blocks_per_chunk": blocks_per_chunk,
+                    "blocks_per_window": blocks_per_window,
+                    "slots_per_chunk": slots_per_chunk,
+                    "per_layer_bytes": per_layer_bytes,
+                    "kg_byte_offset": kg_byte_offset,
+                    "sd": sd,
+                    "single_layer_sd": single_layer_sd,
+                    "group_kv_pointers": group_kv_pointers,
+                }
+            )
 
         all_layers = []
         for kg_info_idx, info in enumerate(kg_infos):
@@ -798,9 +802,7 @@ def transfer_kv_layerwise(
         # Nothing to transfer; still record 1 event so consumer doesn't hang.
         first_gl = all_layers[0][2] if all_layers else 0
         if first_gl < len(layer_events):
-            event_backend.record_event(
-                layer_events[first_gl], cache_context.stream
-            )
+            event_backend.record_event(layer_events[first_gl], cache_context.stream)
         if batch_leader_map is not None:
             for _, _, global_layer_idx in all_layers:
                 batch_leader_map[global_layer_idx] = first_gl
@@ -821,7 +823,7 @@ def transfer_kv_layerwise(
     # In the existing temp buffer (4 full-chunk slots per kernel group),
     # each slot holds nl per-layer entries, giving 4*nl per-layer slots
     # total -- enough for hundreds of chunks on typical LLMs.
-    all_chunks_flat: list[tuple[int, object]] = []
+    all_chunks_flat: list[tuple[int, MemoryObj]] = []
     for start_object_idx, memory_object_batch in batch_plan:
         for local_idx, mo in enumerate(memory_object_batch):
             all_chunks_flat.append((start_object_idx + local_idx, mo))
@@ -839,10 +841,10 @@ def transfer_kv_layerwise(
         # Flat buffer capacity: total temp buffer bytes
         total_buffer_bytes = (
             cache_context.max_batch_size
-            * cache_context.get_temp_kernel_group_buffer(0, kernel_group_id)
-              .nelement()
-            * cache_context.get_temp_kernel_group_buffer(0, kernel_group_id)
-              .element_size()
+            * cache_context.get_temp_kernel_group_buffer(0, kernel_group_id).nelement()
+            * cache_context.get_temp_kernel_group_buffer(
+                0, kernel_group_id
+            ).element_size()
         )
         info["total_buffer_bytes"] = total_buffer_bytes
         # Per-layer check (for fallback)
@@ -859,8 +861,7 @@ def transfer_kv_layerwise(
             ]
             first_start_token = first_obj_idx * lmcache_chunk_size
             skip_tokens_first = (
-                max(first_start_token, skip_first_n_tokens)
-                - first_start_token
+                max(first_start_token, skip_first_n_tokens) - first_start_token
             )
             orig_skip = cache_context.calculate_num_blocks(
                 skip_tokens_first, kernel_group_id
@@ -882,11 +883,13 @@ def transfer_kv_layerwise(
         first_kg_idx = all_layers[layer_batch_start][0]
         first_local = all_layers[layer_batch_start][1]
         batch_end = layer_batch_start + 1
-        while (batch_end < num_all_layers
-               and batch_end - layer_batch_start < layerwise_batch_size
-               and all_layers[batch_end][0] == first_kg_idx
-               and all_layers[batch_end][1]
-                   == first_local + (batch_end - layer_batch_start)):
+        while (
+            batch_end < num_all_layers
+            and batch_end - layer_batch_start < layerwise_batch_size
+            and all_layers[batch_end][0] == first_kg_idx
+            and all_layers[batch_end][1]
+            == first_local + (batch_end - layer_batch_start)
+        ):
             batch_end += 1
 
         n_in_batch = batch_end - layer_batch_start
@@ -918,7 +921,7 @@ def transfer_kv_layerwise(
             # KernelGroupSpec with reusable buffer slots + full block_ids,
             # then one BatchStep per chunk sub-pass (buffer reused across
             # passes, serialized on the stream).
-            n_layer_sd = lmc_ops.PageBufferShapeDesc()
+            n_layer_sd = device_ops.PageBufferShapeDesc()
             n_layer_sd.kv_size = sd.kv_size
             n_layer_sd.nl = n_in_batch
             n_layer_sd.nb = sd.nb
@@ -929,9 +932,7 @@ def transfer_kv_layerwise(
             n_layer_sd.block_stride_elems = sd.block_stride_elems
             n_layer_sd.lmcache_kv_interleaved = True
 
-            n_layer_kv_ptrs = group_kv_pointers[
-                first_local:first_local + n_in_batch
-            ]
+            n_layer_kv_ptrs = group_kv_pointers[first_local : first_local + n_in_batch]
 
             buffer_base = cache_context.get_temp_kernel_group_buffer(
                 0, kernel_group_id
@@ -941,14 +942,13 @@ def transfer_kv_layerwise(
 
             # Fixed gpu_ptrs for max_chunks_per_pass buffer slots (reused)
             slot_gpu_ptrs = [
-                buffer_base + slot * n_bytes
-                for slot in range(max_chunks_per_pass)
+                buffer_base + slot * n_bytes for slot in range(max_chunks_per_pass)
             ]
 
             # One KernelGroupSpec for this kg batch, referencing full
             # block_ids and reusable buffer slot pointers.
             all_block_ids = info["all_block_ids"]
-            layer_spec = lmc_ops.KernelGroupSpec(
+            layer_spec = device_ops.KernelGroupSpec(
                 n_layer_kv_ptrs.data_ptr(),
                 slot_gpu_ptrs,
                 n_layer_sd,
@@ -959,7 +959,7 @@ def transfer_kv_layerwise(
             )
 
             # Build one BatchStep per chunk sub-pass
-            batch_steps: list["lmc_ops.BatchStep"] = []
+            batch_steps: list = []
             chunk_pass_start = 0
             while chunk_pass_start < num_active_chunks:
                 chunk_pass_end = min(
@@ -968,12 +968,12 @@ def transfer_kv_layerwise(
                 pass_chunks = all_chunks_flat[chunk_pass_start:chunk_pass_end]
                 pass_count = len(pass_chunks)
 
-                staging: list["lmc_ops.StagingCopy"] = []
+                staging: list = []
                 for buf_idx, (_, memory_obj) in enumerate(pass_chunks):
                     gpu_dst = slot_gpu_ptrs[buf_idx]
                     src_ptr = memory_obj.data_ptr + src_layer_offset
                     staging.append(
-                        lmc_ops.StagingCopy(
+                        device_ops.StagingCopy(
                             gpu_dst,
                             src_ptr,
                             n_bytes,
@@ -985,17 +985,12 @@ def transfer_kv_layerwise(
                 first_obj_idx = pass_chunks[0][0]
                 last_obj_idx = pass_chunks[-1][0]
                 base_obj_idx = all_chunks_flat[0][0]
-                block_ids_offset = (
-                    (first_obj_idx - base_obj_idx) * blocks_per_window
-                )
-                total_blocks = (
-                    (last_obj_idx + 1 - first_obj_idx) * blocks_per_window
-                )
+                block_ids_offset = (first_obj_idx - base_obj_idx) * blocks_per_window
+                total_blocks = (last_obj_idx + 1 - first_obj_idx) * blocks_per_window
 
                 first_start_token = first_obj_idx * lmcache_chunk_size
                 skip_tokens_first = (
-                    max(first_start_token, skip_first_n_tokens)
-                    - first_start_token
+                    max(first_start_token, skip_first_n_tokens) - first_start_token
                 )
                 pass_skip = _recalculate_blocks_to_skip(
                     info["blocks_per_chunk"],
@@ -1005,21 +1000,19 @@ def transfer_kv_layerwise(
                     ),
                 )
 
-                layer_launch = lmc_ops.LaunchVar(
+                layer_launch = device_ops.LaunchVar(
                     0,
                     block_ids_offset,
                     total_blocks,
                     pass_count,
                     pass_skip,
                 )
-                batch_steps.append(
-                    lmc_ops.BatchStep(staging, [layer_launch])
-                )
+                batch_steps.append(device_ops.BatchStep(staging, [layer_launch]))
                 chunk_pass_start = chunk_pass_end
 
             # Single native call for all chunk sub-passes
-            lmc_ops.execute_object_group_transfer(
-                lmc_ops.TransferDirection.H2D,
+            device_ops.execute_object_group_transfer(
+                lmcache_native.TransferDirection.H2D,
                 cache_context.device,
                 pin_chunk_size,
                 [layer_spec],
@@ -1032,7 +1025,7 @@ def transfer_kv_layerwise(
                 global_layer_idx = all_layers[layer_batch_start + sub_idx][2]
                 single_layer_sd = info["single_layer_sd"]
                 single_layer_kv_ptr = group_kv_pointers[
-                    layer_local_idx:layer_local_idx + 1
+                    layer_local_idx : layer_local_idx + 1
                 ]
 
                 if info["single_launch"] and use_native_layerwise_plan:
@@ -1041,18 +1034,14 @@ def transfer_kv_layerwise(
                     ).data_ptr()
                     all_gpu_ptrs_fb: list[int] = []
                     src_offset = kg_byte_offset + layer_local_idx * per_layer_bytes
-                    staging_fb: list["lmc_ops.StagingCopy"] = []
+                    staging_fb: list = []
 
-                    for chunk_local_idx, (_, memory_obj) in enumerate(
-                        all_chunks_flat
-                    ):
-                        gpu_dst = (
-                            buffer_base + chunk_local_idx * per_layer_bytes
-                        )
+                    for chunk_local_idx, (_, memory_obj) in enumerate(all_chunks_flat):
+                        gpu_dst = buffer_base + chunk_local_idx * per_layer_bytes
                         src_ptr = memory_obj.data_ptr + src_offset
                         all_gpu_ptrs_fb.append(gpu_dst)
                         staging_fb.append(
-                            lmc_ops.StagingCopy(
+                            device_ops.StagingCopy(
                                 gpu_dst,
                                 src_ptr,
                                 per_layer_bytes,
@@ -1061,7 +1050,7 @@ def transfer_kv_layerwise(
                         )
 
                     all_block_ids = info["all_block_ids"]
-                    layer_spec = lmc_ops.KernelGroupSpec(
+                    layer_spec = device_ops.KernelGroupSpec(
                         single_layer_kv_ptr.data_ptr(),
                         all_gpu_ptrs_fb,
                         single_layer_sd,
@@ -1070,35 +1059,32 @@ def transfer_kv_layerwise(
                         all_block_ids.data_ptr(),
                         all_block_ids.numel(),
                     )
-                    layer_launch = lmc_ops.LaunchVar(
+                    layer_launch = device_ops.LaunchVar(
                         0,
                         0,
                         all_block_ids.numel(),
                         len(all_gpu_ptrs_fb),
                         info["all_skip_blocks"],
                     )
-                    lmc_ops.execute_object_group_transfer(
-                        lmc_ops.TransferDirection.H2D,
+                    device_ops.execute_object_group_transfer(
+                        lmcache_native.TransferDirection.H2D,
                         cache_context.device,
                         pin_chunk_size,
                         [layer_spec],
-                        [lmc_ops.BatchStep(staging_fb, [layer_launch])],
+                        [device_ops.BatchStep(staging_fb, [layer_launch])],
+                        layerwise=True,
                     )
                 elif info["single_launch"]:
                     buffer_base = cache_context.get_temp_kernel_group_buffer(
                         0, kernel_group_id
                     ).data_ptr()
-                    all_gpu_ptrs_fb: list[int] = []
+                    all_gpu_ptrs_fb = []
                     src_offset = kg_byte_offset + layer_local_idx * per_layer_bytes
 
-                    for chunk_local_idx, (_, memory_obj) in enumerate(
-                        all_chunks_flat
-                    ):
-                        gpu_dst = (
-                            buffer_base + chunk_local_idx * per_layer_bytes
-                        )
+                    for chunk_local_idx, (_, memory_obj) in enumerate(all_chunks_flat):
+                        gpu_dst = buffer_base + chunk_local_idx * per_layer_bytes
                         src_ptr = memory_obj.data_ptr + src_offset
-                        lmc_ops.lmcache_memcpy_async(
+                        device_ops.lmcache_memcpy_async(
                             gpu_dst,
                             src_ptr,
                             per_layer_bytes,
@@ -1108,7 +1094,7 @@ def transfer_kv_layerwise(
                         )
                         all_gpu_ptrs_fb.append(gpu_dst)
 
-                    lmc_ops.multi_layer_block_kv_transfer(
+                    device_ops.multi_layer_block_kv_transfer(
                         single_layer_kv_ptr,
                         all_gpu_ptrs_fb,
                         info["all_block_ids"],
@@ -1125,29 +1111,22 @@ def transfer_kv_layerwise(
                     blocks_per_window = info["blocks_per_window"]
                     for start_object_idx, memory_object_batch in batch_plan:
                         batch_len = len(memory_object_batch)
-                        batch_start_token = (
-                            start_object_idx * lmcache_chunk_size
-                        )
+                        batch_start_token = start_object_idx * lmcache_chunk_size
                         skip_tokens_in_chunk = (
                             max(batch_start_token, skip_first_n_tokens)
                             - batch_start_token
                         )
                         tmp_gpu_buffers: list[int] = []
-                        for chunk_idx, memory_obj in enumerate(
-                            memory_object_batch
-                        ):
-                            full_kg_buffer = (
-                                cache_context.get_temp_kernel_group_buffer(
-                                    chunk_idx, kernel_group_id
-                                )
+                        for chunk_idx, memory_obj in enumerate(memory_object_batch):
+                            full_kg_buffer = cache_context.get_temp_kernel_group_buffer(
+                                chunk_idx, kernel_group_id
                             )
                             gpu_dst = full_kg_buffer.data_ptr()
                             src_offset = (
-                                kg_byte_offset
-                                + layer_local_idx * per_layer_bytes
+                                kg_byte_offset + layer_local_idx * per_layer_bytes
                             )
                             src_ptr = memory_obj.data_ptr + src_offset
-                            lmc_ops.lmcache_memcpy_async(
+                            device_ops.lmcache_memcpy_async(
                                 gpu_dst,
                                 src_ptr,
                                 per_layer_bytes,
@@ -1157,30 +1136,23 @@ def transfer_kv_layerwise(
                             )
                             tmp_gpu_buffers.append(gpu_dst)
 
-                        orig_skip_blocks = (
-                            cache_context.calculate_num_blocks(
-                                skip_tokens_in_chunk, kernel_group_id
-                            )
+                        orig_skip_blocks = cache_context.calculate_num_blocks(
+                            skip_tokens_in_chunk, kernel_group_id
                         )
-                        recalculated_skip_blocks = (
-                            _recalculate_blocks_to_skip(
-                                blocks_per_chunk,
-                                blocks_per_window,
-                                orig_skip_blocks,
-                            )
+                        recalculated_skip_blocks = _recalculate_blocks_to_skip(
+                            blocks_per_chunk,
+                            blocks_per_window,
+                            orig_skip_blocks,
                         )
-                        start_block_pos = (
-                            start_object_idx * blocks_per_window
-                        )
+                        start_block_pos = start_object_idx * blocks_per_window
                         end_block_pos = (
-                            (start_object_idx + batch_len)
-                            * blocks_per_window
-                        )
-                        block_ids_curr = block_ids_gpu[
-                            kernel_group_id
-                        ][start_block_pos:end_block_pos]
+                            start_object_idx + batch_len
+                        ) * blocks_per_window
+                        block_ids_curr = block_ids_gpu[kernel_group_id][
+                            start_block_pos:end_block_pos
+                        ]
 
-                        lmc_ops.multi_layer_block_kv_transfer(
+                        device_ops.multi_layer_block_kv_transfer(
                             single_layer_kv_ptr,
                             tmp_gpu_buffers,
                             block_ids_curr,
@@ -1188,9 +1160,7 @@ def transfer_kv_layerwise(
                             lmc_ops.TransferDirection.H2D,
                             single_layer_sd,
                             slots_per_chunk,
-                            cache_context.get_engine_kv_format(
-                                kernel_group_id
-                            ),
+                            cache_context.get_engine_kv_format(kernel_group_id),
                             recalculated_skip_blocks,
                         )
 
@@ -1818,6 +1788,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             event_backend.export_event(event, cache_context.device),
             store_succeeded,
         )
+
     @_lmcache_nvtx_annotate
     def retrieve(
         self,

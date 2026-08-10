@@ -184,7 +184,8 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         #     start of the retrieve range (to avoid overwriting APC-shared blocks)
         #   - layerwise: bool - If True, perform per-layer H2D transfer and
         #     return per-layer IPC event handles instead of a single handle
-        # Returns: tuple[bytes | list[bytes], bool] - (CUDA event handle(s), success flag)
+        # Returns: tuple[bytes | list[bytes], bool]
+        #   (CUDA event handle(s), success flag)
         "RETRIEVE": ProtocolDefinition(
             payload_classes=[KeyType, int, list[list[int]], bytes, int, bool],
             response_class=tuple[bytes | list[bytes], bool],

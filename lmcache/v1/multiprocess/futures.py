@@ -231,7 +231,6 @@ class DeviceMessagingFuture(MessagingFuture[T]):
         return DeviceMessagingFuture(raw_future, device)
 
 
-
 class LayerwiseDeviceMessagingFuture(MessagingFuture[T]):
     """Future that carries per-layer IPC events for layerwise KV loading.
 
@@ -298,26 +297,21 @@ class LayerwiseDeviceMessagingFuture(MessagingFuture[T]):
     def wait(self, timeout: Optional[float] = None) -> bool:
         if self.layer_events_:
             # Already resolved — wait on the last event (all layers done)
-            self._event_backend.synchronize_event(
-                self.layer_events_[-1], self.device_
-            )
+            self._event_backend.synchronize_event(self.layer_events_[-1], self.device_)
             return True
         flag = self.raw_future_.wait(timeout)
         if not flag:
             return False
         self._on_raw_future_complete()
         if self.layer_events_:
-            self._event_backend.synchronize_event(
-                self.layer_events_[-1], self.device_
-            )
+            self._event_backend.synchronize_event(self.layer_events_[-1], self.device_)
         return True
 
     def result(self, timeout: Optional[float] = None) -> T:
         flag = self.wait(timeout)
         if not flag:
             raise LMCacheTimeoutError(
-                "LayerwiseDeviceMessagingFuture result not available "
-                "within timeout"
+                "LayerwiseDeviceMessagingFuture result not available within timeout"
             )
         assert self.result_ is not None
         return self.result_
@@ -340,6 +334,7 @@ class LayerwiseDeviceMessagingFuture(MessagingFuture[T]):
     @property
     def num_layers(self) -> int:
         return len(self.layer_events_)
+
 
 # Backward-compatible alias for existing imports.
 CUDAMessagingFuture = DeviceMessagingFuture

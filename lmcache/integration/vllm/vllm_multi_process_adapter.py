@@ -24,11 +24,11 @@ from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
     IPCCacheServerKey,
 )
+from lmcache.v1.multiprocess.futures import LayerwiseDeviceMessagingFuture
 from lmcache.v1.multiprocess.group_view import (
     EngineGroupInfo,
     expand_engine_block_ids,
 )
-from lmcache.v1.multiprocess.futures import LayerwiseDeviceMessagingFuture
 from lmcache.v1.multiprocess.mq import MessageQueueClient, MessagingFuture
 from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
 from lmcache.v1.multiprocess.transfer_context import (
@@ -1455,7 +1455,7 @@ class LMCacheMPWorkerAdapter:
             self._block_ids_per_group(op),
             event,
             self.blocks_in_chunk,
-            layerwise=self._layerwise_loading,
+            **({"layerwise": True} if self._layerwise_loading else {}),
         )
         self.store_futures[request_id] = future
         self.store_events[request_id] = event
@@ -1511,7 +1511,7 @@ class LMCacheMPWorkerAdapter:
             event,
             self.blocks_in_chunk,
             skip_first_n_tokens=op.skip_first_n_tokens,
-            layerwise=self._layerwise_loading,
+            **({"layerwise": True} if self._layerwise_loading else {}),
         )
         self.retrieve_futures[request_id] = (future, op.flat_block_ids)
         self.retrieve_events[request_id] = event
@@ -1590,7 +1590,11 @@ class LMCacheMPWorkerAdapter:
             return
         layer_idx = int(m.group(1))
 
-        ids = request_ids if request_ids is not None else list(self.retrieve_futures.keys())
+        ids = (
+            request_ids
+            if request_ids is not None
+            else list(self.retrieve_futures.keys())
+        )
         for req_id in ids:
             entry = self.retrieve_futures.get(req_id)
             if entry is None:

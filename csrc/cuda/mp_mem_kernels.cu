@@ -378,8 +378,8 @@ void multi_layer_block_kv_transfer_templated(
     EngineKVFormat engine_kv_format, int skip_prefix_n_blocks) {
   // --- Validation ---
   int num_objects = static_cast<int>(lmcache_objects_ptrs.size());
-  TORCH_CHECK(num_objects >= 1,
-              "Expected at least 1 LMCache object, got ", num_objects);
+  TORCH_CHECK(num_objects >= 1, "Expected at least 1 LMCache object, got ",
+              num_objects);
 
   int total_blocks = block_ids.size(0);
   TORCH_CHECK(total_blocks % num_objects == 0, "block_ids length (",
@@ -402,11 +402,12 @@ void multi_layer_block_kv_transfer_templated(
   // --- Upload LMCache object pointers to device ---
   // Small allocation (N * 8 bytes); caching allocator makes this O(1).
   // The copy runs on the current stream, so it completes before the kernel.
-  auto gpu_ptrs_tensor = torch::empty(
-      {num_objects}, torch::TensorOptions().dtype(torch::kInt64).device(device));
-  gpu_ptrs_tensor.copy_(torch::from_blob(
-      lmcache_objects_ptrs.data(), {num_objects},
-      torch::TensorOptions().dtype(torch::kInt64)));
+  auto gpu_ptrs_tensor =
+      torch::empty({num_objects},
+                   torch::TensorOptions().dtype(torch::kInt64).device(device));
+  gpu_ptrs_tensor.copy_(
+      torch::from_blob(lmcache_objects_ptrs.data(), {num_objects},
+                       torch::TensorOptions().dtype(torch::kInt64)));
   ScalarType** lmcache_ptrs_dev =
       reinterpret_cast<ScalarType**>(gpu_ptrs_tensor.data_ptr());
 
