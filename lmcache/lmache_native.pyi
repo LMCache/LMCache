@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Stub for the lmache_native C++ extension (implemented in csrc/storage_manager/).
+# Stub for the lmache_native C++ extension (implemented in csrc/lmcache_native/).
 #
 # ``native_storage_ops`` was renamed to ``lmache_native``. The old name is kept
 # as a backward-compatible Python shim (lmcache/native_storage_ops.py).

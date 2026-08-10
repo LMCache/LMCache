@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Common C++ extension builders shared by all backends.
 
-These extensions (storage manager, Redis, filesystem)
+These extensions (lmache_native, Redis, filesystem)
 are always compiled regardless of which backend is selected.
 """
 
@@ -33,14 +33,14 @@ COMMON_EXTENSIONS: list[CommonExtSpec] = [
     CommonExtSpec(
         name="lmache_native",
         sources=[
-            "csrc/storage_manager/bitmap.cpp",
-            "csrc/storage_manager/fold.cpp",
-            "csrc/storage_manager/periodic_event_notifier.cpp",
-            "csrc/storage_manager/pybind.cpp",
-            "csrc/storage_manager/ttl_lock.cpp",
-            "csrc/storage_manager/utils.cpp",
+            "csrc/lmcache_native/bitmap.cpp",
+            "csrc/lmcache_native/fold.cpp",
+            "csrc/lmcache_native/periodic_event_notifier.cpp",
+            "csrc/lmcache_native/pybind.cpp",
+            "csrc/lmcache_native/ttl_lock.cpp",
+            "csrc/lmcache_native/utils.cpp",
         ],
-        include_dirs=["csrc/storage_manager", "csrc"],
+        include_dirs=["csrc/lmcache_native", "csrc"],
     ),
     CommonExtSpec(
         name="lmcache_redis",

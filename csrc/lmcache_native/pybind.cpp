@@ -12,9 +12,9 @@
 
 namespace py = pybind11;
 
-using lmcache::storage_manager::Bitmap;
-using lmcache::storage_manager::PeriodicEventNotifier;
-using lmcache::storage_manager::TTLLock;
+using lmcache::lmcache_native::Bitmap;
+using lmcache::lmcache_native::PeriodicEventNotifier;
+using lmcache::lmcache_native::TTLLock;
 using lmcache::utils::ParallelPatternMatcher;
 using lmcache::utils::RangePatternMatcher;
 
@@ -59,13 +59,13 @@ PYBIND11_MODULE(lmache_native, m) {
         "Return whether the format is an MLA variant (single latent KV "
         "head).");
 
-  m.def("fold", &lmcache::storage_manager::fold, py::arg("found"),
+  m.def("fold", &lmcache::lmcache_native::fold, py::arg("found"),
         py::arg("num_chunks"), py::arg("num_ranks"), py::arg("group_windows"),
         "Fold per-(group, chunk, rank) presence into a servable-prefix-lengths "
         "bitmap (size num_chunks + 1); bit L set iff every object group can "
         "serve a length-L prefix.");
   m.def(
-      "unfold", &lmcache::storage_manager::unfold, py::arg("hit_length"),
+      "unfold", &lmcache::lmcache_native::unfold, py::arg("hit_length"),
       py::arg("num_chunks"), py::arg("num_ranks"), py::arg("group_windows"),
       "Expand a model-wide hit length into the per-group retain mask over the "
       "group x chunk x kv_rank layout.");
