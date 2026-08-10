@@ -48,3 +48,6 @@ httptools
 cachetools
 google-api-core
 google-cloud-bigtable
+# stdlib tomllib (3.11+) backs the MP TOML config-file loader; on Python 3.10
+# the tomli fallback provides the same API.
+tomli; python_version < "3.11"

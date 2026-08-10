@@ -41,6 +41,7 @@ from lmcache.v1.multiprocess.config import (
     MPServerConfig,
     add_coordinator_args,
     add_mp_server_args,
+    merge_mp_config_file_into_args,
     parse_args_to_coordinator_config,
     parse_args_to_mp_server_config,
 )
@@ -499,6 +500,7 @@ def parse_args():
 if __name__ == "__main__":
     signal.signal(signal.SIGTERM, signal.default_int_handler)
     args = parse_args()
+    args = merge_mp_config_file_into_args(args)
     mp_config = parse_args_to_mp_server_config(args)
     storage_manager_config = parse_args_to_config(args)
     obs_config = parse_args_to_observability_config(args)
