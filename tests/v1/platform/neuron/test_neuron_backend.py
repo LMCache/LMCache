@@ -9,7 +9,6 @@ is skipped when torch_neuronx is not installed.
 
 # Standard
 from typing import Any
-import logging
 
 # Third Party
 import pytest

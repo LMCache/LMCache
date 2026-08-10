@@ -12,8 +12,6 @@ spec.
 # Future
 from __future__ import annotations
 
-# Standard
-from typing import TYPE_CHECKING
 
 # First Party
 from lmcache.v1.platform.base.device_ops import DeviceOps
