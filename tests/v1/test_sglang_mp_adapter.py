@@ -7,8 +7,9 @@ returns a pollable future -- an already-completed one on the no-op paths
 completion future on the happy path -- and never blocks on the result."""
 
 # Standard
+from collections.abc import Callable
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 from unittest.mock import MagicMock
 import threading
 
@@ -17,28 +18,56 @@ import pytest
 import torch
 
 # First Party
-from lmcache.integration.sglang import multi_process_adapter as adapter_mod
-from lmcache.integration.sglang.multi_process_adapter import (
-    LMCacheMPConnector,
-    _completed_future,
-)
-from lmcache.integration.sglang.sglang_adapter import (
-    LMCacheLayerwiseConnector,
-    LoadMetadata,
-    StoreMetadata,
-)
 from lmcache.v1.multiprocess.futures import MessagingFuture
+
+pytestmark = pytest.mark.sglang
+
+# The adapter imports ``sglang`` at module load; skip cleanly where it's absent
+# (sglang is an optional integration, not a hard LMCache dependency).
+pytest.importorskip("sglang")
+
+
+def _import_adapter_symbols() -> tuple[
+    Any,
+    type,
+    Callable[[bool], MessagingFuture],
+    type,
+    type,
+    type,
+]:
+    # First Party
+    from lmcache.integration.sglang import multi_process_adapter as adapter_mod
+    from lmcache.integration.sglang.multi_process_adapter import (
+        LMCacheMPConnector,
+        _completed_future,
+    )
+    from lmcache.integration.sglang.sglang_adapter import (
+        LMCacheLayerwiseConnector,
+        LoadMetadata,
+        StoreMetadata,
+    )
+
+    return (
+        adapter_mod,
+        LMCacheMPConnector,
+        _completed_future,
+        LMCacheLayerwiseConnector,
+        LoadMetadata,
+        StoreMetadata,
+    )
+
 
 _CHUNK_SIZE = 256
 
 
-def _make_connector(healthy: bool = True) -> LMCacheMPConnector:
+def _make_connector(healthy: bool = True) -> Any:
     """Build a connector without running ``__init__`` (which opens ZMQ).
 
     Sets only the attributes the store paths touch; anything a given
     test needs beyond this it stubs itself.
     """
-    conn = object.__new__(LMCacheMPConnector)
+    _, LMCacheMPConnector, _, _, _, _ = _import_adapter_symbols()
+    conn: Any = object.__new__(LMCacheMPConnector)
     conn._health_event = threading.Event()
     if healthy:
         conn._health_event.set()
@@ -47,7 +76,8 @@ def _make_connector(healthy: bool = True) -> LMCacheMPConnector:
     return conn
 
 
-def _store_metadata(num_tokens: int) -> StoreMetadata:
+def _store_metadata(num_tokens: int) -> Any:
+    *_, StoreMetadata = _import_adapter_symbols()
     return StoreMetadata(
         last_node=None,
         token_ids=list(range(num_tokens)),
@@ -104,6 +134,7 @@ class _FakeTorchDev:
 
 
 def test_completed_future_resolves_to_given_result() -> None:
+    _, _, _completed_future, _, _, _ = _import_adapter_symbols()
     done_true = _completed_future(True)
     assert done_true.query() is True
     assert done_true.result(timeout=0) is True
@@ -117,6 +148,7 @@ def test_wrap_sglang_kv_caches_uses_platform_wrapper_in_kv_order(
     monkeypatch,
 ) -> None:
     """Registration dispatches each tensor through the platform wrapper."""
+    adapter_mod, _, _, _, _, _ = _import_adapter_symbols()
     k_pool = [torch.tensor([1]), torch.tensor([2])]
     v_pool = [torch.tensor([3]), torch.tensor([4])]
     wrapped_tensors: list[torch.Tensor] = []
@@ -143,6 +175,7 @@ def test_wrap_sglang_kv_caches_requires_full_handle_capability(
     monkeypatch,
 ) -> None:
     """Registration fails before export when a platform capability is absent."""
+    adapter_mod, _, _, _, _, _ = _import_adapter_symbols()
     monkeypatch.setattr(
         adapter_mod,
         "get_device_spec",
@@ -160,6 +193,7 @@ def test_wrap_sglang_kv_caches_requires_full_handle_capability(
 
 def test_wrap_sglang_kv_caches_rejects_mismatched_layers() -> None:
     """Registration rejects a wire payload that cannot split into K/V pairs."""
+    adapter_mod, _, _, _, _, _ = _import_adapter_symbols()
     with pytest.raises(ValueError, match="matching K and V layers"):
         adapter_mod._wrap_sglang_kv_caches(
             [torch.tensor([1]), torch.tensor([2])],
@@ -185,6 +219,7 @@ def test_mp_connector_validates_pools_before_opening_mq(
     message: str,
 ) -> None:
     """Invalid registration fails before reading the first tensor or opening MQ."""
+    _, LMCacheMPConnector, _, _, _, _ = _import_adapter_symbols()
     with pytest.raises(ValueError, match=message):
         LMCacheMPConnector(
             sgl_config=SimpleNamespace(model_path="test-model"),
@@ -199,6 +234,7 @@ def test_mp_connector_validates_pools_before_opening_mq(
 
 
 def test_store_kv_async_unhealthy_returns_failed_future_no_send(monkeypatch) -> None:
+    adapter_mod, _, _, _, _, _ = _import_adapter_symbols()
     conn = _make_connector(healthy=False)
 
     def _fail_send(*args, **kwargs):
@@ -217,6 +253,7 @@ def test_store_kv_async_unhealthy_returns_failed_future_no_send(monkeypatch) -> 
 def test_store_kv_async_no_aligned_range_returns_completed_future_no_send(
     monkeypatch,
 ) -> None:
+    adapter_mod, _, _, _, _, _ = _import_adapter_symbols()
     conn = _make_connector(healthy=True)
 
     def _fail_send(*args, **kwargs):
@@ -234,6 +271,7 @@ def test_store_kv_async_no_aligned_range_returns_completed_future_no_send(
 def test_store_kv_async_happy_path_returns_daemon_future_without_blocking(
     monkeypatch,
 ) -> None:
+    adapter_mod, _, _, _, _, _ = _import_adapter_symbols()
     conn = _make_connector(healthy=True)
     conn.mq_client = object()  # type: ignore[assignment]
     conn.instance_id = 123
@@ -263,6 +301,7 @@ def test_store_kv_async_happy_path_returns_daemon_future_without_blocking(
 
 def test_submit_retrieve_retains_exported_device_event(monkeypatch) -> None:
     """The producer event outlives daemon import through the returned future."""
+    adapter_mod, _, _, _, _, _ = _import_adapter_symbols()
     connector = _make_connector(healthy=True)
     connector.mq_client = object()  # type: ignore[assignment]
     connector.instance_id = 123
@@ -293,7 +332,8 @@ def test_submit_retrieve_retains_exported_device_event(monkeypatch) -> None:
 
 def test_layerwise_load_forwards_partial_slot_mapping_offset() -> None:
     """Layerwise retrieval tells the GPU connector where its slot map begins."""
-    connector = object.__new__(LMCacheLayerwiseConnector)
+    _, _, _, LMCacheLayerwiseConnector, LoadMetadata, _ = _import_adapter_symbols()
+    connector: Any = object.__new__(LMCacheLayerwiseConnector)
     connector.lmcache_engine = MagicMock()
     connector.lmcache_engine.lookup.return_value = 6
     connector.lmcache_engine.retrieve_layer.return_value = iter([None, None, None])

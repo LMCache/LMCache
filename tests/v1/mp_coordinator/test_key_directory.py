@@ -4,11 +4,13 @@ semantics (seq dedup, gap detection, incarnation fencing), lookup, and
 instance cleanup."""
 
 # Third Party
+import numpy as np
 import pytest
 
 # First Party
 from lmcache.v1.distributed.api import ObjectKey, Tier
 from lmcache.v1.mp_coordinator.api import (
+    UNKNOWN_TOKEN_OFFSET,
     CacheEventBatch,
     CacheEventEntry,
     CacheEventType,
@@ -32,12 +34,14 @@ def _batch(
     shared: bool = False,
     ts: float = 0.0,
     token_ids: list[int] | None = None,
+    token_offset: int = 0,
 ) -> CacheEventBatch:
     entries = [
         CacheEventEntry(
             key=k.to_encoded_object_key(),
             size_bytes=size_bytes,
             token_ids=token_ids or [],
+            token_offset=token_offset,
         )
         for k in (keys or [_key(0xAA)])
     ]
@@ -304,15 +308,20 @@ def _rank_key(hash_byte: int, kv_rank: int) -> ObjectKey:
     return ObjectKey(chunk_hash=_chash(hash_byte), model_name="m", kv_rank=kv_rank)
 
 
+def _tokens(directory: KeyDirectory, *hash_bytes: int) -> list[list[int]]:
+    """The known token ids of each chunk, as plain lists."""
+    return [list(t) for t in directory.get_token_ids([_chash(b) for b in hash_bytes])]
+
+
 def test_binding_links_on_store_and_drops_on_delete():
     directory = KeyDirectory()
     directory.apply_batch(_batch(seq=1, keys=[_key(1)], token_ids=[1, 2]))
-    assert directory.get_token_ids([_chash(1)]) == [(1, 2)]
+    assert _tokens(directory, 1) == [[1, 2]]
 
     directory.apply_batch(
         _batch(seq=2, event_type=CacheEventType.DELETE, keys=[_key(1)])
     )
-    assert directory.get_token_ids([_chash(1)]) == [()]
+    assert _tokens(directory, 1) == [[]]
 
 
 def test_binding_survives_until_last_record_of_the_chunk():
@@ -325,12 +334,12 @@ def test_binding_survives_until_last_record_of_the_chunk():
     directory.apply_batch(
         _batch(seq=2, event_type=CacheEventType.DELETE, keys=[_key(1)])
     )
-    assert directory.get_token_ids([_chash(1)]) == [(1, 2)]
+    assert _tokens(directory, 1) == [[1, 2]]
 
     directory.apply_batch(
         _batch(seq=3, event_type=CacheEventType.DELETE, keys=[_rank_key(1, 1)])
     )
-    assert directory.get_token_ids([_chash(1)]) == [()]
+    assert _tokens(directory, 1) == [[]]
 
 
 def test_chunks_bind_independently():
@@ -341,7 +350,7 @@ def test_chunks_bind_independently():
     directory.apply_batch(
         _batch(seq=3, event_type=CacheEventType.DELETE, keys=[_key(1)])
     )
-    assert directory.get_token_ids([_chash(1), _chash(2)]) == [(), (3, 4)]
+    assert _tokens(directory, 1, 2) == [[], [3, 4]]
 
 
 def test_token_less_entry_links_empty_binding():
@@ -349,30 +358,115 @@ def test_token_less_entry_links_empty_binding():
     chunk's next stamped entry fills the tokens in."""
     directory = KeyDirectory()
     directory.apply_batch(_batch(seq=1, keys=[_rank_key(1, 1)]))
-    assert directory.get_token_ids([_chash(1)]) == [()]
+    assert _tokens(directory, 1) == [[]]
 
     directory.apply_batch(_batch(seq=2, keys=[_key(1)], token_ids=[1, 2]))
-    assert directory.get_token_ids([_chash(1)]) == [(1, 2)]
+    assert _tokens(directory, 1) == [[1, 2]]
 
     # The unstamped record still holds its reference.
     directory.apply_batch(
         _batch(seq=3, event_type=CacheEventType.DELETE, keys=[_key(1)])
     )
-    assert directory.get_token_ids([_chash(1)]) == [(1, 2)]
+    assert _tokens(directory, 1) == [[1, 2]]
 
 
 def test_untagged_record_heals_on_restore():
     directory = KeyDirectory()
     directory.apply_batch(_batch(seq=1, keys=[_key(1)]))
-    assert directory.get_token_ids([_chash(1)]) == [()]
+    assert _tokens(directory, 1) == [[]]
 
     directory.apply_batch(_batch(seq=2, keys=[_key(1)], token_ids=[1, 2]))
-    assert directory.get_token_ids([_chash(1)]) == [(1, 2)]
+    assert _tokens(directory, 1) == [[1, 2]]
 
     directory.apply_batch(
         _batch(seq=3, event_type=CacheEventType.DELETE, keys=[_key(1)])
     )
-    assert directory.get_token_ids([_chash(1)]) == [()]
+    assert _tokens(directory, 1) == [[]]
+
+
+# -- Token offsets and storage representation --------------------------------
+
+
+def test_binding_records_the_chunks_token_offset():
+    """Chunk hashes are prefix-chained, so the offset cannot be derived —
+    it rides the entry and reaches the match as ``old_st``."""
+    directory = KeyDirectory()
+    directory.enable_blend_lookup(chunk_size=2, probe_stride=1)
+    directory.apply_batch(
+        _batch(seq=1, keys=[_key(1)], token_ids=[7, 8], token_offset=512)
+    )
+
+    assert directory.get_token_ids([_chash(1)]) == [(7, 8)]
+    (match,) = directory.blend_match(np.asarray([7, 8], dtype=np.uint64))
+    assert match.old_st == 512
+
+
+def test_unknown_chunk_yields_empty_tokens():
+    directory = KeyDirectory()
+
+    assert directory.get_token_ids([_chash(9)]) == [()]
+
+
+def test_bindings_are_returned_in_request_order():
+    directory = KeyDirectory()
+    directory.apply_batch(_batch(seq=1, keys=[_key(1)], token_ids=[1], token_offset=0))
+    directory.apply_batch(
+        _batch(seq=2, keys=[_key(2)], token_ids=[2], token_offset=256)
+    )
+
+    assert directory.get_token_ids([_chash(2), _chash(9), _chash(1)]) == [
+        (2,),
+        (),
+        (1,),
+    ]
+
+
+def test_restore_replaces_tokens_and_offset():
+    directory = KeyDirectory()
+    directory.enable_blend_lookup(chunk_size=2, probe_stride=1)
+    directory.apply_batch(
+        _batch(seq=1, keys=[_key(1)], token_ids=[1, 2], token_offset=0)
+    )
+    directory.apply_batch(
+        _batch(seq=2, keys=[_key(1)], token_ids=[3, 4], token_offset=256)
+    )
+
+    assert directory.get_token_ids([_chash(1)]) == [(3, 4)]
+    (match,) = directory.blend_match(np.asarray([3, 4], dtype=np.uint64))
+    assert match.old_st == 256
+    # The superseded content is no longer discoverable.
+    assert directory.blend_match(np.asarray([1, 2], dtype=np.uint64)) == []
+
+
+def test_token_ids_outside_uint32_leave_the_binding_unfilled():
+    """A malformed entry must not fail the batch: the placement still
+    applies and the binding stays a lookup miss."""
+    directory = KeyDirectory()
+
+    result = directory.apply_batch(_batch(seq=1, keys=[_key(1)], token_ids=[1, 2**32]))
+
+    assert result == ApplyResult.APPLIED
+    assert directory.lookup([_key(1)])[0]  # placement applied
+    assert _tokens(directory, 1) == [[]]
+
+    # Repaired by the chunk's next well-formed entry.
+    directory.apply_batch(_batch(seq=2, keys=[_key(1)], token_ids=[1, 2]))
+    assert _tokens(directory, 1) == [[1, 2]]
+
+
+def test_negative_token_offset_is_rejected():
+    with pytest.raises(ValueError, match="token_offset must be >= 0"):
+        CacheEventEntry(
+            key=_key(1).to_encoded_object_key(), token_ids=[1], token_offset=-2
+        )
+
+
+def test_unreported_offset_defaults_to_unknown_not_zero():
+    """An emitter predating token offsets must not be read as claiming
+    position 0 — that would re-RoPE reused KV from the wrong source."""
+    entry = CacheEventEntry(key=_key(1).to_encoded_object_key(), token_ids=[1, 2])
+
+    assert entry.token_offset == UNKNOWN_TOKEN_OFFSET
 
 
 def test_restore_with_new_tokens_rebinds():
@@ -380,7 +474,7 @@ def test_restore_with_new_tokens_rebinds():
     directory.apply_batch(_batch(seq=1, keys=[_key(1)], token_ids=[1, 2]))
     directory.apply_batch(_batch(seq=2, keys=[_key(1)], token_ids=[3, 4]))
 
-    assert directory.get_token_ids([_chash(1)]) == [(3, 4)]
+    assert _tokens(directory, 1) == [[3, 4]]
 
 
 def test_fencing_releases_bindings():
@@ -388,7 +482,7 @@ def test_fencing_releases_bindings():
     directory.apply_batch(_batch(seq=1, keys=[_key(1)], token_ids=[1, 2]))
 
     directory.apply_batch(_batch(seq=1, incarnation=2, keys=[_key(9)]))
-    assert directory.get_token_ids([_chash(1)]) == [()]
+    assert _tokens(directory, 1) == [[]]
 
 
 def test_drop_instance_releases_bindings():
@@ -396,7 +490,7 @@ def test_drop_instance_releases_bindings():
     directory.apply_batch(_batch(seq=1, keys=[_key(1)], token_ids=[1, 2]))
 
     directory.drop_instance("node-a")
-    assert directory.get_token_ids([_chash(1)]) == [()]
+    assert _tokens(directory, 1) == [[]]
 
 
 # -- Listing -------------------------------------------------------------------

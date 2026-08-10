@@ -5,7 +5,7 @@ LMCache multi-process (mp) cache servers running across nodes as a fleet. This
 document describes the backbone: the REST API, the instance registry, the
 health-check and eviction loops, and the four domain capabilities that hang off
 it (fleet membership, quota + fleet-wide L2 eviction, cache control including
-warm prefetch / pin / delete, and the global CacheBlend fingerprint directory).
+warm prefetch / pin / delete, and fleet-wide CacheBlend fragment lookup).
 
 Code: `lmcache/v1/mp_coordinator/`.
 
@@ -14,15 +14,15 @@ Code: `lmcache/v1/mp_coordinator/`.
 mp servers are independent by construction: per-instance in-memory quota, no
 cross-node token-match routing for model replicas, and node-local KV
 operations. The coordinator is the fleet-level component those capabilities
-hang off — it holds the shared trackers (quota, LRU, blend directory) and
+hang off — it holds the shared trackers (quota, LRU, key directory) and
 dispatches fleet-wide work (eviction, warm prefetch) to individual mp servers
 by resolving their `ip` / `http_port` from the registry.
 
 ## Transport
 
 The coordinator is a FastAPI app served by uvicorn. mp servers register /
-heartbeat / deregister over REST; they also stream L2 usage events and blend
-fingerprints in the same shape.
+heartbeat / deregister over REST; they also stream cache events in the same
+shape.
 
 | Method & path | Direction | Purpose |
 | --- | --- | --- |
@@ -36,13 +36,11 @@ fingerprints in the same shape.
 | `GET /quota` | operator | fleet-wide usage summary |
 | `POST /directory/events` | mp → coordinator | fleet cache-event ingest (key directory + usage/eviction fan-out) |
 | `GET /directory/keys` | operator/tools | paginated key listing with tier/instance/backend filters |
+| `POST /directory/blend-lookup` | mp → coordinator | fragment lookup: cached chunks contained in a request's tokens |
 | `POST /cache/prefetches` | operator/scheduler | submit warm prefetch to a named server |
 | `GET /cache/prefetches/{instance_id}/{request_id}` | operator/scheduler | poll a warm prefetch |
 | `POST/DELETE /cache/pins` | operator | pin / unpin keys against fleet-wide eviction |
 | `POST /cache/delete` | operator | delete cached objects on a named server |
-| `POST /blend/fingerprints` | mp → coordinator | publish stored blend chunk fingerprints |
-| `DELETE /blend/fingerprints` | mp → coordinator | evict blend fingerprints by storage key |
-| `POST /blend/match` | mp → coordinator | rolling-hash match a request against the directory |
 
 For server-initiated work (fleet-wide eviction, warm prefetch) a coordinator
 router resolves an instance's address from the registry (`ip` + `http_port`)
@@ -61,8 +59,9 @@ lmcache/v1/mp_coordinator/
   registry.py           # InstanceRegistry + MPInstance (pure membership)
   schemas.py            # Pydantic request/response models (shared wire contract)
   registrar.py          # mp-server-side register/heartbeat/deregister helpers
-  blend_directory.py    # GlobalBlendMatcher (chunked rolling-hash directory)
-  blend_client.py       # mp-server-side blend publish/evict/match client
+  key_directory.py      # KeyDirectory: placements + token bindings from cache events
+  blend_index.py      # BlendIndex: fragment (blend) lookup over those bindings
+  blend_client.py       # mp-server-side fragment-lookup query client
   cache_control/
     __init__.py
     event_broadcaster.py     # fans directory-applied events to registered consumers
@@ -72,12 +71,12 @@ lmcache/v1/mp_coordinator/
     resync_manager.py   # startup backfill of directory + views from GET /cache/objects
   http_apis/
     __init__.py
-    dependencies.py     # shared FastAPI dependencies (registry, blend directory, ...)
+    dependencies.py     # shared FastAPI dependencies (registry, key directory, ...)
     instances_api.py    # /instances REST resource
     health_api.py       # /healthz
     quota_api.py        # /quota/config, /quota/{cache_salt}, /quota
     cache_api.py        # /cache/prefetches, /cache/pins, /cache/delete
-    blend_directory_api.py  # /blend/fingerprints, /blend/match
+    directory_api.py    # /directory/events, /directory/lookup, /directory/blend-lookup, ...
 ```
 
 ## Request flow
@@ -116,7 +115,7 @@ sequenceDiagram
 ## Extension seam (adding a capability)
 
 `app.state` carries the **shared collaborators** every capability composes
-from: `config`, `registry`, `blend_directory`, and the `cache_control`
+from: `config`, `registry`, `key_directory`, and the `cache_control`
 managers. Endpoints use them directly — membership is thin enough to have no
 service layer (the `/instances` router calls the registry straight, matching
 the mp server's own `http_apis` convention).
@@ -132,8 +131,7 @@ To add a capability (e.g. a new domain resource):
 2. Only if the domain has real logic/state of its own (persistence,
    broadcast-on-join, background reconciliation, …) add a manager under
    `cache_control/` (or a peer package) and stash it on `app.state` in
-   `create_app`. Thin domains skip this — `quota` and `blend_directory` were
-   both added this way.
+   `create_app`. Thin domains skip this — `quota` was added this way.
 
 A capability that must react to instance join/leave can hook into the
 registration endpoint (a small observer can be reintroduced then — it was
@@ -179,17 +177,20 @@ usage stream:
   named mp server and proxies status polls.
 
 
-## Global CacheBlend directory (`blend_directory.py`)
+## Fleet CacheBlend lookup (`blend_index.py`)
 
-`GlobalBlendMatcher` is the fleet-wide fingerprint index behind cross-request
-blend reuse. Blend-enabled mp servers publish chunk fingerprints on STORE
-(`POST /blend/fingerprints`) and query them on LOOKUP (`POST /blend/match`);
-the index is chunked at the fleet chunk size (`CHUNK_SIZE`) and
-rolling-hash-matched at `BLEND_PROBE_STRIDE`. `DELETE /blend/fingerprints`
-evicts entries when the backing L2 objects are dropped so matches do not go
-stale. The mp-server-side client lives in `blend_client.py`; the wire types
-(`StoreRangeModel`, `BlendMatchRequest`, `GlobalMatchModel`, …) live in
-`schemas.py`.
+Cross-request, cross-instance blend reuse is served by the **blend index**,
+a derived view of the key directory's token bindings: no separate publish
+path, matches verified token-exact, and eviction exact because it follows
+binding lifecycle. Blend servers query it with `POST
+/directory/blend-lookup` and get `(chunk_hash, old_st, cur_st)` per match,
+which they expand into per-rank object keys with their own model and salt.
+The match window is the fleet chunk size (`CHUNK_SIZE`), probed at
+`BLEND_PROBE_STRIDE`. See [blend_index.md](blend_index.md).
+
+The previous design — `blend_directory.py` (`GlobalBlendMatcher`) with its own
+`/blend/fingerprints` publish RPC on every blend store — has been removed; see
+[blend_index.md](blend_index.md) for what changed and why.
 
 ## Concurrency & lifecycle
 
