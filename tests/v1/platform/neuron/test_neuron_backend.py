@@ -18,7 +18,6 @@ import pytest
 from lmcache.v1.platform import resolve_device_ops
 from lmcache.v1.platform.base.device_ops import DeviceOps
 from lmcache.v1.platform.neuron import NeuronDeviceSpec
-from lmcache.v1.platform.neuron.device_ops import NeuronDeviceOps
 import lmcache.v1.platform as platform_pkg
 
 
@@ -45,23 +44,7 @@ def test_neuron_spec_properties(neuron_spec: NeuronDeviceSpec) -> None:
     """NeuronDeviceSpec exposes the correct device identity."""
     assert neuron_spec.device_type == "neuron"
     assert neuron_spec.torch_module_name == "neuron"
-    assert neuron_spec.ops_cls is NeuronDeviceOps
-
-
-def test_neuron_ops_inherits_baseline() -> None:
-    """NeuronDeviceOps adds no method overrides over the base class."""
-    # Standard
-    import inspect
-
-    op_names = [
-        name
-        for name, member in vars(DeviceOps).items()
-        if not name.startswith("_")
-        and name not in ("ensure_native", "bind_native")
-        and inspect.isfunction(member)
-    ]
-    for name in op_names:
-        assert getattr(NeuronDeviceOps, name) is getattr(DeviceOps, name), name
+    assert neuron_spec.ops_cls is DeviceOps
 
 
 # -- Registry integration --------------------------------------------------
@@ -76,7 +59,7 @@ def test_neuron_registry_integration(
         "_DEVICE_REGISTRY",
         {**isolated_registry, "neuron": NeuronDeviceSpec()},
     )
-    assert type(resolve_device_ops("neuron")) is NeuronDeviceOps
+    assert type(resolve_device_ops("neuron")) is DeviceOps
 
 
 # -- Availability guards ---------------------------------------------------
@@ -108,34 +91,6 @@ def test_neuron_no_event_ipc(
 ) -> None:
     """No event IPC backend — engine-driven path only."""
     assert neuron_spec.event_ipc_backend is None
-
-
-# -- DeviceOps fallback ----------------------------------------------------
-
-
-def test_neuron_ensure_native_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
-    """ensure_native logs a warning and stays on the torch baseline."""
-    import lmcache.v1.platform.neuron.device_ops as neuron_ops_mod
-
-    warnings: list[str] = []
-    monkeypatch.setattr(
-        neuron_ops_mod.logger,
-        "warning",
-        lambda msg, *args, **kwargs: warnings.append(str(msg)),
-    )
-
-    ops = neuron_ops_mod.NeuronDeviceOps()
-    ops.ensure_native()
-    assert ops._native_bound is True
-    assert any("torch baseline" in msg for msg in warnings)
-
-
-def test_neuron_ensure_native_idempotent() -> None:
-    """Repeated ensure_native calls do not re-attempt the import."""
-    ops = NeuronDeviceOps()
-    ops.ensure_native()
-    ops.ensure_native()  # should be a no-op
-    assert ops._native_bound is True
 
 
 # -- Hardware verification (skipped on non-Neuron hosts) -------------------
