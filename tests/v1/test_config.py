@@ -8,6 +8,7 @@ import os
 import pytest
 
 # First Party
+from lmcache import torch_device_type
 from lmcache.v1.config import LMCacheEngineConfig, load_ec_engine_config
 from lmcache.v1.config_base import apply_remote_configs, validate_and_set_config_value
 
@@ -916,14 +917,16 @@ class TestNixlBufferDeviceCpuValidation:
         config = self._nixl_cpu_defaults()
         config.validate()  # Should not raise
 
+    @pytest.mark.cuda
     def test_gpu_mode_still_requires_nixl_buffer_size(self):
-        config = self._nixl_cpu_defaults(nixl_buffer_device="cuda")
+        config = self._nixl_cpu_defaults(nixl_buffer_device=torch_device_type)
         with pytest.raises(AssertionError):
             config.validate()
 
+    @pytest.mark.cuda
     def test_gpu_mode_accepts_nixl_buffer_size(self):
         config = self._nixl_cpu_defaults(
-            nixl_buffer_device="cuda", nixl_buffer_size=2**30
+            nixl_buffer_device=torch_device_type, nixl_buffer_size=2**30
         )
         config.validate()  # Should not raise
 
@@ -948,11 +951,12 @@ class TestNixlBufferDeviceCpuValidation:
         with pytest.raises(ValueError, match="has not been validated end-to-end"):
             config.validate()
 
+    @pytest.mark.cuda
     def test_gpu_mode_accepts_enable_p2p(self):
         """The P2P + NIXL storage combo is only rejected in CPU mode; the
         GPU-mode path doesn't touch LocalCPUBackend's allocator."""
         config = self._nixl_cpu_defaults(
-            nixl_buffer_device="cuda", nixl_buffer_size=2**30
+            nixl_buffer_device=torch_device_type, nixl_buffer_size=2**30
         )
         config.enable_p2p = True
         config.enable_controller = True
@@ -1026,12 +1030,13 @@ class TestNixlUseHugepagesDeprecation:
         assert config.local_cpu_use_hugepages is True
         assert "nixl_use_hugepages" not in config.extra_config
 
+    @pytest.mark.cuda
     def test_gpu_mode_drops_flag_without_aliasing(self):
         """In GPU mode the flag was always a no-op; alias would be misleading
         (LocalCPUBackend's hugepages should not be toggled by a NIXL knob in
         a GPU-only deployment). Just drop it with a warning."""
         config = self._nixl_cpu_defaults(
-            nixl_buffer_device="cuda", nixl_buffer_size=2**30
+            nixl_buffer_device=torch_device_type, nixl_buffer_size=2**30
         )
         config.extra_config["nixl_use_hugepages"] = True
         config.validate()

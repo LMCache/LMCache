@@ -18,10 +18,8 @@ import weakref
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.mp_coordinator.blend_client import (
-        BlendCoordinatorClient,
-        RemoteMatch,
-    )
+    from lmcache.v1.mp_coordinator.api import BlendMatch
+    from lmcache.v1.mp_coordinator.blend_client import BlendCoordinatorClient
 
 # Third Party
 import numpy as np
@@ -1537,48 +1535,7 @@ class BlendV3Module(InstanceLivenessTarget):
                 key.request_id,
             )
 
-        if self._coordinator is not None:
-            self._publish_fingerprints(key, chunk_hashes, tokens_in_range)
-
         return result
-
-    def _publish_fingerprints(
-        self,
-        key: IPCCacheServerKey,
-        chunk_hashes: list[bytes],
-        tokens_in_range: list[int],
-    ) -> None:
-        """Publish this stored range's chunk fingerprints to the coordinator.
-
-        Best-effort and fire-and-forget (enqueue only): one wire
-        ``ChunkFingerprint`` per stored chunk -- its content poly-hash (the same
-        ``chunk_hash_windows_numba`` the match probes, with the fleet base), its
-        shared-L2 ``object_key`` (the chunk storage key ``th``), and its token
-        position. Never raises into the store path.
-
-        Args:
-            key: The store request key (model/scope/positions).
-            chunk_hashes: Per-chunk storage keys (``th``) for the range.
-            tokens_in_range: The stored tokens ``token_ids[start:end]``.
-        """
-        coordinator = self._coordinator
-        if coordinator is None or not chunk_hashes:
-            return
-        try:
-            model_scope = key.model_name
-            store_range = {
-                "model_scope": model_scope,
-                "tokens": list(tokens_in_range),
-                "object_keys": [h.hex() for h in chunk_hashes],
-                "old_st_base": key.start,
-            }
-            coordinator.enqueue_register([store_range])
-        except Exception:
-            logger.warning(
-                "CB coordinator publish build failed for request %s "
-                "(does not affect store correctness)",
-                key.request_id,
-            )
 
     def _submit_coordinator_match(self, key: IPCCacheServerKey) -> bool:
         """Issue a fleet directory match query for this request (best-effort).
@@ -1597,7 +1554,7 @@ class BlendV3Module(InstanceLivenessTarget):
             tokens = list(key.token_ids)
             if len(tokens) < self._ctx.chunk_size:
                 return False
-            coordinator.submit_match(key.request_id, key.model_name, tokens)
+            coordinator.submit_match(key.request_id, tokens)
             return True
         except Exception:
             logger.warning(
@@ -1655,15 +1612,18 @@ class BlendV3Module(InstanceLivenessTarget):
         return segments
 
     def _build_global_segments(
-        self, matches: "list[RemoteMatch]"
+        self, matches: "list[BlendMatch]"
     ) -> list[CBMatchResult]:
         """Convert coordinator matches into chunk-granular retrievable segments.
 
-        Each coordinator ``object_key`` is the hex of the chunk's content hash
+        Each coordinator ``chunk_hash`` is the hex of the chunk's content hash
         (the same ``th`` a local ``CBMatchResult.hash`` holds), so the matches
         are returned as ``CBMatchResult`` directly: the retrieve path then
-        expands ``hash`` to per-rank shared-L2 object keys via
-        ``ipc_key_to_object_keys``, identical to local matches.
+        expands ``hash`` to per-rank object keys via
+        ``ipc_key_to_object_keys`` using *this* server's model, salt, and world
+        size, identical to local matches. A match on content another model or
+        tenant stored therefore confirmed-misses at prefetch rather than being
+        filtered coordinator-side.
 
         Args:
             matches: Matched chunks returned by the coordinator client.
@@ -1678,7 +1638,7 @@ class BlendV3Module(InstanceLivenessTarget):
                 old_ed=m.old_st + chunk_size,
                 cur_st=m.cur_st,
                 cur_ed=m.cur_st + chunk_size,
-                hash=bytes.fromhex(m.object_key),
+                hash=m.chunk_hash,
             )
             for m in matches
         ]
