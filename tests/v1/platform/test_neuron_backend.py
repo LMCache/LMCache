@@ -113,13 +113,13 @@ def test_neuron_no_event_ipc(
 # -- DeviceOps fallback ----------------------------------------------------
 
 
-def test_neuron_ensure_native_fallback(caplog: pytest.LogCaptureFixture) -> None:
+def test_neuron_ensure_native_fallback(capfd: pytest.CaptureFixture) -> None:
     """ensure_native logs a warning and stays on the torch baseline."""
     ops = NeuronDeviceOps()
-    with caplog.at_level(logging.WARNING):
-        ops.ensure_native()
+    ops.ensure_native()
     assert ops._native_bound is True
-    assert "torch baseline" in caplog.text
+    out, err = capfd.readouterr()
+    assert "torch baseline" in err
 
 
 def test_neuron_ensure_native_idempotent() -> None:
