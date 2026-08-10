@@ -21,6 +21,12 @@ from lmcache.v1.compute.attention.triton_kernels import (
     merge_attention_outputs,
 )
 
+pytestmark = [
+    pytest.mark.cuda,
+    pytest.mark.xpu,
+    pytest.mark.musa,
+]
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -135,11 +141,6 @@ class TestCausalPrefillAttention:
 
 class TestBlockSparseAttention:
     """Tests for block_sparse_attention kernel."""
-
-    pytestmark = pytest.mark.skipif(
-        not (torch_dev.is_available() and torch_device_type == "cuda"),
-        reason="Block-sparse Triton tests require CUDA backend",
-    )
 
     def _make_full_mask_csr(self, num_q_blocks, num_kv_blocks, device):
         """CSR for a fully dense mask (all blocks attended)."""
