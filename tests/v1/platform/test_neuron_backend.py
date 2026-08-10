@@ -113,13 +113,21 @@ def test_neuron_no_event_ipc(
 # -- DeviceOps fallback ----------------------------------------------------
 
 
-def test_neuron_ensure_native_fallback(capfd: pytest.CaptureFixture) -> None:
+def test_neuron_ensure_native_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     """ensure_native logs a warning and stays on the torch baseline."""
-    ops = NeuronDeviceOps()
+    import lmcache.v1.platform.neuron.device_ops as neuron_ops_mod
+
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        neuron_ops_mod.logger,
+        "warning",
+        lambda msg, *args, **kwargs: warnings.append(str(msg)),
+    )
+
+    ops = neuron_ops_mod.NeuronDeviceOps()
     ops.ensure_native()
     assert ops._native_bound is True
-    out, err = capfd.readouterr()
-    assert "torch baseline" in err
+    assert any("torch baseline" in msg for msg in warnings)
 
 
 def test_neuron_ensure_native_idempotent() -> None:
