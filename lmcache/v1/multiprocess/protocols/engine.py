@@ -166,10 +166,9 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         #   - gpu_block_ids: list[list[int]] - GPU block IDs containing the
         #     data, indexed by LMCache KV group index.
         #   - event_ipc_handle: bytes - CUDA event IPC handle for synchronization
-        #   - layerwise: bool - If True, use per-layer transfer path
         # Returns: tuple[bytes, bool] - (CUDA event handle, success flag)
         "STORE": ProtocolDefinition(
-            payload_classes=[KeyType, int, list[list[int]], bytes, bool],
+            payload_classes=[KeyType, int, list[list[int]], bytes],
             response_class=tuple[bytes, bool],
             handler_type=HandlerType.BLOCKING,
         ),

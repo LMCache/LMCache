@@ -1455,7 +1455,6 @@ class LMCacheMPWorkerAdapter:
             self._block_ids_per_group(op),
             event,
             self.blocks_in_chunk,
-            **({"layerwise": True} if self._layerwise_loading else {}),
         )
         self.store_futures[request_id] = future
         self.store_events[request_id] = event

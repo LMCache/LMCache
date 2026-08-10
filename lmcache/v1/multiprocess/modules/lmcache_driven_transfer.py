@@ -1554,7 +1554,6 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         instance_id: int,
         gpu_block_ids: list[list[int]],
         event_ipc_handle: bytes,
-        layerwise: bool = False,
     ) -> tuple[bytes, bool]:
         """Store the GPU KV cache blocks to CPU.
 
@@ -1565,7 +1564,6 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             gpu_block_ids: GPU block IDs to store, indexed by LMCache KV
                 group index.
             event_ipc_handle: The IPC handle of the event to wait on.
-            layerwise: Ignored. Retained for API compatibility.
 
         Returns:
             A tuple where the first element is the IPC handle of the event

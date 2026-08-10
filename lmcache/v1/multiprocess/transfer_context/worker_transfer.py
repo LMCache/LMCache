@@ -510,7 +510,6 @@ class LMCacheDrivenTransferContext(TransferContext):
         block_ids: list[list[int]],
         event: IPCEvent,
         _blocks_in_chunk: int,
-        layerwise: bool = False,
     ) -> MessagingFuture:
         """Submit a handle-based store ordered by ``event``.
 
@@ -523,7 +522,6 @@ class LMCacheDrivenTransferContext(TransferContext):
             block_ids: Engine block IDs indexed by LMCache KV group.
             event: Producer event that orders reads of the engine KV cache.
             _blocks_in_chunk: Engine blocks per chunk (unused by this transport).
-            layerwise: If True, store as per-layer MemoryObjs.
 
         Returns:
             A device-event-aware future for the server response.
@@ -546,7 +544,7 @@ class LMCacheDrivenTransferContext(TransferContext):
         return self._send_request(
             self._mq_client,
             RequestType.STORE,
-            [key, instance_id, block_ids, event_ipc_handle, layerwise],
+            [key, instance_id, block_ids, event_ipc_handle],
         ).to_device_future(device=self._device)
 
     def submit_q_store(
