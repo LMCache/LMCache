@@ -102,11 +102,11 @@ jobs:
                     WHEEL=$(ls /work/LMCache/dist/*.whl | head -n 1)
                     python3 -m pip install --no-deps "$WHEEL"
                     python3 - <<"PY"
-import lmcache
-import torch
-print("LMCache import OK")
-print("Torch:", torch.__version__)
-PY
+                      import lmcache
+                      import torch
+                      print("LMCache import OK")
+                      print("Torch:", torch.__version__)
+                      PY
                   '
 
             - name: Upload XPU release artifacts to GHA
