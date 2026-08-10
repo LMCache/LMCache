@@ -60,9 +60,9 @@ def _install_c_ops_shim() -> None:
     def _c_ops_getattr(name: str) -> object:
         if name in _C_OPS_NATIVE_NAMES:
             # First Party
-            from lmcache.v1.platform import ops_types
+            from lmcache import lmcache_native
 
-            return getattr(ops_types, name)
+            return getattr(lmcache_native, name)
         return getattr(ops, name)
 
     def _c_ops_dir() -> list[str]:

@@ -4,7 +4,7 @@
 These tests are the acceptance gate for the DeviceOps hierarchy.  They stay
 platform-agnostic by exercising the torch baseline, the ``DeviceSpec``
 dispatch, the ``lmcache.c_ops`` shim, and instance-level ``bind_native``
-without requiring any compiled accelerator module.
+while using the device-independent native module for shared enums.
 """
 
 # Standard
@@ -16,15 +16,12 @@ import pytest
 
 # First Party
 from lmcache import torch_dev, torch_device_type
+from lmcache.lmcache_native import EngineKVFormat, TransferDirection
 from lmcache.v1.platform import resolve_device_ops
 from lmcache.v1.platform.base.device_ops import DeviceOps
 from lmcache.v1.platform.base.device_spec import DeviceSpec
 from lmcache.v1.platform.cpu.device_ops import CpuDeviceOps
-from lmcache.v1.platform.ops_types import (
-    EngineKVFormat,
-    PageBufferShapeDesc,
-    TransferDirection,
-)
+from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 import lmcache.v1.platform as platform_pkg
 
 # Derive op names from the class body: regular instance-method functions,
@@ -66,11 +63,8 @@ def test_base_class_declares_every_op_as_instance_method() -> None:
         )
 
 
-def test_base_class_has_all_types() -> None:
-    """DeviceOps exposes shared types as class attributes."""
-    assert DeviceOps.TransferDirection is TransferDirection
-    assert DeviceOps.EngineKVFormat is EngineKVFormat
-    assert DeviceOps.GPUKVFormat is EngineKVFormat
+def test_base_class_has_python_fallback_types() -> None:
+    """DeviceOps exposes the Python-only fallback types it owns."""
     assert DeviceOps.PageBufferShapeDesc is PageBufferShapeDesc
     assert callable(DeviceOps.set_shape_desc_dtype)
 

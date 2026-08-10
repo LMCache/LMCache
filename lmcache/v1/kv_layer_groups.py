@@ -17,6 +17,7 @@ from lmcache.utils import lmcache_deprecate
 from lmcache.v1.distributed.api import AttnWindowDesc
 from lmcache.v1.platform.ops_types import set_shape_desc_dtype
 import lmcache.c_ops as lmc_ops
+import lmcache.lmcache_native as lmcache_native
 
 if TYPE_CHECKING:
     # First Party
@@ -61,7 +62,7 @@ class KernelGroupIdentity(NamedTuple):
     block_size: int
     engine_group_idx: int
     dtype: torch.dtype
-    engine_kv_format: "lmc_ops.EngineKVFormat"
+    engine_kv_format: "lmcache_native.EngineKVFormat"
 
 
 LayerGroupIdentity = KernelGroupIdentity  # Alias for compatibility
@@ -75,7 +76,7 @@ EXCLUDED_ENGINE_GROUP = -1
 
 def group_layers_by_identity(
     kv_caches: "DiscoverableKVCache",
-    engine_kv_formats: "Sequence[lmc_ops.EngineKVFormat]",
+    engine_kv_formats: "Sequence[lmcache_native.EngineKVFormat]",
     per_layer_engine_group_idx: Sequence[int] | None = None,
 ) -> list[tuple[LayerGroupIdentity, list[int]]]:
     """Partition layer indices by :data:`LayerGroupIdentity`.
@@ -108,7 +109,6 @@ def group_layers_by_identity(
         get_dtype,
         get_head_size,
         get_num_heads,
-        is_mla,
     )
 
     num_layers = len(engine_kv_formats)
@@ -133,7 +133,7 @@ def group_layers_by_identity(
         if engine_group_idx == EXCLUDED_ENGINE_GROUP:
             continue
         layer_format = engine_kv_formats[idx]
-        mla = is_mla(layer_format)
+        mla = lmcache_native.is_mla(layer_format)
         kv_size = 1 if mla else 2
         nh = 1 if mla else get_num_heads(kv_caches, layer_format, idx)
         hs = get_head_size(kv_caches, layer_format, idx)
@@ -190,7 +190,7 @@ class KernelGroupInfo:
     """Torch dtype of the KV cache tensors for this group. Used for
     kernel template instantiation; see class docstring for why we keep
     this alongside ``shape_desc.element_size``."""
-    engine_kv_format: "lmc_ops.EngineKVFormat | None" = None
+    engine_kv_format: "lmcache_native.EngineKVFormat | None" = None
     """Per-group Engine KV format, read via
     ``BaseCacheContext.get_engine_kv_format`` so mixed-format models dispatch each
     group with its own. ``None`` only for bench bookkeeping groups from
@@ -301,7 +301,7 @@ class KVLayerGroupsManager:
     def __init__(
         self,
         kv_caches: "DiscoverableKVCache",
-        engine_kv_formats: "Sequence[lmc_ops.EngineKVFormat]",
+        engine_kv_formats: "Sequence[lmcache_native.EngineKVFormat]",
         engine_group_infos: "Sequence[EngineGroupInfo]" = (),
         lmcache_tokens_per_chunk: int = 256,
         separate_object_groups: bool = False,
