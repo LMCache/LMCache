@@ -15,7 +15,7 @@ import uuid
 try:
     import tomllib  # Python 3.11+ stdlib
 except ModuleNotFoundError:  # pragma: no cover (Python 3.10 only)
-    import tomli as tomllib  # third-party fallback for Python 3.10
+    import tomli as tomllib  # type: ignore[no-redef, import-not-found]
 
 # First Party
 from lmcache.logging import init_logger
