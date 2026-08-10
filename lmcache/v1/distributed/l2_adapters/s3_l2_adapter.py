@@ -71,22 +71,17 @@ def _string_to_object_key(name: str) -> ObjectKey:
         ValueError: ``name`` does not match the expected format.
     """
     parts = name.split("@")
-    layer_id = -1
-    cache_salt = ""
     if len(parts) == 4:
         model_name, kv_rank_hex, object_group_id_hex, chunk_hash_hex = parts
+        cache_salt = ""
     elif len(parts) == 5:
-        model_name, kv_rank_hex, object_group_id_hex, chunk_hash_hex, fifth = parts
-        if fifth.startswith("L") and fifth[1:].isdigit():
-            layer_id = int(fifth[1:])
-        else:
-            cache_salt = fifth
-    elif len(parts) == 6:
-        model_name, kv_rank_hex, object_group_id_hex, chunk_hash_hex, layer_field, cache_salt = parts
-        if layer_field.startswith("L") and layer_field[1:].isdigit():
-            layer_id = int(layer_field[1:])
-        else:
-            raise ValueError(f"unparsable S3 object name {name!r}: bad layer field {layer_field!r}")
+        (
+            model_name,
+            kv_rank_hex,
+            object_group_id_hex,
+            chunk_hash_hex,
+            cache_salt,
+        ) = parts
     else:
         raise ValueError(f"unparsable S3 object name {name!r}: wrong field count")
     try:
@@ -114,7 +109,6 @@ def _string_to_object_key(name: str) -> ObjectKey:
         kv_rank=kv_rank,
         object_group_id=object_group_id,
         cache_salt=cache_salt,
-        layer_id=layer_id,
     )
 
 
@@ -189,8 +183,6 @@ def _object_key_to_string(key: ObjectKey) -> str:
         f"{key.model_name}@{key.kv_rank:08x}"
         f"@{key.object_group_id:x}@{key.chunk_hash.hex()}"
     )
-    if key.layer_id >= 0:
-        base = f"{base}@L{key.layer_id}"
     if key.cache_salt:
         return f"{base}@{key.cache_salt}"
     return base
