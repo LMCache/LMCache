@@ -50,7 +50,7 @@ class PageBufferShapeDesc:
         "element_size",
         "block_stride_elems",
         "dtype",
-        "kv_contiguous",
+        "kv_interleaved",
     )
 
     def __init__(self) -> None:
@@ -65,10 +65,13 @@ class PageBufferShapeDesc:
         # consumer that needs exact addressing must check this.
         self.block_stride_elems: int = 0
         self.dtype: torch.dtype | None = None
-        # When True, the LMCache object layout is (nl, kv_size, slots, hidden)
-        # instead of the default (kv_size, nl, slots, hidden). K and V for
-        # the same layer are adjacent, enabling single-memcpy per-layer H2D.
-        self.kv_contiguous: bool = False
+        # When True, the LMCache host buffer uses per-layer interleaved
+        # layout: [K0,V0, K1,V1, ..., Kn,Vn] instead of the default grouped
+        # layout [K0,K1,...,Kn, V0,V1,...,Vn].  This is set exclusively by
+        # the MP LMCache-driven layerwise store/retrieve path
+        # (LMCACHE_MP_LAYERWISE_BATCH > 0) to enable single-memcpy per-layer
+        # H2D transfers.
+        self.kv_interleaved: bool = False
 
 
 class _NativePlanType:

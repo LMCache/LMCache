@@ -403,13 +403,13 @@ class GPUCacheContext(BaseCacheContext):
             self.group_kv_pointers_.append(list_to_gpu_tensor(ptrs, self.device_))
 
         # Temporary GPU buffer for transfers — a single flat uint8 buffer.
-        # 8 batch slots: per-chunk uses 0-3 (batch_size=4), per-layer uses
-        # the full flat region (8*nl per-layer slots, covering ~164K tokens).
+        # 4 batch slots: per-chunk processes 4 chunks at a time; per-layer
+        # reinterprets the flat region as a byte pool.
         self._temp_buffer = _TempGPUBuffer(
             kv_layer_groups_manager=self.kv_layer_groups_manager_,
             lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
             device=self.device_,
-            max_batch_size=8,
+            max_batch_size=4,
         )
 
         # GPU streams

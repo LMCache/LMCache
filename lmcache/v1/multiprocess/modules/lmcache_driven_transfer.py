@@ -290,7 +290,7 @@ def _run_object_group_transfer_plan(
     batch_size: int,
     skip_first_n_tokens: int,
     direction: "lmcache_native.TransferDirection",
-    kv_contiguous: bool = False,
+    kv_interleaved: bool = False,
 ) -> None:
     """Plan and execute one object group's transfer in a single native call.
 
@@ -317,6 +317,13 @@ def _run_object_group_transfer_plan(
     Raises:
         ValueError: If a None entry is found in memory_objs when direction is
             H2D, or if an object's size does not match its GPU staging buffer.
+
+    Note:
+        ``kv_interleaved`` is used exclusively by the MP LMCache-driven
+        layerwise mode (LMCACHE_MP_LAYERWISE_BATCH > 0).  When True the
+        scatter/gather kernel treats the host buffer as per-layer
+        interleaved [K0,V0, K1,V1, ...] instead of grouped
+        [K0,K1,..., V0,V1,...].
     """
     lmcache_chunk_size = cache_context.lmcache_tokens_per_chunk
     kv_groups_manager = cache_context.kv_layer_groups_manager
@@ -352,7 +359,7 @@ def _run_object_group_transfer_plan(
         ]
 
         sd = cache_context.get_shape_desc(kernel_group_id)
-        if kv_contiguous:
+        if kv_interleaved:
             sd.lmcache_kv_interleaved = True
 
         spec_index_by_kg[kernel_group_id] = len(kernel_group_specs)
@@ -467,7 +474,7 @@ def transfer_kv_per_object_group(
     batch_size: int,
     skip_first_n_tokens: int,
     direction: "lmcache_native.TransferDirection",
-    kv_contiguous: bool = False,
+    kv_interleaved: bool = False,
 ) -> None:
     """Helper function to transfer memory objects of a single object group
     to/from GPU, with batching support.
@@ -488,6 +495,10 @@ def transfer_kv_per_object_group(
             the retrieve range. This avoids overwriting APC-shared GPU blocks that
             may be read concurrently by other requests.
         direction: The transfer direction, H2D (retrieve) or D2H (store).
+        kv_interleaved: If True, the scatter/gather kernel uses per-layer
+            interleaved host buffer layout [K0,V0, K1,V1, ...].
+            Only set by the MP LMCache-driven layerwise store path
+            (LMCACHE_MP_LAYERWISE_BATCH > 0).
 
     Raises:
         ValueError: If it founds None entry in memory_objs when direction is H2D.
@@ -506,7 +517,7 @@ def transfer_kv_per_object_group(
             batch_size,
             skip_first_n_tokens,
             direction,
-            kv_contiguous=kv_contiguous,
+            kv_interleaved=kv_interleaved,
         )
         return
 
@@ -1748,6 +1759,10 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                     ]
 
                     # NOTE: batch_size must stay 1 for store.
+                    # kv_interleaved: when layerwise loading is enabled
+                    # (LMCACHE_MP_LAYERWISE_BATCH > 0), store D2H writes
+                    # in per-layer interleaved layout [K0,V0,K1,V1,...]
+                    # so layerwise retrieve can do single-memcpy per layer.
                     transfer_kv_per_object_group(
                         cache_context,
                         block_ids_per_group_gpu,
@@ -1756,7 +1771,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                         batch_size=1,
                         skip_first_n_tokens=0,
                         direction=lmcache_native.TransferDirection.D2H,
-                        kv_contiguous=self._ctx.layerwise_loading,
+                        kv_interleaved=self._ctx.layerwise_loading,
                     )
 
                 store_succeeded = True
