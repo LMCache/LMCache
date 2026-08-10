@@ -25,6 +25,8 @@ import lmcache.c_ops as lmc_ops
 class NL_X_NB_BS_NH_CS_Spec(KVFormatSpec):
     engine_kv_format = lmc_ops.EngineKVFormat.NL_X_NB_BS_NH_CS
     attention_backends = ("vLLM non-MLA blocks-first, fused K/V (NHD)",)
+    is_layer_list = True
+    is_fused_packed = True
 
     def num_layers(self) -> int:
         return len(self.kv_caches)

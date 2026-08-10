@@ -20,7 +20,7 @@ pytest.importorskip("vllm", reason="MP connector imports vLLM at module top")
 from vllm.v1.utils import ConstantList  # noqa: E402
 
 # First Party
-from lmcache.integration.vllm.lmcache_mp_connector import (  # noqa: E402
+from lmcache.integration.vllm.lmcache_mp_metadata import (  # noqa: E402
     LMCacheMPRequestMetadata,
     LMCacheMPRequestState,
     LMCacheMPRequestTracker,

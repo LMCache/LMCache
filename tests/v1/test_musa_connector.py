@@ -26,6 +26,8 @@ from tests.v1.utils import (
 )
 import lmcache.c_ops as lmc_ops
 
+pytestmark = pytest.mark.musa
+
 
 def _skip_if_no_musa() -> None:
     if not hasattr(torch, "musa") or not torch.musa.is_available():

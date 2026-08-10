@@ -82,8 +82,18 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         Args:
             init_size (int): Initial size of the memory allocation in bytes.
             final_size (int): Final size of the memory allocation in bytes.
-            align_bytes (int, optional): Alignment in for the underlying allocations
+            align_bytes (int, optional): Alignment for the underlying allocations.
+                Must be a positive power of two. The buffer's base address is
+                aligned to this value, not merely the offsets within it.
+
+        Raises:
+            ValueError: If ``align_bytes`` is not a positive power of two.
+            RuntimeError: If the platform does not support memory pinning, or if
+                the allocated buffer could not be aligned to ``align_bytes``.
         """
+        if align_bytes <= 0 or align_bytes & (align_bytes - 1) != 0:
+            raise ValueError("align_bytes must be a positive power of two")
+
         # Whether using NUMA allocation
         self._use_numa = numa_mapping is not None
         # Currently pinned size, only accessed by the expansion thread
@@ -109,8 +119,27 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
             buf = arr_type.from_address(ptr)
             self._buffer = torch.frombuffer(buf, dtype=torch.uint8)
         else:
-            self._buffer = torch.empty(
-                self._final_size, dtype=torch.uint8, device="cpu", pin_memory=False
+            # torch.empty() only guarantees 64-byte alignment, but consumers of
+            # get_l1_memory_desc() (O_DIRECT, RDMA/GDS) need the buffer base
+            # itself aligned to align_bytes.
+            backing = torch.empty(
+                self._final_size + align_bytes - 1,
+                dtype=torch.uint8,
+                device="cpu",
+                pin_memory=False,
+            )
+            offset = (-backing.data_ptr()) % align_bytes
+            # Slice shares storage with `backing`; no separate reference needed.
+            self._buffer = backing[offset : offset + self._final_size]
+
+        # Fail loudly here rather than let a misaligned buffer surface as an
+        # O_DIRECT EINVAL somewhere downstream.
+        base_ptr = self._buffer.data_ptr()
+        if base_ptr % align_bytes != 0:
+            raise RuntimeError(
+                f"LazyMemoryAllocator buffer base {base_ptr:#x} is not aligned "
+                f"to align_bytes={align_bytes} (remainder "
+                f"{base_ptr % align_bytes})."
             )
 
         # Pin the first `curr_size` bytes (aligned to the internal chunk size)

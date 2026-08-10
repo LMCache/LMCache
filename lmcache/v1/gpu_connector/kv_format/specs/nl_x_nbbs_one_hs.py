@@ -22,6 +22,9 @@ import lmcache.c_ops as lmc_ops
 class NL_X_NBBS_ONE_HS_Spec(KVFormatSpec):
     engine_kv_format = lmc_ops.EngineKVFormat.NL_X_NBBS_ONE_HS
     attention_backends = ("SGLang MLA",)
+    is_layer_list = True
+    is_mla = True
+    is_pbs_fused = True
 
     def num_layers(self) -> int:
         return len(self.kv_caches)
