@@ -148,10 +148,13 @@ points:
   reads whose *destination* sits in a single registered region larger than
   ~4 GiB run at ~55% of line rate (NIC translation-cache pressure on the
   requester; measured 9.3 → 6.0 GB/s on 100 GbE RoCE), so the MP server's
-  `P2PConfig` defaults to 3.5 GiB slices. Slice boundaries are rounded down to
-  `align_bytes` multiples so no transfer page straddles two registrations, and
-  nixl/UCX transparently splits reads that span a slice boundary — the
-  page-index math and the descriptor list are unaffected by slicing.
+  `P2PConfig.nixl_mr_slice_bytes` (CLI `--p2p-nixl-mr-slice-bytes`) defaults to
+  3.5 GiB slices. Slice boundaries are rounded down to `align_bytes` multiples
+  so no transfer page straddles two registrations, and nixl/UCX transparently
+  splits reads that span a slice boundary — the page-index math and the
+  descriptor list are unaffected by slicing. The slice layout itself is
+  computed by the pure function `compute_mr_slice_regions`, unit-tested
+  without a nixl runtime.
 - **Handshake over ZMQ.** Metadata is exchanged over a ZMQ `REP`/`REQ` socket
   (not the LMCache MQ — that would be overkill and would leak transfer-channel
   functions into the global MQ). The messages are a small `msgspec` tagged union

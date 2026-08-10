@@ -257,6 +257,12 @@ def test_sliced_registration_serves_read_across_slice_boundary():
         ctx_b = NixlTransferChannelContext(
             desc_b, listen_url=url_b, advertise_url=url_b, mr_slice_bytes=1024
         )
+        # Slicing must actually have happened -- guard against a regression
+        # that ignores mr_slice_bytes and registers one region (a single-MR
+        # read across [768, 1792) would pass the data checks below too).
+        assert ctx_a.num_mr_slices == _BUF_SIZE // 1024
+        assert ctx_b.num_mr_slices == _BUF_SIZE // 1024
+
         client = ctx_a.get_transfer_channel_client(ctx_b.advertise_url)
 
         # [768, 1792) crosses the slice boundary at 1024 on both sides.

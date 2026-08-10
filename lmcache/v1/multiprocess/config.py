@@ -166,11 +166,12 @@ class P2PConfig:
     transfer_engine: str = "nixl"
     """Transfer-channel implementation to use."""
 
-    mr_slice_bytes: int = 3_758_096_384
-    """Maximum bytes per transfer-channel memory-registration slice; 0
-    registers the L1 buffer as a single region. RDMA-read throughput on the
-    requesting peer drops sharply (~9.3 to ~6 GB/s on 100 GbE) once a single
-    registration exceeds ~4 GiB, so the default keeps slices at 3.5 GiB."""
+    nixl_mr_slice_bytes: int = 3_758_096_384
+    """Maximum bytes per nixl memory-registration slice; 0 registers the L1
+    buffer as a single region. RDMA-read throughput on the requesting peer
+    drops sharply (~9.3 to ~6 GB/s on 100 GbE) once a single registration
+    exceeds ~4 GiB, so the default keeps slices at 3.5 GiB. Only consumed by
+    the nixl transfer engine."""
 
     @property
     def enabled(self) -> bool:
@@ -494,12 +495,13 @@ def add_p2p_args(
         help="Transfer-channel implementation to use. Default is nixl.",
     )
     group.add_argument(
-        "--p2p-mr-slice-bytes",
+        "--p2p-nixl-mr-slice-bytes",
         type=int,
-        default=DEFAULT_P2P_CONFIG.mr_slice_bytes,
-        help="Maximum bytes per transfer-channel memory-registration slice; "
+        default=DEFAULT_P2P_CONFIG.nixl_mr_slice_bytes,
+        help="Maximum bytes per nixl memory-registration slice; "
         "0 registers the L1 buffer as a single region. Default is 3.5 GiB "
-        "(single registrations beyond ~4 GiB degrade RDMA-read throughput).",
+        "(single registrations beyond ~4 GiB degrade RDMA-read throughput). "
+        "Only consumed by the nixl transfer engine.",
     )
     return parser
 
@@ -521,8 +523,8 @@ def parse_args_to_p2p_config(
         lookup_timeout=getattr(args, "p2p_lookup_timeout", 30.0),
         load_timeout=getattr(args, "p2p_load_timeout", 30.0),
         transfer_engine=getattr(args, "p2p_transfer_engine", "nixl"),
-        mr_slice_bytes=getattr(
-            args, "p2p_mr_slice_bytes", DEFAULT_P2P_CONFIG.mr_slice_bytes
+        nixl_mr_slice_bytes=getattr(
+            args, "p2p_nixl_mr_slice_bytes", DEFAULT_P2P_CONFIG.nixl_mr_slice_bytes
         ),
     )
 

@@ -234,17 +234,17 @@ def _parse_p2p(argv: list[str]) -> P2PConfig:
     return parse_args_to_p2p_config(parser.parse_args(argv))
 
 
-def test_p2p_mr_slice_defaults_to_3_5_gib():
+def test_p2p_nixl_mr_slice_defaults_to_3_5_gib():
     config = _parse_p2p([])
-    assert config.mr_slice_bytes == 3_758_096_384
-    assert config.mr_slice_bytes == P2PConfig().mr_slice_bytes
+    assert config.nixl_mr_slice_bytes == 3_758_096_384
+    assert config.nixl_mr_slice_bytes == P2PConfig().nixl_mr_slice_bytes
 
 
-def test_p2p_mr_slice_flag_is_parsed():
-    config = _parse_p2p(["--p2p-mr-slice-bytes", "1073741824"])
-    assert config.mr_slice_bytes == 1073741824
+def test_p2p_nixl_mr_slice_flag_is_parsed():
+    config = _parse_p2p(["--p2p-nixl-mr-slice-bytes", "1073741824"])
+    assert config.nixl_mr_slice_bytes == 1073741824
 
 
-def test_p2p_mr_slice_zero_disables_slicing():
-    config = _parse_p2p(["--p2p-mr-slice-bytes", "0"])
-    assert config.mr_slice_bytes == 0
+def test_p2p_nixl_mr_slice_zero_disables_slicing():
+    config = _parse_p2p(["--p2p-nixl-mr-slice-bytes", "0"])
+    assert config.nixl_mr_slice_bytes == 0
