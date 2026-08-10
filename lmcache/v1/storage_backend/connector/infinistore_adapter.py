@@ -24,7 +24,7 @@ class InfinistoreConnectorAdapter(ConnectorAdapter):
         # Local
         from .infinistore_connector import InfinistoreConnector
 
-        logger.info(f"Creating Infinistore connector for URL: {context.url}")
+        logger.info("Creating Infinistore connector for URL: %s", context.url)
         hosts = context.url.split(",")
         if len(hosts) > 1:
             raise ValueError(
