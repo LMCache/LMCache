@@ -113,7 +113,7 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
                 LayoutHints,
                 list[EngineGroupInfo],
             ],
-            response_class=None,
+            response_class=int,
             handler_type=HandlerType.SYNC,
         ),
         # Unregister KV Cache

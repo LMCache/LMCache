@@ -5,7 +5,6 @@
 from dataclasses import dataclass
 from itertools import islice
 from typing import Any, Generator, Sequence, cast
-import os
 import threading
 import time
 
@@ -360,7 +359,7 @@ def _run_object_group_transfer_plan(
 
         sd = cache_context.get_shape_desc(kernel_group_id)
         if kv_interleaved:
-            sd.lmcache_kv_interleaved = True
+            sd.kv_interleaved = True
 
         spec_index_by_kg[kernel_group_id] = len(kernel_group_specs)
         kernel_group_specs.append(
@@ -650,6 +649,7 @@ def transfer_kv_layerwise(
     layer_events: list,
     event_backend: EventIPCBackend,
     batch_leader_map: dict[int, int] | None = None,
+    layerwise_batch: int = 1,
 ) -> None:
     """Transfer KV cache in layer-major order, recording per-layer events.
 
@@ -745,7 +745,7 @@ def transfer_kv_layerwise(
             single_layer_sd.hs = sd.hs
             single_layer_sd.element_size = sd.element_size
             single_layer_sd.block_stride_elems = sd.block_stride_elems
-            single_layer_sd.lmcache_kv_interleaved = False
+            single_layer_sd.kv_interleaved = False
 
             group_kv_pointers = cache_context.get_kernel_group_kv_pointers(
                 kernel_group_id
@@ -814,9 +814,7 @@ def transfer_kv_layerwise(
     # overhead.  0 = layerwise disabled (caller should not reach here);
     # 1 = one event per layer (original behaviour); N>1 = N layers
     # transferred + scattered before events are recorded.
-    layerwise_batch_size = max(
-        1, int(os.environ.get("LMCACHE_MP_LAYERWISE_BATCH", "1"))
-    )
+    layerwise_batch_size = max(1, layerwise_batch)
     use_native_layerwise_plan = _HAS_NATIVE_OBJECT_GROUP_TRANSFER
 
     # Flatten all valid chunks for single-launch-per-layer optimization.
@@ -930,7 +928,7 @@ def transfer_kv_layerwise(
             n_layer_sd.hs = sd.hs
             n_layer_sd.element_size = sd.element_size
             n_layer_sd.block_stride_elems = sd.block_stride_elems
-            n_layer_sd.lmcache_kv_interleaved = True
+            n_layer_sd.kv_interleaved = True
 
             n_layer_kv_ptrs = group_kv_pointers[first_local : first_local + n_in_batch]
 
@@ -1443,7 +1441,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         engine_type: EngineType,
         layout_hints: LayoutHints,
         engine_group_infos: list[EngineGroupInfo],
-    ) -> None:
+    ) -> int:
         """Register the KV cache tensors for a given GPU instance ID.
 
         Args:
@@ -1472,7 +1470,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                     "Instance %d already registered; refreshing liveness",
                     instance_id,
                 )
-                return
+                return self._ctx.layerwise_batch
 
         # Build the context and layout descriptor outside the lock.
         cache_context = create_cache_context(
@@ -1523,6 +1521,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             instance_id,
             cache_context.num_layers,
         )
+        return self._ctx.layerwise_batch
 
     def unregister_kv_cache(self, instance_id: int) -> None:
         """Unregister the KV cache tensors for a given GPU instance ID.
@@ -1916,12 +1915,12 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             expected_retained = sum(num_chunks - skip for skip in group_skips)
 
             # Create per-layer events if layerwise mode is enabled
-            num_total_layers = sum(
-                kgr.num_layers
-                for kgr in cache_context.kv_layer_groups_manager.kernel_groups
-            )
             layer_events = []
             if layerwise:
+                num_total_layers = sum(
+                    kgr.num_layers
+                    for kgr in cache_context.kv_layer_groups_manager.kernel_groups
+                )
                 layer_events = [
                     event_backend.create_event(cache_context.device)
                     for _ in range(num_total_layers)
@@ -1963,6 +1962,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                                 layer_events=layer_events,
                                 event_backend=event_backend,
                                 batch_leader_map=batch_leader_map,
+                                layerwise_batch=self._ctx.layerwise_batch,
                             )
                         else:
                             transfer_kv_per_object_group(

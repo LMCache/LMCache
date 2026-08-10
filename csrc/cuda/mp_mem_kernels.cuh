@@ -37,7 +37,7 @@ struct PageBufferShapeDesc {
   // per-layer: [K0,V0,K1,V1,...]) instead of the default 2LTD layout
   // [2, L, T, D] (all-K then all-V). The scatter kernel selects the
   // corresponding offset formula.
-  bool lmcache_kv_interleaved = false;
+  bool kv_interleaved = false;
 
   template <typename ScalarType>
   __host__ __device__ inline size_t scalars_per_head() const {

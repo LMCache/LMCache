@@ -132,7 +132,7 @@ __device__ inline size_t calculate_lmcache_global_offset(
     const int lmcache_chunk_size,  // e.g., 256
     const PageBufferShapeDesc shape_desc) {
   size_t scalars_per_token = shape_desc.scalars_per_token<ScalarType>();
-  if (shape_desc.lmcache_kv_interleaved) {
+  if (shape_desc.kv_interleaved) {
     // L2TD layout: [L, 2, T, D] — per-layer interleaved [K0,V0,K1,V1,...]
     return token_offset_in_lmcache_object * scalars_per_token +
            k_or_v * lmcache_chunk_size * scalars_per_token +

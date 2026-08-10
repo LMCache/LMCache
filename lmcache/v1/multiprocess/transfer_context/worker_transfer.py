@@ -414,6 +414,7 @@ class LMCacheDrivenTransferContext(TransferContext):
         self._send_request: SendRequest | None = None
         self._device: torch.device | None = None
         self._event_backend: EventIPCBackend | None = None
+        self._layerwise_batch: int = 0
 
     def register(
         self,
@@ -467,7 +468,7 @@ class LMCacheDrivenTransferContext(TransferContext):
                 list(engine_group_infos),
             ],
         )
-        future.result(timeout=mq_timeout)
+        self._layerwise_batch = future.result(timeout=mq_timeout) or 0
         self._device = device
         self._event_backend = event_backend
 
@@ -632,6 +633,11 @@ class LMCacheDrivenTransferContext(TransferContext):
         if layerwise:
             return LayerwiseDeviceMessagingFuture(raw_future, device=self._device)
         return raw_future.to_device_future(device=self._device)
+
+    @property
+    def layerwise_loading(self) -> bool:
+        """Whether the server has layerwise loading enabled."""
+        return self._layerwise_batch > 0
 
     def close(self) -> None:
         """Release the message queue and cached event-backend state."""

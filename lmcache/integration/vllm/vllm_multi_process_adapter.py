@@ -1134,12 +1134,9 @@ class LMCacheMPWorkerAdapter:
         # exactly once, or async loads hang in WAITING_FOR_REMOTE_KVS.
         self._dropped_retrieves: set[str] = set()
 
-        # Per-layer KV loading: when True, retrieve requests use
-        # layerwise transfer and return LayerwiseDeviceMessagingFuture
-        # so wait_for_layer_load can synchronize per layer.
-        self._layerwise_loading: bool = (
-            int(os.environ.get("LMCACHE_MP_LAYERWISE_BATCH", "0")) > 0
-        )
+        # Per-layer KV loading: set after registration from the
+        # server's advertised layerwise_batch value.
+        self._layerwise_loading: bool = False
 
         # The store requests that have finished execution in LMCache
         self.finished_stores: set[str] = set()
@@ -1320,6 +1317,8 @@ class LMCacheMPWorkerAdapter:
                 engine_group_infos=self.engine_group_infos,
                 engine_type=EngineType.VLLM,
             )
+            if hasattr(transfer_ctx, "layerwise_loading"):
+                self._layerwise_loading = transfer_ctx.layerwise_loading
         except TimeoutError:
             raise ConnectionError(
                 "LMCache server did not respond to "

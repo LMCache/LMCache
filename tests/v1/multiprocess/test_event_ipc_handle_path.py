@@ -132,7 +132,8 @@ def test_worker_exports_events_through_platform_backend(
     ) -> MessagingFuture:
         sent.append((request_type, payload))
         if request_type == RequestType.REGISTER_KV_CACHE:
-            return _resolved_future(True)
+            # REGISTER returns the server's layerwise_batch (int; 0 = disabled).
+            return _resolved_future(0)
         return MessagingFuture()
 
     context = worker_transfer.LMCacheDrivenTransferContext()
@@ -237,6 +238,7 @@ def test_server_store_and_retrieve_delegate_event_ordering(
     storage_manager = _FakeStorageManager()
     server_context = SimpleNamespace(
         chunk_size=1,
+        layerwise_loading=False,
         storage_manager=storage_manager,
         event_bus=SimpleNamespace(
             publish=lambda event: None,
