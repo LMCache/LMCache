@@ -124,6 +124,23 @@ Install LMCache
                                 --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/nightly-cu129 \
                                 --index-strategy unsafe-best-match
 
+                    .. tab-item:: ROCm 7.2
+
+                        Run inside an upstream vLLM ROCm container so torch and the ROCm
+                        runtime are already present, then install with ``--no-deps``:
+
+                        .. code-block:: bash
+
+                            docker run -it --device /dev/kfd --device /dev/dri \
+                                --group-add video --security-opt seccomp=unconfined \
+                                --entrypoint bash vllm/vllm-openai-rocm:v0.26.0
+
+                            pip install lmcache --pre --no-deps \
+                                --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/nightly-rocm
+
+                        Nightly ROCm wheels are versioned like the CUDA nightlies with the
+                        ROCm local segment appended, e.g. ``0.5.4.dev15+rocm7.2``.
+
             .. tab-item:: From Source
 
                 ``--no-build-isolation`` ensures the kernels are compiled against the same torch
