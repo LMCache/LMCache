@@ -13,6 +13,7 @@ import os
 import uuid
 
 try:
+    # Standard
     import tomllib  # Python 3.11+ stdlib
 except ModuleNotFoundError:  # pragma: no cover (Python 3.10 only)
     import tomli as tomllib  # type: ignore[no-redef, import-not-found]
@@ -405,7 +406,7 @@ def add_mp_server_args(
         help="Path to a TOML file providing MP server defaults (any flag set "
         "explicitly on the command line overrides the file). Also read from "
         "the LMCACHE_MP_CONFIG environment variable; the flag wins over the "
-        "env var. Missing or unparseable files warn and fall back to "
+        "env var. Missing or unparsable files warn and fall back to "
         "argparse-only behavior (never aborts startup).",
     )
     return parser

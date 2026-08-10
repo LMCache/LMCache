@@ -18,7 +18,7 @@ unchanged (argparse-only).
 
 Point the server at a file with ``--config-file`` or the
 ``LMCACHE_MP_CONFIG`` environment variable (the flag wins over the env var).
-A missing or unparseable file logs a warning and falls back to argparse-only
+A missing or unparsable file logs a warning and falls back to argparse-only
 behavior — it never aborts startup.
 
 Keys mirror the ``MPServerConfig`` field names; both ``max-gpu-workers`` and
