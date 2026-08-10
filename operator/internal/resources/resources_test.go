@@ -974,15 +974,15 @@ func TestBuildConnectionConfigMap_PDPrefiller(t *testing.T) {
 	cm := BuildConnectionConfigMap(engine)
 
 	// PD ConfigMap must contain both prefiller and decoder keys.
-	if _, ok := cm.Data[kvTransferConfigPrefillerDataKey]; !ok {
-		t.Fatalf("missing key %q", kvTransferConfigPrefillerDataKey)
+	if _, ok := cm.Data[KVTransferConfigPrefillerDataKey]; !ok {
+		t.Fatalf("missing key %q", KVTransferConfigPrefillerDataKey)
 	}
-	if _, ok := cm.Data[kvTransferConfigDecoderDataKey]; !ok {
-		t.Fatalf("missing key %q", kvTransferConfigDecoderDataKey)
+	if _, ok := cm.Data[KVTransferConfigDecoderDataKey]; !ok {
+		t.Fatalf("missing key %q", KVTransferConfigDecoderDataKey)
 	}
 
 	var config map[string]any
-	if err := json.Unmarshal([]byte(cm.Data[kvTransferConfigPrefillerDataKey]), &config); err != nil {
+	if err := json.Unmarshal([]byte(cm.Data[KVTransferConfigPrefillerDataKey]), &config); err != nil {
 		t.Fatalf("invalid JSON: %v", err)
 	}
 
@@ -1029,7 +1029,7 @@ func TestBuildConnectionConfigMap_PDDecoder(t *testing.T) {
 	cm := BuildConnectionConfigMap(engine)
 
 	var config map[string]any
-	if err := json.Unmarshal([]byte(cm.Data[kvTransferConfigDecoderDataKey]), &config); err != nil {
+	if err := json.Unmarshal([]byte(cm.Data[KVTransferConfigDecoderDataKey]), &config); err != nil {
 		t.Fatalf("invalid JSON: %v", err)
 	}
 
@@ -1053,7 +1053,7 @@ func TestBuildConnectionConfigMap_PDEnforceHandshakeCompat(t *testing.T) {
 	cm := BuildConnectionConfigMap(engine)
 
 	var config map[string]any
-	if err := json.Unmarshal([]byte(cm.Data[kvTransferConfigPrefillerDataKey]), &config); err != nil {
+	if err := json.Unmarshal([]byte(cm.Data[KVTransferConfigPrefillerDataKey]), &config); err != nil {
 		t.Fatalf("invalid JSON: %v", err)
 	}
 

@@ -65,13 +65,13 @@ func BuildConnectionConfigMap(engine *lmcachev1alpha1.LMCacheEngine) *corev1.Con
 	)
 }
 
-// kvTransferConfigPrefillerDataKey and kvTransferConfigDecoderDataKey are the
+// KVTransferConfigPrefillerDataKey and KVTransferConfigDecoderDataKey are the
 // ConfigMap keys for PD roles. The webhook selects between them based on the
 // lmcache.ai/pd-role pod annotation. Pods without the annotation fall back to
 // kvTransferConfigDataKey (bare LMCacheMPConnector, no NIXL).
 const (
-	kvTransferConfigPrefillerDataKey = "kv-transfer-config-prefiller.json"
-	kvTransferConfigDecoderDataKey   = "kv-transfer-config-decoder.json"
+	KVTransferConfigPrefillerDataKey = "kv-transfer-config-prefiller.json"
+	KVTransferConfigDecoderDataKey   = "kv-transfer-config-decoder.json"
 )
 
 // buildPDConnectionConfigMap produces a MultiConnector ConfigMap for PD
@@ -83,8 +83,8 @@ const (
 //
 // The ConfigMap carries three data keys:
 //   - kvTransferConfigDataKey (kv-transfer-config.json):  bare LMCacheMPConnector (fallback)
-//   - kvTransferConfigPrefillerDataKey: MultiConnector JSON with kv_role=kv_producer
-//   - kvTransferConfigDecoderDataKey:   MultiConnector JSON with kv_role=kv_consumer
+//   - KVTransferConfigPrefillerDataKey: MultiConnector JSON with kv_role=kv_producer
+//   - KVTransferConfigDecoderDataKey:   MultiConnector JSON with kv_role=kv_consumer
 //
 // Parameters:
 //   - name, namespace: the owning engine's identity.
@@ -120,8 +120,8 @@ func buildPDConnectionConfigMap(
 		},
 		Data: map[string]string{
 			"kv-transfer-config.json":        fallbackJSON,
-			kvTransferConfigPrefillerDataKey: string(prefillerJSON),
-			kvTransferConfigDecoderDataKey:   string(decoderJSON),
+			KVTransferConfigPrefillerDataKey: string(prefillerJSON),
+			KVTransferConfigDecoderDataKey:   string(decoderJSON),
 		},
 	}
 }

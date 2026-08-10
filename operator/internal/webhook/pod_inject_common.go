@@ -48,13 +48,6 @@ const valueTrue = "true"
 // Data map that holds the kv-transfer-config JSON for non-PD engines.
 const kvTransferConfigDataKey = "kv-transfer-config.json"
 
-// kvTransferConfigPrefillerDataKey and kvTransferConfigDecoderDataKey mirror the
-// keys written by resources.buildPDConnectionConfigMap into the connection ConfigMap.
-const (
-	kvTransferConfigPrefillerDataKey = "kv-transfer-config-prefiller.json"
-	kvTransferConfigDecoderDataKey   = "kv-transfer-config-decoder.json"
-)
-
 // PDRoleAnnotationKey is the pod annotation that specifies the PD role
 // ("prefiller" or "decoder") when the engine is configured for PD disaggregation.
 // The webhook uses it to select the correct kv-transfer-config key from the
@@ -163,9 +156,9 @@ func prepareInjection(
 
 	switch pdRole {
 	case lmcachev1alpha1.PDRolePrefiller:
-		kvJSON = connCM.Data[kvTransferConfigPrefillerDataKey]
+		kvJSON = connCM.Data[resources.KVTransferConfigPrefillerDataKey]
 	case lmcachev1alpha1.PDRoleDecoder:
-		kvJSON = connCM.Data[kvTransferConfigDecoderDataKey]
+		kvJSON = connCM.Data[resources.KVTransferConfigDecoderDataKey]
 	default:
 		kvJSON = connCM.Data[kvTransferConfigDataKey]
 	}
