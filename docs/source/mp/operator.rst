@@ -1037,10 +1037,11 @@ instance per node serves both prefiller and decoder vLLM pods.  The operator:
 3. **Injects NIXL env vars** -- opted-in PD pods receive two extra env vars:
 
    - ``VLLM_NIXL_SIDE_CHANNEL_HOST`` -- set to the pod's own IP via the
-     downward API (``status.podIP``).  No ``hostPort`` or ``hostNetwork``
-     needed; pod IPs are routable between nodes on a standard CNI setup.
-   - ``VLLM_NIXL_SIDE_CHANNEL_PORT`` -- the value of
-     ``spec.pd.nixlSideChannelPort`` (default ``5558``).
+     downward API (``status.podIP``).
+   - ``VLLM_NIXL_SIDE_CHANNEL_PORT`` -- taken from ``spec.pd.nixlSideChannelPort``
+     (default ``5558``).  If the pod pre-sets this env var, the webhook will
+     leave it unchanged -- useful when both roles run on the same host and
+     need distinct ports (e.g. prefiller ``5557``, decoder ``5558``).
 
 PDSpec Fields
 ~~~~~~~~~~~~~
@@ -1054,9 +1055,10 @@ PDSpec Fields
      - Description
    * - ``pd.nixlSideChannelPort``
      - ``5558``
-     - Port the NIXL agent advertises for handshake negotiation.  Prefiller and
-       decoder pods use the same port number -- no conflict because each pod has
-       its own IP (``status.podIP``).
+     - Port the NIXL agent advertises for handshake negotiation.  Injected by
+       the webhook unless the pod pre-sets ``VLLM_NIXL_SIDE_CHANNEL_PORT``.
+       When using ``hostNetwork: true``, set distinct values for prefiller and
+       decoder directly in the pod env to avoid port conflicts.
    * - ``pd.nixlLoadFailurePolicy``
      - ``fail``
      - ``fail`` -- abort the request if the NIXL transfer fails.
@@ -1119,8 +1121,22 @@ annotation to select the prefiller or decoder config:
 
 The webhook injects ``--kv-transfer-config`` (the role-specific MultiConnector
 JSON), ``hostIPC: true``, ``PYTHONHASHSEED=0``, ``VLLM_NIXL_SIDE_CHANNEL_HOST``,
-and ``VLLM_NIXL_SIDE_CHANNEL_PORT`` into each opted-in pod.  Do **not** set
-these env vars or mount the ConfigMap yourself -- the webhook handles it.
+and ``VLLM_NIXL_SIDE_CHANNEL_PORT`` into each opted-in pod.  Do **not** mount
+the ConfigMap or add ``--kv-transfer-config`` yourself.
+
+.. note::
+   **NIXL RDMA and hostNetwork** -- NIXL's UCX backend requires valid RDMA GIDs,
+   which are derived from the host's network interfaces.  Under standard overlay
+   CNI (each pod has its own network namespace) the GID table inside the pod is
+   empty and UCX backend initialization fails.  The recommended workarounds are:
+
+   - ``hostNetwork: true`` + ``dnsPolicy: ClusterFirstWithHostNet`` (quick test).
+     With hostNetwork both roles share the host IP, so set **distinct**
+     ``VLLM_NIXL_SIDE_CHANNEL_PORT`` values per role (e.g. 5557 / 5558) in the
+     pod env before the webhook runs -- the webhook will not override a pre-set
+     value.
+   - SR-IOV with Multus (production): assign each pod a dedicated VF with its
+     own GID, no ``hostNetwork`` required.
 
 Pods without a ``lmcache.ai/pd-role`` annotation that are bound to a PD engine
 fall back to the bare ``LMCacheMPConnector`` config (no NIXL) -- they still

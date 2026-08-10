@@ -47,6 +47,8 @@ spec:
         lmcache.ai/pd-role: "prefiller"
     spec:
       runtimeClassName: nvidia
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
       # Do NOT set hostIPC — the webhook injects hostIPC=true.
       # Do NOT add --kv-transfer-config — the webhook injects it.
       containers:
@@ -73,6 +75,11 @@ spec:
               value: "all"
             - name: NCCL_CUMEM_ENABLE
               value: "1"
+            # Prefiller uses port 5557; decoder uses 5558. With hostNetwork both
+            # pods share the host IP, so distinct ports are required. The webhook
+            # respects a pre-set VLLM_NIXL_SIDE_CHANNEL_PORT and will not override it.
+            - name: VLLM_NIXL_SIDE_CHANNEL_PORT
+              value: "5557"
           resources:
             limits:
               nvidia.com/gpu: "1"
@@ -111,6 +118,8 @@ spec:
         lmcache.ai/pd-role: "decoder"
     spec:
       runtimeClassName: nvidia
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
       containers:
         - name: vllm
           image: lmcache/vllm-openai:latest-nightly
@@ -135,6 +144,8 @@ spec:
               value: "all"
             - name: NCCL_CUMEM_ENABLE
               value: "1"
+            - name: VLLM_NIXL_SIDE_CHANNEL_PORT
+              value: "5558"
           resources:
             limits:
               nvidia.com/gpu: "1"
