@@ -75,6 +75,7 @@ Validated models
          lmcache server \
              --port 6555 \
              --chunk-size 768 \
+             --separate-object-groups \
              --max-workers 4 \
              --l1-size-gb 100 \
              --eviction-policy LRU
@@ -111,14 +112,20 @@ Validated models
         **required**. ``align`` is the only Mamba cache mode the KDA backend
         supports, and prefix caching must be on for LMCache to store and reuse
         the recurrent state.
+      - ``--separate-object-groups`` (server) is **required** for hybrid
+        Mamba / linear-attention models: it gives the KDA layers their own
+        cache objects and is what lets ``--max-num-batched-tokens`` exceed
+        ``2N``.
       - ``--chunk-size`` (server) must be a multiple of the unified block size
         ``N = 768`` — ``--chunk-size N`` is the simplest choice. LMCache
         raises at engine startup if it is not.
-      - ``--max-num-batched-tokens`` must be in ``[N, 2N)`` — here
-        ``[768, 1536)``; the validated value is ``1500``. ``align`` snapshots
-        the KDA state only on a block boundary at the end of a scheduler step,
-        so the per-step token budget must cover at least one block but stay
-        below two. See :doc:`../mp/hybrid_models` for the full rationale.
+      - ``--max-num-batched-tokens`` must be **at least** ``N`` (= ``768``); the
+        validated value is ``1500``. ``align`` snapshots the KDA state only on a
+        block boundary at the end of a scheduler step. Within ``[N, 2N)`` every
+        step advances exactly one block, snapshotting every boundary (finest
+        reuse); with ``--separate-object-groups`` values ``≥ 2N`` are allowed
+        too, trading coarser reuse for higher prefill throughput. See
+        :doc:`../mp/hybrid_models` for the full rationale.
       - The server's ``--port 6555`` must match ``lmcache.mp.port`` in the
         connector config.
 
