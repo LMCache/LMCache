@@ -11,6 +11,9 @@ expose an identical API -- :class:`AsyncHandle`, :class:`Submission`, and the
 Selection is by ``torch.version.hip``: a ROCm torch build reports a non-None
 HIP version. Importing this shim does not dlopen any GPU IO driver; both
 backends bind ``libcufile``/``libhipfile`` lazily on first use.
+
+Callers must import this module rather than individual symbols, which would
+retain the backend bindings captured before :func:`select_backend` runs.
 """
 
 # Standard
@@ -23,6 +26,7 @@ import torch
 BackendName = Literal["auto", "cufile", "hipfile", "ugds"]
 _backend: ModuleType
 _selected_backend: str
+_selection_finalized = False
 
 # The backend surface re-exported under stable module-level names so callers
 # (and test monkeypatches) target this module.
@@ -70,6 +74,15 @@ def _bind_backend_surface(backend: ModuleType) -> None:
         globals()[name] = getattr(backend, name)
 
 
+def _validate_backend_platform(selected: str) -> None:
+    """Reject GDS backends incompatible with the installed PyTorch build."""
+    if selected == "hipfile":
+        if torch.version.hip is None:
+            raise ValueError("hipfile requires a ROCm PyTorch build")
+    elif selected in ("cufile", "ugds") and torch.version.cuda is None:
+        raise ValueError(f"{selected} requires a CUDA PyTorch build")
+
+
 if TYPE_CHECKING:
     # Static surface for type checkers; every backend exposes the same names.
     # First Party
@@ -107,10 +120,23 @@ def select_backend(name: BackendName) -> str:
 
     Returns:
         The resolved backend name.
+
+    Raises:
+        ValueError: If the backend is incompatible with the PyTorch build.
+        RuntimeError: If a different backend was already selected.
     """
     global _backend
     global _selected_backend
+    global _selection_finalized
 
-    _selected_backend, _backend = _load_backend(name)
+    selected, backend = _load_backend(name)
+    if _selection_finalized and selected != _selected_backend:
+        raise RuntimeError(
+            f"GDS backend already selected as {_selected_backend}; "
+            f"cannot switch to {selected}"
+        )
+    _validate_backend_platform(selected)
+    _selected_backend, _backend = selected, backend
     _bind_backend_surface(_backend)
+    _selection_finalized = True
     return _selected_backend

@@ -13,7 +13,9 @@ skipped unless that stack is present (see :func:`_gds_available`).
 from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
+import importlib
 import os
+import stat
 import tempfile
 
 # Third Party
@@ -27,6 +29,7 @@ from lmcache.v1.distributed.config import GdsL1Config
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.memory_manager import GDSL1MemoryManager
 from lmcache.v1.gpu_connector import _gds_async as ca
+from lmcache.v1.gpu_connector import gds_context
 from lmcache.v1.gpu_connector.gds_context import (
     GDSContext,
     SlabDirection,
@@ -39,6 +42,21 @@ from lmcache.v1.memory_management import GDSMemoryObject
 def _fake_stream(handle: int):
     """A stand-in for ``torch_dev.current_stream()`` (no CUDA needed)."""
     return SimpleNamespace(cuda_stream=handle, synchronize=lambda: None)
+
+
+def _mock_device_node(
+    monkeypatch: pytest.MonkeyPatch, mode: int, subsystem: str
+) -> None:
+    """Mock a device node and its sysfs subsystem."""
+    monkeypatch.setattr(
+        os,
+        "stat",
+        lambda path: SimpleNamespace(
+            st_mode=mode,
+            st_rdev=os.makedev(511, 0),
+        ),
+    )
+    monkeypatch.setattr(os.path, "realpath", lambda path: f"/sys/class/{subsystem}")
 
 
 def _gds_available() -> bool:
@@ -182,7 +200,7 @@ def _reset_singleton():
     get_gds_context.cache_clear()
     yield
     get_gds_context.cache_clear()
-    ca.select_backend("auto")
+    importlib.reload(ca)
 
 
 class TestSingleton:
@@ -196,6 +214,45 @@ class TestSingleton:
         ctx = initialize_gds_context(None)
         assert ctx is get_gds_context()
         assert ctx.initialized is False
+
+
+class TestBackendSelection:
+    @pytest.mark.parametrize(
+        ("cuda_version", "hip_version", "backend", "required_platform"),
+        [
+            (None, "6.3", "cufile", "CUDA"),
+            ("12.9", None, "hipfile", "ROCm"),
+            (None, "6.3", "ugds", "CUDA"),
+            (None, None, "auto", "CUDA"),
+        ],
+    )
+    def test_rejects_incompatible_pytorch_build(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        cuda_version: str | None,
+        hip_version: str | None,
+        backend: ca.BackendName,
+        required_platform: str,
+    ) -> None:
+        # Restore the simulated build before the autouse fixture resets the
+        # backend, including for the CPU-only case where ``auto`` must fail.
+        with monkeypatch.context() as patch:
+            patch.setattr(torch.version, "cuda", cuda_version)
+            patch.setattr(torch.version, "hip", hip_version)
+
+            with pytest.raises(ValueError, match=required_platform):
+                ca.select_backend(backend)
+
+    def test_rejects_switch_after_selection(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(torch.version, "cuda", "12.9")
+        monkeypatch.setattr(torch.version, "hip", None)
+        assert ca.select_backend("cufile") == "cufile"
+        assert ca.select_backend("cufile") == "cufile"
+
+        with pytest.raises(RuntimeError, match="already selected"):
+            ca.select_backend("hipfile")
 
 
 class TestRegisterGpuBuffer:
@@ -230,7 +287,43 @@ class TestRegisterGpuBuffer:
 
 
 class TestUgdsInitialization:
-    def test_raw_device_is_registered_without_file_operations(self, monkeypatch):
+    @pytest.mark.parametrize(
+        ("mode", "subsystem", "error"),
+        [
+            (stat.S_IFREG, "ugds_drv", "character device"),
+            (stat.S_IFBLK, "ugds_drv", "character device"),
+            (stat.S_IFCHR, "nvidia", "ugds_drv"),
+        ],
+    )
+    def test_rejects_invalid_device(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mode: int,
+        subsystem: str,
+        error: str,
+    ) -> None:
+        device = "/dev/invalid"
+        monkeypatch.setattr(ca, "select_backend", lambda name: "ugds")
+        _mock_device_node(monkeypatch, mode, subsystem)
+        monkeypatch.setattr(
+            os,
+            "open",
+            lambda *args, **kwargs: pytest.fail("invalid device must not be opened"),
+        )
+
+        with pytest.raises(ValueError, match=error):
+            GDSContext().initialize(
+                GdsL1Config(
+                    file_location=device,
+                    size_in_bytes=64 << 20,
+                    backend="ugds",
+                )
+            )
+
+    def test_raw_device_is_registered_without_file_operations(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         # Arbitrary fake device path; everything below is mocked. The asserts
         # reuse it to verify file_location is passed through verbatim (the
         # file backends would append a slab filename instead).
@@ -238,6 +331,7 @@ class TestUgdsInitialization:
         opened: list[tuple[str, int]] = []
         registered_fds: list[int] = []
         wrapped: list[tuple[int, int, str]] = []
+        warnings: list[str] = []
 
         class FakeAsyncHandle:
             @classmethod
@@ -256,6 +350,11 @@ class TestUgdsInitialization:
         )
         monkeypatch.setattr(ca, "AsyncHandle", FakeAsyncHandle)
         monkeypatch.setattr(
+            gds_context.logger,
+            "warning",
+            lambda message, *args: warnings.append(message % args),
+        )
+        monkeypatch.setattr(
             os,
             "makedirs",
             lambda *args, **kwargs: pytest.fail(
@@ -272,6 +371,7 @@ class TestUgdsInitialization:
         monkeypatch.setattr(
             os, "open", lambda path, flags, *args: opened.append((path, flags)) or 33
         )
+        _mock_device_node(monkeypatch, stat.S_IFCHR, "ugds_drv")
 
         ctx = GDSContext()
         cfg = GdsL1Config(
@@ -288,6 +388,7 @@ class TestUgdsInitialization:
         assert opened == [(device, os.O_RDWR)]
         assert registered_fds == [33]
         assert wrapped == [(33, 0xBEEF, device)]
+        assert warnings == ["GDSContext: use_direct_io is ignored by uGDS"]
         ctx.close()
 
 

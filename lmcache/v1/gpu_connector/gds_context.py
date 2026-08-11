@@ -22,6 +22,7 @@ import bisect
 import enum
 import functools
 import os
+import stat
 import threading
 
 # Third Party
@@ -45,6 +46,18 @@ _MAX_CUFILE_REGION = 16 * 1024 * 1024
 # GDS submissions to accumulate before recording a completion event and
 # draining finished ones (keeps the live submission set bounded).
 _SUBMISSION_CHECKPOINT_EVERY = 64
+
+
+def _validate_ugds_device(path: str) -> None:
+    """Require an uGDS character device before allowing destructive IO."""
+    device_stat = os.stat(path)
+    if not stat.S_ISCHR(device_stat.st_mode):
+        raise ValueError(f"uGDS path must be a character device: {path}")
+    major = os.major(device_stat.st_rdev)
+    minor = os.minor(device_stat.st_rdev)
+    subsystem = os.path.realpath(f"/sys/dev/char/{major}:{minor}/subsystem")
+    if os.path.basename(subsystem) != "ugds_drv":
+        raise ValueError(f"uGDS path is not managed by ugds_drv: {path}")
 
 
 class SlabDirection(enum.Enum):
@@ -112,8 +125,9 @@ class GDSContext:
                 directly onto the raw device at ``file_location``.
 
         Raises:
-            Exception: Whatever the GDS library (cuFile/hipFile) raises if GDS
-                is unavailable.
+            ValueError: If the backend is incompatible or the uGDS path is not
+                an ``ugds_drv`` character device.
+            Exception: Whatever the GDS library raises if GDS is unavailable.
         """
         self._slab_size = (config.size_in_bytes + _CUFILE_ALIGNMENT - 1) & ~(
             _CUFILE_ALIGNMENT - 1
@@ -257,7 +271,7 @@ class GDSContext:
 
         cuFile/hipFile: create, truncate, and preallocate the slab file,
         then open it (optionally with ``O_DIRECT``) and register the fd.
-        uGDS: open the existing raw block device directly; there is nothing
+        uGDS: open the existing raw character device directly; there is nothing
         to create or preallocate, and ``O_DIRECT`` does not apply because
         uGDS IO bypasses the kernel.
 
@@ -266,6 +280,9 @@ class GDSContext:
                 required for the GDS fast path).
         """
         if self._backend == "ugds":
+            _validate_ugds_device(self._slab_path)
+            if use_direct_io:
+                logger.warning("GDSContext: use_direct_io is ignored by uGDS")
             fd = os.open(self._slab_path, os.O_RDWR)
         else:
             # Create, truncate, and fallocate via a regular (non-O_DIRECT) fd.

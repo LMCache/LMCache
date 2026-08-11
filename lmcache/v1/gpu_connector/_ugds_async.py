@@ -6,7 +6,7 @@ NVMe path instead of cuFile. The API surface (AsyncHandle, Submission,
 register_*/deregister_*) is identical so that :mod:`gds_context` can use
 either backend transparently.
 
-uGDS operates on raw block devices (/dev/ugds_drv*), not filesystem files.
+uGDS operates on raw character devices (/dev/ugds_drv*), not filesystem files.
 The fd/handle split is the same as _cufile_async: the caller opens the
 device (O_RDWR, no O_DIRECT since uGDS IO bypasses the kernel), passes the
 fd to register_handle, and wraps the pair via AsyncHandle.from_fd.
