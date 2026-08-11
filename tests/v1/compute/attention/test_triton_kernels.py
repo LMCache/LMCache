@@ -21,10 +21,13 @@ from lmcache.v1.compute.attention.triton_kernels import (
     merge_attention_outputs,
 )
 
-pytestmark = pytest.mark.skipif(
-    not torch_dev.is_available(),
-    reason=f"Requires available {torch_device_type} runtime",
-)
+pytestmark = [
+    pytest.mark.cuda,
+    pytest.mark.skipif(
+        not (torch_dev.is_available() and torch_device_type == "cuda"),
+        reason="Requires available cuda runtime",
+    ),
+]
 
 # ---------------------------------------------------------------------------
 # Helpers
