@@ -1814,6 +1814,8 @@ def scenario_multi_layer_block_kv_transfer(
     - HND per-layer format (with permute)
     - FlashInfer HND per-layer format (interleaved K/V)
     - MLA per-layer format (no K/V split)
+    - MLA per-layer format with padded physical block strides
+    - blocked-scale MLA format with padded physical block strides
     - SGLang MLA flat per-layer format
     - Cross-layer NHD (single tensor [NB, NL, 2, BS, NH, HS])
     - Cross-layer HND (single tensor [NB, NL, 2, NH, BS, HS])
@@ -2138,6 +2140,211 @@ def scenario_multi_layer_block_kv_transfer(
         assert torch.allclose(orig, recon, atol=1e-6), (
             f"MLA Layer {i} round-trip mismatch"
         )
+
+    # --- MLA per-layer with padded physical block strides ---
+    padded_stride = block_size * mla_hidden + 13
+    padded_storage = [
+        torch.zeros(num_blocks, padded_stride, dtype=dtype, device=device)
+        for _ in range(num_layers)
+    ]
+    paged_layers_padded_mla = [
+        storage.as_strided(
+            (num_blocks, block_size, mla_hidden),
+            (padded_stride, mla_hidden, 1),
+        )
+        for storage in padded_storage
+    ]
+    for layer in paged_layers_padded_mla:
+        layer.copy_(
+            torch.randn(num_blocks, block_size, mla_hidden, dtype=dtype).to(device)
+        )
+    shape_desc_mla.block_stride_elems = padded_stride
+    d2h_chunks_padded_mla = _alloc_chunks(
+        (num_layers, chunk_tokens, mla_hidden), num_chunks
+    )
+    ops.multi_layer_block_kv_transfer(
+        (
+            paged_layers_padded_mla
+            if use_tensor_list
+            else torch.tensor(
+                [layer.data_ptr() for layer in paged_layers_padded_mla],
+                dtype=torch.uint64,
+                device=device,
+            )
+        ),
+        (
+            d2h_chunks_padded_mla
+            if use_tensor_list
+            else [c.data_ptr() for c in d2h_chunks_padded_mla]
+        ),
+        torch.tensor(block_ids, dtype=torch.int64, device=device),
+        torch.device(device),
+        ops.TransferDirection.D2H,
+        shape_desc_mla,
+        chunk_tokens,
+        engine_kv_format_mla,
+        0,
+    )
+    padded_h2d_storage = [
+        torch.zeros(num_blocks, padded_stride, dtype=dtype, device=device)
+        for _ in range(num_layers)
+    ]
+    paged_h2d_padded_mla = [
+        storage.as_strided(
+            (num_blocks, block_size, mla_hidden),
+            (padded_stride, mla_hidden, 1),
+        )
+        for storage in padded_h2d_storage
+    ]
+    ops.multi_layer_block_kv_transfer(
+        (
+            paged_h2d_padded_mla
+            if use_tensor_list
+            else torch.tensor(
+                [layer.data_ptr() for layer in paged_h2d_padded_mla],
+                dtype=torch.uint64,
+                device=device,
+            )
+        ),
+        (
+            d2h_chunks_padded_mla
+            if use_tensor_list
+            else [c.data_ptr() for c in d2h_chunks_padded_mla]
+        ),
+        torch.tensor(block_ids, dtype=torch.int64, device=device),
+        torch.device(device),
+        ops.TransferDirection.H2D,
+        shape_desc_mla,
+        chunk_tokens,
+        engine_kv_format_mla,
+        0,
+    )
+    for i in range(num_layers):
+        orig = paged_layers_padded_mla[i].cpu()
+        recon = paged_h2d_padded_mla[i].cpu()
+        results[f"padded_mla_layer{i}"] = torch.stack([orig, recon])
+        torch.testing.assert_close(orig, recon)
+
+    # --- Blocked-scale MLA with padded physical block strides ---
+    blocked_hidden = 12
+    blocked_value_size = blocked_hidden - 4
+    blocked_stride = block_size * blocked_hidden + 17
+    canonical_blocked = torch.randint(
+        0,
+        256,
+        (num_layers, num_blocks, block_size, blocked_hidden),
+        dtype=torch.uint8,
+    ).to(device)
+
+    def _blocked_pages_from_rows(rows: torch.Tensor) -> list[torch.Tensor]:
+        storage = [
+            torch.zeros(num_blocks, blocked_stride, dtype=torch.uint8, device=device)
+            for _ in range(num_layers)
+        ]
+        pages = [
+            layer_storage.as_strided(
+                (num_blocks, block_size, blocked_hidden),
+                (blocked_stride, blocked_hidden, 1),
+            )
+            for layer_storage in storage
+        ]
+        for layer_idx, page in enumerate(pages):
+            layer_rows = rows[layer_idx]
+            blocked = torch.cat(
+                (
+                    layer_rows[..., :blocked_value_size].reshape(num_blocks, -1),
+                    layer_rows[..., blocked_value_size:].reshape(num_blocks, -1),
+                ),
+                dim=-1,
+            ).reshape(num_blocks, block_size, blocked_hidden)
+            page.copy_(blocked)
+        return pages
+
+    paged_layers_blocked = _blocked_pages_from_rows(canonical_blocked)
+    shape_desc_blocked = ops.PageBufferShapeDesc()
+    shape_desc_blocked.nl = num_layers
+    shape_desc_blocked.nb = num_blocks
+    shape_desc_blocked.bs = block_size
+    shape_desc_blocked.nh = 1
+    shape_desc_blocked.hs = blocked_hidden
+    shape_desc_blocked.element_size = 1
+    shape_desc_blocked.kv_size = 1
+    shape_desc_blocked.block_stride_elems = blocked_stride
+    blocked_format = ops.EngineKVFormat.NL_X_NB_BSV_BSS
+    d2h_chunks_blocked = [
+        torch.zeros((num_layers, chunk_tokens, blocked_hidden), dtype=torch.uint8)
+        for _ in range(num_chunks)
+    ]
+    if device == "cuda":
+        d2h_chunks_blocked = [chunk.pin_memory() for chunk in d2h_chunks_blocked]
+    ops.multi_layer_block_kv_transfer(
+        (
+            paged_layers_blocked
+            if use_tensor_list
+            else torch.tensor(
+                [layer.data_ptr() for layer in paged_layers_blocked],
+                dtype=torch.uint64,
+                device=device,
+            )
+        ),
+        (
+            d2h_chunks_blocked
+            if use_tensor_list
+            else [c.data_ptr() for c in d2h_chunks_blocked]
+        ),
+        torch.tensor(block_ids, dtype=torch.int64, device=device),
+        torch.device(device),
+        ops.TransferDirection.D2H,
+        shape_desc_blocked,
+        chunk_tokens,
+        blocked_format,
+        0,
+    )
+    blocked_h2d_storage = [
+        torch.zeros(num_blocks, blocked_stride, dtype=torch.uint8, device=device)
+        for _ in range(num_layers)
+    ]
+    paged_h2d_blocked = [
+        storage.as_strided(
+            (num_blocks, block_size, blocked_hidden),
+            (blocked_stride, blocked_hidden, 1),
+        )
+        for storage in blocked_h2d_storage
+    ]
+    ops.multi_layer_block_kv_transfer(
+        (
+            paged_h2d_blocked
+            if use_tensor_list
+            else torch.tensor(
+                [layer.data_ptr() for layer in paged_h2d_blocked],
+                dtype=torch.uint64,
+                device=device,
+            )
+        ),
+        (
+            d2h_chunks_blocked
+            if use_tensor_list
+            else [c.data_ptr() for c in d2h_chunks_blocked]
+        ),
+        torch.tensor(block_ids, dtype=torch.int64, device=device),
+        torch.device(device),
+        ops.TransferDirection.H2D,
+        shape_desc_blocked,
+        chunk_tokens,
+        blocked_format,
+        0,
+    )
+    for i in range(num_layers):
+        expected_rows = canonical_blocked[i].reshape(-1, blocked_hidden).cpu()
+        actual_rows = torch.cat([chunk[i] for chunk in d2h_chunks_blocked], dim=0).cpu()
+        results[f"blocked_scale_rows{i}"] = torch.stack([expected_rows, actual_rows])
+        assert torch.equal(expected_rows, actual_rows)
+        results[f"blocked_scale_page{i}"] = torch.stack(
+            [paged_layers_blocked[i].cpu(), paged_h2d_blocked[i].cpu()]
+        )
+        assert torch.equal(paged_layers_blocked[i].cpu(), paged_h2d_blocked[i].cpu())
+
+    shape_desc_mla.block_stride_elems = 0
 
     # --- SGLang MLA flat per-layer ---
     torch.manual_seed(890)

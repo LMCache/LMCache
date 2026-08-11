@@ -164,6 +164,43 @@ def _tensor_from_ptr(
     )
 
 
+def _strided_tensor_from_ptr(
+    ptr: int,
+    shape: tuple[int, ...],
+    strides: tuple[int, ...],
+    dtype: torch.dtype,
+    device: torch.device | str,
+) -> torch.Tensor:
+    """Create a zero-copy strided tensor view over a raw pointer.
+
+    Args:
+        ptr: Raw memory pointer as an integer.
+        shape: Logical tensor shape.
+        strides: Physical element strides for each dimension.
+        dtype: Element dtype of the pointed-to storage.
+        device: Device that owns the pointer.
+
+    Returns:
+        A tensor with the requested shape and physical strides.
+
+    Raises:
+        ValueError: If shape and strides have different ranks or contain
+            unsupported values.
+    """
+    if len(shape) != len(strides):
+        raise ValueError("shape and strides must have the same rank")
+    if any(dim <= 0 for dim in shape):
+        raise ValueError("strided raw-pointer views require positive dimensions")
+    if any(stride < 0 for stride in strides):
+        raise ValueError("strided raw-pointer views do not support negative strides")
+
+    storage_numel = 1 + sum(
+        (int(dim) - 1) * int(stride) for dim, stride in zip(shape, strides, strict=True)
+    )
+    storage = _tensor_from_ptr(ptr, (storage_numel,), dtype, device)
+    return torch.as_strided(storage, shape, strides)
+
+
 def _byte_tensor_from_copy_argument(
     value: int | torch.Tensor,
     nbytes: int,
@@ -1225,6 +1262,25 @@ def _normalize_paged_layers(
         nh = int(shape_desc.nh)
         hs = int(shape_desc.hs)
         per_shape = _per_layer_paged_shape(engine_kv_format, nb, bs, nh, hs)
+        block_stride = int(shape_desc.block_stride_elems)
+        uses_padded_mla = (
+            is_mla(engine_kv_format)
+            and not _is_pbs_fused_format(engine_kv_format)
+            and block_stride > 0
+        )
+        if uses_padded_mla:
+            tight_block_size = bs * hs
+            if block_stride < tight_block_size:
+                raise ValueError(
+                    "block_stride_elems must be at least bs * hs for MLA formats"
+                )
+            per_strides = (block_stride, hs, 1)
+            return [
+                _strided_tensor_from_ptr(
+                    int(p.item()), per_shape, per_strides, dtype, device
+                )
+                for p in paged_buffer_ptrs_tensor
+            ]
         return [
             _tensor_from_ptr(int(p.item()), per_shape, dtype, device)
             for p in paged_buffer_ptrs_tensor
@@ -1403,6 +1459,17 @@ def multi_layer_block_kv_transfer(
             blocks_per_object,
             block_size,
             engine_kv_format,
+            is_d2h,
+            skip_prefix_n_blocks,
+        )
+    elif engine_kv_format == EngineKVFormat.NL_X_NB_BSV_BSS:
+        _transfer_per_layer_blocked_scale(
+            normalized,
+            object_tensors,
+            block_ids,
+            n_block_ids,
+            blocks_per_object,
+            block_size,
             is_d2h,
             skip_prefix_n_blocks,
         )
@@ -2167,6 +2234,79 @@ def _transfer_per_layer_mla(
                 else:
                     src_blocks = src.reshape(n_valid, block_size, hidden_size)
                     layer.index_copy_(0, eff_idx, src_blocks)
+
+
+def _transfer_per_layer_blocked_scale(
+    layer_tensors: list[torch.Tensor],
+    object_tensors: list[torch.Tensor],
+    block_ids: torch.Tensor | list[int],
+    n_block_ids: int,
+    blocks_per_object: int,
+    block_size: int,
+    is_d2h: bool,
+    skip_prefix_n_blocks: int,
+) -> None:
+    """Transfer blocked-scale pages to or from canonical token-major chunks."""
+    if not layer_tensors or not object_tensors:
+        return
+
+    target_device = layer_tensors[0].device
+    hidden_size = layer_tensors[0].shape[-1]
+    if hidden_size <= 4:
+        raise ValueError("blocked-scale rows require values and a 4-byte scale")
+    value_size = hidden_size - 4
+    block_ids_dev = torch.as_tensor(block_ids, dtype=torch.long, device=target_device)
+
+    for object_idx, obj in enumerate(object_tensors):
+        valid = _valid_block_range_indices(
+            object_idx,
+            n_block_ids,
+            blocks_per_object,
+            block_size,
+            skip_prefix_n_blocks,
+        )
+        if valid is None:
+            continue
+        idx_start, idx_end, offset_in_object = valid
+        n_valid = idx_end - idx_start
+        token_end = offset_in_object + n_valid * block_size
+        eff_idx = block_ids_dev[idx_start:idx_end]
+
+        if is_d2h:
+            chunk_gpu = torch.empty(
+                len(layer_tensors),
+                n_valid * block_size,
+                hidden_size,
+                dtype=layer_tensors[0].dtype,
+                device=target_device,
+            )
+            for layer_idx, layer in enumerate(layer_tensors):
+                blocked = layer.index_select(0, eff_idx).reshape(n_valid, -1)
+                values_end = block_size * value_size
+                values = blocked[:, :values_end].reshape(
+                    n_valid, block_size, value_size
+                )
+                scales = blocked[:, values_end:].reshape(n_valid, block_size, 4)
+                chunk_gpu[layer_idx].copy_(
+                    torch.cat((values, scales), dim=-1).reshape(
+                        n_valid * block_size, hidden_size
+                    )
+                )
+            obj[:, offset_in_object:token_end].copy_(chunk_gpu, non_blocking=True)
+        else:
+            chunk_gpu = obj[:, offset_in_object:token_end].to(
+                target_device, non_blocking=True
+            )
+            for layer_idx, layer in enumerate(layer_tensors):
+                rows = chunk_gpu[layer_idx].reshape(n_valid, block_size, hidden_size)
+                blocked = torch.cat(
+                    (
+                        rows[..., :value_size].reshape(n_valid, -1),
+                        rows[..., value_size:].reshape(n_valid, -1),
+                    ),
+                    dim=-1,
+                ).reshape(n_valid, block_size, hidden_size)
+                layer.index_copy_(0, eff_idx, blocked)
 
 
 def _transfer_per_layer_hnd(
