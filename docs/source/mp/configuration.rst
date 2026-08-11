@@ -298,8 +298,10 @@ least that large and must not hold anything else.
    ``libugds.so`` reachable through the loader (``LD_LIBRARY_PATH`` or
    ``ldconfig``). Because the device is claimed by ``ugds_drv`` rather than the
    kernel NVMe driver, it carries no filesystem and cannot be shared with any
-   other consumer while in use. See the
-   `uGDS project <https://github.com/ScaleX-IO/uGDS>`_ for setup.
+   other consumer while in use. Follow the
+   `uGDS installation guide <https://github.com/ScaleX-IO/uGDS/blob/main/docs/installation.md>`_
+   to build and load the kernel module, bind the NVMe device, build
+   ``libugds.so``, and verify the installation.
 
 .. list-table::
    :header-rows: 1
