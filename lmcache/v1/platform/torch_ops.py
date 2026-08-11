@@ -711,9 +711,7 @@ def multi_layer_kv_transfer(
         num_heads = hidden_size // (2 * head_size)
         layer_shape = (num_blocks, num_heads, block_size, 2 * head_size)
     elif is_fused_packed_nhd:
-        num_blocks = page_buffer_size // block_size
-        num_heads = hidden_size // (2 * head_size)
-        layer_shape = (num_blocks, block_size, num_heads, 2 * head_size)
+        layer_shape = (page_buffer_size, hidden_size)
     else:
         layer_shape = (2, page_buffer_size, hidden_size)
 
