@@ -660,7 +660,7 @@ def multi_layer_kv_transfer(
         raise ValueError(f"{engine_kv_format} requires a positive head_size")
 
     # Blocked layouts use these to address a logical token in physical storage.
-    if is_flash_infer or is_hnd_split:
+    if is_flash_infer or is_hnd_split or is_fused_packed_hnd:
         block_indices = valid_slots // block_size
         block_offsets = valid_slots % block_size
     elif is_blocked_scale:
@@ -796,15 +796,23 @@ def multi_layer_kv_transfer(
                 key_value[:, layer_id, valid_mask_kv, :] = lmc_valid.reshape(
                     2, -1, hidden_size
                 ).to(kv_device, non_blocking=False)
-        elif is_fused_packed_hnd or is_fused_packed_nhd:
-            # Fused K/V layouts have one chunk plane. HND stores heads
-            # before tokens within a block; NHD already has token-major
-            # ordering once its first two dimensions are flattened.
-            paged_logical = (
-                paged_tensor.permute(0, 2, 1, 3).reshape(page_buffer_size, hidden_size)
-                if is_fused_packed_hnd
-                else paged_tensor.reshape(page_buffer_size, hidden_size)
+        elif is_fused_packed_hnd:
+            # Paged layout: [NB, NH, BS, 2 * HS].
+            lmc_valid = key_value[0, layer_id, valid_mask_kv, :].reshape(
+                -1, num_heads, 2 * head_size
             )
+            if int(direction) == int(TransferDirection.H2D):
+                paged_tensor[block_indices, :, block_offsets, :] = lmc_valid.to(
+                    paged_memory_device
+                )
+            else:
+                gathered = paged_tensor[block_indices, :, block_offsets, :]
+                key_value[0, layer_id, valid_mask_kv, :] = gathered.reshape(
+                    -1, hidden_size
+                ).to(kv_device, non_blocking=False)
+        elif is_fused_packed_nhd:
+            # Paged layout: [NB, BS, NH, 2 * HS].
+            paged_logical = paged_tensor.reshape(page_buffer_size, hidden_size)
             if int(direction) == int(TransferDirection.H2D):
                 paged_logical.index_copy_(
                     0,
