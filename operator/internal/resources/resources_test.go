@@ -32,6 +32,10 @@ import (
 const (
 	testEngineName = "test-engine"
 	testNamespace  = "default"
+
+	kvRoleBoth     = "kv_both"
+	kvRoleProducer = "kv_producer"
+	kvRoleConsumer = "kv_consumer"
 )
 
 // --- helpers ---
@@ -1088,7 +1092,7 @@ func TestBuildConnectionConfigMap_Default(t *testing.T) {
 			config["kv_connector_module_path"],
 		)
 	}
-	if config["kv_role"] != "kv_both" {
+	if config["kv_role"] != kvRoleBoth {
 		t.Fatalf("expected kv_role=kv_both, got %v", config["kv_role"])
 	}
 
@@ -1116,6 +1120,108 @@ func TestBuildConnectionConfigMap_CustomPort(t *testing.T) {
 	extra := config["kv_connector_extra_config"].(map[string]any)
 	if extra["lmcache.mp.port"] != "8080" {
 		t.Fatalf("expected port 8080, got %v", extra["lmcache.mp.port"])
+	}
+}
+
+func TestBuildConnectionConfigMap_PDPrefiller(t *testing.T) {
+	engine := minimalEngine()
+	engine.Spec.PD = &lmcachev1alpha1.PDSpec{
+		NixlSideChannelPort: ptr(int32(5557)),
+	}
+	cm := BuildConnectionConfigMap(engine)
+
+	// PD ConfigMap must contain both prefiller and decoder keys.
+	if _, ok := cm.Data[KVTransferConfigPrefillerDataKey]; !ok {
+		t.Fatalf("missing key %q", KVTransferConfigPrefillerDataKey)
+	}
+	if _, ok := cm.Data[KVTransferConfigDecoderDataKey]; !ok {
+		t.Fatalf("missing key %q", KVTransferConfigDecoderDataKey)
+	}
+
+	var config map[string]any
+	if err := json.Unmarshal([]byte(cm.Data[KVTransferConfigPrefillerDataKey]), &config); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+
+	if config["kv_connector"] != "MultiConnector" {
+		t.Fatalf("expected kv_connector=MultiConnector, got %v", config["kv_connector"])
+	}
+	if config["kv_role"] != kvRoleProducer {
+		t.Fatalf("expected kv_role=kv_producer, got %v", config["kv_role"])
+	}
+
+	outer := config["kv_connector_extra_config"].(map[string]any)
+	connectors := outer["connectors"].([]any)
+	if len(connectors) != 2 {
+		t.Fatalf("expected 2 inner connectors, got %d", len(connectors))
+	}
+
+	nixl := connectors[0].(map[string]any)
+	if nixl["kv_connector"] != "NixlConnector" {
+		t.Fatalf("first connector must be NixlConnector, got %v", nixl["kv_connector"])
+	}
+	if nixl["kv_role"] != kvRoleProducer {
+		t.Fatalf("NixlConnector role must be kv_producer, got %v", nixl["kv_role"])
+	}
+	if nixl["kv_load_failure_policy"] != "fail" {
+		t.Fatalf("expected kv_load_failure_policy=fail, got %v", nixl["kv_load_failure_policy"])
+	}
+
+	lmc := connectors[1].(map[string]any)
+	if lmc["kv_connector"] != "LMCacheMPConnector" {
+		t.Fatalf("second connector must be LMCacheMPConnector, got %v", lmc["kv_connector"])
+	}
+	if lmc["kv_role"] != kvRoleBoth {
+		t.Fatalf("LMCacheMPConnector role must be kv_both, got %v", lmc["kv_role"])
+	}
+	lmcExtra := lmc["kv_connector_extra_config"].(map[string]any)
+	if lmcExtra["lmcache.mp.port"] != "5555" {
+		t.Fatalf("expected lmcache.mp.port=5555, got %v", lmcExtra["lmcache.mp.port"])
+	}
+}
+
+func TestBuildConnectionConfigMap_PDDecoder(t *testing.T) {
+	engine := minimalEngine()
+	engine.Spec.PD = &lmcachev1alpha1.PDSpec{}
+	cm := BuildConnectionConfigMap(engine)
+
+	var config map[string]any
+	if err := json.Unmarshal([]byte(cm.Data[KVTransferConfigDecoderDataKey]), &config); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+
+	if config["kv_role"] != kvRoleConsumer {
+		t.Fatalf("expected kv_role=kv_consumer, got %v", config["kv_role"])
+	}
+
+	outer := config["kv_connector_extra_config"].(map[string]any)
+	nixl := outer["connectors"].([]any)[0].(map[string]any)
+	if nixl["kv_role"] != kvRoleConsumer {
+		t.Fatalf("NixlConnector role must be kv_consumer, got %v", nixl["kv_role"])
+	}
+}
+
+func TestBuildConnectionConfigMap_PDEnforceHandshakeCompat(t *testing.T) {
+	engine := minimalEngine()
+	handshakeCompat := false
+	engine.Spec.PD = &lmcachev1alpha1.PDSpec{
+		EnforceHandshakeCompat: &handshakeCompat,
+	}
+	cm := BuildConnectionConfigMap(engine)
+
+	var config map[string]any
+	if err := json.Unmarshal([]byte(cm.Data[KVTransferConfigPrefillerDataKey]), &config); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+
+	outer := config["kv_connector_extra_config"].(map[string]any)
+	nixl := outer["connectors"].([]any)[0].(map[string]any)
+	nixlExtra, ok := nixl["kv_connector_extra_config"].(map[string]any)
+	if !ok {
+		t.Fatal("expected kv_connector_extra_config on NixlConnector")
+	}
+	if nixlExtra["enforce_handshake_compat"] != false {
+		t.Fatalf("expected enforce_handshake_compat=false, got %v", nixlExtra["enforce_handshake_compat"])
 	}
 }
 

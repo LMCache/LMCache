@@ -19,61 +19,79 @@
 namespace py = pybind11;
 
 PYBIND11_MODULE(c_ops, m) {
-  py::enum_<TransferDirection>(m, "TransferDirection")
-      .value("H2D", TransferDirection::H2D)
-      .value("D2H", TransferDirection::D2H)
-      .export_values();
-  py::enum_<EngineKVFormat>(m, "EngineKVFormat")
-      .value("NB_NL_TWO_BS_NH_HS", EngineKVFormat::NB_NL_TWO_BS_NH_HS)
-      .value("NL_X_TWO_NB_BS_NH_HS", EngineKVFormat::NL_X_TWO_NB_BS_NH_HS)
-      .value("NL_X_NB_TWO_BS_NH_HS", EngineKVFormat::NL_X_NB_TWO_BS_NH_HS)
-      .value("NL_X_NB_BS_HS", EngineKVFormat::NL_X_NB_BS_HS)
-      .value("TWO_X_NL_X_NBBS_NH_HS", EngineKVFormat::TWO_X_NL_X_NBBS_NH_HS)
-      .value("NL_X_NBBS_ONE_HS", EngineKVFormat::NL_X_NBBS_ONE_HS)
-      .value("NL_X_TWO_NB_NH_BS_HS", EngineKVFormat::NL_X_TWO_NB_NH_BS_HS)
-      .value("NL_X_NB_TWO_NH_BS_HS", EngineKVFormat::NL_X_NB_TWO_NH_BS_HS)
-      .value("NB_NL_TWO_NH_BS_HS", EngineKVFormat::NB_NL_TWO_NH_BS_HS)
-      .value("TWO_X_NL_X_NB_BS_NH_HS", EngineKVFormat::TWO_X_NL_X_NB_BS_NH_HS)
-      .value("NL_X_NB_NH_BS_TWO_HS", EngineKVFormat::NL_X_NB_NH_BS_TWO_HS)
-      .value("NL_X_NB_BS_NH_TWO_HS", EngineKVFormat::NL_X_NB_BS_NH_TWO_HS)
-      .value("NL_X_NB_NH_BS_CS", EngineKVFormat::NL_X_NB_NH_BS_CS)
-      .value("NL_X_NB_BS_NH_CS", EngineKVFormat::NL_X_NB_BS_NH_CS)
-      .value("NL_X_NB_BSV_BSS", EngineKVFormat::NL_X_NB_BSV_BSS)
-      .export_values();
-  // Format classification, shared with the device kernels (engine_kv_format.h).
+  // NOTE: ``TransferDirection`` and ``EngineKVFormat`` (and the format
+  // predicates is_cross_layer / is_kv_list / is_layer_list / is_mla) are owned
+  // exclusively by the device-independent ``lmcache_native`` module
+  // (csrc/lmcache_native/pybind.cpp). They are NOT exported here. ``c_ops``
+  // functions that need a transfer direction accept the underlying ``int`` and
+  // cast it to the C++ enum, so callers pass ``TransferDirection.H2D.value``
+  // (an int) instead of the enum object.
+
   m.def(
-      "is_cross_layer", [](EngineKVFormat f) { return is_cross_layer(f); },
-      py::arg("engine_kv_format"));
-  m.def(
-      "is_kv_list", [](EngineKVFormat f) { return is_kv_list(f); },
-      py::arg("engine_kv_format"));
-  m.def(
-      "is_layer_list", [](EngineKVFormat f) { return is_layer_list(f); },
-      py::arg("engine_kv_format"));
-  m.def(
-      "is_mla", [](EngineKVFormat f) { return is_mla(f); },
-      py::arg("engine_kv_format"));
-  m.def("multi_layer_kv_transfer", &multi_layer_kv_transfer,
-        py::arg("key_value"), py::arg("key_value_ptrs"),
-        py::arg("slot_mapping"), py::arg("paged_memory_device"),
-        py::arg("page_buffer_size"), py::arg("direction"),
-        py::arg("engine_kv_format"), py::arg("block_size") = 0,
-        py::arg("head_size") = 0, py::arg("skip_prefix_n_tokens") = 0,
-        py::call_guard<py::gil_scoped_release>());
+      "multi_layer_kv_transfer",
+      [](torch::Tensor& key_value, const torch::Tensor& key_value_ptrs,
+         const torch::Tensor& slot_mapping,
+         const torch::Device& paged_memory_device, const int page_buffer_size,
+         int direction, int engine_kv_format, const int block_size = 0,
+         const int head_size = 0, const int skip_prefix_n_tokens = 0) {
+        return multi_layer_kv_transfer(
+            key_value, key_value_ptrs, slot_mapping, paged_memory_device,
+            page_buffer_size, static_cast<TransferDirection>(direction),
+            static_cast<EngineKVFormat>(engine_kv_format), block_size,
+            head_size, skip_prefix_n_tokens);
+      },
+      py::arg("key_value"), py::arg("key_value_ptrs"), py::arg("slot_mapping"),
+      py::arg("paged_memory_device"), py::arg("page_buffer_size"),
+      py::arg("direction"), py::arg("engine_kv_format"),
+      py::arg("block_size") = 0, py::arg("head_size") = 0,
+      py::arg("skip_prefix_n_tokens") = 0,
+      py::call_guard<py::gil_scoped_release>());
   m.def("multi_layer_kv_transfer_unilateral",
-        &multi_layer_kv_transfer_unilateral);
-  m.def("single_layer_kv_transfer", &single_layer_kv_transfer,
-        py::arg("lmc_key_value_cache"), py::arg("vllm_key_value_cache"),
-        py::arg("slot_mapping"), py::arg("direction"),
-        py::arg("engine_kv_format"), py::arg("token_major") = false);
-  m.def("single_layer_kv_transfer_sgl", &single_layer_kv_transfer_sgl,
-        py::arg("lmc_key_value_cache"), py::arg("sgl_key_cache"),
-        py::arg("sgl_value_cache"), py::arg("slot_mapping"),
-        py::arg("direction"), py::arg("token_major") = false);
+        [](torch::Tensor& key_value, const torch::Tensor& key_value_ptrs,
+           const torch::Tensor& slot_mapping,
+           const torch::Device& paged_memory_device, const int page_buffer_size,
+           int direction, int engine_kv_format) {
+          return multi_layer_kv_transfer_unilateral(
+              key_value, key_value_ptrs, slot_mapping, paged_memory_device,
+              page_buffer_size, static_cast<TransferDirection>(direction),
+              static_cast<EngineKVFormat>(engine_kv_format));
+        });
+  m.def(
+      "single_layer_kv_transfer",
+      [](torch::Tensor& lmc_key_value_cache,
+         torch::Tensor& vllm_key_value_cache, torch::Tensor& slot_mapping,
+         int direction, int engine_kv_format, const bool token_major = false) {
+        return single_layer_kv_transfer(
+            lmc_key_value_cache, vllm_key_value_cache, slot_mapping,
+            static_cast<TransferDirection>(direction),
+            static_cast<EngineKVFormat>(engine_kv_format), token_major);
+      },
+      py::arg("lmc_key_value_cache"), py::arg("vllm_key_value_cache"),
+      py::arg("slot_mapping"), py::arg("direction"),
+      py::arg("engine_kv_format"), py::arg("token_major") = false);
+  m.def(
+      "single_layer_kv_transfer_sgl",
+      [](torch::Tensor& lmc_key_value_cache, torch::Tensor& sgl_key_cache,
+         torch::Tensor& sgl_value_cache, torch::Tensor& slot_mapping,
+         int direction, const bool token_major = false) {
+        return single_layer_kv_transfer_sgl(
+            lmc_key_value_cache, sgl_key_cache, sgl_value_cache, slot_mapping,
+            static_cast<TransferDirection>(direction), token_major);
+      },
+      py::arg("lmc_key_value_cache"), py::arg("sgl_key_cache"),
+      py::arg("sgl_value_cache"), py::arg("slot_mapping"), py::arg("direction"),
+      py::arg("token_major") = false);
   m.def("load_and_reshape_flash", &load_and_reshape_flash);
   m.def("reshape_and_cache_back_flash", &reshape_and_cache_back_flash);
-  m.def("lmcache_memcpy_async", &lmcache_memcpy_async,
-        py::call_guard<py::gil_scoped_release>());
+  m.def(
+      "lmcache_memcpy_async",
+      [](uintptr_t dest, uintptr_t src, size_t nbytes, int direction,
+         size_t host_buffer_offset, size_t host_buffer_alignment) {
+        return lmcache_memcpy_async(dest, src, nbytes,
+                                    static_cast<TransferDirection>(direction),
+                                    host_buffer_offset, host_buffer_alignment);
+      },
+      py::call_guard<py::gil_scoped_release>());
   m.def("encode_fast_new", &encode_cuda_new);
   m.def("decode_fast_new", &decode_cuda_new);
   m.def("decode_fast_prefsum", &decode_cuda_prefsum);
@@ -103,12 +121,29 @@ PYBIND11_MODULE(c_ops, m) {
         py::arg("dst_ptrs"), py::arg("sizes"),
         py::call_guard<py::gil_scoped_release>());
   m.def("get_gpu_pci_bus_id", &get_gpu_pci_bus_id);
-  m.def("multi_layer_block_kv_transfer", &multi_layer_block_kv_transfer,
-        py::arg("paged_buffer_ptrs_tensor"), py::arg("lmcache_objects_ptrs"),
-        py::arg("block_ids"), py::arg("device"), py::arg("direction"),
-        py::arg("shape_desc"), py::arg("lmcache_chunk_size"),
-        py::arg("engine_kv_format"), py::arg("skip_prefix_n_blocks"),
-        py::call_guard<py::gil_scoped_release>());
+  // The KV-format / transfer enums now live in ``lmcache_native``. We accept
+  // the underlying integer values here and cast to the C++ enums so this module
+  // no longer needs to register the enums (which would shadow the canonical
+  // lmcache_native definitions).
+  m.def(
+      "multi_layer_block_kv_transfer",
+      [](const torch::Tensor& paged_buffer_ptrs_tensor,
+         std::vector<int64_t> lmcache_objects_ptrs,
+         const torch::Tensor& block_ids, const torch::Device& device,
+         int direction, PageBufferShapeDesc shape_desc, int lmcache_chunk_size,
+         int engine_kv_format, int skip_prefix_n_blocks) {
+        return multi_layer_block_kv_transfer(
+            paged_buffer_ptrs_tensor, std::move(lmcache_objects_ptrs),
+            block_ids, device, static_cast<TransferDirection>(direction),
+            shape_desc, lmcache_chunk_size,
+            static_cast<EngineKVFormat>(engine_kv_format),
+            skip_prefix_n_blocks);
+      },
+      py::arg("paged_buffer_ptrs_tensor"), py::arg("lmcache_objects_ptrs"),
+      py::arg("block_ids"), py::arg("device"), py::arg("direction"),
+      py::arg("shape_desc"), py::arg("lmcache_chunk_size"),
+      py::arg("engine_kv_format"), py::arg("skip_prefix_n_blocks"),
+      py::call_guard<py::gil_scoped_release>());
   py::class_<PageBufferShapeDesc>(m, "PageBufferShapeDesc")
       .def(py::init<>())
       .def_readwrite("kv_size", &PageBufferShapeDesc::kv_size)
@@ -149,57 +184,78 @@ PYBIND11_MODULE(c_ops, m) {
       .def(py::init([](uintptr_t paged_buffer_ptrs,
                        std::vector<int64_t> lmcache_objects_ptrs,
                        PageBufferShapeDesc shape_desc, int lmcache_chunk_size,
-                       EngineKVFormat engine_kv_format,
-                       uintptr_t block_ids_base, int64_t block_ids_capacity) {
+                       int engine_kv_format, uintptr_t block_ids_base,
+                       int64_t block_ids_capacity) {
              return KernelGroupSpec{
-                 paged_buffer_ptrs, std::move(lmcache_objects_ptrs),
-                 shape_desc,        lmcache_chunk_size,
-                 engine_kv_format,  block_ids_base,
+                 paged_buffer_ptrs,
+                 std::move(lmcache_objects_ptrs),
+                 shape_desc,
+                 lmcache_chunk_size,
+                 static_cast<EngineKVFormat>(engine_kv_format),
+                 block_ids_base,
                  block_ids_capacity};
            }),
            py::arg("paged_buffer_ptrs"), py::arg("lmcache_objects_ptrs"),
            py::arg("shape_desc"), py::arg("lmcache_chunk_size"),
            py::arg("engine_kv_format"), py::arg("block_ids_base"),
            py::arg("block_ids_capacity"));
-  m.def("execute_object_group_transfer", &execute_object_group_transfer,
-        py::arg("direction"), py::arg("device"),
-        py::arg("host_buffer_alignment"), py::arg("kernel_group_specs"),
-        py::arg("batch_steps"), py::call_guard<py::gil_scoped_release>());
+  m.def(
+      "execute_object_group_transfer",
+      [](int direction, const torch::Device& device,
+         size_t host_buffer_alignment,
+         const std::vector<KernelGroupSpec>& kernel_group_specs,
+         const std::vector<BatchStep>& batch_steps) {
+        return execute_object_group_transfer(
+            static_cast<TransferDirection>(direction), device,
+            host_buffer_alignment, kernel_group_specs, batch_steps);
+      },
+      py::arg("direction"), py::arg("device"), py::arg("host_buffer_alignment"),
+      py::arg("kernel_group_specs"), py::arg("batch_steps"),
+      py::call_guard<py::gil_scoped_release>());
   // CB retrieve plan spec (see blend_kernels.cuh). Built on the Python side
   // (blend_v3.cb_retrieve_pre_computed) and consumed by
   // execute_cb_retrieve_plan_flat.
   py::class_<CBGroupSpec>(m, "CBGroupSpec")
-      .def(py::init(
-               [](uintptr_t paged_kv_ptrs,
-                  std::vector<int64_t> temp_buffer_ptrs, int num_layers,
-                  int slot_tokens, int hidden_elems, int element_size,
-                  EngineKVFormat engine_kv_format, int page_buffer_size,
-                  int block_size, int head_size, uintptr_t slot_mapping_base,
-                  int64_t slot_mapping_capacity, uintptr_t cos_sin_cache,
-                  int rot_dim, int rope_num_kv_heads, int64_t rope_head_stride,
-                  int key_scalar_type, bool is_neox, int64_t rope_base_offset) {
-                 return CBGroupSpec{
-                     paged_kv_ptrs,     std::move(temp_buffer_ptrs),
-                     num_layers,        slot_tokens,
-                     hidden_elems,      element_size,
-                     engine_kv_format,  page_buffer_size,
-                     block_size,        head_size,
-                     slot_mapping_base, slot_mapping_capacity,
-                     cos_sin_cache,     rot_dim,
-                     rope_num_kv_heads, rope_head_stride,
-                     key_scalar_type,   is_neox,
-                     rope_base_offset};
-               }),
-           py::arg("paged_kv_ptrs"), py::arg("temp_buffer_ptrs"),
-           py::arg("num_layers"), py::arg("slot_tokens"),
-           py::arg("hidden_elems"), py::arg("element_size"),
-           py::arg("engine_kv_format"), py::arg("page_buffer_size"),
-           py::arg("block_size"), py::arg("head_size"),
-           py::arg("slot_mapping_base"), py::arg("slot_mapping_capacity"),
-           py::arg("cos_sin_cache"), py::arg("rot_dim"),
-           py::arg("rope_num_kv_heads"), py::arg("rope_head_stride"),
-           py::arg("key_scalar_type"), py::arg("is_neox"),
-           py::arg("rope_base_offset") = 0)
+      .def(
+          py::init(
+              [](uintptr_t paged_kv_ptrs, std::vector<int64_t> temp_buffer_ptrs,
+                 int num_layers, int slot_tokens, int hidden_elems,
+                 int element_size, int engine_kv_format, int page_buffer_size,
+                 int block_size, int head_size, uintptr_t slot_mapping_base,
+                 int64_t slot_mapping_capacity, uintptr_t cos_sin_cache,
+                 int rot_dim, int rope_num_kv_heads, int64_t rope_head_stride,
+                 int key_scalar_type, bool is_neox, int64_t rope_base_offset) {
+                return CBGroupSpec{
+                    paged_kv_ptrs,
+                    std::move(temp_buffer_ptrs),
+                    num_layers,
+                    slot_tokens,
+                    hidden_elems,
+                    element_size,
+                    static_cast<EngineKVFormat>(engine_kv_format),
+                    page_buffer_size,
+                    block_size,
+                    head_size,
+                    slot_mapping_base,
+                    slot_mapping_capacity,
+                    cos_sin_cache,
+                    rot_dim,
+                    rope_num_kv_heads,
+                    rope_head_stride,
+                    key_scalar_type,
+                    is_neox,
+                    rope_base_offset};
+              }),
+          py::arg("paged_kv_ptrs"), py::arg("temp_buffer_ptrs"),
+          py::arg("num_layers"), py::arg("slot_tokens"),
+          py::arg("hidden_elems"), py::arg("element_size"),
+          py::arg("engine_kv_format"), py::arg("page_buffer_size"),
+          py::arg("block_size"), py::arg("head_size"),
+          py::arg("slot_mapping_base"), py::arg("slot_mapping_capacity"),
+          py::arg("cos_sin_cache"), py::arg("rot_dim"),
+          py::arg("rope_num_kv_heads"), py::arg("rope_head_stride"),
+          py::arg("key_scalar_type"), py::arg("is_neox"),
+          py::arg("rope_base_offset") = 0)
       // Mutable so the Python planner can cache one spec per (context, group)
       // and re-stamp only the per-request slot-mapping tensor between calls;
       // every other field is invariant for the life of the paged registration.
@@ -304,6 +360,4 @@ PYBIND11_MODULE(c_ops, m) {
     }
     return out;
   });
-  // Backward-compat alias: GPUKVFormat -> EngineKVFormat
-  m.attr("GPUKVFormat") = m.attr("EngineKVFormat");
 }

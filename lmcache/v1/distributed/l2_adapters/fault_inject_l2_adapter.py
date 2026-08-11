@@ -27,7 +27,7 @@ import threading
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.native_storage_ops import Bitmap
+    from lmcache.lmcache_native import Bitmap
     from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
     from lmcache.v1.distributed.internal_api import L1MemoryDesc
     from lmcache.v1.distributed.internal_api import L2AdapterListener, L2StoreResult
