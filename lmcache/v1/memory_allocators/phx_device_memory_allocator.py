@@ -11,11 +11,23 @@ The alignment and page size are queried at runtime from the Phoenix device
 (``phx_cache.page_size``), making this allocator vendor-neutral: it works with
 NVIDIA (64 KiB page), AMD HIP, Huawei NPU, or any backend registered with
 phxfs via ``devconn_ops``.
+
+This allocator also implements **backpressure**: when the DMA buffer pool is
+temporarily full (device objs pending release by the retrieve path), load
+threads can block waiting for free space instead of falling back to slow
+POSIX reads.  The parent ``GPUMemoryAllocator`` uses a plain ``Lock`` for
+``device_mem_lock``; this subclass replaces it with a ``Condition`` so that
+``free()`` / ``batched_free()`` calls automatically wake up waiters.
 """
+
+# Standard
+from typing import List, Optional
+import threading
 
 # First Party
 from lmcache import torch_dev, torch_device_type
 from lmcache.v1.memory_allocators.gpu_memory_allocator import GPUMemoryAllocator
+from lmcache.v1.memory_management import MemoryObj
 
 
 class PhxDeviceMemoryAllocator(GPUMemoryAllocator):
@@ -33,6 +45,8 @@ class PhxDeviceMemoryAllocator(GPUMemoryAllocator):
       64 KiB for NVIDIA) rather than hard-coded.
     * The ``device`` parameter must match the physical device that the
       ``PhxCache`` instance maps to (e.g. device 4 → phxfs_dev2).
+    * Implements **backpressure** via a ``Condition`` so that load threads
+      can wait for pool space instead of falling back to POSIX reads.
 
     :param size: Size of the device memory pool in bytes.
     :param device: Torch device string (e.g. ``"cuda:4"``).  Must match the
@@ -64,6 +78,12 @@ class PhxDeviceMemoryAllocator(GPUMemoryAllocator):
 
         super().__init__(size, device, align_bytes=align_bytes)
 
+        # Replace the plain Lock from GPUMemoryAllocator with a Condition so
+        # that threads waiting for free pool space (backpressure) can be
+        # woken up when free()/batched_free() returns memory.
+        self._cond = threading.Condition()
+        self.device_mem_lock = self._cond  # type: ignore[assignment]  # noqa: EV100
+
         self.phx_cache = phx_cache
         self.base_pointer = self.tensor.data_ptr()
         self.size = size
@@ -78,6 +98,50 @@ class PhxDeviceMemoryAllocator(GPUMemoryAllocator):
                 self.phx_cache.deregmem(self.base_pointer, self.size)
             except Exception:
                 pass
+
+    def free(self, memory_obj: MemoryObj, allocator_type: Optional[str] = None) -> None:
+        """Free one device memory object and wake up backpressure waiters."""
+        with self.device_mem_lock:
+            self.allocator.free(memory_obj)
+            self._cond.notify_all()
+
+    def batched_free(
+        self,
+        memory_objs: List[MemoryObj],
+        allocator_type: Optional[str] = None,
+        update_stats: bool = True,
+    ) -> None:
+        """Free multiple device memory objects and wake up backpressure waiters."""
+        with self.device_mem_lock:
+            self.allocator.batched_free(memory_objs)
+            self._cond.notify_all()
+
+    def get_free_bytes(self) -> int:
+        """Return the number of free bytes in the pool."""
+        with self.device_mem_lock:
+            am = getattr(self.allocator, "address_manager", None)
+            if am is not None:
+                return am.get_free_size()
+            return 0
+
+    def wait_for_available(self, required_bytes: int, timeout: float = 5.0) -> bool:
+        """Block until at least *required_bytes* are free, or *timeout*.
+
+        Uses the same Condition as ``device_mem_lock`` so that ``free()``
+        calls from other threads (e.g. GPU-stream callbacks releasing
+        device objs after D2D) automatically wake up the waiter.
+
+        Returns ``True`` if enough space is available, ``False`` on
+        timeout.
+        """
+        with self._cond:
+            am = getattr(self.allocator, "address_manager", None)
+            if am is None:
+                return True
+            while am.get_free_size() < required_bytes:
+                if not self._cond.wait(timeout=timeout):
+                    return False  # timed out
+            return True
 
     def __str__(self) -> str:
         return "PhxDeviceMemoryAllocator"

@@ -162,6 +162,7 @@ class _LoadPerf:
         "_batch_ok",
         "_n_batch_reqs",
         "_path_misses",
+        "_n_bp_timeouts",
     )
 
     def __init__(self, enabled: bool) -> None:
@@ -174,6 +175,7 @@ class _LoadPerf:
         self._batch_ok = 0
         self._n_batch_reqs = 0
         self._path_misses = 0
+        self._n_bp_timeouts = 0
 
     def mark(self) -> float:
         """Return a timestamp for later :meth:`measure`."""
@@ -207,6 +209,11 @@ class _LoadPerf:
             self._fd_hits += hits
             self._fd_misses += misses
 
+    def add_bp_timeout(self) -> None:
+        """Record a backpressure timeout."""
+        if self.enabled:
+            self._n_bp_timeouts += 1
+
     def finish_early(self, task_id: int, n_keys: int) -> None:
         """Log for the early-return (no files found) path."""
         if not self.enabled:
@@ -235,11 +242,12 @@ class _LoadPerf:
         t_total = time.perf_counter() - self.t_start
         t_path = self._timings.get("path", 0.0)
         t_alloc = self._timings.get("alloc", 0.0)
+        t_bp = self._timings.get("backpressure", 0.0)
         t_fd = self._timings.get("fd", 0.0)
         t_read = self._timings.get("read_batch", 0.0)
         t_result = self._timings.get("result", 0.0)
         t_fb = self._timings.get("fallback", 0.0)
-        t_prep = t_alloc + t_fd
+        t_prep = t_bp + t_alloc + t_fd
         read_bw = (
             self._batch_bytes / t_read / 1024 / 1024
             if t_read > 0 and self._batch_bytes > 0
@@ -252,7 +260,9 @@ class _LoadPerf:
             f"hit_rate={hit_rate:.1f}% dev_objs={n_device_objs} "
             f"total={t_total * 1000:.1f}ms | "
             f"path={t_path * 1000:.1f}ms(miss={self._path_misses}) | "
-            f"prep={t_prep * 1000:.1f}ms[alloc={t_alloc * 1000:.1f}ms "
+            f"prep={t_prep * 1000:.1f}ms[bp={t_bp * 1000:.1f}ms"
+            f"(to={self._n_bp_timeouts}) "
+            f"alloc={t_alloc * 1000:.1f}ms "
             f"fd={t_fd * 1000:.1f}ms(hits={self._fd_hits} miss={self._fd_misses})] | "
             f"read={t_read * 1000:.1f}ms[{self._n_batch_reqs}reqs "
             f"{self._batch_bytes / 1024 / 1024:.1f}MB {read_bw:.0f}MB/s] | "
@@ -623,9 +633,7 @@ class PhxL2Adapter(L2AdapterInterface):
         # Self-admission: swap CPU placeholders for device-resident objs.
         if device_objs and self._l1_manager is not None:
             for key, obj in device_objs.items():
-                err = self._l1_manager.replace_memory_obj(
-                    key, obj, mark_temporary=True
-                )
+                err = self._l1_manager.replace_memory_obj(key, obj, mark_temporary=True)
                 if err != L1Error.SUCCESS:
                     # Entry was deleted (e.g. request aborted between
                     # reserve_write and query_load_result).  Free the
@@ -976,9 +984,7 @@ class PhxL2Adapter(L2AdapterInterface):
         if fd is not None:
             os.close(fd)
 
-    def _batch_open_fds(
-        self, paths: list[str], flags: int
-    ) -> dict[str, int]:
+    def _batch_open_fds(self, paths: list[str], flags: int) -> dict[str, int]:
         """Open fds for multiple paths in parallel.
 
         Returns a dict mapping path -> fd (or -1 if open failed).
@@ -1141,7 +1147,7 @@ class PhxL2Adapter(L2AdapterInterface):
             allocator = self._phx_allocators.get(dev_id)
             base_ptr = self._phx_base_pointers.get(dev_id)
             cache = self._phx_caches.get(dev_id)
-            if allocator is None or cache is None:
+            if allocator is None or cache is None or base_ptr is None:
                 # Device not initialized, skip (will go to fallback)
                 continue
 
@@ -1150,7 +1156,7 @@ class PhxL2Adapter(L2AdapterInterface):
             dev_batch_dev_objs: list[MemoryObj] = []
             dev_batch_paths: list[str] = []
 
-            # ── Phase 1: Alloc (serial) ──
+            # ── Phase 1: Backpressure + Alloc (serial) ──
             t_alloc_start = perf.mark()
             alloc_results: list[tuple[int, str, int, MemoryObj]] = []
             for i, path in group:
@@ -1159,6 +1165,28 @@ class PhxL2Adapter(L2AdapterInterface):
                 if cpu_tensor is None:
                     continue
                 size = cpu_tensor.nbytes
+
+                # Backpressure: wait for pool space before allocating.
+                # This avoids fallback to slow POSIX reads when the DMA
+                # buffer is temporarily full (device objs pending release
+                # by the retrieve path).
+                if hasattr(allocator, "wait_for_available"):
+                    t_bp = perf.mark()
+                    got = allocator.wait_for_available(size, timeout=5.0)
+                    perf.measure("backpressure", t_bp)
+                    if not got:
+                        perf.add_bp_timeout()
+                        logger.warning(
+                            "PhxL2: backpressure timeout on dev %d "
+                            "(need %d bytes, free %d, key %s)",
+                            dev_id,
+                            size,
+                            allocator.get_free_bytes()
+                            if hasattr(allocator, "get_free_bytes")
+                            else -1,
+                            keys[i],
+                        )
+                        continue  # timeout – fall back to POSIX
 
                 device_obj = allocator.allocate(
                     shapes=obj.metadata.shape,
@@ -1196,7 +1224,14 @@ class PhxL2Adapter(L2AdapterInterface):
                     logger.error("PhxL2Adapter open failed for %s", keys[i])
                     continue
 
-                buf_offset = device_obj.raw_tensor.data_ptr() - base_ptr
+                dev_tensor = device_obj.raw_tensor
+                if dev_tensor is None:
+                    allocator.free(device_obj)
+                    logger.error(
+                        "PhxL2Adapter device obj has no tensor for %s", keys[i]
+                    )
+                    continue
+                buf_offset = dev_tensor.data_ptr() - base_ptr
                 dev_batch_indices.append(i)
                 dev_batch_reqs.append((fd, buf_offset, size, 0))
                 dev_batch_dev_objs.append(device_obj)
