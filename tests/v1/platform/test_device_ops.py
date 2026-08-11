@@ -225,18 +225,27 @@ def test_bind_native_rebinds_types() -> None:
 # -- Shim ------------------------------------------------------------------
 
 
-def test_c_ops_shim_has_all_ops_and_types() -> None:
-    """The lmcache.c_ops shim module exposes everything from _OP_NAMES + types."""
+def test_c_ops_shim_has_all_device_ops() -> None:
+    """The lmcache.c_ops shim exposes the DeviceOps surface only."""
     # First Party
     import lmcache.c_ops as c_ops
 
     for name in _OP_NAMES:
         assert hasattr(c_ops, name), f"c_ops missing {name}"
         assert callable(getattr(c_ops, name))
-    assert hasattr(c_ops, "TransferDirection")
-    assert hasattr(c_ops, "EngineKVFormat")
-    assert hasattr(c_ops, "GPUKVFormat")
     assert hasattr(c_ops, "PageBufferShapeDesc")
+
+    native_only_names = (
+        "TransferDirection",
+        "EngineKVFormat",
+        "GPUKVFormat",
+        "is_cross_layer",
+        "is_kv_list",
+        "is_layer_list",
+        "is_mla",
+    )
+    for name in native_only_names:
+        assert not hasattr(c_ops, name)
 
 
 def test_c_ops_shim_dir() -> None:
@@ -246,7 +255,7 @@ def test_c_ops_shim_dir() -> None:
 
     names = dir(c_ops)
     assert "multi_layer_kv_transfer" in names
-    assert "TransferDirection" in names
+    assert "TransferDirection" not in names
 
 
 # -- DeviceSpec resolution -------------------------------------------------
