@@ -9,12 +9,12 @@ import pytest
 import torch
 
 pytest.importorskip(
-    "lmcache.native_storage_ops",
-    reason="native_storage_ops extension not built",
+    "lmcache.lmcache_native",
+    reason="lmcache_native extension not built",
 )
 
 # First Party
-from lmcache.native_storage_ops import ParallelPatternMatcher, RangePatternMatcher
+from lmcache.lmcache_native import ParallelPatternMatcher, RangePatternMatcher
 
 
 def assert_torch():
