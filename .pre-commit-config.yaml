@@ -108,7 +108,6 @@ repos:
   rev: 'v1.17.1'
   hooks:
   - id: mypy
-    exclude: ^lmcache/lmcache_native\.py$
     language_version: python3.12 
     args: [--config-file=pyproject.toml]
     #args: [--ignore-missing-imports]
