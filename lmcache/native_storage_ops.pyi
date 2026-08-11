@@ -32,8 +32,34 @@ class TTLLock:
         """
         ...
 
+    def lock_count(self, count: int) -> None:
+        """
+        Increment the lock counter by count and update the TTL.
+        If the previous TTL has expired, reset counter to count.
+
+        Args:
+            count: Number of lock counts to acquire. Must be positive.
+
+        Raises:
+            ValueError: If count is not positive.
+            OverflowError: If the counter would exceed int64 capacity.
+        """
+        ...
+
     def unlock(self) -> None:
         """Decrement the lock counter by 1 (minimum 0)."""
+        ...
+
+    def unlock_count(self, count: int) -> None:
+        """
+        Decrement the lock counter by count (minimum 0).
+
+        Args:
+            count: Number of lock counts to release. Must be positive.
+
+        Raises:
+            ValueError: If count is not positive.
+        """
         ...
 
     def is_locked(self) -> bool:
