@@ -352,30 +352,6 @@ class L2AdapterInterface(ABC):
         """
         pass
 
-    def pop_loaded_device_objs(
-        self, task_id: "L2TaskId"
-    ) -> dict["ObjectKey", "MemoryObj"]:
-        """Return device-resident MemoryObjs produced by this load task.
-
-        Most adapters fill the caller-provided load buffers (the
-        ``objects`` passed to :meth:`submit_load_task`) and return an
-        empty dict here. Adapters that instead allocate their own
-        device-resident MemoryObjs during load (e.g. ``PhxL2Adapter`` PHX
-        DMA, which reads NVMe directly into a device buffer) override this
-        to hand those objs to the prefetch controller, so the controller
-        can store them in L1 and serve them to retrieve without an
-        intermediate D2H copy.
-
-        Called once per ``task_id`` after :meth:`query_load_result` has
-        returned a non-None bitmap. The returned mapping is keyed by
-        ``ObjectKey``; only keys whose bitmap bit is set should appear.
-
-        Returns:
-            A mapping of ObjectKey -> device MemoryObj. Empty for adapters
-            that fill caller-provided buffers.
-        """
-        return {}
-
     #####################
     # Listener Interface
     #####################

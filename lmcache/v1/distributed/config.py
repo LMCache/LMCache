@@ -211,12 +211,6 @@ class L1ManagerConfig:
     read_ttl_seconds: int = field(default=300)
     """ Time to live for each object's read lock. Default is 300s (5 minutes). """
 
-    enable_write_back: bool = False
-    """ When True, device-resident MemoryObjs in L1 are D2H-copied to CPU
-    objs after D2D transfer, preserving the L1 cache entry for future H2D
-    hits.  When False (default), device objs are deleted after D2D,
-    freeing the DMA buffer immediately but losing the L1 cache entry. """
-
 
 @dataclass
 class EvictionConfig:
@@ -465,14 +459,6 @@ def add_storage_manager_args(
         default=300,
         help="Time to live for each object's read lock. Default is 300s.",
     )
-    ttl_group.add_argument(
-        "--enable-write-back",
-        action="store_true",
-        default=False,
-        help="D2H-copy device-resident MemoryObjs to CPU after D2D transfer, "
-        "preserving L1 cache entries for future H2D hits. Default is False "
-        "(delete device objs after D2D to immediately free DMA buffer).",
-    )
 
     # Eviction Config
     eviction_group = parser.add_argument_group(
@@ -625,7 +611,6 @@ def parse_args_to_config(
         phx_l2_enabled=phx_l2_enabled,
         write_ttl_seconds=args.l1_write_ttl_seconds,
         read_ttl_seconds=args.l1_read_ttl_seconds,
-        enable_write_back=getattr(args, "enable_write_back", False),
     )
 
     eviction_config = EvictionConfig(

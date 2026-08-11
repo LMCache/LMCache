@@ -25,7 +25,9 @@ from lmcache import torch_device_type
 from lmcache.logging import init_logger
 from lmcache.native_storage_ops import Bitmap
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L1MemoryDesc, L2StoreResult
+from lmcache.v1.distributed.l1_manager import get_current_l1_manager
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
     L2TaskId,
@@ -410,6 +412,17 @@ class PhxL2Adapter(L2AdapterInterface):
         self._lookup_efd = create_event_notifier()
         self._load_efd = create_event_notifier()
 
+        # L1Manager reference for self-admission: when PHX DMA produces
+        # device-resident objs, query_load_result replaces the pre-allocated
+        # CPU objs in L1 with them (mark_temporary=True) so retrieve serves
+        # via D2D and finish_read auto-recycles the DMA buffer.
+        self._l1_manager = get_current_l1_manager()
+        if self._l1_manager is None and self._phx_caches:
+            raise RuntimeError(
+                "PhxL2Adapter: L1Manager not yet constructed; "
+                "adapter must be created after StorageManager's L1Manager"
+            )
+
         # ── task queues ──
         self._store_queue: list[tuple[L2TaskId, list, list]] = []
         self._store_lock = threading.Lock()
@@ -430,8 +443,9 @@ class PhxL2Adapter(L2AdapterInterface):
         self._next_load_id = 0
         # Device-resident MemoryObjs produced by PHX DMA load (task_id ->
         # {key: obj}). Populated by _process_load when is_phx_available();
-        # consumed by pop_loaded_device_objs() so the prefetch controller can
-        # store them in L1 and serve retrieve via D2D (no D2H round-trip).
+        # consumed by query_load_result() which self-admits them into L1
+        # via replace_memory_obj(mark_temporary=True) so retrieve serves
+        # via D2D and finish_read auto-recycles the DMA buffer.
         self._load_device_objs: dict[L2TaskId, dict[ObjectKey, MemoryObj]] = {}
 
         # ── hot cache ──
@@ -571,8 +585,48 @@ class PhxL2Adapter(L2AdapterInterface):
         return task_id
 
     def query_load_result(self, task_id: L2TaskId) -> Optional[Bitmap]:
+        """Pop the load bitmap for *task_id* and self-admit device objs.
+
+        When PHX DMA was used, device-resident MemoryObjs were allocated
+        from the phx pool during ``_process_load``.  Here we replace the
+        pre-allocated CPU placeholder objs in L1 with these device objs,
+        marking them ``is_temporary=True`` so that ``finish_read``
+        automatically deletes the L1 entry and frees the device obj back
+        to the phx pool (via ``PhxL1MemoryManager.free`` dispatch) when
+        read locks reach zero — no manual ``release_device_objs`` needed.
+
+        Thread-safety: ``_load_results`` and ``_load_device_objs`` are
+        written under ``_load_results_lock`` in ``_process_load`` and
+        atomically popped here under the same lock, so the bitmap and
+        device objs are always consistent.
+
+        ``device_objs`` only contains keys whose DMA succeeded
+        (``_load_batch`` sets ``device_objs[key]`` and ``bitmap.set(idx)``
+        together; failed DMA objs are freed immediately and never enter
+        ``device_objs``).  POSIX-fallback keys fill the CPU obj directly
+        and are not in ``device_objs``.
+        """
         with self._load_results_lock:
-            return self._load_results.pop(task_id, None)
+            bitmap = self._load_results.pop(task_id, None)
+            if bitmap is None:
+                return None
+            device_objs = self._load_device_objs.pop(task_id, {})
+
+        # Self-admission: swap CPU placeholders for device-resident objs.
+        if device_objs and self._l1_manager is not None:
+            for key, obj in device_objs.items():
+                err = self._l1_manager.replace_memory_obj(
+                    key, obj, mark_temporary=True
+                )
+                if err != L1Error.SUCCESS:
+                    # Entry was deleted (e.g. request aborted between
+                    # reserve_write and query_load_result).  Free the
+                    # device obj directly to avoid leaking pool memory.
+                    parent = obj.parent()
+                    if parent is not None:
+                        parent.free(obj)
+
+        return bitmap
 
     # ── background worker ──
 
@@ -1119,21 +1173,6 @@ class PhxL2Adapter(L2AdapterInterface):
         CUDA_VISIBLE_DEVICES index.
         """
         return (kv_rank >> 16) & 0xFF
-
-    def pop_loaded_device_objs(self, task_id: L2TaskId) -> dict[ObjectKey, MemoryObj]:
-        """Return device-resident MemoryObjs produced by this load task.
-
-        Overrides the base no-op: when PHX DMA was used, returns the device
-        MemoryObjs allocated from the phx pool (keyed by ObjectKey) so the
-        prefetch controller can store them in L1 and serve retrieve via
-        device→device scatter (D2D) instead of an H2D copy.
-
-        Returns an empty dict for keys that fell back to POSIX read (those
-        filled the controller-provided CPU obj directly) or for tasks that
-        have already been popped.
-        """
-        with self._load_results_lock:
-            return self._load_device_objs.pop(task_id, {})
 
     # ── lifecycle ──
 

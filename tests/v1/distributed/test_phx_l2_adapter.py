@@ -420,34 +420,6 @@ def test_phx_posix_mode_not_phx_available(tmp_path):
         adapter.close()
 
 
-def test_phx_posix_pop_device_objs_empty(tmp_path):
-    """POSIX load fills CPU objs directly; no device objs are produced."""
-    adapter = make_posix_adapter(tmp_path)
-    obj = create_memory_obj(fill_value=1)
-    target = create_memory_obj(fill_value=0)
-    try:
-        key = create_object_key(30)
-        store_and_wait(adapter, key, obj)
-        task_id = adapter.submit_load_task([key], [target])
-        assert wait_for_event_fd(adapter.get_load_event_fd())
-        _ = adapter.query_load_result(task_id)
-
-        assert adapter.pop_loaded_device_objs(task_id) == {}
-    finally:
-        obj.ref_count_down()
-        target.ref_count_down()
-        adapter.close()
-
-
-def test_phx_pop_device_objs_unknown_task_returns_empty(tmp_path):
-    """Popping a task that never existed returns an empty dict."""
-    adapter = make_posix_adapter(tmp_path)
-    try:
-        assert adapter.pop_loaded_device_objs(99999) == {}
-    finally:
-        adapter.close()
-
-
 def test_phx_report_status(tmp_path):
     adapter = make_posix_adapter(tmp_path)
     try:

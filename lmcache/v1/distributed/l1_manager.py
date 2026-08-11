@@ -7,6 +7,7 @@ Managing objects and memory for L1 cache
 from dataclasses import dataclass
 from typing import Literal
 import threading
+import weakref
 
 # First Party
 from lmcache.lmcache_native import TTLLock
@@ -30,6 +31,27 @@ from lmcache.v1.mp_observability.event_bus import get_event_bus
 from lmcache.v1.mp_observability.otel_init import register_gauge
 
 logger = init_logger(__name__)
+
+
+# Module-level registry: holds a weakref to the most recently constructed
+# L1Manager in this process.  MP mode has exactly one StorageManager (and
+# thus one L1Manager) per cache-server process; the construction order in
+# StorageManager.__init__ guarantees L1Manager is created before any L2
+# adapter, so adapters can fetch the live instance via
+# get_current_l1_manager() at construction time.
+_CURRENT: "weakref.ref[L1Manager] | None" = None
+
+
+def get_current_l1_manager() -> "L1Manager | None":
+    """Return the live L1Manager of this process, or None.
+
+    Used by L2 adapters that need to call L1Manager methods (e.g.
+    PhxL2Adapter calls replace_memory_obj) but cannot receive an L1Manager
+    reference through their factory signature because the caller
+    (StorageManager._build_l2_adapter) is a framework file kept at zero
+    diff.
+    """
+    return _CURRENT() if _CURRENT is not None else None
 
 
 # Internal classes and helper functions
@@ -236,26 +258,44 @@ class L1Manager:
                 lambda: _l1_usage_ratio_or_zero(L1Manager._gauge_target),
             )
 
+        # Register self in the module-level registry so L2 adapters
+        # constructed after this point can fetch the live L1Manager.
+        global _CURRENT
+        _CURRENT = weakref.ref(self)
+
     @l1_mgr_synchronized
-    def replace_memory_obj(self, key: ObjectKey, new_obj: MemoryObj) -> L1Error:
+    def replace_memory_obj(
+        self,
+        key: ObjectKey,
+        new_obj: MemoryObj,
+        mark_temporary: bool = False,
+    ) -> L1Error:
         """Replace the MemoryObj stored for ``key`` with ``new_obj``.
 
-        Used by the prefetch controller when an L2 adapter (e.g.
-        ``PhxL2Adapter``) produces a device-resident MemoryObj that should be
-        served from L1 instead of the CPU buffer pre-allocated by
-        ``reserve_write``. The old CPU obj is freed via the L1 memory
-        manager; the new obj's lifecycle is owned by its own allocator
-        (freed via the memory manager's ``free`` dispatch on subsequent
-        eviction/delete/read-finish).
+        Used by L2 adapters (e.g. ``PhxL2Adapter``) that produce a
+        device-resident MemoryObj during load.  The adapter calls this
+        from its ``query_load_result`` to swap the pre-allocated CPU
+        buffer (from ``reserve_write``) with the device obj, so retrieve
+        serves it via D2D instead of H2D.  The old CPU obj is freed via
+        the L1 memory manager; the new obj's lifecycle is owned by its
+        own allocator (freed via the memory manager's ``free`` dispatch
+        on subsequent eviction/delete/read-finish).
 
-        The key must currently exist in L1 (typically write-locked, between
-        ``reserve_write`` and ``finish_write``). Object state (locks,
-        temporary flag) is preserved; only the underlying buffer reference
-        is swapped.
+        The key must currently exist in L1 (typically write-locked,
+        between ``reserve_write`` and ``finish_write``).  Object state
+        (locks) is preserved; only the underlying buffer reference is
+        swapped.
 
         Args:
             key: The object key whose MemoryObj should be replaced.
             new_obj: The new MemoryObj to store (may be device-resident).
+            mark_temporary: If True, set ``is_temporary=True`` on the
+                entry so that ``finish_read`` automatically deletes it
+                and frees the MemoryObj when read locks reach zero.
+                This is the "read-once-then-free" path used by PHX DMA
+                adapters to recycle device buffers without a manual
+                ``release_device_objs`` call.  Default False (preserve
+                the entry's existing temporary flag).
 
         Returns:
             L1Error.SUCCESS on success, L1Error.KEY_NOT_EXIST otherwise.
@@ -265,6 +305,8 @@ class L1Manager:
             return L1Error.KEY_NOT_EXIST
         old_obj = entry.memory_obj
         entry.memory_obj = new_obj
+        if mark_temporary:
+            entry.is_temporary = True
         if old_obj is not None:
             self._memory_manager.free([old_obj])
         return L1Error.SUCCESS
@@ -761,90 +803,6 @@ class L1Manager:
             )
         )
         return ret
-
-    @l1_mgr_synchronized
-    def release_device_objs(
-        self,
-        keys: list[ObjectKey],
-        write_back: bool = False,
-    ) -> None:
-        """Release device-resident MemoryObjs after D2D transfer.
-
-        Called by the storage manager after retrieve has completed the D2D
-        copy from a device-resident MemoryObj (produced by PhxL2Adapter DMA)
-        to the vLLM worker's KV cache.  This ensures the DMA buffer is
-        recycled promptly instead of being held as a cache entry.
-
-        Args:
-            keys: Object keys whose retrieve (D2D) has completed.
-            write_back: If True, D2H-copy the device obj data to a new CPU
-                MemoryObj and replace the L1 entry, preserving the cached
-                data for future H2D hits.  If False (default), delete the
-                L1 entry entirely so the DMA buffer is freed immediately.
-        """
-        keys_to_delete: list[ObjectKey] = []
-        objs_to_free: list[MemoryObj] = []
-
-        for key in keys:
-            entry = self._objects.get(key, None)
-            if entry is None:
-                continue
-            mem_obj = entry.memory_obj
-            if mem_obj is None:
-                continue
-            try:
-                rt = mem_obj.raw_tensor
-            except Exception:
-                rt = None
-            if rt is None or rt.device.type == "cpu":
-                continue  # CPU obj, nothing to do
-
-            # Device obj: write-back or delete
-            if write_back:
-                # Allocate a new CPU obj with the same layout
-                layout_desc = MemoryLayoutDesc(
-                    shapes=[rt.shape],
-                    dtypes=[rt.dtype],
-                )
-                err, allocated = self._memory_manager.allocate(layout_desc, 1)
-                if err == L1Error.SUCCESS and allocated:
-                    cpu_obj = allocated[0]
-                    # D2H copy (synchronous, stream is idle in callback)
-                    if cpu_obj.raw_tensor is not None:
-                        cpu_obj.raw_tensor.copy_(rt)
-                    # Inline replace_memory_obj (can't call the decorated
-                    # method because we already hold self._lock).
-                    old_obj = entry.memory_obj
-                    entry.memory_obj = cpu_obj
-                    if old_obj is not None:
-                        self._memory_manager.free([old_obj])
-                else:
-                    logger.warning(
-                        "L1Manager: write-back allocation failed for key %s, "
-                        "falling back to delete",
-                        key,
-                    )
-                    keys_to_delete.append(key)
-                    objs_to_free.append(mem_obj)
-            else:
-                keys_to_delete.append(key)
-                objs_to_free.append(mem_obj)
-
-        if keys_to_delete:
-            for key in keys_to_delete:
-                del self._objects[key]
-            self._memory_manager.free(objs_to_free)
-            for listener in self._registered_listeners:
-                listener.on_l1_keys_deleted_by_manager(keys_to_delete)
-            self._event_bus.publish(
-                Event(
-                    event_type=EventType.L1_KEYS_EVICTED,
-                    metadata={
-                        "keys": keys_to_delete,
-                        "meta": [self._object_meta(o) for o in objs_to_free],
-                    },
-                )
-            )
 
     def touch_keys(self, keys: list[ObjectKey]):
         """Touch the given keys, marking the keys as accessed(retrieved or stored).
