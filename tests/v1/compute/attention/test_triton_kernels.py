@@ -13,7 +13,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache import torch_device_type
+from lmcache import torch_dev, torch_device_type
 from lmcache.v1.compute.attention.metadata import _block_mask_to_csr
 from lmcache.v1.compute.attention.triton_kernels import (
     block_sparse_attention,
@@ -21,11 +21,10 @@ from lmcache.v1.compute.attention.triton_kernels import (
     merge_attention_outputs,
 )
 
-pytestmark = [
-    pytest.mark.cuda,
-    pytest.mark.xpu,
-    pytest.mark.musa,
-]
+pytestmark = pytest.mark.skipif(
+    not torch_dev.is_available(),
+    reason=f"Requires available {torch_device_type} runtime",
+)
 
 # ---------------------------------------------------------------------------
 # Helpers

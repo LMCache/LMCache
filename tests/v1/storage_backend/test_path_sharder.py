@@ -11,7 +11,7 @@ import tempfile
 import pytest
 
 # First Party
-from lmcache import torch_device_type
+from lmcache import torch_dev, torch_device_type
 from lmcache.v1.storage_backend.path_sharder import PathSharder
 
 
@@ -147,9 +147,10 @@ class TestPathSharder:
         "lmcache.v1.storage_backend.path_sharder.torch_dev.current_device",
         return_value=1,
     )
-    @pytest.mark.cuda
-    @pytest.mark.musa
-    @pytest.mark.xpu
+    @pytest.mark.skipif(
+        not torch_dev.is_available(),
+        reason=f"Requires available {torch_device_type} runtime",
+    )
     def test_bare_cuda_uses_current_device(self, _cur, _avail):
         """Bare active device type resolves to torch_dev.current_device()."""
         dirs = [tempfile.mkdtemp() for _ in range(3)]

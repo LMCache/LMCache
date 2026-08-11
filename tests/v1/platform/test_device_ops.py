@@ -15,7 +15,7 @@ import inspect
 import pytest
 
 # First Party
-from lmcache import torch_device_type
+from lmcache import torch_dev, torch_device_type
 from lmcache.v1.platform import resolve_device_ops
 from lmcache.v1.platform.base.device_ops import DeviceOps
 from lmcache.v1.platform.base.device_spec import DeviceSpec
@@ -280,9 +280,10 @@ def test_cpu_without_registered_spec_falls_back_to_base_device_ops(
     assert type(resolve_device_ops("cpu")) is DeviceOps
 
 
-@pytest.mark.musa
-@pytest.mark.cuda
-@pytest.mark.xpu
+@pytest.mark.skipif(
+    not torch_dev.is_available(),
+    reason=f"Requires available {torch_device_type} runtime",
+)
 def test_unregistered_accelerator_fails_fast(
     isolated_registry: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:

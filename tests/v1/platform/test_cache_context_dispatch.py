@@ -20,7 +20,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache import torch_device_type
+from lmcache import torch_dev, torch_device_type
 from lmcache.v1.platform import get_device_spec
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.cache_context import create_cache_context
@@ -185,9 +185,10 @@ def test_empty_kv_caches_raises() -> None:
         create_cache_context([])
 
 
-@pytest.mark.musa
-@pytest.mark.cuda
-@pytest.mark.xpu
+@pytest.mark.skipif(
+    not torch_dev.is_available(),
+    reason=f"Requires available {torch_device_type} runtime",
+)
 def test_mixed_device_types_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     """Cross-device batches are unsupported and must fail loudly."""
     _patch_hook(monkeypatch, "cpu", _FakeCPUContext)
