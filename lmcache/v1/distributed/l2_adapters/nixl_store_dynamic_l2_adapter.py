@@ -612,6 +612,7 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
                             "Storage capacity exceeded, skipping store for key %s",
                             key,
                         )
+                        success = False
                         break
                     self._inflight_stores.add(key)
                     self._total_bytes += mem_size
