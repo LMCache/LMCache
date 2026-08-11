@@ -77,6 +77,7 @@ REQUEST_NAMES = [
     "COMMIT_STORE",
     "PREPARE_RETRIEVE",
     "COMMIT_RETRIEVE",
+    "RETRIEVE_LAYERWISE",
 ]
 
 # Type alias for cache keys
@@ -189,6 +190,17 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
             payload_classes=[KeyType, int, list[list[int]], bytes, int, bool],
             response_class=tuple[bytes | list[bytes], bool],
             handler_type=HandlerType.BLOCKING,
+        ),
+        # Layerwise variant of RETRIEVE: identical payloads/response but the
+        # server streams per-batch IPC event handles back as partial ZMQ
+        # frames (streaming=True).  A dedicated request type keeps the plain
+        # RETRIEVE (per-chunk) dispatch path completely untouched -- no
+        # StreamingSink is ever allocated for it.
+        "RETRIEVE_LAYERWISE": ProtocolDefinition(
+            payload_classes=[KeyType, int, list[list[int]], bytes, int, bool],
+            response_class=tuple[bytes | list[bytes], bool],
+            handler_type=HandlerType.BLOCKING,
+            streaming=True,
         ),
         # Submit a prefix lookup; job is tracked server-side by request_id
         # Payload:

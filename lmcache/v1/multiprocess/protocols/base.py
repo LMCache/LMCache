@@ -58,6 +58,7 @@ class RequestType(enum.Enum):
     COMMIT_STORE = enum.auto()
     PREPARE_RETRIEVE = enum.auto()
     COMMIT_RETRIEVE = enum.auto()
+    RETRIEVE_LAYERWISE = enum.auto()
 
     # Controller operations
     CLEAR = enum.auto()
@@ -111,3 +112,4 @@ class ProtocolDefinition:
     payload_classes: list[Any]
     response_class: Optional[Any]
     handler_type: HandlerType
+    streaming: bool = False

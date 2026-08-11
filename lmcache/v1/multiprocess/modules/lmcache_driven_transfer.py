@@ -9,6 +9,7 @@ import threading
 import time
 
 # Third Party
+import msgspec
 import torch
 
 # First Party
@@ -650,6 +651,7 @@ def transfer_kv_layerwise(
     event_backend: EventIPCBackend,
     batch_leader_map: dict[int, int] | None = None,
     layerwise_batch: int = 1,
+    event_export_callback=None,
 ) -> None:
     """Transfer KV cache in layer-major order, recording per-layer events.
 
@@ -1171,6 +1173,11 @@ def transfer_kv_layerwise(
                 gl = all_layers[layer_batch_start + sub_idx][2]
                 batch_leader_map[gl] = first_gl
 
+        # Stream the event handle to the worker immediately so it can
+        # start attention on these layers while later batches transfer.
+        if event_export_callback is not None and first_gl < len(layer_events):
+            event_export_callback(first_gl, n_in_batch, layer_events[first_gl])
+
         layer_batch_start = batch_end
 
 
@@ -1392,6 +1399,14 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             ),
             HandlerSpec(
                 RequestType.RETRIEVE,
+                self.retrieve,
+                ThreadPoolType.AFFINITY,
+            ),
+            # Same handler as RETRIEVE; the dedicated request type only
+            # differs in that its protocol has streaming=True, so the MQ
+            # server allocates a StreamingSink for it (layerwise path only).
+            HandlerSpec(
+                RequestType.RETRIEVE_LAYERWISE,
                 self.retrieve,
                 ThreadPoolType.AFFINITY,
             ),
@@ -1795,6 +1810,8 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         event_ipc_handle: bytes,
         skip_first_n_tokens: int = 0,
         layerwise: bool = False,
+        *,
+        streaming_sink=None,
     ) -> tuple[bytes | list[bytes], bool]:
         """Retrieve the CPU KV cache and put into GPU blocks.
 
@@ -1952,6 +1969,25 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                         )
 
                         if layerwise:
+                            # Build streaming callback if sink available
+                            _export_cb = None
+                            if streaming_sink is not None:
+
+                                def _export_cb(
+                                    first_layer,
+                                    count,
+                                    event,
+                                    _sink=streaming_sink,
+                                    _eb=event_backend,
+                                    _cc=cache_context,
+                                ):
+                                    handle = _eb.export_event(event, _cc.device)
+                                    _sink.send_partial(
+                                        msgspec.msgpack.encode(
+                                            (first_layer, count, handle)
+                                        )
+                                    )
+
                             transfer_kv_layerwise(
                                 cache_context,
                                 block_ids_per_group_gpu,
@@ -1963,6 +1999,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                                 event_backend=event_backend,
                                 batch_leader_map=batch_leader_map,
                                 layerwise_batch=self._ctx.layerwise_batch,
+                                event_export_callback=_export_cb,
                             )
                         else:
                             transfer_kv_per_object_group(
@@ -2020,6 +2057,11 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             )
 
         if layerwise and layer_events:
+            if streaming_sink is not None:
+                # Events were already streamed via partials; return
+                # empty list so the final ZMQ response only carries
+                # the success flag.
+                return [], retrieve_succeeded
             # Export deduplicated handles as flat list[bytes] (msgspec
             # compatible). Layers sharing a batch get the same handle
             # bytes; consumer deduplicates on import.

@@ -618,9 +618,13 @@ class LMCacheDrivenTransferContext(TransferContext):
                 "Call register() before submit_retrieve()."
             )
         event_ipc_handle = self._event_backend.export_event(event, self._device)
+        # Layerwise retrieves use a dedicated request type so the server side
+        # streams per-batch IPC event handles back; the plain RETRIEVE path
+        # (per-chunk) is left completely unchanged.
+        req_type = RequestType.RETRIEVE_LAYERWISE if layerwise else RequestType.RETRIEVE
         raw_future = self._send_request(
             self._mq_client,
-            RequestType.RETRIEVE,
+            req_type,
             [
                 key,
                 instance_id,
@@ -631,7 +635,9 @@ class LMCacheDrivenTransferContext(TransferContext):
             ],
         )
         if layerwise:
-            return LayerwiseDeviceMessagingFuture(raw_future, device=self._device)
+            return LayerwiseDeviceMessagingFuture(
+                raw_future, device=self._device, streaming=True
+            )
         return raw_future.to_device_future(device=self._device)
 
     @property

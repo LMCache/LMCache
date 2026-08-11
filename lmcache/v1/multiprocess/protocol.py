@@ -84,3 +84,10 @@ def get_handler_type(req_type: RequestType) -> HandlerType:
         return pd.handler_type
     else:
         raise ValueError(f"Invalid request type: {req_type}")
+
+
+def get_streaming(req_type: RequestType) -> bool:
+    """Return whether a request type supports partial streaming responses."""
+    if pd := _PROTOCOL_DEFINITIONS.get(req_type, None):
+        return pd.streaming
+    return False

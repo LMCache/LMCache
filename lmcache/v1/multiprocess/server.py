@@ -67,6 +67,7 @@ from lmcache.v1.multiprocess.protocol import (
     RequestType,
     get_handler_type,
     get_payload_classes,
+    get_streaming,
 )
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 
@@ -164,11 +165,13 @@ def add_handler_helper(
     """
     payload_classes = get_payload_classes(request_type)
     handler_type = get_handler_type(request_type)
+    streaming = get_streaming(request_type)
     server.add_handler(
         request_type,
         payload_classes,
         handler_type,
         handler_function,
+        streaming=streaming,
     )
 
 

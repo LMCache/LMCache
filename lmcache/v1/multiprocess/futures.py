@@ -1,7 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from typing import Any, Generic, Optional, TypeVar, cast
+import queue
 import threading
+
+# Third Party
+import msgspec
 
 # First Party
 from lmcache import torch_dev
@@ -17,6 +21,7 @@ class MessagingFuture(Generic[T]):
         self.is_done_ = threading.Event()
         self.result_: T | None = None
         self._retained_references: list[object] = []
+        self._partial_queue: queue.Queue[bytes] | None = None
 
     def query(self) -> bool:
         """
@@ -58,6 +63,21 @@ class MessagingFuture(Generic[T]):
         if not flag:
             raise LMCacheTimeoutError("Future result not available within timeout")
         return cast(T, self.result_)
+
+    def on_partial(self, data: bytes) -> None:
+        """Receive a partial streaming response from the MQ client.
+
+        Called by :meth:`MessageQueueClient.process_inbound` for each
+        partial frame.  Only effective if :meth:`enable_streaming` was
+        called first.
+        """
+        if self._partial_queue is not None:
+            self._partial_queue.put(data)
+
+    def enable_streaming(self) -> "queue.Queue[bytes]":
+        """Enable partial result streaming and return the internal queue."""
+        self._partial_queue = queue.Queue()
+        return self._partial_queue
 
     def set_result(self, result: T) -> None:
         """
@@ -234,19 +254,22 @@ class DeviceMessagingFuture(MessagingFuture[T]):
 class LayerwiseDeviceMessagingFuture(MessagingFuture[T]):
     """Future that carries per-layer IPC events for layerwise KV loading.
 
-    The raw future result is ``(list[bytes], T)`` where each bytes element
-    is a serialized IPC event handle for one layer.  The ``wait_for_layer``
-    method synchronises the current stream with a specific layer's event,
-    allowing per-layer overlap of H2D transfer and GPU compute.
+    Supports two modes:
 
-    ``query()`` and ``wait()`` check the LAST layer's event, i.e. the
-    entire transfer is complete.
+    * **Non-streaming** (``streaming=False``, default): the raw future
+      delivers all event handles at once in its result.
+    * **Streaming** (``streaming=True``): event handles arrive
+      incrementally via :meth:`MessagingFuture.on_partial` (partial ZMQ
+      frames).  :meth:`wait_for_layer` imports and waits on each
+      handle as soon as it arrives, overlapping H2D transfer of later
+      batches with GPU attention of earlier layers.
     """
 
     def __init__(
         self,
         raw_future: MessagingFuture[tuple[list[bytes], T]],
         device: Any | None = None,
+        streaming: bool = False,
     ) -> None:
         super().__init__()
         self.raw_future_ = raw_future
@@ -258,14 +281,66 @@ class LayerwiseDeviceMessagingFuture(MessagingFuture[T]):
         self._resolved = False
         self._last_waited_event: object | None = None
 
+        # Streaming state
+        self._streaming = streaming
+        self._layer_event_map: dict[int, Any] = {}
+        if streaming:
+            self._partial_queue = raw_future.enable_streaming()
+        else:
+            self._partial_queue = None
+
+    # ------------------------------------------------------------------
+    # Streaming helpers
+    # ------------------------------------------------------------------
+
+    def _import_partial(self, b_data: bytes) -> None:
+        """Import event handles from one partial message."""
+        first_layer, count, handle_bytes = msgspec.msgpack.decode(
+            b_data, type=tuple[int, int, bytes]
+        )
+        evt = self._event_backend.import_event(handle_bytes, self.device_)
+        for i in range(first_layer, first_layer + count):
+            self._layer_event_map[i] = evt
+
+    def _drain_until_layer(self, target_layer_idx: int) -> None:
+        """Block-drain the partial queue until *target_layer_idx* is available."""
+        assert self._partial_queue is not None
+        while target_layer_idx not in self._layer_event_map:
+            try:
+                b_data = self._partial_queue.get(timeout=60)
+            except queue.Empty:
+                raise LMCacheTimeoutError(
+                    f"Timed out waiting for streaming event of layer {target_layer_idx}"
+                ) from None
+            self._import_partial(b_data)
+
+    def _drain_remaining(self) -> None:
+        """Non-blocking drain of any queued partial messages."""
+        if self._partial_queue is None:
+            return
+        while True:
+            try:
+                b_data = self._partial_queue.get_nowait()
+            except queue.Empty:
+                break
+            self._import_partial(b_data)
+
+    def _resolve_final(self) -> None:
+        """Extract the success flag from the final ZMQ response."""
+        if self.result_ is not None:
+            return
+        _, result = self.raw_future_.result()
+        self.result_ = result
+
+    # ------------------------------------------------------------------
+    # Non-streaming helpers
+    # ------------------------------------------------------------------
+
     def _on_raw_future_complete(self) -> None:
         if self._resolved:
             return
         event_bytes_list, result = self.raw_future_.result()
         self.result_ = result
-        # Deduplicate: layers sharing a batch have identical handle bytes,
-        # so import each unique handle only once (avoids redundant
-        # cudaIpcOpenEventHandle calls).
         seen: dict[bytes, object] = {}
         self.layer_events_ = []
         for eb in event_bytes_list:
@@ -274,18 +349,24 @@ class LayerwiseDeviceMessagingFuture(MessagingFuture[T]):
             self.layer_events_.append(seen[eb])
         self._resolved = True
 
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
     def wait_for_layer(self, layer_idx: int) -> None:
-        """Make the current stream wait for a specific layer's transfer.
+        """Make the current stream wait for a specific layer's transfer."""
+        if self._streaming:
+            evt = self._layer_event_map.get(layer_idx)
+            if evt is None:
+                self._drain_until_layer(layer_idx)
+                evt = self._layer_event_map.get(layer_idx)
+            if evt is not None and evt is not self._last_waited_event:
+                current_stream = torch_dev.current_stream(self.device_)
+                self._event_backend.wait_event(evt, current_stream)
+                self._last_waited_event = evt
+            return
 
-        This waits on the MQ response first (if not yet received), then
-        inserts a stream-ordered dependency so the current GPU stream
-        waits for layer ``layer_idx``'s event without blocking the CPU.
-        This allows the CPU to continue enqueuing work (e.g. the next
-        layer's attention launch) immediately.
-
-        Args:
-            layer_idx: Global layer index (0-based).
-        """
+        # Non-streaming path
         if not self._resolved:
             self.raw_future_.wait()
             self._on_raw_future_complete()
@@ -297,8 +378,21 @@ class LayerwiseDeviceMessagingFuture(MessagingFuture[T]):
                 self._last_waited_event = evt
 
     def wait(self, timeout: Optional[float] = None) -> bool:
+        if self._streaming:
+            flag = self.raw_future_.wait(timeout)
+            if not flag:
+                return False
+            self._resolve_final()
+            self._drain_remaining()
+            if self._layer_event_map:
+                last_layer = max(self._layer_event_map.keys())
+                self._event_backend.synchronize_event(
+                    self._layer_event_map[last_layer], self.device_
+                )
+            return True
+
+        # Non-streaming path
         if self.layer_events_:
-            # Already resolved — wait on the last event (all layers done)
             self._event_backend.synchronize_event(self.layer_events_[-1], self.device_)
             return True
         flag = self.raw_future_.wait(timeout)
@@ -319,6 +413,19 @@ class LayerwiseDeviceMessagingFuture(MessagingFuture[T]):
         return self.result_
 
     def query(self) -> bool:
+        if self._streaming:
+            if not self.raw_future_.query():
+                return False
+            self._resolve_final()
+            self._drain_remaining()
+            if self._layer_event_map:
+                last_layer = max(self._layer_event_map.keys())
+                return self._event_backend.query_event(
+                    self._layer_event_map[last_layer]
+                )
+            return True
+
+        # Non-streaming path
         if self.layer_events_:
             return self._event_backend.query_event(self.layer_events_[-1])
         if self.raw_future_.query():
@@ -335,6 +442,8 @@ class LayerwiseDeviceMessagingFuture(MessagingFuture[T]):
 
     @property
     def num_layers(self) -> int:
+        if self._streaming:
+            return len(self._layer_event_map)
         return len(self.layer_events_)
 
 
