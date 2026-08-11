@@ -38,7 +38,7 @@ class PendingStoreItem:
     is_finished: bool = False
 
 
-# TODO: support more offload policies
+# TODO(chunxiaozheng): support more offload policies
 class OffloadPolicy(ABC):
     """
     Abstract base class for lazy offload policies.
