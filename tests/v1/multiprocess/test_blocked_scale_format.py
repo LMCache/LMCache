@@ -82,12 +82,18 @@ def test_blocked_roundtrip_value_exact_across_alignments():
     torch.manual_seed(0)
     n_tok = 96
     src, src_ptrs = _make_paged()
-    rows = torch.randint(0, 255, (_NL, n_tok, _ROW), dtype=torch.uint8, device="cuda")
-    src_slots = torch.arange(32, 32 + n_tok, dtype=torch.int64, device="cuda")
+    rows = torch.randint(
+        0, 255, (_NL, n_tok, _ROW), dtype=torch.uint8, device="cuda"
+    )
+    src_slots = torch.arange(
+        32, 32 + n_tok, dtype=torch.int64, device="cuda"
+    )
     _write_all(src, src_slots, rows)
 
     # D2H-style gather into a token-major chunk buffer (kv=1, NL, n_tok, 132).
-    chunk = torch.zeros(1, _NL, n_tok, _ROW, dtype=torch.uint8, device="cuda")
+    chunk = torch.zeros(
+        1, _NL, n_tok, _ROW, dtype=torch.uint8, device="cuda"
+    )
     lmc_ops.multi_layer_kv_transfer(
         chunk,
         src_ptrs,
@@ -104,7 +110,9 @@ def test_blocked_roundtrip_value_exact_across_alignments():
 
     # H2D scatter to a DIFFERENT intra-block alignment (delta 17 mod 64 != 0).
     dst, dst_ptrs = _make_paged()
-    dst_slots = torch.arange(17, 17 + n_tok, dtype=torch.int64, device="cuda")
+    dst_slots = torch.arange(
+        17, 17 + n_tok, dtype=torch.int64, device="cuda"
+    )
     lmc_ops.multi_layer_kv_transfer(
         chunk,
         dst_ptrs,
