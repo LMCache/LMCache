@@ -22,6 +22,7 @@ import lmcache.c_ops as lmc_ops
 class NL_X_NB_TWO_BS_NH_HS_Spec(KVFormatSpec):
     engine_kv_format = lmc_ops.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS
     attention_backends = ("vLLM non-MLA flash infer",)
+    is_layer_list = True
 
     def num_layers(self) -> int:
         return len(self.kv_caches)

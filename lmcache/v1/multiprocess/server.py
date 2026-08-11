@@ -14,6 +14,8 @@ import zmq
 # First Party
 from lmcache import torch_dev, torch_device_type
 from lmcache.logging import init_logger
+from lmcache.usage_telemetry.l1_usage import InitializeL1Usage
+from lmcache.usage_telemetry.l2_usage import InitializeL2ConnectorUsage
 from lmcache.usage_telemetry.mp import InitializeMPUsageContext
 from lmcache.usage_telemetry.mp_continuous import InitializeMPContinuousUsage
 from lmcache.v1.distributed.config import (
@@ -259,7 +261,20 @@ def _build_modules(
         # Opt-in: enabled when a coordinator URL is configured (flag or
         # LMCACHE_COORDINATOR_URL, resolved at config parsing); otherwise
         # None and the blend module matches purely locally.
-        coordinator = BlendCoordinatorClient.maybe_create(coordinator_config.url)
+        #
+        # Fleet matching also needs cache-event reporting on: the blend
+        # index it queries is built from that stream.
+        if coordinator_config.url and not coordinator_config.event_reporting:
+            logger.warning(
+                "Coordinator URL is set but cache-event reporting is off, so "
+                "the coordinator has no cache state to match against: fleet "
+                "CacheBlend matching is disabled and blend will match "
+                "locally only. Pass --coordinator-event-reporting (or set "
+                "LMCACHE_COORDINATOR_EVENT_REPORTING=true) to enable it."
+            )
+        coordinator = BlendCoordinatorClient.maybe_create(
+            coordinator_config.url if coordinator_config.event_reporting else ""
+        )
         blend_v3 = BlendV3Module(
             ctx,
             transfer_module,
@@ -401,6 +416,8 @@ def run_cache_server(
 
     InitializeMPUsageContext(mp_config, storage_manager_config)
     InitializeMPContinuousUsage(event_bus, mp_config.chunk_size)
+    InitializeL2ConnectorUsage(event_bus, ctx.storage_manager)
+    InitializeL1Usage(event_bus, ctx.storage_manager)
 
     zmq_context = zmq.Context.instance()
     server = MessageQueueServer(

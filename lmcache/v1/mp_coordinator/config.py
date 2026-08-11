@@ -43,9 +43,12 @@ class MPCoordinatorConfig:
             the MP servers' ``--hash-algorithm`` (default ``blake3``, which is
             self-contained; other algorithms require vLLM importable in the
             coordinator process).
-        blend_probe_stride: Positions between match probes. With partial-fill
-            reuse any offset is usable, so ``1`` (probe every offset) gives full
-            recall; raise only to trade recall for coordinator CPU.
+        enable_blend_lookup: When ``True``, index stored chunk content so
+            ``POST /directory/blend-lookup`` can serve fleet CacheBlend
+            reuse. Off by default; a fleet without CacheBlend then hashes
+            no content.
+        blend_probe_stride: Positions between match probes; ``1`` gives full
+            recall. Ignored unless ``enable_blend_lookup`` is set.
         enable_startup_resync: When ``True``, run a one-shot L2 resync
             on startup to backfill trackers from an MP server's
             ``GET /cache/objects``.
@@ -69,6 +72,7 @@ class MPCoordinatorConfig:
     trigger_watermark: float = 1.0
     chunk_size: int = 256
     hash_algorithm: str = "blake3"
+    enable_blend_lookup: bool = False
     blend_probe_stride: int = 1
     enable_startup_resync: bool = True
     resync_poll_interval: float = 1.0
@@ -154,6 +158,7 @@ class MPCoordinatorConfig:
             trigger_watermark=_num("TRIGGER_WATERMARK", cls.trigger_watermark, float),
             chunk_size=int(_num("CHUNK_SIZE", cls.chunk_size, int)),
             hash_algorithm=_str("HASH_ALGORITHM", cls.hash_algorithm),
+            enable_blend_lookup=_bool("ENABLE_BLEND_LOOKUP", cls.enable_blend_lookup),
             blend_probe_stride=int(
                 _num("BLEND_PROBE_STRIDE", cls.blend_probe_stride, int)
             ),

@@ -241,6 +241,7 @@ def test_server_store_and_retrieve_delegate_event_ordering(
         event_bus=SimpleNamespace(
             publish=lambda event: None,
             publish_on_stream=lambda stream, event: None,
+            has_subscribers=lambda event_type: False,
         ),
         resolve_obj_keys=lambda key, group_ids: [[]],
     )
@@ -255,6 +256,8 @@ def test_server_store_and_retrieve_delegate_event_ordering(
         kv_layer_groups_manager=SimpleNamespace(
             num_object_groups=1,
             num_kernel_groups=1,
+            object_groups=[SimpleNamespace(kernel_group_indices=[0])],
+            get_attn_desc=lambda: SimpleNamespace(num_chunks_in_sw=[-1]),
         ),
         calculate_num_blocks=lambda chunk_size, group_idx: 1,
     )
@@ -269,7 +272,7 @@ def test_server_store_and_retrieve_delegate_event_ordering(
         "get_and_touch_context_entry",
         lambda instance_id: entry,
     )
-    key = SimpleNamespace(request_id="request", cache_salt="")
+    key = SimpleNamespace(request_id="request", cache_salt="", worker_id=0)
 
     assert module.store(key, 1, [[]], b"store-producer") == (
         b"completion-handle",
