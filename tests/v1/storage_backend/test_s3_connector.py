@@ -250,9 +250,11 @@ def connector(async_loop, local_cpu_backend, stub_s3_request):
         aws_secret_access_key="test-secret-access-key",
     )
     yield conn
-    # Drain the job executor on the loop before the loop is stopped, so its
-    # workers are not left pending.
-    run(async_loop, conn.pq_executor.shutdown_async(wait=True))
+    # Stop the job executor's workers before the loop is stopped, so they are
+    # not left pending. `wait=False` discards anything still queued, which is
+    # what a finished test wants, and avoids waiting on a drain that a
+    # cancelled worker can no longer complete.
+    run(async_loop, conn.pq_executor.shutdown_async(wait=False))
 
 
 def run(loop, coro):
