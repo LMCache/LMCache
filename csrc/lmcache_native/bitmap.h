@@ -8,7 +8,7 @@
 
 namespace lmcache {
 
-namespace storage_manager {
+namespace lmcache_native {
 
 /**
  * @brief A simple bitmap implementation for tracking the state of the L2
@@ -161,6 +161,6 @@ class Bitmap {
   std::vector<uint8_t> data_;
 };
 
-}  // namespace storage_manager
+}  // namespace lmcache_native
 
 }  // namespace lmcache

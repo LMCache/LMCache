@@ -74,9 +74,9 @@ Commonly used flags include:
      - Seconds between heartbeats (``> 0``, default ``5``). Keep well below the
        coordinator's instance timeout.
    * - ``--coordinator-event-reporting``
-     - Stream cache store/access/delete events to the coordinator,
-       feeding the key directory (fleet-wide placement tracking) and,
-       for L2 events, usage/quota tracking and eviction.
+     - Stream cache store/access/delete events to the coordinator, feeding the
+       key directory (fleet-wide placement tracking), L2 usage/quota tracking
+       and eviction, and the blend index behind fleet CacheBlend matching.
    * - ``--coordinator-event-flush-interval SECONDS``
      - Seconds between cache-event batch flushes (``> 0``, default ``1``).
    * - ``--p2p-advertise-url HOST:PORT``

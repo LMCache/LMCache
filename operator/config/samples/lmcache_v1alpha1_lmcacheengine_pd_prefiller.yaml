@@ -1,0 +1,46 @@
+# LMCacheEngine — PD (Prefill-Decode) disaggregation.
+#
+# A single LMCacheEngine DaemonSet serves BOTH prefiller and decoder vLLM pods
+# on every node. The connection ConfigMap it generates contains three keys:
+#
+#   kv-transfer-config.json            — bare LMCacheMPConnector (fallback, no NIXL)
+#   kv-transfer-config-prefiller.json  — MultiConnector(kv_producer)
+#   kv-transfer-config-decoder.json    — MultiConnector(kv_consumer)
+#
+# The webhook selects the correct key based on the lmcache.ai/pd-role annotation
+# on each vLLM pod (see vllm_pd_disaggregation.yaml).
+#
+# The webhook also injects into opted-in vLLM pods:
+#   VLLM_NIXL_SIDE_CHANNEL_HOST = pod's own IP (downward API status.podIP)
+#   VLLM_NIXL_SIDE_CHANNEL_PORT = spec.pd.nixlSideChannelPort (5558 default)
+#
+# PREREQUISITES:
+#   1. Deploy this engine.
+#   2. Deploy prefiller and decoder vLLM pods with the opt-in annotations
+#      (see vllm_pd_disaggregation.yaml).
+#   3. Deploy a vllm-router pointing at the prefiller and decoder vLLM Services.
+apiVersion: lmcache.lmcache.ai/v1alpha1
+kind: LMCacheEngine
+metadata:
+  name: lmcache-engine
+  namespace: default
+spec:
+  l1:
+    sizeGB: 100
+
+  server:
+    port: 5555
+    httpPort: 8080
+    chunkSize: 256
+
+  eviction:
+    policy: LRU
+
+  # PD disaggregation: generates both prefiller and decoder MultiConnector configs.
+  pd:
+    nixlSideChannelPort: 5558
+    nixlLoadFailurePolicy: fail
+
+  # -- Scheduling --
+  # nodeSelector:
+  #   nvidia.com/gpu.present: "true"
