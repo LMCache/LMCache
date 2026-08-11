@@ -36,7 +36,6 @@ from lmcache.v1.gpu_connector.utils import (
 )
 from lmcache.v1.platform.ops_types import EngineKVFormat
 from lmcache.v1.platform.rbln.kv_layout import (
-    is_native_kv_structure,
     is_rbln_kv_layout,
     squeeze_singleton_axis,
 )
@@ -79,7 +78,6 @@ def _discover(
 def test_recognizes_the_native_layout() -> None:
     """Only 6-D, K/V-first, singleton-at-3 qualifies."""
     assert is_rbln_kv_layout(_native_kv()[0]) is True
-    assert is_native_kv_structure(cast("DiscoverableKVCache", _native_kv())) is True
 
 
 @pytest.mark.parametrize(
@@ -94,7 +92,6 @@ def test_recognizes_the_native_layout() -> None:
 def test_rejects_other_layouts(shape: tuple[int, ...]) -> None:
     """Anything else is not the RBLN layout."""
     assert is_rbln_kv_layout(torch.zeros(shape)) is False
-    assert is_native_kv_structure([torch.zeros(shape)]) is False
 
 
 def test_squeeze_is_a_free_view() -> None:
