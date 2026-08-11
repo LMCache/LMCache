@@ -100,7 +100,7 @@ jobs:
                     set -euxo pipefail
                     WHEEL=$(ls /work/LMCache/dist/*.whl | head -n 1)
                     python3 -m pip install --no-deps "$WHEEL"
-                    python3 -c "import lmcache, torch; print('LMCache import OK'); print('Torch:', torch.__version__)"
+                    python3 -c "import lmcache, torch; print(\"LMCache import OK\"); print(\"Torch:\", torch.__version__)"
                   '
 
             - name: Upload XPU release artifacts to GHA
