@@ -278,14 +278,15 @@ class TestExtraStatsLoggingSubscriber:
     def test_window_resets_while_cumulative_persists(self):
         subs = ExtraStatsLoggingSubscriber(_INTERVAL).get_subscriptions()
         with _capture_logs() as handler:
+            now = time.time()
             subs[EventType.MP_STORE_START](
-                _start(EventType.MP_STORE_START, "req-1", 100.0)
+                _start(EventType.MP_STORE_START, "req-1", now)
             )
             subs[EventType.MP_STORE_END](
                 _end(
                     EventType.MP_STORE_END,
                     "req-1",
-                    100.5,
+                    now + 0.5,
                     total_bytes=2_000_000_000,
                     num_tokens=1000,
                 )
@@ -294,13 +295,13 @@ class TestExtraStatsLoggingSubscriber:
             subs[EventType.L1_EVICTION_LOOP_TICK](_tick())
 
             subs[EventType.MP_STORE_START](
-                _start(EventType.MP_STORE_START, "req-2", 200.0)
+                _start(EventType.MP_STORE_START, "req-2", now + 1.0)
             )
             subs[EventType.MP_STORE_END](
                 _end(
                     EventType.MP_STORE_END,
                     "req-2",
-                    200.5,
+                    now + 1.5,
                     total_bytes=4_000_000_000,
                     num_tokens=500,
                 )
