@@ -135,3 +135,40 @@ class TestEvictionAmount:
             key_eligible_filter=lambda k: k == k2,
         )
         assert actions[0].keys == [k2]
+
+
+class TestDurableState:
+    def test_the_section_holds_positional_records_without_the_salt(self):
+        """Capture runs on the caller's thread every checkpoint, so the
+        section stores one tuple per key rather than a mapping: a fleet's
+        worth of per-key dicts dominated the cost of taking a checkpoint.
+        The bucket already names the salt, so records do not repeat it.
+        """
+        policy = IsolatedLRUEvictionPolicy()
+        policy.on_keys_created([_key(1, cache_salt="tenant-a")])
+
+        buckets = policy.capture()["buckets"]
+
+        assert buckets == {"tenant-a": [(ObjectKey.IntHash2Bytes(1), "m", 0, 0)]}
+
+    def test_order_survives_a_capture_and_restore(self):
+        """Recency is position, so a restore that reorders a bucket
+        silently changes which key is evicted first."""
+        policy = IsolatedLRUEvictionPolicy()
+        # Created in reverse, so 3 sits at the LRU head; touching it sends
+        # it to the other end and leaves an order creation alone cannot.
+        policy.on_keys_created([_key(i) for i in (1, 2, 3)])
+        policy.on_keys_touched([_key(3)])
+
+        restored = IsolatedLRUEvictionPolicy()
+        restored.restore(policy.capture())
+
+        assert [record[0] for record in restored.capture()["buckets"][""]] == [
+            ObjectKey.IntHash2Bytes(2),
+            ObjectKey.IntHash2Bytes(1),
+            ObjectKey.IntHash2Bytes(3),
+        ]
+        victims = restored.get_eviction_actions(expected_ratio=0.4, cache_salt="")
+        assert [key.chunk_hash for key in victims[0].keys] == [
+            ObjectKey.IntHash2Bytes(2)
+        ], "the restored order must decide who is evicted first"

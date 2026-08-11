@@ -83,6 +83,31 @@ class DirectoryStats:
     blend: BlendIndexStats
 
 
+@dataclass(frozen=True)
+class DirectorySnapshot:
+    """A capture of a :class:`KeyDirectory`'s state.
+
+    Produced by :meth:`KeyDirectory.snapshot`, consumed by
+    :meth:`KeyDirectory.restore`, encoded by
+    ``persistence/snapshot_codec.py``.
+
+    Attributes:
+        keys: ``key → (last_access, placements)``, for every key with at
+            least one placement. Iteration order is the key table's
+            order, which instance records index into.
+        bindings: ``chunk_hash → (token_ids, token_offset)``, for the
+            chunks that carry content; ``token_ids`` is a read-only
+            ``uint32`` array. Chunks that never carried content are
+            absent and rebuild empty.
+        l1_keys_by_instance: The reverse index fencing needs, so a
+            restored directory can still drop an emitter's L1 slice.
+    """
+
+    keys: dict[ObjectKey, tuple[float, tuple[Placement, ...]]]
+    bindings: dict[bytes, tuple[np.ndarray, int]]
+    l1_keys_by_instance: dict[str, tuple[ObjectKey, ...]]
+
+
 @dataclass
 class _KeyRecord:
     """Directory value for one key: its placements plus recency."""
@@ -107,7 +132,9 @@ class KeyDirectory:
 
     Mutations arrive through the ingest layer's two consumer hooks,
     :meth:`consume` and :meth:`fence_instance`; reads through
-    :meth:`lookup` and :meth:`stats`. Nothing is persisted.
+    :meth:`lookup` and :meth:`stats`. The directory holds no files of its
+    own: :meth:`snapshot` and :meth:`restore` hand its state to a caller
+    that owns the storage.
 
     Fragment (blend) lookup is off until :meth:`enable_blend_lookup` is
     called, so a fleet that does not run CacheBlend hashes no content.
@@ -303,6 +330,75 @@ class KeyDirectory:
                 instance_id,
                 removed,
             )
+
+    def snapshot(self) -> DirectorySnapshot:
+        """Capture the directory's state for persistence.
+
+        Taken under the lock and sharing no structure with the directory,
+        so callers may encode it off-thread while the directory keeps
+        serving. Token arrays are aliased, not copied.
+
+        Returns:
+            The captured state.
+        """
+        with self._lock:
+            keys = {
+                key: (record.last_access, tuple(record.placements))
+                for key, record in self._directory.items()
+            }
+            bindings = {
+                chunk_hash: (binding.token_ids, binding.token_offset)
+                for chunk_hash, binding in self._token_bindings.items()
+                if binding.token_ids.size
+            }
+            l1_keys_by_instance = {
+                instance_id: tuple(keys_held)
+                for instance_id, keys_held in self._l1_keys_by_instance.items()
+            }
+            return DirectorySnapshot(
+                keys=keys,
+                bindings=bindings,
+                l1_keys_by_instance=l1_keys_by_instance,
+            )
+
+    def restore(self, snapshot: DirectorySnapshot) -> None:
+        """Load ``snapshot`` into an empty directory.
+
+        Call once at startup. Token bindings and blend fingerprints are
+        re-derived, so :meth:`enable_blend_lookup` must run first for
+        restored content to be fragment-matchable. Restoring placements
+        without the gate's cursors would leave them unfenceable — see
+        :meth:`EventGate.restore_cursors`.
+
+        Args:
+            snapshot: State captured by :meth:`snapshot`.
+
+        Raises:
+            ValueError: If the directory already holds keys.
+        """
+        with self._lock:
+            if self._directory or self._l1_keys_by_instance:
+                raise ValueError(
+                    "restore() requires an empty directory (holds "
+                    f"{len(self._directory)} keys, "
+                    f"{len(self._l1_keys_by_instance)} instances)"
+                )
+            for key, (last_access, placements) in snapshot.keys.items():
+                self._directory[key] = _KeyRecord(
+                    placements=list(placements), last_access=last_access
+                )
+                self._add_token_binding(key)
+            for chunk_hash, (token_ids, token_offset) in snapshot.bindings.items():
+                binding = self._token_bindings.get(chunk_hash)
+                if binding is None:
+                    # Content no surviving key references: nothing owns it.
+                    continue
+                binding.token_ids = token_ids
+                binding.token_offset = token_offset
+                if self._blend_lookup_enabled and token_offset != UNKNOWN_TOKEN_OFFSET:
+                    self._blend_index.add(token_ids, chunk_hash, token_offset)
+            for instance_id, l1_keys in snapshot.l1_keys_by_instance.items():
+                self._l1_keys_by_instance[instance_id] = set(l1_keys)
 
     def stats(self) -> DirectoryStats:
         """Return a point-in-time summary of directory contents."""

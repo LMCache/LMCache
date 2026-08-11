@@ -88,6 +88,20 @@ keeps the default below.
      - ``1``
      - Positions between CacheBlend match probes. ``1`` probes every offset
        for full recall. Ignored unless blend lookup is on.
+   * - ``--snapshot-path``
+     - (empty)
+     - File the key directory is checkpointed to. Empty disables
+       checkpointing and the coordinator starts cold after every
+       restart. See `Surviving a coordinator restart`_.
+   * - ``--snapshot-interval``
+     - ``60``
+     - Seconds between checkpoint writes; ``0`` writes only on shutdown.
+       Ignored unless ``--snapshot-path`` is set. Does not affect the
+       metadata file, which is written whenever pins or quotas change.
+   * - ``--metadata-path``
+     - (empty)
+     - File the operator-set state (L2 pins and per-``cache_salt`` quotas)
+       is stored in. See `Surviving a coordinator restart`_.
    * - ``--timeout-keep-alive``
      - ``10``
      - Seconds the HTTP server keeps idle connections open before closing
@@ -105,6 +119,66 @@ keeps the default below.
        mode exposes ``/metrics`` on the coordinator HTTP port. When set, the
        local ``/metrics`` endpoint returns 404.
 
+Surviving a coordinator restart
+-------------------------------
+
+The key directory is built entirely from the MP servers' cache-event stream, so
+a coordinator that restarts with an empty directory loses every placement the
+stream will never re-announce — L2 objects stored some time ago, whose bytes
+outlive every reporter. Until something stores those chunks again, the fleet
+cannot discover them.
+
+Point ``--snapshot-path`` at a file to checkpoint the directory instead:
+
+.. code-block:: bash
+
+    lmcache coordinator --snapshot-path /var/lib/lmcache/directory.snapshot
+
+The coordinator then writes a checkpoint every ``--snapshot-interval`` seconds
+(default 60) and once more on clean shutdown, and loads it on boot. Restoring
+also rebuilds the per-``cache_salt`` usage view and the eviction LRU, so quota
+enforcement resumes accounting for what was already stored rather than starting
+from zero.
+
+**Operator-set state is a second, separate file.** L2 pins and per-tenant
+quotas are not observations of the cache — nothing can rebuild them by
+replaying events — so they are stored apart from the snapshot, as readable
+JSON, under ``--metadata-path``:
+
+.. code-block:: bash
+
+    lmcache coordinator \
+        --snapshot-path /var/lib/lmcache/directory.snapshot \
+        --metadata-path /var/lib/lmcache/metadata.json
+
+This file is **not** on the snapshot timer. It is rewritten whenever a pin or
+quota changes, before the request that made the change returns — so a ``200``
+from ``POST /cache/pins`` means the pin will survive a restart.
+
+Without it, a restarted coordinator holds no pins and no quotas, which leaves
+eviction disarmed until your controller re-syncs them. With it, enforcement
+resumes immediately — but the restored values are only as fresh as the last
+change, so a quota edited while the coordinator was down comes back at its
+old value. The controller remains the authority and should still re-sync;
+the file's age is logged on load.
+
+Operational notes:
+
+- **The file is disposable.** A missing, unreadable, or corrupt checkpoint is
+  logged and the coordinator starts cold — it never refuses to boot over one.
+  A failed write is logged and retried on the next interval.
+- **Writes are atomic.** The checkpoint is written beside the target and
+  renamed into place, so a crash mid-write cannot leave a torn file. Point the
+  path at persistent storage that survives the coordinator's own restarts (a
+  ``PersistentVolume`` rather than an ephemeral container filesystem).
+- **Size scales with cached tokens**, since the file carries each chunk's token
+  ids once per chunk hash. Budget on the order of a kilobyte per distinct
+  chunk.
+- **Events missed while the coordinator was down are still lost.** An MP server
+  that kept serving during the outage resumes at a higher sequence number, and
+  the coordinator flags that instance's slice with ``gap_detected`` (visible in
+  ``GET /directory/stats``). The checkpoint restores what it captured, not what
+  it missed.
 Coordinator metrics export
 --------------------------
 

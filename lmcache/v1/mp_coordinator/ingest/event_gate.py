@@ -12,6 +12,7 @@ See ``docs/design/v1/mp_coordinator/ingest.md``.
 from __future__ import annotations
 
 # Standard
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 import threading
@@ -121,6 +122,37 @@ class EventGate:
         with self._lock:
             self._broadcaster.fence_instance(instance_id)
             self._cursors.pop(instance_id, None)
+
+    def restore_cursors(self, cursors: Mapping[str, InstanceStreamStats]) -> None:
+        """Load cursors captured by :meth:`stats`.
+
+        Call once at startup, before serving, whenever the consumers'
+        state was itself restored from a checkpoint. Fencing needs a
+        prior incarnation to compare against — without these, an emitter
+        that restarted while the coordinator was down looks brand new, so
+        the L1 placements its previous incarnation reported are never
+        dropped.
+
+        Args:
+            cursors: Cursors keyed by ``instance_id``.
+
+        Raises:
+            ValueError: If the gate has already admitted a batch.
+        """
+        with self._lock:
+            if self._cursors:
+                raise ValueError(
+                    f"restore_cursors() requires an unused gate (holds "
+                    f"{len(self._cursors)} cursors)"
+                )
+            self._cursors = {
+                instance_id: _StreamCursor(
+                    incarnation=cursor.incarnation,
+                    last_seq=cursor.last_seq,
+                    gap_detected=cursor.gap_detected,
+                )
+                for instance_id, cursor in cursors.items()
+            }
 
     def stats(self) -> dict[str, InstanceStreamStats]:
         """Return a cursor snapshot keyed by ``instance_id``."""

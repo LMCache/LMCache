@@ -50,6 +50,20 @@ class L1BackendType(str, enum.Enum):
     GDS = "gds"
 
 
+class PersistenceType(str, enum.Enum):
+    """Which durable artifact a piece of coordinator state belongs in.
+
+    The two differ in cadence and in what can rebuild them.
+    ``CHECKPOINT`` state is derived from the cache-event stream, so it
+    rides with the periodic directory checkpoint and is disposable.
+    ``METADATA`` state is set by an operator and nothing can reconstruct
+    it, so it is written the moment it changes.
+    """
+
+    CHECKPOINT = "checkpoint"
+    METADATA = "metadata"
+
+
 class TrimPolicy(enum.Enum):
     """How to pick the retained subset of found keys for a prefetch.
 

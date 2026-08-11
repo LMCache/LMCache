@@ -31,15 +31,26 @@ import httpx
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.distributed.api import PersistenceType
 from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
+from lmcache.v1.mp_coordinator.controllers import build_controllers
 from lmcache.v1.mp_coordinator.controllers.eviction_controller import (
     FleetEvictionController,
 )
-from lmcache.v1.mp_coordinator.controllers.prefetch_manager import PrefetchManager
 from lmcache.v1.mp_coordinator.http_apis.dependencies import CoordinatorContext
 from lmcache.v1.mp_coordinator.ingest.event_broadcaster import CacheEventBroadcaster
 from lmcache.v1.mp_coordinator.ingest.event_gate import EventGate
 from lmcache.v1.mp_coordinator.key_directory import KeyDirectory
+from lmcache.v1.mp_coordinator.persistence.checkpoint import (
+    load_checkpoint,
+    save_checkpoint,
+)
+from lmcache.v1.mp_coordinator.persistence.metadata_persister import MetadataPersister
+from lmcache.v1.mp_coordinator.persistence.store import (
+    ArtifactStore,
+    LocalArtifactStore,
+    NullArtifactStore,
+)
 from lmcache.v1.mp_coordinator.registry import InstanceRegistry
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.utils.router_discovery import discover_api_routers
@@ -84,11 +95,17 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
         key_directory.enable_blend_lookup(
             chunk_size=config.chunk_size, probe_stride=config.blend_probe_stride
         )
-    eviction_controller = FleetEvictionController(
-        eviction_ratio=config.eviction_ratio,
-        trigger_watermark=config.trigger_watermark,
+    snapshot_store = LocalArtifactStore(Path(config.snapshot_path))
+    metadata_store: ArtifactStore = (
+        LocalArtifactStore(Path(config.metadata_path))
+        if config.metadata_path
+        else NullArtifactStore()
     )
-    prefetch_manager = PrefetchManager()
+    # Controllers are discovered, not listed here.
+    controllers = build_controllers(config)
+    # Named locally only because the ingest fan-out and the lifespan drive
+    # this one directly; handlers reach it through the registry.
+    eviction_controller = controllers.get(FleetEvictionController)
     # Resolves pin requests' token_ids to object keys; must match the fleet's
     # chunk size and hash algorithm (see MPCoordinatorConfig).
     token_hasher = TokenHasher(
@@ -100,14 +117,30 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
     event_broadcaster.register_consumer(key_directory)
     event_broadcaster.register_consumer(eviction_controller)
     event_gate = EventGate(event_broadcaster)
+    durable = controllers.durable_components()
+    metadata_persister = MetadataPersister(metadata_store)
+    for component in durable[PersistenceType.METADATA]:
+        metadata_persister.register(component)
+    checkpoint_components = durable[PersistenceType.CHECKPOINT]
+    # Before the checkpoint's replay, so restored keys enter the eviction
+    # LRU already protected by their pins.
+    metadata_persister.load()
+    if config.snapshot_path:
+        load_checkpoint(
+            snapshot_store,
+            key_directory,
+            event_gate,
+            event_broadcaster,
+            checkpoint_components,
+        )
 
     ctx = CoordinatorContext(
         registry=registry,
-        eviction_controller=eviction_controller,
-        prefetch_manager=prefetch_manager,
+        controllers=controllers,
         token_hasher=token_hasher,
         key_directory=key_directory,
         event_gate=event_gate,
+        metadata_persister=metadata_persister,
     )
 
     async def _health_loop() -> None:
@@ -115,6 +148,19 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
         while True:
             await asyncio.sleep(config.health_check_interval)
             evict_stale(registry, config.instance_timeout)
+
+    async def _snapshot_loop() -> None:
+        """Checkpoint the directory and gate cursors on a timer.
+
+        Only these run on a timer: they change continuously, so a cadence
+        is the only sensible cost. Operator intent is written when it
+        changes instead (see ``MetadataPersister``).
+        """
+        while True:
+            await asyncio.sleep(config.snapshot_interval)
+            await save_checkpoint(
+                snapshot_store, key_directory, event_gate, checkpoint_components
+            )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -126,6 +172,7 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
         app.state.outbound_client = outbound_client
         health_task = None
         eviction_task = None
+        snapshot_task = None
         if config.health_check_interval > 0:
             health_task = asyncio.create_task(_health_loop())
         if config.eviction_check_interval > 0:
@@ -134,17 +181,26 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
                     registry, outbound_client, config.eviction_check_interval
                 )
             )
+        if config.snapshot_path and config.snapshot_interval > 0:
+            snapshot_task = asyncio.create_task(_snapshot_loop())
         logger.info(
             "MP coordinator listening on http://%s:%d", config.host, config.port
         )
         try:
             yield
         finally:
-            for task in (health_task, eviction_task):
+            for task in (health_task, eviction_task, snapshot_task):
                 if task is not None:
                     task.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
                         await task
+            if config.snapshot_path:
+                # One last write, so a clean restart resumes where this
+                # process left off rather than an interval-old copy.
+                # Metadata needs no counterpart: it is already durable.
+                await save_checkpoint(
+                    snapshot_store, key_directory, event_gate, checkpoint_components
+                )
             await eviction_controller.wait_for_in_flight_dispatches()
             await outbound_client.aclose()
 

@@ -60,6 +60,12 @@ class TestCoordinatorCommandArguments:
                 "sha256",
                 "--blend-probe-stride",
                 "2",
+                "--snapshot-path",
+                "/tmp/directory.snapshot",
+                "--snapshot-interval",
+                "30",
+                "--metadata-path",
+                "/tmp/metadata.json",
                 "--timeout-keep-alive",
                 "15",
                 "--disable-metrics",
@@ -72,6 +78,9 @@ class TestCoordinatorCommandArguments:
         assert args.chunk_size == 512
         assert args.hash_algorithm == "sha256"
         assert args.blend_probe_stride == 2
+        assert args.snapshot_path == "/tmp/directory.snapshot"
+        assert args.snapshot_interval == 30.0
+        assert args.metadata_path == "/tmp/metadata.json"
         assert args.timeout_keep_alive == 15
         assert args.disable_metrics is True
         assert args.otlp_endpoint == "http://collector:4317"
@@ -88,6 +97,9 @@ class TestCoordinatorCommandArguments:
         assert args.hash_algorithm is None
         assert args.enable_blend_lookup is None
         assert args.blend_probe_stride is None
+        assert args.snapshot_path is None
+        assert args.snapshot_interval is None
+        assert args.metadata_path is None
         assert args.timeout_keep_alive is None
         assert args.disable_metrics is None
         assert args.otlp_endpoint is None
@@ -111,6 +123,9 @@ class TestCoordinatorCommandExecute:
             hash_algorithm="sha256",
             enable_blend_lookup=True,
             blend_probe_stride=2,
+            snapshot_path="/var/lib/lmcache/directory.snapshot",
+            snapshot_interval=30.0,
+            metadata_path="/var/lib/lmcache/metadata.json",
             timeout_keep_alive=None,
             disable_metrics=True,
             otlp_endpoint="http://collector:4317",
@@ -138,6 +153,9 @@ class TestCoordinatorCommandExecute:
         assert captured["config"].hash_algorithm == "sha256"
         assert captured["config"].enable_blend_lookup is True
         assert captured["config"].blend_probe_stride == 2
+        assert captured["config"].snapshot_path == "/var/lib/lmcache/directory.snapshot"
+        assert captured["config"].snapshot_interval == 30.0
+        assert captured["config"].metadata_path == "/var/lib/lmcache/metadata.json"
         assert captured["config"].metrics_enabled is False
         assert captured["config"].otlp_endpoint == "http://collector:4317"
         # Unset flags keep the config defaults.
@@ -166,6 +184,9 @@ class TestCoordinatorCommandExecute:
             hash_algorithm=None,
             enable_blend_lookup=None,
             blend_probe_stride=None,
+            snapshot_path=None,
+            snapshot_interval=None,
+            metadata_path=None,
             timeout_keep_alive=None,
             disable_metrics=None,
             otlp_endpoint=None,

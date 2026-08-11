@@ -18,11 +18,12 @@ from __future__ import annotations
 
 # Standard
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
+from typing import cast
 import threading
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.api import ObjectKey, PersistenceType
 from lmcache.v1.distributed.eviction import EvictionPolicy
 from lmcache.v1.distributed.internal_api import (
     EvictionAction,
@@ -189,3 +190,83 @@ class IsolatedLRUEvictionPolicy(EvictionPolicy):
         """Return the set of cache_salts with at least one tracked key."""
         with self._lock:
             return list(self._per_salt_order.keys())
+
+    @property
+    def persistence_type(self) -> PersistenceType:
+        """The ordering is derived from the event stream, so it rides with
+        the directory checkpoint."""
+        return PersistenceType.CHECKPOINT
+
+    @property
+    def name(self) -> str:
+        """Name of this policy's section in a durable checkpoint."""
+        return "lru_order"
+
+    def capture(self) -> Mapping[str, object]:
+        """Return each bucket's eviction order, least-recently-used first.
+
+        The ordering *is* the state: recency lives in position, not in a
+        timestamp, so nothing outside this policy can reconstruct it.
+
+        Returns:
+            ``{"buckets": {cache_salt: [(chunk_hash, model_name, kv_rank,
+            object_group_id), ...]}}``, each list in the order eviction
+            would pick them. One tuple per key rather than a mapping: this
+            runs on the caller's thread every checkpoint, and a fleet's
+            worth of per-key dicts is the most expensive thing in it. The
+            salt is the bucket, so it is not repeated.
+        """
+        with self._lock:
+            return {
+                "buckets": {
+                    cache_salt: [
+                        (
+                            key.chunk_hash,
+                            key.model_name,
+                            key.kv_rank,
+                            key.object_group_id,
+                        )
+                        for key in order
+                    ]
+                    for cache_salt, order in self._per_salt_order.items()
+                }
+            }
+
+    def restore(self, state: Mapping[str, object]) -> None:
+        """Replace every bucket's ordering with a captured one.
+
+        Call once at startup, after whatever rebuilt the keys themselves —
+        this replaces their ordering rather than merging into it.
+
+        Args:
+            state: A :meth:`capture` value, as decoded from the
+                checkpoint holding it.
+        """
+        buckets = cast("Mapping[str, list[Sequence[object]]]", state["buckets"])
+        with self._lock:
+            self._per_salt_order = {
+                cache_salt: OrderedDict(
+                    (_decode_key(record, cache_salt), None) for record in ordered
+                )
+                for cache_salt, ordered in buckets.items()
+            }
+
+
+# -- Internals ----------------------------------------------------------------
+
+
+def _decode_key(record: Sequence[object], cache_salt: str) -> ObjectKey:
+    """Rebuild a key from one tuple :meth:`capture` wrote.
+
+    Args:
+        record: ``(chunk_hash, model_name, kv_rank, object_group_id)``.
+        cache_salt: The bucket the record was stored under.
+    """
+    chunk_hash, model_name, kv_rank, object_group_id = record
+    return ObjectKey(
+        chunk_hash=cast(bytes, chunk_hash),
+        model_name=str(model_name),
+        kv_rank=cast(int, kv_rank),
+        object_group_id=cast(int, object_group_id),
+        cache_salt=cache_salt,
+    )

@@ -68,6 +68,21 @@ Options
    * - ``--blend-probe-stride N``
      - Positions between CacheBlend match probes; ``1`` probes every offset
        for full recall (default: ``1``). Ignored unless blend lookup is on.
+   * - ``--snapshot-path FILE``
+     - Checkpoint the key directory to this file so a restart recovers the
+       placements the event stream never re-announces (cold L2 objects). Unset
+       (the default) disables checkpointing and the coordinator starts cold
+       every time.
+   * - ``--snapshot-interval SECS``
+     - Seconds between checkpoint writes; ``0`` writes only on shutdown
+       (default: ``60``). Ignored unless ``--snapshot-path`` is set.
+   * - ``--metadata-path FILE``
+     - Store operator-set state — L2 pins and per-``cache_salt`` quotas — in
+       this file so a restart keeps enforcing them. Written whenever pins or
+       quotas change, not on the snapshot timer. Nothing can rebuild this
+       state from the event stream; unset (the default) starts with no pins
+       and no quotas, which leaves eviction disarmed until the controller
+       re-syncs.
    * - ``--timeout-keep-alive SECS``
      - Seconds the HTTP server keeps idle connections open before closing
        them. Must be greater than the MP servers' heartbeat interval

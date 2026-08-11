@@ -245,3 +245,54 @@ class TestQuotaManagerDefaultLimit:
         qm = QuotaManager()
         with pytest.raises(ValueError):
             qm.set_default_limit_bytes(-1)
+
+
+class TestQuotaManagerDurableState:
+    """The registry's own save/restore contract, used by whatever
+    persists it."""
+
+    def test_capture_and_restore_round_trip(self):
+        qm = QuotaManager()
+        qm.set_quota("alice", 4096)
+        qm.set_quota("bob", 0)
+        qm.set_default_limit_bytes(1024)
+
+        restored = QuotaManager()
+        restored.restore(qm.capture())
+
+        assert restored.list_quotas() == qm.list_quotas()
+        assert restored.get_default_limit_bytes() == 1024
+
+    def test_capture_of_an_empty_registry_round_trips(self):
+        restored = QuotaManager()
+        restored.restore(QuotaManager().capture())
+
+        assert restored.list_quotas() == []
+        assert restored.get_default_limit_bytes() is None
+
+    def test_restore_replaces_rather_than_merges(self):
+        """A restore is the whole table, so stale entries must not linger."""
+        qm = QuotaManager()
+        qm.set_quota("stale", 4096)
+        source = QuotaManager()
+        source.set_quota("alice", 128)
+
+        qm.restore(source.capture())
+
+        assert qm.list_quotas() == [QuotaEntry(cache_salt="alice", limit_bytes=128)]
+
+    def test_restore_rejects_a_malformed_section(self):
+        """Values are trusted, but a wrong-shaped section still fails
+        rather than restoring nonsense."""
+        qm = QuotaManager()
+        with pytest.raises(ValueError):
+            qm.restore({"limits": "not-an-object", "default_limit_bytes": None})
+
+    def test_restore_rejects_a_section_missing_a_field(self):
+        """Whatever persists this catches KeyError for exactly this case."""
+        qm = QuotaManager()
+        with pytest.raises(KeyError):
+            qm.restore({"limits": {}})
+
+    def test_name_labels_the_section(self):
+        assert QuotaManager().name == "quotas"

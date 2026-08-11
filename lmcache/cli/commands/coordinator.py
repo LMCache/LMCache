@@ -142,6 +142,36 @@ class CoordinatorCommand(BaseCommand):
             ),
         )
         parser.add_argument(
+            "--snapshot-path",
+            type=str,
+            default=None,
+            help=(
+                "Checkpoint the key directory to this file so a restart "
+                "recovers placements the event stream never re-announces "
+                "(cold L2 objects). Unset disables checkpointing."
+            ),
+        )
+        parser.add_argument(
+            "--snapshot-interval",
+            type=float,
+            default=None,
+            help=(
+                "Seconds between key-directory checkpoints; 0 writes only "
+                "on shutdown. Ignored without --snapshot-path (default: 60)."
+            ),
+        )
+        parser.add_argument(
+            "--metadata-path",
+            type=str,
+            default=None,
+            help=(
+                "Store operator-set state (L2 pins and per-cache_salt quotas) "
+                "in this file so a restart keeps enforcing them. Nothing can "
+                "rebuild this state; unset, the coordinator starts with none "
+                "and waits for the controller to re-sync."
+            ),
+        )
+        parser.add_argument(
             "--timeout-keep-alive",
             type=int,
             default=None,
@@ -213,6 +243,9 @@ class CoordinatorCommand(BaseCommand):
                 ("hash_algorithm", args.hash_algorithm),
                 ("enable_blend_lookup", args.enable_blend_lookup),
                 ("blend_probe_stride", args.blend_probe_stride),
+                ("snapshot_path", args.snapshot_path),
+                ("snapshot_interval", args.snapshot_interval),
+                ("metadata_path", args.metadata_path),
                 ("timeout_keep_alive", args.timeout_keep_alive),
                 ("otlp_endpoint", args.otlp_endpoint),
             )

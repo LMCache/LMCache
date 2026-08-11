@@ -42,6 +42,16 @@ class MPCoordinatorConfig:
             no content.
         blend_probe_stride: Positions between match probes; ``1`` gives full
             recall. Ignored unless ``enable_blend_lookup`` is set.
+        snapshot_path: File the key directory is checkpointed to, so a
+            restart recovers placements the event stream never
+            re-announces. Empty (the default) starts cold every time.
+        snapshot_interval: Seconds between checkpoint writes; ``0`` writes
+            only on shutdown. Ignored unless ``snapshot_path`` is set.
+        metadata_path: File the operator-set state (L2 pins and quotas)
+            is stored in. Unlike the snapshot this is intent, not a view
+            of the event stream, so nothing can rebuild it. Empty (the
+            default) starts with no pins and no quotas, leaving eviction
+            disarmed until the controller re-syncs.
         timeout_keep_alive: Seconds the HTTP server keeps idle connections
             open before closing them. Must be greater than the heartbeat
             interval of MP servers to avoid race-condition disconnects.
@@ -61,6 +71,9 @@ class MPCoordinatorConfig:
     hash_algorithm: str = "blake3"
     enable_blend_lookup: bool = False
     blend_probe_stride: int = 1
+    snapshot_path: str = ""
+    snapshot_interval: float = 60.0
+    metadata_path: str = ""
     timeout_keep_alive: int = 10
     metrics_enabled: bool = True
     otlp_endpoint: str | None = None
@@ -83,6 +96,8 @@ class MPCoordinatorConfig:
             raise ValueError(
                 "trigger_watermark must be between 0.0 (exclusive) and 1.0"
             )
+        if self.snapshot_interval < 0:
+            raise ValueError("snapshot_interval must be non-negative")
         if self.chunk_size < 1:
             raise ValueError("chunk_size must be positive")
         if not self.hash_algorithm:

@@ -17,12 +17,10 @@ from fastapi import Request
 import httpx
 
 # First Party
-from lmcache.v1.mp_coordinator.controllers.eviction_controller import (
-    FleetEvictionController,
-)
-from lmcache.v1.mp_coordinator.controllers.prefetch_manager import PrefetchManager
+from lmcache.v1.mp_coordinator.controllers import ControllerRegistry
 from lmcache.v1.mp_coordinator.ingest.event_gate import EventGate
 from lmcache.v1.mp_coordinator.key_directory import KeyDirectory
+from lmcache.v1.mp_coordinator.persistence.metadata_persister import MetadataPersister
 from lmcache.v1.mp_coordinator.registry import InstanceRegistry
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
@@ -33,24 +31,27 @@ class CoordinatorContext:
 
     Attributes:
         registry: Fleet membership (``MPInstance`` by ``instance_id``).
-        eviction_controller: The fleet L2 eviction control loop. Owns the
-            quota registry (``.quota``), the usage view (``.usage``), and
-            the L2 pin set.
-        prefetch_manager: Warm-prefetch proxy to MP servers.
+        controllers: The coordinator's controllers, addressed by type --
+            ``controllers.get(FleetEvictionController)`` for the fleet L2
+            eviction loop (which owns the quota registry, the usage view,
+            and the L2 pin set), ``PrefetchManager`` for warm prefetch.
         token_hasher: Resolves a pin request's ``token_ids`` to object keys
             (configured to match the fleet's ``chunk_size`` / ``hash_algorithm``).
         key_directory: Fleet-wide key → placements directory built from
             MP-server cache events (eventually consistent).
         event_gate: Ingest entry point for the fleet cache-event stream
             (``POST /events``).
+        metadata_persister: Durable store for operator intent. Every
+            handler that changes a pin or a quota must ``await`` its
+            ``save`` so the change survives a restart.
     """
 
     registry: InstanceRegistry
-    eviction_controller: FleetEvictionController
-    prefetch_manager: PrefetchManager
+    controllers: ControllerRegistry
     token_hasher: TokenHasher
     key_directory: KeyDirectory
     event_gate: EventGate
+    metadata_persister: MetadataPersister
 
 
 def get_context(request: Request) -> CoordinatorContext:
