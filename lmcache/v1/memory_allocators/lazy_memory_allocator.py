@@ -64,6 +64,14 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
     Background expansion logic:
     - After registering X GB memory, we call sbrk and updates _curr_size
     - Once everything is registered, the background thread stops
+
+    Deferred pinning:
+    - Pinning (``cudaHostRegister``) creates a CUDA context on the calling
+      thread's current device. ``__init__`` runs before any worker's device
+      is known, so pinning there would bind that context to the default
+      device. Pinning therefore must stay out of ``__init__``: it is bound
+      to a device by :meth:`ensure_pinning`, triggered at the latest by the
+      first :meth:`allocate` / :meth:`batched_allocate`.
     """
 
     PIN_CHUNK_SIZE = 1 << 26  # 64 MB pin chunk
@@ -141,9 +149,6 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
                 f"{base_ptr % align_bytes})."
             )
 
-        # Pin the first `curr_size` bytes (aligned to the internal chunk size)
-        self._pin_memory_chunk(0, self._curr_size)
-
         # Create the tensor memory allocator
         self._allocator = TensorMemoryAllocator(
             tensor=self._buffer,
@@ -158,14 +163,42 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         # completely determined by the address manager.
         self._address_manager = self._allocator.address_manager
 
-        # Launch the background expansion thread
+        # Deferred-pinning state, all guarded by _init_lock:
+        # _pin_device is bound once by the first ensure_pinning() and never
+        # rebound; _pinning_started/_closed order pinning against close().
+        self._pin_device: int | torch.device | None = None
+        self._pinning_started = False
+        self._closed = False
+        self._init_lock = threading.Lock()
+
+        # The expansion thread is created here but started only after the
+        # initial pinning is bound to a device.
         self._stop_expand = threading.Event()
         self._expand_thread = threading.Thread(
             target=self._expand_worker, daemon=True, name="lazy-mem-expand-thread"
         )
-        self._expand_thread.start()
 
     # Public methods
+    def ensure_pinning(self, device: int | torch.device) -> None:
+        """
+        Pin the initial chunk on ``device`` and start background expansion.
+
+        Idempotent and thread-safe: only the first call pins and binds the
+        device; subsequent calls (and calls after :meth:`close`) are no-ops.
+        A call racing the initial pin blocks until it completes.
+
+        Args:
+            device (int | torch.device): Device whose CUDA context the pinned
+                host pool is bound to. Typically the worker's current device.
+        """
+        with self._init_lock:
+            if self._pinning_started or self._closed:
+                return
+            self._pin_device = device
+            self._pin_memory_chunk(0, self._curr_size)
+            self._pinning_started = True
+            self._expand_thread.start()
+
     def allocate(
         self,
         shapes: Union[torch.Size, list[torch.Size]],
@@ -183,7 +216,13 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
 
         Returns:
             A memory object, or ``None`` if the committed address space is full.
+
+        Note:
+            The first allocation (across all threads) pins the initial chunk,
+            which blocks the caller and creates a CUDA context on the calling
+            thread's current device unless :meth:`ensure_pinning` already ran.
         """
+        self._ensure_pinned_for_use()
         obj = self._allocator.allocate(shapes, dtypes, fmt, allocator_type)
         # HACK(ApostaC): reset the parent allocator to this lazy allocator
         # There should be a cleaner way to decouple lazy allocator and
@@ -211,7 +250,13 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
 
         Returns:
             Memory objects for the batch, or ``None`` if allocation fails.
+
+        Note:
+            The first allocation (across all threads) pins the initial chunk,
+            which blocks the caller and creates a CUDA context on the calling
+            thread's current device unless :meth:`ensure_pinning` already ran.
         """
+        self._ensure_pinned_for_use()
         # HACK(ApostaC): reset the parent allocator to this lazy allocator
         # There should be a cleaner way to decouple lazy allocator and
         # tensor memory allocator
@@ -255,19 +300,37 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         self._allocator.batched_free(memory_objs, allocator_type, update_stats)
 
     def close(self) -> None:
-        """Stop background expansion and release pinned or NUMA memory."""
-        # Stop the background expansion thread
-        self._stop_expand.set()
-        self._expand_thread.join()
+        """Stop background expansion and release pinned or NUMA memory.
 
-        # Unpin all pinned memory chunks
-        for ptr, size in self._pin_record:
-            current_device_spec.unpin_memory(ptr)
-        self._pin_record.clear()
+        Thread-safe and idempotent. Holds the init lock so a close racing a
+        concurrent first :meth:`ensure_pinning` is serialized against it, and
+        marks the allocator closed so any later pinning attempt is a no-op.
+        If pinning never happened there is nothing to stop or unpin.
 
-        # Free the underlying buffer if using NUMA allocation
-        if self._use_numa:
-            device_ops.free_numa_ptr(self._buffer.data_ptr(), self._final_size)
+        Note:
+            Allocations issued after close are not blocked; they proceed
+            against the unpinned (and, for NUMA, freed) buffer.
+        """
+        with self._init_lock:
+            self._closed = True
+
+            # Stop the expansion thread and unpin only if pinning started.
+            # The expansion thread never takes _init_lock, so joining it
+            # while holding the lock cannot deadlock.
+            if self._pinning_started:
+                self._stop_expand.set()
+                self._expand_thread.join()
+
+                # Unpin in the same device context the chunks were pinned in
+                with torch_dev.device(self._pin_device):
+                    for ptr, size in self._pin_record:
+                        current_device_spec.unpin_memory(ptr)
+                self._pin_record.clear()
+
+            # Free the underlying buffer if using NUMA allocation
+            if self._use_numa:
+                device_ops.free_numa_ptr(self._buffer.data_ptr(), self._final_size)
+                self._use_numa = False
 
     def memcheck(self) -> bool:
         """Return whether the delegated tensor allocator is consistent."""
@@ -286,9 +349,24 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         return self._address_manager
 
     # Helper functions
+    def _ensure_pinned_for_use(self) -> None:
+        """
+        Pin the pool on the calling thread's current device if not yet pinned.
+
+        Fallback for callers that never invoke :meth:`ensure_pinning`
+        explicitly: the first allocation binds pinning to whatever device is
+        current on the calling thread.
+        """
+        if not self._pinning_started:
+            device = torch_dev.current_device() if torch_dev.is_available() else 0
+            self.ensure_pinning(device)
+
     def _pin_memory_chunk(self, offset: int, size: int) -> None:
         """
-        Pin a chunk of memory.
+        Pin a chunk of memory inside the bound device's context.
+
+        Caller must ensure ``_pin_device`` is already bound (i.e. only call
+        this from ``ensure_pinning`` or the expansion thread it starts).
 
         Args:
             offset (int): Offset in the buffer to pin.
@@ -303,8 +381,12 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         assert offset + size <= self._final_size, "Pinning exceeds buffer size"
 
         ptr = self._buffer.data_ptr() + offset
+        # Pin inside the bound device's context so the CUDA context the
+        # registration creates lands on that device, not the thread default.
         # Use flag: cudaHostRegisterMapped (0x02)
-        if not current_device_spec.pin_memory(ptr, size, 2):
+        with torch_dev.device(self._pin_device):
+            pinned = current_device_spec.pin_memory(ptr, size, 2)
+        if not pinned:
             logger.warning(
                 "pin_memory failed for chunk at ptr=%#x size=%d; "
                 "DMA performance may be degraded",
