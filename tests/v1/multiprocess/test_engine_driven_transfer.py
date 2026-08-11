@@ -988,9 +988,9 @@ def test_scatter_rounds_down_partial_block_skip_first_n_tokens(
 
 
 @pytest.fixture
-def stub_native_storage_ops() -> Any:
+def stub_lmcache_native() -> Any:
     """Stub native modules so server imports work in source-only test runs."""
-    module = type(sys)("lmcache.native_storage_ops")
+    module = type(sys)("lmcache.lmcache_native")
     module.TTLLock = type("TTLLock", (), {})  # type: ignore[attr-defined]
     module.Bitmap = type("Bitmap", (), {})  # type: ignore[attr-defined]
     module.PeriodicEventNotifier = type(  # type: ignore[attr-defined]
@@ -999,7 +999,7 @@ def stub_native_storage_ops() -> Any:
     with patch.dict(
         sys.modules,
         {
-            "lmcache.native_storage_ops": module,
+            "lmcache.lmcache_native": module,
             "cupy": MagicMock(),
         },
     ):
@@ -1008,7 +1008,7 @@ def stub_native_storage_ops() -> Any:
 
 @pytest.fixture
 def server_module_factory(
-    stub_native_storage_ops: Any,
+    stub_lmcache_native: Any,
 ) -> Iterator[ServerModuleFactory]:
     """Create a patched server module/context with configurable mocks."""
     # Standard
@@ -1107,7 +1107,7 @@ def server_module_factory(
     ],
 )
 def test_engine_context_shm_pool_info(
-    stub_native_storage_ops: Any,
+    stub_lmcache_native: Any,
     config_kwargs: dict[str, Any],
     expected_pool_info: dict[str, Any],
 ) -> None:
@@ -1133,7 +1133,7 @@ def test_engine_context_shm_pool_info(
 
 
 def test_server_register_and_find_non_cuda_context_layout(
-    stub_native_storage_ops: Any,
+    stub_lmcache_native: Any,
     server_module_factory: ServerModuleFactory,
 ) -> None:
     """Ensure backend-agnostic registration stores metadata and lookup finds layout."""
@@ -1150,7 +1150,7 @@ def test_server_register_and_find_non_cuda_context_layout(
 
 
 def test_server_store_and_retrieve_cpu_chunks(
-    stub_native_storage_ops: Any,
+    stub_lmcache_native: Any,
     server_module_factory: ServerModuleFactory,
 ) -> None:
     """Validate mocked server-side CPU chunk store and retrieve behavior."""
@@ -1191,7 +1191,7 @@ def test_server_store_and_retrieve_cpu_chunks(
 
 
 def test_server_shm_commit_store_allows_noop_when_all_keys_exist(
-    stub_native_storage_ops: Any,
+    stub_lmcache_native: Any,
     server_module_factory: ServerModuleFactory,
 ) -> None:
     """Regression: repeated prompt after worker restart should no-op-store cleanly.
@@ -1227,7 +1227,7 @@ def test_server_shm_commit_store_allows_noop_when_all_keys_exist(
 
 
 def test_server_prepare_store_releases_unused_reserved_write_locks(
-    stub_native_storage_ops: Any,
+    stub_lmcache_native: Any,
     server_module_factory: ServerModuleFactory,
 ) -> None:
     """Ensure SHM prepare_store releases reserved keys that have no writable tensor."""
@@ -1262,7 +1262,7 @@ def test_server_prepare_store_releases_unused_reserved_write_locks(
 
 
 def test_server_shm_transport_uses_engine_level_config(
-    stub_native_storage_ops: Any,
+    stub_lmcache_native: Any,
     server_module_factory: ServerModuleFactory,
 ) -> None:
     """Ensure all instances share the same engine-level SHM transport setting."""
@@ -1297,7 +1297,7 @@ def test_server_shm_transport_uses_engine_level_config(
 
 
 def test_server_engine_driven_reregister_returns_existing_shm_response(
-    stub_native_storage_ops: Any,
+    stub_lmcache_native: Any,
     server_module_factory: ServerModuleFactory,
 ) -> None:
     """Ensure duplicate non-GPU registration returns existing SHM response."""
@@ -1317,7 +1317,7 @@ def test_server_engine_driven_reregister_returns_existing_shm_response(
 
 
 def test_server_unregister_engine_driven_context_releases_pending_shm_locks(
-    stub_native_storage_ops: Any,
+    stub_lmcache_native: Any,
     server_module_factory: ServerModuleFactory,
 ) -> None:
     """Ensure unregister releases pending SHM read/write reservations."""
@@ -1409,7 +1409,7 @@ def test_gather_paged_kv_with_chunk_indices_subset() -> None:
 
 
 def test_server_prepare_store_includes_chunk_indices(
-    stub_native_storage_ops: Any,
+    stub_lmcache_native: Any,
     server_module_factory: ServerModuleFactory,
 ) -> None:
     """prepare_store response context includes chunk_indices for SHM mode.

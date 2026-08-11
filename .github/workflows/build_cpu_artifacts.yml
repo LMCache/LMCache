@@ -81,7 +81,7 @@ jobs:
               run: |
                 set -e
                 # Required: common C++ extensions.
-                for mod in native_storage_ops lmcache_redis lmcache_fs; do
+                for mod in lmcache_native lmcache_redis lmcache_fs; do
                   if ! unzip -l dist/lmcache-*.whl | grep -qE "lmcache/${mod}\..*\.so"; then
                     echo "::error::missing common C++ extension: ${mod}"
                     exit 1
@@ -106,7 +106,7 @@ jobs:
                 import lmcache
                 assert lmcache.torch_device_type == 'cpu', lmcache.torch_device_type
                 "
-                python -c "import lmcache.native_storage_ops"
+                python -c "import lmcache.lmcache_native"
                 python -c "import lmcache.lmcache_redis"
                 python -c "import lmcache.lmcache_fs"
                 # On CPU, `import lmcache.c_ops` resolves to the synthetic shim

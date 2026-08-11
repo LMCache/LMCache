@@ -7,25 +7,65 @@
 #include "fold.h"
 #include "periodic_event_notifier.h"
 #include "utils.h"
+#include "engine_kv_format.h"
+#include "kv_transfer_types.h"
 
 namespace py = pybind11;
 
-using lmcache::storage_manager::Bitmap;
-using lmcache::storage_manager::PeriodicEventNotifier;
-using lmcache::storage_manager::TTLLock;
+using lmcache::lmcache_native::Bitmap;
+using lmcache::lmcache_native::PeriodicEventNotifier;
+using lmcache::lmcache_native::TTLLock;
 using lmcache::utils::ParallelPatternMatcher;
 using lmcache::utils::RangePatternMatcher;
 
-PYBIND11_MODULE(native_storage_ops, m) {
-  m.doc() = "Native storage operations for LMCache";
+PYBIND11_MODULE(lmcache_native, m) {
+  m.doc() = "Native operations for LMCache (device-independent)";
 
-  m.def("fold", &lmcache::storage_manager::fold, py::arg("found"),
+  // Device-independent KV-format and transfer enums. These live in the
+  // common (non-CUDA) native module so they are available regardless of the
+  // GPU backend, and so they are the single source of truth shared with the
+  // pure-Python fallback in ``lmcache.v1.platform.ops_types``.
+  py::enum_<EngineKVFormat>(m, "EngineKVFormat")
+      .value("NB_NL_TWO_BS_NH_HS", EngineKVFormat::NB_NL_TWO_BS_NH_HS)
+      .value("NL_X_TWO_NB_BS_NH_HS", EngineKVFormat::NL_X_TWO_NB_BS_NH_HS)
+      .value("NL_X_NB_TWO_BS_NH_HS", EngineKVFormat::NL_X_NB_TWO_BS_NH_HS)
+      .value("NL_X_NB_BS_HS", EngineKVFormat::NL_X_NB_BS_HS)
+      .value("TWO_X_NL_X_NBBS_NH_HS", EngineKVFormat::TWO_X_NL_X_NBBS_NH_HS)
+      .value("NL_X_NBBS_ONE_HS", EngineKVFormat::NL_X_NBBS_ONE_HS)
+      .value("NL_X_TWO_NB_NH_BS_HS", EngineKVFormat::NL_X_TWO_NB_NH_BS_HS)
+      .value("NL_X_NB_TWO_NH_BS_HS", EngineKVFormat::NL_X_NB_TWO_NH_BS_HS)
+      .value("NB_NL_TWO_NH_BS_HS", EngineKVFormat::NB_NL_TWO_NH_BS_HS)
+      .value("TWO_X_NL_X_NB_BS_NH_HS", EngineKVFormat::TWO_X_NL_X_NB_BS_NH_HS)
+      .value("NL_X_NB_NH_BS_TWO_HS", EngineKVFormat::NL_X_NB_NH_BS_TWO_HS)
+      .value("NL_X_NB_BS_NH_TWO_HS", EngineKVFormat::NL_X_NB_BS_NH_TWO_HS)
+      .value("NL_X_NB_NH_BS_CS", EngineKVFormat::NL_X_NB_NH_BS_CS)
+      .value("NL_X_NB_BS_NH_CS", EngineKVFormat::NL_X_NB_BS_NH_CS)
+      .value("NL_X_NB_BSV_BSS", EngineKVFormat::NL_X_NB_BSV_BSS);
+  m.attr("GPUKVFormat") = m.attr("EngineKVFormat");
+
+  py::enum_<TransferDirection>(m, "TransferDirection")
+      .value("H2D", TransferDirection::H2D)
+      .value("D2H", TransferDirection::D2H);
+
+  m.def("is_kv_list", &is_kv_list, py::arg("format"),
+        "Return whether the format stores KV as a list of per-token KV "
+        "tensors (kv_size == 2).");
+  m.def("is_layer_list", &is_layer_list, py::arg("format"),
+        "Return whether the format stores one list entry per layer.");
+  m.def("is_cross_layer", &is_cross_layer, py::arg("format"),
+        "Return whether the format stacks KV from different layers into a "
+        "single tensor.");
+  m.def("is_mla", &is_mla, py::arg("format"),
+        "Return whether the format is an MLA variant (single latent KV "
+        "head).");
+
+  m.def("fold", &lmcache::lmcache_native::fold, py::arg("found"),
         py::arg("num_chunks"), py::arg("num_ranks"), py::arg("group_windows"),
         "Fold per-(group, chunk, rank) presence into a servable-prefix-lengths "
         "bitmap (size num_chunks + 1); bit L set iff every object group can "
         "serve a length-L prefix.");
   m.def(
-      "unfold", &lmcache::storage_manager::unfold, py::arg("hit_length"),
+      "unfold", &lmcache::lmcache_native::unfold, py::arg("hit_length"),
       py::arg("num_chunks"), py::arg("num_ranks"), py::arg("group_windows"),
       "Expand a model-wide hit length into the per-group retain mask over the "
       "group x chunk x kv_rank layout.");

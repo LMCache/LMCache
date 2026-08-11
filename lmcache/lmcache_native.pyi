@@ -1,11 +1,52 @@
 # SPDX-License-Identifier: Apache-2.0
-# Stub for the native_storage_ops C++ extension (implemented in csrc/storage_manager/).
+# Stub for the lmcache_native C++ extension (implemented in csrc/lmcache_native/).
 
-"""Native storage operations for LMCache."""
+"""Native operations for LMCache (device-independent)."""
 
 # Standard
 from collections.abc import Sequence
+from enum import Enum
 from typing import Any, Set, overload
+
+class EngineKVFormat(Enum):
+    """Enumeration of different engine KV cache memory layouts."""
+
+    NB_NL_TWO_BS_NH_HS = 0
+    NL_X_TWO_NB_BS_NH_HS = 1
+    NL_X_NB_TWO_BS_NH_HS = 2
+    NL_X_NB_BS_HS = 3
+    TWO_X_NL_X_NBBS_NH_HS = 4
+    NL_X_NBBS_ONE_HS = 5
+    NL_X_TWO_NB_NH_BS_HS = 6
+    NL_X_NB_TWO_NH_BS_HS = 7
+    NB_NL_TWO_NH_BS_HS = 8
+    TWO_X_NL_X_NB_BS_NH_HS = 9
+    NL_X_NB_NH_BS_TWO_HS = 10
+    NL_X_NB_BS_NH_TWO_HS = 11
+    NL_X_NB_NH_BS_CS = 12
+    NL_X_NB_BS_NH_CS = 13
+    NL_X_NB_BSV_BSS = 14
+
+# Backward-compat alias for EngineKVFormat.
+GPUKVFormat = EngineKVFormat
+
+class TransferDirection(Enum):
+    """Specifies the direction of a memory transfer."""
+
+    H2D = 0
+    D2H = 1
+
+def is_kv_list(format: EngineKVFormat) -> bool:
+    """Return whether the format stores KV as a list of per-token KV tensors."""
+
+def is_layer_list(format: EngineKVFormat) -> bool:
+    """Return whether the format stores one list entry per layer."""
+
+def is_cross_layer(format: EngineKVFormat) -> bool:
+    """Return whether the format stacks KV from different layers into one tensor."""
+
+def is_mla(format: EngineKVFormat) -> bool:
+    """Return whether the format is an MLA variant (single latent KV head)."""
 
 class TTLLock:
     """
