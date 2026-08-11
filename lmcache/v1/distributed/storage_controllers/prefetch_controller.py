@@ -56,8 +56,8 @@ import select
 import threading
 
 # First Party
+from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
-from lmcache.native_storage_ops import Bitmap
 from lmcache.v1.distributed.api import (
     DEFAULT_ATTN_WINDOW_DESC,
     AttnWindowDesc,
@@ -370,7 +370,7 @@ class PrefetchController(StorageControllerInterface):
             )
             register_gauge(
                 "lmcache.l2_prefetch",
-                "lmcache_mp.l2_adapters",
+                "lmcache_mp.l2_prefetch_adapters",
                 (
                     "Count of L2 adapters attached to the prefetch controller, "
                     "tagged by ``state`` (active or draining)."
@@ -909,13 +909,8 @@ class PrefetchController(StorageControllerInterface):
             return
 
         for adapter_id, adapter in routing_adapters.items():
-            # The layout is an advisory hint (see L2AdapterInterface); pass
-            # group 0's.
-            # TODO(KuntaiDu): update L2 adapters' submit_lookup_and_lock_task
-            # to take per-group layout descs (only the P2P adapter uses the
-            # layout today). Follow-up immediately after this PR.
             task_id = adapter.submit_lookup_and_lock_task(
-                spec.keys, spec.group_layout_descs[0]
+                spec.keys, spec.group_layout_descs
             )
             request.pending_lookup_tasks[adapter_id] = task_id
         self._in_flight_requests[request_id] = request

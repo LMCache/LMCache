@@ -19,7 +19,7 @@ from typing import Callable
 import time
 
 # First Party
-from lmcache.native_storage_ops import Bitmap
+from lmcache.lmcache_native import Bitmap
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.memory_management import MemoryObj
@@ -235,7 +235,7 @@ def bench_lookup(
         for i in range(in_flight):
             task_ids.append(
                 adapter.submit_lookup_and_lock_task(
-                    keys_batches[i], _PLACEHOLDER_LAYOUT_DESC
+                    keys_batches[i], {0: _PLACEHOLDER_LAYOUT_DESC}
                 )
             )
 

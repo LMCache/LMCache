@@ -27,8 +27,8 @@ storage layer ──► EventBus ──► CacheEventSubscriber ──► CacheE
   entire transport contract, and it is deliberately weak: the directory
   already absorbs everything a real transport does wrong. Redelivery is
   deduplicated by the per-instance `seq` cursor, loss surfaces as a
-  `seq` gap that flags the instance for resync, and restarts are fenced
-  by `incarnation`. A sink never needs exactly-once or global ordering.
+  `seq` gap that marks the instance's slice stale until the stream is
+  replayed, and restarts are fenced by `incarnation`. A sink never needs exactly-once or global ordering.
 - **`HttpCacheEventSink`** — the first sink: one
   `POST /directory/events` per flush, batches in list order. Failures
   raise `CacheEventPublishError`; the caller decides retry vs drop
@@ -47,7 +47,7 @@ One `CacheEventSubscriber` per MP-server process owns the buffer, the
 
 - **Order-preserving batching.** The buffer is a list of *pending
   batches*: consecutive records with the same `(event_type, tier,
-  backend)` identity append to the last pending batch; an identity
+  backend, shared)` identity append to the last pending batch; an identity
   change starts a new one (never merged backwards). Flushing emits one
   `CacheEventBatch` per pending batch, so the batch sequence preserves
   the total order of recorded events — a store followed by a delete of
@@ -59,13 +59,14 @@ One `CacheEventSubscriber` per MP-server process owns the buffer, the
   the drained list (bounding memory while the coordinator is down) but
   keeps the `seq` numbers it assigned. The directory sees a gap and
   sets `gap_detected` for the instance — the honest signal that events
-  were lost and the resync backstop (future work) should reconcile.
+  were lost and the slice needs an event-stream replay to reconcile.
   Reusing the seqs instead would hide partial-delivery ambiguity (an
   HTTP timeout after the coordinator applied the batch).
 - **`incarnation` = server start time** (`int(time.time())` at
-  lifespan startup). A restarted server's first batch fences out every
-  placement its previous incarnation reported, matching the fact that
-  its pools restarted empty.
+  lifespan startup). A restarted server's first batch fences out the
+  **L1** placements its previous incarnation reported, matching the
+  fact that its memory restarted empty; L2 placements survive because
+  the bytes persist on disk (see `key_directory.md`).
 
 ## Event flow (the observability bus)
 
@@ -90,12 +91,40 @@ listener plumbing or a dedicated flush task:
   backend)` their store reported. The L2 base adapter's
   listener-notify funnel publishes the new `l2.keys.stored`
   (`keys`+`sizes`+`backend`), `l2.keys.accessed`, and `l2.keys.deleted`
-  events; the backend name is the registered adapter type, stamped by
-  the storage manager via `set_backend_name` at build time — so
-  **runtime-added adapters emit automatically**.
+  events; the backend name is the registered adapter type and the
+  optional `shared` flag comes from the adapter config, both stamped by
+  the storage manager via `set_backend_identity` at build time — so
+  **runtime-added adapters emit automatically**. Batches carry the
+  `shared` flag; for shared batches the backend type name identifies
+  the pool fleet-wide (one pool per backend type), so the directory
+  deduplicates shared-storage placements across emitters (see
+  `key_directory.md` — Shared pools).
+  The LMCache-driven store path additionally publishes
+  `mp.tokens` (parallel `chunk_hashes` + `token_chunks` +
+  `token_offsets`) at
+  store submission — ordered ahead of the store's write-finished
+  events, built only when the event has a subscriber, so the cost is
+  zero with event reporting off (and no hashing anywhere: the directory
+  indexes tokens by the chunk hash already in every key). Only
+  worker 0 reports: bindings depend on token content alone, so one
+  report covers every rank's keys. Other store paths (engine-driven
+  transfer, blend pre-computed docs, experimental qstore) do not emit
+  bindings yet — the engine-driven path can publish the same event from
+  its ``commit_store`` when it needs directory tokens.
 - **`CacheEventSubscriber`** maps those events onto the directory
   vocabulary (writes → `STORE`, evictions/deletes → `DELETE`, split per
-  actual L1 medium from the event metadata; touches → `ACCESS`).
+  actual L1 medium from the event metadata; touches → `ACCESS`). The
+  token-binding events produce no batches of their own: the subscriber
+  remembers their chunk-hash → (token ids, offset) pairs (LRU cache
+  bounded at
+  65536; passing the bound evicts the oldest half in one batch, so
+  eviction — and its warning — stays rare) and stamps `token_ids` and
+  `token_offset` onto
+  every L1/L2 `STORE` entry,
+  so token bindings ride the store events themselves. Tokens are
+  therefore repeated per rank/group/tier placement — an accepted wire
+  trade for a self-contained protocol (see
+  [key_directory.md](key_directory.md) — Token index).
   `ACCESS` batches carry an **empty backend**: the directory only
   refreshes key-level recency on access, so there is no placement
   identity to name — the vocabulary requires a non-empty backend for
@@ -112,7 +141,7 @@ listener plumbing or a dedicated flush task:
   elapsing instead of waiting for the next request. The sink posts
   synchronously with a short timeout (a slow coordinator briefly
   stalls the drain, bounded by the timeout; overflow beyond the bus's
-  bounded queue is dropped and surfaces as a `seq` gap → resync).
+  bounded queue is dropped and surfaces as a `seq` gap → replay).
 - **Coupling.** The stream requires the bus: enabling
   `--coordinator-event-reporting` together with
   `--disable-observability` is rejected at startup. Bus-level drops
@@ -126,25 +155,32 @@ L1 media are a closed set, hence the `L1BackendType` enum
 strings because adapter types are an open registry (plugins register
 new type names).
 
+The `shared` flag is tier-agnostic, and L1 already contains the
+shared-capable medium: `DEVDAX` (e.g. CXL-attached memory exposed as a
+`/dev/dax` device) can be mapped by several instances, while `DRAM` and
+`GDS` are inherently instance-private. Today each instance uses its
+DevDAX region privately (its own allocator, its own lifetime), so L1
+events emit `shared=False`. When pooled DevDAX lands (allocation
+governed by the pool's own controller, reporting still per instance),
+only the producer side changes: the subscriber already splits L1
+records per `L1BackendType`, so it stamps `shared` on the pooled
+backend's runs — the vocabulary, batching identity, and directory
+semantics need no change.
+
 ## Wiring and configuration
 
 Enabled in the MP HTTP server lifespan when a coordinator URL is set
 and `--coordinator-event-reporting` (or
 `LMCACHE_COORDINATOR_EVENT_REPORTING`) is on;
 `--coordinator-event-flush-interval` paces the subscriber's
-event-driven flushes (default 1s). The same flags also gate the
-legacy quota stream (`/quota/events`), which keeps its own schema and
-listener until the two streams are unified.
+event-driven flushes (default 1s).
 
 ## Known limitations (follow-ups)
 
 - **Bus overflow drops events silently** (bounded queue, rate-limited
-  warning); the resulting `seq` gap flags the instance for resync, but
-  the resync backstop itself is future work.
+  warning); the resulting `seq` gap marks the instance's slice stale.
+  Reconstruction is by replaying the event stream (durable-transport
+  retention) — wiring that replay up is future work.
 - **The flush pump is coupled to the eviction loop's tick** — decouple
   it (e.g. a bus-owned periodic hook) so tail freshness does not depend
   on that loop's cadence.
-- The legacy quota stream (`/quota/events`) can be re-based on this
-  stream: route directory-applied `l2` batches into the usage/eviction
-  consumers on the coordinator, then delete the `L2EventListener`
-  client and the endpoint.

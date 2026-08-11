@@ -13,7 +13,17 @@ import pytest
 import torch
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.utils import EngineType
+
+# TRT-LLM connector path is CUDA-only.
+pytestmark = [
+    pytest.mark.cuda,
+    pytest.mark.skipif(
+        not (torch_dev.is_available() and torch_device_type == "cuda"),
+        reason="Requires CUDA backend",
+    ),
+]
 
 
 def _has_lmc_ops() -> bool:
@@ -27,7 +37,7 @@ def _has_lmc_ops() -> bool:
 
 
 def _has_cuda() -> bool:
-    return torch.cuda.is_available()
+    return torch_dev.is_available() and torch_device_type == "cuda"
 
 
 class TestEngineType:
@@ -278,7 +288,7 @@ class TestTRTLLMGPUConnector:
         # First Party
         from lmcache.v1.gpu_connector.gpu_connectors import TRTLLMGPUConnector
 
-        device = torch.device("cuda:0")
+        device = torch.device(f"{torch_device_type}:0")
         c = TRTLLMGPUConnector(
             num_kv_heads=2,
             head_dim=64,
@@ -296,7 +306,7 @@ class TestTRTLLMGPUConnector:
         # First Party
         from lmcache.v1.gpu_connector.gpu_connectors import TRTLLMGPUConnector
 
-        device = torch.device("cuda:0")
+        device = torch.device(f"{torch_device_type}:0")
         c = TRTLLMGPUConnector(
             num_kv_heads=2,
             head_dim=64,
@@ -313,7 +323,7 @@ class TestTRTLLMGPUConnector:
         # First Party
         from lmcache.v1.gpu_connector.gpu_connectors import TRTLLMGPUConnector
 
-        device = torch.device("cuda:0")
+        device = torch.device(f"{torch_device_type}:0")
         nh, bs, hs = 2, 16, 64
         nb, nl, kv = 4, 4, 2
         flat = nh * bs * hs

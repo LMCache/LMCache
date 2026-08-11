@@ -11,8 +11,8 @@ import threading
 import time
 
 # First Party
+from lmcache.lmcache_native import Bitmap, PeriodicEventNotifier
 from lmcache.logging import init_logger
-from lmcache.native_storage_ops import Bitmap, PeriodicEventNotifier
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
@@ -27,7 +27,7 @@ from lmcache.v1.distributed.error import L1Error, strerror
 from lmcache.v1.distributed.internal_api import L1MemoryDesc, L2AdapterListener
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters import create_l2_adapter
-from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface
+from lmcache.v1.distributed.l2_adapters.base import AdapterUsage, L2AdapterInterface
 from lmcache.v1.distributed.l2_adapters.config import L2AdapterConfigBase
 from lmcache.v1.distributed.l2_adapters.reconfiguration import (
     L2ReconfigurableAdapter,
@@ -801,18 +801,46 @@ class StorageManager:
             whose ``get_usage()`` raises are skipped (the gauge prefers
             silence over a poison observation).
         """
-        out: list[tuple[int | float, dict[str, object]]] = []
+        return [
+            (int(usage.total_bytes_used), {"l2_name": type_name})
+            for type_name, usages in self.get_l2_usages_by_type().items()
+            for usage in usages
+        ]
+
+    def get_l2_usages_by_type(self) -> dict[str, list[AdapterUsage]]:
+        """Per-adapter usage snapshots grouped by adapter type name.
+
+        Backing data for usage telemetry's per-connector presence and
+        occupancy reporting and for the :meth:`get_l2_usages` gauge.
+        Adapters whose ``get_usage()`` raises are skipped.
+
+        Returns:
+            Mapping from adapter type name (e.g. ``"dax"``) to one usage
+            snapshot per active adapter of that type; empty when no L2
+            adapters are configured.
+        """
+        out_by_type: dict[str, list[AdapterUsage]] = {}
         for _adapter_id, desc, adapter in self._snapshot_adapters():
             try:
                 usage = adapter.get_usage()
             except Exception:
                 logger.exception(
-                    "L2 adapter %s get_usage() failed; skipping in gauge",
+                    "L2 adapter %s get_usage() failed; skipping in usage snapshot",
                     desc.type_name,
                 )
                 continue
-            out.append((int(usage.total_bytes_used), {"l2_name": desc.type_name}))
-        return out
+            out_by_type.setdefault(desc.type_name, []).append(usage)
+        return out_by_type
+
+    def get_l1_usage(self) -> tuple[int, int]:
+        """Current occupancy of the L1 memory pool.
+
+        Backing data for usage telemetry's L1 occupancy reporting.
+
+        Returns:
+            Tuple of ``(used_bytes, total_bytes)``.
+        """
+        return self._l1_manager.get_memory_usage()
 
     def get_usage_bytes_by_cache_salt(self) -> dict[str, int]:
         """Aggregate ``cache_salt`` byte usage across every L2 adapter.
@@ -1100,7 +1128,7 @@ class StorageManager:
         descriptor = AdapterDescriptor(index=adapter_id, config=config)
         # Stamp the registered type name so the adapter's cache events on
         # the observability bus carry their backend identity.
-        adapter.set_backend_name(descriptor.type_name)
+        adapter.set_backend_identity(descriptor.type_name, shared=config.shared)
         return adapter_id, adapter, descriptor
 
     def _should_enable_l2_eviction(
