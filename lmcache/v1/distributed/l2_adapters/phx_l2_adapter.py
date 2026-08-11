@@ -14,6 +14,7 @@ from __future__ import annotations
 
 # Standard
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Optional
 import os
@@ -199,6 +200,12 @@ class _LoadPerf:
     def add_fd_miss(self) -> None:
         if self.enabled:
             self._fd_misses += 1
+
+    def add_fd_stats(self, hits: int, misses: int) -> None:
+        """Batch add fd hit/miss counts (for parallel open path)."""
+        if self.enabled:
+            self._fd_hits += hits
+            self._fd_misses += misses
 
     def finish_early(self, task_id: int, n_keys: int) -> None:
         """Log for the early-return (no files found) path."""
@@ -458,10 +465,11 @@ class PhxL2Adapter(L2AdapterInterface):
         # store uses .tmp files which are temporary and not worth caching.
         self._fd_cache: OrderedDict[str, int] = OrderedDict()
         self._fd_cache_lock = threading.Lock()
-        # One fd per cache file (one chunk = 256 tokens). 4096 fds covers
-        # 4096 * 256 = 1M tokens of prompt, sufficient for agent workloads.
-        # A single process can typically hold ~10K file handles.
-        self._fd_cache_max = 4096
+        # One fd per cache file (one chunk = 256 tokens).  Sized to cover
+        # the full working set observed in production traces (~256K unique
+        # paths).  Each fd uses ~4 KB of kernel memory (~1 GB total) which
+        # is negligible on servers with 1M fd limit (ulimit -n).
+        self._fd_cache_max = 262144
 
         # ── background worker ──
         self._stop_flag = threading.Event()
@@ -968,6 +976,93 @@ class PhxL2Adapter(L2AdapterInterface):
         if fd is not None:
             os.close(fd)
 
+    def _batch_open_fds(
+        self, paths: list[str], flags: int
+    ) -> dict[str, int]:
+        """Open fds for multiple paths in parallel.
+
+        Returns a dict mapping path -> fd (or -1 if open failed).
+        Uses a thread pool to parallelize os.open syscalls, which are
+        I/O-bound (especially with O_DIRECT) and release the GIL.
+        """
+        if not paths:
+            return {}
+        results: dict[str, int] = {}
+
+        def _open_one(p: str) -> tuple[str, int]:
+            try:
+                return p, os.open(p, flags)
+            except OSError:
+                return p, -1
+
+        # Small batches: serial is faster (no thread pool overhead)
+        if len(paths) <= 4:
+            for p in paths:
+                try:
+                    results[p] = os.open(p, flags)
+                except OSError:
+                    results[p] = -1
+            return results
+
+        n_workers = min(32, len(paths))
+        with ThreadPoolExecutor(max_workers=n_workers) as pool:
+            for p, fd in pool.map(_open_one, paths):
+                results[p] = fd
+        return results
+
+    def _batch_get_read_fds(
+        self, paths: list[str], flags: int, perf: _LoadPerf
+    ) -> dict[str, int]:
+        """Batch get fds: parallel-open cache misses, reuse cache hits.
+
+        1. Check which paths are already in the fd cache (hits).
+        2. Parallel os.open all unique misses.
+        3. Insert opened fds into the cache.
+        4. Return path -> fd mapping for all requested paths.
+
+        Records hit/miss counts into *perf*.
+        """
+        # Phase 1: classify hits vs misses
+        hit_paths: list[str] = []
+        miss_paths: list[str] = []
+        miss_set: set[str] = set()
+        for p in paths:
+            with self._fd_cache_lock:
+                cached = p in self._fd_cache
+            if cached:
+                hit_paths.append(p)
+            elif p not in miss_set:
+                miss_set.add(p)
+                miss_paths.append(p)
+
+        perf.add_fd_stats(len(hit_paths), len(miss_paths))
+
+        # Phase 2: parallel open misses
+        if miss_paths:
+            opened = self._batch_open_fds(miss_paths, flags)
+            with self._fd_cache_lock:
+                for p, fd in opened.items():
+                    if fd < 0:
+                        continue
+                    if p in self._fd_cache:
+                        # Another thread cached it; close duplicate
+                        os.close(fd)
+                        continue
+                    if len(self._fd_cache) >= self._fd_cache_max:
+                        _, old_fd = self._fd_cache.popitem(last=False)
+                        os.close(old_fd)
+                    self._fd_cache[p] = fd
+
+        # Phase 3: collect fds (all should be cache hits now)
+        result: dict[str, int] = {}
+        for p in paths:
+            try:
+                fd = self._get_read_fd(p, flags)  # moves to end (LRU update)
+                result[p] = fd
+            except OSError:
+                result[p] = -1
+        return result
+
     def _load_dma(self, path: str, tensor: Any, size: int) -> None:
         """Load via phxfs_read DMA to device buffer.
 
@@ -1055,6 +1150,9 @@ class PhxL2Adapter(L2AdapterInterface):
             dev_batch_dev_objs: list[MemoryObj] = []
             dev_batch_paths: list[str] = []
 
+            # ── Phase 1: Alloc (serial) ──
+            t_alloc_start = perf.mark()
+            alloc_results: list[tuple[int, str, int, MemoryObj]] = []
             for i, path in group:
                 obj = objects[i]
                 cpu_tensor = obj.raw_tensor
@@ -1062,35 +1160,41 @@ class PhxL2Adapter(L2AdapterInterface):
                     continue
                 size = cpu_tensor.nbytes
 
-                # Allocate device MemoryObj on this device
-                t_a = perf.mark()
                 device_obj = allocator.allocate(
                     shapes=obj.metadata.shape,
                     dtypes=obj.metadata.dtype,
                     fmt=obj.metadata.fmt,
                 )
-                perf.measure("alloc", t_a)
                 if device_obj is None:
                     logger.warning(
                         "PhxL2: pool exhausted on dev %d (key %s)", dev_id, keys[i]
                     )
                     continue  # pool exhausted, skip for fallback
 
-                # Open fd
-                with self._fd_cache_lock:
-                    was_cached = path in self._fd_cache
-                t_f = perf.mark()
-                try:
-                    fd = self._get_read_fd(path, flags)
-                except OSError as e:
+                alloc_results.append((i, path, size, device_obj))
+            perf.measure("alloc", t_alloc_start)
+
+            # ── Phase 2: Batch open fds (parallel for cache misses) ──
+            t_fd_start = perf.mark()
+            if alloc_results:
+                unique_paths = []
+                seen_paths: set[str] = set()
+                for _, path, _, _ in alloc_results:
+                    if path not in seen_paths:
+                        seen_paths.add(path)
+                        unique_paths.append(path)
+                fd_map = self._batch_get_read_fds(unique_paths, flags, perf)
+            else:
+                fd_map = {}
+            perf.measure("fd", t_fd_start)
+
+            # ── Phase 3: Assemble batch requests ──
+            for i, path, size, device_obj in alloc_results:
+                fd = fd_map.get(path, -1)
+                if fd < 0:
                     allocator.free(device_obj)
-                    logger.error("PhxL2Adapter open failed for %s: %s", keys[i], e)
+                    logger.error("PhxL2Adapter open failed for %s", keys[i])
                     continue
-                perf.measure("fd", t_f)
-                if was_cached:
-                    perf.add_fd_hit()
-                else:
-                    perf.add_fd_miss()
 
                 buf_offset = device_obj.raw_tensor.data_ptr() - base_ptr
                 dev_batch_indices.append(i)
@@ -1099,7 +1203,7 @@ class PhxL2Adapter(L2AdapterInterface):
                 dev_batch_paths.append(path)
                 batch_bytes += size
 
-            # Batch read on this device
+            # ── Phase 4: Batch read on this device ──
             if dev_batch_reqs:
                 t_read_start = perf.mark()
                 try:
