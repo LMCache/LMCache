@@ -93,6 +93,42 @@ Compression support
      - Not validated
      -
 
+MTP (speculative decoding) support
+----------------------------------
+
+DeepSeek-V4-Flash ships a native multi-token-prediction head
+(``num_nextn_predict_layers: 1`` in its config), which vLLM uses for
+speculative decoding. The MTP head has its own KV cache layer; LMCache
+detects it from vLLM's ``speculative_config`` and stores/retrieves the
+draft-layer KV together with the target model's -- no extra LMCache flags
+are required.
+
+**Status:** Validated with LMCache (vLLM MP connector, TP4).
+
+Add the speculative config to the ``vllm serve`` command shown above:
+
+.. code-block:: bash
+
+   --speculative-config '{"method":"mtp","num_speculative_tokens":1}'
+
+Validation evidence (gsm8k store-vs-retrieve, 100 samples): scores match
+within sampling stderr (0.95 computed vs 0.96 LMCache-retrieved), and the
+MTP acceptance rate is unchanged when the prefix KV is served by LMCache
+(0.947 store run vs 0.952 retrieve run) -- i.e. the draft-layer KV survives
+the store/retrieve round-trip intact. Cold-vs-warm TTFT improved 6.6x with
+MTP enabled throughout.
+
+MTP-specific caveats:
+
+- Generation is **not bit-exact** between a cached and a fresh run: the
+  MXFP4 MoE kernels do not support vLLM's batch-invariant mode. Expect
+  score-level equivalence, not token-level.
+- On the vLLM nightly tested, engine startup with CUDA graphs crashed for
+  this model -- also with a vanilla ``vllm serve`` (no LMCache, no MTP), so
+  this is the dev-branch breakage warned about above, not an LMCache or MTP
+  interaction. ``--enforce-eager`` was used for validation; on tagged vLLM
+  releases (per the vLLM recipe) it should not be needed.
+
 Caveats
 -------
 

@@ -19,6 +19,7 @@ from lmcache.v1.cache_engine import LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
 from tests.v1.utils import (
     create_gpu_connector,
+    create_musa_connector,
     create_xpu_connector,
     dumb_metadata,
     generate_kv_cache_paged_list_tensors,
@@ -54,13 +55,32 @@ def get_expected_count(token_len, save_unfull_chunk, chunk_size):
 
 
 def create_runtime_connector(hidden_dim: int, num_layers: int):
+    """Create the benchmark connector for the active accelerator runtime."""
     if torch_device_type == "xpu":
         return create_xpu_connector(hidden_dim, num_layers)
     if torch_device_type == "cuda":
         return create_gpu_connector(hidden_dim, num_layers)
+    if torch_device_type == "musa":
+        return create_musa_connector(hidden_dim, num_layers)
     raise ValueError(
         f"Unsupported torch_device_type for benchmark: {torch_device_type}"
     )
+
+
+@pytest.mark.musa
+def test_create_runtime_connector_dispatches_musa(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shared benchmark selects its MUSA connector on MUSA hosts."""
+    # First Party
+    from lmcache.v1.gpu_connector.musa_connectors import (
+        VLLMPagedMemMUSAConnectorV2,
+    )
+
+    monkeypatch.setitem(globals(), "torch_device_type", "musa")
+    connector = create_runtime_connector(1024, 32)
+
+    assert isinstance(connector, VLLMPagedMemMUSAConnectorV2)
 
 
 @pytest.fixture

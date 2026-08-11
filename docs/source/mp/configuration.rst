@@ -121,13 +121,15 @@ Source: ``lmcache/v1/multiprocess/config.py``
        truncating the prefix at the gap. No effect for other engines. See
        :doc:`/mp/l2_storage/fault_inject` for a way to exercise it.
    * - ``--separate-object-groups`` / ``--no-separate-object-groups``
-     - ``True``
+     - ``False``
      - Split a hybrid model's kernel groups into one object group per
        cross-chunk attention window (full attention, each sliding-window
-       size, mamba/GDN) at KV-cache registration. On by default; pass
-       ``--no-separate-object-groups`` to keep all layers in a single
-       full-attention object group. Transparent to correctness; a non-hybrid
-       model always resolves to one object group. See :doc:`/mp/hybrid_models`.
+       size, mamba/GDN) at KV-cache registration. Off by default; pass
+       ``--separate-object-groups`` to enable it. **Required for Mamba /
+       linear-attention hybrids** (it lets their recurrent state be cached
+       independently, and is what allows ``--max-num-batched-tokens`` to exceed
+       twice the block size). For a non-hybrid model it makes no difference —
+       every layer resolves to one object group. See :doc:`/mp/hybrid_models`.
 
 Lookup Hash Logging
 -------------------
