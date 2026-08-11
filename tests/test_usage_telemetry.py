@@ -782,11 +782,11 @@ class TestMPUsage:
         # builds without it.
         fs_l2_adapter = pytest.importorskip(
             "lmcache.v1.distributed.l2_adapters.fs_l2_adapter",
-            reason="requires lmcache.native_storage_ops",
+            reason="requires lmcache.lmcache_native",
         )
         serde = pytest.importorskip(
             "lmcache.v1.distributed.serde",
-            reason="requires lmcache.native_storage_ops",
+            reason="requires lmcache.lmcache_native",
         )
         fs_config = fs_l2_adapter.FSL2AdapterConfig(
             base_path=str(tmp_path),

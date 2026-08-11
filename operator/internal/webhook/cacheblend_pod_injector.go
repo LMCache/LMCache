@@ -132,7 +132,7 @@ func (p *CacheBlendPodInjector) Handle(ctx context.Context, req admission.Reques
 	// LMCache injector).
 	kvTransferConfigJSON, containerIdx, resp, ok := prepareInjection(
 		ctx, p.Client, req, pod, cacheBlendKeys, engineName, engineNamespace,
-		engine.Spec.Injection.TargetContainer)
+		engine.Spec.Injection.TargetContainer, "")
 	if !ok {
 		return resp
 	}

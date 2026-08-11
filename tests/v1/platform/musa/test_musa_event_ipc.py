@@ -11,6 +11,8 @@ from lmcache.v1.platform.base.event_ipc import EventIPCBackend
 from lmcache.v1.platform.musa import MusaDeviceSpec, ipc_wrapper
 from lmcache.v1.platform.musa.event_ipc import MusaEventIPCBackend
 
+pytestmark = pytest.mark.musa
+
 
 class _UnavailableIPC:
     def is_musa_event_ipc_available(self) -> bool:
