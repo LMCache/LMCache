@@ -1513,6 +1513,41 @@ spec:
                   type: string
                 description: nodeSelector determines which nodes get an LMCache instance.
                 type: object
+              pd:
+                description: |-
+                  pd enables PD (Prefill-Decode) disaggregation. When set the connection
+                  ConfigMap emits a MultiConnector config and the webhook injects the NIXL
+                  side-channel env vars into opted-in vLLM pods.
+                properties:
+                  enforceHandshakeCompat:
+                    description: |-
+                      enforceHandshakeCompat, when set, is forwarded to the NixlConnector as
+                      kv_connector_extra_config["enforce_handshake_compat"]. Set to false to
+                      disable strict NIXL version negotiation — useful when prefiller and
+                      decoder run different vLLM builds. When nil the key is omitted and
+                      NixlConnector uses its own default.
+                    type: boolean
+                  nixlLoadFailurePolicy:
+                    default: fail
+                    description: |-
+                      nixlLoadFailurePolicy controls what NixlConnector does when the remote
+                      peer cannot be reached. "fail" aborts the request (default);
+                      "ignore" falls back to local prefill.
+                    enum:
+                    - fail
+                    - ignore
+                    type: string
+                  nixlSideChannelPort:
+                    default: 5558
+                    description: |-
+                      nixlSideChannelPort is the port the NIXL agent advertises for
+                      side-channel negotiation. Use distinct values for prefiller and decoder
+                      when both roles run on the same node (e.g. local testing).
+                    format: int32
+                    maximum: 65535
+                    minimum: 1024
+                    type: integer
+                type: object
               podAnnotations:
                 additionalProperties:
                   type: string

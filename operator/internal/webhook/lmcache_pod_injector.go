@@ -19,6 +19,7 @@ package webhook
 import (
 	"context"
 	"net/http"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -130,8 +131,12 @@ func (p *LMCachePodInjector) Handle(ctx context.Context, req admission.Request) 
 
 	// Read the connection ConfigMap (existence gate), resolve the target
 	// container, and apply the command-override gate (shared with CacheBlend).
+	pdRole := ""
+	if engine.Spec.PD != nil {
+		pdRole = strings.TrimSpace(pod.Annotations[PDRoleAnnotationKey])
+	}
 	kvTransferConfigJSON, containerIdx, resp, ok := prepareInjection(
-		ctx, p.Client, req, pod, lmCacheKeys, engineName, namespace, targetDefault)
+		ctx, p.Client, req, pod, lmCacheKeys, engineName, namespace, targetDefault, pdRole)
 	if !ok {
 		return resp
 	}
@@ -158,6 +163,12 @@ func (p *LMCachePodInjector) Handle(ctx context.Context, req admission.Request) 
 	// --- Code-payload staging (only when injection.payloadImage is set) ---
 	if engine.Spec.Injection != nil {
 		stagePayload(ctx, pod, target, engine.Spec.Injection)
+	}
+
+	// PD disaggregation: inject NIXL side-channel env vars when the engine is
+	// configured for PD mode.
+	if engine.Spec.PD != nil {
+		target.Env = BuildPDEnv(target.Env, engine.Spec.PD)
 	}
 
 	log.Info("Injected LMCache connection", "engine", engineName, "container", target.Name)
