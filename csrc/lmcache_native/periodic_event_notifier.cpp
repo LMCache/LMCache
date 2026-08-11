@@ -7,7 +7,7 @@
 #include <algorithm>
 
 namespace lmcache {
-namespace storage_manager {
+namespace lmcache_native {
 
 std::mutex PeriodicEventNotifier::create_mutex_;
 std::unique_ptr<PeriodicEventNotifier> PeriodicEventNotifier::instance_;
@@ -129,5 +129,5 @@ void PeriodicEventNotifier::thread_func() {
   }
 }
 
-}  // namespace storage_manager
+}  // namespace lmcache_native
 }  // namespace lmcache
