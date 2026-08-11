@@ -20,14 +20,10 @@ tensors are indexed to move bytes.
 from __future__ import annotations
 
 # Standard
-from typing import TYPE_CHECKING, Sequence
+from typing import Sequence
 
 # Third Party
 import torch
-
-if TYPE_CHECKING:
-    # First Party
-    from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache
 
 #: Rank of the native RBLN per-layer KV tensor.
 RBLN_KV_NDIM = 6
@@ -81,23 +77,3 @@ def squeeze_singleton_axis(
             )
         views.append(tensor.squeeze(RBLN_SINGLETON_AXIS))
     return views
-
-
-def is_native_kv_structure(kv_caches: "DiscoverableKVCache") -> bool:
-    """Return whether ``kv_caches`` is a flat list of native RBLN KV tensors.
-
-    Args:
-        kv_caches: Raw KV cache structure as the engine handed it over.
-
-    Returns:
-        bool: ``True`` when every element is a per-layer tensor in the native
-        ``[2, NB, NH, 1, BS, HS]`` shape.
-    """
-    return (
-        isinstance(kv_caches, list)
-        and bool(kv_caches)
-        and all(
-            isinstance(tensor, torch.Tensor) and is_rbln_kv_layout(tensor)
-            for tensor in kv_caches
-        )
-    )
