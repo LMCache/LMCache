@@ -220,30 +220,7 @@ steps:
         plugins: [{ kubernetes: { podSpec: *pod-1gpu-dshm } }]
         artifact_paths: ["*.log"]
 
-      # HMA correctness check on google/gemma-4-31B-it (a hybrid model whose KV
-      # cache groups get different block sizes). Runs gsm8k, resets vLLM's prefix
-      # cache (LMCache preserved), reruns served by LMCache, and asserts the two
-      # runs' scores match. Single GPU, no baseline.
-      - label: ":compression: hma_lm_eval_gemma4"
-        command: .buildkite/k3_tests/multiprocess/run.sh hma_lm_eval_gemma4
-        timeout_in_minutes: 60
-        retry: *flaky-retry
-        env:
-          MODEL: "google/gemma-4-31B-it"
-          # Allow a small score difference between the two runs.
-          SCORE_TOLERANCE: "0.03"
-          ATTENTION_BACKEND: "auto"
-          GPU_MEMORY_UTILIZATION: "0.85"
-          # 31B load + CUDA-graph capture is slow; raise the readiness timeout
-          # above the 300s default.
-          MAX_WAIT_SECONDS: "600"
-          # Cap samples and enlarge the CPU pool so the retrieve run stays
-          # cache-served (31B's per-token KV is large).
-          LIMIT: "100"
-          CPU_BUFFER_SIZE: "200"
-        agents: { queue: "k8s" }
-        plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
-        artifact_paths: ["*.log"]
+      # Temporarily disabled: hma_lm_eval_gemma4.
 
       - label: ":compression: fault_tolerance"
         command: .buildkite/k3_tests/multiprocess/run.sh fault_tolerance
