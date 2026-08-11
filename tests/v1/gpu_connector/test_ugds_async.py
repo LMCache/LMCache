@@ -17,6 +17,7 @@ import ctypes
 
 # Third Party
 import pytest
+import torch
 
 # First Party
 from lmcache.v1.gpu_connector import _ugds_async as ua
@@ -104,9 +105,7 @@ class TestDriverLifecycle:
         assert len(_fake_lib.calls["uGDSDriverOpen"]) == 1
         assert ua._driver_opened is True
 
-    def test_open_failure_does_not_mark_driver_open(
-        self, _fake_lib: _FakeLib
-    ) -> None:
+    def test_open_failure_does_not_mark_driver_open(self, _fake_lib: _FakeLib) -> None:
         _fake_lib.uGDSDriverOpen = lambda: _err(5001)
         with pytest.raises(RuntimeError, match="uGDSDriverOpen"):
             ua._ensure_driver_open()
@@ -174,14 +173,23 @@ class TestBufferRegistration:
         with pytest.raises(ValueError, match="CUDA or ROCm"):
             ua.register_buffer(SimpleNamespace(is_cuda=False))
 
+    @pytest.mark.parametrize(
+        ("hip_version", "expected_flags"),
+        [(None, 0), ("6.3", ua._UGDS_REGISTER_DMABUF)],
+    )
     def test_register_buffer_passes_pointer_size_and_flags(
-        self, _fake_lib: _FakeLib
+        self,
+        _fake_lib: _FakeLib,
+        monkeypatch: pytest.MonkeyPatch,
+        hip_version: str | None,
+        expected_flags: int,
     ) -> None:
+        monkeypatch.setattr(torch.version, "hip", hip_version)
         ua.register_buffer(_fake_gpu_tensor(ptr=0x2000, nbytes=8192))
         pointer, length, flags = _fake_lib.calls["uGDSBufRegister"][0]
         assert pointer.value == 0x2000
         assert length.value == 8192
-        assert flags.value == 0
+        assert flags.value == expected_flags
 
     def test_register_buffer_propagates_error(self, _fake_lib: _FakeLib) -> None:
         _fake_lib.uGDSBufRegister = lambda *args: _err(5036)

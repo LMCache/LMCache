@@ -16,14 +16,13 @@ fd to register_handle, and wraps the pair via AsyncHandle.from_fd.
 """
 
 # Standard
-from typing import TYPE_CHECKING, Any, Optional
+from typing import Any, Optional
 import ctypes
 import ctypes.util
 import os
 
-if TYPE_CHECKING:
-    # Third Party
-    import torch
+# Third Party
+import torch
 
 # --- libugds.so lazy loading -----------------------------------------
 
@@ -190,8 +189,30 @@ def deregister_handle(handle: int) -> None:
 
 # --- Buffer / stream registration -----------------------------------
 
+# UGDS_REGISTER_DMABUF from ugds.h: pin GPU memory by exporting it as a
+# dma-buf, which the AMD path requires. Leaving it clear lets uGDS decide.
+_UGDS_REGISTER_DMABUF = 0x1
 
-def register_buffer(buf: "torch.Tensor") -> None:
+
+def _buf_register_flags() -> int:
+    """Return the ``uGDSBufRegister`` flags matching the PyTorch platform.
+
+    uGDS pins GPU memory for NVMe DMA either through ``nvidia_p2p_get_pages``
+    or through an exported dma-buf, and this flag requests the dma-buf path
+    that AMD needs. A ``libugds.so`` built for a single platform compiles in
+    one path and ignores the flag; a build carrying both honours it and
+    otherwise probes the pointer to guess. Requesting the AMD path explicitly
+    keeps the selection correct on every build instead of resting on that
+    probe, and a CUDA build leaves the flag clear because the NVIDIA path is
+    what uGDS reaches without it.
+
+    Returns:
+        ``_UGDS_REGISTER_DMABUF`` on a ROCm build, ``0`` on a CUDA build.
+    """
+    return _UGDS_REGISTER_DMABUF if torch.version.hip is not None else 0
+
+
+def register_buffer(buf: torch.Tensor) -> None:
     if not buf.is_cuda:
         raise ValueError("register_buffer: tensor must be on a CUDA or ROCm GPU")
     _ensure_driver_open()
@@ -201,15 +222,13 @@ def register_buffer(buf: "torch.Tensor") -> None:
         lib.uGDSBufRegister(
             ctypes.c_void_p(buf.data_ptr()),
             ctypes.c_size_t(nbytes),
-            # flags=0: a platform-specific libugds.so has exactly one pinning
-            # path compiled in, so UGDS_REGISTER_DMABUF need not be requested.
-            ctypes.c_int(0),
+            ctypes.c_int(_buf_register_flags()),
         ),
         "uGDSBufRegister",
     )
 
 
-def deregister_buffer(buf: "torch.Tensor") -> None:
+def deregister_buffer(buf: torch.Tensor) -> None:
     lib = _get_lib()
     _check(
         lib.uGDSBufDeregister(ctypes.c_void_p(buf.data_ptr())),
