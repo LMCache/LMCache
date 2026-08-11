@@ -11,10 +11,9 @@ name: Build XPU Artifacts
 # - launch runtime containers with --shm-size=4g to avoid /dev/shm starvation.
 # - install LMCache wheel with --no-deps to preserve pinned torch/oneAPI stack.
 #
-# Uploaded as the `release-xpu-artifacts` GHA artifact. The XPU wheel carries a
-# +xpu local version and is published to a dedicated v{tag}-xpu GitHub Release
-# (not PyPI), mirroring cu129/rocm flows.
-
+# Uploaded as the `release-xpu-artifacts` GHA artifact. The XPU wheel uses the
+# base LMCache release version and is published to a dedicated v{tag}-xpu
+# GitHub Release (not PyPI).
 on:
     workflow_call:
 
@@ -101,12 +100,7 @@ jobs:
                     set -euxo pipefail
                     WHEEL=$(ls /work/LMCache/dist/*.whl | head -n 1)
                     python3 -m pip install --no-deps "$WHEEL"
-                    python3 - <<"PY"
-                      import lmcache
-                      import torch
-                      print("LMCache import OK")
-                      print("Torch:", torch.__version__)
-                      PY
+                    python3 -c "import lmcache, torch; print('LMCache import OK'); print('Torch:', torch.__version__)"
                   '
 
             - name: Upload XPU release artifacts to GHA

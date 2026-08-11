@@ -87,6 +87,31 @@ Install LMCache
                             host image at runtime). Match the wheel's minor torch/ROCm version to your
                             container; for other bases, use the **From Source** tab.
 
+                    .. tab-item:: Intel XPU
+
+                        The Intel XPU wheel is ABI-matched to the upstream
+                        ``vllm/vllm-openai-xpu:v0.26.0`` image (torch 2.12.0+xpu and oneAPI/SYCL).
+                        It is published to a dedicated
+                        `GitHub Release <https://github.com/LMCache/LMCache/releases>`__ rather than PyPI.
+
+                        Install directly inside the matching upstream vLLM XPU container. Torch and the
+                        oneAPI/SYCL runtime are already present, so ``--no-deps`` preserves that runtime stack:
+
+                        .. code-block:: bash
+
+                            docker run -it --device /dev/dri --shm-size=4g \
+                                --entrypoint bash vllm/vllm-openai-xpu:v0.26.0
+
+                            VERSION=0.5.3  # replace with target release
+                            pip install lmcache==${VERSION} --no-deps \
+                                --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/v${VERSION}-xpu
+
+                        .. note::
+
+                            The wheel excludes torch and oneAPI/SYCL runtime libraries, which bind to the
+                            host image at runtime. Match the wheel's torch and oneAPI versions to the
+                            container; for other bases, use the **From Source** tab.
+
             .. tab-item:: Nightly
 
                 Nightly wheels are built from the latest ``dev`` branch each day at 07:30 UTC
@@ -250,7 +275,7 @@ Install LMCache
 
                 .. code-block:: bash
 
-                    docker pull intel/vllm:0.17.0-xpu
+                    docker pull vllm/vllm-openai-xpu:v0.26.0
 
         See :ref:`docker_deployment` for running the container and ROCm images.
 
