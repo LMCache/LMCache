@@ -2541,8 +2541,10 @@ impl RawBlockDevice {
             }
         }
 
-        // Check if the buffer is aligned for O_DIRECT
-        let ptr_aligned = if self.use_odirect {
+        // O_DIRECT and NVMe io_uring_cmd both require a page-aligned ptr for
+        // multi-page transfers (kernel / PRP list entries).
+        let needs_align = self.use_odirect || self.use_uring_cmd;
+        let ptr_aligned = if needs_align {
             (ptr as usize).is_multiple_of(align)
         } else {
             true
@@ -2559,7 +2561,7 @@ impl RawBlockDevice {
         };
 
         // Use bounce buffer if:
-        // Buffer is not aligned (O_DIRECT requirement)
+        // Buffer is not aligned (O_DIRECT or io_uring_cmd PRP requirement)
         // Buffer capacity is less than total_len
         let use_bounce = !ptr_aligned || cap < total_len;
 
@@ -2859,6 +2861,7 @@ impl RawBlockDevice {
 
         let fd = self.fd;
         let use_odirect = self.use_odirect;
+        let use_uring_cmd = self.use_uring_cmd;
         let alignment = self.alignment;
         let fixed_buffers_registered = self.fixed_buffers_registered.load(Ordering::Relaxed);
         // Clone the fixed buffer map before releasing GIL to avoid lock contention
@@ -2885,19 +2888,12 @@ impl RawBlockDevice {
         let res = py.allow_threads(move || {
             let mut submissions: Vec<(IoSubmission, Arc<IoCompletion>)> = Vec::with_capacity(n);
 
-            // Prepare all requests, validate buffers and collect submission data.
+            // Per-item bounce decision mirrors `read_uring`.
+            let needs_align = use_odirect || use_uring_cmd;
             for i in 0..n {
                 let total_len = total_lens[i];
                 let offset = offsets[i];
                 let cap = caps[i];
-
-                // Validate buffer capacity
-                if cap < total_len {
-                    return Err(PyValueError::new_err(format!(
-                        "output buffer too small: cap={} need={}",
-                        cap, total_len
-                    )));
-                }
 
                 if use_odirect {
                     #[allow(clippy::manual_is_multiple_of)]
@@ -2908,28 +2904,57 @@ impl RawBlockDevice {
                     if total_len % alignment != 0 {
                         return Err(PyValueError::new_err("O_DIRECT requires aligned total_len"));
                     }
-                    #[allow(clippy::manual_is_multiple_of)]
-                    if ptrs[i] % alignment != 0 {
-                        return Err(PyValueError::new_err("O_DIRECT requires aligned buffers"));
-                    }
                 }
+
+                // cap < total_len is OK (bounce handles it); cap == 0 is invalid.
+                if cap == 0 {
+                    return Err(PyValueError::new_err(format!(
+                        "output buffer too small: cap={} need={}",
+                        cap, total_len
+                    )));
+                }
+
+                let ptr_aligned = if needs_align {
+                    ptrs[i].is_multiple_of(alignment)
+                } else {
+                    true
+                };
+                let use_bounce = !ptr_aligned || cap < total_len;
 
                 let comp = Arc::new(IoCompletion::new());
 
-                // Fixed buffers are pre-registered with io_uring, enabling true zero-copy I/O
-                let fixed_idx = fixed_buffer_map.get(&ptrs[i]).map(|(idx, _)| *idx);
+                let (ptr_addr, fixed_idx, bounce_opt, original_ptr_opt, payload_len_opt) =
+                    if use_bounce {
+                        let bounce = AlignedBuf::new(total_len, alignment)?;
+                        let bounce_arc = Arc::new(bounce);
+                        let bounce_ptr = bounce_arc.as_mut_ptr() as usize;
+                        // Copy-back bounded by caller capacity.
+                        let payload_len = std::cmp::min(cap, total_len);
+                        (
+                            bounce_ptr,
+                            None,
+                            Some(bounce_arc),
+                            Some(ptrs[i]),
+                            Some(payload_len),
+                        )
+                    } else {
+                        // Fixed buffers are pre-registered with io_uring,
+                        // enabling true zero-copy I/O.
+                        let fixed_idx = fixed_buffer_map.get(&ptrs[i]).map(|(idx, _)| *idx);
+                        (ptrs[i], fixed_idx, None, None, None)
+                    };
 
                 let sub = IoSubmission {
                     fd,
                     offset,
                     len: total_len,
-                    ptr_addr: ptrs[i],
+                    ptr_addr,
                     is_write: false, // read operation
                     completion: comp.clone(),
                     fixed_buffer_idx: fixed_idx,
-                    bounce: None,
-                    original_ptr: None,
-                    payload_len: None,
+                    bounce: bounce_opt,
+                    original_ptr: original_ptr_opt,
+                    payload_len: payload_len_opt,
                     batch_id,
                     nvme_cmd_data: nvme_cmd_data.clone(),
                 };

@@ -34,10 +34,10 @@ chunk ``j`` is available for object group ``g`` (single-rank), or
 from collections.abc import Callable, Iterable, Sequence
 
 # First Party
-from lmcache.native_storage_ops import Bitmap
+from lmcache.lmcache_native import Bitmap
 from lmcache.v1.distributed.api import TrimPolicy
 
-# Lightweight installs (e.g. lmcache-cli) ship a native_storage_ops without
+# Lightweight installs (e.g. lmcache-cli) ship a lmcache_native without
 # the fold kernels; this module must stay importable there because CLI
 # argument registration reaches it via the storage_controllers package.
 # Calling fold()/unfold() without the kernels raises ImportError.
@@ -45,8 +45,8 @@ _native_fold: "Callable[..., Bitmap] | None"
 _native_unfold: "Callable[..., Bitmap] | None"
 try:
     # First Party
-    from lmcache.native_storage_ops import fold as _native_fold
-    from lmcache.native_storage_ops import unfold as _native_unfold
+    from lmcache.lmcache_native import fold as _native_fold
+    from lmcache.lmcache_native import unfold as _native_unfold
 except ImportError:
     _native_fold = None
     _native_unfold = None
@@ -108,12 +108,12 @@ def fold(
     Raises:
         ValueError: If ``group_windows`` is empty, ``num_chunks`` is negative,
             or ``num_ranks`` is not positive.
-        ImportError: If the installed ``lmcache.native_storage_ops`` does not
+        ImportError: If the installed ``lmcache.lmcache_native`` does not
             provide the fold kernel (lightweight install).
     """
     if _native_fold is None:
         raise ImportError(
-            "lmcache.native_storage_ops lacks the fold kernel; install or "
+            "lmcache.lmcache_native lacks the fold kernel; install or "
             "build the full lmcache package"
         )
     if num_ranks < 1:
@@ -172,12 +172,12 @@ def unfold(
     Raises:
         ValueError: If ``group_windows`` is empty, ``num_chunks`` is negative,
             or ``num_ranks`` is not positive.
-        ImportError: If the installed ``lmcache.native_storage_ops`` does not
+        ImportError: If the installed ``lmcache.lmcache_native`` does not
             provide the unfold kernel (lightweight install).
     """
     if _native_unfold is None:
         raise ImportError(
-            "lmcache.native_storage_ops lacks the unfold kernel; install or "
+            "lmcache.lmcache_native lacks the unfold kernel; install or "
             "build the full lmcache package"
         )
     if num_ranks < 1:

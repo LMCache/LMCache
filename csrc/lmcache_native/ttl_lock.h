@@ -7,7 +7,7 @@
 #include <cstdint>
 
 namespace lmcache {
-namespace storage_manager {
+namespace lmcache_native {
 
 /**
  * @brief A thread-safe lock with TTL (Time-To-Live) support.
@@ -86,5 +86,5 @@ class TTLLock {
   const int64_t ttl_ms_;
 };
 
-}  // namespace storage_manager
+}  // namespace lmcache_native
 }  // namespace lmcache
