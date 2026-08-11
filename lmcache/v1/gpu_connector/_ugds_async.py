@@ -7,7 +7,8 @@ register_*/deregister_*) is identical so that :mod:`gds_context` can use
 either backend transparently.
 
 LMCache expects ``libugds.so`` to be built for the active PyTorch platform:
-CUDA-only for NVIDIA or HIP-only for AMD ROCm. 
+CUDA-only for NVIDIA or HIP-only for AMD ROCm.
+
 uGDS operates on raw character devices (/dev/ugds_drv*), not filesystem files.
 The fd/handle split is the same as _cufile_async: the caller opens the
 device (O_RDWR, no O_DIRECT since uGDS IO bypasses the kernel), passes the
@@ -200,7 +201,8 @@ def register_buffer(buf: "torch.Tensor") -> None:
         lib.uGDSBufRegister(
             ctypes.c_void_p(buf.data_ptr()),
             ctypes.c_size_t(nbytes),
-            # A platform-specific uGDS build selects its only compiled backend;
+            # flags=0: a platform-specific libugds.so has exactly one pinning
+            # path compiled in, so UGDS_REGISTER_DMABUF need not be requested.
             ctypes.c_int(0),
         ),
         "uGDSBufRegister",
