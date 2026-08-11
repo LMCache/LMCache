@@ -28,6 +28,20 @@ def _is_sliding_window_spec(spec: Any) -> bool:
     return any(cls.__name__ == "SlidingWindowSpec" for cls in type(spec).__mro__)
 
 
+def _is_mamba_align_spec(spec: Any) -> bool:
+    """Return whether the spec is an align-mode Mamba/linear-attention spec.
+
+    Align-mode Mamba layers keep only the state snapshot of the last block, so
+    they behave exactly like a cross-chunk sliding window of one block: a hit of
+    length ``L`` needs only the last block present. Checked by class name (like
+    :func:`_is_sliding_window_spec`) so this module stays importable without vLLM.
+    """
+    return (
+        any(cls.__name__ == "MambaSpec" for cls in type(spec).__mro__)
+        and getattr(spec, "mamba_cache_mode", "none") == "align"
+    )
+
+
 def _resolve_per_layer_sw_sizes(
     vllm_groups: Sequence[Any],
     layer_to_idx: Mapping[str, int],
@@ -44,8 +58,10 @@ def _resolve_per_layer_sw_sizes(
 
     Returns:
         A list of length ``num_layers`` mapping each registered tensor index
-        to its sliding window size in tokens, or ``-1`` for
-        non-sliding-window layers.
+        to its cross-chunk window size in tokens: the sliding window for
+        sliding-window attention, the engine-side block size for align-mode
+        Mamba/linear layers (a one-block window), or ``-1`` for full-attention
+        layers.
     """
     per_layer_sw_size = [-1] * num_layers
     for group in vllm_groups:
@@ -59,6 +75,8 @@ def _resolve_per_layer_sw_sizes(
             layer_spec = per_layer_specs[name] if per_layer_specs else spec
             if _is_sliding_window_spec(layer_spec):
                 per_layer_sw_size[layer_to_idx[name]] = layer_spec.sliding_window
+            elif _is_mamba_align_spec(layer_spec):
+                per_layer_sw_size[layer_to_idx[name]] = layer_spec.block_size
     return per_layer_sw_size
 
 

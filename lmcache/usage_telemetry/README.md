@@ -16,10 +16,13 @@ deployment operators), different transports, and independent opt-outs.
 | `identity.py` | Opt-out gate (`is_usage_tracking_enabled`), `UsageIdentity` (session/machine ids) |
 | `transport.py` | `UsageMessageSender` (HTTP), `build_usage_payload` (identity + schema stamping) |
 | `env_probe.py` | Hardware/platform/cloud detection feeding `EnvMessage` |
+| `flush.py` | `start_usage_flush_thread` — interval parsing + the shared `PeriodicThread` flush scheduling for the interval reporters |
 | `context.py` | `UsageContextBase`, single-process `UsageContext`, `InitializeUsageContext` — the `/context` snapshot reporters |
 | `continuous.py` | `ContinuousUsageContext` interval counters and lifespan histogram |
 | `metric_specs.py` | `MetricSpec` (map-reduce metric contract) and the default metric registry (not re-exported from the package root) |
 | `mp_continuous.py` | `MPContinuousUsageReporter` — buffers/reduces/sends the `MetricSpec` metrics for the MP server (not re-exported from the package root) |
+| `l1_usage.py` | `L1UsageReporter` — L1 pool occupancy for the MP server (not re-exported from the package root) |
+| `l2_usage.py` | `L2ConnectorUsageReporter` — per-L2-adapter-type traffic + occupancy for the MP server (not re-exported from the package root) |
 | `mp.py` | MP server `MPUsageContext`, `InitializeMPUsageContext` |
 
 `lmcache/usage_context.py` remains as a backward-compatibility shim
@@ -49,6 +52,8 @@ phone home is a dataclass there, and nowhere else. The contract:
 | MP server one-shot | `run_cache_server` → `InitializeMPUsageContext` | `EnvMessage`, `MPServerMessage` |
 | Continuous (single-process) | `LMCacheStatsLogger.log_worker`, every `LMCACHE_USAGE_TRACK_INTERVAL` s (default 600) | `ContinuousContextMessage`, `CacheLifespanMessage` |
 | Continuous (MP server) | EventBus (`MP_RETRIEVE_END`, `MP_STORE_END`; lmcache-driven transfers only), flushed every `LMCACHE_USAGE_TRACK_INTERVAL` s | `ContinuousContextMessage`; empty intervals double as heartbeats |
+| L2 connector usage (MP server) | EventBus traffic (`L2_STORE_COMPLETED`, `L2_LOAD_TASK_SUBMITTED`) + flush-time `StorageManager` occupancy probe, same interval | `L2ConnectorUsageMessage`, one per active L2 adapter type |
+| L1 usage (MP server) | Flush-time `StorageManager` occupancy probe, same interval | `L1UsageMessage`, one per interval |
 
 Model and KV-layout information only become visible to the MP server when
 a serving engine registers its KV caches; a registration-time report
@@ -65,9 +70,9 @@ mechanisms, outermost first:
 
 - Every entry point called from serving code — `InitializeUsageContext`,
   `InitializeMPUsageContext`, `InitializeMPContinuousUsage`,
-  `ContinuousUsageContext.incr_or_send_stats`, `report_once`, the MP
-  event callbacks, and `MPContinuousUsageReporter.flush` — is decorated
-  with
+  `InitializeL2ConnectorUsage`, `ContinuousUsageContext.incr_or_send_stats`,
+  `report_once`, the MP event callbacks, and the MP reporters'
+  `flush` methods — is decorated with
   `guard.swallow_telemetry_errors`: exceptions are logged at debug level
   and swallowed.
 - One-shot sends run on a daemon thread; startup never blocks on the

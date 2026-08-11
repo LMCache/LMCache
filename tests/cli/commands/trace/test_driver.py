@@ -21,6 +21,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache import torch_dev
 from lmcache.cli.commands.trace._dispatch import (
     CallDispatcher,
     ReplayContext,
@@ -52,7 +53,7 @@ import lmcache.v1.mp_observability.event_bus as _bus_module
 def _should_use_lazy() -> bool:
     """Lazy allocator requires CUDA.  CPU-only hosts (our primary replay
     target) must use eager allocation."""
-    return torch.cuda.is_available()
+    return torch_dev.is_available()
 
 
 def _make_sm_config() -> StorageManagerConfig:
@@ -173,7 +174,7 @@ class TestRecordReplayRoundtrip:
         def script(sm: StorageManager) -> None:
             sm.reserve_write(keys, layout, mode="new")
             sm.finish_write(keys)
-            handle = sm.submit_prefetch_task(PrefetchRequestSpec(keys, layout))
+            handle = sm.submit_prefetch_task(PrefetchRequestSpec(keys, {0: layout}))
             assert handle is not None
             with sm.read_prefetched_results(keys) as objs:
                 assert objs is not None

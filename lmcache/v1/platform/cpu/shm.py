@@ -58,8 +58,8 @@ __all__ = [
 class CpuShmTensorWrapper(DeviceIPCWrapper):
     """IPC wrapper for CPU tensors backed by POSIX shared memory.
 
-    Used by the ``lmcache bench kvcache --mode cpu`` path and the
-    vLLM CPU integration so that the client and the LMCache mp server
+    Used by the ``lmcache bench kvcache --mode cpu`` path and engine
+    CPU integrations so that the client and the LMCache mp server
     map the **same** physical pages for the KV cache, mirroring the
     GPU-mode CUDA-IPC zero-copy semantics.
 

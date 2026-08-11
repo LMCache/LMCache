@@ -10,17 +10,39 @@ import pytest
 
 # First Party
 from lmcache.v1.distributed.quota_manager import QuotaManager
+from lmcache.v1.mp_coordinator.cache_control.event_broadcaster import (
+    CacheEventBroadcaster,
+)
 from lmcache.v1.mp_coordinator.cache_control.eviction_manager import L2EvictionManager
 from lmcache.v1.mp_coordinator.cache_control.resync_manager import L2ResyncManager
 from lmcache.v1.mp_coordinator.cache_control.usage_manager import L2UsageManager
+from lmcache.v1.mp_coordinator.key_directory import KeyDirectory
 from lmcache.v1.mp_coordinator.registry import InstanceRegistry, MPInstance
 
 
-def _make_components() -> tuple[L2UsageManager, L2EvictionManager, L2ResyncManager]:
+class _Components:
+    """The two read sides the resync backfill must populate."""
+
+    def __init__(self, directory: KeyDirectory, usage: L2UsageManager) -> None:
+        self.directory = directory
+        self.usage = usage
+
+    def l2_usage(self, salt: str) -> int:
+        return self.usage.get(salt)
+
+    def lookup(self, keys):
+        return self.directory.lookup(keys)
+
+
+def _make_components() -> tuple[_Components, L2EvictionManager, L2ResyncManager]:
+    directory = KeyDirectory()
     usage = L2UsageManager()
     eviction = L2EvictionManager(QuotaManager(), usage, eviction_ratio=1.0)
-    resync = L2ResyncManager(usage, eviction, page_size=2)
-    return usage, eviction, resync
+    router = CacheEventBroadcaster()
+    router.register_consumer(usage)
+    router.register_consumer(eviction)
+    resync = L2ResyncManager(directory, router, page_size=2)
+    return _Components(directory=directory, usage=usage), eviction, resync
 
 
 def _instance(instance_id: str = "mp-1") -> MPInstance:
@@ -72,6 +94,8 @@ class TestResyncFrom:
             return httpx.Response(
                 200,
                 json={
+                    "adapter": "fs",
+                    "shared": False,
                     "entries": [
                         _entry(chunk_hash_hex="aa", size_bytes=100),
                         _entry(chunk_hash_hex="bb", size_bytes=200),
@@ -84,8 +108,23 @@ class TestResyncFrom:
             total = await resync.resync_from(_instance(), client)
 
         assert total == 2
-        # Usage manager aggregated bytes per cache_salt.
-        assert usage.get("alice") == 300
+        # The directory aggregated bytes per cache_salt.
+        assert usage.l2_usage("alice") == 300
+        # The backfill produced real placements carrying the listing's
+        # backend identity, so live DELETE events can remove them.
+        # First Party
+        from lmcache.v1.distributed.api import ObjectKey, Tier
+
+        key = ObjectKey(
+            chunk_hash=bytes.fromhex("aa"),
+            model_name="llama",
+            kv_rank=0,
+            cache_salt="alice",
+        )
+        [placements] = usage.lookup([key])
+        assert [(p.tier, p.backend, p.shared, p.instance_id) for p in placements] == [
+            (Tier.L2, "fs", False, "mp-1")
+        ]
         # Eviction manager registered both keys — confirmed by
         # synthesizing an eviction (no quota ⇒ ratio=1.0 full sweep).
         eviction._quota_manager.set_quota("alice", 0)
@@ -98,14 +137,20 @@ class TestResyncFrom:
 
         pages = [
             {
+                "adapter": "fs",
+                "shared": False,
                 "entries": [_entry(chunk_hash_hex="aa", size_bytes=10)],
                 "next_page_token": "T1",
             },
             {
+                "adapter": "fs",
+                "shared": False,
                 "entries": [_entry(chunk_hash_hex="bb", size_bytes=20)],
                 "next_page_token": "T2",
             },
             {
+                "adapter": "fs",
+                "shared": False,
                 "entries": [_entry(chunk_hash_hex="cc", size_bytes=30)],
                 "next_page_token": None,
             },
@@ -124,7 +169,7 @@ class TestResyncFrom:
         # First page sends no token, follow-ups forward the previous
         # next_page_token verbatim.
         assert seen_tokens == [None, "T1", "T2"]
-        assert usage.get("alice") == 60
+        assert usage.l2_usage("alice") == 60
 
     @pytest.mark.asyncio
     async def test_http_failure_stops_early_returns_partial_count(self):
@@ -138,6 +183,8 @@ class TestResyncFrom:
                 return httpx.Response(
                     200,
                     json={
+                        "adapter": "fs",
+                        "shared": False,
                         "entries": [_entry(chunk_hash_hex="aa", size_bytes=10)],
                         "next_page_token": "T1",
                     },
@@ -149,7 +196,7 @@ class TestResyncFrom:
 
         # First page succeeded; second failed.
         assert total == 1
-        assert usage.get("alice") == 10
+        assert usage.l2_usage("alice") == 10
 
     @pytest.mark.asyncio
     async def test_malformed_entries_skipped(self):
@@ -159,6 +206,8 @@ class TestResyncFrom:
             return httpx.Response(
                 200,
                 json={
+                    "adapter": "fs",
+                    "shared": False,
                     "entries": [
                         # Bad: ``@`` in model_name violates ObjectKey
                         # invariant → skipped.
@@ -186,14 +235,36 @@ class TestResyncFrom:
             total = await resync.resync_from(_instance(), client)
 
         assert total == 1
-        assert usage.get("alice") == 50
+        assert usage.l2_usage("alice") == 50
+
+    @pytest.mark.asyncio
+    async def test_malformed_page_stops_without_recording(self):
+        """A page missing ``shared`` (or ``adapter``) is rejected
+        wholesale: recording it under a guessed identity would leave
+        placements no DELETE event can ever remove."""
+        usage, _eviction, resync = _make_components()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "adapter": "fs",
+                    # no "shared" field
+                    "entries": [_entry(chunk_hash_hex="aa", size_bytes=100)],
+                    "next_page_token": None,
+                },
+            )
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            total = await resync.resync_from(_instance(), client)
+
+        assert total == 0
+        assert usage.l2_usage("alice") == 0
 
     @pytest.mark.asyncio
     async def test_constructor_rejects_non_positive_page_size(self):
-        usage = L2UsageManager()
-        eviction = L2EvictionManager(QuotaManager(), usage)
         with pytest.raises(ValueError):
-            L2ResyncManager(usage, eviction, page_size=0)
+            L2ResyncManager(KeyDirectory(), CacheEventBroadcaster(), page_size=0)
 
 
 # =============================================================================
@@ -233,6 +304,8 @@ class TestWaitAndResync:
             return httpx.Response(
                 200,
                 json={
+                    "adapter": "fs",
+                    "shared": False,
                     "entries": [_entry(chunk_hash_hex="aa", size_bytes=25)],
                     "next_page_token": None,
                 },
@@ -247,4 +320,4 @@ class TestWaitAndResync:
             )
 
         assert total == 1
-        assert usage.get("alice") == 25
+        assert usage.l2_usage("alice") == 25

@@ -4,8 +4,10 @@ from typing import Any, Generic, Optional, TypeVar
 import threading
 
 # First Party
-from lmcache import torch_dev, torch_device_type
+from lmcache import torch_dev
+from lmcache.utils import lmcache_deprecate
 from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
+from lmcache.v1.platform.base.event_ipc import get_event_ipc_backend
 
 T = TypeVar("T")
 
@@ -68,21 +70,45 @@ class MessagingFuture(Generic[T]):
         self.result_ = result
         self.is_done_.set()
 
+    def to_device_future(
+        self,
+        device: Any | None = None,
+    ) -> "DeviceMessagingFuture":
+        """Wrap this future in a device-aware future.
+
+        Args:
+            device: The device whose event backend orders completion. Defaults
+                to the active device.
+
+        Returns:
+            A DeviceMessagingFuture pending on both this future and the event.
+        """
+        # TODO: need extra type checking for the future type
+        return DeviceMessagingFuture.FromMessagingFuture(self, device)  # type: ignore
+
+    @lmcache_deprecate("Use to_device_future() instead")
     def to_cuda_future(
         self,
         device: Any | None = None,
-    ) -> "CUDAMessagingFuture":
-        # TODO: need extra type checking for the future type
-        return CUDAMessagingFuture.FromMessagingFuture(self, device)  # type: ignore
+    ) -> "DeviceMessagingFuture[T]":
+        """Return a device-aware future using the deprecated CUDA name.
+
+        Args:
+            device: Device on which the completion event will be imported.
+
+        Returns:
+            A device-aware future wrapping this messaging future.
+        """
+        return self.to_device_future(device)
 
 
-class CUDAMessagingFuture(MessagingFuture[T]):
+class DeviceMessagingFuture(MessagingFuture[T]):
     """
-    The future class that wraps both result and a CUDA IPC event.
-    The `query`, `wait`, and `result` methods will pend on both the
-    original future and the CUDA event.
+    The future class that wraps both a result and a device IPC event.
+    The `query`, `wait`, and `result` methods pend on both the original
+    future and the device event, ordered through the platform event backend.
     The original future should return tuple[bytes, T], where the first
-    element is the serialized CUDA event.
+    element is the serialized device event handle.
     """
 
     def __init__(
@@ -95,46 +121,36 @@ class CUDAMessagingFuture(MessagingFuture[T]):
         self.event_: Any | None = None
         self.result_: T | None = None
         self.device_ = device if device is not None else torch_dev.current_device()
+        self._event_backend = get_event_ipc_backend(self.device_)
+        self._event_backend.check_event_support(self.device_)
 
-    def _on_raw_future_complete(self):
+    def _on_raw_future_complete(self) -> None:
         """
-        Update the CUDA event and result when the raw future is complete.
+        Update the device event and result when the raw future is complete.
         """
         event_bytes, result = self.raw_future_.result()
         self.result_ = result
 
-        # Not all backends support interprocess Events (CUDA IPC specific)
-        if not hasattr(torch_dev, "Event") or not hasattr(
-            torch_dev.Event, "from_ipc_handle"
-        ):
-            raise RuntimeError(
-                f"Backend '{torch_device_type}' does not support interprocess "
-                "Events (Event.from_ipc_handle not available). "
-                "Multiprocess IPC requires CUDA."
-            )
-        self.event_ = torch_dev.Event.from_ipc_handle(self.device_, event_bytes)
+        self.event_ = self._event_backend.import_event(event_bytes, self.device_)
 
     def wait(self, timeout: Optional[float] = None) -> bool:
         """
-        Wait for the future to be done, with the CUDA stream.
+        Wait for the future to be done, ordered through the device event.
 
         Args:
             timeout (Optional[float]): Maximum time to wait for the UNDERLYING
                 RAW FUTURE in seconds. The exact timeout is not guaranteed
-                when waiting on the CUDA event. (NOTE: this could be improved
+                when waiting on the device event. (NOTE: this could be improved
                 with careful threading management)
 
         Returns:
             bool: True if the future is done, False if the timeout was reached.
 
-        Raises:
-            ValueError: if the timeout is not None.
-
         Notes:
             This function does not support waiting for a specific time.
         """
         if self.event_:
-            self.event_.synchronize()
+            self._event_backend.synchronize_event(self.event_, self.device_)
             return True
 
         flag = self.raw_future_.wait(timeout)
@@ -144,7 +160,7 @@ class CUDAMessagingFuture(MessagingFuture[T]):
         self._on_raw_future_complete()
 
         assert self.event_ is not None
-        self.event_.synchronize()
+        self._event_backend.synchronize_event(self.event_, self.device_)
 
         return True
 
@@ -155,7 +171,7 @@ class CUDAMessagingFuture(MessagingFuture[T]):
         Args:
             timeout (Optional[float]): Maximum time to wait for the UNDERLYING
                 RAW FUTURE in seconds. The exact timeout is not guaranteed
-                when waiting on the CUDA event. (NOTE: this could be improved
+                when waiting on the device event. (NOTE: this could be improved
                 with careful threading management)
 
         Returns:
@@ -167,7 +183,7 @@ class CUDAMessagingFuture(MessagingFuture[T]):
         flag = self.wait(timeout)
         if not flag:
             raise LMCacheTimeoutError(
-                "CUDAMessagingFuture result not available within timeout"
+                "DeviceMessagingFuture result not available within timeout"
             )
 
         assert self.result_ is not None
@@ -181,23 +197,27 @@ class CUDAMessagingFuture(MessagingFuture[T]):
             bool: True if the future is done, False otherwise.
         """
         if self.event_:
-            return self.event_.query()
+            return self._event_backend.query_event(self.event_)
 
         if self.raw_future_.query():
             self._on_raw_future_complete()
             assert self.event_ is not None
-            return self.event_.query()
+            return self._event_backend.query_event(self.event_)
 
         return False
 
     def set_result(self, result: T) -> None:
         raise NotImplementedError(
-            "CUDAMessagingFuture does not support set_result directly"
+            "DeviceMessagingFuture does not support set_result directly"
         )
 
     @staticmethod
     def FromMessagingFuture(
         raw_future: MessagingFuture[tuple[bytes, T]],
         device: Any | None = None,
-    ) -> "CUDAMessagingFuture[T]":
-        return CUDAMessagingFuture(raw_future, device)
+    ) -> "DeviceMessagingFuture[T]":
+        return DeviceMessagingFuture(raw_future, device)
+
+
+# Backward-compatible alias for existing imports.
+CUDAMessagingFuture = DeviceMessagingFuture

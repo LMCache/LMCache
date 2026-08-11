@@ -10,7 +10,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache import torch_device_type
+from lmcache import torch_dev, torch_device_type
 from lmcache.v1.gpu_connector.utils import get_dtype
 from lmcache.v1.gpu_connector.xpu_connectors import (
     VLLMBufferLayerwiseXPUConnector,
@@ -27,19 +27,20 @@ from lmcache.v1.memory_allocators.tensor_memory_allocator import TensorMemoryAll
 from lmcache.v1.memory_management import MemoryFormat
 from lmcache.v1.metadata import LMCacheMetadata
 
-pytestmark = pytest.mark.skipif(
-    torch_device_type != "xpu",
-    reason="XPU-only tests",
-)
+pytestmark = [
+    pytest.mark.xpu,
+    pytest.mark.skipif(
+        not (torch_dev.is_available() and torch_device_type == "xpu"),
+        reason="requires available xpu runtime",
+    ),
+]
 
-if torch_device_type == "xpu":
-    try:
-        # First Party
-        import lmcache.c_ops as lmc_ops
-    except ImportError:
-        lmc_ops = None
-else:
+try:
+    # First Party
+    import lmcache.c_ops as lmc_ops
+except ImportError:
     lmc_ops = None
+
 
 # Mock c_ops when not available
 if lmc_ops is None:
@@ -647,7 +648,12 @@ def test_batched_layerwise_vllm_paged_connector_with_gpu(use_gpu):
     allocator.close()
 
 
-@pytest.mark.skip(reason="This test is skipped due to vllm dependency")
+@pytest.mark.skip(
+    reason=(
+        "Requires vLLM blending runtime with a registered blender instance "
+        "for 'vllm-instance' (LMCBlenderBuilder)."
+    )
+)
 @pytest.mark.parametrize("use_gpu", [True])
 def test_layerwise_vllm_buffer_connector_with_gpu(use_gpu):
     num_blocks = 100

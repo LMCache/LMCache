@@ -11,7 +11,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache import torch_device_type
+from lmcache import torch_dev, torch_device_type
 from lmcache.utils import mock_up_broadcast_fn, mock_up_broadcast_object_fn
 from lmcache.v1.cache_engine import LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
@@ -22,12 +22,15 @@ from tests.v1.utils import (
     generate_tokens,
 )
 
+if not (torch_device_type == "xpu" and torch_dev.is_available()):
+    pytest.skip(
+        "Requires available xpu runtime",
+        allow_module_level=True,
+    )
+
 BACKENDS = ["cpu", "disk"]
 
-pytestmark = pytest.mark.skipif(
-    torch_device_type != "xpu",
-    reason="XPU-only tests",
-)
+pytestmark = pytest.mark.xpu
 
 # Optional override for tempfile root; see tests/v1/test_cache_engine.py
 # for rationale.

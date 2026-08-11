@@ -519,6 +519,28 @@ L2 Storage
      - --
      - List of L2 backends (``type`` + ``config``).
        See :doc:`l2_storage/index`.
+   * - ``l2Backend.serde``
+     - --
+     - Optional serde transform on KV bytes to/from the L2 adapter
+       (rendered as the ``serde`` sub-dict of ``--l2-adapter``). Exactly
+       one serde type must be set. See :doc:`serde`.
+   * - ``l2Backend.serde.aesgcm``
+     - --
+     - At-rest encryption of L2 KV bytes (AES-GCM, keyed per
+       ``cache_salt``). L1 (host RAM) and L0 (GPU) remain plaintext.
+   * - ``l2Backend.serde.aesgcm.masterKeySecretRef.name``
+     - --
+     - Required. User-created Secret in the engine's namespace holding
+       the master key under the ``master`` data key; mounted read-only
+       into the engine pods at ``/etc/lmcache/keys/master``. The
+       operator never generates key material.
+   * - ``l2Backend.serde.aesgcm.keyProvider``
+     - ``hkdf``
+     - How per-``cache_salt`` keys are derived from the master key.
+       Only ``hkdf`` (HKDF-SHA256) is implemented.
+   * - ``l2Backend.serde.aesgcm.aesBits``
+     - ``128``
+     - AES key size: ``128`` or ``256``.
 
 GPU & Security
 ~~~~~~~~~~~~~~
@@ -719,6 +741,13 @@ The operator validates the CR spec at apply time:
      - Must be in (0.0, 1.0].
    * - ``server.port``
      - Must be in [1024, 65535].
+   * - ``l2Backend.serde``
+     - Exactly one serde type must be set (only ``aesgcm`` today).
+   * - ``l2Backend.serde.aesgcm.masterKeySecretRef.name``
+     - Required, must be non-empty.
+   * - ``l2Backend.serde`` + ``l2Backend.raw``
+     - Rejected if the raw adapter config already sets a ``serde`` key
+       (one would silently overwrite the other).
 
 Examples
 --------
@@ -764,6 +793,43 @@ If the default port (5555) conflicts with other services:
 
 The connection ConfigMap updates automatically -- vLLM pods pick up the new
 port on restart.
+
+Encrypted L2 Backend
+~~~~~~~~~~~~~~~~~~~~
+
+Encrypt KV bytes at rest in the L2 tier with the ``aesgcm`` serde. Create
+the master-key Secret first, in the engine's namespace (the operator never
+generates keys):
+
+.. code-block:: bash
+
+    head -c 16 /dev/urandom > master.key   # 16 bytes for AES-128, 32 for AES-256
+    kubectl create secret generic lmcache-l2-master-key \
+        --from-file=master=master.key
+
+.. code-block:: yaml
+
+    apiVersion: lmcache.lmcache.ai/v1alpha1
+    kind: LMCacheEngine
+    metadata:
+      name: my-cache
+    spec:
+      l1:
+        sizeGB: 60
+      l2Backend:
+        raw:
+          type: fs
+          config:
+            base_path: /data/lmcache/l2
+        serde:
+          aesgcm:
+            masterKeySecretRef:
+              name: lmcache-l2-master-key
+
+The Secret is mounted directly into the engine pods (read-only, only the
+``master`` data key). A missing Secret or missing key surfaces as a pod
+mount event and self-heals once the Secret is fixed. See :doc:`serde` for
+the key model and threat model.
 
 Production with Prometheus Monitoring
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

@@ -24,8 +24,8 @@ import time
 import zmq
 
 # First Party
+from lmcache.lmcache_native import Bitmap, PeriodicEventNotifier
 from lmcache.logging import init_logger
-from lmcache.native_storage_ops import Bitmap, PeriodicEventNotifier
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.internal_api import L1MemoryDesc, L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
@@ -213,7 +213,7 @@ class P2PL2Adapter(L2AdapterInterface):
     def submit_lookup_and_lock_task(
         self,
         keys: list[ObjectKey],
-        layout_desc: MemoryLayoutDesc,
+        group_layout_descs: dict[int, MemoryLayoutDesc],
     ) -> L2TaskId:
         task_id = self._next_task_id
         self._next_task_id += 1
@@ -226,7 +226,7 @@ class P2PL2Adapter(L2AdapterInterface):
 
         future = self._mq_client.submit_request(
             RequestType.P2P_LOOKUP_AND_LOCK,
-            [keys, layout_desc],
+            [keys, group_layout_descs],
             get_response_class(RequestType.P2P_LOOKUP_AND_LOCK),
         )
         failed = False

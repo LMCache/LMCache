@@ -13,8 +13,7 @@ from typing import Any
 import asyncio
 
 # First Party
-from lmcache.v1.distributed.api import EncodedObjectKey
-from lmcache.v1.distributed.tiers import Tier
+from lmcache.v1.distributed.api import EncodedObjectKey, Tier
 from lmcache.v1.multiprocess.cache_control.errors import (
     InvalidRequest,
     NotFound,
@@ -106,7 +105,9 @@ class ObjectService:
         """List keys resident in one adapter, paginated.
 
         Returns:
-            ``{"adapter", "entries", "next_page_token"}``.
+            ``{"adapter", "shared", "entries", "next_page_token"}`` —
+            ``shared`` is the adapter's fleet-shared-pool flag
+            (``L2AdapterConfigBase.shared``).
 
         Raises:
             InvalidRequest: unsupported ``tier`` or malformed ``page_token``.
@@ -131,6 +132,7 @@ class ObjectService:
             ) from None
         return {
             "adapter": desc.type_name,
+            "shared": desc.config.shared,
             "entries": page.entries,
             "next_page_token": page.next_page_token,
         }
