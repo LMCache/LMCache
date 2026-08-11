@@ -100,9 +100,67 @@ class EngineKVFormat(IntEnum):
     # NL_X_NB_NH_BS_CS but tokens before heads.
     NL_X_NB_BS_NH_CS = 13
 
+    # vLLM DSA indexer k-cache [NB,BS,132] u8, paged [BSxvals][BSxscales];
+    # c_ops only (no pure-torch transfer path)
+    NL_X_NB_BSV_BSS = 14
+
 
 # Backward-compat alias
 GPUKVFormat = EngineKVFormat
+
+
+def is_cross_layer(engine_kv_format: EngineKVFormat) -> bool:
+    """Return True if all layers are fused into one tensor.
+
+    Mirrors the C++ ``is_cross_layer`` predicate in ``csrc/engine_kv_format.h``.
+    """
+    return engine_kv_format in (
+        EngineKVFormat.NB_NL_TWO_BS_NH_HS,
+        EngineKVFormat.NB_NL_TWO_NH_BS_HS,
+    )
+
+
+def is_kv_list(engine_kv_format: EngineKVFormat) -> bool:
+    """Return True if keys and values are two separate top-level lists.
+
+    Mirrors the C++ ``is_kv_list`` predicate in ``csrc/engine_kv_format.h``.
+    """
+    return engine_kv_format in (
+        EngineKVFormat.TWO_X_NL_X_NBBS_NH_HS,
+        EngineKVFormat.TWO_X_NL_X_NB_BS_NH_HS,
+    )
+
+
+def is_layer_list(engine_kv_format: EngineKVFormat) -> bool:
+    """Return True if there is one list entry per layer.
+
+    Mirrors the C++ ``is_layer_list`` predicate in ``csrc/engine_kv_format.h``.
+    """
+    return engine_kv_format in (
+        EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
+        EngineKVFormat.NL_X_NB_TWO_BS_NH_HS,
+        EngineKVFormat.NL_X_NB_BS_HS,
+        EngineKVFormat.NL_X_NBBS_ONE_HS,
+        EngineKVFormat.NL_X_TWO_NB_NH_BS_HS,
+        EngineKVFormat.NL_X_NB_TWO_NH_BS_HS,
+        EngineKVFormat.NL_X_NB_NH_BS_TWO_HS,
+        EngineKVFormat.NL_X_NB_BS_NH_TWO_HS,
+        EngineKVFormat.NL_X_NB_NH_BS_CS,
+        EngineKVFormat.NL_X_NB_BS_NH_CS,
+        EngineKVFormat.NL_X_NB_BSV_BSS,
+    )
+
+
+def is_mla(engine_kv_format: EngineKVFormat) -> bool:
+    """Return True for MLA formats (single latent KV head, no K/V split).
+
+    Mirrors the C++ ``is_mla`` predicate in ``csrc/engine_kv_format.h``.
+    """
+    return engine_kv_format in (
+        EngineKVFormat.NL_X_NB_BS_HS,
+        EngineKVFormat.NL_X_NBBS_ONE_HS,
+        EngineKVFormat.NL_X_NB_BSV_BSS,
+    )
 
 
 class PageBufferShapeDesc:

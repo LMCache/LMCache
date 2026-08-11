@@ -15,7 +15,8 @@ import pytest
 import torch
 
 # First Party
-from lmcache.native_storage_ops import Bitmap
+from lmcache import torch_dev, torch_device_type
+from lmcache.lmcache_native import Bitmap
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
@@ -41,6 +42,7 @@ from lmcache.v1.distributed.serde.turboquant import (
 )
 from lmcache.v1.distributed.storage_manager import StorageManager
 from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.platform import current_device_spec
 
 
 def test_turboquant_registered() -> None:
@@ -276,7 +278,7 @@ def _make_turboquant_storage_manager(preset: str) -> StorageManager:
         l1_manager_config=L1ManagerConfig(
             memory_config=L1MemoryManagerConfig(
                 size_in_bytes=256 * 1024 * 1024,
-                use_lazy=torch.cuda.is_available(),
+                use_lazy=current_device_spec.is_pin_supported,
                 init_size_in_bytes=64 * 1024 * 1024,
             ),
         ),
@@ -286,7 +288,10 @@ def _make_turboquant_storage_manager(preset: str) -> StorageManager:
     return StorageManager(cfg)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")
+@pytest.mark.skipif(
+    not torch_dev.is_available(),
+    reason="Requires torch_device_type",
+)
 @pytest.mark.parametrize(
     ("preset", "corr_lower_bound"),
     [
@@ -361,7 +366,7 @@ def test_turboquant_storage_manager_roundtrip(
         )
         assert ok, f"L1 not cleared: {sm.report_status()['l1_manager']}"
 
-        handle = sm.submit_prefetch_task(PrefetchRequestSpec(keys, layout))
+        handle = sm.submit_prefetch_task(PrefetchRequestSpec(keys, {0: layout}))
         hit_bitmap = _wait_for_prefetch_status(sm, handle, timeout=120.0)
         assert hit_bitmap is not None
         hits = hit_bitmap.count_leading_ones()
@@ -404,7 +409,10 @@ class _FakeMemoryObj:
         self.tensor = tensor
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")
+@pytest.mark.skipif(
+    not torch_dev.is_available(),
+    reason="Requires torch_device_type",
+)
 @pytest.mark.parametrize(
     ("preset", "expected_ratio_lower_bound", "corr_lower_bound"),
     [
@@ -423,7 +431,7 @@ def test_turboquant_direct_roundtrip_cuda(
     # First Party
     from lmcache.v1.distributed.serde.turboquant import TurboQuantDeserializer
 
-    device = torch.device("cuda:0")
+    device = torch.device(f"{torch_device_type}:0")
     dtype = torch.float16
 
     # LMCache KV layout: [2, num_layers, num_tokens, hidden_dim]
@@ -511,7 +519,7 @@ def _make_turboquant_fs_storage_manager(
         l1_manager_config=L1ManagerConfig(
             memory_config=L1MemoryManagerConfig(
                 size_in_bytes=256 * 1024 * 1024,
-                use_lazy=torch.cuda.is_available(),
+                use_lazy=current_device_spec.is_pin_supported,
                 init_size_in_bytes=64 * 1024 * 1024,
             ),
         ),
@@ -521,7 +529,10 @@ def _make_turboquant_fs_storage_manager(
     return StorageManager(cfg)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")
+@pytest.mark.skipif(
+    not torch_dev.is_available(),
+    reason="Requires torch_device_type",
+)
 @pytest.mark.parametrize(
     ("preset", "corr_lower_bound"),
     [
@@ -593,7 +604,7 @@ def test_turboquant_fs_storage_manager_roundtrip(
         )
         assert ok, f"L1 not cleared: {sm.report_status()['l1_manager']}"
 
-        handle = sm.submit_prefetch_task(PrefetchRequestSpec(keys, layout))
+        handle = sm.submit_prefetch_task(PrefetchRequestSpec(keys, {0: layout}))
         hit_bitmap = _wait_for_prefetch_status(sm, handle, timeout=120.0)
         assert hit_bitmap is not None
         hits = hit_bitmap.count_leading_ones()

@@ -4,7 +4,7 @@
 The coordinator is a FastAPI app. Endpoints are auto-discovered from the
 ``http_apis`` package (the same convention as the mp server's HTTP API) and stay
 thin, operating on the shared collaborators carried on ``app.state``: ``config``,
-``registry``, ``quota_manager``, ``usage_manager``, and ``eviction_manager``.
+``registry``, ``quota_manager``, ``key_directory``, and ``eviction_manager``.
 The lifespan runs background tasks for health-checking (eviction of instances
 whose heartbeats have lapsed) and L2 eviction (quota enforcement).
 
@@ -30,7 +30,9 @@ import httpx
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.quota_manager import QuotaManager
-from lmcache.v1.mp_coordinator.blend_directory import GlobalBlendMatcher
+from lmcache.v1.mp_coordinator.cache_control.event_broadcaster import (
+    CacheEventBroadcaster,
+)
 from lmcache.v1.mp_coordinator.cache_control.eviction_manager import (
     L2EvictionManager,
 )
@@ -74,11 +76,18 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
     Returns:
         A configured FastAPI application. ``app.state`` carries the shared
         collaborators (``config``, ``registry``, ``quota_manager``,
-        ``usage_manager``, ``key_directory``, ``blend_directory``); all
+        ``key_directory``); all
         ``http_apis`` routers are registered.
     """
     registry = InstanceRegistry()
     quota_manager = QuotaManager()
+    key_directory = KeyDirectory()
+    if config.enable_blend_lookup:
+        # Only now does the directory hash chunk content: chunk_size is the
+        # match window (the fleet chunk), blend_probe_stride the probe density.
+        key_directory.enable_blend_lookup(
+            chunk_size=config.chunk_size, probe_stride=config.blend_probe_stride
+        )
     usage_manager = L2UsageManager()
     eviction_manager = L2EvictionManager(
         quota_manager=quota_manager,
@@ -86,23 +95,23 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
         eviction_ratio=config.eviction_ratio,
         trigger_watermark=config.trigger_watermark,
     )
-    resync_manager = L2ResyncManager(
-        usage_manager=usage_manager,
-        eviction_manager=eviction_manager,
-        page_size=config.resync_page_size,
-    )
     prefetch_manager = PrefetchManager()
     # Resolves pin requests' token_ids to object keys; must match the fleet's
     # chunk size and hash algorithm (see MPCoordinatorConfig).
     token_hasher = TokenHasher(
         chunk_size=config.chunk_size, hash_algorithm=config.hash_algorithm
     )
-    blend_directory = GlobalBlendMatcher(
-        chunk_size=config.chunk_size, probe_stride=config.blend_probe_stride
+    event_broadcaster = CacheEventBroadcaster()
+    # Order matters: the eviction manager's delete handling reads the
+    # usage view for the same batch, so the usage view must consume first.
+    event_broadcaster.register_consumer(usage_manager)
+    event_broadcaster.register_consumer(eviction_manager)
+    resync_manager = L2ResyncManager(
+        key_directory=key_directory,
+        event_broadcaster=event_broadcaster,
+        page_size=config.resync_page_size,
     )
-    key_directory = KeyDirectory()
-    # Typed context the cache handlers resolve via ``get_context``;
-    # ``outbound_client`` is filled in by the lifespan (bound to the loop).
+
     ctx = CoordinatorContext(
         registry=registry,
         quota_manager=quota_manager,
@@ -111,6 +120,7 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
         prefetch_manager=prefetch_manager,
         token_hasher=token_hasher,
         key_directory=key_directory,
+        event_broadcaster=event_broadcaster,
     )
 
     async def _health_loop() -> None:
@@ -148,10 +158,7 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
         # calls (eviction dispatch + startup resync). Created inside
         # the lifespan so it binds to the running event loop.
         outbound_client = httpx.AsyncClient(timeout=30.0)
-        # Fill in the context's outbound client so request handlers (e.g. POST
-        # /cache/prefetches) can issue outbound calls; background loops capture
-        # the local ``outbound_client`` directly.
-        ctx.outbound_client = outbound_client
+        app.state.outbound_client = outbound_client
         health_task = None
         eviction_task = None
         resync_task = None
@@ -176,15 +183,11 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
             await outbound_client.aclose()
 
     app = FastAPI(title="LMCache MP Coordinator", version="1.0.0", lifespan=lifespan)
-    # The typed context carries the cache collaborators handlers compose from
-    # (registry, quota/usage/eviction/prefetch managers, outbound client);
-    # handlers resolve it via ``get_context``.
     app.state.ctx = ctx
-    # Out-of-context collaborators kept on app.state directly: ``config`` and the
-    # blend directory (its own router), plus ``resync_manager`` for the lifespan.
+    # Out-of-context collaborators kept on app.state directly: ``config``,
+    # plus ``resync_manager`` for the lifespan.
     app.state.config = config
     app.state.resync_manager = resync_manager
-    app.state.blend_directory = blend_directory
 
     apis_path = Path(__file__).parent / "http_apis"
     package = f"{__package__}.http_apis"
