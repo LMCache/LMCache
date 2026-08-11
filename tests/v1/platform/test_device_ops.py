@@ -15,6 +15,7 @@ import inspect
 import pytest
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.v1.platform import resolve_device_ops
 from lmcache.v1.platform.base.device_ops import DeviceOps
 from lmcache.v1.platform.base.device_spec import DeviceSpec
@@ -91,6 +92,7 @@ def test_cpu_inherits_baseline_verbatim() -> None:
         assert getattr(CpuDeviceOps, name) is getattr(DeviceOps, name), name
 
 
+@pytest.mark.musa
 def test_musa_overrides_transfer_and_stream_ordering_ops() -> None:
     """MusaDeviceOps owns transfer and stream-ordering adaptation."""
     musa_mod = pytest.importorskip(
@@ -109,6 +111,7 @@ def test_musa_overrides_transfer_and_stream_ordering_ops() -> None:
     ]
 
 
+@pytest.mark.musa
 def test_musa_override_dispatches_native_first(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -277,17 +280,21 @@ def test_cpu_without_registered_spec_falls_back_to_base_device_ops(
     assert type(resolve_device_ops("cpu")) is DeviceOps
 
 
+@pytest.mark.skipif(
+    not torch_dev.is_available(),
+    reason=f"Requires available {torch_device_type} runtime",
+)
 def test_unregistered_accelerator_fails_fast(
     isolated_registry: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A requested accelerator with no registered class is a hard error."""
-    table = {k: v for k, v in isolated_registry.items() if k != "cuda"}
+    table = {k: v for k, v in isolated_registry.items() if k != torch_device_type}
     monkeypatch.setattr(platform_pkg, "_DEVICE_REGISTRY", table)
     with pytest.raises(
         RuntimeError,
         match="refusing to silently fall back to the torch baseline",
     ):
-        resolve_device_ops("cuda")
+        resolve_device_ops(torch_device_type)
 
 
 def test_unknown_accelerator_fails_fast_without_registry_edits() -> None:

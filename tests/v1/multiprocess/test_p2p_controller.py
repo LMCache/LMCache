@@ -12,7 +12,7 @@ import httpx
 import torch
 
 # First Party
-from lmcache.native_storage_ops import Bitmap
+from lmcache.lmcache_native import Bitmap
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey, TrimPolicy
 from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import P2PL2AdapterConfig
 from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
@@ -65,10 +65,10 @@ def test_p2p_request_types_registered():
 
 
 def test_p2p_lookup_and_lock_protocol():
-    """P2P_LOOKUP_AND_LOCK payload is [list[ObjectKey], MemoryLayoutDesc],
-    returns int, and is BLOCKING."""
+    """P2P_LOOKUP_AND_LOCK payload is [list[ObjectKey],
+    dict[int, MemoryLayoutDesc]], returns int, and is BLOCKING."""
     payload_classes = get_payload_classes(RequestType.P2P_LOOKUP_AND_LOCK)
-    assert payload_classes == [list[ObjectKey], MemoryLayoutDesc]
+    assert payload_classes == [list[ObjectKey], dict[int, MemoryLayoutDesc]]
     assert get_response_class(RequestType.P2P_LOOKUP_AND_LOCK) is int
     assert get_handler_type(RequestType.P2P_LOOKUP_AND_LOCK) == HandlerType.BLOCKING
 
@@ -111,6 +111,21 @@ def test_memory_layout_desc_mq_roundtrip():
     assert decoded == desc
     assert all(isinstance(s, torch.Size) for s in decoded.shapes)
     assert all(isinstance(d, torch.dtype) for d in decoded.dtypes)
+
+
+def test_group_layout_descs_mq_roundtrip():
+    """The mq encode/decode dispatch must round-trip the per-group layout
+    dict carried by P2P_LOOKUP_AND_LOCK, including its torch.Size /
+    torch.dtype fields."""
+    descs = {0: _make_layout_desc(), 1: _make_layout_desc()}
+    decoded = msgspec_decode(
+        msgspec_encode(descs, cls=dict[int, MemoryLayoutDesc]),
+        cls=dict[int, MemoryLayoutDesc],
+    )
+    assert decoded == descs
+    for desc in decoded.values():
+        assert all(isinstance(s, torch.Size) for s in desc.shapes)
+        assert all(isinstance(d, torch.dtype) for d in desc.dtypes)
 
 
 def test_memory_layout_desc_empty_mq_roundtrip():
@@ -158,17 +173,33 @@ def test_lookup_and_lock_submits_skip_l2_and_returns_task_id():
     ctx.storage_manager.submit_prefetch_task.return_value = handle
 
     keys = [_make_key(0), _make_key(1)]
-    layout_desc = _make_layout_desc()
-    task_id = controller.p2p_lookup_and_lock(keys, layout_desc)
+    group_layout_descs = {0: _make_layout_desc()}
+    task_id = controller.p2p_lookup_and_lock(keys, group_layout_descs)
 
     assert task_id == 0
     (spec,), kwargs = ctx.storage_manager.submit_prefetch_task.call_args
     assert spec.keys == keys
-    assert spec.group_layout_descs[0] is layout_desc
+    assert spec.group_layout_descs is group_layout_descs
     assert kwargs["skip_l2"] is True
     assert spec.policy is TrimPolicy.SPARSE
     # A second call gets a distinct id.
-    assert controller.p2p_lookup_and_lock(keys, layout_desc) == 1
+    assert controller.p2p_lookup_and_lock(keys, group_layout_descs) == 1
+
+
+def test_lookup_and_lock_accepts_multi_group_layout_descs():
+    """p2p_lookup_and_lock builds a spec whose attn_desc covers every
+    received object group."""
+    controller, ctx = _make_controller()
+    ctx.storage_manager.submit_prefetch_task.return_value = MagicMock(
+        l1_found_indices=()
+    )
+
+    group_layout_descs = {0: _make_layout_desc(), 1: _make_layout_desc()}
+    controller.p2p_lookup_and_lock([_make_key(0)], group_layout_descs)
+
+    (spec,), _ = ctx.storage_manager.submit_prefetch_task.call_args
+    assert spec.group_layout_descs is group_layout_descs
+    assert spec.attn_desc.num_object_groups == 2
 
 
 def test_query_lookup_results_builds_addresses_for_prefix():
@@ -179,7 +210,7 @@ def test_query_lookup_results_builds_addresses_for_prefix():
     ctx.storage_manager.submit_prefetch_task.return_value = handle
 
     keys = [_make_key(0), _make_key(1), _make_key(2)]
-    task_id = controller.p2p_lookup_and_lock(keys, _make_layout_desc())
+    task_id = controller.p2p_lookup_and_lock(keys, {0: _make_layout_desc()})
 
     ctx.storage_manager.query_prefetch_status.return_value = Bitmap(3, 2)
     obj0 = MagicMock(shm_offset=100, shm_byte_length=10)
@@ -202,7 +233,7 @@ def test_query_lookup_results_builds_addresses_for_sparse_hits():
     ctx.storage_manager.submit_prefetch_task.return_value = handle
 
     keys = [_make_key(0), _make_key(1), _make_key(2)]
-    task_id = controller.p2p_lookup_and_lock(keys, _make_layout_desc())
+    task_id = controller.p2p_lookup_and_lock(keys, {0: _make_layout_desc()})
 
     found = Bitmap(3)
     found.batched_set([0, 2])
@@ -226,7 +257,7 @@ def test_query_lookup_results_exactly_once():
     ctx.storage_manager.submit_prefetch_task.return_value = MagicMock(
         l1_found_indices=()
     )
-    task_id = controller.p2p_lookup_and_lock([_make_key(0)], _make_layout_desc())
+    task_id = controller.p2p_lookup_and_lock([_make_key(0)], {0: _make_layout_desc()})
 
     ctx.storage_manager.query_prefetch_status.return_value = Bitmap(1)
 
@@ -249,7 +280,7 @@ def test_query_lookup_results_in_progress():
     ctx.storage_manager.submit_prefetch_task.return_value = MagicMock(
         l1_found_indices=()
     )
-    task_id = controller.p2p_lookup_and_lock([_make_key(0)], _make_layout_desc())
+    task_id = controller.p2p_lookup_and_lock([_make_key(0)], {0: _make_layout_desc()})
 
     ctx.storage_manager.query_prefetch_status.return_value = None
     assert controller.p2p_query_lookup_results(task_id) is None
@@ -280,7 +311,7 @@ def test_report_status_counts_active_jobs():
         l1_found_indices=()
     )
     assert controller.report_status()["active_p2p_lookup_jobs"] == 0
-    controller.p2p_lookup_and_lock([_make_key(0)], _make_layout_desc())
+    controller.p2p_lookup_and_lock([_make_key(0)], {0: _make_layout_desc()})
     status = controller.report_status()
     assert status["active_p2p_lookup_jobs"] == 1
     assert status["p2p_enabled"] is False

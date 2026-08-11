@@ -409,6 +409,14 @@ class TestGetL1MemoryDesc:
 
         assert desc.size == basic_config.size_in_bytes
         assert desc.align_bytes == basic_config.align_bytes
+        # The reported alignment must actually hold for the reported pointer.
+        # Asserting only the advertised value passes even when the underlying
+        # buffer is misaligned, which is how a 4096-byte promise was delivered
+        # as a 64-byte-aligned pointer and broke O_DIRECT consumers silently.
+        assert desc.ptr % desc.align_bytes == 0, (
+            f"L1MemoryDesc advertises align_bytes={desc.align_bytes} but ptr "
+            f"{desc.ptr:#x} is {desc.ptr % desc.align_bytes} bytes past a boundary"
+        )
 
         manager.close()
 
