@@ -113,7 +113,8 @@ requires_ugds = pytest.mark.skipif(
     not _ugds_device(),
     reason=(
         "set UGDS_TEST_DEVICE to a scratch uGDS device (e.g. /dev/ugds_drv0); "
-        "also needs CUDA and libugds.so. These tests overwrite the device."
+        "also needs CUDA or ROCm and a matching libugds.so. These tests "
+        "overwrite the device."
     ),
 )
 
@@ -222,7 +223,7 @@ class TestBackendSelection:
         [
             (None, "6.3", "cufile", "CUDA"),
             ("12.9", None, "hipfile", "ROCm"),
-            (None, "6.3", "ugds", "CUDA"),
+            (None, None, "ugds", "ROCm or CUDA"),
             (None, None, "auto", "CUDA"),
         ],
     )
@@ -242,6 +243,19 @@ class TestBackendSelection:
 
             with pytest.raises(ValueError, match=required_platform):
                 ca.select_backend(backend)
+
+    @pytest.mark.parametrize(
+        ("cuda_version", "hip_version"), [("12.9", None), (None, "6.3")]
+    )
+    def test_ugds_accepts_cuda_and_rocm_builds(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        cuda_version: str | None,
+        hip_version: str | None,
+    ) -> None:
+        monkeypatch.setattr(torch.version, "cuda", cuda_version)
+        monkeypatch.setattr(torch.version, "hip", hip_version)
+        assert ca.select_backend("ugds") == "ugds"
 
     def test_rejects_switch_after_selection(
         self, monkeypatch: pytest.MonkeyPatch

@@ -183,7 +183,8 @@ class GdsL1Config:
 
     backend: Literal["auto", "cufile", "hipfile", "ugds"] = "auto"
     """GPU storage backend. ``auto`` selects cuFile on CUDA and hipFile on ROCm;
-    ``ugds`` treats ``file_location`` as a uGDS character-device path."""
+    ``ugds`` supports CUDA and ROCm through a matching platform-specific
+    ``libugds.so`` and treats ``file_location`` as a character-device path."""
 
     align_bytes: int = 4096
     """Allocation alignment; cuFile/hipFile and O_DIRECT require 4 KiB."""
@@ -437,7 +438,8 @@ def add_storage_manager_args(
         choices=("auto", "cufile", "hipfile", "ugds"),
         default="auto",
         help="GDS implementation. auto selects cuFile on CUDA or hipFile on ROCm; "
-        "ugds treats --gds-l1-path as /dev/ugds_drvX.",
+        "ugds supports either platform with a matching platform-specific "
+        "libugds.so and treats --gds-l1-path as /dev/ugds_drvX.",
     )
     # L1 Manager Config (TTL settings)
     ttl_group = parser.add_argument_group(

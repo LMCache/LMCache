@@ -3,14 +3,16 @@
 
 Selects the GDSContext-facing backend from cuFile, hipFile, or uGDS. Automatic
 selection chooses cuFile on NVIDIA and hipFile on AMD ROCm; GDS L1 config can
-explicitly select uGDS for a raw ``/dev/ugds_drvX`` slab. All implementations
-expose an identical API -- :class:`AsyncHandle`, :class:`Submission`, and the
-``register_*`` / ``deregister_*`` / ``close_driver`` functions -- so
+explicitly select uGDS for a raw ``/dev/ugds_drvX`` slab. uGDS supports both
+platforms through a matching platform-specific build: CUDA-only on NVIDIA or
+HIP-only on AMD. All implementations expose an identical API --
+:class:`AsyncHandle`, :class:`Submission`, and the ``register_*`` /
+``deregister_*`` / ``close_driver`` functions -- so
 :mod:`lmcache.v1.gpu_connector.gds_context` remains backend-agnostic.
 
 Selection is by ``torch.version.hip``: a ROCm torch build reports a non-None
-HIP version. Importing this shim does not dlopen any GPU IO driver; both
-backends bind ``libcufile``/``libhipfile`` lazily on first use.
+HIP version. Importing this shim does not dlopen any GPU IO driver; the selected
+backend binds its native library lazily on first use.
 
 Callers must import this module rather than individual symbols, which would
 retain the backend bindings captured before :func:`select_backend` runs.
@@ -79,8 +81,14 @@ def _validate_backend_platform(selected: str) -> None:
     if selected == "hipfile":
         if torch.version.hip is None:
             raise ValueError("hipfile requires a ROCm PyTorch build")
-    elif selected in ("cufile", "ugds") and torch.version.cuda is None:
+    elif selected == "cufile" and torch.version.cuda is None:
         raise ValueError(f"{selected} requires a CUDA PyTorch build")
+    elif (
+        selected == "ugds"
+        and torch.version.hip is None
+        and torch.version.cuda is None
+    ):
+        raise ValueError(f"{selected} requires a ROCm or CUDA PyTorch build")
 
 
 if TYPE_CHECKING:

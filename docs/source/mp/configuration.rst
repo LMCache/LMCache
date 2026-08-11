@@ -278,11 +278,14 @@ flags apply to both; no configuration change is needed to switch vendors.
 **uGDS** (``libugds.so``) is a third, opt-in backend selected with
 ``--gds-l1-backend ugds``. It is a user-space GPUDirect Storage library that
 builds NVMe commands and rings doorbells from user space, so its IO path issues
-no syscall. Unlike cuFile and hipFile it does not use a filesystem: the slab is
-mapped directly onto a raw character device, and ``--gds-l1-path`` must name
-that device (for example ``/dev/ugds_drv0``) rather than a directory. The first
-``--l1-size-gb`` bytes of the device are the slab, so the device must be at
-least that large and must not hold anything else.
+no syscall. LMCache supports uGDS on both NVIDIA CUDA and AMD ROCm by using a
+platform-specific build of ``libugds.so``: CUDA-only for NVIDIA or HIP-only for
+AMD. LMCache does not target a combined CUDA+HIP build. Unlike cuFile and
+hipFile, uGDS does not use a filesystem: the slab is mapped directly onto a raw
+character device, and ``--gds-l1-path`` must name that device (for example
+``/dev/ugds_drv0``) rather than a directory. The first ``--l1-size-gb`` bytes
+of the device are the slab, so the device must be at least that large and must
+not hold anything else.
 
 .. note::
 
@@ -295,10 +298,10 @@ least that large and must not hold anything else.
 .. note::
 
    uGDS requires its kernel module loaded and the NVMe device bound to it, and
-   ``libugds.so`` reachable through the loader (``LD_LIBRARY_PATH`` or
-   ``ldconfig``). Because the device is claimed by ``ugds_drv`` rather than the
-   kernel NVMe driver, it carries no filesystem and cannot be shared with any
-   other consumer while in use. Follow the
+   a platform-matching ``libugds.so`` reachable through the loader
+   (``LD_LIBRARY_PATH`` or ``ldconfig``). Because the device is claimed by
+   ``ugds_drv`` rather than the kernel NVMe driver, it carries no filesystem
+   and cannot be shared with any other consumer while in use. Follow the
    `uGDS installation guide <https://github.com/ScaleX-IO/uGDS/blob/main/docs/installation.md>`_
    to build and load the kernel module, bind the NVMe device, build
    ``libugds.so``, and verify the installation.

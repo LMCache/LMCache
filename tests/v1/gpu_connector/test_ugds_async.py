@@ -170,8 +170,8 @@ class TestHandleRegistration:
 
 
 class TestBufferRegistration:
-    def test_rejects_non_cuda_tensor(self) -> None:
-        with pytest.raises(ValueError, match="must be on CUDA"):
+    def test_rejects_non_gpu_tensor(self) -> None:
+        with pytest.raises(ValueError, match="CUDA or ROCm"):
             ua.register_buffer(SimpleNamespace(is_cuda=False))
 
     def test_register_buffer_passes_pointer_size_and_flags(

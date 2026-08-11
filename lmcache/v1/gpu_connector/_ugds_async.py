@@ -6,6 +6,8 @@ NVMe path instead of cuFile. The API surface (AsyncHandle, Submission,
 register_*/deregister_*) is identical so that :mod:`gds_context` can use
 either backend transparently.
 
+LMCache expects ``libugds.so`` to be built for the active PyTorch platform:
+CUDA-only for NVIDIA or HIP-only for AMD ROCm. 
 uGDS operates on raw character devices (/dev/ugds_drv*), not filesystem files.
 The fd/handle split is the same as _cufile_async: the caller opens the
 device (O_RDWR, no O_DIRECT since uGDS IO bypasses the kernel), passes the
@@ -97,7 +99,7 @@ def _declare_signatures(lib: ctypes.CDLL) -> None:
         ctypes.POINTER(ctypes.c_int64),  # off_t *file_offset_p
         ctypes.POINTER(ctypes.c_int64),  # off_t *bufPtr_offset_p
         ctypes.POINTER(ctypes.c_int64),  # ssize_t *bytes_read_p
-        ctypes.c_void_p,  # cudaStream_t stream
+        ctypes.c_void_p,  # CUDA or HIP stream handle
     ]
     lib.uGDSReadAsync.restype = _uGDSError_t
 
@@ -190,7 +192,7 @@ def deregister_handle(handle: int) -> None:
 
 def register_buffer(buf: "torch.Tensor") -> None:
     if not buf.is_cuda:
-        raise ValueError("register_buffer: tensor must be on CUDA")
+        raise ValueError("register_buffer: tensor must be on a CUDA or ROCm GPU")
     _ensure_driver_open()
     lib = _get_lib()
     nbytes = buf.numel() * buf.element_size()
@@ -198,6 +200,7 @@ def register_buffer(buf: "torch.Tensor") -> None:
         lib.uGDSBufRegister(
             ctypes.c_void_p(buf.data_ptr()),
             ctypes.c_size_t(nbytes),
+            # A platform-specific uGDS build selects its only compiled backend;
             ctypes.c_int(0),
         ),
         "uGDSBufRegister",
