@@ -256,6 +256,7 @@ class LayerwiseDeviceMessagingFuture(MessagingFuture[T]):
         self._event_backend = get_event_ipc_backend(self.device_)
         self._event_backend.check_event_support(self.device_)
         self._resolved = False
+        self._last_waited_event: object | None = None
 
     def _on_raw_future_complete(self) -> None:
         if self._resolved:
@@ -289,10 +290,11 @@ class LayerwiseDeviceMessagingFuture(MessagingFuture[T]):
             self.raw_future_.wait()
             self._on_raw_future_complete()
         if layer_idx < len(self.layer_events_):
-            current_stream = torch_dev.current_stream(self.device_)
-            self._event_backend.wait_event(
-                self.layer_events_[layer_idx], current_stream
-            )
+            evt = self.layer_events_[layer_idx]
+            if evt is not self._last_waited_event:
+                current_stream = torch_dev.current_stream(self.device_)
+                self._event_backend.wait_event(evt, current_stream)
+                self._last_waited_event = evt
 
     def wait(self, timeout: Optional[float] = None) -> bool:
         if self.layer_events_:
