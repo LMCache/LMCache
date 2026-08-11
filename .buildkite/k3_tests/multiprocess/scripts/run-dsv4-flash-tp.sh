@@ -108,6 +108,14 @@ GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.8}"
 # deliberately does NOT reuse MAX_WAIT_SECONDS, which run-single-test.sh
 # pre-exports to 300s -- that would shadow the value here.
 VLLM_READY_TIMEOUT="${VLLM_READY_TIMEOUT:-2700}"
+# DeepSeek-V4-Flash has multiple KV cache groups with different block
+# geometries. Keep per-group registration explicit instead of depending on the
+# LMCache server default, which flipped off in #3869/#4437.
+SEPARATE_OBJECT_GROUPS="${SEPARATE_OBJECT_GROUPS:-1}"
+SEPARATE_OBJECT_GROUPS_ARG=""
+if [ "$SEPARATE_OBJECT_GROUPS" = "1" ] || [ "$SEPARATE_OBJECT_GROUPS" = "true" ]; then
+    SEPARATE_OBJECT_GROUPS_ARG="--separate-object-groups"
+fi
 
 # Tokens to generate per request. Greedy (temperature 0); a divergence in the
 # restored KV shows up within the first few tokens, but a longer generation
@@ -266,6 +274,7 @@ lmcache server \
     --l1-size-gb "$L1_SIZE_GB" \
     --eviction-policy LRU \
     --max-workers 4 \
+    ${SEPARATE_OBJECT_GROUPS_ARG} \
     > "$LMCACHE_LOG" 2>&1 &
 LMCACHE_PID=$!
 echo "$LMCACHE_PID" >> "$PID_FILE"
