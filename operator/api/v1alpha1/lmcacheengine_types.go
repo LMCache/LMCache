@@ -496,10 +496,8 @@ type LMCacheEngineSpec struct {
 	// +optional
 	VolumeMounts []corev1.VolumeMount `json:"volumeMounts,omitempty"`
 
-	// initContainers are additional init containers run before the lmcache
-	// container starts, in order. Use to prepare state the engine can't
-	// create itself, e.g. pre-sizing the raw_block adapter's device_path
-	// file, which it opens expecting to already exist.
+	// initContainers run before the lmcache container, e.g. to pre-size the
+	// raw_block adapter's device_path file, which it expects to exist.
 	// +optional
 	InitContainers []corev1.Container `json:"initContainers,omitempty"`
 
