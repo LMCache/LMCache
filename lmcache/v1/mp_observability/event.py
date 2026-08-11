@@ -25,6 +25,7 @@ class EventType(Enum):
     L1_WRITE_FINISHED = "l1.write.finished"
     L1_WRITE_FINISHED_AND_READ_RESERVED = "l1.write_finished_and_read_reserved"
     L1_KEYS_EVICTED = "l1.keys.evicted"
+    L1_KEYS_ACCESSED = "l1.keys.accessed"
     L1_EVICTION_LOOP_TICK = "l1.eviction.loop_tick"
 
     # L1 failure events (LM-291 health monitoring)
@@ -55,6 +56,11 @@ class EventType(Enum):
     # L2 Eviction Controller events
     L2_KEYS_EVICTED = "l2.keys.evicted"
 
+    # L2 adapter key-level events.
+    L2_KEYS_STORED = "l2.keys.stored"
+    L2_KEYS_ACCESSED = "l2.keys.accessed"
+    L2_KEYS_DELETED = "l2.keys.deleted"
+
     # L2 failure events (LM-291 health monitoring)
     L2_PREFETCH_FAILED = "l2.prefetch.failed"
 
@@ -68,6 +74,10 @@ class EventType(Enum):
 
     # Chunk hash logging events
     MP_LOOKUP = "mp.lookup"
+
+    # Per-chunk token bindings. Metadata (parallel lists):
+    # chunk_hashes (list[bytes]) and token_chunks (list[list[int]]).
+    MP_TOKENS = "mp.tokens"
 
     # MP Server lifecycle sentinels (CPU-synchronous)
     MP_REQUEST_START = "mp.request.start"

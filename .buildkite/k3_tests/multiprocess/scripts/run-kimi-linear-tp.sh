@@ -63,11 +63,27 @@ VLLM_READY_TIMEOUT="${VLLM_READY_TIMEOUT:-900}"
 # Seconds to wait for vLLM's GPU memory to be released after a restart before
 # relaunching (avoids an OOM racing the dying process).
 GPU_RELEASE_TIMEOUT="${GPU_RELEASE_TIMEOUT:-180}"
+# Kimi-Linear mixes MLA and linear-attention groups. Keep the LMCache server's
+# hybrid-group registration explicit instead of relying on the default, which
+# flipped off in #3869/#4437.
+SEPARATE_OBJECT_GROUPS="${SEPARATE_OBJECT_GROUPS:-1}"
+SEPARATE_OBJECT_GROUPS_ARG=""
+if [ "$SEPARATE_OBJECT_GROUPS" = "1" ] || [ "$SEPARATE_OBJECT_GROUPS" = "true" ]; then
+    SEPARATE_OBJECT_GROUPS_ARG="--separate-object-groups"
+fi
 
 # Tokens to generate per request. Greedy (temperature 0); a divergence in the
 # resumed state shows up within the first few tokens, but a longer generation
 # makes an accidental match astronomically unlikely.
 MAX_TOKENS="${MAX_TOKENS:-128}"
+# Share Triton autotune winners between the two vLLM launches. Without this,
+# each launch re-benchmarks @triton.autotune kernels and can select different
+# configs; the KDA prefill kernels are numerically config-sensitive, so the
+# two greedy runs can then diverge without any KV corruption. With the shared
+# cache, launch 2 reuses launch 1's tuned configs and the exact-match
+# comparison below is sound.
+export TRITON_CACHE_AUTOTUNING=1
+export TRITON_CACHE_DIR="/tmp/build_${BUILD_ID}_triton_cache"
 # Seconds to let async LMCache stores drain before restarting vLLM.
 STORE_DRAIN_SECONDS="${STORE_DRAIN_SECONDS:-20}"
 
@@ -113,7 +129,7 @@ launch_vllm() {
         --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
         --port "$saved_port" \
         --block-size 944 \
-        --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_load_failure_policy\": \"recompute\", \"kv_connector_extra_config\": {\"lmcache.mp.port\": $LMCACHE_PORT, \"lmcache.mp.mq_timeout\": 30}}" \
+        --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_load_failure_policy\": \"recompute\", \"kv_connector_extra_config\": {\"lmcache.mp.port\": $LMCACHE_PORT, \"lmcache.mp.mq_timeout\": 120}}" \
         > "$log_file" 2>&1 &
     VLLM_PID=$!
     echo "$VLLM_PID" >> "$PID_FILE"
@@ -228,6 +244,7 @@ lmcache server \
     --l1-size-gb 80 \
     --eviction-policy LRU \
     --max-workers 4 \
+    ${SEPARATE_OBJECT_GROUPS_ARG} \
     > "$LMCACHE_LOG" 2>&1 &
 LMCACHE_PID=$!
 echo "$LMCACHE_PID" >> "$PID_FILE"

@@ -5,6 +5,16 @@ name: CPU Device Tests
 
 on:
   workflow_call:
+    inputs:
+      nightly_verify:
+        description: >-
+          Nightly verification mode. Runs the whole suite regardless of
+          which paths changed, installs the newest vllm-cpu-nightly on
+          every OS (instead of the macOS-pinned wheel below), and uploads
+          one verify_result.json per matrix leg so
+          nightly-aggregate-vllm-verify.sh can decide what to pin.
+        type: boolean
+        default: false
   workflow_dispatch:
   pull_request:
     branches:
@@ -29,10 +39,13 @@ jobs:
     permissions:
       pull-requests: read
     outputs:
+      # `github.event_name` inside a reusable workflow is the *caller's*
+      # event (schedule, pull_request, ...) and never 'workflow_call', so
+      # callers that must always run signal it through nightly_verify.
       lmcache: >-
         ${{
+          inputs.nightly_verify ||
           github.event_name == 'workflow_dispatch' ||
-          github.event_name == 'workflow_call' ||
           steps.filter.outputs.lmcache == 'true'
         }}
     steps:
@@ -173,27 +186,40 @@ jobs:
           path: ~/.cache/huggingface
           key: hf-hub-${{ matrix.model.name }}-v2
 
-      - name: Install vLLM CPU (prebuilt nightly from PyPI)
+      - name: Resolve verified vLLM CPU nightly version
+        id: resolve-vllm
         env:
-          # Pin the vllm-cpu-nightly wheel on macOS to a build that is
-          # ABI-compatible with the torch it pulls in. The nightly
-          # uploaded on 2026-07-24 08:34 UTC (dev202607240834) declares
-          # `torch==2.13.0` in its metadata but the shipped
-          # `vllm/_C.abi3.so` was compiled against an older libtorch —
-          # loading it on macOS fails with
-          # `Symbol not found: __ZN3c104impl3cow23materialize_cow_storage...`
-          # which then blows up cpu_worker.py at
-          # `torch.ops._C.init_cpu_memory_env(...)`.
-          # Linux dodges this because the pytorch-cpu extra index still
-          # serves `torch-2.11.0+cpu`, matching the wheel's ABI.
-          # Revert this pin once upstream ships a macOS-clean nightly.
+          # Reuse the buildkite pin-resolver: it reads the bare version from
+          # the first line of the per-OS pointer file on the
+          # `github_nightly_tested_vllm` branch -- the version the nightly
+          # verification pipeline most recently confirmed working on this OS.
+          # A missing/unreachable pointer leaves PINNED_VLLM_VERSION empty,
+          # so we fall back to the newest nightly and the job still runs.
+          LMCACHE_VLLM_PIN_URL: >-
+            https://raw.githubusercontent.com/LMCache/LMCache/github_nightly_tested_vllm/latest_tested_vllm_${{ runner.os == 'macOS' && 'macos-latest' || 'ubuntu-22.04' }}.txt
+        run: |
+          source .buildkite/k3_harness/resolve-pinned-vllm.sh
+          if [[ -n "${PINNED_VLLM_VERSION}" ]]; then
+            echo "VLLM_CPU_NIGHTLY_SPEC=vllm-cpu-nightly==${PINNED_VLLM_VERSION}" \
+              | tee -a "$GITHUB_OUTPUT"
+          else
+            echo "VLLM_CPU_NIGHTLY_SPEC=vllm-cpu-nightly" | tee -a "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install vLLM CPU (prebuilt nightly from PyPI)
+        id: install-vllm
+        env:
+          # nightly_verify deliberately ignores the pin: its whole job is to
+          # find out whether today's build works, and a pinned wheel would
+          # just re-validate the same known-good one every night.
           VLLM_CPU_NIGHTLY_SPEC: >-
-            ${{ runner.os == 'macOS'
-                && 'vllm-cpu-nightly==0.25.2.dev202607230832'
-                || 'vllm-cpu-nightly' }}
+            ${{ inputs.nightly_verify
+                && 'vllm-cpu-nightly'
+                || steps.resolve-vllm.outputs.VLLM_CPU_NIGHTLY_SPEC }}
         run: bash .github/scripts/install_vllm_cpu.sh
 
       - name: Install lmcache (CPU-only, no vLLM)
+        id: install-lmcache
         run: bash .github/scripts/install_lmcache_cpu.sh
 
       # server_bench is model-agnostic (cpu_server_bench_test.sh never
@@ -225,6 +251,13 @@ jobs:
           CACHE_MARKER: ${{ matrix.model.cache_marker }}
         run: bash .github/scripts/download_gh_release_model.sh
 
+      # The three e2e steps below cover the three worker-side transfer
+      # paths exactly once: engine-driven splits into pickle and shm data
+      # modes, and lmcache-driven is the IPC handle path.
+      #
+      # Never pass a bare `engine_driven` here: LMCACHE_E2E_DATA_MODE then
+      # defaults to shm, so the step silently becomes a second copy of the
+      # shm leg below instead of testing anything new.
       - name: vLLM e2e — Engine-driven (pickle)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -235,9 +268,11 @@ jobs:
           VLLM_PORT_E2E=18000 \
             bash .github/scripts/cpu_device_test.sh vllm_e2e
 
-      # POSIX SHM transport is Linux-only.
+      # Runs on macOS too: POSIX SHM turns out to work there. The runner
+      # has been executing this exact configuration all along via the
+      # mislabelled `engine_driven` step this replaces, which reports
+      # "Transport mode confirmed: shm" on Darwin.
       - name: vLLM e2e — Engine-driven (shm)
-        if: runner.os == 'Linux'
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
@@ -247,11 +282,17 @@ jobs:
           VLLM_PORT_E2E=18001 \
             bash .github/scripts/cpu_device_test.sh vllm_e2e
 
-      - name: vLLM e2e — Engine-driven
+      # Exercises LMCacheDrivenTransferContext (server-side IPC handle
+      # path) rather than the worker-side gather/scatter copy. On CPU it
+      # resolves to CpuShmTensorWrapper, bound to the device through
+      # CpuDeviceSpec.ipc_wrapper_cls (lmcache/v1/platform/cpu/shm.py).
+      # `Server bench — LMCache-driven` already covers this transport,
+      # but nothing covered it end-to-end through vLLM.
+      - name: vLLM e2e — LMCache-driven
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          LMCACHE_E2E_TRANSPORT_MODE=engine_driven \
+          LMCACHE_E2E_TRANSPORT_MODE=lmcache_driven \
           LMCACHE_HTTP_PORT_E2E=18084 \
           LMCACHE_ZMQ_PORT_E2E=15559 \
           VLLM_PORT_E2E=18002 \
@@ -259,9 +300,30 @@ jobs:
 
       - name: Upload logs on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: cpu-device-logs-${{ matrix.os }}-${{ matrix.model.name }}
           path: |
             /tmp/cpu_device_*.log
           if-no-files-found: ignore
+
+      # Nightly only: hand the pin/report job a machine-readable verdict
+      # for this leg. Note there is deliberately no continue-on-error
+      # anywhere above — a broken e2e still fails the job (and the PR
+      # gate); these two steps just record what happened.
+      - name: Collect verify result
+        if: always() && inputs.nightly_verify
+        env:
+          JOB_STATUS: ${{ job.status }}
+          INSTALL_VLLM_OUTCOME: ${{ steps.install-vllm.outcome }}
+          INSTALL_LMC_OUTCOME: ${{ steps.install-lmcache.outcome }}
+          MATRIX_OS: ${{ matrix.os }}
+          MATRIX_MODEL: ${{ matrix.model.name }}
+        run: python3 .github/scripts/nightly-collect-verify-result.py
+
+      - name: Upload verify result
+        if: always() && inputs.nightly_verify
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: verify-result-${{ matrix.os }}-${{ matrix.model.name }}
+          path: verify_result.json

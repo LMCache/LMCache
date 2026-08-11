@@ -12,6 +12,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import argparse
 import json
 import threading
+import time
 
 # Third Party
 import msgspec
@@ -109,6 +110,7 @@ class TestCommandArguments:
         assert args.end is None
         assert args.interval == 0.5
         assert args.url == "http://localhost:8080"
+        assert args.tp_size == 1
 
     def test_custom_values(
         self,
@@ -415,7 +417,9 @@ class TestAllocateKVCache:
             assert t.shape == (2, 2, 2, 8, 16)
             assert t.dtype == torch.float16
         for t in tensors[3:]:
-            assert t.shape == (1, 2, 2, 4, 32)
+            # MLA groups (kv_size == 1) allocate rank-3 ``(NB, BS, NH*HS)``
+            # to match the vLLM ``NL_X_NB_BS_HS`` detector contract.
+            assert t.shape == (2, 2, 4 * 32)
             assert t.dtype == torch.bfloat16
 
 
@@ -623,3 +627,468 @@ class TestUnregisterKVCache:
             client.close()
         finally:
             router.stop()
+
+
+# ------------------------------------------------------------------ #
+#  _send_register_kv_cache MLA support (data mode)                     #
+# ------------------------------------------------------------------ #
+
+
+class _RegisterEngineDrivenRouter:
+    """Fake ROUTER that decodes ``RegisterEngineDrivenContextPayload``.
+
+    Records the decoded payload of the last
+    ``REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT`` request so the test can
+    assert what the bench sent (notably ``use_mla``).
+    """
+
+    def __init__(self, endpoint: str) -> None:
+        # First Party
+        from lmcache.v1.multiprocess.custom_types import (
+            RegisterEngineDrivenContextPayload,
+        )
+
+        self._payload_type = RegisterEngineDrivenContextPayload
+        self.last_payload: RegisterEngineDrivenContextPayload | None = None
+        self._ctx = zmq.Context.instance()
+        self._router = self._ctx.socket(zmq.ROUTER)
+        # The ``router_endpoint`` fixture briefly binds/closes a probe
+        # socket to pick a free port, which occasionally leaves the port
+        # in TCP TIME_WAIT so an immediate rebind races. Retry a few
+        # times before giving up so this test doesn't flake in CI.
+        last_err: zmq.ZMQError | None = None
+        for _ in range(20):
+            try:
+                self._router.bind(endpoint)
+                last_err = None
+                break
+            except zmq.ZMQError as exc:
+                last_err = exc
+                time.sleep(0.05)
+        if last_err is not None:
+            raise last_err
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=2)
+        self._router.close(linger=0)
+
+    def _run(self) -> None:
+        # First Party
+        from lmcache.v1.multiprocess.protocols.engine import (
+            RegisterEngineDrivenContextResponse,
+        )
+
+        while not self._stop.is_set():
+            if not self._router.poll(100, zmq.POLLIN):
+                continue
+            frames = self._router.recv_multipart()
+            identity, uid_f, type_f, *payload = frames
+            req_type = msgspec.msgpack.decode(type_f, type=RequestType)
+            if req_type == RequestType.REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT:
+                self.last_payload = msgspec.msgpack.decode(
+                    payload[0], type=self._payload_type
+                )
+                # Reply with an empty pool (bench will skip mmap).
+                body = msgspec.msgpack.encode(
+                    RegisterEngineDrivenContextResponse(shm_name="", pool_size=0)
+                )
+                self._router.send_multipart([identity, uid_f, type_f, body])
+
+
+class TestRegisterKVCacheMLA:
+    """The data-mode register must set ``use_mla`` from ``layout_hints``.
+
+    The server keys the SHM chunk shape on ``use_mla``, so the bench
+    has to translate ``kv_size == 1`` from the ``--kvcache-shape-spec``
+    into ``use_mla=True`` on the payload; otherwise a Deepseek-style
+    MLA run would silently register a classical ``[2, NL, ...]`` chunk
+    shape and every STORE / RETRIEVE afterwards would corrupt data.
+    """
+
+    def _make_client(self, endpoint: str) -> MessageQueueClient:
+        ctx = zmq.Context.instance()
+        return MessageQueueClient(endpoint, ctx)
+
+    def _register(self, endpoint: str, kv_size):
+        # First Party
+        from lmcache.cli.commands.bench.server_bench.helpers import (
+            _send_register_kv_cache,
+        )
+        from lmcache.v1.multiprocess.custom_types import (
+            RegisterEngineDrivenContextPayload,
+        )
+
+        router = _RegisterEngineDrivenRouter(endpoint)
+        router.start()
+        try:
+            client = self._make_client(endpoint)
+            hints = {
+                "num_layers": 4,
+                "num_heads": 1 if kv_size == 1 else 8,
+                "head_size": 128,
+                "num_blocks": 16,
+                "block_size": 16,
+                "dtype": "float16",
+                "kv_size": kv_size,
+            }
+            _send_register_kv_cache(
+                client,
+                layout_hints=hints,
+                kv_caches=None,
+                use_gpu=False,
+                use_handle=False,
+            )
+            client.close()
+            payload = router.last_payload
+            assert isinstance(payload, RegisterEngineDrivenContextPayload)
+            return payload
+        finally:
+            router.stop()
+
+    def test_mla_sets_use_mla_true(self, router_endpoint: str) -> None:
+        payload = self._register(router_endpoint, kv_size=1)
+        assert payload.use_mla is True
+
+    def test_classical_sets_use_mla_false(self, router_endpoint: str) -> None:
+        payload = self._register(router_endpoint, kv_size=2)
+        assert payload.use_mla is False
+
+    def test_mixed_kv_size_defaults_to_non_mla(self, router_endpoint: str) -> None:
+        """Heterogeneous specs cannot be expressed in one register call.
+
+        Data mode has a single SHM chunk shape, so ``"mixed"`` falls
+        back to the classical layout (``use_mla=False``).
+        """
+        payload = self._register(router_endpoint, kv_size="mixed")
+        assert payload.use_mla is False
+
+
+# ------------------------------------------------------------------ #
+#  _scatter_flat_chunks_to_paged MLA support                           #
+# ------------------------------------------------------------------ #
+
+
+class TestScatterMLA:
+    """MLA server chunks are 3D ``(NL, chunk, hidden)`` while classical
+    K/V chunks are 4D ``(kv, NL, chunk, hidden)``. Scatter must handle
+    both without mixing layer bytes.
+    """
+
+    def test_mla_scatter_writes_each_layer(self) -> None:
+        # First Party
+        from lmcache.cli.commands.bench.server_bench.helpers import (
+            _scatter_flat_chunks_to_paged,
+        )
+
+        num_layers = 3
+        num_blocks = 4
+        block_size = 2
+        num_heads = 1
+        head_size = 4
+        chunk_size = 4  # 2 blocks per chunk
+        hidden = num_heads * head_size
+
+        # MLA-shaped client tensors: rank-3 ``(NB, BS, hidden)`` so the
+        # server's vLLM detector recognises this as ``NL_X_NB_BS_HS``.
+        tensors = [
+            torch.zeros(
+                (num_blocks, block_size, hidden),
+                dtype=torch.float16,
+            )
+            for _ in range(num_layers)
+        ]
+        # One 3D chunk with distinct constants per layer so a wrong
+        # ``chunk[:, layer_idx]`` index would smear values across layers.
+        chunk = torch.zeros((num_layers, chunk_size, hidden), dtype=torch.float16)
+        for layer_idx in range(num_layers):
+            chunk[layer_idx].fill_(float(layer_idx + 1))
+
+        _scatter_flat_chunks_to_paged(
+            tensors,
+            [chunk],
+            block_offset=0,
+            block_size=block_size,
+            chunk_size=chunk_size,
+        )
+
+        blocks_per_chunk = chunk_size // block_size
+        for layer_idx, t in enumerate(tensors):
+            written = t.narrow(0, 0, blocks_per_chunk)
+            assert torch.all(written == float(layer_idx + 1)), (
+                "layer %d expected value %f but got %s"
+                % (layer_idx, float(layer_idx + 1), written.unique().tolist())
+            )
+
+    def test_mla_gather_produces_3d_chunk(self) -> None:
+        """MLA gather must emit rank-3 chunks matching the server's
+        single-plane commit shape ``(NL, chunk, hidden)`` -- otherwise
+        the engine-driven SHM path writes off-by-one bytes into the
+        pool.
+        """
+        # First Party
+        from lmcache.cli.commands.bench.server_bench.helpers import (
+            _gather_paged_to_flat_chunks,
+        )
+
+        num_layers = 3
+        num_blocks = 4
+        block_size = 2
+        hidden = 8
+        chunk_size = 4  # -> 2 blocks per chunk, 2 chunks total
+
+        tensors = [
+            torch.arange(num_blocks * block_size * hidden, dtype=torch.float32).reshape(
+                num_blocks, block_size, hidden
+            )
+            + float(layer_idx * 1000)
+            for layer_idx in range(num_layers)
+        ]
+
+        chunks = _gather_paged_to_flat_chunks(
+            tensors,
+            block_offset=0,
+            num_blocks=num_blocks,
+            block_size=block_size,
+            chunk_size=chunk_size,
+        )
+
+        assert len(chunks) == 2
+        for chunk in chunks:
+            assert chunk.dim() == 3
+            assert chunk.shape == (num_layers, chunk_size, hidden)
+
+        # First chunk covers blocks [0, 1); layer 0 baseline value.
+        blocks_per_chunk = chunk_size // block_size
+        first_expected = (
+            tensors[0].narrow(0, 0, blocks_per_chunk).reshape(chunk_size, hidden)
+        )
+        assert torch.allclose(chunks[0][0], first_expected)
+
+
+# ------------------------------------------------------------------ #
+#  Allocation shape contract (MLA vs. classical)                       #
+# ------------------------------------------------------------------ #
+
+
+class TestAllocShapeContract:
+    """The bench's paged-tensor allocation must match the shapes the
+    server's vLLM detector recognises: rank-5 ``(kv, NB, BS, NH, HS)``
+    for classical K/V, rank-3 ``(NB, BS, hidden)`` for MLA. Getting
+    this wrong is what caused ``lmcache_driven + MLA`` to be rejected
+    with ``unsupported kv_caches structure`` at register time.
+    """
+
+    def test_mla_alloc_shape_is_rank3(self) -> None:
+        # Standard
+        from types import SimpleNamespace
+
+        # First Party
+        from lmcache.cli.commands.bench.server_bench.helpers import (
+            _allocate_kv_cache,
+        )
+        from lmcache.v1.kv_layer_groups import KVLayerGroupInfo
+
+        group = KVLayerGroupInfo(
+            layer_indices=[0, 1],
+            shape_desc=SimpleNamespace(kv_size=1, nb=4, bs=2, nh=1, hs=32, nl=2),
+            dtype=torch.bfloat16,
+        )
+        tensors = _allocate_kv_cache(device="cpu", groups=[group])
+        assert len(tensors) == 2
+        for t in tensors:
+            assert t.dim() == 3
+            assert t.shape == (4, 2, 1 * 32)
+            assert t.dtype == torch.bfloat16
+
+    def test_classical_alloc_shape_is_rank5(self) -> None:
+        # Standard
+        from types import SimpleNamespace
+
+        # First Party
+        from lmcache.cli.commands.bench.server_bench.helpers import (
+            _allocate_kv_cache,
+        )
+        from lmcache.v1.kv_layer_groups import KVLayerGroupInfo
+
+        group = KVLayerGroupInfo(
+            layer_indices=[0],
+            shape_desc=SimpleNamespace(kv_size=2, nb=4, bs=2, nh=8, hs=16, nl=1),
+            dtype=torch.float16,
+        )
+        tensors = _allocate_kv_cache(device="cpu", groups=[group])
+        assert len(tensors) == 1
+        assert tensors[0].shape == (2, 4, 2, 8, 16)
+
+
+# ------------------------------------------------------------------ #
+#  Multi-worker (TP > 1) fan-out                                       #
+# ------------------------------------------------------------------ #
+
+
+class TestProcessRequestMultiWorker:
+    """LOOKUP is scheduler-scoped (single call, worker_id=None) while
+    STORE / RETRIEVE fan out per-rank, mirroring how
+    ``LMCacheMPWorkerAdapter`` routes requests in a real vLLM
+    deployment. MLA marks only rank 0 as a KV writer (matching
+    ``ParallelStrategy.is_kv_writer``); non-MLA writes on every rank.
+    """
+
+    def _run(self, is_mla: bool, tp_size: int):
+        """Drive ``_process_request`` against a mocked ``_call`` and return
+        the sequence of ``(RequestType, worker_id, instance_id)`` tuples
+        for the fan-out ops (STORE / RETRIEVE)."""
+        # Standard
+        from unittest.mock import patch
+
+        # First Party
+        from lmcache.cli.commands.bench.server_bench import helpers as sv_helpers
+        from lmcache.cli.commands.bench.server_bench.helpers import (
+            _INSTANCE_ID_BASE,
+            WorkerContext,
+            _process_request,
+        )
+
+        calls: list[tuple] = []
+
+        # Stand-in for the two-phase PREPARE reply. ``success=True``
+        # plus an empty ``context`` sends the flow down the classical
+        # path (no slot views, no server_pool needed).
+        class _FakePrep:
+            success = True
+            context: dict = {}
+
+        # ``_call`` returns different shapes per RequestType:
+        #   LOOKUP -> None (void)
+        #   QUERY_PREFETCH_STATUS -> hit_chunks (int) or None
+        #   STORE / RETRIEVE (handle) -> (worker_id, True)
+        #   PREPARE_* -> _FakePrep()
+        #   COMMIT_* -> True
+        #   END_SESSION -> None
+        def fake_call(_client, req_type, payloads):
+            calls.append((req_type, payloads))
+            name = req_type.name
+            if name == "QUERY_PREFETCH_STATUS":
+                # No cache hits -> only STORE side fires.
+                return 0
+            if name in ("STORE", "RETRIEVE"):
+                return (0, True)
+            if name.startswith("PREPARE_"):
+                return _FakePrep()
+            if name.startswith("COMMIT_"):
+                return True
+            return None
+
+        workers = []
+        kv_world_size = 1 if is_mla else tp_size
+        for rank in range(tp_size):
+            workers.append(
+                WorkerContext(
+                    kv_worker_id=0 if is_mla else rank,
+                    kv_world_size=kv_world_size,
+                    instance_id=_INSTANCE_ID_BASE + rank,
+                    client_tensors=None,
+                    server_pool=None,
+                    # MLA: only rank 0 stores; non-MLA: every rank stores.
+                    is_kv_writer=(rank == 0) if is_mla else True,
+                )
+            )
+
+        # ``_make_event_handle`` creates a real CUDA-IPC event via
+        # ``check_interprocess_event_support()``, which requires a
+        # backend that supports ``Event(interprocess=True)`` (e.g.
+        # CUDA). This test only exercises the STORE/RETRIEVE
+        # fan-out/dispatch logic, so stub it out to keep the test
+        # backend-agnostic -- it would otherwise fail on XPU/CPU-only
+        # runners with "Backend '<device>' does not support
+        # interprocess=True parameter for Events".
+        with (
+            patch.object(sv_helpers, "_call", side_effect=fake_call),
+            patch.object(sv_helpers, "_make_event_handle", return_value=b""),
+        ):
+            _process_request(
+                client=None,  # type: ignore[arg-type]  # unused: _call mocked
+                seq_no=0,
+                num_tokens=32,
+                chunk_size=16,
+                pass_label="cold",
+                http_base="",
+                block_size=16,
+                total_blocks=64,
+                num_engine_group_infos=1,
+                use_gpu=True,  # handle mode: single-shot STORE / RETRIEVE
+                use_handle=True,
+                workers=workers,
+                world_size=kv_world_size,
+            )
+
+        return calls
+
+    def test_mla_tp2_store_only_from_rank0(self) -> None:
+        calls = self._run(is_mla=True, tp_size=2)
+        # Extract STORE + RETRIEVE calls with their instance_id argument.
+        stores = [c for c in calls if c[0].name == "STORE"]
+        retrieves = [c for c in calls if c[0].name == "RETRIEVE"]
+        # MLA: rank 0 only.
+        assert len(stores) == 1, "MLA tp=2 should STORE once (rank 0)"
+        # payloads is [key, instance_id, block_ids, event_handle].
+        store_key, store_iid = stores[0][1][0], stores[0][1][1]
+        assert store_iid == 1000  # _INSTANCE_ID_BASE + 0
+        # MLA folds all TP ranks into kv_worker_id 0 with kv_world_size 1
+        # -- must match ParallelStrategy.kv_worker_id / .kv_world_size
+        # or LOOKUP expands to kv_ranks the STORE never wrote and every
+        # warm pass misses.
+        assert store_key.world_size == 1, (
+            "MLA STORE key.world_size must be 1 (kv_world_size), got %d"
+            % store_key.world_size
+        )
+        assert store_key.worker_id == 0, (
+            "MLA STORE key.worker_id must be 0 (kv_worker_id), got %s"
+            % store_key.worker_id
+        )
+        # No hits in the fake -> RETRIEVE is skipped entirely.
+        assert retrieves == []
+
+    def test_non_mla_tp2_store_on_every_rank(self) -> None:
+        calls = self._run(is_mla=False, tp_size=2)
+        stores = [c for c in calls if c[0].name == "STORE"]
+        # Non-MLA: every rank stores.
+        assert len(stores) == 2
+        # payloads is [key, instance_id, block_ids, event_handle].
+        instance_ids = sorted(c[1][1] for c in stores)
+        assert instance_ids == [1000, 1001]
+        # Non-MLA: each rank stores under its own kv_worker_id, with
+        # kv_world_size == tp_size.
+        for c in stores:
+            store_key = c[1][0]
+            assert store_key.world_size == 2, (
+                "non-MLA STORE key.world_size must be tp_size=2, got %d"
+                % store_key.world_size
+            )
+        worker_ids = sorted(c[1][0].worker_id for c in stores)
+        assert worker_ids == [0, 1]
+
+    def test_lookup_called_once_regardless_of_tp(self) -> None:
+        for is_mla in (True, False):
+            for tp in (1, 2, 4):
+                calls = self._run(is_mla=is_mla, tp_size=tp)
+                lookups = [c for c in calls if c[0].name == "LOOKUP"]
+                assert len(lookups) == 1, (
+                    "LOOKUP should fire exactly once regardless of tp_size "
+                    "(is_mla=%s, tp=%d)" % (is_mla, tp)
+                )
+                # LOOKUP payload is ``[key, tp_size]``. MLA with tp>1
+                # needs tp_size on the wire so the server adds
+                # ``tp_size - 1`` extra read locks per chunk (see
+                # compute_extra_count in lookup.py); a hard-coded 1
+                # under-locks and subsequent-rank RETRIEVE reads stale
+                # bytes with a "non-read-locked key" warning.
+                assert lookups[0][1][1] == tp, (
+                    "LOOKUP payload tp_size must equal simulated tp "
+                    "(is_mla=%s, tp=%d, got=%s)" % (is_mla, tp, lookups[0][1][1])
+                )

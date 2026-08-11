@@ -3,9 +3,10 @@
 
 Instead of each handler reaching into ``request.app.state`` with stringly-typed
 ``getattr`` calls, handlers resolve a single :class:`CoordinatorContext` via
-:func:`get_context`. The context is built in ``create_app``; ``outbound_client``
-is filled in by the lifespan (it must bind to the running event loop), so a
-dedicated accessor narrows that ``Optional`` for the dispatch handlers.
+:func:`get_context`. The context is built complete in ``create_app``. The
+outbound HTTP client is deliberately *not* part of it: it must bind to the
+running event loop, so the lifespan parks it on ``app.state`` and dispatch
+handlers fetch it via :func:`get_outbound_client`.
 """
 
 # Standard
@@ -17,9 +18,13 @@ import httpx
 
 # First Party
 from lmcache.v1.distributed.quota_manager import QuotaManager
+from lmcache.v1.mp_coordinator.cache_control.event_broadcaster import (
+    CacheEventBroadcaster,
+)
 from lmcache.v1.mp_coordinator.cache_control.eviction_manager import L2EvictionManager
 from lmcache.v1.mp_coordinator.cache_control.prefetch_manager import PrefetchManager
 from lmcache.v1.mp_coordinator.cache_control.usage_manager import L2UsageManager
+from lmcache.v1.mp_coordinator.key_directory import KeyDirectory
 from lmcache.v1.mp_coordinator.registry import InstanceRegistry
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
@@ -37,8 +42,10 @@ class CoordinatorContext:
         prefetch_manager: Warm-prefetch proxy to MP servers.
         token_hasher: Resolves a pin request's ``token_ids`` to object keys
             (configured to match the fleet's ``chunk_size`` / ``hash_algorithm``).
-        outbound_client: Shared async client for coordinator -> MP calls. Set by
-            the lifespan (bound to the running loop); ``None`` until then.
+        key_directory: Fleet-wide key → placements directory built from
+            MP-server cache events (eventually consistent).
+        event_broadcaster: Fans directory-applied cache-event batches out to
+            the registered consumers.
     """
 
     registry: InstanceRegistry
@@ -47,7 +54,8 @@ class CoordinatorContext:
     eviction_manager: L2EvictionManager
     prefetch_manager: PrefetchManager
     token_hasher: TokenHasher
-    outbound_client: httpx.AsyncClient | None = None
+    key_directory: KeyDirectory
+    event_broadcaster: CacheEventBroadcaster
 
 
 def get_context(request: Request) -> CoordinatorContext:
@@ -82,7 +90,7 @@ def get_outbound_client(request: Request) -> httpx.AsyncClient:
         RuntimeError: If accessed before the lifespan filled it in (e.g. a bare
             app with no startup).
     """
-    client = get_context(request).outbound_client
+    client = getattr(request.app.state, "outbound_client", None)
     if client is None:
         raise RuntimeError("outbound client not initialized")
     return client

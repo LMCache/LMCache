@@ -18,6 +18,7 @@ import uuid
 import torch
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.gpu_connector.gpu_connectors import VLLMPagedMemGPUConnectorV2
@@ -29,7 +30,7 @@ from lmcache.v1.memory_management import (
 from lmcache.v1.metadata import LMCacheMetadata
 
 # Conditional import for CUDA-only operations
-if torch.cuda.is_available() or torch.xpu.is_available():
+if torch_dev.is_available():
     try:
         # First Party
         import lmcache.c_ops as lmc_ops
@@ -341,7 +342,7 @@ def generate_sglang_kv_cache_paged_list_tensors(
     num_heads,
     head_size,
     use_mla=False,
-    device="cuda",
+    device=torch_device_type,
     dtype=torch.bfloat16,
 ):
     """
@@ -636,6 +637,30 @@ def check_kv_cache_device(kvs, device):
 
 def create_gpu_connector(hidden_dim, num_layers):
     return VLLMPagedMemGPUConnectorV2(hidden_dim, num_layers)
+
+
+def create_xpu_connector(hidden_dim, num_layers):
+    # First Party
+    from lmcache.v1.gpu_connector.xpu_connectors import VLLMPagedMemXPUConnectorV2
+
+    return VLLMPagedMemXPUConnectorV2(hidden_dim, num_layers)
+
+
+def create_musa_connector(
+    hidden_dim: int, num_layers: int
+) -> VLLMPagedMemGPUConnectorV2:
+    """Create the MUSA connector used by benchmark tests.
+
+    The MUSA connector discovers model dimensions from the paged KV cache, so
+    ``hidden_dim`` and ``num_layers`` are accepted only to keep the test helper
+    interface consistent across accelerators.
+    """
+    # First Party
+    from lmcache.v1.gpu_connector.musa_connectors import (
+        VLLMPagedMemMUSAConnectorV2,
+    )
+
+    return VLLMPagedMemMUSAConnectorV2(use_gpu=False)
 
 
 def get_all_methods_from_base(base_class):

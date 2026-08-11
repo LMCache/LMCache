@@ -235,7 +235,7 @@ def bench_lookup(
         for i in range(in_flight):
             task_ids.append(
                 adapter.submit_lookup_and_lock_task(
-                    keys_batches[i], _PLACEHOLDER_LAYOUT_DESC
+                    keys_batches[i], {0: _PLACEHOLDER_LAYOUT_DESC}
                 )
             )
 
