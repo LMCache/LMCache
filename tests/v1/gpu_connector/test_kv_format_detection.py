@@ -15,11 +15,11 @@ import torch
 # First Party
 from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.kv_format import detect_format, extract_kv_cache_shapes
-import lmcache.c_ops as lmc_ops
+import lmcache.lmcache_native as lmcache_native
 
 NB, NL, BS, NH, HS = 7, 5, 3, 2, 4
 DT = torch.float16
-F = lmc_ops.EngineKVFormat
+F = lmcache_native.EngineKVFormat
 
 
 def _t(*shape: int) -> torch.Tensor:
@@ -64,28 +64,28 @@ def test_vllm_mla():
 
 
 def test_vllm_blocks_first_fused_num_heads_2(monkeypatch):
-    # Raw 4-D [NB, NH, BS, 2*HS] with NH == 2 (a common GQA config): after the
-    # fused split the K/V axis and the head axis both equal 2, so the 5-D shape
-    # is ambiguous with flash-infer. Detection must use the rank-4 split, not
-    # the post-split shape, to land on the fused format.
+    # Raw 4-D [NB, NH, BS, 2*HS] with NH == 2 (a common GQA config): a 5-D
+    # split would make the K/V axis and the head axis both equal 2, ambiguous
+    # with flash-infer. Detection must use the rank-4 shape to land on the
+    # content-size format, and keep the tensor raw.
     monkeypatch.setattr(_VLLM_DEV, "cuda")
     raw = [_t(NB, 2, BS, 2 * HS) for _ in range(NL)]
     fmt, out = detect_format(raw, EngineType.VLLM, {"kv_layout": "HND"})
-    assert fmt == F.NL_X_NB_NH_BS_TWO_HS
-    assert tuple(out[0].shape) == (NB, 2, BS, 2, HS)
+    assert fmt == F.NL_X_NB_NH_BS_CS
+    assert tuple(out[0].shape) == (NB, 2, BS, 2 * HS)
 
 
 def test_vllm_blocks_first_fused_nhd_vs_hnd(monkeypatch):
-    # The rank-4 fused split is shape-ambiguous between NHD and HND (the two
+    # The rank-4 fused layout is shape-ambiguous between NHD and HND (the two
     # middle axes could be BS/NH or NH/BS), so the kv_layout hint decides.
     monkeypatch.setattr(_VLLM_DEV, "cuda")
     raw = [_t(NB, BS, NH, 2 * HS) for _ in range(NL)]
     fmt_nhd, out = detect_format(raw, EngineType.VLLM, {"kv_layout": "NHD"})
-    assert fmt_nhd == F.NL_X_NB_BS_NH_TWO_HS
-    assert tuple(out[0].shape) == (NB, BS, NH, 2, HS)
+    assert fmt_nhd == F.NL_X_NB_BS_NH_CS
+    assert tuple(out[0].shape) == (NB, BS, NH, 2 * HS)
     raw_hnd = [_t(NB, NH, BS, 2 * HS) for _ in range(NL)]
     fmt_hnd, _ = detect_format(raw_hnd, EngineType.VLLM, {"kv_layout": "HND"})
-    assert fmt_hnd == F.NL_X_NB_NH_BS_TWO_HS
+    assert fmt_hnd == F.NL_X_NB_NH_BS_CS
 
 
 def test_sglang_mla_depth1():

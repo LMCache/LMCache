@@ -27,7 +27,7 @@ the full system context.
 lookup-and-lock  → query (addresses)  → load (RDMA read)  → unlock
 ```
 
-1. **lookup-and-lock** — send `P2P_LOOKUP_AND_LOCK([keys, layout_desc])` to the
+1. **lookup-and-lock** — send `P2P_LOOKUP_AND_LOCK([keys, group_layout_descs])` to the
    peer; it read-locks every L1-resident key (sparse; gaps allowed) and
    returns a task id.
 2. **query** — poll `P2P_QUERY_LOOKUP_RESULTS(task_id)`; once ready the peer
@@ -41,8 +41,9 @@ lookup-and-lock  → query (addresses)  → load (RDMA read)  → unlock
 4. **unlock** — `P2P_UNLOCK_OBJECTS([keys])` releases the peer's read locks and
    drops the stashed addresses. Fire-and-forget: the result future is not awaited.
 
-`layout_desc` is the advisory hint added to the L2 lookup interface; the P2P
-adapter forwards the real descriptor verbatim so the peer can size objects.
+`group_layout_descs` (one `MemoryLayoutDesc` per object group) is the advisory
+hint added to the L2 lookup interface; the P2P adapter forwards the real
+descriptors verbatim so the peer can size objects.
 
 ## Why the periodic notifier
 

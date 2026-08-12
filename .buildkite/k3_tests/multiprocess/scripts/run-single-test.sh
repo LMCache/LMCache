@@ -65,6 +65,12 @@ elif [ "$TEST_NAME" = "kimi_linear_tp" ]; then
     # the model name is declared here so the banner and the script's ${MODEL:-}
     # fallback both resolve to Kimi-Linear rather than the generic default below.
     export MODEL="${MODEL:-moonshotai/Kimi-Linear-48B-A3B-Instruct}"
+elif [ "$TEST_NAME" = "dsv4_flash_tp" ]; then
+    # Self-contained test: run-dsv4-flash-tp.sh owns the server lifecycle and
+    # all launch flags (TP=4, fp8_ds_mla, deepseek_v4 tokenizer). Only the
+    # model name is declared here so the banner and the script's ${MODEL:-}
+    # fallback both resolve to DeepSeek-V4-Flash.
+    export MODEL="${MODEL:-deepseek-ai/DeepSeek-V4-Flash}"
 else
     export MODEL="${MODEL:-Qwen/Qwen3-14B}"
 fi
@@ -90,7 +96,7 @@ echo "Results dir: $RESULTS_DIR"
 echo ""
 
 # Tests that handle their own server lifecycle (different GPU/model config)
-SELF_CONTAINED_TESTS=" deadlock p2p kimi_linear_tp "
+SELF_CONTAINED_TESTS=" deadlock p2p kimi_linear_tp dsv4_flash_tp "
 
 # Tests that compare against a baseline vLLM (no LMCache) on a second GPU.
 # Only these need the baseline server (and thus a 2-GPU pod); everything
@@ -170,6 +176,9 @@ case "$TEST_NAME" in
     kimi_linear_tp)
         exec_script="${SCRIPT_DIR}/run-kimi-linear-tp.sh"
         ;;
+    dsv4_flash_tp)
+        exec_script="${SCRIPT_DIR}/run-dsv4-flash-tp.sh"
+        ;;
     http_api)
         exec_script="${SCRIPT_DIR}/run-http-api.sh"
         ;;
@@ -178,7 +187,7 @@ case "$TEST_NAME" in
         ;;
     *)
         echo "Unknown test: $TEST_NAME"
-        echo "Valid tests: lm_eval, lm_eval_preemption, hma_lm_eval_gemma4, vllm_bench, long_doc_qa, long_doc_qa_l2, fault_tolerance, deadlock, restart_recovery, cache_stats, http_api, gds_smoke_test, p2p, kimi_linear_tp"
+        echo "Valid tests: lm_eval, lm_eval_preemption, hma_lm_eval_gemma4, vllm_bench, long_doc_qa, long_doc_qa_l2, fault_tolerance, deadlock, restart_recovery, cache_stats, http_api, gds_smoke_test, p2p, kimi_linear_tp, dsv4_flash_tp"
         exit 1
         ;;
 esac

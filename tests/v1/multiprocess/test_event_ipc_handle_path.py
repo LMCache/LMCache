@@ -109,7 +109,6 @@ def test_worker_exports_events_through_platform_backend(
 ) -> None:
     """Store and retrieve send backend-exported handles and keep device context."""
     # First Party
-    from lmcache.integration.vllm import vllm_multi_process_adapter
     from lmcache.v1.multiprocess.transfer_context import worker_transfer
 
     backend = _FakeEventBackend()
@@ -119,7 +118,7 @@ def test_worker_exports_events_through_platform_backend(
         lambda device: backend,
     )
     monkeypatch.setattr(
-        vllm_multi_process_adapter,
+        worker_transfer,
         "wrap_kv_caches",
         lambda kv_caches: list(kv_caches.values()),
     )
@@ -242,6 +241,7 @@ def test_server_store_and_retrieve_delegate_event_ordering(
         event_bus=SimpleNamespace(
             publish=lambda event: None,
             publish_on_stream=lambda stream, event: None,
+            has_subscribers=lambda event_type: False,
         ),
         resolve_obj_keys=lambda key, group_ids: [[]],
     )
@@ -256,6 +256,8 @@ def test_server_store_and_retrieve_delegate_event_ordering(
         kv_layer_groups_manager=SimpleNamespace(
             num_object_groups=1,
             num_kernel_groups=1,
+            object_groups=[SimpleNamespace(kernel_group_indices=[0])],
+            get_attn_desc=lambda: SimpleNamespace(num_chunks_in_sw=[-1]),
         ),
         calculate_num_blocks=lambda chunk_size, group_idx: 1,
     )
@@ -270,7 +272,7 @@ def test_server_store_and_retrieve_delegate_event_ordering(
         "get_and_touch_context_entry",
         lambda instance_id: entry,
     )
-    key = SimpleNamespace(request_id="request", cache_salt="")
+    key = SimpleNamespace(request_id="request", cache_salt="", worker_id=0)
 
     assert module.store(key, 1, [[]], b"store-producer") == (
         b"completion-handle",

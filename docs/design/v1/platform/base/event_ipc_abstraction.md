@@ -110,8 +110,8 @@ accelerator's event implementation.
 ### MUSA backend
 
 `MusaEventIPCBackend` lives under `lmcache/v1/platform/musa/`. It first checks
-`is_musa_handle_transfer_available()` from `musa/ipc_wrapper.py`, then adapts
-the current TorchMUSA event API through `DefaultEventIPCBackend`:
+`is_musa_event_ipc_available()` from `musa/ipc_wrapper.py`, then adapts the
+current TorchMUSA event API through `DefaultEventIPCBackend`:
 
 ```python
 torch_musa = get_torch_musa_module()
@@ -121,8 +121,10 @@ remote_event = torch_musa.Event.from_ipc_handle(device, handle)
 ```
 
 The generic layer does not import `platform.musa`; only the MUSA `DeviceSpec`
-and backend do. If MUSA handle transfer or the required TorchMUSA event API is
-unavailable, `check_event_support()` raises a device-named `RuntimeError`.
+and backend do. If the opt-in MUSA event API is unavailable,
+`check_event_support()` raises a device-named `RuntimeError`. Memory IPC and
+server-side block transfer are separate capabilities and are not required to
+validate the standalone event backend.
 
 ## Registration
 
@@ -188,8 +190,10 @@ alias for `to_device_future()`.
 `check_event_support(device)` runs before any cross-process memory transfer.
 The default backend rejects missing `Event`, missing `interprocess` support, or
 missing `Event.from_ipc_handle`. The MUSA backend additionally rejects a
-disabled/unavailable MUSA handle path, a missing TorchMUSA module, or an event
-module without the required interprocess API.
+disabled/unavailable MUSA event API, a missing TorchMUSA module, or an event
+module without the required interprocess API. For opaque C/pybind event
+bindings, capability detection may probe `Event(interprocess=True)` when a
+Python signature is unavailable.
 
 Errors include the backend name and missing capability. They must not claim
 that CUDA is required when a non-CUDA backend has its own implementation.

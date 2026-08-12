@@ -7,12 +7,16 @@ from __future__ import annotations
 from collections.abc import Sequence
 from pathlib import Path
 from typing import TypeVar
+import errno
 import importlib
+import os
 import select
+import stat
 import sys
 import types
 
 # Third Party
+import pytest
 import torch
 
 # First Party
@@ -85,12 +89,19 @@ def make_raw_block_core_config(
     )
 
 
-def make_object_key(chunk_id: int, model_name: str = "raw_block_ci") -> ObjectKey:
+def make_object_key(
+    chunk_id: int,
+    model_name: str = "raw_block_ci",
+    cache_salt: str = "",
+    kv_rank: int = 0,
+) -> ObjectKey:
     """Create a deterministic object key for raw block tests.
 
     Args:
         chunk_id: Integer chunk identifier encoded into the object key hash.
         model_name: Model name stored in the object key.
+        cache_salt: Optional cache isolation salt stored in the object key.
+        kv_rank: KV rank stored in the object key.
 
     Returns:
         Object key with a stable hash, model name, and KV rank.
@@ -98,7 +109,8 @@ def make_object_key(chunk_id: int, model_name: str = "raw_block_ci") -> ObjectKe
     return ObjectKey(
         chunk_hash=ObjectKey.IntHash2Bytes(chunk_id),
         model_name=model_name,
-        kv_rank=0,
+        kv_rank=kv_rank,
+        cache_salt=cache_salt,
     )
 
 
@@ -179,8 +191,77 @@ def wait_for_event_fd(event_fd: int, timeout: float = 5.0) -> bool:
     return True
 
 
-def install_native_storage_ops_fallback() -> None:
-    """Install a small native_storage_ops fallback for test environments.
+def message_contains(exc: BaseException, fragments: tuple[str, ...]) -> bool:
+    """Return whether an exception message contains any expected fragment."""
+    msg = str(exc).lower()
+    return any(fragment in msg for fragment in fragments)
+
+
+def is_skip_safe_device_setup_error(exc: BaseException) -> bool:
+    """Return whether raw-device setup failed for an external HW/OS reason."""
+    if getattr(exc, "errno", None) in {
+        errno.EACCES,
+        errno.ENOSYS,
+        errno.ENOTTY,
+        errno.EPERM,
+    }:
+        return True
+    return message_contains(
+        exc,
+        (
+            "function not implemented",
+            "inappropriate ioctl",
+            "nvme identify namespace ioctl failed",
+            "operation not permitted",
+            "permission denied",
+            "requires an nvme namespace character device",
+        ),
+    )
+
+
+def is_skip_safe_fdp_status_error(exc: BaseException) -> bool:
+    """Return whether the FDP status ioctl failed for missing HW/OS support."""
+    if "nvme fdp reclaim unit handle status ioctl failed" not in str(exc).lower():
+        return False
+    if getattr(exc, "errno", None) in {
+        errno.EINVAL,
+        errno.ENOSYS,
+        errno.ENOTTY,
+        errno.EPERM,
+    }:
+        return True
+    return message_contains(
+        exc,
+        (
+            "function not implemented",
+            "inappropriate ioctl",
+            "invalid argument",
+            "not supported",
+            "operation not permitted",
+            "permission denied",
+            "unsupported",
+        ),
+    )
+
+
+def require_fdp_char_device_path() -> str:
+    """Return a verified NVMe char device path for hardware-gated FDP probes."""
+    configured_device_path = os.environ.get("LMCACHE_TEST_FDP_CHAR_DEVICE")
+    if configured_device_path is None or configured_device_path == "":
+        pytest.skip("Set LMCACHE_TEST_FDP_CHAR_DEVICE to run the FDP probe.")
+        raise AssertionError("pytest.skip should not return")
+    device_path: str = configured_device_path
+    if not os.path.exists(device_path):
+        pytest.skip(f"FDP test device {device_path} not found.")
+        raise AssertionError("pytest.skip should not return")
+    if not stat.S_ISCHR(os.stat(device_path).st_mode):
+        pytest.skip(f"FDP test device {device_path} is not a character device.")
+        raise AssertionError("pytest.skip should not return")
+    return device_path
+
+
+def install_lmcache_native_fallback() -> None:
+    """Install a small lmcache_native fallback for test environments.
 
     Args:
         None.
@@ -189,10 +270,8 @@ def install_native_storage_ops_fallback() -> None:
         None.
     """
     try:
-        native_storage_ops = importlib.import_module("lmcache.native_storage_ops")
-        if hasattr(native_storage_ops, "Bitmap") and hasattr(
-            native_storage_ops, "TTLLock"
-        ):
+        lmcache_native = importlib.import_module("lmcache.lmcache_native")
+        if hasattr(lmcache_native, "Bitmap") and hasattr(lmcache_native, "TTLLock"):
             return
     except Exception:
         pass
@@ -259,7 +338,7 @@ def install_native_storage_ops_fallback() -> None:
     class TTLLock:
         pass
 
-    fallback_module = types.ModuleType("lmcache.native_storage_ops")
+    fallback_module = types.ModuleType("lmcache.lmcache_native")
     fallback_module.__dict__["Bitmap"] = Bitmap
     fallback_module.__dict__["TTLLock"] = TTLLock
-    sys.modules["lmcache.native_storage_ops"] = fallback_module
+    sys.modules["lmcache.lmcache_native"] = fallback_module

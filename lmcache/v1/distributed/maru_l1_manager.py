@@ -58,7 +58,7 @@ from lmcache.v1.distributed.l1_manager import (
 from lmcache.v1.distributed.memory_manager.maru_memory_allocator import (
     MaruMemoryAllocator,
 )
-from lmcache.v1.gpu_connector.utils import is_mla
+from lmcache.lmcache_native import is_mla
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus

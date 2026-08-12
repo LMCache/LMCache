@@ -38,7 +38,7 @@ discover_xpu_tests() {
   python - <<'PY'
 from pathlib import Path
 
-root = Path("tests")
+root = Path(".")
 # Temporary allowlist of XPU cases that are known to run in the current
 # vLLM-based XPU image.
 #
@@ -50,24 +50,18 @@ root = Path("tests")
 #      are not ready yet.
 #   4. As tests become ready, shrink blocklist until XPU jobs run the full set.
 allowlist = {
-  "tests/benchmarks/test_cachegen.py",
-  "tests/benchmarks/test_xpu_connector_benchmark.py",
-  "tests/benchmarks/test_xpu_kernels_microbench.py",
-  "tests/benchmarks/test_xpu_layerwise_connector_benchmark.py",
-  "tests/test_serde.py",
-  "tests/v1/multiprocess/test_engine_driven_transfer.py",
-  "tests/v1/test_python_ops_fallback.py",
-  "tests/v1/test_xpu_connector.py",
+  "tests/benchmarks/test_*.py",
+  "tests/test_*.py",
+  "tests/cli/**/test_*.py",
+  "tests/disagg/test_*.py",
+  "tests/v1/**/test_*.py",
 }
 selected: set[str] = set()
 
-def is_allowlisted(rel: str) -> bool:
-  return rel in allowlist
-
-for path in root.rglob("test_*.py"):
-    rel = path.as_posix()
-    if is_allowlisted(rel):
-      selected.add(rel)
+for pattern in allowlist:
+    for path in root.glob(pattern):
+        if path.is_file():
+            selected.add(path.as_posix())
 
 for rel in sorted(selected):
     print(rel)
@@ -82,7 +76,7 @@ fi
 log "discovered ${#XPU_TEST_FILES[@]} XPU-related test files"
 printf '  %s\n' "${XPU_TEST_FILES[@]}"
 
-PYTEST_ARGS=(-q --maxfail=1)
+PYTEST_ARGS=(-q --maxfail=1 -m "not cuda and not musa and not sglang" --ignore=tests/v1/gpu_connector/)
 if [ -n "${TEST_SELECTOR:-}" ]; then
   PYTEST_ARGS+=(-k "${TEST_SELECTOR}")
 fi
