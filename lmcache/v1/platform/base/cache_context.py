@@ -184,12 +184,7 @@ class BaseCacheContext(ABC):
 
     def get_engine_kv_format(
         self, kernel_group_idx: int
-    ) -> "
-    
-    
-    
-    
-    .EngineKVFormat":
+    ) -> "lmcache_native.EngineKVFormat":
         """Returns the Engine KV format of kernel *kernel_group_idx*.
 
         Raises:
