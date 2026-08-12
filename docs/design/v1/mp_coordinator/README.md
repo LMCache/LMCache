@@ -9,6 +9,10 @@ warm prefetch / pin / delete, and fleet-wide CacheBlend fragment lookup).
 
 Code: `lmcache/v1/mp_coordinator/`.
 
+For the module-level picture — how the MP server, the cache-event stream, the
+key directory and its indexes, the `cache_control` package, and the managers
+connect — see [module_architecture.md](module_architecture.md).
+
 ## Why
 
 mp servers are independent by construction: per-instance in-memory quota, no
