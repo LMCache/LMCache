@@ -33,10 +33,11 @@ from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.mq import MessageQueueClient
+import lmcache.lmcache_native as lmcache_native
 
 if TYPE_CHECKING:
     # First Party
-    import lmcache.c_ops as lmc_ops
+    pass
 
 logger = init_logger(__name__)
 
@@ -263,7 +264,7 @@ def create_engine_driven_context(
 def compute_kv_layout(
     kv_caches: dict[str, torch.Tensor],
     layout_hints: LayoutHints | None = None,
-) -> tuple[int, int, int, str, "lmc_ops.EngineKVFormat", int]:
+) -> tuple[int, int, int, str, "lmcache_native.EngineKVFormat", int]:
     """Compute KV layout metadata from KV tensors.
 
     Args:
@@ -319,7 +320,7 @@ def gather_paged_kv_to_cpu(
     block_ids: list[int],
     blocks_per_chunk: int,
     layout_hints: LayoutHints | None = None,
-    engine_kv_format: "lmc_ops.EngineKVFormat" | None = None,
+    engine_kv_format: "lmcache_native.EngineKVFormat" | None = None,
     out: list[torch.Tensor] | None = None,
     chunk_indices: list[int] | None = None,
 ) -> list[torch.Tensor]:
@@ -482,7 +483,7 @@ def gather_paged_kv_to_cpu(
                 objs_arg,
                 block_ids_arg,
                 tensors[0].device,
-                lmc_ops.TransferDirection.D2H,
+                lmcache_native.TransferDirection.D2H,
                 shape_desc,
                 chunk_tokens,
                 engine_kv_format,
@@ -526,7 +527,7 @@ def gather_paged_kv_to_cpu(
                     batch_objs_ptrs,
                     batch_blocks,
                     tensors[0].device,
-                    lmc_ops.TransferDirection.D2H,
+                    lmcache_native.TransferDirection.D2H,
                     shape_desc,
                     chunk_tokens,
                     engine_kv_format,
@@ -566,7 +567,7 @@ def scatter_cpu_to_paged_kv(
     blocks_per_chunk: int,
     skip_first_n_tokens: int = 0,
     layout_hints: LayoutHints | None = None,
-    engine_kv_format: "lmc_ops.EngineKVFormat" | None = None,
+    engine_kv_format: "lmcache_native.EngineKVFormat" | None = None,
 ) -> None:
     """Scatter CPU chunk tensors back into paged KV tensors.
 
@@ -666,7 +667,7 @@ def scatter_cpu_to_paged_kv(
             objs_arg,
             block_ids_arg,
             tensors[0].device,
-            lmc_ops.TransferDirection.H2D,
+            lmcache_native.TransferDirection.H2D,
             shape_desc,
             chunk_tokens,
             engine_kv_format,
@@ -723,7 +724,7 @@ def scatter_cpu_to_paged_kv(
                 batch_objs_ptrs,
                 batch_blocks,
                 tensors[0].device,
-                lmc_ops.TransferDirection.H2D,
+                lmcache_native.TransferDirection.H2D,
                 shape_desc,
                 chunk_tokens,
                 engine_kv_format,

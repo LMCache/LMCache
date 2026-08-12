@@ -65,6 +65,7 @@ from lmcache.v1.multiprocess.token_hasher import (
 )
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 import lmcache.c_ops as lmc_ops
+import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
 
@@ -504,10 +505,10 @@ def _cb_group_rope_geometry(
     # *_TWO_HS leaves fused_packed False on current vLLM, which halves
     # per_head, doubles n_heads, and re-RoPEs across the V plane.
     fused_packed = _ekf is not None and int(_ekf) in (
-        int(lmc_ops.EngineKVFormat.NL_X_NB_NH_BS_TWO_HS),
-        int(lmc_ops.EngineKVFormat.NL_X_NB_BS_NH_TWO_HS),
-        int(lmc_ops.EngineKVFormat.NL_X_NB_NH_BS_CS),
-        int(lmc_ops.EngineKVFormat.NL_X_NB_BS_NH_CS),
+        int(lmcache_native.EngineKVFormat.NL_X_NB_NH_BS_TWO_HS),
+        int(lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_TWO_HS),
+        int(lmcache_native.EngineKVFormat.NL_X_NB_NH_BS_CS),
+        int(lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_CS),
     )
     per_head = head_size * (2 if fused_packed else 1)
     n_heads = hidden_dim // per_head
@@ -1832,7 +1833,7 @@ class BlendV3Module(InstanceLivenessTarget):
                     slot_mapping[tok_off : tok_off + n_tok],
                     gpu_context.device,
                     page_buffer_size,
-                    lmc_ops.TransferDirection.H2D,
+                    lmcache_native.TransferDirection.H2D,
                     gpu_context.get_engine_kv_format(group_idx),
                     block_size=group_bs,
                     head_size=head_size,

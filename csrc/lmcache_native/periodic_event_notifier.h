@@ -13,7 +13,7 @@
 #include <vector>
 
 namespace lmcache {
-namespace storage_manager {
+namespace lmcache_native {
 
 class PeriodicEventNotifier {
  public:
@@ -50,5 +50,5 @@ class PeriodicEventNotifier {
   std::unordered_set<int> fds_;
 };
 
-}  // namespace storage_manager
+}  // namespace lmcache_native
 }  // namespace lmcache
