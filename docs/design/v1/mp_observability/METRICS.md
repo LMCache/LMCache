@@ -105,6 +105,23 @@ require a cross-cutting API change out of scope for this PR.
 
 ---
 
+## Timeout Metrics
+
+Cross-component anomaly counter. Incremented once per `LMCacheTimeoutError`
+constructed (see `errors.py` and the `TIMEOUT_RAISED` event in
+[EVENTS.md](EVENTS.md)), tagged by `exception_type` so operators can alert on
+the timeout rate per class.
+
+| OTel metric name | Prometheus name | Type | Source event | Calculation | Tags |
+|---|---|---|---|---|---|
+| `lmcache_mp.timeouts` | `lmcache_mp_timeouts_total` | Counter | `TIMEOUT_RAISED` | `+1` per event | `exception_type` |
+
+**What it answers:** how often are operations timing out, and of which kind?
+Should stay near zero in healthy operation; a rising rate signals an
+overloaded or stuck MQ/transfer/adapter path.
+
+---
+
 ## L1 Chunk Lifecycle Histograms
 
 Sampled (default 1%) chunk-level lifecycle tracking.  Only sampled chunks

@@ -4,7 +4,7 @@
 The coordinator is a FastAPI app. Endpoints are auto-discovered from the
 ``http_apis`` package (the same convention as the mp server's HTTP API) and stay
 thin, operating on the shared collaborators carried on ``app.state``: ``config``,
-``registry``, ``quota_manager``, ``usage_manager``, and ``eviction_manager``.
+``registry``, ``quota_manager``, ``key_directory``, and ``eviction_manager``.
 The lifespan runs background tasks for health-checking (eviction of instances
 whose heartbeats have lapsed) and L2 eviction (quota enforcement).
 
@@ -30,14 +30,20 @@ import httpx
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.quota_manager import QuotaManager
-from lmcache.v1.mp_coordinator.blend_directory import GlobalBlendMatcher
-from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
-from lmcache.v1.mp_coordinator.l2.eviction_manager import (
+from lmcache.v1.mp_coordinator.cache_control.event_broadcaster import (
+    CacheEventBroadcaster,
+)
+from lmcache.v1.mp_coordinator.cache_control.eviction_manager import (
     L2EvictionManager,
 )
-from lmcache.v1.mp_coordinator.l2.resync_manager import L2ResyncManager
-from lmcache.v1.mp_coordinator.l2.usage_manager import L2UsageManager
+from lmcache.v1.mp_coordinator.cache_control.prefetch_manager import PrefetchManager
+from lmcache.v1.mp_coordinator.cache_control.resync_manager import L2ResyncManager
+from lmcache.v1.mp_coordinator.cache_control.usage_manager import L2UsageManager
+from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
+from lmcache.v1.mp_coordinator.http_apis.dependencies import CoordinatorContext
+from lmcache.v1.mp_coordinator.key_directory import KeyDirectory
 from lmcache.v1.mp_coordinator.registry import InstanceRegistry
+from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.utils.router_discovery import discover_api_routers
 
 logger = init_logger(__name__)
@@ -70,11 +76,18 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
     Returns:
         A configured FastAPI application. ``app.state`` carries the shared
         collaborators (``config``, ``registry``, ``quota_manager``,
-        ``usage_manager``, ``blend_directory``); all ``http_apis`` routers are
-        registered.
+        ``key_directory``); all
+        ``http_apis`` routers are registered.
     """
     registry = InstanceRegistry()
     quota_manager = QuotaManager()
+    key_directory = KeyDirectory()
+    if config.enable_blend_lookup:
+        # Only now does the directory hash chunk content: chunk_size is the
+        # match window (the fleet chunk), blend_probe_stride the probe density.
+        key_directory.enable_blend_lookup(
+            chunk_size=config.chunk_size, probe_stride=config.blend_probe_stride
+        )
     usage_manager = L2UsageManager()
     eviction_manager = L2EvictionManager(
         quota_manager=quota_manager,
@@ -82,13 +95,32 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
         eviction_ratio=config.eviction_ratio,
         trigger_watermark=config.trigger_watermark,
     )
+    prefetch_manager = PrefetchManager()
+    # Resolves pin requests' token_ids to object keys; must match the fleet's
+    # chunk size and hash algorithm (see MPCoordinatorConfig).
+    token_hasher = TokenHasher(
+        chunk_size=config.chunk_size, hash_algorithm=config.hash_algorithm
+    )
+    event_broadcaster = CacheEventBroadcaster()
+    # Order matters: the eviction manager's delete handling reads the
+    # usage view for the same batch, so the usage view must consume first.
+    event_broadcaster.register_consumer(usage_manager)
+    event_broadcaster.register_consumer(eviction_manager)
     resync_manager = L2ResyncManager(
-        usage_manager=usage_manager,
-        eviction_manager=eviction_manager,
+        key_directory=key_directory,
+        event_broadcaster=event_broadcaster,
         page_size=config.resync_page_size,
     )
-    blend_directory = GlobalBlendMatcher(
-        chunk_size=config.blend_chunk_size, probe_stride=config.blend_probe_stride
+
+    ctx = CoordinatorContext(
+        registry=registry,
+        quota_manager=quota_manager,
+        usage_manager=usage_manager,
+        eviction_manager=eviction_manager,
+        prefetch_manager=prefetch_manager,
+        token_hasher=token_hasher,
+        key_directory=key_directory,
+        event_broadcaster=event_broadcaster,
     )
 
     async def _health_loop() -> None:
@@ -99,7 +131,12 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
 
     async def _eviction_loop(http_client: httpx.AsyncClient) -> None:
         """Periodically check usage against quotas and dispatch
-        eviction RPCs to any one registered MP server."""
+        eviction RPCs to any one registered MP server.
+
+        Safe to start immediately: salts without an explicit quota are
+        exempt from eviction until the external quota controller sets a
+        default limit via ``PUT /quota/config`` (after re-syncing the
+        per-salt quotas), so a cold quota table cannot mass-evict."""
         while True:
             await asyncio.sleep(config.eviction_check_interval)
             await eviction_manager.execute_evictions(registry, http_client)
@@ -121,6 +158,7 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
         # calls (eviction dispatch + startup resync). Created inside
         # the lifespan so it binds to the running event loop.
         outbound_client = httpx.AsyncClient(timeout=30.0)
+        app.state.outbound_client = outbound_client
         health_task = None
         eviction_task = None
         resync_task = None
@@ -145,14 +183,11 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
             await outbound_client.aclose()
 
     app = FastAPI(title="LMCache MP Coordinator", version="1.0.0", lifespan=lifespan)
-    # Shared collaborators on app.state so routers compose from them.
+    app.state.ctx = ctx
+    # Out-of-context collaborators kept on app.state directly: ``config``,
+    # plus ``resync_manager`` for the lifespan.
     app.state.config = config
-    app.state.registry = registry
-    app.state.quota_manager = quota_manager
-    app.state.usage_manager = usage_manager
-    app.state.eviction_manager = eviction_manager
     app.state.resync_manager = resync_manager
-    app.state.blend_directory = blend_directory
 
     apis_path = Path(__file__).parent / "http_apis"
     package = f"{__package__}.http_apis"

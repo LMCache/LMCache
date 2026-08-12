@@ -27,7 +27,8 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
 WORKDIR /workspace
 
 # Pre-install requirements that rarely change
-COPY requirements/common.txt requirements/build.txt requirements/cuda.txt /tmp/reqs/
+COPY requirements/common.txt requirements/build.txt requirements/cuda.txt \
+     requirements/cuda13_core.txt requirements/nixl.txt /tmp/reqs/
 RUN . /opt/venv/bin/activate && \
     uv pip install -r /tmp/reqs/cuda.txt && \
     uv pip install -r /tmp/reqs/build.txt && \

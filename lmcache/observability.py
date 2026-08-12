@@ -23,7 +23,7 @@ import prometheus_client
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.usage_context import ContinuousUsageContext
+from lmcache.usage_telemetry import ContinuousUsageContext
 from lmcache.utils import thread_safe
 from lmcache.v1.metadata import LMCacheMetadata
 
@@ -2013,7 +2013,7 @@ class LMCacheStatsLogger:
                 else:
                     logger.info("Stats logger thread terminated successfully")
             except Exception as e:
-                logger.error(f"Error waiting for stats logger thread: {e}")
+                logger.error("Error waiting for stats logger thread: %s", e)
         else:
             logger.info("Stats logger thread already stopped")
 

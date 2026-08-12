@@ -105,6 +105,31 @@ def _engine_group_id_per_view(
     return tuple(group.engine_group_id for group in groups)
 
 
+def engine_group_layer_indices(
+    groups: Sequence[EngineGroupInfo],
+) -> list[list[int]]:
+    """Return each engine group's layer indices, ordered by engine group id.
+
+    Several ``EngineGroupInfo`` may share one ``engine_group_id``; their
+    ``layer_indices`` are unioned into that group's entry.
+
+    Args:
+        groups: The LMCache KV groups, in protocol order.
+
+    Returns:
+        One sorted ``list[int]`` of layer indices per engine group, indexed by
+        engine group id (dense from 0). Empty when ``groups`` is empty (a single
+        non-hybrid group with no per-group split).
+    """
+    if not groups:
+        return []
+    num_groups = max(group.engine_group_id for group in groups) + 1
+    per_group: list[list[int]] = [[] for _ in range(num_groups)]
+    for group in groups:
+        per_group[group.engine_group_id].extend(group.layer_indices)
+    return [sorted(indices) for indices in per_group]
+
+
 def expand_engine_block_ids(
     groups: Sequence[EngineGroupInfo],
     engine_side_block_ids: Sequence[Sequence[int]] | Sequence[int],

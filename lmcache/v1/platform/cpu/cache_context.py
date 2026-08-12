@@ -30,14 +30,12 @@ from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.utils import (
     LayoutHints,
     get_group_data_ptrs,
-    get_num_blocks,
-    get_num_layers,
-    is_mla,
-    normalize_kv_and_discover_format,
+    normalize_and_discover_per_layer_formats,
 )
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.multiprocess.custom_types import KVCache
-from lmcache.v1.platform.base_cache_context import BaseCacheContext
+from lmcache.v1.multiprocess.group_view import engine_group_layer_indices
+from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.cpu.stub_cpu_device import StubStream
 
 if TYPE_CHECKING:
@@ -72,6 +70,8 @@ class CPUCacheContext(BaseCacheContext):
         layout_hints: LayoutHints | None = None,
         engine_group_infos: "Sequence[EngineGroupInfo]" = (),
         engine_type: EngineType = EngineType.VLLM,
+        separate_object_groups: bool = False,
+        full_sw_kv: bool = False,
     ) -> None:
         if not kv_caches:
             raise ValueError(
@@ -93,36 +93,37 @@ class CPUCacheContext(BaseCacheContext):
         # PageBufferShapeDesc here. ``layout_hints`` / ``engine_type``
         # are forwarded so the signature matches GPUCacheContext.
         (
-            engine_kv_format,
             kv_caches_normalized,
-        ) = normalize_kv_and_discover_format(
+            engine_kv_formats,
+        ) = normalize_and_discover_per_layer_formats(
             unwrapped,
+            engine_group_layer_indices(engine_group_infos),
             engine_type,
-            layout_hints=layout_hints,
+            layout_hints,
         )
         kv_caches_list: list[torch.Tensor] = list(kv_caches_normalized)
-        is_mla_val = is_mla(engine_kv_format)
-        num_layers_val = get_num_layers(kv_caches_list, engine_kv_format)
-        num_blocks_val = get_num_blocks(kv_caches_list, engine_kv_format)
+        num_layers_val = len(engine_kv_formats)
         kv_layer_groups_manager = KVLayerGroupsManager(
             kv_caches_list,
-            engine_kv_format=engine_kv_format,
-            num_blocks=num_blocks_val,
+            engine_kv_formats=engine_kv_formats,
             engine_group_infos=engine_group_infos,
             lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
+            separate_object_groups=separate_object_groups,
         )
+        # Set full_sw_kv before the temp buffer / object groups are sized so
+        # both use the full (un-windowed) per-chunk geometry (mirrors
+        # GPUCacheContext).
+        if full_sw_kv:
+            kv_layer_groups_manager.enable_full_sw_kv()
 
         # Pre-allocated block IDs buffer (CPU).
         _MAX_BLOCK_IDS = 1_000_000
         block_ids_buffer = torch.empty(_MAX_BLOCK_IDS, dtype=torch.long)
 
         super().__init__(
-            engine_kv_format=engine_kv_format,
             kv_caches=kv_caches_list,
             device=self.device_,
             num_layers=num_layers_val,
-            num_blocks=num_blocks_val,
-            is_mla=is_mla_val,
             kv_layer_groups_manager=kv_layer_groups_manager,
             block_ids_buffer=block_ids_buffer,
             lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
@@ -134,12 +135,12 @@ class CPUCacheContext(BaseCacheContext):
             torch.tensor(
                 get_group_data_ptrs(
                     self.kv_caches_,
-                    self.engine_kv_format,
+                    self.get_engine_kv_format(idx),
                     group.layer_indices,
                 ),
                 dtype=torch.long,
             )
-            for group in self.kv_layer_groups_manager_.kv_layer_groups
+            for idx, group in enumerate(self.kv_layer_groups_manager_.kernel_groups)
         ]
 
         self.kv_cache_pointers_ = torch.tensor(
@@ -150,9 +151,7 @@ class CPUCacheContext(BaseCacheContext):
         # GPUCacheContext but on CPU).
         self._max_batch_size = 4
         self.tmp_chunk_group_offsets_: list[int] = [0]
-        for group_idx, group in enumerate(
-            self.kv_layer_groups_manager_.kv_layer_groups
-        ):
+        for group_idx, group in enumerate(self.kv_layer_groups_manager_.kernel_groups):
             shape = self.get_kv_buffer_shape(lmcache_tokens_per_chunk, group_idx)
             byte_size = shape.numel() * group.dtype.itemsize
             self.tmp_chunk_group_offsets_.append(
@@ -187,7 +186,7 @@ class CPUCacheContext(BaseCacheContext):
         logger.info(
             "CPUCacheContext: %d layers, %d blocks, dtype=%s (shm-backed)",
             self.num_layers_,
-            self.num_blocks_,
+            self.num_blocks,
             self.kv_caches_[0].dtype,
         )
 
@@ -222,11 +221,6 @@ class CPUCacheContext(BaseCacheContext):
     # -- Properties (same API as GPUCacheContext) --
 
     @property
-    def dtype(self) -> torch.dtype:
-        """Returns the dtype of the KV cache tensors."""
-        return self.kv_caches_[0].dtype
-
-    @property
     def max_batch_size(self) -> int:
         """Returns the maximum number of concurrent batches."""
         return self._max_batch_size
@@ -259,15 +253,14 @@ class CPUCacheContext(BaseCacheContext):
     @property
     def block_size(self) -> int:
         """Returns the block size (tokens per block)."""
-        return self.kv_layer_groups_manager_.kv_layer_groups[0].shape_desc.bs
+        return self.kv_layer_groups_manager_.kernel_groups[0].shape_desc.bs
 
     @property
     def group_slots_per_blocks(self) -> list[int]:
         """Per-group physical slot count (``shape_desc.bs``) in group
         order."""
         return [
-            group.shape_desc.bs
-            for group in self.kv_layer_groups_manager_.kv_layer_groups
+            group.shape_desc.bs for group in self.kv_layer_groups_manager_.kernel_groups
         ]
 
     def blocks_for_tokens(self, num_logical_tokens: int, group_idx: int) -> int:
@@ -275,7 +268,7 @@ class CPUCacheContext(BaseCacheContext):
 
         Mirrors :meth:`GPUCacheContext.blocks_for_tokens`.
         """
-        group = self.kv_layer_groups_manager_.kv_layer_groups[group_idx]
+        group = self.kv_layer_groups_manager_.kernel_groups[group_idx]
         physical_slots = (
             num_logical_tokens * group.slots_per_block // group.tokens_per_block
         )
@@ -311,7 +304,7 @@ class CPUCacheContext(BaseCacheContext):
         Returns:
             A ``(shape, dtype)`` tuple for the given kernel group.
         """
-        group = self.kv_layer_groups_manager_.kv_layer_groups[kernel_group_idx]
+        group = self.kv_layer_groups_manager_.kernel_groups[kernel_group_idx]
         compress_ratio = group.tokens_per_block // group.slots_per_block
         if num_tokens % compress_ratio != 0:
             raise ValueError(
@@ -353,7 +346,7 @@ class CPUCacheContext(BaseCacheContext):
             raise ValueError(
                 "batch_idx %d >= max_batch_size %d" % (batch_idx, self.max_batch_size)
             )
-        group = self.kv_layer_groups_manager_.kv_layer_groups[kernel_group_idx]
+        group = self.kv_layer_groups_manager_.kernel_groups[kernel_group_idx]
         shape = self.get_kv_buffer_shape(
             self.lmcache_tokens_per_chunk, kernel_group_idx
         )
@@ -400,7 +393,7 @@ class CPUCacheContext(BaseCacheContext):
 
     def get_tmp_chunk_gpu_buffer(self, group_idx: int = 0) -> torch.Tensor:
         """Returns a typed view of the temp buffer for one chunk."""
-        group = self.kv_layer_groups_manager_.kv_layer_groups[group_idx]
+        group = self.kv_layer_groups_manager_.kernel_groups[group_idx]
         shape = self.get_kv_buffer_shape(self.lmcache_tokens_per_chunk, group_idx)
         start = self.tmp_chunk_group_offsets_[group_idx]
         end = self.tmp_chunk_group_offsets_[group_idx + 1]
@@ -414,7 +407,7 @@ class CPUCacheContext(BaseCacheContext):
             raise ValueError(
                 "batch_size %d > max_batch_size %d" % (batch_size, self.max_batch_size)
             )
-        group = self.kv_layer_groups_manager_.kv_layer_groups[group_idx]
+        group = self.kv_layer_groups_manager_.kernel_groups[group_idx]
         shape = self.get_kv_buffer_shape(self.lmcache_tokens_per_chunk, group_idx)
         g_start = self.tmp_chunk_group_offsets_[group_idx]
         g_end = self.tmp_chunk_group_offsets_[group_idx + 1]
@@ -433,9 +426,7 @@ class CPUCacheContext(BaseCacheContext):
         Mirrors :meth:`GPUCacheContext.cache_size_per_token`.
         """
         total = 0
-        for group_idx, group in enumerate(
-            self.kv_layer_groups_manager_.kv_layer_groups
-        ):
+        for group_idx, group in enumerate(self.kv_layer_groups_manager_.kernel_groups):
             compress_ratio = group.tokens_per_block // group.slots_per_block
             numels = self.get_kv_buffer_shape(compress_ratio, group_idx).numel()
             slot_bytes = numels * group.dtype.itemsize

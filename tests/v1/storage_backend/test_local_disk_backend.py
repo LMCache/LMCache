@@ -5,12 +5,14 @@ import asyncio
 import os
 import shutil
 import tempfile
+import threading
 
 # Third Party
 import pytest
 import torch
 
 # First Party
+from lmcache import torch_device_type
 from lmcache.utils import CacheEngineKey, DiskCacheMetadata
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.config_base import _parse_local_disk
@@ -117,7 +119,7 @@ def local_disk_backend(temp_disk_path, async_loop, local_cpu_backend):
         config=config,
         loop=async_loop,
         local_cpu_backend=local_cpu_backend,
-        dst_device="cuda:0",
+        dst_device=f"{torch_device_type}:0",
     )
 
 
@@ -131,10 +133,10 @@ class TestLocalDiskBackend:
             config=config,
             loop=async_loop,
             local_cpu_backend=local_cpu_backend,
-            dst_device="cuda:0",
+            dst_device=f"{torch_device_type}:0",
         )
 
-        assert backend.dst_device == "cuda:0"
+        assert backend.dst_device == f"{torch_device_type}:0"
         assert backend.local_cpu_backend == local_cpu_backend
         assert backend.path == temp_disk_path
         assert os.path.exists(temp_disk_path)
@@ -156,7 +158,7 @@ class TestLocalDiskBackend:
             config=config,
             loop=async_loop,
             local_cpu_backend=local_cpu_backend,
-            dst_device="cuda:0",
+            dst_device=f"{torch_device_type}:0",
             lmcache_worker=lmcache_worker,
         )
 
@@ -211,7 +213,7 @@ class TestMultiPathDiskBackend:
                 config=config,
                 loop=async_loop,
                 local_cpu_backend=local_cpu_backend,
-                dst_device="cuda:0",
+                dst_device=f"{torch_device_type}:0",
             )
 
             # Path selected by device_id (0 % 2 = 0 -> dir_a)
@@ -227,7 +229,7 @@ class TestMultiPathDiskBackend:
             local_cpu_backend.memory_allocator.close()
 
     def test_gpu_affinity_selects_path(self, async_loop, local_cpu_backend):
-        """Different cuda devices select different paths via modulo."""
+        """Different accelerator device indices select different paths via modulo."""
         dir_a = tempfile.mkdtemp()
         dir_b = tempfile.mkdtemp()
         try:
@@ -235,7 +237,7 @@ class TestMultiPathDiskBackend:
             config = create_test_config(combined)
 
             dirs_by_gpu = {}
-            for device in ("cuda:0", "cuda:1"):
+            for device in (f"{torch_device_type}:0", f"{torch_device_type}:1"):
                 backend = LocalDiskBackend(
                     config=config,
                     loop=async_loop,
@@ -244,8 +246,8 @@ class TestMultiPathDiskBackend:
                 )
                 dirs_by_gpu[device] = backend.path
 
-            assert dirs_by_gpu["cuda:0"] == dir_a
-            assert dirs_by_gpu["cuda:1"] == dir_b
+            assert dirs_by_gpu[f"{torch_device_type}:0"] == dir_a
+            assert dirs_by_gpu[f"{torch_device_type}:1"] == dir_b
         finally:
             shutil.rmtree(dir_a, ignore_errors=True)
             shutil.rmtree(dir_b, ignore_errors=True)
@@ -262,7 +264,7 @@ class TestMultiPathDiskBackend:
                 config=config,
                 loop=async_loop,
                 local_cpu_backend=local_cpu_backend,
-                dst_device="cuda:0",
+                dst_device=f"{torch_device_type}:0",
             )
             for p in paths:
                 assert os.path.isdir(p), f"{p} should exist"
@@ -279,7 +281,7 @@ class TestMultiPathDiskBackend:
             config=config,
             loop=async_loop,
             local_cpu_backend=local_cpu_backend,
-            dst_device="cuda:0",
+            dst_device=f"{torch_device_type}:0",
         )
         assert backend.path == temp_disk_path
         local_cpu_backend.memory_allocator.close()
@@ -291,7 +293,7 @@ class TestMultiPathDiskBackend:
             config=config,
             loop=async_loop,
             local_cpu_backend=local_cpu_backend,
-            dst_device="cuda:0",
+            dst_device=f"{torch_device_type}:0",
         )
         assert backend.path == temp_disk_path
         local_cpu_backend.memory_allocator.close()
@@ -305,7 +307,7 @@ class TestMultiPathDiskBackend:
             config=config,
             loop=async_loop,
             local_cpu_backend=local_cpu_backend,
-            dst_device="cuda:0",
+            dst_device=f"{torch_device_type}:0",
         )
         assert backend.path == temp_disk_path
         local_cpu_backend.memory_allocator.close()
@@ -322,7 +324,7 @@ class TestMultiPathDiskBackend:
                 config=config,
                 loop=async_loop,
                 local_cpu_backend=local_cpu_backend,
-                dst_device="cuda:0",
+                dst_device=f"{torch_device_type}:0",
             )
 
     def test_cpu_dst_device_defaults_to_first_path(self, async_loop, local_cpu_backend):
@@ -465,4 +467,146 @@ class TestGetBlockingCachePolicyUpdate:
 
         assert result is None
         mock_update.assert_not_called()
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+
+class TestBatchedGetBlocking:
+    """Tests for the concurrent batched_get_blocking() override."""
+
+    _SHAPE = torch.Size([28, 2, 256, 8, 128])
+    _DTYPE = torch.bfloat16
+
+    def _write_key(
+        self,
+        backend: LocalDiskBackend,
+        key: CacheEngineKey,
+    ) -> bytes:
+        """Write random data to disk for *key* and register it in the backend.
+
+        Returns the raw bytes that were written so callers can verify reads.
+        """
+        path = backend._key_to_path(key)
+        nbytes = 1
+        for s in self._SHAPE:
+            nbytes *= s
+        nbytes *= self._DTYPE.itemsize
+        data = os.urandom(nbytes)
+        with open(path, "wb") as f:
+            f.write(data)
+        backend.insert_key(
+            key,
+            size=nbytes,
+            shape=self._SHAPE,
+            dtype=self._DTYPE,
+            fmt=MemoryFormat.KV_2LTD,
+        )
+        return data
+
+    def test_all_keys_missing(self, local_disk_backend: LocalDiskBackend) -> None:
+        """batched_get_blocking returns [None, …] when no keys are cached."""
+        keys = [create_test_key(i) for i in range(200, 204)]
+        results = local_disk_backend.batched_get_blocking(keys)
+
+        assert len(results) == len(keys)
+        assert all(r is None for r in results)
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+    def test_reads_match_written_data(
+        self, local_disk_backend: LocalDiskBackend
+    ) -> None:
+        """Data loaded by batched_get_blocking matches what was written."""
+        keys = [create_test_key(i) for i in range(210, 214)]
+        expected_data = {}
+        for key in keys:
+            expected_data[key] = self._write_key(local_disk_backend, key)
+
+        results = local_disk_backend.batched_get_blocking(keys)
+
+        assert len(results) == len(keys)
+        for key, mem_obj in zip(keys, results, strict=True):
+            assert mem_obj is not None, f"Expected data for {key}"
+            actual = bytes(mem_obj.byte_array)
+            assert actual == expected_data[key]
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+    def test_mixed_hit_and_miss(self, local_disk_backend: LocalDiskBackend) -> None:
+        """Handles a mix of cached and missing keys correctly."""
+        present_key = create_test_key(220)
+        missing_key = create_test_key(221)
+        expected = self._write_key(local_disk_backend, present_key)
+
+        results = local_disk_backend.batched_get_blocking([present_key, missing_key])
+
+        assert len(results) == 2
+        assert results[0] is not None
+        assert bytes(results[0].byte_array) == expected
+        assert results[1] is None
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+    def test_cache_policy_updated_only_for_hits(
+        self, local_disk_backend: LocalDiskBackend
+    ) -> None:
+        """update_on_hit is called only for keys that were successfully loaded."""
+        hit_key = create_test_key(230)
+        miss_key = create_test_key(231)
+        self._write_key(local_disk_backend, hit_key)
+
+        with patch.object(
+            local_disk_backend.cache_policy, "update_on_hit"
+        ) as mock_update:
+            results = local_disk_backend.batched_get_blocking([hit_key, miss_key])
+
+        assert results[0] is not None
+        assert results[1] is None
+        mock_update.assert_called_once_with(hit_key, local_disk_backend.dict)
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+    def test_single_key_delegates_to_get_blocking(
+        self, local_disk_backend: LocalDiskBackend
+    ) -> None:
+        """A single-key batch falls through to get_blocking (fast path)."""
+        key = create_test_key(240)
+        sentinel = MagicMock(spec=MemoryObj)
+        with patch.object(
+            local_disk_backend, "get_blocking", return_value=sentinel
+        ) as mock_get:
+            results = local_disk_backend.batched_get_blocking([key])
+
+        assert results == [sentinel]
+        mock_get.assert_called_once_with(key)
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+    def test_concurrent_reads_use_multiple_threads(
+        self, local_disk_backend: LocalDiskBackend
+    ) -> None:
+        """Verify that reads actually fan out across threads."""
+        keys = [create_test_key(i) for i in range(250, 254)]
+        for key in keys:
+            self._write_key(local_disk_backend, key)
+
+        thread_ids: list[int] = []
+        lock = threading.Lock()
+        original_read_file = local_disk_backend.read_file
+
+        def tracking_read_file(key, buffer, path):
+            with lock:
+                thread_ids.append(threading.current_thread().ident)
+            return original_read_file(key, buffer, path)
+
+        with patch.object(
+            local_disk_backend, "read_file", side_effect=tracking_read_file
+        ):
+            results = local_disk_backend.batched_get_blocking(keys)
+
+        assert all(r is not None for r in results)
+        # With 4 keys and 4 threads, we should see more than 1 unique thread.
+        assert len(set(thread_ids)) > 1, (
+            f"Expected multiple threads, got {set(thread_ids)}"
+        )
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+    def test_empty_keys_list(self, local_disk_backend: LocalDiskBackend) -> None:
+        """An empty key list returns an empty result list."""
+        results = local_disk_backend.batched_get_blocking([])
+        assert results == []
         local_disk_backend.local_cpu_backend.memory_allocator.close()
