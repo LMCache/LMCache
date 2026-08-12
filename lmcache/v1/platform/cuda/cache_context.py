@@ -425,10 +425,14 @@ class GPUCacheContext(BaseCacheContext):
             self.cuda_stream_.cuda_stream, self.device_.index
         )
 
-        # Extra initialization
+        # Extra initialization. The callback must not capture ``self``: a
+        # closure over the context would keep its IPC-imported KV tensors
+        # reachable through a reference cycle, so ipc_collect() at release
+        # time could not unmap them until a cyclic GC pass happens to run.
+        device_str = str(self.device_)
         self.cupy_stream_.launch_host_func(
             lambda logger: logger.info(
-                "Initialized cuda stream on device %s", str(self.device_)
+                "Initialized cuda stream on device %s", device_str
             ),
             logger,
         )
@@ -568,10 +572,13 @@ class PlainGPUCacheContext:
             self._cuda_stream.cuda_stream, self._device.index
         )
 
-        # Extra initialization
+        # Extra initialization. Must not capture ``self`` (see
+        # GPUCacheContext.__init__): a closure over the context would keep
+        # its KV tensors reachable until a cyclic GC pass.
+        device_str = str(self._device)
         self._cupy_stream.launch_host_func(
             lambda logger: logger.info(
-                "Initialized cuda stream on device %s", str(self._device)
+                "Initialized cuda stream on device %s", device_str
             ),
             logger,
         )

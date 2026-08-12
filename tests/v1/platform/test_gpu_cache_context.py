@@ -20,6 +20,8 @@ Two layers are exercised:
 
 # Standard
 from collections.abc import Sequence
+import gc
+import weakref
 
 # Third Party
 import pytest
@@ -555,6 +557,30 @@ class TestGPUCacheContextReportStatus:
             assert group["slots_per_block"] == kernel_group.slots_per_block
             assert group["tokens_per_block"] == kernel_group.tokens_per_block
             assert 0 <= group["object_group_idx"] < manager.num_object_groups
+
+
+class TestContextReleaseCollectibility:
+    def test_context_collectible_without_cyclic_gc(self) -> None:
+        """The context must be freed by reference counting alone.
+
+        The MP server unmaps a dead worker's CUDA-IPC-imported KV pool by
+        dropping its last reference to the context and calling
+        ``ipc_collect()`` immediately after. A reference cycle through the
+        context (e.g. a stream host-func closure capturing ``self``) would
+        keep the pool mapped until an arbitrary later cyclic-GC pass.
+        """
+        gc.disable()
+        try:
+            ctx = _make_context(_SINGLE_GROUP)
+            ref = weakref.ref(ctx)
+            ctx.close()
+            del ctx
+            assert ref() is None, (
+                "GPUCacheContext survived release: a reference cycle is "
+                "keeping it (and its imported KV tensors) alive"
+            )
+        finally:
+            gc.enable()
 
 
 if __name__ == "__main__":
