@@ -13,6 +13,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache import torch_device_type
 from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.kv_format import detect_format, extract_kv_cache_shapes
 import lmcache.lmcache_native as lmcache_native
@@ -37,10 +38,11 @@ def test_vllm_cross_layer():
 # The CPU-HND safeguard forces HND regardless of hint when running on a CPU
 # host; bypass it so the hint-driven NHD/HND branch is exercised on any host.
 _VLLM_DEV = "lmcache.v1.gpu_connector.kv_format.detectors.vllm.torch_device_type"
+_NON_CPU_DEV = torch_device_type if torch_device_type != "cpu" else "xpu"
 
 
 def test_vllm_flash_attn_nhd_vs_hnd(monkeypatch):
-    monkeypatch.setattr(_VLLM_DEV, "cuda")
+    monkeypatch.setattr(_VLLM_DEV, _NON_CPU_DEV)
     kv = [_t(2, NB, BS, NH, HS) for _ in range(NL)]
     fmt_nhd, _ = detect_format(kv, EngineType.VLLM, {"kv_layout": "NHD"})
     assert fmt_nhd == F.NL_X_TWO_NB_BS_NH_HS
@@ -51,7 +53,7 @@ def test_vllm_flash_attn_nhd_vs_hnd(monkeypatch):
 
 
 def test_vllm_flash_infer_nhd(monkeypatch):
-    monkeypatch.setattr(_VLLM_DEV, "cuda")
+    monkeypatch.setattr(_VLLM_DEV, _NON_CPU_DEV)
     kv = [_t(NB, 2, BS, NH, HS) for _ in range(NL)]
     fmt, _ = detect_format(kv, EngineType.VLLM, {"kv_layout": "NHD"})
     assert fmt == F.NL_X_NB_TWO_BS_NH_HS
@@ -68,7 +70,7 @@ def test_vllm_blocks_first_fused_num_heads_2(monkeypatch):
     # split would make the K/V axis and the head axis both equal 2, ambiguous
     # with flash-infer. Detection must use the rank-4 shape to land on the
     # content-size format, and keep the tensor raw.
-    monkeypatch.setattr(_VLLM_DEV, "cuda")
+    monkeypatch.setattr(_VLLM_DEV, _NON_CPU_DEV)
     raw = [_t(NB, 2, BS, 2 * HS) for _ in range(NL)]
     fmt, out = detect_format(raw, EngineType.VLLM, {"kv_layout": "HND"})
     assert fmt == F.NL_X_NB_NH_BS_CS
@@ -78,7 +80,7 @@ def test_vllm_blocks_first_fused_num_heads_2(monkeypatch):
 def test_vllm_blocks_first_fused_nhd_vs_hnd(monkeypatch):
     # The rank-4 fused layout is shape-ambiguous between NHD and HND (the two
     # middle axes could be BS/NH or NH/BS), so the kv_layout hint decides.
-    monkeypatch.setattr(_VLLM_DEV, "cuda")
+    monkeypatch.setattr(_VLLM_DEV, _NON_CPU_DEV)
     raw = [_t(NB, BS, NH, 2 * HS) for _ in range(NL)]
     fmt_nhd, out = detect_format(raw, EngineType.VLLM, {"kv_layout": "NHD"})
     assert fmt_nhd == F.NL_X_NB_BS_NH_CS
