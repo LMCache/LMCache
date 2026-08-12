@@ -58,17 +58,29 @@ closes the root span before the retrieve child span ends.
 
 ## Root Span Attributes
 
-In addition to `session_id`, the root `"request"` span carries three hit rate
-attributes that are set when `MP_LOOKUP_PREFETCH_END` is processed:
+In addition to `session_id`, the root `"request"` span carries eight hit rate
+and outcome attributes that are set when `MP_LOOKUP_PREFETCH_END` is processed:
 
 | Attribute | OTel type | Value |
 |-----------|-----------|-------|
 | `hit_tokens` | `int` | tokens found in L1+L2 (numerator) |
 | `requested_tokens` | `int` | chunk-aligned tokens submitted for lookup (denominator) |
 | `hit_rate` | `float` | `hit_tokens / requested_tokens`; `0.0` when denominator is zero |
+| `l1_hit_tokens` | `int` | tokens in the prefix L1 alone could serve |
+| `l2_hit_tokens` | `int` | tokens by which L2 extended that prefix |
+| `l1_hit_rate` | `float` | `l1_hit_tokens / requested_tokens`; `0.0` when denominator is zero |
+| `l2_hit_rate` | `float` | `l2_hit_tokens / requested_tokens`; `0.0` when denominator is zero |
+| `early_exit_reason` | `str` | branch of `lookup()` that returned before submitting a prefetch; `""` on the normal path |
 
 `hit_rate` is stored as a precomputed float because trace UIs (Tempo, Jaeger)
-cannot derive it from two integer attributes at query time.
+cannot derive it from two integer attributes at query time; the same reasoning
+applies to `l1_hit_rate` and `l2_hit_rate`.
+
+`l1_hit_tokens + l2_hit_tokens == hit_tokens` exactly — `l2` is the remainder
+of `found_count` after the L1-servable prefix, not an independent count.  The
+two rates therefore sum to `hit_rate` up to float rounding, not bit-for-bit.
+See [EVENTS.md](../v1/mp_observability/EVENTS.md) for the derivation and for
+the `early_exit_reason` vocabulary.
 
 **Invariant:** these attributes are set at `MP_LOOKUP_PREFETCH_END` time, while
 the root span is still open.  `LP_END` always precedes `MP_REQUEST_END` in the
@@ -80,8 +92,10 @@ attributes are written.
 
 ### CB path — `cb.request` span
 
-The same three attributes appear on the `"cb.request"` root span and are set
-when `CB_LOOKUP_END` is processed by `BlendTracingSubscriber`.
+The `hit_tokens` / `requested_tokens` / `hit_rate` trio also appears on the
+`"cb.request"` root span, set when `CB_LOOKUP_END` is processed by
+`BlendTracingSubscriber`.  The per-tier split and `early_exit_reason` are
+specific to the MP path and are not set on `"cb.request"`.
 
 `CB_LOOKUP_END` carries `hit_tokens` and `requested_tokens` in its metadata,
 computed at the emit site in `lmcache/v1/multiprocess/modules/blend.py`:
