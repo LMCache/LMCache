@@ -15,6 +15,7 @@ from lmcache.v1.multiprocess.group_view import (
     get_engine_group_indices,
     num_engine_groups,
 )
+import lmcache.lmcache_native as lmcache_native
 
 # Test doubles for the vLLM KV cache spec classes. Unit tests must run
 # without vLLM installed; sliding-window specs are detected by class name,
@@ -345,15 +346,14 @@ def test_group_layers_by_identity_uses_per_layer_format():
     distinction the single global format cannot express."""
     # First Party
     from lmcache.v1.kv_layer_groups import group_layers_by_identity
-    import lmcache.c_ops as lmc_ops
 
     kv_caches = [
         torch.randn(2, 32, 16, 8, 64, dtype=torch.bfloat16),  # K+V (rank-5)
         torch.randn(32, 16, 128, dtype=torch.bfloat16),  # MLA key-only (rank-3)
     ]
     per_layer_format = [
-        lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
-        lmc_ops.EngineKVFormat.NL_X_NB_BS_HS,
+        lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
+        lmcache_native.EngineKVFormat.NL_X_NB_BS_HS,
     ]
     groups = group_layers_by_identity(
         kv_caches,
@@ -376,13 +376,12 @@ def test_group_layers_by_identity_rejects_group_idx_length_mismatch():
     """per_layer_engine_group_idx must hold one entry per layer."""
     # First Party
     from lmcache.v1.kv_layer_groups import group_layers_by_identity
-    import lmcache.c_ops as lmc_ops
 
     kv_caches = [torch.randn(2, 32, 16, 8, 64, dtype=torch.bfloat16)]
     # One layer (one format) but two engine-group ids.
     with pytest.raises(ValueError, match="per_layer_engine_group_idx"):
         group_layers_by_identity(
             kv_caches,
-            [lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS],
+            [lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS],
             per_layer_engine_group_idx=[0, 1],
         )
