@@ -62,6 +62,7 @@ logger = init_logger(__name__)
 _HAS_NATIVE_OBJECT_GROUP_TRANSFER: bool = hasattr(
     device_ops, "execute_object_group_transfer"
 )
+_warned_layerwise_fallback: bool = False
 
 
 def get_layout_desc(
@@ -1020,6 +1021,24 @@ def transfer_kv_layerwise(
             )
         else:
             # --- Per-layer fallback (N=1, no native ops, or buffer overflow) ---
+            if n_in_batch > 1:
+                global _warned_layerwise_fallback
+                if not _warned_layerwise_fallback:
+                    _warned_layerwise_fallback = True
+                    reason = (
+                        "native ops unavailable"
+                        if not use_native_layerwise_plan
+                        else f"staging buffer too small ({max_chunks_per_pass}"
+                        f" chunks fit, need >=1)"
+                    )
+                    logger.warning(
+                        "Layerwise merged H2D path unavailable (batch=%d, kg=%d): %s. "
+                        "Falling back to %d separate per-layer H2D copies.",
+                        n_in_batch,
+                        kernel_group_id,
+                        reason,
+                        n_in_batch,
+                    )
             for sub_idx in range(n_in_batch):
                 layer_local_idx = first_local + sub_idx
                 global_layer_idx = all_layers[layer_batch_start + sub_idx][2]
@@ -1088,7 +1107,7 @@ def transfer_kv_layerwise(
                             gpu_dst,
                             src_ptr,
                             per_layer_bytes,
-                            lmc_ops.TransferDirection.H2D,
+                            lmcache_native.TransferDirection.H2D,
                             memory_obj.meta.address,
                             pin_chunk_size,
                         )
@@ -1099,7 +1118,7 @@ def transfer_kv_layerwise(
                         all_gpu_ptrs_fb,
                         info["all_block_ids"],
                         cache_context.device,
-                        lmc_ops.TransferDirection.H2D,
+                        lmcache_native.TransferDirection.H2D,
                         single_layer_sd,
                         slots_per_chunk,
                         cache_context.get_engine_kv_format(kernel_group_id),
@@ -1130,7 +1149,7 @@ def transfer_kv_layerwise(
                                 gpu_dst,
                                 src_ptr,
                                 per_layer_bytes,
-                                lmc_ops.TransferDirection.H2D,
+                                lmcache_native.TransferDirection.H2D,
                                 memory_obj.meta.address,
                                 pin_chunk_size,
                             )
@@ -1157,7 +1176,7 @@ def transfer_kv_layerwise(
                             tmp_gpu_buffers,
                             block_ids_curr,
                             cache_context.device,
-                            lmc_ops.TransferDirection.H2D,
+                            lmcache_native.TransferDirection.H2D,
                             single_layer_sd,
                             slots_per_chunk,
                             cache_context.get_engine_kv_format(kernel_group_id),
