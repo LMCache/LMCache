@@ -15,6 +15,7 @@ from lmcache.v1.multiprocess.native_completion import (
     DeviceHostFuncDispatcher,
     submit_callback_to_stream,
 )
+from lmcache.v1.platform import resolve_device_ops
 from lmcache.v1.platform import torch_ops as _py_ops
 import lmcache.lmcache_native as lmcache_native
 
@@ -58,7 +59,7 @@ def _build_backend_params() -> list:
     - cuda_ops: uses lmcache.cuda_ops (requires CUDA)
     - cuda_py_ops: uses lmcache.v1.platform.torch_ops with GPU visible
     - cpy_py_ops: uses lmcache.v1.platform.torch_ops with GPU mocked away
-    - xpu_sycl_ops: uses lmcache.xpu_ops (requires XPU and the SYCL extension)
+    - xpu_sycl_ops: uses resolved XpuDeviceOps (native xpu_ops + fallbacks)
     - xpu_py_ops: uses lmcache.v1.platform.torch_ops with XPU visible
     """
     params = []
@@ -86,13 +87,13 @@ def _build_backend_params() -> list:
 
     if hasattr(torch, "xpu") and torch.xpu.is_available():
         try:
-            # First Party
-            import lmcache.xpu_ops as xpu_sycl_ops
-
             params.append(
-                pytest.param(("xpu_sycl_ops", xpu_sycl_ops, "xpu"), id="xpu_sycl_ops")
+                pytest.param(
+                    ("xpu_sycl_ops", resolve_device_ops("xpu"), "xpu"),
+                    id="xpu_sycl_ops",
+                )
             )
-        except ImportError:
+        except (ImportError, RuntimeError):
             pass
 
     return params
