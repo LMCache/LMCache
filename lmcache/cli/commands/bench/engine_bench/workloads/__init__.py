@@ -133,6 +133,7 @@ def create_workload(
             stats_collector=stats_collector,
             progress_monitor=progress_monitor,
             seed=config.seed,
+            model_name=config.model,
         )
 
     if config.workload == "long-doc-qa":

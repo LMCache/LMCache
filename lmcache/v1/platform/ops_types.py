@@ -1,12 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Shared, device-agnostic ops *types* for the unified ``DeviceOps`` surface.
+"""Python-only types for the unified ``DeviceOps`` surface.
 
-These types (``TransferDirection``, ``EngineKVFormat``, ``GPUKVFormat``,
-``PageBufferShapeDesc``, ``set_shape_desc_dtype``) were migrated verbatim from
-the former ``lmcache.python_ops_fallback`` module. They are deliberately
-self-contained (only ``torch`` + ``enum``) so call sites can import them
-without pulling in the heavier torch-baseline op implementations in
-:mod:`lmcache.v1.platform.torch_ops`.
+The native KV-format and transfer types live in :mod:`lmcache.lmcache_native`.
+This module contains only the Python fallback types used by device operations.
 
 The object-group transfer plan types (``_NativePlanType`` and its
 ``StagingCopy`` / ``LaunchVar`` / ``BatchStep`` / ``KernelGroupSpec``
@@ -19,90 +15,11 @@ names.
 from __future__ import annotations
 
 # Standard
-from enum import IntEnum
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     # Third Party
     import torch
-
-
-class TransferDirection(IntEnum):
-    """Specifies the direction of a memory transfer.
-
-    Inherits from IntEnum so that members compare equal to plain ints
-    and to native pybind11 enum members with the same integer value.
-    Several call sites (and the fallback ops themselves) use
-    ``int(direction)`` to compare across backend / fallback boundaries.
-    """
-
-    H2D = 0
-    D2H = 1
-
-
-class EngineKVFormat(IntEnum):
-    """Enumeration of different engine KV cache memory layouts."""
-
-    # used by: vLLM CROSS_LAYER mode
-    NB_NL_TWO_BS_NH_HS = 0
-
-    # used by: vLLM non-MLA flash attention
-    NL_X_TWO_NB_BS_NH_HS = 1
-
-    # used by: vLLM non-MLA flash infer
-    NL_X_NB_TWO_BS_NH_HS = 2
-
-    # used by: vLLM MLA
-    NL_X_NB_BS_HS = 3
-
-    # used by: SGLang MHA (flash attention and flash infer)
-    TWO_X_NL_X_NBBS_NH_HS = 4
-
-    # used by: SGLang MLA
-    NL_X_NBBS_ONE_HS = 5
-
-    # used by: vLLM non-MLA flash attention (HND layout)
-    NL_X_TWO_NB_NH_BS_HS = 6
-
-    # used by: vLLM non-MLA flash infer (HND layout)
-    NL_X_NB_TWO_NH_BS_HS = 7
-
-    # used by: TRT-LLM cross-layer (HND layout)
-    NB_NL_TWO_NH_BS_HS = 8
-
-    # used by: SGLang MHA via the MP daemon path
-    TWO_X_NL_X_NB_BS_NH_HS = 9
-
-    # DEPRECATED: superseded by NL_X_NB_NH_BS_CS; no longer produced by
-    # detection.
-    # used by: vLLM non-MLA blocks-first attention with K/V fused into the
-    # trailing dim. Per-layer physical shape
-    # [num_blocks, num_heads, block_size, 2, head_size] -- the K/V "2" axis is
-    # second-to-last, recovered by splitting the fused [..., 2 * head_size].
-    NL_X_NB_NH_BS_TWO_HS = 10
-
-    # DEPRECATED: superseded by NL_X_NB_BS_NH_CS; no longer produced by
-    # detection.
-    # used by: vLLM non-MLA blocks-first attention (NHD layout) with K/V fused
-    # into the trailing dim. Per-layer physical shape
-    # [num_blocks, block_size, num_heads, 2, head_size] -- like
-    # NL_X_NB_NH_BS_TWO_HS but tokens before heads.
-    NL_X_NB_BS_NH_TWO_HS = 11
-
-    # used by: vLLM non-MLA blocks-first attention (HND layout, unified KV
-    # cache) with K/V fused into the trailing content dim. Per-layer physical
-    # shape [num_blocks, num_heads, block_size, content_size].
-    NL_X_NB_NH_BS_CS = 12
-
-    # used by: vLLM non-MLA blocks-first attention (NHD layout, unified KV
-    # cache) with K/V fused into the trailing content dim. Per-layer physical
-    # shape [num_blocks, block_size, num_heads, content_size] -- like
-    # NL_X_NB_NH_BS_CS but tokens before heads.
-    NL_X_NB_BS_NH_CS = 13
-
-
-# Backward-compat alias
-GPUKVFormat = EngineKVFormat
 
 
 class PageBufferShapeDesc:

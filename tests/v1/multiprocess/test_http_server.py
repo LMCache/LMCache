@@ -12,7 +12,7 @@ import torch
 # First Party
 from lmcache.v1.multiprocess.http_apis.dependencies import build_context
 from lmcache.v1.multiprocess.http_server import app
-import lmcache.c_ops as lmc_ops
+import lmcache.lmcache_native as lmcache_native
 
 
 def _make_kv_tensors(
@@ -47,7 +47,7 @@ def mock_gpu_ctx():
     type(ctx).block_size = PropertyMock(return_value=4)
     # KV tensors are built as [2, NB, BS, NH, HS] -> NL_X_TWO_NB_BS_NH_HS;
     # one homogeneous kernel group, so every layer reports the same format.
-    fmt = lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
+    fmt = lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
     ctx.engine_kv_formats.return_value = [fmt]
     ctx.engine_kv_format_per_layer.return_value = [fmt] * len(tensors)
     return ctx
@@ -62,8 +62,8 @@ def mock_mixed_engine():
     kv_idx = torch.randn(4, 4, 8)
     type(ctx).kv_tensors = PropertyMock(return_value=[kv_kv, kv_idx])
     ctx.engine_kv_format_per_layer.return_value = [
-        lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
-        lmc_ops.EngineKVFormat.NL_X_NB_BS_HS,
+        lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
+        lmcache_native.EngineKVFormat.NL_X_NB_BS_HS,
     ]
     engine = MagicMock()
     engine.cache_contexts = {0: ctx}

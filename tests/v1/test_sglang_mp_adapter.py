@@ -7,35 +7,49 @@ returns a pollable future -- an already-completed one on the no-op paths
 completion future on the happy path -- and never blocks on the result."""
 
 # Standard
+from collections.abc import Callable
+from typing import Any
 import threading
 
 # Third Party
 import pytest
 import torch
 
+# First Party
+from lmcache.v1.multiprocess.futures import MessagingFuture
+
+pytestmark = pytest.mark.sglang
+
 # The adapter imports ``sglang`` at module load; skip cleanly where it's absent
 # (sglang is an optional integration, not a hard LMCache dependency).
 pytest.importorskip("sglang")
 
-# First Party
-from lmcache.integration.sglang import multi_process_adapter as adapter_mod
-from lmcache.integration.sglang.multi_process_adapter import (
-    LMCacheMPConnector,
-    _completed_future,
-)
-from lmcache.integration.sglang.sglang_adapter import StoreMetadata
-from lmcache.v1.multiprocess.futures import MessagingFuture
+
+def _import_adapter_symbols() -> tuple[
+    Any, type, Callable[[bool], MessagingFuture], Any
+]:
+    # First Party
+    from lmcache.integration.sglang import multi_process_adapter as adapter_mod
+    from lmcache.integration.sglang.multi_process_adapter import (
+        LMCacheMPConnector,
+        _completed_future,
+    )
+    from lmcache.integration.sglang.sglang_adapter import StoreMetadata
+
+    return adapter_mod, LMCacheMPConnector, _completed_future, StoreMetadata
+
 
 _CHUNK_SIZE = 256
 
 
-def _make_connector(healthy: bool = True) -> LMCacheMPConnector:
+def _make_connector(healthy: bool = True) -> Any:
     """Build a connector without running ``__init__`` (which opens ZMQ).
 
     Sets only the attributes the store paths touch; anything a given
     test needs beyond this it stubs itself.
     """
-    conn = object.__new__(LMCacheMPConnector)
+    _, LMCacheMPConnector, _, _ = _import_adapter_symbols()
+    conn: Any = object.__new__(LMCacheMPConnector)
     conn._health_event = threading.Event()
     if healthy:
         conn._health_event.set()
@@ -44,7 +58,8 @@ def _make_connector(healthy: bool = True) -> LMCacheMPConnector:
     return conn
 
 
-def _store_metadata(num_tokens: int) -> StoreMetadata:
+def _store_metadata(num_tokens: int) -> Any:
+    *_, StoreMetadata = _import_adapter_symbols()
     return StoreMetadata(
         last_node=None,
         token_ids=list(range(num_tokens)),
@@ -97,6 +112,7 @@ class _FakeTorchDev:
 
 
 def test_completed_future_resolves_to_given_result() -> None:
+    _, _, _completed_future, _ = _import_adapter_symbols()
     done_true = _completed_future(True)
     assert done_true.query() is True
     assert done_true.result(timeout=0) is True
@@ -107,6 +123,7 @@ def test_completed_future_resolves_to_given_result() -> None:
 
 
 def test_store_kv_async_unhealthy_returns_failed_future_no_send(monkeypatch) -> None:
+    adapter_mod, _, _, _ = _import_adapter_symbols()
     conn = _make_connector(healthy=False)
 
     def _fail_send(*args, **kwargs):
@@ -125,6 +142,7 @@ def test_store_kv_async_unhealthy_returns_failed_future_no_send(monkeypatch) -> 
 def test_store_kv_async_no_aligned_range_returns_completed_future_no_send(
     monkeypatch,
 ) -> None:
+    adapter_mod, _, _, _ = _import_adapter_symbols()
     conn = _make_connector(healthy=True)
 
     def _fail_send(*args, **kwargs):
@@ -142,6 +160,7 @@ def test_store_kv_async_no_aligned_range_returns_completed_future_no_send(
 def test_store_kv_async_happy_path_returns_daemon_future_without_blocking(
     monkeypatch,
 ) -> None:
+    adapter_mod, _, _, _ = _import_adapter_symbols()
     conn = _make_connector(healthy=True)
     conn.mq_client = object()  # type: ignore[assignment]
     conn.instance_id = 123

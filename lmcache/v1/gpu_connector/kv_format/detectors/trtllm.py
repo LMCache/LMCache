@@ -15,7 +15,7 @@ from lmcache.v1.gpu_connector.kv_format.detectors.base import (
     measure_list_depth_until_tensor,
 )
 from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache, LayoutHints
-import lmcache.c_ops as lmc_ops
+import lmcache.lmcache_native as lmcache_native
 
 
 class TRTLLM_Detector(EngineDetector):
@@ -23,7 +23,7 @@ class TRTLLM_Detector(EngineDetector):
 
     def discover(
         self, kv_caches: DiscoverableKVCache, layout_hints: LayoutHints
-    ) -> "tuple[Optional[lmc_ops.EngineKVFormat], DiscoverableKVCache]":
+    ) -> "tuple[Optional[lmcache_native.EngineKVFormat], DiscoverableKVCache]":
         # TRT-LLM hands a 4-D pool tensor (maybe wrapped in a 1-element list);
         # reshape its fused trailing dim into the canonical 6-D cross-layer form
         # [NB, NL, 2, num_kv_heads, tokens_per_block, head_dim].
@@ -57,5 +57,5 @@ class TRTLLM_Detector(EngineDetector):
             kv_caches
         )
         if list_depth == 0 and tensor_ndim == 6:
-            return lmc_ops.EngineKVFormat.NB_NL_TWO_NH_BS_HS, kv_caches
+            return lmcache_native.EngineKVFormat.NB_NL_TWO_NH_BS_HS, kv_caches
         return None, kv_caches

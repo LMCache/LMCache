@@ -17,6 +17,13 @@ from enum import Enum
 # First Party
 from lmcache.v1.distributed.api import EncodedObjectKey, Tier
 
+# ``token_offset`` value meaning "the emitter did not report a position".
+# Distinct from 0, which is a real position (a chunk at the start of its
+# sequence): an emitter predating token offsets sends no offset at all, and
+# treating that as 0 would place every chunk at the sequence start and
+# re-RoPE reused KV from the wrong source position.
+UNKNOWN_TOKEN_OFFSET = -1
+
 
 class CacheEventType(str, Enum):
     """The kind of cache-state change a :class:`CacheEventBatch` reports.
@@ -32,6 +39,26 @@ class CacheEventType(str, Enum):
 
 
 @dataclass(frozen=True)
+class BlendMatch:
+    """One cached chunk found inside a query sequence.
+
+    Shared by the coordinator's blend index, which produces matches, and
+    the MP-server client, which consumes them.
+
+    Attributes:
+        chunk_hash: The matched chunk's ``ObjectKey.chunk_hash``; the
+            same bytes a local ``CBMatchResult.hash`` holds.
+        old_st: Its position in the sequence it was stored under
+            (re-RoPE source).
+        cur_st: Its position in the query (re-RoPE target).
+    """
+
+    chunk_hash: bytes
+    old_st: int
+    cur_st: int
+
+
+@dataclass(frozen=True)
 class CacheEventEntry:
     """One key's worth of change inside a :class:`CacheEventBatch`.
 
@@ -39,22 +66,33 @@ class CacheEventEntry:
         key: The object key the change applies to.
         size_bytes: Bytes committed for the key (``store`` only; ``0``
             otherwise).
-        content_hash_hex: Hex of the chunk's position-independent content
-            hash; empty when the emitter does not compute it.
+        token_ids: The chunk's token ids, stamped on ``store`` entries
+            (empty when the emitter no longer holds them); the directory
+            indexes them by the key's chunk hash.
+        token_offset: Token position of the chunk's first token in the
+            sequence it was stored under; prefix-chained chunk hashes do
+            not reveal it. :data:`UNKNOWN_TOKEN_OFFSET` when unreported.
     """
 
     key: EncodedObjectKey
     size_bytes: int = 0
-    content_hash_hex: str = ""
+    token_ids: list[int] = field(default_factory=list)
+    token_offset: int = UNKNOWN_TOKEN_OFFSET
 
     def __post_init__(self) -> None:
         """Enforce intrinsic invariants.
 
         Raises:
-            ValueError: If ``size_bytes`` is negative.
+            ValueError: If ``size_bytes`` is negative, or ``token_offset``
+                is negative and not :data:`UNKNOWN_TOKEN_OFFSET`.
         """
         if self.size_bytes < 0:
             raise ValueError(f"size_bytes must be >= 0 (got {self.size_bytes})")
+        if self.token_offset < 0 and self.token_offset != UNKNOWN_TOKEN_OFFSET:
+            raise ValueError(
+                f"token_offset must be >= 0 or UNKNOWN_TOKEN_OFFSET "
+                f"({UNKNOWN_TOKEN_OFFSET}), got {self.token_offset}"
+            )
 
 
 @dataclass(frozen=True)
@@ -62,7 +100,7 @@ class CacheEventBatch:
     """A batch of same-typed cache events from one MP server.
 
     Attributes:
-        instance_id: The emitting MP server (non-empty).
+        instance_id: The emitter's unique ID (non-empty).
         incarnation: The emitter's restart counter (non-negative). A
             higher value fences off all placements reported by lower
             values of the same ``instance_id``.
@@ -77,6 +115,9 @@ class CacheEventBatch:
             identity); empty for ``access``, which only refreshes
             key-level recency and carries no placement identity.
         entries: The affected keys.
+        shared: ``True`` when the backend is a storage domain mounted by
+            several instances (e.g. one S3 bucket or CXL pool). ``False``
+            (default) marks the storage private to this instance.
         ts: Emitter wall-clock seconds for the batch (``0.0`` if unknown).
     """
 
@@ -87,6 +128,7 @@ class CacheEventBatch:
     tier: Tier
     backend: str
     entries: list[CacheEventEntry] = field(default_factory=list)
+    shared: bool = False
     ts: float = 0.0
 
     def __post_init__(self) -> None:

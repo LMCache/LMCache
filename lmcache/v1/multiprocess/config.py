@@ -12,6 +12,11 @@ import math
 import os
 import uuid
 
+# First Party
+from lmcache.logging import init_logger
+
+logger = init_logger(__name__)
+
 
 @dataclass
 class MPServerConfig:
@@ -45,10 +50,10 @@ class MPServerConfig:
     ('default' for standard prefix caching, 'blend' when cacheblend is enabled).
     """
 
-    separate_object_groups: bool = True
-    """When True (default), split kernel groups into one object group per
-    sliding-window size at KV-cache registration (hybrid models). When False,
-    all kernel groups share a single full-attention object group."""
+    separate_object_groups: bool = False
+    """When True, split kernel groups into one object group per
+    sliding-window size at KV-cache registration (hybrid models). When False
+    (default), all kernel groups share a single full-attention object group."""
 
     enable_segmented_prefix: bool = False
     """CacheBlend only (engine_type='blend'): on a mid-prefix L2 retrieve
@@ -214,9 +219,9 @@ class CoordinatorConfig:
     the coordinator's ``INSTANCE_TIMEOUT``."""
 
     event_reporting: bool = False
-    """When ``True``, report cache events to the coordinator: the key
-    directory's store/access/delete stream (fleet-wide placement tracking)
-    and the L2 usage stream (quota tracking and eviction)."""
+    """When ``True``, stream cache store/access/delete events to the
+    coordinator, feeding the key directory (fleet-wide placement
+    tracking) and, for L2 events, usage/quota tracking and eviction."""
 
     event_flush_interval: float = 1.0
     """Seconds between cache-event flush attempts to the coordinator."""
@@ -352,9 +357,9 @@ def add_mp_server_args(
     mp_group.add_argument(
         "--separate-object-groups",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=False,
         help="Split kernel groups into one object group per sliding-window size "
-        "at KV-cache registration (for hybrid models). (Default is True)",
+        "at KV-cache registration (for hybrid models). (Default is False)",
     )
     mp_group.add_argument(
         "--worker-reap-timeout-seconds",
@@ -597,9 +602,9 @@ def add_coordinator_args(
         "--coordinator-event-reporting",
         action="store_true",
         default=None,
-        help="Report cache events to the coordinator: the key directory's "
-        "store/access/delete stream (placement tracking) and the L2 usage "
-        "stream (quota tracking and eviction). Defaults to "
+        help="Stream cache store/access/delete events to the coordinator, "
+        "feeding the key directory (placement tracking) and, for L2 "
+        "events, usage/quota tracking and eviction. Defaults to "
         "LMCACHE_COORDINATOR_EVENT_REPORTING; unset disables.",
     )
     group.add_argument(
@@ -608,6 +613,24 @@ def add_coordinator_args(
         default=None,
         help="Seconds between cache-event flush attempts (must be > 0). "
         "Defaults to LMCACHE_COORDINATOR_EVENT_FLUSH_INTERVAL, then 1.0.",
+    )
+    # Deprecated pre-v0.5.3 aliases, hidden from --help. Released deployers
+    # (operator <= v0.5.2, charts) still render these names into server args,
+    # and rejecting them crashes the pod on startup. Remove once those
+    # deployers are out of the support matrix.
+    group.add_argument(
+        "--coordinator-l2-event-reporting",
+        dest="coordinator_l2_event_reporting",
+        action="store_true",
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    group.add_argument(
+        "--coordinator-l2-event-flush-interval",
+        dest="coordinator_l2_event_flush_interval",
+        type=float,
+        default=None,
+        help=argparse.SUPPRESS,
     )
     return parser
 
@@ -620,6 +643,11 @@ def parse_args_to_coordinator_config(
     A flag value takes precedence over its environment variable. The heartbeat
     interval is validated here so a malformed value fails fast at startup
     (runtime best-effort only covers coordinator *reachability*, not config).
+
+    The event-reporting flags also accept their deprecated pre-v0.5.3
+    spellings (``--coordinator-l2-event-*``), logging a deprecation warning
+    when used. Precedence per setting: new flag > deprecated flag > env var
+    > default.
 
     Args:
         args: Parsed arguments from the argument parser.
@@ -661,15 +689,31 @@ def parse_args_to_coordinator_config(
             "coordinator heartbeat interval must be a finite number > 0, "
             "got %s" % heartbeat_interval
         )
+    # Deprecated pre-v0.5.3 flag spellings. Precedence within each setting:
+    # new flag > deprecated flag > env var > default.
+    deprecated_reporting = getattr(args, "coordinator_l2_event_reporting", None)
     if args.coordinator_event_reporting is not None:
         event_reporting = args.coordinator_event_reporting
+    elif deprecated_reporting is not None:
+        logger.warning(
+            "--coordinator-l2-event-reporting is deprecated, "
+            "use --coordinator-event-reporting instead"
+        )
+        event_reporting = deprecated_reporting
     else:
         event_reporting = os.getenv(
             "LMCACHE_COORDINATOR_EVENT_REPORTING", ""
         ).lower() in ("1", "true", "yes")
 
+    deprecated_flush = getattr(args, "coordinator_l2_event_flush_interval", None)
     if args.coordinator_event_flush_interval is not None:
         event_flush_interval = args.coordinator_event_flush_interval
+    elif deprecated_flush is not None:
+        logger.warning(
+            "--coordinator-l2-event-flush-interval is deprecated, "
+            "use --coordinator-event-flush-interval instead"
+        )
+        event_flush_interval = deprecated_flush
     else:
         raw = os.getenv("LMCACHE_COORDINATOR_EVENT_FLUSH_INTERVAL")
         if raw:

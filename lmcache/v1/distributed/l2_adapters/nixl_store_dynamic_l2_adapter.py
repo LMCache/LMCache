@@ -38,8 +38,8 @@ from nixl._api import (
 )
 
 # First Party
+from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
-from lmcache.native_storage_ops import Bitmap
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.internal_api import L1MemoryDesc, L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
@@ -422,7 +422,7 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
     #####################
 
     def submit_lookup_and_lock_task(
-        self, keys: list[ObjectKey], layout_desc: MemoryLayoutDesc
+        self, keys: list[ObjectKey], group_layout_descs: dict[int, MemoryLayoutDesc]
     ) -> L2TaskId:
         with self._lock:
             task_id = self._get_next_task_id()
@@ -612,6 +612,7 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
                             "Storage capacity exceeded, skipping store for key %s",
                             key,
                         )
+                        success = False
                         break
                     self._inflight_stores.add(key)
                     self._total_bytes += mem_size

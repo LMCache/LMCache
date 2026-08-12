@@ -10,12 +10,17 @@ This module holds HTTP models only.
 """
 
 # Standard
-from enum import Enum
 from typing import Annotated
 import base64
 
 # Third Party
-from pydantic import BaseModel, Field, StringConstraints, field_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 import numpy as np
 
 # First Party
@@ -170,57 +175,7 @@ class QuotaConfigResponse(BaseModel):
     default_limit_gb: float | None
 
 
-# -- Usage tracking ----------------------------------------------------------
-
-
-class EventType(str, Enum):
-    """Cache events reported by an MP server."""
-
-    STORE = "store"
-    LOOKUP = "lookup"
-    DELETE = "delete"
-
-
-class UsageEvent(BaseModel):
-    """A single cache event reported by an MP server.
-
-    Attributes:
-        type: The event type.
-        key: The cache key this event applies to.
-        bytes: Bytes stored (``store`` only; ``0`` for other types).
-    """
-
-    type: EventType
-    key: EncodedObjectKey
-    bytes: int = Field(ge=0)
-
-
-class ReportUsageRequest(BaseModel):
-    """Body of ``POST /quota/events``.
-
-    Attributes:
-        instance_id: Identifier of the MP server that produced this batch.
-        seq: Monotonically increasing sequence number scoped to this
-            ``instance_id``. Starts at 1 for the first flush after the
-            server starts.
-        events: Batch of store/lookup events to record.
-        tier: Cache tier the events apply to (only ``l2`` is supported today).
-    """
-
-    instance_id: str
-    seq: int = Field(ge=1)
-    events: list[UsageEvent]
-    tier: Tier = Tier.L2
-
-
-class ReportUsageResponse(BaseModel):
-    """Reply to ``POST /quota/events``.
-
-    Attributes:
-        recorded: Number of events processed.
-    """
-
-    recorded: int
+# -- Usage / quota status ----------------------------------------------------
 
 
 class StatusResponse(BaseModel):
@@ -276,13 +231,11 @@ class DirectoryEventsRequest(BaseModel):
 
         Raises:
             ValueError: If an entry's key cannot convert into an
-                ``ObjectKey`` or its ``content_hash_hex`` is not valid
-                hex (surfaced as 422).
+                ``ObjectKey`` (surfaced as 422).
         """
         for batch in value:
             for entry in batch.entries:
                 entry.key.to_object_key()
-                bytes.fromhex(entry.content_hash_hex)
         return value
 
 
@@ -303,140 +256,134 @@ class DirectoryEventsResponse(BaseModel):
 class DirectoryLookupRequest(BaseModel):
     """Body of ``POST /directory/lookup``.
 
+    Supply exactly one of the two lookup forms:
+
+    * ``keys`` — resolve these keys directly.
+    * ``token_ids`` (with ``model_name`` / ``world_size``) — resolve a
+      request's token sequence to the object keys of its complete
+      chunks, the same fan-out the pin APIs use. Chunk hashes are
+      prefix-chained, so this must be the request's **full** token
+      sequence from position 0; a mid-request slice resolves to
+      different keys. Trailing incomplete chunks are ignored.
+
     Attributes:
-        keys: The keys to resolve to placements.
+        keys: The keys to resolve (keys form).
+        token_ids: The request's full token sequence (tokens form).
+        model_name: Model whose rank fan-out to use (tokens form).
+        world_size: World size selecting the per-rank fan-out
+            (tokens form).
+        cache_salt: Per-tenant isolation salt applied to produced keys
+            (tokens form).
     """
 
     keys: list[EncodedObjectKey] = Field(default_factory=list)
+    token_ids: list[int] = Field(default_factory=list)
+    model_name: str = ""
+    world_size: int = Field(default=1, ge=1)
+    cache_salt: str = ""
+
+    @field_validator("keys")
+    @classmethod
+    def _validate_keys(cls, value: list[EncodedObjectKey]) -> list[EncodedObjectKey]:
+        """Reject undecodable keys at request validation (surfaced as 422).
+
+        Args:
+            value: The hydrated keys.
+
+        Returns:
+            The unchanged keys once each converts to an ``ObjectKey``.
+
+        Raises:
+            ValueError: If a key cannot convert into an ``ObjectKey``.
+        """
+        for encoded in value:
+            encoded.to_object_key()
+        return value
+
+    @model_validator(mode="after")
+    def _validate_one_form(self) -> "DirectoryLookupRequest":
+        """Enforce that exactly one lookup form is supplied.
+
+        Returns:
+            The unchanged request once exactly one form is present.
+
+        Raises:
+            ValueError: If both or neither of ``keys`` / ``token_ids``
+                is supplied, or the tokens form omits ``model_name``.
+        """
+        if bool(self.keys) == bool(self.token_ids):
+            raise ValueError("supply exactly one of 'keys' or 'token_ids'")
+        if self.token_ids and not self.model_name:
+            raise ValueError("'model_name' is required with 'token_ids'")
+        return self
 
 
 class DirectoryKeyPlacements(BaseModel):
-    """Placements for one requested key.
+    """Placements and token ids for one resolved key.
 
     Attributes:
-        key: The requested key, echoed back.
+        key: The resolved key, echoed back.
         placements: Known placements; empty when the directory knows
             nothing about the key.
+        token_ids: The chunk's token ids; empty when unknown.
     """
 
     key: EncodedObjectKey
     placements: list[Placement] = Field(default_factory=list)
+    token_ids: list[int] = Field(default_factory=list)
 
 
 class DirectoryLookupResponse(BaseModel):
     """Reply to ``POST /directory/lookup``.
 
     Attributes:
-        results: One entry per requested key, in request order.
-    """
-
-    results: list[DirectoryKeyPlacements] = Field(default_factory=list)
-
-
-class TokenPlacementLookupRequest(BaseModel):
-    """Body of ``POST /directory/lookup_tokens``.
-
-    Resolves ``token_ids`` to the object keys of their complete chunks
-    (the same fan-out the pin APIs use) and returns each key's placements.
-
-    Attributes:
-        model_name: Model whose rank fan-out to use when resolving keys.
-        world_size: World size selecting the per-rank fan-out.
-        token_ids: The token sequence to resolve.
-        cache_salt: Per-tenant isolation salt applied to the produced keys.
-    """
-
-    model_name: str
-    world_size: int = Field(ge=1)
-    token_ids: list[int] = Field(default_factory=list)
-    cache_salt: str = ""
-
-
-class TokenPlacementLookupResponse(BaseModel):
-    """Reply to ``POST /directory/lookup_tokens``.
-
-    Attributes:
-        chunks: Number of complete chunks the token sequence resolved to.
-        results: One entry per resolved key (``chunks`` x per-rank
-            fan-out), each echoing the key with its known placements.
+        chunks: Complete chunks the request resolved to — the token
+            sequence's chunk count (tokens form) or the number of
+            requested keys (keys form).
+        results: One entry per resolved key, in request order (tokens
+            form: ``chunks`` x per-rank fan-out).
     """
 
     chunks: int = 0
     results: list[DirectoryKeyPlacements] = Field(default_factory=list)
 
 
-# -- Global CacheBlend fingerprint directory ------------------------------
-
-
-class StoreRangeModel(BaseModel):
-    """Wire form of one published stored token range (see ``StoreRange``).
-
-    The coordinator chunks ``tokens`` at its chunk size and hashes each chunk;
-    chunk ``i`` maps to ``object_keys[i]`` at ``old_st_base + i * chunk_size``.
+class DirectoryKeyInfo(BaseModel):
+    """One listed directory key.
 
     Attributes:
-        model_scope: Reuse scope (the model name).
-        tokens: The stored tokens (``token_ids[start:end]``).
-        object_keys: Shared-L2 storage key (hex) per chunk, in order.
-        old_st_base: Token position of the range's first token.
+        key: The listed key.
+        placements: The key's placements that matched the listing filters.
+        num_tokens: Token ids known for the key's chunk (``0`` = unknown).
     """
 
-    model_scope: str
-    tokens: list[int] = Field(default_factory=list)
-    object_keys: list[str] = Field(default_factory=list)
-    old_st_base: int = Field(ge=0)
+    key: EncodedObjectKey
+    placements: list[Placement] = Field(default_factory=list)
+    num_tokens: int = 0
 
 
-class BlendFingerprintRequest(BaseModel):
-    """Body of ``POST /blend/fingerprints``: register stored ranges.
+class DirectoryListResponse(BaseModel):
+    """Reply to ``GET /directory/keys``.
 
     Attributes:
-        ranges: Stored token ranges to register (idempotent).
+        total: Keys with at least one placement matching the filters.
+        keys: The requested page of them, in directory iteration order.
     """
 
-    ranges: list[StoreRangeModel] = Field(default_factory=list)
+    total: int = 0
+    keys: list[DirectoryKeyInfo] = Field(default_factory=list)
 
 
-class BlendFingerprintResponse(BaseModel):
-    """Reply to ``POST /blend/fingerprints``.
+class BlendLookupRequest(BaseModel):
+    """Body of ``POST /directory/blend-lookup``.
 
-    Attributes:
-        inserted: Number of fingerprints newly registered.
-    """
-
-    inserted: int
-
-
-class BlendEvictRequest(BaseModel):
-    """Body of ``DELETE /blend/fingerprints``: evict by storage key.
+    Unlike ``/directory/lookup`` the query need not be a prefix.
 
     Attributes:
-        object_keys: ``object_key`` values to evict.
-    """
-
-    object_keys: list[str] = Field(default_factory=list)
-
-
-class BlendEvictResponse(BaseModel):
-    """Reply to ``DELETE /blend/fingerprints``.
-
-    Attributes:
-        removed: Number of fingerprint entries evicted.
-    """
-
-    removed: int
-
-
-class BlendMatchRequest(BaseModel):
-    """Body of ``POST /blend/match``.
-
-    Attributes:
-        model_scope: Scope to match within.
-        tokens_b64: The request tokens, packed via :func:`encode_tokens`
+        tokens_b64: The query tokens, packed via :func:`encode_tokens`
             (base64 little-endian ``uint32``).
     """
 
-    model_scope: str
     tokens_b64: str = ""
 
     @field_validator("tokens_b64")
@@ -444,9 +391,8 @@ class BlendMatchRequest(BaseModel):
     def _validate_tokens_b64(cls, value: str) -> str:
         """Reject a malformed token buffer at request validation.
 
-        Without this, ``decode_tokens`` would raise ``ValueError`` inside the
-        route handler, which FastAPI surfaces as a 500 (server error) for what
-        is really bad client input. Validating here returns a 422 instead.
+        Validating here returns 422 rather than the 500 a decode failure
+        inside the handler would produce.
 
         Args:
             value: The base64 ``tokens_b64`` field.
@@ -455,35 +401,37 @@ class BlendMatchRequest(BaseModel):
             The unchanged value once it is confirmed decodable.
 
         Raises:
-            ValueError: If ``value`` is not valid base64 or not a whole number
-                of ``uint32`` tokens (surfaced by FastAPI as 422).
+            ValueError: If ``value`` is not valid base64 or not a whole
+                number of ``uint32`` tokens.
         """
         decode_tokens(value)
         return value
 
 
-class GlobalMatchModel(BaseModel):
-    """Wire form of one matched chunk (see ``GlobalMatch``).
+class BlendMatchModel(BaseModel):
+    """Wire form of one blend match (see ``BlendMatch``).
 
     Attributes:
-        object_key: Shared-L2 storage key of the matched chunk.
-        old_st: Token position in the stored sequence (re-RoPE source).
-        cur_st: Token position in the request (re-RoPE target).
+        chunk_hash: Hex of the matched chunk's ``ObjectKey.chunk_hash``.
+        old_st: Its position in the sequence it was stored under
+            (re-RoPE source).
+        cur_st: Its position in the query (re-RoPE target).
     """
 
-    object_key: str
+    chunk_hash: str
     old_st: int
     cur_st: int
 
 
-class BlendMatchResponse(BaseModel):
-    """Reply to ``POST /blend/match``.
+class BlendLookupResponse(BaseModel):
+    """Reply to ``POST /directory/blend-lookup``.
 
     Attributes:
-        matches: Matched chunks, ascending by ``cur_st``.
+        matches: Matched chunks, ascending by ``cur_st``. They may
+            overlap in the query; the caller resolves overlaps.
     """
 
-    matches: list[GlobalMatchModel]
+    matches: list[BlendMatchModel] = Field(default_factory=list)
 
 
 class PrefetchRequest(BaseModel):
