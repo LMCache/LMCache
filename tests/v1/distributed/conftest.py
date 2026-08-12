@@ -12,7 +12,7 @@ from typing import Any, cast
 import sys
 import types
 
-if find_spec("lmcache.native_storage_ops") is None:
+if find_spec("lmcache.lmcache_native") is None:
 
     class Bitmap:
         """Small Python Bitmap fallback for source-only distributed tests."""
@@ -84,11 +84,11 @@ if find_spec("lmcache.native_storage_ops") is None:
     class TTLLock:
         """Minimal TTLLock fallback for tests that only import the symbol."""
 
-    fallback_module = types.ModuleType("lmcache.native_storage_ops")
+    fallback_module = types.ModuleType("lmcache.lmcache_native")
     fallback_module_any = cast(Any, fallback_module)
     fallback_module_any.Bitmap = Bitmap
     fallback_module_any.TTLLock = TTLLock
-    sys.modules["lmcache.native_storage_ops"] = fallback_module
+    sys.modules["lmcache.lmcache_native"] = fallback_module
 
 
 # ---------------------------------------------------------------------------

@@ -124,3 +124,35 @@ spec:
 
   # -- Extra CLI flags (appended last, can override any auto-generated flag) --
   # extraArgs: []
+
+  # -- PD (Prefill-Decode) disaggregation --
+  # When set, the engine's connection ConfigMap emits three kv-transfer-config
+  # keys so a single DaemonSet instance can serve prefiller, decoder, and
+  # plain (non-PD) vLLM pods simultaneously:
+  #
+  #   kv-transfer-config.json            — bare LMCacheMPConnector (fallback,
+  #                                        for pods without lmcache.ai/pd-role)
+  #   kv-transfer-config-prefiller.json  — MultiConnector(kv_producer)
+  #   kv-transfer-config-decoder.json    — MultiConnector(kv_consumer)
+  #
+  # vLLM pods mount the ConfigMap and read the role-specific key directly, or
+  # add the lmcache.ai/pd-role annotation to have the webhook select it.
+  #
+  # NIXL RDMA note: UCX requires valid RDMA GIDs. Under standard overlay CNI
+  # the GID table inside the pod is empty; use hostNetwork: true (quick test)
+  # or SR-IOV with Multus (production) on the vLLM pods.
+  #
+  # pd:
+  #   nixlSideChannelPort: 5558        # default, NIXL side-channel port.
+  #                                    # With hostNetwork: true, use distinct
+  #                                    # values per role (e.g. 5557 / 5558)
+  #                                    # by pre-setting VLLM_NIXL_SIDE_CHANNEL_PORT
+  #                                    # in the pod env — the webhook will not
+  #                                    # override a pre-set value.
+  #   nixlLoadFailurePolicy: fail      # fail | ignore
+  #                                    # fail:   abort request if NIXL transfer fails
+  #                                    # ignore: fall back to local prefill on failure
+  #   enforceHandshakeCompat: true     # omit this key to use NIXL's own default.
+  #                                    # Set to false to disable strict version
+  #                                    # negotiation when prefiller and decoder
+  #                                    # run different vLLM builds.

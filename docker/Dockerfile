@@ -91,8 +91,7 @@ RUN --mount=type=cache,target=/root/.cache/ccache,id=ccache \
     python3 setup.py bdist_wheel --dist-dir=dist_lmcache && \
     uv pip install ./dist_lmcache/*.whl --verbose && \
   
-    uv pip install --reinstall-package "nixl-cu${LMCACHE_CUDA_MAJOR}" \
-        "nixl-cu${LMCACHE_CUDA_MAJOR}"
+    uv pip install --reinstall-package nixl nixl
 
 WORKDIR /workspace
 ENTRYPOINT ["/opt/venv/bin/vllm", "serve"]
@@ -120,7 +119,7 @@ RUN . /opt/venv/bin/activate && \
         --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
         --index-strategy unsafe-best-match --verbose && \
   
-    uv pip install --reinstall-package "nixl-cu${CUDA_MAJOR}" "nixl-cu${CUDA_MAJOR}"
+    uv pip install --reinstall-package nixl nixl
 
 WORKDIR /workspace
 ENTRYPOINT ["/opt/venv/bin/vllm", "serve"]
@@ -149,7 +148,7 @@ RUN . /opt/venv/bin/activate && \
         --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/v${VER}-cu129 \
         --index-strategy unsafe-best-match --verbose && \
     
-    uv pip install --reinstall-package "nixl-cu${CUDA_MAJOR}" "nixl-cu${CUDA_MAJOR}"
+    uv pip install --reinstall-package nixl nixl
 
 WORKDIR /workspace
 ENTRYPOINT ["/opt/venv/bin/vllm", "serve"]

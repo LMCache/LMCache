@@ -26,29 +26,7 @@ from lmcache.v1.memory_allocators.pin_memory_allocator import PinMemoryAllocator
 from lmcache.v1.memory_allocators.tensor_memory_allocator import TensorMemoryAllocator
 from lmcache.v1.memory_management import MemoryFormat
 from lmcache.v1.metadata import LMCacheMetadata
-
-if torch.cuda.is_available():
-    try:
-        # First Party
-        import lmcache.c_ops as lmc_ops
-    except ImportError:
-        lmc_ops = None
-else:
-    lmc_ops = None
-
-# Mock c_ops when not available
-if lmc_ops is None:
-
-    class MockEngineKVFormat:
-        NL_X_TWO_NB_BS_NH_HS = 0
-        NL_X_NB_TWO_BS_NH_HS = 1
-        NL_X_NB_BS_HS = 2
-
-    class MockCOps:
-        EngineKVFormat = MockEngineKVFormat
-        GPUKVFormat = MockEngineKVFormat
-
-    lmc_ops = MockCOps()
+import lmcache.lmcache_native as lmcache_native
 
 # Local
 from .utils import (
@@ -119,9 +97,11 @@ def patch_pin_allocator():
 @pytest.mark.parametrize(
     "engine_kv_format",
     [
-        lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,  # vllm non-MLA flash attention
-        lmc_ops.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS,  # vllm non-MLA flash infer
-        lmc_ops.EngineKVFormat.NL_X_NB_BS_HS,
+        # vLLM non-MLA flash attention
+        lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
+        # vLLM non-MLA flash infer
+        lmcache_native.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS,
+        lmcache_native.EngineKVFormat.NL_X_NB_BS_HS,
     ],  # vllm MLA
 )
 @pytest.mark.skipif(
@@ -129,7 +109,7 @@ def patch_pin_allocator():
     reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
 )
 def test_vllm_paged_connector_v2_with_gpu_and_mla(use_gpu, engine_kv_format):
-    use_mla = engine_kv_format == lmc_ops.EngineKVFormat.NL_X_NB_BS_HS
+    use_mla = engine_kv_format == lmcache_native.EngineKVFormat.NL_X_NB_BS_HS
     num_blocks = 100
     block_size = 16
     num_layers = 32
@@ -240,9 +220,11 @@ def test_vllm_paged_connector_v2_with_gpu_and_mla(use_gpu, engine_kv_format):
 @pytest.mark.parametrize(
     "engine_kv_format",
     [
-        lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,  # vllm non-MLA flash attention
-        lmc_ops.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS,  # vllm non-MLA flash infer
-        lmc_ops.EngineKVFormat.NL_X_NB_BS_HS,
+        # vLLM non-MLA flash attention
+        lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
+        # vLLM non-MLA flash infer
+        lmcache_native.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS,
+        lmcache_native.EngineKVFormat.NL_X_NB_BS_HS,
     ],  # vllm MLA
 )
 @pytest.mark.skipif(
@@ -252,7 +234,7 @@ def test_vllm_paged_connector_v2_with_gpu_and_mla(use_gpu, engine_kv_format):
 def test_vllm_paged_connector_v3_with_gpu_and_mla(
     use_gpu, num_groups, engine_kv_format
 ):
-    use_mla = engine_kv_format == lmc_ops.EngineKVFormat.NL_X_NB_BS_HS
+    use_mla = engine_kv_format == lmcache_native.EngineKVFormat.NL_X_NB_BS_HS
     head_sizes = [64, 66, 66]
     dtypes = [torch.uint8, torch.bfloat16, torch.uint8]
     num_blocks = 100
@@ -378,8 +360,10 @@ def test_vllm_paged_connector_v3_with_gpu_and_mla(
 @pytest.mark.parametrize(
     "engine_kv_format",
     [
-        lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,  # vllm non-MLA flash attention
-        lmc_ops.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS,  # vllm non-MLA flash infer
+        # vLLM non-MLA flash attention
+        lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
+        # vLLM non-MLA flash infer
+        lmcache_native.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS,
     ],
 )
 @pytest.mark.skipif(

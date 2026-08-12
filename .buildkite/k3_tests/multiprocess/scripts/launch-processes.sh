@@ -89,6 +89,18 @@ if [ -n "${MAX_NUM_BATCHED_TOKENS:-}" ]; then
     MAX_NUM_BATCHED_TOKENS_ARG="--max-num-batched-tokens ${MAX_NUM_BATCHED_TOKENS}"
 fi
 
+# Split kernel groups into one object group per sliding-window size at
+# KV-cache registration. Required for hybrid models (e.g. gemma-4's
+# sliding-window + full-attention groups have different block sizes); without
+# it the hybrid groups collapse into a single full-attention group and the
+# per-group HMA store/retrieve corrupts the KV, failing the bit-exact check.
+# Set explicitly rather than relying on the server default so the test is
+# robust to default changes (the default flipped False in #3869/#4437).
+SEPARATE_OBJECT_GROUPS_ARG=""
+if [ "${SEPARATE_OBJECT_GROUPS:-0}" = "1" ] || [ "${SEPARATE_OBJECT_GROUPS:-0}" = "true" ]; then
+    SEPARATE_OBJECT_GROUPS_ARG="--separate-object-groups"
+fi
+
 # L1 lazy allocation mode. Default is lazy (--l1-use-lazy). Set L1_USE_LAZY=false
 # to disable lazy allocation, which enables POSIX SHM-backed L1 pool for the
 # engine_driven SHM transfer path. When lazy is enabled (default), the SHM pool
@@ -126,6 +138,7 @@ lmcache server \
     --port "$LMCACHE_PORT" \
     ${GDS_L1_ARG} \
     ${L1_LAZY_ARG} \
+    ${SEPARATE_OBJECT_GROUPS_ARG} \
     > "/tmp/build_${BUILD_ID}_lmcache.log" 2>&1 &
 
 LMCACHE_PID=$!
