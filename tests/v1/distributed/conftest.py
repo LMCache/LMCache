@@ -88,15 +88,6 @@ if find_spec("lmcache.lmcache_native") is None:
     fallback_module_any = cast(Any, fallback_module)
     fallback_module_any.Bitmap = Bitmap
     fallback_module_any.TTLLock = TTLLock
-    # Relocated KV-format / transfer types and format predicates, so
-    # ``lmcache.v1.platform.ops_types`` can import them from the fallback.
-    fallback_module_any.EngineKVFormat = object
-    fallback_module_any.GPUKVFormat = object
-    fallback_module_any.TransferDirection = object
-    fallback_module_any.is_cross_layer = lambda _: False
-    fallback_module_any.is_kv_list = lambda _: False
-    fallback_module_any.is_layer_list = lambda _: False
-    fallback_module_any.is_mla = lambda _: False
     sys.modules["lmcache.lmcache_native"] = fallback_module
 
 

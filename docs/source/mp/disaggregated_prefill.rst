@@ -215,6 +215,14 @@ Verifying it is working
   server ``/status``. It stays ``0`` while the working set fits in GPU HBM and
   rises once reuse spills out of the GPU cache.
 
+Using the Operator
+------------------
+
+For Kubernetes deployments, the operator can manage the ``LMCacheEngine`` CRs
+for both the prefiller and decoder roles and automatically inject the
+``MultiConnector`` config and NIXL env vars into opted-in vLLM pods.  See
+:ref:`mp-operator-pd-disaggregation` for the operator-based setup.
+
 Limitations and tuning
 ----------------------
 

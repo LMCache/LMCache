@@ -41,7 +41,7 @@ from lmcache.v1.platform.cuda.cache_context import (  # noqa: E402
     GPUCacheContext,
     _TempGPUBuffer,
 )
-import lmcache.c_ops as lmc_ops  # noqa: E402
+import lmcache.lmcache_native as lmcache_native  # noqa: E402
 
 pytestmark = [
     pytest.mark.cuda,
@@ -102,8 +102,8 @@ def _make_kv_tensors(
 
 def _build_manager(
     tensors: list[torch.Tensor],
-    engine_kv_format: "lmc_ops.EngineKVFormat" = (
-        lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
+    engine_kv_format: "lmcache_native.EngineKVFormat" = (
+        lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
     ),
     engine_group_infos: Sequence[EngineGroupInfo] = (),
     lmcache_tokens_per_chunk: int = 256,
