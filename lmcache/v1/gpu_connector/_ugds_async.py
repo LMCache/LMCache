@@ -6,8 +6,8 @@ NVMe path instead of cuFile. The API surface (AsyncHandle, Submission,
 register_*/deregister_*) is identical so that :mod:`gds_context` can use
 either backend transparently.
 
-LMCache expects ``libugds.so`` to be built for the active PyTorch platform:
-CUDA-only for NVIDIA or HIP-only for AMD ROCm.
+LMCache expects ``libugds.so`` to match the active NVIDIA CUDA or AMD ROCm
+platform.
 
 uGDS operates on raw character devices (/dev/ugds_drv*), not filesystem files.
 The fd/handle split is the same as _cufile_async: the caller opens the
@@ -189,25 +189,15 @@ def deregister_handle(handle: int) -> None:
 
 # --- Buffer / stream registration -----------------------------------
 
-# UGDS_REGISTER_DMABUF from ugds.h: pin GPU memory by exporting it as a
-# dma-buf, which the AMD path requires. Leaving it clear lets uGDS decide.
+# UGDS_REGISTER_DMABUF from ugds.h requests the AMD HIP dma-buf path.
 _UGDS_REGISTER_DMABUF = 0x1
 
 
 def _buf_register_flags() -> int:
     """Return the ``uGDSBufRegister`` flags matching the PyTorch platform.
 
-    uGDS pins GPU memory for NVMe DMA either through ``nvidia_p2p_get_pages``
-    or through an exported dma-buf, and this flag requests the dma-buf path
-    that AMD needs. A ``libugds.so`` built for a single platform compiles in
-    one path and ignores the flag; a build carrying both honours it and
-    otherwise probes the pointer to guess. Requesting the AMD path explicitly
-    keeps the selection correct on every build instead of resting on that
-    probe, and a CUDA build leaves the flag clear because the NVIDIA path is
-    what uGDS reaches without it.
-
     Returns:
-        ``_UGDS_REGISTER_DMABUF`` on a ROCm build, ``0`` on a CUDA build.
+        ``_UGDS_REGISTER_DMABUF`` on ROCm, or ``0`` on CUDA.
     """
     return _UGDS_REGISTER_DMABUF if torch.version.hip is not None else 0
 
@@ -261,7 +251,7 @@ class Submission:
 
     Mirrors :class:`_cufile_async.Submission`: holds the ctypes storage for the
     size and offset arguments, which uGDS takes by pointer and dereferences
-    later from a CUDA host callback.
+    later from a stream-ordered host callback.
 
     The instance must therefore stay reachable until the stream has executed
     the operation. Dropping the last reference earlier lets the garbage

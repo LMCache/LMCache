@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Process-global GPUDirect Storage data path for the GDS L1 tier.
 
-The actual GPU<->slab DMA goes through the platform GDS library -- cuFile on
-NVIDIA, hipFile on AMD ROCm -- reached via the :mod:`_gds_async` dispatch shim
-(imported here as ``ca``), so this module is platform-agnostic.
+The default GPU<->slab DMA backend is cuFile on NVIDIA or hipFile on AMD ROCm.
+uGDS can instead be selected explicitly on either platform with a matching
+``libugds.so``. All backends are reached through the :mod:`_gds_async` dispatch
+shim (imported here as ``ca``), so this module is platform-agnostic.
 
 One :class:`GDSContext` per worker process owns the slab, its GDS handle,
 the registered GPU staging buffers, and the stream-ordered GDS submissions.
@@ -62,11 +63,11 @@ def _validate_ugds_device(path: str) -> None:
 
 class SlabDirection(enum.Enum):
     """Direction of a GDS slab transfer. GPUDirect DMAs run straight between GPU
-    memory and the slab *file* (no host buffer), so directions are file I/O
+    memory and slab storage (no host buffer), so directions are storage I/O
     (READ/WRITE), not host<->device (H2D/D2H)."""
 
-    READ = enum.auto()  # slab file -> GPU buffer
-    WRITE = enum.auto()  # GPU buffer -> slab file
+    READ = enum.auto()  # slab storage -> GPU buffer
+    WRITE = enum.auto()  # GPU buffer -> slab storage
 
 
 @dataclass
@@ -74,7 +75,7 @@ class _StreamSubmissions:
     """Per-stream GDS submissions, kept alive until their DMA has run.
 
     Submissions accumulate in ``uncommitted``, move to ``inflight`` behind a
-    CUDA event on the stream, and drop once it completes. Per-stream because an
+    GPU event on the stream, and drop once it completes. Per-stream because an
     event only orders work on its own stream.
     """
 
@@ -103,8 +104,8 @@ class GDSContext:
         self._slab_path = ""
         self._backend = ""
         self._slab_handle: Optional[ca.AsyncHandle] = None
-        # Per-stream in-flight submissions (keyed by raw ``CUstream``), released
-        # once a CUDA event recorded on that stream completes. Guarded by
+        # Per-stream in-flight submissions (keyed by raw GPU stream), released
+        # once a GPU event recorded on that stream completes. Guarded by
         # ``_submissions_lock`` (see ``_record_submission``).
         self._submissions_lock = threading.Lock()
         self._submissions: dict[int, _StreamSubmissions] = {}
@@ -155,7 +156,7 @@ class GDSContext:
         cap); :meth:`transfer_async` splits transfers at these boundaries.
 
         Args:
-            buffer: Contiguous CUDA staging buffer, 4 KiB-aligned in size.
+            buffer: Contiguous GPU staging buffer, 4 KiB-aligned in size.
         """
         if not self.initialized:
             return
@@ -398,7 +399,7 @@ class GDSContext:
         """Track an in-flight submission so its ctypes storage outlives the DMA.
 
         Accumulated per (current) stream; every ``_SUBMISSION_CHECKPOINT_EVERY``
-        ops a CUDA event is recorded and completed batches are released.
+        ops a GPU event is recorded and completed batches are released.
         """
         stream = torch_dev.current_stream()
         raw_stream = stream.cuda_stream
@@ -414,7 +415,7 @@ class GDSContext:
     def _checkpoint_submissions_locked(
         self, st: _StreamSubmissions, stream: "torch.Stream"
     ) -> None:
-        """Close ``st``'s current batch behind a CUDA event on ``stream`` and
+        """Close ``st``'s current batch behind a GPU event on ``stream`` and
         drop earlier batches whose event has completed. Hold
         ``self._submissions_lock``.
         """

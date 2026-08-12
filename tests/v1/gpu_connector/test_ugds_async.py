@@ -59,7 +59,7 @@ def _fake_lib(monkeypatch: pytest.MonkeyPatch) -> _FakeLib:
 
 
 def _fake_gpu_tensor(ptr: int = 0x1000, nbytes: int = 4096) -> SimpleNamespace:
-    """Return a CUDA-tensor stand-in accepted by the wrapper."""
+    """Return a GPU-tensor stand-in accepted by the wrapper."""
     return SimpleNamespace(
         is_cuda=True,
         data_ptr=lambda: ptr,

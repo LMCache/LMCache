@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Unit tests for the GDS cuFile context (``GDSContext``).
+"""Unit tests for the GDS L1 context (``GDSContext``).
 
-Most tests are pure (no cuFile): they exercise the public interface
+Most tests are pure (no GPU storage library): they exercise the public interface
 (singleton/no-op semantics, the <=16 MiB region split observed at the ``ca``
-cuFile seam, and the registered-region mapping driven through
-:meth:`GDSContext.transfer_async`). The ``test_gds_*_roundtrip`` tests
-exercise the real GDS DMA path (cuFile on NVIDIA, hipFile on AMD ROCm) and are
-skipped unless that stack is present (see :func:`_gds_available`).
+backend seam, and the registered-region mapping driven through
+:meth:`GDSContext.transfer_async`). Round-trip tests cover cuFile on NVIDIA,
+hipFile on AMD ROCm, or an explicitly configured uGDS device, and are skipped
+unless the corresponding stack is available.
 """
 
 # Standard
@@ -247,7 +247,7 @@ class TestBackendSelection:
     @pytest.mark.parametrize(
         ("cuda_version", "hip_version"), [("12.9", None), (None, "6.3")]
     )
-    def test_ugds_accepts_cuda_and_rocm_builds(
+    def test_ugds_accepts_each_supported_platform(
         self,
         monkeypatch: pytest.MonkeyPatch,
         cuda_version: str | None,
@@ -523,8 +523,7 @@ def test_ugds_context_roundtrip():
 
 @requires_gds
 def test_gds_two_stream_write_read(gds_slab_dir: Path):
-    """Two CUDA streams each register their own buffer and round-trip a chunk
-    through real cuFile DMA; verify the data stays isolated per stream."""
+    """Verify independent chunk writes and reads on two GPU streams."""
     cfg = GdsL1Config(file_location=str(gds_slab_dir), size_in_bytes=64 << 20)
     chunk_bytes = 8 << 20
     ctx = GDSContext()

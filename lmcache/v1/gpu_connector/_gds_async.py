@@ -3,9 +3,9 @@
 
 Selects the GDSContext-facing backend from cuFile, hipFile, or uGDS. Automatic
 selection chooses cuFile on NVIDIA and hipFile on AMD ROCm; GDS L1 config can
-explicitly select uGDS for a raw ``/dev/ugds_drvX`` slab. uGDS supports both
-platforms through a matching platform-specific build: CUDA-only on NVIDIA or
-HIP-only on AMD. All implementations expose an identical API --
+explicitly select uGDS for a raw ``/dev/ugds_drvX`` slab. uGDS can be used on
+either platform with a matching platform-specific build. All implementations
+expose an identical API --
 :class:`AsyncHandle`, :class:`Submission`, and the ``register_*`` /
 ``deregister_*`` / ``close_driver`` functions -- so
 :mod:`lmcache.v1.gpu_connector.gds_context` remains backend-agnostic.

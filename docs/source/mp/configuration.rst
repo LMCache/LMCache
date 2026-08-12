@@ -278,14 +278,13 @@ flags apply to both; no configuration change is needed to switch vendors.
 **uGDS** (``libugds.so``) is a third, opt-in backend selected with
 ``--gds-l1-backend ugds``. It is a user-space GPUDirect Storage library that
 builds NVMe commands and rings doorbells from user space, so its IO path issues
-no syscall. LMCache supports uGDS on both NVIDIA CUDA and AMD ROCm by using a
-platform-specific build of ``libugds.so``: CUDA-only for NVIDIA or HIP-only for
-AMD. LMCache does not target a combined CUDA+HIP build. Unlike cuFile and
-hipFile, uGDS does not use a filesystem: the slab is mapped directly onto a raw
-character device, and ``--gds-l1-path`` must name that device (for example
-``/dev/ugds_drv0``) rather than a directory. The first ``--l1-size-gb`` bytes
-of the device are the slab, so the device must be at least that large and must
-not hold anything else.
+no syscall. LMCache can use uGDS on either NVIDIA CUDA or AMD ROCm. Each
+deployment must use a ``libugds.so`` built for its active platform. Unlike
+cuFile and hipFile, uGDS does not use a filesystem: the slab is mapped directly
+onto a raw character device, and ``--gds-l1-path`` must name that device (for
+example ``/dev/ugds_drv0``) rather than a directory. The first
+``--l1-size-gb`` bytes of the device are the slab, so the device must be at
+least that large and must not hold anything else.
 
 .. note::
 

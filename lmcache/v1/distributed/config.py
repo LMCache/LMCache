@@ -171,20 +171,20 @@ class GdsL1Config:
     """
 
     file_location: str
-    """Directory for the slab file (one shared slab per process, used by all
-    GPU instances)."""
+    """Directory for a cuFile/hipFile slab, or an ``ugds_drv`` character-device
+    path for uGDS."""
 
     size_in_bytes: int
-    """Slab capacity in bytes (from ``--l1-size-gb``). Sizes both the
-    preallocated slab file and the GDS tier's address space."""
+    """Slab capacity in bytes (from ``--l1-size-gb``). For uGDS, this reserves
+    the corresponding leading range of the raw character device."""
 
     use_direct_io: bool = True
-    """Open the slab with ``O_DIRECT`` (required for the GDS DMA fast path)."""
+    """Use ``O_DIRECT`` for cuFile/hipFile. Ignored by uGDS."""
 
     backend: Literal["auto", "cufile", "hipfile", "ugds"] = "auto"
     """GPU storage backend. ``auto`` selects cuFile on CUDA and hipFile on ROCm;
-    ``ugds`` supports CUDA and ROCm through a matching platform-specific
-    ``libugds.so`` and treats ``file_location`` as a character-device path."""
+    ``ugds`` can be used on either platform with a matching ``libugds.so`` and
+    treats ``file_location`` as a character-device path."""
 
     align_bytes: int = 4096
     """Allocation alignment; cuFile/hipFile and O_DIRECT require 4 KiB."""
@@ -438,8 +438,8 @@ def add_storage_manager_args(
         choices=("auto", "cufile", "hipfile", "ugds"),
         default="auto",
         help="GDS implementation. auto selects cuFile on CUDA or hipFile on ROCm; "
-        "ugds supports either platform with a matching platform-specific "
-        "libugds.so and treats --gds-l1-path as /dev/ugds_drvX.",
+        "ugds can be used on either platform with a matching libugds.so and "
+        "treats --gds-l1-path as /dev/ugds_drvX.",
     )
     # L1 Manager Config (TTL settings)
     ttl_group = parser.add_argument_group(
