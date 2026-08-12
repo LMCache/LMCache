@@ -33,8 +33,7 @@ msgstr "``lmcache ping`` 命令用于检查 LMCache KV Cache 服务器或 vLLM �
 msgid ""
 "``ping kvcache`` checks the ``/healthcheck`` endpoint; ``ping engine`` "
 "checks ``/health``."
-msgstr ""
-"``ping kvcache`` 检查 ``/healthcheck`` 端点； ``ping engine`` 检查 ``/health``\\ 。"
+msgstr "``ping kvcache`` 检查 ``/healthcheck`` 端点； ``ping engine`` 检查 ``/health``\\ 。"
 
 #: ../../source/cli/ping.rst:26
 msgid "Options"
@@ -64,8 +63,7 @@ msgstr "``--url``"
 msgid ""
 "Server URL. Defaults to ``http://localhost:8080`` for ``kvcache``, "
 "``http://localhost:8000`` for ``engine``."
-msgstr ""
-"服务器 URL。对于 ``kvcache`` 默认为 ``http://localhost:8080``\\ ，对于 ``engine`` 默认为 ``http://localhost:8000``\\ 。"
+msgstr "服务器 URL。对于 ``kvcache`` 默认为 ``http://localhost:8080``\\ ，对于 ``engine`` 默认为 ``http://localhost:8000``\\ 。"
 
 #: ../../source/cli/ping.rst:39
 msgid "``--format``"
@@ -73,8 +71,7 @@ msgstr "``--format``"
 
 #: ../../source/cli/ping.rst:40
 msgid "Output format: ``terminal`` (default) or ``json``."
-msgstr ""
-"输出格式：\\ ``terminal``\\ （默认）或 ``json``\\ 。"
+msgstr "输出格式：\\ ``terminal``\\ （默认）或\\ ``json``\\ 。"
 
 #: ../../source/cli/ping.rst:41
 msgid "``--output PATH``"
@@ -82,8 +79,7 @@ msgstr "``--output PATH``"
 
 #: ../../source/cli/ping.rst:42
 msgid "Save metrics to a file (format follows ``--format``)."
-msgstr ""
-"将指标保存到文件中（格式遵循 ``--format``\\ ）。"
+msgstr "将指标保存到文件中（格式遵循 ``--format``\\ ）。"
 
 #: ../../source/cli/ping.rst:43
 msgid "``-q`` / ``--quiet``"

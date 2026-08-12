@@ -10,9 +10,14 @@ import time
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import (
+    DEFAULT_ATTN_WINDOW_DESC,
+    AttnWindowDesc,
+    ObjectKey,
     PrefetchHandle,
+    PrefetchRequestSpec,
     ipc_key_to_object_keys,
 )
+from lmcache.v1.distributed.bitmap_ops.fold import fold_unfold_ranked
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.otel_init import register_gauge
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
@@ -78,6 +83,8 @@ class _PrefetchJob:
     # or chunk_hashes is empty).  Consumed at ``MP_LOOKUP_PREFETCH_END``
     # emission time in ``query_prefetch_status``.
     requested_tokens: int
+    num_object_groups: int = 1
+    attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC
     # Captured at lookup time so the ``MP_LOOKUP_PREFETCH_END`` event can
     # carry them as labels.  ``model_name`` lets dashboards slice hit rate
     # per model in multi-model deployments; ``cache_salt`` slices per
@@ -122,6 +129,11 @@ class LookupModule:
             HandlerSpec(
                 RequestType.QUERY_PREFETCH_STATUS,
                 self.query_prefetch_status,
+                ThreadPoolType.NORMAL,
+            ),
+            HandlerSpec(
+                RequestType.WAIT_PREFETCH_STATUS,
+                self.wait_prefetch_status,
                 ThreadPoolType.NORMAL,
             ),
             HandlerSpec(
@@ -201,6 +213,7 @@ class LookupModule:
                         prefetch_request_id=-1,
                         external_request_id=key.request_id,
                         l1_found_indices=(),
+                        l1_hit_chunks=0,
                         total_requested_keys=0,
                         submit_time=time.monotonic(),
                     ),
@@ -223,6 +236,7 @@ class LookupModule:
                         prefetch_request_id=-1,
                         external_request_id=key.request_id,
                         l1_found_indices=(),
+                        l1_hit_chunks=0,
                         total_requested_keys=0,
                         submit_time=time.monotonic(),
                     ),
@@ -266,12 +280,49 @@ class LookupModule:
         session.set_tokens(list(key.token_ids))
         session.lookup_ipc_key = key
 
-        obj_keys = ipc_key_to_object_keys(key, chunk_hashes, [0])[0]
+        # Lay keys out chunk-major across object groups (see
+        # _chunk_major_object_keys); pass the windows to the prefetch policy.
+        attn_desc = self._ctx.layout_desc_registry.find_attn_desc(
+            model_name, world_size
+        )
+        obj_keys = self._chunk_major_object_keys(key, chunk_hashes)
+
+        group_layout_descs = self._ctx.layout_desc_registry.find_group_layout_descs(
+            model_name, world_size
+        )
+        if not group_layout_descs:
+            logger.error(
+                "No group layout descs found for model %s with world size %d "
+                "during lookup!",
+                model_name,
+                world_size,
+            )
+            self._register_prefetch_job(
+                _PrefetchJob(
+                    handle=PrefetchHandle(
+                        prefetch_request_id=-1,
+                        external_request_id=key.request_id,
+                        l1_found_indices=(),
+                        l1_hit_chunks=0,
+                        total_requested_keys=0,
+                        submit_time=time.monotonic(),
+                    ),
+                    world_size=1,
+                    request_id=key.request_id,
+                    requested_tokens=0,
+                    model_name=model_name,
+                    cache_salt=key.cache_salt,
+                )
+            )
+            return
 
         handle = self._ctx.storage_manager.submit_prefetch_task(
-            obj_keys,
-            layout_desc,
-            extra_count=extra_count,
+            PrefetchRequestSpec(
+                keys=obj_keys,
+                group_layout_descs=group_layout_descs,
+                extra_count=extra_count,
+                attn_desc=attn_desc,
+            ),
             external_request_id=key.request_id,
         )
         self._register_prefetch_job(
@@ -280,6 +331,8 @@ class LookupModule:
                 world_size=key.world_size,
                 request_id=key.request_id,
                 requested_tokens=requested_tokens,
+                num_object_groups=attn_desc.num_object_groups,
+                attn_desc=attn_desc,
                 model_name=model_name,
                 cache_salt=key.cache_salt,
             )
@@ -309,12 +362,8 @@ class LookupModule:
             )
             return 0
 
-        found = self._ctx.storage_manager.query_prefetch_lookup_hits(job.handle)
-        if found is None:
-            return None
-
-        found_count = found // job.world_size
-        return found_count
+        # Result is already in chunk-level units (l1_hit_chunks + l2_hit_chunks).
+        return self._ctx.storage_manager.query_prefetch_lookup_hits(job.handle)
 
     def query_prefetch_status(
         self,
@@ -348,11 +397,14 @@ class LookupModule:
         if found is None:
             return None
 
-        # NOTE(Kuntai): this assumes two things:
-        # 1. the world size is the same between keys
-        # 2. the lookup sort the keys in prefix order and breaks at the
-        #    first failure
-        found_count = found.count_leading_ones() // job.world_size
+        stride = job.attn_desc.num_object_groups * job.world_size
+        num_chunks = job.handle.total_requested_keys // stride
+        found_count, _retain = fold_unfold_ranked(
+            found,
+            num_chunks,
+            job.world_size,
+            job.attn_desc.num_chunks_in_sw,
+        )
 
         self._ctx.event_bus.publish(
             Event(
@@ -372,6 +424,39 @@ class LookupModule:
             self._prefetch_jobs.pop(request_id, None)
 
         return found_count
+
+    def wait_prefetch_status(
+        self,
+        request_id: str,
+        timeout: float,
+    ) -> int | None:
+        """Block until a prefetch job completes, then return its chunk count.
+
+        Like query_prefetch_status, but waits for the daemon to publish the
+        result instead of returning None while the prefetch is still in
+        progress, so the caller does not have to busy-poll. The job entry is
+        removed once a non-None result is returned (exactly-once semantics).
+
+        Args:
+            request_id: The external request ID passed in the lookup key.
+            timeout: Maximum number of seconds to wait for the prefetch.
+
+        Returns:
+            Chunk count (int) when done, None if the wait timed out, 0 if the
+            request_id is unknown (already completed and consumed, or invalid).
+        """
+        with self._prefetch_job_lock:
+            job = self._prefetch_jobs.get(request_id)
+        if job is None:
+            logger.warning(
+                "Prefetch job for request %s not found (already completed or invalid)",
+                request_id,
+            )
+            return 0
+
+        if not self._ctx.storage_manager.wait_prefetch_status(job.handle, timeout):
+            return None
+        return self.query_prefetch_status(request_id)
 
     def free_lookup_locks(
         self,
@@ -399,7 +484,16 @@ class LookupModule:
         )
         if not chunk_hashes:
             return
-        obj_keys = ipc_key_to_object_keys(key, chunk_hashes, [0])[0]
+        # Release across every object group, mirroring lookup, which locks keys
+        # in every group; releasing only group 0 would leak the rest.
+        #
+        # NOTE: correct only for full attention, where every locked chunk is a
+        # hit chunk. Sliding-window groups do not retain chunks outside their
+        # window, so once SWA prefetch lands this must skip those chunks instead
+        # of releasing every one -- otherwise chunks the engine still holds can
+        # be over-released (e.g. window=512, LMCache hit 1024, vLLM hit 768 ->
+        # chunks 512..768 may leak). Revisit when sliding-window prefetch is on.
+        obj_keys = self._chunk_major_object_keys(key, chunk_hashes)
 
         extra_count = compute_extra_count(tp_size, key.world_size)
 
@@ -437,7 +531,7 @@ class LookupModule:
             return
 
         chunk_hashes = [TokenHasher.hash_to_bytes(h) for h in session.get_hashes(0)]
-        obj_keys = ipc_key_to_object_keys(session.lookup_ipc_key, chunk_hashes, [0])[0]
+        obj_keys = self._chunk_major_object_keys(session.lookup_ipc_key, chunk_hashes)
         # unified touch of all keys, which include retrieved and stored keys
         # TODO(chunxiaozheng): when l2 is enabled, the prefetched keys from l2 are temp
         #  and will be deleted after finish_read_prefetched, when we touch all keys,
@@ -447,6 +541,50 @@ class LookupModule:
     # -----------------------------------------------------------------
     # Internal helpers
     # -----------------------------------------------------------------
+
+    def _chunk_major_object_keys(
+        self,
+        key: IPCCacheServerKey,
+        chunk_hashes: list[bytes],
+    ) -> list[ObjectKey]:
+        """Resolve the flat object-key list across all object groups,
+        chunk-major.
+
+        The object-group count is read from the layout registry for
+        ``key``'s ``(model_name, world_size)``. The keys are ordered
+        ``chunk -> object group -> kv_rank`` so that all keys belonging to one
+        chunk are contiguous; a leading-ones prefix over the flat list then maps
+        directly to a whole-chunk hit count. Callers that need the full key set
+        regardless of order (lock release, touch) use this too.
+
+        Example (2 chunks ``c0,c1``; 2 groups ``g0,g1``; 2 kv_ranks ``r0,r1``)::
+
+            [c0g0r0, c0g0r1, c0g1r0, c0g1r1,   # chunk 0: all groups, all ranks
+             c1g0r0, c1g0r1, c1g1r0, c1g1r1]   # chunk 1: ...
+
+        Args:
+            key: The IPC key (model/world/worker, salt).
+            chunk_hashes: Chunk hashes to resolve keys for.
+
+        Returns:
+            The chunk-major flattened list of object keys across all groups.
+        """
+        num_groups = self._ctx.layout_desc_registry.find_attn_desc(
+            key.model_name, key.world_size
+        ).num_object_groups
+        per_group = ipc_key_to_object_keys(key, chunk_hashes, list(range(num_groups)))
+        if num_groups == 1:
+            return per_group[0]
+        # Each per-group list is chunk-major / rank-minor of length
+        # len(chunk_hashes) * num_ranks; recover num_ranks to slice per chunk.
+        num_ranks = len(per_group[0]) // len(chunk_hashes) if chunk_hashes else 0
+        obj_keys: list[ObjectKey] = []
+        for chunk_idx in range(len(chunk_hashes)):
+            lo = chunk_idx * num_ranks
+            hi = lo + num_ranks
+            for group_keys in per_group:
+                obj_keys.extend(group_keys[lo:hi])
+        return obj_keys
 
     def _register_prefetch_job(self, job: _PrefetchJob) -> None:
         with self._prefetch_job_lock:

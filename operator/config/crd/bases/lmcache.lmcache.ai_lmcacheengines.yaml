@@ -1188,10 +1188,10 @@ spec:
                     type: number
                   policy:
                     default: LRU
-                    description: policy is the eviction policy. Currently only LRU
-                      is supported.
+                    description: policy is the eviction policy. LRU or noop.
                     enum:
                     - LRU
+                    - noop
                     type: string
                   triggerWatermark:
                     default: 0.8
@@ -1211,11 +1211,18 @@ spec:
                 description: |-
                   gpuVendor selects the GPU vendor. "nvidia" (default) requires the NVIDIA
                   GPU Operator's "nvidia" RuntimeClass; "amd" runs on the default container
-                  runtime with privileged: true.
+                  runtime.
                 enum:
                 - nvidia
                 - amd
                 type: string
+              hostNetwork:
+                default: false
+                description: |-
+                  hostNetwork runs the pod in the host's network namespace. When true the
+                  operator also sets dnsPolicy to ClusterFirstWithHostNet so cluster DNS
+                  still works. Default: false.
+                type: boolean
               image:
                 description: image defines the container image to use.
                 properties:
@@ -1256,6 +1263,71 @@ spec:
                   type: object
                   x-kubernetes-map-type: atomic
                 type: array
+              injection:
+                description: |-
+                  injection defines the defaults the LMCache mutating webhook reads for pods
+                  bound to this engine. When unset, the webhook wires only the connection;
+                  set injection.payloadImage to also stage an lmcache code payload.
+                properties:
+                  imagePullSecrets:
+                    description: |-
+                      imagePullSecrets are appended to the vLLM pod's spec.imagePullSecrets so a
+                      PRIVATE payload init-container image can pull. The referenced Secret(s)
+                      must already exist in the vLLM pod's namespace; the operator does not copy
+                      them cross-namespace.
+                    items:
+                      description: |-
+                        LocalObjectReference contains enough information to let you locate the
+                        referenced object inside the same namespace.
+                      properties:
+                        name:
+                          default: ""
+                          description: |-
+                            Name of the referent.
+                            This field is effectively required, but due to backwards compatibility is
+                            allowed to be empty. Instances of this type with an empty value here are
+                            almost certainly wrong.
+                            More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                          type: string
+                      type: object
+                      x-kubernetes-map-type: atomic
+                    type: array
+                  payloadImage:
+                    description: |-
+                      payloadImage is a purpose-built init-container image (repository/tag/
+                      pullPolicy, like spec.image) that ships an unpacked lmcache tree under
+                      /payload and copies it to $SHARED_DIR on start (see
+                      docker/Dockerfile.payload); the vLLM container imports it via PYTHONPATH.
+
+                      repository has no usable default — the ImageSpec default
+                      (lmcache/vllm-openai) is NOT a payload — so it must be set explicitly. For
+                      private registries, imagePullSecrets must reference Secret(s) in the vLLM
+                      pod's namespace.
+                    properties:
+                      pullPolicy:
+                        default: IfNotPresent
+                        description: pullPolicy is the image pull policy.
+                        enum:
+                        - Always
+                        - Never
+                        - IfNotPresent
+                        type: string
+                      repository:
+                        default: lmcache/vllm-openai
+                        description: repository is the container image repository.
+                        type: string
+                      tag:
+                        default: latest
+                        description: tag is the container image tag.
+                        type: string
+                    type: object
+                  targetContainer:
+                    description: |-
+                      targetContainer is the name of the vLLM container to inject into. Empty
+                      (the default) selects the first container; a per-pod annotation may
+                      override it.
+                    type: string
+                type: object
               l1:
                 description: l1 defines the L1 memory cache configuration.
                 properties:
@@ -1291,6 +1363,7 @@ spec:
                       cache misses. "default" picks the first adapter that has the key.
                     enum:
                     - default
+                    - retain
                     type: string
                   raw:
                     description: |-
@@ -1362,6 +1435,58 @@ spec:
                     - host
                     - port
                     type: object
+                  serde:
+                    description: |-
+                      serde configures a transform applied to KV bytes on their way to
+                      and from the L2 adapter (whichever of resp or raw is configured).
+                      Exactly one serde type must be set.
+                    properties:
+                      aesgcm:
+                        description: |-
+                          aesgcm enables at-rest encryption of KV bytes in the L2 tier,
+                          keyed per cache_salt. L1 (host RAM) and L0 (GPU) remain plaintext.
+                        properties:
+                          aesBits:
+                            default: 128
+                            description: aesBits selects the AES key size (128 or
+                              256).
+                            enum:
+                            - 128
+                            - 256
+                            format: int32
+                            type: integer
+                          keyProvider:
+                            default: hkdf
+                            description: |-
+                              keyProvider selects how per-cache_salt keys are obtained from the
+                              master key. Only "hkdf" (HKDF-SHA256 derivation) is implemented.
+                            enum:
+                            - hkdf
+                            type: string
+                          masterKeySecretRef:
+                            description: |-
+                              masterKeySecretRef names a user-created Secret in the engine's
+                              namespace holding the master key under the "master" data key. The
+                              Secret is mounted directly into the engine pods; the reference is
+                              same-namespace only, so creating an engine CR cannot be used to
+                              read Secrets from other namespaces. The operator never generates
+                              key material.
+                            properties:
+                              name:
+                                default: ""
+                                description: |-
+                                  Name of the referent.
+                                  This field is effectively required, but due to backwards compatibility is
+                                  allowed to be empty. Instances of this type with an empty value here are
+                                  almost certainly wrong.
+                                  More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                type: string
+                            type: object
+                            x-kubernetes-map-type: atomic
+                        required:
+                        - masterKeySecretRef
+                        type: object
+                    type: object
                   storePolicy:
                     default: default
                     description: |-
@@ -1388,6 +1513,41 @@ spec:
                   type: string
                 description: nodeSelector determines which nodes get an LMCache instance.
                 type: object
+              pd:
+                description: |-
+                  pd enables PD (Prefill-Decode) disaggregation. When set the connection
+                  ConfigMap emits a MultiConnector config and the webhook injects the NIXL
+                  side-channel env vars into opted-in vLLM pods.
+                properties:
+                  enforceHandshakeCompat:
+                    description: |-
+                      enforceHandshakeCompat, when set, is forwarded to the NixlConnector as
+                      kv_connector_extra_config["enforce_handshake_compat"]. Set to false to
+                      disable strict NIXL version negotiation — useful when prefiller and
+                      decoder run different vLLM builds. When nil the key is omitted and
+                      NixlConnector uses its own default.
+                    type: boolean
+                  nixlLoadFailurePolicy:
+                    default: fail
+                    description: |-
+                      nixlLoadFailurePolicy controls what NixlConnector does when the remote
+                      peer cannot be reached. "fail" aborts the request (default);
+                      "ignore" falls back to local prefill.
+                    enum:
+                    - fail
+                    - ignore
+                    type: string
+                  nixlSideChannelPort:
+                    default: 5558
+                    description: |-
+                      nixlSideChannelPort is the port the NIXL agent advertises for
+                      side-channel negotiation. Use distinct values for prefiller and decoder
+                      when both roles run on the same node (e.g. local testing).
+                    format: int32
+                    maximum: 65535
+                    minimum: 1024
+                    type: integer
+                type: object
               podAnnotations:
                 additionalProperties:
                   type: string
@@ -1401,6 +1561,15 @@ spec:
               priorityClassName:
                 description: priorityClassName is the priority class for the pods.
                 type: string
+              privileged:
+                default: false
+                description: |-
+                  privileged runs the engine container in privileged mode. On some clusters
+                  this is required for the engine to see all node GPUs (for CUDA IPC) without
+                  claiming any via the nvidia.com/gpu device plugin; on many clusters
+                  NVIDIA_VISIBLE_DEVICES=all already grants that visibility without it, so it
+                  defaults to false.
+                type: boolean
               prometheus:
                 description: prometheus defines Prometheus monitoring configuration.
                 properties:

@@ -5,16 +5,13 @@ from __future__ import annotations
 
 # Standard
 from collections.abc import Mapping
-from concurrent.futures import Future
-from typing import Any, Callable, List, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Callable, List, Optional, Sequence
 import asyncio
 import threading
 import time
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.utils import CacheEngineKey
-from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.storage_backend.abstract_backend import (
     AllocatorBackendInterface,
     StoragePluginInterface,
@@ -30,6 +27,14 @@ from lmcache.v1.storage_backend.raw_block import (
     round_up,
     validate_raw_block_io_options,
 )
+
+if TYPE_CHECKING:
+    # Standard
+    from concurrent.futures import Future
+
+    # First Party
+    from lmcache.utils import CacheEngineKey
+    from lmcache.v1.memory_management import MemoryObj
 
 logger = init_logger(__name__)
 
@@ -406,22 +411,37 @@ class RustRawBlockBackend(StoragePluginInterface):
         if not pending:
             return None
 
-        if self._core.io_engine == "io_uring" and len(pending) > 1:
-            fut = asyncio.run_coroutine_threadsafe(
-                self._submit_put_many(pending, on_complete_callback),
-                loop,
-            )
-            return [fut]
+        # On scheduling failure, roll back unscheduled items; scheduled ones
+        # release their ref / put-task entry in their coroutine's finally.
+        scheduled_count = 0
+        try:
+            if self._core.io_engine == "io_uring" and len(pending) > 1:
+                coro = self._submit_put_many(pending, on_complete_callback)
+                try:
+                    fut = asyncio.run_coroutine_threadsafe(coro, loop)
+                except Exception:
+                    coro.close()
+                    raise
+                return [fut]
 
-        futures: list[Future] = []
-        for key, spec, obj in pending:
-            futures.append(
-                asyncio.run_coroutine_threadsafe(
-                    self._submit_put_one(key, spec, obj, on_complete_callback),
-                    loop,
-                )
-            )
-        return futures
+            futures: list[Future] = []
+            for key, spec, obj in pending:
+                coro = self._submit_put_one(key, spec, obj, on_complete_callback)
+                try:
+                    fut = asyncio.run_coroutine_threadsafe(coro, loop)
+                except Exception:
+                    coro.close()
+                    raise
+                futures.append(fut)
+                scheduled_count += 1
+            return futures
+        except Exception:
+            for _, _, obj in pending[scheduled_count:]:
+                obj.ref_count_down()
+            with self._put_lock:
+                for key, _, _ in pending[scheduled_count:]:
+                    self._put_tasks.discard(key)
+            raise
 
     async def _submit_put_one(
         self,

@@ -10,8 +10,10 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1.platform import torch_ops as py_ops
 from lmcache.v1.platform.musa import native_kv_transfer as musa_native
-import lmcache.python_ops_fallback as py_ops
+
+pytestmark = pytest.mark.musa
 
 
 def _make_native_module() -> ModuleType:
@@ -57,26 +59,17 @@ def test_native_transfer_module_lives_under_musa_platform() -> None:
     assert musa_native.__name__ == "lmcache.v1.platform.musa.native_kv_transfer"
 
 
-def test_get_backend_prefers_musa_ops_over_cuda_when_musa_is_available(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Backend composition follows device detection priority when MUSA is active."""
+def test_musa_device_ops_overrides_multi_layer_block_kv_transfer() -> None:
+    """MusaDeviceOps overrides multi_layer_block_kv_transfer via MRO."""
     # First Party
-    from lmcache.v1.platform.musa import ops as musa_ops
-    import lmcache
+    from lmcache.v1.platform import torch_ops
+    from lmcache.v1.platform.musa.device_ops import MusaDeviceOps
 
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-    monkeypatch.setattr(
-        torch,
-        "musa",
-        SimpleNamespace(is_available=lambda: True),
-        raising=False,
-    )
-
-    backend = lmcache._get_backend()
-
-    assert backend.multi_layer_block_kv_transfer is (
-        musa_ops.multi_layer_block_kv_transfer
+    assert MusaDeviceOps.device_type == "musa"
+    # The override is on the class itself, not the torch baseline.
+    assert (
+        MusaDeviceOps.multi_layer_block_kv_transfer
+        is not torch_ops.multi_layer_block_kv_transfer
     )
 
 
@@ -414,9 +407,9 @@ def test_native_block_transfer_rejects_unvalidated_layout(
 def test_musa_ops_block_transfer_entry_dispatches_to_musa_platform(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """MUSA ops backend hides native dispatch behind the c_ops-compatible API."""
+    """MusaDeviceOps dispatches to native transfer when tensor-backed."""
     # First Party
-    from lmcache.v1.platform.musa import ops as musa_ops
+    from lmcache.v1.platform.musa.device_ops import MusaDeviceOps
 
     captured: dict[str, Any] = {}
 
@@ -432,7 +425,7 @@ def test_musa_ops_block_transfer_entry_dispatches_to_musa_platform(
 
     paged_layers = [torch.zeros(4, 4, 16) for _ in range(2)]
     object_tensors = [torch.zeros(2, 8, 16)]
-    musa_ops.multi_layer_block_kv_transfer(
+    MusaDeviceOps().multi_layer_block_kv_transfer(
         paged_layers,
         object_tensors,
         [0, 1],

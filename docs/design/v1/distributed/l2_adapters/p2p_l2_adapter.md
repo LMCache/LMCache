@@ -27,8 +27,9 @@ the full system context.
 lookup-and-lock  → query (addresses)  → load (RDMA read)  → unlock
 ```
 
-1. **lookup-and-lock** — send `P2P_LOOKUP_AND_LOCK([keys, layout_desc])` to the
-   peer; it read-locks the cached prefix in its L1 and returns a task id.
+1. **lookup-and-lock** — send `P2P_LOOKUP_AND_LOCK([keys, group_layout_descs])` to the
+   peer; it read-locks every L1-resident key (sparse; gaps allowed) and
+   returns a task id.
 2. **query** — poll `P2P_QUERY_LOOKUP_RESULTS(task_id)`; once ready the peer
    returns one `TransferChannelAddress` per key (invalid offset for keys it did
    not lock). The adapter stashes the valid addresses keyed by `ObjectKey` and
@@ -40,8 +41,9 @@ lookup-and-lock  → query (addresses)  → load (RDMA read)  → unlock
 4. **unlock** — `P2P_UNLOCK_OBJECTS([keys])` releases the peer's read locks and
    drops the stashed addresses. Fire-and-forget: the result future is not awaited.
 
-`layout_desc` is the advisory hint added to the L2 lookup interface; the P2P
-adapter forwards the real descriptor verbatim so the peer can size objects.
+`group_layout_descs` (one `MemoryLayoutDesc` per object group) is the advisory
+hint added to the L2 lookup interface; the P2P adapter forwards the real
+descriptors verbatim so the peer can size objects.
 
 ## Why the periodic notifier
 
@@ -101,7 +103,8 @@ storage manager owns its lifecycle. The config carries the peer's two URLs:
 ## close()
 
 Sets a closed flag (later submits are inert), unregisters the lookup/load fds
-from the periodic notifier, closes the MQ client, and closes the three event
-notifiers. The transfer-channel client is **not** closed here — for
-bi-directional transports (NIXL) it is a shared view owned by the
-`TransferChannelContext`.
+from the periodic notifier, removes the transfer-channel client from the
+`TransferChannelContext` via `remove_transfer_channel_client(peer_url)` (which
+closes it and releases its transport handles), closes the MQ client, and closes
+the three event notifiers. `close()` is idempotent: the closed flag guards
+against a second teardown of these shared resources.

@@ -300,9 +300,28 @@ in `lmcache/cli/corpora/`.
 
 ### Architecture
 
-- **Explicit registration:** Each command inherits from `BaseCommand` (in
-  `commands/base.py`) and is registered in `commands/__init__.py`'s
-  `ALL_COMMANDS` list. See [framework-and-metrics.md](framework-and-metrics.md).
+- **Auto-discovery (N-level):** Commands at all levels are discovered
+  automatically via `discover_subclasses()` (in
+  `lmcache/v1/utils/subclass_discovery.py`). No manual registration is needed
+  — adding a new command at any depth is a single-file change.
+  - **Leaf commands:** Inherit from `BaseCommand` directly.
+  - **Command groups:** Inherit from `CompositeCommand(BaseCommand)`. Its
+    `register()` scans the package where the concrete subclass is defined for
+    nested `BaseCommand` subclasses and registers each one automatically.
+  - **Recursive nesting:** A discovered subcommand can itself be a
+    `CompositeCommand`, enabling arbitrary depth (e.g.
+    `tool → cache-simulator → simulate`).
+- **Class hierarchy:**
+  - `BaseCommand` — abstract base class for all CLI commands (leaf or composite).
+  - `CompositeCommand(BaseCommand)` — base class for commands that contain
+    auto-discovered sub-subcommands (e.g. `query`, `bench`, `quota`, `trace`,
+    `tool`). Subclasses only need to implement `name()` and `help()`.
+- **Adding a new command:**
+  - *Top-level:* Create a new `.py` file (or sub-package with `__init__.py`)
+    under `commands/` with a concrete `BaseCommand` subclass. Done.
+  - *Second-level:* Create a new `.py` file (or sub-package with `__init__.py`)
+    under the parent command's package with a concrete `BaseCommand` subclass.
+    Done. No edits to the parent's `__init__.py` required.
 - **`send_request()` helper:** Creates a temporary `MessageQueueClient`, submits
   a ZMQ request, waits with timeout (default 5s), tears down. All ZMQ commands
   use this. Extended to handle HTTP targets alongside ZMQ.
@@ -318,20 +337,40 @@ lmcache/cli/
 ├── main.py              # main() entry point
 ├── metrics/             # Metrics system (see framework-and-metrics.md)
 ├── commands/
-│   ├── __init__.py      # ALL_COMMANDS registry
-│   ├── base.py          # BaseCommand ABC
+│   ├── __init__.py      # Auto-discovers ALL_COMMANDS (no manual edits)
+│   ├── base.py          # BaseCommand ABC + CompositeCommand
 │   ├── mock.py          # lmcache mock  (example/test command)
 │   ├── server.py        # lmcache server
 │   ├── coordinator.py   # lmcache coordinator
-│   ├── describe.py      # lmcache describe {kvcache,engine}
+│   ├── describe.py      # lmcache describe {kvcache}
 │   ├── ping.py          # lmcache ping {kvcache,engine}
-│   ├── query.py         # lmcache query {kvcache,engine}
-│   ├── bench/           # lmcache bench {engine,server,l2}
-│   │   ├── __init__.py          # BenchCommand + dispatch
-│   │   ├── engine_bench/        # lmcache bench engine
-│   │   ├── server_bench/        # lmcache bench server
-│   │   └── l2_adapter_bench/    # lmcache bench l2
-│   └── kvcache.py       # lmcache kvcache {clear,end-session}
+│   ├── kvcache.py       # lmcache kvcache {clear,end-session}
+│   ├── query/           # lmcache query (CompositeCommand)
+│   │   ├── __init__.py          # QueryCommand(CompositeCommand)
+│   │   ├── engine_command.py    # Auto-discovered: lmcache query engine
+│   │   └── kvcache_command.py   # Auto-discovered: lmcache query kvcache
+│   ├── bench/           # lmcache bench (CompositeCommand)
+│   │   ├── __init__.py          # BenchCommand(CompositeCommand)
+│   │   ├── engine_bench/        # Auto-discovered: lmcache bench engine
+│   │   ├── server_bench/        # Auto-discovered: lmcache bench server
+│   │   └── l2_adapter_bench/    # Auto-discovered: lmcache bench l2
+│   ├── quota/           # lmcache quota (CompositeCommand)
+│   │   ├── __init__.py          # QuotaCommand(CompositeCommand)
+│   │   ├── set_command.py       # Auto-discovered: lmcache quota set
+│   │   ├── get_command.py       # Auto-discovered: lmcache quota get
+│   │   ├── list_command.py      # Auto-discovered: lmcache quota list
+│   │   └── delete_command.py    # Auto-discovered: lmcache quota delete
+│   ├── trace/           # lmcache trace (CompositeCommand)
+│   │   ├── __init__.py          # TraceCommand(CompositeCommand)
+│   │   ├── info_command.py      # Auto-discovered: lmcache trace info
+│   │   └── replay_command.py    # Auto-discovered: lmcache trace replay
+│   └── tool/            # lmcache tool (CompositeCommand)
+│       ├── __init__.py          # ToolCommand(CompositeCommand)
+│       └── cache_simulator/     # Auto-discovered: lmcache tool cache-simulator
+│           ├── __init__.py              # CacheSimulatorCommand(CompositeCommand)
+│           ├── simulate_command.py      # Auto-discovered: simulate
+│           ├── sweep_command.py         # Auto-discovered: sweep
+│           └── gen_dataset_command.py   # Auto-discovered: gen-dataset
 ├── config.py            # CLIConfig (centralized config system)
 └── corpora/             # Built-in prompt corpora
 ```
@@ -339,6 +378,14 @@ lmcache/cli/
 ### Other notes
 
 - **Entry point:** `lmcache = "lmcache.cli.main:main"` in `pyproject.toml`.
+- **Auto-discovery mechanism:** Powered by `discover_subclasses()` in
+  `lmcache/v1/utils/subclass_discovery.py`. Uses `pkgutil.iter_modules` to
+  scan direct submodules, then `inspect.getmembers` to find concrete
+  `BaseCommand` subclasses. Each subclass is yielded at most once.
+- **`CompositeCommand` pattern:** A `CompositeCommand` scans its own package
+  for `BaseCommand` subclasses (excluding itself and abstract classes).
+  Sub-packages with `__init__.py` defining a `BaseCommand` are also discovered,
+  enabling nested command groups (e.g. `tool cache-simulator simulate`).
 - **`bench engine`:** Wraps `vllm.benchmarks`, then queries `/status` for
   cache metrics.
 - **`query kvcache`:** Tokenizes `--prompt` using the model's tokenizer, then

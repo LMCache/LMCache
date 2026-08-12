@@ -41,10 +41,14 @@ class RequestType(enum.Enum):
     # Engine operations
     REGISTER_KV_CACHE = enum.auto()
     UNREGISTER_KV_CACHE = enum.auto()
+    REGISTER_Q_CACHE = enum.auto()
+    UNREGISTER_Q_CACHE = enum.auto()
+    STORE_Q = enum.auto()
     STORE = enum.auto()
     RETRIEVE = enum.auto()
     LOOKUP = enum.auto()
     QUERY_PREFETCH_STATUS = enum.auto()
+    WAIT_PREFETCH_STATUS = enum.auto()
     QUERY_PREFETCH_LOOKUP_HITS = enum.auto()
     FREE_LOOKUP_LOCKS = enum.auto()
     END_SESSION = enum.auto()
@@ -88,6 +92,9 @@ class RequestType(enum.Enum):
     P2P_LOOKUP_AND_LOCK = enum.auto()
     P2P_QUERY_LOOKUP_RESULTS = enum.auto()
     P2P_UNLOCK_OBJECTS = enum.auto()
+
+    # Experimental transfer intermediate tensor
+    GET_EXPERIMENTAL = enum.auto()
 
 
 @dataclass

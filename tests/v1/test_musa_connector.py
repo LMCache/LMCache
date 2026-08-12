@@ -14,10 +14,10 @@ from lmcache.v1.gpu_connector.musa_connectors import (
     VLLMPagedMemLayerwiseMUSAConnector,
     VLLMPagedMemMUSAConnectorV2,
 )
+from lmcache.v1.memory_allocators.pin_memory_allocator import PinMemoryAllocator
 from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
-    PinMemoryAllocator,
 )
 from lmcache.v1.metadata import LMCacheMetadata
 from tests.v1.utils import (
@@ -25,6 +25,8 @@ from tests.v1.utils import (
     generate_kv_cache_paged_list_tensors,
 )
 import lmcache.c_ops as lmc_ops
+
+pytestmark = pytest.mark.musa
 
 
 def _skip_if_no_musa() -> None:

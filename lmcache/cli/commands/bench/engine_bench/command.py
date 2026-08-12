@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """``lmcache bench engine`` subcommand implementation.
 
-This module owns the full registration + execution flow for the
-inference engine benchmark. ``BenchCommand`` only forwards CLI dispatch
-to :func:`run_engine_bench` and parser registration to
-:func:`register_engine_parser`.
+This module provides argument registration via :func:`add_engine_arguments`
+and the execution orchestrator :func:`run_engine_bench` for the inference
+engine benchmark.
 """
 
 # Future
@@ -55,26 +54,12 @@ _LDQA_MAX_OUTPUT_LENGTH_DEFAULT = 128
 # ---------------------------------------------------------------------------
 
 
-def register_engine_parser(
-    subparsers: argparse._SubParsersAction,
-    dispatch_func,
-) -> argparse.ArgumentParser:
-    """Register the ``lmcache bench engine`` subcommand parser.
+def add_engine_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add ``lmcache bench engine`` arguments to *parser*.
 
     Args:
-        subparsers: The ``bench`` subparsers action.
-        dispatch_func: Function to bind via ``set_defaults(func=...)``.
-            Typically ``BenchCommand.execute`` so that the outer
-            dispatcher can route the call back into
-            :func:`run_engine_bench`.
-
-    Returns:
-        The created ``ArgumentParser`` (mostly for testing).
+        parser: The ``ArgumentParser`` for the engine bench subcommand.
     """
-    parser = subparsers.add_parser(
-        "engine",
-        help="Benchmark an inference engine.",
-    )
 
     # --- Config file ---
     parser.add_argument(
@@ -190,13 +175,15 @@ def register_engine_parser(
         "--ldp-context-length",
         type=int,
         default=5000,
-        help="Token length of each context (default: 5000).",
+        help="Exact token length of each context (default: 5000). Requires a "
+        "loadable tokenizer; pass --model when the engine reports a name that "
+        "is not a HuggingFace repo ID or local path.",
     )
     ldp_group.add_argument(
         "--ldp-system-prompt-length",
         type=int,
         default=1000,
-        help="Token length of the shared system prompt (default: 1000). "
+        help="Exact token length of the shared system prompt (default: 1000). "
         "Use 0 for no system prompt.",
     )
     ldp_group.add_argument(
@@ -336,9 +323,6 @@ def register_engine_parser(
         default=50,
         help="Number of requests to send (default: 50).",
     )
-
-    parser.set_defaults(func=dispatch_func)
-    return parser
 
 
 # ---------------------------------------------------------------------------
