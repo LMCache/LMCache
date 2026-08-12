@@ -109,6 +109,7 @@ jobs:
           python -m pip install vllm
           python -m pip install -r requirements/test.txt
           python -m pip install -r requirements/common.txt
+          NO_GPU_EXT=1 python -m pip install -e . --no-build-isolation
 
       - name: "CPU only unit tests"
         run: |
@@ -151,6 +152,7 @@ jobs:
           python -m pip install maturin
           python -m pip install -r requirements/test.txt
           python -m pip install -r requirements/common.txt
+          NO_GPU_EXT=1 python -m pip install -e . --no-build-isolation
 
       - name: Build raw-block Rust extension
         run: |

@@ -12,7 +12,8 @@
 /lmcache/v1/multiprocess/              @ApostaC @Oasis-git @DongDongJu @hlin99
 /lmcache/v1/multiprocess/protocols/observability.py  @royyhuang @ApostaC
 /lmcache/v1/multiprocess/http_server.py              @royyhuang @ApostaC @Oasis-git
-/lmcache/v1/mp_observability/            @yoo-kumaneko @royyhuang @ApostaC @Oasis-git @sammshen
+/lmcache/v1/mp_coordinator/              @ruizhang0101
+/lmcache/v1/mp_observability/            @yoo-kumaneko @royyhuang @ApostaC @Oasis-git @sammshen @ruizhang0101
 
 # Distributed / L2
 /lmcache/v1/distributed/               @ApostaC @maobaolong @chunxiaozheng @DongDongJu
@@ -74,10 +75,10 @@
 /tests/                                @hickeyma @sammshen @ApostaC @deng451e
 
 # CLI
-/lmcache/cli/                          @KuntaiDu @deng451e @royyhuang @ApostaC @sammshen @zhengfeihe
+/lmcache/cli/                          @KuntaiDu @deng451e @royyhuang @ApostaC @sammshen @zhengfeihe @ruizhang0101
 
 # Documentation
-/docs/source/mp/                       @ApostaC @YaoJiayi @KuntaiDu @royyhuang
+/docs/source/mp/                       @ApostaC @YaoJiayi @KuntaiDu @royyhuang @ruizhang0101
 /docs/source/kv_cache/                 @sammshen @ApostaC
 /docs/source/kv_cache_optimizations/   @ApostaC @YaoJiayi
 /docs/source/getting_started/          @sammshen @deng451e
@@ -94,7 +95,7 @@
 /.buildkite/                           @sammshen @ApostaC @deng451e @hickeyma
 
 # Operator
-/operator/                             @royyhuang @DongDongJu
+/operator/                             @royyhuang @DongDongJu @ruizhang0101
 
 # Rust
 /rust/                                 @DongDongJu @zhengfeihe

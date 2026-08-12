@@ -63,6 +63,14 @@ VLLM_READY_TIMEOUT="${VLLM_READY_TIMEOUT:-900}"
 # Seconds to wait for vLLM's GPU memory to be released after a restart before
 # relaunching (avoids an OOM racing the dying process).
 GPU_RELEASE_TIMEOUT="${GPU_RELEASE_TIMEOUT:-180}"
+# Kimi-Linear mixes MLA and linear-attention groups. Keep the LMCache server's
+# hybrid-group registration explicit instead of relying on the default, which
+# flipped off in #3869/#4437.
+SEPARATE_OBJECT_GROUPS="${SEPARATE_OBJECT_GROUPS:-1}"
+SEPARATE_OBJECT_GROUPS_ARG=""
+if [ "$SEPARATE_OBJECT_GROUPS" = "1" ] || [ "$SEPARATE_OBJECT_GROUPS" = "true" ]; then
+    SEPARATE_OBJECT_GROUPS_ARG="--separate-object-groups"
+fi
 
 # Tokens to generate per request. Greedy (temperature 0); a divergence in the
 # resumed state shows up within the first few tokens, but a longer generation
@@ -236,6 +244,7 @@ lmcache server \
     --l1-size-gb 80 \
     --eviction-policy LRU \
     --max-workers 4 \
+    ${SEPARATE_OBJECT_GROUPS_ARG} \
     > "$LMCACHE_LOG" 2>&1 &
 LMCACHE_PID=$!
 echo "$LMCACHE_PID" >> "$PID_FILE"
