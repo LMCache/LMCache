@@ -918,7 +918,7 @@ before the lmcache container starts:
       volumes:
         - name: kv-cache-root
           hostPath:
-            path: /mnt/disks/scratch/kvcache
+            path: /path/to/local/disk    # e.g. a mounted NVMe scratch disk
             type: DirectoryOrCreate
       volumeMounts:
         - name: kv-cache-root
@@ -931,8 +931,8 @@ before the lmcache container starts:
             - -c
             - |
               test -f /mnt/kv-cache-root/lmcache-l2.raw || \
-                fallocate -l 40000000000 /mnt/kv-cache-root/lmcache-l2.raw || \
-                truncate -s 40000000000 /mnt/kv-cache-root/lmcache-l2.raw
+                fallocate -l 10000000000 /mnt/kv-cache-root/lmcache-l2.raw || \
+                truncate -s 10000000000 /mnt/kv-cache-root/lmcache-l2.raw
           volumeMounts:
             - name: kv-cache-root
               mountPath: /mnt/kv-cache-root
@@ -941,7 +941,7 @@ before the lmcache container starts:
           type: raw_block
           config:
             device_path: "/mnt/kv-cache-root/lmcache-l2.raw"
-            capacity_bytes: 40000000000
+            capacity_bytes: 10000000000   # 10 GB, must match the size above
 
 .. note::
    ``capacity_bytes`` in ``l2Backend.raw.config`` must match the size the

@@ -72,8 +72,9 @@ spec:
   # order. Use to prepare state the engine can't create itself -- e.g. a
   # raw_block L2 adapter (l2Backend.raw.type: raw_block) opens device_path
   # expecting it to already exist at the configured size; it does not
-  # create or grow the file. The volumeMounts below assume a matching
-  # "kv-cache-root" entry in the top-level volumes list (see below).
+  # create or grow the file. Requires a matching "kv-cache-root" entry
+  # under the top-level volumes field (currently commented out above as
+  # `volumes: []`) -- add a hostPath volume there before using this.
   # initContainers:
   #   - name: preallocate-raw-block
   #     image: busybox
@@ -82,8 +83,8 @@ spec:
   #       - -c
   #       - |
   #         test -f /mnt/kv-cache-root/lmcache-l2.raw || \
-  #           fallocate -l 40000000000 /mnt/kv-cache-root/lmcache-l2.raw || \
-  #           truncate -s 40000000000 /mnt/kv-cache-root/lmcache-l2.raw
+  #           fallocate -l 10000000000 /mnt/kv-cache-root/lmcache-l2.raw || \
+  #           truncate -s 10000000000 /mnt/kv-cache-root/lmcache-l2.raw
   #     volumeMounts:
   #       - name: kv-cache-root
   #         mountPath: /mnt/kv-cache-root
