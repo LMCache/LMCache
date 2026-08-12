@@ -52,7 +52,7 @@ spec:
     # targetContainer: ""          # default: first container; name the vLLM container
     # cudagraph: eager             # eager | piecewise | full_decode_only (never full)
     # NOTE: --attention-backend and --block-size are NOT injected and have no
-    # field here; the CacheBlend plugin sets both at runtime.
+    # field here.
 
   # -- Eviction --
   # eviction:

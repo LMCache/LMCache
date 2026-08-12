@@ -48,8 +48,8 @@ import (
 //     annotation). The mutating webhook injects the CacheBlend vLLM flags
 //     (--kv-transfer-config <engine>, etc.), the cb-plugin init container,
 //     hostIPC, and the private payload's pull secret.
-//  3. The plugin selects the CUSTOM attention backend at runtime (asserted on
-//     vLLM's own startup banner), vLLM starts, and serves /v1/models.
+//  3. vLLM comes up on the CUSTOM attention backend (asserted on its own
+//     startup banner), starts, and serves /v1/models.
 //  4. A completion request drives a forward pass, which makes vLLM's connector
 //     register its rope cache with the engine — the engine logs
 //     "Registered CB rope state for instance N".
@@ -182,12 +182,12 @@ var _ = Describe("vLLM + CacheBlendEngine integration smoke (GPU)", Ordered, fun
 		vllmPod := firstPodForDeployment(ctx, nsName, vllmDeploy)
 		Expect(vllmPod).NotTo(BeNil(), "vLLM pod disappeared after the Deployment became Available")
 
-		By("verifying the plugin selected the CUSTOM attention backend at runtime")
+		By("verifying vLLM logged the CUSTOM attention backend banner")
 		Eventually(func() int {
 			return countLogLines(ctx, nsName, vllmPod.Name, backendLog)
 		}, 60*time.Second, 2*time.Second).Should(BeNumerically(">=", 1),
 			"vLLM never logged the CUSTOM attention backend banner (pattern %q) — "+
-				"the plugin did not select the CB attention backend", backendLog.String())
+				"the CB attention backend was not selected", backendLog.String())
 
 		By("port-forwarding to the vLLM service for completion requests")
 		vllmCloser, vllmBaseURL, err := utils.PortForward(

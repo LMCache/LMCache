@@ -252,9 +252,9 @@ var _ = Describe("CacheBlendPodInjector", func() {
 
 			By("M5: required vLLM args asserted individually")
 			Expect(argsHasFlag(c.Args, "--attention-backend")).To(BeFalse(),
-				"--attention-backend is set by the plugin at runtime, not injected")
+				"--attention-backend is not injected")
 			Expect(argsHasFlag(c.Args, "--block-size")).To(BeFalse(),
-				"--block-size is set by the plugin at runtime, not injected")
+				"--block-size is not injected")
 			Expect(argsHasFlag(c.Args, cbFlagNoChunkedPrefill)).To(BeTrue(),
 				"--no-enable-chunked-prefill")
 			Expect(argsHasFlagValue(c.Args, cbFlagPipelineParallelSize, cbValPipelineParallelSize)).To(BeTrue(),
@@ -390,7 +390,7 @@ var _ = Describe("CacheBlendPodInjector", func() {
 			out := applyResponse(pod, resp)
 			c := findContainer(out, "vllm")
 
-			By("the plugin sets both at runtime; the rest of the injection still applies")
+			By("neither flag is managed; the rest of the injection still applies")
 			Expect(argsHasFlag(c.Args, "--attention-backend")).To(BeFalse())
 			Expect(argsHasFlag(c.Args, "--block-size")).To(BeFalse())
 			Expect(argsHasFlag(c.Args, cbFlagNoChunkedPrefill)).To(BeTrue())

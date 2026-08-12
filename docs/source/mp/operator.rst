@@ -1001,9 +1001,8 @@ private-image pull secret, and the required CacheBlend vLLM flags
 ``--pipeline-parallel-size 1``, ``--no-enable-chunked-prefill``,
 ``--enforce-eager``).  You supply only the model and your non-CacheBlend flags.
 
-``--attention-backend`` and ``--block-size`` are **not** injected: the
-CacheBlend plugin sets both at runtime, and a value you supply on the pod is
-left untouched.
+``--attention-backend`` and ``--block-size`` are **not** injected; a value you
+supply on the pod is left untouched.
 
 Verifying Injection
 ~~~~~~~~~~~~~~~~~~~~~

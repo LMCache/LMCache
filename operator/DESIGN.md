@@ -428,9 +428,7 @@ l2Backend, scheduling, overrides, imagePullSecrets) and adds:
   must exist in the vLLM pod's namespace), `targetContainer` (default: first
   container), `cudagraph` (`eager`|`piecewise`|`full_decode_only`, default
   `eager`). `--attention-backend` and `--block-size` are deliberately **not**
-  injected and have no CR field: the CacheBlend plugin sets both at runtime, so
-  the operator would only be able to fight it (and a wrong pinned value fails
-  late, in the matcher). Env vars need no injection field: the webhook only
+  injected and have no CR field. Env vars need no injection field: the webhook only
   prepends PYTHONPATH and never touches other env, so pod authors set model
   env vars (e.g. `VLLM_USE_FLASHINFER_MOE_FP8=0`) directly on their container.
 - `server.chunkSize` defaults to **256** and is validated to equal 256 (the blend
@@ -487,7 +485,7 @@ webhook then applies:
 | pod `hostIPC: true` | required for CUDA IPC with the node-local engine |
 | `cb-plugin` emptyDir + payload init container | the busybox payload `cp -a`'s the pure-Python plugin tree onto the shared volume |
 | readOnly mount + `PYTHONPATH=/cb-plugin` on the vLLM container | vLLM discovers the plugin via its `vllm.general_plugins` entry point |
-| append required vLLM args | `--kv-transfer-config <from the connection ConfigMap>`, `--pipeline-parallel-size 1`, `--no-enable-chunked-prefill`, `--enforce-eager` (or the configured cudagraph). `--attention-backend` and `--block-size` are **not** injected — the plugin sets both at runtime, and a user-supplied value is left untouched |
+| append required vLLM args | `--kv-transfer-config <from the connection ConfigMap>`, `--pipeline-parallel-size 1`, `--no-enable-chunked-prefill`, `--enforce-eager` (or the configured cudagraph). `--attention-backend` and `--block-size` are **not** injected; a user-supplied value is left untouched |
 | append `injection.imagePullSecrets` | so the private payload image can pull |
 | stamp `lmcache.ai/cacheblend-injected: "true"` | idempotency guard |
 
