@@ -17,6 +17,7 @@ pytest.importorskip(
 
 # First Party
 import lmcache.c_ops as lmc_ops
+import lmcache.lmcache_native as lmcache_native
 
 # Skip all tests if cuda is unavailable
 pytestmark = [
@@ -48,18 +49,18 @@ def _create_zero_tensor(
 
 
 # Format enum values from c_ops
-FMT_NORMAL = lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
-FMT_CROSS_LAYER = lmc_ops.EngineKVFormat.NB_NL_TWO_BS_NH_HS
-FMT_FLASH_INFER = lmc_ops.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS
-FMT_MLA = lmc_ops.EngineKVFormat.NL_X_NB_BS_HS
-FMT_SGLANG_MHA = lmc_ops.EngineKVFormat.TWO_X_NL_X_NBBS_NH_HS
-FMT_SGLANG_MLA = lmc_ops.EngineKVFormat.NL_X_NBBS_ONE_HS
-FMT_NORMAL_HND = lmc_ops.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS
-FMT_FLASH_INFER_HND = lmc_ops.EngineKVFormat.NL_X_NB_TWO_NH_BS_HS
-FMT_VLLM_FUSED_HND = lmc_ops.EngineKVFormat.NL_X_NB_NH_BS_TWO_HS
-FMT_VLLM_FUSED_NHD = lmc_ops.EngineKVFormat.NL_X_NB_BS_NH_TWO_HS
-FMT_VLLM_CS_HND = lmc_ops.EngineKVFormat.NL_X_NB_NH_BS_CS
-FMT_VLLM_CS_NHD = lmc_ops.EngineKVFormat.NL_X_NB_BS_NH_CS
+FMT_NORMAL = lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
+FMT_CROSS_LAYER = lmcache_native.EngineKVFormat.NB_NL_TWO_BS_NH_HS
+FMT_FLASH_INFER = lmcache_native.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS
+FMT_MLA = lmcache_native.EngineKVFormat.NL_X_NB_BS_HS
+FMT_SGLANG_MHA = lmcache_native.EngineKVFormat.TWO_X_NL_X_NBBS_NH_HS
+FMT_SGLANG_MLA = lmcache_native.EngineKVFormat.NL_X_NBBS_ONE_HS
+FMT_NORMAL_HND = lmcache_native.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS
+FMT_FLASH_INFER_HND = lmcache_native.EngineKVFormat.NL_X_NB_TWO_NH_BS_HS
+FMT_VLLM_FUSED_HND = lmcache_native.EngineKVFormat.NL_X_NB_NH_BS_TWO_HS
+FMT_VLLM_FUSED_NHD = lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_TWO_HS
+FMT_VLLM_CS_HND = lmcache_native.EngineKVFormat.NL_X_NB_NH_BS_CS
+FMT_VLLM_CS_NHD = lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_CS
 
 # Format parameters: (engine_kv_format, num_layers, num_heads, head_size, is_mla)
 # The is_mla column really means "kv_size == 1": the fused-K/V and content-size
@@ -359,7 +360,7 @@ def test_block_transfer_roundtrip(
         mem_objects,
         block_ids_d2h,
         engine_kv_format,
-        lmc_ops.TransferDirection.D2H,
+        lmcache_native.TransferDirection.D2H,
         nl,
         NB,
         BS,
@@ -376,7 +377,7 @@ def test_block_transfer_roundtrip(
         mem_objects,
         block_ids_h2d,
         engine_kv_format,
-        lmc_ops.TransferDirection.H2D,
+        lmcache_native.TransferDirection.H2D,
         nl,
         NB,
         BS,
@@ -456,7 +457,7 @@ def test_block_transfer_skip_prefix(engine_kv_format, nl, nh, hs, is_mla, dtype)
         mem_objects,
         block_ids_d2h,
         engine_kv_format,
-        lmc_ops.TransferDirection.D2H,
+        lmcache_native.TransferDirection.D2H,
         nl,
         NB,
         BS,
@@ -474,7 +475,7 @@ def test_block_transfer_skip_prefix(engine_kv_format, nl, nh, hs, is_mla, dtype)
         mem_objects,
         block_ids_h2d,
         engine_kv_format,
-        lmc_ops.TransferDirection.H2D,
+        lmcache_native.TransferDirection.H2D,
         nl,
         NB,
         BS,

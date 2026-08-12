@@ -4,7 +4,7 @@
 These tests are the acceptance gate for the DeviceOps hierarchy.  They stay
 platform-agnostic by exercising the torch baseline, the ``DeviceSpec``
 dispatch, the ``lmcache.c_ops`` shim, and instance-level ``bind_native``
-without requiring any compiled accelerator module.
+while using the device-independent native module for shared enums.
 """
 
 # Standard
@@ -16,15 +16,12 @@ import pytest
 
 # First Party
 from lmcache import torch_dev, torch_device_type
+from lmcache.lmcache_native import EngineKVFormat, TransferDirection
 from lmcache.v1.platform import resolve_device_ops
 from lmcache.v1.platform.base.device_ops import DeviceOps
 from lmcache.v1.platform.base.device_spec import DeviceSpec
 from lmcache.v1.platform.cpu.device_ops import CpuDeviceOps
-from lmcache.v1.platform.ops_types import (
-    EngineKVFormat,
-    PageBufferShapeDesc,
-    TransferDirection,
-)
+from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 import lmcache.v1.platform as platform_pkg
 
 # Derive op names from the class body: regular instance-method functions,
@@ -66,11 +63,8 @@ def test_base_class_declares_every_op_as_instance_method() -> None:
         )
 
 
-def test_base_class_has_all_types() -> None:
-    """DeviceOps exposes shared types as class attributes."""
-    assert DeviceOps.TransferDirection is TransferDirection
-    assert DeviceOps.EngineKVFormat is EngineKVFormat
-    assert DeviceOps.GPUKVFormat is EngineKVFormat
+def test_base_class_has_python_fallback_types() -> None:
+    """DeviceOps exposes the Python-only fallback types it owns."""
     assert DeviceOps.PageBufferShapeDesc is PageBufferShapeDesc
     assert callable(DeviceOps.set_shape_desc_dtype)
 
@@ -231,18 +225,27 @@ def test_bind_native_rebinds_types() -> None:
 # -- Shim ------------------------------------------------------------------
 
 
-def test_c_ops_shim_has_all_ops_and_types() -> None:
-    """The lmcache.c_ops shim module exposes everything from _OP_NAMES + types."""
+def test_c_ops_shim_has_all_device_ops() -> None:
+    """The lmcache.c_ops shim exposes the DeviceOps surface only."""
     # First Party
     import lmcache.c_ops as c_ops
 
     for name in _OP_NAMES:
         assert hasattr(c_ops, name), f"c_ops missing {name}"
         assert callable(getattr(c_ops, name))
-    assert hasattr(c_ops, "TransferDirection")
-    assert hasattr(c_ops, "EngineKVFormat")
-    assert hasattr(c_ops, "GPUKVFormat")
     assert hasattr(c_ops, "PageBufferShapeDesc")
+
+    native_only_names = (
+        "TransferDirection",
+        "EngineKVFormat",
+        "GPUKVFormat",
+        "is_cross_layer",
+        "is_kv_list",
+        "is_layer_list",
+        "is_mla",
+    )
+    for name in native_only_names:
+        assert not hasattr(c_ops, name)
 
 
 def test_c_ops_shim_dir() -> None:
@@ -252,7 +255,7 @@ def test_c_ops_shim_dir() -> None:
 
     names = dir(c_ops)
     assert "multi_layer_kv_transfer" in names
-    assert "TransferDirection" in names
+    assert "TransferDirection" not in names
 
 
 # -- DeviceSpec resolution -------------------------------------------------

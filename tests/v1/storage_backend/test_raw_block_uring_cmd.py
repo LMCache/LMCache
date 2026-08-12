@@ -364,19 +364,79 @@ def test_uring_cmd_disabled(loop_in_thread):
 
 
 def test_uring_cmd_auto_transfer_limit_from_sysfs_ng_device():
-    expected_path = (
-        f"{_get_sysfs_path(TEST_DEVICES['char_device'])}/queue/max_hw_sectors_kb"
-    )
+    queue_dir = f"{_get_sysfs_path(TEST_DEVICES['char_device'])}/queue"
+
+    def fake_read(path: str) -> int | None:
+        if path == f"{queue_dir}/max_hw_sectors_kb":
+            return 1024
+        if path == f"{queue_dir}/max_segments":
+            # Large segment limit so it does not bound the transfer size here.
+            return 4096
+        return None
+
     with patch(
         "lmcache.v1.storage_backend.raw_block.core._read_sysfs_int",
-        return_value=1024,
+        side_effect=fake_read,
     ) as mock_read:
         backend = _build_transfer_limit_backend(
             TEST_DEVICES["char_device"], max_data_transfer_size=-1
         )
 
-    mock_read.assert_called_once_with(expected_path)
+    mock_read.assert_any_call(f"{queue_dir}/max_hw_sectors_kb")
     assert backend._core.max_data_transfer_size == 1024 * 1024
+
+
+def test_uring_cmd_auto_transfer_limit_capped_by_max_segments():
+    """Auto transfer size must not exceed max_segments * page_size.
+
+    The io_uring_cmd passthrough path builds one iovec segment per page, so a
+    single transfer is bounded by the device's scatter-gather segment limit
+    even when max_hw_sectors_kb would permit a larger transfer.
+    """
+    queue_dir = f"{_get_sysfs_path(TEST_DEVICES['char_device'])}/queue"
+    page_size = os.sysconf("SC_PAGE_SIZE")
+    max_segments = 128
+
+    def fake_read(path: str) -> int | None:
+        if path == f"{queue_dir}/max_hw_sectors_kb":
+            # 2 MB worth of sectors -- larger than the segment limit allows.
+            return 2048
+        if path == f"{queue_dir}/max_segments":
+            return max_segments
+        return None
+
+    with patch(
+        "lmcache.v1.storage_backend.raw_block.core._read_sysfs_int",
+        side_effect=fake_read,
+    ):
+        backend = _build_transfer_limit_backend(
+            TEST_DEVICES["char_device"], max_data_transfer_size=-1
+        )
+
+    expected = max_segments * page_size
+    assert backend._core.max_data_transfer_size == expected
+    assert backend._core.max_data_transfer_size < 2048 * 1024
+
+
+def test_uring_cmd_auto_transfer_limit_ignores_missing_max_segments():
+    """Auto detection falls back to max_hw_sectors_kb when max_segments is absent."""
+    queue_dir = f"{_get_sysfs_path(TEST_DEVICES['char_device'])}/queue"
+
+    def fake_read(path: str) -> int | None:
+        if path == f"{queue_dir}/max_hw_sectors_kb":
+            return 512
+        # max_segments unavailable on this device/kernel.
+        return None
+
+    with patch(
+        "lmcache.v1.storage_backend.raw_block.core._read_sysfs_int",
+        side_effect=fake_read,
+    ):
+        backend = _build_transfer_limit_backend(
+            TEST_DEVICES["char_device"], max_data_transfer_size=-1
+        )
+
+    assert backend._core.max_data_transfer_size == 512 * 1024
 
 
 def test_uring_cmd_auto_transfer_limit_fails_when_sysfs_unavailable():
