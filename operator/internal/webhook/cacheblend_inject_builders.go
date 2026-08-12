@@ -149,8 +149,8 @@ func cudagraphArgs(cudagraph string) []string {
 //   - existingArgs: the target container's current args (may be nil).
 //   - kvTransferConfigJSON: the CBKVConnector JSON from the engine's connection
 //     ConfigMap, or "" to skip injecting/replacing --kv-transfer-config.
-//   - injection: the engine's (defaulted) injection spec, carrying the cudagraph
-//     mode, block size, and attention backend ("none" omits the flag).
+//   - injection: the engine's (defaulted) injection spec; only the cudagraph
+//     mode is read from it here.
 //
 // Returns a new args slice; the input is not mutated.
 func BuildCBArgs(
