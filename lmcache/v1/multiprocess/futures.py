@@ -21,7 +21,7 @@ class MessagingFuture(Generic[T]):
         self.is_done_ = threading.Event()
         self.result_: T | None = None
         self._retained_references: list[object] = []
-        self._partial_queue: queue.Queue[bytes] | None = None
+        self._partial_queue: queue.Queue[bytes | None] | None = None
 
     def query(self) -> bool:
         """
@@ -74,9 +74,9 @@ class MessagingFuture(Generic[T]):
         if self._partial_queue is not None:
             self._partial_queue.put(data)
 
-    def enable_streaming(self) -> "queue.Queue[bytes]":
+    def enable_streaming(self) -> "queue.Queue[bytes | None]":
         """Enable partial result streaming and return the internal queue."""
-        self._partial_queue = queue.Queue()
+        self._partial_queue = queue.Queue()  # type: ignore[assignment]
         return self._partial_queue
 
     def set_result(self, result: T) -> None:
@@ -90,6 +90,10 @@ class MessagingFuture(Generic[T]):
         """
         self.result_ = result
         self.is_done_.set()
+        # Wake any thread blocked in _drain_until_layer() so it can
+        # observe the final result instead of waiting for the 60-s timeout.
+        if self._partial_queue is not None:
+            self._partial_queue.put(None)
 
     def retain_reference(self, value: object) -> None:
         """Keep a resource alive for at least the lifetime of this future.
@@ -312,6 +316,11 @@ class LayerwiseDeviceMessagingFuture(MessagingFuture[T]):
                 raise LMCacheTimeoutError(
                     f"Timed out waiting for streaming event of layer {target_layer_idx}"
                 ) from None
+            if b_data is None:
+                # Sentinel from set_result(): final response arrived
+                # with no more partials coming.  Break out so the
+                # caller can discover the outcome via the raw future.
+                break
             self._import_partial(b_data)
 
     def _drain_remaining(self) -> None:
@@ -322,6 +331,8 @@ class LayerwiseDeviceMessagingFuture(MessagingFuture[T]):
             try:
                 b_data = self._partial_queue.get_nowait()
             except queue.Empty:
+                break
+            if b_data is None:
                 break
             self._import_partial(b_data)
 

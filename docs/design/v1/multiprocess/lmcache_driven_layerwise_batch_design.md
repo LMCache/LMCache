@@ -148,7 +148,7 @@ Per-layer interleaved (kv_interleaved=True, layerwise mode):
   chunk = [K_layer0, V_layer0, K_layer1, V_layer1, ..., K_layerN, V_layerN]
 ```
 
-This interleaved layout is set by `MemoryLayoutDesc.kv_interleaved`
+This interleaved layout is set by `PageBufferShapeDesc.kv_interleaved`
 (`lmcache/v1/platform/ops_types.py`).
 
 ### 4.2 Interleaved Enables Contiguous Batch Memcpy
