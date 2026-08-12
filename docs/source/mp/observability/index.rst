@@ -67,6 +67,7 @@ endpoint — this switches metrics to **push mode** (see
 Where ``/metrics`` lives
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
+The pull-mode ``/metrics`` endpoint location depends on the entrypoint.
 Entrypoints that embed a uvicorn HTTP frontend serve it there (and disable the
 standalone Prometheus server); entrypoints with no HTTP frontend start the
 standalone server on ``--prometheus-port`` instead.
