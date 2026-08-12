@@ -427,18 +427,14 @@ l2Backend, scheduling, overrides, imagePullSecrets) and adds:
   (appended to the vLLM pod so the private payload image can pull — the Secret
   must exist in the vLLM pod's namespace), `targetContainer` (default: first
   container), `cudagraph` (`eager`|`piecewise`|`full_decode_only`, default
-  `eager`), `blockSize` (default 64 — raise it for models whose KV page size
-  differs, e.g. sparse-attention models with a 128-token page), and
-  `attentionBackend` (default `none` — the webhook does not manage
-  `--attention-backend` unless the CR asks it to; set `CUSTOM` to route
-  attention through the CB backend, which most models need for blending —
-  models whose arch adapter takes over that role, e.g. all-sparse-MLA, keep
-  `none`). Env vars need no injection field: the webhook only
+  `eager`). `--attention-backend` and `--block-size` are deliberately **not**
+  injected and have no CR field: the CacheBlend plugin sets both at runtime, so
+  the operator would only be able to fight it (and a wrong pinned value fails
+  late, in the matcher). Env vars need no injection field: the webhook only
   prepends PYTHONPATH and never touches other env, so pod authors set model
   env vars (e.g. `VLLM_USE_FLASHINFER_MOE_FP8=0`) directly on their container.
 - `server.chunkSize` defaults to **256** and is validated to equal 256 (the blend
-  matcher requires `chunk_size == 256`; with the default `--block-size 64` that
-  is block\_size × 4).
+  matcher requires `chunk_size == 256`).
 
 ### The blend engine (controller)
 
@@ -491,7 +487,7 @@ webhook then applies:
 | pod `hostIPC: true` | required for CUDA IPC with the node-local engine |
 | `cb-plugin` emptyDir + payload init container | the busybox payload `cp -a`'s the pure-Python plugin tree onto the shared volume |
 | readOnly mount + `PYTHONPATH=/cb-plugin` on the vLLM container | vLLM discovers the plugin via its `vllm.general_plugins` entry point |
-| append required vLLM args | `--attention-backend <injection.attentionBackend; omitted on the default "none">`, `--kv-transfer-config <from the connection ConfigMap>`, `--block-size <injection.blockSize, default 64>`, `--pipeline-parallel-size 1`, `--no-enable-chunked-prefill`, `--enforce-eager` (or the configured cudagraph) |
+| append required vLLM args | `--kv-transfer-config <from the connection ConfigMap>`, `--pipeline-parallel-size 1`, `--no-enable-chunked-prefill`, `--enforce-eager` (or the configured cudagraph). `--attention-backend` and `--block-size` are **not** injected — the plugin sets both at runtime, and a user-supplied value is left untouched |
 | append `injection.imagePullSecrets` | so the private payload image can pull |
 | stamp `lmcache.ai/cacheblend-injected: "true"` | idempotency guard |
 
@@ -504,8 +500,8 @@ or the requested `targetContainer`/`cacheblend-container` annotation names a
 container that does not exist on the pod (`target-container-not-found`). It does
 **not** gate on engine readiness — like `LMCacheEngine`, the connector connects
 when the engine comes up. Args are emitted in two-token form
-(`--block-size 64`); the replace-not-duplicate dedup still recognizes a
-user-supplied `--flag=value`.
+(`--pipeline-parallel-size 1`); the replace-not-duplicate dedup still recognizes
+a user-supplied `--flag=value`.
 
 > **Shared with the LMCache injector.** The emptyDir + payload init container +
 > readOnly mount + `PYTHONPATH` staging (rows 2–3 above) is generic — the standard

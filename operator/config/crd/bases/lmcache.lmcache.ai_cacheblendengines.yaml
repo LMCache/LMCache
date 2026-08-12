@@ -1294,24 +1294,6 @@ spec:
                   injection defines the defaults the mutating webhook reads for pods bound
                   to this engine.
                 properties:
-                  attentionBackend:
-                    default: none
-                    description: |-
-                      attentionBackend is the vLLM --attention-backend the webhook injects.
-                      "none" (the default, case-sensitive) omits the flag and leaves a
-                      user-supplied value on the pod untouched; any other value is injected
-                      verbatim. Most models need "CUSTOM" for blending (see DESIGN.md).
-                    minLength: 1
-                    type: string
-                  blockSize:
-                    default: 64
-                    description: |-
-                      blockSize is the vLLM --block-size the webhook injects; a user-supplied
-                      value on the pod is overwritten. Raise it for models whose KV page size
-                      is not 64 (see DESIGN.md).
-                    format: int32
-                    minimum: 1
-                    type: integer
                   cudagraph:
                     default: eager
                     description: |-

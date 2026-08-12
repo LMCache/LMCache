@@ -953,11 +953,6 @@ Deploying a CacheBlendEngine
         # Secret must exist in the vLLM pod's namespace.
         imagePullSecrets:
           - name: my-registry-secret
-        # Route attention through the CB backend.  Most models need this for
-        # blending; the default ("none") leaves --attention-backend unmanaged.
-        # Keep "none" only for models whose arch adapter owns the attention
-        # role (e.g. all-sparse-MLA).
-        attentionBackend: CUSTOM
 
 The engine runs ``lmcache server --engine-type blend`` as a DaemonSet and
 emits a ``my-cacheblend-connection`` ConfigMap with the ``CBKVConnector``
@@ -1002,12 +997,13 @@ not reach ``vllm serve``:
 
 The webhook injects the plugin init container, ``PYTHONPATH``, ``hostIPC``, the
 private-image pull secret, and the required CacheBlend vLLM flags
-(``--attention-backend`` from ``injection.attentionBackend`` -- omitted on the
-default ``none``, so set ``CUSTOM`` as above, ``--kv-transfer-config`` from the
-engine's connection ConfigMap, ``--block-size`` from ``injection.blockSize``
-(default 64), ``--pipeline-parallel-size 1``, ``--no-enable-chunked-prefill``,
-``--enforce-eager``).  You supply only the model and
-your non-CacheBlend flags.
+(``--kv-transfer-config`` from the engine's connection ConfigMap,
+``--pipeline-parallel-size 1``, ``--no-enable-chunked-prefill``,
+``--enforce-eager``).  You supply only the model and your non-CacheBlend flags.
+
+``--attention-backend`` and ``--block-size`` are **not** injected: the
+CacheBlend plugin sets both at runtime, and a value you supply on the pod is
+left untouched.
 
 Verifying Injection
 ~~~~~~~~~~~~~~~~~~~~~
@@ -1069,19 +1065,9 @@ Spec Reference above) and adds:
    * - ``injection.cudagraph``
      - ``eager``
      - ``eager`` | ``piecewise`` | ``full_decode_only`` (never ``full``).
-   * - ``injection.blockSize``
-     - ``64``
-     - The injected vLLM ``--block-size`` (a user-supplied value on the pod is
-       overwritten).  Raise it for models whose KV page size differs (e.g. 128
-       for sparse-attention models).
-   * - ``injection.attentionBackend``
-     - ``none``
-     - The injected vLLM ``--attention-backend``.  ``none`` (default) omits the
-       flag and leaves a user-supplied value untouched; set ``CUSTOM`` to route
-       attention through the CB backend (most models need this for blending).
 
-``server.chunkSize`` defaults to ``256`` and must equal 256 (with the default
-``--block-size 64`` that is ``block_size * 4``).
+``server.chunkSize`` defaults to ``256`` and must equal 256 (the blend matcher
+requires it).
 
 .. _mp-operator-pd-disaggregation:
 

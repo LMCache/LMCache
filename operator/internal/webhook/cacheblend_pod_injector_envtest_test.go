@@ -40,9 +40,7 @@ var _ = Describe("CacheBlendPodInjector webhook (envtest)", Ordered, func() {
 		Expect(client.IgnoreAlreadyExists(k8sClient.Create(envtestCtx, ns))).To(Succeed())
 
 		By("creating the CacheBlendEngine and its connection ConfigMap")
-		// Opt in to --attention-backend CUSTOM (the spec default is "none",
-		// which omits the flag) so the full M5 flag set is exercised end to end.
-		engine := newTestEngine(withCustomBackend)
+		engine := newTestEngine(nil)
 		Expect(k8sClient.Create(envtestCtx, engine)).To(Succeed())
 		Expect(k8sClient.Create(envtestCtx, resources.BuildCBConnectionConfigMap(engine))).To(Succeed())
 	})
@@ -82,10 +80,11 @@ var _ = Describe("CacheBlendPodInjector webhook (envtest)", Ordered, func() {
 		By("M5: every required vLLM flag is present, with the node-local CBKVConnector config")
 		// Form-agnostic: the handler may emit two-token (--flag value) or
 		// =-token (--flag=value) forms; argsHasFlagValue handles both.
-		Expect(argsHasFlagValue(c.Args, "--attention-backend", "CUSTOM")).To(BeTrue())
-		Expect(argsHasFlagValue(c.Args, "--block-size", "64")).To(BeTrue())
 		Expect(argsHasFlagValue(c.Args, "--pipeline-parallel-size", "1")).To(BeTrue())
 		Expect(c.Args).To(ContainElement("--no-enable-chunked-prefill"))
+		By("--attention-backend, --block-size, and async scheduling are left to the plugin / vLLM")
+		Expect(argsHasFlag(c.Args, "--attention-backend")).To(BeFalse())
+		Expect(argsHasFlag(c.Args, "--block-size")).To(BeFalse())
 		Expect(c.Args).NotTo(ContainElement("--no-async-scheduling"))
 		kv := argsFlagValue(c.Args, "--kv-transfer-config")
 		Expect(kv).To(ContainSubstring("CBKVConnector"))

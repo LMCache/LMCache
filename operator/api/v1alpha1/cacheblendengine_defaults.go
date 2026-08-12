@@ -82,12 +82,4 @@ func (e *CacheBlendEngine) SetDefaults() {
 		cg := CudagraphEager
 		spec.Injection.Cudagraph = &cg
 	}
-	if spec.Injection.BlockSize == nil {
-		bs := DefaultCBBlockSize
-		spec.Injection.BlockSize = &bs
-	}
-	if spec.Injection.AttentionBackend == nil {
-		ab := DefaultCBAttentionBackend
-		spec.Injection.AttentionBackend = &ab
-	}
 }

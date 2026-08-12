@@ -19,7 +19,7 @@ spec:
   # server:
   #   port: 6566                  # MP port the CB connector dials (default 6566)
   #   httpPort: 8080              # HTTP frontend port (health, admin)
-  #   chunkSize: 256              # FIXED at 256 (default vLLM --block-size 64 * 4)
+  #   chunkSize: 256              # FIXED at 256 (required by the blend matcher)
   #   maxWorkers: 1               # default, worker threads
   #   hashAlgorithm: blake3       # builtin | sha256_cbor | blake3
 
@@ -49,15 +49,10 @@ spec:
     # vLLM pod's namespace.
     # imagePullSecrets:
     #   - name: my-registry-secret
-    # Route attention through the CB backend — most models need this for
-    # blending. The default ("none") leaves --attention-backend unmanaged;
-    # keep "none" only for models whose arch adapter owns the attention role
-    # (e.g. all-sparse-MLA).
-    attentionBackend: CUSTOM
     # targetContainer: ""          # default: first container; name the vLLM container
     # cudagraph: eager             # eager | piecewise | full_decode_only (never full)
-    # blockSize: 64                # injected --block-size; raise for models whose KV
-    #                              # page size differs (e.g. 128 for sparse-attention)
+    # NOTE: --attention-backend and --block-size are NOT injected and have no
+    # field here; the CacheBlend plugin sets both at runtime.
 
   # -- Eviction --
   # eviction:

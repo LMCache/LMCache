@@ -5,11 +5,10 @@
 # annotation) and a normal, args-only vLLM launch. After admission the webhook
 # adds: pod hostIPC=true; the `cb-plugin` emptyDir + payload init container;
 # a readOnly mount + PYTHONPATH on the vLLM container; the required vLLM flags
-# (--attention-backend from the engine's injection.attentionBackend — set it to
-# CUSTOM there, as the companion sample does; omitted on the default "none" —
-# --kv-transfer-config <node-local engine>, --block-size <injection.blockSize,
-# default 64>, --pipeline-parallel-size 1, --no-enable-chunked-prefill,
-# --enforce-eager); and the private-payload imagePullSecrets.
+# (--kv-transfer-config <node-local engine>, --pipeline-parallel-size 1,
+# --no-enable-chunked-prefill, --enforce-eager); and the private-payload
+# imagePullSecrets. --attention-backend and --block-size are NOT injected: the
+# CacheBlend plugin sets both at runtime.
 #
 # PREREQUISITES (else injection silently no-ops or the pod is rejected):
 #   1. A CacheBlendEngine named below exists IN THIS NAMESPACE and is reconciled
@@ -25,7 +24,7 @@
 #      the annotation below).
 #
 # Verify after creation:
-#   kubectl get pod -l app=vllm-cacheblend -o yaml | grep -E "hostIPC|cb-plugin|PYTHONPATH|attention-backend|cacheblend-injected"
+#   kubectl get pod -l app=vllm-cacheblend -o yaml | grep -E "hostIPC|cb-plugin|PYTHONPATH|kv-transfer-config|cacheblend-injected"
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -69,10 +68,7 @@ spec:
           # Args-only launch (image ENTRYPOINT is ["vllm","serve"]). Put the
           # model + your NON-CacheBlend serving flags here; the webhook APPENDS
           # the CacheBlend flags. Do NOT add --kv-transfer-config yourself (a
-          # user-supplied value makes the webhook skip that flag), and set
-          # --attention-backend via the engine's injection.attentionBackend
-          # rather than here (the webhook overwrites it when the engine manages
-          # it; the companion sample sets CUSTOM).
+          # user-supplied value makes the webhook skip that flag).
           args:
             - "Qwen/Qwen3-4B-Instruct-2507"
             - "--port"

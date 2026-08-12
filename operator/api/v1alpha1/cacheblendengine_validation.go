@@ -23,7 +23,7 @@ import (
 // ValidateSpec validates the CacheBlendEngineSpec and returns any validation
 // errors. It mirrors LMCacheEngine.ValidateSpec and additionally enforces the
 // CacheBlend invariants: chunkSize == 256, recompRatio in (0, 1], checkLayer
-// >= 0, partialBucket >= 1, blockSize >= 1, and a non-empty attentionBackend.
+// >= 0, and partialBucket >= 1.
 func (e *CacheBlendEngine) ValidateSpec() field.ErrorList {
 	var errs field.ErrorList
 	spec := &e.Spec
@@ -89,17 +89,6 @@ func (e *CacheBlendEngine) ValidateSpec() field.ErrorList {
 		} else if spec.Injection.PayloadImage.Repository == nil || *spec.Injection.PayloadImage.Repository == "" {
 			errs = append(errs, field.Required(injPath.Child("payloadImage", "repository"),
 				"must be a non-empty string"))
-		}
-
-		if spec.Injection.BlockSize != nil && *spec.Injection.BlockSize < 1 {
-			errs = append(errs, field.Invalid(injPath.Child("blockSize"),
-				*spec.Injection.BlockSize, "must be >= 1"))
-		}
-
-		if spec.Injection.AttentionBackend != nil && *spec.Injection.AttentionBackend == "" {
-			errs = append(errs, field.Invalid(injPath.Child("attentionBackend"),
-				*spec.Injection.AttentionBackend,
-				`must be a backend name or "none" to omit the flag`))
 		}
 	}
 

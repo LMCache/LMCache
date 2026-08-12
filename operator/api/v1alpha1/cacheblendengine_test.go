@@ -558,35 +558,7 @@ func TestCBValidateSpec_L2BothSet(t *testing.T) {
 	}
 }
 
-// --- Configurable injection (blockSize / attentionBackend / partialBucket) ---
-
-func TestCBSetDefaults_InjectionArgDefaults(t *testing.T) {
-	e := &CacheBlendEngine{Spec: CacheBlendEngineSpec{L1: L1BackendSpec{SizeGB: 10}}}
-	e.SetDefaults()
-	if e.Spec.Injection.BlockSize == nil || *e.Spec.Injection.BlockSize != DefaultCBBlockSize {
-		t.Fatalf("expected BlockSize=%d, got %v", DefaultCBBlockSize, e.Spec.Injection.BlockSize)
-	}
-	if e.Spec.Injection.AttentionBackend == nil || *e.Spec.Injection.AttentionBackend != DefaultCBAttentionBackend {
-		t.Fatalf("expected AttentionBackend=%s, got %v", DefaultCBAttentionBackend, e.Spec.Injection.AttentionBackend)
-	}
-}
-
-func TestCBSetDefaults_InjectionArgsPreserved(t *testing.T) {
-	e := &CacheBlendEngine{Spec: CacheBlendEngineSpec{
-		L1: L1BackendSpec{SizeGB: 10},
-		Injection: &InjectionSpec{
-			BlockSize:        ptr(int32(128)),
-			AttentionBackend: ptr(AttentionBackendCustom),
-		},
-	}}
-	e.SetDefaults()
-	if *e.Spec.Injection.BlockSize != 128 {
-		t.Fatalf("expected BlockSize preserved at 128, got %d", *e.Spec.Injection.BlockSize)
-	}
-	if *e.Spec.Injection.AttentionBackend != AttentionBackendCustom {
-		t.Fatalf("expected AttentionBackend preserved at CUSTOM, got %s", *e.Spec.Injection.AttentionBackend)
-	}
-}
+// --- Configurable injection (partialBucket) ---
 
 func TestCBValidateSpec_PartialBucketInvalid(t *testing.T) {
 	e := &CacheBlendEngine{Spec: CacheBlendEngineSpec{
@@ -608,50 +580,6 @@ func TestCBValidateSpec_PartialBucketValid(t *testing.T) {
 		L1:        L1BackendSpec{SizeGB: 10},
 		Injection: validCBInjection(),
 		Blend:     &BlendSpec{PartialBucket: ptr(int32(4096))},
-	}}
-	if errs := e.ValidateSpec(); len(errs) != 0 {
-		t.Fatalf("expected no errors, got %v", errs)
-	}
-}
-
-func TestCBValidateSpec_BlockSizeInvalid(t *testing.T) {
-	inj := validCBInjection()
-	inj.BlockSize = ptr(int32(0))
-	e := &CacheBlendEngine{Spec: CacheBlendEngineSpec{
-		L1:        L1BackendSpec{SizeGB: 10},
-		Injection: inj,
-	}}
-	errs := e.ValidateSpec()
-	if len(errs) != 1 {
-		t.Fatalf("expected 1 error, got %d: %v", len(errs), errs)
-	}
-	if errs[0].Field != "spec.injection.blockSize" {
-		t.Fatalf("expected field spec.injection.blockSize, got %s", errs[0].Field)
-	}
-}
-
-func TestCBValidateSpec_AttentionBackendEmptyInvalid(t *testing.T) {
-	inj := validCBInjection()
-	inj.AttentionBackend = ptr("")
-	e := &CacheBlendEngine{Spec: CacheBlendEngineSpec{
-		L1:        L1BackendSpec{SizeGB: 10},
-		Injection: inj,
-	}}
-	errs := e.ValidateSpec()
-	if len(errs) != 1 {
-		t.Fatalf("expected 1 error, got %d: %v", len(errs), errs)
-	}
-	if errs[0].Field != "spec.injection.attentionBackend" {
-		t.Fatalf("expected field spec.injection.attentionBackend, got %s", errs[0].Field)
-	}
-}
-
-func TestCBValidateSpec_AttentionBackendNoneValid(t *testing.T) {
-	inj := validCBInjection()
-	inj.AttentionBackend = ptr(AttentionBackendNone)
-	e := &CacheBlendEngine{Spec: CacheBlendEngineSpec{
-		L1:        L1BackendSpec{SizeGB: 10},
-		Injection: inj,
 	}}
 	if errs := e.ValidateSpec(); len(errs) != 0 {
 		t.Fatalf("expected no errors, got %v", errs)

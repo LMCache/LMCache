@@ -21,8 +21,6 @@ limitations under the License.
 package webhook
 
 import (
-	"strconv"
-
 	corev1 "k8s.io/api/core/v1"
 
 	lmcachev1alpha1 "github.com/LMCache/LMCache/api/v1alpha1"
@@ -60,16 +58,11 @@ var cbStaging = payloadStaging{
 
 // CacheBlend-required vLLM flag names and fixed values (design §7 M5). The
 // CacheBlend matcher and connector hard-require these. --attention-backend and
-// --block-size values come from spec.injection (defaults: "none" — flag
-// omitted — and 64, pinned by SetDefaults); the rest are fixed.
+// --block-size are deliberately absent: the plugin sets both at runtime.
 const (
-	cbFlagAttentionBackend = "--attention-backend"
-
 	cbFlagKVTransferConfig = "--kv-transfer-config"
 
 	cbFlagNoChunkedPrefill = "--no-enable-chunked-prefill"
-
-	cbFlagBlockSize = "--block-size"
 
 	cbFlagPipelineParallelSize = "--pipeline-parallel-size"
 	cbValPipelineParallelSize  = "1"
@@ -168,17 +161,10 @@ func BuildCBArgs(
 	args := make([]string, len(existingArgs))
 	copy(args, existingArgs)
 
-	// attentionBackend "none" omits the flag entirely: some models route the CB
-	// attention role through an arch adapter instead of the CUSTOM backend.
-	backend := injectedAttentionBackend(injection)
-	if backend != lmcachev1alpha1.AttentionBackendNone {
-		args = applyArg(args, cbFlagAttentionBackend, backend)
-	}
 	if kvTransferConfigJSON != "" {
 		args = applyArg(args, cbFlagKVTransferConfig, kvTransferConfigJSON)
 	}
 	args = applyBareFlag(args, cbFlagNoChunkedPrefill)
-	args = applyArg(args, cbFlagBlockSize, injectedBlockSize(injection))
 	args = applyArg(args, cbFlagPipelineParallelSize, cbValPipelineParallelSize)
 
 	// cudagraphArgs returns either a single bare flag (--enforce-eager), a
@@ -196,26 +182,6 @@ func BuildCBArgs(
 	}
 
 	return args
-}
-
-// injectedAttentionBackend returns the --attention-backend value to inject,
-// falling back to the default ("none", i.e. the flag is omitted) when the
-// injection spec does not carry one (SetDefaults normally pins it).
-func injectedAttentionBackend(injection *lmcachev1alpha1.InjectionSpec) string {
-	if injection == nil || injection.AttentionBackend == nil {
-		return lmcachev1alpha1.DefaultCBAttentionBackend
-	}
-	return *injection.AttentionBackend
-}
-
-// injectedBlockSize returns the --block-size value to inject as a string,
-// falling back to the default (64) when the injection spec does not carry one
-// (SetDefaults normally pins it).
-func injectedBlockSize(injection *lmcachev1alpha1.InjectionSpec) string {
-	if injection == nil || injection.BlockSize == nil {
-		return strconv.Itoa(int(lmcachev1alpha1.DefaultCBBlockSize))
-	}
-	return strconv.Itoa(int(*injection.BlockSize))
 }
 
 // applyArg appends-or-replaces a "--flag value" pair in args (design §9.1). It

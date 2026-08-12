@@ -36,28 +36,6 @@ const (
 	CudagraphFullDecodeOnly = "full_decode_only"
 )
 
-// Injection constants for CacheBlendEngine.
-const (
-	// DefaultCBBlockSize is the vLLM --block-size the webhook injects unless
-	// overridden by injection.blockSize.
-	DefaultCBBlockSize int32 = 64
-
-	// AttentionBackendNone is the injection.attentionBackend sentinel that makes
-	// the webhook omit the --attention-backend flag entirely, leaving any
-	// user-supplied value on the pod untouched.
-	AttentionBackendNone = "none"
-
-	// AttentionBackendCustom routes attention through the CB backend that owns
-	// the FULL_RECOMP / CHECK / PARTIAL pipeline. Most models need this; set it
-	// explicitly via injection.attentionBackend.
-	AttentionBackendCustom = "CUSTOM"
-
-	// DefaultCBAttentionBackend is the injection.attentionBackend default:
-	// "none" — the webhook does not manage --attention-backend unless the CR
-	// asks it to.
-	DefaultCBAttentionBackend = AttentionBackendNone
-)
-
 // BlendSpec defines the CacheBlend tunables injected into the vLLM connect-config.
 type BlendSpec struct {
 	// checkLayer is the layer index used by CacheBlend to decide which tokens
@@ -117,23 +95,6 @@ type InjectionSpec struct {
 	// +kubebuilder:default="eager"
 	// +kubebuilder:validation:Enum=eager;piecewise;full_decode_only
 	Cudagraph *string `json:"cudagraph,omitempty"`
-
-	// blockSize is the vLLM --block-size the webhook injects; a user-supplied
-	// value on the pod is overwritten. Raise it for models whose KV page size
-	// is not 64 (see DESIGN.md).
-	// +optional
-	// +kubebuilder:default=64
-	// +kubebuilder:validation:Minimum=1
-	BlockSize *int32 `json:"blockSize,omitempty"`
-
-	// attentionBackend is the vLLM --attention-backend the webhook injects.
-	// "none" (the default, case-sensitive) omits the flag and leaves a
-	// user-supplied value on the pod untouched; any other value is injected
-	// verbatim. Most models need "CUSTOM" for blending (see DESIGN.md).
-	// +optional
-	// +kubebuilder:default="none"
-	// +kubebuilder:validation:MinLength=1
-	AttentionBackend *string `json:"attentionBackend,omitempty"`
 }
 
 // CacheBlendEngineSpec defines the desired state of CacheBlendEngine. It mirrors

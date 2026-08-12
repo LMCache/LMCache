@@ -2,9 +2,8 @@
 #
 # Unlike vllm_deployment.yaml (the LMCacheEngine round-trip), this pod OPTS IN
 # to CacheBlend dependency injection via the mutating webhook. The webhook
-# appends the CacheBlend vLLM flags (--attention-backend CUSTOM,
-# --kv-transfer-config <engine>, --block-size 64, --pipeline-parallel-size 1,
-# --no-enable-chunked-prefill, --enforce-eager), the
+# appends the CacheBlend vLLM flags (--kv-transfer-config <engine>,
+# --pipeline-parallel-size 1, --no-enable-chunked-prefill, --enforce-eager), the
 # cb-plugin init container + emptyDir + PYTHONPATH, hostIPC=true, and the
 # engine's payload imagePullSecrets.
 #
@@ -17,8 +16,8 @@
 # CRITICAL: the vLLM container MUST launch via the image ENTRYPOINT
 # (["vllm","serve"]) with args ONLY. A `command:` override makes the webhook
 # SKIP injection (it stamps lmcache.ai/cacheblend-skip-reason=command-override)
-# because appended args can't reach `vllm serve`. Do NOT add --attention-backend
-# or --kv-transfer-config here — the webhook injects both.
+# because appended args can't reach `vllm serve`. Do NOT add
+# --kv-transfer-config here — the webhook injects it.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
