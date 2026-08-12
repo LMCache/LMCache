@@ -1,30 +1,38 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-Dynamic-file-mode Nixl L2 adapter.
+Dynamic Nixl L2 adapter.
 
 Unlike the static ``NixlStoreL2Adapter`` which pre-allocates all storage
-files at init time, this adapter opens/registers files per operation.
+descriptors at init time, this adapter opens/registers storage descriptors per
+operation.
 
-Atomic publish:
+File backend atomic publish:
 - Stores DMA-write to a per-operation ``<final_path>.tmp.<uuid>`` and
   atomically ``rename()`` to the final deterministic path on completion.
   This guarantees that readers (including other processes sharing the
   same directory) never observe a partially-written file.
 
-Persist (enabled by default via ``persist_enabled``, can be opted out):
+Object backends:
+- Stores and loads deterministic object names derived from ``ObjectKey``.
+  The NIXL object path has object-store semantics: this adapter can query
+  object presence, but it does not provide backend-neutral size accounting or
+  object deletion.
+
+Persist for file backends (enabled by default via ``persist_enabled``, can be
+opted out):
 - Keeps data files on disk at shutdown (no metadata dump).
 
 Secondary lookup (always on):
-- Lookup always checks secondary storage (disk) on miss and lazily
-  populates the in-memory index when a file is found. File names are
-  derived deterministically from ObjectKey.
+- Lookup always checks secondary storage on miss and lazily populates the
+  in-memory index when storage is found. File/object names are derived
+  deterministically from ObjectKey.
 """
 
 # Future
 from __future__ import annotations
 
 # Standard
-from typing import Optional
+from typing import Any, Optional
 import asyncio
 import os
 import threading
@@ -58,6 +66,10 @@ from lmcache.v1.platform import create_event_notifier
 
 logger = init_logger(__name__)
 
+_FILE_DYNAMIC_BACKENDS = ("GDS", "GDS_MT", "POSIX", "HF3FS")
+_OBJECT_DYNAMIC_BACKENDS = ("OBJ", "AZURE_BLOB")
+_VALID_DYNAMIC_BACKENDS = _FILE_DYNAMIC_BACKENDS + _OBJECT_DYNAMIC_BACKENDS
+
 
 # ---------------------------------------------------------------
 # ObjectKey <-> file path helpers
@@ -84,10 +96,10 @@ def _object_key_to_filename(key: ObjectKey) -> str:
 
 
 class DynamicNixlStorageAgent:
-    """Nixl storage agent that opens/registers files per operation.
+    """Nixl storage agent that registers storage per operation.
 
     The L1 memory handler is registered once at init (same as the static
-    agent).  Storage files are registered on-demand for each store/load
+    agent).  Storage descriptors are registered on-demand for each store/load
     and deregistered immediately after the transfer completes.
     """
 
@@ -102,11 +114,18 @@ class DynamicNixlStorageAgent:
         self.device = device
         self.backend_params = backend_params
         self.l1_align_bytes = l1_memory_desc.align_bytes
-        self.file_path = backend_params["file_path"]
-        os.makedirs(self.file_path, exist_ok=True)
-        self.use_direct_io = (
-            str(backend_params.get("use_direct_io", "false")).lower() == "true"
-        )
+        self.mem_type = "OBJ" if backend in _OBJECT_DYNAMIC_BACKENDS else "FILE"
+        if self.mem_type == "FILE":
+            self.file_path = backend_params["file_path"]
+            os.makedirs(self.file_path, exist_ok=True)
+            self.use_direct_io = (
+                str(backend_params.get("use_direct_io", "false")).lower() == "true"
+            )
+        else:
+            self.file_path = ""
+            self.use_direct_io = False
+        self._device_id_counter = 0
+        self._device_id_lock = threading.Lock()
 
         self.agent_name = "DynNixlAgent_" + str(uuid.uuid4())
         nixl_conf = NixlAgentConfig(backends=[])
@@ -154,7 +173,9 @@ class DynamicNixlStorageAgent:
             flags |= os.O_DIRECT
         return flags
 
-    def _register_single_file(self, fd: int, file_size: int, page_size: int):
+    def _register_single_file(
+        self, fd: int, file_size: int, page_size: int
+    ) -> tuple[Any, Any]:
         """Register a single file with nixl and return (reg_descs, xfer_handler).
 
         Returns:
@@ -172,8 +193,41 @@ class DynamicNixlStorageAgent:
         )
         return reg_descs, xfer_handler
 
-    def _deregister_file(self, reg_descs, xfer_handler):
+    def _register_single_object(
+        self, object_key: str, object_size: int, page_size: int
+    ) -> tuple[Any, Any]:
+        """Register a single object with nixl.
+
+        Args:
+            object_key: Deterministic object key to register with the object backend.
+            object_size: Object size in bytes.
+            page_size: Transfer page size in bytes.
+
+        Returns:
+            Tuple of (reg_descs, xfer_handler) for later cleanup.
+        """
+        num_pages = object_size // page_size
+        device_id = self._alloc_device_id()
+
+        reg_list = [(0, object_size, device_id, object_key)]
+        xfer_desc = [
+            (offset * page_size, page_size, device_id) for offset in range(num_pages)
+        ]
+
+        reg_descs = self.nixl_agent.register_memory(reg_list, mem_type="OBJ")
+        xfer_descs = self.nixl_agent.get_xfer_descs(xfer_desc, mem_type="OBJ")
+        xfer_handler = self.nixl_agent.prep_xfer_dlist(
+            self.agent_name, xfer_descs, mem_type="OBJ"
+        )
+        return reg_descs, xfer_handler
+
+    def _deregister_file(self, reg_descs: Any, xfer_handler: Any) -> None:
         """Deregister a file from nixl."""
+        self.nixl_agent.release_dlist_handle(xfer_handler)
+        self.nixl_agent.deregister_memory(reg_descs)
+
+    def _deregister_object(self, reg_descs: Any, xfer_handler: Any) -> None:
+        """Deregister an object from nixl."""
         self.nixl_agent.release_dlist_handle(xfer_handler)
         self.nixl_agent.deregister_memory(reg_descs)
 
@@ -207,8 +261,10 @@ class DynamicNixlStorageAgent:
                     xfer_handler,
                     storage_indices,
                 )
-                await self._post_non_blocking(handle)
-                self.nixl_agent.release_xfer_handle(handle)
+                try:
+                    await self._post_non_blocking(handle)
+                finally:
+                    self.nixl_agent.release_xfer_handle(handle)
             finally:
                 self._deregister_file(reg_descs, xfer_handler)
         except BaseException:
@@ -247,12 +303,86 @@ class DynamicNixlStorageAgent:
                     xfer_handler,
                     storage_indices,
                 )
-                await self._post_non_blocking(handle)
-                self.nixl_agent.release_xfer_handle(handle)
+                try:
+                    await self._post_non_blocking(handle)
+                finally:
+                    self.nixl_agent.release_xfer_handle(handle)
             finally:
                 self._deregister_file(reg_descs, xfer_handler)
         finally:
             os.close(fd)
+
+    async def dynamic_store_object(
+        self,
+        mem_indices: list[int],
+        object_key: str,
+        page_size: int,
+    ) -> None:
+        """Write memory pages to an object through a NIXL object backend.
+
+        Args:
+            mem_indices: L1 memory page indices to write.
+            object_key: Deterministic object key derived from ObjectKey.
+            page_size: Transfer page size in bytes.
+
+        Raises:
+            RuntimeError: If the NIXL transfer fails.
+        """
+        object_size = len(mem_indices) * page_size
+        reg_descs, xfer_handler = self._register_single_object(
+            object_key, object_size, page_size
+        )
+        try:
+            storage_indices = list(range(len(mem_indices)))
+            handle = self.nixl_agent.make_prepped_xfer(
+                "WRITE",
+                self.mem_xfer_handler,
+                mem_indices,
+                xfer_handler,
+                storage_indices,
+            )
+            try:
+                await self._post_non_blocking(handle)
+            finally:
+                self.nixl_agent.release_xfer_handle(handle)
+        finally:
+            self._deregister_object(reg_descs, xfer_handler)
+
+    async def dynamic_load_object(
+        self,
+        mem_indices: list[int],
+        object_key: str,
+        page_size: int,
+    ) -> None:
+        """Read object data into memory through a NIXL object backend.
+
+        Args:
+            mem_indices: L1 memory page indices to receive data.
+            object_key: Deterministic object key derived from ObjectKey.
+            page_size: Transfer page size in bytes.
+
+        Raises:
+            RuntimeError: If the NIXL transfer fails.
+        """
+        object_size = len(mem_indices) * page_size
+        reg_descs, xfer_handler = self._register_single_object(
+            object_key, object_size, page_size
+        )
+        try:
+            storage_indices = list(range(len(mem_indices)))
+            handle = self.nixl_agent.make_prepped_xfer(
+                "READ",
+                self.mem_xfer_handler,
+                mem_indices,
+                xfer_handler,
+                storage_indices,
+            )
+            try:
+                await self._post_non_blocking(handle)
+            finally:
+                self.nixl_agent.release_xfer_handle(handle)
+        finally:
+            self._deregister_object(reg_descs, xfer_handler)
 
     def dynamic_delete_file(self, file_path: str) -> None:
         """Delete a storage file from disk."""
@@ -282,7 +412,30 @@ class DynamicNixlStorageAgent:
         """Return the full file path for a given ObjectKey."""
         return os.path.join(self.file_path, _object_key_to_filename(key))
 
-    async def _post_non_blocking(self, handle):
+    def get_object_key_for_key(self, key: ObjectKey) -> str:
+        """Return the object backend key for a given ObjectKey."""
+        return _object_key_to_filename(key)
+
+    def object_exists(self, object_key: str) -> bool:
+        """Return whether an object exists in a NIXL object backend.
+
+        Args:
+            object_key: Deterministic object key to query.
+
+        Returns:
+            True when NIXL reports a matching object descriptor, False otherwise.
+        """
+        reg_list = [(0, 0, 0, object_key)]
+        try:
+            resp = self.nixl_agent.query_memory(
+                reg_list, self.backend, mem_type=self.mem_type
+            )
+        except Exception as e:
+            logger.warning("NIXL object query failed for %s: %s", object_key, e)
+            return False
+        return bool(resp and resp[0] is not None)
+
+    async def _post_non_blocking(self, handle: Any) -> None:
         """Await a nixl transfer until done."""
         state = self.nixl_agent.transfer(handle)
         while state != "DONE" and state != "ERR":
@@ -318,10 +471,17 @@ class DynamicNixlStorageAgent:
                         "Failed to remove leftover temp file %s: %s", name, e
                     )
 
-    def close(self):
+    def close(self) -> None:
         """Release L1 memory handlers."""
         self.nixl_agent.release_dlist_handle(self.mem_xfer_handler)
         self.nixl_agent.deregister_memory(self.mem_reg_descs)
+
+    def _alloc_device_id(self) -> int:
+        """Allocate a unique OBJ device ID for a register/deregister cycle."""
+        with self._device_id_lock:
+            device_id = self._device_id_counter
+            self._device_id_counter += 1
+        return device_id
 
 
 # ---------------------------------------------------------------
@@ -330,13 +490,15 @@ class DynamicNixlStorageAgent:
 
 
 class DynamicNixlStoreL2Adapter(L2AdapterInterface):
-    """Nixl L2 adapter using dynamic per-operation file registration.
+    """Nixl L2 adapter using dynamic per-operation storage registration.
 
-    Each store creates a new file on disk; each load re-opens the file.
+    For file backends, each store creates a new file on disk and each load
+    re-opens the file. For object backends, each store/load dynamically
+    registers the deterministic object key derived from ``ObjectKey``.
 
-    When ``persist_enabled`` is True (the default), data files are kept
-    on disk at shutdown.  Lookup always checks secondary storage (disk)
-    for keys not in the in-memory index and populates the index lazily.
+    When ``persist_enabled`` is True (the default), file backend data files
+    are kept on disk at shutdown. Lookup always checks secondary storage for
+    keys not in the in-memory index and populates the index lazily.
     """
 
     def __init__(
@@ -344,10 +506,16 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
         config: DynamicNixlStoreL2AdapterConfig,
         l1_memory_desc: L1MemoryDesc,
     ):
-        max_capacity_gb = float(config.backend_params.get("max_capacity_gb", 0))
-        if max_capacity_gb <= 0:
-            raise ValueError("backend_params must include a positive 'max_capacity_gb'")
-        super().__init__(max_capacity_bytes=int(max_capacity_gb * (1024**3)))
+        if config.backend in _OBJECT_DYNAMIC_BACKENDS:
+            max_capacity_bytes = 0
+        else:
+            max_capacity_gb = float(config.backend_params.get("max_capacity_gb", 0))
+            if max_capacity_gb <= 0:
+                raise ValueError(
+                    "backend_params must include a positive 'max_capacity_gb'"
+                )
+            max_capacity_bytes = int(max_capacity_gb * (1024**3))
+        super().__init__(max_capacity_bytes=max_capacity_bytes)
         self._config = config
 
         self._store_efd = create_event_notifier()
@@ -469,6 +637,13 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
 
     def delete(self, keys: list[ObjectKey]) -> None:
         """Delete objects from storage, removing their files from disk."""
+        if self._config.backend in _OBJECT_DYNAMIC_BACKENDS:
+            logger.info(
+                "delete() is unsupported for object backend %s; skipping",
+                self._config.backend,
+            )
+            return
+
         to_delete: list[tuple[ObjectKey, int, str]] = []
         with self._lock:
             for key in keys:
@@ -524,7 +699,7 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
     # Cleanup Interface
     #####################
 
-    def close(self):
+    def close(self) -> None:
         # Stop the event loop and wait for all in-flight tasks to finish
         async def _stop_tasks():
             tasks = [
@@ -537,16 +712,23 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
 
-        if self._loop.is_running():
-            future = asyncio.run_coroutine_threadsafe(_stop_tasks(), self._loop)
-            future.result(timeout=5)
-            self._loop.call_soon_threadsafe(self._loop.stop)
+        if not self._loop.is_closed():
+            try:
+                future = asyncio.run_coroutine_threadsafe(_stop_tasks(), self._loop)
+                future.result(timeout=5)
+            finally:
+                self._loop.call_soon_threadsafe(self._loop.stop)
 
         self._loop_thread.join()
         self._loop.close()
 
         # If persist is enabled, keep data files on disk; otherwise clean up.
-        if self._persist_enabled:
+        if self._config.backend in _OBJECT_DYNAMIC_BACKENDS:
+            logger.info(
+                "%s backend does not support adapter-side cleanup",
+                self._config.backend,
+            )
+        elif self._persist_enabled:
             logger.info("persist_enabled=True, keeping data files on disk")
         else:
             logger.info("persist_enabled=False, deleting all data files")
@@ -556,7 +738,8 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
                     self.nixl_agent.dynamic_delete_file(file_path)
 
         # Best-effort cleanup of orphaned temp files from crashed stores.
-        self.nixl_agent.cleanup_temp_files()
+        if self._config.backend not in _OBJECT_DYNAMIC_BACKENDS:
+            self.nixl_agent.cleanup_temp_files()
 
         self.nixl_agent.close()
 
@@ -607,7 +790,10 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
                 with self._lock:
                     if key in self._memory_objects or key in self._inflight_stores:
                         continue
-                    if self._total_bytes + mem_size > self._max_capacity_bytes:
+                    if (
+                        self._max_capacity_bytes > 0
+                        and self._total_bytes + mem_size > self._max_capacity_bytes
+                    ):
                         logger.warning(
                             "Storage capacity exceeded, skipping store for key %s",
                             key,
@@ -619,11 +805,16 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
 
                 try:
                     mem_indices = self.nixl_agent.get_memory_indices(mem_addr, mem_size)
-                    file_path = self.nixl_agent.get_file_path_for_key(key)
-
-                    await self.nixl_agent.dynamic_store_file(
-                        mem_indices, file_path, self.nixl_agent.l1_align_bytes
-                    )
+                    if self._config.backend in _OBJECT_DYNAMIC_BACKENDS:
+                        object_key = self.nixl_agent.get_object_key_for_key(key)
+                        await self.nixl_agent.dynamic_store_object(
+                            mem_indices, object_key, self.nixl_agent.l1_align_bytes
+                        )
+                    else:
+                        file_path = self.nixl_agent.get_file_path_for_key(key)
+                        await self.nixl_agent.dynamic_store_file(
+                            mem_indices, file_path, self.nixl_agent.l1_align_bytes
+                        )
 
                     store_obj = NixlStoreObj(
                         page_indices=[],  # not used in dynamic mode
@@ -704,6 +895,18 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
         # in _total_bytes.
         if key in self._inflight_stores:
             return None
+        if self._config.backend in _OBJECT_DYNAMIC_BACKENDS:
+            object_key = self.nixl_agent.get_object_key_for_key(key)
+            if not self.nixl_agent.object_exists(object_key):
+                return None
+            obj = NixlStoreObj(
+                page_indices=[],  # not used in dynamic mode
+                size=0,
+                layout=None,
+            )
+            self._memory_objects[key] = obj
+            return obj
+
         file_path = self.nixl_agent.get_file_path_for_key(key)
         try:
             obj_size = os.stat(file_path).st_size
@@ -765,13 +968,20 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
                 mem_addr = objects[i].meta.address
                 mem_size = objects[i].meta.phy_size
                 mem_indices = self.nixl_agent.get_memory_indices(mem_addr, mem_size)
-                file_path = self.nixl_agent.get_file_path_for_key(key)
-
-                coros.append(
-                    self.nixl_agent.dynamic_load_file(
-                        mem_indices, file_path, self.nixl_agent.l1_align_bytes
+                if self._config.backend in _OBJECT_DYNAMIC_BACKENDS:
+                    object_key = self.nixl_agent.get_object_key_for_key(key)
+                    coros.append(
+                        self.nixl_agent.dynamic_load_object(
+                            mem_indices, object_key, self.nixl_agent.l1_align_bytes
+                        )
                     )
-                )
+                else:
+                    file_path = self.nixl_agent.get_file_path_for_key(key)
+                    coros.append(
+                        self.nixl_agent.dynamic_load_file(
+                            mem_indices, file_path, self.nixl_agent.l1_align_bytes
+                        )
+                    )
                 found_positions.append(i)
 
             if coros:
@@ -804,18 +1014,17 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
 # Config and self-registration
 # ---------------------------------------------------------------------
 
-# TODO(Jiayi): OBJ backend is not supported in the dynamic adapter yet.
-# Only file-based backends are supported.
-_VALID_DYNAMIC_BACKENDS = ("GDS", "GDS_MT", "POSIX", "HF3FS")
-
 
 class DynamicNixlStoreL2AdapterConfig(L2AdapterConfigBase):
     """Config for the dynamic-file Nixl L2 adapter.
 
     Fields:
-    - backend: Nixl storage backend (GDS, GDS_MT, POSIX, HF3FS).
+    - backend: Nixl storage backend (GDS, GDS_MT, POSIX, HF3FS, OBJ,
+      AZURE_BLOB).
     - backend_params: Backend-specific parameters as a dict of string
-      key-value pairs. Must include ``file_path`` and ``use_direct_io``.
+      key-value pairs. File backends must include ``file_path``,
+      ``use_direct_io``, and ``max_capacity_gb``. Object backend parameters
+      are passed through to NIXL.
     """
 
     def __init__(
@@ -827,11 +1036,11 @@ class DynamicNixlStoreL2AdapterConfig(L2AdapterConfigBase):
             raise ValueError(
                 "backend must be one of %s, got %r" % (_VALID_DYNAMIC_BACKENDS, backend)
             )
-        if "file_path" not in backend_params:
+        if backend in _FILE_DYNAMIC_BACKENDS and "file_path" not in backend_params:
             raise ValueError(
                 "backend_params must include 'file_path' for backend %r" % backend
             )
-        if "use_direct_io" not in backend_params:
+        if backend in _FILE_DYNAMIC_BACKENDS and "use_direct_io" not in backend_params:
             raise ValueError(
                 "backend_params must include 'use_direct_io' for backend %r" % backend
             )
@@ -859,11 +1068,12 @@ class DynamicNixlStoreL2AdapterConfig(L2AdapterConfigBase):
             "- backend (str): Nixl storage backend, "
             "one of %s (required)\n"
             "- backend_params (dict): backend-specific "
-            "string key-value pairs. Must include "
-            "'file_path' and 'use_direct_io'.\n"
-            "- persist_enabled (bool): if True, keep data files on disk "
-            "at shutdown (optional, default True)\n"
-            "Lookup always checks secondary storage (disk) on miss."
+            "string key-value pairs. File backends must include "
+            "'file_path', 'use_direct_io', and 'max_capacity_gb'. "
+            "Object backend parameters are passed through to NIXL.\n"
+            "- persist_enabled (bool): for file backends, if True, keep "
+            "data files on disk at shutdown (optional, default True)\n"
+            "Lookup always checks secondary storage on miss."
             % (_VALID_DYNAMIC_BACKENDS,)
         )
 

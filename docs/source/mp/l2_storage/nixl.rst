@@ -6,8 +6,9 @@ NIXL-based persistent storage — the primary production L2 backend, using NIXL
 types share this backend:
 
 - ``nixl_store`` — a fixed pool of storage descriptors pre-allocated at init.
-- ``nixl_store_dynamic`` — opens and registers files per operation, adding
-  persist/recover across restarts and removing the open-file-descriptor limit.
+- ``nixl_store_dynamic`` — opens and registers storage descriptors per
+  operation, adding file-backend persist/recover across restarts and removing
+  the open-file-descriptor limit.
 
 .. note::
 
@@ -86,8 +87,9 @@ The ``OBJ`` and ``AZURE_BLOB`` backends (object stores) do not require ``file_pa
 Dynamic (persist / recover) — ``nixl_store_dynamic``
 ----------------------------------------------------
 
-A dynamic variant of the NIXL adapter that opens and registers files
-per-operation instead of pre-allocating them at init. This enables:
+A dynamic variant of the NIXL adapter that opens and registers storage
+descriptors per-operation instead of pre-allocating them at init. For file
+backends, this enables:
 
 - **Persist/recover** -- cached KV metadata survives restarts.
 - **No fd limits** -- files are opened and closed per transfer, so the
@@ -95,21 +97,30 @@ per-operation instead of pre-allocating them at init. This enables:
 
 .. note::
 
-   Only file-based backends are supported (``POSIX``, ``GDS``, ``GDS_MT``,
-   ``HF3FS``). The ``OBJ`` and ``AZURE_BLOB`` backends are not supported yet.
+   Dynamic object backends (``OBJ`` and ``AZURE_BLOB``) support store/load and
+   secondary lookup via NIXL object presence queries. They do not support
+   adapter-side deletion or global capacity-based eviction because the adapter
+   cannot query backend-neutral object sizes or remove objects through the
+   current NIXL object path.
 
 **Required fields:**
 
 - ``backend``: Storage backend -- one of ``POSIX``, ``GDS``, ``GDS_MT``,
-  ``HF3FS``.
+  ``HF3FS``, ``OBJ``, ``AZURE_BLOB``.
 
 **Backend-specific parameters (``backend_params``):**
+
+File-based backends (``GDS``, ``GDS_MT``, ``POSIX``, ``HF3FS``) require:
 
 - ``file_path``: Directory path for storing L2 data files.
 - ``use_direct_io``: ``"true"`` or ``"false"``.
 - ``max_capacity_gb``: Maximum storage capacity in GB. The adapter
   rejects stores when this limit is reached. Required for the eviction
   controller to compute usage.
+
+The ``OBJ`` and ``AZURE_BLOB`` backends do not require ``file_path``,
+``use_direct_io``, or ``max_capacity_gb``. Backend-specific object-store
+parameters are passed through to NIXL.
 
 **Optional fields (for persist):**
 
@@ -133,12 +144,19 @@ populates the in-memory index when a file is found.
     # With eviction
     --l2-adapter '{"type": "nixl_store_dynamic", "backend": "GDS", "backend_params": {"file_path": "/data/nvme/l2", "use_direct_io": "true", "max_capacity_gb": "50"}, "eviction": {"eviction_policy": "LRU", "trigger_watermark": 0.9, "eviction_ratio": 0.1}}'
 
+    # OBJ backend
+    --l2-adapter '{"type": "nixl_store_dynamic", "backend": "OBJ", "backend_params": {}}'
+
+    # AZURE_BLOB backend
+    --l2-adapter '{"type": "nixl_store_dynamic", "backend": "AZURE_BLOB", "backend_params": {"account_url": "https://<account_name>.blob.core.windows.net", "container_name": "<container_name>"}}'
+
 **Persist / secondary lookup behaviour:**
 
 - On **shutdown**, the adapter keeps data files on disk by default
   (``persist_enabled`` defaults to ``true``). If explicitly set to
-  ``false``, all data files are deleted to avoid orphaned storage.
+  ``false``, all data files are deleted to avoid orphaned storage. For
+  ``OBJ``, adapter-side cleanup is not supported.
 - On **startup**, the in-memory index is empty. Every lookup miss falls
-  through to a secondary lookup on disk: if the deterministic file
-  exists, it is treated as a hit and the in-memory index is populated
-  lazily from the file size.
+  through to secondary storage: file backends check the deterministic file
+  path; object backends check the deterministic object key through NIXL
+  ``query_memory``.

@@ -10,12 +10,15 @@ two variants:
 | Adapter | Type name | Storage mode | Persist | Backends |
 |---|---|---|---|---|
 | `NixlStoreL2Adapter` | `nixl_store` | Static (pre-allocated files) | Not supported | GDS, GDS_MT, POSIX, HF3FS, OBJ, AZURE_BLOB |
-| `DynamicNixlStoreL2Adapter` | `nixl_store_dynamic` | Dynamic (per-operation files) | Supported (default on) | GDS, GDS_MT, POSIX, HF3FS |
+| `DynamicNixlStoreL2Adapter` | `nixl_store_dynamic` | Dynamic (per-operation descriptors) | File backends only | GDS, GDS_MT, POSIX, HF3FS, OBJ, AZURE_BLOB |
 
-The **static** adapter pre-allocates all storage files at init and registers
-them with Nixl as a single prepped descriptor list. The **dynamic** adapter
-opens/registers files per operation, enabling persist/recover of cached KV
-metadata across restarts and avoiding OS open-file-descriptor limits.
+The **static** adapter pre-allocates all storage descriptors at init and
+registers them with Nixl as a single prepped descriptor list. The **dynamic**
+adapter opens/registers descriptors per operation. File backends use
+deterministic file names for persist/recover across restarts and avoid OS
+open-file-descriptor limits. Dynamic object backends (`OBJ`, `AZURE_BLOB`) use
+deterministic object keys and NIXL presence queries, but do not support
+adapter-side deletion or global capacity-based eviction.
 
 ---
 
@@ -133,49 +136,60 @@ Nixl at init time. This has two limitations:
 2. **No persist/recover.** Files are created with random UUIDs and the
    in-memory index (`_memory_objects`) is lost on shutdown.
 
-The dynamic adapter solves both by opening/registering files per operation
-and using deterministic file names derived from `ObjectKey`.
+The dynamic adapter solves both for file backends by opening/registering files
+per operation and using deterministic file names derived from `ObjectKey`.
+For object backends, it dynamically registers deterministic object keys derived
+from `ObjectKey`.
 
 ### Key Differences from Static
 
 | Aspect | Static | Dynamic |
 |---|---|---|
-| File lifecycle | All opened at init, closed at shutdown | Opened per store/load, closed after each transfer |
-| File naming | Random UUID (`obj_{i}_{uuid}.bin`) | Deterministic from ObjectKey (`{model}_{rank}_{hash}.bin`) |
+| Descriptor lifecycle | All registered at init, released at shutdown | Registered per store/load, released after each transfer |
+| Storage naming | Random UUID (`obj_{i}_{uuid}.bin`) or object key | Deterministic from ObjectKey (`{model}_{rank}_{hash}.bin`) |
 | Nixl registration | Single prepped dlist for all storage | Per-operation register → transfer → deregister |
 | Pool / page indices | `NixlObjPool` manages fixed slots | No pool; `NixlStoreObj.page_indices` unused (`[]`) |
-| Capacity control | Pool size (slot count) | `max_capacity_gb` (byte-based) |
-| Persist/recover | Not supported | Supported |
-| Batching | One DMA transfer per batch of keys | One DMA transfer per key (each key = separate file) |
+| Capacity control | Pool size (slot count) | File backends: `max_capacity_gb`; object backends: unsupported |
+| Persist/recover | Not supported | File backends: supported; object backends: presence lookup only |
+| Batching | One DMA transfer per batch of keys | One DMA transfer per key |
 
 ### Key Components
 
 #### `DynamicNixlStorageAgent`
 
 Similar to `NixlStorageAgent` but only registers L1 memory at init. Storage
-file registration is per-operation:
+registration is per-operation:
 
 - `dynamic_store_file(mem_indices, file_path, page_size)` — create file,
   register with Nixl, DMA write, deregister, close fd.
 - `dynamic_load_file(mem_indices, file_path, page_size)` — open existing
   file, register, DMA read, deregister, close fd.
+- `dynamic_store_object(mem_indices, object_key, page_size)` — register the
+  deterministic object key, DMA write, deregister.
+- `dynamic_load_object(mem_indices, object_key, page_size)` — register the
+  deterministic object key, DMA read, deregister.
+- `object_exists(object_key)` — use NIXL `query_memory` to check object
+  presence.
 - `dynamic_delete_file(file_path)` — `os.unlink()`.
 
 #### `DynamicNixlStoreL2Adapter`
 
 Same `L2AdapterInterface` contract as the static adapter. Differences:
 
-- **Store:** Iterates per key, calling `dynamic_store_file` for each.
-  Checks `_total_bytes + obj_size > _max_capacity_bytes` before each write;
-  stops the batch if capacity is exceeded.
-- **Delete:** Removes the file from disk via `dynamic_delete_file` in
-  addition to removing the key from `_memory_objects`.
-- **Capacity:** Tracks `_total_bytes` (incremented on store and on
-  secondary lookup, decremented on delete). `get_usage()` returns
-  `_total_bytes / _max_capacity_bytes` for the eviction controller.
-- **Close:** Stops the event loop first (waits for in-flight tasks);
-  when `persist_enabled`, data files are kept on disk, otherwise all
-  data files are deleted.
+- **Store:** Iterates per key, calling `dynamic_store_file` or
+  `dynamic_store_object` for each. File backends check
+  `_total_bytes + obj_size > _max_capacity_bytes` before each write; object
+  backends do not enforce aggregate capacity.
+- **Delete:** File backends remove the file from disk via
+  `dynamic_delete_file` in addition to removing the key from
+  `_memory_objects`. Object backend delete is a no-op.
+- **Capacity:** File backends track `_total_bytes` (incremented on store and
+  on secondary lookup, decremented on delete). `get_usage()` returns
+  `_total_bytes / _max_capacity_bytes` for the eviction controller. Object
+  backends set `max_capacity_bytes=0`, so global eviction is disabled.
+- **Close:** Stops the event loop first (waits for in-flight tasks). For file
+  backends, when `persist_enabled`, data files are kept on disk, otherwise all
+  data files are deleted. Object backends have no adapter-side cleanup.
 - **Lookup:** A lookup miss always falls through to a synchronous
   secondary lookup on disk; see the Persist / Secondary Lookup section
   below.
@@ -187,9 +201,9 @@ Same `L2AdapterInterface` contract as the static adapter. Differences:
 submit_store_task(keys, objects)
   └─ schedules _execute_store_in_the_loop on the asyncio loop
        ├─ for each key/object:
-       │    ├─ check capacity (skip remaining if exceeded)
-       │    ├─ compute deterministic file path from ObjectKey
-       │    ├─ open file, register with Nixl, DMA write, deregister, close
+       │    ├─ check capacity for file backends
+       │    ├─ compute deterministic file path/object key from ObjectKey
+       │    ├─ register storage with Nixl, DMA write, deregister
        │    └─ record key→NixlStoreObj in _memory_objects, update _total_bytes
        └─ signals store event-fd
 ```
@@ -199,8 +213,8 @@ submit_store_task(keys, objects)
 submit_load_task(keys, objects)
   └─ schedules _execute_load_in_loop on the asyncio loop
        ├─ for each found key:
-       │    ├─ compute file path from ObjectKey
-       │    └─ open file, register with Nixl, DMA read, deregister, close
+       │    ├─ compute file path/object key from ObjectKey
+       │    └─ register storage with Nixl, DMA read, deregister
        └─ signals load event-fd
 ```
 
@@ -247,14 +261,18 @@ mapping is sufficient to rediscover each file on restart.
 
 #### Secondary Lookup (lazy disk recovery)
 
-`_execute_lookup_in_the_loop` always extends the in-memory index lookup
-with a secondary lookup on miss:
+For file backends, `_execute_lookup_in_the_loop` extends the in-memory index
+lookup with a secondary lookup on miss:
 
 1. Compute deterministic file path from the ObjectKey.
 2. `os.stat(file_path)` — if the file exists, treat as a hit.
 3. Populate `_memory_objects[key]` lazily with `size` from the stat
    result and `layout=None`.
 4. Update `_total_bytes`; enforce capacity (skip if it would exceed).
+
+For object backends, secondary lookup computes the deterministic object key and
+calls NIXL `query_memory`. A hit populates `_memory_objects[key]` with `size=0`
+because the adapter does not have a backend-neutral object-size query.
 
 The `NixlStoreObj.layout` field is left as `None` on secondary lookup. Layout
 information is only needed at load time, where the caller supplies it
@@ -280,6 +298,8 @@ via the provided `MemoryObj`'s shape/dtype/phy_size.
 
 ### Dynamic Adapter (`nixl_store_dynamic`)
 
+File backend:
+
 ```json
 {
   "type": "nixl_store_dynamic",
@@ -290,6 +310,29 @@ via the provided `MemoryObj`'s shape/dtype/phy_size.
     "max_capacity_gb": "10"
   },
   "persist_enabled": true
+}
+```
+
+OBJ backend:
+
+```json
+{
+  "type": "nixl_store_dynamic",
+  "backend": "OBJ",
+  "backend_params": {}
+}
+```
+
+AZURE_BLOB backend:
+
+```json
+{
+  "type": "nixl_store_dynamic",
+  "backend": "AZURE_BLOB",
+  "backend_params": {
+    "account_url": "https://<account_name>.blob.core.windows.net",
+    "container_name": "<container_name>"
+  }
 }
 ```
 
