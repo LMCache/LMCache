@@ -8,6 +8,7 @@ pure config layer (no native extensions), so it runs without a CUDA build.
 
 # Standard
 import argparse
+import logging
 import uuid
 
 # Third Party
@@ -27,6 +28,8 @@ _COORD_ENV = (
     "LMCACHE_COORDINATOR_URL",
     "LMCACHE_COORDINATOR_ADVERTISE_IP",
     "LMCACHE_COORDINATOR_HEARTBEAT_INTERVAL",
+    "LMCACHE_COORDINATOR_EVENT_REPORTING",
+    "LMCACHE_COORDINATOR_EVENT_FLUSH_INTERVAL",
 )
 
 
@@ -127,3 +130,93 @@ def test_instance_id_defaults_are_distinct():
 def test_instance_id_dataclass_default_is_distinct():
     # Direct construction (no CLI) also mints a fresh id per instance.
     assert MPServerConfig().instance_id != MPServerConfig().instance_id
+
+
+# -- Event reporting ----------------------------------------------------------
+
+
+def test_event_reporting_defaults_are_disabled():
+    config = _parse([])
+    assert config.event_reporting is False
+    assert config.event_flush_interval == 1.0
+
+
+def test_event_reporting_flags_are_parsed():
+    config = _parse(
+        [
+            "--coordinator-event-reporting",
+            "--coordinator-event-flush-interval",
+            "0.5",
+        ]
+    )
+    assert config.event_reporting is True
+    assert config.event_flush_interval == 0.5
+
+
+def test_event_reporting_env_fallback(monkeypatch):
+    monkeypatch.setenv("LMCACHE_COORDINATOR_EVENT_REPORTING", "true")
+    monkeypatch.setenv("LMCACHE_COORDINATOR_EVENT_FLUSH_INTERVAL", "2.5")
+    config = _parse([])
+    assert config.event_reporting is True
+    assert config.event_flush_interval == 2.5
+
+
+def test_event_flush_interval_rejects_nonpositive():
+    with pytest.raises(ValueError):
+        _parse(["--coordinator-event-flush-interval", "0"])
+
+
+# -- Deprecated pre-v0.5.3 aliases (operator <= v0.5.2 still emits these) -----
+
+
+def test_deprecated_l2_event_flags_are_accepted():
+    config = _parse(
+        [
+            "--coordinator-l2-event-reporting",
+            "--coordinator-l2-event-flush-interval",
+            "0.5",
+        ]
+    )
+    assert config.event_reporting is True
+    assert config.event_flush_interval == 0.5
+
+
+def test_new_flags_win_over_deprecated_aliases():
+    config = _parse(
+        [
+            "--coordinator-event-flush-interval",
+            "2.0",
+            "--coordinator-l2-event-flush-interval",
+            "0.5",
+        ]
+    )
+    assert config.event_flush_interval == 2.0
+
+
+def test_deprecated_flags_log_warning():
+    # lmcache's ``init_logger`` sets ``propagate = False``, so pytest's
+    # ``caplog`` (root-logger based) cannot see the records. Attach a local
+    # handler to the named logger instead (established pattern, see
+    # tests/v1/test_v1_adapter_state_desync.py).
+    records: list[logging.LogRecord] = []
+
+    class _ListHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    handler = _ListHandler(level=logging.WARNING)
+    config_logger = logging.getLogger("lmcache.v1.multiprocess.config")
+    config_logger.addHandler(handler)
+    try:
+        _parse(["--coordinator-l2-event-flush-interval", "0.5"])
+    finally:
+        config_logger.removeHandler(handler)
+    messages = [r.getMessage() for r in records]
+    assert any(
+        "--coordinator-l2-event-flush-interval is deprecated" in m for m in messages
+    )
+
+
+def test_deprecated_flush_interval_flag_rejects_nonpositive():
+    with pytest.raises(ValueError):
+        _parse(["--coordinator-l2-event-flush-interval", "0"])

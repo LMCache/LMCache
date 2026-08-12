@@ -7,6 +7,9 @@ import random
 import pytest
 import torch
 
+# First Party
+from lmcache import torch_dev, torch_device_type
+
 pytest.importorskip(
     "lmcache.c_ops",
     reason="Requires CUDA extension lmcache.c_ops",
@@ -16,11 +19,13 @@ pytest.importorskip(
 import lmcache.c_ops as lmc_ops
 
 # Skip all tests if cuda is unavailable
-pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available() or torch.cuda.device_count() == 0,
-    reason="No CUDA GPU present",
-)
-
+pytestmark = [
+    pytest.mark.cuda,
+    pytest.mark.skipif(
+        not (torch_dev.is_available() and torch_device_type == "cuda"),
+        reason="Requires CUDA backend",
+    ),
+]
 # ---------------------------------------------------------------------------
 # Tensor factories (ported from kernel harness)
 # ---------------------------------------------------------------------------
@@ -51,8 +56,15 @@ FMT_SGLANG_MHA = lmc_ops.EngineKVFormat.TWO_X_NL_X_NBBS_NH_HS
 FMT_SGLANG_MLA = lmc_ops.EngineKVFormat.NL_X_NBBS_ONE_HS
 FMT_NORMAL_HND = lmc_ops.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS
 FMT_FLASH_INFER_HND = lmc_ops.EngineKVFormat.NL_X_NB_TWO_NH_BS_HS
+FMT_VLLM_FUSED_HND = lmc_ops.EngineKVFormat.NL_X_NB_NH_BS_TWO_HS
+FMT_VLLM_FUSED_NHD = lmc_ops.EngineKVFormat.NL_X_NB_BS_NH_TWO_HS
+FMT_VLLM_CS_HND = lmc_ops.EngineKVFormat.NL_X_NB_NH_BS_CS
+FMT_VLLM_CS_NHD = lmc_ops.EngineKVFormat.NL_X_NB_BS_NH_CS
 
 # Format parameters: (engine_kv_format, num_layers, num_heads, head_size, is_mla)
+# The is_mla column really means "kv_size == 1": the fused-K/V and content-size
+# formats are not MLA but transfer with kv_size == 1 and hs already doubled
+# (kv-packed D).
 # Use small layer counts to keep GPU memory usage low in CI
 FORMAT_PARAMS = [
     (FMT_NORMAL, 4, 8, 128, False),
@@ -63,6 +75,10 @@ FORMAT_PARAMS = [
     (FMT_SGLANG_MLA, 4, 1, 576, True),
     (FMT_NORMAL_HND, 4, 8, 128, False),
     (FMT_FLASH_INFER_HND, 4, 8, 128, False),
+    (FMT_VLLM_FUSED_HND, 4, 8, 256, True),
+    (FMT_VLLM_FUSED_NHD, 4, 8, 256, True),
+    (FMT_VLLM_CS_HND, 4, 8, 256, True),
+    (FMT_VLLM_CS_NHD, 4, 8, 256, True),
 ]
 
 
@@ -91,6 +107,12 @@ def create_vllm_tensors(
         return [_create_random_tensor(shape, dtype, device) for _ in range(nl)]
     elif engine_kv_format == FMT_FLASH_INFER_HND:
         shape = [nb, 2, nh, bs, hs]
+        return [_create_random_tensor(shape, dtype, device) for _ in range(nl)]
+    elif engine_kv_format in (FMT_VLLM_FUSED_HND, FMT_VLLM_CS_HND):
+        shape = [nb, nh, bs, hs]  # hs is the fused 2 * head_size
+        return [_create_random_tensor(shape, dtype, device) for _ in range(nl)]
+    elif engine_kv_format in (FMT_VLLM_FUSED_NHD, FMT_VLLM_CS_NHD):
+        shape = [nb, bs, nh, hs]  # hs is the fused 2 * head_size
         return [_create_random_tensor(shape, dtype, device) for _ in range(nl)]
     elif engine_kv_format == FMT_MLA:
         shape = [nb, bs, hs]
@@ -129,6 +151,12 @@ def create_zero_vllm_tensors(
         return [_create_zero_tensor(shape, dtype, device) for _ in range(nl)]
     elif engine_kv_format == FMT_FLASH_INFER_HND:
         shape = [nb, 2, nh, bs, hs]
+        return [_create_zero_tensor(shape, dtype, device) for _ in range(nl)]
+    elif engine_kv_format in (FMT_VLLM_FUSED_HND, FMT_VLLM_CS_HND):
+        shape = [nb, nh, bs, hs]  # hs is the fused 2 * head_size
+        return [_create_zero_tensor(shape, dtype, device) for _ in range(nl)]
+    elif engine_kv_format in (FMT_VLLM_FUSED_NHD, FMT_VLLM_CS_NHD):
+        shape = [nb, bs, nh, hs]  # hs is the fused 2 * head_size
         return [_create_zero_tensor(shape, dtype, device) for _ in range(nl)]
     elif engine_kv_format == FMT_MLA:
         shape = [nb, bs, hs]
@@ -186,6 +214,10 @@ def get_block_data(
             results.append(vllm_tensors[layer_idx][block_idx, :, :, :, :].clone())
         elif engine_kv_format == FMT_FLASH_INFER_HND:
             results.append(vllm_tensors[layer_idx][block_idx, :, :, :, :].clone())
+        elif engine_kv_format in (FMT_VLLM_FUSED_HND, FMT_VLLM_CS_HND):
+            results.append(vllm_tensors[layer_idx][block_idx, :, :, :].clone())
+        elif engine_kv_format in (FMT_VLLM_FUSED_NHD, FMT_VLLM_CS_NHD):
+            results.append(vllm_tensors[layer_idx][block_idx, :, :, :].clone())
         elif engine_kv_format == FMT_MLA:
             results.append(vllm_tensors[layer_idx][block_idx, :, :].clone())
         elif engine_kv_format == FMT_SGLANG_MHA:
@@ -272,12 +304,18 @@ TOTAL_BLOCKS = NUM_MEMORY_OBJECTS * BLOCKS_PER_OBJECT  # 64
         "sglang_mla",
         "normal_hnd",
         "flash_infer_hnd",
+        "vllm_fused_hnd",
+        "vllm_fused_nhd",
+        "vllm_cs_hnd",
+        "vllm_cs_nhd",
     ],
 )
 @pytest.mark.parametrize(
     "dtype", [torch.bfloat16, torch.float8_e4m3fn], ids=["bf16", "fp8"]
 )
-@pytest.mark.parametrize("mem_device", ["cuda", "cpu"], ids=["mem_gpu", "mem_cpu"])
+@pytest.mark.parametrize(
+    "mem_device", [torch_device_type, "cpu"], ids=["mem_gpu", "mem_cpu"]
+)
 def test_block_transfer_roundtrip(
     engine_kv_format, nl, nh, hs, is_mla, dtype, mem_device
 ):
@@ -285,7 +323,7 @@ def test_block_transfer_roundtrip(
     D2H -> H2D roundtrip with different block IDs proves data flows through
     memory objects.
     """
-    device = torch.device("cuda")
+    device = torch.device(torch_device_type)
     mem_dev = torch.device(mem_device)
     kv_dim = 1 if is_mla else 2
     hidden_dim = nh * hs
@@ -330,7 +368,7 @@ def test_block_transfer_roundtrip(
         is_mla,
         TOKENS_PER_OBJECT,
     )
-    torch.cuda.synchronize()
+    torch_dev.synchronize()
 
     # H2D: mem_objects -> target
     call_block_kernel(
@@ -347,7 +385,7 @@ def test_block_transfer_roundtrip(
         is_mla,
         TOKENS_PER_OBJECT,
     )
-    torch.cuda.synchronize()
+    torch_dev.synchronize()
 
     # Verify: target[h2d_block] == source[d2h_block]
     for i in range(TOTAL_BLOCKS):
@@ -375,12 +413,16 @@ def test_block_transfer_roundtrip(
         "sglang_mla",
         "normal_hnd",
         "flash_infer_hnd",
+        "vllm_fused_hnd",
+        "vllm_fused_nhd",
+        "vllm_cs_hnd",
+        "vllm_cs_nhd",
     ],
 )
 @pytest.mark.parametrize("dtype", [torch.bfloat16], ids=["bf16"])
 def test_block_transfer_skip_prefix(engine_kv_format, nl, nh, hs, is_mla, dtype):
     """Verify skip_prefix_n_blocks=4 skips the first 4 blocks globally."""
-    device = torch.device("cuda")
+    device = torch.device(torch_device_type)
     kv_dim = 1 if is_mla else 2
     hidden_dim = nh * hs
     skip = 4
@@ -424,7 +466,7 @@ def test_block_transfer_skip_prefix(engine_kv_format, nl, nh, hs, is_mla, dtype)
         TOKENS_PER_OBJECT,
         skip_prefix_n_blocks=skip,
     )
-    torch.cuda.synchronize()
+    torch_dev.synchronize()
 
     # H2D with skip
     call_block_kernel(
@@ -442,7 +484,7 @@ def test_block_transfer_skip_prefix(engine_kv_format, nl, nh, hs, is_mla, dtype)
         TOKENS_PER_OBJECT,
         skip_prefix_n_blocks=skip,
     )
-    torch.cuda.synchronize()
+    torch_dev.synchronize()
 
     # Non-skipped blocks should match
     for i in range(skip, TOTAL_BLOCKS):

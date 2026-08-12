@@ -3,9 +3,16 @@
 """Tests for io_uring command (passthrough) support in Rust raw block backend."""
 
 # Standard
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 import asyncio
+import mmap
+import multiprocessing
 import os
+
+if TYPE_CHECKING:
+    # Third Party
+    from lmcache_rust_raw_block_io import RawBlockDevice
 
 # Third Party
 import pytest
@@ -53,6 +60,43 @@ def _has_ext() -> bool:
         return True
     except Exception:
         return False
+
+
+def _run_uring_cmd_build_error_probe(device_path: str) -> None:
+    """Verify that a middle SQE build failure completes without hanging."""
+    # Third Party
+    from lmcache_rust_raw_block_io import RawBlockDevice
+
+    raw_device = RawBlockDevice(
+        device_path,
+        writable=False,
+        use_odirect=False,
+        alignment=4096,
+        io_engine="io_uring",
+        iouring_queue_depth=256,
+        use_uring_cmd=True,
+    )
+    buffers: list[mmap.mmap] = []
+    try:
+        lba_size = raw_device.nvme_lba_size()
+        buffers = [mmap.mmap(-1, lba_size) for _ in range(3)]
+        batch_id = raw_device.batched_read(
+            [0, 1, lba_size],
+            buffers,
+            [lba_size] * len(buffers),
+        )
+
+        try:
+            raw_device.wait_iouring(batch_id)
+        except ValueError as error:
+            if "offset must be aligned to LBA size" not in str(error):
+                raise
+        else:
+            raise AssertionError("expected the unaligned middle SQE build to fail")
+    finally:
+        raw_device.close()
+        for buffer in buffers:
+            buffer.close()
 
 
 # Skip all tests in this file if the Rust extension is not available
@@ -227,6 +271,68 @@ def test_uring_cmd_get_nvme_info(loop_in_thread):
         pytest.fail(f"Failed to get NVMe info: {e}")
 
 
+def test_uring_cmd_rejects_alignment_smaller_than_lba():
+    """A 4Kn namespace must reject a 512-byte transfer alignment."""
+    device_path = TEST_DEVICES["char_device"]
+    if not os.path.exists(device_path):
+        pytest.skip(f"Test device {device_path} not found.")
+
+    lba_path = os.path.join(
+        _get_sysfs_path(device_path),
+        "queue",
+        "logical_block_size",
+    )
+    try:
+        with open(lba_path, encoding="utf-8") as file:
+            lba_size = int(file.read().strip())
+    except (OSError, ValueError):
+        pytest.skip(f"Cannot determine the namespace LBA size from {lba_path}.")
+
+    if lba_size <= 512:
+        pytest.skip(
+            "Test requires an NVMe namespace with an LBA larger than 512 bytes."
+        )
+
+    # Third Party
+    from lmcache_rust_raw_block_io import RawBlockDevice
+
+    expected_error = (
+        rf"alignment \(512\) must be a non-zero multiple of "
+        rf"NVMe LBA size \({lba_size}\)"
+    )
+    with pytest.raises(ValueError, match=expected_error):
+        RawBlockDevice(
+            device_path,
+            writable=False,
+            use_odirect=False,
+            alignment=512,
+            io_engine="io_uring",
+            iouring_queue_depth=256,
+            use_uring_cmd=True,
+        )
+
+
+def test_uring_cmd_middle_build_error_does_not_hang():
+    """A rejected middle SQE must complete its batch with an error."""
+    device_path = TEST_DEVICES["char_device"]
+    if not os.path.exists(device_path):
+        pytest.skip(f"Test device {device_path} not found.")
+
+    context = multiprocessing.get_context("spawn")
+    process = context.Process(
+        target=_run_uring_cmd_build_error_probe,
+        args=(device_path,),
+    )
+    process.start()
+    process.join(timeout=10)
+    if process.is_alive():
+        process.terminate()
+        process.join()
+        pytest.fail("wait_iouring hung after a middle SQE build error")
+
+    assert process.exitcode == 0
+
+
 def test_uring_cmd_disabled(loop_in_thread):
     """Test that NVMe methods are not available when use_uring_cmd is disabled."""
     config = MockConfig(device_path=TEST_DEVICES["null_device"], use_uring_cmd=False)
@@ -289,6 +395,94 @@ def test_uring_cmd_auto_transfer_limit_fails_when_sysfs_unavailable():
     mock_read.assert_called_once_with(expected_path)
 
 
+def _open_raw_device(
+    device_path: str, *, use_uring_cmd: bool = True
+) -> "RawBlockDevice":
+    """Open the Rust RawBlockDevice; skip the test if the device is absent."""
+    if not os.path.exists(device_path):
+        pytest.skip(f"Test device {device_path} not found.")
+
+    # Third Party
+    from lmcache_rust_raw_block_io import RawBlockDevice  # type: ignore
+
+    return RawBlockDevice(
+        device_path,
+        writable=True,
+        use_odirect=False,
+        alignment=4096,
+        io_engine="io_uring",
+        iouring_queue_depth=256,
+        use_uring_cmd=use_uring_cmd,
+    )
+
+
+def _unaligned_bytearray(total_len: int, align: int = 4096) -> bytearray:
+    """Return a bytearray that is likely (best-effort) not ``align``-aligned."""
+    backing = bytearray(total_len + align)
+    return bytearray(backing[1 : 1 + total_len])
+
+
+def test_uring_cmd_read_uring_handles_unaligned_buffer() -> None:
+    """``read_uring`` must accept an unaligned buffer under ``use_uring_cmd``."""
+    device_path = TEST_DEVICES["char_device"]
+    raw_dev = _open_raw_device(device_path, use_uring_cmd=True)
+
+    try:
+        total_len = 8192  # multi-page to require a PRP list
+        buf = _unaligned_bytearray(total_len)
+        raw_dev.read_uring(0, buf, total_len, total_len)
+    finally:
+        raw_dev.close()
+
+
+def test_uring_cmd_batched_read_handles_unaligned_buffer() -> None:
+    """``batched_read`` must accept unaligned buffers under ``use_uring_cmd``."""
+    device_path = TEST_DEVICES["char_device"]
+    raw_dev = _open_raw_device(device_path, use_uring_cmd=True)
+
+    try:
+        total_len = 8192
+        offsets = [0, total_len, 2 * total_len, 3 * total_len]
+        buffers = [_unaligned_bytearray(total_len) for _ in offsets]
+        total_lens = [total_len] * len(offsets)
+
+        batch_id = raw_dev.batched_read(offsets, buffers, total_lens)
+        raw_dev.wait_iouring(batch_id)
+    finally:
+        raw_dev.close()
+
+
+def test_uring_cmd_batched_read_short_buffer_uses_bounce() -> None:
+    """``batched_read`` must bounce when caller capacity is below ``total_len``."""
+    device_path = TEST_DEVICES["char_device"]
+    raw_dev = _open_raw_device(device_path, use_uring_cmd=True)
+
+    try:
+        total_len = 8192
+        buf = bytearray(4096)
+        batch_id = raw_dev.batched_read([0], [buf], [total_len])
+        raw_dev.wait_iouring(batch_id)
+    finally:
+        raw_dev.close()
+
+
+def test_uring_cmd_batched_read_independent_per_item_bounce_decision() -> None:
+    """``batched_read`` must choose bounce per item, not for the whole batch."""
+    device_path = TEST_DEVICES["char_device"]
+    raw_dev = _open_raw_device(device_path, use_uring_cmd=True)
+
+    try:
+        total_len = 8192
+        offsets = [0, total_len]
+        buffers = [bytearray(total_len), _unaligned_bytearray(total_len)]
+        total_lens = [total_len, total_len]
+
+        batch_id = raw_dev.batched_read(offsets, buffers, total_lens)
+        raw_dev.wait_iouring(batch_id)
+    finally:
+        raw_dev.close()
+
+
 def test_uring_cmd_explicit_transfer_limit_must_be_block_aligned():
     """Test that explicitly configured max_data_transfer_size must be block-aligned."""
     # Default block_align is 4096 bytes
@@ -308,7 +502,7 @@ def test_uring_cmd_explicit_transfer_limit_must_be_block_aligned():
     with pytest.raises(
         ValueError,
         match=r"max_data_transfer_size \(5000\) must be a multiple of "
-        "block_align \(4096\)",
+        r"block_align \(4096\)",
     ):
         _build_transfer_limit_backend(
             TEST_DEVICES["char_device"], max_data_transfer_size=5000

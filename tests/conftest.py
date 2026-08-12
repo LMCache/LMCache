@@ -27,7 +27,7 @@ import torch
 
 # First Party
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
-from lmcache.v1.memory_management import MixedMemoryAllocator
+from lmcache.v1.memory_allocators.mixed_memory_allocator import MixedMemoryAllocator
 from lmcache.v1.metadata import LMCacheMetadata
 
 if importlib.util.find_spec("pytest_benchmark") is None:
@@ -35,6 +35,18 @@ if importlib.util.find_spec("pytest_benchmark") is None:
     @pytest.fixture
     def benchmark():
         pytest.skip("pytest-benchmark is not installed")
+
+
+@pytest.fixture(scope="session", autouse=True)
+def disable_usage_tracking():
+    """Keep the test suite from sending usage telemetry to the stats server.
+
+    Tests that exercise the telemetry itself (tests/test_usage_context.py)
+    re-enable it per-test via monkeypatch with an injected transport.
+    """
+    os.environ["LMCACHE_TRACK_USAGE"] = "false"
+    yield
+
 
 # This is to mock the constructor and destructor of
 # MixedMemoryAllocator and PinMemoryAllocator to
@@ -84,17 +96,18 @@ def patch_mixed_allocator():
 
     def fake_mixed_close(self):
         if not self._unregistered:
-            torch.cuda.synchronize()
+            torch_dev.synchronize()
             # torch.cuda.cudart().cudaHostUnregister(self.buffer.data_ptr())
             self._unregistered = True
 
     with (
         patch(
-            "lmcache.v1.memory_management.MixedMemoryAllocator.__init__",
+            "lmcache.v1.memory_allocators.mixed_memory_allocator.MixedMemoryAllocator.__init__",
             fake_mixed_init,
         ),
         patch(
-            "lmcache.v1.memory_management.MixedMemoryAllocator.close", fake_mixed_close
+            "lmcache.v1.memory_allocators.mixed_memory_allocator.MixedMemoryAllocator.close",
+            fake_mixed_close,
         ),
     ):
         yield
@@ -134,15 +147,19 @@ def patch_pin_allocator():
 
     def fake_pin_close(self):
         if not self._unregistered:
-            torch.cuda.synchronize()
+            torch_dev.synchronize()
             # torch.cuda.cudart().cudaHostUnregister(self.buffer.data_ptr())
             self._unregistered = True
 
     with (
         patch(
-            "lmcache.v1.memory_management.PinMemoryAllocator.__init__", fake_pin_init
+            "lmcache.v1.memory_allocators.pin_memory_allocator.PinMemoryAllocator.__init__",
+            fake_pin_init,
         ),
-        patch("lmcache.v1.memory_management.PinMemoryAllocator.close", fake_pin_close),
+        patch(
+            "lmcache.v1.memory_allocators.pin_memory_allocator.PinMemoryAllocator.close",
+            fake_pin_close,
+        ),
     ):
         yield
 """
@@ -174,6 +191,14 @@ class MockSyncGlideClient:
 
     def exists(self, keys: list[bytes]) -> int:
         return sum(1 for k in keys if k in self._store)
+
+    def delete(self, keys: list[bytes]) -> int:
+        removed = 0
+        for k in keys:
+            if k in self._store:
+                del self._store[k]
+                removed += 1
+        return removed
 
     @classmethod
     def reset_store(cls) -> None:

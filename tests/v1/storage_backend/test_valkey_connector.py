@@ -24,17 +24,11 @@ import torch
 
 # First Party
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.memory_management import PinMemoryAllocator
+from lmcache.v1.memory_allocators.pin_memory_allocator import PinMemoryAllocator
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.connector import CreateConnector
-
-# Captured at import time (before the autouse mock_thread_worker_pool fixture
-# patches valkey_connector._ThreadWorkerPool) so tests can exercise the real
-# worker-pool methods directly.
-from lmcache.v1.storage_backend.connector.valkey_connector import (  # noqa: E402
-    _ThreadWorkerPool as _RealThreadWorkerPool,
-)
+from lmcache.v1.storage_backend.valkey.worker_pool import GET_MISS, ValkeyWorkerPool
 
 # Local
 from ...conftest import MockSyncGlideClient
@@ -47,7 +41,7 @@ from ..utils import (
 
 
 class MockThreadWorkerPool:
-    """In-memory mock of _ThreadWorkerPool that uses MockSyncGlideClient.
+    """In-memory mock of ValkeyWorkerPool that uses MockSyncGlideClient.
 
     Runs all operations in-process so tests don't need glide_sync or a
     real Valkey server.  Captures constructor kwargs so tests can verify
@@ -56,12 +50,6 @@ class MockThreadWorkerPool:
 
     # Class-level record of the last __init__ kwargs for config assertions.
     last_init_kwargs: dict = {}
-
-    #: When True, ``_do_get_into`` mirrors the real buffer-GET branch: it stages
-    #: into a scratch buffer and relies on the client returning an int byte
-    #: count (``n = int(result)``), exercising the same control flow as the real
-    #: ``_ThreadWorkerPool``. Default False uses the simpler legacy GET branch.
-    simulate_buffer_get: bool = False
 
     def __init__(self, *args, **kwargs):
         MockThreadWorkerPool.last_init_kwargs = {
@@ -82,33 +70,27 @@ class MockThreadWorkerPool:
         expiry = ("EX", self._ttl_seconds) if self._ttl_seconds is not None else None
         self._client.set(key_str.encode(), bytes(data), expiry=expiry)
 
-    def _do_get_into(self, key_str: str, buf: memoryview) -> bool:
+    def _do_get_into(self, key_str: str, buf: memoryview) -> int:
         """GET a key into a buffer.
 
-        Mirrors the real ``_ThreadWorkerPool._do_get_into``: when
-        ``simulate_buffer_get`` is set, take the buffer-GET branch (stage into
-        a scratch buffer, rely on an int byte count); otherwise use the legacy
-        GET branch that returns the full bytes.
+        Mirrors ``ValkeyWorkerPool._do_get_into``: returns the number of
+        payload bytes for the key, or ``-1`` (GET_MISS) when absent.
         """
-        flat = buf.cast("B") if buf.format != "B" else buf
-        if type(self).simulate_buffer_get:
-            size = flat.nbytes
-            scratch = memoryview(bytearray(size))
-            result = self._client.get(key_str.encode(), buffer=scratch)
-            if result is None:
-                return False
-            n = int(result)
-            flat[:n] = scratch[:n]
-            return True
         data = self._client.get(key_str.encode())
         if data is None:
-            return False
-        flat[: len(data)] = data
-        return True
+            return -1
+        flat = buf.cast("B") if buf.format != "B" else buf
+        n = len(data)
+        flat[: min(n, len(flat))] = data[: min(n, len(flat))]
+        return n
 
     def _do_exists(self, key_str: str) -> bool:
         """Check if a key exists."""
         return bool(self._client.exists([key_str.encode()]))
+
+    def _do_delete(self, key_str: str) -> bool:
+        """Delete a key; return True iff a value was removed."""
+        return int(self._client.delete([key_str.encode()])) > 0
 
     def submit_set(self, key_str: str, data: bytes) -> Future:
         """Submit a SET operation."""
@@ -121,6 +103,15 @@ class MockThreadWorkerPool:
     def submit_exists(self, key_str: str) -> Future:
         """Submit an EXISTS check."""
         return self._executor.submit(self._do_exists, key_str)
+
+    def submit_delete(self, key_str: str) -> Future:
+        """Submit a DELETE operation."""
+        return self._executor.submit(self._do_delete, key_str)
+
+    @property
+    def has_buffer_get(self) -> bool:
+        """Mock always exposes buffer GET."""
+        return True
 
     def close(self) -> None:
         """Shut down the thread pool."""
@@ -176,13 +167,12 @@ def _create_test_memory_obj(local_backend, seed=42):
 
 @pytest.fixture(autouse=True)
 def mock_thread_worker_pool():
-    """Replace _ThreadWorkerPool with in-memory mock so tests never need
+    """Replace ValkeyWorkerPool with in-memory mock so tests never need
     glide_sync or a real Valkey server."""
     MockSyncGlideClient.reset_store()
     MockThreadWorkerPool.last_init_kwargs = {}
-    MockThreadWorkerPool.simulate_buffer_get = False
     with patch(
-        "lmcache.v1.storage_backend.connector.valkey_connector._ThreadWorkerPool",
+        "lmcache.v1.storage_backend.connector.valkey_connector.ValkeyWorkerPool",
         MockThreadWorkerPool,
     ):
         yield
@@ -774,10 +764,10 @@ def test_valkey_standalone_mode_config(local_backend, autorelease_v1):
         )
 
         init_info = MockThreadWorkerPool.last_init_kwargs
-        # Positional args: host, port, num_workers, username, password
-        assert init_info["args"][0] == "standalone.local"
-        assert init_info["args"][1] == 6379
-        assert init_info["args"][2] == 2
+        # ValkeyWorkerPool is constructed with keyword args:
+        # addresses=[(host, port)], num_workers=..., etc.
+        assert init_info["kwargs"]["addresses"] == [("standalone.local", 6379)]
+        assert init_info["kwargs"]["num_workers"] == 2
         assert init_info["kwargs"].get("cluster_mode") is False
         assert init_info["kwargs"].get("database_id") == 3
 
@@ -808,8 +798,7 @@ def test_valkey_cluster_mode_config(local_backend, autorelease_v1):
         )
 
         init_info = MockThreadWorkerPool.last_init_kwargs
-        assert init_info["args"][0] == "cluster.local"
-        assert init_info["args"][1] == 7000
+        assert init_info["kwargs"]["addresses"] == [("cluster.local", 7000)]
         assert init_info["kwargs"].get("cluster_mode") is True
         # database_id should be None (ignored in cluster mode)
         assert init_info["kwargs"].get("database_id") is None
@@ -1213,93 +1202,70 @@ def test_valkey_save_chunk_meta_string_coercion(
         close_asyncio_loop(async_loop, async_thread)
 
 
-def test_valkey_do_get_into_rejects_short_read():
-    """_do_get_into must not silently accept a short read: fixed-size chunks
-    require an exact round-trip, so a partial fill is treated as a miss
-    (returns False) instead of leaving stale tail bytes in the buffer."""
+class _FakeGlideClient:
+    """Minimal glide-client stand-in for ``ValkeyWorkerPool._do_get_into``.
+
+    ``payload`` of ``None`` models an absent key. The buffer-GET path writes
+    what fits into the caller-provided buffer and returns the byte count,
+    mirroring glide's native buffer protocol.
+    """
+
+    def __init__(self, payload):
+        self._payload = payload
+
+    def get(self, key, buffer=None):
+        if self._payload is None:
+            return None
+        if buffer is not None:
+            n = min(len(self._payload), len(buffer))
+            buffer[:n] = self._payload[:n]
+            return n
+        return self._payload
+
+
+def _fake_pool(payload, has_buffer_get):
+    """Build a ``SimpleNamespace`` usable as ``self`` for the unbound
+    ``ValkeyWorkerPool._do_get_into`` (no real client / server needed)."""
     # Standard
     from types import SimpleNamespace
 
-    class _FakeClient:
-        def __init__(self, payload: bytes):
-            self._payload = payload
+    return SimpleNamespace(
+        _get_client=lambda: _FakeGlideClient(payload),
+        has_buffer_get=has_buffer_get,
+        _get_scratch=lambda size: bytearray(size),
+    )
 
-        def get(self, key, buffer=None):
-            if buffer is not None:
-                n = len(self._payload)
-                buffer[:n] = self._payload
-                return n
-            return self._payload
 
-    def _make_self(payload, has_buffer_get):
-        return SimpleNamespace(
-            _get_client=lambda: _FakeClient(payload),
-            _has_buffer_get=has_buffer_get,
-            _get_scratch=lambda size: bytearray(size),
-        )
-
+@pytest.mark.parametrize("has_buffer_get", [True, False])
+def test_worker_pool_get_into_exact_read_is_hit(has_buffer_get):
+    """An exact-size read returns the byte count and fills the buffer."""
     expected = 8
-
-    # Short read (buffer-get path) → treated as miss
     buf = memoryview(bytearray(expected))
-    fake = _make_self(b"\xaa" * 4, has_buffer_get=True)
-    assert _RealThreadWorkerPool._do_get_into(fake, "k", buf) is False
-
-    # Short read (non-buffer path) → treated as miss
-    buf = memoryview(bytearray(expected))
-    fake = _make_self(b"\xaa" * 4, has_buffer_get=False)
-    assert _RealThreadWorkerPool._do_get_into(fake, "k", buf) is False
-
-    # Exact read (buffer-get path) → hit, buffer fully populated
-    buf = memoryview(bytearray(expected))
-    fake = _make_self(b"\xbb" * expected, has_buffer_get=True)
-    assert _RealThreadWorkerPool._do_get_into(fake, "k", buf) is True
+    pool = _fake_pool(b"\xbb" * expected, has_buffer_get=has_buffer_get)
+    assert ValkeyWorkerPool._do_get_into(pool, "k", buf) == expected
     assert bytes(buf) == b"\xbb" * expected
 
-    # Exact read (non-buffer path) → hit, buffer fully populated
-    buf = memoryview(bytearray(expected))
-    fake = _make_self(b"\xcc" * expected, has_buffer_get=False)
-    assert _RealThreadWorkerPool._do_get_into(fake, "k", buf) is True
-    assert bytes(buf) == b"\xcc" * expected
+
+@pytest.mark.parametrize("has_buffer_get", [True, False])
+def test_worker_pool_get_into_absent_is_miss(has_buffer_get):
+    """An absent key returns GET_MISS."""
+    buf = memoryview(bytearray(8))
+    pool = _fake_pool(None, has_buffer_get=has_buffer_get)
+    assert ValkeyWorkerPool._do_get_into(pool, "k", buf) == GET_MISS
 
 
-@pytest.mark.parametrize("simulate_buffer_get", [False, True])
-def test_valkey_get_round_trip_both_get_modes(
-    valkey_url, local_backend, valkey_config, autorelease_v1, simulate_buffer_get
-):
-    """get/batched_get must round-trip correctly on both worker-pool GET paths:
-    the legacy GET (returns full bytes) and the buffer-GET branch (returns an
-    int byte count). This closes the gap where the mock only exercised the
-    non-buffer branch, leaving the connector's buffer-GET handling untested."""
-    MockThreadWorkerPool.simulate_buffer_get = simulate_buffer_get
-    async_loop, async_thread = init_asyncio_loop()
+@pytest.mark.parametrize("has_buffer_get", [True, False])
+def test_worker_pool_get_into_short_read_is_miss(has_buffer_get):
+    """A short read (fewer bytes than the buffer) is rejected as a miss so
+    stale tail bytes are never surfaced to the caller."""
+    buf = memoryview(bytearray(8))
+    pool = _fake_pool(b"\xaa" * 4, has_buffer_get=has_buffer_get)
+    assert ValkeyWorkerPool._do_get_into(pool, "k", buf) == GET_MISS
 
-    try:
-        connector = autorelease_v1(
-            CreateConnector(valkey_url, async_loop, local_backend, valkey_config)
-        )
 
-        # Single get round-trip
-        key = dumb_cache_engine_key()
-        mem = _create_test_memory_obj(local_backend, seed=7)
-        asyncio.run_coroutine_threadsafe(connector.put(key, mem), async_loop).result()
-        retrieved = asyncio.run_coroutine_threadsafe(
-            connector.get(key), async_loop
-        ).result()
-        assert retrieved is not None
-        check_mem_obj_equal([retrieved], [mem])
-
-        # Batched get round-trip
-        keys = [dumb_cache_engine_key(i) for i in range(3)]
-        mems = [_create_test_memory_obj(local_backend, seed=100 + i) for i in range(3)]
-        asyncio.run_coroutine_threadsafe(
-            connector.batched_put(keys, mems), async_loop
-        ).result()
-        retrieved_batch = asyncio.run_coroutine_threadsafe(
-            connector.batched_get(keys), async_loop
-        ).result()
-        assert all(r is not None for r in retrieved_batch)
-        check_mem_obj_equal(retrieved_batch, mems)
-
-    finally:
-        close_asyncio_loop(async_loop, async_thread)
+def test_worker_pool_get_into_oversized_read_is_miss():
+    """An oversized read (more bytes than the buffer) is rejected as a miss
+    (non-buffer path; the buffer path is bounded by the buffer length)."""
+    buf = memoryview(bytearray(8))
+    pool = _fake_pool(b"\xcc" * 12, has_buffer_get=False)
+    assert ValkeyWorkerPool._do_get_into(pool, "k", buf) == GET_MISS

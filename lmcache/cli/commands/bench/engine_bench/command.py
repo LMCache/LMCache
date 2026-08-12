@@ -175,13 +175,15 @@ def add_engine_arguments(parser: argparse.ArgumentParser) -> None:
         "--ldp-context-length",
         type=int,
         default=5000,
-        help="Token length of each context (default: 5000).",
+        help="Exact token length of each context (default: 5000). Requires a "
+        "loadable tokenizer; pass --model when the engine reports a name that "
+        "is not a HuggingFace repo ID or local path.",
     )
     ldp_group.add_argument(
         "--ldp-system-prompt-length",
         type=int,
         default=1000,
-        help="Token length of the shared system prompt (default: 1000). "
+        help="Exact token length of the shared system prompt (default: 1000). "
         "Use 0 for no system prompt.",
     )
     ldp_group.add_argument(

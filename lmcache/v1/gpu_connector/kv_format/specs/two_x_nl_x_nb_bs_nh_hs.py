@@ -22,6 +22,7 @@ import lmcache.c_ops as lmc_ops
 class TWO_X_NL_X_NB_BS_NH_HS_Spec(KVFormatSpec):
     engine_kv_format = lmc_ops.EngineKVFormat.TWO_X_NL_X_NB_BS_NH_HS
     attention_backends = ("SGLang MHA via MP daemon (4-D inner)",)
+    is_kv_list = True
 
     def num_layers(self) -> int:
         return len(self.kv_caches[0])
@@ -34,6 +35,9 @@ class TWO_X_NL_X_NB_BS_NH_HS_Spec(KVFormatSpec):
 
     def page_buffer_size(self) -> int:
         return self.kv_caches[0][0].shape[0] * self.kv_caches[0][0].shape[1]
+
+    def kv_size(self) -> int:
+        return 2
 
     def num_heads(self, layer_idx: int = 0) -> int:
         return self.kv_caches[0][layer_idx].shape[2]

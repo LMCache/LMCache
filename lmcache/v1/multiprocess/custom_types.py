@@ -8,7 +8,7 @@ import msgspec
 import torch
 
 # First Party
-from lmcache.v1.platform.base_ipc_wrapper import (  # noqa: E402,F401
+from lmcache.v1.platform.base.ipc_wrapper import (  # noqa: E402,F401
     DeviceIPCWrapper,
 )
 

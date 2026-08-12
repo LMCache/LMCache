@@ -418,10 +418,10 @@ chunk-level cache lookup and eviction.
 | Field | CLI arg | Default | Description |
 |-------|---------|---------|-------------|
 | `num_contexts` | `--ldp-num-contexts` | 5 | Number of unique context documents (`N`) |
-| `context_length` | `--ldp-context-length` | 5000 | Tokens per context |
-| `system_prompt_length` | `--ldp-system-prompt-length` | 1000 | Shared system prompt tokens (`0` disables) |
+| `context_length` | `--ldp-context-length` | 5000 | Tokens per context (exact) |
+| `system_prompt_length` | `--ldp-system-prompt-length` | 1000 | Shared system prompt tokens, exact (`0` disables) |
 | `num_permutations` | `--ldp-num-permutations` | 10 | Distinct permutations to send (capped at `N!`) |
-| `vocab_size` | (none — hardcoded in factory) | 8000 | Vocabulary pool size for synthetic context generation |
+| `vocab_size` | (none — hardcoded in factory) | 8000 | Number of distinct single-token words contexts are sampled from |
 | `num_inflight_requests` | `--ldp-num-inflight-requests` | 1 | Max concurrent in-flight requests |
 
 **Stress axes** (each config field tunes one):
@@ -436,9 +436,27 @@ chunk-level cache lookup and eviction.
 
 **Behavior:**
 
-- **Data generation:** Builds a deterministic vocab pool of pseudo-words,
-  generates `num_contexts` distinct contexts (each seeded independently so
-  token sequences truly diverge), and enumerates permutations.
+- **Data generation:** Builds a deterministic pool of `vocab_size` words that
+  each cost exactly one token under the model's tokenizer, generates
+  `num_contexts` distinct contexts from it (each seeded independently so token
+  sequences truly diverge), and enumerates permutations. Because every word is
+  one token and begins a word, a context of `context_length` words is exactly
+  `context_length` tokens whatever order a permutation puts them in — the
+  configured lengths are exact, not estimates.
+- **Tokenizer families.** Candidates are read from the vocabulary's *keys*, so
+  byte-level BPE (`Ġthe`) and SentencePiece (`▁the`) are both covered;
+  `decode()` would drop the SentencePiece marker and find nothing. Words are
+  then joined by whichever convention that tokenizer makes exact — each word
+  carrying a leading space, or plain separators for tokenizers that charge a
+  token for an explicit leading space — and the total is checked before use.
+  WordPiece (BERT) marks continuations rather than word starts and is not
+  supported; the workload says so instead of guessing.
+- **Tokenizer is required.** Without one the workload cannot honour a length
+  expressed in tokens, so it raises instead of falling back to a text-level
+  approximation, which would silently benchmark a different operating point
+  than the flags describe. The tokenizer is loaded from `--model`, which
+  defaults to the name the engine reports from `/v1/models`; pass `--model`
+  explicitly when that name is not a HuggingFace repo ID or a local path.
 - **Permutation enumeration:** For small `N`, iterates `itertools.permutations`
   and truncates. When `N!` is much larger than `num_permutations * 10`, samples
   random permutations into a `set` to avoid exhausting an enormous search

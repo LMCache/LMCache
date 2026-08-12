@@ -10,22 +10,32 @@ import pytest
 import torch
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.v1.gpu_connector import xpu_connectors
 from lmcache.v1.gpu_connector.xpu_connectors import (
     SGLangLayerwiseXPUConnector,
     SGLangXPUConnector,
 )
-from lmcache.v1.memory_management import MemoryFormat, PinMemoryAllocator
+from lmcache.v1.memory_allocators.pin_memory_allocator import PinMemoryAllocator
+from lmcache.v1.memory_management import MemoryFormat
 from tests.v1.utils import (
     check_paged_kv_cache_equal_with_mla,
     check_sglang_paged_kv_cache_equal,
     generate_sglang_kv_cache_paged_list_tensors,
 )
 
+pytestmark = [
+    pytest.mark.xpu,
+    pytest.mark.sglang,
+    pytest.mark.skipif(
+        not (torch_dev.is_available() and torch_device_type == "xpu"),
+        reason="requires available xpu runtime",
+    ),
+]
 
-def _skip_if_no_xpu():
-    if not hasattr(torch, "xpu") or not torch.xpu.is_available():
-        pytest.skip("torch.xpu is not available")
+
+def _current_xpu_device() -> torch.device:
+    return torch.device(torch_device_type, torch.xpu.current_device())
 
 
 def _make_unique_slot_mapping(
@@ -90,8 +100,7 @@ def _flat_to_nested_sglang_mha(kvcaches_flat, num_layers: int):
 @pytest.mark.parametrize("use_mla", [False, True])
 def test_sglang_xpu_connector_roundtrip(use_xpu: bool, use_mla: bool):
     """Roundtrip: XPU kvcaches -> CPU memobj -> XPU kvcaches_dst, then compare."""
-    _skip_if_no_xpu()
-    device = torch.device("xpu:0")
+    device = _current_xpu_device()
 
     num_layers = 2
     num_blocks = 4
@@ -178,8 +187,7 @@ def test_sglang_xpu_connector_roundtrip(use_xpu: bool, use_mla: bool):
 @pytest.mark.parametrize("use_mla", [False, True])
 def test_sglang_xpu_connector_roundtrip_multi_chunk(use_xpu: bool, use_mla: bool):
     """Multi-chunk roundtrip with non-contiguous token ranges."""
-    _skip_if_no_xpu()
-    device = torch.device("xpu:0")
+    device = _current_xpu_device()
 
     num_layers = 2
     num_blocks = 6
@@ -273,8 +281,7 @@ def test_sglang_xpu_connector_roundtrip_multi_chunk(use_xpu: bool, use_mla: bool
 @pytest.mark.parametrize("use_xpu", [False, True])
 def test_sglang_xpu_connector_roundtrip_flat_mha_kvcaches(use_xpu: bool):
     """Non-layerwise SGLang can pass flat MHA kvcaches; ensure roundtrip works."""
-    _skip_if_no_xpu()
-    device = torch.device("xpu:0")
+    device = _current_xpu_device()
 
     num_layers = 2
     num_blocks = 4
@@ -367,8 +374,7 @@ def test_sglang_xpu_connector_roundtrip_flat_mha_kvcaches(use_xpu: bool):
 @pytest.mark.parametrize("use_mla", [False, True])
 def test_sglang_xpu_connector_roundtrip_layerwise(use_xpu: bool, use_mla: bool):
     """Layerwise roundtrip using generator protocol."""
-    _skip_if_no_xpu()
-    device = torch.device("xpu:0")
+    device = _current_xpu_device()
 
     num_layers = 4
     num_blocks = 8
@@ -477,8 +483,7 @@ def test_sglang_xpu_connector_roundtrip_layerwise_multi_chunk(
     use_xpu: bool, use_mla: bool
 ):
     """Layerwise multi-chunk roundtrip."""
-    _skip_if_no_xpu()
-    device = torch.device("xpu:0")
+    device = _current_xpu_device()
 
     num_layers = 4
     num_blocks = 8
@@ -588,8 +593,7 @@ def test_sglang_xpu_connector_roundtrip_layerwise_multi_chunk(
 
 def test_sglang_layerwise_uses_kernel_transfers(monkeypatch):
     """Ensure layerwise SGLang path dispatches through kernel transfer ops."""
-    _skip_if_no_xpu()
-    device = torch.device("xpu:0")
+    device = _current_xpu_device()
 
     num_layers = 3
     num_blocks = 6
@@ -729,8 +733,7 @@ def test_sglang_layerwise_uses_kernel_transfers(monkeypatch):
 
 def test_sglang_layerwise_uses_mla_kernel_transfers(monkeypatch):
     """Ensure MLA layerwise path dispatches through single_layer_kv_transfer."""
-    _skip_if_no_xpu()
-    device = torch.device("xpu:0")
+    device = _current_xpu_device()
 
     num_layers = 3
     num_blocks = 6

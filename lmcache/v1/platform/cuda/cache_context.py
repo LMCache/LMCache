@@ -36,7 +36,7 @@ from lmcache.v1.multiprocess.group_view import (
     EngineGroupInfo,
     engine_group_layer_indices,
 )
-from lmcache.v1.platform.base_cache_context import BaseCacheContext
+from lmcache.v1.platform.base.cache_context import BaseCacheContext
 
 logger = init_logger(__name__)
 
@@ -353,7 +353,8 @@ class GPUCacheContext(BaseCacheContext):
         layout_hints: LayoutHints | None = None,
         engine_group_infos: Sequence[EngineGroupInfo] = (),
         engine_type: EngineType = EngineType.VLLM,
-        separate_object_groups: bool = True,
+        separate_object_groups: bool = False,
+        full_sw_kv: bool = False,
     ):
         unwrapped = unwrap_kv_cache_tensors(kv_caches)
         kv_caches_norm, engine_kv_formats = normalize_and_discover_per_layer_formats(
@@ -372,6 +373,10 @@ class GPUCacheContext(BaseCacheContext):
             lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
             separate_object_groups=separate_object_groups,
         )
+        # Set full_sw_kv before the temp buffer / object groups are built so
+        # both are sized for the full (un-windowed) per-chunk geometry.
+        if full_sw_kv:
+            kv_layer_groups_manager.enable_full_sw_kv()
 
         # Pre-allocated GPU buffer for block IDs (up to 1M elements).
         # The caller copies block_ids into this buffer before launching the
@@ -391,7 +396,7 @@ class GPUCacheContext(BaseCacheContext):
         )
 
         self.group_kv_pointers_: list[torch.Tensor] = []
-        for idx, group in enumerate(self.kv_layer_groups_manager_.kv_layer_groups):
+        for idx, group in enumerate(self.kv_layer_groups_manager_.kernel_groups):
             ptrs = get_group_data_ptrs(
                 self.kv_caches_, self.get_engine_kv_format(idx), group.layer_indices
             )

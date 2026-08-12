@@ -27,9 +27,11 @@ Expected log output:
 
 The CLI accepts ``--host``, ``--port``, ``--instance-timeout``,
 ``--health-check-interval``, ``--eviction-check-interval``,
-``--eviction-ratio``, ``--trigger-watermark``, ``--blend-chunk-size``,
-``--blend-probe-stride``, and ``--timeout-keep-alive``; any flag overrides the
-matching environment variable below. See :doc:`/cli/coordinator` for details.
+``--eviction-ratio``, ``--trigger-watermark``, ``--chunk-size``,
+``--hash-algorithm``, ``--enable-blend-lookup``, ``--blend-probe-stride``,
+and ``--timeout-keep-alive``;
+any flag overrides the matching environment variable below. See
+:doc:`/cli/coordinator` for details.
 Equivalently, the coordinator can still be launched as a module with
 ``python3 -m lmcache.v1.mp_coordinator``.
 
@@ -58,7 +60,10 @@ variables:
        fleet.
    * - ``LMCACHE_MP_COORDINATOR_HEALTH_CHECK_INTERVAL``
      - ``10``
-     - Seconds between health-check sweeps. ``0`` disables eviction.
+     - Seconds between health-check sweeps that expire stale MP-server
+       registrations. ``0`` disables the stale-instance eviction loop; it does
+       **not** affect the ``/quota`` L2 eviction loop (see
+       ``LMCACHE_MP_COORDINATOR_EVICTION_CHECK_INTERVAL`` below).
    * - ``LMCACHE_MP_COORDINATOR_EVICTION_CHECK_INTERVAL``
      - ``5``
      - Seconds between L2 eviction sweeps. ``0`` disables the loop.
@@ -69,14 +74,26 @@ variables:
      - ``1.0``
      - Eviction fires when usage reaches this fraction of the quota
        (0.0 exclusive to 1.0).
-   * - ``LMCACHE_MP_COORDINATOR_BLEND_CHUNK_SIZE``
+   * - ``LMCACHE_MP_COORDINATOR_CHUNK_SIZE``
      - ``256``
-     - Tokens per chunk for the global CacheBlend directory. Must equal the
-       LMCache chunk size the blend servers use.
+     - Tokens per KV chunk: the CacheBlend match unit and the unit used to
+       resolve pin ``token_ids`` to keys. Must equal the MP servers'
+       ``--chunk-size``.
+   * - ``LMCACHE_MP_COORDINATOR_HASH_ALGORITHM``
+     - ``blake3``
+     - Token hash algorithm for pin key resolution. Must equal the MP servers'
+       ``--hash-algorithm``. ``blake3`` is self-contained; other algorithms
+       require vLLM importable in the coordinator process.
+   * - ``LMCACHE_MP_COORDINATOR_ENABLE_BLEND_LOOKUP``
+     - ``False``
+     - Index stored chunk content so ``POST /directory/blend-lookup`` can serve
+       fleet CacheBlend reuse. Off by default: hashing content costs CPU on
+       every store. Also requires the MP servers'
+       ``--coordinator-event-reporting``.
    * - ``LMCACHE_MP_COORDINATOR_BLEND_PROBE_STRIDE``
      - ``1``
      - Positions between CacheBlend match probes. ``1`` probes every offset
-       for full recall.
+       for full recall. Ignored unless blend lookup is on.
    * - ``LMCACHE_MP_COORDINATOR_TIMEOUT_KEEP_ALIVE``
      - ``10``
      - Seconds the HTTP server keeps idle connections open before closing
@@ -88,7 +105,8 @@ variables:
      - ``True``
      - When ``True``, the coordinator runs a one-shot L2 resync on
        startup that paginates an MP server's ``GET /cache/objects`` and
-       backfills usage + eviction trackers from existing L2 contents.
+       backfills the key directory's L2 placements plus the
+       usage/eviction trackers from existing L2 contents.
        Disable to start from empty trackers (handy for tests, or
        deployments that start the coordinator before any MP server).
    * - ``LMCACHE_MP_COORDINATOR_RESYNC_POLL_INTERVAL``
@@ -135,13 +153,15 @@ Kubernetes downward API); an explicit flag wins over the env var.
      - ``LMCACHE_COORDINATOR_HEARTBEAT_INTERVAL``
      - Seconds between heartbeats (must be ``> 0``, default ``5``). Keep it well
        below the coordinator's ``INSTANCE_TIMEOUT``.
-   * - ``--coordinator-l2-event-reporting``
-     - ``LMCACHE_COORDINATOR_L2_EVENT_REPORTING``
-     - Enable reporting L2 store/lookup events to the coordinator for
-       fleet-wide usage tracking and quota-based eviction.
-   * - ``--coordinator-l2-event-flush-interval``
-     - ``LMCACHE_COORDINATOR_L2_EVENT_FLUSH_INTERVAL``
-     - Seconds between L2 event batch flushes (must be ``> 0``, default ``1``).
+   * - ``--coordinator-event-reporting``
+     - ``LMCACHE_COORDINATOR_EVENT_REPORTING``
+     - Stream cache store/access/delete events to the coordinator,
+       feeding the key directory (fleet-wide placement tracking) and,
+       for L2 events, usage/quota tracking and eviction.
+   * - ``--coordinator-event-flush-interval``
+     - ``LMCACHE_COORDINATOR_EVENT_FLUSH_INTERVAL``
+     - Seconds between cache-event batch flushes (must be ``> 0``, default
+       ``1``).
 
 The server registers under its stable identity (``--instance-id`` / OTel
 ``service.instance.id``); if the flag is not passed, the server mints a
@@ -162,7 +182,11 @@ The coordinator's HTTP surface (base URL ``http://localhost:9300``) groups into:
   budgets, usage accounting, and the usage-event ingest that drives fleet-wide
   eviction.
 - **Cache control** -- the ``/cache`` group: cache operations dispatched to a
-  named server (currently warm prefetch, with more to come).
+  named server (warm prefetch, pin/unpin, and delete, with more to come).
+- **CacheBlend fragment lookup** -- ``POST /directory/blend-lookup``: finds
+  cached chunk content anywhere inside a query sequence, using the blend index
+  derived from the key directory's token bindings. Server-to-coordinator only;
+  not usually called by hand.
 
 Each endpoint is documented below. Success is ``200`` unless noted, and
 ``{cache_salt}`` uses the ``_default`` sentinel for the empty salt. The wire
@@ -350,15 +374,54 @@ Quota, usage, and eviction
 The ``/quota`` group owns per-``cache_salt`` byte budgets, the live usage
 accounting behind them, and the usage-event stream that drives fleet-wide
 eviction. (The MP server exposes a node-local ``/quota`` with the same shape;
-this is its fleet-wide counterpart.) Salts without a quota default to a 0-byte
-limit (allowlist semantics); use ``_default`` as the path parameter to target
-the empty-string salt.
+this is its fleet-wide counterpart.) Use ``_default`` as the path parameter to
+target the empty-string salt.
 
-When MP servers enable ``--coordinator-l2-event-reporting``, they stream L2
-``store``, ``lookup``, and ``delete`` events to the coordinator, which aggregates
-per-``cache_salt`` usage, enforces quotas, and selects LRU keys to evict. Each
-batch carries the server's ``instance_id`` and a monotonically increasing
-sequence number (``seq``) scoped to that instance, enabling future gap detection.
+.. warning::
+
+   Do **not** use the MP server's node-local ``/quota`` API together with the
+   coordinator's. The two are independent, unsynchronized quota registries
+   enforcing eviction on the **same shared L2**: the server-side enforcer
+   (active when the server runs a per-salt eviction policy) uses strict
+   allowlist semantics — any salt missing from *its own* table is fully
+   evicted — and it never sees quotas registered on the coordinator, and vice
+   versa. Mixing the two produces competing eviction decisions: the server can
+   wipe data the coordinator considers within quota (or still exempt before
+   the default limit is armed). Pick one owner per deployment — in
+   coordinator-managed deployments, register quotas **only** through the
+   coordinator's ``/quota`` API and leave the servers' node-local quota tables
+   untouched.
+
+Salts without an explicit quota are governed by the registry's **default
+limit** (``PUT /quota/config``). On boot the default is unset, and unquota'd
+salts are **exempt** from eviction — quotas live in memory, so a freshly
+(re)started coordinator has an empty quota table until the external quota
+controller re-syncs it, and the exempt default keeps that window from
+mass-evicting unknown tenants. After re-registering every per-salt quota, the
+controller sets the default to ``0`` — the signal that arms strict allowlist
+enforcement (all bytes under unquota'd salts become evictable on the next
+cycle):
+
+.. code-block:: bash
+
+    # 1. re-register every tenant quota
+    curl -s -X PUT http://localhost:9300/quota/user-a \
+        -H 'Content-Type: application/json' -d '{"limit_gb": 10.0}'
+    # ... one PUT per tenant ...
+
+    # 2. arm eviction of everything else
+    curl -s -X PUT http://localhost:9300/quota/config \
+        -H 'Content-Type: application/json' -d '{"default_limit_gb": 0}'
+    # -> {"default_limit_gb": 0.0}
+
+When MP servers enable ``--coordinator-event-reporting``, they stream cache
+``store``, ``access``, and ``delete`` events to the coordinator's
+``POST /directory/events``. Applied ``l2`` batches also feed the quota side:
+the coordinator aggregates per-``cache_salt`` usage, enforces quotas, and
+selects LRU keys to evict. Each batch carries the server's ``instance_id``,
+``incarnation``, and a monotonically increasing sequence number (``seq``)
+scoped to that instance, so replays are deduplicated and lost batches are
+detected.
 
 **Active eviction loop.** Every
 ``LMCACHE_MP_COORDINATOR_EVICTION_CHECK_INTERVAL`` seconds, the
@@ -369,7 +432,7 @@ server. Because all MP servers share the same backing L2 (e.g. one S3
 bucket), one dispatch evicts the keys for the whole fleet. The MP
 server's L2 adapter fires ``on_l2_keys_deleted`` listeners after the
 delete completes; those listeners ship ``delete`` events back through
-``POST /quota/events``, which is what updates the coordinator's LRU +
+``POST /directory/events``, which is what updates the coordinator's LRU +
 per-salt totals. Dispatch failures or no-instances-registered fall
 through to the next cycle — at-least-once semantics, safe because the
 S3 delete is idempotent.
@@ -377,13 +440,54 @@ S3 delete is idempotent.
 **Startup resync.** On boot, the coordinator waits up to
 ``LMCACHE_MP_COORDINATOR_RESYNC_MAX_WAIT`` seconds for the first MP
 server to register, then paginates its
-``GET /cache/objects`` and seeds the in-memory usage + eviction trackers
-with whatever is already resident in L2 — so a fresh coordinator
-does not start from zero usage. Set
+``GET /cache/objects`` and seeds the key directory and the usage +
+eviction trackers with whatever is already resident in L2 — so a fresh
+coordinator does not start from zero usage. Set
 ``LMCACHE_MP_COORDINATOR_ENABLE_STARTUP_RESYNC=False`` to skip this
 phase. Best-effort: resync failures are logged and the manager gives
 up; the ongoing usage-event stream from MP servers eventually corrects
 any initial blind spots.
+
+``PUT /quota/config`` / ``GET /quota/config``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Set / read the default limit applied to salts with no explicit quota entry.
+
+**Request body** (``PUT``):
+
+.. list-table::
+   :header-rows: 1
+   :widths: 22 14 64
+
+   * - Field
+     - Type
+     - Description
+   * - ``default_limit_gb``
+     - float or null
+     - ``null`` (the boot default) exempts unquota'd salts from eviction;
+       ``0`` arms strict allowlist enforcement (all unquota'd bytes become
+       evictable next cycle); a positive value grants every unquota'd salt
+       that byte budget.
+   * - ``tier``
+     - string
+     - Optional (default ``l2``). Only ``l2`` is supported today.
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {"default_limit_gb": 0.0}
+
+**Example:**
+
+.. code-block:: bash
+
+    curl -s http://localhost:9300/quota/config
+    # -> {"default_limit_gb": null}          (boot state: unquota'd exempt)
+
+    curl -s -X PUT http://localhost:9300/quota/config \
+        -H 'Content-Type: application/json' -d '{"default_limit_gb": 0}'
+    # -> {"default_limit_gb": 0.0}           (allowlist enforcement armed)
 
 ``PUT /quota/{cache_salt}``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -527,75 +631,205 @@ entry has the same fields as the ``GET /quota/{cache_salt}`` response.
     curl -s http://localhost:9300/quota
     # -> {"total_gb": 0.005, "by_cache_salt": [...]}
 
-``POST /quota/events``
+Usage events arrive on the fleet cache-event stream
+(``POST /directory/events``); there is no separate quota ingestion
+endpoint. See ``docs/design/v1/mp_coordinator/cache_events.md`` for the
+batch format and routing semantics.
+
+Key directory
+-------------
+
+The ``/directory`` group is a read-only operator view of the fleet-wide key
+directory: which keys are cached, where (instance / tier / backend), and what
+token ids each chunk holds. The directory is **eventually consistent soft
+state** built from the servers' cache-event stream -- every answer is a hint to
+be validated at the owning server, never a guarantee.
+
+``GET /directory/keys``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Ingest a batch of usage events. Sent automatically by reporting MP servers; not
-usually called by hand.
+List cached keys and their placements, one page at a time.
 
-**Request body:**
+**Query parameters:**
 
 .. list-table::
    :header-rows: 1
-   :widths: 18 16 66
+   :widths: 22 14 64
 
-   * - Field
-     - Type
+   * - Parameter
+     - Default
      - Description
-   * - ``instance_id``
-     - string
-     - The MP server that produced this batch.
-   * - ``seq``
-     - int
-     - Monotonic per-instance sequence number (``>= 1``); supports future gap
-       detection of lost batches.
    * - ``tier``
-     - string
-     - Optional (default ``l2``). Cache tier the events apply to.
-   * - ``events``
-     - list[object]
-     - The events to record. Each is ``{"type", "key", "bytes"}``: ``type`` is
-       ``"store"``, ``"lookup"``, or ``"delete"``; ``key`` is the encoded object
-       key; ``bytes`` (``>= 0``) is the stored size — counted for ``store`` and
-       ignored for ``lookup`` / ``delete`` (a ``delete`` subtracts the size
-       recorded at the original ``store``).
+     - ``all``
+     - Keep placements on this tier (``l1`` / ``l2``; ``all`` keeps every
+       tier).
+   * - ``instance_id``
+     - *(empty)*
+     - Keep placements reported by this MP server (empty keeps every
+       instance).
+   * - ``backend``
+     - *(empty)*
+     - Keep placements on this backend, e.g. ``dram`` / ``fs`` (empty keeps
+       every backend).
+   * - ``offset``
+     - ``0``
+     - Matching keys to skip (pagination).
+   * - ``limit``
+     - ``1000``
+     - Maximum keys to return (1 to 10000).
 
 **Response** (``200 OK``):
 
 .. code-block:: json
 
-    {"recorded": 3}
+    {
+      "total": 2,
+      "keys": [
+        {
+          "key": {
+            "chunk_hash_hex": "aa12...",
+            "model_name": "meta-llama/Llama-3.1-8B-Instruct",
+            "kv_rank": 0,
+            "object_group_id": 0,
+            "cache_salt": ""
+          },
+          "placements": [
+            {
+              "instance_id": "server-1",
+              "incarnation": 1719000000,
+              "tier": "l1",
+              "backend": "dram",
+              "size_bytes": 1048576,
+              "shared": false
+            }
+          ],
+          "num_tokens": 256
+        }
+      ]
+    }
 
-``recorded`` is the number of events processed.
+``total`` counts every key with at least one placement matching the filters;
+``keys`` is the requested page of them, each with **only its matching
+placements**. ``num_tokens`` reports how many token ids the directory knows for
+the key's chunk (``0`` = unknown) -- fetch the actual tokens via
+``POST /directory/lookup``, which exists precisely so listing pages stay
+small. Pages of a changing directory may skip or repeat keys (snapshot
+semantics).
 
 **HTTP status codes:**
 
-- ``200``: events processed.
-- ``422``: request body fails field-level validation.
+- ``200``: page returned (an empty directory returns ``{"total": 0, "keys": []}``).
+- ``422``: invalid parameter (negative ``offset``, ``limit`` out of range,
+  unknown ``tier``).
 
 **Example:**
 
 .. code-block:: bash
 
-    curl -s -X POST http://localhost:9300/quota/events \
-        -H 'Content-Type: application/json' \
-        -d '{
-            "instance_id": "server-1",
-            "seq": 1,
-            "events": [
-                {"type": "store",  "key": {"chunk_hash_hex": "aa", "model_name": "m", "kv_rank": 0, "cache_salt": "user-a"}, "bytes": 1024},
-                {"type": "lookup", "key": {"chunk_hash_hex": "aa", "model_name": "m", "kv_rank": 0, "cache_salt": "user-a"}, "bytes": 0},
-                {"type": "delete", "key": {"chunk_hash_hex": "aa", "model_name": "m", "kv_rank": 0, "cache_salt": "user-a"}, "bytes": 0}
-            ]
-        }'
-    # -> {"recorded": 3}
+    # Everything on server-1's L1:
+    curl -s "http://localhost:9300/directory/keys?tier=l1&instance_id=server-1&limit=100"
+
+``POST /directory/lookup``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Resolve cache content to its placements and token ids. One endpoint, two
+forms -- supply exactly one:
+
+* **keys form** -- ``{"keys": [...]}``: resolve keys you already have (e.g.
+  from ``GET /directory/keys``).
+* **tokens form** -- ``{"token_ids": [...], "model_name": ..., "world_size":
+  ..., "cache_salt": ...}``: resolve a request's tokens to the keys of its
+  complete chunks (the same fan-out the pin APIs use).
+
+.. important::
+
+   ``token_ids`` must be the request's **whole** token sequence from position
+   0, not one chunk's worth. Chunk hashes are prefix-chained -- each chunk's
+   key depends on every token before it -- so a mid-request slice resolves to
+   different (nonexistent) keys. Trailing tokens that do not fill a chunk are
+   ignored.
+
+**Request body** (tokens form):
+
+.. code-block:: json
+
+    {
+      "token_ids": [15496, 11, 995, 314],
+      "model_name": "meta-llama/Llama-3.1-8B-Instruct",
+      "world_size": 1,
+      "cache_salt": ""
+    }
+
+**Request body** (keys form):
+
+.. code-block:: json
+
+    {
+      "keys": [
+        {
+          "chunk_hash_hex": "aa12...",
+          "model_name": "meta-llama/Llama-3.1-8B-Instruct",
+          "kv_rank": 0,
+          "object_group_id": 0,
+          "cache_salt": ""
+        }
+      ]
+    }
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {
+      "chunks": 1,
+      "results": [
+        {
+          "key": {"chunk_hash_hex": "aa12...", "model_name": "...", "kv_rank": 0,
+                  "object_group_id": 0, "cache_salt": ""},
+          "placements": [
+            {"instance_id": "server-1", "incarnation": 1770000000, "tier": "l1",
+             "backend": "dram", "size_bytes": 8388608, "shared": false}
+          ],
+          "token_ids": [15496, 11, 995]
+        }
+      ]
+    }
+
+``chunks`` is the number of complete chunks the tokens resolved to (keys form:
+the number of keys requested); ``results`` has one entry per resolved key, in
+request order (tokens form: ``chunks`` x the per-rank fan-out). ``placements``
+is empty for keys the directory does not know; ``token_ids`` is empty when the
+directory has no tokens for the key's chunk (never stored with token reporting
+on, or not yet re-reported after an event gap).
+
+**HTTP status codes:**
+
+- ``200``: results returned.
+- ``400``: the token sequence exceeds the per-request cap, or a resolution
+  parameter is invalid (e.g. ``model_name`` contains ``@``).
+- ``422``: neither or both forms supplied, ``model_name`` missing with
+  ``token_ids``, or a key is malformed (e.g. ``chunk_hash_hex`` is not hex).
+
+**Examples:**
+
+.. code-block:: bash
+
+    # Tokens form -- where is this prompt cached, and what does each chunk hold?
+    curl -s -X POST http://localhost:9300/directory/lookup \
+      -H 'Content-Type: application/json' \
+      -d '{"token_ids": [15496, 11, 995], "model_name": "m", "world_size": 1}'
+
+    # Keys form -- keys taken from GET /directory/keys:
+    curl -s -X POST http://localhost:9300/directory/lookup \
+      -H 'Content-Type: application/json' \
+      -d '{"keys": [{"chunk_hash_hex": "aa12...", "model_name": "m", "kv_rank": 0}]}'
 
 Cache control
 -------------
 
-The ``/cache`` group dispatches cache operations to a named MP server. Today it
-covers **warm prefetch**; further cache-control operations will be documented as
-endpoints here as they land.
+The ``/cache`` group dispatches cache operations to a named MP server. It covers
+**warm prefetch**, **pin/unpin**, and **delete**; further cache-control
+operations will be documented as endpoints here as they land.
 
 **Warm prefetch (pre-loading L1 from L2).** Pre-warm one MP server's L1 with the
 KV for a known prompt **before** the requests arrive, so the first request hits
@@ -737,3 +971,222 @@ verbatim with its code.
 
     curl -s http://localhost:9300/cache/prefetches/server-1/abc123
     # -> {"status": "completed", "found_keys": 12, "total_keys": 12}
+
+**Pin/unpin (protecting cache from eviction).** Pin a token sequence's cache so
+it is not evicted from L2 until unpinned. The coordinator resolves the token
+sequence to its object keys **locally** (no MP-server round-trip) and records
+them in its L2 eviction plan (``POST``) or releases them (``DELETE``), excluding
+pinned keys from quota-based eviction. L2 pins are fleet-wide (per
+``cache_salt``), so no target instance is named.
+
+Local resolution requires the coordinator's ``chunk_size`` and
+``hash_algorithm`` (see `Configuration`_) to match the MP servers' ``--chunk-size``
+/ ``--hash-algorithm``; otherwise the resolved keys will not match what was
+stored and the pin protects nothing. It also requires the MP servers to be
+launched with ``--no-separate-object-groups`` (the coordinator resolves keys in
+a single object group).
+
+``POST /cache/pins``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Pin a token sequence's keys in the L2 eviction plan.
+
+**Request body:**
+
+.. list-table::
+   :header-rows: 1
+   :widths: 18 16 66
+
+   * - Field
+     - Type
+     - Description
+   * - ``model_name``
+     - string
+     - Model whose rank fan-out to use when resolving keys.
+   * - ``world_size``
+     - int
+     - World size (``>= 1``) selecting the per-rank fan-out.
+   * - ``token_ids``
+     - list[int]
+     - Prompt tokens whose complete chunks are pinned; must match what was
+       stored. A sub-chunk sequence pins nothing (``affected`` 0).
+   * - ``cache_salt``
+     - string
+     - Optional (default ``""``). Per-tenant isolation salt.
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {"requested": 12, "affected": 12, "status": "pinned"}
+
+``requested`` is the number of whole chunks resolved; ``affected`` is the number
+of L2 keys pinned (chunks times the per-rank fan-out).
+
+**HTTP status codes:**
+
+- ``200``: pinned.
+- ``400``: ``token_ids`` exceeds the per-request cap, or ``cache_salt`` violates
+  its invariants.
+- ``422``: request body fails field-level validation.
+
+**Example:**
+
+.. code-block:: bash
+
+    curl -s -X POST http://localhost:9300/cache/pins \
+        -H 'Content-Type: application/json' \
+        -d '{
+            "model_name": "Qwen/Qwen3-8B",
+            "world_size": 1,
+            "token_ids": [101, 102, 103, "..."],
+            "cache_salt": "user-a"
+        }'
+    # -> {"requested": 12, "affected": 12, "status": "pinned"}
+
+.. note::
+
+   **Requires event reporting.** The coordinator can only exclude keys from
+   eviction for a salt it is tracking, which requires the MP servers started with
+   ``--coordinator-event-reporting`` (see `Connecting MP servers`_).
+
+``DELETE /cache/pins``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Unpin a token sequence's keys from the L2 eviction plan. Same request body as
+``POST /cache/pins``. The response mirrors the pin (``affected`` is the number
+of keys unpinned), with ``status`` ``"unpinned"``. Pins are reference-counted: a
+chunk pinned *N* times needs *N* unpins before it can be evicted.
+
+**HTTP status codes:** same as ``POST /cache/pins``.
+
+**Example:**
+
+.. code-block:: bash
+
+    curl -s -X DELETE http://localhost:9300/cache/pins \
+        -H 'Content-Type: application/json' \
+        -d '{
+            "model_name": "Qwen/Qwen3-8B",
+            "world_size": 1,
+            "token_ids": [101, 102, 103, "..."],
+            "cache_salt": "user-a"
+        }'
+    # -> {"requested": 12, "affected": 12, "status": "unpinned"}
+
+**Delete (removing cache by token sequence).** Delete a token sequence's cache
+on one named server, addressed by token ids. The coordinator resolves the tokens
+to object keys locally (like pin) and issues a single key-addressed
+``DELETE /cache/objects`` to the named server, which removes them from the
+requested tier(s). The ``tier`` field selects the tier(s): ``l1`` deletes only
+the named server's L1, ``l2`` only L2, ``all`` both. When the tier includes L2,
+the coordinator first drops any key it is protecting with an L2 pin from the
+delete set unless ``force`` is set — so a pinned key is retained in every tier
+the delete would have touched; ``force`` deletes them and drops those pins.
+
+``POST /cache/delete``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Delete a token sequence on one named server.
+
+**Request body:** (``model_name``,
+``world_size``, ``token_ids``, ``cache_salt``) plus ``tier`` (``l1`` / ``l2`` /
+``all``) and ``force`` (bool, default ``false``). When ``force`` is ``true``,
+locked keys are deleted anyway (L1 read/write locks on the node and the
+coordinator's L2 pin set).
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {"instance_id": "server-1", "requested": 12, "affected": 24, "skipped": 0, "status": "deleted"}
+
+``requested`` is the number of whole chunks resolved. ``affected`` and
+``skipped`` are **totals across the tiers acted on**: ``affected`` counts L1 keys
+removed by the node plus L2 keys removed by the coordinator, and ``skipped``
+counts L1 keys the node refused plus L2 keys held back for an L2 pin (non-force
+only). A chunk resident in both tiers (``tier=all``) contributes to both counts,
+so ``affected`` may be up to ``2 x requested x world_size``. A sub-chunk
+sequence returns ``status`` ``"noop"``.
+
+**HTTP status codes:**
+
+- ``200``: deleted (or a ``noop``).
+- ``404``: no server is registered under ``instance_id``.
+- ``502``: the target server was unreachable or rejected the delete.
+
+**Example:**
+
+.. code-block:: bash
+
+    curl -s -X POST http://localhost:9300/cache/delete \
+        -H 'Content-Type: application/json' \
+        -d '{
+            "instance_id": "server-1",
+            "model_name": "Qwen/Qwen3-8B",
+            "world_size": 1,
+            "token_ids": [101, 102, 103, "..."],
+            "cache_salt": "user-a",
+            "tier": "all",
+            "force": false
+        }'
+    # -> {"instance_id": "server-1", "requested": 12, "affected": 24, "skipped": 0, "status": "deleted"}
+
+CacheBlend fragment lookup
+--------------------------
+
+``POST /directory/blend-lookup`` is the fragment counterpart to
+``/directory/lookup``: the query need not be a prefix, and each match reports
+where the content sits in the query and where it sat when stored, so the caller
+can re-RoPE it.
+
+It is served from the blend index, derived from the key directory's token
+bindings — the coordinator learns content from the cache-event stream, not from
+a separate publish call. Both feeds default to off and both are required: the
+coordinator needs ``--enable-blend-lookup``, and every MP server whose chunks
+should be discoverable needs ``--coordinator-event-reporting`` (a server with a
+coordinator URL but no event reporting warns at startup and matches locally
+only). Matching is chunked at ``LMCACHE_MP_COORDINATOR_CHUNK_SIZE`` — which
+must equal the MP servers' ``--chunk-size`` — probing every
+``LMCACHE_MP_COORDINATOR_BLEND_PROBE_STRIDE`` positions.
+
+**Request body:**
+
+.. list-table::
+   :header-rows: 1
+   :widths: 22 14 64
+
+   * - Field
+     - Type
+     - Description
+   * - ``tokens_b64``
+     - string
+     - Query tokens packed as base64 little-endian ``uint32`` (see
+       ``encode_tokens`` / ``decode_tokens`` in ``schemas.py``).
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {
+      "matches": [
+        {"chunk_hash": "ab12...", "old_st": 0,   "cur_st": 512},
+        {"chunk_hash": "cd34...", "old_st": 256, "cur_st": 768}
+      ]
+    }
+
+``chunk_hash`` is the chunk's content hash, which the caller expands to
+per-rank object keys with its own model, salt, and world size; ``old_st`` is
+its position in the stored sequence (re-RoPE source) and ``cur_st`` its
+position in the query (re-RoPE target). Matches are sorted ascending by
+``cur_st``, at most one per chunk, and may overlap — a caller that scatters
+them resolves overlaps itself. A query shorter than one chunk, or a coordinator
+without ``--enable-blend-lookup``, returns ``{"matches": []}``.
+
+**HTTP status codes:**
+
+- ``200``: lookup completed (an empty match list is not an error).
+- ``422``: ``tokens_b64`` is not valid base64 or not a whole number of
+  ``uint32`` tokens.
+
+Index counts are reported under the ``blend`` key of ``GET /directory/stats``.
