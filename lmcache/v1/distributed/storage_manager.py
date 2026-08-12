@@ -386,7 +386,6 @@ class StorageManager:
         finish_result = self._l1_manager.finish_read(keys, extra_count=extra_count)
         successful_keys = [k for k, e in finish_result.items() if e == L1Error.SUCCESS]
         failed_keys = [k for k, e in finish_result.items() if e != L1Error.SUCCESS]
-
         self._event_bus.publish(
             Event(
                 event_type=EventType.SM_READ_PREFETCHED_FINISHED,

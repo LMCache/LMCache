@@ -1339,7 +1339,6 @@ class PrefetchController(StorageControllerInterface):
         # |       -        |     -      |       -        |load→locked |     -      |
         # SW keys in L1:
         # |     unlock     |   unlock   |     unlock     |   locked   |   unlock   |
-        # Transition loaded keys out of write-locked state.
         if loaded_keys:
             if request.mode is PrefetchMode.WARM:
                 # Warm: make ready, lock nothing.
