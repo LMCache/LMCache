@@ -72,6 +72,7 @@ class CPUCacheContext(BaseCacheContext):
         engine_type: EngineType = EngineType.VLLM,
         separate_object_groups: bool = False,
         full_sw_kv: bool = False,
+        max_batch_size: int = 4,
     ) -> None:
         if not kv_caches:
             raise ValueError(
@@ -149,7 +150,7 @@ class CPUCacheContext(BaseCacheContext):
 
         # Temporary buffer for transfers (same layout as
         # GPUCacheContext but on CPU).
-        self._max_batch_size = 4
+        self._max_batch_size = max_batch_size
         self.tmp_chunk_group_offsets_: list[int] = [0]
         for group_idx, group in enumerate(self.kv_layer_groups_manager_.kernel_groups):
             shape = self.get_kv_buffer_shape(lmcache_tokens_per_chunk, group_idx)
@@ -215,8 +216,18 @@ class CPUCacheContext(BaseCacheContext):
             )
 
     def close(self) -> None:
-        """Release resources. No-op for CPU context (no GDS staging buffer)."""
-        pass
+        """Release SHM-backed tensor references.
+
+        Although CPU contexts have no GDS staging buffer, the unwrapped
+        KV tensors are backed by POSIX SHM segments whose lifetime is tied
+        to the tensor's storage.  Dropping these references lets the
+        SHM segments be munmapped and unlinked by the finalize hooks in
+        :mod:`lmcache.v1.platform.cpu.shm`.
+        """
+        self.group_kv_pointers_ = None
+        self.kv_caches_ = None
+        self.kv_cache_pointers_ = None
+        self._temp_buffer = None
 
     # -- Properties (same API as GPUCacheContext) --
 

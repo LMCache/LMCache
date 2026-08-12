@@ -55,6 +55,13 @@ class MPServerConfig:
     sliding-window size at KV-cache registration (hybrid models). When False
     (default), all kernel groups share a single full-attention object group."""
 
+    max_batch_size: int = 4
+    """Maximum number of chunks the temporary GPU staging buffer can hold
+    simultaneously. Each chunk occupies ``chunk_size × hidden_dim × num_layers
+    × dtype_size`` bytes of GPU memory. Reducing this value (e.g. to 2)
+    decreases GPU staging memory at the cost of batched-transfer throughput.
+    Default is 4."""
+
     enable_segmented_prefix: bool = False
     """CacheBlend only (engine_type='blend'): on a mid-prefix L2 retrieve
     failure, retain the gapped contiguous prefix so the post-gap chunks stay
@@ -362,6 +369,15 @@ def add_mp_server_args(
         "at KV-cache registration (for hybrid models). (Default is False)",
     )
     mp_group.add_argument(
+        "--max-batch-size",
+        type=int,
+        default=4,
+        help="Maximum number of chunks the temporary GPU staging buffer "
+        "can hold simultaneously. Reducing this value (e.g. to 2) "
+        "decreases GPU staging memory at the cost of batched-transfer "
+        "throughput. Default is 4.",
+    )
+    mp_group.add_argument(
         "--worker-reap-timeout-seconds",
         type=float,
         default=120.0,
@@ -426,6 +442,7 @@ def parse_args_to_mp_server_config(
         hash_algorithm=args.hash_algorithm,
         engine_type=args.engine_type,
         separate_object_groups=args.separate_object_groups,
+        max_batch_size=args.max_batch_size,
         enable_segmented_prefix=args.enable_segmented_prefix,
         supported_transfer_mode=args.supported_transfer_mode,
         runtime_plugin_config=RuntimePluginConfig(

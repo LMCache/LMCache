@@ -17,6 +17,9 @@ module (``torch_dev``).
 # Standard
 # Standard Library
 from types import SimpleNamespace
+
+# Third Party
+import pytest
 from unittest.mock import MagicMock
 import time
 import weakref
@@ -45,9 +48,28 @@ class _FakeTorchDev:
             )
 
 
+class _StoppedPeriodicThread:
+    """Stub for create_periodic_thread — never starts the background loop.
+
+    The periodic IPC collector thread fires _ipc_collect_cycle every 60 s
+    in the background.  Without this stub, background calls to
+    empty_cache/ipc_collect race with the test assertions on dev.calls.
+    Tests that need the collector call module._ipc_collect_cycle() directly.
+    """
+
+    name = "lmcache-ipc-collector-stub"
+
+    def start(self) -> None:
+        pass
+
+    def stop(self) -> None:
+        pass
+
+
 def _module(monkeypatch) -> LMCacheDrivenTransferModule:
     """Construct the module through the real __init__ with stubbed deps."""
     monkeypatch.setattr(gpu_mod, "DeviceHostFuncDispatcher", MagicMock())
+    monkeypatch.setattr(gpu_mod, "create_periodic_thread", lambda **kw: _StoppedPeriodicThread())
     return LMCacheDrivenTransferModule(MagicMock(name="ctx"))
 
 
@@ -234,3 +256,235 @@ def test_close_with_empty_registry_does_not_reclaim(monkeypatch) -> None:
     module.close()
 
     assert dev.calls == []
+
+
+# =============================================================================
+# Store/retrieve through @_pins_context_entry decorator
+# =============================================================================
+# Regression guard for the bug where the decorator never passed the pinned
+# entry to the method body, causing `entry = _pinned_entry` (None) to crash
+# with AttributeError at `entry.cache_context`.  These tests drive the real
+# decorated store/retrieve through the public API and prove the body receives
+# a non-None pinned entry by reaching a sentinel deep in the body.
+
+
+class _SentinelError(Exception):
+    """Raised by a stubbed ctx method to prove the body reached that line."""
+
+
+def _module_with_sentinel_at_resolve(monkeypatch):
+    """Build a module whose ``ctx.resolve_obj_keys`` raises ``_SentinelError``.
+
+    Both store and retrieve call ``self._ctx.resolve_obj_keys(key, ...)`` right
+    after ``cache_context = entry.cache_context``.  If ``_pinned_entry`` were
+    None, the body would crash with ``AttributeError`` *before* reaching
+    resolve_obj_keys.  So a ``_SentinelError`` from resolve_obj_keys proves the
+    pinned entry was passed and its cache_context was accessed successfully.
+    """
+    module = _module(monkeypatch)
+    module._ctx.resolve_obj_keys.side_effect = _SentinelError
+    return module
+
+
+def test_store_receives_pinned_entry_not_none(monkeypatch) -> None:
+    """store() body must get the pinned entry, not None (bug4 regression)."""
+    dev = _FakeTorchDev()
+    monkeypatch.setattr(gpu_mod, "torch_dev", dev)
+    module = _module_with_sentinel_at_resolve(monkeypatch)
+    _register(module, monkeypatch, 1)
+
+    raised = False
+    try:
+        module.store(
+            key=MagicMock(name="key"),
+            instance_id=1,
+            gpu_block_ids=[[0]],
+            event_ipc_handle=b"\x00",
+        )
+    except _SentinelError:
+        raised = True
+    except AttributeError as e:
+        pytest.fail(
+            f"store got _pinned_entry=None (bug4 regression): {e}"
+        )
+    assert raised, "store body never reached resolve_obj_keys"
+    # checkin must have run (pin released)
+    assert module.context_entries_snapshot()[1].in_use == 0
+
+
+def test_retrieve_receives_pinned_entry_not_none(monkeypatch) -> None:
+    """retrieve() body must get the pinned entry, not None (bug4 regression)."""
+    dev = _FakeTorchDev()
+    monkeypatch.setattr(gpu_mod, "torch_dev", dev)
+    module = _module_with_sentinel_at_resolve(monkeypatch)
+    _register(module, monkeypatch, 2)
+
+    raised = False
+    try:
+        module.retrieve(
+            key=MagicMock(name="key"),
+            instance_id=2,
+            gpu_block_ids=[[0]],
+            event_ipc_handle=b"\x00",
+        )
+    except _SentinelError:
+        raised = True
+    except AttributeError as e:
+        pytest.fail(
+            f"retrieve got _pinned_entry=None (bug4 regression): {e}"
+        )
+    assert raised, "retrieve body never reached resolve_obj_keys"
+    assert module.context_entries_snapshot()[2].in_use == 0
+
+
+def test_store_raises_value_error_for_unknown_instance(monkeypatch) -> None:
+    """store() on an unregistered instance must raise ValueError, not crash."""
+    dev = _FakeTorchDev()
+    monkeypatch.setattr(gpu_mod, "torch_dev", dev)
+    module = _module(monkeypatch)
+
+    with pytest.raises(ValueError, match="instance ID 999"):
+        module.store(
+            key=MagicMock(name="key"),
+            instance_id=999,
+            gpu_block_ids=[[0]],
+            event_ipc_handle=b"\x00",
+        )
+
+
+# =============================================================================
+# Dead-entry safety net: busy entry retirement + deferred release
+# =============================================================================
+
+
+def test_busy_retire_enters_dead_entries(monkeypatch) -> None:
+    """A checked-out entry retired by unregister must enter _dead_entries."""
+    dev = _FakeTorchDev()
+    monkeypatch.setattr(gpu_mod, "torch_dev", dev)
+    module = _module(monkeypatch)
+    _register(module, monkeypatch, 1)
+
+    # Pin the entry (simulate an in-flight transfer)
+    entry = module.checkout_context_entry(1)
+    assert entry is not None
+    assert entry.in_use == 1
+
+    # Retire while busy — should defer, not release
+    module.unregister_kv_cache(1)
+
+    assert entry in module._dead_entries, "busy entry should be in _dead_entries"
+    assert entry.dead is True
+    # Context not yet closed (transfer may still be using it)
+    entry.cache_context.close.assert_not_called()
+    assert module.context_entries_snapshot() == {}
+
+    # Clean up: checkin to release
+    module.checkin_context_entry(entry)
+    entry.cache_context.close.assert_called_once()
+
+
+def test_dead_entry_checkin_releases_exactly_once(monkeypatch) -> None:
+    """After retire + checkin, the context is closed exactly once."""
+    dev = _FakeTorchDev()
+    monkeypatch.setattr(gpu_mod, "torch_dev", dev)
+    module = _module(monkeypatch)
+    ctx = _register(module, monkeypatch, 1)
+
+    entry = module.checkout_context_entry(1)
+    module.unregister_kv_cache(1)
+
+    assert entry in module._dead_entries
+
+    module.checkin_context_entry(entry)
+
+    ctx.close.assert_called_once()
+    assert entry not in module._dead_entries
+    assert entry.released is True
+    assert dev.calls == ["empty_cache", "ipc_collect"]
+
+
+def test_dead_entry_timeout_force_releases(monkeypatch) -> None:
+    """_ipc_collect_cycle force-releases entries past _CHECKIN_TIMEOUT_S."""
+    dev = _FakeTorchDev()
+    monkeypatch.setattr(gpu_mod, "torch_dev", dev)
+    module = _module(monkeypatch)
+    ctx = _register(module, monkeypatch, 1)
+
+    entry = module.checkout_context_entry(1)
+    module.unregister_kv_cache(1)
+    assert entry in module._dead_entries
+
+    # Backdate the dead-entry timestamp to simulate timeout
+    module._dead_entries[entry] = time.monotonic() - 999.0
+
+    summary = module._ipc_collect_cycle()
+
+    ctx.close.assert_called_once()
+    assert entry not in module._dead_entries
+    assert entry.released is True
+    assert "force_released=1" in summary.message
+    assert dev.calls == ["empty_cache", "ipc_collect"]
+
+
+def test_ipc_collect_noop_when_no_dead_entries(monkeypatch) -> None:
+    """_ipc_collect_cycle with no dead entries just runs global collect."""
+    dev = _FakeTorchDev()
+    monkeypatch.setattr(gpu_mod, "torch_dev", dev)
+    module = _module(monkeypatch)
+    _register(module, monkeypatch, 1)
+
+    summary = module._ipc_collect_cycle()
+
+    assert "force_released=0" in summary.message
+    assert dev.calls == ["empty_cache", "ipc_collect"]
+
+
+# =============================================================================
+# Double-release race: checkin vs _ipc_collect_cycle
+# =============================================================================
+
+
+def test_no_double_release_when_checkin_wins(monkeypatch) -> None:
+    """If checkin releases first, the collector must not release again."""
+    dev = _FakeTorchDev()
+    monkeypatch.setattr(gpu_mod, "torch_dev", dev)
+    module = _module(monkeypatch)
+    ctx = _register(module, monkeypatch, 1)
+
+    entry = module.checkout_context_entry(1)
+    module.unregister_kv_cache(1)
+    # Backdate so the collector *would* fire if the entry were still tracked
+    module._dead_entries[entry] = time.monotonic() - 999.0
+
+    # checkin wins the race: releases and pops from _dead_entries
+    module.checkin_context_entry(entry)
+    assert ctx.close.call_count == 1
+    assert entry not in module._dead_entries
+    assert entry.released is True
+
+    # Now the collector runs — should find nothing to release
+    module._ipc_collect_cycle()
+    assert ctx.close.call_count == 1, "collector must not double-release"
+
+
+def test_no_double_release_when_collector_wins(monkeypatch) -> None:
+    """If the collector releases first, a late checkin must not release again."""
+    dev = _FakeTorchDev()
+    monkeypatch.setattr(gpu_mod, "torch_dev", dev)
+    module = _module(monkeypatch)
+    ctx = _register(module, monkeypatch, 1)
+
+    entry = module.checkout_context_entry(1)
+    module.unregister_kv_cache(1)
+    module._dead_entries[entry] = time.monotonic() - 999.0
+
+    # Collector wins the race
+    module._ipc_collect_cycle()
+    assert ctx.close.call_count == 1
+    assert entry.released is True
+    assert entry not in module._dead_entries
+
+    # Late checkin: must detect released=True and NOT release again
+    module.checkin_context_entry(entry)
+    assert ctx.close.call_count == 1, "late checkin must not double-release"
+    assert entry.in_use == 0
