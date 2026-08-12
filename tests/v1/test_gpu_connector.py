@@ -57,7 +57,8 @@ def patch_pin_allocator():
         # ptr = self.buffer.data_ptr()
         # err = backend_runtime.cudart().cudaHostRegister(ptr, size, 0)
         # assert err == 0, (
-        #     f"cudaHostRegister failed: {backend_runtime.cudart().cudaGetErrorString(err)}"
+        #     "cudaHostRegister failed: "
+        #     f"{backend_runtime.cudart().cudaGetErrorString(err)}"
         # )
         self._unregistered = False
         self.buffer = torch.empty(size, dtype=torch.uint8, pin_memory=True)
