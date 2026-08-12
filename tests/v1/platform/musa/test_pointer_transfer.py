@@ -11,7 +11,7 @@ import torch
 # First Party
 from lmcache.lmcache_native import EngineKVFormat, TransferDirection
 from lmcache.v1.platform.musa import device_ops
-from lmcache.v1.platform.ops_types import PageBufferShapeDesc
+from lmcache.v1.platform.ops_types import PageBufferShapeDesc, set_shape_desc_dtype
 
 
 def test_pointer_operands_are_reconstructed_inside_musa_adapter(
@@ -56,7 +56,7 @@ def test_pointer_operands_are_reconstructed_inside_musa_adapter(
     shape_desc.nh = 1
     shape_desc.hs = 8
     shape_desc.element_size = 2
-    shape_desc.dtype = torch.bfloat16
+    set_shape_desc_dtype(shape_desc, torch.bfloat16)
     shape_desc.block_stride_elems = 40
 
     device_ops.MusaDeviceOps().multi_layer_block_kv_transfer(

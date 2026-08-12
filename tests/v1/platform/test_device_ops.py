@@ -83,6 +83,17 @@ def test_base_class_has_python_fallback_types() -> None:
     assert callable(DeviceOps.set_shape_desc_dtype)
 
 
+def test_shape_desc_dtype_helper_sets_dynamic_attr() -> None:
+    """The shared shape descriptor accepts the dtype side-channel."""
+    # Third Party
+    import torch
+
+    shape_desc = DeviceOps.PageBufferShapeDesc()
+    DeviceOps.set_shape_desc_dtype(shape_desc, torch.bfloat16)
+
+    assert getattr(shape_desc, "dtype", None) == torch.bfloat16
+
+
 def test_every_registered_device_has_all_ops(isolated_registry: Any) -> None:
     """Each discovered DeviceSpec resolves an ops instance with all ops."""
     for device_type, spec in isolated_registry.items():

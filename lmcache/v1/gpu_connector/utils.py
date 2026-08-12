@@ -660,9 +660,10 @@ def make_page_buffer_shape_desc(
     desc.hs = get_head_size(kv_caches, engine_kv_format, layer_idx)
     dtype = get_dtype(kv_caches, engine_kv_format, layer_idx)
     desc.element_size = dtype.itemsize
-    # The C++ PageBufferShapeDesc has no ``dtype`` field, but the pure-Python
-    # CPU fallback does -- and needs it to disambiguate float16 vs bfloat16
-    # (both have itemsize 2, so element_size alone is not enough). Best-effort.
+    # ``dtype`` is a Python-side side channel used by the torch fallback to
+    # disambiguate float16 vs bfloat16 when ``element_size == 2``. The native
+    # descriptor now accepts dynamic attributes too, so this assignment works
+    # uniformly across both surfaces.
     set_shape_desc_dtype(desc, dtype)
 
     resolved_stride = int(block_stride_elems) if block_stride_elems else 0

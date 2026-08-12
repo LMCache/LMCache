@@ -8,6 +8,7 @@
 #include "periodic_event_notifier.h"
 #include "utils.h"
 #include "engine_kv_format.h"
+#include "kv_transfer_plan_types.h"
 #include "kv_transfer_types.h"
 
 namespace py = pybind11;
@@ -46,6 +47,64 @@ PYBIND11_MODULE(lmcache_native, m) {
   py::enum_<TransferDirection>(m, "TransferDirection")
       .value("H2D", TransferDirection::H2D)
       .value("D2H", TransferDirection::D2H);
+
+  py::class_<PageBufferShapeDesc>(m, "PageBufferShapeDesc", py::dynamic_attr())
+      .def(py::init<>())
+      .def_readwrite("kv_size", &PageBufferShapeDesc::kv_size)
+      .def_readwrite("nl", &PageBufferShapeDesc::nl)
+      .def_readwrite("nb", &PageBufferShapeDesc::nb)
+      .def_readwrite("bs", &PageBufferShapeDesc::bs)
+      .def_readwrite("nh", &PageBufferShapeDesc::nh)
+      .def_readwrite("hs", &PageBufferShapeDesc::hs)
+      .def_readwrite("element_size", &PageBufferShapeDesc::element_size)
+      .def_readwrite("block_stride_elems",
+                     &PageBufferShapeDesc::block_stride_elems);
+
+  // Object-group transfer plan descriptors. These are backend-agnostic value
+  // types: planners construct them once in Python, while individual backends
+  // decide which execute_* entry points consume them.
+  py::class_<StagingCopy>(m, "StagingCopy")
+      .def(py::init([](uintptr_t dest, uintptr_t src, size_t nbytes,
+                       size_t host_offset) {
+             return StagingCopy{dest, src, nbytes, host_offset};
+           }),
+           py::arg("dest"), py::arg("src"), py::arg("nbytes"),
+           py::arg("host_offset"));
+  py::class_<LaunchVar>(m, "LaunchVar")
+      .def(
+          py::init([](int group_idx, int64_t block_ids_offset, int total_blocks,
+                      int num_objects, int skip_prefix_n_blocks) {
+            return LaunchVar{group_idx, block_ids_offset, total_blocks,
+                             num_objects, skip_prefix_n_blocks};
+          }),
+          py::arg("group_idx"), py::arg("block_ids_offset"),
+          py::arg("total_blocks"), py::arg("num_objects"),
+          py::arg("skip_prefix_n_blocks"));
+  py::class_<BatchStep>(m, "BatchStep")
+      .def(py::init([](std::vector<StagingCopy> staging,
+                       std::vector<LaunchVar> launches) {
+             return BatchStep{std::move(staging), std::move(launches)};
+           }),
+           py::arg("staging"), py::arg("launches"));
+  py::class_<KernelGroupSpec>(m, "KernelGroupSpec")
+      .def(py::init([](uintptr_t paged_buffer_ptrs,
+                       std::vector<int64_t> lmcache_objects_ptrs,
+                       PageBufferShapeDesc shape_desc, int lmcache_chunk_size,
+                       int engine_kv_format, uintptr_t block_ids_base,
+                       int64_t block_ids_capacity) {
+             return KernelGroupSpec{
+                 paged_buffer_ptrs,
+                 std::move(lmcache_objects_ptrs),
+                 shape_desc,
+                 lmcache_chunk_size,
+                 static_cast<EngineKVFormat>(engine_kv_format),
+                 block_ids_base,
+                 block_ids_capacity};
+           }),
+           py::arg("paged_buffer_ptrs"), py::arg("lmcache_objects_ptrs"),
+           py::arg("shape_desc"), py::arg("lmcache_chunk_size"),
+           py::arg("engine_kv_format"), py::arg("block_ids_base"),
+           py::arg("block_ids_capacity"));
 
   m.def("is_kv_list", &is_kv_list, py::arg("format"),
         "Return whether the format stores KV as a list of per-token KV "

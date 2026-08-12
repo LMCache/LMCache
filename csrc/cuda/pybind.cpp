@@ -19,13 +19,16 @@
 namespace py = pybind11;
 
 PYBIND11_MODULE(cuda_ops, m) {
-  // NOTE: ``TransferDirection`` and ``EngineKVFormat`` (and the format
-  // predicates is_cross_layer / is_kv_list / is_layer_list / is_mla) are owned
-  // exclusively by the device-independent ``lmcache_native`` module
+  py::module_::import("lmcache.lmcache_native");
+
+  // NOTE: ``TransferDirection`` / ``EngineKVFormat`` and the common transfer
+  // descriptors (``PageBufferShapeDesc``, ``StagingCopy``, ``LaunchVar``,
+  // ``BatchStep``, ``KernelGroupSpec``) are owned exclusively by the
+  // device-independent ``lmcache_native`` module
   // (csrc/lmcache_native/pybind.cpp). They are NOT exported here. ``cuda_ops``
-  // functions that need a transfer direction accept the underlying ``int`` and
-  // cast it to the C++ enum, so callers pass ``TransferDirection.H2D.value``
-  // (an int) instead of the enum object.
+  // functions that need enums accept the underlying ``int`` and cast to the
+  // C++ enum, so callers pass ``TransferDirection.H2D.value`` instead of the
+  // enum object.
 
   m.def(
       "multi_layer_kv_transfer",
@@ -144,61 +147,6 @@ PYBIND11_MODULE(cuda_ops, m) {
       py::arg("shape_desc"), py::arg("lmcache_chunk_size"),
       py::arg("engine_kv_format"), py::arg("skip_prefix_n_blocks"),
       py::call_guard<py::gil_scoped_release>());
-  py::class_<PageBufferShapeDesc>(m, "PageBufferShapeDesc")
-      .def(py::init<>())
-      .def_readwrite("kv_size", &PageBufferShapeDesc::kv_size)
-      .def_readwrite("nl", &PageBufferShapeDesc::nl)
-      .def_readwrite("nb", &PageBufferShapeDesc::nb)
-      .def_readwrite("bs", &PageBufferShapeDesc::bs)
-      .def_readwrite("nh", &PageBufferShapeDesc::nh)
-      .def_readwrite("hs", &PageBufferShapeDesc::hs)
-      .def_readwrite("element_size", &PageBufferShapeDesc::element_size)
-      .def_readwrite("block_stride_elems",
-                     &PageBufferShapeDesc::block_stride_elems);
-  // Object-group transfer plan types (see mp_mem_kernels.cuh). Built on the
-  // Python side and consumed by execute_object_group_transfer.
-  py::class_<StagingCopy>(m, "StagingCopy")
-      .def(py::init([](uintptr_t dest, uintptr_t src, size_t nbytes,
-                       size_t host_offset) {
-             return StagingCopy{dest, src, nbytes, host_offset};
-           }),
-           py::arg("dest"), py::arg("src"), py::arg("nbytes"),
-           py::arg("host_offset"));
-  py::class_<LaunchVar>(m, "LaunchVar")
-      .def(
-          py::init([](int group_idx, int64_t block_ids_offset, int total_blocks,
-                      int num_objects, int skip_prefix_n_blocks) {
-            return LaunchVar{group_idx, block_ids_offset, total_blocks,
-                             num_objects, skip_prefix_n_blocks};
-          }),
-          py::arg("group_idx"), py::arg("block_ids_offset"),
-          py::arg("total_blocks"), py::arg("num_objects"),
-          py::arg("skip_prefix_n_blocks"));
-  py::class_<BatchStep>(m, "BatchStep")
-      .def(py::init([](std::vector<StagingCopy> staging,
-                       std::vector<LaunchVar> launches) {
-             return BatchStep{std::move(staging), std::move(launches)};
-           }),
-           py::arg("staging"), py::arg("launches"));
-  py::class_<KernelGroupSpec>(m, "KernelGroupSpec")
-      .def(py::init([](uintptr_t paged_buffer_ptrs,
-                       std::vector<int64_t> lmcache_objects_ptrs,
-                       PageBufferShapeDesc shape_desc, int lmcache_chunk_size,
-                       int engine_kv_format, uintptr_t block_ids_base,
-                       int64_t block_ids_capacity) {
-             return KernelGroupSpec{
-                 paged_buffer_ptrs,
-                 std::move(lmcache_objects_ptrs),
-                 shape_desc,
-                 lmcache_chunk_size,
-                 static_cast<EngineKVFormat>(engine_kv_format),
-                 block_ids_base,
-                 block_ids_capacity};
-           }),
-           py::arg("paged_buffer_ptrs"), py::arg("lmcache_objects_ptrs"),
-           py::arg("shape_desc"), py::arg("lmcache_chunk_size"),
-           py::arg("engine_kv_format"), py::arg("block_ids_base"),
-           py::arg("block_ids_capacity"));
   m.def(
       "execute_object_group_transfer",
       [](int direction, const torch::Device& device,
