@@ -11,12 +11,12 @@ import torch
 from lmcache import torch_dev, torch_device_type
 
 pytest.importorskip(
-    "lmcache.c_ops",
-    reason="Requires CUDA extension lmcache.c_ops",
+    "lmcache.cuda_ops",
+    reason="Requires CUDA extension lmcache.cuda_ops",
 )
 
 # First Party
-import lmcache.c_ops as lmc_ops
+import lmcache.cuda_ops as cuda_ops
 import lmcache.lmcache_native as lmcache_native
 
 # Skip all tests if cuda is unavailable
@@ -48,7 +48,7 @@ def _create_zero_tensor(
     return torch.zeros(shape, dtype=dtype, device=device)
 
 
-# Format enum values from c_ops
+# Format enum values used by the DeviceOps compatibility shim
 FMT_NORMAL = lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
 FMT_CROSS_LAYER = lmcache_native.EngineKVFormat.NB_NL_TWO_BS_NH_HS
 FMT_FLASH_INFER = lmcache_native.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS
@@ -254,7 +254,7 @@ def call_block_kernel(
 ) -> None:
     device = vllm_tensors[0].device
 
-    shape_desc = lmc_ops.PageBufferShapeDesc()
+    shape_desc = cuda_ops.PageBufferShapeDesc()
     shape_desc.kv_size = 1 if is_mla else 2
     shape_desc.nl = nl
     shape_desc.nb = nb
@@ -268,7 +268,7 @@ def call_block_kernel(
     lmcache_objects_ptrs = [m.data_ptr() for m in mem_objects]
 
     block_ids_gpu = torch.tensor(block_ids, dtype=torch.int64, device=device)
-    lmc_ops.multi_layer_block_kv_transfer(
+    cuda_ops.multi_layer_block_kv_transfer(
         paged_buffer_ptrs_tensor,
         lmcache_objects_ptrs,
         block_ids_gpu,
