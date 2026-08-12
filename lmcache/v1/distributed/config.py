@@ -186,6 +186,24 @@ class GdsL1Config:
 
 
 @dataclass
+class PhxL1Config:
+    """Configuration for the Phoenix L1 tier.
+
+    When present on :class:`L1ManagerConfig`, L1 uses
+    :class:`PhxL1MemoryManager` whose ``free()`` dispatches device-resident
+    MemoryObjs (injected by PhxL2Adapter via
+    :meth:`L1Manager.replace_memory_obj`) to their parent allocator, while
+    CPU objs still go through the CPU pinned-DRAM allocator.  Mutually
+    exclusive with GDS L1 and Device-DAX L1.
+
+    The presence of this config is inferred automatically at parse time from
+    the L2 adapter config (any adapter with ``type == "phx"``); users do not
+    set it directly.  Fields are reserved for future PhxL1MemoryManager
+    tuning (e.g. device-obj pool sizing).
+    """
+
+
+@dataclass
 class L1ManagerConfig:
     """
     Special config for the L1 Object/Key manager
@@ -198,9 +216,10 @@ class L1ManagerConfig:
     """ Optional GDS L1 tier. When set, the GDS slab is the L1 medium
     (mutually exclusive with the pinned-DRAM tier in ``memory_config``). """
 
-    phx_l2_enabled: bool = False
-    """ When True, L1 uses :class:`PhxL1MemoryManager` whose ``free()``
-    dispatches device-resident MemoryObjs (injected by PhxL2Adapter via
+    phx_l1_config: "PhxL1Config | None" = None
+    """ Optional Phoenix L1 tier. When set, L1 uses
+    :class:`PhxL1MemoryManager` whose ``free()`` dispatches
+    device-resident MemoryObjs (injected by PhxL2Adapter via
     :meth:`L1Manager.replace_memory_obj`) to their parent allocator, while
     CPU objs still go through the CPU pinned-DRAM allocator.  Mutually
     exclusive with GDS L1 and Device-DAX L1. """
@@ -309,7 +328,7 @@ def validate_storage_manager_config(config: StorageManagerConfig) -> None:
     ):
         raise ValueError("gds-l1-path cannot be used with l1-devdax-path")
 
-    if config.l1_manager_config.phx_l2_enabled:
+    if config.l1_manager_config.phx_l1_config is not None:
         if config.l1_manager_config.gds_l1_config is not None:
             raise ValueError(
                 "phx L2 adapter cannot be used with GDS L1 "
@@ -601,14 +620,19 @@ def parse_args_to_config(
 
     l2_adapter_config = parse_args_to_l2_adapters_config(args)
 
-    phx_l2_enabled = any(
+    # Infer PhxL1Config presence from the L2 adapter config: any "phx"
+    # adapter requires PhxL1MemoryManager so device-resident objects injected
+    # by the adapter are dispatched correctly on free().
+    phx_l1_config: PhxL1Config | None = None
+    if any(
         get_type_name_for_config(cfg) == "phx" for cfg in l2_adapter_config.adapters
-    )
+    ):
+        phx_l1_config = PhxL1Config()
 
     l1_manager_config = L1ManagerConfig(
         memory_config=memory_config,
         gds_l1_config=gds_l1_config,
-        phx_l2_enabled=phx_l2_enabled,
+        phx_l1_config=phx_l1_config,
         write_ttl_seconds=args.l1_write_ttl_seconds,
         read_ttl_seconds=args.l1_read_ttl_seconds,
     )

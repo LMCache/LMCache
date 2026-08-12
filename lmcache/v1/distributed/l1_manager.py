@@ -223,7 +223,12 @@ class L1Manager:
         elif config.memory_config.devdax_path:
             self._memory_manager = DevDaxL1MemoryManager(config.memory_config)
             logger.info("L1Manager: Device-DAX L1 tier enabled; CPU-only L1 disabled")
-        elif config.phx_l2_enabled:
+        # When a Phoenix L2 adapter is configured, L1 must use
+        # PhxL1MemoryManager so that device-resident MemoryObjs injected by
+        # the adapter (via ``replace_memory_obj``) are dispatched back to
+        # their parent allocator on ``free()``.  ``phx_l1_config`` is set at
+        # parse time whenever a "phx" L2 adapter is present.
+        elif config.phx_l1_config is not None:
             self._memory_manager = PhxL1MemoryManager(config.memory_config)
             logger.info(
                 "L1Manager: PhxL1MemoryManager enabled (CPU DRAM + device-obj dispatch)"
