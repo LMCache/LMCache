@@ -41,6 +41,11 @@ class Session:
     num_chunks_processed: int = 0
     created_at: float = field(default_factory=time.time)
     lookup_ipc_key: Optional[IPCCacheServerKey] = None
+    prefetch_hit_chunks: int = -1
+    """Model-wide prefix hit length in chunks, recorded by
+    ``query_prefetch_status`` when the prefetch result is consumed; ``-1``
+    until then.  ``free_lookup_locks`` uses it to reconstruct which keys the
+    prefetch read-locked (see ``unfold``)."""
     extras: dict[str, Any] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
