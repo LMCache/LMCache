@@ -9,12 +9,9 @@ import pytest
 import torch
 
 # First Party
+from lmcache.lmcache_native import EngineKVFormat, TransferDirection
 from lmcache.v1.platform.musa import device_ops
-from lmcache.v1.platform.ops_types import (
-    EngineKVFormat,
-    PageBufferShapeDesc,
-    TransferDirection,
-)
+from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 
 
 def test_pointer_operands_are_reconstructed_inside_musa_adapter(

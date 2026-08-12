@@ -31,6 +31,7 @@ import torch
 
 # First Party
 from lmcache.v1.multiprocess.modules.blend_v3 import _cb_group_rope_geometry
+import lmcache.lmcache_native as lmcache_native
 
 _CONTENT, _ROPE = 24, 8  # latent = [content | rope], hidden = 32
 _HIDDEN = _CONTENT + _ROPE
@@ -204,7 +205,7 @@ def test_native_plan_rope_base_offset():
             slot_tokens=spc,
             hidden_elems=_HIDDEN,
             element_size=_DTYPE.itemsize,
-            engine_kv_format=lmc_ops.EngineKVFormat.NL_X_NB_BS_HS,
+            engine_kv_format=lmcache_native.EngineKVFormat.NL_X_NB_BS_HS,
             page_buffer_size=1,
             block_size=1,
             head_size=_ROPE,

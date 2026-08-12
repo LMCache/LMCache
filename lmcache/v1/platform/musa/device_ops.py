@@ -18,17 +18,14 @@ from typing import ClassVar
 import torch
 
 # First Party
+from lmcache.lmcache_native import EngineKVFormat, TransferDirection
 from lmcache.v1.platform import torch_ops
 from lmcache.v1.platform.base.device_ops import DeviceOps
 from lmcache.v1.platform.musa import native_kv_transfer
 from lmcache.v1.platform.musa.tensor_from_ptr import (
     construct_musa_tensor_from_data_pointer,
 )
-from lmcache.v1.platform.ops_types import (
-    EngineKVFormat,
-    PageBufferShapeDesc,
-    TransferDirection,
-)
+from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 
 _MUSA_MP_BLOCK_TRANSFER_FORMATS = {
     int(EngineKVFormat.NL_X_TWO_NB_BS_NH_HS),
