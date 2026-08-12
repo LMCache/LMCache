@@ -26,10 +26,10 @@ from lmcache.v1.gpu_connector.utils import (
     get_engine_kv_shape_description,
     is_mla,
 )
-from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 
 if TYPE_CHECKING:
     # First Party
+    from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
     import lmcache.c_ops as lmc_ops
 
 
