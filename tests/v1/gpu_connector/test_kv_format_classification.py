@@ -13,9 +13,9 @@ relies on.
 
 # First Party
 from lmcache.v1.gpu_connector.kv_format import get_spec_class
-import lmcache.c_ops as lmc_ops
+import lmcache.lmcache_native as lmcache_native
 
-F = lmc_ops.EngineKVFormat
+F = lmcache_native.EngineKVFormat
 
 # (is_cross_layer, is_kv_list, is_layer_list, is_mla) per format.
 EXPECTED = {
@@ -66,10 +66,10 @@ def _all_formats():
 def test_classification_matches_golden():
     for fmt, expected in EXPECTED.items():
         got = (
-            lmc_ops.is_cross_layer(fmt),
-            lmc_ops.is_kv_list(fmt),
-            lmc_ops.is_layer_list(fmt),
-            lmc_ops.is_mla(fmt),
+            lmcache_native.is_cross_layer(fmt),
+            lmcache_native.is_kv_list(fmt),
+            lmcache_native.is_layer_list(fmt),
+            lmcache_native.is_mla(fmt),
         )
         assert got == expected, f"{fmt}: got {got}, expected {expected}"
 
@@ -81,10 +81,10 @@ def test_spec_facts_match_predicates():
         spec = get_spec_class(fmt)
         got = (spec.is_cross_layer, spec.is_kv_list, spec.is_layer_list, spec.is_mla)
         expected = (
-            lmc_ops.is_cross_layer(fmt),
-            lmc_ops.is_kv_list(fmt),
-            lmc_ops.is_layer_list(fmt),
-            lmc_ops.is_mla(fmt),
+            lmcache_native.is_cross_layer(fmt),
+            lmcache_native.is_kv_list(fmt),
+            lmcache_native.is_layer_list(fmt),
+            lmcache_native.is_mla(fmt),
         )
         assert got == expected, f"{fmt}: spec {got}, c_ops {expected}"
 
@@ -106,8 +106,8 @@ def test_structural_flags_partition_every_format():
     # Exactly one structural shape is true for every format.
     for fmt in _all_formats():
         structural = (
-            lmc_ops.is_cross_layer(fmt),
-            lmc_ops.is_kv_list(fmt),
-            lmc_ops.is_layer_list(fmt),
+            lmcache_native.is_cross_layer(fmt),
+            lmcache_native.is_kv_list(fmt),
+            lmcache_native.is_layer_list(fmt),
         )
         assert sum(structural) == 1, f"{fmt}: structural flags {structural}"

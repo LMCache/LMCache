@@ -22,13 +22,13 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.platform.ops_types import (
-    EngineKVFormat,
-    PageBufferShapeDesc,
-    TransferDirection,
-)
+from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 from lmcache.v1.platform.rbln.device_ops import RblnDeviceOps
 from lmcache.v1.platform.rbln.kv_ops import head_major_view
+import lmcache.lmcache_native as lmcache_native
+
+EngineKVFormat = lmcache_native.EngineKVFormat
+TransferDirection = lmcache_native.TransferDirection
 
 NUM_LAYERS = 2
 NUM_BLOCKS = 8

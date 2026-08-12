@@ -5,10 +5,10 @@
 
 # Standard
 from collections.abc import Sequence
-from enum import Enum
+from enum import IntEnum
 from typing import Any, Set, overload
 
-class EngineKVFormat(Enum):
+class EngineKVFormat(IntEnum):
     """Enumeration of different engine KV cache memory layouts."""
 
     NB_NL_TWO_BS_NH_HS = 0
@@ -31,7 +31,7 @@ class EngineKVFormat(Enum):
 # Backward-compat alias for EngineKVFormat.
 GPUKVFormat = EngineKVFormat
 
-class TransferDirection(Enum):
+class TransferDirection(IntEnum):
     """Specifies the direction of a memory transfer."""
 
     H2D = 0

@@ -37,23 +37,20 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.platform.base.device_ops import DeviceOps
-from lmcache.v1.platform.ops_types import (
-    EngineKVFormat,
-    PageBufferShapeDesc,
-    TransferDirection,
-)
+from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 from lmcache.v1.platform.rbln.kv_layout import squeeze_singleton_axis
 from lmcache.v1.platform.rbln.kv_ops import (
     gather_blocks_head_major,
     head_major_view,
     scatter_head_major_to_blocks,
 )
+import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
 
 #: The only layout the head-major path is validated for: the native vLLM-RBLN
 #: per-layer HND format the vLLM detector reports for an RBLN KV cache.
-_SUPPORTED_FORMAT = EngineKVFormat.NL_X_TWO_NB_NH_ONE_BS_HS
+_SUPPORTED_FORMAT = lmcache_native.EngineKVFormat.NL_X_TWO_NB_NH_ONE_BS_HS
 
 
 class RblnDeviceOps(DeviceOps):
@@ -65,10 +62,10 @@ class RblnDeviceOps(DeviceOps):
         lmcache_objects_ptrs: "list[int] | list[torch.Tensor]",
         block_ids: "torch.Tensor | list[int]",
         device: "torch.device | str",
-        direction: TransferDirection,
+        direction: lmcache_native.TransferDirection,
         shape_desc: PageBufferShapeDesc,
         lmcache_chunk_size: int,
-        engine_kv_format: EngineKVFormat,
+        engine_kv_format: lmcache_native.EngineKVFormat,
         skip_prefix_n_blocks: int,
     ) -> None:
         """Move whole paged blocks between RBLN KV and head-major chunks.
@@ -130,8 +127,8 @@ class RblnDeviceOps(DeviceOps):
             )
         blocks_per_chunk = lmcache_chunk_size // block_size
 
-        is_d2h = int(direction) == int(TransferDirection.D2H)
-        if not is_d2h and int(direction) != int(TransferDirection.H2D):
+        is_d2h = int(direction) == int(lmcache_native.TransferDirection.D2H)
+        if not is_d2h and int(direction) != int(lmcache_native.TransferDirection.H2D):
             raise ValueError(f"Unsupported transfer direction: {direction!r}")
 
         consumed = 0
