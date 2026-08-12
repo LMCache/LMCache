@@ -72,6 +72,7 @@ def _build_backend_params() -> list:
             # First Party
             import lmcache.cuda_ops as cuda_ops
 
+            cuda_ops.PageBufferShapeDesc = lmcache_native.PageBufferShapeDesc
             params.append(pytest.param(("cuda_ops", cuda_ops, "cuda"), id="cuda_ops"))
         except ImportError:
             pass

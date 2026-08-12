@@ -91,7 +91,6 @@ when those commands are missing. If you are validating only non-Rust changes
 and do not intend to touch Rust in that pass, run
 `SKIP=rust-fmt,rust-clippy pre-commit run --all-files` to skip those hooks
 explicitly.
-
 C++/CUDA files use clang-format (Google style, 80-col). Rust code in `rust/` uses `cargo fmt` and `cargo clippy`.
 
 All Python files require an `# SPDX-License-Identifier: Apache-2.0` header as the first line.
