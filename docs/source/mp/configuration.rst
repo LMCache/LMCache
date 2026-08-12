@@ -565,6 +565,13 @@ All connector-level options are passed through
      - ``10.0``
      - Interval (seconds) between periodic heartbeat pings sent from the
        connector to the server.
+   * - ``lmcache.mp.retrieve_timeout``
+     - ``0.0``
+     - Maximum time (seconds) from retrieve submission to device-event
+       completion. ``0`` disables the deadline. When enabled, expiry raises
+       a timeout and aborts the worker rather than releasing target KV blocks:
+       the underlying transfer currently has no cancellation acknowledgement,
+       so reusing those blocks could allow a late DMA write to corrupt KV.
    * - ``lmcache.mp.mp_transfer_mode``
      - ``auto``
      - Routing mode for the worker -> server transfer context. One of
