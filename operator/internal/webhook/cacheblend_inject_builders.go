@@ -149,15 +149,10 @@ func cudagraphArgs(cudagraph string) []string {
 //   - existingArgs: the target container's current args (may be nil).
 //   - kvTransferConfigJSON: the CBKVConnector JSON from the engine's connection
 //     ConfigMap, or "" to skip injecting/replacing --kv-transfer-config.
-//   - injection: the engine's (defaulted) injection spec; only the cudagraph
-//     mode is read from it here.
+//   - cudagraph: the cudagraph mode (eager|piecewise|full_decode_only).
 //
 // Returns a new args slice; the input is not mutated.
-func BuildCBArgs(
-	existingArgs []string,
-	kvTransferConfigJSON string,
-	injection *lmcachev1alpha1.InjectionSpec,
-) []string {
+func BuildCBArgs(existingArgs []string, kvTransferConfigJSON, cudagraph string) []string {
 	args := make([]string, len(existingArgs))
 	copy(args, existingArgs)
 
@@ -170,10 +165,6 @@ func BuildCBArgs(
 	// cudagraphArgs returns either a single bare flag (--enforce-eager), a
 	// [flag, value] pair (full_decode_only), or nil (piecewise). Apply with
 	// append-or-replace semantics so a user's pre-existing value is overwritten.
-	cudagraph := ""
-	if injection != nil && injection.Cudagraph != nil {
-		cudagraph = *injection.Cudagraph
-	}
 	switch cg := cudagraphArgs(cudagraph); len(cg) {
 	case 1:
 		args = applyBareFlag(args, cg[0])

@@ -174,7 +174,8 @@ func (p *CacheBlendPodInjector) Handle(ctx context.Context, req admission.Reques
 	if userHasKVTransferConfig {
 		kvForArgs = ""
 	}
-	target.Args = BuildCBArgs(target.Args, kvForArgs, engine.Spec.Injection)
+	cudagraph := deref(engine.Spec.Injection.Cudagraph)
+	target.Args = BuildCBArgs(target.Args, kvForArgs, cudagraph)
 
 	// M7: append injection pull secrets (annotation override wins) to the pod's
 	// imagePullSecrets, deduped (private payload image).
