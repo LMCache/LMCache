@@ -82,14 +82,12 @@ func (e *CacheBlendEngine) ValidateSpec() field.ErrorList {
 	injPath := field.NewPath("spec", "injection")
 	if spec.Injection == nil {
 		errs = append(errs, field.Required(injPath, "must be specified for CacheBlend injection"))
-	} else {
-		if spec.Injection.PayloadImage == nil {
-			errs = append(errs, field.Required(injPath.Child("payloadImage"),
-				"must be specified for CacheBlend injection"))
-		} else if spec.Injection.PayloadImage.Repository == nil || *spec.Injection.PayloadImage.Repository == "" {
-			errs = append(errs, field.Required(injPath.Child("payloadImage", "repository"),
-				"must be a non-empty string"))
-		}
+	} else if spec.Injection.PayloadImage == nil {
+		errs = append(errs, field.Required(injPath.Child("payloadImage"),
+			"must be specified for CacheBlend injection"))
+	} else if spec.Injection.PayloadImage.Repository == nil || *spec.Injection.PayloadImage.Repository == "" {
+		errs = append(errs, field.Required(injPath.Child("payloadImage", "repository"),
+			"must be a non-empty string"))
 	}
 
 	errs = append(errs, validateL2BackendSpec(spec.L2Backend)...)
