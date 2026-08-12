@@ -111,18 +111,17 @@ class LMCacheConnector:
         sgl_config: ModelConfig,
         tp_size: int,
         rank: int,
-        k_pool: List[torch.Tensor],
-        v_pool: List[torch.Tensor],
+        kv_cache_pools: List[List[torch.Tensor]],
         config_file: str,
     ):
-        if not k_pool:
-            raise ValueError("k_pool cannot be empty during initialization.")
-        kv_dtype = k_pool[0].dtype
+        if not kv_cache_pools or not kv_cache_pools[0]:
+            raise ValueError("kv_cache_pools[0] cannot be empty during initialization.")
+        kv_dtype = kv_cache_pools[0][0].dtype
         if (
-            k_pool[0].device.type == torch_device_type
-            and k_pool[0].device.index is not None
+            kv_cache_pools[0][0].device.type == torch_device_type
+            and kv_cache_pools[0][0].device.index is not None
         ):
-            local_rank = k_pool[0].device.index
+            local_rank = kv_cache_pools[0][0].device.index
         else:
             # Fallback for CPU / odd cases
             local_rank = rank
@@ -140,7 +139,7 @@ class LMCacheConnector:
         self.sgl_config = sgl_config
         self.tp_size = tp_size
         self.rank = local_rank  # Use local_rank for torch.device() calls
-        self.kvcaches = k_pool + v_pool
+        self.kvcaches = sum(kv_cache_pools, [])
         self.num_layer = sgl_config.num_hidden_layers
 
         self.lmcache_engine.post_init(kvcaches=self.kvcaches)
@@ -212,16 +211,15 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
         sgl_config: ModelConfig,
         tp_size: int,
         rank: int,
-        k_pool: List[torch.Tensor],
-        v_pool: List[torch.Tensor],
+        kv_cache_pools: List[List[torch.Tensor]],
         config_file: str,
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
     ):
-        super().__init__(sgl_config, tp_size, rank, k_pool, v_pool, config_file)
+        super().__init__(sgl_config, tp_size, rank, kv_cache_pools, config_file)
         self._lmcache_chunk_size = self.lmcache_engine.config.chunk_size
         self.layerwise_retrievers: List[Any] = []
         self.layer_load_layer: List[int] = []
-        self.kvcaches = [k_pool, v_pool]
+        self.kvcaches = kv_cache_pools
         self.tp_group = tp_group
         self.lookup_id_list: List[str] = []
 
