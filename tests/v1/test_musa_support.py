@@ -33,6 +33,8 @@ from lmcache.v1.metadata import LMCacheMetadata
 import lmcache as lmc
 import lmcache.v1.gpu_connector as gpu_connector_module
 
+pytestmark = pytest.mark.musa
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

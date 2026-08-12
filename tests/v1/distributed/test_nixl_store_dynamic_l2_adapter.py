@@ -305,7 +305,7 @@ class TestLookupAndLockInterface:
         adpt, _, _ = adapter
         key = create_object_key(999)
 
-        task_id = adpt.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+        task_id = adpt.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         wait_for_event_fd(adpt.get_lookup_and_lock_event_fd())
 
         bitmap = adpt.query_lookup_and_lock_result(task_id)
@@ -323,7 +323,7 @@ class TestLookupAndLockInterface:
         adpt.pop_completed_store_tasks()
 
         # Lookup
-        task_id = adpt.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+        task_id = adpt.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         wait_for_event_fd(adpt.get_lookup_and_lock_event_fd())
 
         bitmap = adpt.query_lookup_and_lock_result(task_id)
@@ -337,7 +337,7 @@ class TestLookupAndLockInterface:
         adpt, _, _ = adapter
         key = create_object_key(1)
 
-        task_id = adpt.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+        task_id = adpt.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         wait_for_event_fd(adpt.get_lookup_and_lock_event_fd())
 
         result1 = adpt.query_lookup_and_lock_result(task_id)
@@ -363,7 +363,7 @@ class TestLoadInterface:
         adpt.pop_completed_store_tasks()
 
         # Lookup and lock
-        task_id = adpt.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+        task_id = adpt.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         wait_for_event_fd(adpt.get_lookup_and_lock_event_fd())
         adpt.query_lookup_and_lock_result(task_id)
 
@@ -402,7 +402,7 @@ class TestLoadInterface:
         adpt.pop_completed_store_tasks()
 
         # Lookup and lock
-        task_id = adpt.submit_lookup_and_lock_task(keys, _EMPTY_LAYOUT)
+        task_id = adpt.submit_lookup_and_lock_task(keys, {0: _EMPTY_LAYOUT})
         wait_for_event_fd(adpt.get_lookup_and_lock_event_fd())
         adpt.query_lookup_and_lock_result(task_id)
 
@@ -441,7 +441,7 @@ class TestLoadInterface:
         wait_for_event_fd(adpt.get_store_event_fd())
         adpt.pop_completed_store_tasks()
 
-        task_id = adpt.submit_lookup_and_lock_task(keys, _EMPTY_LAYOUT)
+        task_id = adpt.submit_lookup_and_lock_task(keys, {0: _EMPTY_LAYOUT})
         wait_for_event_fd(adpt.get_lookup_and_lock_event_fd())
         adpt.query_lookup_and_lock_result(task_id)
 
@@ -477,7 +477,7 @@ class TestLoadInterface:
         wait_for_event_fd(adpt.get_store_event_fd())
         adpt.pop_completed_store_tasks()
 
-        task_id = adpt.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+        task_id = adpt.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         wait_for_event_fd(adpt.get_lookup_and_lock_event_fd())
         adpt.query_lookup_and_lock_result(task_id)
 
@@ -511,7 +511,7 @@ class TestEndToEnd:
         assert completed[store_task].is_successful()
 
         # Lookup
-        lookup_task = adpt.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+        lookup_task = adpt.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         wait_for_event_fd(adpt.get_lookup_and_lock_event_fd())
         bitmap = adpt.query_lookup_and_lock_result(lookup_task)
         assert bitmap is not None
@@ -552,7 +552,7 @@ class TestEvictionInterface:
         adpt.delete([key])
 
         # Lookup should miss
-        task_id = adpt.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+        task_id = adpt.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         wait_for_event_fd(adpt.get_lookup_and_lock_event_fd())
         bitmap = adpt.query_lookup_and_lock_result(task_id)
         assert bitmap is not None
@@ -572,7 +572,7 @@ class TestEvictionInterface:
         adpt.pop_completed_store_tasks()
 
         # Lock
-        task_id = adpt.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+        task_id = adpt.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         wait_for_event_fd(adpt.get_lookup_and_lock_event_fd())
         adpt.query_lookup_and_lock_result(task_id)
 
@@ -580,7 +580,7 @@ class TestEvictionInterface:
         adpt.delete([key])
 
         # Should still be found
-        task_id = adpt.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+        task_id = adpt.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         wait_for_event_fd(adpt.get_lookup_and_lock_event_fd())
         bitmap = adpt.query_lookup_and_lock_result(task_id)
         assert bitmap is not None
@@ -697,12 +697,67 @@ class TestCapacity:
             wait_for_event_fd(adpt.get_store_event_fd())
 
             # Only first key should be found
-            task_id = adpt.submit_lookup_and_lock_task([key1, key2], _EMPTY_LAYOUT)
+            task_id = adpt.submit_lookup_and_lock_task([key1, key2], {0: _EMPTY_LAYOUT})
             wait_for_event_fd(adpt.get_lookup_and_lock_event_fd())
             bitmap = adpt.query_lookup_and_lock_result(task_id)
             assert bitmap is not None
             assert bitmap.test(0)  # key1 found
             assert not bitmap.test(1)  # key2 not found
+
+            adpt.submit_unlock([key1])
+            adpt.close()
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    def test_batched_store_reports_failure_when_capacity_exceeded(self):
+        """A partial batch should preserve completed stores and report failure."""
+        tmp_dir = tempfile.mkdtemp(prefix="nixl_dyn_cap_test_")
+        try:
+            buffer = torch.empty(
+                PAGE_SIZE * NUM_BUFFER_PAGES, dtype=torch.uint8, device="cpu"
+            )
+            l1_memory = L1MemoryDesc(
+                ptr=buffer.data_ptr(),
+                size=buffer.numel(),
+                align_bytes=PAGE_SIZE,
+            )
+            tiny_cap_gb = PAGE_SIZE / (1024**3)
+            config = DynamicNixlStoreL2AdapterConfig(
+                backend="POSIX",
+                backend_params={
+                    "file_path": tmp_dir,
+                    "use_direct_io": "false",
+                    "max_capacity_gb": str(tiny_cap_gb),
+                },
+            )
+            adpt = DynamicNixlStoreL2Adapter(config, l1_memory)
+
+            key1 = create_object_key(1)
+            key2 = create_object_key(2)
+            objects = [
+                create_memory_obj(buffer, page_index=0),
+                create_memory_obj(buffer, page_index=1),
+            ]
+
+            task_id = adpt.submit_store_task([key1, key2], objects)
+            wait_for_event_fd(adpt.get_store_event_fd())
+            result = adpt.pop_completed_store_tasks()[task_id]
+
+            assert not result.is_successful()
+            assert result.bytes_transferred() == 0
+            assert adpt.get_usage().total_bytes_used == PAGE_SIZE
+
+            stored_file = os.path.join(tmp_dir, _object_key_to_filename(key1))
+            rejected_file = os.path.join(tmp_dir, _object_key_to_filename(key2))
+            assert os.path.exists(stored_file)
+            assert not os.path.exists(rejected_file)
+
+            lookup_task = adpt.submit_lookup_and_lock_task([key1, key2], _EMPTY_LAYOUT)
+            wait_for_event_fd(adpt.get_lookup_and_lock_event_fd())
+            bitmap = adpt.query_lookup_and_lock_result(lookup_task)
+            assert bitmap is not None
+            assert bitmap.test(0)
+            assert not bitmap.test(1)
 
             adpt.submit_unlock([key1])
             adpt.close()
@@ -749,7 +804,7 @@ class TestPersistAndSecondaryLookup:
         adpt2 = DynamicNixlStoreL2Adapter(config, l1_memory)
 
         # Lookup should find the key via secondary lookup
-        task_id = adpt2.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+        task_id = adpt2.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         wait_for_event_fd(adpt2.get_lookup_and_lock_event_fd())
         bitmap = adpt2.query_lookup_and_lock_result(task_id)
         assert bitmap is not None
@@ -772,7 +827,7 @@ class TestPersistAndSecondaryLookup:
         adpt2 = DynamicNixlStoreL2Adapter(config, l1_memory)
 
         # Lookup (lazy recover) + load
-        task_id = adpt2.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+        task_id = adpt2.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         wait_for_event_fd(adpt2.get_lookup_and_lock_event_fd())
         adpt2.query_lookup_and_lock_result(task_id)
 
@@ -806,7 +861,7 @@ class TestPersistAndSecondaryLookup:
 
         adpt2 = DynamicNixlStoreL2Adapter(config, l1_memory)
 
-        task_id = adpt2.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+        task_id = adpt2.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         wait_for_event_fd(adpt2.get_lookup_and_lock_event_fd())
         bitmap = adpt2.query_lookup_and_lock_result(task_id)
         assert bitmap is not None
@@ -833,7 +888,7 @@ class TestPersistAndSecondaryLookup:
         assert usage_initial == 0.0
 
         # After a lookup, the key is populated and usage matches
-        task_id = adpt2.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+        task_id = adpt2.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         wait_for_event_fd(adpt2.get_lookup_and_lock_event_fd())
         adpt2.query_lookup_and_lock_result(task_id)
 

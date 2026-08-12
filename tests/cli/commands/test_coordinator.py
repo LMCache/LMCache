@@ -76,11 +76,17 @@ class TestCoordinatorCommandArguments:
         assert args.disable_metrics is True
         assert args.otlp_endpoint == "http://collector:4317"
 
+    def test_enable_blend_lookup_flag(self, parser):
+        """The blend-lookup switch parses as True when passed."""
+        args = parser.parse_args(["coordinator", "--enable-blend-lookup"])
+        assert args.enable_blend_lookup is True
+
     def test_flags_default_to_none(self, parser):
         """Unset flags default to None so env/config defaults win."""
         args = parser.parse_args(["coordinator"])
         assert args.chunk_size is None
         assert args.hash_algorithm is None
+        assert args.enable_blend_lookup is None
         assert args.blend_probe_stride is None
         assert args.timeout_keep_alive is None
         assert args.disable_metrics is None
@@ -89,7 +95,7 @@ class TestCoordinatorCommandArguments:
 
 class TestCoordinatorCommandExecute:
     def test_overrides_applied(self, cmd):
-        """chunk_size/hash_algorithm/blend_probe_stride flags override the config."""
+        """chunk_size/hash_algorithm/blend flags override the config."""
         # First Party
         from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
 
@@ -103,6 +109,7 @@ class TestCoordinatorCommandExecute:
             trigger_watermark=None,
             chunk_size=512,
             hash_algorithm="sha256",
+            enable_blend_lookup=True,
             blend_probe_stride=2,
             timeout_keep_alive=None,
             disable_metrics=True,
@@ -129,6 +136,7 @@ class TestCoordinatorCommandExecute:
 
         assert captured["config"].chunk_size == 512
         assert captured["config"].hash_algorithm == "sha256"
+        assert captured["config"].enable_blend_lookup is True
         assert captured["config"].blend_probe_stride == 2
         assert captured["config"].metrics_enabled is False
         assert captured["config"].otlp_endpoint == "http://collector:4317"

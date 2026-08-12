@@ -222,7 +222,7 @@ def _run_store(adapter: RawBlockL2Adapter, keys, objects) -> bool:
 
 
 def _run_lookup(adapter: RawBlockL2Adapter, keys):
-    task_id = adapter.submit_lookup_and_lock_task(keys, _EMPTY_LAYOUT)
+    task_id = adapter.submit_lookup_and_lock_task(keys, {0: _EMPTY_LAYOUT})
     assert _wait_event_fd(adapter.get_lookup_and_lock_event_fd())
     return task_id, adapter.query_lookup_and_lock_result(task_id)
 
@@ -619,7 +619,7 @@ def test_raw_block_l2_adapter_error_bitmaps_keep_submitted_size():
                 adapter, "_run_lookup_task", side_effect=RuntimeError("lookup failed")
             ):
                 lookup_task_id = adapter.submit_lookup_and_lock_task(
-                    keys, _EMPTY_LAYOUT
+                    keys, {0: _EMPTY_LAYOUT}
                 )
                 assert _wait_event_fd(adapter.get_lookup_and_lock_event_fd())
                 lookup_bitmap = adapter.query_lookup_and_lock_result(lookup_task_id)

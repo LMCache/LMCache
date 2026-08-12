@@ -13,6 +13,7 @@ import torch
 # First Party
 from lmcache import torch_dev, torch_device_type
 from lmcache.v1.distributed.api import (
+    AttnWindowDesc,
     MemoryLayoutDesc,
     ObjectKey,
     PrefetchMode,
@@ -273,7 +274,7 @@ class TestStorageManagerBasic:
 
         # Prefetch all the objects
         handle = storage_manager.submit_prefetch_task(
-            PrefetchRequestSpec(object_keys, basic_layout)
+            PrefetchRequestSpec(object_keys, {0: basic_layout})
         )
 
         hit_count = storage_manager.query_prefetch_status(handle).count_leading_ones()
@@ -301,7 +302,7 @@ class TestStorageManagerBasic:
 
         # Prefetch all the objects
         handle = storage_manager.submit_prefetch_task(
-            PrefetchRequestSpec(object_keys, basic_layout)
+            PrefetchRequestSpec(object_keys, {0: basic_layout})
         )
 
         hit_count = storage_manager.query_prefetch_status(handle).count_leading_ones()
@@ -333,7 +334,7 @@ class TestStorageManagerBasic:
 
         # Prefetch all the objects
         handle = storage_manager.submit_prefetch_task(
-            PrefetchRequestSpec(object_keys, basic_layout)
+            PrefetchRequestSpec(object_keys, {0: basic_layout})
         )
 
         hit_count = storage_manager.query_prefetch_status(handle).count_leading_ones()
@@ -373,7 +374,7 @@ class TestStorageManagerBasic:
 
         # Prefetch objects except the first one
         handle = storage_manager.submit_prefetch_task(
-            PrefetchRequestSpec(object_keys[1:], basic_layout)
+            PrefetchRequestSpec(object_keys[1:], {0: basic_layout})
         )
         hit_count = storage_manager.query_prefetch_status(handle).count_leading_ones()
         assert hit_count is not None
@@ -420,7 +421,7 @@ class TestStorageManagerMultiReader:
 
         extra_count = 2  # total = 1 + 2 = 3 locks
         handle = sm.submit_prefetch_task(
-            PrefetchRequestSpec(keys, basic_layout, extra_count=extra_count)
+            PrefetchRequestSpec(keys, {0: basic_layout}, extra_count=extra_count)
         )
         hit = sm.query_prefetch_status(handle).count_leading_ones()
         assert hit == len(keys)
@@ -446,7 +447,7 @@ class TestStorageManagerMultiReader:
 
         extra_count = 3  # total = 1 + 3 = 4 locks
         handle = sm.submit_prefetch_task(
-            PrefetchRequestSpec(keys, basic_layout, extra_count=extra_count)
+            PrefetchRequestSpec(keys, {0: basic_layout}, extra_count=extra_count)
         )
         hit = sm.query_prefetch_status(handle).count_leading_ones()
         assert hit == len(keys)
@@ -485,7 +486,7 @@ class TestStorageManagerMultiReader:
 
         extra_count = 1  # total = 1 + 1 = 2 locks
         handle = sm.submit_prefetch_task(
-            PrefetchRequestSpec(all_keys, basic_layout, extra_count=extra_count)
+            PrefetchRequestSpec(all_keys, {0: basic_layout}, extra_count=extra_count)
         )
         hit = sm.query_prefetch_status(handle).count_leading_ones()
         # Only prefix {0,1} count as hits
@@ -515,7 +516,7 @@ class TestStorageManagerMultiReader:
         ret = sm.reserve_write(keys, basic_layout, mode="new")
         sm.finish_write(list(ret.keys()))
 
-        handle = sm.submit_prefetch_task(PrefetchRequestSpec(keys, basic_layout))
+        handle = sm.submit_prefetch_task(PrefetchRequestSpec(keys, {0: basic_layout}))
         hit = sm.query_prefetch_status(handle).count_leading_ones()
         assert hit == len(keys)
 
@@ -586,7 +587,7 @@ class TestStorageManagerL2Prefetch:
         assert used == 0, f"L1 should be empty after clear, but {used} bytes used"
 
         # Prefetch — L1 has 0 hits, L2 should have all 5
-        handle = sm.submit_prefetch_task(PrefetchRequestSpec(keys, basic_layout))
+        handle = sm.submit_prefetch_task(PrefetchRequestSpec(keys, {0: basic_layout}))
         hit_count = wait_for_prefetch_status(sm, handle)
 
         assert hit_count is not None, "Prefetch should complete"
@@ -615,7 +616,9 @@ class TestStorageManagerL2Prefetch:
         sm._l1_manager.delete(l2_only_keys)
 
         # Prefetch all 5 keys: first 2 from L1, next 3 from L2
-        handle = sm.submit_prefetch_task(PrefetchRequestSpec(all_keys, basic_layout))
+        handle = sm.submit_prefetch_task(
+            PrefetchRequestSpec(all_keys, {0: basic_layout})
+        )
         hit_count = wait_for_prefetch_status(sm, handle)
 
         assert hit_count is not None, "Prefetch should complete"
@@ -634,7 +637,7 @@ class TestStorageManagerL2Prefetch:
         # Don't write anything — keys exist nowhere
         keys = [make_object_key(i) for i in range(3)]
 
-        handle = sm.submit_prefetch_task(PrefetchRequestSpec(keys, basic_layout))
+        handle = sm.submit_prefetch_task(PrefetchRequestSpec(keys, {0: basic_layout}))
         hit_count = wait_for_prefetch_status(sm, handle)
 
         assert hit_count is not None, "Prefetch should complete"
@@ -660,7 +663,7 @@ class TestStorageManagerL2Prefetch:
         sm.clear()
 
         handle = sm.submit_prefetch_task(
-            PrefetchRequestSpec(keys, basic_layout, mode=PrefetchMode.WARM),
+            PrefetchRequestSpec(keys, {0: basic_layout}, mode=PrefetchMode.WARM),
             skip_l2=True,
         )
 
@@ -689,7 +692,7 @@ class TestStorageManagerL2Prefetch:
         assert (deleted, skipped) == (1, 0)
 
         handle = sm.submit_prefetch_task(
-            PrefetchRequestSpec(all_keys, basic_layout, policy=TrimPolicy.SPARSE),
+            PrefetchRequestSpec(all_keys, {0: basic_layout}, policy=TrimPolicy.SPARSE),
             skip_l2=True,
         )
 
@@ -721,7 +724,9 @@ class TestStorageManagerL2Prefetch:
         used, _ = sm._l1_manager.get_memory_usage()
         assert used == 0, f"L1 should be empty after clear, but {used} bytes used"
 
-        handle = sm.submit_prefetch_task(PrefetchRequestSpec(all_keys, basic_layout))
+        handle = sm.submit_prefetch_task(
+            PrefetchRequestSpec(all_keys, {0: basic_layout})
+        )
         hit_count = wait_for_prefetch_status(sm, handle)
 
         assert hit_count is not None, "Prefetch should complete"
@@ -752,13 +757,135 @@ class TestStorageManagerL2Prefetch:
         sm._l1_manager.delete(all_keys[2:])
 
         # Prefetch: L1 prefix hits = 2 (keys 0,1), L2 loads {2,3,4} → total = 5
-        handle = sm.submit_prefetch_task(PrefetchRequestSpec(all_keys, basic_layout))
+        handle = sm.submit_prefetch_task(
+            PrefetchRequestSpec(all_keys, {0: basic_layout})
+        )
         hit_count = wait_for_prefetch_status(sm, handle)
 
         assert hit_count is not None
         assert hit_count == 5, f"Expected 5 total hits (2 L1 + 3 L2), got {hit_count}"
 
         sm.finish_read_prefetched(all_keys)
+        sm.close()
+
+    def test_prefetch_l2_with_sliding_window(
+        self, l2_storage_manager_config, basic_layout
+    ):
+        """L2 fold respects sliding windows: only in-window SW keys retained."""
+        sm = StorageManager(l2_storage_manager_config)
+
+        # 2 object groups (full_attn + sw=2), 1 rank, 4 chunks = 8 keys
+        # chunk-major layout: g0c0, g1c0, g0c1, g1c1, g0c2, g1c2, g0c3, g1c3
+        num_chunks = 4
+        num_groups = 2
+        num_keys = num_chunks * num_groups
+        attn_desc = AttnWindowDesc(num_chunks_in_sw=[-1, 2])
+
+        all_keys = [make_object_key(i) for i in range(num_keys)]
+
+        # Write all 8 keys → L2
+        self._write_keys_and_wait_for_l2(sm, all_keys, basic_layout)
+
+        # Clear L1 entirely so everything must come from L2
+        time.sleep(0.05)
+        sm.clear()
+
+        handle = sm.submit_prefetch_task(
+            PrefetchRequestSpec(
+                all_keys,
+                {0: basic_layout, 1: basic_layout},
+                attn_desc=attn_desc,
+            )
+        )
+
+        # Wait for L2 prefetch to complete
+        deadline = time.monotonic() + 10.0
+        result = None
+        while time.monotonic() < deadline:
+            result = sm.query_prefetch_status(handle)
+            if result is not None:
+                break
+            time.sleep(0.05)
+        assert result is not None, "L2 prefetch should complete"
+
+        indices = set(result.get_indices_list())
+        # full-attn group (g0 = even indices): all chunks retained
+        for c in range(num_chunks):
+            assert c * num_groups in indices, (
+                f"full-attn key at chunk {c} should be retained"
+            )
+        # SW group (g1 = odd indices, w=2): only last 2 chunks in window
+        assert 1 not in indices, "SW chunk 0 should be out of window"
+        assert 3 not in indices, "SW chunk 1 should be out of window"
+        assert 5 in indices, "SW chunk 2 should be in window"
+        assert 7 in indices, "SW chunk 3 should be in window"
+
+        # Clean up read locks on retained keys
+        retained_keys = [all_keys[i] for i in sorted(indices)]
+        sm.finish_read_prefetched(retained_keys)
+        sm.close()
+
+    def test_prefetch_l1_plus_l2_sliding_window(
+        self, l2_storage_manager_config, basic_layout
+    ):
+        """L1 has first 2 chunks, L2 has next 2 → fold trims SW correctly."""
+        sm = StorageManager(l2_storage_manager_config)
+
+        # 2 groups (full=-1, sw=2), 1 rank, 4 chunks = 8 keys
+        num_chunks = 4
+        num_groups = 2
+        num_keys = num_chunks * num_groups
+        attn_desc = AttnWindowDesc(num_chunks_in_sw=[-1, 2])
+
+        all_keys = [make_object_key(i) for i in range(num_keys)]
+
+        # Write all keys → L2
+        self._write_keys_and_wait_for_l2(sm, all_keys, basic_layout)
+
+        # Delete chunks 2-3 (keys 4-7) from L1, keeping them in L2
+        sm._l1_manager.delete(all_keys[4:])
+
+        # Prefetch: L1 has chunks 0-1, L2 should provide chunks 2-3
+        handle = sm.submit_prefetch_task(
+            PrefetchRequestSpec(
+                all_keys,
+                {0: basic_layout, 1: basic_layout},
+                attn_desc=attn_desc,
+            )
+        )
+
+        deadline = time.monotonic() + 10.0
+        result = None
+        while time.monotonic() < deadline:
+            result = sm.query_prefetch_status(handle)
+            if result is not None:
+                break
+            time.sleep(0.05)
+        assert result is not None, "L1+L2 SW prefetch should complete"
+
+        indices = set(result.get_indices_list())
+        # All full-attn keys (even indices) should be retained
+        for c in range(num_chunks):
+            assert c * num_groups in indices, (
+                f"full-attn key at chunk {c} should be retained"
+            )
+        # L1 retain: fold over L1 presence (chunks 0-1) → hit=2
+        # SW w=2: both chunks 0-1 in window → retained
+        # L2: provides chunks 2-3, fold there → SW retains chunks 2-3
+        # Combined: all SW keys retained (w=2 and hit=4 means last 2 chunks)
+        # But L1's fold was done with hit=2, retaining SW chunks 0-1.
+        # After L2 extends to hit=4, the caller folds the combined bitmap
+        # and would trim SW to chunks 2-3 only. But here we're testing
+        # the raw combined bitmap before the caller's fold.
+        # L1 retains: g1c0(1), g1c1(3) (in window when hit=2)
+        # L2 retains: g1c2(5), g1c3(7) (in window when l2_hit=2)
+        assert 1 in indices, "L1 SW chunk 0 retained by L1 fold"
+        assert 3 in indices, "L1 SW chunk 1 retained by L1 fold"
+        assert 5 in indices, "L2 SW chunk 2 retained by L2 fold"
+        assert 7 in indices, "L2 SW chunk 3 retained by L2 fold"
+
+        retained_keys = [all_keys[i] for i in sorted(indices)]
+        sm.finish_read_prefetched(retained_keys)
         sm.close()
 
 
@@ -852,7 +979,9 @@ class TestFailureEventProduction:
             sm.finish_write(list(ret.keys()))
 
             # Prefetch to acquire read locks on all keys.
-            handle = sm.submit_prefetch_task(PrefetchRequestSpec(keys, basic_layout))
+            handle = sm.submit_prefetch_task(
+                PrefetchRequestSpec(keys, {0: basic_layout})
+            )
             assert wait_for_prefetch_status(sm, handle) == len(keys)
 
             # Force a mid-read race by removing the key from L1Manager's
@@ -902,7 +1031,7 @@ class TestStorageManagerSparsePrefetch:
         sm.finish_write(list(ret.keys()))
 
         handle = sm.submit_prefetch_task(
-            PrefetchRequestSpec(all_keys, basic_layout, policy=TrimPolicy.SPARSE)
+            PrefetchRequestSpec(all_keys, {0: basic_layout}, policy=TrimPolicy.SPARSE)
         )
         found = wait_for_sparse_found(sm, handle, timeout=10.0)
 
@@ -942,7 +1071,7 @@ class TestStorageManagerSparsePrefetch:
         assert used == 0
 
         handle = sm.submit_prefetch_task(
-            PrefetchRequestSpec(all_keys, basic_layout, policy=TrimPolicy.SPARSE)
+            PrefetchRequestSpec(all_keys, {0: basic_layout}, policy=TrimPolicy.SPARSE)
         )
         found = wait_for_sparse_found(sm, handle, timeout=10.0)
 

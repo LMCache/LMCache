@@ -4,7 +4,7 @@
 These tests are the acceptance gate for the DeviceOps hierarchy.  They stay
 platform-agnostic by exercising the torch baseline, the ``DeviceSpec``
 dispatch, the ``lmcache.c_ops`` shim, and instance-level ``bind_native``
-without requiring any compiled accelerator module.
+while using the device-independent native module for shared enums.
 """
 
 # Standard
@@ -15,15 +15,13 @@ import inspect
 import pytest
 
 # First Party
+from lmcache import torch_dev, torch_device_type
+from lmcache.lmcache_native import EngineKVFormat, TransferDirection
 from lmcache.v1.platform import resolve_device_ops
 from lmcache.v1.platform.base.device_ops import DeviceOps
 from lmcache.v1.platform.base.device_spec import DeviceSpec
 from lmcache.v1.platform.cpu.device_ops import CpuDeviceOps
-from lmcache.v1.platform.ops_types import (
-    EngineKVFormat,
-    PageBufferShapeDesc,
-    TransferDirection,
-)
+from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 import lmcache.v1.platform as platform_pkg
 
 # Derive op names from the class body: regular instance-method functions,
@@ -65,11 +63,8 @@ def test_base_class_declares_every_op_as_instance_method() -> None:
         )
 
 
-def test_base_class_has_all_types() -> None:
-    """DeviceOps exposes shared types as class attributes."""
-    assert DeviceOps.TransferDirection is TransferDirection
-    assert DeviceOps.EngineKVFormat is EngineKVFormat
-    assert DeviceOps.GPUKVFormat is EngineKVFormat
+def test_base_class_has_python_fallback_types() -> None:
+    """DeviceOps exposes the Python-only fallback types it owns."""
     assert DeviceOps.PageBufferShapeDesc is PageBufferShapeDesc
     assert callable(DeviceOps.set_shape_desc_dtype)
 
@@ -91,8 +86,9 @@ def test_cpu_inherits_baseline_verbatim() -> None:
         assert getattr(CpuDeviceOps, name) is getattr(DeviceOps, name), name
 
 
-def test_musa_overrides_only_one_op() -> None:
-    """MusaDeviceOps overrides exactly one hot op; the rest inherit base."""
+@pytest.mark.musa
+def test_musa_overrides_transfer_and_stream_ordering_ops() -> None:
+    """MusaDeviceOps owns transfer and stream-ordering adaptation."""
     musa_mod = pytest.importorskip(
         "lmcache.v1.platform.musa.device_ops",
         reason="musa platform package unavailable",
@@ -102,9 +98,14 @@ def test_musa_overrides_only_one_op() -> None:
         for name in _OP_NAMES
         if getattr(musa_mod.MusaDeviceOps, name) is not getattr(DeviceOps, name)
     ]
-    assert overridden == ["multi_layer_block_kv_transfer"]
+    assert overridden == [
+        "multi_layer_block_kv_transfer",
+        "record_completion_on_stream",
+        "record_event_on_stream",
+    ]
 
 
+@pytest.mark.musa
 def test_musa_override_dispatches_native_first(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -224,18 +225,27 @@ def test_bind_native_rebinds_types() -> None:
 # -- Shim ------------------------------------------------------------------
 
 
-def test_c_ops_shim_has_all_ops_and_types() -> None:
-    """The lmcache.c_ops shim module exposes everything from _OP_NAMES + types."""
+def test_c_ops_shim_has_all_device_ops() -> None:
+    """The lmcache.c_ops shim exposes the DeviceOps surface only."""
     # First Party
     import lmcache.c_ops as c_ops
 
     for name in _OP_NAMES:
         assert hasattr(c_ops, name), f"c_ops missing {name}"
         assert callable(getattr(c_ops, name))
-    assert hasattr(c_ops, "TransferDirection")
-    assert hasattr(c_ops, "EngineKVFormat")
-    assert hasattr(c_ops, "GPUKVFormat")
     assert hasattr(c_ops, "PageBufferShapeDesc")
+
+    native_only_names = (
+        "TransferDirection",
+        "EngineKVFormat",
+        "GPUKVFormat",
+        "is_cross_layer",
+        "is_kv_list",
+        "is_layer_list",
+        "is_mla",
+    )
+    for name in native_only_names:
+        assert not hasattr(c_ops, name)
 
 
 def test_c_ops_shim_dir() -> None:
@@ -245,7 +255,7 @@ def test_c_ops_shim_dir() -> None:
 
     names = dir(c_ops)
     assert "multi_layer_kv_transfer" in names
-    assert "TransferDirection" in names
+    assert "TransferDirection" not in names
 
 
 # -- DeviceSpec resolution -------------------------------------------------
@@ -273,17 +283,21 @@ def test_cpu_without_registered_spec_falls_back_to_base_device_ops(
     assert type(resolve_device_ops("cpu")) is DeviceOps
 
 
+@pytest.mark.skipif(
+    not torch_dev.is_available(),
+    reason=f"Requires available {torch_device_type} runtime",
+)
 def test_unregistered_accelerator_fails_fast(
     isolated_registry: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A requested accelerator with no registered class is a hard error."""
-    table = {k: v for k, v in isolated_registry.items() if k != "cuda"}
+    table = {k: v for k, v in isolated_registry.items() if k != torch_device_type}
     monkeypatch.setattr(platform_pkg, "_DEVICE_REGISTRY", table)
     with pytest.raises(
         RuntimeError,
         match="refusing to silently fall back to the torch baseline",
     ):
-        resolve_device_ops("cuda")
+        resolve_device_ops(torch_device_type)
 
 
 def test_unknown_accelerator_fails_fast_without_registry_edits() -> None:

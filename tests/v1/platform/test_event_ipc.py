@@ -17,6 +17,11 @@ from lmcache.v1.platform.cpu import CpuDeviceSpec
 from lmcache.v1.platform.cuda import CudaDeviceSpec
 import lmcache.v1.platform as platform
 
+pytestmark = pytest.mark.skipif(
+    torch_device_type == "xpu",
+    reason="Event IPC tests are not supported on XPU",
+)
+
 
 class _FakeEvent:
     def __init__(self, interprocess: bool = False) -> None:
@@ -136,7 +141,11 @@ def test_get_event_ipc_backend_accepts_string_device_type():
     [
         pytest.param(0, torch_device_type, id="integer-index"),
         pytest.param(2, torch_device_type, id="nonzero-integer-index"),
-        pytest.param("cuda:0", "cuda", id="indexed-cuda-string"),
+        pytest.param(
+            f"{torch_device_type}:0",
+            torch_device_type,
+            id="indexed-active-device-string",
+        ),
         pytest.param("musa:3", "musa", id="indexed-musa-string"),
     ],
 )
@@ -211,10 +220,11 @@ def test_cpu_device_spec_exposes_cached_default_event_backend() -> None:
     assert spec.event_ipc_backend is spec.event_ipc_backend
 
 
+@pytest.mark.cuda
 def test_cuda_device_spec_exposes_cached_default_event_backend() -> None:
     spec = CudaDeviceSpec()
     assert isinstance(spec.event_ipc_backend, DefaultEventIPCBackend)
-    assert spec.event_ipc_backend.device_type == "cuda"
+    assert spec.event_ipc_backend.device_type == torch_device_type
     assert spec.event_ipc_backend is spec.event_ipc_backend
 
 
