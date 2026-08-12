@@ -37,7 +37,7 @@ matching.
 ## Performance
 
 `fold` and `unfold` delegate to native C++ (`csrc/storage_manager/fold.cpp`,
-exported as `native_storage_ops.fold` / `unfold`) and `highest_set_bit` to
+exported as `lmcache_native.fold` / `unfold`) and `highest_set_bit` to
 `Bitmap.highest_set_bit()`. They scan the packed `Bitmap` buffer directly —
 no Python per-bit loop and no `Bitmap`↔tensor conversion. `_fold_python` /
 `_unfold_python` are reference implementations used only as test oracles. See
