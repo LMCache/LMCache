@@ -10,6 +10,7 @@ from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
 
 router = APIRouter()
 
+
 @router.get("/metrics")
 async def metrics(request: Request) -> Response:
     """Return Prometheus metrics when the coordinator uses pull mode.
