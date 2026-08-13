@@ -1,0 +1,2 @@
+# Pinned for deterministic build/test generation; generated files are not tracked.
+grpcio-tools==1.78.0

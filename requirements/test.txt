@@ -1,4 +1,5 @@
 buildkite-test-collector
+-r proto.txt
 pytest>=7.0,<9.1  # avoid some plugins breaking in 8.x
 pytest-asyncio
 pytest-benchmark
@@ -8,15 +9,3 @@ pytest-html>=3.2,<5.0  # 4.x requires external assets; 3.2 is stable
 jinja2<3.2
 python-multipart
 openai
-# Regenerates the mp-mode gRPC stubs (lmcache_mq_pb2*.py) at import time --
-# those files are not checked into git and are generated lazily on first
-# import. protobuf refuses to load generated code whose *gencode* version is
-# newer than the protobuf *runtime* (it aborts with SIGABRT). To keep the
-# self-healing generation compatible across every CI env (GitHub pytest, the
-# CPU device script, and the Buildkite k3 unit-test pipeline -- all of which
-# install this file), the gencode version MUST equal the runtime version.
-# grpcio-tools==1.78.0 emits gencode 6.33.6, so pin protobuf==6.33.6 to match
-# exactly. This upgrades the protobuf runtime to 6.33.6 everywhere test.txt is
-# installed, eliminating the gencode/runtime skew that broke the Buildkite run.
-grpcio-tools==1.78.0
-protobuf==6.33.6

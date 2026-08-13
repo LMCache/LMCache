@@ -36,7 +36,9 @@ uv pip install "${SGLANG_URL}"
 export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE="${SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE:-0.0.0+ci}"
 
 uv pip uninstall cupy-cuda12x 2>/dev/null || true
+uv pip install -r requirements/proto.txt
 uv pip install -e . --no-build-isolation
+python -m lmcache.v1.multiprocess.transport.grpc_impl._proto_gen._generate
 
 python -c "import lmcache, sglang; print(f'sglang={sglang.__version__}; lmcache OK')"
 python -c "import cupy; print(f'cupy={cupy.__version__}')"

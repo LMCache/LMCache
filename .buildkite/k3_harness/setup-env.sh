@@ -261,8 +261,10 @@ echo "--- :python: Installing LMCache from source"
 # Skip setuptools_scm git describe; the repo carries non-PEP-440 tags
 # (nightly, nightly-cu13) that crash the newer vcs_versioning backend.
 export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE="${SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE:-0.0.0+ci}"
+uv pip install -r requirements/proto.txt
 uv pip freeze | sort > /tmp/env-before-lmcache.txt
 uv pip install -e . --no-build-isolation
+python -m lmcache.v1.multiprocess.transport.grpc_impl._proto_gen._generate
 uv pip freeze | sort > /tmp/env-after-lmcache.txt
 if ! diff -q /tmp/env-before-lmcache.txt /tmp/env-after-lmcache.txt >/dev/null; then
     echo "--- :warning: Packages changed during LMCache install"

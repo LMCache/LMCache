@@ -82,6 +82,7 @@ jobs:
           set -euo pipefail
           python -m pip install --upgrade pip wheel
           python -m pip install 'setuptools>=77.0.3,<81.0.0' 'pybind11>=2.12'
+          python -m pip install -r requirements/proto.txt
           python -m pip install numpy
           python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
           export BUILD_AEROSPIKE=1

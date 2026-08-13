@@ -61,6 +61,7 @@ import sys
 from lmcache.v1.multiprocess import mq
 
 assert "grpc" not in sys.modules
+assert "grpc_tools" not in sys.modules
 assert mq.grpc is None
 assert mq.request_type_to_method_name(mq.RequestType.PING) == "Ping"
 """

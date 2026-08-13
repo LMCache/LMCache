@@ -8,6 +8,7 @@ zero changes to this file.
 
 # Standard
 from pathlib import Path
+from types import ModuleType
 import importlib.util
 import sys
 
@@ -36,43 +37,38 @@ def _read_requirements(path: Path) -> list[str]:
     return reqs
 
 
+def _load_proto_generator() -> ModuleType:
+    """Load the gRPC code generator without importing missing stubs."""
+    generator_path = (
+        ROOT_DIR
+        / "lmcache"
+        / "v1"
+        / "multiprocess"
+        / "transport"
+        / "grpc_impl"
+        / "_proto_gen"
+        / "_generate.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "_lmcache_proto_generate", generator_path
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load gRPC code generator: {generator_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 class _BuildPyWithProtoStubs(_build_py):
-    """Generate gRPC stubs before packaging when grpcio-tools is present."""
+    """Generate gRPC stubs before packaging the full LMCache distribution."""
 
     def run(self) -> None:
-        # Avoid importing _proto_gen, whose initialization also loads stubs.
-        gen_path = (
-            ROOT_DIR
-            / "lmcache"
-            / "v1"
-            / "multiprocess"
-            / "transport"
-            / "grpc_impl"
-            / "_proto_gen"
-            / "_generate.py"
-        )
-        spec = importlib.util.spec_from_file_location(
-            "_lmcache_proto_generate", gen_path
-        )
-        assert spec is not None and spec.loader is not None, f"cannot load {gen_path}"
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-
-        try:
-            # Third Party
-            import grpc_tools.protoc  # noqa: F401
-        except ImportError:
-            print(
-                "warning: grpcio-tools not available at build time; "
-                "skipping gRPC stub generation. Stubs will be produced "
-                "lazily on first import at runtime.",
-                file=sys.stderr,
-            )
-        else:
-            rc = module.main()
-            if rc != 0:
-                raise SystemExit(
-                    "failed to generate gRPC stubs during build; check the output above"
+        if self.distribution.get_name().replace("_", "-").lower() != "lmcache-cli":
+            generator = _load_proto_generator()
+            if generator.main() != 0:
+                raise RuntimeError(
+                    "failed to generate LMCache gRPC stubs; install the pinned "
+                    "requirements/proto.txt dependencies"
                 )
         super().run()
 

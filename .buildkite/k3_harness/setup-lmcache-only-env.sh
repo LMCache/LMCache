@@ -18,7 +18,9 @@ echo "--- :python: Installing LMCache from source (no vLLM)"
 # Skip setuptools_scm git describe; the repo carries non-PEP-440 tags
 # (nightly, nightly-cu13) that crash the newer vcs_versioning backend.
 export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE="${SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE:-0.0.0+ci}"
+uv pip install -r requirements/proto.txt
 uv pip install -e . --no-build-isolation
+python -m lmcache.v1.multiprocess.transport.grpc_impl._proto_gen._generate
 
 echo "--- :white_check_mark: Environment ready (LMCache only, no vLLM)"
 python -c "import lmcache; print('LMCache installed from source')"

@@ -3,14 +3,14 @@
 
 The ``.proto`` source lives under ``../proto/`` (checked into git);
 the emitted ``*_pb2.py`` / ``*_pb2_grpc.py`` files land right next to
-this module and are checked into git as well so runtime users do not
-need ``grpcio-tools`` on the install path.
+this module and are ignored by Git. Package builds include the generated
+modules, so runtime users do not need ``grpcio-tools``.
 
 Run as a module so relative paths resolve correctly::
 
     python -m lmcache.v1.multiprocess.transport.grpc_impl._proto_gen._generate
 
-Requires the ``grpcio-tools`` package (dev-only).  The generated
+Requires the pinned ``requirements/proto.txt`` dependencies. The generated
 files are then patched so their internal import uses the full
 package path (grpc's generator emits a flat
 ``import lmcache_mq_pb2`` by default) and so mypy skips them
@@ -19,7 +19,6 @@ package path (grpc's generator emits a flat
 
 # Standard
 from pathlib import Path
-import os
 import subprocess
 import sys
 
@@ -57,11 +56,15 @@ def main() -> int:
     except ImportError:
         print(
             "grpcio-tools is not installed; cannot generate gRPC stubs "
-            "for the mp transport. Install it with 'pip install "
-            "grpcio-tools' or run this generator manually.",
+            "for the mp transport. Install it with "
+            "'pip install -r requirements/proto.txt'.",
             file=sys.stderr,
         )
         return 1
+
+    # Never let stale output hide an invalid schema or failed generation.
+    for path in (PB2, PB2_GRPC):
+        path.unlink(missing_ok=True)
 
     cmd = [
         sys.executable,
@@ -94,12 +97,7 @@ def main() -> int:
 
     # Health-check the freshly generated stubs in a subprocess so we do
     # not pollute the caller's sys.modules and can cleanly detect the
-    # classic protobuf gencode-vs-runtime version mismatch. Kill the
-    # stubs on failure so the next import retries generation rather
-    # than reusing a broken pair.  The env flag prevents ``_proto_gen``
-    # from recursing back into us if the import still fails inside.
-    env = dict(os.environ)
-    env["LMCACHE_MQ_PROTO_GEN_HEALTHCHECK"] = "1"
+    # classic protobuf gencode-vs-runtime version mismatch.
     rc = subprocess.call(
         [
             sys.executable,
@@ -109,32 +107,19 @@ def main() -> int:
                 "_proto_gen import lmcache_mq_pb2, lmcache_mq_pb2_grpc"
             ),
         ],
-        env=env,
     )
     if rc != 0:
         for path in (PB2, PB2_GRPC):
             path.unlink(missing_ok=True)
         print(
-            "generated stubs failed health check (likely a protobuf "
-            "gencode/runtime version mismatch); removed and giving up. "
-            "Install a grpcio-tools version compatible with your local "
-            "protobuf runtime, e.g. 'pip install \"grpcio-tools==%s.*\"' "
-            "matching the grpc runtime already installed." % _grpc_major_minor(),
+            "generated stubs failed their import health check; install the "
+            "pinned requirements/proto.txt dependencies and regenerate.",
             file=sys.stderr,
         )
         return rc
 
-    print("regenerated:", PB2.name, "+", PB2_GRPC.name)
+    print("generated:", PB2.name, "+", PB2_GRPC.name)
     return 0
-
-
-def _grpc_major_minor() -> str:
-    try:
-        # Third Party
-        import grpc
-    except ImportError:
-        return "1.x"
-    return ".".join(grpc.__version__.split(".")[:2])
 
 
 if __name__ == "__main__":

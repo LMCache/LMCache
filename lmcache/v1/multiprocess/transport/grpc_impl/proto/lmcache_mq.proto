@@ -149,9 +149,9 @@ message QueryPrefetchLookupHitsResponse {
   optional int64 chunk_count = 1;
 }
 
-// Clear / GetChunkSize / Noop: controller & debug rpcs with trivial
-// payloads.  Every message keeps its own name so the wire remains
-// self-describing (no shared "EmptyRequest" alias — cheaper to grep).
+// Clear / GetChunkSize / GetExperimental / Noop: controller & debug rpcs
+// with trivial payloads.  Every message keeps its own name so the wire
+// remains self-describing (no shared "EmptyRequest" alias — cheaper to grep).
 message ClearRequest {}
 
 message ClearResponse {}
@@ -160,6 +160,12 @@ message GetChunkSizeRequest {}
 
 message GetChunkSizeResponse {
   int64 chunk_size = 1;
+}
+
+message GetExperimentalRequest {}
+
+message GetExperimentalResponse {
+  repeated string names = 1;
 }
 
 message NoopRequest {}
