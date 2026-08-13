@@ -12,11 +12,15 @@ Python types for them until a concrete device backend binds real native types.
 from __future__ import annotations
 
 # Standard
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeAlias
 
 if TYPE_CHECKING:
     # Third Party
     import torch
+
+    # First Party
+    from lmcache.lmcache_native import KernelGroupSpec as KernelGroupSpec
+    from lmcache.lmcache_native import PageBufferShapeDesc as PageBufferShapeDesc
 
 # First Party
 import lmcache.lmcache_native as lmcache_native
@@ -93,20 +97,19 @@ class _FallbackKernelGroupSpec(_FallbackNativePlanType):
     """Fallback stub for the native ``KernelGroupSpec`` plan type."""
 
 
-_NATIVE_COMMON_DESCRIPTOR_NAMES = ("PageBufferShapeDesc", "KernelGroupSpec")
+if not TYPE_CHECKING:
+    _NATIVE_COMMON_DESCRIPTOR_NAMES = ("PageBufferShapeDesc", "KernelGroupSpec")
 
-PageBufferShapeDesc: type[Any]
-KernelGroupSpec: type[Any]
-if all(hasattr(lmcache_native, name) for name in _NATIVE_COMMON_DESCRIPTOR_NAMES):
-    PageBufferShapeDesc = lmcache_native.PageBufferShapeDesc
-    KernelGroupSpec = lmcache_native.KernelGroupSpec
-else:
-    PageBufferShapeDesc = _FallbackPageBufferShapeDesc
-    KernelGroupSpec = _FallbackKernelGroupSpec
+    if all(hasattr(lmcache_native, name) for name in _NATIVE_COMMON_DESCRIPTOR_NAMES):
+        PageBufferShapeDesc = lmcache_native.PageBufferShapeDesc
+        KernelGroupSpec = lmcache_native.KernelGroupSpec
+    else:
+        PageBufferShapeDesc = _FallbackPageBufferShapeDesc
+        KernelGroupSpec = _FallbackKernelGroupSpec
 
-StagingCopy: type[Any] = _FallbackStagingCopy
-LaunchVar: type[Any] = _FallbackLaunchVar
-BatchStep: type[Any] = _FallbackBatchStep
+StagingCopy: TypeAlias = _FallbackStagingCopy
+LaunchVar: TypeAlias = _FallbackLaunchVar
+BatchStep: TypeAlias = _FallbackBatchStep
 
 
 def set_shape_desc_dtype(shape_desc: Any, dtype: torch.dtype) -> None:
