@@ -19,6 +19,9 @@ if TYPE_CHECKING:
     # Third Party
     import torch
 
+    # First Party
+    import lmcache.lmcache_native as lmcache_native
+
 
 class PageBufferShapeDesc:
     """Python stand-in for the C++ ``PageBufferShapeDesc`` struct.
@@ -137,7 +140,7 @@ class KernelGroupSpec:
         lmcache_objects_ptrs: list[int | torch.Tensor],
         shape_desc: PageBufferShapeDesc,
         lmcache_chunk_size: int,
-        engine_kv_format: EngineKVFormat,
+        engine_kv_format: lmcache_native.EngineKVFormat,
         block_ids_base: int | torch.Tensor,
         block_ids_capacity: int,
     ) -> None:
@@ -183,7 +186,7 @@ class CBGroupSpec:
         slot_tokens: int,
         hidden_elems: int,
         element_size: int,
-        engine_kv_format: EngineKVFormat,
+        engine_kv_format: lmcache_native.EngineKVFormat,
         page_buffer_size: int,
         block_size: int,
         head_size: int,

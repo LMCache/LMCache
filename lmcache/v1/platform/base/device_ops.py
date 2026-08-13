@@ -24,12 +24,10 @@ from lmcache.v1.platform import ops_types, torch_ops
 from lmcache.v1.platform.ops_types import (
     BatchStep,
     CBGroupSpec,
-    EngineKVFormat,
     KernelGroupSpec,
     LaunchVar,
     PageBufferShapeDesc,
     StagingCopy,
-    TransferDirection,
     set_shape_desc_dtype,
 )
 import lmcache.lmcache_native as lmcache_native
@@ -186,8 +184,8 @@ class DeviceOps:
         slot_mapping: "torch.Tensor",
         paged_memory_device: "torch.device",
         page_buffer_size: int,
-        direction: ops_types.TransferDirection,
-        engine_kv_format: ops_types.EngineKVFormat,
+        direction: lmcache_native.TransferDirection,
+        engine_kv_format: lmcache_native.EngineKVFormat,
         block_size: int = 0,
         head_size: int = 0,
         skip_prefix_n_tokens: int = 0,
@@ -212,8 +210,8 @@ class DeviceOps:
         slot_mapping: "torch.Tensor",
         paged_memory_device: "torch.device",
         page_buffer_size: int,
-        direction: ops_types.TransferDirection,
-        engine_kv_format: ops_types.EngineKVFormat,
+        direction: lmcache_native.TransferDirection,
+        engine_kv_format: lmcache_native.EngineKVFormat,
     ) -> None:
         return torch_ops.multi_layer_kv_transfer_unilateral(
             key_value,
@@ -230,8 +228,8 @@ class DeviceOps:
         lmc_key_value_cache: "torch.Tensor",
         vllm_key_value_cache: "torch.Tensor",
         slot_mapping: "torch.Tensor",
-        direction: ops_types.TransferDirection,
-        engine_kv_format: ops_types.EngineKVFormat,
+        direction: lmcache_native.TransferDirection,
+        engine_kv_format: lmcache_native.EngineKVFormat,
         token_major: bool = False,
     ) -> None:
         return torch_ops.single_layer_kv_transfer(
@@ -249,7 +247,7 @@ class DeviceOps:
         sgl_key_cache: "torch.Tensor",
         sgl_value_cache: "torch.Tensor",
         slot_mapping: "torch.Tensor",
-        direction: ops_types.TransferDirection,
+        direction: lmcache_native.TransferDirection,
         token_major: bool = False,
     ) -> None:
         return torch_ops.single_layer_kv_transfer_sgl(
@@ -343,7 +341,7 @@ class DeviceOps:
         dest: "int | torch.Tensor",
         src: "int | torch.Tensor",
         nbytes: int,
-        direction: ops_types.TransferDirection,
+        direction: lmcache_native.TransferDirection,
         host_buffer_offset: int,
         host_buffer_alignments: int,
     ) -> None:
@@ -396,7 +394,7 @@ class DeviceOps:
 
     def execute_object_group_transfer(
         self,
-        direction: ops_types.TransferDirection,
+        direction: lmcache_native.TransferDirection,
         device: "torch.device | str",
         host_buffer_alignment: int,
         kernel_group_specs: "list[ops_types.KernelGroupSpec]",

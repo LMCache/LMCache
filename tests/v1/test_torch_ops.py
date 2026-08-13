@@ -2218,7 +2218,7 @@ def scenario_multi_layer_block_kv_transfer(
         ),
         torch.tensor(block_ids, dtype=torch.int64, device=device),
         torch.device(device),
-        ops.TransferDirection.D2H,
+        lmcache_native.TransferDirection.D2H,
         shape_desc_mla,
         chunk_tokens,
         engine_kv_format_mla,
@@ -2252,7 +2252,7 @@ def scenario_multi_layer_block_kv_transfer(
         ),
         torch.tensor(block_ids, dtype=torch.int64, device=device),
         torch.device(device),
-        ops.TransferDirection.H2D,
+        lmcache_native.TransferDirection.H2D,
         shape_desc_mla,
         chunk_tokens,
         engine_kv_format_mla,
@@ -2309,7 +2309,7 @@ def scenario_multi_layer_block_kv_transfer(
     shape_desc_blocked.element_size = 1
     shape_desc_blocked.kv_size = 1
     shape_desc_blocked.block_stride_elems = blocked_stride
-    blocked_format = ops.EngineKVFormat.NL_X_NB_BSV_BSS
+    blocked_format = lmcache_native.EngineKVFormat.NL_X_NB_BSV_BSS
     d2h_chunks_blocked = [
         torch.zeros((num_layers, chunk_tokens, blocked_hidden), dtype=torch.uint8)
         for _ in range(num_chunks)
@@ -2333,7 +2333,7 @@ def scenario_multi_layer_block_kv_transfer(
         ),
         torch.tensor(block_ids, dtype=torch.int64, device=device),
         torch.device(device),
-        ops.TransferDirection.D2H,
+        lmcache_native.TransferDirection.D2H,
         shape_desc_blocked,
         chunk_tokens,
         blocked_format,
@@ -2367,7 +2367,7 @@ def scenario_multi_layer_block_kv_transfer(
         ),
         torch.tensor(block_ids, dtype=torch.int64, device=device),
         torch.device(device),
-        ops.TransferDirection.H2D,
+        lmcache_native.TransferDirection.H2D,
         shape_desc_blocked,
         chunk_tokens,
         blocked_format,
@@ -3097,7 +3097,7 @@ def scenario_object_group_transfer_plan(
         [object_plan_address(split_kv_temp_input)],
         split_kv_desc,
         4,
-        ops.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS,
+        lmcache_native.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS,
         object_plan_address(split_kv_block_ids),
         split_kv_block_ids.numel(),
     )
@@ -3113,7 +3113,7 @@ def scenario_object_group_transfer_plan(
         [ops.LaunchVar(0, 0, 2, 1, 0)],
     )
     ops.execute_object_group_transfer(
-        ops.TransferDirection.H2D,
+        lmcache_native.TransferDirection.H2D,
         torch.device(device),
         64,
         [split_kv_h2d_group],
@@ -3132,7 +3132,7 @@ def scenario_object_group_transfer_plan(
         [object_plan_address(split_kv_temp_output)],
         split_kv_desc,
         4,
-        ops.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS,
+        lmcache_native.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS,
         object_plan_address(split_kv_block_ids),
         split_kv_block_ids.numel(),
     )
@@ -3148,7 +3148,7 @@ def scenario_object_group_transfer_plan(
         [ops.LaunchVar(0, 0, 2, 1, 0)],
     )
     ops.execute_object_group_transfer(
-        ops.TransferDirection.D2H,
+        lmcache_native.TransferDirection.D2H,
         torch.device(device),
         64,
         [split_kv_d2h_group],
@@ -3270,7 +3270,7 @@ def scenario_object_group_transfer_plan(
             group_a_plan_buffers,
             _shape_desc(2, 2, 4),
             chunk_size,
-            ops.EngineKVFormat.NL_X_NB_BS_NH_CS,
+            lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_CS,
             object_plan_address(block_ids_a),
             block_ids_a.numel(),
         ),
@@ -3279,7 +3279,7 @@ def scenario_object_group_transfer_plan(
             group_b_plan_buffers,
             _shape_desc(4, 2, 6),
             chunk_size,
-            ops.EngineKVFormat.NL_X_NB_BS_NH_CS,
+            lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_CS,
             object_plan_address(block_ids_b),
             block_ids_b.numel(),
         ),
@@ -3289,7 +3289,7 @@ def scenario_object_group_transfer_plan(
         ops.LaunchVar(1, 0, block_ids_b.numel(), num_objects, 0),
     ]
     ops.execute_object_group_transfer(
-        ops.TransferDirection.H2D,
+        lmcache_native.TransferDirection.H2D,
         torch.device(device),
         64,
         groups,
@@ -3317,7 +3317,7 @@ def scenario_object_group_transfer_plan(
             else group_a_output_temps,
             _shape_desc(2, 2, 4),
             chunk_size,
-            ops.EngineKVFormat.NL_X_NB_BS_NH_CS,
+            lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_CS,
             object_plan_address(block_ids_a),
             block_ids_a.numel(),
         ),
@@ -3328,7 +3328,7 @@ def scenario_object_group_transfer_plan(
             else group_b_output_temps,
             _shape_desc(4, 2, 6),
             chunk_size,
-            ops.EngineKVFormat.NL_X_NB_BS_NH_CS,
+            lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_CS,
             object_plan_address(block_ids_b),
             block_ids_b.numel(),
         ),
@@ -3349,7 +3349,7 @@ def scenario_object_group_transfer_plan(
             )
         )
     ops.execute_object_group_transfer(
-        ops.TransferDirection.D2H,
+        lmcache_native.TransferDirection.D2H,
         torch.device(device),
         64,
         d2h_groups,
@@ -3393,7 +3393,7 @@ def scenario_cb_retrieve_plan_flat(
         2,
         2,
         torch.float32.itemsize,
-        ops.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS,
+        lmcache_native.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS,
         4,
         2,
         2,

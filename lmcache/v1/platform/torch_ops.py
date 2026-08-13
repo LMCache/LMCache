@@ -28,6 +28,7 @@ from lmcache.lmcache_native import (
     TransferDirection,
     is_cross_layer,
     is_kv_list,
+    is_layer_list,
     is_mla,
 )
 from lmcache.logging import init_logger
@@ -38,13 +39,10 @@ from lmcache.v1.platform._device_detect import (
 from lmcache.v1.platform.ops_types import (  # noqa: F401
     BatchStep,
     CBGroupSpec,
-    EngineKVFormat,
-    GPUKVFormat,
     KernelGroupSpec,
     LaunchVar,
     PageBufferShapeDesc,
     StagingCopy,
-    TransferDirection,
     set_shape_desc_dtype,
 )
 
