@@ -24,6 +24,7 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
+import lmcache.lmcache_native as lmcache_native
 
 if not (torch_dev.is_available() and torch_device_type == "cuda"):
     pytest.skip(
@@ -49,7 +50,7 @@ _DTYPE = torch.bfloat16
 class _FmtCase:
     """Per-format geometry: chunk plane count, widths, and paged shape."""
 
-    fmt: "lmc_ops.EngineKVFormat"
+    fmt: "lmcache_native.EngineKVFormat"
     kv_size: int  # chunk leading planes (1 = K/V fused, 2 = split)
     hidden: int  # per-plane scalars per token
     head_stride: int  # rope stride between heads in the K plane
@@ -59,7 +60,7 @@ class _FmtCase:
 _CASES = {
     # Fused-packed HND: [NB, NH, BS, 2*HS], K is the first HS of each head.
     "packed": _FmtCase(
-        fmt=lmc_ops.EngineKVFormat.NL_X_NB_NH_BS_TWO_HS,
+        fmt=lmcache_native.EngineKVFormat.NL_X_NB_NH_BS_TWO_HS,
         kv_size=1,
         hidden=_NH * 2 * _HS,
         head_stride=2 * _HS,
@@ -67,7 +68,7 @@ _CASES = {
     ),
     # Un-fused flash-attention HND: [2, NB, NH, BS, HS], separate K/V planes.
     "split": _FmtCase(
-        fmt=lmc_ops.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS,
+        fmt=lmcache_native.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS,
         kv_size=2,
         hidden=_NH * _HS,
         head_stride=_HS,
@@ -100,7 +101,7 @@ def _reference_scatter(
             slot_mapping[i * _SPC : (i + 1) * _SPC],
             slot_mapping.device,
             _NB * _BS,
-            lmc_ops.TransferDirection.H2D,
+            lmcache_native.TransferDirection.H2D,
             case.fmt,
             block_size=_BS,
             head_size=_HS,

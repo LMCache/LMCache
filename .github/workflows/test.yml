@@ -109,17 +109,11 @@ jobs:
           python -m pip install vllm
           python -m pip install -r requirements/test.txt
           python -m pip install -r requirements/common.txt
+          NO_GPU_EXT=1 python -m pip install -e . --no-build-isolation
 
-      - name: "Run non-CUDA unit tests"
+      - name: "CPU only unit tests"
         run: |
-          pytest --ignore=tests/disagg \
-            --ignore=tests/v1/multiprocess/ \
-            --ignore=tests/v1/distributed/ \
-            --ignore=tests/v1/mp_observability/ \
-            --ignore=tests/skipped \
-            --ignore=tests/cli/commands/trace \
-            --ignore=tests/v1/storage_backend/test_eic.py \
-            --ignore=tests/v1/storage_backend/test_p2p_backend_with_controller.py
+          pytest -m "not cuda and not musa and not xpu"
 
   raw-block-tests:
     needs: changes
@@ -158,6 +152,7 @@ jobs:
           python -m pip install maturin
           python -m pip install -r requirements/test.txt
           python -m pip install -r requirements/common.txt
+          NO_GPU_EXT=1 python -m pip install -e . --no-build-isolation
 
       - name: Build raw-block Rust extension
         run: |

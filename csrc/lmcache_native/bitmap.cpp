@@ -5,7 +5,7 @@
 #include <algorithm>
 
 namespace lmcache {
-namespace storage_manager {
+namespace lmcache_native {
 
 namespace {
 
@@ -239,5 +239,5 @@ Bitmap Bitmap::operator~() const {
 
 Bitmap::~Bitmap() = default;
 
-}  // namespace storage_manager
+}  // namespace lmcache_native
 }  // namespace lmcache
