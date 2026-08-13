@@ -24,7 +24,8 @@ Secondary lookup (always on):
 from __future__ import annotations
 
 # Standard
-from typing import Optional
+from abc import ABC, abstractmethod
+from typing import Any, Optional
 import asyncio
 import os
 import threading
@@ -58,6 +59,7 @@ from lmcache.v1.platform import create_event_notifier
 
 logger = init_logger(__name__)
 
+_FILE_DYNAMIC_BACKENDS = ("GDS", "GDS_MT", "POSIX", "HF3FS")
 
 # ---------------------------------------------------------------
 # ObjectKey <-> file path helpers
@@ -96,12 +98,12 @@ def _object_key_to_relpath(key: ObjectKey) -> str:
 # ---------------------------------------------------------------
 
 
-class DynamicNixlStorageAgent:
-    """Nixl storage agent that opens/registers files per operation.
+class DynamicNixlStorageAgent(ABC):
+    """Base class for dynamic NIXL storage agents.
 
-    The L1 memory handler is registered once at init (same as the static
-    agent).  Storage files are registered on-demand for each store/load
-    and deregistered immediately after the transfer completes.
+    This class owns the NIXL agent, the L1 memory registration, and the common
+    transfer lifecycle. Concrete agents map :class:`ObjectKey` values to their
+    storage backend without exposing backend-specific paths to callers.
     """
 
     def __init__(
@@ -110,32 +112,17 @@ class DynamicNixlStorageAgent:
         backend: str,
         backend_params: dict[str, str],
         l1_memory_desc: L1MemoryDesc,
-    ):
+    ) -> None:
         self.backend = backend
         self.device = device
         self.backend_params = backend_params
         self.l1_align_bytes = l1_memory_desc.align_bytes
-        self.file_path = backend_params["file_path"]
-        os.makedirs(self.file_path, exist_ok=True)
-        self.use_direct_io = (
-            str(backend_params.get("use_direct_io", "false")).lower() == "true"
-        )
-        # Opt-in: spread per-key files across a fixed 2-level subdir tree
-        # instead of one flat directory. Default false = the original flat
-        # layout (unchanged). See _object_key_to_relpath / get_file_path_for_key.
-        self.shard_dirs = (
-            str(backend_params.get("shard_dirs", "false")).lower() == "true"
-        )
-        # Subdirs already created (shard_dirs only), to skip redundant makedirs
-        # on the store hot path. Bounded by the fanout (<= 256*256 entries).
-        self._created_subdirs: set[str] = set()
 
         self.agent_name = "DynNixlAgent_" + str(uuid.uuid4())
         nixl_conf = NixlAgentConfig(backends=[])
         self.nixl_agent = NixlAgent(self.agent_name, nixl_conf)
         self.nixl_agent.create_backend(backend, backend_params)
 
-        # Register L1 memory (same as static agent)
         self._init_mem_handlers(
             device,
             l1_memory_desc.ptr,
@@ -144,9 +131,15 @@ class DynamicNixlStorageAgent:
             device_id=0,
         )
 
-    # ---- L1 memory registration (one-time) ----
-
-    def _init_mem_handlers(self, device, buffer_ptr, buffer_size, page_size, device_id):
+    def _init_mem_handlers(
+        self,
+        device: str,
+        buffer_ptr: int,
+        buffer_size: int,
+        page_size: int,
+        device_id: int,
+    ) -> None:
+        """Register the L1 memory used by all dynamic storage transfers."""
         reg_list = [(buffer_ptr, buffer_size, device_id, "")]
         xfer_desc = [
             (base_addr, page_size, device_id)
@@ -163,48 +156,111 @@ class DynamicNixlStorageAgent:
             "", xfer_descs, mem_type=mem_type
         )
 
-    # ---- Per-operation file helpers ----
-
-    def _open_flags(self, create: bool) -> int:
-        """Return os.open flags for storage files."""
-        flags = os.O_RDWR
-        if create:
-            # O_TRUNC ensures any orphaned file from a previous crash
-            # is truncated, avoiding stale trailing bytes on disk.
-            flags |= os.O_CREAT | os.O_TRUNC
-        if self.use_direct_io and hasattr(os, "O_DIRECT"):
-            flags |= os.O_DIRECT
-        return flags
-
-    def _register_single_file(self, fd: int, file_size: int, page_size: int):
-        """Register a single file with nixl and return (reg_descs, xfer_handler).
-
-        Returns:
-            Tuple of (reg_descs, xfer_handler) for later cleanup.
-        """
-        num_pages = file_size // page_size
-
-        reg_list = [(0, file_size, fd, "")]
-        xfer_desc = [(offset * page_size, page_size, fd) for offset in range(num_pages)]
-
-        reg_descs = self.nixl_agent.register_memory(reg_list, mem_type="FILE")
-        xfer_descs = self.nixl_agent.get_xfer_descs(xfer_desc, mem_type="FILE")
-        xfer_handler = self.nixl_agent.prep_xfer_dlist(
-            self.agent_name, xfer_descs, mem_type="FILE"
-        )
-        return reg_descs, xfer_handler
-
-    def _deregister_file(self, reg_descs, xfer_handler):
-        """Deregister a file from nixl."""
-        self.nixl_agent.release_dlist_handle(xfer_handler)
-        self.nixl_agent.deregister_memory(reg_descs)
-
-    async def dynamic_store_file(
+    async def _transfer(
         self,
+        direction: str,
         mem_indices: list[int],
-        file_path: str,
-        page_size: int,
+        storage_xfer_handler: Any,
     ) -> None:
+        """Transfer pages between L1 memory and a prepared storage handler."""
+        storage_indices = list(range(len(mem_indices)))
+        handle = self.nixl_agent.make_prepped_xfer(
+            direction,
+            self.mem_xfer_handler,
+            mem_indices,
+            storage_xfer_handler,
+            storage_indices,
+        )
+        try:
+            await self._post_non_blocking(handle)
+        finally:
+            self.nixl_agent.release_xfer_handle(handle)
+
+    async def _post_non_blocking(self, handle: Any) -> None:
+        """Await a NIXL transfer until it completes or fails."""
+        state = self.nixl_agent.transfer(handle)
+        while state != "DONE" and state != "ERR":
+            try:
+                state = self.nixl_agent.check_xfer_state(handle)
+            except nixlBind.nixlBackendError:
+                raise
+            await asyncio.sleep(0.01)
+        if state == "ERR":
+            raise RuntimeError("NIXL transfer failed")
+
+    def get_memory_indices(self, raw_addr: int, mem_size: int) -> list[int]:
+        """Return the registered L1 page indices for a memory range."""
+        if raw_addr % self.l1_align_bytes != 0:
+            raise ValueError(
+                f"Raw address {raw_addr} is not aligned to "
+                f"page size {self.l1_align_bytes}"
+            )
+        if mem_size % self.l1_align_bytes != 0:
+            raise ValueError(
+                f"Memory size {mem_size} is not a multiple of "
+                f"page size {self.l1_align_bytes}"
+            )
+        num_pages = mem_size // self.l1_align_bytes
+        return [(raw_addr // self.l1_align_bytes + i) for i in range(num_pages)]
+
+    def close(self) -> None:
+        """Release resources owned by this storage agent."""
+        self.nixl_agent.release_dlist_handle(self.mem_xfer_handler)
+        self.nixl_agent.deregister_memory(self.mem_reg_descs)
+
+    @abstractmethod
+    async def dynamic_store(self, mem_indices: list[int], key: ObjectKey) -> None:
+        """Store L1 memory pages for ``key`` in the backing storage."""
+
+    @abstractmethod
+    async def dynamic_load(self, mem_indices: list[int], key: ObjectKey) -> None:
+        """Load the stored pages for ``key`` into L1 memory."""
+
+    @abstractmethod
+    def dynamic_delete(self, key: ObjectKey) -> None:
+        """Delete the backing-storage object associated with ``key``."""
+
+    @abstractmethod
+    def get_stored_size(self, key: ObjectKey) -> int | None:
+        """Return the stored size for ``key``, or ``None`` if it is absent."""
+
+    @abstractmethod
+    def cleanup(self) -> None:
+        """Perform best-effort cleanup of backend-specific transient data."""
+
+
+class FileDynamicNixlStorageAgent(DynamicNixlStorageAgent):
+    """Dynamic NIXL storage agent backed by one file per object.
+
+    The L1 memory handler is registered once at initialization. Each file is
+    registered for the duration of an individual store or load transfer and
+    is deregistered immediately afterward.
+    """
+
+    def __init__(
+        self,
+        device: str,
+        backend: str,
+        backend_params: dict[str, str],
+        l1_memory_desc: L1MemoryDesc,
+    ) -> None:
+        super().__init__(device, backend, backend_params, l1_memory_desc)
+        self.file_path = backend_params["file_path"]
+        os.makedirs(self.file_path, exist_ok=True)
+        self.use_direct_io = (
+            str(backend_params.get("use_direct_io", "false")).lower() == "true"
+        )
+        # Opt-in: spread per-key files across a fixed 2-level subdir tree
+        # instead of one flat directory. Default false = the original flat
+        # layout (unchanged). See _object_key_to_relpath / get_file_path_for_key.
+        self.shard_dirs = (
+            str(backend_params.get("shard_dirs", "false")).lower() == "true"
+        )
+        # Subdirs already created (shard_dirs only), to skip redundant makedirs
+        # on the store hot path. Bounded by the fanout (<= 256*256 entries).
+        self._created_subdirs: set[str] = set()
+
+    async def dynamic_store(self, mem_indices: list[int], key: ObjectKey) -> None:
         """Write-to-temp-then-rename to publish the final file atomically.
 
         The DMA write goes to ``<file_path>.tmp.<uuid>`` in the same
@@ -213,6 +269,8 @@ class DynamicNixlStorageAgent:
         concurrent readers (including other processes sharing the same
         directory) never observe a partially-written file.
         """
+        file_path = self._get_file_path_for_key(key)
+        page_size = self.l1_align_bytes
         file_size = len(mem_indices) * page_size
         tmp_path = f"{file_path}.tmp.{uuid.uuid4().hex}"
         # With sharding, create the subdir once per bucket (cached). Flat layout
@@ -228,16 +286,7 @@ class DynamicNixlStorageAgent:
                 fd, file_size, page_size
             )
             try:
-                storage_indices = list(range(len(mem_indices)))
-                handle = self.nixl_agent.make_prepped_xfer(
-                    "WRITE",
-                    self.mem_xfer_handler,
-                    mem_indices,
-                    xfer_handler,
-                    storage_indices,
-                )
-                await self._post_non_blocking(handle)
-                self.nixl_agent.release_xfer_handle(handle)
+                await self._transfer("WRITE", mem_indices, xfer_handler)
             finally:
                 self._deregister_file(reg_descs, xfer_handler)
         except BaseException:
@@ -254,13 +303,10 @@ class DynamicNixlStorageAgent:
         # TODO(Jiayi): Only guaranteed to be atomic within the local posix filesystems.
         os.rename(tmp_path, file_path)
 
-    async def dynamic_load_file(
-        self,
-        mem_indices: list[int],
-        file_path: str,
-        page_size: int,
-    ) -> None:
+    async def dynamic_load(self, mem_indices: list[int], key: ObjectKey) -> None:
         """Open an existing file, DMA read into L1 memory, then clean up."""
+        file_path = self._get_file_path_for_key(key)
+        page_size = self.l1_align_bytes
         file_size = len(mem_indices) * page_size
         fd = os.open(file_path, self._open_flags(create=False))
         try:
@@ -268,66 +314,28 @@ class DynamicNixlStorageAgent:
                 fd, file_size, page_size
             )
             try:
-                storage_indices = list(range(len(mem_indices)))
-                handle = self.nixl_agent.make_prepped_xfer(
-                    "READ",
-                    self.mem_xfer_handler,
-                    mem_indices,
-                    xfer_handler,
-                    storage_indices,
-                )
-                await self._post_non_blocking(handle)
-                self.nixl_agent.release_xfer_handle(handle)
+                await self._transfer("READ", mem_indices, xfer_handler)
             finally:
                 self._deregister_file(reg_descs, xfer_handler)
         finally:
             os.close(fd)
 
-    def dynamic_delete_file(self, file_path: str) -> None:
+    def dynamic_delete(self, key: ObjectKey) -> None:
         """Delete a storage file from disk."""
+        file_path = self._get_file_path_for_key(key)
         try:
             os.unlink(file_path)
         except FileNotFoundError:
             logger.warning("File already deleted: %s", file_path)
 
-    # ---- Shared helpers ----
+    def get_stored_size(self, key: ObjectKey) -> int | None:
+        """Return the data-file size for ``key``, or ``None`` if it is absent."""
+        try:
+            return os.stat(self._get_file_path_for_key(key)).st_size
+        except FileNotFoundError:
+            return None
 
-    def get_memory_indices(self, raw_addr: int, mem_size: int) -> list[int]:
-        """Get L1 memory page indices for the given address and size."""
-        if raw_addr % self.l1_align_bytes != 0:
-            raise ValueError(
-                f"Raw address {raw_addr} is not aligned to "
-                f"page size {self.l1_align_bytes}"
-            )
-        if mem_size % self.l1_align_bytes != 0:
-            raise ValueError(
-                f"Memory size {mem_size} is not a multiple of "
-                f"page size {self.l1_align_bytes}"
-            )
-        num_pages = mem_size // self.l1_align_bytes
-        return [(raw_addr // self.l1_align_bytes + i) for i in range(num_pages)]
-
-    def get_file_path_for_key(self, key: ObjectKey) -> str:
-        """Return the on-disk path for ``key``: sharded when ``shard_dirs`` is
-        set (see ``_object_key_to_relpath``), otherwise the flat layout.
-        """
-        if self.shard_dirs:
-            return os.path.join(self.file_path, _object_key_to_relpath(key))
-        return os.path.join(self.file_path, _object_key_to_filename(key))
-
-    async def _post_non_blocking(self, handle):
-        """Await a nixl transfer until done."""
-        state = self.nixl_agent.transfer(handle)
-        while state != "DONE" and state != "ERR":
-            try:
-                state = self.nixl_agent.check_xfer_state(handle)
-            except nixlBind.nixlBackendError:
-                raise
-            await asyncio.sleep(0.01)
-        if state == "ERR":
-            raise RuntimeError("NIXL transfer failed")
-
-    def cleanup_temp_files(self) -> None:
+    def cleanup(self) -> None:
         """Remove leftover ``*.tmp.*`` files in the storage directory.
 
         These can be left behind if a store crashed between opening the
@@ -349,10 +357,61 @@ class DynamicNixlStorageAgent:
                             "Failed to remove leftover temp file %s: %s", name, e
                         )
 
-    def close(self):
-        """Release L1 memory handlers."""
-        self.nixl_agent.release_dlist_handle(self.mem_xfer_handler)
-        self.nixl_agent.deregister_memory(self.mem_reg_descs)
+    def _open_flags(self, create: bool) -> int:
+        """Return os.open flags for storage files."""
+        flags = os.O_RDWR
+        if create:
+            # O_TRUNC ensures any orphaned file from a previous crash
+            # is truncated, avoiding stale trailing bytes on disk.
+            flags |= os.O_CREAT | os.O_TRUNC
+        if self.use_direct_io and hasattr(os, "O_DIRECT"):
+            flags |= os.O_DIRECT
+        return flags
+
+    def _register_single_file(
+        self, fd: int, file_size: int, page_size: int
+    ) -> tuple[Any, Any]:
+        """Register a single file with NIXL for a transfer."""
+        num_pages = file_size // page_size
+        reg_list = [(0, file_size, fd, "")]
+        xfer_desc = [(offset * page_size, page_size, fd) for offset in range(num_pages)]
+        reg_descs = self.nixl_agent.register_memory(reg_list, mem_type="FILE")
+        xfer_descs = self.nixl_agent.get_xfer_descs(xfer_desc, mem_type="FILE")
+        xfer_handler = self.nixl_agent.prep_xfer_dlist(
+            self.agent_name, xfer_descs, mem_type="FILE"
+        )
+        return reg_descs, xfer_handler
+
+    def _deregister_file(self, reg_descs: Any, xfer_handler: Any) -> None:
+        """Release NIXL resources registered for a single file."""
+        self.nixl_agent.release_dlist_handle(xfer_handler)
+        self.nixl_agent.deregister_memory(reg_descs)
+
+    def _get_file_path_for_key(self, key: ObjectKey) -> str:
+        """Return the on-disk path for ``key``: sharded when ``shard_dirs`` is
+        set (see ``_object_key_to_relpath``), otherwise the flat layout.
+        """
+        if self.shard_dirs:
+            return os.path.join(self.file_path, _object_key_to_relpath(key))
+        return os.path.join(self.file_path, _object_key_to_filename(key))
+
+
+def _create_dynamic_nixl_storage_agent(
+    device: str,
+    backend: str,
+    backend_params: dict[str, str],
+    l1_memory_desc: L1MemoryDesc,
+) -> DynamicNixlStorageAgent:
+    """Create the dynamic storage agent registered for ``backend``.
+
+    The factory selects an implementation by backend family so the L2 adapter
+    does not depend on a concrete storage representation.
+    """
+    if backend in _FILE_DYNAMIC_BACKENDS:
+        return FileDynamicNixlStorageAgent(
+            device, backend, backend_params, l1_memory_desc
+        )
+    raise ValueError(f"No dynamic NIXL storage agent for backend {backend!r}")
 
 
 # ---------------------------------------------------------------
@@ -402,8 +461,7 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
         self._loop_thread = threading.Thread(target=self._run_event_loop, daemon=True)
         self._loop_thread.start()
 
-        # Initialize dynamic Nixl agent (L1 memory only, no pre-allocated files)
-        self.nixl_agent = DynamicNixlStorageAgent(
+        self.nixl_agent = _create_dynamic_nixl_storage_agent(
             device="cpu",
             backend=config.backend,
             backend_params=config.backend_params,
@@ -500,7 +558,7 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
 
     def delete(self, keys: list[ObjectKey]) -> None:
         """Delete objects from storage, removing their files from disk."""
-        to_delete: list[tuple[ObjectKey, int, str]] = []
+        to_delete: list[tuple[ObjectKey, int]] = []
         with self._lock:
             for key in keys:
                 obj = self._memory_objects.get(key)
@@ -515,15 +573,13 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
                     continue
                 self._total_bytes -= obj.size
                 del self._memory_objects[key]
-                to_delete.append(
-                    (key, obj.size, self.nixl_agent.get_file_path_for_key(key))
-                )
+                to_delete.append((key, obj.size))
         # Filesystem I/O outside the lock to avoid blocking concurrent
         # store/lookup/load operations.
         deleted_keys: list[ObjectKey] = []
         deleted_sizes: list[int] = []
-        for key, size, file_path in to_delete:
-            self.nixl_agent.dynamic_delete_file(file_path)
+        for key, size in to_delete:
+            self.nixl_agent.dynamic_delete(key)
             deleted_keys.append(key)
             deleted_sizes.append(size)
         if deleted_keys:
@@ -583,11 +639,10 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
             logger.info("persist_enabled=False, deleting all data files")
             with self._lock:
                 for key in list(self._memory_objects.keys()):
-                    file_path = self.nixl_agent.get_file_path_for_key(key)
-                    self.nixl_agent.dynamic_delete_file(file_path)
+                    self.nixl_agent.dynamic_delete(key)
 
         # Best-effort cleanup of orphaned temp files from crashed stores.
-        self.nixl_agent.cleanup_temp_files()
+        self.nixl_agent.cleanup()
 
         self.nixl_agent.close()
 
@@ -650,11 +705,7 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
 
                 try:
                     mem_indices = self.nixl_agent.get_memory_indices(mem_addr, mem_size)
-                    file_path = self.nixl_agent.get_file_path_for_key(key)
-
-                    await self.nixl_agent.dynamic_store_file(
-                        mem_indices, file_path, self.nixl_agent.l1_align_bytes
-                    )
+                    await self.nixl_agent.dynamic_store(mem_indices, key)
 
                     store_obj = NixlStoreObj(
                         page_indices=[],  # not used in dynamic mode
@@ -735,10 +786,8 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
         # in _total_bytes.
         if key in self._inflight_stores:
             return None
-        file_path = self.nixl_agent.get_file_path_for_key(key)
-        try:
-            obj_size = os.stat(file_path).st_size
-        except FileNotFoundError:
+        obj_size = self.nixl_agent.get_stored_size(key)
+        if obj_size is None:
             return None
 
         # Enforce capacity when populating lazily too.
@@ -796,13 +845,7 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
                 mem_addr = objects[i].meta.address
                 mem_size = objects[i].meta.phy_size
                 mem_indices = self.nixl_agent.get_memory_indices(mem_addr, mem_size)
-                file_path = self.nixl_agent.get_file_path_for_key(key)
-
-                coros.append(
-                    self.nixl_agent.dynamic_load_file(
-                        mem_indices, file_path, self.nixl_agent.l1_align_bytes
-                    )
-                )
+                coros.append(self.nixl_agent.dynamic_load(mem_indices, key))
                 found_positions.append(i)
 
             if coros:
@@ -837,7 +880,7 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
 
 # TODO(Jiayi): OBJ backend is not supported in the dynamic adapter yet.
 # Only file-based backends are supported.
-_VALID_DYNAMIC_BACKENDS = ("GDS", "GDS_MT", "POSIX", "HF3FS")
+_VALID_DYNAMIC_BACKENDS = _FILE_DYNAMIC_BACKENDS
 
 
 class DynamicNixlStoreL2AdapterConfig(L2AdapterConfigBase):
