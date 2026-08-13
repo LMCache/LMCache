@@ -571,14 +571,6 @@ class DynamicNixlStoreL2AdapterConfig(L2AdapterConfigBase):
             raise ValueError(
                 "backend must be one of %s, got %r" % (_VALID_DYNAMIC_BACKENDS, backend)
             )
-        if "file_path" not in backend_params:
-            raise ValueError(
-                "backend_params must include 'file_path' for backend %r" % backend
-            )
-        if "use_direct_io" not in backend_params:
-            raise ValueError(
-                "backend_params must include 'use_direct_io' for backend %r" % backend
-            )
         self.backend = backend
         self.backend_params = backend_params
 
