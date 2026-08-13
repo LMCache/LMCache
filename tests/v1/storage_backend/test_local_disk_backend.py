@@ -610,3 +610,184 @@ class TestBatchedGetBlocking:
         results = local_disk_backend.batched_get_blocking([])
         assert results == []
         local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+
+class TestDiskSpaceAccountingOnRemove:
+    """Tests for how the disk budget is accounted across removals.
+
+    ``submit_put_task`` charges every chunk against ``max_local_disk_size``
+    and drops the put when the budget is exhausted and nothing can be
+    evicted.  Removing a chunk therefore has to give its space back, or the
+    backend ends up refusing puts while the disk is actually empty.
+    """
+
+    _SHAPE = torch.Size([2, 2, 16, 8, 128])
+    _DTYPE = torch.bfloat16
+
+    @pytest.fixture
+    def running_loop(self):
+        """Create an asyncio event loop running in a background thread.
+
+        ``submit_put_task`` hands the disk write to the backend's event loop,
+        so the loop has to be running for a put to ever reach the disk.
+        """
+        loop = asyncio.new_event_loop()
+        ready = threading.Event()
+
+        def run_loop() -> None:
+            asyncio.set_event_loop(loop)
+            ready.set()
+            loop.run_forever()
+
+        thread = threading.Thread(target=run_loop, daemon=True)
+        thread.start()
+        if not ready.wait(timeout=5.0):
+            raise RuntimeError("Event loop thread failed to start within 5 seconds")
+
+        yield loop
+
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=5)
+        loop.close()
+
+    def test_put_accepted_after_stored_keys_are_removed(
+        self,
+        temp_disk_path: str,
+        running_loop: asyncio.AbstractEventLoop,
+        local_cpu_backend: LocalCPUBackend,
+    ) -> None:
+        """Space freed by ``batched_remove`` is available to later puts.
+
+        Fills the disk budget, drops every key through the public
+        ``batched_remove`` API, then stores a new chunk.  The new chunk has
+        to land on disk -- the disk is empty at that point, so there is room
+        for it.
+        """
+        backend = self._make_backend(
+            temp_disk_path, running_loop, local_cpu_backend, chunk_budget=2.5
+        )
+        try:
+            stored_keys = [create_test_key(i) for i in range(300, 302)]
+            for key in stored_keys:
+                assert self._put_and_wait(backend, key, local_cpu_backend), (
+                    f"initial put for {key} was dropped"
+                )
+                assert backend.contains(key)
+
+            assert backend.batched_remove(stored_keys) == len(stored_keys)
+            for key in stored_keys:
+                assert not backend.contains(key)
+
+            fresh_key = create_test_key(302)
+            assert self._put_and_wait(backend, fresh_key, local_cpu_backend), (
+                "put was dropped even though every stored key had been "
+                "removed and the disk was empty"
+            )
+            assert backend.contains(fresh_key)
+        finally:
+            backend.close()
+            local_cpu_backend.memory_allocator.close()
+
+    def test_eviction_keeps_only_the_newest_chunks(
+        self,
+        temp_disk_path: str,
+        running_loop: asyncio.AbstractEventLoop,
+        local_cpu_backend: LocalCPUBackend,
+    ) -> None:
+        """Storing past the budget evicts the oldest chunks -- and no more.
+
+        Four chunks are stored into a budget that holds two, so the two
+        oldest must be gone and the two newest must remain.  Releasing more
+        space than a chunk occupies would let the cache grow past its
+        budget instead.
+        """
+        backend = self._make_backend(
+            temp_disk_path, running_loop, local_cpu_backend, chunk_budget=2.5
+        )
+        try:
+            keys = [create_test_key(i) for i in range(310, 314)]
+            for key in keys:
+                assert self._put_and_wait(backend, key, local_cpu_backend), (
+                    f"put for {key} was dropped"
+                )
+
+            assert not backend.contains(keys[0])
+            assert not backend.contains(keys[1])
+            assert backend.contains(keys[2])
+            assert backend.contains(keys[3])
+        finally:
+            backend.close()
+            local_cpu_backend.memory_allocator.close()
+
+    def _make_backend(
+        self,
+        disk_path: str,
+        loop: asyncio.AbstractEventLoop,
+        cpu_backend: LocalCPUBackend,
+        chunk_budget: float,
+    ) -> LocalDiskBackend:
+        """Build a backend whose disk budget holds ``chunk_budget`` chunks.
+
+        The budget is derived from the physical size of a real allocation so
+        that it stays exact whatever the allocator's alignment is.
+
+        :param disk_path: Directory to use for the disk cache.
+        :param loop: Running event loop the backend submits its writes to.
+        :param cpu_backend: Backend used to allocate the staging memory.
+        :param chunk_budget: Disk capacity, expressed in ``_SHAPE`` chunks.
+        :returns: A backend configured with that capacity.
+        """
+        probe = self._allocate_chunk(cpu_backend)
+        chunk_size = probe.get_physical_size()
+        probe.ref_count_down()
+
+        config = create_test_config(
+            disk_path, max_disk_size=chunk_budget * chunk_size / 1024**3
+        )
+        return LocalDiskBackend(
+            config=config,
+            loop=loop,
+            local_cpu_backend=cpu_backend,
+            dst_device=f"{torch_device_type}:0",
+        )
+
+    def _allocate_chunk(self, cpu_backend: LocalCPUBackend) -> MemoryObj:
+        """Allocate one staging chunk of ``_SHAPE``.
+
+        :param cpu_backend: Backend used to allocate the staging memory.
+        :returns: The allocated memory object.
+        """
+        # busy_loop=False so an exhausted pool fails here instead of spinning.
+        memory_obj = cpu_backend.allocate(
+            self._SHAPE, self._DTYPE, MemoryFormat.KV_2LTD, busy_loop=False
+        )
+        assert memory_obj is not None, "CPU staging allocation failed"
+        return memory_obj
+
+    def _put_and_wait(
+        self,
+        backend: LocalDiskBackend,
+        key: CacheEngineKey,
+        cpu_backend: LocalCPUBackend,
+        timeout: float = 10.0,
+    ) -> bool:
+        """Store one chunk under *key* and wait for the disk write to finish.
+
+        :param backend: The backend under test.
+        :param key: Key to store the chunk under.
+        :param cpu_backend: Backend used to allocate the staging chunk.
+        :param timeout: Seconds to wait for the completion callback.
+        :returns: ``True`` once the write completed, ``False`` if the backend
+            dropped the put -- the completion callback only runs for puts
+            that were accepted.
+        """
+        memory_obj = self._allocate_chunk(cpu_backend)
+        done = threading.Event()
+
+        def on_complete(_key: CacheEngineKey) -> None:
+            done.set()
+
+        backend.submit_put_task(key, memory_obj, on_complete_callback=on_complete)
+        stored = done.wait(timeout=timeout)
+        memory_obj.ref_count_down()
+        return stored
