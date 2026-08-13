@@ -1766,23 +1766,45 @@ def request_type_to_method_name(request_type: RequestType) -> str:
 
 
 def _parse_grpc_url(url: str) -> str:
-    """Return a ``host:port`` target that ``grpc.insecure_channel`` accepts.
+    """Return a gRPC target string for the mp-mode transport URL.
 
-    Accepts ``grpc://host:port`` or a bare ``host:port``.  Any other
-    transport scheme (``tcp://`` / ``ipc://`` / etc.) is rejected up front
-    now that gRPC is the only supported transport.
+    Backward compatibility matters here: older LMCache configs still pass
+    ``tcp://host:port`` or ``ipc:///path`` from the historical ZMQ transport.
+    The wire is gRPC now, but those legacy schemes still map cleanly to gRPC's
+    TCP and unix-domain-socket targets, so accept them as aliases instead of
+    breaking existing deploys and tests.
     """
     if "://" not in url:
         return url
     parsed = urlparse(url)
-    if parsed.scheme != "grpc":
-        raise ValueError(
-            f"unsupported transport scheme {parsed.scheme!r} for url {url!r}; "
-            f"only grpc:// (or a bare host:port) is supported"
-        )
-    if not parsed.netloc:
-        raise ValueError(f"missing host in url {url!r}")
-    return parsed.netloc
+    if parsed.scheme in ("grpc", "tcp"):
+        if not parsed.netloc:
+            raise ValueError(f"missing host in url {url!r}")
+        if parsed.scheme == "tcp":
+            logger.warning(
+                "treating legacy mp transport url %r as grpc://%s", url, parsed.netloc
+            )
+        return parsed.netloc
+
+    if parsed.scheme in ("grpc+unix", "unix", "ipc"):
+        unix_path = parsed.path
+        if parsed.netloc:
+            unix_path = f"/{parsed.netloc}{parsed.path}"
+        if not unix_path:
+            raise ValueError(f"missing unix socket path in url {url!r}")
+        if parsed.scheme in ("unix", "ipc"):
+            logger.warning(
+                "treating legacy mp transport url %r as grpc+unix://%s",
+                url,
+                unix_path,
+            )
+        return f"unix://{unix_path}"
+
+    raise ValueError(
+        f"unsupported transport scheme {parsed.scheme!r} for url {url!r}; "
+        "supported schemes are grpc://, grpc+unix://, and the legacy aliases "
+        "tcp:// / ipc:// / unix://"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1798,7 +1820,9 @@ class MessageQueueClient:
     are thread-safe).
 
     Args:
-        server_url: Either ``grpc://host:port`` or a bare ``host:port``.
+        server_url: Either ``grpc://host:port``, ``grpc+unix:///path``, a bare
+            ``host:port``, or a legacy alias such as ``tcp://host:port`` /
+            ``ipc:///path``.
         context: Legacy positional slot kept for backwards compatibility
             with the historical zmq-based constructor; ignored.
     """

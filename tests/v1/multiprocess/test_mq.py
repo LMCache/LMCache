@@ -22,6 +22,7 @@ from lmcache.v1.multiprocess.mq import (
     BlockingRequestHandler,
     MessageQueueClient,
     MessageQueueServer,
+    _parse_grpc_url,
 )
 from lmcache.v1.multiprocess.protocol import (
     RequestType,
@@ -36,6 +37,28 @@ from tests.v1.multiprocess import test_mq_handler_helpers
 # ==============================================================================
 # MessageQueueServer and MessageQueueClient Tests Infrastructure
 # ==============================================================================
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("127.0.0.1:5555", "127.0.0.1:5555"),
+        ("grpc://127.0.0.1:5555", "127.0.0.1:5555"),
+        ("tcp://127.0.0.1:5555", "127.0.0.1:5555"),
+        ("grpc+unix:///tmp/lmcache.sock", "unix:///tmp/lmcache.sock"),
+        ("ipc:///tmp/lmcache.sock", "unix:///tmp/lmcache.sock"),
+    ],
+)
+def test_parse_grpc_url_accepts_legacy_mp_aliases(
+    url: str,
+    expected: str,
+) -> None:
+    assert _parse_grpc_url(url) == expected
+
+
+def test_parse_grpc_url_rejects_unknown_scheme() -> None:
+    with pytest.raises(ValueError, match="unsupported transport scheme"):
+        _parse_grpc_url("http://127.0.0.1:5555")
 
 
 def create_cache_key(index: int, model: str = "testmodel") -> IPCCacheServerKey:
