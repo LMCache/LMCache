@@ -234,15 +234,16 @@ def _byte_tensor_from_copy_argument(
 
 
 def _device_for_raw_pointer(ptr: int) -> torch.device:
-    """Return a CUDA device for a pointer owned by PyTorch's CUDA allocator."""
-    if not torch.cuda.is_available():
+    """Return the active accelerator device owning a PyTorch-allocated pointer."""
+    torch_dev, torch_device_type = get_torch_device()
+    if torch_device_type == "cpu" or not torch_dev.is_available():
         return torch.device("cpu")
 
-    for segment in torch.cuda.memory._snapshot()["segments"]:
+    for segment in torch_dev.memory._snapshot()["segments"]:
         segment_start = int(segment["address"])
         segment_end = segment_start + int(segment["total_size"])
         if segment_start <= ptr < segment_end:
-            return torch.device("cuda", int(segment["device"]))
+            return torch.device(torch_device_type, int(segment["device"]))
     return torch.device("cpu")
 
 
@@ -2963,12 +2964,17 @@ def lmcache_memcpy_async(
 
     # The direction identifies the device on which a raw pointer resides.
     # Without CUDA, both pointers are CPU addresses in the fallback path.
-    use_cuda = torch.cuda.is_available()
+    torch_dev, torch_device_type = get_torch_device()
+    use_accelerator = torch_device_type != "cpu" and torch_dev.is_available()
     destination_device = torch.device(
-        "cuda" if use_cuda and int(direction) == int(TransferDirection.H2D) else "cpu"
+        torch_device_type
+        if use_accelerator and int(direction) == int(TransferDirection.H2D)
+        else "cpu"
     )
     source_device = torch.device(
-        "cuda" if use_cuda and int(direction) == int(TransferDirection.D2H) else "cpu"
+        torch_device_type
+        if use_accelerator and int(direction) == int(TransferDirection.D2H)
+        else "cpu"
     )
     destination = _byte_tensor_from_copy_argument(dest, nbytes, destination_device)
     source = _byte_tensor_from_copy_argument(src, nbytes, source_device)
