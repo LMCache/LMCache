@@ -187,7 +187,7 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         # Returns: tuple[bytes | list[bytes], bool]
         #   (CUDA event handle(s), success flag)
         "RETRIEVE": ProtocolDefinition(
-            payload_classes=[KeyType, int, list[list[int]], bytes, int, bool],
+            payload_classes=[KeyType, int, list[list[int]], bytes, int],
             response_class=tuple[bytes | list[bytes], bool],
             handler_type=HandlerType.BLOCKING,
         ),
@@ -197,7 +197,7 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         # RETRIEVE (per-chunk) dispatch path completely untouched -- no
         # StreamingSink is ever allocated for it.
         "RETRIEVE_LAYERWISE": ProtocolDefinition(
-            payload_classes=[KeyType, int, list[list[int]], bytes, int, bool],
+            payload_classes=[KeyType, int, list[list[int]], bytes, int],
             response_class=tuple[bytes | list[bytes], bool],
             handler_type=HandlerType.BLOCKING,
             streaming=True,

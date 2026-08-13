@@ -622,17 +622,17 @@ class LMCacheDrivenTransferContext(TransferContext):
         # streams per-batch IPC event handles back; the plain RETRIEVE path
         # (per-chunk) is left completely unchanged.
         req_type = RequestType.RETRIEVE_LAYERWISE if layerwise else RequestType.RETRIEVE
+        payload = [
+            key,
+            instance_id,
+            block_ids,
+            event_ipc_handle,
+            skip_first_n_tokens,
+        ]
         raw_future = self._send_request(
             self._mq_client,
             req_type,
-            [
-                key,
-                instance_id,
-                block_ids,
-                event_ipc_handle,
-                skip_first_n_tokens,
-                layerwise,
-            ],
+            payload,
         )
         if layerwise:
             return LayerwiseDeviceMessagingFuture(

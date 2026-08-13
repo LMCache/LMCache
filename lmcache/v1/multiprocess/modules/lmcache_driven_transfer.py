@@ -1828,7 +1828,6 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         gpu_block_ids: list[list[int]],
         event_ipc_handle: bytes,
         skip_first_n_tokens: int = 0,
-        layerwise: bool = False,
         *,
         streaming_sink=None,
     ) -> tuple[bytes | list[bytes], bool]:
@@ -1855,6 +1854,10 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             ValueError: If no GPU context is registered for the given instance ID.
             RuntimeError: If the backend does not support IPC event handles.
         """
+        # Derive layerwise from the request type: streaming_sink is
+        # non-None iff the request was RETRIEVE_LAYERWISE.
+        layerwise = streaming_sink is not None
+
         st = time.perf_counter()
 
         entry = self.get_and_touch_context_entry(instance_id)
