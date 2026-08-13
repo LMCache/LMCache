@@ -88,6 +88,9 @@ Before running `pre-commit run --all-files`, verify that `cargo`, `rustfmt`, and
 the Rust toolchain are on `PATH`. The repository's pre-commit config includes
 Rust format and clippy hooks, so the run will fail even for Python-only changes
 when those commands are missing.
+If you are validating only non-Rust changes and do not intend to touch Rust in
+that pass, run `SKIP=rust-fmt,rust-clippy pre-commit run --all-files` to skip
+those hooks explicitly.
 
 C++/CUDA files use clang-format (Google style, 80-col). Rust code in `rust/` uses `cargo fmt` and `cargo clippy`.
 
