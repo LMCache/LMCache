@@ -236,7 +236,7 @@ def _byte_tensor_from_copy_argument(
 def _device_for_raw_pointer(ptr: int) -> torch.device:
     """Return the active accelerator device owning a PyTorch-allocated pointer."""
     torch_dev, torch_device_type = get_torch_device()
-    if torch_device_type == "cpu" or not torch_dev.is_available():
+    if torch_device_type not in ("cuda", "musa") or not torch_dev.is_available():
         return torch.device("cpu")
 
     for segment in torch_dev.memory._snapshot()["segments"]:
@@ -2962,22 +2962,24 @@ def lmcache_memcpy_async(
     if nbytes == 0:
         return
 
-    # The direction identifies the device on which a raw pointer resides.
-    # Without CUDA, both pointers are CPU addresses in the fallback path.
-    torch_dev, torch_device_type = get_torch_device()
-    use_accelerator = torch_device_type != "cpu" and torch_dev.is_available()
-    destination_device = torch.device(
-        torch_device_type
-        if use_accelerator and int(direction) == int(TransferDirection.H2D)
-        else "cpu"
-    )
-    source_device = torch.device(
-        torch_device_type
-        if use_accelerator and int(direction) == int(TransferDirection.D2H)
-        else "cpu"
-    )
-    destination = _byte_tensor_from_copy_argument(dest, nbytes, destination_device)
-    source = _byte_tensor_from_copy_argument(src, nbytes, source_device)
+    if isinstance(dest, torch.Tensor) or isinstance(src, torch.Tensor):
+        if not isinstance(dest, torch.Tensor) or not isinstance(src, torch.Tensor):
+            raise TypeError(
+                "dest and src must both be torch.Tensor or both be raw pointers"
+            )
+        destination = _byte_tensor_from_copy_argument(dest, nbytes, torch.device("cpu"))
+        source = _byte_tensor_from_copy_argument(src, nbytes, torch.device("cpu"))
+    else:
+        if not isinstance(dest, int) or not isinstance(src, int):
+            raise TypeError(
+                "dest and src must both be torch.Tensor or both be raw pointers"
+            )
+        destination = _byte_tensor_from_copy_argument(
+            dest, nbytes, _device_for_raw_pointer(dest)
+        )
+        source = _byte_tensor_from_copy_argument(
+            src, nbytes, _device_for_raw_pointer(src)
+        )
 
     copied_bytes = 0
     alignment_mask = host_buffer_alignments - 1
