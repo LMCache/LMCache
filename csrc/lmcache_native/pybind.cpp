@@ -60,32 +60,6 @@ PYBIND11_MODULE(lmcache_native, m) {
       .def_readwrite("block_stride_elems",
                      &PageBufferShapeDesc::block_stride_elems);
 
-  // Object-group transfer plan descriptors. These are backend-agnostic value
-  // types: planners construct them once in Python, while individual backends
-  // decide which execute_* entry points consume them.
-  py::class_<StagingCopy>(m, "StagingCopy")
-      .def(py::init([](uintptr_t dest, uintptr_t src, size_t nbytes,
-                       size_t host_offset) {
-             return StagingCopy{dest, src, nbytes, host_offset};
-           }),
-           py::arg("dest"), py::arg("src"), py::arg("nbytes"),
-           py::arg("host_offset"));
-  py::class_<LaunchVar>(m, "LaunchVar")
-      .def(
-          py::init([](int group_idx, int64_t block_ids_offset, int total_blocks,
-                      int num_objects, int skip_prefix_n_blocks) {
-            return LaunchVar{group_idx, block_ids_offset, total_blocks,
-                             num_objects, skip_prefix_n_blocks};
-          }),
-          py::arg("group_idx"), py::arg("block_ids_offset"),
-          py::arg("total_blocks"), py::arg("num_objects"),
-          py::arg("skip_prefix_n_blocks"));
-  py::class_<BatchStep>(m, "BatchStep")
-      .def(py::init([](std::vector<StagingCopy> staging,
-                       std::vector<LaunchVar> launches) {
-             return BatchStep{std::move(staging), std::move(launches)};
-           }),
-           py::arg("staging"), py::arg("launches"));
   py::class_<KernelGroupSpec>(m, "KernelGroupSpec")
       .def(py::init([](uintptr_t paged_buffer_ptrs,
                        std::vector<int64_t> lmcache_objects_ptrs,

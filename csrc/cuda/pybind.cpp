@@ -21,14 +21,35 @@ namespace py = pybind11;
 PYBIND11_MODULE(cuda_ops, m) {
   py::module_::import("lmcache.lmcache_native");
 
-  // NOTE: ``TransferDirection`` / ``EngineKVFormat`` and the common transfer
-  // descriptors (``PageBufferShapeDesc``, ``StagingCopy``, ``LaunchVar``,
-  // ``BatchStep``, ``KernelGroupSpec``) are owned exclusively by the
-  // device-independent ``lmcache_native`` module
-  // (csrc/lmcache_native/pybind.cpp). They are NOT exported here. ``cuda_ops``
-  // functions that need enums accept the underlying ``int`` and cast to the
-  // C++ enum, so callers pass ``TransferDirection.H2D.value`` instead of the
-  // enum object.
+  // NOTE: ``TransferDirection`` / ``EngineKVFormat`` plus the portable
+  // descriptors (``PageBufferShapeDesc``, ``KernelGroupSpec``) live in
+  // ``lmcache_native``. The CUDA-only per-batch plan descriptors stay here.
+  // Functions that need enums accept their underlying ``int`` values and cast
+  // locally, so callers pass the canonical ``lmcache_native`` enums.
+
+  py::class_<StagingCopy>(m, "StagingCopy")
+      .def(py::init([](uintptr_t dest, uintptr_t src, size_t nbytes,
+                       size_t host_offset) {
+             return StagingCopy{dest, src, nbytes, host_offset};
+           }),
+           py::arg("dest"), py::arg("src"), py::arg("nbytes"),
+           py::arg("host_offset"));
+  py::class_<LaunchVar>(m, "LaunchVar")
+      .def(
+          py::init([](int group_idx, int64_t block_ids_offset, int total_blocks,
+                      int num_objects, int skip_prefix_n_blocks) {
+            return LaunchVar{group_idx, block_ids_offset, total_blocks,
+                             num_objects, skip_prefix_n_blocks};
+          }),
+          py::arg("group_idx"), py::arg("block_ids_offset"),
+          py::arg("total_blocks"), py::arg("num_objects"),
+          py::arg("skip_prefix_n_blocks"));
+  py::class_<BatchStep>(m, "BatchStep")
+      .def(py::init([](std::vector<StagingCopy> staging,
+                       std::vector<LaunchVar> launches) {
+             return BatchStep{std::move(staging), std::move(launches)};
+           }),
+           py::arg("staging"), py::arg("launches"));
 
   m.def(
       "multi_layer_kv_transfer",

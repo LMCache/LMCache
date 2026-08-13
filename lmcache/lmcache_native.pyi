@@ -50,38 +50,6 @@ class PageBufferShapeDesc:
 
     def __init__(self) -> None: ...
 
-class StagingCopy:
-    """One asynchronous host<->device copy in an object-group transfer plan."""
-
-    def __init__(
-        self,
-        dest: int,
-        src: int,
-        nbytes: int,
-        host_offset: int,
-    ) -> None: ...
-
-class LaunchVar:
-    """Per-batch launch metadata for one kernel-group execution."""
-
-    def __init__(
-        self,
-        group_idx: int,
-        block_ids_offset: int,
-        total_blocks: int,
-        num_objects: int,
-        skip_prefix_n_blocks: int,
-    ) -> None: ...
-
-class BatchStep:
-    """One batch worth of staging copies and kernel launches."""
-
-    def __init__(
-        self,
-        staging: Sequence[StagingCopy],
-        launches: Sequence[LaunchVar],
-    ) -> None: ...
-
 class KernelGroupSpec:
     """Backend-agnostic descriptor for one blocked-transfer kernel group."""
 

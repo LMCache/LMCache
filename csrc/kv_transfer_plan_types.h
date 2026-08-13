@@ -2,15 +2,15 @@
 
 #pragma once
 
+#include <vector>
 #include <cstddef>
 #include <cstdint>
-#include <vector>
 
 #include "kv_transfer_types.h"
 
-// Shared native descriptors for blocked KV transfers and object-group transfer
-// plans. These are backend-agnostic value types: they describe geometry,
-// pointers, and per-launch metadata without depending on any vendor runtime.
+// Shared native descriptors for blocked KV transfers. These are
+// backend-agnostic value types that describe geometry and per-kernel-group
+// invariants without depending on any vendor runtime.
 
 // __host__ __device__ under CUDA/HIP so kernels can call the inline helpers;
 // otherwise keep the header toolchain-agnostic for the common C++ extension.
@@ -71,32 +71,6 @@ struct PageBufferShapeDesc {
                              : static_cast<size_t>(bs) * nh * hs;
     return elems * element_size / sizeof(ScalarType);
   }
-};
-
-// One asynchronous host<->device copy. `host_offset` is the host-side virtual
-// offset in the lmcache allocator (source for H2D, destination for D2H).
-struct StagingCopy {
-  uintptr_t dest;
-  uintptr_t src;
-  size_t nbytes;
-  size_t host_offset;
-};
-
-// One kernel launch within a batch step. The batch-invariant arguments live in
-// the referenced KernelGroupSpec; only these vary per (batch, kernel group).
-struct LaunchVar {
-  int group_idx;             // index into the plan's kernel_group_specs
-  int64_t block_ids_offset;  // element offset into the group's block_ids_base
-  int total_blocks;          // number of block ids for this launch
-  int num_objects;           // chunks in this batch (1-4)
-  int skip_prefix_n_blocks;
-};
-
-// One batch: its staging copies and kernel launches. For H2D the staging runs
-// before the launches, for D2H after; the executor preserves this ordering.
-struct BatchStep {
-  std::vector<StagingCopy> staging;
-  std::vector<LaunchVar> launches;
 };
 
 // Per-kernel-group invariants, resolved once on the Python side.

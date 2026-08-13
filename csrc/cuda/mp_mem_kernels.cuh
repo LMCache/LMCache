@@ -6,6 +6,7 @@
 
 #include "kv_transfer_plan_types.h"
 #include "mem_kernels.cuh"
+#include "transfer_plan_types.cuh"
 
 // ---------------------------------------------------------------------------
 // Object-group transfer plan.

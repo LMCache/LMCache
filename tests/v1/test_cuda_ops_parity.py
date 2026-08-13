@@ -218,14 +218,12 @@ _EXCLUDED_FUNCS: set[str] = {
     "execute_cb_retrieve_plan_flat",
 }
 
-# The shared plan types now live in lmcache_native rather than cuda_ops, so
-# descriptor parity here only concerns any types that remain exported by
-# cuda_ops itself.
+# CUDA-only plan descriptors intentionally remain native-only. Descriptor
+# parity here only concerns portable/shared types with a torch-side surface.
 _EXCLUDED_DESCS: set[str] = {
     "StagingCopy",
     "LaunchVar",
     "BatchStep",
-    "KernelGroupSpec",
     "CBGroupSpec",
 }
 
