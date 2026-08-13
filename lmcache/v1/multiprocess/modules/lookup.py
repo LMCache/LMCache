@@ -406,6 +406,13 @@ class LookupModule:
             job.attn_desc.num_chunks_in_sw,
         )
 
+        # Record the served hit length on the session: free_lookup_locks
+        # needs it to release only the still-held locks of sliding-window
+        # groups (their retained window is anchored at the hit end).
+        self._ctx.session_manager.get_or_create(
+            job.request_id
+        ).lookup_hit_chunks = found_count
+
         self._ctx.event_bus.publish(
             Event(
                 event_type=EventType.MP_LOOKUP_PREFETCH_END,
@@ -474,6 +481,15 @@ class LookupModule:
         ``world_size`` the same way :meth:`lookup` does, so
         the correct number of locks is released.
 
+        Only locks the lookup still holds are released. Full-attention
+        groups hold every hit chunk, so the whole ``[start, end)`` range is
+        released. Sliding-window / linear-attention groups hold only the
+        retained window ``[hit - w, hit)`` — the prefetch controller already
+        unlocked everything earlier when it trimmed the load plan. Releasing
+        those trimmed chunks again would decrement read locks held by
+        *other* requests on the same content-addressed keys, letting
+        eviction reclaim objects mid-retrieve.
+
         Args:
             key: Cache key whose read locks should be released.
             tp_size: Tensor-parallel size for MLA
@@ -484,16 +500,43 @@ class LookupModule:
         )
         if not chunk_hashes:
             return
-        # Release across every object group, mirroring lookup, which locks keys
-        # in every group; releasing only group 0 would leak the rest.
-        #
-        # NOTE: correct only for full attention, where every locked chunk is a
-        # hit chunk. Sliding-window groups do not retain chunks outside their
-        # window, so once SWA prefetch lands this must skip those chunks instead
-        # of releasing every one -- otherwise chunks the engine still holds can
-        # be over-released (e.g. window=512, LMCache hit 1024, vLLM hit 768 ->
-        # chunks 512..768 may leak). Revisit when sliding-window prefetch is on.
-        obj_keys = self._chunk_major_object_keys(key, chunk_hashes)
+
+        attn_desc = self._ctx.layout_desc_registry.find_attn_desc(
+            key.model_name, key.world_size
+        )
+        num_groups = attn_desc.num_object_groups
+        per_group = ipc_key_to_object_keys(key, chunk_hashes, list(range(num_groups)))
+
+        start_chunk = key.start // self._ctx.chunk_size
+        end_chunk = start_chunk + len(chunk_hashes)
+        hit_chunks = self._ctx.session_manager.get_or_create(
+            key.request_id
+        ).lookup_hit_chunks
+
+        # Each per-group list is chunk-major / rank-minor of length
+        # len(chunk_hashes) * num_ranks.
+        num_ranks = len(per_group[0]) // len(chunk_hashes)
+        obj_keys: list[ObjectKey] = []
+        for group_idx, group_keys in enumerate(per_group):
+            if attn_desc.is_full_attention(group_idx):
+                obj_keys.extend(group_keys)
+                continue
+            # Still held for this group: the retained window intersected
+            # with the freed range. When the caller frees the vLLM-hit
+            # prefix ahead of a retrieve, this intersection is empty and
+            # the retrieve releases the window instead; when it frees the
+            # whole hit (no retrieve), this releases exactly the window.
+            window = attn_desc.num_chunks_in_sw[group_idx]
+            held_lo = max(start_chunk, hit_chunks - window)
+            held_hi = min(end_chunk, hit_chunks)
+            if held_hi <= held_lo:
+                continue
+            lo = (held_lo - start_chunk) * num_ranks
+            hi = (held_hi - start_chunk) * num_ranks
+            obj_keys.extend(group_keys[lo:hi])
+
+        if not obj_keys:
+            return
 
         extra_count = compute_extra_count(tp_size, key.world_size)
 
