@@ -1102,16 +1102,22 @@ def _p2p_lookup_request_to_python(
 ) -> tuple[Any, ...]:
     return (
         [_object_key_proto_to_python(k) for k in req.keys],
-        _layout_proto_to_python(req.layout_desc),
+        {
+            group_id: _layout_proto_to_python(layout)
+            for group_id, layout in req.group_layout_descs.items()
+        },
     )
 
 
 def _p2p_lookup_python_to_request(
-    keys: list[ObjectKey], layout_desc: MemoryLayoutDesc
+    keys: list[ObjectKey], group_layout_descs: dict[int, MemoryLayoutDesc]
 ) -> "lmcache_mq_pb2.P2pLookupAndLockRequest":
     return lmcache_mq_pb2.P2pLookupAndLockRequest(
         keys=[_object_key_python_to_proto(k) for k in keys],
-        layout_desc=_layout_python_to_proto(layout_desc),
+        group_layout_descs={
+            group_id: _layout_python_to_proto(layout)
+            for group_id, layout in group_layout_descs.items()
+        },
     )
 
 
@@ -1319,6 +1325,7 @@ def _cb_register_rope_v3_request_to_python(
         req.head_size,
         bool(req.is_neox_style),
         list(req.group_to_cache),
+        [list(window.values) for window in req.group_rot],
     )
 
 
@@ -1328,6 +1335,7 @@ def _cb_register_rope_v3_python_to_request(
     head_size: int,
     is_neox_style: bool,
     group_to_cache: list[int],
+    group_rot: list[list[int]],
 ) -> "lmcache_mq_pb2.CbRegisterRopeV3Request":
     return lmcache_mq_pb2.CbRegisterRopeV3Request(
         instance_id=instance_id,
@@ -1335,6 +1343,7 @@ def _cb_register_rope_v3_python_to_request(
         head_size=head_size,
         is_neox_style=bool(is_neox_style),
         group_to_cache=list(group_to_cache),
+        group_rot=[lmcache_mq_pb2.RopeWindow(values=window) for window in group_rot],
     )
 
 

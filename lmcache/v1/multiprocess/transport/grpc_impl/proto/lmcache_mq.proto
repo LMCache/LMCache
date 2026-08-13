@@ -462,7 +462,7 @@ message TransferChannelAddress {
 
 message P2pLookupAndLockRequest {
   repeated ObjectKey keys = 1;
-  MemoryLayoutDesc layout_desc = 2;
+  map<int64, MemoryLayoutDesc> group_layout_descs = 2;
 }
 
 message P2pLookupAndLockResponse {
@@ -548,12 +548,17 @@ message CbRegisterKvCacheResponse {}
 // CbRegisterRopeV3: publish per-engine rope caches (dual-RoPE models
 // send two).  ``group_to_cache`` maps engine group idx -> cache idx;
 // empty means "all groups use cache 0".
+message RopeWindow {
+  repeated int64 values = 1;
+}
+
 message CbRegisterRopeV3Request {
   int64 instance_id = 1;
   repeated DeviceIpcWrapper cos_sin_caches_ipc = 2;
   int64 head_size = 3;
   bool is_neox_style = 4;
   repeated int64 group_to_cache = 5;
+  repeated RopeWindow group_rot = 6;
 }
 
 message CbRegisterRopeV3Response {}

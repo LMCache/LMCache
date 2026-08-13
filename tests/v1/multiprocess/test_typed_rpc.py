@@ -14,6 +14,7 @@ the invariants that:
 
 # Standard
 from typing import Any, Optional
+import inspect
 import socket
 import subprocess
 import sys
@@ -719,14 +720,20 @@ def test_p2p_lookup_and_query_roundtrip() -> None:
         ),
         ObjectKey(chunk_hash=b"\x03\x04", model_name="opt", kv_rank=7),
     ]
-    layout = MemoryLayoutDesc(
-        shapes=[torch.Size([2, 8, 128]), torch.Size([2, 8, 128])],
-        dtypes=[torch.float16, torch.bfloat16],
-    )
-    proto_req = lookup.python_to_request(keys, layout)
-    round_keys, round_layout = lookup.request_to_python(proto_req)
+    group_layouts = {
+        0: MemoryLayoutDesc(
+            shapes=[torch.Size([2, 8, 128]), torch.Size([2, 8, 128])],
+            dtypes=[torch.float16, torch.bfloat16],
+        ),
+        7: MemoryLayoutDesc(
+            shapes=[torch.Size([4, 64])],
+            dtypes=[torch.uint8],
+        ),
+    }
+    proto_req = lookup.python_to_request(keys, group_layouts)
+    round_keys, round_group_layouts = lookup.request_to_python(proto_req)
     assert round_keys == keys
-    assert round_layout == layout
+    assert round_group_layouts == group_layouts
 
     proto_resp = lookup.python_to_response(99)
     assert lookup.response_to_python(proto_resp) == 99
@@ -795,6 +802,23 @@ def test_typed_rpc_coverage_is_complete() -> None:
     """Enforce the migration invariant: every RequestType is typed."""
     missing = [rt.name for rt in RequestType if rt not in _TYPED_RPCS]
     assert not missing, f"legacy rpcs remain: {missing}"
+
+
+@pytest.mark.parametrize("request_type", list(RequestType))
+def test_typed_rpc_request_arity_matches_protocol(request_type: RequestType) -> None:
+    """Keep typed adapters aligned with the public protocol payload contract."""
+    signature = inspect.signature(_TYPED_RPCS[request_type].python_to_request)
+    positional = [
+        parameter
+        for parameter in signature.parameters.values()
+        if parameter.kind
+        in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        )
+        and parameter.default is inspect.Parameter.empty
+    ]
+    assert len(positional) == len(get_payload_classes(request_type))
 
 
 def test_register_kv_cache_roundtrip() -> None:
@@ -870,12 +894,14 @@ def test_cb_register_kv_cache_roundtrip() -> None:
 def test_cb_register_rope_v3_roundtrip() -> None:
     spec = _TYPED_RPCS[RequestType.CB_REGISTER_ROPE_V3]
     caches = [_FakeIPCWrapper("rope-0"), _FakeIPCWrapper("rope-1")]
-    proto_req = spec.python_to_request(3, caches, 128, True, [0, 1, 0])
-    iid, r_caches, head, neox, mapping = spec.request_to_python(proto_req)
+    group_rot = [[0, 64], [], [128, 32]]
+    proto_req = spec.python_to_request(3, caches, 128, True, [0, 1, 0], group_rot)
+    iid, r_caches, head, neox, mapping, r_group_rot = spec.request_to_python(proto_req)
     assert iid == 3
     assert head == 128
     assert neox is True
     assert mapping == [0, 1, 0]
+    assert r_group_rot == group_rot
     assert [w.device_uuid for w in r_caches] == [
         "test-uuid-rope-0",
         "test-uuid-rope-1",
