@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-05-18 17:25+0000\n"
+"POT-Creation-Date: 2026-07-06 10:41+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -23,7 +23,15 @@ msgstr ""
 msgid "Adding new storage backends"
 msgstr "添加新的存储后端"
 
-#: ../../source/api_reference/storage_backends.rst:4
+#: ../../source/api_reference/storage_backends.rst:6
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance. For the MP mode equivalent of"
+" this page, see :doc:`/mp/l2_storage/index`."
+msgstr "本页记录了 LMCache 的进程内模式（已弃用）的行为。请考虑使用 :doc:`LMCache MP 模式 </mp/index>` 以获得更好的功能支持和性能。有关此页面的 MP 模式等效内容，请参见 :doc:`/mp/l2_storage/index`。"
+
+#: ../../source/api_reference/storage_backends.rst:9
 msgid "Coming soon..."
 msgstr "敬请期待..."
 

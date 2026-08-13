@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-06-22 11:07+0000\n"
+"POT-Creation-Date: 2026-07-20 10:08+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -31,7 +31,7 @@ msgid ""
 "medium they target."
 msgstr ""
 "LMCache 提供了多个 L2 存储后端。使用 ``--l2-adapter`` 标志选择一个或多个（每个后端的 ``\"type\"`` "
-"如下所示）；每个后端都有其自己的配置页面。它们按目标介质的类型进行分组。"
+"如下所示）；每个后端均有其各自的配置页面。它们按目标介质的类型进行分组。"
 
 #: ../../source/mp/l2_storage/supported_storages.rst:13
 msgid "Backend"
@@ -73,7 +73,7 @@ msgstr "文件与块"
 
 #: ../../source/mp/l2_storage/supported_storages.rst:22
 msgid ":doc:`FS (native) <fs_native>`"
-msgstr ":doc:`FS (native) <fs_native>`"
+msgstr ":doc:`FS（原生）<fs_native>`"
 
 #: ../../source/mp/l2_storage/supported_storages.rst:23
 msgid "``fs_native``"
@@ -88,83 +88,113 @@ msgid "``raw_block``"
 msgstr "``raw_block``"
 
 #: ../../source/mp/l2_storage/supported_storages.rst:28
-msgid ":doc:`S3 <s3>`"
-msgstr ":doc:`S3 <s3>`"
+msgid ":doc:`Bigtable <bigtable>`"
+msgstr "`:doc:`Bigtable <bigtable>``"
 
 #: ../../source/mp/l2_storage/supported_storages.rst:29
-msgid "``s3``"
-msgstr "``s3``"
+msgid "``bigtable``"
+msgstr "``bigtable``"
 
 #: ../../source/mp/l2_storage/supported_storages.rst:30
 #: ../../source/mp/l2_storage/supported_storages.rst:33
 #: ../../source/mp/l2_storage/supported_storages.rst:36
 #: ../../source/mp/l2_storage/supported_storages.rst:39
 #: ../../source/mp/l2_storage/supported_storages.rst:42
+#: ../../source/mp/l2_storage/supported_storages.rst:45
+#: ../../source/mp/l2_storage/supported_storages.rst:48
 msgid "Remote & Distributed"
 msgstr "远程与分布式"
 
 #: ../../source/mp/l2_storage/supported_storages.rst:31
+msgid ":doc:`SageMaker HyperPod <sagemaker_hyperpod>`"
+msgstr ":doc:`SageMaker HyperPod <sagemaker_hyperpod>`"
+
+#: ../../source/mp/l2_storage/supported_storages.rst:32
+msgid "``sagemaker-hyperpod``"
+msgstr "``sagemaker-hyperpod``"
+
+#: ../../source/mp/l2_storage/supported_storages.rst:34
+msgid ":doc:`S3 <s3>`"
+msgstr ":doc:`S3 <s3>`"
+
+#: ../../source/mp/l2_storage/supported_storages.rst:35
+msgid "``s3``"
+msgstr "``s3``"
+
+#: ../../source/mp/l2_storage/supported_storages.rst:37
 msgid ":doc:`HF Bucket <hfbucket>`"
 msgstr ":doc:`HF Bucket <hfbucket>`"
 
-#: ../../source/mp/l2_storage/supported_storages.rst:32
+#: ../../source/mp/l2_storage/supported_storages.rst:38
 msgid "``hfbucket``"
 msgstr "``hfbucket``"
 
-#: ../../source/mp/l2_storage/supported_storages.rst:34
+#: ../../source/mp/l2_storage/supported_storages.rst:40
 msgid ":doc:`Mooncake Store <mooncake_store>`"
 msgstr ":doc:`Mooncake Store <mooncake_store>`"
 
-#: ../../source/mp/l2_storage/supported_storages.rst:35
+#: ../../source/mp/l2_storage/supported_storages.rst:41
 msgid "``mooncake_store``"
 msgstr "``mooncake_store``"
 
-#: ../../source/mp/l2_storage/supported_storages.rst:37
+#: ../../source/mp/l2_storage/supported_storages.rst:43
 msgid ":doc:`RESP (Redis/Valkey) <resp>`"
 msgstr ":doc:`RESP (Redis/Valkey) <resp>`"
 
-#: ../../source/mp/l2_storage/supported_storages.rst:38
+#: ../../source/mp/l2_storage/supported_storages.rst:44
 msgid "``resp``"
 msgstr "``resp``"
 
-#: ../../source/mp/l2_storage/supported_storages.rst:40
+#: ../../source/mp/l2_storage/supported_storages.rst:46
 msgid ":doc:`Aerospike <aerospike>`"
 msgstr ":doc:`Aerospike <aerospike>`"
 
-#: ../../source/mp/l2_storage/supported_storages.rst:41
+#: ../../source/mp/l2_storage/supported_storages.rst:47
 msgid "``aerospike``"
 msgstr "``aerospike``"
 
-#: ../../source/mp/l2_storage/supported_storages.rst:43
+#: ../../source/mp/l2_storage/supported_storages.rst:49
 msgid ":doc:`DAX <dax>`"
 msgstr ":doc:`DAX <dax>`"
 
-#: ../../source/mp/l2_storage/supported_storages.rst:44
+#: ../../source/mp/l2_storage/supported_storages.rst:50
 msgid "``dax``"
 msgstr "``dax``"
 
-#: ../../source/mp/l2_storage/supported_storages.rst:45
+#: ../../source/mp/l2_storage/supported_storages.rst:51
 msgid "Byte-addressable memory"
 msgstr "字节可寻址内存"
 
-#: ../../source/mp/l2_storage/supported_storages.rst:46
+#: ../../source/mp/l2_storage/supported_storages.rst:52
 msgid ":doc:`Mock <mock>`"
 msgstr ":doc:`Mock <mock>`"
 
-#: ../../source/mp/l2_storage/supported_storages.rst:47
+#: ../../source/mp/l2_storage/supported_storages.rst:53
 msgid "``mock``"
 msgstr "``mock``"
 
-#: ../../source/mp/l2_storage/supported_storages.rst:48
-#: ../../source/mp/l2_storage/supported_storages.rst:51
+#: ../../source/mp/l2_storage/supported_storages.rst:54
+#: ../../source/mp/l2_storage/supported_storages.rst:57
 msgid "Testing"
 msgstr "测试"
 
-#: ../../source/mp/l2_storage/supported_storages.rst:49
+#: ../../source/mp/l2_storage/supported_storages.rst:55
 msgid ":doc:`Fault Inject <fault_inject>`"
 msgstr "`:doc:`故障注入 <fault_inject>` `"
 
-#: ../../source/mp/l2_storage/supported_storages.rst:50
+#: ../../source/mp/l2_storage/supported_storages.rst:56
 msgid "``fault_inject``"
 msgstr "``fault_inject``"
+
+#: ../../source/mp/l2_storage/supported_storages.rst:58
+msgid ":doc:`Plugin <plugin>`"
+msgstr "`:doc:`插件 <plugin>` `"
+
+#: ../../source/mp/l2_storage/supported_storages.rst:59
+msgid "``plugin`` / ``native_plugin``"
+msgstr "``plugin`` / ``native_plugin``"
+
+#: ../../source/mp/l2_storage/supported_storages.rst:60
+msgid "Custom / External"
+msgstr "自定义 / 外部"
 

@@ -67,7 +67,7 @@ msgstr ""
 
 #: ../../source/recipes/qwen3.rst:24
 msgid "**Status:** Validated with LMCache."
-msgstr "**状态：** 已通过 LMCache 验证。"
+msgstr "**状态:** 已通过 LMCache 验证。"
 
 #: ../../source/recipes/qwen3.rst:26
 msgid "Start the LMCache MP server:"
@@ -75,19 +75,19 @@ msgstr "启动 LMCache MP 服务器："
 
 #: ../../source/recipes/qwen3.rst:34
 msgid "**Qwen3-235B-A22B** (4 GPUs, expert parallel):"
-msgstr "**Qwen3-235B-A22B** (4 GPUs, 专家并行):"
+msgstr "**Qwen3-235B-A22B**\\ （4 个 GPU，专家并行）："
 
 #: ../../source/recipes/qwen3.rst:49
 msgid "**Qwen3-30B-A3B** (1 GPU):"
-msgstr "**Qwen3-30B-A3B** (1 GPU):"
+msgstr "**Qwen3-30B-A3B**\\ （1 个 GPU）："
 
 #: ../../source/recipes/qwen3.rst:62
 msgid "**Qwen3-Coder-480B-A35B-Instruct-FP8** (8 GPUs, expert parallel):"
-msgstr "**Qwen3-Coder-480B-A35B-Instruct-FP8** (8 个 GPU，专家并行)："
+msgstr "**Qwen3-Coder-480B-A35B-Instruct-FP8**\\ （8 个 GPU，专家并行）："
 
 #: ../../source/recipes/qwen3.rst:76
 msgid "**Qwen3-Coder-30B-A3B-Instruct** (1 GPU):"
-msgstr "**Qwen3-Coder-30B-A3B-Instruct** (1 GPU):"
+msgstr "**Qwen3-Coder-30B-A3B-Instruct**\\ （1 个 GPU）："
 
 #: ../../source/recipes/qwen3.rst:88
 msgid ""
@@ -123,9 +123,7 @@ msgstr "TRT-LLM"
 msgid ""
 "**Status:** Supported. See :doc:`../getting_started/quickstart` for TRT-"
 "LLM + LMCache setup."
-msgstr ""
-"**状态：** 支持。请参阅 :doc:`../getting_started/quickstart` 以获取 TRT-LLM + KV "
-"Cache 的设置。"
+msgstr "**状态：** 支持。TRT-LLM + LMCache 的配置方式，请参阅 :doc:`../getting_started/quickstart`。"
 
 #: ../../source/recipes/qwen3.rst:105
 msgid "CacheBlend support"
@@ -145,7 +143,7 @@ msgstr "状态"
 
 #: ../../source/recipes/qwen3.rst:116
 msgid "Notes"
-msgstr "笔记"
+msgstr "备注"
 
 #: ../../source/recipes/qwen3.rst:117
 msgid ":doc:`CacheGen <../kv_cache_optimizations/compression/cachegen>`"

@@ -27,7 +27,7 @@ import torch
 
 # First Party
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
-from lmcache.v1.memory_management import MixedMemoryAllocator
+from lmcache.v1.memory_allocators.mixed_memory_allocator import MixedMemoryAllocator
 from lmcache.v1.metadata import LMCacheMetadata
 
 if importlib.util.find_spec("pytest_benchmark") is None:
@@ -35,6 +35,18 @@ if importlib.util.find_spec("pytest_benchmark") is None:
     @pytest.fixture
     def benchmark():
         pytest.skip("pytest-benchmark is not installed")
+
+
+@pytest.fixture(scope="session", autouse=True)
+def disable_usage_tracking():
+    """Keep the test suite from sending usage telemetry to the stats server.
+
+    Tests that exercise the telemetry itself (tests/test_usage_context.py)
+    re-enable it per-test via monkeypatch with an injected transport.
+    """
+    os.environ["LMCACHE_TRACK_USAGE"] = "false"
+    yield
+
 
 # This is to mock the constructor and destructor of
 # MixedMemoryAllocator and PinMemoryAllocator to
@@ -84,17 +96,18 @@ def patch_mixed_allocator():
 
     def fake_mixed_close(self):
         if not self._unregistered:
-            torch.cuda.synchronize()
+            torch_dev.synchronize()
             # torch.cuda.cudart().cudaHostUnregister(self.buffer.data_ptr())
             self._unregistered = True
 
     with (
         patch(
-            "lmcache.v1.memory_management.MixedMemoryAllocator.__init__",
+            "lmcache.v1.memory_allocators.mixed_memory_allocator.MixedMemoryAllocator.__init__",
             fake_mixed_init,
         ),
         patch(
-            "lmcache.v1.memory_management.MixedMemoryAllocator.close", fake_mixed_close
+            "lmcache.v1.memory_allocators.mixed_memory_allocator.MixedMemoryAllocator.close",
+            fake_mixed_close,
         ),
     ):
         yield
@@ -134,15 +147,19 @@ def patch_pin_allocator():
 
     def fake_pin_close(self):
         if not self._unregistered:
-            torch.cuda.synchronize()
+            torch_dev.synchronize()
             # torch.cuda.cudart().cudaHostUnregister(self.buffer.data_ptr())
             self._unregistered = True
 
     with (
         patch(
-            "lmcache.v1.memory_management.PinMemoryAllocator.__init__", fake_pin_init
+            "lmcache.v1.memory_allocators.pin_memory_allocator.PinMemoryAllocator.__init__",
+            fake_pin_init,
         ),
-        patch("lmcache.v1.memory_management.PinMemoryAllocator.close", fake_pin_close),
+        patch(
+            "lmcache.v1.memory_allocators.pin_memory_allocator.PinMemoryAllocator.close",
+            fake_pin_close,
+        ),
     ):
         yield
 """
@@ -152,19 +169,41 @@ class MockSyncGlideClient:
     """In-memory mock of a synchronous Glide (Valkey) client."""
 
     _store: dict[bytes, bytes] = {}
+    #: Records the ``expiry`` argument from the most recent ``set`` call so
+    #: tests can assert TTL behavior. ``None`` means no expiry was passed.
+    last_expiry = None
 
-    def set(self, key: bytes, value) -> None:
+    def set(self, key: bytes, value, expiry=None) -> None:
         self._store[key] = bytes(value)
+        type(self).last_expiry = expiry
 
-    def get(self, key: bytes):
-        return self._store.get(key)
+    def get(self, key: bytes, buffer=None):
+        data = self._store.get(key)
+        if buffer is None:
+            return data
+        # Mirror glide's native buffer-GET: write into the caller's buffer and
+        # return the number of bytes read (an int count), or None on miss.
+        if data is None:
+            return None
+        n = len(data)
+        buffer[:n] = data
+        return n
 
     def exists(self, keys: list[bytes]) -> int:
         return sum(1 for k in keys if k in self._store)
 
+    def delete(self, keys: list[bytes]) -> int:
+        removed = 0
+        for k in keys:
+            if k in self._store:
+                del self._store[k]
+                removed += 1
+        return removed
+
     @classmethod
     def reset_store(cls) -> None:
         cls._store.clear()
+        cls.last_expiry = None
 
 
 class MockRedis:
@@ -767,12 +806,16 @@ def memory_allocator():
 
 
 @pytest.fixture(autouse=True)  # function-scoped by default
-def use_shared_allocator(request, monkeypatch, memory_allocator):
+def use_shared_allocator(request, monkeypatch):
     """Default: patch. Opt out with @pytest.mark.no_shared_allocator."""
     if request.node.get_closest_marker("no_shared_allocator"):
         # do NOT patch for this test
         yield
         return
+
+    # Resolve lazily (after the marker check) so the 5GB session allocator
+    # is only constructed when a test actually uses the shared allocator.
+    memory_allocator = request.getfixturevalue("memory_allocator")
 
     def _create_shared_allocator(config, metadata, numa_mapping):
         return memory_allocator

@@ -38,12 +38,21 @@ Recipe pages for the validated hybrid-attention architectures:
    * - Qwen3.5 / Qwen3.6 series
      - Mamba / GDN + full
      - :doc:`/recipes/qwen3_5`
+   * - Kimi-Linear
+     - KDA linear-attention + MLA full
+     - :doc:`/recipes/kimi_linear`
+   * - Kimi K3
+     - KDA linear-attention + MLA full
+     - :doc:`/recipes/kimi_k3`
    * - DeepSeek-V4-Flash
      - Sparse-MLA (multiple KV groups)
      - :doc:`/recipes/deepseek_v4_flash`
    * - GLM 5.1/5.2
      - Dynamic Sparse Attention (multiple KV groups)
      - :doc:`/recipes/glm5_2`
+   * - MiniMax-M3
+     - Sparse attention + lightning indexer (mixed KV formats in one group)
+     - :doc:`/recipes/minimax_m3`
 
 .. toctree::
    :hidden:
@@ -53,8 +62,11 @@ Recipe pages for the validated hybrid-attention architectures:
    /recipes/gemma4
    /recipes/gpt_oss
    /recipes/qwen3_5
+   /recipes/kimi_linear
+   /recipes/kimi_k3
    /recipes/deepseek_v4_flash
    /recipes/glm5_2
+   /recipes/minimax_m3
 
 What Works
 ----------
@@ -96,34 +108,36 @@ detects the model's KV cache groups automatically at registration time.
 Object-group separation
 -----------------------
 
-At KV-cache registration LMCache buckets a hybrid model's layers into **object
-groups** — the unit it stores and retrieves as one object. By default
-(``--separate-object-groups``, on) each distinct cross-chunk attention window
-becomes its own object group: full-attention layers form one group, and each
-sliding-window size (mamba / GDN included) forms another. Pass
-``--no-separate-object-groups`` to keep every layer in a single full-attention
-object group instead (the previous behavior).
+At KV-cache registration LMCache can bucket a hybrid model's layers into
+**object groups** — the unit it stores and retrieves as one object. With
+``--separate-object-groups`` each distinct cross-chunk attention window becomes
+its own object group: full-attention layers form one group, and each
+sliding-window size (mamba / GDN included) forms another. The default is
+**off** — every layer shares a single full-attention object group.
 
 .. code-block:: bash
 
-   # default: one object group per attention window
+   # default: a single full-attention object group for all layers
    lmcache server --chunk-size 256 --l1-size-gb 100
 
-   # opt out: a single full-attention object group for all layers
-   lmcache server --chunk-size 256 --l1-size-gb 100 --no-separate-object-groups
+   # one object group per attention window (required for mamba / GDN hybrids)
+   lmcache server --chunk-size 256 --l1-size-gb 100 --separate-object-groups
 
-The flag is transparent to correctness — prefix caching and KV reuse behave the
-same either way, and a non-hybrid model (a single attention behavior) always
-resolves to one object group regardless of the setting. Separation organizes
-storage by attention window so that each group's cross-chunk window is tracked
-independently.
+For a non-hybrid model (a single attention behavior) the setting makes no
+difference — every layer resolves to one object group either way. For a
+**Mamba / linear-attention hybrid it is required** (see below): it gives the
+linear-attention layers their own cache objects so their recurrent state is
+stored and loaded independently of the full-attention layers — which is what
+lets ``--max-num-batched-tokens`` exceed twice the block size.
 
 Mamba / Linear-Attention Hybrids
 --------------------------------
 
 Models that interleave **Mamba / Gated-DeltaNet (GDN) linear-attention layers**
 with full attention — the Qwen3.5 and Qwen3.6 series (``Qwen/Qwen3.5-0.8B``,
-``Qwen/Qwen3.6-27B``, …), Qwen3-Next, and other GDN hybrids — are supported.
+``Qwen/Qwen3.6-27B``, …), Qwen3-Next, Kimi-Linear
+(``moonshotai/Kimi-Linear-48B-A3B-Instruct``), Kimi K3
+(``moonshotai/Kimi-K3``), and other GDN hybrids — are supported.
 Unlike a paged key/value cache, their linear-attention layers keep a recurrent
 **state cache** (a convolution + SSM state). LMCache reinterprets that state as
 an opaque page at registration time, so prefix caching and KV reuse work end to
@@ -190,22 +204,35 @@ example:
    * - ``Qwen/Qwen3.5-0.8B``
      - 544
      - 1
+   * - ``moonshotai/Kimi-Linear-48B-A3B-Instruct``
+     - 944
+     - 2
+   * - ``moonshotai/Kimi-K3``
+     - 768
+     - 8
 
-Step 2 — derive the three required flags from ``N``
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Step 2 — derive the required flags from ``N``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-#. **LMCache server** ``--chunk-size`` **= N** (or any multiple of ``N``). This
-   is the rule the connector enforces: LMCache's chunk size must be a multiple
-   of vLLM's unified block size, or registration fails::
+#. **LMCache server** ``--chunk-size`` **= N** (or any multiple of ``N``) **and**
+   ``--separate-object-groups``. The chunk-size rule is enforced by the
+   connector (it must be a multiple of vLLM's unified block size, or
+   registration fails); ``--separate-object-groups`` gives the
+   linear-attention layers their own cache objects and is required for these
+   hybrids::
 
-       lmcache server --chunk-size 784 --l1-size-gb 100 --eviction-policy LRU
+       lmcache server --chunk-size 784 --separate-object-groups \
+           --l1-size-gb 100 --eviction-policy LRU
 
-#. **vLLM** ``--max-num-batched-tokens`` **in [N, 2·N)** — setting it equal to
-   ``N`` is the simple, always-valid choice. Outside this range LMCache raises
-   at engine startup. ``align`` mode snapshots the Mamba state only at the
-   *end* of each scheduler step, so each prefill step must advance exactly one
-   block; a larger budget would let a step skip block boundaries, leaving no
-   snapshot for LMCache to store at those prefixes.
+#. **vLLM** ``--max-num-batched-tokens`` **≥ N** — a scheduler step must advance
+   at least one whole block (``align`` snapshots the Mamba state only at the
+   *end* of each step, on a block boundary). Within ``[N, 2·N)`` every step
+   advances exactly one block, so LMCache snapshots every block boundary — the
+   finest partial-prefix reuse, and ``N`` is the simplest always-valid choice.
+   ``--separate-object-groups`` additionally allows values **≥ 2·N**, which
+   raise prefill throughput with larger steps but snapshot only the last block
+   of each step (cached prefixes then align to step boundaries, not every
+   block).
 
 #. **vLLM** ``--mamba-cache-mode align --enable-prefix-caching`` — ``align`` is
    mandatory (GDN backends do not support the ``all`` mode)::
@@ -216,9 +243,9 @@ Step 2 — derive the three required flags from ``N``
            --kv-transfer-config \
            '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both"}'
 
-So for a freshly-probed model the whole derivation is just: read ``N`` (step 1),
-then pass ``--chunk-size N`` to the server and ``--max-num-batched-tokens N`` to
-vLLM.
+So for a freshly-probed model the whole derivation is: read ``N`` (step 1), then
+pass ``--chunk-size N --separate-object-groups`` to the server and
+``--max-num-batched-tokens N`` to vLLM.
 
 No ``--no-disable-hybrid-kv-cache-manager`` or attention-backend flag is needed;
 ``LMCacheMPConnector`` advertises hybrid support and vLLM auto-selects the GDN
@@ -241,12 +268,6 @@ Caveats
 
 See the :doc:`Qwen3.5 / Qwen3.6 recipe <../recipes/qwen3_5>` for the validated
 end-to-end commands and the per-model block sizes.
-
-What Is Not Supported Yet
--------------------------
-
-- **DeepSeek-V4-style compressed / indexer caches** are not yet handled by the
-  multiprocess connector.
 
 Verifying Correctness
 ---------------------

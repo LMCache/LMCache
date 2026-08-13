@@ -76,6 +76,10 @@ _SPECIAL_ENCODER_DECODERS = {
         get_customized_encoder(MemoryLayoutDesc),
         get_customized_decoder(MemoryLayoutDesc),
     ),
+    dict[int, MemoryLayoutDesc]: (
+        get_customized_encoder(dict[int, MemoryLayoutDesc]),
+        get_customized_decoder(dict[int, MemoryLayoutDesc]),
+    ),
 }
 
 

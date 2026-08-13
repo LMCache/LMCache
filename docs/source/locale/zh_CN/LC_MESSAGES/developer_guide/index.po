@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-06-17 02:35+0000\n"
+"POT-Creation-Date: 2026-07-20 10:08+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -27,5 +27,13 @@ msgstr "开发者指南"
 msgid ""
 "How to contribute to LMCache and extend it with new storage backends, CLI"
 " commands, and HTTP endpoints."
-msgstr "如何为 LMCache 贡献代码，并通过新的存储后端、CLI 命令和 HTTP 端点扩展它。"
+msgstr "如何为 LMCache 贡献代码，并通过新的存储后端、CLI 命令和 HTTP 端点对其进行扩展。"
+
+#: ../../source/developer_guide/index.rst:12
+msgid "extending_lmcache/adding_a_new_device_backend"
+msgstr "extending_lmcache/adding_a_new_device_backend"
+
+#: ../../source/developer_guide/index.rst:13
+msgid "cli extending_http_api"
+msgstr "cli extending_http_api"
 

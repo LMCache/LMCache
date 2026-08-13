@@ -225,7 +225,9 @@ def async_loop():
 def memory_allocator():
     """Create a memory allocator for testing."""
     # First Party
-    from lmcache.v1.memory_management import AdHocMemoryAllocator
+    from lmcache.v1.memory_allocators.ad_hoc_memory_allocator import (
+        AdHocMemoryAllocator,
+    )
 
     return AdHocMemoryAllocator(device="cpu")
 

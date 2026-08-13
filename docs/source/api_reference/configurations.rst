@@ -1,6 +1,11 @@
 Configuring LMCache
 ===================
 
+.. warning::
+
+   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance. For the MP mode equivalent of this page, see :doc:`/mp/configuration`.
+
+
 LMCache supports two types of configurations:
 
 1. **Configuration file**: a YAML (recommended) or JSON file that contains the configuration items.
@@ -180,15 +185,15 @@ Settings for enabling and configuring peer-to-peer CPU KV cache sharing and glob
      - Description
    * - enable_p2p
      - LMCACHE_ENABLE_P2P
-     - Whether to enable peer-to-peer sharing. Values: true/false. Default: false
+     - Whether to enable peer-to-peer sharing. Requires ``enable_controller=true`` and the controller settings below. Values: true/false. Default: false
    * - p2p_host
      - LMCACHE_P2P_HOST
      - Ip address. Required if enable_p2p is true
-   * - peer_init_ports
-     - LMCACHE_PEER_INIT_PORTS
+   * - p2p_init_ports
+     - LMCACHE_P2P_INIT_PORTS
      - Ports for p2p peer init. Required if enable_p2p is true
-   * - peer_lookup_ports
-     - LMCACHE_PEER_lookup_PORTS
+   * - p2p_lookup_ports
+     - LMCACHE_P2P_LOOKUP_PORTS
      - Ports for p2p peer lookup. Required if enable_p2p is true
    * - transfer_channel
      - LMCACHE_TRANSFER_CHANNEL
@@ -211,13 +216,16 @@ Settings for the KV cache controller functionality.
      - Whether to enable controller. Values: true/false. Default: false
    * - lmcache_instance_id
      - LMCACHE_LMCACHE_INSTANCE_ID
-     - ID of the LMCache instance. Default: "lmcache_default_instance"
-   * - controller_url
-     - LMCACHE_CONTROLLER_URL
-     - URL of the controller server
-   * - lmcache_worker_port
-     - LMCACHE_LMCACHE_WORKER_PORT
-     - Port number for LMCache worker
+     - ID of the LMCache instance. Must be non-null if ``enable_controller`` is true. If omitted, a unique ``lmcacheengineconfig_<uuid>`` value is generated
+   * - controller_pull_url
+     - LMCACHE_CONTROLLER_PULL_URL
+     - URL used by workers to pull commands from the controller server. Required if ``enable_controller`` is true
+   * - controller_reply_url
+     - LMCACHE_CONTROLLER_REPLY_URL
+     - URL used by workers to send replies to the controller server. Required if ``enable_controller`` is true
+   * - lmcache_worker_ports
+     - LMCACHE_LMCACHE_WORKER_PORTS
+     - Non-empty list of port numbers for LMCache workers. Required if ``enable_controller`` is true
 
 Disaggregated Prefill Configurations
 -------------------------------------------
@@ -274,13 +282,13 @@ Settings for disaggregated prefill functionality. The latest/default PD is imple
      - Port for proxy server. Required for senders to connect to inform the proxy when transfer to decoder has been completed
    * - pd_allocation_timeout_sec
      - LMCACHE_PD_ALLOCATION_TIMEOUT_SEC
-     - Maximum seconds to retry memory allocation before giving up. Default: 5.0
+     - Maximum seconds to retry memory allocation before giving up. Default: infinity (no timeout)
    * - pd_shutdown_timeout_sec
      - LMCACHE_PD_SHUTDOWN_TIMEOUT_SEC
      - Maximum seconds to wait for event loop shutdown and thread join. Default: 5.0
    * - pd_condition_poll_interval_sec
      - LMCACHE_PD_CONDITION_POLL_INTERVAL_SEC
-     - Polling interval in seconds when waiting on a threading/asyncio Condition. Small enough to be responsive, large enough not to spin-waste CPU. Default: 0.05
+     - Polling interval in seconds when waiting on a threading/asyncio Condition. Small enough to be responsive, large enough not to spin-waste CPU. Default: 0.005
    * - pd_max_prefill_len
      - LMCACHE_PD_MAX_PREFILL_LEN
      - Maximum prefill token length that the PD buffer must be able to hold. If > 0, initialization raises ValueError when the buffer capacity (in tokens) is smaller than this value. Set to 0 (default) to skip the check.
@@ -321,6 +329,31 @@ Settings for P2P (peer-to-peer) backend timeout behavior. These configurations a
    * - p2p_socket_send_timeout_ms
      - 10000
      - Timeout in milliseconds for socket send operations
+
+Disk I/O Backend Configurations
+---------------------------------
+
+Settings shared by disk-based storage backends (local disk and GDS). These configurations are specified through ``extra_config``.
+
+.. code-block:: yaml
+
+    extra_config:
+      use_odirect: true
+      disk_io_threads: 8
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 15 55
+
+   * - Configuration Key
+     - Default
+     - Description
+   * - use_odirect
+     - false
+     - Enable O_DIRECT for disk I/O, bypassing the kernel page cache. Recommended when most local CPU memory is already used for KV cache offloading.
+   * - disk_io_threads
+     - 4
+     - Number of worker threads in the disk I/O thread pool. Applies to both the local disk backend and the GDS backend. Increase for higher parallelism on fast NVMe drives. (Replaces the deprecated ``gds_io_threads`` key.)
 
 Nixl (as a storage backend) Configurations
 ------------------------------------------
@@ -505,9 +538,9 @@ Settings for plugin system.
    * - YAML Config Name
      - Environment Variable
      - Description
-   * - plugin_locations
-     - LMCACHE_PLUGIN_LOCATIONS
-     - List of plugin locations. Default: []
+   * - runtime_plugin_locations
+     - LMCACHE_RUNTIME_PLUGIN_LOCATIONS
+     - List of runtime plugin locations. Default: null
 
 Deprecated Configurations
 -------------------------
@@ -524,4 +557,7 @@ These configurations are deprecated and may be removed in future versions.
    * - audit_actual_remote_url
      - LMCACHE_AUDIT_ACTUAL_REMOTE_URL
      - (Deprecated) URL of actual remote LMCache instance for auditing. Use extra_config['audit_actual_remote_url'] instead
+   * - plugin_locations
+     - LMCACHE_PLUGIN_LOCATIONS
+     - Deprecated alias for ``runtime_plugin_locations``
      

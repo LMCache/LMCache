@@ -66,14 +66,24 @@ KVLayerGroupInfo list   --STORE/RETRIEVE block_ids per info-->  transfer kernels
 
 `create_engine_group_infos_from_vllm` (the only place that reads vLLM `KVCacheConfig`):
 
-1. Inspect registered tensors for physical layout/dtype.
+1. Discover each layer's Engine KV format from its registered tensor
+   (`normalize_and_discover_per_layer_formats`). Detection is per *layout*, not
+   per engine group: a single engine group can contain layers whose registered
+   KV tensors have different shapes — for example a 5-D key+value cache
+   (`[NB, 2, BS, NH, HS]`, `kv_size=2`) alongside a 3-D key-only cache
+   (`[NB, BS, HS]`, `kv_size=1`) in one `UniformTypeKVCacheSpecs` group — so each
+   distinct layout within a group is detected and reported separately.
+   ("5-D"/"3-D" is the tensor rank: the number of dimensions of one layer's
+   registered KV tensor.)
 2. Map each registered layer to its engine group index; layers absent from
    every group's `layer_names` (cross-layer KV-sharing layers) are tagged
    `EXCLUDED_ENGINE_GROUP` and dropped (see Cross-layer KV sharing).
 3. `group_layers_by_identity` splits layers by transfer identity
-   `(kv_size, num_heads, head_size, block_size, engine_group_idx, dtype)` — the
-   `engine_group_idx` term keeps identically-shaped layers from different engine
-   groups in separate infos.
+   `(kv_size, num_heads, head_size, block_size, engine_group_idx, dtype,
+   engine_kv_format)` — `engine_group_idx` keeps identically-shaped layers from
+   different engine groups in separate infos, and `engine_kv_format` keeps
+   different layouts that share one engine group apart (the 5-D key+value vs the
+   3-D key-only cache from step 1).
 4. Emit one `EngineGroupInfo` per identity; send the list in the
    `REGISTER_KV_CACHE` payload (the message queue encodes it).
 

@@ -852,8 +852,118 @@ All groups must share the same ``NB`` and ``BS`` (this is a physical
 constraint of paged KV). Layer counts across groups sum to the total
 layer count registered with the server.
 
+MLA (Multi-head Latent Attention)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Set ``kv_size=1`` to exercise the MLA data path. MLA folds K and V into
+a single latent plane, so each chunk on the wire is
+``(num_layers, chunk_tokens, num_heads * head_size)`` instead of the
+classical ``(2, num_layers, chunk_tokens, num_heads * head_size)``.
+The bench also allocates each per-layer client tensor as rank-3
+``(NB, BS, num_heads * head_size)`` (rather than the classical rank-5
+``(2, NB, BS, NH, HS)``), which is what the server's vLLM detector
+recognises as MLA -- see ``NL_X_NB_BS_HS`` in
+``lmcache/v1/gpu_connector/kv_format/detectors/vllm.py``.
+
+Pure MLA example (DeepSeek-V2-style, 61 layers, single latent head):
+
+.. code-block:: bash
+
+   lmcache bench server \
+       --rpc-url tcp://localhost:15556 \
+       --kvcache-shape-spec "(1,1024,16,1,128):bfloat16:61"
+
+Both transfer modes support MLA:
+
+* ``lmcache_driven`` (GPU default / CPU opt-in): the server discovers
+  ``use_mla`` from the registered tensor shapes -- the bench's rank-3
+  MLA client tensors trip this automatically.
+* ``engine_driven`` (CPU default): the bench derives ``use_mla`` from
+  ``kv_size`` in the spec and sends it on the register payload, so the
+  server sizes its SHM chunks correctly.
+
+.. note::
+
+   Heterogeneous specs that mix ``kv_size=1`` and ``kv_size=2`` groups
+   are fully supported in ``lmcache_driven`` mode -- each layer's
+   rank (3 vs. 5) tells the detector which per-group KV format to
+   use. In ``engine_driven`` mode the server registers a *single*
+   SHM chunk shape per context, so a mixed spec falls back to the
+   classical (non-MLA) layout; use ``lmcache_driven`` when you need
+   true per-group MLA.
+
+Tensor Parallel (TP > 1)
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+``--tp-size N`` (default: 1) simulates a TP world of ``N`` vLLM
+workers against a single LMCache server. Each rank registers its own
+KV cache under a distinct ``instance_id``, so the server holds one
+context per rank -- exactly the layout ``LMCacheMPWorkerAdapter``
+creates in a real deployment. Fan-out for the store / retrieve /
+lookup ops mirrors ``ParallelStrategy`` from the vLLM adapter:
+
+* ``LOOKUP`` fires exactly once per request (scheduler-scoped,
+  ``worker_id=None``).
+* ``RETRIEVE`` fires on **every** rank -- each worker loads its own
+  KV shard back.
+* ``STORE`` fires on **KV writers only**. Non-MLA: every rank is a
+  writer. MLA: only rank 0 is a writer (the latent plane is shared
+  across ranks; storing from every rank would just re-write identical
+  bytes).
+
+Example: MLA + TP=2, exercising rank 0 STORE + both-rank RETRIEVE:
+
+.. code-block:: bash
+
+   lmcache bench server \
+       --rpc-url tcp://localhost:15556 \
+       --mode cpu --transfer-mode lmcache_driven \
+       --kvcache-shape-spec "(1,1024,16,1,128):bfloat16:8" \
+       --tp-size 2
+
+The bench's client-side checksum aggregates writer-rank bytes only,
+so a cold-vs-warm mismatch pinpoints the exact rank whose round trip
+went wrong -- useful for verifying that a new server-side change
+handles per-rank ``instance_id`` routing correctly.
+
 See ``parse_kvcache_shape_spec`` in ``lmcache/v1/kv_layer_groups.py``
 for the authoritative parsing rules and validation errors.
+
+
+Profiling the server
+~~~~~~~~~~~~~~~~~~~~~
+
+``lmcache bench server`` is a ZMQ client: the store path it exercises
+(hashing, allocation, gather, D2H) runs inside the **server** process, not
+this benchmark. ``--flamegraph on`` therefore attaches the profiler to a
+server pid you supply, records for the duration of the load, and renders a
+flame graph of the server, not of the client.
+
+.. code-block:: bash
+
+   lmcache bench server \
+       --rpc-url tcp://localhost:5555 \
+       --start 0 --end 200 --interval 0.02 \
+       --flamegraph on --flamegraph-mode gil \
+       --profile-server-pid "$(pgrep -f 'lmcache server')"
+
+``--flamegraph-mode`` takes the same six values documented under
+:ref:`lmcache tool flamegraph <lmcache-flamegraph-modes>` (or several
+comma-separated to drive the load once per mode, one SVG each). Because the
+target is a separate, already-running server (not a process this benchmark
+spawns), it profiles by *attaching*, so the same attach-mode caveats
+documented for
+:doc:`lmcache tool flamegraph </cli/tool>` apply here: what each mode
+shows, the ``PYTHONPERFSUPPORT=1`` requirement for naming Python frames in
+the perf/bcc modes, the container privileges each mode needs, and the fact
+that recording a live process is never free.
+
+.. note::
+
+   The one thing unique to ``bench server``: it records *while* it drives
+   load, so the recording overhead lands on the very throughput/latency
+   this benchmark reports. Keep the profiled run short and read those
+   numbers as indicative, not a clean baseline.
 
 
 Output
@@ -1164,6 +1274,30 @@ Options
      - *(unset)*
      - Run only the specified operation. When omitted, all three
        operations are run in the order ``store -> lookup -> load``.
+   * - ``--flamegraph {on,off}``
+     - ``off``
+     - Capture a flame graph of the measured phases (``on``) or run the
+       benchmark normally (``off``). When ``on``, the benchmark profiles
+       itself and renders an SVG. Default ``off`` leaves benchmark
+       behavior unchanged. See
+       :ref:`Profiling / flame charts <lmcache-bench-l2-profiling>`.
+   * - ``--flamegraph-mode {on-cpu,off-cpu,wakeup,offwake,wall,gil}``
+     - ``on-cpu``
+     - Flame-graph mode for ``--flamegraph on``. ``on-cpu`` shows
+       where CPU time goes; ``off-cpu`` shows time blocked on I/O /
+       locks (best for I/O-bound adapters); ``offwake`` adds the waker
+       stack to each blocked stack; ``wakeup`` shows the stacks doing
+       the waking. ``wall`` and ``gil`` (``py-spy``) split the chart
+       per thread: wall-clock time, and time holding the interpreter
+       lock.
+   * - ``--flamegraph-output PATH``
+     - *(auto)*
+     - SVG output path. Default:
+       ``/tmp/lmcache_bench_flames/<adapter>.<mode>.svg``.
+   * - ``--flamegraph-scripts-dir DIR``
+     - *(~/FlameGraph)*
+     - Directory with the FlameGraph scripts (``flamegraph.pl``,
+       ``stackcollapse-perf.pl``).
 
 
 Adapter JSON spec
@@ -1290,6 +1424,45 @@ requires both the store and load object batches to stay resident so the
 loaded data can be compared against the original store pattern.
 
 
+.. _lmcache-bench-l2-profiling:
+
+Profiling / flame charts
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+When ``--flamegraph on`` is passed, the benchmark profiles **its own
+process** (the L2 adapter driven by this microbenchmark's synthetic load)
+and renders a flame graph of the measured phases (to profile a separate
+server or a real process instead, use
+:doc:`lmcache tool flamegraph </cli/tool>`):
+
+.. code-block:: bash
+
+   lmcache bench l2 \
+       --l2-adapter '{"type":"fs","base_path":"/data/lmcache-bench"}' \
+       --rounds 300 --flamegraph on --flamegraph-mode on-cpu
+   #   [Profile] on-cpu recording started (pid=12345) -> .../FSL2Adapter.oncpu.svg
+   #   [Profile] wrote /tmp/lmcache_bench_flames/FSL2Adapter.oncpu.svg
+
+The ``--flamegraph-mode`` values, cost of recording, and tool / sysctl
+requirements are documented under
+:ref:`lmcache tool flamegraph <lmcache-flamegraph-modes>` (or pass several
+comma-separated to profile one benchmark run per mode, one SVG each). What is
+specific to ``bench l2``:
+
+* It **self-profiles**, so on CPython 3.12+ it activates the perf trampolines
+  itself and adapter functions resolve as ``py::<qualname>`` in the
+  ``on-cpu`` / ``off-cpu`` charts with no ``PYTHONPERFSUPPORT`` needed (an
+  attached server cannot). Trampolines cost a few percent, so treat a
+  profiled run's timings as indicative.
+* The recorder runs as a child of the benchmark, so ``wall`` / ``gil`` need
+  ``kernel.yama.ptrace_scope`` at ``0`` (not the attach-mode permissions).
+* Recording covers only the measured work, so use a large ``--rounds``; too
+  short a run captures no samples.
+
+The SVG is written to ``--flamegraph-output`` (default
+``/tmp/lmcache_bench_flames/<adapter>.<mode>.svg``).
+
+
 Exit codes
 ~~~~~~~~~~
 
@@ -1306,5 +1479,7 @@ Exit codes
      - Adapter creation failed, round-trip verification failed, or
        an operation hit a fatal error (e.g. all rounds timed out).
    * - ``2``
-     - The ``--l2-adapter`` JSON / ``L2_ADAPTER_JSON`` env var was
-       missing or could not be parsed.
+     - Invalid invocation: the ``--l2-adapter`` JSON / ``L2_ADAPTER_JSON``
+       env var was missing or could not be parsed, an option value was
+       invalid, or ``--flamegraph on`` was requested but the profiling
+       toolchain is unavailable.
