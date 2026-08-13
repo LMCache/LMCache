@@ -282,7 +282,36 @@ __device__ void multi_layer_block_transfer_single_block(
 }
 
 template <typename ScalarType, bool lmcache_to_engine, EngineKVFormat format>
+// Per-chunk kernel: MemoryObj4 passed by value (zero GPU alloc, <=4 objects)
 __global__ void multi_layer_block_transfer_kernel(
+    MemoryObj4<ScalarType> lmcache_objects,
+    ScalarType** __restrict__ paged_buffer_ptrs,
+    const int64_t* engine_block_ids,
+    const int num_blocks_per_object,  // e.g. 16 for lmcache chunk size =
+                                      // 256 and block size = 16
+    const PageBufferShapeDesc shape_desc,
+    const int lmcache_chunk_size,  // e.g., 256, used to calculate global offset
+                                   // in LMCache object
+    const int skip_prefix_n_blocks) {
+  // blockIdx.y spans all blocks across all objects (total_blocks).
+  // Derive which object and local block index from the flat index.
+  const int flat_block_idx = blockIdx.y;
+  if (flat_block_idx < skip_prefix_n_blocks) {
+    return;
+  }
+  const int obj_idx = flat_block_idx / num_blocks_per_object;
+  const int block_idx_in_object = flat_block_idx % num_blocks_per_object;
+  const int engine_block_idx = engine_block_ids[flat_block_idx];
+  multi_layer_block_transfer_single_block<ScalarType, lmcache_to_engine,
+                                          format>(
+      lmcache_objects.objects[obj_idx], paged_buffer_ptrs, engine_block_idx,
+      block_idx_in_object * shape_desc.bs,  // offset in LMCache object
+      shape_desc, lmcache_chunk_size);
+}
+
+// Per-layer kernel: ScalarType** via GPU device pointer array (arbitrary N)
+template <typename ScalarType, bool lmcache_to_engine, EngineKVFormat format>
+__global__ void multi_layer_block_transfer_kernel_layerwise(
     ScalarType** __restrict__ lmcache_object_ptrs,
     ScalarType** __restrict__ paged_buffer_ptrs,
     const int64_t* engine_block_ids,
@@ -300,7 +329,6 @@ __global__ void multi_layer_block_transfer_kernel(
   }
   const int obj_idx = flat_block_idx / num_blocks_per_object;
   const int block_idx_in_object = flat_block_idx % num_blocks_per_object;
-
   const int engine_block_idx = engine_block_ids[flat_block_idx];
   multi_layer_block_transfer_single_block<ScalarType, lmcache_to_engine,
                                           format>(
@@ -309,64 +337,77 @@ __global__ void multi_layer_block_transfer_kernel(
       shape_desc, lmcache_chunk_size);
 }
 
-#define LAUNCH_KERNEL(DIRECTION, FORMAT)                                 \
-  multi_layer_block_transfer_kernel<ScalarType, DIRECTION, FORMAT>       \
-      <<<grid, block, 0, stream>>>(lmcache_ptrs_dev, paged_buffer_ptrs,  \
-                                   block_ids_ptr, num_blocks_per_object, \
-                                   shape_desc, lmcache_chunk_size,       \
-                                   skip_prefix_n_blocks);                \
+#define LAUNCH_KERNEL(KERNEL, DIRECTION, FORMAT, FIRST_ARG)               \
+  KERNEL<ScalarType, DIRECTION, FORMAT><<<grid, block, 0, stream>>>(      \
+      FIRST_ARG, paged_buffer_ptrs, block_ids_ptr, num_blocks_per_object, \
+      shape_desc, lmcache_chunk_size, skip_prefix_n_blocks);              \
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 
-#define DISPATCH_FORMAT(DIRECTION)                                      \
-  switch (engine_kv_format) {                                           \
-    case EngineKVFormat::NB_NL_TWO_BS_NH_HS:                            \
-      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NB_NL_TWO_BS_NH_HS);     \
-      break;                                                            \
-    case EngineKVFormat::NL_X_TWO_NB_BS_NH_HS:                          \
-      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_TWO_NB_BS_NH_HS);   \
-      break;                                                            \
-    case EngineKVFormat::NL_X_TWO_NB_NH_BS_HS:                          \
-      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_TWO_NB_NH_BS_HS);   \
-      break;                                                            \
-    case EngineKVFormat::NL_X_NB_TWO_BS_NH_HS:                          \
-      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_TWO_BS_NH_HS);   \
-      break;                                                            \
-    case EngineKVFormat::NL_X_NB_TWO_NH_BS_HS:                          \
-      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_TWO_NH_BS_HS);   \
-      break;                                                            \
-    case EngineKVFormat::NL_X_NB_BS_HS:                                 \
-      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_BS_HS);          \
-      break;                                                            \
-    case EngineKVFormat::TWO_X_NL_X_NBBS_NH_HS:                         \
-      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::TWO_X_NL_X_NBBS_NH_HS);  \
-      break;                                                            \
-    case EngineKVFormat::TWO_X_NL_X_NB_BS_NH_HS:                        \
-      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::TWO_X_NL_X_NB_BS_NH_HS); \
-      break;                                                            \
-    case EngineKVFormat::NL_X_NBBS_ONE_HS:                              \
-      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NBBS_ONE_HS);       \
-      break;                                                            \
-    case EngineKVFormat::NB_NL_TWO_NH_BS_HS:                            \
-      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NB_NL_TWO_NH_BS_HS);     \
-      break;                                                            \
-    case EngineKVFormat::NL_X_NB_NH_BS_TWO_HS:                          \
-      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_NH_BS_TWO_HS);   \
-      break;                                                            \
-    case EngineKVFormat::NL_X_NB_BS_NH_TWO_HS:                          \
-      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_BS_NH_TWO_HS);   \
-      break;                                                            \
-    case EngineKVFormat::NL_X_NB_NH_BS_CS:                              \
-      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_NH_BS_CS);       \
-      break;                                                            \
-    case EngineKVFormat::NL_X_NB_BS_NH_CS:                              \
-      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_BS_NH_CS);       \
-      break;                                                            \
-    case EngineKVFormat::NL_X_NB_BSV_BSS:                               \
-      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_BSV_BSS);        \
-      break;                                                            \
-    default:                                                            \
-      TORCH_CHECK(false, "Unsupported EngineKVFormat: ",                \
-                  static_cast<int>(engine_kv_format));                  \
+#define DISPATCH_FORMAT(KERNEL, DIRECTION, FIRST_ARG)                          \
+  switch (engine_kv_format) {                                                  \
+    case EngineKVFormat::NB_NL_TWO_BS_NH_HS:                                   \
+      LAUNCH_KERNEL(KERNEL, DIRECTION, EngineKVFormat::NB_NL_TWO_BS_NH_HS,     \
+                    FIRST_ARG);                                                \
+      break;                                                                   \
+    case EngineKVFormat::NL_X_TWO_NB_BS_NH_HS:                                 \
+      LAUNCH_KERNEL(KERNEL, DIRECTION, EngineKVFormat::NL_X_TWO_NB_BS_NH_HS,   \
+                    FIRST_ARG);                                                \
+      break;                                                                   \
+    case EngineKVFormat::NL_X_TWO_NB_NH_BS_HS:                                 \
+      LAUNCH_KERNEL(KERNEL, DIRECTION, EngineKVFormat::NL_X_TWO_NB_NH_BS_HS,   \
+                    FIRST_ARG);                                                \
+      break;                                                                   \
+    case EngineKVFormat::NL_X_NB_TWO_BS_NH_HS:                                 \
+      LAUNCH_KERNEL(KERNEL, DIRECTION, EngineKVFormat::NL_X_NB_TWO_BS_NH_HS,   \
+                    FIRST_ARG);                                                \
+      break;                                                                   \
+    case EngineKVFormat::NL_X_NB_TWO_NH_BS_HS:                                 \
+      LAUNCH_KERNEL(KERNEL, DIRECTION, EngineKVFormat::NL_X_NB_TWO_NH_BS_HS,   \
+                    FIRST_ARG);                                                \
+      break;                                                                   \
+    case EngineKVFormat::NL_X_NB_BS_HS:                                        \
+      LAUNCH_KERNEL(KERNEL, DIRECTION, EngineKVFormat::NL_X_NB_BS_HS,          \
+                    FIRST_ARG);                                                \
+      break;                                                                   \
+    case EngineKVFormat::TWO_X_NL_X_NBBS_NH_HS:                                \
+      LAUNCH_KERNEL(KERNEL, DIRECTION, EngineKVFormat::TWO_X_NL_X_NBBS_NH_HS,  \
+                    FIRST_ARG);                                                \
+      break;                                                                   \
+    case EngineKVFormat::TWO_X_NL_X_NB_BS_NH_HS:                               \
+      LAUNCH_KERNEL(KERNEL, DIRECTION, EngineKVFormat::TWO_X_NL_X_NB_BS_NH_HS, \
+                    FIRST_ARG);                                                \
+      break;                                                                   \
+    case EngineKVFormat::NL_X_NBBS_ONE_HS:                                     \
+      LAUNCH_KERNEL(KERNEL, DIRECTION, EngineKVFormat::NL_X_NBBS_ONE_HS,       \
+                    FIRST_ARG);                                                \
+      break;                                                                   \
+    case EngineKVFormat::NB_NL_TWO_NH_BS_HS:                                   \
+      LAUNCH_KERNEL(KERNEL, DIRECTION, EngineKVFormat::NB_NL_TWO_NH_BS_HS,     \
+                    FIRST_ARG);                                                \
+      break;                                                                   \
+    case EngineKVFormat::NL_X_NB_NH_BS_TWO_HS:                                 \
+      LAUNCH_KERNEL(KERNEL, DIRECTION, EngineKVFormat::NL_X_NB_NH_BS_TWO_HS,   \
+                    FIRST_ARG);                                                \
+      break;                                                                   \
+    case EngineKVFormat::NL_X_NB_BS_NH_TWO_HS:                                 \
+      LAUNCH_KERNEL(KERNEL, DIRECTION, EngineKVFormat::NL_X_NB_BS_NH_TWO_HS,   \
+                    FIRST_ARG);                                                \
+      break;                                                                   \
+    case EngineKVFormat::NL_X_NB_NH_BS_CS:                                     \
+      LAUNCH_KERNEL(KERNEL, DIRECTION, EngineKVFormat::NL_X_NB_NH_BS_CS,       \
+                    FIRST_ARG);                                                \
+      break;                                                                   \
+    case EngineKVFormat::NL_X_NB_BS_NH_CS:                                     \
+      LAUNCH_KERNEL(KERNEL, DIRECTION, EngineKVFormat::NL_X_NB_BS_NH_CS,       \
+                    FIRST_ARG);                                                \
+      break;                                                                   \
+    case EngineKVFormat::NL_X_NB_BSV_BSS:                                      \
+      LAUNCH_KERNEL(KERNEL, DIRECTION, EngineKVFormat::NL_X_NB_BSV_BSS,        \
+                    FIRST_ARG);                                                \
+      break;                                                                   \
+    default:                                                                   \
+      TORCH_CHECK(false, "Unsupported EngineKVFormat: ",                       \
+                  static_cast<int>(engine_kv_format));                         \
   }
 
 template <typename ScalarType>
@@ -375,7 +416,7 @@ void multi_layer_block_kv_transfer_templated(
     std::vector<int64_t> lmcache_objects_ptrs, const torch::Tensor& block_ids,
     const torch::Device& device, TransferDirection direction,
     PageBufferShapeDesc shape_desc, int lmcache_chunk_size,
-    EngineKVFormat engine_kv_format, int skip_prefix_n_blocks) {
+    EngineKVFormat engine_kv_format, int skip_prefix_n_blocks, bool layerwise) {
   // --- Validation ---
   int num_objects = static_cast<int>(lmcache_objects_ptrs.size());
   TORCH_CHECK(num_objects >= 1, "Expected at least 1 LMCache object, got ",
@@ -399,18 +440,6 @@ void multi_layer_block_kv_transfer_templated(
   const at::cuda::OptionalCUDAGuard device_guard(device);
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-  // --- Upload LMCache object pointers to device ---
-  // Small allocation (N * 8 bytes); caching allocator makes this O(1).
-  // The copy runs on the current stream, so it completes before the kernel.
-  auto gpu_ptrs_tensor =
-      torch::empty({num_objects},
-                   torch::TensorOptions().dtype(torch::kInt64).device(device));
-  gpu_ptrs_tensor.copy_(
-      torch::from_blob(lmcache_objects_ptrs.data(), {num_objects},
-                       torch::TensorOptions().dtype(torch::kInt64)));
-  ScalarType** lmcache_ptrs_dev =
-      reinterpret_cast<ScalarType**>(gpu_ptrs_tensor.data_ptr());
-
   // --- block_ids is a GPU int64 tensor, read directly ---
   const int64_t* block_ids_ptr = block_ids.data_ptr<int64_t>();
 
@@ -429,10 +458,39 @@ void multi_layer_block_kv_transfer_templated(
   dim3 block(thread_dim_x, thread_dim_y, thread_dim_z);
   dim3 grid(shape_desc.kv_size, total_blocks, shape_desc.nl);
 
-  if (direction == TransferDirection::H2D) {
-    DISPATCH_FORMAT(true);
+  if (!layerwise) {
+    // Per-chunk path: MemoryObj4 by value, zero GPU alloc
+    TORCH_CHECK(num_objects <= 4,
+                "Per-chunk path supports at most 4 objects, got ", num_objects);
+    MemoryObj4<ScalarType> lmcache_obj4;
+    lmcache_obj4.num_objects = num_objects;
+    for (int i = 0; i < 4; ++i)
+      lmcache_obj4.objects[i] =
+          (i < num_objects)
+              ? reinterpret_cast<ScalarType*>(lmcache_objects_ptrs[i])
+              : nullptr;
+    if (direction == TransferDirection::H2D) {
+      DISPATCH_FORMAT(multi_layer_block_transfer_kernel, true, lmcache_obj4);
+    } else {
+      DISPATCH_FORMAT(multi_layer_block_transfer_kernel, false, lmcache_obj4);
+    }
   } else {
-    DISPATCH_FORMAT(false);
+    // Per-layer path: dynamic GPU pointer array
+    auto gpu_ptrs_tensor = torch::empty(
+        {num_objects},
+        torch::TensorOptions().dtype(torch::kInt64).device(device));
+    gpu_ptrs_tensor.copy_(
+        torch::from_blob(lmcache_objects_ptrs.data(), {num_objects},
+                         torch::TensorOptions().dtype(torch::kInt64)));
+    ScalarType** lmcache_ptrs_dev =
+        reinterpret_cast<ScalarType**>(gpu_ptrs_tensor.data_ptr());
+    if (direction == TransferDirection::H2D) {
+      DISPATCH_FORMAT(multi_layer_block_transfer_kernel_layerwise, true,
+                      lmcache_ptrs_dev);
+    } else {
+      DISPATCH_FORMAT(multi_layer_block_transfer_kernel_layerwise, false,
+                      lmcache_ptrs_dev);
+    }
   }
 }
 
@@ -446,7 +504,7 @@ void multi_layer_block_kv_transfer_templated(
     multi_layer_block_kv_transfer_templated<type>(                         \
         paged_buffer_ptrs_tensor, lmcache_objects_ptrs, block_ids, device, \
         direction, shape_desc, lmcache_chunk_size, engine_kv_format,       \
-        skip_prefix_n_blocks);                                             \
+        skip_prefix_n_blocks, layerwise);                                  \
   } while (0)
 
 void multi_layer_block_kv_transfer(
@@ -454,7 +512,7 @@ void multi_layer_block_kv_transfer(
     std::vector<int64_t> lmcache_objects_ptrs, const torch::Tensor& block_ids,
     const torch::Device& device, TransferDirection direction,
     PageBufferShapeDesc shape_desc, int lmcache_chunk_size,
-    EngineKVFormat engine_kv_format, int skip_prefix_n_blocks) {
+    EngineKVFormat engine_kv_format, int skip_prefix_n_blocks, bool layerwise) {
   int head_bytes = shape_desc.hs * shape_desc.element_size;
   TORCH_CHECK(head_bytes % sizeof(uint16_t) == 0, "head_size * element_size (",
               head_bytes, ") must be divisible by 2 for vectorized access");
@@ -484,7 +542,7 @@ void execute_object_group_transfer(
     TransferDirection direction, const torch::Device& device,
     size_t host_buffer_alignment,
     const std::vector<KernelGroupSpec>& kernel_group_specs,
-    const std::vector<BatchStep>& batch_steps) {
+    const std::vector<BatchStep>& batch_steps, bool layerwise) {
   // Set the device guard once for the whole plan so every staging copy and
   // kernel launch below is enqueued on this device's current stream, in order.
   const at::cuda::OptionalCUDAGuard device_guard(device);
@@ -554,7 +612,7 @@ void execute_object_group_transfer(
       multi_layer_block_kv_transfer(
           paged_buffer_ptrs_tensor, std::move(lmcache_objects_ptrs), block_ids,
           device, direction, group.shape_desc, group.lmcache_chunk_size,
-          group.engine_kv_format, launch.skip_prefix_n_blocks);
+          group.engine_kv_format, launch.skip_prefix_n_blocks, layerwise);
     }
     if (!is_h2d) {
       do_staging(step.staging);

@@ -177,7 +177,7 @@ def test_worker_exports_events_through_platform_backend(
     )
     assert sent[2] == (
         RequestType.RETRIEVE,
-        ["key", 1, [[0]], b"completion-handle", 2, False],
+        ["key", 1, [[0]], b"completion-handle", 2],
     )
     assert [call[0] for call in backend.calls] == [
         "check",

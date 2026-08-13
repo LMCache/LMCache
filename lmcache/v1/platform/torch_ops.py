@@ -1110,6 +1110,7 @@ def multi_layer_block_kv_transfer(
     lmcache_chunk_size: int,
     engine_kv_format: EngineKVFormat,
     skip_prefix_n_blocks: int,
+    layerwise: bool = False,
 ) -> None:
     """Python fallback implementation of block-based multi-layer KV transfer.
 

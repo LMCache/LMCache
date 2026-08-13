@@ -1018,6 +1018,7 @@ def transfer_kv_layerwise(
                 pin_chunk_size,
                 [layer_spec],
                 batch_steps,
+                layerwise=True,
             )
         else:
             # --- Per-layer fallback (N=1, no native ops, or buffer overflow) ---
@@ -1123,6 +1124,7 @@ def transfer_kv_layerwise(
                         slots_per_chunk,
                         cache_context.get_engine_kv_format(kernel_group_id),
                         info["all_skip_blocks"],
+                        layerwise=True,
                     )
                 else:
                     # Batched fallback for very long sequences
@@ -1181,6 +1183,7 @@ def transfer_kv_layerwise(
                             slots_per_chunk,
                             cache_context.get_engine_kv_format(kernel_group_id),
                             recalculated_skip_blocks,
+                            layerwise=True,
                         )
 
         # Record 1 IPC event per batch (all layers in batch share it)
