@@ -2,11 +2,53 @@
 
 # Standard
 from pathlib import Path
+import ast
 import subprocess
 import sys
 import textwrap
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
+_ALLOCATOR_PACKAGE = _REPO_ROOT / "lmcache" / "v1" / "memory_allocators"
+
+
+def _expected_allocator_exports() -> set[str]:
+    """Return allocator class names that should be package re-exports."""
+    exports: set[str] = set()
+
+    for module_path in _ALLOCATOR_PACKAGE.glob("*_allocator.py"):
+        syntax_tree = ast.parse(
+            module_path.read_text(encoding="utf-8"),
+            filename=str(module_path),
+        )
+        for node in syntax_tree.body:
+            if (
+                isinstance(node, ast.ClassDef)
+                and not node.name.startswith("_")
+                and node.name.endswith("Allocator")
+            ):
+                exports.add(node.name)
+
+    return exports
+
+
+def _expected_allocator_modules() -> set[str]:
+    """Return allocator module names used by the lazy import surface test."""
+    modules: set[str] = set()
+
+    for module_path in _ALLOCATOR_PACKAGE.glob("*_allocator.py"):
+        syntax_tree = ast.parse(
+            module_path.read_text(encoding="utf-8"),
+            filename=str(module_path),
+        )
+        if any(
+            isinstance(node, ast.ClassDef)
+            and not node.name.startswith("_")
+            and node.name.endswith("Allocator")
+            for node in syntax_tree.body
+        ):
+            modules.add(module_path.stem)
+
+    return modules
 
 
 def _run_import_script(script: str) -> None:
@@ -34,27 +76,17 @@ def _run_import_script(script: str) -> None:
 
 def test_memory_allocators_package_import_is_lazy() -> None:
     """Importing the allocator package does not eagerly import submodules."""
+    allocator_modules = sorted(_expected_allocator_modules())
+    expected_exports = sorted(_expected_allocator_exports())
+
     _run_import_script(
-        """
+        f"""
         import sys
 
         import lmcache.v1.memory_allocators as allocators
 
-        allocator_modules = {
-            "ad_hoc_memory_allocator",
-            "buffer_allocator",
-            "cu_file_memory_allocator",
-            "devdax_memory_allocator",
-            "gpu_memory_allocator",
-            "hip_file_memory_allocator",
-            "host_memory_allocator",
-            "lazy_memory_allocator",
-            "mixed_memory_allocator",
-            "paged_cpu_gpu_memory_allocator",
-            "paged_tensor_memory_allocator",
-            "pin_memory_allocator",
-            "tensor_memory_allocator",
-        }
+        allocator_modules = {allocator_modules!r}
+        expected_exports = {expected_exports!r}
         loaded = sorted(
             name
             for name in sys.modules
@@ -62,6 +94,7 @@ def test_memory_allocators_package_import_is_lazy() -> None:
             and name.rsplit(".", 1)[-1] in allocator_modules
         )
         assert loaded == [], loaded
+        assert allocators.__all__ == expected_exports
         assert "LazyMemoryAllocator" in allocators.__all__
         assert "TensorMemoryAllocator" in allocators.__all__
         """

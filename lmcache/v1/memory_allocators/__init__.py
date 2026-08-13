@@ -2,22 +2,41 @@
 
 # Standard
 from importlib import import_module
+from pathlib import Path
+import ast
 
-_EXPORT_TO_MODULE = {
-    "AdHocMemoryAllocator": "ad_hoc_memory_allocator",
-    "BufferAllocator": "buffer_allocator",
-    "CuFileMemoryAllocator": "cu_file_memory_allocator",
-    "DevDaxMemoryAllocator": "devdax_memory_allocator",
-    "GPUMemoryAllocator": "gpu_memory_allocator",
-    "HipFileMemoryAllocator": "hip_file_memory_allocator",
-    "HostMemoryAllocator": "host_memory_allocator",
-    "LazyMemoryAllocator": "lazy_memory_allocator",
-    "MixedMemoryAllocator": "mixed_memory_allocator",
-    "PagedCpuGpuMemoryAllocator": "paged_cpu_gpu_memory_allocator",
-    "PagedTensorMemoryAllocator": "paged_tensor_memory_allocator",
-    "PinMemoryAllocator": "pin_memory_allocator",
-    "TensorMemoryAllocator": "tensor_memory_allocator",
-}
+
+def _is_exported_allocator(class_def: ast.ClassDef) -> bool:
+    """Return whether a top-level class should be re-exported by this package."""
+    return not class_def.name.startswith("_") and class_def.name.endswith("Allocator")
+
+
+def _discover_allocator_exports() -> dict[str, str]:
+    """Build the lazy export map from allocator modules on disk."""
+    exports: dict[str, str] = {}
+    package_dir = Path(__file__).resolve().parent
+
+    for module_path in sorted(package_dir.glob("*_allocator.py")):
+        module = module_path.stem
+        syntax_tree = ast.parse(
+            module_path.read_text(encoding="utf-8"),
+            filename=str(module_path),
+        )
+        for node in syntax_tree.body:
+            if not isinstance(node, ast.ClassDef) or not _is_exported_allocator(node):
+                continue
+
+            previous = exports.setdefault(node.name, module)
+            if previous != module:
+                raise RuntimeError(
+                    "duplicate memory allocator export "
+                    f"{node.name!r} in {previous!r} and {module!r}"
+                )
+
+    return exports
+
+
+_EXPORT_TO_MODULE = _discover_allocator_exports()
 
 
 def __getattr__(name: str) -> object:
@@ -42,4 +61,9 @@ def __getattr__(name: str) -> object:
     return value
 
 
-__all__ = list(_EXPORT_TO_MODULE)
+def __dir__() -> list[str]:
+    """Return the package attributes exposed for interactive discovery."""
+    return sorted(set(globals()) | set(__all__))
+
+
+__all__ = sorted(_EXPORT_TO_MODULE)
