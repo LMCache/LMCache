@@ -52,7 +52,7 @@ import zmq
 
 # First Party
 from lmcache.banner import print_banner_once
-from lmcache.integration.vllm.experimental import dispatch
+from lmcache.integration.vllm.experimental import LMCacheMPQRequestMetadata, dispatch
 from lmcache.integration.vllm.kv_cache_group_edits import (
     apply_kv_cache_group_edits,
     validate_kv_cache_groups,
@@ -1687,6 +1687,15 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             num_new_tokens = scheduler_output.num_scheduled_tokens[new_request.req_id]
             request_tracker.increase_num_scheduled_tokens(num_new_tokens)
 
+            if self.transfer_intermediate_tensors:
+                q_window = LMCacheMPQRequestMetadata.BuildQCaptureWindow(
+                    request_tracker,
+                    num_new_tokens,
+                    self._group_tokens_per_block,
+                )
+                if q_window is not None:
+                    metadata.add_q_capture_window(q_window)
+
             if not self._can_store:
                 continue
 
@@ -1725,6 +1734,15 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             # stay consistent with _process_new_requests.
             num_new_tokens = scheduler_output.num_scheduled_tokens[request_id]
             request_tracker.increase_num_scheduled_tokens(num_new_tokens)
+
+            if self.transfer_intermediate_tensors:
+                q_window = LMCacheMPQRequestMetadata.BuildQCaptureWindow(
+                    request_tracker,
+                    num_new_tokens,
+                    self._group_tokens_per_block,
+                )
+                if q_window is not None:
+                    metadata.add_q_capture_window(q_window)
 
             if not self._can_store:
                 continue

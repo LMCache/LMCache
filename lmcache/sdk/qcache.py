@@ -8,13 +8,18 @@ from __future__ import annotations
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.sdk.cache_kind import ALL_SPAN, LMCacheSDKCacheSpan
 from lmcache.sdk.context import LMCacheSDKCacheKind, LMCacheSDKContext
 
 logger = init_logger(__name__)
 
 
 def connect(
-    url: str, http_url: str, model_name: str, timeout: float = 60.0
+    url: str,
+    http_url: str,
+    model_name: str,
+    timeout: float = 60.0,
+    span: LMCacheSDKCacheSpan = ALL_SPAN,
 ) -> LMCacheSDKContext:
     """Connect to the LMCache server and return a context for Q cache.
     The technique to get the query tensors are the same as KV cache,
@@ -34,6 +39,7 @@ def connect(
         http_url=http_url,
         model_name=model_name,
         kind=LMCacheSDKCacheKind.QUERY,
+        span=span,
         timeout=timeout,
     )
     ctx.register_caches()
