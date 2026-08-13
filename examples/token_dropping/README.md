@@ -1,15 +1,10 @@
 # Token Dropping Examples using LMCache SDK
 
-## **Quick Start**
+#### We provide ready-to-run Google Collab examples for token dropping!!! [[Link]](https://drive.google.com/drive/folders/1ILctdh_Lf51qDUf1v00osRfoylfBIlOD?usp=share_link)
 
-We provide an easily reproducible examples on Google Colab's free tier
-using GPU T4. Check it out 
-[here](https://drive.google.com/drive/folders/1ILctdh_Lf51qDUf1v00osRfoylfBIlOD?usp=share_link).
-If you have interesting token dropping algorithms, feel free to make your own
-copy of the notebook and request upload to the folder!
+> Caveat: each notebook may take ~15 minutes to run.
 
-Notes:
-- SnapKV notebook takes 15 minutes to run end-to-end!
+> Join LMCache Slack and contact us at #sig-kv-research if you also want to ship your jupyter notebook to LMCache, or to our google collab examples.
 
 ## Running example on your own GPU
 
