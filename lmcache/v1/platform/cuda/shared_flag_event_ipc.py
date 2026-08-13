@@ -1,0 +1,589 @@
+# SPDX-License-Identifier: Apache-2.0
+"""GPU shared-flag event IPC backend (zero host-side sharing).
+
+CUDA interprocess *event* handles (used by ``DefaultEventIPCBackend``)
+only resolve when both processes share a ``/dev/shm`` tmpfs -- on
+Kubernetes that means ``hostIPC: true``. Legacy CUDA IPC *memory* handles
+have no such dependency: they rendezvous inside the kernel driver and work
+across fully isolated containers (only the PID *values* of the two
+processes must differ, same constraint as KV-cache tensor IPC).
+
+This backend implements event semantics on memory handles alone. Each
+process lazily allocates a small shared flag buffer and
+exports it once with ``cudaIpcGetMemHandle``; an event is a
+``(slot, sequence)`` event object against it:
+
+- ``record_event`` -> ``cuStreamWriteValue64(slot, seq)`` on the stream
+- ``wait_event``   -> ``cuStreamWaitValue64(slot, seq, GEQ)`` on the stream
+- ``query_event``  -> 8-byte device read, compared against ``seq``
+- ``export_event`` -> self-contained ``(mem handle, slot offset, seq)``
+  bytes, so the importer needs no registration side channel
+
+Semantics vs ``DefaultEventIPCBackend``: a never-recorded event is
+complete; an exported handle is a snapshot of the sequence at export time
+(LMCache exports once, after the single record); same-process import is
+supported.
+
+Slots are assigned per recording stream, so each slot's values are
+stream-ordered and monotonic, keeping the GEQ wait race-free.
+
+Only events from this backend's ``create_event`` can be exported; call
+sites constructing ``torch_dev.Event(interprocess=True)`` directly must be
+migrated before binding this backend to the device spec. See
+``docs/design/v1/platform/cuda/shared_flag_event_ipc.md``.
+"""
+
+# Future
+from __future__ import annotations
+
+# Standard
+from dataclasses import dataclass, field
+import ctypes
+import enum
+import struct
+import threading
+import time
+
+# Third Party
+import torch
+
+# First Party
+from lmcache.logging import init_logger
+from lmcache.v1.platform.cuda.utils import (
+    _CHECK_CUDA,
+    _cuda,
+    _raw_stream_handle,
+    _resolve_device_index,
+    cudaStream_t,
+)
+
+logger = init_logger(__name__)
+
+#: 8-byte flag slots per buffer; slot 0 is reserved for the
+#: ``check_event_support`` probe.
+_SLOT_COUNT = 4096
+_SLOT_BYTES = 8
+_PROBE_SLOT_OFFSET = 0
+_FIRST_ALLOCATABLE_SLOT = 1
+
+#: Wire format: version, 64-byte cudaIpcMemHandle, slot offset, sequence.
+_HANDLE_VERSION = 1
+_EXPORT_STRUCT = struct.Struct("!B64sQQ")
+
+#: Sentinels for a local event that has not been recorded yet.
+_UNASSIGNED_SLOT_OFFSET = -1
+_UNRECORDED_SEQ = 0
+
+
+class SharedFlagEventOrigin(enum.Enum):
+    """Which side of the wire a :class:`SharedFlagEvent` was created on."""
+
+    LOCAL = "local"
+    IMPORTED = "imported"
+
+
+@dataclass
+class SharedFlagEvent:
+    """A ``(slot, sequence)`` event object against a shared flag buffer.
+
+    Created by :class:`SharedFlagEventIPCBackend`; callers treat it as
+    opaque.
+
+    Attributes:
+        origin: LOCAL events are recordable; IMPORTED are wait/query only. Just
+            a safeguard so that we don't make stupid mistakes and fail silently.
+        device_index: CUDA device ordinal the event operates on.
+        base_ptr: Flag buffer pointer in this process (0 until the
+            first record assigns a slot).
+        slot_offset: Byte offset of the slot (-1 until the first record).
+        seq: Target sequence number; 0 means never recorded. Flag's value
+            >= than a event's seq number means such event is complete.
+        handle_bytes: The buffer's ``cudaIpcMemHandle`` bytes (empty until
+            the first record).
+    """
+
+    origin: SharedFlagEventOrigin
+    device_index: int
+    base_ptr: int = 0
+    slot_offset: int = _UNASSIGNED_SLOT_OFFSET
+    seq: int = _UNRECORDED_SEQ
+    handle_bytes: bytes = b""
+
+    def wait(self, stream: object | None = None) -> None:
+        """Make ``stream`` wait for this event (``IPCEvent`` duck method).
+
+        Args:
+            stream: Stream that should wait; ``None`` for the current one.
+        """
+        _enqueue_wait(self, stream)
+
+
+@dataclass
+class _SharedFlagBuffer:
+    """Per-device flag buffer owned by one backend instance.
+
+    Attributes:
+        device_index: CUDA device ordinal the buffer lives on.
+        base_ptr: Device pointer of the buffer.
+        handle_bytes: ``cudaIpcMemHandle`` bytes exported at allocation.
+        host_ops_stream: Dedicated non-blocking stream for host-initiated
+            slot reads/writes, so they never synchronize with (possibly
+            blocked) caller streams.
+        lock: Guards the mutable fields below; ``record_event`` holds it
+            through the write enqueue (see there).
+        slot_by_stream: Raw ``cudaStream_t`` -> slot index.
+        next_seq_by_slot: Slot index -> last assigned sequence.
+        next_free_slot: Next never-used slot. Slots are not reclaimed.
+    """
+
+    device_index: int
+    base_ptr: int
+    handle_bytes: bytes
+    host_ops_stream: object
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    slot_by_stream: dict[cudaStream_t, int] = field(default_factory=dict)
+    next_seq_by_slot: dict[int, int] = field(default_factory=dict)
+    next_free_slot: int = _FIRST_ALLOCATABLE_SLOT
+
+    def assign_locked(self, raw_stream: cudaStream_t) -> tuple[int, int]:
+        """Assign the next sequence for ``raw_stream``'s slot.
+
+        Caller must hold :attr:`lock` through the flag write enqueue.
+
+        Args:
+            raw_stream: Raw ``cudaStream_t`` of the recording stream.
+
+        Returns:
+            A ``(slot_offset, seq)`` pair for this record.
+
+        Raises:
+            RuntimeError: If all slots are in use.
+        """
+        slot: int | None = self.slot_by_stream.get(raw_stream)
+        if slot is None:
+            if self.next_free_slot >= _SLOT_COUNT:
+                raise RuntimeError(
+                    f"Flag buffer on cuda:{self.device_index} is "
+                    f"out of slots ({_SLOT_COUNT}); too many distinct "
+                    "recording streams."
+                )
+            slot = self.next_free_slot
+            self.next_free_slot += 1
+            self.slot_by_stream[raw_stream] = slot
+        seq: int = self.next_seq_by_slot.get(slot, _UNRECORDED_SEQ) + 1
+        self.next_seq_by_slot[slot] = seq
+        return slot * _SLOT_BYTES, seq
+
+
+# Flag-buffer base pointers created by this process, by handle bytes:
+# import_event resolves same-process handles locally, since
+# cudaIpcOpenMemHandle cannot open a handle in the exporting process.
+_LOCAL_BUFFERS_BY_HANDLE: dict[bytes, int] = {}
+# Imported buffers by (handle bytes, importer device index); mappings live
+# for the process lifetime (32 KiB each).
+_IMPORTED_BUFFERS_BY_HANDLE: dict[tuple[bytes, int], int] = {}
+_HANDLE_REGISTRY_LOCK = threading.Lock()
+
+
+def _enqueue_wait(event: SharedFlagEvent, stream: object | None) -> None:
+    """Enqueue a ``cuStreamWaitValue64`` for ``event`` on ``stream``.
+
+    Never-recorded events are complete; nothing is enqueued.
+
+    Args:
+        event: The event to wait for.
+        stream: Stream that should wait; ``None`` for the current stream.
+    """
+    if event.seq == _UNRECORDED_SEQ:
+        return
+    raw: cudaStream_t = _raw_stream_handle(stream, event.device_index)
+    with torch.cuda.device(event.device_index):
+        result: tuple[object, ...] = _cuda.driver.cuStreamWaitValue64(
+            _cuda.driver.CUstream(raw),
+            _cuda.driver.CUdeviceptr(event.base_ptr + event.slot_offset),
+            event.seq,
+            _cuda.driver.CUstreamWaitValue_flags.CU_STREAM_WAIT_VALUE_GEQ,
+        )
+    _CHECK_CUDA(result, "cuStreamWaitValue64")
+
+
+class SharedFlagEventIPCBackend:
+    """CUDA event-IPC backend over shared flag slots in IPC-shared memory.
+
+    Implements the
+    :class:`~lmcache.v1.platform.base.event_ipc.EventIPCBackend` protocol
+    with the same observable semantics as ``DefaultEventIPCBackend`` but
+    without CUDA interprocess event handles (which need a shared
+    ``/dev/shm``); see the module docstring.
+
+    Thread safety: all methods may be called from multiple threads.
+    """
+
+    def __init__(self) -> None:
+        self.device_type: str = "cuda"
+        self._lock = threading.Lock()
+        self._buffers: dict[int, _SharedFlagBuffer] = {}
+        self._probed_devices: set[int] = set()
+
+    def check_event_support(self, device: object) -> None:
+        """Validate shared-flag event IPC on ``device`` with a live probe."""
+        device_index: int = _resolve_device_index(device)
+        with self._lock:
+            if device_index in self._probed_devices:
+                return
+
+        # Allocates the buffer and round-trips a write/wait pair through the
+        # reserved probe slot. Probes with real calls on purpose: the
+        # ``CU_DEVICE_ATTRIBUTE_CAN_USE_STREAM_MEM_OPS`` attribute reports 0
+        # on drivers where the v2 memops (default since CUDA 12) work.
+        try:
+            buffer: _SharedFlagBuffer = self._get_buffer(device_index)
+            probe_ptr: int = buffer.base_ptr + _PROBE_SLOT_OFFSET
+            stream_hdl: cudaStream_t = _raw_stream_handle(
+                buffer.host_ops_stream, device_index
+            )
+            with torch.cuda.device(device_index):
+                _CHECK_CUDA(
+                    _cuda.driver.cuStreamWriteValue64(
+                        _cuda.driver.CUstream(stream_hdl),
+                        _cuda.driver.CUdeviceptr(probe_ptr),
+                        1,
+                        _cuda.driver.CUstreamWriteValue_flags.CU_STREAM_WRITE_VALUE_DEFAULT,
+                    ),
+                    "cuStreamWriteValue64 (probe)",
+                )
+                _CHECK_CUDA(
+                    _cuda.driver.cuStreamWaitValue64(
+                        _cuda.driver.CUstream(stream_hdl),
+                        _cuda.driver.CUdeviceptr(probe_ptr),
+                        1,
+                        _cuda.driver.CUstreamWaitValue_flags.CU_STREAM_WAIT_VALUE_GEQ,
+                    ),
+                    "cuStreamWaitValue64 (probe)",
+                )
+                _CHECK_CUDA(
+                    _cuda.runtime.cudaStreamSynchronize(buffer.host_ops_stream),
+                    "cudaStreamSynchronize (probe)",
+                )
+        except Exception as e:
+            raise RuntimeError(
+                f"Device backend '{self.device_type}' does not support "
+                f"shared-flag event IPC on device {device_index}: {e}"
+            ) from e
+        with self._lock:
+            self._probed_devices.add(device_index)
+
+    def create_event(self, device: object) -> object:
+        """Create a new shared-flag event on ``device``."""
+        # Slot/flag binding is deferred to the recording time when stream is known.
+        return SharedFlagEvent(
+            origin=SharedFlagEventOrigin.LOCAL,
+            device_index=_resolve_device_index(device),
+        )
+
+    def record_event(self, event: object, stream: object) -> None:
+        """Record ``event`` on ``stream``.
+
+        Assigns the stream's slot, bumps its sequence, and enqueues the
+        flag write so the slot reaches that value exactly when all
+        prior work on ``stream`` has completed.
+
+        Args:
+            event: A local :class:`SharedFlagEvent`.
+            stream: Recording stream; ``None`` for the current stream.
+
+        Raises:
+            RuntimeError: If ``event`` was imported (imported events are
+                wait/query only) or the enqueue fails.
+        """
+        if not isinstance(event, SharedFlagEvent):
+            raise RuntimeError(
+                f"record_event expected a SharedFlagEvent, got {type(event)!r}"
+            )
+        if event.origin is not SharedFlagEventOrigin.LOCAL:
+            raise RuntimeError(
+                "Imported shared-flag events cannot be recorded; only the "
+                "exporting process records."
+            )
+        buffer: _SharedFlagBuffer = self._get_buffer(event.device_index)
+        stream_hdl: cudaStream_t = _raw_stream_handle(stream, event.device_index)
+        # Lock held through the enqueue: a second thread landing seq N+1's
+        # write before this thread's seq N would leave the slot at N and
+        # strand the N+1 event's waiters.
+        with buffer.lock:
+            slot_offset: int
+            seq: int
+            slot_offset, seq = buffer.assign_locked(stream_hdl)
+            event.base_ptr = buffer.base_ptr
+            event.handle_bytes = buffer.handle_bytes
+            event.slot_offset = slot_offset
+            event.seq = seq
+            with torch.cuda.device(event.device_index):
+                _CHECK_CUDA(
+                    _cuda.driver.cuStreamWriteValue64(
+                        _cuda.driver.CUstream(stream_hdl),
+                        _cuda.driver.CUdeviceptr(event.base_ptr + event.slot_offset),
+                        event.seq,
+                        _cuda.driver.CUstreamWriteValue_flags.CU_STREAM_WRITE_VALUE_DEFAULT,
+                    ),
+                    "cuStreamWriteValue64 (record)",
+                )
+
+    def export_event(self, event: object, device: object) -> bytes:
+        """Serialize ``event`` for import by another process.
+
+        Args:
+            event: A :class:`SharedFlagEvent` to export.
+            device: Device that owns the event (unused; part of the
+                protocol signature).
+
+        Returns:
+            The packed handle bytes (snapshot of the current sequence).
+
+        Raises:
+            RuntimeError: If ``event`` is not a :class:`SharedFlagEvent`.
+        """
+        if not isinstance(event, SharedFlagEvent):
+            raise RuntimeError(
+                f"export_event expected a SharedFlagEvent, got {type(event)!r}"
+            )
+        handle_bytes: bytes = event.handle_bytes
+        slot_offset: int = event.slot_offset
+        if event.seq == _UNRECORDED_SEQ:
+            # Exports as "already complete"; the wire format still needs a
+            # valid handle and offset.
+            handle_bytes = self._get_buffer(event.device_index).handle_bytes
+            slot_offset = _PROBE_SLOT_OFFSET
+        return _EXPORT_STRUCT.pack(
+            _HANDLE_VERSION, handle_bytes, slot_offset, event.seq
+        )
+
+    def import_event(self, handle: bytes, device: object) -> object:
+        """Import a serialized shared-flag event handle on ``device``.
+
+        Opens the exporter's flag buffer on first use and caches the
+        mapping for the process lifetime; same-process handles resolve to
+        the local buffer.
+
+        Args:
+            handle: Bytes produced by :meth:`export_event`.
+            device: Device on which to import the event.
+
+        Returns:
+            An imported :class:`SharedFlagEvent` (wait/query only).
+
+        Raises:
+            RuntimeError: If the payload is malformed, carries an
+                out-of-range slot offset, or the flag buffer cannot be
+                opened.
+        """
+        version: int
+        handle_bytes: bytes
+        slot_offset: int
+        seq: int
+        try:
+            version, handle_bytes, slot_offset, seq = _EXPORT_STRUCT.unpack(handle)
+        except struct.error as e:
+            raise RuntimeError(
+                f"Malformed shared-flag event handle ({len(handle)} bytes): {e}"
+            ) from e
+        if version != _HANDLE_VERSION:
+            raise RuntimeError(
+                f"Unsupported shared-flag event handle version {version}; "
+                f"this process supports version {_HANDLE_VERSION}."
+            )
+        if (
+            slot_offset < 0
+            or slot_offset >= _SLOT_COUNT * _SLOT_BYTES
+            or slot_offset % _SLOT_BYTES != 0
+        ):
+            raise RuntimeError(
+                f"Shared-flag event handle carries an invalid slot offset "
+                f"{slot_offset}; expected an {_SLOT_BYTES}-byte-aligned "
+                f"offset below {_SLOT_COUNT * _SLOT_BYTES}."
+            )
+        device_index = _resolve_device_index(device)
+
+        # Lock held across the open so two threads importing the same new
+        # handle cannot race it (opening is rare; imports hit the cache).
+        base_ptr: int
+        with _HANDLE_REGISTRY_LOCK:
+            local_base: int | None = _LOCAL_BUFFERS_BY_HANDLE.get(handle_bytes)
+            if local_base is not None:
+                base_ptr = local_base
+            else:
+                cached: int | None = _IMPORTED_BUFFERS_BY_HANDLE.get(
+                    (handle_bytes, device_index)
+                )
+                if cached is not None:
+                    base_ptr = cached
+                else:
+                    ipc_handle = _cuda.runtime.cudaIpcMemHandle_t()
+                    ipc_handle.reserved = handle_bytes
+                    with torch.cuda.device(device_index):
+                        open_result = _cuda.runtime.cudaIpcOpenMemHandle(
+                            ipc_handle,
+                            _cuda.runtime.cudaIpcMemLazyEnablePeerAccess,
+                        )
+                        _CHECK_CUDA(open_result, "cudaIpcOpenMemHandle (flag buffer)")
+                        _err, opened_ptr = open_result
+                        base_ptr = int(opened_ptr)
+                    _IMPORTED_BUFFERS_BY_HANDLE[(handle_bytes, device_index)] = base_ptr
+
+        return SharedFlagEvent(
+            origin=SharedFlagEventOrigin.IMPORTED,
+            device_index=device_index,
+            base_ptr=base_ptr,
+            slot_offset=slot_offset,
+            seq=seq,
+            handle_bytes=handle_bytes,
+        )
+
+    def wait_event(self, event: object, stream: object) -> None:
+        """Make ``stream`` wait for ``event``.
+
+        Args:
+            event: A local or imported :class:`SharedFlagEvent`.
+            stream: Stream that should wait; ``None`` for the current one.
+
+        Raises:
+            RuntimeError: If ``event`` is not a :class:`SharedFlagEvent` or
+                the enqueue fails.
+        """
+        if not isinstance(event, SharedFlagEvent):
+            raise RuntimeError(
+                f"wait_event expected a SharedFlagEvent, got {type(event)!r}"
+            )
+        _enqueue_wait(event, stream)
+
+    def query_event(self, event: object) -> bool:
+        """Return whether ``event`` has completed.
+
+        Args:
+            event: A local or imported :class:`SharedFlagEvent`.
+
+        Returns:
+            ``True`` when the slot has reached the event's sequence (or
+            the event was never recorded); otherwise ``False``.
+
+        Raises:
+            RuntimeError: If ``event`` is not a :class:`SharedFlagEvent` or
+                the device read fails.
+        """
+        if not isinstance(event, SharedFlagEvent):
+            raise RuntimeError(
+                f"query_event expected a SharedFlagEvent, got {type(event)!r}"
+            )
+        if event.seq == _UNRECORDED_SEQ:
+            return True
+        return self._read_slot(event) >= event.seq
+
+    def synchronize_event(self, event: object, device: object) -> None:
+        """Block the host until ``event`` completes (poll-based).
+
+        Blocks indefinitely while the record point is unreached, like a
+        CUDA event synchronize.
+
+        Args:
+            event: A local or imported :class:`SharedFlagEvent`.
+            device: Device that owns the event (unused; part of the
+                protocol signature).
+
+        Raises:
+            RuntimeError: If ``event`` is not a :class:`SharedFlagEvent` or
+                a device read fails.
+        """
+        while not self.query_event(event):
+            time.sleep(0.0001)
+
+    def _get_buffer(self, device_index: int) -> _SharedFlagBuffer:
+        """Return the flag buffer for ``device_index``, allocating it
+        on first use.
+
+        Args:
+            device_index: CUDA device ordinal.
+
+        Returns:
+            The per-device :class:`_SharedFlagBuffer` of this backend.
+
+        Raises:
+            RuntimeError: If allocation or IPC export fails.
+        """
+        # Lock-free fast path: query/synchronize poll this on every
+        # iteration, and buffers are never removed.
+        if (buffer := self._buffers.get(device_index)) is not None:
+            return buffer
+        with self._lock:
+            if (buffer := self._buffers.get(device_index)) is not None:
+                return buffer
+            nbytes: int = _SLOT_COUNT * _SLOT_BYTES
+            with torch.cuda.device(device_index):
+                malloc_result = _cuda.runtime.cudaMalloc(nbytes)
+                _CHECK_CUDA(malloc_result, "cudaMalloc")
+                _err, base = malloc_result
+                stream_result = _cuda.runtime.cudaStreamCreateWithFlags(
+                    _cuda.runtime.cudaStreamNonBlocking
+                )
+                _CHECK_CUDA(stream_result, "cudaStreamCreateWithFlags")
+                _err, host_stream = stream_result
+                # Zero the slots on the buffer's own stream, never via a
+                # device-wide sync: this runs lazily inside the first
+                # record_event, and draining the caller's recording stream
+                # here would break the record's ordering guarantee.
+                _CHECK_CUDA(
+                    _cuda.runtime.cudaMemsetAsync(base, 0, nbytes, host_stream),
+                    "cudaMemsetAsync",
+                )
+                _CHECK_CUDA(
+                    _cuda.runtime.cudaStreamSynchronize(host_stream),
+                    "cudaStreamSynchronize (flag buffer init)",
+                )
+                handle_result = _cuda.runtime.cudaIpcGetMemHandle(base)
+                _CHECK_CUDA(handle_result, "cudaIpcGetMemHandle")
+                _err, handle = handle_result
+            buffer = _SharedFlagBuffer(
+                device_index=device_index,
+                base_ptr=int(base),
+                handle_bytes=bytes(handle.reserved),
+                host_ops_stream=host_stream,
+            )
+            with _HANDLE_REGISTRY_LOCK:
+                _LOCAL_BUFFERS_BY_HANDLE[buffer.handle_bytes] = buffer.base_ptr
+            self._buffers[device_index] = buffer
+            logger.info(
+                "Allocated shared-flag event buffer on cuda:%d (%d slots)",
+                device_index,
+                _SLOT_COUNT,
+            )
+            return buffer
+
+    def _read_slot(self, event: SharedFlagEvent) -> int:
+        """Read the current 64-bit value of ``event``'s slot.
+
+        Args:
+            event: A recorded or imported event.
+
+        Returns:
+            The slot's current value.
+
+        Raises:
+            RuntimeError: If the device read fails.
+        """
+        host_stream: object = self._get_buffer(event.device_index).host_ops_stream
+        value: ctypes.c_uint64 = ctypes.c_uint64(0)
+        with torch.cuda.device(event.device_index):
+            _CHECK_CUDA(
+                _cuda.runtime.cudaMemcpyAsync(
+                    ctypes.addressof(value),
+                    event.base_ptr + event.slot_offset,
+                    _SLOT_BYTES,
+                    _cuda.runtime.cudaMemcpyKind.cudaMemcpyDeviceToHost,
+                    host_stream,
+                ),
+                "cudaMemcpyAsync (flag read)",
+            )
+            _CHECK_CUDA(
+                _cuda.runtime.cudaStreamSynchronize(host_stream),
+                "cudaStreamSynchronize (flag read)",
+            )
+        return value.value
