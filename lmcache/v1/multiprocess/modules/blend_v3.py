@@ -577,6 +577,16 @@ class BlendV3Module(InstanceLivenessTarget):
         self._cb_slot_staging: "weakref.WeakKeyDictionary[Any, tuple]" = (
             weakref.WeakKeyDictionary()
         )
+        # Per-context completion event of the last retrieve; the next
+        # plan-build waits on it before rewriting the shared slot buffers.
+        self._cb_plan_done_events: (
+            "weakref.WeakKeyDictionary[Any, torch.cuda.Event]"
+        ) = weakref.WeakKeyDictionary()
+        # Per-context retrieve-owned stream, so retrieves never queue
+        # behind the store path's copies on the context stream.
+        self._cb_retrieve_streams: "weakref.WeakKeyDictionary[Any, Any]" = (
+            weakref.WeakKeyDictionary()
+        )
 
         # Non-blocking cb_unified_lookup poll state (submit-once, poll-on-recall)
         # so the handler never holds a worker thread across the L2->L1 loads.
@@ -1877,10 +1887,24 @@ class BlendV3Module(InstanceLivenessTarget):
         unsupported layout (compressed / kv_size / dtype / head geometry).
         """
         kgm = gpu_context.kv_layer_groups_manager
+        # Retrieve-owned staging pool: the context's temp slot buffers are
+        # shared with the store path's gather, so staging into them needs a
+        # device-wide sync. A private pool with the same slot/group layout
+        # (per-group pointer offsets) removes the sharing; the scoped event
+        # in _build_cb_retrieve_plan_flat orders retrieve-vs-retrieve reuse.
+        shared_obj0 = gpu_context.get_temp_object_group_buffer(0, 0)
+        slot_bytes = int(shared_obj0.nbytes)
+        slot_stride = (slot_bytes + 255) & ~255
+        shared_base = int(shared_obj0.data_ptr())
+        private_pool = torch.empty(
+            max_batch * slot_stride, dtype=torch.uint8, device=gpu_context.device
+        )
+        private_base = int(private_pool.data_ptr())
         group_specs: list[Any] = []
         for group_idx in range(kgm.num_kernel_groups):
             group = kgm.kernel_groups[group_idx]
             buf0 = gpu_context.get_temp_kernel_group_buffer(0, group_idx)
+            group_off = int(buf0.data_ptr()) - shared_base
             num_layers, slot_tokens, hidden_dim = (
                 int(buf0.shape[1]),
                 int(buf0.shape[2]),
@@ -1892,7 +1916,7 @@ class BlendV3Module(InstanceLivenessTarget):
                     group_idx
                 ).data_ptr(),
                 temp_buffer_ptrs=[
-                    gpu_context.get_temp_kernel_group_buffer(slot, group_idx).data_ptr()
+                    private_base + slot * slot_stride + group_off
                     for slot in range(max_batch)
                 ],
                 num_layers=num_layers,
@@ -1958,7 +1982,7 @@ class BlendV3Module(InstanceLivenessTarget):
                 )
             )
         object_group_buffers = [
-            gpu_context.get_temp_object_group_buffer(slot, 0)
+            private_pool[slot * slot_stride : slot * slot_stride + slot_bytes]
             for slot in range(max_batch)
         ]
         return group_specs, object_group_buffers
@@ -2065,6 +2089,16 @@ class BlendV3Module(InstanceLivenessTarget):
         pinned, pinned_np, dev_buf = self._cb_slot_buffers(
             gpu_context, num_groups, n_pos
         )
+        # Cross-request barrier: the previous retrieve may still be reading
+        # these per-context buffers when the host rewrites ``pinned_np``.
+        # Waiting on its completion event covers all of its device work
+        # (the native call joins its staging stream into the caller's
+        # stream every step, csrc/blend_kernels.cu). Sound only with the
+        # retrieve-owned staging pool above — a device-wide sync here
+        # otherwise serializes retrieves behind store commits for 100s of ms.
+        prev_ev = self._cb_plan_done_events.pop(gpu_context, None)
+        if prev_ev is not None:
+            prev_ev.synchronize()
         div_mod: "dict[int, tuple[np.ndarray, np.ndarray]]" = {}
         for gi, ((block_ids_np, group_bs), spec) in enumerate(
             zip(cpu_block_tables, group_specs, strict=True)
@@ -2328,38 +2362,43 @@ class BlendV3Module(InstanceLivenessTarget):
             )
         num_groups = gpu_context.kv_layer_groups_manager.num_kernel_groups
 
+        # Retrieve-owned stream: the context stream carries the store's
+        # copies, and queuing behind them re-creates the stall.
+        retrieve_stream = self._cb_retrieve_streams.get(gpu_context)
+        if retrieve_stream is None:
+            if gpu_context.device.type == "cuda":
+                retrieve_stream = torch_dev.Stream(device=gpu_context.device)
+            else:
+                retrieve_stream = gpu_context.stream
+            self._cb_retrieve_streams[gpu_context] = retrieve_stream
+
         with (
             torch_dev.device(gpu_context.device),
-            torch_dev.stream(gpu_context.stream),
+            torch_dev.stream(retrieve_stream),
         ):
             check_interprocess_event_support()
             event = torch_dev.Event(interprocess=True)
 
-            # One staged block-id tensor per engine group, indexed by group.
-            block_ids_per_group_gpu = gpu_context.stage_block_ids(gpu_block_ids)
-
-            # Resolve each kernel group's block table + block size once. Select
-            # by engine_group_idx (kernel groups may share one, e.g. MiniMax-M3).
-            # The CPU (numpy) tables feed the native plan's slot-mapping math;
-            # the GPU tensors feed the Python fallback loop.
+            # Resolve each kernel group's block table + block size once
+            # (by engine_group_idx; kernel groups may share one). Only the
+            # CPU tables are built here; stage_block_ids writes a buffer
+            # shared with the store path, so it is deferred to the fallback.
             kgm = gpu_context.kv_layer_groups_manager
             block_ids_np = [np.asarray(b, dtype=np.int64) for b in gpu_block_ids]
-            resolved_groups: list[tuple[torch.Tensor, int]] = []
             cpu_block_tables: "list[tuple[np.ndarray, int]]" = []
             for group_idx in range(num_groups):
                 eg_idx = kgm.kernel_groups[group_idx].engine_group_idx
-                if eg_idx >= len(block_ids_per_group_gpu):
+                if eg_idx >= len(gpu_block_ids):
                     # Engine groups have independent block tables under HMA;
                     # substituting another group's table would scatter KV into
                     # the wrong physical blocks (silent corruption).
                     raise ValueError(
                         f"CB retrieve: kernel group {group_idx} maps to engine "
                         f"group {eg_idx}, but only "
-                        f"{len(block_ids_per_group_gpu)} block table(s) were "
+                        f"{len(gpu_block_ids)} block table(s) were "
                         "provided."
                     )
                 group_bs = kgm.kernel_groups[group_idx].tokens_per_block
-                resolved_groups.append((block_ids_per_group_gpu[eg_idx], group_bs))
                 cpu_block_tables.append((block_ids_np[eg_idx], group_bs))
 
             self._event_bus.publish_on_stream(
@@ -2383,7 +2422,7 @@ class BlendV3Module(InstanceLivenessTarget):
             vllm_event = torch_dev.Event.from_ipc_handle(
                 gpu_context.device, event_ipc_handle
             )
-            vllm_event.wait(stream=gpu_context.stream)
+            vllm_event.wait(stream=retrieve_stream)
 
             # Stage marks for the scatter_ms log line (CPU enqueue wall time):
             # fetch = L1 prefetched read, plan = flat-plan table build,
@@ -2408,8 +2447,8 @@ class BlendV3Module(InstanceLivenessTarget):
                     # Bound by the smallest group: under HMA the sliding group
                     # has fewer blocks than the full group, so [0] isn't safe.
                     num_slots = min(
-                        int(block_ids.numel()) * group_bs
-                        for block_ids, group_bs in resolved_groups
+                        int(block_ids.shape[0]) * group_bs
+                        for block_ids, group_bs in cpu_block_tables
                     )
                     for r, memory_obj in zip(cb_match_result, memory_objs, strict=True):
                         if r.cur_ed > num_slots:
@@ -2478,6 +2517,24 @@ class BlendV3Module(InstanceLivenessTarget):
                         _stage_ms["exec"] = (time.perf_counter() - _stage_t) * 1000
                         runs = []  # plan covers every wave; skip the loop
 
+                    resolved_groups: list[tuple[torch.Tensor, int]] = []
+                    if runs:
+                        # Fallback only: it uses the context's shared temp
+                        # slots and block-id buffer, so it keeps the
+                        # device-wide barrier.
+                        if gpu_context.device.type == "cuda":
+                            torch.cuda.synchronize(gpu_context.device)
+                        block_ids_per_group_gpu = gpu_context.stage_block_ids(
+                            gpu_block_ids
+                        )
+                        for group_idx in range(num_groups):
+                            eg_idx = kgm.kernel_groups[group_idx].engine_group_idx
+                            resolved_groups.append(
+                                (
+                                    block_ids_per_group_gpu[eg_idx],
+                                    kgm.kernel_groups[group_idx].tokens_per_block,
+                                )
+                            )
                     for run in runs:
                         for batch_start in range(0, len(run), max_batch):
                             batch = run[batch_start : batch_start + max_batch]
@@ -2511,6 +2568,12 @@ class BlendV3Module(InstanceLivenessTarget):
                             )
 
                     applied_now = {(r.hash, r.cur_st, r.cur_ed) for r, _ in pairs}
+
+                    # Completion event for the next request's scoped barrier.
+                    if gpu_context.device.type == "cuda":
+                        done_ev = torch.cuda.Event()
+                        done_ev.record()
+                        self._cb_plan_done_events[gpu_context] = done_ev
 
                     self._event_bus.publish_on_stream(
                         gpu_context.cupy_stream,
