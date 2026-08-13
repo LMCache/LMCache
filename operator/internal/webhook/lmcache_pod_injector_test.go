@@ -216,6 +216,22 @@ var _ = Describe("LMCachePodInjector", func() {
 			Expect(findVolume(out, testDevShmVolumeName)).To(BeNil())
 		})
 
+		It("preserves the pod's hostIPC opt-in without mounting /dev/shm", func() {
+			injector := newLMCacheInjector(true)
+			pod := lmcachePod(func(p *corev1.Pod) {
+				p.Spec.HostIPC = true
+			})
+
+			resp := injector.Handle(ctx, makeRequest(pod))
+			out := applyResponse(pod, resp)
+
+			Expect(out.Spec.HostIPC).To(BeTrue())
+			Expect(findVolume(out, testDevShmVolumeName)).To(BeNil())
+			c := findContainer(out, testContainerVLLM)
+			Expect(findVolumeMount(c, testDevShmVolumeName)).To(BeNil())
+			Expect(out.Annotations[LMCacheAnnotationInjected]).To(Equal(valueTrue))
+		})
+
 		It("leaves a user-supplied /dev/shm mount untouched", func() {
 			injector := newLMCacheInjector(true)
 			pod := lmcachePod(func(p *corev1.Pod) {

@@ -538,6 +538,23 @@ var _ = Describe("CacheBlendPodInjector", func() {
 			Expect(out.Spec.HostIPC).To(BeTrue())
 			Expect(findVolume(out, testDevShmVolumeName)).To(BeNil())
 		})
+
+		It("preserves the pod's hostIPC opt-in without mounting /dev/shm", func() {
+			engine := newTestEngine(nil)
+			injector := newPodInjector(engine, true)
+			pod := vllmPod(func(p *corev1.Pod) {
+				p.Spec.HostIPC = true
+			})
+
+			resp := injector.Handle(ctx, makeRequest(pod))
+			out := applyResponse(pod, resp)
+
+			Expect(out.Spec.HostIPC).To(BeTrue())
+			Expect(findVolume(out, testDevShmVolumeName)).To(BeNil())
+			vllm := findContainer(out, "vllm")
+			Expect(findVolumeMount(vllm, testDevShmVolumeName)).To(BeNil())
+			Expect(out.Annotations[AnnotationInjected]).To(Equal(valueTrue))
+		})
 	})
 
 	Describe("cudagraph modes", func() {

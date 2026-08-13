@@ -184,7 +184,8 @@ func prepareInjection(
 // CUDA IPC requirement is that both processes see the same /dev/shm
 // tmpfs (PyTorch's CUDA IPC handles reference a ref-counter file there). When
 // the engine opts into hostIPC, the pod instead joins the host IPC namespace,
-// which exposes the host's /dev/shm without a mount. User-supplied wiring is
+// which exposes the host's /dev/shm without a mount. A pod that already has
+// hostIPC enabled also needs no /dev/shm mount. Other user-supplied wiring is
 // left untouched: an existing mount at /dev/shm or an existing volume named
 // "lmcache-dev-shm" suppresses the injection.
 //
@@ -195,6 +196,8 @@ func prepareInjection(
 func applyIPCSharing(pod *corev1.Pod, target *corev1.Container, hostIPC bool) {
 	if hostIPC {
 		pod.Spec.HostIPC = true
+	}
+	if pod.Spec.HostIPC {
 		return
 	}
 	// Leave user-supplied wiring untouched: an existing mount at /dev/shm, or
