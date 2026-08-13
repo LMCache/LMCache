@@ -479,17 +479,6 @@ class LookupModule:
         caller's responsibility to align the boundaries as desired.
 
         Only the keys the prefetch actually read-locked are released.
-        Mirroring ``unfold``, for a model-wide hit of ``H`` chunks a
-        full-attention group locks chunks ``[0, H)`` while a sliding-window
-        group locks only the trailing ``[max(0, H - window), H)``; each
-        group releases the intersection of its locked range with
-        ``[start, end)``.  The hit length is read from the session, where
-        ``query_prefetch_status`` recorded it when the prefetch result was
-        consumed.  If it was never recorded, full-attention groups fall
-        back to releasing the whole ``[start, end)`` range while
-        sliding-window groups release nothing: a leaked read lock expires
-        with its TTL, whereas an over-release could strip a lock held by a
-        concurrent reader of the same chunk.
 
         Computes the extra reader count from ``tp_size`` and
         ``world_size`` the same way :meth:`lookup` does, so
