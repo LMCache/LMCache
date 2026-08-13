@@ -280,7 +280,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                     u.strip() for u in server_urls_cfg.split(",") if u.strip()
                 ]
         else:
-            # Legacy single-server fallback.
+            # Single-server configuration.
             server_host = vllm_config.kv_transfer_config.get_from_extra_config(
                 "lmcache.mp.host", "grpc://localhost"
             )
@@ -289,7 +289,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             )
             server_urls = [f"{server_host}:{server_port}"]
 
-        # Preserve explicit transport schemes and default bare URLs to gRPC.
+        # Normalize bare host:port values to the gRPC transport scheme.
         server_urls = [_ensure_transport_scheme(u) for u in server_urls]
 
         # The server count is derived from lmcache.mp.server_urls.

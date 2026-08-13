@@ -338,10 +338,10 @@ def run_cache_server(
     start_prometheus_http_server: bool = True,
     coordinator_config: CoordinatorConfig = DEFAULT_COORDINATOR_CONFIG,
 ) -> tuple[MessageQueueServer, MPCacheServer] | None:
-    """Run the LMCache cache server with ZMQ message queue.
+    """Run the LMCache cache server with a gRPC message queue.
 
     Args:
-        mp_config: Configuration for the ZMQ multiprocess server.
+        mp_config: Configuration for the gRPC multiprocess server.
         storage_manager_config: Configuration for the storage manager.
         obs_config: Configuration for the observability stack.
         coordinator_config: Coordinator connection used by the P2P controller
@@ -488,7 +488,7 @@ def parse_args():
         Parsed arguments namespace.
     """
     parser = argparse.ArgumentParser(
-        description="LMCache ZMQ Cache Server (without HTTP)"
+        description="LMCache gRPC Cache Server (without HTTP)"
     )
     add_mp_server_args(parser)
     add_storage_manager_args(parser)

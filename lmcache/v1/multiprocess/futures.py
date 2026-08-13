@@ -17,6 +17,7 @@ class MessagingFuture(Generic[T]):
         self.is_done_ = threading.Event()
         self.result_: T | None = None
         self._retained_references: list[object] = []
+        self.exception_: BaseException | None = None
 
     def query(self) -> bool:
         """
@@ -57,6 +58,8 @@ class MessagingFuture(Generic[T]):
         flag = self.wait(timeout)
         if not flag:
             raise LMCacheTimeoutError("Future result not available within timeout")
+        if self.exception_ is not None:
+            raise self.exception_
         return cast(T, self.result_)
 
     def set_result(self, result: T) -> None:
@@ -81,6 +84,15 @@ class MessagingFuture(Generic[T]):
             value: Resource whose lifetime must be tied to this future.
         """
         self._retained_references.append(value)
+
+    def set_exception(self, exception: BaseException) -> None:
+        """Set the exception raised by :meth:`result` and mark this future done.
+
+        Args:
+            exception: The asynchronous operation failure to propagate.
+        """
+        self.exception_ = exception
+        self.is_done_.set()
 
     def to_device_future(
         self,

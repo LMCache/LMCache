@@ -19,6 +19,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 
 # Third Party
 import pytest
@@ -985,3 +986,65 @@ def test_register_kv_cache_grpc_roundtrip() -> None:
         client.close()
     finally:
         server.close()
+
+
+def test_grpc_request_waits_for_server_startup() -> None:
+    """Requests submitted during daemon startup must not fail fast."""
+    port = _find_free_port()
+    server_url = f"grpc://127.0.0.1:{port}"
+    client = MessageQueueClient(server_url)
+    future: MessagingFuture[bool] = client.submit_request(RequestType.PING, [None])
+    time.sleep(0.25)
+    assert not future.query()
+
+    server = MessageQueueServer(server_url)
+
+    def handler(instance_id: Optional[int]) -> bool:
+        return instance_id is None
+
+    server.add_handler(
+        RequestType.PING,
+        get_payload_classes(RequestType.PING),
+        HandlerType.SYNC,
+        handler,
+    )
+    server.start()
+    try:
+        assert future.result(timeout=5.0) is True
+    finally:
+        client.close()
+        server.close()
+
+
+def test_grpc_request_stays_pending_when_server_stops_mid_call() -> None:
+    """An in-flight request must retain legacy fault-tolerance semantics."""
+    port = _find_free_port()
+    server_url = f"grpc://127.0.0.1:{port}"
+    handler_entered = threading.Event()
+    release_handler = threading.Event()
+
+    def handler(instance_id: Optional[int]) -> bool:
+        del instance_id
+        handler_entered.set()
+        release_handler.wait(timeout=5.0)
+        return True
+
+    server = MessageQueueServer(server_url)
+    server.add_handler(
+        RequestType.PING,
+        get_payload_classes(RequestType.PING),
+        HandlerType.SYNC,
+        handler,
+    )
+    server.start()
+    client = MessageQueueClient(server_url)
+    future: MessagingFuture[bool] = client.submit_request(RequestType.PING, [None])
+    assert handler_entered.wait(timeout=5.0)
+
+    server.close()
+    release_handler.set()
+    time.sleep(0.25)
+    try:
+        assert not future.query()
+    finally:
+        client.close()

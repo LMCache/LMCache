@@ -37,9 +37,15 @@ EOF
         > "${log_file}" 2>&1 &
     DAEMON_PID=$!
     for ((i = 0; i < 60; i++)); do
-        if grep -q "ZMQ cache server is running" "${log_file}" 2>/dev/null; then
+        if curl -sf "http://127.0.0.1:${DAEMON_HTTP_PORT}/healthcheck" \
+            >/dev/null 2>&1; then
             echo "  daemon ready (${i}s, log=${log_file})"
             return 0
+        fi
+        if ! kill -0 "${DAEMON_PID}" 2>/dev/null; then
+            echo "FAIL: daemon exited during startup" >&2
+            tail -n 200 "${log_file}" >&2
+            return 1
         fi
         sleep 1
     done

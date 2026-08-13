@@ -1899,22 +1899,34 @@ class MessageQueueClient:
             try:
                 proto_response = call.result()
             except grpc.RpcError as exc:
+                if exc.code() is grpc.StatusCode.UNAVAILABLE:
+                    # Preserve the old DEALER behavior when a daemon disappears
+                    # mid-request. Callers can time out loads and recompute, while
+                    # fire-and-poll stores simply remain unfinished.
+                    logger.warning(
+                        "gRPC call %s lost its server and remains pending: %s",
+                        method_name,
+                        exc,
+                    )
+                    return
                 logger.error("gRPC call %s failed: %s", method_name, exc)
-                future.set_result(None)  # type: ignore[arg-type]
+                future.set_exception(exc)
                 return
-            except Exception:  # defensive
+            except Exception as exc:  # defensive
                 logger.exception("gRPC call %s failed", method_name)
-                future.set_result(None)  # type: ignore[arg-type]
+                future.set_exception(exc)
                 return
             try:
                 decoded = typed_spec.response_to_python(proto_response)
-            except Exception:
+            except Exception as exc:
                 logger.exception("failed to decode typed response for %s", method_name)
-                future.set_result(None)  # type: ignore[arg-type]
+                future.set_exception(exc)
                 return
             future.set_result(decoded)
 
-        call = stub_method.future(proto_request)
+        # Match the old DEALER socket semantics: requests submitted while the
+        # daemon is starting or restarting remain pending until it is reachable.
+        call = stub_method.future(proto_request, wait_for_ready=True)
         call.add_done_callback(_on_done_typed)
         return future
 

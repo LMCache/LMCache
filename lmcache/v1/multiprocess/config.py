@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Configuration for the multiprocess (ZMQ) server and HTTP frontend.
+Configuration for the multiprocess server and HTTP frontend.
 """
 
 # Standard
@@ -26,10 +26,9 @@ class MPServerConfig:
     host: str = "localhost"
     """MessageQueue server host.
 
-    May optionally carry a transport scheme understood by the mp-mode
-    transport registry (``tcp://`` / ``ipc://`` for ZMQ, ``grpc://`` /
-    ``grpc+unix://`` for gRPC); when no scheme is present, ``tcp://`` is
-    assumed so existing deployments keep working unchanged.
+    May optionally carry ``grpc://``. Historical ``tcp://`` values remain
+    accepted as aliases, but the server always uses gRPC. A bare host defaults
+    to gRPC.
     """
 
     port: int = 5555
@@ -260,7 +259,7 @@ def add_mp_server_args(
         The same parser with MP server arguments added.
     """
     mp_group = parser.add_argument_group(
-        "MP Server", "Configuration for the ZMQ multiprocess cache server"
+        "MP Server", "Configuration for the multiprocess cache server"
     )
     mp_group.add_argument(
         "--instance-id",
@@ -275,13 +274,13 @@ def add_mp_server_args(
         "--host",
         type=str,
         default="localhost",
-        help="Host to bind the ZMQ server. Default is localhost.",
+        help="Host to bind the gRPC server. Default is localhost.",
     )
     mp_group.add_argument(
         "--port",
         type=int,
         default=5555,
-        help="Port to bind the ZMQ server. Default is 5555.",
+        help="Port to bind the gRPC server. Default is 5555.",
     )
     mp_group.add_argument(
         "--chunk-size",
