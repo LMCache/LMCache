@@ -103,7 +103,7 @@ Install LMCache
                                 --entrypoint bash vllm/vllm-openai-xpu:v0.26.0
 
                             VERSION=0.5.3  # replace with target release
-                            pip install lmcache==${VERSION} --no-deps \
+                            pip install lmcache==${VERSION}+xpu --no-deps \
                                 --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/v${VERSION}-xpu
 
                         .. note::
