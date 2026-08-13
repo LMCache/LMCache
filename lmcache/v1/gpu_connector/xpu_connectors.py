@@ -23,6 +23,7 @@ from lmcache.v1.gpu_connector.utils import (
 from lmcache.v1.memory_allocators.gpu_memory_allocator import GPUMemoryAllocator
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 import lmcache.c_ops as lmc_ops
+import lmcache.lmcache_native as lmcache_native
 
 if TYPE_CHECKING:
     # First Party
@@ -199,7 +200,7 @@ class VLLMPagedMemXPUConnectorV2(GPUConnectorInterface):
             slot_mapping[start:end],
             self.device,
             self.page_buffer_size,
-            lmc_ops.TransferDirection.H2D,
+            lmcache_native.TransferDirection.H2D,
             self.engine_kv_format,
             self.block_size,
             skip_prefix_n_tokens,
@@ -246,7 +247,7 @@ class VLLMPagedMemXPUConnectorV2(GPUConnectorInterface):
                     slot_mapping[start:end],
                     self.kvcaches[0].device,
                     self.page_buffer_size,
-                    lmc_ops.TransferDirection.D2H,
+                    lmcache_native.TransferDirection.D2H,
                     self.engine_kv_format,
                     self.block_size,
                 )
@@ -260,7 +261,7 @@ class VLLMPagedMemXPUConnectorV2(GPUConnectorInterface):
                     slot_mapping[start:end],
                     self.kvcaches[0].device,
                     self.page_buffer_size,
-                    lmc_ops.TransferDirection.D2H,
+                    lmcache_native.TransferDirection.D2H,
                     self.engine_kv_format,
                     self.block_size,
                 )
@@ -399,7 +400,7 @@ class VLLMPagedMemXPUConnectorV3(GPUConnectorInterface):
                 slot_mapping[start:end],
                 self.device,
                 self.page_buffer_size,
-                lmc_ops.TransferDirection.H2D,
+                lmcache_native.TransferDirection.H2D,
                 self.engine_kv_format,
                 self.block_size,
                 skip_prefix_n_tokens,
@@ -429,7 +430,7 @@ class VLLMPagedMemXPUConnectorV3(GPUConnectorInterface):
                         slot_mapping[start:end],
                         self.device,
                         self.page_buffer_size,
-                        lmc_ops.TransferDirection.D2H,
+                        lmcache_native.TransferDirection.D2H,
                         self.engine_kv_format,
                         self.block_size,
                     )
@@ -446,7 +447,7 @@ class VLLMPagedMemXPUConnectorV3(GPUConnectorInterface):
                         slot_mapping[start:end],
                         self.device,
                         self.page_buffer_size,
-                        lmc_ops.TransferDirection.D2H,
+                        lmcache_native.TransferDirection.D2H,
                         self.engine_kv_format,
                         self.block_size,
                     )
@@ -684,7 +685,7 @@ class VLLMBufferLayerwiseXPUConnector(GPUConnectorInterface):
                     self.buffer_mapping[layer_id - 2].tensor,
                     self.kvcaches[layer_id - 2],
                     slot_mapping_full,
-                    lmc_ops.TransferDirection.H2D,
+                    lmcache_native.TransferDirection.H2D,
                     self.engine_kv_format,
                     token_major=False,  # shape is [2, num_tokens, hidden_dim]
                 )
@@ -844,7 +845,7 @@ class VLLMBufferLayerwiseXPUConnector(GPUConnectorInterface):
                     tmp_gpu_buffer_obj.tensor,
                     self.kvcaches[layer_id],
                     slot_mapping_full,
-                    lmc_ops.TransferDirection.D2H,
+                    lmcache_native.TransferDirection.D2H,
                     self.engine_kv_format,
                     token_major=False,  # shape is [2, num_tokens, hidden_dim]
                 )
@@ -1083,7 +1084,7 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
                             memory_obj.tensor,
                             self.kvcaches[layer_id],
                             slot_mapping[start:end],
-                            lmc_ops.TransferDirection.H2D,
+                            lmcache_native.TransferDirection.H2D,
                             self.engine_kv_format,
                             token_major=True,
                         )
@@ -1093,7 +1094,7 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
                         tmp_gpu_buffer_obj.tensor,
                         self.kvcaches[layer_id],
                         slot_mapping_full,
-                        lmc_ops.TransferDirection.H2D,
+                        lmcache_native.TransferDirection.H2D,
                         self.engine_kv_format,
                         token_major=True,
                     )
@@ -1191,7 +1192,7 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
                         tmp_gpu_buffer_obj.tensor,
                         self.kvcaches[layer_id],
                         slot_mapping_full,
-                        lmc_ops.TransferDirection.D2H,
+                        lmcache_native.TransferDirection.D2H,
                         self.engine_kv_format,
                         token_major=True,
                     )
@@ -1209,7 +1210,7 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
                             memory_obj.tensor,
                             self.kvcaches[layer_id],
                             slot_mapping[start:end],
-                            lmc_ops.TransferDirection.D2H,
+                            lmcache_native.TransferDirection.D2H,
                             self.engine_kv_format,
                             token_major=True,
                         )
@@ -1304,7 +1305,7 @@ class SGLangXPUConnector(GPUConnectorInterface):
 
         # For TWO_X_NL_X_NBBS_NH_HS format, kv_caches is [[k_list], [v_list]]
         # We need to flatten it to [k0, k1, ..., v0, v1, ...]
-        if self.engine_kv_format == lmc_ops.EngineKVFormat.TWO_X_NL_X_NBBS_NH_HS:
+        if self.engine_kv_format == lmcache_native.EngineKVFormat.TWO_X_NL_X_NBBS_NH_HS:
             flat_kv_caches = kv_caches[0] + kv_caches[1]  # [k_list] + [v_list]
             device = flat_kv_caches[0].device
         else:
@@ -1381,7 +1382,7 @@ class SGLangXPUConnector(GPUConnectorInterface):
             slot_mapping[start - offset : end - offset],
             kvcaches[0][0].device,
             self.page_buffer_size,
-            lmc_ops.TransferDirection.H2D,
+            lmcache_native.TransferDirection.H2D,
             self.engine_kv_format,
         )
 
@@ -1424,7 +1425,7 @@ class SGLangXPUConnector(GPUConnectorInterface):
                 slot_mapping[start:end],
                 kvcaches[0][0].device,
                 self.page_buffer_size,
-                lmc_ops.TransferDirection.D2H,
+                lmcache_native.TransferDirection.D2H,
                 self.engine_kv_format,
             )
         else:
@@ -1437,7 +1438,7 @@ class SGLangXPUConnector(GPUConnectorInterface):
                 slot_mapping[start:end],
                 kvcaches[0][0].device,
                 self.page_buffer_size,
-                lmc_ops.TransferDirection.D2H,
+                lmcache_native.TransferDirection.D2H,
                 self.engine_kv_format,
             )
             memory_obj.tensor.copy_(tmp_gpu_buffer, non_blocking=True)
@@ -1623,7 +1624,7 @@ class SGLangLayerwiseXPUConnector(GPUConnectorInterface):
                             memory_obj.tensor,
                             self.kvcaches[layer_id],
                             slot_mapping[start:end],
-                            lmc_ops.TransferDirection.H2D,
+                            lmcache_native.TransferDirection.H2D,
                             self.engine_kv_format,
                             token_major=True,
                         )
@@ -1637,7 +1638,7 @@ class SGLangLayerwiseXPUConnector(GPUConnectorInterface):
                             self.kvcaches[0][layer_id].view(t, 1, h, d),
                             self.kvcaches[1][layer_id].view(t, 1, h, d),
                             slot_mapping[start:end],
-                            lmc_ops.TransferDirection.H2D,
+                            lmcache_native.TransferDirection.H2D,
                             token_major=True,
                         )
 
@@ -1647,7 +1648,7 @@ class SGLangLayerwiseXPUConnector(GPUConnectorInterface):
                         tmp_gpu_buffer_obj.tensor,
                         self.kvcaches[layer_id],
                         slot_mapping_full,
-                        lmc_ops.TransferDirection.H2D,
+                        lmcache_native.TransferDirection.H2D,
                         self.engine_kv_format,
                         token_major=True,
                     )
@@ -1658,7 +1659,7 @@ class SGLangLayerwiseXPUConnector(GPUConnectorInterface):
                         self.kvcaches[0][layer_id].view(t, 1, h, d),
                         self.kvcaches[1][layer_id].view(t, 1, h, d),
                         slot_mapping_full,
-                        lmc_ops.TransferDirection.H2D,
+                        lmcache_native.TransferDirection.H2D,
                         token_major=True,
                     )
 
@@ -1755,7 +1756,7 @@ class SGLangLayerwiseXPUConnector(GPUConnectorInterface):
                         tmp_gpu_buffer_obj.tensor,
                         self.kvcaches[layer_id],
                         slot_mapping_full,
-                        lmc_ops.TransferDirection.D2H,
+                        lmcache_native.TransferDirection.D2H,
                         self.engine_kv_format,
                         token_major=True,
                     )
@@ -1766,7 +1767,7 @@ class SGLangLayerwiseXPUConnector(GPUConnectorInterface):
                         self.kvcaches[0][layer_id].view(t, 1, h, d),
                         self.kvcaches[1][layer_id].view(t, 1, h, d),
                         slot_mapping_full,
-                        lmc_ops.TransferDirection.D2H,
+                        lmcache_native.TransferDirection.D2H,
                         token_major=True,
                     )
 
@@ -1789,7 +1790,7 @@ class SGLangLayerwiseXPUConnector(GPUConnectorInterface):
                             memory_obj.tensor,
                             self.kvcaches[layer_id],
                             slot_mapping[start:end],
-                            lmc_ops.TransferDirection.D2H,
+                            lmcache_native.TransferDirection.D2H,
                             self.engine_kv_format,
                             token_major=True,
                         )
@@ -1803,7 +1804,7 @@ class SGLangLayerwiseXPUConnector(GPUConnectorInterface):
                             self.kvcaches[0][layer_id].view(t, 1, h, d),
                             self.kvcaches[1][layer_id].view(t, 1, h, d),
                             slot_mapping[start:end],
-                            lmc_ops.TransferDirection.D2H,
+                            lmcache_native.TransferDirection.D2H,
                             token_major=True,
                         )
 
