@@ -1,5 +1,18 @@
 # Token Dropping Examples using LMCache SDK
 
+## **Quick Start**
+
+We provide an easily reproducible examples on Google Colab's free tier
+using GPU T4. Check it out 
+[here](https://drive.google.com/drive/folders/1ILctdh_Lf51qDUf1v00osRfoylfBIlOD?usp=share_link).
+If you have interesting token dropping algorithms, feel free to make your own
+copy of the notebook and request upload to the folder!
+
+Notes:
+- SnapKV notebook takes 15 minutes to run end-to-end!
+
+## Running example on your own GPU
+
 Long prompts create large KV caches that eat up GPU memory and limit how many
 requests fit in a batch. Smaller batch means lower decode throughput. To 
 improve decode throughput, we then need to stuff more requests in a batch.
@@ -13,12 +26,6 @@ The two examples use the LMCache SDK to do this: the SDK **retrieves** a
 request's cached tensors, **modifies** them, and **stores** them back for vLLM
 to decode from. Users only need to supply the token dropping function, and the
 SDK's batch and stream APIs does the job in an offline manner.
-
-We also provide an easily reproducible examples on Google Colab's free tier
-using GPU T4. Check it out 
-[here](https://drive.google.com/drive/folders/1ILctdh_Lf51qDUf1v00osRfoylfBIlOD?usp=share_link).
-If you have interesting token dropping algorithms, feel free to make your own
-copy of the notebook and request upload to the folder!
 
 ## Examples
 
