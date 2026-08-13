@@ -50,7 +50,7 @@ try:
     from lmcache.v1.distributed.storage_manager import StorageManager
     from lmcache.v1.memory_management import MemoryFormat
     from lmcache.v1.mp_observability.event import EventType
-    import lmcache.c_ops as lmc_ops
+    import lmcache.lmcache_native as lmcache_native
 
     # Local
     from .maru_fakes import (
@@ -821,9 +821,7 @@ def test_prefetch_hits_l1_resident_keys():
         sm.reserve_write(keys, _LAYOUT, mode="new")
         sm.finish_write(keys)
 
-        handle = sm.submit_prefetch_task(
-            PrefetchRequestSpec(keys=keys, layout_desc=_LAYOUT)
-        )
+        handle = sm.submit_prefetch_task(PrefetchRequestSpec(keys, {0: _LAYOUT}))
         assert _wait(lambda: sm.query_prefetch_status(handle) is not None)
         assert sm.query_prefetch_status(handle).count_leading_ones() == len(keys)
     finally:
@@ -863,12 +861,14 @@ def test_register_kv_layout_maps_engine_format_to_memory_format():
     manager._allocator.init_layout = MagicMock()  # type: ignore[method-assign]
     shapes, dtypes = [torch.Size([4, 8])], [torch.float16]
 
-    manager.register_kv_layout(shapes, dtypes, lmc_ops.EngineKVFormat.NL_X_NB_BS_HS, 16)
+    manager.register_kv_layout(
+        shapes, dtypes, lmcache_native.EngineKVFormat.NL_X_NB_BS_HS, 16
+    )
     fmt = manager._allocator.init_layout.call_args.args[2]
     assert fmt == MemoryFormat.KV_MLA_FMT
 
     manager.register_kv_layout(
-        shapes, dtypes, lmc_ops.EngineKVFormat.NB_NL_TWO_BS_NH_HS, 16
+        shapes, dtypes, lmcache_native.EngineKVFormat.NB_NL_TWO_BS_NH_HS, 16
     )
     fmt = manager._allocator.init_layout.call_args.args[2]
     assert fmt == MemoryFormat.KV_2LTD

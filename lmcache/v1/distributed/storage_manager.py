@@ -12,7 +12,7 @@ import time
 
 if TYPE_CHECKING:
     # First Party
-    import lmcache.c_ops as lmc_ops
+    import lmcache.lmcache_native as lmcache_native
 
 # First Party
 from lmcache.lmcache_native import Bitmap, PeriodicEventNotifier
@@ -187,7 +187,7 @@ class StorageManager:
     def register_kv_layout(
         self,
         layout_desc: MemoryLayoutDesc,
-        engine_kv_format: "lmc_ops.EngineKVFormat",
+        engine_kv_format: "lmcache_native.EngineKVFormat",
         chunk_size_in_tokens: int,
         num_object_groups: int,
     ) -> None:
