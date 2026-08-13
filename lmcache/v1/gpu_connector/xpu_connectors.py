@@ -1284,6 +1284,20 @@ class SGLangXPUConnector(GPUConnectorInterface):
             logger.info(f"GPU buffer: {self.gpu_buffer.shape}")
 
     def _initialize_pointers(self, kv_caches: List[torch.Tensor]) -> torch.Tensor:
+        # LMCacheConnector (non-layerwise SGLang adapter) hands us a flat MHA
+        # list [k0, ..., kN, v0, ..., vN]. Regroup it into the nested
+        # [k_list, v_list] the SGLANG detector recognizes. MLA (fused, NH==1)
+        # and the already-nested layout are passed through untouched.
+        if (
+            not self.use_mla
+            and isinstance(kv_caches, list)
+            and len(kv_caches) == self.num_kv_cache
+            and len(kv_caches) > 0
+            and isinstance(kv_caches[0], torch.Tensor)
+        ):
+            half = len(kv_caches) // 2
+            kv_caches = [kv_caches[:half], kv_caches[half:]]
+
         # Discover format first to handle flattening correctly
         self.engine_kv_format, kv_caches = normalize_kv_and_discover_format(
             kv_caches, EngineType.SGLANG
@@ -1615,10 +1629,14 @@ class SGLangLayerwiseXPUConnector(GPUConnectorInterface):
                             token_major=True,
                         )
                     else:
+                        # single_layer_kv_transfer_sgl reads sgl_*_cache.size(2)
+                        # and .size(3), so the paged caches must be rank-4
+                        # [t, 1, h, d]; the stored layout is rank-3 [t, h, d].
+                        t, h, d = self.kvcaches[0][layer_id].shape
                         lmc_ops.single_layer_kv_transfer_sgl(
                             memory_obj.tensor,
-                            self.kvcaches[0][layer_id],
-                            self.kvcaches[1][layer_id],
+                            self.kvcaches[0][layer_id].view(t, 1, h, d),
+                            self.kvcaches[1][layer_id].view(t, 1, h, d),
                             slot_mapping[start:end],
                             lmcache_native.TransferDirection.H2D,
                             token_major=True,
@@ -1644,6 +1662,11 @@ class SGLangLayerwiseXPUConnector(GPUConnectorInterface):
                         lmcache_native.TransferDirection.H2D,
                         token_major=True,
                     )
+
+        # Extra yield so the generator advances num_layers + 2 times, matching
+        # SGLangLayerwiseGPUConnector (CUDA) and the caller protocol
+        # (one next(), num_layers send()s, one final next()).
+        yield
 
         # free the buffer memory
         if self.use_gpu:
@@ -1772,10 +1795,14 @@ class SGLangLayerwiseXPUConnector(GPUConnectorInterface):
                             token_major=True,
                         )
                     else:
+                        # single_layer_kv_transfer_sgl reads sgl_*_cache.size(2)
+                        # and .size(3), so the paged caches must be rank-4
+                        # [t, 1, h, d]; the stored layout is rank-3 [t, h, d].
+                        t, h, d = self.kvcaches[0][layer_id].shape
                         lmc_ops.single_layer_kv_transfer_sgl(
                             memory_obj.tensor,
-                            self.kvcaches[0][layer_id],
-                            self.kvcaches[1][layer_id],
+                            self.kvcaches[0][layer_id].view(t, 1, h, d),
+                            self.kvcaches[1][layer_id].view(t, 1, h, d),
                             slot_mapping[start:end],
                             lmcache_native.TransferDirection.D2H,
                             token_major=True,

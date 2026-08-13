@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from unittest import mock
 import threading
 import time
 
@@ -1249,3 +1250,97 @@ class TestSetUsedSize:
         # Should not raise; should not change get_size.
         buf.set_used_size(1)
         assert buf.get_size() == 3
+
+
+class TestPageableHostFallback:
+    """_allocate_cpu_memory falls back to pageable host memory when the native
+    pinned allocation fails (e.g. sycl::malloc_host overflows the device
+    max_mem_alloc_size cap), so the engine degrades gracefully instead of
+    crashing.
+    """
+
+    @staticmethod
+    def _failing_resolved():
+        """A PinnedAllocFree whose alloc() raises, mimicking a pinned-alloc
+        failure while leaving free() available.
+        """
+        # First Party
+        from lmcache.v1.memory_management import PinnedAllocFree
+
+        def _boom():
+            raise RuntimeError("pinned allocation failed")
+
+        return PinnedAllocFree(
+            alloc_fn=lambda *a: _boom(),
+            alloc_args=(),
+            free_fn=lambda *a: None,
+            free_args=(),
+        )
+
+    def test_plain_alloc_falls_back_to_pageable(self):
+        # First Party
+        from lmcache.v1 import memory_management as mm
+
+        size = 4096
+        with mock.patch.object(
+            mm, "_resolve_pinned_alloc_free", return_value=self._failing_resolved()
+        ):
+            buf = mm._allocate_cpu_memory(size)
+
+        try:
+            assert buf.numel() == size
+            assert buf.dtype == torch.uint8
+            # Zero-initialized and writable.
+            assert int(buf.sum().item()) == 0
+            buf[0] = 7
+            assert int(buf[0].item()) == 7
+            # Tracked so _free_cpu_memory won't route it to the native free path.
+            assert buf.data_ptr() in mm._FALLBACK_HOST_BUFFERS
+        finally:
+            mm._free_cpu_memory(buf, size=size)
+
+        # Freeing drops the tracking entry (torch owns the buffer via GC).
+        assert buf.data_ptr() not in mm._FALLBACK_HOST_BUFFERS
+
+    def test_free_of_fallback_does_not_touch_native_path(self):
+        # First Party
+        from lmcache.v1 import memory_management as mm
+
+        size = 2048
+        with mock.patch.object(
+            mm, "_resolve_pinned_alloc_free", return_value=self._failing_resolved()
+        ):
+            buf = mm._allocate_cpu_memory(size)
+
+        # If _free_cpu_memory tried to resolve a native free for a fallback
+        # buffer it would call _resolve_pinned_alloc_free again; assert it does
+        # not by making that raise for the duration of the free.
+        with mock.patch.object(
+            mm,
+            "_resolve_pinned_alloc_free",
+            side_effect=AssertionError("native free path must not run for fallback"),
+        ):
+            mm._free_cpu_memory(buf, size=size)
+
+        assert buf.data_ptr() not in mm._FALLBACK_HOST_BUFFERS
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"shm_name": "some_shm"},
+            {"use_hugepages": True},
+        ],
+    )
+    def test_special_allocations_do_not_fall_back(self, kwargs):
+        """shm / hugepage allocations carry semantics a plain pageable buffer
+        cannot preserve, so a pinned-alloc failure must propagate, not fall
+        back.
+        """
+        # First Party
+        from lmcache.v1 import memory_management as mm
+
+        with mock.patch.object(
+            mm, "_resolve_pinned_alloc_free", return_value=self._failing_resolved()
+        ):
+            with pytest.raises(RuntimeError):
+                mm._allocate_cpu_memory(4096, **kwargs)
