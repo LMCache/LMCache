@@ -63,6 +63,10 @@ Test dependencies: `uv pip install -r requirements/test.txt`
 
 Pytest marker: `@pytest.mark.no_shared_allocator` disables the shared-allocator monkeypatch for a test.
 
+### Buildkite K3 PR builds
+
+- Buildkite K3 pipelines do not reliably start from a synthetic GitHub merge commit. On PR builds, pre-merge `origin/${BUILDKITE_PULL_REQUEST_BASE_BRANCH:-dev}` into the checked-out PR head before `pip install -e .` or running tests, otherwise CI can validate stale code relative to the latest base branch.
+
 ### Testing Practices
 
 - Write tests against the **public interface and docstring contract**, not the implementation. Test as if you don't know the internals — verify that behavior matches what the docstring describes.
@@ -216,4 +220,3 @@ When reviewing code (or self-checking before submitting), verify all of the foll
 - [ ] No unnecessary memory copies or allocations in hot paths.
 - [ ] Thread safety is maintained for shared data structures.
 - [ ] CUDA/GPU resources are properly managed (allocated, freed, synchronized).
-
