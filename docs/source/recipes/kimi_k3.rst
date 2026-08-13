@@ -17,6 +17,9 @@ Validated models
 
 - `moonshotai/Kimi-K3 <https://huggingface.co/moonshotai/Kimi-K3>`_
   (8× NVIDIA B300)
+- `moonshotai/Kimi-K3 <https://huggingface.co/moonshotai/Kimi-K3>`_ MXFP4
+  (8× AMD MI355X, via the InferenceX AgentX benchmark; fp8 KV cache,
+  DSpark speculative decoding)
 
 .. tab-set::
    :sync-group: engine
@@ -46,27 +49,41 @@ Validated models
 
       As a Mamba / linear-attention hybrid, Kimi K3 needs the same three
       settings as the other KDA / GDN hybrids: the ``align`` Mamba cache mode,
-      prefix caching, and a chunk size matched to vLLM's *unified block size*
-      ``N`` (see :ref:`mamba-block-size` for how ``N`` is determined). For
-      Kimi K3 at ``--tensor-parallel-size 8`` the unified block size is
-      ``N = 768``:
+      prefix caching, and a chunk size that is a multiple of **every** engine
+      KV group's ``tokens_per_block`` (see :ref:`mamba-block-size` for how
+      the unified block size ``N`` is determined). For Kimi K3 at
+      ``--tensor-parallel-size 8`` the validated values are:
 
       .. list-table::
          :header-rows: 1
-         :widths: 50 25 25
+         :widths: 34 22 22 22
 
-         * - Model
-           - Unified block size ``N``
-           - GPUs (TP)
-         * - ``moonshotai/Kimi-K3``
+         * - Platform (TP 8)
+           - Attention block ``N``
+           - KDA state group
+           - Minimum ``--chunk-size``
+         * - NVIDIA B300 (bf16 KV)
            - 768
-           - 8
+           - 768
+           - 768
+         * - AMD MI355X (fp8 KV, ``TRITON_MLA``)
+           - 1536
+           - 3072
+           - 3072
 
-      ``N`` depends on the tensor-parallel size (the KDA state is sharded
-      across TP ranks while the MLA cache is not), so after changing
-      ``--tensor-parallel-size`` always re-read ``N`` from vLLM's
-      ``Setting attention block size to N tokens`` startup log line and
-      re-derive ``--chunk-size`` and ``--max-num-batched-tokens`` from it.
+      ``N`` depends on the tensor-parallel size, the KV cache dtype, and the
+      attention backend (the KDA state is sharded across TP ranks while the
+      MLA cache is not, and vLLM sizes the attention block so the attention
+      page is at least as large as the mamba page). **Do not copy a number
+      from this table for a different stack.** After changing
+      ``--tensor-parallel-size``, ``--kv-cache-dtype``, or the platform,
+      re-read ``N`` from vLLM's ``Setting attention block size to N tokens``
+      startup log line and re-derive ``--chunk-size`` from it. The KDA state
+      group can register a *larger* ``tokens_per_block`` than ``N`` (the
+      MI355X row above registers 3072 against ``N = 1536``); LMCache rejects
+      a chunk size that is not a multiple of every group's block size at
+      engine startup, and the error message names the offending group and
+      value — take the final chunk size from that, not from ``N`` alone.
 
       Start the LMCache MP server (``--chunk-size`` = ``N`` = 768):
 
@@ -100,7 +117,6 @@ Validated models
              --reasoning-parser kimi_k3 \
              --enable-prefix-caching \
              --mamba-cache-mode align \
-             --max-num-batched-tokens 1500 \
              --kv-transfer-config \
              '{"kv_connector":"LMCacheMPConnector","kv_role":"kv_both","kv_connector_extra_config":{"lmcache.mp.port":6555}}'
 
@@ -114,17 +130,19 @@ Validated models
         the recurrent state.
       - ``--separate-object-groups`` (server) is **required** for hybrid
         Mamba / linear-attention models: it gives the KDA layers their own
-        cache objects and is what lets ``--max-num-batched-tokens`` exceed
-        ``2N``.
-      - ``--chunk-size`` (server) must be a multiple of the unified block size
-        ``N = 768`` — ``--chunk-size N`` is the simplest choice. LMCache
-        raises at engine startup if it is not.
-      - ``--max-num-batched-tokens`` must be **at least** ``N`` (= ``768``); the
-        validated value is ``1500``. ``align`` snapshots the KDA state only on a
-        block boundary at the end of a scheduler step. Within ``[N, 2N)`` every
-        step advances exactly one block, snapshotting every boundary (finest
-        reuse); with ``--separate-object-groups`` values ``≥ 2N`` are allowed
-        too, trading coarser reuse for higher prefill throughput. See
+        cache objects.
+      - ``--chunk-size`` (server) must be a multiple of **every** engine KV
+        group's ``tokens_per_block`` (see the table above) — on stacks where
+        all groups share the unified block size, ``--chunk-size N`` is the
+        simplest choice. LMCache raises at engine startup if it is not.
+      - ``--max-num-batched-tokens`` no longer needs to be set explicitly.
+        The constraint is only that it be **at least** ``N`` (``align``
+        snapshots the KDA state on block boundaries at the end of a
+        scheduler step), which vLLM's default already satisfies. Earlier
+        revisions of this recipe pinned ``1500`` as a workaround from before
+        ``--separate-object-groups`` allowed values ``≥ 2N``; that pin is
+        obsolete. Smaller values within ``[N, 2N)`` snapshot every block
+        boundary (finest reuse) at the cost of prefill throughput. See
         :doc:`../mp/hybrid_models` for the full rationale.
       - The server's ``--port 6555`` must match ``lmcache.mp.port`` in the
         connector config.
@@ -183,12 +201,46 @@ Compression support
      - Not supported
      - Hybrid groups' cached pages are byte-opaque.
 
+Operational notes from sustained-load validation
+------------------------------------------------
+
+Learned from running this recipe under the InferenceX AgentX trace-replay
+benchmark on 8× MI355X (100k–330k-token contexts, ~1 hour of sustained load,
+DRAM offload as the external tier):
+
+- **Size the L1 against** ``/dev/shm``, **not free DRAM.** The MP server's L1
+  pool is backed by POSIX shared memory in every transfer mode, so the usable
+  ceiling is the ``/dev/shm`` tmpfs mount (Linux default: 50% of RAM), not
+  total host memory. Pre-flight the budget: on the engine-driven path an
+  oversized L1 silently falls back to the (much slower) pickle transport; on
+  the ``lmcache_driven`` path the server-side capacity check does not run, so
+  writes can hit ``SIGBUS`` when the tmpfs fills.
+- **Pin** ``--supported-transfer-mode lmcache_driven`` **for benchmarks.**
+  The default ``auto`` advertises both transfer paths; pinning one makes the
+  measured data path deterministic across runs.
+- ``--enable-extra-logging`` (server) logs cumulative per-device store and
+  retrieve token counters, which pair with vLLM's
+  ``vllm:external_prefix_cache_queries`` / ``hits`` metrics to attribute hit
+  rates: external hits are counted only on tokens the local GPU prefix cache
+  missed, so the two hit populations are disjoint and the external hit rate
+  reads as "share of locally-missed tokens served by LMCache".
+
 Caveats
 -------
 
 - **Pre-release engine support.** Until vLLM ships K3 in a stable release, pin
   both sides: the ``vllm/vllm-openai:kimi-k3`` Docker image on the vLLM side
   and an LMCache nightly from 2026-07-27 or newer (stable from 0.5.3).
+- **Concurrent load on hybrid models requires the sliding-window
+  lock-release fix.** Versions up to and including 0.5.4rc1 over-release
+  read locks when freeing the vLLM-hit prefix: for linear-attention (KDA)
+  object groups, the lookup only retains locks on the trailing window, and
+  the extra releases decrement locks held by concurrent requests on the same
+  content-addressed chunks. Under L1 eviction pressure this lets evicted
+  state pages be reclaimed mid-retrieve — observed as ``finish read on
+  non-read-locked key`` warnings followed by corrupted generations or GPU
+  ``hipErrorIllegalAddress`` / ``HSA_STATUS_ERROR_EXCEPTION`` faults. Use a
+  release containing the fix for any multi-request workload.
 - Generation is **not guaranteed bit-exact** between a cached and a fresh run
   under concurrent load: KDA / GDN linear-attention backends do not support
   vLLM's batch-invariant mode, so kernel results can vary with batch

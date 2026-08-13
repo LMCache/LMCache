@@ -87,15 +87,34 @@ def test_mq_free_locks():
 # ============================================================================
 
 
+def _make_free_locks_ctx(attn_desc, hit_chunks, num_range_chunks):
+    """Build a mocked server context for free_lookup_locks tests.
+
+    Args:
+        attn_desc: The AttnWindowDesc the layout registry should return.
+        hit_chunks: The recorded lookup hit length, in chunks.
+        num_range_chunks: How many chunk hashes the ``[start, end)`` range
+            resolves to.
+    """
+    ctx = MagicMock()
+    ctx.chunk_size = 256
+    ctx.token_hasher.chunk_size = 256
+    ctx.token_hasher.compute_chunk_hashes.return_value = [
+        f"hash{i}".encode() for i in range(num_range_chunks)
+    ]
+    ctx.layout_desc_registry.find_attn_desc.return_value = attn_desc
+    ctx.session_manager.get_or_create.return_value.lookup_hit_chunks = hit_chunks
+    return ctx
+
+
 def test_server_free_lookup_locks_calls_finish_read_prefetched():
     """LookupModule.free_lookup_locks should resolve hash keys and call
     finish_read_prefetched on the storage manager."""
     # First Party
+    from lmcache.v1.distributed.api import AttnWindowDesc
     from lmcache.v1.multiprocess.modules.lookup import LookupModule
 
-    ctx = MagicMock()
-    ctx.token_hasher.chunk_size = 256
-    ctx.token_hasher.compute_chunk_hashes.return_value = [b"hash0"]
+    ctx = _make_free_locks_ctx(AttnWindowDesc([-1]), hit_chunks=1, num_range_chunks=1)
 
     module = LookupModule(ctx)
 
@@ -111,6 +130,87 @@ def test_server_free_lookup_locks_calls_finish_read_prefetched():
 
     module.context.storage_manager.finish_read_prefetched.assert_called_once_with(
         sentinel_obj_keys, extra_count=0
+    )
+
+
+def test_server_free_lookup_locks_skips_sw_group_before_retrieve():
+    """Freeing the vLLM-hit prefix ahead of a retrieve must not release
+    sliding-window group locks: the lookup only holds the retained window
+    ``[hit - w, hit)``, which lies beyond the freed prefix and is released
+    by the retrieve itself. Releasing trimmed chunks here would steal read
+    locks from concurrent requests sharing the same content-addressed keys."""
+    # First Party
+    from lmcache.v1.distributed.api import AttnWindowDesc
+    from lmcache.v1.multiprocess.modules.lookup import LookupModule
+
+    # Groups: 0 = full attention, 1 = sliding window of 1 chunk.
+    # Request hit = 4 chunks; the connector frees the vLLM-hit prefix
+    # [0, 512) = chunks 0..1 before retrieving chunks 2..3.
+    ctx = _make_free_locks_ctx(
+        AttnWindowDesc([-1, 1]), hit_chunks=4, num_range_chunks=2
+    )
+    module = LookupModule(ctx)
+
+    key = IPCCacheServerKey(
+        model_name="testmodel",
+        world_size=1,
+        worker_id=None,
+        token_ids=tuple(range(1024)),
+        start=0,
+        end=512,
+        request_id="req-sw-retrieve",
+    )
+
+    full_keys = [MagicMock(name="f0"), MagicMock(name="f1")]
+    sw_keys = [MagicMock(name="s0"), MagicMock(name="s1")]
+    with patch(
+        "lmcache.v1.multiprocess.modules.lookup.ipc_key_to_object_keys",
+        return_value=[full_keys, sw_keys],
+    ):
+        module.free_lookup_locks(key, 1)
+
+    # Only the full-attention group's prefix locks are released; the
+    # sliding-window group's retained window [3, 4) is outside [0, 2).
+    module.context.storage_manager.finish_read_prefetched.assert_called_once_with(
+        full_keys, extra_count=0
+    )
+
+
+def test_server_free_lookup_locks_releases_sw_window_without_retrieve():
+    """Freeing the whole hit (no retrieve pending) must release the
+    sliding-window group's retained window ``[hit - w, hit)`` — and only
+    that — alongside the full-attention group's full range."""
+    # First Party
+    from lmcache.v1.distributed.api import AttnWindowDesc
+    from lmcache.v1.multiprocess.modules.lookup import LookupModule
+
+    # Groups: 0 = full attention, 1 = sliding window of 1 chunk.
+    # Request hit = 4 chunks; the connector frees the whole hit [0, 1024).
+    ctx = _make_free_locks_ctx(
+        AttnWindowDesc([-1, 1]), hit_chunks=4, num_range_chunks=4
+    )
+    module = LookupModule(ctx)
+
+    key = IPCCacheServerKey(
+        model_name="testmodel",
+        world_size=1,
+        worker_id=None,
+        token_ids=tuple(range(1024)),
+        start=0,
+        end=1024,
+        request_id="req-sw-full-free",
+    )
+
+    full_keys = [MagicMock(name=f"f{i}") for i in range(4)]
+    sw_keys = [MagicMock(name=f"s{i}") for i in range(4)]
+    with patch(
+        "lmcache.v1.multiprocess.modules.lookup.ipc_key_to_object_keys",
+        return_value=[full_keys, sw_keys],
+    ):
+        module.free_lookup_locks(key, 1)
+
+    module.context.storage_manager.finish_read_prefetched.assert_called_once_with(
+        full_keys + sw_keys[3:], extra_count=0
     )
 
 

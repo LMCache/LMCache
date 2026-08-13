@@ -41,6 +41,11 @@ class Session:
     num_chunks_processed: int = 0
     created_at: float = field(default_factory=time.time)
     lookup_ipc_key: Optional[IPCCacheServerKey] = None
+    lookup_hit_chunks: int = 0
+    """Chunk-length of the most recent completed lookup's servable hit,
+    recorded when the prefetch result is queried. free_lookup_locks uses it
+    to locate sliding-window groups' retained windows ``[hit - w, hit)`` —
+    the only chunks of those groups still read-locked after lookup."""
     extras: dict[str, Any] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
