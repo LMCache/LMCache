@@ -285,17 +285,21 @@ per-worker, per-device, and per-model slicing in Prometheus (e.g.
 
 | OTel metric name | Prometheus name | Type | Source event | Calculation |
 |---|---|---|---|---|
-| `lmcache_mp.l0_l1_store_throughput` | `lmcache_mp_l0_l1_store_throughput_GBs` | Histogram | `MP_STORE_START` → `MP_STORE_END` | `total_bytes / (end_ts - start_ts) / 1e9` per request |
-| `lmcache_mp.l0_l1_load_throughput` | `lmcache_mp_l0_l1_load_throughput_GBs` | Histogram | `MP_RETRIEVE_START` → `MP_RETRIEVE_END` | `total_bytes / (end_ts - start_ts) / 1e9` per request |
-| `lmcache_mp.l0_l1_store_reserve_time` | `lmcache_mp_l0_l1_store_reserve_time_s` | Histogram | `MP_STORE_END` | `reserve_seconds` metadata per request |
+| `lmcache_mp.l0_l1_store_throughput` | `lmcache_mp_l0_l1_store_throughput_GB_per_second` | Histogram | `MP_STORE_START` → `MP_STORE_END` | `total_bytes / (end_ts - start_ts) / 1e9` per request |
+| `lmcache_mp.l0_l1_load_throughput` | `lmcache_mp_l0_l1_load_throughput_GB_per_second` | Histogram | `MP_RETRIEVE_START` → `MP_RETRIEVE_END` | `total_bytes / (end_ts - start_ts) / 1e9` per request |
+| `lmcache_mp.l0_l1_store_reserve_time` | `lmcache_mp_l0_l1_store_reserve_time_seconds` | Histogram | `MP_STORE_END` | `reserve_seconds` metadata per request |
+| `lmcache_mp.l0_l1_store_gpu_throughput` | `lmcache_mp_l0_l1_store_gpu_throughput_GB_per_second` | Histogram | `MP_STORE_START` → `MP_STORE_END` | `total_bytes / (end_ts - start_ts - reserve_seconds) / 1e9` per request |
 
 **What it answers:** What GPU↔CPU throughput is each vLLM worker actually
 achieving for KV store/load? Does it match the theoretical PCIe bandwidth?
 Are some workers or GPUs underperforming?
 
 **Caveats:** the store throughput denominator starts at `MP_STORE_START`,
-which is enqueued before `reserve_write` runs on the CPU — subtract
-`l0_l1_store_reserve_time` to isolate GPU time.
+which is enqueued before `reserve_write` runs on the CPU.
+`l0_l1_store_gpu_throughput` subtracts the reserve share per request at
+the source (histograms cannot be combined after the fact); it is an
+upper-bound estimate, since the subtraction assumes the stream idled
+while `reserve_write` ran.
 
 ---
 
@@ -305,22 +309,38 @@ The composite `l0_l1_*` histograms span two serialized GPU phases: the
 gather/scatter kernel (paged blocks ↔ GPU staging buffer, occupies SMs)
 and the DMA staging copy (GPU staging buffer ↔ pinned host memory,
 occupies copy engines).  The native plan executor brackets each phase
-with CUDA event pairs (recording follows `--disable-observability` /
-`--disable-metrics`, since only a metrics subscriber consumes the
+with CUDA event pairs (recording is off by default in the native module;
+`init_observability` enables it unless `--disable-observability` /
+`--disable-metrics` is set, since only a metrics subscriber consumes the
 samples); the store/retrieve handlers drain finished pairs and publish
 them as `MP_TRANSFER_PHASE_SAMPLES`.
 
-Labels: `device_index` (e.g. `"0"`), `direction` (`"h2d"` / `"d2h"`).
+Labels: `device_index` (e.g. `"0"`), `direction` (`"h2d"` / `"d2h"`);
+the counters additionally carry `phase` (`"kernel"` / `"staging"`).
 
 | OTel metric name | Prometheus name | Type | Source event | Calculation |
 |---|---|---|---|---|
-| `lmcache_mp.transfer_kernel_throughput` | `lmcache_mp_transfer_kernel_throughput_GBs` | Histogram | `MP_TRANSFER_PHASE_SAMPLES` | `nbytes / elapsed_ms * 1e3 / 1e9` per batch step |
-| `lmcache_mp.transfer_staging_throughput` | `lmcache_mp_transfer_staging_throughput_GBs` | Histogram | `MP_TRANSFER_PHASE_SAMPLES` | `nbytes / elapsed_ms * 1e3 / 1e9` per batch step |
+| `lmcache_mp.transfer_kernel_throughput` | `lmcache_mp_transfer_kernel_throughput_GB_per_second` | Histogram | `MP_TRANSFER_PHASE_SAMPLES` | `nbytes / elapsed_ms * 1e3 / 1e9` per batch step |
+| `lmcache_mp.transfer_staging_throughput` | `lmcache_mp_transfer_staging_throughput_GB_per_second` | Histogram | `MP_TRANSFER_PHASE_SAMPLES` | `nbytes / elapsed_ms * 1e3 / 1e9` per batch step |
+| `lmcache_mp.transfer_phase_bytes` | `lmcache_mp_transfer_phase_bytes_total` | Counter | `MP_TRANSFER_PHASE_SAMPLES` | `+nbytes` per batch step, per `phase` |
+| `lmcache_mp.transfer_phase_busy_time` | `lmcache_mp_transfer_phase_busy_time_seconds_total` | Counter | `MP_TRANSFER_PHASE_SAMPLES` | `+elapsed_ms / 1e3` per batch step, per `phase` |
 
 **What it answers:** Which phase does a slow transfer path spend its time
 in?  A low kernel number with a healthy staging number points at launch
 geometry / batching (SM-side); the reverse points at PCIe / pinned-memory
-issues (DMA-side).
+issues (DMA-side).  The histograms show the per-step distribution; for
+aggregate answers use the counters —
+`rate(transfer_phase_bytes) / rate(transfer_phase_busy_time)` is the
+byte-weighted aggregate phase throughput (a mean over per-step histogram
+samples is not), and `rate(transfer_phase_busy_time)` against wall time
+is each phase's time share.
+
+**Caveats:** `nbytes` is the step's staged payload for both phases; kernel
+launches with `skip_prefix_n_blocks > 0` move fewer bytes than were
+staged, so kernel throughput can be overstated.  A section's elapsed time
+is stream-clocked from section start to end, so it includes any stream
+idle while the CPU enqueues the section's work — per-step serialization
+shows up inside the kernel section rather than between sections.
 
 ---
 

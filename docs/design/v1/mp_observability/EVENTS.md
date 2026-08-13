@@ -200,7 +200,8 @@ to correlate START/END pairs.
 `reserve_seconds` is the CPU time the store spent inside
 `storage_manager.reserve_write` (locks + allocation).  It runs after
 `MP_STORE_START` is already on the stream, so the stream-clocked store
-throughput includes it; subscribers subtract it to isolate GPU time.
+throughput includes it; the L0/L1 subscriber subtracts it per request to
+derive `l0_l1_store_gpu_throughput`.
 
 ### `MP_TRANSFER_PHASE_SAMPLES`
 
@@ -208,6 +209,9 @@ Published CPU-synchronously from the store/retrieve handlers after draining
 `lmc_ops.harvest_transfer_phase_timings()`.  Samples complete asynchronously,
 so a batch belongs to transfers enqueued earlier and carries its own
 `device_index`/`direction` labels instead of correlating with any request.
+Because harvesting piggybacks on request handling, the samples of the last
+transfers before an idle period stay queued (bounded) until the next
+store/retrieve arrives.
 
 ### `num_tokens` on `MP_STORE_END` / `MP_RETRIEVE_END`
 

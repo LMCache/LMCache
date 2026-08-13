@@ -4,7 +4,6 @@
 
 #include <atomic>
 #include <deque>
-#include <functional>
 #include <mutex>
 
 namespace {
@@ -27,8 +26,9 @@ std::mutex g_phase_timing_mutex;
 std::deque<PhaseTimingRecord> g_phase_timing_pending;
 constexpr size_t kPhaseTimingMaxPending = 8192;
 
-// Default on; overwritten at startup via set_phase_timing_enabled.
-std::atomic<bool> g_phase_timing_enabled{true};
+// Default off; init_observability enables it at startup when metrics are on,
+// so processes that never configure observability pay zero timing overhead.
+std::atomic<bool> g_phase_timing_enabled{false};
 
 bool phase_timing_enabled() {
   return g_phase_timing_enabled.load(std::memory_order_relaxed);
@@ -39,13 +39,20 @@ void destroy_phase_timing_events(PhaseTimingRecord& record) {
   cudaEventDestroy(record.end);
 }
 
-void push_phase_timing(const PhaseTimingRecord& record) {
-  std::lock_guard<std::mutex> lock(g_phase_timing_mutex);
-  if (g_phase_timing_pending.size() >= kPhaseTimingMaxPending) {
-    destroy_phase_timing_events(g_phase_timing_pending.front());
-    g_phase_timing_pending.pop_front();
+// Enqueue one call's records under a single lock acquisition; the executor
+// hot path therefore locks once per transfer call, not once per section.
+void push_phase_timing_batch(const std::vector<PhaseTimingRecord>& records) {
+  if (records.empty()) {
+    return;
   }
-  g_phase_timing_pending.push_back(record);
+  std::lock_guard<std::mutex> lock(g_phase_timing_mutex);
+  for (const auto& record : records) {
+    if (g_phase_timing_pending.size() >= kPhaseTimingMaxPending) {
+      destroy_phase_timing_events(g_phase_timing_pending.front());
+      g_phase_timing_pending.pop_front();
+    }
+    g_phase_timing_pending.push_back(record);
+  }
 }
 
 /**
@@ -537,13 +544,31 @@ void execute_object_group_transfer(
   };
 
   // Brackets *body* with a CUDA event pair; degrades to untimed execution on
-  // event-creation failure.
+  // event-creation failure. Finished records accumulate in call_records and
+  // are registered in one batch when the call ends.
   const bool timing = phase_timing_enabled();
   const cudaStream_t timing_stream =
       timing ? static_cast<cudaStream_t>(at::cuda::getCurrentCUDAStream())
              : nullptr;
+  std::vector<PhaseTimingRecord> call_records;
+  if (timing) {
+    call_records.reserve(batch_steps.size() * 2);
+  }
+  // Registers accumulated records on scope exit — normal return or exception
+  // unwind — so sections completed before a failing step are never leaked.
+  struct PhaseTimingFlusher {
+    std::vector<PhaseTimingRecord>& records;
+    ~PhaseTimingFlusher() {
+      try {
+        push_phase_timing_batch(records);
+      } catch (...) {
+        // Flushing during unwind must not terminate; on allocation failure
+        // the records' events are leaked, which is the lesser evil.
+      }
+    }
+  } phase_timing_flusher{call_records};
   const auto timed_section = [&](TransferPhase phase, int64_t nbytes,
-                                 const std::function<void()>& body) {
+                                 const auto& body) {
     if (!timing || nbytes <= 0) {
       body();
       return;
@@ -568,14 +593,15 @@ void execute_object_group_transfer(
       throw;
     }
     cudaEventRecord(end_event, timing_stream);
-    push_phase_timing({start_event, end_event, static_cast<int>(phase),
-                       static_cast<int>(direction),
-                       static_cast<int>(device.index()), nbytes});
+    call_records.push_back({start_event, end_event, static_cast<int>(phase),
+                            static_cast<int>(direction),
+                            static_cast<int>(device.index()), nbytes});
   };
 
   for (const auto& step : batch_steps) {
-    // Staged payload; the kernel section moves the same objects, so the
-    // value serves both phases.
+    // Staged payload; also used as the kernel section's byte count. That is
+    // a proxy: launches with skip_prefix_n_blocks > 0 move fewer bytes than
+    // were staged, so the kernel throughput sample can be overstated.
     int64_t step_bytes = 0;
     for (const auto& copy : step.staging) {
       step_bytes += static_cast<int64_t>(copy.nbytes);
@@ -588,7 +614,11 @@ void execute_object_group_transfer(
       timed_section(TransferPhase::STAGING, step_bytes,
                     [&] { do_staging(step.staging); });
     }
-    timed_section(TransferPhase::KERNEL, step_bytes, [&] {
+    // Skip kernel timing when the step has nothing to launch; an empty
+    // section would record a near-zero elapsed time and produce an absurd
+    // throughput outlier.
+    const int64_t kernel_bytes = step.launches.empty() ? 0 : step_bytes;
+    timed_section(TransferPhase::KERNEL, kernel_bytes, [&] {
       for (const auto& launch : step.launches) {
         TORCH_CHECK(
             launch.group_idx >= 0 &&
@@ -656,26 +686,45 @@ void set_phase_timing_enabled(bool enabled) {
 
 std::vector<std::tuple<int, int, int, double, int64_t>>
 harvest_transfer_phase_timings() {
+  // Swap the registry out under the lock and run all CUDA calls unlocked, so
+  // executor threads pushing new records never wait on event queries.
+  std::deque<PhaseTimingRecord> pending;
+  {
+    std::lock_guard<std::mutex> lock(g_phase_timing_mutex);
+    pending.swap(g_phase_timing_pending);
+  }
+
   std::vector<std::tuple<int, int, int, double, int64_t>> samples;
-  std::lock_guard<std::mutex> lock(g_phase_timing_mutex);
-  for (auto it = g_phase_timing_pending.begin();
-       it != g_phase_timing_pending.end();) {
-    const cudaError_t status = cudaEventQuery(it->end);
+  std::deque<PhaseTimingRecord> not_ready;
+  for (auto& record : pending) {
+    const cudaError_t status = cudaEventQuery(record.end);
     if (status == cudaErrorNotReady) {
       (void)cudaGetLastError();  // clear cudaErrorNotReady
-      ++it;
+      not_ready.push_back(record);
       continue;
     }
     if (status == cudaSuccess) {
       float elapsed_ms = 0.0f;
-      if (cudaEventElapsedTime(&elapsed_ms, it->start, it->end) ==
+      if (cudaEventElapsedTime(&elapsed_ms, record.start, record.end) ==
           cudaSuccess) {
-        samples.emplace_back(it->phase, it->direction, it->device_index,
-                             static_cast<double>(elapsed_ms), it->nbytes);
+        samples.emplace_back(record.phase, record.direction,
+                             record.device_index,
+                             static_cast<double>(elapsed_ms), record.nbytes);
       }
     }
-    destroy_phase_timing_events(*it);
-    it = g_phase_timing_pending.erase(it);
+    destroy_phase_timing_events(record);
+  }
+
+  if (!not_ready.empty()) {
+    std::lock_guard<std::mutex> lock(g_phase_timing_mutex);
+    // Re-queue at the front: these records predate anything pushed while the
+    // registry was unlocked, keeping eviction oldest-first.
+    g_phase_timing_pending.insert(g_phase_timing_pending.begin(),
+                                  not_ready.begin(), not_ready.end());
+    while (g_phase_timing_pending.size() > kPhaseTimingMaxPending) {
+      destroy_phase_timing_events(g_phase_timing_pending.front());
+      g_phase_timing_pending.pop_front();
+    }
   }
   return samples;
 }

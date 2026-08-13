@@ -36,8 +36,9 @@ enum class TransferPhase : int {
 
 /**
  * Enable or disable phase-timing recording in the plan executor.
- * Defaults to enabled; pushed from the observability config at startup.
- * Thread-safe; takes effect for subsequently executed plans.
+ * Defaults to disabled; the observability config enables it at startup
+ * when metrics are on. Thread-safe; takes effect for subsequently
+ * executed plans.
  */
 void set_phase_timing_enabled(bool enabled);
 
