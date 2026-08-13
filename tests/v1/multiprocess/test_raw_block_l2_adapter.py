@@ -18,7 +18,7 @@ from tests.v1.storage_backend.raw_block_test_utils import (
     RAW_BLOCK_CI_HEADER_BYTES,
     RAW_BLOCK_CI_META_TOTAL_BYTES,
     RAW_BLOCK_CI_SLOT_BYTES,
-    install_native_storage_ops_fallback,
+    install_lmcache_native_fallback,
     make_empty_memory_obj,
     make_memory_obj,
     make_object_key,
@@ -27,7 +27,7 @@ from tests.v1.storage_backend.raw_block_test_utils import (
     wait_for_event_fd,
 )
 
-install_native_storage_ops_fallback()
+install_lmcache_native_fallback()
 pytest.importorskip("lmcache_rust_raw_block_io")
 
 # First Party

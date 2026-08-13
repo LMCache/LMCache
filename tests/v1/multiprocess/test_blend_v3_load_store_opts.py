@@ -17,6 +17,9 @@ import time
 import pytest
 import torch
 
+# First Party
+import lmcache.lmcache_native as lmcache_native
+
 # ---------------------------------------------------------------------------
 # S1: async fingerprint registration
 # ---------------------------------------------------------------------------
@@ -384,15 +387,15 @@ def _coord_engine(chunk_size: int = 4):
 
 
 def test_build_global_segments_are_retrievable_cbmatchresults():
-    """Coordinator object_key hex round-trips to the hash the retrieve path
+    """Coordinator chunk_hash hex round-trips to the hash the retrieve path
     resolves via ipc_key_to_object_keys; positions span one chunk."""
     # First Party
-    from lmcache.v1.mp_coordinator.blend_client import RemoteMatch
+    from lmcache.v1.mp_coordinator.api import BlendMatch
     from lmcache.v1.multiprocess.custom_types import CBMatchResult
 
     eng = _coord_engine(chunk_size=4)
     raw = bytes.fromhex("00") * 0 + b"\xab\xcd\xef\x01"
-    matches = [RemoteMatch(object_key=raw.hex(), old_st=8, cur_st=20)]
+    matches = [BlendMatch(chunk_hash=raw, old_st=8, cur_st=20)]
 
     segs = eng._build_global_segments(matches)
 
@@ -406,7 +409,8 @@ def test_build_global_segments_are_retrievable_cbmatchresults():
 def test_poll_coordinator_match_deferred_then_resolved():
     """PENDING within deadline defers (None); a list resolves to segments."""
     # First Party
-    from lmcache.v1.mp_coordinator.blend_client import PENDING, RemoteMatch
+    from lmcache.v1.mp_coordinator.api import BlendMatch
+    from lmcache.v1.mp_coordinator.blend_client import PENDING
 
     eng = _coord_engine(chunk_size=4)
     coordinator = MagicMock()
@@ -417,7 +421,7 @@ def test_poll_coordinator_match_deferred_then_resolved():
     assert eng._poll_coordinator_match(job, "rid") is None  # defer
     coordinator.take_match.assert_not_called()
 
-    coordinator.poll_match.return_value = [RemoteMatch("aa", old_st=0, cur_st=4)]
+    coordinator.poll_match.return_value = [BlendMatch(b"\xaa", old_st=0, cur_st=4)]
     out = eng._poll_coordinator_match(job, "rid")
     assert [s.cur_st for s in out] == [4]
     coordinator.take_match.assert_called_once_with("rid")
@@ -743,7 +747,6 @@ def _build_plan_engine_and_context(
 
     # First Party
     from lmcache.v1.multiprocess.modules import blend_v3 as v3_mod
-    import lmcache.c_ops as lmc_ops
 
     eng = MagicMock(spec=v3_mod.BlendV3Module)
     for name in (
@@ -764,7 +767,7 @@ def _build_plan_engine_and_context(
             tokens_per_block=4,
             slots_per_block=4,
             engine_group_idx=0,
-            engine_kv_format=lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
+            engine_kv_format=lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
             shape_desc=SimpleNamespace(nb=100),
         )
         for _ in range(num_groups)
@@ -780,7 +783,7 @@ def _build_plan_engine_and_context(
     ptr_tensors = [torch.zeros(num_layers, dtype=torch.long) for _ in range(num_groups)]
     gpu_context.get_kernel_group_kv_pointers.side_effect = lambda g: ptr_tensors[g]
     gpu_context.get_engine_kv_format.side_effect = (
-        lambda g: lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
+        lambda g: lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
     )
     # One object group; each chunk memory object fills one flat slot.
     obj_bytes = sum(kv_buffers[(0, g)].numel() * 4 for g in range(num_groups))
@@ -1023,3 +1026,38 @@ def test_native_plan_falls_back_for_compressed_group():
         )
         is None
     )
+
+
+def test_union_of_local_and_fleet_matches_collapses_duplicates():
+    """Local and fleet matching are additive, so the overlap dedup is what
+    keeps a chunk both sources report from scattering twice."""
+    # First Party
+    from lmcache.v1.multiprocess.custom_types import CBMatchResult
+    from lmcache.v1.multiprocess.modules import blend_v3 as v3_mod
+
+    dedup = v3_mod.BlendV3Module._non_overlapping_after_prefix
+    shared = CBMatchResult(old_st=0, old_ed=4, cur_st=8, cur_ed=12, hash=b"\x01")
+    local_only = CBMatchResult(old_st=4, old_ed=8, cur_st=12, cur_ed=16, hash=b"\x02")
+    fleet_only = CBMatchResult(old_st=8, old_ed=12, cur_st=16, cur_ed=20, hash=b"\x03")
+
+    # Same chunk reported by both sources, plus one unique to each.
+    union = [shared, local_only] + [shared, fleet_only]
+    kept = dedup(union, 0)
+
+    assert [r.hash for r in kept] == [b"\x01", b"\x02", b"\x03"]
+
+
+def test_union_recall_is_at_least_either_source_alone():
+    """The union can only add matches: whatever one source finds outside the
+    prefix survives the merge."""
+    # First Party
+    from lmcache.v1.multiprocess.custom_types import CBMatchResult
+    from lmcache.v1.multiprocess.modules import blend_v3 as v3_mod
+
+    dedup = v3_mod.BlendV3Module._non_overlapping_after_prefix
+    local = [CBMatchResult(old_st=0, old_ed=4, cur_st=4, cur_ed=8, hash=b"\x01")]
+    fleet = [CBMatchResult(old_st=0, old_ed=4, cur_st=12, cur_ed=16, hash=b"\x02")]
+
+    assert len(dedup(local, 0)) == 1
+    assert len(dedup(fleet, 0)) == 1
+    assert len(dedup(local + fleet, 0)) == 2

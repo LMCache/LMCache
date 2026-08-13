@@ -9,6 +9,8 @@ import importlib
 import pytest
 import torch
 
+pytestmark = pytest.mark.musa
+
 
 class _FakeMusaEvent:
     """Minimal TorchMUSA Event facade for capability-gate tests."""

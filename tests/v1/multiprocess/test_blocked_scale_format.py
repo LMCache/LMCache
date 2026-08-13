@@ -18,8 +18,9 @@ if not torch.cuda.is_available():
 
 # First Party
 import lmcache.c_ops as lmc_ops  # noqa: E402
+import lmcache.lmcache_native as lmcache_native
 
-if not hasattr(lmc_ops.EngineKVFormat, "NL_X_NB_BSV_BSS"):
+if not hasattr(lmcache_native.EngineKVFormat, "NL_X_NB_BSV_BSS"):
     pytest.skip("c_ops build lacks NL_X_NB_BSV_BSS", allow_module_level=True)
 
 _BS = 64  # tokens per block
@@ -93,8 +94,8 @@ def test_blocked_roundtrip_value_exact_across_alignments():
         src_slots,
         torch.device("cuda"),
         _NB * _BS,
-        lmc_ops.TransferDirection.D2H,
-        lmc_ops.EngineKVFormat.NL_X_NB_BSV_BSS,
+        lmcache_native.TransferDirection.D2H,
+        lmcache_native.EngineKVFormat.NL_X_NB_BSV_BSS,
         block_size=_BS,
         head_size=0,
     )
@@ -110,8 +111,8 @@ def test_blocked_roundtrip_value_exact_across_alignments():
         dst_slots,
         torch.device("cuda"),
         _NB * _BS,
-        lmc_ops.TransferDirection.H2D,
-        lmc_ops.EngineKVFormat.NL_X_NB_BSV_BSS,
+        lmcache_native.TransferDirection.H2D,
+        lmcache_native.EngineKVFormat.NL_X_NB_BSV_BSS,
         block_size=_BS,
         head_size=0,
     )

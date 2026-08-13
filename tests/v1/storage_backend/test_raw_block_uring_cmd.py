@@ -3,11 +3,16 @@
 """Tests for io_uring command (passthrough) support in Rust raw block backend."""
 
 # Standard
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 import asyncio
 import mmap
 import multiprocessing
 import os
+
+if TYPE_CHECKING:
+    # Third Party
+    from lmcache_rust_raw_block_io import RawBlockDevice
 
 # Third Party
 import pytest
@@ -359,19 +364,79 @@ def test_uring_cmd_disabled(loop_in_thread):
 
 
 def test_uring_cmd_auto_transfer_limit_from_sysfs_ng_device():
-    expected_path = (
-        f"{_get_sysfs_path(TEST_DEVICES['char_device'])}/queue/max_hw_sectors_kb"
-    )
+    queue_dir = f"{_get_sysfs_path(TEST_DEVICES['char_device'])}/queue"
+
+    def fake_read(path: str) -> int | None:
+        if path == f"{queue_dir}/max_hw_sectors_kb":
+            return 1024
+        if path == f"{queue_dir}/max_segments":
+            # Large segment limit so it does not bound the transfer size here.
+            return 4096
+        return None
+
     with patch(
         "lmcache.v1.storage_backend.raw_block.core._read_sysfs_int",
-        return_value=1024,
+        side_effect=fake_read,
     ) as mock_read:
         backend = _build_transfer_limit_backend(
             TEST_DEVICES["char_device"], max_data_transfer_size=-1
         )
 
-    mock_read.assert_called_once_with(expected_path)
+    mock_read.assert_any_call(f"{queue_dir}/max_hw_sectors_kb")
     assert backend._core.max_data_transfer_size == 1024 * 1024
+
+
+def test_uring_cmd_auto_transfer_limit_capped_by_max_segments():
+    """Auto transfer size must not exceed max_segments * page_size.
+
+    The io_uring_cmd passthrough path builds one iovec segment per page, so a
+    single transfer is bounded by the device's scatter-gather segment limit
+    even when max_hw_sectors_kb would permit a larger transfer.
+    """
+    queue_dir = f"{_get_sysfs_path(TEST_DEVICES['char_device'])}/queue"
+    page_size = os.sysconf("SC_PAGE_SIZE")
+    max_segments = 128
+
+    def fake_read(path: str) -> int | None:
+        if path == f"{queue_dir}/max_hw_sectors_kb":
+            # 2 MB worth of sectors -- larger than the segment limit allows.
+            return 2048
+        if path == f"{queue_dir}/max_segments":
+            return max_segments
+        return None
+
+    with patch(
+        "lmcache.v1.storage_backend.raw_block.core._read_sysfs_int",
+        side_effect=fake_read,
+    ):
+        backend = _build_transfer_limit_backend(
+            TEST_DEVICES["char_device"], max_data_transfer_size=-1
+        )
+
+    expected = max_segments * page_size
+    assert backend._core.max_data_transfer_size == expected
+    assert backend._core.max_data_transfer_size < 2048 * 1024
+
+
+def test_uring_cmd_auto_transfer_limit_ignores_missing_max_segments():
+    """Auto detection falls back to max_hw_sectors_kb when max_segments is absent."""
+    queue_dir = f"{_get_sysfs_path(TEST_DEVICES['char_device'])}/queue"
+
+    def fake_read(path: str) -> int | None:
+        if path == f"{queue_dir}/max_hw_sectors_kb":
+            return 512
+        # max_segments unavailable on this device/kernel.
+        return None
+
+    with patch(
+        "lmcache.v1.storage_backend.raw_block.core._read_sysfs_int",
+        side_effect=fake_read,
+    ):
+        backend = _build_transfer_limit_backend(
+            TEST_DEVICES["char_device"], max_data_transfer_size=-1
+        )
+
+    assert backend._core.max_data_transfer_size == 512 * 1024
 
 
 def test_uring_cmd_auto_transfer_limit_fails_when_sysfs_unavailable():
@@ -388,6 +453,94 @@ def test_uring_cmd_auto_transfer_limit_fails_when_sysfs_unavailable():
             )
 
     mock_read.assert_called_once_with(expected_path)
+
+
+def _open_raw_device(
+    device_path: str, *, use_uring_cmd: bool = True
+) -> "RawBlockDevice":
+    """Open the Rust RawBlockDevice; skip the test if the device is absent."""
+    if not os.path.exists(device_path):
+        pytest.skip(f"Test device {device_path} not found.")
+
+    # Third Party
+    from lmcache_rust_raw_block_io import RawBlockDevice  # type: ignore
+
+    return RawBlockDevice(
+        device_path,
+        writable=True,
+        use_odirect=False,
+        alignment=4096,
+        io_engine="io_uring",
+        iouring_queue_depth=256,
+        use_uring_cmd=use_uring_cmd,
+    )
+
+
+def _unaligned_bytearray(total_len: int, align: int = 4096) -> bytearray:
+    """Return a bytearray that is likely (best-effort) not ``align``-aligned."""
+    backing = bytearray(total_len + align)
+    return bytearray(backing[1 : 1 + total_len])
+
+
+def test_uring_cmd_read_uring_handles_unaligned_buffer() -> None:
+    """``read_uring`` must accept an unaligned buffer under ``use_uring_cmd``."""
+    device_path = TEST_DEVICES["char_device"]
+    raw_dev = _open_raw_device(device_path, use_uring_cmd=True)
+
+    try:
+        total_len = 8192  # multi-page to require a PRP list
+        buf = _unaligned_bytearray(total_len)
+        raw_dev.read_uring(0, buf, total_len, total_len)
+    finally:
+        raw_dev.close()
+
+
+def test_uring_cmd_batched_read_handles_unaligned_buffer() -> None:
+    """``batched_read`` must accept unaligned buffers under ``use_uring_cmd``."""
+    device_path = TEST_DEVICES["char_device"]
+    raw_dev = _open_raw_device(device_path, use_uring_cmd=True)
+
+    try:
+        total_len = 8192
+        offsets = [0, total_len, 2 * total_len, 3 * total_len]
+        buffers = [_unaligned_bytearray(total_len) for _ in offsets]
+        total_lens = [total_len] * len(offsets)
+
+        batch_id = raw_dev.batched_read(offsets, buffers, total_lens)
+        raw_dev.wait_iouring(batch_id)
+    finally:
+        raw_dev.close()
+
+
+def test_uring_cmd_batched_read_short_buffer_uses_bounce() -> None:
+    """``batched_read`` must bounce when caller capacity is below ``total_len``."""
+    device_path = TEST_DEVICES["char_device"]
+    raw_dev = _open_raw_device(device_path, use_uring_cmd=True)
+
+    try:
+        total_len = 8192
+        buf = bytearray(4096)
+        batch_id = raw_dev.batched_read([0], [buf], [total_len])
+        raw_dev.wait_iouring(batch_id)
+    finally:
+        raw_dev.close()
+
+
+def test_uring_cmd_batched_read_independent_per_item_bounce_decision() -> None:
+    """``batched_read`` must choose bounce per item, not for the whole batch."""
+    device_path = TEST_DEVICES["char_device"]
+    raw_dev = _open_raw_device(device_path, use_uring_cmd=True)
+
+    try:
+        total_len = 8192
+        offsets = [0, total_len]
+        buffers = [bytearray(total_len), _unaligned_bytearray(total_len)]
+        total_lens = [total_len, total_len]
+
+        batch_id = raw_dev.batched_read(offsets, buffers, total_lens)
+        raw_dev.wait_iouring(batch_id)
+    finally:
+        raw_dev.close()
 
 
 def test_uring_cmd_explicit_transfer_limit_must_be_block_aligned():

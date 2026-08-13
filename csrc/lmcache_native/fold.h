@@ -10,7 +10,7 @@
 
 namespace lmcache {
 
-namespace storage_manager {
+namespace lmcache_native {
 
 /**
  * @brief Fold per-(group, chunk, rank) presence into servable prefix lengths.
@@ -59,6 +59,6 @@ Bitmap fold(const Bitmap& found, size_t num_chunks, size_t num_ranks,
 Bitmap unfold(size_t hit_length, size_t num_chunks, size_t num_ranks,
               const std::vector<int64_t>& group_windows);
 
-}  // namespace storage_manager
+}  // namespace lmcache_native
 
 }  // namespace lmcache

@@ -186,29 +186,36 @@ jobs:
           path: ~/.cache/huggingface
           key: hf-hub-${{ matrix.model.name }}-v2
 
+      - name: Resolve verified vLLM CPU nightly version
+        id: resolve-vllm
+        env:
+          # Reuse the buildkite pin-resolver: it reads the bare version from
+          # the first line of the per-OS pointer file on the
+          # `github_nightly_tested_vllm` branch -- the version the nightly
+          # verification pipeline most recently confirmed working on this OS.
+          # A missing/unreachable pointer leaves PINNED_VLLM_VERSION empty,
+          # so we fall back to the newest nightly and the job still runs.
+          LMCACHE_VLLM_PIN_URL: >-
+            https://raw.githubusercontent.com/LMCache/LMCache/github_nightly_tested_vllm/latest_tested_vllm_${{ runner.os == 'macOS' && 'macos-latest' || 'ubuntu-22.04' }}.txt
+        run: |
+          source .buildkite/k3_harness/resolve-pinned-vllm.sh
+          if [[ -n "${PINNED_VLLM_VERSION}" ]]; then
+            echo "VLLM_CPU_NIGHTLY_SPEC=vllm-cpu-nightly==${PINNED_VLLM_VERSION}" \
+              | tee -a "$GITHUB_OUTPUT"
+          else
+            echo "VLLM_CPU_NIGHTLY_SPEC=vllm-cpu-nightly" | tee -a "$GITHUB_OUTPUT"
+          fi
+
       - name: Install vLLM CPU (prebuilt nightly from PyPI)
         id: install-vllm
         env:
-          # Pin the vllm-cpu-nightly wheel on macOS to a build that is
-          # ABI-compatible with the torch it pulls in. The nightly
-          # uploaded on 2026-07-24 08:34 UTC (dev202607240834) declares
-          # `torch==2.13.0` in its metadata but the shipped
-          # `vllm/_C.abi3.so` was compiled against an older libtorch —
-          # loading it on macOS fails with
-          # `Symbol not found: __ZN3c104impl3cow23materialize_cow_storage...`
-          # which then blows up cpu_worker.py at
-          # `torch.ops._C.init_cpu_memory_env(...)`.
-          # Linux dodges this because the pytorch-cpu extra index still
-          # serves `torch-2.11.0+cpu`, matching the wheel's ABI.
-          # Revert this pin once upstream ships a macOS-clean nightly.
-          #
-          # nightly_verify deliberately ignores the pin: its whole job is
-          # to find out whether today's build works, and a pinned wheel
-          # would just re-validate the same known-good one every night.
+          # nightly_verify deliberately ignores the pin: its whole job is to
+          # find out whether today's build works, and a pinned wheel would
+          # just re-validate the same known-good one every night.
           VLLM_CPU_NIGHTLY_SPEC: >-
-            ${{ (inputs.nightly_verify || runner.os != 'macOS')
+            ${{ inputs.nightly_verify
                 && 'vllm-cpu-nightly'
-                || 'vllm-cpu-nightly==0.25.2.dev202607230832' }}
+                || steps.resolve-vllm.outputs.VLLM_CPU_NIGHTLY_SPEC }}
         run: bash .github/scripts/install_vllm_cpu.sh
 
       - name: Install lmcache (CPU-only, no vLLM)

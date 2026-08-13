@@ -22,12 +22,15 @@ import torch
 from lmcache.utils import lmcache_deprecate
 from lmcache.v1.gpu_connector.kv_format.specs.base import KVFormatSpec
 from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache
-import lmcache.c_ops as lmc_ops
+import lmcache.lmcache_native as lmcache_native
 
 
 class NL_X_NB_NH_BS_TWO_HS_Spec(KVFormatSpec):
-    engine_kv_format = lmc_ops.EngineKVFormat.NL_X_NB_NH_BS_TWO_HS
+    engine_kv_format = lmcache_native.EngineKVFormat.NL_X_NB_NH_BS_TWO_HS
     attention_backends = ("vLLM non-MLA blocks-first, fused K/V",)
+    is_layer_list = True
+    is_hnd = True
+    is_fused_packed = True
 
     @lmcache_deprecate(
         "NL_X_NB_NH_BS_TWO_HS is superseded by NL_X_NB_NH_BS_CS "
