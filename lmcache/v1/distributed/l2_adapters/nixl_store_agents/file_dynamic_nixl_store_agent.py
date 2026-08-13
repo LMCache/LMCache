@@ -39,6 +39,15 @@ class FileDynamicNixlStorageAgent(DynamicNixlStorageAgent):
         backend_params: dict[str, str],
         l1_memory_desc: L1MemoryDesc,
     ) -> None:
+        if "file_path" not in backend_params:
+            raise ValueError(
+                "backend_params must include 'file_path' for backend %r" % backend
+            )
+        if "use_direct_io" not in backend_params:
+            raise ValueError(
+                "backend_params must include 'use_direct_io' for backend %r" % backend
+            )
+
         super().__init__(device, backend, backend_params, l1_memory_desc)
         self.file_path = backend_params["file_path"]
         os.makedirs(self.file_path, exist_ok=True)
