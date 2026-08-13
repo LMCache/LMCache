@@ -25,7 +25,7 @@ class TransferPhase(IntEnum):
     """Timed sections of the native object-group transfer plan executor.
 
     Mirrors the C++ ``TransferPhase`` enum in ``csrc/cuda/mp_mem_kernels.cuh``;
-    values appear in ``lmc_ops.harvest_transfer_phase_timings()`` samples.
+    values appear in ``lmc_ops.pop_completed_phase_timings()`` samples.
     Python-only: unlike ``TransferDirection`` (in
     :mod:`lmcache.lmcache_native`), this enum is not exposed by a native
     module.

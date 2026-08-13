@@ -28,7 +28,7 @@ struct MemoryObj4 {
 // ---------------------------------------------------------------------------
 
 // Timed sections of execute_object_group_transfer, reported by
-// harvest_transfer_phase_timings().
+// pop_completed_phase_timings().
 enum class TransferPhase : int {
   KERNEL = 0,   // gather/scatter kernel launches (paged blocks <-> staging)
   STAGING = 1,  // host<->device DMA staging copies
@@ -43,7 +43,7 @@ enum class TransferPhase : int {
 void set_phase_timing_enabled(bool enabled);
 
 /**
- * Drain completed gather/DMA phase timing samples.
+ * Pop completed gather/DMA phase timing samples.
  *
  * Returns the finished CUDA event pairs recorded by
  * execute_object_group_transfer; unfinished pairs stay queued.
@@ -54,7 +54,7 @@ void set_phase_timing_enabled(bool enabled);
  *         nbytes the step's staged payload (shared by both phases).
  */
 std::vector<std::tuple<int, int, int, double, int64_t>>
-harvest_transfer_phase_timings();
+pop_completed_phase_timings();
 
 /**
  * Execute one object group's transfer plan on the current CUDA stream.

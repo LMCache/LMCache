@@ -216,7 +216,7 @@ def _has_real_names(params):
 _EXCLUDED_FUNCS: set[str] = {
     "execute_object_group_transfer",
     "execute_cb_retrieve_plan_flat",
-    "harvest_transfer_phase_timings",
+    "pop_completed_phase_timings",
     "set_phase_timing_enabled",
 }
 

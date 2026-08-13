@@ -62,7 +62,7 @@ logger = init_logger(__name__)
 _HAS_NATIVE_OBJECT_GROUP_TRANSFER: bool = hasattr(
     device_ops, "execute_object_group_transfer"
 )
-_HAS_PHASE_TIMING_HARVEST: bool = hasattr(lmc_ops, "harvest_transfer_phase_timings")
+_HAS_PHASE_TIMING_POP: bool = hasattr(lmc_ops, "pop_completed_phase_timings")
 
 
 def get_layout_desc(
@@ -283,8 +283,8 @@ def _recalculate_blocks_to_skip(
     return full_windows_to_skip * blocks_per_window + max(0, tail_blocks_to_skip)
 
 
-def harvest_and_publish_phase_timings(event_bus: EventBus) -> None:
-    """Drain finished gather/DMA phase timings and publish them on the bus.
+def publish_completed_phase_timings(event_bus: EventBus) -> None:
+    """Publish the gather/DMA phase timings that have finished on the GPU.
 
     Samples complete asynchronously and belong to transfers enqueued
     earlier, so publication is decoupled from any single request. No-op
@@ -294,9 +294,9 @@ def harvest_and_publish_phase_timings(event_bus: EventBus) -> None:
         event_bus: Bus that receives the ``MP_TRANSFER_PHASE_SAMPLES``
             event; see the ``EventType`` docstring for the metadata layout.
     """
-    if not _HAS_PHASE_TIMING_HARVEST:
+    if not _HAS_PHASE_TIMING_POP:
         return
-    samples = lmc_ops.harvest_transfer_phase_timings()
+    samples = lmc_ops.pop_completed_phase_timings()
     if not samples:
         return
     event_bus.publish(
@@ -1299,7 +1299,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                     ),
                 )
 
-        harvest_and_publish_phase_timings(self._ctx.event_bus)
+        publish_completed_phase_timings(self._ctx.event_bus)
         ed = time.perf_counter()
         if stored_count:
             logger.info(
@@ -1541,7 +1541,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                         },
                     ),
                 )
-        harvest_and_publish_phase_timings(self._ctx.event_bus)
+        publish_completed_phase_timings(self._ctx.event_bus)
         if retrieve_succeeded:
             tokens_retrieved = num_chunks * self._ctx.chunk_size
             ed = time.perf_counter()

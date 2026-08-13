@@ -186,8 +186,8 @@ PYBIND11_MODULE(cuda_ops, m) {
   m.def("set_phase_timing_enabled", &set_phase_timing_enabled,
         py::arg("enabled"),
         "Enable/disable CUDA event phase timing in the plan executor.");
-  m.def("harvest_transfer_phase_timings", &harvest_transfer_phase_timings,
-        "Drain completed (phase, direction, device_index, elapsed_ms, nbytes) "
+  m.def("pop_completed_phase_timings", &pop_completed_phase_timings,
+        "Pop completed (phase, direction, device_index, elapsed_ms, nbytes) "
         "samples recorded by execute_object_group_transfer.",
         py::call_guard<py::gil_scoped_release>());
   // CB retrieve plan spec (see blend_kernels.cuh). Built on the Python side

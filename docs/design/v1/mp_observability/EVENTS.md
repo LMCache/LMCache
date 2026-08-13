@@ -205,11 +205,11 @@ derive `l0_l1_store_gpu_throughput`.
 
 ### `MP_TRANSFER_PHASE_SAMPLES`
 
-Published CPU-synchronously from the store/retrieve handlers after draining
-`lmc_ops.harvest_transfer_phase_timings()`.  Samples complete asynchronously,
+Published CPU-synchronously from the store/retrieve handlers after popping
+finished samples via `lmc_ops.pop_completed_phase_timings()`.  Samples complete asynchronously,
 so a batch belongs to transfers enqueued earlier and carries its own
 `device_index`/`direction` labels instead of correlating with any request.
-Because harvesting piggybacks on request handling, the samples of the last
+Because popping piggybacks on request handling, the samples of the last
 transfers before an idle period stay queued (bounded) until the next
 store/retrieve arrives.
 
