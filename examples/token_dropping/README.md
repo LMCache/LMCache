@@ -14,8 +14,11 @@ request's cached tensors, **modifies** them, and **stores** them back for vLLM
 to decode from. Users only need to supply the token dropping function, and the
 SDK's batch and stream APIs does the job in an offline manner.
 
-There is also an example meant to be run in Google Colab's GPU T4 which uses
-smaller model and 
+We also provide an easily reproducible examples on Google Colab's free tier
+using GPU T4. Check it out 
+[here](https://drive.google.com/drive/folders/1ILctdh_Lf51qDUf1v00osRfoylfBIlOD?usp=share_link).
+If you have interesting token dropping algorithms, feel free to make your own
+copy of the notebook and request upload to the folder!
 
 ## Examples
 
@@ -39,7 +42,7 @@ cheaper:
 
 [snapkv_colab.ipynb](./snapkv_colab.ipynb) is a demonstration done in Google
 Colab Notebook, which can also be accessed here:
-[Google Colab SnapKV SDK Example](https://colab.research.google.com/drive/1JtyqhRIqmACDoQ7PKra1QszsRvE2wA7I?usp=sharing).
+[Google Colab SDK Examples](https://drive.google.com/drive/folders/1ILctdh_Lf51qDUf1v00osRfoylfBIlOD?usp=share_link).
 
 ## Prerequisites
 
