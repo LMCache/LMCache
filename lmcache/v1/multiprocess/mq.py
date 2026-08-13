@@ -21,7 +21,6 @@ import pickle
 import threading
 
 # Third Party
-import grpc
 import msgspec
 import torch
 
@@ -60,15 +59,14 @@ from lmcache.v1.multiprocess.protocols.engine import (
 from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
     lmcache_mq_pb2 as _pb2_typed,
 )
-from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
-    lmcache_mq_pb2_grpc as _pb2_grpc_typed,
-)
 
 # Message classes come out of the protobuf descriptor pool at runtime
 # and are invisible to static analysis; rebind through Any so mypy
 # does not chase every attribute lookup.
 lmcache_mq_pb2: Any = _pb2_typed
-lmcache_mq_pb2_grpc: Any = _pb2_grpc_typed
+grpc: Any = None
+lmcache_mq_pb2_grpc: Any = None
+_grpc_runtime_lock = threading.Lock()
 
 logger = init_logger(__name__)
 
@@ -1737,6 +1735,28 @@ _TYPED_RPCS: dict[RequestType, TypedRpcSpec] = {
 }
 
 
+def _ensure_grpc_runtime() -> None:
+    """Load gRPC and generated service bindings on first transport use."""
+    global grpc, lmcache_mq_pb2_grpc
+
+    if grpc is not None:
+        return
+    with _grpc_runtime_lock:
+        if grpc is not None:
+            return
+
+        # Third Party
+        import grpc as grpc_module
+
+        # First Party
+        from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
+            lmcache_mq_pb2_grpc as pb2_grpc_module,
+        )
+
+        lmcache_mq_pb2_grpc = pb2_grpc_module
+        grpc = grpc_module
+
+
 # ---------------------------------------------------------------------------
 # RequestType <-> gRPC method name
 # ---------------------------------------------------------------------------
@@ -1834,6 +1854,7 @@ class MessageQueueClient:
         transport: Optional[Any] = None,
     ):
         del context, transport  # legacy positional slots, no longer used
+        _ensure_grpc_runtime()
         target = _parse_grpc_url(server_url)
         self._server_url = server_url
         self._channel = grpc.insecure_channel(target, options=_GRPC_UNLIMITED_MSG_OPTS)
@@ -1981,7 +2002,7 @@ class NonBlockingRequestHandler(Generic[ResponseType, StateType]):
 # ---------------------------------------------------------------------------
 
 
-class _RequestHandlerServicer(lmcache_mq_pb2_grpc.MessageQueueServicer):
+class _RequestHandlerServicer:
     """Bridge every rpc method to the ``RequestHandlerBase`` registered
     under the matching ``RequestType``.
 
@@ -2334,6 +2355,7 @@ class MessageQueueServer:
     # ------------------------------------------------------------------
 
     def start(self) -> None:
+        _ensure_grpc_runtime()
         for rt, handler in self.handlers.items():
             if isinstance(handler, BlockingRequestHandler) and handler.executor is None:
                 raise RuntimeError(

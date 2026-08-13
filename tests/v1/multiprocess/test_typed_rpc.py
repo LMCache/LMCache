@@ -15,6 +15,8 @@ the invariants that:
 # Standard
 from typing import Any, Optional
 import socket
+import subprocess
+import sys
 import threading
 
 # Third Party
@@ -50,6 +52,19 @@ from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
 # See mq.py: message classes are dynamic; rebind through Any so
 # static analysis stops complaining about attribute lookups.
 lmcache_mq_pb2: Any = _pb2_typed
+
+
+def test_mq_import_does_not_load_grpc_runtime() -> None:
+    """Importing MQ helpers must not initialize gRPC native libraries."""
+    script = """
+import sys
+from lmcache.v1.multiprocess import mq
+
+assert "grpc" not in sys.modules
+assert mq.grpc is None
+assert mq.request_type_to_method_name(mq.RequestType.PING) == "Ping"
+"""
+    subprocess.run([sys.executable, "-c", script], check=True)
 
 
 def _find_free_port() -> int:
