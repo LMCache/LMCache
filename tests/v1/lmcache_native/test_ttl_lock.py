@@ -9,12 +9,12 @@ import time
 import pytest
 
 pytest.importorskip(
-    "lmcache.native_storage_ops",
-    reason="native_storage_ops extension not built",
+    "lmcache.lmcache_native",
+    reason="lmcache_native extension not built",
 )
 
 # First Party
-from lmcache.native_storage_ops import TTLLock
+from lmcache.lmcache_native import TTLLock
 
 
 class TestTTLLockBasicSemantics:

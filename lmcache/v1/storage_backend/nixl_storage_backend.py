@@ -2080,7 +2080,17 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
             future = asyncio.run_coroutine_threadsafe(
                 self.mem_to_storage(keys, memory_objs), self.loop
             )
-            future.result()
+            try:
+                future.result()
+            except Exception as e:
+                with self.progress_lock:
+                    for key in keys:
+                        self.progress_set.discard(key)
+                logger.warning(
+                    f"NIXL batched put failed for {len(keys)} key(s); "
+                    f"skipping best-effort offload: {e}"
+                )
+                return
 
             # Call completion callback for sync mode
             if on_complete_callback is not None:

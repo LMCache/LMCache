@@ -9,18 +9,18 @@ reference implementation for third-party plugin authors.
 
 # Standard
 from collections import defaultdict
-from typing import Any, Union
+from typing import Any
 import asyncio
 import copy
 import threading
 import time
 
 # Third Party
-import torch  # noqa: F401  # must precede native_storage_ops
+import torch  # noqa: F401  # must precede lmcache_native
 
 # First Party
+from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
-from lmcache.native_storage_ops import Bitmap
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import (
@@ -103,10 +103,7 @@ class InMemoryL2Adapter(L2AdapterInterface):
 
     def __init__(
         self,
-        config: Union[
-            InMemoryL2AdapterConfig,
-            dict[str, Any],
-        ],
+        config: InMemoryL2AdapterConfig | dict[str, Any],
         **_kwargs: object,
     ):
         if isinstance(config, dict):

@@ -6,7 +6,7 @@
 
 namespace lmcache {
 
-namespace storage_manager {
+namespace lmcache_native {
 
 Bitmap fold(const Bitmap& found, size_t num_chunks, size_t num_ranks,
             const std::vector<int64_t>& group_windows) {
@@ -79,6 +79,6 @@ Bitmap unfold(size_t hit_length, size_t num_chunks, size_t num_ranks,
   return retain_mask;
 }
 
-}  // namespace storage_manager
+}  // namespace lmcache_native
 
 }  // namespace lmcache

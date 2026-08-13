@@ -17,6 +17,9 @@ import time
 import pytest
 import torch
 
+# First Party
+import lmcache.lmcache_native as lmcache_native
+
 # ---------------------------------------------------------------------------
 # S1: async fingerprint registration
 # ---------------------------------------------------------------------------
@@ -744,7 +747,6 @@ def _build_plan_engine_and_context(
 
     # First Party
     from lmcache.v1.multiprocess.modules import blend_v3 as v3_mod
-    import lmcache.c_ops as lmc_ops
 
     eng = MagicMock(spec=v3_mod.BlendV3Module)
     for name in (
@@ -765,7 +767,7 @@ def _build_plan_engine_and_context(
             tokens_per_block=4,
             slots_per_block=4,
             engine_group_idx=0,
-            engine_kv_format=lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
+            engine_kv_format=lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
             shape_desc=SimpleNamespace(nb=100),
         )
         for _ in range(num_groups)
@@ -780,8 +782,8 @@ def _build_plan_engine_and_context(
     ]
     ptr_tensors = [torch.zeros(num_layers, dtype=torch.long) for _ in range(num_groups)]
     gpu_context.get_kernel_group_kv_pointers.side_effect = lambda g: ptr_tensors[g]
-    gpu_context.get_engine_kv_format.side_effect = lambda g: (
-        lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
+    gpu_context.get_engine_kv_format.side_effect = (
+        lambda g: lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
     )
     # One object group; each chunk memory object fills one flat slot.
     obj_bytes = sum(kv_buffers[(0, g)].numel() * 4 for g in range(num_groups))

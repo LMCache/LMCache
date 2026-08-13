@@ -3,7 +3,7 @@
 #include "ttl_lock.h"
 
 namespace lmcache {
-namespace storage_manager {
+namespace lmcache_native {
 
 TTLLock::TTLLock(uint32_t ttl_sec)
     : counter_(0),
@@ -91,5 +91,5 @@ int64_t TTLLock::to_ms(const TimePoint& tp) {
           .count());
 }
 
-}  // namespace storage_manager
+}  // namespace lmcache_native
 }  // namespace lmcache
