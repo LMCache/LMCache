@@ -62,7 +62,10 @@ Commonly used flags include:
    * - ``--eviction-ratio RATIO``
      - Fraction of L1 cleared per eviction cycle.
    * - ``--max-workers N``
-     - Number of server worker processes.
+     - Base number of worker **threads**; sets the default for both the GPU
+       affinity pool (STORE/RETRIEVE) and the CPU normal pool (LOOKUP, etc.).
+       Default ``1``. Override per-pool with ``--max-gpu-workers`` /
+       ``--max-cpu-workers``.
    * - ``--coordinator-url URL``
      - Register with an MP coordinator at this base URL (e.g.
        ``http://coordinator:9300``). Opt-in; enables fleet registration. See

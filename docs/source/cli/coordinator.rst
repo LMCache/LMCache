@@ -94,9 +94,9 @@ A second set of env-only knobs controls the startup L2 resync —
 eviction loop.
 
 The coordinator drives fleet-wide L2 eviction by calling each MP
-server's ``DELETE /l2`` endpoint, and resync paginates ``GET /l2/keys``
-on a registered MP server. Both endpoints are documented at
-:ref:`mp-http-l2-keys-api`.
+server's ``DELETE /cache/objects`` endpoint, and resync paginates
+``GET /cache/objects`` on a registered MP server. Both endpoints are
+documented at :ref:`mp-http-l2-keys-api`.
 
 See :doc:`/mp/coordinator` for the coordinator's architecture, registration
 protocol, and HTTP API.
