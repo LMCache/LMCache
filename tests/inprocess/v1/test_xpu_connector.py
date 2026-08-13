@@ -100,6 +100,8 @@ def patch_pin_allocator():
         lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
         # vLLM non-MLA flash infer
         lmcache_native.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS,
+        # vLLM 0.27+ unified KV cache: NHD with K/V fused into the trailing dim
+        lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_CS,
         lmcache_native.EngineKVFormat.NL_X_NB_BS_HS,
     ],  # vllm MLA
 )
@@ -208,6 +210,60 @@ def test_vllm_paged_connector_v2_with_gpu_and_mla(use_gpu, engine_kv_format):
         check_paged_kv_cache_equal(
             gpu_kv_src, gpu_kv_dst, slot_mapping, num_heads, head_size, engine_kv_format
         )
+    allocator.close()
+
+
+@pytest.mark.parametrize("use_gpu", [True, False])
+def test_vllm_paged_connector_v2_rejects_hnd_fused(use_gpu):
+    """An HND fused cache must fail loudly, not be copied as NHD.
+
+    Under VLLM_KV_CACHE_LAYOUT=HND, vLLM 0.27+ allocates each layer as
+    [num_blocks, num_heads, block_size, 2 * head_size], which has the same rank
+    as the NHD fused cache. Only the layout hint tells them apart; without it
+    the connector would move head-major bytes as if they were token-major. The
+    XPU kernel does not support HND, so the transfer has to raise.
+    """
+    num_blocks = 100
+    block_size = 16
+    num_layers = 4
+    num_heads = 8
+    head_size = 128
+    num_tokens = 64
+    engine_kv_format = lmcache_native.EngineKVFormat.NL_X_NB_NH_BS_CS
+
+    allocator = PinMemoryAllocator(64 * 1024 * 1024)
+    gpu_kv = generate_kv_cache_paged_list_tensors(
+        num_blocks=num_blocks,
+        device=torch_device_type,
+        block_size=block_size,
+        num_layers=num_layers,
+        head_size=head_size,
+        engine_kv_format=engine_kv_format,
+    )
+    dtype = get_dtype(gpu_kv, engine_kv_format)
+    slot_mapping = torch.arange(num_tokens, device=torch_device_type)
+
+    connector = VLLMPagedMemXPUConnectorV2(
+        num_heads * head_size,
+        num_layers,
+        use_gpu=use_gpu,
+        chunk_size=num_tokens,
+        dtype=dtype,
+        device=torch_device_type,
+        layout_hints={"kv_layout": "HND"},
+    )
+    memory_obj = allocator.allocate(connector.get_shape(num_tokens), dtype)
+    with pytest.raises(RuntimeError, match="Unsupported"):
+        connector.from_gpu(
+            memory_obj,
+            0,
+            num_tokens,
+            kvcaches=gpu_kv,
+            slot_mapping=slot_mapping,
+            offset=0,
+        )
+    assert connector.engine_kv_format == engine_kv_format
+    allocator.free(memory_obj)
     allocator.close()
 
 

@@ -291,6 +291,14 @@ def generate_kv_cache_paged_list_tensors(
         elif engine_kv_format == lmcache_native.EngineKVFormat.NL_X_NB_NH_BS_TWO_HS:
             # blocks-first, K/V fused into the trailing dim
             shape = [num_blocks, num_heads, block_size, 2, head_size]
+        elif engine_kv_format == lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_CS:
+            # blocks-first NHD, K/V fused into the trailing content dim
+            # (CS == 2 * head_size) — vLLM 0.27+ unified KV cache
+            shape = [num_blocks, block_size, num_heads, 2 * head_size]
+        elif engine_kv_format == lmcache_native.EngineKVFormat.NL_X_NB_NH_BS_CS:
+            # blocks-first HND twin: what vLLM 0.27+ allocates under
+            # VLLM_KV_CACHE_LAYOUT=HND
+            shape = [num_blocks, num_heads, block_size, 2 * head_size]
         else:
             raise ValueError(f"Unsupported engine_kv_format: {engine_kv_format}")
 
@@ -506,6 +514,28 @@ def check_paged_kv_cache_equal(
             assert left_k.shape[0] >= num_tokens
             assert (left_k[slot_mapping, :, :] == right_k[slot_mapping, :, :]).all()
             assert (left_v[slot_mapping, :, :] == right_v[slot_mapping, :, :]).all()
+
+    elif engine_kv_format == lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_CS:
+        # NHD with K/V fused into the trailing content dim:
+        #   [num_blocks, block_size, num_heads, 2 * head_size]
+        # Already token-major, so flattening the block dims is enough; K and V
+        # are compared together since they share the trailing dim.
+        num_tokens = slot_mapping.shape[0]
+        content_size = 2 * head_size
+        for left_kv_layer, right_kv_layer in zip(left, right, strict=False):
+            left_kv = left_kv_layer.reshape(-1, num_heads, content_size)
+            right_kv = right_kv_layer.reshape(-1, num_heads, content_size)
+
+            assert left_kv.shape[0] >= num_tokens
+            assert (left_kv[slot_mapping, :, :] == right_kv[slot_mapping, :, :]).all()
+
+    else:
+        # Without this the function would silently compare nothing and every
+        # caller passing an unhandled format would pass vacuously.
+        raise ValueError(
+            f"check_paged_kv_cache_equal: unhandled engine_kv_format "
+            f"{engine_kv_format!r}"
+        )
 
 
 def check_paged_kv_cache_equal_with_mla(left, right, slot_mapping, head_size=128):

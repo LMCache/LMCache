@@ -131,20 +131,20 @@ def CreateGPUConnector(
             if config.use_layerwise:
                 if config.enable_blending:
                     return VLLMBufferLayerwiseXPUConnector.from_metadata(
-                        metadata, use_gpu, device
+                        metadata, use_gpu, device, layout_hints=layout_hints
                     )
                 else:
                     return VLLMPagedMemLayerwiseXPUConnector.from_metadata(
-                        metadata, use_gpu, device
+                        metadata, use_gpu, device, layout_hints=layout_hints
                     )
 
             if config.use_gpu_connector_v3:
                 return VLLMPagedMemXPUConnectorV3.from_metadata(
-                    metadata, use_gpu, device
+                    metadata, use_gpu, device, layout_hints=layout_hints
                 )
             else:
                 return VLLMPagedMemXPUConnectorV2.from_metadata(
-                    metadata, use_gpu, device
+                    metadata, use_gpu, device, layout_hints=layout_hints
                 )
         elif torch_device_type == "musa":
             # First Party

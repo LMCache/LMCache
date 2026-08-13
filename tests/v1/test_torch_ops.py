@@ -1200,6 +1200,117 @@ def scenario_multi_layer_kv_transfer(ops: Any, device: str) -> dict[str, torch.T
                             ),
                         )
 
+    # ── 5b. Fused K/V packing (NL_X_NB_BS_NH_CS) ──
+    # vLLM 0.27+ FlashAttention/TritonAttention hand LMCache one paged tensor per
+    # layer with K and V packed into the trailing dim:
+    #     [num_blocks, block_size, num_heads, 2 * head_size]
+    # That is token-major with a per-token stride of num_heads * 2 * head_size,
+    # so the transfer is a single pass (kv_size == 1) and the LMCache-side buffer
+    # is [1, num_layers, num_tokens, num_heads * 2 * head_size] — not the split
+    # [2, ...] shape the non-fused formats use.
+    fused_results: dict[str, torch.Tensor] = {}
+    fused_num_heads = 2
+    fused_head_size = 8
+    fused_content_size = 2 * fused_head_size
+    fused_hidden = fused_num_heads * fused_content_size
+    fused_num_blocks = page_buffer_size // block_size
+    fused_format = lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_CS
+
+    for direction in [True, False]:
+        dir_tag = "paged2lmc" if direction else "lmc2paged"
+
+        key_value = torch.zeros(
+            (1, num_layers, num_tokens, fused_hidden), dtype=dtype, device="cpu"
+        )
+        if device in ("cuda", "xpu"):
+            key_value = key_value.pin_memory()
+
+        if not direction:  # LMC → Paged
+            for ly in range(num_layers):
+                for t in range(num_tokens):
+                    key_value[0, ly, t] = (
+                        ly * 1000 + t * 10 + torch.arange(fused_hidden)
+                    ).to(dtype)
+
+        page_buffers = []
+        for ly in range(num_layers):
+            pb = torch.zeros(
+                (fused_num_blocks, block_size, fused_num_heads, fused_content_size),
+                dtype=dtype,
+                device=device,
+            )
+            if direction:  # Paged → LMC
+                for s in range(page_buffer_size):
+                    val = (ly * 2000 + s * 10 + torch.arange(fused_hidden)).to(dtype)
+                    pb[s // block_size, s % block_size] = val.reshape(
+                        fused_num_heads, fused_content_size
+                    ).to(device)
+            page_buffers.append(pb)
+
+        if use_tensor_list:
+            key_value_ptrs = page_buffers
+        else:
+            key_value_ptrs = torch.tensor(
+                [pb.data_ptr() for pb in page_buffers],
+                dtype=torch.uint64,
+                device=device,
+            )
+
+        xfer_dir = (
+            lmcache_native.TransferDirection.D2H
+            if direction
+            else lmcache_native.TransferDirection.H2D
+        )
+        ops.multi_layer_kv_transfer(
+            key_value,
+            key_value_ptrs,
+            slot_mapping,
+            torch.device(device),
+            page_buffer_size,
+            xfer_dir,
+            fused_format,
+            block_size,
+        )
+        device_sync(device)
+
+        for t_id in range(num_tokens):
+            s_idx = int(slot_mapping[t_id].item())
+            for ly in range(num_layers):
+                paged_val = page_buffers[ly][
+                    s_idx // block_size, s_idx % block_size
+                ].reshape(-1)
+                torch.testing.assert_close(
+                    key_value[0, ly, t_id].to("cpu"),
+                    paged_val.to("cpu"),
+                    msg=(
+                        f"Mismatch: NL_X_NB_BS_NH_CS {dir_tag} "
+                        f"(tensor_list={use_tensor_list}), layer={ly}, token={t_id}"
+                    ),
+                )
+
+        fused_results[f"multi_layer_kv_transfer_fused_{dir_tag}"] = key_value.cpu()
+
+    # A split [2, ...] buffer for a fused format would move half the data at half
+    # the true per-token stride, so it has to be rejected rather than silently
+    # mis-copied. Only asserted for the Python fallback: cuda_c_ops has no such
+    # guard, and adding the expectation for every backend would fail there.
+    if ops is _py_ops:
+        with pytest.raises((ValueError, RuntimeError)):
+            ops.multi_layer_kv_transfer(
+                torch.zeros(
+                    (2, num_layers, num_tokens, fused_hidden // 2),
+                    dtype=dtype,
+                    device="cpu",
+                ),
+                key_value_ptrs,
+                slot_mapping,
+                torch.device(device),
+                page_buffer_size,
+                lmcache_native.TransferDirection.H2D,
+                fused_format,
+                block_size,
+            )
+
     # ── 6. Collect ONE canonical result for cross-backend comparison ──
     # Use flash attn format (NL_X_TWO_NB_BS_NH_HS), re-run canonical cases
     canonical_format = lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
@@ -1262,6 +1373,7 @@ def scenario_multi_layer_kv_transfer(ops: Any, device: str) -> dict[str, torch.T
 
         results[f"multi_layer_kv_transfer_{dir_tag}"] = key_value.cpu()
 
+    results.update(fused_results)
     return results
 
 

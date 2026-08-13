@@ -46,11 +46,27 @@ def multi_layer_kv_transfer(
 
     format_spec = _format_spec(engine_kv_format)
 
-    # TODO: Implement head_size support for HND layouts as next step.
+    # TODO: Implement head_size support for HND layouts as next step. Every HND
+    # format needs scalar_offset decomposed into (head_idx, head_offset), fused
+    # or not, so none of them can ride the branches below.
     if format_spec.is_hnd:
         raise NotImplementedError(
-            "HND layouts are not supported in the non-CUDA fallback. "
-            "head_size parameter is required but not implemented in this path."
+            f"HND layouts ({engine_kv_format!r}) are not supported in the "
+            "non-CUDA fallback. head_size parameter is required but not "
+            "implemented in this path."
+        )
+
+    # Fused formats pack K and V into the trailing content dim, so the K/V axis
+    # of the LMCache-side buffer is 1, not 2 (kv_size == 1, like MLA). A caller
+    # that hands us a split [2, NL, T, NH*HS] buffer for a fused format would
+    # otherwise transfer half the data at half the true per-token stride, so
+    # fail loudly instead.
+    if format_spec.is_fused_packed and key_value.size(0) != 1:
+        raise ValueError(
+            f"{engine_kv_format!r} packs K/V in the trailing dim, so key_value "
+            f"must be [1, num_layers, num_tokens, num_heads * content_size]; "
+            f"got {tuple(key_value.shape)}. The paged cache's per-token stride "
+            "is num_heads * 2 * head_size."
         )
     # 1. Filter out invalid slots.
     #    valid_mask_kv:  on key_value.device, used to index key_value
@@ -72,7 +88,12 @@ def multi_layer_kv_transfer(
     valid_slots = slots_kv[valid_mask_kv].to(paged_memory_device)
 
     # 2. Determine architecture variant and tensor dimensions.
-    is_mla = format_spec.is_mla
+    # A fused NHD paged layer ([num_blocks, block_size, num_heads, 2*head_size])
+    # is token-major with a per-token stride of num_heads * 2 * head_size, so it
+    # flattens to the same [page_buffer_size, hidden_size] plane MLA uses and
+    # moves in a single pass. Only the trailing dim differs, and that comes from
+    # key_value itself.
+    is_single_pass = format_spec.is_mla or format_spec.is_fused_packed
     has_interleaved_kv_blocks = (
         format_spec.is_layer_list
         and not format_spec.is_mla
@@ -94,7 +115,7 @@ def multi_layer_kv_transfer(
     # (used when wrapping a raw pointer).
     layer_shape: Tuple[int, ...]
 
-    if is_mla:
+    if is_single_pass:
         layer_shape = (page_buffer_size, hidden_size)
     elif has_interleaved_kv_blocks:
         num_blocks = page_buffer_size // block_size
@@ -115,7 +136,8 @@ def multi_layer_kv_transfer(
             )
 
         # --- B. Vectorized bulk data transfer. ---
-        if is_mla:
+        if is_single_pass:
+            # MLA / fused packed K+V.
             # Paged layout : [page_buffer_size, hidden_size]
             # key_value layout: [1, num_layers, num_tokens, hidden_size]
             if int(direction) == int(TransferDirection.H2D):

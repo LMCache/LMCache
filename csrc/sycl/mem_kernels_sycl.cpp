@@ -86,9 +86,16 @@ inline int64_t page_buffer_offset(const int k_or_v, const int token_idx,
            k_or_v * block_size * scalars_per_token +
            block_offset * scalars_per_token + scalar_offset;
   }
-  // MLA formats: vLLM (NL_X_NB_BS_HS) and SGLang (NL_X_NBBS_ONE_HS)
+  // Single-pass token-major formats (k_or_v_size == 1):
+  //  - MLA: vLLM (NL_X_NB_BS_HS) and SGLang (NL_X_NBBS_ONE_HS)
+  //  - NHD fused K/V, where a token's K and V are packed into the trailing dim
+  //    ([num_blocks, block_size, num_heads, 2 * head_size]), so
+  //    scalars_per_token is already num_heads * 2 * head_size and no head_size
+  //    decomposition is needed.
   else if constexpr (format == EngineKVFormat::NL_X_NB_BS_HS ||
-                     format == EngineKVFormat::NL_X_NBBS_ONE_HS) {
+                     format == EngineKVFormat::NL_X_NBBS_ONE_HS ||
+                     format == EngineKVFormat::NL_X_NB_BS_NH_TWO_HS ||
+                     format == EngineKVFormat::NL_X_NB_BS_NH_CS) {
     return token_idx * scalars_per_token + scalar_offset;
   }
 }
@@ -115,7 +122,9 @@ inline int64_t page_buffer_base_offset(const int k_or_v, const int token_idx,
            k_or_v * block_size * scalars_per_token +
            block_offset * scalars_per_token;
   } else if constexpr (format == EngineKVFormat::NL_X_NB_BS_HS ||
-                       format == EngineKVFormat::NL_X_NBBS_ONE_HS) {
+                       format == EngineKVFormat::NL_X_NBBS_ONE_HS ||
+                       format == EngineKVFormat::NL_X_NB_BS_NH_TWO_HS ||
+                       format == EngineKVFormat::NL_X_NB_BS_NH_CS) {
     return token_idx * scalars_per_token;
   }
 }
@@ -167,8 +176,9 @@ T* get_kernel_ptr(TENSOR_TYPE& tensor) {
 // ---------------------------------------------------------------------------
 
 /**
- * Submit the multi-layer KV transfer kernel for MLA formats
- * (k_or_v_size == 1).
+ * Submit the multi-layer KV transfer kernel for single-pass formats
+ * (k_or_v_size == 1): MLA, and fused K/V where a token's K and V are packed
+ * into the trailing dim.
  *
  * nd_range layout: group(0)=k_or_v, group(1)=layer, group(2)=token;
  * local_id(2)=tid, local_range(2)=num_threads.
@@ -296,8 +306,9 @@ void submit_multi_layer_kernel_fused_kv(
 
 // ---------------------------------------------------------------------------
 // Macros to dispatch multi-layer kernels with a specific EngineKVFormat.
-// MLA formats (k_or_v_size==1) use the per-component kernel.
-// Non-MLA formats (k_or_v_size==2) use the fused K+V kernel.
+// Single-pass formats -- MLA and fused K/V (k_or_v_size==1) -- use the
+// per-component kernel. Split-K/V formats (k_or_v_size==2) use the fused K+V
+// kernel, which moves a token's K and V in one work-group.
 // ---------------------------------------------------------------------------
 #define LAUNCH_KERNEL_WITH_FORMAT(T, DIRECTION, FORMAT)                     \
   submit_multi_layer_kernel<T, DIRECTION, FORMAT>(                          \
@@ -333,7 +344,11 @@ void multi_layer_kv_transfer_templated(
   int elements_per_xword = sizeof(T) / key_value.element_size();
   int num_xwords = num_origin_elements / elements_per_xword;
 
-  int k_or_v_size = ::is_mla(engine_kv_format) ? 1 : 2;
+  // Fused formats pack a token's K and V into the trailing dim, so like MLA
+  // they move in a single pass over a token-major page.
+  int k_or_v_size =
+      (::is_mla(engine_kv_format) || ::is_fused_packed(engine_kv_format)) ? 1
+                                                                          : 2;
 
   // Round up to a sub-group multiple so every sub-group is full.
   int wg_size = round_up_to_sg(std::min(num_xwords, MAX_WG_SIZE));
@@ -342,8 +357,8 @@ void multi_layer_kv_transfer_templated(
   sycl::queue& queue =
       c10::xpu::getCurrentXPUStream(paged_memory_device.index()).queue();
 
-  // Non-MLA formats use the fused K+V kernel; MLA formats
-  // (k_or_v_size==1) use the per-component kernel.
+  // Split-K/V formats use the fused K+V kernel; single-pass formats
+  // (k_or_v_size==1: MLA and fused K/V) use the per-component kernel.
   if (k_or_v_size == 2) {
     if (direction == TransferDirection::H2D) {
       switch (engine_kv_format) {
@@ -381,7 +396,10 @@ void multi_layer_kv_transfer_templated(
       }
     }
   } else {
-    // MLA path (k_or_v_size == 1)
+    // Single-pass path (k_or_v_size == 1): MLA and NHD fused K/V. HND fused
+    // (NL_X_NB_NH_BS_*) is absent on purpose — decomposing scalar_offset into
+    // (head_idx, head_offset) needs head_size, which the offset helpers above
+    // do not take.
     if (direction == TransferDirection::H2D) {
       switch (engine_kv_format) {
         case EngineKVFormat::NL_X_NB_BS_HS:
@@ -390,8 +408,16 @@ void multi_layer_kv_transfer_templated(
         case EngineKVFormat::NL_X_NBBS_ONE_HS:
           LAUNCH_KERNEL_WITH_FORMAT(T, false, EngineKVFormat::NL_X_NBBS_ONE_HS);
           break;
+        case EngineKVFormat::NL_X_NB_BS_NH_TWO_HS:
+          LAUNCH_KERNEL_WITH_FORMAT(T, false,
+                                    EngineKVFormat::NL_X_NB_BS_NH_TWO_HS);
+          break;
+        case EngineKVFormat::NL_X_NB_BS_NH_CS:
+          LAUNCH_KERNEL_WITH_FORMAT(T, false, EngineKVFormat::NL_X_NB_BS_NH_CS);
+          break;
         default:
-          throw std::runtime_error("Unsupported MLA EngineKVFormat");
+          throw std::runtime_error(
+              "Unsupported single-pass (MLA / fused K/V) EngineKVFormat");
       }
     } else {
       switch (engine_kv_format) {
@@ -401,8 +427,16 @@ void multi_layer_kv_transfer_templated(
         case EngineKVFormat::NL_X_NBBS_ONE_HS:
           LAUNCH_KERNEL_WITH_FORMAT(T, true, EngineKVFormat::NL_X_NBBS_ONE_HS);
           break;
+        case EngineKVFormat::NL_X_NB_BS_NH_TWO_HS:
+          LAUNCH_KERNEL_WITH_FORMAT(T, true,
+                                    EngineKVFormat::NL_X_NB_BS_NH_TWO_HS);
+          break;
+        case EngineKVFormat::NL_X_NB_BS_NH_CS:
+          LAUNCH_KERNEL_WITH_FORMAT(T, true, EngineKVFormat::NL_X_NB_BS_NH_CS);
+          break;
         default:
-          throw std::runtime_error("Unsupported MLA EngineKVFormat");
+          throw std::runtime_error(
+              "Unsupported single-pass (MLA / fused K/V) EngineKVFormat");
       }
     }
   }
@@ -424,6 +458,15 @@ void multi_layer_kv_transfer(
   // keep ABI parity with the CUDA cuda_ops binding so callers can pass the
   // same kwargs to either backend.
   (void)head_size;
+  // A fused format's page is token-major with a per-token stride of
+  // num_heads * 2 * head_size, so the LMCache-side buffer must present the same
+  // stride: [1, num_layers, num_tokens, num_heads * 2 * head_size]. Given the
+  // split [2, ...] shape instead, the kernel would copy half the data at half
+  // the stride, so reject it rather than corrupt the cache silently.
+  TORCH_CHECK(!::is_fused_packed(engine_kv_format) || key_value.size(0) == 1,
+              "Fused K/V formats require key_value[0] == 1 (K and V are packed "
+              "in the trailing dim); got key_value.size(0) = ",
+              key_value.size(0));
   int num_origin_elements = key_value.size(3);
   int copy_size = num_origin_elements * key_value.element_size();
 

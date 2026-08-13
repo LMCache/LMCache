@@ -12,7 +12,9 @@ from lmcache.inprocess.v1.gpu_connector.gpu_connectors import GPUConnectorInterf
 from lmcache.integration.vllm.utils import ENGINE_NAME
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType, _lmcache_nvtx_annotate
+from lmcache.v1.gpu_connector.kv_format import get_spec_class
 from lmcache.v1.gpu_connector.utils import (
+    LayoutHints,
     assert_is_vllm_flash_attn_or_flash_infer,
     get_block_size,
     get_elements_per_layer,
@@ -29,6 +31,37 @@ if TYPE_CHECKING:
     from lmcache.inprocess.v1.metadata import LMCacheMetadata
 
 logger = init_logger(__name__)
+
+
+def _as_fused_plane(
+    tensor: torch.Tensor, engine_kv_format: lmcache_native.EngineKVFormat
+) -> torch.Tensor:
+    """Present an LMCache-side ``[2, NL, T, D]`` buffer as ``[1, NL, T, 2 * D]``.
+
+    vLLM 0.27+ hands us one paged tensor per layer with K and V packed into the
+    trailing dim (``[num_blocks, block_size, num_heads, 2 * head_size]``), so a
+    layer's page is token-major with a per-token stride of ``num_heads * 2 *
+    head_size``. The kernel therefore moves it in a single pass and wants an
+    LMCache-side plane of the same per-token stride — the shape
+    ``KVLayerGroupsManager`` produces for the V3 connector. Handing it the split
+    ``[2, ...]`` shape instead would copy half the data at half the true stride.
+
+    This is a pure reinterpretation of the same contiguous storage, so the bytes
+    written are identical to the V3 fused buffer's: nothing is copied and D2H /
+    H2D stay each other's inverse. What the buffer is *not* is the split K-then-V
+    ordering ``MemoryFormat.KV_2LTD`` names, so a fused engine's memory objects
+    must not be fed to anything that reads their contents structurally (CacheGen
+    compression, blending) or shared with a non-fused engine.
+
+    Non-fused and MLA formats are returned unchanged.
+    """
+    if tensor.dim() != 4 or tensor.size(0) != 2:
+        return tensor
+    if not get_spec_class(engine_kv_format).is_fused_packed:
+        return tensor
+    # .view, not .reshape: a silent copy would break the D2H direction, which
+    # writes into this tensor.
+    return tensor.view(1, tensor.size(1), tensor.size(2), 2 * tensor.size(3))
 
 
 class VLLMPagedMemXPUConnectorV2(GPUConnectorInterface):
@@ -69,6 +102,8 @@ class VLLMPagedMemXPUConnectorV2(GPUConnectorInterface):
 
         self.gpu_buffer: Optional[torch.Tensor] = None
         self.use_mla = "use_mla" in kwargs and kwargs["use_mla"]
+        layout_hints: LayoutHints | None = kwargs.get("layout_hints")
+        self.layout_hints: LayoutHints = layout_hints or {}
         if use_gpu:
             assert "chunk_size" in kwargs, (
                 "chunk_size should be provided to create a GPU buffer."
@@ -91,6 +126,7 @@ class VLLMPagedMemXPUConnectorV2(GPUConnectorInterface):
         metadata: "LMCacheMetadata",
         use_gpu: bool = False,
         device: Optional[torch.device] = None,
+        layout_hints: LayoutHints | None = None,
     ) -> "VLLMPagedMemXPUConnectorV2":
         """Create a connector from LMCacheMetadata.
 
@@ -98,6 +134,8 @@ class VLLMPagedMemXPUConnectorV2(GPUConnectorInterface):
             metadata: The LMCache engine metadata containing model configuration.
             use_gpu: Whether to use GPU intermediate buffer.
             device: The device to use for the connector.
+            layout_hints: Optional hints about KV cache layout from the
+                serving engine, e.g. ``{"kv_layout": "HND"}``.
 
         Returns:
             A new instance of VLLMPagedMemXPUConnectorV2.
@@ -118,6 +156,7 @@ class VLLMPagedMemXPUConnectorV2(GPUConnectorInterface):
             dtype=metadata.kv_dtype,
             device=device,
             use_mla=metadata.use_mla,
+            layout_hints=layout_hints,
         )
 
     def _initialize_pointers(self, kv_caches: List[torch.Tensor]) -> torch.Tensor:
@@ -133,7 +172,7 @@ class VLLMPagedMemXPUConnectorV2(GPUConnectorInterface):
         self.kv_cache_pointers_on_gpu[idx].copy_(self.kv_cache_pointers)
 
         self.engine_kv_format, kv_caches = normalize_kv_and_discover_format(
-            kv_caches, EngineType.VLLM
+            kv_caches, EngineType.VLLM, layout_hints=self.layout_hints
         )
         self.num_blocks = get_num_blocks(kv_caches, self.engine_kv_format)
         self.block_size = get_block_size(kv_caches, self.engine_kv_format)
@@ -193,16 +232,18 @@ class VLLMPagedMemXPUConnectorV2(GPUConnectorInterface):
         vllm_cached = kwargs.get("vllm_cached_tokens", 0)
         skip_prefix_n_tokens = min(end - start, max(0, vllm_cached - start))
 
+        # Keyword args from block_size on: passed positionally, the 9th argument
+        # lands in head_size and skip_prefix_n_tokens is silently dropped.
         device_ops.multi_layer_kv_transfer(
-            memory_obj.tensor,
+            _as_fused_plane(memory_obj.tensor, self.engine_kv_format),
             kv_cache_pointers,
             slot_mapping[start:end],
             self.device,
             self.page_buffer_size,
             lmcache_native.TransferDirection.H2D,
             self.engine_kv_format,
-            self.block_size,
-            skip_prefix_n_tokens,
+            block_size=self.block_size,
+            skip_prefix_n_tokens=skip_prefix_n_tokens,
         )
 
     @_lmcache_nvtx_annotate
@@ -241,28 +282,28 @@ class VLLMPagedMemXPUConnectorV2(GPUConnectorInterface):
         with torch.xpu.stream(self.store_stream):
             if self.gpu_buffer is None or end - start != self.gpu_buffer.shape[2]:
                 device_ops.multi_layer_kv_transfer(
-                    memory_obj.tensor,
+                    _as_fused_plane(memory_obj.tensor, self.engine_kv_format),
                     kv_cache_pointers,
                     slot_mapping[start:end],
                     self.kvcaches[0].device,
                     self.page_buffer_size,
                     lmcache_native.TransferDirection.D2H,
                     self.engine_kv_format,
-                    self.block_size,
+                    block_size=self.block_size,
                 )
             else:
                 # kvcaches -> gpu_buffer -> memobj
                 assert self.gpu_buffer.device == self.kvcaches[0].device
                 tmp_gpu_buffer = self.gpu_buffer[:, :, : end - start, :]
                 device_ops.multi_layer_kv_transfer(
-                    tmp_gpu_buffer,
+                    _as_fused_plane(tmp_gpu_buffer, self.engine_kv_format),
                     kv_cache_pointers,
                     slot_mapping[start:end],
                     self.kvcaches[0].device,
                     self.page_buffer_size,
                     lmcache_native.TransferDirection.D2H,
                     self.engine_kv_format,
-                    self.block_size,
+                    block_size=self.block_size,
                 )
                 memory_obj.tensor.copy_(tmp_gpu_buffer, non_blocking=True)
 
@@ -298,9 +339,11 @@ class VLLMPagedMemXPUConnectorV3(GPUConnectorInterface):
         metadata: "LMCacheMetadata",
         device: torch.device,
         use_gpu: bool = False,
+        layout_hints: LayoutHints | None = None,
     ):
         assert device.type == "xpu", "The device should be XPU."
         self.metadata = metadata
+        self.layout_hints: LayoutHints = layout_hints or {}
         self.device = device
         self.use_mla = metadata.use_mla
         self.chunk_size = metadata.chunk_size
@@ -321,9 +364,10 @@ class VLLMPagedMemXPUConnectorV3(GPUConnectorInterface):
         metadata: "LMCacheMetadata",
         use_gpu: bool = False,
         device: Optional[torch.device] = None,
+        layout_hints: LayoutHints | None = None,
     ) -> "VLLMPagedMemXPUConnectorV3":
         assert device is not None
-        return cls(metadata, device, use_gpu)
+        return cls(metadata, device, use_gpu, layout_hints=layout_hints)
 
     def _initialize_kv_cache_pointers(self):
         if self.init:
@@ -359,7 +403,7 @@ class VLLMPagedMemXPUConnectorV3(GPUConnectorInterface):
             self.group_kv_cache_pointers_on_gpu.append(kv_cache_pointers_on_gpu)
 
         self.engine_kv_format, self.kvcaches = normalize_kv_and_discover_format(
-            self.kvcaches, EngineType.VLLM
+            self.kvcaches, EngineType.VLLM, layout_hints=self.layout_hints
         )
         self.num_blocks = get_num_blocks(self.kvcaches, self.engine_kv_format)
         self.block_size = get_block_size(self.kvcaches, self.engine_kv_format)
@@ -514,6 +558,8 @@ class VLLMBufferLayerwiseXPUConnector(GPUConnectorInterface):
         self.use_gpu = use_gpu
         self.gpu_buffer_allocator = None
         self.element_size = torch.tensor([], dtype=self.dtype).element_size()
+        layout_hints: LayoutHints | None = kwargs.get("layout_hints")
+        self.layout_hints: LayoutHints = layout_hints or {}
 
     @classmethod
     def from_metadata(
@@ -521,6 +567,7 @@ class VLLMBufferLayerwiseXPUConnector(GPUConnectorInterface):
         metadata: "LMCacheMetadata",
         use_gpu: bool = False,
         device: Optional[torch.device] = None,
+        layout_hints: LayoutHints | None = None,
     ) -> "VLLMBufferLayerwiseXPUConnector":
         """Create a connector from LMCacheMetadata.
 
@@ -528,6 +575,8 @@ class VLLMBufferLayerwiseXPUConnector(GPUConnectorInterface):
             metadata: The LMCache engine metadata containing model configuration.
             use_gpu: Whether to use GPU intermediate buffer.
             device: The device to use for the connector.
+            layout_hints: Optional hints about KV cache layout from the
+                serving engine, e.g. ``{"kv_layout": "HND"}``.
 
         Returns:
             A new instance of VLLMBufferLayerwiseXPUConnector.
@@ -545,6 +594,7 @@ class VLLMBufferLayerwiseXPUConnector(GPUConnectorInterface):
             use_gpu=use_gpu,
             dtype=metadata.kv_dtype,
             device=device,
+            layout_hints=layout_hints,
         )
 
     def _lazy_initialize_buffer(self, kv_caches):
@@ -562,7 +612,7 @@ class VLLMBufferLayerwiseXPUConnector(GPUConnectorInterface):
             # in layerwise mode.
 
             self.engine_kv_format, kv_caches = normalize_kv_and_discover_format(
-                kv_caches, EngineType.VLLM
+                kv_caches, EngineType.VLLM, layout_hints=self.layout_hints
             )
             assert_is_vllm_flash_attn_or_flash_infer(self.engine_kv_format)
             self.tokens_per_layer = get_tokens_per_layer(
@@ -915,6 +965,8 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
         self.store_stream = torch.xpu.Stream()
 
         self.use_mla = "use_mla" in kwargs and kwargs["use_mla"]
+        layout_hints: LayoutHints | None = kwargs.get("layout_hints")
+        self.layout_hints: LayoutHints = layout_hints or {}
 
     @classmethod
     def from_metadata(
@@ -922,6 +974,7 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
         metadata: "LMCacheMetadata",
         use_gpu: bool = False,
         device: Optional[torch.device] = None,
+        layout_hints: LayoutHints | None = None,
     ) -> "VLLMPagedMemLayerwiseXPUConnector":
         """Create a connector from LMCacheMetadata.
 
@@ -929,6 +982,8 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
             metadata: The LMCache engine metadata containing model configuration.
             use_gpu: Whether to use GPU intermediate buffer.
             device: The device to use for the connector.
+            layout_hints: Optional hints about KV cache layout from the
+                serving engine, e.g. ``{"kv_layout": "HND"}``.
 
         Returns:
             A new instance of VLLMPagedMemLayerwiseXPUConnector.
@@ -949,6 +1004,7 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
             dtype=metadata.kv_dtype,
             device=device,
             use_mla=metadata.use_mla,
+            layout_hints=layout_hints,
         )
 
     def _lazy_initialize_buffer(self, kv_caches):
@@ -966,7 +1022,7 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
             # in layerwise mode.
 
             self.engine_kv_format, kv_caches = normalize_kv_and_discover_format(
-                kv_caches, EngineType.VLLM
+                kv_caches, EngineType.VLLM, layout_hints=self.layout_hints
             )
             assert_is_vllm_flash_attn_or_flash_infer(self.engine_kv_format)
             self.tokens_per_layer = get_tokens_per_layer(
