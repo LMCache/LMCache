@@ -614,6 +614,12 @@ Overrides & Extras
    * - ``volumeMounts``
      - --
      - Extra volume mounts.
+   * - ``initContainers``
+     - --
+     - Additional init containers run before the lmcache container starts,
+       in order.  Use to prepare state the engine can't create itself, e.g.
+       pre-sizing a ``raw_block`` L2 adapter's ``device_path`` file (see
+       :ref:`mp-operator-preexisting-l2-state` below).
    * - ``podAnnotations``
      - --
      - Extra pod annotations.
@@ -888,6 +894,63 @@ Override Auto-Computed Resources
           cpu: "8"
         limits:
           memory: "100Gi"
+
+.. _mp-operator-preexisting-l2-state:
+
+Pre-Sizing an L2 Raw Block Device
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The ``raw_block`` L2 adapter opens its ``device_path`` file expecting it to
+already exist at the configured size -- it does not create or grow the file
+itself.  On a fresh node, that file is missing and the engine crashes with a
+``FileNotFoundError``.  Use ``initContainers`` to fallocate (or truncate) it
+before the lmcache container starts:
+
+.. code-block:: yaml
+
+    apiVersion: lmcache.lmcache.ai/v1alpha1
+    kind: LMCacheEngine
+    metadata:
+      name: my-cache
+    spec:
+      l1:
+        sizeGB: 60
+      volumes:
+        - name: kv-cache-root
+          hostPath:
+            path: /path/to/local/disk    # e.g. a mounted NVMe scratch disk
+            type: DirectoryOrCreate
+      volumeMounts:
+        - name: kv-cache-root
+          mountPath: /mnt/kv-cache-root
+      initContainers:
+        - name: preallocate-raw-block
+          image: busybox
+          command:
+            - sh
+            - -c
+            - |
+              test -f /mnt/kv-cache-root/lmcache-l2.raw || \
+                fallocate -l 10000000000 /mnt/kv-cache-root/lmcache-l2.raw || \
+                truncate -s 10000000000 /mnt/kv-cache-root/lmcache-l2.raw
+          volumeMounts:
+            - name: kv-cache-root
+              mountPath: /mnt/kv-cache-root
+      l2Backend:
+        raw:
+          type: raw_block
+          config:
+            device_path: "/mnt/kv-cache-root/lmcache-l2.raw"
+            capacity_bytes: 10000000000   # 10 GB, must match the size above
+
+.. note::
+   ``capacity_bytes`` in ``l2Backend.raw.config`` must match the size the
+   init container allocates.  The ``test -f ... ||`` guard makes the
+   fallocate idempotent -- a pod restart never truncates a file that
+   already has data, so a populated L2 cache survives engine restarts.
+   Init containers listed here run in order, before the lmcache container,
+   and share the engine's ``volumes``/``volumeMounts`` -- mount the same
+   volume in both if the init container needs to touch it.
 
 .. _mp-operator-cacheblend:
 
