@@ -7,7 +7,7 @@
 # a readOnly mount + PYTHONPATH on the vLLM container; the required vLLM flags
 # (--kv-transfer-config <node-local engine>, --pipeline-parallel-size 1,
 # --no-enable-chunked-prefill, --enforce-eager); and the private-payload
-# imagePullSecrets. --attention-backend and --block-size are NOT injected.
+# imagePullSecrets.
 #
 # PREREQUISITES (else injection silently no-ops or the pod is rejected):
 #   1. A CacheBlendEngine named below exists IN THIS NAMESPACE and is reconciled

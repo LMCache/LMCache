@@ -1001,9 +1001,6 @@ private-image pull secret, and the required CacheBlend vLLM flags
 ``--pipeline-parallel-size 1``, ``--no-enable-chunked-prefill``,
 ``--enforce-eager``).  You supply only the model and your non-CacheBlend flags.
 
-``--attention-backend`` and ``--block-size`` are **not** injected; a value you
-supply on the pod is left untouched.
-
 Verifying Injection
 ~~~~~~~~~~~~~~~~~~~~~
 
@@ -1012,7 +1009,7 @@ The webhook mutates **Pods**, not the Deployment, so inspect a pod:
 .. code-block:: bash
 
     kubectl get pod -l app=vllm-cacheblend -o yaml | \
-      grep -E "initContainers|cb-plugin|PYTHONPATH|attention-backend|cacheblend-injected|skip-reason"
+      grep -E "initContainers|cb-plugin|PYTHONPATH|kv-transfer-config|cacheblend-injected|skip-reason"
 
 If nothing was injected, check the pod's ``lmcache.ai/cacheblend-skip-reason``
 annotation: ``command-override`` (a ``sh -c`` wrapper was used),

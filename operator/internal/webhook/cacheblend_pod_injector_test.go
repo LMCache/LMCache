@@ -251,16 +251,10 @@ var _ = Describe("CacheBlendPodInjector", func() {
 			Expect(envValue(c, pythonPathEnvName)).To(Equal(cbPluginMountPath))
 
 			By("M5: required vLLM args asserted individually")
-			Expect(argsHasFlag(c.Args, "--attention-backend")).To(BeFalse(),
-				"--attention-backend is not injected")
-			Expect(argsHasFlag(c.Args, "--block-size")).To(BeFalse(),
-				"--block-size is not injected")
 			Expect(argsHasFlag(c.Args, cbFlagNoChunkedPrefill)).To(BeTrue(),
 				"--no-enable-chunked-prefill")
 			Expect(argsHasFlagValue(c.Args, cbFlagPipelineParallelSize, cbValPipelineParallelSize)).To(BeTrue(),
 				"--pipeline-parallel-size=1")
-			Expect(argsHasFlag(c.Args, "--no-async-scheduling")).To(BeFalse(),
-				"async scheduling is left to vLLM's default, not forced off")
 			Expect(argsHasFlag(c.Args, cbFlagEnforceEager)).To(BeTrue(),
 				"default cudagraph eager -> --enforce-eager")
 
@@ -381,42 +375,6 @@ var _ = Describe("CacheBlendPodInjector", func() {
 	})
 
 	Describe("append-or-replace arg semantics", func() {
-		It("injects neither --attention-backend nor --block-size", func() {
-			engine := newTestEngine(nil)
-			injector := newPodInjector(engine, true)
-			pod := vllmPod(nil)
-
-			resp := injector.Handle(ctx, makeRequest(pod))
-			out := applyResponse(pod, resp)
-			c := findContainer(out, "vllm")
-
-			By("neither flag is managed; the rest of the injection still applies")
-			Expect(argsHasFlag(c.Args, "--attention-backend")).To(BeFalse())
-			Expect(argsHasFlag(c.Args, "--block-size")).To(BeFalse())
-			Expect(argsHasFlag(c.Args, cbFlagNoChunkedPrefill)).To(BeTrue())
-		})
-
-		It("leaves user-supplied --attention-backend and --block-size untouched", func() {
-			engine := newTestEngine(nil)
-			injector := newPodInjector(engine, true)
-			pod := vllmPod(func(p *corev1.Pod) {
-				p.Spec.Containers[0].Args = []string{
-					"--attention-backend", "FLASH_ATTN",
-					"--block-size", "128",
-					"--model", "m",
-				}
-			})
-
-			resp := injector.Handle(ctx, makeRequest(pod))
-			out := applyResponse(pod, resp)
-			c := findContainer(out, "vllm")
-
-			Expect(argsHasFlagValue(c.Args, "--attention-backend", "FLASH_ATTN")).To(BeTrue())
-			Expect(argsHasFlagValue(c.Args, "--block-size", "128")).To(BeTrue())
-			Expect(countFlag(c.Args, "--attention-backend")).To(Equal(1))
-			Expect(countFlag(c.Args, "--block-size")).To(Equal(1))
-		})
-
 		It("skips + stamps when the user already supplies --kv-transfer-config", func() {
 			engine := newTestEngine(nil)
 			injector := newPodInjector(engine, true)

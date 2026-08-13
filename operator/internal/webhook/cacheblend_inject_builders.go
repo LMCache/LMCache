@@ -57,8 +57,7 @@ var cbStaging = payloadStaging{
 }
 
 // CacheBlend-required vLLM flag names and fixed values (design §7 M5). The
-// CacheBlend matcher and connector hard-require these. --attention-backend and
-// --block-size are deliberately absent: the operator does not manage them.
+// CacheBlend matcher and connector hard-require these.
 const (
 	cbFlagKVTransferConfig = "--kv-transfer-config"
 

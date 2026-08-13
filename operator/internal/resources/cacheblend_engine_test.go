@@ -412,8 +412,8 @@ func TestBuildCBConnectionConfigMap_PortMatchesEngineArgs(t *testing.T) {
 }
 
 // TestBuildCBEngine_ChunkSizeConsistency asserts the engine's chunk-size is 256
-// (the only value CacheBlend supports — block_size 64 * 4), matching the locked
-// CacheBlendChunkSize constant, so it cannot drift from the injected --block-size.
+// (the only value CacheBlend supports), matching the locked CacheBlendChunkSize
+// constant.
 func TestBuildCBEngine_ChunkSizeConsistency(t *testing.T) {
 	engine := minimalCBEngine()
 	args := BuildCBEngineArgs(&engine.Spec)

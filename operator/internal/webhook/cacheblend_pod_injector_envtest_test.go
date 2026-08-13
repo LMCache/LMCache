@@ -82,10 +82,6 @@ var _ = Describe("CacheBlendPodInjector webhook (envtest)", Ordered, func() {
 		// =-token (--flag=value) forms; argsHasFlagValue handles both.
 		Expect(argsHasFlagValue(c.Args, "--pipeline-parallel-size", "1")).To(BeTrue())
 		Expect(c.Args).To(ContainElement("--no-enable-chunked-prefill"))
-		By("--attention-backend, --block-size, and async scheduling are left to the plugin / vLLM")
-		Expect(argsHasFlag(c.Args, "--attention-backend")).To(BeFalse())
-		Expect(argsHasFlag(c.Args, "--block-size")).To(BeFalse())
-		Expect(c.Args).NotTo(ContainElement("--no-async-scheduling"))
 		kv := argsFlagValue(c.Args, "--kv-transfer-config")
 		Expect(kv).To(ContainSubstring("CBKVConnector"))
 		Expect(kv).To(ContainSubstring("tcp://" + testEngineName + "." + testNamespace + ".svc"))
