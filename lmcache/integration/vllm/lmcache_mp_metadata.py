@@ -24,6 +24,9 @@ if TYPE_CHECKING:
     # Third Party
     from vllm.v1.request import Request
 
+    # First Party
+    from lmcache.integration.vllm.experimental import LMCacheMPQRequestMetadata
+
 
 class LMCacheMPRequestState(enum.Enum):
     """
@@ -345,9 +348,13 @@ class LMCacheMPConnectorMetadata(KVConnectorMetadata):
         super().__init__()
         self.requests: list[LMCacheMPRequestMetadata] = []
         self.need_flush_before_forward: bool = False
+        self.q_requests: list[LMCacheMPQRequestMetadata] = []
 
     def add_request_metadata(self, request_metadata: LMCacheMPRequestMetadata):
         self.requests.append(request_metadata)
+
+    def add_q_capture_window(self, window: "LMCacheMPQRequestMetadata"):
+        self.q_requests.append(window)
 
     def __len__(self):
         return len(self.requests)

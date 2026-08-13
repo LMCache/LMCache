@@ -6,7 +6,7 @@ from __future__ import annotations
 
 # Standard
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Collection, Mapping, Sequence
 import math
 
 # Third Party
@@ -14,6 +14,8 @@ import torch
 
 # First Party
 from lmcache.integration.vllm.utils import vllm_layout_hints
+from lmcache.sdk.cache_kind import LMCacheSDKCacheKind
+from lmcache.utils import cdiv
 from lmcache.utils import init_logger as lmcache_init_logger
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.protocol import RequestType
@@ -24,6 +26,9 @@ if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
 
     # First Party
+    from lmcache.integration.vllm.experimental.q_metadata import (
+        LMCacheMPQRequestMetadata,
+    )
     from lmcache.integration.vllm.lmcache_mp_metadata import (
         LMCacheMPConnectorMetadata,
     )
@@ -47,12 +52,15 @@ class _QLayerStore:
         op: The store op whose ``[start, end)`` token range is stored.
         ring_block_ids: Ring blocks (in token order) holding this op's query.
         cache_salt: Per-user isolation salt for the query key.
+        segment_start: Token index this pass's query chunk hashes chain from
+            (see ``_QRequestBlocks.origin``).
     """
 
     request_id: str
     op: "LoadStoreOp"
     ring_block_ids: list[int]
     cache_salt: str
+    segment_start: int
 
 
 @dataclass
@@ -111,6 +119,10 @@ class QRingBuffer:
             f"lmcache_q_layer_{i}": self._layer_tensors[i] for i in range(num_layers)
         }
         self._free_blocks: list[int] = list(range(num_blocks))
+
+    def num_total_blocks(self) -> int:
+        """The total number of blocks in the ring buffer."""
+        return self.num_blocks
 
     def num_free_blocks(self) -> int:
         """The number of free blocks in the ring buffer."""
@@ -183,6 +195,30 @@ class QRingBuffer:
         )
 
 
+@dataclass
+class _QRequestBlocks:
+    """Ring blocks holding one request's query rows across forward steps.
+
+    A per-request block table over the paged ring, mirroring how vLLM pages
+    its KV cache: entry ``i`` of ``block_ids`` holds tokens
+    ``[start_token + i * block_size, start_token + (i + 1) * block_size)``.
+
+    Attributes:
+        origin: The first token the pass computed query rows for. Set when the table
+            opens, while ``start_token`` advances as stores complete.
+        start_token: Token index mapped to the first slot of ``block_ids[0]``.
+            Always chunk-aligned, so a store op's range begins on a block
+            boundary inside the table.
+        block_ids: Ring block ids in token order.
+        filled: Contiguous tokens scattered so far, counted from start_token.
+    """
+
+    origin: int
+    start_token: int
+    block_ids: list[int]
+    filled: int
+
+
 def get_tensor(
     args: dict[str, Any],
     arg_names: list[str],
@@ -245,6 +281,7 @@ class QRingBufferCapture:
         self.q_layer_index: dict[str, int] = {}
         self.q_step_state: _QStepState | None = None
         self.q_step_disabled: bool = False
+        self.q_blocks: dict[str, _QRequestBlocks] = {}
 
     def setup_q_ring(
         self,
@@ -296,11 +333,11 @@ class QRingBufferCapture:
         if cfg is None:
             raise ValueError("kv_transfer_config is None; cannot register Q ring")
 
-        explicit = cfg.get_from_extra_config("lmcache.q.ring_blocks", None)
+        explicit = cfg.get_from_extra_config("lmcache.mp.q.ring_blocks", None)
         if explicit is not None:
             num_ring_blocks = max(1, int(explicit))
         else:
-            depth = max(1, int(cfg.get_from_extra_config("lmcache.q.ring_depth", 2)))
+            depth = max(1, int(cfg.get_from_extra_config("lmcache.mp.q.ring_depth", 2)))
             max_batched = (
                 getattr(vllm_config.scheduler_config, "max_num_batched_tokens", None)
                 or 8192
@@ -357,18 +394,15 @@ class QRingBufferCapture:
         metadata: "LMCacheMPConnectorMetadata",
         attn_metadata: Any = None,
     ) -> "_QStepState | None":
-        """Build the per-step query store plan for the current forward step.
-        Done only on the first layer's save_kv_layer call of the step.
+        """Build this step's scatter plan and take the stores it completes.
 
-        Query rows are matched to each store op's tokens through
+        Query rows are matched to token indices through
         ``attn_metadata.slot_mapping``: row ``r`` writes its KV to GPU slot
-        ``slot_mapping[r]``, and the op's token ``i`` lives in GPU slot
-        ``block_ids[i // block_size] * block_size + i % block_size`` (the op's
-        block list is pre-sliced to its ``[start, end)`` range). Intersecting
-        the two identifies each op's rows regardless of batch composition or
-        ordering, so mixed STORE/RETRIEVE steps and requests whose scheduled
-        token count differs from their store-op token count (chunk-unaligned
-        prompt tails, APC offsets) no longer shift later requests' rows.
+        ``slot_mapping[r]``, and window token ``i`` lives in
+        ``block_ids[(i - block_start) // block_size] * block_size +
+        (i - block_start) % block_size``. Matched rows are appended to the
+        request's ring block table, which persists across forward steps, so a
+        chunk assembled over many steps is stored once its last token arrives.
 
         Args:
             query: The query tensor of shape [num_tokens, num_q_heads, head_size].
@@ -377,9 +411,8 @@ class QRingBufferCapture:
                 ``slot_mapping`` for query capture to run.
 
         Returns:
-            _QStepState: the query capture plan (containing ring slot mapping
-                            and per-request store ops).
-            None if not storing any query tensors.
+            _QStepState: the scatter plan plus the stores completed this step.
+            None when this step scatters nothing and completes nothing.
         """
         q_ring = self.q_ring_adapter.q_ring
         if q_ring is None:
@@ -405,98 +438,248 @@ class QRingBufferCapture:
         )
         offsets = torch.arange(block_size, device=query.device)
 
+        scattered = False
+        for meta in metadata.q_requests:
+            if self._append_block(meta, row_slots, ring_slots, offsets, n_rows):
+                scattered = True
+
+        stores = self._collect_completed_stores(metadata, block_size)
+        if not scattered and not stores:
+            return None
+        return _QStepState(ring_slots=ring_slots, stores=stores)
+
+    def _append_block(
+        self,
+        meta: "LMCacheMPQRequestMetadata",
+        row_slots: torch.Tensor,
+        ring_slots: torch.Tensor,
+        offsets: torch.Tensor,
+        n_rows: int,
+    ) -> bool:
+        """Append one request's rows for this step to its ring block table.
+
+        Args:
+            meta: The request's Q metadata.
+            row_slots: GPU KV slot written by each query row, shape [n_rows].
+            ring_slots: Output slot map, mutated in place for matched rows.
+            offsets: ``arange(block_size)`` on the query device.
+            n_rows: Number of query rows covered by ``row_slots``.
+
+        Returns:
+            True when this request's rows were mapped into the ring.
+        """
+        q_ring = self.q_ring_adapter.q_ring
+        if q_ring is None:
+            return False
+        block_size = q_ring.block_size
+        chunk_size = self.worker_adapter.lmcache_tokens_per_chunk
+
+        num_window_tokens = meta.end - meta.start
+        if num_window_tokens <= 0:
+            return False
+
+        gpu_blocks = self._op_gpu_blocks(meta)
+        if gpu_blocks is None:
+            logger.warning(
+                "Skip query for request %s: capture supports a single engine "
+                "group only",
+                meta.request_id,
+            )
+            self._drop_request_blocks(meta.request_id)
+            return False
+
+        # table mimics vLLM's KV cache table
+        # Keyed by request_id, value is the table of ring blocks for that request.
+        table = self.q_blocks.get(meta.request_id)
+        if table is None:
+            if meta.start % chunk_size != 0:
+                # A store op always begins at num_stored_tokens, which is
+                # chunk-aligned, so a table opened mid-chunk could never
+                # satisfy op.start == table.start_token and its first chunk
+                # would never be storable. Wait for a chunk boundary. 2 cases:
+                # 1. vLLM's prefix cache: some tokens come from the prefix cache,
+                # so they have no query rows.
+                # 2. The table was reset earlier (ring starvation, hybrid
+                # layout, row mismatch, reset query capture, server recovery).
+                return False
+            table = _QRequestBlocks(
+                origin=meta.start, start_token=meta.start, block_ids=[], filled=0
+            )
+            self.q_blocks[meta.request_id] = table
+        elif meta.start != table.start_token + table.filled:
+            # The request had rows in some step that were never appended.
+            logger.warning(
+                "Reset query capture for request %s: expected token %d, got "
+                "a window starting at %d",
+                meta.request_id,
+                table.start_token + table.filled,
+                meta.start,
+            )
+            self._drop_request_blocks(meta.request_id)
+            return False
+
+        # GPU KV slot of each window token, in token order.
+        block_tensor = torch.tensor(
+            gpu_blocks, dtype=torch.int64, device=row_slots.device
+        )
+        covered_slots = (block_tensor[:, None] * block_size + offsets[None, :]).reshape(
+            -1
+        )
+        # continue from previously filled tokens in the request's table
+        lo = meta.start - meta.block_start
+        op_slots = covered_slots[lo : lo + num_window_tokens]
+
+        # Match rows to window tokens through the KV slot each row writes.
+        # Each GPU slot is written by at most one row per step, so a full
+        # match is a bijection between the window's tokens and its rows.
+        sorted_slots, token_order = torch.sort(op_slots)
+        pos = torch.searchsorted(sorted_slots, row_slots)
+        pos_clamped = pos.clamp(max=num_window_tokens - 1)
+        hit = (row_slots >= 0) & (sorted_slots[pos_clamped] == row_slots)
+        num_matched = int(hit.sum().item())
+        if num_matched != num_window_tokens:
+            logger.warning(
+                "Reset query capture for request %s: %d of %d window tokens "
+                "have query rows in this step",
+                meta.request_id,
+                num_matched,
+                num_window_tokens,
+            )
+            self._drop_request_blocks(meta.request_id)
+            return False
+
+        needed = cdiv(table.filled + num_window_tokens, block_size) - len(
+            table.block_ids
+        )
+        if needed > 0:
+            new_blocks = q_ring.allocate(needed)
+            if new_blocks is None:
+                logger.warning(
+                    "Reset query capture for request %s: need %d more Q "
+                    "blocks, %d free from total %d",
+                    meta.request_id,
+                    needed,
+                    q_ring.num_free_blocks(),
+                    q_ring.num_total_blocks(),
+                )
+                self._drop_request_blocks(meta.request_id)
+                return False
+            table.block_ids.extend(new_blocks)
+
+        ring_block_tensor = torch.tensor(
+            table.block_ids, dtype=torch.int64, device=row_slots.device
+        )
+        ring_slot_by_offset = (
+            ring_block_tensor[:, None] * block_size + offsets[None, :]
+        ).reshape(-1)
+        # The table fills contiguously in token order, so window token i sits
+        # at table offset filled + i.
+        matched_token_idx = token_order[pos_clamped[hit]]
+        ring_slots[:n_rows][hit] = ring_slot_by_offset[table.filled + matched_token_idx]
+        table.filled += num_window_tokens
+        return True
+
+    def _collect_completed_stores(
+        self,
+        metadata: "LMCacheMPConnectorMetadata",
+        block_size: int,
+    ) -> list[_QLayerStore]:
+        """Store the query tensor for each request that are fully scattered,
+        then free the table's ring blocks once the store completes.
+
+        Args:
+            metadata: The LMCache connector metadata for this step.
+            block_size: Tokens per ring block.
+
+        Returns:
+            One ``_QLayerStore`` per store op completed in this step.
+        """
         stores: list[_QLayerStore] = []
         for meta in metadata.requests:
             if meta.direction != "STORE":
                 continue
+            table = self.q_blocks.get(meta.request_id)
+            if table is None:
+                continue
             op = meta.op
             num_tokens = op.end - op.start
-            if num_tokens <= 0:
+            if num_tokens <= 0 or num_tokens % block_size != 0:
                 continue
-
-            if num_tokens % block_size != 0:
+            if op.start != table.start_token:
                 logger.warning(
-                    "Skip query for %s: tokens (%d) undivisible by block size",
+                    "Skip query for %s: op starts at %d but the "
+                    "ring table starts at %d",
+                    meta.request_id,
+                    op.start,
+                    table.start_token,
+                )
+                self._drop_request_blocks(meta.request_id)
+                continue
+            if table.filled < num_tokens:
+                logger.warning(
+                    "Skip query for %s: op covers %d tokens but only %d are staged",
                     meta.request_id,
                     num_tokens,
+                    table.filled,
                 )
+                self._drop_request_blocks(meta.request_id)
                 continue
-
-            gpu_blocks = self._op_gpu_blocks(op)
-            if gpu_blocks is None or len(gpu_blocks) * block_size != num_tokens:
-                logger.warning(
-                    "Skip query for request %s: op block layout does not "
-                    "cover its token range (%d blocks of %d tokens for %d "
-                    "tokens)",
-                    meta.request_id,
-                    0 if gpu_blocks is None else len(gpu_blocks),
-                    block_size,
-                    num_tokens,
-                )
-                continue
-
-            # GPU KV slot of the op's token i, in token order.
-            block_tensor = torch.tensor(
-                gpu_blocks, dtype=torch.int64, device=query.device
-            )
-            op_slots = (block_tensor[:, None] * block_size + offsets[None, :]).reshape(
-                -1
-            )
-
-            # Match rows to op tokens through the KV slot each row writes.
-            # Each GPU slot is written by at most one row per step, so a full
-            # match is a bijection between the op's tokens and its rows.
-            sorted_slots, token_order = torch.sort(op_slots)
-            pos = torch.searchsorted(sorted_slots, row_slots)
-            pos_clamped = pos.clamp(max=num_tokens - 1)
-            hit = (row_slots >= 0) & (sorted_slots[pos_clamped] == row_slots)
-            num_matched = int(hit.sum().item())
-            if num_matched != num_tokens:
-                logger.warning(
-                    "Skip query for request %s: only %d of %d op tokens are "
-                    "in this step's batch (tokens computed in an earlier "
-                    "chunked-prefill step have no query rows here)",
-                    meta.request_id,
-                    num_matched,
-                    num_tokens,
-                )
-                continue
-
-            n_blocks = num_tokens // block_size
-            ring_blocks = q_ring.allocate(n_blocks)
-            if ring_blocks is None:
-                logger.warning(
-                    "Skip query for request %s: need %d Q blocks, %d free",
-                    meta.request_id,
-                    n_blocks,
-                    q_ring.num_free_blocks(),
-                )
-                continue
-
-            ring_block_tensor = torch.tensor(
-                ring_blocks, dtype=torch.int64, device=query.device
-            )
-            ring_slot_by_token = (
-                ring_block_tensor[:, None] * block_size + offsets[None, :]
-            ).reshape(-1)
-            matched_token_idx = token_order[pos_clamped[hit]]
-            ring_slots[:n_rows][hit] = ring_slot_by_token[matched_token_idx]
+            num_blocks = num_tokens // block_size
             stores.append(
                 _QLayerStore(
                     request_id=meta.request_id,
                     op=op,
-                    ring_block_ids=ring_blocks,
+                    ring_block_ids=table.block_ids[:num_blocks],
                     cache_salt=meta.cache_salt,
+                    segment_start=table.origin,
                 )
             )
+            del table.block_ids[:num_blocks]
+            table.start_token = op.end
+            table.filled -= num_tokens
+        return stores
 
-        if not stores:
-            return None
+    def _drop_request_blocks(self, request_id: str) -> None:
+        """Free a request's staged ring blocks and its block table.
 
-        return _QStepState(ring_slots=ring_slots, stores=stores)
+        Args:
+            request_id: The request whose staged query blocks are dropped.
+        """
+        table = self.q_blocks.pop(request_id, None)
+        if table is None:
+            return
+        q_ring = self.q_ring_adapter.q_ring
+        if q_ring is not None and table.block_ids:
+            q_ring.free(table.block_ids)
+
+    def drop_finished_requests(self, finished_req_ids: Collection[str]) -> None:
+        """Free ring blocks still staged for requests that have finished.
+
+        Args:
+            finished_req_ids: Request ids reported finished by the engine.
+        """
+        for request_id in finished_req_ids:
+            self._drop_request_blocks(request_id)
+
+    def drop_all_requests(self, reason: str) -> None:
+        """Free every staged ring block and the block tables.
+
+        Args:
+            reason: Short description used in the log line, e.g. "preemption".
+        """
+        if not self.q_blocks:
+            return
+        logger.warning(
+            "Dropping query capture for %d request(s) due to %s; their "
+            "stored query will have a hole from this point",
+            len(self.q_blocks),
+            reason,
+        )
+        for request_id in list(self.q_blocks):
+            self._drop_request_blocks(request_id)
 
     @staticmethod
-    def _op_gpu_blocks(op: "LoadStoreOp") -> list[int] | None:
+    def _op_gpu_blocks(op: "LMCacheMPQRequestMetadata") -> list[int] | None:
         """The op's GPU block IDs as a flat list, or None when the layout is
         not the single-group one query capture supports.
 
@@ -537,6 +720,7 @@ class QRingBufferCapture:
                 q_store.ring_block_ids,
                 event,
                 cache_salt=q_store.cache_salt,
+                segment_start=q_store.segment_start,
             )
 
 
@@ -583,7 +767,6 @@ class QRingBufferAdapter:
         Raises:
             RuntimeError: if the transfer context is not established.
         """
-        logger.info("Registering paged-Q ring")
         if not self._adapter.transfer_ctx:
             raise RuntimeError(
                 "register_q_ring() requires an established transfer context; "
@@ -591,6 +774,11 @@ class QRingBufferAdapter:
             )
         block_size = (
             self._adapter.lmcache_tokens_per_chunk // self._adapter.blocks_in_chunk
+        )
+        logger.info(
+            "Registering paged-Q ring: %d blocks x %d tokens",
+            num_ring_blocks,
+            block_size,
         )
         self.q_ring = QRingBuffer(
             num_layers=num_layers,
@@ -680,10 +868,13 @@ class QRingBufferAdapter:
         ring_block_ids: list[int],
         event: "_IpcEvent",
         cache_salt: str = "",
+        segment_start: int = 0,
     ) -> None:
         """Submit a store request for QRingBuffer content at ring_block_ids
         to LMCache. This is called after the query tensor is scattered, every
         time wait_for_save is called.
+        The key is chained from ``segment_start`` rather than from token 0:
+        query rows exist only for the tokens this pass computed.
 
         Args:
             request_id: The ID of the request which query belongs to.
@@ -691,6 +882,8 @@ class QRingBufferAdapter:
             ring_block_ids: The ring block IDs to store.
             event: The IPC event to signal when the store is complete.
             cache_salt: Per-user isolation salt.
+            segment_start: First token of this pass's query chain. Must be
+                chunk-aligned and no greater than ``op.start``.
         """
         if not self.q_ring or not self._adapter.transfer_ctx:
             return
@@ -702,11 +895,21 @@ class QRingBufferAdapter:
             logger.warning("Skipping Q store for %s: token_ids is None", request_id)
             self.q_ring.free(ring_block_ids)
             return
+        if segment_start > op.start:
+            logger.warning(
+                "Skipping Q store for %s: segment starts at %d, past the op's "
+                "first token %d",
+                request_id,
+                segment_start,
+                op.start,
+            )
+            self.q_ring.free(ring_block_ids)
+            return
         key = self._adapter._create_key(
-            op.token_ids,
-            op.start,
-            op.end,
-            request_id=request_id,
+            op.token_ids[segment_start:],
+            op.start - segment_start,
+            op.end - segment_start,
+            request_id=LMCacheSDKCacheKind.QUERY.server_session_id(request_id),
             cache_salt=cache_salt,
         )
         key = replace(key, model_name=self.q_model_name)

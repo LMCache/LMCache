@@ -68,7 +68,7 @@ def test_init_dispatcher_ignores_unrequested_features() -> None:
     dispatcher = init_dispatcher(_feature_context(), set())
 
     assert dispatcher._features == []
-    dispatcher.reclaim()
+    dispatcher.reclaim(set())
     dispatcher.shutdown()
     assert dispatcher.reregister() is True
 
@@ -76,7 +76,7 @@ def test_init_dispatcher_ignores_unrequested_features() -> None:
 def test_dispatch_without_a_dispatcher_is_a_noop() -> None:
     """Check that the dispatch not returns error even when the feature is
     not built."""
-    dispatch(None, "reclaim")
+    dispatch(None, "reclaim", finished_req_ids=set())
     dispatch(None, "wait_for_save", event=None)
 
 
