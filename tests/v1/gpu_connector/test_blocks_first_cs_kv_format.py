@@ -28,6 +28,7 @@ from lmcache.v1.platform.torch_ops import (
     multi_layer_block_kv_transfer as fallback_multi_layer_block_kv_transfer,
 )
 import lmcache.c_ops as lmc_ops
+import lmcache.lmcache_native as lmcache_native
 
 NB, NH, BS, HS, NL = 16, 4, 128, 64, 3
 HINTS = {"kv_layout": "HND"}
@@ -43,7 +44,7 @@ def test_discovery_keeps_raw_shape():
     fmt, norm = U.normalize_kv_and_discover_format(
         _raw_blocks_first_caches(), EngineType.VLLM, HINTS
     )
-    assert fmt == lmc_ops.EngineKVFormat.NL_X_NB_NH_BS_CS
+    assert fmt == lmcache_native.EngineKVFormat.NL_X_NB_NH_BS_CS
     # The raw 4D [NB, NH, BS, CS] registration is kept as-is.
     assert tuple(norm[0].shape) == (NB, NH, BS, 2 * HS)
 
@@ -64,7 +65,7 @@ def test_accessors():
     # get_dtype is on the register_kv_caches -> group_layers_by_identity path,
     # so it must recognize this format too.
     assert U.get_dtype(norm, fmt) == _raw_blocks_first_caches()[0].dtype
-    assert not U.is_mla(fmt)
+    assert not lmcache_native.is_mla(fmt)
 
 
 def test_mp_gather_scatter_roundtrip():
@@ -145,7 +146,7 @@ def test_multi_layer_block_kv_transfer_roundtrip():
         obj_ptrs,
         block_ids,
         torch.device("cpu"),
-        lmc_ops.TransferDirection.D2H,
+        lmcache_native.TransferDirection.D2H,
         sd,
         chunk_tokens,
         fmt,
@@ -160,7 +161,7 @@ def test_multi_layer_block_kv_transfer_roundtrip():
         obj_ptrs,
         block_ids,
         torch.device("cpu"),
-        lmc_ops.TransferDirection.H2D,
+        lmcache_native.TransferDirection.H2D,
         sd,
         chunk_tokens,
         fmt,

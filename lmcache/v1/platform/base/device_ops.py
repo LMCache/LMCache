@@ -21,11 +21,10 @@ if TYPE_CHECKING:
 from lmcache.logging import init_logger
 from lmcache.v1.platform import ops_types, torch_ops
 from lmcache.v1.platform.ops_types import (
-    EngineKVFormat,
     PageBufferShapeDesc,
-    TransferDirection,
     set_shape_desc_dtype,
 )
+import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
 
@@ -48,11 +47,13 @@ class DeviceOps:
     device_type: ClassVar[str] = ""  # base is unregistered
 
     # ── Shared types (explicit for static analysis) ────────────────────
-    TransferDirection = TransferDirection
-    EngineKVFormat = EngineKVFormat
-    GPUKVFormat = EngineKVFormat  # back-compat alias
     PageBufferShapeDesc = PageBufferShapeDesc
     set_shape_desc_dtype = staticmethod(set_shape_desc_dtype)
+
+    # Bound from the native module by bind_native (declared for static analysis).
+    TransferDirection: type[lmcache_native.TransferDirection]
+    EngineKVFormat: type[lmcache_native.EngineKVFormat]
+    GPUKVFormat: type[lmcache_native.EngineKVFormat]
 
     def __init__(self) -> None:
         self._native_bound: bool = False
@@ -147,10 +148,10 @@ class DeviceOps:
         lmcache_objects_ptrs: "list[int] | list[torch.Tensor]",
         block_ids: "torch.Tensor | list[int]",
         device: "torch.device | str",
-        direction: ops_types.TransferDirection,
+        direction: lmcache_native.TransferDirection,
         shape_desc: ops_types.PageBufferShapeDesc,
         lmcache_chunk_size: int,
-        engine_kv_format: ops_types.EngineKVFormat,
+        engine_kv_format: lmcache_native.EngineKVFormat,
         skip_prefix_n_blocks: int,
     ) -> None:
         return torch_ops.multi_layer_block_kv_transfer(
@@ -198,20 +199,6 @@ class DeviceOps:
 
     def encode_fast_new(self, cdf, input_sym, output_buffer, output_lengths):
         return torch_ops.encode_fast_new(cdf, input_sym, output_buffer, output_lengths)
-
-    # ── Ops: format query ────────────────────────────────────────────
-
-    def is_cross_layer(self, engine_kv_format):
-        return torch_ops.is_cross_layer(engine_kv_format)
-
-    def is_kv_list(self, engine_kv_format):
-        return torch_ops.is_kv_list(engine_kv_format)
-
-    def is_layer_list(self, engine_kv_format):
-        return torch_ops.is_layer_list(engine_kv_format)
-
-    def is_mla(self, engine_kv_format):
-        return torch_ops.is_mla(engine_kv_format)
 
     # ── Ops: async / event recording ─────────────────────────────────
 

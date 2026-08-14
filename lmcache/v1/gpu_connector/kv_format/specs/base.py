@@ -23,7 +23,7 @@ import torch
 
 # First Party
 from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache
-import lmcache.c_ops as lmc_ops
+import lmcache.lmcache_native as lmcache_native
 
 # A format's enum name *is* its shape: ``_``-joined tokens, with ``X`` marking a
 # list level. ``TWO_X_NL_X_NBBS_NH_HS`` reads as ``2 x NL x [PBS, NH, HS]``.
@@ -58,13 +58,15 @@ _ACCESSORS = {
 }
 
 
-def _render_shape(fmt: "lmc_ops.EngineKVFormat", token: Callable[[str], str]) -> str:
+def _render_shape(
+    fmt: "lmcache_native.EngineKVFormat", token: Callable[[str], str]
+) -> str:
     *lists, inner = fmt.name.split("_X_")
     body = ", ".join(token(t) for t in inner.split("_"))
     return " x ".join([token(t) for t in lists] + [f"[{body}]"])
 
 
-def describe_shape(fmt: "lmc_ops.EngineKVFormat") -> str:
+def describe_shape(fmt: "lmcache_native.EngineKVFormat") -> str:
     """Symbolic shape of a format, e.g. ``NL_X_NB_BS_HS`` -> ``NL x [NB, BS, HS]``.
 
     Named ``describe_shape`` (not ``shape_desc``) to avoid confusion with the
@@ -74,7 +76,9 @@ def describe_shape(fmt: "lmc_ops.EngineKVFormat") -> str:
     return _render_shape(fmt, lambda t: _LABELS[t])
 
 
-def concrete_shape(fmt: "lmc_ops.EngineKVFormat", size: Callable[[str], int]) -> str:
+def concrete_shape(
+    fmt: "lmcache_native.EngineKVFormat", size: Callable[[str], int]
+) -> str:
     """Numeric shape of a format; ``size(label)`` gives each axis's dimension.
 
     E.g. ``NL_X_TWO_NB_BS_NH_HS`` with ``NL=32, NB=2048, BS=16, NH=8, HS=128``
@@ -121,7 +125,7 @@ class KVFormatSpec(ABC):
     object: that would keep the engine's GPU KV tensors alive past disconnect.
     """
 
-    engine_kv_format: ClassVar["lmc_ops.EngineKVFormat"]
+    engine_kv_format: ClassVar["lmcache_native.EngineKVFormat"]
     attention_backends: ClassVar[tuple[str, ...]] = ()
 
     # ── Static layout facts (see the class docstring) ──────────────────
