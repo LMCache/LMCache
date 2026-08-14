@@ -11,7 +11,8 @@ lookup, and load.
 from __future__ import annotations
 
 # Standard
-from concurrent.futures import Future, ThreadPoolExecutor
+from collections.abc import Callable, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from functools import partial
 from typing import TYPE_CHECKING, Any, Optional, cast
 import threading
@@ -56,6 +57,7 @@ RawBlockStoreTaskResult = tuple[
     list[ObjectKey],
     list[int],
 ]
+RawBlockDeviceSelector = Callable[[ObjectKey, int], int]
 
 _FDP_DATA_PLACEMENT_POLICY_NONE = "none"
 _FDP_DATA_PLACEMENT_POLICY_CACHE_SALT_PREFIX = "cache_salt_prefix"
@@ -210,13 +212,40 @@ def _make_bitmap(size: int) -> "Bitmap":
     return Bitmap(size)
 
 
+def _select_device_by_local_rank(key: ObjectKey, device_count: int) -> int:
+    """Select a raw-block device by the key's packed local rank."""
+    return _local_rank_from_kv_rank(key.kv_rank) % device_count
+
+
+def _group_key_indices_by_device(
+    keys: Sequence[ObjectKey],
+    cores: Sequence[RawBlockCore],
+    select_device: RawBlockDeviceSelector,
+) -> dict[RawBlockCore, list[int]]:
+    """Group submitted key indices by selected raw-block core."""
+    device_count = len(cores)
+    if device_count <= 0:
+        raise ValueError("raw_block requires at least one device")
+
+    groups: dict[RawBlockCore, list[int]] = {}
+    for i, key in enumerate(keys):
+        device_index = select_device(key, device_count)
+        if device_index < 0 or device_index >= device_count:
+            raise ValueError(
+                "device selector returned out-of-range index "
+                f"{device_index} for {device_count} raw-block devices"
+            )
+        groups.setdefault(cores[device_index], []).append(i)
+    return groups
+
+
 class RawBlockL2AdapterConfig(L2AdapterConfigBase):
     """Configuration object for the built-in raw-block MP L2 adapter."""
 
     def __init__(
         self,
         *,
-        device_path: str,
+        device_paths: Sequence[str] | str,
         slot_bytes: int,
         capacity_bytes: int = 0,
         use_odirect: bool = True,
@@ -243,11 +272,15 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
         num_store_workers: int = 2,
         num_lookup_workers: int = 1,
         num_load_workers: int = 4,
-    ):
+        num_shard_workers_per_device: int = 4,
+    ) -> None:
         """Initialize raw-block MP adapter configuration.
 
         Args:
-            device_path: Raw device path or pre-sized file path used for L2.
+            device_paths: Raw device path(s) or pre-sized file path(s). A
+                single string selects one device; a list of strings or a
+                comma-separated string enables multi-device sharding. Objects
+                are routed by ``kv_rank.local_rank % len(device_paths)``.
             slot_bytes: Fixed data-slot size in bytes.
             capacity_bytes: Optional cap on usable bytes; zero uses device size.
             use_odirect: Whether to open the raw path with O_DIRECT.
@@ -286,9 +319,12 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             num_store_workers: Number of store worker threads.
             num_lookup_workers: Number of lookup worker threads.
             num_load_workers: Number of load worker threads.
+            num_shard_workers_per_device: Worker-count multiplier per configured
+                device for the shared shard operation pool.
         """
         super().__init__()
-        self.device_path = device_path
+        paths = self._normalize_device_paths(device_paths)
+        self.device_paths = tuple(paths)
         self.slot_bytes = int(slot_bytes)
         self.capacity_bytes = int(capacity_bytes)
         self.use_odirect = bool(use_odirect)
@@ -349,19 +385,19 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
         self.num_store_workers = int(num_store_workers)
         self.num_lookup_workers = int(num_lookup_workers)
         self.num_load_workers = int(num_load_workers)
+        self.num_shard_workers_per_device = int(num_shard_workers_per_device)
 
     @classmethod
     def from_dict(cls, d: dict) -> "RawBlockL2AdapterConfig":
         """Build and validate a raw-block config from ``--l2-adapter`` JSON."""
-        device_path = d.get("device_path")
-        if not isinstance(device_path, str) or not device_path:
-            raise ValueError("device_path must be a non-empty string")
         if "per_tp_device_paths" in d:
             raise ValueError(
                 "per_tp_device_paths is not supported in MP raw_block mode"
             )
         if not bool(d.get("persist_enabled", True)):
             raise ValueError("raw_block requires persist_enabled=true")
+
+        device_paths = cls._parse_device_paths(d)
 
         slot_bytes = d.get("slot_bytes")
         if not isinstance(slot_bytes, int) or slot_bytes <= 0:
@@ -425,6 +461,7 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             "num_store_workers": 2,
             "num_lookup_workers": 1,
             "num_load_workers": 4,
+            "num_shard_workers_per_device": 4,
         }
         worker_counts: dict[str, int] = {}
         for field_name, default in worker_defaults.items():
@@ -434,7 +471,7 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             worker_counts[field_name] = value
 
         return cls(
-            device_path=device_path,
+            device_paths=device_paths,
             slot_bytes=slot_bytes,
             capacity_bytes=capacity_bytes,
             use_odirect=bool(d.get("use_odirect", True)),
@@ -461,6 +498,7 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             num_store_workers=worker_counts["num_store_workers"],
             num_lookup_workers=worker_counts["num_lookup_workers"],
             num_load_workers=worker_counts["num_load_workers"],
+            num_shard_workers_per_device=worker_counts["num_shard_workers_per_device"],
         )
 
     @classmethod
@@ -468,7 +506,9 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
         """Return human-readable raw-block adapter configuration help."""
         return (
             "raw_block L2 adapter config fields:\n"
-            "- device_path (str): raw device or file path (required)\n"
+            "- device_paths (str | list[str]): raw device or file path(s); "
+            "a single string selects one device, a list of strings or CSV "
+            "string enables multi-device sharding (required)\n"
             "- slot_bytes (int): slot size in bytes, aligned to block_align "
             "(required)\n"
             "- capacity_bytes (int): optional usable capacity cap "
@@ -516,13 +556,15 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             "identifier for metadata checkpoints; requires io_uring_cmd\n"
             "- num_store_workers (int): store worker threads (default 2)\n"
             "- num_lookup_workers (int): lookup worker threads (default 1)\n"
-            "- num_load_workers (int): load worker threads (default 4)"
+            "- num_load_workers (int): load worker threads (default 4)\n"
+            "- num_shard_workers_per_device (int): shared shard-pool worker "
+            "multiplier per configured device (default 4)"
         )
 
-    def to_core_config(self) -> RawBlockCoreConfig:
+    def to_core_config(self, device_path: str) -> RawBlockCoreConfig:
         """Convert this adapter config to the shared RawBlockCore config."""
         return RawBlockCoreConfig(
-            device_path=self.device_path,
+            device_path=device_path,
             capacity_bytes=self.capacity_bytes,
             block_align=self.block_align,
             header_bytes=self.header_bytes,
@@ -546,6 +588,36 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
                 self.fdp_slot_reuse_policy == _FDP_SLOT_REUSE_POLICY_PID_AFFINITY
             ),
         )
+
+    @staticmethod
+    def _normalize_device_paths(device_paths: Sequence[str] | str) -> list[str]:
+        """Return validated raw-block paths in sharding order."""
+        raw_paths: Sequence[str]
+        if isinstance(device_paths, str):
+            raw_paths = device_paths.split(",")
+        else:
+            raw_paths = device_paths
+        paths = []
+        for path in raw_paths:
+            if not isinstance(path, str):
+                raise ValueError("device_paths must contain only strings")
+            stripped = path.strip()
+            if stripped:
+                paths.append(stripped)
+        if not paths:
+            raise ValueError("device_paths must provide at least one non-empty path")
+        if len(set(paths)) != len(paths):
+            raise ValueError("raw_block device paths must be unique")
+        return paths
+
+    @classmethod
+    def _parse_device_paths(cls, d: dict) -> list[str]:
+        raw = d.get("device_paths")
+        if raw is None:
+            raise ValueError("device_paths must be provided")
+        if isinstance(raw, (str, list)):
+            return cls._normalize_device_paths(raw)
+        raise ValueError("device_paths must be a string or list of strings")
 
 
 class RawBlockL2Adapter(L2AdapterInterface):
@@ -584,13 +656,16 @@ class RawBlockL2Adapter(L2AdapterInterface):
             )
 
         self._closed = False
+        self._cores: list[RawBlockCore] = []
         self._core: RawBlockCore
+        self._select_device = _select_device_by_local_rank
         self._store_efd: EventNotifier | None = None
         self._lookup_efd: EventNotifier | None = None
         self._load_efd: EventNotifier | None = None
         self._store_pool: ThreadPoolExecutor
         self._lookup_pool: ThreadPoolExecutor
         self._load_pool: ThreadPoolExecutor
+        self._shard_pool: ThreadPoolExecutor
         self._fdp_lock = threading.Lock()
         self._fdp_data_placement_policy = config.fdp_data_placement_policy
         self._fdp_slot_reuse_policy = config.fdp_slot_reuse_policy
@@ -603,20 +678,28 @@ class RawBlockL2Adapter(L2AdapterInterface):
         self._fdp_fallback_warning_emitted = False
 
         try:
-            self._core = RawBlockCore(config.to_core_config(), key_namespace="object")
-            self._fdp_enabled = bool(config.fdp_enabled)
-            self._fdp_discovered_status: list[tuple[int, int]] = []
-            self._fdp_placement_ids: list[int] = []
-            if self._fdp_enabled:
-                self._configure_fdp(config.fdp_placement_ids)
             if config.io_engine == "io_uring":
                 logger.warning(
                     "RawBlockL2Adapter: MP raw_block uses io_uring without "
                     "fixed-buffer registration; zero-copy fixed buffers are "
                     "disabled unless registered by a future MP allocator path"
                 )
-            self._max_capacity_bytes = int(
-                self._core.report_status().get("usable_capacity_bytes", 0)
+            for device_path in config.device_paths:
+                self._cores.append(
+                    RawBlockCore(
+                        config.to_core_config(device_path),
+                        key_namespace="object",
+                    )
+                )
+            self._core = self._cores[0]
+            self._fdp_enabled = bool(config.fdp_enabled)
+            self._fdp_discovered_status: list[tuple[int, int]] = []
+            self._fdp_placement_ids: list[int] = []
+            if self._fdp_enabled:
+                self._configure_fdp(config.fdp_placement_ids)
+            self._max_capacity_bytes = sum(
+                int(core.report_status().get("usable_capacity_bytes", 0))
+                for core in self._cores
             )
             self._seed_usage_from_core_snapshot()
 
@@ -635,6 +718,10 @@ class RawBlockL2Adapter(L2AdapterInterface):
             self._load_pool = ThreadPoolExecutor(
                 max_workers=config.num_load_workers,
                 thread_name_prefix="rawblk-load",
+            )
+            self._shard_pool = ThreadPoolExecutor(
+                max_workers=(len(self._cores) * config.num_shard_workers_per_device),
+                thread_name_prefix="rawblk-shard",
             )
         except Exception:
             self._cleanup_after_init_failure()
@@ -750,8 +837,9 @@ class RawBlockL2Adapter(L2AdapterInterface):
 
     def submit_unlock(self, keys: list[ObjectKey]) -> None:
         """Release L2 locks acquired by lookup-and-lock."""
-        encoded_keys = [encode_object_key(key).encoded for key in keys]
-        self._core.unlock_many(encoded_keys)
+        specs = [encode_object_key(key) for key in keys]
+        for core, indices in self._group_key_indices(keys).items():
+            core.unlock_many([specs[i].encoded for i in indices])
 
     def submit_load_task(
         self,
@@ -797,12 +885,24 @@ class RawBlockL2Adapter(L2AdapterInterface):
 
     def delete(self, keys: list[ObjectKey]) -> None:
         """Delete keys from raw-block L2 and notify listeners for removals."""
-        encoded_keys = [encode_object_key(key).encoded for key in keys]
-        metas = self._core.get_metadata_many(encoded_keys)
-        deleted_bitmap = self._core.delete_many(encoded_keys, force=False)
+        specs = [encode_object_key(key) for key in keys]
+        metas: list[Any] = [None] * len(keys)
+        deleted_bitmap: list[bool] = [False] * len(keys)
+        for core, indices in self._group_key_indices(keys).items():
+            encoded_keys = [specs[i].encoded for i in indices]
+            core_metas = core.get_metadata_many(encoded_keys)
+            core_deleted = core.delete_many(encoded_keys, force=False)
+            for local_idx, meta, deleted in zip(
+                indices,
+                core_metas,
+                core_deleted,
+                strict=True,
+            ):
+                metas[local_idx] = meta
+                deleted_bitmap[local_idx] = deleted
         deleted_keys: list[ObjectKey] = []
         deleted_sizes: list[int] = []
-        for key, meta, deleted in zip(keys, metas, deleted_bitmap, strict=False):
+        for key, meta, deleted in zip(keys, metas, deleted_bitmap, strict=True):
             if not deleted:
                 continue
             deleted_keys.append(key)
@@ -837,8 +937,10 @@ class RawBlockL2Adapter(L2AdapterInterface):
         self._store_pool.shutdown(wait=True)
         self._lookup_pool.shutdown(wait=True)
         self._load_pool.shutdown(wait=True)
+        self._shard_pool.shutdown(wait=True)
 
-        self._core.close()
+        for core in self._cores:
+            core.close()
 
         with self._lock:
             store_efd = self._store_efd
@@ -857,7 +959,10 @@ class RawBlockL2Adapter(L2AdapterInterface):
 
     def report_status(self) -> dict:
         """Return adapter health, task counters, and core status."""
-        core_status = self._core.report_status()
+        core_statuses = [core.report_status() for core in self._cores]
+        is_core_healthy = all(
+            status.get("is_healthy", True) for status in core_statuses
+        )
         with self._fdp_lock:
             fdp_cache_salt_bucket_placements = dict(
                 self._fdp_cache_salt_bucket_placements
@@ -873,9 +978,10 @@ class RawBlockL2Adapter(L2AdapterInterface):
                 self._fdp_cache_salt_fallback_bucket_samples
             )
         with self._lock:
-            return {
-                "is_healthy": core_status.get("is_healthy", True) and not self._closed,
+            status = {
+                "is_healthy": is_core_healthy and not self._closed,
                 "type": "RawBlockL2Adapter",
+                "device_count": len(self._cores),
                 "store_inflight_task_count": self._store_inflight_tasks,
                 "lookup_inflight_task_count": self._lookup_inflight_tasks,
                 "load_inflight_task_count": self._load_inflight_tasks,
@@ -895,8 +1001,10 @@ class RawBlockL2Adapter(L2AdapterInterface):
                 "completed_store_task_count": len(self._completed_store_tasks),
                 "completed_lookup_task_count": len(self._completed_lookup_tasks),
                 "completed_load_task_count": len(self._completed_load_tasks),
-                "core": core_status,
+                "core": core_statuses[0],
+                "cores": core_statuses,
             }
+            return status
 
     def _configure_fdp(self, configured_ids: Optional[list[int]]) -> None:
         """Fetch and register FDP placement identifiers for this adapter."""
@@ -1188,15 +1296,16 @@ class RawBlockL2Adapter(L2AdapterInterface):
     def _snapshot_indexed_object_keys(self) -> list[ObjectKey]:
         """Return decoded ObjectKeys for all indexed raw-block entries."""
         keys: list[ObjectKey] = []
-        for encoded_key in self._core.snapshot_indexed_keys():
-            try:
-                keys.append(decode_object_key(encoded_key))
-            except Exception as e:
-                logger.warning(
-                    "RawBlockL2Adapter could not decode indexed key %r: %s",
-                    encoded_key,
-                    e,
-                )
+        for core in self._cores:
+            for encoded_key in core.snapshot_indexed_keys():
+                try:
+                    keys.append(decode_object_key(encoded_key))
+                except Exception as e:
+                    logger.warning(
+                        "RawBlockL2Adapter could not decode indexed key %r: %s",
+                        encoded_key,
+                        e,
+                    )
         return keys
 
     def _run_store_task(
@@ -1219,17 +1328,39 @@ class RawBlockL2Adapter(L2AdapterInterface):
         """
         specs = [encode_object_key(key) for key in keys]
         placement_ids = self._assign_fdp_placement_ids(keys)
-        put_result = self._core.put_many(specs, objects, placement_ids=placement_ids)
-        stored_encoded = set(put_result.stored_keys)
+
+        def _store_shard(
+            core: RawBlockCore, indices: list[int]
+        ) -> tuple[list[int], Any]:
+            core_placement_ids = (
+                None if placement_ids is None else [placement_ids[i] for i in indices]
+            )
+            return indices, core.put_many(
+                [specs[i] for i in indices],
+                [objects[i] for i in indices],
+                placement_ids=core_placement_ids,
+            )
+
+        shard_futs = [
+            self._shard_pool.submit(_store_shard, core, indices)
+            for core, indices in self._group_key_indices(keys).items()
+        ]
+        results = [False] * len(keys)
+        stored_encoded: set[str] = set()
+        for fut in as_completed(shard_futs):
+            indices, put_result = fut.result()
+            for local_idx, ok in zip(indices, put_result.results, strict=True):
+                results[local_idx] = ok
+            stored_encoded.update(put_result.stored_keys)
         slot_bytes = int(self._core.slot_bytes)
         stored_keys: list[ObjectKey] = []
         stored_sizes: list[int] = []
-        for key, spec in zip(keys, specs, strict=False):
+        for key, spec in zip(keys, specs, strict=True):
             if spec.encoded not in stored_encoded:
                 continue
             stored_keys.append(key)
             stored_sizes.append(slot_bytes)
-        return all(put_result.results), stored_keys, stored_sizes
+        return all(results), stored_keys, stored_sizes
 
     def _finish_store_task(
         self,
@@ -1260,11 +1391,24 @@ class RawBlockL2Adapter(L2AdapterInterface):
 
     def _run_lookup_task(self, keys: list[ObjectKey]) -> Bitmap:
         specs = [encode_object_key(key) for key in keys]
-        exists = self._core.exists_many([spec.encoded for spec in specs], lock=True)
+
+        def _lookup_shard(
+            core: RawBlockCore, indices: list[int]
+        ) -> tuple[list[int], list[bool]]:
+            return indices, core.exists_many(
+                [specs[i].encoded for i in indices], lock=True
+            )
+
+        shard_futs = [
+            self._shard_pool.submit(_lookup_shard, core, indices)
+            for core, indices in self._group_key_indices(keys).items()
+        ]
         bitmap = _make_bitmap(len(keys))
-        for i, ok in enumerate(exists):
-            if ok:
-                bitmap.set(i)
+        for fut in as_completed(shard_futs):
+            indices, exists = fut.result()
+            for local_idx, ok in zip(indices, exists, strict=True):
+                if ok:
+                    bitmap.set(local_idx)
         return bitmap
 
     def _finish_lookup_task(
@@ -1287,14 +1431,34 @@ class RawBlockL2Adapter(L2AdapterInterface):
         objects: list[MemoryObj],
     ) -> tuple[Bitmap, list[ObjectKey]]:
         specs = [encode_object_key(key) for key in keys]
-        results = self._core.load_many_into([spec.encoded for spec in specs], objects)
+
+        def _load_shard(
+            core: RawBlockCore, indices: list[int]
+        ) -> tuple[list[int], list[bool]]:
+            return indices, core.load_many_into(
+                [specs[i].encoded for i in indices],
+                [objects[i] for i in indices],
+            )
+
+        shard_futs = [
+            self._shard_pool.submit(_load_shard, core, indices)
+            for core, indices in self._group_key_indices(keys).items()
+        ]
         bitmap = _make_bitmap(len(keys))
-        accessed_keys: list[ObjectKey] = []
-        for i, ok in enumerate(results):
-            if ok:
-                bitmap.set(i)
-                accessed_keys.append(keys[i])
+        for fut in as_completed(shard_futs):
+            indices, results = fut.result()
+            for local_idx, ok in zip(indices, results, strict=True):
+                if ok:
+                    bitmap.set(local_idx)
+        accessed_keys = [keys[i] for i in range(len(keys)) if bitmap.test(i)]
         return bitmap, accessed_keys
+
+    def _group_key_indices(
+        self,
+        keys: Sequence[ObjectKey],
+    ) -> dict[RawBlockCore, list[int]]:
+        """Group submitted key indices by owning raw-block core."""
+        return _group_key_indices_by_device(keys, self._cores, self._select_device)
 
     def _finish_load_task(
         self, task_id: L2TaskId, bitmap_size: int, future: Future[Any]
@@ -1324,14 +1488,14 @@ class RawBlockL2Adapter(L2AdapterInterface):
             logger.debug("event notifier was closed before signaling")
 
     def _cleanup_after_init_failure(self) -> None:
-        for pool_name in ("_store_pool", "_lookup_pool", "_load_pool"):
+        for pool_name in ("_store_pool", "_lookup_pool", "_load_pool", "_shard_pool"):
             pool = getattr(self, pool_name, None)
             if pool is not None:
                 pool.shutdown(wait=False, cancel_futures=True)
                 setattr(self, pool_name, None)
 
-        core = getattr(self, "_core", None)
-        if core is not None:
+        cores = getattr(self, "_cores", [])
+        for core in cores:
             core.close()
 
         for fd_name in ("_store_efd", "_lookup_efd", "_load_efd"):

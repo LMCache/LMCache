@@ -8,13 +8,16 @@ caller-provided load buffers during prefetch.
 
 **Required fields:**
 
-- ``device_path``: Raw device path or pre-sized file path.
+- ``device_paths``: Raw device path(s) or pre-sized file path(s). A single
+  string selects one device; a list of strings or a comma-separated string
+  enables multi-device sharding.
 - ``slot_bytes``: Fixed slot size in bytes. Must be aligned to ``block_align``.
 
 **Optional fields:**
 
 - ``capacity_bytes``: Optional cap on the usable device bytes. Default ``0``
-  means use the full device/file size.
+  means use the full device/file size. In multi-device mode, the same cap is
+  applied to each configured device.
 - ``use_odirect``: ``true`` or ``false`` (default ``true``).
 - ``block_align``: Device alignment in bytes (default ``4096``). Must be a
   power of two.
@@ -61,15 +64,27 @@ caller-provided load buffers during prefetch.
   on default NVMe placement.
 - ``num_store_workers`` / ``num_lookup_workers`` / ``num_load_workers``:
   Worker-thread counts for each operation type.
+- ``num_shard_workers_per_device``: Worker-count multiplier per configured
+  raw-block device (default ``4``). The shared shard pool uses
+  ``len(device_paths) * num_shard_workers_per_device`` as its maximum worker
+  count across store, lookup, and load operations. Workers are not bound to
+  individual devices.
 
 **Notes:**
 
-- ``raw_block`` is a server-owned MP adapter. It does **not** support
-  per-TP device-path mappings in MP mode.
+- ``device_paths`` can be a single path string, a list of strings, or a
+  comma-separated string. Paths must be non-empty and unique.
+- In multi-device mode, each object is routed by
+  ``kv_rank.local_rank % len(device_paths)``. Keep ``device_paths`` in stable
+  local-rank order across restarts so recovered metadata maps to the same raw
+  device.
+- ``raw_block`` is a server-owned MP adapter. It supports single-node
+  multi-device sharding through ``device_paths``; it does **not** support
+  ``per_tp_device_paths`` in MP mode.
 - ``raw_block`` remains ``"type": "raw_block"`` for all supported engines.
 - ``raw_block`` owns on-device slot allocation, checkpointing, and recovery
-  through ``RawBlockCore``. Slot reclamation is driven by the shared/global
-  L2 eviction controller or explicit ``delete()`` calls.
+  through one ``RawBlockCore`` per configured path. Slot reclamation is driven
+  by the shared/global L2 eviction controller or explicit ``delete()`` calls.
 - ``slot_bytes``, ``header_bytes``, and ``meta_total_bytes`` must be multiples
   of ``block_align``.
 - If ``use_odirect`` is enabled, the server's ``--l1-align-bytes`` should be
@@ -78,7 +93,7 @@ caller-provided load buffers during prefetch.
   are not multiples of ``block_align``. Misaligned write buffers use an aligned
   bounce buffer.
 - ``persist_enabled`` must remain ``true`` for this adapter.
-- For ``use_uring_cmd=true``, ``device_path`` must use the NVMe character
+- For ``use_uring_cmd=true``, ``device_paths`` must use the NVMe character
   device node (e.g., ``/dev/ng0n1``) instead of the block device node
   (``/dev/nvme0n1``). The character device provides direct NVMe
   command passthrough.
@@ -142,25 +157,31 @@ caller-provided load buffers during prefetch.
 .. code-block:: bash
 
     # Basic raw_block with posix I/O
-    --l2-adapter '{"type": "raw_block", "device_path": "/dev/nvme0n1", "slot_bytes": 1048576, "block_align": 4096, "header_bytes": 4096, "meta_total_bytes": 268435456, "use_odirect": true, "num_store_workers": 2, "num_lookup_workers": 1, "num_load_workers": 4}'
+    --l2-adapter '{"type": "raw_block", "device_paths": "/dev/nvme0n1", "slot_bytes": 1048576, "block_align": 4096, "header_bytes": 4096, "meta_total_bytes": 268435456, "use_odirect": true, "num_store_workers": 2, "num_lookup_workers": 1, "num_load_workers": 4}'
+
+    # With multi-device sharding
+    --l2-adapter '{"type": "raw_block", "device_paths": ["/dev/nvme0n1", "/dev/nvme1n1", "/dev/nvme2n1", "/dev/nvme3n1"], "slot_bytes": 1048576, "block_align": 4096, "use_odirect": true, "num_shard_workers_per_device": 4}'
+
+    # With multi-device sharding from a comma-separated string
+    --l2-adapter '{"type": "raw_block", "device_paths": "/dev/nvme0n1,/dev/nvme1n1", "slot_bytes": 1048576, "use_odirect": true}'
 
     # With io_uring
-    --l2-adapter '{"type": "raw_block", "device_path": "/dev/nvme0n1", "slot_bytes": 1048576, "io_engine": "io_uring", "iouring_queue_depth": 256, "use_odirect": true}'
+    --l2-adapter '{"type": "raw_block", "device_paths": "/dev/nvme0n1", "slot_bytes": 1048576, "io_engine": "io_uring", "iouring_queue_depth": 256, "use_odirect": true}'
 
     # With io_uring_cmd (NVMe passthrough)
-    --l2-adapter '{"type": "raw_block", "device_path": "/dev/ng0n1", "slot_bytes": 1048576, "io_engine": "io_uring", "use_uring_cmd": true, "iouring_queue_depth": 256, "max_data_transfer_size": 131072, "use_odirect": false}'
+    --l2-adapter '{"type": "raw_block", "device_paths": "/dev/ng0n1", "slot_bytes": 1048576, "io_engine": "io_uring", "use_uring_cmd": true, "iouring_queue_depth": 256, "max_data_transfer_size": 131072, "use_odirect": false}'
 
     # With FDP discovery and cache_salt prefix placement enabled
-    --l2-adapter '{"type": "raw_block", "device_path": "/dev/ng0n1", "slot_bytes": 1048576, "io_engine": "io_uring", "use_uring_cmd": true, "fdp_enabled": true, "use_odirect": false}'
+    --l2-adapter '{"type": "raw_block", "device_paths": "/dev/ng0n1", "slot_bytes": 1048576, "io_engine": "io_uring", "use_uring_cmd": true, "fdp_enabled": true, "use_odirect": false}'
 
     # With FDP discovery and cache_salt/rank placement enabled
-    --l2-adapter '{"type": "raw_block", "device_path": "/dev/ng0n1", "slot_bytes": 1048576, "io_engine": "io_uring", "use_uring_cmd": true, "fdp_enabled": true, "fdp_data_placement_policy": "cache_salt_rank", "use_odirect": false}'
+    --l2-adapter '{"type": "raw_block", "device_paths": "/dev/ng0n1", "slot_bytes": 1048576, "io_engine": "io_uring", "use_uring_cmd": true, "fdp_enabled": true, "fdp_data_placement_policy": "cache_salt_rank", "use_odirect": false}'
 
     # With FDP discovery only, keeping KV data writes on default NVMe placement
-    --l2-adapter '{"type": "raw_block", "device_path": "/dev/ng0n1", "slot_bytes": 1048576, "io_engine": "io_uring", "use_uring_cmd": true, "fdp_enabled": true, "fdp_data_placement_policy": "none", "use_odirect": false}'
+    --l2-adapter '{"type": "raw_block", "device_paths": "/dev/ng0n1", "slot_bytes": 1048576, "io_engine": "io_uring", "use_uring_cmd": true, "fdp_enabled": true, "fdp_data_placement_policy": "none", "use_odirect": false}'
 
     # With eviction
-    --l2-adapter '{"type": "raw_block", "device_path": "/dev/nvme0n1", "slot_bytes": 1048576, "load_checkpoint_on_init": false, "eviction": {"eviction_policy": "LRU", "trigger_watermark": 0.9, "eviction_ratio": 0.1}}'
+    --l2-adapter '{"type": "raw_block", "device_paths": "/dev/nvme0n1", "slot_bytes": 1048576, "load_checkpoint_on_init": false, "eviction": {"eviction_policy": "LRU", "trigger_watermark": 0.9, "eviction_ratio": 0.1}}'
 
 **Hardware-gated FDP status validation:**
 

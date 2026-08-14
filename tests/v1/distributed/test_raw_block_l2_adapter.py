@@ -48,22 +48,27 @@ requires_raw_block_ext = pytest.mark.skipif(
 class _RecordingListener(L2AdapterListener):
     def __init__(self):
         self.stored: list[list[ObjectKey]] = []
+        self.stored_sizes: list[list[int] | None] = []
         self.accessed: list[list[ObjectKey]] = []
         self.deleted: list[list[ObjectKey]] = []
+        self.deleted_sizes: list[list[int] | None] = []
 
     def on_l2_keys_stored(self, keys: list[ObjectKey], sizes: list[int]):
         self.stored.append(list(keys))
+        self.stored_sizes.append(list(sizes))
 
     def on_l2_keys_accessed(self, keys: list[ObjectKey]):
         self.accessed.append(list(keys))
 
     def on_l2_keys_deleted(self, keys: list[ObjectKey]):
         self.deleted.append(list(keys))
+        self.deleted_sizes.append(None)
 
 
 class _FailingListener(L2AdapterListener):
     def on_l2_keys_stored(self, keys: list[ObjectKey], sizes: list[int]):
         del keys
+        del sizes
         raise RuntimeError("store listener failed")
 
     def on_l2_keys_accessed(self, keys: list[ObjectKey]):
@@ -78,11 +83,13 @@ def _create_object_key(
     chunk_id: int,
     model_name: str = "test_model",
     cache_salt: str = "",
+    *,
+    kv_rank: int = 0,
 ) -> ObjectKey:
     return ObjectKey(
         chunk_hash=ObjectKey.IntHash2Bytes(chunk_id),
         model_name=model_name,
-        kv_rank=0,
+        kv_rank=kv_rank,
         cache_salt=cache_salt,
     )
 
@@ -132,7 +139,7 @@ def _wait_event_fd(event_fd: int, timeout: float = 5.0) -> bool:
 
 
 def _make_config(
-    device_path: str,
+    device_paths: str | list[str],
     *,
     slot_bytes: int = 64 * 1024,
     capacity_bytes: int = 0,
@@ -140,7 +147,7 @@ def _make_config(
     use_uring_cmd: bool = False,
 ) -> RawBlockL2AdapterConfig:
     return RawBlockL2AdapterConfig(
-        device_path=device_path,
+        device_paths=device_paths,
         slot_bytes=slot_bytes,
         capacity_bytes=capacity_bytes,
         use_odirect=False,
@@ -158,7 +165,7 @@ def _make_config(
 
 def _config_dict(**overrides) -> dict[str, object]:
     config: dict[str, object] = {
-        "device_path": "/tmp/raw-block-test-device",
+        "device_paths": "/tmp/raw-block-test-device",
         "slot_bytes": 64 * 1024,
         "use_odirect": False,
     }
@@ -213,6 +220,23 @@ def test_raw_block_l2_adapter_config_rejects_non_power_of_2_block_align(
         RawBlockL2AdapterConfig.from_dict(_config_dict(block_align=block_align))
 
 
+def _create_object_key_with_local_rank(
+    chunk_id: int,
+    local_rank: int,
+    *,
+    local_world_size: int = 2,
+) -> ObjectKey:
+    return _create_object_key(
+        chunk_id,
+        kv_rank=ObjectKey.ComputeKVRank(
+            world_size=local_world_size,
+            global_rank=local_rank,
+            local_world_size=local_world_size,
+            local_rank=local_rank,
+        ),
+    )
+
+
 def _run_store(adapter: RawBlockL2Adapter, keys, objects) -> bool:
     task_id = adapter.submit_store_task(keys, objects)
     assert _wait_event_fd(adapter.get_store_event_fd())
@@ -237,7 +261,7 @@ def test_raw_block_l2_adapter_config_parses_uring_flags():
     cfg = RawBlockL2AdapterConfig.from_dict(
         {
             "type": "raw_block",
-            "device_path": "/tmp/raw-block-dev",
+            "device_paths": "/tmp/raw-block-dev",
             "slot_bytes": 64 * 1024,
             "use_odirect": False,
             "io_engine": "io_uring",
@@ -251,7 +275,7 @@ def test_raw_block_l2_adapter_config_parses_uring_flags():
         RawBlockL2AdapterConfig.from_dict(
             {
                 "type": "raw_block",
-                "device_path": "/tmp/raw-block-dev",
+                "device_paths": "/tmp/raw-block-dev",
                 "slot_bytes": 64 * 1024,
                 "use_uring_cmd": True,
             }
@@ -317,6 +341,209 @@ def test_raw_block_l2_adapter_store_lookup_load_roundtrip():
             assert torch.count_nonzero(load_buffers[1].tensor) == 0
 
             adapter.submit_unlock([key1, key_miss, key3])
+        finally:
+            adapter.close()
+
+
+@requires_raw_block_ext
+def test_raw_block_l2_adapter_multi_device_roundtrip_and_recovery():
+    device_count = 2
+    local_ranks = list(range(device_count))
+    with tempfile.TemporaryDirectory() as td:
+        dev_paths = [
+            os.path.join(td, f"dev{local_rank}.bin") for local_rank in local_ranks
+        ]
+        for dev_path in dev_paths:
+            with open(dev_path, "wb") as f:
+                f.truncate(8 * 1024 * 1024)
+
+        config = _make_config(dev_paths)
+        keys = [
+            _create_object_key_with_local_rank(
+                1000 + local_rank,
+                local_rank,
+                local_world_size=device_count,
+            )
+            for local_rank in local_ranks
+        ]
+        objects = [
+            _create_memory_obj(fill_value=float(100 + local_rank))
+            for local_rank in local_ranks
+        ]
+
+        adapter1 = RawBlockL2Adapter(config)
+        try:
+            assert _run_store(adapter1, keys, objects) is True
+            status = adapter1.report_status()
+            assert status["device_count"] == device_count
+            indexed_key_counts = [core["indexed_key_count"] for core in status["cores"]]
+            assert indexed_key_counts == [1] * device_count
+        finally:
+            adapter1.close()
+
+        adapter2 = RawBlockL2Adapter(config)
+        try:
+            _, lookup_bitmap = _run_lookup(adapter2, keys)
+            assert lookup_bitmap is not None
+            assert lookup_bitmap.get_indices_list() == [0, 1]
+
+            load_buffers = [
+                _create_memory_obj(fill_value=0.0),
+                _create_memory_obj(fill_value=0.0),
+            ]
+            _, load_bitmap = _run_load(adapter2, keys, load_buffers)
+            assert load_bitmap is not None
+            assert load_bitmap.get_indices_list() == [0, 1]
+            assert torch.equal(load_buffers[0].tensor, objects[0].tensor)
+            assert torch.equal(load_buffers[1].tensor, objects[1].tensor)
+
+            adapter2.submit_unlock(keys)
+        finally:
+            adapter2.close()
+
+
+@requires_raw_block_ext
+def test_raw_block_l2_adapter_four_device_local_rank_distribution_and_order():
+    device_count = 4
+    local_ranks = list(range(device_count))
+    with tempfile.TemporaryDirectory() as td:
+        dev_paths = [
+            os.path.join(td, f"dev{local_rank}.bin") for local_rank in local_ranks
+        ]
+        for dev_path in dev_paths:
+            with open(dev_path, "wb") as f:
+                f.truncate(8 * 1024 * 1024)
+
+        keys_by_local_rank = [
+            _create_object_key_with_local_rank(
+                3000 + local_rank,
+                local_rank,
+                local_world_size=device_count,
+            )
+            for local_rank in local_ranks
+        ]
+        objects_by_local_rank = [
+            _create_memory_obj(fill_value=float(300 + local_rank))
+            for local_rank in local_ranks
+        ]
+        store_local_ranks = list(reversed(local_ranks))
+
+        adapter = RawBlockL2Adapter(_make_config(dev_paths))
+        try:
+            store_keys = [
+                keys_by_local_rank[local_rank] for local_rank in store_local_ranks
+            ]
+            store_objects = [
+                objects_by_local_rank[local_rank] for local_rank in store_local_ranks
+            ]
+            assert (
+                _run_store(
+                    adapter,
+                    store_keys,
+                    store_objects,
+                )
+                is True
+            )
+            status = adapter.report_status()
+            assert status["device_count"] == device_count
+            indexed_key_counts = [core["indexed_key_count"] for core in status["cores"]]
+            assert indexed_key_counts == [1] * device_count
+
+            missing_local_rank = local_ranks[1]
+            miss = _create_object_key_with_local_rank(
+                3999,
+                missing_local_rank,
+                local_world_size=device_count,
+            )
+            lookup_local_ranks = [
+                local_ranks[2],
+                None,
+                local_ranks[0],
+                local_ranks[-1],
+            ]
+            lookup_keys = [
+                miss if local_rank is None else keys_by_local_rank[local_rank]
+                for local_rank in lookup_local_ranks
+            ]
+            expected_hit_indices = [
+                request_index
+                for request_index, local_rank in enumerate(lookup_local_ranks)
+                if local_rank is not None
+            ]
+
+            _, lookup_bitmap = _run_lookup(adapter, lookup_keys)
+            assert lookup_bitmap is not None
+            assert lookup_bitmap.get_indices_list() == expected_hit_indices
+
+            load_buffers = [_create_memory_obj(fill_value=0.0) for _ in lookup_keys]
+            _, load_bitmap = _run_load(adapter, lookup_keys, load_buffers)
+            assert load_bitmap is not None
+            assert load_bitmap.get_indices_list() == expected_hit_indices
+            for request_index, local_rank in enumerate(lookup_local_ranks):
+                if local_rank is None:
+                    assert torch.count_nonzero(load_buffers[request_index].tensor) == 0
+                else:
+                    assert torch.equal(
+                        load_buffers[request_index].tensor,
+                        objects_by_local_rank[local_rank].tensor,
+                    )
+
+            adapter.submit_unlock(lookup_keys)
+        finally:
+            adapter.close()
+
+
+@requires_raw_block_ext
+def test_raw_block_l2_adapter_multi_device_delete_preserves_other_devices():
+    device_count = 3
+    with tempfile.TemporaryDirectory() as td:
+        dev_paths = [os.path.join(td, f"dev{i}.bin") for i in range(device_count)]
+        for dev_path in dev_paths:
+            with open(dev_path, "wb") as f:
+                f.truncate(8 * 1024 * 1024)
+
+        keys = [
+            _create_object_key_with_local_rank(
+                4100 + rank,
+                rank,
+                local_world_size=device_count,
+            )
+            for rank in range(device_count)
+        ]
+        objects = [
+            _create_memory_obj(fill_value=float(410 + rank))
+            for rank in range(device_count)
+        ]
+        listener = _RecordingListener()
+        adapter = RawBlockL2Adapter(_make_config(dev_paths))
+        adapter.register_listener(listener)
+
+        try:
+            assert _run_store(adapter, keys, objects) is True
+            adapter.delete([keys[1]])
+
+            status = adapter.report_status()
+            assert [core["indexed_key_count"] for core in status["cores"]] == [
+                1,
+                0,
+                1,
+            ]
+            assert listener.deleted == [[keys[1]]]
+            assert listener.deleted_sizes == [None]
+
+            _, lookup_bitmap = _run_lookup(adapter, keys)
+            assert lookup_bitmap is not None
+            assert lookup_bitmap.get_indices_list() == [0, 2]
+
+            load_buffers = [_create_memory_obj(fill_value=0.0) for _ in keys]
+            _, load_bitmap = _run_load(adapter, keys, load_buffers)
+            assert load_bitmap is not None
+            assert load_bitmap.get_indices_list() == [0, 2]
+            assert torch.equal(load_buffers[0].tensor, objects[0].tensor)
+            assert torch.count_nonzero(load_buffers[1].tensor) == 0
+            assert torch.equal(load_buffers[2].tensor, objects[2].tensor)
+
+            adapter.submit_unlock(keys)
         finally:
             adapter.close()
 

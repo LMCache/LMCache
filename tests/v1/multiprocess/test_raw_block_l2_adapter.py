@@ -44,7 +44,7 @@ _EMPTY_LAYOUT = MemoryLayoutDesc(shapes=[], dtypes=[])
 def _make_adapter(tmp_path: Path) -> RawBlockL2Adapter:
     path = make_raw_block_file(tmp_path)
     config = RawBlockL2AdapterConfig(
-        device_path=str(path),
+        device_paths=str(path),
         capacity_bytes=RAW_BLOCK_CI_CAPACITY_BYTES,
         block_align=RAW_BLOCK_CI_BLOCK_ALIGN,
         header_bytes=RAW_BLOCK_CI_HEADER_BYTES,
@@ -168,7 +168,7 @@ def _make_fdp_config(
     meta_checkpoint_placement_id: int | None = None,
 ) -> RawBlockL2AdapterConfig:
     return RawBlockL2AdapterConfig(
-        device_path="/dev/ng0n1",
+        device_paths="/dev/ng0n1",
         capacity_bytes=RAW_BLOCK_CI_CAPACITY_BYTES,
         block_align=RAW_BLOCK_CI_BLOCK_ALIGN,
         header_bytes=RAW_BLOCK_CI_HEADER_BYTES,
@@ -207,7 +207,7 @@ def _make_fdp_adapter(
 def test_raw_block_meta_checkpoint_placement_id_reaches_core_config() -> None:
     config = RawBlockL2AdapterConfig.from_dict(
         {
-            "device_path": "/dev/ng0n1",
+            "device_paths": "/dev/ng0n1",
             "slot_bytes": RAW_BLOCK_CI_SLOT_BYTES,
             "io_engine": "io_uring",
             "use_uring_cmd": True,
@@ -216,14 +216,16 @@ def test_raw_block_meta_checkpoint_placement_id_reaches_core_config() -> None:
     )
 
     assert config.meta_checkpoint_placement_id == 7
-    assert config.to_core_config().meta_checkpoint_placement_id == 7
+    assert (
+        config.to_core_config(config.device_paths[0]).meta_checkpoint_placement_id == 7
+    )
 
 
 def test_raw_block_meta_checkpoint_placement_id_requires_uring_cmd() -> None:
     with pytest.raises(ValueError, match="meta_checkpoint_placement_id requires"):
         RawBlockL2AdapterConfig.from_dict(
             {
-                "device_path": "/tmp/raw-block",
+                "device_paths": "/tmp/raw-block",
                 "slot_bytes": RAW_BLOCK_CI_SLOT_BYTES,
                 "io_engine": "posix",
                 "meta_checkpoint_placement_id": 7,
@@ -247,7 +249,7 @@ def test_raw_block_meta_checkpoint_placement_id_must_not_overlap_data_ids() -> N
 def test_raw_block_fdp_requires_uring_cmd_config():
     with pytest.raises(ValueError, match="fdp_enabled requires"):
         RawBlockL2AdapterConfig(
-            device_path="/dev/ng0n1",
+            device_paths="/dev/ng0n1",
             slot_bytes=RAW_BLOCK_CI_SLOT_BYTES,
             io_engine="posix",
             use_uring_cmd=False,
@@ -257,7 +259,7 @@ def test_raw_block_fdp_requires_uring_cmd_config():
 
 def test_raw_block_fdp_disabled_ignores_placement_ids() -> None:
     config = RawBlockL2AdapterConfig(
-        device_path="/tmp/raw-block",
+        device_paths="/tmp/raw-block",
         slot_bytes=RAW_BLOCK_CI_SLOT_BYTES,
         fdp_enabled=False,
         fdp_placement_ids=[0, 1],
@@ -267,13 +269,15 @@ def test_raw_block_fdp_disabled_ignores_placement_ids() -> None:
     assert config.fdp_placement_ids is None
     assert config.fdp_data_placement_policy == "none"
     assert config.fdp_slot_reuse_policy == "none"
-    assert config.to_core_config().fdp_slot_affinity_enabled is False
+    assert (
+        config.to_core_config(config.device_paths[0]).fdp_slot_affinity_enabled is False
+    )
 
 
 def test_raw_block_fdp_data_placement_policy_requires_fdp_enabled() -> None:
     with pytest.raises(ValueError, match="requires fdp_enabled=true"):
         RawBlockL2AdapterConfig(
-            device_path="/tmp/raw-block",
+            device_paths="/tmp/raw-block",
             slot_bytes=RAW_BLOCK_CI_SLOT_BYTES,
             fdp_enabled=False,
             fdp_data_placement_policy="cache_salt_prefix",
@@ -289,20 +293,24 @@ def test_raw_block_fdp_slot_reuse_policy_defaults_to_pid_affinity() -> None:
     config = _make_fdp_config()
 
     assert config.fdp_slot_reuse_policy == "pid_affinity"
-    assert config.to_core_config().fdp_slot_affinity_enabled is True
+    assert (
+        config.to_core_config(config.device_paths[0]).fdp_slot_affinity_enabled is True
+    )
 
 
 def test_raw_block_fdp_slot_reuse_policy_can_be_disabled() -> None:
     config = _make_fdp_config(slot_reuse_policy="none")
 
     assert config.fdp_slot_reuse_policy == "none"
-    assert config.to_core_config().fdp_slot_affinity_enabled is False
+    assert (
+        config.to_core_config(config.device_paths[0]).fdp_slot_affinity_enabled is False
+    )
 
 
 def test_raw_block_fdp_slot_reuse_policy_requires_fdp_enabled() -> None:
     with pytest.raises(ValueError, match="requires fdp_enabled=true"):
         RawBlockL2AdapterConfig(
-            device_path="/tmp/raw-block",
+            device_paths="/tmp/raw-block",
             slot_bytes=RAW_BLOCK_CI_SLOT_BYTES,
             fdp_enabled=False,
             fdp_slot_reuse_policy="pid_affinity",
@@ -317,7 +325,7 @@ def test_raw_block_fdp_slot_reuse_policy_rejects_unknown_value() -> None:
 def test_raw_block_fdp_slot_reuse_policy_from_dict_reaches_core() -> None:
     config = RawBlockL2AdapterConfig.from_dict(
         {
-            "device_path": "/dev/ng0n1",
+            "device_paths": "/dev/ng0n1",
             "slot_bytes": RAW_BLOCK_CI_SLOT_BYTES,
             "io_engine": "io_uring",
             "use_uring_cmd": True,
@@ -327,14 +335,16 @@ def test_raw_block_fdp_slot_reuse_policy_from_dict_reaches_core() -> None:
     )
 
     assert config.fdp_slot_reuse_policy == "none"
-    assert config.to_core_config().fdp_slot_affinity_enabled is False
+    assert (
+        config.to_core_config(config.device_paths[0]).fdp_slot_affinity_enabled is False
+    )
 
 
 def test_raw_block_fdp_from_dict_validates_enabled_id_elements() -> None:
     with pytest.raises(ValueError, match="fdp_placement_ids must contain"):
         RawBlockL2AdapterConfig.from_dict(
             {
-                "device_path": "/dev/ng0n1",
+                "device_paths": "/dev/ng0n1",
                 "slot_bytes": RAW_BLOCK_CI_SLOT_BYTES,
                 "io_engine": "io_uring",
                 "use_uring_cmd": True,

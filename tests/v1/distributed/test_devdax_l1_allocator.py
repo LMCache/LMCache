@@ -485,7 +485,7 @@ def test_cli_infers_l1_devdax_overflow_from_registered_dax_adapter(tmp_path):
         (
             {
                 "type": "raw_block",
-                "device_path": "rawblock-l2.bin",
+                "device_paths": "rawblock-l2.bin",
                 "slot_bytes": 8192,
                 "capacity_bytes": 16384,
                 "meta_total_bytes": 4096,
@@ -503,7 +503,7 @@ def test_cli_hybrid_l1_keeps_ordinary_l2_adapters(
 ):
     path = _make_mmap_file(tmp_path)
     adapter_spec = {
-        key: str(tmp_path / value) if key in ("base_path", "device_path") else value
+        key: str(tmp_path / value) if key in ("base_path", "device_paths") else value
         for key, value in adapter_spec.items()
     }
 
