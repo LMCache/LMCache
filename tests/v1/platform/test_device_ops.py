@@ -3,25 +3,35 @@
 
 These tests are the acceptance gate for the DeviceOps hierarchy.  They stay
 platform-agnostic by exercising the torch baseline, the ``DeviceSpec``
-dispatch, the ``lmcache.c_ops`` shim, and instance-level ``bind_native``
+dispatch, the package-level ``device_ops`` singleton, and instance-level ``bind_native``
 while using the device-independent native module for shared enums.
 """
 
 # Standard
+from types import ModuleType
 from typing import Any
+import importlib
 import inspect
+import sys
 
 # Third Party
 import pytest
 
 # First Party
-from lmcache import torch_dev, torch_device_type
+from lmcache import device_ops, torch_dev, torch_device_type
 from lmcache.lmcache_native import EngineKVFormat, TransferDirection
 from lmcache.v1.platform import resolve_device_ops
 from lmcache.v1.platform.base.device_ops import DeviceOps
 from lmcache.v1.platform.base.device_spec import DeviceSpec
 from lmcache.v1.platform.cpu.device_ops import CpuDeviceOps
-from lmcache.v1.platform.ops_types import PageBufferShapeDesc
+from lmcache.v1.platform.cuda.device_ops import CudaDeviceOps
+from lmcache.v1.platform.ops_types import (
+    BatchStep,
+    KernelGroupSpec,
+    LaunchVar,
+    PageBufferShapeDesc,
+    StagingCopy,
+)
 import lmcache.v1.platform as platform_pkg
 
 # Derive op names from the class body: regular instance-method functions,
@@ -66,6 +76,10 @@ def test_base_class_declares_every_op_as_instance_method() -> None:
 def test_base_class_has_python_fallback_types() -> None:
     """DeviceOps exposes the Python-only fallback types it owns."""
     assert DeviceOps.PageBufferShapeDesc is PageBufferShapeDesc
+    assert DeviceOps.StagingCopy is StagingCopy
+    assert DeviceOps.LaunchVar is LaunchVar
+    assert DeviceOps.BatchStep is BatchStep
+    assert DeviceOps.KernelGroupSpec is KernelGroupSpec
     assert callable(DeviceOps.set_shape_desc_dtype)
 
 
@@ -222,18 +236,37 @@ def test_bind_native_rebinds_types() -> None:
     assert ops.GPUKVFormat is FakeTypes.EngineKVFormat  # alias
 
 
-# -- Shim ------------------------------------------------------------------
-
-
-def test_c_ops_shim_has_all_device_ops() -> None:
-    """The lmcache.c_ops shim exposes the DeviceOps surface only."""
+def test_cuda_device_ops_loads_cuda_ops(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CudaDeviceOps binds the platform-specific ``cuda_ops`` module."""
     # First Party
-    import lmcache.c_ops as c_ops
+    import lmcache
 
+    def calculate_cdf(*_args: object) -> str:
+        return "cuda-native"
+
+    native = ModuleType("lmcache.cuda_ops")
+    native.calculate_cdf = calculate_cdf  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "lmcache.cuda_ops", native)
+    monkeypatch.setattr(lmcache, "cuda_ops", native, raising=False)
+
+    ops = CudaDeviceOps()
+    ops.ensure_native()
+
+    assert ops.calculate_cdf(None, 0) == "cuda-native"
+
+
+# -- Package export --------------------------------------------------------
+
+
+def test_package_exports_resolved_device_ops() -> None:
+    """The package exports the resolved DeviceOps singleton directly."""
+    assert device_ops is resolve_device_ops(torch_device_type)
     for name in _OP_NAMES:
-        assert hasattr(c_ops, name), f"c_ops missing {name}"
-        assert callable(getattr(c_ops, name))
-    assert hasattr(c_ops, "PageBufferShapeDesc")
+        assert hasattr(device_ops, name), f"device_ops missing {name}"
+        assert callable(getattr(device_ops, name))
+    assert hasattr(device_ops, "PageBufferShapeDesc")
 
     native_only_names = (
         "TransferDirection",
@@ -245,17 +278,13 @@ def test_c_ops_shim_has_all_device_ops() -> None:
         "is_mla",
     )
     for name in native_only_names:
-        assert not hasattr(c_ops, name)
+        assert not hasattr(device_ops, name)
 
 
-def test_c_ops_shim_dir() -> None:
-    """The shim supports dir() for discoverability."""
-    # First Party
-    import lmcache.c_ops as c_ops
-
-    names = dir(c_ops)
-    assert "multi_layer_kv_transfer" in names
-    assert "TransferDirection" not in names
+def test_legacy_ops_module_is_absent() -> None:
+    """The removed generic native-module name is no longer importable."""
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("lmcache." + "c" + "_ops")
 
 
 # -- DeviceSpec resolution -------------------------------------------------

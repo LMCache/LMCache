@@ -101,14 +101,29 @@ if [ "${SEPARATE_OBJECT_GROUPS:-0}" = "1" ] || [ "${SEPARATE_OBJECT_GROUPS:-0}" 
     SEPARATE_OBJECT_GROUPS_ARG="--separate-object-groups"
 fi
 
+# Server-side transfer paths. The server default flipped from 'auto' to
+# 'lmcache_driven' (#4447), so steps that force the engine-driven worker path
+# (LMCACHE_MP_TRANSFER_MODE=engine_driven, set by the pipeline matrix) must
+# tell the server to load it. Mirror the worker-side mode env; set explicitly
+# rather than relying on the server default so the test is robust to default
+# changes.
+TRANSFER_MODE_ARG="--supported-transfer-mode ${LMCACHE_MP_TRANSFER_MODE:-lmcache_driven}"
+
 # L1 lazy allocation mode. Default is lazy (--l1-use-lazy). Set L1_USE_LAZY=false
-# to disable lazy allocation, which enables POSIX SHM-backed L1 pool for the
-# engine_driven SHM transfer path. When lazy is enabled (default), the SHM pool
-# is disabled and engine_driven falls back to pickle transport.
+# to disable lazy allocation, which allows a POSIX SHM-backed L1 pool for the
+# engine_driven SHM transfer path. The pool also needs an explicit --shm-name:
+# the default "" disables it (and lazy allocation disables it regardless), in
+# which case engine_driven falls back to pickle transport.
 L1_LAZY_ARG=""
+SHM_NAME_ARG=""
 if [ "${L1_USE_LAZY:-true}" = "false" ]; then
     L1_LAZY_ARG="--no-l1-use-lazy"
-    echo "L1 lazy allocation disabled (SHM transport enabled)"
+    if [ "${LMCACHE_MP_TRANSFER_MODE:-}" = "engine_driven" ]; then
+        SHM_NAME_ARG="--shm-name mp_${BUILD_ID}"
+        echo "L1 lazy allocation disabled (SHM transport enabled)"
+    else
+        echo "L1 lazy allocation disabled"
+    fi
 fi
 
 # Store PIDs in a file so cleanup.sh can find them
@@ -138,6 +153,8 @@ lmcache server \
     --port "$LMCACHE_PORT" \
     ${GDS_L1_ARG} \
     ${L1_LAZY_ARG} \
+    ${SHM_NAME_ARG} \
+    ${TRANSFER_MODE_ARG} \
     ${SEPARATE_OBJECT_GROUPS_ARG} \
     > "/tmp/build_${BUILD_ID}_lmcache.log" 2>&1 &
 
