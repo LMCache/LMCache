@@ -24,6 +24,13 @@ uv pip install torch               # pre-requisite for CUDA extensions
 uv pip install -e . --no-build-isolation
 ```
 
+On this checkout, do not assume ``python`` is available on ``PATH`` or
+that ``python3`` points at the project interpreter: the local system
+``python3`` may still be Python 3.9 while LMCache development here uses
+``.venv/bin/python`` (Python 3.12). Run tests, docs, and pre-commit via
+``.venv/bin/python`` / ``.venv/bin/<tool>`` or ``uv run`` to avoid
+accidentally validating against the wrong interpreter.
+
 ## Build & Install
 
 ```bash
@@ -83,6 +90,12 @@ isort .                   # Import sorting (black profile, from_first=true)
 mypy --config-file=pyproject.toml   # Type checking
 codespell --toml pyproject.toml     # Spell checking
 ```
+
+On this macOS checkout, ``pre-commit run --all-files`` can fail before
+code evaluation if the Rust toolchain is missing because the repo's
+hooks invoke ``cargo fmt`` and ``cargo clippy`` for ``rust/``. Verify
+``cargo`` is installed before treating those hook failures as source
+regressions.
 
 C++/CUDA files use clang-format (Google style, 80-col). Rust code in `rust/` uses `cargo fmt` and `cargo clippy`.
 

@@ -11,12 +11,16 @@ that init chain.
 
 The registry of :class:`DeviceSpec` subclasses and the detected torch
 device module are both built lazily on first access and then cached
-process-wide.
+process-wide.  Registry entries may come from LMCache's in-tree
+``platform/<backend>/`` packages or from installed wheels publishing a
+``DeviceSpec`` entry point in the ``lmcache.v1.device_specs`` group.
 """
 
 # Standard
 from functools import lru_cache
+from importlib import metadata as importlib_metadata
 from typing import TYPE_CHECKING, Any
+import inspect
 import os
 
 # First Party
@@ -27,6 +31,8 @@ if TYPE_CHECKING:
     from lmcache.v1.platform.base.device_spec import DeviceSpec
 
 logger = init_logger(__name__)
+
+_DEVICE_SPEC_ENTRYPOINT_GROUP = "lmcache.v1.device_specs"
 
 
 # ---------------------------------------------------------------------------
@@ -45,19 +51,149 @@ def _build_device_registry() -> "dict[str, DeviceSpec]":
     from lmcache.v1.platform.base.device_spec import DeviceSpec
     from lmcache.v1.utils.subclass_discovery import discover_subclasses
 
-    return {
-        spec.device_type: spec
-        for spec in [
-            cls()
-            for cls in discover_subclasses(
-                "lmcache.v1.platform",
-                DeviceSpec,  # type: ignore[type-abstract]
-                module_filter=lambda name: not name.startswith(("_", "base")),
-                require_defined_in_module=True,
-                on_import_error=lambda name, exc: None,
+    registry: dict[str, DeviceSpec] = {}
+
+    for cls in discover_subclasses(
+        "lmcache.v1.platform",
+        DeviceSpec,  # type: ignore[type-abstract]
+        module_filter=lambda name: not name.startswith(("_", "base")),
+        require_defined_in_module=True,
+        on_import_error=lambda name, exc: None,
+    ):
+        _register_device_spec(
+            registry,
+            cls(),
+            source=f"{cls.__module__}.{cls.__qualname__}",
+        )
+
+    for entry_point, spec in _iter_entry_point_device_specs(DeviceSpec):
+        _register_device_spec(
+            registry,
+            spec,
+            source=(
+                f"entry point {entry_point.group}:{entry_point.name}"
+                f" ({entry_point.value})"
+            ),
+        )
+
+    return registry
+
+
+def _iter_entry_point_device_specs(
+    base_class: "type[DeviceSpec]",
+) -> "list[tuple[Any, DeviceSpec]]":
+    """Load ``DeviceSpec`` objects exposed through installed entry points."""
+    discovered: list[tuple[Any, DeviceSpec]] = []
+
+    for entry_point in _select_entry_points(_DEVICE_SPEC_ENTRYPOINT_GROUP):
+        try:
+            loaded = entry_point.load()
+        except Exception as exc:
+            logger.warning(
+                "Failed to load device entry point %s:%s (%s): %s",
+                entry_point.group,
+                entry_point.name,
+                entry_point.value,
+                exc,
             )
-        ]
-    }
+            continue
+
+        spec = _coerce_entry_point_device_spec(entry_point, loaded, base_class)
+        if spec is not None:
+            discovered.append((entry_point, spec))
+
+    return discovered
+
+
+def _select_entry_points(group: str) -> list[Any]:
+    """Return entry points from *group* across Python 3.10-3.13 APIs."""
+    entry_points = importlib_metadata.entry_points()
+    select = getattr(entry_points, "select", None)
+    if callable(select):
+        return list(select(group=group))
+
+    legacy_get = getattr(entry_points, "get", None)
+    if callable(legacy_get):
+        return list(legacy_get(group, ()))
+
+    return []
+
+
+def _coerce_entry_point_device_spec(
+    entry_point: Any,
+    loaded: Any,
+    base_class: "type[DeviceSpec]",
+) -> "DeviceSpec | None":
+    """Normalize an entry point target to a concrete ``DeviceSpec`` instance."""
+    if inspect.isclass(loaded):
+        try:
+            is_subclass = issubclass(loaded, base_class)
+        except TypeError:
+            is_subclass = False
+        if not is_subclass:
+            logger.warning(
+                "Skipping device entry point %s:%s (%s): target is not a "
+                "DeviceSpec subclass.",
+                entry_point.group,
+                entry_point.name,
+                entry_point.value,
+            )
+            return None
+        if inspect.isabstract(loaded):
+            logger.warning(
+                "Skipping device entry point %s:%s (%s): DeviceSpec subclass "
+                "is abstract.",
+                entry_point.group,
+                entry_point.name,
+                entry_point.value,
+            )
+            return None
+        return loaded()
+
+    if isinstance(loaded, base_class):
+        return loaded
+
+    logger.warning(
+        "Skipping device entry point %s:%s (%s): target must resolve to a "
+        "DeviceSpec subclass or instance.",
+        entry_point.group,
+        entry_point.name,
+        entry_point.value,
+    )
+    return None
+
+
+def _register_device_spec(
+    registry: "dict[str, DeviceSpec]",
+    spec: "DeviceSpec",
+    *,
+    source: str,
+) -> None:
+    """Insert *spec* into *registry* unless a device_type collision exists."""
+    device_type = spec.device_type
+    if not device_type:
+        logger.warning("Skipping DeviceSpec from %s: device_type is empty.", source)
+        return
+
+    existing = registry.get(device_type)
+    if existing is not None:
+        logger.warning(
+            "Skipping DeviceSpec from %s: device_type %r is already provided by %s.",
+            source,
+            device_type,
+            f"{type(existing).__module__}.{type(existing).__qualname__}",
+        )
+        return
+
+    registry[device_type] = spec
+
+
+def _get_platform_device_registry() -> "dict[str, DeviceSpec]":
+    """Return the shared device registry owned by ``lmcache.v1.platform``."""
+    # First Party
+    import lmcache.v1.platform as platform_pkg
+
+    return platform_pkg._DEVICE_REGISTRY
 
 
 def _detect_device() -> tuple[Any, str]:
@@ -75,7 +211,7 @@ def _detect_device() -> tuple[Any, str]:
         logger.warning("load torch failed, error is %s", e)
         return None, "cpu"  # fallback for CLI-only environments
 
-    registry = _build_device_registry()
+    registry = _get_platform_device_registry()
 
     # Check DEVICE_TYPE environment variable for forced device selection.
     env_device_type = os.environ.get("DEVICE_TYPE")
@@ -128,7 +264,7 @@ def _detect_device() -> tuple[Any, str]:
 
 def get_device_spec(device_type: str) -> "DeviceSpec | None":
     """Return the :class:`DeviceSpec` registered for *device_type*, if any."""
-    return _build_device_registry().get(device_type)
+    return _get_platform_device_registry().get(device_type)
 
 
 @lru_cache(maxsize=1)

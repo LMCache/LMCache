@@ -47,7 +47,9 @@ Your PyTorch backend should support:
 Step 1: Add a ``FooDeviceSpec``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Create ``lmcache/v1/platform/foo/__init__.py``:
+For an in-tree backend, create ``lmcache/v1/platform/foo/__init__.py``.
+For an out-of-tree backend wheel, put the class in your own package;
+LMCache only requires the class body shown below.
 
 .. code-block:: python
 
@@ -167,11 +169,51 @@ Key properties:
    PyTorch itself (like ``torch.cuda``) a plain
    ``torch.foo.is_available()`` is enough.
 
-That's it.  Defining these two classes is enough for auto-discovery —
-no global list or manual registration call is required.  All ops
+That's it.  Defining these two classes is enough for auto-discovery.
+For an in-tree backend there is no global list or manual registration
+call; LMCache will find the sub-package automatically.  All ops
 automatically route through the torch baseline in ``torch_ops.py``,
-which is not performant but is functionally applicable to any device that
-supports the standard PyTorch tensor surface.
+which is not performant but is functionally applicable to any device
+that supports the standard PyTorch tensor surface.
+
+Packaging an Out-of-Tree Backend Wheel
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+If you want to maintain the backend in a separate repository, publish
+the ``DeviceSpec`` class through the ``lmcache.v1.device_specs`` entry
+point group.  Once that wheel is installed into the same environment
+as LMCache, LMCache discovers it automatically at process start.
+
+Example ``pyproject.toml`` for a vendor-maintained wheel:
+
+.. code-block:: toml
+
+    [project]
+    name = "lmcache-foo-device"
+    version = "0.1.0"
+    dependencies = ["lmcache"]
+
+    [project.entry-points."lmcache.v1.device_specs"]
+    foo = "vendor_lmcache_foo.device:FooDeviceSpec"
+
+Suggested package layout:
+
+.. code-block:: text
+
+    vendor_lmcache_foo/
+    ├── __init__.py
+    ├── device.py          # defines FooDeviceSpec
+    ├── device_ops.py      # defines FooDeviceOps
+    └── cache_context.py   # optional cache-context implementation
+
+Why this works:
+
+- LMCache imports the entry point, instantiates ``FooDeviceSpec``, and
+  adds it to the same device registry used by built-in backends.
+- ``FooDeviceSpec.ops_cls`` and other lazy properties can then import
+  the rest of your package on demand.
+- No LMCache source patch is needed as long as the wheel is installed
+  before the LMCache process starts.
 
 Verification
 ~~~~~~~~~~~~

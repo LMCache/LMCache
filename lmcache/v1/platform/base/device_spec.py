@@ -5,15 +5,21 @@ Each accelerator sub-package (``platform/cuda``, ``platform/musa``, ...)
 provides a concrete :class:`DeviceSpec` subclass that describes how to
 detect the device and which ops backend to load.
 
-The :mod:`~lmcache.v1.platform` module discovers these
-subclasses automatically at import time via ``pkgutil.iter_modules``:
-it imports each sub-package, inspects its module namespace for
-:class:`DeviceSpec` subclasses, instantiates them, and uses the
-resulting objects for device detection and backend selection.
+The :mod:`~lmcache.v1.platform` module discovers these subclasses
+automatically from two sources:
 
-No manual registration (e.g. ``DEVICE_SPEC = ...``) is required --
-simply defining the subclass in the sub-package's ``__init__.py`` is
-enough.
+* in-tree platform packages under ``lmcache.v1.platform`` via
+  ``pkgutil.iter_modules``;
+* installed wheels exposing ``DeviceSpec`` entry points in the
+  ``lmcache.v1.device_specs`` group.
+
+In both cases LMCache instantiates the discovered specifications and
+uses the resulting objects for device detection and backend selection.
+
+No manual registration call (e.g. ``DEVICE_SPEC = ...``) is required:
+define the subclass in the sub-package's ``__init__.py`` for in-tree
+backends, or publish it through the entry-point group above for an
+out-of-tree backend wheel.
 
 :class:`DeviceSpec` itself is instantiable and doubles as the fallback
 implementation used when no accelerator sub-package matches the
@@ -45,7 +51,9 @@ class DeviceSpec:
 
     Subclasses override the properties / methods below to describe a
     concrete accelerator.  Defining a concrete subclass in a platform
-    sub-package's ``__init__.py`` is sufficient for auto-discovery.
+    sub-package's ``__init__.py`` or exposing it via the
+    ``lmcache.v1.device_specs`` entry-point group is sufficient for
+    auto-discovery.
 
     Instantiating :class:`DeviceSpec` directly yields the fallback
     implementation with "no-op / all False" semantics -- this is the
