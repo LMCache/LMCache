@@ -497,27 +497,24 @@ void execute_object_group_transfer(
     }
   };
 
-  // Brackets *body* with a CUDA event pair; degrades to untimed execution on
-  // event-creation failure. Finished records accumulate in call_records and
-  // are registered in one batch when the call ends.
-  const bool timing = phase_timing_enabled;
   const cudaStream_t timing_stream =
-      timing ? static_cast<cudaStream_t>(at::cuda::getCurrentCUDAStream())
-             : nullptr;
+      phase_timing_enabled
+          ? static_cast<cudaStream_t>(at::cuda::getCurrentCUDAStream())
+          : nullptr;
+  // Finished sections of this call; handed to the recorder in one batch.
   std::vector<PhaseTimingRecord> call_records;
-  if (timing) {
+  if (phase_timing_enabled) {
     call_records.reserve(batch_steps.size() * 2);
   }
   PhaseTimingDiscardGuard discard_on_failure{call_records};
+  // Brackets *body* with a CUDA event pair; degrades to untimed execution
+  // on any event failure.
   const auto timed_section = [&](TransferPhase phase, int64_t nbytes,
                                  const auto& body) {
-    if (!timing || nbytes <= 0) {
-      // No CUDA call is made here, so no error state can be left behind.
+    if (!phase_timing_enabled || nbytes <= 0) {
       body();
       return;
     }
-    // Best-effort from here on: any CUDA failure degrades to untimed
-    // execution, and every failure path clears the error state.
     cudaEvent_t start_event = nullptr;
     cudaEvent_t end_event = nullptr;
     if (cudaEventCreate(&start_event) != cudaSuccess ||
@@ -534,8 +531,8 @@ void execute_object_group_transfer(
       throw;
     }
     if (cudaEventRecord(end_event, timing_stream) != cudaSuccess) {
-      // An event that was never recorded queries as complete, so keeping the
-      // pair would yield a garbage interval. Drop it instead.
+      // A never-recorded event queries as complete; keeping the pair would
+      // yield a garbage interval.
       destroy_phase_timing_events(start_event, end_event);
       return;
     }
@@ -545,9 +542,8 @@ void execute_object_group_transfer(
   };
 
   for (const auto& step : batch_steps) {
-    // Staged payload; also used as the kernel section's byte count. That is
-    // a proxy: launches with skip_prefix_n_blocks > 0 move fewer bytes than
-    // were staged, so the kernel throughput sample can be overstated.
+    // Staged payload; also the kernel section's byte count -- a proxy that
+    // overstates kernel throughput when skip_prefix_n_blocks > 0.
     int64_t step_bytes = 0;
     for (const auto& copy : step.staging) {
       step_bytes += static_cast<int64_t>(copy.nbytes);
@@ -560,9 +556,7 @@ void execute_object_group_transfer(
       timed_section(TransferPhase::STAGING, step_bytes,
                     [&] { do_staging(step.staging); });
     }
-    // Skip kernel timing when the step has nothing to launch; an empty
-    // section would record a near-zero elapsed time and produce an absurd
-    // throughput outlier.
+    // An empty kernel section would record a near-zero-elapsed outlier.
     const int64_t kernel_bytes = step.launches.empty() ? 0 : step_bytes;
     timed_section(TransferPhase::KERNEL, kernel_bytes, [&] {
       for (const auto& launch : step.launches) {
@@ -625,8 +619,7 @@ void execute_object_group_transfer(
     }
   }
 
-  // The whole plan was enqueued, so the samples describe complete work:
-  // hand them over instead of discarding them.
+  // Publish only after the whole plan enqueued successfully.
   discard_on_failure.armed = false;
   PhaseTimingRecorder::instance().push_batch(call_records);
 }

@@ -56,8 +56,7 @@ void PhaseTimingRecorder::evict_until_below_cap(size_t headroom) {
 
 std::vector<std::tuple<int, int, int, double, int64_t>>
 pop_completed_phase_timings() {
-  // Take the whole queue and run every CUDA call unlocked, so executor
-  // threads pushing new records never wait behind a batch of event queries.
+  // Every CUDA call below runs unlocked so executor pushes never wait.
   PhaseTimingRecorder& recorder = PhaseTimingRecorder::instance();
   std::deque<PhaseTimingRecord> pending = recorder.take_all();
 
@@ -79,9 +78,6 @@ pop_completed_phase_timings() {
                              static_cast<double>(elapsed_ms), record.nbytes);
       }
     }
-    // Reached on success, on an elapsed-time failure, and on any query error
-    // other than not-ready; the destroy helper clears the error state so a
-    // timing failure never surfaces on an unrelated CUDA call.
     destroy_phase_timing_events(record.start, record.end);
   }
 

@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// Gather/DMA phase timing for the object-group transfer plan executor.
-//
-// The executor (mp_mem_kernels.cu) brackets each staging/kernel section with
-// a CUDA event pair when the caller requests it, and hands the finished
-// pairs to the process-wide PhaseTimingRecorder. Python later drains the
-// completed samples via pop_completed_phase_timings().
+// KV transfer between the serving engine's GPU memory and host memory is
+// one of the most performance-critical paths in LMCache. This recorder
+// times each batch step of a transfer plan in two phases:
+//   1. gather/scatter kernel: paged KV blocks <-> GPU staging buffers
+//   2. DMA copies: GPU staging buffers <-> pinned host memory
+// The metrics layer derives per-phase throughput from the drained samples.
 
 #pragma once
 
@@ -17,34 +17,29 @@
 #include <tuple>
 #include <vector>
 
-// Timed sections of execute_object_group_transfer, reported by
-// pop_completed_phase_timings().
+// Timed sections of execute_object_group_transfer.
 enum class TransferPhase : int {
   KERNEL = 0,   // gather/scatter kernel launches (paged blocks <-> staging)
   STAGING = 1,  // host<->device DMA staging copies
 };
 
-// One timed section: a recorded CUDA event pair plus its labels.
+// One timed section.
 struct PhaseTimingRecord {
-  cudaEvent_t start;
-  cudaEvent_t end;
-  int phase;      // TransferPhase value (kernel / staging)
-  int direction;  // TransferDirection value
-  int device_index;
-  int64_t nbytes;
+  cudaEvent_t start;  // recorded on the transfer stream at section start
+  cudaEvent_t end;    // recorded at section end; complete => sample ready
+  int phase;          // TransferPhase value
+  int direction;      // TransferDirection value
+  int device_index;   // CUDA device the section ran on
+  int64_t nbytes;     // staged payload bytes of the step
 };
 
-// Destroy an event pair (either handle may be null) and swallow the CUDA
-// error state afterwards. Timing is best-effort instrumentation: a failure
-// here must never surface on an unrelated CUDA call later in this thread.
+// Destroy an event pair (either handle may be null) and clear the CUDA
+// error state, so a timing failure never surfaces on an unrelated call.
 void destroy_phase_timing_events(cudaEvent_t start, cudaEvent_t end);
 
-// Scope guard over one call's accumulated records: unless disarmed, destroys
-// their events on scope exit so sections completed before a failing step are
-// dropped rather than published — a transfer that threw did not run to
-// completion, and its partial phase samples would misrepresent the work
-// actually done. The destructor only destroys events, so it cannot throw
-// while unwinding.
+// Destroys the accumulated records on scope exit unless disarmed, so a
+// transfer that failed mid-plan publishes no partial samples. The
+// destructor only destroys events and cannot throw.
 struct PhaseTimingDiscardGuard {
   std::vector<PhaseTimingRecord>& records;
   bool armed = true;
@@ -57,44 +52,34 @@ struct PhaseTimingDiscardGuard {
   }
 };
 
-// Process-wide buffer of in-flight timing records.
-//
-// Constructed on first use, so no static-initialization ordering applies.
-// Teardown only releases the
-// queue's memory: the CUDA events of records still pending at exit are
-// deliberately left alone rather than destroyed, since the CUDA runtime may
-// already be shut down by then and the process is going away regardless.
+// Process-wide buffer of in-flight timing records. Constructed on first
+// use; records still pending at process exit are deliberately leaked (the
+// CUDA runtime may already be shut down).
 class PhaseTimingRecorder {
  public:
   static PhaseTimingRecorder& instance();
 
-  // Enqueue one call's records under a single lock acquisition; the executor
-  // hot path therefore locks once per transfer call, not once per section.
+  // Enqueue one call's records under a single lock acquisition.
   void push_batch(const std::vector<PhaseTimingRecord>& records);
 
-  // Hand the whole queue to the caller so it can run CUDA calls unlocked.
+  // Hand over the whole queue so the caller can run CUDA calls unlocked.
   std::deque<PhaseTimingRecord> take_all();
 
-  // Return records whose events have not completed. They predate anything
-  // pushed while the recorder was unlocked, so they go back at the front to
-  // keep eviction oldest-first.
+  // Put not-yet-completed records back at the front (they are the oldest).
   void requeue_front(const std::deque<PhaseTimingRecord>& records);
 
  private:
   PhaseTimingRecorder() = default;
 
-  // Backstop, not a tuning knob: normal operation pops after every request
-  // and stays far below the cap. Sized well above the peak in-flight sample
-  // count (devices x concurrent transfers x steps x 2 phases) while staying
-  // cheap when full (a few MB of records plus their events).
+  // Bound on queued records; the oldest are evicted past this.
   static constexpr size_t kMaxPending = 8192;
 
-  // Caller must hold mutex_. Drops the oldest records until at least
-  // `headroom` more can be pushed without exceeding the cap.
+  // Caller must hold mutex_. Evicts the oldest records until `headroom`
+  // more fit under the cap.
   void evict_until_below_cap(size_t headroom);
 
   std::mutex mutex_;
-  std::deque<PhaseTimingRecord> pending_;
+  std::deque<PhaseTimingRecord> pending_;  // guarded by mutex_
 };
 
 /**
