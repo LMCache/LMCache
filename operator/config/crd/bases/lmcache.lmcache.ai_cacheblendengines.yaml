@@ -979,6 +979,15 @@ spec:
                     format: int32
                     minimum: 0
                     type: integer
+                  partialBucket:
+                    description: |-
+                      partialBucket pads PARTIAL row counts to a multiple of this bucket size,
+                      surfaced to the connector as kv_connector_extra_config["cb.partial_bucket"].
+                      Unset (the default) omits the key, leaving the padding disabled. Needed
+                      on fp8-MoE models (see DESIGN.md).
+                    format: int32
+                    minimum: 1
+                    type: integer
                   recompRatio:
                     default: 0.15
                     description: |-

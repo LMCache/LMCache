@@ -5,9 +5,9 @@
 # annotation) and a normal, args-only vLLM launch. After admission the webhook
 # adds: pod hostIPC=true; the `cb-plugin` emptyDir + payload init container;
 # a readOnly mount + PYTHONPATH on the vLLM container; the required vLLM flags
-# (--attention-backend CUSTOM, --kv-transfer-config <node-local engine>,
-# --block-size 64, --pipeline-parallel-size 1, --no-enable-chunked-prefill,
-# --no-async-scheduling, --enforce-eager); and the private-payload imagePullSecrets.
+# (--kv-transfer-config <node-local engine>, --pipeline-parallel-size 1,
+# --no-enable-chunked-prefill, --enforce-eager); and the private-payload
+# imagePullSecrets.
 #
 # PREREQUISITES (else injection silently no-ops or the pod is rejected):
 #   1. A CacheBlendEngine named below exists IN THIS NAMESPACE and is reconciled
@@ -23,7 +23,7 @@
 #      the annotation below).
 #
 # Verify after creation:
-#   kubectl get pod -l app=vllm-cacheblend -o yaml | grep -E "hostIPC|cb-plugin|PYTHONPATH|attention-backend|cacheblend-injected"
+#   kubectl get pod -l app=vllm-cacheblend -o yaml | grep -E "hostIPC|cb-plugin|PYTHONPATH|kv-transfer-config|cacheblend-injected"
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -66,8 +66,8 @@ spec:
               value: "0"
           # Args-only launch (image ENTRYPOINT is ["vllm","serve"]). Put the
           # model + your NON-CacheBlend serving flags here; the webhook APPENDS
-          # the CacheBlend flags. Do NOT add --attention-backend / --kv-transfer-config
-          # yourself (a user-supplied --kv-transfer-config makes the webhook skip it).
+          # the CacheBlend flags. Do NOT add --kv-transfer-config yourself (a
+          # user-supplied value makes the webhook skip that flag).
           args:
             - "Qwen/Qwen3-4B-Instruct-2507"
             - "--port"

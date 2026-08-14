@@ -78,7 +78,7 @@ Install LMCache
                                 --entrypoint bash vllm/vllm-openai-rocm:v0.25.0
 
                             VERSION=0.5.3  # replace with target release
-                            pip install lmcache==${VERSION} --no-deps \
+                            pip install lmcache==${VERSION}+rocm7.2 --no-deps \
                                 --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/v${VERSION}-rocm
 
                         .. note::
@@ -86,6 +86,13 @@ Install LMCache
                             The wheel excludes torch and the ROCm runtime libraries (they bind to the
                             host image at runtime). Match the wheel's minor torch/ROCm version to your
                             container; for other bases, use the **From Source** tab.
+
+                        .. note::
+
+                            The ROCm wheel carries a ``+rocm7.2`` PEP 440 local version, so
+                            ``pip show lmcache`` reports which build is installed and the ROCm
+                            build can be requested explicitly. A bare ``lmcache==${VERSION}``
+                            also resolves it, since ``==`` ignores the local segment.
 
             .. tab-item:: Nightly
 
@@ -290,4 +297,4 @@ Verify Installation
 
 .. code-block:: bash
 
-    python -c "import lmcache.c_ops"
+    python -c "import lmcache.cuda_ops"

@@ -186,7 +186,7 @@ def test_get_group_data_ptrs_sglang_mha_groups_k_before_v():
 
 def test_get_group_data_ptrs_cross_layer_returns_single_base():
     """Cross-layer format packs every layer into one tensor; the kernel
-    (csrc/mp_mem_kernels.cu) reads paged_buffer_ptrs[0] and computes
+    (csrc/cuda/mp_mem_kernels.cu) reads paged_buffer_ptrs[0] and computes
     per-layer offsets from shape_desc.nl internally. The group helper
     must return a single base pointer, not num_layers entries."""
     big = torch.empty(

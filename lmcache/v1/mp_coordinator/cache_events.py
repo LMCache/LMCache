@@ -30,7 +30,7 @@ from lmcache.v1.mp_coordinator.api import (
     CacheEventEntry,
     CacheEventType,
 )
-from lmcache.v1.mp_coordinator.schemas import DirectoryEventsRequest
+from lmcache.v1.mp_coordinator.schemas import CacheEventsRequest
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventCallback, EventSubscriber
 
@@ -74,7 +74,7 @@ class CacheEventSink(ABC):
 
 
 class HttpCacheEventSink(CacheEventSink):
-    """Sink that POSTs batches to the coordinator's ``/directory/events``.
+    """Sink that POSTs batches to the coordinator's ``/events``.
 
     Owns a synchronous HTTP client: publishing happens on the event
     bus's drain thread, so the request timeout bounds how long a flush
@@ -90,7 +90,7 @@ class HttpCacheEventSink(CacheEventSink):
         self._client = httpx.Client(timeout=timeout)
 
     def publish(self, batches: list[CacheEventBatch]) -> None:
-        """Deliver ``batches`` via one ``POST /directory/events`` request.
+        """Deliver ``batches`` via one ``POST /events`` request.
 
         Args:
             batches: The batches to deliver; never empty.
@@ -99,10 +99,10 @@ class HttpCacheEventSink(CacheEventSink):
             CacheEventPublishError: If the request failed or returned
                 a non-2xx status.
         """
-        body = DirectoryEventsRequest(batches=batches)
+        body = CacheEventsRequest(batches=batches)
         try:
             resp = self._client.post(
-                f"{self._base_url}/directory/events",
+                f"{self._base_url}/events",
                 json=body.model_dump(mode="json"),
             )
             resp.raise_for_status()

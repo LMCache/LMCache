@@ -140,9 +140,11 @@ func BuildCBEngineMetricsService(engine *lmcachev1alpha1.CacheBlendEngine) *core
 
 // BuildCBConnectionConfigMap creates the <engine>-connection ConfigMap carrying
 // the CBKVConnector kv-transfer-config JSON (design §7). The JSON points vLLM at
-// the node-local Service (lmcache.mp.host) and carries the blend tunables
-// cb.check_layer and cb.recomp_ratio read from spec.Blend (defaults are pinned by
-// SetDefaults: checkLayer=1, recompRatio=0.15).
+// the node-local Service (lmcache.mp.host) and carries the blend tunables read
+// from spec.Blend: cb.check_layer and cb.recomp_ratio (defaults are pinned by
+// SetDefaults: checkLayer=1, recompRatio=0.15), plus cb.partial_bucket when
+// spec.Blend.partialBucket is set (unset omits the key, leaving the connector's
+// padding disabled).
 func BuildCBConnectionConfigMap(engine *lmcachev1alpha1.CacheBlendEngine) *corev1.ConfigMap {
 	spec := &engine.Spec
 	// Use the same default (5555) as BuildContainerArgs/getServerPort so the
@@ -160,6 +162,9 @@ func BuildCBConnectionConfigMap(engine *lmcachev1alpha1.CacheBlendEngine) *corev
 	extra := map[string]any{
 		"cb.check_layer":  checkLayer,
 		"cb.recomp_ratio": recompRatio,
+	}
+	if spec.Blend != nil && spec.Blend.PartialBucket != nil {
+		extra["cb.partial_bucket"] = *spec.Blend.PartialBucket
 	}
 
 	return buildConnectionConfigMapCore(
