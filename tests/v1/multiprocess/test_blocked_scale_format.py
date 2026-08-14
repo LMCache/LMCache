@@ -16,10 +16,7 @@ import torch
 # First Party
 from lmcache import torch_dev, torch_device_type  # noqa: E402
 
-if not torch_dev.is_available():
-    pytest.skip("No accelerator runtime is available", allow_module_level=True)
-
-if torch_device_type != "cuda":
+if torch_device_type != "cuda" or not torch_dev.is_available():
     pytest.skip(
         f"blocked-scale format test requires CUDA runtime, got {torch_device_type}",
         allow_module_level=True,
