@@ -217,7 +217,6 @@ _EXCLUDED_FUNCS: set[str] = {
     "execute_object_group_transfer",
     "execute_cb_retrieve_plan_flat",
     "pop_completed_phase_timings",
-    "set_phase_timing_enabled",
 }
 
 # CUDA-only plan descriptors intentionally remain native-only. Descriptor

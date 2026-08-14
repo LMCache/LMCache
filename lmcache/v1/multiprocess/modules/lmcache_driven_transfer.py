@@ -32,7 +32,7 @@ from lmcache.v1.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_management import GDSMemoryObject, MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType
-from lmcache.v1.mp_observability.event_bus import EventBus
+from lmcache.v1.mp_observability.event_bus import EventBus, is_metrics_enabled
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
     KVCache,
@@ -62,7 +62,9 @@ logger = init_logger(__name__)
 _HAS_NATIVE_OBJECT_GROUP_TRANSFER: bool = hasattr(
     device_ops, "execute_object_group_transfer"
 )
-_HAS_PHASE_TIMING_POP: bool = hasattr(lmc_ops, "pop_completed_phase_timings")
+_HAS_PHASE_TIMING_POP: bool = hasattr(
+    device_ops, "pop_completed_phase_timings"
+)
 
 
 def get_layout_desc(
@@ -296,7 +298,7 @@ def publish_completed_phase_timings(event_bus: EventBus) -> None:
     """
     if not _HAS_PHASE_TIMING_POP:
         return
-    samples = lmc_ops.pop_completed_phase_timings()
+    samples = device_ops.pop_completed_phase_timings()
     if not samples:
         return
     event_bus.publish(
@@ -469,13 +471,19 @@ def _run_object_group_transfer_plan(
     if not batch_steps:
         return
 
-    execute_object_group_transfer = device_ops.execute_object_group_transfer
-    execute_object_group_transfer(
+    # phase_timing_enabled only exists on builds that also expose the pop op; on
+    # an older compiled extension the keyword would raise, so fall back to
+    # the untimed legacy signature (samples could not be consumed anyway).
+    timing_kwargs = (
+        {"phase_timing_enabled": is_metrics_enabled()} if _HAS_PHASE_TIMING_POP else {}
+    )
+    device_ops.execute_object_group_transfer(
         direction,
         cache_context.device,
         LazyMemoryAllocator.PIN_CHUNK_SIZE,
         kernel_group_specs,
         batch_steps,
+        **timing_kwargs,
     )
 
 

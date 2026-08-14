@@ -2,135 +2,12 @@
 
 #include "mp_mem_kernels.cuh"
 
-#include <atomic>
+#include "phase_timing_recorder.cuh"
+
 #include <deque>
 #include <mutex>
 
 namespace {
-
-// ---------------------------------------------------------------------------
-// Gather/DMA phase timing. Timed sections push CUDA event pairs into this
-// bounded registry; pop_completed_phase_timings() takes the completed pairs.
-// ---------------------------------------------------------------------------
-
-struct PhaseTimingRecord {
-  cudaEvent_t start;
-  cudaEvent_t end;
-  int phase;      // TransferPhase value (kernel / staging)
-  int direction;  // TransferDirection value
-  int device_index;
-  int64_t nbytes;
-};
-
-// Destroy an event pair (either handle may be null) and swallow the CUDA
-// error state afterwards. Timing is best-effort instrumentation: a failure
-// here must never surface on an unrelated CUDA call later in this thread.
-void destroy_phase_timing_events(cudaEvent_t start, cudaEvent_t end) {
-  if (start != nullptr) {
-    cudaEventDestroy(start);
-  }
-  if (end != nullptr) {
-    cudaEventDestroy(end);
-  }
-  (void)cudaGetLastError();
-}
-
-// Scope guard over one call's accumulated records: unless disarmed, destroys
-// their events on scope exit so sections completed before a failing step are
-// dropped rather than published — a transfer that threw did not run to
-// completion, and its partial phase samples would misrepresent the work
-// actually done. The destructor only destroys events, so it cannot throw
-// while unwinding.
-struct PhaseTimingDiscardGuard {
-  std::vector<PhaseTimingRecord>& records;
-  bool armed = true;
-  ~PhaseTimingDiscardGuard() {
-    if (armed) {
-      for (auto& record : records) {
-        destroy_phase_timing_events(record.start, record.end);
-      }
-    }
-  }
-};
-
-// Process-wide registry of in-flight timing events.
-//
-// Constructed on first use (same pattern as CompletionRecorder), so no
-// static-initialization ordering applies. Teardown only releases the
-// queue's memory: the CUDA events of records still pending at exit are
-// deliberately left alone rather than destroyed, since the CUDA runtime may
-// already be shut down by then and the process is going away regardless.
-class PhaseTimingRegistry {
- public:
-  static PhaseTimingRegistry& instance() {
-    static PhaseTimingRegistry registry;
-    return registry;
-  }
-
-  bool enabled() const { return enabled_.load(std::memory_order_relaxed); }
-
-  void set_enabled(bool enabled) {
-    enabled_.store(enabled, std::memory_order_relaxed);
-  }
-
-  // Enqueue one call's records under a single lock acquisition; the executor
-  // hot path therefore locks once per transfer call, not once per section.
-  void push_batch(const std::vector<PhaseTimingRecord>& records) {
-    if (records.empty()) {
-      return;
-    }
-    std::lock_guard<std::mutex> lock(mutex_);
-    for (const auto& record : records) {
-      evict_until_below_cap(1);
-      pending_.push_back(record);
-    }
-  }
-
-  // Hand the whole queue to the caller so it can run CUDA calls unlocked.
-  std::deque<PhaseTimingRecord> take_all() {
-    std::deque<PhaseTimingRecord> taken;
-    std::lock_guard<std::mutex> lock(mutex_);
-    taken.swap(pending_);
-    return taken;
-  }
-
-  // Return records whose events have not completed. They predate anything
-  // pushed while the registry was unlocked, so they go back at the front to
-  // keep eviction oldest-first.
-  void requeue_front(const std::deque<PhaseTimingRecord>& records) {
-    if (records.empty()) {
-      return;
-    }
-    std::lock_guard<std::mutex> lock(mutex_);
-    pending_.insert(pending_.begin(), records.begin(), records.end());
-    evict_until_below_cap(0);
-  }
-
- private:
-  PhaseTimingRegistry() = default;
-
-  // Backstop, not a tuning knob: normal operation pops after every request
-  // and stays far below the cap. Sized well above the peak in-flight sample
-  // count (devices x concurrent transfers x steps x 2 phases) while staying
-  // cheap when full (a few MB of records plus their events).
-  static constexpr size_t kMaxPending = 8192;
-
-  // Caller must hold mutex_. Drops the oldest records until at least
-  // `headroom` more can be pushed without exceeding the cap.
-  void evict_until_below_cap(size_t headroom) {
-    while (pending_.size() + headroom > kMaxPending) {
-      PhaseTimingRecord& oldest = pending_.front();
-      destroy_phase_timing_events(oldest.start, oldest.end);
-      pending_.pop_front();
-    }
-  }
-
-  std::mutex mutex_;
-  std::deque<PhaseTimingRecord> pending_;
-  // Default off; init_observability enables it at startup when metrics are
-  // on, so processes that never configure observability pay nothing.
-  std::atomic<bool> enabled_{false};
-};
 
 /**
  * Key logic in the kernel implementation:
@@ -606,7 +483,7 @@ void execute_object_group_transfer(
     TransferDirection direction, const torch::Device& device,
     size_t host_buffer_alignment,
     const std::vector<KernelGroupSpec>& kernel_group_specs,
-    const std::vector<BatchStep>& batch_steps) {
+    const std::vector<BatchStep>& batch_steps, bool phase_timing_enabled) {
   // Set the device guard once for the whole plan so every staging copy and
   // kernel launch below is enqueued on this device's current stream, in order.
   const at::cuda::OptionalCUDAGuard device_guard(device);
@@ -623,7 +500,7 @@ void execute_object_group_transfer(
   // Brackets *body* with a CUDA event pair; degrades to untimed execution on
   // event-creation failure. Finished records accumulate in call_records and
   // are registered in one batch when the call ends.
-  const bool timing = PhaseTimingRegistry::instance().enabled();
+  const bool timing = phase_timing_enabled;
   const cudaStream_t timing_stream =
       timing ? static_cast<cudaStream_t>(at::cuda::getCurrentCUDAStream())
              : nullptr;
@@ -751,44 +628,5 @@ void execute_object_group_transfer(
   // The whole plan was enqueued, so the samples describe complete work:
   // hand them over instead of discarding them.
   discard_on_failure.armed = false;
-  PhaseTimingRegistry::instance().push_batch(call_records);
-}
-
-void set_phase_timing_enabled(bool enabled) {
-  PhaseTimingRegistry::instance().set_enabled(enabled);
-}
-
-std::vector<std::tuple<int, int, int, double, int64_t>>
-pop_completed_phase_timings() {
-  // Take the whole queue and run every CUDA call unlocked, so executor
-  // threads pushing new records never wait behind a batch of event queries.
-  PhaseTimingRegistry& registry = PhaseTimingRegistry::instance();
-  std::deque<PhaseTimingRecord> pending = registry.take_all();
-
-  std::vector<std::tuple<int, int, int, double, int64_t>> samples;
-  std::deque<PhaseTimingRecord> not_ready;
-  for (auto& record : pending) {
-    const cudaError_t status = cudaEventQuery(record.end);
-    if (status == cudaErrorNotReady) {
-      (void)cudaGetLastError();  // clear cudaErrorNotReady
-      not_ready.push_back(record);
-      continue;
-    }
-    if (status == cudaSuccess) {
-      float elapsed_ms = 0.0f;
-      if (cudaEventElapsedTime(&elapsed_ms, record.start, record.end) ==
-          cudaSuccess) {
-        samples.emplace_back(record.phase, record.direction,
-                             record.device_index,
-                             static_cast<double>(elapsed_ms), record.nbytes);
-      }
-    }
-    // Reached on success, on an elapsed-time failure, and on any query error
-    // other than not-ready; the destroy helper clears the error state so a
-    // timing failure never surfaces on an unrelated CUDA call.
-    destroy_phase_timing_events(record.start, record.end);
-  }
-
-  registry.requeue_front(not_ready);
-  return samples;
+  PhaseTimingRecorder::instance().push_batch(call_records);
 }

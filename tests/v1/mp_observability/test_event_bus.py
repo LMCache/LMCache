@@ -537,3 +537,18 @@ class TestSelfMonitoringGauges:
             bus.publish(_make_event(session_id="s1"))
             bus.publish(_make_event(session_id="s2"))
             assert captured["lmcache_mp.event_bus.queue_depth"]() == 2
+
+
+class TestMetricsEnabledFlag:
+    """set_metrics_enabled / is_metrics_enabled singleton round-trip."""
+
+    def test_defaults_to_false_and_round_trips(self, monkeypatch):
+        # First Party
+        from lmcache.v1.mp_observability import event_bus as eb
+
+        monkeypatch.setattr(eb, "_metrics_enabled", False)
+        assert eb.is_metrics_enabled() is False
+        eb.set_metrics_enabled(True)
+        assert eb.is_metrics_enabled() is True
+        eb.set_metrics_enabled(False)
+        assert eb.is_metrics_enabled() is False

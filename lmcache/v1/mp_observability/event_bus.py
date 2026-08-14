@@ -361,6 +361,7 @@ class EventBus:
 
 _global_bus = EventBus(EventBusConfig(enabled=False))
 _observability_enabled: bool = False
+_metrics_enabled: bool = False
 
 
 def is_observability_enabled() -> bool:
@@ -370,6 +371,29 @@ def is_observability_enabled() -> bool:
     scheduling when observability is disabled.
     """
     return _observability_enabled
+
+
+def is_metrics_enabled() -> bool:
+    """Fast check for whether metrics subscribers are consuming events.
+
+    Use this to guard instrumentation that only exists to feed metrics
+    (e.g. requesting phase timing from the native plan executor) so it
+    costs nothing when metrics are off.
+    """
+    return _metrics_enabled
+
+
+def set_metrics_enabled(enabled: bool) -> None:
+    """Record whether metrics collection is active.
+
+    Called by ``init_observability`` once the observability and metrics
+    master switches are resolved; not intended for use elsewhere.
+
+    Args:
+        enabled: True when metrics subscribers are registered on the bus.
+    """
+    global _metrics_enabled
+    _metrics_enabled = enabled
 
 
 def get_event_bus() -> EventBus:

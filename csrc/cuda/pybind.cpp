@@ -5,6 +5,7 @@
 #include <pybind11/stl.h>
 #include "mem_kernels.cuh"
 #include "mp_mem_kernels.cuh"
+#include "phase_timing_recorder.cuh"
 #include "blend_kernels.cuh"
 #include "cachegen_kernels.cuh"
 #include "pos_kernels.cuh"
@@ -175,17 +176,16 @@ PYBIND11_MODULE(cuda_ops, m) {
       [](int direction, const torch::Device& device,
          size_t host_buffer_alignment,
          const std::vector<KernelGroupSpec>& kernel_group_specs,
-         const std::vector<BatchStep>& batch_steps) {
+         const std::vector<BatchStep>& batch_steps, bool phase_timing_enabled) {
         return execute_object_group_transfer(
             static_cast<TransferDirection>(direction), device,
-            host_buffer_alignment, kernel_group_specs, batch_steps);
+            host_buffer_alignment, kernel_group_specs, batch_steps,
+            phase_timing_enabled);
       },
       py::arg("direction"), py::arg("device"), py::arg("host_buffer_alignment"),
       py::arg("kernel_group_specs"), py::arg("batch_steps"),
+      py::arg("phase_timing_enabled") = false,
       py::call_guard<py::gil_scoped_release>());
-  m.def("set_phase_timing_enabled", &set_phase_timing_enabled,
-        py::arg("enabled"),
-        "Enable/disable CUDA event phase timing in the plan executor.");
   m.def("pop_completed_phase_timings", &pop_completed_phase_timings,
         "Pop completed (phase, direction, device_index, elapsed_ms, nbytes) "
         "samples recorded by execute_object_group_transfer.",

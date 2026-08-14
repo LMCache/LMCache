@@ -302,11 +302,13 @@ The composite `l0_l1_*` histograms span two serialized GPU phases: the
 gather/scatter kernel (paged blocks ↔ GPU staging buffer, occupies SMs)
 and the DMA staging copy (GPU staging buffer ↔ pinned host memory,
 occupies copy engines).  The native plan executor brackets each phase
-with CUDA event pairs (recording is off by default in the native module;
-`init_observability` enables it unless `--disable-observability` /
-`--disable-metrics` is set, since only a metrics subscriber consumes the
-samples); the store/retrieve handlers drain finished pairs and publish
-them as `MP_TRANSFER_PHASE_SAMPLES`.
+with CUDA event pairs when the caller requests it: the transfer module
+passes `phase_timing_enabled=is_metrics_enabled()` per executor call, so
+recording is off with `--disable-observability` / `--disable-metrics`
+(only a metrics subscriber consumes the samples) and costs nothing in
+processes that never initialize observability.  The store/retrieve
+handlers drain finished pairs and publish them as
+`MP_TRANSFER_PHASE_SAMPLES`.
 
 Labels: `device_index` (e.g. `"0"`), `direction` (`"h2d"` / `"d2h"`);
 the counters additionally carry `phase` (`"kernel"` / `"staging"`).
