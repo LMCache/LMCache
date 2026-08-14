@@ -27,30 +27,6 @@ PYBIND11_MODULE(cuda_ops, m) {
   // Functions that need enums accept their underlying ``int`` values and cast
   // locally, so callers pass the canonical ``lmcache_native`` enums.
 
-  py::class_<StagingCopy>(m, "StagingCopy")
-      .def(py::init([](uintptr_t dest, uintptr_t src, size_t nbytes,
-                       size_t host_offset) {
-             return StagingCopy{dest, src, nbytes, host_offset};
-           }),
-           py::arg("dest"), py::arg("src"), py::arg("nbytes"),
-           py::arg("host_offset"));
-  py::class_<LaunchVar>(m, "LaunchVar")
-      .def(
-          py::init([](int group_idx, int64_t block_ids_offset, int total_blocks,
-                      int num_objects, int skip_prefix_n_blocks) {
-            return LaunchVar{group_idx, block_ids_offset, total_blocks,
-                             num_objects, skip_prefix_n_blocks};
-          }),
-          py::arg("group_idx"), py::arg("block_ids_offset"),
-          py::arg("total_blocks"), py::arg("num_objects"),
-          py::arg("skip_prefix_n_blocks"));
-  py::class_<BatchStep>(m, "BatchStep")
-      .def(py::init([](std::vector<StagingCopy> staging,
-                       std::vector<LaunchVar> launches) {
-             return BatchStep{std::move(staging), std::move(launches)};
-           }),
-           py::arg("staging"), py::arg("launches"));
-
   m.def(
       "multi_layer_kv_transfer",
       [](torch::Tensor& key_value, const torch::Tensor& key_value_ptrs,
@@ -168,6 +144,31 @@ PYBIND11_MODULE(cuda_ops, m) {
       py::arg("shape_desc"), py::arg("lmcache_chunk_size"),
       py::arg("engine_kv_format"), py::arg("skip_prefix_n_blocks"),
       py::call_guard<py::gil_scoped_release>());
+  // Object-group transfer plan types (see mp_mem_kernels.cuh). Built on the
+  // Python side and consumed by execute_object_group_transfer.
+  py::class_<StagingCopy>(m, "StagingCopy")
+      .def(py::init([](uintptr_t dest, uintptr_t src, size_t nbytes,
+                       size_t host_offset) {
+             return StagingCopy{dest, src, nbytes, host_offset};
+           }),
+           py::arg("dest"), py::arg("src"), py::arg("nbytes"),
+           py::arg("host_offset"));
+  py::class_<LaunchVar>(m, "LaunchVar")
+      .def(
+          py::init([](int group_idx, int64_t block_ids_offset, int total_blocks,
+                      int num_objects, int skip_prefix_n_blocks) {
+            return LaunchVar{group_idx, block_ids_offset, total_blocks,
+                             num_objects, skip_prefix_n_blocks};
+          }),
+          py::arg("group_idx"), py::arg("block_ids_offset"),
+          py::arg("total_blocks"), py::arg("num_objects"),
+          py::arg("skip_prefix_n_blocks"));
+  py::class_<BatchStep>(m, "BatchStep")
+      .def(py::init([](std::vector<StagingCopy> staging,
+                       std::vector<LaunchVar> launches) {
+             return BatchStep{std::move(staging), std::move(launches)};
+           }),
+           py::arg("staging"), py::arg("launches"));
   m.def(
       "execute_object_group_transfer",
       [](int direction, const torch::Device& device,
