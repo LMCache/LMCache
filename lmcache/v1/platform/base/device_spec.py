@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Base class for platform device specification.
 
-Each accelerator sub-package (``platform/cuda``, ``platform/musa``, ...)
-provides a concrete :class:`DeviceSpec` subclass that describes how to
-detect the device and which ops backend to load.
+Each built-in accelerator sub-package (``platform/cuda``, ``platform/musa``,
+...) provides a concrete :class:`DeviceSpec` subclass that describes how to
+detect the device and which ops backend to load. External packages can expose
+the same class through the ``lmcache.device_plugins`` Python entry-point group.
 
 The :mod:`~lmcache.v1.platform` module discovers these
 subclasses automatically at import time via ``pkgutil.iter_modules``:
@@ -11,9 +12,9 @@ it imports each sub-package, inspects its module namespace for
 :class:`DeviceSpec` subclasses, instantiates them, and uses the
 resulting objects for device detection and backend selection.
 
-No manual registration (e.g. ``DEVICE_SPEC = ...``) is required --
-simply defining the subclass in the sub-package's ``__init__.py`` is
-enough.
+No manual registration call is required. Built-in implementations are found
+from their sub-package; external implementations are found from installed
+package metadata.
 
 :class:`DeviceSpec` itself is instantiable and doubles as the fallback
 implementation used when no accelerator sub-package matches the
@@ -44,8 +45,9 @@ class DeviceSpec:
     """Description of a hardware accelerator backend.
 
     Subclasses override the properties / methods below to describe a
-    concrete accelerator.  Defining a concrete subclass in a platform
-    sub-package's ``__init__.py`` is sufficient for auto-discovery.
+    concrete accelerator. Built-in subclasses are auto-discovered from the
+    platform package, while external subclasses are registered as Python
+    entry points.
 
     Instantiating :class:`DeviceSpec` directly yields the fallback
     implementation with "no-op / all False" semantics -- this is the

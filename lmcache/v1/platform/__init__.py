@@ -7,19 +7,15 @@ signal background loops from other threads.  On Linux it is backed by
 ``os.eventfd``; on macOS / other POSIX systems it falls back to
 ``os.pipe``.  Callers never touch ``os.eventfd`` directly.
 
-Accelerator- and OS-specific implementations live in dedicated sub-
-packages so each can evolve independently:
+Built-in accelerator- and OS-specific implementations live in dedicated
+sub-packages so each can evolve independently:
 
 * :mod:`lmcache.v1.platform.cuda` -- CUDA-backed implementations.
 * :mod:`lmcache.v1.platform.cpu`  -- CPU-only fallbacks.
 
-KV-cache IPC wrappers and ``BaseCacheContext`` subclasses are
-discovered separately on first use via
-:mod:`lmcache.v1.utils.subclass_discovery`, keyed by each subclass'
-``device_type`` ClassVar.  Adding a new accelerator therefore
-requires *zero* edits to this module -- drop a new
-``platform/<backend>/`` package and it will be picked up
-automatically.
+Third-party accelerators can ship a :class:`DeviceSpec` subclass in a
+separate wheel and register it through the ``lmcache.device_plugins`` Python
+entry-point group. No LMCache source changes are required.
 """
 
 # Future
@@ -43,10 +39,11 @@ __all__ = [
 
 # Standard
 from typing import TYPE_CHECKING, Any
-import os
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.platform._device_detect import (
+    _build_device_registry,
+)
 from lmcache.v1.platform._device_detect import (
     current_device_spec as _current_device_spec_fn,
 )
@@ -55,7 +52,6 @@ from lmcache.v1.platform._device_detect import (
     get_torch_device,
 )
 from lmcache.v1.platform.base.device_spec import DeviceSpec
-from lmcache.v1.utils.subclass_discovery import discover_subclasses
 
 if TYPE_CHECKING:
     from lmcache.v1.platform.base.device_ops import DeviceOps
@@ -70,102 +66,15 @@ from lmcache.v1.platform.event_notifier import (
     create_event_notifier as create_event_notifier,
 )
 
-logger = init_logger(__name__)
-
-
 # ---------------------------------------------------------------------------
 # Resolve device ops
 # ---------------------------------------------------------------------------
 
 
-_DEVICE_REGISTRY: dict[str, DeviceSpec] = {
-    spec.device_type: spec
-    for spec in [
-        cls()
-        for cls in discover_subclasses(
-            "lmcache.v1.platform",
-            DeviceSpec,  # type: ignore[type-abstract]
-            module_filter=lambda name: not name.startswith(("_", "base")),
-            require_defined_in_module=True,
-            on_import_error=lambda name, exc: None,
-        )
-    ]
-}
-
-
-# ---------------------------------------------------------------------------
-# Device detection
-# ---------------------------------------------------------------------------
-
-
-def _detect_device() -> tuple[Any, str]:
-    """Detect the available accelerator via the device registry.
-
-    Returns:
-        tuple[Any, str]: A tuple of (torch_device_module, device_type_string).
-            When torch is not installed (CLI-only mode), returns
-            ``(None, "cpu")``.
-    """
-    try:
-        # Third Party
-        import torch
-    except ImportError as e:
-        logger.warning("load torch failed, error is %s", e)
-        return None, "cpu"  # fallback for CLI-only environments
-
-    # Check DEVICE_TYPE environment variable for forced device selection.
-    env_device_type = os.environ.get("DEVICE_TYPE")
-    if env_device_type is not None:
-        env_device_type = env_device_type.strip().lower()
-        spec = _DEVICE_REGISTRY.get(env_device_type)
-        if spec is not None and spec.is_available():
-            torch_module = getattr(torch, spec.torch_module_name, None)
-            if torch_module is not None:
-                return torch_module, spec.device_type
-            else:
-                logger.warning(
-                    "DEVICE_TYPE=%r is available but torch module [%s] not found, "
-                    "falling back to auto-detection.",
-                    env_device_type,
-                    spec.torch_module_name,
-                )
-        else:
-            logger.warning(
-                "DEVICE_TYPE=%r is not available or not registered, "
-                "falling back to auto-detection.",
-                env_device_type,
-            )
-
-    for spec in _DEVICE_REGISTRY.values():
-        # ``cpu`` is the tail fallback: even though ``CpuDeviceSpec`` now
-        # lives in the registry (so ``resolve_kv_wrapper_factory`` can bind
-        # its IPC wrapper), auto-detection must still prefer accelerators
-        # and let the ``StubCPUDevice`` branch below handle the no-accelerator
-        # case. ``DEVICE_TYPE=cpu`` remains an explicit opt-in above.
-        #
-        # Defence-in-depth pairs with the ``CpuDeviceSpec`` invariant that
-        # ``is_available()`` stays inherited (False); do not remove either
-        # side without updating the other.
-        if spec.device_type == "cpu":
-            continue
-        if not spec.is_available():
-            continue
-
-        torch_module = getattr(torch, spec.torch_module_name, None)
-        if torch_module is not None:
-            return torch_module, spec.device_type
-        else:
-            logger.warning(
-                "device [%s] is available, but torch module [%s] is not found.",
-                spec.device_type,
-                spec.torch_module_name,
-            )
-
-    # No accelerator found -- fall back to CPU stub
-    # First Party
-    from lmcache.v1.platform.cpu.stub_cpu_device import StubCPUDevice
-
-    return StubCPUDevice("cpu"), "cpu"
+# Keep the historical private name as an alias for existing internal tests and
+# downstream diagnostics. Both detection and resolution now share the same
+# DeviceSpec instances, including external plugins.
+_DEVICE_REGISTRY: dict[str, DeviceSpec] = _build_device_registry()
 
 
 # ---------------------------------------------------------------------------
@@ -221,8 +130,8 @@ def _resolve_device_spec(device_type: str) -> DeviceSpec:
     raise RuntimeError(
         f"No DeviceSpec registered for accelerator {device_type!r}; "
         "refusing to silently fall back to the torch baseline on "
-        "accelerator hardware. Ensure the platform sub-package for this "
-        "device is importable and defines a DeviceSpec."
+        "accelerator hardware. Ensure a built-in backend or an installed "
+        "lmcache.device_plugins entry point defines this device."
     )
 
 
