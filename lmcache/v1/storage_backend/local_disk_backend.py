@@ -254,6 +254,20 @@ class LocalDiskBackend(StorageBackendInterface):
         key: CacheEngineKey,
         force: bool = True,
     ) -> bool:
+        """
+        Remove a cached chunk from disk and release its accounted space.
+
+        :param key: The cache key identifying the chunk to remove.
+        :param force: ``True`` for removals initiated outside the backend
+            (the caller does not hold ``disk_lock`` and has not adjusted the
+            disk space accounting). ``False`` is reserved for the internal
+            eviction path in ``submit_put_task``, which already holds
+            ``disk_lock`` and has already deducted the chunk from
+            ``current_cache_size`` before calling this method.
+
+        :return: ``True`` if the key was present and removed, ``False`` if
+            it was not cached.
+        """
         lock_context = self.disk_lock if force else nullcontext()
         with lock_context:
             if not (meta := self.dict.pop(key, None)):
@@ -263,6 +277,14 @@ class LocalDiskBackend(StorageBackendInterface):
             size = meta.size
             self.usage -= size
             self.stats_monitor.update_local_storage_usage(self.usage)
+
+            # Release the space this chunk reserved in `submit_put_task`.
+            # Deducted next to `usage` and before the fallible `os.remove` so
+            # both counters stay consistent with `dict` on every exit path.
+            # Skipped when force=False: the internal eviction path already
+            # deducted the chunk before calling us.
+            if force:
+                self.current_cache_size -= size
 
             # NOTE: The following code will cause deadlock
             # res = asyncio.run_coroutine_threadsafe(
