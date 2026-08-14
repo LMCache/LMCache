@@ -265,7 +265,7 @@ def test_deprecated_two_hs_specs_warn():
 
 def test_static_metadata(case):
     # The format's static layout flags are pinned in test_kv_format_classification
-    # (read via lmc_ops); here we only freeze the symbolic shape.
+    # (read via device_ops); here we only freeze the symbolic shape.
     name, fmt, gold = case
     assert describe_shape(fmt) == gold["shape_desc"], name
 

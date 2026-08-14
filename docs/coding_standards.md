@@ -230,7 +230,8 @@ from .utils import helper
 ```
 
 - All imports must be at the top of the file. No lazy imports.
-- Always `import torch` before importing native C extensions (`lmcache.c_ops`, etc.).
+- Always `import torch` before importing native C extensions
+  (`lmcache.cuda_ops`, `lmcache.xpu_ops`, etc.).
 
 ### 7.3 Formatting and Linting
 

@@ -34,7 +34,7 @@ reach the directory with no blend-specific plumbing at all.
 STORE (blend server, worker-0)
   transfer module emits mp.tokens (chunk hashes + tokens + offsets)
   storage layer emits l1/l2 store events
-        ── POST /directory/events ──▶ key directory: token bindings
+        ── POST /events ──▶ key directory: token bindings
                                         └─▶ blend index: fingerprints
 
 LOOKUP (blend server, cb_unified_lookup)

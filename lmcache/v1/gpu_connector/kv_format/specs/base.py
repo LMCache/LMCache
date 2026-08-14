@@ -70,7 +70,7 @@ def describe_shape(fmt: "lmcache_native.EngineKVFormat") -> str:
     """Symbolic shape of a format, e.g. ``NL_X_NB_BS_HS`` -> ``NL x [NB, BS, HS]``.
 
     Named ``describe_shape`` (not ``shape_desc``) to avoid confusion with the
-    unrelated :class:`lmc_ops.PageBufferShapeDesc` and its ``shape_desc``
+    unrelated :class:`device_ops.PageBufferShapeDesc` and its ``shape_desc``
     instances used on the transfer path.
     """
     return _render_shape(fmt, lambda t: _LABELS[t])
