@@ -12,6 +12,9 @@ import torch
 # First Party
 from lmcache.v1.platform import torch_ops as py_ops
 from lmcache.v1.platform.musa import native_kv_transfer as musa_native
+import lmcache.lmcache_native as lmcache_native
+
+pytestmark = pytest.mark.musa
 
 
 def _make_native_module() -> ModuleType:
@@ -266,10 +269,10 @@ def test_native_block_gather_uses_device_staging_for_cpu_out(
         paged_layers=paged_layers,
         object_tensors=[out],
         block_ids=[2, 4],
-        direction=py_ops.TransferDirection.D2H,
+        direction=lmcache_native.TransferDirection.D2H,
         shape_desc=_make_block_shape_desc(head_size=16),
         lmcache_chunk_size=8,
-        engine_kv_format=py_ops.EngineKVFormat.NL_X_NB_BS_HS,
+        engine_kv_format=lmcache_native.EngineKVFormat.NL_X_NB_BS_HS,
         skip_prefix_n_blocks=0,
     )
 
@@ -304,10 +307,10 @@ def test_native_block_scatter_uses_device_staging_for_cpu_chunks(
         paged_layers=paged_layers,
         object_tensors=[chunk],
         block_ids=[0, 1],
-        direction=py_ops.TransferDirection.H2D,
+        direction=lmcache_native.TransferDirection.H2D,
         shape_desc=_make_block_shape_desc(head_size=16),
         lmcache_chunk_size=8,
-        engine_kv_format=py_ops.EngineKVFormat.NL_X_NB_BS_HS,
+        engine_kv_format=lmcache_native.EngineKVFormat.NL_X_NB_BS_HS,
         skip_prefix_n_blocks=0,
     )
 
@@ -338,10 +341,10 @@ def test_native_block_scatter_uses_whole_block_skip(
         paged_layers=paged_layers,
         object_tensors=[chunk],
         block_ids=[0, 1],
-        direction=py_ops.TransferDirection.H2D,
+        direction=lmcache_native.TransferDirection.H2D,
         shape_desc=_make_block_shape_desc(head_size=16),
         lmcache_chunk_size=8,
-        engine_kv_format=py_ops.EngineKVFormat.NL_X_NB_BS_HS,
+        engine_kv_format=lmcache_native.EngineKVFormat.NL_X_NB_BS_HS,
         skip_prefix_n_blocks=1,
     )
 
@@ -369,10 +372,10 @@ def test_native_block_gather_skips_native_when_disabled(
         paged_layers=paged_layers,
         object_tensors=[torch.zeros(2, 8, 16)],
         block_ids=[0, 1],
-        direction=py_ops.TransferDirection.D2H,
+        direction=lmcache_native.TransferDirection.D2H,
         shape_desc=_make_block_shape_desc(head_size=16),
         lmcache_chunk_size=8,
-        engine_kv_format=py_ops.EngineKVFormat.NL_X_NB_BS_HS,
+        engine_kv_format=lmcache_native.EngineKVFormat.NL_X_NB_BS_HS,
         skip_prefix_n_blocks=0,
     )
 
@@ -392,10 +395,10 @@ def test_native_block_transfer_rejects_unvalidated_layout(
         paged_layers=[torch.zeros(2, 4, 2, 4, 8)],
         object_tensors=[torch.zeros(2, 2, 8, 16)],
         block_ids=[0, 1],
-        direction=py_ops.TransferDirection.H2D,
+        direction=lmcache_native.TransferDirection.H2D,
         shape_desc=_make_block_shape_desc(),
         lmcache_chunk_size=8,
-        engine_kv_format=py_ops.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS,
+        engine_kv_format=lmcache_native.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS,
         skip_prefix_n_blocks=0,
     )
 
@@ -428,10 +431,10 @@ def test_musa_ops_block_transfer_entry_dispatches_to_musa_platform(
         object_tensors,
         [0, 1],
         "musa",
-        py_ops.TransferDirection.D2H,
+        lmcache_native.TransferDirection.D2H,
         _make_block_shape_desc(head_size=16),
         8,
-        py_ops.EngineKVFormat.NL_X_NB_BS_HS,
+        lmcache_native.EngineKVFormat.NL_X_NB_BS_HS,
         0,
     )
 

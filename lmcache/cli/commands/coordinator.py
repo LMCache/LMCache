@@ -122,6 +122,17 @@ class CoordinatorCommand(BaseCommand):
             ),
         )
         parser.add_argument(
+            "--enable-blend-lookup",
+            action="store_true",
+            default=None,
+            help=(
+                "Index stored chunk content so POST /directory/blend-lookup "
+                "can serve fleet CacheBlend reuse. Off by default: hashing "
+                "content costs CPU on every store and is useless without "
+                "CacheBlend."
+            ),
+        )
+        parser.add_argument(
             "--blend-probe-stride",
             type=int,
             default=None,
@@ -185,6 +196,7 @@ class CoordinatorCommand(BaseCommand):
                 ("trigger_watermark", args.trigger_watermark),
                 ("chunk_size", args.chunk_size),
                 ("hash_algorithm", args.hash_algorithm),
+                ("enable_blend_lookup", args.enable_blend_lookup),
                 ("blend_probe_stride", args.blend_probe_stride),
                 ("timeout_keep_alive", args.timeout_keep_alive),
             )

@@ -21,5 +21,9 @@ steps:
                     deviceclass.resource.kubernetes.io/gpu.intel.com: "1"
                 volumeMounts:
                   - { name: hf-cache, mountPath: /root/.cache/huggingface }
+                  # K8s defaults /dev/shm to 64 MiB; mount a larger tmpfs for
+                  # SHM-heavy tests (e.g. tests/v1/shm_allocator).
+                  - { name: dshm, mountPath: /dev/shm }
             volumes:
               - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
+              - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 16Gi } }

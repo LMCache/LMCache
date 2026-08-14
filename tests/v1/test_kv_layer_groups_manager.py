@@ -20,10 +20,7 @@ from lmcache.v1.kv_layer_groups import (
     parse_kvcache_shape_spec,
 )
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
-
-pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="PageBufferShapeDesc requires CUDA build"
-)
+import lmcache.lmcache_native as lmcache_native
 
 
 def _build_manager(
@@ -40,11 +37,11 @@ def _build_manager(
     per-layer from the tensor shapes, so callers pass neither.
     """
     # First Party
-    import lmcache.c_ops as lmc_ops
 
     return KVLayerGroupsManager(
         tensors,
-        engine_kv_formats=[lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS] * len(tensors),
+        engine_kv_formats=[lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS]
+        * len(tensors),
         engine_group_infos=engine_group_infos,
         separate_object_groups=separate_object_groups,
     )
@@ -78,7 +75,6 @@ class TestKVLayerGroupsManager:
         with their own per-layer formats (kv_size 2 and 1), not one shared
         format -- the server-side per-group path."""
         # First Party
-        import lmcache.c_ops as lmc_ops
 
         tensors = [
             torch.randn(2, 32, 256, 8, 64, dtype=torch.bfloat16),  # K+V (rank-5)
@@ -87,8 +83,8 @@ class TestKVLayerGroupsManager:
         manager = KVLayerGroupsManager(
             tensors,
             engine_kv_formats=[
-                lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
-                lmc_ops.EngineKVFormat.NL_X_NB_BS_HS,
+                lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
+                lmcache_native.EngineKVFormat.NL_X_NB_BS_HS,
             ],
             engine_group_infos=[
                 EngineGroupInfo(0, (0,)),
@@ -106,9 +102,12 @@ class TestKVLayerGroupsManager:
         assert by_group[1].shape_desc.hs == 128
         # Each kernel group persists its own format for the transfer path.
         assert (
-            by_group[0].engine_kv_format == lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
+            by_group[0].engine_kv_format
+            == lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
         )
-        assert by_group[1].engine_kv_format == lmc_ops.EngineKVFormat.NL_X_NB_BS_HS
+        assert (
+            by_group[1].engine_kv_format == lmcache_native.EngineKVFormat.NL_X_NB_BS_HS
+        )
 
     def test_build_multiple_layers_same_shape(self):
         tensors = [
@@ -381,9 +380,8 @@ class TestKernelGroupIdentity:
 
     def test_fields_and_alias(self):
         # First Party
-        import lmcache.c_ops as lmc_ops
 
-        fmt = lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
+        fmt = lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
         ident = KernelGroupIdentity(
             kv_size=2,
             num_heads=8,
@@ -404,9 +402,8 @@ class TestKernelGroupIdentity:
 
     def test_hashable_as_dict_key(self):
         # First Party
-        import lmcache.c_ops as lmc_ops
 
-        fmt = lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
+        fmt = lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
         ident = KernelGroupIdentity(2, 8, 64, 16, 0, torch.float16, fmt)
         assert {ident: "x"}[ident] == "x"
 
@@ -420,7 +417,6 @@ class TestKernelGroupIdentity:
         layout instead of one transferring the other with the wrong axis order.
         """
         # First Party
-        import lmcache.c_ops as lmc_ops
 
         # NH == BS == 16, so NHD [.., BS, NH, ..] and HND [.., NH, BS, ..] yield
         # the same kv_size/num_heads/head_size/block_size; only axis order differs.
@@ -431,8 +427,8 @@ class TestKernelGroupIdentity:
         groups = group_layers_by_identity(
             tensors,
             [
-                lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,  # NHD
-                lmc_ops.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS,  # HND
+                lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,  # NHD
+                lmcache_native.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS,  # HND
             ],
         )
         # Without the format in the identity these share one geometry and would

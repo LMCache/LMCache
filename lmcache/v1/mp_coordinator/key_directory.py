@@ -2,16 +2,10 @@
 """Fleet-wide key directory for the MP coordinator.
 
 Maps each :class:`ObjectKey` to its placements (instance, tier, backend,
-size) across the fleet, using :class:`CacheEventBatch` streams from MP
-servers. The directory is eventually consistent: lookups are hints to be
-validated at the owner.
-
-Events are processed in order per instance and only the latest L1
-placements for each incarnation are kept. L2 placements persist across
-restarts.
-
-Views like per-``cache_salt`` L2 usage are maintained separately from
-the same event stream.
+size) across the fleet, built by consuming the cache-event stream the
+ingest layer has already ordered, deduped, and fenced. Eventually
+consistent: lookups are hints to be validated at the owner. L1
+placements die with their reporter's incarnation; L2 placements persist.
 
 See ``docs/design/v1/mp_coordinator/key_directory.md``.
 """
@@ -21,19 +15,32 @@ from __future__ import annotations
 
 # Standard
 from dataclasses import dataclass, field
-from enum import Enum
 import threading
+
+# Third Party
+import numpy as np
 
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import ObjectKey, Tier
 from lmcache.v1.mp_coordinator.api import (
+    UNKNOWN_TOKEN_OFFSET,
+    BlendMatch,
     CacheEventBatch,
     CacheEventEntry,
     CacheEventType,
 )
+from lmcache.v1.mp_coordinator.blend_index import BlendIndex, BlendIndexStats
 
 logger = init_logger(__name__)
+
+# Token ids are held as ``uint32``: a few hundred bytes per chunk instead
+# of the ~10 KB a ``tuple[int, ...]`` of boxed ints costs, and content
+# comparison against a query window stays vectorized.
+_TOKEN_DTYPE = np.uint32
+
+# Shared empty array for chunks whose content is unknown.
+_NO_TOKENS = np.empty(0, dtype=_TOKEN_DTYPE)
 
 
 @dataclass(frozen=True)
@@ -58,40 +65,6 @@ class Placement:
     shared: bool = False
 
 
-class ApplyResult(str, Enum):
-    """Result of applying one :class:`CacheEventBatch` to the directory.
-
-    ``APPLIED`` — the batch was applied.
-    ``DUPLICATE`` — the batch's ``seq`` was already applied for the
-    instance's current incarnation; the batch was dropped.
-    ``STALE_INCARNATION`` — the batch carries an incarnation older than the
-    instance's current one; the batch was dropped.
-    """
-
-    APPLIED = "applied"
-    DUPLICATE = "duplicate"
-    STALE_INCARNATION = "stale_incarnation"
-
-
-@dataclass(frozen=True)
-class InstanceDirectoryStats:
-    """Directory-side bookkeeping for one reporting instance.
-
-    Attributes:
-        incarnation: The instance's current incarnation.
-        last_seq: Highest batch ``seq`` applied for that incarnation.
-        gap_detected: ``True`` if a ``seq`` gap was observed for the
-            instance's stream.
-        num_l1_keys: Number of keys the stream has reported L1
-            placements for (eventually consistent).
-    """
-
-    incarnation: int
-    last_seq: int
-    gap_detected: bool
-    num_l1_keys: int
-
-
 @dataclass(frozen=True)
 class DirectoryStats:
     """A point-in-time summary of directory contents.
@@ -99,12 +72,15 @@ class DirectoryStats:
     Attributes:
         num_keys: Keys with at least one placement.
         num_placements: Total placements across all keys.
-        instances: Per-instance bookkeeping, keyed by ``instance_id``.
+        l1_keys_by_instance: Keys each instance reported L1 placements
+            for; its stream cursor lives on the ingest gate.
+        blend: How much of the directory is fragment-matchable.
     """
 
     num_keys: int
     num_placements: int
-    instances: dict[str, InstanceDirectoryStats]
+    l1_keys_by_instance: dict[str, int]
+    blend: BlendIndexStats
 
 
 @dataclass
@@ -117,82 +93,70 @@ class _KeyRecord:
 
 @dataclass
 class _TokenBinding:
-    """Token ids for one chunk hash plus the keys sharing it (dropped
+    """Token content for one chunk hash plus the keys sharing it (dropped
     when the last key goes). ``token_ids`` is empty until a
     token-bearing ``STORE`` entry arrives."""
 
-    token_ids: tuple[int, ...]
+    token_ids: np.ndarray
+    token_offset: int
     keys: set[ObjectKey]
-
-
-@dataclass
-class _InstanceState:
-    """Per-instance event-stream cursor and reverse index."""
-
-    incarnation: int
-    last_seq: int = 0
-    gap_detected: bool = False
-    keys: set[ObjectKey] = field(default_factory=set)
 
 
 class KeyDirectory:
     """Thread-safe in-memory key directory built from cache events.
 
-    Mutations arrive through :meth:`apply_batch` and :meth:`drop_instance`;
-    reads through :meth:`lookup` and :meth:`stats`. Nothing is persisted.
+    Mutations arrive through the ingest layer's two consumer hooks,
+    :meth:`consume` and :meth:`fence_instance`; reads through
+    :meth:`lookup` and :meth:`stats`. Nothing is persisted.
+
+    Fragment (blend) lookup is off until :meth:`enable_blend_lookup` is
+    called, so a fleet that does not run CacheBlend hashes no content.
     """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._records: dict[ObjectKey, _KeyRecord] = {}
-        self._instances: dict[str, _InstanceState] = {}
+        self._directory: dict[ObjectKey, _KeyRecord] = {}
+        # instance_id → keys it reported L1 placements for. The reverse
+        # index that makes fencing proportional to the instance's own
+        # keys instead of a full directory scan.
+        self._l1_keys_by_instance: dict[str, set[ObjectKey]] = {}
         # chunk hash → tokens + keys, for chunk hashes of >= 1 record.
         self._token_bindings: dict[bytes, _TokenBinding] = {}
+        # Derived from the bindings; owns its own lock (order: self → index).
+        # A real (1 KiB) index rather than None keeps blend_stats() branch-free;
+        # enable_blend_lookup() swaps in one sized to the fleet's chunk size.
+        self._blend_index = BlendIndex()
+        self._blend_lookup_enabled = False
 
-    def apply_batch(self, batch: CacheEventBatch) -> ApplyResult:
-        """Apply one event batch to the directory.
+    def enable_blend_lookup(self, chunk_size: int, probe_stride: int) -> None:
+        """Start indexing chunk content so :meth:`blend_match` can serve.
 
-        Applies incarnation fencing, seq dedup, and gap detection, then
-        the entries. Entry application is idempotent: re-storing upserts
-        the placement (and its token binding), deleting an absent
-        placement is a no-op.
+        Call once at startup. Chunks stored before the call are not
+        retroactively indexed.
 
         Args:
-            batch: The event batch to apply.
+            chunk_size: The index's match window; must equal the MP
+                servers' chunk size.
+            probe_stride: Query positions between probes.
 
-        Returns:
-            Whether the batch was applied, or why it was dropped.
+        Raises:
+            ValueError: If ``chunk_size`` or ``probe_stride`` is < 1.
+        """
+        self._blend_index = BlendIndex(chunk_size=chunk_size, probe_stride=probe_stride)
+        self._blend_lookup_enabled = True
+
+    def consume(self, batch: CacheEventBatch) -> None:
+        """Apply one gate-admitted batch, idempotently: re-storing
+        upserts the placement (and its token binding), deleting an
+        absent placement is a no-op.
+
+        Args:
+            batch: The admitted batch.
         """
         with self._lock:
-            state = self._instances.get(batch.instance_id)
-            if state is None:
-                state = _InstanceState(incarnation=batch.incarnation)
-                self._instances[batch.instance_id] = state
-            elif batch.incarnation < state.incarnation:
-                return ApplyResult.STALE_INCARNATION
-            elif batch.incarnation > state.incarnation:
-                # Restart: fence out the previous incarnation's placements.
-                self._drop_instance_locked(batch.instance_id)
-                state = _InstanceState(incarnation=batch.incarnation)
-                self._instances[batch.instance_id] = state
-            elif batch.seq <= state.last_seq:
-                return ApplyResult.DUPLICATE
-
-            if batch.seq > state.last_seq + 1 and not state.gap_detected:
-                state.gap_detected = True
-                logger.warning(
-                    "Event gap for instance %s (incarnation %d): "
-                    "seq jumped %d -> %d; slice needs replay",
-                    batch.instance_id,
-                    batch.incarnation,
-                    state.last_seq,
-                    batch.seq,
-                )
-            state.last_seq = batch.seq
-
+            l1_keys = self._l1_keys_by_instance.setdefault(batch.instance_id, set())
             for entry in batch.entries:
-                self._apply_entry_locked(state, batch, entry)
-            return ApplyResult.APPLIED
+                self._apply_entry(l1_keys, batch, entry)
 
     def lookup(self, keys: list[ObjectKey]) -> list[list[Placement]]:
         """Return the known placements for each requested key.
@@ -208,7 +172,7 @@ class KeyDirectory:
         with self._lock:
             results: list[list[Placement]] = []
             for key in keys:
-                record = self._records.get(key)
+                record = self._directory.get(key)
                 if record is None:
                     results.append([])
                     continue
@@ -231,11 +195,41 @@ class KeyDirectory:
             unknown chunks.
         """
         with self._lock:
-            results: list[tuple[int, ...]] = []
-            for chunk_hash in chunk_hashes:
-                binding = self._token_bindings.get(chunk_hash)
-                results.append(binding.token_ids if binding is not None else ())
-            return results
+            return [
+                tuple(binding.token_ids.tolist())
+                if (binding := self._token_bindings.get(chunk_hash)) is not None
+                else ()
+                for chunk_hash in chunk_hashes
+            ]
+
+    def blend_match(self, tokens: np.ndarray) -> list[BlendMatch]:
+        """Find cached chunks contained anywhere in ``tokens``.
+
+        Unlike :meth:`lookup` the query need not be a prefix. Matches name
+        a ``chunk_hash`` only, which the caller expands with its own
+        model, salt, and world size. Takes the blend index's lock, not
+        the directory's.
+
+        Args:
+            tokens: The query token ids.
+
+        Returns:
+            Matches in ascending ``cur_st`` order, at most one per chunk;
+            empty when :meth:`enable_blend_lookup` was never called. They
+            may overlap in the query, so callers that scatter them must
+            resolve overlaps themselves.
+        """
+        if not self._blend_lookup_enabled:
+            return []
+        return self._blend_index.match(tokens)
+
+    def blend_stats(self) -> BlendIndexStats:
+        """Return a point-in-time summary of the blend index.
+
+        Returns:
+            Distinct contents, total chunks, and the filter size.
+        """
+        return self._blend_index.stats()
 
     def list_keys(
         self,
@@ -276,7 +270,7 @@ class KeyDirectory:
         with self._lock:
             total = 0
             page: dict[ObjectKey, list[Placement]] = {}
-            for key, record in self._records.items():
+            for key, record in self._directory.items():
                 placements = [
                     p
                     for p in record.placements
@@ -291,79 +285,59 @@ class KeyDirectory:
                 total += 1
             return total, page
 
-    def drop_instance(self, instance_id: str) -> int:
+    def fence_instance(self, instance_id: str) -> None:
         """Remove every **L1** placement reported by ``instance_id``.
 
-        The instance's stream cursor is removed too, so a later reconnect
-        starts fresh with any incarnation.
+        L2 placements survive: their bytes persist across the reporter's
+        restarts and leave only via ``DELETE`` events.
 
         Args:
-            instance_id: The instance whose placements to drop.
-
-        Returns:
-            The number of placements removed.
+            instance_id: The instance whose L1 placements to drop.
         """
         with self._lock:
-            removed = self._drop_instance_locked(instance_id)
-            self._instances.pop(instance_id, None)
-            return removed
-
-    def reconcile(self, batch: CacheEventBatch) -> None:
-        """Apply ``batch``'s entries without stream-cursor bookkeeping.
-
-        Args:
-            batch: The synthesized batch to apply.
-        """
-        with self._lock:
-            state = self._instances.get(batch.instance_id)
-            if state is None:
-                state = _InstanceState(incarnation=batch.incarnation)
-                self._instances[batch.instance_id] = state
-            for entry in batch.entries:
-                self._apply_entry_locked(state, batch, entry)
+            removed = self._drop_l1_placements(instance_id)
+            self._l1_keys_by_instance.pop(instance_id, None)
+        if removed:
+            logger.info(
+                "Fenced instance %s: dropped %d L1 placement(s)",
+                instance_id,
+                removed,
+            )
 
     def stats(self) -> DirectoryStats:
-        """Return a point-in-time summary of directory contents.
-
-        Returns:
-            Key/placement counts plus per-instance stream state, keyed by
-            ``instance_id``.
-        """
+        """Return a point-in-time summary of directory contents."""
+        blend = self._blend_index.stats()
         with self._lock:
             num_placements = sum(
-                len(record.placements) for record in self._records.values()
+                len(record.placements) for record in self._directory.values()
             )
-            instances = {
-                instance_id: InstanceDirectoryStats(
-                    incarnation=state.incarnation,
-                    last_seq=state.last_seq,
-                    gap_detected=state.gap_detected,
-                    num_l1_keys=len(state.keys),
-                )
-                for instance_id, state in self._instances.items()
-            }
             return DirectoryStats(
-                num_keys=len(self._records),
+                num_keys=len(self._directory),
                 num_placements=num_placements,
-                instances=instances,
+                l1_keys_by_instance={
+                    instance_id: len(keys)
+                    for instance_id, keys in self._l1_keys_by_instance.items()
+                },
+                blend=blend,
             )
 
     # -- Internals (call with self._lock held) --------------------------------
 
-    def _apply_entry_locked(
+    def _apply_entry(
         self,
-        state: _InstanceState,
+        l1_keys: set[ObjectKey],
         batch: CacheEventBatch,
         entry: CacheEventEntry,
     ) -> None:
-        """Apply one entry of ``batch`` under the directory lock."""
+        """Apply one entry under the directory lock, maintaining
+        ``l1_keys`` (the emitter's L1 reverse index)."""
         key = entry.key.to_object_key()
         if batch.event_type == CacheEventType.STORE:
-            record = self._records.get(key)
+            record = self._directory.get(key)
             if record is None:
                 record = _KeyRecord()
-                self._records[key] = record
-                self._link_key(key)
+                self._directory[key] = record
+                self._add_token_binding(key)
             placement = Placement(
                 instance_id=batch.instance_id,
                 incarnation=batch.incarnation,
@@ -378,27 +352,27 @@ class KeyDirectory:
             else:
                 record.placements[index] = placement
             if entry.token_ids:
-                self._token_bindings[key.chunk_hash].token_ids = tuple(entry.token_ids)
+                self._create_token_binding(key.chunk_hash, entry)
             record.last_access = max(record.last_access, batch.ts)
             if batch.tier == Tier.L1:
-                state.keys.add(key)
+                l1_keys.add(key)
         elif batch.event_type == CacheEventType.DELETE:
-            record = self._records.get(key)
+            record = self._directory.get(key)
             if record is None:
                 return
             index = self._find_placement(record.placements, batch)
             if index is not None:
                 record.placements.pop(index)
             if not record.placements:
-                del self._records[key]
-                self._unlink_key(key)
+                del self._directory[key]
+                self._remove_token_binding(key)
             if batch.tier == Tier.L1 and not any(
                 p.tier == Tier.L1 and p.instance_id == batch.instance_id
                 for p in record.placements
             ):
-                state.keys.discard(key)
+                l1_keys.discard(key)
         elif batch.event_type == CacheEventType.ACCESS:
-            record = self._records.get(key)
+            record = self._directory.get(key)
             if record is not None:
                 record.last_access = max(record.last_access, batch.ts)
 
@@ -418,16 +392,14 @@ class KeyDirectory:
                 return index
         return None
 
-    def _drop_instance_locked(self, instance_id: str) -> int:
-        """Remove the **L1** placements ``instance_id`` reported; return
-        the count. L2 placements survive: their bytes persist across the
-        reporter's restarts and leave only via ``DELETE`` events."""
-        state = self._instances.get(instance_id)
-        if state is None:
+    def _drop_l1_placements(self, instance_id: str) -> int:
+        """Remove and count the **L1** placements ``instance_id`` reported."""
+        l1_keys = self._l1_keys_by_instance.get(instance_id)
+        if l1_keys is None:
             return 0
         removed = 0
-        for key in state.keys:
-            record = self._records.get(key)
+        for key in l1_keys:
+            record = self._directory.get(key)
             if record is None:
                 continue
             kept = [
@@ -439,28 +411,70 @@ class KeyDirectory:
             if kept:
                 record.placements = kept
             else:
-                del self._records[key]
-                self._unlink_key(key)
-        state.keys.clear()
+                del self._directory[key]
+                self._remove_token_binding(key)
+        l1_keys.clear()
         return removed
 
-    def _link_key(self, key: ObjectKey) -> None:
+    def _create_token_binding(self, chunk_hash: bytes, entry: CacheEventEntry) -> None:
+        """Record ``entry``'s token content on ``chunk_hash``'s binding.
+
+        Token ids outside ``uint32`` leave the binding as it was, so one
+        bad entry is a lookup miss rather than a failed batch. An entry
+        whose ``token_offset`` is
+        :data:`~lmcache.v1.mp_coordinator.api.UNKNOWN_TOKEN_OFFSET` fills
+        the binding's content but is not indexed: a fragment match with
+        no stored position would re-RoPE from the wrong source.
+
+        Args:
+            chunk_hash: Chunk hash whose binding to fill.
+            entry: The store entry carrying the token ids and offset.
+        """
+        try:
+            token_ids = np.asarray(entry.token_ids, dtype=_TOKEN_DTYPE)
+        except (OverflowError, TypeError, ValueError):
+            logger.warning(
+                "Ignoring token ids for chunk %s: values outside uint32",
+                chunk_hash.hex(),
+            )
+            return
+        token_ids.flags.writeable = False
+        binding = self._token_bindings[chunk_hash]
+        if (
+            self._blend_lookup_enabled
+            and binding.token_ids.size
+            and not np.array_equal(binding.token_ids, token_ids)
+        ):
+            # Re-store with different content: retire the old fingerprint,
+            # or the chunk stays discoverable under content it no longer has.
+            self._blend_index.remove(binding.token_ids, chunk_hash)
+        binding.token_ids = token_ids
+        binding.token_offset = entry.token_offset
+        if not self._blend_lookup_enabled:
+            return
+        if entry.token_offset == UNKNOWN_TOKEN_OFFSET:
+            return
+        self._blend_index.add(token_ids, chunk_hash, entry.token_offset)
+
+    def _add_token_binding(self, key: ObjectKey) -> None:
         """Index ``key`` under its chunk's token binding, creating an
         empty binding on first reference."""
         binding = self._token_bindings.get(key.chunk_hash)
         if binding is None:
             self._token_bindings[key.chunk_hash] = _TokenBinding(
-                token_ids=(), keys={key}
+                token_ids=_NO_TOKENS, token_offset=UNKNOWN_TOKEN_OFFSET, keys={key}
             )
         else:
             binding.keys.add(key)
 
-    def _unlink_key(self, key: ObjectKey) -> None:
+    def _remove_token_binding(self, key: ObjectKey) -> None:
         """Remove ``key`` from its chunk's token binding, dropping the
-        binding with its last key."""
+        binding — and its blend-index entry — with its last key."""
         binding = self._token_bindings.get(key.chunk_hash)
         if binding is None:
             return
         binding.keys.discard(key)
         if not binding.keys:
             del self._token_bindings[key.chunk_hash]
+            if self._blend_lookup_enabled and binding.token_ids.size:
+                self._blend_index.remove(binding.token_ids, key.chunk_hash)

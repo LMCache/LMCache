@@ -8,6 +8,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.observability import LMCStatsMonitor
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_allocators.gpu_memory_allocator import GPUMemoryAllocator
@@ -608,9 +609,10 @@ def test_tensor_memory_obj_pin_monitor_integration():
 # =============================================================================
 
 
+@pytest.mark.cuda
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="LazyMemoryAllocator requires CUDA for memory pinning",
+    not (torch_dev.is_available() and torch_device_type == "cuda"),
+    reason="Requires CUDA backend",
 )
 class TestLazyMemoryAllocator:
     """
@@ -960,6 +962,76 @@ class TestLazyMemoryAllocator:
 
         assert allocator.memcheck()
         allocator.close()
+
+    @pytest.mark.parametrize("align_bytes", [512, 4096, 1 << 16])
+    def test_buffer_base_is_aligned(self, lazy_allocator_cls, align_bytes):
+        """The buffer base is aligned to ``align_bytes``, not just the offsets.
+
+        ``torch.empty`` guarantees only 64-byte alignment, so before this was
+        fixed the base came back at ``page + 64`` and every object address was
+        congruent to 64 mod 512. Consumers cannot detect that from the reported
+        ``align_bytes``, and O_DIRECT rejects such a pointer with EINVAL.
+        """
+        allocator = lazy_allocator_cls(
+            init_size=self.INIT_SIZE,
+            final_size=self.FINAL_SIZE,
+            align_bytes=align_bytes,
+        )
+        try:
+            base = allocator.get_underlying_buffer().data_ptr()
+            assert base % align_bytes == 0, (
+                f"buffer base {base:#x} is {base % align_bytes} bytes past an "
+                f"{align_bytes}-byte boundary"
+            )
+        finally:
+            allocator.close()
+
+    def test_allocated_object_addresses_are_aligned(self, lazy_allocator_cls):
+        """Every object handed out is aligned, for a mix of sizes.
+
+        Offsets were always aligned; what mattered was the base. Mixed and
+        deliberately unaligned request sizes are used here so that a regression
+        in either the base or the per-object rounding shows up.
+        """
+        align_bytes = 4096
+        allocator = lazy_allocator_cls(
+            init_size=self.INIT_SIZE,
+            final_size=self.FINAL_SIZE,
+            align_bytes=align_bytes,
+        )
+        try:
+            objs = []
+            # 4096 is a whole number of alignment units; 100 and 5000 are not.
+            for nbytes in (4096, 100, 5000, 4096):
+                obj = allocator.allocate(torch.Size([nbytes]), torch.uint8)
+                assert obj is not None
+                objs.append(obj)
+                addr = obj.data_ptr
+                assert addr % align_bytes == 0, (
+                    f"object of {nbytes} bytes landed at {addr:#x}, "
+                    f"{addr % align_bytes} past an {align_bytes}-byte boundary"
+                )
+            for obj in objs:
+                allocator.free(obj)
+            assert allocator.memcheck()
+        finally:
+            allocator.close()
+
+    @pytest.mark.parametrize("bad", [0, -4096, 3, 1000])
+    def test_rejects_align_bytes_that_is_not_a_power_of_two(
+        self, lazy_allocator_cls, bad
+    ):
+        """A non-power-of-two alignment is a caller error, not silently accepted.
+
+        The base-alignment arithmetic assumes a power of two, and 0 would divide
+        by zero.
+        """
+        with pytest.raises(ValueError, match="power of two"):
+            lazy_allocator_cls(
+                init_size=self.INIT_SIZE,
+                final_size=self.FINAL_SIZE,
+                align_bytes=bad,
+            )
 
 
 def _get_num_free_hugepages() -> int:

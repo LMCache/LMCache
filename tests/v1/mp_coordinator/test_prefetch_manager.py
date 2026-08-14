@@ -10,7 +10,7 @@ import httpx
 import pytest
 
 # First Party
-from lmcache.v1.mp_coordinator.cache_control.prefetch_manager import PrefetchManager
+from lmcache.v1.mp_coordinator.controllers.prefetch_manager import PrefetchManager
 from lmcache.v1.mp_coordinator.registry import MPInstance
 
 
