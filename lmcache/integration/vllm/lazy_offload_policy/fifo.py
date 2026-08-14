@@ -57,22 +57,53 @@ class FIFOOffloadPolicy(OffloadPolicy):
             )
         self._pending_items[meta.request_id].metadatas.append((meta, block_hashes))
 
-    def mark_req_finished(self, req_id: str) -> None:
+    def mark_req_finished(self, req_id: str) -> bool:
         """Mark a queued request as ready for FIFO offload.
 
         Args:
             req_id: Identifier of the request that has completed.
 
-        Raises:
-            ValueError: If ``req_id`` has no queued cache blocks.
+        Returns:
+            True if the request has queued cache blocks; False if it queued
+            none, which happens for a request shorter than one chunk.
         """
-        if req_id in self._pending_items:
-            self._pending_items[req_id].is_finished = True
-            self._finished_requests_count += 1
-        else:
-            raise ValueError(
-                f"mark req finished failed: req_id: {req_id} not in pending_items"
-            )
+        if req_id not in self._pending_items:
+            return False
+        self._pending_items[req_id].is_finished = True
+        self._finished_requests_count += 1
+        return True
+
+    def drop_request(self, req_id: str) -> int:
+        """Discard a request's queued cache blocks without offloading them.
+
+        Args:
+            req_id: Identifier of the request being dropped.
+
+        Returns:
+            The number of queued metadata entries discarded.
+        """
+        item = self._pending_items.pop(req_id, None)
+        if item is None:
+            return 0
+        if item.is_finished:
+            self._finished_requests_count -= 1
+        return len(item.metadatas)
+
+    def reclaim_finished_request(self, req_id: str) -> bool:
+        """Discard a finished predecessor's item when its id is reused.
+
+        Args:
+            req_id: The reused request identifier.
+
+        Returns:
+            True if a finished item was discarded; False otherwise.
+        """
+        item = self._pending_items.get(req_id)
+        if item is None or not item.is_finished:
+            return False
+        del self._pending_items[req_id]
+        self._finished_requests_count -= 1
+        return True
 
     def pop_items_for_offload(self, count: int) -> list[PendingStoreItem]:
         """Return up to ``count`` finished requests in insertion order.

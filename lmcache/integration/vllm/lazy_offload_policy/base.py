@@ -49,11 +49,49 @@ class OffloadPolicy(ABC):
         """
 
     @abstractmethod
-    def mark_req_finished(self, req_id: str) -> None:
+    def mark_req_finished(self, req_id: str) -> bool:
         """Mark the pending store item for ``req_id`` as finished.
 
         Args:
             req_id: Identifier of the request that has completed.
+
+        Returns:
+            True if the request has buffered cache blocks awaiting offload,
+            so its session must outlive the request; False if it buffered
+            none. A request shorter than one chunk finishes without ever
+            producing store metadata, which is not an error.
+        """
+
+    @abstractmethod
+    def drop_request(self, req_id: str) -> int:
+        """Discard everything buffered for a request without storing it.
+
+        Called when the engine drops a request before its cache blocks are
+        offloaded, so the buffered blocks can no longer be trusted.
+
+        Args:
+            req_id: Identifier of the request being dropped.
+
+        Returns:
+            The number of buffered entries discarded; 0 if the request had
+            nothing buffered.
+        """
+
+    @abstractmethod
+    def reclaim_finished_request(self, req_id: str) -> bool:
+        """Discard a finished predecessor's buffered item on request-id reuse.
+
+        A new request may legally reuse a finished request's id. Inheriting
+        the predecessor's buffered item would merge two unrelated requests'
+        cache blocks into one store.
+
+        Args:
+            req_id: The reused request identifier.
+
+        Returns:
+            True if a finished item was discarded, meaning the caller must
+            end the predecessor's session now; False if the id carries no
+            finished item.
         """
 
     @abstractmethod
