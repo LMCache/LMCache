@@ -318,15 +318,24 @@ class TestAsyncHandleLifecycle:
     ) -> None:
         opened: list[tuple[str, int]] = []
         registered: list[int] = []
+
+        def open_device(path: str, flags: int) -> int:
+            opened.append((path, flags))
+            return 33
+
+        def register_device(fd: int) -> int:
+            registered.append(fd)
+            return 0xBEEF
+
         monkeypatch.setattr(
             ua.os,
             "open",
-            lambda path, flags: opened.append((path, flags)) or 33,
+            open_device,
         )
         monkeypatch.setattr(
             ua,
             "register_handle",
-            lambda fd: registered.append(fd) or 0xBEEF,
+            register_device,
         )
         handle = ua.AsyncHandle("/dev/ugds_drv0")
         assert opened == [("/dev/ugds_drv0", ua.os.O_RDWR)]

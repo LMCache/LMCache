@@ -360,6 +360,10 @@ class TestUgdsInitialization:
             registered_fds.append(fd)
             return 0xBEEF
 
+        def open_device(path: str, flags: int, *args: object) -> int:
+            opened.append((path, flags))
+            return 33
+
         monkeypatch.setattr(ca, "select_backend", lambda name: "ugds")
         monkeypatch.setattr(ca, "register_handle", register_handle)
         monkeypatch.setattr(ca, "AsyncHandle", FakeAsyncHandle)
@@ -382,9 +386,7 @@ class TestUgdsInitialization:
                 "uGDS initialization must not preallocate a slab file"
             ),
         )
-        monkeypatch.setattr(
-            os, "open", lambda path, flags, *args: opened.append((path, flags)) or 33
-        )
+        monkeypatch.setattr(os, "open", open_device)
         _mock_device_node(monkeypatch, stat.S_IFCHR, "ugds_drv")
 
         ctx = GDSContext()
