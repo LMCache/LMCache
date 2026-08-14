@@ -100,6 +100,16 @@ class TestToObjectKeyValidation:
         with pytest.raises(ValueError):
             ck.to_object_key()
 
+    def test_rejects_percent_in_cache_salt(self):
+        ck = EncodedObjectKey(
+            chunk_hash_hex="aa",
+            model_name="m",
+            kv_rank=0,
+            cache_salt="tenant%prod",
+        )
+        with pytest.raises(ValueError, match="cache_salt"):
+            ck.to_object_key()
+
 
 class TestSchemasReExport:
     def test_schemas_module_still_exposes_encoded_object_key(self):

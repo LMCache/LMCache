@@ -320,6 +320,7 @@ def test_adapter_free_lookup_locks_sends_request():
         start=0,
         end=512,
         request_id="req-1",
+        request_configs={"lmcache.tag.user": "alice"},
     )
 
     mock_client.submit_request.assert_called_once()
@@ -337,6 +338,8 @@ def test_adapter_free_lookup_locks_sends_request():
     assert key.worker_id is None
     assert key.model_name == "test_model"
     assert key.request_id == "req-1"
+    assert key.request_configs == {"lmcache.tag.user": "alice"}
+    assert key.tags == (("user", "alice"),)
     assert payloads[1] == 1  # tp_size
 
 
@@ -374,7 +377,11 @@ def test_adapter_free_lookup_locks_key_matches_lookup():
 
     # Submit lookup – patch heartbeat to avoid spawning a real thread
     with patch.object(adapter, "_ensure_heartbeat_started"):
-        adapter.maybe_submit_lookup_request("req-1", token_ids)
+        adapter.maybe_submit_lookup_request(
+            "req-1",
+            token_ids,
+            request_configs={"lmcache.tag.user": "alice"},
+        )
     lookup_call = mock_client.submit_request.call_args
     lookup_payloads = lookup_call[0][1]
     lookup_key = lookup_payloads[0]
@@ -389,6 +396,7 @@ def test_adapter_free_lookup_locks_key_matches_lookup():
         start=0,
         end=aligned_end,
         request_id="req-1",
+        request_configs={"lmcache.tag.user": "alice"},
     )
     free_call = mock_client.submit_request.call_args
     free_payloads = free_call[0][1]
@@ -405,6 +413,8 @@ def test_adapter_free_lookup_locks_key_matches_lookup():
     assert lookup_key.end == free_key.end
     assert lookup_key.request_id == free_key.request_id
     assert lookup_key.token_ids == free_key.token_ids
+    assert lookup_key.request_configs == free_key.request_configs
+    assert lookup_key.tags == free_key.tags
 
 
 def test_server_free_lookup_locks_honors_the_session_lock_model():

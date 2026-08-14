@@ -112,12 +112,13 @@ class ObjectKey:
     (no trailing salt field) — no migration is needed for un-salted
     deployments.
 
-    Invariant: must not contain ``@``, ``/``, ``\\``, or NUL. The L2
+    Invariant: must not contain ``@``, ``%``, ``/``, ``\\``, or NUL. The L2
     adapters use ``@`` as the field separator; ``/`` and ``\\`` are
     filesystem path separators (FS adapter embeds the salt into
-    filenames); NUL terminates C strings (C++ connector). Max length
-    128 to stay well within ``NAME_MAX`` (255) after the model, rank,
-    hash, and extension are added.
+    filenames); NUL terminates C strings (C++ connector); and ``%`` is
+    reserved to identify trailing ``@name%value`` tag segments during
+    reverse parsing. Max length 128 to stay well within ``NAME_MAX``
+    (255) after the model, rank, hash, and extension are added.
     """
 
     tags: tuple[tuple[str, str], ...] = ()
@@ -136,7 +137,7 @@ class ObjectKey:
     on-wire ``@k%v`` suffix, so it must not appear inside a tag.
     """
 
-    _SALT_FORBIDDEN_CHARS = frozenset("@/\\\x00")
+    _SALT_FORBIDDEN_CHARS = frozenset("@%/\\\x00")
     _SALT_MAX_LEN = 128
     _TAG_FORBIDDEN_CHARS = frozenset("@%/\\\x00")
     _TAG_MAX_LEN = 128

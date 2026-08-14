@@ -107,8 +107,8 @@ class IPCCacheServerKey:
     # on new code using the default "". Placing the field last is a style
     # choice — all defaulted fields must come after non-defaulted ones.
     #
-    # Invariant: must not contain ``@``, ``/``, ``\``, or NUL, and
-    # must be <= 128 chars — same rationale as ObjectKey (see
+    # Invariant: must not contain ``@``, ``%``, ``/``, ``\``, or NUL,
+    # and must be <= 128 chars — same rationale as ObjectKey (see
     # ObjectKey.cache_salt). Validated in __post_init__.
     cache_salt: str = ""
 
@@ -139,7 +139,7 @@ class IPCCacheServerKey:
 
     # Duplicated from ObjectKey — cannot import ObjectKey here due to
     # circular dependency (api.py imports IPCCacheServerKey).
-    _SALT_FORBIDDEN_CHARS = frozenset("@/\\\x00")
+    _SALT_FORBIDDEN_CHARS = frozenset("@%/\\\x00")
     _SALT_MAX_LEN = 128
 
     def __post_init__(self) -> None:

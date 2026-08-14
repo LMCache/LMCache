@@ -248,10 +248,19 @@ def test_submit_store_request_tracks_returned_future(fake_adapter, monkeypatch):
     adapter.transfer_ctx = transfer_ctx
     op = LoadStoreOp(token_ids=[1, 2, 3, 4], block_ids=[[0]], start=0, end=4)
 
-    adapter.submit_store_request("req-1", op, event=MagicMock())
+    adapter.submit_store_request(
+        "req-1",
+        op,
+        event=MagicMock(),
+        request_configs={"lmcache.tag.user": "alice"},
+    )
 
     assert transfer_ctx.submit_store.called
     assert transfer_ctx.submit_store.call_args.kwargs == {}
+    assert transfer_ctx.submit_store.call_args.args[1].request_configs == {
+        "lmcache.tag.user": "alice"
+    }
+    assert transfer_ctx.submit_store.call_args.args[1].tags == (("user", "alice"),)
     assert transfer_ctx.submit_store.call_args.args[4] == [[0]]
     assert adapter.store_futures["req-1"] is fake_future
 
@@ -306,10 +315,21 @@ def test_submit_retrieve_request_tracks_returned_future(fake_adapter, monkeypatc
         skip_first_n_tokens=1,
     )
 
-    adapter.submit_retrieve_request("req-1", op, event=MagicMock())
+    adapter.submit_retrieve_request(
+        "req-1",
+        op,
+        event=MagicMock(),
+        request_configs={"lmcache.tag.user": "alice"},
+    )
 
     assert transfer_ctx.submit_retrieve.called
     assert transfer_ctx.submit_retrieve.call_args.kwargs == {"skip_first_n_tokens": 1}
+    assert transfer_ctx.submit_retrieve.call_args.args[1].request_configs == {
+        "lmcache.tag.user": "alice"
+    }
+    assert transfer_ctx.submit_retrieve.call_args.args[1].tags == (
+        ("user", "alice"),
+    )
     assert transfer_ctx.submit_retrieve.call_args.args[4] == [[0]]
     assert adapter.retrieve_futures["req-1"] == (fake_future, [0])
 
