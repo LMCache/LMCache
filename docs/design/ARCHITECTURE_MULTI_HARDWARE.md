@@ -244,9 +244,8 @@ documented case.
 |-------|----------|
 | Runtime | `torch_device_type == "cuda"` → existing `CudaDeviceSpec`, `lmcache.cuda_ops` |
 | Vendor / model | `torch.cuda.get_device_name()` contains `"Iluvatar"` (e.g. `Iluvatar BI-V150`); helper `lmcache.v1.platform.cuda.is_iluvatar_device` |
-| Build | `setup_extensions/build_profiles/iluvatar.py` (`BUILD_WITH_ILUVATAR=1`); injects `USE_ILUVATAR` (same pattern as ROCm's `USE_ROCM`) |
+| Build | `setup_extensions/build_profiles/iluvatar.py` (`BUILD_WITH_ILUVATAR=1`); injects `USE_ILUVATAR` |
 | Kernels | Skip NVIDIA-only `#include <cuda_fp8.h>` and PTX `ld/st.global.cs` under `USE_ILUVATAR` |
-| Contrast with MUSA | MUSA adds a **new** `device_type="musa"` / `MusaDeviceSpec`.  Do not copy that path for CUDA-compatible vendors. |
 
 Headless / CI builds without a CoreX GPU should set `BUILD_WITH_ILUVATAR=1`
 explicitly.  Auto-detect requires `nvcc` **and** an Iluvatar device name;
