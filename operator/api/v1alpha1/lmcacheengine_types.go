@@ -496,6 +496,11 @@ type LMCacheEngineSpec struct {
 	// +optional
 	VolumeMounts []corev1.VolumeMount `json:"volumeMounts,omitempty"`
 
+	// initContainers run before the lmcache container, e.g. to pre-size the
+	// raw_block adapter's device_path file, which it expects to exist.
+	// +optional
+	InitContainers []corev1.Container `json:"initContainers,omitempty"`
+
 	// podAnnotations are additional annotations added to pods.
 	// +optional
 	PodAnnotations map[string]string `json:"podAnnotations,omitempty"`

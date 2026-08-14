@@ -348,6 +348,39 @@ func TestBuildCBConnectionConfigMap_CustomBlendAndPort(t *testing.T) {
 	}
 }
 
+func TestBuildCBConnectionConfigMap_PartialBucket(t *testing.T) {
+	engine := minimalCBEngine()
+	engine.Spec.Blend = &lmcachev1alpha1.BlendSpec{
+		PartialBucket: ptr(int32(4096)),
+	}
+
+	cm := BuildCBConnectionConfigMap(engine)
+	_, extra := parseCBConnectionConfig(t, cm)
+
+	if extra["cb.partial_bucket"] != float64(4096) {
+		t.Fatalf("expected cb.partial_bucket=4096, got %v", extra["cb.partial_bucket"])
+	}
+	// The auto-generated keys are still present (defaults: blend was replaced
+	// wholesale, so the builder falls back to checkLayer=1, recompRatio=0.15).
+	if extra["cb.check_layer"] != float64(1) {
+		t.Fatalf("expected cb.check_layer=1, got %v", extra["cb.check_layer"])
+	}
+	if extra["cb.recomp_ratio"] != 0.15 {
+		t.Fatalf("expected cb.recomp_ratio=0.15, got %v", extra["cb.recomp_ratio"])
+	}
+}
+
+func TestBuildCBConnectionConfigMap_PartialBucketOmittedWhenUnset(t *testing.T) {
+	engine := minimalCBEngine()
+
+	cm := BuildCBConnectionConfigMap(engine)
+	_, extra := parseCBConnectionConfig(t, cm)
+
+	if _, present := extra["cb.partial_bucket"]; present {
+		t.Fatalf("expected cb.partial_bucket omitted when unset, got %v", extra["cb.partial_bucket"])
+	}
+}
+
 // TestBuildCBConnectionConfigMap_PortMatchesEngineArgs asserts the connection
 // ConfigMap's lmcache.mp.port and the engine DaemonSet's --port never drift, for
 // both the default and a user-set port.
@@ -379,8 +412,8 @@ func TestBuildCBConnectionConfigMap_PortMatchesEngineArgs(t *testing.T) {
 }
 
 // TestBuildCBEngine_ChunkSizeConsistency asserts the engine's chunk-size is 256
-// (the only value CacheBlend supports — block_size 64 * 4), matching the locked
-// CacheBlendChunkSize constant, so it cannot drift from the injected --block-size.
+// (the only value CacheBlend supports), matching the locked CacheBlendChunkSize
+// constant.
 func TestBuildCBEngine_ChunkSizeConsistency(t *testing.T) {
 	engine := minimalCBEngine()
 	args := BuildCBEngineArgs(&engine.Spec)

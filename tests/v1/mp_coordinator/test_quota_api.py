@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for the coordinator ``/quota`` REST API (quota writes and
 combined quota+usage status), fed by cache events posted to
-``/directory/events`` (the event router fans applied L2 batches into
-the usage/eviction consumers)."""
+``/events`` (the ingest gate fans admitted L2 batches out to the
+eviction controller, which owns both quota and usage)."""
 
 # Third Party
 from fastapi.testclient import TestClient
@@ -50,7 +50,7 @@ def _batch(
 
 
 def _post_events(client: TestClient, batches: list[dict]):
-    return client.post("/directory/events", json={"batches": batches})
+    return client.post("/events", json={"batches": batches})
 
 
 # -- Quota writes ------------------------------------------------------------
@@ -181,7 +181,7 @@ def test_quota_config_arms_unquotad_eviction_flow():
 
         # Boot state: default null — user-b is exempt (nothing to assert
         # via HTTP beyond config state; eviction-plan behavior is covered
-        # in test_eviction_manager.py).
+        # in test_eviction_controller.py).
         assert client.get("/quota/config").json() == {"default_limit_gb": None}
 
         # Controller arms allowlist enforcement.
