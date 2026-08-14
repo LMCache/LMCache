@@ -1148,7 +1148,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         if not self._gpu_block_pool:
             raise ValueError("Lazy offload is enabled but no GPU block pool is bound")
 
-        for item in self._pending_store.select_items():
+        # Each item aggregates store metadata for one request. Chunked prefill
+        # or the scheduler's ``max-num-batched-tokens`` limit can schedule one
+        # request multiple times, with each metadata entry containing only that
+        # scheduling pass's blocks.
+        for item in self._pending_store.pop_items_for_offload():
             request_id = item.request_id
             for meta, old_block_hashes in item.metadatas:
                 gpu_block_ids = list(old_block_hashes.keys())

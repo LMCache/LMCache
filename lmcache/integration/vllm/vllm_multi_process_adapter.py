@@ -1703,6 +1703,8 @@ class LMCacheMPWorkerAdapter:
 
         return ret_stores, finished_retrieves
 
+    # TODO(chunxiaozheng): There are some duplicated codes
+    #  with `get_finished`, optimize it later.
     @_lmcache_nvtx_annotate
     def get_finished_with_lazy_offload(
         self,

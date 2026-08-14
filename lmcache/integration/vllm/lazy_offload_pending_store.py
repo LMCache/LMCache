@@ -45,7 +45,7 @@ class OffloadPolicy(ABC):
 
     Policies run in the scheduler role through :class:`LazyOffloadPendingStore`;
     worker processes do not create or call them. Subclasses decide whether
-    offload is due and select items in one ``select_items`` operation.
+    offload is due and pop items in one ``pop_items_for_offload`` operation.
     """
 
     @abstractmethod
@@ -68,15 +68,18 @@ class OffloadPolicy(ABC):
         ...
 
     @abstractmethod
-    def select_items(self, count: int) -> list[PendingStoreItem]:
-        """Select and remove items to offload when the policy is triggered.
+    def pop_items_for_offload(self, count: int) -> list[PendingStoreItem]:
+        """Pop items to offload only when the policy's condition is satisfied.
+
+        When the condition is not satisfied, this method returns an empty list
+        and leaves pending items in the queue.
 
         Args:
-            count: Maximum number of items to select.
+            count: Maximum number of items to pop.
 
         Returns:
-            Selected pending store items, or an empty list when offload should
-            not be triggered.
+            Popped pending store items, or an empty list when offload is not
+            due.
         """
         ...
 
@@ -84,7 +87,7 @@ class OffloadPolicy(ABC):
 class FIFOOffloadPolicy(OffloadPolicy):
     """
     FIFO offload policy: when finished request count reaches the threshold,
-    returns a fixed number of items from the front.
+    pops a fixed number of items from the front.
     """
 
     def __init__(self, configs: dict | None = None):
@@ -118,7 +121,7 @@ class FIFOOffloadPolicy(OffloadPolicy):
                 f"mark req finished failed: req_id: {req_id} not in pending_items"
             )
 
-    def select_items(self, count: int) -> list[PendingStoreItem]:
+    def pop_items_for_offload(self, count: int) -> list[PendingStoreItem]:
         if count <= 0 or self._finished_requests_count < self._threshold:
             return []
 
@@ -187,8 +190,8 @@ class LazyOffloadPendingStore:
         else:
             raise ValueError("gpu block pool not bound")
 
-    def select_items(self) -> list[PendingStoreItem]:
-        """Drain items from the queue when the policy's trigger is satisfied.
+    def pop_items_for_offload(self) -> list[PendingStoreItem]:
+        """Pop items from the queue when the policy's trigger is satisfied.
 
         An empty result means offload is not currently due.
 
@@ -196,7 +199,7 @@ class LazyOffloadPendingStore:
             Pending store items to submit, or an empty list when no offload is
             due.
         """
-        return self._policy.select_items(self._select_count)
+        return self._policy.pop_items_for_offload(self._select_count)
 
     def mark_req_finished(self, req_id: str):
         self._policy.mark_req_finished(req_id)

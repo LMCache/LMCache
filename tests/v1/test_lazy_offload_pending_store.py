@@ -56,73 +56,73 @@ class TestFIFOOffloadPolicy:
         policy.add(meta2, _make_block_hashes([0, 1]))
         assert len(policy._pending_items["req-0"].metadatas) == 2
 
-    def test_select_items_below_threshold_returns_empty(self):
+    def test_pop_items_for_offload_below_threshold_returns_empty(self):
         policy = FIFOOffloadPolicy({"lmcache.mp.lazy_offload_threshold": 3})
         policy.add(_make_meta("req-0"), _make_block_hashes([0]))
         policy.mark_req_finished("req-0")
-        assert policy.select_items(10) == []
+        assert policy.pop_items_for_offload(10) == []
         assert "req-0" in policy._pending_items
 
-    def test_select_items_at_threshold_returns_finished_items(self):
+    def test_pop_items_for_offload_at_threshold_returns_finished_items(self):
         policy = FIFOOffloadPolicy({"lmcache.mp.lazy_offload_threshold": 3})
         for i in range(3):
             policy.add(_make_meta(f"req-{i}"), _make_block_hashes([i]))
             policy.mark_req_finished(f"req-{i}")
-        assert len(policy.select_items(10)) == 3
+        assert len(policy.pop_items_for_offload(10)) == 3
 
     def test_mark_req_finished_not_in_pending_raises(self):
         policy = FIFOOffloadPolicy()
         with pytest.raises(ValueError, match="not in pending_items"):
             policy.mark_req_finished("nonexistent")
 
-    def test_select_items_returns_only_finished(self):
+    def test_pop_items_for_offload_returns_only_finished(self):
         policy = FIFOOffloadPolicy({"lmcache.mp.lazy_offload_threshold": 1})
         policy.add(_make_meta("req-0"), _make_block_hashes([0]))
         policy.mark_req_finished("req-0")
         policy.add(_make_meta("req-1"), _make_block_hashes([1]))
         # req-1 is not finished
 
-        selected = policy.select_items(10)
+        selected = policy.pop_items_for_offload(10)
         assert len(selected) == 1
         assert selected[0].request_id == "req-0"
 
-    def test_select_items_removes_from_pending(self):
+    def test_pop_items_for_offload_removes_from_pending(self):
         policy = FIFOOffloadPolicy({"lmcache.mp.lazy_offload_threshold": 2})
         policy.add(_make_meta("req-0"), _make_block_hashes([0]))
         policy.mark_req_finished("req-0")
         policy.add(_make_meta("req-1"), _make_block_hashes([1]))
         policy.mark_req_finished("req-1")
 
-        selected = policy.select_items(10)
+        selected = policy.pop_items_for_offload(10)
         assert len(selected) == 2
         assert len(policy._pending_items) == 0
         assert policy._finished_requests_count == 0
 
-    def test_select_items_skips_unfinished(self):
+    def test_pop_items_for_offload_skips_unfinished(self):
         policy = FIFOOffloadPolicy({"lmcache.mp.lazy_offload_threshold": 1})
         policy.add(_make_meta("req-0"), _make_block_hashes([0]))
         policy.add(_make_meta("req-1"), _make_block_hashes([1]))
         policy.mark_req_finished("req-1")
 
-        selected = policy.select_items(10)
+        selected = policy.pop_items_for_offload(10)
         assert len(selected) == 1
         assert selected[0].request_id == "req-1"
         # req-0 still pending
         assert "req-0" in policy._pending_items
 
-    def test_select_items_count_limits_output(self):
+    def test_pop_items_for_offload_count_limits_output(self):
         policy = FIFOOffloadPolicy({"lmcache.mp.lazy_offload_threshold": 1})
         for i in range(5):
             policy.add(_make_meta(f"req-{i}"), _make_block_hashes([i]))
             policy.mark_req_finished(f"req-{i}")
 
-        selected = policy.select_items(2)
+        selected = policy.pop_items_for_offload(2)
         assert len(selected) == 2
         assert len(policy._pending_items) == 3
 
-    def test_select_items_empty(self):
+    def test_pop_items_for_offload_empty(self):
         policy = FIFOOffloadPolicy()
-        assert policy.select_items(5) == []
+        assert policy.pop_items_for_offload(5) == []
 
 
 # ===========================================================================
@@ -184,19 +184,19 @@ class TestLazyOffloadPendingStore:
         assert len(pending.metadatas) == 1
         assert pending.metadatas[0][1] == {0: b"hash-0", 1: b"hash-1"}
 
-    def test_select_items_returns_empty_until_threshold(self):
+    def test_pop_items_for_offload_returns_empty_until_threshold(self):
         configs = {"lmcache.mp.lazy_offload_threshold": 2}
         store = self._setup_store_with_gpu_pool(configs)
 
         store.add(_make_meta("req-0"))
         store.mark_req_finished("req-0")
-        assert store.select_items() == []
+        assert store.pop_items_for_offload() == []
 
         store.add(_make_meta("req-1"))
         store.mark_req_finished("req-1")
-        assert len(store.select_items()) == 2
+        assert len(store.pop_items_for_offload()) == 2
 
-    def test_select_items_returns_correct_count(self):
+    def test_pop_items_for_offload_returns_correct_count(self):
         configs = {
             "lmcache.mp.lazy_offload_threshold": 1,
             "lmcache.mp.lazy_offload_select_count": 3,
@@ -207,7 +207,7 @@ class TestLazyOffloadPendingStore:
             store.add(_make_meta(f"req-{i}"))
             store.mark_req_finished(f"req-{i}")
 
-        selected = store.select_items()
+        selected = store.pop_items_for_offload()
         assert len(selected) == 3
 
     def test_mark_req_finished(self):
@@ -215,7 +215,7 @@ class TestLazyOffloadPendingStore:
         store = self._setup_store_with_gpu_pool(configs)
         store.add(_make_meta("req-0"))
         store.mark_req_finished("req-0")
-        assert [item.request_id for item in store.select_items()] == ["req-0"]
+        assert [item.request_id for item in store.pop_items_for_offload()] == ["req-0"]
 
     def test_update_get_remove_gpu_block_ids(self):
         store = LazyOffloadPendingStore()
@@ -231,7 +231,7 @@ class TestLazyOffloadPendingStore:
         assert store.get_request_gpu_block_ids("nonexistent") == []
 
     def test_end_to_end_flow(self):
-        """Test full add -> mark_finished -> select_items flow."""
+        """Test full add -> mark_finished -> pop_items_for_offload flow."""
         configs = {
             "lmcache.mp.lazy_offload_threshold": 3,
             "lmcache.mp.lazy_offload_select_count": 2,
@@ -245,12 +245,12 @@ class TestLazyOffloadPendingStore:
             store.mark_req_finished(f"req-{i}")
 
         # Select first 2 (select_count=2)
-        selected = store.select_items()
+        selected = store.pop_items_for_offload()
         assert len(selected) == 2
         assert selected[0].request_id == "req-0"
         assert selected[1].request_id == "req-1"
 
-    def test_select_items_multiple_batches(self):
+    def test_pop_items_for_offload_multiple_batches(self):
         configs = {
             "lmcache.mp.lazy_offload_threshold": 1,
             "lmcache.mp.lazy_offload_select_count": 2,
@@ -261,17 +261,17 @@ class TestLazyOffloadPendingStore:
             store.add(_make_meta(f"req-{i}"))
             store.mark_req_finished(f"req-{i}")
 
-        batch1 = store.select_items()
+        batch1 = store.pop_items_for_offload()
         assert len(batch1) == 2
         assert batch1[0].request_id == "req-0"
 
-        batch2 = store.select_items()
+        batch2 = store.pop_items_for_offload()
         assert len(batch2) == 2
         assert batch2[0].request_id == "req-2"
 
-        batch3 = store.select_items()
+        batch3 = store.pop_items_for_offload()
         assert len(batch3) == 2
         assert batch3[0].request_id == "req-4"
 
-        batch4 = store.select_items()
+        batch4 = store.pop_items_for_offload()
         assert len(batch4) == 0
