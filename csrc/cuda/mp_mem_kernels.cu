@@ -35,9 +35,23 @@ void destroy_phase_timing_events(cudaEvent_t start, cudaEvent_t end) {
   (void)cudaGetLastError();
 }
 
-void destroy_phase_timing_events(PhaseTimingRecord& record) {
-  destroy_phase_timing_events(record.start, record.end);
-}
+// Scope guard over one call's accumulated records: unless disarmed, destroys
+// their events on scope exit so sections completed before a failing step are
+// dropped rather than published — a transfer that threw did not run to
+// completion, and its partial phase samples would misrepresent the work
+// actually done. The destructor only destroys events, so it cannot throw
+// while unwinding.
+struct PhaseTimingDiscardGuard {
+  std::vector<PhaseTimingRecord>& records;
+  bool armed = true;
+  ~PhaseTimingDiscardGuard() {
+    if (armed) {
+      for (auto& record : records) {
+        destroy_phase_timing_events(record.start, record.end);
+      }
+    }
+  }
+};
 
 // Process-wide registry of in-flight timing events.
 //
@@ -105,7 +119,8 @@ class PhaseTimingRegistry {
   // `headroom` more can be pushed without exceeding the cap.
   void evict_until_below_cap(size_t headroom) {
     while (pending_.size() + headroom > kMaxPending) {
-      destroy_phase_timing_events(pending_.front());
+      PhaseTimingRecord& oldest = pending_.front();
+      destroy_phase_timing_events(oldest.start, oldest.end);
       pending_.pop_front();
     }
   }
@@ -616,19 +631,7 @@ void execute_object_group_transfer(
   if (timing) {
     call_records.reserve(batch_steps.size() * 2);
   }
-  // Registers accumulated records on scope exit — normal return or exception
-  // unwind — so sections completed before a failing step are never leaked.
-  struct PhaseTimingFlusher {
-    std::vector<PhaseTimingRecord>& records;
-    ~PhaseTimingFlusher() {
-      try {
-        PhaseTimingRegistry::instance().push_batch(records);
-      } catch (...) {
-        // Flushing during unwind must not terminate; on allocation failure
-        // the records' events are leaked, which is the lesser evil.
-      }
-    }
-  } phase_timing_flusher{call_records};
+  PhaseTimingDiscardGuard discard_on_failure{call_records};
   const auto timed_section = [&](TransferPhase phase, int64_t nbytes,
                                  const auto& body) {
     if (!timing || nbytes <= 0) {
@@ -744,6 +747,11 @@ void execute_object_group_transfer(
                     [&] { do_staging(step.staging); });
     }
   }
+
+  // The whole plan was enqueued, so the samples describe complete work:
+  // hand them over instead of discarding them.
+  discard_on_failure.armed = false;
+  PhaseTimingRegistry::instance().push_batch(call_records);
 }
 
 void set_phase_timing_enabled(bool enabled) {
@@ -778,7 +786,7 @@ pop_completed_phase_timings() {
     // Reached on success, on an elapsed-time failure, and on any query error
     // other than not-ready; the destroy helper clears the error state so a
     // timing failure never surfaces on an unrelated CUDA call.
-    destroy_phase_timing_events(record);
+    destroy_phase_timing_events(record.start, record.end);
   }
 
   registry.requeue_front(not_ready);

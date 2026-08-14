@@ -1222,7 +1222,6 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             all_dict: dict[ObjectKey, MemoryObj] = {}
             total_bytes: int = 0
             store_succeeded = False
-            reserve_seconds: float = 0.0
             try:
                 for obj_group_id in range(num_object_groups):
                     obj_keys = obj_keys_per_obj_group[obj_group_id]
@@ -1235,12 +1234,9 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                         self._ctx.chunk_size,
                         object_group_id=obj_group_id,
                     )
-                    # CPU share included in the stream-clocked store metric.
-                    reserve_start = time.perf_counter()
                     reserved_dict = self._ctx.storage_manager.reserve_write(
                         keys_to_reserve, layout_desc, "new"
                     )
-                    reserve_seconds += time.perf_counter() - reserve_start
                     all_dict.update(reserved_dict)
                     if reserved_dict:
                         total_bytes += next(
@@ -1294,7 +1290,6 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                             "model_name": model_name,
                             "total_bytes": total_bytes,
                             "num_tokens": num_tokens,
-                            "reserve_seconds": reserve_seconds,
                         },
                     ),
                 )

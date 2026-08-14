@@ -276,7 +276,9 @@ Every request contributes one sample (no sampling).
 START/END events fire on the GPU cupy stream (`publish_on_stream`).
 Caveat: on the store path, `reserve_write` runs on the CPU after
 `MP_STORE_START` is already enqueued, so the store denominator includes
-that CPU share (measured separately by `l0_l1_store_reserve_time`).
+that CPU share. It was measured at well under 1% of the window
+(~0.4 ms against a hundreds-of-ms window at CONC=128), so no separate
+metric or correction is provided.
 
 All throughput histograms carry `engine_id` (vLLM worker instance id),
 `device` (e.g. `"cuda:3"`), and `model_name` OTel attributes, enabling
@@ -287,19 +289,10 @@ per-worker, per-device, and per-model slicing in Prometheus (e.g.
 |---|---|---|---|---|
 | `lmcache_mp.l0_l1_store_throughput` | `lmcache_mp_l0_l1_store_throughput_GB_per_second` | Histogram | `MP_STORE_START` → `MP_STORE_END` | `total_bytes / (end_ts - start_ts) / 1e9` per request |
 | `lmcache_mp.l0_l1_load_throughput` | `lmcache_mp_l0_l1_load_throughput_GB_per_second` | Histogram | `MP_RETRIEVE_START` → `MP_RETRIEVE_END` | `total_bytes / (end_ts - start_ts) / 1e9` per request |
-| `lmcache_mp.l0_l1_store_reserve_time` | `lmcache_mp_l0_l1_store_reserve_time_seconds` | Histogram | `MP_STORE_END` | `reserve_seconds` metadata per request |
-| `lmcache_mp.l0_l1_store_gpu_throughput` | `lmcache_mp_l0_l1_store_gpu_throughput_GB_per_second` | Histogram | `MP_STORE_START` → `MP_STORE_END` | `total_bytes / (end_ts - start_ts - reserve_seconds) / 1e9` per request |
 
 **What it answers:** What GPU↔CPU throughput is each vLLM worker actually
 achieving for KV store/load? Does it match the theoretical PCIe bandwidth?
 Are some workers or GPUs underperforming?
-
-**Caveats:** the store throughput denominator starts at `MP_STORE_START`,
-which is enqueued before `reserve_write` runs on the CPU.
-`l0_l1_store_gpu_throughput` subtracts the reserve share per request at
-the source (histograms cannot be combined after the fact); it is an
-upper-bound estimate, since the subtraction assumes the stream idled
-while `reserve_write` ran.
 
 ---
 

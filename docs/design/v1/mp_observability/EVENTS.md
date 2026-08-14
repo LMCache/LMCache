@@ -185,7 +185,7 @@ to correlate START/END pairs.
 | EventType | Metadata keys | Types |
 |---|---|---|
 | `MP_STORE_START` | `device`, `engine_id`, `model_name` | `str`, `int`, `str` |
-| `MP_STORE_END` | `device`, `stored_count`, `engine_id`, `model_name`, `total_bytes`, `num_tokens`, `reserve_seconds` | `str`, `int`, `int`, `str`, `int`, `int`, `float` |
+| `MP_STORE_END` | `device`, `stored_count`, `engine_id`, `model_name`, `total_bytes`, `num_tokens` | `str`, `int`, `int`, `str`, `int`, `int` |
 | `MP_TRANSFER_PHASE_SAMPLES` | `samples` | `list[tuple[int, int, int, float, int]]` — `(phase, direction, device_index, elapsed_ms, nbytes)` per finished executor section; `phase` is a `TransferPhase` value (0 = kernel, 1 = staging), `direction` a `TransferDirection` value |
 | `MP_RETRIEVE_START` | `device`, `engine_id`, `model_name` | `str`, `int`, `str` |
 | `MP_RETRIEVE_END` | `device`, `retrieved_count`, `engine_id`, `model_name`, `cache_salt`, `total_bytes`, `num_tokens` | `str`, `int`, `int`, `str`, `str`, `int`, `int` |
@@ -195,20 +195,13 @@ to correlate START/END pairs.
 | `MP_VLLM_BLOCK_ALLOCATION` | `instance_id`, `model_name`, `records` | `int`, `str`, `list[BlockAllocationRecord]` (each has `req_id: str`, `new_block_ids: list[int]`, `new_token_ids: list[int]`) |
 | `MP_VLLM_END_SESSION` | `request_id` | `str` |
 
-### Store-side stats on `MP_STORE_END`
-
-`reserve_seconds` is the CPU time the store spent inside
-`storage_manager.reserve_write` (locks + allocation).  It runs after
-`MP_STORE_START` is already on the stream, so the stream-clocked store
-throughput includes it; the L0/L1 subscriber subtracts it per request to
-derive `l0_l1_store_gpu_throughput`.
-
 ### `MP_TRANSFER_PHASE_SAMPLES`
 
 Published CPU-synchronously from the store/retrieve handlers after popping
-finished samples via `lmc_ops.pop_completed_phase_timings()`.  Samples complete asynchronously,
-so a batch belongs to transfers enqueued earlier and carries its own
-`device_index`/`direction` labels instead of correlating with any request.
+finished samples via `lmc_ops.pop_completed_phase_timings()`.  Samples
+complete asynchronously, so a batch belongs to transfers enqueued earlier
+and carries its own `device_index`/`direction` labels instead of
+correlating with any request.
 Because popping piggybacks on request handling, the samples of the last
 transfers before an idle period stay queued (bounded) until the next
 store/retrieve arrives.

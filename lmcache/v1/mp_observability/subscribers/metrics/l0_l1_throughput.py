@@ -15,15 +15,9 @@ Implementation:
     replicas of the same request fire concurrent START/END pairs on
     different GPUs.
   - START/END events fire on the GPU cupy stream (``publish_on_stream``).
-    The store histogram includes the CPU ``reserve_write`` share (it runs
-    after MP_STORE_START is on the stream); ``l0_l1_store_gpu_throughput``
-    subtracts that share per request at the source.
-
-Also emitted from MP_STORE_END metadata:
-  - ``lmcache_mp.l0_l1_store_reserve_time``  — CPU reserve time (s)
-  - ``lmcache_mp.l0_l1_store_gpu_throughput`` — store throughput with the
-    reserve share subtracted from the window (GB/s). Upper-bound estimate:
-    the subtraction assumes the stream idled while ``reserve_write`` ran.
+    The store window also contains the CPU ``reserve_write`` share (it
+    runs after MP_STORE_START is on the stream); it was measured at well
+    under 1% of the window, so no correction is applied.
 """
 
 # Future
@@ -38,25 +32,6 @@ from opentelemetry import metrics
 # First Party
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventCallback, EventSubscriber
-
-
-def _as_number(value: Any) -> float | None:
-    """Coerce an event-metadata value to a number, or None if it isn't one.
-
-    ``publish_on_stream`` metadata crosses the C++ event recorder, whose
-    typed containers are ``map<str,str>``/``map<str,int>``; floats come
-    back stringified, while the in-process path keeps original types.
-    """
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)):
-        return float(value)
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
 
 
 class L0L1ThroughputSubscriber(EventSubscriber):
@@ -88,26 +63,6 @@ class L0L1ThroughputSubscriber(EventSubscriber):
             ),
             unit="GB/s",
         )
-        self._reserve_hist = meter.create_histogram(
-            "lmcache_mp.l0_l1_store_reserve_time",
-            description=(
-                "Histogram of per-store CPU time spent in "
-                "storage_manager.reserve_write (locks + allocation). This "
-                "share is included in the store throughput denominator."
-            ),
-            unit="s",
-        )
-        self._store_gpu_hist = meter.create_histogram(
-            "lmcache_mp.l0_l1_store_gpu_throughput",
-            description=(
-                "Histogram of L0→L1 store throughput in GB/s with the CPU "
-                "reserve_write share subtracted from the window: "
-                "total_bytes / (end_ts - start_ts - reserve_seconds). "
-                "Upper-bound estimate of GPU copy throughput; assumes the "
-                "stream idled during reserve_write."
-            ),
-            unit="GB/s",
-        )
 
     # -- EventSubscriber interface -----------------------------------------
 
@@ -127,41 +82,11 @@ class L0L1ThroughputSubscriber(EventSubscriber):
             self._pending_store[key] = event.timestamp
 
     def _on_store_end(self, event: Event) -> None:
-        window_seconds = self._record(
+        self._record(
             event=event,
             pending=self._pending_store,
             hist=self._store_hist,
         )
-        self._record_store_side_stats(event, window_seconds)
-
-    def _record_store_side_stats(
-        self, event: Event, window_seconds: float | None
-    ) -> None:
-        """Record the reserve time an END event carries and, when the
-        store window is known, the reserve-corrected GPU throughput.
-
-        Older publishers omit ``reserve_seconds``; both metrics are skipped
-        when it is absent or degenerate.
-
-        Args:
-            event: The ``MP_STORE_END`` event.
-            window_seconds: Stream-clocked store window from the matching
-                START/END pair, or ``None`` when no throughput sample was
-                recorded for this event.
-        """
-        reserve_seconds = _as_number(event.metadata.get("reserve_seconds"))
-        if reserve_seconds is None or reserve_seconds < 0:
-            return
-        attrs = self._metric_attributes(event)
-        self._reserve_hist.record(reserve_seconds, attributes=attrs)
-
-        if window_seconds is None:
-            return
-        total_bytes = event.metadata.get("total_bytes", 0)
-        gpu_window = window_seconds - reserve_seconds
-        if total_bytes <= 0 or gpu_window <= 0:
-            return
-        self._store_gpu_hist.record(total_bytes / gpu_window / 1e9, attributes=attrs)
 
     # -- Retrieve path (L1→L0, CPU→GPU) ------------------------------------
 
@@ -214,28 +139,25 @@ class L0L1ThroughputSubscriber(EventSubscriber):
         event: Event,
         pending: dict[tuple[str, str], float],
         hist: Any,
-    ) -> float | None:
+    ) -> None:
         """Record one throughput sample from a matched START/END pair.
 
-        Returns:
-            The stream-clocked window in seconds when a sample was
-            recorded, or ``None`` when the event could not be paired or
-            was degenerate (no bytes, non-positive window).
+        Unpaired or degenerate events (no bytes, non-positive window) are
+        dropped without recording.
         """
         key = cls._correlation_key(event)
         if key is None:
-            return None
+            return
         t_start = pending.pop(key, None)
         if t_start is None:
-            return None  # No matching START event
+            return  # No matching START event
 
         total_bytes = event.metadata.get("total_bytes", 0)
         if total_bytes <= 0:
-            return None
+            return
 
         dt = event.timestamp - t_start
         if dt <= 0:
-            return None
+            return
 
         hist.record(total_bytes / dt / 1e9, attributes=cls._metric_attributes(event))
-        return dt
