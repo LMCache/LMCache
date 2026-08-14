@@ -17,10 +17,15 @@ import torch
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
-from lmcache.v1.memory_management import AdHocMemoryAllocator, MemoryFormat, MemoryObj
+from lmcache.v1.memory_allocators.ad_hoc_memory_allocator import AdHocMemoryAllocator
+from lmcache.v1.memory_management import (
+    MemoryFormat,
+    MemoryObj,
+)
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.plugins.dax_backend import DaxBackend
+import lmcache.lmcache_native as lmcache_native
 import lmcache.v1.storage_backend.plugins.dax_backend as dax_backend_module
 
 
@@ -52,7 +57,6 @@ def _create_metadata(
 
 def _create_multi_group_metadata(chunk_size: int = 16) -> LMCacheMetadata:
     # First Party
-    import lmcache.c_ops as lmc_ops
 
     metadata = _create_metadata(chunk_size=chunk_size)
     # Two single-layer groups whose only differing signature field is
@@ -63,8 +67,7 @@ def _create_multi_group_metadata(chunk_size: int = 16) -> LMCacheMetadata:
     ]
     metadata.kv_layer_groups_manager = KVLayerGroupsManager(
         kv_caches,
-        lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS,
-        num_blocks=1,
+        [lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS] * len(kv_caches),
     )
     return metadata
 

@@ -15,9 +15,10 @@ import zmq
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
 from lmcache.v1.multiprocess.custom_types import (
-    CudaIPCWrapper,
+    DeviceIPCWrapper,
     get_customized_decoder,
     get_customized_encoder,
 )
@@ -63,13 +64,21 @@ def unwrap_request_payloads(
 
 
 _SPECIAL_ENCODER_DECODERS = {
-    CudaIPCWrapper: (
-        get_customized_encoder(CudaIPCWrapper),
-        get_customized_decoder(CudaIPCWrapper),
+    DeviceIPCWrapper: (
+        get_customized_encoder(DeviceIPCWrapper),
+        get_customized_decoder(DeviceIPCWrapper),
     ),
-    list[CudaIPCWrapper]: (
-        get_customized_encoder(list[CudaIPCWrapper]),
-        get_customized_decoder(list[CudaIPCWrapper]),
+    list[DeviceIPCWrapper]: (
+        get_customized_encoder(list[DeviceIPCWrapper]),
+        get_customized_decoder(list[DeviceIPCWrapper]),
+    ),
+    MemoryLayoutDesc: (
+        get_customized_encoder(MemoryLayoutDesc),
+        get_customized_decoder(MemoryLayoutDesc),
+    ),
+    dict[int, MemoryLayoutDesc]: (
+        get_customized_encoder(dict[int, MemoryLayoutDesc]),
+        get_customized_decoder(dict[int, MemoryLayoutDesc]),
     ),
 }
 

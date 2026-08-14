@@ -25,6 +25,7 @@ import torch
 pytest.importorskip("nixl")
 
 # First Party
+from lmcache import torch_device_type
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.storage_backend.nixl_storage_backend import (
     B128_MAX_POOL_SIZE,
@@ -147,8 +148,13 @@ class TestValidateNixlBackend:
         assert NixlStorageConfig.validate_nixl_backend("DOCA_MEMOS", "cuda") is False
 
     def test_doca_memos_cuda_with_index_is_rejected(self) -> None:
-        # device strings may carry an index suffix (e.g. "cuda:0")
-        assert NixlStorageConfig.validate_nixl_backend("DOCA_MEMOS", "cuda:0") is False
+        # device strings may carry an index suffix (e.g. f"{torch_device_type}:0")
+        assert (
+            NixlStorageConfig.validate_nixl_backend(
+                "DOCA_MEMOS", f"{torch_device_type}:0"
+            )
+            is False
+        )
 
 
 class TestCreatePool:
@@ -156,7 +162,12 @@ class TestCreatePool:
 
     def test_doca_memos_creates_b128_object_pool(self) -> None:
         pool = NixlStaticStorageBackend.createPool(
-            "DOCA_MEMOS", size=8, path="/tmp/unused", use_direct_io=False
+            "DOCA_MEMOS",
+            size=8,
+            path="/tmp/unused",
+            use_direct_io=False,
+            path_sharding="by_gpu",
+            dst_device="cpu",
         )
         assert isinstance(pool, NixlObjectPool)
         # b128 slot names are 32-char lowercase hex (no "obj_" prefix).
@@ -165,7 +176,12 @@ class TestCreatePool:
 
     def test_obj_creates_non_b128_object_pool(self) -> None:
         pool = NixlStaticStorageBackend.createPool(
-            "OBJ", size=8, path="/tmp/unused", use_direct_io=False
+            "OBJ",
+            size=8,
+            path="/tmp/unused",
+            use_direct_io=False,
+            path_sharding="by_gpu",
+            dst_device="cpu",
         )
         assert isinstance(pool, NixlObjectPool)
         assert all(k.startswith("obj_") for k in pool.keys)

@@ -1,23 +1,30 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Shared-memory NonGpuContext implementation for multiprocess mode."""
+"""Shared-memory EngineDrivenContext implementation for multiprocess mode."""
 
 # Standard
 from dataclasses import dataclass
 from multiprocessing import shared_memory
 from multiprocessing.resource_tracker import unregister
 from typing import Any
+import ctypes
 
 # Third Party
 import torch
 
 # First Party
-from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
+from lmcache import torch_dev
+from lmcache.logging import init_logger
+from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
+from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
 from lmcache.v1.multiprocess.transfer_context.base import (
-    NonGpuContext,
-    NonGpuContextMetadata,
+    EngineDrivenContext,
+    EngineDrivenContextMetadata,
 )
+from lmcache.v1.platform import current_device_spec
+
+logger = init_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -73,12 +80,12 @@ class ShmSlotDescriptor:
         )
 
 
-class NonGpuContextShm(NonGpuContext):
-    """Shared-memory implementation of :class:`NonGpuContext`."""
+class EngineDrivenContextShm(EngineDrivenContext):
+    """Shared-memory implementation of :class:`EngineDrivenContext`."""
 
     def __init__(
         self,
-        metadata: NonGpuContextMetadata,
+        metadata: EngineDrivenContextMetadata,
         mq_client: MessageQueueClient,
         mq_timeout: float,
         shm_name: str,
@@ -92,6 +99,9 @@ class NonGpuContextShm(NonGpuContext):
         self._pool_size = pool_size
         self._shm: shared_memory.SharedMemory | None = None
         self._shm_buffer: memoryview | None = None
+        self._pinned = False
+        self._pinned_ptr = 0
+        self._pinned_size = 0
         try:
             self._shm = shared_memory.SharedMemory(
                 name=shm_name.lstrip("/"), create=False
@@ -101,6 +111,11 @@ class NonGpuContextShm(NonGpuContext):
             # unlink the segment when this worker exits.
             unregister(f"/{self._shm.name}", "shared_memory")
             self._shm_buffer = self._shm.buf
+            # pin memory is per process
+            # the shm might be pinned on lmcache server side already
+            # pin memory here is for worker side for fast DMA copy
+            self._pin_shm_buffer()
+            logger.info("SHM pinned=%s for shm_name=%s", self._pinned, self._shm_name)
         except Exception:
             self._shm = None
             self._shm_buffer = None
@@ -143,20 +158,22 @@ class NonGpuContextShm(NonGpuContext):
         ]
 
     def prepare_store(
-        self, key: IPCCacheEngineKey, instance_id: int
+        self, key: IPCCacheServerKey, instance_id: int
     ) -> tuple[list[torch.Tensor], list[int]] | None:
         future = self.mq_client.submit_request(
             RequestType.PREPARE_STORE,
             [key, instance_id],
             get_response_class(RequestType.PREPARE_STORE),
         )
-        try:
-            response = future.result(timeout=self.mq_timeout)
-        except TimeoutError as err:
-            raise TimeoutError(
+        # wait() first so a timeout raises exactly one LMCacheTimeoutError
+        # (one event); result() then returns without its own timeout.
+        if not future.wait(timeout=self.mq_timeout):
+            raise LMCacheTimeoutError(
                 f"PREPARE_STORE timed out for instance_id={instance_id} "
-                f"after {self.mq_timeout}s"
-            ) from err
+                f"after {self.mq_timeout}s",
+                session_id=key.request_id,
+            )
+        response = future.result()
         context = response.context if isinstance(response.context, dict) else {}
         slots = context.get("slots")
         if not isinstance(slots, list):
@@ -168,7 +185,7 @@ class NonGpuContextShm(NonGpuContext):
         return self._build_slot_tensors(slots), chunk_indices
 
     def commit_store(
-        self, key: IPCCacheEngineKey, instance_id: int, _chunks: list[torch.Tensor]
+        self, key: IPCCacheServerKey, instance_id: int, _chunks: list[torch.Tensor]
     ) -> bool:
         future = self.mq_client.submit_request(
             RequestType.COMMIT_STORE,
@@ -181,7 +198,7 @@ class NonGpuContextShm(NonGpuContext):
             return False
 
     def prepare_retrieve(
-        self, key: IPCCacheEngineKey, instance_id: int
+        self, key: IPCCacheServerKey, instance_id: int
     ) -> list[torch.Tensor] | None:
         future = self.mq_client.submit_request(
             RequestType.PREPARE_RETRIEVE,
@@ -197,7 +214,7 @@ class NonGpuContextShm(NonGpuContext):
         slots = response.context.get("slots", [])
         return self._build_slot_tensors(slots) if slots else None
 
-    def commit_retrieve(self, key: IPCCacheEngineKey, instance_id: int) -> bool:
+    def commit_retrieve(self, key: IPCCacheServerKey, instance_id: int) -> bool:
         future = self.mq_client.submit_request(
             RequestType.COMMIT_RETRIEVE,
             [key, instance_id],
@@ -211,8 +228,49 @@ class NonGpuContextShm(NonGpuContext):
     def close(self) -> None:
         if self._shm is None:
             return
+        self._unpin_shm_buffer()
         try:
             self._shm.close()
         finally:
             self._shm = None
             self._shm_buffer = None
+
+    def _pin_shm_buffer(self) -> None:
+        """Pin the SHM buffer as page-locked host memory via cudaHostRegister.
+
+        Enables faster async D2H CUDA copies to the SHM region. If pinning is
+        not available or fails, logs a warning and continues without pinning.
+        """
+        if self._shm_buffer is None or not torch_dev.is_available():
+            return
+        try:
+            ptr = ctypes.addressof(ctypes.c_char.from_buffer(self._shm_buffer))
+        except Exception as exc:
+            logger.warning(
+                "Failed to get pointer for shm_name=%s: %r; "
+                "D2H copies will be synchronous",
+                self._shm_name,
+                exc,
+            )
+            return
+        if current_device_spec.pin_memory(ptr, self._pool_size):
+            self._pinned = True
+            self._pinned_ptr = ptr
+            self._pinned_size = self._pool_size
+        else:
+            logger.warning(
+                "pin_memory failed for shm_name=%s ptr=%#x size=%d; "
+                "D2H copies will be synchronous",
+                self._shm_name,
+                ptr,
+                self._pool_size,
+            )
+
+    def _unpin_shm_buffer(self) -> None:
+        """Unpin the SHM buffer if it was previously pinned via cudaHostRegister."""
+        if not self._pinned or self._pinned_ptr == 0:
+            return
+        current_device_spec.unpin_memory(self._pinned_ptr)
+        self._pinned = False
+        self._pinned_ptr = 0
+        self._pinned_size = 0

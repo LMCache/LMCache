@@ -14,7 +14,12 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache import torch_dev, torch_device_type
+from lmcache.v1.distributed.api import (
+    MemoryLayoutDesc,
+    ObjectKey,
+    PrefetchRequestSpec,
+)
 from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import (
@@ -40,10 +45,11 @@ from lmcache.v1.memory_management import MemoryObjMetadata, TensorMemoryObj
 # InMemoryMetricReader; controllers bind their instruments to it.
 from tests.v1.mp_observability.subscribers.metrics.otel_setup import reader as _reader
 
-pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="CUDA is not available"
-)
-
+if not torch_dev.is_available():
+    pytest.skip(
+        f"Requires available {torch_device_type} runtime",
+        allow_module_level=True,
+    )
 
 # =============================================================================
 # Helpers
@@ -259,8 +265,10 @@ class TestNumInflightL2Stores:
         # Both adapters should have stored every key (DefaultStorePolicy
         # writes to all) and counters should return to baseline.
         assert wait_for_condition(
-            lambda: adapters[0].debug_get_stored_object_count() == 3
-            and adapters[1].debug_get_stored_object_count() == 3
+            lambda: (
+                adapters[0].debug_get_stored_object_count() == 3
+                and adapters[1].debug_get_stored_object_count() == 3
+            )
         )
         assert wait_for_condition(
             lambda: (
@@ -303,7 +311,7 @@ class TestNumInflightL2Loads:
         before_loads = _value_for("lmcache_mp.num_inflight_l2_loads", attrs)
         before_bytes = _value_for("lmcache_mp.inflight_load_memory_usage_bytes", attrs)
 
-        req_id = ctrl.submit_prefetch_request(keys, layout)
+        req_id = ctrl.submit_prefetch_request(PrefetchRequestSpec(keys, {0: layout}))
 
         # Wait for the request to fully resolve, then the counters should
         # come back to where they started.
@@ -350,7 +358,7 @@ class TestNumInflightL2Loads:
         before_loads = _value_for("lmcache_mp.num_inflight_l2_loads", attrs)
         before_bytes = _value_for("lmcache_mp.inflight_load_memory_usage_bytes", attrs)
 
-        ctrl.submit_prefetch_request(keys, layout)
+        ctrl.submit_prefetch_request(PrefetchRequestSpec(keys, {0: layout}))
 
         # Wait until the load is actually in flight on this adapter; only
         # then is ``_cleanup_in_flight_requests`` the path that brings the

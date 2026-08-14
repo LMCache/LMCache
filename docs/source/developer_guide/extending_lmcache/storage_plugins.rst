@@ -195,7 +195,7 @@ Minimal Example
     import asyncio
     import threading
 
-    from lmcache.native_storage_ops import Bitmap
+    from lmcache.lmcache_native import Bitmap
     from lmcache.v1.distributed.l2_adapters.base import (
         L2AdapterInterface,
         L2TaskId,

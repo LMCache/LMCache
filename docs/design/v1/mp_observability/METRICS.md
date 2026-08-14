@@ -5,7 +5,7 @@
 The observability system uses an **EventBus with pub/sub dispatch** and
 **OpenTelemetry** for metrics instrumentation.
 
-- **Producers** (`L1Manager`, `StorageManager`, `MPCacheEngine`) publish `Event` objects
+- **Producers** (`L1Manager`, `StorageManager`, `MPCacheServer`) publish `Event` objects
   to the EventBus.
 - **Metrics subscribers** (e.g. `L1MetricsSubscriber`, `L2MetricsSubscriber`) subscribe to
   specific event types and update OTel counters.
@@ -28,7 +28,7 @@ attributes built at startup:
 
 | Attribute | CLI flag | Source | Applies to |
 |---|---|---|---|
-| `service.instance.id` | `--service-instance-id` | `ObservabilityConfig.service_instance_id` (`None` defaults to a random UUID v4; explicit `""` preserved) | All metrics + spans |
+| `service.instance.id` | `--instance-id` | `MPServerConfig.instance_id` (defaults to a random UUID v4 at startup; projected onto `ObservabilityConfig.service_instance_id` by `run_cache_server` so telemetry and coordinator membership share one id) | All metrics + spans |
 
 Resource attributes are attached to the `MeterProvider` / `TracerProvider`
 in `otel_init.py` and therefore appear on every datapoint exported via
@@ -102,6 +102,23 @@ require a cross-cutting API change out of scope for this PR.
 **What it answers:**
 - `l1_allocation_failure` — how often is L1 rejecting writes for lack of memory, split by whether the pressure is user stores or L2 prefetch?
 - `l1_read_failure` — a **post-lookup anomaly counter**, not a cache-miss counter. Should stay near zero in healthy operation; any non-zero value indicates a lookup/reserve race or unexpected eviction in MP mode.
+
+---
+
+## Timeout Metrics
+
+Cross-component anomaly counter. Incremented once per `LMCacheTimeoutError`
+constructed (see `errors.py` and the `TIMEOUT_RAISED` event in
+[EVENTS.md](EVENTS.md)), tagged by `exception_type` so operators can alert on
+the timeout rate per class.
+
+| OTel metric name | Prometheus name | Type | Source event | Calculation | Tags |
+|---|---|---|---|---|---|
+| `lmcache_mp.timeouts` | `lmcache_mp_timeouts_total` | Counter | `TIMEOUT_RAISED` | `+1` per event | `exception_type` |
+
+**What it answers:** how often are operations timing out, and of which kind?
+Should stay near zero in healthy operation; a rising rate signals an
+overloaded or stuck MQ/transfer/adapter path.
 
 ---
 
@@ -179,7 +196,7 @@ either L1 or L2.  L0 (GPU prefix cache) is intentionally excluded — it is
 vLLM-owned and not observable from LMCache.
 
 Both counters carry `model_name` and `cache_salt` OTel attributes (captured
-at lookup time from `IPCCacheEngineKey`), enabling per-model and per-tenant
+at lookup time from `IPCCacheServerKey`), enabling per-model and per-tenant
 slicing of the hit rate.  `cache_salt` can be high-cardinality; drop it at
 scrape time with `metric_relabel_configs` if storage cost matters.
 
@@ -353,7 +370,7 @@ scrape.
 
 ---
 
-## MPCacheEngine Observable Gauges
+## MPCacheServer Observable Gauges
 
 These metrics are registered directly via `register_gauge` (pull-based OTel
 observable gauges) rather than through the EventBus, because they represent
@@ -361,7 +378,7 @@ point-in-time state snapshots that do not correspond to discrete events.
 
 | OTel metric name | Prometheus name | Type | Source | Calculation |
 |---|---|---|---|---|
-| `lmcache_mp.active_prefetch_jobs` | `lmcache_mp_active_prefetch_jobs` | ObservableGauge | `MPCacheEngine._prefetch_jobs` | `len(_prefetch_jobs)` at scrape time |
+| `lmcache_mp.active_prefetch_jobs` | `lmcache_mp_active_prefetch_jobs` | ObservableGauge | `MPCacheServer._prefetch_jobs` | `len(_prefetch_jobs)` at scrape time |
 
 **What it answers:** How many prefetch jobs are currently in-flight? A sustained high value may indicate slow L2 backends or client-side polling delays.
 

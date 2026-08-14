@@ -63,6 +63,38 @@ Commonly used flags include:
      - Fraction of L1 cleared per eviction cycle.
    * - ``--max-workers N``
      - Number of server worker processes.
+   * - ``--coordinator-url URL``
+     - Register with an MP coordinator at this base URL (e.g.
+       ``http://coordinator:9300``). Opt-in; enables fleet registration. See
+       :doc:`/mp/coordinator`.
+   * - ``--coordinator-advertise-ip IP``
+     - IP the coordinator should reach this server at (defaults to the
+       outbound IP).
+   * - ``--coordinator-heartbeat-interval SECONDS``
+     - Seconds between heartbeats (``> 0``, default ``5``). Keep well below the
+       coordinator's instance timeout.
+   * - ``--coordinator-event-reporting``
+     - Stream cache store/access/delete events to the coordinator, feeding the
+       key directory (fleet-wide placement tracking), L2 usage/quota tracking
+       and eviction, and the blend index behind fleet CacheBlend matching.
+   * - ``--coordinator-event-flush-interval SECONDS``
+     - Seconds between cache-event batch flushes (``> 0``, default ``1``).
+   * - ``--p2p-advertise-url HOST:PORT``
+     - Enable P2P KV cache sharing and advertise this server's
+       transfer-channel endpoint to peers (e.g. ``10.0.0.1:8500``). Setting it
+       turns P2P on; it additionally requires ``--coordinator-url`` for peer
+       discovery. See :doc:`/mp/p2p`.
+   * - ``--p2p-listen-url HOST:PORT``
+     - Address the transfer-channel server binds to. Defaults to
+       ``--p2p-advertise-url``. Set it when the advertised address differs from
+       the bind address (e.g. bind ``0.0.0.0`` while advertising a routable IP).
+   * - ``--p2p-lookup-timeout SECONDS``
+     - Deadline for a peer lookup before it counts as a miss (default ``30``).
+   * - ``--p2p-load-timeout SECONDS``
+     - Deadline for a peer KV read before it counts as a failure
+       (default ``30``).
+   * - ``--p2p-transfer-engine ENGINE``
+     - Transfer-channel implementation for P2P reads (default ``nixl``).
    * - ``--trace-level {storage}``
      - Enable storage-level trace recording (see :doc:`trace`).
    * - ``--trace-output PATH``

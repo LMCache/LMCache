@@ -36,7 +36,7 @@ contracts see [EVENTS.md](EVENTS.md).
 
 - **No KV tensor data is captured.** Replay exercises bookkeeping and
   controller logic; payloads at replay time are zeros.
-- **No MQ-, MPCacheEngine-, or GPU-copy-level capture.** Those layers
+- **No MQ-, MPCacheServer-, or GPU-copy-level capture.** Those layers
   carry GPU IPC handles and require a swappable GPU-copy abstraction
   that is out of scope.
 - **No runtime enable/disable.** Capture is configured at server
@@ -495,7 +495,7 @@ file format:
 1. **`level` header field** — the same `Header` carries the
    discriminator; replay dispatches on it.
 2. **Reusable decorator** — apply `@enable_tracing` to MQ handlers or
-   `MPCacheEngine` methods. No new event type, no format change. The
+   `MPCacheServer` methods. No new event type, no format change. The
    `qualname` string differentiates them.
 3. **Polymorphic recorder** — `TraceRecorder` ABC accepts new
    subclasses with different `get_subscriptions()` mappings (or, more

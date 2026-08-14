@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from lmcache.v1.mp_observability.event_bus import EventBus
 
 # First Party
+from lmcache.v1.mp_observability.gc_monitor import GCMonitorConfig
 from lmcache.v1.mp_observability.subscribers.logging.lookup_hash import (
     LookupHashLogConfig,
 )
@@ -63,6 +64,18 @@ class ObservabilityConfig:
     """Configuration for lookup hash file logging.  Disabled by default
     (empty ``output_dir``)."""
 
+    gc_monitor: GCMonitorConfig = field(default_factory=GCMonitorConfig)
+    """Configuration for CPython garbage-collection timing.  Disabled by
+    default.  The monitor logs directly rather than publishing events, so it
+    is independent of every other flag here including :attr:`enabled`."""
+
+    extra_logging_enabled: bool = False
+    """Register the periodic extra-stats logging subscriber (opt-in):
+    per-GPU L0<->L1 store/retrieve throughput and token counts at INFO."""
+
+    extra_logging_interval: float = 10.0
+    """Seconds between extra-stats log flushes."""
+
     trace_level: str | None = None
     """If set, enables trace recording at the given level.  Currently
     only ``"storage"`` is supported.  See
@@ -74,14 +87,16 @@ class ObservabilityConfig:
     minted and logged at INFO."""
 
     service_instance_id: str | None = None
-    """Identifier for this MP server instance.  Attached as the OTel
-    Resource attribute ``service.instance.id`` on every metric and span.
-    One MP server has exactly one instance id.
+    """OTel ``service.instance.id`` resource attribute, attached to every
+    metric and span. There is no CLI flag for it: the operator-facing id is
+    ``--instance-id`` (``MPServerConfig.instance_id``), which ``run_cache_server``
+    projects onto this attribute so telemetry and coordinator membership share
+    one id.
 
-    ``None`` (the default, also the state when the CLI flag is not
-    passed) falls back to a random UUID v4 at ``init_observability``
-    time.  An explicit empty string is preserved verbatim so operators
-    who want the attribute to report ``""`` can ask for it."""
+    ``None`` (the default) means "not set": standalone callers that build an
+    ``ObservabilityConfig`` directly (e.g. the trace CLI driver) fall back to a
+    random UUID v4 at ``init_observability`` time. An explicit value is
+    preserved verbatim."""
 
 
 DEFAULT_OBSERVABILITY_CONFIG = ObservabilityConfig(enabled=False)
@@ -162,18 +177,6 @@ def add_observability_args(
             "(0, 1.0]. Counters always count all events. Default is 0.01 (1%%)."
         ),
     )
-    group.add_argument(
-        "--service-instance-id",
-        type=str,
-        default=None,
-        help=(
-            "Identifier for this MP server instance. Attached as the OTel "
-            "Resource attribute 'service.instance.id' on every metric and "
-            "span. When the flag is not passed, defaults to a random "
-            "UUID v4 minted at startup. Pass --service-instance-id='' to "
-            "force an empty attribute value."
-        ),
-    )
 
     # Lookup hash logging config
     log_group = parser.add_argument_group(
@@ -207,6 +210,56 @@ def add_observability_args(
         default=100,
         help="Max number of lookup hash log files to keep. "
         "Oldest files are deleted when this limit is exceeded. Default is 100.",
+    )
+
+    gc_group = parser.add_argument_group(
+        "GC Monitoring",
+        "Time CPython garbage collections so their pauses can be "
+        "correlated with request tail latency",
+    )
+    gc_group.add_argument(
+        "--enable-gc-monitor",
+        action="store_true",
+        default=False,
+        help="Time every CPython garbage collection and log the slow ones at "
+        "INFO. Disabled by default.",
+    )
+    gc_group.add_argument(
+        "--gc-monitor-min-pause-ms",
+        type=float,
+        default=1.0,
+        help="Only log garbage collections that took at least this many "
+        "milliseconds. Default is 1.0; 0 logs every collection, including "
+        "the very frequent sub-millisecond gen-0 sweeps.",
+    )
+    gc_group.add_argument(
+        "--gc-monitor-top-objects",
+        type=int,
+        default=0,
+        help="Include a breakdown of the N most common object types in each "
+        "logged collection. This walks the whole generation on EVERY "
+        "collection and can itself cost hundreds of milliseconds on a large "
+        "cache. Default is 0 (off); use only while debugging.",
+    )
+
+    extra_group = parser.add_argument_group(
+        "Extra Logging",
+        "Periodic INFO-level L0<->L1 throughput/token stats per GPU and "
+        "L1 memory usage",
+    )
+    extra_group.add_argument(
+        "--enable-extra-logging",
+        action="store_true",
+        default=False,
+        help="Periodically log L0<->L1 store/retrieve throughput and token "
+        "counts per GPU, and L1 memory usage. Disabled by default.",
+    )
+    extra_group.add_argument(
+        "--extra-logging-interval",
+        type=float,
+        default=10.0,
+        help="Seconds between extra-logging emissions. Default is 10.0. "
+        "Values below 1.0 are limited by the 1 Hz internal heartbeat.",
     )
 
     trace_group = parser.add_argument_group(
@@ -260,9 +313,15 @@ def parse_args_to_observability_config(
             rotation_max_size=args.lookup_hash_log_rotation_max_size,
             max_files=args.lookup_hash_log_max_files,
         ),
+        gc_monitor=GCMonitorConfig(
+            enabled=args.enable_gc_monitor,
+            min_pause_ms=args.gc_monitor_min_pause_ms,
+            top_objects=args.gc_monitor_top_objects,
+        ),
+        extra_logging_enabled=args.enable_extra_logging,
+        extra_logging_interval=args.extra_logging_interval,
         trace_level=args.trace_level,
         trace_output=args.trace_output,
-        service_instance_id=args.service_instance_id,
     )
 
     if config.tracing_enabled and config.otlp_endpoint is None:
@@ -270,6 +329,15 @@ def parse_args_to_observability_config(
             "--enable-tracing requires --otlp-endpoint to be set. "
             "Tracing needs an OTLP gRPC endpoint to export spans."
         )
+
+    if config.extra_logging_enabled and not config.enabled:
+        raise ValueError(
+            "--enable-extra-logging requires the observability EventBus; "
+            "remove --disable-observability."
+        )
+
+    if config.extra_logging_interval <= 0:
+        raise ValueError("--extra-logging-interval must be > 0.")
 
     return config
 
@@ -349,6 +417,7 @@ def init_observability(
             L2ThroughputSubscriber,
             LookupMetricsSubscriber,
             SMLifecycleSubscriber,
+            TimeoutMetricsSubscriber,
         )
 
         sample_rate = obs_config.metrics_sample_rate
@@ -366,6 +435,7 @@ def init_observability(
         bus.register_subscriber(BlendMetricsSubscriber())
         bus.register_subscriber(EngineMetricsSubscriber())
         bus.register_subscriber(EventBusSelfMetricsSubscriber(bus))
+        bus.register_subscriber(TimeoutMetricsSubscriber())
 
     if obs_config.logging_enabled:
         # First Party
@@ -375,6 +445,7 @@ def init_observability(
             L2LoggingSubscriber,
             MPServerLoggingSubscriber,
             SMLoggingSubscriber,
+            TimeoutLoggingSubscriber,
         )
 
         bus.register_subscriber(MPServerLoggingSubscriber())
@@ -382,18 +453,21 @@ def init_observability(
         bus.register_subscriber(L2LoggingSubscriber())
         bus.register_subscriber(SMLoggingSubscriber())
         bus.register_subscriber(BlendLoggingSubscriber())
+        bus.register_subscriber(TimeoutLoggingSubscriber())
 
     if obs_config.tracing_enabled:
         # First Party
         from lmcache.v1.mp_observability.subscribers.tracing import (
             BlendTracingSubscriber,
             MPServerTracingSubscriber,
+            TimeoutTracingSubscriber,
             get_span_registry,
         )
 
         registry = get_span_registry()
         bus.register_subscriber(MPServerTracingSubscriber(registry))
         bus.register_subscriber(BlendTracingSubscriber(registry))
+        bus.register_subscriber(TimeoutTracingSubscriber(registry))
 
     # Lookup hash file logging (independent of the logging_enabled flag —
     # it has its own enable gate via output_dir).
@@ -404,6 +478,18 @@ def init_observability(
         )
 
         bus.register_subscriber(LookupHashLoggingSubscriber(obs_config.lookup_hash_log))
+
+    # Extra-stats logging (independent of the logging_enabled flag — it has
+    # its own enable gate).
+    if obs_config.extra_logging_enabled:
+        # First Party
+        from lmcache.v1.mp_observability.subscribers.logging.extra_stats import (
+            ExtraStatsLoggingSubscriber,
+        )
+
+        bus.register_subscriber(
+            ExtraStatsLoggingSubscriber(obs_config.extra_logging_interval)
+        )
 
     bus.start()
     return bus

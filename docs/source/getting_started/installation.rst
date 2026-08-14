@@ -31,6 +31,15 @@ Install LMCache
                             You're all set! You can now start using LMCache. For hands-on guides and more
                             usage examples, see the :ref:`quickstart_examples` section.
 
+                        .. note::
+
+                            NIXL support (e.g. for disaggregated prefill and P2P KV
+                            sharing) is an optional extra:
+
+                            .. code-block:: bash
+
+                                uv pip install lmcache[nixl]
+
                     .. tab-item:: CUDA 12.9
 
                         The CUDA 12.9 wheel is published to a dedicated
@@ -50,6 +59,33 @@ Install LMCache
 
                             ``--extra-index-url https://download.pytorch.org/whl/cu129`` ensures the CUDA 12.9
                             build of PyTorch is resolved. Without it, pip may select a mismatched CUDA variant.
+
+                    .. tab-item:: ROCm
+
+                        The ROCm wheel targets AMD Instinct **gfx942** (MI300X / MI325X) and
+                        **gfx950** (MI350X / MI355X) in one fat binary, and is ABI-matched to the
+                        upstream ``vllm/vllm-openai-rocm`` image (torch 2.11, ROCm 7.2, Python 3.12).
+                        It is published to a dedicated
+                        `GitHub Release <https://github.com/LMCache/LMCache/releases>`__ rather than PyPI.
+
+                        Install directly inside an upstream vLLM ROCm container — torch and the
+                        ROCm runtime are already present, so ``--no-deps`` binds against them:
+
+                        .. code-block:: bash
+
+                            docker run -it --device /dev/kfd --device /dev/dri \
+                                --group-add video --security-opt seccomp=unconfined \
+                                --entrypoint bash vllm/vllm-openai-rocm:v0.25.0
+
+                            VERSION=0.5.3  # replace with target release
+                            pip install lmcache==${VERSION} --no-deps \
+                                --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/v${VERSION}-rocm
+
+                        .. note::
+
+                            The wheel excludes torch and the ROCm runtime libraries (they bind to the
+                            host image at runtime). Match the wheel's minor torch/ROCm version to your
+                            container; for other bases, use the **From Source** tab.
 
             .. tab-item:: Nightly
 
@@ -118,8 +154,8 @@ Install LMCache
                             uv pip install vllm \
                                 --extra-index-url https://download.pytorch.org/whl/cu129 \
                                 --index-strategy unsafe-best-match
-                            # LMCACHE_CUDA_MAJOR=12 makes setup.py pick cupy-cuda12x / nixl-cu12
-                            # for install_requires instead of the cu13 defaults.
+                            # LMCACHE_CUDA_MAJOR=12 makes setup.py pick cupy-cuda12x
+                            # for install_requires instead of the cu13 default.
                             LMCACHE_CUDA_MAJOR=12 \
                                 uv pip install -e . --no-build-isolation
 
@@ -136,8 +172,9 @@ Install LMCache
                             # Need to install these packages manually to avoid build isolation
                             uv pip install -r requirements/build.txt
 
-                            # Install torch from the ROCm wheel index
-                            uv pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm7.0
+                            # Install torch from the ROCm wheel index. Use the rocm7.2 index to
+                            # match the upstream vllm/vllm-openai-rocm image (torch 2.11, ROCm 7.2).
+                            uv pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm7.2
 
                             # Build LMCache. BUILD_WITH_HIP=1 makes setup.py pick cupy-rocm-7-0 automatically.
                             # PYTORCH_ROCM_ARCH selects the target GPU(s):
@@ -231,21 +268,26 @@ Install LMCache
             ``lmcache-cli`` and ``lmcache`` ship the same ``lmcache`` CLI command.
             Do not install both in the same environment.
 
+Build the Docker Image
+----------------------
+
+Instead of pulling a prebuilt image, you can build the LMCache (integrated with
+vLLM) image yourself from the provided Dockerfile, located in
+`docker/ <https://github.com/LMCache/LMCache/tree/dev/docker>`_.
+
+From the root of the LMCache repository:
+
+.. code-block:: bash
+
+    docker build --tag <IMAGE_NAME>:<TAG> --target image-build --file docker/Dockerfile .
+
+Replace ``<IMAGE_NAME>`` and ``<TAG>`` with your desired image name and tag. See
+the example build file in `docker/ <https://github.com/LMCache/LMCache/tree/dev/docker>`_
+for an explanation of all build arguments.
+
 Verify Installation
 -------------------
 
 .. code-block:: bash
 
     python -c "import lmcache.c_ops"
-
-Compatibility Matrix
-~~~~~~~~~~~~~~~~~~~~
-
-✅ compatible · ❌ API incompatible · 🕯 torch mismatch (use ``--no-build-isolation``)
-
-
-.. container:: compat-table-scroll
-
-   .. csv-table::
-      :file: Installation_compatibility_matrix.csv
-      :header-rows: 1

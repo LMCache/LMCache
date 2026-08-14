@@ -9,7 +9,8 @@ from unittest.mock import MagicMock, patch
 import threading
 
 # First Party
-from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
+from lmcache.v1.distributed.api import AttnWindowDesc
+from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import (
     RequestType,
@@ -38,10 +39,10 @@ def test_free_locks_in_request_type():
 
 
 def test_free_locks_payload_classes():
-    """FREE_LOOKUP_LOCKS payload should be [IPCCacheEngineKey, int]."""
+    """FREE_LOOKUP_LOCKS payload should be [IPCCacheServerKey, int]."""
     payload_classes = get_payload_classes(RequestType.FREE_LOOKUP_LOCKS)
     assert len(payload_classes) == 2
-    assert payload_classes[0] is IPCCacheEngineKey
+    assert payload_classes[0] is IPCCacheServerKey
     assert payload_classes[1] is int
 
 
@@ -87,15 +88,40 @@ def test_mq_free_locks():
 # ============================================================================
 
 
+def _make_free_locks_ctx(
+    chunk_hashes: list[bytes],
+    windows: list[int],
+    hit_chunks: int,
+) -> MagicMock:
+    """Build a mock engine context for free_lookup_locks tests.
+
+    Args:
+        chunk_hashes: Hashes returned for the freed [start, end) range.
+        windows: Per-object-group windows for the registered AttnWindowDesc.
+        hit_chunks: Prefetch hit length recorded on the session (-1 for
+            "never recorded").
+
+    Returns:
+        The configured MagicMock context.
+    """
+    ctx = MagicMock()
+    ctx.chunk_size = 256
+    ctx.token_hasher.chunk_size = 256
+    ctx.token_hasher.compute_chunk_hashes.return_value = chunk_hashes
+    ctx.layout_desc_registry.find_attn_desc.return_value = AttnWindowDesc(
+        num_chunks_in_sw=windows
+    )
+    ctx.session_manager.get_or_create.return_value.prefetch_hit_chunks = hit_chunks
+    return ctx
+
+
 def test_server_free_lookup_locks_calls_finish_read_prefetched():
     """LookupModule.free_lookup_locks should resolve hash keys and call
     finish_read_prefetched on the storage manager."""
     # First Party
     from lmcache.v1.multiprocess.modules.lookup import LookupModule
 
-    ctx = MagicMock()
-    ctx.token_hasher.chunk_size = 256
-    ctx.token_hasher.compute_chunk_hashes.return_value = [b"hash0"]
+    ctx = _make_free_locks_ctx([b"hash0"], windows=[-1], hit_chunks=1)
 
     module = LookupModule(ctx)
 
@@ -105,13 +131,114 @@ def test_server_free_lookup_locks_calls_finish_read_prefetched():
     sentinel_obj_keys = [MagicMock()]
     with patch(
         "lmcache.v1.multiprocess.modules.lookup.ipc_key_to_object_keys",
-        return_value=sentinel_obj_keys,
+        return_value=[sentinel_obj_keys],
     ):
         module.free_lookup_locks(key, 1)
 
     module.context.storage_manager.finish_read_prefetched.assert_called_once_with(
         sentinel_obj_keys, extra_count=0
     )
+
+
+def _free_locks_key(num_tokens: int, start: int, end: int) -> IPCCacheServerKey:
+    """Build a lookup-style (worker_id=None) key over [start, end)."""
+    return IPCCacheServerKey(
+        model_name="testmodel",
+        world_size=1,
+        worker_id=None,
+        token_ids=tuple(range(num_tokens)),
+        start=start,
+        end=end,
+        request_id="req-sw",
+    )
+
+
+def _released_chunks(finish_read_mock: MagicMock) -> set[tuple[int, bytes]]:
+    """Collect (object_group_id, chunk_hash) pairs released by the module."""
+    (obj_keys,), kwargs = finish_read_mock.call_args
+    assert kwargs == {"extra_count": 0}
+    return {(k.object_group_id, k.chunk_hash) for k in obj_keys}
+
+
+def test_server_free_lookup_locks_sliding_window_skips_unlocked_chunks():
+    """A sliding-window group must release only its locked suffix.
+
+    Hit of 4 chunks, windows [1, -1], freed range [0, 3): the window group
+    locked only chunk 3, which is outside the range, so only the
+    full-attention group's chunks 0-2 are released.
+    """
+    # First Party
+    from lmcache.v1.multiprocess.modules.lookup import LookupModule
+
+    hashes = [b"h0", b"h1", b"h2"]
+    ctx = _make_free_locks_ctx(hashes, windows=[1, -1], hit_chunks=4)
+    module = LookupModule(ctx)
+
+    module.free_lookup_locks(_free_locks_key(1024, start=0, end=768), 1)
+
+    released = _released_chunks(ctx.storage_manager.finish_read_prefetched)
+    assert released == {(1, b"h0"), (1, b"h1"), (1, b"h2")}
+
+
+def test_server_free_lookup_locks_sliding_window_releases_locked_suffix():
+    """Freeing the whole hit range releases the window group's suffix.
+
+    Hit of 4 chunks, windows [1, -1], freed range [0, 4): the window group
+    releases chunk 3, the full-attention group releases chunks 0-3.
+    """
+    # First Party
+    from lmcache.v1.multiprocess.modules.lookup import LookupModule
+
+    hashes = [b"h0", b"h1", b"h2", b"h3"]
+    ctx = _make_free_locks_ctx(hashes, windows=[1, -1], hit_chunks=4)
+    module = LookupModule(ctx)
+
+    module.free_lookup_locks(_free_locks_key(1024, start=0, end=1024), 1)
+
+    released = _released_chunks(ctx.storage_manager.finish_read_prefetched)
+    assert released == {
+        (0, b"h3"),
+        (1, b"h0"),
+        (1, b"h1"),
+        (1, b"h2"),
+        (1, b"h3"),
+    }
+
+
+def test_server_free_lookup_locks_caps_release_at_hit_length():
+    """Chunks beyond the hit length were never locked and must not be freed."""
+    # First Party
+    from lmcache.v1.multiprocess.modules.lookup import LookupModule
+
+    hashes = [b"h0", b"h1", b"h2", b"h3"]
+    ctx = _make_free_locks_ctx(hashes, windows=[-1], hit_chunks=2)
+    module = LookupModule(ctx)
+
+    module.free_lookup_locks(_free_locks_key(1024, start=0, end=1024), 1)
+
+    released = _released_chunks(ctx.storage_manager.finish_read_prefetched)
+    assert released == {(0, b"h0"), (0, b"h1")}
+
+
+def test_server_free_lookup_locks_unknown_hit_skips_window_groups():
+    """Without a recorded hit length, window groups release nothing.
+
+    Full-attention groups keep the legacy full-range release; a
+    sliding-window group's locked suffix is unknown, so it is skipped
+    (leaked locks expire with the TTL, over-releasing could strip a
+    concurrent reader's lock).
+    """
+    # First Party
+    from lmcache.v1.multiprocess.modules.lookup import LookupModule
+
+    hashes = [b"h0", b"h1", b"h2"]
+    ctx = _make_free_locks_ctx(hashes, windows=[1, -1], hit_chunks=-1)
+    module = LookupModule(ctx)
+
+    module.free_lookup_locks(_free_locks_key(1024, start=0, end=768), 1)
+
+    released = _released_chunks(ctx.storage_manager.finish_read_prefetched)
+    assert released == {(1, b"h0"), (1, b"h1"), (1, b"h2")}
 
 
 def test_server_free_lookup_locks_no_matching_chunks():
@@ -126,7 +253,7 @@ def test_server_free_lookup_locks_no_matching_chunks():
     module = LookupModule(ctx)
 
     # Key with start == end means no chunks to free
-    key = IPCCacheEngineKey(
+    key = IPCCacheServerKey(
         model_name="testmodel",
         world_size=1,
         worker_id=None,
@@ -166,17 +293,18 @@ def test_adapter_free_lookup_locks_sends_request():
 
     adapter = LMCacheMPSchedulerAdapter.__new__(LMCacheMPSchedulerAdapter)
     adapter.model_name = "test_model"
-    adapter.chunk_size = 256
+    adapter.lmcache_tokens_per_chunk = 256
     adapter.blocks_in_chunk = 16
-    adapter.parallel_strategy = ParallelStrategy(False, 1, 0, 1, 0, 1, 1)
-    adapter._health_event = threading.Event()
-    adapter._health_event.set()
+    adapter.parallel_strategy = ParallelStrategy(False, 1, 0, 1, 1, 1)
+    adapter._health_events = {"tcp://test:0": threading.Event()}
+    adapter._health_events["tcp://test:0"].set()
+    adapter._server_urls = ["tcp://test:0"]
     adapter._mq_timeout = 30.0
 
     mock_client = MagicMock(spec=MessageQueueClient)
     mock_future = MagicMock()
     mock_client.submit_request.return_value = mock_future
-    adapter.mq_client = mock_client
+    adapter.mq_clients = {"tcp://test:0": mock_client}
     adapter._pending_lookups = set()
 
     token_ids = list(range(512))
@@ -198,7 +326,7 @@ def test_adapter_free_lookup_locks_sends_request():
     assert len(payloads) == 2
 
     key = payloads[0]
-    assert isinstance(key, IPCCacheEngineKey)
+    assert isinstance(key, IPCCacheServerKey)
     assert key.worker_id is None
     assert key.model_name == "test_model"
     assert key.request_id == "req-1"
@@ -216,13 +344,14 @@ def test_adapter_free_lookup_locks_key_matches_lookup():
 
     adapter = LMCacheMPSchedulerAdapter.__new__(LMCacheMPSchedulerAdapter)
     adapter.model_name = "test_model"
-    adapter.chunk_size = 256
+    adapter.lmcache_tokens_per_chunk = 256
     adapter.blocks_in_chunk = 16
-    adapter.parallel_strategy = ParallelStrategy(False, 1, 0, 1, 0, 1, 1)
-    adapter._health_event = threading.Event()
-    adapter._health_event.set()
+    adapter.parallel_strategy = ParallelStrategy(False, 1, 0, 1, 1, 1)
+    adapter._server_urls = ["tcp://test:0"]
+    adapter._health_events = {"tcp://test:0": threading.Event()}
+    adapter._health_events["tcp://test:0"].set()
     adapter._mq_timeout = 30.0
-    adapter._heartbeat = None
+    adapter._heartbeats: dict[str, object] = {}
     adapter._heartbeat_lock = threading.Lock()
     adapter._heartbeat_interval = 5.0
 
@@ -230,8 +359,9 @@ def test_adapter_free_lookup_locks_key_matches_lookup():
     mock_future = MagicMock()
     mock_future.result.return_value = None  # LOOKUP returns None
     mock_client.submit_request.return_value = mock_future
-    adapter.mq_client = mock_client
+    adapter.mq_clients = {"tcp://test:0": mock_client}
     adapter._pending_lookups = set()
+    adapter._lookup_params = {}
 
     token_ids = list(range(512))
 
@@ -245,7 +375,8 @@ def test_adapter_free_lookup_locks_key_matches_lookup():
     mock_client.submit_request.reset_mock()
 
     # Submit free_lookup_locks with aligned end
-    aligned_end = (len(token_ids) // adapter.chunk_size) * adapter.chunk_size
+    tokens_per_chunk = adapter.lmcache_tokens_per_chunk
+    aligned_end = (len(token_ids) // tokens_per_chunk) * tokens_per_chunk
     adapter.free_lookup_locks(
         token_ids=token_ids,
         start=0,
