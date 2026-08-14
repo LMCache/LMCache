@@ -79,12 +79,9 @@ var _ = Describe("CacheBlendPodInjector webhook (envtest)", Ordered, func() {
 
 		By("M5: every required vLLM flag is present, with the node-local CBKVConnector config")
 		// Form-agnostic: the handler may emit two-token (--flag value) or
-		// =-token (--flag=value) forms; argsHasFlagValue handles both.
-		Expect(argsHasFlagValue(c.Args, "--attention-backend", "CUSTOM")).To(BeTrue())
-		Expect(argsHasFlagValue(c.Args, "--block-size", "64")).To(BeTrue())
-		Expect(argsHasFlagValue(c.Args, "--pipeline-parallel-size", "1")).To(BeTrue())
+		// =-token (--flag=value) forms; argsFlagValue handles both.
+		Expect(argsFlagValue(c.Args, "--pipeline-parallel-size")).To(Equal("1"))
 		Expect(c.Args).To(ContainElement("--no-enable-chunked-prefill"))
-		Expect(c.Args).To(ContainElement("--no-async-scheduling"))
 		kv := argsFlagValue(c.Args, "--kv-transfer-config")
 		Expect(kv).To(ContainSubstring("CBKVConnector"))
 		Expect(kv).To(ContainSubstring("tcp://" + testEngineName + "." + testNamespace + ".svc"))

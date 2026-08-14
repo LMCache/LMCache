@@ -766,6 +766,46 @@ func TestBuildDaemonSet_CustomEnvAndVolumes(t *testing.T) {
 	}
 }
 
+func TestBuildDaemonSet_NoInitContainersByDefault(t *testing.T) {
+	engine := minimalEngine()
+
+	ds := BuildDaemonSet(engine)
+
+	if len(ds.Spec.Template.Spec.InitContainers) != 0 {
+		t.Fatalf("expected 0 init containers, got %d", len(ds.Spec.Template.Spec.InitContainers))
+	}
+}
+
+func TestBuildDaemonSet_InitContainers(t *testing.T) {
+	engine := minimalEngine()
+	engine.Spec.InitContainers = []corev1.Container{
+		{
+			Name:    "preallocate-raw-block",
+			Image:   "busybox",
+			Command: []string{"sh", "-c", "fallocate -l 1G /data/l2.raw"},
+			VolumeMounts: []corev1.VolumeMount{
+				{Name: "kv-cache-root", MountPath: "/data"},
+			},
+		},
+	}
+
+	ds := BuildDaemonSet(engine)
+	initContainers := ds.Spec.Template.Spec.InitContainers
+
+	if len(initContainers) != 1 {
+		t.Fatalf("expected 1 init container, got %d", len(initContainers))
+	}
+	if initContainers[0].Name != "preallocate-raw-block" {
+		t.Fatalf("expected init container name preallocate-raw-block, got %s", initContainers[0].Name)
+	}
+
+	// Init containers run before the lmcache container; the daemonset must
+	// still have exactly the one main container.
+	if len(ds.Spec.Template.Spec.Containers) != 1 {
+		t.Fatalf("expected 1 main container, got %d", len(ds.Spec.Template.Spec.Containers))
+	}
+}
+
 func TestBuildDaemonSet_NodeSelectorAndTolerations(t *testing.T) {
 	engine := minimalEngine()
 	engine.Spec.NodeSelector = map[string]string{"nvidia.com/gpu.present": "true"}

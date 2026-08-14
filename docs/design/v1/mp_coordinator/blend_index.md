@@ -108,7 +108,7 @@ Driven entirely by binding lifecycle in `KeyDirectory`:
 | `STORE` with `token_ids` | `add(tokens, chunk_hash, token_offset)` |
 | re-`STORE` with different content | old fingerprint removed, new added |
 | `DELETE` of a chunk's last placement | `remove(tokens, chunk_hash)` |
-| incarnation fencing / `drop_instance` | `remove` per dropped chunk |
+| `fence_instance` (restart / deregistration) | `remove` per dropped chunk |
 
 A chunk whose `STORE` carried no tokens (the emitter's bound cache had
 already evicted it) is simply not indexed — a lookup miss, repaired by
