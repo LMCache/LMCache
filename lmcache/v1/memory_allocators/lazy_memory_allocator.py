@@ -85,6 +85,10 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
             align_bytes (int, optional): Alignment for the underlying allocations.
                 Must be a positive power of two. The buffer's base address is
                 aligned to this value, not merely the offsets within it.
+            numa_mapping (NUMAMapping, optional): GPU-to-NUMA mapping; when
+                given, the buffer is bound to the current GPU's node. A failed
+                binding (e.g. missing CAP_SYS_NICE) logs a warning and falls
+                back to default placement instead of raising.
 
         Raises:
             ValueError: If ``align_bytes`` is not a positive power of two.
@@ -94,8 +98,8 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         if align_bytes <= 0 or align_bytes & (align_bytes - 1) != 0:
             raise ValueError("align_bytes must be a positive power of two")
 
-        # Whether using NUMA allocation
-        self._use_numa = numa_mapping is not None
+        # True only when alloc_numa_ptr succeeds; selects the free path.
+        self._use_numa = False
         # Currently pinned size, only accessed by the expansion thread
         self._curr_size = align_to(init_size, self.PIN_CHUNK_SIZE)
         # Final size of the allocation, only accessed by the expansion thread
@@ -111,14 +115,25 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         # List of (ptr, size) for pinned memory chunks
         self._pin_record: list[tuple[int, int]] = []
 
-        # Detect numa mapping
+        # mbind needs CAP_SYS_NICE (absent in default containers); on
+        # failure degrade to default placement instead of failing startup.
         if numa_mapping is not None:
             numa_id = get_numa_id(numa_mapping)
-            ptr = lmc_ops.alloc_numa_ptr(self._final_size, numa_id)
-            arr_type = ctypes.c_uint8 * self._final_size
-            buf = arr_type.from_address(ptr)
-            self._buffer = torch.frombuffer(buf, dtype=torch.uint8)
-        else:
+            try:
+                ptr = lmc_ops.alloc_numa_ptr(self._final_size, numa_id)
+            except RuntimeError as exc:
+                logger.warning(
+                    "NUMA-bound allocation on node %d unavailable (%s); "
+                    "falling back to default placement.",
+                    numa_id,
+                    exc,
+                )
+            else:
+                arr_type = ctypes.c_uint8 * self._final_size
+                buf = arr_type.from_address(ptr)
+                self._buffer = torch.frombuffer(buf, dtype=torch.uint8)
+                self._use_numa = True
+        if not self._use_numa:
             # torch.empty() only guarantees 64-byte alignment, but consumers of
             # get_l1_memory_desc() (O_DIRECT, RDMA/GDS) need the buffer base
             # itself aligned to align_bytes.

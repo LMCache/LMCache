@@ -44,6 +44,42 @@ def _requires_single_l1_memory_region(
     return None
 
 
+def _parse_numa_mapping(spec: str) -> dict[int, int]:
+    """Parse a ``GPU:NODE[,GPU:NODE...]`` spec into a GPU-to-NUMA dict.
+
+    Args:
+        spec: Comma-separated ``gpu_id:numa_node`` pairs of non-negative
+            integers, e.g. ``"0:0,1:0,2:1,3:1"``.
+
+    Returns:
+        Mapping from GPU index to NUMA node.
+
+    Raises:
+        ValueError: If the spec is empty, a pair is malformed or negative,
+            or a GPU id repeats.
+    """
+    mapping: dict[int, int] = {}
+    for pair in spec.split(","):
+        gpu_str, sep, node_str = pair.partition(":")
+        try:
+            if not sep:
+                raise ValueError
+            gpu, node = int(gpu_str), int(node_str)
+        except ValueError:
+            raise ValueError(
+                f"Malformed NUMA mapping pair {pair!r}; expected 'gpu:node' "
+                "with integer ids."
+            ) from None
+        if gpu < 0 or node < 0:
+            raise ValueError(f"Negative id in NUMA mapping pair {pair!r}.")
+        if gpu in mapping:
+            raise ValueError(f"Duplicate GPU id {gpu} in NUMA mapping {spec!r}.")
+        mapping[gpu] = node
+    if not mapping:
+        raise ValueError("Empty NUMA mapping spec.")
+    return mapping
+
+
 def _infer_l1_devdax_overflow_from_dax_adapter(
     memory_config: "L1MemoryManagerConfig",
     l2_adapter_config: L2AdaptersConfig,
@@ -121,6 +157,14 @@ class L1MemoryManagerConfig:
 
     shm_name: str = field(default_factory=lambda: f"lmcache_l1_pool_{os.getpid()}")
     """ POSIX shared-memory segment name for L1 pool. Empty disables SHM. """
+
+    numa_mode: str | None = None
+    """ NUMA placement for the lazy L1 pool: ``"auto"`` binds it to the
+    current GPU's node, ``"manual"`` uses ``numa_mapping``; ``None`` keeps
+    first-touch placement. Lazy only. """
+
+    numa_mapping: dict[int, int] | None = None
+    """ GPU index to NUMA node mapping for ``numa_mode="manual"``. """
 
     devdax_path: str | None = None
     """ Optional Device-DAX path to use as the L1 backing arena. """
@@ -386,6 +430,23 @@ def add_storage_manager_args(
         help="The initial size (GB) when using lazy allocation. Default is 20.",
     )
     memory_group.add_argument(
+        "--l1-numa-mode",
+        type=str,
+        choices=["auto", "manual"],
+        default=None,
+        help="NUMA placement for the lazy L1 pool: 'auto' binds the pool to "
+        "the current GPU's NUMA node, 'manual' uses --l1-numa-mapping. "
+        "Default keeps first-touch placement.",
+    )
+    memory_group.add_argument(
+        "--l1-numa-mapping",
+        type=str,
+        default=None,
+        metavar="GPU:NODE[,GPU:NODE...]",
+        help="GPU-to-NUMA-node mapping for --l1-numa-mode manual, "
+        "e.g. '0:0,1:0,2:1,3:1'.",
+    )
+    memory_group.add_argument(
         "--l1-align-bytes",
         type=int,
         default=4096,
@@ -554,7 +615,20 @@ def parse_args_to_config(
 
     Returns:
         StorageManagerConfig: The configuration object.
+
+    Raises:
+        ValueError: If the NUMA arguments are inconsistent (``manual`` mode
+            without a mapping, a mapping without ``manual`` mode) or the
+            mapping spec is malformed.
     """
+    numa_mapping = (
+        _parse_numa_mapping(args.l1_numa_mapping) if args.l1_numa_mapping else None
+    )
+    if args.l1_numa_mode == "manual" and numa_mapping is None:
+        raise ValueError("--l1-numa-mode manual requires --l1-numa-mapping.")
+    if numa_mapping is not None and args.l1_numa_mode != "manual":
+        raise ValueError("--l1-numa-mapping requires --l1-numa-mode manual.")
+
     shm_name = getattr(args, "shm_name", None)
     if shm_name is None:
         memory_config = L1MemoryManagerConfig(
@@ -562,6 +636,8 @@ def parse_args_to_config(
             use_lazy=args.l1_use_lazy,
             init_size_in_bytes=int(args.l1_init_size_gb * (1 << 30)),
             align_bytes=args.l1_align_bytes,
+            numa_mode=args.l1_numa_mode,
+            numa_mapping=numa_mapping,
             devdax_path=args.l1_devdax_path,
         )
     else:
@@ -570,6 +646,8 @@ def parse_args_to_config(
             use_lazy=args.l1_use_lazy,
             init_size_in_bytes=int(args.l1_init_size_gb * (1 << 30)),
             align_bytes=args.l1_align_bytes,
+            numa_mode=args.l1_numa_mode,
+            numa_mapping=numa_mapping,
             shm_name=shm_name,
             devdax_path=args.l1_devdax_path,
         )
