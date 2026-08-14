@@ -607,3 +607,37 @@ class L2AdapterInterface(ABC):
             "is_healthy": True,
             "extra_warning": "report_status is not implemented and runs default impl",
         }
+
+    def _seed_existing_keys(
+        self,
+        keys: list[ObjectKey],
+        sizes: list[int],
+    ) -> None:
+        """Seed accounting for keys that existed before adapter startup.
+
+        This updates only the base-class byte counters. It intentionally
+        does not emit events or notify listeners: adapters must replay their
+        recovered keys to each listener when that listener registers.
+
+        Args:
+            keys: Existing keys that have not previously been counted by this
+                adapter instance.
+            sizes: On-disk byte size of each corresponding key.
+
+        Raises:
+            ValueError: If a size is negative or the list lengths differ.
+        """
+        delta: dict[str, int] = {}
+        total_delta = 0
+        for key, size in zip(keys, sizes, strict=True):
+            if size < 0:
+                raise ValueError("existing key size must be non-negative")
+            delta[key.cache_salt] = delta.get(key.cache_salt, 0) + size
+            total_delta += size
+
+        with self._usage_lock:
+            self._total_bytes_used += total_delta
+            for salt, size in delta.items():
+                self._bytes_by_cache_salt[salt] = (
+                    self._bytes_by_cache_salt.get(salt, 0) + size
+                )
