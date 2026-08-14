@@ -680,5 +680,5 @@ in the first place.
 | **What to buffer** | `PendingStoreEntry` containing token_ids, block_ids, start/end (all info needed for key construction) |
 | **When to flush** | When total buffered GPU blocks >= threshold (configurable ratio of total GPU blocks) |
 | **How to flush** | FIFO partial drain -> emit as store ops in connector metadata |
-| **Worker changes** | Yes — metadata extension, `_lazy_deferred_requests` tracking, guarded `get_finished`, deferred `request_finished` cleanup |
+| **Worker changes** | Yes — metadata extension, completed/failed store tracking (implemented as `_completed_store_requests` / `_failed_store_requests` in the worker adapter), `get_finished_with_lazy_offload`, deferred `request_finished` cleanup |
 | **Server changes** | None — receives standard STORE requests |
