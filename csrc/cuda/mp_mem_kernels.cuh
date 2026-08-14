@@ -8,6 +8,12 @@
 #include "mem_kernels.cuh"
 #include "transfer_plan_types.cuh"
 
+template <typename ScalarType>
+struct MemoryObj4 {
+  ScalarType* objects[4];
+  int num_objects;  // 0 - 4
+};
+
 // ---------------------------------------------------------------------------
 // Object-group transfer plan.
 //
@@ -17,12 +23,6 @@
 // burst instead of once per copy/launch. See the design in
 // docs/design/v1/multiprocess/modules/ and lmcache_driven_transfer.py.
 // ---------------------------------------------------------------------------
-
-template <typename ScalarType>
-struct MemoryObj4 {
-  ScalarType* objects[4];
-  int num_objects;  // 0 - 4
-};
 
 /**
  * Execute one object group's transfer plan on the current CUDA stream.
