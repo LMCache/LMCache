@@ -95,6 +95,7 @@ def test_neuron_no_event_ipc(
 # -- Hardware verification (skipped on non-Neuron hosts) -------------------
 
 
+@pytest.mark.neuron
 def test_neuron_device_type_matches_torch_neuronx() -> None:
     """Fail loudly if our assumed device_type no longer matches
     what torch_neuronx actually registers.
