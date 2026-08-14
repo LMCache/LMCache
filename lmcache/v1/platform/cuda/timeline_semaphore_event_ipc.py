@@ -99,7 +99,7 @@ class TimelineSemaphoreEvent:
         base_ptr: Semaphore buffer pointer in this process (0 until the
             first record assigns a slot).
         slot_offset: Byte offset of the slot (-1 until the first record).
-        seq: Target sequence number; 0 means never recorded. Flag's value
+        seq: Target sequence number; 0 means never recorded. Semaphore's value
             >= than a event's seq number means such event is complete.
         handle_bytes: The buffer's ``cudaIpcMemHandle`` bytes (empty until
             the first record).
@@ -219,7 +219,11 @@ class TimelineSemaphoreEventIPCBackend:
     without CUDA interprocess event handles (which need a shared
     ``/dev/shm``); see the module docstring.
 
-    Thread safety: all methods may be called from multiple threads.
+    Thread safety: backend methods may be called from multiple threads;
+    backend and buffer state is locked internally. A single event object,
+    however, must not be recorded concurrently with export/wait/query on
+    that same event (record mutates its fields) -- the same discipline
+    CUDA events require between ``record`` and ``ipc_handle``.
     """
 
     def __init__(self) -> None:
@@ -526,26 +530,29 @@ class TimelineSemaphoreEventIPCBackend:
                 malloc_result = _cuda.runtime.cudaMalloc(nbytes)
                 _CHECK_CUDA(malloc_result, "cudaMalloc")
                 _err, base = malloc_result
-                stream_result = _cuda.runtime.cudaStreamCreateWithFlags(
-                    _cuda.runtime.cudaStreamNonBlocking
-                )
-                _CHECK_CUDA(stream_result, "cudaStreamCreateWithFlags")
-                _err, host_stream = stream_result
-                # Zero the slots on the buffer's own stream, never via a
-                # device-wide sync: this runs lazily inside the first
-                # record_event, and draining the caller's recording stream
-                # here would break the record's ordering guarantee.
-                _CHECK_CUDA(
-                    _cuda.runtime.cudaMemsetAsync(base, 0, nbytes, host_stream),
-                    "cudaMemsetAsync",
-                )
-                _CHECK_CUDA(
-                    _cuda.runtime.cudaStreamSynchronize(host_stream),
-                    "cudaStreamSynchronize (semaphore buffer init)",
-                )
-                handle_result = _cuda.runtime.cudaIpcGetMemHandle(base)
-                _CHECK_CUDA(handle_result, "cudaIpcGetMemHandle")
-                _err, handle = handle_result
+                host_stream = None
+                try:
+                    stream_result = _cuda.runtime.cudaStreamCreateWithFlags(
+                        _cuda.runtime.cudaStreamNonBlocking
+                    )
+                    _CHECK_CUDA(stream_result, "cudaStreamCreateWithFlags")
+                    _err, host_stream = stream_result
+                    _CHECK_CUDA(
+                        _cuda.runtime.cudaMemsetAsync(base, 0, nbytes, host_stream),
+                        "cudaMemsetAsync",
+                    )
+                    _CHECK_CUDA(
+                        _cuda.runtime.cudaStreamSynchronize(host_stream),
+                        "cudaStreamSynchronize (semaphore buffer init)",
+                    )
+                    handle_result = _cuda.runtime.cudaIpcGetMemHandle(base)
+                    _CHECK_CUDA(handle_result, "cudaIpcGetMemHandle")
+                    _err, handle = handle_result
+                except Exception:
+                    if host_stream is not None:
+                        _cuda.runtime.cudaStreamDestroy(host_stream)
+                    _cuda.runtime.cudaFree(base)
+                    raise
             buffer = _TimelineSemaphoreBuffer(
                 device_index=device_index,
                 base_ptr=int(base),

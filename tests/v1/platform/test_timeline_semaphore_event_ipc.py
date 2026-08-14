@@ -82,6 +82,22 @@ def test_unrecorded_event_is_complete(kind: str) -> None:
     stream.synchronize()
 
 
+def test_unrecorded_event_exports_as_complete() -> None:
+    """Exporting a never-recorded event yields an importable handle that is
+    already complete (probe-slot fallback). CUDA event handles cannot be
+    self-imported, so this is timeline-semaphore-only coverage.
+    """
+    backend = TimelineSemaphoreEventIPCBackend()
+    device = torch.device(DEVICE)
+    event = backend.create_event(device)
+    imported = backend.import_event(backend.export_event(event, device), device)
+    assert backend.query_event(imported) is True
+    backend.synchronize_event(imported, device)  # must return immediately
+    stream = torch.cuda.Stream()
+    backend.wait_event(imported, stream)  # must be a no-op enqueue
+    stream.synchronize()
+
+
 def test_query_transitions_with_recording_stream() -> None:
     """query_event flips False -> True when the recording stream drains."""
     backend = TimelineSemaphoreEventIPCBackend()
