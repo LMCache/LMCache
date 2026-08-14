@@ -9,6 +9,7 @@ config from CLI args, and returns the workload instance.
 
 # Standard
 import argparse
+import os
 
 # First Party
 from lmcache.cli.commands.bench.engine_bench.config import EngineBenchConfig
@@ -34,6 +35,11 @@ from lmcache.cli.commands.bench.engine_bench.workloads.prefix_suffix_tuner impor
     PrefixSuffixTunerConfig,
     PrefixSuffixTunerWorkload,
 )
+from lmcache.cli.commands.bench.engine_bench.workloads.rag_qa_quality import (
+    RagQaQualityConfig,
+    RagQaQualityWorkload,
+    parse_template_kwargs,
+)
 from lmcache.cli.commands.bench.engine_bench.workloads.random_prefill import (
     RandomPrefillConfig,
     RandomPrefillWorkload,
@@ -49,9 +55,12 @@ __all__ = [
     "MultiRoundChatWorkload",
     "PrefixSuffixTunerConfig",
     "PrefixSuffixTunerWorkload",
+    "RagQaQualityConfig",
+    "RagQaQualityWorkload",
     "RandomPrefillConfig",
     "RandomPrefillWorkload",
     "create_workload",
+    "parse_template_kwargs",
     "validate_max_output_length_supported",
 ]
 
@@ -60,6 +69,7 @@ _WORKLOAD_NAMES = (
     "long-doc-qa",
     "multi-round-chat",
     "prefix-suffix-tuner",
+    "rag-qa-quality",
     "random-prefill",
 )
 
@@ -187,6 +197,25 @@ def create_workload(
             progress_monitor=progress_monitor,
             seed=config.seed,
             model_name=config.model,
+        )
+
+    if config.workload == "rag-qa-quality":
+        rag_workload_config = RagQaQualityConfig.resolve(
+            dataset=args.rag_dataset,
+            num_samples=args.rag_num_samples,
+            max_output_length=args.rag_max_output_length,
+            template_kwargs=parse_template_kwargs(args.rag_template_kwargs),
+            output_path=args.rag_output
+            or os.path.join(config.output_dir, "rag_qa_quality.json"),
+        )
+        return RagQaQualityWorkload(
+            config=rag_workload_config,
+            request_sender=request_sender,
+            stats_collector=stats_collector,
+            progress_monitor=progress_monitor,
+            engine_url=config.engine_url,
+            model_name=config.model,
+            seed=config.seed,
         )
 
     if config.workload == "random-prefill":

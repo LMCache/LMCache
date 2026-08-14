@@ -117,6 +117,10 @@ ALL_ITEMS: list[ConfigItem] = [
                 "prefix-suffix-tuner",
                 "Two-pass sequential workload demonstrating tiered KV cache reuse",
             ),
+            (
+                "rag-qa-quality",
+                "Answer quality (F1) on real QA data with individually cached docs",
+            ),
             ("random-prefill", "Prefill-only requests fired simultaneously"),
         ],
         phase=PHASE_REQUIRED,
@@ -161,6 +165,24 @@ ALL_ITEMS: list[ConfigItem] = [
         default=None,
         required=True,
         condition=_no_lmcache_url,
+        phase=PHASE_REQUIRED,
+    ),
+    # Lives in phase 1 because it has no usable default. The condition keeps
+    # it inert for other workloads; ordered after ``workload`` so that choice
+    # is made first.
+    ConfigItem(
+        key="rag_dataset",
+        display_name="QA dataset",
+        description=(
+            "A known dataset name, or a path to a local QA file.\n"
+            "  musique   -- MuSiQue answerable dev (20 passages/question)\n"
+            "  hotpotqa  -- HotpotQA distractor validation (needs pyarrow)\n"
+            "Named datasets download from the HuggingFace Hub on first use."
+        ),
+        input_type="text",
+        default=None,
+        required=True,
+        condition=_workload_is("rag-qa-quality"),
         phase=PHASE_REQUIRED,
     ),
     # ── Phase 2: General ──────────────────────────────────────────────
@@ -381,6 +403,29 @@ ALL_ITEMS: list[ConfigItem] = [
         input_type="float",
         default=20.0,
         condition=_workload_is("prefix-suffix-tuner"),
+        phase=PHASE_WORKLOAD,
+    ),
+    # ── Phase 3: rag-qa-quality ───────────────────────────────────────
+    ConfigItem(
+        key="rag_num_samples",
+        display_name="Number of samples",
+        description="Questions to measure, taken in dataset order.",
+        input_type="int",
+        default=50,
+        condition=_workload_is("rag-qa-quality"),
+        phase=PHASE_WORKLOAD,
+    ),
+    ConfigItem(
+        key="rag_max_output_length",
+        display_name="Max output length (tokens)",
+        description=(
+            "Token budget per answer. Must fit a reasoning model's thinking "
+            "block as well as the <final_answer> tags, or samples fail to "
+            "parse and drop out of the score."
+        ),
+        input_type="int",
+        default=1024,
+        condition=_workload_is("rag-qa-quality"),
         phase=PHASE_WORKLOAD,
     ),
     # ── Phase 3: random-prefill ───────────────────────────────────────

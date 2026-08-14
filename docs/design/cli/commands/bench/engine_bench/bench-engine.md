@@ -41,6 +41,11 @@ lmcache bench engine --engine-url http://localhost:8000 \
 lmcache bench engine --engine-url http://localhost:8000 \
     --workload prefix-suffix-tuner --lmcache-url http://localhost:8080 \
     --psf-context-length 8000 --psf-prefix-ratio 0.8 --psf-thrash 100
+
+# RAG answer quality (real QA data, documents cached individually)
+lmcache bench engine --engine-url http://localhost:8000 \
+    --workload rag-qa-quality --tokens-per-gb-kvcache 6000 \
+    --rag-dataset musique --rag-num-samples 50 --rag-output cached.json
 ```
 
 ---
@@ -64,13 +69,19 @@ lmcache/cli/commands/bench/
     │   ├── state.py               # InteractiveState (load/save JSON, merge CLI args)
     │   ├── terminal.py            # Terminal rendering primitives
     │   └── config.json            # Static schema for interactive prompts
+    ├── quality/                   # Answer-quality measurement (rag-qa-quality)
+    │   ├── __init__.py            # Re-exports the public helpers
+    │   ├── dataset.py             # Sample, hub registry, schema adapters
+    │   ├── scoring.py             # F1, answer extraction, QualityAggregator
+    │   └── metrics_probe.py       # Reads LMCache hit counters from /metrics
     └── workloads/
         ├── __init__.py            # create_workload() factory
-        ├── base.py                # BaseWorkload (ABC with run loop)
+        ├── base.py                # BaseWorkload (ABC with run loop) + MetricSection
         ├── long_doc_permutator.py # LongDocPermutatorConfig + LongDocPermutatorWorkload
         ├── long_doc_qa.py         # LongDocQAConfig + LongDocQAWorkload
         ├── multi_round_chat.py    # MultiRoundChatConfig + Session + MultiRoundChatWorkload
         ├── prefix_suffix_tuner.py # PrefixSuffixTunerConfig + PrefixSuffixTunerWorkload
+        ├── rag_qa_quality.py      # RagQaQualityConfig + RagQaQualityWorkload
         └── random_prefill.py      # RandomPrefillConfig + RandomPrefillWorkload
 ```
 
@@ -223,7 +234,15 @@ class BaseWorkload(ABC):
     # --- Provided by base class ---
     def run(self) -> None                         # entry point (blocks)
     def request_finished(self, result, text)      # thread-safe queue bridge
+    def extra_metric_sections(self) -> list[MetricSection]   # default: []
 ```
+
+**`extra_metric_sections()`** lets a workload contribute its own sections to
+the final report. `StatsCollector` covers what every workload has in common
+(throughput, TTFT, decode speed); a workload measuring something else —
+answer quality, cache hit rate — returns `MetricSection(key, label, entries)`
+values, and the orchestrator renders them through the same metrics system,
+so they reach terminal *and* JSON output without special-casing.
 
 **`run()` loop** (in base class):
 
@@ -571,6 +590,113 @@ prefix. This makes the suffix unreachable by ordinary prefix caching even
 within a single benchmark run — exactly the case CacheBlend is designed to
 handle, and exactly what Baseline 3 should improve over Baseline 2.
 
+### 4.6 `rag-qa-quality` — Answer Quality Under Cache Reuse
+
+The only workload that measures **correctness** rather than speed. Every
+other workload here would report an unchanged number if the cache returned
+subtly wrong KV; this one asks real questions and scores the answers.
+
+Documents are prefilled individually during warmup, so each is stored on its
+own. The measured request then composes several of them:
+
+```
+[system prompt][doc_a][doc_b]…[doc_n][question]
+```
+
+Document *k* therefore has to be reused at a position it was never cached at
+— behind everything ahead of it, rather than right after the system prompt.
+That is the RAG serving pattern. Unlike forcing the same effect by prepending
+filler tokens, the measured request is a prompt the deployment would really
+receive, so a change in answer quality is attributable to the cache rather
+than to the perturbation used to provoke it.
+
+**Config** (`RagQaQualityConfig`):
+
+| Field | CLI arg | Default | Description |
+|-------|---------|---------|-------------|
+| `dataset` | `--rag-dataset` | **required** | Hub dataset name or local file path |
+| `num_samples` | `--rag-num-samples` | 50 | Questions measured, in dataset order |
+| `max_output_length` | `--rag-max-output-length` | 1024 | Answer token budget |
+| `template_kwargs` | `--rag-template-kwargs` | `{}` | Chat-template variables, repeatable `KEY=VALUE` |
+| `output_path` | `--rag-output` | `<output-dir>/rag_qa_quality.json` | Per-sample results |
+
+`--kv-cache-volume` is unused by this workload.
+
+**Datasets.** Not vendored — they are megabytes each and change independently
+of this repository. Named datasets download from the Hugging Face Hub on
+first use and are cached under `HF_HOME`:
+
+| Name | Source | Notes |
+|------|--------|-------|
+| `musique` | `dgslibisey/MuSiQue` | JSONL, 20 passages/question, ~2.1k tokens. No extra dependency. |
+| `hotpotqa` | `hotpotqa/hotpot_qa` | Parquet (`distractor/validation`), 10 passages/question. Needs `pyarrow`. |
+
+Any other value is treated as a local path. `load_samples` recognizes four
+record schemas, so most QA files already on disk load unchanged:
+
+```json
+[{"ctxs": [{"title": "...", "text": "..."}], "question": "...", "answers": ["..."]}]
+```
+
+plus MuSiQue's `paragraphs[].paragraph_text`, HotpotQA's
+`context.{title, sentences}` struct, and the official
+`context: [[title, [sentence, ...]]]` pairs. Records missing passages, a
+question, or gold answers are skipped.
+
+**Chunk alignment.** Each document is padded to a multiple of
+`_CHUNK_ALIGN_TOKENS` (256, LMCache's default chunk size), and the system
+prompt is padded so the chat template's prefix plus the system block is also
+a whole number of chunks. Document *k* then starts on a chunk boundary in
+both the prefill and the composite, so its chunks hold document content alone
+and match. Without this the documents land off-phase and nothing matches —
+silently, which is why the cache hit rate is reported.
+
+The alignment unit is hardcoded rather than read from the LMCache server:
+the baseline stack a run is compared against has no server to ask, and if the
+two runs padded differently their prompts would no longer be the same input.
+A deployment on a different chunk size gets partial reuse, visible in the
+reported hit rate.
+
+**Scoring.** The model is asked to wrap its answer in
+`<final_answer>...</final_answer>`. The *last complete* region is taken —
+reasoning models may echo an example while thinking — and an unterminated
+region counts as no answer, since scoring the reasoning that preceded it
+would report quality the model never produced. The answer is then scored by
+SQuAD-normalized token-overlap F1, best over the gold answers.
+
+`f1_mean` covers **parsed samples only** and is always reported beside
+`parse_rate`: a high F1 over a third of the samples is a different result
+from the same F1 over all of them.
+
+**Reasoning models.** `--rag-template-kwargs` is deliberately not defaulted.
+Disabling thinking is *not* a safe universal choice — on multi-hop QA it can
+lower answer quality, which compresses the range a cache regression has to
+show up in. Bounding runaway reasoning (`reasoning_effort=high`) or enabling
+it (`thinking_mode=enabled`) is model-specific. Unset, the model's own
+template default applies.
+
+**Behavior:**
+
+- **Warmup:** Each distinct document sent once (`max_tokens=1`) behind the
+  system block. Shared passages are prefilled once. Stats discarded.
+- **Dispatch:** Strictly sequential, one in-flight request. `step()` reads
+  the cache counters, awaits the composite request, drains the finished queue
+  for its response text, reads the counters again, and scores.
+- **`on_request_finished`:** Holds the response text until its step scores it.
+- **Termination:** `-1.0` once every sample has been measured.
+
+**Comparing two stacks.** The workload reports one arm. Run it twice — once
+per stack — and diff the two result files by `sample_id`. An unparsed
+sample's `f1` is written as `null`, not `0.0`, so a diff can pair by id and
+skip the samples either run failed to score. The files are comparable only
+when their `run_fingerprint` values match; the fingerprint covers the
+dataset, sample ids, budget, template kwargs, model, and alignment unit.
+
+Start each run from a clean cache state — restart the server, or
+`lmcache kvcache clear --url <mp-url>` — otherwise a previous run's composite
+requests are still cached and the second run measures a full prefix hit
+rather than per-document reuse.
+
 ---
 
 ## 5. Adding a New Workload
@@ -700,6 +826,10 @@ pytest -xvs tests/cli/commands/bench/
 pytest -xvs tests/cli/commands/bench/engine_bench/workloads/test_long_doc_qa.py
 pytest -xvs tests/cli/commands/bench/engine_bench/workloads/test_multi_round_chat.py
 pytest -xvs tests/cli/commands/bench/engine_bench/workloads/test_random_prefill.py
+pytest -xvs tests/cli/commands/bench/engine_bench/workloads/test_rag_qa_quality.py
+
+# Quality helpers (scoring, dataset loading, cache-counter probe)
+pytest -xvs tests/cli/commands/bench/engine_bench/quality/
 
 # Factory
 pytest -xvs tests/cli/commands/bench/engine_bench/workloads/test_create_workload.py
