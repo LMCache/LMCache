@@ -12,8 +12,6 @@ import math
 import pytest
 import torch
 
-pytest.importorskip("triton")
-
 # First Party
 from lmcache import torch_dev, torch_device_type
 from lmcache.v1.compute.attention.metadata import _block_mask_to_csr

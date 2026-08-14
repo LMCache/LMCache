@@ -573,7 +573,10 @@ message CbRegisterRopeV3Response {}
 service MessageQueue {
   // Engine operations
   rpc RegisterKvCache(RegisterKvCacheRequest) returns (RegisterKvCacheResponse);
+  rpc RegisterQCache(RegisterKvCacheRequest) returns (RegisterKvCacheResponse);
   rpc UnregisterKvCache(UnregisterKvCacheRequest) returns (UnregisterKvCacheResponse);
+  rpc UnregisterQCache(UnregisterKvCacheRequest) returns (UnregisterKvCacheResponse);
+  rpc StoreQ(StoreRequest) returns (StoreResponse);
   rpc Store(StoreRequest) returns (StoreResponse);
   rpc Retrieve(RetrieveRequest) returns (RetrieveResponse);
   rpc Lookup(LookupRequest) returns (LookupResponse);
@@ -592,6 +595,7 @@ service MessageQueue {
   // Controller operations
   rpc Clear(ClearRequest) returns (ClearResponse);
   rpc GetChunkSize(GetChunkSizeRequest) returns (GetChunkSizeResponse);
+  rpc GetExperimental(GetExperimentalRequest) returns (GetExperimentalResponse);
   rpc Ping(PingRequest) returns (PingResponse);
 
   // Observability operations

@@ -11,14 +11,12 @@ Covers:
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import argparse
 import json
+import socket
 import threading
-import time
 
 # Third Party
-import msgspec
 import pytest
 import torch
-import zmq
 
 # First Party
 from lmcache.cli.commands.bench import BenchCommand
@@ -31,8 +29,16 @@ from lmcache.cli.commands.bench.server_bench.helpers import (
     _send_lookup,
     _send_unregister_kv_cache,
 )
-from lmcache.v1.multiprocess.mq import MessageQueueClient
-from lmcache.v1.multiprocess.protocols.base import RequestType
+from lmcache.v1.multiprocess.custom_types import (
+    IPCCacheServerKey,
+    RegisterEngineDrivenContextPayload,
+)
+from lmcache.v1.multiprocess.mq import MessageQueueClient, MessageQueueServer
+from lmcache.v1.multiprocess.protocol import get_payload_classes
+from lmcache.v1.multiprocess.protocols.base import HandlerType, RequestType
+from lmcache.v1.multiprocess.protocols.engine import (
+    RegisterEngineDrivenContextResponse,
+)
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 
 
@@ -351,14 +357,11 @@ class TestQueryChecksum:
 
 @pytest.fixture
 def router_endpoint() -> str:
-    """Allocate an ephemeral inproc/tcp endpoint for the ROUTER."""
-    # Use tcp with port=0 so the OS assigns a free port.
-    ctx = zmq.Context.instance()
-    probe = ctx.socket(zmq.ROUTER)
-    probe.bind("tcp://127.0.0.1:0")
-    endpoint = probe.getsockopt_string(zmq.LAST_ENDPOINT)
-    probe.close(linger=0)
-    return endpoint
+    """Allocate an ephemeral endpoint for a gRPC message queue server."""
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    return f"grpc://127.0.0.1:{port}"
 
 
 # ------------------------------------------------------------------ #
@@ -467,8 +470,7 @@ class TestAllocateKVCache:
 
 
 class _LookupRouter:
-    """Fake ROUTER implementing the LOOKUP / QUERY_PREFETCH_STATUS
-    subset of the MP server protocol.
+    """Fake server implementing LOOKUP and QUERY_PREFETCH_STATUS.
 
     * ``LOOKUP`` replies with **no payload** (void response) — the
       real server-side handler returns ``None``. Regression for a
@@ -489,45 +491,42 @@ class _LookupRouter:
         self._in_progress_left = in_progress_polls
         self._hit_chunks = hit_chunks
         self.last_query_request_id: str | None = None
-        self._ctx = zmq.Context.instance()
-        self._router = self._ctx.socket(zmq.ROUTER)
-        self._router.bind(endpoint)
-        self._stop = threading.Event()
-        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._server = MessageQueueServer(endpoint)
+        request_types = [RequestType.LOOKUP, RequestType.QUERY_PREFETCH_STATUS]
+        self._server.add_handler(
+            RequestType.LOOKUP,
+            get_payload_classes(RequestType.LOOKUP),
+            HandlerType.BLOCKING,
+            self._lookup,
+        )
+        self._server.add_handler(
+            RequestType.QUERY_PREFETCH_STATUS,
+            get_payload_classes(RequestType.QUERY_PREFETCH_STATUS),
+            HandlerType.BLOCKING,
+            self._query_prefetch_status,
+        )
+        self._server.add_normal_thread_pool(request_types, max_workers=2)
 
     def start(self) -> None:
-        self._thread.start()
+        self._server.start()
 
     def stop(self) -> None:
-        self._stop.set()
-        self._thread.join(timeout=2)
-        self._router.close(linger=0)
+        self._server.close()
 
-    def _run(self) -> None:
-        while not self._stop.is_set():
-            if not self._router.poll(100, zmq.POLLIN):
-                continue
-            frames = self._router.recv_multipart()
-            identity, uid_f, type_f, *payload = frames
-            req_type = msgspec.msgpack.decode(type_f, type=RequestType)
-            if req_type == RequestType.LOOKUP:
-                # Void reply: no payload frame.
-                self._router.send_multipart([identity, uid_f, type_f])
-            elif req_type == RequestType.QUERY_PREFETCH_STATUS:
-                req_id = msgspec.msgpack.decode(payload[0], type=str)
-                self.last_query_request_id = req_id
-                if self._in_progress_left > 0:
-                    self._in_progress_left -= 1
-                    body = msgspec.msgpack.encode(None)
-                else:
-                    body = msgspec.msgpack.encode(self._hit_chunks)
-                self._router.send_multipart([identity, uid_f, type_f, body])
+    def _lookup(self, key: IPCCacheServerKey, tp_size: int) -> None:
+        del key, tp_size
+
+    def _query_prefetch_status(self, request_id: str) -> int | None:
+        self.last_query_request_id = request_id
+        if self._in_progress_left > 0:
+            self._in_progress_left -= 1
+            return None
+        return self._hit_chunks
 
 
 class TestLookupProtocol:
     def _make_client(self, endpoint: str) -> MessageQueueClient:
-        ctx = zmq.Context.instance()
-        return MessageQueueClient(endpoint, ctx)
+        return MessageQueueClient(endpoint)
 
     def test_send_lookup_void_reply_is_success(
         self,
@@ -576,7 +575,7 @@ class TestLookupProtocol:
 
 
 class _UnregisterRouter:
-    """Fake ROUTER that records UNREGISTER requests and replies void.
+    """Fake server that records UNREGISTER requests and replies void.
 
     Both ``UNREGISTER_KV_CACHE`` and
     ``UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT`` carry a single
@@ -589,41 +588,38 @@ class _UnregisterRouter:
     def __init__(self, endpoint: str) -> None:
         self.last_request_type: RequestType | None = None
         self.last_instance_id: int | None = None
-        self._ctx = zmq.Context.instance()
-        self._router = self._ctx.socket(zmq.ROUTER)
-        self._router.bind(endpoint)
-        self._stop = threading.Event()
-        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._server = MessageQueueServer(endpoint)
+        self._server.add_handler(
+            RequestType.UNREGISTER_KV_CACHE,
+            get_payload_classes(RequestType.UNREGISTER_KV_CACHE),
+            HandlerType.SYNC,
+            self._unregister_kv_cache,
+        )
+        self._server.add_handler(
+            RequestType.UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT,
+            get_payload_classes(RequestType.UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT),
+            HandlerType.SYNC,
+            self._unregister_engine_driven_context,
+        )
 
     def start(self) -> None:
-        self._thread.start()
+        self._server.start()
 
     def stop(self) -> None:
-        self._stop.set()
-        self._thread.join(timeout=2)
-        self._router.close(linger=0)
+        self._server.close()
 
-    def _run(self) -> None:
-        while not self._stop.is_set():
-            if not self._router.poll(100, zmq.POLLIN):
-                continue
-            frames = self._router.recv_multipart()
-            identity, uid_f, type_f, *payload = frames
-            req_type = msgspec.msgpack.decode(type_f, type=RequestType)
-            if req_type in (
-                RequestType.UNREGISTER_KV_CACHE,
-                RequestType.UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT,
-            ):
-                self.last_request_type = req_type
-                self.last_instance_id = msgspec.msgpack.decode(payload[0], type=int)
-                # Void reply: no payload frame.
-                self._router.send_multipart([identity, uid_f, type_f])
+    def _unregister_kv_cache(self, instance_id: int) -> None:
+        self.last_request_type = RequestType.UNREGISTER_KV_CACHE
+        self.last_instance_id = instance_id
+
+    def _unregister_engine_driven_context(self, instance_id: int) -> None:
+        self.last_request_type = RequestType.UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT
+        self.last_instance_id = instance_id
 
 
 class TestUnregisterKVCache:
     def _make_client(self, endpoint: str) -> MessageQueueClient:
-        ctx = zmq.Context.instance()
-        return MessageQueueClient(endpoint, ctx)
+        return MessageQueueClient(endpoint)
 
     def test_handle_mode_sends_unregister_kv_cache(
         self,
@@ -673,7 +669,7 @@ class TestUnregisterKVCache:
 
 
 class _RegisterEngineDrivenRouter:
-    """Fake ROUTER that decodes ``RegisterEngineDrivenContextPayload``.
+    """Fake server that records ``RegisterEngineDrivenContextPayload``.
 
     Records the decoded payload of the last
     ``REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT`` request so the test can
@@ -681,62 +677,27 @@ class _RegisterEngineDrivenRouter:
     """
 
     def __init__(self, endpoint: str) -> None:
-        # First Party
-        from lmcache.v1.multiprocess.custom_types import (
-            RegisterEngineDrivenContextPayload,
-        )
-
-        self._payload_type = RegisterEngineDrivenContextPayload
         self.last_payload: RegisterEngineDrivenContextPayload | None = None
-        self._ctx = zmq.Context.instance()
-        self._router = self._ctx.socket(zmq.ROUTER)
-        # The ``router_endpoint`` fixture briefly binds/closes a probe
-        # socket to pick a free port, which occasionally leaves the port
-        # in TCP TIME_WAIT so an immediate rebind races. Retry a few
-        # times before giving up so this test doesn't flake in CI.
-        last_err: zmq.ZMQError | None = None
-        for _ in range(20):
-            try:
-                self._router.bind(endpoint)
-                last_err = None
-                break
-            except zmq.ZMQError as exc:
-                last_err = exc
-                time.sleep(0.05)
-        if last_err is not None:
-            raise last_err
-        self._stop = threading.Event()
-        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._server = MessageQueueServer(endpoint)
+        request_type = RequestType.REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT
+        self._server.add_handler(
+            request_type,
+            get_payload_classes(request_type),
+            HandlerType.SYNC,
+            self._register,
+        )
 
     def start(self) -> None:
-        self._thread.start()
+        self._server.start()
 
     def stop(self) -> None:
-        self._stop.set()
-        self._thread.join(timeout=2)
-        self._router.close(linger=0)
+        self._server.close()
 
-    def _run(self) -> None:
-        # First Party
-        from lmcache.v1.multiprocess.protocols.engine import (
-            RegisterEngineDrivenContextResponse,
-        )
-
-        while not self._stop.is_set():
-            if not self._router.poll(100, zmq.POLLIN):
-                continue
-            frames = self._router.recv_multipart()
-            identity, uid_f, type_f, *payload = frames
-            req_type = msgspec.msgpack.decode(type_f, type=RequestType)
-            if req_type == RequestType.REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT:
-                self.last_payload = msgspec.msgpack.decode(
-                    payload[0], type=self._payload_type
-                )
-                # Reply with an empty pool (bench will skip mmap).
-                body = msgspec.msgpack.encode(
-                    RegisterEngineDrivenContextResponse(shm_name="", pool_size=0)
-                )
-                self._router.send_multipart([identity, uid_f, type_f, body])
+    def _register(
+        self, payload: RegisterEngineDrivenContextPayload
+    ) -> RegisterEngineDrivenContextResponse:
+        self.last_payload = payload
+        return RegisterEngineDrivenContextResponse(shm_name="", pool_size=0)
 
 
 class TestRegisterKVCacheMLA:
@@ -750,16 +711,12 @@ class TestRegisterKVCacheMLA:
     """
 
     def _make_client(self, endpoint: str) -> MessageQueueClient:
-        ctx = zmq.Context.instance()
-        return MessageQueueClient(endpoint, ctx)
+        return MessageQueueClient(endpoint)
 
     def _register(self, endpoint: str, kv_size):
         # First Party
         from lmcache.cli.commands.bench.server_bench.helpers import (
             _send_register_kv_cache,
-        )
-        from lmcache.v1.multiprocess.custom_types import (
-            RegisterEngineDrivenContextPayload,
         )
 
         router = _RegisterEngineDrivenRouter(endpoint)

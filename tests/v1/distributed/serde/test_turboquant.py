@@ -14,8 +14,6 @@ import time
 import pytest
 import torch
 
-pytest.importorskip("triton")
-
 # First Party
 from lmcache import torch_dev, torch_device_type
 from lmcache.lmcache_native import Bitmap

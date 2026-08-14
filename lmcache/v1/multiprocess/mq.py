@@ -400,6 +400,18 @@ def _get_chunk_size_response_to_python(
     return int(resp.chunk_size)
 
 
+def _get_experimental_python_to_response(
+    result: Any,
+) -> "lmcache_mq_pb2.GetExperimentalResponse":
+    return lmcache_mq_pb2.GetExperimentalResponse(names=list(result))
+
+
+def _get_experimental_response_to_python(
+    resp: "lmcache_mq_pb2.GetExperimentalResponse",
+) -> list[str]:
+    return list(resp.names)
+
+
 def _noop_python_to_response(result: Any) -> "lmcache_mq_pb2.NoopResponse":
     return lmcache_mq_pb2.NoopResponse(
         message=str(result) if result is not None else ""
@@ -1449,6 +1461,18 @@ _TYPED_RPCS: dict[RequestType, TypedRpcSpec] = {
         ),
         response_to_python=_empty_response_to_python,
     ),
+    RequestType.UNREGISTER_Q_CACHE: TypedRpcSpec(
+        request_message=lmcache_mq_pb2.UnregisterKvCacheRequest,
+        response_message=lmcache_mq_pb2.UnregisterKvCacheResponse,
+        request_to_python=_instance_id_request_to_python,
+        python_to_request=_make_instance_id_python_to_request(
+            lmcache_mq_pb2.UnregisterKvCacheRequest
+        ),
+        python_to_response=_make_empty_python_to_response(
+            lmcache_mq_pb2.UnregisterKvCacheResponse
+        ),
+        response_to_python=_empty_response_to_python,
+    ),
     RequestType.UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT: TypedRpcSpec(
         request_message=lmcache_mq_pb2.UnregisterKvCacheEngineDrivenContextRequest,
         response_message=lmcache_mq_pb2.UnregisterKvCacheEngineDrivenContextResponse,
@@ -1509,6 +1533,16 @@ _TYPED_RPCS: dict[RequestType, TypedRpcSpec] = {
         python_to_response=_get_chunk_size_python_to_response,
         response_to_python=_get_chunk_size_response_to_python,
     ),
+    RequestType.GET_EXPERIMENTAL: TypedRpcSpec(
+        request_message=lmcache_mq_pb2.GetExperimentalRequest,
+        response_message=lmcache_mq_pb2.GetExperimentalResponse,
+        request_to_python=_empty_request_to_python,
+        python_to_request=_make_empty_python_to_request(
+            lmcache_mq_pb2.GetExperimentalRequest
+        ),
+        python_to_response=_get_experimental_python_to_response,
+        response_to_python=_get_experimental_response_to_python,
+    ),
     RequestType.NOOP: TypedRpcSpec(
         request_message=lmcache_mq_pb2.NoopRequest,
         response_message=lmcache_mq_pb2.NoopResponse,
@@ -1518,6 +1552,14 @@ _TYPED_RPCS: dict[RequestType, TypedRpcSpec] = {
         response_to_python=_noop_response_to_python,
     ),
     RequestType.STORE: TypedRpcSpec(
+        request_message=lmcache_mq_pb2.StoreRequest,
+        response_message=lmcache_mq_pb2.StoreResponse,
+        request_to_python=_store_request_to_python,
+        python_to_request=_store_python_to_request,
+        python_to_response=_store_python_to_response,
+        response_to_python=_store_response_to_python,
+    ),
+    RequestType.STORE_Q: TypedRpcSpec(
         request_message=lmcache_mq_pb2.StoreRequest,
         response_message=lmcache_mq_pb2.StoreResponse,
         request_to_python=_store_request_to_python,
@@ -1712,6 +1754,16 @@ _TYPED_RPCS: dict[RequestType, TypedRpcSpec] = {
         response_to_python=_empty_response_to_python,
     ),
     RequestType.REGISTER_KV_CACHE: TypedRpcSpec(
+        request_message=lmcache_mq_pb2.RegisterKvCacheRequest,
+        response_message=lmcache_mq_pb2.RegisterKvCacheResponse,
+        request_to_python=_register_kv_cache_request_to_python,
+        python_to_request=_register_kv_cache_python_to_request,
+        python_to_response=_make_empty_python_to_response(
+            lmcache_mq_pb2.RegisterKvCacheResponse
+        ),
+        response_to_python=_empty_response_to_python,
+    ),
+    RequestType.REGISTER_Q_CACHE: TypedRpcSpec(
         request_message=lmcache_mq_pb2.RegisterKvCacheRequest,
         response_message=lmcache_mq_pb2.RegisterKvCacheResponse,
         request_to_python=_register_kv_cache_request_to_python,

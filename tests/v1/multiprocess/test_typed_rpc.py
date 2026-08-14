@@ -313,12 +313,14 @@ def test_lookup_typed_roundtrip() -> None:
         RequestType.FREE_LOOKUP_LOCKS,
         RequestType.END_SESSION,
         RequestType.UNREGISTER_KV_CACHE,
+        RequestType.UNREGISTER_Q_CACHE,
         RequestType.UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT,
         RequestType.QUERY_PREFETCH_STATUS,
         RequestType.WAIT_PREFETCH_STATUS,
         RequestType.QUERY_PREFETCH_LOOKUP_HITS,
         RequestType.CLEAR,
         RequestType.GET_CHUNK_SIZE,
+        RequestType.GET_EXPERIMENTAL,
         RequestType.NOOP,
     ],
 )
@@ -447,6 +449,7 @@ def test_query_prefetch_status_typed_roundtrip() -> None:
 @pytest.mark.parametrize(
     "request_type",
     [
+        RequestType.STORE_Q,
         RequestType.STORE,
         RequestType.RETRIEVE,
         RequestType.REPORT_BLOCK_ALLOCATION,
@@ -787,12 +790,13 @@ class _FakeIPCWrapper(DeviceIPCWrapper):
     "request_type",
     [
         RequestType.REGISTER_KV_CACHE,
+        RequestType.REGISTER_Q_CACHE,
         RequestType.CB_REGISTER_KV_CACHE,
         RequestType.CB_REGISTER_ROPE_V3,
     ],
 )
 def test_wave5_rpc_is_typed(request_type: RequestType) -> None:
-    """Wave 5 finishes the migration: 36 / 36 typed rpcs."""
+    """Wave 5 finishes the migration: all request types use typed RPCs."""
     assert request_type in _TYPED_RPCS
     spec = _TYPED_RPCS[request_type]
     assert spec.request_message is not lmcache_mq_pb2.BytesRequest
