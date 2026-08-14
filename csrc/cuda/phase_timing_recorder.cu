@@ -20,9 +20,8 @@ void destroy_phase_timing_events(cudaEvent_t start, cudaEvent_t end) {
 
 }  // namespace
 
-PhaseTimer::PhaseTimer(bool enabled, cudaStream_t stream,
-                                 int direction, int device_index,
-                                 size_t max_sections)
+PhaseTimer::PhaseTimer(bool enabled, cudaStream_t stream, int direction,
+                       int device_index, size_t max_sections)
     : enabled_(enabled),
       stream_(stream),
       direction_(direction),

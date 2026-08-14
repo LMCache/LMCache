@@ -62,8 +62,8 @@ class PhaseTimer {
     int base_exceptions_;  // std::uncaught_exceptions() at construction
   };
 
-  PhaseTimer(bool enabled, cudaStream_t stream, int direction,
-                  int device_index, size_t max_sections);
+  PhaseTimer(bool enabled, cudaStream_t stream, int direction, int device_index,
+             size_t max_sections);
   ~PhaseTimer();
   PhaseTimer(const PhaseTimer&) = delete;
   PhaseTimer& operator=(const PhaseTimer&) = delete;

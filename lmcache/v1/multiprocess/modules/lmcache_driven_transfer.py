@@ -62,9 +62,7 @@ logger = init_logger(__name__)
 _HAS_NATIVE_OBJECT_GROUP_TRANSFER: bool = hasattr(
     device_ops, "execute_object_group_transfer"
 )
-_HAS_PHASE_TIMING_POP: bool = hasattr(
-    device_ops, "pop_completed_phase_timings"
-)
+_HAS_PHASE_TIMING_POP: bool = hasattr(device_ops, "pop_completed_phase_timings")
 
 
 def get_layout_desc(
