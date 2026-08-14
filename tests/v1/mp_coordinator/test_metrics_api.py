@@ -22,7 +22,6 @@ def test_prometheus_pull_returns_registry_exposition() -> None:
         metrics_enabled=True,
         health_check_interval=0.0,
         eviction_check_interval=0.0,
-        enable_startup_resync=False,
     )
     exposition = b"# HELP coordinator_test Coordinator test metric\n"
 
@@ -46,7 +45,6 @@ def test_disabled_metrics_return_404() -> None:
         metrics_enabled=False,
         health_check_interval=0.0,
         eviction_check_interval=0.0,
-        enable_startup_resync=False,
     )
 
     with (
@@ -67,7 +65,6 @@ def test_otlp_push_returns_404() -> None:
         otlp_endpoint="http://collector:4317",
         health_check_interval=0.0,
         eviction_check_interval=0.0,
-        enable_startup_resync=False,
     )
 
     with (
