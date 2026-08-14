@@ -1,32 +1,31 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Descriptor aliases for the unified ``DeviceOps`` surface.
+"""Python-only types for the unified ``DeviceOps`` surface.
 
-Only ``PageBufferShapeDesc`` and ``KernelGroupSpec`` are currently treated as
-backend-agnostic native types and sourced from :mod:`lmcache.lmcache_native`.
-Per-batch plan descriptors such as ``StagingCopy``, ``LaunchVar``, and
-``BatchStep`` stay backend-local; this module therefore exposes placeholder
-Python types for them until a concrete device backend binds real native types.
+The native KV-format and transfer types live in :mod:`lmcache.lmcache_native`.
+This module contains the Python fallback types used by device operations.
+
+``PageBufferShapeDesc`` and ``KernelGroupSpec`` are sourced from
+``lmcache_native`` when available. ``StagingCopy`` / ``LaunchVar`` /
+``BatchStep`` still only exist natively in the compiled ``cuda_ops``
+extension; the pure-Python subclasses here are stubs so the CPU-only build
+exposes the same names.
 """
 
 # Future
 from __future__ import annotations
 
 # Standard
-from typing import TYPE_CHECKING, Any, TypeAlias
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     # Third Party
     import torch
 
-    # First Party
-    from lmcache.lmcache_native import KernelGroupSpec as KernelGroupSpec
-    from lmcache.lmcache_native import PageBufferShapeDesc as PageBufferShapeDesc
-
 # First Party
 import lmcache.lmcache_native as lmcache_native
 
 
-class _FallbackPageBufferShapeDesc:
+class PageBufferShapeDesc:
     """Python stand-in for the native ``PageBufferShapeDesc`` struct.
 
     Mirrors the pybind ``def_readwrite`` attributes in
@@ -71,8 +70,15 @@ class _FallbackPageBufferShapeDesc:
         self.dtype: torch.dtype | None = None
 
 
-class _FallbackNativePlanType:
-    """Base for native-only plan types absent from the generic surface."""
+class _NativePlanType:
+    """Base for object-group transfer plan types that only exist natively.
+
+    The plan value structs (see ``csrc/cuda/mp_mem_kernels.cuh``) are built on the
+    Python side and consumed by the native ``execute_object_group_transfer``.
+    They have no pure-Python fallback, so constructing one without the compiled
+    backend extension is unsupported. Subclasses exist only so the CPU-only
+    build exposes the same names through ``lmcache.device_ops``.
+    """
 
     def __init__(self, *args: object, **kwargs: object) -> None:
         raise NotImplementedError(
@@ -81,19 +87,19 @@ class _FallbackNativePlanType:
         )
 
 
-class _FallbackStagingCopy(_FallbackNativePlanType):
-    """Fallback stub for the CUDA-local ``StagingCopy`` plan type."""
+class StagingCopy(_NativePlanType):
+    """Fallback stub for the native ``StagingCopy`` plan type."""
 
 
-class _FallbackLaunchVar(_FallbackNativePlanType):
-    """Fallback stub for the CUDA-local ``LaunchVar`` plan type."""
+class LaunchVar(_NativePlanType):
+    """Fallback stub for the native ``LaunchVar`` plan type."""
 
 
-class _FallbackBatchStep(_FallbackNativePlanType):
-    """Fallback stub for the CUDA-local ``BatchStep`` plan type."""
+class BatchStep(_NativePlanType):
+    """Fallback stub for the native ``BatchStep`` plan type."""
 
 
-class _FallbackKernelGroupSpec(_FallbackNativePlanType):
+class KernelGroupSpec(_NativePlanType):
     """Fallback stub for the native ``KernelGroupSpec`` plan type."""
 
 
@@ -103,22 +109,15 @@ if not TYPE_CHECKING:
     if all(hasattr(lmcache_native, name) for name in _NATIVE_COMMON_DESCRIPTOR_NAMES):
         PageBufferShapeDesc = lmcache_native.PageBufferShapeDesc
         KernelGroupSpec = lmcache_native.KernelGroupSpec
-    else:
-        PageBufferShapeDesc = _FallbackPageBufferShapeDesc
-        KernelGroupSpec = _FallbackKernelGroupSpec
-
-StagingCopy: TypeAlias = _FallbackStagingCopy
-LaunchVar: TypeAlias = _FallbackLaunchVar
-BatchStep: TypeAlias = _FallbackBatchStep
 
 
 def set_shape_desc_dtype(shape_desc: Any, dtype: torch.dtype) -> None:
     """Best-effort ``shape_desc.dtype = dtype``.
 
-    The fallback ``PageBufferShapeDesc`` exposes a ``dtype`` slot so the
+    The pure-Python ``PageBufferShapeDesc`` exposes a ``dtype`` slot so the
     CPU fallback kernel can disambiguate float16 vs bfloat16 (both have
-    ``element_size == 2``). The native pybind class now allows dynamic
-    attributes too, so this helper works uniformly across both surfaces.
+    ``element_size == 2``). The native pybind class also accepts dynamic
+    attributes, so call sites do not need to branch on the active backend.
 
     Args:
         shape_desc: A ``PageBufferShapeDesc`` instance (either the
