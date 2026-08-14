@@ -81,6 +81,61 @@ def _get_copy_lib() -> Optional[ctypes.CDLL]:
     return _copy_lib
 
 
+# ``cudaMemoryType`` from driver_types.h; only device memory has to be treated
+# differently from what this module assumed before.
+_CUDA_MEMORY_TYPE_DEVICE = 2
+
+
+class _CudaPointerAttributes(ctypes.Structure):
+    """Leading fields of ``cudaPointerAttributes`` (CUDA >= 11.0).
+
+    The trailing padding keeps the buffer large enough for runtimes whose
+    struct carries additional fields after the four that are read here.
+    """
+
+    _fields_ = [
+        ("memory_type", ctypes.c_int),
+        ("device", ctypes.c_int),
+        ("device_pointer", ctypes.c_void_p),
+        ("host_pointer", ctypes.c_void_p),
+        ("_padding", ctypes.c_uint8 * 64),
+    ]
+
+
+def _device_of_ptr(ptr: int) -> torch.device:
+    """Return the device a raw pointer actually lives on.
+
+    Args:
+        ptr: Raw memory pointer as int.
+
+    Returns:
+        ``torch.device("cuda", ordinal)`` when the CUDA runtime reports device
+        memory, ``torch.device("cpu")`` otherwise -- including host memory
+        (registered or not), a failed query, a runtime that does not export
+        ``cudaPointerGetAttributes`` (ROCm exports the ``hip`` spelling with a
+        different struct layout), or no runtime at all. CPU is the safe answer
+        because it is what this module assumed unconditionally before.
+    """
+    lib = _get_copy_lib()
+    query = getattr(lib, "cudaPointerGetAttributes", None) if lib else None
+    if query is None:
+        return torch.device("cpu")
+    query.restype = ctypes.c_int
+    query.argtypes = [ctypes.POINTER(_CudaPointerAttributes), ctypes.c_void_p]
+    attributes = _CudaPointerAttributes()
+    err = query(ctypes.byref(attributes), ctypes.c_void_p(ptr))
+    if err != 0:
+        # Plain host allocations report an error on older runtimes. Clear it so
+        # an unrelated cudaGetLastError() does not pick up this query's failure.
+        clear_error = getattr(lib, "cudaGetLastError", None)
+        if clear_error is not None:
+            clear_error()
+        return torch.device("cpu")
+    if attributes.memory_type != _CUDA_MEMORY_TYPE_DEVICE:
+        return torch.device("cpu")
+    return torch.device("cuda", int(attributes.device))
+
+
 def _tensor_from_ptr(
     ptr: int,
     shape: tuple[int, ...],
@@ -1040,10 +1095,13 @@ def _normalize_lmcache_objects(
 ) -> list[torch.Tensor]:
     """Normalize LMCache object inputs to chunk tensors.
 
-    Accepts either a list of chunk tensors or a ``list[int]`` of raw CPU pointers.
+    Accepts either a list of chunk tensors or a ``list[int]`` of raw pointers.
     When a pointer list is provided *shape_desc*, *lmcache_chunk_size*,
     *engine_kv_format*, and *dtype* must be supplied so the tensors can be
-    reconstructed via :func:`_tensor_from_ptr` on the CPU.
+    reconstructed via :func:`_tensor_from_ptr`. Those pointers may be host or
+    device memory -- callers that stage through GPU buffers pass device
+    pointers -- so each one's residency is resolved with :func:`_device_of_ptr`
+    rather than assumed.
     """
     if not isinstance(lmcache_objects_ptrs, list):
         raise TypeError(
@@ -1055,7 +1113,7 @@ def _normalize_lmcache_objects(
     if isinstance(lmcache_objects_ptrs[0], torch.Tensor):
         return lmcache_objects_ptrs  # type: ignore[return-value]
     if isinstance(lmcache_objects_ptrs[0], int):
-        # Pointer mode: reconstruct chunk tensors (always on CPU).
+        # Pointer mode: reconstruct chunk tensors where the pointers actually live.
         if (
             shape_desc is None
             or lmcache_chunk_size is None
@@ -1079,7 +1137,7 @@ def _normalize_lmcache_objects(
         else:
             chunk_shape = (2, nl, chunk_tokens, nh * hs)
         return [
-            _tensor_from_ptr(ptr, chunk_shape, dtype, "cpu")
+            _tensor_from_ptr(ptr, chunk_shape, dtype, _device_of_ptr(ptr))
             for ptr in lmcache_objects_ptrs
         ]
     raise TypeError(
