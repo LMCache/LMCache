@@ -1,11 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Per-``cache_salt`` L2 usage view for the MP coordinator.
 
-The global key directory is the source of truth for placements; this
-manager maintains the **usage view** of it — per-salt L2 byte totals —
-from the same applied cache-event stream (it is a
-:class:`~lmcache.v1.mp_coordinator.cache_control.event_broadcaster.CacheEventConsumer`
-registered on the ``CacheEventBroadcaster``).
+Per-salt byte totals derived from the same admitted cache-event stream
+that builds the key directory. Owned and fed by
+``FleetEvictionController``, the only thing that acts on usage.
 """
 
 # Future
@@ -29,12 +27,7 @@ _PlacementId = tuple[ObjectKey, str, str]
 
 
 class L2UsageManager:
-    """Thread-safe per-``cache_salt`` L2 byte usage view.
-
-    Mutations arrive through :meth:`consume` (directory-applied event
-    batches); reads through :meth:`get`, :meth:`get_all`,
-    :meth:`get_total`, and :meth:`get_key_size`.
-    """
+    """Thread-safe per-``cache_salt`` L2 byte usage view."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -44,14 +37,12 @@ class L2UsageManager:
         self._total_bytes: int = 0
 
     def consume(self, batch: CacheEventBatch) -> None:
-        """Apply one directory-applied cache-event batch to the view.
-
-        The :class:`CacheEventBroadcaster` consumer hook: L2 ``STORE``
-        upserts placement bytes (delta on re-store), L2 ``DELETE``
-        removes them; ``ACCESS`` and other tiers are ignored.
+        """Account one gate-admitted batch: L2 ``STORE`` upserts
+        placement bytes (delta on re-store), L2 ``DELETE`` removes them.
 
         Args:
-            batch: The applied batch.
+            batch: The admitted batch; other tiers and ``ACCESS`` are
+                ignored.
         """
         if batch.tier != Tier.L2:
             return

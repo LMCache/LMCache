@@ -30,14 +30,14 @@ storage layer ──► EventBus ──► CacheEventSubscriber ──► CacheE
   `seq` gap that marks the instance's slice stale until the stream is
   replayed, and restarts are fenced by `incarnation`. A sink never needs exactly-once or global ordering.
 - **`HttpCacheEventSink`** — the first sink: one
-  `POST /directory/events` per flush, batches in list order. Failures
+  `POST /events` per flush, batches in list order. Failures
   raise `CacheEventPublishError`; the caller decides retry vs drop
   (both are safe, see above).
 - A future **Kafka sink** produces to a topic with the message key set
   to `instance_id`, so one partition carries one instance's stream —
   partition FIFO is exactly the per-instance FIFO the directory needs.
   The coordinator side gains a consumer that feeds
-  `KeyDirectory.apply_batch`; the subscriber and producers are
+  the coordinator's `EventGate`; the subscriber and producers are
   untouched.
 
 ## Batching and sequencing (inside the subscriber)

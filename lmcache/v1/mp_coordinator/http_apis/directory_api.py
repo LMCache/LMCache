@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Key-directory endpoints on the coordinator (fleet-level).
 
-The ``/directory`` surface, thin over the :class:`KeyDirectory` carried on
-the typed :class:`CoordinatorContext`: cache-event ingestion from MP
-servers, placement lookup, key/token-id listing, and stats. See
+The ``/directory`` surface, thin over the :class:`KeyDirectory` carried
+on the typed :class:`CoordinatorContext`: placement lookup, fragment
+(blend) lookup, key/token-id listing, and stats — all read-only. The
+directory is written by the cache-event stream, which arrives on
+``POST /events`` (see :mod:`events_api`). See
 ``docs/design/v1/mp_coordinator/key_directory.md``.
 """
 
@@ -16,13 +18,11 @@ from fastapi import APIRouter, HTTPException, Query, Request
 # First Party
 from lmcache.v1.distributed.api import Tier
 from lmcache.v1.mp_coordinator.http_apis.dependencies import get_context
-from lmcache.v1.mp_coordinator.key_directory import ApplyResult, DirectoryStats
+from lmcache.v1.mp_coordinator.key_directory import DirectoryStats
 from lmcache.v1.mp_coordinator.schemas import (
     BlendLookupRequest,
     BlendLookupResponse,
     BlendMatchModel,
-    DirectoryEventsRequest,
-    DirectoryEventsResponse,
     DirectoryKeyInfo,
     DirectoryKeyPlacements,
     DirectoryListResponse,
@@ -33,37 +33,6 @@ from lmcache.v1.mp_coordinator.schemas import (
 from lmcache.v1.multiprocess.cache_control.key_resolver import resolve_object_keys
 
 router = APIRouter()
-
-
-@router.post("/directory/events")
-async def report_cache_events(
-    body: DirectoryEventsRequest, request: Request
-) -> DirectoryEventsResponse:
-    """Apply a batch of cache-event batches to the key directory.
-
-    Batches are applied in list order; per instance they must be sent in
-    emission order. Duplicate and stale-incarnation batches are dropped
-    and counted, not errors. Applied batches also fan out to the
-    usage/eviction consumers via the context's event router.
-
-    Args:
-        body: The event batches to apply.
-
-    Returns:
-        Counts of applied and dropped batches.
-    """
-    ctx = get_context(request)
-    response = DirectoryEventsResponse()
-    for batch in body.batches:
-        result = ctx.key_directory.apply_batch(batch)
-        if result == ApplyResult.APPLIED:
-            ctx.event_broadcaster.broadcast(batch)
-            response.applied += 1
-        elif result == ApplyResult.DUPLICATE:
-            response.duplicates += 1
-        else:
-            response.stale += 1
-    return response
 
 
 @router.post("/directory/lookup")
@@ -218,7 +187,9 @@ async def directory_stats(request: Request) -> DirectoryStats:
     """Return a point-in-time summary of directory contents.
 
     Returns:
-        Key/placement counts plus per-instance stream state (incarnation,
-        last applied seq, gap flag), keyed by ``instance_id``.
+        Key/placement counts, per-instance L1 key counts, and the
+        blend-index counts. Per-emitter stream state (incarnation,
+        applied seq, gap flag) lives on the ingest gate and is not
+        exposed yet.
     """
     return get_context(request).key_directory.stats()
