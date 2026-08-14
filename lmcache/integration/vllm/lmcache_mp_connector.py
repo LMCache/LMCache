@@ -35,6 +35,7 @@ import zmq
 
 # First Party
 from lmcache import torch_dev
+from lmcache import torch_device_type
 from lmcache.banner import print_banner_once
 from lmcache.integration.vllm.experimental import dispatch
 from lmcache.integration.vllm.kv_cache_group_edits import (
@@ -495,6 +496,36 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             )
         return
 
+    def _create_worker_ordering_event(self) -> "torch_dev.Event":
+        """Create the device event that orders worker-side KV transfers.
+
+        The event is recorded after the model step so the transfer path can
+        order KV copies against compute. Only the ``lmcache_driven`` (handle)
+        transfer path exports this event across processes, and that path is
+        selected exclusively for backends that provide an event-IPC backend
+        (CUDA). Those backends therefore require an interprocess-capable event.
+
+        Backends without an event-IPC backend (e.g. XPU) run the
+        ``engine_driven`` path, which performs the copy inside the worker and
+        orders it with a stream synchronize; the event is never exported, so a
+        plain device event is sufficient. Their device ``Event`` classes do not
+        accept ``interprocess=True`` (and cannot produce IPC handles), so
+        requesting one would fail.
+
+        Returns:
+            A recorded-capable device ``Event``: interprocess-capable when the
+            active backend supports event IPC, otherwise a plain device event.
+        """
+        # Lazy import: platform subclass discovery can import the connector
+        # before platform.__init__ finishes, so keep this out of module scope.
+        # First Party
+        from lmcache.v1.platform import get_device_spec
+
+        spec = get_device_spec(torch_device_type)
+        if spec is not None and spec.event_ipc_backend is not None:
+            return torch_dev.Event(interprocess=True)
+        return torch_dev.Event()
+
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
         """
         Start loading the KV cache from the connector to vLLM's paged
@@ -527,7 +558,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         if len(request_ids) == 0:
             return
 
-        event = torch_dev.Event(interprocess=True)
+        event = self._create_worker_ordering_event()
         event.record()
 
         self.worker_adapter.batched_submit_retrieve_requests(
@@ -603,7 +634,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 dispatch(self.dispatcher, "wait_for_save", event=None)
             return
 
-        event = torch_dev.Event(interprocess=True)
+        event = self._create_worker_ordering_event()
         event.record()
 
         self.worker_adapter.batched_submit_store_requests(
