@@ -951,6 +951,24 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             group_layout_descs=group_layout_descs,
         )
 
+        # Bring up the maru CXL pool now that the KV layout is known; a no-op
+        # for the stock L1 backend. The raw engine format is forwarded as-is
+        # (maru maps it to its memory format internally) so this hook carries
+        # no maru-conditional logic. Idempotent across instances.
+        try:
+            self._ctx.storage_manager.register_kv_layout(
+                layout_desc,
+                cache_context.get_engine_kv_format(0),
+                self._ctx.chunk_size,
+                attn_desc.num_object_groups,
+            )
+        except Exception:
+            # e.g. maru rejects >1 object group -- drop the context we
+            # just built so the instance is not left half-registered,
+            # then surface the error on the REGISTER path.
+            cache_context.close()
+            raise
+
         with self._lock:
             self._cache_contexts[instance_id] = ContextEntry(
                 cache_context=cache_context,

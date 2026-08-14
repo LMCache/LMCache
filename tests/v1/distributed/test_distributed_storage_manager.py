@@ -4,6 +4,7 @@ Unit tests for StorageManager.
 """
 
 # Standard
+from unittest.mock import MagicMock
 import time
 
 # Third Party
@@ -24,6 +25,7 @@ from lmcache.v1.distributed.config import (
     EvictionConfig,
     L1ManagerConfig,
     L1MemoryManagerConfig,
+    MaruL1Config,
     StorageManagerConfig,
 )
 from lmcache.v1.distributed.l2_adapters.config import (
@@ -42,6 +44,8 @@ if not torch_dev.is_available():
 
 try:
     # First Party
+    from lmcache.v1.distributed.l1_manager import L1Manager
+    from lmcache.v1.distributed.maru_l1_manager import MaruL1Manager
     from lmcache.v1.distributed.storage_manager import StorageManager
 except ImportError:
     # Skip tests if L1Manager cannot be imported
@@ -116,6 +120,27 @@ def small_storage_manager_config(small_l1_config):
         eviction_config=EvictionConfig(
             eviction_policy="LRU",
         ),
+    )
+
+
+@pytest.fixture
+def maru_storage_manager_config():
+    """StorageManagerConfig whose L1 tier is maru (shared CXL pool)."""
+    return StorageManagerConfig(
+        l1_manager_config=L1ManagerConfig(
+            memory_config=L1MemoryManagerConfig(
+                size_in_bytes=0,
+                use_lazy=False,
+                maru_config=MaruL1Config(
+                    server_url="maru://localhost:5555",
+                    pool_size_bytes=1 << 20,
+                    instance_id="test-sm",
+                ),
+            ),
+            write_ttl_seconds=600,
+            read_ttl_seconds=300,
+        ),
+        eviction_config=EvictionConfig(eviction_policy="LRU"),
     )
 
 
@@ -1080,6 +1105,71 @@ class TestStorageManagerSparsePrefetch:
 
         sm.finish_read_prefetched(existing)
         sm.close()
+
+
+class TestMaruL1Selection:
+    """C8: StorageManager selects and drives the maru L1 backend."""
+
+    def test_maru_config_selects_maru_l1_manager(self, maru_storage_manager_config):
+        sm = StorageManager(maru_storage_manager_config)
+        try:
+            assert isinstance(sm._l1_manager, MaruL1Manager)
+        finally:
+            sm.close()
+
+    def test_stock_config_selects_stock_l1_manager(self, basic_storage_manager_config):
+        sm = StorageManager(basic_storage_manager_config)
+        try:
+            assert isinstance(sm._l1_manager, L1Manager)
+        finally:
+            sm.close()
+
+    def test_register_kv_layout_forwards_to_maru(
+        self, maru_storage_manager_config, basic_layout
+    ):
+        sm = StorageManager(maru_storage_manager_config)
+        try:
+            # Spy the forward so the test needs no maru runtime (init_layout).
+            sm._l1_manager.register_kv_layout = MagicMock()  # type: ignore[method-assign]
+            engine_fmt = MagicMock(name="engine_kv_format")
+            sm.register_kv_layout(basic_layout, engine_fmt, 16, num_object_groups=1)
+            sm._l1_manager.register_kv_layout.assert_called_once_with(
+                basic_layout.shapes, basic_layout.dtypes, engine_fmt, 16
+            )
+        finally:
+            sm.close()
+
+    def test_register_kv_layout_rejects_multi_object_group(
+        self, maru_storage_manager_config, basic_layout
+    ):
+        sm = StorageManager(maru_storage_manager_config)
+        try:
+            with pytest.raises(ValueError):
+                sm.register_kv_layout(
+                    basic_layout,
+                    MagicMock(name="engine_kv_format"),
+                    16,
+                    num_object_groups=2,
+                )
+        finally:
+            sm.close()
+
+    def test_register_kv_layout_noop_for_stock(
+        self, basic_storage_manager_config, basic_layout
+    ):
+        sm = StorageManager(basic_storage_manager_config)
+        try:
+            # Stock sizes its pool at construction: this must be a silent no-op
+            # (no forward, no raise, format never dereferenced) even for a
+            # would-be-rejected group count.
+            sm.register_kv_layout(
+                basic_layout,
+                MagicMock(name="engine_kv_format"),
+                16,
+                num_object_groups=2,
+            )
+        finally:
+            sm.close()
 
 
 class TestStorageManagerDelete:

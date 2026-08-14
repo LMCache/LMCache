@@ -217,8 +217,9 @@ def run_http_server(
 
     Raises:
         ValueError: If P2P is enabled without a coordinator URL, or with an L1
-            tier that is not a single registerable memory region; or if
-            coordinator event reporting is enabled with observability
+            tier that is not a single registerable memory region; or if maru
+            L1 is configured with a transfer mode other than lmcache_driven;
+            or if coordinator event reporting is enabled with observability
             disabled (the cache-event stream rides the event bus).
     """
     if mp_config.p2p_config.enabled:
@@ -231,9 +232,20 @@ def run_http_server(
         if not l1_exposes_single_memory_region(storage_manager_config):
             raise ValueError(
                 "P2P requires a single L1 memory region the transfer channel "
-                "can register; it is incompatible with GDS L1 (--gds-l1-path) "
-                "and Device-DAX L1 (--l1-devdax-path)."
+                "can register; it is incompatible with GDS L1 (--gds-l1-path), "
+                "Device-DAX L1 (--l1-devdax-path), and maru L1 (--maru-*)."
             )
+    # maru drives KV transfer through the LMCache-driven path only; engine-
+    # driven / auto transfer assumes engine-side buffers the shared CXL pool
+    # does not provide.
+    if (
+        storage_manager_config.l1_manager_config.memory_config.maru_config is not None
+        and mp_config.supported_transfer_mode != "lmcache_driven"
+    ):
+        raise ValueError(
+            "maru L1 requires --supported-transfer-mode lmcache_driven (got "
+            f"{mp_config.supported_transfer_mode!r})."
+        )
     if coordinator_config.event_reporting and not obs_config.enabled:
         raise ValueError(
             "--coordinator-event-reporting rides the observability event "

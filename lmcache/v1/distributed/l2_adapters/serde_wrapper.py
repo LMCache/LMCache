@@ -41,7 +41,7 @@ from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import KeyListPage, MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L2AdapterListener, L2StoreResult
-from lmcache.v1.distributed.l1_manager import L1Manager
+from lmcache.v1.distributed.l1_protocol import L1ManagerInterface
 from lmcache.v1.distributed.l2_adapters.base import (
     AdapterUsage,
     L2AdapterInterface,
@@ -106,7 +106,7 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
         self,
         inner: L2AdapterInterface,
         serde: SerdeProcessor,
-        l1_manager: L1Manager,
+        l1_manager: L1ManagerInterface,
     ) -> None:
         super().__init__()
         self._inner = inner
@@ -613,18 +613,20 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
             layout_desc=layout,
             mode="new",
         )
-        # First pass: collect every key whose reserve_write succeeded.
-        # We must scan the full list (not bail on the first failure)
-        # so a mixed-success result still releases all reserved keys.
+        # Scan the full list (not bailing on the first failure) so a mixed
+        # result still releases every reserved key. A SUCCESS result always
+        # carries a buffer; the ``is not None`` check keeps that explicit and
+        # collects the objects in one pass.
         successful_temp_keys: list[ObjectKey] = []
+        temp_objs: list[MemoryObj] = []
         for temp_key in temp_keys:
             r = results.get(temp_key)
-            if r is not None and r[0] == L1Error.SUCCESS:
+            if r is not None and r[0] == L1Error.SUCCESS and r[1] is not None:
                 successful_temp_keys.append(temp_key)
+                temp_objs.append(r[1])
         if len(successful_temp_keys) != len(temp_keys):
             self._release_write_temps(successful_temp_keys)
             return temp_keys, None
-        temp_objs = [results[tk][1] for tk in temp_keys]
         return temp_keys, temp_objs
 
     def _release_write_temps(self, temp_keys: list[ObjectKey]) -> None:

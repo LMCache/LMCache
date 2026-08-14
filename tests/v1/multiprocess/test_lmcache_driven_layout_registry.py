@@ -32,6 +32,10 @@ class _FakeGPUContext:
     num_layers: int = 2
     kv_layer_groups_manager: _FakeKVLayerGroupsManager = _FakeKVLayerGroupsManager()
 
+    def get_engine_kv_format(self, object_group_id: int) -> object:
+        """Return a sentinel engine KV format (forwarded, never dereferenced)."""
+        return object()
+
     def close(self) -> None:
         """No-op teardown (real GPUCacheContext.close deregisters its GDS buffer)."""
 

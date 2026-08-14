@@ -128,6 +128,10 @@ class L1MemoryManagerConfig:
     devdax_size_in_bytes: int = 0
     """ Optional Device-DAX overflow size for hybrid DRAM + DAX L1. """
 
+    maru_config: "MaruL1Config | None" = None
+    """ Optional Maru CXL L1 backend; when set the L1 medium is a shared CXL
+    pool and the other L1 sizing fields above are ignored. """
+
     def __post_init__(self):
         self.init_size_in_bytes = min(self.init_size_in_bytes, self.size_in_bytes)
 
@@ -183,6 +187,44 @@ class GdsL1Config:
 
     align_bytes: int = 4096
     """Allocation alignment; cuFile/hipFile and O_DIRECT require 4 KiB."""
+
+
+@dataclass
+class MaruL1Config:
+    """Config for the Maru CXL-backed L1 backend (mutually exclusive with the
+    pinned-DRAM / Device-DAX / GDS tiers). Defaults follow the non-MP
+    ``MaruBackend``; the allocator supplies ``chunk_size_bytes`` (from the KV
+    layout) and ``auto_connect=False``.
+    """
+
+    server_url: str
+    """MaruServer endpoint, e.g. ``maru://host:port`` or ``tcp://host:port``."""
+
+    pool_size_bytes: int
+    """CXL pool size to request from MaruServer, in bytes."""
+
+    instance_id: str | None = None
+    """Stable client id for ownership tracking; auto-generated if unset."""
+
+    timeout_ms: int = 5000
+    """RPC timeout in milliseconds."""
+
+    use_async_rpc: bool = True
+    """Whether to use the async RPC path to MaruServer."""
+
+    max_inflight: int = 64
+    """Maximum concurrent in-flight RPCs."""
+
+    eager_map: bool = True
+    """Eagerly mmap peer regions for cross-instance zero-copy reads."""
+
+    auto_expand: bool = True
+    """Whether the owned pool auto-expands into free CXL device space when it
+    fills. When True (default), the pool grows toward the device capacity and
+    the eviction watermark is anchored to device fill (owned pool + device
+    free); when False, the pool is hard-capped at ``pool_size_bytes`` and the
+    watermark is anchored to that pool, so eviction engages before the pool is
+    exhausted (see ``MaruL1Manager.get_memory_usage``)."""
 
 
 @dataclass
@@ -296,6 +338,33 @@ def validate_storage_manager_config(config: StorageManagerConfig) -> None:
         ValueError: If mutually exclusive L1 tiers are both configured, or
             hybrid L1 is paired with incompatible L2 adapters.
     """
+    l1_config = config.l1_manager_config
+    if l1_config.memory_config.maru_config is not None:
+        # maru is a standalone shared-CXL L1 tier. It cannot coexist with the
+        # other L1 backends, and -- exposing no single registerable region --
+        # cannot serve L2 adapters or store policies that need one.
+        if l1_config.gds_l1_config is not None:
+            raise ValueError("maru L1 cannot be combined with gds-l1-path")
+        if l1_config.memory_config.devdax_path:
+            raise ValueError("maru L1 cannot be combined with l1-devdax-path")
+        if config.store_policy == "skip_l1":
+            raise ValueError(
+                "maru L1 does not support store_policy='skip_l1': the shared "
+                "pool is the store target, not a bypass buffer"
+            )
+        registered_adapters = [
+            name
+            for adapter_config in config.l2_adapter_config.adapters
+            if (name := _requires_single_l1_memory_region(adapter_config)) is not None
+        ]
+        if registered_adapters:
+            raise ValueError(
+                "maru L1 has no single registerable memory region, so it "
+                "cannot be used with L2 adapters that require one: "
+                f"{', '.join(registered_adapters)}"
+            )
+        return
+
     if (
         config.l1_manager_config.gds_l1_config is not None
         and config.l1_manager_config.memory_config.devdax_path
@@ -328,9 +397,12 @@ def l1_exposes_single_memory_region(config: StorageManagerConfig) -> bool:
 
     Returns:
         ``True`` if L1 is a single registerable memory region, ``False`` for
-        GDS L1 or Device-DAX L1.
+        GDS L1, Device-DAX L1, or maru L1 (a shared CXL pool with no single
+        registerable region).
     """
     l1_config = config.l1_manager_config
+    if l1_config.memory_config.maru_config is not None:
+        return False
     if l1_config.gds_l1_config is not None:
         return False
     if l1_config.memory_config.devdax_path:
@@ -427,6 +499,46 @@ def add_storage_manager_args(
         help="Open the slab file with O_DIRECT (required for the GDS DMA fast "
         "path on ext4). Default True.",
     )
+    # Maru L1 tier (optional, opt-in via --maru-server-url)
+    maru_group = parser.add_argument_group(
+        "Maru L1 tier",
+        "Optional CXL-backed shared L1 via Maru. Setting --maru-server-url "
+        "makes the L1 medium a cross-instance CXL pool instead of pinned DRAM; "
+        "the DRAM L1 settings (--l1-size-gb, --l1-use-lazy, --l1-init-size-gb) "
+        "are then ignored.",
+    )
+    maru_group.add_argument(
+        "--maru-server-url",
+        type=str,
+        default=None,
+        help="MaruServer endpoint (maru://host:port or tcp://host:port). "
+        "Enables the Maru CXL L1 backend when set.",
+    )
+    maru_group.add_argument(
+        "--maru-pool-size-gb",
+        type=float,
+        default=0.0,
+        help="CXL pool size to request from MaruServer (GB). Required (>0) "
+        "when --maru-server-url is set.",
+    )
+    maru_group.add_argument(
+        "--maru-instance-id",
+        type=str,
+        default=None,
+        help="Stable client id reported to MaruServer for ownership tracking. "
+        "Auto-generated if omitted.",
+    )
+    maru_group.add_argument(
+        "--maru-auto-expand",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Whether the owned CXL pool auto-expands into free device space "
+        "when full. Default True: the pool grows toward device capacity and "
+        "eviction is anchored to device fill. Use --no-maru-auto-expand to "
+        "hard-cap the pool at --maru-pool-size-gb and evict before it is "
+        "exhausted.",
+    )
+
     # L1 Manager Config (TTL settings)
     ttl_group = parser.add_argument_group(
         "L1 Manager TTL", "TTL configuration for L1 manager locks"
@@ -555,6 +667,20 @@ def parse_args_to_config(
     Returns:
         StorageManagerConfig: The configuration object.
     """
+    maru_config: MaruL1Config | None = None
+    if getattr(args, "maru_server_url", None):
+        pool_size_gb = getattr(args, "maru_pool_size_gb", 0.0)
+        if pool_size_gb <= 0:
+            raise ValueError(
+                "--maru-pool-size-gb must be > 0 when --maru-server-url is set"
+            )
+        maru_config = MaruL1Config(
+            server_url=args.maru_server_url,
+            pool_size_bytes=int(pool_size_gb * (1 << 30)),
+            instance_id=getattr(args, "maru_instance_id", None),
+            auto_expand=getattr(args, "maru_auto_expand", True),
+        )
+
     shm_name = getattr(args, "shm_name", None)
     if shm_name is None:
         memory_config = L1MemoryManagerConfig(
@@ -562,6 +688,7 @@ def parse_args_to_config(
             use_lazy=args.l1_use_lazy,
             init_size_in_bytes=int(args.l1_init_size_gb * (1 << 30)),
             align_bytes=args.l1_align_bytes,
+            maru_config=maru_config,
             devdax_path=args.l1_devdax_path,
         )
     else:
@@ -571,6 +698,7 @@ def parse_args_to_config(
             init_size_in_bytes=int(args.l1_init_size_gb * (1 << 30)),
             align_bytes=args.l1_align_bytes,
             shm_name=shm_name,
+            maru_config=maru_config,
             devdax_path=args.l1_devdax_path,
         )
 
