@@ -6,10 +6,8 @@ from unittest.mock import MagicMock
 import pytest
 
 # First Party
-from lmcache.integration.vllm.lazy_offload_pending_store import (
-    FIFOOffloadPolicy,
-    LazyOffloadPendingStore,
-)
+from lmcache.integration.vllm.lazy_offload_pending_store import LazyOffloadPendingStore
+from lmcache.integration.vllm.lazy_offload_policy.fifo import FIFOOffloadPolicy
 
 
 def _make_meta(request_id: str = "req-0", num_blocks: int = 1) -> MagicMock:

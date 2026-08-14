@@ -1,13 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Standard
-from abc import ABC, abstractmethod
 from collections import defaultdict
-from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 # First Party
-from lmcache.utils import init_logger as lmcache_init_logger
+from lmcache.integration.vllm.lazy_offload_policy.base import (
+    OffloadPolicy,
+    PendingStoreItem,
+)
+from lmcache.integration.vllm.lazy_offload_policy.fifo import FIFOOffloadPolicy
 
 if TYPE_CHECKING:
     # Third Party
@@ -15,125 +17,6 @@ if TYPE_CHECKING:
 
     # First Party
     from lmcache.integration.vllm.lmcache_mp_metadata import LMCacheMPRequestMetadata
-
-
-logger = lmcache_init_logger(__name__)
-
-
-@dataclass
-class PendingStoreItem:
-    """
-    Represents a pending store operation in the lazy offload queue.
-
-    Attributes:
-        request_id: The request id of the pending store request.
-        metadatas: The store metadata to be submitted.
-        is_finished: Whether the request is finished.
-    """
-
-    request_id: str
-    metadatas: list[tuple["LMCacheMPRequestMetadata", dict[int, bytes]]] = field(
-        default_factory=list
-    )
-    is_finished: bool = False
-
-
-# TODO(chunxiaozheng): support more offload policies
-class OffloadPolicy(ABC):
-    """
-    Abstract base class for lazy offload policies.
-
-    Policies run in the scheduler role through :class:`LazyOffloadPendingStore`;
-    worker processes do not create or call them. Subclasses decide whether
-    offload is due and pop items in one ``pop_items_for_offload`` operation.
-    """
-
-    @abstractmethod
-    def add(self, meta: "LMCacheMPRequestMetadata", block_hashes: dict[int, bytes]):
-        """Add cache blocks from one request to the pending store.
-
-        Args:
-            meta: Store metadata for a subset of one request's cache blocks.
-                Chunked prefill or the scheduler's ``max-num-batched-tokens``
-                limit can schedule one request multiple times, so policies must
-                aggregate its metadata by ``meta.request_id``.
-            block_hashes: Mapping from the GPU block IDs in ``meta`` to their
-                corresponding block hashes captured when the metadata is queued.
-        """
-        ...
-
-    @abstractmethod
-    def mark_req_finished(self, req_id: str):
-        """Mark the pending store item finished."""
-        ...
-
-    @abstractmethod
-    def pop_items_for_offload(self, count: int) -> list[PendingStoreItem]:
-        """Pop items to offload only when the policy's condition is satisfied.
-
-        When the condition is not satisfied, this method returns an empty list
-        and leaves pending items in the queue.
-
-        Args:
-            count: Maximum number of items to pop.
-
-        Returns:
-            Popped pending store items, or an empty list when offload is not
-            due.
-        """
-        ...
-
-
-class FIFOOffloadPolicy(OffloadPolicy):
-    """
-    FIFO offload policy: when finished request count reaches the threshold,
-    pops a fixed number of items from the front.
-    """
-
-    def __init__(self, configs: dict | None = None):
-        """
-        Args:
-            configs: The configuration for the FIFO offload policy.
-        """
-        self._pending_items: dict[str, PendingStoreItem] = {}
-        self._threshold = (
-            configs.get("lmcache.mp.lazy_offload_threshold", 100) if configs else 100
-        )
-        self._finished_requests_count = 0
-        logger.info(
-            "lazy offload enabled with FIFO policy, offload threshold: %d",
-            self._threshold,
-        )
-
-    def add(self, meta: "LMCacheMPRequestMetadata", block_hashes: dict[int, bytes]):
-        if meta.request_id not in self._pending_items:
-            self._pending_items[meta.request_id] = PendingStoreItem(
-                request_id=meta.request_id
-            )
-        self._pending_items[meta.request_id].metadatas.append((meta, block_hashes))
-
-    def mark_req_finished(self, req_id: str):
-        if req_id in self._pending_items:
-            self._pending_items[req_id].is_finished = True
-            self._finished_requests_count += 1
-        else:
-            raise ValueError(
-                f"mark req finished failed: req_id: {req_id} not in pending_items"
-            )
-
-    def pop_items_for_offload(self, count: int) -> list[PendingStoreItem]:
-        if count <= 0 or self._finished_requests_count < self._threshold:
-            return []
-
-        to_offload = []
-        for req_id in list(self._pending_items.keys()):
-            if self._pending_items[req_id].is_finished:
-                to_offload.append(self._pending_items[req_id])
-                del self._pending_items[req_id]
-                self._finished_requests_count -= 1
-            if len(to_offload) >= count:
-                break
-        return to_offload
 
 
 class LazyOffloadPendingStore:
@@ -155,13 +38,7 @@ class LazyOffloadPendingStore:
         Args:
             configs: The configuration for the pending store.
         """
-        policy = (
-            configs.get("lmcache.mp.lazy_offload_policy", "FIFO") if configs else "FIFO"
-        )
-        if policy == "FIFO":
-            self._policy = FIFOOffloadPolicy(configs)
-        else:
-            raise ValueError(f"Unknown offload policy: {policy}")
+        self._policy = self._create_offload_policy(configs)
 
         # TODO(chunxiaozheng): support more flexible select count
         self._select_count = (
@@ -213,3 +90,12 @@ class LazyOffloadPendingStore:
     def remove_request_gpu_block_ids(self, req_id: str):
         if req_id in self._request_block_ids:
             del self._request_block_ids[req_id]
+
+    def _create_offload_policy(self, configs: dict | None) -> OffloadPolicy:
+        """Create the configured lazy-offload policy."""
+        policy = (
+            configs.get("lmcache.mp.lazy_offload_policy", "FIFO") if configs else "FIFO"
+        )
+        if policy == "FIFO":
+            return FIFOOffloadPolicy(configs)
+        raise ValueError(f"Unknown offload policy: {policy}")
