@@ -1060,10 +1060,9 @@ not reach ``vllm serve``:
 
 The webhook injects the plugin init container, ``PYTHONPATH``, ``hostIPC``, the
 private-image pull secret, and the required CacheBlend vLLM flags
-(``--attention-backend CUSTOM``, ``--kv-transfer-config`` from the engine's
-connection ConfigMap, ``--block-size 64``, ``--pipeline-parallel-size 1``,
-``--no-enable-chunked-prefill``, ``--no-async-scheduling``, ``--enforce-eager``).
-You supply only the model and your non-CacheBlend flags.
+(``--kv-transfer-config`` from the engine's connection ConfigMap,
+``--pipeline-parallel-size 1``, ``--no-enable-chunked-prefill``,
+``--enforce-eager``).  You supply only the model and your non-CacheBlend flags.
 
 Verifying Injection
 ~~~~~~~~~~~~~~~~~~~~~
@@ -1073,7 +1072,7 @@ The webhook mutates **Pods**, not the Deployment, so inspect a pod:
 .. code-block:: bash
 
     kubectl get pod -l app=vllm-cacheblend -o yaml | \
-      grep -E "initContainers|cb-plugin|PYTHONPATH|attention-backend|cacheblend-injected|skip-reason"
+      grep -E "initContainers|cb-plugin|PYTHONPATH|kv-transfer-config|cacheblend-injected|skip-reason"
 
 If nothing was injected, check the pod's ``lmcache.ai/cacheblend-skip-reason``
 annotation: ``command-override`` (a ``sh -c`` wrapper was used),
@@ -1105,6 +1104,12 @@ Spec Reference above) and adds:
    * - ``blend.recompRatio``
      - ``0.15``
      - Fraction of non-prefix-hit tokens recomputed (``cb.recomp_ratio``).
+   * - ``blend.partialBucket``
+     - unset
+     - Pads PARTIAL row counts to a multiple of this bucket
+       (``cb.partial_bucket``).  Needed on fp8-MoE models, where every distinct
+       row count is a fresh M shape and the Triton autotuner re-tunes all MoE
+       layers per CB step without it.  Unset omits the key (padding disabled).
    * - ``injection.payloadImage``
      - *required*
      - The (private) cacheblend-plugin init-container image
@@ -1121,7 +1126,7 @@ Spec Reference above) and adds:
      - ``eager`` | ``piecewise`` | ``full_decode_only`` (never ``full``).
 
 ``server.chunkSize`` defaults to ``256`` and must equal 256 (the blend matcher
-requires ``chunk_size == vLLM --block-size * 4``).
+requires it).
 
 .. _mp-operator-pd-disaggregation:
 

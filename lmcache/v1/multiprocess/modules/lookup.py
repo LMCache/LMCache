@@ -406,6 +406,14 @@ class LookupModule:
             job.attn_desc.num_chunks_in_sw,
         )
 
+        # Record the model-wide hit length on the session so a later
+        # free_lookup_locks can reconstruct which keys the prefetch
+        # read-locked (see ``unfold``: full-attention groups lock the whole
+        # hit prefix, sliding-window groups only its in-window suffix).
+        self._ctx.session_manager.get_or_create(
+            job.request_id
+        ).prefetch_hit_chunks = found_count
+
         self._ctx.event_bus.publish(
             Event(
                 event_type=EventType.MP_LOOKUP_PREFETCH_END,
@@ -470,6 +478,8 @@ class LookupModule:
         ``start`` and ``end`` must be aligned to ``chunk_size``; it is the
         caller's responsibility to align the boundaries as desired.
 
+        Only the keys the prefetch actually read-locked are released.
+
         Computes the extra reader count from ``tp_size`` and
         ``world_size`` the same way :meth:`lookup` does, so
         the correct number of locks is released.
@@ -484,16 +494,44 @@ class LookupModule:
         )
         if not chunk_hashes:
             return
-        # Release across every object group, mirroring lookup, which locks keys
-        # in every group; releasing only group 0 would leak the rest.
-        #
-        # NOTE: correct only for full attention, where every locked chunk is a
-        # hit chunk. Sliding-window groups do not retain chunks outside their
-        # window, so once SWA prefetch lands this must skip those chunks instead
-        # of releasing every one -- otherwise chunks the engine still holds can
-        # be over-released (e.g. window=512, LMCache hit 1024, vLLM hit 768 ->
-        # chunks 512..768 may leak). Revisit when sliding-window prefetch is on.
-        obj_keys = self._chunk_major_object_keys(key, chunk_hashes)
+
+        start_chunk = key.start // self._ctx.chunk_size
+        end_chunk = start_chunk + len(chunk_hashes)
+
+        attn_desc = self._ctx.layout_desc_registry.find_attn_desc(
+            key.model_name, key.world_size
+        )
+        hit_chunks = self._ctx.session_manager.get_or_create(
+            key.request_id
+        ).prefetch_hit_chunks
+        if hit_chunks < 0:
+            logger.warning(
+                "free_lookup_locks for request %s before its prefetch result "
+                "was consumed; releasing full-attention groups only",
+                key.request_id,
+            )
+
+        # Release across every object group, mirroring lookup, which locks
+        # keys in every group; releasing only group 0 would leak the rest.
+        obj_keys: list[ObjectKey] = []
+        for group_idx, window in enumerate(attn_desc.num_chunks_in_sw):
+            if hit_chunks < 0:
+                if window >= 0:
+                    continue
+                lo, hi = start_chunk, end_chunk
+            else:
+                # Locked range per ``unfold``: the whole hit prefix for full
+                # attention, its trailing ``window`` chunks otherwise.
+                lo = 0 if window < 0 else max(0, hit_chunks - window)
+                lo = max(lo, start_chunk)
+                hi = min(hit_chunks, end_chunk)
+            if lo >= hi:
+                continue
+            group_hashes = chunk_hashes[lo - start_chunk : hi - start_chunk]
+            obj_keys.extend(ipc_key_to_object_keys(key, group_hashes, [group_idx])[0])
+
+        if not obj_keys:
+            return
 
         extra_count = compute_extra_count(tp_size, key.world_size)
 

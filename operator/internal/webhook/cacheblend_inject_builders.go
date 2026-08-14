@@ -57,23 +57,14 @@ var cbStaging = payloadStaging{
 }
 
 // CacheBlend-required vLLM flag names and fixed values (design §7 M5). The
-// CacheBlend matcher and connector hard-require these; several fail loudly,
-// --no-async-scheduling fails silently (MoE garble).
+// CacheBlend matcher and connector hard-require these.
 const (
-	cbFlagAttentionBackend = "--attention-backend"
-	cbValAttentionBackend  = "CUSTOM"
-
 	cbFlagKVTransferConfig = "--kv-transfer-config"
 
 	cbFlagNoChunkedPrefill = "--no-enable-chunked-prefill"
 
-	cbFlagBlockSize = "--block-size"
-	cbValBlockSize  = "64"
-
 	cbFlagPipelineParallelSize = "--pipeline-parallel-size"
 	cbValPipelineParallelSize  = "1"
-
-	cbFlagNoAsyncScheduling = "--no-async-scheduling"
 
 	// cudagraph mode flags. Eager (default) forces --enforce-eager; full
 	// decode-only enables decode graphs while never using full graphs in prefill
@@ -164,14 +155,11 @@ func BuildCBArgs(existingArgs []string, kvTransferConfigJSON, cudagraph string) 
 	args := make([]string, len(existingArgs))
 	copy(args, existingArgs)
 
-	args = applyArg(args, cbFlagAttentionBackend, cbValAttentionBackend)
 	if kvTransferConfigJSON != "" {
 		args = applyArg(args, cbFlagKVTransferConfig, kvTransferConfigJSON)
 	}
 	args = applyBareFlag(args, cbFlagNoChunkedPrefill)
-	args = applyArg(args, cbFlagBlockSize, cbValBlockSize)
 	args = applyArg(args, cbFlagPipelineParallelSize, cbValPipelineParallelSize)
-	args = applyBareFlag(args, cbFlagNoAsyncScheduling)
 
 	// cudagraphArgs returns either a single bare flag (--enforce-eager), a
 	// [flag, value] pair (full_decode_only), or nil (piecewise). Apply with
