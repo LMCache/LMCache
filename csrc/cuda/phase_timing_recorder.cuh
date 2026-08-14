@@ -33,23 +33,60 @@ struct PhaseTimingRecord {
   int64_t nbytes;     // staged payload bytes of the step
 };
 
-// Destroy an event pair (either handle may be null) and clear the CUDA
-// error state, so a timing failure never surfaces on an unrelated call.
-void destroy_phase_timing_events(cudaEvent_t start, cudaEvent_t end);
+// Collects the timed sections of one executor call and hands them to the
+// PhaseTimingRecorder on commit(). Without commit() -- an exception, or an
+// early return -- the destructor discards everything, so a transfer that
+// failed mid-plan publishes no partial samples.
+//
+// `stream` must be the stream the transfer work is enqueued on; sections
+// record their events on it.
+class PhaseTimer {
+ public:
+  // Times one section; the scope of this object IS the timed interval
+  // (same grammar as CUDAGuard / RECORD_FUNCTION). Inert when timing is
+  // disabled, nbytes <= 0, or any event operation fails; discards instead
+  // of publishing when destroyed during exception unwinding.
+  class Section {
+   public:
+    Section(PhaseTimer& timer, TransferPhase phase, int64_t nbytes);
+    ~Section();
+    Section(const Section&) = delete;
+    Section& operator=(const Section&) = delete;
 
-// Destroys the accumulated records on scope exit unless disarmed, so a
-// transfer that failed mid-plan publishes no partial samples. The
-// destructor only destroys events and cannot throw.
-struct PhaseTimingDiscardGuard {
-  std::vector<PhaseTimingRecord>& records;
-  bool armed = true;
-  ~PhaseTimingDiscardGuard() {
-    if (armed) {
-      for (auto& record : records) {
-        destroy_phase_timing_events(record.start, record.end);
-      }
-    }
+   private:
+    PhaseTimer* timer_;  // owning timer; nullptr => inert section
+    cudaEvent_t start_;
+    cudaEvent_t end_;
+    TransferPhase phase_;
+    int64_t nbytes_;
+    int base_exceptions_;  // std::uncaught_exceptions() at construction
+  };
+
+  PhaseTimer(bool enabled, cudaStream_t stream, int direction,
+                  int device_index, size_t max_sections);
+  ~PhaseTimer();
+  PhaseTimer(const PhaseTimer&) = delete;
+  PhaseTimer& operator=(const PhaseTimer&) = delete;
+
+  Section section(TransferPhase phase, int64_t nbytes) {
+    return Section(*this, phase, nbytes);
   }
+
+  // Hand the collected records to the recorder.
+  void commit();
+
+ private:
+  // Takes ownership of a completed section's events. Never allocates
+  // (records_ is reserved up front), so it is safe to call from a
+  // destructor.
+  void add(const PhaseTimingRecord& record);
+
+  bool enabled_;
+  cudaStream_t stream_;  // stream the sections record their events on
+  int direction_;        // TransferDirection value
+  int device_index_;
+  std::vector<PhaseTimingRecord> records_;  // completed sections
+  bool committed_ = false;
 };
 
 // Process-wide buffer of in-flight timing records. Constructed on first
@@ -62,11 +99,10 @@ class PhaseTimingRecorder {
   // Enqueue one call's records under a single lock acquisition.
   void push_batch(const std::vector<PhaseTimingRecord>& records);
 
-  // Hand over the whole queue so the caller can run CUDA calls unlocked.
-  std::deque<PhaseTimingRecord> take_all();
-
-  // Put not-yet-completed records back at the front (they are the oldest).
-  void requeue_front(const std::deque<PhaseTimingRecord>& records);
+  // Measure and remove the records whose end event has completed;
+  // unfinished records stay queued. See pop_completed_phase_timings()
+  // for the tuple layout.
+  std::vector<std::tuple<int, int, int, double, int64_t>> pop_completed();
 
  private:
   PhaseTimingRecorder() = default;
@@ -83,7 +119,8 @@ class PhaseTimingRecorder {
 };
 
 /**
- * Pop completed gather/DMA phase timing samples.
+ * Pop completed gather/DMA phase timing samples
+ * (PhaseTimingRecorder::pop_completed, exposed for the pybind layer).
  *
  * Returns the finished CUDA event pairs recorded by
  * execute_object_group_transfer; unfinished pairs stay queued.

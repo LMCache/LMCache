@@ -497,49 +497,11 @@ void execute_object_group_transfer(
     }
   };
 
-  const cudaStream_t timing_stream =
-      phase_timing_enabled
-          ? static_cast<cudaStream_t>(at::cuda::getCurrentCUDAStream())
-          : nullptr;
-  // Finished sections of this call; handed to the recorder in one batch.
-  std::vector<PhaseTimingRecord> call_records;
-  if (phase_timing_enabled) {
-    call_records.reserve(batch_steps.size() * 2);
-  }
-  PhaseTimingDiscardGuard discard_on_failure{call_records};
-  // Brackets *body* with a CUDA event pair; degrades to untimed execution
-  // on any event failure.
-  const auto timed_section = [&](TransferPhase phase, int64_t nbytes,
-                                 const auto& body) {
-    if (!phase_timing_enabled || nbytes <= 0) {
-      body();
-      return;
-    }
-    cudaEvent_t start_event = nullptr;
-    cudaEvent_t end_event = nullptr;
-    if (cudaEventCreate(&start_event) != cudaSuccess ||
-        cudaEventCreate(&end_event) != cudaSuccess ||
-        cudaEventRecord(start_event, timing_stream) != cudaSuccess) {
-      destroy_phase_timing_events(start_event, end_event);
-      body();
-      return;
-    }
-    try {
-      body();
-    } catch (...) {
-      destroy_phase_timing_events(start_event, end_event);
-      throw;
-    }
-    if (cudaEventRecord(end_event, timing_stream) != cudaSuccess) {
-      // A never-recorded event queries as complete; keeping the pair would
-      // yield a garbage interval.
-      destroy_phase_timing_events(start_event, end_event);
-      return;
-    }
-    call_records.push_back({start_event, end_event, static_cast<int>(phase),
-                            static_cast<int>(direction),
-                            static_cast<int>(device.index()), nbytes});
-  };
+  PhaseTimer phase_timer(
+      phase_timing_enabled,
+      static_cast<cudaStream_t>(at::cuda::getCurrentCUDAStream()),
+      static_cast<int>(direction), static_cast<int>(device.index()),
+      batch_steps.size() * 2);
 
   for (const auto& step : batch_steps) {
     // Staged payload; also the kernel section's byte count -- a proxy that
@@ -553,12 +515,13 @@ void execute_object_group_transfer(
     // GPU->CPU after the kernel writes them. The per-step ordering must be
     // preserved because temp buffers are reused across steps.
     if (is_h2d) {
-      timed_section(TransferPhase::STAGING, step_bytes,
-                    [&] { do_staging(step.staging); });
+      auto section = phase_timer.section(TransferPhase::STAGING, step_bytes);
+      do_staging(step.staging);
     }
     // An empty kernel section would record a near-zero-elapsed outlier.
     const int64_t kernel_bytes = step.launches.empty() ? 0 : step_bytes;
-    timed_section(TransferPhase::KERNEL, kernel_bytes, [&] {
+    {
+      auto section = phase_timer.section(TransferPhase::KERNEL, kernel_bytes);
       for (const auto& launch : step.launches) {
         TORCH_CHECK(
             launch.group_idx >= 0 &&
@@ -612,14 +575,13 @@ void execute_object_group_transfer(
             group.lmcache_chunk_size, group.engine_kv_format,
             launch.skip_prefix_n_blocks);
       }
-    });
+    }
     if (!is_h2d) {
-      timed_section(TransferPhase::STAGING, step_bytes,
-                    [&] { do_staging(step.staging); });
+      auto section = phase_timer.section(TransferPhase::STAGING, step_bytes);
+      do_staging(step.staging);
     }
   }
 
   // Publish only after the whole plan enqueued successfully.
-  discard_on_failure.armed = false;
-  PhaseTimingRecorder::instance().push_batch(call_records);
+  phase_timer.commit();
 }
