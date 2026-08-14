@@ -143,11 +143,11 @@ var _ = Describe("vLLM + CacheBlendEngine integration smoke (GPU)", Ordered, fun
 		enginePod, err := utils.WaitDaemonSetPodReady(ctx, k8sClient, key, 8*time.Minute)
 		Expect(err).NotTo(HaveOccurred(), "CacheBlend engine pod did not become Ready")
 
-		By("verifying the blend engine logged its gRPC listening line")
+		By("verifying the blend engine logged its message-queue listening line")
 		Eventually(func() int {
 			return countLogLines(ctx, nsName, enginePod, cbServerListeningLine)
 		}, 60*time.Second, 2*time.Second).Should(BeNumerically(">=", 1),
-			"blend engine never logged its gRPC listening line - server did not bind")
+			"blend engine never logged its message-queue listening line - server did not bind")
 
 		By("applying the vLLM Deployment that opts into CacheBlend injection")
 		vllmRaw, err := utils.LoadFixture("vllm_cacheblend_deployment.yaml")
@@ -217,9 +217,11 @@ var _ = Describe("vLLM + CacheBlendEngine integration smoke (GPU)", Ordered, fun
 	})
 })
 
-// cbServerListeningLine matches the gRPC transport's listening INFO line,
-// proving the lmcache server bound its message-queue endpoint.
-var cbServerListeningLine = regexp.MustCompile(`MessageQueueServer listening on .* \(gRPC\)`)
+// The operator pipeline pulls a separately published nightly engine image, so
+// accept both transport generations while that image rolls over to gRPC.
+var cbServerListeningLine = regexp.MustCompile(
+	`(LMCache ZMQ cache server is running|MessageQueueServer listening on .* \(gRPC\))`,
+)
 
 // cbRopeRegisteredLine matches the engine-side log emitted by
 // BlendV3.cb_register_rope on every CB_REGISTER_ROPE_V3 message
