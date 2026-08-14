@@ -87,6 +87,10 @@ select = [
     # "I",
     # flake8-logging-format
     #"G",
+    # pylint: logging call passes too many / too few args for its format string.
+    # Such a call raises TypeError inside logging and the message is dropped.
+    "PLE1205",
+    "PLE1206",
     # flake8-self (private member access)
     "SLF",
 ]
