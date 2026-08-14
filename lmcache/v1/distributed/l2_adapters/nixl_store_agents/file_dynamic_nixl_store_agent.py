@@ -48,9 +48,13 @@ class FileDynamicNixlStorageAgent(DynamicNixlStorageAgent):
                 "backend_params must include 'use_direct_io' for backend %r" % backend
             )
 
-        super().__init__(device, backend, backend_params, l1_memory_desc)
         self.file_path = backend_params["file_path"]
+        # Validate and create the storage directory before registering any NIXL
+        # resources so a filesystem error cannot leak a partially initialized
+        # base agent.
         os.makedirs(self.file_path, exist_ok=True)
+
+        super().__init__(device, backend, backend_params, l1_memory_desc)
         self.use_direct_io = (
             str(backend_params.get("use_direct_io", "false")).lower() == "true"
         )

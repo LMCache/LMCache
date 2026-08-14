@@ -95,6 +95,41 @@ def test_dynamic_nixl_storage_agent_is_abstract() -> None:
     assert not inspect.isabstract(FileDynamicNixlStorageAgent)
 
 
+def test_file_agent_creates_directory_before_nixl_initialization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A directory creation failure must not initialize NIXL resources."""
+    base_initialized = False
+
+    def fake_base_init(
+        self: DynamicNixlStorageAgent,
+        device: str,
+        backend: str,
+        backend_params: dict[str, str],
+        l1_memory_desc: L1MemoryDesc,
+    ) -> None:
+        del self, device, backend, backend_params, l1_memory_desc
+        nonlocal base_initialized
+        base_initialized = True
+
+    def raise_permission_error(path: str, exist_ok: bool) -> None:
+        del path, exist_ok
+        raise PermissionError("cannot create storage directory")
+
+    monkeypatch.setattr(DynamicNixlStorageAgent, "__init__", fake_base_init)
+    monkeypatch.setattr(os, "makedirs", raise_permission_error)
+
+    with pytest.raises(PermissionError, match="cannot create storage directory"):
+        FileDynamicNixlStorageAgent(
+            device="cpu",
+            backend="POSIX",
+            backend_params={"file_path": "/unwritable", "use_direct_io": "false"},
+            l1_memory_desc=L1MemoryDesc(ptr=0, size=0, align_bytes=1),
+        )
+
+    assert not base_initialized
+
+
 # =============================================================================
 # Test Helpers
 # =============================================================================
