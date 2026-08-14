@@ -380,7 +380,7 @@ jobs:
                   Install into an upstream vLLM ROCm container:
                   \`\`\`
                   VERSION=${{ github.ref_name }}
-                  pip install lmcache==\${VERSION#v} --no-deps \\
+                  pip install lmcache==${{ needs.build-rocm.outputs.rocm_version }} --no-deps \\
                     --find-links https://github.com/${{ github.repository }}/releases/expanded_assets/\${VERSION}-rocm
                   \`\`\`" \
                     dist/*.whl

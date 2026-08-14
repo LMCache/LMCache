@@ -17,11 +17,11 @@ if not torch.cuda.is_available():
     pytest.skip("CUDA is not available", allow_module_level=True)
 
 # First Party
-import lmcache.c_ops as lmc_ops  # noqa: E402
+import lmcache.cuda_ops as cuda_ops  # noqa: E402
 import lmcache.lmcache_native as lmcache_native
 
 if not hasattr(lmcache_native.EngineKVFormat, "NL_X_NB_BSV_BSS"):
-    pytest.skip("c_ops build lacks NL_X_NB_BSV_BSS", allow_module_level=True)
+    pytest.skip("cuda_ops build lacks NL_X_NB_BSV_BSS", allow_module_level=True)
 
 _BS = 64  # tokens per block
 _HD = 128  # fp8 value bytes per token
@@ -88,7 +88,7 @@ def test_blocked_roundtrip_value_exact_across_alignments():
 
     # D2H-style gather into a token-major chunk buffer (kv=1, NL, n_tok, 132).
     chunk = torch.zeros(1, _NL, n_tok, _ROW, dtype=torch.uint8, device="cuda")
-    lmc_ops.multi_layer_kv_transfer(
+    cuda_ops.multi_layer_kv_transfer(
         chunk,
         src_ptrs,
         src_slots,
@@ -105,7 +105,7 @@ def test_blocked_roundtrip_value_exact_across_alignments():
     # H2D scatter to a DIFFERENT intra-block alignment (delta 17 mod 64 != 0).
     dst, dst_ptrs = _make_paged()
     dst_slots = torch.arange(17, 17 + n_tok, dtype=torch.int64, device="cuda")
-    lmc_ops.multi_layer_kv_transfer(
+    cuda_ops.multi_layer_kv_transfer(
         chunk,
         dst_ptrs,
         dst_slots,

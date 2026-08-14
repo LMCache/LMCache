@@ -20,6 +20,9 @@ Key scenarios tested:
 """
 
 # Standard
+from contextlib import nullcontext
+from types import SimpleNamespace
+from typing import Any, Iterator, cast
 import asyncio
 
 # Third Party
@@ -27,10 +30,16 @@ import pytest
 import torch
 
 # First Party
+from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.event_manager import EventManager, EventType
+from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.metadata import LMCacheMetadata
-from lmcache.v1.storage_backend.storage_manager import StorageManager
+from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
+from lmcache.v1.storage_backend.storage_manager import (
+    StorageManager,
+    allocate_and_copy_objects,
+)
 
 
 class MockMemoryObj:
@@ -57,6 +66,57 @@ class MockAsyncLookupServer:
 
     def send_response_to_scheduler(self, lookup_id: str, retrieved_length: int):
         self.responses.append((lookup_id, retrieved_length))
+
+
+def test_allocate_and_copy_objects_returns_allocated_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Returned keys must stay aligned when an existing key is skipped."""
+
+    class CopyMemoryObj:
+        def __init__(self, value: int) -> None:
+            self.tensor = torch.full((2,), value, dtype=torch.float32)
+            self.meta = SimpleNamespace(fmt=MemoryFormat.KV_T2D)
+
+        def get_shape(self) -> torch.Size:
+            return self.tensor.size()
+
+        def get_dtype(self) -> torch.dtype:
+            return self.tensor.dtype
+
+    keys = [
+        CacheEngineKey("test_model", 1, 0, chunk_hash, torch.float32)
+        for chunk_hash in range(3)
+    ]
+    src_memory_objs = [CopyMemoryObj(i) for i in range(3)]
+    allocated_objects = [CopyMemoryObj(0) for _ in range(2)]
+
+    class MockAllocator:
+        def __init__(self) -> None:
+            self.objects: Iterator[CopyMemoryObj] = iter(allocated_objects)
+
+        def contains(self, key: CacheEngineKey) -> bool:
+            return key == keys[0]
+
+        def allocate(self, *args: Any, **kwargs: Any) -> CopyMemoryObj:
+            return next(self.objects)
+
+    monkeypatch.setattr(
+        "lmcache.v1.storage_backend.storage_manager.torch_dev.stream",
+        lambda _: nullcontext(),
+    )
+
+    returned_keys, returned_objects = allocate_and_copy_objects(
+        cast(AllocatorBackendInterface, MockAllocator()),
+        keys,
+        cast(list[MemoryObj], src_memory_objs),
+        stream=None,
+    )
+
+    assert returned_keys == keys[1:]
+    assert returned_objects == allocated_objects
+    assert torch.equal(allocated_objects[0].tensor, src_memory_objs[1].tensor)
+    assert torch.equal(allocated_objects[1].tensor, src_memory_objs[2].tensor)
 
 
 @pytest.fixture
