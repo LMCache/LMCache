@@ -198,7 +198,7 @@ to correlate START/END pairs.
 ### `MP_TRANSFER_PHASE_SAMPLES`
 
 Published CPU-synchronously from the store/retrieve handlers after popping
-finished samples via `lmc_ops.pop_completed_phase_timings()`.  Samples
+finished samples via `device_ops.pop_completed_phase_timings()`.  Samples
 complete asynchronously, so a batch belongs to transfers enqueued earlier
 and carries its own `device_index`/`direction` labels instead of
 correlating with any request.

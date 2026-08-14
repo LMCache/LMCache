@@ -362,7 +362,7 @@ def init_observability(
     from lmcache.v1.mp_observability.event_bus import (
         EventBusConfig,
         init_event_bus,
-        set_metrics_enabled,
+        set_observability_metrics_enabled,
     )
 
     # Set up OTel providers BEFORE creating subscribers so that
@@ -401,7 +401,7 @@ def init_observability(
         )
     )
 
-    set_metrics_enabled(obs_config.enabled and obs_config.metrics_enabled)
+    set_observability_metrics_enabled(obs_config.enabled and obs_config.metrics_enabled)
 
     if obs_config.metrics_enabled:
         # First Party

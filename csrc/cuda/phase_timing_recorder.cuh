@@ -42,10 +42,11 @@ struct PhaseTimingRecord {
 // record their events on it.
 class PhaseTimer {
  public:
-  // Times one section; the scope of this object IS the timed interval
-  // (same grammar as CUDAGuard / RECORD_FUNCTION). Inert when timing is
-  // disabled, nbytes <= 0, or any event operation fails; discards instead
-  // of publishing when destroyed during exception unwinding.
+  // A timed section of work: the constructor records the start event on
+  // the transfer stream, the destructor records the end and files the
+  // sample with the timer. Inert when timing is off, nbytes <= 0, or an
+  // event call fails; destruction during exception unwinding discards
+  // the sample.
   class Section {
    public:
     Section(PhaseTimer& timer, TransferPhase phase, int64_t nbytes);

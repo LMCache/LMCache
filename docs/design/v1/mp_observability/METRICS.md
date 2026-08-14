@@ -325,10 +325,12 @@ in?  A low kernel number with a healthy staging number points at launch
 geometry / batching (SM-side); the reverse points at PCIe / pinned-memory
 issues (DMA-side).  The histograms show the per-step distribution; for
 aggregate answers use the counters —
-`rate(transfer_phase_bytes) / rate(transfer_phase_busy_time)` is the
-byte-weighted aggregate phase throughput (a mean over per-step histogram
-samples is not), and `rate(transfer_phase_busy_time)` against wall time
-is each phase's time share.
+`rate(lmcache_mp_transfer_phase_bytes_total[1m]) /
+rate(lmcache_mp_transfer_phase_busy_time_seconds_total[1m])` is the
+byte-weighted aggregate phase throughput in bytes/s (a mean over the
+per-step histogram samples is not byte-weighted), and
+`rate(lmcache_mp_transfer_phase_busy_time_seconds_total[1m])` — busy
+seconds per wall-clock second — is each phase's time share.
 
 **Caveats:** `nbytes` is the step's staged payload for both phases; kernel
 launches with `skip_prefix_n_blocks > 0` move fewer bytes than were

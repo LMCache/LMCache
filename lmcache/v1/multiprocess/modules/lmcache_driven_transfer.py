@@ -32,7 +32,10 @@ from lmcache.v1.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_management import GDSMemoryObject, MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType
-from lmcache.v1.mp_observability.event_bus import EventBus, is_metrics_enabled
+from lmcache.v1.mp_observability.event_bus import (
+    EventBus,
+    is_observability_metrics_enabled,
+)
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
     KVCache,
@@ -473,7 +476,9 @@ def _run_object_group_transfer_plan(
     # an older compiled extension the keyword would raise, so fall back to
     # the untimed legacy signature (samples could not be consumed anyway).
     timing_kwargs = (
-        {"phase_timing_enabled": is_metrics_enabled()} if _HAS_PHASE_TIMING_POP else {}
+        {"phase_timing_enabled": is_observability_metrics_enabled()}
+        if _HAS_PHASE_TIMING_POP
+        else {}
     )
     device_ops.execute_object_group_transfer(
         direction,
