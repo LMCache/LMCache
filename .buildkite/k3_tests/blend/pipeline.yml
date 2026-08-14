@@ -1,6 +1,6 @@
 # CacheBlend <-> LMCache compatibility test.
 #
-# Builds the PR's LMCache from source (compiling c_ops for the pod's GPU arch),
+# Builds the PR's LMCache from source (compiling cuda_ops for the pod's GPU arch),
 # pulls the external cacheblend-plugin from GitHub, installs it editable, and
 # runs the plugin's vllm_compat_check (--skip-correctness): one blend server +
 # vLLM stack, five V3 contract checks ending in a non-prefix blend that must

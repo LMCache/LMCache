@@ -1,175 +1,119 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the coordinator L2UsageManager."""
-
-# Third Party
-import pytest
+"""Tests for the L2 usage view (per-salt byte totals derived from the
+gate-admitted cache-event stream by the owning eviction manager)."""
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey
-from lmcache.v1.mp_coordinator.cache_control.usage_manager import L2UsageManager
+from lmcache.v1.distributed.api import ObjectKey, Tier
+from lmcache.v1.mp_coordinator.api import (
+    CacheEventBatch,
+    CacheEventEntry,
+    CacheEventType,
+)
+from lmcache.v1.mp_coordinator.controllers.usage_manager import L2UsageManager
 
 
-def _key(chunk: int = 0, salt: str = "a") -> ObjectKey:
+def _key(hash_byte: int, salt: str = "") -> ObjectKey:
     return ObjectKey(
-        chunk_hash=chunk.to_bytes(4, "big"),
+        chunk_hash=bytes([hash_byte]) * 4,
         model_name="m",
         kv_rank=0,
         cache_salt=salt,
     )
 
 
-# =============================================================================
-# record_stored — basic accumulation
-# =============================================================================
+def _batch(
+    keys: list[ObjectKey],
+    event_type: CacheEventType = CacheEventType.STORE,
+    instance_id: str = "node-a",
+    tier: Tier = Tier.L2,
+    backend: str = "fs",
+    shared: bool = False,
+    size_bytes: int = 100,
+) -> CacheEventBatch:
+    return CacheEventBatch(
+        instance_id=instance_id,
+        incarnation=1,
+        seq=1,
+        event_type=event_type,
+        tier=tier,
+        backend=backend,
+        shared=shared,
+        entries=[
+            CacheEventEntry(key=k.to_encoded_object_key(), size_bytes=size_bytes)
+            for k in keys
+        ],
+    )
 
 
-def test_record_stored_basic():
-    t = L2UsageManager()
-    t.record_stored(_key(0, salt="a"), 100)
-    assert t.get("a") == 100
-    assert t.get_total() == 100
-    assert t.has_key(_key(0, salt="a"))
+def test_aggregates_bytes_per_salt():
+    usage = L2UsageManager()
+    usage.consume(_batch([_key(1, "alice")], size_bytes=100))
+    usage.consume(_batch([_key(2, "alice"), _key(3, "bob")], size_bytes=200))
+    assert usage.get("alice") == 300
+    assert usage.get("bob") == 200
+    assert usage.get_all() == {"alice": 300, "bob": 200}
+    assert usage.get_total() == 500
 
 
-def test_record_stored_distinct_keys_accumulate():
-    t = L2UsageManager()
-    t.record_stored(_key(0, salt="a"), 100)
-    t.record_stored(_key(1, salt="a"), 200)
-    assert t.get("a") == 300
-    assert t.get_total() == 300
+def test_ignores_l1_batches_and_access():
+    usage = L2UsageManager()
+    usage.consume(_batch([_key(1)], tier=Tier.L1, backend="dram"))
+    usage.consume(_batch([_key(1)], event_type=CacheEventType.ACCESS))
+    assert usage.get_total() == 0
+    assert usage.get_all() == {}
 
 
-# =============================================================================
-# record_stored — replace-on-existing (the new contract)
-# =============================================================================
+def test_restore_adjusts_delta():
+    usage = L2UsageManager()
+    usage.consume(_batch([_key(1)], size_bytes=100))
+    usage.consume(_batch([_key(1)], size_bytes=250))
+    assert usage.get("") == 250
+    assert usage.get_total() == 250
 
 
-def test_record_stored_same_key_same_size_is_idempotent():
-    t = L2UsageManager()
-    k = _key(0, salt="a")
-    t.record_stored(k, 100)
-    t.record_stored(k, 100)
-    # Stored twice, but the per-salt total stays at 100 — no
-    # double-counting.
-    assert t.get("a") == 100
-    assert t.get_total() == 100
+def test_delete_subtracts_and_cleans_bucket():
+    usage = L2UsageManager()
+    usage.consume(_batch([_key(1, "alice")], size_bytes=100))
+    usage.consume(_batch([_key(1, "alice")], event_type=CacheEventType.DELETE))
+    assert usage.get("alice") == 0
+    assert usage.get_all() == {}
+    assert usage.get_total() == 0
 
 
-def test_record_stored_same_key_new_size_replaces():
-    t = L2UsageManager()
-    k = _key(0, salt="a")
-    t.record_stored(k, 100)
-    t.record_stored(k, 250)
-    # New size replaces the old one; delta (+150) lands on the total.
-    assert t.get_key_size(k) == 250
-    assert t.get("a") == 250
-    assert t.get_total() == 250
+def test_counts_each_private_copy_but_shared_once():
+    """Two private copies occupy bytes twice; N reporters of one shared
+    pool describe a single placement, counted once."""
+    usage = L2UsageManager()
+    for node in ("node-a", "node-b"):
+        usage.consume(_batch([_key(1)], instance_id=node, backend="fs"))
+        usage.consume(_batch([_key(1)], instance_id=node, backend="s3", shared=True))
+    assert usage.get_total() == 300  # 2 private copies + 1 shared
 
 
-def test_record_stored_shrink_adjusts_down():
-    t = L2UsageManager()
-    k = _key(0, salt="a")
-    t.record_stored(k, 100)
-    t.record_stored(k, 40)
-    assert t.get("a") == 40
-    assert t.get_total() == 40
+def test_delete_from_any_reporter_removes_shared_bytes():
+    usage = L2UsageManager()
+    usage.consume(_batch([_key(1)], instance_id="node-a", backend="s3", shared=True))
+    usage.consume(
+        _batch(
+            [_key(1)],
+            instance_id="node-b",
+            backend="s3",
+            shared=True,
+            event_type=CacheEventType.DELETE,
+        )
+    )
+    assert usage.get_total() == 0
 
 
-# =============================================================================
-# record_evicted — key-aware
-# =============================================================================
+def test_delete_of_untracked_placement_is_noop():
+    usage = L2UsageManager()
+    usage.consume(_batch([_key(1)], event_type=CacheEventType.DELETE))
+    assert usage.get_total() == 0
 
 
-def test_record_evicted_returns_freed_bytes():
-    t = L2UsageManager()
-    k = _key(0, salt="a")
-    t.record_stored(k, 100)
-    assert t.record_evicted(k) == 100
-    assert t.get("a") == 0
-    assert t.get_total() == 0
-    assert not t.has_key(k)
-
-
-def test_record_evicted_unknown_key_returns_zero():
-    t = L2UsageManager()
-    assert t.record_evicted(_key(99, salt="z")) == 0
-
-
-def test_record_evicted_removes_zero_entry():
-    t = L2UsageManager()
-    k = _key(0, salt="a")
-    t.record_stored(k, 100)
-    t.record_evicted(k)
-    assert t.get_all() == {}
-
-
-def test_record_evicted_partial_when_multiple_keys():
-    t = L2UsageManager()
-    t.record_stored(_key(0, salt="a"), 100)
-    t.record_stored(_key(1, salt="a"), 200)
-    t.record_evicted(_key(0, salt="a"))
-    # Bucket only loses the evicted key's bytes.
-    assert t.get("a") == 200
-    assert t.get_total() == 200
-
-
-# =============================================================================
-# Existence query
-# =============================================================================
-
-
-def test_has_key_returns_false_for_unknown():
-    t = L2UsageManager()
-    assert not t.has_key(_key(0))
-
-
-def test_get_key_size_returns_none_for_unknown():
-    t = L2UsageManager()
-    assert t.get_key_size(_key(0)) is None
-
-
-# =============================================================================
-# Multi-salt + zero / negative
-# =============================================================================
-
-
-def test_multiple_salts():
-    t = L2UsageManager()
-    t.record_stored(_key(0, salt="a"), 100)
-    t.record_stored(_key(0, salt="b"), 200)
-    assert t.get("a") == 100
-    assert t.get("b") == 200
-    assert t.get_total() == 300
-
-
-def test_get_unknown_returns_zero():
-    t = L2UsageManager()
-    assert t.get("unknown") == 0
-
-
-def test_get_all():
-    t = L2UsageManager()
-    t.record_stored(_key(0, salt="a"), 100)
-    t.record_stored(_key(0, salt="b"), 200)
-    assert t.get_all() == {"a": 100, "b": 200}
-
-
-def test_get_all_empty():
-    t = L2UsageManager()
-    assert t.get_all() == {}
-
-
-def test_zero_bytes_stores_entry_without_changing_total():
-    t = L2UsageManager()
-    k = _key(0, salt="a")
-    t.record_stored(k, 0)
-    # The key is now tracked at size 0; the per-salt total doesn't move.
-    assert t.has_key(k)
-    assert t.get("a") == 0
-    assert t.get_total() == 0
-
-
-def test_negative_store_raises():
-    t = L2UsageManager()
-    with pytest.raises(ValueError, match="non-negative"):
-        t.record_stored(_key(0), -1)
+def test_get_key_size_sums_the_keys_placements():
+    usage = L2UsageManager()
+    usage.consume(_batch([_key(1)], backend="fs", size_bytes=100))
+    usage.consume(_batch([_key(1)], backend="s3", shared=True, size_bytes=150))
+    assert usage.get_key_size(_key(1)) == 250
+    assert usage.get_key_size(_key(9)) == 0

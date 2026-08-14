@@ -9,9 +9,9 @@ import time
 
 # Third Party
 import pytest
-import torch
 
 # First Party
+from lmcache import torch_dev
 from lmcache.v1.distributed.config import (
     EvictionConfig,
     L1ManagerConfig,
@@ -60,7 +60,7 @@ def l1_manager():
     config = L1ManagerConfig(
         memory_config=L1MemoryManagerConfig(
             size_in_bytes=128 * 1024 * 1024,
-            use_lazy=torch.cuda.is_available(),
+            use_lazy=torch_dev.is_available(),
             init_size_in_bytes=64 * 1024 * 1024,
             align_bytes=0x1000,
         ),

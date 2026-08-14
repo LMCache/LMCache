@@ -64,12 +64,12 @@ Source: ``lmcache/v1/multiprocess/config.py``
        ``--supported-transfer-mode`` to be ``lmcache_driven`` or ``auto``.
        Choices: ``default``, ``blend``, ``blend_legacy``.
    * - ``--supported-transfer-mode``
-     - ``auto``
+     - ``lmcache_driven``
      - Which worker → server transfer paths the server loads.
-       ``lmcache_driven`` enables only the server-driven transfer
-       path (STORE/RETRIEVE, supports both CUDA IPC and CPU SHM);
-       ``engine_driven`` enables only the non-GPU (PREPARE/COMMIT)
-       transfer path; ``auto`` (default) loads both
+       ``lmcache_driven`` (default) enables only the server-driven
+       transfer path (STORE/RETRIEVE, supports both CUDA IPC and CPU
+       SHM); ``engine_driven`` enables only the non-GPU
+       (PREPARE/COMMIT) transfer path; ``auto`` loads both
        so workers of either device type can connect without manual
        configuration.
        Choices: ``lmcache_driven``, ``engine_driven``, ``auto``.
@@ -90,14 +90,13 @@ Source: ``lmcache/v1/multiprocess/config.py``
        to the HTTP ``/run_script`` endpoint are allowed to import.
        Example: ``--script-allowed-imports numpy pandas``.
    * - ``--shm-name``
-     - *(not set)*
+     - ``""``
      - SHM segment name for non-GPU KV transfer (only used when the
        non-GPU path is loaded, i.e. ``--supported-transfer-mode`` is
        ``auto`` or ``engine_driven``).
-       Not set (default): auto-allocate a shared-memory pool.
-       ``""`` (empty string): disable SHM and force the pickle transfer
-       path.  Any other value: use that exact name for the SHM pool
-       segment.
+       ``""`` (empty string, default): SHM disabled; KV transfer uses
+       the pickle path.  Any other value: create a SHM pool and use
+       that exact name for its segment.
    * - ``--worker-reap-timeout-seconds``
      - ``120.0``
      - Silence budget (seconds) after which a worker that has sent at
@@ -121,13 +120,15 @@ Source: ``lmcache/v1/multiprocess/config.py``
        truncating the prefix at the gap. No effect for other engines. See
        :doc:`/mp/l2_storage/fault_inject` for a way to exercise it.
    * - ``--separate-object-groups`` / ``--no-separate-object-groups``
-     - ``True``
+     - ``False``
      - Split a hybrid model's kernel groups into one object group per
        cross-chunk attention window (full attention, each sliding-window
-       size, mamba/GDN) at KV-cache registration. On by default; pass
-       ``--no-separate-object-groups`` to keep all layers in a single
-       full-attention object group. Transparent to correctness; a non-hybrid
-       model always resolves to one object group. See :doc:`/mp/hybrid_models`.
+       size, mamba/GDN) at KV-cache registration. Off by default; pass
+       ``--separate-object-groups`` to enable it. **Required for Mamba /
+       linear-attention hybrids** (it lets their recurrent state be cached
+       independently, and is what allows ``--max-num-batched-tokens`` to exceed
+       twice the block size). For a non-hybrid model it makes no difference —
+       every layer resolves to one object group. See :doc:`/mp/hybrid_models`.
 
 Lookup Hash Logging
 -------------------
@@ -251,8 +252,9 @@ Source: ``lmcache/v1/distributed/config.py``
      - *(not set)*
      - Optional ``/dev/dax*`` device or mmap-able file to use as the L1
        backing arena.  When set, disable lazy allocation with
-       ``--no-l1-use-lazy`` and disable SHM transfer advertising with
-       ``--shm-name ""`` because the L1 bytes live in the DAX mapping.  If a
+       ``--no-l1-use-lazy`` and leave ``--shm-name`` at its default ``""``
+       (SHM transfer disabled) because the L1 bytes live in the DAX
+       mapping.  If a
        DAX L2 adapter with the same ``device_path`` is registered, that
        adapter's ``max_dax_size_gb`` is used as the L1 Device-DAX overflow
        size.

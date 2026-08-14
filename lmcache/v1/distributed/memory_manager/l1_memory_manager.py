@@ -6,7 +6,7 @@ from multiprocessing import shared_memory
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import MemoryLayoutDesc
+from lmcache.v1.distributed.api import L1BackendType, MemoryLayoutDesc
 from lmcache.v1.distributed.config import L1MemoryManagerConfig
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L1MemoryDesc
@@ -144,6 +144,17 @@ class L1MemoryManager:
         """
         self._allocator.batched_free(mem_objs)
         return L1Error.SUCCESS
+
+    def get_backend_type(self, memory_obj: MemoryObj) -> L1BackendType:
+        """Return the storage medium backing ``memory_obj``.
+
+        Args:
+            memory_obj: An object allocated by this manager.
+
+        Returns:
+            ``L1BackendType.DRAM`` — the CPU tier is pinned DRAM only.
+        """
+        return L1BackendType.DRAM
 
     def get_memory_usage(self) -> tuple[int, int]:
         """

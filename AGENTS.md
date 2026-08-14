@@ -84,6 +84,14 @@ mypy --config-file=pyproject.toml   # Type checking
 codespell --toml pyproject.toml     # Spell checking
 ```
 
+Before running `pre-commit run --all-files`, verify that `cargo`, `rustfmt`, and
+`cargo clippy` are available. The repository's pre-commit config includes Rust
+format and clippy hooks, so the run will fail even for Python-only changes when
+those commands are missing.
+If you are validating only non-Rust changes and do not intend to touch Rust in
+that pass, run `SKIP=rust-fmt,rust-clippy pre-commit run --all-files` to skip
+those hooks explicitly.
+
 C++/CUDA files use clang-format (Google style, 80-col). Rust code in `rust/` uses `cargo fmt` and `cargo clippy`.
 
 All Python files require an `# SPDX-License-Identifier: Apache-2.0` header as the first line.
@@ -216,4 +224,3 @@ When reviewing code (or self-checking before submitting), verify all of the foll
 - [ ] No unnecessary memory copies or allocations in hot paths.
 - [ ] Thread safety is maintained for shared data structures.
 - [ ] CUDA/GPU resources are properly managed (allocated, freed, synchronized).
-
