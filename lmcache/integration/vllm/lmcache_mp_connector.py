@@ -1142,7 +1142,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
     def _process_lazy_offload_store_requests(
         self, metadata: LMCacheMPConnectorMetadata
     ):
-        if not self.lazy_offload or not self._pending_store.should_offload():
+        if not self.lazy_offload:
             return
 
         if not self._gpu_block_pool:

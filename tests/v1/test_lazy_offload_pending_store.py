@@ -56,26 +56,19 @@ class TestFIFOOffloadPolicy:
         policy.add(meta2, _make_block_hashes([0, 1]))
         assert len(policy._pending_items["req-0"].metadatas) == 2
 
-    def test_should_offload_below_threshold(self):
+    def test_select_items_below_threshold_returns_empty(self):
         policy = FIFOOffloadPolicy({"lmcache.mp.lazy_offload_threshold": 3})
         policy.add(_make_meta("req-0"), _make_block_hashes([0]))
         policy.mark_req_finished("req-0")
-        assert policy._finished_requests_count == 1
-        assert policy.should_offload() is False
+        assert policy.select_items(10) == []
+        assert "req-0" in policy._pending_items
 
-    def test_should_offload_at_threshold(self):
+    def test_select_items_at_threshold_returns_finished_items(self):
         policy = FIFOOffloadPolicy({"lmcache.mp.lazy_offload_threshold": 3})
         for i in range(3):
             policy.add(_make_meta(f"req-{i}"), _make_block_hashes([i]))
             policy.mark_req_finished(f"req-{i}")
-        assert policy.should_offload() is True
-
-    def test_should_offload_above_threshold(self):
-        policy = FIFOOffloadPolicy({"lmcache.mp.lazy_offload_threshold": 2})
-        for i in range(5):
-            policy.add(_make_meta(f"req-{i}"), _make_block_hashes([i]))
-            policy.mark_req_finished(f"req-{i}")
-        assert policy.should_offload() is True
+        assert len(policy.select_items(10)) == 3
 
     def test_mark_req_finished_not_in_pending_raises(self):
         policy = FIFOOffloadPolicy()
@@ -83,7 +76,7 @@ class TestFIFOOffloadPolicy:
             policy.mark_req_finished("nonexistent")
 
     def test_select_items_returns_only_finished(self):
-        policy = FIFOOffloadPolicy({"lmcache.mp.lazy_offload_threshold": 2})
+        policy = FIFOOffloadPolicy({"lmcache.mp.lazy_offload_threshold": 1})
         policy.add(_make_meta("req-0"), _make_block_hashes([0]))
         policy.mark_req_finished("req-0")
         policy.add(_make_meta("req-1"), _make_block_hashes([1]))
@@ -191,17 +184,17 @@ class TestLazyOffloadPendingStore:
         assert len(pending.metadatas) == 1
         assert pending.metadatas[0][1] == {0: b"hash-0", 1: b"hash-1"}
 
-    def test_should_offload_delegates_to_policy(self):
+    def test_select_items_returns_empty_until_threshold(self):
         configs = {"lmcache.mp.lazy_offload_threshold": 2}
         store = self._setup_store_with_gpu_pool(configs)
 
         store.add(_make_meta("req-0"))
         store.mark_req_finished("req-0")
-        assert store.should_offload() is False
+        assert store.select_items() == []
 
         store.add(_make_meta("req-1"))
         store.mark_req_finished("req-1")
-        assert store.should_offload() is True
+        assert len(store.select_items()) == 2
 
     def test_select_items_returns_correct_count(self):
         configs = {
@@ -222,7 +215,7 @@ class TestLazyOffloadPendingStore:
         store = self._setup_store_with_gpu_pool(configs)
         store.add(_make_meta("req-0"))
         store.mark_req_finished("req-0")
-        assert store.should_offload() is True
+        assert [item.request_id for item in store.select_items()] == ["req-0"]
 
     def test_update_get_remove_gpu_block_ids(self):
         store = LazyOffloadPendingStore()
@@ -238,7 +231,7 @@ class TestLazyOffloadPendingStore:
         assert store.get_request_gpu_block_ids("nonexistent") == []
 
     def test_end_to_end_flow(self):
-        """Test full add -> mark_finished -> should_offload -> select_items."""
+        """Test full add -> mark_finished -> select_items flow."""
         configs = {
             "lmcache.mp.lazy_offload_threshold": 3,
             "lmcache.mp.lazy_offload_select_count": 2,
@@ -250,9 +243,6 @@ class TestLazyOffloadPendingStore:
             store.add(_make_meta(f"req-{i}", num_blocks=1))
         for i in range(5):
             store.mark_req_finished(f"req-{i}")
-
-        # Should be over threshold
-        assert store.should_offload() is True
 
         # Select first 2 (select_count=2)
         selected = store.select_items()

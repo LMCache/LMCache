@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from vllm.v1.core.block_pool import BlockPool
 
     # First Party
-    from lmcache.integration.vllm.lmcache_mp_connector import LMCacheMPRequestMetadata
+    from lmcache.integration.vllm.lmcache_mp_metadata import LMCacheMPRequestMetadata
 
 
 logger = lmcache_init_logger(__name__)
@@ -43,13 +43,23 @@ class OffloadPolicy(ABC):
     """
     Abstract base class for lazy offload policies.
 
-    Subclasses define when to trigger offload (should_offload) and
-    which items to return (select_items).
+    Policies run in the scheduler role through :class:`LazyOffloadPendingStore`;
+    worker processes do not create or call them. Subclasses decide whether
+    offload is due and select items in one ``select_items`` operation.
     """
 
     @abstractmethod
     def add(self, meta: "LMCacheMPRequestMetadata", block_hashes: dict[int, bytes]):
-        """Add a pending store item to the pending store."""
+        """Add cache blocks from one request to the pending store.
+
+        Args:
+            meta: Store metadata for a subset of one request's cache blocks.
+                Chunked prefill or the scheduler's ``max-num-batched-tokens``
+                limit can schedule one request multiple times, so policies must
+                aggregate its metadata by ``meta.request_id``.
+            block_hashes: Mapping from the GPU block IDs in ``meta`` to their
+                corresponding block hashes captured when the metadata is queued.
+        """
         ...
 
     @abstractmethod
@@ -58,31 +68,23 @@ class OffloadPolicy(ABC):
         ...
 
     @abstractmethod
-    def should_offload(self) -> bool:
-        """Determine whether the queue should be drained.
-
-        Returns:
-            True if offload should be triggered.
-        """
-        ...
-
-    @abstractmethod
     def select_items(self, count: int) -> list[PendingStoreItem]:
-        """Select which items to offload from the queue.
+        """Select and remove items to offload when the policy is triggered.
 
         Args:
-            count: The number of items to select.
+            count: Maximum number of items to select.
 
         Returns:
-            A list of PendingStoreItem.
+            Selected pending store items, or an empty list when offload should
+            not be triggered.
         """
         ...
 
 
 class FIFOOffloadPolicy(OffloadPolicy):
     """
-    FIFO offload policy: triggers when pending count reaches threshold,
-    and returns a fixed batch_size number of items from the front.
+    FIFO offload policy: when finished request count reaches the threshold,
+    returns a fixed number of items from the front.
     """
 
     def __init__(self, configs: dict | None = None):
@@ -116,10 +118,10 @@ class FIFOOffloadPolicy(OffloadPolicy):
                 f"mark req finished failed: req_id: {req_id} not in pending_items"
             )
 
-    def should_offload(self) -> bool:
-        return self._finished_requests_count >= self._threshold
-
     def select_items(self, count: int) -> list[PendingStoreItem]:
+        if count <= 0 or self._finished_requests_count < self._threshold:
+            return []
+
         to_offload = []
         for req_id in list(self._pending_items.keys()):
             if self._pending_items[req_id].is_finished:
@@ -163,8 +165,7 @@ class LazyOffloadPendingStore:
             configs.get("lmcache.mp.lazy_offload_select_count", 10) if configs else 10
         )
 
-        # TODO(chunxiaozheng): use gpu block pool to judge should offload
-        #  and select items
+        # TODO(chunxiaozheng): use gpu block pool to guide item selection.
         # GPU block pool reference
         self._gpu_block_pool: "BlockPool | None" = None
 
@@ -186,16 +187,14 @@ class LazyOffloadPendingStore:
         else:
             raise ValueError("gpu block pool not bound")
 
-    def should_offload(self) -> bool:
-        """Check if the queue should be drained based on the policy."""
-        return self._policy.should_offload()
-
     def select_items(self) -> list[PendingStoreItem]:
-        """
-        Drain items from the queue according to the policy.
+        """Drain items from the queue when the policy's trigger is satisfied.
+
+        An empty result means offload is not currently due.
 
         Returns:
-            Iterator of pending store items to be submitted.
+            Pending store items to submit, or an empty list when no offload is
+            due.
         """
         return self._policy.select_items(self._select_count)
 
