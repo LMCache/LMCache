@@ -260,6 +260,11 @@ func (in *CacheBlendEngineSpec) DeepCopyInto(out *CacheBlendEngineSpec) {
 			(*out)[key] = val
 		}
 	}
+	if in.HostIPC != nil {
+		in, out := &in.HostIPC, &out.HostIPC
+		*out = new(bool)
+		**out = **in
+	}
 	if in.Privileged != nil {
 		in, out := &in.Privileged, &out.Privileged
 		*out = new(bool)
@@ -955,6 +960,11 @@ func (in *LMCacheEngineSpec) DeepCopyInto(out *LMCacheEngineSpec) {
 	}
 	if in.HostNetwork != nil {
 		in, out := &in.HostNetwork, &out.HostNetwork
+		*out = new(bool)
+		**out = **in
+	}
+	if in.HostIPC != nil {
+		in, out := &in.HostIPC, &out.HostIPC
 		*out = new(bool)
 		**out = **in
 	}

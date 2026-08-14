@@ -351,3 +351,15 @@ func vllmContainerArgs(pod *corev1.Pod) []string {
 	}
 	return nil
 }
+
+// podHasDevShmHostPath reports whether the pod carries a hostPath volume for
+// /dev/shm — the webhook's default CUDA IPC wiring (hostIPC is opt-in).
+func podHasDevShmHostPath(pod *corev1.Pod) bool {
+	for i := range pod.Spec.Volumes {
+		hp := pod.Spec.Volumes[i].HostPath
+		if hp != nil && hp.Path == "/dev/shm" {
+			return true
+		}
+	}
+	return false
+}
