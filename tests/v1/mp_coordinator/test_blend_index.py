@@ -357,7 +357,7 @@ def _directory() -> KeyDirectory:
 
 def test_a_stored_chunk_becomes_fragment_matchable():
     directory = _directory()
-    directory.apply_batch(_store([_key(1)], [10, 11, 12, 13], seq=1, token_offset=256))
+    directory.consume(_store([_key(1)], [10, 11, 12, 13], seq=1, token_offset=256))
 
     matches = directory.blend_match(np.asarray([0, 10, 11, 12, 13], dtype=np.uint64))
     assert _tuples(matches) == [(_key(1).chunk_hash, 256, 1)]
@@ -367,10 +367,8 @@ def test_deleting_the_last_placement_removes_it_from_fragment_matching():
     """Exact eviction: unlike a tombstoned fingerprint table, a deleted
     chunk stops being matched, so no prefetch is wasted on it."""
     directory = _directory()
-    directory.apply_batch(_store([_key(1)], [10, 11, 12, 13], seq=1))
-    directory.apply_batch(
-        _store([_key(1)], [], seq=2, event_type=CacheEventType.DELETE)
-    )
+    directory.consume(_store([_key(1)], [10, 11, 12, 13], seq=1))
+    directory.consume(_store([_key(1)], [], seq=2, event_type=CacheEventType.DELETE))
 
     assert directory.blend_match(np.asarray([10, 11, 12, 13], dtype=np.uint64)) == []
     assert directory.blend_stats().num_contents == 0
@@ -378,17 +376,17 @@ def test_deleting_the_last_placement_removes_it_from_fragment_matching():
 
 def test_chunk_stays_matchable_while_any_rank_holds_it():
     directory = _directory()
-    directory.apply_batch(
+    directory.consume(
         _store([_key(1, kv_rank=0), _key(1, kv_rank=1)], [10, 11, 12, 13], seq=1)
     )
-    directory.apply_batch(
+    directory.consume(
         _store([_key(1, kv_rank=0)], [], seq=2, event_type=CacheEventType.DELETE)
     )
 
     query = np.asarray([10, 11, 12, 13], dtype=np.uint64)
     assert _tuples(directory.blend_match(query)) == [(_key(1).chunk_hash, 0, 0)]
 
-    directory.apply_batch(
+    directory.consume(
         _store([_key(1, kv_rank=1)], [], seq=3, event_type=CacheEventType.DELETE)
     )
     assert directory.blend_match(query) == []
@@ -398,8 +396,8 @@ def test_restoring_a_chunk_with_new_content_retires_the_old_fingerprint():
     """A chunk hash should never stay discoverable under content it no
     longer holds."""
     directory = _directory()
-    directory.apply_batch(_store([_key(1)], [10, 11, 12, 13], seq=1))
-    directory.apply_batch(_store([_key(1)], [20, 21, 22, 23], seq=2))
+    directory.consume(_store([_key(1)], [10, 11, 12, 13], seq=1))
+    directory.consume(_store([_key(1)], [20, 21, 22, 23], seq=2))
 
     assert directory.blend_match(np.asarray([10, 11, 12, 13], dtype=np.uint64)) == []
     assert _tuples(
@@ -412,7 +410,7 @@ def test_a_tokenless_store_is_not_fragment_matchable():
     """The emitter could not stamp the chunk, so the directory has no
     content to verify against — a miss, not an error."""
     directory = _directory()
-    directory.apply_batch(_store([_key(1)], [], seq=1))
+    directory.consume(_store([_key(1)], [], seq=1))
 
     assert directory.blend_stats().num_contents == 0
     assert directory.blend_match(np.asarray([10, 11, 12, 13], dtype=np.uint64)) == []
@@ -420,18 +418,9 @@ def test_a_tokenless_store_is_not_fragment_matchable():
 
 def test_incarnation_fencing_removes_fragment_matches():
     directory = _directory()
-    directory.apply_batch(_store([_key(1)], [10, 11, 12, 13], seq=1))
+    directory.consume(_store([_key(1)], [10, 11, 12, 13], seq=1))
 
-    restarted = CacheEventBatch(
-        instance_id="node-a",
-        incarnation=2,
-        seq=1,
-        event_type=CacheEventType.STORE,
-        tier=Tier.L1,
-        backend="dram",
-        entries=[CacheEventEntry(key=_key(9).to_encoded_object_key(), size_bytes=1)],
-    )
-    directory.apply_batch(restarted)
+    directory.fence_instance("node-a")
 
     assert directory.blend_match(np.asarray([10, 11, 12, 13], dtype=np.uint64)) == []
 
@@ -443,7 +432,7 @@ def test_chunk_with_unreported_offset_is_not_fragment_matchable():
     re-RoPE the reused KV from the wrong source, which is wrong KV rather
     than a miss."""
     directory = _directory()
-    directory.apply_batch(
+    directory.consume(
         CacheEventBatch(
             instance_id="node-a",
             incarnation=1,
@@ -471,10 +460,10 @@ def test_a_later_offset_bearing_store_makes_the_chunk_matchable():
     """The unknown-offset state is repaired by the chunk's next store from
     an emitter that does report positions."""
     directory = _directory()
-    directory.apply_batch(_store([_key(1)], [10, 11, 12, 13], seq=1, token_offset=-1))
+    directory.consume(_store([_key(1)], [10, 11, 12, 13], seq=1, token_offset=-1))
     assert directory.blend_stats().num_chunks == 0
 
-    directory.apply_batch(_store([_key(1)], [10, 11, 12, 13], seq=2, token_offset=256))
+    directory.consume(_store([_key(1)], [10, 11, 12, 13], seq=2, token_offset=256))
 
     matches = directory.blend_match(np.asarray([10, 11, 12, 13], dtype=np.uint64))
     assert _tuples(matches) == [(_key(1).chunk_hash, 256, 0)]
@@ -485,7 +474,7 @@ def test_blend_lookup_is_off_until_enabled():
     does not run CacheBlend must not pay for it: a directory that was
     never enabled indexes nothing and matches nothing."""
     directory = KeyDirectory()  # not enabled
-    directory.apply_batch(_store([_key(1)], [10, 11, 12, 13], seq=1, token_offset=0))
+    directory.consume(_store([_key(1)], [10, 11, 12, 13], seq=1, token_offset=0))
 
     assert directory.blend_stats().num_chunks == 0
     assert directory.blend_match(np.asarray([10, 11, 12, 13], dtype=np.uint64)) == []
@@ -497,10 +486,10 @@ def test_enabling_does_not_retroactively_index_earlier_stores():
     """Documented contract: chunks stored before enable_blend_lookup are
     not back-filled, so the call belongs at startup."""
     directory = KeyDirectory()
-    directory.apply_batch(_store([_key(1)], [10, 11, 12, 13], seq=1, token_offset=0))
+    directory.consume(_store([_key(1)], [10, 11, 12, 13], seq=1, token_offset=0))
 
     directory.enable_blend_lookup(chunk_size=CHUNK, probe_stride=1)
 
     assert directory.blend_match(np.asarray([10, 11, 12, 13], dtype=np.uint64)) == []
-    directory.apply_batch(_store([_key(2)], [20, 21, 22, 23], seq=2, token_offset=0))
+    directory.consume(_store([_key(2)], [20, 21, 22, 23], seq=2, token_offset=0))
     assert directory.blend_match(np.asarray([20, 21, 22, 23], dtype=np.uint64))

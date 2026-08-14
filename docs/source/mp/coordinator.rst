@@ -101,28 +101,6 @@ variables:
        (default ``5``), otherwise heartbeat requests may hit a closing
        connection and fail with ``Server disconnected without sending a
        response``.
-   * - ``LMCACHE_MP_COORDINATOR_ENABLE_STARTUP_RESYNC``
-     - ``True``
-     - When ``True``, the coordinator runs a one-shot L2 resync on
-       startup that paginates an MP server's ``GET /cache/objects`` and
-       backfills the key directory's L2 placements plus the
-       usage/eviction trackers from existing L2 contents.
-       Disable to start from empty trackers (handy for tests, or
-       deployments that start the coordinator before any MP server).
-   * - ``LMCACHE_MP_COORDINATOR_RESYNC_POLL_INTERVAL``
-     - ``1``
-     - Seconds between registry checks while waiting for the first
-       MP server to register so startup resync can begin.
-   * - ``LMCACHE_MP_COORDINATOR_RESYNC_MAX_WAIT``
-     - ``60``
-     - Maximum seconds startup resync waits for an MP server before
-       giving up. The coordinator keeps running with empty trackers
-       until normal usage events fill them in.
-   * - ``LMCACHE_MP_COORDINATOR_RESYNC_PAGE_SIZE``
-     - ``1000``
-     - ``page_size`` forwarded to the MP server's ``GET /cache/objects``
-       during resync. Larger values reduce RTT count; the server
-       clamps to its own ceiling.
 
 Connecting MP servers
 ---------------------
@@ -416,7 +394,7 @@ cycle):
 
 When MP servers enable ``--coordinator-event-reporting``, they stream cache
 ``store``, ``access``, and ``delete`` events to the coordinator's
-``POST /directory/events``. Applied ``l2`` batches also feed the quota side:
+``POST /events``. Applied ``l2`` batches also feed the quota side:
 the coordinator aggregates per-``cache_salt`` usage, enforces quotas, and
 selects LRU keys to evict. Each batch carries the server's ``instance_id``,
 ``incarnation``, and a monotonically increasing sequence number (``seq``)
@@ -432,21 +410,19 @@ server. Because all MP servers share the same backing L2 (e.g. one S3
 bucket), one dispatch evicts the keys for the whole fleet. The MP
 server's L2 adapter fires ``on_l2_keys_deleted`` listeners after the
 delete completes; those listeners ship ``delete`` events back through
-``POST /directory/events``, which is what updates the coordinator's LRU +
+``POST /events``, which is what updates the coordinator's LRU +
 per-salt totals. Dispatch failures or no-instances-registered fall
 through to the next cycle — at-least-once semantics, safe because the
 S3 delete is idempotent.
 
-**Startup resync.** On boot, the coordinator waits up to
-``LMCACHE_MP_COORDINATOR_RESYNC_MAX_WAIT`` seconds for the first MP
-server to register, then paginates its
-``GET /cache/objects`` and seeds the key directory and the usage +
-eviction trackers with whatever is already resident in L2 — so a fresh
-coordinator does not start from zero usage. Set
-``LMCACHE_MP_COORDINATOR_ENABLE_STARTUP_RESYNC=False`` to skip this
-phase. Best-effort: resync failures are logged and the manager gives
-up; the ongoing usage-event stream from MP servers eventually corrects
-any initial blind spots.
+**Cold start.** The coordinator's trackers are in-memory and are built
+only from the cache-event stream, so after a restart per-salt usage
+starts at zero even though the bytes are still resident in L2. Quotas
+under-report until enough events accumulate. Unquota'd salts are exempt
+from eviction until the quota controller sets a default limit, so a cold
+coordinator cannot mass-evict — but it can under-evict, and an operator
+re-arming quotas right after a restart should expect the usage numbers
+to climb toward the true value rather than start at it.
 
 ``PUT /quota/config`` / ``GET /quota/config``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -632,7 +608,7 @@ entry has the same fields as the ``GET /quota/{cache_salt}`` response.
     # -> {"total_gb": 0.005, "by_cache_salt": [...]}
 
 Usage events arrive on the fleet cache-event stream
-(``POST /directory/events``); there is no separate quota ingestion
+(``POST /events``); there is no separate quota ingestion
 endpoint. See ``docs/design/v1/mp_coordinator/cache_events.md`` for the
 batch format and routing semantics.
 
