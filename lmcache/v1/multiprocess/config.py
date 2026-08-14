@@ -80,7 +80,7 @@ class MPServerConfig:
 
     shm_name: str | None = ""
     """SHM segment name for engine-driven KV transfer.
-    None: auto-allocate (default). "": force pickle. Other: use that name."""
+    "" (default): force pickle. None: auto-allocate. Other: use that name."""
 
     script_allowed_imports: list[str] = field(default_factory=list)
     """Modules that /run_script endpoint is allowed to import."""
@@ -321,7 +321,8 @@ def add_mp_server_args(
         help="Supported transfer mode: 'lmcache_driven' for server-driven "
         "transfer (STORE/RETRIEVE, supports CUDA IPC and CPU SHM), "
         "'engine_driven' for engine-driven transfer (PREPARE/COMMIT), "
-        "or 'auto' to enable both transfer paths. Default is 'auto'.",
+        "or 'auto' to enable both transfer paths. "
+        "Default is 'lmcache_driven'.",
     )
     mp_group.add_argument(
         "--runtime-plugin-locations",
@@ -345,9 +346,10 @@ def add_mp_server_args(
         type=str,
         default="",
         help="SHM segment name for engine-driven KV transfer. "
-        "Default (not specified): auto-allocate. "
-        'Set to "" to force pickle path (disable SHM). '
-        "Set to a name to use that specific SHM segment.",
+        'Default "" (not specified): disable SHM. '
+        "Set to a name to create and use that specific SHM segment. "
+        "(Only use this for engine_driven transfer mode, see "
+        "`--supported-transfer-mode`.) ",
     )
     mp_group.add_argument(
         "--script-allowed-imports",
