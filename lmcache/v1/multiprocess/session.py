@@ -79,6 +79,10 @@ class Session:
 
         Returns:
             List of hash values for chunks in [start_chunk, end_chunk).
+
+        Raises:
+            ValueError: If an explicit ``end`` exceeds the current tokens
+                (hashing past them yields valid-looking garbage).
         """
         chunk_size = self.hasher.chunk_size
         assert start % chunk_size == 0, (
@@ -87,6 +91,12 @@ class Session:
         start_chunk = start // chunk_size
 
         with self._lock:
+            if end is not None and end > len(self.token_ids):
+                raise ValueError(
+                    f"get_hashes end ({end}) exceeds the session's "
+                    f"{len(self.token_ids)} token(s); the session may have "
+                    "been recreated after request cleanup"
+                )
             if end is None:
                 # No explicit end: use the last full-chunk boundary.
                 # Lock must be held here because `self.token_ids` may be

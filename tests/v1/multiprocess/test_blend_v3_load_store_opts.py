@@ -297,7 +297,9 @@ def test_batched_rope_calls_kernel_per_group_per_slot():
 
         torch_mod.arange.return_value = _Pos()
 
-        eng._apply_cb_rope_batched(gpu_context, rope_state, 4, slots_to_rope)
+        eng._apply_cb_rope_batched(
+            gpu_context, rope_state, 4, slots_to_rope, list(range(2))
+        )
 
     # all_slots is built once per group (G=2), each fetching the full batch
     # of slot buffers => batch_len(4) × G(2) = 8 buffer fetches, independent
@@ -325,7 +327,7 @@ def test_batched_rope_noop_on_empty_slots():
     )
 
     with patch.object(v3_mod, "device_ops") as ops:
-        eng._apply_cb_rope_batched(gpu_context, rope_state, 2, [])
+        eng._apply_cb_rope_batched(gpu_context, rope_state, 2, [], list(range(2)))
 
     assert gpu_context.get_temp_kernel_group_buffer.call_count == 0
     assert ops.rotary_embedding_k_fused.call_count == 0
@@ -359,7 +361,7 @@ def test_batched_rope_raises_on_compressed_layout():
     )
 
     with pytest.raises(RuntimeError, match="is compressed"):
-        eng._apply_cb_rope_batched(gpu_context, rope_state, 2, [(0, 1, 2)])
+        eng._apply_cb_rope_batched(gpu_context, rope_state, 2, [(0, 1, 2)], [0])
 
 
 # ---------------------------------------------------------------------------
@@ -570,8 +572,26 @@ def test_register_rope_rejects_invalid_group_to_cache():
     # Model has engine groups {0, 1} but the map only covers group 0.
     with pytest.raises(ValueError, match="engine groups up to index 1"):
         eng.cb_register_rope(1, caches, 8, True, group_to_cache=[0])
-    with pytest.raises(ValueError, match=">=1 cos/sin cache"):
-        eng.cb_register_rope(1, [], 8, True, group_to_cache=[])
+    # A map referencing caches that were never sent is rejected even when the
+    # cache list is empty (the NoPE form requires an empty map too).
+    with pytest.raises(ValueError, match="outside"):
+        eng.cb_register_rope(1, [], 8, True, group_to_cache=[0, 0])
+
+
+def test_register_rope_accepts_nope_zero_caches():
+    """NoPE models register zero cos/sin caches. The rope state is still
+    stored — it carries the head layout the scatter needs — and every group
+    reports its re-RoPE skipped."""
+    eng = _rope_registration_engine(engine_group_indices=[0, 1])
+
+    eng.cb_register_rope(1, [], 128, True, group_to_cache=[])
+
+    state = eng._cb_rope_state[1]
+    assert state.cos_sin_caches == []
+    assert state.head_size == 128
+    # No cache for any group => every re-RoPE consumer skips rotation.
+    assert state.cache_for_group(0) is None
+    assert state.cache_for_group(1) is None
 
 
 def test_register_rope_requires_registered_instance():
@@ -650,7 +670,9 @@ def test_scatter_launches_per_slot_without_cat():
     ]
 
     with patch.object(v3_mod, "device_ops") as ops:
-        eng._scatter_batch_to_paged(gpu_context, resolved_groups, batch, 32)
+        eng._scatter_batch_to_paged(
+            gpu_context, resolved_groups, batch, 32, list(range(2))
+        )
 
     calls = ops.multi_layer_kv_transfer.call_args_list
     assert len(calls) == 3 * 2  # per (group, slot)
@@ -688,7 +710,7 @@ def test_scatter_narrows_partial_chunk_and_keeps_alignment():
     resolved_groups = [(torch.tensor([10, 11, 12], dtype=torch.long), 4)]
 
     with patch.object(v3_mod, "device_ops") as ops:
-        eng._scatter_batch_to_paged(gpu_context, resolved_groups, batch, 32)
+        eng._scatter_batch_to_paged(gpu_context, resolved_groups, batch, 32, [0])
 
     calls = ops.multi_layer_kv_transfer.call_args_list
     assert len(calls) == 3
@@ -755,14 +777,27 @@ def _build_plan_engine_and_context(
         "_build_cb_retrieve_plan_flat",
         "_resolve_cb_plan_invariants",
         "_cb_slot_buffers",
+        "_cb_staged_groups",
     ):
         setattr(eng, name, getattr(v3_mod.BlendV3Module, name).__get__(eng))
     eng._cb_plan_invariants = weakref.WeakKeyDictionary()
     eng._cb_slot_staging = weakref.WeakKeyDictionary()
+    eng._cb_plan_done_events = weakref.WeakKeyDictionary()
+
+    # First Party
+    from lmcache.v1.distributed.api import AttnWindowDesc
+    from lmcache.v1.kv_layer_groups import ObjectGroupInfo
 
     hidden_dim = n_heads * head_size
     gpu_context = MagicMock()
     gpu_context.device = torch.device("cpu")
+    # Legacy fused layout: one object group holding every kernel group.
+    gpu_context.kv_layer_groups_manager.get_attn_desc.return_value = AttnWindowDesc(
+        num_chunks_in_sw=[-1]
+    )
+    gpu_context.kv_layer_groups_manager.object_groups = [
+        ObjectGroupInfo(kernel_group_indices=list(range(num_groups)))
+    ]
     gpu_context.kv_layer_groups_manager.num_kernel_groups = num_groups
     gpu_context.kv_layer_groups_manager.kernel_groups = [
         SimpleNamespace(
@@ -784,8 +819,8 @@ def _build_plan_engine_and_context(
     ]
     ptr_tensors = [torch.zeros(num_layers, dtype=torch.long) for _ in range(num_groups)]
     gpu_context.get_kernel_group_kv_pointers.side_effect = lambda g: ptr_tensors[g]
-    gpu_context.get_engine_kv_format.side_effect = (
-        lambda g: lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
+    gpu_context.get_engine_kv_format.side_effect = lambda g: (
+        lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
     )
     # One object group; each chunk memory object fills one flat slot.
     obj_bytes = sum(kv_buffers[(0, g)].numel() * 4 for g in range(num_groups))
@@ -835,7 +870,7 @@ def test_native_plan_specs_stamped_and_cached():
     def pair(cur_st, cur_ed, old_st):
         return (
             SimpleNamespace(cur_st=cur_st, cur_ed=cur_ed, old_st=old_st),
-            _lazy_memory_obj(obj_bytes, address=cur_st * 1000),
+            (_lazy_memory_obj(obj_bytes, address=cur_st * 1000),),
         )
 
     # Chunks 0/1 shifted (old != cur), chunk 2 prefix (old == cur).
@@ -869,7 +904,7 @@ def test_native_plan_specs_stamped_and_cached():
     def pair2(cur_st, cur_ed, old_st):
         return (
             SimpleNamespace(cur_st=cur_st, cur_ed=cur_ed, old_st=old_st),
-            _lazy_memory_obj(obj_bytes, address=cur_st * 1000),
+            (_lazy_memory_obj(obj_bytes, address=cur_st * 1000),),
         )
 
     plan2 = eng._build_cb_retrieve_plan_flat(
@@ -903,7 +938,7 @@ def test_flat_plan_tables_encode_every_work_item():
     def pair(cur_st, cur_ed, old_st):
         return (
             SimpleNamespace(cur_st=cur_st, cur_ed=cur_ed, old_st=old_st),
-            _lazy_memory_obj(obj_bytes, address=cur_st * 1000),
+            (_lazy_memory_obj(obj_bytes, address=cur_st * 1000),),
         )
 
     # Chunks 0/1 shifted, chunk 2 prefix (old == cur).
@@ -919,14 +954,16 @@ def test_flat_plan_tables_encode_every_work_item():
     assert plan is not None
     _specs, (staging, ropes, scatters, step_offsets), _keep = plan
 
-    # 3 chunks -> 3 staging rows; wave=1 alternates slots 0,1,0.
+    # 3 chunks -> 3 staging rows; wave=1 alternates slots 0,1,0. The
+    # destinations live in the retrieve-owned private pool (NOT the shared
+    # temp buffers), so assert the alternation contract on the pointers:
+    # rows 0 and 2 share slot 0's buffer, row 1 uses a distinct one.
     assert staging.shape == (3, 4)
-    slot_bufs = [gpu_context.get_temp_object_group_buffer(s, 0) for s in (0, 1)]
-    assert staging[:, 0].tolist() == [
-        slot_bufs[0].data_ptr(),
-        slot_bufs[1].data_ptr(),
-        slot_bufs[0].data_ptr(),
-    ]
+    dests = staging[:, 0].tolist()
+    assert dests[0] == dests[2]
+    assert dests[1] != dests[0]
+    shared_ptr = gpu_context.get_temp_object_group_buffer(0, 0).data_ptr()
+    assert shared_ptr not in dests, "staging must not target the shared pool"
     # Rope rows: 2 shifted chunks x 2 groups.
     assert ropes.shape == (4, 4)
     assert sorted(set(ropes[:, 2].tolist())) == [100, 104]  # old_st values
@@ -942,6 +979,54 @@ def test_flat_plan_tables_encode_every_work_item():
 
 
 @native_retrieve_plan_required
+def test_flat_plan_emits_no_rope_rows_for_a_nope_model():
+    """A NoPE model (zero cos/sin caches) needs no re-RoPE for shifted
+    matches, so the plan must emit no rope rows: the table unpack runs under
+    the GIL and the executor would walk entries that cannot change a value.
+    """
+    # Third Party
+    import numpy as np
+
+    eng, gpu_context, rope_state, obj_bytes = _build_plan_engine_and_context()
+
+    def pair(cur_st, cur_ed, old_st):
+        return (
+            SimpleNamespace(cur_st=cur_st, cur_ed=cur_ed, old_st=old_st),
+            (_lazy_memory_obj(obj_bytes, address=cur_st * 1000),),
+        )
+
+    # Every chunk shifted (old != cur) — the worst case for rope rows.
+    runs = [[pair(0, 4, 100), pair(4, 8, 104), pair(8, 12, 108)]]
+    cpu_block_tables = [
+        (np.array([10, 11, 12], dtype=np.int64), 4),
+        (np.array([20, 21, 22], dtype=np.int64), 4),
+    ]
+
+    with_rope = eng._build_cb_retrieve_plan_flat(
+        gpu_context, rope_state, cpu_block_tables, runs, max_batch=2
+    )
+    assert with_rope is not None
+    _, (_, ropes_r, scatters_r, offsets_r), _ = with_rope
+    assert ropes_r.shape[0] == 6  # 3 shifted chunks x 2 groups
+
+    rope_state.cos_sin_caches = []  # NoPE
+    nope = eng._build_cb_retrieve_plan_flat(
+        gpu_context, rope_state, cpu_block_tables, runs, max_batch=2
+    )
+    assert nope is not None
+    _, (staging_n, ropes_n, scatters_n, offsets_n), _ = nope
+
+    assert ropes_n.shape[0] == 0, "NoPE must emit no rope rows"
+    assert (offsets_n[:, 1] == 0).all(), "rope CSR offsets must stay at zero"
+    # The actual data movement is untouched: same staging and scatter tables.
+    assert np.array_equal(scatters_n, scatters_r)
+    assert offsets_n.shape == offsets_r.shape
+    assert np.array_equal(offsets_n[:, 0], offsets_r[:, 0])
+    assert np.array_equal(offsets_n[:, 2], offsets_r[:, 2])
+    assert staging_n.shape[0] == 3
+
+
+@native_retrieve_plan_required
 def test_flat_tables_alternate_disjoint_slot_halves():
     """Same double-buffer contract, asserted on the flat-table encoding."""
     # Third Party
@@ -954,7 +1039,7 @@ def test_flat_tables_alternate_disjoint_slot_halves():
         [
             (
                 SimpleNamespace(cur_st=i * 4, cur_ed=i * 4 + 4, old_st=i * 4 + 100),
-                _lazy_memory_obj(obj_bytes, address=i * 4),
+                (_lazy_memory_obj(obj_bytes, address=i * 4),),
             )
             for i in range(6)
         ]
@@ -989,7 +1074,7 @@ def test_native_plan_falls_back_for_non_lazy_objects():
     eng, gpu_context, rope_state, obj_bytes = _build_plan_engine_and_context()
     obj = _lazy_memory_obj(obj_bytes, address=0)
     obj.parent.return_value = object()  # not a LazyMemoryAllocator
-    runs = [[(SimpleNamespace(cur_st=0, cur_ed=4, old_st=100), obj)]]
+    runs = [[(SimpleNamespace(cur_st=0, cur_ed=4, old_st=100), (obj,))]]
     cpu_block_tables = [
         (np.array([10], dtype=np.int64), 4),
         (np.array([20], dtype=np.int64), 4),
@@ -1014,7 +1099,7 @@ def test_native_plan_falls_back_for_compressed_group():
         [
             (
                 SimpleNamespace(cur_st=0, cur_ed=4, old_st=100),
-                _lazy_memory_obj(obj_bytes, address=0),
+                (_lazy_memory_obj(obj_bytes, address=0),),
             )
         ]
     ]
@@ -1063,3 +1148,87 @@ def test_union_recall_is_at_least_either_source_alone():
     assert len(dedup(local, 0)) == 1
     assert len(dedup(fleet, 0)) == 1
     assert len(dedup(local + fleet, 0)) == 2
+
+
+# ---------------------------------------------------------------------------
+# Multi-object-group read set (separate-object-groups support)
+# ---------------------------------------------------------------------------
+
+
+def test_classify_read_groups_single_group_is_legacy():
+    """A single-object-group layout maps to group 0 with no aux group,
+    regardless of kind labels (legacy fused layout)."""
+    # First Party
+    from lmcache.v1.multiprocess.modules import blend_v3 as v3_mod
+
+    read = v3_mod._classify_cb_read_groups(1, ())
+    assert read.gids == (0,)
+    assert read.attn_gid == 0
+
+
+def test_classify_read_groups_hybrid_layout():
+    """attention + recurrent + standalone -> read set = (attention, aux);
+    the recurrent group is excluded from every blend read."""
+    # First Party
+    from lmcache.v1.multiprocess.modules import blend_v3 as v3_mod
+
+    read = v3_mod._classify_cb_read_groups(3, ("attention", "recurrent", "standalone"))
+    assert read.gids == (0, 2)
+    assert read.attn_gid == 0
+
+
+def test_classify_read_groups_rejects_unresolvable_layouts():
+    """Multi-group layouts without kinds, with several attention buckets, or
+    with several standalone groups are refused loudly (silent mis-addressing
+    would corrupt reads)."""
+    # First Party
+    from lmcache.v1.multiprocess.modules import blend_v3 as v3_mod
+
+    with pytest.raises(RuntimeError):
+        v3_mod._classify_cb_read_groups(2, ())
+    with pytest.raises(RuntimeError):
+        v3_mod._classify_cb_read_groups(2, ("attention", "attention"))
+    with pytest.raises(RuntimeError):
+        v3_mod._classify_cb_read_groups(3, ("attention", "standalone", "standalone"))
+
+
+def test_chunk_major_object_keys_ordering():
+    """Keys come out chunk-major: for each hash, every read group's key(s)
+    are contiguous, groups ascending — the invariant behind every per-chunk
+    stride (coverage math, found-classification, retrieve pairing)."""
+    # First Party
+    from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+    from lmcache.v1.multiprocess.modules import blend_v3 as v3_mod
+
+    key = IPCCacheServerKey.from_token_ids(
+        model_name="m", world_size=2, worker_id=None, token_ids=[1, 2, 3]
+    )
+    hashes = [b"\x01" * 8, b"\x02" * 8]
+    keys = v3_mod._cb_chunk_major_object_keys(key, hashes, (0, 2))
+    # 2 hashes x 2 groups x world_size 2.
+    assert len(keys) == 8
+    assert [k.object_group_id for k in keys] == [0, 0, 2, 2, 0, 0, 2, 2]
+    assert [k.chunk_hash for k in keys][:4] == [hashes[0]] * 4
+    assert [k.chunk_hash for k in keys][4:] == [hashes[1]] * 4
+
+    # Worker-specific key: expansion of 1 per (hash, group).
+    wkey = IPCCacheServerKey.from_token_ids(
+        model_name="m", world_size=2, worker_id=1, token_ids=[1, 2, 3]
+    )
+    wkeys = v3_mod._cb_chunk_major_object_keys(wkey, hashes, (0, 2))
+    assert len(wkeys) == 4
+    assert [k.object_group_id for k in wkeys] == [0, 2, 0, 2]
+
+
+def test_classify_read_groups_recurrent_first_layout():
+    """Object groups are numbered by registration order, so a hybrid whose
+    recurrent layers register first makes object group 0 RECURRENT. Blend
+    must key its layout off attn_gid, never off group 0 (that would hand it
+    the state-page layout)."""
+    # First Party
+    from lmcache.v1.multiprocess.modules import blend_v3 as v3_mod
+
+    read = v3_mod._classify_cb_read_groups(3, ("recurrent", "attention", "standalone"))
+    assert read.attn_gid == 1
+    # Read set ascending, recurrent excluded.
+    assert read.gids == (1, 2)
