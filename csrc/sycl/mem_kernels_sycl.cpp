@@ -37,6 +37,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <stdexcept>
 #include <string>
 
@@ -993,8 +994,11 @@ void lmcache_memcpy_async(uintptr_t dest, uintptr_t src, size_t nbytes,
                           TransferDirection direction,
                           size_t host_buffer_offset,
                           size_t host_buffer_alignments) {
-  TORCH_CHECK((host_buffer_alignments & (host_buffer_alignments - 1)) == 0,
+  TORCH_CHECK(host_buffer_alignments != 0 &&
+                  (host_buffer_alignments & (host_buffer_alignments - 1)) == 0,
               "host_buffer_alignments must be power of two");
+  TORCH_CHECK(nbytes <= std::numeric_limits<size_t>::max() - host_buffer_offset,
+              "host_buffer_offset + nbytes must not overflow size_t");
 
   // SYCL USM memcpy infers direction from pointer allocation types;
   // the `direction` parameter is retained only for API compatibility.
@@ -1009,10 +1013,10 @@ void lmcache_memcpy_async(uintptr_t dest, uintptr_t src, size_t nbytes,
     size_t current_src = src + offset;
     size_t current_dest = dest + offset;
 
-    size_t aligned_area_end =
-        ((offset + host_buffer_offset) & ~mask) + host_buffer_alignments;
-    size_t real_end = std::min(host_buffer_offset + nbytes, aligned_area_end);
-    size_t max_nbytes = real_end - offset - host_buffer_offset;
+    const size_t position = host_buffer_offset + offset;
+    const size_t bytes_to_boundary = host_buffer_alignments - (position & mask);
+    const size_t max_nbytes =
+        std::min<size_t>(nbytes - offset, bytes_to_boundary);
 
     // USM memcpy is direction-agnostic.
     queue.memcpy(reinterpret_cast<void*>(current_dest),
