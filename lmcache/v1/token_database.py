@@ -468,10 +468,15 @@ class SegmentTokenDatabase(TokenDatabase):
         self.sep_len = len(self.sep_tokens)
 
     def _fast_split_by_subtensor(self, tokens: torch.Tensor) -> Iterable[torch.Tensor]:
-        """Match the `sep_tokens` with sliding windows"""
+        """Match the `sep_tokens` with sliding windows.
+
+        When there is no separator to look for (`sep_len == 0`) or the input is
+        too short to contain one, the whole input is yielded as a single chunk.
+        """
 
         if self.sep_len == 0 or len(tokens) < self.sep_len:
             yield tokens
+            return
 
         # Unfold into sliding windows
         # shape: (num_tokens-sep_len+1, sep_len)
