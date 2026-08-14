@@ -13,9 +13,9 @@ import pytest
 import torch
 
 # First Party
+from lmcache import torch_device_type
 from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.kv_format import detect_format, extract_kv_cache_shapes
-from lmcache.v1.gpu_connector.kv_format.detectors.vllm import resolve_vllm_kv_layout
 import lmcache.lmcache_native as lmcache_native
 
 NB, NL, BS, NH, HS = 7, 5, 3, 2, 4
@@ -35,19 +35,24 @@ def test_vllm_cross_layer():
     assert out.data_ptr() == kv.data_ptr()
 
 
-def test_resolve_vllm_kv_layout_honors_hint_off_cpu():
-    assert resolve_vllm_kv_layout({"kv_layout": "NHD"}, False) == "NHD"
-    assert resolve_vllm_kv_layout({"kv_layout": "HND"}, False) == "HND"
+# The CPU-HND safeguard forces HND regardless of hint when running on a CPU
+# host; bypass it so the hint-driven NHD/HND branch is exercised on any host.
+_VLLM_DEV = "lmcache.v1.gpu_connector.kv_format.detectors.vllm.torch_device_type"
+_MOCK_DEVICE_TYPE = "cuda" if torch_device_type == "cpu" else torch_device_type
 
 
-def test_resolve_vllm_kv_layout_forces_hnd_on_cpu():
-    assert resolve_vllm_kv_layout({"kv_layout": "NHD"}, True) == "HND"
-
-
-def test_vllm_flash_attn_hnd():
+def test_vllm_flash_attn_hnd(monkeypatch):
+    monkeypatch.setattr(_VLLM_DEV, _MOCK_DEVICE_TYPE)
     kv = [_t(2, NB, BS, NH, HS) for _ in range(NL)]
     fmt_hnd, _ = detect_format(kv, EngineType.VLLM, {"kv_layout": "HND"})
     assert fmt_hnd == F.NL_X_TWO_NB_NH_BS_HS
+
+
+def test_vllm_flash_infer_nhd(monkeypatch):
+    monkeypatch.setattr(_VLLM_DEV, _MOCK_DEVICE_TYPE)
+    kv = [_t(NB, 2, BS, NH, HS) for _ in range(NL)]
+    fmt, _ = detect_format(kv, EngineType.VLLM, {"kv_layout": "NHD"})
+    assert fmt == F.NL_X_NB_TWO_BS_NH_HS
 
 
 def test_vllm_mla():
@@ -56,18 +61,20 @@ def test_vllm_mla():
     assert fmt == F.NL_X_NB_BS_HS
 
 
-def test_vllm_blocks_first_fused_hnd_num_heads_2():
+def test_vllm_blocks_first_fused_hnd_num_heads_2(monkeypatch):
     # Raw 4-D [NB, NH, BS, 2*HS] with NH == 2 (a common GQA config): a 5-D
     # split would make the K/V axis and the head axis both equal 2, ambiguous
     # with flash-infer. Detection must use the rank-4 shape to land on the
     # content-size format, and keep the tensor raw.
+    monkeypatch.setattr(_VLLM_DEV, _MOCK_DEVICE_TYPE)
     raw = [_t(NB, 2, BS, 2 * HS) for _ in range(NL)]
     fmt, out = detect_format(raw, EngineType.VLLM, {"kv_layout": "HND"})
     assert fmt == F.NL_X_NB_NH_BS_CS
     assert tuple(out[0].shape) == (NB, 2, BS, 2 * HS)
 
 
-def test_vllm_blocks_first_fused_hnd():
+def test_vllm_blocks_first_fused_hnd(monkeypatch):
+    monkeypatch.setattr(_VLLM_DEV, _MOCK_DEVICE_TYPE)
     raw_hnd = [_t(NB, NH, BS, 2 * HS) for _ in range(NL)]
     fmt_hnd, _ = detect_format(raw_hnd, EngineType.VLLM, {"kv_layout": "HND"})
     assert fmt_hnd == F.NL_X_NB_NH_BS_CS
