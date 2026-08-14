@@ -1,23 +1,30 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-Dynamic-file-mode Nixl L2 adapter.
+Dynamic NIXL L2 adapter.
 
 Unlike the static ``NixlStoreL2Adapter`` which pre-allocates all storage
-files at init time, this adapter opens/registers files per operation.
+descriptors at init time, this adapter opens/registers storage descriptors per
+operation.
 
-Atomic publish:
+File backend atomic publish:
 - Stores DMA-write to a per-operation ``<final_path>.tmp.<uuid>`` and
   atomically ``rename()`` to the final deterministic path on completion.
   This guarantees that readers (including other processes sharing the
   same directory) never observe a partially-written file.
 
-Persist (enabled by default via ``persist_enabled``, can be opted out):
+Object backends:
+- Store and load deterministic object names derived from ``ObjectKey``.
+  The adapter can query object presence, but it does not provide
+  backend-neutral object-size accounting or object deletion.
+
+Persist for file backends (enabled by default via ``persist_enabled``, can be
+opted out):
 - Keeps data files on disk at shutdown (no metadata dump).
 
 Secondary lookup (always on):
-- Lookup always checks secondary storage (disk) on miss and lazily
-  populates the in-memory index when a file is found. File names are
-  derived deterministically from ObjectKey.
+- Lookup always checks secondary storage on miss and lazily populates the
+  in-memory index when a file or object is found. Names are derived
+  deterministically from ``ObjectKey``.
 """
 
 # Future
@@ -47,6 +54,10 @@ from lmcache.v1.distributed.l2_adapters.nixl_store_agents.dynamic_nixl_store_age
 from lmcache.v1.distributed.l2_adapters.nixl_store_agents.file_dynamic_nixl_store_agent import (  # noqa: E501
     FILE_DYNAMIC_BACKENDS,
     FileDynamicNixlStorageAgent,
+)
+from lmcache.v1.distributed.l2_adapters.nixl_store_agents.object_dynamic_nixl_store_agent import (  # noqa: E501
+    OBJECT_DYNAMIC_BACKENDS,
+    ObjectDynamicNixlStorageAgent,
 )
 from lmcache.v1.distributed.l2_adapters.nixl_store_l2_adapter import (
     NixlStoreObj,
@@ -81,6 +92,10 @@ def _create_dynamic_nixl_storage_agent(
         return FileDynamicNixlStorageAgent(
             device, backend, backend_params, l1_memory_desc
         )
+    if backend in OBJECT_DYNAMIC_BACKENDS:
+        return ObjectDynamicNixlStorageAgent(
+            device, backend, backend_params, l1_memory_desc
+        )
     raise ValueError(f"No dynamic NIXL storage agent for backend {backend!r}")
 
 
@@ -90,13 +105,13 @@ def _create_dynamic_nixl_storage_agent(
 
 
 class DynamicNixlStoreL2Adapter(L2AdapterInterface):
-    """Nixl L2 adapter using dynamic per-operation file registration.
+    """NIXL L2 adapter using dynamic per-operation storage registration.
 
-    Each store creates a new file on disk; each load re-opens the file.
+    File backends create a data file per key. Object backends register the
+    deterministic object key derived from each ``ObjectKey``.
 
-    When ``persist_enabled`` is True (the default), data files are kept
-    on disk at shutdown.  Lookup always checks secondary storage (disk)
-    for keys not in the in-memory index and populates the index lazily.
+    File backends honor ``persist_enabled`` and recover from disk. Object
+    backends use backend-managed retention and presence-based recovery.
     """
 
     def __init__(
@@ -104,10 +119,17 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
         config: DynamicNixlStoreL2AdapterConfig,
         l1_memory_desc: L1MemoryDesc,
     ):
-        max_capacity_gb = float(config.backend_params.get("max_capacity_gb", 0))
-        if max_capacity_gb <= 0:
-            raise ValueError("backend_params must include a positive 'max_capacity_gb'")
-        super().__init__(max_capacity_bytes=int(max_capacity_gb * (1024**3)))
+        self._is_object_backend = config.backend in OBJECT_DYNAMIC_BACKENDS
+        if self._is_object_backend:
+            max_capacity_bytes = 0
+        else:
+            max_capacity_gb = float(config.backend_params.get("max_capacity_gb", 0))
+            if max_capacity_gb <= 0:
+                raise ValueError(
+                    "backend_params must include a positive 'max_capacity_gb'"
+                )
+            max_capacity_bytes = int(max_capacity_gb * (1024**3))
+        super().__init__(max_capacity_bytes=max_capacity_bytes)
         self._config = config
 
         self._store_efd = create_event_notifier()
@@ -227,7 +249,20 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
     #####################
 
     def delete(self, keys: list[ObjectKey]) -> None:
-        """Delete objects from storage, removing their files from disk."""
+        """Delete unpinned objects from file storage.
+
+        Object-storage backends do not expose adapter-side deletion, so this
+        method leaves their local index and backing objects unchanged.
+
+        Args:
+            keys: Cache-object keys to delete.
+        """
+        if self._is_object_backend:
+            logger.info(
+                "delete() is unsupported for object backend %s; skipping",
+                self._config.backend,
+            )
+            return
         to_delete: list[tuple[ObjectKey, int]] = []
         with self._lock:
             for key in keys:
@@ -281,7 +316,14 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
     # Cleanup Interface
     #####################
 
-    def close(self):
+    def close(self) -> None:
+        """Stop asynchronous work and release adapter-owned resources.
+
+        File backends honor ``persist_enabled`` before their NIXL resources are
+        released. Object backends leave backing-object retention to the storage
+        service.
+        """
+
         # Stop the event loop and wait for all in-flight tasks to finish
         async def _stop_tasks():
             tasks = [
@@ -302,8 +344,14 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
         self._loop_thread.join()
         self._loop.close()
 
-        # If persist is enabled, keep data files on disk; otherwise clean up.
-        if self._persist_enabled:
+        # Object lifetime is backend-managed. File backends can optionally
+        # remove their data files at shutdown.
+        if self._is_object_backend:
+            logger.info(
+                "%s backend does not support adapter-side cleanup",
+                self._config.backend,
+            )
+        elif self._persist_enabled:
             logger.info("persist_enabled=True, keeping data files on disk")
         else:
             logger.info("persist_enabled=False, deleting all data files")
@@ -311,8 +359,9 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
                 for key in list(self._memory_objects.keys()):
                     self.nixl_agent.dynamic_delete(key)
 
-        # Best-effort cleanup of orphaned temp files from crashed stores.
-        self.nixl_agent.cleanup()
+        if not self._is_object_backend:
+            # Best-effort cleanup of orphaned temp files from crashed stores.
+            self.nixl_agent.cleanup()
 
         self.nixl_agent.close()
 
@@ -348,7 +397,7 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
         objects: list[MemoryObj],
         task_id: L2TaskId,
     ) -> None:
-        """Store each key-object pair to its own file via dynamic DMA write."""
+        """Store each key-object pair using a dynamic NIXL DMA write."""
         success = True
         stored_keys: list[ObjectKey] = []
         stored_sizes: list[int] = []
@@ -363,7 +412,10 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
                 with self._lock:
                     if key in self._memory_objects or key in self._inflight_stores:
                         continue
-                    if self._total_bytes + mem_size > self._max_capacity_bytes:
+                    if (
+                        self._max_capacity_bytes > 0
+                        and self._total_bytes + mem_size > self._max_capacity_bytes
+                    ):
                         logger.warning(
                             "Storage capacity exceeded, skipping store for key %s",
                             key,
@@ -419,9 +471,8 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
     ) -> None:
         """Look up keys and pin found objects.
 
-        Also checks secondary storage (disk) for keys not in the
-        in-memory index and lazily populates ``_memory_objects`` for any
-        data files found on disk.
+        Also checks secondary storage for keys not in the in-memory index and
+        lazily populates ``_memory_objects`` for any matching file or object.
         """
         bitmap = Bitmap(len(keys))
         # Keys populated by secondary lookup need a ``_notify_keys_stored``
@@ -446,11 +497,14 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
         self._signal_lookup_event()
 
     def _secondary_lookup_locked(self, key: ObjectKey) -> NixlStoreObj | None:
-        """Check if a data file for ``key`` exists on disk; if so, populate
-        ``_memory_objects`` and return the entry. Caller must hold ``_lock``.
+        """Check backing storage for ``key`` and populate the local index.
 
-        The file size is read via ``os.stat``. Layout is left as ``None`` and
-        will be supplied by the caller's MemoryObj at load time.
+        File agents return the data-file size; object agents return zero for a
+        successful presence query because their object size is backend-specific.
+        The caller must hold ``_lock``.
+
+        Layout is left as ``None`` and will be supplied by the caller's
+        ``MemoryObj`` at load time.
         """
         # Skip keys with an in-flight store to avoid double-counting
         # in _total_bytes.
@@ -460,8 +514,11 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
         if obj_size is None:
             return None
 
-        # Enforce capacity when populating lazily too.
-        if self._total_bytes + obj_size > self._max_capacity_bytes:
+        # Enforce capacity for file backends when populating lazily.
+        if (
+            self._max_capacity_bytes > 0
+            and self._total_bytes + obj_size > self._max_capacity_bytes
+        ):
             logger.debug(
                 "Secondary lookup hit for %s but capacity exceeded, skipping",
                 key,
@@ -548,18 +605,18 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
 # Config and self-registration
 # ---------------------------------------------------------------------
 
-# TODO(Jiayi): OBJ backend is not supported in the dynamic adapter yet.
-# Only file-based backends are supported.
-_VALID_DYNAMIC_BACKENDS = FILE_DYNAMIC_BACKENDS
+_VALID_DYNAMIC_BACKENDS = FILE_DYNAMIC_BACKENDS + OBJECT_DYNAMIC_BACKENDS
 
 
 class DynamicNixlStoreL2AdapterConfig(L2AdapterConfigBase):
-    """Config for the dynamic-file Nixl L2 adapter.
+    """Config for the dynamic NIXL L2 adapter.
 
     Fields:
-    - backend: Nixl storage backend (GDS, GDS_MT, POSIX, HF3FS).
+    - backend: NIXL storage backend (GDS, GDS_MT, POSIX, HF3FS, OBJ,
+      AZURE_BLOB).
     - backend_params: Backend-specific parameters as a dict of string
-      key-value pairs. Must include ``file_path`` and ``use_direct_io``.
+      key-value pairs. File backends require ``file_path`` and
+      ``use_direct_io``; object backend parameters are passed to NIXL.
     """
 
     def __init__(
@@ -591,15 +648,16 @@ class DynamicNixlStoreL2AdapterConfig(L2AdapterConfigBase):
     @classmethod
     def help(cls) -> str:
         return (
-            "Dynamic Nixl store L2 adapter config fields:\n"
-            "- backend (str): Nixl storage backend, "
+            "Dynamic NIXL store L2 adapter config fields:\n"
+            "- backend (str): NIXL storage backend, "
             "one of %s (required)\n"
             "- backend_params (dict): backend-specific "
-            "string key-value pairs. Must include "
-            "'file_path' and 'use_direct_io'.\n"
-            "- persist_enabled (bool): if True, keep data files on disk "
-            "at shutdown (optional, default True)\n"
-            "Lookup always checks secondary storage (disk) on miss."
+            "string key-value pairs. File backends must include "
+            "'file_path' and 'use_direct_io'; object backend parameters "
+            "are passed through to NIXL.\n"
+            "- persist_enabled (bool): controls file retention at shutdown "
+            "(optional, default True). Object retention is backend-managed.\n"
+            "Lookup always checks secondary storage on miss."
             % (_VALID_DYNAMIC_BACKENDS,)
         )
 
