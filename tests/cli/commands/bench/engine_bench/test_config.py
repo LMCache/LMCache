@@ -11,7 +11,7 @@ import pytest
 # First Party
 from lmcache.cli.commands.bench.engine_bench.config import (
     EngineBenchConfig,
-    _find_model_meta,
+    _find_model_metas,
     auto_detect_model,
     parse_args_to_config,
     resolve_tokens_per_gb,
@@ -189,11 +189,11 @@ class TestParseArgsToConfig:
 
 
 # ---------------------------------------------------------------------------
-# _find_model_meta
+# _find_model_metas
 # ---------------------------------------------------------------------------
 
 
-class TestFindModelMeta:
+class TestFindModelMetas:
     def _gpu_meta(self) -> dict:
         return {
             "gpu_0": {
@@ -206,26 +206,33 @@ class TestFindModelMeta:
                 "world_size": 4,
                 "kv_cache_layout": {"cache_size_per_token": 327680},
             },
+            "gpu_2": {
+                "model_name": "meta-llama/Llama-3.1-70B",
+                "world_size": 4,
+                "kv_cache_layout": {"cache_size_per_token": 327680},
+            },
         }
 
     def test_finds_matching_model(self) -> None:
-        meta = _find_model_meta(self._gpu_meta(), "Qwen/Qwen3-14B")
-        assert meta["model_name"] == "Qwen/Qwen3-14B"
+        metas = _find_model_metas(self._gpu_meta(), "Qwen/Qwen3-14B")
+        assert len(metas) == 1
+        assert metas[0]["model_name"] == "Qwen/Qwen3-14B"
 
-    def test_finds_second_model(self) -> None:
-        meta = _find_model_meta(
+    def test_finds_all_rank_entries(self) -> None:
+        metas = _find_model_metas(
             self._gpu_meta(),
             "meta-llama/Llama-3.1-70B",
         )
-        assert meta["world_size"] == 4
+        assert len(metas) == 2
+        assert all(m["world_size"] == 4 for m in metas)
 
     def test_missing_model_raises(self) -> None:
         with pytest.raises(RuntimeError, match="not found"):
-            _find_model_meta(self._gpu_meta(), "nonexistent-model")
+            _find_model_metas(self._gpu_meta(), "nonexistent-model")
 
     def test_error_lists_available(self) -> None:
         with pytest.raises(RuntimeError, match="Qwen/Qwen3-14B"):
-            _find_model_meta(self._gpu_meta(), "nonexistent")
+            _find_model_metas(self._gpu_meta(), "nonexistent")
 
 
 # ---------------------------------------------------------------------------
@@ -234,24 +241,31 @@ class TestFindModelMeta:
 
 
 class TestResolveTokensPerGb:
-    def _status_response(
+    def _entry(
         self,
         cache_size_per_token: int = 163840,
         world_size: int = 1,
         model_name: str = "Qwen/Qwen3-14B",
+        mla: bool = False,
     ) -> dict:
         return {
+            "model_name": model_name,
+            "world_size": world_size,
+            "kv_cache_layout": {
+                "num_layers": 40,
+                "hidden_dim_size": 1024,
+                "dtype": "torch.bfloat16",
+                "cache_size_per_token": cache_size_per_token,
+                "kernel_groups": [{"is_mla": mla}],
+            },
+        }
+
+    def _status_response(self, *entries: dict) -> dict:
+        if not entries:
+            entries = (self._entry(),)
+        return {
             "cache_context_meta": {
-                "gpu_0": {
-                    "model_name": model_name,
-                    "world_size": world_size,
-                    "kv_cache_layout": {
-                        "num_layers": 40,
-                        "hidden_dim_size": 1024,
-                        "dtype": "torch.bfloat16",
-                        "cache_size_per_token": cache_size_per_token,
-                    },
-                },
+                f"gpu_{i}": entry for i, entry in enumerate(entries)
             },
         }
 
@@ -263,8 +277,7 @@ class TestResolveTokensPerGb:
         # 1 GB = 1073741824 bytes
         # 1073741824 // 163840 = 6553
         mock_fetch.return_value = self._status_response(
-            cache_size_per_token=163840,
-            world_size=1,
+            self._entry(cache_size_per_token=163840, world_size=1),
         )
         result = resolve_tokens_per_gb(
             "http://localhost:8080",
@@ -276,18 +289,114 @@ class TestResolveTokensPerGb:
         "lmcache.cli.commands.bench.engine_bench.config._fetch_lmcache_status",
     )
     def test_world_size_multiplier(self, mock_fetch) -> None:
-        # 163840 bytes/token (rank-local), world_size=4
-        # global = 163840 * 4 = 655360
+        # 163840 bytes/token (rank-local), world_size=4, one rank
+        # registered so far: global = 163840 * 4 = 655360
         # 1073741824 // 655360 = 1638
         mock_fetch.return_value = self._status_response(
-            cache_size_per_token=163840,
-            world_size=4,
+            self._entry(cache_size_per_token=163840, world_size=4),
         )
         result = resolve_tokens_per_gb(
             "http://localhost:8080",
             "Qwen/Qwen3-14B",
         )
         assert result == 1638
+
+    @patch(
+        "lmcache.cli.commands.bench.engine_bench.config._fetch_lmcache_status",
+    )
+    def test_sums_across_tp_ranks(self, mock_fetch) -> None:
+        # Two TP ranks with uneven shards: 100000 + 120000 = 220000
+        # bytes/token global; 1073741824 // 220000 = 4880
+        mock_fetch.return_value = self._status_response(
+            self._entry(cache_size_per_token=100000, world_size=2),
+            self._entry(cache_size_per_token=120000, world_size=2),
+        )
+        result = resolve_tokens_per_gb(
+            "http://localhost:8080",
+            "Qwen/Qwen3-14B",
+        )
+        assert result == 4880
+
+    @patch(
+        "lmcache.cli.commands.bench.engine_bench.config._fetch_lmcache_status",
+    )
+    def test_mla_not_multiplied_by_world_size(self, mock_fetch) -> None:
+        # All-MLA model: TP ranks share one KV copy, so global stays
+        # at 163840 bytes/token despite world_size=4.
+        mock_fetch.return_value = self._status_response(
+            *[
+                self._entry(cache_size_per_token=163840, world_size=4, mla=True)
+                for _ in range(4)
+            ],
+        )
+        result = resolve_tokens_per_gb(
+            "http://localhost:8080",
+            "Qwen/Qwen3-14B",
+        )
+        assert result == 6553
+
+    @patch(
+        "lmcache.cli.commands.bench.engine_bench.config._fetch_lmcache_status",
+    )
+    def test_mixed_mla_groups_multiplied(self, mock_fetch) -> None:
+        # A layout with one MLA and one non-MLA kernel group is not
+        # all-MLA, so the world_size multiplier applies.
+        entry = self._entry(cache_size_per_token=163840, world_size=4)
+        entry["kv_cache_layout"]["kernel_groups"] = [
+            {"is_mla": True},
+            {"is_mla": False},
+        ]
+        mock_fetch.return_value = self._status_response(entry)
+        result = resolve_tokens_per_gb(
+            "http://localhost:8080",
+            "Qwen/Qwen3-14B",
+        )
+        assert result == 1638
+
+    @patch(
+        "lmcache.cli.commands.bench.engine_bench.config._fetch_lmcache_status",
+    )
+    def test_replicas_not_double_counted(self, mock_fetch) -> None:
+        # Two replicas of a TP=2 model -> 4 entries. Global must equal
+        # a single replica's sum: 163840 * 2 = 327680 bytes/token.
+        # 1073741824 // 327680 = 3276
+        mock_fetch.return_value = self._status_response(
+            *[self._entry(cache_size_per_token=163840, world_size=2) for _ in range(4)],
+        )
+        result = resolve_tokens_per_gb(
+            "http://localhost:8080",
+            "Qwen/Qwen3-14B",
+        )
+        assert result == 3276
+
+    @patch(
+        "lmcache.cli.commands.bench.engine_bench.config._fetch_lmcache_status",
+    )
+    def test_no_kernel_groups_treated_as_non_mla(self, mock_fetch) -> None:
+        # Blend layouts carry no kernel_groups; the world_size
+        # multiplier applies.
+        entry = self._entry(cache_size_per_token=163840, world_size=4)
+        del entry["kv_cache_layout"]["kernel_groups"]
+        mock_fetch.return_value = self._status_response(entry)
+        result = resolve_tokens_per_gb(
+            "http://localhost:8080",
+            "Qwen/Qwen3-14B",
+        )
+        assert result == 1638
+
+    @patch(
+        "lmcache.cli.commands.bench.engine_bench.config._fetch_lmcache_status",
+    )
+    def test_inconsistent_world_size_raises(self, mock_fetch) -> None:
+        mock_fetch.return_value = self._status_response(
+            self._entry(cache_size_per_token=163840, world_size=2),
+            self._entry(cache_size_per_token=163840, world_size=4),
+        )
+        with pytest.raises(RuntimeError, match="Inconsistent world_size"):
+            resolve_tokens_per_gb(
+                "http://localhost:8080",
+                "Qwen/Qwen3-14B",
+            )
 
     @patch(
         "lmcache.cli.commands.bench.engine_bench.config._fetch_lmcache_status",

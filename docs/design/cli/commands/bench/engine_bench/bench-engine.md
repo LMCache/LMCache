@@ -117,7 +117,7 @@ Key functions:
 |----------|---------|
 | `parse_args_to_config(args) -> EngineBenchConfig` | Converts CLI args to fully-resolved config |
 | `auto_detect_model(engine_url) -> str` | Fetches model ID from `/v1/models` |
-| `resolve_tokens_per_gb(lmcache_url, model_name) -> int` | Queries LMCache `/status` for `cache_size_per_token * world_size` |
+| `resolve_tokens_per_gb(lmcache_url, model_name) -> int` | Queries LMCache `/status`; averages `cache_size_per_token` over the model's rank entries (collapsing replicas) and multiplies by `world_size`, or by 1 for all-MLA models (TP ranks share one KV copy) |
 
 `EngineBenchConfig` contains only general parameters. Workload-specific
 configs live in their own modules and are resolved by the workload factory.
