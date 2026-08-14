@@ -26,7 +26,7 @@ from lmcache.v1.gpu_connector.kv_format import (
     get_spec_class,
 )
 from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache, LayoutHints
-from lmcache.v1.platform.ops_types import set_shape_desc_dtype
+from lmcache.v1.platform.ops_types import PageBufferShapeDesc, set_shape_desc_dtype
 import lmcache.lmcache_native as lmcache_native
 
 if TYPE_CHECKING:
@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from lmcache.v1.gpu_connector.gpu_connectors import GPUConnectorInterface
 
 # First Party
-import lmcache.c_ops as lmc_ops
+from lmcache import device_ops
 
 logger = init_logger(__name__)
 
@@ -132,7 +132,7 @@ def get_concrete_engine_kv_shape(
 
 
 def get_concrete_engine_kv_shape_from_shape_desc(
-    shape_desc: "lmc_ops.PageBufferShapeDesc",
+    shape_desc: PageBufferShapeDesc,
     engine_kv_format: "lmcache_native.EngineKVFormat",
 ) -> str:
     """Return the concrete shape for a single kernel group's ``shape_desc``.
@@ -622,7 +622,7 @@ def make_page_buffer_shape_desc(
     num_blocks: int,
     block_size: int,
     block_stride_elems: Optional[int] = None,
-) -> "lmc_ops.PageBufferShapeDesc":
+) -> PageBufferShapeDesc:
     """Build a :class:`PageBufferShapeDesc` from a representative layer.
 
     Args:
@@ -647,7 +647,7 @@ def make_page_buffer_shape_desc(
     Returns:
         A populated ``PageBufferShapeDesc``.
     """
-    desc = lmc_ops.PageBufferShapeDesc()
+    desc = device_ops.PageBufferShapeDesc()
     desc.kv_size = get_kv_size(kv_caches, engine_kv_format)
     desc.nl = num_layers_in_group
     desc.nb = num_blocks
