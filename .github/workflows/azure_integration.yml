@@ -72,6 +72,7 @@ jobs:
           python -m pip install -r requirements/common.txt
           python -m pip install -r requirements/test.txt
           python -m pip install azure-storage-blob
+          NO_GPU_EXT=1 python -m pip install -e . --no-build-isolation
 
       - name: Start Azurite
         run: |
