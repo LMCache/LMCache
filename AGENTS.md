@@ -59,12 +59,6 @@ pytest -xvs tests/v1/test_cache_engine.py
 pytest -xvs tests/v1/test_cache_engine.py::test_function_name
 ```
 
-On macOS arm64, the standard suite cannot fully collect because `triton` and
-`vllm` are unavailable on that platform. The first failures currently surface
-in `tests/v1/compute/attention/test_triton_kernels.py` and
-`tests/v1/test_pos_kernels.py`. Run targeted platform-independent test files
-locally and rely on Linux GPU CI for the full standard suite.
-
 Test dependencies: `uv pip install -r requirements/test.txt`
 
 Pytest marker: `@pytest.mark.no_shared_allocator` disables the shared-allocator monkeypatch for a test.
