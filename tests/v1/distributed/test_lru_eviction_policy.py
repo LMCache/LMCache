@@ -11,9 +11,11 @@ These tests verify the basic functionality of the LRUEvictionPolicy:
 """
 
 # Third Party
+import pytest
 
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.eviction import L2EvictionPolicy
 from lmcache.v1.distributed.eviction_policy import LRUEvictionPolicy
 from lmcache.v1.distributed.internal_api import (
     EvictionDestination,
@@ -191,6 +193,100 @@ class TestLRUEvictionPolicyRatio:
         # Ratio > 1 should be treated as 1
         actions = policy.get_eviction_actions(1.5)
         assert len(actions[0].keys) == 10
+
+
+# =============================================================================
+# Byte-weighted L2 Tests
+# =============================================================================
+
+
+class TestLRUEvictionPolicySizes:
+    """Tests for byte-weighted eviction when L2 reports object sizes."""
+
+    def test_variable_sizes_control_eviction_amount(self):
+        """Evict the minimal LRU prefix that reaches the byte target."""
+        policy = LRUEvictionPolicy()
+        keys = [make_key(i) for i in range(4)]
+        for key, size in zip(keys, [1, 1, 8, 8], strict=True):
+            policy.on_keys_created_with_sizes([key], [size])
+
+        actions = policy.get_eviction_actions(0.5)
+
+        assert actions[0].keys == keys[:3]
+
+    def test_equal_sizes_preserve_count_based_result(self):
+        """Equal object sizes produce the same victims as count-based LRU."""
+        policy = LRUEvictionPolicy()
+        keys = [make_key(i) for i in range(3)]
+        policy.on_keys_created_with_sizes(keys, [4] * len(keys))
+
+        actions = policy.get_eviction_actions(0.5)
+
+        assert len(actions[0].keys) == 1
+
+    def test_size_refresh_updates_byte_accounting(self):
+        """Re-storing a key replaces its old size and refreshes LRU order."""
+        policy = LRUEvictionPolicy()
+        keys = [make_key(i) for i in range(2)]
+        policy.on_keys_created_with_sizes(keys, [1, 9])
+
+        policy.on_keys_created_with_sizes([keys[1]], [1])
+        actions = policy.get_eviction_actions(0.5)
+
+        assert actions[0].keys == [keys[0]]
+
+    def test_removal_updates_byte_accounting(self):
+        """Removed objects no longer contribute to the byte target."""
+        policy = LRUEvictionPolicy()
+        keys = [make_key(i) for i in range(3)]
+        for key, size in zip(keys, [1, 9, 2], strict=True):
+            policy.on_keys_created_with_sizes([key], [size])
+
+        policy.on_keys_removed([keys[1]])
+        actions = policy.get_eviction_actions(0.5)
+
+        assert actions[0].keys == [keys[0]]
+
+    def test_mixed_history_keeps_byte_target_after_removal(self):
+        """A mixed-size policy keeps freeing at least the requested bytes."""
+        policy = LRUEvictionPolicy()
+        keys = [make_key(i) for i in range(4)]
+        for key, size in zip(keys, [4, 8, 2, 4], strict=True):
+            policy.on_keys_created_with_sizes([key], [size])
+
+        policy.on_keys_removed([keys[1]])
+        actions = policy.get_eviction_actions(0.5)
+
+        assert actions[0].keys == [keys[0], keys[2]]
+
+    def test_uniform_rounding_is_restored_after_removal(self):
+        """Removing the odd-sized object restores count-based rounding."""
+        policy = LRUEvictionPolicy()
+        keys = [make_key(i) for i in range(4)]
+        policy.on_keys_created_with_sizes(keys, [4, 8, 4, 4])
+
+        policy.on_keys_removed([keys[1]])
+        actions = policy.get_eviction_actions(0.5)
+
+        assert len(actions[0].keys) == 1
+
+    def test_l2_bridge_forwards_object_sizes(self):
+        """The L2 listener must not discard adapter-provided byte sizes."""
+        policy = LRUEvictionPolicy()
+        bridge = L2EvictionPolicy(policy)
+        keys = [make_key(i) for i in range(4)]
+        bridge.on_l2_keys_stored(keys, [8, 8, 1, 1])
+
+        actions = policy.get_eviction_actions(0.5)
+
+        assert actions[0].keys == [keys[3], keys[2], keys[1]]
+
+    def test_mismatched_sizes_are_rejected(self):
+        """Each reported key must have exactly one byte size."""
+        policy = LRUEvictionPolicy()
+
+        with pytest.raises(ValueError, match="same length"):
+            policy.on_keys_created_with_sizes([make_key(1)], [])
 
 
 # =============================================================================

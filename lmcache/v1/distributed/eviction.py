@@ -62,6 +62,22 @@ class EvictionPolicy:
         """
         pass
 
+    def on_keys_created_with_sizes(
+        self,
+        keys: list[ObjectKey],
+        sizes: list[int],
+    ) -> None:
+        """Notify the policy that sized keys have been created.
+
+        Policies that do not use object sizes inherit the compatibility
+        fallback, which delegates to :meth:`on_keys_created`.
+
+        Args:
+            keys: Keys that have been created.
+            sizes: Size in bytes for each key.
+        """
+        self.on_keys_created(keys)
+
     @abstractmethod
     def on_keys_touched(self, keys: list[ObjectKey]):
         """
@@ -94,10 +110,10 @@ class EvictionPolicy:
 
         Args:
             expected_ratio (float): A hint indicating approximately what
-                fraction of tracked keys should be evicted. Value should be
-                in range [0.0, 1.0]. For example, 0.1 means roughly 10% of
-                keys should be evicted. This is a hint and the policy may
-                return more or fewer keys.
+                fraction of tracked eviction weight should be evicted. Policies
+                may use bytes when sizes are available and unit weight otherwise.
+                Value should be in range [0.0, 1.0]. This is a hint and the
+                policy may return more or fewer keys.
             key_eligible_filter: An optional callable that takes an ObjectKey
                 and returns True if the key is eligible for eviction. When
                 provided, keys for which the filter returns False will be
@@ -184,8 +200,12 @@ class L2EvictionPolicy(L2AdapterListener):
     def policy(self) -> EvictionPolicy:
         return self._policy
 
-    def on_l2_keys_stored(self, keys: list[ObjectKey], sizes: list[int]):
-        self._policy.on_keys_created(keys)
+    def on_l2_keys_stored(
+        self,
+        keys: list[ObjectKey],
+        sizes: list[int],
+    ) -> None:
+        self._policy.on_keys_created_with_sizes(keys, sizes)
 
     def on_l2_keys_accessed(self, keys: list[ObjectKey]):
         self._policy.on_keys_touched(keys)
