@@ -7,6 +7,12 @@ independently versioned wheel. LMCache discovers the wheel at runtime, so the
 vendor can ship fixes and native binaries without adding vendor code or a
 device-name list to the LMCache repository.
 
+This is an alternative to the existing in-tree model, not a replacement for
+it. Vendors can still contribute a backend under
+`lmcache/v1/platform/<device>/` when joint maintenance and the LMCache release
+cadence are preferable. Both models implement the same interfaces and merge
+into the same runtime registry.
+
 The plugin boundary is a `DeviceSpec` subclass. Existing dispatch paths then
 resolve operations, IPC wrappers, event IPC, pinning, and cache contexts from
 that same object; plugins do not need separate registration hooks for each

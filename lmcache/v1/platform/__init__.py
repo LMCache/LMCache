@@ -15,7 +15,8 @@ sub-packages so each can evolve independently:
 
 Third-party accelerators can ship a :class:`DeviceSpec` subclass in a
 separate wheel and register it through the ``lmcache.device_plugins`` Python
-entry-point group. No LMCache source changes are required.
+entry-point group. This complements the built-in integration model for
+backends maintained directly in the LMCache repository.
 """
 
 # Future

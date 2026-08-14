@@ -217,17 +217,25 @@ which is wrong for that backend's actual KV cache layout.
 
 ## Adding New Hardware
 
-1. Create an independent Python project with a ``DeviceSpec`` subclass and,
-   when needed, a ``DeviceOps`` subclass.
-2. Publish the ``DeviceSpec`` class through the
-   ``lmcache.device_plugins`` entry-point group and build a wheel.
-3. Install the wheel beside LMCache and verify with MP ``engine_driven`` mode
-   (see the [developer guide](../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst)).
-4. Optionally add ``ipc_wrapper_cls``, ``event_ipc_backend``, and
-   ``create_cache_context()`` implementations for LMCache-driven transfer.
+Device vendors choose one of two ownership models:
 
-No LMCache repository change is required. Users can set
-``DEVICE_TYPE=<device_type>`` at runtime to force selection when multiple
-devices are available. See the
+- **In-tree:** contribute the `DeviceSpec`, `DeviceOps`, tests, and optional
+  IPC capabilities under `lmcache/v1/platform/<device>/`. Subclass discovery
+  finds the backend without a registration list. This model ships and tests
+  the device on the LMCache release cadence.
+- **External wheel:** maintain the same interfaces in a vendor repository and
+  publish the `DeviceSpec` through the `lmcache.device_plugins` entry-point
+  group. This model lets the vendor own its release cadence and native binary
+  distribution without an LMCache code change.
+
+Both models enter the same registry and dispatch paths. Start with MP
+`engine_driven` mode, then optionally add `ipc_wrapper_cls`,
+`event_ipc_backend`, and `create_cache_context()` implementations for
+LMCache-driven transfer. Users can set `DEVICE_TYPE=<device_type>` at runtime
+to force selection when multiple devices are available.
+
+See the
+[developer guide](../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst)
+for both integration procedures. The
 [external device plugin design](v1/platform/device-plugin-architecture.md)
-for the package contract, conflict policy, and failure behavior.
+defines the wheel package contract, conflict policy, and failure behavior.
