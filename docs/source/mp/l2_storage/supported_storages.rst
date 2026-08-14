@@ -28,6 +28,9 @@ target.
    * - :doc:`Bigtable <bigtable>`
      - ``bigtable``
      - Remote & Distributed
+   * - :doc:`SageMaker HyperPod <sagemaker_hyperpod>`
+     - ``sagemaker-hyperpod``
+     - Remote & Distributed
    * - :doc:`S3 <s3>`
      - ``s3``
      - Remote & Distributed
@@ -39,6 +42,9 @@ target.
      - Remote & Distributed
    * - :doc:`RESP (Redis/Valkey) <resp>`
      - ``resp``
+     - Remote & Distributed
+   * - :doc:`Valkey <valkey>`
+     - ``valkey``
      - Remote & Distributed
    * - :doc:`Aerospike <aerospike>`
      - ``aerospike``

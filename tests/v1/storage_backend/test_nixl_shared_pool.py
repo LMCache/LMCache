@@ -80,6 +80,7 @@ _NIXL_MOCK_KEYS = _install_nixl_mock_if_absent()
 
 
 # First Party
+from lmcache import torch_dev, torch_device_type  # noqa: E402
 from lmcache.utils import CacheEngineKey  # noqa: E402
 from lmcache.v1.config import LMCacheEngineConfig  # noqa: E402
 from lmcache.v1.memory_allocators.paged_tensor_memory_allocator import (  # noqa: E402
@@ -142,7 +143,7 @@ def _nixl_cpu_config(pool_size: int = 0) -> LMCacheEngineConfig:
 
 def _nixl_gpu_config(pool_size: int = 0) -> LMCacheEngineConfig:
     config = _nixl_cpu_config(pool_size)
-    config.nixl_buffer_device = "cuda"
+    config.nixl_buffer_device = torch_device_type
     config.nixl_buffer_size = 1024 * 1024
     return config
 
@@ -352,7 +353,12 @@ class TestDynamicCpuMode:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.cuda
 class TestDynamicGpuMode:
+    @pytest.mark.skipif(
+        not (torch_dev.is_available() and torch_device_type == "cuda"),
+        reason="Dynamic GPU-mode NIXL test requires CUDA backend",
+    )
     def test_get_allocator_backend_returns_self(self, monkeypatch):
         """In GPU mode, get_allocator_backend() returns self."""
         metadata = _make_metadata()

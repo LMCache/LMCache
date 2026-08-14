@@ -78,15 +78,15 @@ class TestL1EvictionPolicyAccessedBridge:
 
         mock_policy.on_keys_touched.assert_called_once_with(keys)
 
-    def test_on_l1_keys_read_finished_also_touches(self):
-        """on_l1_keys_read_finished should call on_keys_touched."""
+    def test_on_l1_keys_read_finished_does_not_touch(self):
+        """Releasing a read lock is not an access: no on_keys_touched."""
         mock_policy = MagicMock()
         listener = L1EvictionPolicy(mock_policy)
         keys = [make_key(1), make_key(2)]
 
         listener.on_l1_keys_read_finished(keys)
 
-        mock_policy.on_keys_touched.assert_called_once_with(keys)
+        mock_policy.on_keys_touched.assert_not_called()
 
     def test_on_l1_keys_accessed_with_lru_policy(self):
         """on_l1_keys_accessed should update LRU order via real LRU policy."""
@@ -106,8 +106,8 @@ class TestL1EvictionPolicyAccessedBridge:
         assert ObjectKey.Bytes2IntHash(candidates[1].chunk_hash) == 2
         assert ObjectKey.Bytes2IntHash(candidates[2].chunk_hash) == 1
 
-    def test_on_l1_keys_read_finished_updates_lru(self):
-        """on_l1_keys_read_finished should update LRU order."""
+    def test_on_l1_keys_read_finished_keeps_lru_order(self):
+        """Releasing a read lock must not change the LRU order."""
         lru = LRUEvictionPolicy()
         listener = L1EvictionPolicy(lru)
 
@@ -115,14 +115,18 @@ class TestL1EvictionPolicyAccessedBridge:
         keys = [make_key(1), make_key(2), make_key(3)]
         lru.on_keys_created(keys)
 
-        # Call on_l1_keys_read_finished on key 1 - should touch it
-        listener.on_l1_keys_read_finished([make_key(1)])
+        before = [
+            ObjectKey.Bytes2IntHash(c.chunk_hash)
+            for c in lru.get_eviction_candidates(3)
+        ]
 
-        # Key 1 is now most recently touched, eviction order: 2, 3, 1
-        candidates = lru.get_eviction_candidates(3)
-        assert ObjectKey.Bytes2IntHash(candidates[0].chunk_hash) == 3
-        assert ObjectKey.Bytes2IntHash(candidates[1].chunk_hash) == 2
-        assert ObjectKey.Bytes2IntHash(candidates[2].chunk_hash) == 1
+        listener.on_l1_keys_read_finished([make_key(2)])
+
+        after = [
+            ObjectKey.Bytes2IntHash(c.chunk_hash)
+            for c in lru.get_eviction_candidates(3)
+        ]
+        assert after == before
 
 
 class TestL1EvictionPolicyUnifiedTouchOrder:

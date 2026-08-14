@@ -10,6 +10,7 @@ from lmcache.v1.gpu_connector.gds_context import SlabDirection, get_gds_context
 from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_management import GDSMemoryObject, MemoryObj
 import lmcache.c_ops as lmc_ops
+import lmcache.lmcache_native as lmcache_native
 
 
 # Helper functions
@@ -44,7 +45,7 @@ def lmcache_memcpy_async_h2d(
             gpu_buffer.data_ptr(),
             memory_obj.data_ptr,
             mem_obj_size,
-            lmc_ops.TransferDirection.H2D,
+            lmcache_native.TransferDirection.H2D,
             memory_obj.meta.address,
             LazyMemoryAllocator.PIN_CHUNK_SIZE,
         )
@@ -85,7 +86,7 @@ def lmcache_memcpy_async_d2h(
             memory_obj.data_ptr,
             gpu_buffer.data_ptr(),
             mem_obj_size,
-            lmc_ops.TransferDirection.D2H,
+            lmcache_native.TransferDirection.D2H,
             memory_obj.meta.address,
             LazyMemoryAllocator.PIN_CHUNK_SIZE,
         )

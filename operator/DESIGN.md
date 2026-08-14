@@ -113,6 +113,25 @@ spec:
     raw:
       type: string              # adapter type name (nixl_store, fs, mock, raw_block, etc.)
       config: map[string]any    # type-specific config as free-form map
+    # Optional: serde transform on KV bytes to/from the L2 adapter. Renders
+    # a "serde" sub-dict into the --l2-adapter JSON; applies to whichever
+    # adapter is configured. Exactly one serde type must be set (only aesgcm
+    # today; other server-side serdes like fp8/turboquant can gain typed
+    # fields here later, or be set via raw.config.serde).
+    serde:
+      # aesgcm: at-rest encryption keyed per cache_salt. The referenced
+      # Secret is mounted directly into the engine pods, read-only at
+      # /etc/lmcache/keys/master (only the "master" data key is projected).
+      # The operator never reads or writes the Secret and never generates
+      # key material; provenance/rotation stay with the user. The reference
+      # is same-namespace only, so CR-create permission cannot be leveraged
+      # to read Secrets from other namespaces (confused deputy). See
+      # docs/design/v1/distributed/serde/aesgcm.md for the threat/key models.
+      aesgcm:
+        masterKeySecretRef:     # REQUIRED, user-created Secret with a "master" data key,
+          name: string          # in the engine's namespace (same-namespace only)
+        keyProvider: string     # default: hkdf (only implemented provider)
+        aesBits: int            # default: 128 (or 256)
 
   # -- Connection-injection webhook defaults (optional) --
   # Read by the LMCache mutating webhook for pods bound to this engine. When
@@ -396,18 +415,23 @@ Group `lmcache.lmcache.ai`, `v1alpha1`, kind `CacheBlendEngine` (shortName `cbe`
 The spec **mirrors `LMCacheEngineSpec`** (image, server, l1, eviction, prometheus,
 l2Backend, scheduling, overrides, imagePullSecrets) and adds:
 
-- `blend.checkLayer` (default 1) and `blend.recompRatio` (default 0.15) — CB
-  tunables fed to the vLLM connector.
+- `blend.checkLayer` (default 1), `blend.recompRatio` (default 0.15), and
+  `blend.partialBucket` (unset by default — emits `cb.partial_bucket`, the
+  PARTIAL row-count padding bucket fp8-MoE models need to keep the Triton
+  autotuner from re-tuning per CB step) — CB tunables fed to the vLLM
+  connector.
 - `injection` — what the webhook injects into vLLM pods: `payloadImage` (an
   `ImageSpec` — `repository`/`tag`/`pullPolicy`, like `spec.image` — for the
   private `lmcache-cacheblend` init-container image; set `repository` explicitly,
   the inherited engine-image default is not a valid payload), `imagePullSecrets`
   (appended to the vLLM pod so the private payload image can pull — the Secret
   must exist in the vLLM pod's namespace), `targetContainer` (default: first
-  container), and `cudagraph` (`eager`|`piecewise`|`full_decode_only`, default
-  `eager`).
+  container), `cudagraph` (`eager`|`piecewise`|`full_decode_only`, default
+  `eager`). Env vars need no injection field: the webhook only
+  prepends PYTHONPATH and never touches other env, so pod authors set model
+  env vars (e.g. `VLLM_USE_FLASHINFER_MOE_FP8=0`) directly on their container.
 - `server.chunkSize` defaults to **256** and is validated to equal 256 (the blend
-  matcher requires `chunk_size == vLLM --block-size * 4`).
+  matcher requires `chunk_size == 256`).
 
 ### The blend engine (controller)
 
@@ -436,7 +460,8 @@ The `<name>-connection` ConfigMap carries the **`CBKVConnector`**
     "lmcache.mp.host": "tcp://<name>.<namespace>.svc.cluster.local",
     "lmcache.mp.port": "<server.port>",
     "cb.check_layer": <blend.checkLayer>,
-    "cb.recomp_ratio": <blend.recompRatio>
+    "cb.recomp_ratio": <blend.recompRatio>,
+    "cb.partial_bucket": <blend.partialBucket, only when set>
   }
 }
 ```
@@ -459,7 +484,7 @@ webhook then applies:
 | pod `hostIPC: true` | required for CUDA IPC with the node-local engine |
 | `cb-plugin` emptyDir + payload init container | the busybox payload `cp -a`'s the pure-Python plugin tree onto the shared volume |
 | readOnly mount + `PYTHONPATH=/cb-plugin` on the vLLM container | vLLM discovers the plugin via its `vllm.general_plugins` entry point |
-| append required vLLM args | `--attention-backend CUSTOM`, `--kv-transfer-config <from the connection ConfigMap>`, `--block-size 64`, `--pipeline-parallel-size 1`, `--no-enable-chunked-prefill`, `--no-async-scheduling`, `--enforce-eager` (or the configured cudagraph) |
+| append required vLLM args | `--kv-transfer-config <from the connection ConfigMap>`, `--pipeline-parallel-size 1`, `--no-enable-chunked-prefill`, `--enforce-eager` (or the configured cudagraph) |
 | append `injection.imagePullSecrets` | so the private payload image can pull |
 | stamp `lmcache.ai/cacheblend-injected: "true"` | idempotency guard |
 
@@ -472,8 +497,8 @@ or the requested `targetContainer`/`cacheblend-container` annotation names a
 container that does not exist on the pod (`target-container-not-found`). It does
 **not** gate on engine readiness — like `LMCacheEngine`, the connector connects
 when the engine comes up. Args are emitted in two-token form
-(`--attention-backend CUSTOM`); the replace-not-duplicate dedup still recognizes a
-user-supplied `--flag=value`.
+(`--pipeline-parallel-size 1`); the replace-not-duplicate dedup still recognizes
+a user-supplied `--flag=value`.
 
 > **Shared with the LMCache injector.** The emptyDir + payload init container +
 > readOnly mount + `PYTHONPATH` staging (rows 2–3 above) is generic — the standard

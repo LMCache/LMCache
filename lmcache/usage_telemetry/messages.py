@@ -263,8 +263,71 @@ class MPServerMessage(UsageMessage):
 
 
 @dataclass
+class L2ConnectorUsageMessage(UsageMessage):
+    """Interval usage of one L2 adapter type on an MP cache server.
+
+    One message per active (or trafficked) adapter type per flush
+    interval; all messages of a flush share a ``sequence_number``. Key
+    counts are chunks, not tokens.
+    """
+
+    ENDPOINT: ClassVar[str] = "l2-usage"
+
+    l2_name: str
+    """Adapter type name from the factory registry (e.g. ``"dax"``)."""
+    active_seconds: float
+    """Seconds of this interval the type was active; sub-interval
+    add/remove rounds to the full interval."""
+    interval_stored_bytes: int
+    interval_store_succeeded_keys: int
+    interval_store_failed_keys: int
+    interval_load_submitted_keys: int
+    interval_load_submitted_bytes: int
+    """Bytes *requested* from L2 (load completions carry no byte count)."""
+    bytes_used: int
+    """Occupancy probe: bytes held by this type; ``-1`` when the probe
+    was unavailable for this type."""
+    capacity_bytes: int
+    """Summed capacity of the type's capacity-bounded adapters; ``0``
+    when every adapter is unbounded/unknown."""
+    unbounded_adapters: int
+    """Adapters of this type without a known capacity; nonzero means
+    ``bytes_used / capacity_bytes`` is not a meaningful ratio."""
+    sequence_number: int
+    uptime_seconds: float
+    """Seconds since the reporting process started."""
+
+
+@dataclass
+class L1UsageMessage(UsageMessage):
+    """Interval occupancy of an MP cache server's L1 pool.
+
+    One message per flush interval, probed at flush time.
+    """
+
+    ENDPOINT: ClassVar[str] = "l1-usage"
+
+    active_seconds: float
+    """Seconds covered by this interval."""
+    bytes_used: int
+    """Bytes currently held in L1; ``-1`` when the probe failed."""
+    capacity_bytes: int
+    """Total L1 pool capacity in bytes; ``0`` when the probe failed."""
+    sequence_number: int
+    uptime_seconds: float
+    """Seconds since the reporting process started."""
+
+
+@dataclass
 class ContinuousContextMessage(UsageMessage):
-    """Interval counters flushed periodically by the continuous reporter."""
+    """Interval counters flushed periodically by the continuous reporters.
+
+    Sent by both deployment modes; distinguish by the ``deployment_mode``
+    header. ``interval_num_hit_tokens`` counts tokens actually retrieved
+    (served) from LMCache in the interval; ``interval_stored_kv_size`` is
+    exact bytes in MP mode and a kv-bytes-per-token estimate in
+    single-process mode.
+    """
 
     ENDPOINT: ClassVar[str] = "cache-usage"
 
@@ -272,15 +335,23 @@ class ContinuousContextMessage(UsageMessage):
     interval_num_hit_tokens: int
     interval_stored_kv_size: int
     sequence_number: int
+    uptime_seconds: float
+    """Seconds since the reporting process started."""
 
 
 @dataclass
 class CacheLifespanMessage(UsageMessage):
-    """Cache-entry lifespan histogram flushed with each continuous report."""
+    """Cache-entry lifespan histogram flushed with each continuous report.
+
+    Single-process mode only; measures the store-to-reuse gap per reused
+    chunk.
+    """
 
     ENDPOINT: ClassVar[str] = "cache-lifespan"
 
     cache_lifespan_histogram: dict[float, int]
-    """Bucket lower bound (seconds) to sample count. Numeric keys become
+    """Bucket lower bound (minutes) to sample count. Numeric keys become
     strings on the wire (JSON object keys)."""
     sequence_number: int
+    uptime_seconds: float
+    """Seconds since the reporting process started."""

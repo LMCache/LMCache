@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """Quota and usage-accounting endpoints on the coordinator (fleet-level).
 
-The ``/quota`` surface, thin over the collaborators on the typed
-:class:`CoordinatorContext` (resolved via :func:`get_context`): quota writes,
-combined quota+usage status reads, and usage-event ingestion from MP servers.
+The ``/quota`` surface, thin over the eviction manager on the typed
+:class:`CoordinatorContext` (resolved via :func:`get_context`): it owns
+both the quota registry these endpoints write and the usage view they
+read, because enforcing one against the other is what it does. Usage
+arrives through the fleet cache-event stream
+(``POST /events``), admitted by the ingest gate.
 This mirrors the MP server's node-local ``/quota`` group; warm-prefetch dispatch
 is genuine cache control and lives in :mod:`cache_api` instead.
 """
@@ -13,15 +16,12 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 # First Party
-from lmcache.v1.distributed.tiers import Tier
+from lmcache.v1.distributed.api import Tier
 from lmcache.v1.mp_coordinator.http_apis.dependencies import get_context
 from lmcache.v1.mp_coordinator.schemas import (
-    EventType,
     QuotaConfigRequest,
     QuotaConfigResponse,
     QuotaResponse,
-    ReportUsageRequest,
-    ReportUsageResponse,
     SetQuotaRequest,
     StatusListResponse,
     StatusResponse,
@@ -73,7 +73,8 @@ async def set_quota_config(
     default_limit_bytes = (
         None if body.default_limit_gb is None else int(body.default_limit_gb * _GB)
     )
-    get_context(request).quota_manager.set_default_limit_bytes(default_limit_bytes)
+    quota = get_context(request).eviction_controller.quota
+    quota.set_default_limit_bytes(default_limit_bytes)
     return QuotaConfigResponse(default_limit_gb=body.default_limit_gb)
 
 
@@ -91,7 +92,8 @@ async def get_quota_config(
         unquota'd salts are exempt from eviction (the boot default).
     """
     _require_supported_tier(tier)
-    default_limit = get_context(request).quota_manager.get_default_limit_bytes()
+    quota = get_context(request).eviction_controller.quota
+    default_limit = quota.get_default_limit_bytes()
     return QuotaConfigResponse(
         default_limit_gb=None if default_limit is None else _gb(default_limit)
     )
@@ -117,7 +119,9 @@ async def set_quota(
     cache_salt = _resolve_salt_from_api_path(cache_salt)
     limit_bytes = int(body.limit_gb * _GB)
     try:
-        get_context(request).quota_manager.set_quota(cache_salt, limit_bytes)
+        get_context(request).eviction_controller.quota.set_quota(
+            cache_salt, limit_bytes
+        )
     except ValueError:
         return JSONResponse(status_code=400, content={"error": "invalid quota limit"})
     return QuotaResponse(cache_salt=cache_salt, limit_gb=body.limit_gb, status="ok")
@@ -138,7 +142,8 @@ async def delete_quota(
     """
     _require_supported_tier(tier)
     cache_salt = _resolve_salt_from_api_path(cache_salt)
-    removed = get_context(request).quota_manager.delete_quota(cache_salt)
+    quota = get_context(request).eviction_controller.quota
+    removed = quota.delete_quota(cache_salt)
     return QuotaResponse(
         cache_salt=cache_salt,
         limit_gb=0.0,
@@ -165,9 +170,10 @@ async def get_status(
     _require_supported_tier(tier)
     cache_salt = _resolve_salt_from_api_path(cache_salt)
     ctx = get_context(request)
-    usage = ctx.usage_manager.get(cache_salt)
-    exists = ctx.quota_manager.has_quota(cache_salt)
-    limit = ctx.quota_manager.get_limit_bytes(cache_salt)
+    quota = ctx.eviction_controller.quota
+    usage = ctx.eviction_controller.usage.get(cache_salt)
+    exists = quota.has_quota(cache_salt)
+    limit = quota.get_limit_bytes(cache_salt)
     return StatusResponse(
         cache_salt=cache_salt,
         quota_limit_gb=_gb(limit) if exists else 0.0,
@@ -188,11 +194,11 @@ async def list_status(request: Request, tier: Tier = Tier.L2) -> StatusListRespo
     """
     _require_supported_tier(tier)
     ctx = get_context(request)
-    tracker = ctx.usage_manager
-    store = ctx.quota_manager
-    by_salt = tracker.get_all()
-    total = tracker.get_total()
-    quota_entries = {e.cache_salt: e.limit_bytes for e in store.list_quotas()}
+    usage_view = ctx.eviction_controller.usage
+    quota_registry = ctx.eviction_controller.quota
+    by_salt = usage_view.get_all()
+    total = usage_view.get_total()
+    quota_entries = {e.cache_salt: e.limit_bytes for e in quota_registry.list_quotas()}
     all_salts = sorted(set(by_salt) | set(quota_entries))
     return StatusListResponse(
         total_gb=_gb(total),
@@ -208,39 +214,3 @@ async def list_status(request: Request, tier: Tier = Tier.L2) -> StatusListRespo
             for salt in all_salts
         ],
     )
-
-
-# -- Usage-event ingestion ---------------------------------------------------
-
-
-@router.post("/quota/events")
-async def report_events(
-    body: ReportUsageRequest, request: Request
-) -> ReportUsageResponse:
-    """Record a batch of ``store`` / ``lookup`` / ``delete`` events.
-
-    Usage events feed the same per-``cache_salt`` ledger the quota status reads
-    expose, so they live in the ``/quota`` group alongside the quota writes.
-
-    Args:
-        body: Event batch tagged with the reporter's ``instance_id``, ``seq``,
-            and the ``tier`` the events apply to.
-
-    Returns:
-        Number of events processed.
-    """
-    _require_supported_tier(body.tier)
-    ctx = get_context(request)
-    tracker = ctx.usage_manager
-    ctrl = ctx.eviction_manager
-    for event in body.events:
-        ok = event.key.to_object_key()
-        if event.type == EventType.STORE:
-            tracker.record_stored(ok, event.bytes)
-            ctrl.on_store(ok)
-        elif event.type == EventType.LOOKUP:
-            ctrl.on_lookup(ok)
-        elif event.type == EventType.DELETE:
-            tracker.record_evicted(ok)
-            ctrl.on_remove(ok)
-    return ReportUsageResponse(recorded=len(body.events))

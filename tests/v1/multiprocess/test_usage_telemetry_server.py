@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-"""End-to-end test: the MP cache server emits usage telemetry at startup.
+"""End-to-end test: the MP cache server emits usage telemetry.
 
-Spawns a real ``run_cache_server`` in a child process with the stats-server
-URL pointed at a local HTTP sink, and asserts the startup report arrives
-over the wire.
+Spawns a real ``run_cache_server`` (with one filesystem L2 adapter) in a
+child process with the stats-server URL pointed at a local HTTP sink, and
+asserts the startup, continuous, and per-L2-connector reports arrive over
+the wire.
 """
 
 # Standard
@@ -15,24 +16,33 @@ import time
 
 # Third Party
 import pytest
-import torch
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.v1.distributed.config import (
     EvictionConfig,
     L1ManagerConfig,
     L1MemoryManagerConfig,
     StorageManagerConfig,
 )
+from lmcache.v1.distributed.l2_adapters.config import L2AdaptersConfig
 from lmcache.v1.mp_observability.config import DEFAULT_OBSERVABILITY_CONFIG
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.server import run_cache_server
 
-if not torch.cuda.is_available():
+if not torch_dev.is_available():
     pytest.skip(
-        "MP cache server requires an accelerator device",
+        f"requires available {torch_device_type} runtime",
         allow_module_level=True,
     )
+
+# First Party
+# Needs the native extension, which is only built alongside an
+# accelerator device — import after the module-level skip so CPU-only
+# environments can still collect this module.
+from lmcache.v1.distributed.l2_adapters.fs_l2_adapter import (  # noqa: E402
+    FSL2AdapterConfig,
+)
 
 SERVER_PORT = 15599
 STARTUP_TIMEOUT_SECONDS = 90.0
@@ -56,8 +66,9 @@ class _UsageSink(ThreadingHTTPServer):
         self.received: list[tuple[str, dict[str, object]]] = []
 
 
-def _usage_server_runner(port: int) -> None:
-    """Child-process entry point running a minimal cache server."""
+def _usage_server_runner(port: int, l2_fs_path: str) -> None:
+    """Child-process entry point running a minimal cache server with one
+    filesystem L2 adapter (so per-connector L2 usage is reported)."""
     mp_config = MPServerConfig(host="localhost", port=port)
     storage_manager_config = StorageManagerConfig(
         l1_manager_config=L1ManagerConfig(
@@ -67,6 +78,9 @@ def _usage_server_runner(port: int) -> None:
             ),
         ),
         eviction_config=EvictionConfig(eviction_policy="LRU"),
+        l2_adapter_config=L2AdaptersConfig(
+            adapters=[FSL2AdapterConfig(base_path=l2_fs_path)]
+        ),
     )
     run_cache_server(
         mp_config=mp_config,
@@ -75,7 +89,7 @@ def _usage_server_runner(port: int) -> None:
     )
 
 
-def test_server_startup_emits_usage_report(monkeypatch, tmp_path):
+def test_server_emits_usage_reports(monkeypatch, tmp_path):
     sink = _UsageSink()
     sink_thread = threading.Thread(target=sink.serve_forever, daemon=True)
     sink_thread.start()
@@ -88,20 +102,39 @@ def test_server_startup_emits_usage_report(monkeypatch, tmp_path):
         "LMCACHE_USAGE_TRACK_URL", f"http://127.0.0.1:{sink.server_address[1]}"
     )
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LMCACHE_USAGE_TRACK_INTERVAL", "1")
+
+    l2_fs_path = tmp_path / "l2-fs"
+    l2_fs_path.mkdir()
 
     context = multiprocessing.get_context("spawn")
-    process = context.Process(target=_usage_server_runner, args=(SERVER_PORT,))
+    process = context.Process(
+        target=_usage_server_runner, args=(SERVER_PORT, str(l2_fs_path))
+    )
     process.start()
     try:
+        # With a short flush interval, continuous heartbeats can interleave
+        # with (or precede) the one-shot startup messages: wait for the
+        # startup message types, not a message count.
+        def received_types() -> set[object]:
+            return {payload["message_type"] for _, payload in sink.received}
+
         deadline = time.monotonic() + STARTUP_TIMEOUT_SECONDS
-        while time.monotonic() < deadline and len(sink.received) < 2:
+        while time.monotonic() < deadline and not (
+            {"EnvMessage", "MPServerMessage"} <= received_types()
+        ):
             time.sleep(0.1)
         received = list(sink.received)
-        assert len(received) == 2, f"expected 2 usage messages, got {received}"
-
-        assert {path for path, _ in received} == {"/context"}
         payloads = {payload["message_type"]: payload for _, payload in received}
-        assert set(payloads) == {"EnvMessage", "MPServerMessage"}
+        assert {"EnvMessage", "MPServerMessage"} <= set(payloads), (
+            f"startup messages missing, got {received}"
+        )
+        startup_paths = {
+            path
+            for path, payload in received
+            if payload["message_type"] in ("EnvMessage", "MPServerMessage")
+        }
+        assert startup_paths == {"/context"}
 
         mp_payload = payloads["MPServerMessage"]
         assert mp_payload["deployment_mode"] == "mp_server"
@@ -109,6 +142,76 @@ def test_server_startup_emits_usage_report(monkeypatch, tmp_path):
         assert mp_payload["l1_size_bytes"] == 1 << 30
         assert "instance_id" not in mp_payload
         assert payloads["EnvMessage"]["session_id"] == mp_payload["session_id"]
+
+        # With a 1 s flush interval the continuous reporter must deliver a
+        # heartbeat shortly after startup.
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and not any(
+            payload["message_type"] == "ContinuousContextMessage"
+            for _, payload in sink.received
+        ):
+            time.sleep(0.1)
+        continuous = [
+            (path, payload)
+            for path, payload in sink.received
+            if payload["message_type"] == "ContinuousContextMessage"
+        ]
+        assert continuous, "no ContinuousContextMessage received"
+        path, payload = continuous[0]
+        assert path == "/cache-usage"
+        assert payload["deployment_mode"] == "mp_server"
+        assert payload["sequence_number"] >= 1
+        assert payload["uptime_seconds"] >= 0
+        assert payload["session_id"] == mp_payload["session_id"]
+
+        # The configured (idle) filesystem L2 adapter makes the
+        # per-connector reporter emit one L2ConnectorUsageMessage per
+        # interval: presence and occupancy without any traffic.
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and not any(
+            payload["message_type"] == "L2ConnectorUsageMessage"
+            for _, payload in sink.received
+        ):
+            time.sleep(0.1)
+        l2_usage = [
+            (path, payload)
+            for path, payload in sink.received
+            if payload["message_type"] == "L2ConnectorUsageMessage"
+        ]
+        assert l2_usage, "no L2ConnectorUsageMessage received"
+        path, payload = l2_usage[0]
+        assert path == "/l2-usage"
+        assert payload["deployment_mode"] == "mp_server"
+        assert payload["l2_name"] == "fs"
+        assert payload["active_seconds"] > 0
+        assert payload["interval_stored_bytes"] == 0
+        assert payload["bytes_used"] == 0
+        assert payload["capacity_bytes"] == 0
+        assert payload["unbounded_adapters"] == 1
+        assert payload["sequence_number"] >= 1
+        assert payload["session_id"] == mp_payload["session_id"]
+
+        # The L1 reporter emits one L1UsageMessage per interval with the
+        # pool's live occupancy.
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and not any(
+            payload["message_type"] == "L1UsageMessage" for _, payload in sink.received
+        ):
+            time.sleep(0.1)
+        l1_usage = [
+            (path, payload)
+            for path, payload in sink.received
+            if payload["message_type"] == "L1UsageMessage"
+        ]
+        assert l1_usage, "no L1UsageMessage received"
+        path, payload = l1_usage[0]
+        assert path == "/l1-usage"
+        assert payload["deployment_mode"] == "mp_server"
+        assert payload["active_seconds"] > 0
+        assert payload["bytes_used"] >= 0
+        assert payload["capacity_bytes"] == 1 << 30
+        assert payload["sequence_number"] >= 1
+        assert payload["session_id"] == mp_payload["session_id"]
     finally:
         process.terminate()
         process.join(timeout=10)

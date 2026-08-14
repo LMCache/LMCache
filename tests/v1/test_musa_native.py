@@ -10,8 +10,11 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1.platform import torch_ops as py_ops
 from lmcache.v1.platform.musa import native_kv_transfer as musa_native
-import lmcache.python_ops_fallback as py_ops
+import lmcache.lmcache_native as lmcache_native
+
+pytestmark = pytest.mark.musa
 
 
 def _make_native_module() -> ModuleType:
@@ -57,35 +60,18 @@ def test_native_transfer_module_lives_under_musa_platform() -> None:
     assert musa_native.__name__ == "lmcache.v1.platform.musa.native_kv_transfer"
 
 
-def test_get_backend_prefers_musa_ops_over_cuda_when_musa_is_available(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Backend composition follows device detection priority when MUSA is active."""
-    # Standard
-    import os
-
+def test_musa_device_ops_overrides_multi_layer_block_kv_transfer() -> None:
+    """MusaDeviceOps overrides multi_layer_block_kv_transfer via MRO."""
     # First Party
-    from lmcache.v1.platform import _detect_device, get_backend
-    from lmcache.v1.platform.musa import ops as musa_ops
+    from lmcache.v1.platform import torch_ops
+    from lmcache.v1.platform.musa.device_ops import MusaDeviceOps
 
-    os.environ["DEVICE_TYPE"] = "musa"
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-    monkeypatch.setattr(
-        torch,
-        "musa",
-        SimpleNamespace(is_available=lambda: True),
-        raising=False,
+    assert MusaDeviceOps.device_type == "musa"
+    # The override is on the class itself, not the torch baseline.
+    assert (
+        MusaDeviceOps.multi_layer_block_kv_transfer
+        is not torch_ops.multi_layer_block_kv_transfer
     )
-
-    dev, dev_type = _detect_device()
-
-    assert dev_type == "musa"
-    backend = get_backend(dev_type)
-    assert backend is not None
-    assert backend.multi_layer_block_kv_transfer is (
-        musa_ops.multi_layer_block_kv_transfer
-    )
-    del os.environ["DEVICE_TYPE"]
 
 
 def test_native_transfer_enabled_by_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -283,10 +269,10 @@ def test_native_block_gather_uses_device_staging_for_cpu_out(
         paged_layers=paged_layers,
         object_tensors=[out],
         block_ids=[2, 4],
-        direction=py_ops.TransferDirection.D2H,
+        direction=lmcache_native.TransferDirection.D2H,
         shape_desc=_make_block_shape_desc(head_size=16),
         lmcache_chunk_size=8,
-        engine_kv_format=py_ops.EngineKVFormat.NL_X_NB_BS_HS,
+        engine_kv_format=lmcache_native.EngineKVFormat.NL_X_NB_BS_HS,
         skip_prefix_n_blocks=0,
     )
 
@@ -321,10 +307,10 @@ def test_native_block_scatter_uses_device_staging_for_cpu_chunks(
         paged_layers=paged_layers,
         object_tensors=[chunk],
         block_ids=[0, 1],
-        direction=py_ops.TransferDirection.H2D,
+        direction=lmcache_native.TransferDirection.H2D,
         shape_desc=_make_block_shape_desc(head_size=16),
         lmcache_chunk_size=8,
-        engine_kv_format=py_ops.EngineKVFormat.NL_X_NB_BS_HS,
+        engine_kv_format=lmcache_native.EngineKVFormat.NL_X_NB_BS_HS,
         skip_prefix_n_blocks=0,
     )
 
@@ -355,10 +341,10 @@ def test_native_block_scatter_uses_whole_block_skip(
         paged_layers=paged_layers,
         object_tensors=[chunk],
         block_ids=[0, 1],
-        direction=py_ops.TransferDirection.H2D,
+        direction=lmcache_native.TransferDirection.H2D,
         shape_desc=_make_block_shape_desc(head_size=16),
         lmcache_chunk_size=8,
-        engine_kv_format=py_ops.EngineKVFormat.NL_X_NB_BS_HS,
+        engine_kv_format=lmcache_native.EngineKVFormat.NL_X_NB_BS_HS,
         skip_prefix_n_blocks=1,
     )
 
@@ -386,10 +372,10 @@ def test_native_block_gather_skips_native_when_disabled(
         paged_layers=paged_layers,
         object_tensors=[torch.zeros(2, 8, 16)],
         block_ids=[0, 1],
-        direction=py_ops.TransferDirection.D2H,
+        direction=lmcache_native.TransferDirection.D2H,
         shape_desc=_make_block_shape_desc(head_size=16),
         lmcache_chunk_size=8,
-        engine_kv_format=py_ops.EngineKVFormat.NL_X_NB_BS_HS,
+        engine_kv_format=lmcache_native.EngineKVFormat.NL_X_NB_BS_HS,
         skip_prefix_n_blocks=0,
     )
 
@@ -409,10 +395,10 @@ def test_native_block_transfer_rejects_unvalidated_layout(
         paged_layers=[torch.zeros(2, 4, 2, 4, 8)],
         object_tensors=[torch.zeros(2, 2, 8, 16)],
         block_ids=[0, 1],
-        direction=py_ops.TransferDirection.H2D,
+        direction=lmcache_native.TransferDirection.H2D,
         shape_desc=_make_block_shape_desc(),
         lmcache_chunk_size=8,
-        engine_kv_format=py_ops.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS,
+        engine_kv_format=lmcache_native.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS,
         skip_prefix_n_blocks=0,
     )
 
@@ -422,9 +408,9 @@ def test_native_block_transfer_rejects_unvalidated_layout(
 def test_musa_ops_block_transfer_entry_dispatches_to_musa_platform(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """MUSA ops backend hides native dispatch behind the c_ops-compatible API."""
+    """MusaDeviceOps dispatches to native transfer when tensor-backed."""
     # First Party
-    from lmcache.v1.platform.musa import ops as musa_ops
+    from lmcache.v1.platform.musa.device_ops import MusaDeviceOps
 
     captured: dict[str, Any] = {}
 
@@ -440,15 +426,15 @@ def test_musa_ops_block_transfer_entry_dispatches_to_musa_platform(
 
     paged_layers = [torch.zeros(4, 4, 16) for _ in range(2)]
     object_tensors = [torch.zeros(2, 8, 16)]
-    musa_ops.multi_layer_block_kv_transfer(
+    MusaDeviceOps().multi_layer_block_kv_transfer(
         paged_layers,
         object_tensors,
         [0, 1],
         "musa",
-        py_ops.TransferDirection.D2H,
+        lmcache_native.TransferDirection.D2H,
         _make_block_shape_desc(head_size=16),
         8,
-        py_ops.EngineKVFormat.NL_X_NB_BS_HS,
+        lmcache_native.EngineKVFormat.NL_X_NB_BS_HS,
         0,
     )
 

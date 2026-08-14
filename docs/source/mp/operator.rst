@@ -519,6 +519,28 @@ L2 Storage
      - --
      - List of L2 backends (``type`` + ``config``).
        See :doc:`l2_storage/index`.
+   * - ``l2Backend.serde``
+     - --
+     - Optional serde transform on KV bytes to/from the L2 adapter
+       (rendered as the ``serde`` sub-dict of ``--l2-adapter``). Exactly
+       one serde type must be set. See :doc:`serde`.
+   * - ``l2Backend.serde.aesgcm``
+     - --
+     - At-rest encryption of L2 KV bytes (AES-GCM, keyed per
+       ``cache_salt``). L1 (host RAM) and L0 (GPU) remain plaintext.
+   * - ``l2Backend.serde.aesgcm.masterKeySecretRef.name``
+     - --
+     - Required. User-created Secret in the engine's namespace holding
+       the master key under the ``master`` data key; mounted read-only
+       into the engine pods at ``/etc/lmcache/keys/master``. The
+       operator never generates key material.
+   * - ``l2Backend.serde.aesgcm.keyProvider``
+     - ``hkdf``
+     - How per-``cache_salt`` keys are derived from the master key.
+       Only ``hkdf`` (HKDF-SHA256) is implemented.
+   * - ``l2Backend.serde.aesgcm.aesBits``
+     - ``128``
+     - AES key size: ``128`` or ``256``.
 
 GPU & Security
 ~~~~~~~~~~~~~~
@@ -592,6 +614,12 @@ Overrides & Extras
    * - ``volumeMounts``
      - --
      - Extra volume mounts.
+   * - ``initContainers``
+     - --
+     - Additional init containers run before the lmcache container starts,
+       in order.  Use to prepare state the engine can't create itself, e.g.
+       pre-sizing a ``raw_block`` L2 adapter's ``device_path`` file (see
+       :ref:`mp-operator-preexisting-l2-state` below).
    * - ``podAnnotations``
      - --
      - Extra pod annotations.
@@ -719,6 +747,13 @@ The operator validates the CR spec at apply time:
      - Must be in (0.0, 1.0].
    * - ``server.port``
      - Must be in [1024, 65535].
+   * - ``l2Backend.serde``
+     - Exactly one serde type must be set (only ``aesgcm`` today).
+   * - ``l2Backend.serde.aesgcm.masterKeySecretRef.name``
+     - Required, must be non-empty.
+   * - ``l2Backend.serde`` + ``l2Backend.raw``
+     - Rejected if the raw adapter config already sets a ``serde`` key
+       (one would silently overwrite the other).
 
 Examples
 --------
@@ -764,6 +799,43 @@ If the default port (5555) conflicts with other services:
 
 The connection ConfigMap updates automatically -- vLLM pods pick up the new
 port on restart.
+
+Encrypted L2 Backend
+~~~~~~~~~~~~~~~~~~~~
+
+Encrypt KV bytes at rest in the L2 tier with the ``aesgcm`` serde. Create
+the master-key Secret first, in the engine's namespace (the operator never
+generates keys):
+
+.. code-block:: bash
+
+    head -c 16 /dev/urandom > master.key   # 16 bytes for AES-128, 32 for AES-256
+    kubectl create secret generic lmcache-l2-master-key \
+        --from-file=master=master.key
+
+.. code-block:: yaml
+
+    apiVersion: lmcache.lmcache.ai/v1alpha1
+    kind: LMCacheEngine
+    metadata:
+      name: my-cache
+    spec:
+      l1:
+        sizeGB: 60
+      l2Backend:
+        raw:
+          type: fs
+          config:
+            base_path: /data/lmcache/l2
+        serde:
+          aesgcm:
+            masterKeySecretRef:
+              name: lmcache-l2-master-key
+
+The Secret is mounted directly into the engine pods (read-only, only the
+``master`` data key). A missing Secret or missing key surfaces as a pod
+mount event and self-heals once the Secret is fixed. See :doc:`serde` for
+the key model and threat model.
 
 Production with Prometheus Monitoring
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -822,6 +894,63 @@ Override Auto-Computed Resources
           cpu: "8"
         limits:
           memory: "100Gi"
+
+.. _mp-operator-preexisting-l2-state:
+
+Pre-Sizing an L2 Raw Block Device
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The ``raw_block`` L2 adapter opens its ``device_path`` file expecting it to
+already exist at the configured size -- it does not create or grow the file
+itself.  On a fresh node, that file is missing and the engine crashes with a
+``FileNotFoundError``.  Use ``initContainers`` to fallocate (or truncate) it
+before the lmcache container starts:
+
+.. code-block:: yaml
+
+    apiVersion: lmcache.lmcache.ai/v1alpha1
+    kind: LMCacheEngine
+    metadata:
+      name: my-cache
+    spec:
+      l1:
+        sizeGB: 60
+      volumes:
+        - name: kv-cache-root
+          hostPath:
+            path: /path/to/local/disk    # e.g. a mounted NVMe scratch disk
+            type: DirectoryOrCreate
+      volumeMounts:
+        - name: kv-cache-root
+          mountPath: /mnt/kv-cache-root
+      initContainers:
+        - name: preallocate-raw-block
+          image: busybox
+          command:
+            - sh
+            - -c
+            - |
+              test -f /mnt/kv-cache-root/lmcache-l2.raw || \
+                fallocate -l 10000000000 /mnt/kv-cache-root/lmcache-l2.raw || \
+                truncate -s 10000000000 /mnt/kv-cache-root/lmcache-l2.raw
+          volumeMounts:
+            - name: kv-cache-root
+              mountPath: /mnt/kv-cache-root
+      l2Backend:
+        raw:
+          type: raw_block
+          config:
+            device_path: "/mnt/kv-cache-root/lmcache-l2.raw"
+            capacity_bytes: 10000000000   # 10 GB, must match the size above
+
+.. note::
+   ``capacity_bytes`` in ``l2Backend.raw.config`` must match the size the
+   init container allocates.  The ``test -f ... ||`` guard makes the
+   fallocate idempotent -- a pod restart never truncates a file that
+   already has data, so a populated L2 cache survives engine restarts.
+   Init containers listed here run in order, before the lmcache container,
+   and share the engine's ``volumes``/``volumeMounts`` -- mount the same
+   volume in both if the init container needs to touch it.
 
 .. _mp-operator-cacheblend:
 
@@ -931,10 +1060,9 @@ not reach ``vllm serve``:
 
 The webhook injects the plugin init container, ``PYTHONPATH``, ``hostIPC``, the
 private-image pull secret, and the required CacheBlend vLLM flags
-(``--attention-backend CUSTOM``, ``--kv-transfer-config`` from the engine's
-connection ConfigMap, ``--block-size 64``, ``--pipeline-parallel-size 1``,
-``--no-enable-chunked-prefill``, ``--no-async-scheduling``, ``--enforce-eager``).
-You supply only the model and your non-CacheBlend flags.
+(``--kv-transfer-config`` from the engine's connection ConfigMap,
+``--pipeline-parallel-size 1``, ``--no-enable-chunked-prefill``,
+``--enforce-eager``).  You supply only the model and your non-CacheBlend flags.
 
 Verifying Injection
 ~~~~~~~~~~~~~~~~~~~~~
@@ -944,7 +1072,7 @@ The webhook mutates **Pods**, not the Deployment, so inspect a pod:
 .. code-block:: bash
 
     kubectl get pod -l app=vllm-cacheblend -o yaml | \
-      grep -E "initContainers|cb-plugin|PYTHONPATH|attention-backend|cacheblend-injected|skip-reason"
+      grep -E "initContainers|cb-plugin|PYTHONPATH|kv-transfer-config|cacheblend-injected|skip-reason"
 
 If nothing was injected, check the pod's ``lmcache.ai/cacheblend-skip-reason``
 annotation: ``command-override`` (a ``sh -c`` wrapper was used),
@@ -976,6 +1104,12 @@ Spec Reference above) and adds:
    * - ``blend.recompRatio``
      - ``0.15``
      - Fraction of non-prefix-hit tokens recomputed (``cb.recomp_ratio``).
+   * - ``blend.partialBucket``
+     - unset
+     - Pads PARTIAL row counts to a multiple of this bucket
+       (``cb.partial_bucket``).  Needed on fp8-MoE models, where every distinct
+       row count is a fresh M shape and the Triton autotuner re-tunes all MoE
+       layers per CB step without it.  Unset omits the key (padding disabled).
    * - ``injection.payloadImage``
      - *required*
      - The (private) cacheblend-plugin init-container image
@@ -992,7 +1126,180 @@ Spec Reference above) and adds:
      - ``eager`` | ``piecewise`` | ``full_decode_only`` (never ``full``).
 
 ``server.chunkSize`` defaults to ``256`` and must equal 256 (the blend matcher
-requires ``chunk_size == vLLM --block-size * 4``).
+requires it).
+
+.. _mp-operator-pd-disaggregation:
+
+PD Disaggregation
+-----------------
+
+The operator has first-class support for PD (Prefill-Decode) disaggregation.
+Adding a ``pd`` block to an ``LMCacheEngine`` spec switches the engine's
+connection ConfigMap to include ``MultiConnector`` configs (``NixlConnector`` +
+``LMCacheMPConnector``) alongside the standard bare connector, and tells the
+webhook to inject the NIXL side-channel environment variables into opted-in
+vLLM pods automatically.
+
+See :ref:`mp_disaggregated_prefill` for background on what PD disaggregation is
+and how the pieces fit together.
+
+.. note::
+   PD disaggregation requires NIXL in the vLLM environment (``lmcache[nixl]``
+   extra) and `vllm-project/vllm#46865
+   <https://github.com/vllm-project/vllm/pull/46865>`_ merged.
+
+How it works
+~~~~~~~~~~~~
+
+Deploy a **single** ``LMCacheEngine`` CR with a ``pd`` block.  One DaemonSet
+instance per node serves both prefiller and decoder vLLM pods.  The operator:
+
+1. **Builds a multi-key ConfigMap** -- the ``<engine>-connection`` ConfigMap
+   emits three keys so the same engine can serve all pod types:
+
+   - ``kv-transfer-config.json`` -- bare ``LMCacheMPConnector`` (fallback for
+     pods without a ``pd-role`` annotation; no NIXL).
+   - ``kv-transfer-config-prefiller.json`` -- ``MultiConnector`` with
+     ``kv_role=kv_producer``.
+   - ``kv-transfer-config-decoder.json`` -- ``MultiConnector`` with
+     ``kv_role=kv_consumer``.
+
+2. **Injects the correct config via the webhook** -- the webhook reads the
+   ``lmcache.ai/pd-role`` annotation on each vLLM pod and injects the
+   matching ConfigMap key as ``--kv-transfer-config``.
+
+3. **Injects NIXL env vars** -- opted-in PD pods receive two extra env vars:
+
+   - ``VLLM_NIXL_SIDE_CHANNEL_HOST`` -- set to the pod's own IP via the
+     downward API (``status.podIP``).
+   - ``VLLM_NIXL_SIDE_CHANNEL_PORT`` -- taken from ``spec.pd.nixlSideChannelPort``
+     (default ``5558``).  If the pod pre-sets this env var, the webhook will
+     leave it unchanged -- useful when both roles run on the same host and
+     need distinct ports (e.g. prefiller ``5557``, decoder ``5558``).
+
+PDSpec Fields
+~~~~~~~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 15 50
+
+   * - Field
+     - Default
+     - Description
+   * - ``pd.nixlSideChannelPort``
+     - ``5558``
+     - Port the NIXL agent advertises for handshake negotiation.  Injected by
+       the webhook unless the pod pre-sets ``VLLM_NIXL_SIDE_CHANNEL_PORT``.
+       When using ``hostNetwork: true``, set distinct values for prefiller and
+       decoder directly in the pod env to avoid port conflicts.
+   * - ``pd.nixlLoadFailurePolicy``
+     - ``fail``
+     - ``fail`` -- abort the request if the NIXL transfer fails.
+       ``ignore`` -- fall back to local prefill on failure.
+   * - ``pd.enforceHandshakeCompat``
+     - *(omitted)*
+     - When set to ``false``, disables strict NIXL version negotiation -- useful
+       when prefiller and decoder run different vLLM builds.  When omitted the
+       key is not sent and NIXL uses its own default.
+
+Deploying a PD Engine
+~~~~~~~~~~~~~~~~~~~~~
+
+A single ``LMCacheEngine`` handles both roles:
+
+.. code-block:: yaml
+
+    apiVersion: lmcache.lmcache.ai/v1alpha1
+    kind: LMCacheEngine
+    metadata:
+      name: lmcache-engine
+    spec:
+      l1:
+        sizeGB: 100
+      server:
+        port: 5555
+        chunkSize: 256
+      pd:
+        nixlLoadFailurePolicy: fail
+
+.. code-block:: bash
+
+    kubectl apply -f engine.yaml
+    kubectl get lmc    # wait for Running
+
+Opting vLLM Pods In
+~~~~~~~~~~~~~~~~~~~~
+
+Use the standard label + annotation pattern (see
+:ref:`mp-operator-connection-injection`), adding the ``lmcache.ai/pd-role``
+annotation to select the prefiller or decoder config:
+
+.. code-block:: yaml
+
+    # prefiller vLLM pod template
+    metadata:
+      labels:
+        lmcache.ai/lmcache-inject: "true"
+      annotations:
+        lmcache.ai/lmcache-engine: "lmcache-engine"
+        lmcache.ai/pd-role: "prefiller"
+
+    # decoder vLLM pod template
+    metadata:
+      labels:
+        lmcache.ai/lmcache-inject: "true"
+      annotations:
+        lmcache.ai/lmcache-engine: "lmcache-engine"
+        lmcache.ai/pd-role: "decoder"
+
+The webhook injects ``--kv-transfer-config`` (the role-specific MultiConnector
+JSON), ``hostIPC: true``, ``PYTHONHASHSEED=0``, ``VLLM_NIXL_SIDE_CHANNEL_HOST``,
+and ``VLLM_NIXL_SIDE_CHANNEL_PORT`` into each opted-in pod.  Do **not** mount
+the ConfigMap or add ``--kv-transfer-config`` yourself.
+
+.. note::
+   **NIXL RDMA and hostNetwork** -- NIXL's UCX backend requires valid RDMA GIDs,
+   which are derived from the host's network interfaces.  Under standard overlay
+   CNI (each pod has its own network namespace) the GID table inside the pod is
+   empty and UCX backend initialization fails.  The recommended workarounds are:
+
+   - ``hostNetwork: true`` + ``dnsPolicy: ClusterFirstWithHostNet`` (quick test).
+     With hostNetwork both roles share the host IP, so set **distinct**
+     ``VLLM_NIXL_SIDE_CHANNEL_PORT`` values per role (e.g. 5557 / 5558) in the
+     pod env before the webhook runs -- the webhook will not override a pre-set
+     value.
+   - SR-IOV with Multus (production): assign each pod a dedicated VF with its
+     own GID, no ``hostNetwork`` required.
+
+Pods without a ``lmcache.ai/pd-role`` annotation that are bound to a PD engine
+fall back to the bare ``LMCacheMPConnector`` config (no NIXL) -- they still
+benefit from the LMCache KV cache without participating in disaggregation.
+
+Router
+~~~~~~
+
+The ``vllm-router`` is **not** managed by the operator.  Deploy it as a plain
+Kubernetes ``Deployment`` pointing at the prefiller and decoder vLLM Services:
+
+.. code-block:: bash
+
+    vllm-router \
+        --policy round_robin \
+        --vllm-pd-disaggregation \
+        --prefill http://pd-prefiller.<namespace>.svc.cluster.local:8001 \
+        --decode  http://pd-decoder.<namespace>.svc.cluster.local:8002 \
+        --host 0.0.0.0 --port 30000
+
+A ready-to-edit manifest is at
+``operator/config/samples/vllm_pd_disaggregation.yaml``.
+
+.. note::
+   Name your prefiller and decoder vLLM Services with a prefix other than
+   ``vllm-`` (e.g., ``pd-prefiller``, ``pd-decoder``).  Kubernetes injects
+   ``<SERVICE_NAME>_*`` env vars into every pod in the namespace; a ``vllm-``
+   prefix generates ``VLLM_*`` vars that vLLM's env-var validator flags as
+   unknown.
 
 LMCacheCoordinator
 ------------------
