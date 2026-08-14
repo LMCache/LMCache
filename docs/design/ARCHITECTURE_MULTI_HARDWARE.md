@@ -28,7 +28,7 @@ multiprocess (MP) mode.
 │  [DeviceOps Resolution]                                         │
 │  DeviceSpec.ops_cls → DeviceOps subclass (e.g. CudaDeviceOps)  │
 │  DeviceSpec.get_ops() → cached singleton instance               │
-│  lmcache.c_ops shim → resolve_device_ops(device_type)           │
+│  lmcache.device_ops = resolve_device_ops(device_type)           │
 └──────────────────────────────┬──────────────────────────────────┘
                                │
               ┌────────────────┼──────────────────┐
@@ -95,7 +95,7 @@ multiprocess (MP) mode.
 | **Entry** `v1/platform/__init__.py` | `_detect_device()` + `resolve_device_ops()` | Registry-driven detection and DeviceOps resolution. |
 | **Entry** DeviceOps | `DeviceSpec.ops_cls` → `DeviceSpec.get_ops()` | OOP polymorphism: each accelerator subclasses `DeviceOps` with native ops. |
 | **Middle** engine / storage / multiprocess | `from lmcache import torch_dev` | Hardware-agnostic unified code |
-| **Middle** ops call sites | `import lmcache.c_ops as lmc_ops` | The `c_ops` shim proxies to the resolved `DeviceOps` singleton. |
+| **Middle** ops call sites | `from lmcache import device_ops` | Direct reference to the resolved `DeviceOps` singleton. |
 | **Middle** IPC-capable / device-specific APIs | `hasattr(torch_dev, 'xxx')` guard | Graceful runtime degradation |
 | **Bottom** Transfer Context | `create_transfer_context(kv_caches, mode)` | Per-device routing. In `AUTO` mode: CUDA→LMCacheDriven, other devices→EngineDriven. Other IPC-capable devices (e.g. MUSA) can opt-in to LMCacheDriven via explicit `mode=lmcache_driven` when their `DeviceSpec` reports `is_handle_transfer_available() == True`. |
 | **Bottom** Cache Context | `DeviceSpec.create_cache_context()` | Per-device cache context factory dispatched via `DeviceSpec` registry. |
@@ -104,10 +104,9 @@ multiprocess (MP) mode.
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
-│                   lmcache.c_ops (shim module)                  │
+│              lmcache.device_ops (DeviceOps instance)          │
 │                                                                │
-│  Attribute access proxies to:                                  │
-│    resolve_device_ops(torch_device_type) → DeviceOps instance  │
+│  resolve_device_ops(torch_device_type) returns this singleton  │
 └────────────────────────────────┬───────────────────────────────┘
                                  │
                                  ▼
@@ -134,7 +133,8 @@ multiprocess (MP) mode.
          │ensure_ ││ensure_ ││ensure_ ││(no     ││(no     │
          │native: ││native: ││native: ││native) ││native) │
          │lmcache ││lmcache ││method  ││        ││        │
-         │.c_ops  ││.xpu_ops││override││        ││        │
+         │.cuda_  ││.xpu_ops││override││        ││        │
+         │ops     ││        ││        ││        ││        │
          │(pybind)││(SYCL)  ││        ││        ││        │
          └────────┘└────────┘└────────┘└────────┘└────────┘
 ```
@@ -148,7 +148,7 @@ multiprocess (MP) mode.
   rebinds them on the instance, replacing torch baseline ops with compiled implementations
   or adding native-only symbols that have no pure-Python equivalent
   (e.g. `execute_object_group_transfer`). Consumers feature-detect with
-  `hasattr(lmc_ops, "op_name")`.
+  `hasattr(device_ops, "op_name")`.
 - `ops_types.py` defines shared enums, descriptors, and native plan type stubs.
 
 ## Transfer Mode Routing (`transfer_context/worker_transfer.py`)

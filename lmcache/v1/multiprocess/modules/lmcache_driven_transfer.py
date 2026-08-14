@@ -4,7 +4,7 @@
 # Standard
 from dataclasses import dataclass
 from itertools import islice
-from typing import Generator, Sequence
+from typing import Any, Generator, Sequence
 import threading
 import time
 
@@ -12,7 +12,7 @@ import time
 import torch
 
 # First Party
-from lmcache import torch_dev
+from lmcache import device_ops, torch_dev
 from lmcache.logging import init_logger
 from lmcache.utils import (
     EngineType,
@@ -54,12 +54,11 @@ from lmcache.v1.platform.base.event_ipc import (
     get_event_ipc_backend,
 )
 from lmcache.v1.platform.cache_context import create_cache_context
-import lmcache.c_ops as lmc_ops
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
 _HAS_NATIVE_OBJECT_GROUP_TRANSFER: bool = hasattr(
-    lmc_ops, "execute_object_group_transfer"
+    device_ops, "execute_object_group_transfer"
 )
 
 
@@ -324,7 +323,7 @@ def _run_object_group_transfer_plan(
     max_batch_size = cache_context.max_batch_size
 
     # --- Per-kernel-group invariants, resolved once (vs. every batch before) ---
-    kernel_group_specs: list["lmc_ops.KernelGroupSpec"] = []
+    kernel_group_specs: list[Any] = []
     spec_index_by_kg: dict[int, int] = {}
     blocks_per_chunk_by_kg: dict[int, int] = {}
     blocks_per_window_by_kg: dict[int, int] = {}
@@ -351,7 +350,7 @@ def _run_object_group_transfer_plan(
 
         spec_index_by_kg[kernel_group_id] = len(kernel_group_specs)
         kernel_group_specs.append(
-            lmc_ops.KernelGroupSpec(
+            device_ops.KernelGroupSpec(
                 paged_ptrs.data_ptr(),
                 [buffer.data_ptr() for buffer in temp_buffers],
                 cache_context.get_shape_desc(kernel_group_id),
@@ -381,7 +380,7 @@ def _run_object_group_transfer_plan(
         )
 
     # --- Walk the batches in order, emitting staging + launch work per step ---
-    batch_steps: list["lmc_ops.BatchStep"] = []
+    batch_steps: list[Any] = []
     for start_object_idx, memory_object_batch in batched_iteration_with_skip(
         memory_objs, batch_size, skip_count=num_objects_to_skip
     ):
@@ -411,7 +410,7 @@ def _run_object_group_transfer_plan(
             is_h2d,
         )
 
-        launches: list["lmc_ops.LaunchVar"] = []
+        launches: list[Any] = []
         for kernel_group_id in kernel_group_ids:
             blocks_per_chunk = blocks_per_chunk_by_kg[kernel_group_id]
             blocks_per_window = blocks_per_window_by_kg[kernel_group_id]
@@ -429,7 +428,7 @@ def _run_object_group_transfer_plan(
             )
 
             launches.append(
-                lmc_ops.LaunchVar(
+                device_ops.LaunchVar(
                     spec_index_by_kg[kernel_group_id],
                     start_block_pos,
                     end_block_pos - start_block_pos,
@@ -438,12 +437,13 @@ def _run_object_group_transfer_plan(
                 )
             )
 
-        batch_steps.append(lmc_ops.BatchStep(staging, launches))
+        batch_steps.append(device_ops.BatchStep(staging, launches))
 
     if not batch_steps:
         return
 
-    lmc_ops.execute_object_group_transfer(
+    execute_object_group_transfer = device_ops.execute_object_group_transfer
+    execute_object_group_transfer(
         direction,
         cache_context.device,
         LazyMemoryAllocator.PIN_CHUNK_SIZE,
@@ -596,7 +596,7 @@ def transfer_kv_per_object_group(
                 ).data_ptr()
                 for i in range(batch_len)
             ]
-            lmc_ops.multi_layer_block_kv_transfer(
+            device_ops.multi_layer_block_kv_transfer(
                 group_kv_pointers,
                 tmp_gpu_buffers_batched,
                 block_ids_curr_batch,

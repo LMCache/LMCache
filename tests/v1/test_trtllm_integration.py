@@ -27,10 +27,10 @@ pytestmark = [
 ]
 
 
-def _has_lmc_ops() -> bool:
+def _has_cuda_ops() -> bool:
     try:
         # First Party
-        import lmcache.c_ops  # noqa: F401
+        import lmcache.cuda_ops  # noqa: F401
 
         return True
     except ImportError:
@@ -78,7 +78,7 @@ class TestAssertContiguous:
             assert_contiguous(view)
 
 
-@pytest.mark.skipif(not _has_lmc_ops(), reason="lmcache C ops not built")
+@pytest.mark.skipif(not _has_cuda_ops(), reason="lmcache C ops not built")
 class TestGPUKVFormatEnum:
     def test_nb_nl_two_nh_bs_hs_exists(self) -> None:
         # First Party
@@ -86,7 +86,7 @@ class TestGPUKVFormatEnum:
         assert hasattr(lmcache_native.EngineKVFormat, "NB_NL_TWO_NH_BS_HS")
 
 
-@pytest.mark.skipif(not _has_lmc_ops(), reason="lmcache C ops not built")
+@pytest.mark.skipif(not _has_cuda_ops(), reason="lmcache C ops not built")
 class TestNormalizeTRTLLM:
     """``normalize_kv_and_discover_format`` for ``EngineType.TRTLLM``."""
 
@@ -167,7 +167,7 @@ class TestNormalizeTRTLLM:
             )
 
 
-@pytest.mark.skipif(not _has_lmc_ops(), reason="lmcache C ops not built")
+@pytest.mark.skipif(not _has_cuda_ops(), reason="lmcache C ops not built")
 class TestAccessorsTRTLLM:
     """Format accessors for ``NB_NL_TWO_NH_BS_HS``."""
 
@@ -275,7 +275,7 @@ class TestAccessorsTRTLLM:
 
 
 @pytest.mark.skipif(not _has_cuda(), reason="CUDA required for connector init")
-@pytest.mark.skipif(not _has_lmc_ops(), reason="lmcache C ops not built")
+@pytest.mark.skipif(not _has_cuda_ops(), reason="lmcache C ops not built")
 class TestTRTLLMGPUConnector:
     def test_construct(self) -> None:
         # First Party

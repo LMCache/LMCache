@@ -49,15 +49,6 @@ class MPCoordinatorConfig:
             no content.
         blend_probe_stride: Positions between match probes; ``1`` gives full
             recall. Ignored unless ``enable_blend_lookup`` is set.
-        enable_startup_resync: When ``True``, run a one-shot L2 resync
-            on startup to backfill trackers from an MP server's
-            ``GET /cache/objects``.
-        resync_poll_interval: Seconds between registry checks while
-            waiting for the first MP server to register.
-        resync_max_wait: Maximum seconds startup resync waits for an MP
-            server before giving up.
-        resync_page_size: ``page_size`` forwarded to ``GET /cache/objects``
-            during resync.
         timeout_keep_alive: Seconds the HTTP server keeps idle connections
             open before closing them. Must be greater than the heartbeat
             interval of MP servers to avoid race-condition disconnects.
@@ -74,10 +65,6 @@ class MPCoordinatorConfig:
     hash_algorithm: str = "blake3"
     enable_blend_lookup: bool = False
     blend_probe_stride: int = 1
-    enable_startup_resync: bool = True
-    resync_poll_interval: float = 1.0
-    resync_max_wait: float = 60.0
-    resync_page_size: int = 1000
     timeout_keep_alive: int = 10
 
     def __post_init__(self) -> None:
@@ -98,12 +85,6 @@ class MPCoordinatorConfig:
             raise ValueError(
                 "trigger_watermark must be between 0.0 (exclusive) and 1.0"
             )
-        if self.resync_poll_interval <= 0:
-            raise ValueError("resync_poll_interval must be positive")
-        if self.resync_max_wait < 0:
-            raise ValueError("resync_max_wait must be non-negative")
-        if self.resync_page_size <= 0:
-            raise ValueError("resync_page_size must be positive")
         if self.chunk_size < 1:
             raise ValueError("chunk_size must be positive")
         if not self.hash_algorithm:
@@ -162,14 +143,6 @@ class MPCoordinatorConfig:
             blend_probe_stride=int(
                 _num("BLEND_PROBE_STRIDE", cls.blend_probe_stride, int)
             ),
-            enable_startup_resync=_bool(
-                "ENABLE_STARTUP_RESYNC", cls.enable_startup_resync
-            ),
-            resync_poll_interval=_num(
-                "RESYNC_POLL_INTERVAL", cls.resync_poll_interval, float
-            ),
-            resync_max_wait=_num("RESYNC_MAX_WAIT", cls.resync_max_wait, float),
-            resync_page_size=int(_num("RESYNC_PAGE_SIZE", cls.resync_page_size, int)),
             timeout_keep_alive=int(
                 _num("TIMEOUT_KEEP_ALIVE", cls.timeout_keep_alive, int)
             ),
