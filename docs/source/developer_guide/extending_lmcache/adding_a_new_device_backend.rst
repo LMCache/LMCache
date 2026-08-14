@@ -24,6 +24,16 @@ torch baseline ops layer (``lmcache/v1/platform/torch_ops.py``) that
 works on any device supporting standard PyTorch tensor operations —
 **no custom kernels required**.
 
+**CUDA-compatible accelerators.** If the device already exposes
+``torch.cuda`` (for example Iluvatar CoreX), do **not** add a new
+``device_type`` / ``DeviceSpec``.  Keep ``CudaDeviceSpec`` so MP
+``AUTO`` still routes to LMCacheDriven.  Build ``lmcache.cuda_ops``
+with ``BUILD_WITH_ILUVATAR=1`` (injects ``USE_ILUVATAR``, same pattern
+as ``USE_ROCM``).  Vendor checks use
+:func:`lmcache.v1.platform.cuda.is_iluvatar_device`.  See
+``docs/design/ARCHITECTURE_MULTI_HARDWARE.md`` section
+"CUDA-compatible vendors (Iluvatar)".
+
 Prerequisites
 ~~~~~~~~~~~~~
 

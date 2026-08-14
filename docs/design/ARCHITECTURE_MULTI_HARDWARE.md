@@ -232,3 +232,23 @@ which is wrong for that backend's actual KV cache layout.
 No edits to ``lmcache/__init__.py`` or global backend candidate lists
 are required. Users can set ``DEVICE_TYPE=<device_type>`` at runtime to
 force selection of a registered device when multiple are available.
+
+## CUDA-compatible vendors (Iluvatar)
+
+Some accelerators are **CUDA-API compatible** (`torch.cuda`, same MP AUTO
+routing to LMCacheDriven) and must **not** introduce a new
+`device_type` / `DeviceSpec` identity.  Iluvatar CoreX is the first
+documented case.
+
+| Layer | Behavior |
+|-------|----------|
+| Runtime | `torch_device_type == "cuda"` → existing `CudaDeviceSpec`, `lmcache.cuda_ops` |
+| Vendor / model | `torch.cuda.get_device_name()` contains `"Iluvatar"` (e.g. `Iluvatar BI-V150`); helper `lmcache.v1.platform.cuda.is_iluvatar_device` |
+| Build | `setup_extensions/build_profiles/iluvatar.py` (`BUILD_WITH_ILUVATAR=1`); injects `USE_ILUVATAR` (same pattern as ROCm's `USE_ROCM`) |
+| Kernels | Skip NVIDIA-only `#include <cuda_fp8.h>` and PTX `ld/st.global.cs` under `USE_ILUVATAR` |
+| Contrast with MUSA | MUSA adds a **new** `device_type="musa"` / `MusaDeviceSpec`.  Do not copy that path for CUDA-compatible vendors. |
+
+Headless / CI builds without a CoreX GPU should set `BUILD_WITH_ILUVATAR=1`
+explicitly.  Auto-detect requires `nvcc` **and** an Iluvatar device name;
+`CudaProfile.detect()` stays `nvcc`-only, and `BuildPolicy` prefers a
+non-`cuda` profile when multiple profiles match.

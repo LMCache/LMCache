@@ -19,13 +19,45 @@ if TYPE_CHECKING:
     from lmcache.v1.platform.base.event_ipc import EventIPCBackend
     from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
 
+
+def is_iluvatar_device(device_index: int | None = None) -> bool:
+    """Return True when ``torch.cuda.get_device_name`` contains ``Iluvatar``.
+
+    CoreX reports names like ``Iluvatar BI-V150``.  Matching is
+    case-sensitive.  This does **not** change ``torch_device_type``;
+    callers stay on the CUDA ``DeviceSpec`` path.
+
+    Args:
+        device_index: CUDA ordinal.  When ``None``, uses the current device.
+
+    Returns:
+        True on Iluvatar CoreX, False when CUDA is unavailable, the name
+        does not contain ``Iluvatar``, or the query fails.
+    """
+    try:
+        # Third Party
+        import torch
+
+        if not torch.cuda.is_available():
+            return False
+        index = torch.cuda.current_device() if device_index is None else device_index
+        return "Iluvatar" in torch.cuda.get_device_name(index)
+    except Exception:
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Device detection registry entry
 # ---------------------------------------------------------------------------
 
 
 class CudaDeviceSpec(DeviceSpec):
-    """CUDA device specification for the detection registry."""
+    """CUDA device specification for the detection registry.
+
+    CUDA-compatible vendors such as Iluvatar CoreX also use this spec:
+    ``device_type`` / ``torch_module_name`` remain ``"cuda"``.  Use
+    :func:`is_iluvatar_device` for vendor/model checks.
+    """
 
     _event_backend_cache: "EventIPCBackend | None" = None
 

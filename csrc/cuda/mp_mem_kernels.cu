@@ -149,8 +149,9 @@ __device__ inline size_t calculate_lmcache_local_offset(
   return head_idx * scalars_per_head + token_offset * scalars_per_token;
 }
 
+// USE_ILUVATAR: CoreX rejects PTX ld/st.global.cs; use plain uint4 I/O.
 __device__ inline uint4 ld_cs(const uint4* addr) {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) && !defined(USE_ILUVATAR)
   uint4 val;
   asm volatile("ld.global.cs.v4.u32 {%0, %1, %2, %3}, [%4];"
                : "=r"(val.x), "=r"(val.y), "=r"(val.z), "=r"(val.w)
@@ -162,7 +163,7 @@ __device__ inline uint4 ld_cs(const uint4* addr) {
 }
 
 __device__ inline void st_cs(uint4* addr, uint4 val) {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) && !defined(USE_ILUVATAR)
   asm volatile("st.global.cs.v4.u32 [%0], {%1, %2, %3, %4};"
                :
                : "l"(addr), "r"(val.x), "r"(val.y), "r"(val.z), "r"(val.w));
