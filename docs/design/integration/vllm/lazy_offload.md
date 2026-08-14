@@ -415,52 +415,69 @@ if self._pending_store_queue.should_offload:
 
 ### 2.4 Threshold Trigger Mechanism
 
-The threshold determines when buffered stores are flushed:
+The threshold determines when buffered stores are flushed. The
+current implementation counts **finished requests** waiting in the
+pending queue rather than a ratio of GPU blocks — buffering only
+graduates to an offload once whole requests have accumulated, which
+matches how the FIFO policy drains items request-by-request:
 
 ```
-threshold_ratio = configured percentage (e.g. 0.8)
-threshold_blocks = total_gpu_blocks * threshold_ratio
+threshold = configured number of finished requests (default 100)
 
 Trigger condition:
-    sum(num_gpu_blocks for all entries in queue) >= threshold_blocks
+    number of finished requests in the pending queue >= threshold
 ```
 
-When triggered, the queue is drained (partially or fully) and the
-resulting store ops are emitted in the connector metadata for the worker
-to execute.
+When triggered, the queue is drained (up to a per-call cap, see
+Section 2.5) and the resulting store ops are emitted in the connector
+metadata for the worker to execute.
 
-Configuration:
+Configuration (``kv_connector_extra_config`` keys read by
+``LMCacheMPConnector`` and ``LazyOffloadPendingStore``):
+
 ```
-lmcache.mp.lazy_offload = true/false          (default: false)
-lmcache.mp.lazy_offload_threshold = 0.8       (trigger when 80% of GPU blocks are buffered)
-lmcache.mp.lazy_offload_drain_ratio = 0.5     (drain 50% of queue when triggered)
+lmcache.mp.lazy_offload          = true/false   (default: false)
+lmcache.mp.lazy_offload_policy   = "FIFO"       (default: "FIFO"; only
+                                                policy currently registered)
+lmcache.mp.lazy_offload_threshold      = int    (default: 100; number of
+                                                finished requests that
+                                                trigger an offload under the
+                                                FIFO policy)
+lmcache.mp.lazy_offload_select_count   = int    (default: 10; maximum
+                                                number of finished pending
+                                                items popped per drain)
 ```
 
 ### 2.5 Drain Strategy
 
 When the threshold is reached, not all entries need to be drained at
-once. Options:
+once. Possible policies:
 
 - **FIFO drain**: Drain the oldest entries first (they hold the oldest
-  GPU blocks, most likely to be evicted soon).
-- **Partial drain**: Drain a fixed ratio (e.g. 50%) of the queue to
-  bring the buffered block count below the threshold.
+  GPU blocks, most likely to be evicted soon). **This is the only
+  policy currently implemented** (``FIFOOffloadPolicy`` under
+  ``lmcache/integration/vllm/lazy_offload_policy/fifo.py``).
 - **Priority drain**: Drain entries with the longest prefix first (higher
-  reuse probability).
+  reuse probability). Not implemented yet.
 
-FIFO with partial drain is the simplest and most predictable:
+The implemented FIFO policy pops up to ``lazy_offload_select_count``
+finished pending items in insertion order, and only once at least
+``lazy_offload_threshold`` finished requests have accumulated:
 
 ```python
-def drain(self, target_ratio: float = 0.5) -> list[PendingStoreEntry]:
-    target_blocks = int(self._total_buffered_blocks * target_ratio)
-    drained = []
-    drained_blocks = 0
-    while self._queue and drained_blocks < target_blocks:
-        entry = self._queue.popleft()
-        drained.append(entry)
-        drained_blocks += entry.num_gpu_blocks
-    self._total_buffered_blocks -= drained_blocks
-    return drained
+def pop_items_for_offload(self, count: int) -> list[PendingStoreItem]:
+    if count <= 0 or self._finished_requests_count < self._threshold:
+        return []
+
+    to_offload = []
+    for req_id in list(self._pending_items.keys()):
+        if self._pending_items[req_id].is_finished:
+            to_offload.append(self._pending_items[req_id])
+            del self._pending_items[req_id]
+            self._finished_requests_count -= 1
+        if len(to_offload) >= count:
+            break
+    return to_offload
 ```
 
 ### 2.6 GPU Block Protection: Touch and Free
