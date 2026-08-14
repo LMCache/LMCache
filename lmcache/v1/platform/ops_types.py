@@ -11,17 +11,11 @@ module keeps placeholder stubs for those names.
 # Future
 from __future__ import annotations
 
-# Standard
-from typing import TYPE_CHECKING
+# First Party
+import lmcache.lmcache_native as _native
 
-if TYPE_CHECKING:
-    # First Party
-    from lmcache.lmcache_native import KernelGroupSpec as KernelGroupSpec
-    from lmcache.lmcache_native import PageBufferShapeDesc as PageBufferShapeDesc
-else:
-    # First Party
-    from lmcache.lmcache_native import KernelGroupSpec as KernelGroupSpec
-    from lmcache.lmcache_native import PageBufferShapeDesc as PageBufferShapeDesc
+PageBufferShapeDesc = _native.PageBufferShapeDesc
+KernelGroupSpec = _native.KernelGroupSpec
 
 
 class _NativePlanType:
@@ -51,3 +45,12 @@ class LaunchVar(_NativePlanType):
 
 class BatchStep(_NativePlanType):
     """Fallback stub for the native ``BatchStep`` plan type."""
+
+
+__all__ = [
+    "PageBufferShapeDesc",
+    "KernelGroupSpec",
+    "StagingCopy",
+    "LaunchVar",
+    "BatchStep",
+]
