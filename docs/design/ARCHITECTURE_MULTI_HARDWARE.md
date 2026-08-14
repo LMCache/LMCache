@@ -20,8 +20,9 @@ multiprocess (MP) mode.
 │                                 "hpu"/"cpu"; auto-discoverable) │
 │                                                                 │
 │  [Registry Discovery Point]                                     │
-│  DeviceSpec subclasses are auto-discovered under                │
-│  lmcache.v1.platform and selected by availability.              │
+│  Built-in DeviceSpecs are discovered under lmcache.v1.platform; │
+│  wheel plugins use the lmcache.device_plugins entry-point group.│
+│  Both sources share one registry and availability selection.    │
 │  The DEVICE_TYPE env var forces the detector to prefer one      │
 │  registered device_type when multiple are available.            │
 │                                                                 │
@@ -216,19 +217,17 @@ which is wrong for that backend's actual KV cache layout.
 
 ## Adding New Hardware
 
-1. Add a ``DeviceSpec`` subclass under
-   ``lmcache/v1/platform/<device>/__init__.py``.  Override ``ops_cls``
-   to return your ``DeviceOps`` subclass (or inherit the base which
-   returns ``DeviceOps`` itself for pure torch baseline).
-2. Add a ``DeviceOps`` subclass under
-   ``lmcache/v1/platform/<device>/device_ops.py``.  Override
-   ``ensure_native()`` to bind your compiled extension (or leave it
-   empty for pure torch baseline).
-3. Verify with MP ``engine_driven`` mode (see the :doc:`developer guide
-   <../source/developer_guide/extending_lmcache/adding_a_new_device_backend>`).
-4. (Optional) Add ``ipc_wrapper_cls`` and ``create_cache_context()``
-   overrides on your ``DeviceSpec`` for LMCache-driven transfer.
+1. Create an independent Python project with a ``DeviceSpec`` subclass and,
+   when needed, a ``DeviceOps`` subclass.
+2. Publish the ``DeviceSpec`` class through the
+   ``lmcache.device_plugins`` entry-point group and build a wheel.
+3. Install the wheel beside LMCache and verify with MP ``engine_driven`` mode
+   (see the [developer guide](../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst)).
+4. Optionally add ``ipc_wrapper_cls``, ``event_ipc_backend``, and
+   ``create_cache_context()`` implementations for LMCache-driven transfer.
 
-No edits to ``lmcache/__init__.py`` or global backend candidate lists
-are required. Users can set ``DEVICE_TYPE=<device_type>`` at runtime to
-force selection of a registered device when multiple are available.
+No LMCache repository change is required. Users can set
+``DEVICE_TYPE=<device_type>`` at runtime to force selection when multiple
+devices are available. See the
+[external device plugin design](v1/platform/device-plugin-architecture.md)
+for the package contract, conflict policy, and failure behavior.

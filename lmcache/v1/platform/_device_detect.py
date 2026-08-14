@@ -9,14 +9,17 @@ import cycle -- ``platform/__init__.py`` itself pulls in
 that ``torch_ops`` needs from the platform package must live *outside*
 that init chain.
 
-The registry of :class:`DeviceSpec` subclasses and the detected torch
-device module are both built lazily on first access and then cached
-process-wide.
+The registry combines the :class:`DeviceSpec` subclasses shipped with
+LMCache and external subclasses published through the
+``lmcache.device_plugins`` Python entry-point group.  The registry and the
+detected torch device module are both built lazily on first access and then
+cached process-wide.
 """
 
 # Standard
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any
+import importlib.metadata
 import os
 
 # First Party
@@ -28,26 +31,85 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+DEVICE_PLUGIN_ENTRY_POINT_GROUP = "lmcache.device_plugins"
+
 
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
 
 
+def _load_external_device_specs() -> "list[DeviceSpec]":
+    """Load external device specifications from Python entry points.
+
+    Each entry point must use its device type as its name and resolve to a
+    concrete :class:`DeviceSpec` subclass with a no-argument constructor.
+    Invalid or broken plugins are skipped so that an unrelated installed
+    package cannot prevent LMCache from starting.
+
+    Returns:
+        Device specifications loaded successfully from installed plugins.
+    """
+    # First Party
+    from lmcache.v1.platform.base.device_spec import DeviceSpec
+
+    specs: list[DeviceSpec] = []
+    entry_points = importlib.metadata.entry_points(
+        group=DEVICE_PLUGIN_ENTRY_POINT_GROUP
+    )
+    for entry_point in sorted(entry_points, key=lambda item: (item.name, item.value)):
+        try:
+            spec_cls = entry_point.load()
+            if (
+                not isinstance(spec_cls, type)
+                or spec_cls is DeviceSpec
+                or not issubclass(spec_cls, DeviceSpec)
+            ):
+                raise TypeError("entry point must resolve to a DeviceSpec subclass")
+
+            spec = spec_cls()
+            if not isinstance(spec, DeviceSpec):
+                raise TypeError("entry point must construct a DeviceSpec instance")
+            device_type = spec.device_type
+            if (
+                not isinstance(device_type, str)
+                or not device_type
+                or device_type != device_type.lower()
+            ):
+                raise ValueError("device_type must be a non-empty lowercase string")
+            if device_type != entry_point.name:
+                raise ValueError(
+                    "entry-point name must match DeviceSpec.device_type "
+                    f"({entry_point.name!r} != {device_type!r})"
+                )
+        except Exception as exc:
+            logger.warning(
+                "Failed to load LMCache device plugin %r (%s): %s",
+                entry_point.name,
+                entry_point.value,
+                exc,
+            )
+            continue
+        specs.append(spec)
+    return specs
+
+
 @lru_cache(maxsize=1)
 def _build_device_registry() -> "dict[str, DeviceSpec]":
-    """Discover and instantiate every :class:`DeviceSpec` subclass.
+    """Discover and instantiate built-in and external device specifications.
 
     Discovery is deferred until first use so importing this module
-    stays cheap and side-effect free.
+    stays cheap and side-effect free. Built-in specifications win name
+    collisions; this prevents an installed wheel from replacing LMCache's
+    implementation for an existing device type.
     """
     # First Party
     from lmcache.v1.platform.base.device_spec import DeviceSpec
     from lmcache.v1.utils.subclass_discovery import discover_subclasses
 
-    return {
+    registry = {
         spec.device_type: spec
-        for spec in [
+        for spec in (
             cls()
             for cls in discover_subclasses(
                 "lmcache.v1.platform",
@@ -56,8 +118,18 @@ def _build_device_registry() -> "dict[str, DeviceSpec]":
                 require_defined_in_module=True,
                 on_import_error=lambda name, exc: None,
             )
-        ]
+        )
     }
+    for spec in _load_external_device_specs():
+        if spec.device_type in registry:
+            logger.warning(
+                "Ignoring LMCache device plugin for %r because that device "
+                "type is already registered",
+                spec.device_type,
+            )
+            continue
+        registry[spec.device_type] = spec
+    return registry
 
 
 def _detect_device() -> tuple[Any, str]:
@@ -149,7 +221,7 @@ def current_device_spec() -> "DeviceSpec":
     """Return the :class:`DeviceSpec` for the detected device.
 
     Falls back to a bare ``DeviceSpec()`` (no-op / all False semantics)
-    when no accelerator sub-package matches.
+    when no registered accelerator backend matches.
     """
     # First Party
     from lmcache.v1.platform.base.device_spec import DeviceSpec
