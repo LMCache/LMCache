@@ -119,6 +119,13 @@ Install LMCache
                             host image at runtime. Match the wheel's torch and oneAPI versions to the
                             container; for other bases, use the **From Source** tab.
 
+                        .. note::
+
+                            The XPU wheel carries a ``+xpu`` PEP 440 local version, so
+                            ``pip show lmcache`` reports which build is installed and the XPU
+                            build can be requested explicitly. A bare ``lmcache==${VERSION}``
+                            also resolves it, since ``==`` ignores the local segment.
+
             .. tab-item:: Nightly
 
                 Nightly wheels are built from the latest ``dev`` branch each day at 07:30 UTC
