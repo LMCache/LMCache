@@ -11,6 +11,7 @@ The real ctypes ABI and end-to-end DMA path are covered by the opt-in
 """
 
 # Standard
+from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any
 import ctypes
@@ -35,6 +36,14 @@ def _err(code: int = 5001, cuda_code: int = 0) -> ua._uGDSError_t:
 
 class _FakeLib:
     """Stand-in for ``libugds.so`` that records all symbol calls."""
+
+    uGDSDriverOpen: Callable[..., ua._uGDSError_t]
+    uGDSDriverClose: Callable[..., ua._uGDSError_t]
+    uGDSHandleRegister: Callable[..., ua._uGDSError_t]
+    uGDSBufRegister: Callable[..., ua._uGDSError_t]
+    uGDSStreamRegister: Callable[..., ua._uGDSError_t]
+    uGDSReadAsync: Callable[..., ua._uGDSError_t]
+    uGDSWriteAsync: Callable[..., ua._uGDSError_t]
 
     def __init__(self) -> None:
         self.calls: dict[str, list[tuple[Any, ...]]] = {}

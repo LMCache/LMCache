@@ -84,9 +84,7 @@ def _validate_backend_platform(selected: str) -> None:
     elif selected == "cufile" and torch.version.cuda is None:
         raise ValueError(f"{selected} requires a CUDA PyTorch build")
     elif (
-        selected == "ugds"
-        and torch.version.hip is None
-        and torch.version.cuda is None
+        selected == "ugds" and torch.version.hip is None and torch.version.cuda is None
     ):
         raise ValueError(f"{selected} requires a ROCm or CUDA PyTorch build")
 

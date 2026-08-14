@@ -356,12 +356,12 @@ class TestUgdsInitialization:
             def close(self):
                 return None
 
+        def register_handle(fd: int) -> int:
+            registered_fds.append(fd)
+            return 0xBEEF
+
         monkeypatch.setattr(ca, "select_backend", lambda name: "ugds")
-        monkeypatch.setattr(
-            ca,
-            "register_handle",
-            lambda fd: registered_fds.append(fd) or 0xBEEF,
-        )
+        monkeypatch.setattr(ca, "register_handle", register_handle)
         monkeypatch.setattr(ca, "AsyncHandle", FakeAsyncHandle)
         monkeypatch.setattr(
             gds_context.logger,
