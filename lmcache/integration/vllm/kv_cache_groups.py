@@ -157,9 +157,27 @@ def create_engine_group_infos_from_vllm(
         else ()
     )
 
+    # CacheBlend-on-GDN (gated): serve only full-attention groups; GDN/Mamba
+    # groups' layers then fall through to EXCLUDED_ENGINE_GROUP below.
+    # First Party
+    from lmcache.integration.vllm.kv_cache_group_edits import cb_skip_mamba_groups
+
+    vllm_groups = cb_skip_mamba_groups(vllm_groups)
+
     layer_index_groups = [
         [layer_to_idx[name] for name in group.layer_names] for group in vllm_groups
     ]
+
+    # CacheBlend fused-aux (presence-gated): a connector-owned aux page pool
+    # registers under a reserved layer name (block size in the suffix; see
+    # cb_aux_pool_entries). It joins detection as its own group here so its
+    # rank-3 [pages, block, elems] layout is classified independently of the
+    # attention groups' shapes.
+    # First Party
+    from lmcache.integration.vllm.kv_cache_group_edits import cb_aux_pool_entries
+
+    aux_entries = cb_aux_pool_entries(kv_caches)
+    layer_index_groups += [[layer_to_idx[name]] for name, _ in aux_entries]
     normalized_kv_caches, engine_kv_formats = normalize_and_discover_per_layer_formats(
         per_layer_discoverable_kv_caches,
         layer_index_groups,
@@ -187,6 +205,20 @@ def create_engine_group_infos_from_vllm(
         per_layer_sw_size = _resolve_per_layer_sw_sizes(
             vllm_groups, layer_to_idx, num_layers
         )
+
+    # Each aux pool forms its own synthetic engine group after the vLLM
+    # groups — its pages hold per-chunk opaque aux blobs whose block ids the
+    # connector synthesizes at store/retrieve submission. Without this the
+    # marker layer would fall to EXCLUDED_ENGINE_GROUP and never store.
+    if aux_entries:
+        if per_layer_group_idx is None:
+            # Non-hybrid engine config: all real layers share group 0.
+            per_layer_group_idx = [0] * num_layers
+        next_group_id = len(vllm_groups) if vllm_groups else 1
+        for name, tokens_per_block in aux_entries:
+            per_layer_group_idx[layer_to_idx[name]] = next_group_id
+            group_tokens_per_block[next_group_id] = tokens_per_block
+            next_group_id += 1
 
     # Within one vLLM engine group, layers can have different hidden dimensions
     # (e.g. a different head count), which require different GPU copy kernels.

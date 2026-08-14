@@ -95,6 +95,135 @@ def _leaf_specs(spec: KVCacheSpec) -> list[KVCacheSpec]:
     return [spec]
 
 
+#: Whether a CacheBlend connector owns this engine's recurrent-state
+#: (Mamba/GDN) groups: it reconstructs their state from its own per-token
+#: aux planes, so LMCache serves only the full-attention groups. Set
+#: programmatically via :func:`set_cb_owned_mamba` by the CacheBlend
+#: connector at construction; default off leaves standard behavior intact.
+_CB_OWNED_MAMBA = False
+
+
+def set_cb_owned_mamba(enabled: bool) -> None:
+    """Declare that a CacheBlend connector owns the Mamba/GDN groups.
+
+    Called by the CacheBlend connector during ``__init__`` (before the
+    parent connector validates the KV cache groups), in every process that
+    constructs a connector. When enabled, :func:`cb_skip_mamba_groups` and
+    :func:`cb_kept_group_indices` drop recurrent-state groups from LMCache's
+    view and :func:`validate_kv_cache_groups` stops rejecting their
+    non-align cache modes.
+
+    Args:
+        enabled: True when the CacheBlend aux store manages recurrent state.
+    """
+    global _CB_OWNED_MAMBA
+    _CB_OWNED_MAMBA = bool(enabled)
+
+
+def cb_skip_mamba_groups(groups):
+    """Drop Mamba/GDN groups when a CacheBlend connector owns them.
+
+    The CacheBlend recurrent-state path owns the Mamba/GDN groups via its
+    aux store (per-token projections), so LMCache should serve only the
+    full-attention groups. Returns ``groups`` unchanged when
+    :func:`set_cb_owned_mamba` was never enabled.
+
+    Args:
+        groups: Iterable of vLLM ``KVCacheGroupSpec`` (each has
+            ``kv_cache_spec`` with possibly nested leaf specs).
+
+    Returns:
+        tuple: The groups with Mamba/GDN groups removed (gate on), else the
+        input groups unchanged.
+    """
+    if not _CB_OWNED_MAMBA:
+        return groups
+    return tuple(
+        g
+        for g in groups
+        if not any(
+            getattr(s, "mamba_cache_mode", None) is not None
+            for s in _leaf_specs(g.kv_cache_spec)
+        )
+    )
+
+
+#: Reserved layer-name prefix for CacheBlend fused-aux page pools. The
+#: connector registers its pool tensor under ``cb.aux_pool.<tokens_per_block>``
+#: and the suffix carries the group's logical block size (= the LMCache chunk
+#: size), so the synthetic engine group needs no side-channel configuration.
+CB_AUX_POOL_LAYER_PREFIX = "cb.aux_pool."
+
+
+def cb_aux_pool_entries(kv_caches) -> "list[tuple[str, int]]":
+    """CacheBlend fused-aux pool entries among the registered tensors.
+
+    Presence-gated (no env): any registered layer name starting with
+    :data:`CB_AUX_POOL_LAYER_PREFIX` is a connector-owned aux page pool that
+    must form its own synthetic engine group (its pages hold per-chunk
+    opaque aux blobs, addressed by connector-synthesized block ids).
+
+    Args:
+        kv_caches: Registered tensors keyed by layer name.
+
+    Returns:
+        ``(layer_name, tokens_per_block)`` per aux pool, in registration
+        order; empty for models without one.
+
+    Raises:
+        ValueError: If a marker name's block-size suffix does not parse.
+    """
+    entries: list[tuple[str, int]] = []
+    for name in kv_caches:
+        if not name.startswith(CB_AUX_POOL_LAYER_PREFIX):
+            continue
+        suffix = name[len(CB_AUX_POOL_LAYER_PREFIX) :]
+        try:
+            tokens_per_block = int(suffix)
+        except ValueError as exc:
+            raise ValueError(
+                f"aux pool layer name {name!r}: block-size suffix "
+                f"{suffix!r} is not an integer"
+            ) from exc
+        if tokens_per_block <= 0:
+            raise ValueError(
+                f"aux pool layer name {name!r}: tokens_per_block must be "
+                f"positive, got {tokens_per_block}"
+            )
+        entries.append((name, tokens_per_block))
+    return entries
+
+
+def cb_kept_group_indices(groups) -> list[int]:
+    """Indices of the groups :func:`cb_skip_mamba_groups` keeps, in order.
+
+    The companion to :func:`cb_skip_mamba_groups`: it returns the *kept* groups,
+    this returns their ORIGINAL positional indices in ``groups``. Callers use
+    it to project a vLLM-group-indexed structure (e.g. ``new_block_ids``, which
+    is indexed by vLLM's full kv_cache_groups order) onto the compacted,
+    mamba-skipped group order so per-group accounting stays aligned. When the
+    gate is off this is the identity ``list(range(len(groups)))``.
+
+    Args:
+        groups: Iterable of vLLM ``KVCacheGroupSpec`` (vLLM's full group order).
+
+    Returns:
+        list[int]: Original indices of the kept (non-Mamba) groups, in order.
+        Identity over all groups when the gate is off.
+    """
+    all_idx = list(range(len(groups)))
+    if not _CB_OWNED_MAMBA:
+        return all_idx
+    return [
+        i
+        for i, g in enumerate(groups)
+        if not any(
+            getattr(s, "mamba_cache_mode", None) is not None
+            for s in _leaf_specs(g.kv_cache_spec)
+        )
+    ]
+
+
 def validate_kv_cache_groups(kv_cache_config: KVCacheConfig | None) -> None:
     """Reject KV cache group specs the transfer path cannot serve correctly.
 
@@ -118,6 +247,11 @@ def validate_kv_cache_groups(kv_cache_config: KVCacheConfig | None) -> None:
     """
     if kv_cache_config is None:
         return
+    # When a CacheBlend connector owns the Mamba/GDN groups
+    # (set_cb_owned_mamba), do NOT reject their non-align cache modes: the
+    # CacheBlend path manages recurrent state itself via its aux store
+    # (per-token projections), not LMCache's opaque align-mode snapshots.
+    _skip_mamba = _CB_OWNED_MAMBA
     unsupported: list[str] = []
     for group_idx, group in enumerate(kv_cache_config.kv_cache_groups):
         for spec in _leaf_specs(group.kv_cache_spec):
@@ -126,6 +260,7 @@ def validate_kv_cache_groups(kv_cache_config: KVCacheConfig | None) -> None:
                 unsupported.append(f"group {group_idx}: CrossAttentionSpec")
             elif (
                 kind == KVCacheSpecKind.MAMBA
+                and not _skip_mamba  # CacheBlend-on-GDN gate
                 and getattr(spec, "mamba_cache_mode", "none") != "align"
             ):
                 unsupported.append(
@@ -537,7 +672,12 @@ def apply_kv_cache_group_edits(
 
     edited = dict(kv_caches)
     counts: Counter[str] = Counter()
-    for group in kv_cache_config.kv_cache_groups:
+    # CacheBlend-on-GDN (gated) — don't transform GDN/Mamba
+    # groups (the aux store owns them); they pass through unedited and are
+    # excluded from LMCache's engine groups downstream. Computed once + reused
+    # by the drop step below.
+    kept = cb_skip_mamba_groups(kv_cache_config.kv_cache_groups)
+    for group in kept:
         spec = group.kv_cache_spec
         for name in group.layer_names:
             for edit in _EDITS:
@@ -549,4 +689,14 @@ def apply_kv_cache_group_edits(
         "KV cache group edits applied: %s",
         dict(counts) if counts else "none",
     )
+    # CacheBlend-on-GDN (gated) — drop the skipped GDN/Mamba groups' layers from
+    # the registered set entirely, so LMCache's transfer context and store never
+    # see them (their tensors are [conv_state, ssm_state] lists, not paged KV).
+    # The aux store owns GDN. No-op when the gate is off (kept == all groups).
+    if len(kept) != len(kv_cache_config.kv_cache_groups):
+        kept_names = {n for g in kept for n in g.layer_names}
+        for group in kv_cache_config.kv_cache_groups:
+            for name in group.layer_names:
+                if name not in kept_names:
+                    edited.pop(name, None)
     return edited

@@ -88,6 +88,15 @@ class RequestType(enum.Enum):
     CB_RETRIEVE_PRE_COMPUTED_V3 = enum.auto()
     CB_UNIFIED_LOOKUP = enum.auto()
 
+    # Generic auxiliary-blob store for the CacheBlend GDN path: opaque per-chunk
+    # tensors (SVD-compressed GDN projections) alongside KV; server is data-type
+    # agnostic. AUX_PUT stores; AUX_GET_BY_HASH_IPC retrieves fingerprint-keyed
+    # chunks by copying them straight into a worker-exported GPU buffer over
+    # CUDA IPC (same physical GPU — no D2H/ZMQ-bytes/H2D round-trip), gated by a
+    # CUDA event. Mirrors CB_RETRIEVE_PRE_COMPUTED_V3.
+    AUX_PUT = enum.auto()
+    AUX_GET_BY_HASH_IPC = enum.auto()
+
     # P2P operations
     P2P_LOOKUP_AND_LOCK = enum.auto()
     P2P_QUERY_LOOKUP_RESULTS = enum.auto()

@@ -570,8 +570,27 @@ def test_register_rope_rejects_invalid_group_to_cache():
     # Model has engine groups {0, 1} but the map only covers group 0.
     with pytest.raises(ValueError, match="engine groups up to index 1"):
         eng.cb_register_rope(1, caches, 8, True, group_to_cache=[0])
-    with pytest.raises(ValueError, match=">=1 cos/sin cache"):
-        eng.cb_register_rope(1, [], 8, True, group_to_cache=[])
+    # A map referencing caches that were never sent is rejected even when the
+    # cache list is empty (the NoPE form requires an empty map too).
+    with pytest.raises(ValueError, match="outside"):
+        eng.cb_register_rope(1, [], 8, True, group_to_cache=[0, 0])
+
+
+def test_register_rope_accepts_nope_zero_caches():
+    """NoPE models (NemotronH: attention applies no rotary at all) register
+    zero cos/sin caches. The rope state is still stored — it carries the head
+    layout the scatter geometry needs — and every group reports its re-RoPE
+    skipped."""
+    eng = _rope_registration_engine(engine_group_indices=[0, 1])
+
+    eng.cb_register_rope(1, [], 128, True, group_to_cache=[])
+
+    state = eng._cb_rope_state[1]
+    assert state.cos_sin_caches == []
+    assert state.head_size == 128
+    # No cache for any group => every re-RoPE consumer skips rotation.
+    assert state.cache_for_group(0) is None
+    assert state.cache_for_group(1) is None
 
 
 def test_register_rope_requires_registered_instance():
@@ -937,6 +956,59 @@ def test_flat_plan_tables_encode_every_work_item():
     assert step_offsets[:, 0].tolist() == [1, 2, 3]
     assert step_offsets[:, 2].tolist() == [2, 4, 6]
     assert bool(np.all(np.diff(step_offsets[:, 1]) >= 0))
+
+
+@native_retrieve_plan_required
+def test_flat_plan_emits_no_rope_rows_for_a_nope_model():
+    """NoPE models register zero cos/sin caches, so a shifted match needs no
+    re-RoPE.
+
+    Emitting the rope rows anyway costs twice over: pybind unpacks the flat
+    tables into C++ structs while the GIL is still HELD (the release happens
+    after the unpack), and the executor then walks ramp-rope entries that
+    cannot change a value. Measured on Nemotron-3-Ultra, shifted matches cost
+    5-20x an aligned match's scatter, and Nemotron attention is NoPE.
+    """
+    # Third Party
+    import numpy as np
+
+    eng, gpu_context, rope_state, obj_bytes = _build_plan_engine_and_context()
+
+    def pair(cur_st, cur_ed, old_st):
+        return (
+            SimpleNamespace(cur_st=cur_st, cur_ed=cur_ed, old_st=old_st),
+            _lazy_memory_obj(obj_bytes, address=cur_st * 1000),
+        )
+
+    # Every chunk shifted (old != cur) — the worst case for rope rows.
+    runs = [[pair(0, 4, 100), pair(4, 8, 104), pair(8, 12, 108)]]
+    cpu_block_tables = [
+        (np.array([10, 11, 12], dtype=np.int64), 4),
+        (np.array([20, 21, 22], dtype=np.int64), 4),
+    ]
+
+    with_rope = eng._build_cb_retrieve_plan_flat(
+        gpu_context, rope_state, cpu_block_tables, runs, max_batch=2
+    )
+    assert with_rope is not None
+    _, (_, ropes_r, scatters_r, offsets_r), _ = with_rope
+    assert ropes_r.shape[0] == 6  # 3 shifted chunks x 2 groups
+
+    rope_state.cos_sin_caches = []  # NoPE
+    nope = eng._build_cb_retrieve_plan_flat(
+        gpu_context, rope_state, cpu_block_tables, runs, max_batch=2
+    )
+    assert nope is not None
+    _, (staging_n, ropes_n, scatters_n, offsets_n), _ = nope
+
+    assert ropes_n.shape[0] == 0, "NoPE must emit no rope rows"
+    assert (offsets_n[:, 1] == 0).all(), "rope CSR offsets must stay at zero"
+    # The actual data movement is untouched: same staging and scatter tables.
+    assert np.array_equal(scatters_n, scatters_r)
+    assert offsets_n.shape == offsets_r.shape
+    assert np.array_equal(offsets_n[:, 0], offsets_r[:, 0])
+    assert np.array_equal(offsets_n[:, 2], offsets_r[:, 2])
+    assert staging_n.shape[0] == 3
 
 
 @native_retrieve_plan_required
