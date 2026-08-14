@@ -81,13 +81,16 @@ def _make_deps() -> tuple[MagicMock, MagicMock, MagicMock]:
 
 
 class TestValidateMaxOutputLengthSupported:
-    @pytest.mark.parametrize("workload", ["long-doc-qa", "multi-round-chat"])
+    @pytest.mark.parametrize(
+        "workload",
+        ["long-doc-permutator", "long-doc-qa", "multi-round-chat"],
+    )
     def test_allowed_for_workloads_with_the_parameter(self, workload: str) -> None:
         validate_max_output_length_supported(workload)
 
     @pytest.mark.parametrize(
         "workload",
-        ["long-doc-permutator", "random-prefill", "prefix-suffix-tuner"],
+        ["random-prefill", "prefix-suffix-tuner"],
     )
     def test_rejected_for_workloads_without_the_parameter(self, workload: str) -> None:
         with pytest.raises(ValueError, match="max output length cannot be specified"):

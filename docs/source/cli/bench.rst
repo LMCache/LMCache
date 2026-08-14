@@ -325,6 +325,11 @@ dispatched with semaphore-controlled concurrency.
    * - ``--ldp-num-inflight-requests``
      - 1
      - Maximum concurrent in-flight requests.
+   * - ``--ldp-max-output-length``
+     - 128
+     - Maximum tokens to generate per permutation request. Use ``1`` to
+       measure prefill alone; combine larger values with ``--ignore-eos``
+       for a reproducible decode phase.
 
 **Example:**
 
