@@ -26,7 +26,7 @@ from lmcache.v1.gpu_connector.kv_format import (
     get_spec_class,
 )
 from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache, LayoutHints
-from lmcache.v1.platform.ops_types import PageBufferShapeDesc, set_shape_desc_dtype
+from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 import lmcache.lmcache_native as lmcache_native
 
 if TYPE_CHECKING:
@@ -661,10 +661,8 @@ def make_page_buffer_shape_desc(
     dtype = get_dtype(kv_caches, engine_kv_format, layer_idx)
     desc.element_size = dtype.itemsize
     # ``dtype`` is a Python-side side channel used by the torch fallback to
-    # disambiguate float16 vs bfloat16 when ``element_size == 2``. The native
-    # descriptor now accepts dynamic attributes too, so this assignment works
-    # uniformly across both surfaces.
-    set_shape_desc_dtype(desc, dtype)
+    # disambiguate float16 vs bfloat16 when ``element_size == 2``.
+    desc.dtype = dtype
 
     resolved_stride = int(block_stride_elems) if block_stride_elems else 0
     desc.block_stride_elems = resolved_stride
