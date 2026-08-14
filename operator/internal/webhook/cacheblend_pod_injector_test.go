@@ -251,16 +251,10 @@ var _ = Describe("CacheBlendPodInjector", func() {
 			Expect(envValue(c, pythonPathEnvName)).To(Equal(cbPluginMountPath))
 
 			By("M5: required vLLM args asserted individually")
-			Expect(argsHasFlagValue(c.Args, cbFlagAttentionBackend, cbValAttentionBackend)).To(BeTrue(),
-				"--attention-backend=CUSTOM")
 			Expect(argsHasFlag(c.Args, cbFlagNoChunkedPrefill)).To(BeTrue(),
 				"--no-enable-chunked-prefill")
-			Expect(argsHasFlagValue(c.Args, cbFlagBlockSize, cbValBlockSize)).To(BeTrue(),
-				"--block-size=64")
-			Expect(argsHasFlagValue(c.Args, cbFlagPipelineParallelSize, cbValPipelineParallelSize)).To(BeTrue(),
+			Expect(argsFlagValue(c.Args, cbFlagPipelineParallelSize)).To(Equal(cbValPipelineParallelSize),
 				"--pipeline-parallel-size=1")
-			Expect(argsHasFlag(c.Args, cbFlagNoAsyncScheduling)).To(BeTrue(),
-				"--no-async-scheduling")
 			Expect(argsHasFlag(c.Args, cbFlagEnforceEager)).To(BeTrue(),
 				"default cudagraph eager -> --enforce-eager")
 
@@ -381,36 +375,39 @@ var _ = Describe("CacheBlendPodInjector", func() {
 	})
 
 	Describe("append-or-replace arg semantics", func() {
-		It("replaces a pre-existing --attention-backend value", func() {
+		It("replaces a pre-existing injected flag rather than duplicating it", func() {
 			engine := newTestEngine(nil)
 			injector := newPodInjector(engine, true)
 			pod := vllmPod(func(p *corev1.Pod) {
-				p.Spec.Containers[0].Args = []string{"--attention-backend", "FLASH_ATTN", "--model", "m"}
+				p.Spec.Containers[0].Args = []string{
+					cbFlagPipelineParallelSize, "4", "--model", "m",
+				}
 			})
 
 			resp := injector.Handle(ctx, makeRequest(pod))
 			out := applyResponse(pod, resp)
 			c := findContainer(out, "vllm")
 
-			Expect(argsHasFlagValue(c.Args, cbFlagAttentionBackend, cbValAttentionBackend)).To(BeTrue())
-			Expect(argsHasFlagValue(c.Args, cbFlagAttentionBackend, "FLASH_ATTN")).To(BeFalse())
-			// Not duplicated.
-			Expect(countFlag(c.Args, cbFlagAttentionBackend)).To(Equal(1))
+			Expect(argsFlagValue(c.Args, cbFlagPipelineParallelSize)).To(Equal(cbValPipelineParallelSize))
+			Expect(countFlag(c.Args, cbFlagPipelineParallelSize)).To(Equal(1))
 		})
 
-		It("replaces a pre-existing --attention-backend=value (single-token form)", func() {
+		It("replaces the single-token --flag=value form in place", func() {
 			engine := newTestEngine(nil)
 			injector := newPodInjector(engine, true)
 			pod := vllmPod(func(p *corev1.Pod) {
-				p.Spec.Containers[0].Args = []string{"--attention-backend=FLASH_ATTN", "--model", "m"}
+				p.Spec.Containers[0].Args = []string{
+					cbFlagPipelineParallelSize + "=4", "--model", "m",
+				}
 			})
 
 			resp := injector.Handle(ctx, makeRequest(pod))
 			out := applyResponse(pod, resp)
 			c := findContainer(out, "vllm")
 
-			Expect(c.Args).To(ContainElement("--attention-backend=CUSTOM"))
-			Expect(c.Args).NotTo(ContainElement("--attention-backend=FLASH_ATTN"))
+			Expect(c.Args).To(ContainElement(cbFlagPipelineParallelSize + "=" + cbValPipelineParallelSize))
+			Expect(c.Args).NotTo(ContainElement(cbFlagPipelineParallelSize + "=4"))
+			Expect(countFlag(c.Args, cbFlagPipelineParallelSize)).To(Equal(1))
 		})
 
 		It("skips + stamps when the user already supplies --kv-transfer-config", func() {
@@ -432,7 +429,6 @@ var _ = Describe("CacheBlendPodInjector", func() {
 			Expect(out.Annotations[AnnotationSkipReason]).To(Equal(SkipReasonKVTransferConfigPresent))
 			Expect(out.Annotations[AnnotationInjected]).To(Equal(valueTrue))
 			Expect(out.Spec.HostIPC).To(BeTrue())
-			Expect(argsHasFlagValue(c.Args, cbFlagBlockSize, cbValBlockSize)).To(BeTrue())
 		})
 
 		It("prepends to a pre-existing PYTHONPATH", func() {
@@ -470,7 +466,6 @@ var _ = Describe("CacheBlendPodInjector", func() {
 			By("the vLLM container is mutated")
 			vllm := findContainer(out, "vllm")
 			Expect(envValue(vllm, pythonPathEnvName)).To(Equal(cbPluginMountPath))
-			Expect(argsHasFlagValue(vllm.Args, cbFlagAttentionBackend, cbValAttentionBackend)).To(BeTrue())
 
 			By("the sidecar container is untouched")
 			sidecar := findContainer(out, "sidecar")
@@ -495,8 +490,8 @@ var _ = Describe("CacheBlendPodInjector", func() {
 			out := applyResponse(pod, resp)
 
 			vllm := findContainer(out, "vllm")
-			Expect(argsHasFlagValue(vllm.Args, cbFlagAttentionBackend, cbValAttentionBackend)).To(BeTrue())
 			sidecar := findContainer(out, "sidecar")
+			Expect(argsHasFlag(vllm.Args, cbFlagKVTransferConfig)).To(BeTrue())
 			Expect(sidecar.Args).To(Equal([]string{"sleep"}))
 		})
 
@@ -540,12 +535,6 @@ var _ = Describe("CacheBlendPodInjector", func() {
 })
 
 // --- test arg helpers (mirror the package's two-token / =-token recognition) ---
-
-// argsHasFlagValue reports whether args carries flag with the given value in
-// either the two-token or single-token form.
-func argsHasFlagValue(args []string, flag, value string) bool {
-	return argsFlagValue(args, flag) == value
-}
 
 // argsFlagValue returns the value bound to flag in args (two-token or
 // single-token form), or "" if the flag is absent.

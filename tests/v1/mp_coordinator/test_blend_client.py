@@ -2,8 +2,8 @@
 """Tests for the blend-server side coordinator client.
 
 The HTTP layer is replaced by an injected ``request_fn`` backed by a real
-``GlobalBlendMatcher``, so the queue/daemon/poll state machine is exercised
-end-to-end against the actual directory without a network or server.
+:class:`KeyDirectory`, so the queue/daemon/poll state machine is exercised
+end-to-end against the actual fragment lookup without a network or server.
 """
 
 # Standard
@@ -14,47 +14,37 @@ import time
 import pytest
 
 # First Party
+from lmcache.v1.distributed.api import ObjectKey, Tier
+from lmcache.v1.mp_coordinator.api import (
+    CacheEventBatch,
+    CacheEventEntry,
+    CacheEventType,
+)
 from lmcache.v1.mp_coordinator.blend_client import (
     PENDING,
     BlendCoordinatorClient,
 )
-from lmcache.v1.mp_coordinator.blend_directory import (
-    GlobalBlendMatcher,
-    StoreRange,
-)
+from lmcache.v1.mp_coordinator.key_directory import KeyDirectory
 from lmcache.v1.mp_coordinator.schemas import decode_tokens
 
 CHUNK = 3
-SCOPE = "model-a"
 
 
-def _matcher_request(
-    matcher: GlobalBlendMatcher,
+def _directory_request(
+    directory: KeyDirectory,
 ) -> Callable[[str, str, dict], dict]:
-    """request_fn that drives a real matcher, mirroring the coordinator router."""
+    """request_fn driving a real directory, mirroring the coordinator router."""
 
     def request(method: str, path: str, payload: dict) -> dict:
-        if method == "POST" and path == "/blend/fingerprints":
-            ranges = [
-                StoreRange(
-                    model_scope=r["model_scope"],
-                    tokens=r["tokens"],
-                    object_keys=r["object_keys"],
-                    old_st_base=r["old_st_base"],
-                )
-                for r in payload.get("ranges", [])
-            ]
-            return {"inserted": matcher.register(ranges) if ranges else 0}
-        if method == "DELETE" and path == "/blend/fingerprints":
-            keys = payload.get("object_keys", [])
-            return {"removed": matcher.remove(keys) if keys else 0}
-        if method == "POST" and path == "/blend/match":
-            matches = matcher.match(
-                payload["model_scope"], decode_tokens(payload["tokens_b64"])
-            )
+        if method == "POST" and path == "/directory/blend-lookup":
+            matches = directory.blend_match(decode_tokens(payload["tokens_b64"]))
             return {
                 "matches": [
-                    {"object_key": m.object_key, "old_st": m.old_st, "cur_st": m.cur_st}
+                    {
+                        "chunk_hash": m.chunk_hash.hex(),
+                        "old_st": m.old_st,
+                        "cur_st": m.cur_st,
+                    }
                     for m in matches
                 ]
             }
@@ -63,19 +53,37 @@ def _matcher_request(
     return request
 
 
-def _range(prefix: str, tokens: list[int]) -> dict:
-    n_chunks = len(tokens) // CHUNK
-    return {
-        "model_scope": SCOPE,
-        "tokens": tokens,
-        "object_keys": [f"{prefix}{i}" for i in range(n_chunks)],
-        "old_st_base": 0,
-    }
+def _stored(directory: KeyDirectory, chunks: list[list[int]]) -> list[bytes]:
+    """Feed ``chunks`` in as cache events; return their chunk hashes."""
+    hashes = [bytes([index + 1]) * 4 for index in range(len(chunks))]
+    for seq, (chunk_hash, tokens) in enumerate(zip(hashes, chunks, strict=True), 1):
+        directory.consume(
+            CacheEventBatch(
+                instance_id="node-a",
+                incarnation=1,
+                seq=seq,
+                event_type=CacheEventType.STORE,
+                tier=Tier.L1,
+                backend="dram",
+                entries=[
+                    CacheEventEntry(
+                        key=ObjectKey(
+                            chunk_hash=chunk_hash, model_name="m", kv_rank=0
+                        ).to_encoded_object_key(),
+                        size_bytes=100,
+                        token_ids=tokens,
+                        token_offset=(seq - 1) * CHUNK,
+                    )
+                ],
+            )
+        )
+    return hashes
 
 
-def _store_range(prefix: str, tokens: list[int]) -> StoreRange:
-    d = _range(prefix, tokens)
-    return StoreRange(**d)
+def _directory() -> KeyDirectory:
+    directory = KeyDirectory()
+    directory.enable_blend_lookup(chunk_size=CHUNK, probe_stride=1)
+    return directory
 
 
 def _wait_match(client: BlendCoordinatorClient, rid: str, timeout: float = 2.0):
@@ -88,56 +96,28 @@ def _wait_match(client: BlendCoordinatorClient, rid: str, timeout: float = 2.0):
     return client.poll_match(rid)
 
 
-def test_match_after_register():
-    m = GlobalBlendMatcher(chunk_size=CHUNK)
-    doc = [1, 2, 3, 4, 5, 6]
-    m.register([_store_range("K", doc)])
-    client = BlendCoordinatorClient(request_fn=_matcher_request(m))
+def test_match_finds_chunks_the_event_stream_reported():
+    directory = _directory()
+    hashes = _stored(directory, [[1, 2, 3], [4, 5, 6]])
+    client = BlendCoordinatorClient(request_fn=_directory_request(directory))
     try:
-        client.submit_match("r1", SCOPE, doc)
+        client.submit_match("r1", [1, 2, 3, 4, 5, 6])
         matches = _wait_match(client, "r1")
         assert isinstance(matches, list)
-        assert [(x.object_key, x.old_st, x.cur_st) for x in matches] == [
-            ("K0", 0, 0),
-            ("K1", 3, 3),
+        # chunk_hash arrives as bytes, matching a local CBMatchResult.hash.
+        assert [(x.chunk_hash, x.old_st, x.cur_st) for x in matches] == [
+            (hashes[0], 0, 0),
+            (hashes[1], 3, 3),
         ]
     finally:
         client.close()
 
 
-def test_publish_reaches_matcher():
-    m = GlobalBlendMatcher(chunk_size=CHUNK)
-    client = BlendCoordinatorClient(request_fn=_matcher_request(m))
+def test_match_is_empty_when_nothing_is_cached():
+    client = BlendCoordinatorClient(request_fn=_directory_request(_directory()))
     try:
-        doc = [1, 2, 3]
-        client.enqueue_register([_range("K", doc)])
-        end = time.time() + 2.0
-        ok = False
-        while time.time() < end:
-            if m.match(SCOPE, doc):
-                ok = True
-                break
-            time.sleep(0.005)
-        assert ok
-    finally:
-        client.close()
-
-
-def test_evict_reaches_matcher():
-    m = GlobalBlendMatcher(chunk_size=CHUNK)
-    doc = [1, 2, 3]
-    m.register([_store_range("K", doc)])
-    client = BlendCoordinatorClient(request_fn=_matcher_request(m))
-    try:
-        client.enqueue_evict(["K0"])
-        end = time.time() + 2.0
-        gone = False
-        while time.time() < end:
-            if not m.match(SCOPE, doc):
-                gone = True
-                break
-            time.sleep(0.005)
-        assert gone
+        client.submit_match("r1", [1, 2, 3])
+        assert _wait_match(client, "r1") == []
     finally:
         client.close()
 
@@ -151,13 +131,12 @@ def test_poll_none_before_submit():
 
 
 def test_submit_is_idempotent():
-    m = GlobalBlendMatcher(chunk_size=CHUNK)
-    doc = [1, 2, 3]
-    m.register([_store_range("K", doc)])
-    client = BlendCoordinatorClient(request_fn=_matcher_request(m))
+    directory = _directory()
+    _stored(directory, [[1, 2, 3]])
+    client = BlendCoordinatorClient(request_fn=_directory_request(directory))
     try:
-        client.submit_match("r1", SCOPE, doc)
-        client.submit_match("r1", SCOPE, doc)  # no-op
+        client.submit_match("r1", [1, 2, 3])
+        client.submit_match("r1", [1, 2, 3])  # no-op
         matches = _wait_match(client, "r1")
         assert isinstance(matches, list) and len(matches) == 1
     finally:
@@ -170,7 +149,7 @@ def test_match_error_degrades_to_empty():
 
     client = BlendCoordinatorClient(request_fn=boom)
     try:
-        client.submit_match("r1", SCOPE, [1, 2, 3])
+        client.submit_match("r1", [1, 2, 3])
         matches = _wait_match(client, "r1")
         assert matches == []  # failure -> local-only, never hangs
     finally:
@@ -178,12 +157,11 @@ def test_match_error_degrades_to_empty():
 
 
 def test_take_match_clears():
-    m = GlobalBlendMatcher(chunk_size=CHUNK)
-    doc = [1, 2, 3]
-    m.register([_store_range("K", doc)])
-    client = BlendCoordinatorClient(request_fn=_matcher_request(m))
+    directory = _directory()
+    _stored(directory, [[1, 2, 3]])
+    client = BlendCoordinatorClient(request_fn=_directory_request(directory))
     try:
-        client.submit_match("r1", SCOPE, doc)
+        client.submit_match("r1", [1, 2, 3])
         _wait_match(client, "r1")
         client.take_match("r1")
         assert client.poll_match("r1") is None

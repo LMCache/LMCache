@@ -22,8 +22,8 @@ import (
 )
 
 // CacheBlendChunkSize is the only chunk size CacheBlend supports. The blend
-// matcher requires chunk_size == vLLM --block-size (64) * 4 == 256, so the
-// CacheBlendEngine server is locked to this value (see design §4).
+// matcher requires chunk_size == 256 (the default vLLM --block-size of 64 * 4),
+// so the CacheBlendEngine server is locked to this value (see design §4).
 const CacheBlendChunkSize int32 = 256
 
 // Cudagraph mode constants for CacheBlendEngine injection.
@@ -52,6 +52,14 @@ type BlendSpec struct {
 	// +optional
 	// +kubebuilder:default=0.15
 	RecompRatio *float64 `json:"recompRatio,omitempty"`
+
+	// partialBucket pads PARTIAL row counts to a multiple of this bucket size,
+	// surfaced to the connector as kv_connector_extra_config["cb.partial_bucket"].
+	// Unset (the default) omits the key, leaving the padding disabled. Needed
+	// on fp8-MoE models (see DESIGN.md).
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	PartialBucket *int32 `json:"partialBucket,omitempty"`
 }
 
 // InjectionSpec defines the defaults the mutating webhook reads when injecting
