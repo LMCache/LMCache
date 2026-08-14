@@ -18,17 +18,15 @@ import weakref
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.mp_coordinator.blend_client import (
-        BlendCoordinatorClient,
-        RemoteMatch,
-    )
+    from lmcache.v1.mp_coordinator.api import BlendMatch
+    from lmcache.v1.mp_coordinator.blend_client import BlendCoordinatorClient
 
 # Third Party
 import numpy as np
 import torch
 
 # First Party
-from lmcache import torch_dev, torch_device_type
+from lmcache import device_ops, torch_dev, torch_device_type
 from lmcache.logging import init_logger
 from lmcache.utils import check_interprocess_event_support
 from lmcache.v1.distributed.api import (
@@ -66,7 +64,7 @@ from lmcache.v1.multiprocess.token_hasher import (
     update_table_id_numba,
 )
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
-import lmcache.c_ops as lmc_ops
+import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
 
@@ -76,9 +74,9 @@ _NOOP_REASONS_SEEN: set[str] = set()
 
 # Plan-then-execute retrieve: one native call enqueues all fill/rope/scatter
 # in a single GIL release, with the plan encoded as numpy int64 tables (one
-# pybind crossing). The Python wave loop stays as fallback for c_ops builds
+# pybind crossing). The Python wave loop stays as fallback for cuda_ops builds
 # that predate the op (and for inputs the planner declines).
-_HAS_NATIVE_RETRIEVE_PLAN = hasattr(lmc_ops, "execute_cb_retrieve_plan_flat")
+_HAS_NATIVE_RETRIEVE_PLAN = hasattr(device_ops, "execute_cb_retrieve_plan_flat")
 
 # torch dtype -> at::ScalarType (rope dispatch); missing -> Python fallback.
 _TORCH_TO_AT_SCALAR = {
@@ -506,10 +504,10 @@ def _cb_group_rope_geometry(
     # *_TWO_HS leaves fused_packed False on current vLLM, which halves
     # per_head, doubles n_heads, and re-RoPEs across the V plane.
     fused_packed = _ekf is not None and int(_ekf) in (
-        int(lmc_ops.EngineKVFormat.NL_X_NB_NH_BS_TWO_HS),
-        int(lmc_ops.EngineKVFormat.NL_X_NB_BS_NH_TWO_HS),
-        int(lmc_ops.EngineKVFormat.NL_X_NB_NH_BS_CS),
-        int(lmc_ops.EngineKVFormat.NL_X_NB_BS_NH_CS),
+        int(lmcache_native.EngineKVFormat.NL_X_NB_NH_BS_TWO_HS),
+        int(lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_TWO_HS),
+        int(lmcache_native.EngineKVFormat.NL_X_NB_NH_BS_CS),
+        int(lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_CS),
     )
     per_head = head_size * (2 if fused_packed else 1)
     n_heads = hidden_dim // per_head
@@ -1537,48 +1535,7 @@ class BlendV3Module(InstanceLivenessTarget):
                 key.request_id,
             )
 
-        if self._coordinator is not None:
-            self._publish_fingerprints(key, chunk_hashes, tokens_in_range)
-
         return result
-
-    def _publish_fingerprints(
-        self,
-        key: IPCCacheServerKey,
-        chunk_hashes: list[bytes],
-        tokens_in_range: list[int],
-    ) -> None:
-        """Publish this stored range's chunk fingerprints to the coordinator.
-
-        Best-effort and fire-and-forget (enqueue only): one wire
-        ``ChunkFingerprint`` per stored chunk -- its content poly-hash (the same
-        ``chunk_hash_windows_numba`` the match probes, with the fleet base), its
-        shared-L2 ``object_key`` (the chunk storage key ``th``), and its token
-        position. Never raises into the store path.
-
-        Args:
-            key: The store request key (model/scope/positions).
-            chunk_hashes: Per-chunk storage keys (``th``) for the range.
-            tokens_in_range: The stored tokens ``token_ids[start:end]``.
-        """
-        coordinator = self._coordinator
-        if coordinator is None or not chunk_hashes:
-            return
-        try:
-            model_scope = key.model_name
-            store_range = {
-                "model_scope": model_scope,
-                "tokens": list(tokens_in_range),
-                "object_keys": [h.hex() for h in chunk_hashes],
-                "old_st_base": key.start,
-            }
-            coordinator.enqueue_register([store_range])
-        except Exception:
-            logger.warning(
-                "CB coordinator publish build failed for request %s "
-                "(does not affect store correctness)",
-                key.request_id,
-            )
 
     def _submit_coordinator_match(self, key: IPCCacheServerKey) -> bool:
         """Issue a fleet directory match query for this request (best-effort).
@@ -1597,7 +1554,7 @@ class BlendV3Module(InstanceLivenessTarget):
             tokens = list(key.token_ids)
             if len(tokens) < self._ctx.chunk_size:
                 return False
-            coordinator.submit_match(key.request_id, key.model_name, tokens)
+            coordinator.submit_match(key.request_id, tokens)
             return True
         except Exception:
             logger.warning(
@@ -1655,15 +1612,18 @@ class BlendV3Module(InstanceLivenessTarget):
         return segments
 
     def _build_global_segments(
-        self, matches: "list[RemoteMatch]"
+        self, matches: "list[BlendMatch]"
     ) -> list[CBMatchResult]:
         """Convert coordinator matches into chunk-granular retrievable segments.
 
-        Each coordinator ``object_key`` is the hex of the chunk's content hash
+        Each coordinator ``chunk_hash`` is the hex of the chunk's content hash
         (the same ``th`` a local ``CBMatchResult.hash`` holds), so the matches
         are returned as ``CBMatchResult`` directly: the retrieve path then
-        expands ``hash`` to per-rank shared-L2 object keys via
-        ``ipc_key_to_object_keys``, identical to local matches.
+        expands ``hash`` to per-rank object keys via
+        ``ipc_key_to_object_keys`` using *this* server's model, salt, and world
+        size, identical to local matches. A match on content another model or
+        tenant stored therefore confirmed-misses at prefetch rather than being
+        filtered coordinator-side.
 
         Args:
             matches: Matched chunks returned by the coordinator client.
@@ -1678,7 +1638,7 @@ class BlendV3Module(InstanceLivenessTarget):
                 old_ed=m.old_st + chunk_size,
                 cur_st=m.cur_st,
                 cur_ed=m.cur_st + chunk_size,
-                hash=bytes.fromhex(m.object_key),
+                hash=m.chunk_hash,
             )
             for m in matches
         ]
@@ -1786,7 +1746,7 @@ class BlendV3Module(InstanceLivenessTarget):
                     # row width), so the non-contiguous view is safe. It then
                     # rotates rot_dim (= window width) dims from that base —
                     # the content dims [0, rot_offset) are never touched.
-                    lmc_ops.rotary_embedding_k_fused_strided(
+                    device_ops.rotary_embedding_k_fused_strided(
                         old_st + slot_positions_rep,
                         cur_st + slot_positions_rep,
                         k_view[..., rot_offset:],
@@ -1797,7 +1757,7 @@ class BlendV3Module(InstanceLivenessTarget):
                     )
                 elif fused_packed:
                     # Strided kernel rotates only the K half of each slot.
-                    lmc_ops.rotary_embedding_k_fused_strided(
+                    device_ops.rotary_embedding_k_fused_strided(
                         old_st + slot_positions_rep,
                         cur_st + slot_positions_rep,
                         k_view,
@@ -1807,7 +1767,7 @@ class BlendV3Module(InstanceLivenessTarget):
                         rope_state.is_neox_style,
                     )
                 else:
-                    lmc_ops.rotary_embedding_k_fused(
+                    device_ops.rotary_embedding_k_fused(
                         old_st + slot_positions_rep,
                         cur_st + slot_positions_rep,
                         k_view,
@@ -1866,13 +1826,13 @@ class BlendV3Module(InstanceLivenessTarget):
                     # kernel scatters size(2) tokens). Slicing dim 2 breaks
                     # contiguity, so this one slot pays a small copy.
                     key_value = key_value[:, :, :n_tok].contiguous()
-                lmc_ops.multi_layer_kv_transfer(
+                device_ops.multi_layer_kv_transfer(
                     key_value,
                     gpu_context.get_kernel_group_kv_pointers(group_idx),
                     slot_mapping[tok_off : tok_off + n_tok],
                     gpu_context.device,
                     page_buffer_size,
-                    lmc_ops.TransferDirection.H2D,
+                    lmcache_native.TransferDirection.H2D,
                     gpu_context.get_engine_kv_format(group_idx),
                     block_size=group_bs,
                     head_size=head_size,
@@ -1916,6 +1876,7 @@ class BlendV3Module(InstanceLivenessTarget):
         unsupported layout (compressed / kv_size / dtype / head geometry).
         """
         kgm = gpu_context.kv_layer_groups_manager
+        cb_group_spec = device_ops.CBGroupSpec
         group_specs: list[Any] = []
         for group_idx in range(kgm.num_kernel_groups):
             group = kgm.kernel_groups[group_idx]
@@ -1954,7 +1915,7 @@ class BlendV3Module(InstanceLivenessTarget):
                 # must not run (a uint8 group would knock every group off
                 # the native plan).
                 group_specs.append(
-                    lmc_ops.CBGroupSpec(
+                    cb_group_spec(
                         cos_sin_cache=0,
                         rot_dim=0,
                         rope_num_kv_heads=1,
@@ -1986,7 +1947,7 @@ class BlendV3Module(InstanceLivenessTarget):
                 return None
 
             group_specs.append(
-                lmc_ops.CBGroupSpec(
+                cb_group_spec(
                     cos_sin_cache=group_cos_sin.data_ptr(),
                     rot_dim=int(group_cos_sin.shape[1]),
                     rope_num_kv_heads=n_heads,
@@ -2499,7 +2460,7 @@ class BlendV3Module(InstanceLivenessTarget):
 
                     # Fast path: one native call for the whole request; the
                     # per-wave Python loop is the fallback (returns None on old
-                    # c_ops, non-lazy objects, max_batch < 2, or size mismatch).
+                    # native ops, non-lazy objects, max_batch < 2, or size mismatch).
                     _stage_t = time.perf_counter()
                     native_flat = self._build_cb_retrieve_plan_flat(
                         gpu_context, rope_state, cpu_block_tables, runs, max_batch
@@ -2508,7 +2469,10 @@ class BlendV3Module(InstanceLivenessTarget):
                     if native_flat is not None:
                         plan_group_specs, plan_tables, _plan_keepalive = native_flat
                         _stage_t = time.perf_counter()
-                        lmc_ops.execute_cb_retrieve_plan_flat(
+                        execute_cb_retrieve_plan_flat = (
+                            device_ops.execute_cb_retrieve_plan_flat
+                        )
+                        execute_cb_retrieve_plan_flat(
                             gpu_context.device,
                             LazyMemoryAllocator.PIN_CHUNK_SIZE,
                             plan_group_specs,

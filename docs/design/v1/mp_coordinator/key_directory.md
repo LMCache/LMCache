@@ -25,19 +25,15 @@ at the moment.
 
 ## Event application semantics
 
-One batch = `(instance_id, incarnation, seq, event_type, tier, backend, entries[], ts)`. `apply_batch` enforces, in order:
+The directory is a `CacheEventConsumer`: batches reach `consume()` only
+after the ingest layer's gate has ordered, deduped, and fenced them, so
+nothing here depends on `seq` or `incarnation` — see
+[ingest.md](ingest.md) for that half of the contract. What the
+directory owns is what a batch *means*.
 
-
-| mechanism           | rule                                                                                                                                                                   | why                                                                                                                                         |
-| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| Incarnation fencing | `incarnation <` current → drop batch (`STALE_INCARNATION`). `incarnation >` current → drop the **L1** placements the old incarnation reported, then start a fresh cursor. | A restart empties the reporter's *memory* — its L1 placements must not survive. L2 bytes persist on disk across restarts, so L2 placements are deliberately not fenced. |
-| Seq dedup           | `seq <=` last applied (same incarnation) → drop batch (`DUPLICATE`).                                                                                                   | Replays (retry, event-bus redelivery) must be idempotent.                                                                                   |
-| Gap detection       | `seq >` last applied `+ 1` → set the instance's `gap_detected` flag (visible in stats), apply anyway.                                                                  | Events may be lost; the flag marks the instance's slice as stale until the stream is replayed (durable-transport retention). Entry application is idempotent, so applying past a gap is safe. |
-
-
-Per-instance FIFO by `seq` is the **only** ordering the design needs: each
-instance is the sole writer of its own facts, so there is no global order
-and no cross-instance arbitration.
+Application is idempotent, which is what lets the gate admit past a
+detected gap: re-storing upserts, deleting an absent placement is a
+no-op.
 
 Entry semantics by event type:
 
@@ -55,35 +51,64 @@ never creates records, and carries no placement identity — its
 `backend` may be empty (`tier`/`backend` are ignored on apply). `ts` is
 emitter wall-clock and is never compared across instances.
 
+Plus one non-batch hook, `fence_instance(instance_id)`: the gate calls
+it when an emitter restarts (a higher incarnation) or leaves the fleet,
+and the directory drops every **L1** placement that instance reported.
+L2 placements survive — their bytes persist on disk across the
+reporter's restarts and leave only via `DELETE`.
+
 ## Token index (chunk hash → token ids + keys)
 
-The directory can answer "what token ids does this chunk hold?" and
-"which keys share this chunk?" from the `STORE` entries themselves.
-Every store entry carries its chunk's `token_ids` — a deliberate wire
-trade: tokens ride once per rank/group/tier placement in exchange for a
+The directory can answer "what token ids does this chunk hold?",
+"where in its sequence did it sit?" and "which keys share this chunk?"
+from the `STORE` entries themselves.
+Every store entry carries its chunk's `token_ids` plus its
+`token_offset` — a deliberate wire trade: both ride once per
+rank/group/tier placement in exchange for a
 self-contained protocol (no per-chunk canonical entry, no cross-entry
 ordering to reason about). Bindings are keyed by `ObjectKey.chunk_hash`
 — the identity every entry and every lookup already carries — so the
 coordinator does no hashing at all.
 
+`token_offset` is the position of the chunk's first token in the
+sequence it was stored under, or `UNKNOWN_TOKEN_OFFSET` when no emitter
+reported one — distinct from 0, which is a real position. It cannot be derived: chunk hashes are
+prefix-chained, so the hash *implies* a unique position but does not
+reveal it, and position-dependent reuse (blend re-RoPE, which shifts KV
+from its stored position to the query's) needs the value. It is a
+property of the chunk hash, not of a placement, so it lives on the
+binding; two entries disagreeing about it would mean a hash collision.
+
+**Representation.** Tokens are held as a read-only `uint32` numpy array
+(`TokenBinding.token_ids`), ~1 KB per 256-token chunk against the ~10 KB
+a `tuple[int, ...]` of boxed ints costs — a live-chunk footprint the
+directory pays per chunk, not per placement, since every rank shares one
+binding. It also keeps content comparison against a query window
+vectorized. Token ids outside `uint32` leave the binding unfilled (a
+lookup miss) instead of failing the batch.
+
 The lookups this serves:
 
 - **key → tokens**: `key.chunk_hash` → binding
   (`get_token_ids(chunk_hashes)`, served by `POST /directory/lookup`'s
-  keys form).
+  keys form). Content only — the stored position reaches the blend path
+  as a match's `old_st`, never as a standalone lookup.
 - **prefix tokens → keys**: stateless — `POST /directory/lookup`'s
   tokens form recomputes keys from the sequence; no index involved.
-- **fragment tokens → keys** (blend-style, follow-up): rolling
+- **fragment tokens → keys** (blend-style): rolling
   fingerprints over the query discover candidate bindings, the query
   window is verified against `binding.token_ids` (exact), and the
   binding's keys give the placements. Discovery uses blend's cheap
   polynomial hash family; the index itself never needs a
-  content-addressed key because every hit is token-verified.
+  content-addressed key because every hit is token-verified. Implemented
+  as a derived view over these bindings — see
+  [blend_index.md](blend_index.md), served by `POST
+  /directory/blend-lookup`.
 
 Lifecycle is record lifecycle — bounded structurally, not configured:
 every record joins its chunk's binding at creation and leaves when it
-is dropped (delete, incarnation fencing, `drop_instance`); the binding
-dies with the chunk's last key. A binding's tokens stay empty until one
+is dropped (delete or `fence_instance`); the binding dies with the
+chunk's last key. A binding's tokens stay empty until one
 of its entries was stamped (the emitter's token cache is bounded) — an
 empty binding is a lookup miss, never an error, repaired by the chunk's
 next stamped entry. Eventually consistent soft state, like the rest of
@@ -149,12 +174,14 @@ ObjectKey → _KeyRecord {
     placements: list[Placement],   # ≤1 per placement identity (see STORE)
     content_hash_hex, last_access
 }
-instance_id → _InstanceState { incarnation, last_seq, gap_detected, keys }
+chunk_hash → _TokenBinding { token_ids: uint32[], token_offset, keys }
+instance_id → set[ObjectKey]       # L1 reverse index
 ```
 
-`_InstanceState.keys` is the reverse index that makes incarnation fencing
-and `drop_instance` (deregistration cleanup) proportional to the
-instance's own keys instead of a full directory scan.
+The L1 reverse index (`_l1_keys_by_instance`) is what makes
+`fence_instance` proportional to the instance's own keys instead of a
+full directory scan. The emitter's stream cursor is **not** here — it
+belongs to the gate ([ingest.md](ingest.md)).
 
 The Python-phase directory is keyed by `ObjectKey` directly (hashable
 frozen dataclass). The RFC's 16-byte
@@ -163,9 +190,10 @@ optimization (M6), not a semantic change.
 
 ## HTTP surface
 
-- `POST /directory/events` — apply `CacheEventBatch` batches (list
-order; per-instance emission order required). Duplicates and stale
-batches are counted in the response, not errors.
+- `POST /events` — offer `CacheEventBatch` batches to the
+ingest gate (list order; per-instance emission order required).
+Duplicates and stale batches are counted in the response, not errors.
+See [ingest.md](ingest.md).
 - `POST /directory/lookup` — resolve content to placements **and** token
 ids, in either direction (POST because the payload rides in the body).
 Supply exactly one of: `keys` (resolve keys directly) or `token_ids`
@@ -182,10 +210,11 @@ matching placements, recency, and `num_tokens` — a cheap indicator of
 whether the chunk's tokens are known. Full token ids are deliberately
 not inlined (a page repeats each chunk across its ranks/groups; fetch
 content via `/directory/lookup` for exactly the keys that need it).
-- `GET /directory/stats` — key/placement counts plus per-instance stream
-state (`incarnation`, `last_seq`, `gap_detected`, `num_l1_keys` from
-the fencing index), for observability and the future replay trigger;
-per-key L2 detail lives on the keys listing endpoint.
+- `GET /directory/stats` — key/placement counts, per-instance L1 key
+counts (the fencing index), and the blend-index counts; per-key L2
+detail lives on the keys listing endpoint. Directory contents only —
+per-emitter stream state lives on the ingest gate and has no endpoint
+yet (see [ingest.md](ingest.md)).
 
 Type placement:
 
@@ -195,29 +224,30 @@ MP-server emitter and the directory. Plain dataclasses with intrinsic
 invariants in `__post_init__` (the `ObjectKey` pattern: `seq >= 1`,
 concrete tier, non-empty ids are unconstructible anywhere).
 - **`key_directory.py`** — the engine plus everything the directory
-itself produces (`Placement`, `ApplyResult`, stats) and its private
-records.
+itself produces (`Placement`, `DirectoryStats`) and its private
+records. Admission outcomes (`IngestResult`) and stream cursors
+(`InstanceStreamStats`) belong to `ingest/event_gate.py`.
 - **`schemas.py`** — HTTP models only. 
 
 MP-server emission of the `CacheEvent` stream (L1 + L2, `incarnation` =
 server start time) is implemented — see
 [cache_events.md](cache_events.md). It is the fleet's single event
-stream: `/directory/events` ingestion fans applied batches out to the
-router's registered consumers (`CacheEventBroadcaster`) — derived views such
-as the per-salt L2 usage view and the eviction LRU (see
+stream: `/events` offers it to the gate, which fans admitted
+batches out to every consumer ([ingest.md](ingest.md)) — this
+directory, and the eviction manager's per-salt usage view and LRU (see
 [l2_usage_and_eviction.md](l2_usage_and_eviction.md)).
 
 ## Deliberately out of scope (follow-ups)
-- **Replay integration**: acting on `gap_detected` by replaying the
-instance's stream from the durable transport's retention (supersedes
-the earlier storage-scan resync idea).
-- **Allocation generations** for shared pools (deterministic
-cross-reporter conflict resolution; see Shared pools above).
-- **Registry integration**: calling `drop_instance` from deregistration /
-heartbeat-timeout eviction (the method exists and is tested).
-- **Content index (I2)**, blend rewiring, checkpointing, and the
+- **Stream-level follow-ups** (replay on `gap_detected`, registry-driven
+`drop_instance`, shared-pool allocation generations) now live with the
+gate — see [ingest.md](ingest.md).
+- **Blend rewiring**: pointing the mp-server blend lookup at
+`/directory/blend-lookup` and retiring `blend_directory.py` plus the
+per-store fingerprint publish. The coordinator side is done — see
+[blend_index.md](blend_index.md).
+- Checkpointing and the
 `DELETE_PENDING`/pin placement states used by tier-aware cache-control
-directives (M2–M4 of the RFC).
+directives (M3–M4 of the RFC).
 - **Token store (I3)**: the opt-in `content_hash → token_ids` store for
 `key → tokens` introspection, fed by `TOKENS` events and refcounted from
 key records via the `content_hash` back-pointer. Nothing

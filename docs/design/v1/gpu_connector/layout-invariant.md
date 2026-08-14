@@ -50,14 +50,24 @@ kv_format/
     └── <engine>.py            #   one file per engine (a single discover())
 ```
 
-- **One spec class per format — pure geometry.** Each `EngineKVFormat`
-  maps to exactly one `KVFormatSpec` subclass that knows how to index a
-  value of that format. A spec describes *only* layout geometry; both the
+- **One spec class per format — geometry plus static facts.** Each
+  `EngineKVFormat` maps to exactly one `KVFormatSpec` subclass that knows how to
+  index a value of that format. A spec describes *only* layout; both the
   class and its file are named after the format member (e.g.
   `NB_NL_TWO_BS_NH_HS_Spec` in `nb_nl_two_bs_nh_hs.py`) — a geometry
   encoding, never an engine. `get_spec(kv, fmt)` returns an instance for
   geometry; `get_spec_class(fmt)` returns the class for static facts
   (`is_mla`, `is_hnd`, `is_cross_layer`, `attention_backends`).
+- **Static facts are class attributes, declared once.** The structural shape
+  (`is_cross_layer` / `is_kv_list` / `is_layer_list`, exactly one true) and the
+  `is_mla` / `is_hnd` / `is_fused_packed` / `is_two_major` / `is_pbs_fused`
+  modifiers are booleans on the spec, defaulting to `False` so a spec only
+  declares what applies. Consumers read them via `get_spec_class(fmt)` — a
+  call site must never re-list formats (`fmt in (A, B, ...)`), which is how
+  the same predicate used to drift across `torch_ops.py`, the transfer
+  helpers and the connectors. The device kernels keep their own copy in
+  `csrc/engine_kv_format.h`; `tests/v1/gpu_connector/test_kv_format_classification.py`
+  pins the two sides together and enforces the structural partition.
 - **Backend labels are diagnostic, colocated on the spec.** A single
   `EngineKVFormat` can be produced by several (engine, attention-backend)
   combinations, so each spec lists them in `attention_backends` (a tuple),
@@ -98,20 +108,22 @@ kv_format/
 
 1. Add the enum value in `csrc/kv_transfer_types.h` (the single
    backend-agnostic definition shared by every accelerator backend), then
-   register it in each backend's pybind module — `csrc/pybind.cpp` (CUDA)
+   register it in each backend's pybind module — `csrc/cuda/pybind.cpp` (CUDA)
    and `csrc/sycl/pybind_sycl.cpp` (SYCL/XPU).
 2. Add a branch in the engine's `detectors/<engine>.py` `discover()`. It keys
    off `(list_depth, tensor_ndim)` from `measure_list_depth_until_tensor`,
    returning `(format, kv)`; any reshape-via-hints (e.g. TRT-LLM's 4-D `view`'d
    to 6-D) happens in the same method before the shape checks.
 3. Add a `KVFormatSpec` subclass as a new `specs/<engine_kv_format>.py` file
-   (named after the format, declaring its `engine_kv_format`). `registry.py`
+   (named after the format, declaring its `engine_kv_format` and its static
+   facts — the structural flag plus any modifier that applies). `registry.py`
    discovers it automatically — no other file changes. The ABC makes the
    required accessors explicit (a spec missing one raises `TypeError` on first
    `get_spec`, which the golden test triggers).
-4. Add a row to the golden table in
-   `tests/v1/gpu_connector/test_kv_format_specs.py` and a detection
-   case in `test_kv_format_detection.py`.
+4. Add a row to the golden tables in
+   `tests/v1/gpu_connector/test_kv_format_specs.py` and
+   `test_kv_format_classification.py`, plus a detection case in
+   `test_kv_format_detection.py`.
 
 No other Python module should need edits. If you're editing
 `kv_layer_groups.py`, `gpu_context.py`, or any `KVLayerGroupInfo`
@@ -149,8 +161,8 @@ an `EngineKVFormat`. Nothing else may index raw shapes.
 
 The two cross-layer formats (`NB_NL_TWO_*`) share a single base
 pointer, the kernel walks layers internally via `shape_desc.nl`. Use
-`is_cross_layer_format(fmt)` for that dispatch and `is_hnd(fmt)` to
-detect head-major within-block layouts.
+`get_spec_class(fmt).is_cross_layer` for that dispatch and
+`.is_hnd` to detect head-major within-block layouts.
 
 ### Reshape-via-hints (TRT-LLM)
 
@@ -182,14 +194,14 @@ helper.
 | `get_head_size(kv, fmt, layer_idx=0)` | yes | |
 | `get_hidden_dim_size(kv, fmt, layer_idx=0)` | yes | |
 | `get_dtype(kv, fmt, layer_idx=0)` | yes | |
-| `is_mla(fmt)`, `is_hnd(fmt)` | — | Format predicates. |
+| `is_mla(fmt)` | — | Format predicate; the other static facts are read off `get_spec_class(fmt)`. |
 | `get_device(kv)` | — | Format-agnostic (descends to any leaf). |
 
 ### Pointer and descriptor builders
 
 | Helper | Returns | Notes |
 |---|---|---|
-| `get_group_data_ptrs(kv, fmt, layer_indices)` | `list[int]` | Pointer array in **kernel-expected order**: `[base]` for cross-layer (`layer_indices` ignored), `[K_0…K_N, V_0…V_N]` for SGLang MHA, per-layer flat elsewhere. Matches the dispatch in `csrc/mp_mem_kernels.cu:161-169`. The pointer-array shape is a property of the format — callers never ask "does this format have per-layer pointers?". |
+| `get_group_data_ptrs(kv, fmt, layer_indices)` | `list[int]` | Pointer array in **kernel-expected order**: `[base]` for cross-layer (`layer_indices` ignored), `[K_0…K_N, V_0…V_N]` for SGLang MHA, per-layer flat elsewhere. Matches the dispatch in `csrc/cuda/mp_mem_kernels.cu:161-169`. The pointer-array shape is a property of the format — callers never ask "does this format have per-layer pointers?". |
 | `make_page_buffer_shape_desc(kv, fmt, layer_idx, num_layers_in_group, num_blocks, block_size, block_stride_elems)` | `PageBufferShapeDesc` | The kernel-facing shape struct. ``block_stride_elems`` carries the per-block dim-0 element stride; pass the value returned by `resolve_block_stride_and_log_layout` so groups with different physical block sizes (e.g. a compressed DeepSeek V4 indexer group alongside dense layers) share a single GPU pool. |
 
 ### Contiguity
@@ -205,6 +217,9 @@ consumer code must never do any of the following — it queries via the
 `utils.py` facade instead:
 
 - `isinstance(kv_cache, (tuple, list))` to distinguish layouts.
+- Re-listing formats to recover a static fact (`fmt in (A, B)`,
+  `fmt == NL_X_NB_NH_BS_CS`) — read it off `get_spec_class(fmt)` instead, or
+  add the missing fact to the specs.
 - Indexing raw shapes (`tensor.shape[3]`, `len(shape) == 5`) to derive
   dimensions.
 - Hand-rolled list-depth probing (`while isinstance(x, list): depth +=

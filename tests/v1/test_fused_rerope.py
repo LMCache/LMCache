@@ -26,18 +26,24 @@ except Exception:  # allow running as a plain script (bench) without pytest
 
 
 # First Party
+from lmcache import torch_dev, torch_device_type
+
 try:
     # First Party
-    import lmcache.c_ops as lmc_ops
+    import lmcache.cuda_ops as cuda_ops
 
-    _HAS_STRIDED = hasattr(lmc_ops, "rotary_embedding_k_fused_strided")
-except Exception:  # CPU-only / no built c_ops (e.g. the unit-test runner)
-    lmc_ops = None
+    _HAS_STRIDED = hasattr(cuda_ops, "rotary_embedding_k_fused_strided")
+except Exception:  # CPU-only / no built cuda_ops (e.g. the unit-test runner)
+    cuda_ops = None
     _HAS_STRIDED = False
 
-# These tests need CUDA and the built c_ops carrying the strided kernel; without
-# both they skip cleanly (keeps CPU-only pytest collection from erroring).
-_REQ = torch.cuda.is_available() and _HAS_STRIDED
+# These tests need CUDA, an available torch device backend, and a built cuda_ops
+# carrying the strided kernel.
+_REQ = torch_dev.is_available() and torch_device_type == "cuda" and _HAS_STRIDED
+
+# Module-level skip keeps every pytest case consistent without repeating
+# per-function decorators.
+pytestmark = _skipif(not _REQ, reason="requires CUDA + built cuda_ops")
 
 
 def _make_inputs(n_tokens, n_heads, head_size, max_pos, dtype, device, seed=0):
@@ -62,7 +68,7 @@ def _option1_copy(packed, old_pos, new_pos, cos_sin, head_size, is_neox=True):
     """Gather K contiguous -> existing kernel -> scatter back (in place)."""
     t, h = packed.shape[0], packed.shape[1]
     k = packed[:, :, 0, :].reshape(t, h, head_size).contiguous()
-    lmc_ops.rotary_embedding_k_fused(old_pos, new_pos, k, head_size, cos_sin, is_neox)
+    cuda_ops.rotary_embedding_k_fused(old_pos, new_pos, k, head_size, cos_sin, is_neox)
     packed[:, :, 0, :] = k.reshape(t, h, head_size)
 
 
@@ -70,14 +76,13 @@ def _option2_strided(packed, old_pos, new_pos, cos_sin, head_size, is_neox=True)
     """Strided kernel: rotate the K half in place (head_stride = 2*head_size)."""
     t, h = packed.shape[0], packed.shape[1]
     view = packed.reshape(t, h, 2 * head_size)  # contiguous view
-    lmc_ops.rotary_embedding_k_fused_strided(
+    cuda_ops.rotary_embedding_k_fused_strided(
         old_pos, new_pos, view, head_size, 2 * head_size, cos_sin, is_neox
     )
 
 
-@_skipif(not _REQ, reason="requires CUDA + built c_ops")
 def test_option2_matches_option1_and_preserves_v():
-    dev, dtype = "cuda", torch.bfloat16
+    dev, dtype = torch_device_type, torch.bfloat16
     packed, old_pos, new_pos, cos_sin = _make_inputs(
         n_tokens=512, n_heads=8, head_size=64, max_pos=4096, dtype=dtype, device=dev
     )
@@ -86,7 +91,7 @@ def test_option2_matches_option1_and_preserves_v():
 
     _option1_copy(p1, old_pos, new_pos, cos_sin, 64)
     _option2_strided(p2, old_pos, new_pos, cos_sin, 64)
-    torch.cuda.synchronize()
+    torch_dev.synchronize()
 
     # K rotated identically by both paths.
     assert torch.equal(p1[:, :, 0, :], p2[:, :, 0, :]), "option2 K != option1 K"
@@ -100,15 +105,14 @@ def test_option2_matches_option1_and_preserves_v():
 def _bench(fn, packed, *args, iters=200):
     # In place, no per-iter clone, so the timing isolates the op (not a full
     # KV clone). Bounded rotary cos/sin keeps repeated rotation numerically safe.
-    torch.cuda.synchronize()
+    torch_dev.synchronize()
     t0 = time.perf_counter()
     for _ in range(iters):
         fn(packed, *args)
-    torch.cuda.synchronize()
+    torch_dev.synchronize()
     return (time.perf_counter() - t0) / iters * 1e3  # ms/iter
 
 
-@_skipif(not _REQ, reason="requires CUDA + built c_ops")
 def test_bench_option1_vs_option2(capsys):
     # Timing report; run with `pytest -s` to see the table.
     with capsys.disabled():
@@ -119,7 +123,7 @@ def main():
     if not _REQ:
         print("CUDA unavailable; skipping fused re-RoPE bench")
         return
-    dev, dtype = "cuda", torch.bfloat16
+    dev, dtype = torch_device_type, torch.bfloat16
     print(
         f"{'config (T x H x D)':>22} | {'opt1 copy':>10} | "
         f"{'opt2 strided':>12} | speedup"

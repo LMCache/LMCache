@@ -169,7 +169,7 @@ async def request_pin(body: PinRequest, request: Request) -> PinResponse:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
 
-    ctx.eviction_manager.pin(resolved)
+    ctx.eviction_controller.pin(resolved)
     return PinResponse(
         requested=chunks,
         affected=len(resolved),
@@ -205,7 +205,7 @@ async def request_unpin(body: PinRequest, request: Request) -> PinResponse:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
 
-    ctx.eviction_manager.unpin(resolved)
+    ctx.eviction_controller.unpin(resolved)
     return PinResponse(
         requested=chunks,
         affected=len(resolved),
@@ -266,7 +266,7 @@ async def request_delete(body: DeleteRequest, request: Request) -> DeleteRespons
     # tiers; ``force`` deletes them and clears the pins.
     touches_l2 = body.tier in (Tier.L2, Tier.ALL)
     if touches_l2 and not body.force:
-        delete_keys = ctx.eviction_manager.filter_unpinned(resolved)
+        delete_keys = ctx.eviction_controller.filter_unpinned(resolved)
         pin_skipped = len(resolved) - len(delete_keys)
     else:
         delete_keys = resolved
@@ -296,7 +296,7 @@ async def request_delete(body: DeleteRequest, request: Request) -> DeleteRespons
         node_skipped = result.get("skipped", 0)
 
     if touches_l2 and body.force:
-        ctx.eviction_manager.drop_pins(resolved)
+        ctx.eviction_controller.drop_pins(resolved)
 
     # ``skipped`` = L1 keys the node refused (locks) + L2 keys the coordinator
     # held back for a pin.

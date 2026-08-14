@@ -80,7 +80,7 @@ class DeviceSpec:
 
     @property
     def ops_cls(self) -> type[DeviceOps]:
-        """DeviceOps subclass providing the ``lmcache.c_ops`` surface.
+        """DeviceOps subclass providing this platform's operation surface.
 
         Lazy by design: the import happens on *access*, not at class-definition
         or DeviceSpec-discovery time, so resolving a spec never drags the torch

@@ -8,15 +8,17 @@ import pytest
 import torch
 
 # First Party
+from lmcache.lmcache_native import EngineKVFormat
 from lmcache.utils import EngineType
 from lmcache.v1.platform import resolve_device_ops
 from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
 from lmcache.v1.platform.musa.cache_context import MUSACacheContext
 from lmcache.v1.platform.musa.device_ops import MusaDeviceOps
 from lmcache.v1.platform.musa.ipc_wrapper import is_musa_block_transfer_available
-from lmcache.v1.platform.ops_types import EngineKVFormat, PageBufferShapeDesc
+from lmcache.v1.platform.ops_types import PageBufferShapeDesc
+import lmcache.lmcache_native as lmcache_native
 
-lmc_ops = cast(MusaDeviceOps, resolve_device_ops("musa"))
+device_ops = cast(MusaDeviceOps, resolve_device_ops("musa"))
 
 
 def _using_python_fallback() -> bool:
@@ -45,7 +47,7 @@ def _shape_desc(
     dtype: torch.dtype,
 ) -> PageBufferShapeDesc:
     """Build a block-transfer shape descriptor for compact test tensors."""
-    desc = lmc_ops.PageBufferShapeDesc()
+    desc = device_ops.PageBufferShapeDesc()
     desc.nl = num_layers
     desc.nb = num_blocks
     desc.bs = block_size
@@ -66,24 +68,24 @@ def _round_trip(
     engine_kv_format: EngineKVFormat,
 ) -> list[torch.Tensor]:
     """Gather selected blocks into ``chunk`` and scatter them to new tensors."""
-    lmc_ops.multi_layer_block_kv_transfer(
+    device_ops.multi_layer_block_kv_transfer(
         source,
         [chunk],
         block_ids,
         device,
-        lmc_ops.TransferDirection.D2H,
+        lmcache_native.TransferDirection.D2H,
         shape_desc,
         chunk_tokens,
         engine_kv_format,
         0,
     )
     target = [torch.zeros_like(layer) for layer in source]
-    lmc_ops.multi_layer_block_kv_transfer(
+    device_ops.multi_layer_block_kv_transfer(
         target,
         [chunk],
         block_ids,
         device,
-        lmc_ops.TransferDirection.H2D,
+        lmcache_native.TransferDirection.H2D,
         shape_desc,
         chunk_tokens,
         engine_kv_format,
@@ -139,7 +141,7 @@ def test_musa_block_transfer_fallback_non_mla_d2h_and_h2d() -> None:
         torch.device("cpu"),
         shape_desc,
         chunk_tokens,
-        lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
+        lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
     )
 
     for layer_idx in range(num_layers):
@@ -186,7 +188,7 @@ def test_musa_block_transfer_fallback_mla_d2h_and_h2d() -> None:
         torch.device("cpu"),
         shape_desc,
         chunk_tokens,
-        lmc_ops.EngineKVFormat.NL_X_NB_BS_HS,
+        lmcache_native.EngineKVFormat.NL_X_NB_BS_HS,
     )
 
     for layer_idx in range(num_layers):
@@ -238,7 +240,7 @@ def test_musa_block_transfer_fallback_repeated_round_trip() -> None:
             torch.device("cpu"),
             shape_desc,
             chunk_tokens,
-            lmc_ops.EngineKVFormat.NL_X_NB_BS_HS,
+            lmcache_native.EngineKVFormat.NL_X_NB_BS_HS,
         )
         assert torch.equal(target[0][1], source[0][1])
         assert torch.equal(target[0][3], source[0][3])
@@ -284,28 +286,28 @@ def test_musa_cache_context_mla_operand_round_trip() -> None:
 
         expected = [layer.clone() for layer in source]
         block_ids = torch.tensor([2], dtype=torch.int64, device=device)
-        lmc_ops.multi_layer_block_kv_transfer(
+        device_ops.multi_layer_block_kv_transfer(
             context.get_kernel_group_kv_pointers(0),
             [staging.data_ptr()],
             block_ids,
             device,
-            lmc_ops.TransferDirection.D2H,
+            lmcache_native.TransferDirection.D2H,
             context.get_shape_desc(0),
             block_size,
-            lmc_ops.EngineKVFormat.NL_X_NB_BS_HS,
+            lmcache_native.EngineKVFormat.NL_X_NB_BS_HS,
             0,
         )
         for layer in source:
             layer.zero_()
-        lmc_ops.multi_layer_block_kv_transfer(
+        device_ops.multi_layer_block_kv_transfer(
             context.get_kernel_group_kv_pointers(0),
             [staging.data_ptr()],
             block_ids,
             device,
-            lmc_ops.TransferDirection.H2D,
+            lmcache_native.TransferDirection.H2D,
             context.get_shape_desc(0),
             block_size,
-            lmc_ops.EngineKVFormat.NL_X_NB_BS_HS,
+            lmcache_native.EngineKVFormat.NL_X_NB_BS_HS,
             0,
         )
         for expected_layer, restored_layer in zip(expected, source, strict=True):
@@ -331,15 +333,15 @@ def test_musa_block_transfer_rejects_unvalidated_layout() -> None:
     )
 
     with pytest.raises(ValueError, match="MUSA MP block transfer supports only"):
-        lmc_ops.multi_layer_block_kv_transfer(
+        device_ops.multi_layer_block_kv_transfer(
             [torch.zeros(1, 2, 1, 1, 1)],
             [torch.zeros(2, 1, 1, 1)],
             torch.tensor([0], dtype=torch.int64),
             torch.device("cpu"),
-            lmc_ops.TransferDirection.D2H,
+            lmcache_native.TransferDirection.D2H,
             shape_desc,
             1,
-            lmc_ops.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS,
+            lmcache_native.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS,
             0,
         )
 
@@ -388,7 +390,7 @@ def test_musa_block_transfer_device_non_mla_d2h_and_h2d() -> None:
         device,
         shape_desc,
         chunk_tokens,
-        lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
+        lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
     )
 
     for layer_idx in range(num_layers):
@@ -438,7 +440,7 @@ def test_musa_block_transfer_device_mla_d2h_and_h2d() -> None:
         device,
         shape_desc,
         chunk_tokens,
-        lmc_ops.EngineKVFormat.NL_X_NB_BS_HS,
+        lmcache_native.EngineKVFormat.NL_X_NB_BS_HS,
     )
 
     for layer_idx in range(num_layers):

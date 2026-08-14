@@ -13,7 +13,7 @@ from __future__ import annotations
 
 # Standard
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import Any, ClassVar
 import array
 
 # Third Party
@@ -24,13 +24,10 @@ from lmcache.v1.gpu_connector.utils import (
     get_attention_backend,
     get_concrete_engine_kv_shape_from_shape_desc,
     get_engine_kv_shape_description,
-    is_mla,
 )
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
-
-if TYPE_CHECKING:
-    # First Party
-    import lmcache.c_ops as lmc_ops
+from lmcache.v1.platform.ops_types import PageBufferShapeDesc
+import lmcache.lmcache_native as lmcache_native
 
 
 class BaseCacheContext(ABC):
@@ -178,11 +175,13 @@ class BaseCacheContext(ABC):
             kernel_group_idx, num_tokens
         )
 
-    def get_shape_desc(self, group_idx: int) -> "lmc_ops.PageBufferShapeDesc":
+    def get_shape_desc(self, group_idx: int) -> PageBufferShapeDesc:
         """Returns the PageBufferShapeDesc for *group_idx*."""
         return self.kv_layer_groups_manager.get_shape_desc(group_idx)
 
-    def get_engine_kv_format(self, kernel_group_idx: int) -> "lmc_ops.EngineKVFormat":
+    def get_engine_kv_format(
+        self, kernel_group_idx: int
+    ) -> "lmcache_native.EngineKVFormat":
         """Returns the Engine KV format of kernel *kernel_group_idx*.
 
         Raises:
@@ -199,18 +198,22 @@ class BaseCacheContext(ABC):
             )
         return engine_kv_format
 
-    def engine_kv_formats(self) -> list["lmc_ops.EngineKVFormat"]:
+    def engine_kv_formats(self) -> list["lmcache_native.EngineKVFormat"]:
         """Returns the Engine KV format of each kernel group, in group order."""
         num_groups = len(self.kv_layer_groups_manager.kernel_groups)
         return [self.get_engine_kv_format(idx) for idx in range(num_groups)]
 
-    def engine_kv_format_per_layer(self) -> list["lmc_ops.EngineKVFormat | None"]:
+    def engine_kv_format_per_layer(
+        self,
+    ) -> list["lmcache_native.EngineKVFormat | None"]:
         """Returns each layer's Engine KV format, indexed by layer index.
 
         Formats differ across layers for a mixed-format model. ``None`` marks a
         layer in no kernel group (a cross-layer KV-sharing layer).
         """
-        formats: list["lmc_ops.EngineKVFormat | None"] = [None] * len(self.kv_caches_)
+        formats: list["lmcache_native.EngineKVFormat | None"] = [None] * len(
+            self.kv_caches_
+        )
         for kernel_group_idx, group in enumerate(
             self.kv_layer_groups_manager.kernel_groups
         ):
@@ -278,8 +281,12 @@ class BaseCacheContext(ABC):
     def concrete_engine_kv_shape(self) -> str:
         """Returns the engine KV shape with actual numeric values."""
         group = self.kv_layer_groups_manager.kernel_groups[0]
+        engine_kv_format = group.engine_kv_format
+        # Detection-built groups always set engine_kv_format; this property
+        # is only meaningful for them, so None is unreachable here.
+        assert engine_kv_format is not None
         return get_concrete_engine_kv_shape_from_shape_desc(
-            group.shape_desc, group.engine_kv_format
+            group.shape_desc, engine_kv_format
         )
 
     # ------------------------------------------------------------------
@@ -320,7 +327,7 @@ class BaseCacheContext(ABC):
                     group.shape_desc, engine_kv_format
                 )
             ),
-            "is_mla": is_mla(engine_kv_format),
+            "is_mla": lmcache_native.is_mla(engine_kv_format),
             "engine_kv_format": engine_kv_format.name,
             "engine_kv_shape": get_engine_kv_shape_description(engine_kv_format),
             "attention_backend": get_attention_backend(engine_kv_format),

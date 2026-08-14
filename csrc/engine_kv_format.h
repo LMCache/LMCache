@@ -4,7 +4,7 @@
 
 // Physical KV-cache memory layout an engine hands to LMCache, plus the
 // classification predicates over it. Vendor-header-free, so every backend and
-// the Python facade (lmc_ops) share one definition. Detection (raw layout ->
+// the Python facade (device_ops) share one definition. Detection (raw layout ->
 // format) lives in lmcache/v1/gpu_connector/kv_format.
 
 /*
@@ -148,49 +148,75 @@ enum class EngineKVFormat : int {
   #define LMC_KV_FORMAT_HD
 #endif
 
-// Structural shape of the normalized kv_caches: exactly one is true per format.
+// Static layout facts for each format, declared once per format (indexed by the
+// enum value). This mirrors the facts declared on each Python KVFormatSpec so
+// the two sides can never drift; the predicates below are one-line lookups.
+// Exactly one structural shape (cross_layer / kv_list / layer_list) is true per
+// format. The remaining flags are modifiers layered on top of it.
+// Every field defaults to false; the table below only sets the true ones.
+struct FormatFacts {
+  bool is_cross_layer = false;   // all layers in one fused tensor
+  bool is_kv_list = false;       // keys and values in two top-level lists
+  bool is_layer_list = false;    // one list entry per layer
+  bool is_mla = false;           // MLA: single latent KV head (no separate K/V)
+  bool is_hnd = false;           // heads before block tokens (HND layout)
+  bool is_fused_packed = false;  // K/V packed in trailing dim (kv_size == 1)
+  bool is_two_major = false;     // size-2 K/V axis precedes the block axis
+  bool is_pbs_fused = false;     // paged buffer size fused into one axis
+};
+
+// clang-format off
+LMC_KV_FORMAT_HD constexpr FormatFacts FORMAT_FACTS[] = {
+    /*  0 NB_NL_TWO_BS_NH_HS      */ {.is_cross_layer = true},
+    /*  1 NL_X_TWO_NB_BS_NH_HS    */ {.is_layer_list = true,  .is_two_major = true},
+    /*  2 NL_X_NB_TWO_BS_NH_HS    */ {.is_layer_list = true},
+    /*  3 NL_X_NB_BS_HS           */ {.is_layer_list = true,  .is_mla = true},
+    /*  4 TWO_X_NL_X_NBBS_NH_HS   */ {.is_kv_list = true},
+    /*  5 NL_X_NBBS_ONE_HS        */ {.is_layer_list = true,  .is_mla = true,
+                                      .is_pbs_fused = true},
+    /*  6 NL_X_TWO_NB_NH_BS_HS    */ {.is_layer_list = true,  .is_hnd = true,
+                                      .is_two_major = true},
+    /*  7 NL_X_NB_TWO_NH_BS_HS    */ {.is_layer_list = true,  .is_hnd = true},
+    /*  8 NB_NL_TWO_NH_BS_HS      */ {.is_cross_layer = true, .is_hnd = true},
+    /*  9 TWO_X_NL_X_NB_BS_NH_HS  */ {.is_kv_list = true},
+    /* 10 NL_X_NB_NH_BS_TWO_HS    */ {.is_layer_list = true,  .is_hnd = true,
+                                      .is_fused_packed = true},
+    /* 11 NL_X_NB_BS_NH_TWO_HS    */ {.is_layer_list = true,  .is_fused_packed = true},
+    /* 12 NL_X_NB_NH_BS_CS        */ {.is_layer_list = true,  .is_hnd = true,
+                                      .is_fused_packed = true},
+    /* 13 NL_X_NB_BS_NH_CS        */ {.is_layer_list = true,  .is_fused_packed = true},
+    /* 14 NL_X_NB_BSV_BSS         */ {.is_layer_list = true,  .is_mla = true},
+};
+// clang-format on
+
+LMC_KV_FORMAT_HD constexpr const FormatFacts& format_facts(EngineKVFormat f) {
+  return FORMAT_FACTS[static_cast<int>(f)];
+}
 
 // All layers in one fused tensor.
 LMC_KV_FORMAT_HD constexpr bool is_cross_layer(EngineKVFormat f) {
-  return f == EngineKVFormat::NB_NL_TWO_BS_NH_HS ||
-         f == EngineKVFormat::NB_NL_TWO_NH_BS_HS;
+  return format_facts(f).is_cross_layer;
 }
 
 // Keys and values in two separate top-level lists: [key_layers, value_layers].
 LMC_KV_FORMAT_HD constexpr bool is_kv_list(EngineKVFormat f) {
-  return f == EngineKVFormat::TWO_X_NL_X_NBBS_NH_HS ||
-         f == EngineKVFormat::TWO_X_NL_X_NB_BS_NH_HS;
+  return format_facts(f).is_kv_list;
 }
 
 // One list entry per layer: kv_caches[layer_idx] is that layer's tensor.
 LMC_KV_FORMAT_HD constexpr bool is_layer_list(EngineKVFormat f) {
-  return f == EngineKVFormat::NL_X_TWO_NB_BS_NH_HS ||
-         f == EngineKVFormat::NL_X_NB_TWO_BS_NH_HS ||
-         f == EngineKVFormat::NL_X_NB_BS_HS ||
-         f == EngineKVFormat::NL_X_NBBS_ONE_HS ||
-         f == EngineKVFormat::NL_X_TWO_NB_NH_BS_HS ||
-         f == EngineKVFormat::NL_X_NB_TWO_NH_BS_HS ||
-         f == EngineKVFormat::NL_X_NB_NH_BS_TWO_HS ||
-         f == EngineKVFormat::NL_X_NB_BS_NH_TWO_HS ||
-         f == EngineKVFormat::NL_X_NB_NH_BS_CS ||
-         f == EngineKVFormat::NL_X_NB_BS_NH_CS ||
-         f == EngineKVFormat::NL_X_NB_BSV_BSS;
+  return format_facts(f).is_layer_list;
 }
 
 // Multi-head Latent Attention: a single latent KV head (no separate K/V split).
 // The blocked-scale indexer cache transfers like MLA (single plane,
 // kv_size == 1); only its paged addressing differs.
 LMC_KV_FORMAT_HD constexpr bool is_mla(EngineKVFormat f) {
-  return f == EngineKVFormat::NL_X_NB_BS_HS ||     // vLLM MLA
-         f == EngineKVFormat::NL_X_NBBS_ONE_HS ||  // SGLang MLA
-         f == EngineKVFormat::NL_X_NB_BSV_BSS;     // DSA indexer (blocked)
+  return format_facts(f).is_mla;
 }
 
 // vLLM fused K/V: K and V packed in the trailing dim (2 * head_size), no
 // separate K/V axis — transferred as one k_or_v == 0 pass (like MLA).
 LMC_KV_FORMAT_HD constexpr bool is_fused_packed(EngineKVFormat f) {
-  return f == EngineKVFormat::NL_X_NB_NH_BS_TWO_HS ||  // fused HND (deprecated)
-         f == EngineKVFormat::NL_X_NB_BS_NH_TWO_HS ||  // fused NHD (deprecated)
-         f == EngineKVFormat::NL_X_NB_NH_BS_CS ||      // content-size HND
-         f == EngineKVFormat::NL_X_NB_BS_NH_CS;        // content-size NHD
+  return format_facts(f).is_fused_packed;
 }

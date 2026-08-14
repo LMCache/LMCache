@@ -15,6 +15,7 @@ from lmcache.v1.multiprocess.group_view import (
     get_engine_group_indices,
     num_engine_groups,
 )
+import lmcache.lmcache_native as lmcache_native
 
 # Test doubles for the vLLM KV cache spec classes. Unit tests must run
 # without vLLM installed; sliding-window specs are detected by class name,
@@ -48,6 +49,14 @@ class MLAAttentionSpec:
     """Key-only, one-vector-per-token spec (an MLA index cache)."""
 
     block_size: int
+
+
+@dataclass
+class MambaSpec:
+    """Align-mode Mamba/linear-attention spec (detected by class name)."""
+
+    block_size: int
+    mamba_cache_mode: str = "align"
 
 
 @dataclass
@@ -191,6 +200,40 @@ def test_conversion_defaults_sliding_window_for_non_sw_spec():
     assert [group.sw_size_tokens for group in spec] == [-1]
 
 
+def test_conversion_resolves_mamba_align_window():
+    """An align-mode Mamba group carries a one-block cross-chunk window
+    (sw_size_tokens == block_size), so it becomes a 1-chunk sliding window
+    downstream; full attention stays -1."""
+    spec = create_engine_group_infos_from_vllm(
+        MockKVCacheConfig(
+            kv_cache_groups=[
+                MockKVCacheGroup(["layer.0"], FullAttentionSpec(block_size=16)),
+                MockKVCacheGroup(["layer.1"], MambaSpec(block_size=16)),
+            ]
+        ),
+        _same_shape_caches(["layer.0", "layer.1"]),
+    )
+
+    assert [group.sw_size_tokens for group in spec] == [-1, 16]
+
+
+def test_conversion_mamba_non_align_not_windowed():
+    """Only align mode keeps a reusable per-block snapshot; other Mamba cache
+    modes are not treated as a sliding window."""
+    spec = create_engine_group_infos_from_vllm(
+        MockKVCacheConfig(
+            kv_cache_groups=[
+                MockKVCacheGroup(
+                    ["layer.0"], MambaSpec(block_size=16, mamba_cache_mode="none")
+                ),
+            ]
+        ),
+        _same_shape_caches(["layer.0"]),
+    )
+
+    assert [group.sw_size_tokens for group in spec] == [-1]
+
+
 def test_conversion_uniform_type_specs_resolve_per_layer():
     """Inside a UniformTypeKVCacheSpecs group, per-layer specs decide the
     window. SW layers with a distinct transfer identity get their own group
@@ -303,15 +346,14 @@ def test_group_layers_by_identity_uses_per_layer_format():
     distinction the single global format cannot express."""
     # First Party
     from lmcache.v1.kv_layer_groups import group_layers_by_identity
-    import lmcache.c_ops as lmc_ops
 
     kv_caches = [
         torch.randn(2, 32, 16, 8, 64, dtype=torch.bfloat16),  # K+V (rank-5)
         torch.randn(32, 16, 128, dtype=torch.bfloat16),  # MLA key-only (rank-3)
     ]
     per_layer_format = [
-        lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
-        lmc_ops.EngineKVFormat.NL_X_NB_BS_HS,
+        lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
+        lmcache_native.EngineKVFormat.NL_X_NB_BS_HS,
     ]
     groups = group_layers_by_identity(
         kv_caches,
@@ -334,13 +376,12 @@ def test_group_layers_by_identity_rejects_group_idx_length_mismatch():
     """per_layer_engine_group_idx must hold one entry per layer."""
     # First Party
     from lmcache.v1.kv_layer_groups import group_layers_by_identity
-    import lmcache.c_ops as lmc_ops
 
     kv_caches = [torch.randn(2, 32, 16, 8, 64, dtype=torch.bfloat16)]
     # One layer (one format) but two engine-group ids.
     with pytest.raises(ValueError, match="per_layer_engine_group_idx"):
         group_layers_by_identity(
             kv_caches,
-            [lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS],
+            [lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS],
             per_layer_engine_group_idx=[0, 1],
         )

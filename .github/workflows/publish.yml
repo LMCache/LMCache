@@ -62,6 +62,7 @@ jobs:
                         - '.github/workflows/code_quality_checks.yml'
                         - '.github/workflows/publish.yml'
                         - '.github/workflows/build_main_artifacts.yml'
+                        - '.github/workflows/build_main_artifacts_arm64.yml'
                         - '.github/workflows/build_cli_artifacts.yml'
                         - '.github/workflows/build_cu129_artifacts.yml'
                         - '.github/workflows/build_rocm_artifacts.yml'
@@ -76,6 +77,12 @@ jobs:
         if: needs.changes.outputs.lmcache == 'true'
         name: Build main
         uses: ./.github/workflows/build_main_artifacts.yml
+
+    build-main-arm64:
+        needs: changes
+        if: needs.changes.outputs.lmcache == 'true'
+        name: Build main (arm64)
+        uses: ./.github/workflows/build_main_artifacts_arm64.yml
 
     build-cli:
         needs: changes
@@ -123,6 +130,7 @@ jobs:
         # doesn't trigger a publish that fails on the missing artifact.
         if: |
             needs.build-main.result == 'success' &&
+            needs.build-main-arm64.result == 'success' &&
             needs.test.result == 'success' &&
             needs.code-quality.result == 'success' &&
             needs.changes.outputs.lmcache == 'true' &&
@@ -133,7 +141,7 @@ jobs:
             # see https://docs.pypi.org/trusted-publishers/
             id-token: write
         runs-on: ubuntu-latest
-        needs: [changes, build-main, test, code-quality]
+        needs: [changes, build-main, build-main-arm64, test, code-quality]
 
         steps:
             - name: Harden Runner
@@ -146,6 +154,12 @@ jobs:
               uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
               with:
                   name: release-artifacts
+                  path: dist
+
+            - name: Fetch arm64 release artifacts
+              uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+              with:
+                  name: release-artifacts-arm64
                   path: dist
 
             - name: Upload to Test PyPI
@@ -194,6 +208,7 @@ jobs:
         name: Publish release to pypi.org
         if: |
             needs.build-main.result == 'success' &&
+            needs.build-main-arm64.result == 'success' &&
             needs.test.result == 'success' &&
             needs.code-quality.result == 'success' &&
             needs.changes.outputs.lmcache == 'true' &&
@@ -205,7 +220,7 @@ jobs:
             contents: write
 
         runs-on: ubuntu-latest
-        needs: [changes, build-main, test, code-quality]
+        needs: [changes, build-main, build-main-arm64, test, code-quality]
 
         steps:
             - name: Harden Runner
@@ -218,6 +233,12 @@ jobs:
               uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
               with:
                   name: release-artifacts
+                  path: dist
+
+            - name: Fetch arm64 release artifacts
+              uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+              with:
+                  name: release-artifacts-arm64
                   path: dist
 
             - name: Upload release artifacts to GitHub release
@@ -359,7 +380,7 @@ jobs:
                   Install into an upstream vLLM ROCm container:
                   \`\`\`
                   VERSION=${{ github.ref_name }}
-                  pip install lmcache==\${VERSION#v} --no-deps \\
+                  pip install lmcache==${{ needs.build-rocm.outputs.rocm_version }} --no-deps \\
                     --find-links https://github.com/${{ github.repository }}/releases/expanded_assets/\${VERSION}-rocm
                   \`\`\`" \
                     dist/*.whl

@@ -421,6 +421,14 @@ class RawBlockCore:
     def _resolve_max_data_transfer_size(self, configured_size: int) -> int:
         """Resolve transfer split size from config or NVMe sysfs queue limits.
 
+        When auto-detecting, the size is bounded by both the device's
+        ``max_hw_sectors_kb`` (total transfer size) and its ``max_segments``
+        scatter-gather limit. The NVMe ``io_uring_cmd`` passthrough path builds
+        one iovec segment per page, so a single transfer can consume up to
+        ``ceil(len / page_size)`` segments. Exceeding ``max_segments`` makes the
+        kernel reject the command with ``EINVAL``, so the resolved size is
+        capped at ``max_segments * page_size``.
+
         Args:
             configured_size: Explicitly configured max data transfer size in bytes.
                 If > 0, this value is used directly. If <= 0, the size is
@@ -433,6 +441,8 @@ class RawBlockCore:
         Raises:
             ValueError: If ``configured_size`` is > 0 but not a multiple of
                 ``self.block_align``.
+            RuntimeError: If sysfs queue limits cannot be resolved during
+                auto-detection.
         """
         if configured_size > 0:
             if configured_size % self.block_align != 0:
@@ -458,16 +468,27 @@ class RawBlockCore:
             )
 
         resolved_bytes = max_hw_sectors_kb * 1024
+
+        # The io_uring_cmd passthrough path builds one iovec segment per page,
+        # so cap the transfer at the device's scatter-gather segment limit.
+        max_segments = _read_sysfs_int(f"{queue_dir}/max_segments")
+        page_size = os.sysconf("SC_PAGE_SIZE")
+        if max_segments is not None and max_segments > 0:
+            segment_limit_bytes = max_segments * page_size
+            resolved_bytes = min(resolved_bytes, segment_limit_bytes)
+
         aligned_bytes = (resolved_bytes // self.block_align) * self.block_align
         if aligned_bytes <= 0:
             aligned_bytes = self.block_align
 
         logger.info(
             "RustRawBlockBackend: auto max_data_transfer_size=%d bytes "
-            "(device=%s, max_hw_sectors_kb=%s)",
+            "(device=%s, max_hw_sectors_kb=%s, max_segments=%s, page_size=%d)",
             aligned_bytes,
             self.device_path,
             max_hw_sectors_kb,
+            max_segments,
+            page_size,
         )
         return aligned_bytes
 
