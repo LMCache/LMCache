@@ -8,7 +8,7 @@ either platform with a matching platform-specific build. All implementations
 expose an identical API -- :class:`AsyncHandle`, :class:`Submission`, and the
 ``register_*`` / ``deregister_*`` / ``close_driver`` functions -- so
 :mod:`lmcache.v1.gpu_connector.gds_context` remains backend-agnostic.
-The uGDS-only :func:`get_ugds_device_size` helper is intentionally separate
+The uGDS-only :func:`get_ugds_device_capacity` helper is intentionally separate
 from that common backend surface.
 
 Selection is by ``torch.version.hip``: a ROCm torch build reports a non-None
@@ -149,7 +149,7 @@ def select_backend(name: BackendName) -> str:
     return _selected_backend
 
 
-def get_ugds_device_size(fd: int, handle: int) -> int:
+def get_ugds_device_capacity(fd: int, handle: int) -> int:
     """Return the capacity reported by the selected uGDS backend.
 
     Args:
@@ -165,6 +165,6 @@ def get_ugds_device_size(fd: int, handle: int) -> int:
     """
     if _selected_backend != "ugds":
         raise RuntimeError(
-            "get_ugds_device_size requires the selected GDS backend to be 'ugds'"
+            "get_ugds_device_capacity requires the selected GDS backend to be 'ugds'"
         )
-    return _backend.get_device_size(fd, handle)
+    return _backend.get_device_capacity(fd, handle)

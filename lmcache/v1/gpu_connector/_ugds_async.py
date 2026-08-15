@@ -3,7 +3,7 @@
 
 Drop-in replacement for :mod:`_cufile_async` that uses uGDS's user-space
 NVMe path instead of cuFile. Its common GDS operations are compatible with
-the other backends, while :func:`get_device_size` is uGDS-specific because
+the other backends, while :func:`get_device_capacity` is uGDS-specific because
 raw devices cannot rely on file allocation to validate the requested slab.
 
 LMCache expects ``libugds.so`` to match the active NVIDIA CUDA or AMD ROCm
@@ -83,17 +83,17 @@ def _declare_signatures(lib: ctypes.CDLL) -> None:
     lib.uGDSHandleDeregister.restype = None
 
     try:
-        get_device_size_fn = lib.uGDSGetDeviceSize
+        get_device_capacity_fn = lib.uGDSGetDeviceCapacity
     except AttributeError as exc:
         raise RuntimeError(
-            "libugds.so does not provide uGDSGetDeviceSize; update uGDS "
+            "libugds.so does not provide uGDSGetDeviceCapacity; update uGDS "
             "before enabling the LMCache uGDS backend"
         ) from exc
-    get_device_size_fn.argtypes = [
+    get_device_capacity_fn.argtypes = [
         ctypes.c_void_p,  # uGDSHandle_t fh
-        ctypes.POINTER(ctypes.c_uint64),  # uint64_t *size_bytes
+        ctypes.POINTER(ctypes.c_uint64),  # uint64_t *capacity_bytes
     ]
-    get_device_size_fn.restype = _uGDSError_t
+    get_device_capacity_fn.restype = _uGDSError_t
 
     lib.uGDSBufRegister.argtypes = [
         ctypes.c_void_p,  # const void *bufPtr_base
@@ -200,7 +200,7 @@ def deregister_handle(handle: int) -> None:
     lib.uGDSHandleDeregister(ctypes.c_void_p(handle))
 
 
-def get_device_size(fd: int, handle: int) -> int:
+def get_device_capacity(fd: int, handle: int) -> int:
     """Return the NVMe namespace capacity associated with a uGDS handle.
 
     Args:
@@ -215,14 +215,16 @@ def get_device_size(fd: int, handle: int) -> int:
         RuntimeError: If uGDS cannot query the device or returns zero capacity.
     """
     del fd
-    size_bytes = ctypes.c_uint64()
+    capacity_bytes = ctypes.c_uint64()
     _check(
-        _get_lib().uGDSGetDeviceSize(ctypes.c_void_p(handle), ctypes.byref(size_bytes)),
-        "uGDSGetDeviceSize",
+        _get_lib().uGDSGetDeviceCapacity(
+            ctypes.c_void_p(handle), ctypes.byref(capacity_bytes)
+        ),
+        "uGDSGetDeviceCapacity",
     )
-    if size_bytes.value == 0:
-        raise RuntimeError("uGDSGetDeviceSize returned zero capacity")
-    return size_bytes.value
+    if capacity_bytes.value == 0:
+        raise RuntimeError("uGDSGetDeviceCapacity returned zero capacity")
+    return capacity_bytes.value
 
 
 # --- Buffer / stream registration -----------------------------------

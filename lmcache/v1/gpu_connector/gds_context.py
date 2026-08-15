@@ -303,12 +303,12 @@ class GDSContext:
         try:
             handle = ca.register_handle(fd)
             if self._backend == "ugds":
-                device_size = ca.get_ugds_device_size(fd, handle)
-                if self._slab_size > device_size:
+                device_capacity = ca.get_ugds_device_capacity(fd, handle)
+                if self._slab_size > device_capacity:
                     raise ValueError(
                         "GDS L1 slab size "
                         f"({self._slab_size} bytes) exceeds backing device capacity "
-                        f"({device_size} bytes): {self._slab_path}"
+                        f"({device_capacity} bytes): {self._slab_path}"
                     )
         except Exception:
             if handle is not None:

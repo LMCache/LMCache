@@ -308,7 +308,7 @@ least that large and must not hold anything else.
    ``libugds.so``, and verify the installation.
 
    At startup LMCache queries the namespace capacity through
-   ``uGDSGetDeviceSize`` and rejects an aligned ``--l1-size-gb`` value larger
+   ``uGDSGetDeviceCapacity`` and rejects an aligned ``--l1-size-gb`` value larger
    than the device. The installed ``libugds.so`` must provide this API; LMCache
    fails closed with an upgrade message when an older library cannot report
    capacity.
