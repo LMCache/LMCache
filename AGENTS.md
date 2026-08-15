@@ -24,11 +24,6 @@ uv pip install torch               # pre-requisite for CUDA extensions
 uv pip install -e . --no-build-isolation
 ```
 
-When using the repo's ``uv``-managed virtualenv without activating it first,
-do not assume ``python -m pip`` works: this environment may not include the
-``pip`` module. Prefer ``uv pip install --python .venv/bin/python ...`` for
-one-off installs (including docs/test dependencies).
-
 ## Build & Install
 
 ```bash
@@ -176,11 +171,6 @@ cd docs
 make clean
 make html
 ```
-
-If you are running the docs build without activating ``.venv`` first, export
-``SPHINXBUILD=/abs/path/to/.venv/bin/sphinx-build`` (or prepend
-``.venv/bin`` to ``PATH``) before invoking ``make``; otherwise the Makefile
-may fail with ``sphinx-build: command not found``.
 
 The build must complete **without errors or warnings**. Review the generated HTML in `docs/build/html/` to confirm formatting, links, and examples render correctly. You can preview locally with:
 
