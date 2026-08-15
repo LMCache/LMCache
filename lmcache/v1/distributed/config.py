@@ -176,7 +176,8 @@ class GdsL1Config:
 
     size_in_bytes: int
     """Slab capacity in bytes (from ``--l1-size-gb``). For uGDS, this reserves
-    the corresponding leading range of the raw character device."""
+    the corresponding leading range of the dedicated raw character device and
+    must not exceed its reported namespace capacity."""
 
     use_direct_io: bool = True
     """Use ``O_DIRECT`` for cuFile/hipFile. Ignored by uGDS."""

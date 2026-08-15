@@ -126,8 +126,9 @@ class GDSContext:
                 directly onto the raw device at ``file_location``.
 
         Raises:
-            ValueError: If the backend is incompatible or the uGDS path is not
-                an ``ugds_drv`` character device.
+            ValueError: If the backend is incompatible, the uGDS path is not
+                an ``ugds_drv`` character device, or the aligned slab size
+                exceeds the backing device capacity.
             Exception: Whatever the GDS library raises if GDS is unavailable.
         """
         self._slab_size = (config.size_in_bytes + _CUFILE_ALIGNMENT - 1) & ~(
@@ -298,9 +299,25 @@ class GDSContext:
             if use_direct_io:
                 flags |= os.O_DIRECT
             fd = os.open(self._slab_path, flags)
+        handle = None
         try:
             handle = ca.register_handle(fd)
+            device_size = ca.get_device_size(fd, handle)
+            if self._slab_size > device_size:
+                raise ValueError(
+                    "GDS L1 slab size "
+                    f"({self._slab_size} bytes) exceeds backing device capacity "
+                    f"({device_size} bytes): {self._slab_path}"
+                )
         except Exception:
+            if handle is not None:
+                try:
+                    ca.deregister_handle(handle)
+                except Exception as cleanup_error:
+                    logger.warning(
+                        "GDSContext: handle cleanup after capacity check failed: %s",
+                        cleanup_error,
+                    )
             os.close(fd)
             raise
         self._slab_handle = ca.AsyncHandle.from_fd(

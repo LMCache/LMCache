@@ -275,6 +275,21 @@ def deregister_handle(handle: int) -> None:
     _lib().hipFileHandleDeregister(ctypes.c_void_p(handle))
 
 
+def get_device_size(fd: int, handle: int) -> int:
+    """Return the size of the file registered by ``handle``.
+
+    Args:
+        fd: Open file descriptor backing the hipFile handle.
+        handle: Registered hipFile handle. It is accepted for API consistency
+            with the other GDS backends and is not inspected.
+
+    Returns:
+        Current file size in bytes.
+    """
+    del handle
+    return os.fstat(fd).st_size
+
+
 # --- Buffer / stream registration ----------------------------------
 
 

@@ -40,6 +40,7 @@ class _FakeLib:
     uGDSDriverOpen: Callable[..., ua._uGDSError_t]
     uGDSDriverClose: Callable[..., ua._uGDSError_t]
     uGDSHandleRegister: Callable[..., ua._uGDSError_t]
+    uGDSGetDeviceSize: Callable[..., ua._uGDSError_t]
     uGDSBufRegister: Callable[..., ua._uGDSError_t]
     uGDSStreamRegister: Callable[..., ua._uGDSError_t]
     uGDSReadAsync: Callable[..., ua._uGDSError_t]
@@ -47,12 +48,15 @@ class _FakeLib:
 
     def __init__(self) -> None:
         self.calls: dict[str, list[tuple[Any, ...]]] = {}
+        self.device_size = 2 << 40
 
     def __getattr__(self, name: str) -> Any:
         def _record(*args: Any) -> ua._uGDSError_t:
             self.calls.setdefault(name, []).append(args)
             if name == "uGDSHandleRegister":
                 args[0]._obj.value = 0xDEADBEEF
+            elif name == "uGDSGetDeviceSize":
+                args[1]._obj.value = self.device_size
             return _ok()
 
         return _record
@@ -85,6 +89,7 @@ class TestApiSurface:
             "close_driver",
             "register_handle",
             "deregister_handle",
+            "get_device_size",
             "register_buffer",
             "deregister_buffer",
             "register_stream",
@@ -175,6 +180,24 @@ class TestHandleRegistration:
         ua.deregister_handle(0x1234)
         (handle,) = _fake_lib.calls["uGDSHandleDeregister"][0]
         assert handle.value == 0x1234
+
+    def test_get_device_size_returns_namespace_capacity(
+        self, _fake_lib: _FakeLib
+    ) -> None:
+        assert ua.get_device_size(42, 0x1234) == _fake_lib.device_size
+        handle, size_ref = _fake_lib.calls["uGDSGetDeviceSize"][0]
+        assert handle.value == 0x1234
+        assert size_ref._obj.value == _fake_lib.device_size
+
+    def test_get_device_size_propagates_error(self, _fake_lib: _FakeLib) -> None:
+        _fake_lib.uGDSGetDeviceSize = lambda *args: _err(5008)
+        with pytest.raises(RuntimeError, match="uGDSGetDeviceSize"):
+            ua.get_device_size(42, 0x1234)
+
+    def test_get_device_size_rejects_zero_capacity(self, _fake_lib: _FakeLib) -> None:
+        _fake_lib.device_size = 0
+        with pytest.raises(RuntimeError, match="zero capacity"):
+            ua.get_device_size(42, 0x1234)
 
 
 class TestBufferRegistration:

@@ -6,8 +6,8 @@ selection chooses cuFile on NVIDIA and hipFile on AMD ROCm; GDS L1 config can
 explicitly select uGDS for a raw ``/dev/ugds_drvX`` slab. uGDS can be used on
 either platform with a matching platform-specific build. All implementations
 expose an identical API --
-:class:`AsyncHandle`, :class:`Submission`, and the ``register_*`` /
-``deregister_*`` / ``close_driver`` functions -- so
+:class:`AsyncHandle`, :class:`Submission`, :func:`get_device_size`, and the
+``register_*`` / ``deregister_*`` / ``close_driver`` functions -- so
 :mod:`lmcache.v1.gpu_connector.gds_context` remains backend-agnostic.
 
 Selection is by ``torch.version.hip``: a ROCm torch build reports a non-None
@@ -38,6 +38,7 @@ _EXPORTED_NAMES = (
     "close_driver",
     "register_handle",
     "deregister_handle",
+    "get_device_size",
     "register_buffer",
     "deregister_buffer",
     "register_stream",
@@ -103,6 +104,9 @@ if TYPE_CHECKING:
     )
     from lmcache.v1.gpu_connector._cufile_async import (
         deregister_stream as deregister_stream,
+    )
+    from lmcache.v1.gpu_connector._cufile_async import (
+        get_device_size as get_device_size,
     )
     from lmcache.v1.gpu_connector._cufile_async import (
         register_buffer as register_buffer,

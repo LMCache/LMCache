@@ -366,6 +366,7 @@ class TestUgdsInitialization:
 
         monkeypatch.setattr(ca, "select_backend", lambda name: "ugds")
         monkeypatch.setattr(ca, "register_handle", register_handle)
+        monkeypatch.setattr(ca, "get_device_size", lambda fd, handle: 128 << 20)
         monkeypatch.setattr(ca, "AsyncHandle", FakeAsyncHandle)
         monkeypatch.setattr(
             gds_context.logger,
@@ -406,6 +407,41 @@ class TestUgdsInitialization:
         assert wrapped == [(33, 0xBEEF, device)]
         assert warnings == ["GDSContext: use_direct_io is ignored by uGDS"]
         ctx.close()
+
+    def test_rejects_l1_size_over_device_capacity(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        device = "/dev/ugds_drv7"
+        closed: list[int] = []
+        deregistered: list[int] = []
+
+        monkeypatch.setattr(ca, "select_backend", lambda name: "ugds")
+        monkeypatch.setattr(ca, "register_handle", lambda fd: 0xBEEF)
+        monkeypatch.setattr(ca, "get_device_size", lambda fd, handle: 32 << 20)
+        monkeypatch.setattr(ca, "deregister_handle", deregistered.append)
+        monkeypatch.setattr(
+            ca.AsyncHandle,
+            "from_fd",
+            lambda *args, **kwargs: pytest.fail("oversized slab must not be wrapped"),
+        )
+        monkeypatch.setattr(os, "open", lambda path, flags: 33)
+        monkeypatch.setattr(os, "close", closed.append)
+        _mock_device_node(monkeypatch, stat.S_IFCHR, "ugds_drv")
+
+        ctx = GDSContext()
+        with pytest.raises(ValueError, match="exceeds backing device capacity"):
+            ctx.initialize(
+                GdsL1Config(
+                    file_location=device,
+                    size_in_bytes=64 << 20,
+                    backend="ugds",
+                )
+            )
+
+        assert ctx.initialized is False
+        assert deregistered == [0xBEEF]
+        assert closed == [33]
 
 
 class TestResolveBuffer:
