@@ -8,6 +8,7 @@ import enum
 # Third Party
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
+    KVConnectorWorkerMetadata,
 )
 from vllm.v1.utils import ConstantList
 import torch
@@ -370,3 +371,25 @@ class LMCacheMPConnectorMetadata(KVConnectorMetadata):
 
     def __repr__(self):
         return self.__str__()
+
+
+@dataclass
+class LMCacheMPWorkerMetadata(KVConnectorWorkerMetadata):
+    """Worker -> Scheduler metadata for completed store events.
+
+    Each worker reports {req_id: 1} for newly completed stores.
+    ``aggregate()`` sums counts across workers within a step.
+    The scheduler-side manager accumulates across steps and processes
+    a store completion only when count reaches ``world_size``.
+    """
+
+    completed_store_requests: dict[str, int]
+
+    def aggregate(
+        self, other: "KVConnectorWorkerMetadata"
+    ) -> "KVConnectorWorkerMetadata":
+        assert isinstance(other, LMCacheMPWorkerMetadata)
+        merged = dict(self.completed_store_requests)
+        for k, v in other.completed_store_requests.items():
+            merged[k] = merged.get(k, 0) + v
+        return LMCacheMPWorkerMetadata(completed_store_requests=merged)

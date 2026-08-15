@@ -12,11 +12,11 @@ from typing import TYPE_CHECKING, NamedTuple
 import torch
 
 # First Party
+from lmcache import device_ops
 from lmcache.logging import init_logger
 from lmcache.utils import lmcache_deprecate
 from lmcache.v1.distributed.api import AttnWindowDesc
-from lmcache.v1.platform.ops_types import set_shape_desc_dtype
-import lmcache.c_ops as lmc_ops
+from lmcache.v1.platform.ops_types import PageBufferShapeDesc, set_shape_desc_dtype
 import lmcache.lmcache_native as lmcache_native
 
 if TYPE_CHECKING:
@@ -182,7 +182,7 @@ class KernelGroupInfo:
     """0-based layer indices belonging to this group, in the order the
     kernel should iterate them. Fed to ``get_group_data_ptrs`` to build
     the per-group pointer array."""
-    shape_desc: "lmc_ops.PageBufferShapeDesc"
+    shape_desc: PageBufferShapeDesc
     """Kernel-facing shape descriptor shared by every layer in the group.
     All eight fields (``kv_size, nl, nb, bs, nh, hs, element_size,
     block_stride_elems``) are stamped once at construction."""
@@ -492,7 +492,7 @@ class KVLayerGroupsManager:
         """
         return len(self._kernel_groups)
 
-    def get_shape_desc(self, kernel_group_idx: int) -> "lmc_ops.PageBufferShapeDesc":
+    def get_shape_desc(self, kernel_group_idx: int) -> PageBufferShapeDesc:
         """Return the :class:`PageBufferShapeDesc` for *kernel_group_idx*.
 
         Args:
@@ -798,7 +798,7 @@ def parse_kvcache_shape_spec(
                 "Shape must be a 5-tuple (kv_size,nb,bs,nh,hs): %s" % group_spec
             )
         kv_size, nb, bs, nh, hs = shape
-        shape_desc = lmc_ops.PageBufferShapeDesc()
+        shape_desc = device_ops.PageBufferShapeDesc()
         shape_desc.kv_size = kv_size
         shape_desc.nl = layer_count
         shape_desc.nb = nb

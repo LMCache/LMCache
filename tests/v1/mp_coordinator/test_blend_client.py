@@ -57,7 +57,7 @@ def _stored(directory: KeyDirectory, chunks: list[list[int]]) -> list[bytes]:
     """Feed ``chunks`` in as cache events; return their chunk hashes."""
     hashes = [bytes([index + 1]) * 4 for index in range(len(chunks))]
     for seq, (chunk_hash, tokens) in enumerate(zip(hashes, chunks, strict=True), 1):
-        directory.apply_batch(
+        directory.consume(
             CacheEventBatch(
                 instance_id="node-a",
                 incarnation=1,

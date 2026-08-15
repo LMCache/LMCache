@@ -799,8 +799,11 @@ runs on a CPU-only host (``StubCPUDevice``); the bench tool allocates
 POSIX-SHM-backed KV tensors and exercises the full RPC path.
 
 By default ``--mode cpu`` uses the engine-driven gather/scatter path
-(``auto`` → ``cpu→engine_driven``). To use the zero-copy SHM
-handle path instead, pass ``--transfer-mode lmcache_driven``:
+(``auto`` → ``cpu→engine_driven``); that path requires the server to
+be started with ``--supported-transfer-mode engine_driven`` or
+``auto``, since the server's default ``lmcache_driven`` does not load
+it. To use the zero-copy SHM handle path instead, pass
+``--transfer-mode lmcache_driven``:
 
 .. code-block:: bash
 

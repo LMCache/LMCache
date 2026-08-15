@@ -4,7 +4,7 @@
 The structural shape (``is_cross_layer`` / ``is_kv_list`` / ``is_layer_list``)
 and the ``is_mla`` modifier are declared once per format on its
 :class:`KVFormatSpec` and mirrored for the device kernels in
-``csrc/engine_kv_format.h`` (reached via ``lmc_ops``). This file pins each
+``csrc/engine_kv_format.h`` (reached via ``device_ops``). This file pins each
 format's classification, checks the two sides agree, and enforces that the
 three structural flags partition every format (exactly one is true), so a new
 format or an edit cannot silently break the contract the per-layer detection
@@ -37,7 +37,7 @@ EXPECTED = {
     F.NL_X_NB_BSV_BSS: (False, False, True, True),
 }
 
-# Facts that only the spec carries (no c_ops predicate mirrors them):
+# Facts that only the spec carries (no native predicate mirrors them):
 # (is_hnd, is_fused_packed, is_two_major, is_pbs_fused) per format.
 EXPECTED_SPEC_FACTS = {
     F.NB_NL_TWO_BS_NH_HS: (False, False, False, False),
@@ -86,7 +86,7 @@ def test_spec_facts_match_predicates():
             lmcache_native.is_layer_list(fmt),
             lmcache_native.is_mla(fmt),
         )
-        assert got == expected, f"{fmt}: spec {got}, c_ops {expected}"
+        assert got == expected, f"{fmt}: spec {got}, native {expected}"
 
 
 def test_spec_only_facts_match_golden():

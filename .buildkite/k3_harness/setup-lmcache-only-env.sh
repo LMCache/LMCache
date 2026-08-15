@@ -12,6 +12,7 @@ trap 'echo "ERROR: setup-lmcache-only-env.sh failed at line $LINENO (exit code $
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 source "${REPO_ROOT}/.buildkite/k3_tests/common_scripts/helpers.sh"
 check_gpu_health 80
+merge_pr_base_branch
 
 echo "--- :python: Installing LMCache from source (no vLLM)"
 # Skip setuptools_scm git describe; the repo carries non-PEP-440 tags

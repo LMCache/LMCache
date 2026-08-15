@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+import gc
 import multiprocessing as mp
 import threading
 import time
+import weakref
 
 # Third Party
 import pytest
@@ -193,6 +195,26 @@ def test_messaging_future_complex_type():
     assert result == complex_data, "Complex types should be preserved"
 
     thread.join()
+
+
+def test_messaging_future_retains_reference_for_its_lifetime() -> None:
+    """A retained resource stays alive until its future is released."""
+
+    class Resource:
+        pass
+
+    resource = Resource()
+    resource_ref = weakref.ref(resource)
+    future = MessagingFuture[bool]()
+
+    future.retain_reference(resource)
+    del resource
+    gc.collect()
+    assert resource_ref() is not None
+
+    del future
+    gc.collect()
+    assert resource_ref() is None
 
 
 # ==============================================================================

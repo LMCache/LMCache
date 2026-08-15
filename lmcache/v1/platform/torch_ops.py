@@ -388,7 +388,7 @@ def _format_spec(engine_kv_format: EngineKVFormat) -> "type[KVFormatSpec]":
         ValueError: If the format has no spec.
     """
     # Imported lazily, not at module scope: the specs package reads
-    # ``lmcache.c_ops``, whose shim is installed only once this module (the
+    # ``lmcache.device_ops``, which is resolved only once this module (the
     # torch baseline behind it) has been imported.
     # First Party
     from lmcache.v1.gpu_connector.kv_format.specs.registry import get_spec_class
@@ -1111,7 +1111,7 @@ def multi_layer_block_kv_transfer(
     """Python fallback implementation of block-based multi-layer KV transfer.
 
     Signature intentionally mirrors the C++ binding so callers can invoke
-    ``lmcache.c_ops.multi_layer_block_kv_transfer`` uniformly on native and
+    ``lmcache.device_ops.multi_layer_block_kv_transfer`` uniformly on native and
     fallback backends.
 
     Args:
