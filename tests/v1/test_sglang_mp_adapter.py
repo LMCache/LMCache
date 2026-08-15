@@ -22,10 +22,6 @@ from lmcache.v1.multiprocess.futures import MessagingFuture
 
 pytestmark = pytest.mark.sglang
 
-# The adapter imports ``sglang`` at module load; skip cleanly where it's absent
-# (sglang is an optional integration, not a hard LMCache dependency).
-pytest.importorskip("sglang")
-
 
 def _import_adapter_symbols() -> tuple[
     Any,
