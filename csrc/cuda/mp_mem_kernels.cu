@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "mp_mem_kernels.cuh"
+#include <cstring>
 
 namespace {
 
@@ -413,12 +414,12 @@ __global__ void multi_layer_block_transfer_kernel_layerwise(
 template <typename ScalarType>
 void multi_layer_block_kv_transfer_templated(
     const torch::Tensor& paged_buffer_ptrs_tensor,
-    std::vector<int64_t> lmcache_objects_ptrs, const torch::Tensor& block_ids,
-    const torch::Device& device, TransferDirection direction,
-    PageBufferShapeDesc shape_desc, int lmcache_chunk_size,
-    EngineKVFormat engine_kv_format, int skip_prefix_n_blocks, bool layerwise) {
+    const int64_t* lmcache_objects_ptrs, int num_objects,
+    const torch::Tensor& block_ids, const torch::Device& device,
+    TransferDirection direction, PageBufferShapeDesc shape_desc,
+    int lmcache_chunk_size, EngineKVFormat engine_kv_format,
+    int skip_prefix_n_blocks, bool layerwise) {
   // --- Validation ---
-  int num_objects = static_cast<int>(lmcache_objects_ptrs.size());
   TORCH_CHECK(num_objects >= 1, "Expected at least 1 LMCache object, got ",
               num_objects);
 
@@ -475,15 +476,48 @@ void multi_layer_block_kv_transfer_templated(
       DISPATCH_FORMAT(multi_layer_block_transfer_kernel, false, lmcache_obj4);
     }
   } else {
-    // Per-layer path: dynamic GPU pointer array
-    auto gpu_ptrs_tensor = torch::empty(
-        {num_objects},
-        torch::TensorOptions().dtype(torch::kInt64).device(device));
-    gpu_ptrs_tensor.copy_(
-        torch::from_blob(lmcache_objects_ptrs.data(), {num_objects},
-                         torch::TensorOptions().dtype(torch::kInt64)));
+    // Per-layer path: reusable pinned+device buffer for pointer upload.
+    // Avoids per-launch torch::empty (caching allocator overhead) and
+    // pageable copy_ (which forces a CPU-blocking bounce buffer in the
+    // CUDA driver).  Fixed 1024-element buffers (8 KB each) are allocated
+    // once on first use and reused forever; the pinned→device copy is
+    // truly async with zero CPU stall.
+    static constexpr int kMaxObjects = 1024;
+    static thread_local int64_t* pinned_host_ptr = nullptr;
+    static thread_local torch::Tensor dev_buf_tensor;
+    static thread_local int dev_buf_device_index = -1;
+
+    TORCH_CHECK(num_objects <= kMaxObjects, "Layerwise path supports at most ",
+                kMaxObjects, " objects, got ", num_objects);
+
+    const int dev_idx = device.index();
+
+    // One-time allocation of pinned host buffer
+    if (!pinned_host_ptr) {
+      auto err = cudaHostAlloc(reinterpret_cast<void**>(&pinned_host_ptr),
+                               kMaxObjects * sizeof(int64_t),
+                               cudaHostAllocDefault);
+      TORCH_CHECK(err == cudaSuccess, "cudaHostAlloc failed: ",
+                  cudaGetErrorString(err));
+    }
+
+    // One-time allocation of device buffer (or on device change)
+    if (dev_buf_device_index != dev_idx) {
+      dev_buf_tensor = torch::empty(
+          {kMaxObjects},
+          torch::TensorOptions().dtype(torch::kInt64).device(device));
+      dev_buf_device_index = dev_idx;
+    }
+
+    // pinned staging → device (truly async, zero CPU stall)
+    std::memcpy(pinned_host_ptr, lmcache_objects_ptrs,
+                num_objects * sizeof(int64_t));
+    cudaMemcpyAsync(dev_buf_tensor.data_ptr(), pinned_host_ptr,
+                    num_objects * sizeof(int64_t), cudaMemcpyHostToDevice,
+                    stream);
+
     ScalarType** lmcache_ptrs_dev =
-        reinterpret_cast<ScalarType**>(gpu_ptrs_tensor.data_ptr());
+        reinterpret_cast<ScalarType**>(dev_buf_tensor.data_ptr());
     if (direction == TransferDirection::H2D) {
       DISPATCH_FORMAT(multi_layer_block_transfer_kernel_layerwise, true,
                       lmcache_ptrs_dev);
@@ -499,20 +533,22 @@ void multi_layer_block_kv_transfer_templated(
 
 }  // namespace
 
-#define LAUNCH_TEMPLATED(type)                                             \
-  do {                                                                     \
-    multi_layer_block_kv_transfer_templated<type>(                         \
-        paged_buffer_ptrs_tensor, lmcache_objects_ptrs, block_ids, device, \
-        direction, shape_desc, lmcache_chunk_size, engine_kv_format,       \
-        skip_prefix_n_blocks, layerwise);                                  \
+#define LAUNCH_TEMPLATED(type)                                            \
+  do {                                                                    \
+    multi_layer_block_kv_transfer_templated<type>(                        \
+        paged_buffer_ptrs_tensor, lmcache_objects_ptrs,                   \
+        num_objects, block_ids, device,                                   \
+        direction, shape_desc, lmcache_chunk_size, engine_kv_format,      \
+        skip_prefix_n_blocks, layerwise);                                 \
   } while (0)
 
 void multi_layer_block_kv_transfer(
     const torch::Tensor& paged_buffer_ptrs_tensor,
-    std::vector<int64_t> lmcache_objects_ptrs, const torch::Tensor& block_ids,
-    const torch::Device& device, TransferDirection direction,
-    PageBufferShapeDesc shape_desc, int lmcache_chunk_size,
-    EngineKVFormat engine_kv_format, int skip_prefix_n_blocks, bool layerwise) {
+    const int64_t* lmcache_objects_ptrs, int num_objects,
+    const torch::Tensor& block_ids, const torch::Device& device,
+    TransferDirection direction, PageBufferShapeDesc shape_desc,
+    int lmcache_chunk_size, EngineKVFormat engine_kv_format,
+    int skip_prefix_n_blocks, bool layerwise) {
   int head_bytes = shape_desc.hs * shape_desc.element_size;
   TORCH_CHECK(head_bytes % sizeof(uint16_t) == 0, "head_size * element_size (",
               head_bytes, ") must be divisible by 2 for vectorized access");
@@ -605,14 +641,11 @@ void execute_object_group_transfer(
       const at::Tensor block_ids = at::from_blob(
           reinterpret_cast<void*>(block_ids_addr),
           {static_cast<int64_t>(launch.total_blocks)}, int64_opts);
-      std::vector<int64_t> lmcache_objects_ptrs(
-          group.lmcache_objects_ptrs.begin(),
-          group.lmcache_objects_ptrs.begin() + launch.num_objects);
-
       multi_layer_block_kv_transfer(
-          paged_buffer_ptrs_tensor, std::move(lmcache_objects_ptrs), block_ids,
-          device, direction, group.shape_desc, group.lmcache_chunk_size,
-          group.engine_kv_format, launch.skip_prefix_n_blocks, layerwise);
+          paged_buffer_ptrs_tensor, group.lmcache_objects_ptrs.data(),
+          launch.num_objects, block_ids, device, direction, group.shape_desc,
+          group.lmcache_chunk_size, group.engine_kv_format,
+          launch.skip_prefix_n_blocks, layerwise);
     }
     if (!is_h2d) {
       do_staging(step.staging);

@@ -133,11 +133,11 @@ PYBIND11_MODULE(cuda_ops, m) {
          int direction, PageBufferShapeDesc shape_desc, int lmcache_chunk_size,
          int engine_kv_format, int skip_prefix_n_blocks, bool layerwise) {
         return multi_layer_block_kv_transfer(
-            paged_buffer_ptrs_tensor, std::move(lmcache_objects_ptrs),
-            block_ids, device, static_cast<TransferDirection>(direction),
-            shape_desc, lmcache_chunk_size,
-            static_cast<EngineKVFormat>(engine_kv_format), skip_prefix_n_blocks,
-            layerwise);
+            paged_buffer_ptrs_tensor, lmcache_objects_ptrs.data(),
+            static_cast<int>(lmcache_objects_ptrs.size()), block_ids, device,
+            static_cast<TransferDirection>(direction), shape_desc,
+            lmcache_chunk_size, static_cast<EngineKVFormat>(engine_kv_format),
+            skip_prefix_n_blocks, layerwise);
       },
       py::arg("paged_buffer_ptrs_tensor"), py::arg("lmcache_objects_ptrs"),
       py::arg("block_ids"), py::arg("device"), py::arg("direction"),
