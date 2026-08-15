@@ -88,7 +88,7 @@ Use a ``src`` layout so the wheel owns only its vendor namespace::
 
 The project must declare one entry point in the
 ``lmcache.device_plugins`` group. Its name is the lowercase
-``DeviceSpec.device_type`` and its value points to the ``DeviceSpec`` class:
+``DeviceSpec.backend_name`` and its value points to the ``DeviceSpec`` class:
 
 .. code-block:: toml
 
@@ -142,6 +142,10 @@ The implementation is the same in both layouts:
 
         @property
         def device_type(self) -> str:
+            return "foo"
+
+        @property
+        def backend_name(self) -> str:
             return "foo"
 
         @property
@@ -211,6 +215,9 @@ Key properties:
    * - ``DeviceSpec.device_type``
      - yes
      - Device type string (e.g. ``"cuda"``, ``"musa"``, ``"xpu"``)
+   * - ``DeviceSpec.backend_name``
+     - yes
+     - Unique LMCache selector for one concrete backend implementation
    * - ``DeviceSpec.torch_module_name``
      - yes
      - Attribute on the ``torch`` package (e.g. ``"cuda"`` →
@@ -262,13 +269,14 @@ through ``torch_ops.py`` until the backend overrides them.
 External wheel loading rules
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-- LMCache discovers in-tree backends first, then installed entry points. An
-  external wheel can replace an existing in-tree ``device_type``. This lets a
-  vendor ship backend fixes or specializations in a separate wheel without
-  forking LMCache.
-- Entry-point names and ``DeviceSpec.device_type`` values must match and use a
-  non-empty lowercase string. Duplicate external device types are ignored
-  after the first deterministic match.
+- ``DeviceSpec.device_type`` is the torch-facing device category (for example,
+  ``"cuda"``). Multiple backends may intentionally share one ``device_type``.
+- ``DeviceSpec.backend_name`` is the LMCache-specific selector for one concrete
+  backend implementation. It must be a unique, non-empty lowercase string.
+- For external wheels, the entry-point name must match
+  ``DeviceSpec.backend_name``.
+- Duplicate ``backend_name`` values are ignored after the first deterministic
+  match.
 - A plugin that cannot be imported, resolves to the wrong object type, or
   raises during construction is logged and skipped. Other devices remain
   usable.
@@ -288,13 +296,14 @@ Start LMCache server:
 
     lmcache server --l1-size-gb 10 --eviction-policy LRU --port 5555
 
-Run vLLM with MP connector.  If multiple accelerators are visible on
-the host, set ``DEVICE_TYPE`` to force LMCache to pick the new backend
-instead of auto-detecting:
+Run vLLM with MP connector. If you want a specific torch device category, set
+``DEVICE_TYPE``. If multiple LMCache backends share that device type, set
+``LMCACHE_DEVICE_BACKEND`` as well to select the exact implementation:
 
 .. code-block:: bash
 
-    export DEVICE_TYPE=foo            # optional; only when auto-detection picks the wrong device
+    export DEVICE_TYPE=foo                    # optional; selects the torch-facing device type
+    export LMCACHE_DEVICE_BACKEND=foo        # optional; required only when multiple backends share one device_type
 
     vllm serve <your-model> \
         --kv-transfer-config '{
@@ -323,7 +332,8 @@ Check the LMCache logs::
     torch_dev=..., torch_device_type=foo
 
 This confirms your ``DeviceSpec`` was discovered and the torch
-baseline is active.
+baseline is active. When ``LMCACHE_DEVICE_BACKEND`` is set, LMCache also binds
+the backend whose ``backend_name`` matches that value.
 
 Debugging checklist:
 
@@ -331,8 +341,10 @@ Debugging checklist:
 - [ ] For an external wheel,
   ``importlib.metadata.entry_points(group="lmcache.device_plugins")`` includes
   ``foo`` and points to ``FooDeviceSpec``.
-- [ ] Set ``DEVICE_TYPE=foo`` to force selection if not picked up
-  automatically.
+- [ ] If another backend shares ``device_type="foo"``, set
+  ``LMCACHE_DEVICE_BACKEND=foo`` as well.
+- [ ] Set ``DEVICE_TYPE=foo`` to force the torch-facing device category if not
+  picked up automatically.
 - [ ] Engine-driven transfer works end-to-end (check the LMCache logs
   to confirm whether the SHM or Pickle sub-path is chosen — both
   should succeed).

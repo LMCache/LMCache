@@ -40,9 +40,12 @@ __all__ = [
 
 # Standard
 from typing import TYPE_CHECKING, Any
+import os
 
 # First Party
 from lmcache.v1.platform._device_detect import (
+    DEVICE_BACKEND_ENV_VAR,
+    _build_backend_registry,
     _build_device_registry,
 )
 from lmcache.v1.platform._device_detect import (
@@ -72,10 +75,10 @@ from lmcache.v1.platform.event_notifier import (
 # ---------------------------------------------------------------------------
 
 
-# Keep the historical private name as an alias for existing internal tests and
-# downstream diagnostics. Both detection and resolution now share the same
-# DeviceSpec instances, including external plugins.
-_DEVICE_REGISTRY: dict[str, DeviceSpec] = _build_device_registry()
+# Keep the historical private name for the backend-name registry so existing
+# tests and downstream diagnostics can still inspect the resolved spec table.
+_DEVICE_REGISTRY: dict[str, DeviceSpec] = _build_backend_registry()
+_DEVICE_TYPE_REGISTRY: dict[str, tuple[DeviceSpec, ...]] = _build_device_registry()
 
 
 # ---------------------------------------------------------------------------
@@ -99,7 +102,7 @@ def resolve_kv_wrapper_factory(device_type: str) -> Any:
     Raises:
         ValueError: If no spec / wrapper is registered for *device_type*.
     """
-    spec = _DEVICE_REGISTRY.get(device_type)
+    spec = _resolve_device_spec(device_type)
     wrapper_cls = spec.ipc_wrapper_cls if spec is not None else None
     if wrapper_cls is None:
         raise ValueError(
@@ -123,9 +126,29 @@ def _resolve_device_spec(device_type: str) -> DeviceSpec:
     Raises:
         RuntimeError: If an accelerator device has no registered spec.
     """
-    dev_spec = _DEVICE_REGISTRY.get(device_type)
-    if dev_spec is not None:
-        return dev_spec
+    candidates = _DEVICE_TYPE_REGISTRY.get(device_type, ())
+    if len(candidates) == 1:
+        return candidates[0]
+
+    if len(candidates) > 1:
+        explicit_backend = os.environ.get(DEVICE_BACKEND_ENV_VAR, "").strip().lower()
+        if explicit_backend:
+            dev_spec = _DEVICE_REGISTRY.get(explicit_backend)
+            if dev_spec is not None and dev_spec.device_type == device_type:
+                return dev_spec
+
+        available_candidates = [spec for spec in candidates if spec.is_available()]
+        if len(available_candidates) == 1:
+            return available_candidates[0]
+        if len(available_candidates) > 1:
+            backend_names = ", ".join(
+                sorted(spec.backend_name for spec in available_candidates)
+            )
+            raise RuntimeError(
+                f"Multiple DeviceSpec backends are available for accelerator "
+                f"{device_type!r}: {backend_names}. Set "
+                f"{DEVICE_BACKEND_ENV_VAR}=<backend_name> to choose one explicitly."
+            )
     if device_type in ("", "cpu"):
         return _FALLBACK_CPU_SPEC
     raise RuntimeError(

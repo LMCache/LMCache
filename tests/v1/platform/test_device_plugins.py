@@ -18,7 +18,12 @@ class _ExternalDeviceSpec(DeviceSpec):
 
     @property
     def device_type(self) -> str:
-        """Return the entry-point name used by the test plugin."""
+        """Return the torch-facing device type used by the test plugin."""
+        return "external"
+
+    @property
+    def backend_name(self) -> str:
+        """Return the explicit backend selector for the test plugin."""
         return "external"
 
     @property
@@ -27,22 +32,56 @@ class _ExternalDeviceSpec(DeviceSpec):
         return "external"
 
 
-class _CpuOverrideDeviceSpec(DeviceSpec):
-    """External specification that attempts to replace the built-in CPU."""
-
-    @property
-    def device_type(self) -> str:
-        """Return the colliding built-in device type."""
-        return "cpu"
-
-
 class _ExternalDeviceSpecOverride(DeviceSpec):
-    """Second external specification for deterministic duplicate handling."""
+    """Second external specification that reuses the same backend name."""
 
     @property
     def device_type(self) -> str:
-        """Return the colliding external device type."""
+        """Return a different device type to prove backend-name uniqueness."""
+        return "other"
+
+    @property
+    def backend_name(self) -> str:
+        """Return the colliding backend name."""
         return "external"
+
+
+class _SharedVendorADeviceSpec(DeviceSpec):
+    """External spec that shares a device type with another backend."""
+
+    @property
+    def device_type(self) -> str:
+        """Return the shared device type."""
+        return "shared"
+
+    @property
+    def backend_name(self) -> str:
+        """Return the first backend selector."""
+        return "vendor-a"
+
+    @property
+    def torch_module_name(self) -> str:
+        """Return the shared torch module name."""
+        return "shared"
+
+
+class _SharedVendorBDeviceSpec(DeviceSpec):
+    """Second external spec for the same device type."""
+
+    @property
+    def device_type(self) -> str:
+        """Return the shared device type."""
+        return "shared"
+
+    @property
+    def backend_name(self) -> str:
+        """Return the second backend selector."""
+        return "vendor-b"
+
+    @property
+    def torch_module_name(self) -> str:
+        """Return the shared torch module name."""
+        return "shared"
 
 
 class _FakeEntryPoint:
@@ -61,10 +100,13 @@ class _FakeEntryPoint:
 @pytest.fixture(autouse=True)
 def reset_device_registry_cache() -> Any:
     """Keep the process-wide registry cache isolated between tests."""
-    registry_builder = _device_detect._build_device_registry
-    registry_builder.cache_clear()
+    backend_registry_builder = _device_detect._build_backend_registry
+    device_registry_builder = _device_detect._build_device_registry
+    backend_registry_builder.cache_clear()
+    device_registry_builder.cache_clear()
     yield
-    registry_builder.cache_clear()
+    backend_registry_builder.cache_clear()
+    device_registry_builder.cache_clear()
 
 
 def _set_entry_points(
@@ -84,7 +126,7 @@ def _set_entry_points(
     )
 
 
-def test_external_device_spec_is_added_to_registry(
+def test_external_device_spec_is_added_to_registries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A valid wheel entry point contributes its DeviceSpec at runtime."""
@@ -99,10 +141,12 @@ def test_external_device_spec_is_added_to_registry(
         ],
     )
 
-    registry = _device_detect._build_device_registry()
+    backend_registry = _device_detect._build_backend_registry()
+    device_registry = _device_detect._build_device_registry()
 
-    assert isinstance(registry["external"], _ExternalDeviceSpec)
-    assert _device_detect.get_device_spec("external") is registry["external"]
+    assert isinstance(backend_registry["external"], _ExternalDeviceSpec)
+    assert device_registry["external"] == (backend_registry["external"],)
+    assert _device_detect.get_device_spec("external") is backend_registry["external"]
 
 
 @pytest.mark.parametrize(
@@ -123,11 +167,11 @@ def test_invalid_device_plugin_is_skipped(
         [_FakeEntryPoint(name, "broken_plugin:device", loader)],
     )
 
-    registry = _device_detect._build_device_registry()
+    backend_registry = _device_detect._build_backend_registry()
 
-    assert "external" not in registry
-    assert "wrong-name" not in registry
-    assert "cpu" in registry
+    assert "external" not in backend_registry
+    assert "wrong-name" not in backend_registry
+    assert "cpu" in backend_registry
 
 
 def test_plugin_import_failure_is_skipped(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -141,36 +185,16 @@ def test_plugin_import_failure_is_skipped(monkeypatch: pytest.MonkeyPatch) -> No
         [_FakeEntryPoint("external", "broken_plugin:device", fail_to_load)],
     )
 
-    registry = _device_detect._build_device_registry()
+    backend_registry = _device_detect._build_backend_registry()
 
-    assert "external" not in registry
-    assert "cpu" in registry
+    assert "external" not in backend_registry
+    assert "cpu" in backend_registry
 
 
-def test_external_device_overrides_builtin_name_collision(
+def test_duplicate_backend_name_is_ignored_after_first(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An installed package can override an LMCache built-in backend."""
-    _set_entry_points(
-        monkeypatch,
-        [
-            _FakeEntryPoint(
-                "cpu",
-                "lmcache_external:CpuOverrideDeviceSpec",
-                lambda: _CpuOverrideDeviceSpec,
-            )
-        ],
-    )
-
-    registry = _device_detect._build_device_registry()
-
-    assert isinstance(registry["cpu"], _CpuOverrideDeviceSpec)
-
-
-def test_first_external_device_wins_duplicate_name_collision(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Duplicate external wheels resolve deterministically to the first match."""
+    """Backends must be unique even when device types differ."""
     _set_entry_points(
         monkeypatch,
         [
@@ -187,31 +211,160 @@ def test_first_external_device_wins_duplicate_name_collision(
         ],
     )
 
-    registry = _device_detect._build_device_registry()
+    backend_registry = _device_detect._build_backend_registry()
 
-    assert isinstance(registry["external"], _ExternalDeviceSpec)
+    assert isinstance(backend_registry["external"], _ExternalDeviceSpec)
+
+
+def test_same_device_type_can_register_multiple_backends(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Different backends can intentionally share one torch device type."""
+    _set_entry_points(
+        monkeypatch,
+        [
+            _FakeEntryPoint(
+                "vendor-a",
+                "plugin_a:SharedVendorADeviceSpec",
+                lambda: _SharedVendorADeviceSpec,
+            ),
+            _FakeEntryPoint(
+                "vendor-b",
+                "plugin_b:SharedVendorBDeviceSpec",
+                lambda: _SharedVendorBDeviceSpec,
+            ),
+        ],
+    )
+
+    backend_registry = _device_detect._build_backend_registry()
+    device_registry = _device_detect._build_device_registry()
+
+    assert isinstance(backend_registry["vendor-a"], _SharedVendorADeviceSpec)
+    assert isinstance(backend_registry["vendor-b"], _SharedVendorBDeviceSpec)
+    assert device_registry["shared"] == (
+        backend_registry["vendor-a"],
+        backend_registry["vendor-b"],
+    )
+
+
+def test_explicit_backend_selects_requested_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A backend env var disambiguates shared device types explicitly."""
+    _set_entry_points(
+        monkeypatch,
+        [
+            _FakeEntryPoint(
+                "vendor-a",
+                "plugin_a:SharedVendorADeviceSpec",
+                lambda: _SharedVendorADeviceSpec,
+            ),
+            _FakeEntryPoint(
+                "vendor-b",
+                "plugin_b:SharedVendorBDeviceSpec",
+                lambda: _SharedVendorBDeviceSpec,
+            ),
+        ],
+    )
+    monkeypatch.setattr(_SharedVendorADeviceSpec, "is_available", lambda self: True)
+    monkeypatch.setattr(_SharedVendorBDeviceSpec, "is_available", lambda self: True)
+
+    # Third Party
+    import torch
+
+    shared_torch_module = object()
+    monkeypatch.setattr(torch, "shared", shared_torch_module, raising=False)
+    monkeypatch.setenv(_device_detect.DEVICE_BACKEND_ENV_VAR, "vendor-b")
+
+    torch_module, device_type, backend_name = _device_detect._detect_device()
+
+    assert torch_module is shared_torch_module
+    assert device_type == "shared"
+    assert backend_name == "vendor-b"
+
+
+def test_explicit_device_type_with_multiple_backends_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DEVICE_TYPE alone is insufficient when multiple backends are available."""
+    _set_entry_points(
+        monkeypatch,
+        [
+            _FakeEntryPoint(
+                "vendor-a",
+                "plugin_a:SharedVendorADeviceSpec",
+                lambda: _SharedVendorADeviceSpec,
+            ),
+            _FakeEntryPoint(
+                "vendor-b",
+                "plugin_b:SharedVendorBDeviceSpec",
+                lambda: _SharedVendorBDeviceSpec,
+            ),
+        ],
+    )
+    monkeypatch.setattr(_SharedVendorADeviceSpec, "is_available", lambda self: True)
+    monkeypatch.setattr(_SharedVendorBDeviceSpec, "is_available", lambda self: True)
+
+    # Third Party
+    import torch
+
+    monkeypatch.setattr(torch, "shared", object(), raising=False)
+    monkeypatch.setenv("DEVICE_TYPE", "shared")
+
+    with pytest.raises(RuntimeError, match="LMCACHE_DEVICE_BACKEND"):
+        _device_detect._detect_device()
+
+
+def test_get_device_spec_uses_explicit_backend_with_shared_device_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shared device types resolve through the explicit backend selector."""
+    _set_entry_points(
+        monkeypatch,
+        [
+            _FakeEntryPoint(
+                "vendor-a",
+                "plugin_a:SharedVendorADeviceSpec",
+                lambda: _SharedVendorADeviceSpec,
+            ),
+            _FakeEntryPoint(
+                "vendor-b",
+                "plugin_b:SharedVendorBDeviceSpec",
+                lambda: _SharedVendorBDeviceSpec,
+            ),
+        ],
+    )
+    monkeypatch.setenv(_device_detect.DEVICE_BACKEND_ENV_VAR, "vendor-b")
+
+    spec = _device_detect.get_device_spec("shared")
+
+    assert isinstance(spec, _SharedVendorBDeviceSpec)
 
 
 def test_external_device_participates_in_runtime_detection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A registered external spec is selected by the normal detector."""
-    spec = _ExternalDeviceSpec()
-    monkeypatch.setattr(spec, "is_available", lambda: True)
-    monkeypatch.setattr(
-        _device_detect,
-        "_build_device_registry",
-        lambda: {"external": spec},
+    _set_entry_points(
+        monkeypatch,
+        [
+            _FakeEntryPoint(
+                "external",
+                "lmcache_external:ExternalDeviceSpec",
+                lambda: _ExternalDeviceSpec,
+            )
+        ],
     )
+    monkeypatch.setattr(_ExternalDeviceSpec, "is_available", lambda self: True)
 
     # Third Party
     import torch
 
     external_torch_module = object()
     monkeypatch.setattr(torch, "external", external_torch_module, raising=False)
-    monkeypatch.setenv("DEVICE_TYPE", "external")
 
-    torch_module, device_type = _device_detect._detect_device()
+    torch_module, device_type, backend_name = _device_detect._detect_device()
 
     assert torch_module is external_torch_module
     assert device_type == "external"
+    assert backend_name == "external"
