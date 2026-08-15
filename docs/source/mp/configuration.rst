@@ -286,25 +286,7 @@ example ``/dev/ugds_drv0``) rather than a directory. The first
 ``--l1-size-gb`` bytes of the device are the slab, so the device must be at
 least that large and must not hold anything else.
 
-.. warning::
 
-   uGDS requires an **entire dedicated SSD whose contents may be destroyed**.
-   Before binding the SSD to ``ugds_drv``, unmount every filesystem on that
-   SSD and verify that none of its namespaces or partitions backs swap, LVM,
-   software RAID, the root filesystem, or another service. Binding a mounted
-   or shared SSD removes it from the kernel ``nvme`` driver while it is still
-   in use and can corrupt data.
-
-   Check the selected SSD before launching LMCache; replace the example path
-   with the block-device path corresponding to the PCI device that will be
-   rebound::
-
-      lsblk -o NAME,PATH,SIZE,FSTYPE,MOUNTPOINTS /dev/nvme1n1
-      findmnt --source /dev/nvme1n1p1
-
-   Unmount every mount point reported for that SSD before running the uGDS
-   driver-binding steps. Do not use the OS disk, a disk containing live data,
-   or one shared by multiple LMCache servers.
 
 .. note::
 
@@ -330,6 +312,11 @@ least that large and must not hold anything else.
    than the device. The installed ``libugds.so`` must provide this API; LMCache
    fails closed with an upgrade message when an older library cannot report
    capacity.
+.. warning::
+
+   uGDS requires an **entire dedicated SSD whose contents may be destroyed**.
+   Ensure the SSD is not used for any other purpose and that its contents are
+   not critical.
 
 .. list-table::
    :header-rows: 1

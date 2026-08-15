@@ -132,12 +132,6 @@ class TestRegisterHandle:
         ha.deregister_handle(0x1234)
         assert "hipFileHandleDeregister" in _fake_lib.calls
 
-    def test_get_device_size_uses_open_file(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(ha.os, "fstat", lambda fd: SimpleNamespace(st_size=8192))
-        assert ha.get_device_size(42, 0x1234) == 8192
-
 
 class TestBufferRegistration:
     def test_rejects_non_gpu_tensor(self):

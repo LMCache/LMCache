@@ -2,9 +2,9 @@
 """ctypes wrapper around the uGDS async C API (libugds.so).
 
 Drop-in replacement for :mod:`_cufile_async` that uses uGDS's user-space
-NVMe path instead of cuFile. The API surface (AsyncHandle, Submission,
-register_*/deregister_* and get_device_size) is identical so that
-:mod:`gds_context` can use either backend transparently.
+NVMe path instead of cuFile. Its common GDS operations are compatible with
+the other backends, while :func:`get_device_size` is uGDS-specific because
+raw devices cannot rely on file allocation to validate the requested slab.
 
 LMCache expects ``libugds.so`` to match the active NVIDIA CUDA or AMD ROCm
 platform.

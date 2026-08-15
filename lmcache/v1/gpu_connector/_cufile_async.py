@@ -148,21 +148,6 @@ def deregister_handle(handle: Any) -> None:
     cuFileHandleDeregister(handle)
 
 
-def get_device_size(fd: int, handle: Any) -> int:
-    """Return the size of the file registered by ``handle``.
-
-    Args:
-        fd: Open file descriptor backing the cuFile handle.
-        handle: Registered cuFile handle. It is accepted for API consistency
-            with the other GDS backends and is not inspected.
-
-    Returns:
-        Current file size in bytes.
-    """
-    del handle
-    return os.fstat(fd).st_size
-
-
 # --- Buffer / stream registration ----------------------------------
 
 
