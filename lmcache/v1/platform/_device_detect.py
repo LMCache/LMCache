@@ -99,9 +99,12 @@ def _build_device_registry() -> "dict[str, DeviceSpec]":
     """Discover and instantiate built-in and external device specifications.
 
     Discovery is deferred until first use so importing this module
-    stays cheap and side-effect free. Built-in specifications win name
-    collisions; this prevents an installed wheel from replacing LMCache's
-    implementation for an existing device type.
+    stays cheap and side-effect free. Built-in specifications provide the
+    default registry entries, then installed plugins are layered on top.
+    When an external wheel reuses an existing ``device_type``, the external
+    spec takes precedence so vendors can ship fixes or specialized behavior
+    without forking LMCache. If multiple wheels claim the same
+    ``device_type``, the first deterministic match wins.
     """
     # First Party
     from lmcache.v1.platform.base.device_spec import DeviceSpec
@@ -120,15 +123,23 @@ def _build_device_registry() -> "dict[str, DeviceSpec]":
             )
         )
     }
+    external_device_types: set[str] = set()
     for spec in _load_external_device_specs():
-        if spec.device_type in registry:
+        if spec.device_type in external_device_types:
             logger.warning(
-                "Ignoring LMCache device plugin for %r because that device "
-                "type is already registered",
+                "Ignoring duplicate LMCache device plugin for %r after the "
+                "first matching external wheel was registered",
                 spec.device_type,
             )
             continue
+        if spec.device_type in registry:
+            logger.info(
+                "LMCache device plugin for %r overrides the built-in device "
+                "spec for that device type",
+                spec.device_type,
+            )
         registry[spec.device_type] = spec
+        external_device_types.add(spec.device_type)
     return registry
 
 
