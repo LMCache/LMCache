@@ -565,6 +565,12 @@ All connector-level options are passed through
      - ``10.0``
      - Interval (seconds) between periodic heartbeat pings sent from the
        connector to the server.
+   * - ``lmcache.mp.eager_prefetch``
+     - ``false``
+     - Submit the LMCache lookup when a request enters vLLM's waiting queue,
+       allowing L2-to-L1 KV staging to overlap with scheduler queue wait.
+       Resumable requests are skipped because their token IDs may be incomplete
+       at enqueue time.
    * - ``lmcache.mp.mp_transfer_mode``
      - ``auto``
      - Routing mode for the worker -> server transfer context. One of
