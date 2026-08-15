@@ -145,8 +145,21 @@ Per-layer interleaved (kv_interleaved=True, layerwise mode):
   chunk = [K_layer0, V_layer0, K_layer1, V_layer1, ..., K_layerN, V_layerN]
 ```
 
-This interleaved layout is set by `PageBufferShapeDesc.kv_interleaved`
+This interleaved layout is carried by `PageBufferShapeDesc.kv_interleaved`
 (`lmcache/v1/platform/ops_types.py`).
+
+The flag is a **deployment-wide invariant**, not a per-call argument: it
+is set once in `register_kv_cache()` on every kernel group's
+`shape_desc` when `layerwise_loading` (i.e. `layerwise_batch > 0`) is
+true.  Both the store (D2H) and retrieve (H2D) paths then simply read
+it.  Configuring it at registration — rather than latching it on the
+first store — also keeps cold-start retrieves correct when a process
+reads chunks written by a previous run before storing anything itself.
+
+Consequently the per-chunk transfer helpers
+(`_run_object_group_transfer_plan`, `transfer_kv_per_object_group`)
+take no layout parameter and are byte-identical to the pre-layerwise
+implementation.
 
 ### 4.2 Interleaved Enables Contiguous Batch Memcpy
 
@@ -284,7 +297,7 @@ MPCacheServerContext
 
 ## 7. Layout Uniformity & Mixed-Mode Considerations
 
-### 6.1 Current Invariant
+### 7.1 Current Invariant
 
 Layout is fixed per deployment: a server is uniformly per-layer
 (`kv_interleaved=True`) or uniformly per-chunk
@@ -296,7 +309,7 @@ This works because `layerwise_loading` is a server-level config, not
 a per-request flag.  All chunks stored by this server instance use
 the same interleaving.
 
-### 6.2 Note: Rolling Upgrades & Shared L2
+### 7.2 Note: Rolling Upgrades & Shared L2
 
 If servers sharing persistent L2 storage are upgraded from
 `--layerwise-batch 0` to `N > 0` (or vice versa), stale chunks with
@@ -311,18 +324,18 @@ flushing L2 between mode changes is sufficient.
 
 ## 8. Streaming ZMQ Protocol
 
-### 7.1 Request Types
+### 8.1 Request Types
 
 | Request Type | `streaming` | Used By |
 |---|---|---|
-| `RETRIEVE` | `False` | Per-chunk retrieve (legacy, untouched) |
+| `RETRIEVE` | `False` | Per-chunk retrieve (legacy path; unchanged) |
 | `RETRIEVE_LAYERWISE` | `True` | Layerwise retrieve (streaming) |
 
 Both share identical `payload_classes` and `response_class`.  The
 only difference is the protocol-level `streaming` flag, which
 controls whether `_call_blocking_handler` allocates a `StreamingSink`.
 
-### 7.2 Frame Formats
+### 8.2 Frame Formats
 
 **Partial frame** (total ceil(L/N), one per batch):
 ```

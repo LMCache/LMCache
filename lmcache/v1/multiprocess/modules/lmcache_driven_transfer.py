@@ -293,7 +293,6 @@ def _run_object_group_transfer_plan(
     batch_size: int,
     skip_first_n_tokens: int,
     direction: "lmcache_native.TransferDirection",
-    kv_interleaved: bool = False,
 ) -> None:
     """Plan and execute one object group's transfer in a single native call.
 
@@ -320,13 +319,6 @@ def _run_object_group_transfer_plan(
     Raises:
         ValueError: If a None entry is found in memory_objs when direction is
             H2D, or if an object's size does not match its GPU staging buffer.
-
-    Note:
-        ``kv_interleaved`` is used exclusively by the MP LMCache-driven
-        layerwise mode (LMCACHE_MP_LAYERWISE_BATCH > 0).  When True the
-        scatter/gather kernel treats the host buffer as per-layer
-        interleaved [K0,V0, K1,V1, ...] instead of grouped
-        [K0,K1,..., V0,V1,...].
     """
     lmcache_chunk_size = cache_context.lmcache_tokens_per_chunk
     kv_groups_manager = cache_context.kv_layer_groups_manager
@@ -361,16 +353,12 @@ def _run_object_group_transfer_plan(
             for slot in range(max_batch_size)
         ]
 
-        sd = cache_context.get_shape_desc(kernel_group_id)
-        if kv_interleaved:
-            sd.kv_interleaved = True
-
         spec_index_by_kg[kernel_group_id] = len(kernel_group_specs)
         kernel_group_specs.append(
             device_ops.KernelGroupSpec(
                 paged_ptrs.data_ptr(),
                 [buffer.data_ptr() for buffer in temp_buffers],
-                sd,
+                cache_context.get_shape_desc(kernel_group_id),
                 cache_context.get_slots_per_chunk_in_sw(kernel_group_id),
                 cache_context.get_engine_kv_format(kernel_group_id),
                 block_ids_tensor.data_ptr(),
@@ -477,7 +465,6 @@ def transfer_kv_per_object_group(
     batch_size: int,
     skip_first_n_tokens: int,
     direction: "lmcache_native.TransferDirection",
-    kv_interleaved: bool = False,
 ) -> None:
     """Helper function to transfer memory objects of a single object group
     to/from GPU, with batching support.
@@ -498,10 +485,6 @@ def transfer_kv_per_object_group(
             the retrieve range. This avoids overwriting APC-shared GPU blocks that
             may be read concurrently by other requests.
         direction: The transfer direction, H2D (retrieve) or D2H (store).
-        kv_interleaved: If True, the scatter/gather kernel uses per-layer
-            interleaved host buffer layout [K0,V0, K1,V1, ...].
-            Only set by the MP LMCache-driven layerwise store path
-            (LMCACHE_MP_LAYERWISE_BATCH > 0).
 
     Raises:
         ValueError: If it founds None entry in memory_objs when direction is H2D.
@@ -520,7 +503,6 @@ def transfer_kv_per_object_group(
             batch_size,
             skip_first_n_tokens,
             direction,
-            kv_interleaved=kv_interleaved,
         )
         return
 
@@ -619,14 +601,13 @@ def transfer_kv_per_object_group(
                 ).data_ptr()
                 for i in range(batch_len)
             ]
-            sd = cache_context.get_shape_desc(kernel_group_id)
             device_ops.multi_layer_block_kv_transfer(
                 group_kv_pointers,
                 tmp_gpu_buffers_batched,
                 block_ids_curr_batch,
                 cache_context.device,
                 direction,
-                sd,
+                cache_context.get_shape_desc(kernel_group_id),
                 group_lmcache_chunk_size,
                 cache_context.get_engine_kv_format(kernel_group_id),
                 recalculated_skip_blocks,
@@ -1552,6 +1533,15 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             group_layout_descs=group_layout_descs,
         )
 
+        # Host-buffer layout is a deployment-wide invariant derived from
+        # layerwise_batch, so configure it once here rather than latching it
+        # on the first store call.  Setting it at registration also covers
+        # cold-start retrieves that read chunks written by a previous run
+        # before this process has stored anything.
+        if self._ctx.layerwise_loading:
+            for kgr in cache_context.kv_layer_groups_manager.kernel_groups:
+                kgr.shape_desc.kv_interleaved = True
+
         # Pre-allocate the IPC event pool for this (context, worker) pair.
         # Handles are exported once here and sent back in the registration
         # response; the worker imports them once and reuses by index.
@@ -1794,10 +1784,9 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                     ]
 
                     # NOTE: batch_size must stay 1 for store.
-                    # kv_interleaved: when layerwise loading is enabled
-                    # (LMCACHE_MP_LAYERWISE_BATCH > 0), store D2H writes
-                    # in per-layer interleaved layout [K0,V0,K1,V1,...]
-                    # so layerwise retrieve can do single-memcpy per layer.
+                    # The interleaved host layout for layerwise mode is
+                    # configured once at registration time (see
+                    # register_kv_cache), not per call.
                     transfer_kv_per_object_group(
                         cache_context,
                         block_ids_per_group_gpu,
@@ -1806,7 +1795,6 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                         batch_size=1,
                         skip_first_n_tokens=0,
                         direction=lmcache_native.TransferDirection.D2H,
-                        kv_interleaved=self._ctx.layerwise_loading,
                     )
 
                 store_succeeded = True
@@ -1991,8 +1979,8 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             # Events are reused across requests; the pool is created once
             # at registration time (zero per-request create/export cost).
             layer_events = []
-            event_pool = entry.event_pool
             if layerwise:
+                event_pool = entry.event_pool
                 num_total_layers = sum(
                     kgr.num_layers
                     for kgr in cache_context.kv_layer_groups_manager.kernel_groups

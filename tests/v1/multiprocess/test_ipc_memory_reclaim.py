@@ -48,7 +48,11 @@ class _FakeTorchDev:
 def _module(monkeypatch) -> LMCacheDrivenTransferModule:
     """Construct the module through the real __init__ with stubbed deps."""
     monkeypatch.setattr(gpu_mod, "DeviceHostFuncDispatcher", MagicMock())
-    return LMCacheDrivenTransferModule(MagicMock(name="ctx"))
+    # layerwise_* must be concrete: register_kv_cache compares layerwise_batch
+    # against 0, which a bare MagicMock cannot support.
+    return LMCacheDrivenTransferModule(
+        MagicMock(name="ctx", layerwise_batch=0, layerwise_loading=False)
+    )
 
 
 def _register(

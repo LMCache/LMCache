@@ -38,7 +38,9 @@ def _bare_gpu_module() -> LMCacheDrivenTransferModule:
     liveness methods can be exercised without GPU hardware.
     """
     module = LMCacheDrivenTransferModule.__new__(LMCacheDrivenTransferModule)
-    module._ctx = MagicMock(name="ctx")
+    # register_kv_cache compares layerwise_batch against 0, which a bare
+    # MagicMock cannot support.
+    module._ctx = MagicMock(name="ctx", layerwise_batch=0, layerwise_loading=False)
     module._cache_contexts = {}
     module._lock = threading.Lock()
     return module

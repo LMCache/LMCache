@@ -366,8 +366,8 @@ def test_mq_noop_multiple_clients():
 def test_mq_register_kv_cache():
     """
     Test MessageQueue with REGISTER_KV_CACHE request type.
-    REGISTER_KV_CACHE takes (gpu_id: int, kv_cache: KVCache) and returns int
-    (the server's layerwise_batch setting).
+    REGISTER_KV_CACHE takes (gpu_id: int, kv_cache: KVCache) and returns
+    (layerwise_batch, event_pool_handles).
     """
     # First Party
     from lmcache.v1.platform.cuda.ipc_wrapper import CudaIPCWrapper
@@ -399,7 +399,7 @@ def test_mq_register_kv_cache():
             {"vllm_block_size": 16},
             [],
         ],
-        expected_response=0,
+        expected_response=(0, []),
         num_requests=1,
     )
 

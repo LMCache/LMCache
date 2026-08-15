@@ -42,7 +42,7 @@ def register_kv_cache_handler(
     engine_type: EngineType,
     layout_hints: LayoutHints,
     engine_group_infos: list[EngineGroupInfo],
-) -> int:
+) -> tuple[int, list[bytes]]:
     """
     Dummy handler for REGISTER_KV_CACHE requests.
 
@@ -57,7 +57,9 @@ def register_kv_cache_handler(
             msgspec-decoded from the request payload.
 
     Returns:
-        int: The server's layerwise_batch setting (0 = disabled).
+        tuple[int, list[bytes]]: The server's layerwise_batch setting
+            (0 = disabled) and the IPC event pool handles (empty when
+            layerwise is disabled).
     """
     # In a real implementation, this would register the KV cache
     # For testing, we just validate the inputs are received correctly
@@ -80,8 +82,9 @@ def register_kv_cache_handler(
     assert isinstance(engine_group_infos, list), (
         f"Expected engine_group_infos to be a list, got {type(engine_group_infos)}"
     )
-    # REGISTER_KV_CACHE advertises the server's layerwise_batch (0 = disabled).
-    return 0
+    # REGISTER_KV_CACHE advertises the server's layerwise_batch
+    # (0 = disabled) plus the IPC event pool handles (empty when disabled).
+    return (0, [])
 
 
 # ==============================================================================
