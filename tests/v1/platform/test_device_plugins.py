@@ -36,6 +36,15 @@ class _CpuOverrideDeviceSpec(DeviceSpec):
         return "cpu"
 
 
+class _ExternalDeviceSpecOverride(DeviceSpec):
+    """Second external specification for deterministic duplicate handling."""
+
+    @property
+    def device_type(self) -> str:
+        """Return the colliding external device type."""
+        return "external"
+
+
 class _FakeEntryPoint:
     """Small importlib.metadata.EntryPoint stand-in."""
 
@@ -138,10 +147,10 @@ def test_plugin_import_failure_is_skipped(monkeypatch: pytest.MonkeyPatch) -> No
     assert "cpu" in registry
 
 
-def test_builtin_device_wins_plugin_name_collision(
+def test_external_device_overrides_builtin_name_collision(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An installed package cannot replace an LMCache built-in backend."""
+    """An installed package can override an LMCache built-in backend."""
     _set_entry_points(
         monkeypatch,
         [
@@ -155,7 +164,32 @@ def test_builtin_device_wins_plugin_name_collision(
 
     registry = _device_detect._build_device_registry()
 
-    assert not isinstance(registry["cpu"], _CpuOverrideDeviceSpec)
+    assert isinstance(registry["cpu"], _CpuOverrideDeviceSpec)
+
+
+def test_first_external_device_wins_duplicate_name_collision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Duplicate external wheels resolve deterministically to the first match."""
+    _set_entry_points(
+        monkeypatch,
+        [
+            _FakeEntryPoint(
+                "external",
+                "plugin_a:ExternalDeviceSpec",
+                lambda: _ExternalDeviceSpec,
+            ),
+            _FakeEntryPoint(
+                "external",
+                "plugin_b:ExternalDeviceSpecOverride",
+                lambda: _ExternalDeviceSpecOverride,
+            ),
+        ],
+    )
+
+    registry = _device_detect._build_device_registry()
+
+    assert isinstance(registry["external"], _ExternalDeviceSpec)
 
 
 def test_external_device_participates_in_runtime_detection(

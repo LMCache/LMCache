@@ -263,7 +263,9 @@ External wheel loading rules
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 - LMCache discovers in-tree backends first, then installed entry points. An
-  external wheel cannot replace an existing in-tree ``device_type``.
+  external wheel can replace an existing in-tree ``device_type``. This lets a
+  vendor ship backend fixes or specializations in a separate wheel without
+  forking LMCache.
 - Entry-point names and ``DeviceSpec.device_type`` values must match and use a
   non-empty lowercase string. Duplicate external device types are ignored
   after the first deterministic match.
