@@ -5,8 +5,10 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, NoReturn, Protocol
 import enum
+import math
 import os
 import threading
+import time
 import uuid
 
 # Third Party
@@ -27,6 +29,7 @@ from lmcache.v1.multiprocess.group_view import (
     EngineGroupInfo,
     expand_engine_block_ids,
 )
+from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 from lmcache.v1.multiprocess.mq import MessageQueueClient, MessagingFuture
 from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
 from lmcache.v1.multiprocess.transfer_context import (
@@ -57,6 +60,11 @@ class ExtraConfigDefault(enum.Enum):
     # Interval (seconds) between periodic heartbeat pings
     # to the server.
     heartbeat_interval = 10.0
+    # Maximum time (seconds) from retrieve submission to device-event
+    # completion. Zero disables the deadline. A deadline raises instead of
+    # releasing target blocks because the underlying transfer cannot yet be
+    # cancelled or quarantined safely.
+    retrieve_timeout = 0.0
     # Routing mode for ``create_transfer_context``: ``auto`` keeps the
     # historical CUDA -> lmcache_driven / others -> engine_driven dispatch;
     # ``lmcache_driven`` forces the IPC / SHM zero-copy path where the
@@ -1077,6 +1085,7 @@ class LMCacheMPWorkerAdapter:
             cfg = _resolve_extra_config(extra_config)
             mq_timeout = cfg[ExtraConfigDefault.mq_timeout.name]
             heartbeat_interval = cfg[ExtraConfigDefault.heartbeat_interval.name]
+            retrieve_timeout = cfg[ExtraConfigDefault.retrieve_timeout.name]
             # Only treat ``mp_transfer_mode`` as an explicit override when
             # the user actually set it in extra_config; otherwise leave it
             # as ``None`` so ``create_transfer_context`` can still consult
@@ -1090,8 +1099,15 @@ class LMCacheMPWorkerAdapter:
                 self._mp_transfer_mode = None
         else:
             self._mp_transfer_mode = None
+            retrieve_timeout = ExtraConfigDefault.retrieve_timeout.value
+        if not math.isfinite(retrieve_timeout) or retrieve_timeout < 0:
+            raise ValueError(
+                "lmcache.mp.retrieve_timeout must be a finite, non-negative "
+                f"number, got {retrieve_timeout}"
+            )
         self.mq_client = MessageQueueClient(server_url, context)
         self._mq_timeout = mq_timeout
+        self._retrieve_timeout = retrieve_timeout
 
         # Instance id for GPU worker. uuid4-derived (OS entropy) rather
         # than os.getpid() to avoid collision in containerized deployments.
@@ -1115,6 +1131,7 @@ class LMCacheMPWorkerAdapter:
         self.retrieve_futures: dict[
             str, tuple[MessagingFuture[RetrieveResult], list[int]]
         ] = {}
+        self._retrieve_started_at: dict[str, float] = {}
         # The IPC handle is not enough by itself; CUDA needs the exporting
         # event object to stay alive until the consumer is done with it.
         self.store_events: dict[str, _IpcEvent] = {}
@@ -1499,6 +1516,7 @@ class LMCacheMPWorkerAdapter:
             skip_first_n_tokens=op.skip_first_n_tokens,
         )
         self.retrieve_futures[request_id] = (future, op.flat_block_ids)
+        self._retrieve_started_at[request_id] = time.monotonic()
         self.retrieve_events[request_id] = event
 
     @_lmcache_nvtx_annotate
@@ -1592,6 +1610,11 @@ class LMCacheMPWorkerAdapter:
                 including retrieves dropped at submit time while unhealthy
                 (reported exactly once; blocks already in error_block_ids).
 
+        Raises:
+            LMCacheTimeoutError: If an enabled retrieve deadline expires.
+                The worker fails closed without releasing target blocks because
+                the in-flight transfer has no cancellation acknowledgement.
+
         Notes:
             When enabling async scheduling in vLLM, the same request ID may appear
             multiple times in `finished_req_ids_from_engine`. The adapter should
@@ -1613,6 +1636,7 @@ class LMCacheMPWorkerAdapter:
                 self.error_block_ids.update(r_block_ids)
             self.store_futures.clear()
             self.retrieve_futures.clear()
+            self._retrieve_started_at.clear()
             self.store_events.clear()
             self.retrieve_events.clear()
 
@@ -1654,6 +1678,20 @@ class LMCacheMPWorkerAdapter:
 
         for request_id, (r_future, _) in self.retrieve_futures.items():
             if not r_future.query():
+                started_at = self._retrieve_started_at.get(request_id)
+                if (
+                    self._retrieve_timeout > 0
+                    and started_at is not None
+                    and time.monotonic() - started_at >= self._retrieve_timeout
+                ):
+                    raise LMCacheTimeoutError(
+                        "LMCache retrieve for request_id=%s did not complete "
+                        "within %.3fs; aborting the worker because the "
+                        "in-flight transfer cannot be cancelled or its target "
+                        "KV blocks safely reused"
+                        % (request_id, self._retrieve_timeout),
+                        session_id=request_id,
+                    )
                 continue
 
             r_result = r_future.result(timeout=60)
@@ -1673,6 +1711,7 @@ class LMCacheMPWorkerAdapter:
             self.store_events.pop(request_id, None)
         for request_id in finished_retrieves:
             self.retrieve_futures.pop(request_id, None)
+            self._retrieve_started_at.pop(request_id, None)
             self.retrieve_events.pop(request_id, None)
 
         # Retrieves dropped while unhealthy still must be reported,

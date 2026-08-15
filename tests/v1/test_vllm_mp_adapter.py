@@ -385,6 +385,81 @@ def test_retrieve_keeps_event_until_future_finishes(fake_adapter):
     assert event_ref() is None
 
 
+def test_retrieve_timeout_is_disabled_by_default(fake_adapter, monkeypatch) -> None:
+    """A pending retrieve remains pending when the opt-in deadline is zero."""
+    adapter, _send_mock, _future = fake_adapter
+    pending = MagicMock(name="pending_retrieve")
+    pending.query.return_value = False
+    transfer_ctx = MagicMock()
+    transfer_ctx.submit_retrieve.return_value = pending
+    adapter.transfer_ctx = transfer_ctx
+    clock = [10.0]
+    monkeypatch.setattr(adapter_mod.time, "monotonic", lambda: clock[0])
+    adapter.submit_retrieve_request("req-1", _op([[7]]), MagicMock())
+    clock[0] = 10_000.0
+
+    finished_stores, finished_retrieves = adapter.get_finished(set())
+
+    assert finished_stores == set()
+    assert finished_retrieves == set()
+    pending.query.assert_called_once_with()
+
+
+def test_retrieve_timeout_fails_closed_without_releasing_blocks(
+    fake_adapter, monkeypatch
+) -> None:
+    """Expiry aborts polling but keeps the future/blocks quarantined."""
+    _adapter, _send_mock, _future = fake_adapter
+    adapter = _make_worker_adapter(extra_config={"lmcache.mp.retrieve_timeout": 30.0})
+    pending = MagicMock(name="pending_retrieve")
+    pending.query.return_value = False
+    transfer_ctx = MagicMock()
+    transfer_ctx.submit_retrieve.return_value = pending
+    adapter.transfer_ctx = transfer_ctx
+    clock = [100.0]
+    monkeypatch.setattr(adapter_mod.time, "monotonic", lambda: clock[0])
+    adapter.submit_retrieve_request("req-1", _op([[7, 8]]), MagicMock())
+    clock[0] = 130.0
+
+    with pytest.raises(TimeoutError, match="in-flight transfer cannot be cancelled"):
+        adapter.get_finished(set())
+
+    assert adapter.get_block_ids_with_load_errors() == set()
+    # It remains pending and fails closed again: target blocks were not
+    # reported reusable after the first timeout.
+    with pytest.raises(TimeoutError):
+        adapter.get_finished(set())
+
+
+def test_ready_retrieve_wins_at_deadline(fake_adapter, monkeypatch) -> None:
+    """A ready event completes normally even when its deadline has arrived."""
+    _adapter, _send_mock, _future = fake_adapter
+    adapter = _make_worker_adapter(extra_config={"lmcache.mp.retrieve_timeout": 30.0})
+    complete = MagicMock(name="complete_retrieve")
+    complete.query.return_value = True
+    complete.result.return_value = True
+    transfer_ctx = MagicMock()
+    transfer_ctx.submit_retrieve.return_value = complete
+    adapter.transfer_ctx = transfer_ctx
+    clock = [100.0]
+    monkeypatch.setattr(adapter_mod.time, "monotonic", lambda: clock[0])
+    adapter.submit_retrieve_request("req-1", _op([[7]]), MagicMock())
+    clock[0] = 130.0
+
+    _finished_stores, finished_retrieves = adapter.get_finished(set())
+
+    assert finished_retrieves == {"req-1"}
+    assert adapter.get_finished(set())[1] == set()
+
+
+@pytest.mark.parametrize("value", [-1, float("inf"), float("nan")])
+def test_retrieve_timeout_rejects_invalid_values(fake_adapter, value) -> None:
+    _adapter, _send_mock, _future = fake_adapter
+
+    with pytest.raises(ValueError, match="finite, non-negative"):
+        _make_worker_adapter(extra_config={"lmcache.mp.retrieve_timeout": value})
+
+
 def test_instance_id_is_uuid_derived_63_bit_int(fake_adapter) -> None:
     """instance_id is a 63-bit int, not the PID, and unique per adapter."""
     adapter, _send_mock, _ = fake_adapter
