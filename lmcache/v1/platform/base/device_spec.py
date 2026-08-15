@@ -71,6 +71,22 @@ class DeviceSpec:
         return ""
 
     @property
+    def backend_name(self) -> str:
+        """Unique LMCache backend identifier for explicit backend selection.
+
+        ``device_type`` is tied to torch device naming, so multiple specs may
+        legitimately share it (for example, two different implementations of
+        ``"cuda"``). ``backend_name`` is the LMCache-specific disambiguator for
+        those cases and must therefore be unique across all registered specs.
+
+        The base implementation reuses :attr:`device_type`, which keeps today's
+        built-in backends unchanged. Specialised backends that share a
+        ``device_type`` with another implementation should override this with a
+        distinct lowercase name.
+        """
+        return self.device_type
+
+    @property
     def torch_module_name(self) -> str:
         """Attribute name on the ``torch`` package for the device module.
 
