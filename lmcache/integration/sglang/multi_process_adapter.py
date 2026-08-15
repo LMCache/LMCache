@@ -4,12 +4,11 @@ from __future__ import annotations
 
 # Standard
 from dataclasses import dataclass
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 import os
 import threading
 
 # Third Party
-from sglang.srt.configs.model_config import ModelConfig
 import torch
 import torch.distributed as dist
 import zmq
@@ -37,13 +36,46 @@ from lmcache.v1.multiprocess.custom_types import (
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import RequestType
-from lmcache.v1.platform.cuda.ipc_wrapper import CudaIPCWrapper
+from lmcache.v1.platform import get_device_spec
+from lmcache.v1.platform.kv_wrap import wrap_one_kv_cache
+
+if TYPE_CHECKING:
+    # Third Party
+    from sglang.srt.configs.model_config import ModelConfig
 
 logger = init_logger(__name__)
 
 # Extra seconds the WAIT_PREFETCH_STATUS response is allowed beyond the daemon's
 # own blocking-wait budget, to cover the request/response round trip.
 _WAIT_LOOKUP_RESPONSE_BUFFER_S = 5.0
+
+
+def _validate_sglang_kv_pools(
+    k_pool: list[torch.Tensor],
+    v_pool: list[torch.Tensor],
+) -> torch.device:
+    """Validate SGLang's split MHA pools and return their shared device.
+
+    Args:
+        k_pool: Per-layer key-cache tensors.
+        v_pool: Per-layer value-cache tensors.
+
+    Returns:
+        The device shared by every key and value tensor.
+
+    Raises:
+        ValueError: If either pool is empty, layer counts differ, or tensors
+            span multiple devices.
+    """
+    if not k_pool or not v_pool:
+        raise ValueError("SGLang MP registration requires non-empty K and V pools")
+    if len(k_pool) != len(v_pool):
+        raise ValueError("SGLang MP registration requires matching K and V layers")
+    tensors = [*k_pool, *v_pool]
+    device = tensors[0].device
+    if any(tensor.device != device for tensor in tensors):
+        raise ValueError("SGLang MP K and V pools must use one device")
+    return device
 
 
 def _wrap_sglang_kv_caches(
@@ -56,11 +88,22 @@ def _wrap_sglang_kv_caches(
     :func:`normalize_kv_and_discover_format` recognizes this shape from
     ``EngineType.SGLANG`` plus a ``tokens_per_block`` ``LayoutHints`` field
     and splits it back at its midpoint before format detection.
+
+    Raises:
+        ValueError: If the pools are empty, use different devices, or the
+            selected platform cannot provide the complete handle-transfer
+            path.
     """
-    wrapped: KVCache = []
-    wrapped.extend(CudaIPCWrapper(tensor) for tensor in k_pool)
-    wrapped.extend(CudaIPCWrapper(tensor) for tensor in v_pool)
-    return wrapped
+    device = _validate_sglang_kv_pools(k_pool, v_pool)
+    tensors = [*k_pool, *v_pool]
+    device_spec = get_device_spec(device.type)
+    if device_spec is None or not device_spec.is_handle_transfer_available():
+        raise ValueError(
+            "SGLang MP handle transfer is unavailable for device type "
+            f"{device.type!r}: required memory IPC, event IPC, cache context, "
+            "or block-transfer capabilities are missing"
+        )
+    return [wrap_one_kv_cache(tensor) for tensor in tensors]
 
 
 def _completed_future(result: bool) -> MessagingFuture[bool]:
@@ -115,7 +158,7 @@ class LMCacheMPConnector:
       matched-token count.
     - ``retrieve_kv``: fires RETRIEVE using the cached LOOKUP result.
       Daemon copies L1→GPU via ``multi_layer_block_kv_transfer``
-      (single CUDA launch, all layers) and releases the read locks
+      (one device transfer, all layers) and releases the read locks
       via ``finish_read_prefetched``.
     - ``release_pending``: frees the held locks when no RETRIEVE will
       follow (LMCache had nothing fresh beyond radix).
@@ -138,10 +181,11 @@ class LMCacheMPConnector:
         mq_timeout: float = DEFAULT_MQ_TIMEOUT,
         heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
     ):
+        device = _validate_sglang_kv_pools(k_pool, v_pool)
         self.tp_size = tp_size
         self.worker_id = rank
         self.page_size = page_size
-        self.device = k_pool[0].device
+        self.device = device
         self.model_name = sgl_config.model_path
         self.num_layers = len(k_pool)
         self.tp_group = tp_group
@@ -412,10 +456,10 @@ class LMCacheMPConnector:
         matched_end: int,
         block_ids: list[int],
         skip_prefix_n_blocks: int = 0,
-    ):
+    ) -> MessagingFuture[bool]:
         event = torch_dev.Event(interprocess=True)
         event.record(torch_dev.current_stream())
-        return send_lmcache_request(
+        future = send_lmcache_request(
             self.mq_client,
             RequestType.RETRIEVE,
             [
@@ -433,6 +477,11 @@ class LMCacheMPConnector:
                 skip_prefix_n_blocks,
             ],
         ).to_device_future(device=self.device)
+        # The daemon imports this IPC event after the request crosses the wire.
+        # Retain the exporting event until the returned future is released so
+        # its underlying handle cannot be destroyed during that interval.
+        future.retain_reference(event)
+        return future
 
     def retrieve_kv(self, load_metadata: LoadMetadata) -> int:
         """Phase 2 of the two-phase load — fires RETRIEVE only.
@@ -575,13 +624,12 @@ class LMCacheMPConnector:
                 [block_ids],
                 event.ipc_handle(),
             ],
-        ).to_cuda_future(device=self.device)
-        # Keep the exporting CUDA event alive until the caller releases the
+        ).to_device_future(device=self.device)
+        # Keep the exporting device event alive until the caller releases the
         # future. Since we return without blocking, the local ``event`` would
         # otherwise be garbage-collected immediately, destroying the underlying
-        # CUDA event before the daemon imports its IPC handle and waits on it.
-        # (Dynamic keepalive attribute; the future type doesn't declare it.)
-        future._export_event = event  # type: ignore[attr-defined]
+        # event before the daemon imports its IPC handle and waits on it.
+        future.retain_reference(event)
         return future
 
     def store_kv(self, store_metadata: StoreMetadata) -> None:
