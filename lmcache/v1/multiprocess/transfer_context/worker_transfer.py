@@ -329,7 +329,7 @@ class TransferContext(ABC):
         instance_id: int,
         kv_caches: dict[str, torch.Tensor],
         block_ids: list[list[int]],
-        event: IPCEvent,
+        event: IPCEvent | None,
         blocks_in_chunk: int,
     ) -> MessagingFuture:
         """Submit a store request and return a completion future.
@@ -340,7 +340,7 @@ class TransferContext(ABC):
             instance_id: Worker process instance identifier.
             kv_caches: Worker KV cache tensors keyed by layer name.
             block_ids: vLLM block IDs to store, indexed by LMCache KV group id.
-            event: Synchronization event object.
+            event: Synchronization event object, or ``None`` without event IPC.
             blocks_in_chunk: Number of vLLM blocks per LMCache chunk.
 
         Returns:
@@ -358,7 +358,7 @@ class TransferContext(ABC):
         instance_id: int,
         kv_caches: dict[str, torch.Tensor],
         block_ids: list[list[int]],
-        event: IPCEvent,
+        event: IPCEvent | None,
         blocks_in_chunk: int,
         skip_first_n_tokens: int = 0,
     ) -> MessagingFuture:
@@ -371,7 +371,7 @@ class TransferContext(ABC):
             kv_caches: Worker KV cache tensors keyed by layer name.
             block_ids: vLLM block IDs to retrieve into, indexed by LMCache KV
                 group id.
-            event: Synchronization event object.
+            event: Synchronization event object, or ``None`` without event IPC.
             blocks_in_chunk: Number of vLLM blocks per LMCache chunk.
             skip_first_n_tokens: Number of initial tokens to skip when writing.
 
@@ -505,7 +505,7 @@ class LMCacheDrivenTransferContext(TransferContext):
         instance_id: int,
         kv_caches: dict[str, torch.Tensor],
         block_ids: list[list[int]],
-        event: IPCEvent,
+        event: IPCEvent | None,
         _blocks_in_chunk: int,
     ) -> MessagingFuture:
         """Submit a handle-based store ordered by ``event``.
@@ -536,6 +536,12 @@ class LMCacheDrivenTransferContext(TransferContext):
             raise RuntimeError(
                 "LMCache-driven transfer context is not registered. "
                 "Call register() before submit_store()."
+            )
+        if event is None:
+            raise RuntimeError(
+                "LMCache-driven transfer needs a device event to order the "
+                "engine's KV writes, but the caller passed none -- this "
+                "device declares no DeviceSpec.event_ipc_backend."
             )
         event_ipc_handle = self._event_backend.export_event(event, self._device)
         return self._send_request(
@@ -578,7 +584,7 @@ class LMCacheDrivenTransferContext(TransferContext):
         instance_id: int,
         _kv_caches: dict[str, torch.Tensor],
         block_ids: list[list[int]],
-        event: IPCEvent,
+        event: IPCEvent | None,
         _blocks_in_chunk: int,
         skip_first_n_tokens: int = 0,
     ) -> MessagingFuture:
@@ -611,6 +617,12 @@ class LMCacheDrivenTransferContext(TransferContext):
             raise RuntimeError(
                 "LMCache-driven transfer context is not registered. "
                 "Call register() before submit_retrieve()."
+            )
+        if event is None:
+            raise RuntimeError(
+                "LMCache-driven transfer needs a device event to order the "
+                "engine's KV writes, but the caller passed none -- this "
+                "device declares no DeviceSpec.event_ipc_backend."
             )
         event_ipc_handle = self._event_backend.export_event(event, self._device)
         return self._send_request(
@@ -755,7 +767,7 @@ class EngineDrivenTransferContext(TransferContext):
         instance_id: int,
         kv_caches: dict[str, torch.Tensor],
         block_ids: list[list[int]],
-        _event: IPCEvent,
+        _event: IPCEvent | None,
         blocks_in_chunk: int,
     ) -> MessagingFuture:
         if self._engine_driven_context is None:
@@ -797,7 +809,7 @@ class EngineDrivenTransferContext(TransferContext):
         instance_id: int,
         kv_caches: dict[str, torch.Tensor],
         block_ids: list[list[int]],
-        _event: IPCEvent,
+        _event: IPCEvent | None,
         blocks_in_chunk: int,
         skip_first_n_tokens: int = 0,
     ) -> MessagingFuture:

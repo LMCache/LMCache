@@ -158,7 +158,7 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
         instance_id: int,
         kv_caches: dict[str, torch.Tensor],
         block_ids: list[list[int]],
-        _event: IPCEvent,
+        _event: IPCEvent | None,
         blocks_in_chunk: int,
     ) -> MessagingFuture:
         """Three-phase async store (prepare, gather and commit all in background).
@@ -258,7 +258,10 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
 
                     # --- Phase 2: gather (GPU->CPU copy on copy stream) ---
                     with torch.inference_mode(), torch_dev.stream(self._copy_stream):
-                        _event.wait(stream=self._copy_stream)
+                        # Without event IPC there is no producer event to
+                        # wait on; ordering falls to the caller.
+                        if _event is not None:
+                            _event.wait(stream=self._copy_stream)
 
                         gather_paged_kv_to_cpu(
                             kv_caches,

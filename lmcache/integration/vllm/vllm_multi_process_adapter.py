@@ -1400,7 +1400,7 @@ class LMCacheMPWorkerAdapter:
         self,
         request_id: str,
         op: LoadStoreOp,
-        event: _IpcEvent,
+        event: _IpcEvent | None,
         cache_salt: str = "",
     ):
         """
@@ -1409,8 +1409,8 @@ class LMCacheMPWorkerAdapter:
         Args:
             request_id: The ID of the request
             op: The LoadStoreOp describing the store operation.
-            event: The CUDA event that is recorded after the current
-                model inference step
+            event: The device event recorded after the current model
+                inference step, or ``None`` without event IPC
             cache_salt: Per-user isolation salt.
         """
         self._ensure_heartbeat_started()
@@ -1444,14 +1444,15 @@ class LMCacheMPWorkerAdapter:
             self.blocks_in_chunk,
         )
         self.store_futures[request_id] = future
-        self.store_events[request_id] = event
+        if event is not None:
+            self.store_events[request_id] = event
 
     @_lmcache_nvtx_annotate
     def submit_retrieve_request(
         self,
         request_id: str,
         op: LoadStoreOp,
-        event: _IpcEvent,
+        event: _IpcEvent | None,
         cache_salt: str = "",
     ) -> None:
         """
@@ -1464,8 +1465,8 @@ class LMCacheMPWorkerAdapter:
         Args:
             request_id: The ID of the request
             op: The LoadStoreOp describing the retrieve operation.
-            event: The CUDA event that is recorded after the current
-                model inference step
+            event: The device event recorded after the current model
+                inference step, or ``None`` without event IPC
             cache_salt: Per-user isolation salt.
         """
         self._ensure_heartbeat_started()
@@ -1499,14 +1500,15 @@ class LMCacheMPWorkerAdapter:
             skip_first_n_tokens=op.skip_first_n_tokens,
         )
         self.retrieve_futures[request_id] = (future, op.flat_block_ids)
-        self.retrieve_events[request_id] = event
+        if event is not None:
+            self.retrieve_events[request_id] = event
 
     @_lmcache_nvtx_annotate
     def batched_submit_store_requests(
         self,
         request_ids: list[str],
         ops: list[LoadStoreOp],
-        event: _IpcEvent,
+        event: _IpcEvent | None,
         cache_salts: list[str] | None = None,
     ):
         """
@@ -1516,8 +1518,8 @@ class LMCacheMPWorkerAdapter:
             request_ids: The IDs of the requests
             ops: The LoadStoreOps describing the store operations. Should have
                 the same length as request_ids
-            event: The CUDA event that is recorded after the current
-                model inference step
+            event: The device event recorded after the current model
+                inference step, or ``None`` without event IPC
             cache_salts: Per-user isolation salts, one per request. If None,
                 all requests use cache_salt="". The list length should be the same as
                 request_ids.
@@ -1532,7 +1534,7 @@ class LMCacheMPWorkerAdapter:
         self,
         request_ids: list[str],
         ops: list[LoadStoreOp],
-        event: _IpcEvent,
+        event: _IpcEvent | None,
         cache_salts: list[str] | None = None,
     ):
         """
@@ -1542,8 +1544,8 @@ class LMCacheMPWorkerAdapter:
             request_ids: The IDs of the requests
             ops: The LoadStoreOps describing the retrieve operations. Should have
                 the same length as request_ids
-            event: The CUDA event that is recorded after the current
-                model inference step
+            event: The device event recorded after the current model
+                inference step, or ``None`` without event IPC
             cache_salts: Per-user isolation salts, one per request. If None,
                 all requests use cache_salt="". The list length should be same as
                 request_ids.
