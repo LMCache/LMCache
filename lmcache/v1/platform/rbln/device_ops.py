@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""RBLN ops backend: head-major block transfer over the torch baseline.
+"""RBLN ops backend: block transfer tuned for the device's torch op ordering.
 
 Every op except :meth:`RblnDeviceOps.multi_layer_block_kv_transfer` is
 inherited from :class:`DeviceOps`, which routes to the pure torch
@@ -9,20 +9,10 @@ devices, and the completion / event recorders degrade to immediate
 publication, with ordering supplied by the transfer context's
 ``torch_dev.synchronize()``.
 
-Block transfer is overridden because RBLN stores heads before block tokens.
-Upstream stages each chunk token-major (``[2, L, T, H*D]``), so the torch
-baseline would issue an on-device head<->token permute per store and restore;
-:mod:`lmcache.v1.platform.rbln.kv_ops` fills the same buffer head-major
-instead and never permutes.
-
-**Scope of the head-major chunk.** On RBLN the only caller of this op is the
-multiprocess engine-driven pair, ``gather_paged_kv_to_cpu`` /
-``scatter_cpu_to_paged_kv``; the LMCache-driven path is refused by
-:meth:`RblnDeviceSpec.is_handle_transfer_available`. That pair
-writes and reads the chunk with the same code and the cache server treats it
-as an opaque byte range, so the head-major interpretation round-trips. Any
-future caller that hands an RBLN chunk to a token-major reader would break
-this invariant.
+Block transfer is overridden for the op sequence, not for the layout. Chunks
+keep LMCache's canonical token-major wire layout (``[2, L, T, H*D]``), so a
+chunk written from an RBLN cache is byte-compatible with every other device --
+the case that matters for cross-device KV sharing and PD disaggregation.
 """
 
 # Future
@@ -40,16 +30,15 @@ from lmcache.v1.platform.base.device_ops import DeviceOps
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 from lmcache.v1.platform.rbln.kv_layout import squeeze_singleton_axis
 from lmcache.v1.platform.rbln.kv_ops import (
-    gather_blocks_head_major,
-    head_major_view,
-    scatter_head_major_to_blocks,
+    gather_blocks_to_chunk,
+    scatter_chunk_to_blocks,
 )
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
 
-#: The only layout the head-major path is validated for: the native vLLM-RBLN
-#: per-layer HND format the vLLM detector reports for an RBLN KV cache.
+#: The only layout this path is validated for: the native vLLM-RBLN per-layer
+#: HND format the vLLM detector reports for an RBLN KV cache.
 _SUPPORTED_FORMAT = lmcache_native.EngineKVFormat.NL_X_TWO_NB_NH_ONE_BS_HS
 
 
@@ -68,13 +57,13 @@ class RblnDeviceOps(DeviceOps):
         engine_kv_format: lmcache_native.EngineKVFormat,
         skip_prefix_n_blocks: int,
     ) -> None:
-        """Move whole paged blocks between RBLN KV and head-major chunks.
+        """Move whole paged blocks between RBLN KV and token-major chunks.
 
         Args:
             paged_buffer_ptrs_tensor: Native per-layer HND KV tensors,
                 ``[2, NB, NH, 1, BS, HS]``.
-            lmcache_objects_ptrs: Staging chunks, each sized as upstream's
-                token-major ``[2, L, T, H*D]`` and reinterpreted head-major.
+            lmcache_objects_ptrs: Staging chunks, each in the canonical
+                token-major layout ``[2, L, T, H*D]``.
             block_ids: Flat paged-block IDs in chunk-token order.
             device: Device the transfer runs on. Unused; taken from the
                 tensors.
@@ -101,7 +90,7 @@ class RblnDeviceOps(DeviceOps):
             )
         if int(engine_kv_format) != int(_SUPPORTED_FORMAT):
             raise ValueError(
-                "RBLN head-major block transfer supports only "
+                "RBLN block transfer supports only "
                 f"{_SUPPORTED_FORMAT.name}; got {engine_kv_format!r}"
             )
 
@@ -117,9 +106,6 @@ class RblnDeviceOps(DeviceOps):
             else [int(b) for b in block_ids]
         )
 
-        num_layers = len(paged_layers)
-        num_heads = int(shape_desc.nh)
-        head_size = int(shape_desc.hs)
         block_size = int(shape_desc.bs)
         if block_size <= 0 or lmcache_chunk_size % block_size != 0:
             raise ValueError(
@@ -138,20 +124,13 @@ class RblnDeviceOps(DeviceOps):
             ]
             if not blocks:
                 break
-            view = head_major_view(
-                chunk,
-                num_layers,
-                num_heads,
-                len(blocks) * block_size,
-                head_size,
-            )
             if is_d2h:
-                gather_blocks_head_major(paged_layers, blocks, view)
+                gather_blocks_to_chunk(paged_layers, blocks, chunk)
             else:
                 # The prefix skip is global across the transfer; translate it
                 # into this chunk's local block offset.
                 local_skip = min(len(blocks), max(0, skip_prefix_n_blocks - consumed))
-                scatter_head_major_to_blocks(
-                    paged_layers, blocks, view, skip_prefix_n_blocks=local_skip
+                scatter_chunk_to_blocks(
+                    paged_layers, blocks, chunk, skip_prefix_n_blocks=local_skip
                 )
             consumed += len(blocks)
