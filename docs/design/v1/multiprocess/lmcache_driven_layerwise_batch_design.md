@@ -39,16 +39,15 @@ event and one streaming partial frame to the worker.
 |  |                      |    |  +-- per batch (N layers) -----------+   |    |
 |  |  Drains output_queue |    |  | 1. GPU: H2D memcpy                |   |    |
 |  |  into ZMQ socket     |    |  | 2. GPU: scatter kernel            |   |    |
-|  |                      |    |  | 3. CPU: record_event              |   |    |
-|  |                      |    |  | 4. CPU: export_event              |   |    |
-|  |                      |    |  | 5. CPU: sink.send_partial()       |   |    |
+|  |                      |    |  | 3. CPU: record_event(pool[i])              |   |    |
+|  |                      |    |  | 4. CPU: sink.send_partial(pool_idx)       |   |    |
 |  |                      |    |  |      +-> output_queue.put()       |   |    |
 |  |                      |    |  +-----------------------------------+   |    |
 |  +------+---------------+    +------------------------------------------+    |
 |         | ZMQ ipc://                                                         |
 +---------+--------------------------------------------------------------------+
           |
-          |  partial frames (event IPC handle)
+          |  partial frames (pool index, int)
           |  or final frame  (completion status)
           |
 +---------+-------------------- Worker Process (vLLM) -------------------------+
@@ -60,7 +59,7 @@ event and one streaming partial frame to the worker.
 |  |  * zmq DEALER recv   |    |  |                                   |   |    |
 |  |  * partial? -> queue |    |  | 1. CPU: wait_for_layer(layer_idx) |   |    |
 |  |  * final? -> set_rslt|    |  |    1st in batch: drain _partial_q |   |    |
-|  |                      |    |  |      + import + wait_event(stream)|   |    |
+|  |                      |    |  |      + pool.event_at(idx) + wait_event|   |    |
 |  |  queue.Queue links:  |    |  |    rest N-1: cached event, no-op  |   |    |
 |  |   -> _partial_queue  |    |  |                                   |   |    |
 |  |                      |    |  | 2. GPU: attention(layer_idx)      |   |    |
@@ -85,22 +84,20 @@ Batch 0 (layers 0 .. N-1):
   +-- H2D memcpy: num_chunks x N x per_layer_bytes        (GPU)
   +-- scatter kernel: interleaved -> per-layer KV blocks  (GPU)
   +-- record_event(layer_events[0], server_stream)        (CPU)
-  +-- export_event(layer_events[0]) -> handle bytes       (CPU)
-  +-- sink.send_partial(msgpack(0, N, handle))            (CPU)
+  +-- sink.send_partial(msgpack(0, N, pool_idx=0))            (CPU)
        +-> output_queue -> MQ main loop -> ZMQ ROUTER -> wire
 
 Batch 1 (layers N .. 2N-1):
   +-- H2D memcpy ...
   +-- scatter kernel ...
   +-- record_event(layer_events[N], server_stream)
-  +-- export_event(layer_events[N]) -> handle bytes
-  +-- sink.send_partial(msgpack(N, N, handle))
+  +-- sink.send_partial(msgpack(N, N, pool_idx=N))
 
   ... (batches 2 .. ceil(L/N)-2 identical pattern) ...
 
 Batch ceil(L/N)-1 (last N layers):
-  +-- H2D + scatter + record_event + export_event
-  +-- sink.send_partial(msgpack((ceil(L/N)-1)*N, N, handle))
+  +-- H2D + scatter + record_event(pool[last])
+  +-- sink.send_partial(msgpack((ceil(L/N)-1)*N, N, pool_idx))
 
 Handler returns ([], True)
   +-> done-callback -> output_queue -> final frame
@@ -111,7 +108,7 @@ Handler returns ([], True)
 ```
 Layer  0: wait_for_layer(0)
             -> _drain_until_layer(0) blocks on partial_queue.get()
-            -> receives partial (0, N, handle) -> import_event -> wait_event
+            -> receives partial (0, N, pool_idx) -> pool.event_at(idx) -> wait_event
           attention(layer 0)  <-- GPU, overlaps with server batch 1 H2D
 
 Layer  1: wait_for_layer(1)
@@ -122,8 +119,8 @@ Layer  1: wait_for_layer(1)
   ... layers 2 .. N-1: same event, all dedup-skipped ...
 
 Layer  N: wait_for_layer(N)
-            -> not in map -> drain queue -> receives partial (N, N, handle)
-            -> import_event -> wait_event
+            -> not in map -> drain queue -> receives partial (N, N, pool_idx)
+            -> pool.event_at(idx) -> wait_event
           attention(layer N)  <-- GPU, overlaps with server batch 2 H2D
 
   ... layers N+1 .. L-1: same pattern ...
@@ -189,7 +186,75 @@ When native ops are available and the staging buffer is large enough,
 
 ---
 
-## 5. `--layerwise-batch N` Configuration Flow
+## 5. IPC Event Pool
+
+### 5.1 Motivation
+
+Without pooling, each layerwise retrieve creates L events
+(`cudaEventCreate`), exports B handles (`cudaIpcGetEventHandle`), 
+and the worker imports B handles (`cudaIpcOpenEventHandle`). 
+
+### 5.2 Design
+
+A fixed pool of `EVENT_POOL_SIZE = 256` interprocess events is
+pre-allocated per (context, worker) pair at **registration time**:
+
+```
+register_kv_cache():
+  1. assert num_total_layers <= EVENT_POOL_SIZE
+  2. pool = EventPool(backend, device)          # 256 x cudaEventCreate
+  3. handles = [backend.export_event(e) for e]  # 256 x cudaIpcGetEventHandle
+  4. return (layerwise_batch, handles)          # sent once in registration response
+```
+
+The worker imports all 256 handles **once** at registration:
+
+```
+register() response:
+  pool = EventPool.import_pool(backend, device, handles)
+  # 256 x cudaIpcOpenEventHandle — one-time cost at startup
+```
+
+### 5.3 Per-Request Hot Path (Zero Driver Calls)
+
+During retrieve, the server indexes into the pre-allocated pool:
+
+```
+layer_events = [pool.event_at(i) for i in range(num_total_layers)]
+...
+record_event(pool_event[batch_leader], stream)   # cudaEventRecord only
+send_partial(msgpack(first_layer, count, batch_leader))  # int, not bytes
+```
+
+The worker receives a pool index (int) and looks up the pre-imported
+event — no `cudaIpcOpenEventHandle` on the forward path:
+
+```
+pool_idx = decode(partial)  # int
+evt = pool.event_at(pool_idx)
+stream.wait_event(evt)
+```
+
+### 5.4 Wire Encoding
+
+Pool indices are sent as:
+- **Streaming (partial frames):** `msgpack(first_layer, count, pool_idx: int)`
+- **Non-streaming (final response):** `struct.pack("<Ni", *indices)` encoded
+  as `bytes` to stay within `tuple[bytes | list[bytes], bool]` (msgspec
+  cannot union two array-like types).
+
+### 5.5 Invariants
+
+- `num_total_layers <= EVENT_POOL_SIZE` — validated at registration; fails
+  loudly otherwise.
+- Pool is always present when layerwise is enabled (`assert event_pool`
+  in retrieve).
+- No fallback path exists — if the pool can't be created, registration
+  fails.
+
+---
+
+## 6. `--layerwise-batch N` Configuration Flow
 
 ```
 --layerwise-batch N
@@ -217,7 +282,7 @@ MPCacheServerContext
 
 ---
 
-## 6. Layout Uniformity & Mixed-Mode Considerations
+## 7. Layout Uniformity & Mixed-Mode Considerations
 
 ### 6.1 Current Invariant
 
@@ -244,7 +309,7 @@ flushing L2 between mode changes is sufficient.
 
 ---
 
-## 7. Streaming ZMQ Protocol
+## 8. Streaming ZMQ Protocol
 
 ### 7.1 Request Types
 
@@ -261,7 +326,7 @@ controls whether `_call_blocking_handler` allocates a `StreamingSink`.
 
 **Partial frame** (total ceil(L/N), one per batch):
 ```
-[zmq_identity, request_uid, request_type, b'\x00', msgpack(first_layer, count, handle_bytes)]
+[zmq_identity, request_uid, request_type, b'\x00', msgpack(first_layer, count, pool_index)]
 ```
 
 **Final frame** (only 1 for completion, after handler returns):

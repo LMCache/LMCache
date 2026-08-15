@@ -51,7 +51,9 @@ from lmcache.v1.multiprocess.native_completion import (
 from lmcache.v1.multiprocess.protocols.base import RequestType
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.base.event_ipc import (
+    EVENT_POOL_SIZE,
     EventIPCBackend,
+    EventPool,
     get_event_ipc_backend,
 )
 from lmcache.v1.platform.cache_context import create_cache_context
@@ -1233,6 +1235,7 @@ class ContextEntry:
     last_seen: float = 0.0
     has_liveness_signal: bool = False
     event_backend: EventIPCBackend | None = None
+    event_pool: EventPool | None = None
 
 
 class LMCacheDrivenTransferModule(InstanceLivenessTarget):
@@ -1478,7 +1481,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         engine_type: EngineType,
         layout_hints: LayoutHints,
         engine_group_infos: list[EngineGroupInfo],
-    ) -> int:
+    ) -> tuple[int, list[bytes]]:
         """Register the KV cache tensors for a given GPU instance ID.
 
         Args:
@@ -1507,7 +1510,10 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                     "Instance %d already registered; refreshing liveness",
                     instance_id,
                 )
-                return self._ctx.layerwise_batch
+                pool_handles = (
+                    existing.event_pool.handles if existing.event_pool else []
+                )
+                return (self._ctx.layerwise_batch, pool_handles)
 
         # Build the context and layout descriptor outside the lock.
         cache_context = create_cache_context(
@@ -1543,6 +1549,23 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             group_layout_descs=group_layout_descs,
         )
 
+        # Pre-allocate the IPC event pool for this (context, worker) pair.
+        # Handles are exported once here and sent back in the registration
+        # response; the worker imports them once and reuses by index.
+        event_pool: EventPool | None = None
+        if self._ctx.layerwise_batch > 0:
+            num_total_layers = sum(
+                kgr.num_layers
+                for kgr in cache_context.kv_layer_groups_manager.kernel_groups
+            )
+            if num_total_layers > EVENT_POOL_SIZE:
+                raise ValueError(
+                    f"Model has {num_total_layers} total layers but "
+                    f"EVENT_POOL_SIZE={EVENT_POOL_SIZE}. Increase "
+                    f"EVENT_POOL_SIZE or disable layerwise mode."
+                )
+            event_pool = EventPool(event_backend, cache_context.device)
+
         with self._lock:
             self._cache_contexts[instance_id] = ContextEntry(
                 cache_context=cache_context,
@@ -1551,14 +1574,19 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 last_seen=now,
                 has_liveness_signal=False,
                 event_backend=event_backend,
+                event_pool=event_pool,
             )
 
         logger.info(
-            "Registered KV cache for GPU ID %d with %d layers",
+            "Registered KV cache for GPU ID %d with %d layers (pool_size=%d)",
             instance_id,
             cache_context.num_layers,
+            event_pool.size if event_pool else 0,
         )
-        return self._ctx.layerwise_batch
+        # Return (layerwise_batch, event_pool_handles) so the worker can
+        # pre-import all IPC events at registration time.
+        pool_handles = event_pool.handles if event_pool else []
+        return (self._ctx.layerwise_batch, pool_handles)
 
     def unregister_kv_cache(self, instance_id: int) -> None:
         """Unregister the KV cache tensors for a given GPU instance ID.
@@ -1956,17 +1984,20 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             ]
             expected_retained = sum(num_chunks - skip for skip in group_skips)
 
-            # Create per-layer events if layerwise mode is enabled
+            # Use pre-allocated event pool for layerwise signaling.
+            # Events are reused across requests; the pool is created once
+            # at registration time (zero per-request create/export cost).
             layer_events = []
+            event_pool = entry.event_pool
             if layerwise:
                 num_total_layers = sum(
                     kgr.num_layers
                     for kgr in cache_context.kv_layer_groups_manager.kernel_groups
                 )
-                layer_events = [
-                    event_backend.create_event(cache_context.device)
-                    for _ in range(num_total_layers)
-                ]
+                assert event_pool is not None, (
+                    "EventPool must exist when layerwise is enabled"
+                )
+                layer_events = [event_pool.event_at(i) for i in range(num_total_layers)]
             batch_leader_map: dict[int, int] = {}
 
             prefetched_keys: list[ObjectKey] = []
@@ -2003,13 +2034,12 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                                     count,
                                     event,
                                     _sink=streaming_sink,
-                                    _eb=event_backend,
-                                    _cc=cache_context,
                                 ):
-                                    handle = _eb.export_event(event, _cc.device)
+                                    # Pool mode: send index (int) — no
+                                    # export_event call on the hot path.
                                     _sink.send_partial(
                                         msgspec.msgpack.encode(
-                                            (first_layer, count, handle)
+                                            (first_layer, count, first_layer)
                                         )
                                     )
 
@@ -2087,19 +2117,17 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 # empty list so the final ZMQ response only carries
                 # the success flag.
                 return [], retrieve_succeeded
-            # Export deduplicated handles as flat list[bytes] (msgspec
-            # compatible). Layers sharing a batch get the same handle
-            # bytes; consumer deduplicates on import.
-            exported_cache: dict[int, bytes] = {}
-            layer_event_handles: list[bytes] = []
+            # Pack pool indices as bytes (msgspec can't union two
+            # array-like types in the response).
+            # Standard
+            import struct as _struct
+
+            layer_event_indices: list[int] = []
             for gl in range(len(layer_events)):
                 leader = batch_leader_map.get(gl, gl)
-                if leader not in exported_cache:
-                    exported_cache[leader] = event_backend.export_event(
-                        layer_events[leader], cache_context.device
-                    )
-                layer_event_handles.append(exported_cache[leader])
-            return layer_event_handles, retrieve_succeeded
+                layer_event_indices.append(leader)
+            packed = _struct.pack(f"<{len(layer_event_indices)}i", *layer_event_indices)
+            return packed, retrieve_succeeded
         return (
             event_backend.export_event(event, cache_context.device),
             retrieve_succeeded,

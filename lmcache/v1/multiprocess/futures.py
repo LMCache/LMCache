@@ -11,7 +11,7 @@ import msgspec
 from lmcache import torch_dev
 from lmcache.utils import lmcache_deprecate
 from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
-from lmcache.v1.platform.base.event_ipc import get_event_ipc_backend
+from lmcache.v1.platform.base.event_ipc import EventPool, get_event_ipc_backend
 
 T = TypeVar("T")
 
@@ -274,6 +274,7 @@ class LayerwiseDeviceMessagingFuture(MessagingFuture[T]):
         raw_future: MessagingFuture[tuple[list[bytes], T]],
         device: Any | None = None,
         streaming: bool = False,
+        event_pool: EventPool | None = None,
     ) -> None:
         super().__init__()
         self.raw_future_ = raw_future
@@ -284,6 +285,7 @@ class LayerwiseDeviceMessagingFuture(MessagingFuture[T]):
         self._event_backend.check_event_support(self.device_)
         self._resolved = False
         self._last_waited_event: object | None = None
+        self._event_pool = event_pool
 
         # Streaming state
         self._streaming = streaming
@@ -298,11 +300,12 @@ class LayerwiseDeviceMessagingFuture(MessagingFuture[T]):
     # ------------------------------------------------------------------
 
     def _import_partial(self, b_data: bytes) -> None:
-        """Import event handles from one partial message."""
-        first_layer, count, handle_bytes = msgspec.msgpack.decode(
-            b_data, type=tuple[int, int, bytes]
+        """Import event from one partial message (pool index)."""
+        assert self._event_pool is not None
+        first_layer, count, pool_idx = msgspec.msgpack.decode(
+            b_data, type=tuple[int, int, int]
         )
-        evt = self._event_backend.import_event(handle_bytes, self.device_)
+        evt = self._event_pool.event_at(pool_idx)
         for i in range(first_layer, first_layer + count):
             self._layer_event_map[i] = evt
 
@@ -350,14 +353,24 @@ class LayerwiseDeviceMessagingFuture(MessagingFuture[T]):
     def _on_raw_future_complete(self) -> None:
         if self._resolved:
             return
-        event_bytes_list, result = self.raw_future_.result()
+        event_data_list, result = self.raw_future_.result()
         self.result_ = result
-        seen: dict[bytes, object] = {}
         self.layer_events_ = []
-        for eb in event_bytes_list:
-            if eb not in seen:
-                seen[eb] = self._event_backend.import_event(eb, self.device_)
-            self.layer_events_.append(seen[eb])
+        assert self._event_pool is not None, (
+            "EventPool must exist when layerwise is enabled"
+        )
+        # Pool mode: server packs indices as bytes (struct "<Ni").
+        # Standard
+        import struct as _struct
+
+        assert isinstance(event_data_list, bytes)
+        n = len(event_data_list) // 4
+        pool_indices = list(_struct.unpack(f"<{n}i", event_data_list))
+        seen_idx: dict[int, object] = {}
+        for idx in pool_indices:
+            if idx not in seen_idx:
+                seen_idx[idx] = self._event_pool.event_at(idx)
+            self.layer_events_.append(seen_idx[idx])
         self._resolved = True
 
     # ------------------------------------------------------------------

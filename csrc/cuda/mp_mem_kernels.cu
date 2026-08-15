@@ -494,11 +494,11 @@ void multi_layer_block_kv_transfer_templated(
 
     // One-time allocation of pinned host buffer
     if (!pinned_host_ptr) {
-      auto err = cudaHostAlloc(reinterpret_cast<void**>(&pinned_host_ptr),
-                               kMaxObjects * sizeof(int64_t),
-                               cudaHostAllocDefault);
-      TORCH_CHECK(err == cudaSuccess, "cudaHostAlloc failed: ",
-                  cudaGetErrorString(err));
+      auto err =
+          cudaHostAlloc(reinterpret_cast<void**>(&pinned_host_ptr),
+                        kMaxObjects * sizeof(int64_t), cudaHostAllocDefault);
+      TORCH_CHECK(err == cudaSuccess,
+                  "cudaHostAlloc failed: ", cudaGetErrorString(err));
     }
 
     // One-time allocation of device buffer (or on device change)
@@ -533,13 +533,12 @@ void multi_layer_block_kv_transfer_templated(
 
 }  // namespace
 
-#define LAUNCH_TEMPLATED(type)                                            \
-  do {                                                                    \
-    multi_layer_block_kv_transfer_templated<type>(                        \
-        paged_buffer_ptrs_tensor, lmcache_objects_ptrs,                   \
-        num_objects, block_ids, device,                                   \
-        direction, shape_desc, lmcache_chunk_size, engine_kv_format,      \
-        skip_prefix_n_blocks, layerwise);                                 \
+#define LAUNCH_TEMPLATED(type)                                        \
+  do {                                                                \
+    multi_layer_block_kv_transfer_templated<type>(                    \
+        paged_buffer_ptrs_tensor, lmcache_objects_ptrs, num_objects,  \
+        block_ids, device, direction, shape_desc, lmcache_chunk_size, \
+        engine_kv_format, skip_prefix_n_blocks, layerwise);           \
   } while (0)
 
 void multi_layer_block_kv_transfer(
