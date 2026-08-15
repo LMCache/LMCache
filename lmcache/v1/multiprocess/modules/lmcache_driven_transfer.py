@@ -756,6 +756,16 @@ def transfer_kv_layerwise(
                 kernel_group_id
             )
 
+            # Flat buffer capacity: total temp buffer bytes.  Invariant
+            # across requests (max_batch_size and the temp buffer shape are
+            # fixed at cache-context construction), so compute it once.
+            _temp_buf = cache_context.get_temp_kernel_group_buffer(0, kernel_group_id)
+            total_buffer_bytes = (
+                cache_context.max_batch_size
+                * _temp_buf.nelement()
+                * _temp_buf.element_size()
+            )
+
             kg_infos.append(
                 {
                     "kernel_group_id": kernel_group_id,
@@ -768,6 +778,8 @@ def transfer_kv_layerwise(
                     "sd": sd,
                     "single_layer_sd": single_layer_sd,
                     "group_kv_pointers": group_kv_pointers,
+                    "total_buffer_bytes": total_buffer_bytes,
+                    "max_per_layer_slots": total_buffer_bytes // per_layer_bytes,
                 }
             )
 
@@ -777,10 +789,11 @@ def transfer_kv_layerwise(
             for local_idx, global_layer_idx in enumerate(kg.layer_indices):
                 all_layers.append((kg_info_idx, local_idx, global_layer_idx))
 
-        _lw_cache[cache_key] = (kg_infos, all_layers)
+        # Sort by global layer index to ensure layer-major order.  Done
+        # once here (not per request) since the cached list is reused.
+        all_layers.sort(key=lambda x: x[2])
 
-    # Sort by global layer index to ensure layer-major order
-    all_layers.sort(key=lambda x: x[2])
+        _lw_cache[cache_key] = (kg_infos, all_layers)
 
     if not all_layers:
         return
@@ -839,20 +852,10 @@ def transfer_kv_layerwise(
         kernel_group_id = info["kernel_group_id"]
         blocks_per_window = info["blocks_per_window"]
         blocks_per_chunk = info["blocks_per_chunk"]
-        per_layer_bytes = info["per_layer_bytes"]
 
-        # Flat buffer capacity: total temp buffer bytes
-        total_buffer_bytes = (
-            cache_context.max_batch_size
-            * cache_context.get_temp_kernel_group_buffer(0, kernel_group_id).nelement()
-            * cache_context.get_temp_kernel_group_buffer(
-                0, kernel_group_id
-            ).element_size()
-        )
-        info["total_buffer_bytes"] = total_buffer_bytes
-        # Per-layer check (for fallback)
-        max_per_layer_slots = total_buffer_bytes // per_layer_bytes
-        info["single_launch"] = num_active_chunks <= max_per_layer_slots
+        # total_buffer_bytes / max_per_layer_slots are cached invariants;
+        # only the chunk-count comparison depends on this request.
+        info["single_launch"] = num_active_chunks <= info["max_per_layer_slots"]
 
         if num_active_chunks > 0:
             first_obj_idx = all_chunks_flat[0][0]
@@ -2000,6 +2003,18 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 layer_events = [event_pool.event_at(i) for i in range(num_total_layers)]
             batch_leader_map: dict[int, int] = {}
 
+            # Built once per request (not per object group): the closure
+            # only captures the streaming sink.
+            _export_cb = None
+            if layerwise and streaming_sink is not None:
+
+                def _export_cb(first_layer, count, event, _sink=streaming_sink):
+                    # Pool mode: send index (int) — no export_event call
+                    # on the hot path.
+                    _sink.send_partial(
+                        msgspec.msgpack.encode((first_layer, count, first_layer))
+                    )
+
             prefetched_keys: list[ObjectKey] = []
             total_bytes = 0
             retrieve_succeeded = True
@@ -2025,24 +2040,6 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                         )
 
                         if layerwise:
-                            # Build streaming callback if sink available
-                            _export_cb = None
-                            if streaming_sink is not None:
-
-                                def _export_cb(
-                                    first_layer,
-                                    count,
-                                    event,
-                                    _sink=streaming_sink,
-                                ):
-                                    # Pool mode: send index (int) — no
-                                    # export_event call on the hot path.
-                                    _sink.send_partial(
-                                        msgspec.msgpack.encode(
-                                            (first_layer, count, first_layer)
-                                        )
-                                    )
-
                             transfer_kv_layerwise(
                                 cache_context,
                                 block_ids_per_group_gpu,
