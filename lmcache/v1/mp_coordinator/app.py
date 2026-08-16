@@ -5,7 +5,7 @@ The coordinator is a FastAPI app. Endpoints are auto-discovered from the
 ``http_apis`` package (the same convention as the mp server's HTTP API) and stay
 thin, operating on the shared collaborators carried on ``app.state``: ``config``,
 ``registry``, ``key_directory``, ``eviction_controller`` (which owns quota and
-usage), and the ingest layer's ``event_gate``.
+usage), and the ingest layer's ``event_source`` / ``event_gate``.
 The lifespan runs background tasks for health-checking (eviction of instances
 whose heartbeats have lapsed) and the fleet L2 eviction control loop, which the
 controller owns (``FleetEvictionController.run``).
@@ -40,6 +40,7 @@ from lmcache.v1.mp_coordinator.controllers.usage_manager import CacheUsageManage
 from lmcache.v1.mp_coordinator.http_apis.dependencies import CoordinatorContext
 from lmcache.v1.mp_coordinator.ingest.event_broadcaster import CacheEventBroadcaster
 from lmcache.v1.mp_coordinator.ingest.event_gate import EventGate
+from lmcache.v1.mp_coordinator.ingest.http_event_source import HttpCacheEventSource
 from lmcache.v1.mp_coordinator.key_directory import KeyDirectory
 from lmcache.v1.mp_coordinator.persistence.checkpoint import (
     load_checkpoint,
@@ -116,8 +117,8 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
     token_hasher = TokenHasher(
         chunk_size=config.chunk_size, hash_algorithm=config.hash_algorithm
     )
-    # Ingest layer: the gate admits, the broadcaster fans out. Adding a
-    # consumer of the fleet's cache-event stream is a register call here.
+    # Ingest layer: the source feeds the gate, which admits before the
+    # broadcaster fans out. Adding a consumer is a register call here.
     event_broadcaster = CacheEventBroadcaster()
     event_broadcaster.register_consumer(key_directory)
     # Order matters: the eviction controller's delete handling reads the
@@ -130,6 +131,7 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
     # to read across the consumers consistently.
     quiesce = QuiesceLock()
     event_gate = EventGate(event_broadcaster, quiesce)
+    event_source = HttpCacheEventSource(event_gate)
 
     # Durable state, split by where each component says it belongs. PR 3
     # replaces this hand-built list with controller discovery.
@@ -160,6 +162,7 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
         token_hasher=token_hasher,
         key_directory=key_directory,
         event_gate=event_gate,
+        event_source=event_source,
         metadata_persister=metadata_persister,
         server_config=server_config,
     )
@@ -204,38 +207,42 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
         health_task = None
         eviction_task = None
         checkpoint_task = None
-        if config.checkpoint_path and config.checkpoint_interval > 0:
-            checkpoint_task = asyncio.create_task(_checkpoint_loop())
-        if config.health_check_interval > 0:
-            health_task = asyncio.create_task(_health_loop())
-        if config.eviction_check_interval > 0:
-            eviction_task = asyncio.create_task(
-                eviction_controller.run(
-                    registry, outbound_client, config.eviction_check_interval
-                )
-            )
-        logger.info(
-            "MP coordinator listening on http://%s:%d", config.host, config.port
-        )
         try:
+            await event_source.start()
+            if config.checkpoint_path and config.checkpoint_interval > 0:
+                checkpoint_task = asyncio.create_task(_checkpoint_loop())
+            if config.health_check_interval > 0:
+                health_task = asyncio.create_task(_health_loop())
+            if config.eviction_check_interval > 0:
+                eviction_task = asyncio.create_task(
+                    eviction_controller.run(
+                        registry, outbound_client, config.eviction_check_interval
+                    )
+                )
+            logger.info(
+                "MP coordinator listening on http://%s:%d", config.host, config.port
+            )
             yield
         finally:
-            for task in (health_task, eviction_task, checkpoint_task):
-                if task is not None:
-                    task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await task
-            if config.checkpoint_path:
-                # One last write, so a clean restart resumes where this
-                # process stopped rather than an interval-old copy.
-                await asyncio.to_thread(
-                    save_checkpoint,
-                    checkpoint_store,
-                    quiesce,
-                    checkpoint_components,
-                )
-            await eviction_controller.wait_for_in_flight_dispatches()
-            await outbound_client.aclose()
+            try:
+                await event_source.stop()
+            finally:
+                for task in (health_task, eviction_task, checkpoint_task):
+                    if task is not None:
+                        task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await task
+                if config.checkpoint_path:
+                    # One last write, so a clean restart resumes where this
+                    # process stopped rather than an interval-old copy.
+                    await asyncio.to_thread(
+                        save_checkpoint,
+                        checkpoint_store,
+                        quiesce,
+                        checkpoint_components,
+                    )
+                await eviction_controller.wait_for_in_flight_dispatches()
+                await outbound_client.aclose()
 
     app = FastAPI(title="LMCache MP Coordinator", version="1.0.0", lifespan=lifespan)
     app.state.ctx = ctx

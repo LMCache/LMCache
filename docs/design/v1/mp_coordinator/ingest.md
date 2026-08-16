@@ -1,6 +1,8 @@
 # Cache-event ingest
 
 Modules: `lmcache/v1/mp_coordinator/ingest/`
+ - `event_source.py` — source lifecycle/status contract
+ - `http_event_source.py` — non-durable `POST /events` push source
  - `event_gate.py` — `EventGate`: admission (fencing, dedup, gap detection)
  - `event_broadcaster.py` — `CacheEventBroadcaster` + the `CacheEventConsumer` protocol
 Contract vocabulary: `lmcache/v1/mp_coordinator/api.py`
@@ -12,11 +14,12 @@ it decides **what** is admitted (the gate) and **who** sees it (the
 broadcaster). Neither holds cache state — the consumers do.
 
 ```
-source                    ingest layer                     consumers
-─────────────────────────────────────────────────────────────────────────
-POST /events ──────────▶ EventGate.ingest ──▶ CacheEventBroadcaster
-  (live emitter stream)    fence / dedup /      .broadcast(batch) ────▶ KeyDirectory
-                           gap detect           .fence_instance(id) ──▶ FleetEvictionController
+source adapter                    ingest layer                 consumers
+──────────────────────────────────────────────────────────────────────────────
+POST /events ──▶ HttpCacheEventSource ──▶ EventGate ──▶ CacheEventBroadcaster
+ (HTTP push)      .ingest(batches)          fence /      .broadcast(batch) ────▶ KeyDirectory
+                                             dedup /       .fence_instance(id) ──▶ FleetEvictionController
+                                             gap detect
 ```
 
 ## Why a gate separate from the directory
@@ -62,10 +65,24 @@ the registry is still a follow-up; the method exists and is tested.)
 ## Sources
 
 `ingest` is the only door, and every source must carry a stream:
-`(instance_id, incarnation, seq)`. Today that is `POST /events`, fed by
+`(instance_id, incarnation, seq)`. Source adapters feed ordered batch
+lists to `EventGate.ingest_batches`, which reports the aggregate admitted /
+duplicate / stale counts.
+
+Today the adapter is `HttpCacheEventSource`, fed by `POST /events` from
 the MP-server `CacheEventSubscriber` (see
-[cache_events.md](cache_events.md)); a durable message-queue consumer
-would enter the same way, unchanged.
+[cache_events.md](cache_events.md)). It is a non-durable push source:
+FastAPI owns its request lifecycle, and the source cannot seek or replay
+events that failed before the coordinator accepted them. A future durable
+message-queue source enters through the same gate, so fencing, dedup, fan-out,
+and consumers do not change.
+
+The source lifecycle/status contract is deliberately smaller than a
+replayable-source contract. HTTP reports `replay_capability=none`; it does
+not implement a silent no-op `seek`. A durable source will add its own
+transport position and seek/lag contract when that position has a concrete
+representation. Transport positions (for example Kafka partition offsets)
+are separate from the gate's per-emitter seq cursors.
 
 A source that is a *scan* of current contents rather than a stream —
 the startup L2 resync that used to paginate `GET /cache/objects` — has

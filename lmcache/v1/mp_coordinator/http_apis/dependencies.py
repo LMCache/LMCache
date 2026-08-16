@@ -23,6 +23,7 @@ from lmcache.v1.mp_coordinator.controllers.eviction_controller import (
 from lmcache.v1.mp_coordinator.controllers.prefetch_manager import PrefetchManager
 from lmcache.v1.mp_coordinator.controllers.usage_manager import CacheUsageManager
 from lmcache.v1.mp_coordinator.ingest.event_gate import EventGate
+from lmcache.v1.mp_coordinator.ingest.http_event_source import HttpCacheEventSource
 from lmcache.v1.mp_coordinator.key_directory import KeyDirectory
 from lmcache.v1.mp_coordinator.persistence.metadata import MetadataPersister
 from lmcache.v1.mp_coordinator.registry import InstanceRegistry
@@ -46,8 +47,9 @@ class CoordinatorContext:
             (configured to match the fleet's ``chunk_size`` / ``hash_algorithm``).
         key_directory: Fleet-wide key → placements directory built from
             MP-server cache events (eventually consistent).
-        event_gate: Ingest entry point for the fleet cache-event stream
-            (``POST /events``).
+        event_gate: Admission authority after a source delivers cache events.
+        event_source: HTTP source adapter used by ``POST /events`` before
+            batches reach the gate.
         metadata_persister: Durable store for operator intent. Every
             handler that changes a pin or a quota must ``save`` so the
             change survives a restart.
@@ -63,6 +65,7 @@ class CoordinatorContext:
     token_hasher: TokenHasher
     key_directory: KeyDirectory
     event_gate: EventGate
+    event_source: HttpCacheEventSource
     metadata_persister: MetadataPersister
     server_config: ServerConfigRegistry
 
