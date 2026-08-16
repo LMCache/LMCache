@@ -351,9 +351,11 @@ Two policies are available:
 
 Policies do not receive request-finished or store-receipt lifecycle events.
 The manager derives finished and blocked request-id sets from the registry and
-passes those as drain inputs. A policy reports buffered operations and requests
-whose buffers became empty; only the manager combines those facts with registry
-state to authorize session teardown.
+passes those to one `LazyOffloadPendingStore.drain()` entry point. The facade
+hides pressure-aware versus FIFO triggering and returns a policy-neutral
+`LazyOffloadDrain`: request batches plus ids whose buffers became empty. Only
+the manager validates and pins emitted batches and combines empty-buffer facts
+with registry state to authorize session teardown.
 
 For either policy, the manager coalesces each request's released chunks into
 one store operation, calls `BlockPool.touch()` to pin its surviving blocks,

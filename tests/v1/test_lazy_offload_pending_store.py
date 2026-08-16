@@ -103,8 +103,22 @@ def _make_gpu_pool(num_blocks: int = 10) -> MagicMock:
     return gpu_pool
 
 
+def _drain_store(
+    store: LazyOffloadPendingStore,
+    new_blocks_allocated: int = 0,
+    est_next_step_blocks: int = 0,
+) -> pending_store_mod.LazyOffloadDrain:
+    return store.drain(
+        new_blocks_allocated,
+        est_next_step_blocks,
+        None,
+        set(),
+        set(),
+    )
+
+
 # ===========================================================================
-# Tests for FIFOOffloadPolicy (legacy placeholder)
+# Tests for FIFOOffloadPolicy
 # ===========================================================================
 
 
@@ -200,7 +214,7 @@ class TestLazyOffloadPendingStore:
         assert store.add(meta) is AddOutcome.BUFFERED
         assert store.has_pending_request("req")
 
-        (item,) = store.pop_items_for_offload({"req"})
+        (item,) = store.drain(0, 0, None, {"req"}, set()).items
         assert item.metadatas == [(meta, {0: b"hash-0", 1: b"hash-1"})]
         assert not store.has_pending_request("req")
 
@@ -215,11 +229,11 @@ class TestLazyOffloadPendingStore:
         for index in range(5):
             store.add(_make_meta(f"req-{index}"))
 
-        first = store.pop_items_for_offload(finished)
-        second = store.pop_items_for_offload(finished)
+        first = store.drain(0, 0, None, finished, set()).items
+        second = store.drain(0, 0, None, finished, set()).items
         assert [item.request_id for item in first] == ["req-0", "req-1"]
         assert [item.request_id for item in second] == ["req-2", "req-3"]
-        assert store.pop_items_for_offload(finished) == []
+        assert store.drain(0, 0, None, finished, set()).items == []
 
     def test_fifo_facade_routes_drop_and_reuse_discard(self) -> None:
         store = self._setup_store_with_gpu_pool()
@@ -282,60 +296,48 @@ class TestEvictionAwareMode:
         assert "prefix caching is off" in warnings[0]
         assert "sliding-window" in warnings[0]
 
-    def test_fifo_entry_points_raise(self) -> None:
-        store, _ = self._setup()
-        with pytest.raises(ValueError, match="FIFO policy unavailable"):
-            store.pop_items_for_offload(set())
-
     def test_collect_due_under_pressure_emits_op(self) -> None:
         store, _ = self._setup({"lmcache.mp.lazy_offload_horizon_steps": 1.0})
         meta = _make_meta("req-0", num_blocks=2)
         store.add(meta)
-        store.observe_step(new_blocks_allocated=4, est_next_step_blocks=0)
-        result = store.collect_due()
-        assert [op.store_metadata for op in result.to_store] == [meta]
+        result = _drain_store(store, 4, 0)
+        assert [entry[0] for item in result.items for entry in item.metadatas] == [meta]
 
     def test_collect_due_without_pressure_holds(self) -> None:
         store, _ = self._setup()
         store.add(_make_meta("req-0", num_blocks=2))
-        store.observe_step(new_blocks_allocated=0, est_next_step_blocks=0)
-        assert store.collect_due().to_store == []
+        assert _drain_store(store, 0, 0).items == []
 
     def test_drain_reports_policy_neutral_emptied_request(self) -> None:
         store, _ = self._setup({"lmcache.mp.lazy_offload_horizon_steps": 1.0})
         store.add(_make_meta("req-0", num_blocks=1))
-        store.observe_step(new_blocks_allocated=4, est_next_step_blocks=0)
-        result = store.collect_due()
-        assert len(result.to_store) == 1
-        assert result.emptied_requests == ["req-0"]
+        result = _drain_store(store, 4, 0)
+        assert len(result.items) == 1
+        assert result.emptied_request_ids == ["req-0"]
         assert not store.has_pending_request("req-0")
 
     def test_drop_request_discards_buffered_ops(self) -> None:
         store, _ = self._setup({"lmcache.mp.lazy_offload_horizon_steps": 1.0})
         store.add(_make_meta("req-0", num_blocks=2))
         assert store.drop_request("req-0") == 1
-        store.observe_step(new_blocks_allocated=4, est_next_step_blocks=0)
-        assert store.collect_due().to_store == []
+        assert _drain_store(store, 4, 0).items == []
 
     def test_discard_for_reuse_routes_to_eviction_queue(self) -> None:
         store, _ = self._setup({"lmcache.mp.lazy_offload_horizon_steps": 1.0})
         store.add(_make_meta("req-0", num_blocks=2))
         assert store.discard_for_reuse("req-0") == 1
-        store.observe_step(new_blocks_allocated=4, est_next_step_blocks=0)
-        assert store.collect_due().to_store == []
+        assert _drain_store(store, 4, 0).items == []
 
     def test_mark_store_failed_drops_buffered_ops(self) -> None:
         store, _ = self._setup({"lmcache.mp.lazy_offload_horizon_steps": 1.0})
         store.add(_make_meta("req-0", num_blocks=2))
         assert store.mark_store_failed("req-0") == 1
-        store.observe_step(new_blocks_allocated=4, est_next_step_blocks=0)
-        assert store.collect_due().to_store == []
+        assert _drain_store(store, 4, 0).items == []
 
     def test_stats_reports_the_cumulative_counters(self) -> None:
         store, _ = self._setup({"lmcache.mp.lazy_offload_horizon_steps": 1.0})
         store.add(_make_meta("req-0", num_blocks=1))
-        store.observe_step(new_blocks_allocated=4, est_next_step_blocks=0)
-        store.collect_due()
+        _drain_store(store, 4, 0)
         stats = store.stats()
         assert stats.admitted == 1
         assert stats.emitted == 1
@@ -345,8 +347,7 @@ class TestEvictionAwareMode:
         store, gpu_pool = self._setup({"lmcache.mp.lazy_offload_horizon_steps": 1.0})
         store.add(_make_meta("req-0", num_blocks=1))
         gpu_pool.blocks[0].block_hash = b"reallocated"
-        store.observe_step(new_blocks_allocated=4, est_next_step_blocks=0)
-        assert store.collect_due().to_store == []
+        assert _drain_store(store, 4, 0).items == []
         assert store.stats().dropped_evicted == 1
 
     def test_stats_unavailable_in_fifo_mode_or_before_bind(self) -> None:
@@ -368,8 +369,7 @@ class TestEvictionAwareMode:
         messages = _spy_logger_info(monkeypatch)
         store.add(_make_meta("req-0", num_blocks=1))
         gpu_pool.blocks[0].block_hash = b"reallocated"
-        store.observe_step(new_blocks_allocated=4, est_next_step_blocks=0)
-        store.collect_due()
+        _drain_store(store, 4, 0)
         (line,) = [m for m in messages if "blocks evicted before drain" in m]
         assert "dropped 1 store op(s)" in line
         assert "req-0" in line
@@ -388,9 +388,8 @@ class TestEvictionAwareMode:
         )
         messages = _spy_logger_info(monkeypatch)
         store.add(_make_meta("req-0", num_blocks=1, end=256))
-        store.observe_step(new_blocks_allocated=4, est_next_step_blocks=0)
-        result = store.collect_due()
-        assert len(result.dropped_short_prefix) == 1
+        _drain_store(store, 4, 0)
+        assert store.stats().rejected_short_prefix == 1
         (line,) = [m for m in messages if "below the break-even length" in m]
         assert "dropped 1 store op(s)" in line
         assert "req-0 (prefix 256)" in line
@@ -417,9 +416,8 @@ class TestEvictionAwareMode:
             meta = _make_meta(f"req-{block_id}", end=256)
             meta.op.flat_block_ids = [block_id]
             store.add(meta)
-        store.observe_step(new_blocks_allocated=40, est_next_step_blocks=0)
-        result = store.collect_due()
-        assert len(result.dropped_short_prefix) == 10
+        _drain_store(store, 40, 0)
+        assert store.stats().rejected_short_prefix == 10
         (line,) = [m for m in messages if "below the break-even length" in m]
         assert "dropped 10 store op(s)" in line
         assert line.count("(prefix 256)") == 8
@@ -453,11 +451,9 @@ class TestEvictionAwareMode:
         doomed.op.flat_block_ids = [2]
         store.add(doomed)
         gpu_pool.blocks[2].block_hash = b"reallocated"
-        store.observe_step(new_blocks_allocated=40, est_next_step_blocks=0)
-
-        result = store.collect_due()
-        assert result.ops_held_back == 1
-        assert len(result.dropped_evicted) == 1
+        _drain_store(store, 40, 0)
+        assert store.stats().throttled_drains == 1
+        assert store.stats().dropped_evicted == 1
         (line,) = [m for m in warnings if "max_drain_per_step" in m]
         assert "held back 1 due store op(s)" in line
         assert "1 op(s) were lost to eviction" in line
@@ -472,8 +468,7 @@ class TestEvictionAwareMode:
         again.op.flat_block_ids = [3]
         store.add(again)
         gpu_pool.blocks[3].block_hash = b"reallocated"
-        store.observe_step(new_blocks_allocated=40, est_next_step_blocks=0)
-        store.collect_due()
+        _drain_store(store, 40, 0)
         assert len([m for m in warnings if "max_drain_per_step" in m]) == 1
 
     def test_healthy_drain_does_not_warn_about_the_cap(
@@ -486,10 +481,9 @@ class TestEvictionAwareMode:
         warnings = _spy_logger(monkeypatch, "warning")
         store.add(_make_meta("req-0", num_blocks=1))
         gpu_pool.blocks[0].block_hash = b"reallocated"
-        store.observe_step(new_blocks_allocated=4, est_next_step_blocks=0)
-        result = store.collect_due()
-        assert len(result.dropped_evicted) == 1
-        assert result.ops_held_back == 0
+        _drain_store(store, 4, 0)
+        assert store.stats().dropped_evicted == 1
+        assert store.stats().throttled_drains == 0
         assert [m for m in warnings if "max_drain_per_step" in m] == []
 
     def test_skip_of_a_broken_request_logs_at_debug_only(
@@ -523,11 +517,10 @@ class TestEvictionAwareMode:
         store, _ = self._setup({"lmcache.mp.lazy_offload_horizon_steps": 1.0})
         messages = _spy_logger_info(monkeypatch)
         store.add(_make_meta("req-0", num_blocks=1))
-        store.observe_step(new_blocks_allocated=4, est_next_step_blocks=0)
-        store.collect_due()  # changed since start -> logs
-        store.collect_due()  # unchanged -> silent
+        _drain_store(store, 4, 0)  # changed since start -> logs
+        _drain_store(store)  # unchanged -> silent
         store.add(_make_meta("req-1", num_blocks=2))
-        store.collect_due()  # changed, but inside the throttle -> silent
+        _drain_store(store)  # changed, but inside the throttle -> silent
         ledgers = [m for m in messages if m.startswith("Lazy offload counters:")]
         assert len(ledgers) == 1
         assert "admitted=1" in ledgers[0]
@@ -538,7 +531,7 @@ class TestEvictionAwareMode:
         # without pending it does not close as an equation.
         assert "pending=0" in ledgers[0]
         clock[0] += 6.0
-        store.collect_due()  # throttle lapsed, change pending -> logs again
+        _drain_store(store)  # throttle lapsed, change pending -> logs again
         ledgers = [m for m in messages if m.startswith("Lazy offload counters:")]
         assert len(ledgers) == 2
         assert "admitted=2" in ledgers[1]
@@ -550,8 +543,7 @@ class TestEvictionAwareMode:
         store, gpu_pool = self._setup({"lmcache.mp.lazy_offload_horizon_steps": 1.0})
         store.add(_make_meta("req-0", num_blocks=1))
         gpu_pool.blocks[0].block_hash = b"reallocated"
-        store.observe_step(new_blocks_allocated=4, est_next_step_blocks=0)
-        store.collect_due()
+        _drain_store(store, 4, 0)
         messages = _spy_logger_info(monkeypatch)
         store.log_final_stats()
         (line,) = [m for m in messages if "final counters" in m]
@@ -576,8 +568,7 @@ class TestEvictionAwareMode:
         assert "emitted=0" in held
         assert "pending=2" in held
 
-        store.observe_step(new_blocks_allocated=4, est_next_step_blocks=0)
-        assert len(store.collect_due().to_store) == 2
+        assert len(_drain_store(store, 4, 0).items) == 2
         messages.clear()
         store.log_final_stats()
         (drained,) = [m for m in messages if "final counters" in m]
@@ -605,8 +596,7 @@ class TestEvictionAwareMode:
         store.bind_gpu_block_pool(gpu_pool)
 
         # Buffered state survived the redundant bind.
-        store.observe_step(new_blocks_allocated=4, est_next_step_blocks=0)
-        assert len(store.collect_due().to_store) == 1
+        assert len(_drain_store(store, 4, 0).items) == 1
 
     def test_rebind_different_pool_raises(self) -> None:
         store, _ = self._setup()

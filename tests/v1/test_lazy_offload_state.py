@@ -78,6 +78,8 @@ def test_initial_candidate_state_is_active() -> None:
     registry = LazyOffloadRequestRegistry()
     assert registry.ensure_active("req") == 0
     assert registry.is_active("req")
+    assert registry.is_current_epoch("req", 0)
+    assert not registry.is_current_epoch("req", 1)
     # Keep the enum in this public contract: slots use explicit phases rather
     # than booleans with call-site-specific meanings.
     assert RequestPhase.ACTIVE is not RequestPhase.FINISHED

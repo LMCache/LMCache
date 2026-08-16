@@ -15,7 +15,6 @@ from typing import TYPE_CHECKING, Protocol
 from lmcache.integration.vllm.lazy_offload_pending_store import (
     AddOutcome,
     ConfigValue,
-    LazyOffloadMode,
     LazyOffloadPendingStore,
 )
 from lmcache.integration.vllm.lazy_offload_state import LazyOffloadRequestRegistry
@@ -232,10 +231,7 @@ class LazyOffloadManager:
         """
         if not scheduler_output.total_num_scheduled_tokens:
             return LazyOffloadActions()
-        pool = self._require_block_pool()
-        if self._pending_store.mode is LazyOffloadMode.EVICTION_AWARE:
-            return self._drain_eviction_aware(scheduler_output, pool)
-        return self._drain_fifo(pool)
+        return self._drain(scheduler_output, self._require_block_pool())
 
     def on_store_results(
         self,
@@ -371,65 +367,34 @@ class LazyOffloadManager:
         """Write the final eviction-aware counter ledger, when available."""
         self._pending_store.log_final_stats()
 
-    def _drain_eviction_aware(
+    def _drain(
         self,
         scheduler_output: "SchedulerOutput",
         pool: "BlockPool",
     ) -> LazyOffloadActions:
-        """Run a pressure-triggered drain and pin every emitted operation."""
-        gross_new_blocks = _count_new_blocks(scheduler_output)
-        est_next_step_blocks = sum(
-            -(-scheduler_output.total_num_scheduled_tokens // tokens_per_block)
-            for tokens_per_block in self._group_tokens_per_block
+        """Apply one policy-neutral drain plan and its GPU side effects."""
+        drain = self._pending_store.drain(
+            new_blocks_allocated=_count_new_blocks(scheduler_output),
+            est_next_step_blocks=sum(
+                -(-scheduler_output.total_num_scheduled_tokens // tokens_per_block)
+                for tokens_per_block in self._group_tokens_per_block
+            ),
+            allocated_block_ids=_allocated_block_ids(scheduler_output),
+            finished_request_ids=self._requests.finished_request_ids(),
+            blocked_request_ids=self._requests.in_flight_request_ids(),
         )
-        self._pending_store.observe_step(
-            gross_new_blocks,
-            est_next_step_blocks,
-            _allocated_block_ids(scheduler_output),
-        )
-        result = self._pending_store.collect_due(self._requests.in_flight_request_ids())
-
-        ops_by_request: dict[str, list[LMCacheMPRequestMetadata]] = {}
-        blocks_by_request: dict[str, list[int]] = {}
-        for pending_op in result.to_store:
-            ops_by_request.setdefault(pending_op.request_id, []).append(
-                pending_op.store_metadata
-            )
-            blocks_by_request.setdefault(pending_op.request_id, []).extend(
-                pending_op.block_hashes
-            )
-
-        stores_to_submit = [
-            _coalesce_store_metadata(request_metas)
-            for request_metas in ops_by_request.values()
-        ]
-        for request_id in blocks_by_request:
-            if self._requests.has_in_flight(request_id):
+        actions = LazyOffloadActions()
+        for item in drain.items:
+            if not self._requests.is_current_epoch(item.request_id, item.epoch):
                 raise RuntimeError(
-                    f"request {request_id!r} emitted while a store batch "
+                    f"request {item.request_id!r} emitted stale store epoch "
+                    f"{item.epoch}"
+                )
+            if self._requests.has_in_flight(item.request_id):
+                raise RuntimeError(
+                    f"request {item.request_id!r} emitted while a store batch "
                     "is still in flight"
                 )
-        for request_id, block_ids in blocks_by_request.items():
-            pool.touch([pool.blocks[block_id] for block_id in block_ids])
-            self._requests.register_batch(request_id, block_ids)
-
-        sessions_to_end = []
-        for request_id in result.emptied_requests:
-            if self._requests.can_end_session(request_id):
-                sessions_to_end.append(request_id)
-                self._release_current_session(request_id)
-        return LazyOffloadActions(
-            stores_to_submit=stores_to_submit,
-            sessions_to_end=sessions_to_end,
-        )
-
-    def _drain_fifo(self, pool: "BlockPool") -> LazyOffloadActions:
-        """Run the legacy FIFO drain with ex-post hash validation."""
-        actions = LazyOffloadActions()
-        for item in self._pending_store.pop_items_for_offload(
-            self._requests.finished_request_ids(),
-            self._requests.in_flight_request_ids(),
-        ):
             valid_metas: list[LMCacheMPRequestMetadata] = []
             valid_block_ids: list[int] = []
             for metadata, old_block_hashes in item.metadatas:
@@ -454,11 +419,14 @@ class LazyOffloadManager:
                 valid_metas.append(metadata)
                 valid_block_ids.extend(gpu_block_ids)
             if not valid_metas:
-                actions.sessions_to_end.append(item.request_id)
-                self._release_current_session(item.request_id)
                 continue
             actions.stores_to_submit.append(_coalesce_store_metadata(valid_metas))
             self._requests.register_batch(item.request_id, valid_block_ids)
+
+        for request_id in drain.emptied_request_ids:
+            if self._requests.can_end_session(request_id):
+                actions.sessions_to_end.append(request_id)
+                self._release_current_session(request_id)
         return actions
 
     def _release_current_session(self, request_id: str) -> None:

@@ -12,7 +12,7 @@ if TYPE_CHECKING:
 
 @dataclass
 class PendingStoreItem:
-    """FIFO-buffered store metadata for one request epoch."""
+    """Store metadata selected for one request epoch by any drain policy."""
 
     request_id: str
     epoch: int = 0

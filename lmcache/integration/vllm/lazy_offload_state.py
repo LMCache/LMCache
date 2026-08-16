@@ -97,6 +97,11 @@ class LazyOffloadRequestRegistry:
         slot = self._slots.get(request_id)
         return slot is not None and slot.in_flight is not None
 
+    def is_current_epoch(self, request_id: str, epoch: int) -> bool:
+        """Whether an operation belongs to the request's current epoch."""
+        slot = self._slots.get(request_id)
+        return slot is not None and slot.epoch == epoch
+
     def in_flight_is_current(self, request_id: str) -> bool:
         """Whether the submitted batch belongs to the current store epoch."""
         slot = self._slots.get(request_id)

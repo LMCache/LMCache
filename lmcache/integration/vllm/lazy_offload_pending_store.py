@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Standard
-from dataclasses import asdict
+from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, cast
 import enum
 import time
 
 # First Party
-from lmcache.integration.vllm.lazy_offload_policy.base import PendingStoreItem
+from lmcache.integration.vllm.lazy_offload_policy.types import PendingStoreItem
 from lmcache.integration.vllm.lazy_offload_policy.eviction_aware import (
     DEFAULT_HORIZON_STEPS,
     AdmitResult,
@@ -33,6 +33,15 @@ if TYPE_CHECKING:
 logger = lmcache_init_logger(__name__)
 
 ConfigValue = str | int | float | bool | list[str] | None
+
+
+@dataclass
+class LazyOffloadDrain:
+    """Policy-neutral output consumed by the lazy-offload controller."""
+
+    items: list[PendingStoreItem] = field(default_factory=list)
+    emptied_request_ids: list[str] = field(default_factory=list)
+
 
 #: Minimum seconds between periodic counter-ledger log lines.
 _STATS_LOG_INTERVAL_S = 5.0
@@ -301,7 +310,49 @@ class LazyOffloadPendingStore:
         )
         return AddOutcome.SKIPPED_PREFIX_BROKEN
 
-    def observe_step(
+    def drain(
+        self,
+        new_blocks_allocated: int,
+        est_next_step_blocks: int,
+        allocated_block_ids: set[int] | None,
+        finished_request_ids: set[str],
+        blocked_request_ids: set[str],
+    ) -> LazyOffloadDrain:
+        """Return one policy-neutral drain plan for the controller."""
+        if self._eviction_queue is not None:
+            self._observe_step(
+                new_blocks_allocated,
+                est_next_step_blocks,
+                allocated_block_ids,
+            )
+            result = self._collect_due(blocked_request_ids)
+            items_by_request: dict[str, PendingStoreItem] = {}
+            for op in result.to_store:
+                item = items_by_request.setdefault(
+                    op.request_id,
+                    PendingStoreItem(request_id=op.request_id, epoch=op.epoch),
+                )
+                if item.epoch != op.epoch:
+                    raise RuntimeError(
+                        f"request {op.request_id!r} mixed store epochs "
+                        f"{item.epoch} and {op.epoch}"
+                    )
+                item.metadatas.append((op.store_metadata, op.block_hashes))
+            return LazyOffloadDrain(
+                items=list(items_by_request.values()),
+                emptied_request_ids=result.emptied_requests,
+            )
+
+        items = self._pop_fifo_items(
+            finished_request_ids,
+            blocked_request_ids,
+        )
+        return LazyOffloadDrain(
+            items=items,
+            emptied_request_ids=[item.request_id for item in items],
+        )
+
+    def _observe_step(
         self,
         new_blocks_allocated: int,
         est_next_step_blocks: int,
@@ -325,7 +376,7 @@ class LazyOffloadPendingStore:
                 allocated_block_ids,
             )
 
-    def collect_due(self, blocked_request_ids: set[str] | None = None) -> DrainResult:
+    def _collect_due(self, blocked_request_ids: set[str] | None = None) -> DrainResult:
         """Release the operations facing imminent eviction (EVICTION_AWARE).
 
         Returns:
@@ -458,7 +509,7 @@ class LazyOffloadPendingStore:
         self._last_logged_stats = stats
         self._last_stats_log_time = now
 
-    def pop_items_for_offload(
+    def _pop_fifo_items(
         self,
         finished_request_ids: set[str],
         blocked_request_ids: set[str] | None = None,
