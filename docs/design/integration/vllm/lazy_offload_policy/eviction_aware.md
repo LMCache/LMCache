@@ -278,9 +278,10 @@ vLLM hit instead of 0 on a lookup miss.
 
 ## Scheduler-path complexity
 
-The queue maintains three incremental indexes: block id to pending requests,
-per-request block reference counts, and a bounded multiset of operation sizes.
-A production drain therefore walks only the bounded free-queue window and the
+A dedicated pending-operation index owner maintains content covers, admission
+order, block id to pending requests, per-request block reference counts, and a
+bounded multiset of operation sizes. A production drain therefore walks only
+the bounded free-queue window and the
 requests represented in that window or touched by this step's allocations. Its
 cost is proportional to the pressure window and drain cap, not total pending
 queue depth. Admission and every departure path update all three indexes; the

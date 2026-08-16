@@ -20,7 +20,7 @@ submitting them to the worker.
 
 # Standard
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Iterable, Protocol
 import enum
 import math
 
@@ -375,6 +375,102 @@ class _RequestLifecycle:
         )
 
 
+class _PendingOperationIndexes:
+    """Own all secondary indexes derived from pending operations."""
+
+    def __init__(self) -> None:
+        self._content: dict[
+            tuple[str, int, tuple["BlockHashWithGroupId", ...]], PendingStoreOp
+        ] = {}
+        self._requests_by_block: dict[int, set[str]] = {}
+        self._request_block_refs: dict[tuple[str, int], int] = {}
+        self._request_order: dict[str, int] = {}
+        self._next_request_order = 0
+        self._op_size_counts: dict[int, int] = {}
+        self._max_op_blocks = 0
+        self._num_pending_blocks = 0
+        self._requests_to_validate: set[str] = set()
+
+    def covering_op(self, op: PendingStoreOp) -> PendingStoreOp | None:
+        return self._content.get(_content_key(op))
+
+    def add(self, op: PendingStoreOp, *, starts_request: bool) -> None:
+        """Index one admitted op after it enters the primary pending map."""
+        if starts_request:
+            self._request_order[op.request_id] = self._next_request_order
+            self._next_request_order += 1
+        self._content[_content_key(op)] = op
+        op_blocks = len(op.block_hashes)
+        self._op_size_counts[op_blocks] = self._op_size_counts.get(op_blocks, 0) + 1
+        self._max_op_blocks = max(self._max_op_blocks, op_blocks)
+        self._num_pending_blocks += op_blocks
+        for block_id in op.block_hashes:
+            ref_key = (op.request_id, block_id)
+            refs = self._request_block_refs.get(ref_key, 0) + 1
+            self._request_block_refs[ref_key] = refs
+            if refs == 1:
+                self._requests_by_block.setdefault(block_id, set()).add(op.request_id)
+
+    def forget(self, ops: list[PendingStoreOp]) -> None:
+        """Remove content, block, and operation-size entries for departed ops."""
+        for op in ops:
+            key = _content_key(op)
+            if self._content.get(key) is op:
+                del self._content[key]
+            op_blocks = len(op.block_hashes)
+            remaining_sizes = self._op_size_counts[op_blocks] - 1
+            if remaining_sizes:
+                self._op_size_counts[op_blocks] = remaining_sizes
+            else:
+                del self._op_size_counts[op_blocks]
+                if op_blocks == self._max_op_blocks:
+                    self._max_op_blocks = max(self._op_size_counts, default=0)
+            self._num_pending_blocks -= op_blocks
+            for block_id in op.block_hashes:
+                ref_key = (op.request_id, block_id)
+                refs = self._request_block_refs[ref_key] - 1
+                if refs > 0:
+                    self._request_block_refs[ref_key] = refs
+                    continue
+                del self._request_block_refs[ref_key]
+                requests = self._requests_by_block[block_id]
+                requests.discard(op.request_id)
+                if not requests:
+                    del self._requests_by_block[block_id]
+
+    def finish_request(self, request_id: str) -> None:
+        """Discard request-level ordering and validation entries."""
+        self._request_order.pop(request_id, None)
+        self._requests_to_validate.discard(request_id)
+
+    def observe_allocations(
+        self,
+        allocated_block_ids: set[int] | None,
+        all_pending_request_ids: Iterable[str],
+    ) -> None:
+        """Mark requests whose snapshots require validation this step."""
+        if allocated_block_ids is None:
+            self._requests_to_validate.update(all_pending_request_ids)
+            return
+        for block_id in allocated_block_ids:
+            self._requests_to_validate.update(self._requests_by_block.get(block_id, ()))
+
+    def requests_to_check(self, ranked_block_ids: Iterable[int]) -> set[str]:
+        requests = set(self._requests_to_validate)
+        for block_id in ranked_block_ids:
+            requests.update(self._requests_by_block.get(block_id, ()))
+        return requests
+
+    def validation_complete(self, request_id: str) -> None:
+        self._requests_to_validate.discard(request_id)
+
+    def admission_order(self, request_id: str) -> int:
+        return self._request_order[request_id]
+
+    def max_emission_shift_blocks(self, max_ops: int) -> int:
+        return min(self._num_pending_blocks, max_ops * self._max_op_blocks)
+
+
 class EvictionAwareStoreQueue:
     """Buffers store operations and releases them by eviction imminence.
 
@@ -424,38 +520,9 @@ class EvictionAwareStoreQueue:
         # record makes transition invariants explicit and avoids independent
         # set updates drifting apart.
         self._request_lifecycle: dict[str, _RequestLifecycle] = {}
-        # Content key -> the pending operation buffering that content. An
-        # operation whose content is already buffered under another request
-        # is deduplicated at admission: without this, every request over a
-        # hot shared prefix (blocks that never enter the free queue) would
-        # buffer its own copy and the queue would grow without bound. With
-        # deduplication the queue is bounded by the amount of unique cached
-        # content on the GPU. The covering op is kept (not just the key) so
-        # a dedup hit can verify its snapshot is still live: a doomed op can
-        # sit in the pending list ahead of its eviction drop, and it must
-        # not absorb a live copy of the content.
-        self._pending_content: dict[
-            tuple[str, int, tuple["BlockHashWithGroupId", ...]], PendingStoreOp
-        ] = {}
-        # Reverse index used by collect_due to inspect only requests whose
-        # blocks are in the bounded free-queue window or were allocated this
-        # step. Counts handle the defensive case where two ops of one request
-        # reference the same block.
-        self._requests_by_block: dict[int, set[str]] = {}
-        self._request_block_refs: dict[tuple[str, int], int] = {}
-        # Preserve the pending dict's historical insertion-order tie break
-        # without iterating that dict during incremental candidate discovery.
-        self._request_order: dict[str, int] = {}
-        self._next_request_order = 0
-        # Multiset of operation sizes. Its maximum gives a safe upper bound
-        # on how far at most max_drain_per_step emissions can shift the free
-        # queue, without retaining departed operations in a lazy heap.
-        self._op_size_counts: dict[int, int] = {}
-        self._max_op_blocks = 0
-        self._num_pending_blocks = 0
-        # Requests whose snapshots may have changed because one of their
-        # block ids was allocated in the latest scheduler step.
-        self._requests_to_validate: set[str] = set()
+        # Secondary indexes for content deduplication, bounded candidate
+        # discovery, admission-order tie breaking, and emission-shift bounds.
+        self._indexes = _PendingOperationIndexes()
         self._blocks_per_step_ema: float = 0.0
         self._ema_initialized = False
         self._next_step_estimate = 0
@@ -493,8 +560,7 @@ class EvictionAwareStoreQueue:
             self._lifecycle(op.request_id).prefix_broken = True
             self._counters.rejected_unhashed += 1
             return AdmitResult.REJECTED_UNHASHED_BLOCK
-        content_key = _content_key(op)
-        covering = self._pending_content.get(content_key)
+        covering = self._indexes.covering_op(op)
         if covering is not None and self._chain_intact(covering):
             self._counters.deduplicated += 1
             return AdmitResult.DEDUPLICATED
@@ -502,12 +568,9 @@ class EvictionAwareStoreQueue:
         # an earlier sibling's were, so the next drain prefix-closes over
         # it): buffer the live copy and make it the new cover. The doomed
         # op stays pending and is dropped by collect_due().
-        if op.request_id not in self._pending:
-            self._request_order[op.request_id] = self._next_request_order
-            self._next_request_order += 1
+        starts_request = op.request_id not in self._pending
         self._pending.setdefault(op.request_id, []).append(op)
-        self._pending_content[content_key] = op
-        self._index_op(op)
+        self._indexes.add(op, starts_request=starts_request)
         self._counters.admitted += 1
         return AdmitResult.ADMITTED
 
@@ -532,13 +595,7 @@ class EvictionAwareStoreQueue:
                 the drain. None asks for a full validation pass and is kept
                 for callers that cannot provide the incremental signal.
         """
-        if allocated_block_ids is None:
-            self._requests_to_validate.update(self._pending)
-        else:
-            for block_id in allocated_block_ids:
-                self._requests_to_validate.update(
-                    self._requests_by_block.get(block_id, ())
-                )
+        self._indexes.observe_allocations(allocated_block_ids, self._pending)
         if self._ema_initialized:
             self._blocks_per_step_ema = (
                 _EMA_ALPHA * new_blocks_allocated
@@ -603,9 +660,8 @@ class EvictionAwareStoreQueue:
             The number of operations discarded.
         """
         dropped = self._pending.pop(request_id, [])
-        self._request_order.pop(request_id, None)
-        self._forget_ops(dropped)
-        self._requests_to_validate.discard(request_id)
+        self._indexes.forget(dropped)
+        self._indexes.finish_request(request_id)
         self._counters.dropped_on_request_drop += len(dropped)
         state = self._request_lifecycle.get(request_id)
         if state is not None:
@@ -652,9 +708,8 @@ class EvictionAwareStoreQueue:
         if state is None or not state.finished:
             return False
         dropped = self._pending.pop(request_id, [])
-        self._request_order.pop(request_id, None)
-        self._forget_ops(dropped)
-        self._requests_to_validate.discard(request_id)
+        self._indexes.forget(dropped)
+        self._indexes.finish_request(request_id)
         self._counters.dropped_id_reuse += len(dropped)
         state.prefix_broken = False
         state.finished = False
@@ -688,9 +743,8 @@ class EvictionAwareStoreQueue:
         if state is not None and state.stale_in_flight:
             return 0
         dropped = self._pending.pop(request_id, [])
-        self._request_order.pop(request_id, None)
-        self._forget_ops(dropped)
-        self._requests_to_validate.discard(request_id)
+        self._indexes.forget(dropped)
+        self._indexes.finish_request(request_id)
         self._counters.dropped_failed_store += len(dropped)
         self._lifecycle(request_id).prefix_broken = True
         return len(dropped)
@@ -751,16 +805,14 @@ class EvictionAwareStoreQueue:
         # Only requests touched by this step's allocations or represented in
         # the bounded rank snapshot can have changed outcome. The reverse
         # index avoids a full pending-queue scan on every scheduler step.
-        requests_to_check = set(self._requests_to_validate)
-        for block_id in ranks:
-            requests_to_check.update(self._requests_by_block.get(block_id, ()))
+        requests_to_check = self._indexes.requests_to_check(ranks)
 
         # Per request: (min in-queue rank, request id, surviving ops).
         candidates: list[tuple[int, str, list[PendingStoreOp]]] = []
         for request_id in requests_to_check:
             ops = self._pending.get(request_id)
             if not ops:
-                self._requests_to_validate.discard(request_id)
+                self._indexes.validation_complete(request_id)
                 continue
             state = self._request_lifecycle.get(request_id)
             if state is not None and state.in_flight:
@@ -770,7 +822,7 @@ class EvictionAwareStoreQueue:
                 # checked even if their recycled blocks are no longer free.
                 continue
             surviving = self._drop_evicted_suffix(request_id, ops, result)
-            self._requests_to_validate.discard(request_id)
+            self._indexes.validation_complete(request_id)
             if not surviving:
                 continue
             op_ranks = [
@@ -788,7 +840,9 @@ class EvictionAwareStoreQueue:
         # Most imminent requests first. The cap may split a segment, but the
         # emitted part is a front slice of it, so within-request prefix order
         # is never violated; the rest stays pending for a later step.
-        candidates.sort(key=lambda cand: (cand[0], self._request_order[cand[1]]))
+        candidates.sort(
+            key=lambda cand: (cand[0], self._indexes.admission_order(cand[1]))
+        )
         budget = self._config.max_drain_per_step
         emitted_blocks = 0
         # Block ids removed from the free queue by earlier emissions in this
@@ -884,10 +938,7 @@ class EvictionAwareStoreQueue:
         without scanning the pending queue. Shared and in-use blocks make the
         actual shift smaller, never larger.
         """
-        return min(
-            self._num_pending_blocks,
-            self._config.max_drain_per_step * self._max_op_blocks,
-        )
+        return self._indexes.max_emission_shift_blocks(self._config.max_drain_per_step)
 
     def _danger_depth(self) -> int:
         """Free-queue depth considered at risk within the horizon.
@@ -998,60 +1049,14 @@ class EvictionAwareStoreQueue:
                 return False
             if sibling is op:
                 return True
-        # Unreachable while the _pending_content invariant holds (every
+        # Unreachable while the content-index invariant holds (every
         # cover is a pending op of its request); a missing cover is treated
         # as doomed, the safe direction.
         return False
 
-    def _index_op(self, op: PendingStoreOp) -> None:
-        """Add one admitted operation to candidate-discovery indexes."""
-        op_blocks = len(op.block_hashes)
-        self._op_size_counts[op_blocks] = self._op_size_counts.get(op_blocks, 0) + 1
-        self._max_op_blocks = max(self._max_op_blocks, op_blocks)
-        self._num_pending_blocks += op_blocks
-        for block_id in op.block_hashes:
-            ref_key = (op.request_id, block_id)
-            refs = self._request_block_refs.get(ref_key, 0) + 1
-            self._request_block_refs[ref_key] = refs
-            if refs == 1:
-                self._requests_by_block.setdefault(block_id, set()).add(op.request_id)
-
-    def _unindex_op(self, op: PendingStoreOp) -> None:
-        """Remove one departing operation from candidate-discovery indexes."""
-        op_blocks = len(op.block_hashes)
-        remaining_sizes = self._op_size_counts[op_blocks] - 1
-        if remaining_sizes:
-            self._op_size_counts[op_blocks] = remaining_sizes
-        else:
-            del self._op_size_counts[op_blocks]
-            if op_blocks == self._max_op_blocks:
-                self._max_op_blocks = max(self._op_size_counts, default=0)
-        self._num_pending_blocks -= op_blocks
-        for block_id in op.block_hashes:
-            ref_key = (op.request_id, block_id)
-            refs = self._request_block_refs[ref_key] - 1
-            if refs > 0:
-                self._request_block_refs[ref_key] = refs
-                continue
-            del self._request_block_refs[ref_key]
-            requests = self._requests_by_block[block_id]
-            requests.discard(op.request_id)
-            if not requests:
-                del self._requests_by_block[block_id]
-
     def _forget_ops(self, ops: list[PendingStoreOp]) -> None:
-        """Remove content keys and reverse-index entries for departing ops.
-
-        Must be called on every path that removes operations from
-        ``self._pending`` (emission, eviction drop, gate-3 drop, request
-        drop), so identical content becomes admissible again and bounded
-        candidate discovery never retains dead requests.
-        """
-        for op in ops:
-            key = _content_key(op)
-            if self._pending_content.get(key) is op:
-                del self._pending_content[key]
-            self._unindex_op(op)
+        """Remove all secondary-index entries for departing operations."""
+        self._indexes.forget(ops)
 
     def _replace_pending(
         self,
@@ -1064,8 +1069,7 @@ class EvictionAwareStoreQueue:
             self._pending[request_id] = remaining
             return
         self._pending.pop(request_id, None)
-        self._request_order.pop(request_id, None)
-        self._requests_to_validate.discard(request_id)
+        self._indexes.finish_request(request_id)
         state = self._request_lifecycle.get(request_id)
         if state is not None and state.finished and not state.in_flight:
             state.finished = False
