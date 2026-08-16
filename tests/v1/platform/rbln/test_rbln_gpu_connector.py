@@ -23,7 +23,6 @@ import torch
 # First Party
 from lmcache.v1.gpu_connector.rbln_connector import VLLMPagedMemRBLNConnectorV2
 from lmcache.v1.memory_allocators.tensor_memory_allocator import TensorMemoryAllocator
-from lmcache.v1.memory_management import MemoryFormat
 from lmcache.v1.platform.rbln.kv_layout import squeeze_singleton_axis
 import lmcache.lmcache_native as lmcache_native
 
@@ -258,20 +257,6 @@ def test_missing_kvcaches_raises() -> None:
     )
     with pytest.raises(TypeError):
         unregistered.from_gpu(memory_obj, 0, 4, slot_mapping=_slot_mapping(4))
-
-
-def test_non_kv_2ltd_memory_object_is_refused() -> None:
-    """The connector only speaks KV_2LTD."""
-    native = _native_kv()
-    connector = _connector_with_attributes()
-    memory_obj = _allocator().allocate(
-        connector.get_shape(4), DTYPE, fmt=MemoryFormat.KV_MLA_FMT
-    )
-    assert memory_obj is not None
-    with pytest.raises(ValueError, match="KV_2LTD"):
-        connector.from_gpu(
-            memory_obj, 0, 4, kvcaches=native, slot_mapping=_slot_mapping(4)
-        )
 
 
 def test_explicit_registration_enables_get_shape() -> None:

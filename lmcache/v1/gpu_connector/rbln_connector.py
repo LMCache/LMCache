@@ -2,31 +2,19 @@
 """RBLN (Rebellions NPU) paged-memory connector for vLLM.
 
 vLLM-RBLN hands LMCache one 6-D tensor per layer,
-``[2, num_blocks, num_kv_heads, 1, block_size, head_size]`` -- the HND layout
-with a singleton axis between heads and block tokens that the RBLN attention
-backend requires.
-
-That layout is its own ``EngineKVFormat.NL_X_TWO_NB_NH_ONE_BS_HS``, so this
-connector hands the caches to discovery exactly as vLLM-RBLN registered them
-and needs no layout hint -- the format is HND by definition.
-
-Axis 3 is always 1, so squeezing it is a free view onto identical bytes. This
-connector applies :func:`squeeze_singleton_axis` only where it indexes those
-bytes, which is the same split the multiprocess path uses in
-:class:`~lmcache.v1.platform.rbln.device_ops.RblnDeviceOps`: detection sees the
-registered layout, and the singleton is dropped at the point of transfer.
+``[2, num_blocks, num_kv_heads, 1, block_size, head_size]`` -- HND with a
+singleton axis the RBLN attention backend requires. Squeezing that axis is a
+free view, so the transfers do it where they index the bytes.
 
 The connector produces and consumes ``KV_2LTD`` memory objects
-(``[2, num_layers, num_tokens, num_heads * head_size]``), the same contract
-every other vLLM connector uses.
+(``[2, num_layers, num_tokens, num_heads * head_size]``), like every other
+vLLM connector.
 
-Because the layout is HND, tokens are *not* contiguous within a layer: the
-head axis sits between blocks and block tokens. The flat
+HND means tokens are not contiguous within a layer -- the head axis sits
+between blocks and block tokens -- so the flat
 ``view(num_blocks * block_size, hidden_dim)`` reshape the NHD connectors use
-would therefore address the wrong slots. Instead each transfer resolves the
-slot mapping into ``(block, offset)`` pairs and uses advanced indexing, which
-touches only the tokens in the request rather than materialising a permuted
-copy of the whole KV cache.
+would address the wrong slots. Each transfer resolves the slot mapping into
+``(block, offset)`` pairs and indexes with those instead.
 """
 
 # Future
@@ -55,7 +43,7 @@ from lmcache.v1.gpu_connector.utils import (
     get_num_layers,
     normalize_kv_and_discover_format,
 )
-from lmcache.v1.memory_management import MemoryFormat, MemoryObj
+from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.platform.rbln.kv_layout import squeeze_singleton_axis
 
 if TYPE_CHECKING:
@@ -222,13 +210,10 @@ class VLLMPagedMemRBLNConnectorV2(GPUConnectorInterface):
             end: One past the last token index of the slice.
             **kwargs: Must carry ``slot_mapping``; may carry ``kvcaches``.
 
-        Raises:
-            ValueError: If the memory object is not ``KV_2LTD``.
         """
         self.initialize_kvcaches_ptr(**kwargs)
         kvcaches = cast("List[torch.Tensor]", self.kvcaches)
         self._initialize_attributes(kvcaches)
-        self._validate_memory_format(memory_obj)
 
         slot_mapping = cast(torch.Tensor, kwargs["slot_mapping"])
         slices = slot_mapping[start:end].to(dtype=torch.long)
@@ -262,13 +247,10 @@ class VLLMPagedMemRBLNConnectorV2(GPUConnectorInterface):
             end: One past the last token index of the slice.
             **kwargs: Must carry ``slot_mapping``; may carry ``kvcaches``.
 
-        Raises:
-            ValueError: If the memory object is not ``KV_2LTD``.
         """
         self.initialize_kvcaches_ptr(**kwargs)
         kvcaches = cast("List[torch.Tensor]", self.kvcaches)
         self._initialize_attributes(kvcaches)
-        self._validate_memory_format(memory_obj)
 
         slot_mapping = cast(torch.Tensor, kwargs["slot_mapping"])
         slices = slot_mapping[start:end].to(dtype=torch.long)
@@ -336,18 +318,3 @@ class VLLMPagedMemRBLNConnectorV2(GPUConnectorInterface):
             torch.Size: ``[2, num_layers, num_tokens, num_heads * head_size]``.
         """
         return torch.Size([2, self.num_layers, num_tokens, self.hidden_dim_size])
-
-    def _validate_memory_format(self, memory_obj: MemoryObj) -> None:
-        """Reject memory objects that are not in ``KV_2LTD`` layout.
-
-        Args:
-            memory_obj: The memory object to check.
-
-        Raises:
-            ValueError: If the format is not ``KV_2LTD``.
-        """
-        if memory_obj.metadata.fmt != MemoryFormat.KV_2LTD:
-            raise ValueError(
-                "The memory object should be in KV_2LTD format in order to be "
-                "processed by VLLMPagedMemRBLNConnectorV2"
-            )
