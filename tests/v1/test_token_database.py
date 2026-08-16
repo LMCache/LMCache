@@ -155,3 +155,39 @@ def test_process_tokens_returns_int_keys_for_bytes_hash_func() -> None:
         assert isinstance(hash_val, int), f"Expected int, got {type(hash_val)}"
         # Must fit in uint64 (msgpack range: 0 to 2**64 - 1)
         assert 0 <= hash_val <= 2**64 - 1
+
+
+def test_fast_split_shorter_than_separator():
+    """A sequence shorter than the separator is one whole chunk, not a crash.
+
+    Regression for the missing ``return`` in the degenerate-case guard of
+    ``SegmentTokenDatabase._fast_split_by_subtensor``: the guard yielded the
+    whole tensor but then fell through to ``tokens.unfold(0, sep_len, 1)``,
+    which raises ``RuntimeError`` when ``len(tokens) < sep_len``.
+    """
+    db = object.__new__(SegmentTokenDatabase)
+    db.sep_tokens = torch.tensor([100, 200, 300], device="cpu")
+    db.sep_len = 3
+
+    tokens = torch.tensor([1, 2], device="cpu")
+    chunks = list(db._fast_split_by_subtensor(tokens))
+
+    assert len(chunks) == 1
+    assert torch.equal(chunks[0], tokens)
+
+
+def test_fast_split_empty_separator():
+    """An empty separator yields the whole sequence unchanged.
+
+    With ``sep_len == 0`` the fall-through produced spurious empty and
+    single-token chunks; the guard must short-circuit instead.
+    """
+    db = object.__new__(SegmentTokenDatabase)
+    db.sep_tokens = torch.tensor([], dtype=torch.long, device="cpu")
+    db.sep_len = 0
+
+    tokens = torch.tensor([1, 2, 3, 4], device="cpu")
+    chunks = list(db._fast_split_by_subtensor(tokens))
+
+    assert len(chunks) == 1
+    assert torch.equal(chunks[0], tokens)
