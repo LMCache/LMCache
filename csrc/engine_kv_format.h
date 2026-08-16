@@ -4,7 +4,7 @@
 
 // Physical KV-cache memory layout an engine hands to LMCache, plus the
 // classification predicates over it. Vendor-header-free, so every backend and
-// the Python facade (lmc_ops) share one definition. Detection (raw layout ->
+// the Python facade (device_ops) share one definition. Detection (raw layout ->
 // format) lives in lmcache/v1/gpu_connector/kv_format.
 
 /*
@@ -138,6 +138,8 @@ enum class EngineKVFormat : int {
 
   // vLLM DSA indexer k-cache [NB,BS,132] u8, paged [BSxvals][BSxscales]; kv 1
   NL_X_NB_BSV_BSS = 14,
+
+  NL_X_TWO_NB_NH_ONE_BS_HS = 15,
 };
 
 // __host__ __device__ under CUDA/HIP so the kernels can call these; the guard
@@ -186,6 +188,8 @@ LMC_KV_FORMAT_HD constexpr FormatFacts FORMAT_FACTS[] = {
                                       .is_fused_packed = true},
     /* 13 NL_X_NB_BS_NH_CS        */ {.is_layer_list = true,  .is_fused_packed = true},
     /* 14 NL_X_NB_BSV_BSS         */ {.is_layer_list = true,  .is_mla = true},
+    /* 15 NL_X_TWO_NB_NH_ONE_BS_HS*/ {.is_layer_list = true,  .is_hnd = true,
+                                      .is_two_major = true},
 };
 // clang-format on
 

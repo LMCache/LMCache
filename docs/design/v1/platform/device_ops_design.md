@@ -4,8 +4,8 @@
 
 ## 1. Goal
 
-Unify the per-device **ops** (callable ops plus shared types, currently
-exposed as `lmcache.c_ops`) behind a single `DeviceOps` abstraction in
+Unify the per-device **ops** (callable ops plus shared types, exposed through
+`lmcache.device_ops`) behind a single `DeviceOps` abstraction in
 `lmcache/v1/platform/`, alongside the existing device abstractions
 (`DeviceIPCWrapper`, `PinMemoryBackend`, `BaseCacheContext`).
 
@@ -21,13 +21,13 @@ what it accelerates and inherits the torch baseline for everything else.
 
 | Concern | Mechanism | Location |
 |---------|-----------|----------|
-| Compiled CUDA ops | `PYBIND11_MODULE(c_ops)` — 36 ops + 7 types (+`GPUKVFormat` alias) | `csrc/pybind.cpp` |
+| Compiled CUDA ops | `PYBIND11_MODULE(cuda_ops)` — CUDA/HIP native kernels loaded only by `CudaDeviceOps` | `csrc/cuda/pybind.cpp` |
 | Compiled SYCL ops | `PYBIND11_MODULE(xpu_ops)` — 12 ops + 2 enums (+`GPUKVFormat`); **24 ops fall back to torch** | `csrc/sycl/pybind_sycl.cpp` |
 | Torch/CPU reference | `torch_ops.py` — 36 ops (migrated from former `python_ops_fallback.py`) | `lmcache/v1/platform/torch_ops.py` |
 | Shared types | `ops_types.py` — `TransferDirection`, `EngineKVFormat`, `PageBufferShapeDesc`, `StagingCopy`, `LaunchVar`, `BatchStep`, `KernelGroupSpec`, `set_shape_desc_dtype` | `lmcache/v1/platform/ops_types.py` |
 | MUSA ops | Python override: 1 native op, rest inherited | `lmcache/v1/platform/musa/device_ops.py` |
 | HPU ops | None — uses torch baseline entirely | (via `DeviceOps` inheritance) |
-| Runtime selection | `_install_c_ops_shim()`: resolves `DeviceOps` singleton via `DeviceSpec.get_ops()` | `lmcache/__init__.py` |
+| Runtime selection | `device_ops = resolve_device_ops(torch_device_type)` | `lmcache/__init__.py` |
 | Device detection | `_device_detect.py`: registry, torch device probe, `current_device_spec` | `lmcache/v1/platform/_device_detect.py` |
 | Build selection | `BuildProfile` subclasses auto-discovered | `setup_extensions/build_profiles/` |
 | Device services registry | `DeviceIPCWrapper`/`PinMemoryBackend`/`BaseCacheContext` auto-discovered by `device_type` | `lmcache/v1/platform/` |
@@ -75,7 +75,7 @@ class DeviceOps:
 
     device_type: ClassVar[str] = ""        # base is unregistered
 
-    # Shared types as class attributes (for c_ops shim access).
+    # Shared types as class attributes for package-level access.
     TransferDirection = TransferDirection
     EngineKVFormat = EngineKVFormat
     GPUKVFormat = EngineKVFormat            # back-compat alias
@@ -164,7 +164,7 @@ classDiagram
       +bind_native(module)
     }
     class CpuDeviceOps { "cpu" - no overrides }
-    class CudaDeviceOps { "cuda"; bind_native(c_ops) }
+    class CudaDeviceOps { "cuda"; bind_native(cuda_ops) }
     class XpuDeviceOps { "xpu"; bind_native(xpu_ops): 12 SYCL + 24 torch }
     class MusaDeviceOps { "musa"; +1 native op override }
     class HpuDeviceOps { "hpu"; pure inherit }
@@ -191,14 +191,14 @@ class CudaDeviceOps(DeviceOps):
             return
         self._native_bound = True
         try:
-            import lmcache.c_ops as native
+            import lmcache.cuda_ops as native
         except ImportError:
-            logger.warning("lmcache.c_ops not found; staying on torch baseline.")
+            logger.warning("lmcache.cuda_ops not found; staying on torch baseline.")
             return
-        self.bind_native(native)      # all 36 ops -> lmcache.c_ops
+        self.bind_native(native)      # all CUDA/HIP native ops
 ```
 
-> ROCm also builds `lmcache.c_ops` (via hipify) and PyTorch ROCm masquerades
+> ROCm also builds `lmcache.cuda_ops` (via hipify) and PyTorch ROCm masquerades
 > as `torch.cuda`, so `CudaDeviceOps` handles ROCm automatically.
 
 ### 4.3 XPU — 12 SYCL + 24 torch
@@ -359,7 +359,7 @@ lmcache/v1/platform/
     stub_cpu_device.py
   cuda/
     __init__.py               # CudaDeviceSpec.ops_cls -> CudaDeviceOps
-    device_ops.py             # CudaDeviceOps (bind_native c_ops)
+    device_ops.py             # CudaDeviceOps (bind_native cuda_ops)
     cache_context.py
     ipc_wrapper.py
     pin_memory.py
@@ -378,50 +378,44 @@ lmcache/v1/platform/
 
 ---
 
-## 6. Runtime Resolution — the `lmcache.c_ops` Shim
+## 6. Runtime Resolution — `lmcache.device_ops`
 
-The shim lives in `lmcache/__init__.py` (not `platform/`) because
-`globals()["c_ops"]` must be set on the `lmcache` package namespace for
-`from lmcache import c_ops` (IMPORT_FROM bytecode) to work.
+The package exports the resolved `DeviceOps` singleton directly. Call sites
+import the object rather than a synthetic module, so platform dispatch is
+explicit and the native extension names remain platform-specific.
 
 ```python
-# lmcache/__init__.py
-def _install_c_ops_shim() -> None:
+try:
     from lmcache.v1.platform import resolve_device_ops
 
-    ops = resolve_device_ops(torch_device_type)  # cached singleton
-
-    shim = types.ModuleType("lmcache.c_ops")
-    shim.__getattr__ = lambda name: getattr(ops, name)
-    shim.__dir__ = lambda: dir(ops)
-    sys.modules["lmcache.c_ops"] = shim
-    globals()["c_ops"] = shim  # parent attr for IMPORT_FROM bytecode
-
-try:
-    _install_c_ops_shim()
+    device_ops = resolve_device_ops(torch_device_type)
+    __all__.append("device_ops")
 except Exception as exc:
     logger.warning("No compute backend loaded; CLI-only mode. Reason: %s", exc)
 ```
 
-The PEP 562 `__getattr__`/`__dir__` forwarding means:
-- `lmc_ops.multi_layer_kv_transfer(...)` resolves with zero overhead.
-- Runtime `setattr(ops_instance, ...)` patches (e.g. from `bind_native` or
-  tests) are immediately visible through the live forwarding.
+`DeviceSpec.get_ops()` caches the instance, so `lmcache.device_ops` and
+`resolve_device_ops(torch_device_type)` return the same object. Runtime native
+bindings and test patches are therefore immediately visible to all call sites.
 
 ---
 
-## 7. Native Compiled Modules (unchanged)
+## 7. Native Compiled Modules
 
-`DeviceOps` changes only how kernels are *selected*, not how they are built.
+Device-independent native code stays directly under `csrc/`, while each
+accelerator owns a dedicated subdirectory. CUDA sources live in `csrc/cuda/`
+and build as the private `lmcache.cuda_ops` extension. Device-agnostic callers
+use the resolved `lmcache.device_ops` object instead of a compiled module name.
 
 ---
 
 ## 8. Build System
 
-setuptools + auto-discovered `BuildProfile`s in `setup_extensions/build_profiles/`.
-**No build change is required**: the CUDA extension keeps the name
-`lmcache.c_ops`. All profiles (`cuda.py`, `sycl.py`, `rocm.py`, `musa.py`)
-are untouched.
+setuptools auto-discovers `BuildProfile`s in
+`setup_extensions/build_profiles/`. The CUDA profile compiles
+`csrc/cuda/` into `lmcache.cuda_ops`; the ROCm profile hipifies that same
+directory and emits the same module name. Other devices keep their own native
+module names and directories.
 
 ---
 
@@ -430,8 +424,8 @@ are untouched.
 | Device | DeviceOps subclass | Overrides | Native work | Effort |
 |--------|-------------------|-----------|-------------|--------|
 | CPU | `CpuDeviceOps` | none (base = torch) | none | migrate `python_ops_fallback` -> `torch_ops` |
-| CUDA | `CudaDeviceOps` | 36 via `bind_native(c_ops)` | none (keep `.cu`) | **low** |
-| HIP/ROCm | handled by `CudaDeviceOps` | (same; ROCm builds `c_ops` via hipify) | N/A | N/A |
+| CUDA | `CudaDeviceOps` | native ops via `bind_native(cuda_ops)` | `csrc/cuda/` | **low** |
+| HIP/ROCm | handled by `CudaDeviceOps` | same; ROCm builds `cuda_ops` via hipify | `csrc/cuda/` | N/A |
 | XPU | `XpuDeviceOps` | 12 via `bind_native(xpu_ops)` + 24 torch | existing SYCL | **low** |
 | MUSA | `MusaDeviceOps` | 1 native op | none | **low** |
 | HPU | `HpuDeviceOps` | none (inherits baseline) | none | **trivial** |

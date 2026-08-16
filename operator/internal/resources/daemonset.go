@@ -66,10 +66,11 @@ func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
 
 // buildDaemonSetCore constructs the DaemonSet shared by the LMCacheEngine and
 // CacheBlendEngine controllers. It is the single source of truth for the
-// GPU/security pod-template scaffolding (hostIPC, runtimeClassName, optional
-// privileged (default false, via spec.Privileged), NVIDIA_VISIBLE_DEVICES,
-// resources without a device-plugin GPU claim) so those settings cannot drift
-// between the two engines.
+// GPU/security pod-template scaffolding (host /dev/shm sharing for CUDA IPC —
+// a hostPath mount by default, or the host IPC namespace when spec.HostIPC is
+// true — runtimeClassName, optional privileged (default false, via
+// spec.Privileged), NVIDIA_VISIBLE_DEVICES, resources without a device-plugin
+// GPU claim) so those settings cannot drift between the two engines.
 //
 // Parameters:
 //   - name, namespace: the owning object's identity, used for labels and metadata.
@@ -97,6 +98,7 @@ func buildDaemonSetCore(
 		runtimeClassName = &rc
 	}
 	privileged := derefBool(spec.Privileged, false)
+	hostIPC := derefBool(spec.HostIPC, false)
 
 	serverPort := derefInt32(getServerPort(spec), 5555)
 	imgRepo := defaultImageRepo
@@ -185,11 +187,19 @@ func buildDaemonSetCore(
 	}
 	envVars = append(envVars, spec.Env...)
 
-	// No emptyDir /dev/shm mount — hostIPC: true exposes the host's /dev/shm
-	// directly. An emptyDir mount would shadow it and break CUDA IPC between
-	// LMCache and vLLM pods (cudaIpcOpenMemHandle requires shared /dev/shm).
+	// Cross-pod CUDA IPC needs the engine and vLLM pods to share the host's
+	// /dev/shm tmpfs (PyTorch CUDA IPC handles reference a ref-counter file
+	// there). By default that is a hostPath mount; with spec.hostIPC=true the
+	// shared IPC namespace already exposes the host's /dev/shm, so the mount is
+	// omitted. Never mount an emptyDir at /dev/shm — it would shadow the host's
+	// tmpfs and break CUDA IPC (cudaIpcOpenMemHandle fails with
+	// cudaErrorMapBufferObjectFailed).
 	volumes := append([]corev1.Volume{}, spec.Volumes...)
 	volumeMounts := append([]corev1.VolumeMount{}, spec.VolumeMounts...)
+	if !hostIPC && !HasDevShmMount(volumeMounts) && !HasDevShmVolume(volumes) {
+		volumes = append(volumes, BuildDevShmVolume())
+		volumeMounts = append(volumeMounts, BuildDevShmVolumeMount())
+	}
 
 	// Mount the L2 encryption master key (user-created Secret in the engine's
 	// namespace) read-only at the path the serde config references. Only the
@@ -298,7 +308,7 @@ func buildDaemonSetCore(
 					Annotations: podAnnotations,
 				},
 				Spec: corev1.PodSpec{
-					HostIPC:            true,
+					HostIPC:            hostIPC,
 					HostNetwork:        derefBool(spec.HostNetwork, false),
 					RuntimeClassName:   runtimeClassName,
 					ServiceAccountName: spec.ServiceAccountName,
@@ -307,6 +317,7 @@ func buildDaemonSetCore(
 					Affinity:           spec.Affinity,
 					Tolerations:        spec.Tolerations,
 					ImagePullSecrets:   spec.ImagePullSecrets,
+					InitContainers:     spec.InitContainers,
 					Containers: []corev1.Container{
 						{
 							Name:            "lmcache",

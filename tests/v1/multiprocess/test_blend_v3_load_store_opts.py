@@ -17,6 +17,9 @@ import time
 import pytest
 import torch
 
+# First Party
+import lmcache.lmcache_native as lmcache_native
+
 # ---------------------------------------------------------------------------
 # S1: async fingerprint registration
 # ---------------------------------------------------------------------------
@@ -276,7 +279,7 @@ def test_batched_rope_calls_kernel_per_group_per_slot():
     slots_to_rope = [(0, 100, 200), (2, 300, 400)]  # 2 non-prefix slots
 
     with (
-        patch.object(v3_mod, "lmc_ops") as ops,
+        patch.object(v3_mod, "device_ops") as ops,
         patch.object(v3_mod, "torch") as torch_mod,
     ):
         torch_mod.long = "long"
@@ -321,7 +324,7 @@ def test_batched_rope_noop_on_empty_slots():
         eng
     )
 
-    with patch.object(v3_mod, "lmc_ops") as ops:
+    with patch.object(v3_mod, "device_ops") as ops:
         eng._apply_cb_rope_batched(gpu_context, rope_state, 2, [])
 
     assert gpu_context.get_temp_kernel_group_buffer.call_count == 0
@@ -646,7 +649,7 @@ def test_scatter_launches_per_slot_without_cat():
         (torch.tensor([20, 21, 22], dtype=torch.long), 4),
     ]
 
-    with patch.object(v3_mod, "lmc_ops") as ops:
+    with patch.object(v3_mod, "device_ops") as ops:
         eng._scatter_batch_to_paged(gpu_context, resolved_groups, batch, 32)
 
     calls = ops.multi_layer_kv_transfer.call_args_list
@@ -684,7 +687,7 @@ def test_scatter_narrows_partial_chunk_and_keeps_alignment():
     batch = [(_match(0, 4), None), (_match(4, 6), None), (_match(6, 10), None)]
     resolved_groups = [(torch.tensor([10, 11, 12], dtype=torch.long), 4)]
 
-    with patch.object(v3_mod, "lmc_ops") as ops:
+    with patch.object(v3_mod, "device_ops") as ops:
         eng._scatter_batch_to_paged(gpu_context, resolved_groups, batch, 32)
 
     calls = ops.multi_layer_kv_transfer.call_args_list
@@ -716,7 +719,9 @@ def _native_retrieve_plan_available() -> bool:
     # First Party
     from lmcache.v1.multiprocess.modules import blend_v3 as v3_mod
 
-    return v3_mod._HAS_NATIVE_RETRIEVE_PLAN and hasattr(v3_mod.lmc_ops, "CBGroupSpec")
+    return v3_mod._HAS_NATIVE_RETRIEVE_PLAN and hasattr(
+        v3_mod.device_ops, "CBGroupSpec"
+    )
 
 
 native_retrieve_plan_required = pytest.mark.skipif(
@@ -744,7 +749,6 @@ def _build_plan_engine_and_context(
 
     # First Party
     from lmcache.v1.multiprocess.modules import blend_v3 as v3_mod
-    import lmcache.c_ops as lmc_ops
 
     eng = MagicMock(spec=v3_mod.BlendV3Module)
     for name in (
@@ -765,7 +769,7 @@ def _build_plan_engine_and_context(
             tokens_per_block=4,
             slots_per_block=4,
             engine_group_idx=0,
-            engine_kv_format=lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
+            engine_kv_format=lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
             shape_desc=SimpleNamespace(nb=100),
         )
         for _ in range(num_groups)
@@ -780,8 +784,8 @@ def _build_plan_engine_and_context(
     ]
     ptr_tensors = [torch.zeros(num_layers, dtype=torch.long) for _ in range(num_groups)]
     gpu_context.get_kernel_group_kv_pointers.side_effect = lambda g: ptr_tensors[g]
-    gpu_context.get_engine_kv_format.side_effect = lambda g: (
-        lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
+    gpu_context.get_engine_kv_format.side_effect = (
+        lambda g: lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
     )
     # One object group; each chunk memory object fills one flat slot.
     obj_bytes = sum(kv_buffers[(0, g)].numel() * 4 for g in range(num_groups))

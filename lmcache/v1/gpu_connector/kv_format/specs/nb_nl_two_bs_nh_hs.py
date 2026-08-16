@@ -15,11 +15,11 @@ import torch
 
 # First Party
 from lmcache.v1.gpu_connector.kv_format.specs.base import KVFormatSpec
-import lmcache.c_ops as lmc_ops
+import lmcache.lmcache_native as lmcache_native
 
 
 class NB_NL_TWO_BS_NH_HS_Spec(KVFormatSpec):
-    engine_kv_format = lmc_ops.EngineKVFormat.NB_NL_TWO_BS_NH_HS
+    engine_kv_format = lmcache_native.EngineKVFormat.NB_NL_TWO_BS_NH_HS
     attention_backends = ("vLLM CROSS_LAYER",)
     is_cross_layer = True
 

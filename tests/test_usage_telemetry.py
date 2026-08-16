@@ -764,7 +764,7 @@ class TestMPUsage:
         assert message.chunk_size == 256
         assert message.hash_algorithm == "blake3"
         assert message.engine_type == "default"
-        assert message.supported_transfer_mode == "auto"
+        assert message.supported_transfer_mode == "lmcache_driven"
         assert not message.p2p_enabled
         assert message.l1_size_bytes == 1 << 30
         assert message.l1_medium == "dram"
@@ -782,11 +782,11 @@ class TestMPUsage:
         # builds without it.
         fs_l2_adapter = pytest.importorskip(
             "lmcache.v1.distributed.l2_adapters.fs_l2_adapter",
-            reason="requires lmcache.native_storage_ops",
+            reason="requires lmcache.lmcache_native",
         )
         serde = pytest.importorskip(
             "lmcache.v1.distributed.serde",
-            reason="requires lmcache.native_storage_ops",
+            reason="requires lmcache.lmcache_native",
         )
         fs_config = fs_l2_adapter.FSL2AdapterConfig(
             base_path=str(tmp_path),

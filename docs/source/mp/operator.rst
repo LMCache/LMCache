@@ -17,10 +17,10 @@ Why Use the Operator
 The manual DaemonSet approach works, but it has sharp edges the operator
 eliminates:
 
-- **Auto-injected pod settings** -- The operator always sets ``hostIPC: true``
-  and ``--host 0.0.0.0``.  Forgetting ``hostIPC`` in a hand-written manifest
-  causes silent CUDA IPC failures (``cudaErrorMapBufferObjectFailed``) that are
-  hard to debug.
+- **Auto-injected pod settings** -- The operator always mounts the host's
+  ``/dev/shm`` (hostPath) and sets ``--host 0.0.0.0``.  Forgetting the shared
+  ``/dev/shm`` in a hand-written manifest causes silent CUDA IPC failures
+  (``cudaErrorMapBufferObjectFailed``) that are hard to debug.
 - **Node-local service discovery** -- The operator creates a ClusterIP Service
   with ``internalTrafficPolicy=Local`` and a connection ConfigMap that vLLM
   pods simply mount.  No ``hostNetwork``, no Downward API, no shell variable
@@ -87,7 +87,8 @@ A minimal CR deploys a DaemonSet with 60 GB L1 cache on every GPU node:
 The operator automatically:
 
 - Creates a DaemonSet running one LMCache server pod per matched node
-- Sets ``hostIPC: true`` and passes ``--host 0.0.0.0`` to the server
+- Mounts the host's ``/dev/shm`` (hostPath) for CUDA IPC and passes
+  ``--host 0.0.0.0`` to the server
 - Creates a node-local ClusterIP Service for vLLM discovery
 - Creates a connection ConfigMap (``my-cache-connection``) with the
   ``kv-transfer-config`` JSON that vLLM needs
@@ -127,8 +128,6 @@ Mount it in your vLLM Deployment:
           labels:
             app: vllm
         spec:
-          # Required for CUDA IPC between vLLM and LMCache
-          hostIPC: true
           containers:
             - name: vllm
               image: lmcache/vllm-openai:latest
@@ -151,6 +150,10 @@ Mount it in your vLLM Deployment:
                 - name: kv-transfer-config
                   mountPath: /etc/lmcache
                   readOnly: true
+                # Required for CUDA IPC between vLLM and LMCache: both pods
+                # must see the same /dev/shm tmpfs
+                - name: lmcache-dev-shm
+                  mountPath: /dev/shm
               resources:
                 limits:
                   nvidia.com/gpu: "1"
@@ -158,11 +161,19 @@ Mount it in your vLLM Deployment:
             - name: kv-transfer-config
               configMap:
                 name: my-cache-connection  # <engine-name>-connection
+            - name: lmcache-dev-shm
+              hostPath:
+                path: /dev/shm
+                type: Directory
 
 Key requirements for vLLM pods:
 
-- **hostIPC: true** -- CUDA IPC (``cudaIpcOpenMemHandle``) needs a shared IPC
-  namespace between vLLM and LMCache.
+- **Shared /dev/shm** -- CUDA IPC (``cudaIpcOpenMemHandle``) needs vLLM and
+  LMCache to see the same ``/dev/shm`` tmpfs (PyTorch's CUDA IPC handles
+  reference a shared-memory ref-counter file there).  Mount the host's
+  ``/dev/shm`` via hostPath as above, or set ``spec.hostIPC: true`` on the
+  engine and ``hostIPC: true`` on the vLLM pod to share the host IPC
+  namespace instead.
 - **PYTHONHASHSEED=0** -- Ensures deterministic token hashing so vLLM and
   LMCache produce consistent cache keys.
 - **ConfigMap mount** -- The ``$(cat ...)`` pattern reads the connection JSON
@@ -188,13 +199,14 @@ the webhook mutates the pod at admission time to add:
 - ``--kv-transfer-config <JSON>`` -- the ``LMCacheMPConnector`` config, read
   verbatim from the engine's ``<engine>-connection`` ConfigMap and inlined onto
   the vLLM container's ``args`` (no volume mount needed);
-- ``hostIPC: true`` on the pod spec (CUDA IPC with the node-local server);
+- a hostPath mount of the host's ``/dev/shm`` (CUDA IPC with the node-local
+  server; ``hostIPC: true`` instead when the engine sets ``spec.hostIPC``);
 - ``PYTHONHASHSEED=0`` on the vLLM container env, **set-if-absent** -- it
   preserves a value you already set.
 
-Unlike the CacheBlend injector it does **not** consult the engine CR: the
-entire connector config lives in the connection ConfigMap, and
-``LMCacheEngine`` has no injection sub-spec.  It fails open
+The connector config lives in the connection ConfigMap; the webhook also
+reads the ``LMCacheEngine`` CR (when present) to mirror its ``spec.hostIPC``
+mode and its optional injection sub-spec.  It fails open
 (``failurePolicy: Ignore``) and is idempotent (re-admitted pods carrying the
 ``lmcache.ai/lmcache-injected`` stamp are allowed unchanged).
 
@@ -205,9 +217,10 @@ Prerequisites
   controller-only and disables the webhook via ``ENABLE_WEBHOOKS=false``) --
   same as the CacheBlend webhook; install once per cluster (see
   :ref:`mp-operator-cacheblend` "Additional Prerequisites").
-- **Pod Security Standards** -- the injected ``hostIPC`` is rejected by the
-  ``baseline`` / ``restricted`` PSS profiles, so the vLLM pod's namespace must
-  be labeled ``pod-security.kubernetes.io/enforce=privileged``.
+- **Pod Security Standards** -- the injected hostPath ``/dev/shm`` mount (and
+  ``hostIPC``, when the engine opts in) is rejected by the ``baseline`` /
+  ``restricted`` PSS profiles, so the vLLM pod's namespace must be labeled
+  ``pod-security.kubernetes.io/enforce=privileged``.
 - **Engine reconciled in the same namespace** -- the webhook reads the
   ``<engine>-connection`` ConfigMap directly, so the ``LMCacheEngine`` must
   already exist in the vLLM pod's namespace.
@@ -243,9 +256,9 @@ not reach ``vllm serve``):
             # lmcache.ai/lmcache-container: "vllm"
         spec:
           runtimeClassName: nvidia
-          # Do NOT set hostIPC here or mount an emptyDir at /dev/shm -- the
-          # webhook injects hostIPC=true; an emptyDir would shadow the host's
-          # /dev/shm and break cudaIpcOpenMemHandle.
+          # Do NOT mount an emptyDir at /dev/shm -- the webhook injects a
+          # hostPath mount of the host's /dev/shm; an emptyDir would shadow the
+          # host's /dev/shm and break cudaIpcOpenMemHandle.
           containers:
             - name: vllm
               image: lmcache/vllm-openai:latest
@@ -272,7 +285,7 @@ Deployment spec):
 .. code-block:: bash
 
     kubectl get pod -l app=vllm-lmcache -o yaml | \
-      grep -E "hostIPC|kv-transfer-config|lmcache-injected|lmcache-skip-reason"
+      grep -E "lmcache-dev-shm|hostIPC|kv-transfer-config|lmcache-injected|lmcache-skip-reason"
 
 If nothing was injected, check the pod's ``lmcache.ai/lmcache-skip-reason``
 annotation:
@@ -556,6 +569,15 @@ GPU & Security
      - ``nvidia``
      - GPU vendor: ``nvidia`` (uses the ``nvidia`` RuntimeClass) or ``amd``
        (runs on the default runtime).
+   * - ``hostIPC``
+     - ``false``
+     - Run the pod in the host IPC namespace instead of mounting the host's
+       ``/dev/shm`` via hostPath. Cross-pod CUDA IPC needs only the shared
+       ``/dev/shm`` tmpfs, so the default hostPath mount suffices on NVIDIA
+       clusters; set ``true`` where hostPath volumes are blocked by an
+       admission policy, or for ``gpuVendor: amd`` (the HIP IPC path is
+       unverified without it). The injection webhook mirrors this setting on
+       opted-in vLLM pods.
    * - ``privileged``
      - ``false``
      - Run the engine container in privileged mode. On most clusters
@@ -614,6 +636,12 @@ Overrides & Extras
    * - ``volumeMounts``
      - --
      - Extra volume mounts.
+   * - ``initContainers``
+     - --
+     - Additional init containers run before the lmcache container starts,
+       in order.  Use to prepare state the engine can't create itself, e.g.
+       pre-sizing a ``raw_block`` L2 adapter's ``device_path`` file (see
+       :ref:`mp-operator-preexisting-l2-state` below).
    * - ``podAnnotations``
      - --
      - Extra pod annotations.
@@ -642,10 +670,14 @@ For example, ``l1.sizeGB: 60`` produces a 65 Gi request and 98 Gi limit.
 Auto-Injected Pod Settings
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The operator always injects these into the pod spec (they are not configurable
-via the CRD):
+The operator always injects these into the pod spec:
 
-- **hostIPC: true** -- Required for CUDA IPC between LMCache and vLLM.
+- **Host /dev/shm mount (hostPath)** -- Required for CUDA IPC between LMCache
+  and vLLM: both processes must see the same ``/dev/shm`` tmpfs (PyTorch's CUDA
+  IPC handles reference a shared-memory ref-counter file there).  Set
+  ``spec.hostIPC: true`` to share the host IPC namespace instead (needed on
+  clusters that block hostPath volumes, and for ``gpuVendor: amd``); the mount
+  is then omitted.
 - **--host 0.0.0.0** -- Binds the server to all interfaces so the node-local
   Service can route to it.
 - **NVIDIA_VISIBLE_DEVICES=all** -- Ensures GPU access for IPC-based memory
@@ -656,9 +688,9 @@ via the CRD):
   and readiness (5s) probes on the server port.
 
 .. note::
-   The operator does **not** mount an emptyDir at ``/dev/shm``.  With
-   ``hostIPC: true``, the container sees the host's ``/dev/shm`` directly.
-   Mounting an emptyDir would shadow it with a private tmpfs and break CUDA IPC.
+   The operator never mounts an emptyDir at ``/dev/shm``.  Mounting an emptyDir
+   there would shadow the host's ``/dev/shm`` with a private tmpfs and break
+   CUDA IPC.
 
 Resources Created
 ~~~~~~~~~~~~~~~~~
@@ -889,6 +921,63 @@ Override Auto-Computed Resources
         limits:
           memory: "100Gi"
 
+.. _mp-operator-preexisting-l2-state:
+
+Pre-Sizing an L2 Raw Block Device
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The ``raw_block`` L2 adapter opens its ``device_path`` file expecting it to
+already exist at the configured size -- it does not create or grow the file
+itself.  On a fresh node, that file is missing and the engine crashes with a
+``FileNotFoundError``.  Use ``initContainers`` to fallocate (or truncate) it
+before the lmcache container starts:
+
+.. code-block:: yaml
+
+    apiVersion: lmcache.lmcache.ai/v1alpha1
+    kind: LMCacheEngine
+    metadata:
+      name: my-cache
+    spec:
+      l1:
+        sizeGB: 60
+      volumes:
+        - name: kv-cache-root
+          hostPath:
+            path: /path/to/local/disk    # e.g. a mounted NVMe scratch disk
+            type: DirectoryOrCreate
+      volumeMounts:
+        - name: kv-cache-root
+          mountPath: /mnt/kv-cache-root
+      initContainers:
+        - name: preallocate-raw-block
+          image: busybox
+          command:
+            - sh
+            - -c
+            - |
+              test -f /mnt/kv-cache-root/lmcache-l2.raw || \
+                fallocate -l 10000000000 /mnt/kv-cache-root/lmcache-l2.raw || \
+                truncate -s 10000000000 /mnt/kv-cache-root/lmcache-l2.raw
+          volumeMounts:
+            - name: kv-cache-root
+              mountPath: /mnt/kv-cache-root
+      l2Backend:
+        raw:
+          type: raw_block
+          config:
+            device_path: "/mnt/kv-cache-root/lmcache-l2.raw"
+            capacity_bytes: 10000000000   # 10 GB, must match the size above
+
+.. note::
+   ``capacity_bytes`` in ``l2Backend.raw.config`` must match the size the
+   init container allocates.  The ``test -f ... ||`` guard makes the
+   fallocate idempotent -- a pod restart never truncates a file that
+   already has data, so a populated L2 cache survives engine restarts.
+   Init containers listed here run in order, before the lmcache container,
+   and share the engine's ``volumes``/``volumeMounts`` -- mount the same
+   volume in both if the init container needs to touch it.
+
 .. _mp-operator-cacheblend:
 
 CacheBlend
@@ -905,8 +994,9 @@ It has two halves the operator runs together:
 
 - a GPU-resident CacheBlend V3 engine (``lmcache server --engine-type blend``),
   deployed as a DaemonSet with the **same GPU model as** ``LMCacheEngine``
-  (``runtimeClassName: nvidia`` + ``NVIDIA_VISIBLE_DEVICES=all`` + ``hostIPC``,
-  plus ``privileged`` when ``spec.privileged`` is set, and **no**
+  (``runtimeClassName: nvidia`` + ``NVIDIA_VISIBLE_DEVICES=all`` + the host
+  ``/dev/shm`` mount -- or ``hostIPC`` when ``spec.hostIPC`` is set -- plus
+  ``privileged`` when ``spec.privileged`` is set, and **no**
   ``nvidia.com/gpu`` claim) so it shares the vLLM GPU for same-device CUDA IPC;
   and
 - the vLLM-side plugin, injected into opted-in pods by the webhook.
@@ -926,9 +1016,10 @@ Beyond the operator prerequisites above:
 
 - **Deploy with the webhook** -- use ``make deploy`` (not ``make run``, which is
   controller-only and disables the webhook via ``ENABLE_WEBHOOKS=false``).
-- **Pod Security Standards** -- the webhook injects ``hostIPC``/``privileged``,
-  which the ``baseline``/``restricted`` profiles reject, so label the engine's
-  and the vLLM pod's namespaces ``pod-security.kubernetes.io/enforce=privileged``.
+- **Pod Security Standards** -- the webhook injects a hostPath ``/dev/shm``
+  mount (or ``hostIPC``/``privileged`` when the engine opts in), which the
+  ``baseline``/``restricted`` profiles reject, so label the engine's and the
+  vLLM pod's namespaces ``pod-security.kubernetes.io/enforce=privileged``.
 
 Deploying a CacheBlendEngine
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -995,12 +1086,12 @@ not reach ``vllm serve``:
                 limits:
                   nvidia.com/gpu: "1"
 
-The webhook injects the plugin init container, ``PYTHONPATH``, ``hostIPC``, the
+The webhook injects the plugin init container, ``PYTHONPATH``, the ``/dev/shm``
+mount, the
 private-image pull secret, and the required CacheBlend vLLM flags
-(``--attention-backend CUSTOM``, ``--kv-transfer-config`` from the engine's
-connection ConfigMap, ``--block-size 64``, ``--pipeline-parallel-size 1``,
-``--no-enable-chunked-prefill``, ``--no-async-scheduling``, ``--enforce-eager``).
-You supply only the model and your non-CacheBlend flags.
+(``--kv-transfer-config`` from the engine's connection ConfigMap,
+``--pipeline-parallel-size 1``, ``--no-enable-chunked-prefill``,
+``--enforce-eager``).  You supply only the model and your non-CacheBlend flags.
 
 Verifying Injection
 ~~~~~~~~~~~~~~~~~~~~~
@@ -1010,7 +1101,7 @@ The webhook mutates **Pods**, not the Deployment, so inspect a pod:
 .. code-block:: bash
 
     kubectl get pod -l app=vllm-cacheblend -o yaml | \
-      grep -E "initContainers|cb-plugin|PYTHONPATH|attention-backend|cacheblend-injected|skip-reason"
+      grep -E "initContainers|cb-plugin|PYTHONPATH|kv-transfer-config|cacheblend-injected|skip-reason"
 
 If nothing was injected, check the pod's ``lmcache.ai/cacheblend-skip-reason``
 annotation: ``command-override`` (a ``sh -c`` wrapper was used),
@@ -1042,6 +1133,12 @@ Spec Reference above) and adds:
    * - ``blend.recompRatio``
      - ``0.15``
      - Fraction of non-prefix-hit tokens recomputed (``cb.recomp_ratio``).
+   * - ``blend.partialBucket``
+     - unset
+     - Pads PARTIAL row counts to a multiple of this bucket
+       (``cb.partial_bucket``).  Needed on fp8-MoE models, where every distinct
+       row count is a fresh M shape and the Triton autotuner re-tunes all MoE
+       layers per CB step without it.  Unset omits the key (padding disabled).
    * - ``injection.payloadImage``
      - *required*
      - The (private) cacheblend-plugin init-container image
@@ -1058,7 +1155,180 @@ Spec Reference above) and adds:
      - ``eager`` | ``piecewise`` | ``full_decode_only`` (never ``full``).
 
 ``server.chunkSize`` defaults to ``256`` and must equal 256 (the blend matcher
-requires ``chunk_size == vLLM --block-size * 4``).
+requires it).
+
+.. _mp-operator-pd-disaggregation:
+
+PD Disaggregation
+-----------------
+
+The operator has first-class support for PD (Prefill-Decode) disaggregation.
+Adding a ``pd`` block to an ``LMCacheEngine`` spec switches the engine's
+connection ConfigMap to include ``MultiConnector`` configs (``NixlConnector`` +
+``LMCacheMPConnector``) alongside the standard bare connector, and tells the
+webhook to inject the NIXL side-channel environment variables into opted-in
+vLLM pods automatically.
+
+See :ref:`mp_disaggregated_prefill` for background on what PD disaggregation is
+and how the pieces fit together.
+
+.. note::
+   PD disaggregation requires NIXL in the vLLM environment (``lmcache[nixl]``
+   extra) and `vllm-project/vllm#46865
+   <https://github.com/vllm-project/vllm/pull/46865>`_ merged.
+
+How it works
+~~~~~~~~~~~~
+
+Deploy a **single** ``LMCacheEngine`` CR with a ``pd`` block.  One DaemonSet
+instance per node serves both prefiller and decoder vLLM pods.  The operator:
+
+1. **Builds a multi-key ConfigMap** -- the ``<engine>-connection`` ConfigMap
+   emits three keys so the same engine can serve all pod types:
+
+   - ``kv-transfer-config.json`` -- bare ``LMCacheMPConnector`` (fallback for
+     pods without a ``pd-role`` annotation; no NIXL).
+   - ``kv-transfer-config-prefiller.json`` -- ``MultiConnector`` with
+     ``kv_role=kv_producer``.
+   - ``kv-transfer-config-decoder.json`` -- ``MultiConnector`` with
+     ``kv_role=kv_consumer``.
+
+2. **Injects the correct config via the webhook** -- the webhook reads the
+   ``lmcache.ai/pd-role`` annotation on each vLLM pod and injects the
+   matching ConfigMap key as ``--kv-transfer-config``.
+
+3. **Injects NIXL env vars** -- opted-in PD pods receive two extra env vars:
+
+   - ``VLLM_NIXL_SIDE_CHANNEL_HOST`` -- set to the pod's own IP via the
+     downward API (``status.podIP``).
+   - ``VLLM_NIXL_SIDE_CHANNEL_PORT`` -- taken from ``spec.pd.nixlSideChannelPort``
+     (default ``5558``).  If the pod pre-sets this env var, the webhook will
+     leave it unchanged -- useful when both roles run on the same host and
+     need distinct ports (e.g. prefiller ``5557``, decoder ``5558``).
+
+PDSpec Fields
+~~~~~~~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 15 50
+
+   * - Field
+     - Default
+     - Description
+   * - ``pd.nixlSideChannelPort``
+     - ``5558``
+     - Port the NIXL agent advertises for handshake negotiation.  Injected by
+       the webhook unless the pod pre-sets ``VLLM_NIXL_SIDE_CHANNEL_PORT``.
+       When using ``hostNetwork: true``, set distinct values for prefiller and
+       decoder directly in the pod env to avoid port conflicts.
+   * - ``pd.nixlLoadFailurePolicy``
+     - ``fail``
+     - ``fail`` -- abort the request if the NIXL transfer fails.
+       ``ignore`` -- fall back to local prefill on failure.
+   * - ``pd.enforceHandshakeCompat``
+     - *(omitted)*
+     - When set to ``false``, disables strict NIXL version negotiation -- useful
+       when prefiller and decoder run different vLLM builds.  When omitted the
+       key is not sent and NIXL uses its own default.
+
+Deploying a PD Engine
+~~~~~~~~~~~~~~~~~~~~~
+
+A single ``LMCacheEngine`` handles both roles:
+
+.. code-block:: yaml
+
+    apiVersion: lmcache.lmcache.ai/v1alpha1
+    kind: LMCacheEngine
+    metadata:
+      name: lmcache-engine
+    spec:
+      l1:
+        sizeGB: 100
+      server:
+        port: 5555
+        chunkSize: 256
+      pd:
+        nixlLoadFailurePolicy: fail
+
+.. code-block:: bash
+
+    kubectl apply -f engine.yaml
+    kubectl get lmc    # wait for Running
+
+Opting vLLM Pods In
+~~~~~~~~~~~~~~~~~~~~
+
+Use the standard label + annotation pattern (see
+:ref:`mp-operator-connection-injection`), adding the ``lmcache.ai/pd-role``
+annotation to select the prefiller or decoder config:
+
+.. code-block:: yaml
+
+    # prefiller vLLM pod template
+    metadata:
+      labels:
+        lmcache.ai/lmcache-inject: "true"
+      annotations:
+        lmcache.ai/lmcache-engine: "lmcache-engine"
+        lmcache.ai/pd-role: "prefiller"
+
+    # decoder vLLM pod template
+    metadata:
+      labels:
+        lmcache.ai/lmcache-inject: "true"
+      annotations:
+        lmcache.ai/lmcache-engine: "lmcache-engine"
+        lmcache.ai/pd-role: "decoder"
+
+The webhook injects ``--kv-transfer-config`` (the role-specific MultiConnector
+JSON), ``hostIPC: true``, ``PYTHONHASHSEED=0``, ``VLLM_NIXL_SIDE_CHANNEL_HOST``,
+and ``VLLM_NIXL_SIDE_CHANNEL_PORT`` into each opted-in pod.  Do **not** mount
+the ConfigMap or add ``--kv-transfer-config`` yourself.
+
+.. note::
+   **NIXL RDMA and hostNetwork** -- NIXL's UCX backend requires valid RDMA GIDs,
+   which are derived from the host's network interfaces.  Under standard overlay
+   CNI (each pod has its own network namespace) the GID table inside the pod is
+   empty and UCX backend initialization fails.  The recommended workarounds are:
+
+   - ``hostNetwork: true`` + ``dnsPolicy: ClusterFirstWithHostNet`` (quick test).
+     With hostNetwork both roles share the host IP, so set **distinct**
+     ``VLLM_NIXL_SIDE_CHANNEL_PORT`` values per role (e.g. 5557 / 5558) in the
+     pod env before the webhook runs -- the webhook will not override a pre-set
+     value.
+   - SR-IOV with Multus (production): assign each pod a dedicated VF with its
+     own GID, no ``hostNetwork`` required.
+
+Pods without a ``lmcache.ai/pd-role`` annotation that are bound to a PD engine
+fall back to the bare ``LMCacheMPConnector`` config (no NIXL) -- they still
+benefit from the LMCache KV cache without participating in disaggregation.
+
+Router
+~~~~~~
+
+The ``vllm-router`` is **not** managed by the operator.  Deploy it as a plain
+Kubernetes ``Deployment`` pointing at the prefiller and decoder vLLM Services:
+
+.. code-block:: bash
+
+    vllm-router \
+        --policy round_robin \
+        --vllm-pd-disaggregation \
+        --prefill http://pd-prefiller.<namespace>.svc.cluster.local:8001 \
+        --decode  http://pd-decoder.<namespace>.svc.cluster.local:8002 \
+        --host 0.0.0.0 --port 30000
+
+A ready-to-edit manifest is at
+``operator/config/samples/vllm_pd_disaggregation.yaml``.
+
+.. note::
+   Name your prefiller and decoder vLLM Services with a prefix other than
+   ``vllm-`` (e.g., ``pd-prefiller``, ``pd-decoder``).  Kubernetes injects
+   ``<SERVICE_NAME>_*`` env vars into every pod in the namespace; a ``vllm-``
+   prefix generates ``VLLM_*`` vars that vLLM's env-var validator flags as
+   unknown.
 
 LMCacheCoordinator
 ------------------
@@ -1326,9 +1596,9 @@ Operator vs Manual Deployment
    * - Concern
      - Manual DaemonSet
      - LMCacheEngine Operator
-   * - hostIPC
+   * - ``/dev/shm`` sharing (CUDA IPC)
      - Must set manually
-     - Auto-injected
+     - Auto-injected (hostPath mount; ``spec.hostIPC`` opt-in)
    * - ``--host 0.0.0.0``
      - Must set manually
      - Auto-injected
@@ -1354,14 +1624,17 @@ Operator vs Manual Deployment
 Security Considerations
 -----------------------
 
-**hostIPC** exposes the host's IPC namespace (System V IPC, POSIX message
-queues) to the container.  Any process in the container can interact with IPC
-resources from other processes on the same host.
+The **hostPath /dev/shm mount** exposes the host's shared-memory tmpfs to the
+container -- a narrower grant than the whole host IPC namespace, but still
+host-level access.  ``spec.hostIPC: true`` (opt-in, default ``false``) instead
+exposes the host's IPC namespace (System V IPC, POSIX message queues): any
+process in the container can interact with IPC resources from other processes
+on the same host.
 
 - Deploy only in trusted environments.
 - Clusters using Pod Security Standards must allow the ``privileged`` profile
   for the LMCache namespace -- the ``baseline`` and ``restricted`` profiles
-  reject ``hostIPC``.
+  reject hostPath volumes and ``hostIPC`` alike.
 - ``spec.privileged`` defaults to ``false``. When enabled (required for
   ``gpuVendor: amd``), the engine container additionally runs privileged,
   granting it full device access -- enable it only where GPU visibility

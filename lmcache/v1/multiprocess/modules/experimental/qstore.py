@@ -40,7 +40,7 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
 from lmcache.v1.multiprocess.native_completion import submit_callback_to_stream
 from lmcache.v1.multiprocess.protocols.base import RequestType
 from lmcache.v1.platform.cache_context import create_cache_context
-import lmcache.c_ops as lmc_ops
+import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
 
@@ -506,7 +506,7 @@ class QStoreModule(InstanceLivenessTarget):
                         object_group_id=obj_group_id,
                         batch_size=1,
                         skip_first_n_tokens=0,
-                        direction=lmc_ops.TransferDirection.D2H,
+                        direction=lmcache_native.TransferDirection.D2H,
                     )
 
                 store_succeeded = True
