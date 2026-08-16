@@ -58,7 +58,9 @@ def _slot_mapping(num_tokens: int) -> torch.Tensor:
 
 def _connector_with_attributes() -> VLLMPagedMemRBLNConnectorV2:
     """A connector that has already discovered its geometry."""
-    connector = VLLMPagedMemRBLNConnectorV2()
+    connector = VLLMPagedMemRBLNConnectorV2(
+        hidden_dim_size=HIDDEN_DIM, num_layers=NUM_LAYERS
+    )
     connector.register_kv_caches(_native_kv())
     return connector
 
@@ -128,10 +130,21 @@ def test_get_shape_is_kv_2ltd() -> None:
     assert connector.get_shape(12) == torch.Size([2, NUM_LAYERS, 12, HIDDEN_DIM])
 
 
-def test_get_shape_before_registration_is_refused() -> None:
-    """Geometry is unknown until a KV cache has been seen."""
-    with pytest.raises(RuntimeError, match="attributes are initialized"):
-        VLLMPagedMemRBLNConnectorV2().get_shape(4)
+def test_get_shape_needs_no_registration() -> None:
+    """The metadata fixes the shape, so a memory object can be sized first."""
+    connector = VLLMPagedMemRBLNConnectorV2(
+        hidden_dim_size=HIDDEN_DIM, num_layers=NUM_LAYERS
+    )
+    assert connector.get_shape(4) == torch.Size([2, NUM_LAYERS, 4, HIDDEN_DIM])
+
+
+def test_caches_disagreeing_with_the_metadata_are_refused() -> None:
+    """A cache built for another model would break get_shape()'s sizing."""
+    connector = VLLMPagedMemRBLNConnectorV2(
+        hidden_dim_size=HIDDEN_DIM, num_layers=NUM_LAYERS + 1
+    )
+    with pytest.raises(ValueError, match="num_layers"):
+        connector.register_kv_caches(_native_kv())
 
 
 # ---------------------------------------------------------------------------
@@ -142,7 +155,9 @@ def test_get_shape_before_registration_is_refused() -> None:
 def test_gather_matches_an_independent_hnd_expectation() -> None:
     """`from_gpu` reads the slots HND addressing implies, not a flat reshape."""
     native = _native_kv()
-    connector = VLLMPagedMemRBLNConnectorV2()
+    connector = VLLMPagedMemRBLNConnectorV2(
+        hidden_dim_size=HIDDEN_DIM, num_layers=NUM_LAYERS
+    )
     num_tokens = NUM_BLOCKS * BLOCK_SIZE
     slot_mapping = _slot_mapping(num_tokens)
 
@@ -171,8 +186,12 @@ def test_round_trip_restores_the_native_cache() -> None:
     num_tokens = NUM_BLOCKS * BLOCK_SIZE
     slot_mapping = _slot_mapping(num_tokens)
 
-    reader = VLLMPagedMemRBLNConnectorV2()
-    writer = VLLMPagedMemRBLNConnectorV2()
+    reader = VLLMPagedMemRBLNConnectorV2(
+        hidden_dim_size=HIDDEN_DIM, num_layers=NUM_LAYERS
+    )
+    writer = VLLMPagedMemRBLNConnectorV2(
+        hidden_dim_size=HIDDEN_DIM, num_layers=NUM_LAYERS
+    )
     reader.register_kv_caches(src)
     memory_obj = _allocator().allocate(reader.get_shape(num_tokens), DTYPE)
     assert memory_obj is not None
@@ -192,8 +211,12 @@ def test_partial_slice_touches_only_its_tokens() -> None:
     slot_mapping = _slot_mapping(num_tokens)
     start, end = BLOCK_SIZE, 3 * BLOCK_SIZE
 
-    reader = VLLMPagedMemRBLNConnectorV2()
-    writer = VLLMPagedMemRBLNConnectorV2()
+    reader = VLLMPagedMemRBLNConnectorV2(
+        hidden_dim_size=HIDDEN_DIM, num_layers=NUM_LAYERS
+    )
+    writer = VLLMPagedMemRBLNConnectorV2(
+        hidden_dim_size=HIDDEN_DIM, num_layers=NUM_LAYERS
+    )
     reader.register_kv_caches(src)
     memory_obj = _allocator().allocate(reader.get_shape(end - start), DTYPE)
     assert memory_obj is not None
@@ -232,7 +255,9 @@ def test_missing_kvcaches_is_refused() -> None:
     """
     memory_obj = _allocator().allocate(_connector_with_attributes().get_shape(4), DTYPE)
     assert memory_obj is not None
-    unregistered = VLLMPagedMemRBLNConnectorV2()
+    unregistered = VLLMPagedMemRBLNConnectorV2(
+        hidden_dim_size=HIDDEN_DIM, num_layers=NUM_LAYERS
+    )
     with pytest.raises(ValueError, match="kvcaches"):
         unregistered.from_gpu(memory_obj, 0, 4, slot_mapping=_slot_mapping(4))
 
@@ -253,7 +278,9 @@ def test_non_kv_2ltd_memory_object_is_refused() -> None:
 
 def test_explicit_registration_enables_get_shape() -> None:
     """`register_kv_caches` discovers geometry without a transfer first."""
-    connector = VLLMPagedMemRBLNConnectorV2()
+    connector = VLLMPagedMemRBLNConnectorV2(
+        hidden_dim_size=HIDDEN_DIM, num_layers=NUM_LAYERS
+    )
     connector.register_kv_caches(_native_kv())
     assert connector.get_shape(8) == torch.Size([2, NUM_LAYERS, 8, HIDDEN_DIM])
 
@@ -261,4 +288,6 @@ def test_explicit_registration_enables_get_shape() -> None:
 def test_registering_nothing_is_refused() -> None:
     """An empty layer list is not a valid registration."""
     with pytest.raises(ValueError, match="non-empty"):
-        VLLMPagedMemRBLNConnectorV2().register_kv_caches([])
+        VLLMPagedMemRBLNConnectorV2(
+            hidden_dim_size=HIDDEN_DIM, num_layers=NUM_LAYERS
+        ).register_kv_caches([])

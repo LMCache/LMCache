@@ -234,7 +234,9 @@ def CreateGPUConnector(
                 VLLMPagedMemRBLNConnectorV2,
             )
 
-            return VLLMPagedMemRBLNConnectorV2.from_metadata(metadata, use_gpu, device)
+            return VLLMPagedMemRBLNConnectorV2.from_metadata(
+                metadata, use_gpu, device, layout_hints=layout_hints
+            )
         else:
             raise RuntimeError(f"No supported {torch_device_type} connector found.")
 
