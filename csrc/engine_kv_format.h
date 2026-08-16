@@ -2,6 +2,11 @@
 
 #pragma once
 
+#if !defined(__CUDA_ARCH__) && !defined(__HIP_DEVICE_COMPILE__) && \
+    !defined(__SYCL_DEVICE_ONLY__)
+  #include <stdexcept>
+#endif
+
 // Physical KV-cache memory layout an engine hands to LMCache, plus the
 // classification predicates over it. Vendor-header-free, so every backend and
 // the Python facade (device_ops) share one definition. Detection (raw layout ->
@@ -150,6 +155,18 @@ enum class EngineKVFormat : int {
   #define LMC_KV_FORMAT_HD
 #endif
 
+// Device code cannot throw C++ exceptions. An invalid format is a host-side
+// contract violation and is reported as an exception there; device code traps
+// instead of silently continuing with an invalid layout classification.
+[[noreturn]] LMC_KV_FORMAT_HD inline void unsupported_engine_kv_format() {
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__) || \
+    defined(__SYCL_DEVICE_ONLY__)
+  __builtin_trap();
+#else
+  throw std::invalid_argument("Unsupported EngineKVFormat");
+#endif
+}
+
 // Static layout facts for each format, declared once per format (indexed by the
 // enum value). This mirrors the facts declared on each Python KVFormatSpec so
 // the two sides can never drift; the predicates below are one-line lookups.
@@ -167,34 +184,82 @@ struct FormatFacts {
   bool is_pbs_fused = false;     // paged buffer size fused into one axis
 };
 
-// clang-format off
-LMC_KV_FORMAT_HD constexpr FormatFacts FORMAT_FACTS[] = {
-    /*  0 NB_NL_TWO_BS_NH_HS      */ {.is_cross_layer = true},
-    /*  1 NL_X_TWO_NB_BS_NH_HS    */ {.is_layer_list = true,  .is_two_major = true},
-    /*  2 NL_X_NB_TWO_BS_NH_HS    */ {.is_layer_list = true},
-    /*  3 NL_X_NB_BS_HS           */ {.is_layer_list = true,  .is_mla = true},
-    /*  4 TWO_X_NL_X_NBBS_NH_HS   */ {.is_kv_list = true},
-    /*  5 NL_X_NBBS_ONE_HS        */ {.is_layer_list = true,  .is_mla = true,
-                                      .is_pbs_fused = true},
-    /*  6 NL_X_TWO_NB_NH_BS_HS    */ {.is_layer_list = true,  .is_hnd = true,
-                                      .is_two_major = true},
-    /*  7 NL_X_NB_TWO_NH_BS_HS    */ {.is_layer_list = true,  .is_hnd = true},
-    /*  8 NB_NL_TWO_NH_BS_HS      */ {.is_cross_layer = true, .is_hnd = true},
-    /*  9 TWO_X_NL_X_NB_BS_NH_HS  */ {.is_kv_list = true},
-    /* 10 NL_X_NB_NH_BS_TWO_HS    */ {.is_layer_list = true,  .is_hnd = true,
-                                      .is_fused_packed = true},
-    /* 11 NL_X_NB_BS_NH_TWO_HS    */ {.is_layer_list = true,  .is_fused_packed = true},
-    /* 12 NL_X_NB_NH_BS_CS        */ {.is_layer_list = true,  .is_hnd = true,
-                                      .is_fused_packed = true},
-    /* 13 NL_X_NB_BS_NH_CS        */ {.is_layer_list = true,  .is_fused_packed = true},
-    /* 14 NL_X_NB_BSV_BSS         */ {.is_layer_list = true,  .is_mla = true},
-    /* 15 NL_X_TWO_NB_NH_ONE_BS_HS*/ {.is_layer_list = true,  .is_hnd = true,
-                                      .is_two_major = true},
-};
-// clang-format on
-
-LMC_KV_FORMAT_HD constexpr const FormatFacts& format_facts(EngineKVFormat f) {
-  return FORMAT_FACTS[static_cast<int>(f)];
+// Return facts by value rather than indexing a global table. This keeps the
+// host/device implementation strictly C++17-compatible and avoids relying on
+// hipcc's handling of C++20 designated initializers or global HD data.
+// The boolean fields are ordered as they appear in FormatFacts above.
+LMC_KV_FORMAT_HD constexpr FormatFacts format_facts(EngineKVFormat f) {
+  FormatFacts facts{};
+  switch (f) {
+    case EngineKVFormat::NB_NL_TWO_BS_NH_HS:
+      facts.is_cross_layer = true;
+      break;
+    case EngineKVFormat::NL_X_TWO_NB_BS_NH_HS:
+      facts.is_layer_list = true;
+      facts.is_two_major = true;
+      break;
+    case EngineKVFormat::NL_X_NB_TWO_BS_NH_HS:
+      facts.is_layer_list = true;
+      break;
+    case EngineKVFormat::NL_X_NB_BS_HS:
+      facts.is_layer_list = true;
+      facts.is_mla = true;
+      break;
+    case EngineKVFormat::TWO_X_NL_X_NBBS_NH_HS:
+      facts.is_kv_list = true;
+      break;
+    case EngineKVFormat::NL_X_NBBS_ONE_HS:
+      facts.is_layer_list = true;
+      facts.is_mla = true;
+      facts.is_pbs_fused = true;
+      break;
+    case EngineKVFormat::NL_X_TWO_NB_NH_BS_HS:
+      facts.is_layer_list = true;
+      facts.is_hnd = true;
+      facts.is_two_major = true;
+      break;
+    case EngineKVFormat::NL_X_NB_TWO_NH_BS_HS:
+      facts.is_layer_list = true;
+      facts.is_hnd = true;
+      break;
+    case EngineKVFormat::NB_NL_TWO_NH_BS_HS:
+      facts.is_cross_layer = true;
+      facts.is_hnd = true;
+      break;
+    case EngineKVFormat::TWO_X_NL_X_NB_BS_NH_HS:
+      facts.is_kv_list = true;
+      break;
+    case EngineKVFormat::NL_X_NB_NH_BS_TWO_HS:
+      facts.is_layer_list = true;
+      facts.is_hnd = true;
+      facts.is_fused_packed = true;
+      break;
+    case EngineKVFormat::NL_X_NB_BS_NH_TWO_HS:
+      facts.is_layer_list = true;
+      facts.is_fused_packed = true;
+      break;
+    case EngineKVFormat::NL_X_NB_NH_BS_CS:
+      facts.is_layer_list = true;
+      facts.is_hnd = true;
+      facts.is_fused_packed = true;
+      break;
+    case EngineKVFormat::NL_X_NB_BS_NH_CS:
+      facts.is_layer_list = true;
+      facts.is_fused_packed = true;
+      break;
+    case EngineKVFormat::NL_X_NB_BSV_BSS:
+      facts.is_layer_list = true;
+      facts.is_mla = true;
+      break;
+    case EngineKVFormat::NL_X_TWO_NB_NH_ONE_BS_HS:
+      facts.is_layer_list = true;
+      facts.is_hnd = true;
+      facts.is_two_major = true;
+      break;
+    default:
+      unsupported_engine_kv_format();
+  }
+  return facts;
 }
 
 // All layers in one fused tensor.
