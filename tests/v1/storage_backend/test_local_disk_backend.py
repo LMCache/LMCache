@@ -609,3 +609,97 @@ class TestBatchedGetBlocking:
         results = local_disk_backend.batched_get_blocking([])
         assert results == []
         local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+
+class TestDiskSpaceAccounting:
+    """Tests for the `current_cache_size` reservation counter."""
+
+    _SHAPE = torch.Size([28, 2, 256, 8, 128])
+    _DTYPE = torch.bfloat16
+    _CHUNK = 1024 * 1024
+
+    def _admit(
+        self,
+        backend: LocalDiskBackend,
+        key: CacheEngineKey,
+        size: int,
+    ) -> None:
+        """Register *key* the way an accepted put does.
+
+        `submit_put_task` reserves `size` against the disk budget, then the
+        completed write bumps `usage` and registers the chunk via `insert_key`.
+        """
+        backend.current_cache_size += size
+        backend.cache_policy.update_on_put(key)
+        path = backend._key_to_path(key)
+        with open(path, "wb") as f:
+            f.write(b"\0")
+        backend.usage += size
+        backend.insert_key(
+            key,
+            size=size,
+            shape=self._SHAPE,
+            dtype=self._DTYPE,
+            fmt=MemoryFormat.KV_2LTD,
+        )
+
+    def test_force_remove_releases_the_reservation(
+        self, local_disk_backend: LocalDiskBackend
+    ) -> None:
+        """A remove that did not come from the eviction loop frees its space."""
+        keys = [create_test_key(i) for i in range(300, 304)]
+        for key in keys:
+            self._admit(local_disk_backend, key, self._CHUNK)
+        assert local_disk_backend.current_cache_size == len(keys) * self._CHUNK
+
+        # StorageManager.remove / batched_remove both default to force=True.
+        assert local_disk_backend.batched_remove(keys) == len(keys)
+
+        assert local_disk_backend.dict == {}
+        assert local_disk_backend.usage == 0
+        assert local_disk_backend.current_cache_size == 0
+
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+    def test_eviction_loop_removal_is_not_double_counted(
+        self, local_disk_backend: LocalDiskBackend
+    ) -> None:
+        """force=False means the caller already deducted; don't deduct twice."""
+        key = create_test_key(310)
+        self._admit(local_disk_backend, key, self._CHUNK)
+
+        # Replay what the eviction loop in submit_put_task does: deduct the
+        # chunk itself, then remove it with force=False.
+        local_disk_backend.current_cache_size -= local_disk_backend.dict[key].size
+        assert local_disk_backend.batched_remove([key], force=False) == 1
+
+        assert local_disk_backend.current_cache_size == 0
+
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+    def test_puts_are_still_accepted_after_external_removes(
+        self, local_disk_backend: LocalDiskBackend
+    ) -> None:
+        """The capacity gate must not lock an empty disk out of new puts."""
+        local_disk_backend.max_cache_size = 4 * self._CHUNK
+
+        for cycle in range(3):
+            keys = [create_test_key(320 + cycle * 10 + i) for i in range(4)]
+            for key in keys:
+                self._admit(local_disk_backend, key, self._CHUNK)
+            local_disk_backend.batched_remove(keys)
+
+        assert local_disk_backend.dict == {}
+
+        memory_obj = MagicMock(spec=MemoryObj)
+        memory_obj.get_physical_size.return_value = self._CHUNK
+        with patch.object(local_disk_backend.disk_worker, "submit_task"):
+            with patch(
+                "lmcache.v1.storage_backend.local_disk_backend"
+                ".asyncio.run_coroutine_threadsafe"
+            ):
+                local_disk_backend.submit_put_task(create_test_key(399), memory_obj)
+
+        assert local_disk_backend.current_cache_size == self._CHUNK
+
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
