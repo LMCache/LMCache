@@ -571,6 +571,34 @@ All connector-level options are passed through
        allowing L2-to-L1 KV staging to overlap with scheduler queue wait.
        Resumable requests are skipped because their token IDs may be incomplete
        at enqueue time.
+   * - ``lmcache.mp.lazy_offload``
+     - ``false``
+     - Defer scheduler-side store submissions instead of emitting them on
+       every scheduler step. When ``true``, per-request store metadata is
+       queued in a pending buffer and only released to the worker once the
+       configured policy fires (see the ``lazy_offload_policy`` /
+       ``lazy_offload_threshold`` / ``lazy_offload_select_count`` keys
+       below). Opt-in throughput/scheduling optimization; requires the
+       scheduler-side GPU block pool to be bound (done automatically by the
+       ``LMCacheMPConnector`` when the flag is set).
+   * - ``lmcache.mp.lazy_offload_policy``
+     - ``"FIFO"``
+     - Only used when ``lmcache.mp.lazy_offload`` is ``true``. Selects the
+       drain policy for the pending-store buffer. The only shipped choice is
+       ``"FIFO"`` (offload finished requests in insertion order); any other
+       value raises ``ValueError`` on connector construction.
+   * - ``lmcache.mp.lazy_offload_threshold``
+     - ``100``
+     - Only used when ``lmcache.mp.lazy_offload`` is ``true``. Integer count
+       of **finished** pending requests that must accumulate before the FIFO
+       policy releases a batch; ``pop_items_for_offload`` returns an empty
+       list until ``finished_requests_count >= threshold``. This is a request
+       count, not a fraction of GPU blocks.
+   * - ``lmcache.mp.lazy_offload_select_count``
+     - ``10``
+     - Only used when ``lmcache.mp.lazy_offload`` is ``true``. Maximum number
+       of finished pending requests popped from the buffer per scheduler
+       step once the threshold fires.
    * - ``lmcache.mp.mp_transfer_mode``
      - ``auto``
      - Routing mode for the worker -> server transfer context. One of
