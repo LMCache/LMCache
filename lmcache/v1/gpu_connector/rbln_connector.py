@@ -128,7 +128,6 @@ class VLLMPagedMemRBLNConnectorV2(GPUConnectorInterface):
         Returns:
             VLLMPagedMemRBLNConnectorV2: A new connector.
         """
-        del device, layout_hints
         num_layers = metadata.kv_shape[0]
         num_kv_head = metadata.kv_shape[3]
         head_size = metadata.kv_shape[4]
