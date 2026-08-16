@@ -190,6 +190,19 @@ class TestFIFOOffloadPolicy:
         assert len(selected) == 1
         assert selected[0].request_id == "req-0"
 
+    def test_pop_items_for_offload_leaves_in_flight_id_queued(self) -> None:
+        policy = FIFOOffloadPolicy({"lmcache.mp.lazy_offload_threshold": 1})
+        for request_id, block_id in (("blocked", 0), ("ready", 1)):
+            policy.add(_make_meta(request_id), _make_block_hashes([block_id]))
+            policy.mark_req_finished(request_id)
+
+        selected = policy.pop_items_for_offload(10, {"blocked"})
+        assert [item.request_id for item in selected] == ["ready"]
+        assert policy.pop_items_for_offload(10, {"blocked"}) == []
+        assert [item.request_id for item in policy.pop_items_for_offload(10)] == [
+            "blocked"
+        ]
+
     def test_pop_items_for_offload_removes_from_pending(self) -> None:
         policy = FIFOOffloadPolicy({"lmcache.mp.lazy_offload_threshold": 2})
         policy.add(_make_meta("req-0"), _make_block_hashes([0]))

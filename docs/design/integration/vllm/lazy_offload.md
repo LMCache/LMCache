@@ -353,8 +353,10 @@ one store operation, calls `BlockPool.touch()` to pin its surviving blocks,
 and records those block ids in a dedicated pinned-batch registry until every
 worker rank reports completion. The registry permits exactly one receipt
 window per request, so an accidental overlapping emission fails before it can
-silently overwrite pins. The completion receipt balances the pins with
-`free_blocks(prepend=True)`: a block
+silently overwrite pins. A successor reusing an in-flight request id remains
+active but cannot drain until the predecessor receipt closes that window; the
+receipt cannot end the shared session while the successor is live or queued.
+The completion receipt balances the pins with `free_blocks(prepend=True)`: a block
 that now has a lower-tier copy returns to the eviction head. Failed stores are
 reported alongside completion receipts, allowing the scheduler to break the
 request's prefix chain before considering later chunks.

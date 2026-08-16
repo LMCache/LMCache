@@ -409,9 +409,10 @@ class LazyOffloadPendingStore:
         """
         if self._eviction_queue is not None:
             return self._eviction_queue.notify_stored(req_id)
-        # FIFO drains a request's buffered ops all at once, so the receipt
-        # always ends the session.
-        return True
+        # FIFO normally drains all chunks at once. A reused request id may,
+        # however, have a successor queued behind the predecessor's receipt;
+        # that shared session must survive for the successor's own drain.
+        return not self._require_fifo_policy().has_pending_request(req_id)
 
     def stats(self) -> LazyOffloadCounters:
         """Return a copy of the cumulative policy counters.
@@ -471,14 +472,24 @@ class LazyOffloadPendingStore:
         self._last_logged_stats = stats
         self._last_stats_log_time = now
 
-    def pop_items_for_offload(self) -> list[PendingStoreItem]:
+    def pop_items_for_offload(
+        self,
+        blocked_request_ids: set[str] | None = None,
+    ) -> list[PendingStoreItem]:
         """Pop items when the policy's trigger is satisfied (FIFO mode only).
+
+        Args:
+            blocked_request_ids: Requests with an older store batch still in
+                flight; these remain queued until its receipt arrives.
 
         Returns:
             The pending store items to be submitted, or an empty list when
             no offload is due.
         """
-        return self._require_fifo_policy().pop_items_for_offload(self._select_count)
+        return self._require_fifo_policy().pop_items_for_offload(
+            self._select_count,
+            blocked_request_ids,
+        )
 
     def mark_req_finished(self, req_id: str) -> bool:
         """Record that the engine finished a request.

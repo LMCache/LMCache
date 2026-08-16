@@ -95,11 +95,17 @@ class OffloadPolicy(ABC):
         """
 
     @abstractmethod
-    def pop_items_for_offload(self, count: int) -> list[PendingStoreItem]:
+    def pop_items_for_offload(
+        self,
+        count: int,
+        blocked_request_ids: set[str] | None = None,
+    ) -> list[PendingStoreItem]:
         """Pop items only when the policy's offload condition is satisfied.
 
         Args:
             count: Maximum number of pending items to return.
+            blocked_request_ids: Requests that already have a submitted batch
+                and must stay queued until its completion receipt arrives.
 
         Returns:
             Pending items to offload, or an empty list when offload is not due.

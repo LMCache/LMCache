@@ -105,11 +105,21 @@ class FIFOOffloadPolicy(OffloadPolicy):
         self._finished_requests_count -= 1
         return True
 
-    def pop_items_for_offload(self, count: int) -> list[PendingStoreItem]:
+    def has_pending_request(self, req_id: str) -> bool:
+        """Whether a request still has buffered operations."""
+        return req_id in self._pending_items
+
+    def pop_items_for_offload(
+        self,
+        count: int,
+        blocked_request_ids: set[str] | None = None,
+    ) -> list[PendingStoreItem]:
         """Return up to ``count`` finished requests in insertion order.
 
         Args:
             count: Maximum number of pending items to pop.
+            blocked_request_ids: Finished requests to leave queued because an
+                older generation with the same id still has a store in flight.
 
         Returns:
             Finished pending items when the threshold is reached; otherwise an
@@ -118,8 +128,11 @@ class FIFOOffloadPolicy(OffloadPolicy):
         if count <= 0 or self._finished_requests_count < self._threshold:
             return []
 
+        blocked_request_ids = blocked_request_ids or set()
         to_offload = []
         for req_id in list(self._pending_items.keys()):
+            if req_id in blocked_request_ids:
+                continue
             if self._pending_items[req_id].is_finished:
                 to_offload.append(self._pending_items[req_id])
                 del self._pending_items[req_id]

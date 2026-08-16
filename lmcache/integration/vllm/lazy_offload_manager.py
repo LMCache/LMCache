@@ -167,6 +167,9 @@ class _PinnedStoreBatches:
     def contains(self, request_id: str) -> bool:
         return request_id in self._block_ids_by_request
 
+    def request_ids(self) -> set[str]:
+        return set(self._block_ids_by_request)
+
     def register(self, request_id: str, block_ids: list[int]) -> None:
         """Open one receipt window; overlapping batches are a logic error."""
         if request_id in self._block_ids_by_request:
@@ -211,6 +214,10 @@ class LazyOffloadManager:
         self._completion_tracker = completion_tracker
         self._gpu_block_pool: "BlockPool | None" = None
         self._pinned_batches = _PinnedStoreBatches()
+        # Requests currently present in vLLM's request table. This generation
+        # guard prevents a predecessor's receipt from ending a reused id's
+        # live successor session, including successors with no pending ops.
+        self._active_request_ids: set[str] = set()
 
     def bind_block_pool(self, gpu_block_pool: "BlockPool") -> None:
         """Bind the scheduler's GPU block pool.
@@ -312,7 +319,10 @@ class LazyOffloadManager:
                 [pool.blocks[block_id] for block_id in gpu_block_ids],
                 prepend=True,
             )
-            if self._pending_store.notify_store_complete(request_id):
+            if (
+                self._pending_store.notify_store_complete(request_id)
+                and request_id not in self._active_request_ids
+            ):
                 actions.sessions_to_end.append(request_id)
         return actions
 
@@ -326,7 +336,10 @@ class LazyOffloadManager:
             An immediate session-release action only when no store is pending
             or in flight; otherwise an empty action.
         """
+        self._active_request_ids.discard(request_id)
         if self._pending_store.mark_req_finished(request_id):
+            return LazyOffloadActions()
+        if self._pinned_batches.contains(request_id):
             return LazyOffloadActions()
         return LazyOffloadActions(sessions_to_end=[request_id])
 
@@ -359,6 +372,7 @@ class LazyOffloadManager:
             A predecessor session-release action when no in-flight batch is
             carrying that release; otherwise an empty action.
         """
+        self._active_request_ids.add(request_id)
         if not self._pending_store.reclaim_finished_request(request_id):
             return LazyOffloadActions()
         logger.info(
@@ -422,7 +436,9 @@ class LazyOffloadManager:
     def _drain_fifo(self, pool: "BlockPool") -> LazyOffloadActions:
         """Run the legacy FIFO drain with ex-post hash validation."""
         actions = LazyOffloadActions()
-        for item in self._pending_store.pop_items_for_offload():
+        for item in self._pending_store.pop_items_for_offload(
+            self._pinned_batches.request_ids()
+        ):
             valid_metas: list[LMCacheMPRequestMetadata] = []
             valid_block_ids: list[int] = []
             for metadata, old_block_hashes in item.metadatas:

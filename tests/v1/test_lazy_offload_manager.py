@@ -982,6 +982,38 @@ def test_fifo_drain_submits_intact_request_after_finish() -> None:
     assert harness.pool.touched == [[1, 2]]
 
 
+def test_fifo_reused_id_waits_for_predecessor_receipt_before_draining() -> None:
+    harness = _make_fifo_harness()
+    _admit_op(harness, "X", [[1, 2]], 0, 32)
+    _finish_request(harness, "X")
+    assert len(_drain(harness)) == 1  # predecessor batch in flight
+
+    _arrive_new_request(harness, "X")
+    _admit_op(harness, "X", [[3, 4]], 0, 32)
+    _finish_request(harness, "X")
+    assert len(_drain(harness)) == 0  # successor must not overlap by id
+
+    _report_store_complete(harness, "X")
+    assert harness.adapter.ended_sessions == []
+    assert len(_drain(harness)) == 1
+    _report_store_complete(harness, "X")
+    assert harness.adapter.ended_sessions == ["X"]
+
+
+def test_fifo_predecessor_receipt_does_not_end_live_reused_id() -> None:
+    harness = _make_fifo_harness()
+    _admit_op(harness, "X", [[1, 2]], 0, 32)
+    _finish_request(harness, "X")
+    assert len(_drain(harness)) == 1
+
+    _arrive_new_request(harness, "X")
+    _report_store_complete(harness, "X")
+    assert harness.adapter.ended_sessions == []
+
+    _finish_request(harness, "X")
+    assert harness.adapter.ended_sessions == ["X"]
+
+
 def test_fifo_no_drain_below_finished_request_threshold() -> None:
     harness = _make_fifo_harness(threshold=2)
     _admit_op(harness, "req-a", [[1, 2]], 0, 32)
