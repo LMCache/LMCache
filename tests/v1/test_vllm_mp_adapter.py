@@ -525,6 +525,86 @@ def test_dropped_retrieve_reported_once_via_healthy_get_finished(
     assert finished_retrieves == set()
 
 
+def _submit_retrieve_with_future(
+    adapter: LMCacheMPWorkerAdapter,
+    request_id: str,
+    block_ids: list[list[int]],
+) -> MagicMock:
+    """Submit a retrieve through a stubbed transfer context and return the
+    settled-but-unresolved fake future controlling its outcome."""
+    r_future = MagicMock(name=f"retrieve_future_{request_id}")
+    r_future.query.return_value = True
+    transfer_ctx = MagicMock()
+    transfer_ctx.submit_retrieve.return_value = r_future
+    adapter.transfer_ctx = transfer_ctx
+    adapter.submit_retrieve_request(request_id, _op(block_ids), MagicMock())
+    return r_future
+
+
+def test_failed_retrieve_marks_blocks_as_load_errors(fake_adapter) -> None:
+    """A retrieve future resolving False must flag the op's blocks via
+    get_block_ids_with_load_errors so the scheduler recomputes them,
+    while the request is still reported finished exactly once. Without
+    the flag the engine decodes over GPU blocks the server never wrote
+    (silent corruption, #2865 / #3388)."""
+    adapter, _send_mock, _ = fake_adapter
+    r_future = _submit_retrieve_with_future(adapter, "req-1", [[3, 4]])
+    r_future.result.return_value = False
+
+    _ret_stores, finished_retrieves = adapter.get_finished(set())
+
+    assert finished_retrieves == {"req-1"}
+    assert adapter.get_block_ids_with_load_errors() == {3, 4}
+    # Drained: a second poll reports neither the request nor the blocks.
+    _ret_stores, finished_retrieves = adapter.get_finished(set())
+    assert finished_retrieves == set()
+    assert adapter.get_block_ids_with_load_errors() == set()
+
+
+def test_successful_retrieve_reports_no_load_errors(fake_adapter) -> None:
+    """A retrieve future resolving True must not flag any block."""
+    adapter, _send_mock, _ = fake_adapter
+    r_future = _submit_retrieve_with_future(adapter, "req-1", [[3, 4]])
+    r_future.result.return_value = True
+
+    _ret_stores, finished_retrieves = adapter.get_finished(set())
+
+    assert finished_retrieves == {"req-1"}
+    assert adapter.get_block_ids_with_load_errors() == set()
+
+
+def test_raising_retrieve_future_is_contained_and_marks_blocks(
+    fake_adapter,
+) -> None:
+    """A retrieve future that raises must not escape get_finished (that
+    would abort the engine step); it is treated as a failed retrieve:
+    request reported finished, blocks flagged for recompute."""
+    adapter, _send_mock, _ = fake_adapter
+    r_future = _submit_retrieve_with_future(adapter, "req-1", [[7]])
+    r_future.result.side_effect = RuntimeError("ipc event import failed")
+
+    _ret_stores, finished_retrieves = adapter.get_finished(set())
+
+    assert finished_retrieves == {"req-1"}
+    assert adapter.get_block_ids_with_load_errors() == {7}
+
+
+def test_failed_retrieve_marks_blocks_with_lazy_offload(fake_adapter) -> None:
+    """The lazy-offload variant of get_finished applies the same
+    fail-closed contract for failed retrieves."""
+    _adapter, _send_mock, _ = fake_adapter
+    adapter = _make_worker_adapter(
+        extra_config={"lmcache.mp.lazy_offload": True},
+    )
+    r_future = _submit_retrieve_with_future(adapter, "req-1", [[9, 10]])
+    r_future.result.return_value = False
+
+    _stores, finished_retrieves = adapter.get_finished_with_lazy_offload()
+
+    assert finished_retrieves == {"req-1"}
+    assert adapter.get_block_ids_with_load_errors() == {9, 10}
+
+
 def test_shutdown_stops_heartbeat_before_unregister(fake_adapter) -> None:
     """shutdown() stops the heartbeat before sending UNREGISTER, so no
     stray heartbeat ping can race the closing mq_client."""

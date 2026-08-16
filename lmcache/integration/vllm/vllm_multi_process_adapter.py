@@ -1553,6 +1553,53 @@ class LMCacheMPWorkerAdapter:
         for request_id, op, salt in zip(request_ids, ops, cache_salts, strict=False):
             self.submit_retrieve_request(request_id, op, event, cache_salt=salt)
 
+    def _poll_finished_retrieves(self) -> set[str]:
+        """Poll retrieve futures, failing closed on unsuccessful retrieves.
+
+        A retrieve future that resolves ``False`` (or raises) means the
+        server did not write the op's GPU blocks. Reporting the request
+        finished without recording the failed span would ACK the load as
+        successful: the engine would then decode over blocks the server
+        never wrote (stale or uninitialized KV), producing silently wrong
+        tokens (#2865, #3388). The failed op's block ids are added to
+        ``error_block_ids`` so ``get_block_ids_with_load_errors`` makes the
+        scheduler invalidate and recompute them, matching the contract the
+        unhealthy drain path already follows. The server collapses per-key
+        results into a single bool, so flagging the whole op span is
+        conservative-correct for partial failures too; finer-grained
+        recovery is tracked in #2898.
+
+        Returns:
+            The request ids whose retrieve future settled in this call.
+        """
+        finished_retrieves: set[str] = set()
+        for request_id, (r_future, r_block_ids) in self.retrieve_futures.items():
+            if not r_future.query():
+                continue
+
+            try:
+                r_result = r_future.result(timeout=60)
+            except Exception:
+                # A raising future must not escape get_finished (that would
+                # abort the engine step); contain it as a failed retrieve.
+                logger.exception(
+                    "Retrieve future raised for request_id=%s; "
+                    "treating it as a failed retrieve.",
+                    request_id,
+                )
+                r_result = False
+            finished_retrieves.add(request_id)
+
+            if not r_result:
+                self.error_block_ids.update(r_block_ids)
+                logger.error(
+                    "Retrieve failed for request_id=%s: %d block id(s) "
+                    "flagged for engine recompute.",
+                    request_id,
+                    len(r_block_ids),
+                )
+        return finished_retrieves
+
     def _process_finished_stores(
         self,
         finished_req_ids_from_lmcache: set[str],
@@ -1637,7 +1684,6 @@ class LMCacheMPWorkerAdapter:
             return ret_stores, finished_retrieves
 
         finished_stores = set()
-        finished_retrieves = set()
         for request_id, s_future in self.store_futures.items():
             if not s_future.query():
                 continue
@@ -1652,20 +1698,7 @@ class LMCacheMPWorkerAdapter:
                     request_id,
                 )
 
-        for request_id, (r_future, _) in self.retrieve_futures.items():
-            if not r_future.query():
-                continue
-
-            r_result = r_future.result(timeout=60)
-            finished_retrieves.add(request_id)
-
-            if not r_result:
-                logger.error(
-                    "Something went wrong when processing the "
-                    "retrieve request for request_id=%s, result=%s",
-                    request_id,
-                    r_result,
-                )
+        finished_retrieves = self._poll_finished_retrieves()
 
         # Remove the finished requests from the tracking dicts
         for request_id in finished_stores:
@@ -1757,7 +1790,6 @@ class LMCacheMPWorkerAdapter:
             return None, finished_retrieves
 
         finished_stores = set()
-        finished_retrieves = set()
         for request_id, s_future in self.store_futures.items():
             if not s_future.query():
                 continue
@@ -1772,20 +1804,7 @@ class LMCacheMPWorkerAdapter:
                     request_id,
                 )
 
-        for request_id, (r_future, _) in self.retrieve_futures.items():
-            if not r_future.query():
-                continue
-
-            r_result = r_future.result(timeout=60)
-            finished_retrieves.add(request_id)
-
-            if not r_result:
-                logger.error(
-                    "Something went wrong when processing the "
-                    "retrieve request for request_id=%s, result=%s",
-                    request_id,
-                    r_result,
-                )
+        finished_retrieves = self._poll_finished_retrieves()
 
         # Remove the finished requests from the tracking dicts
         for request_id in finished_stores:
