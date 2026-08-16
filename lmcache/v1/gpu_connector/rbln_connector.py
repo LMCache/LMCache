@@ -286,38 +286,6 @@ class VLLMPagedMemRBLNConnectorV2(GPUConnectorInterface):
             layer[1][blocks, :, offsets, :] = src_v
         torch_dev.synchronize()
 
-    @staticmethod
-    def _unpack_batch(
-        memory_objs: Union[List[List[MemoryObj]], List[MemoryObj], List[int], None],
-        starts: Optional[List[int]],
-        ends: Optional[List[int]],
-    ) -> tuple[List[MemoryObj], List[int], List[int]]:
-        """Narrow the loosely-typed batch arguments the interface declares.
-
-        Args:
-            memory_objs: Batch of memory objects.
-            starts: Per-object slice starts.
-            ends: Per-object slice ends.
-
-        Returns:
-            tuple: The batch as flat, non-optional lists.
-
-        Raises:
-            ValueError: If any argument is missing or not a flat
-                ``list[MemoryObj]``.
-        """
-        if memory_objs is None or starts is None or ends is None:
-            raise ValueError(
-                "memory_objs, starts and ends are all required for batched "
-                "RBLN transfers"
-            )
-        if any(isinstance(item, (list, int)) for item in memory_objs):
-            raise ValueError(
-                "VLLMPagedMemRBLNConnectorV2 expects a flat list[MemoryObj]; "
-                "nested and pointer batches are not supported"
-            )
-        return cast(List[MemoryObj], memory_objs), starts, ends
-
     def batched_from_gpu(
         self,
         memory_objs: Union[
@@ -328,8 +296,12 @@ class VLLMPagedMemRBLNConnectorV2(GPUConnectorInterface):
         **kwargs,
     ) -> None:
         """Gather each ``(memory_obj, start, end)`` triple in turn."""
-        objs, begins, finishes = self._unpack_batch(memory_objs, starts, ends)
-        for memory_obj, start, end in zip(objs, begins, finishes, strict=False):
+        for memory_obj, start, end in zip(
+            cast("List[MemoryObj]", memory_objs),
+            cast("List[int]", starts),
+            cast("List[int]", ends),
+            strict=False,
+        ):
             self.from_gpu(memory_obj, start, end, **kwargs)
 
     def batched_to_gpu(
@@ -342,8 +314,12 @@ class VLLMPagedMemRBLNConnectorV2(GPUConnectorInterface):
         **kwargs,
     ) -> None:
         """Scatter each ``(memory_obj, start, end)`` triple in turn."""
-        objs, begins, finishes = self._unpack_batch(memory_objs, starts, ends)
-        for memory_obj, start, end in zip(objs, begins, finishes, strict=False):
+        for memory_obj, start, end in zip(
+            cast("List[MemoryObj]", memory_objs),
+            cast("List[int]", starts),
+            cast("List[int]", ends),
+            strict=False,
+        ):
             self.to_gpu(memory_obj, start, end, **kwargs)
 
     # ------------------------------------------------------------------
