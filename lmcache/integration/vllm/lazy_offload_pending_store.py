@@ -141,8 +141,9 @@ class LazyOffloadPendingStore:
 
         Args:
             configs: The kv_connector_extra_config dict. Recognized keys:
-                ``lmcache.mp.lazy_offload_policy`` ("FIFO" default, or
-                "EVICTION_AWARE"), ``lmcache.mp.lazy_offload_horizon_steps`` (float),
+                ``lmcache.mp.lazy_offload_policy`` ("EVICTION_AWARE" default,
+                or the legacy "FIFO" policy),
+                ``lmcache.mp.lazy_offload_horizon_steps`` (float),
                 ``lmcache.mp.lazy_offload_min_prefix_tokens`` (int),
                 ``lmcache.mp.lazy_offload_max_drain_per_step`` (int), and the
                 FIFO-only ``lmcache.mp.lazy_offload_threshold`` /
@@ -152,7 +153,13 @@ class LazyOffloadPendingStore:
             ValueError: If the configured policy name is unknown.
         """
         configs = configs or {}
-        policy = cast(str, configs.get("lmcache.mp.lazy_offload_policy", "FIFO"))
+        policy = cast(
+            str,
+            configs.get(
+                "lmcache.mp.lazy_offload_policy",
+                LazyOffloadMode.EVICTION_AWARE.value,
+            ),
+        )
         try:
             self._mode = LazyOffloadMode(policy)
         except ValueError as e:

@@ -195,9 +195,9 @@ class TestLazyOffloadPendingStore:
         return store
 
     def test_selects_and_validates_mode(self) -> None:
-        assert LazyOffloadPendingStore().mode is LazyOffloadMode.FIFO
-        store = LazyOffloadPendingStore(dict(EVICTION_AWARE_CONFIG))
-        assert store.mode is LazyOffloadMode.EVICTION_AWARE
+        assert LazyOffloadPendingStore().mode is LazyOffloadMode.EVICTION_AWARE
+        store = LazyOffloadPendingStore(dict(FIFO_CONFIG))
+        assert store.mode is LazyOffloadMode.FIFO
         with pytest.raises(ValueError, match="Unknown offload policy"):
             LazyOffloadPendingStore({"lmcache.mp.lazy_offload_policy": "UNKNOWN"})
 

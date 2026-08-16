@@ -579,10 +579,10 @@ All connector-level options are passed through
      - Buffer stores on the scheduler and submit them according to the
        selected lazy-offload policy. Requires vLLM prefix caching.
    * - ``lmcache.mp.lazy_offload_policy``
-     - ``FIFO``
-     - Lazy drain policy. ``FIFO`` preserves count-triggered behavior;
-       ``EVICTION_AWARE`` is opt-in and drains blocks near the GPU free
-       queue's eviction head.
+     - ``EVICTION_AWARE``
+     - Lazy drain policy. ``EVICTION_AWARE`` drains blocks near the GPU free
+       queue's eviction head. Set ``FIFO`` explicitly to retain the legacy
+       count-triggered behavior.
    * - ``lmcache.mp.lazy_offload_horizon_steps``
      - ``2.5``
      - ``EVICTION_AWARE`` only: estimated scheduler steps of block

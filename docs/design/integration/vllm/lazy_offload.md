@@ -338,15 +338,16 @@ not add policy-specific branches to the connector.
 
 Two policies are available:
 
-- `EVICTION_AWARE` (opt-in) reads the free queue in LRU order and releases an
+- `EVICTION_AWARE` (default) reads the free queue in LRU order and releases an
   operation only when one of its blocks enters the pressure-derived danger
   window. It validates admission-time block hashes, preserves prefix closure,
   deduplicates identical pending content, and can reject prefixes below the
   configured break-even length. Its decision model and full queue contract are
   in [lazy_offload_decision_model.md](lazy_offload_decision_model.md) and
   [lazy_offload_policy/eviction_aware.md](lazy_offload_policy/eviction_aware.md).
-- `FIFO` is the compatibility default and preserves the original count-triggered behavior.
-  It drains completed requests after the configured request threshold and
+- `FIFO` remains available as an explicit legacy fallback. It preserves the
+  original count-triggered behavior and drains completed requests after the
+  configured request threshold and
   validates their block hashes immediately before submission.
 
 Policies do not receive request-finished or store-receipt lifecycle events.
@@ -376,13 +377,12 @@ Configuration in `kv_connector_extra_config`:
 
 ```text
 lmcache.mp.lazy_offload = true                         # default: false
-lmcache.mp.lazy_offload_policy = FIFO                  # default
-# Set EVICTION_AWARE explicitly to enable pressure-aware draining.
+lmcache.mp.lazy_offload_policy = EVICTION_AWARE        # default
 lmcache.mp.lazy_offload_horizon_steps = 2.5
 lmcache.mp.lazy_offload_min_prefix_tokens = 0
 lmcache.mp.lazy_offload_max_drain_per_step = 64
 
-# FIFO only
+# Explicit legacy FIFO mode only
 lmcache.mp.lazy_offload_threshold = 100
 lmcache.mp.lazy_offload_select_count = 10
 ```

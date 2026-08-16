@@ -324,9 +324,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         self.dispatcher = None
 
         # Lazy offload configuration: when enabled, store operations are
-        # buffered and drained by the configured policy (FIFO by default;
-        # EVICTION_AWARE is opt-in and releases stores when their GPU blocks
-        # face imminent eviction) instead of being submitted at every step.
+        # buffered and drained by the configured policy. EVICTION_AWARE is
+        # the default and releases stores when their GPU blocks face imminent
+        # eviction instead of submitting every store at every step.
         self.lazy_offload = vllm_config.kv_transfer_config.get_from_extra_config(
             "lmcache.mp.lazy_offload", False
         )
