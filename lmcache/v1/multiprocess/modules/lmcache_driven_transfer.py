@@ -452,6 +452,23 @@ def _run_object_group_transfer_plan(
     )
 
 
+def _eligible_for_fast_path(mo: MemoryObj | None) -> bool:
+    """Returns True if ``mo`` can go through the native object-group fast path.
+
+    The fast path is only for CPU-GPU transfer, so it requires a CPU-resident
+    backing buffer. A :class:`GDSMemoryObject`, or any object whose
+    ``raw_tensor`` is off-CPU, must fall through to the slow path.
+
+    ``None`` entries are treated as eligible: they do not block the fast path,
+    matching the original ``not any(mo is not None and ...)`` semantics.
+    """
+    if isinstance(mo, GDSMemoryObject):
+        return False
+    if mo is None or mo.raw_tensor is None:
+        return True
+    return mo.raw_tensor.device.type == "cpu"
+
+
 def transfer_kv_per_object_group(
     cache_context: BaseCacheContext,
     block_ids_gpu: list[torch.Tensor],
@@ -487,33 +504,10 @@ def transfer_kv_per_object_group(
         This function expects the caller to stage the block ids (list[list[int]])
         into GPU tensors and pass them in as `block_ids_gpu`.
     """
-    # The fast path below (`_run_object_group_transfer_plan`) is a CPU-MO-only
-    # path: it assumes every memory object is backed by host (CPU) memory so
-    # that the native object-group transfer can issue DMA straight from the CPU
-    # buffers. Entering it with a device-resident memory object (DMO), such as
-    # the GPU-resident objects, would DMA from a wrong address space and
-    # corrupt data, so such objects must fall through to the slow path below.
-    #
-    # Three guards keep us in the fast path only when it is safe:
-    #   1. `_HAS_NATIVE_OBJECT_GROUP_TRANSFER` -- the native fast path exists.
-    #   2. No `GDSMemoryObject` is present -- historically this was enough to
-    #      guarantee "all MOs are CPU MOs", because the only non-CPU object
-    #      type was GDSMemoryObject.
-    #   3. No MO has a non-CPU `raw_tensor` -- added for device-resident
-    #      objects (DMOs), which are *not* GDSMemoryObject and therefore slip
-    #      past guard 2. This check is strictly broader than guard 2 and would
-    #      suffice on its own; guard 2 is kept to preserve the original
-    #      semantics for callers that still rely on the GDS-specific check and
-    #      to short-circuit the more expensive tensor inspection for GDS paths.
-    if (
-        _HAS_NATIVE_OBJECT_GROUP_TRANSFER
-        and not any(isinstance(mo, GDSMemoryObject) for mo in memory_objs)
-        and not any(
-            mo is not None
-            and mo.raw_tensor is not None
-            and mo.raw_tensor.device.type != "cpu"
-            for mo in memory_objs
-        )
+    # The fast path is only for CPU-GPU transfer; device-resident objects
+    # fall through to the slow path below. See `_eligible_for_fast_path`.
+    if _HAS_NATIVE_OBJECT_GROUP_TRANSFER and all(
+        _eligible_for_fast_path(mo) for mo in memory_objs
     ):
         _run_object_group_transfer_plan(
             cache_context,

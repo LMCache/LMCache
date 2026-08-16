@@ -23,8 +23,8 @@ import time
 
 # First Party
 from lmcache import torch_device_type
-from lmcache.logging import init_logger
 from lmcache.lmcache_native import Bitmap
+from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L1MemoryDesc, L2StoreResult
@@ -64,14 +64,15 @@ def _configure_perf_log(perf_log_dir: str | None) -> None:
     """Enable/disable perf logging at runtime (called from __init__).
 
     When *perf_log_dir* is a non-empty string, opens
-    ``perf_log_dir/phx_perf.log`` for append writing (line-buffered).
+    ``perf_log_dir/phx_perf.log`` for append writing (block-buffered, 64 KiB)
+    to amortize small file IOs on the hot path.
     When None, perf logging is disabled and all instrumentation is no-op.
     """
     global _lmc_perf_log_file
     if perf_log_dir:
         os.makedirs(perf_log_dir, exist_ok=True)
         log_path = os.path.join(perf_log_dir, "phx_perf.log")
-        _lmc_perf_log_file = open(log_path, "a", buffering=1)  # line-buffered
+        _lmc_perf_log_file = open(log_path, "a", buffering=1 << 16)
         logger.info("PhxL2Adapter: perf log enabled (%s)", log_path)
     else:
         _lmc_perf_log_file = None
@@ -88,7 +89,6 @@ def _perf_write(line: str) -> None:
         return
     with _lmc_perf_log_lock:
         f.write(line + "\n")
-        f.flush()
 
 
 def _key_str(key: "ObjectKey") -> str:
@@ -1172,7 +1172,7 @@ class PhxL2Adapter(L2AdapterInterface):
                 # by the retrieve path).
                 if hasattr(allocator, "wait_for_available"):
                     t_bp = perf.mark()
-                    got = allocator.wait_for_available(size, timeout=5.0)
+                    got = allocator.wait_for_available(size, timeout=1.0)
                     perf.measure("backpressure", t_bp)
                     if not got:
                         perf.add_bp_timeout()
