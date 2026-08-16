@@ -11,3 +11,4 @@ files or fixed-size slots on a disk or block device.
    fs
    fs_native
    raw_block
+   phx
