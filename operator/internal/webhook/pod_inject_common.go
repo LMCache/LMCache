@@ -178,6 +178,40 @@ func prepareInjection(
 	return kvJSON, idx, admission.Response{}, true
 }
 
+// applyIPCSharing wires the pod for cross-pod CUDA IPC with the node-local
+// engine, mirroring the engine's spec.hostIPC mode. By default (hostIPC=false)
+// it mounts the host's /dev/shm into the target container via hostPath — the
+// CUDA IPC requirement is that both processes see the same /dev/shm
+// tmpfs (PyTorch's CUDA IPC handles reference a ref-counter file there). When
+// the engine opts into hostIPC, the pod instead joins the host IPC namespace,
+// which exposes the host's /dev/shm without a mount. A pod that already has
+// hostIPC enabled also needs no /dev/shm mount. Other user-supplied wiring is
+// left untouched: an existing mount at /dev/shm or an existing volume named
+// "lmcache-dev-shm" suppresses the injection.
+//
+// Parameters:
+//   - pod: the decoded pod (mutated in place: hostIPC or volumes).
+//   - target: the resolved vLLM container (mutated in place: volume mount).
+//   - hostIPC: the engine's resolved spec.hostIPC value.
+func applyIPCSharing(pod *corev1.Pod, target *corev1.Container, hostIPC bool) {
+	if hostIPC {
+		pod.Spec.HostIPC = true
+	}
+	if pod.Spec.HostIPC {
+		return
+	}
+	// Leave user-supplied wiring untouched: an existing mount at /dev/shm, or
+	// an existing volume named "lmcache-dev-shm" (whatever its source — mounting a
+	// volume of unknown source at /dev/shm could silently shadow the host
+	// tmpfs, and appending a same-named volume would be invalid).
+	if resources.HasDevShmMount(target.VolumeMounts) ||
+		resources.HasDevShmVolume(pod.Spec.Volumes) {
+		return
+	}
+	pod.Spec.Volumes = append(pod.Spec.Volumes, resources.BuildDevShmVolume())
+	target.VolumeMounts = append(target.VolumeMounts, resources.BuildDevShmVolumeMount())
+}
+
 // stampInjected stamps the idempotency guard (and the kv-transfer-config-present
 // skip reason when the user supplied their own --kv-transfer-config), then
 // returns the success patch response. Callers apply their mutations first.

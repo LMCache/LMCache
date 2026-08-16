@@ -81,7 +81,8 @@ spec:
 # ---------------------------------------------------------------------------
 # To enable CacheBlend on a vLLM pod, label it for the webhook and annotate it
 # with this engine's name. The pod (and this engine) must run in a namespace
-# labeled `pod-security.kubernetes.io/enforce=privileged` (hostIPC is injected).
+# labeled `pod-security.kubernetes.io/enforce=privileged` (a hostPath /dev/shm
+# mount is injected).
 #
 #   metadata:
 #     labels:

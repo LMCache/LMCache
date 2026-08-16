@@ -290,11 +290,15 @@ External wheel loading rules
 Verification
 ~~~~~~~~~~~~
 
-Start LMCache server:
+Start LMCache server.  The worker below uses the engine-driven
+transfer path, which the server only loads when
+``--supported-transfer-mode`` is ``engine_driven`` or ``auto`` (the
+default is ``lmcache_driven``):
 
 .. code-block:: bash
 
-    lmcache server --l1-size-gb 10 --eviction-policy LRU --port 5555
+    lmcache server --l1-size-gb 10 --eviction-policy LRU --port 5555 \
+        --supported-transfer-mode engine_driven
 
 Run vLLM with MP connector. If you want a specific torch device category, set
 ``DEVICE_TYPE``. If multiple LMCache backends share that device type, set

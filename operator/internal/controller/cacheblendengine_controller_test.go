@@ -131,7 +131,7 @@ var _ = Describe("CacheBlendEngine Controller", func() {
 			Expect(ownedBy(ds.OwnerReferences)).To(BeTrue())
 
 			podSpec := ds.Spec.Template.Spec
-			Expect(podSpec.HostIPC).To(BeTrue())
+			Expect(podSpec.HostIPC).To(BeFalse())
 			Expect(podSpec.Containers).To(HaveLen(1))
 			engineContainer := podSpec.Containers[0]
 
