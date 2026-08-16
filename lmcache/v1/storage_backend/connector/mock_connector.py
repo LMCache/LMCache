@@ -264,8 +264,9 @@ class MockConnector(RemoteConnector):
         for i, mock_obj in enumerate(mock_objs):
             if mock_obj is None:
                 logger.warning(
-                    f"Mock object is None on {i}",
-                    f" out of {len(mock_objs)} objects",
+                    "Mock object is None on %d out of %d objects",
+                    i,
+                    len(mock_objs),
                 )
                 break
             metadata = mock_obj.metadata
@@ -276,8 +277,10 @@ class MockConnector(RemoteConnector):
             )
             if memory_obj is None:
                 logger.warning(
-                    "Failed to allocate memory even with",
-                    f" busy loop on {i} out of {len(mock_objs)} objects",
+                    "Failed to allocate memory even with busy loop on %d out of "
+                    "%d objects",
+                    i,
+                    len(mock_objs),
                 )
                 break
             memory_objs.append(memory_obj)

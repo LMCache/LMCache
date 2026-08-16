@@ -152,7 +152,9 @@ class PeerInfo:
         try:
             self.lookup_socket.close(linger=0)
         except Exception as e:
-            logger.error("Failed to close peer %s lookup socket", self.peer_init_url, e)
+            logger.error(
+                "Failed to close peer %s lookup socket: %s", self.peer_init_url, e
+            )
         self.lookup_socket = new_lookup_socket
 
 

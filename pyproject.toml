@@ -87,6 +87,9 @@ select = [
     # "I",
     # flake8-logging-format
     #"G",
+    # Pylint: logging call passes too many / too few arguments for its
+    # format string, which makes logging drop the message at runtime.
+    "PLE1205", "PLE1206",
     # flake8-self (private member access)
     "SLF",
 ]
