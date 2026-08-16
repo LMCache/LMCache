@@ -375,10 +375,11 @@ class _RequestLifecycle:
         )
 
 
-class _PendingOperationIndexes:
-    """Own all secondary indexes derived from pending operations."""
+class _PendingOperations:
+    """Own pending operations and every index derived from them."""
 
     def __init__(self) -> None:
+        self._by_request: dict[str, list[PendingStoreOp]] = {}
         self._content: dict[
             tuple[str, int, tuple["BlockHashWithGroupId", ...]], PendingStoreOp
         ] = {}
@@ -391,14 +392,24 @@ class _PendingOperationIndexes:
         self._num_pending_blocks = 0
         self._requests_to_validate: set[str] = set()
 
+    def __bool__(self) -> bool:
+        return bool(self._by_request)
+
+    def contains_request(self, request_id: str) -> bool:
+        return request_id in self._by_request
+
+    def get(self, request_id: str) -> list[PendingStoreOp] | None:
+        return self._by_request.get(request_id)
+
     def covering_op(self, op: PendingStoreOp) -> PendingStoreOp | None:
         return self._content.get(_content_key(op))
 
-    def add(self, op: PendingStoreOp, *, starts_request: bool) -> None:
-        """Index one admitted op after it enters the primary pending map."""
-        if starts_request:
+    def add(self, op: PendingStoreOp) -> None:
+        """Add one admitted operation and all of its index entries."""
+        if op.request_id not in self._by_request:
             self._request_order[op.request_id] = self._next_request_order
             self._next_request_order += 1
+        self._by_request.setdefault(op.request_id, []).append(op)
         self._content[_content_key(op)] = op
         op_blocks = len(op.block_hashes)
         self._op_size_counts[op_blocks] = self._op_size_counts.get(op_blocks, 0) + 1
@@ -411,7 +422,7 @@ class _PendingOperationIndexes:
             if refs == 1:
                 self._requests_by_block.setdefault(block_id, set()).add(op.request_id)
 
-    def forget(self, ops: list[PendingStoreOp]) -> None:
+    def _forget(self, ops: list[PendingStoreOp]) -> None:
         """Remove content, block, and operation-size entries for departed ops."""
         for op in ops:
             key = _content_key(op)
@@ -438,19 +449,41 @@ class _PendingOperationIndexes:
                 if not requests:
                     del self._requests_by_block[block_id]
 
-    def finish_request(self, request_id: str) -> None:
-        """Discard request-level ordering and validation entries."""
+    def pop_request(self, request_id: str) -> list[PendingStoreOp]:
+        """Atomically remove a request and all entries derived from its ops."""
+        departed = self._by_request.pop(request_id, [])
+        self._forget(departed)
+        self._finish_request(request_id)
+        return departed
+
+    def replace_request(
+        self,
+        request_id: str,
+        departed: list[PendingStoreOp],
+        remaining: list[PendingStoreOp],
+    ) -> None:
+        """Atomically remove a front/suffix and install the surviving list."""
+        self._forget(departed)
+        if remaining:
+            self._by_request[request_id] = remaining
+            return
+        self._by_request.pop(request_id, None)
+        self._finish_request(request_id)
+
+    def num_ops(self) -> int:
+        return sum(len(ops) for ops in self._by_request.values())
+
+    def _finish_request(self, request_id: str) -> None:
         self._request_order.pop(request_id, None)
         self._requests_to_validate.discard(request_id)
 
     def observe_allocations(
         self,
         allocated_block_ids: set[int] | None,
-        all_pending_request_ids: Iterable[str],
     ) -> None:
         """Mark requests whose snapshots require validation this step."""
         if allocated_block_ids is None:
-            self._requests_to_validate.update(all_pending_request_ids)
+            self._requests_to_validate.update(self._by_request)
             return
         for block_id in allocated_block_ids:
             self._requests_to_validate.update(self._requests_by_block.get(block_id, ()))
@@ -513,16 +546,14 @@ class EvictionAwareStoreQueue:
         """
         self._config = config
         self._pool = pool
-        # Per-request pending operations in prefix (admission) order.
-        self._pending: dict[str, list[PendingStoreOp]] = {}
+        # Primary pending storage and every derived secondary index share one
+        # owner so departure paths cannot update one without the other.
+        self._pending_ops = _PendingOperations()
         # Request lifecycle is deliberately separate from pending-operation
         # storage and its secondary indexes. Keeping the related flags in one
         # record makes transition invariants explicit and avoids independent
         # set updates drifting apart.
         self._request_lifecycle: dict[str, _RequestLifecycle] = {}
-        # Secondary indexes for content deduplication, bounded candidate
-        # discovery, admission-order tie breaking, and emission-shift bounds.
-        self._indexes = _PendingOperationIndexes()
         self._blocks_per_step_ema: float = 0.0
         self._ema_initialized = False
         self._next_step_estimate = 0
@@ -560,7 +591,7 @@ class EvictionAwareStoreQueue:
             self._lifecycle(op.request_id).prefix_broken = True
             self._counters.rejected_unhashed += 1
             return AdmitResult.REJECTED_UNHASHED_BLOCK
-        covering = self._indexes.covering_op(op)
+        covering = self._pending_ops.covering_op(op)
         if covering is not None and self._chain_intact(covering):
             self._counters.deduplicated += 1
             return AdmitResult.DEDUPLICATED
@@ -568,9 +599,7 @@ class EvictionAwareStoreQueue:
         # an earlier sibling's were, so the next drain prefix-closes over
         # it): buffer the live copy and make it the new cover. The doomed
         # op stays pending and is dropped by collect_due().
-        starts_request = op.request_id not in self._pending
-        self._pending.setdefault(op.request_id, []).append(op)
-        self._indexes.add(op, starts_request=starts_request)
+        self._pending_ops.add(op)
         self._counters.admitted += 1
         return AdmitResult.ADMITTED
 
@@ -595,7 +624,7 @@ class EvictionAwareStoreQueue:
                 the drain. None asks for a full validation pass and is kept
                 for callers that cannot provide the incremental signal.
         """
-        self._indexes.observe_allocations(allocated_block_ids, self._pending)
+        self._pending_ops.observe_allocations(allocated_block_ids)
         if self._ema_initialized:
             self._blocks_per_step_ema = (
                 _EMA_ALPHA * new_blocks_allocated
@@ -619,7 +648,9 @@ class EvictionAwareStoreQueue:
             is pending and the caller may tear down immediately.
         """
         state = self._request_lifecycle.get(request_id)
-        if request_id in self._pending or (state is not None and state.in_flight):
+        if self._pending_ops.contains_request(request_id) or (
+            state is not None and state.in_flight
+        ):
             self._lifecycle(request_id).finished = True
             return True
         if state is not None:
@@ -659,9 +690,7 @@ class EvictionAwareStoreQueue:
         Returns:
             The number of operations discarded.
         """
-        dropped = self._pending.pop(request_id, [])
-        self._indexes.forget(dropped)
-        self._indexes.finish_request(request_id)
+        dropped = self._pending_ops.pop_request(request_id)
         self._counters.dropped_on_request_drop += len(dropped)
         state = self._request_lifecycle.get(request_id)
         if state is not None:
@@ -707,9 +736,7 @@ class EvictionAwareStoreQueue:
         state = self._request_lifecycle.get(request_id)
         if state is None or not state.finished:
             return False
-        dropped = self._pending.pop(request_id, [])
-        self._indexes.forget(dropped)
-        self._indexes.finish_request(request_id)
+        dropped = self._pending_ops.pop_request(request_id)
         self._counters.dropped_id_reuse += len(dropped)
         state.prefix_broken = False
         state.finished = False
@@ -742,16 +769,14 @@ class EvictionAwareStoreQueue:
         state = self._request_lifecycle.get(request_id)
         if state is not None and state.stale_in_flight:
             return 0
-        dropped = self._pending.pop(request_id, [])
-        self._indexes.forget(dropped)
-        self._indexes.finish_request(request_id)
+        dropped = self._pending_ops.pop_request(request_id)
         self._counters.dropped_failed_store += len(dropped)
         self._lifecycle(request_id).prefix_broken = True
         return len(dropped)
 
     def num_pending_ops(self) -> int:
         """Return the total number of buffered store operations."""
-        return sum(len(ops) for ops in self._pending.values())
+        return self._pending_ops.num_ops()
 
     def stats(self) -> LazyOffloadCounters:
         """Return a copy of the cumulative policy counters."""
@@ -785,7 +810,7 @@ class EvictionAwareStoreQueue:
             :class:`DrainResult`.
         """
         result = DrainResult()
-        if not self._pending:
+        if not self._pending_ops:
             return result
 
         danger_depth = self._danger_depth()
@@ -805,14 +830,14 @@ class EvictionAwareStoreQueue:
         # Only requests touched by this step's allocations or represented in
         # the bounded rank snapshot can have changed outcome. The reverse
         # index avoids a full pending-queue scan on every scheduler step.
-        requests_to_check = self._indexes.requests_to_check(ranks)
+        requests_to_check = self._pending_ops.requests_to_check(ranks)
 
         # Per request: (min in-queue rank, request id, surviving ops).
         candidates: list[tuple[int, str, list[PendingStoreOp]]] = []
         for request_id in requests_to_check:
-            ops = self._pending.get(request_id)
+            ops = self._pending_ops.get(request_id)
             if not ops:
-                self._indexes.validation_complete(request_id)
+                self._pending_ops.validation_complete(request_id)
                 continue
             state = self._request_lifecycle.get(request_id)
             if state is not None and state.in_flight:
@@ -822,7 +847,7 @@ class EvictionAwareStoreQueue:
                 # checked even if their recycled blocks are no longer free.
                 continue
             surviving = self._drop_evicted_suffix(request_id, ops, result)
-            self._indexes.validation_complete(request_id)
+            self._pending_ops.validation_complete(request_id)
             if not surviving:
                 continue
             op_ranks = [
@@ -841,7 +866,10 @@ class EvictionAwareStoreQueue:
         # emitted part is a front slice of it, so within-request prefix order
         # is never violated; the rest stays pending for a later step.
         candidates.sort(
-            key=lambda cand: (cand[0], self._indexes.admission_order(cand[1]))
+            key=lambda cand: (
+                cand[0],
+                self._pending_ops.admission_order(cand[1]),
+            )
         )
         budget = self._config.max_drain_per_step
         emitted_blocks = 0
@@ -872,16 +900,14 @@ class EvictionAwareStoreQueue:
                 # Dropped blocks stay in the free queue, so they do not
                 # extend the emission shift.
                 result.dropped_short_prefix.extend(surviving)
-                self._forget_ops(surviving)
                 self._counters.rejected_short_prefix += len(surviving)
                 self._lifecycle(request_id).prefix_broken = True
-                self._replace_pending(request_id, [], result)
+                self._replace_pending(request_id, surviving, [], result)
                 continue
             emitted = due_ops[:budget]
             result.ops_held_back += len(due_ops) - len(emitted)
             budget -= len(emitted)
             result.to_store.extend(emitted)
-            self._forget_ops(emitted)
             self._counters.emitted += len(emitted)
             newly_pinned_free_blocks = {
                 block_id
@@ -895,8 +921,8 @@ class EvictionAwareStoreQueue:
             # fully drained by this emission is not released until the store
             # completion arrives via notify_stored().
             self._lifecycle(request_id).in_flight = True
-            remaining = self._pending[request_id][len(emitted) :]
-            self._replace_pending(request_id, remaining, result)
+            remaining = surviving[len(emitted) :]
+            self._replace_pending(request_id, emitted, remaining, result)
         if result.ops_held_back:
             self._counters.throttled_drains += 1
         return result
@@ -919,7 +945,7 @@ class EvictionAwareStoreQueue:
             return False
         state.in_flight = False
         state.stale_in_flight = False
-        if request_id in self._pending:
+        if self._pending_ops.contains_request(request_id):
             self._prune_lifecycle(request_id)
             return False
         if state.finished:
@@ -938,7 +964,9 @@ class EvictionAwareStoreQueue:
         without scanning the pending queue. Shared and in-use blocks make the
         actual shift smaller, never larger.
         """
-        return self._indexes.max_emission_shift_blocks(self._config.max_drain_per_step)
+        return self._pending_ops.max_emission_shift_blocks(
+            self._config.max_drain_per_step
+        )
 
     def _danger_depth(self) -> int:
         """Free-queue depth considered at risk within the horizon.
@@ -974,11 +1002,10 @@ class EvictionAwareStoreQueue:
             return ops
         dropped = ops[first_lost:]
         result.dropped_evicted.extend(dropped)
-        self._forget_ops(dropped)
         self._counters.dropped_evicted += len(dropped)
         self._lifecycle(request_id).prefix_broken = True
         surviving = ops[:first_lost]
-        self._replace_pending(request_id, surviving, result)
+        self._replace_pending(request_id, dropped, surviving, result)
         return surviving
 
     def _due_front_segment(
@@ -1044,7 +1071,7 @@ class EvictionAwareStoreQueue:
         copy of the content. Later siblings do not matter: their loss
         prefix-closes from their own position, leaving the cover storable.
         """
-        for sibling in self._pending.get(op.request_id, []):
+        for sibling in self._pending_ops.get(op.request_id) or []:
             if not self._snapshot_intact(sibling):
                 return False
             if sibling is op:
@@ -1054,22 +1081,17 @@ class EvictionAwareStoreQueue:
         # as doomed, the safe direction.
         return False
 
-    def _forget_ops(self, ops: list[PendingStoreOp]) -> None:
-        """Remove all secondary-index entries for departing operations."""
-        self._indexes.forget(ops)
-
     def _replace_pending(
         self,
         request_id: str,
+        departed: list[PendingStoreOp],
         remaining: list[PendingStoreOp],
         result: DrainResult,
     ) -> None:
-        """Update a request's pending list, releasing it if drained empty."""
+        """Replace pending ops and release a drained finished request."""
+        self._pending_ops.replace_request(request_id, departed, remaining)
         if remaining:
-            self._pending[request_id] = remaining
             return
-        self._pending.pop(request_id, None)
-        self._indexes.finish_request(request_id)
         state = self._request_lifecycle.get(request_id)
         if state is not None and state.finished and not state.in_flight:
             state.finished = False

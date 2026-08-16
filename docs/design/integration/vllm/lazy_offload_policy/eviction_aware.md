@@ -278,18 +278,20 @@ vLLM hit instead of 0 on a lookup miss.
 
 ## Scheduler-path complexity
 
-A dedicated pending-operation index owner maintains content covers, admission
-order, block id to pending requests, per-request block reference counts, and a
-bounded multiset of operation sizes. A production drain therefore walks only
-the bounded free-queue window and the
-requests represented in that window or touched by this step's allocations. Its
-cost is proportional to the pressure window and drain cap, not total pending
-queue depth. Admission and every departure path update all three indexes; the
-pure-policy tests retain an `allocated_block_ids=None` compatibility path that
-performs a full validation pass.
+A dedicated pending-operation owner maintains the primary per-request lists
+together with their content covers, admission order, block-to-request reverse
+index, per-request block reference counts, and bounded operation-size multiset.
+Admission, replacement, and departure update primary storage and every derived
+index through one atomic API. A production drain therefore walks only the
+bounded free-queue window and the requests represented in that window or
+touched by this step's allocations. Its cost is proportional to the pressure
+window and drain cap, not total pending queue depth. The pure-policy tests
+retain an `allocated_block_ids=None` compatibility path that performs a full
+validation pass.
 
-Request lifecycle is stored separately from those indexes in one per-request
-record (`prefix_broken`, `finished`, `in_flight`, and `stale_in_flight`). This
+Request lifecycle is stored separately from pending operations in one
+per-request record (`prefix_broken`, `finished`, `in_flight`, and
+`stale_in_flight`). This
 keeps multi-flag transitions such as preemption, id reuse, failed stores, and
 completion receipts atomic in one owner rather than synchronizing parallel
 sets. Empty lifecycle records are pruned, so completed request ids do not
