@@ -1,16 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the RBLN head-major block transfer.
+"""Tests for the RBLN block transfer.
 
-RBLN stores heads before block tokens, so upstream's token-major staging would
-cost a head<->token permute on every store and restore. ``RblnDeviceOps``
-overrides ``multi_layer_block_kv_transfer`` to fill the same buffer head-major
-instead.
+``RblnDeviceOps`` overrides ``multi_layer_block_kv_transfer`` for the torch op
+sequence RBLN is tuned for, **not** for the chunk layout: chunks stay in
+LMCache's canonical token-major ``[2, L, T, H*D]``.
 
-The load-bearing test is :func:`test_chunk_is_head_major_not_token_major`: a
-round trip alone passes under either layout, because the same code writes and
-reads the chunk. Only a positive check against the head-major expectation --
-with the token-major reading asserted *false* -- proves the override is
-actually in effect.
+The load-bearing test is :func:`test_chunk_matches_the_canonical_torch_path`:
+a round trip alone passes under any self-consistent layout, because the same
+code writes and reads the chunk. Only byte equality against the shared torch
+path proves an RBLN chunk is interchangeable with one written by another
+device -- the property cross-device sharing and PD disaggregation rely on.
 
 No RBLN hardware is needed: the kernels are torch-only, so CPU tensors are
 enough to pin the layout contract. That is also the limit of what these cover
@@ -22,13 +21,14 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.platform.ops_types import (
-    EngineKVFormat,
-    PageBufferShapeDesc,
-    TransferDirection,
-)
+from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 from lmcache.v1.platform.rbln.device_ops import RblnDeviceOps
-from lmcache.v1.platform.rbln.kv_ops import head_major_view
+from lmcache.v1.platform.rbln.kv_layout import squeeze_singleton_axis
+from lmcache.v1.platform.torch_ops import multi_layer_block_kv_transfer
+import lmcache.lmcache_native as lmcache_native
+
+EngineKVFormat = lmcache_native.EngineKVFormat
+TransferDirection = lmcache_native.TransferDirection
 
 NUM_LAYERS = 2
 NUM_BLOCKS = 8
@@ -95,27 +95,13 @@ def _transfer(
 # ---------------------------------------------------------------------------
 
 
-def test_chunk_is_head_major_not_token_major() -> None:
-    """The whole point: heads lead tokens in the staged chunk."""
+def test_chunk_is_canonical_token_major() -> None:
+    """Each chunk row is one token's heads laid end to end."""
     layers = _paged_layers()
     chunks = _chunks()
     _transfer(layers, chunks, TransferDirection.D2H)
 
-    head_major = chunks[0].view(2, NUM_LAYERS, NUM_HEADS, CHUNK_TOKENS, HEAD_SIZE)
     assert all(
-        torch.equal(
-            head_major[kv, li, hi, ti],
-            layers[li][kv, ti // BLOCK_SIZE, hi, 0, ti % BLOCK_SIZE],
-        )
-        for kv in (0, 1)
-        for li in range(NUM_LAYERS)
-        for hi in range(NUM_HEADS)
-        for ti in range(CHUNK_TOKENS)
-    )
-
-    # Control: reading the same bytes token-major must NOT line up, otherwise
-    # the override silently did nothing.
-    assert not all(
         torch.equal(
             chunks[0][kv, li, ti],
             layers[li][kv, ti // BLOCK_SIZE, :, 0, ti % BLOCK_SIZE, :].reshape(
@@ -126,6 +112,34 @@ def test_chunk_is_head_major_not_token_major() -> None:
         for li in range(NUM_LAYERS)
         for ti in range(CHUNK_TOKENS)
     )
+
+
+def test_chunk_matches_the_canonical_torch_path() -> None:
+    """RBLN chunks are byte-identical to the shared torch HND path's.
+
+    The RBLN layout is the 5-D HND format plus a singleton axis, so the shared
+    path fed the squeezed tensors must produce exactly the same bytes. This is
+    what makes a chunk written on RBLN readable by another device.
+    """
+    layers = _paged_layers()
+    ours = _chunks()
+    theirs = _chunks()
+
+    _transfer(layers, ours, TransferDirection.D2H)
+    multi_layer_block_kv_transfer(
+        squeeze_singleton_axis(layers),
+        theirs,
+        list(range(NUM_BLOCKS)),
+        torch.device("cpu"),
+        TransferDirection.D2H,
+        _shape_desc(),
+        CHUNK_TOKENS,
+        EngineKVFormat.NL_X_TWO_NB_NH_BS_HS,
+        0,
+    )
+
+    for got, expected in zip(ours, theirs, strict=True):
+        assert torch.equal(got, expected)
 
 
 def test_round_trip_restores_the_paged_cache() -> None:
@@ -152,13 +166,32 @@ def test_prefix_skip_leaves_leading_blocks_untouched() -> None:
         assert torch.equal(got[:, 1:], expected[:, 1:])
 
 
-def test_head_major_view_requires_contiguity() -> None:
-    """A non-contiguous buffer would silently address the wrong bytes."""
-    buf = torch.zeros(2, NUM_LAYERS, CHUNK_TOKENS, NUM_HEADS * HEAD_SIZE)
-    with pytest.raises(ValueError, match="contiguous"):
-        head_major_view(
-            buf.transpose(2, 3), NUM_LAYERS, NUM_HEADS, CHUNK_TOKENS, HEAD_SIZE
+def test_trailing_partial_chunk_is_handled() -> None:
+    """A chunk holding fewer blocks than it is sized for round-trips."""
+    src = _paged_layers()
+    dst = _paged_layers(fill_random=False)
+    chunks = _chunks()
+    partial = NUM_BLOCKS - 1
+
+    for direction, layers in (
+        (TransferDirection.D2H, src),
+        (TransferDirection.H2D, dst),
+    ):
+        RblnDeviceOps().multi_layer_block_kv_transfer(
+            layers,
+            chunks,
+            list(range(partial)),
+            torch.device("cpu"),
+            direction,
+            _shape_desc(),
+            CHUNK_TOKENS,
+            EngineKVFormat.NL_X_TWO_NB_NH_ONE_BS_HS,
+            0,
         )
+
+    for got, expected in zip(dst, src, strict=True):
+        assert torch.equal(got[:, :partial], expected[:, :partial])
+        assert torch.count_nonzero(got[:, partial:]) == 0
 
 
 # ---------------------------------------------------------------------------

@@ -34,11 +34,11 @@ from lmcache.v1.gpu_connector.utils import (
     get_num_layers,
     normalize_kv_and_discover_format,
 )
-from lmcache.v1.platform.ops_types import EngineKVFormat
 from lmcache.v1.platform.rbln.kv_layout import (
     is_rbln_kv_layout,
     squeeze_singleton_axis,
 )
+import lmcache.lmcache_native as lmcache_native
 
 NUM_LAYERS = 2
 NUM_BLOCKS = 8
@@ -46,7 +46,7 @@ NUM_HEADS = 2
 BLOCK_SIZE = 4
 HEAD_SIZE = 16
 
-_NATIVE_FORMAT = EngineKVFormat.NL_X_TWO_NB_NH_ONE_BS_HS
+_NATIVE_FORMAT = lmcache_native.EngineKVFormat.NL_X_TWO_NB_NH_ONE_BS_HS
 
 
 def _native_kv() -> list[torch.Tensor]:

@@ -26,14 +26,15 @@ from lmcache.v1.gpu_connector.kv_format import (
     get_spec_class,
 )
 from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache, LayoutHints
-from lmcache.v1.platform.ops_types import set_shape_desc_dtype
+from lmcache.v1.platform.ops_types import PageBufferShapeDesc, set_shape_desc_dtype
+import lmcache.lmcache_native as lmcache_native
 
 if TYPE_CHECKING:
     # First Party
     from lmcache.v1.gpu_connector.gpu_connectors import GPUConnectorInterface
 
 # First Party
-import lmcache.c_ops as lmc_ops
+from lmcache import device_ops
 
 logger = init_logger(__name__)
 
@@ -87,12 +88,9 @@ def assert_layerwise_gpu_connector(gpu_connector: "GPUConnectorInterface"):
     assert isinstance(gpu_connector, valid_connectors)
 
 
-def is_mla(engine_kv_format: "lmc_ops.EngineKVFormat") -> bool:
-    """Return ``True`` for a Multi-head Latent Attention (MLA) layout."""
-    return lmc_ops.is_mla(engine_kv_format)
-
-
-def get_engine_kv_shape_description(engine_kv_format: "lmc_ops.EngineKVFormat") -> str:
+def get_engine_kv_shape_description(
+    engine_kv_format: "lmcache_native.EngineKVFormat",
+) -> str:
     """Return a human-readable symbolic shape legend for the Engine KV format.
 
     Uses short names matching the ``EngineKVFormat`` enum convention:
@@ -105,7 +103,7 @@ def get_engine_kv_shape_description(engine_kv_format: "lmc_ops.EngineKVFormat") 
         return f"Unknown ({engine_kv_format})"
 
 
-def get_attention_backend(engine_kv_format: "lmc_ops.EngineKVFormat") -> str:
+def get_attention_backend(engine_kv_format: "lmcache_native.EngineKVFormat") -> str:
     """Return a representative attention-backend label for the format.
 
     Diagnostic only. A format may be produced by several (engine,
@@ -120,7 +118,7 @@ def get_attention_backend(engine_kv_format: "lmc_ops.EngineKVFormat") -> str:
 
 
 def get_concrete_engine_kv_shape(
-    kv_caches: DiscoverableKVCache, engine_kv_format: "lmc_ops.EngineKVFormat"
+    kv_caches: DiscoverableKVCache, engine_kv_format: "lmcache_native.EngineKVFormat"
 ) -> str:
     """Return the shape with actual numeric values substituted.
 
@@ -134,8 +132,8 @@ def get_concrete_engine_kv_shape(
 
 
 def get_concrete_engine_kv_shape_from_shape_desc(
-    shape_desc: "lmc_ops.PageBufferShapeDesc",
-    engine_kv_format: "lmc_ops.EngineKVFormat",
+    shape_desc: PageBufferShapeDesc,
+    engine_kv_format: "lmcache_native.EngineKVFormat",
 ) -> str:
     """Return the concrete shape for a single kernel group's ``shape_desc``.
 
@@ -172,7 +170,7 @@ def get_concrete_engine_kv_shape_from_shape_desc(
         return f"Unknown ({engine_kv_format})"
 
 
-def legible_print_engine_kv_format(engine_kv_format: "lmc_ops.EngineKVFormat"):
+def legible_print_engine_kv_format(engine_kv_format: "lmcache_native.EngineKVFormat"):
     """
     Print the Engine KV Format in a legible way
     """
@@ -189,7 +187,7 @@ def normalize_kv_and_discover_format(
     kv_caches: DiscoverableKVCache,
     serving_engine: EngineType,
     layout_hints: "LayoutHints | None" = None,
-) -> tuple["lmc_ops.EngineKVFormat", DiscoverableKVCache]:
+) -> tuple["lmcache_native.EngineKVFormat", DiscoverableKVCache]:
     """Normalize ``kv_caches`` into canonical form and discover its Engine KV format.
 
     Thin wrapper over
@@ -214,7 +212,7 @@ def normalize_and_discover_per_layer_formats(
     layer_index_groups: "Sequence[Sequence[int]]",
     serving_engine: EngineType,
     layout_hints: "LayoutHints | None" = None,
-) -> "tuple[DiscoverableKVCache, list[lmc_ops.EngineKVFormat]]":
+) -> "tuple[DiscoverableKVCache, list[lmcache_native.EngineKVFormat]]":
     """Normalize the KV caches and return one Engine KV format per layer.
 
     Reports each layer's own format, so models whose layers do not all share one
@@ -243,7 +241,7 @@ def normalize_and_discover_per_layer_formats(
         whole_format, whole_normalized = detect_format(
             kv_caches, serving_engine, layout_hints
         )
-        if not lmc_ops.is_layer_list(whole_format):
+        if not lmcache_native.is_layer_list(whole_format):
             return whole_normalized, [whole_format] * get_num_layers(
                 whole_normalized, whole_format
             )
@@ -251,7 +249,9 @@ def normalize_and_discover_per_layer_formats(
     # Per-layer list: re-detect per engine group, split by tensor shape so a group
     # that mixes layouts gets the right format per layer.
     groups = layer_index_groups or [range(len(kv_caches))]
-    detected: dict[int, tuple[DiscoverableKVCache, "lmc_ops.EngineKVFormat"]] = {}
+    detected: dict[
+        int, tuple[DiscoverableKVCache, "lmcache_native.EngineKVFormat"]
+    ] = {}
     for indices in groups:
         layers_by_shape: dict[Hashable, list[int]] = {}
         for i in indices:
@@ -281,14 +281,14 @@ def normalize_and_discover_per_layer_formats(
 
 
 def get_num_layers(
-    kv_caches: DiscoverableKVCache, engine_kv_format: "lmc_ops.EngineKVFormat"
+    kv_caches: DiscoverableKVCache, engine_kv_format: "lmcache_native.EngineKVFormat"
 ) -> int:
     """Return the number of layers from ``kv_caches``."""
     return get_spec(kv_caches, engine_kv_format).num_layers()
 
 
 def get_num_blocks(
-    kv_caches: DiscoverableKVCache, engine_kv_format: "lmc_ops.EngineKVFormat"
+    kv_caches: DiscoverableKVCache, engine_kv_format: "lmcache_native.EngineKVFormat"
 ) -> int:
     """Return the number of blocks from ``kv_caches``.
 
@@ -300,7 +300,7 @@ def get_num_blocks(
 
 def get_block_size(
     kv_caches: DiscoverableKVCache,
-    engine_kv_format: "lmc_ops.EngineKVFormat",
+    engine_kv_format: "lmcache_native.EngineKVFormat",
     layer_idx: int = 0,
 ) -> int:
     """Return the block size (tokens per block) for layer ``layer_idx``.
@@ -321,14 +321,14 @@ def get_block_size(
     "the MP transfer path reads geometry from a per-group PageBufferShapeDesc instead"
 )
 def get_page_buffer_size(
-    kv_caches: DiscoverableKVCache, engine_kv_format: "lmc_ops.EngineKVFormat"
+    kv_caches: DiscoverableKVCache, engine_kv_format: "lmcache_native.EngineKVFormat"
 ) -> int:
     """Return the page buffer size (num_blocks * block_size) from ``kv_caches``."""
     return get_spec(kv_caches, engine_kv_format).page_buffer_size()
 
 
 def get_kv_size(
-    kv_caches: DiscoverableKVCache, engine_kv_format: "lmc_ops.EngineKVFormat"
+    kv_caches: DiscoverableKVCache, engine_kv_format: "lmcache_native.EngineKVFormat"
 ) -> int:
     """Return the K/V axis size (2 for split K/V, 1 for fused)."""
     return get_spec(kv_caches, engine_kv_format).kv_size()
@@ -336,7 +336,7 @@ def get_kv_size(
 
 def get_num_heads(
     kv_caches: DiscoverableKVCache,
-    engine_kv_format: "lmc_ops.EngineKVFormat",
+    engine_kv_format: "lmcache_native.EngineKVFormat",
     layer_idx: int = 0,
 ) -> int:
     """Return the number of heads for a layer (defaults to layer 0)."""
@@ -345,7 +345,7 @@ def get_num_heads(
 
 def get_hidden_dim_size(
     kv_caches: DiscoverableKVCache,
-    engine_kv_format: "lmc_ops.EngineKVFormat",
+    engine_kv_format: "lmcache_native.EngineKVFormat",
     layer_idx: int = 0,
 ) -> int:
     """Return the hidden dimension for a layer (defaults to layer 0)."""
@@ -354,7 +354,7 @@ def get_hidden_dim_size(
 
 def get_head_size(
     kv_caches: DiscoverableKVCache,
-    engine_kv_format: "lmc_ops.EngineKVFormat",
+    engine_kv_format: "lmcache_native.EngineKVFormat",
     layer_idx: int = 0,
 ) -> int:
     """Return the head size for a layer (defaults to layer 0)."""
@@ -362,14 +362,14 @@ def get_head_size(
 
 
 def get_tokens_per_layer(
-    kv_caches: DiscoverableKVCache, engine_kv_format: "lmc_ops.EngineKVFormat"
+    kv_caches: DiscoverableKVCache, engine_kv_format: "lmcache_native.EngineKVFormat"
 ) -> int:
     """Return the number of tokens per layer (num_blocks * block_size)."""
     return get_spec(kv_caches, engine_kv_format).tokens_per_layer()
 
 
 def get_elements_per_layer(
-    kv_caches: DiscoverableKVCache, engine_kv_format: "lmc_ops.EngineKVFormat"
+    kv_caches: DiscoverableKVCache, engine_kv_format: "lmcache_native.EngineKVFormat"
 ) -> int:
     """Return the number of elements per layer (both K and V for non-MLA)."""
     return get_spec(kv_caches, engine_kv_format).elements_per_layer()
@@ -377,7 +377,7 @@ def get_elements_per_layer(
 
 def get_dtype(
     kv_caches: DiscoverableKVCache,
-    engine_kv_format: "lmc_ops.EngineKVFormat",
+    engine_kv_format: "lmcache_native.EngineKVFormat",
     layer_idx: int = 0,
 ) -> torch.dtype:
     """Return the dtype for a layer (defaults to layer 0)."""
@@ -386,7 +386,7 @@ def get_dtype(
 
 def get_group_data_ptrs(
     kv_caches: DiscoverableKVCache,
-    engine_kv_format: "lmc_ops.EngineKVFormat",
+    engine_kv_format: "lmcache_native.EngineKVFormat",
     layer_indices: list[int],
 ) -> list[int]:
     """Return device pointers for a group of layers in kernel-expected order.
@@ -409,28 +409,28 @@ def get_group_data_ptrs(
 
 
 def assert_is_vllm_flash_attn_or_flash_infer(
-    engine_kv_format: "lmc_ops.EngineKVFormat",
+    engine_kv_format: "lmcache_native.EngineKVFormat",
 ):
     """
     Ensure that we have an Engine KV Cache Format
     that is either vLLM's flash attention or flash infer.
     """
     assert engine_kv_format in (
-        lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
-        lmc_ops.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS,
-        lmc_ops.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS,
-        lmc_ops.EngineKVFormat.NL_X_NB_TWO_NH_BS_HS,
+        lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
+        lmcache_native.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS,
+        lmcache_native.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS,
+        lmcache_native.EngineKVFormat.NL_X_NB_TWO_NH_BS_HS,
         # Blocks-first fused K/V (HND and NHD): per-layer non-MLA layouts that
         # share this transfer path even though they are not literally flash-*.
-        lmc_ops.EngineKVFormat.NL_X_NB_NH_BS_TWO_HS,
-        lmc_ops.EngineKVFormat.NL_X_NB_BS_NH_TWO_HS,
-        lmc_ops.EngineKVFormat.NL_X_NB_NH_BS_CS,
-        lmc_ops.EngineKVFormat.NL_X_NB_BS_NH_CS,
+        lmcache_native.EngineKVFormat.NL_X_NB_NH_BS_TWO_HS,
+        lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_TWO_HS,
+        lmcache_native.EngineKVFormat.NL_X_NB_NH_BS_CS,
+        lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_CS,
     )
 
 
 def assert_is_vllm_mla_or_flash_attn_or_flash_infer(
-    engine_kv_format: "lmc_ops.EngineKVFormat",
+    engine_kv_format: "lmcache_native.EngineKVFormat",
 ) -> None:
     """
     Ensure that we have an Engine KV Cache Format that is either
@@ -447,12 +447,12 @@ def assert_is_vllm_mla_or_flash_attn_or_flash_infer(
         AssertionError: If *engine_kv_format* is not one of the accepted formats.
     """
     assert engine_kv_format in (
-        lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
-        lmc_ops.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS,
-        lmc_ops.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS,
-        lmc_ops.EngineKVFormat.NL_X_NB_TWO_NH_BS_HS,
-        lmc_ops.EngineKVFormat.NL_X_NB_BS_HS,
-        lmc_ops.EngineKVFormat.NL_X_NB_BSV_BSS,
+        lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
+        lmcache_native.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS,
+        lmcache_native.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS,
+        lmcache_native.EngineKVFormat.NL_X_NB_TWO_NH_BS_HS,
+        lmcache_native.EngineKVFormat.NL_X_NB_BS_HS,
+        lmcache_native.EngineKVFormat.NL_X_NB_BSV_BSS,
     )
 
 
@@ -488,15 +488,15 @@ def get_device(kv_caches: DiscoverableKVCache) -> torch.device:
 # properly-tested branch when a concrete use case lands.
 _BLOCK_AXIS_FORMATS: frozenset = frozenset(
     {
-        lmc_ops.EngineKVFormat.NL_X_NB_BS_HS,
-        lmc_ops.EngineKVFormat.NL_X_NB_BSV_BSS,
+        lmcache_native.EngineKVFormat.NL_X_NB_BS_HS,
+        lmcache_native.EngineKVFormat.NL_X_NB_BSV_BSS,
     }
 )
 
 
 def resolve_block_stride_and_log_layout(
     kv_caches: DiscoverableKVCache,
-    engine_kv_format: "lmc_ops.EngineKVFormat",
+    engine_kv_format: "lmcache_native.EngineKVFormat",
     layer_idx: int,
     group_idx: int,
 ) -> Optional[int]:
@@ -539,14 +539,14 @@ def resolve_block_stride_and_log_layout(
         # - SGL MHA: outer list is K/V (length 2), inner list is
         #   per-layer; K & V share shape/stride by construction.
         # - Other formats: ``kv_caches`` is already a per-layer list.
-        if lmc_ops.is_cross_layer(engine_kv_format):
+        if lmcache_native.is_cross_layer(engine_kv_format):
             if not isinstance(kv_caches, torch.Tensor):
                 raise TypeError(
                     "Cross-layer EngineKVFormat expects a single backing "
                     f"torch.Tensor, got {type(kv_caches).__name__}."
                 )
             return kv_caches
-        if lmc_ops.is_kv_list(engine_kv_format):
+        if lmcache_native.is_kv_list(engine_kv_format):
             return kv_caches[0][layer_idx]  # type: ignore[index,return-value]
         return kv_caches[layer_idx]  # type: ignore[index,return-value]
 
@@ -616,13 +616,13 @@ def resolve_block_stride_and_log_layout(
 
 def make_page_buffer_shape_desc(
     kv_caches: DiscoverableKVCache,
-    engine_kv_format: "lmc_ops.EngineKVFormat",
+    engine_kv_format: "lmcache_native.EngineKVFormat",
     layer_idx: int,
     num_layers_in_group: int,
     num_blocks: int,
     block_size: int,
     block_stride_elems: Optional[int] = None,
-) -> "lmc_ops.PageBufferShapeDesc":
+) -> PageBufferShapeDesc:
     """Build a :class:`PageBufferShapeDesc` from a representative layer.
 
     Args:
@@ -647,14 +647,14 @@ def make_page_buffer_shape_desc(
     Returns:
         A populated ``PageBufferShapeDesc``.
     """
-    desc = lmc_ops.PageBufferShapeDesc()
+    desc = device_ops.PageBufferShapeDesc()
     desc.kv_size = get_kv_size(kv_caches, engine_kv_format)
     desc.nl = num_layers_in_group
     desc.nb = num_blocks
     desc.bs = block_size
     desc.nh = (
         1
-        if is_mla(engine_kv_format)
+        if lmcache_native.is_mla(engine_kv_format)
         else get_num_heads(kv_caches, engine_kv_format, layer_idx)
     )
     desc.hs = get_head_size(kv_caches, engine_kv_format, layer_idx)
@@ -692,7 +692,7 @@ def _get_head_size_view(
     kv_cache_layer: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]],
     *,
     use_mla: bool,
-    engine_kv_format: Optional["lmc_ops.EngineKVFormat"] = None,
+    engine_kv_format: Optional["lmcache_native.EngineKVFormat"] = None,
 ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
     """
     Returns flattened views for index_copy/index_select.
@@ -735,7 +735,7 @@ def _get_head_size_view(
 
     # If we have the format enum, decode explicitly.
     if engine_kv_format is not None:
-        if engine_kv_format == lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS:
+        if engine_kv_format == lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS:
             # per-layer: [2, NB, BS, NH, HS]
             if t.shape[0] != 2:
                 raise ValueError(
@@ -743,7 +743,7 @@ def _get_head_size_view(
                 )
             k, v = t[0], t[1]  # [NB,BS,NH,HS]
 
-        elif engine_kv_format == lmc_ops.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS:
+        elif engine_kv_format == lmcache_native.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS:
             # per-layer: [NB, 2, BS, NH, HS]
             if t.shape[1] != 2:
                 raise ValueError(

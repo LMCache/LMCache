@@ -24,8 +24,10 @@ import torch
 from lmcache.v1.gpu_connector.rbln_connector import VLLMPagedMemRBLNConnectorV2
 from lmcache.v1.memory_allocators.tensor_memory_allocator import TensorMemoryAllocator
 from lmcache.v1.memory_management import MemoryFormat
-from lmcache.v1.platform.ops_types import EngineKVFormat
 from lmcache.v1.platform.rbln.kv_layout import squeeze_singleton_axis
+import lmcache.lmcache_native as lmcache_native
+
+EngineKVFormat = lmcache_native.EngineKVFormat
 
 NUM_LAYERS = 3
 NUM_BLOCKS = 6

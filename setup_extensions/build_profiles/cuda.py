@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """CUDA GPU backend profile.
 
-Builds the ``lmcache.c_ops`` extension containing memory kernels, lookup
+Builds the ``lmcache.cuda_ops`` extension containing memory kernels, lookup
 kernels, Cascade-AC encode/decode, position kernels, and event recorders.
 """
 
 # Standard
+from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 import os
 import shutil
@@ -18,6 +19,7 @@ if TYPE_CHECKING:
 from setup_extensions.build_profiles import BuildProfile
 
 ENABLE_CXX11_ABI = os.environ.get("ENABLE_CXX11_ABI", "1") == "1"
+CSRC_DIR = str(Path(__file__).resolve().parents[2] / "csrc")
 
 
 class CudaProfile(BuildProfile):
@@ -48,23 +50,24 @@ class CudaProfile(BuildProfile):
             else "-D_GLIBCXX_USE_CXX11_ABI=0"
         )
         cuda_sources = [
-            "csrc/pybind.cpp",
-            "csrc/mem_kernels.cu",
-            "csrc/mp_mem_kernels.cu",
-            "csrc/blend_kernels.cu",
-            "csrc/cal_cdf.cu",
-            "csrc/ac_enc.cu",
-            "csrc/ac_dec.cu",
-            "csrc/pos_kernels.cu",
-            "csrc/mem_alloc.cpp",
-            "csrc/utils.cpp",
-            "csrc/event_recorder.cpp",
-            "csrc/completion_recorder.cpp",
+            "csrc/cuda/pybind.cpp",
+            "csrc/cuda/mem_kernels.cu",
+            "csrc/cuda/mp_mem_kernels.cu",
+            "csrc/cuda/blend_kernels.cu",
+            "csrc/cuda/cal_cdf.cu",
+            "csrc/cuda/ac_enc.cu",
+            "csrc/cuda/ac_dec.cu",
+            "csrc/cuda/pos_kernels.cu",
+            "csrc/cuda/mem_alloc.cpp",
+            "csrc/cuda/utils.cpp",
+            "csrc/cuda/event_recorder.cpp",
+            "csrc/cuda/completion_recorder.cpp",
         ]
         ext_modules = [
             cpp_extension.CUDAExtension(
-                "lmcache.c_ops",
+                "lmcache.cuda_ops",
                 sources=cuda_sources,
+                include_dirs=[CSRC_DIR],
                 extra_compile_args={
                     "cxx": [flag_cxx_abi, "-std=c++17"],
                     "nvcc": [flag_cxx_abi],

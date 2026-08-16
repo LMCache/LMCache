@@ -59,9 +59,14 @@ Options
      - Token hash algorithm for pin key resolution; must equal the MP servers'
        ``--hash-algorithm``. ``blake3`` (default) is self-contained; other
        algorithms require vLLM importable in the coordinator.
+   * - ``--enable-blend-lookup``
+     - Index stored chunk content so ``POST /directory/blend-lookup`` can serve
+       fleet CacheBlend reuse. Off by default: hashing content costs CPU on
+       every store and is useless without CacheBlend. Also requires the MP
+       servers' ``--coordinator-event-reporting``, which feeds the index.
    * - ``--blend-probe-stride N``
      - Positions between CacheBlend match probes; ``1`` probes every offset
-       for full recall (default: ``1``).
+       for full recall (default: ``1``). Ignored unless blend lookup is on.
    * - ``--timeout-keep-alive SECS``
      - Seconds the HTTP server keeps idle connections open before closing
        them. Must be greater than the MP servers' heartbeat interval
@@ -76,21 +81,14 @@ Every flag is optional. Unset flags fall back to the
 ``LMCACHE_MP_COORDINATOR_*`` environment variables (``HOST``, ``PORT``,
 ``INSTANCE_TIMEOUT``, ``HEALTH_CHECK_INTERVAL``, ``EVICTION_CHECK_INTERVAL``,
 ``EVICTION_RATIO``, ``TRIGGER_WATERMARK``, ``CHUNK_SIZE``, ``HASH_ALGORITHM``,
-``BLEND_PROBE_STRIDE``, ``TIMEOUT_KEEP_ALIVE``), and then to the built-in
-defaults. A supplied flag always overrides the matching env-derived value, so
-env-only deployments keep working unchanged.
+``ENABLE_BLEND_LOOKUP``, ``BLEND_PROBE_STRIDE``, ``TIMEOUT_KEEP_ALIVE``), and
+then to the built-in defaults. A supplied flag always overrides the matching
+env-derived value, so env-only deployments keep working unchanged.
 
-A second set of env-only knobs controls the startup L2 resync —
-``LMCACHE_MP_COORDINATOR_ENABLE_STARTUP_RESYNC`` (default ``True``),
-``LMCACHE_MP_COORDINATOR_RESYNC_POLL_INTERVAL`` (``1``),
-``LMCACHE_MP_COORDINATOR_RESYNC_MAX_WAIT`` (``60``), and
-``LMCACHE_MP_COORDINATOR_RESYNC_PAGE_SIZE`` (``1000``). See
-:doc:`/mp/coordinator` for the boot-time resync flow and the active
-eviction loop.
+See :doc:`/mp/coordinator` for the active eviction loop.
 
 The coordinator drives fleet-wide L2 eviction by calling each MP
-server's ``DELETE /l2`` endpoint, and resync paginates ``GET /l2/keys``
-on a registered MP server. Both endpoints are documented at
+server's ``DELETE /l2`` endpoint, documented at
 :ref:`mp-http-l2-keys-api`.
 
 See :doc:`/mp/coordinator` for the coordinator's architecture, registration

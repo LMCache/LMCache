@@ -209,8 +209,8 @@ class StatusListResponse(BaseModel):
 # -- Key directory -----------------------------------------------------------
 
 
-class DirectoryEventsRequest(BaseModel):
-    """Body of ``POST /directory/events``.
+class CacheEventsRequest(BaseModel):
+    """Body of ``POST /events``.
 
     Attributes:
         batches: Event batches to apply, in emission order per instance.
@@ -239,8 +239,8 @@ class DirectoryEventsRequest(BaseModel):
         return value
 
 
-class DirectoryEventsResponse(BaseModel):
-    """Reply to ``POST /directory/events``.
+class CacheEventsResponse(BaseModel):
+    """Reply to ``POST /events``.
 
     Attributes:
         applied: Batches applied to the directory.
@@ -374,78 +374,16 @@ class DirectoryListResponse(BaseModel):
     keys: list[DirectoryKeyInfo] = Field(default_factory=list)
 
 
-# -- Global CacheBlend fingerprint directory ------------------------------
+class BlendLookupRequest(BaseModel):
+    """Body of ``POST /directory/blend-lookup``.
 
-
-class StoreRangeModel(BaseModel):
-    """Wire form of one published stored token range (see ``StoreRange``).
-
-    The coordinator chunks ``tokens`` at its chunk size and hashes each chunk;
-    chunk ``i`` maps to ``object_keys[i]`` at ``old_st_base + i * chunk_size``.
+    Unlike ``/directory/lookup`` the query need not be a prefix.
 
     Attributes:
-        model_scope: Reuse scope (the model name).
-        tokens: The stored tokens (``token_ids[start:end]``).
-        object_keys: Shared-L2 storage key (hex) per chunk, in order.
-        old_st_base: Token position of the range's first token.
-    """
-
-    model_scope: str
-    tokens: list[int] = Field(default_factory=list)
-    object_keys: list[str] = Field(default_factory=list)
-    old_st_base: int = Field(ge=0)
-
-
-class BlendFingerprintRequest(BaseModel):
-    """Body of ``POST /blend/fingerprints``: register stored ranges.
-
-    Attributes:
-        ranges: Stored token ranges to register (idempotent).
-    """
-
-    ranges: list[StoreRangeModel] = Field(default_factory=list)
-
-
-class BlendFingerprintResponse(BaseModel):
-    """Reply to ``POST /blend/fingerprints``.
-
-    Attributes:
-        inserted: Number of fingerprints newly registered.
-    """
-
-    inserted: int
-
-
-class BlendEvictRequest(BaseModel):
-    """Body of ``DELETE /blend/fingerprints``: evict by storage key.
-
-    Attributes:
-        object_keys: ``object_key`` values to evict.
-    """
-
-    object_keys: list[str] = Field(default_factory=list)
-
-
-class BlendEvictResponse(BaseModel):
-    """Reply to ``DELETE /blend/fingerprints``.
-
-    Attributes:
-        removed: Number of fingerprint entries evicted.
-    """
-
-    removed: int
-
-
-class BlendMatchRequest(BaseModel):
-    """Body of ``POST /blend/match``.
-
-    Attributes:
-        model_scope: Scope to match within.
-        tokens_b64: The request tokens, packed via :func:`encode_tokens`
+        tokens_b64: The query tokens, packed via :func:`encode_tokens`
             (base64 little-endian ``uint32``).
     """
 
-    model_scope: str
     tokens_b64: str = ""
 
     @field_validator("tokens_b64")
@@ -453,9 +391,8 @@ class BlendMatchRequest(BaseModel):
     def _validate_tokens_b64(cls, value: str) -> str:
         """Reject a malformed token buffer at request validation.
 
-        Without this, ``decode_tokens`` would raise ``ValueError`` inside the
-        route handler, which FastAPI surfaces as a 500 (server error) for what
-        is really bad client input. Validating here returns a 422 instead.
+        Validating here returns 422 rather than the 500 a decode failure
+        inside the handler would produce.
 
         Args:
             value: The base64 ``tokens_b64`` field.
@@ -464,35 +401,37 @@ class BlendMatchRequest(BaseModel):
             The unchanged value once it is confirmed decodable.
 
         Raises:
-            ValueError: If ``value`` is not valid base64 or not a whole number
-                of ``uint32`` tokens (surfaced by FastAPI as 422).
+            ValueError: If ``value`` is not valid base64 or not a whole
+                number of ``uint32`` tokens.
         """
         decode_tokens(value)
         return value
 
 
-class GlobalMatchModel(BaseModel):
-    """Wire form of one matched chunk (see ``GlobalMatch``).
+class BlendMatchModel(BaseModel):
+    """Wire form of one blend match (see ``BlendMatch``).
 
     Attributes:
-        object_key: Shared-L2 storage key of the matched chunk.
-        old_st: Token position in the stored sequence (re-RoPE source).
-        cur_st: Token position in the request (re-RoPE target).
+        chunk_hash: Hex of the matched chunk's ``ObjectKey.chunk_hash``.
+        old_st: Its position in the sequence it was stored under
+            (re-RoPE source).
+        cur_st: Its position in the query (re-RoPE target).
     """
 
-    object_key: str
+    chunk_hash: str
     old_st: int
     cur_st: int
 
 
-class BlendMatchResponse(BaseModel):
-    """Reply to ``POST /blend/match``.
+class BlendLookupResponse(BaseModel):
+    """Reply to ``POST /directory/blend-lookup``.
 
     Attributes:
-        matches: Matched chunks, ascending by ``cur_st``.
+        matches: Matched chunks, ascending by ``cur_st``. They may
+            overlap in the query; the caller resolves overlaps.
     """
 
-    matches: list[GlobalMatchModel]
+    matches: list[BlendMatchModel] = Field(default_factory=list)
 
 
 class PrefetchRequest(BaseModel):

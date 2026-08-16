@@ -13,11 +13,11 @@ import torch
 # First Party
 from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.utils import normalize_and_discover_per_layer_formats
-import lmcache.c_ops as lmc_ops
+import lmcache.lmcache_native as lmcache_native
 
 NB, NL, BS, NH, HS = 7, 5, 3, 2, 4
 DT = torch.float16
-F = lmc_ops.EngineKVFormat
+F = lmcache_native.EngineKVFormat
 
 # The vLLM CPU-HND safeguard forces HND regardless of hint on a CPU host; bypass
 # it so the hint-driven NHD branch is exercised on any host.

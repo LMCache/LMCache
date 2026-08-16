@@ -24,7 +24,9 @@ from tests.v1.utils import (
     check_paged_kv_cache_equal,
     generate_kv_cache_paged_list_tensors,
 )
-import lmcache.c_ops as lmc_ops
+import lmcache.lmcache_native as lmcache_native
+
+pytestmark = pytest.mark.musa
 
 
 def _skip_if_no_musa() -> None:
@@ -76,8 +78,8 @@ def _patch_musa_connector_attrs(
     block_size: int,
     num_heads: int,
     head_size: int,
-    engine_kv_format: lmc_ops.EngineKVFormat = (
-        lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
+    engine_kv_format: lmcache_native.EngineKVFormat = (
+        lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
     ),
 ) -> None:
     """Patch connector layout discovery so transfer logic can run on CPU."""
@@ -227,7 +229,7 @@ def test_musa_connector_rejects_unsupported_kv_layout(
         block_size=block_size,
         num_heads=num_heads,
         head_size=head_size,
-        engine_kv_format=lmc_ops.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS,
+        engine_kv_format=lmcache_native.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS,
     )
 
     kvcaches_dst = [
