@@ -320,6 +320,21 @@ always returns `False` from `request_finished`, allowing vLLM to return the
 request's blocks to its prefix-cache free queue. The configured policy decides
 when those buffered operations leave the queue.
 
+Scheduler-side lazy-offload integration is isolated behind
+`LazyOffloadManager`. `LMCacheMPConnector` forwards scheduler, request, and
+store-receipt lifecycle events to this facade and applies its explicit
+`LazyOffloadActions` (stores to submit and sessions to end). The manager owns
+policy dispatch, pressure-signal translation, metadata coalescing, block
+pin/unpin bookkeeping, and failure handling. Consequently a policy change does
+not add policy-specific branches to the connector.
+
+| Layer | Responsibility |
+|-------|----------------|
+| `LMCacheMPConnector` | Forward vLLM lifecycle events and apply returned actions |
+| `LazyOffloadManager` | Execute scheduler-side lazy-offload orchestration and GPU block side effects |
+| `LazyOffloadPendingStore` | Normalize configuration and dispatch to the selected queue policy |
+| `EvictionAwareStoreQueue` / `FIFOOffloadPolicy` | Make buffering and drain decisions |
+
 Two policies are available:
 
 - `EVICTION_AWARE` (opt-in) reads the free queue in LRU order and releases an
@@ -333,7 +348,7 @@ Two policies are available:
   It drains completed requests after the configured request threshold and
   validates their block hashes immediately before submission.
 
-For either policy, the connector coalesces each request's released chunks into
+For either policy, the manager coalesces each request's released chunks into
 one store operation, calls `BlockPool.touch()` to pin its surviving blocks,
 and records those block ids until every worker rank reports completion. The
 completion receipt balances the pins with `free_blocks(prepend=True)`: a block
@@ -366,10 +381,11 @@ connector therefore fails construction when lazy offload is enabled without
 1. `GetStoreMetadata` produces each newly storable contiguous token range.
 2. The pending-store facade snapshots its block hashes and admits it to the
    selected policy instead of sending it to the worker immediately.
-3. On a token-producing scheduler step, the connector observes allocation
-   pressure and drains the selected policy once.
-4. Released operations are validated, pinned, coalesced per request, and added
-   to that step's connector metadata.
+3. On a token-producing scheduler step, the connector forwards the scheduler
+   output to `LazyOffloadManager`, which observes allocation pressure and
+   drains the selected policy once.
+4. The manager validates, pins, and coalesces released operations per request,
+   then returns them as explicit actions for the connector metadata.
 5. Worker completion and failure metadata returns on later token-producing
    steps. The scheduler unpins only after all ranks have reported.
 6. A finished request's LMCache session ends when its pending queue is dropped

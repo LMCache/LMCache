@@ -39,15 +39,15 @@ from vllm.v1.request import RequestStatus  # noqa: E402
 from lmcache.integration.vllm import (  # noqa: E402
     lazy_offload_pending_store as pending_store_mod,
 )
-from lmcache.integration.vllm.lazy_offload_pending_store import (  # noqa: E402
-    AddOutcome,
-    LazyOffloadPendingStore,
-)
-from lmcache.integration.vllm.lmcache_mp_connector import (  # noqa: E402
-    LMCacheMPConnector,
+from lmcache.integration.vllm.lazy_offload_manager import (  # noqa: E402
+    LazyOffloadManager,
     _allocated_block_ids,
     _coalesce_store_metadata,
     _count_new_blocks,
+)
+from lmcache.integration.vllm.lazy_offload_pending_store import AddOutcome  # noqa: E402
+from lmcache.integration.vllm.lmcache_mp_connector import (  # noqa: E402
+    LMCacheMPConnector,
 )
 from lmcache.integration.vllm.lmcache_mp_metadata import (  # noqa: E402
     LMCacheMPConnectorMetadata,
@@ -256,7 +256,7 @@ class _Harness:
     connector: LMCacheMPConnector
     pool: _FakeBlockPool
     adapter: _FakeSchedulerAdapter
-    pending_store: LazyOffloadPendingStore
+    manager: LazyOffloadManager
 
 
 def _make_lazy_connector(
@@ -272,22 +272,24 @@ def _make_lazy_connector(
     connector._group_tokens_per_block = group_tokens_per_block or [TOKENS_PER_BLOCK]
     connector._hit_alignment_tokens = TOKENS_PER_BLOCK
     pool = _FakeBlockPool(num_blocks)
-    pending_store = LazyOffloadPendingStore(
+    adapter = _FakeSchedulerAdapter(expected_worker_count)
+    manager = LazyOffloadManager(
         {
             "lmcache.mp.lazy_offload_policy": "EVICTION_AWARE",
             **(extra_config or {}),
-        }
+        },
+        connector._group_tokens_per_block,
+        adapter,
     )
-    pending_store.bind_gpu_block_pool(pool)  # type: ignore[arg-type]
-    connector._pending_store = pending_store
+    manager.bind_block_pool(pool)  # type: ignore[arg-type]
+    connector._lazy_offload_manager = manager
     connector._gpu_block_pool = pool  # type: ignore[assignment]
-    adapter = _FakeSchedulerAdapter(expected_worker_count)
     connector.scheduler_adapter = adapter  # type: ignore[assignment]
     return _Harness(
         connector=connector,
         pool=pool,
         adapter=adapter,
-        pending_store=pending_store,
+        manager=manager,
     )
 
 
@@ -304,7 +306,7 @@ def _admit_op(
             if harness.pool.blocks[bid].block_hash is None:
                 harness.pool.set_hash(bid, f"hash-{bid}".encode())
     meta = _make_store_metadata(request_id, group_block_ids, start, end)
-    harness.pending_store.add(meta)
+    harness.manager.add_store_candidate(meta)
     return meta
 
 
@@ -318,7 +320,11 @@ def _drain(
     scheduler_output = _make_scheduler_output(
         total_num_scheduled_tokens, new_request_block_ids
     )
-    harness.connector._drain_lazy_offload(scheduler_output, metadata)
+    actions = harness.manager.on_scheduler_step(scheduler_output)  # type: ignore[arg-type]
+    for store_metadata in actions.stores_to_submit:
+        metadata.add_request_metadata(store_metadata)
+    for request_id in actions.sessions_to_end:
+        harness.adapter.end_session(request_id)
     return metadata
 
 
@@ -449,7 +455,6 @@ def test_drain_under_pressure_pins_and_emits() -> None:
     assert harness.pool.touched == [[1, 2]]
     # Pinned blocks left the free queue.
     assert harness.pool.get_num_free_blocks() == 0
-    assert harness.pending_store.get_request_gpu_block_ids("req") == [1, 2]
 
 
 def test_drain_pressure_from_gross_allocation() -> None:
@@ -505,7 +510,6 @@ def test_drain_coalesces_one_request_into_one_store_op() -> None:
     assert merged.op.block_ids == [[1, 2, 3, 4]]
     # All four blocks are pinned for the single in-flight store.
     assert sorted(bid for pin in harness.pool.touched for bid in pin) == [1, 2, 3, 4]
-    assert harness.pending_store.get_request_gpu_block_ids("req") == [1, 2, 3, 4]
 
 
 def test_drain_multi_group_op_pins_all_groups() -> None:
@@ -672,8 +676,9 @@ def test_receipt_unpins_to_free_queue_head() -> None:
 
     assert harness.pool.freed == [([5, 6], True)]
     assert harness.pool.free_block_ids() == [5, 6, 10, 11]
-    # The pin bookkeeping is cleared with the receipt.
-    assert harness.pending_store.get_request_gpu_block_ids("req") == []
+    # A duplicate receipt cannot unpin the blocks a second time.
+    _report_store_complete(harness, "req")
+    assert harness.pool.freed == [([5, 6], True)]
 
 
 def test_receipt_for_running_request_keeps_session() -> None:
@@ -751,16 +756,16 @@ def test_update_connector_output_ignores_foreign_metadata() -> None:
     assert harness.pool.freed == []
 
 
-def test_update_connector_output_requires_bound_pool() -> None:
-    harness = _make_lazy_connector()
-    harness.connector._gpu_block_pool = None
-    output = SimpleNamespace(
-        kv_connector_worker_meta=LMCacheMPWorkerMetadata(
-            completed_store_requests={"req": 1}
-        )
+def test_store_results_require_bound_pool() -> None:
+    adapter = _FakeSchedulerAdapter()
+    manager = LazyOffloadManager(
+        {"lmcache.mp.lazy_offload_policy": "EVICTION_AWARE"},
+        [TOKENS_PER_BLOCK],
+        adapter,
     )
+
     with pytest.raises(ValueError, match="block pool"):
-        harness.connector.update_connector_output(output)
+        manager.on_store_results(set(), {"req": 1})
 
 
 ####
@@ -900,7 +905,9 @@ def test_drain_never_coalesces_across_dedup_hole() -> None:
     _report_store_complete(harness, "req-c")  # chunk 2 still pending under C
 
     _admit_op(harness, "req-b", [[1, 2]], 0, 32)
-    dedup = harness.pending_store.add(_make_store_metadata("req-b", [[3, 4]], 32, 64))
+    dedup = harness.manager.add_store_candidate(
+        _make_store_metadata("req-b", [[3, 4]], 32, 64)
+    )
     assert dedup is AddOutcome.DEDUPLICATED
     _admit_op(harness, "req-b", [[5, 6]], 64, 96)
 
@@ -1009,7 +1016,9 @@ def test_stale_batch_failure_receipt_spares_resumed_request() -> None:
     assert len(metadata) == 1, "post-resume op dropped by the stale failure"
     for bid in (5, 6):
         harness.pool.set_hash(bid, f"hash-{bid}".encode())
-    outcome = harness.pending_store.add(_make_store_metadata("req", [[5, 6]], 32, 64))
+    outcome = harness.manager.add_store_candidate(
+        _make_store_metadata("req", [[5, 6]], 32, 64)
+    )
     assert outcome is AddOutcome.BUFFERED
 
 
@@ -1282,7 +1291,7 @@ def test_fifo_drain_drops_chunk_with_unhashed_block() -> None:
     it (an evicted-and-reallocated block also reads None)."""
     harness = _make_fifo_harness()
     # Bypass the hash-seeding helper: blocks 1-2 keep block_hash=None.
-    harness.pending_store.add(_make_store_metadata("req", [[1, 2]], 0, 32))
+    harness.manager.add_store_candidate(_make_store_metadata("req", [[1, 2]], 0, 32))
     _finish_request(harness, "req")
 
     metadata = _drain(harness)

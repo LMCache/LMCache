@@ -44,17 +44,13 @@ from lmcache.integration.vllm.kv_cache_group_edits import (
 from lmcache.integration.vllm.kv_cache_groups import (
     create_engine_group_infos_from_vllm,
 )
-from lmcache.integration.vllm.lazy_offload_pending_store import (
-    LazyOffloadMode,
-    LazyOffloadPendingStore,
-)
+from lmcache.integration.vllm.lazy_offload_manager import LazyOffloadManager
 from lmcache.integration.vllm.lmcache_mp_metadata import (
     LMCacheMPConnectorMetadata,
     LMCacheMPRequestMetadata,
     LMCacheMPRequestState,
     LMCacheMPRequestTracker,
     LMCacheMPWorkerMetadata,
-    LoadStoreOp,
 )
 from lmcache.integration.vllm.utils import (
     mla_only,
@@ -145,100 +141,6 @@ def _has_preemption_reqs(scheduler_output: SchedulerOutput) -> bool:
         return True
 
     return False
-
-
-def _count_new_blocks(scheduler_output: SchedulerOutput) -> int:
-    """Count the GPU blocks newly allocated in this step, across all groups.
-
-    Args:
-        scheduler_output: The vLLM scheduler output for this step.
-
-    Returns:
-        The gross number of block ids handed out this step (new requests'
-        full allocations plus cached requests' appended blocks).
-    """
-    count = 0
-    for new_request in scheduler_output.scheduled_new_reqs:
-        count += sum(len(group_ids) for group_ids in new_request.block_ids)
-    for request_block_ids in scheduler_output.scheduled_cached_reqs.new_block_ids:
-        if request_block_ids:
-            count += sum(len(group_ids) for group_ids in request_block_ids)
-    return count
-
-
-def _allocated_block_ids(scheduler_output: SchedulerOutput) -> set[int]:
-    """Collect block ids allocated or resurrected in this scheduler step.
-
-    Args:
-        scheduler_output: The vLLM scheduler output for this step.
-
-    Returns:
-        Unique block ids handed to new or cached requests. The eviction-aware
-        queue uses them to revalidate only pending operations whose snapshots
-        may have changed.
-    """
-    block_ids: set[int] = set()
-    for new_request in scheduler_output.scheduled_new_reqs:
-        for group_ids in new_request.block_ids:
-            block_ids.update(group_ids)
-    for request_block_ids in scheduler_output.scheduled_cached_reqs.new_block_ids:
-        if request_block_ids:
-            for group_ids in request_block_ids:
-                block_ids.update(group_ids)
-    return block_ids
-
-
-def _coalesce_store_metadata(
-    request_metas: list[LMCacheMPRequestMetadata],
-) -> LMCacheMPRequestMetadata:
-    """Merge one request's contiguous store operations into a single one.
-
-    The worker adapter tracks one in-flight store future per request, so a
-    drained batch must be submitted as one operation. The inputs are the
-    request's pending ops in prefix order; their token ranges are contiguous
-    by construction (each starts where the previous one ended).
-
-    Args:
-        request_metas: Non-empty list of STORE metadata for one request, in
-            prefix order.
-
-    Returns:
-        A single store metadata covering the whole released range.
-
-    Raises:
-        ValueError: If the list is empty or the ranges are not contiguous.
-    """
-    if not request_metas:
-        raise ValueError("cannot coalesce an empty store batch")
-    if len(request_metas) == 1:
-        return request_metas[0]
-    first = request_metas[0]
-    last = request_metas[-1]
-    merged_block_ids: list[list[int]] = [list(group) for group in first.op.block_ids]
-    expected_start = first.op.end
-    for meta in request_metas[1:]:
-        if meta.op.start != expected_start:
-            raise ValueError(
-                f"non-contiguous store ops for request {first.request_id}: "
-                f"expected start {expected_start}, got {meta.op.start}"
-            )
-        expected_start = meta.op.end
-        for group_idx, group_ids in enumerate(meta.op.block_ids):
-            merged_block_ids[group_idx].extend(group_ids)
-    merged_op = LoadStoreOp(
-        # The last op carries the longest token snapshot, covering the
-        # whole merged range.
-        token_ids=last.op.token_ids,
-        block_ids=merged_block_ids,
-        start=first.op.start,
-        end=last.op.end,
-    )
-    return LMCacheMPRequestMetadata(
-        request_id=first.request_id,
-        direction="STORE",
-        op=merged_op,
-        cache_salt=first.cache_salt,
-    )
 
 
 def validate_mamba_step_alignment(vllm_config: VllmConfig) -> None:
@@ -452,12 +354,6 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
             # GPU block pool reference
             self._gpu_block_pool: "BlockPool | None" = None
-
-            # Initialize pending store for lazy offload mode
-            if self.lazy_offload:
-                self._pending_store = LazyOffloadPendingStore(
-                    vllm_config.kv_transfer_config.kv_connector_extra_config
-                )
         elif self.role == KVConnectorRole.WORKER:
             # Node routing: a worker connects only to its local LMCache server.
             # Global ranks are assigned to nodes in contiguous blocks:
@@ -534,6 +430,12 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                         f"a multiple of group {engine_group_idx} "
                         f"tokens_per_block {tokens_per_block}"
                     )
+            if self.lazy_offload:
+                self._lazy_offload_manager = LazyOffloadManager(
+                    vllm_config.kv_transfer_config.kv_connector_extra_config,
+                    self._group_tokens_per_block,
+                    self.scheduler_adapter,
+                )
 
     @property
     def role(self) -> KVConnectorRole:
@@ -808,7 +710,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             self.worker_adapter.shutdown()
         if hasattr(self, "scheduler_adapter"):
             if self.lazy_offload:
-                self._pending_store.log_final_stats()
+                self._lazy_offload_manager.log_final_stats()
             self.scheduler_adapter.shutdown()
         return None
 
@@ -829,7 +731,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             logger.info("Bind GPU block pool in LMCacheMPConnector scheduler")
             self._gpu_block_pool = gpu_block_pool
             if self.lazy_offload:
-                self._pending_store.bind_gpu_block_pool(gpu_block_pool)
+                self._lazy_offload_manager.bind_block_pool(gpu_block_pool)
 
     def get_num_new_matched_tokens(
         self,
@@ -1010,12 +912,12 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         self._process_new_requests(scheduler_output, metadata)
         self._process_cached_requests(scheduler_output, metadata)
 
-        # Drain due lazy stores once per step, only when the step schedules
-        # tokens: with total_num_scheduled_tokens == 0 the model runner takes
-        # kv_connector_no_forward and this step's store metadata would be
-        # lost.
-        if self.lazy_offload and scheduler_output.total_num_scheduled_tokens:
-            self._drain_lazy_offload(scheduler_output, metadata)
+        if self.lazy_offload:
+            actions = self._lazy_offload_manager.on_scheduler_step(scheduler_output)
+            for store_metadata in actions.stores_to_submit:
+                metadata.add_request_metadata(store_metadata)
+            for request_id in actions.sessions_to_end:
+                self.scheduler_adapter.end_session(request_id)
 
         if len(metadata) > 0:
             logger.debug("Final connector metadata: %s", metadata)
@@ -1035,48 +937,15 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """
         if not self.lazy_offload:
             return
-        if not self._gpu_block_pool:
-            raise ValueError("Lazy offload is enabled but gpu block pool is not binded")
         meta = connector_output.kv_connector_worker_meta
         if not isinstance(meta, LMCacheMPWorkerMetadata):
             return
-        # Break the prefix chains of failed stores before processing the
-        # receipts: a finished request whose held-back ops are dropped here
-        # can then tear down on the receipt below, and a running one stops
-        # buffering chunks that would be unreachable without their prefix.
-        for req_id in meta.failed_store_requests:
-            if not self._pending_store.has_in_flight_store(req_id):
-                continue
-            dropped = self._pending_store.mark_store_failed(req_id)
-            logger.warning(
-                "Store failed for request %s; dropped %d held-back store "
-                "op(s) that would lack their stored prefix",
-                req_id,
-                dropped,
-            )
-        for req_id, count in meta.completed_store_requests.items():
-            if not self._pending_store.has_in_flight_store(req_id):
-                # Duplicate or stale receipt (e.g. a resend after the batch
-                # was fully processed): the blocks are no longer pinned and
-                # the session may already be gone, so there is nothing to do.
-                logger.warning(
-                    "Ignoring store-completion receipt for request %s with "
-                    "no in-flight store batch",
-                    req_id,
-                )
-                continue
-            if self.scheduler_adapter.update_pending_store_count(req_id, count):
-                gpu_block_ids = self._pending_store.get_request_gpu_block_ids(req_id)
-                # Unpin to the HEAD of the free queue: a stored block has a
-                # copy below the GPU, so among free blocks it should be
-                # evicted first (and this restores its pre-pin imminence).
-                self._gpu_block_pool.free_blocks(
-                    [self._gpu_block_pool.blocks[bid] for bid in gpu_block_ids],
-                    prepend=True,
-                )
-                self._pending_store.remove_request_gpu_block_ids(req_id)
-                if self._pending_store.notify_store_complete(req_id):
-                    self.scheduler_adapter.end_session(req_id)
+        actions = self._lazy_offload_manager.on_store_results(
+            meta.failed_store_requests,
+            meta.completed_store_requests,
+        )
+        for request_id in actions.sessions_to_end:
+            self.scheduler_adapter.end_session(request_id)
 
     def request_finished(
         self,
@@ -1119,15 +988,12 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         self._cleanup_request_tracker(request.request_id)
 
         if self.lazy_offload:
-            # Blocks are returned to the free queue (False): they stay
-            # observable and resurrectable there, and the drain policy pins
-            # them just-in-time. The session must outlive any pending or
-            # in-flight store; when nothing is pending the session ends now,
-            # otherwise it ends when the drain drops the last op or the
-            # store-completion receipt arrives (update_connector_output).
-            has_pending = self._pending_store.mark_req_finished(request.request_id)
-            if not has_pending:
-                self.scheduler_adapter.end_session(request.request_id)
+            # Blocks return to the free queue (False) and remain observable;
+            # the manager ends the LMCache session after all deferred stores
+            # have either completed or been dropped.
+            actions = self._lazy_offload_manager.on_request_finished(request.request_id)
+            for request_id in actions.sessions_to_end:
+                self.scheduler_adapter.end_session(request_id)
             return False, (return_params or None)
 
         # Notify LMCache to end the session for this request
@@ -1249,7 +1115,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             if r_meta is not None:
                 # In lazy_offload mode, add to pending queue instead of immediate store
                 if self.lazy_offload:
-                    self._pending_store.add(r_meta)
+                    self._lazy_offload_manager.add_store_candidate(r_meta)
                 else:
                     metadata.add_request_metadata(r_meta)
 
@@ -1283,132 +1149,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             if r_meta is not None:
                 # In lazy_offload mode, add to pending queue instead of immediate store
                 if self.lazy_offload:
-                    self._pending_store.add(r_meta)
+                    self._lazy_offload_manager.add_store_candidate(r_meta)
                 else:
                     metadata.add_request_metadata(r_meta)
-
-    def _drain_lazy_offload(
-        self,
-        scheduler_output: SchedulerOutput,
-        metadata: LMCacheMPConnectorMetadata,
-    ) -> None:
-        """Drain due pending stores into this step's connector metadata.
-
-        Dispatches on the configured pending-store mode. Called once per
-        step from ``build_connector_meta``, and only when the step schedules
-        tokens: with ``total_num_scheduled_tokens == 0`` the model runner
-        takes ``kv_connector_no_forward`` and this step's metadata would be
-        lost.
-        """
-        if self._pending_store.mode is LazyOffloadMode.EVICTION_AWARE:
-            self._drain_eviction_aware(scheduler_output, metadata)
-        else:
-            self._drain_fifo(metadata)
-
-    def _drain_eviction_aware(
-        self,
-        scheduler_output: SchedulerOutput,
-        metadata: LMCacheMPConnectorMetadata,
-    ) -> None:
-        """Pressure-triggered drain in free-queue LRU order.
-
-        Feeds the policy this step's gross block allocation plus a next-step
-        estimate, pins (``touch``) the blocks of every released operation,
-        coalesces each request's released operations into a single store op
-        (the worker tracks one in-flight store per request), and ends the
-        sessions of requests whose last pending op was dropped.
-        """
-        if not self._gpu_block_pool:
-            raise ValueError("Lazy offload is enabled but no GPU block pool is bound")
-
-        gross_new_blocks = _count_new_blocks(scheduler_output)
-        est_next_step_blocks = sum(
-            -(-scheduler_output.total_num_scheduled_tokens // tokens_per_block)
-            for tokens_per_block in self._group_tokens_per_block
-        )
-        self._pending_store.observe_step(
-            gross_new_blocks,
-            est_next_step_blocks,
-            _allocated_block_ids(scheduler_output),
-        )
-        result = self._pending_store.collect_due()
-
-        ops_by_request: dict[str, list[LMCacheMPRequestMetadata]] = {}
-        for pending_op in result.to_store:
-            gpu_block_ids = list(pending_op.block_hashes.keys())
-            # Pin for the in-flight copy; released on the completion receipt
-            # in update_connector_output.
-            self._gpu_block_pool.touch(
-                [self._gpu_block_pool.blocks[bid] for bid in gpu_block_ids]
-            )
-            self._pending_store.update_request_gpu_block_ids(
-                pending_op.request_id, gpu_block_ids
-            )
-            ops_by_request.setdefault(pending_op.request_id, []).append(
-                pending_op.store_metadata
-            )
-
-        for request_metas in ops_by_request.values():
-            metadata.add_request_metadata(_coalesce_store_metadata(request_metas))
-
-        for request_id in result.released_requests:
-            # Every pending op of this finished request was dropped; nothing
-            # is in flight, so the session can be ended here.
-            self.scheduler_adapter.end_session(request_id)
-
-    def _drain_fifo(self, metadata: LMCacheMPConnectorMetadata) -> None:
-        """Legacy count-triggered FIFO drain with ex-post hash validation.
-
-        A request's buffered chunks are validated in prefix order and the
-        surviving prefix is submitted as one coalesced store: the worker
-        tracks one in-flight store future per request, so per-chunk
-        submission would overwrite futures and lose completion receipts.
-        On the first hash mismatch the remaining chunks are dropped; a
-        request left with no valid chunk produces no store -- and hence no
-        receipt -- so its session is ended here.
-        """
-        if not self._gpu_block_pool:
-            raise ValueError("Lazy offload is enabled but no GPU block pool is bound")
-
-        # Each item aggregates store metadata for one request. Chunked prefill
-        # or the scheduler's ``max-num-batched-tokens`` limit can schedule one
-        # request multiple times, with each metadata entry containing only that
-        # scheduling pass's blocks.
-        for item in self._pending_store.pop_items_for_offload():
-            request_id = item.request_id
-            valid_metas: list[LMCacheMPRequestMetadata] = []
-            valid_block_ids: list[int] = []
-            for meta, old_block_hashes in item.metadatas:
-                gpu_block_ids = list(old_block_hashes.keys())
-                blocks = [self._gpu_block_pool.blocks[bid] for bid in gpu_block_ids]
-                self._gpu_block_pool.touch(blocks)
-                new_block_hashes = {
-                    bid: self._gpu_block_pool.blocks[bid].block_hash
-                    for bid in gpu_block_ids
-                }
-                # A None current hash can never validate the chunk: an
-                # evicted-and-reallocated block also reads None, so
-                # None == None would store unverifiable data.
-                if (
-                    any(h is None for h in new_block_hashes.values())
-                    or old_block_hashes != new_block_hashes
-                ):
-                    logger.warning(
-                        "Block hashes missing or mismatched for request %s, "
-                        "dropping its remaining chunks",
-                        request_id,
-                    )
-                    self._gpu_block_pool.free_blocks(blocks)
-                    break
-                valid_metas.append(meta)
-                valid_block_ids.extend(gpu_block_ids)
-            if not valid_metas:
-                self.scheduler_adapter.end_session(request_id)
-                continue
-            metadata.add_request_metadata(_coalesce_store_metadata(valid_metas))
-            self._pending_store.update_request_gpu_block_ids(
-                request_id, valid_block_ids
-            )
 
     def _report_block_allocation_deltas(
         self,
@@ -1498,35 +1241,15 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             if tracker.state != LMCacheMPRequestState.PREFETCHING:
                 self.request_trackers.pop(request_id)
                 if self.lazy_offload:
-                    # The recreated tracker restarts at num_stored_tokens=0
-                    # and re-produces store metadata from token zero after
-                    # resume; anything still buffered for the request would
-                    # overlap it.
-                    dropped = self._pending_store.drop_request(request_id)
-                    if dropped:
-                        logger.info(
-                            "Lazy offload: dropped %d buffered store op(s) "
-                            "of preempted request %s",
-                            dropped,
-                            request_id,
-                        )
+                    # The recreated tracker restarts at token zero, so its
+                    # manager discards overlapping buffered metadata.
+                    self._lazy_offload_manager.on_request_reset(request_id)
 
         if request_id not in self.request_trackers:
-            if self.lazy_offload and self._pending_store.reclaim_finished_request(
-                request_id
-            ):
-                # A finished request leaves vLLM's request table immediately
-                # in lazy mode (request_finished returns False), so a new
-                # request can legally reuse its id while its teardown is
-                # still deferred behind buffered ops. Release the
-                # predecessor before the successor's first operation.
-                logger.info(
-                    "Lazy offload: request id %s reused while its "
-                    "predecessor's teardown was deferred; released the "
-                    "predecessor's session",
-                    request_id,
-                )
-                self.scheduler_adapter.end_session(request_id)
+            if self.lazy_offload:
+                actions = self._lazy_offload_manager.on_request_arrived(request_id)
+                for session_id in actions.sessions_to_end:
+                    self.scheduler_adapter.end_session(session_id)
             new_tracker = LMCacheMPRequestTracker(request)
             self.request_trackers[request_id] = new_tracker
         return self.request_trackers[request_id]

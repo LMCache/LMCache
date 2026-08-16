@@ -9,9 +9,10 @@ buffering / protection mechanism it plugs into is described in
 
 The module is **pure policy**: no vLLM imports at runtime, no I/O, no lock (it
 runs on the scheduler thread). It decides *which* buffered store operations to
-release *when*; the connector executes everything (snapshots, pinning,
-submission). Gate 2 (reuse prediction) is out of scope — phase 1 stores every
-admitted op whose blocks come under eviction pressure.
+release *when*; `LazyOffloadManager` executes the integration side effects
+(snapshots, pinning, submission) and returns explicit actions to the connector.
+Gate 2 (reuse prediction) is out of scope — phase 1 stores every admitted op
+whose blocks come under eviction pressure.
 
 ## Objects
 
@@ -35,7 +36,10 @@ admitted op whose blocks come under eviction pressure.
   `cache_salt` (part of the op's content identity).
 - **`EvictionAwareStoreQueue`** — the policy object, one per connector.
 
-## Per-step protocol (connector obligations)
+## Per-step protocol (policy-caller obligations)
+
+`LazyOffloadManager` is the production caller that fulfills this contract; the
+connector only forwards lifecycle events to the manager.
 
 1. Route each `GetStoreMetadata` result to `admit(op)` instead of the step
    metadata. Handle the outcome:
