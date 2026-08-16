@@ -7,8 +7,10 @@
 - Rebuild on PR label change: Yes
 - Skip queued / cancel running branch builds: Yes
 
-This pipeline now has a single step: it runs the XPU smoke test directly in a
-prebuilt public vLLM image and installs LMCache from source inside the job pod.
+This pipeline now has a single step: it runs the XPU unit tests directly in the
+upstream vLLM XPU nightly image and installs LMCache from source inside the job
+pod. It is the device-level validation for XPU wheels; GitHub Actions only
+builds and smoke-checks the wheel without an Intel GPU.
 
 ### Trigger strategy
 
@@ -55,7 +57,8 @@ steps:
 ## What this pipeline does
 
 - Runs the XPU smoke test on the `intel-xpu` queue
-- Uses the prebuilt public vLLM image
+- Uses `vllm/vllm-openai-xpu:nightly`; reproduce a failure by selecting the
+  corresponding immutable `nightly-<vLLM SHA>` image from the upstream hub
 - Installs LMCache from source via `setup-lmcache-only-env.sh`
 - Verifies `torch.xpu.is_available()` inside the job pod
 

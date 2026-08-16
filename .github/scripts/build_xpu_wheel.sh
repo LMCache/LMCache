@@ -71,7 +71,8 @@ $PY -m pip install --no-cache-dir \
 $PY -c 'import torch; print("BUILD TORCH:", torch.__version__, "xpu:", hasattr(torch, "xpu"), "cxx11abi:", torch._C._GLIBCXX_USE_CXX11_ABI)'
 
 cd /work/LMCache
-rm -rf build dist dist_xpu
+rm -rf build dist_xpu
+mkdir -p dist
 
 export BUILD_WITH_SYCL=1
 $PY setup.py bdist_wheel --dist-dir=dist_xpu

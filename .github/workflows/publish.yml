@@ -108,6 +108,10 @@ jobs:
         if: needs.changes.outputs.lmcache == 'true'
         name: Build XPU
         uses: ./.github/workflows/build_xpu_artifacts.yml
+        with:
+            # Stable releases must be reproducible. Nightly builds resolve an
+            # immutable digest in nightly_build.yml instead.
+            xpu_image: vllm/vllm-openai-xpu:v0.26.0
         # DockerHub creds avoid anonymous rate limits pulling the oneAPI image;
         # reusable workflows do not auto-inherit secrets.
         secrets: inherit

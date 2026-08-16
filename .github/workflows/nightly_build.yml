@@ -113,6 +113,74 @@ jobs:
             --prerelease \
             dist/cu129/*.whl
 
+  resolve-xpu-nightly:
+    name: Resolve vLLM XPU nightly runtime
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.runtime.outputs.image }}
+      digest: ${{ steps.runtime.outputs.digest }}
+    steps:
+      - name: Resolve immutable XPU runtime image
+        id: runtime
+        run: |
+          set -Eeuo pipefail
+          IMAGE="vllm/vllm-openai-xpu"
+          DIGEST="$(docker buildx imagetools inspect "${IMAGE}:nightly" --format '{{json .Manifest.Digest}}' | tr -d '"')"
+          test -n "${DIGEST}"
+          echo "image=${IMAGE}@${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+
+  nightly-xpu-wheel:
+    name: Build XPU nightly wheel
+    needs: resolve-xpu-nightly
+    uses: ./.github/workflows/build_xpu_artifacts.yml
+    with:
+      xpu_image: ${{ needs.resolve-xpu-nightly.outputs.image }}
+      dev_version: true
+    secrets: inherit
+
+  publish-nightly-xpu:
+    name: Publish XPU nightly wheel
+    needs: [resolve-xpu-nightly, nightly-xpu-wheel]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          disable-sudo-and-containers: false
+          egress-policy: audit
+
+      - name: Fetch XPU nightly artifacts
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: release-xpu-artifacts
+          path: dist/xpu
+
+      - name: Publish XPU wheels to rolling nightly-xpu release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          XPU_VERSION: ${{ needs.nightly-xpu-wheel.outputs.xpu_version }}
+          XPU_IMAGE: ${{ needs.resolve-xpu-nightly.outputs.image }}
+        run: |
+          set -Eeuo pipefail
+          gh release delete nightly-xpu --yes --cleanup-tag --repo ${{ github.repository }} 2>/dev/null || true
+          gh release create nightly-xpu \
+            --repo ${{ github.repository }} \
+            --title "Nightly $(date +'%Y-%m-%d') · Intel XPU" \
+            --notes "Nightly Intel XPU wheel built from \`dev\` on $(date +'%Y-%m-%d').
+
+          Runtime image: \`${XPU_IMAGE}\`.
+
+          Install inside that vLLM XPU runtime image:
+          \`\`\`
+          pip install lmcache==${XPU_VERSION} --no-deps \\
+            --find-links https://github.com/${{ github.repository }}/releases/expanded_assets/nightly-xpu
+          \`\`\`" \
+            --prerelease \
+            dist/xpu/*
+
   nightly-build:
     name: Build image
     runs-on: ubuntu-latest

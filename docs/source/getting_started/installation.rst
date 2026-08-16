@@ -90,7 +90,7 @@ Install LMCache
                     .. tab-item:: Intel XPU
 
                         The Intel XPU wheel is ABI-matched to the upstream
-                        ``vllm/vllm-openai-xpu:v0.26.0`` image (torch 2.12.0+xpu and oneAPI/SYCL).
+                        ``vllm/vllm-openai-xpu`` runtime image (torch-xpu and oneAPI/SYCL).
                         It is published to a dedicated
                         `GitHub Release <https://github.com/LMCache/LMCache/releases>`__ rather than PyPI.
 
@@ -100,7 +100,7 @@ Install LMCache
                         .. code-block:: bash
 
                             docker run -it --device /dev/dri --shm-size=4g \
-                                --entrypoint bash vllm/vllm-openai-xpu:v0.26.0
+                                --entrypoint bash vllm/vllm-openai-xpu:<matching-tag>
 
                             VERSION=0.5.3  # replace with target release
                             pip install lmcache==${VERSION} --no-deps \
@@ -109,8 +109,9 @@ Install LMCache
                         .. note::
 
                             The wheel excludes torch and oneAPI/SYCL runtime libraries, which bind to the
-                            host image at runtime. Match the wheel's torch and oneAPI versions to the
-                            container; for other bases, use the **From Source** tab.
+                            host image at runtime. Each XPU nightly release includes ``xpu-runtime.json``
+                            with the exact vLLM image digest and runtime versions; use that image for
+                            installation. For other bases, use the **From Source** tab.
 
             .. tab-item:: Nightly
 
