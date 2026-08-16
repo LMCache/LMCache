@@ -336,27 +336,6 @@ class TestLazyOffloadPendingStore:
         assert store.mark_req_finished("req-0") is True
         assert len(store.pop_items_for_offload()) == 1
 
-    def test_update_get_remove_gpu_block_ids(self) -> None:
-        store = LazyOffloadPendingStore()
-        store.update_request_gpu_block_ids("req-0", [1, 2])
-        store.update_request_gpu_block_ids("req-0", [3])
-        assert store.get_request_gpu_block_ids("req-0") == [1, 2, 3]
-
-        store.remove_request_gpu_block_ids("req-0")
-        assert store.get_request_gpu_block_ids("req-0") == []
-
-    def test_get_gpu_block_ids_nonexistent_returns_empty(self) -> None:
-        store = LazyOffloadPendingStore()
-        assert store.get_request_gpu_block_ids("nonexistent") == []
-
-    def test_unknown_request_lookup_does_not_open_receipt_window(self) -> None:
-        """A read of an unknown id must not create state: were
-        has_in_flight_store to flip True, a stale or duplicate receipt
-        would unpin blocks that are not pinned and end the session twice."""
-        store = LazyOffloadPendingStore()
-        store.get_request_gpu_block_ids("ghost")
-        assert store.has_in_flight_store("ghost") is False
-
     def test_end_to_end_flow(self) -> None:
         """Test full add -> mark_finished -> pop_items_for_offload."""
         configs = {

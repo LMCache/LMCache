@@ -188,6 +188,10 @@ class LazyOffloadManager:
         self._group_tokens_per_block = list(group_tokens_per_block)
         self._completion_tracker = completion_tracker
         self._gpu_block_pool: "BlockPool | None" = None
+        # Request -> blocks pinned for its one submitted store batch. Presence
+        # opens the receipt window; removal after the fully aggregated receipt
+        # makes duplicate receipts harmless.
+        self._in_flight_block_ids: dict[str, list[int]] = {}
 
     def bind_block_pool(self, gpu_block_pool: "BlockPool") -> None:
         """Bind the scheduler's GPU block pool.
@@ -261,7 +265,7 @@ class LazyOffloadManager:
         """
         pool = self._require_block_pool()
         for request_id in failed_request_ids:
-            if not self._pending_store.has_in_flight_store(request_id):
+            if request_id not in self._in_flight_block_ids:
                 continue
             dropped = self._pending_store.mark_store_failed(request_id)
             logger.warning(
@@ -273,7 +277,7 @@ class LazyOffloadManager:
 
         actions = LazyOffloadActions()
         for request_id, count in completed_store_counts.items():
-            if not self._pending_store.has_in_flight_store(request_id):
+            if request_id not in self._in_flight_block_ids:
                 logger.warning(
                     "Ignoring store-completion receipt for request %s with "
                     "no in-flight store batch",
@@ -284,12 +288,11 @@ class LazyOffloadManager:
                 request_id, count
             ):
                 continue
-            gpu_block_ids = self._pending_store.get_request_gpu_block_ids(request_id)
+            gpu_block_ids = self._in_flight_block_ids.pop(request_id)
             pool.free_blocks(
                 [pool.blocks[block_id] for block_id in gpu_block_ids],
                 prepend=True,
             )
-            self._pending_store.remove_request_gpu_block_ids(request_id)
             if self._pending_store.notify_store_complete(request_id):
                 actions.sessions_to_end.append(request_id)
         return actions
@@ -372,8 +375,8 @@ class LazyOffloadManager:
         for pending_op in result.to_store:
             gpu_block_ids = list(pending_op.block_hashes)
             pool.touch([pool.blocks[block_id] for block_id in gpu_block_ids])
-            self._pending_store.update_request_gpu_block_ids(
-                pending_op.request_id, gpu_block_ids
+            self._in_flight_block_ids.setdefault(pending_op.request_id, []).extend(
+                gpu_block_ids
             )
             ops_by_request.setdefault(pending_op.request_id, []).append(
                 pending_op.store_metadata
@@ -418,9 +421,7 @@ class LazyOffloadManager:
                 actions.sessions_to_end.append(item.request_id)
                 continue
             actions.stores_to_submit.append(_coalesce_store_metadata(valid_metas))
-            self._pending_store.update_request_gpu_block_ids(
-                item.request_id, valid_block_ids
-            )
+            self._in_flight_block_ids[item.request_id] = valid_block_ids
         return actions
 
     def _require_block_pool(self) -> "BlockPool":

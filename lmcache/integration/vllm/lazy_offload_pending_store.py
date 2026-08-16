@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Standard
-from collections import defaultdict
 from dataclasses import asdict
 from typing import TYPE_CHECKING, cast
 import enum
@@ -202,9 +201,6 @@ class LazyOffloadPendingStore:
 
         # GPU block pool reference
         self._gpu_block_pool: "BlockPool | None" = None
-
-        # save all request block ids for free
-        self._request_block_ids: dict[str, list[int]] = defaultdict(list)
 
     @property
     def mode(self) -> LazyOffloadMode:
@@ -571,51 +567,3 @@ class LazyOffloadPendingStore:
         if self._fifo_policy is None:
             raise ValueError("FIFO policy unavailable in EVICTION_AWARE mode")
         return self._fifo_policy
-
-    def has_in_flight_store(self, req_id: str) -> bool:
-        """Whether a drained store batch of the request awaits its receipt.
-
-        True from the drain that pinned and submitted the request's batch
-        until the full set of worker completion receipts has been processed.
-        A receipt for a request outside this window is a duplicate or stale
-        resend and must be ignored (processing it would unpin blocks that
-        are no longer pinned and tear the session down twice).
-
-        Args:
-            req_id: The request to check.
-
-        Returns:
-            True if a submitted store batch is awaiting completion.
-        """
-        return req_id in self._request_block_ids
-
-    def update_request_gpu_block_ids(self, req_id: str, block_ids: list[int]) -> None:
-        """Record blocks pinned for the request's submitted store batch.
-
-        Opens the request's receipt window (``has_in_flight_store``).
-
-        Args:
-            req_id: The request whose batch was submitted.
-            block_ids: The GPU blocks pinned for the batch.
-        """
-        self._request_block_ids[req_id].extend(block_ids)
-
-    def get_request_gpu_block_ids(self, req_id: str) -> list[int]:
-        """Return the blocks pinned for the request's in-flight batch.
-
-        A read never creates state: an unknown request yields an empty
-        list and leaves ``has_in_flight_store`` False.
-
-        Args:
-            req_id: The request to look up.
-        """
-        return self._request_block_ids.get(req_id, [])
-
-    def remove_request_gpu_block_ids(self, req_id: str) -> None:
-        """Close the request's receipt window after its receipt completes.
-
-        Args:
-            req_id: The request whose receipt was processed.
-        """
-        if req_id in self._request_block_ids:
-            del self._request_block_ids[req_id]
