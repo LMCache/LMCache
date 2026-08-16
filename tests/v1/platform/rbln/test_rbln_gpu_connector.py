@@ -237,17 +237,17 @@ def test_partial_slice_touches_only_its_tokens() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_missing_slot_mapping_is_refused() -> None:
-    """The slot mapping is required, not optional."""
+def test_missing_slot_mapping_raises() -> None:
+    """The slot mapping is required; the lookup that needs it says so."""
     native = _native_kv()
     connector = _connector_with_attributes()
     memory_obj = _allocator().allocate(connector.get_shape(4), DTYPE)
     assert memory_obj is not None
-    with pytest.raises(ValueError, match="slot_mapping"):
+    with pytest.raises(KeyError, match="slot_mapping"):
         connector.from_gpu(memory_obj, 0, 4, kvcaches=native)
 
 
-def test_missing_kvcaches_is_refused() -> None:
+def test_missing_kvcaches_raises() -> None:
     """Nothing can be transferred before the caches are known.
 
     The shape comes from a separately registered connector so the connector
@@ -258,7 +258,7 @@ def test_missing_kvcaches_is_refused() -> None:
     unregistered = VLLMPagedMemRBLNConnectorV2(
         hidden_dim_size=HIDDEN_DIM, num_layers=NUM_LAYERS
     )
-    with pytest.raises(ValueError, match="kvcaches"):
+    with pytest.raises(TypeError):
         unregistered.from_gpu(memory_obj, 0, 4, slot_mapping=_slot_mapping(4))
 
 

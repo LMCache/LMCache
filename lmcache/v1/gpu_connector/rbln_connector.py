@@ -225,49 +225,6 @@ class VLLMPagedMemRBLNConnectorV2(GPUConnectorInterface):
     # Transfers
     # ------------------------------------------------------------------
 
-    def _prepare(
-        self, memory_obj: MemoryObj, start: int, end: int, **kwargs: object
-    ) -> tuple[List[torch.Tensor], torch.Tensor, torch.Tensor]:
-        """Validate a transfer request and resolve its slot mapping.
-
-        Args:
-            memory_obj: Memory object being read or written.
-            start: First token index of the slice.
-            end: One past the last token index of the slice.
-            **kwargs: Must carry ``slot_mapping``; may carry ``kvcaches``.
-
-        Returns:
-            tuple: Squeezed per-layer views, per-token block indices, and
-            per-token offsets within a block.
-
-        Raises:
-            ValueError: If ``slot_mapping`` or the KV caches are missing, or
-                the memory object is not ``KV_2LTD``.
-        """
-        if memory_obj.tensor is None:
-            raise ValueError("memory_obj must carry a tensor")
-
-        self.initialize_kvcaches_ptr(**kwargs)
-        if self.kvcaches is None:
-            raise ValueError(
-                "'kvcaches' must be provided in kwargs or registered beforehand"
-            )
-        if "slot_mapping" not in kwargs:
-            raise ValueError("'slot_mapping' should be provided in kwargs.")
-
-        self._initialize_attributes(self.kvcaches)
-        self._validate_memory_format(memory_obj)
-
-        slot_mapping = kwargs["slot_mapping"]
-        if not isinstance(slot_mapping, torch.Tensor):
-            raise ValueError("'slot_mapping' must be a torch.Tensor")
-        slices = slot_mapping[start:end].to(dtype=torch.long)
-
-        views = squeeze_singleton_axis(self.kvcaches)
-        blocks = torch.div(slices, self.block_size, rounding_mode="floor")
-        offsets = slices % self.block_size
-        return views, blocks, offsets
-
     def from_gpu(
         self, memory_obj: MemoryObj, start: int, end: int, **kwargs: object
     ) -> None:
@@ -278,8 +235,20 @@ class VLLMPagedMemRBLNConnectorV2(GPUConnectorInterface):
             start: First token index of the slice.
             end: One past the last token index of the slice.
             **kwargs: Must carry ``slot_mapping``; may carry ``kvcaches``.
+
+        Raises:
+            ValueError: If the memory object is not ``KV_2LTD``.
         """
-        views, blocks, offsets = self._prepare(memory_obj, start, end, **kwargs)
+        self.initialize_kvcaches_ptr(**kwargs)
+        kvcaches = cast("List[torch.Tensor]", self.kvcaches)
+        self._initialize_attributes(kvcaches)
+        self._validate_memory_format(memory_obj)
+
+        slot_mapping = cast(torch.Tensor, kwargs["slot_mapping"])
+        slices = slot_mapping[start:end].to(dtype=torch.long)
+        views = squeeze_singleton_axis(kvcaches)
+        blocks = torch.div(slices, self.block_size, rounding_mode="floor")
+        offsets = slices % self.block_size
         num_tokens = int(blocks.numel())
 
         assert memory_obj.tensor is not None
@@ -306,8 +275,20 @@ class VLLMPagedMemRBLNConnectorV2(GPUConnectorInterface):
             start: First token index of the slice.
             end: One past the last token index of the slice.
             **kwargs: Must carry ``slot_mapping``; may carry ``kvcaches``.
+
+        Raises:
+            ValueError: If the memory object is not ``KV_2LTD``.
         """
-        views, blocks, offsets = self._prepare(memory_obj, start, end, **kwargs)
+        self.initialize_kvcaches_ptr(**kwargs)
+        kvcaches = cast("List[torch.Tensor]", self.kvcaches)
+        self._initialize_attributes(kvcaches)
+        self._validate_memory_format(memory_obj)
+
+        slot_mapping = cast(torch.Tensor, kwargs["slot_mapping"])
+        slices = slot_mapping[start:end].to(dtype=torch.long)
+        views = squeeze_singleton_axis(kvcaches)
+        blocks = torch.div(slices, self.block_size, rounding_mode="floor")
+        offsets = slices % self.block_size
         num_tokens = int(blocks.numel())
 
         assert memory_obj.tensor is not None
