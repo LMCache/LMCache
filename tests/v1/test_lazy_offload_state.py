@@ -48,6 +48,8 @@ def test_session_release_requires_finished_request_and_no_batch() -> None:
     registry.arrive("req")
     registry.register_batch("req", [1])
     registry.finish("req")
+    assert registry.is_finished("req")
+    assert registry.finished_request_ids() == {"req"}
     assert not registry.can_end_session("req")
 
     registry.complete_batch("req")

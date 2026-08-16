@@ -325,7 +325,7 @@ class LazyOffloadPendingStore:
                 allocated_block_ids,
             )
 
-    def collect_due(self) -> DrainResult:
+    def collect_due(self, blocked_request_ids: set[str] | None = None) -> DrainResult:
         """Release the operations facing imminent eviction (EVICTION_AWARE).
 
         Returns:
@@ -335,7 +335,7 @@ class LazyOffloadPendingStore:
             ValueError: If called in FIFO mode or before the pool is bound.
         """
         queue = self._require_eviction_queue()
-        result = queue.collect_due()
+        result = queue.collect_due(blocked_request_ids)
         if (
             result.ops_held_back
             and result.dropped_evicted
@@ -400,22 +400,6 @@ class LazyOffloadPendingStore:
         self._maybe_log_stats(queue)
         return result
 
-    def notify_store_complete(self, req_id: str) -> bool:
-        """Record a completed store batch for a request.
-
-        Args:
-            req_id: The request whose store completion was reported.
-
-        Returns:
-            True if the request's session may now be torn down.
-        """
-        if self._eviction_queue is not None:
-            return self._eviction_queue.notify_stored(req_id)
-        # FIFO normally drains all chunks at once. A reused request id may,
-        # however, have a successor queued behind the predecessor's receipt;
-        # that shared session must survive for the successor's own drain.
-        return not self._require_fifo_policy().has_pending_request(req_id)
-
     def stats(self) -> LazyOffloadCounters:
         """Return a copy of the cumulative policy counters.
 
@@ -476,11 +460,13 @@ class LazyOffloadPendingStore:
 
     def pop_items_for_offload(
         self,
+        finished_request_ids: set[str],
         blocked_request_ids: set[str] | None = None,
     ) -> list[PendingStoreItem]:
         """Pop items when the policy's trigger is satisfied (FIFO mode only).
 
         Args:
+            finished_request_ids: Requests the controller has seen finish.
             blocked_request_ids: Requests with an older store batch still in
                 flight; these remain queued until its receipt arrives.
 
@@ -490,22 +476,15 @@ class LazyOffloadPendingStore:
         """
         return self._require_fifo_policy().pop_items_for_offload(
             self._select_count,
+            finished_request_ids,
             blocked_request_ids,
         )
 
-    def mark_req_finished(self, req_id: str) -> bool:
-        """Record that the engine finished a request.
-
-        Args:
-            req_id: The finished request.
-
-        Returns:
-            True if stores are still pending or in flight for the request
-            (session teardown must wait); False otherwise.
-        """
+    def has_pending_request(self, req_id: str) -> bool:
+        """Whether the selected policy has buffered operations for an id."""
         if self._eviction_queue is not None:
-            return self._eviction_queue.mark_request_finished(req_id)
-        return self._require_fifo_policy().mark_req_finished(req_id)
+            return self._eviction_queue.has_pending_request(req_id)
+        return self._require_fifo_policy().has_pending_request(req_id)
 
     def drop_request(self, req_id: str) -> int:
         """Discard the request's buffered (not yet drained) operations.
@@ -526,27 +505,18 @@ class LazyOffloadPendingStore:
             return self._eviction_queue.drop_request(req_id)
         return self._require_fifo_policy().drop_request(req_id)
 
-    def reclaim_finished_request(self, req_id: str) -> bool:
-        """Release a finished predecessor's residual state on id reuse.
-
-        In lazy mode the engine frees a finished request's id immediately,
-        so a new request may arrive under an id whose previous owner still
-        has buffered state (teardown deferred). Call this when a new
-        request's id is first seen; see
-        :meth:`EvictionAwareStoreQueue.reclaim_finished_request` for the
-        conflation hazards this prevents.
-
-        Args:
-            req_id: The reused request id.
-
-        Returns:
-            True if the caller must end the predecessor's session now;
-            False if there was nothing to reclaim or (EVICTION_AWARE) the
-            teardown rides an outstanding completion receipt.
-        """
+    def discard_for_reuse(self, req_id: str) -> int:
+        """Discard a finished predecessor's buffered policy state."""
         if self._eviction_queue is not None:
-            return self._eviction_queue.reclaim_finished_request(req_id)
-        return self._require_fifo_policy().reclaim_finished_request(req_id)
+            return self._eviction_queue.discard_for_reuse(req_id)
+        return self._require_fifo_policy().discard_for_reuse(req_id)
+
+    def release_request(self, req_id: str) -> None:
+        """Forget non-pending policy state after current-session teardown."""
+        if self._eviction_queue is not None:
+            self._eviction_queue.release_request(req_id)
+        else:
+            self._require_fifo_policy().release_request(req_id)
 
     def mark_store_failed(self, req_id: str) -> int:
         """Record that the request's in-flight store batch failed.

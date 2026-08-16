@@ -1,14 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
-"""FIFO lazy-offload policy."""
+"""FIFO lazy-offload drain policy."""
 
 # Standard
 from typing import TYPE_CHECKING
 
 # First Party
-from lmcache.integration.vllm.lazy_offload_policy.base import (
-    OffloadPolicy,
-    PendingStoreItem,
-)
+from lmcache.integration.vllm.lazy_offload_policy.base import PendingStoreItem
 from lmcache.utils import init_logger as lmcache_init_logger
 
 if TYPE_CHECKING:
@@ -19,22 +16,14 @@ if TYPE_CHECKING:
 logger = lmcache_init_logger(__name__)
 
 
-class FIFOOffloadPolicy(OffloadPolicy):
-    """Offload finished pending requests in first-in, first-out order."""
+class FIFOOffloadPolicy:
+    """Buffer by request and drain controller-eligible ids in FIFO order."""
 
     def __init__(self, configs: dict | None = None) -> None:
-        """Initialize the policy.
-
-        Args:
-            configs: Optional lazy-offload configuration. The
-                ``lmcache.mp.lazy_offload_threshold`` value controls how many
-                finished requests trigger an offload.
-        """
         self._pending_items: dict[str, PendingStoreItem] = {}
         self._threshold = (
             configs.get("lmcache.mp.lazy_offload_threshold", 100) if configs else 100
         )
-        self._finished_requests_count = 0
         logger.info(
             "lazy offload enabled with FIFO policy, offload threshold: %d",
             self._threshold,
@@ -46,13 +35,7 @@ class FIFOOffloadPolicy(OffloadPolicy):
         block_hashes: dict[int, bytes],
         epoch: int = 0,
     ) -> None:
-        """Queue cache blocks, aggregating multiple entries per request.
-
-        Args:
-            meta: Store metadata for a subset of a request's cache blocks.
-            block_hashes: Mapping from queued GPU block IDs to block hashes.
-            epoch: Store epoch that produced this metadata.
-        """
+        """Queue one metadata chunk under its request epoch."""
         item = self._pending_items.get(meta.request_id)
         if item is None:
             item = PendingStoreItem(request_id=meta.request_id, epoch=epoch)
@@ -64,86 +47,44 @@ class FIFOOffloadPolicy(OffloadPolicy):
             )
         item.metadatas.append((meta, block_hashes))
 
-    def mark_req_finished(self, req_id: str) -> bool:
-        """Mark a queued request as ready for FIFO offload.
+    def has_pending_request(self, request_id: str) -> bool:
+        return request_id in self._pending_items
 
-        Args:
-            req_id: Identifier of the request that has completed.
+    def drop_request(self, request_id: str) -> int:
+        """Discard chunks invalidated by a tracker reset."""
+        item = self._pending_items.pop(request_id, None)
+        return len(item.metadatas) if item is not None else 0
 
-        Returns:
-            True if the request has queued cache blocks; False if it queued
-            none, which happens for a request shorter than one chunk.
-        """
-        if req_id not in self._pending_items:
-            return False
-        self._pending_items[req_id].is_finished = True
-        self._finished_requests_count += 1
-        return True
+    def discard_for_reuse(self, request_id: str) -> int:
+        """Discard a predecessor's chunks before its id is reused."""
+        item = self._pending_items.pop(request_id, None)
+        return len(item.metadatas) if item is not None else 0
 
-    def drop_request(self, req_id: str) -> int:
-        """Discard a request's queued cache blocks without offloading them.
-
-        Args:
-            req_id: Identifier of the request being dropped.
-
-        Returns:
-            The number of queued metadata entries discarded.
-        """
-        item = self._pending_items.pop(req_id, None)
-        if item is None:
-            return 0
-        if item.is_finished:
-            self._finished_requests_count -= 1
-        return len(item.metadatas)
-
-    def reclaim_finished_request(self, req_id: str) -> bool:
-        """Discard a finished predecessor's item when its id is reused.
-
-        Args:
-            req_id: The reused request identifier.
-
-        Returns:
-            True if a finished item was discarded; False otherwise.
-        """
-        item = self._pending_items.get(req_id)
-        if item is None or not item.is_finished:
-            return False
-        del self._pending_items[req_id]
-        self._finished_requests_count -= 1
-        return True
-
-    def has_pending_request(self, req_id: str) -> bool:
-        """Whether a request still has buffered operations."""
-        return req_id in self._pending_items
+    def release_request(self, request_id: str) -> None:
+        """FIFO has no non-pending per-request state to release."""
 
     def pop_items_for_offload(
         self,
         count: int,
+        finished_request_ids: set[str],
         blocked_request_ids: set[str] | None = None,
     ) -> list[PendingStoreItem]:
-        """Return up to ``count`` finished requests in insertion order.
-
-        Args:
-            count: Maximum number of pending items to pop.
-            blocked_request_ids: Finished requests to leave queued because an
-                older generation with the same id still has a store in flight.
-
-        Returns:
-            Finished pending items when the threshold is reached; otherwise an
-            empty list.
-        """
-        if count <= 0 or self._finished_requests_count < self._threshold:
+        """Pop eligible finished requests in admission order."""
+        if count <= 0:
+            return []
+        blocked_request_ids = blocked_request_ids or set()
+        eligible_ids = finished_request_ids - blocked_request_ids
+        eligible_count = sum(
+            request_id in self._pending_items for request_id in eligible_ids
+        )
+        if eligible_count < self._threshold:
             return []
 
-        blocked_request_ids = blocked_request_ids or set()
-        to_offload = []
-        for req_id in list(self._pending_items.keys()):
-            if req_id in blocked_request_ids:
+        to_offload: list[PendingStoreItem] = []
+        for request_id in list(self._pending_items):
+            if request_id not in eligible_ids:
                 continue
-            if self._pending_items[req_id].is_finished:
-                to_offload.append(self._pending_items[req_id])
-                del self._pending_items[req_id]
-                self._finished_requests_count -= 1
+            to_offload.append(self._pending_items.pop(request_id))
             if len(to_offload) >= count:
                 break
         return to_offload

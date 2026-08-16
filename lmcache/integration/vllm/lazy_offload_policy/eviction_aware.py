@@ -336,9 +336,9 @@ class DrainResult:
             operations dropped for prefix closure.
         dropped_short_prefix: Operations dropped by gate 3 (request prefix
             below the break-even length at the time its blocks came due).
-        released_requests: Finished requests that no longer have any pending
-            operations after this drain; the connector may now end their
-            sessions.
+        emptied_requests: Requests whose pending operations became empty in
+            this drain. The controller combines this fact with request phase
+            and submitted-batch state before ending a session.
         ops_held_back: Operations this drain found due but did not emit
             because ``max_drain_per_step`` ran out. They stay pending and
             are emitted by a later drain if their blocks survive that long.
@@ -350,25 +350,8 @@ class DrainResult:
     to_store: list[PendingStoreOp] = field(default_factory=list)
     dropped_evicted: list[PendingStoreOp] = field(default_factory=list)
     dropped_short_prefix: list[PendingStoreOp] = field(default_factory=list)
-    released_requests: list[str] = field(default_factory=list)
+    emptied_requests: list[str] = field(default_factory=list)
     ops_held_back: int = 0
-
-
-@dataclass
-class _RequestLifecycle:
-    """State-machine flags for one request id.
-
-    Pending operations and their secondary indexes remain owned by the queue;
-    this record only centralizes lifecycle transitions that previously updated
-    four parallel sets independently.
-    """
-
-    prefix_broken: bool = False
-    finished: bool = False
-    in_flight: bool = False
-
-    def is_empty(self) -> bool:
-        return not (self.prefix_broken or self.finished or self.in_flight)
 
 
 class _PendingOperations:
@@ -545,25 +528,13 @@ class EvictionAwareStoreQueue:
         # Primary pending storage and every derived secondary index share one
         # owner so departure paths cannot update one without the other.
         self._pending_ops = _PendingOperations()
-        # Request lifecycle is deliberately separate from pending-operation
-        # storage and its secondary indexes. Keeping the related flags in one
-        # record makes transition invariants explicit and avoids independent
-        # set updates drifting apart.
-        self._request_lifecycle: dict[str, _RequestLifecycle] = {}
+        # Prefix validity is a policy concern. Request phase, epochs, and
+        # submitted batches are owned by the controller.
+        self._broken_prefixes: set[str] = set()
         self._blocks_per_step_ema: float = 0.0
         self._ema_initialized = False
         self._next_step_estimate = 0
         self._counters = LazyOffloadCounters()
-
-    def _lifecycle(self, request_id: str) -> _RequestLifecycle:
-        """Return the request's lifecycle record, creating it on mutation."""
-        return self._request_lifecycle.setdefault(request_id, _RequestLifecycle())
-
-    def _prune_lifecycle(self, request_id: str) -> None:
-        """Drop an all-false lifecycle record to keep request ids bounded."""
-        state = self._request_lifecycle.get(request_id)
-        if state is not None and state.is_empty():
-            del self._request_lifecycle[request_id]
 
     def admit(self, op: PendingStoreOp) -> AdmitResult:
         """Admit a store operation into the pending queue.
@@ -582,15 +553,14 @@ class EvictionAwareStoreQueue:
                 f"request {op.request_id!r} mixed store epochs "
                 f"{existing[0].epoch} and {op.epoch}"
             )
-        state = self._request_lifecycle.get(op.request_id)
-        if state is not None and state.prefix_broken:
+        if op.request_id in self._broken_prefixes:
             self._counters.rejected_prefix_broken += 1
             return AdmitResult.REJECTED_PREFIX_BROKEN
         if any(block_hash is None for block_hash in op.block_hashes.values()):
             # The caller's tracker has already advanced past this range, so
             # the request's later chunks would be stored without their prefix
             # (unreachable): reject them like any other broken chain.
-            self._lifecycle(op.request_id).prefix_broken = True
+            self._broken_prefixes.add(op.request_id)
             self._counters.rejected_unhashed += 1
             return AdmitResult.REJECTED_UNHASHED_BLOCK
         covering = self._pending_ops.covering_op(op)
@@ -637,123 +607,35 @@ class EvictionAwareStoreQueue:
             self._ema_initialized = True
         self._next_step_estimate = est_next_step_blocks
 
-    def mark_request_finished(self, request_id: str) -> bool:
-        """Record that the engine finished a request.
-
-        Args:
-            request_id: The finished request.
-
-        Returns:
-            True if the request still has pending operations (the caller
-            must defer session teardown until the request appears in a
-            :class:`DrainResult`'s ``released_requests``); False if nothing
-            is pending and the caller may tear down immediately.
-        """
-        state = self._request_lifecycle.get(request_id)
-        if self._pending_ops.contains_request(request_id) or (
-            state is not None and state.in_flight
-        ):
-            self._lifecycle(request_id).finished = True
-            return True
-        if state is not None:
-            state.prefix_broken = False
-            self._prune_lifecycle(request_id)
-        return False
+    def has_pending_request(self, request_id: str) -> bool:
+        """Whether this request currently owns buffered operations."""
+        return self._pending_ops.contains_request(request_id)
 
     def drop_request(self, request_id: str) -> int:
-        """Discard all pending operations of a request.
-
-        Called when the buffered state becomes stale: today only when a
-        preempted request's tracker is reset (after resume it re-produces
-        store metadata from token zero, overlapping anything still
-        buffered). An abort does not drop: it routes through
-        :meth:`mark_request_finished` and the buffered ops stay storable.
-        An in-flight batch is deliberately not forgotten: it
-        stays tracked until its completion receipt arrives via
-        :meth:`notify_stored`, so an operation re-admitted after the drop
-        cannot be emitted while the worker still holds an outstanding
-        store for the request (one in-flight batch per request). The
-        controller advances the store epoch at reset, so a later failure of
-        the old batch is filtered before it reaches this policy.
-
-        Precondition: the request is not finished with deferred teardown
-        (:meth:`mark_request_finished` returned True and no release arrived
-        yet). The drop discards the finished marker without emitting a
-        release, so violating this would leak the caller's session. The only
-        call site today -- the preemption tracker reset -- satisfies it:
-        a finished request is never rescheduled, hence never preempted, and
-        a reused id is stripped of its predecessor's marker by
-        :meth:`reclaim_finished_request` before the successor can be
-        preempted.
-
-        Args:
-            request_id: The request to discard.
-
-        Returns:
-            The number of operations discarded.
-        """
+        """Discard buffered operations invalidated by a tracker reset."""
         dropped = self._pending_ops.pop_request(request_id)
+        self._broken_prefixes.discard(request_id)
         self._counters.dropped_on_request_drop += len(dropped)
-        state = self._request_lifecycle.get(request_id)
-        if state is not None:
-            state.finished = False
-            state.prefix_broken = False
-            self._prune_lifecycle(request_id)
         return len(dropped)
 
-    def reclaim_finished_request(self, request_id: str) -> bool:
-        """Release a finished predecessor's residual state on id reuse.
-
-        In lazy mode the engine frees a finished request's id immediately
-        (``request_finished`` returns False), so a client may submit a new
-        request under an id whose previous owner still has buffered
-        operations or an in-flight batch (teardown deferred). Must be
-        called when the caller first sees such a new request; without it
-        the two requests' state conflates: the predecessor's eviction drop
-        would prefix-close over the successor's intact operations, and the
-        deferred session release would fire while the successor is live.
-
-        The predecessor's buffered operations are discarded along with its
-        finished marker. The marker must not survive the reclaim: the
-        successor is live by definition (the reclaim is triggered by its
-        arrival), so a kept
-        marker would authorize a premature session teardown at the batch's
-        completion receipt -- or, worse, ride until the successor's own
-        receipt or eviction drop and tear down mid-request. The id-keyed
-        session instead covers both requests and ends once, through the
-        successor's own lifecycle (:meth:`mark_request_finished` re-creates
-        the marker when the successor finishes); the predecessor's receipt
-        only clears the in-flight hold.
-
-        Args:
-            request_id: The reused request id.
-
-        Returns:
-            True if the caller must end the predecessor's session now;
-            False if there was nothing to reclaim or the session teardown
-            merges into the successor's lifecycle (in-flight batch).
-        """
-        state = self._request_lifecycle.get(request_id)
-        if state is None or not state.finished:
-            return False
+    def discard_for_reuse(self, request_id: str) -> int:
+        """Discard a finished predecessor's buffered policy state."""
         dropped = self._pending_ops.pop_request(request_id)
+        self._broken_prefixes.discard(request_id)
         self._counters.dropped_id_reuse += len(dropped)
-        state.prefix_broken = False
-        state.finished = False
-        if state.in_flight:
-            return False
-        self._prune_lifecycle(request_id)
-        return True
+        return len(dropped)
+
+    def release_request(self, request_id: str) -> None:
+        """Forget non-pending policy state after current-session teardown."""
+        self._broken_prefixes.discard(request_id)
 
     def mark_store_failed(self, request_id: str) -> int:
         """Record that the request's in-flight store batch failed.
 
         The request's stored prefix chain is broken: its held-back pending
         operations are dropped (stored without the failed prefix they would
-        be unreachable) and further admissions are rejected. The finished
-        and in-flight markers are left untouched, so the completion receipt
-        that accompanies the failure still tears the request down through
-        :meth:`notify_stored` as usual.
+        be unreachable) and further admissions are rejected. Receipt and
+        request lifecycle remain entirely controller-owned.
 
         The controller only calls this method for a batch from the current
         store epoch. Failures from an epoch made stale by reset or id reuse
@@ -767,7 +649,7 @@ class EvictionAwareStoreQueue:
         """
         dropped = self._pending_ops.pop_request(request_id)
         self._counters.dropped_failed_store += len(dropped)
-        self._lifecycle(request_id).prefix_broken = True
+        self._broken_prefixes.add(request_id)
         return len(dropped)
 
     def num_pending_ops(self) -> int:
@@ -778,7 +660,7 @@ class EvictionAwareStoreQueue:
         """Return a copy of the cumulative policy counters."""
         return replace(self._counters)
 
-    def collect_due(self) -> DrainResult:
+    def collect_due(self, blocked_request_ids: set[str] | None = None) -> DrainResult:
         """Release the operations whose blocks face imminent eviction.
 
         For every pending request, first drops the suffix of its operation
@@ -806,6 +688,7 @@ class EvictionAwareStoreQueue:
             :class:`DrainResult`.
         """
         result = DrainResult()
+        blocked_request_ids = blocked_request_ids or set()
         if not self._pending_ops:
             return result
 
@@ -835,8 +718,7 @@ class EvictionAwareStoreQueue:
             if not ops:
                 self._pending_ops.validation_complete(request_id)
                 continue
-            state = self._request_lifecycle.get(request_id)
-            if state is not None and state.in_flight:
+            if request_id in blocked_request_ids:
                 # One in-flight store batch per request (worker constraint).
                 # Keep an allocation-triggered validation pending: after the
                 # receipt, the held-back ops still need their snapshots
@@ -897,7 +779,7 @@ class EvictionAwareStoreQueue:
                 # extend the emission shift.
                 result.dropped_short_prefix.extend(surviving)
                 self._counters.rejected_short_prefix += len(surviving)
-                self._lifecycle(request_id).prefix_broken = True
+                self._broken_prefixes.add(request_id)
                 self._replace_pending(request_id, surviving, [], result)
                 continue
             emitted = due_ops[:budget]
@@ -913,43 +795,11 @@ class EvictionAwareStoreQueue:
             }
             emitted_free_blocks.update(newly_pinned_free_blocks)
             emitted_blocks += len(newly_pinned_free_blocks)
-            # Mark in flight before updating pending state so that a request
-            # fully drained by this emission is not released until the store
-            # completion arrives via notify_stored().
-            self._lifecycle(request_id).in_flight = True
             remaining = surviving[len(emitted) :]
             self._replace_pending(request_id, emitted, remaining, result)
         if result.ops_held_back:
             self._counters.throttled_drains += 1
         return result
-
-    def notify_stored(self, request_id: str) -> bool:
-        """Record that a request's in-flight store batch completed (or was
-        drained by an unhealthy worker).
-
-        Re-enables emission of the request's remaining pending operations.
-
-        Args:
-            request_id: The request whose store completion was reported.
-
-        Returns:
-            True if the request is finished and has nothing pending -- the
-            caller may now safely tear down its session; False otherwise.
-        """
-        state = self._request_lifecycle.get(request_id)
-        if state is None:
-            return False
-        state.in_flight = False
-        if self._pending_ops.contains_request(request_id):
-            self._prune_lifecycle(request_id)
-            return False
-        if state.finished:
-            state.finished = False
-            state.prefix_broken = False
-            self._prune_lifecycle(request_id)
-            return True
-        self._prune_lifecycle(request_id)
-        return False
 
     def _max_emission_shift_blocks(self) -> int:
         """Safe upper bound on one drain's free-queue pin cascade.
@@ -998,7 +848,7 @@ class EvictionAwareStoreQueue:
         dropped = ops[first_lost:]
         result.dropped_evicted.extend(dropped)
         self._counters.dropped_evicted += len(dropped)
-        self._lifecycle(request_id).prefix_broken = True
+        self._broken_prefixes.add(request_id)
         surviving = ops[:first_lost]
         self._replace_pending(request_id, dropped, surviving, result)
         return surviving
@@ -1083,13 +933,7 @@ class EvictionAwareStoreQueue:
         remaining: list[PendingStoreOp],
         result: DrainResult,
     ) -> None:
-        """Replace pending ops and release a drained finished request."""
+        """Replace pending ops and report requests whose buffer became empty."""
         self._pending_ops.replace_request(request_id, departed, remaining)
-        if remaining:
-            return
-        state = self._request_lifecycle.get(request_id)
-        if state is not None and state.finished and not state.in_flight:
-            state.finished = False
-            state.prefix_broken = False
-            self._prune_lifecycle(request_id)
-            result.released_requests.append(request_id)
+        if not remaining:
+            result.emptied_requests.append(request_id)

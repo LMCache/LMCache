@@ -297,11 +297,11 @@ class LazyOffloadManager:
                 [pool.blocks[block_id] for block_id in batch.block_ids],
                 prepend=True,
             )
-            if self._pending_store.notify_store_complete(
+            if not self._pending_store.has_pending_request(
                 request_id
             ) and self._requests.can_end_session(request_id):
                 actions.sessions_to_end.append(request_id)
-                self._requests.session_ended(request_id)
+                self._release_current_session(request_id)
         return actions
 
     def on_request_finished(self, request_id: str) -> LazyOffloadActions:
@@ -315,11 +315,11 @@ class LazyOffloadManager:
             or in flight; otherwise an empty action.
         """
         self._requests.finish(request_id)
-        if self._pending_store.mark_req_finished(request_id):
+        if self._pending_store.has_pending_request(request_id):
             return LazyOffloadActions()
         if self._requests.has_in_flight(request_id):
             return LazyOffloadActions()
-        self._requests.session_ended(request_id)
+        self._release_current_session(request_id)
         return LazyOffloadActions(sessions_to_end=[request_id])
 
     def on_request_reset(self, request_id: str) -> int:
@@ -352,8 +352,13 @@ class LazyOffloadManager:
             A predecessor session-release action when no in-flight batch is
             carrying that release; otherwise an empty action.
         """
+        reused_finished_id = self._requests.is_finished(request_id)
+        predecessor_in_flight = self._requests.has_in_flight(request_id)
         self._requests.arrive(request_id)
-        if not self._pending_store.reclaim_finished_request(request_id):
+        if not reused_finished_id:
+            return LazyOffloadActions()
+        self._pending_store.discard_for_reuse(request_id)
+        if predecessor_in_flight:
             return LazyOffloadActions()
         logger.info(
             "Lazy offload: request id %s reused while its predecessor's "
@@ -382,7 +387,7 @@ class LazyOffloadManager:
             est_next_step_blocks,
             _allocated_block_ids(scheduler_output),
         )
-        result = self._pending_store.collect_due()
+        result = self._pending_store.collect_due(self._requests.in_flight_request_ids())
 
         ops_by_request: dict[str, list[LMCacheMPRequestMetadata]] = {}
         blocks_by_request: dict[str, list[int]] = {}
@@ -408,18 +413,22 @@ class LazyOffloadManager:
             pool.touch([pool.blocks[block_id] for block_id in block_ids])
             self._requests.register_batch(request_id, block_ids)
 
-        for request_id in result.released_requests:
-            self._requests.session_ended(request_id)
+        sessions_to_end = []
+        for request_id in result.emptied_requests:
+            if self._requests.can_end_session(request_id):
+                sessions_to_end.append(request_id)
+                self._release_current_session(request_id)
         return LazyOffloadActions(
             stores_to_submit=stores_to_submit,
-            sessions_to_end=result.released_requests,
+            sessions_to_end=sessions_to_end,
         )
 
     def _drain_fifo(self, pool: "BlockPool") -> LazyOffloadActions:
         """Run the legacy FIFO drain with ex-post hash validation."""
         actions = LazyOffloadActions()
         for item in self._pending_store.pop_items_for_offload(
-            self._requests.in_flight_request_ids()
+            self._requests.finished_request_ids(),
+            self._requests.in_flight_request_ids(),
         ):
             valid_metas: list[LMCacheMPRequestMetadata] = []
             valid_block_ids: list[int] = []
@@ -446,11 +455,16 @@ class LazyOffloadManager:
                 valid_block_ids.extend(gpu_block_ids)
             if not valid_metas:
                 actions.sessions_to_end.append(item.request_id)
-                self._requests.session_ended(item.request_id)
+                self._release_current_session(item.request_id)
                 continue
             actions.stores_to_submit.append(_coalesce_store_metadata(valid_metas))
             self._requests.register_batch(item.request_id, valid_block_ids)
         return actions
+
+    def _release_current_session(self, request_id: str) -> None:
+        """Clear policy and controller state for a settled current epoch."""
+        self._pending_store.release_request(request_id)
+        self._requests.session_ended(request_id)
 
     def _require_block_pool(self) -> "BlockPool":
         """Return the bound block pool or reject an invalid lifecycle call."""

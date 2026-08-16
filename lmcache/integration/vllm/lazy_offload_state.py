@@ -78,6 +78,17 @@ class LazyOffloadRequestRegistry:
         slot.phase = RequestPhase.FINISHED
         slot.awaiting_rearrival = False
 
+    def is_finished(self, request_id: str) -> bool:
+        slot = self._slots.get(request_id)
+        return slot is not None and slot.phase is RequestPhase.FINISHED
+
+    def finished_request_ids(self) -> set[str]:
+        return {
+            request_id
+            for request_id, slot in self._slots.items()
+            if slot.phase is RequestPhase.FINISHED
+        }
+
     def is_active(self, request_id: str) -> bool:
         slot = self._slots.get(request_id)
         return slot is not None and slot.phase is RequestPhase.ACTIVE

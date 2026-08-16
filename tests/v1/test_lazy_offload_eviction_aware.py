@@ -355,39 +355,9 @@ class TestStoreFailure:
 
         assert queue.mark_store_failed("req") == 1  # held-back op dropped
         assert queue.stats().dropped_failed_store == 1
-        assert queue.notify_stored("req") is False  # request still running
 
         result = queue.admit(make_op("req", [2], pool, prefix_end_tokens=512))
         assert result is AdmitResult.REJECTED_PREFIX_BROKEN
-
-    def test_store_failure_of_finished_request_still_allows_teardown(self) -> None:
-        pool = FakePoolView()
-        seed_blocks(pool, [1], free=True)
-        queue = make_queue(pool, horizon_steps=1.0)
-        queue.admit(make_op("req", [1], pool, prefix_end_tokens=256))
-        assert queue.mark_request_finished("req") is True
-        queue.observe_step(new_blocks_allocated=1, est_next_step_blocks=0)
-        assert len(queue.collect_due().to_store) == 1
-
-        queue.mark_store_failed("req")
-        assert queue.notify_stored("req") is True
-
-    def test_prefix_broken_cleared_when_finished_request_releases(self) -> None:
-        """Teardown clears the broken-prefix mark, so a reused request id
-        does not inherit it."""
-        pool = FakePoolView()
-        seed_blocks(pool, [1], free=True)
-        queue = make_queue(pool, horizon_steps=1.0)
-        queue.admit(make_op("req", [1], pool, prefix_end_tokens=256))
-        assert queue.mark_request_finished("req") is True
-        queue.observe_step(new_blocks_allocated=1, est_next_step_blocks=0)
-        assert len(queue.collect_due().to_store) == 1  # in flight
-        queue.mark_store_failed("req")  # prefix broken while in flight
-        assert queue.notify_stored("req") is True  # teardown clears the mark
-
-        seed_blocks(pool, [2], free=False)
-        result = queue.admit(make_op("req", [2], pool, prefix_end_tokens=256))
-        assert result is AdmitResult.ADMITTED
 
     def test_failure_of_fresh_batch_after_reset_is_honored(self) -> None:
         """A current-epoch failure after reset breaks the chain as usual."""
@@ -398,7 +368,6 @@ class TestStoreFailure:
         queue.observe_step(new_blocks_allocated=1, est_next_step_blocks=0)
         assert len(queue.collect_due().to_store) == 1
         queue.drop_request("req")
-        queue.notify_stored("req")  # stale batch's receipt clears the mark
 
         seed_blocks(pool, [2], free=True)
         seed_blocks(pool, [3], free=False)
@@ -430,8 +399,7 @@ class TestContentDeduplication:
         )
         assert queue.num_pending_ops() == 1
         assert queue.stats().deduplicated == 1
-        # req-b has nothing pending: its session may be torn down now.
-        assert queue.mark_request_finished("req-b") is False
+        assert not queue.has_pending_request("req-b")
 
     def test_hot_prefix_requests_keep_one_pending_op(self) -> None:
         """The round-2 repro: a hot shared prefix must not grow the queue
@@ -444,8 +412,7 @@ class TestContentDeduplication:
             request_id = f"req-{i}"
             queue.admit(make_op(request_id, [1, 2], pool, prefix_end_tokens=256))
             queue.collect_due()
-            deferred = queue.mark_request_finished(request_id)
-            assert deferred is (i == 0), "only the buffering request defers"
+            assert queue.has_pending_request(request_id) is (i == 0)
         assert queue.num_pending_ops() == 1
 
     def test_different_salt_is_not_deduplicated(self) -> None:
@@ -624,7 +591,6 @@ class TestEmissionContiguity:
     def test_post_hole_op_emitted_in_next_batch_after_receipt(self) -> None:
         _, queue = self._queue_with_hole()
         queue.collect_due()
-        queue.notify_stored("req")
         result = queue.collect_due()
         assert [op.prefix_end_tokens for op in result.to_store] == [768]
         assert queue.num_pending_ops() == 0
@@ -673,7 +639,6 @@ class TestDrainOrderingAndCap:
         first = queue.collect_due()
         assert [op.prefix_end_tokens for op in first.to_store] == [256]
         assert queue.num_pending_ops() == 1
-        queue.notify_stored("req")  # first batch completes
         queue.observe_step(new_blocks_allocated=2, est_next_step_blocks=0)
         second = queue.collect_due()
         assert [op.prefix_end_tokens for op in second.to_store] == [512]
@@ -798,240 +763,43 @@ class TestPinCascadeShift:
         assert queue.num_pending_ops() == 1
 
 
-class TestRequestLifecycle:
-    def test_finished_request_released_only_after_store_completes(self) -> None:
-        pool = FakePoolView()
-        seed_blocks(pool, [1], free=True)
-        queue = make_queue(pool, horizon_steps=1.0)
-        queue.admit(make_op("req", [1], pool, prefix_end_tokens=256))
-        assert queue.mark_request_finished("req") is True
-        queue.observe_step(new_blocks_allocated=1, est_next_step_blocks=0)
-        result = queue.collect_due()
-        assert len(result.to_store) == 1
-        # The emitted batch is in flight: not released until completion.
-        assert result.released_requests == []
-        assert queue.notify_stored("req") is True
-
-    def test_finish_while_in_flight_defers_release(self) -> None:
-        pool = FakePoolView()
-        seed_blocks(pool, [1], free=True)
-        queue = make_queue(pool, horizon_steps=1.0)
-        queue.admit(make_op("req", [1], pool, prefix_end_tokens=256))
-        queue.observe_step(new_blocks_allocated=1, est_next_step_blocks=0)
-        assert len(queue.collect_due().to_store) == 1
-        # Request finishes while its only batch is still in flight.
-        assert queue.mark_request_finished("req") is True
-        assert queue.notify_stored("req") is True
-
-    def test_in_flight_request_held_back_until_notify(self) -> None:
+class TestControllerEligibilityInputs:
+    def test_blocked_request_is_held_until_controller_unblocks_it(self) -> None:
         pool = FakePoolView()
         seed_blocks(pool, [1, 2], free=True)
         queue = make_queue(pool, horizon_steps=1.0, max_drain_per_step=1)
         queue.admit(make_op("req", [1], pool, prefix_end_tokens=256))
         queue.admit(make_op("req", [2], pool, prefix_end_tokens=512))
         queue.observe_step(new_blocks_allocated=2, est_next_step_blocks=0)
-        first = queue.collect_due()
-        assert [op.prefix_end_tokens for op in first.to_store] == [256]
-        # Second op is due but the request has a batch in flight.
-        queue.observe_step(new_blocks_allocated=2, est_next_step_blocks=0)
-        assert queue.collect_due().to_store == []
-        assert queue.notify_stored("req") is False  # still one op pending
-        queue.observe_step(new_blocks_allocated=2, est_next_step_blocks=0)
-        second = queue.collect_due()
-        assert [op.prefix_end_tokens for op in second.to_store] == [512]
 
-    def test_finish_with_nothing_pending_releases_immediately(self) -> None:
-        queue = make_queue(FakePoolView())
-        assert queue.mark_request_finished("req") is False
-
-    def test_drop_request_discards_pending_ops(self) -> None:
-        pool = FakePoolView()
-        seed_blocks(pool, [1, 2], free=False)
-        queue = make_queue(pool)
-        queue.admit(make_op("req", [1], pool, prefix_end_tokens=256))
-        queue.admit(make_op("req", [2], pool, prefix_end_tokens=512))
-        assert queue.drop_request("req") == 2
-        assert queue.num_pending_ops() == 0
-        assert queue.stats().dropped_on_request_drop == 2
-
-    def test_drop_request_keeps_in_flight_batch_tracked(self) -> None:
-        """Dropping a request's pending ops must not forget its in-flight
-        batch: an op re-admitted afterwards (e.g. after a preemption
-        resume) stays blocked until the completion receipt arrives via
-        ``notify_stored`` -- the worker allows one outstanding store per
-        request."""
-        pool = FakePoolView()
-        seed_blocks(pool, [1, 2], free=True)
-        # horizon covers both queue ranks: block 2 is due at every step.
-        queue = make_queue(pool, horizon_steps=2.0)
-        queue.admit(make_op("req", [1], pool, prefix_end_tokens=256))
-        queue.observe_step(new_blocks_allocated=1, est_next_step_blocks=0)
-        assert len(queue.collect_due().to_store) == 1  # now in flight
-        assert queue.drop_request("req") == 0  # nothing left pending
-
-        queue.admit(make_op("req", [2], pool, prefix_end_tokens=256))
-        queue.observe_step(new_blocks_allocated=1, est_next_step_blocks=0)
-        assert queue.collect_due().to_store == []  # held back
-
-        assert queue.notify_stored("req") is False
-        queue.observe_step(new_blocks_allocated=1, est_next_step_blocks=0)
+        assert len(queue.collect_due().to_store) == 1
+        assert queue.collect_due({"req"}).to_store == []
         assert len(queue.collect_due().to_store) == 1
 
-
-class TestIdReuseReclaim:
-    """vLLM frees a finished lazy request's id immediately, so a client may
-    reuse it while the predecessor's teardown is still deferred. The caller
-    reclaims the residual state when it first sees the successor."""
-
-    def test_reclaim_releases_pending_predecessor(self) -> None:
+    def test_discard_for_reuse_clears_buffer_and_prefix_state(self) -> None:
         pool = FakePoolView()
-        seed_blocks(pool, [1], free=True)
+        seed_blocks(pool, [1], free=False)
         queue = make_queue(pool)
         queue.admit(make_op("req", [1], pool, prefix_end_tokens=256))
-        assert queue.mark_request_finished("req") is True
-        # The caller must end the predecessor's session now; its buffered
-        # op is discarded and its content key released.
-        assert queue.reclaim_finished_request("req") is True
-        assert queue.num_pending_ops() == 0
-        assert queue.stats().dropped_id_reuse == 1
+        queue.mark_store_failed("req")
+
+        assert queue.discard_for_reuse("req") == 0
         assert (
             queue.admit(make_op("req", [1], pool, prefix_end_tokens=256))
             is AdmitResult.ADMITTED
         )
-        # The successor's own lifecycle is unaffected by the reclaim.
-        assert queue.mark_request_finished("req") is True
 
-    def test_reclaim_without_finished_marker_is_a_noop(self) -> None:
-        """A live request's state must never be reclaimed: only an id whose
-        previous owner finished with deferred teardown carries residue."""
+    def test_release_request_clears_non_pending_prefix_state(self) -> None:
         pool = FakePoolView()
-        seed_blocks(pool, [1], free=True)
+        seed_blocks(pool, [1], free=False)
         queue = make_queue(pool)
-        queue.admit(make_op("req", [1], pool, prefix_end_tokens=256))
-        assert queue.reclaim_finished_request("req") is False
-        assert queue.num_pending_ops() == 1
-        assert queue.reclaim_finished_request("unknown") is False
+        queue.mark_store_failed("req")
+        queue.release_request("req")
 
-    def test_reclaim_with_in_flight_batch_defers_release_to_receipt(self) -> None:
-        """An in-flight batch keeps the merged session alive."""
-        pool = FakePoolView()
-        seed_blocks(pool, [1, 2], free=True)
-        queue = make_queue(pool, horizon_steps=2.0)
-        queue.admit(make_op("req", [1], pool, prefix_end_tokens=256))
-        queue.observe_step(new_blocks_allocated=1, est_next_step_blocks=0)
-        assert len(queue.collect_due().to_store) == 1  # in flight
-        queue.admit(make_op("req", [2], pool, prefix_end_tokens=512))  # held back
-        assert queue.mark_request_finished("req") is True
-
-        assert queue.reclaim_finished_request("req") is False
-        assert queue.num_pending_ops() == 0  # held-back op discarded
-        # The receipt arrives with the successor's op pending: the merged
-        # session now rides the successor's lifecycle, not the corpse's.
-        assert queue.notify_stored("req") is False
-
-    def test_receipt_after_reclaim_never_tears_down_the_live_successor(self) -> None:
-        """The successor is live when the reclaim fires, so the
-        predecessor's receipt must not authorize a teardown even when the
-        successor has admitted nothing yet; the merged session ends through
-        the successor's own finish."""
-        pool = FakePoolView()
-        seed_blocks(pool, [1], free=True)
-        queue = make_queue(pool, horizon_steps=1.0)
-        queue.admit(make_op("req", [1], pool, prefix_end_tokens=256))
-        queue.observe_step(new_blocks_allocated=1, est_next_step_blocks=0)
-        assert len(queue.collect_due().to_store) == 1
-        assert queue.mark_request_finished("req") is True
-        assert queue.reclaim_finished_request("req") is False
-        assert queue.notify_stored("req") is False
-        # The successor finishes with nothing buffered: immediate teardown.
-        assert queue.mark_request_finished("req") is False
-
-    def test_successor_receipt_not_poisoned_by_predecessor_marker(self) -> None:
-        """The predecessor's stale finished marker must not survive the
-        reclaim: the successor's own batch receipt would otherwise return
-        True and end a running request's session."""
-        pool = FakePoolView()
-        seed_blocks(pool, [1], free=True)
-        queue = make_queue(pool, horizon_steps=2.0)
-        queue.admit(make_op("req", [1], pool, prefix_end_tokens=256))
-        queue.observe_step(new_blocks_allocated=1, est_next_step_blocks=0)
-        assert len(queue.collect_due().to_store) == 1
-        assert queue.mark_request_finished("req") is True
-        assert queue.reclaim_finished_request("req") is False
-
-        # The live successor buffers a chunk; the predecessor's receipt
-        # arrives while it is pending (no teardown, marker consumed).
-        seed_blocks(pool, [2], free=True)
-        queue.admit(make_op("req", [2], pool, prefix_end_tokens=256))
-        assert queue.notify_stored("req") is False
-
-        # The successor's own chunk is emitted and its receipt arrives
-        # while the successor is still running: no teardown.
-        queue.observe_step(new_blocks_allocated=1, est_next_step_blocks=0)
-        assert len(queue.collect_due().to_store) == 1
-        assert queue.notify_stored("req") is False
-
-    def test_successor_eviction_drop_not_poisoned_by_predecessor_marker(
-        self,
-    ) -> None:
-        """An eviction drop of the live successor's pending op must not
-        release the request (the connector would end a running request's
-        session) and must leave the successor blacklisted for its now
-        unreachable later chunks."""
-        pool = FakePoolView()
-        seed_blocks(pool, [1], free=True)
-        queue = make_queue(pool, horizon_steps=2.0)
-        queue.admit(make_op("req", [1], pool, prefix_end_tokens=256))
-        queue.observe_step(new_blocks_allocated=1, est_next_step_blocks=0)
-        assert len(queue.collect_due().to_store) == 1
-        assert queue.mark_request_finished("req") is True
-        assert queue.reclaim_finished_request("req") is False
-
-        seed_blocks(pool, [2], free=True)
-        queue.admit(make_op("req", [2], pool, prefix_end_tokens=256))
-        assert queue.notify_stored("req") is False
-
-        # The successor's block dies before its op comes due.
-        pool.evict(2)
-        queue.observe_step(new_blocks_allocated=0, est_next_step_blocks=0)
-        result = queue.collect_due()
-        assert len(result.dropped_evicted) == 1
-        assert result.released_requests == []
-        # The lost chunk blacklists the successor's later (unreachable)
-        # chunks; the drop must not wipe that mark.
-        seed_blocks(pool, [3], free=True)
         assert (
-            queue.admit(
-                make_op(
-                    "req",
-                    [3],
-                    pool,
-                    prefix_start_tokens=256,
-                    prefix_end_tokens=512,
-                )
-            )
-            is AdmitResult.REJECTED_PREFIX_BROKEN
+            queue.admit(make_op("req", [1], pool, prefix_end_tokens=256))
+            is AdmitResult.ADMITTED
         )
-
-    def test_successor_finishing_during_the_stale_flight_tears_down_on_receipt(
-        self,
-    ) -> None:
-        """A marker set by the successor's own finish while the
-        predecessor's batch is still in flight is legitimate: the receipt
-        is then the last event and must tear the merged session down."""
-        pool = FakePoolView()
-        seed_blocks(pool, [1], free=True)
-        queue = make_queue(pool, horizon_steps=1.0)
-        queue.admit(make_op("req", [1], pool, prefix_end_tokens=256))
-        queue.observe_step(new_blocks_allocated=1, est_next_step_blocks=0)
-        assert len(queue.collect_due().to_store) == 1
-        assert queue.mark_request_finished("req") is True
-        assert queue.reclaim_finished_request("req") is False
-
-        # The successor finishes before the predecessor's receipt lands;
-        # the in-flight hold defers its teardown to the receipt.
-        assert queue.mark_request_finished("req") is True
-        assert queue.notify_stored("req") is True
 
 
 class TestFreeQueueSnapshotBound:

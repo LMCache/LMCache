@@ -331,8 +331,9 @@ not add policy-specific branches to the connector.
 | Layer | Responsibility |
 |-------|----------------|
 | `LMCacheMPConnector` | Forward vLLM lifecycle events and apply returned actions |
-| `LazyOffloadManager` | Execute scheduler-side lazy-offload orchestration and GPU block side effects |
-| `LazyOffloadPendingStore` | Normalize configuration and dispatch to the selected queue policy |
+| `LazyOffloadManager` | Own lifecycle interpretation, scheduler-side orchestration, and GPU block side effects |
+| `LazyOffloadRequestRegistry` | Own request phase, epoch, and submitted-store batches |
+| `LazyOffloadPendingStore` | Normalize configuration and dispatch to the selected drain policy |
 | `EvictionAwareStoreQueue` / `FIFOOffloadPolicy` | Make buffering and drain decisions |
 
 Two policies are available:
@@ -347,6 +348,12 @@ Two policies are available:
 - `FIFO` is the compatibility default and preserves the original count-triggered behavior.
   It drains completed requests after the configured request threshold and
   validates their block hashes immediately before submission.
+
+Policies do not receive request-finished or store-receipt lifecycle events.
+The manager derives finished and blocked request-id sets from the registry and
+passes those as drain inputs. A policy reports buffered operations and requests
+whose buffers became empty; only the manager combines those facts with registry
+state to authorize session teardown.
 
 For either policy, the manager coalesces each request's released chunks into
 one store operation, calls `BlockPool.touch()` to pin its surviving blocks,

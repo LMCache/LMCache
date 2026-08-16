@@ -116,69 +116,50 @@ connector only forwards lifecycle events to the manager.
      layer 0 (`test_lazy_offload_eviction_aware.py`) and was not reachable on
      hardware.
 2. Once per step, call `observe_step(gross_blocks_allocated,
-   est_next_step_blocks, allocated_block_ids)` and then `collect_due()`.
-   The connector obtains the ids from the scheduler output. The queue keeps a
+   est_next_step_blocks, allocated_block_ids)` and then
+   `collect_due(in_flight_request_ids)`. The controller obtains both sets of
+   ids from scheduler output and its request registry. The queue keeps a
    block-to-request reverse index and revalidates only requests touched by
-   those allocations or represented in the bounded free-queue snapshot; a
-   caller that cannot supply ids passes `None`, which requests a compatibility
-   full-scan validation pass.
+   allocations or represented in the bounded free-queue snapshot. Requests
+   blocked by a submitted batch retain pending validation until a receipt.
 3. For every op in `DrainResult.to_store` (already ordered): pin (`touch`)
-   its blocks, **coalesce each request's released ops into one store op**
-   (the worker adapter tracks a single in-flight store future per request),
-   and put it into this step's connector metadata. `dropped_*` lists need no
-   action beyond accounting.
-4. On the store-completion receipt: unpin with `free_blocks(prepend=True)`
-   (a stored block has a copy below the GPU, so among free blocks it should
-   die first) and call `notify_stored(id)` — the queue holds back a
-   request's remaining ops while a batch is in flight; a True return means
-   the request is finished and fully drained, so its session may end.
-5. On `request_finished`: call `mark_request_finished(id)`; True means
-   stores are pending or in flight — defer `end_session` until the id
-   appears in `DrainResult.released_requests` (remaining ops all dropped) or
-   `notify_stored` returns True (stored).
-6. When the request's buffered state goes stale — today only the preemption
-   tracker reset (the recreated tracker re-produces metadata from token
-   zero, overlapping anything buffered) — call `drop_request(id)`. It
-   discards pending ops only: an in-flight batch stays tracked until its
-   receipt, so a re-admitted op cannot be emitted while the worker still
-   holds an outstanding store for the request. The controller advances the
-   store epoch, making the surviving submitted batch stale for failure
-   interpretation (see step 7). An abort is **not** a drop: it routes
-   through `request_finished` → `mark_request_finished`, and the aborted
-   request's buffered ops stay storable until drained or evicted.
-7. When a receipt reports the store **failed** (worker-side failure signal):
-   call `mark_store_failed(id)` before `notify_stored(id)`. It drops the
-   request's held-back ops and rejects its later chunks (without the failed
-   prefix they would be stored unreachable), while leaving the finished and
-   in-flight markers alone so the accompanying receipt still tears the
-   request down through `notify_stored` as usual. Before calling the policy,
-   the controller compares the submitted batch epoch with the request's
-   current epoch. It ignores an old-epoch failure because operations admitted
-   after reset or reuse do not depend on the failed prefix; the receipt still
-   clears and unpins the old batch.
-8. When a **new** request's id is first seen (tracker creation): call
-   `reclaim_finished_request(id)`. In lazy mode a finished request leaves
-   vLLM's request table immediately (`request_finished` returns False), so a
-   client-supplied id can return while its previous owner's teardown is
-   still deferred; without the reclaim the two requests' pending lists
-   conflate (the predecessor's eviction drop prefix-closes over the
-   successor's intact ops, and the deferred release fires while the
-   successor is live). The reclaim discards the predecessor's buffered ops
-   and its finished marker; a True return means the caller must
-   `end_session(id)` now, before the successor's first operation. With an
-   in-flight predecessor batch it returns False instead: successor arrival
-   advances the epoch and the id-keyed session, which now covers both requests,
-   ends once through the successor's own lifecycle — the predecessor's
-   receipt only clears the in-flight hold. The marker must not ride the
-   receipt: the successor is live when the reclaim fires, so any teardown
-   the marker later authorizes (the predecessor's receipt, the successor's
-   own receipt, or an eviction drop landing the id in
-   `released_requests`) would end a running request's session. Note which
-   deployments can produce the duplicate at all: vLLM's input processor
-   appends 8 random characters to every externally supplied id
-   (`assign_request_id`), so an HTTP client cannot force one unless the
-   engine runs with `VLLM_DISABLE_REQUEST_ID_RANDOMIZATION=1`; callers that
-   drive the engine core directly with their own ids always can.
+   its blocks, **coalesce each request's released ops into one store op**,
+   register the submitted batch and its epoch in the controller, and put it
+   into this step's connector metadata. `dropped_*` lists need no action
+   beyond accounting. `emptied_requests` is only a buffer transition; the
+   controller may end those sessions only when its registry says they are
+   finished with no submitted batch.
+4. On a store-completion receipt, the controller completes the submitted
+   batch and unpins with `free_blocks(prepend=True)` (a stored block has a
+   copy below the GPU, so among free blocks it should die first). It ends the
+   session only when the request registry says the current request is
+   finished and the policy reports no pending operations. The policy has no
+   receipt or in-flight lifecycle hook.
+5. On `request_finished`, the controller records `FINISHED` in the request
+   registry. It ends immediately only when the policy has no pending
+   operations and the registry has no submitted batch; otherwise drain or
+   receipt processing performs the same predicate later.
+6. On preemption tracker reset, the controller advances the epoch and calls
+   `drop_request(id)`. This discards buffered operations and prefix-validity
+   state only. An already submitted batch remains in the registry and blocks
+   new emission until its receipt. An abort is **not** a drop: its buffered
+   operations remain storable until drained or evicted.
+7. For a failed receipt, the controller first compares the submitted batch
+   epoch with the current request epoch. A current-epoch failure calls
+   `mark_store_failed(id)`, which drops held-back operations and marks the
+   prefix broken. An old-epoch failure does not enter the policy because
+   operations admitted after reset or reuse do not depend on it. Both paths
+   still complete the receipt and unpin the old batch.
+8. On request-id reuse, the controller detects the `FINISHED` predecessor in
+   its registry, advances the epoch, and calls `discard_for_reuse(id)`. With
+   no submitted batch it releases the predecessor session immediately. With
+   one submitted batch, the id-keyed session spans both epochs and ends once
+   through the successor's lifecycle; the predecessor receipt only removes
+   the block. This prevents predecessor state from conflating with successor
+   operations or authorizing teardown while the successor is live. vLLM's
+   HTTP input processor normally appends eight random characters to external
+   ids, but direct engine callers and deployments with
+   `VLLM_DISABLE_REQUEST_ID_RANDOMIZATION=1` can exercise this path.
 
 **Prerequisite for 1 and the dedup path**: the connector must record vLLM's
 prefix-cache hit in the tracker even when the LMCache lookup misses. In lazy
@@ -291,13 +272,12 @@ window and drain cap, not total pending queue depth. The pure-policy tests
 retain an `allocated_block_ids=None` compatibility path that performs a full
 validation pass.
 
-Request lifecycle is stored separately from pending operations in one
-per-request record (`prefix_broken`, `finished`, and `in_flight`). Stale submitted batches
-are identified by the controller's store epochs rather than policy state. This
-keeps multi-flag transitions such as preemption, id reuse, failed stores, and
-completion receipts atomic in one owner rather than synchronizing parallel
-sets. Empty lifecycle records are pruned, so completed request ids do not
-accumulate.
+Request lifecycle is not policy state. The controller registry owns request
+phase, epoch, and submitted batches; the policy receives blocked request ids as
+an input to each drain. The queue retains only prefix validity because that is
+a consequence of its store decisions. `release_request`, `drop_request`, and
+`discard_for_reuse` clear that non-pending state at controller-defined epoch
+boundaries, so completed request ids do not accumulate.
 
 ## Observability
 

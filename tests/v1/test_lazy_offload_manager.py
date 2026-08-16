@@ -1111,9 +1111,7 @@ def test_fifo_mid_request_mismatch_submits_valid_prefix() -> None:
 
 
 def test_fifo_duplicate_receipt_is_ignored() -> None:
-    """FIFO's ``notify_store_complete`` unconditionally allows teardown, so
-    without the in-flight guard a resent receipt would end the session a
-    second time."""
+    """A duplicate receipt cannot end the same session twice."""
     harness = _make_fifo_harness()
     _admit_op(harness, "req", [[1, 2]], 0, 32)
     _finish_request(harness, "req")
