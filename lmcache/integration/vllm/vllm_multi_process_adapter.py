@@ -57,6 +57,9 @@ class ExtraConfigDefault(enum.Enum):
     # Interval (seconds) between periodic heartbeat pings
     # to the server.
     heartbeat_interval = 10.0
+    # Timeout (seconds) for each heartbeat PING. Zero preserves the
+    # historical behavior of using heartbeat_interval as the timeout.
+    heartbeat_timeout = 0.0
     # Routing mode for ``create_transfer_context``: ``auto`` keeps the
     # historical CUDA -> lmcache_driven / others -> engine_driven dispatch;
     # ``lmcache_driven`` forces the IPC / SHM zero-copy path where the
@@ -74,9 +77,9 @@ DEFAULT_HEARTBEAT_INTERVAL: float = ExtraConfigDefault.heartbeat_interval.value
 
 _EXTRA_CONFIG_KEY_PREFIX = "lmcache.mp."
 
-# Floor (seconds) of the MP server's worker reap timeout. It only covers the
-# default 10 s heartbeat interval (3 x 10 s); the adapter warns at startup
-# when 3 x heartbeat_interval exceeds it (server timeout must be raised too).
+# Floor (seconds) of the MP server's worker reap timeout. It covers the default
+# 10 s heartbeat interval (3 x 10 s); the adapter warns at startup when the
+# configured heartbeat refresh gap can exceed it.
 _SERVER_REAP_TIMEOUT_FLOOR_SECONDS: float = 30.0
 
 
@@ -379,6 +382,7 @@ class HeartbeatThread(PeriodicThread):
         health_event: threading.Event,
         interval: float = DEFAULT_HEARTBEAT_INTERVAL,
         instance_id: int | None = None,
+        timeout: float = 0.0,
     ):
         """
         Args:
@@ -387,10 +391,12 @@ class HeartbeatThread(PeriodicThread):
                 Set when the server is healthy, cleared when unhealthy.
                 Adapters check this event to decide whether to proceed
                 with operations or enter degraded mode.
-            interval: Seconds between heartbeat pings and ping timeout.
+            interval: Seconds between heartbeat pings.
             instance_id: The worker's instance ID sent with each PING so the
                 server can refresh its liveness, or None for an untracked
                 prober (the scheduler adapter).
+            timeout: Seconds to wait for each PING response. A non-positive
+                value preserves legacy behavior by using ``interval``.
         """
         super().__init__(
             name="lmcache-heartbeat",
@@ -400,6 +406,7 @@ class HeartbeatThread(PeriodicThread):
         self._mq_client = mq_client
         self._health_event = health_event
         self._interval = interval
+        self._timeout = timeout if timeout > 0.0 else interval
         self._instance_id = instance_id
 
         # Optional callback invoked on the unhealthy->healthy edge,
@@ -440,7 +447,7 @@ class HeartbeatThread(PeriodicThread):
         """
         was_healthy = self._health_event.is_set()
         healthy = send_ping(
-            self._mq_client, timeout=self._interval, instance_id=self._instance_id
+            self._mq_client, timeout=self._timeout, instance_id=self._instance_id
         )
 
         if self.stop_requested:
@@ -1061,8 +1068,10 @@ class LMCacheMPWorkerAdapter:
             heartbeat_interval: Interval in seconds between heartbeat pings.
                 Ignored when ``extra_config`` is provided.
             extra_config: Optional dict with keys starting with
-                ``lmcache.mp.`` (e.g., ``lmcache.mp.mq_timeout``). When
-                provided, it overrides ``mq_timeout`` / ``heartbeat_interval``.
+                ``lmcache.mp.`` (for example, ``lmcache.mp.mq_timeout`` or
+                ``lmcache.mp.heartbeat_timeout``). When provided, it overrides
+                ``mq_timeout`` / ``heartbeat_interval`` and can independently
+                configure the heartbeat response timeout.
 
         Raises:
             TypeError: If the connector argument shape is unsupported.
@@ -1073,10 +1082,12 @@ class LMCacheMPWorkerAdapter:
             legacy_block_size,
             mq_timeout,
         )
+        heartbeat_timeout = 0.0
         if extra_config is not None:
             cfg = _resolve_extra_config(extra_config)
             mq_timeout = cfg[ExtraConfigDefault.mq_timeout.name]
             heartbeat_interval = cfg[ExtraConfigDefault.heartbeat_interval.name]
+            heartbeat_timeout = cfg[ExtraConfigDefault.heartbeat_timeout.name]
             # Only treat ``mp_transfer_mode`` as an explicit override when
             # the user actually set it in extra_config; otherwise leave it
             # as ``None`` so ``create_transfer_context`` can still consult
@@ -1169,18 +1180,27 @@ class LMCacheMPWorkerAdapter:
         # request, by which time vLLM is fully ready (model loaded,
         # KV caches allocated, warmup & CUDA graph capture done).
         self._heartbeat_interval = heartbeat_interval
+        self._heartbeat_timeout = heartbeat_timeout
         self._heartbeat: HeartbeatThread | None = None
         self._heartbeat_lock = threading.Lock()
-        if 3 * heartbeat_interval > _SERVER_REAP_TIMEOUT_FLOOR_SECONDS:
+        effective_heartbeat_timeout = (
+            heartbeat_timeout if heartbeat_timeout > 0.0 else heartbeat_interval
+        )
+        heartbeat_refresh_gap = max(
+            3 * heartbeat_interval,
+            heartbeat_interval + effective_heartbeat_timeout,
+        )
+        if heartbeat_refresh_gap > _SERVER_REAP_TIMEOUT_FLOOR_SECONDS:
             logger.warning(
-                "lmcache.mp.heartbeat_interval is %.1fs, so 3 x "
-                "heartbeat_interval (%.1fs) exceeds the MP server's "
-                "default worker reap timeout floor (%.1fs). Raise the "
-                "server's worker reap timeout to at least 3 x the "
-                "heartbeat interval, or the server may reap this "
-                "worker between heartbeats.",
+                "LMCache heartbeat refresh gap can reach %.1fs with "
+                "heartbeat_interval=%.1fs and heartbeat_timeout=%.1fs, which "
+                "exceeds the MP server's default worker reap timeout floor "
+                "(%.1fs). Raise the server's worker reap timeout above the "
+                "refresh gap, or the server may reap this worker between "
+                "heartbeats.",
+                heartbeat_refresh_gap,
                 heartbeat_interval,
-                3 * heartbeat_interval,
+                effective_heartbeat_timeout,
                 _SERVER_REAP_TIMEOUT_FLOOR_SECONDS,
             )
 
@@ -1334,6 +1354,7 @@ class LMCacheMPWorkerAdapter:
                 health_event=self._health_event,
                 interval=self._heartbeat_interval,
                 instance_id=self.instance_id,
+                timeout=self._heartbeat_timeout,
             )
             heartbeat.register_recover_callback(self._reregister_kv_caches_callback)
             heartbeat.start()

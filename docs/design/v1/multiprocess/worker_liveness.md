@@ -150,6 +150,16 @@ re-registers only on a genuine recovery edge (Section 6.2). A retrieve dropped
 while the server is unhealthy is still reported via `get_finished` so async loads
 cannot hang.
 
+The worker adapter accepts `lmcache.mp.heartbeat_interval` (default `10.0` seconds)
+for the PING cadence and `lmcache.mp.heartbeat_timeout` (default `0.0`) for the
+response deadline. A non-positive timeout inherits the interval, preserving
+legacy behavior. Deployments whose NORMAL pool can run longer than the desired
+PING cadence may set a larger timeout—for example, a 5-second interval with a
+30-second timeout—without reducing how often live workers refresh `last_seen`.
+While a PING is blocked, the refresh gap can reach `interval + timeout`, so the
+server's worker reap timeout must exceed that bound. This setting is consumed
+by the worker adapter; scheduler-adapter heartbeat behavior is unchanged.
+
 ### 6.2 Recovery after a reap
 
 ```
