@@ -389,30 +389,8 @@ class TestStoreFailure:
         result = queue.admit(make_op("req", [2], pool, prefix_end_tokens=256))
         assert result is AdmitResult.ADMITTED
 
-    def test_stale_batch_failure_spares_post_reset_ops(self) -> None:
-        """A failure receipt for a batch emitted before a drop_request reset
-        must not touch ops admitted after the reset: they were re-produced
-        from token zero and do not depend on the failed prefix."""
-        pool = FakePoolView()
-        seed_blocks(pool, [1], free=True)
-        queue = make_queue(pool, horizon_steps=2.0)
-        queue.admit(make_op("req", [1], pool, prefix_end_tokens=256))
-        queue.observe_step(new_blocks_allocated=1, est_next_step_blocks=0)
-        assert len(queue.collect_due().to_store) == 1  # batch in flight
-        queue.drop_request("req")  # preemption tracker reset
-
-        seed_blocks(pool, [2], free=False)
-        queue.admit(make_op("req", [2], pool, prefix_end_tokens=256))
-
-        assert queue.mark_store_failed("req") == 0
-        assert queue.num_pending_ops() == 1
-        seed_blocks(pool, [3], free=False)
-        result = queue.admit(make_op("req", [3], pool, prefix_end_tokens=512))
-        assert result is AdmitResult.ADMITTED
-
-    def test_failure_of_fresh_batch_after_stale_cycle_is_honored(self) -> None:
-        """The stale mark must not outlive its batch's receipt: a failure of
-        a batch emitted after the reset breaks the chain as usual."""
+    def test_failure_of_fresh_batch_after_reset_is_honored(self) -> None:
+        """A current-epoch failure after reset breaks the chain as usual."""
         pool = FakePoolView()
         seed_blocks(pool, [1], free=True)
         queue = make_queue(pool, horizon_steps=2.0)
@@ -935,9 +913,7 @@ class TestIdReuseReclaim:
         assert queue.reclaim_finished_request("unknown") is False
 
     def test_reclaim_with_in_flight_batch_defers_release_to_receipt(self) -> None:
-        """An in-flight batch keeps the session alive: the reclaim marks it
-        stale (its failure must not blacklist the successor) and the merged
-        session rides the successor's lifecycle."""
+        """An in-flight batch keeps the merged session alive."""
         pool = FakePoolView()
         seed_blocks(pool, [1, 2], free=True)
         queue = make_queue(pool, horizon_steps=2.0)
@@ -949,12 +925,6 @@ class TestIdReuseReclaim:
 
         assert queue.reclaim_finished_request("req") is False
         assert queue.num_pending_ops() == 0  # held-back op discarded
-        # The stale batch's failure does not break the successor's chain.
-        assert queue.mark_store_failed("req") == 0
-        assert (
-            queue.admit(make_op("req", [1], pool, prefix_end_tokens=256))
-            is AdmitResult.ADMITTED
-        )
         # The receipt arrives with the successor's op pending: the merged
         # session now rides the successor's lifecycle, not the corpse's.
         assert queue.notify_stored("req") is False

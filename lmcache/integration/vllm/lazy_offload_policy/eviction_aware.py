@@ -366,15 +366,9 @@ class _RequestLifecycle:
     prefix_broken: bool = False
     finished: bool = False
     in_flight: bool = False
-    stale_in_flight: bool = False
 
     def is_empty(self) -> bool:
-        return not (
-            self.prefix_broken
-            or self.finished
-            or self.in_flight
-            or self.stale_in_flight
-        )
+        return not (self.prefix_broken or self.finished or self.in_flight)
 
 
 class _PendingOperations:
@@ -678,9 +672,9 @@ class EvictionAwareStoreQueue:
         stays tracked until its completion receipt arrives via
         :meth:`notify_stored`, so an operation re-admitted after the drop
         cannot be emitted while the worker still holds an outstanding
-        store for the request (one in-flight batch per request). Such a
-        batch is marked stale: operations admitted after the reset do not
-        depend on it, so its failure no longer breaks their prefix chain.
+        store for the request (one in-flight batch per request). The
+        controller advances the store epoch at reset, so a later failure of
+        the old batch is filtered before it reaches this policy.
 
         Precondition: the request is not finished with deferred teardown
         (:meth:`mark_request_finished` returned True and no release arrived
@@ -704,8 +698,6 @@ class EvictionAwareStoreQueue:
         if state is not None:
             state.finished = False
             state.prefix_broken = False
-            if state.in_flight:
-                state.stale_in_flight = True
             self._prune_lifecycle(request_id)
         return len(dropped)
 
@@ -722,9 +714,9 @@ class EvictionAwareStoreQueue:
         deferred session release would fire while the successor is live.
 
         The predecessor's buffered operations are discarded along with its
-        finished marker. An in-flight batch is additionally marked stale.
-        The marker must not survive the reclaim: the successor is live by
-        definition (the reclaim is triggered by its arrival), so a kept
+        finished marker. The marker must not survive the reclaim: the
+        successor is live by definition (the reclaim is triggered by its
+        arrival), so a kept
         marker would authorize a premature session teardown at the batch's
         completion receipt -- or, worse, ride until the successor's own
         receipt or eviction drop and tear down mid-request. The id-keyed
@@ -749,7 +741,6 @@ class EvictionAwareStoreQueue:
         state.prefix_broken = False
         state.finished = False
         if state.in_flight:
-            state.stale_in_flight = True
             return False
         self._prune_lifecycle(request_id)
         return True
@@ -764,9 +755,9 @@ class EvictionAwareStoreQueue:
         that accompanies the failure still tears the request down through
         :meth:`notify_stored` as usual.
 
-        A failure of a batch made stale by :meth:`drop_request` is ignored:
-        operations admitted after the reset were re-produced from token
-        zero and do not depend on the failed prefix.
+        The controller only calls this method for a batch from the current
+        store epoch. Failures from an epoch made stale by reset or id reuse
+        are filtered there because they do not break the current prefix.
 
         Args:
             request_id: The request whose store failed.
@@ -774,9 +765,6 @@ class EvictionAwareStoreQueue:
         Returns:
             The number of pending operations dropped.
         """
-        state = self._request_lifecycle.get(request_id)
-        if state is not None and state.stale_in_flight:
-            return 0
         dropped = self._pending_ops.pop_request(request_id)
         self._counters.dropped_failed_store += len(dropped)
         self._lifecycle(request_id).prefix_broken = True
@@ -952,7 +940,6 @@ class EvictionAwareStoreQueue:
         if state is None:
             return False
         state.in_flight = False
-        state.stale_in_flight = False
         if self._pending_ops.contains_request(request_id):
             self._prune_lifecycle(request_id)
             return False

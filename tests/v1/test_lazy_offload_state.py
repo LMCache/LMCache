@@ -19,6 +19,15 @@ def test_preemption_reset_advances_epoch_once_across_rearrival() -> None:
     assert registry.arrive("req") == 1
 
 
+def test_reset_makes_existing_batch_stale() -> None:
+    registry = LazyOffloadRequestRegistry()
+    registry.register_batch("req", [1])
+    assert registry.in_flight_is_current("req")
+
+    registry.reset("req")
+    assert not registry.in_flight_is_current("req")
+
+
 def test_finished_id_reuse_advances_epoch_and_keeps_old_batch() -> None:
     registry = LazyOffloadRequestRegistry()
     registry.arrive("req")
@@ -27,6 +36,7 @@ def test_finished_id_reuse_advances_epoch_and_keeps_old_batch() -> None:
 
     assert registry.arrive("req") == 1
     assert registry.is_active("req")
+    assert not registry.in_flight_is_current("req")
     batch = registry.complete_batch("req")
     assert batch.epoch == 0
     assert batch.block_ids == (1, 2)

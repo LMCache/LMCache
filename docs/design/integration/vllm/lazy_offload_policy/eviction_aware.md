@@ -141,8 +141,9 @@ connector only forwards lifecycle events to the manager.
    zero, overlapping anything buffered) — call `drop_request(id)`. It
    discards pending ops only: an in-flight batch stays tracked until its
    receipt, so a re-admitted op cannot be emitted while the worker still
-   holds an outstanding store for the request. The surviving batch is
-   marked *stale* (see step 7). An abort is **not** a drop: it routes
+   holds an outstanding store for the request. The controller advances the
+   store epoch, making the surviving submitted batch stale for failure
+   interpretation (see step 7). An abort is **not** a drop: it routes
    through `request_finished` → `mark_request_finished`, and the aborted
    request's buffered ops stay storable until drained or evicted.
 7. When a receipt reports the store **failed** (worker-side failure signal):
@@ -150,10 +151,11 @@ connector only forwards lifecycle events to the manager.
    request's held-back ops and rejects its later chunks (without the failed
    prefix they would be stored unreachable), while leaving the finished and
    in-flight markers alone so the accompanying receipt still tears the
-   request down through `notify_stored` as usual. A failure of a batch
-   marked stale by `drop_request` is ignored: ops admitted after the reset
-   were re-produced from token zero and do not depend on the failed prefix.
-   `notify_stored` clears the stale mark along with the in-flight marker.
+   request down through `notify_stored` as usual. Before calling the policy,
+   the controller compares the submitted batch epoch with the request's
+   current epoch. It ignores an old-epoch failure because operations admitted
+   after reset or reuse do not depend on the failed prefix; the receipt still
+   clears and unpins the old batch.
 8. When a **new** request's id is first seen (tracker creation): call
    `reclaim_finished_request(id)`. In lazy mode a finished request leaves
    vLLM's request table immediately (`request_finished` returns False), so a
@@ -164,8 +166,8 @@ connector only forwards lifecycle events to the manager.
    successor is live). The reclaim discards the predecessor's buffered ops
    and its finished marker; a True return means the caller must
    `end_session(id)` now, before the successor's first operation. With an
-   in-flight predecessor batch it returns False instead: the batch is
-   marked stale and the id-keyed session, which now covers both requests,
+   in-flight predecessor batch it returns False instead: successor arrival
+   advances the epoch and the id-keyed session, which now covers both requests,
    ends once through the successor's own lifecycle — the predecessor's
    receipt only clears the in-flight hold. The marker must not ride the
    receipt: the successor is live when the reclaim fires, so any teardown
@@ -290,8 +292,8 @@ retain an `allocated_block_ids=None` compatibility path that performs a full
 validation pass.
 
 Request lifecycle is stored separately from pending operations in one
-per-request record (`prefix_broken`, `finished`, `in_flight`, and
-`stale_in_flight`). This
+per-request record (`prefix_broken`, `finished`, and `in_flight`). Stale submitted batches
+are identified by the controller's store epochs rather than policy state. This
 keeps multi-flag transitions such as preemption, id reuse, failed stores, and
 completion receipts atomic in one owner rather than synchronizing parallel
 sets. Empty lifecycle records are pruned, so completed request ids do not

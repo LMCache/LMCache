@@ -266,6 +266,11 @@ class LazyOffloadManager:
         for request_id in failed_request_ids:
             if not self._requests.has_in_flight(request_id):
                 continue
+            if not self._requests.in_flight_is_current(request_id):
+                # A reset or id reuse advanced the store epoch. The old
+                # batch still owns pins, but its failure cannot break the
+                # current generation's prefix chain.
+                continue
             dropped = self._pending_store.mark_store_failed(request_id)
             logger.warning(
                 "Store failed for request %s; dropped %d held-back store "
