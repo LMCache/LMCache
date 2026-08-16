@@ -293,6 +293,8 @@ class LocalDiskBackend(StorageBackendInterface):
         dtype: torch.dtype,
         fmt: MemoryFormat,
         cached_positions: Optional[torch.Tensor] = None,
+        shapes: Optional[list[torch.Size]] = None,
+        dtypes: Optional[list[torch.dtype]] = None,
     ) -> None:
         path = self._key_to_path(key)
 
@@ -304,7 +306,15 @@ class LocalDiskBackend(StorageBackendInterface):
                 has_stored = True
             else:
                 self.dict[key] = DiskCacheMetadata(
-                    path, size, shape, dtype, cached_positions, fmt, 0
+                    path,
+                    size,
+                    shape,
+                    dtype,
+                    cached_positions,
+                    fmt,
+                    0,
+                    shapes=shapes,
+                    dtypes=dtypes,
                 )
 
         # Push kv admit msg with batching
@@ -427,6 +437,8 @@ class LocalDiskBackend(StorageBackendInterface):
             dtype = disk_meta.dtype
             shape = disk_meta.shape
             fmt = disk_meta.fmt
+            shapes = disk_meta.shapes
+            dtypes = disk_meta.dtypes
             assert dtype is not None
             assert shape is not None
 
@@ -435,7 +447,13 @@ class LocalDiskBackend(StorageBackendInterface):
         # must not hold disk_lock while waiting, or concurrent insert/evict
         # operations would deadlock.
         memory_obj = self.load_bytes_from_disk(
-            key, path, dtype=dtype, shape=shape, fmt=fmt
+            key,
+            path,
+            dtype=dtype,
+            shape=shape,
+            fmt=fmt,
+            shapes=shapes,
+            dtypes=dtypes,
         )
 
         if memory_obj is not None:
@@ -474,9 +492,15 @@ class LocalDiskBackend(StorageBackendInterface):
 
         # --- 2. Pre-allocate staging buffers (sequential) -----------------
         memory_objs = [
-            self.local_cpu_backend.allocate(m.shape, m.dtype, m.fmt)
-            if m is not None
-            else None
+            (
+                self.local_cpu_backend.allocate(
+                    m.shapes, m.dtypes, m.fmt
+                )
+                if m is not None and m.shapes is not None and m.dtypes is not None
+                else self.local_cpu_backend.allocate(m.shape, m.dtype, m.fmt)
+                if m is not None
+                else None
+            )
             for m in metas
         ]
 
@@ -551,10 +575,13 @@ class LocalDiskBackend(StorageBackendInterface):
             self.disk_lock.acquire()
             assert key in self.dict, f"Key {key} not found in disk cache after pinning"
 
-            path = self.dict[key].path
-            dtype = self.dict[key].dtype
-            shape = self.dict[key].shape
-            fmt = self.dict[key].fmt
+            disk_meta = self.dict[key]
+            path = disk_meta.path
+            dtype = disk_meta.dtype
+            shape = disk_meta.shape
+            fmt = disk_meta.fmt
+            shapes = disk_meta.shapes
+            dtypes = disk_meta.dtypes
 
             assert dtype is not None
             assert shape is not None
@@ -562,12 +589,20 @@ class LocalDiskBackend(StorageBackendInterface):
             # busy_loop=False prevents spinning on the event loop thread;
             # if staging memory is exhausted the caller will get a logged
             # error rather than a silent deadlock.
-            memory_obj = self.local_cpu_backend.allocate(
-                shape,
-                dtype,
-                fmt,
-                busy_loop=False,
-            )
+            if shapes is not None and dtypes is not None:
+                memory_obj = self.local_cpu_backend.allocate(
+                    shapes,
+                    dtypes,
+                    fmt,
+                    busy_loop=False,
+                )
+            else:
+                memory_obj = self.local_cpu_backend.allocate(
+                    shape,
+                    dtype,
+                    fmt,
+                    busy_loop=False,
+                )
 
             if memory_obj is None:
                 logger.error(
@@ -653,9 +688,20 @@ class LocalDiskBackend(StorageBackendInterface):
         dtype = memory_obj.metadata.dtype
         fmt = memory_obj.metadata.fmt
         cached_positions = memory_obj.metadata.cached_positions
+        shapes = memory_obj.metadata.shapes
+        dtypes = memory_obj.metadata.dtypes
         memory_obj.ref_count_down()
 
-        self.insert_key(key, size, shape, dtype, fmt, cached_positions=cached_positions)
+        self.insert_key(
+            key,
+            size,
+            shape,
+            dtype,
+            fmt,
+            cached_positions=cached_positions,
+            shapes=shapes,
+            dtypes=dtypes,
+        )
 
         self.disk_worker.remove_put_task(key)
 
@@ -701,12 +747,23 @@ class LocalDiskBackend(StorageBackendInterface):
         dtype: torch.dtype,
         shape: torch.Size,
         fmt: MemoryFormat,
+        shapes: Optional[list[torch.Size]] = None,
+        dtypes: Optional[list[torch.dtype]] = None,
     ) -> Optional[MemoryObj]:
         """
         Load bytearray from disk.
+
+        When ``shapes`` and ``dtypes`` are provided (multi-group memory
+        objects such as DSA dual-buffer), the allocator receives the
+        per-group shape/dtype list so the resulting ``TensorMemoryObj``
+        has a correct ``group_prefix_sum`` and ``get_tensor(i)`` works
+        for every group.
         """
 
-        memory_obj = self.local_cpu_backend.allocate(shape, dtype, fmt)
+        if shapes is not None and dtypes is not None:
+            memory_obj = self.local_cpu_backend.allocate(shapes, dtypes, fmt)
+        else:
+            memory_obj = self.local_cpu_backend.allocate(shape, dtype, fmt)
         assert memory_obj is not None, "Memory allocation failed during disk load."
 
         buffer = memory_obj.byte_array

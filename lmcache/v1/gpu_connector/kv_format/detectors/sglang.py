@@ -58,6 +58,29 @@ class SGLANG_Detector(EngineDetector):
         list_depth, tensor_ndim, first_tensor = measure_list_depth_until_tensor(
             kv_caches
         )
+        # DSA indexer cache: list[NL] of 2-D uint8 tensors. Each tensor is
+        # (num_pages, page_size * 132) where 132 = 128B fp8 key + 4B fp32 scale
+        # per token. SGLang packs the page dimension into the last axis (unlike
+        # vLLM which keeps a 3-D (NB, BS, 132) layout), so we check divisibility
+        # by 132 rather than equality. Detected before MLA since the indexer is
+        # 2-D while MLA latent is 3-D with a singleton head axis.
+        #
+        # Reshape (num_pages, page_size * 132) -> (num_pages, page_size, 132)
+        # so the tensor matches the 3-D (NB, BS, HS) layout that the
+        # NL_X_NB_BSV_BSS spec (inheriting NL_X_NB_BS_HS_Spec) expects. The
+        # spec's geometry accessors only read shape/dtype/data_ptr, so the view
+        # is safe even though the physical per-block layout interleaves values
+        # and scales differently ([BS x 128 vals][BS x 4B scales]); the
+        # transfer kernels address values and scales separately via raw ptrs.
+        if (
+            list_depth == 1
+            and tensor_ndim == 2
+            and first_tensor.dtype == torch.uint8
+            and int(first_tensor.shape[-1]) % 132 == 0
+        ):
+            bs = int(first_tensor.shape[-1]) // 132
+            kv_caches = [t.view(t.shape[0], bs, 132) for t in kv_caches]
+            return lmcache_native.EngineKVFormat.NL_X_NB_BSV_BSS, kv_caches
         if list_depth == 1 and first_tensor.shape[1] == 1:  # MLA, fused PBS
             return lmcache_native.EngineKVFormat.NL_X_NBBS_ONE_HS, kv_caches
         if list_depth == 2:

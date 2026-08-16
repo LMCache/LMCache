@@ -1,0 +1,738 @@
+<title>LMCache DSA Indexer Support</title>
+<style>
+  :root {
+    --bg: #fafafa;
+    --surface: #ffffff;
+    --border: #e2e2e2;
+    --text: #1a1a1a;
+    --text-secondary: #555;
+    --text-muted: #888;
+    --accent: #c0392b;
+    --accent-light: #fdecea;
+    --code-bg: #f4f4f4;
+    --code-border: #ddd;
+    --green: #27ae60;
+    --green-light: #eafaf1;
+    --amber: #d68910;
+    --amber-light: #fef5e7;
+    --blue: #2471a3;
+    --blue-light: #ebf5fb;
+    --font-mono: 'SF Mono', 'Cascadia Code', 'Fira Code', Consolas, monospace;
+    --font-body: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0e0e0e;
+      --surface: #1a1a1a;
+      --border: #333;
+      --text: #e0e0e0;
+      --text-secondary: #aaa;
+      --text-muted: #666;
+      --accent: #e74c3c;
+      --accent-light: #2a1515;
+      --code-bg: #161616;
+      --code-border: #2a2a2a;
+      --green: #2ecc71;
+      --green-light: #15291a;
+      --amber: #f4d03f;
+      --amber-light: #2a2410;
+      --blue: #5dade2;
+      --blue-light: #152535;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0e0e0e;
+    --surface: #1a1a1a;
+    --border: #333;
+    --text: #e0e0e0;
+    --text-secondary: #aaa;
+    --text-muted: #666;
+    --accent: #e74c3c;
+    --accent-light: #2a1515;
+    --code-bg: #161616;
+    --code-border: #2a2a2a;
+    --green: #2ecc71;
+    --green-light: #15291a;
+    --amber: #f4d03f;
+    --amber-light: #2a2410;
+    --blue: #5dade2;
+    --blue-light: #152535;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: var(--font-body);
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.65;
+    font-size: 15px;
+    -webkit-font-smoothing: antialiased;
+  }
+  .container {
+    max-width: 860px;
+    margin: 0 auto;
+    padding: 48px 32px 80px;
+  }
+  h1 {
+    font-size: 28px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    margin-bottom: 8px;
+    line-height: 1.3;
+  }
+  .subtitle {
+    color: var(--text-secondary);
+    font-size: 15px;
+    margin-bottom: 32px;
+  }
+  .badges {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 40px;
+  }
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 10px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: 600;
+    font-family: var(--font-mono);
+  }
+  .badge-accent { background: var(--accent-light); color: var(--accent); }
+  .badge-green { background: var(--green-light); color: var(--green); }
+  .badge-blue { background: var(--blue-light); color: var(--blue); }
+  .badge-amber { background: var(--amber-light); color: var(--amber); }
+  h2 {
+    font-size: 20px;
+    font-weight: 700;
+    margin-top: 40px;
+    margin-bottom: 14px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+    letter-spacing: -0.01em;
+  }
+  h3 {
+    font-size: 16px;
+    font-weight: 600;
+    margin-top: 28px;
+    margin-bottom: 10px;
+    color: var(--text);
+  }
+  p { margin-bottom: 12px; }
+  ul, ol { margin: 0 0 14px 20px; }
+  li { margin-bottom: 4px; }
+  code {
+    font-family: var(--font-mono);
+    font-size: 0.88em;
+    background: var(--code-bg);
+    padding: 1px 5px;
+    border-radius: 3px;
+    border: 1px solid var(--code-border);
+  }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--code-border);
+    border-radius: 6px;
+    padding: 14px 16px;
+    overflow-x: auto;
+    margin: 14px 0 18px;
+    font-size: 13px;
+    line-height: 1.5;
+  }
+  pre code {
+    background: none;
+    border: none;
+    padding: 0;
+    font-size: 13px;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 14px 0 18px;
+    font-size: 13.5px;
+  }
+  th {
+    text-align: left;
+    padding: 8px 10px;
+    border-bottom: 2px solid var(--border);
+    font-weight: 600;
+    color: var(--text-secondary);
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  td {
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+  td code { font-size: 12px; }
+  .num { font-variant-numeric: tabular-nums; font-family: var(--font-mono); }
+  .perf-table td:nth-child(2),
+  .perf-table td:nth-child(3),
+  .perf-table td:nth-child(4),
+  .perf-table td:nth-child(5) {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+  .highlight { color: var(--accent); font-weight: 600; }
+  .callout {
+    border-left: 3px solid var(--accent);
+    background: var(--accent-light);
+    padding: 12px 16px;
+    border-radius: 0 6px 6px 0;
+    margin: 14px 0;
+    font-size: 14px;
+  }
+  .callout-blue {
+    border-left-color: var(--blue);
+    background: var(--blue-light);
+  }
+  .callout-green {
+    border-left-color: var(--green);
+    background: var(--green-light);
+  }
+  .file-list {
+    list-style: none;
+    margin-left: 0;
+  }
+  .file-list li {
+    padding: 6px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .file-list code { font-size: 12.5px; }
+  .stat-bar {
+    display: inline-block;
+    height: 6px;
+    border-radius: 3px;
+    background: var(--green);
+    min-width: 4px;
+    vertical-align: middle;
+    margin-right: 6px;
+  }
+  .summary-box {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+    margin: 20px 0;
+  }
+  .stat-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    text-align: center;
+  }
+  .stat-card .value {
+    font-size: 28px;
+    font-weight: 700;
+    font-family: var(--font-mono);
+    color: var(--accent);
+    line-height: 1.2;
+  }
+  .stat-card .label {
+    font-size: 12px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-top: 4px;
+  }
+  .stat-card.green .value { color: var(--green); }
+  .stat-card.blue .value { color: var(--blue); }
+  hr {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 32px 0;
+  }
+  .toc {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin-bottom: 32px;
+  }
+  .toc-title {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-muted);
+    margin-bottom: 8px;
+  }
+  .toc ul { list-style: none; margin: 0; padding: 0; }
+  .toc li { padding: 2px 0; }
+  .toc a {
+    color: var(--blue);
+    text-decoration: none;
+    font-size: 14px;
+  }
+  .toc a:hover { text-decoration: underline; }
+  .arch-flow {
+    background: var(--code-bg);
+    border: 1px solid var(--code-border);
+    border-radius: 6px;
+    padding: 16px;
+    margin: 14px 0;
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    line-height: 1.7;
+    overflow-x: auto;
+    white-space: pre;
+    color: var(--text-secondary);
+  }
+  .arch-flow .arrow { color: var(--accent); }
+  .arch-flow .label { color: var(--green); }
+</style>
+
+<div class="container">
+
+<h1>LMCache DSA 索引器支持 — SGLang 集成</h1>
+<p class="subtitle">为 GLM-5.2 (Deepseek Sparse Attention) 模型实现 LMCache L2 缓存的完整适配</p>
+
+<div class="badges">
+  <span class="badge badge-accent">feat: DSA support</span>
+  <span class="badge badge-green">380 tests passed</span>
+  <span class="badge badge-blue">13.6× throughput</span>
+  <span class="badge badge-amber">IP + MP</span>
+</div>
+
+<div class="summary-box">
+  <div class="stat-card">
+    <div class="value">13</div>
+    <div class="label">改动文件</div>
+  </div>
+  <div class="stat-card green">
+    <div class="value">380</div>
+    <div class="label">测试通过</div>
+  </div>
+  <div class="stat-card blue">
+    <div class="value">13.6×</div>
+    <div class="label">L2 vs 冷启动</div>
+  </div>
+</div>
+
+<div class="toc">
+  <div class="toc-title">目录</div>
+  <ul>
+    <li><a href="#background">1. 背景与问题</a></li>
+    <li><a href="#architecture">2. 架构方案</a></li>
+    <li><a href="#changes">3. 改动文件清单</a></li>
+    <li><a href="#key-changes">4. 关键代码变更</a></li>
+    <li><a href="#bugfix">5. 顺带修复的 V3 连接器 bug</a></li>
+    <li><a href="#tests">6. 测试结果</a></li>
+    <li><a href="#perf">7. 性能对比</a></li>
+    <li><a href="#scope">8. 范围与限制</a></li>
+  </ul>
+</div>
+
+<h2 id="background">1. 背景与问题</h2>
+
+<p>GLM-5.2 是 DSA (Deepseek Sparse Attention) MoE 模型，其 KV cache 使用<strong>双缓冲区结构</strong>：</p>
+
+<ul>
+  <li><code>kv_buffer</code> — MLA 潜在 KV，fp8，<code>list[NL]</code> of <code>(size+page_size, 1, kv_cache_dim=576)</code></li>
+  <li><code>index_k_with_scale_buffer</code> — DSA 索引器，uint8，<code>list[NL]</code> of <code>(num_pages, page_size*132)</code>，其中 132 = 128B fp8 key + 4B fp32 scale</li>
+</ul>
+
+<p>LMCache 框架已有约 70% 的 DSA 基础设施（DSA 格式 spec、vLLM 检测器、<code>KVLayerGroupsManager</code> 异构层组、<code>multi_layer_kv_transfer</code> CUDA 内核），但 <strong>SGLang 集成层完全不感知 MLA/DSA</strong>：连接器硬编码 K/V 分离和 <code>kv_size=2</code>，不构建层组管理器，不使用逐层格式检测。</p>
+
+<div class="callout">
+  <strong>核心缺口</strong>：SGLang 连接器 (<code>SGLangGPUConnector</code>) 使用单格式路径 (<code>normalize_kv_and_discover_format</code>)，无法处理 DSA 的两种异构张量格式。MP 适配器硬编码 <code>k_pool + v_pool</code> 拼接，不接受融合缓冲区。
+</div>
+
+<h2 id="architecture">2. 架构方案</h2>
+
+<p>采用 <strong>方法 A：KVLayerGroupsManager</strong> — 让 SGLang 连接器遵循 vLLM V3 连接器模式，构建层组管理器，逐组传输。DSA 的两个缓冲区自然按张量形状分裂为两个 kernel group。</p>
+
+<div class="arch-flow">GLM-5.2 DSA 双缓冲区
+  <span class="arrow">├─</span> kv_buffer (MLA latent, fp8, 576-dim)     <span class="arrow">─┐</span>
+  <span class="arrow">└─</span> index_k_with_scale_buffer (uint8, 132-dim) <span class="arrow">─┤</span>
+                                                    <span class="arrow">▼</span>
+  lmc_radix_cache.py: 检测 kv_buffer + index_k_with_scale_buffer
+  <span class="arrow">→</span> 拼接为 kv_caches = kv_buffer + index_k_with_scale_buffer (flat list[2*NL])
+  <span class="arrow">→</span> 传给 LMCacheConnector / LMCacheMPConnector
+                                                    <span class="arrow">▼</span>
+  SGLangGPUConnector._initialize_pointers:
+    normalize_and_discover_per_layer_formats <span class="arrow">→</span> 按形状分裂为两组
+      <span class="label">组0</span>: MLA latent (NL_X_NBBS_ONE_HS, fp8, kv_cache_dim=576)
+      <span class="label">组1</span>: DSA 索引器 (NL_X_NB_BSV_BSS, uint8, 132)
+    KVLayerGroupsManager 构建两个 kernel group
+                                                    <span class="arrow">▼</span>
+  metadata.get_shapes() 返回两个形状
+  store()/retrieve() 分配多组 memory object
+  to_gpu/from_gpu 逐组调用 multi_layer_kv_transfer</div>
+
+<h2 id="changes">3. 改动文件清单</h2>
+
+<h3>LMCache 框架侧 (13 文件, +1038 / -195)</h3>
+
+<table>
+  <thead>
+    <tr>
+      <th>文件</th>
+      <th>改动</th>
+      <th style="text-align:right">行数</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>gpu_connector/gpu_connectors.py</code></td>
+      <td>SGLangGPUConnector 核心重写：层组感知 <code>_initialize_pointers</code>、逐组 <code>to_gpu</code>/<code>from_gpu</code>、<code>get_shape</code> MLA 修复</td>
+      <td class="num">+441</td>
+    </tr>
+    <tr>
+      <td><code>integration/sglang/multi_process_adapter.py</code></td>
+      <td>MP 适配器：<code>kv_caches</code> 单列表、<code>engine_group_infos</code> DSA 两组、逐组 block IDs</td>
+      <td class="num">+129</td>
+    </tr>
+    <tr>
+      <td><code>integration/sglang/sglang_adapter.py</code></td>
+      <td><code>init_lmcache_engine</code> MLA kv_shape；<code>LMCacheConnector</code> 接受 <code>kv_caches</code></td>
+      <td class="num">+113</td>
+    </tr>
+    <tr>
+      <td><code>v1/kv_layer_groups.py</code></td>
+      <td><code>group_layers_by_identity</code> 增加 <code>per_layer_tokens_per_block</code> fallback；NBBS-fused 格式 <code>block_size</code> 容错</td>
+      <td class="num">+41</td>
+    </tr>
+    <tr>
+      <td><code>v1/cache_engine.py</code></td>
+      <td><code>post_init</code> 及早初始化 <code>KVLayerGroupsManager</code>（避免 <code>get_shapes</code> 在 store 前返回单组）</td>
+      <td class="num">+24</td>
+    </tr>
+    <tr>
+      <td><code>gpu_connector/__init__.py</code></td>
+      <td>SGLang 路径传 <code>use_mla</code>/<code>metadata</code>/<code>layout_hints</code>；层式 MLA 守卫</td>
+      <td class="num">+15</td>
+    </tr>
+    <tr>
+      <td><code>gpu_connector/kv_format/detectors/sglang.py</code></td>
+      <td>DSA 索引器检测（uint8, <code>shape[-1] % 132 == 0</code>，reshape 2-D → 3-D）</td>
+      <td class="num">+23</td>
+    </tr>
+    <tr>
+      <td><code>gpu_connector/kv_format/specs/nl_x_nb_bsv_bss.py</code></td>
+      <td><code>attention_backends</code> 增加 <code>"SGLang MLA"</code></td>
+      <td class="num">+1</td>
+    </tr>
+    <tr>
+      <td><code>utils.py</code></td>
+      <td><code>DiskCacheMetadata</code> 增加 <code>shapes</code>/<code>dtypes</code> 字段</td>
+      <td class="num">+6</td>
+    </tr>
+    <tr>
+      <td><code>v1/memory_management.py</code></td>
+      <td><code>TensorMemoryObj.tensor</code> 属性多组修复（<code>get_tensor(0)</code>）</td>
+      <td class="num">+6</td>
+    </tr>
+    <tr>
+      <td><code>tests/.../test_dsa_support.py</code></td>
+      <td><strong>新增</strong>：14 个 DSA 专项测试</td>
+      <td class="num">new</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3>sglang 侧 (1 文件, +85 / -37)</h3>
+
+<table>
+  <thead>
+    <tr>
+      <th>文件</th>
+      <th>改动</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>mem_cache/storage/lmcache/lmc_radix_cache.py</code></td>
+      <td>缓冲区获取检测 <code>kv_buffer</code>/<code>index_k_with_scale_buffer</code>；传 <code>use_mla</code>/<code>kv_cache_dim</code>/<code>kv_caches</code>；<code>cache_finished_req</code> 签名修复</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2 id="key-changes">4. 关键代码变更</h2>
+
+<h3>4.1 DSA 索引器格式检测</h3>
+<p>SGLang 的 DSA 索引器张量是 2-D <code>(num_pages, page_size*132)</code>，与 vLLM 的 3-D 布局不同。检测器通过 <code>shape[-1] % 132 == 0</code> 识别，并 reshape 为 3-D 以匹配 spec 的 <code>(NB, BS, HS)</code> 布局：</p>
+
+<pre><code># detectors/sglang.py — DSA indexer detection
+if (
+    list_depth == 1
+    and tensor_ndim == 2
+    and first_tensor.dtype == torch.uint8
+    and int(first_tensor.shape[-1]) % 132 == 0
+):
+    bs = int(first_tensor.shape[-1]) // 132
+    kv_caches = [t.view(t.shape[0], bs, 132) for t in kv_caches]
+    return lmc_ops.EngineKVFormat.NL_X_NB_BSV_BSS, kv_caches</code></pre>
+
+<h3>4.2 SGLangGPUConnector 逐组传输</h3>
+<p>核心改动：从单格式 <code>multi_layer_kv_transfer_unilateral</code> 切换为逐组 <code>multi_layer_kv_transfer</code>，每组使用自己的 <code>engine_kv_format</code>、<code>page_buffer_size</code>、<code>block_size</code>、<code>head_size</code>：</p>
+
+<pre><code># gpu_connectors.py — to_gpu 逐组传输
+for i, group in enumerate(klg_manager.kernel_groups):
+    group_tensor = memory_obj.get_tensor(i)
+    page_buffer_size = group.shape_desc.nb * group.shape_desc.bs
+    lmc_ops.multi_layer_kv_transfer(
+        group_tensor,
+        group_pointers[i],
+        slot_mapping[start - offset : end - offset],
+        device,
+        page_buffer_size,
+        lmc_ops.TransferDirection.H2D,
+        group.engine_kv_format,          # 逐组格式（关键）
+        block_size=group.shape_desc.bs,
+        head_size=group.shape_desc.hs,
+    )</code></pre>
+
+<h3>4.3 MP 适配器 engine_group_infos</h3>
+<p>DSA 有两个 kernel group（MLA latent + DSA indexer），共享同一页地址空间（<code>engine_group_id=0</code>）。<code>expand_engine_block_ids</code> 将单组 block IDs 复制为两组：</p>
+
+<pre><code># multi_process_adapter.py — DSA 两组 engine_group_infos
+if self.use_mla and num_kv_tensors > self.num_layers:
+    return [
+        EngineGroupInfo(0, tuple(range(self.num_layers)), self.page_size),
+        EngineGroupInfo(0, tuple(range(self.num_layers, num_kv_tensors)), self.page_size),
+    ]</code></pre>
+
+<h3>4.4 多组 MemoryObj 贯穿存储后端</h3>
+<p>DSA 双缓冲区在 <code>MemoryObjMetadata</code> 中同时有 singular（<code>shape</code>/<code>dtype</code> = group 0）和 plural（<code>shapes</code>/<code>dtypes</code> = 全列表）字段。存储后端需要用 plural 形式分配，否则 <code>get_tensor(1)</code> 越界：</p>
+
+<pre><code># local_disk_backend.py — load_bytes_from_disk 多组分配
+if shapes is not None and dtypes is not None:
+    memory_obj = self.local_cpu_backend.allocate(shapes, dtypes, fmt)
+else:
+    memory_obj = self.local_cpu_backend.allocate(shape, dtype, fmt)</code></pre>
+
+<h3>4.5 post_init 及早初始化层组管理器</h3>
+<p>不修复此问题，<code>store()</code> 中的 <code>get_shapes()</code> 在 <code>_initialize_pointers</code> 之前被调用，返回单组形状，导致 <code>from_gpu</code> 访问第二组时 <code>IndexError</code>：</p>
+
+<pre><code># cache_engine.py — post_init 中及早初始化
+if self.gpu_connector is not None and "kvcaches" in kwargs:
+    self.gpu_connector.initialize_kvcaches_ptr(**kwargs)
+    init_ptrs = getattr(self.gpu_connector, "_initialize_pointers", None)
+    if init_ptrs is not None:
+        kvcaches = getattr(self.gpu_connector, "kvcaches", None)
+        if kvcaches is not None:
+            init_ptrs(kvcaches)</code></pre>
+
+<h3>4.6 NBBS-fused 格式 block_size 容错</h3>
+<p>SGLang MLA 使用 <code>NL_X_NBBS_ONE_HS</code> 格式，block 轴折叠进 PBS，<code>block_size()</code> 抛出 <code>ValueError</code>。<code>group_layers_by_identity</code> 增加 <code>per_layer_tokens_per_block</code> fallback：</p>
+
+<pre><code># kv_layer_groups.py — block_size fallback
+try:
+    bs = get_block_size(kv_caches, layer_format, idx)
+except ValueError:
+    if per_layer_tokens_per_block is not None:
+        bs = per_layer_tokens_per_block[idx]
+    else:
+        raise</code></pre>
+
+<h2 id="bugfix">5. 顺带修复的 V3 连接器 bug</h2>
+
+<div class="callout callout-blue">
+  <p>V3 连接器 (<code>VLLMPagedMemGPUConnectorV3</code>) 在 <code>to_gpu</code>/<code>from_gpu</code> 中使用 <code>self.engine_kv_format</code>（单格式）而非 <code>group.engine_kv_format</code>（逐组格式）。对 DSA 两组不同格式是 bug。本 PR 修正为逐组格式，同时修正了 <code>page_buffer_size</code>、<code>block_size</code>、<code>head_size</code> 从 group 的 <code>shape_desc</code> 获取。</p>
+</div>
+
+<h3>5.1 MHA 格式分发修复</h3>
+<p>逐层格式检测为 MHA 模型返回 <code>TWO_X_NL_X_NBBS_NH_HS</code>（K/V 分离列表格式），但 <code>multi_layer_kv_transfer</code> 不处理 KV-list 格式。在 <code>to_gpu</code>/<code>from_gpu</code> 中增加 <code>is_mla()</code> 分发：MLA/DSA → <code>multi_layer_kv_transfer</code>，MHA → <code>multi_layer_kv_transfer_unilateral</code>。</p>
+
+<h3>5.2 部分块 staging buffer 修复 (W2)</h3>
+<p><code>from_gpu</code> 的 MLA staging buffer 路径对所有 chunk 大小无条件使用 staging buffer。对于不完整 chunk（<code>end - start &lt; chunk_size</code>），切片后的 staging buffer 导致数据损坏。修复：增加 <code>and end - start == self.chunk_size</code> 条件，部分 chunk 走直接传输路径。</p>
+
+<h2 id="tests">6. 测试结果</h2>
+
+<p>在 43 节点容器 (8×MI308X gfx942) 上运行完整 DSA 相关测试套件，<strong>所有 DSA 专项测试全部通过</strong>。6 个失败为预存环境问题（fs connector 运行时错误、async 测试），与 DSA 改动无关。</p>
+
+<table class="perf-table">
+  <thead>
+    <tr>
+      <th>测试套件</th>
+      <th style="text-align:right">通过</th>
+      <th style="text-align:right">跳过</th>
+      <th style="text-align:right">失败</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr><td>DSA support <span style="color:var(--green)">(new)</span></td><td>14</td><td>0</td><td>0</td></tr>
+    <tr><td>KV format detection</td><td>14</td><td>0</td><td>0</td></tr>
+    <tr><td>Normalize per-layer formats</td><td>4</td><td>0</td><td>0</td></tr>
+    <tr><td>KV format specs</td><td>8 classes</td><td>0</td><td>0</td></tr>
+    <tr><td>KV format classification</td><td>3</td><td>0</td><td>0</td></tr>
+    <tr><td>Concrete shape</td><td>4</td><td>0</td><td>0</td></tr>
+    <tr><td>Blocks-first CS KV format</td><td>4</td><td>0</td><td>0</td></tr>
+    <tr><td>Local disk backend</td><td>33</td><td>0</td><td>0</td></tr>
+    <tr><td>L2 adapter base</td><td>22</td><td>0</td><td>0</td></tr>
+    <tr><td>Raw block L2 adapter</td><td>9</td><td>10</td><td>0</td></tr>
+    <tr><td>L1 memory manager</td><td>23</td><td>0</td><td>0</td></tr>
+    <tr><td>GDS L1 memory manager</td><td>8</td><td>0</td><td>0</td></tr>
+    <tr><td>Serde E2E</td><td>13</td><td>0</td><td>0</td></tr>
+    <tr><td>FP8 multi-group</td><td>5</td><td>0</td><td>0</td></tr>
+    <tr><td>GDS context</td><td>7</td><td>3</td><td>0</td></tr>
+    <tr><td>Shape desc utils</td><td>15</td><td>0</td><td>0</td></tr>
+    <tr><td>Hipfile async</td><td>19</td><td>0</td><td>0</td></tr>
+    <tr><td>GPU connector (MLA+MHA)</td><td>4</td><td>0</td><td>0</td></tr>
+    <tr><td>KV layer groups manager</td><td>all</td><td>0</td><td>0</td></tr>
+    <tr><td>KV cache groups</td><td>all</td><td>0</td><td>0</td></tr>
+    <tr style="color:var(--text-muted)">
+      <td>fs connector (预存)</td><td>—</td><td>—</td><td>2</td>
+    </tr>
+    <tr style="color:var(--text-muted)">
+      <td>basic_check (async, 预存)</td><td>—</td><td>—</td><td>3</td>
+    </tr>
+    <tr style="color:var(--text-muted)">
+      <td>sglang_mp_adapter (async, 预存)</td><td>—</td><td>—</td><td>1</td>
+    </tr>
+    <tr style="font-weight:700; border-top:2px solid var(--border)">
+      <td>总计</td>
+      <td>380</td>
+      <td>13</td>
+      <td>6 (预存)</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>13 个跳过全部因硬件依赖（裸块设备 / GDS 硬件不可用），非代码问题。6 个失败为预存环境问题（fs connector 运行时 RuntimeError、async 测试 mock 问题），在 base 分支同样存在，与 DSA 改动无关。</p>
+
+<h2 id="perf">7. 性能对比</h2>
+
+<h3>7.1 Prefill 吞吐量</h3>
+
+<table class="perf-table">
+  <thead>
+    <tr>
+      <th>场景</th>
+      <th style="text-align:right">新算 token</th>
+      <th style="text-align:right">缓存命中</th>
+      <th style="text-align:right">吞吐 (token/s)</th>
+      <th style="text-align:right">加速比</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>冷启动 prefill</td>
+      <td>1216</td>
+      <td>0</td>
+      <td>34.52</td>
+      <td>1.0×</td>
+    </tr>
+    <tr>
+      <td>L1 命中 (GPU radix)</td>
+      <td>64</td>
+      <td>1152</td>
+      <td>7.03</td>
+      <td>—</td>
+    </tr>
+    <tr style="background:var(--green-light)">
+      <td><strong>L2 命中 (DDN 磁盘)</strong></td>
+      <td>192</td>
+      <td>1024</td>
+      <td><strong>469.80</strong></td>
+      <td><strong>13.6×</strong></td>
+    </tr>
+  </tbody>
+</table>
+
+<p>L1 命中吞吐低（7.03 token/s）是因为仅 64 token 需计算，吞吐被固定开销摊薄。L2 命中时 192 token 的计算远快于冷启动的 1216 token，且 L2 检索仅 ~9 ms。</p>
+
+<p><strong>L2 cached-token = 1024</strong>（4 full chunks × 256 chunk_size），L1 cached-token = 1152（token 粒度）。差值 128 = 末尾不完整 chunk（<code>save_unfull_chunk: false</code> 不存）。</p>
+
+<h3>7.2 L2 存储/读取性能（8 ranks 并行）</h3>
+
+<table class="perf-table">
+  <thead>
+    <tr>
+      <th>操作</th>
+      <th style="text-align:right">数据量/rank</th>
+      <th style="text-align:right">延迟均值</th>
+      <th style="text-align:right">吞吐均值</th>
+      <th style="text-align:right">吞吐范围</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Store (H2D → Disk)</td>
+      <td>0.0658 GB</td>
+      <td>~6.1 ms</td>
+      <td>~10.7 GB/s</td>
+      <td>9.97–11.45</td>
+    </tr>
+    <tr>
+      <td>Retrieve (Disk → H2D)</td>
+      <td>0.0658 GB</td>
+      <td>~9.4 ms</td>
+      <td>~7.0 GB/s</td>
+      <td>6.65–7.41</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>Store 比 Retrieve 快（10.7 vs 7.0 GB/s）——store 的 offload 是 GPU→CPU DMA 直写，retrieve 需先从磁盘读取再 H2D 拷贝。Store 细分：offload_time ~5.5 ms（GPU→CPU），put_time 0.3–1.1 ms（写入磁盘）。</p>
+
+<h3>7.3 测试环境</h3>
+
+<ul>
+  <li>节点: 10.1.29.43 (8×MI308X gfx942, TP8)</li>
+  <li>模型: GLM-5.2, <code>--kv-cache-dtype fp8_e4m3</code>, <code>--max-total-tokens 4096</code> (小 L1 强制 L2)</li>
+  <li>L2 后端: DDN 文件系统 <code>/ddn/glm5.2.lmcache-dsa-test-ip/</code></li>
+  <li>LMCache: IP 非层式模式, <code>chunk_size=256</code>, <code>save_unfull_chunk=false</code></li>
+  <li>DSA prefill/decode backend: tilelang</li>
+</ul>
+
+<h2 id="scope">8. 范围与限制</h2>
+
+<table>
+  <thead>
+    <tr>
+      <th>范围</th>
+      <th>决策</th>
+      <th>理由</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>非层式路径 (MP + IP)</td>
+      <td style="color:var(--green); font-weight:600">✅ 实现</td>
+      <td>默认路径，DSA 支持的核心</td>
+    </tr>
+    <tr>
+      <td>层式路径 (<code>use_layerwise=True</code>)</td>
+      <td style="color:var(--amber); font-weight:600">❌ 延后</td>
+      <td>需重构 <code>store_layer</code>/<code>retrieve_layer</code>，工作量超出范围</td>
+    </tr>
+    <tr>
+      <td>MLA 标准模型 (DeepSeek-V3)</td>
+      <td style="color:var(--green); font-weight:600">✅ 附带支持</td>
+      <td>MLA 是 DSA 的子集（单缓冲区），改动自然覆盖</td>
+    </tr>
+    <tr>
+      <td>MHA 模型</td>
+      <td style="color:var(--green); font-weight:600">✅ 向后兼容</td>
+      <td>保留 <code>k_pool</code>/<code>v_pool</code> 参数路径</td>
+    </tr>
+    <tr>
+      <td>ROCm c_ops</td>
+      <td style="color:var(--green); font-weight:600">✅ 已支持</td>
+      <td><code>multi_layer_kv_transfer</code> 已处理 DSA <code>page_buffer_offset</code></td>
+    </tr>
+    <tr>
+      <td>纯 torch fallback</td>
+      <td style="color:var(--text-muted); font-weight:600">❌ 不支持</td>
+      <td>DSA 是 GPU 模型，c_ops 必需</td>
+    </tr>
+    <tr>
+      <td>V3 连接器 <code>self.engine_kv_format</code> bug</td>
+      <td style="color:var(--blue); font-weight:600">📝 已修正</td>
+      <td>V3 用单格式而非逐组格式，对 DSA 是 bug；本 PR 修正为 <code>group.engine_kv_format</code></td>
+    </tr>
+  </tbody>
+</table>
+
+<hr>
+
+<p style="color:var(--text-muted); font-size:13px;">
+  Co-Authored-By: Claude &lt;noreply@anthropic.com&gt;
+</p>
+
+</div>

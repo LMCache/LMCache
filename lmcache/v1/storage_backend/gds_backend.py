@@ -98,12 +98,25 @@ def get_fstype(path):
     return best_fstype
 
 
-def pack_metadata(tensor, fmt: MemoryFormat, **extra_metadata) -> bytes:
+def pack_metadata(
+    tensor,
+    fmt: MemoryFormat,
+    shapes: Optional[list[torch.Size]] = None,
+    dtypes: Optional[list[torch.dtype]] = None,
+    **extra_metadata,
+) -> bytes:
     if tensor.dtype not in torch_dtypes:
         raise RuntimeError(f"unhandled dtype {tensor.dtype}")
 
     # Metadata
-    data_size = tensor.numel() * tensor.element_size()
+    if shapes is not None and dtypes is not None:
+        # Multi-group: data_size covers all groups' raw bytes so that
+        # data_offsets[1] - data_offsets[0] matches the on-disk blob.
+        data_size = sum(
+            s.numel() * d.element_size() for s, d in zip(shapes, dtypes)
+        )
+    else:
+        data_size = tensor.numel() * tensor.element_size()
     tensor_meta = {
         "dtype": torch_dtypes[tensor.dtype],
         "shape": list(tensor.size()),
@@ -111,6 +124,12 @@ def pack_metadata(tensor, fmt: MemoryFormat, **extra_metadata) -> bytes:
         "fmt": fmt.value,
         "__metadata__": extra_metadata,
     }
+    # Record per-group shapes/dtypes for multi-group memory objects (e.g.
+    # DSA dual-buffer) so the retrieve path can reconstruct the multi-group
+    # MemoryObj with the correct group_prefix_sum.
+    if shapes is not None and dtypes is not None:
+        tensor_meta["shapes"] = [list(s) for s in shapes]
+        tensor_meta["dtypes"] = [torch_dtypes[d] for d in dtypes]
     meta = {"kvcache": tensor_meta}
     str_meta = json.dumps(meta).encode("utf-8")
     meta_len = len(str_meta)
@@ -140,7 +159,25 @@ def unpack_metadata(buffer: bytes):
     nbytes = data_offsets[1] - data_offsets[0]
     dtype = torch_dtypes_inverse[dtype_str]
 
-    return torch.Size(shape), dtype, nbytes, fmt, tensor_meta["__metadata__"]
+    # Reconstruct per-group shapes/dtypes for multi-group memory objects.
+    multi_shapes = tensor_meta.get("shapes")
+    multi_dtypes_str = tensor_meta.get("dtypes")
+    if multi_shapes is not None and multi_dtypes_str is not None:
+        shapes = [torch.Size(s) for s in multi_shapes]
+        dtypes = [torch_dtypes_inverse[d] for d in multi_dtypes_str]
+    else:
+        shapes = None
+        dtypes = None
+
+    return (
+        torch.Size(shape),
+        dtype,
+        nbytes,
+        fmt,
+        tensor_meta["__metadata__"],
+        shapes,
+        dtypes,
+    )
 
 
 def rand_suffix(n: int):
@@ -490,7 +527,9 @@ class GdsBackend(AllocatorBackendInterface):
         filename: str,
         subdir_key: str,
     ):
-        shape, dtype, size, fmt, extra_metadata = self._read_metadata_info(filename)
+        shape, dtype, size, fmt, extra_metadata, shapes, dtypes = (
+            self._read_metadata_info(filename)
+        )
         if extra_metadata["lmcache_version"] != str(_METADATA_VERSION):
             raise UnsupportedMetadataVersion("unhandled lmcache metadata")
         logger.debug(
@@ -508,6 +547,8 @@ class GdsBackend(AllocatorBackendInterface):
             dtype,
             None,
             fmt,
+            shapes=shapes,
+            dtypes=dtypes,
         )
         with self.hot_lock:
             self.metadata_dirs.add(subdir_key)
@@ -666,6 +707,8 @@ class GdsBackend(AllocatorBackendInterface):
                     fmt,
                     self.gds_base_pointer,
                     memory_obj.metadata.address,
+                    memory_obj.metadata.shapes,
+                    memory_obj.metadata.dtypes,
                 )
             except Exception as e:
                 logger.error(
@@ -748,9 +791,14 @@ class GdsBackend(AllocatorBackendInterface):
         shape = memory_obj.metadata.shape
         dtype = memory_obj.metadata.dtype
         fmt = memory_obj.metadata.fmt
+        shapes = memory_obj.metadata.shapes
+        dtypes = memory_obj.metadata.dtypes
         with self.hot_lock:
             # TODO(Jiayi): need to support `cached_positions`.
-            self.hot_cache[key] = DiskCacheMetadata(path, size, shape, dtype, None, fmt)
+            self.hot_cache[key] = DiskCacheMetadata(
+                path, size, shape, dtype, None, fmt,
+                shapes=shapes, dtypes=dtypes,
+            )
 
     def submit_prefetch_task(
         self,
@@ -802,10 +850,17 @@ class GdsBackend(AllocatorBackendInterface):
         dtype = entry.dtype
         shape = entry.shape
         fmt = entry.fmt
-        logger.warning(entry)
         assert dtype is not None
         assert shape is not None
         assert fmt is not None
+        # Multi-group memory objects (e.g. DSA dual-buffer) need the
+        # per-group shapes/dtypes so the allocated MemoryObj has the
+        # correct group_prefix_sum for get_tensor(i).
+        if entry.shapes is not None and entry.dtypes is not None:
+            return self._load_bytes_from_disk_with_allocation(
+                key, path, dtype=dtype, shape=shape, fmt=fmt,
+                shapes=entry.shapes, dtypes=entry.dtypes,
+            )
         return self._load_bytes_from_disk_with_allocation(
             key, path, dtype=dtype, shape=shape, fmt=fmt
         )
@@ -817,6 +872,8 @@ class GdsBackend(AllocatorBackendInterface):
         dtype: torch.dtype,
         shape: torch.Size,
         fmt: MemoryFormat,
+        shapes: Optional[list[torch.Size]] = None,
+        dtypes: Optional[list[torch.dtype]] = None,
     ) -> Optional[MemoryObj]:
         """
         Load byte array from disk by first allocating memory, then loading.
@@ -826,12 +883,19 @@ class GdsBackend(AllocatorBackendInterface):
             path: File path to load from
             dtype: Data type for memory allocation
             shape: Shape for memory allocation
+            shapes: Per-group shapes for multi-group memory objects.
+                When provided, the allocator receives the full list so
+                the resulting MemoryObj has the correct group_prefix_sum.
+            dtypes: Per-group dtypes, paired with ``shapes``.
 
         Returns:
             A new memory object with loaded data, or None if allocation or
             loading failed
         """
-        memory_obj = self.memory_allocator.allocate(shape, dtype, fmt=fmt)
+        if shapes is not None and dtypes is not None:
+            memory_obj = self.memory_allocator.allocate(shapes, dtypes, fmt=fmt)
+        else:
+            memory_obj = self.memory_allocator.allocate(shape, dtype, fmt=fmt)
         if memory_obj is None:
             logger.error("Memory allocation failed during sync disk load.")
             return None
@@ -923,6 +987,8 @@ class GdsBackend(AllocatorBackendInterface):
         dtypes: list[torch.dtype | None] = []
         shapes: list[torch.Size | None] = []
         fmts: list[MemoryFormat | None] = []
+        multi_shapes: list[Optional[list[torch.Size]]] = []
+        multi_dtypes: list[Optional[list[torch.dtype]]] = []
         with self.hot_lock:
             for key in keys:
                 entry = self.hot_cache.get(key)
@@ -932,19 +998,30 @@ class GdsBackend(AllocatorBackendInterface):
                     dtypes.append(None)
                     shapes.append(None)
                     fmts.append(None)
+                    multi_shapes.append(None)
+                    multi_dtypes.append(None)
                     continue
                 paths.append(entry.path)
                 dtypes.append(entry.dtype)
                 shapes.append(entry.shape)
                 fmts.append(entry.fmt)
+                multi_shapes.append(entry.shapes)
+                multi_dtypes.append(entry.dtypes)
 
         memory_objs: list[MemoryObj | None] = []
         gds_reads, gds_read_bytes = 0, 0
-        for dtype, shape, path, fmt in zip(dtypes, shapes, paths, fmts, strict=True):
+        for dtype, shape, path, fmt, m_shapes, m_dtypes in zip(
+            dtypes, shapes, paths, fmts, multi_shapes, multi_dtypes, strict=True
+        ):
             if path is None:
                 memory_objs.append(None)
                 continue
-            memory_obj = self.memory_allocator.allocate(shape, dtype, fmt=fmt)
+            if m_shapes is not None and m_dtypes is not None:
+                memory_obj = self.memory_allocator.allocate(
+                    m_shapes, m_dtypes, fmt=fmt
+                )
+            else:
+                memory_obj = self.memory_allocator.allocate(shape, dtype, fmt=fmt)
             if memory_obj is None:
                 logger.error(f"Memory allocation failed during get_blocking for {path}")
             else:
@@ -976,7 +1053,23 @@ class GdsBackend(AllocatorBackendInterface):
         fmt: MemoryFormat,
         base_pointer: int,
         device_offset: int,
+        shapes: Optional[list[torch.Size]] = None,
+        dtypes: Optional[list[torch.dtype]] = None,
     ):
+        # For multi-group memory objects (e.g. DSA dual-buffer), kv_chunk
+        # is only group 0's tensor (via memory_obj.tensor → get_tensor(0)).
+        # The full raw_data buffer contains all groups concatenated, so we
+        # must write get_size() bytes — not kv_chunk.nbytes — to persist
+        # every group.  The write address is the raw_data base pointer
+        # (or the pre-computed base_pointer + device_offset for pinned
+        # allocator paths).
+        if shapes is not None and dtypes is not None:
+            write_nbytes = sum(
+                s.numel() * d.element_size() for s, d in zip(shapes, dtypes)
+            )
+        else:
+            write_nbytes = kv_chunk.nbytes
+
         if base_pointer is None:
             addr = ctypes.c_void_p(kv_chunk.data_ptr())
             dev_offset = 0
@@ -988,7 +1081,8 @@ class GdsBackend(AllocatorBackendInterface):
         # TODO: We can add the chunk's metadata here, e.g. Tensor parallelism shard
         # and pipeline parallelism index.
         metadata = pack_metadata(
-            kv_chunk, fmt=fmt, lmcache_version=str(_METADATA_VERSION)
+            kv_chunk, fmt=fmt, shapes=shapes, dtypes=dtypes,
+            lmcache_version=str(_METADATA_VERSION),
         )
         try:
             with open(tmp_path, "wb") as f:
@@ -998,12 +1092,12 @@ class GdsBackend(AllocatorBackendInterface):
                     tmp_path, "r+", use_direct_io=self.use_direct_io
                 ) as f:
                     f.write(
-                        addr, kv_chunk.nbytes, file_offset=offset, dev_offset=dev_offset
+                        addr, write_nbytes, file_offset=offset, dev_offset=dev_offset
                     )
             elif self._gpu_memcpy:
                 # mmap the file
                 fd = os.open(tmp_path, os.O_RDWR)
-                nbytes = kv_chunk.nbytes
+                nbytes = write_nbytes
                 os.ftruncate(fd, nbytes + offset)
                 mm = mmap.mmap(
                     fd, nbytes + offset, prot=mmap.PROT_WRITE, flags=mmap.MAP_SHARED
@@ -1017,7 +1111,7 @@ class GdsBackend(AllocatorBackendInterface):
                 assert addr.value is not None
                 res = self._gpu_memcpy(
                     ctypes.c_void_p(buf_addr + offset),
-                    ctypes.c_void_p(int(addr.value) + device_offset),
+                    ctypes.c_void_p(int(addr.value) + dev_offset),
                     ctypes.c_size_t(nbytes),
                     ctypes.c_int(2),
                 )

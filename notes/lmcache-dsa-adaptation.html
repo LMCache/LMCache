@@ -1,0 +1,689 @@
+<title>LMCache DSA 适配笔记</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --surface: #f6f8fa;
+    --surface-2: #eaeef2;
+    --border: #d0d7de;
+    --border-dim: #e3e8ed;
+    --text: #1f2328;
+    --text-dim: #656d76;
+    --text-faint: #8c959f;
+    --accent: #0969da;
+    --accent-soft: #ddf4ff;
+    --green: #1a7f37;
+    --green-soft: #dafbe1;
+    --amber: #9a6700;
+    --amber-soft: #fff8c5;
+    --red: #cf222e;
+    --mono: ui-monospace, "SF Mono", "Cascadia Code", "Source Code Pro", Menlo, Consolas, "DejaVu Sans Mono", monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --max-width: 880px;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0d1117;
+      --surface: #161b22;
+      --surface-2: #1c2330;
+      --border: #30363d;
+      --border-dim: #21262d;
+      --text: #c9d1d9;
+      --text-dim: #8b949e;
+      --text-faint: #6e7681;
+      --accent: #58a6ff;
+      --accent-soft: #0d2d5a;
+      --green: #3fb950;
+      --green-soft: #143f1f;
+      --amber: #d29922;
+      --amber-soft: #3a2e00;
+      --red: #f85149;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --surface-2: #1c2330;
+    --border: #30363d;
+    --border-dim: #21262d;
+    --text: #c9d1d9;
+    --text-dim: #8b949e;
+    --text-faint: #6e7681;
+    --accent: #58a6ff;
+    --accent-soft: #0d2d5a;
+    --green: #3fb950;
+    --green-soft: #143f1f;
+    --amber: #d29922;
+    --amber-soft: #3a2e00;
+    --red: #f85149;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 15px;
+    line-height: 1.7;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .container {
+    max-width: var(--max-width);
+    margin: 0 auto;
+    padding: 48px 24px 80px;
+  }
+
+  /* --- Header --- */
+  .doc-header {
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 28px;
+    margin-bottom: 40px;
+  }
+  .doc-eyebrow {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text-faint);
+    letter-spacing: 0.04em;
+    margin-bottom: 8px;
+  }
+  .doc-title {
+    font-size: 28px;
+    font-weight: 700;
+    line-height: 1.25;
+    margin: 0 0 16px;
+    text-wrap: balance;
+  }
+  .doc-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 20px;
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--text-dim);
+  }
+  .doc-meta span { display: inline-flex; align-items: center; gap: 6px; }
+  .doc-meta .label { color: var(--text-faint); }
+
+  /* --- Status badge --- */
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 600;
+    padding: 2px 10px;
+    border-radius: 20px;
+    border: 1px solid transparent;
+    white-space: nowrap;
+  }
+  .badge-pass { background: var(--green-soft); color: var(--green); border-color: color-mix(in srgb, var(--green) 30%, transparent); }
+  .badge-info { background: var(--accent-soft); color: var(--accent); border-color: color-mix(in srgb, var(--accent) 30%, transparent); }
+  .badge-warn { background: var(--amber-soft); color: var(--amber); border-color: color-mix(in srgb, var(--amber) 30%, transparent); }
+
+  /* --- Summary box --- */
+  .summary {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px 24px;
+    margin-bottom: 40px;
+  }
+  .summary-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 16px;
+  }
+  .summary-item .k {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-faint);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 4px;
+  }
+  .summary-item .v {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text);
+  }
+
+  /* --- Section --- */
+  section { margin-bottom: 44px; }
+  h2 {
+    font-size: 20px;
+    font-weight: 700;
+    margin: 0 0 16px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border-dim);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  h2 .num {
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--accent);
+    font-weight: 600;
+  }
+  h3 {
+    font-size: 16px;
+    font-weight: 600;
+    margin: 28px 0 12px;
+    color: var(--text);
+  }
+  p { margin: 0 0 14px; }
+  strong { font-weight: 600; }
+  a { color: var(--accent); text-decoration: none; }
+
+  /* --- Code --- */
+  code {
+    font-family: var(--mono);
+    font-size: 0.88em;
+    background: var(--surface-2);
+    padding: 1px 5px;
+    border-radius: 4px;
+    color: var(--text);
+  }
+  pre {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 18px;
+    overflow-x: auto;
+    margin: 0 0 16px;
+    font-size: 13px;
+    line-height: 1.55;
+  }
+  pre code {
+    background: none;
+    padding: 0;
+    font-size: inherit;
+  }
+  .log-line { color: var(--text-dim); }
+  .log-hit { color: var(--green); }
+  .log-key { color: var(--accent); }
+
+  /* --- Table --- */
+  .table-wrap { overflow-x: auto; margin: 0 0 16px; }
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: 13.5px;
+  }
+  th, td {
+    text-align: left;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border-dim);
+    vertical-align: top;
+  }
+  th {
+    font-weight: 600;
+    color: var(--text-dim);
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    background: var(--surface);
+  }
+  td code { font-size: 12px; }
+  tr:last-child td { border-bottom: none; }
+
+  /* --- Callout --- */
+  .callout {
+    border-left: 3px solid var(--accent);
+    background: var(--accent-soft);
+    padding: 12px 16px;
+    border-radius: 0 6px 6px 0;
+    margin: 0 0 16px;
+    font-size: 14px;
+  }
+  .callout-warn {
+    border-left-color: var(--amber);
+    background: var(--amber-soft);
+  }
+  .callout strong { display: block; margin-bottom: 4px; }
+
+  /* --- KV diagram --- */
+  .kv-diagram {
+    display: flex;
+    gap: 12px;
+    margin: 0 0 16px;
+    flex-wrap: wrap;
+  }
+  .kv-buf {
+    flex: 1;
+    min-width: 200px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 16px;
+    background: var(--surface);
+  }
+  .kv-buf .buf-name {
+    font-family: var(--mono);
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--accent);
+    margin-bottom: 8px;
+  }
+  .kv-buf .buf-desc {
+    font-size: 13px;
+    color: var(--text-dim);
+    line-height: 1.5;
+  }
+  .kv-buf .buf-shape {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text-faint);
+    margin-top: 6px;
+  }
+
+  /* --- Flow steps --- */
+  .flow { display: flex; flex-direction: column; gap: 0; margin: 0 0 16px; }
+  .flow-step {
+    display: flex;
+    gap: 14px;
+    padding: 12px 0;
+    border-bottom: 1px solid var(--border-dim);
+  }
+  .flow-step:last-child { border-bottom: none; }
+  .flow-num {
+    flex-shrink: 0;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    background: var(--accent-soft);
+    color: var(--accent);
+    font-family: var(--mono);
+    font-size: 13px;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .flow-body { flex: 1; }
+  .flow-body .flow-title { font-weight: 600; font-size: 14px; margin-bottom: 2px; }
+  .flow-body .flow-desc { font-size: 13.5px; color: var(--text-dim); }
+  .flow-body .flow-desc code { font-size: 12px; }
+
+  /* --- File tree --- */
+  .tree {
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.7;
+    color: var(--text-dim);
+    white-space: pre;
+    overflow-x: auto;
+  }
+  .tree .dir { color: var(--accent); font-weight: 600; }
+  .tree .file { color: var(--text); }
+
+  /* --- DDN structure --- */
+  .ddn-structure {
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.65;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 18px;
+    overflow-x: auto;
+    margin: 0 0 16px;
+  }
+  .ddn-structure .dir { color: var(--accent); }
+  .ddn-structure .file { color: var(--text-dim); }
+  .ddn-structure .comment { color: var(--text-faint); }
+
+  hr { border: none; border-top: 1px solid var(--border-dim); margin: 32px 0; }
+</style>
+
+<div class="container">
+
+<!-- ==================== HEADER ==================== -->
+<div class="doc-header">
+  <div class="doc-eyebrow">工程笔记 / Engineering Note</div>
+  <h1 class="doc-title">LMCache DSA 索引器适配</h1>
+  <div class="doc-meta">
+    <span><span class="label">日期</span> 2026-08-15</span>
+    <span><span class="label">节点</span> 10.1.29.43 (8×MI308X)</span>
+    <span><span class="label">模型</span> GLM-5.2-FP8</span>
+    <span><span class="label">状态</span> <span class="badge badge-pass">✓ 端到端验证通过</span></span>
+  </div>
+</div>
+
+<!-- ==================== SUMMARY ==================== -->
+<div class="summary">
+  <div class="summary-grid">
+    <div class="summary-item">
+      <div class="k">改动文件</div>
+      <div class="v">7 生产 + 2 辅助</div>
+    </div>
+    <div class="summary-item">
+      <div class="k">L2 存储</div>
+      <div class="v">16 文件 / 2 子目录</div>
+    </div>
+    <div class="summary-item">
+      <div class="k">L2 命中</div>
+      <div class="v">16/16 keys · 0 L1</div>
+    </div>
+    <div class="summary-item">
+      <div class="k">缓存命中</div>
+      <div class="v">512 / 768 tokens</div>
+    </div>
+    <div class="summary-item">
+      <div class="k">L2 延迟</div>
+      <div class="v">45.7 ms (16 keys)</div>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== 1. 背景 ==================== -->
+<section>
+  <h2><span class="num">01</span> 背景：GLM-5.2 DSA 双缓冲区</h2>
+  <p>
+    GLM-5.2 是 DSA (Deepseek Sparse Attention) MoE 模型，其 KV cache 使用<strong>双缓冲区结构</strong>，与传统 MHA 的 K/V 分离布局完全不同。LMCache 框架已有约 70% 的 DSA 基础设施（格式 spec、检测器、异构层组管理器、CUDA 内核），但 SGLang 集成路径完全缺失——连接器不构建 <code>KVLayerGroupsManager</code>，硬编码 K/V 分离和 <code>kv_size=2</code>。
+  </p>
+
+  <div class="kv-diagram">
+    <div class="kv-buf">
+      <div class="buf-name">kv_buffer</div>
+      <div class="buf-desc">MLA 潜在 KV，fp8</div>
+      <div class="buf-shape">(size+page_size, 1, kv_cache_dim=576)<br>576 = 512 (lora) + 64 (rope)</div>
+    </div>
+    <div class="kv-buf">
+      <div class="buf-name">index_k_with_scale_buffer</div>
+      <div class="buf-desc">DSA 索引器，uint8</div>
+      <div class="buf-shape">(num_pages, page_size×132)<br>132 = 128B fp8 key + 4B fp32 scale</div>
+    </div>
+  </div>
+
+  <p>关键配置值：</p>
+  <div class="table-wrap">
+    <table>
+      <tr><th>参数</th><th>值</th><th>说明</th></tr>
+      <tr><td><code>num_hidden_layers</code></td><td>78</td><td>Transformer 层数</td></tr>
+      <tr><td><code>kv_lora_rank</code></td><td>512</td><td>MLA 潜在维度</td></tr>
+      <tr><td><code>qk_rope_head_dim</code></td><td>64</td><td>RoPE 头维度</td></tr>
+      <tr><td><code>kv_cache_dim</code></td><td>576</td><td>512 + 64</td></tr>
+      <tr><td><code>page_size</code></td><td>64</td><td>页大小</td></tr>
+      <tr><td><code>chunk_size</code></td><td>256</td><td>LMCache 分块</td></tr>
+    </table>
+  </div>
+</section>
+
+<!-- ==================== 2. 方案 ==================== -->
+<section>
+  <h2><span class="num">02</span> 方案：KVLayerGroupsManager 模式</h2>
+  <p>
+    采用方法 A——让 SGLang 连接器遵循 vLLM V3 连接器模式，构建 <code>KVLayerGroupsManager</code>，逐组传输。DSA 的两个缓冲区自然按张量形状分裂为两个层组：
+  </p>
+
+  <div class="table-wrap">
+    <table>
+      <tr><th>层组</th><th>格式</th><th>层数</th><th>张量形状</th><th>dtype</th></tr>
+      <tr>
+        <td>Group 0 — KV 潜在</td>
+        <td><code>NL_X_NBBS_ONE_HS</code></td>
+        <td>78 (0–77)</td>
+        <td>(990592, 1, 576)</td>
+        <td>uint8 (fp8 storage)</td>
+      </tr>
+      <tr>
+        <td>Group 1 — DSA 索引器</td>
+        <td><code>NL_X_NB_BSV_BSS</code></td>
+        <td>78 (78–155)</td>
+        <td>(15478, 64, 132)</td>
+        <td>uint8</td>
+      </tr>
+    </table>
+  </div>
+
+  <p>数据流：</p>
+  <pre><code>DSA 双缓冲区 → lmc_radix_cache.py 检测 kv_buffer + index_k_with_scale_buffer
+             → 拼接为 kv_caches = kv_buffer + index_k_with_scale_buffer (flat list[2×NL])
+             → SGLangGPUConnector._initialize_pointers:
+                 normalize_and_discover_per_layer_formats → 按形状分裂为两组
+                 KVLayerGroupsManager 构建两个 kernel group
+             → metadata.get_shapes() 返回两个形状
+             → store()/retrieve() 分配多组 memory object
+             → to_gpu/from_gpu 逐组调用 multi_layer_kv_transfer</code></pre>
+</section>
+
+<!-- ==================== 3. 实现详情 ==================== -->
+<section>
+  <h2><span class="num">03</span> 实现详情：七层改动</h2>
+
+  <h3>第一层：格式检测与注册</h3>
+  <p>
+    <code>NL_X_NB_BSV_BSS_Spec.attention_backends</code> 增加 <code>"SGLang MLA"</code>；SGLang 检测器增加 DSA 索引器检测——2-D 张量、<code>uint8</code>、<code>shape[-1]==132</code>，在 MLA 检测（3-D, <code>shape[1]==1</code>）之后，不冲突。
+  </p>
+
+  <h3>第二层：CreateGPUConnector 传参</h3>
+  <p>
+    SGLang 路径增加 <code>use_mla</code>、<code>metadata</code>、<code>layout_hints</code> 参数，使连接器能构建 <code>KVLayerGroupsManager</code>。
+  </p>
+
+  <h3>第三层：sglang_adapter.py</h3>
+  <p>
+    <code>init_lmcache_engine</code> 支持 MLA kv_shape <code>(num_layer, 1, chunk_size, 1, kv_cache_dim)</code>；<code>LMCacheConnector.__init__</code> 接受 <code>kv_caches</code> flat list（MLA/DSA）或 <code>k_pool</code>/<code>v_pool</code>（MHA 向后兼容）。
+  </p>
+
+  <h3>第四层：lmc_radix_cache.py</h3>
+  <p>
+    缓冲区获取检测 <code>kv_buffer</code>（MLA/DSA）或 <code>k_buffer</code>（MHA），DSA 额外获取 <code>index_k_with_scale_buffer</code>，拼接为 flat list 传给连接器。
+  </p>
+
+  <h3>第五层：SGLangGPUConnector — 核心改动</h3>
+  <p>
+    <code>_initialize_pointers</code> 改用 <code>normalize_and_discover_per_layer_formats</code>（逐层格式检测）+ <code>KVLayerGroupsManager</code>；<code>to_gpu</code>/<code>from_gpu</code> 逐组 <code>multi_layer_kv_transfer</code>，使用 <code>group.engine_kv_format</code>（逐组格式）。
+  </p>
+  <div class="callout">
+    <strong>修正 V3 bug</strong>
+    vLLM V3 连接器在 <code>to_gpu</code>/<code>from_gpu</code> 中使用 <code>self.engine_kv_format</code>（单格式），对 DSA 两组不同格式是 bug。本实现使用 <code>group.engine_kv_format</code>（逐组格式），是正确做法。
+  </div>
+
+  <h3>第六层：MP 适配器 — MLA/DSA 线协议</h3>
+  <p>
+    <code>_wrap_sglang_kv_caches</code> 改为接受 flat list；<code>LMCacheMPConnector</code> 填充 <code>engine_group_infos</code> 为两组（DSA）；STORE/RETRIEVE 逐组 block IDs——DSA 索引器复用 KV 的页索引。
+  </p>
+
+  <h3>第七层（延后）：层式路径 MLA 支持</h3>
+  <p>
+    <code>SGLangLayerwiseGPUConnector</code> 仍有 <code># TODO: support MLA</code>。层式路径默认关闭，且需重构 <code>store_layer</code>/<code>retrieve_layer</code>，工作量超出阶段 3 范围。临时措施：MLA/DSA 模型强制使用非层式模式。
+  </p>
+</section>
+
+<!-- ==================== 4. 存储命名 ==================== -->
+<section>
+  <h2><span class="num">04</span> 存储命名格式变更</h2>
+  <p>
+    参考 nixl 的做法，用 hash 前两位散列到子目录，文件名不带模型名，更简洁。命名格式在 <code>fs_l2_adapter.py</code>、<code>native_connector_l2_adapter.py</code>、<code>csrc/storage_backends/fs/connector.cpp</code> 三处保持同步。
+  </p>
+
+  <div class="table-wrap">
+    <table>
+      <tr><th>维度</th><th>格式</th></tr>
+      <tr>
+        <td>文件名</td>
+        <td><code>0x{kv_rank:#010x}@{object_group_id:x}@{chunk_hash_hex}[@{cache_salt}].data</code></td>
+      </tr>
+      <tr>
+        <td>路径</td>
+        <td><code>base_path/{chunk_hash_hex[:2]}/{filename}</code></td>
+      </tr>
+      <tr>
+        <td>线协议 key</td>
+        <td><code>{kv_rank:08x}@{object_group_id:x}@{chunk_hash_hex}[@{cache_salt}]</code></td>
+      </tr>
+    </table>
+  </div>
+
+  <p>DDN 上的实际文件结构：</p>
+  <div class="ddn-structure"><span class="comment">/ddn/glm5.2.lmcache-dsa-test/</span>
+<span class="dir">├── 77/</span>
+<span class="file">│   ├── 0x08000800@0@77c59fd7aa57021a...data</span>  <span class="comment"># rank 0</span>
+<span class="file">│   ├── 0x08010801@0@77c59fd7aa57021a...data</span>  <span class="comment"># rank 1</span>
+<span class="file">│   └── ...</span>                                    <span class="comment"># rank 2–7</span>
+<span class="dir">└── 37/</span>
+<span class="file">    ├── 0x08000800@0@37fddcc9fb3a04c3...data</span>  <span class="comment"># rank 0</span>
+<span class="file">    └── ...</span>                                    <span class="comment"># rank 1–7</span></div>
+
+  <div class="callout callout-warn">
+    <strong>设计决策：model_name="" 逆解析</strong>
+    <code>_filename_to_object_key</code> 返回 <code>model_name=""</code>，因为文件名中不含模型名。这是安全的：ObjectKey.__post_init__ 不拒绝空 model_name；FS 适配器是无状态的，不扫描目录，逆解析仅在测试中使用。
+  </div>
+</section>
+
+<!-- ==================== 5. 验证 ==================== -->
+<section>
+  <h2><span class="num">05</span> 端到端验证</h2>
+  <p>
+    在节点 43（8×MI308X gfx942, 192G, TP8）上验证。测试环境与生产隔离——DDN 独立目录 <code>/ddn/glm5.2.lmcache-dsa-test</code>，不触碰 47 生产。
+  </p>
+
+  <h3>L2 存储（Store）</h3>
+  <p>发送 721 token 的 prompt，KV cache 异步写入 DDN：</p>
+  <ul>
+    <li>16 个 <code>.data</code> 文件出现，分布在 2 个子目录（<code>77/</code> 和 <code>37/</code>）</li>
+    <li>每个文件 14MB（78 层 × 2 组的 KV 数据，per rank）</li>
+    <li>文件名格式 <code>0x{kv_rank}@0@{chunk_hash}.data</code>，无模型名</li>
+  </ul>
+
+  <h3>L2 检索（Retrieve）— 真 L2 命中</h3>
+  <p>
+    重启 daemon 清空 L1（内存缓存），保留 DDN 文件，重发相同 prompt。L1 为空，唯一缓存来源是 L2（DDN 文件系统）。
+  </p>
+
+  <p>关键 daemon 日志：</p>
+  <pre><code><span class="log-line">[07:02:59,798] FSL2Adapter lookup key[9/16]:  path=0x08000800@0@77c59fd7...data</span> <span class="log-hit">exists=True</span>
+<span class="log-line">[07:02:59,798] FSL2Adapter lookup key[10/16]: path=0x08010801@0@77c59fd7...data</span> <span class="log-hit">exists=True</span>
+<span class="log-line">[07:02:59,799] FSL2Adapter lookup key[16/16]: path=0x08070807@0@77c59fd7...data</span> <span class="log-hit">exists=True</span>
+<span class="log-line">[07:02:59,834] Prefetch request 0 FINISHING: hit_length=2 result_bitmap_popcount=16 loaded=16 failed=0</span>
+<span class="log-hit">[07:02:59,834] Prefetch request completed (L1+L2): 16/16 retained keys (0 L1, 16 L2) in 45.7 ms</span>
+<span class="log-line">[07:03:07,393] Retrieved 512 tokens in 0.063 seconds</span>
+<span class="log-line">[07:03:07,510] Retrieved 512 tokens in 0.048 seconds</span></code></pre>
+
+  <div class="callout">
+    <strong>0 L1, 16 L2</strong>
+    全部 16 个 key 从 L2（DDN）检索，无一来自 L1。这是真正的 L2 命中，不是 L1 命中。
+  </div>
+
+  <p>sglang 侧缓存命中：</p>
+  <pre><code><span class="log-line">[07:03:08 TP0] Prefill batch, #new-token: 256, #cached-token: 512, token usage: 0.00</span></code></pre>
+  <p>768 token 中 512 从缓存命中，仅需 prefill 256 个新 token。</p>
+
+  <h3>验证结果汇总</h3>
+  <div class="table-wrap">
+    <table>
+      <tr><th>检查项</th><th>结果</th></tr>
+      <tr><td>Store（写入 L2）</td><td><span class="badge badge-pass">✓ 16 文件，新格式，hash 前缀子目录</span></td></tr>
+      <tr><td>Lookup（路径解析）</td><td><span class="badge badge-pass">✓ 16/16 exists=True</span></td></tr>
+      <tr><td>Retrieve（L2 → GPU）</td><td><span class="badge badge-pass">✓ 512 tokens × 8 ranks loaded</span></td></tr>
+      <tr><td>sglang 缓存命中</td><td><span class="badge badge-pass">✓ #cached-token: 512</span></td></tr>
+      <tr><td>L1 vs L2 隔离</td><td><span class="badge badge-pass">✓ 0 L1, 16 L2（真 L2 命中）</span></td></tr>
+      <tr><td>文件名无模型名</td><td><span class="badge badge-pass">✓ 0x{rank}@{group}@{hash}.data</span></td></tr>
+      <tr><td>Hash 前缀子目录</td><td><span class="badge badge-pass">✓ 37/ 和 77/ 子目录</span></td></tr>
+    </table>
+  </div>
+</section>
+
+<!-- ==================== 6. 文件清单 ==================== -->
+<section>
+  <h2><span class="num">06</span> 改动文件清单</h2>
+
+  <h3>LMCache 框架侧</h3>
+  <div class="table-wrap">
+    <table>
+      <tr><th>文件</th><th>改动</th></tr>
+      <tr><td><code>kv_format/specs/nl_x_nb_bsv_bss.py</code></td><td><code>attention_backends</code> 加 <code>"SGLang MLA"</code></td></tr>
+      <tr><td><code>kv_format/detectors/sglang.py</code></td><td>增加 DSA 索引器检测（uint8/132）</td></tr>
+      <tr><td><code>gpu_connector/__init__.py</code></td><td>SGLang 路径传 <code>use_mla</code>/<code>metadata</code>/<code>layout_hints</code></td></tr>
+      <tr><td><code>integration/sglang/sglang_adapter.py</code></td><td><code>init_lmcache_engine</code> MLA kv_shape；连接器接受 <code>kv_caches</code></td></tr>
+      <tr><td><code>integration/sglang/multi_process_adapter.py</code></td><td>flat list；<code>engine_group_infos</code> DSA 两组；逐组 block IDs</td></tr>
+      <tr><td><code>gpu_connector/gpu_connectors.py</code></td><td>SGLangGPUConnector 层组感知（核心）</td></tr>
+      <tr><td><code>distributed/l2_adapters/fs_l2_adapter.py</code></td><td>命名格式：hash 子目录 + 无模型名</td></tr>
+    </table>
+  </div>
+
+  <h3>命名格式同步</h3>
+  <div class="table-wrap">
+    <table>
+      <tr><th>文件</th><th>改动</th></tr>
+      <tr><td><code>distributed/l2_adapters/native_connector_l2_adapter.py</code></td><td>线协议 key 去模型名</td></tr>
+      <tr><td><code>csrc/storage_backends/fs/connector.cpp</code></td><td>C++ 侧 <code>key_to_filename</code> 匹配新格式</td></tr>
+      <tr><td><code>csrc/storage_backends/fs/connector.h</code></td><td>移除 <code>PATH_SLASH_REPLACEMENT</code></td></tr>
+      <tr><td><code>examples/lmc_external_native_connector/csrc/connector.cpp</code></td><td>示例连接器匹配新格式</td></tr>
+      <tr><td><code>examples/lmc_external_native_connector/csrc/connector.h</code></td><td>移除 <code>replace_all</code> 声明</td></tr>
+    </table>
+  </div>
+
+  <h3>测试与诊断</h3>
+  <div class="table-wrap">
+    <table>
+      <tr><th>文件</th><th>改动</th></tr>
+      <tr><td><code>tests/v1/distributed/test_fs_l2_adapter_keys.py</code></td><td>重写测试匹配新 3-field/4-field 格式</td></tr>
+      <tr><td><code>diag_l2_lookup.py</code></td><td>诊断脚本适配 hash 子目录 + 新格式</td></tr>
+    </table>
+  </div>
+
+  <h3>sglang 侧</h3>
+  <div class="table-wrap">
+    <table>
+      <tr><th>文件</th><th>改动</th></tr>
+      <tr><td><code>python/sglang/srt/mem_cache/storage/lmcache/lmc_radix_cache.py</code></td><td>缓冲区获取检测 <code>kv_buffer</code>/<code>index_k_with_scale_buffer</code></td></tr>
+    </table>
+  </div>
+</section>
+
+<!-- ==================== 7. 范围与待办 ==================== -->
+<section>
+  <h2><span class="num">07</span> 范围与待办</h2>
+
+  <div class="table-wrap">
+    <table>
+      <tr><th>范围</th><th>决策</th><th>理由</th></tr>
+      <tr><td>非层式路径（MP + IP）</td><td><span class="badge badge-pass">已实现</span></td><td>默认路径，DSA 支持核心</td></tr>
+      <tr><td>层式路径（<code>use_layerwise=True</code>）</td><td><span class="badge badge-warn">延后</span></td><td>需重构 <code>store_layer</code>/<code>retrieve_layer</code></td></tr>
+      <tr><td>MLA 标准模型（DeepSeek-V3）</td><td><span class="badge badge-pass">附带支持</span></td><td>MLA 是 DSA 子集</td></tr>
+      <tr><td>MHA 模型</td><td><span class="badge badge-pass">向后兼容</span></td><td>保留 <code>k_pool</code>/<code>v_pool</code> 路径</td></tr>
+      <tr><td>ROCm c_ops</td><td><span class="badge badge-pass">已支持</span></td><td><code>multi_layer_kv_transfer</code> 已处理 DSA</td></tr>
+    </table>
+  </div>
+
+  <h3>待办</h3>
+  <div class="flow">
+    <div class="flow-step">
+      <div class="flow-num">1</div>
+      <div class="flow-body">
+        <div class="flow-title">在容器内运行单元测试</div>
+        <div class="flow-desc"><code>pytest tests/v1/distributed/test_fs_l2_adapter_keys.py</code>（容器内 <code>c_ops</code> 可用）</div>
+      </div>
+    </div>
+    <div class="flow-step">
+      <div class="flow-num">2</div>
+      <div class="flow-body">
+        <div class="flow-title">清理诊断日志</div>
+        <div class="flow-desc"><code>prefetch_controller.py</code> 有 4 处诊断日志可降级为 debug 或移除</div>
+      </div>
+    </div>
+    <div class="flow-step">
+      <div class="flow-num">3</div>
+      <div class="flow-body">
+        <div class="flow-title">层式 MLA 支持</div>
+        <div class="flow-desc"><code>SGLangLayerwiseGPUConnector</code> 仍有 <code># TODO: support MLA</code>，非当前优先级</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<hr>
+<p style="font-size: 13px; color: var(--text-faint); font-family: var(--mono);">
+  测试环境：10.1.29.43 · 8×MI308X (gfx942, 192G) · GLM-5.2-FP8 · TP8<br>
+  DDN 隔离目录：/ddn/glm5.2.lmcache-dsa-test（不触碰 47 生产）<br>
+  LMCache 0.5.4.dev3 · sglang 0.5.15.post1 · ROCm 7.20
+</p>
+
+</div>
