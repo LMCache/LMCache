@@ -328,8 +328,8 @@ def _percentiles(values: list[float], pcts: list[int]) -> dict[str, float]:
     n = len(s)
     result = {}
     for p in pcts:
-        idx = min(int(p / 100 * n), n - 1)
-        result[f"p{p}"] = s[idx]
+        rank = math.ceil(p * n / 100.0)
+        result[f"p{p}"] = s[max(rank, 1) - 1]
     return result
 
 

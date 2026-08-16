@@ -12,10 +12,12 @@ import pytest
 # First Party
 from lmcache.tools.cache_simulator.lru_cache import LRUCache, LRUCacheFast
 from lmcache.tools.cache_simulator.simulator import (
+    _percentiles,
     compute_kv_bytes_per_chunk,
     load_lookup_events,
     simulate,
 )
+
 
 # ---------------------------------------------------------------------------
 # LRUCacheFast
@@ -330,3 +332,33 @@ class TestSimulate:
     def test_invalid_kv_bytes_raises(self):
         with pytest.raises(ValueError):
             simulate([], cache_capacity_bytes=100, kv_bytes_per_chunk=0)
+
+
+def test_percentiles_whole_rank():
+    values = [float(i) for i in range(1, 101)]
+
+    result = _percentiles(values, [25, 50, 75, 90, 99])
+
+    assert result == {
+        "p25": 25.0,
+        "p50": 50.0,
+        "p75": 75.0,
+        "p90": 90.0,
+        "p99": 99.0,
+    }
+
+
+def test_percentiles_fractional_rank():
+    values = [float(i) for i in range(1, 11)]
+
+    result = _percentiles(values, [25])
+
+    assert result == {"p25": 3.0}
+
+
+def test_percentiles_avoids_floating_point_rank_error():
+    values = [float(i) for i in range(1, 101)]
+
+    result = _percentiles(values, [7])
+
+    assert result == {"p7": 7.0}
