@@ -233,11 +233,12 @@ class LazyOffloadPendingStore:
                 self._eviction_config, GPUBlockPoolView(gpu_block_pool)
             )
 
-    def add(self, meta: "LMCacheMPRequestMetadata") -> AddOutcome:
+    def add(self, meta: "LMCacheMPRequestMetadata", epoch: int = 0) -> AddOutcome:
         """Buffer a store operation produced by ``GetStoreMetadata``.
 
         Args:
             meta: The store metadata to buffer.
+            epoch: Store epoch that produced the metadata.
 
         Returns:
             The buffering outcome; see :class:`AddOutcome` for the action
@@ -253,7 +254,7 @@ class LazyOffloadPendingStore:
             for bid in meta.op.flat_block_ids
         }
         if self._fifo_policy is not None:
-            self._fifo_policy.add(meta, block_hashes)
+            self._fifo_policy.add(meta, block_hashes, epoch)
             return AddOutcome.BUFFERED
         queue = self._require_eviction_queue()
         op = PendingStoreOp(
@@ -263,6 +264,7 @@ class LazyOffloadPendingStore:
             block_hashes=cast("dict[int, BlockHashWithGroupId]", block_hashes),
             prefix_start_tokens=meta.op.start,
             prefix_end_tokens=meta.op.end,
+            epoch=epoch,
             cache_salt=meta.cache_salt,
         )
         admit = queue.admit(op)

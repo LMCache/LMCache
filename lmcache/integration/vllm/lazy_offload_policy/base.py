@@ -17,11 +17,13 @@ class PendingStoreItem:
 
     Attributes:
         request_id: The request identifier for the pending operation.
+        epoch: Store epoch that produced the buffered metadata.
         metadatas: Store metadata and the captured block hashes to submit.
         is_finished: Whether all cache blocks for the request have been queued.
     """
 
     request_id: str
+    epoch: int = 0
     metadatas: list[tuple["LMCacheMPRequestMetadata", dict[int, bytes]]] = field(
         default_factory=list
     )
@@ -40,12 +42,14 @@ class OffloadPolicy(ABC):
         self,
         meta: "LMCacheMPRequestMetadata",
         block_hashes: dict[int, bytes],
+        epoch: int = 0,
     ) -> None:
         """Add cache blocks from one request to the pending store.
 
         Args:
             meta: Store metadata for a subset of a request's cache blocks.
             block_hashes: Mapping from queued GPU block IDs to block hashes.
+            epoch: Store epoch that produced this metadata.
         """
 
     @abstractmethod

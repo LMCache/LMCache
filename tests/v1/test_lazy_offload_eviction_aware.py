@@ -72,6 +72,7 @@ def make_op(
     prefix_end_tokens: int,
     cache_salt: str = "",
     prefix_start_tokens: int = -1,
+    epoch: int = 0,
 ) -> PendingStoreOp:
     """Build a pending op whose hash snapshot matches the pool's state.
 
@@ -90,6 +91,7 @@ def make_op(
         block_hashes={block_id: pool.hashes[block_id] for block_id in block_ids},
         prefix_start_tokens=prefix_start_tokens,
         prefix_end_tokens=prefix_end_tokens,
+        epoch=epoch,
         cache_salt=cache_salt,
     )
 
@@ -141,6 +143,17 @@ class TestAdmission:
         result = queue.admit(make_op("req", [1, 2], pool, prefix_end_tokens=256))
         assert result is AdmitResult.ADMITTED
         assert queue.num_pending_ops() == 1
+
+    def test_rejects_mixed_epochs_for_one_request(self) -> None:
+        pool = FakePoolView()
+        seed_blocks(pool, [1, 2], free=False)
+        queue = make_queue(pool)
+        assert (
+            queue.admit(make_op("req", [1], pool, 256, epoch=3)) is AdmitResult.ADMITTED
+        )
+
+        with pytest.raises(RuntimeError, match="mixed store epochs 3 and 4"):
+            queue.admit(make_op("req", [2], pool, 512, epoch=4))
 
     def test_rejects_op_with_unhashed_block(self) -> None:
         pool = FakePoolView()

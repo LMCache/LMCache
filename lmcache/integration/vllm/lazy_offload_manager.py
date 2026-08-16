@@ -210,8 +210,8 @@ class LazyOffloadManager:
         Returns:
             The pending store's admission outcome.
         """
-        self._requests.ensure_active(metadata.request_id)
-        return self._pending_store.add(metadata)
+        epoch = self._requests.ensure_active(metadata.request_id)
+        return self._pending_store.add(metadata, epoch)
 
     def on_scheduler_step(
         self, scheduler_output: "SchedulerOutput"

@@ -138,6 +138,13 @@ class TestFIFOOffloadPolicy:
         policy.add(meta2, _make_block_hashes([0, 1]))
         assert len(policy._pending_items["req-0"].metadatas) == 2
 
+    def test_add_rejects_mixed_epochs_for_one_request(self) -> None:
+        policy = FIFOOffloadPolicy()
+        policy.add(_make_meta("req-0"), _make_block_hashes([0]), epoch=2)
+
+        with pytest.raises(RuntimeError, match="mixed store epochs 2 and 3"):
+            policy.add(_make_meta("req-0"), _make_block_hashes([1]), epoch=3)
+
     def test_pop_items_for_offload_below_threshold_returns_empty(self) -> None:
         policy = FIFOOffloadPolicy({"lmcache.mp.lazy_offload_threshold": 3})
         policy.add(_make_meta("req-0"), _make_block_hashes([0]))

@@ -386,8 +386,11 @@ connector therefore fails construction when lazy offload is enabled without
 ### 2.1 Scheduler-step flow
 
 1. `GetStoreMetadata` produces each newly storable contiguous token range.
-2. The pending-store facade snapshots its block hashes and admits it to the
-   selected policy instead of sending it to the worker immediately.
+2. The manager tags it with the request's current store epoch. The
+   pending-store facade snapshots its block hashes and admits it to the
+   selected policy instead of sending it to the worker immediately; mixing
+   two epochs in one request's pending list is rejected as an invariant
+   violation.
 3. On a token-producing scheduler step, the connector forwards the scheduler
    output to `LazyOffloadManager`, which observes allocation pressure and
    drains the selected policy once.

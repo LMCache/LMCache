@@ -44,18 +44,25 @@ class FIFOOffloadPolicy(OffloadPolicy):
         self,
         meta: "LMCacheMPRequestMetadata",
         block_hashes: dict[int, bytes],
+        epoch: int = 0,
     ) -> None:
         """Queue cache blocks, aggregating multiple entries per request.
 
         Args:
             meta: Store metadata for a subset of a request's cache blocks.
             block_hashes: Mapping from queued GPU block IDs to block hashes.
+            epoch: Store epoch that produced this metadata.
         """
-        if meta.request_id not in self._pending_items:
-            self._pending_items[meta.request_id] = PendingStoreItem(
-                request_id=meta.request_id
+        item = self._pending_items.get(meta.request_id)
+        if item is None:
+            item = PendingStoreItem(request_id=meta.request_id, epoch=epoch)
+            self._pending_items[meta.request_id] = item
+        elif item.epoch != epoch:
+            raise RuntimeError(
+                f"request {meta.request_id!r} mixed store epochs "
+                f"{item.epoch} and {epoch}"
             )
-        self._pending_items[meta.request_id].metadatas.append((meta, block_hashes))
+        item.metadatas.append((meta, block_hashes))
 
     def mark_req_finished(self, req_id: str) -> bool:
         """Mark a queued request as ready for FIFO offload.

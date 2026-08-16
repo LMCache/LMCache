@@ -201,6 +201,7 @@ class PendingStoreOp:
         prefix_end_tokens: Token index one past the end of this operation's
             range, i.e. the request-prefix length covered once this
             operation and all earlier ones are stored.
+        epoch: Store epoch that produced this operation.
         cache_salt: The request's cache salt, part of the operation's
             content identity for deduplication (two requests with the same
             block hashes but different salts store under different keys).
@@ -211,6 +212,7 @@ class PendingStoreOp:
     block_hashes: dict[int, "BlockHashWithGroupId"]
     prefix_start_tokens: int
     prefix_end_tokens: int
+    epoch: int = 0
     cache_salt: str = ""
 
 
@@ -580,6 +582,12 @@ class EvictionAwareStoreQueue:
             The admission outcome; see :class:`AdmitResult` for the action
             the caller must take on each value.
         """
+        existing = self._pending_ops.get(op.request_id)
+        if existing is not None and existing[0].epoch != op.epoch:
+            raise RuntimeError(
+                f"request {op.request_id!r} mixed store epochs "
+                f"{existing[0].epoch} and {op.epoch}"
+            )
         state = self._request_lifecycle.get(op.request_id)
         if state is not None and state.prefix_broken:
             self._counters.rejected_prefix_broken += 1
