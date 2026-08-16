@@ -352,10 +352,12 @@ class PrefetchController(StorageControllerInterface):
         self._load_admission_wait_seconds = load_admission_wait_seconds
         self._enable_load_admission = load_admission_wait_seconds > 0
         self._l1_align_bytes = 1
+        self._l1_max_capacity_bytes = 0
         if self._enable_load_admission:
             l1_memory_desc = self._l1_manager.get_l1_memory_desc()
             if l1_memory_desc is not None:
                 self._l1_align_bytes = l1_memory_desc.align_bytes
+                self._l1_max_capacity_bytes = l1_memory_desc.size
 
         # Adapters that are being drained and will be removed after all
         # the in-flight operations are done.
@@ -908,8 +910,11 @@ class PrefetchController(StorageControllerInterface):
         if not self._enable_load_admission:
             return True, True
         used, total = self._l1_manager.get_memory_usage()
+        # Lazy L1 reports committed capacity in ``total`` while its descriptor
+        # covers the final backing buffer.
+        max_capacity = max(total, self._l1_max_capacity_bytes)
         return (
-            request.planned_load_bytes <= total,
+            request.planned_load_bytes <= max_capacity,
             request.planned_load_bytes <= total - used,
         )
 

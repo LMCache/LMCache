@@ -34,6 +34,7 @@ from lmcache.v1.distributed.config import (
     parse_args,
 )
 from lmcache.v1.distributed.error import L1Error
+from lmcache.v1.distributed.internal_api import L1MemoryDesc
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters.fault_inject_l2_adapter import (
     FaultInjectL2Adapter,
@@ -775,6 +776,59 @@ class TestLoadAdmission:
         assert result.get_indices_list() == []
         assert elapsed < 0.08
         assert wait_for_condition(lambda: adapter.debug_get_locked_key_count() == 0)
+
+        ctrl.stop()
+        adapter.close()
+        l1_manager.close()
+
+    def test_load_waits_for_lazy_l1_final_capacity(self):
+        """A load that fits final lazy capacity is not treated as oversized."""
+        layout = make_large_layout()
+        l1_manager = make_l1_manager(4 * 1024 * 1024)
+
+        class ExpandingCapacityL1:
+            def __init__(self, inner: L1Manager) -> None:
+                self.inner = inner
+                self.current_total = 2 * 1024 * 1024
+
+            def get_memory_usage(self) -> tuple[int, int]:
+                used, _ = self.inner.get_memory_usage()
+                return used, self.current_total
+
+            def get_l1_memory_desc(self) -> L1MemoryDesc | None:
+                return self.inner.get_l1_memory_desc()
+
+            def expand(self) -> None:
+                self.current_total = 4 * 1024 * 1024
+
+            def __getattr__(self, name: str) -> object:
+                return getattr(self.inner, name)
+
+        expanding_l1 = ExpandingCapacityL1(l1_manager)
+        adapter = make_adapter()
+        key = make_object_key(26_000)
+        store_keys_in_l2(adapter, [key], layout)
+        ctrl = PrefetchController(
+            l1_manager=expanding_l1,  # type: ignore[arg-type]
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultPrefetchPolicy(),
+            load_admission_wait_seconds=2.0,
+        )
+        ctrl.start()
+
+        request_id = ctrl.submit_prefetch_request(
+            PrefetchRequestSpec([key], {0: layout})
+        )
+        assert wait_for_condition(
+            lambda: ctrl.report_status()["wait_load_phase_count"] == 1
+        )
+
+        expanding_l1.expand()
+        result = wait_for_prefetch_result_bitmap(ctrl, request_id, timeout=2.0)
+        assert result is not None
+        assert result.get_indices_list() == [0]
+        l1_manager.finish_read([key])
 
         ctrl.stop()
         adapter.close()
