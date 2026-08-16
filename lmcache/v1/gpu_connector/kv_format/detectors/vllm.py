@@ -56,6 +56,15 @@ class VLLM_Detector(EngineDetector):
 
         if list_depth == 0:
             return lmcache_native.EngineKVFormat.NB_NL_TWO_BS_NH_HS, kv_caches
+        # vLLM-RBLN: HND with a singleton between heads and block tokens that
+        # its attention backend requires. Always HND, so the hint is not read.
+        if (
+            list_depth == 1
+            and tensor_ndim == 6
+            and first_tensor.shape[0] == 2
+            and first_tensor.shape[3] == 1
+        ):
+            return lmcache_native.EngineKVFormat.NL_X_TWO_NB_NH_ONE_BS_HS, kv_caches
         if list_depth == 1 and tensor_ndim == 5:
             if first_tensor.shape[0] == 2:  # K/V axis first
                 if is_hnd:
