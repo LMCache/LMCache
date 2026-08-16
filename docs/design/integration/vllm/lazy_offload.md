@@ -350,8 +350,11 @@ Two policies are available:
 
 For either policy, the manager coalesces each request's released chunks into
 one store operation, calls `BlockPool.touch()` to pin its surviving blocks,
-and records those block ids until every worker rank reports completion. The
-completion receipt balances the pins with `free_blocks(prepend=True)`: a block
+and records those block ids in a dedicated pinned-batch registry until every
+worker rank reports completion. The registry permits exactly one receipt
+window per request, so an accidental overlapping emission fails before it can
+silently overwrite pins. The completion receipt balances the pins with
+`free_blocks(prepend=True)`: a block
 that now has a lower-tier copy returns to the eviction head. Failed stores are
 reported alongside completion receipts, allowing the scheduler to break the
 request's prefix chain before considering later chunks.
