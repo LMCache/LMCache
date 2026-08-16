@@ -284,8 +284,15 @@ A production drain therefore walks only the bounded free-queue window and the
 requests represented in that window or touched by this step's allocations. Its
 cost is proportional to the pressure window and drain cap, not total pending
 queue depth. Admission and every departure path update all three indexes; the
-pure-policy tests retain a `allocated_block_ids=None` compatibility path that
+pure-policy tests retain an `allocated_block_ids=None` compatibility path that
 performs a full validation pass.
+
+Request lifecycle is stored separately from those indexes in one per-request
+record (`prefix_broken`, `finished`, `in_flight`, and `stale_in_flight`). This
+keeps multi-flag transitions such as preemption, id reuse, failed stores, and
+completion receipts atomic in one owner rather than synchronizing parallel
+sets. Empty lifecycle records are pruned, so completed request ids do not
+accumulate.
 
 ## Observability
 

@@ -352,6 +352,29 @@ class DrainResult:
     ops_held_back: int = 0
 
 
+@dataclass
+class _RequestLifecycle:
+    """State-machine flags for one request id.
+
+    Pending operations and their secondary indexes remain owned by the queue;
+    this record only centralizes lifecycle transitions that previously updated
+    four parallel sets independently.
+    """
+
+    prefix_broken: bool = False
+    finished: bool = False
+    in_flight: bool = False
+    stale_in_flight: bool = False
+
+    def is_empty(self) -> bool:
+        return not (
+            self.prefix_broken
+            or self.finished
+            or self.in_flight
+            or self.stale_in_flight
+        )
+
+
 class EvictionAwareStoreQueue:
     """Buffers store operations and releases them by eviction imminence.
 
@@ -396,21 +419,11 @@ class EvictionAwareStoreQueue:
         self._pool = pool
         # Per-request pending operations in prefix (admission) order.
         self._pending: dict[str, list[PendingStoreOp]] = {}
-        # Requests whose prefix chain was broken by a drop; further chunks
-        # of these requests are unreachable and must not be admitted.
-        self._prefix_broken: set[str] = set()
-        # Requests reported finished by the engine; used to compute
-        # DrainResult.released_requests.
-        self._finished: set[str] = set()
-        # Requests with an emitted batch whose store completion has not been
-        # reported yet. The worker tracks one in-flight store per request, so
-        # further emissions for these requests are held back until
-        # notify_stored().
-        self._in_flight: set[str] = set()
-        # In-flight batches invalidated by drop_request (preemption reset).
-        # Ops admitted after the reset are re-produced from token zero and do
-        # not depend on such a batch, so its failure must not drop them.
-        self._stale_in_flight: set[str] = set()
+        # Request lifecycle is deliberately separate from pending-operation
+        # storage and its secondary indexes. Keeping the related flags in one
+        # record makes transition invariants explicit and avoids independent
+        # set updates drifting apart.
+        self._request_lifecycle: dict[str, _RequestLifecycle] = {}
         # Content key -> the pending operation buffering that content. An
         # operation whose content is already buffered under another request
         # is deduplicated at admission: without this, every request over a
@@ -448,6 +461,16 @@ class EvictionAwareStoreQueue:
         self._next_step_estimate = 0
         self._counters = LazyOffloadCounters()
 
+    def _lifecycle(self, request_id: str) -> _RequestLifecycle:
+        """Return the request's lifecycle record, creating it on mutation."""
+        return self._request_lifecycle.setdefault(request_id, _RequestLifecycle())
+
+    def _prune_lifecycle(self, request_id: str) -> None:
+        """Drop an all-false lifecycle record to keep request ids bounded."""
+        state = self._request_lifecycle.get(request_id)
+        if state is not None and state.is_empty():
+            del self._request_lifecycle[request_id]
+
     def admit(self, op: PendingStoreOp) -> AdmitResult:
         """Admit a store operation into the pending queue.
 
@@ -459,14 +482,15 @@ class EvictionAwareStoreQueue:
             The admission outcome; see :class:`AdmitResult` for the action
             the caller must take on each value.
         """
-        if op.request_id in self._prefix_broken:
+        state = self._request_lifecycle.get(op.request_id)
+        if state is not None and state.prefix_broken:
             self._counters.rejected_prefix_broken += 1
             return AdmitResult.REJECTED_PREFIX_BROKEN
         if any(block_hash is None for block_hash in op.block_hashes.values()):
             # The caller's tracker has already advanced past this range, so
             # the request's later chunks would be stored without their prefix
             # (unreachable): reject them like any other broken chain.
-            self._prefix_broken.add(op.request_id)
+            self._lifecycle(op.request_id).prefix_broken = True
             self._counters.rejected_unhashed += 1
             return AdmitResult.REJECTED_UNHASHED_BLOCK
         content_key = _content_key(op)
@@ -537,10 +561,13 @@ class EvictionAwareStoreQueue:
             :class:`DrainResult`'s ``released_requests``); False if nothing
             is pending and the caller may tear down immediately.
         """
-        if request_id in self._pending or request_id in self._in_flight:
-            self._finished.add(request_id)
+        state = self._request_lifecycle.get(request_id)
+        if request_id in self._pending or (state is not None and state.in_flight):
+            self._lifecycle(request_id).finished = True
             return True
-        self._prefix_broken.discard(request_id)
+        if state is not None:
+            state.prefix_broken = False
+            self._prune_lifecycle(request_id)
         return False
 
     def drop_request(self, request_id: str) -> int:
@@ -580,10 +607,13 @@ class EvictionAwareStoreQueue:
         self._forget_ops(dropped)
         self._requests_to_validate.discard(request_id)
         self._counters.dropped_on_request_drop += len(dropped)
-        self._finished.discard(request_id)
-        self._prefix_broken.discard(request_id)
-        if request_id in self._in_flight:
-            self._stale_in_flight.add(request_id)
+        state = self._request_lifecycle.get(request_id)
+        if state is not None:
+            state.finished = False
+            state.prefix_broken = False
+            if state.in_flight:
+                state.stale_in_flight = True
+            self._prune_lifecycle(request_id)
         return len(dropped)
 
     def reclaim_finished_request(self, request_id: str) -> bool:
@@ -618,18 +648,20 @@ class EvictionAwareStoreQueue:
             False if there was nothing to reclaim or the session teardown
             merges into the successor's lifecycle (in-flight batch).
         """
-        if request_id not in self._finished:
+        state = self._request_lifecycle.get(request_id)
+        if state is None or not state.finished:
             return False
         dropped = self._pending.pop(request_id, [])
         self._request_order.pop(request_id, None)
         self._forget_ops(dropped)
         self._requests_to_validate.discard(request_id)
         self._counters.dropped_id_reuse += len(dropped)
-        self._prefix_broken.discard(request_id)
-        self._finished.discard(request_id)
-        if request_id in self._in_flight:
-            self._stale_in_flight.add(request_id)
+        state.prefix_broken = False
+        state.finished = False
+        if state.in_flight:
+            state.stale_in_flight = True
             return False
+        self._prune_lifecycle(request_id)
         return True
 
     def mark_store_failed(self, request_id: str) -> int:
@@ -652,14 +684,15 @@ class EvictionAwareStoreQueue:
         Returns:
             The number of pending operations dropped.
         """
-        if request_id in self._stale_in_flight:
+        state = self._request_lifecycle.get(request_id)
+        if state is not None and state.stale_in_flight:
             return 0
         dropped = self._pending.pop(request_id, [])
         self._request_order.pop(request_id, None)
         self._forget_ops(dropped)
         self._requests_to_validate.discard(request_id)
         self._counters.dropped_failed_store += len(dropped)
-        self._prefix_broken.add(request_id)
+        self._lifecycle(request_id).prefix_broken = True
         return len(dropped)
 
     def num_pending_ops(self) -> int:
@@ -729,7 +762,8 @@ class EvictionAwareStoreQueue:
             if not ops:
                 self._requests_to_validate.discard(request_id)
                 continue
-            if request_id in self._in_flight:
+            state = self._request_lifecycle.get(request_id)
+            if state is not None and state.in_flight:
                 # One in-flight store batch per request (worker constraint).
                 # Keep an allocation-triggered validation pending: after the
                 # receipt, the held-back ops still need their snapshots
@@ -786,7 +820,7 @@ class EvictionAwareStoreQueue:
                 result.dropped_short_prefix.extend(surviving)
                 self._forget_ops(surviving)
                 self._counters.rejected_short_prefix += len(surviving)
-                self._prefix_broken.add(request_id)
+                self._lifecycle(request_id).prefix_broken = True
                 self._replace_pending(request_id, [], result)
                 continue
             emitted = due_ops[:budget]
@@ -806,7 +840,7 @@ class EvictionAwareStoreQueue:
             # Mark in flight before updating pending state so that a request
             # fully drained by this emission is not released until the store
             # completion arrives via notify_stored().
-            self._in_flight.add(request_id)
+            self._lifecycle(request_id).in_flight = True
             remaining = self._pending[request_id][len(emitted) :]
             self._replace_pending(request_id, remaining, result)
         if result.ops_held_back:
@@ -826,14 +860,20 @@ class EvictionAwareStoreQueue:
             True if the request is finished and has nothing pending -- the
             caller may now safely tear down its session; False otherwise.
         """
-        self._in_flight.discard(request_id)
-        self._stale_in_flight.discard(request_id)
-        if request_id in self._pending:
+        state = self._request_lifecycle.get(request_id)
+        if state is None:
             return False
-        if request_id in self._finished:
-            self._finished.discard(request_id)
-            self._prefix_broken.discard(request_id)
+        state.in_flight = False
+        state.stale_in_flight = False
+        if request_id in self._pending:
+            self._prune_lifecycle(request_id)
+            return False
+        if state.finished:
+            state.finished = False
+            state.prefix_broken = False
+            self._prune_lifecycle(request_id)
             return True
+        self._prune_lifecycle(request_id)
         return False
 
     def _max_emission_shift_blocks(self) -> int:
@@ -885,7 +925,7 @@ class EvictionAwareStoreQueue:
         result.dropped_evicted.extend(dropped)
         self._forget_ops(dropped)
         self._counters.dropped_evicted += len(dropped)
-        self._prefix_broken.add(request_id)
+        self._lifecycle(request_id).prefix_broken = True
         surviving = ops[:first_lost]
         self._replace_pending(request_id, surviving, result)
         return surviving
@@ -1026,7 +1066,9 @@ class EvictionAwareStoreQueue:
         self._pending.pop(request_id, None)
         self._request_order.pop(request_id, None)
         self._requests_to_validate.discard(request_id)
-        if request_id in self._finished and request_id not in self._in_flight:
-            self._finished.discard(request_id)
-            self._prefix_broken.discard(request_id)
+        state = self._request_lifecycle.get(request_id)
+        if state is not None and state.finished and not state.in_flight:
+            state.finished = False
+            state.prefix_broken = False
+            self._prune_lifecycle(request_id)
             result.released_requests.append(request_id)
