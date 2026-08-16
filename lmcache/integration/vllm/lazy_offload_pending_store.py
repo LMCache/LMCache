@@ -7,7 +7,6 @@ import enum
 import time
 
 # First Party
-from lmcache.integration.vllm.lazy_offload_policy.types import PendingStoreItem
 from lmcache.integration.vllm.lazy_offload_policy.eviction_aware import (
     DEFAULT_HORIZON_STEPS,
     AdmitResult,
@@ -19,6 +18,7 @@ from lmcache.integration.vllm.lazy_offload_policy.eviction_aware import (
     PendingStoreOp,
 )
 from lmcache.integration.vllm.lazy_offload_policy.fifo import FIFOOffloadPolicy
+from lmcache.integration.vllm.lazy_offload_policy.types import PendingStoreItem
 from lmcache.utils import init_logger as lmcache_init_logger
 
 if TYPE_CHECKING:

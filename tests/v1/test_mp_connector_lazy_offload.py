@@ -95,6 +95,7 @@ class _FakeSchedulerAdapter:
         self.ended_sessions: list[str] = []
         self.shutdown_calls = 0
         self.lookup_result: int | None = 0
+        self.lmcache_tokens_per_chunk = TOKENS_PER_BLOCK
 
     def end_session(self, request_id: str) -> None:
         self.ended_sessions.append(request_id)
@@ -348,7 +349,6 @@ def test_eager_apc_backfill_uses_the_existing_immediate_store_path() -> None:
     """The eager side effect changes coverage, not offload orchestration."""
     harness = _make_connector()
     harness.connector.lazy_offload = False
-    harness.adapter.lmcache_tokens_per_chunk = TOKENS_PER_BLOCK
     tokens = list(range(4 * TOKENS_PER_BLOCK))
     request = SimpleNamespace(
         request_id="E-immediate",
@@ -419,7 +419,6 @@ def test_eager_apc_backfill_excludes_the_prefix_already_in_lmcache() -> None:
     harness = _make_connector()
     harness.connector.lazy_offload = False
     harness.adapter.lookup_result = 2 * TOKENS_PER_BLOCK
-    harness.adapter.lmcache_tokens_per_chunk = TOKENS_PER_BLOCK
     tokens = list(range(4 * TOKENS_PER_BLOCK))
     request = SimpleNamespace(
         request_id="E-partial",
