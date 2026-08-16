@@ -49,10 +49,8 @@ from lmcache.v1.gpu_connector.kv_format.types import (
 )
 from lmcache.v1.gpu_connector.utils import (
     get_block_size,
-    get_dtype,
     get_head_size,
     get_hidden_dim_size,
-    get_num_blocks,
     get_num_heads,
     get_num_layers,
     normalize_kv_and_discover_format,
@@ -87,9 +85,10 @@ class VLLMPagedMemRBLNConnectorV2(GPUConnectorInterface):
         ``num_layers`` and ``hidden_dim_size`` come from the metadata because
         they are properties of the *model*, and they are all
         :meth:`get_shape` needs -- so a memory object can be sized before any
-        cache is registered. Everything else (the KV format, ``num_blocks``,
-        ``block_size``) is a property of the *allocated cache*, so it is
-        discovered from the tensors on first use.
+        cache is registered. Everything the transfers need on top of that
+        (the KV format, ``block_size``, the head geometry) is a property of
+        the *allocated cache*, so it is discovered from the tensors on first
+        use.
 
         Args:
             hidden_dim_size: ``num_kv_heads * head_size``.
@@ -141,12 +140,6 @@ class VLLMPagedMemRBLNConnectorV2(GPUConnectorInterface):
     # Registration
     # ------------------------------------------------------------------
 
-    def initialize_kvcaches_ptr(self, **kwargs: object) -> None:
-        """Record the engine's KV caches when the caller supplies them."""
-        kvcaches = kwargs.get("kvcaches")
-        if kvcaches is not None:
-            self.kvcaches = kvcaches  # type: ignore[assignment]
-
     def register_kv_caches(self, kv_caches: List[torch.Tensor]) -> None:
         """Register the per-layer KV caches and discover their geometry.
 
@@ -178,11 +171,9 @@ class VLLMPagedMemRBLNConnectorV2(GPUConnectorInterface):
             cast(DiscoverableKVCache, list(kv_caches)),
             EngineType.VLLM,
         )
-        self.num_blocks = get_num_blocks(discovered, self.engine_kv_format)
         self.block_size = get_block_size(discovered, self.engine_kv_format)
         self.head_size = get_head_size(discovered, self.engine_kv_format)
         self.num_heads = get_num_heads(discovered, self.engine_kv_format)
-        self.dtype = get_dtype(discovered, self.engine_kv_format)
 
         # The two the metadata already fixed are checked, not overwritten: a
         # cache that disagrees with the model it was built for would otherwise
@@ -208,17 +199,12 @@ class VLLMPagedMemRBLNConnectorV2(GPUConnectorInterface):
 
         self._attributes_initialized = True
         logger.info(
-            "RBLN: attributes initialized - format: %s, num_layers: %d, "
-            "num_blocks: %d, block_size: %d, hidden_dim_size: %d, "
-            "head_size: %d, num_heads: %d, dtype: %s",
+            "RBLN: KV geometry - format: %s, block_size: %d, num_heads: %d, "
+            "head_size: %d",
             self.engine_kv_format,
-            self.num_layers,
-            self.num_blocks,
             self.block_size,
-            self.hidden_dim_size,
-            self.head_size,
             self.num_heads,
-            self.dtype,
+            self.head_size,
         )
 
     # ------------------------------------------------------------------

@@ -116,12 +116,10 @@ def test_geometry_matches_the_native_tensors() -> None:
     """Discovery reads the real dims, not the ones shifted by the singleton."""
     connector = _connector_with_attributes()
     assert connector.num_layers == NUM_LAYERS
-    assert connector.num_blocks == NUM_BLOCKS
     assert connector.block_size == BLOCK_SIZE
     assert connector.num_heads == NUM_HEADS
     assert connector.head_size == HEAD_SIZE
     assert connector.hidden_dim_size == HIDDEN_DIM
-    assert connector.dtype == DTYPE
 
 
 def test_get_shape_is_kv_2ltd() -> None:
