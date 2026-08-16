@@ -350,14 +350,16 @@ Two policies are available:
 
 For either policy, the manager coalesces each request's released chunks into
 one store operation, calls `BlockPool.touch()` to pin its surviving blocks,
-and records those block ids in a dedicated pinned-batch registry until every
-worker rank reports completion. The registry permits exactly one receipt
-window per request, so an accidental overlapping emission fails before it can
-silently overwrite pins. A successor reusing an in-flight request id remains
-active but cannot drain until the predecessor receipt closes that window; the
-receipt cannot end the shared session while the successor is live or queued.
-The completion receipt balances the pins with `free_blocks(prepend=True)`: a block
-that now has a lower-tier copy returns to the eviction head. Failed stores are
+and records those block ids in the request's controller-owned state until
+every worker rank reports completion. Each request id has an explicit store
+epoch and at most one submitted batch. Preemption reset advances the epoch
+before tracker recreation; finished-id reuse advances it at successor arrival.
+An old batch retains its submission epoch while a successor becomes active, so
+its receipt can release pins without ending the successor's shared session.
+Overlapping emission remains a logic error because worker receipts are keyed
+only by request id. The completion receipt balances the pins with
+`free_blocks(prepend=True)`: a block that now has a lower-tier copy returns to
+the eviction head. Failed stores are
 reported alongside completion receipts, allowing the scheduler to break the
 request's prefix chain before considering later chunks.
 
