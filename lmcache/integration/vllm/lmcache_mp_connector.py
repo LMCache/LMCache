@@ -166,6 +166,28 @@ def _count_new_blocks(scheduler_output: SchedulerOutput) -> int:
     return count
 
 
+def _allocated_block_ids(scheduler_output: SchedulerOutput) -> set[int]:
+    """Collect block ids allocated or resurrected in this scheduler step.
+
+    Args:
+        scheduler_output: The vLLM scheduler output for this step.
+
+    Returns:
+        Unique block ids handed to new or cached requests. The eviction-aware
+        queue uses them to revalidate only pending operations whose snapshots
+        may have changed.
+    """
+    block_ids: set[int] = set()
+    for new_request in scheduler_output.scheduled_new_reqs:
+        for group_ids in new_request.block_ids:
+            block_ids.update(group_ids)
+    for request_block_ids in scheduler_output.scheduled_cached_reqs.new_block_ids:
+        if request_block_ids:
+            for group_ids in request_block_ids:
+                block_ids.update(group_ids)
+    return block_ids
+
+
 def _coalesce_store_metadata(
     request_metas: list[LMCacheMPRequestMetadata],
 ) -> LMCacheMPRequestMetadata:
@@ -400,9 +422,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         self.dispatcher = None
 
         # Lazy offload configuration: when enabled, store operations are
-        # buffered and drained by the configured policy (default
-        # EVICTION_AWARE: released when their GPU blocks face imminent
-        # eviction) instead of being submitted at every step.
+        # buffered and drained by the configured policy (FIFO by default;
+        # EVICTION_AWARE is opt-in and releases stores when their GPU blocks
+        # face imminent eviction) instead of being submitted at every step.
         self.lazy_offload = vllm_config.kv_transfer_config.get_from_extra_config(
             "lmcache.mp.lazy_offload", False
         )
@@ -1304,7 +1326,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             -(-scheduler_output.total_num_scheduled_tokens // tokens_per_block)
             for tokens_per_block in self._group_tokens_per_block
         )
-        self._pending_store.observe_step(gross_new_blocks, est_next_step_blocks)
+        self._pending_store.observe_step(
+            gross_new_blocks,
+            est_next_step_blocks,
+            _allocated_block_ids(scheduler_output),
+        )
         result = self._pending_store.collect_due()
 
         ops_by_request: dict[str, list[LMCacheMPRequestMetadata]] = {}

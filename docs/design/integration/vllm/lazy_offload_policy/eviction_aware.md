@@ -1,9 +1,9 @@
 # `lazy_offload_policy/eviction_aware.py`: Eviction-Aware Store Queue
 
 Implements gates 1 and 3 of the store decision defined in
-[lazy_offload_decision_model.md](lazy_offload_decision_model.md); the buffering
-/ protection mechanism it plugs into is described in
-[lazy_offload.md](lazy_offload.md). This document is the module's contract.
+[lazy_offload_decision_model.md](../lazy_offload_decision_model.md); the
+buffering / protection mechanism it plugs into is described in
+[lazy_offload.md](../lazy_offload.md). This document is the module's contract.
 
 ## Scope and non-scope
 
@@ -24,9 +24,10 @@ admitted op whose blocks come under eviction pressure.
   bound is not an optimisation detail the policy may ignore: this call is on
   the scheduler's critical path once per step, and an unbounded read is
   O(free blocks) — tens of thousands on a pool sized to fill the GPU.
-  `collect_due` asks for `danger_depth + pending blocks`, the deepest rank
-  any of its comparisons can reach (the second term is the emission shift),
-  and skips the call entirely at danger depth 0.
+  `collect_due` asks for `danger_depth + max_drain_per_step × largest pending
+  op`, capped by the total pending blocks. This is a safe upper bound on the
+  deepest rank a pin cascade can reach without walking the pending queue to
+  size every operation; it skips the call entirely at danger depth 0.
 - **`PendingStoreOp`** — one deferred store: opaque `store_metadata` (the
   ready `LMCacheMPRequestMetadata`), the covered blocks' hash snapshot taken
   at admission, `prefix_start_tokens` / `prefix_end_tokens` (the op's token
@@ -110,8 +111,13 @@ admitted op whose blocks come under eviction pressure.
      The two conditions pull against each other; the branch is covered at
      layer 0 (`test_lazy_offload_eviction_aware.py`) and was not reachable on
      hardware.
-2. Once per step: `observe_step(gross_blocks_allocated, est_next_step_blocks)`
-   then `collect_due()`.
+2. Once per step, call `observe_step(gross_blocks_allocated,
+   est_next_step_blocks, allocated_block_ids)` and then `collect_due()`.
+   The connector obtains the ids from the scheduler output. The queue keeps a
+   block-to-request reverse index and revalidates only requests touched by
+   those allocations or represented in the bounded free-queue snapshot; a
+   caller that cannot supply ids passes `None`, which requests a compatibility
+   full-scan validation pass.
 3. For every op in `DrainResult.to_store` (already ordered): pin (`touch`)
    its blocks, **coalesce each request's released ops into one store op**
    (the worker adapter tracks a single in-flight store future per request),
@@ -194,16 +200,28 @@ vLLM hit instead of 0 on a lookup miss.
   inverted-gate-1 anti-pattern, decision model §6).
 - An op is **due** when any covered block's rank < danger depth. Blocks not
   in the free queue (in use / resurrected) are not at risk.
+- **Horizon calibration.** The default is 2.5 scheduler steps. A fine sweep
+  over 2.0–8.0 on two opposing Qwen3-8B/H200 workloads selected it as the
+  measured compromise: three 120-request hot/cold runs at 2.5 completed in
+  27.0–27.1 s with 0.952–0.957 cache coverage and three lower-tier eviction
+  cycles, while 2.0 took 31.6–32.2 s and 4.0 took 36.2–36.3 s. On the
+  no-hot-set GSM8K workload, 2.5 retained 0.945–0.961 coverage versus 0.961
+  once the horizon reached 3.0–4.0. The value is a calibrated default, not a
+  universal optimum: increase it when eviction loss is more important than
+  filtering, and decrease it when lower-tier write or eviction pressure is
+  the limiting cost.
 - **Pin-cascade shift**: emitting a segment pins its blocks out of the free
-  queue, moving every block behind them toward the head by the segment's
-  size before the next step's allocation runs. Within one `collect_due`
-  call, each later candidate is therefore checked against
-  `danger depth + blocks emitted so far in this call`; without this, a
-  candidate teleported into the danger window by an earlier emission loses
-  its tail to the next allocation before the next drain can see it
-  (observed as `dropped_evicted` under back-to-back drains). The first
-  emission still requires a plain danger-depth hit, so this never opens
-  the gate on an idle system; dropped (unpinned) segments do not extend
+  queue, moving every block behind them toward the head before the next
+  step's allocation runs. The shift is the number of **unique emitted
+  blocks that were in the free-queue snapshot**: an in-use block does not
+  leave the queue, and a block shared by multiple emitted ops leaves it only
+  on the first touch. Within one `collect_due` call, each later candidate is
+  therefore checked against `danger depth + free blocks removed so far in
+  this call`; without this, a candidate teleported into the danger window by
+  an earlier emission loses its tail to the next allocation before the next
+  drain can see it (observed as `dropped_evicted` under back-to-back drains).
+  The first emission still requires a plain danger-depth hit, so this never
+  opens the gate on an idle system; dropped (unpinned) segments do not extend
   the shift.
 - **Prefix closure** (amendment A1): a due op releases the request's ops from
   the front through the last due one; a data-loss drop (hash mismatch) drops
@@ -253,6 +271,17 @@ vLLM hit instead of 0 on a lookup miss.
   never come due likewise hold their sessions open. Both resolve on the
   next activity — nothing leaks permanently, by design ("idle never
   drains" also means "idle never settles").
+
+## Scheduler-path complexity
+
+The queue maintains three incremental indexes: block id to pending requests,
+per-request block reference counts, and a bounded multiset of operation sizes.
+A production drain therefore walks only the bounded free-queue window and the
+requests represented in that window or touched by this step's allocations. Its
+cost is proportional to the pressure window and drain cap, not total pending
+queue depth. Admission and every departure path update all three indexes; the
+pure-policy tests retain a `allocated_block_ids=None` compatibility path that
+performs a full validation pass.
 
 ## Observability
 

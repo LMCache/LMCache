@@ -40,6 +40,7 @@ class FakePoolView:
         self.free_queue: list[int] = []
         self.hashes: dict[int, bytes] = {}
         self.depth_requests: list[int] = []
+        self.hash_requests: list[int] = []
 
     def free_queue_ranks(self, max_depth: int) -> dict[int, int]:
         self.depth_requests.append(max_depth)
@@ -48,6 +49,7 @@ class FakePoolView:
         }
 
     def block_hash(self, block_id: int) -> bytes | None:
+        self.hash_requests.append(block_id)
         return self.hashes.get(block_id)
 
     def evict(self, block_id: int) -> None:
@@ -115,6 +117,9 @@ def make_queue(
 
 
 class TestConfigValidation:
+    def test_default_horizon_uses_calibrated_value(self) -> None:
+        assert LazyOffloadPolicyConfig().horizon_steps == 2.5
+
     def test_rejects_non_positive_horizon(self) -> None:
         with pytest.raises(ValueError):
             LazyOffloadPolicyConfig(horizon_steps=0)
@@ -645,6 +650,28 @@ class TestDrainOrderingAndCap:
         result = queue.collect_due()
         assert [op.request_id for op in result.to_store] == ["req-soon", "req-late"]
 
+    def test_equal_rank_preserves_request_admission_order(self) -> None:
+        """Incremental set discovery must not change the historical tie break.
+
+        This matters under sustained pressure: arbitrary request-id ordering
+        changes which shared hot prefixes remain pending long enough to dedup.
+        """
+        pool = FakePoolView()
+        seed_blocks(pool, [1, 2], free=True)
+        queue = make_queue(pool, horizon_steps=1.0)
+        queue.admit(make_op("req-z-first", [1], pool, prefix_end_tokens=256))
+        queue.admit(make_op("req-a-second", [1, 2], pool, prefix_end_tokens=256))
+        queue.observe_step(
+            new_blocks_allocated=1,
+            est_next_step_blocks=0,
+            allocated_block_ids=set(),
+        )
+        result = queue.collect_due()
+        assert [op.request_id for op in result.to_store] == [
+            "req-z-first",
+            "req-a-second",
+        ]
+
     def test_drain_cap_cuts_from_the_tail(self) -> None:
         pool = FakePoolView()
         seed_blocks(pool, [1, 2], free=True)
@@ -710,6 +737,35 @@ class TestPinCascadeShift:
         # allocation, so req-b must drain in the same call.
         result = queue.collect_due()
         assert [op.request_id for op in result.to_store] == ["req-a", "req-b"]
+
+    def test_in_use_blocks_do_not_expand_the_shift(self) -> None:
+        pool = FakePoolView()
+        seed_blocks(pool, [1, 2, 3], free=True)
+        seed_blocks(pool, [9], free=False)
+        queue = make_queue(pool, horizon_steps=1.0)
+        queue.admit(make_op("req-a", [1, 9], pool, prefix_end_tokens=256))
+        queue.admit(make_op("req-b", [3], pool, prefix_end_tokens=256))
+        queue.observe_step(new_blocks_allocated=1, est_next_step_blocks=0)
+        # req-a pins two blocks, but only block 1 leaves the free queue.
+        # Block 3 moves from rank 2 to rank 1, exactly outside depth 1.
+        result = queue.collect_due()
+        assert [op.request_id for op in result.to_store] == ["req-a"]
+        assert queue.num_pending_ops() == 1
+
+    def test_shared_blocks_expand_the_shift_only_once(self) -> None:
+        pool = FakePoolView()
+        seed_blocks(pool, [1, 2, 3, 4, 5], free=True)
+        queue = make_queue(pool, horizon_steps=1.0)
+        queue.admit(make_op("req-a", [1, 2], pool, prefix_end_tokens=256))
+        queue.admit(make_op("req-b", [2, 3], pool, prefix_end_tokens=256))
+        queue.admit(make_op("req-c", [5], pool, prefix_end_tokens=256))
+        queue.observe_step(new_blocks_allocated=1, est_next_step_blocks=0)
+        # req-a removes blocks 1 and 2; req-b then removes only block 3,
+        # because shared block 2 is already pinned. Block 5 moves from rank
+        # 4 to rank 1, which is exactly outside depth 1.
+        result = queue.collect_due()
+        assert [op.request_id for op in result.to_store] == ["req-a", "req-b"]
+        assert queue.num_pending_ops() == 1
 
     def test_shift_never_opens_the_gate_by_itself(self) -> None:
         pool = FakePoolView()
@@ -1018,6 +1074,47 @@ class TestFreeQueueSnapshotBound:
         # 4 blocks per step over a 1-step horizon, plus the 2 pending blocks
         # that an emission in this call could shift the queue by.
         assert pool.depth_requests == [6]
+
+    def test_incremental_step_checks_only_bounded_candidate_requests(self) -> None:
+        pool = FakePoolView()
+        seed_blocks(pool, list(range(1, 1001)), free=True)
+        queue = make_queue(pool, horizon_steps=1.0)
+        for block_id in range(1, 1001):
+            queue.admit(
+                make_op(
+                    f"req-{block_id}",
+                    [block_id],
+                    pool,
+                    prefix_end_tokens=256,
+                )
+            )
+        queue.observe_step(
+            new_blocks_allocated=1,
+            est_next_step_blocks=0,
+            allocated_block_ids=set(),
+        )
+        queue.collect_due()
+
+        # danger depth 1 plus at most 64 one-block emissions: neither the
+        # free-list walk nor hash validation reaches the other 935 requests.
+        assert pool.depth_requests == [65]
+        assert set(pool.hash_requests) <= set(range(1, 66))
+
+    def test_allocated_block_signal_revalidates_a_nonfree_op(self) -> None:
+        pool = FakePoolView()
+        seed_blocks(pool, [1, 2, 3], free=True)
+        queue = make_queue(pool, horizon_steps=1.0)
+        queue.admit(make_op("req", [3], pool, prefix_end_tokens=256))
+        pool.evict(3)
+        queue.observe_step(
+            new_blocks_allocated=1,
+            est_next_step_blocks=0,
+            allocated_block_ids={3},
+        )
+        result = queue.collect_due()
+
+        assert [op.request_id for op in result.dropped_evicted] == ["req"]
+        assert queue.num_pending_ops() == 0
 
     def test_idle_step_reads_no_ranks_at_all(self) -> None:
         """No expected consumption means no rank can be below the danger

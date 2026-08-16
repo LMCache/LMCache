@@ -241,6 +241,9 @@ def _contiguous_front_run(ops: list[PendingStoreOp]) -> list[PendingStoreOp]:
     return ops
 
 
+DEFAULT_HORIZON_STEPS = 2.5
+
+
 @dataclass(frozen=True)
 class LazyOffloadPolicyConfig:
     """Tunables of the eviction-aware drain policy.
@@ -263,7 +266,7 @@ class LazyOffloadPolicyConfig:
             ``LazyOffloadCounters.throttled_drains``.
     """
 
-    horizon_steps: float = 2.0
+    horizon_steps: float = DEFAULT_HORIZON_STEPS
     min_prefix_tokens: int = 0
     max_drain_per_step: int = 64
 
@@ -421,6 +424,25 @@ class EvictionAwareStoreQueue:
         self._pending_content: dict[
             tuple[str, int, tuple["BlockHashWithGroupId", ...]], PendingStoreOp
         ] = {}
+        # Reverse index used by collect_due to inspect only requests whose
+        # blocks are in the bounded free-queue window or were allocated this
+        # step. Counts handle the defensive case where two ops of one request
+        # reference the same block.
+        self._requests_by_block: dict[int, set[str]] = {}
+        self._request_block_refs: dict[tuple[str, int], int] = {}
+        # Preserve the pending dict's historical insertion-order tie break
+        # without iterating that dict during incremental candidate discovery.
+        self._request_order: dict[str, int] = {}
+        self._next_request_order = 0
+        # Multiset of operation sizes. Its maximum gives a safe upper bound
+        # on how far at most max_drain_per_step emissions can shift the free
+        # queue, without retaining departed operations in a lazy heap.
+        self._op_size_counts: dict[int, int] = {}
+        self._max_op_blocks = 0
+        self._num_pending_blocks = 0
+        # Requests whose snapshots may have changed because one of their
+        # block ids was allocated in the latest scheduler step.
+        self._requests_to_validate: set[str] = set()
         self._blocks_per_step_ema: float = 0.0
         self._ema_initialized = False
         self._next_step_estimate = 0
@@ -456,13 +478,20 @@ class EvictionAwareStoreQueue:
         # an earlier sibling's were, so the next drain prefix-closes over
         # it): buffer the live copy and make it the new cover. The doomed
         # op stays pending and is dropped by collect_due().
+        if op.request_id not in self._pending:
+            self._request_order[op.request_id] = self._next_request_order
+            self._next_request_order += 1
         self._pending.setdefault(op.request_id, []).append(op)
         self._pending_content[content_key] = op
+        self._index_op(op)
         self._counters.admitted += 1
         return AdmitResult.ADMITTED
 
     def observe_step(
-        self, new_blocks_allocated: int, est_next_step_blocks: int
+        self,
+        new_blocks_allocated: int,
+        est_next_step_blocks: int,
+        allocated_block_ids: set[int] | None = None,
     ) -> None:
         """Record one scheduler step's block-consumption signals.
 
@@ -474,7 +503,18 @@ class EvictionAwareStoreQueue:
                 from the scheduler output).
             est_next_step_blocks: Estimated blocks the next step will
                 allocate (e.g. scheduled tokens divided by block size).
+            allocated_block_ids: Block ids allocated or resurrected in this
+                step. Requests indexed by these ids are revalidated during
+                the drain. None asks for a full validation pass and is kept
+                for callers that cannot provide the incremental signal.
         """
+        if allocated_block_ids is None:
+            self._requests_to_validate.update(self._pending)
+        else:
+            for block_id in allocated_block_ids:
+                self._requests_to_validate.update(
+                    self._requests_by_block.get(block_id, ())
+                )
         if self._ema_initialized:
             self._blocks_per_step_ema = (
                 _EMA_ALPHA * new_blocks_allocated
@@ -536,7 +576,9 @@ class EvictionAwareStoreQueue:
             The number of operations discarded.
         """
         dropped = self._pending.pop(request_id, [])
-        self._forget_content(dropped)
+        self._request_order.pop(request_id, None)
+        self._forget_ops(dropped)
+        self._requests_to_validate.discard(request_id)
         self._counters.dropped_on_request_drop += len(dropped)
         self._finished.discard(request_id)
         self._prefix_broken.discard(request_id)
@@ -579,7 +621,9 @@ class EvictionAwareStoreQueue:
         if request_id not in self._finished:
             return False
         dropped = self._pending.pop(request_id, [])
-        self._forget_content(dropped)
+        self._request_order.pop(request_id, None)
+        self._forget_ops(dropped)
+        self._requests_to_validate.discard(request_id)
         self._counters.dropped_id_reuse += len(dropped)
         self._prefix_broken.discard(request_id)
         self._finished.discard(request_id)
@@ -611,7 +655,9 @@ class EvictionAwareStoreQueue:
         if request_id in self._stale_in_flight:
             return 0
         dropped = self._pending.pop(request_id, [])
-        self._forget_content(dropped)
+        self._request_order.pop(request_id, None)
+        self._forget_ops(dropped)
+        self._requests_to_validate.discard(request_id)
         self._counters.dropped_failed_store += len(dropped)
         self._prefix_broken.add(request_id)
         return len(dropped)
@@ -662,20 +708,35 @@ class EvictionAwareStoreQueue:
         # danger depth makes nothing due, so nothing is read at all -- the
         # loss check below reads block hashes, not ranks, and still runs.
         ranks = (
-            self._pool.free_queue_ranks(danger_depth + self._pending_blocks())
+            self._pool.free_queue_ranks(
+                danger_depth + self._max_emission_shift_blocks()
+            )
             if danger_depth > 0
             else {}
         )
 
+        # Only requests touched by this step's allocations or represented in
+        # the bounded rank snapshot can have changed outcome. The reverse
+        # index avoids a full pending-queue scan on every scheduler step.
+        requests_to_check = set(self._requests_to_validate)
+        for block_id in ranks:
+            requests_to_check.update(self._requests_by_block.get(block_id, ()))
+
         # Per request: (min in-queue rank, request id, surviving ops).
-        # Iterate over a copy: helpers may drop entries from self._pending.
         candidates: list[tuple[int, str, list[PendingStoreOp]]] = []
-        for request_id, ops in list(self._pending.items()):
+        for request_id in requests_to_check:
+            ops = self._pending.get(request_id)
+            if not ops:
+                self._requests_to_validate.discard(request_id)
+                continue
             if request_id in self._in_flight:
-                # One in-flight store batch per request (worker constraint);
-                # held-back ops are re-examined once notify_stored() arrives.
+                # One in-flight store batch per request (worker constraint).
+                # Keep an allocation-triggered validation pending: after the
+                # receipt, the held-back ops still need their snapshots
+                # checked even if their recycled blocks are no longer free.
                 continue
             surviving = self._drop_evicted_suffix(request_id, ops, result)
+            self._requests_to_validate.discard(request_id)
             if not surviving:
                 continue
             op_ranks = [
@@ -685,17 +746,22 @@ class EvictionAwareStoreQueue:
                 if (rank := ranks.get(block_id)) is not None
             ]
             if not op_ranks:
-                # No block in the free queue (all in use or pinned): the
-                # request cannot be due, shifted or not.
+                # No block in the bounded free-queue window: the request
+                # cannot be due, shifted or not.
                 continue
             candidates.append((min(op_ranks), request_id, surviving))
 
         # Most imminent requests first. The cap may split a segment, but the
         # emitted part is a front slice of it, so within-request prefix order
         # is never violated; the rest stays pending for a later step.
-        candidates.sort(key=lambda cand: cand[0])
+        candidates.sort(key=lambda cand: (cand[0], self._request_order[cand[1]]))
         budget = self._config.max_drain_per_step
         emitted_blocks = 0
+        # Block ids removed from the free queue by earlier emissions in this
+        # drain. A shared block shifts the queue only on its first touch;
+        # blocks absent from ``ranks`` were already in use or pinned and do
+        # not shift it at all.
+        emitted_free_blocks: set[int] = set()
         for min_rank, request_id, surviving in candidates:
             if budget <= 0:
                 break
@@ -718,7 +784,7 @@ class EvictionAwareStoreQueue:
                 # Dropped blocks stay in the free queue, so they do not
                 # extend the emission shift.
                 result.dropped_short_prefix.extend(surviving)
-                self._forget_content(surviving)
+                self._forget_ops(surviving)
                 self._counters.rejected_short_prefix += len(surviving)
                 self._prefix_broken.add(request_id)
                 self._replace_pending(request_id, [], result)
@@ -727,9 +793,16 @@ class EvictionAwareStoreQueue:
             result.ops_held_back += len(due_ops) - len(emitted)
             budget -= len(emitted)
             result.to_store.extend(emitted)
-            self._forget_content(emitted)
+            self._forget_ops(emitted)
             self._counters.emitted += len(emitted)
-            emitted_blocks += sum(len(op.block_hashes) for op in emitted)
+            newly_pinned_free_blocks = {
+                block_id
+                for op in emitted
+                for block_id in op.block_hashes
+                if block_id in ranks and block_id not in emitted_free_blocks
+            }
+            emitted_free_blocks.update(newly_pinned_free_blocks)
+            emitted_blocks += len(newly_pinned_free_blocks)
             # Mark in flight before updating pending state so that a request
             # fully drained by this emission is not released until the store
             # completion arrives via notify_stored().
@@ -763,14 +836,18 @@ class EvictionAwareStoreQueue:
             return True
         return False
 
-    def _pending_blocks(self) -> int:
-        """GPU blocks covered by every buffered operation.
+    def _max_emission_shift_blocks(self) -> int:
+        """Safe upper bound on one drain's free-queue pin cascade.
 
-        An upper bound on how far one :meth:`collect_due` call can shift the
-        free queue by pinning what it emits, since it can only emit
-        operations that are already buffered.
+        At most ``max_drain_per_step`` operations can be emitted. Multiplying
+        that cap by the largest live operation bounds their total blocks
+        without scanning the pending queue. Shared and in-use blocks make the
+        actual shift smaller, never larger.
         """
-        return sum(len(op.block_hashes) for ops in self._pending.values() for op in ops)
+        return min(
+            self._num_pending_blocks,
+            self._config.max_drain_per_step * self._max_op_blocks,
+        )
 
     def _danger_depth(self) -> int:
         """Free-queue depth considered at risk within the horizon.
@@ -806,7 +883,7 @@ class EvictionAwareStoreQueue:
             return ops
         dropped = ops[first_lost:]
         result.dropped_evicted.extend(dropped)
-        self._forget_content(dropped)
+        self._forget_ops(dropped)
         self._counters.dropped_evicted += len(dropped)
         self._prefix_broken.add(request_id)
         surviving = ops[:first_lost]
@@ -886,20 +963,55 @@ class EvictionAwareStoreQueue:
         # as doomed, the safe direction.
         return False
 
-    def _forget_content(self, ops: list[PendingStoreOp]) -> None:
-        """Release the content keys of operations leaving the pending queue.
+    def _index_op(self, op: PendingStoreOp) -> None:
+        """Add one admitted operation to candidate-discovery indexes."""
+        op_blocks = len(op.block_hashes)
+        self._op_size_counts[op_blocks] = self._op_size_counts.get(op_blocks, 0) + 1
+        self._max_op_blocks = max(self._max_op_blocks, op_blocks)
+        self._num_pending_blocks += op_blocks
+        for block_id in op.block_hashes:
+            ref_key = (op.request_id, block_id)
+            refs = self._request_block_refs.get(ref_key, 0) + 1
+            self._request_block_refs[ref_key] = refs
+            if refs == 1:
+                self._requests_by_block.setdefault(block_id, set()).add(op.request_id)
+
+    def _unindex_op(self, op: PendingStoreOp) -> None:
+        """Remove one departing operation from candidate-discovery indexes."""
+        op_blocks = len(op.block_hashes)
+        remaining_sizes = self._op_size_counts[op_blocks] - 1
+        if remaining_sizes:
+            self._op_size_counts[op_blocks] = remaining_sizes
+        else:
+            del self._op_size_counts[op_blocks]
+            if op_blocks == self._max_op_blocks:
+                self._max_op_blocks = max(self._op_size_counts, default=0)
+        self._num_pending_blocks -= op_blocks
+        for block_id in op.block_hashes:
+            ref_key = (op.request_id, block_id)
+            refs = self._request_block_refs[ref_key] - 1
+            if refs > 0:
+                self._request_block_refs[ref_key] = refs
+                continue
+            del self._request_block_refs[ref_key]
+            requests = self._requests_by_block[block_id]
+            requests.discard(op.request_id)
+            if not requests:
+                del self._requests_by_block[block_id]
+
+    def _forget_ops(self, ops: list[PendingStoreOp]) -> None:
+        """Remove content keys and reverse-index entries for departing ops.
 
         Must be called on every path that removes operations from
         ``self._pending`` (emission, eviction drop, gate-3 drop, request
-        drop), so identical content becomes admissible again. A key is only
-        released if the leaving op still owns it: a corpse whose key was
-        taken over by a live copy at admission must not release that copy's
-        key.
+        drop), so identical content becomes admissible again and bounded
+        candidate discovery never retains dead requests.
         """
         for op in ops:
             key = _content_key(op)
             if self._pending_content.get(key) is op:
                 del self._pending_content[key]
+            self._unindex_op(op)
 
     def _replace_pending(
         self,
@@ -912,6 +1024,8 @@ class EvictionAwareStoreQueue:
             self._pending[request_id] = remaining
             return
         self._pending.pop(request_id, None)
+        self._request_order.pop(request_id, None)
+        self._requests_to_validate.discard(request_id)
         if request_id in self._finished and request_id not in self._in_flight:
             self._finished.discard(request_id)
             self._prefix_broken.discard(request_id)

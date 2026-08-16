@@ -24,6 +24,7 @@ from lmcache.integration.vllm.lazy_offload_pending_store import (
 from lmcache.integration.vllm.lazy_offload_policy.fifo import FIFOOffloadPolicy
 
 FIFO_CONFIG = {"lmcache.mp.lazy_offload_policy": "FIFO"}
+EVICTION_AWARE_CONFIG = {"lmcache.mp.lazy_offload_policy": "EVICTION_AWARE"}
 
 
 def _spy_logger(monkeypatch: pytest.MonkeyPatch, method: str) -> list[str]:
@@ -110,7 +111,7 @@ def _make_gpu_pool(num_blocks: int = 10) -> MagicMock:
 class TestFIFOOffloadPolicy:
     """Legacy count-triggered policy (``lazy_offload_policy = "FIFO"``).
 
-    Kept for compatibility; EVICTION_AWARE is the default mode."""
+    Kept as the compatibility default; EVICTION_AWARE is opt-in."""
 
     def test_init_default_threshold(self) -> None:
         policy = FIFOOffloadPolicy()
@@ -257,13 +258,13 @@ class TestLazyOffloadPendingStore:
         store.bind_gpu_block_pool(_make_gpu_pool())
         return store
 
-    def test_init_default_policy_is_eviction_aware(self) -> None:
+    def test_init_default_policy_is_fifo(self) -> None:
         store = LazyOffloadPendingStore()
-        assert store.mode is LazyOffloadMode.EVICTION_AWARE
-
-    def test_init_fifo_policy_explicit(self) -> None:
-        store = LazyOffloadPendingStore(dict(FIFO_CONFIG))
         assert store.mode is LazyOffloadMode.FIFO
+
+    def test_init_eviction_aware_policy_explicit(self) -> None:
+        store = LazyOffloadPendingStore(dict(EVICTION_AWARE_CONFIG))
+        assert store.mode is LazyOffloadMode.EVICTION_AWARE
 
     def test_init_unknown_policy_raises(self) -> None:
         configs = {"lmcache.mp.lazy_offload_policy": "UNKNOWN"}
@@ -417,7 +418,7 @@ class TestEvictionAwareMode:
     def _setup(
         self, configs: dict | None = None
     ) -> tuple[LazyOffloadPendingStore, MagicMock]:
-        store = LazyOffloadPendingStore(configs)
+        store = LazyOffloadPendingStore({**EVICTION_AWARE_CONFIG, **(configs or {})})
         gpu_pool = _make_gpu_pool()
         store.bind_gpu_block_pool(gpu_pool)
         return store, gpu_pool

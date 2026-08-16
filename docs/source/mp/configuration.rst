@@ -574,6 +574,37 @@ All connector-level options are passed through
        ``engine_driven`` (force the worker-side gather/scatter copy
        path). Overrides the ``LMCACHE_MP_TRANSFER_MODE`` env var when
        set.
+   * - ``lmcache.mp.lazy_offload``
+     - ``false``
+     - Buffer stores on the scheduler and submit them according to the
+       selected lazy-offload policy. Requires vLLM prefix caching.
+   * - ``lmcache.mp.lazy_offload_policy``
+     - ``FIFO``
+     - Lazy drain policy. ``FIFO`` preserves count-triggered behavior;
+       ``EVICTION_AWARE`` is opt-in and drains blocks near the GPU free
+       queue's eviction head.
+   * - ``lmcache.mp.lazy_offload_horizon_steps``
+     - ``2.5``
+     - ``EVICTION_AWARE`` only: estimated scheduler steps of block
+       consumption treated as imminent eviction. Must be greater than zero.
+       Larger values store earlier and reduce eviction losses, but may store
+       GPU-resident hot content and increase lower-tier eviction pressure.
+   * - ``lmcache.mp.lazy_offload_min_prefix_tokens``
+     - ``0``
+     - ``EVICTION_AWARE`` only: drop a due request whose known prefix is
+       shorter than this break-even length. Zero disables the gate.
+   * - ``lmcache.mp.lazy_offload_max_drain_per_step``
+     - ``64``
+     - ``EVICTION_AWARE`` only: maximum store operations emitted per
+       scheduler step. A value below the concurrent prefill admission rate
+       can lose buffered operations to eviction.
+   * - ``lmcache.mp.lazy_offload_threshold``
+     - ``100``
+     - ``FIFO`` only: number of finished buffered requests that triggers a
+       drain.
+   * - ``lmcache.mp.lazy_offload_select_count``
+     - ``10``
+     - ``FIFO`` only: maximum finished requests emitted by one drain.
 
 Environment Variables
 ---------------------

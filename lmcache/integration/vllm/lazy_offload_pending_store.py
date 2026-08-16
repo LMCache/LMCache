@@ -10,6 +10,7 @@ import time
 # First Party
 from lmcache.integration.vllm.lazy_offload_policy.base import PendingStoreItem
 from lmcache.integration.vllm.lazy_offload_policy.eviction_aware import (
+    DEFAULT_HORIZON_STEPS,
     AdmitResult,
     DrainResult,
     EvictionAwareStoreQueue,
@@ -31,6 +32,8 @@ if TYPE_CHECKING:
 
 
 logger = lmcache_init_logger(__name__)
+
+ConfigValue = str | int | float | bool | list[str] | None
 
 #: Minimum seconds between periodic counter-ledger log lines.
 _STATS_LOG_INTERVAL_S = 5.0
@@ -123,15 +126,15 @@ class LazyOffloadPendingStore:
 
     def __init__(
         self,
-        configs: dict | None = None,
-    ):
+        configs: dict[str, ConfigValue] | None = None,
+    ) -> None:
         """
         Initialize the pending store queue.
 
         Args:
             configs: The kv_connector_extra_config dict. Recognized keys:
-                ``lmcache.mp.lazy_offload_policy`` ("EVICTION_AWARE" default,
-                or "FIFO"), ``lmcache.mp.lazy_offload_horizon_steps`` (float),
+                ``lmcache.mp.lazy_offload_policy`` ("FIFO" default, or
+                "EVICTION_AWARE"), ``lmcache.mp.lazy_offload_horizon_steps`` (float),
                 ``lmcache.mp.lazy_offload_min_prefix_tokens`` (int),
                 ``lmcache.mp.lazy_offload_max_drain_per_step`` (int), and the
                 FIFO-only ``lmcache.mp.lazy_offload_threshold`` /
@@ -141,7 +144,7 @@ class LazyOffloadPendingStore:
             ValueError: If the configured policy name is unknown.
         """
         configs = configs or {}
-        policy = configs.get("lmcache.mp.lazy_offload_policy", "EVICTION_AWARE")
+        policy = cast(str, configs.get("lmcache.mp.lazy_offload_policy", "FIFO"))
         try:
             self._mode = LazyOffloadMode(policy)
         except ValueError as e:
@@ -161,13 +164,25 @@ class LazyOffloadPendingStore:
         self._warned_throttled_loss = False
         self._eviction_config = LazyOffloadPolicyConfig(
             horizon_steps=float(
-                configs.get("lmcache.mp.lazy_offload_horizon_steps", 2.0)
+                cast(
+                    str | int | float,
+                    configs.get(
+                        "lmcache.mp.lazy_offload_horizon_steps",
+                        DEFAULT_HORIZON_STEPS,
+                    ),
+                )
             ),
             min_prefix_tokens=int(
-                configs.get("lmcache.mp.lazy_offload_min_prefix_tokens", 0)
+                cast(
+                    str | int | float,
+                    configs.get("lmcache.mp.lazy_offload_min_prefix_tokens", 0),
+                )
             ),
             max_drain_per_step=int(
-                configs.get("lmcache.mp.lazy_offload_max_drain_per_step", 64)
+                cast(
+                    str | int | float,
+                    configs.get("lmcache.mp.lazy_offload_max_drain_per_step", 64),
+                )
             ),
         )
         if self._mode is LazyOffloadMode.FIFO:
@@ -178,7 +193,12 @@ class LazyOffloadPendingStore:
                 self._eviction_config,
             )
 
-        self._select_count = configs.get("lmcache.mp.lazy_offload_select_count", 10)
+        self._select_count = int(
+            cast(
+                str | int | float,
+                configs.get("lmcache.mp.lazy_offload_select_count", 10),
+            )
+        )
 
         # GPU block pool reference
         self._gpu_block_pool: "BlockPool | None" = None
@@ -284,7 +304,10 @@ class LazyOffloadPendingStore:
         return AddOutcome.SKIPPED_PREFIX_BROKEN
 
     def observe_step(
-        self, new_blocks_allocated: int, est_next_step_blocks: int
+        self,
+        new_blocks_allocated: int,
+        est_next_step_blocks: int,
+        allocated_block_ids: set[int] | None = None,
     ) -> None:
         """Forward one step's block-consumption signals to the policy.
 
@@ -293,10 +316,15 @@ class LazyOffloadPendingStore:
         Args:
             new_blocks_allocated: GPU blocks newly allocated this step.
             est_next_step_blocks: Estimated allocation of the next step.
+            allocated_block_ids: Ids allocated or resurrected this step, used
+                for incremental snapshot validation. None requests a full
+                validation pass.
         """
         if self._eviction_queue is not None:
             self._eviction_queue.observe_step(
-                new_blocks_allocated, est_next_step_blocks
+                new_blocks_allocated,
+                est_next_step_blocks,
+                allocated_block_ids,
             )
 
     def collect_due(self) -> DrainResult:
@@ -561,7 +589,7 @@ class LazyOffloadPendingStore:
         """
         return req_id in self._request_block_ids
 
-    def update_request_gpu_block_ids(self, req_id: str, block_ids: list[int]):
+    def update_request_gpu_block_ids(self, req_id: str, block_ids: list[int]) -> None:
         """Record blocks pinned for the request's submitted store batch.
 
         Opens the request's receipt window (``has_in_flight_store``).
@@ -583,7 +611,7 @@ class LazyOffloadPendingStore:
         """
         return self._request_block_ids.get(req_id, [])
 
-    def remove_request_gpu_block_ids(self, req_id: str):
+    def remove_request_gpu_block_ids(self, req_id: str) -> None:
         """Close the request's receipt window after its receipt completes.
 
         Args:

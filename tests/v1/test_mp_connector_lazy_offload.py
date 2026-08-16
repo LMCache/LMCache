@@ -45,6 +45,7 @@ from lmcache.integration.vllm.lazy_offload_pending_store import (  # noqa: E402
 )
 from lmcache.integration.vllm.lmcache_mp_connector import (  # noqa: E402
     LMCacheMPConnector,
+    _allocated_block_ids,
     _coalesce_store_metadata,
     _count_new_blocks,
 )
@@ -271,7 +272,12 @@ def _make_lazy_connector(
     connector._group_tokens_per_block = group_tokens_per_block or [TOKENS_PER_BLOCK]
     connector._hit_alignment_tokens = TOKENS_PER_BLOCK
     pool = _FakeBlockPool(num_blocks)
-    pending_store = LazyOffloadPendingStore(dict(extra_config or {}))
+    pending_store = LazyOffloadPendingStore(
+        {
+            "lmcache.mp.lazy_offload_policy": "EVICTION_AWARE",
+            **(extra_config or {}),
+        }
+    )
     pending_store.bind_gpu_block_pool(pool)  # type: ignore[arg-type]
     connector._pending_store = pending_store
     connector._gpu_block_pool = pool  # type: ignore[assignment]
@@ -359,6 +365,15 @@ def test_count_new_blocks_sums_all_groups_and_skips_empty_cached() -> None:
 
 def test_count_new_blocks_empty_step() -> None:
     assert _count_new_blocks(_make_scheduler_output(0)) == 0
+
+
+def test_allocated_block_ids_collects_unique_ids_across_groups() -> None:
+    output = _make_scheduler_output(
+        total_num_scheduled_tokens=1,
+        new_request_block_ids=[[[1, 2], [8]]],
+        cached_new_block_ids=[[[2, 3], [9]], None],
+    )
+    assert _allocated_block_ids(output) == {1, 2, 3, 8, 9}
 
 
 def test_coalesce_single_op_is_identity() -> None:
