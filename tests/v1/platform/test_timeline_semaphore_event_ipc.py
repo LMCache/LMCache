@@ -48,6 +48,12 @@ def _enqueue_busy_work(stream: torch.cuda.Stream, iters: int) -> torch.Tensor:
 
     Tensors are allocated inside the stream context (no cross-stream
     allocator hazards). Keep the returned tensor alive until sync.
+
+    Tests that assert an event is *incomplete* while this work is pending
+    must call ``backend.check_event_support(device)`` BEFORE enqueuing:
+    it pre-allocates the semaphore buffer (as production does at KV-cache
+    registration), whose ``cudaMalloc`` may implicitly synchronize the
+    device and drain this stream.
     """
     with torch.cuda.stream(stream):
         a = torch.randn(4096, 4096, device=DEVICE)
@@ -102,6 +108,7 @@ def test_query_transitions_with_recording_stream() -> None:
     """query_event flips False -> True when the recording stream drains."""
     backend = TimelineSemaphoreEventIPCBackend()
     device = torch.device(DEVICE)
+    backend.check_event_support(device)  # buffer alloc may device-sync
     stream = torch.cuda.Stream()
     keepalive = _enqueue_busy_work(stream, _BUSY_ITERS_SHORT)
 
@@ -120,6 +127,7 @@ def test_same_process_export_import_orders_consumer_stream() -> None:
     """
     backend = TimelineSemaphoreEventIPCBackend()
     device = torch.device(DEVICE)
+    backend.check_event_support(device)  # buffer alloc may device-sync
     producer = torch.cuda.Stream()
     consumer = torch.cuda.Stream()
 
@@ -166,6 +174,7 @@ def test_events_on_different_streams_are_independent() -> None:
     """A busy stream's pending event must not delay another stream's event."""
     backend = TimelineSemaphoreEventIPCBackend()
     device = torch.device(DEVICE)
+    backend.check_event_support(device)  # buffer alloc may device-sync
     busy = torch.cuda.Stream()
     idle = torch.cuda.Stream()
 
@@ -263,6 +272,7 @@ def _cross_process_consumer(kind: str, conn: Connection) -> None:
     torch.cuda.set_device(0)
     backend = _make_backend(kind)
     device = torch.device(DEVICE)
+    backend.check_event_support(device)  # buffer alloc may device-sync
     conn.send("ready")
 
     handle = conn.recv()
@@ -292,6 +302,7 @@ def test_cross_process_synchronize_blocks_until_record_point(
 
         backend = _make_backend(kind)
         device = torch.device(DEVICE)
+        backend.check_event_support(device)  # buffer alloc may device-sync
         stream = torch.cuda.Stream()
         keepalive = _enqueue_busy_work(stream, _BUSY_ITERS_LONG)
         event = backend.create_event(device)
