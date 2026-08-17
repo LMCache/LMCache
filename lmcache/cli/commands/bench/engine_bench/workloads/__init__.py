@@ -213,7 +213,6 @@ def create_workload(
             request_sender=request_sender,
             stats_collector=stats_collector,
             progress_monitor=progress_monitor,
-            engine_url=config.engine_url,
             model_name=config.model,
             seed=config.seed,
         )

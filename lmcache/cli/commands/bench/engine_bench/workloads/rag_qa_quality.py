@@ -19,8 +19,8 @@ comparable only when their ``run_fingerprint`` values match.
 """
 
 # Standard
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
-from typing import Any
 import hashlib
 import json
 import os
@@ -33,7 +33,6 @@ from lmcache.cli.commands.bench.engine_bench.quality.dataset import (
     load_samples,
     resolve_dataset_path,
 )
-from lmcache.cli.commands.bench.engine_bench.quality.metrics_probe import MetricsProbe
 from lmcache.cli.commands.bench.engine_bench.quality.scoring import (
     QualityAggregator,
     SampleScore,
@@ -95,16 +94,20 @@ class RagQaQualityConfig:
             measure the same questions.
         max_output_length: Token budget per answer.  Must fit a reasoning
             model's thinking block as well as the answer tags.
-        template_kwargs: Chat-template variables sent as
-            ``chat_template_kwargs``, already coerced to bool/int/str.  Empty
-            means the model's own template default applies.
+        template_kwargs: Chat-template variables, already coerced to
+            bool/int/str.  Empty means the model's own template default
+            applies.  The workload does not send these itself — the caller
+            puts them on the shared ``RequestSender`` as
+            ``chat_template_kwargs``; here they only enter the run
+            fingerprint and the results file, so runs configured differently
+            are not mistaken for comparable.
         output_path: Where the per-sample results JSON is written.
     """
 
     dataset: str
     num_samples: int = 50
     max_output_length: int = 1024
-    template_kwargs: dict[str, Any] = field(default_factory=dict)
+    template_kwargs: dict[str, bool | int | str] = field(default_factory=dict)
     output_path: str = "rag_qa_quality.json"
 
     def __post_init__(self) -> None:
@@ -125,7 +128,7 @@ class RagQaQualityConfig:
         dataset: str,
         num_samples: int,
         max_output_length: int,
-        template_kwargs: dict[str, Any],
+        template_kwargs: Mapping[str, bool | int | str],
         output_path: str,
     ) -> "RagQaQualityConfig":
         """Build a validated config from CLI arguments.
@@ -134,7 +137,9 @@ class RagQaQualityConfig:
             dataset: Dataset name or local path.
             num_samples: Number of samples to measure.
             max_output_length: Token budget per answer.
-            template_kwargs: Coerced chat-template variables.
+            template_kwargs: Coerced chat-template variables.  Copied, so a
+                later mutation of the caller's mapping does not change the
+                config.
             output_path: Destination for the per-sample results JSON.
 
         Returns:
@@ -149,7 +154,7 @@ class RagQaQualityConfig:
         )
 
 
-def parse_template_kwargs(items: list[str]) -> dict[str, Any]:
+def parse_template_kwargs(items: list[str]) -> dict[str, bool | int | str]:
     """Parse repeatable ``KEY=VALUE`` chat-template arguments.
 
     Values are typed: a template testing ``enable_thinking`` sees the string
@@ -164,7 +169,7 @@ def parse_template_kwargs(items: list[str]) -> dict[str, Any]:
     Raises:
         ValueError: If an item has no ``=`` or an empty key.
     """
-    parsed: dict[str, Any] = {}
+    parsed: dict[str, bool | int | str] = {}
     for item in items:
         key, separator, raw = item.partition("=")
         key = key.strip()
@@ -191,7 +196,6 @@ class RagQaQualityWorkload(BaseWorkload):
         request_sender: RequestSender,
         stats_collector: StatsCollector,
         progress_monitor: ProgressMonitor,
-        engine_url: str,
         model_name: str,
         seed: int = 42,
     ) -> None:
@@ -202,7 +206,6 @@ class RagQaQualityWorkload(BaseWorkload):
             request_sender: Shared request sender.
             stats_collector: Shared stats collector.
             progress_monitor: Shared progress monitor.
-            engine_url: Engine base URL, used to read cache counters.
             model_name: Model whose tokenizer sizes the padding.
             seed: Random seed for padding selection.
 
@@ -214,7 +217,6 @@ class RagQaQualityWorkload(BaseWorkload):
         self._config = config
         self._model_name = model_name
         self._seed = seed
-        self._probe = MetricsProbe(engine_url)
         self._aggregator = QualityAggregator()
         self._responses: dict[str, str] = {}
         self._index = 0
@@ -255,7 +257,7 @@ class RagQaQualityWorkload(BaseWorkload):
 
         Returns:
             The prefix length, or ``0`` when the model has no chat template —
-            alignment is then approximate, which the hit rate will show.
+            alignment is then approximate, and cache reuse partial.
         """
         try:
             rendered = self._tokenizer.apply_chat_template(
@@ -439,7 +441,6 @@ class RagQaQualityWorkload(BaseWorkload):
         request_id = f"{_MEASURED_REQUEST_PREFIX}{self._index}"
         self._index += 1
 
-        before = self._probe.read()
         self._progress_monitor.on_request_sent(request_id)
         result = await self._request_sender.send_request(
             request_id,
@@ -449,24 +450,19 @@ class RagQaQualityWorkload(BaseWorkload):
         # The sender fires its callbacks before returning, so the response
         # text is available to score in this same step.
         self._drain_finished_queue()
-        after = self._probe.read()
 
         response = self._responses.pop(request_id, "")
         answer = extract_final_answer(response)
         parsed = bool(answer) and result.successful
-        cache_delta = after.delta(before)
         self._aggregator.record(
             SampleScore(
                 sample_id=sample.sample_id,
                 parsed=parsed,
                 f1=best_f1(answer, sample.answers) if parsed else 0.0,
                 answer=answer,
-                requested_tokens=cache_delta.requested_tokens,
-                hit_tokens=cache_delta.hit_tokens,
                 ttft=result.ttft,
                 num_output_tokens=result.num_output_tokens,
-            ),
-            counters_available=cache_delta.available,
+            )
         )
         if not parsed:
             self._progress_monitor.log_message(
@@ -492,32 +488,20 @@ class RagQaQualityWorkload(BaseWorkload):
     # ------------------------------------------------------------------
 
     def extra_metric_sections(self) -> list[MetricSection]:
-        """Return the quality and cache-activity sections for the summary."""
+        """Return the answer-quality section for the summary."""
         summary = self._aggregator.summarize()
-        quality = MetricSection(
-            key="quality",
-            label="Answer Quality",
-            entries=[
-                ("samples", "Samples measured", summary.num_samples),
-                ("parsed", "Samples scored", summary.num_parsed),
-                ("parse_rate", "Parse rate", round(summary.parse_rate, 4)),
-                ("f1_mean", "Mean F1 (scored only)", round(summary.f1_mean, 4)),
-                ("fingerprint", "Run fingerprint", self._run_fingerprint()),
-            ],
-        )
-        if not summary.counters_available:
-            cache_entries: list[tuple[str, str, Any]] = [
-                ("available", "LMCache counters", "unavailable"),
-            ]
-        else:
-            cache_entries = [
-                ("hit_rate", "Cache hit rate", round(summary.hit_rate, 4)),
-                ("hit_tokens", "Cached tokens hit", summary.hit_tokens),
-                ("requested_tokens", "Tokens looked up", summary.requested_tokens),
-            ]
         return [
-            quality,
-            MetricSection(key="cache", label="Cache Activity", entries=cache_entries),
+            MetricSection(
+                key="quality",
+                label="Answer Quality",
+                entries=[
+                    ("samples", "Samples measured", summary.num_samples),
+                    ("parsed", "Samples scored", summary.num_parsed),
+                    ("parse_rate", "Parse rate", round(summary.parse_rate, 4)),
+                    ("f1_mean", "Mean F1 (scored only)", round(summary.f1_mean, 4)),
+                    ("fingerprint", "Run fingerprint", self._run_fingerprint()),
+                ],
+            )
         ]
 
     def _write_results(self) -> None:
@@ -538,9 +522,6 @@ class RagQaQualityWorkload(BaseWorkload):
                     "f1": round(score.f1, 4) if score.parsed else None,
                     "parsed": score.parsed,
                     "answer": score.answer,
-                    "hit_rate": round(score.hit_rate, 4),
-                    "hit_tokens": score.hit_tokens,
-                    "requested_tokens": score.requested_tokens,
                     "ttft": round(score.ttft, 4),
                     "num_output_tokens": score.num_output_tokens,
                 }
@@ -550,7 +531,7 @@ class RagQaQualityWorkload(BaseWorkload):
         directory = os.path.dirname(self._config.output_path)
         if directory:
             os.makedirs(directory, exist_ok=True)
-        with open(self._config.output_path, "w") as f:
+        with open(self._config.output_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
             f.write("\n")
         logger.info("Wrote quality results to %s", self._config.output_path)

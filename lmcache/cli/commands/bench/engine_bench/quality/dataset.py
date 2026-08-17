@@ -11,6 +11,9 @@ from dataclasses import dataclass
 import json
 import os
 
+# Third Party
+from huggingface_hub import hf_hub_download
+
 # First Party
 from lmcache.logging import init_logger
 
@@ -105,9 +108,6 @@ def resolve_dataset_path(dataset: str) -> str:
         entry.filename,
     )
     try:
-        # Third Party
-        from huggingface_hub import hf_hub_download
-
         return hf_hub_download(
             repo_id=entry.repo_id,
             filename=entry.filename,

@@ -109,44 +109,31 @@ class TestBestF1:
         assert best_f1("Paris", ["Berlin", "Madrid"]) == 0.0
 
 
-def _score(sample_id: str, parsed: bool, f1: float, **overrides) -> SampleScore:
-    defaults = dict(
+def _score(sample_id: str, parsed: bool, f1: float) -> SampleScore:
+    """Build a score, defaulting the fields a test is not exercising."""
+    return SampleScore(
         sample_id=sample_id,
         parsed=parsed,
         f1=f1,
         answer="a" if parsed else "",
-        requested_tokens=100,
-        hit_tokens=50,
         ttft=0.1,
         num_output_tokens=5,
     )
-    defaults.update(overrides)
-    return SampleScore(**defaults)
-
-
-class TestSampleScore:
-    def test_hit_rate(self) -> None:
-        assert _score("a", True, 1.0, requested_tokens=200, hit_tokens=50).hit_rate == (
-            0.25
-        )
-
-    def test_hit_rate_without_lookups(self) -> None:
-        assert _score("a", True, 1.0, requested_tokens=0, hit_tokens=0).hit_rate == 0.0
 
 
 class TestQualityAggregator:
     def test_empty_summary(self) -> None:
         summary = QualityAggregator().summarize()
         assert summary.num_samples == 0
+        assert summary.num_parsed == 0
         assert summary.parse_rate == 0.0
         assert summary.f1_mean == 0.0
-        assert summary.counters_available is False
 
     def test_f1_mean_covers_parsed_samples_only(self) -> None:
         """An unparsed sample must not be averaged in as a zero."""
         aggregator = QualityAggregator()
-        aggregator.record(_score("a", True, 1.0), counters_available=True)
-        aggregator.record(_score("b", False, 0.0), counters_available=True)
+        aggregator.record(_score("a", True, 1.0))
+        aggregator.record(_score("b", False, 0.0))
 
         summary = aggregator.summarize()
         assert summary.num_samples == 2
@@ -154,25 +141,14 @@ class TestQualityAggregator:
         assert summary.parse_rate == 0.5
         assert summary.f1_mean == 1.0
 
-    def test_hit_rate_is_token_weighted(self) -> None:
+    def test_f1_mean_averages_over_parsed_samples(self) -> None:
         aggregator = QualityAggregator()
-        aggregator.record(
-            _score("a", True, 1.0, requested_tokens=100, hit_tokens=100),
-            counters_available=True,
-        )
-        aggregator.record(
-            _score("b", True, 1.0, requested_tokens=300, hit_tokens=0),
-            counters_available=True,
-        )
-        assert aggregator.summarize().hit_rate == 0.25
-
-    def test_counters_unavailable_when_never_read(self) -> None:
-        aggregator = QualityAggregator()
-        aggregator.record(_score("a", True, 1.0), counters_available=False)
-        assert aggregator.summarize().counters_available is False
+        aggregator.record(_score("a", True, 1.0))
+        aggregator.record(_score("b", True, 0.5))
+        assert aggregator.summarize().f1_mean == 0.75
 
     def test_scores_preserve_measurement_order(self) -> None:
         aggregator = QualityAggregator()
-        aggregator.record(_score("b", True, 1.0), counters_available=False)
-        aggregator.record(_score("a", True, 1.0), counters_available=False)
+        aggregator.record(_score("b", True, 1.0))
+        aggregator.record(_score("a", True, 1.0))
         assert [s.sample_id for s in aggregator.scores()] == ["b", "a"]

@@ -61,8 +61,7 @@ lmcache/cli/commands/bench/
     ├── interactive/               # Guided TUI (schema, state, terminal)
     ├── quality/                   # Answer-quality measurement
     │   ├── dataset.py             # Sample, hub registry, schema adapters
-    │   ├── scoring.py             # F1, answer extraction, QualityAggregator
-    │   └── metrics_probe.py       # Reads LMCache hit counters from /metrics
+    │   └── scoring.py             # F1, answer extraction, QualityAggregator
     └── workloads/
         ├── __init__.py            # create_workload() factory
         ├── base.py                # BaseWorkload (ABC + run loop), MetricSection
@@ -418,13 +417,16 @@ gold answers are skipped.
 prompt is padded so the chat-template prefix plus system block is also a whole
 number of chunks. Documents then start on a chunk boundary in both the prefill
 and the composite, so their chunks hold document content alone and match.
-Without this they land off-phase and nothing matches — silently, which is why
-the cache hit rate is reported.
+Without this they land off-phase and nothing matches, silently.
 
 The unit is hardcoded, not read from the server: the baseline stack a run is
 compared against has no LMCache server to ask, and runs that padded
 differently would no longer share prompts. A different chunk size yields
-partial reuse, visible in the hit rate.
+partial reuse.
+
+Nothing here reads LMCache's own counters: the workload measures answers, and
+its output is deliberately agnostic of engine-side metrics. Confirm the cache
+was exercised from the engine's own `/metrics` if a run needs that evidence.
 
 **Scoring.** The model wraps its answer in `<final_answer>…</final_answer>`;
 the *last complete* region is taken, since reasoning models may echo an
@@ -446,8 +448,8 @@ default applies.
 
 **Behavior:** warmup sends each distinct document once behind the system block
 (`max_tokens=1`; shared passages prefill once, stats discarded). `step()` is
-strictly sequential: read cache counters, await the composite request, drain
-the finished queue for its text, read counters again, score.
+strictly sequential: await the composite request, drain the finished queue for
+its text, score.
 `on_request_finished` holds a measured request's text until its step scores it.
 
 **Comparing two stacks.** The workload reports one arm. Run it twice — once

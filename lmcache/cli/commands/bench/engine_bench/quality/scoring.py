@@ -95,7 +95,7 @@ def best_f1(prediction: str, references: list[str]) -> float:
 
 @dataclass
 class SampleScore:
-    """One sample's measured quality and the cache activity behind it.
+    """One sample's measured quality.
 
     Attributes:
         sample_id: The dataset's id for this sample.
@@ -103,9 +103,6 @@ class SampleScore:
             ``f1`` is meaningless and is exported as null.
         f1: Best token F1 against the gold answers; ``0.0`` when unparsed.
         answer: The extracted answer (``""`` when unparsed).
-        requested_tokens: Tokens looked up in the cache, or ``0`` when the
-            counters were unavailable.
-        hit_tokens: Tokens the lookup found cached, on the same basis.
         ttft: Time to first token, in seconds.
         num_output_tokens: Tokens generated.
     """
@@ -114,17 +111,8 @@ class SampleScore:
     parsed: bool
     f1: float
     answer: str
-    requested_tokens: int
-    hit_tokens: int
     ttft: float
     num_output_tokens: int
-
-    @property
-    def hit_rate(self) -> float:
-        """Fraction of looked-up tokens that were cached (``0.0`` if none)."""
-        if self.requested_tokens <= 0:
-            return 0.0
-        return self.hit_tokens / self.requested_tokens
 
 
 @dataclass
@@ -139,10 +127,6 @@ class QualitySummary:
     num_parsed: int
     parse_rate: float
     f1_mean: float
-    hit_rate: float
-    requested_tokens: int
-    hit_tokens: int
-    counters_available: bool
 
 
 class QualityAggregator:
@@ -150,18 +134,14 @@ class QualityAggregator:
 
     def __init__(self) -> None:
         self._scores: list[SampleScore] = []
-        self._counters_available = False
 
-    def record(self, score: SampleScore, counters_available: bool) -> None:
+    def record(self, score: SampleScore) -> None:
         """Record one sample's score.
 
         Args:
-            score: The sample's measured quality and cache activity.
-            counters_available: Whether the hit counters could be read.
+            score: The sample's measured quality.
         """
         self._scores.append(score)
-        if counters_available:
-            self._counters_available = True
 
     def scores(self) -> list[SampleScore]:
         """Return the recorded scores, in measurement order."""
@@ -170,16 +150,10 @@ class QualityAggregator:
     def summarize(self) -> QualitySummary:
         """Compute the aggregate summary over all recorded scores."""
         parsed = [s for s in self._scores if s.parsed]
-        requested = sum(s.requested_tokens for s in self._scores)
-        hits = sum(s.hit_tokens for s in self._scores)
         num_samples = len(self._scores)
         return QualitySummary(
             num_samples=num_samples,
             num_parsed=len(parsed),
             parse_rate=(len(parsed) / num_samples) if num_samples else 0.0,
             f1_mean=(sum(s.f1 for s in parsed) / len(parsed)) if parsed else 0.0,
-            hit_rate=(hits / requested) if requested > 0 else 0.0,
-            requested_tokens=requested,
-            hit_tokens=hits,
-            counters_available=self._counters_available,
         )

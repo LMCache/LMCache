@@ -9,7 +9,6 @@ import json
 import pytest
 
 # First Party
-from lmcache.cli.commands.bench.engine_bench.quality.metrics_probe import CacheCounters
 from lmcache.cli.commands.bench.engine_bench.stats import RequestResult
 from lmcache.cli.commands.bench.engine_bench.workloads import rag_qa_quality
 from lmcache.cli.commands.bench.engine_bench.workloads.rag_qa_quality import (
@@ -23,24 +22,10 @@ from ..fake_tokenizer import make_fake_tokenizer
 
 _CHUNK = rag_qa_quality._CHUNK_ALIGN_TOKENS
 
-# An engine exposing no LMCache counters (the baseline configuration).
-_NO_COUNTERS = CacheCounters(0, 0, False)
-
 
 # ---------------------------------------------------------------------------
 # Test doubles
 # ---------------------------------------------------------------------------
-
-
-def _chat_tokenizer(num_words: int = 300):
-    """A fake tokenizer that also renders a chat template."""
-    tokenizer = make_fake_tokenizer(num_words)
-
-    def apply_chat_template(messages, tokenize=False, add_generation_prompt=True, **kw):
-        return "user\n" + messages[0]["content"] + "\nassistant\n"
-
-    tokenizer.apply_chat_template = apply_chat_template
-    return tokenizer
 
 
 def _result(request_id: str, successful: bool = True) -> RequestResult:
@@ -87,30 +72,30 @@ def _make_workload(
     monkeypatch,
     records: list = _RECORDS,
     responses: list = [],  # noqa: B006
-    counters: CacheCounters = _NO_COUNTERS,
     successful: bool = True,
-    **config_overrides,
+    num_samples: int = 10,
+    max_output_length: int = 64,
+    template_kwargs: dict[str, bool | int | str] = {},  # noqa: B006
+    output_path: str = "",
 ):
     """Build a workload wired to fakes, returning ``(workload, sender)``.
 
     ``responses`` supplies each measured request's response text in order.
+    ``output_path`` defaults to a file under ``tmp_path``, which is not
+    known until call time.
     """
     monkeypatch.setattr(rag_qa_quality, "_FILLER_VOCAB_SIZE", 200)
     monkeypatch.setattr(
-        rag_qa_quality, "try_load_tokenizer", lambda _name: _chat_tokenizer()
+        rag_qa_quality, "try_load_tokenizer", lambda _name: make_fake_tokenizer()
     )
-    probe = MagicMock()
-    probe.read.return_value = counters
-    monkeypatch.setattr(rag_qa_quality, "MetricsProbe", lambda _url: probe)
 
-    options = dict(
+    config = RagQaQualityConfig.resolve(
         dataset=_write_dataset(tmp_path, records),
-        num_samples=10,
-        max_output_length=64,
-        template_kwargs={},
-        output_path=str(tmp_path / "out.json"),
+        num_samples=num_samples,
+        max_output_length=max_output_length,
+        template_kwargs=template_kwargs,
+        output_path=output_path or str(tmp_path / "out.json"),
     )
-    options.update(config_overrides)
 
     sender = MagicMock()
     sender.send_warmup_request = AsyncMock(side_effect=lambda rid, _m: _result(rid))
@@ -125,11 +110,10 @@ def _make_workload(
     sender.send_request = AsyncMock(side_effect=send_request)
 
     workload = RagQaQualityWorkload(
-        config=RagQaQualityConfig.resolve(**options),
+        config=config,
         request_sender=sender,
         stats_collector=MagicMock(),
         progress_monitor=MagicMock(),
-        engine_url="http://localhost:8000",
         model_name="fake-model",
         seed=7,
     )
@@ -254,7 +238,6 @@ class TestPromptConstruction:
                 request_sender=MagicMock(),
                 stats_collector=MagicMock(),
                 progress_monitor=MagicMock(),
-                engine_url="http://localhost:8000",
                 model_name="fake-model",
             )
 
@@ -364,21 +347,6 @@ class TestStep:
         assert sender.send_request.await_args.kwargs["max_tokens"] == 64
 
     @pytest.mark.asyncio
-    async def test_records_the_cache_delta_around_the_request(
-        self, tmp_path, monkeypatch
-    ) -> None:
-        workload, _ = _make_workload(tmp_path, monkeypatch)
-        workload._probe.read.side_effect = [
-            CacheCounters(1000, 400, True),
-            CacheCounters(1600, 900, True),
-        ]
-        await workload.step(0.0)
-
-        score = workload._aggregator.scores()[0]
-        assert score.requested_tokens == 600
-        assert score.hit_tokens == 500
-
-    @pytest.mark.asyncio
     async def test_returns_negative_when_samples_are_exhausted(
         self, tmp_path, monkeypatch
     ) -> None:
@@ -424,41 +392,21 @@ class TestReporting:
         assert sections["quality"]["f1_mean"] == 1.0
 
     @pytest.mark.asyncio
-    async def test_cache_section_says_so_when_counters_are_absent(
+    async def test_quality_is_the_only_extra_section(
         self, tmp_path, monkeypatch
     ) -> None:
-        """A plain engine has no counters to read."""
+        """Quality is measured from the answers alone, with no engine probing."""
         workload, _ = _make_workload(tmp_path, monkeypatch)
         await workload.step(0.0)
 
-        cache = next(s for s in workload.extra_metric_sections() if s.key == "cache")
-        assert dict((k, v) for k, _, v in cache.entries) == (
-            {"available": "unavailable"}
-        )
-
-    @pytest.mark.asyncio
-    async def test_cache_section_reports_the_hit_rate(
-        self, tmp_path, monkeypatch
-    ) -> None:
-        workload, _ = _make_workload(
-            tmp_path, monkeypatch, counters=CacheCounters(0, 0, True)
-        )
-        workload._probe.read.side_effect = [
-            CacheCounters(0, 0, True),
-            CacheCounters(1000, 750, True),
-        ] * 2
-        while await workload.step(0.0) >= 0:
-            pass
-
-        cache = next(s for s in workload.extra_metric_sections() if s.key == "cache")
-        assert dict((k, v) for k, _, v in cache.entries)["hit_rate"] == 0.75
+        assert [s.key for s in workload.extra_metric_sections()] == ["quality"]
 
     @pytest.mark.asyncio
     async def test_results_file_pairs_by_sample_id(self, tmp_path, monkeypatch) -> None:
         workload, _ = _make_workload(
             tmp_path,
             monkeypatch,
-            responses=["<final_answer>Paris</final_answer>", "unparseable"],
+            responses=["<final_answer>Paris</final_answer>", "no answer tags here"],
         )
         while await workload.step(0.0) >= 0:
             pass

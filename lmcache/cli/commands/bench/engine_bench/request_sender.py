@@ -76,6 +76,22 @@ class RequestSender:
         ignore_eos: bool = False,
         extra_body: dict[str, object] = {},  # noqa: B006
     ) -> None:
+        """Initialize the sender and its OpenAI client.
+
+        Args:
+            engine_url: Base URL of the inference engine.
+            model: Model name sent with every request.
+            completions_mode: Send legacy ``/completions`` requests instead
+                of ``/chat/completions``.
+            on_finished: Callbacks invoked when a request completes.  Copied,
+                so later mutation of the caller's list has no effect.
+            ignore_eos: Add vLLM's ``ignore_eos`` to every request body, so
+                generation runs for the full ``max_tokens``.
+            extra_body: Extra fields merged into every request body, for
+                options the OpenAI client has no parameter for (notably
+                ``chat_template_kwargs``).  Copied, and sent verbatim, so the
+                caller owns their compatibility with the backend.
+        """
         self._model = model
         self._completions_mode = completions_mode
         self._on_finished = list(on_finished)

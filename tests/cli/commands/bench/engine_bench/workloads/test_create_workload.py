@@ -343,6 +343,7 @@ class TestCreateWorkload:
         sender, collector, monitor = _make_deps()
         result = create_workload(config, args, sender, collector, monitor)
 
+        assert isinstance(result, RagQaQualityWorkload)
         assert result._config.output_path == str(tmp_path / "rag_qa_quality.json")
 
     def test_unknown_workload_raises(self) -> None:

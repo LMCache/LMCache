@@ -4,7 +4,6 @@
 # Standard
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any
 import asyncio
 import queue
 import time
@@ -28,12 +27,13 @@ class MetricSection:
     Attributes:
         key: Machine-readable section key, used in JSON output.
         label: Human-readable section heading for terminal output.
-        entries: ``(key, label, value)`` triples, in display order.
+        entries: ``(key, label, value)`` triples, in display order.  A value
+            is a scalar the metrics system can render and serialize to JSON.
     """
 
     key: str
     label: str
-    entries: list[tuple[str, str, Any]] = field(default_factory=list)
+    entries: list[tuple[str, str, str | int | float]] = field(default_factory=list)
 
 
 class BaseWorkload(ABC):

@@ -3,8 +3,6 @@
 
 * ``dataset`` — loading multi-passage QA datasets into :class:`Sample` objects.
 * ``scoring`` — extracting the model's answer and scoring it against gold.
-* ``metrics_probe`` — reading LMCache hit counters, so a run can show that the
-  cache was actually exercised.
 """
 
 # First Party
@@ -14,10 +12,6 @@ from lmcache.cli.commands.bench.engine_bench.quality.dataset import (
     describe_hub_datasets,
     load_samples,
     resolve_dataset_path,
-)
-from lmcache.cli.commands.bench.engine_bench.quality.metrics_probe import (
-    CacheCounters,
-    MetricsProbe,
 )
 from lmcache.cli.commands.bench.engine_bench.quality.scoring import (
     QualityAggregator,
@@ -31,8 +25,6 @@ from lmcache.cli.commands.bench.engine_bench.quality.scoring import (
 
 __all__ = [
     "HUB_DATASET_NAMES",
-    "CacheCounters",
-    "MetricsProbe",
     "QualityAggregator",
     "QualitySummary",
     "Sample",
