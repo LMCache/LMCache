@@ -761,9 +761,6 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             into account.
         """
         tracker = self._get_or_create_request_tracker(request)
-        # TODO: support loading KV for preempted requests in the future
-        if request.status == RequestStatus.PREEMPTED:
-            return 0, False
 
         self.scheduler_adapter.maybe_submit_lookup_request(
             request.request_id,
@@ -794,7 +791,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         )
         tracker.num_lmcache_hit_tokens = ret
 
-        need_to_load = max(0, ret - num_computed_tokens)
+        need_to_load = ret - num_computed_tokens
+        # A resumed full hit still needs the final token to produce logits.
+        if request.status == RequestStatus.PREEMPTED and ret == request.num_tokens:
+            need_to_load -= 1
+        need_to_load = max(0, need_to_load)
         logger.debug(
             "vLLM hit is: %d, Need to load is %d", num_computed_tokens, need_to_load
         )
