@@ -5,8 +5,9 @@ A single ``/cache/*`` surface, thin over the typed services in
 ``lmcache/v1/multiprocess/cache_control/`` (resolved via :func:`get_context`):
 
 - Objects   -- ``GET /cache/objects`` and ``DELETE /cache/objects``
-  (:class:`ObjectService`); the delete is key-addressed and spans L1, L2, or
-  both via its ``tier`` field. Adapter listing lives in the config group
+  plus ``POST /cache/objects/download`` (:class:`ObjectService`); delete is
+  key-addressed and spans L1, L2, or both via its ``tier`` field, while download
+  snapshots one node-local L1 object. Adapter listing lives in the config group
   (``GET /config/adapters``).
 - Prefetch  -- ``POST /cache/prefetches``, ``GET /cache/prefetches/{id}``
   (:class:`PrefetchService`).
@@ -23,9 +24,11 @@ from http import HTTPStatus
 from typing import Any, Optional
 import asyncio
 import hashlib
+import json
 
 # Third Party
 from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import Response
 import torch
 
 # First Party
@@ -37,6 +40,7 @@ from lmcache.v1.multiprocess.http_apis.schemas import (
     ChecksumRequest,
     ClearRequest,
     DeleteObjectsRequest,
+    DownloadObjectRequest,
     PrefetchRequest,
 )
 import lmcache.lmcache_native as lmcache_native
@@ -48,6 +52,7 @@ router = APIRouter()
 _MAX_PAGE_SIZE = 5000
 _DEFAULT_PAGE_SIZE = 500
 _CLEAR_TIER = Tier.L1
+_OBJECT_METADATA_HEADER = "X-LMCache-Object-Metadata"
 
 
 # ---------------------------------------------------------------------------
@@ -96,6 +101,41 @@ async def delete_cache_objects(
     """
     return await get_context(request).object_service.delete_objects(
         body.tier, body.adapter, body.keys, body.force
+    )
+
+
+@router.post("/cache/objects/download", response_class=Response)
+async def download_cache_object(
+    body: DownloadObjectRequest, request: Request
+) -> Response:
+    """Download an independent raw-byte snapshot of one node-local L1 object.
+
+    The exact object is addressed by ``EncodedObjectKey``. DRAM and Device-DAX
+    are supported; GDS requires a separate DMA path and is rejected. Inspection
+    does not count as a normal cache read and does not update LRU state.
+
+    Responses:
+        200: Raw logical bytes (``application/octet-stream``) with compact JSON
+            layout metadata in ``X-LMCache-Object-Metadata``.
+        400: Invalid ``ObjectKey`` semantic value. 404: object absent from L1.
+        409: object temporarily unreadable. 501: unsupported L1 backend.
+        503: server not initialized. 422: body validation.
+    """
+    snapshot = await get_context(request).object_service.download_object(body.key)
+    metadata = json.dumps(
+        {
+            "size_bytes": snapshot.size_bytes,
+            "backend": snapshot.backend.value,
+            "memory_format": snapshot.memory_format,
+            "shapes": snapshot.shapes,
+            "dtypes": snapshot.dtypes,
+        },
+        separators=(",", ":"),
+    )
+    return Response(
+        content=snapshot.data,
+        media_type="application/octet-stream",
+        headers={_OBJECT_METADATA_HEADER: metadata},
     )
 
 

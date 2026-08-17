@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Node-local cache object operations (adapter listing, object listing, delete).
+"""Node-local cache object operations (download, listing, and deletion).
 
 :class:`ObjectService` wraps the storage manager's L2 adapters and exposes
-adapter resolution, paginated listing, and key-addressed deletion. It performs
-its own validation and raises transport-agnostic domain errors (see
-:mod:`cache_control.errors`); the HTTP layer maps those to status codes.
-Blocking adapter I/O is off-loaded to a worker thread so callers can ``await``.
+adapter resolution, paginated listing, key-addressed deletion, and local L1
+snapshots. It performs its own validation and raises transport-agnostic domain
+errors (see :mod:`cache_control.errors`); the HTTP layer maps those to status
+codes. Blocking storage I/O is off-loaded to a worker thread so callers can
+``await``.
 """
 
 # Standard
@@ -13,11 +14,14 @@ from typing import Any
 import asyncio
 
 # First Party
-from lmcache.v1.distributed.api import EncodedObjectKey, Tier
+from lmcache.v1.distributed.api import EncodedObjectKey, L1ObjectSnapshot, Tier
+from lmcache.v1.distributed.error import L1Error, strerror
 from lmcache.v1.multiprocess.cache_control.errors import (
+    Conflict,
     InvalidRequest,
     NotFound,
     Unavailable,
+    Unsupported,
 )
 
 # Hard cap on how many keys a single delete request may target. Keeps the
@@ -30,15 +34,51 @@ _SUPPORTED_TIER = Tier.L2
 
 
 class ObjectService:
-    """Adapter-listing, object-listing, and key-addressed deletion on one node.
+    """Download, list, and delete cache objects on one node.
 
     Args:
-        engine: The node's cache engine; its ``storage_manager`` owns the L2
-            adapters.
+        engine: The node's cache engine; its ``storage_manager`` owns L1 and
+            the L2 adapters.
     """
 
     def __init__(self, engine: Any) -> None:
         self._engine = engine
+
+    async def download_object(self, encoded_key: EncodedObjectKey) -> L1ObjectSnapshot:
+        """Return an independent snapshot of one object in this node's L1.
+
+        Args:
+            encoded_key: JSON-safe exact object key supplied by the caller.
+
+        Returns:
+            An immutable snapshot containing raw logical bytes and layout
+            metadata. The source object's read protection has been released.
+
+        Raises:
+            InvalidRequest: The encoded key violates an ``ObjectKey`` invariant.
+            NotFound: The object is not resident in local L1.
+            Conflict: The object exists but is temporarily write-locked.
+            Unsupported: The object uses an L1 backend without CPU snapshot
+                support, currently GDS.
+            Unavailable: The storage manager returns an unexpected failure.
+        """
+        try:
+            key = encoded_key.to_object_key()
+        except ValueError as exc:
+            raise InvalidRequest(f"key: {exc}") from None
+
+        error, snapshot = await asyncio.to_thread(
+            self._engine.storage_manager.snapshot_l1_object, key
+        )
+        if error == L1Error.SUCCESS and snapshot is not None:
+            return snapshot
+        if error == L1Error.KEY_NOT_EXIST:
+            raise NotFound("object not found in local L1")
+        if error == L1Error.KEY_NOT_READABLE:
+            raise Conflict("object is temporarily unreadable in local L1")
+        if error == L1Error.UNSUPPORTED_BACKEND:
+            raise Unsupported("L1 object backend does not support CPU download")
+        raise Unavailable(f"failed to snapshot local L1 object: {strerror(error)}")
 
     @staticmethod
     def _require_supported_tier(tier: Tier) -> None:

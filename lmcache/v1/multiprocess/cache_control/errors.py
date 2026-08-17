@@ -20,3 +20,9 @@ class NotFound(CacheControlError): ...  # referenced adapter / job missing
 
 
 class Unavailable(CacheControlError): ...  # backend can't serve the request
+
+
+class Conflict(CacheControlError): ...  # object exists but is temporarily locked
+
+
+class Unsupported(CacheControlError): ...  # backend lacks the requested capability
