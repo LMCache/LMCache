@@ -19,6 +19,7 @@ class RocmDeviceSpec(CudaDeviceSpec):
             # Third Party
             import torch
 
-            return torch.cuda.is_available() and torch.version.hip is not None
+            hip_version = getattr(getattr(torch, "version", None), "hip", None)
+            return torch.cuda.is_available() and hip_version is not None
         except Exception:
             return False
