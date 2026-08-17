@@ -366,6 +366,7 @@ def test_external_device_participates_in_runtime_detection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A registered external spec is selected by the normal detector."""
+    monkeypatch.setenv("DEVICE_TYPE", "external")
     _set_entry_points(
         monkeypatch,
         [
