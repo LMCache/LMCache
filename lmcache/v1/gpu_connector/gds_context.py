@@ -150,18 +150,21 @@ class GDSContext:
 
     # --- Public API ---------------------------------------------------
 
-    def register_gpu_buffer(self, buffer: torch.Tensor) -> None:
-        """Register a staging buffer (and its stream) with the GDS library.
+    def register_gpu_buffer(
+        self, buffer: torch.Tensor, stream: "torch.cuda.Stream"
+    ) -> None:
+        """Register a staging buffer and its transfer stream with the GDS library.
 
         Registered as contiguous <=16 MiB regions (the GDS buffer-registration
         cap); :meth:`transfer_async` splits transfers at these boundaries.
 
         Args:
             buffer: Contiguous GPU staging buffer, 4 KiB-aligned in size.
+            stream: The CUDA stream all DMAs for ``buffer`` will run on.
         """
         if not self.initialized:
             return
-        raw_stream = torch_dev.current_stream().cuda_stream
+        raw_stream = stream.cuda_stream
         buf = buffer.view(torch.uint8)
         nbytes = buf.numel()
         with self._registry_lock:
@@ -173,15 +176,17 @@ class GDSContext:
                     buf[start : min(start + _MAX_CUFILE_REGION, nbytes)]
                 )
 
-    def deregister_gpu_buffer(self, buffer: torch.Tensor) -> None:
+    def deregister_gpu_buffer(
+        self, buffer: torch.Tensor, stream: "torch.cuda.Stream"
+    ) -> None:
         """Reverse of :meth:`register_gpu_buffer`: deregister its regions + stream.
 
         Args:
             buffer: The buffer passed to :meth:`register_gpu_buffer`.
+            stream: The stream passed to :meth:`register_gpu_buffer`.
         """
         if not self.initialized:
             return
-        stream = torch_dev.current_stream()
         raw_stream = stream.cuda_stream
         # No in-flight DMA on this stream may still reference the buffer.
         stream.synchronize()
@@ -222,17 +227,28 @@ class GDSContext:
             gpu_buffer: A slice of a registered staging buffer; its first
                 ``get_size()`` bytes are transferred.
             direction: :attr:`SlabDirection.READ` or ``.WRITE``.
+
+        Raises:
+            RuntimeError: If the calling thread's current stream was never
+                passed to :meth:`register_gpu_buffer`.
         """
         slab_op = (
             self._slab_read if direction is SlabDirection.READ else self._slab_write
         )
+        stream_handle = self._require_registered_stream()
         nbytes = memory_obj.get_size()
         buf = gpu_buffer.view(torch.uint8)
         pos = 0
         while pos < nbytes:
             base_ptr, dev_offset, region_nbytes = self._resolve_buffer(buf[pos:])
             seg_len = min(nbytes - pos, region_nbytes - dev_offset)
-            slab_op(memory_obj.slab_offset + pos, seg_len, dev_offset, base_ptr)
+            slab_op(
+                memory_obj.slab_offset + pos,
+                seg_len,
+                dev_offset,
+                base_ptr,
+                stream_handle,
+            )
             pos += seg_len
 
     def close(self) -> None:
@@ -389,25 +405,49 @@ class GDSContext:
         offset = ptr - base
         return base, offset, nbytes
 
+    def _require_registered_stream(self) -> int:
+        """Return the current stream's raw handle, requiring it be registered.
+
+        Raises:
+            RuntimeError: If the current stream was never passed to
+                :meth:`register_gpu_buffer`.
+        """
+        stream_handle = torch_dev.current_stream().cuda_stream
+        with self._registry_lock:
+            if stream_handle not in self._registered_streams:
+                raise RuntimeError(
+                    f"GDSContext: current stream 0x{stream_handle:x} is not "
+                    "registered via register_gpu_buffer."
+                )
+        return stream_handle
+
     def _slab_read(
-        self, slab_offset: int, size: int, dev_offset: int, buf_base: int
+        self,
+        slab_offset: int,
+        size: int,
+        dev_offset: int,
+        buf_base: int,
+        stream_handle: int,
     ) -> None:
         """Submit one async GDS read against the slab handle (stream-ordered)."""
         if self._slab_handle is None:
             raise RuntimeError("GDSContext._slab_read: slab handle not open")
-        stream_handle = torch_dev.current_stream().cuda_stream
         sub = self._slab_handle.read_async(
             buf_base, size, slab_offset, dev_offset, stream_handle
         )
         self._record_submission(sub)
 
     def _slab_write(
-        self, slab_offset: int, size: int, dev_offset: int, buf_base: int
+        self,
+        slab_offset: int,
+        size: int,
+        dev_offset: int,
+        buf_base: int,
+        stream_handle: int,
     ) -> None:
         """Submit one async GDS write against the slab handle (stream-ordered)."""
         if self._slab_handle is None:
             raise RuntimeError("GDSContext._slab_write: slab handle not open")
-        stream_handle = torch_dev.current_stream().cuda_stream
         sub = self._slab_handle.write_async(
             buf_base, size, slab_offset, dev_offset, stream_handle
         )
