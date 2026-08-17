@@ -105,11 +105,17 @@ def reset_device_registry_cache() -> Any:
     """Keep the process-wide registry cache isolated between tests."""
     backend_registry_builder = _device_detect._build_backend_registry
     device_registry_builder = _device_detect._build_device_registry
+    torch_device_getter = _device_detect.get_torch_device
+    current_spec_getter = _device_detect.current_device_spec
     backend_registry_builder.cache_clear()
     device_registry_builder.cache_clear()
+    torch_device_getter.cache_clear()
+    current_spec_getter.cache_clear()
     yield
     backend_registry_builder.cache_clear()
     device_registry_builder.cache_clear()
+    torch_device_getter.cache_clear()
+    current_spec_getter.cache_clear()
 
 
 def _set_entry_points(
