@@ -176,11 +176,15 @@ supports the standard PyTorch tensor surface.
 Verification
 ~~~~~~~~~~~~
 
-Start LMCache server:
+Start LMCache server.  The worker below uses the engine-driven
+transfer path, which the server only loads when
+``--supported-transfer-mode`` is ``engine_driven`` or ``auto`` (the
+default is ``lmcache_driven``):
 
 .. code-block:: bash
 
-    lmcache server --l1-size-gb 10 --eviction-policy LRU --port 5555
+    lmcache server --l1-size-gb 10 --eviction-policy LRU --port 5555 \
+        --supported-transfer-mode engine_driven
 
 Run vLLM with MP connector.  If multiple accelerators are visible on
 the host, set ``DEVICE_TYPE`` to force LMCache to pick the new backend
@@ -257,7 +261,7 @@ base-class methods that delegate to ``torch_ops``:
 
 .. code-block:: text
 
-    callers  →  lmcache.c_ops (shim)  →  DeviceOps instance
+    callers  →  lmcache.device_ops (DeviceOps instance)
                                            │
                                      bind_native() overlay:
                                        ├── native.multi_layer_kv_transfer  ← vendor CUDA/SYCL kernel
@@ -306,7 +310,7 @@ Implementation notes
 For concrete reference implementations, see:
 
 - ``lmcache/v1/platform/cuda/device_ops.py`` — binds the compiled
-  ``lmcache.c_ops`` pybind11 extension.
+  ``lmcache.cuda_ops`` pybind11 extension.
 - ``lmcache/v1/platform/xpu/device_ops.py`` — binds the SYCL
   ``lmcache.xpu_ops`` extension.
 - ``lmcache/v1/platform/musa/device_ops.py`` — method overrides
@@ -498,7 +502,7 @@ References
      - ``lmcache/v1/platform/base/event_ipc.py``
    * - Backend loading (``resolve_device_ops`` / ``_detect_device``)
      - ``lmcache/v1/platform/__init__.py``
-   * - ``c_ops`` shim install (``_install_c_ops_shim``)
+   * - Package-level ``device_ops`` resolution
      - ``lmcache/__init__.py``
    * - Cache context base
      - ``lmcache/v1/platform/base/cache_context.py``

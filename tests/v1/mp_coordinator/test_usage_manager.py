@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the L2 usage view (a router consumer deriving per-salt
-byte totals from directory-applied cache events)."""
+"""Tests for the L2 usage view (per-salt byte totals derived from the
+gate-admitted cache-event stream by the owning eviction manager)."""
 
 # First Party
 from lmcache.v1.distributed.api import ObjectKey, Tier
@@ -9,7 +9,7 @@ from lmcache.v1.mp_coordinator.api import (
     CacheEventEntry,
     CacheEventType,
 )
-from lmcache.v1.mp_coordinator.cache_control.usage_manager import L2UsageManager
+from lmcache.v1.mp_coordinator.controllers.usage_manager import L2UsageManager
 
 
 def _key(hash_byte: int, salt: str = "") -> ObjectKey:

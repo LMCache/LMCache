@@ -8,7 +8,7 @@ when a tenant exceeds its quota. It is **opt-in** (gated by
 ``event_reporting`` in ``CoordinatorConfig``, shared with the key-directory stream) and **additive** (the existing
 per-server eviction is unchanged).
 
-Code: `lmcache/v1/mp_coordinator/cache_control/` (coordinator side),
+Code: `lmcache/v1/mp_coordinator/controllers/` (coordinator side),
 `lmcache/v1/mp_coordinator/http_apis/cache_api.py` (REST endpoints),
 `lmcache/v1/mp_coordinator/schemas.py` (wire types),
 `lmcache/v1/multiprocess/http_server.py` (MP-server wiring).
@@ -34,12 +34,15 @@ MP server (store/lookup)
         │  flush paced by event_flush_interval (default 1s)
         │
         ▼
-  POST /directory/events ──▶ Coordinator
-                        ├─ KeyDirectory: seq dedup / fencing, placements
-                        └─ CacheEventBroadcaster (applied batches → consumers):
-                           ├─ L2UsageManager.consume: per-salt byte view
-                           └─ L2EvictionManager.consume: per-salt LRU
-                        (QuotaManager: per-salt byte limits)
+  POST /events ──▶ Coordinator
+                        EventGate: fencing / seq dedup / gap detection
+                          │  (see ingest.md)
+                          └─ CacheEventBroadcaster (admitted batches → consumers):
+                             ├─ KeyDirectory.consume: placements
+                             └─ FleetEvictionController.consume:
+                                  ├─ L2UsageManager: per-salt byte view
+                                  ├─ QuotaManager:   per-salt byte limits
+                                  └─ IsolatedLRU:    eviction order
 
   Coordinator background loop (every eviction_check_interval, default 5s)
         │
@@ -65,15 +68,24 @@ MP server (store/lookup)
 The ``ObjectKey`` → ``EncodedObjectKey`` conversion happens at the MP-server
 boundary (``obj.to_encoded_object_key()`` in ``cache_events.py``).
 
-## Coordinator components (`cache_control/`)
+## Coordinator components (`controllers/`)
+
+The eviction controller owns the whole quota → usage → evict loop: the
+budgets (target), what is spent against them (observation), and the LRU
+that picks victims when a salt is over (action). Holding all three is
+what makes it a controller rather than a bag of state — so they sit
+behind one collaborator (`ctx.eviction_controller`, with `.quota` and
+`.usage` for the read-only `/quota` endpoints) rather than as three
+peers the app has to wire together in the right order. Its node-local
+counterpart one scope down is
+`distributed/storage_controllers/eviction_controller.py`.
 
 ### L2UsageManager (`usage_manager.py`)
 
 The per-salt L2 byte totals are a **derived view of the global key
 directory**, constructed and maintained in this manager rather than
-inside the directory itself: it is a ``CacheEventConsumer`` registered
-on the ``CacheEventBroadcaster``, so it sees exactly the batches the
-directory applied. Accounting mirrors the directory's placement
+inside the directory itself: the owning eviction controller feeds it
+the same admitted batches the directory sees. Accounting mirrors the directory's placement
 identity — re-storing a placement delta-adjusts, two private copies of
 one key count twice, N reporters of one shared pool count once — and
 only ``DELETE`` events remove bytes, so reporter restarts never zero
@@ -109,13 +121,25 @@ two ``/quota`` APIs, never both — the server-side enforcer fully evicts any
 salt missing from its own table, so it would fight quotas registered only on
 the coordinator (see the warning in ``docs/source/mp/coordinator.rst``).
 
-### L2EvictionManager (`eviction_manager.py`)
+### FleetEvictionController (`eviction_controller.py`)
 
-Per-``cache_salt`` LRU for the coordinator process. It delegates the ordering to
+Per-``cache_salt`` LRU for the fleet, plus ownership of the quota
+registry and usage view above. It delegates the ordering to
 a coordinator-side ``IsolatedLRUEvictionPolicy`` instance, keyed by the canonical
 ``ObjectKey`` (rebuilt from the wire ``EncodedObjectKey``). Per-salt byte
-accounting lives in ``L2UsageManager``; the eviction manager only tracks order.
+accounting lives in ``L2UsageManager``; the LRU only tracks order.
 
+- ``consume(batch)`` — the `CacheEventConsumer` hook. Feeds the usage
+  view **first**, then maps L2 entries onto the LRU (`STORE` registers,
+  `ACCESS` touches, `DELETE` drops). A delete drops the key from the LRU
+  only once its **last** L2 placement is gone: usage is per placement,
+  so while another copy still holds bytes the key must stay evictable —
+  otherwise those bytes could exceed quota with nothing for the planner
+  to select. Usage consuming first is what makes that read of the
+  post-batch size correct; it is now internal to this manager rather
+  than a consumer-registration-order constraint.
+- ``fence_instance(id)`` — no-op. A restart voids L1 state only; the L2
+  bytes this manager accounts outlive the reporting process.
 - ``on_store(key)`` — register the key in the LRU
   (``policy.on_keys_created``). The paired byte increment happens in the
   usage view consuming the same event.
@@ -128,7 +152,11 @@ accounting lives in ``L2UsageManager``; the eviction manager only tracks order.
   ``policy.get_eviction_actions``. Salts without an explicit quota use the
   registry's default limit; while it is unset (``None``) they are skipped
   entirely — see QuotaManager above. No network, no mutation.
-- ``execute_evictions(registry, http_client)`` — computes the plan and
+- ``run(registry, http_client, check_interval)`` — the control loop
+  itself, started as an asyncio task by the app lifespan and cancelled on
+  shutdown. ``EVICTION_CHECK_INTERVAL = 0`` disables it (the task is
+  never created).
+- ``execute_evictions(registry, http_client)`` — one pass: computes the plan and
   **fire-and-forget** ``DELETE /cache/objects`` to a holder MP server for each
   salt's victims; on confirmed deletion ``on_remove`` drops them from tracking.
   The plan's keys are split into chunks of at most ``MAX_DELETE_BATCH`` (imported
@@ -147,11 +175,12 @@ accounting lives in ``L2UsageManager``; the eviction manager only tracks order.
 | ``GET`` | ``/quota/{cache_salt}`` | Quota + usage for one salt |
 | ``GET`` | ``/quota`` | Quota + usage for all salts |
 
-Event ingestion happens on ``POST /directory/events`` (the fleet
-cache-event stream); the key directory applies each batch and the
-``CacheEventBroadcaster`` fans applied batches to its registered consumers
-(the usage view and the eviction LRU; each ``consume`` filters to
-``l2``), so replayed batches cannot double-count.
+Event ingestion happens on ``POST /events`` (the fleet
+cache-event stream): the ``EventGate`` admits each batch and the
+``CacheEventBroadcaster`` fans it to the registered consumers — the key
+directory and this manager, whose ``consume`` filters to ``l2``. The
+gate's seq dedup is what stops replayed batches double-counting; see
+[ingest.md](ingest.md).
 
 The ``/quota/config`` routes are declared before ``/quota/{cache_salt}`` so the
 literal ``config`` segment is not captured as a salt. Expected controller flow
@@ -169,7 +198,7 @@ report usage in GiB only (no raw bytes in the API).
 
 The L2 adapters publish key events on the observability bus; one
 ``CacheEventSubscriber`` per MP server turns them into ordered batches
-delivered to ``POST /directory/events`` (flushes paced by
+delivered to ``POST /events`` (flushes paced by
 ``event_flush_interval``, default 1s); failures drop the batch (the
 resulting seq gap flags replay). See
 [cache_events.md](cache_events.md) for the subscriber/transport design.
@@ -201,7 +230,7 @@ Both also accept CLI flags (``--coordinator-event-reporting``,
 | Event | Effect | Handling |
 | --- | --- | --- |
 | Coordinator down | Events not delivered | Flush fails → batch dropped, logged; MP server unaffected |
-| Coordinator restart | Usage/LRU state lost | Startup resync backfills the directory (placements + usage) and LRU from a live server's listing; refined by incoming events |
+| Coordinator restart | Usage/LRU state lost | Rebuilt from the cache-event stream as events arrive; usage under-reports until it catches up |
 | Flush timeout | One batch delayed | Next flush sends new batch; no retry of old batch |
 | Usage accounting drift | Quota enforcement imprecise | Self-correcting as new events arrive |
 
