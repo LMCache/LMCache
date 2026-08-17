@@ -1,5 +1,13 @@
 # Token Dropping Examples using LMCache SDK
 
+#### We provide ready-to-run Google Collab examples for token dropping!!! [[Link]](https://drive.google.com/drive/folders/1ILctdh_Lf51qDUf1v00osRfoylfBIlOD?usp=share_link)
+
+> Caveat: each notebook may take ~15 minutes to run.
+
+> Join LMCache Slack and contact us at #sig-kv-research if you also want to ship your jupyter notebook to LMCache, or to our google collab examples.
+
+## Running example on your own GPU
+
 Long prompts create large KV caches that eat up GPU memory and limit how many
 requests fit in a batch. Smaller batch means lower decode throughput. To 
 improve decode throughput, we then need to stuff more requests in a batch.
@@ -13,9 +21,6 @@ The two examples use the LMCache SDK to do this: the SDK **retrieves** a
 request's cached tensors, **modifies** them, and **stores** them back for vLLM
 to decode from. Users only need to supply the token dropping function, and the
 SDK's batch and stream APIs does the job in an offline manner.
-
-There is also an example meant to be run in Google Colab's GPU T4 which uses
-smaller model and 
 
 ## Examples
 
@@ -39,7 +44,7 @@ cheaper:
 
 [snapkv_colab.ipynb](./snapkv_colab.ipynb) is a demonstration done in Google
 Colab Notebook, which can also be accessed here:
-[Google Colab SnapKV SDK Example](https://colab.research.google.com/drive/1JtyqhRIqmACDoQ7PKra1QszsRvE2wA7I?usp=sharing).
+[Google Colab SDK Examples](https://drive.google.com/drive/folders/1ILctdh_Lf51qDUf1v00osRfoylfBIlOD?usp=share_link).
 
 ## Prerequisites
 

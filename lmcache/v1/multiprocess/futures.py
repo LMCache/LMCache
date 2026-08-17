@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import Any, Generic, Optional, TypeVar
+from typing import Any, Generic, Optional, TypeVar, cast
 import threading
 
 # First Party
@@ -13,9 +13,10 @@ T = TypeVar("T")
 
 
 class MessagingFuture(Generic[T]):
-    def __init__(self):
+    def __init__(self) -> None:
         self.is_done_ = threading.Event()
-        self.result_ = None
+        self.result_: T | None = None
+        self._retained_references: list[object] = []
 
     def query(self) -> bool:
         """
@@ -56,7 +57,7 @@ class MessagingFuture(Generic[T]):
         flag = self.wait(timeout)
         if not flag:
             raise LMCacheTimeoutError("Future result not available within timeout")
-        return self.result_
+        return cast(T, self.result_)
 
     def set_result(self, result: T) -> None:
         """
@@ -69,6 +70,17 @@ class MessagingFuture(Generic[T]):
         """
         self.result_ = result
         self.is_done_.set()
+
+    def retain_reference(self, value: object) -> None:
+        """Keep a resource alive for at least the lifetime of this future.
+
+        Async callers can use this for resources, such as exported IPC events,
+        whose validity must extend until a remote operation completes.
+
+        Args:
+            value: Resource whose lifetime must be tied to this future.
+        """
+        self._retained_references.append(value)
 
     def to_device_future(
         self,
