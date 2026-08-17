@@ -105,17 +105,11 @@ def reset_device_registry_cache() -> Any:
     """Keep the process-wide registry cache isolated between tests."""
     backend_registry_builder = _device_detect._build_backend_registry
     device_registry_builder = _device_detect._build_device_registry
-    torch_device_getter = _device_detect.get_torch_device
-    current_spec_getter = _device_detect.current_device_spec
     backend_registry_builder.cache_clear()
     device_registry_builder.cache_clear()
-    torch_device_getter.cache_clear()
-    current_spec_getter.cache_clear()
     yield
     backend_registry_builder.cache_clear()
     device_registry_builder.cache_clear()
-    torch_device_getter.cache_clear()
-    current_spec_getter.cache_clear()
 
 
 def _set_entry_points(
@@ -406,7 +400,9 @@ def test_cuda_device_type_auto_selects_runtime_backend(
     assert torch_module is torch.cuda
     assert device_type == "cuda"
     assert backend_name == expected_backend_name
-    assert isinstance(_device_detect.current_device_spec(), expected_spec_type)
+    assert isinstance(
+        _device_detect._build_backend_registry()[backend_name], expected_spec_type
+    )
 
 
 @pytest.mark.parametrize(
