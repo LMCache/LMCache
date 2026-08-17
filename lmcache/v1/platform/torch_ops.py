@@ -17,7 +17,6 @@ import threading
 import warnings
 
 # Third Party
-from numba import njit
 import numpy as np
 import torch
 
@@ -31,6 +30,7 @@ from lmcache.lmcache_native import (
     is_mla,
 )
 from lmcache.logging import init_logger
+from lmcache.v1.numba_utils import njit_cached
 from lmcache.v1.platform._device_detect import (
     current_device_spec,
     get_torch_device,
@@ -2219,7 +2219,7 @@ def lmcache_memcpy_async(
         _copy_bytes_with_tensor(dest, src, nbytes)
 
 
-@njit(cache=True)
+@njit_cached
 def _encode_single_channel(
     cdf_layer_c,  # np.uint32 [lp]
     sym_channel,  # np.uint8 [n_tokens]
@@ -2339,7 +2339,7 @@ def encode_fast_new(cdf, input_sym, output_buffer, output_lengths):
     output_lengths.copy_(torch.from_numpy(out_len_np))
 
 
-@njit(cache=True)
+@njit_cached
 def _decode_single_channel(
     cdf_layer_c,
     bs_np,
