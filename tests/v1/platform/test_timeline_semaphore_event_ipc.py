@@ -6,6 +6,7 @@ cover what CUDA events cannot do (same-process import).
 """
 
 # Standard
+from collections.abc import Callable
 from multiprocessing import get_context
 from multiprocessing.connection import Connection
 import time
@@ -30,11 +31,6 @@ pytestmark = [
 
 DEVICE = "cuda:0"
 
-#: Matmul iterations that keep an H100/H200-class GPU busy for hundreds of
-#: milliseconds; slower GPUs only get slower, which these tests tolerate.
-_BUSY_ITERS_SHORT = 200
-_BUSY_ITERS_LONG = 600
-
 
 def _make_backend(kind: str) -> EventIPCBackend:
     """Construct a backend by parametrization key."""
@@ -43,25 +39,60 @@ def _make_backend(kind: str) -> EventIPCBackend:
     return DefaultEventIPCBackend()
 
 
-def _enqueue_busy_work(stream: torch.cuda.Stream, iters: int) -> torch.Tensor:
-    """Enqueue ``iters`` chained matmuls on ``stream``.
+def _gate_stream(stream: torch.cuda.Stream) -> Callable[[], None]:
+    """Block ``stream`` behind a host-released flag; return the release.
 
-    Tensors are allocated inside the stream context (no cross-stream
-    allocator hazards). Keep the returned tensor alive until sync.
+    Enqueues a ``cuStreamWaitValue64`` on ``stream``, so it provably has
+    pending work until the returned callable writes the flag with
+    ``cuStreamWriteValue64`` on a separate stream (a pending memop wait is
+    not woken by plain memory writes).
 
-    Tests that assert an event is *incomplete* while this work is pending
-    must call ``backend.check_event_support(device)`` BEFORE enqueuing:
-    it pre-allocates the semaphore buffer (as production does at KV-cache
-    registration), whose ``cudaMalloc`` may implicitly synchronize the
-    device and drain this stream.
+    Busy kernels cannot provide the pending work: the k3 CI runs with
+    ``CUDA_LAUNCH_BLOCKING=1``, under which every kernel completes inside
+    its launch call, so a stream is never observably busy behind kernels.
+    Memops are unaffected by that mode -- but for the same reason, gated
+    test bodies must not launch kernels (the launch would block the test
+    thread behind the pending gate and deadlock the same-thread release);
+    they stick to memop-based backend calls.
+
+    Callers must allocate the semaphore buffer
+    (``backend.check_event_support(device)``) and any tensors before
+    gating: an allocation's implicit ``cudaMalloc`` device-sync would
+    deadlock behind the gate. Always call the release (``try/finally``):
+    a stream left gated hangs whatever touches it next.
     """
-    with torch.cuda.stream(stream):
-        a = torch.randn(4096, 4096, device=DEVICE)
-        b = torch.randn(4096, 4096, device=DEVICE)
-        for _ in range(iters):
-            a = a @ b
-            a = a / a.norm()
-    return a
+    # Third Party
+    from cuda.bindings import driver
+
+    flag = torch.zeros(1, dtype=torch.int64, device=DEVICE)
+    # The allocator may hand back a block still holding a released gate's 1,
+    # and the zeroing memset is asynchronous -- make sure it lands before
+    # the wait below samples the flag, or the gate never arms.
+    torch.cuda.current_stream().synchronize()
+    release_stream = torch.cuda.Stream()
+
+    (err,) = driver.cuStreamWaitValue64(
+        driver.CUstream(stream.cuda_stream),
+        driver.CUdeviceptr(flag.data_ptr()),
+        1,
+        driver.CUstreamWaitValue_flags.CU_STREAM_WAIT_VALUE_GEQ,
+    )
+    if err != driver.CUresult.CUDA_SUCCESS:
+        raise RuntimeError(f"cuStreamWaitValue64 (gate) failed: {err}")
+
+    def release() -> None:
+        # `flag` and `release_stream` are kept alive by this closure.
+        (werr,) = driver.cuStreamWriteValue64(
+            driver.CUstream(release_stream.cuda_stream),
+            driver.CUdeviceptr(flag.data_ptr()),
+            1,
+            driver.CUstreamWriteValue_flags.CU_STREAM_WRITE_VALUE_DEFAULT,
+        )
+        if werr != driver.CUresult.CUDA_SUCCESS:
+            raise RuntimeError(f"cuStreamWriteValue64 (gate release) failed: {werr}")
+        release_stream.synchronize()
+
+    return release
 
 
 def test_timeline_semaphore_backend_satisfies_protocol() -> None:
@@ -108,48 +139,52 @@ def test_query_transitions_with_recording_stream() -> None:
     """query_event flips False -> True when the recording stream drains."""
     backend = TimelineSemaphoreEventIPCBackend()
     device = torch.device(DEVICE)
-    backend.check_event_support(device)  # buffer alloc may device-sync
+    backend.check_event_support(device)  # allocate before gating
     stream = torch.cuda.Stream()
-    keepalive = _enqueue_busy_work(stream, _BUSY_ITERS_SHORT)
-
-    event = backend.create_event(device)
-    backend.record_event(event, stream)
-    assert backend.query_event(event) is False
+    release = _gate_stream(stream)
+    try:
+        event = backend.create_event(device)
+        backend.record_event(event, stream)
+        assert backend.query_event(event) is False
+    finally:
+        release()
 
     stream.synchronize()
     assert backend.query_event(event) is True
-    del keepalive
 
 
 def test_same_process_export_import_orders_consumer_stream() -> None:
-    """Imported event gates a consumer stream behind the producer's work
-    (timeline-semaphore-only: CUDA event handles cannot be self-imported).
+    """Imported event gates a consumer stream behind the producer's record
+    point (timeline-semaphore-only: CUDA event handles cannot be
+    self-imported). Consumer progress is observed via a second event
+    recorded behind the imported wait, since gated test bodies must not
+    launch kernels (see ``_gate_stream``).
     """
     backend = TimelineSemaphoreEventIPCBackend()
     device = torch.device(DEVICE)
-    backend.check_event_support(device)  # buffer alloc may device-sync
+    backend.check_event_support(device)  # allocate before gating
     producer = torch.cuda.Stream()
     consumer = torch.cuda.Stream()
 
-    payload = torch.zeros(1, device=DEVICE, dtype=torch.int64)
-    keepalive = _enqueue_busy_work(producer, _BUSY_ITERS_SHORT)
-    with torch.cuda.stream(producer):
-        payload.fill_(42)
-    event = backend.create_event(device)
-    backend.record_event(event, producer)
+    release = _gate_stream(producer)
+    try:
+        event = backend.create_event(device)
+        backend.record_event(event, producer)
 
-    imported = backend.import_event(backend.export_event(event, device), device)
-    assert backend.query_event(imported) is False
+        imported = backend.import_event(backend.export_event(event, device), device)
+        assert backend.query_event(imported) is False
 
-    with torch.cuda.stream(consumer):
         backend.wait_event(imported, consumer)
-        observed = payload.clone()
+        tail = backend.create_event(device)
+        backend.record_event(tail, consumer)  # sits behind the imported wait
+        assert backend.query_event(tail) is False  # consumer genuinely gated
+    finally:
+        release()
     consumer.synchronize()
 
-    assert observed.item() == 42
+    assert backend.query_event(tail) is True  # consumer ran after the release
     assert backend.query_event(imported) is True
     assert producer.query() is True  # consumer only finished after producer
-    del keepalive
 
 
 def test_reexport_after_rerecord_uses_higher_sequence() -> None:
@@ -174,22 +209,24 @@ def test_events_on_different_streams_are_independent() -> None:
     """A busy stream's pending event must not delay another stream's event."""
     backend = TimelineSemaphoreEventIPCBackend()
     device = torch.device(DEVICE)
-    backend.check_event_support(device)  # buffer alloc may device-sync
+    backend.check_event_support(device)  # allocate before gating
     busy = torch.cuda.Stream()
     idle = torch.cuda.Stream()
 
-    keepalive = _enqueue_busy_work(busy, _BUSY_ITERS_SHORT)
-    busy_event = backend.create_event(device)
-    backend.record_event(busy_event, busy)
+    release = _gate_stream(busy)
+    try:
+        busy_event = backend.create_event(device)
+        backend.record_event(busy_event, busy)
 
-    idle_event = backend.create_event(device)
-    backend.record_event(idle_event, idle)
-    backend.synchronize_event(idle_event, device)  # must not block on `busy`
+        idle_event = backend.create_event(device)
+        backend.record_event(idle_event, idle)
+        backend.synchronize_event(idle_event, device)  # must not block on `busy`
 
-    assert backend.query_event(busy_event) is False
+        assert backend.query_event(busy_event) is False
+    finally:
+        release()
     busy.synchronize()
     assert backend.query_event(busy_event) is True
-    del keepalive
 
 
 def test_event_object_satisfies_ipc_event_duck_protocol() -> None:
@@ -242,15 +279,17 @@ def test_stale_slot_value_does_not_satisfy_next_sequence() -> None:
     backend.record_event(first, stream)
     stream.synchronize()  # slot now holds first's sequence
 
-    keepalive = _enqueue_busy_work(stream, _BUSY_ITERS_SHORT)
-    second = backend.create_event(device)
-    backend.record_event(second, stream)
-    imported = backend.import_event(backend.export_event(second, device), device)
-    assert backend.query_event(imported) is False
+    release = _gate_stream(stream)
+    try:
+        second = backend.create_event(device)
+        backend.record_event(second, stream)
+        imported = backend.import_event(backend.export_event(second, device), device)
+        assert backend.query_event(imported) is False
+    finally:
+        release()
 
     stream.synchronize()
     assert backend.query_event(imported) is True
-    del keepalive
 
 
 def test_record_rejects_imported_event() -> None:
@@ -265,24 +304,23 @@ def test_record_rejects_imported_event() -> None:
 
 
 def _cross_process_consumer(kind: str, conn: Connection) -> None:
-    """Child: import the received handle, synchronize on it, and report
-    (query at import, blocked duration, query after).
+    """Child: import the received handle, report the immediate query result,
+    then synchronize on the event and report (blocked duration, query after).
     """
     torch.cuda.init()
     torch.cuda.set_device(0)
     backend = _make_backend(kind)
     device = torch.device(DEVICE)
-    backend.check_event_support(device)  # buffer alloc may device-sync
+    backend.check_event_support(device)  # allocate before the parent gates
     conn.send("ready")
 
     handle = conn.recv()
     event = backend.import_event(handle, device)
-    query_at_import = backend.query_event(event)
+    conn.send(backend.query_event(event))
     start = time.monotonic()
     backend.synchronize_event(event, device)
     blocked_for = time.monotonic() - start
-    query_after = backend.query_event(event)
-    conn.send((query_at_import, blocked_for, query_after))
+    conn.send((blocked_for, backend.query_event(event)))
 
 
 @pytest.mark.parametrize("kind", ["default", "timeline_semaphore"])
@@ -302,25 +340,25 @@ def test_cross_process_synchronize_blocks_until_record_point(
 
         backend = _make_backend(kind)
         device = torch.device(DEVICE)
-        backend.check_event_support(device)  # buffer alloc may device-sync
+        backend.check_event_support(device)  # allocate before gating
         stream = torch.cuda.Stream()
-        keepalive = _enqueue_busy_work(stream, _BUSY_ITERS_LONG)
-        event = backend.create_event(device)
-        backend.record_event(event, stream)
-        busy_started = time.monotonic()
-        parent_conn.send(backend.export_event(event, device))
+        release = _gate_stream(stream)
+        try:
+            event = backend.create_event(device)
+            backend.record_event(event, stream)
+            parent_conn.send(backend.export_event(event, device))
 
-        query_at_import, blocked_for, query_after = parent_conn.recv()
+            assert parent_conn.recv() is False  # incomplete at import
+            time.sleep(0.3)  # give the child time to enter synchronize_event
+        finally:
+            release()
         stream.synchronize()
-        busy_duration = time.monotonic() - busy_started
 
-        assert query_at_import is False
+        blocked_for, query_after = parent_conn.recv()
         assert query_after is True
-        # The child must have been genuinely blocked on the GPU work, and
-        # released no later than the producer stream drained.
+        # The child must have been genuinely blocked on the pending work (a
+        # never-completing wait would hang and trip the join timeout below).
         assert blocked_for >= 0.05
-        assert blocked_for <= busy_duration + 1.0
-        del keepalive
     finally:
         child.join(timeout=60)
         if child.is_alive():

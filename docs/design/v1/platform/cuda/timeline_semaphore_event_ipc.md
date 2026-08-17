@@ -47,14 +47,22 @@ simple and absolute: slot values only grow.
   first `record_event`, and a `cudaDeviceSynchronize` there drains the
   caller's recording stream, silently breaking record ordering. The buffer
   is zeroed via `cudaMemsetAsync` on its own stream.
-- **`cudaMalloc` itself may implicitly synchronize the device** (observed
-  on the CI GPUs, not on H200/driver 580), so lazy allocation mid-traffic
-  would stall until in-flight work drains. Production never hits this:
-  `check_event_support` allocates the buffer, and all three MP paths call
-  it at KV-cache registration, before any transfer. Tests that assert an
-  event is incomplete behind pending stream work must do the same before
-  enqueuing that work — the implicit sync completes the work early, which
-  is harmless for ordering but breaks "still pending" assertions.
+- **`cudaMalloc` may implicitly synchronize the device**, so lazy buffer
+  allocation mid-traffic could stall until in-flight work drains.
+  Production never hits this: `check_event_support` allocates the buffer,
+  and all three MP paths call it at KV-cache registration, before any
+  transfer.
+- **`CUDA_LAUNCH_BLOCKING=1` constrains the tests, not the backend.** The
+  k3 unit CI sets it (`.buildkite/k3_tests/unit/pipeline.yml`), making
+  every kernel launch synchronous: a stream is never observably "still
+  busy behind kernels" (each kernel completes inside its launch call),
+  and launching a kernel behind a *pending* `cuStreamWaitValue64` blocks
+  the launching host thread until the wait clears. Memops themselves stay
+  asynchronous and correctly ordered under that mode. Tests that assert
+  incompleteness therefore gate streams behind a host-released
+  `cuStreamWaitValue64` and keep the gated region free of kernel
+  launches; allocations happen before gating (an implicit `cudaMalloc`
+  device-sync would deadlock behind the gate).
 - **Host-side slot reads go through a dedicated non-blocking stream** so
   they cannot synchronize with caller streams blocked in a semaphore wait.
 - **`CU_STREAM_WAIT_VALUE_GEQ` is cyclic**: `(int64_t)(*addr - value) >= 0`,
