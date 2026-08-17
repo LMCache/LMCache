@@ -413,20 +413,19 @@ def test_cuda_device_type_auto_selects_runtime_backend(
 
 
 @pytest.mark.parametrize(
-    ("cuda_version", "hip_version", "expected_spec_type"),
+    ("cuda_version", "hip_version"),
     [
-        ("13.0", None, CudaDeviceSpec),
-        (None, "7.2", RocmDeviceSpec),
-        (None, None, CudaDeviceSpec),
+        ("13.0", None),
+        (None, "7.2"),
+        (None, None),
     ],
 )
-def test_cuda_device_type_resolves_runtime_backend_without_hardware(
+def test_cuda_device_type_prefers_default_backend_without_hardware(
     monkeypatch: pytest.MonkeyPatch,
     cuda_version: str | None,
     hip_version: str | None,
-    expected_spec_type: type[DeviceSpec],
 ) -> None:
-    """Explicit cuda lookups use the torch runtime when no GPU is available."""
+    """Explicit cuda lookups stay deterministic even without a GPU."""
     _set_entry_points(monkeypatch, [])
 
     # Third Party
@@ -436,4 +435,4 @@ def test_cuda_device_type_resolves_runtime_backend_without_hardware(
     monkeypatch.setattr(torch.version, "cuda", cuda_version)
     monkeypatch.setattr(torch.version, "hip", hip_version)
 
-    assert isinstance(_device_detect.get_device_spec("cuda"), expected_spec_type)
+    assert isinstance(_device_detect.get_device_spec("cuda"), CudaDeviceSpec)

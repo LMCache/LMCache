@@ -294,10 +294,6 @@ def get_device_spec(device_type: str) -> "DeviceSpec | None":
     if len(available_specs) == 1:
         return available_specs[0]
 
-    compatible_specs = [spec for spec in specs if spec.is_runtime_compatible()]
-    if len(compatible_specs) == 1:
-        return compatible_specs[0]
-
     default_specs = [spec for spec in specs if spec.backend_name == device_type]
     if len(default_specs) == 1:
         return default_specs[0]

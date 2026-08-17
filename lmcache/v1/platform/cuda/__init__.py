@@ -79,20 +79,13 @@ class CudaDeviceSpec(DeviceSpec):
             # Third Party
             import torch
 
-            return torch.cuda.is_available() and self.is_runtime_compatible()
-        except Exception:
-            return False
-
-    def is_runtime_compatible(self) -> bool:
-        """Return whether torch exposes a CUDA runtime."""
-        try:
-            # Third Party
-            import torch
-
             torch_version = getattr(torch, "version", None)
             if torch_version is None:
-                return True
-            return getattr(torch_version, "cuda", None) is not None
+                return torch.cuda.is_available()
+            return (
+                torch.cuda.is_available()
+                and getattr(torch_version, "cuda", None) is not None
+            )
         except Exception:
             return False
 
