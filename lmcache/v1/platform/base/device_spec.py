@@ -139,6 +139,15 @@ class DeviceSpec:
         """
         return False
 
+    def is_runtime_compatible(self) -> bool:
+        """Return whether this backend matches the installed torch runtime.
+
+        Unlike :meth:`is_available`, this does not require usable hardware.
+        Backends sharing a torch device type can override it so explicit
+        device lookups remain deterministic on hosts without accelerators.
+        """
+        return True
+
     def is_handle_transfer_available(self) -> bool:
         """Return ``True`` when the device is usable for handle transfer."""
         # TODO(chunxiaozheng): implement on subclasses
