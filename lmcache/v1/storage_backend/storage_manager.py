@@ -321,8 +321,24 @@ class StorageManager:
                 allocator_backend = self.storage_backends["LocalCPUBackend"]
             else:
                 allocator_backend = self.storage_backends["MaruBackend"]
-        else:
+        elif "LocalCPUBackend" in self.storage_backends:
             allocator_backend = self.storage_backends["LocalCPUBackend"]
+        else:
+            # No host pool: a tier that allocates its own objects can serve.
+            allocator_backend = next(
+                (
+                    backend
+                    for backend in self.storage_backends.values()
+                    if isinstance(backend, AllocatorBackendInterface)
+                ),
+                None,
+            )  # type: ignore[assignment]
+            if allocator_backend is None:
+                raise RuntimeError(
+                    "No storage backend owns a memory allocator. Configure one "
+                    "(a host pool via max_local_cpu_size, or a tier that "
+                    "allocates its own objects) before storing."
+                )
         assert isinstance(allocator_backend, AllocatorBackendInterface)
         return allocator_backend
 
