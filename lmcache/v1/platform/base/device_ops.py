@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The unified per-device ops abstraction (the ``lmcache.c_ops`` surface).
+"""The unified per-device operations abstraction.
 
 :class:`DeviceOps` is a strategy base class whose every op is an instance
 method delegating to :mod:`lmcache.v1.platform.torch_ops`.  Accelerator
@@ -11,7 +11,7 @@ polymorphism, or bulk-rebind via :meth:`DeviceOps.bind_native`.
 from __future__ import annotations
 
 # Standard
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 if TYPE_CHECKING:
     # Third Party
@@ -40,14 +40,18 @@ class DeviceOps:
     - Call :meth:`bind_native` in :meth:`ensure_native` to bulk-rebind
       all ops the compiled extension exports.
 
-    The ``lmcache.c_ops`` shim forwards attribute access to a resolved
-    singleton instance so module-level call sites keep working.
+    The package-level :data:`lmcache.device_ops` attribute references a
+    resolved singleton instance for module-level call sites.
     """
 
     device_type: ClassVar[str] = ""  # base is unregistered
 
     # ── Shared types (explicit for static analysis) ────────────────────
     PageBufferShapeDesc = PageBufferShapeDesc
+    StagingCopy = ops_types.StagingCopy
+    LaunchVar = ops_types.LaunchVar
+    BatchStep = ops_types.BatchStep
+    KernelGroupSpec = ops_types.KernelGroupSpec
     set_shape_desc_dtype = staticmethod(set_shape_desc_dtype)
 
     # Bound from the native module by bind_native (declared for static analysis).
@@ -57,6 +61,24 @@ class DeviceOps:
 
     def __init__(self) -> None:
         self._native_bound: bool = False
+
+    def __getattr__(self, name: str) -> Any:
+        """Report an unavailable optional native symbol.
+
+        Native extensions may add platform-specific symbols at runtime through
+        :meth:`bind_native`. Returning ``Any`` to static analysis reflects that
+        dynamic surface, while raising ``AttributeError`` preserves normal
+        ``hasattr`` feature detection when a backend does not provide a symbol.
+
+        Args:
+            name: Attribute requested by the caller.
+
+        Raises:
+            AttributeError: If the active backend did not bind the symbol.
+        """
+        raise AttributeError(
+            f"{type(self).__name__!s} has no device operation {name!r}"
+        )
 
     # ── Lazy native binding ───────────────────────────────────────────
 
@@ -227,3 +249,6 @@ class DeviceOps:
 
     def rotary_embedding_k_fused(self, *args, **kwargs):
         return torch_ops.rotary_embedding_k_fused(*args, **kwargs)
+
+    def rotary_embedding_k_fused_strided(self, *args, **kwargs):
+        return torch_ops.rotary_embedding_k_fused_strided(*args, **kwargs)

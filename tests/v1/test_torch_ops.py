@@ -15,6 +15,7 @@ from lmcache.v1.multiprocess.native_completion import (
     DeviceHostFuncDispatcher,
     submit_callback_to_stream,
 )
+from lmcache.v1.platform import resolve_device_ops
 from lmcache.v1.platform import torch_ops as _py_ops
 import lmcache.lmcache_native as lmcache_native
 
@@ -55,10 +56,10 @@ def _build_backend_params() -> list:
     """Build pytest parameter list for the backend fixture.
 
     Returns one entry per available backend configuration:
-    - cuda_c_ops: uses lmcache.c_ops (requires CUDA and the CUDA extension)
+    - cuda_ops: uses lmcache.cuda_ops (requires CUDA)
     - cuda_py_ops: uses lmcache.v1.platform.torch_ops with GPU visible
     - cpy_py_ops: uses lmcache.v1.platform.torch_ops with GPU mocked away
-    - xpu_sycl_ops: uses lmcache.xpu_ops (requires XPU and the SYCL extension)
+    - xpu_sycl_ops: uses resolved XpuDeviceOps (native xpu_ops + fallbacks)
     - xpu_py_ops: uses lmcache.v1.platform.torch_ops with XPU visible
     """
     params = []
@@ -69,11 +70,9 @@ def _build_backend_params() -> list:
     if cuda_available:
         try:
             # First Party
-            import lmcache.c_ops as cuda_c_ops
+            import lmcache.cuda_ops as cuda_ops
 
-            params.append(
-                pytest.param(("cuda_c_ops", cuda_c_ops, "cuda"), id="cuda_c_ops")
-            )
+            params.append(pytest.param(("cuda_ops", cuda_ops, "cuda"), id="cuda_ops"))
         except ImportError:
             pass
 
@@ -88,13 +87,13 @@ def _build_backend_params() -> list:
 
     if hasattr(torch, "xpu") and torch.xpu.is_available():
         try:
-            # First Party
-            import lmcache.c_ops as xpu_sycl_ops
-
             params.append(
-                pytest.param(("xpu_sycl_ops", xpu_sycl_ops, "xpu"), id="xpu_sycl_ops")
+                pytest.param(
+                    ("xpu_sycl_ops", resolve_device_ops("xpu"), "xpu"),
+                    id="xpu_sycl_ops",
+                )
             )
-        except ImportError:
+        except (ImportError, RuntimeError):
             pass
 
     return params
@@ -237,7 +236,7 @@ def scenario_lmcache_memcpy_async(ops: Any, device: str) -> dict[str, torch.Tens
     Uses pointer mode for CPU/CUDA devices and tensor mode for other devices.
 
     Exercises multiple boundary conditions to verify correct behaviour for
-    both the CUDA c_ops backend (which chunks at alignment boundaries via
+    both the CUDA DeviceOps backend (which chunks at alignment boundaries via
     cudaMemcpyAsync) and the Python fallback backend (which issues a single
     synchronous copy):
       - copy spanning exactly one aligned block
@@ -1775,7 +1774,7 @@ def scenario_transfer_direction_enum(ops: Any, device: str) -> dict[str, torch.T
 def scenario_record_drain_completion(ops: Any, device: str) -> dict[str, torch.Tensor]:
     """Test record_completion_on_stream / drain_recorded_completions contracts.
 
-    Verified backend-agnostic: native c_ops uses cudaLaunchHostFunc on the
+    Verified backend-agnostic: native cuda_ops uses cudaLaunchHostFunc on the
     default stream (ptr=0), which fires synchronously after device_sync; the
     fallback enqueues immediately. Both paths satisfy every assertion below.
     """
@@ -1814,8 +1813,8 @@ def scenario_dispatcher_integration(ops: Any, device: str) -> dict[str, torch.Te
     # First Party
     import lmcache.v1.multiprocess.native_completion as nc
 
-    original = nc._lmc_ops
-    nc._lmc_ops = ops
+    original = nc._device_ops
+    nc._device_ops = ops
     try:
         ops.drain_recorded_completions()
 
@@ -1836,7 +1835,7 @@ def scenario_dispatcher_integration(ops: Any, device: str) -> dict[str, torch.Te
 
         assert received == [[b"k0", b"k1"]]
     finally:
-        nc._lmc_ops = original
+        nc._device_ops = original
 
     return {"dispatcher_integration": torch.tensor([1], dtype=torch.int32)}
 
@@ -1863,7 +1862,7 @@ def scenario_multi_layer_block_kv_transfer(
     """
     results = {}
 
-    # C++ bindings (cuda_c_ops, xpu_sycl_ops) expect uint64 pointer tensors for
+    # C++ bindings (cuda_ops, xpu_sycl_ops) expect uint64 pointer tensors for
     # paged_buffer_ptrs_tensor and list[int] for lmcache_objects_ptrs.
     # The Python fallback also supports both modes on cpu/cuda (pointer inputs
     # are reconstructed internally via _tensor_from_ptr).
@@ -2784,7 +2783,7 @@ def scenario_multi_layer_block_kv_transfer(
 def scenario_record_drain_event(ops: Any, device: str) -> dict[str, torch.Tensor]:
     """Test record_event_on_stream / drain_recorded_events contracts.
 
-    Verified backend-agnostic: native c_ops uses cudaLaunchHostFunc on the
+    Verified backend-agnostic: native cuda_ops uses cudaLaunchHostFunc on the
     default stream (ptr=0), which fires synchronously after device_sync; the
     fallback enqueues immediately with time.time(). Both paths satisfy every
     assertion below.
@@ -2840,7 +2839,7 @@ def scenario_record_drain_event(ops: Any, device: str) -> dict[str, torch.Tensor
 # 3. Registry
 # ==========================================
 
-# cover pybind list in csrc/pybind.cpp
+# cover pybind list in csrc/cuda/pybind.cpp
 SCENARIO_REGISTRY = {
     "transfer_direction_enum": scenario_transfer_direction_enum,
     "multi_layer_kv_transfer": scenario_multi_layer_kv_transfer,

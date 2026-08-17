@@ -15,6 +15,14 @@ name: Build ROCm Artifacts
 
 on:
     workflow_call:
+        outputs:
+            rocm_version:
+                description: >-
+                    Full wheel version including the ROCm local segment
+                    (e.g. 0.5.3+rocm7.2). Consume this rather than
+                    reconstructing the version, so the local segment has a
+                    single source of truth.
+                value: ${{ jobs.build-rocm-artifacts.outputs.rocm_version }}
 
 env:
     LC_ALL: en_US.UTF-8
@@ -29,6 +37,12 @@ env:
     TORCH_ROCM_SPEC: torch==2.11.0+rocm7.2
     TORCH_ROCM_INDEX: https://download.pytorch.org/whl/rocm7.2
     PYTORCH_ROCM_ARCH: gfx942;gfx950
+    # PEP 440 local version appended to the wheel, matching how PyTorch tags its
+    # own ROCm builds (torch-2.11.0+rocm7.2). Without it the ROCm wheel is
+    # indistinguishable from the CUDA wheel on PyPI: same name, same version,
+    # same interpreter tag, differing only in the manylinux minor. Bump together
+    # with TORCH_ROCM_SPEC/TORCH_ROCM_INDEX above.
+    ROCM_LOCAL_VERSION: rocm7.2
 
 defaults:
     run:
@@ -41,6 +55,8 @@ jobs:
     build-rocm-artifacts:
         name: Build ROCm wheel (gfx942, gfx950)
         runs-on: ubuntu-latest
+        outputs:
+            rocm_version: ${{ steps.rocm-version.outputs.rocm_version }}
         steps:
             - name: "Harden Runner"
               uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
@@ -74,13 +90,15 @@ jobs:
               uses: ./.github/actions/free-disk-space
 
             - name: Get base version for rocm wheel
+              id: rocm-version
               run: |
                 if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
                   BASE="${GITHUB_REF_NAME#v}"
                 else
                   BASE=$(git tag --list 'v[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 | sed 's/^v//' || echo "0.0.0.dev")
                 fi
-                echo "ROCM_VERSION=${BASE}" >> "$GITHUB_ENV"
+                echo "ROCM_VERSION=${BASE}+${ROCM_LOCAL_VERSION}" >> "$GITHUB_ENV"
+                echo "rocm_version=${BASE}+${ROCM_LOCAL_VERSION}" >> "$GITHUB_OUTPUT"
 
             # Build inside the ROCm dev image. No GPU is needed to compile HIP
             # kernels; PYTORCH_ROCM_ARCH bakes gfx942+gfx950 code objects into
@@ -103,7 +121,7 @@ jobs:
                 name: release-rocm-artifacts
                 path: dist/
 
-# On-device validation (loading the compiled c_ops and running the real
+# On-device validation (loading the compiled cuda_ops and running the real
 # KV-transfer kernels on gfx942/gfx950) requires AMD Instinct hardware, which
 # GitHub-hosted runners do not provide and LMCache does not maintain a
 # self-hosted runner for. It is therefore run manually on AMD hardware:

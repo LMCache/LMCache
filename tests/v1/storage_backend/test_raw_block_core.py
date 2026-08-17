@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 # Standard
+import ctypes
 import dataclasses
 import stat
 import sys
@@ -42,6 +43,97 @@ def test_normalize_raw_block_placement_ids_rejects_out_of_range() -> None:
 
     with pytest.raises(ValueError, match="range 1..=65535"):
         normalize_raw_block_placement_ids([65536], 1)
+
+
+class _RecordingRawDevice:
+    def __init__(self) -> None:
+        self.offsets: list[int] = []
+        self.buffers: list[memoryview] = []
+        self.lengths: list[int] = []
+        self.read_buffers: list[memoryview] = []
+        self.read_data = b""
+        self.read_cursor = 0
+        self.waited_batch_id: int | None = None
+
+    def batched_write(
+        self,
+        offsets: list[int],
+        buffers: list[memoryview],
+        lengths: list[int],
+        placement_ids: list[int | None] | None = None,
+    ) -> int:
+        del placement_ids
+        self.offsets = offsets
+        self.buffers = buffers
+        self.lengths = lengths
+        return 17
+
+    def wait_iouring(self, batch_id: int) -> None:
+        self.waited_batch_id = batch_id
+
+    def read_uring(
+        self,
+        offset: int,
+        target: memoryview,
+        payload_len: int,
+        total_len: int,
+    ) -> None:
+        del offset, payload_len
+        self.read_buffers.append(target)
+        end = self.read_cursor + total_len
+        target[:total_len] = self.read_data[self.read_cursor : end]
+        self.read_cursor = end
+
+
+def _buffer_address(buf: memoryview) -> int:
+    return ctypes.addressof((ctypes.c_byte * 1).from_buffer(buf))
+
+
+def test_raw_block_core_uring_cmd_write_padding_uses_aligned_chunks(monkeypatch):
+    core = RawBlockCore.__new__(RawBlockCore)
+    core.block_align = 4096
+    core.max_data_transfer_size = 4096
+    raw_dev = _RecordingRawDevice()
+    monkeypatch.setattr(core, "_rawdev", lambda: raw_dev)
+
+    payload = bytes([3]) * 5000
+
+    core._write_uring_cmd_buffers(
+        offsets=[4096],
+        buffers=[bytearray(payload)],
+        payload_lens=[len(payload)],
+        total_lens=[8192],
+    )
+
+    assert raw_dev.offsets == [4096, 8192]
+    assert raw_dev.lengths == [4096, 4096]
+    assert raw_dev.waited_batch_id == 17
+    assert all(_buffer_address(buf) % core.block_align == 0 for buf in raw_dev.buffers)
+    assert b"".join(bytes(buf) for buf in raw_dev.buffers) == payload + bytes(3192)
+
+
+def test_raw_block_core_uring_cmd_read_copyback_uses_aligned_chunks(monkeypatch):
+    core = RawBlockCore.__new__(RawBlockCore)
+    core.block_align = 4096
+    core.max_data_transfer_size = 4096
+    raw_dev = _RecordingRawDevice()
+    monkeypatch.setattr(core, "_rawdev", lambda: raw_dev)
+
+    payload = bytes([5]) * 5000
+    raw_dev.read_data = payload + bytes(3192)
+    dst = bytearray(len(payload))
+
+    core._read_uring_cmd_buffers(
+        offsets=[4096],
+        buffers=[dst],
+        payload_lens=[len(payload)],
+        total_lens=[8192],
+    )
+
+    assert dst == payload
+    assert all(
+        _buffer_address(buf) % core.block_align == 0 for buf in raw_dev.read_buffers
+    )
 
 
 def test_raw_block_core_store_load_and_exists(tmp_path):

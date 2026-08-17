@@ -54,11 +54,23 @@ echo ""
 echo "==> Starting lmcache server (log: ${LOG_FILE})"
 rm -f "${LOG_FILE}"
 
+# The server only loads the transfer paths named by
+# --supported-transfer-mode (default: lmcache_driven), so pass the
+# bench's mode explicitly. The engine-driven leg also names a SHM
+# segment: the default --shm-name "" would silently downgrade it to
+# pickle transport. Keep the name short — macOS caps POSIX SHM names
+# at 31 chars including the server's lmcache_l1_pool_ prefix.
+SERVER_MODE_ARGS=(--supported-transfer-mode "${TRANSFER_MODE}")
+if [ "${TRANSFER_MODE}" = "engine_driven" ]; then
+  SERVER_MODE_ARGS+=(--shm-name "bench_$$")
+fi
+
 lmcache server \
   --port "${ZMQ_PORT}" \
   --http-port "${HTTP_PORT}" \
   --l1-size-gb 1 \
   --eviction-policy LRU \
+  "${SERVER_MODE_ARGS[@]}" \
   >"${LOG_FILE}" 2>&1 &
 SERVER_PID=$!
 
