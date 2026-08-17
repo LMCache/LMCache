@@ -4,15 +4,17 @@
 Datasets are not vendored.  Named datasets download from the Hugging Face
 Hub on first use and are cached by ``huggingface_hub``; any other value is
 treated as a local file path.
+
+``huggingface_hub`` and ``pyarrow`` are imported where they are used rather
+than at module scope.  ``lmcache --help`` reaches this module to build its
+dataset help text, and the lmcache-cli wheel depends on neither, so importing
+either at module scope would make the whole CLI unusable on that install.
 """
 
 # Standard
 from dataclasses import dataclass
 import json
 import os
-
-# Third Party
-from huggingface_hub import hf_hub_download
 
 # First Party
 from lmcache.logging import init_logger
@@ -90,7 +92,8 @@ def resolve_dataset_path(dataset: str) -> str:
 
     Raises:
         ValueError: If *dataset* is neither a known name nor an existing file.
-        RuntimeError: If a known name could not be downloaded.
+        RuntimeError: If ``huggingface_hub`` is not installed, or a known name
+            could not be downloaded.
     """
     entry = _HUB_DATASETS.get(dataset)
     if entry is None:
@@ -107,6 +110,16 @@ def resolve_dataset_path(dataset: str) -> str:
         entry.repo_id,
         entry.filename,
     )
+    try:
+        # Third Party
+        from huggingface_hub import hf_hub_download
+    except ImportError as e:
+        raise RuntimeError(
+            f"Downloading dataset {dataset!r} requires huggingface_hub. "
+            f"Install it with `pip install huggingface_hub`, or pass a local "
+            f"file path instead."
+        ) from e
+
     try:
         return hf_hub_download(
             repo_id=entry.repo_id,
