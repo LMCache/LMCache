@@ -35,7 +35,8 @@ engine
 The ``lmcache bench engine`` command runs sustained performance benchmarks
 against an inference engine (e.g., vLLM). It supports multiple workload types
 that exercise different caching patterns and reports TTFT, decoding speed, and
-throughput metrics.
+throughput metrics. One workload, :ref:`rag-qa-quality
+<bench-rag-qa-quality>`, measures answer *correctness* instead of speed.
 
 .. code-block:: bash
 
@@ -146,8 +147,8 @@ General Options
    * - ``--workload TYPE``
      - Yes
      - Workload type: ``long-doc-qa``, ``multi-round-chat``,
-       ``long-doc-permutator``, ``prefix-suffix-tuner``, or
-       ``random-prefill``.
+       ``long-doc-permutator``, ``prefix-suffix-tuner``,
+       ``rag-qa-quality``, or ``random-prefill``.
    * - ``--tokens-per-gb-kvcache N``
      - \*
      - Tokens per GB of KV cache. Required unless ``--lmcache-url`` is set.
@@ -447,6 +448,145 @@ by ``--psf-thrash``.
    any eviction fires.
 
 
+.. _bench-rag-qa-quality:
+
+rag-qa-quality
+^^^^^^^^^^^^^^
+
+Measures **answer quality** rather than speed. Every other workload would
+report an unchanged number if the cache returned subtly wrong KV; this one
+scores the model's actual answers against gold answers from a real QA
+dataset.
+
+Each document is prefilled on its own during warmup, so its KV is stored
+independently. The measured request then composes them::
+
+   [system prompt][doc_a][doc_b]...[doc_n][question]
+
+Every document is therefore reused at a position it was never cached at --
+the RAG serving pattern. Nothing artificial is inserted, so a change in
+answer quality is attributable to the cache rather than to a perturbation.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 10 55
+
+   * - Flag
+     - Default
+     - Description
+   * - ``--rag-dataset``
+     - *required*
+     - A known dataset name (``musique``, ``hotpotqa``) or a path to a local
+       ``.json``, ``.jsonl``, or ``.parquet`` QA file.
+   * - ``--rag-num-samples``
+     - 50
+     - Questions to measure, taken in dataset order.
+   * - ``--rag-max-output-length``
+     - 1024
+     - Token budget per answer. Must fit a reasoning model's thinking block
+       as well as the answer tags.
+   * - ``--rag-template-kwargs``
+     - *(unset)*
+     - Chat-template variables as ``KEY=VALUE``, repeatable. Unset, the
+       model's own template default applies.
+   * - ``--rag-output``
+     - ``<output-dir>/rag_qa_quality.json``
+     - Per-sample results file.
+
+``--kv-cache-volume`` is unused by this workload, but ``--tokens-per-gb-kvcache``
+(or ``--lmcache-url``) is still required by the command.
+
+A tokenizer is **required** -- pass ``--model`` with a HuggingFace repo ID or
+a local path, or let it be auto-detected from ``/v1/models``. The workload
+fails fast without one, since documents cannot be aligned to cache chunks.
+
+**Datasets** are not vendored. Named ones download from the HuggingFace Hub
+on first use and cache under ``HF_HOME``; any other value is treated as a
+local path.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 15 30 55
+
+   * - Name
+     - Source
+     - Notes
+   * - ``musique``
+     - ``dgslibisey/MuSiQue``
+     - JSONL, 20 passages per question, ~2.1k tokens.
+   * - ``hotpotqa``
+     - ``hotpotqa/hotpot_qa``
+     - Parquet (distractor/validation); requires ``pyarrow``.
+
+A local file loads unchanged if its records carry passages, a question, and
+gold answers under any of the recognized keys: ``ctxs[].{title,text}``,
+``paragraphs[].paragraph_text``, or ``context``. Records missing any of the
+three are skipped.
+
+**Comparing two stacks.** The workload reports **one arm**. Run it twice --
+once per stack -- and diff the result files by ``sample_id``:
+
+.. code-block:: bash
+
+   # Arm A: the LMCache-enabled engine
+   lmcache bench engine \
+       --engine-url http://localhost:8000 \
+       --workload rag-qa-quality \
+       --tokens-per-gb-kvcache 6000 \
+       --rag-dataset musique \
+       --rag-num-samples 20 \
+       --rag-max-output-length 256 \
+       --rag-output lmcache.json
+
+   # Arm B: the same model without LMCache
+   lmcache bench engine \
+       --engine-url http://localhost:8001 \
+       --workload rag-qa-quality \
+       --tokens-per-gb-kvcache 6000 \
+       --rag-dataset musique \
+       --rag-num-samples 20 \
+       --rag-max-output-length 256 \
+       --rag-output baseline.json
+
+The two files are comparable **only when their ``run_fingerprint`` values
+match**. The fingerprint covers the dataset, sample ids, output budget,
+template kwargs, model, and chunk alignment -- if it differs, a diff would
+report an input delta as a quality delta.
+
+.. note::
+
+   Start each run from a clean cache state -- restart the server, or run
+   ``lmcache kvcache clear --url <mp-url>``. Otherwise a previous run's
+   composite prompts are still cached and the second run measures a full
+   prefix hit instead of per-document reuse.
+
+.. note::
+
+   This workload reports **no cache-hit metrics**; answer quality is measured
+   from the responses alone and is deliberately independent of engine-side
+   counters. To confirm the cache was actually exercised -- otherwise
+   "quality unchanged" cannot be told apart from "LMCache never engaged" --
+   read the engine's own metrics endpoint before and after a run:
+
+   .. code-block:: bash
+
+      curl -s http://localhost:8080/metrics | grep lookup_.*_tokens_total
+
+**Reasoning models.** ``--rag-template-kwargs`` is deliberately not
+defaulted. Disabling thinking is not a safe universal choice -- on multi-hop
+QA it can lower quality, compressing the range a cache regression must show
+up in. Bounding runaway reasoning or enabling it is model-specific:
+
+.. code-block:: bash
+
+   --rag-template-kwargs enable_thinking=true \
+   --rag-template-kwargs reasoning_effort=high
+
+If the budget is too small for a model's thinking block, generation is cut
+off before the closing tag, the sample does not parse, and it drops out of
+the score -- watch ``Parse rate`` for this.
+
+
 random-prefill
 ^^^^^^^^^^^^^^
 
@@ -518,6 +658,7 @@ text and number prompts accept typed input with defaults shown in brackets.
        multi-round-chat       Multi-turn chat with stateful sessions
        long-doc-permutator    Permutations of context documents
        prefix-suffix-tuner    Two-pass tiered KV-cache demonstrator
+       rag-qa-quality         Answer quality (F1) on real QA data
        random-prefill         Prefill-only requests fired simultaneously
 
    LMCache Server
@@ -629,6 +770,41 @@ After completion, a summary table is printed:
    P99 decode (tok/s):               38.55
    ======================================================
 
+A workload may append sections of its own after the shared ones.
+``rag-qa-quality`` adds **Answer Quality**:
+
+.. code-block:: text
+
+   -------------------- Answer Quality --------------------
+   Samples measured:                                     20
+   Samples scored:                                       20
+   Parse rate:                                         1.00
+   Mean F1 (scored only):                              0.31
+   Run fingerprint:                        61709aae928fdba8
+
+.. list-table::
+   :header-rows: 1
+   :widths: 25 75
+
+   * - Field
+     - Meaning
+   * - ``Samples measured``
+     - Questions sent.
+   * - ``Samples scored``
+     - Of those, how many produced a complete ``<final_answer>`` region.
+   * - ``Parse rate``
+     - ``scored / measured``. A low value means the output budget is too
+       small or the model is ignoring the answer tags -- fix that before
+       reading the F1.
+   * - ``Mean F1 (scored only)``
+     - SQuAD-normalized token-overlap F1, best over the gold answers,
+       averaged over **scored samples only**. Always read it together with
+       the parse rate: a high F1 over a third of the samples is a different
+       result from the same F1 over all of them.
+   * - ``Run fingerprint``
+     - Digest of everything determining the prompts. Two runs are comparable
+       only when these match.
+
 CSV and JSON
 ^^^^^^^^^^^^
 
@@ -638,6 +814,54 @@ CSV and JSON
   metadata. Opt-in with ``--json``.
 
 Both files are written to ``--output-dir`` (default: current directory).
+
+Per-sample quality results
+^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+``rag-qa-quality`` additionally writes its own file to ``--rag-output``:
+
+.. code-block:: json
+
+   {
+     "run_fingerprint": "61709aae928fdba8",
+     "config": {
+       "dataset": "musique",
+       "num_samples": 20,
+       "max_output_length": 256,
+       "template_kwargs": {},
+       "output_path": "lmcache.json"
+     },
+     "model": "meta-llama/Llama-3.1-8B-Instruct",
+     "summary": {
+       "num_samples": 20,
+       "num_parsed": 20,
+       "parse_rate": 1.0,
+       "f1_mean": 0.3144
+     },
+     "per_sample": [
+       {
+         "sample_id": "2hop__481349_302087",
+         "f1": 0.6667,
+         "parsed": true,
+         "answer": "Bombardier Aerospace",
+         "ttft": 0.1624,
+         "num_output_tokens": 26
+       },
+       {
+         "sample_id": "2hop__697790_864352",
+         "f1": null,
+         "parsed": false,
+         "answer": "",
+         "ttft": 0.1701,
+         "num_output_tokens": 256
+       }
+     ]
+   }
+
+An unparsed sample's ``f1`` is ``null``, **not** ``0.0``. This is what lets a
+cross-run diff pair by ``sample_id`` and skip whatever either run failed to
+score, instead of averaging in a parsing failure as if the model had answered
+wrongly.
 
 
 Exit Codes

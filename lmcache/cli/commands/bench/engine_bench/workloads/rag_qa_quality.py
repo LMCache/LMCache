@@ -2,20 +2,15 @@
 """RAG-style question-answering quality workload for ``lmcache bench engine``.
 
 Measures whether reusing cached KV changes the model's *answers*, not just
-how fast it produces them.
-
-Each document is prefilled on its own during warmup, so its KV is stored
-independently.  The measured request then composes them::
+how fast it produces them.  Documents are prefilled individually, then
+composed into one request::
 
     [system prompt][doc_a][doc_b]…[doc_n][question]
 
-Every document is therefore reused at a position it was never cached at —
-the RAG serving pattern.  Nothing artificial is inserted, so a change in
-answer quality is attributable to the cache rather than to a perturbation.
+so each is reused at a position it was never cached at — the RAG serving
+pattern.  Reports one arm; diff two runs by sample id to compare stacks.
 
-The workload reports one arm.  To compare against full recompute, run it
-twice — once per stack — and diff the result files by sample id; they are
-comparable only when their ``run_fingerprint`` values match.
+See ``docs/source/cli/bench.rst`` for usage and output.
 """
 
 # Standard
