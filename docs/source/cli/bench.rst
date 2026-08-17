@@ -453,19 +453,17 @@ by ``--psf-thrash``.
 rag-qa-quality
 ^^^^^^^^^^^^^^
 
-Measures **answer quality** rather than speed. Every other workload would
-report an unchanged number if the cache returned subtly wrong KV; this one
-scores the model's actual answers against gold answers from a real QA
-dataset.
+Measures **answer quality** rather than speed: every other workload reports an
+unchanged number if the cache returns subtly wrong KV. Answers are scored
+against gold answers from a real QA dataset.
 
-Each document is prefilled on its own during warmup, so its KV is stored
-independently. The measured request then composes them::
+Each document is prefilled on its own during warmup; the measured request then
+composes them::
 
    [system prompt][doc_a][doc_b]...[doc_n][question]
 
-Every document is therefore reused at a position it was never cached at --
-the RAG serving pattern. Nothing artificial is inserted, so a change in
-answer quality is attributable to the cache rather than to a perturbation.
+so every document is reused at a position it was never cached at -- the RAG
+serving pattern, with no artificial perturbation.
 
 .. list-table::
    :header-rows: 1
@@ -493,16 +491,12 @@ answer quality is attributable to the cache rather than to a perturbation.
      - ``<output-dir>/rag_qa_quality.json``
      - Per-sample results file.
 
-``--kv-cache-volume`` is unused by this workload, but ``--tokens-per-gb-kvcache``
-(or ``--lmcache-url``) is still required by the command.
+``--kv-cache-volume`` is unused, but ``--tokens-per-gb-kvcache`` (or
+``--lmcache-url``) is still required. A tokenizer is required too, for chunk
+alignment: pass ``--model``, or let it auto-detect from ``/v1/models``.
 
-A tokenizer is **required** -- pass ``--model`` with a HuggingFace repo ID or
-a local path, or let it be auto-detected from ``/v1/models``. The workload
-fails fast without one, since documents cannot be aligned to cache chunks.
-
-**Datasets** are not vendored. Named ones download from the HuggingFace Hub
-on first use and cache under ``HF_HOME``; any other value is treated as a
-local path.
+**Datasets** are not vendored. Named ones download from the HuggingFace Hub on
+first use and cache under ``HF_HOME``; any other value is a local path.
 
 .. list-table::
    :header-rows: 1
@@ -518,73 +512,45 @@ local path.
      - ``hotpotqa/hotpot_qa``
      - Parquet (distractor/validation); requires ``pyarrow``.
 
-A local file loads unchanged if its records carry passages, a question, and
-gold answers under any of the recognized keys: ``ctxs[].{title,text}``,
-``paragraphs[].paragraph_text``, or ``context``. Records missing any of the
-three are skipped.
+Local files load unchanged if their records carry passages, a question, and
+gold answers -- ``ctxs[].{title,text}``, ``paragraphs[].paragraph_text``, or
+``context``. Records missing any of the three are skipped.
 
-**Comparing two stacks.** The workload reports **one arm**. Run it twice --
-once per stack -- and diff the result files by ``sample_id``:
+**Comparing two stacks.** The workload reports one arm; run it twice and diff
+the files by ``sample_id``:
 
 .. code-block:: bash
 
-   # Arm A: the LMCache-enabled engine
-   lmcache bench engine \
-       --engine-url http://localhost:8000 \
-       --workload rag-qa-quality \
-       --tokens-per-gb-kvcache 6000 \
-       --rag-dataset musique \
-       --rag-num-samples 20 \
-       --rag-max-output-length 256 \
-       --rag-output lmcache.json
+   ARGS="--workload rag-qa-quality --tokens-per-gb-kvcache 6000 \
+         --rag-dataset musique --rag-num-samples 20"
 
-   # Arm B: the same model without LMCache
-   lmcache bench engine \
-       --engine-url http://localhost:8001 \
-       --workload rag-qa-quality \
-       --tokens-per-gb-kvcache 6000 \
-       --rag-dataset musique \
-       --rag-num-samples 20 \
-       --rag-max-output-length 256 \
-       --rag-output baseline.json
+   lmcache bench engine --engine-url http://localhost:8000 $ARGS --rag-output a.json
+   lmcache bench engine --engine-url http://localhost:8001 $ARGS --rag-output b.json
 
-The two files are comparable **only when their ``run_fingerprint`` values
-match**. The fingerprint covers the dataset, sample ids, output budget,
-template kwargs, model, and chunk alignment -- if it differs, a diff would
-report an input delta as a quality delta.
+The files are comparable **only when their ``run_fingerprint`` values match**.
+It covers dataset, sample ids, budget, template kwargs, model, and chunk
+alignment, so a mismatch means the diff would report an input delta as a
+quality delta.
 
 .. note::
 
-   Start each run from a clean cache state -- restart the server, or run
-   ``lmcache kvcache clear --url <mp-url>``. Otherwise a previous run's
-   composite prompts are still cached and the second run measures a full
-   prefix hit instead of per-document reuse.
+   Start each run from a clean cache -- restart the server, or
+   ``lmcache kvcache clear --url <mp-url>`` -- or the second run hits the
+   first run's cached composites instead of measuring per-document reuse.
 
 .. note::
 
-   This workload reports **no cache-hit metrics**; answer quality is measured
-   from the responses alone and is deliberately independent of engine-side
-   counters. To confirm the cache was actually exercised -- otherwise
-   "quality unchanged" cannot be told apart from "LMCache never engaged" --
-   read the engine's own metrics endpoint before and after a run:
-
-   .. code-block:: bash
+   No cache-hit metrics are reported; quality is measured from the responses
+   alone. To tell "quality unchanged" apart from "LMCache never engaged",
+   check the engine's own counters around a run::
 
       curl -s http://localhost:8080/metrics | grep lookup_.*_tokens_total
 
-**Reasoning models.** ``--rag-template-kwargs`` is deliberately not
-defaulted. Disabling thinking is not a safe universal choice -- on multi-hop
-QA it can lower quality, compressing the range a cache regression must show
-up in. Bounding runaway reasoning or enabling it is model-specific:
-
-.. code-block:: bash
-
-   --rag-template-kwargs enable_thinking=true \
-   --rag-template-kwargs reasoning_effort=high
-
-If the budget is too small for a model's thinking block, generation is cut
-off before the closing tag, the sample does not parse, and it drops out of
-the score -- watch ``Parse rate`` for this.
+**Reasoning models.** ``--rag-template-kwargs`` has no default: disabling
+thinking can lower multi-hop QA quality, and the right setting is
+model-specific (``enable_thinking=true``, ``reasoning_effort=high``). Too
+small a budget cuts generation off before the closing tag, so the sample
+does not parse and drops out of the score -- watch ``Parse rate``.
 
 
 random-prefill
@@ -824,44 +790,22 @@ Per-sample quality results
 
    {
      "run_fingerprint": "61709aae928fdba8",
-     "config": {
-       "dataset": "musique",
-       "num_samples": 20,
-       "max_output_length": 256,
-       "template_kwargs": {},
-       "output_path": "lmcache.json"
-     },
      "model": "meta-llama/Llama-3.1-8B-Instruct",
-     "summary": {
-       "num_samples": 20,
-       "num_parsed": 20,
-       "parse_rate": 1.0,
-       "f1_mean": 0.3144
-     },
+     "config": {"dataset": "musique", "num_samples": 20, "max_output_length": 256,
+                "template_kwargs": {}, "output_path": "a.json"},
+     "summary": {"num_samples": 20, "num_parsed": 20, "parse_rate": 1.0,
+                 "f1_mean": 0.3144},
      "per_sample": [
-       {
-         "sample_id": "2hop__481349_302087",
-         "f1": 0.6667,
-         "parsed": true,
-         "answer": "Bombardier Aerospace",
-         "ttft": 0.1624,
-         "num_output_tokens": 26
-       },
-       {
-         "sample_id": "2hop__697790_864352",
-         "f1": null,
-         "parsed": false,
-         "answer": "",
-         "ttft": 0.1701,
-         "num_output_tokens": 256
-       }
+       {"sample_id": "2hop__481349_302087", "f1": 0.6667, "parsed": true,
+        "answer": "Bombardier Aerospace", "ttft": 0.1624, "num_output_tokens": 26},
+       {"sample_id": "2hop__697790_864352", "f1": null, "parsed": false,
+        "answer": "", "ttft": 0.1701, "num_output_tokens": 256}
      ]
    }
 
-An unparsed sample's ``f1`` is ``null``, **not** ``0.0``. This is what lets a
-cross-run diff pair by ``sample_id`` and skip whatever either run failed to
-score, instead of averaging in a parsing failure as if the model had answered
-wrongly.
+An unparsed sample's ``f1`` is ``null``, **not** ``0.0`` -- so a cross-run
+diff can pair by ``sample_id`` and skip what either run failed to score,
+rather than averaging a parsing failure in as a wrong answer.
 
 
 Exit Codes
