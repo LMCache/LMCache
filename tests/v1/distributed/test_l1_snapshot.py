@@ -243,9 +243,7 @@ class TestStorageManagerL1Snapshot:
         gds = GdsL1Config(file_location="/unused", size_in_bytes=1 << 20)
         storage_manager = StorageManager(_storage_config(gds))
         key = _key(1)
-        layout = MemoryLayoutDesc(
-            shapes=[torch.Size([4096])], dtypes=[torch.uint8]
-        )
+        layout = MemoryLayoutDesc(shapes=[torch.Size([4096])], dtypes=[torch.uint8])
         storage_manager.reserve_write([key], layout, mode="new")
         storage_manager.finish_write([key])
 
