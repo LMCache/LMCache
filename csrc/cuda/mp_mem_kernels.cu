@@ -504,11 +504,29 @@ void execute_object_group_transfer(
       batch_steps.size() * 2);
 
   for (const auto& step : batch_steps) {
-    // Staged payload; also the kernel section's byte count -- a proxy that
-    // overstates kernel throughput when skip_prefix_n_blocks > 0.
+    // Exact per-section byte counts. Staging moves whole objects; the
+    // kernel may skip leading blocks (skip_prefix_n_blocks), so its bytes
+    // are derived from the launches instead of the staged payload.
     int64_t step_bytes = 0;
     for (const auto& copy : step.staging) {
       step_bytes += static_cast<int64_t>(copy.nbytes);
+    }
+    int64_t kernel_bytes = 0;
+    for (const auto& launch : step.launches) {
+      if (launch.group_idx < 0 ||
+          launch.group_idx >= static_cast<int>(kernel_group_specs.size())) {
+        continue;  // the launch loop below rejects such a plan via TORCH_CHECK
+      }
+      const PageBufferShapeDesc& desc =
+          kernel_group_specs[launch.group_idx].shape_desc;
+      const int64_t block_bytes = static_cast<int64_t>(desc.kv_size) * desc.nl *
+                                  desc.bs * desc.nh * desc.hs *
+                                  desc.element_size;
+      const int64_t moved_blocks = static_cast<int64_t>(launch.total_blocks) -
+                                   launch.skip_prefix_n_blocks;
+      if (moved_blocks > 0) {
+        kernel_bytes += block_bytes * moved_blocks;
+      }
     }
 
     // H2D stages CPU->GPU temp buffers before the kernel reads them; D2H stages
@@ -518,8 +536,6 @@ void execute_object_group_transfer(
       auto section = phase_timer.section(TransferPhase::STAGING, step_bytes);
       do_staging(step.staging);
     }
-    // An empty kernel section would record a near-zero-elapsed outlier.
-    const int64_t kernel_bytes = step.launches.empty() ? 0 : step_bytes;
     {
       auto section = phase_timer.section(TransferPhase::KERNEL, kernel_bytes);
       for (const auto& launch : step.launches) {

@@ -27,7 +27,6 @@ struct MemoryObj4 {
 // docs/design/v1/multiprocess/modules/ and lmcache_driven_transfer.py.
 // ---------------------------------------------------------------------------
 
-
 /**
  * Execute one object group's transfer plan on the current CUDA stream.
  *

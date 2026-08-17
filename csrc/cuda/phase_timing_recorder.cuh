@@ -30,7 +30,7 @@ struct PhaseTimingRecord {
   int phase;          // TransferPhase value
   int direction;      // TransferDirection value
   int device_index;   // CUDA device the section ran on
-  int64_t nbytes;     // staged payload bytes of the step
+  int64_t nbytes;     // bytes this section moved
 };
 
 // Collects the timed sections of one executor call and hands them to the
@@ -129,7 +129,8 @@ class PhaseTimingRecorder {
  * @return One tuple per finished section:
  *         (phase, direction, device_index, elapsed_ms, nbytes), with phase a
  *         TransferPhase value, direction a TransferDirection value, and
- *         nbytes the step's staged payload (shared by both phases).
+ *         nbytes the bytes that section moved (staged payload for
+ *         staging sections; skip-aware launch bytes for kernel sections).
  */
 std::vector<std::tuple<int, int, int, double, int64_t>>
 pop_completed_phase_timings();

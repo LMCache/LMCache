@@ -332,9 +332,11 @@ per-step histogram samples is not byte-weighted), and
 `rate(lmcache_mp_transfer_phase_busy_time_seconds_total[1m])` — busy
 seconds per wall-clock second — is each phase's time share.
 
-**Caveats:** `nbytes` is the step's staged payload for both phases; kernel
-launches with `skip_prefix_n_blocks > 0` move fewer bytes than were
-staged, so kernel throughput can be overstated.  A section's elapsed time
+**Caveats:** each section's `nbytes` is exact — staged payload for the
+staging phase, skip-aware launch bytes for the kernel phase — so the two
+phases' byte counters can legitimately differ, and the difference is the
+payload skipped by `skip_prefix_n_blocks` (e.g. sliding windows).  A
+section's elapsed time
 is stream-clocked from section start to end, so it includes any stream
 idle while the CPU enqueues the section's work — per-step serialization
 shows up inside the kernel section rather than between sections.
