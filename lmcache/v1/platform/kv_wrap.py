@@ -60,6 +60,23 @@ def wrap_kv_caches(kv_caches: dict[str, torch.Tensor]) -> KVCache:
             for i, (name, shape, dtype) in enumerate(kept_summary)
         ),
     )
+    # Wrapper factories assume one uniform geometry per batch; a mixed-rank
+    # batch previously blocked in the loop below with no exception (see #4608).
+    # List entries (e.g. Mamba state pairs) are left to the factories.
+    ranks: dict[int, list[str]] = {}
+    for name, tensor in kv_caches.items():
+        if isinstance(tensor, torch.Tensor):
+            ranks.setdefault(tensor.ndim, []).append(name)
+    if len(ranks) > 1:
+        detail = "; ".join(
+            f"rank {rank}: {len(names)} layer(s), e.g. {names[0]}"
+            for rank, names in sorted(ranks.items())
+        )
+        raise ValueError(
+            f"cannot wrap a KV cache batch with mixed tensor ranks: {detail}. "
+            "Registered layers must be normalized to one geometry first."
+        )
+
     logger.info("Wrapping %d KV cache tensors for IPC", len(kv_caches))
     # Per-iteration resource management: if wrapping the N-th tensor
     # raises, ``shm_unlink`` whatever earlier iterations already
