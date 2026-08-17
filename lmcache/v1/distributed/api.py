@@ -48,6 +48,7 @@ class L1BackendType(str, enum.Enum):
     DRAM = "dram"
     DEVDAX = "devdax"
     GDS = "gds"
+    DEVICE = "device"
 
 
 class TrimPolicy(enum.Enum):

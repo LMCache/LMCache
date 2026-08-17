@@ -33,6 +33,19 @@ class AdapterDescriptor:
     config: L2AdapterConfigBase
     """The adapter's configuration object."""
 
+    l1_tier: str = "cpu"
+    """Which L1 tier to reserve write buffers on for loads from this adapter.
+
+    - ``"cpu"`` (default): reserve CPU pinned-DRAM via ``reserve_write`` —
+      the standard path for all existing adapters (redis, s3, disk, ...).
+    - ``"device"``: reserve device-resident memory via
+      ``device_reserve_write`` — used by DMA-direct adapters (e.g. PHX) that
+      can read directly into device memory.
+
+    Defaults to ``"cpu"`` so all existing adapters keep their current
+    behaviour without any change.
+    """
+
     @property
     def type_name(self) -> str:
         """

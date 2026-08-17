@@ -186,6 +186,41 @@ class GdsL1Config:
 
 
 @dataclass
+class DeviceResidentL1Config:
+    """Configuration for the device-resident L1 tier.
+
+    When present on :class:`L1ManagerConfig`, the L1 tier gains the ability
+    to hold device-resident (e.g. GPU) memory objects directly — retrieve
+    serves via D2D instead of H2D. This is useful when an L2 adapter can DMA
+    directly into device memory (e.g. NVMe-to-GPU direct read).
+
+    Backend-agnostic: ``backend`` selects the concrete pool implementation.
+    This PR provides the config framework only; a follow-up PR adds the
+    ``"phx"`` backend implementation.
+
+    The device tier co-exists with the CPU pinned-DRAM tier (unlike GDS,
+    which is mutually exclusive): CPU objs go through the normal CPU slab,
+    device objs go through the device pool, and :meth:`free` routes by
+    ``obj.parent()``.
+    """
+
+    backend: str = ""
+    """Device pool backend name (e.g. ``"phx"``). Empty string means no
+    backend implemented yet — ``_init_device_pools`` will raise
+    ``NotImplementedError`` at construction time if set."""
+
+    device_ids: list[int] = field(default_factory=list)
+    """CUDA/HIP device ids that own device memory pools. One pool is
+    created per device id."""
+
+    buffer_size_mb: int = 2048
+    """Per-device pool size in MiB."""
+
+    use_direct_io: bool = True
+    """Open files with ``O_DIRECT`` (required for DMA fast path)."""
+
+
+@dataclass
 class L1ManagerConfig:
     """
     Special config for the L1 Object/Key manager
@@ -197,6 +232,11 @@ class L1ManagerConfig:
     gds_l1_config: "GdsL1Config | None" = None
     """ Optional GDS L1 tier. When set, the GDS slab is the L1 medium
     (mutually exclusive with the pinned-DRAM tier in ``memory_config``). """
+
+    device_resident_l1_config: "DeviceResidentL1Config | None" = None
+    """ Optional device-resident L1 tier. When set, the L1 tier can hold
+    device memory objects directly (retrieve via D2D). Co-exists with the
+    CPU pinned-DRAM tier. A follow-up PR adds the ``"phx"`` backend."""
 
     write_ttl_seconds: int = field(default=600)
     """ Time to live for each object's write lock. Default is 600s (10 minutes). """

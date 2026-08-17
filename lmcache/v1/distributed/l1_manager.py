@@ -23,6 +23,9 @@ from lmcache.v1.distributed.memory_manager import (
 from lmcache.v1.distributed.memory_manager.devdax_l1_memory_manager import (
     DevDaxL1MemoryManager,
 )
+from lmcache.v1.distributed.memory_manager.device_resident_l1_memory_manager import (
+    DeviceResidentL1MemoryManager,
+)
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
@@ -193,6 +196,9 @@ class L1Manager:
 
         # GDS, Device-DAX, and CPU L1 are mutually exclusive tiers. Each tier
         # owns its backing allocator instead of branching inside the CPU path.
+        # Device L1 (DeviceResidentL1MemoryManager) co-exists with the CPU tier: it
+        # holds its own device pools but delegates CPU-fallback allocation to
+        # the CPU L1MemoryManager internally.
         self._memory_manager: L1ManagerProtocol
         if config.gds_l1_config is not None:
             self._memory_manager = GDSL1MemoryManager(config.gds_l1_config)
@@ -200,6 +206,15 @@ class L1Manager:
         elif config.memory_config.devdax_path:
             self._memory_manager = DevDaxL1MemoryManager(config.memory_config)
             logger.info("L1Manager: Device-DAX L1 tier enabled; CPU-only L1 disabled")
+        elif config.device_resident_l1_config is not None:
+            self._memory_manager = DeviceResidentL1MemoryManager(
+                config.memory_config, config.device_resident_l1_config
+            )
+            logger.info(
+                "L1Manager: device-resident L1 tier enabled (backend=%s); "
+                "CPU pinned-DRAM L1 retained for CPU-fallback objects",
+                config.device_resident_l1_config.backend,
+            )
         else:
             self._memory_manager = L1MemoryManager(config.memory_config)
 
@@ -531,6 +546,106 @@ class L1Manager:
             )
         )
         return ret
+
+    @l1_mgr_synchronized
+    def device_reserve_write(
+        self,
+        keys: list[ObjectKey],
+        is_temporary: list[bool],
+        layout_desc: MemoryLayoutDesc,
+        kv_rank: int,
+    ) -> dict[ObjectKey, L1OperationResult]:
+        """Reserve write access with a device-resident MemoryObj.
+
+        Like :meth:`reserve_write`, but allocates the MemoryObj from the
+        device pool (via
+        :meth:`DeviceResidentL1MemoryManager.allocate_device`) instead of the CPU
+        slab. The resulting :class:`L1ObjectState` holds a device-resident
+        tensor, so retrieve serves via D2D instead of H2D.
+
+        Only available when :meth:`has_device_l1` returns ``True``. Callers
+        should check before use.
+
+        All-or-nothing: if the device pool is exhausted (after backpressure
+        timeout), all keys return ``L1Error.OUT_OF_MEMORY``. There is no
+        per-key fallback — the caller should abandon the batch and retry
+        later (or fall back to a CPU-L1 adapter).
+
+        Args:
+            keys: The list of object keys to reserve write access for.
+            is_temporary: Whether each key is temporary (read-once-then-free).
+            layout_desc: The memory layout description for the objects.
+            kv_rank: Used to route to the correct device.
+
+        Returns:
+            A dictionary mapping each object key to a tuple of
+            (L1Error, Optional[MemoryObj]).
+
+        Errors:
+            KEY_NOT_WRITABLE: The key already exists (always-new mode).
+            OUT_OF_MEMORY: Device pool exhausted after backpressure timeout.
+        """
+        assert isinstance(self._memory_manager, DeviceResidentL1MemoryManager), (
+            "device_reserve_write requires DeviceResidentL1MemoryManager; "
+            "check has_device_l1() before calling."
+        )
+        ret: dict[ObjectKey, L1OperationResult] = {}
+        successful_keys: list[ObjectKey] = []
+
+        # Filter out existing keys (always-new mode like reserve_write mode="new")
+        need_to_allocate: list[tuple[ObjectKey, bool]] = []
+        for key, is_temp in zip(keys, is_temporary, strict=False):
+            entry = self._objects.get(key, None)
+            if entry is not None:
+                ret[key] = (L1Error.KEY_NOT_WRITABLE, None)
+                continue
+            need_to_allocate.append((key, is_temp))
+
+        if len(need_to_allocate) == 0:
+            return ret
+
+        err, allocated_objs = self._memory_manager.allocate_device(
+            layout_desc, len(need_to_allocate), kv_rank
+        )
+
+        if err != L1Error.SUCCESS:
+            for key, _ in need_to_allocate:
+                ret[key] = (L1Error.OUT_OF_MEMORY, None)
+            # Free the memory if partial allocation succeeded
+            if allocated_objs:
+                self._memory_manager.free(allocated_objs)
+        else:
+            for (key, is_temp), mem_obj in zip(
+                need_to_allocate, allocated_objs, strict=False
+            ):
+                self._objects[key] = L1ObjectState(
+                    memory_obj=mem_obj,
+                    write_lock=TTLLock(self._write_ttl_seconds),
+                    read_lock=TTLLock(self._read_ttl_seconds),
+                    is_temporary=is_temp,
+                )
+                self._objects[key].write_lock.lock()
+                ret[key] = (L1Error.SUCCESS, mem_obj)
+                successful_keys.append(key)
+
+        for listener in self._registered_listeners:
+            listener.on_l1_keys_reserved_write(successful_keys)
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.L1_WRITE_RESERVED,
+                metadata={"keys": successful_keys},
+            )
+        )
+        return ret
+
+    def has_device_l1(self) -> bool:
+        """Whether this L1Manager has a device-resident tier.
+
+        Returns:
+            ``True`` if the backing memory manager is a
+            :class:`DeviceResidentL1MemoryManager`, ``False`` otherwise.
+        """
+        return isinstance(self._memory_manager, DeviceResidentL1MemoryManager)
 
     @l1_mgr_synchronized
     def finish_write(

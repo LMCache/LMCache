@@ -1014,7 +1014,7 @@ class PrefetchController(StorageControllerInterface):
         keys_to_reserve = merge_bitmaps(trimmed_plan.values(), num_keys).gather(
             request.keys
         )
-        reserved = self._reserve_load_buffers(request, keys_to_reserve)
+        reserved = self._reserve_load_buffers(request, keys_to_reserve, trimmed_plan)
         if len(reserved) < len(keys_to_reserve):
             self._finish_request(request)
             return
@@ -1035,6 +1035,7 @@ class PrefetchController(StorageControllerInterface):
         self,
         request: InFlightPrefetchRequest,
         keys_to_reserve: list[ObjectKey],
+        trimmed_plan: dict[int, Bitmap],
     ) -> set[ObjectKey]:
         """Reserve L1 write buffers for the keys to load from L2.
 
@@ -1046,6 +1047,12 @@ class PrefetchController(StorageControllerInterface):
                                           ^ L1 hit length               ^ L1+L2 hit
             |       -        |     -      |       -        |  loading   |     -      |
 
+        Reserves are routed by adapter L1 tier: adapters with
+        ``l1_tier == "device"`` get device-resident buffers via
+        :meth:`~lmcache.v1.distributed.l1_manager.L1Manager.device_reserve_write`;
+        all other adapters get CPU buffers via the existing ``reserve_write``
+        path. The two paths are fully isolated.
+
         Successful reservations are recorded on
         ``request.write_reserved_keys`` / ``request.write_reserved_objs``.
         Failures publish an ``L2_PREFETCH_FAILED`` event; the caller
@@ -1054,6 +1061,8 @@ class PrefetchController(StorageControllerInterface):
         Args:
             request: The in-flight request the buffers belong to.
             keys_to_reserve: Keys in the trimmed load plan, in prefix order.
+            trimmed_plan: Per-adapter bitmaps (used to determine which
+                adapter each key belongs to, for L1 tier routing).
 
         Returns:
             The subset of ``keys_to_reserve`` that now holds a write buffer.
@@ -1067,20 +1076,59 @@ class PrefetchController(StorageControllerInterface):
             )
         retention_map = dict(zip(keys_to_reserve, retentions, strict=True))
 
+        # Build a reverse map: key → adapter index, so we can route each key
+        # to its adapter's L1 tier without changing the reserve order.
+        key_to_adapter: dict[ObjectKey, int] = {}
+        for adapter_idx, plan_bitmap in trimmed_plan.items():
+            adapter_keys = plan_bitmap.gather(request.keys)
+            for k in adapter_keys:
+                key_to_adapter[k] = adapter_idx
+
+        # Determine whether device_reserve_write is available at all.
+        has_device_l1 = self._l1_manager.has_device_l1()
+
         # Batch reserve_write by object_group_id so each group uses its own
-        # tensor shapes.
+        # tensor shapes. Within a group, split by L1 tier (device vs cpu)
+        # so each sub-batch goes through the correct reserve path.
         write_results: dict[ObjectKey, tuple[L1Error, MemoryObj | None]] = {}
         by_group = sorted(keys_to_reserve, key=attrgetter("object_group_id"))
         for gid, group_iter in groupby(by_group, key=attrgetter("object_group_id")):
             group_keys = list(group_iter)
             gld = request.group_layout_descs[gid]
-            gr = self._l1_manager.reserve_write(
-                keys=group_keys,
-                is_temporary=[not retention_map[k] for k in group_keys],
-                layout_desc=gld,
-                mode="new",
-            )
-            write_results.update(gr)
+
+            # Split group keys by L1 tier
+            device_keys: list[ObjectKey] = []
+            cpu_keys: list[ObjectKey] = []
+            for k in group_keys:
+                k_adapter_idx = key_to_adapter.get(k)
+                if k_adapter_idx is None:
+                    cpu_keys.append(k)
+                    continue
+                desc = self._adapter_descriptors.get(k_adapter_idx)
+                if desc is not None and desc.l1_tier == "device" and has_device_l1:
+                    device_keys.append(k)
+                else:
+                    cpu_keys.append(k)
+
+            # Device path: device_reserve_write (kv_rank from first key)
+            if device_keys:
+                gr = self._l1_manager.device_reserve_write(
+                    keys=device_keys,
+                    is_temporary=[not retention_map[k] for k in device_keys],
+                    layout_desc=gld,
+                    kv_rank=device_keys[0].kv_rank,
+                )
+                write_results.update(gr)
+
+            # CPU path: existing reserve_write (unchanged)
+            if cpu_keys:
+                gr = self._l1_manager.reserve_write(
+                    keys=cpu_keys,
+                    is_temporary=[not retention_map[k] for k in cpu_keys],
+                    layout_desc=gld,
+                    mode="new",
+                )
+                write_results.update(gr)
 
         reserved: set[ObjectKey] = set()
         oom_keys: list[ObjectKey] = []
