@@ -16,20 +16,20 @@ name: Build XPU Artifacts
 # GitHub Release (not PyPI).
 on:
     workflow_call:
-    inputs:
-      xpu_image:
-        description: Immutable vLLM XPU runtime image reference.
-        required: true
-        type: string
-      dev_version:
-        description: Build a next-version .devN wheel for nightly publication.
-        required: false
-        default: false
-        type: boolean
-    outputs:
-      xpu_version:
-        description: Version assigned to the built XPU wheel.
-        value: ${{ jobs.build-xpu-artifacts.outputs.xpu_version }}
+      inputs:
+        xpu_image:
+          description: Immutable vLLM XPU runtime image reference.
+          required: true
+          type: string
+        dev_version:
+          description: Build a next-version .devN wheel for nightly publication.
+          required: false
+          default: false
+          type: boolean
+      outputs:
+        xpu_version:
+          description: Version assigned to the built XPU wheel.
+          value: ${{ jobs.build-xpu-artifacts.outputs.xpu_version }}
 
 env:
     LC_ALL: en_US.UTF-8
@@ -150,6 +150,14 @@ jobs:
                     set -euxo pipefail
                     WHEEL=$(ls /work/LMCache/dist/*.whl | head -n 1)
                     python3 -m pip install --no-deps "$WHEEL"
+                      python3 /work/LMCache/.github/scripts/assert_native_ops.py lmcache.xpu_ops
+                      python3 - <<"PY"
+                      import lmcache.xpu_ops as ops
+
+                      for name in ("TransferDirection", "EngineKVFormat", "multi_layer_kv_transfer"):
+                          assert hasattr(ops, name), f"lmcache.xpu_ops is missing {name}"
+                      print("LMCache XPU extension API surface OK")
+                      PY
                     python3 -c "import lmcache, torch; print(\"LMCache import OK\"); print(\"Torch:\", torch.__version__)"
                   '
 
