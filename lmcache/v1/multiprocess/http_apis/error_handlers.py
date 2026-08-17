@@ -19,9 +19,11 @@ from fastapi.responses import JSONResponse
 # First Party
 from lmcache.v1.multiprocess.cache_control.errors import (
     CacheControlError,
+    Conflict,
     InvalidRequest,
     NotFound,
     Unavailable,
+    Unsupported,
 )
 
 # Domain error type -> HTTP status. The only place the two vocabularies meet.
@@ -29,6 +31,8 @@ _STATUS_BY_ERROR: dict[type[CacheControlError], HTTPStatus] = {
     InvalidRequest: HTTPStatus.BAD_REQUEST,
     NotFound: HTTPStatus.NOT_FOUND,
     Unavailable: HTTPStatus.SERVICE_UNAVAILABLE,
+    Conflict: HTTPStatus.CONFLICT,
+    Unsupported: HTTPStatus.NOT_IMPLEMENTED,
 }
 
 

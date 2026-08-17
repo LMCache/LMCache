@@ -32,6 +32,9 @@ class L1Error(enum.Enum):
     OUT_OF_MEMORY = enum.auto()
     """ Not enough memory to complete the operation. """
 
+    UNSUPPORTED_BACKEND = enum.auto()
+    """ The operation is not supported by the object's L1 backend. """
+
 
 ErrorType = L1Error
 
@@ -60,5 +63,7 @@ def strerror(error: ErrorType) -> str:
             return "The specified key is locked and cannot perform the operation."
         elif error == L1Error.OUT_OF_MEMORY:
             return "Not enough memory to complete the operation."
+        elif error == L1Error.UNSUPPORTED_BACKEND:
+            return "The operation is not supported by the object's L1 backend."
 
     return "Unknown error."
