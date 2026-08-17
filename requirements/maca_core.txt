@@ -1,0 +1,11 @@
+# Vendor-specific runtime deps baked into install_requires by setup.py
+# when building for MetaX MACA (BUILD_WITH_MACA=1).
+#
+# torch/torchvision are NOT listed here: MACA-enabled torch is not on PyPI;
+# users install a MACA-enabled torch build themselves before compiling
+# lmcache from source, per the "LMCache on MACA" installation docs.
+#
+# No MACA-specific pure-Python runtime package (e.g. a cupy-rocm-* analogue)
+# has been confirmed yet -- leave empty until one is identified.
+
+mcpy
