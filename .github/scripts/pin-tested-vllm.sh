@@ -10,6 +10,8 @@
 # buildkite pipeline invokes it by path.
 #
 # Target branch controlled by PIN_VLLM_BRANCH (defaults below per-platform).
+# XPU pins are stored in verified_runtimes.json and record both the human-facing
+# image tag and the immutable image digest used for the smoke check.
 # Callers that run the script only on success should set
 #   PIN_VLLM_STATUS=tested.
 # Callers that record a failure MUST also set PIN_VLLM_REASON and
@@ -62,6 +64,16 @@ case "${CI_PLATFORM}" in
         ;;
 esac
 
+PIN_BACKEND="${PIN_BACKEND:-cuda}"
+case "${PIN_BACKEND}" in
+    cpu|cuda|xpu) ;;
+    *)
+        echo "[ERROR] unknown PIN_BACKEND '${PIN_BACKEND}';" \
+             "expected cpu, cuda, or xpu" >&2
+        exit 1
+        ;;
+esac
+
 # ── Pin status & reason ─────────────────────────────────────────────────
 # Default to "tested" so existing buildkite callers (which only invoke
 # this script on success) stay unchanged. Resolved before the version
@@ -77,16 +89,16 @@ OS_PLATFORM="${OS_PLATFORM:-}"
 # `|| true` keeps `set -e` from killing the script when vllm is absent:
 # a failure row is recorded from an aggregator runner that never installs
 # vllm, and losing that row would also lose the failure notification.
-if [[ -z "${VLLM_VERSION:-}" ]]; then
+if [[ -z "${VLLM_VERSION:-}" && "${PIN_BACKEND}" != "xpu" ]]; then
     VLLM_VERSION="$(python -c 'import vllm; print(vllm.__version__)' \
         2>/dev/null || true)"
 fi
-if [[ -z "${VLLM_VERSION}" ]]; then
-    if [[ "${PIN_VLLM_STATUS}" == "tested" ]]; then
+if [[ -z "${VLLM_VERSION:-}" ]]; then
+    if [[ "${PIN_VLLM_STATUS}" == "tested" && "${PIN_BACKEND}" != "xpu" ]]; then
         echo "[ERROR] could not read vllm.__version__ from the live env" >&2
         exit 1
     fi
-    echo "[WARN] no vllm version available; recording it as 'unknown'" >&2
+    echo "[INFO] no vLLM wheel version required; recording it as 'unknown'" >&2
     VLLM_VERSION="unknown"
 fi
 echo "Verified vLLM version: ${VLLM_VERSION}"
@@ -100,7 +112,8 @@ echo "Verified vLLM version: ${VLLM_VERSION}"
 # after the rolling nightly index has dropped the wheel.
 VLLM_SHORT_SHA="${VLLM_VERSION##*+g}"
 if [[ "${VLLM_SHORT_SHA}" == "${VLLM_VERSION}" \
-        || ! "${VLLM_SHORT_SHA}" =~ ^[0-9a-f]+$ ]]; then
+    || ! "${VLLM_SHORT_SHA}" =~ ^[0-9a-f]+$ \
+    || "${PIN_BACKEND}" == "xpu" ]]; then
     VLLM_SHORT_SHA=""
 fi
 
@@ -133,9 +146,29 @@ if [[ -n "${VLLM_FULL_SHA}" ]]; then
     echo "Archive index:     ${VLLM_ARCHIVE_INDEX}"
 else
     VLLM_ARCHIVE_INDEX=""
-    echo "[WARN] could not resolve full SHA for short SHA" \
-         "'${VLLM_SHORT_SHA:-<none>}'; archive_index_url will be empty" \
-         "and consumers will fall back to live API lookup" >&2
+    if [[ "${PIN_BACKEND}" != "xpu" ]]; then
+        echo "[WARN] could not resolve full SHA for short SHA" \
+             "'${VLLM_SHORT_SHA:-<none>}'; archive_index_url will be empty" \
+             "and consumers will fall back to live API lookup" >&2
+    fi
+fi
+
+VLLM_IMAGE_TAG="${VLLM_IMAGE_TAG:-${XPU_IMAGE_TAG:-}}"
+VLLM_IMAGE_REF="${VLLM_IMAGE_REF:-${XPU_IMAGE_REF:-}}"
+VLLM_IMAGE_DIGEST="${VLLM_IMAGE_DIGEST:-${XPU_IMAGE_DIGEST:-}}"
+LMCACHE_VERSION="${LMCACHE_VERSION:-}"
+
+if [[ "${PIN_BACKEND}" == "xpu" && "${PIN_VLLM_STATUS}" == "tested" ]]; then
+    if [[ -z "${VLLM_IMAGE_TAG}" && "${VLLM_IMAGE_REF}" == *:* && "${VLLM_IMAGE_REF}" != *@* ]]; then
+        VLLM_IMAGE_TAG="${VLLM_IMAGE_REF}"
+    fi
+    if [[ -z "${VLLM_IMAGE_REF}" ]]; then
+        VLLM_IMAGE_REF="${VLLM_IMAGE_TAG}"
+    fi
+    if [[ -z "${VLLM_IMAGE_TAG}" || -z "${VLLM_IMAGE_REF}" || -z "${VLLM_IMAGE_DIGEST}" ]]; then
+        echo "[ERROR] XPU pins require an image tag, image reference, and immutable digest" >&2
+        exit 1
+    fi
 fi
 
 CI_REPO="LMCache/LMCache"
@@ -172,59 +205,118 @@ elif ! git clone --depth=1 --branch "${CI_BRANCH}" "${CI_REPO_URL}" \
 fi
 
 # ── Update files ────────────────────────────────────────────────────────
-HISTORY_FILE="${WORK_DIR}/tested_vllm_versions.csv"
-# Each OS resolves its own nightly, so give each one its own pointer file
-# instead of letting the last writer win. Buildkite keeps the plain name.
-if [[ -n "${OS_PLATFORM}" ]]; then
-    LATEST_FILE="${WORK_DIR}/latest_tested_vllm_${OS_PLATFORM}.txt"
-else
-    LATEST_FILE="${WORK_DIR}/latest_tested_vllm.txt"
+if [[ "${PIN_BACKEND}" == "xpu" ]]; then
+    STATE_FILE="${WORK_DIR}/verified_runtimes.json"
+    TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+    BUILD_NUMBER="${BUILD_NUMBER:-${GITHUB_RUN_ID:-${BUILDKITE_BUILD_NUMBER:-}}}"
+    BUILD_URL="${BUILD_URL:-}"
+    if [[ -z "${BUILD_URL}" && -n "${GITHUB_RUN_ID:-}" ]]; then
+        BUILD_URL="${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-}/actions/runs/${GITHUB_RUN_ID}"
+    fi
+    BUILD_URL="${BUILD_URL:-${BUILDKITE_BUILD_URL:-}}"
+    COMMIT_SHA="${COMMIT_SHA:-${GITHUB_SHA:-${BUILDKITE_COMMIT:-}}}"
+
+    TIMESTAMP="${TIMESTAMP}" \
+    CI_PLATFORM="${CI_PLATFORM}" \
+    PIN_VLLM_STATUS="${PIN_VLLM_STATUS}" \
+    PIN_VLLM_REASON="${PIN_VLLM_REASON}" \
+    VLLM_IMAGE_TAG="${VLLM_IMAGE_TAG}" \
+    VLLM_IMAGE_REF="${VLLM_IMAGE_REF}" \
+    VLLM_IMAGE_DIGEST="${VLLM_IMAGE_DIGEST}" \
+    LMCACHE_VERSION="${LMCACHE_VERSION}" \
+    BUILD_NUMBER="${BUILD_NUMBER}" \
+    BUILD_URL="${BUILD_URL}" \
+    COMMIT_SHA="${COMMIT_SHA}" \
+    python - "${STATE_FILE}" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    state = json.loads(path.read_text())
+except FileNotFoundError:
+    state = {"schema_version": 1, "runtimes": {}}
+
+record = {
+    "backend": "xpu",
+    "runtime_id": "linux-intel-xpu",
+    "status": os.environ["PIN_VLLM_STATUS"],
+    "reason": os.environ["PIN_VLLM_REASON"],
+    "validated_at": os.environ["TIMESTAMP"],
+    "validator": os.environ["CI_PLATFORM"],
+    "image_tag": os.environ["VLLM_IMAGE_TAG"],
+    "image_ref": os.environ["VLLM_IMAGE_REF"],
+    "image_digest": os.environ["VLLM_IMAGE_DIGEST"],
+    "lmcache_version": os.environ["LMCACHE_VERSION"],
+    "build_number": os.environ["BUILD_NUMBER"],
+    "build_url": os.environ["BUILD_URL"],
+    "commit": os.environ["COMMIT_SHA"],
+}
+
+if record["status"] == "tested":
+    state.setdefault("runtimes", {}).setdefault("xpu", {})["linux-intel-xpu"] = record
+
+path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n")
+PY
 fi
 
-TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+if [[ "${PIN_BACKEND}" != "xpu" ]]; then
+    HISTORY_FILE="${WORK_DIR}/tested_vllm_versions.csv"
+    # Each OS resolves its own nightly, so give each one its own pointer file
+    # instead of letting the last writer win. Buildkite keeps the plain name.
+    if [[ -n "${OS_PLATFORM}" ]]; then
+        LATEST_FILE="${WORK_DIR}/latest_tested_vllm_${OS_PLATFORM}.txt"
+    else
+        LATEST_FILE="${WORK_DIR}/latest_tested_vllm.txt"
+    fi
 
-# ── Resolve CI metadata (build url / number / commit) per platform ──────
-case "${CI_PLATFORM}" in
-    buildkite)
-        BUILD_URL="${BUILD_URL:-${BUILDKITE_BUILD_URL:-}}"
-        BUILD_NUMBER="${BUILD_NUMBER:-${BUILDKITE_BUILD_NUMBER:-}}"
-        COMMIT_SHA="${COMMIT_SHA:-${BUILDKITE_COMMIT:-}}"
-        ;;
-    github_actions)
-        BUILD_NUMBER="${BUILD_NUMBER:-${GITHUB_RUN_ID:-}}"
-        if [[ -n "${GITHUB_RUN_ID:-}" ]]; then
-            BUILD_URL="${BUILD_URL:-${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-}/actions/runs/${GITHUB_RUN_ID}}"
-        else
-            BUILD_URL="${BUILD_URL:-}"
-        fi
-        COMMIT_SHA="${COMMIT_SHA:-${GITHUB_SHA:-}}"
-        ;;
-esac
+    TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-# Final safety net: guarantee these are always defined regardless of the
-# CI_PLATFORM branch taken above, so the `set -u` heredoc below never trips
-# on an unbound variable.
-BUILD_URL="${BUILD_URL:-}"
-BUILD_NUMBER="${BUILD_NUMBER:-}"
-COMMIT_SHA="${COMMIT_SHA:-}"
+    # ── Resolve CI metadata (build url / number / commit) per platform ──────
+    case "${CI_PLATFORM}" in
+        buildkite)
+            BUILD_URL="${BUILD_URL:-${BUILDKITE_BUILD_URL:-}}"
+            BUILD_NUMBER="${BUILD_NUMBER:-${BUILDKITE_BUILD_NUMBER:-}}"
+            COMMIT_SHA="${COMMIT_SHA:-${BUILDKITE_COMMIT:-}}"
+            ;;
+        github_actions)
+            BUILD_NUMBER="${BUILD_NUMBER:-${GITHUB_RUN_ID:-}}"
+            if [[ -n "${GITHUB_RUN_ID:-}" ]]; then
+                BUILD_URL="${BUILD_URL:-${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-}/actions/runs/${GITHUB_RUN_ID}}"
+            else
+                BUILD_URL="${BUILD_URL:-}"
+            fi
+            COMMIT_SHA="${COMMIT_SHA:-${GITHUB_SHA:-}}"
+            ;;
+    esac
 
-# Append-only history (JSON Lines). Built via python so quoting is safe.
-# Use a quoted heredoc (<<'PY') to disable Bash expansion inside the script,
-# and pass variables via the environment to avoid syntax errors from special
-# characters in values like BUILD_URL.
-TIMESTAMP="${TIMESTAMP}" \
-VLLM_VERSION="${VLLM_VERSION}" \
-VLLM_SHORT_SHA="${VLLM_SHORT_SHA}" \
-VLLM_FULL_SHA="${VLLM_FULL_SHA}" \
-VLLM_ARCHIVE_INDEX="${VLLM_ARCHIVE_INDEX}" \
-BUILD_NUMBER="${BUILD_NUMBER}" \
-BUILD_URL="${BUILD_URL}" \
-COMMIT_SHA="${COMMIT_SHA}" \
-PIN_VLLM_STATUS="${PIN_VLLM_STATUS}" \
-PIN_VLLM_REASON="${PIN_VLLM_REASON}" \
-OS_PLATFORM="${OS_PLATFORM}" \
-CI_PLATFORM="${CI_PLATFORM}" \
-python - "$HISTORY_FILE" <<'PY'
+    # Final safety net: guarantee these are always defined regardless of the
+    # CI_PLATFORM branch taken above, so the `set -u` heredoc below never trips
+    # on an unbound variable.
+    BUILD_URL="${BUILD_URL:-}"
+    BUILD_NUMBER="${BUILD_NUMBER:-}"
+    COMMIT_SHA="${COMMIT_SHA:-}"
+
+    # Append-only history (JSON Lines). Built via python so quoting is safe.
+    # Use a quoted heredoc (<<'PY') to disable Bash expansion inside the script,
+    # and pass variables via the environment to avoid syntax errors from special
+    # characters in values like BUILD_URL.
+    TIMESTAMP="${TIMESTAMP}" \
+    VLLM_VERSION="${VLLM_VERSION}" \
+    VLLM_SHORT_SHA="${VLLM_SHORT_SHA}" \
+    VLLM_FULL_SHA="${VLLM_FULL_SHA}" \
+    VLLM_ARCHIVE_INDEX="${VLLM_ARCHIVE_INDEX}" \
+    BUILD_NUMBER="${BUILD_NUMBER}" \
+    BUILD_URL="${BUILD_URL}" \
+    COMMIT_SHA="${COMMIT_SHA}" \
+    PIN_VLLM_STATUS="${PIN_VLLM_STATUS}" \
+    PIN_VLLM_REASON="${PIN_VLLM_REASON}" \
+    OS_PLATFORM="${OS_PLATFORM}" \
+    CI_PLATFORM="${CI_PLATFORM}" \
+    python - "$HISTORY_FILE" <<'PY'
 import json, os, sys
 path = sys.argv[1]
 record = {
@@ -245,22 +337,29 @@ with open(path, "a", encoding="utf-8") as f:
     f.write(json.dumps(record) + "\n")
 PY
 
-# Latest pointer — only overwritten when the verification actually passed.
-# Consumers that just `head -n1` keep working; trailing key=value lines
-# let new consumers skip the live GitHub API lookup entirely.
-if [[ "${PIN_VLLM_STATUS}" == "tested" ]]; then
-    {
-        printf '%s\n' "${VLLM_VERSION}"
-        printf 'short_sha=%s\n' "${VLLM_SHORT_SHA}"
-        printf 'full_sha=%s\n' "${VLLM_FULL_SHA}"
-        printf 'archive_index_url=%s\n' "${VLLM_ARCHIVE_INDEX}"
-    } > "${LATEST_FILE}"
+    # Latest pointer — only overwritten when the verification actually passed.
+    # Consumers that just `head -n1` keep working; trailing key=value lines
+    # let new consumers skip the live GitHub API lookup entirely.
+    if [[ "${PIN_VLLM_STATUS}" == "tested" ]]; then
+        {
+            printf '%s\n' "${VLLM_VERSION}"
+            printf 'short_sha=%s\n' "${VLLM_SHORT_SHA}"
+            printf 'full_sha=%s\n' "${VLLM_FULL_SHA}"
+            printf 'archive_index_url=%s\n' "${VLLM_ARCHIVE_INDEX}"
+        } > "${LATEST_FILE}"
+    fi
 fi
 
 # ── Commit + push ───────────────────────────────────────────────────────
 cd "${WORK_DIR}"
 
 if [[ "${PIN_VLLM_DRY_RUN}" == "1" ]]; then
+    if [[ "${PIN_BACKEND}" == "xpu" ]]; then
+        echo "--- [DRY-RUN] would write $(basename "${STATE_FILE}"):"
+        cat "${STATE_FILE}"
+        echo "--- [DRY-RUN] nothing pushed to ${CI_REPO} ${CI_BRANCH}"
+        exit 0
+    fi
     echo "--- [DRY-RUN] would append to $(basename "${HISTORY_FILE}"):"
     tail -n1 "${HISTORY_FILE}"
     if [[ -f "${LATEST_FILE}" ]]; then
@@ -279,6 +378,9 @@ if git diff --cached --quiet 2>/dev/null; then
 fi
 
 COMMIT_MSG="Pin vLLM nightly (${PIN_VLLM_STATUS})"
+if [[ "${PIN_BACKEND}" == "xpu" ]]; then
+    COMMIT_MSG="Pin XPU runtime (${PIN_VLLM_STATUS}): ${VLLM_IMAGE_TAG}"
+fi
 if [[ "${PIN_VLLM_STATUS}" != "tested" ]]; then
     COMMIT_MSG="${COMMIT_MSG}: ${VLLM_VERSION} [${OS_PLATFORM:-unknown}]"
 else

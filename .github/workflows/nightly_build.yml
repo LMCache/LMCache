@@ -139,9 +139,30 @@ jobs:
       dev_version: true
     secrets: inherit
 
+  pin-nightly-xpu:
+    name: Pin smoke-verified XPU runtime
+    needs: [resolve-xpu-nightly, nightly-xpu-wheel]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+
+      - name: Record XPU runtime pin
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CI_PLATFORM: github_actions
+          PIN_BACKEND: xpu
+          VLLM_IMAGE_TAG: vllm/vllm-openai-xpu:nightly
+          VLLM_IMAGE_REF: ${{ needs.resolve-xpu-nightly.outputs.image }}
+          VLLM_IMAGE_DIGEST: ${{ needs.resolve-xpu-nightly.outputs.digest }}
+          LMCACHE_VERSION: ${{ needs.nightly-xpu-wheel.outputs.xpu_version }}
+        run: bash .github/scripts/pin-tested-vllm.sh
+
   publish-nightly-xpu:
     name: Publish XPU nightly wheel
-    needs: [resolve-xpu-nightly, nightly-xpu-wheel]
+    needs: [resolve-xpu-nightly, nightly-xpu-wheel, pin-nightly-xpu]
     runs-on: ubuntu-latest
     permissions:
       contents: write
