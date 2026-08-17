@@ -150,12 +150,6 @@ def _resolve_device_spec(device_type: str) -> DeviceSpec:
                 f"{DEVICE_BACKEND_ENV_VAR}=<backend_name> to choose one explicitly."
             )
 
-        compatible_candidates = [
-            spec for spec in candidates if spec.is_runtime_compatible()
-        ]
-        if len(compatible_candidates) == 1:
-            return compatible_candidates[0]
-
         default_candidates = [
             spec for spec in candidates if spec.backend_name == device_type
         ]
