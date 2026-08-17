@@ -11,6 +11,8 @@ import pytest
 # First Party
 from lmcache.v1.platform import _device_detect
 from lmcache.v1.platform.base.device_spec import DeviceSpec
+from lmcache.v1.platform.cuda import CudaDeviceSpec
+from lmcache.v1.platform.rocm import RocmDeviceSpec
 
 
 class _ExternalDeviceSpec(DeviceSpec):
@@ -369,3 +371,33 @@ def test_external_device_participates_in_runtime_detection(
     assert torch_module is external_torch_module
     assert device_type == "external"
     assert backend_name == "external"
+
+
+@pytest.mark.parametrize(
+    ("hip_version", "expected_spec_type", "expected_backend_name"),
+    [
+        (None, CudaDeviceSpec, "cuda"),
+        ("7.2", RocmDeviceSpec, "rocm"),
+    ],
+)
+def test_cuda_device_type_auto_selects_runtime_backend(
+    monkeypatch: pytest.MonkeyPatch,
+    hip_version: str | None,
+    expected_spec_type: type[DeviceSpec],
+    expected_backend_name: str,
+) -> None:
+    """CUDA and ROCm builds select one backend for torch's cuda device type."""
+    _set_entry_points(monkeypatch, [])
+
+    # Third Party
+    import torch
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.version, "hip", hip_version)
+
+    torch_module, device_type, backend_name = _device_detect._detect_device()
+
+    assert torch_module is torch.cuda
+    assert device_type == "cuda"
+    assert backend_name == expected_backend_name
+    assert isinstance(_device_detect.current_device_spec(), expected_spec_type)
