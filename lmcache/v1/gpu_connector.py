@@ -4,6 +4,7 @@ from typing import List, Optional, Tuple, Union
 import abc
 import logging
 import os
+import time
 
 # Third Party
 import torch
@@ -21,6 +22,13 @@ if torch.cuda.is_available():
     import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
+
+# B2 step 4 probe (LMCACHE_BLEND_PARTS=1, default OFF). Splits the part of
+# `send_ms` that is neither the chunk loop nor the copy mechanism -- i.e. the
+# rest of `batched_to_gpu_multi`'s per-layer body, which the caller's
+# `mem_obj_consumer.send()` also runs. Read ONCE at import, never per access
+# (same pattern as _CACHE_MEMOBJ_VIEW in memory_management.py).
+_BLEND_PARTS = os.environ.get("LMCACHE_BLEND_PARTS", "0") == "1"
 
 
 def _rotate_half(x: torch.Tensor) -> torch.Tensor:
@@ -688,6 +696,47 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
             old_positions_full = torch.zeros(
                 (num_all_tokens,), dtype=torch.int64, device=self.kvcaches[0].device
             )
+
+        # B2 (LMCACHE_FUSED_CHUNK_COPY=1, default OFF): collapse the per-chunk
+        # memobj->buffer copy loop below. MEASURED (job 15098377): that loop is
+        # 87.7% of the fetch phase's CPU time and 75% of the whole fetch -- one
+        # `copy_()` per chunk per layer, ~81 chunks x 48 layers = 3,888 copies at
+        # a dead-constant ~27 us each. Both sides are GPU-resident (local_gpu:
+        # True), so that 27 us is launch + Python object overhead, NOT bandwidth.
+        # Two wins:
+        #  (A) the (s, e) destination slices are loop-INVARIANT across layers,
+        #      so build the views once per buffer -> 2*81 view constructions
+        #      instead of 3,888 (each `t[:, s:e]` allocates a Python object +
+        #      TensorImpl).
+        #  (B) `torch._foreach_copy_` does ONE multi-tensor apply for the whole
+        #      list (~320 tensors/launch) instead of one launch per chunk.
+        # Together ~3,888 launches -> ~48. Semantics are identical to the
+        # per-pair `copy_`: same pairwise elementwise copy, same load_stream.
+        #
+        # CRITICAL (job 15102050 FAIL + 15110877 KeyError):
+        # (1) Ping-pong swaps which buffer is "load" -- must have views for BOTH.
+        # (2) MemoryObj.tensor is a @property that returns a NEW view every
+        #     access (raw_data[...].view(...)), so id(obj.tensor) is unstable.
+        #     Key by id(MemoryObj), not id(tensor). Job 15110877 crashed with
+        #     KeyError on the first warm blend after the tensor-id fix.
+        _fused_copy = os.environ.get("LMCACHE_FUSED_CHUNK_COPY", "0") == "1"
+        _dst_views_by_buf = None
+        if _fused_copy:
+            assert load_gpu_buffer_obj.tensor is not None
+            assert compute_gpu_buffer_obj.tensor is not None
+            _slices = [
+                (start - buf_offset, end - buf_offset)
+                for start, end in zip(starts, ends, strict=False)
+            ]
+            _dst_views_by_buf = {
+                id(load_gpu_buffer_obj): [
+                    load_gpu_buffer_obj.tensor[:, s:e] for s, e in _slices
+                ],
+                id(compute_gpu_buffer_obj): [
+                    compute_gpu_buffer_obj.tensor[:, s:e] for s, e in _slices
+                ],
+            }
+
         for layer_id in range(self.num_layers + 2):
             store_events = None
             rope_events = None
@@ -793,22 +842,46 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
                         load_start = torch.cuda.Event(enable_timing=True)
                         load_end = torch.cuda.Event(enable_timing=True)
                         load_start.record(self.load_stream)
-                    for start, end, memory_obj in zip(
-                        starts, ends, memory_objs_layer, strict=False
-                    ):
-                        c += 1
-                        s = start - buf_offset
-                        e = end - buf_offset
-                        if memory_obj is None:
-                            evicted_ranges.append((s, e))
-                            continue
-                        assert memory_obj.metadata.fmt == MemoryFormat.KV_2TD
-                        assert load_gpu_buffer_obj.tensor is not None
+                    if _fused_copy:
+                        _dst_views = _dst_views_by_buf[id(load_gpu_buffer_obj)]
+                        _dsts = []
+                        _srcs = []
+                        for start, end, memory_obj in zip(
+                            starts, ends, memory_objs_layer, strict=False
+                        ):
+                            s_ = start - buf_offset
+                            e_ = end - buf_offset
+                            if memory_obj is None:
+                                evicted_ranges.append((s_, e_))
+                                c += 1
+                                continue
+                            assert memory_obj.metadata.fmt == MemoryFormat.KV_2TD
+                            _dsts.append(_dst_views[c])
+                            _srcs.append(memory_obj.tensor)
+                            if self.cache_positions and layer_id == 0:
+                                old_positions_full[s_:e_] = (
+                                    memory_obj.metadata.cached_positions
+                                )
+                            c += 1
+                        if _dsts:
+                            torch._foreach_copy_(_dsts, _srcs, non_blocking=True)
+                    else:
+                        for start, end, memory_obj in zip(
+                            starts, ends, memory_objs_layer, strict=False
+                        ):
+                            c += 1
+                            s = start - buf_offset
+                            e = end - buf_offset
+                            if memory_obj is None:
+                                evicted_ranges.append((s, e))
+                                continue
+                            assert memory_obj.metadata.fmt == MemoryFormat.KV_2TD
+                            assert load_gpu_buffer_obj.tensor is not None
 
-                        load_gpu_buffer_obj.tensor[:, s:e].copy_(memory_obj.tensor, non_blocking=True)
+                            load_gpu_buffer_obj.tensor[:, s:e].copy_(memory_obj.tensor, non_blocking=True)
 
-                        if self.cache_positions and layer_id == 0:
-                            old_positions_full[s:e] = memory_obj.metadata.cached_positions
+                            if self.cache_positions and layer_id == 0:
+                                old_positions_full[s:e] = memory_obj.metadata.cached_positions
                     if timing:
                         load_end.record(self.load_stream)
                         load_events = (load_start, load_end)
@@ -1011,6 +1084,167 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
             old_positions_full = torch.zeros(
                 (num_all_tokens,), dtype=torch.int64, device=self.kvcaches[0].device
             )
+
+        # B2 (LMCACHE_FUSED_CHUNK_COPY=1, default OFF): collapse the per-chunk
+        # memobj->buffer copy loop below. MEASURED (job 15098377): that loop is
+        # 87.7% of the fetch phase's CPU time and 75% of the whole fetch -- one
+        # `copy_()` per chunk per layer, ~81 chunks x 48 layers = 3,888 copies at
+        # a dead-constant ~27 us each. Both sides are GPU-resident (local_gpu:
+        # True), so that 27 us is launch + Python object overhead, NOT bandwidth.
+        # Two wins:
+        #  (A) the (s, e) destination slices are loop-INVARIANT across layers,
+        #      so build the views once per buffer -> 2*81 view constructions
+        #      instead of 3,888 (each `t[:, s:e]` allocates a Python object +
+        #      TensorImpl).
+        #  (B) `torch._foreach_copy_` does ONE multi-tensor apply for the whole
+        #      list (~320 tensors/launch) instead of one launch per chunk.
+        # Together ~3,888 launches -> ~48. Semantics are identical to the
+        # per-pair `copy_`: same pairwise elementwise copy, same load_stream.
+        #
+        # CRITICAL (job 15102050 FAIL + 15110877 KeyError):
+        # (1) Ping-pong swaps which buffer is "load" -- views for BOTH.
+        # (2) MemoryObj.tensor is a @property returning a NEW view each access,
+        #     so id(obj.tensor) is unstable -- key by id(MemoryObj).
+        _fused_copy = os.environ.get("LMCACHE_FUSED_CHUNK_COPY", "0") == "1"
+        # B2 step 3 (LMCACHE_GATHER_CHUNK_COPY=1, default OFF; requires FUSED).
+        # MEASURED (job 15150843): torch.cat issues ONE batched multi-input copy
+        # kernel for this shape, byte-exact vs the per-chunk loop:
+        #     foreach (today)        host 265.6us  device 512.0us   6.0% of peak
+        #     cat -> sliced out      host  35.6us  device 157.7us  19.4% of peak
+        #     cat -> contiguous out  host  32.4us  device  79.9us  38.4% of peak
+        # Production's destination is a slice of the staging buffer, so the
+        # middle row applies: ~3.2x device, ~7.5x host. Why this matters more
+        # than it looks: send_ms is HOST-bound in production (33.65 ms), and the
+        # per-chunk host work collapses into one call.
+        #
+        # WHY NOT A CUSTOM CUDA GATHER: it would need nvcc in the container, an
+        # extension build and a new .so to bind-mount. torch.cat already is the
+        # batched gather, so this is a pure-torch change (job 15150843 was run
+        # specifically to check that before writing a kernel).
+        # WHY NOT MULTI-STREAM: refuted, job 15150732 -- best 1.22x at K=2 and
+        # 0.41x at K=65; the per-transfer device cost is per-OPERATION, not
+        # queue serialisation.
+        #
+        # v1 (one dense region) and v2 (per contiguous run) BOTH failed to
+        # engage in production -- jobs 15151505 and 15154448 logged
+        # "active=0 ... runs=65 over 65 chunks". That is STRUCTURAL:
+        # `_coalesced_layout` interleaves cached chunks with gaps for the anchor
+        # tokens that get recomputed. Measured: 65 chunks x ~179 tok separated by
+        # ~16-tok gaps (anchors 1032 / 64 gaps = 16.1). THE ANCHORS ARE THE GAPS,
+        # so no two chunks are ever adjacent and no gather-into-dense primitive
+        # can apply. The operation has to SCATTER.
+        #
+        # v3, measured on the real interleaved layout (job 15154534):
+        #     foreach per-chunk (today)   host 272.0us  device 507.4us
+        #     cat + index_copy_           host  42.6us  device 167.9us   3.02x
+        #     [bound] one big copy        host  10.7us  device  52.2us   9.72x
+        # Two ops per layer instead of n_chunks: one batched multi-input copy
+        # into a dense temp, then one scatter to the true row offsets. Byte-exact
+        # vs the per-chunk loop with the anchor gaps left untouched (verified in
+        # that job -- a scatter that wrote gap rows would corrupt recompute).
+        # The 167.9 vs 52.2 difference is the extra temp round-trip; removing it
+        # needs a real fused scatter kernel, which is the next lever, not this one.
+        #
+        # `_scatter_idx` is loop-invariant (identical every layer) so it is built
+        # ONCE here, not 48 times.
+        # PRECONDITIONS (else fall back to the fused loop):
+        #  (a) enough chunks for two ops to beat n_chunks ops;
+        #  (b) no evicted chunk this layer -- _srcs would then not line up with
+        #      the precomputed index;
+        #  (c) len(_srcs) == len(chunk_slices).
+        _gather_copy = _fused_copy and (
+            os.environ.get("LMCACHE_GATHER_CHUNK_COPY", "0") == "1"
+        )
+        _scatter_idx = None
+        _scatter_tmp = None
+        _gather_reason = ""
+        if _gather_copy:
+            _n_cached = sum(e - s for (s, e) in chunk_slices)
+            if len(chunk_slices) < 4:
+                _gather_copy = False
+                _gather_reason = f" (rejected: only {len(chunk_slices)} chunks)"
+            else:
+                try:
+                    _scatter_idx = torch.tensor(
+                        [r for (s, e) in chunk_slices for r in range(s, e)],
+                        dtype=torch.long,
+                        device=self.device,
+                    )
+                    _scatter_tmp = torch.empty(
+                        (2, _n_cached, self.hidden_dim_size),
+                        dtype=self.dtype,
+                        device=self.device,
+                    )
+                except (RuntimeError, torch.cuda.OutOfMemoryError) as exc:
+                    # the temp is one extra payload-sized buffer; never let it
+                    # take down a fetch that would otherwise succeed
+                    _gather_copy = False
+                    _scatter_idx = _scatter_tmp = None
+                    _gather_reason = f" (rejected: temp alloc failed: {type(exc).__name__})"
+        if os.environ.get("LMCACHE_GATHER_CHUNK_COPY", "0") == "1":
+            # Observability, once per fetch. Without this a null timing result is
+            # ambiguous between "never engaged" and "engaged, no win" -- which is
+            # exactly what happened to v1 and v2, whose equality gates passed only
+            # because the code never ran.
+            logger.info(
+                "[gather] active=%d mode=scatter fused=%d chunks=%d%s",
+                int(_gather_copy),
+                int(_fused_copy),
+                len(chunk_slices),
+                _gather_reason
+                if _gather_reason
+                else ("" if _fused_copy else " (rejected: requires FUSED=1)"),
+            )
+        _gather_fallback_layers = 0
+        # Step 4 instrumentation: measure the two terms of send_ms DIRECTLY
+        # instead of solving one equation with two unknowns. Previously the
+        # per-chunk cost was reported as `send_ms - (benchmark mechanism cost)`,
+        # i.e. a residual under an ASSUMPTION that the idle-GPU benchmark's
+        # 42.6us/layer transfers to production. It may not: production has cost
+        # 2.6-8x the benchmark for the same operation elsewhere in this study.
+        # Timed ONCE PER LAYER (4 perf_counter calls/layer, ~192/fetch) -- NOT
+        # per chunk, which would be 3,120 timer calls and would perturb the very
+        # thing being measured (this project has 5 prior instances of that).
+        # Gated on the same LMCACHE_FETCH_CPU_TIMING as send_ms, and applied to
+        # BOTH the scatter and foreach paths so the A/B stays symmetric.
+        _gt_timing = os.environ.get("LMCACHE_FETCH_CPU_TIMING", "0") == "1"
+        _gt_loop_us = 0.0
+        _gt_mech_us = 0.0
+        # Step 4 probe (LMCACHE_BLEND_PARTS=1, default OFF): `loop` + `mech`
+        # above account for only ~4.4 of the ~17.2 ms `send_ms`. The other
+        # ~12.5 ms is the REST of this generator's per-layer body, which the
+        # caller resumes inside the same `mem_obj_consumer.send()` call it
+        # charges to send_ms: the second hop (`single_layer_kv_transfer`), the
+        # per-layer device barrier, and RoPE + gap zeroing. Instrument it
+        # rather than keep reporting it as a subtraction residual (rule 10).
+        #
+        # ATTRIBUTION: store and rope are ASYNC launches, so `store_us`/
+        # `rope_us` are host launch cost only -- the device time they enqueue
+        # is paid at the NEXT layer's `torch.cuda.synchronize()` and therefore
+        # lands in `sync_us`. `sync_us` is thus "device time of the previous
+        # layer's copy + store + rope, serialized". That barrier is
+        # pre-existing code, not added by this probe.
+        #
+        # Cost: 6 perf_counter calls per LAYER (~288/fetch, ~15 us total), not
+        # per chunk -- per chunk would be 3,120 and would perturb its own
+        # subject (rule 12; six prior instances in this project).
+        _bp = _BLEND_PARTS
+        _bp_store_us = 0.0
+        _bp_sync_us = 0.0
+        _bp_rope_us = 0.0
+        _dst_views_by_buf = None
+        if _fused_copy:
+            assert load_gpu_buffer_obj.tensor is not None
+            assert compute_gpu_buffer_obj.tensor is not None
+            _dst_views_by_buf = {
+                id(load_gpu_buffer_obj): [
+                    load_gpu_buffer_obj.tensor[:, s:e] for (s, e) in chunk_slices
+                ],
+                id(compute_gpu_buffer_obj): [
+                    compute_gpu_buffer_obj.tensor[:, s:e] for (s, e) in chunk_slices
+                ],
+            }
+
         for layer_id in range(self.num_layers + 2):
             store_events = None
             rope_events = None
@@ -1020,6 +1254,7 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
                     store_start = torch.cuda.Event(enable_timing=True)
                     store_end = torch.cuda.Event(enable_timing=True)
                     store_start.record(stream)
+                _bp_t0 = time.perf_counter() if _bp else 0.0
                 lmc_ops.single_layer_kv_transfer(
                     buffer_mapping[layer_id - 2].tensor,
                     self.kvcaches[layer_id - 2],
@@ -1028,6 +1263,8 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
                     False,  # shape is [2, num_tokens, hidden_dim]
                     self.vllm_two_major,
                 )
+                if _bp:
+                    _bp_store_us += (time.perf_counter() - _bp_t0) * 1e6
                 if timing:
                     store_end.record(stream)
                     store_events = (store_start, store_end)
@@ -1046,11 +1283,17 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
                     or os.environ.get("LMCACHE_BATCHED_BLEND_OVERLAP", "0") == "1"
                     or os.environ.get("LMCACHE_SCOPED_STREAM_SYNC", "0") == "1"
                 ):
+                    _bp_t0 = time.perf_counter() if _bp else 0.0
                     stream.wait_stream(self.load_stream)
                     self.load_stream.wait_stream(stream)
+                    if _bp:
+                        _bp_sync_us += (time.perf_counter() - _bp_t0) * 1e6
                 else:
                     self.global_sync_count += 1
+                    _bp_t0 = time.perf_counter() if _bp else 0.0
                     torch.cuda.synchronize()
+                    if _bp:
+                        _bp_sync_us += (time.perf_counter() - _bp_t0) * 1e6
 
                 # ping-pong the buffers
                 compute_gpu_buffer_obj, load_gpu_buffer_obj = (
@@ -1062,6 +1305,7 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
                     rope_start = torch.cuda.Event(enable_timing=True)
                     rope_end = torch.cuda.Event(enable_timing=True)
                     rope_start.record(stream)
+                _bp_t0 = time.perf_counter() if _bp else 0.0
                 if self.cache_positions:
                     assert compute_gpu_buffer_obj.tensor is not None
 
@@ -1087,6 +1331,8 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
 
                 buffer_mapping[layer_id - 1] = compute_gpu_buffer_obj
 
+                if _bp:
+                    _bp_rope_us += (time.perf_counter() - _bp_t0) * 1e6
                 if timing:
                     rope_end.record(stream)
                     rope_events = (rope_start, rope_end)
@@ -1108,20 +1354,66 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
                         load_start = torch.cuda.Event(enable_timing=True)
                         load_end = torch.cuda.Event(enable_timing=True)
                         load_start.record(self.load_stream)
-                    for (s, e), memory_obj in zip(
-                        chunk_slices, memory_objs_layer, strict=False
-                    ):
-                        c += 1
-                        if memory_obj is None:
-                            evicted_ranges.append((s, e))
-                            continue
-                        assert memory_obj.metadata.fmt == MemoryFormat.KV_2TD
-                        assert load_gpu_buffer_obj.tensor is not None
+                    if _fused_copy:
+                        # Same filtering/bookkeeping as the loop below, but the
+                        # copies are batched into one multi-tensor apply.
+                        # Select dst views for the *current* load MemoryObj
+                        # (ping-pong); key by MemoryObj id, not tensor id.
+                        _dst_views = _dst_views_by_buf[id(load_gpu_buffer_obj)]
+                        _dsts = []
+                        _srcs = []
+                        _gt_t0 = time.perf_counter() if _gt_timing else 0.0
+                        for (s, e), memory_obj in zip(
+                            chunk_slices, memory_objs_layer, strict=False
+                        ):
+                            if memory_obj is None:
+                                evicted_ranges.append((s, e))
+                                c += 1
+                                continue
+                            assert memory_obj.metadata.fmt == MemoryFormat.KV_2TD
+                            _dsts.append(_dst_views[c])
+                            _srcs.append(memory_obj.tensor)
+                            if self.cache_positions and layer_id == 0:
+                                old_positions_full[s:e] = (
+                                    memory_obj.metadata.cached_positions
+                                )
+                            c += 1
+                        if _gt_timing:
+                            _gt_loop_us += (time.perf_counter() - _gt_t0) * 1e6
+                            _gt_t1 = time.perf_counter()
+                        if _dsts:
+                            # B2 step 3: one batched gather instead of one
+                            # multi-tensor apply over N per-chunk pairs. Only
+                            # when every chunk is present -- a hole would make
+                            # cat's dense output shift the tail of the region.
+                            if _gather_copy and not evicted_ranges and len(
+                                _srcs
+                            ) == len(chunk_slices):
+                                torch.cat(_srcs, dim=1, out=_scatter_tmp)
+                                load_gpu_buffer_obj.tensor.index_copy_(
+                                    1, _scatter_idx, _scatter_tmp
+                                )
+                            else:
+                                if _gather_copy:
+                                    _gather_fallback_layers += 1
+                                torch._foreach_copy_(_dsts, _srcs, non_blocking=True)
+                        if _gt_timing:
+                            _gt_mech_us += (time.perf_counter() - _gt_t1) * 1e6
+                    else:
+                        for (s, e), memory_obj in zip(
+                            chunk_slices, memory_objs_layer, strict=False
+                        ):
+                            c += 1
+                            if memory_obj is None:
+                                evicted_ranges.append((s, e))
+                                continue
+                            assert memory_obj.metadata.fmt == MemoryFormat.KV_2TD
+                            assert load_gpu_buffer_obj.tensor is not None
 
-                        load_gpu_buffer_obj.tensor[:, s:e].copy_(memory_obj.tensor, non_blocking=True)
+                            load_gpu_buffer_obj.tensor[:, s:e].copy_(memory_obj.tensor, non_blocking=True)
 
-                        if self.cache_positions and layer_id == 0:
-                            old_positions_full[s:e] = memory_obj.metadata.cached_positions
+                            if self.cache_positions and layer_id == 0:
+                                old_positions_full[s:e] = memory_obj.metadata.cached_positions
                     if timing:
                         load_end.record(self.load_stream)
                         load_events = (load_start, load_end)
@@ -1180,6 +1472,51 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
                     total_ms,
                     c,
                 )
+
+        if _gt_timing and (_gt_loop_us or _gt_mech_us):
+            # send_ms = loop + mech (+ generator overhead). Both now MEASURED.
+            logger.info(
+                "[gather-timing] mode=%s chunks=%d loop=%.2fms mech=%.2fms "
+                "per_chunk=%.2fus per_layer_mech=%.1fus",
+                "scatter" if _gather_copy else "foreach",
+                len(chunk_slices),
+                _gt_loop_us / 1e3,
+                _gt_mech_us / 1e3,
+                _gt_loop_us / max(1, len(chunk_slices) * self.num_layers),
+                _gt_mech_us / self.num_layers,
+            )
+
+        if _bp:
+            # Engagement + decomposition in one line (rule 8: a probe that can
+            # silently not run makes a null result unreadable). `other` is what
+            # send_ms still has left after loop+mech+store+sync+rope -- pure
+            # generator/dispatch overhead. Printed even when zero.
+            _bp_total = (
+                _gt_loop_us + _gt_mech_us + _bp_store_us + _bp_sync_us + _bp_rope_us
+            )
+            logger.info(
+                "[send-parts] active=1 layers=%d chunks=%d | loop=%.2fms "
+                "mech=%.2fms store=%.2fms sync=%.2fms rope=%.2fms | "
+                "accounted=%.2fms sync_per_layer=%.0fus",
+                self.num_layers,
+                len(chunk_slices),
+                _gt_loop_us / 1e3,
+                _gt_mech_us / 1e3,
+                _bp_store_us / 1e3,
+                _bp_sync_us / 1e3,
+                _bp_rope_us / 1e3,
+                _bp_total / 1e3,
+                _bp_sync_us / self.num_layers,
+            )
+
+        if _gather_copy and _gather_fallback_layers:
+            # Only when nonzero: a gather run that quietly fell back on most
+            # layers would otherwise look identical to one that never engaged.
+            logger.info(
+                "[gather] fell back on %d/%d layers (evicted chunks)",
+                _gather_fallback_layers,
+                self.num_layers,
+            )
 
         # free the buffer memory
         load_gpu_buffer_obj.ref_count_down()

@@ -16,6 +16,113 @@ from lmcache.v1.config import LMCacheEngineConfig
 
 logger = init_logger(__name__)
 
+# Same flag base.py already gates its 6-phase `[recompute-sub]` split on -- this
+# only adds a finer split INSIDE `rope_gather_scatter`. Read once at import.
+_RECOMPUTE_SUBTIMING = os.environ.get("LMCACHE_RECOMPUTE_SUBTIMING", "0") == "1"
+
+
+class DeferredBatchedBlendDriver:
+    """TP-aware deferred batched blend driver (Fix C + optional AR mux).
+
+    Split FETCH from RECOMPUTE so they can run on different CUDA streams:
+
+    * ``step_fetch()`` — connector ``retrieve_layer`` nexts (D2D copy / RoPE /
+      gap-zero). No NCCL. Safe on a side stream overlapping prefill.
+    * ``step_recompute()`` — ``compute_layer_batched`` next (``o_proj`` /
+      ``mlp`` → ``RowParallelLinear`` → ``tensor_model_parallel_all_reduce``
+      under TP>1).
+
+    Default (no ``LMCACHE_AR_MUX``): recompute MUST run on the prefill/current
+    stream; launching these all-reduces on ``_blend_stream`` concurrent with
+    prefill collectives is what deadlocked Fix C (jobs 15002378, 15099974).
+
+    With ``LMCACHE_AR_MUX=1``: all TP all-reduces are remuxed onto a dedicated
+    stream (see ``lmcache.v1.compute.ar_mux``), so the adapter may run
+    ``step_recompute()`` on ``_blend_stream`` and overlap local blend GEMMs
+    with prefill.
+
+    Phase-fix (``LMCACHE_DEFER_PHASE_FIX=1``, default): one extra fetch prime
+    before layer 0 so recompute L sees paged KV for layer L (connector stores
+    layer i-2 at iteration i). Fetch next-count after the caller's warmup is
+    still ``num_layers + 1`` (+ trailing drain only when phase_fix is off).
+
+    ``__next__`` = fetch + recompute for one layer (used by DEFER_DRAIN_EAGER).
+    """
+
+    __slots__ = (
+        "fetch_gens", "compute_gen", "num_layers", "phase_fix",
+        "layer_idx", "_fetch_ready", "_phase_fetch_done", "_closed",
+        "fetch_steps", "recompute_steps",
+    )
+
+    def __init__(self, fetch_gens, compute_gen, num_layers, phase_fix: bool):
+        self.fetch_gens = list(fetch_gens)
+        self.compute_gen = compute_gen
+        self.num_layers = int(num_layers)
+        self.phase_fix = bool(phase_fix)
+        self.layer_idx = 0
+        self._fetch_ready = False
+        self._phase_fetch_done = False
+        self._closed = False
+        self.fetch_steps = 0
+        self.recompute_steps = 0
+
+    @property
+    def done(self) -> bool:
+        return self.layer_idx >= self.num_layers
+
+    def _ensure_phase_fetch(self) -> None:
+        if self.phase_fix and not self._phase_fetch_done:
+            for fg in self.fetch_gens:
+                next(fg)
+            self._phase_fetch_done = True
+
+    def step_fetch(self) -> None:
+        """Advance fetch gens so paged KV for ``layer_idx`` is ready to recompute."""
+        if self._closed or self.done:
+            raise StopIteration
+        if self._fetch_ready:
+            return
+        self._ensure_phase_fetch()
+        for fg in self.fetch_gens:
+            next(fg)
+        self._fetch_ready = True
+        self.fetch_steps += 1
+
+    def step_recompute(self) -> None:
+        """Run one packed recompute layer. Call on the prefill/current stream under TP."""
+        if self._closed or self.done:
+            raise StopIteration
+        if not self._fetch_ready:
+            self.step_fetch()
+        next(self.compute_gen)
+        self.layer_idx += 1
+        self._fetch_ready = False
+        self.recompute_steps += 1
+
+    def __next__(self):
+        """One fused layer step (fetch then recompute). For DEFER_DRAIN_EAGER."""
+        self.step_fetch()
+        self.step_recompute()
+        return None
+
+    def __iter__(self):
+        return self
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        for fg in self.fetch_gens:
+            try:
+                fg.close()
+            except Exception:
+                pass
+        try:
+            self.compute_gen.close()
+        except Exception:
+            pass
+
 
 class LMCBlender:
     """
@@ -32,6 +139,15 @@ class LMCBlender:
     ):
         self.cache_engine = cache_engine
         self.gpu_connector = gpu_connector
+
+        # `rope_gather_scatter` sub-split (LMCACHE_RECOMPUTE_SUBTIMING=1, the
+        # SAME flag base.py already uses -- no new flag). It is the only
+        # non-GEMM phase inside recompute and therefore the only one that can
+        # be removed rather than merely made cheaper, so knowing which of its
+        # four parts dominates decides whether "attend from staging" is worth
+        # building. CUDA-event pairs accumulated per layer, read ONCE by
+        # base.py at its existing end-of-last-layer sync -- no extra barrier.
+        self._rgs_evs: dict = {}
 
         enable_sparse = False
         if config.extra_config is not None:
@@ -90,6 +206,13 @@ class LMCBlender:
         #  LMCACHE_EQUAL_K=1        -> top-K refreshes the SAME #tokens as I-frame (equal-K)
         self._time_sel = os.environ.get("LMCACHE_TIME_SELECTION") == "1"
         self._equal_k = os.environ.get("LMCACHE_EQUAL_K") == "1"
+        # Same flag as the adapter: when set, blend_layer accumulates
+        # fetch vs recompute CUDA-event spans (and select wall time) so the
+        # serial [blend-timing] line can match the batched breakdown.
+        self._blend_timing = os.environ.get("LMCACHE_BLEND_TIMING", "0") == "1"
+        self._phase_fetch_evts: list = []
+        self._phase_recompute_evts: list = []
+        self._phase_select_ms: float = 0.0
         if config.extra_config is not None:
             self.skip_ffn = bool(config.extra_config.get("skip_ffn", False))
             self.skip_ffn_only_codecsight = bool(
@@ -732,6 +855,7 @@ class LMCBlender:
             hit_indices = self._compute_hit_indices(effective_len, q.device)
             if self._time_sel:
                 torch.cuda.synchronize(); _t0 = time.perf_counter()
+            _sel_t0 = time.perf_counter() if self._blend_timing else None
             if self.blend_mode == "codecsight":
                 selected = self._codecsight_select(
                     hit_indices, effective_len, q.device,
@@ -744,6 +868,10 @@ class LMCBlender:
                 selected = self._vlcache_select(
                     hit_indices, effective_len, q.device,
                 )
+            if _sel_t0 is not None:
+                # CPU index math; reported separately (also sits inside the
+                # first-layer recompute CUDA span — do not double-count in total).
+                self._phase_select_ms += (time.perf_counter() - _sel_t0) * 1000.0
             if self._time_sel:
                 torch.cuda.synchronize()
                 logger.info("SELECT_TIME mode=%s layer=%d ms=%.4f k=%d",
@@ -767,6 +895,32 @@ class LMCBlender:
     # ------------------------------------------------------------------
     # Tier-2: batched selective recompute (LMCACHE_BATCHED_BLEND=1)
     # ------------------------------------------------------------------
+    def _rgs_mark(self):
+        """Record a CUDA event, or None when the sub-split is off."""
+        if not _RECOMPUTE_SUBTIMING:
+            return None
+        e = torch.cuda.Event(enable_timing=True)
+        e.record()
+        return e
+
+    def _rgs_close(self, name, start):
+        """Close a span opened by `_rgs_mark` into bucket `name`."""
+        if start is None:
+            return
+        e = torch.cuda.Event(enable_timing=True)
+        e.record()
+        self._rgs_evs.setdefault(name, []).append((start, e))
+
+    def take_rgs_spans(self):
+        """Return and clear the accumulated rope_gather_scatter event pairs.
+
+        Drained by `compute_layer_batched` at its EXISTING end-of-last-layer
+        `torch.cuda.synchronize()`, so reading these costs no extra barrier.
+        """
+        out = self._rgs_evs
+        self._rgs_evs = {}
+        return out
+
     def process_qkv_batched(
         self,
         q: torch.Tensor,
@@ -790,6 +944,8 @@ class LMCBlender:
         """
         rotary = self._rotary_by_layer[layer_id]
 
+        _rgs = self._rgs_mark()
+
         # packed positions across all requests (1D [ΣA] or mRoPE [3, ΣA])
         pos0 = req_meta[0]["positions"]
         if pos0.ndim == 2:
@@ -797,6 +953,7 @@ class LMCBlender:
         else:
             packed_pos = torch.cat([m["positions"] for m in req_meta], dim=0)
         q, k = rotary(packed_pos, q, k)
+        self._rgs_close("rope", _rgs)
 
         attn_core = self.layerwise_model.vllm_attn_layers[layer_id]
         nkv = int(getattr(attn_core, "num_kv_heads", None)
@@ -819,6 +976,14 @@ class LMCBlender:
 
         old_k_segs, old_v_segs, S_list = [], [], []
         for i, m in enumerate(req_meta):
+            # Split the loop's two halves. `scatter` writes ~A anchor rows;
+            # `gather` reads ALL S rows of context back out. If gather is the
+            # expensive half, attending straight from the paged cache
+            # (block-table attention) would delete it outright -- whereas a
+            # merely cheaper scatter would not justify that surgery.
+            # NOTE: `int(cu_q[i])` is a device->host sync on a device tensor,
+            # twice per request per layer; it is inside the `scatter` bucket.
+            _rgs_sc = self._rgs_mark()
             a0, a1 = int(cu_q[i]), int(cu_q[i + 1])
             slot_full = m["slot_full"]
             anchor_local = m["anchor_local"]
@@ -826,13 +991,19 @@ class LMCBlender:
             # scatter fresh anchor K/V into the paged cache (refresh the cache)
             k_all[anchor_slots] = k[a0:a1]
             v_all[anchor_slots] = v[a0:a1]
+            self._rgs_close("scatter", _rgs_sc)
+
             # gather full context (now includes the fresh anchors)
+            _rgs_g = self._rgs_mark()
             old_k_segs.append(k_all[slot_full])
             old_v_segs.append(v_all[slot_full])
+            self._rgs_close("gather", _rgs_g)
             S_list.append(slot_full.shape[0])
 
+        _rgs_cat = self._rgs_mark()
         packed_old_k = torch.cat(old_k_segs, dim=0)
         packed_old_v = torch.cat(old_v_segs, dim=0)
+        self._rgs_close("cat", _rgs_cat)
 
         dev = q.device
         cu_k = torch.tensor(
@@ -864,12 +1035,13 @@ class LMCBlender:
 
         Deferred (defer=True, Tier-2 Level-2): `fetch_gens` are the per-request
         retrieve_layer generators, each already primed ONCE (warmup -> gap
-        positions set + layer-0 loaded, not yet sent). Returns a generator that
-        `wait_for_layer_load` steps once per decoder layer: each step sends the
-        current layer's KV for every request then recomputes that layer's packed
-        anchors. Cadence mirrors ``blend_layer``: one post-warmup yield, then one
-        yield per layer, then a final fetch-drain yield (num_layers + 2 yields,
-        matching the 2x prime + num_layers wait_for_layer_load calls).
+        positions set + layer-0 loaded, not yet sent). Returns a
+        ``DeferredBatchedBlendDriver`` that the adapter steps as:
+          - ``step_fetch()`` on a side stream (memcpy / RoPE only — OK to overlap
+            prefill), and
+          - ``step_recompute()`` on the prefill/current stream (has TP
+            all-reduces via ``o_proj`` / ``mlp`` — MUST NOT overlap prefill
+            collectives; that was Fix C's N=4 hang, jobs 15002378 / 15099974).
         """
         logger.info("blend_batched: packing %d request(s), total anchors=%d%s",
                     len(requests),
@@ -890,57 +1062,38 @@ class LMCBlender:
                 next(gen)
             return None
 
-        num_layers = self.num_layers
-        fetch_gens = list(fetch_gens or [])
-
         # PHASE FIX (2026-07-27, LMCACHE_DEFER_PHASE_FIX=0 restores the old, WRONG
-        # phasing for A/B). The old driver was OFF BY ONE against the connector's
-        # 3-stage pipeline and that is why the deferred path produced different
-        # output from eager (7/18 keys, 0.45-1.81 nats, one answer flip; jobs
-        # 15001729 / 15002005 / 15002109 / 15002110 / 15002139 -- the last of those
-        # ran the deferred CODE with EAGER TIMING and still failed, proving the bug
-        # is here and not in the interleaving).
-        #
-        # Why off by one: gpu_connector.batched_to_gpu stores layer i-2 at iteration
-        # i (`single_layer_kv_transfer(buffer_mapping[i-2] -> kvcaches[i-2])`), and
-        # retrieve_layer yields BEFORE _send_layer. So the fetch gen's (L+2)th next
-        # performs send(L), after which the PAGED cache holds only layers 0..L-1.
-        # The old loop then recomputed layer L against a layer that had not been
-        # written yet. Eager never hit this because it drains every layer before
-        # blend_batched runs.
-        #
-        # Fix = re-phase, not extra work: advance the fetch gens ONE extra time
-        # before the loop and drop the trailing drain. Totals are unchanged --
-        # fetch gens still get 1 (caller warmup) + 1 + num_layers = num_layers + 2
-        # nexts, and the driver still yields num_layers + 2 times, so
-        # wait_for_layer_load's cadence is untouched. Now at loop step L the gens
-        # have had L+3 nexts -> send(L+1) done -> paged holds 0..L -> the recompute
-        # of layer L reads a layer that is actually there.
+        # phasing for A/B). See DeferredBatchedBlendDriver for why an extra fetch
+        # prime is required against gpu_connector's i-2 store pipeline.
         _phase_fix = os.environ.get("LMCACHE_DEFER_PHASE_FIX", "1") == "1"
+        return DeferredBatchedBlendDriver(
+            fetch_gens=list(fetch_gens or []),
+            compute_gen=gen,
+            num_layers=self.num_layers,
+            phase_fix=_phase_fix,
+        )
 
-        def _driver():
-            # Post-warmup handshake (mirrors blend_layer's first yield). Fetches
-            # are already warmed up by the caller; nothing to send yet.
-            yield
-            if _phase_fix:
-                # Extra prime: push the store stage one layer ahead of the recompute.
-                for fg in fetch_gens:
-                    next(fg)
-            for _ in range(num_layers):
-                for fg in fetch_gens:
-                    next(fg)
-                next(gen)
-                yield
-            if not _phase_fix:
-                # Old trailing drain (each gen's (num_layers+2)th next).
-                for fg in fetch_gens:
-                    next(fg)
-            yield
+    def take_serial_phase_timing(self):
+        """Return and clear fetch/recompute event pairs + select_ms for one blend().
 
-        d = _driver()
-        next(d)  # prime 1: advance past the post-warmup handshake
-        next(d)  # prime 2: run layer 0 (stay one layer ahead of prefill)
-        return d
+        Used by the adapter's serial [blend-timing] drain. Event pairs are
+        ``(start, end)`` CUDA events; caller sums ``elapsed_time`` after they
+        complete (same deferred-read pattern as embed events).
+        """
+        out = (
+            self._phase_fetch_evts,
+            self._phase_recompute_evts,
+            float(self._phase_select_ms),
+        )
+        self._phase_fetch_evts = []
+        self._phase_recompute_evts = []
+        self._phase_select_ms = 0.0
+        return out
+
+    def _phase_evt_pair(self):
+        s = torch.cuda.Event(enable_timing=True)
+        e = torch.cuda.Event(enable_timing=True)
+        return s, e
 
     # NOTE(Jiayi): Exposing this `blend_layer` interface as we might
     # want to orchestrate the blending process elsewhere
@@ -964,7 +1117,13 @@ class LMCBlender:
         layerwise_retriever = self.cache_engine.retrieve_layer(tokens, mask, **kwargs)
 
         # warmup retriever
+        if self._blend_timing:
+            _fs, _fe = self._phase_evt_pair()
+            _fs.record()
         warmup_retrieved = next(layerwise_retriever)
+        if self._blend_timing:
+            _fe.record()
+            self._phase_fetch_evts.append((_fs, _fe))
         has_retrieved_tokens = False
         if warmup_retrieved is not None:
             if torch.is_tensor(warmup_retrieved):
@@ -976,7 +1135,13 @@ class LMCBlender:
         if not has_retrieved_tokens:
             logger.debug("No retrievable tokens in layerwise retrieve; skip blending compute.")
             for _ in range(self.num_layers):
+                if self._blend_timing:
+                    _fs, _fe = self._phase_evt_pair()
+                    _fs.record()
                 next(layerwise_retriever)
+                if self._blend_timing:
+                    _fe.record()
+                    self._phase_fetch_evts.append((_fs, _fe))
                 yield
             next(layerwise_retriever)
             md.clean()
@@ -989,7 +1154,13 @@ class LMCBlender:
                 "KV load matches non-blending retrieve_layer."
             )
             for _ in range(self.num_layers):
+                if self._blend_timing:
+                    _fs, _fe = self._phase_evt_pair()
+                    _fs.record()
                 next(layerwise_retriever)
+                if self._blend_timing:
+                    _fe.record()
+                    self._phase_fetch_evts.append((_fs, _fe))
                 yield
             next(layerwise_retriever)
             md.clean()
@@ -1003,8 +1174,19 @@ class LMCBlender:
         )
         for _ in range(self.num_layers):
             self._active_metadata = md
+            if self._blend_timing:
+                _fs, _fe = self._phase_evt_pair()
+                _fs.record()
             next(layerwise_retriever)
+            if self._blend_timing:
+                _fe.record()
+                self._phase_fetch_evts.append((_fs, _fe))
+                _rs, _re = self._phase_evt_pair()
+                _rs.record()
             next(layerwise_model_executor)
+            if self._blend_timing:
+                _re.record()
+                self._phase_recompute_evts.append((_rs, _re))
             yield
 
         next(layerwise_retriever)
@@ -1038,6 +1220,12 @@ class LMCBlender:
         # state. blend_layer re-installs this before each layer step.
         md = LMCBlendMetadata(imp_indices=None, attn_mask=None, positions=None)
         self._active_metadata = md
+        # Fresh phase buckets for this request (adapter reads via
+        # take_serial_phase_timing after eager blend returns).
+        if self._blend_timing:
+            self._phase_fetch_evts = []
+            self._phase_recompute_evts = []
+            self._phase_select_ms = 0.0
         tokens_per_frame = kwargs.get("tokens_per_frame")
         if tokens_per_frame is not None:
             self._active_metadata.tokens_per_frame = int(tokens_per_frame)

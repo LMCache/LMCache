@@ -2,6 +2,7 @@
 # Standard
 from abc import ABC, abstractmethod
 from typing import Optional, Tuple
+import os
 
 # Third Party
 from torch import nn
@@ -372,6 +373,11 @@ class LMCBaseModel(nn.Module, ABC):
 
         Generator: yields once per layer (mirrors compute_layer's cadence so the
         caller can step Phase-1 retrievers in lockstep if pipelining the load).
+
+        Optional ``LMCACHE_RECOMPUTE_SUBTIMING=1``: CUDA-event spans per sub-op,
+        summed across all layers, logged once as ``[recompute-sub]`` after a
+        single device sync at the end of the last layer (same pattern as
+        ``[blend-timing]`` — does not sync per layer).
         """
         hidden_states = packed_embeds.cuda()
         residual = None
@@ -381,34 +387,63 @@ class LMCBaseModel(nn.Module, ABC):
             dtype=torch.int32, device=hidden_states.device,
         )
 
-        for layer_idx, layer in enumerate(self.layers[self.start_layer:self.end_layer]):
+        # Sub-phase timing (default OFF). Keys match NVTX range names.
+        _sub = (
+            os.environ.get("LMCACHE_RECOMPUTE_SUBTIMING", "0") == "1"
+            and torch.cuda.is_available()
+        )
+        _phases = ("ln1", "qkv_proj", "rope_gather_scatter", "attention",
+                   "post_attn", "ffn")
+        _evs = {k: [] for k in _phases} if _sub else None
+
+        def _span_begin():
+            if not _sub:
+                return None
+            s = torch.cuda.Event(enable_timing=True)
+            s.record()
+            return s
+
+        def _span_end(name, start):
+            if not _sub or start is None:
+                return
+            e = torch.cuda.Event(enable_timing=True)
+            e.record()
+            _evs[name].append((start, e))
+
+        layers = self.layers[self.start_layer:self.end_layer]
+        n_layers = len(layers)
+        for layer_idx, layer in enumerate(layers):
             global_layer = self.start_layer + layer_idx
-            # NVTX only -- no CUDA events / no torch.cuda.synchronize() here, so
-            # (unlike LMCACHE_LAYER_LOAD_TIMING on the fetch side) this cannot
-            # reintroduce a per-layer device sync. push/pop are non-blocking
-            # markers nsys reads off the existing timeline; safe to leave in
-            # unconditionally, matching how _lmcache_nvtx_annotate is already
-            # applied unconditionally elsewhere (utils.py).
+            # NVTX only by default -- no CUDA events / no torch.cuda.synchronize()
+            # here, so (unlike LMCACHE_LAYER_LOAD_TIMING on the fetch side) this
+            # cannot reintroduce a per-layer device sync. push/pop are
+            # non-blocking markers nsys reads off the existing timeline.
             torch.cuda.nvtx.range_push(f"recompute_layer_{global_layer}")
 
             torch.cuda.nvtx.range_push("ln1")
+            _s = _span_begin()
             if residual is None:
                 residual = hidden_states
                 hidden_states = layer.input_layernorm(hidden_states)
             else:
                 hidden_states, residual = layer.input_layernorm(hidden_states, residual)
+            _span_end("ln1", _s)
             torch.cuda.nvtx.range_pop()
 
             torch.cuda.nvtx.range_push("qkv_proj")
+            _s = _span_begin()
             q, k, v = self._project_qkv(layer, hidden_states)
             q, k, v = self._process_qkv(q, k, v, layer)
+            _span_end("qkv_proj", _s)
             torch.cuda.nvtx.range_pop()
 
             # Blender owns RoPE + per-request KV gather/scatter/concat.
             torch.cuda.nvtx.range_push("rope_gather_scatter")
+            _s = _span_begin()
             q, old_k, old_v, attn_metadata = self.blender.process_qkv_batched(
                 q, k, v, global_layer, req_meta, kvcaches, cu_q,
             )
+            _span_end("rope_gather_scatter", _s)
             torch.cuda.nvtx.range_pop()
 
             attn_core = self.vllm_attn_layers[global_layer]
@@ -422,20 +457,25 @@ class LMCBaseModel(nn.Module, ABC):
             attn_output = torch.zeros_like(q)
 
             torch.cuda.nvtx.range_push("attention")
+            _s = _span_begin()
             attn_output = self.lmc_attn_layers[global_layer].forward_contiguous(
                 q, old_k, old_v, attn_output, attn_metadata
             )
+            _span_end("attention", _s)
             torch.cuda.nvtx.range_pop()
             attn_output = attn_output.view(-1, num_heads * head_size)
 
             torch.cuda.nvtx.range_push("post_attn")
+            _s = _span_begin()
             hidden_states, _ = layer.self_attn.o_proj(attn_output)
             hidden_states, residual = layer.post_attention_layernorm(
                 hidden_states, residual
             )
+            _span_end("post_attn", _s)
             torch.cuda.nvtx.range_pop()
 
             torch.cuda.nvtx.range_push("ffn")
+            _s = _span_begin()
             skip_ffn = bool(getattr(self.blender, "skip_ffn", False))
             if skip_ffn and bool(getattr(self.blender, "skip_ffn_only_codecsight", True)):
                 skip_ffn = getattr(self.blender, "blend_mode", "") in ("codecsight",)
@@ -443,7 +483,58 @@ class LMCBaseModel(nn.Module, ABC):
                 hidden_states = torch.zeros_like(hidden_states)
             else:
                 hidden_states = layer.mlp(hidden_states)
+            _span_end("ffn", _s)
             torch.cuda.nvtx.range_pop()
 
             torch.cuda.nvtx.range_pop()  # recompute_layer_{global_layer}
+
+            # One sync after the last layer's events are recorded, then log.
+            if _sub and layer_idx == n_layers - 1:
+                torch.cuda.synchronize()
+                totals = {
+                    k: sum(a.elapsed_time(b) for a, b in pairs)
+                    for k, pairs in _evs.items()
+                }
+                total = sum(totals.values()) or 1.0
+                n_anch = sum(A_list)
+                n_ctx = sum(int(m["slot_full"].shape[0]) for m in req_meta)
+                logger.info(
+                    "[recompute-sub] N=%d anchors=%d ctx_tokens=%d layers=%d | "
+                    "ln1=%.2fms qkv=%.2fms rope_gather_scatter=%.2fms "
+                    "attn=%.2fms post_attn=%.2fms ffn=%.2fms | sum=%.2fms "
+                    "(rgs=%.0f%% attn=%.0f%% ffn=%.0f%% qkv+post=%.0f%%)",
+                    len(req_meta), n_anch, n_ctx, n_layers,
+                    totals["ln1"], totals["qkv_proj"],
+                    totals["rope_gather_scatter"], totals["attention"],
+                    totals["post_attn"], totals["ffn"], total,
+                    100.0 * totals["rope_gather_scatter"] / total,
+                    100.0 * totals["attention"] / total,
+                    100.0 * totals["ffn"] / total,
+                    100.0 * (totals["qkv_proj"] + totals["post_attn"]) / total,
+                )
+
+                # Finer split INSIDE rope_gather_scatter -- the only non-GEMM
+                # phase above, and so the only one that can be REMOVED rather
+                # than merely made cheaper. Drained here, after the sync that
+                # already happened, so it costs no extra barrier.
+                rgs = getattr(self.blender, "take_rgs_spans", lambda: {})()
+                if rgs:
+                    rgs_tot = {
+                        k: sum(a.elapsed_time(b) for a, b in pairs)
+                        for k, pairs in rgs.items()
+                    }
+                    rgs_sum = sum(rgs_tot.values()) or 1.0
+                    logger.info(
+                        "[rgs-parts] active=1 N=%d anchors=%d ctx_tokens=%d "
+                        "layers=%d | rope=%.2fms scatter=%.2fms gather=%.2fms "
+                        "cat=%.2fms | sum=%.2fms (gather+cat=%.0f%% of rgs) "
+                        "parent_rgs=%.2fms",
+                        len(req_meta), n_anch, n_ctx, n_layers,
+                        rgs_tot.get("rope", 0.0), rgs_tot.get("scatter", 0.0),
+                        rgs_tot.get("gather", 0.0), rgs_tot.get("cat", 0.0),
+                        rgs_sum,
+                        100.0 * (rgs_tot.get("gather", 0.0)
+                                 + rgs_tot.get("cat", 0.0)) / rgs_sum,
+                        totals["rope_gather_scatter"],
+                    )
             yield

@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Generator, Optional, Union
 import contextlib
 import os
+import time
 
 # Third Party
 from vllm.config import (
@@ -55,6 +56,8 @@ from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.compute.blend import LMCBlenderBuilder
+from lmcache.v1.compute.ar_mux import ar_mux_env_requested, get_ar_mux
+from lmcache.v1.compute.blend.blender import DeferredBatchedBlendDriver
 from lmcache.v1.config import LMCacheEngineConfig, _validate_and_set_config_value
 from lmcache.v1.gpu_connector import (
     GPUConnectorInterface,
@@ -81,6 +84,40 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
+# Blend-parts probe (LMCACHE_BLEND_PARTS=1, default OFF). After the B2 fetch
+# work, `[blend-timing]` reads embed=14.8 fetch=32.8 select=0.8 ms -- so `embed`
+# (_reconstruct_inputs_embeds) is now ~31% of the blend and has never been
+# decomposed. Read ONCE at import; `_EMBED_PARTS` is filled by
+# `_reconstruct_inputs_embeds` and `_scatter_vision_embeds` (single-threaded:
+# the blend runs inline in start_load_kv on the model-runner thread) and
+# drained by the `[embed-parts]` log at the end of the same call.
+_BLEND_PARTS = os.environ.get("LMCACHE_BLEND_PARTS", "0") == "1"
+_EMBED_PARTS: dict = {}
+
+
+def _log_embed_parts(num_tokens: int, n_mm: int, path: str) -> None:
+    """Emit one `[embed-parts]` line per `_reconstruct_inputs_embeds` call.
+
+    `accounted` vs the `embed=` figure in `[blend-timing]` is the check that
+    the split is complete; a large gap means a phase was missed, not that the
+    remainder is free. `debug_total` = the part that exists only to feed
+    disabled `logger.debug` calls (see the NOTE comments at each site).
+    """
+    p = _EMBED_PARTS
+    acc = sum(p.values()) - p["scat_sync"] - p["scat_nan"]  # both are ⊂ scat
+    dbg_total = p["dbg"] + p["scat_sync"] + p["scat_nan"]
+    logger.info(
+        "[embed-parts] active=1 tokens=%d mm_items=%d path=%s | tok=%.2fms "
+        "enc=%.2fms emb=%.2fms devsync=%.2fms dbg=%.2fms norm=%.2fms "
+        "scat=%.2fms (of which sync=%.2fms nan=%.2fms) | accounted=%.2fms "
+        "debug_only=%.2fms",
+        num_tokens, n_mm, path,
+        p["tok"] * 1e3, p["enc"] * 1e3, p["emb"] * 1e3, p["devsync"] * 1e3,
+        p["dbg"] * 1e3, p["norm"] * 1e3, p["scat"] * 1e3,
+        p["scat_sync"] * 1e3, p["scat_nan"] * 1e3,
+        acc * 1e3, dbg_total * 1e3,
+    )
 
 
 def _patch_vllm_model_registration():
@@ -708,16 +745,37 @@ class LMCacheConnectorV1Impl:
         self._batched_blend = (
             os.environ.get("LMCACHE_BATCHED_BLEND", "0") == "1"
         )
+        # Scheduler surgery (LMCACHE_MERGED_BLEND=1): after fetch+select, skip the
+        # separate compute_layer_batched recompute and instead stash anchor
+        # segments for the vLLM runner to append into the same prefill forward
+        # (one QKV / attn / AR per layer covering suffix + anchors). Requires
+        # batched blend. Forces OVERLAP recompute off (fetch stays eager-drained
+        # here; runner applies the plan before model()). Default OFF.
+        self._merged_blend = (
+            os.environ.get("LMCACHE_MERGED_BLEND", "0") == "1"
+            and self._batched_blend
+        )
+        self._merged_blend_plan = None  # set by _batched_blend_load_kv
         # Tier-2 Level-2 (LMCACHE_BATCHED_BLEND_OVERLAP=1): overlap the BATCHED
         # blend with prefill. Defers the batched fetch+recompute into a per-layer
         # generator stepped by wait_for_layer_load on the side stream -- the same
         # pipelining the serial path uses -- WITHOUT routing into the per-request
         # serial path. Requires _batched_blend. Default off => batched path stays
         # eager/blocking (unchanged). See codecsight-bench/TIER2_BATCHED_BLEND.md.
+        # Merged blend is incompatible with deferred recompute (recompute IS the
+        # prefill loop); keep fetch-eager when MERGED is on.
         self._batched_overlap = (
             os.environ.get("LMCACHE_BATCHED_BLEND_OVERLAP", "0") == "1"
             and self._batched_blend
+            and not self._merged_blend
         )
+        if self._merged_blend and os.environ.get(
+                "LMCACHE_BATCHED_BLEND_OVERLAP", "0") == "1":
+            logger.warning(
+                "[merged-blend] LMCACHE_BATCHED_BLEND_OVERLAP=1 ignored: "
+                "merged path drains fetch eagerly and folds recompute into "
+                "prefill (no DeferredBatchedBlendDriver)."
+            )
         if self._batched_overlap:
             # Turn on side-stream stepping in wait_for_layer_load, but do NOT set
             # _codecsight_pipeline: that flag routes to the serial path and would
@@ -725,6 +783,31 @@ class LMCacheConnectorV1Impl:
             # AFTER the _async_overlap->_codecsight_pipeline coupling above so it
             # enables overlap without the coupling.
             self._async_overlap = True
+        # AR multiplexer (LMCACHE_AR_MUX=1): serialize all TP all-reduces onto one
+        # CUDA stream so blend RECOMPUTE local GEMMs may run on `_blend_stream`
+        # concurrent with prefill. Requires batched overlap. Without the mux,
+        # recompute must stay on the prefill stream (Fix C hang under TP>1).
+        # Install only on the worker (TP ranks); scheduler has no collectives.
+        self._ar_mux = (
+            ar_mux_env_requested()
+            and self._batched_overlap
+            and role != KVConnectorRole.SCHEDULER
+        )
+        if self._ar_mux:
+            get_ar_mux().ensure_installed()
+            get_ar_mux().enable()
+            logger.info(
+                "[ar-mux] LMCACHE_AR_MUX=1 with OVERLAP: recompute-on-blend-stream enabled"
+            )
+        elif (
+            ar_mux_env_requested()
+            and role != KVConnectorRole.SCHEDULER
+            and not self._batched_overlap
+        ):
+            logger.warning(
+                "[ar-mux] LMCACHE_AR_MUX=1 ignored: requires "
+                "LMCACHE_BATCHED_BLEND=1 and LMCACHE_BATCHED_BLEND_OVERLAP=1"
+            )
         # Fix C-fix (2026-07-27): latch set when a deferred blend driver could not
         # be finished cleanly. Once set, _batched_blend_load_kv falls back to the
         # eager (blocking, always-correct) path for the rest of the process, so a
@@ -766,6 +849,29 @@ class LMCacheConnectorV1Impl:
         self._blend_timing = (
             os.environ.get("LMCACHE_BLEND_TIMING", "0") == "1"
         )
+        # Serial-path counterpart of the batched [blend-timing] state,
+        # accumulated per engine step in start_load_kv and flushed at the end
+        # of it. Defaulted here so no call site can hit a missing attribute.
+        self._serial_blend_n = 0
+        self._serial_blend_embed_evts = []
+        self._serial_blend_layer_evts = []
+        # Per-step aggregated fetch/recompute CUDA events + select wall ms
+        # (from blender.take_serial_phase_timing), so serial logs match batched
+        # embed/fetch/select/recompute breakdown.
+        self._serial_blend_fetch_evts = []
+        self._serial_blend_recompute_evts = []
+        self._serial_blend_select_ms = 0.0
+        # Completed-but-unread event batches, drained LAZILY one engine step
+        # later. This exists to avoid adding a torch.cuda.synchronize() to the
+        # serial path: the batched path can afford one because it already had
+        # one, but the serial path had NO timing code at all before this, and
+        # a new sync in start_load_kv would make the unbatched arm slower than
+        # it is in every previously recorded job -- instrumentation perturbing
+        # the very A/B it exists to measure. Events are polled with .query()
+        # instead, so the device is never blocked; a batch whose events are
+        # not yet complete simply waits for the next step. See the measurement
+        # protocol's "instrumentation must be symmetric across arms" rule.
+        self._serial_blend_pending = []
         # Packing census (LMCACHE_BLEND_PACK_DEBUG=1, implied by BLEND_TIMING).
         # Logs how many requests the scheduler put in each step vs how many
         # actually reached the packer, and names the gate whenever the batched
@@ -1027,13 +1133,28 @@ class LMCacheConnectorV1Impl:
             ve_slice = ve[:actual_len].to(
                 dtype=inputs_embeds.dtype, device=inputs_embeds.device)
             valid_mask = ~torch.isnan(ve_slice).any(dim=-1)
+            # NOTE (probe finding candidate): `.item()` here and `bool()` on
+            # `valid_mask.all()` below are BOTH device->host syncs, once per mm
+            # item -- ~80 of them per request on this workload. The `.item()`
+            # one exists only for a disabled logger.debug.
             if merged == 0:
-                nan_count = int((~valid_mask).sum().item())
+                if _BLEND_PARTS:
+                    _t0 = time.perf_counter()
+                    nan_count = int((~valid_mask).sum().item())
+                    _EMBED_PARTS["scat_nan"] += time.perf_counter() - _t0
+                else:
+                    nan_count = int((~valid_mask).sum().item())
                 logger.debug(
                     "vision_embed[0]: shape=%s, nan_rows=%d/%d, dtype=%s",
                     ve.shape, nan_count, actual_len, ve.dtype)
             if ve_slice.shape[0] >= actual_len:
-                if valid_mask.all():
+                if _BLEND_PARTS:
+                    _t0 = time.perf_counter()
+                    _all_valid = bool(valid_mask.all())
+                    _EMBED_PARTS["scat_sync"] += time.perf_counter() - _t0
+                else:
+                    _all_valid = valid_mask.all()
+                if _all_valid:
                     inputs_embeds[start:end] = ve_slice
                 else:
                     inputs_embeds[start:end][valid_mask] = \
@@ -1045,7 +1166,15 @@ class LMCacheConnectorV1Impl:
                     inputs_embeds[start:start + sub_len][sub_mask] = \
                         ve_slice[sub_mask]
             merged += 1
-        final_has_nan = bool(torch.isnan(inputs_embeds).any())
+        # NOTE (probe finding candidate): a full [num_tokens, hidden] NaN scan
+        # plus a device sync, on every blend, consumed only by the disabled
+        # logger.debug below. Counted into `scat_nan`.
+        if _BLEND_PARTS:
+            _t0 = time.perf_counter()
+            final_has_nan = bool(torch.isnan(inputs_embeds).any())
+            _EMBED_PARTS["scat_nan"] += time.perf_counter() - _t0
+        else:
+            final_has_nan = bool(torch.isnan(inputs_embeds).any())
         logger.debug(
             "Reconstructed inputs_embeds: shape=%s, "
             "vision_embeds_merged=%d/%d, num_tokens=%d, has_nan=%s",
@@ -1095,9 +1224,28 @@ class LMCacheConnectorV1Impl:
             )
             return None, None
 
+        # --- blend-parts probe (LMCACHE_BLEND_PARTS=1, default OFF) ----------
+        # Host-side perf_counter buckets, one pair per PHASE (not per mm item),
+        # so the probe cannot perturb its own subject (rule 12). See the
+        # `[embed-parts]` log at the bottom of this method for how to read the
+        # attribution -- CUDA launches are async, so a bucket that ends in a
+        # device sync absorbs the queued device time of everything before it.
+        _bp = _BLEND_PARTS
+        if _bp:
+            _EMBED_PARTS.clear()
+            _EMBED_PARTS.update(
+                {k: 0.0 for k in (
+                    "tok", "enc", "emb", "devsync", "dbg", "norm",
+                    "scat", "scat_sync", "scat_nan",
+                )}
+            )
+            _bp_t = time.perf_counter()
+
         token_ids_t = torch.tensor(
             token_ids[:num_tokens], dtype=torch.long, device="cuda"
         )
+        if _bp:
+            _EMBED_PARTS["tok"] = time.perf_counter() - _bp_t
         # Incomplete cached prefix: under high-concurrency KV pressure vLLM can
         # preempt/evict part (or all) of a request's cached tokens, so the
         # available token_ids are fewer than the expected num_tokens. Downstream
@@ -1120,6 +1268,8 @@ class LMCacheConnectorV1Impl:
         # stays aligned 1:1 with the mm_positions that pass the filter.
         vision_embeds: list[Optional[torch.Tensor]] = []
         num_encoder_misses = 0
+        if _bp:
+            _bp_t = time.perf_counter()
         for mm_hash, placeholder in zip(mm_hashes, mm_positions):
             start = int(getattr(placeholder, "offset", 0))
             length = int(getattr(placeholder, "length", 0))
@@ -1140,6 +1290,8 @@ class LMCacheConnectorV1Impl:
                 enc_slice = self._normalize_cached_mm_embed(
                     torch.as_tensor(enc_out), end - start)
             vision_embeds.append(enc_slice)
+        if _bp:
+            _EMBED_PARTS["enc"] = time.perf_counter() - _bp_t
         if num_encoder_misses > 0:
             logger.warning(
                 "encoder_cache missed %d/%d items in cached prefix "
@@ -1167,7 +1319,29 @@ class LMCacheConnectorV1Impl:
         if embed_fn is None:
             return None, None
 
+        if _bp:
+            _bp_t = time.perf_counter()
         text_embeds = embed_fn(token_ids_t)
+        if _bp:
+            # `emb` is LAUNCH cost only -- the embedding gather is async. The
+            # probe-only barrier below then drains everything queued so far
+            # (token H2D + encoder-cache slicing + this gather), so `devsync`
+            # is the real device time of the phases above and `dbg` is measured
+            # against an already-idle device instead of silently absorbing it.
+            # Probe-only: the flag-off path keeps the original single implicit
+            # sync inside the `bool(...)` below. The ctrl arm checks the total
+            # did not move.
+            _EMBED_PARTS["emb"] = time.perf_counter() - _bp_t
+            _bp_t = time.perf_counter()
+            torch.cuda.synchronize()
+            _EMBED_PARTS["devsync"] = time.perf_counter() - _bp_t
+            _bp_t = time.perf_counter()
+        # NOTE (probe finding candidate): every term below is computed
+        # unconditionally and consumed ONLY by a logger.debug that is disabled
+        # in production -- `bool(...)` on a device tensor is a full-tensor scan
+        # plus a device->host sync, and `.norm().item()` / `.min().item()` /
+        # `.max().item()` are evaluated as CALL ARGUMENTS, so lazy %-formatting
+        # does not save them.
         text_has_nan = bool(torch.isnan(text_embeds).any())
         logger.debug(
             "text_embeds: shape=%s, has_nan=%s, norm=%.4f, "
@@ -1176,6 +1350,8 @@ class LMCacheConnectorV1Impl:
             text_embeds.norm().item() if not text_has_nan else float('nan'),
             token_ids_t.min().item(), token_ids_t.max().item(),
         )
+        if _bp:
+            _EMBED_PARTS["dbg"] = time.perf_counter() - _bp_t
 
         # --- Deepstack (Qwen3-VL): encoder_cache stores concatenated
         # [main | multiscale] embeddings whose dim > text hidden size.
@@ -1191,6 +1367,8 @@ class LMCacheConnectorV1Impl:
         # Strip these channels before deepstack split / scatter reconstruction.
         # None entries (encoder_cache misses) are preserved for alignment.
         vision_embeds_norm: list[Optional[torch.Tensor]] = []
+        if _bp:
+            _bp_t = time.perf_counter()
         for ve in vision_embeds:
             if ve is None:
                 vision_embeds_norm.append(None)
@@ -1206,6 +1384,8 @@ class LMCacheConnectorV1Impl:
                 last_dim = ve.shape[-1]
             vision_embeds_norm.append(ve)
 
+        if _bp:
+            _EMBED_PARTS["norm"] = time.perf_counter() - _bp_t
         vision_embeds = vision_embeds_norm
         if use_deepstack and compute_deepstack is not None:
             try:
@@ -1213,9 +1393,14 @@ class LMCacheConnectorV1Impl:
                 ds_embeds, vision_embeds_main = compute_deepstack(
                     token_ids_t, text_embeds, vision_embeds,
                 )
+                if _bp:
+                    _bp_t = time.perf_counter()
                 inputs_embeds = self._scatter_vision_embeds(
                     text_embeds, vision_embeds_main, mm_positions, num_tokens,
                 )
+                if _bp:
+                    _EMBED_PARTS["scat"] = time.perf_counter() - _bp_t
+                    _log_embed_parts(num_tokens, len(mm_positions), "deepstack")
                 deepstack_input_embeds = ds_embeds
                 return inputs_embeds, deepstack_input_embeds
             except Exception as exc:
@@ -1252,9 +1437,14 @@ class LMCacheConnectorV1Impl:
 
         # --- Standard path (InternVL, etc.): encoder_cache dim matches
         # text hidden size. Scatter directly. --------------------------
+        if _bp:
+            _bp_t = time.perf_counter()
         inputs_embeds = self._scatter_vision_embeds(
             text_embeds, vision_embeds_scatter, mm_positions, num_tokens,
         )
+        if _bp:
+            _EMBED_PARTS["scat"] = time.perf_counter() - _bp_t
+            _log_embed_parts(num_tokens, len(mm_positions), "standard")
         return inputs_embeds, deepstack_input_embeds
 
     def _batched_blend_load_kv(self, metadata, kvcaches, attn_metadata) -> bool:
@@ -1277,6 +1467,20 @@ class LMCacheConnectorV1Impl:
         blender = self.blender
         if blender is None:
             return False
+
+        # Merged-blend hygiene: a plan stashed last step that the runner never
+        # consumed (e.g. an exception before the merge hook) is stale -- its
+        # slot mappings/embeds belong to a previous batch. Never apply it late;
+        # drop it. The KV for those requests was fetched but not refreshed,
+        # which is the same state as a soft-skipped (retrieve-only) request:
+        # correct output, no anchor refresh.
+        if self._merged_blend_plan is not None:
+            logger.warning(
+                "[merged-blend] dropping stale unconsumed plan (N=%d) from a "
+                "previous step",
+                len(self._merged_blend_plan.get("requests") or []),
+            )
+            self._merged_blend_plan = None
 
         # Per-phase GPU timing via CUDA events (see self._blend_timing).
         # event.record() only enqueues a timestamp marker on the current stream;
@@ -1309,26 +1513,80 @@ class LMCacheConnectorV1Impl:
         # confirmed request-level concurrency, and the gates are silent, so
         # there is no way to tell "the scheduler only gave us one request" from
         # "several arrived but one tripped a gate and aborted the whole batch".
-        # Note the asymmetry: a missing load_spec SKIPS that request, but every
-        # other gate `return False`s, discarding the requests already collected
-        # and dropping the whole step to the serial path. One bad request in a
-        # step therefore costs batching for all of them.
+        # Note the asymmetry (fixed by LMCACHE_PARTIAL_BAIL=1, default ON): a
+        # missing load_spec SKIPS that request. Soft gates (encoder miss, short
+        # cache, 0 anchors) used to `return False` and discard the whole pack;
+        # with partial bail they soft-skip (retrieve-only) and keep packing.
+        # Hard gate (len mismatch) still aborts the step.
         pack_dbg = self._blend_pack_debug
         n_sched = len(metadata.requests)
         n_no_loadspec = 0
+        # Partial bail (LMCACHE_PARTIAL_BAIL=1, default ON): soft gates drop ONLY
+        # the offending request (retrieve-only / already-fetched) and keep packing
+        # the rest. Old behaviour aborted the WHOLE step to serial on any gate --
+        # one encoder-cache miss cost batching for every co-scheduled request.
+        # Hard gate (len mismatch) still aborts: that is data corruption.
+        _partial_bail = os.environ.get("LMCACHE_PARTIAL_BAIL", "1") == "1"
+        # Test hook: soft-skip the first eligible request of a multi-request step
+        # so equality/timing can exercise the path without waiting for a real
+        # encoder eviction. No-op when PARTIAL_BAIL=0 (falls through to _bail).
+        _force_skip = os.environ.get("LMCACHE_PARTIAL_BAIL_FORCE_SKIP", "0") == "1"
+        _force_skip_done = False
+        n_soft_skip = 0
 
         def _bail(reason: str, req_idx: int) -> bool:
             """Uniform abort: log why the whole step left the batched path."""
             if pack_dbg:
                 logger.info(
                     "[blend-pack] ABORT to serial: scheduled=%d no_load_spec=%d "
-                    "collected=%d, request #%d hit gate '%s'",
-                    n_sched, n_no_loadspec, len(requests_info), req_idx, reason,
+                    "collected=%d soft_skip=%d, request #%d hit gate '%s'",
+                    n_sched, n_no_loadspec, len(requests_info), n_soft_skip,
+                    req_idx, reason,
                 )
             return False
 
         requests_info = []
         chunk = self._lmcache_chunk_size
+
+        def _retrieve_only(tokens, c, token_mask, slot_mapping) -> None:
+            """Drain a plain layerwise retrieve for a soft-skipped request.
+
+            Used when embeds are unavailable (cannot CodecSight-recompute) or the
+            window is too short to blend. KV still lands in the paged cache so
+            the request is correct; it just does not join blend_batched. Fully
+            drained here (sync) so we do not mix deferred retrievers with the
+            packed path that returns handled=True and skips the serial loop.
+            """
+            retr = self.lmcache_engine.retrieve_layer(
+                tokens[:c], token_mask[:c], kvcaches=kvcaches,
+                slot_mapping=slot_mapping[:c], sync=True,
+            )
+            for _ in retr:
+                pass
+
+        def _soft_skip(reason: str, req_idx: int, *,
+                       tokens=None, c=None, token_mask=None, slot_mapping=None,
+                       need_retrieve: bool = False) -> bool:
+            """Drop this request from the pack. Returns True if soft-skip engaged.
+
+            When PARTIAL_BAIL is off, returns False so the caller can _bail.
+            """
+            nonlocal n_soft_skip
+            if not _partial_bail:
+                return False
+            n_soft_skip += 1
+            if pack_dbg:
+                logger.info(
+                    "[blend-pack] SOFT-SKIP req #%d '%s' (need_retrieve=%s); "
+                    "continuing pack (collected=%d soft_skip=%d scheduled=%d)",
+                    req_idx, reason, need_retrieve,
+                    len(requests_info), n_soft_skip, n_sched,
+                )
+            if need_retrieve:
+                assert tokens is not None and c is not None
+                assert token_mask is not None and slot_mapping is not None
+                _retrieve_only(tokens, c, token_mask, slot_mapping)
+            return True
 
         def _fallback_fetch_and_select(request, tokens, c, token_mask, slot_mapping, embeds) -> bool:
             """Per-request eager fetch+select, used ONLY as the coalesced-fetch
@@ -1369,6 +1627,8 @@ class LMCacheConnectorV1Impl:
                 positions = torch.arange(c, device=dev, dtype=torch.int64)[anchor_local]
 
             requests_info.append({
+                "req_id": request.req_id,
+                "prefix_len": int(c),
                 "anchor_embeds": embeds[anchor_local],
                 "positions": positions,
                 "slot_full": slot_mapping[:c],
@@ -1439,14 +1699,36 @@ class LMCacheConnectorV1Impl:
             tokens = request.token_ids
             slot_mapping = request.slot_mapping.cuda()
             if len(tokens) != len(slot_mapping):
+                # Hard gate: structural inconsistency -- abort the step.
                 return _bail("len(tokens) != len(slot_mapping)", req_idx)
             c = min(request.load_spec.lmcache_cached_tokens, len(tokens))
-            if c < 128:  # _MIN_BLEND_TOKENS: too short to blend -> fall back
-                return _bail(f"cached_tokens {c} < 128", req_idx)
-
             token_mask = torch.ones(len(tokens), dtype=torch.bool)
             masked = request.load_spec.vllm_cached_tokens // chunk * chunk
             token_mask[:masked] = False
+
+            if c < 128:  # _MIN_BLEND_TOKENS: too short to blend
+                if _soft_skip(
+                    f"cached_tokens {c} < 128", req_idx,
+                    tokens=tokens, c=c, token_mask=token_mask,
+                    slot_mapping=slot_mapping, need_retrieve=True,
+                ):
+                    continue
+                return _bail(f"cached_tokens {c} < 128", req_idx)
+
+            # Test hook: drop the first eligible request of a multi-request step
+            # so partial-bail can be exercised without a real encoder eviction.
+            if (
+                _force_skip and not _force_skip_done and n_sched >= 2
+                and (n_sched - n_no_loadspec) >= 2
+            ):
+                _force_skip_done = True
+                if _soft_skip(
+                    "force_skip_test", req_idx,
+                    tokens=tokens, c=c, token_mask=token_mask,
+                    slot_mapping=slot_mapping, need_retrieve=True,
+                ):
+                    continue
+                return _bail("force_skip_test", req_idx)
 
             _s = _evt() if timing else None
             embeds, _deepstack = self._reconstruct_inputs_embeds(
@@ -1455,7 +1737,14 @@ class LMCacheConnectorV1Impl:
             if timing:
                 spans["embed"].append((_s, _evt()))
             if embeds is None:
-                # encoder cache unavailable -> serial fallback
+                # Encoder cache miss: cannot CodecSight-recompute this req, but
+                # other co-scheduled reqs can still form a pack.
+                if _soft_skip(
+                    "encoder cache miss (embeds is None)", req_idx,
+                    tokens=tokens, c=c, token_mask=token_mask,
+                    slot_mapping=slot_mapping, need_retrieve=True,
+                ):
+                    continue
                 return _bail("encoder cache miss (embeds is None)", req_idx)
 
             if coalesced_fetch:
@@ -1502,6 +1791,14 @@ class LMCacheConnectorV1Impl:
             hit = blender._compute_hit_indices(c, dev)
             anchor_local = blender._codecsight_select(hit, c, dev)
             if anchor_local.numel() == 0:
+                # Eager: fetch already drained into paged KV -- omit from pack.
+                # Overlap: fetch_gens must stay 1:1 with requests_info (we already
+                # primed this req onto the side stream), so abort rather than
+                # soft-skip (orphan generators deadlock the deferred driver).
+                if overlap:
+                    return _bail("codecsight selected 0 anchors", req_idx)
+                if _soft_skip("codecsight selected 0 anchors", req_idx):
+                    continue
                 return _bail("codecsight selected 0 anchors", req_idx)
 
             if blender.is_mrope and blender._mrope_model_config is not None:
@@ -1511,6 +1808,8 @@ class LMCacheConnectorV1Impl:
                 positions = torch.arange(c, device=dev, dtype=torch.int64)[anchor_local]
 
             requests_info.append({
+                "req_id": request.req_id,
+                "prefix_len": int(c),
                 "anchor_embeds": embeds[anchor_local],
                 "positions": positions,
                 "slot_full": slot_mapping[:c],
@@ -1547,9 +1846,66 @@ class LMCacheConnectorV1Impl:
                 # compare against instead of skipping unchecked.
                 gconn._lazy_initialize_buffer(kvcaches)
             max_safe = getattr(gconn, "max_coalesced_tokens", None)
+
+            # Gate 2 (added after job 15081983): every request in a coalesced
+            # group must contribute >= 1 retrievable chunk. retrieve_layer_multi
+            # asserts this and has no per-request fallback once it starts, and
+            # that assert runs inside the worker -- so one unretrievable request
+            # does not degrade the step, it kills the EngineCore
+            # (EngineDeadError at N=8, which then took out the N=10 and N=12
+            # phases as downstream fallout). Common on category-diverse
+            # workloads, where a window's KV may simply not be cached yet;
+            # invisible on the single-video set every earlier run used.
+            #
+            # FILTER, don't bail: drop only the zero-chunk requests to the
+            # per-request path and still coalesce the rest, so one cache miss
+            # costs that request's coalescing rather than the whole step's.
+            coalescable, misses = [], []
+            for p in pending:
+                (coalescable if self.lmcache_engine.has_retrievable_chunk(
+                    p["tokens"][: p["c"]], p["token_mask"][: p["c"]])
+                 else misses).append(p)
+
+            if misses:
+                if pack_dbg:
+                    logger.info(
+                        "[blend-pack] %d of %d pending request(s) contribute no "
+                        "retrievable chunk (req_idx=%s); handling those per-request "
+                        "and coalescing the remaining %d.",
+                        len(misses), len(pending), [p["req_idx"] for p in misses],
+                        len(coalescable),
+                    )
+                for p in misses:
+                    if not _fallback_fetch_and_select(
+                        p["request"], p["tokens"], p["c"], p["token_mask"],
+                        p["slot_mapping"], p["embeds"],
+                    ):
+                        # Fetch ran; 0 anchors -- soft-skip keeps the pack.
+                        if _soft_skip(
+                            "coalesced-fallback (no chunk): 0 anchors",
+                            p["req_idx"],
+                        ):
+                            continue
+                        return _bail(
+                            "coalesced-fallback (no retrievable chunk): "
+                            "codecsight selected 0 anchors",
+                            p["req_idx"],
+                        )
+                # _fallback_fetch_and_select already did BOTH fetch and select
+                # for these and appended their requests_info entry, so they must
+                # not be revisited by Pass 2. Narrowing `pending` to the
+                # coalesced group also keeps it index-aligned with
+                # `per_request_gaps`, which Pass 2 slices positionally.
+                pending = coalescable
+
             est_tokens = sum(int(p["token_mask"][: p["c"]].sum()) for p in pending)
 
-            if max_safe is not None and est_tokens > max_safe:
+            if not pending:
+                # Every request was a miss; they were all handled inline above.
+                # Calling retrieve_layer_multi with an empty list would trip its
+                # own n_reqs > 0 assert.
+                pass
+            elif max_safe is not None and est_tokens > max_safe:
                 if pack_dbg:
                     logger.info(
                         "[blend-pack] coalesced fetch needs ~%d tokens > pool "
@@ -1562,6 +1918,10 @@ class LMCacheConnectorV1Impl:
                         p["request"], p["tokens"], p["c"], p["token_mask"],
                         p["slot_mapping"], p["embeds"],
                     ):
+                        if _soft_skip(
+                            "coalesced-fallback: 0 anchors", p["req_idx"],
+                        ):
+                            continue
                         return _bail(
                             "coalesced-fallback: codecsight selected 0 anchors",
                             p["req_idx"],
@@ -1615,6 +1975,8 @@ class LMCacheConnectorV1Impl:
             hit = blender._compute_hit_indices(c, dev)
             anchor_local = blender._codecsight_select(hit, c, dev)
             if anchor_local.numel() == 0:
+                if _soft_skip("codecsight selected 0 anchors", req_idx):
+                    continue
                 return _bail("codecsight selected 0 anchors", req_idx)
 
             if blender.is_mrope and blender._mrope_model_config is not None:
@@ -1624,6 +1986,8 @@ class LMCacheConnectorV1Impl:
                 positions = torch.arange(c, device=dev, dtype=torch.int64)[anchor_local]
 
             requests_info.append({
+                "req_id": request.req_id,
+                "prefix_len": int(c),
                 "anchor_embeds": embeds[anchor_local],
                 "positions": positions,
                 "slot_full": slot_mapping[:c],
@@ -1633,10 +1997,22 @@ class LMCacheConnectorV1Impl:
                 spans["select"].append((_s, _evt()))
 
         if not requests_info:
+            if n_soft_skip > 0:
+                # Every eligible request was soft-skipped and already retrieve-
+                # only (or fetch-only) handled above. Returning False would
+                # fall into the serial loop and load/blend them a second time.
+                if pack_dbg:
+                    logger.info(
+                        "[blend-pack] all %d soft-skipped (scheduled=%d "
+                        "no_load_spec=%d); nothing to pack, already handled",
+                        n_soft_skip, n_sched, n_no_loadspec,
+                    )
+                return True
             if pack_dbg:
                 logger.info(
                     "[blend-pack] no blendable requests: scheduled=%d "
-                    "no_load_spec=%d -> serial path", n_sched, n_no_loadspec,
+                    "no_load_spec=%d soft_skip=%d -> serial path",
+                    n_sched, n_no_loadspec, n_soft_skip,
                 )
             return False
 
@@ -1646,53 +2022,100 @@ class LMCacheConnectorV1Impl:
         # is here in the gates above.
         if pack_dbg:
             logger.info(
-                "[blend-pack] scheduled=%d no_load_spec=%d -> packed N=%d "
-                "(anchors=%d) mode=%s",
-                n_sched, n_no_loadspec, len(requests_info),
+                "[blend-pack] scheduled=%d no_load_spec=%d soft_skip=%d -> "
+                "packed N=%d (anchors=%d) mode=%s",
+                n_sched, n_no_loadspec, n_soft_skip, len(requests_info),
                 sum(int(r["anchor_local"].numel()) for r in requests_info),
                 "deferred/overlap" if overlap else "eager",
             )
 
         if overlap:
-            # Level-2: defer the packed recompute + per-layer fetch into a driver
-            # generator driven by wait_for_layer_load on the side stream, so the
-            # batched blend overlaps prefill instead of blocking start_load_kv.
-            # Priming happens on the side stream (mirrors the serial path). No
-            # [blend-timing] line here: the work runs later, during the forward.
-            with torch.cuda.stream(self._blend_stream):
-                driver = blender.blend_batched(
-                    requests_info, kvcaches,
-                    fetch_gens=fetch_gens, defer=True,
-                )
-            # ISOLATION EXPERIMENT (LMCACHE_DEFER_DRAIN_EAGER=1): run the DEFERRED
-            # code path with EAGER timing -- build the defer=True driver exactly as
-            # normal, then drain it right here instead of handing it to
-            # wait_for_layer_load. This splits the two candidate causes of the
-            # overlap path's wrong output (7/18 keys, deltas 0.45-1.81 nats, one
-            # answer flip; jobs 15001729/15002005/15002109/15002110):
-            #   PASS -> the deferred computation is correct, the bug is in the
-            #           per-layer interleaving with prefill.
-            #   FAIL -> the bug is inside blend_batched(defer=True) itself and the
-            #           interleaving is innocent.
-            # Creation already consumed 2 primes, so num_layers more next() calls
-            # complete the cadence and one further call runs the epilogue.
+            # Level-2: deferred batched blend.
+            # Default (no AR mux): FETCH on `_blend_stream`, RECOMPUTE on current
+            # (TP all-reduces must not share a communicator across streams —
+            # Fix C hang, jobs 15002378 / 15099974).
+            # With LMCACHE_AR_MUX=1: ARs are remuxed onto a dedicated stream, so
+            # wait_for_layer_load may also run RECOMPUTE on `_blend_stream` and
+            # overlap local blend GEMMs with prefill. Prime still finishes
+            # recompute(0) on the current stream before the forward starts.
+            # No [blend-timing] here: work finishes during the forward via
+            # wait_for_layer_load.
+            driver = blender.blend_batched(
+                requests_info, kvcaches,
+                fetch_gens=fetch_gens, defer=True,
+            )
+            assert isinstance(driver, DeferredBatchedBlendDriver)
+
+            # ISOLATION EXPERIMENT (LMCACHE_DEFER_DRAIN_EAGER=1): deferred CODE
+            # with EAGER timing — drain fully here, no wait_for_layer_load.
             if os.environ.get("LMCACHE_DEFER_DRAIN_EAGER", "0") == "1":
                 logger.info(
                     "[blend-pack] LMCACHE_DEFER_DRAIN_EAGER=1: draining the deferred "
                     "driver in place (deferred code path, eager timing)."
                 )
-                with torch.cuda.stream(self._blend_stream):
-                    for _ in range(self.num_layers):
-                        next(driver)
-                    try:
-                        next(driver)
-                    except StopIteration:
-                        pass
+                for _ in range(self.num_layers):
+                    next(driver)
+                driver.close()
                 if self._blend_stream is not None:
                     torch.cuda.current_stream().wait_stream(self._blend_stream)
                 return True
 
+            # Prime: fetch(0) on side stream, recompute(0) on current (layer-0 KV
+            # must be ready before forward), fetch(1) on side for wait_for_layer_load.
+            with torch.cuda.stream(self._blend_stream):
+                driver.step_fetch()
+            torch.cuda.current_stream().wait_stream(self._blend_stream)
+            driver.step_recompute()
+            if not driver.done:
+                with torch.cuda.stream(self._blend_stream):
+                    driver.step_fetch()
             self.layerwise_blenders.append(driver)
+            return True
+
+        # Phase 2: either stash for runner-merged prefill (LMCACHE_MERGED_BLEND)
+        # or run the classic packed recompute forward.
+        anchors = sum(int(r["anchor_local"].numel()) for r in requests_info)
+        n = len(requests_info)
+        # skip_ffn zeroes the FFN on recompute rows only; the merged forward
+        # runs the real mlp on anchor rows and cannot reproduce that. Refuse
+        # to merge rather than silently change the skip_ffn semantics.
+        merged_ok = self._merged_blend and not bool(
+            getattr(blender, "skip_ffn", False))
+        if self._merged_blend and not merged_ok:
+            logger.warning(
+                "[merged-blend] skip_ffn=True is incompatible with the merged "
+                "path; using classic blend_batched for this step."
+            )
+        if merged_ok:
+            # Fetch+select done; recompute will be folded into the upcoming
+            # vLLM prefill by gpu_model_runner._apply_merged_blend_plan.
+            # Keep kvcaches so a runner-side fallback can still blend_batched.
+            self._merged_blend_plan = {
+                "requests": requests_info,
+                "kvcaches": kvcaches,
+            }
+            if timing:
+                torch.cuda.synchronize()
+
+                def _sum_m(key):
+                    return sum(a.elapsed_time(b) for a, b in spans[key])
+
+                t_embed = _sum_m("embed")
+                t_fetch = _sum_m("fetch")
+                t_select = _sum_m("select")
+                total = t_embed + t_fetch + t_select
+                n_sync = getattr(gconn, "global_sync_count", 0) - sync0
+                logger.info(
+                    "[blend-timing] merged-stash N=%d anchors=%d | embed=%.2fms "
+                    "fetch=%.2fms select=%.2fms recompute=0.00ms (deferred to "
+                    "prefill) | total=%.2fms fetch_syncs=%d",
+                    n, anchors, t_embed, t_fetch, t_select, total, n_sync,
+                )
+            else:
+                logger.info(
+                    "[merged-blend] stashed N=%d anchors=%d for runner merge",
+                    n, anchors,
+                )
             return True
 
         # Phase 2 (eager): one packed forward for all requests (KV REFRESH).
@@ -1712,9 +2135,7 @@ class LMCacheConnectorV1Impl:
             t_fetch = _sum("fetch")
             t_select = _sum("select")
             t_recompute = _s.elapsed_time(_e)
-            n = len(requests_info)
             total = t_embed + t_fetch + t_select + t_recompute
-            anchors = sum(int(r["anchor_local"].numel()) for r in requests_info)
             n_sync = getattr(gconn, "global_sync_count", 0) - sync0
             logger.info(
                 "[blend-timing] batched N=%d anchors=%d | embed=%.2fms "
@@ -1726,6 +2147,35 @@ class LMCacheConnectorV1Impl:
                 100.0 * t_recompute / total if total else 0.0,
                 n_sync,
             )
+        return True
+
+    def take_merged_blend_plan(self):
+        """Return the stashed merged-blend plan (or None). Does not clear.
+
+        Cleared by ``clear_merged_blend_plan`` after the runner applies it or
+        after ``run_merged_blend_recompute_fallback``.
+        """
+        return self._merged_blend_plan
+
+    def clear_merged_blend_plan(self) -> None:
+        self._merged_blend_plan = None
+
+    def run_merged_blend_recompute_fallback(self) -> bool:
+        """Run classic ``blend_batched`` on the stashed plan (runner could not
+        append pseudo-segments). Returns True if a recompute ran."""
+        plan = self._merged_blend_plan
+        self._merged_blend_plan = None
+        if not plan or not plan.get("requests"):
+            return False
+        blender = self.blender
+        if blender is None:
+            return False
+        logger.warning(
+            "[merged-blend] runner could not apply plan; falling back to "
+            "eager blend_batched (N=%d)",
+            len(plan["requests"]),
+        )
+        blender.blend_batched(plan["requests"], plan["kvcaches"])
         return True
 
     @_lmcache_nvtx_annotate
@@ -1766,6 +2216,27 @@ class LMCacheConnectorV1Impl:
         # _drain_layerwise_blenders for why the old bare reassignment deadlocked
         # the engine at N>=4 (job 15000264).
         self._drain_layerwise_blenders("new engine step")
+
+        # Serial per-request blend timing (LMCACHE_BLEND_TIMING=1), the
+        # non-batched analogue of _batched_blend_load_kv's [blend-timing]
+        # line. self.blender.blend(defer=self._codecsight_pipeline) only
+        # returns a deferred per-layer generator when _codecsight_pipeline is
+        # set (VLLM_CODECSIGHT_PIPELINE=1); that env var is NOT set in any of
+        # the benchmark qsub scripts, so defer=False and blend() instead
+        # drains the whole per-layer generator SYNCHRONOUSLY right there
+        # (blender.py:1066-1067, `for _ in range(num_layers+2): next(...)`),
+        # exactly like the batched path's eager blend_batched() call -- so it
+        # can be bracketed the same way, around the call site below. If
+        # _codecsight_pipeline IS set, only the two priming next() calls run
+        # eagerly and the rest happens later in wait_for_layer_load, which
+        # this bracket does NOT cover -- see the warning at the flush site.
+        if self._blend_timing:
+            self._serial_blend_n = 0
+            self._serial_blend_embed_evts = []
+            self._serial_blend_layer_evts = []
+            self._serial_blend_fetch_evts = []
+            self._serial_blend_recompute_evts = []
+            self._serial_blend_select_ms = 0.0
 
         # Tier-2: batched selective recompute. Eligible only for the eager
         # codecsight blend path (the validated batch-safe mode). Falls through
@@ -1856,12 +2327,22 @@ class LMCacheConnectorV1Impl:
                     if skip_embeds:
                         inputs_embeds, deepstack_input_embeds = None, None
                     else:
+                        _blend_t_evt = None
+                        if self._blend_timing:
+                            _blend_t_evt = torch.cuda.Event(enable_timing=True)
+                            _blend_t_evt.record()
                         inputs_embeds, deepstack_input_embeds = (
                             self._reconstruct_inputs_embeds(
                                 tokens, request.mm_hashes,
                                 request.mm_positions, lmcache_cached_tokens,
                             )
                         )
+                        if self._blend_timing:
+                            _blend_t_end = torch.cuda.Event(enable_timing=True)
+                            _blend_t_end.record()
+                            self._serial_blend_embed_evts.append(
+                                (_blend_t_evt, _blend_t_end)
+                            )
 
                     if inputs_embeds is None and not skip_embeds:
                         logger.warning(
@@ -1869,6 +2350,12 @@ class LMCacheConnectorV1Impl:
                             "eviction); falling back to layerwise "
                             "retrieval for this request"
                         )
+                        # This request never reaches blend(), so drop the embed
+                        # span just recorded for it -- keeping it would charge
+                        # embed time to a step whose reported N excludes this
+                        # request.
+                        if self._blend_timing and self._serial_blend_embed_evts:
+                            self._serial_blend_embed_evts.pop()
                         layerwise_retriever = \
                             self.lmcache_engine.retrieve_layer(
                                 tokens[:lmcache_cached_tokens],
@@ -1904,6 +2391,10 @@ class LMCacheConnectorV1Impl:
                         if self._async_overlap
                         else contextlib.nullcontext()
                     )
+                    _blend_l_evt = None
+                    if self._blend_timing:
+                        _blend_l_evt = torch.cuda.Event(enable_timing=True)
+                        _blend_l_evt.record()
                     with _blend_ctx:
                         deferred_blender = self.blender.blend(
                             tokens[:lmcache_cached_tokens],
@@ -1919,6 +2410,29 @@ class LMCacheConnectorV1Impl:
                             inputs_embeds=inputs_embeds,
                             deepstack_input_embeds=deepstack_input_embeds,
                         )
+                    if self._blend_timing:
+                        # Only a complete measurement when defer=False (the
+                        # eager path -- see the reset-block comment above):
+                        # blend() has then already drained every layer
+                        # synchronously, so this span covers the whole
+                        # request. When _codecsight_pipeline forces defer=
+                        # True, this span covers only the 2-step primer and
+                        # UNDER-reports -- flagged at the flush site instead
+                        # of silently mixing complete and partial spans.
+                        _blend_l_end = torch.cuda.Event(enable_timing=True)
+                        _blend_l_end.record()
+                        self._serial_blend_layer_evts.append(
+                            (_blend_l_evt, _blend_l_end, deferred_blender is not None)
+                        )
+                        self._serial_blend_n += 1
+                        # Pull per-phase fetch/recompute/select out of the
+                        # blender (eager path only -- deferred has not run
+                        # the full layer loop yet).
+                        if deferred_blender is None and self.blender is not None:
+                            _tf, _tr, _ts = self.blender.take_serial_phase_timing()
+                            self._serial_blend_fetch_evts.extend(_tf)
+                            self._serial_blend_recompute_evts.extend(_tr)
+                            self._serial_blend_select_ms += float(_ts)
                     if deferred_blender is not None:
                         # Pipelining A: step per-layer in wait_for_layer_load
                         # so the KV load overlaps prefill compute.
@@ -1976,6 +2490,91 @@ class LMCacheConnectorV1Impl:
                 request.load_spec.vllm_cached_tokens
             )
             self._stats_monitor.update_interval_prompt_tokens(len(tokens))
+
+        # Queue this step's serial blend timing (LMCACHE_BLEND_TIMING=1) --
+        # the [blend-timing] serial counterpart of _batched_blend_load_kv's
+        # line, aggregated over however many requests this step's per-request
+        # loop actually blended (self._serial_blend_n). NOT read here: the
+        # events are read a step later by _drain_serial_blend_timing, which
+        # polls rather than syncing (see _serial_blend_pending in __init__ for
+        # why no sync is added to this path).
+        if self._blend_timing and self._serial_blend_n:
+            self._serial_blend_pending.append(
+                (self._serial_blend_n, self._serial_blend_embed_evts,
+                 self._serial_blend_layer_evts,
+                 self._serial_blend_fetch_evts,
+                 self._serial_blend_recompute_evts,
+                 self._serial_blend_select_ms)
+            )
+            self._serial_blend_n = 0
+            self._serial_blend_embed_evts = []
+            self._serial_blend_layer_evts = []
+            self._serial_blend_fetch_evts = []
+            self._serial_blend_recompute_evts = []
+            self._serial_blend_select_ms = 0.0
+        if self._blend_timing:
+            self._drain_serial_blend_timing()
+
+    def _drain_serial_blend_timing(self) -> None:
+        """Log any queued serial [blend-timing] batches whose CUDA events have
+        completed, WITHOUT synchronizing the device.
+
+        Called at the end of every start_load_kv, so a batch queued by step k
+        is normally read at step k+1, by which time its events are long done.
+        Completion is polled with Event.query() -- a batch that is somehow not
+        ready yet stays queued for the following step instead of blocking.
+        Batches are read in order and reading stops at the first incomplete
+        one, so the log stays chronological.
+
+        The final step's batch is never read (nothing follows it to trigger a
+        drain). That costs one blend step per phase out of the tens-to-hundreds
+        each phase produces, and the analysis averages over the phase, so it
+        is not worth a sync to recover.
+        """
+        while self._serial_blend_pending:
+            item = self._serial_blend_pending[0]
+            # Backward-compatible: old 3-tuples vs new 6-tuples with phases.
+            if len(item) == 3:
+                n, embed_evts, layer_evts = item
+                fetch_evts, recompute_evts, select_ms = [], [], 0.0
+            else:
+                (n, embed_evts, layer_evts, fetch_evts,
+                 recompute_evts, select_ms) = item
+            last = (layer_evts or embed_evts or fetch_evts or recompute_evts)[-1][1]
+            if not last.query():
+                break                      # not finished; try again next step
+            self._serial_blend_pending.pop(0)
+            t_embed = sum(a.elapsed_time(b) for a, b in embed_evts)
+            t_blend = sum(a.elapsed_time(b) for a, b, _ in layer_evts)
+            partial = any(deferred for _, _, deferred in layer_evts)
+            t_fetch = sum(a.elapsed_time(b) for a, b in fetch_evts) if fetch_evts else None
+            t_recompute = (
+                sum(a.elapsed_time(b) for a, b in recompute_evts)
+                if recompute_evts else None
+            )
+            total = t_embed + t_blend
+            if t_fetch is not None and t_recompute is not None and not partial:
+                # Match batched line shape. select is CPU wall time nested in
+                # the first recompute layer — reported but not added again.
+                logger.info(
+                    "[blend-timing] serial N=%d | embed=%.2fms fetch=%.2fms "
+                    "select=%.2fms recompute=%.2fms | total=%.2fms "
+                    "(fetch=%.0f%% recompute=%.0f%%; select⊂recompute, "
+                    "not double-counted)",
+                    n, t_embed, t_fetch, select_ms, t_recompute, total,
+                    100.0 * t_fetch / total if total else 0.0,
+                    100.0 * t_recompute / total if total else 0.0,
+                )
+            else:
+                logger.info(
+                    "[blend-timing] serial N=%d | embed=%.2fms blend=%.2fms | "
+                    "total=%.2fms%s",
+                    n, t_embed, t_blend, total,
+                    " (PARTIAL -- _codecsight_pipeline deferred >=1 request; "
+                    "blend span covers only the 2-step primer, not the full "
+                    "per-layer cost, which ran later in wait_for_layer_load "
+                    "and is NOT included here)" if partial else "",
+                )
 
     def record_failed_blocks(
         self,
@@ -2052,26 +2651,75 @@ class LMCacheConnectorV1Impl:
         return missing_blocks
 
     @_lmcache_nvtx_annotate
-    def _step_blenders(self, blenders: list) -> list:
+    def _step_blenders(self, blenders: list, fetch_stream=None) -> list:
         """Advance each deferred blend driver one layer; return those still alive.
 
-        The old code did a bare ``next(b)`` over the list. A driver that reached its
-        natural end raised StopIteration straight out of ``wait_for_layer_load`` and
-        into vLLM's forward. Retiring exhausted drivers here also means a driver is
-        never advanced past its cadence, which is what let the abandoned-generator
-        state build up in the first place.
+        For ``DeferredBatchedBlendDriver`` (batched Fix C path):
+          * Default (no AR mux): ``step_recompute()`` on the *current* stream
+            (TP all-reduces); ``step_fetch()`` for the next layer on
+            ``fetch_stream`` if given (memcpy/RoPE only).
+          * With ``LMCACHE_AR_MUX=1`` and ``fetch_stream``: both recompute and
+            next fetch run on ``fetch_stream`` without waiting afterward, so
+            local blend GEMMs overlap the remainder of the current prefill
+            layer. ARs are serialized on the mux stream. The next
+            ``wait_for_layer_load`` does ``cur.wait_stream(fetch_stream)``
+            before attention needs the blended KV.
+
+        Legacy generator drivers still use a single ``next()`` (optionally under
+        ``fetch_stream`` when the caller wrapped the call).
         """
         alive = []
+        ar_mux = bool(getattr(self, "_ar_mux", False))
         for blender in blenders:
             try:
-                next(blender)
-                self._blender_steps[id(blender)] = (
-                    self._blender_steps.get(id(blender), 0) + 1
-                )
-                alive.append(blender)
+                if isinstance(blender, DeferredBatchedBlendDriver):
+                    if blender.done:
+                        blender.close()
+                        self._blender_steps.pop(id(blender), None)
+                        continue
+                    if ar_mux and fetch_stream is not None:
+                        # Full ahead step on blend stream; do not wait here.
+                        with torch.cuda.stream(fetch_stream):
+                            blender.step_recompute()
+                            self._blender_steps[id(blender)] = (
+                                self._blender_steps.get(id(blender), 0) + 1
+                            )
+                            if blender.done:
+                                blender.close()
+                                self._blender_steps.pop(id(blender), None)
+                                continue
+                            blender.step_fetch()
+                        alive.append(blender)
+                        continue
+                    # RECOMPUTE on current stream — never on _blend_stream under TP
+                    # unless AR mux is active (branch above).
+                    blender.step_recompute()
+                    self._blender_steps[id(blender)] = (
+                        self._blender_steps.get(id(blender), 0) + 1
+                    )
+                    if blender.done:
+                        blender.close()
+                        self._blender_steps.pop(id(blender), None)
+                        continue
+                    # Ahead FETCH on side stream (overlaps subsequent prefill).
+                    if fetch_stream is not None:
+                        with torch.cuda.stream(fetch_stream):
+                            blender.step_fetch()
+                    else:
+                        blender.step_fetch()
+                    alive.append(blender)
+                else:
+                    if fetch_stream is not None:
+                        with torch.cuda.stream(fetch_stream):
+                            next(blender)
+                    else:
+                        next(blender)
+                    self._blender_steps[id(blender)] = (
+                        self._blender_steps.get(id(blender), 0) + 1
+                    )
+                    alive.append(blender)
             except StopIteration:
                 self._blender_steps.pop(id(blender), None)
-                # Finished cleanly: drop it, do NOT keep stepping it.
                 try:
                     blender.close()
                 except Exception:
@@ -2127,7 +2775,12 @@ class LMCacheConnectorV1Impl:
         # "healthy (driven == num_layers) vs genuinely short" is the distinction that
         # decides which drain branch runs. Volume is ~1 line per deferred blend,
         # comparable to the existing [blend-pack] line.
-        driven = [self._blender_steps.get(id(d), 0) for d in leftover]
+        driven = []
+        for d in leftover:
+            if isinstance(d, DeferredBatchedBlendDriver):
+                driven.append(d.recompute_steps)
+            else:
+                driven.append(self._blender_steps.get(id(d), 0))
         logger.info(
             "[blend-drain] retiring %d deferred blend driver(s) (%s); "
             "driven=%s of num_layers=%d%s",
@@ -2143,6 +2796,28 @@ class LMCacheConnectorV1Impl:
             else contextlib.nullcontext()
         )
         for driver in leftover:
+            # New Fix-C driver: finish any remaining layers on the CURRENT stream
+            # (TP-safe), then close. No generator epilogue next().
+            if isinstance(driver, DeferredBatchedBlendDriver):
+                self._blender_steps.pop(id(driver), None)
+                try:
+                    if self._blend_stream is not None:
+                        torch.cuda.current_stream().wait_stream(self._blend_stream)
+                    while not driver.done:
+                        driver.step_fetch()
+                        driver.step_recompute()
+                    driver.close()
+                except Exception:
+                    logger.exception(
+                        "DeferredBatchedBlendDriver drain failed; disabling overlap."
+                    )
+                    self._overlap_degraded = True
+                    try:
+                        driver.close()
+                    except Exception:
+                        pass
+                continue
+
             done = self._blender_steps.pop(id(driver), 0)
             remaining = self.num_layers - done
             if remaining <= 0:
@@ -2218,6 +2893,11 @@ class LMCacheConnectorV1Impl:
         # cur.wait_stream(self._blend_stream) must not inherit a partial blend.
         if self._blend_stream is not None:
             self._blend_stream.synchronize()
+        if getattr(self, "_ar_mux", False):
+            get_ar_mux().wait_for_ar()
+            mux = get_ar_mux()
+            if mux.ar_stream is not None:
+                mux.ar_stream.synchronize()
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         """Blocking until the KV for a specific layer is loaded into vLLM's
@@ -2240,21 +2920,28 @@ class LMCacheConnectorV1Impl:
                 num_retrieved_tokens = ret_token_mask.sum().item()
                 logger.debug(f"Retrieved {num_retrieved_tokens} tokens")
 
-        # Pipelining A / async overlap: step deferred codecsight blenders one
-        # layer at a time. blend_layer yields None each step (no token mask).
-        if self._async_overlap and self.layerwise_blenders:
-            # The blender is one layer ahead (2x prime). At this hook for
-            # prefill layer L, blend(L) was already issued on the side stream
-            # last call; make the current (prefill) stream wait for it, then
-            # issue blend(L+1) on the side stream so it overlaps prefill(L).
-            cur = torch.cuda.current_stream()
-            cur.wait_stream(self._blend_stream)
-            with torch.cuda.stream(self._blend_stream):
+        # Pipelining A / async overlap: step deferred codecsight blenders.
+        # Batched deferred drivers (DeferredBatchedBlendDriver):
+        #   * Default: wait for ahead FETCH on `_blend_stream`, RECOMPUTE on
+        #     current (TP-safe), next FETCH on side stream.
+        #   * AR mux: wait for prior blend-stream work (so layer-L KV is ready
+        #     before attention), then launch RECOMPUTE(L+1)+FETCH on the side
+        #     stream without waiting — overlaps the rest of prefill layer L;
+        #     collectives go through the AR multiplexer.
+        # Legacy generator drivers keep the old side-stream step path.
+        if self.layerwise_blenders:
+            if self._async_overlap and self._blend_stream is not None:
+                cur = torch.cuda.current_stream()
+                cur.wait_stream(self._blend_stream)
+                if getattr(self, "_ar_mux", False):
+                    get_ar_mux().wait_for_ar(cur)
                 self.layerwise_blenders = self._step_blenders(
-                    self.layerwise_blenders
+                    self.layerwise_blenders, fetch_stream=self._blend_stream
                 )
-        else:
-            self.layerwise_blenders = self._step_blenders(self.layerwise_blenders)
+            else:
+                self.layerwise_blenders = self._step_blenders(
+                    self.layerwise_blenders, fetch_stream=None
+                )
 
         return
 

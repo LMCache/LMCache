@@ -65,6 +65,16 @@ class LMCacheConnectorV1Dynamic(KVConnectorBase_V1):
         """
         self._lmcache_engine.wait_for_layer_load(layer_name)
 
+    # ---- merged-blend (LMCACHE_MERGED_BLEND) helpers for gpu_model_runner ----
+    def take_merged_blend_plan(self):
+        return self._lmcache_engine.take_merged_blend_plan()
+
+    def clear_merged_blend_plan(self) -> None:
+        self._lmcache_engine.clear_merged_blend_plan()
+
+    def run_merged_blend_recompute_fallback(self) -> bool:
+        return self._lmcache_engine.run_merged_blend_recompute_fallback()
+
     def save_kv_layer(
         self,
         layer_name: str,

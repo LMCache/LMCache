@@ -8,6 +8,7 @@ from typing import Any, List, Optional, Tuple, Union
 import abc
 import ctypes
 import math
+import os
 import threading
 
 # Third Party
@@ -324,6 +325,28 @@ def _allocate_cpu_memory(
     return buffer
 
 
+# B2 study step 2b (LMCACHE_CACHE_MEMOBJ_VIEW=1, default OFF): `TensorMemoryObj
+# .tensor` is a @property that rebuilds THREE tensors on every access
+# (raw_data[:get_size()].view(dtype).view(shape)) plus an uncached get_size().
+# MEASURED on A100 (job 15148976): 5.80 us per access vs 0.04 us when the view
+# is built once -- and the blend fetch touches it once per chunk per layer,
+# 65 x 48 = 3,120 times per request, i.e. ~18.1 ms of the ~52 ms that survive
+# B2's fused chunk copy. Nothing about the result changes between accesses.
+#
+# CORRECTNESS: a naive cache is UNSAFE. PagedTensorMemoryAllocator recycles
+# MemoryObj instances and reassigns both fields the view is derived from --
+# `meta.shape` (L1110/L1162) and `raw_data` (L1116/L1168/L1190/L1225) -- so a
+# stale view would silently read the wrong memory. The cache is therefore
+# guarded on the identity of `raw_data` and the value of `meta.shape`; any
+# reassignment misses the guard and rebuilds. `meta.dtype` is fixed at
+# construction (asserted below, never reassigned anywhere in this file) so it
+# is not part of the guard. The guard holds a reference to the raw_data object
+# it cached from, so `is` cannot be fooled by id() recycling -- the hazard that
+# already bit this project once (job 15110877, KeyError after keying on
+# id(tensor) instead of id(MemoryObj)).
+_CACHE_MEMOBJ_VIEW = os.environ.get("LMCACHE_CACHE_MEMOBJ_VIEW", "0") == "1"
+
+
 class TensorMemoryObj(MemoryObj):
     """
     Wraps a raw flat tensor with some metadata
@@ -343,9 +366,16 @@ class TensorMemoryObj(MemoryObj):
         self.valid = True
         self.lock = threading.Lock()
         self.parent_allocator = parent_allocator
+        # see _CACHE_MEMOBJ_VIEW above; inert unless the flag is on
+        self._cached_view: Optional[torch.Tensor] = None
+        self._cached_raw: Optional[torch.Tensor] = None
+        self._cached_shape: Optional[torch.Size] = None
 
     def invalidate(self):
         self.valid = False
+        self._cached_view = None
+        self._cached_raw = None
+        self._cached_shape = None
 
     def is_valid(self):
         return self.valid
@@ -447,6 +477,23 @@ class TensorMemoryObj(MemoryObj):
             logger.warning("Trying to access an invalidated MemoryObj")
             return None
         assert self.meta.dtype is not None
+        if _CACHE_MEMOBJ_VIEW:
+            raw = self.raw_data
+            shape = self.meta.shape
+            cached = self._cached_view
+            # `is` on the retained raw_data reference + value-compare on shape;
+            # any allocator reassignment of either misses and rebuilds below.
+            if (
+                cached is not None
+                and self._cached_raw is raw
+                and self._cached_shape == shape
+            ):
+                return cached
+            view = raw[: self.get_size()].view(self.meta.dtype).view(shape)
+            self._cached_view = view
+            self._cached_raw = raw
+            self._cached_shape = shape
+            return view
         # TODO(Jiayi): consider caching the `get_size()`
         return (
             self.raw_data[: self.get_size()].view(self.meta.dtype).view(self.meta.shape)

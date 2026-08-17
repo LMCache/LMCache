@@ -617,6 +617,23 @@ class LMCacheEngine:
         if request_configs is not None and len(request_configs) != 0:
             assert isinstance(request_configs, dict)
 
+        # LMCACHE_FETCH_CPU_TIMING=1: pure CPU-side (perf_counter) split of the
+        # fetch phase into setup / per-layer get / per-layer send. Answers the
+        # H3-vs-H4 question that the nsys CUDA trace CANNOT: ~74% of the fetch
+        # window has zero CUDA activity, and H3 (storage-backend lookup) and H4
+        # (generator next()/send() crossings) look IDENTICAL in a CUDA timeline.
+        # Deliberately adds NO torch.cuda.synchronize() -- see the
+        # per_layer_timing note below for why a blocking sync serialises the
+        # whole fetch phase and perturbs exactly what we are measuring. These
+        # are therefore CPU wall-times (they include queue backpressure but do
+        # not force it). Default OFF => byte-identical to the untimed path.
+        _cpu_timing = os.environ.get("LMCACHE_FETCH_CPU_TIMING", "0") == "1"
+        _t_setup = 0.0
+        _t_get = 0.0
+        _t_send = 0.0
+        _n_contains = 0
+        _t0_setup = time.perf_counter() if _cpu_timing else 0.0
+
         location = None
         for start, end, key in self.token_database.process_tokens(
             tokens=tokens,
@@ -632,6 +649,7 @@ class LMCacheEngine:
             current_location = None
             all_layers_found = True
             for key_single_layer in keys_multi_layer:
+                _n_contains += 1
                 found_location = self.storage_manager.contains(key_single_layer)
                 if not found_location:
                     all_layers_found = False
@@ -658,6 +676,9 @@ class LMCacheEngine:
             keys.append(keys_multi_layer)
 
             ret_mask[start:end] = True
+
+        if _cpu_timing:
+            _t_setup = time.perf_counter() - _t0_setup
 
         total_chunk_tokens = 0
         if starts:
@@ -787,7 +808,10 @@ class LMCacheEngine:
                     to_count_down.extend(mem_objs_layer)
             else:
                 for layer_id in range(self.num_layers):
+                    _tg = time.perf_counter() if _cpu_timing else 0.0
                     task = next(get_generator)
+                    if _cpu_timing:
+                        _t_get += time.perf_counter() - _tg
 
                     assert task is not None
 
@@ -799,7 +823,10 @@ class LMCacheEngine:
                         yield None
 
                     mem_objs_layer = task
+                    _ts = time.perf_counter() if _cpu_timing else 0.0
                     _send_layer(layer_id, mem_objs_layer)
+                    if _cpu_timing:
+                        _t_send += time.perf_counter() - _ts
                     to_count_down.extend(mem_objs_layer)
 
             for mem_obj in to_count_down:
@@ -831,6 +858,22 @@ class LMCacheEngine:
             f"out of total {len(tokens)} tokens. "
             f"retrieve_layer gpu cost {elapsed_ms:.3f} ms"
         )
+        if _cpu_timing:
+            # H3 vs H4 split. setup_ms  = token_database.process_tokens +
+            # split_layers + storage_manager.contains (n_contains calls) -- the
+            # H3 candidate, ALREADY outside the per-layer loop. get_ms = sum of
+            # next(get_generator) over num_layers -- storage-side per-layer
+            # fetch. send_ms = sum of mem_obj_consumer.send() over num_layers --
+            # the batched_to_gpu generator crossing + GPU copy enqueue (H4).
+            logger.info(
+                "[fetch-cpu] mode=single layers=%d n_contains=%d "
+                "setup_ms=%.2f get_ms=%.2f send_ms=%.2f cpu_total_ms=%.2f "
+                "gpu_ms=%.2f",
+                self.num_layers, _n_contains,
+                _t_setup * 1e3, _t_get * 1e3, _t_send * 1e3,
+                (_t_setup + _t_get + _t_send) * 1e3,
+                elapsed_ms if elapsed_ms is not None else float("nan"),
+            )
 
         yield ret_mask
 
@@ -841,6 +884,49 @@ class LMCacheEngine:
     # ------------------------------------------------------------------
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
+    def has_retrievable_chunk(
+        self,
+        tokens: Union[torch.Tensor, list],
+        mask: Optional[torch.Tensor] = None,
+        request_configs=None,
+    ) -> bool:
+        """Would this request contribute at least one chunk to a coalesced fetch?
+
+        `retrieve_layer_multi` requires every request in the group to yield at
+        least one fully-present chunk, and has no per-request fallback once it
+        starts -- so the caller must screen for this BEFORE coalescing. This is
+        that screen.
+
+        It replicates exactly the accept/reject test of the chunk loop in
+        `retrieve_layer_multi` (all `num_layers` sub-keys present, in one
+        location) but stops at the FIRST chunk, because `starts` being non-empty
+        is decided entirely by whether chunk 0 is retrievable -- the loop
+        `break`s on the first miss. Cost is <= num_layers `contains` calls,
+        negligible against the fetch it guards.
+
+        Added 2026-08-04 after job 15081983: on a category-diverse workload
+        (12 distinct videos rather than the single-video set every prior run
+        used) cache misses are common, a request contributed zero chunks, and
+        the assertion in `retrieve_layer_multi` killed the EngineCore --
+        `EngineDeadError`, every subsequent request 500ing, which took out the
+        N=10 and N=12 phases downstream of the N=8 crash.
+        """
+        for start, end, key in self.token_database.process_tokens(
+            tokens=tokens, mask=mask, request_configs=request_configs,
+        ):
+            assert isinstance(key, CacheEngineKey)
+            location = None
+            for key_single_layer in key.split_layers(self.num_layers):
+                found = self.storage_manager.contains(key_single_layer)
+                if not found:
+                    return False
+                if location is None:
+                    location = found
+                elif location != found:
+                    return False
+            return location is not None
+        return False
+
     def retrieve_layer_multi(
         self,
         tokens_list: List[Union[torch.Tensor, list]],
@@ -916,6 +1002,17 @@ class LMCacheEngine:
         keys_layer_major_per_request: List[List[List[CacheEngineKey]]] = []
         num_required_tokens_total = 0
 
+        # LMCACHE_FETCH_CPU_TIMING=1 -- see retrieve_layer for the rationale.
+        # Same three buckets, but setup here is n_reqs x n_chunks x num_layers
+        # `contains` calls (the coalesced path still does the lookup per
+        # request), while get/send are ONE generator pair for the whole pack.
+        _cpu_timing = os.environ.get("LMCACHE_FETCH_CPU_TIMING", "0") == "1"
+        _t_setup = 0.0
+        _t_get = 0.0
+        _t_send = 0.0
+        _n_contains = 0
+        _t0_setup = time.perf_counter() if _cpu_timing else 0.0
+
         for r in range(n_reqs):
             tokens = tokens_list[r]
             mask = masks_list[r]
@@ -941,6 +1038,7 @@ class LMCacheEngine:
                 current_location = None
                 all_layers_found = True
                 for key_single_layer in keys_multi_layer:
+                    _n_contains += 1
                     found_location = self.storage_manager.contains(key_single_layer)
                     if not found_location:
                         all_layers_found = False
@@ -997,6 +1095,9 @@ class LMCacheEngine:
             for layer_id in range(self.num_layers)
         ]
 
+        if _cpu_timing:
+            _t_setup = time.perf_counter() - _t0_setup
+
         get_generator = self.storage_manager.layerwise_batched_get_sync(
             keys_layer_major_all
         )
@@ -1026,7 +1127,10 @@ class LMCacheEngine:
 
         to_count_down = []
         for layer_id in range(self.num_layers):
+            _tg = time.perf_counter() if _cpu_timing else 0.0
             task = next(get_generator)
+            if _cpu_timing:
+                _t_get += time.perf_counter() - _tg
             assert task is not None
 
             if layer_id == 0:
@@ -1035,6 +1139,7 @@ class LMCacheEngine:
                 yield None
 
             mem_objs_layer = task
+            _ts = time.perf_counter() if _cpu_timing else 0.0
             if per_layer_timing:
                 layer_start_event = torch.cuda.Event(enable_timing=True)
                 layer_end_event = torch.cuda.Event(enable_timing=True)
@@ -1049,6 +1154,8 @@ class LMCacheEngine:
                 )
             else:
                 mem_obj_consumer.send(mem_objs_layer)
+            if _cpu_timing:
+                _t_send += time.perf_counter() - _ts
             to_count_down.extend(mem_objs_layer)
 
         for mem_obj in to_count_down:
@@ -1093,6 +1200,16 @@ class LMCacheEngine:
             f"out of {num_required_tokens_total} tokens across {n_reqs} "
             f"requests. gpu cost {elapsed_ms:.3f} ms"
         )
+        if _cpu_timing:
+            logger.info(
+                "[fetch-cpu] mode=multi n_reqs=%d layers=%d n_contains=%d "
+                "setup_ms=%.2f get_ms=%.2f send_ms=%.2f cpu_total_ms=%.2f "
+                "gpu_ms=%.2f",
+                n_reqs, self.num_layers, _n_contains,
+                _t_setup * 1e3, _t_get * 1e3, _t_send * 1e3,
+                (_t_setup + _t_get + _t_send) * 1e3,
+                elapsed_ms if elapsed_ms is not None else float("nan"),
+            )
 
         yield ret_masks
 
