@@ -4,18 +4,18 @@ Long prompts create large KV caches that eat up GPU memory and limit how many
 requests fit in a batch. Smaller batch means lower decode throughput. To 
 improve decode throughput, we then need to stuff more requests in a batch.
 *Token dropping*, analogous to its name, select tokens to drop (by half in
-the two examples) to shrink each request's KV cache and improve decode
+these examples) to shrink each request's KV cache and improve decode
 throughput by 1.5-1.7x. The example also demonstrates that the generation
 accuracy is unaffected, even improved, by a good token dropping algorithm 
 (SnapKV was chosen for this demonstration).
 
-The two examples use the LMCache SDK to do this: the SDK **retrieves** a 
+These examples use the LMCache SDK to do this: the SDK **retrieves** a 
 request's cached tensors, **modifies** them, and **stores** them back for vLLM
 to decode from. Users only need to supply the token dropping function, and the
 SDK's batch and stream APIs does the job in an offline manner.
 
-There is also an example meant to be run in Google Colab's GPU T4 which uses
-smaller model and 
+There is also an example meant to be run in Google Colab's GPU T4 which uses a
+smaller model and a shorter dataset to fit the T4's memory.
 
 ## Examples
 
@@ -51,15 +51,62 @@ Colab Notebook, which can also be accessed here:
   pass `--enable transfer_query` when starting LMCache.
 * **vLLM** with below patch.
 
+### Installing LMCache
+
+This example uses recent `dev`-branch features (`--enable transfer_query`,
+engine-driven transfer), so install LMCache **from source** rather than a
+released wheel:
+
+```sh
+uv venv --python 3.12 && source .venv/bin/activate
+uv pip install torch                        # install torch FIRST
+uv pip install -e . --no-build-isolation    # then build LMCache
+```
+
+A few things that commonly trip people up:
+
+* **torch must be installed before LMCache, and you must pass
+  `--no-build-isolation`.** The native CUDA extensions in `csrc/` compile
+  against the installed torch's headers; without `--no-build-isolation` pip
+  builds in an isolated environment that cannot see torch, and the build fails.
+* **`nvcc` (CUDA toolkit) must match your torch CUDA version**, otherwise the
+  `.cu` files fail to compile. Dependencies for CUDA 12 vs 13 are auto-selected
+  from `requirements/`.
+* **Rebuild after pulling `dev`.** `-e` (editable) makes Python changes take
+  effect immediately, but native-extension changes do **not** — if `csrc/` or
+  the native enums/kernels changed upstream, re-run
+  `uv pip install -e . --no-build-isolation`, otherwise you can hit errors like
+  `AttributeError: ... 'EngineKVFormat' has no attribute ...` from a stale `.so`.
+* **Use `uv pip` (or the venv's `pip`), not the system `pip`**, which may be
+  marked externally-managed (PEP 668) and refuse to install.
+
+Build variants: `NO_NATIVE_EXT=1` (pure Python, no extensions),
+`NO_GPU_EXT=1 ... --no-build-isolation` (CPU C++ only), `BUILD_WITH_HIP=1`
+(AMD ROCm/HIP).
+
 ### vLLM patch to expose intermediate tensor
 
 Many token dropping algorithms need the query tensor to rank the importance of
 tokens. SnapKV is one of it. vLLM does not expose the intermediate tensors to 
-the KV connector by default. A 10-line change adds it:
+the KV connector by default. A 10-line change adds it.
+
+First install a vLLM version this patch has been tested against (0.23.0 through
+0.25.1). The patch touches **only two Python files** — no recompilation is
+needed; just restart vLLM after applying it.
+
+If you have a vLLM **source checkout** (git tree), apply with `git apply`:
 
 ```sh
 cd /path/to/vllm
 git apply /path/to/LMCache/examples/token_dropping/vllm-export-intermediate-tensors.diff
+```
+
+If you installed vLLM from a **wheel** (`pip install vllm`), there is no git
+tree to patch. Apply the diff directly to the installed package instead:
+
+```sh
+VLLM_DIR=$(python -c "import vllm, os; print(os.path.dirname(vllm.__file__))")
+patch -p1 -d "$VLLM_DIR/.." < /path/to/LMCache/examples/token_dropping/vllm-export-intermediate-tensors.diff
 ```
 
 When booting up vLLM, activate the code path by adding 
@@ -83,8 +130,6 @@ passes. However, it can also be configured via `"lmcache.mp.q.ring_depth":2`.
 The random-dropping example, being the simplest example that demonstrates 
 decode throughput improvement, does **not** need this patch or flag. It only
 works with the KV cache.
-
-This patch has been tested on vLLM versions 0.23.0 until 0.25.1.
 
 ## Dataset
 
