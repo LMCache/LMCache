@@ -79,7 +79,7 @@ class CudaDeviceSpec(DeviceSpec):
             # Third Party
             import torch
 
-            return torch.cuda.is_available()
+            return torch.cuda.is_available() and torch.version.hip is None
         except Exception:
             return False
 

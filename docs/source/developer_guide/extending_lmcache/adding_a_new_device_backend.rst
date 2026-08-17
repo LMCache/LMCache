@@ -443,10 +443,11 @@ handle transfer can still opt into LMCache-driven explicitly (below).
 
 .. note::
 
-   ROCm is not a separate backend: under PyTorch a ROCm GPU reports
-   ``device_type == "cuda"`` and reuses ``CudaIPCWrapper`` (CUDA IPC)
-   for the LMCache-driven path, so it works in AUTO mode with no extra
-   setup.  There is currently no dedicated ``platform/rocm`` package.
+   Under PyTorch a ROCm GPU reports ``device_type == "cuda"``. LMCache
+   registers a distinct ``RocmDeviceSpec`` with ``backend_name == "rocm"``
+   while reusing the CUDA platform's ops, cache context, and IPC wrapper.
+   CUDA and ROCm availability checks are mutually exclusive, so AUTO mode
+   selects the correct backend without extra configuration.
 
 When the caller (or ``LMCACHE_MP_TRANSFER_MODE``) explicitly requests
 ``lmcache_driven``, ``_build_lmcache_driven_context`` performs two hard
