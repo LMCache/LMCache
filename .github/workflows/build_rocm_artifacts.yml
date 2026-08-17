@@ -121,7 +121,7 @@ jobs:
                 name: release-rocm-artifacts
                 path: dist/
 
-# On-device validation (loading the compiled c_ops and running the real
+# On-device validation (loading the compiled cuda_ops and running the real
 # KV-transfer kernels on gfx942/gfx950) requires AMD Instinct hardware, which
 # GitHub-hosted runners do not provide and LMCache does not maintain a
 # self-hosted runner for. It is therefore run manually on AMD hardware:

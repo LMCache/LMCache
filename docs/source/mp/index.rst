@@ -101,9 +101,9 @@ based on ``--engine-type`` and ``--supported-transfer-mode``.
 ``MPCacheServer``, assembles the engine modules
 (``LookupModule`` + ``ManagementModule`` + ``LMCacheDrivenTransferModule``
 and/or ``EngineDrivenTransferModule`` depending on
-``--supported-transfer-mode`` — ``lmcache_driven`` or ``engine_driven`` loads
-just one,
-``auto`` (default) loads both — plus a CacheBlend module when
+``--supported-transfer-mode`` — ``lmcache_driven`` (default) or
+``engine_driven`` loads just one,
+``auto`` loads both — plus a CacheBlend module when
 ``--engine-type`` is set: ``blend`` appends ``BlendV3Module`` (the
 current paged-aware implementation), and ``blend_legacy`` appends
 ``BlendModule`` (the original)). Starts a ``MessageQueueServer``,

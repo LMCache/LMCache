@@ -208,8 +208,12 @@ var _ = Describe("CacheBlendPodInjector", func() {
 			resp := injector.Handle(ctx, makeRequest(pod))
 			out := applyResponse(pod, resp)
 
-			By("M0: hostIPC")
-			Expect(out.Spec.HostIPC).To(BeTrue())
+			By("M0: /dev/shm hostPath sharing (no hostIPC by default)")
+			Expect(out.Spec.HostIPC).To(BeFalse())
+			shmVol := findVolume(out, testDevShmVolumeName)
+			Expect(shmVol).NotTo(BeNil())
+			Expect(shmVol.HostPath).NotTo(BeNil())
+			Expect(shmVol.HostPath.Path).To(Equal("/dev/shm"))
 
 			By("M1: cb-plugin emptyDir volume")
 			var vol *corev1.Volume
@@ -327,6 +331,7 @@ var _ = Describe("CacheBlendPodInjector", func() {
 			Expect(out.Annotations[AnnotationSkipReason]).To(Equal(SkipReasonEngineNotFound))
 			Expect(out.Annotations).NotTo(HaveKey(AnnotationInjected))
 			Expect(out.Spec.HostIPC).To(BeFalse())
+			Expect(findVolume(out, testDevShmVolumeName)).To(BeNil())
 			Expect(out.Spec.InitContainers).To(BeEmpty())
 		})
 
@@ -343,6 +348,7 @@ var _ = Describe("CacheBlendPodInjector", func() {
 
 			Expect(out.Annotations[AnnotationSkipReason]).To(Equal(SkipReasonEngineNotFound))
 			Expect(out.Spec.HostIPC).To(BeFalse())
+			Expect(findVolume(out, testDevShmVolumeName)).To(BeNil())
 		})
 
 		It("allows an already-injected pod as a no-op", func() {
@@ -370,6 +376,7 @@ var _ = Describe("CacheBlendPodInjector", func() {
 			Expect(out.Annotations[AnnotationSkipReason]).To(Equal(SkipReasonCommandOverride))
 			Expect(out.Annotations).NotTo(HaveKey(AnnotationInjected))
 			Expect(out.Spec.HostIPC).To(BeFalse())
+			Expect(findVolume(out, testDevShmVolumeName)).To(BeNil())
 			Expect(out.Spec.InitContainers).To(BeEmpty())
 		})
 	})
@@ -428,7 +435,7 @@ var _ = Describe("CacheBlendPodInjector", func() {
 			By("the skip reason is stamped but the rest of the injection still applies")
 			Expect(out.Annotations[AnnotationSkipReason]).To(Equal(SkipReasonKVTransferConfigPresent))
 			Expect(out.Annotations[AnnotationInjected]).To(Equal(valueTrue))
-			Expect(out.Spec.HostIPC).To(BeTrue())
+			Expect(findVolume(out, testDevShmVolumeName)).NotTo(BeNil())
 		})
 
 		It("prepends to a pre-existing PYTHONPATH", func() {
@@ -508,10 +515,45 @@ var _ = Describe("CacheBlendPodInjector", func() {
 			Expect(out.Annotations[AnnotationSkipReason]).To(Equal(SkipReasonTargetContainerNotFound))
 			Expect(out.Annotations).NotTo(HaveKey(AnnotationInjected))
 			Expect(out.Spec.HostIPC).To(BeFalse())
+			Expect(findVolume(out, testDevShmVolumeName)).To(BeNil())
 			Expect(out.Spec.InitContainers).To(BeEmpty())
 			By("the original vLLM container is left untouched")
 			vllm := findContainer(out, "vllm")
 			Expect(envValue(vllm, pythonPathEnvName)).To(BeEmpty())
+		})
+	})
+
+	Describe("hostIPC opt-in", func() {
+		It("mirrors the engine's hostIPC opt-in instead of mounting /dev/shm", func() {
+			hostIPC := true
+			engine := newTestEngine(func(e *lmcachev1alpha1.CacheBlendEngine) {
+				e.Spec.HostIPC = &hostIPC
+			})
+			injector := newPodInjector(engine, true)
+			pod := vllmPod(nil)
+
+			resp := injector.Handle(ctx, makeRequest(pod))
+			out := applyResponse(pod, resp)
+
+			Expect(out.Spec.HostIPC).To(BeTrue())
+			Expect(findVolume(out, testDevShmVolumeName)).To(BeNil())
+		})
+
+		It("preserves the pod's hostIPC opt-in without mounting /dev/shm", func() {
+			engine := newTestEngine(nil)
+			injector := newPodInjector(engine, true)
+			pod := vllmPod(func(p *corev1.Pod) {
+				p.Spec.HostIPC = true
+			})
+
+			resp := injector.Handle(ctx, makeRequest(pod))
+			out := applyResponse(pod, resp)
+
+			Expect(out.Spec.HostIPC).To(BeTrue())
+			Expect(findVolume(out, testDevShmVolumeName)).To(BeNil())
+			vllm := findContainer(out, "vllm")
+			Expect(findVolumeMount(vllm, testDevShmVolumeName)).To(BeNil())
+			Expect(out.Annotations[AnnotationInjected]).To(Equal(valueTrue))
 		})
 	})
 
