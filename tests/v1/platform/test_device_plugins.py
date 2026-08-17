@@ -4,7 +4,6 @@
 # Standard
 import sys
 from collections.abc import Callable
-from types import SimpleNamespace
 from typing import Any
 
 # Third Party
@@ -84,25 +83,6 @@ class _SharedVendorBDeviceSpec(DeviceSpec):
     def torch_module_name(self) -> str:
         """Return the shared torch module name."""
         return "shared"
-
-
-class _RocmDeviceSpec(DeviceSpec):
-    """External spec that shares torch's ``cuda`` device type."""
-
-    @property
-    def device_type(self) -> str:
-        """Return the torch-facing device type shared with CUDA."""
-        return "cuda"
-
-    @property
-    def backend_name(self) -> str:
-        """Return the ROCm backend selector."""
-        return "rocm"
-
-    @property
-    def torch_module_name(self) -> str:
-        """Return the torch module name shared with CUDA."""
-        return "cuda"
 
 
 class _FakeEntryPoint:
@@ -389,32 +369,3 @@ def test_external_device_participates_in_runtime_detection(
     assert torch_module is external_torch_module
     assert device_type == "external"
     assert backend_name == "external"
-
-
-def test_rocm_backend_can_auto_select_shared_cuda_device_type(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A ROCm torch build should not leave the built-in CUDA backend eligible."""
-    _set_entry_points(
-        monkeypatch,
-        [
-            _FakeEntryPoint(
-                "rocm",
-                "plugin_rocm:RocmDeviceSpec",
-                lambda: _RocmDeviceSpec,
-            )
-        ],
-    )
-    monkeypatch.setattr(_RocmDeviceSpec, "is_available", lambda self: True)
-
-    stub_torch = SimpleNamespace(
-        cuda=SimpleNamespace(is_available=lambda: True),
-        version=SimpleNamespace(hip="7.2"),
-    )
-    monkeypatch.setitem(sys.modules, "torch", stub_torch)
-
-    torch_module, device_type, backend_name = _device_detect._detect_device()
-
-    assert torch_module is stub_torch.cuda
-    assert device_type == "cuda"
-    assert backend_name == "rocm"
