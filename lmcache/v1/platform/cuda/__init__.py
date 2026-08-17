@@ -84,12 +84,15 @@ class CudaDeviceSpec(DeviceSpec):
             return False
 
     def is_runtime_compatible(self) -> bool:
-        """Return whether torch uses the CUDA rather than HIP runtime."""
+        """Return whether torch exposes a CUDA runtime."""
         try:
             # Third Party
             import torch
 
-            return getattr(getattr(torch, "version", None), "hip", None) is None
+            torch_version = getattr(torch, "version", None)
+            if torch_version is None:
+                return True
+            return getattr(torch_version, "cuda", None) is not None
         except Exception:
             return False
 

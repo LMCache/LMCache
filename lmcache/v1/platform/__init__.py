@@ -155,6 +155,12 @@ def _resolve_device_spec(device_type: str) -> DeviceSpec:
         ]
         if len(compatible_candidates) == 1:
             return compatible_candidates[0]
+
+        default_candidates = [
+            spec for spec in candidates if spec.backend_name == device_type
+        ]
+        if len(default_candidates) == 1:
+            return default_candidates[0]
     if device_type in ("", "cpu"):
         return _FALLBACK_CPU_SPEC
     raise RuntimeError(
