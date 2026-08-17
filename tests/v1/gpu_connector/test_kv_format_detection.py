@@ -61,7 +61,21 @@ def test_vllm_mla():
     assert fmt == F.NL_X_NB_BS_HS
 
 
-def test_vllm_blocks_first_fused_hnd_num_heads_2(monkeypatch):
+@pytest.mark.parametrize("hint", [{}, {"kv_layout": "NHD"}, {"kv_layout": "HND"}])
+def test_vllm_rbln_native_singleton_axis(monkeypatch, hint):
+    # vLLM-RBLN's 6-D HND layout is its own format, so it is detected from the
+    # shape alone on any host and whatever the hint says (vLLM-RBLN reports no
+    # layout, and the format is HND by definition).
+    monkeypatch.setattr(_VLLM_DEV, "cuda")
+    kv = [_t(2, NB, NH, 1, BS, HS) for _ in range(NL)]
+    fmt, out = detect_format(kv, EngineType.VLLM, hint)
+    assert fmt == F.NL_X_TWO_NB_NH_ONE_BS_HS
+    # Detection must not reshape it away: the singleton axis survives.
+    assert tuple(out[0].shape) == (2, NB, NH, 1, BS, HS)
+    assert out[0].data_ptr() == kv[0].data_ptr()
+
+
+def test_vllm_blocks_first_fused_num_heads_2(monkeypatch):
     # Raw 4-D [NB, NH, BS, 2*HS] with NH == 2 (a common GQA config): a 5-D
     # split would make the K/V axis and the head axis both equal 2, ambiguous
     # with flash-infer. Detection must use the rank-4 shape to land on the

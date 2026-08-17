@@ -176,11 +176,15 @@ supports the standard PyTorch tensor surface.
 Verification
 ~~~~~~~~~~~~
 
-Start LMCache server:
+Start LMCache server.  The worker below uses the engine-driven
+transfer path, which the server only loads when
+``--supported-transfer-mode`` is ``engine_driven`` or ``auto`` (the
+default is ``lmcache_driven``):
 
 .. code-block:: bash
 
-    lmcache server --l1-size-gb 10 --eviction-policy LRU --port 5555
+    lmcache server --l1-size-gb 10 --eviction-policy LRU --port 5555 \
+        --supported-transfer-mode engine_driven
 
 Run vLLM with MP connector.  If multiple accelerators are visible on
 the host, set ``DEVICE_TYPE`` to force LMCache to pick the new backend

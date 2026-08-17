@@ -19,6 +19,9 @@ See [DESIGN.md](DESIGN.md) for architecture details, reconciliation logic, and C
 > On AMD ROCm clusters, `spec.gpuVendor: amd` omits `runtimeClassName` and skips NVIDIA-specific env vars.
 
 > [!WARNING]
+> **Upgrade note:** earlier operator versions always set `hostIPC: true` on engine pods and webhook-injected vLLM pods. `spec.hostIPC` now defaults to `false`; the host's `/dev/shm` is shared via a hostPath mount instead (the CUDA IPC requirement). Upgrading restarts the engine pods once (the DaemonSet pod template changes). Already-running vLLM pods keep working without a restart: a pod using `hostIPC` and a pod using the hostPath mount see the same host `/dev/shm`. If your cluster blocks hostPath volumes, set `spec.hostIPC: true` on existing CRs **before** upgrading.
+
+> [!WARNING]
 > **Upgrade note:** earlier operator versions always ran the engine container privileged. `spec.privileged` now defaults to `false`. Upgrading rewrites the DaemonSet pod template (forcing a rolling pod replacement), and on any cluster where privileged was load-bearing for GPU visibility the engine pods will come back up **without** GPU access. If your cluster relied on privileged mode (always the case for `gpuVendor: amd`), set `spec.privileged: true` on existing CRs before upgrading.
 
 ## Quick Start
@@ -56,7 +59,7 @@ The minimal CR just needs `l1.sizeGB`. Apply the sample (a fully-commented field
 kubectl apply -f config/samples/lmcache_v1alpha1_lmcacheengine.yaml
 ```
 
-The operator automatically handles `hostIPC`, GPU visibility (`runtimeClassName: nvidia`, `NVIDIA_VISIBLE_DEVICES=all`; set `spec.privileged: true` if your cluster also needs privileged mode), node-local service routing, resource sizing, and Prometheus metrics — see [DESIGN.md](DESIGN.md) for details.
+The operator automatically handles `/dev/shm` sharing for CUDA IPC (a hostPath mount; set `spec.hostIPC: true` to use the host IPC namespace instead), GPU visibility (`runtimeClassName: nvidia`, `NVIDIA_VISIBLE_DEVICES=all`; set `spec.privileged: true` if your cluster also needs privileged mode), node-local service routing, resource sizing, and Prometheus metrics — see [DESIGN.md](DESIGN.md) for details.
 
 ### 3. Connect vLLM to LMCache
 
@@ -64,7 +67,7 @@ The operator creates a ConfigMap named `<engine-name>-connection` with the `kv-t
 
 Key points for vLLM pods:
 
-- **`hostIPC: true` is required** — CUDA IPC (`cudaIpcOpenMemHandle`) needs a shared IPC namespace between vLLM and LMCache. Without this, GPU memory mapping fails.
+- **A shared `/dev/shm` is required** — CUDA IPC needs both pods to see the same `/dev/shm` tmpfs: PyTorch's CUDA IPC handles reference a shared-memory ref-counter file there. Mount the host's `/dev/shm` via hostPath on the vLLM pod (the injection webhook does this for you), or set `spec.hostIPC: true` on the engine to use the host IPC namespace instead. Without a shared `/dev/shm`, GPU memory mapping fails.
 - **ConfigMap mount** — the `$(cat ...)` pattern reads the connection JSON and passes it inline to `--kv-transfer-config`. The ConfigMap name is always `<LMCacheEngine name>-connection`.
 - **External LMCache connector required** — the operator-generated config now sets `kv_connector_module_path=lmcache.integration.vllm.lmcache_mp_connector` so vLLM loads the external LMCache MP connector instead of silently resolving a vendored builtin path.
 - **No `hostNetwork` needed** — the operator creates a ClusterIP Service with `internalTrafficPolicy=Local`. kube-proxy routes traffic to the LMCache pod on the same node automatically. The ConfigMap points to the service DNS name, so neither LMCache nor vLLM pods need `hostNetwork`.
@@ -73,7 +76,7 @@ Key points for vLLM pods:
 > Use a pinned vLLM image that is new enough to honor `kv_connector_module_path` for KV connector loading. In practice, that means a build that includes the external-module selection fix from vLLM PR #38301 (merged April 7, 2026). Builds that also include vLLM PR #42596 (merged May 15, 2026) are preferred because they default LMCache MP to the external connector with builtin fallback. If your existing vLLM build predates those changes or you are unsure, upgrade it before enabling this operator path.
 
 > [!WARNING]
-> **Do NOT mount an emptyDir at `/dev/shm`** on either LMCache or vLLM pods. With `hostIPC: true`, both pods share the host's `/dev/shm`. Mounting an emptyDir (even with `medium: Memory`) shadows it with a private tmpfs, breaking CUDA IPC — `cudaIpcOpenMemHandle` fails because IPC handles from one pod become invisible to the other.
+> **Do NOT mount an emptyDir at `/dev/shm`** on either LMCache or vLLM pods. Both pods must share the host's `/dev/shm` (via the default hostPath mount, or via `hostIPC: true`). Mounting an emptyDir (even with `medium: Memory`) shadows it with a private tmpfs, breaking CUDA IPC — `cudaIpcOpenMemHandle` fails because IPC handles from one pod become invisible to the other.
 
 ### 4. Verify the Deployment
 
@@ -115,7 +118,7 @@ Every scenario has a ready-to-edit manifest under [`config/samples/`](config/sam
 Notes:
 
 - **GPU targeting** — `nodeSelector: {nvidia.com/gpu.present: "true"}` runs LMCache only on GPU nodes; new GPU nodes auto-get a pod.
-- **AMD (ROCm)** — `spec.gpuVendor: amd` omits `runtimeClassName` and the NVIDIA env vars; vLLM connects via HIP IPC over `hostIPC` the same way (`PYTHONHASHSEED=0` still required). Supply a `nodeSelector` matching your platform's AMD label and a ROCm-built `spec.image`. AMD has no RuntimeClass-based device injection, so set `spec.privileged: true` to let the engine reach `/dev/kfd`/`/dev/dri` (see the [AMD sample](config/samples/lmcache_v1alpha1_lmcacheengine_amd.yaml)).
+- **AMD (ROCm)** — `spec.gpuVendor: amd` omits `runtimeClassName` and the NVIDIA env vars; vLLM connects via HIP IPC over `hostIPC` the same way (`PYTHONHASHSEED=0` still required); the HIP IPC path is unverified with only the hostPath `/dev/shm` mount, so set `spec.hostIPC: true` for AMD. Supply a `nodeSelector` matching your platform's AMD label and a ROCm-built `spec.image`. AMD has no RuntimeClass-based device injection, so set `spec.privileged: true` to let the engine reach `/dev/kfd`/`/dev/dri` (see the [AMD sample](config/samples/lmcache_v1alpha1_lmcacheengine_amd.yaml)).
 - **Custom port** — set `server.port`; the connection ConfigMap updates automatically and vLLM picks it up on restart.
 - **L2 adapters** — only one at a time today. Redis/Valkey is natively typed; cross-namespace auth Secrets are copied automatically and injected via env (never in args or `kubectl describe`). Other types (`nixl_store`, `fs`, `mock`, `raw_block`) use the `raw` escape hatch — see the commented blocks in the minimal sample. For `raw_block` with `use_odirect: true`, `--l1-align-bytes` must be ≥ `block_align`.
 - **Resources** auto-compute from `l1.sizeGB`; override with `resourceOverrides`.
@@ -134,7 +137,9 @@ CREATE the webhook injects, reading the engine's `<engine>-connection` ConfigMap
 
 - `--kv-transfer-config <JSON>` — the `LMCacheMPConnector` config, inlined onto
   the vLLM container args (no volume mount needed);
-- `hostIPC: true` — CUDA IPC with the node-local LMCache server;
+- a hostPath mount of the host's `/dev/shm` — CUDA IPC with the node-local
+  LMCache server (or `hostIPC: true` instead, when the engine sets
+  `spec.hostIPC: true`);
 - `PYTHONHASHSEED=0` — deterministic prefix hashing (only if you didn't set it).
 
 ### Optional: code-payload staging
@@ -163,12 +168,13 @@ Editable sample: [`config/samples/vllm_lmcache_deployment.yaml`](config/samples/
 > [!IMPORTANT]
 > The webhook needs `make deploy` (not `make run`) + cert-manager, and the vLLM
 > pod's namespace labeled `pod-security.kubernetes.io/enforce=privileged` (the
-> injected `hostIPC` is rejected by `baseline`/`restricted`). The engine must
+> injected hostPath `/dev/shm` mount — and `hostIPC`, if the engine opts in —
+> is rejected by `baseline`/`restricted`). The engine must
 > already be reconciled in the same namespace (its `<engine>-connection`
 > ConfigMap must exist — the webhook reads it).
 
 The webhook mutates **Pods**, not the Deployment, so verify on a pod
-(`kubectl get pod -l app=vllm-lmcache -o yaml | grep -E "hostIPC|kv-transfer-config|lmcache-injected"`).
+(`kubectl get pod -l app=vllm-lmcache -o yaml | grep -E "lmcache-dev-shm|hostIPC|kv-transfer-config|lmcache-injected"`).
 If nothing was injected, check the pod's `lmcache.ai/lmcache-skip-reason`
 annotation (`command-override`, `kv-transfer-config-present`, `engine-not-found`,
 or `target-container-not-found`).
@@ -195,7 +201,8 @@ image ENTRYPOINT — a `sh -c` wrapper is skipped). Editable samples:
 > (`kubectl apply -f https://github.com/cert-manager/cert-manager/releases/latest/download/cert-manager.yaml`).
 > If Pod Security Standards are enforced, label the engine's and the vLLM pod's
 > namespaces `pod-security.kubernetes.io/enforce=privileged` — the webhook injects
-> `hostIPC`/`privileged`, which `baseline`/`restricted` reject.
+> a hostPath `/dev/shm` mount (or `hostIPC` when the engine opts in), which
+> `baseline`/`restricted` reject.
 
 > [!IMPORTANT]
 > CacheBlend is still in early stage development and under heavy testing. Its
