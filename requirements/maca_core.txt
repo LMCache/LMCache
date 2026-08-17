@@ -5,7 +5,7 @@
 # users install a MACA-enabled torch build themselves before compiling
 # lmcache from source, per the "LMCache on MACA" installation docs.
 #
-# No MACA-specific pure-Python runtime package (e.g. a cupy-rocm-* analogue)
-# has been confirmed yet -- leave empty until one is identified.
+# mcpy is MetaX's own cupy-equivalent for MACA, the analogue of
+# cupy-rocm-7-0 in requirements/rocm_core.txt.
 
 mcpy
