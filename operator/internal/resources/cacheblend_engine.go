@@ -84,6 +84,7 @@ func cbSpecToEngineSpec(spec *lmcachev1alpha1.CacheBlendEngineSpec) *lmcachev1al
 		PodLabels:          spec.PodLabels,
 		ServiceAccountName: spec.ServiceAccountName,
 		PriorityClassName:  spec.PriorityClassName,
+		HostIPC:            spec.HostIPC,
 		Privileged:         spec.Privileged,
 		ExtraArgs:          spec.ExtraArgs,
 	}
@@ -110,10 +111,12 @@ func BuildCBEngineArgs(spec *lmcachev1alpha1.CacheBlendEngineSpec) []string {
 
 // BuildCBEngineDaemonSet constructs the DaemonSet for the blend_v3 engine of the
 // given CacheBlendEngine. It reuses the shared GPU/security pod-template
-// scaffolding (hostIPC, runtimeClassName=nvidia, NVIDIA_VISIBLE_DEVICES=all,
-// privileged only when spec.privileged=true (default false), CPU+memory-only
-// resources with no nvidia.com/gpu claim) so the engine shares the node's GPU
-// via CUDA IPC, and adds the blend-specific server args.
+// scaffolding (host /dev/shm sharing for CUDA IPC — hostPath mount by default,
+// host IPC namespace when spec.hostIPC=true — runtimeClassName=nvidia,
+// NVIDIA_VISIBLE_DEVICES=all, privileged only when spec.privileged=true
+// (default false), CPU+memory-only resources with no nvidia.com/gpu claim) so
+// the engine shares the node's GPU via CUDA IPC, and adds the blend-specific
+// server args.
 func BuildCBEngineDaemonSet(engine *lmcachev1alpha1.CacheBlendEngine) *appsv1.DaemonSet {
 	engineSpec := cbSpecToEngineSpec(&engine.Spec)
 	return buildDaemonSetCore(
@@ -140,9 +143,11 @@ func BuildCBEngineMetricsService(engine *lmcachev1alpha1.CacheBlendEngine) *core
 
 // BuildCBConnectionConfigMap creates the <engine>-connection ConfigMap carrying
 // the CBKVConnector kv-transfer-config JSON (design §7). The JSON points vLLM at
-// the node-local Service (lmcache.mp.host) and carries the blend tunables
-// cb.check_layer and cb.recomp_ratio read from spec.Blend (defaults are pinned by
-// SetDefaults: checkLayer=1, recompRatio=0.15).
+// the node-local Service (lmcache.mp.host) and carries the blend tunables read
+// from spec.Blend: cb.check_layer and cb.recomp_ratio (defaults are pinned by
+// SetDefaults: checkLayer=1, recompRatio=0.15), plus cb.partial_bucket when
+// spec.Blend.partialBucket is set (unset omits the key, leaving the connector's
+// padding disabled).
 func BuildCBConnectionConfigMap(engine *lmcachev1alpha1.CacheBlendEngine) *corev1.ConfigMap {
 	spec := &engine.Spec
 	// Use the same default (5555) as BuildContainerArgs/getServerPort so the
@@ -160,6 +165,9 @@ func BuildCBConnectionConfigMap(engine *lmcachev1alpha1.CacheBlendEngine) *corev
 	extra := map[string]any{
 		"cb.check_layer":  checkLayer,
 		"cb.recomp_ratio": recompRatio,
+	}
+	if spec.Blend != nil && spec.Blend.PartialBucket != nil {
+		extra["cb.partial_bucket"] = *spec.Blend.PartialBucket
 	}
 
 	return buildConnectionConfigMapCore(
