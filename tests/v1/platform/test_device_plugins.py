@@ -374,14 +374,20 @@ def test_external_device_participates_in_runtime_detection(
 
 
 @pytest.mark.parametrize(
-    ("hip_version", "expected_spec_type", "expected_backend_name"),
+    (
+        "cuda_version",
+        "hip_version",
+        "expected_spec_type",
+        "expected_backend_name",
+    ),
     [
-        (None, CudaDeviceSpec, "cuda"),
-        ("7.2", RocmDeviceSpec, "rocm"),
+        ("13.0", None, CudaDeviceSpec, "cuda"),
+        (None, "7.2", RocmDeviceSpec, "rocm"),
     ],
 )
 def test_cuda_device_type_auto_selects_runtime_backend(
     monkeypatch: pytest.MonkeyPatch,
+    cuda_version: str | None,
     hip_version: str | None,
     expected_spec_type: type[DeviceSpec],
     expected_backend_name: str,
@@ -393,6 +399,7 @@ def test_cuda_device_type_auto_selects_runtime_backend(
     import torch
 
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.version, "cuda", cuda_version)
     monkeypatch.setattr(torch.version, "hip", hip_version)
 
     torch_module, device_type, backend_name = _device_detect._detect_device()
@@ -406,14 +413,16 @@ def test_cuda_device_type_auto_selects_runtime_backend(
 
 
 @pytest.mark.parametrize(
-    ("hip_version", "expected_spec_type"),
+    ("cuda_version", "hip_version", "expected_spec_type"),
     [
-        (None, CudaDeviceSpec),
-        ("7.2", RocmDeviceSpec),
+        ("13.0", None, CudaDeviceSpec),
+        (None, "7.2", RocmDeviceSpec),
+        (None, None, CudaDeviceSpec),
     ],
 )
 def test_cuda_device_type_resolves_runtime_backend_without_hardware(
     monkeypatch: pytest.MonkeyPatch,
+    cuda_version: str | None,
     hip_version: str | None,
     expected_spec_type: type[DeviceSpec],
 ) -> None:
@@ -424,6 +433,7 @@ def test_cuda_device_type_resolves_runtime_backend_without_hardware(
     import torch
 
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(torch.version, "cuda", cuda_version)
     monkeypatch.setattr(torch.version, "hip", hip_version)
 
     assert isinstance(_device_detect.get_device_spec("cuda"), expected_spec_type)
