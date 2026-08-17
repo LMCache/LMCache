@@ -73,6 +73,11 @@ Options
        (default ``5``), otherwise heartbeat requests may hit a closing
        connection and fail with ``Server disconnected without sending a
        response`` (default: ``10``).
+   * - ``--disable-metrics``
+     - Disable OpenTelemetry metrics. Metrics are enabled by default.
+   * - ``--otlp-endpoint URL``
+     - Push metrics to the specified OTLP gRPC endpoint. When unset, Prometheus
+       pull mode exposes ``/metrics`` on the coordinator HTTP port.
 
 Configuration
 -------------
@@ -81,6 +86,14 @@ Every flag is optional. Unset flags fall back to the
 ``LMCACHE_MP_COORDINATOR_*`` environment variables (``HOST``, ``PORT``,
 ``INSTANCE_TIMEOUT``, ``HEALTH_CHECK_INTERVAL``, ``EVICTION_CHECK_INTERVAL``,
 ``EVICTION_RATIO``, ``TRIGGER_WATERMARK``, ``CHUNK_SIZE``, ``HASH_ALGORITHM``,
+``BLEND_PROBE_STRIDE``, ``TIMEOUT_KEEP_ALIVE``, ``METRICS_ENABLED``,
+``OTLP_ENDPOINT``), and then to the built-in defaults. A supplied flag always
+overrides the matching env-derived value, so env-only deployments keep working
+unchanged.
+
+Prometheus pull mode reuses the coordinator's existing HTTP server; it does not
+start a second server or reserve a separate Prometheus port. Metrics-disabled
+and OTLP push modes both return HTTP 404 from the local ``/metrics`` route.
 ``ENABLE_BLEND_LOOKUP``, ``BLEND_PROBE_STRIDE``, ``TIMEOUT_KEEP_ALIVE``), and
 then to the built-in defaults. A supplied flag always overrides the matching
 env-derived value, so env-only deployments keep working unchanged.

@@ -29,7 +29,7 @@ The CLI accepts ``--host``, ``--port``, ``--instance-timeout``,
 ``--health-check-interval``, ``--eviction-check-interval``,
 ``--eviction-ratio``, ``--trigger-watermark``, ``--chunk-size``,
 ``--hash-algorithm``, ``--enable-blend-lookup``, ``--blend-probe-stride``,
-and ``--timeout-keep-alive``;
+``--timeout-keep-alive``, ``--disable-metrics``, and ``--otlp-endpoint``;
 any flag overrides the matching environment variable below. See
 :doc:`/cli/coordinator` for details.
 Equivalently, the coordinator can still be launched as a module with
@@ -101,6 +101,32 @@ variables:
        (default ``5``), otherwise heartbeat requests may hit a closing
        connection and fail with ``Server disconnected without sending a
        response``.
+   * - ``LMCACHE_MP_COORDINATOR_METRICS_ENABLED``
+     - ``True``
+     - Initialize OpenTelemetry metrics. Set to ``False`` to disable metrics;
+       the local ``/metrics`` endpoint then returns 404.
+   * - ``LMCACHE_MP_COORDINATOR_OTLP_ENDPOINT``
+     - unset
+     - OTLP gRPC endpoint for metrics push mode. When unset, Prometheus pull
+       mode exposes ``/metrics`` on the coordinator HTTP port. When set, the
+       local ``/metrics`` endpoint returns 404.
+
+Coordinator metrics export
+--------------------------
+
+Metrics are enabled by default. Without an OTLP endpoint, Prometheus scrapes
+the coordinator's existing FastAPI port; no separate metrics server or port is
+created:
+
+.. code-block:: bash
+
+   curl http://localhost:9300/metrics
+
+Set ``--otlp-endpoint http://collector:4317`` to push metrics to an
+OpenTelemetry Collector instead. In OTLP push mode, and when
+``--disable-metrics`` is set, ``GET /metrics`` returns 404. This infrastructure
+does not itself define coordinator business metrics; instruments register with
+the shared OpenTelemetry provider as coordinator capabilities add them.
 
 Connecting MP servers
 ---------------------
