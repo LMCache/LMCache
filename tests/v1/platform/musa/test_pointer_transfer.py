@@ -100,3 +100,75 @@ def test_pointer_transfer_rejects_ambiguous_two_byte_dtype() -> None:
             EngineKVFormat.NL_X_NB_BS_HS,
             0,
         )
+
+
+def test_sglang_pointer_operands_preserve_k_then_v_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SGLang's 2*NL pointers become nested K/V layer lists in wire order."""
+    fake_device = SimpleNamespace(type="musa", index=0)
+    calls: list[tuple[int, tuple[int, ...]]] = []
+    captured: dict[str, object] = {}
+
+    def construct(
+        ptr: int,
+        shape: tuple[int, ...],
+        _dtype: torch.dtype,
+        _device: object,
+        **_kwargs: object,
+    ) -> torch.Tensor:
+        calls.append((ptr, shape))
+        return torch.empty(shape)
+
+    def native_transfer(**kwargs: object) -> bool:
+        captured.update(kwargs)
+        return True
+
+    monkeypatch.setattr(
+        device_ops,
+        "_as_device",
+        lambda _device, _paged, _objects: fake_device,  # type: ignore[return-value]
+    )
+    monkeypatch.setattr(
+        device_ops,
+        "construct_musa_tensor_from_data_pointer",
+        construct,
+    )
+    monkeypatch.setattr(
+        "lmcache.v1.platform.musa.native_kv_transfer"
+        ".try_native_multi_layer_block_kv_transfer",
+        native_transfer,
+    )
+
+    shape_desc = PageBufferShapeDesc()
+    shape_desc.nl = 2
+    shape_desc.nb = 3
+    shape_desc.bs = 4
+    shape_desc.nh = 2
+    shape_desc.hs = 4
+    shape_desc.kv_size = 2
+    shape_desc.element_size = 4
+    shape_desc.dtype = torch.float32
+
+    device_ops.MusaDeviceOps().multi_layer_block_kv_transfer(
+        torch.tensor([101, 102, 201, 202], dtype=torch.int64),
+        [303],
+        torch.tensor([0], dtype=torch.int64),
+        fake_device,  # type: ignore[arg-type]
+        TransferDirection.D2H,
+        shape_desc,
+        4,
+        EngineKVFormat.TWO_X_NL_X_NB_BS_NH_HS,
+        0,
+    )
+
+    paged_layers = captured["paged_layers"]
+    assert isinstance(paged_layers, list)
+    assert [len(group) for group in paged_layers] == [2, 2]
+    assert calls == [
+        (101, (3, 4, 2, 4)),
+        (102, (3, 4, 2, 4)),
+        (201, (3, 4, 2, 4)),
+        (202, (3, 4, 2, 4)),
+        (303, (2, 2, 4, 8)),
+    ]

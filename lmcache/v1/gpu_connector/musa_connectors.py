@@ -19,6 +19,7 @@ from lmcache.v1.gpu_connector.utils import (
     _get_head_size_view,
     _split_token2d_kv,
     get_block_size,
+    get_device,
     get_dtype,
     get_head_size,
     get_hidden_dim_size,
@@ -834,3 +835,685 @@ class VLLMPagedMemLayerwiseMUSAConnector(GPUConnectorInterface):
         if self.use_mla:
             return torch.Size([num_tokens, self.hidden_dim_size])
         return torch.Size([num_tokens, 2, self.hidden_dim_size])
+
+
+def _layer_views(
+    kvcaches: DiscoverableKVCache,
+    *,
+    engine_kv_format: lmcache_native.EngineKVFormat,
+    hidden_dim_size: int,
+) -> list[tuple[torch.Tensor, torch.Tensor | None]]:
+    """Create token-major views of every SGLang KV-cache layer."""
+    if engine_kv_format == lmcache_native.EngineKVFormat.NL_X_NBBS_ONE_HS:
+        layers = cast(list[torch.Tensor], kvcaches)
+        return [(tensor.view(-1, hidden_dim_size), None) for tensor in layers]
+    if engine_kv_format == lmcache_native.EngineKVFormat.TWO_X_NL_X_NBBS_NH_HS:
+        key_layers, value_layers = cast(list[list[torch.Tensor]], kvcaches)
+        return [
+            (
+                key_tensor.view(-1, hidden_dim_size),
+                value_tensor.view(-1, hidden_dim_size),
+            )
+            for key_tensor, value_tensor in zip(key_layers, value_layers, strict=True)
+        ]
+    raise ValueError(
+        "SGLang MUSA in-process transfer supports only "
+        "TWO_X_NL_X_NBBS_NH_HS and NL_X_NBBS_ONE_HS; "
+        f"got {engine_kv_format!r}"
+    )
+
+
+def _to_device(tensor: torch.Tensor, device: torch.device) -> torch.Tensor:
+    """Move a tensor to the MUSA KV-cache device when needed."""
+    if tensor.device == device:
+        return tensor
+    return tensor.to(device=device, non_blocking=True)
+
+
+def _slot_slice(
+    slot_mapping: torch.Tensor,
+    start: int,
+    end: int,
+    device: torch.device,
+    *,
+    offset: int = 0,
+) -> torch.Tensor:
+    """Return a device-local slice from a possibly partial slot mapping."""
+    mapping_start = start - offset
+    mapping_end = end - offset
+    if mapping_start < 0:
+        raise ValueError("start must not precede the SGLang slot-map offset")
+    return slot_mapping[mapping_start:mapping_end].to(
+        device=device,
+        dtype=torch.long,
+        non_blocking=True,
+    )
+
+
+def _split_flat_mha_kvcaches(
+    kvcaches: DiscoverableKVCache,
+    *,
+    num_layers: int,
+) -> DiscoverableKVCache:
+    """Convert the legacy flat SGLang MHA list into nested K/V lists.
+
+    The in-process SGLang adapter passes ``[K0, ..., Kn, V0, ..., Vn]``,
+    while the shared format detector expects ``[[K0, ..., Kn],
+    [V0, ..., Vn]]``. Keep this compatibility conversion local to the MUSA
+    connector so enabling MUSA does not change format detection for CUDA,
+    XPU, or multiprocess users.
+    """
+    if (
+        isinstance(kvcaches, list)
+        and len(kvcaches) == 2 * num_layers
+        and all(isinstance(tensor, torch.Tensor) for tensor in kvcaches)
+    ):
+        return [kvcaches[:num_layers], kvcaches[num_layers:]]
+    return kvcaches
+
+
+def _prepare_kvcaches(
+    kvcaches: DiscoverableKVCache,
+    *,
+    hidden_dim_size: int,
+    num_layers: int,
+    use_mla: bool,
+) -> tuple[
+    torch.device,
+    list[tuple[torch.Tensor, torch.Tensor | None]],
+]:
+    """Normalize, validate, and expose token-major SGLang layer views."""
+    if not use_mla:
+        kvcaches = _split_flat_mha_kvcaches(
+            kvcaches,
+            num_layers=num_layers,
+        )
+    engine_kv_format, normalized = normalize_kv_and_discover_format(
+        kvcaches,
+        EngineType.SGLANG,
+    )
+    expected_format = (
+        lmcache_native.EngineKVFormat.NL_X_NBBS_ONE_HS
+        if use_mla
+        else lmcache_native.EngineKVFormat.TWO_X_NL_X_NBBS_NH_HS
+    )
+    if engine_kv_format != expected_format:
+        raise ValueError(
+            f"SGLang MUSA expected {expected_format!r}, got {engine_kv_format!r}"
+        )
+    discovered_layers = get_num_layers(normalized, engine_kv_format)
+    if discovered_layers != num_layers:
+        raise ValueError(
+            f"Expected {num_layers} SGLang layers, got {discovered_layers}"
+        )
+    device = get_device(normalized)
+    if device.type != "musa":
+        raise ValueError(
+            "SGLang MUSA connectors require MUSA KV-cache tensors; "
+            f"got device type {device.type!r}"
+        )
+    return device, _layer_views(
+        normalized,
+        engine_kv_format=engine_kv_format,
+        hidden_dim_size=hidden_dim_size,
+    )
+
+
+class SGLangMUSAConnector(GPUConnectorInterface):
+    """Transfer complete SGLang KV chunks with pure TorchMUSA operations.
+
+    MHA caches use separate K/V layer lists whose tensors have shape
+    ``[page_buffer_size, num_heads, head_size]``. MLA caches use one tensor
+    per layer. The connector flattens only the head dimensions and gathers or
+    scatters rows using SGLang's slot mapping; it does not depend on CUDA
+    transfer kernels. The SGLang adapter selects this MLA path from the
+    model's ``attention_arch`` and passes the cache pool's actual latent width.
+    """
+
+    def __init__(
+        self,
+        hidden_dim_size: int,
+        num_layers: int,
+        use_gpu: bool = False,
+        *,
+        device: torch.device,
+        use_mla: bool = False,
+        **_: Any,
+    ) -> None:
+        """Create an SGLang MUSA connector.
+
+        Args:
+            hidden_dim_size: Flattened KV head width.
+            num_layers: Number of model KV-cache layers.
+            use_gpu: Whether LMCache requests a device intermediate buffer.
+                The pure-torch path moves each source tensor directly and does
+                not require a persistent staging allocation.
+            device: MUSA device that owns the SGLang KV cache.
+            use_mla: Whether the cache uses the single-tensor MLA layout.
+            **_: Ignored compatibility arguments such as ``chunk_size`` and
+                ``dtype``.
+        """
+        self.hidden_dim_size = hidden_dim_size
+        self.num_layers = num_layers
+        self.use_gpu = use_gpu
+        self.device = device
+        self.use_mla = use_mla
+
+    @classmethod
+    def from_metadata(
+        cls,
+        metadata: "LMCacheMetadata",
+        use_gpu: bool = False,
+        device: torch.device | None = None,
+        **kwargs: Any,
+    ) -> "SGLangMUSAConnector":
+        """Create a connector from LMCache engine metadata.
+
+        Args:
+            metadata: Engine metadata describing the SGLang KV layout.
+            use_gpu: Whether LMCache requests a device intermediate buffer.
+            device: MUSA device that owns the SGLang KV cache.
+            **kwargs: Additional forward-compatible connector options.
+
+        Returns:
+            A configured :class:`SGLangMUSAConnector`.
+
+        Raises:
+            ValueError: If ``device`` is not provided.
+        """
+        if device is None:
+            raise ValueError("device must be provided for SGLang on MUSA")
+        num_layers, _, _, num_kv_heads, head_size = metadata.kv_shape
+        return cls(
+            hidden_dim_size=num_kv_heads * head_size,
+            num_layers=num_layers,
+            use_gpu=use_gpu,
+            device=device,
+            use_mla=metadata.use_mla,
+            **kwargs,
+        )
+
+    def to_gpu(
+        self,
+        memory_obj: MemoryObj,
+        start: int,
+        end: int,
+        **kwargs: Any,
+    ) -> None:
+        """Scatter a complete LMCache chunk into SGLang's MUSA KV cache.
+
+        Args:
+            memory_obj: LMCache memory object containing the chunk.
+            start: Start token offset in the request.
+            end: End token offset in the request.
+            **kwargs: Must contain ``kvcaches`` and ``slot_mapping``; may
+                contain SGLang's ``offset`` for a partial slot mapping.
+
+        Raises:
+            ValueError: If required inputs, formats, or shapes are invalid.
+        """
+        if memory_obj.tensor is None:
+            raise ValueError("memory_obj must contain a tensor")
+        if "kvcaches" not in kwargs:
+            raise ValueError("'kvcaches' should be provided in kwargs")
+        if "slot_mapping" not in kwargs:
+            raise ValueError("'slot_mapping' should be provided in kwargs")
+        self._validate_memory_format(memory_obj)
+
+        kvcaches = cast(DiscoverableKVCache, kwargs["kvcaches"])
+        slot_mapping = cast(torch.Tensor, kwargs["slot_mapping"])
+        offset = int(kwargs.get("offset", 0))
+
+        device, views = _prepare_kvcaches(
+            kvcaches,
+            hidden_dim_size=self.hidden_dim_size,
+            num_layers=self.num_layers,
+            use_mla=self.use_mla,
+        )
+        slots = _slot_slice(slot_mapping, start, end, device, offset=offset)
+        self._validate_memory_shape(memory_obj.tensor, int(slots.numel()))
+
+        if self.use_mla:
+            for layer_id, (key_view, _) in enumerate(views):
+                source = _to_device(memory_obj.tensor[layer_id], device)
+                key_view.index_copy_(0, slots, source)
+            return
+
+        for layer_id, (key_view, value_view) in enumerate(views):
+            if value_view is None:
+                raise ValueError("SGLang MHA cache is missing a value layer")
+            key_source = _to_device(memory_obj.tensor[0, layer_id], device)
+            value_source = _to_device(memory_obj.tensor[1, layer_id], device)
+            key_view.index_copy_(0, slots, key_source)
+            value_view.index_copy_(0, slots, value_source)
+
+    def from_gpu(
+        self,
+        memory_obj: MemoryObj,
+        start: int,
+        end: int,
+        **kwargs: Any,
+    ) -> None:
+        """Gather a complete SGLang MUSA KV chunk into LMCache memory.
+
+        Args:
+            memory_obj: Destination LMCache memory object.
+            start: Start token offset in the full slot mapping.
+            end: End token offset in the full slot mapping.
+            **kwargs: Must contain ``kvcaches`` and ``slot_mapping``.
+
+        Raises:
+            ValueError: If required inputs, formats, or shapes are invalid.
+        """
+        if memory_obj.tensor is None:
+            raise ValueError("memory_obj must contain a tensor")
+        if "kvcaches" not in kwargs:
+            raise ValueError("'kvcaches' should be provided in kwargs")
+        if "slot_mapping" not in kwargs:
+            raise ValueError("'slot_mapping' should be provided in kwargs")
+
+        kvcaches = cast(DiscoverableKVCache, kwargs["kvcaches"])
+        slot_mapping = cast(torch.Tensor, kwargs["slot_mapping"])
+        offset = int(kwargs.get("offset", 0))
+        device, views = _prepare_kvcaches(
+            kvcaches,
+            hidden_dim_size=self.hidden_dim_size,
+            num_layers=self.num_layers,
+            use_mla=self.use_mla,
+        )
+        slots = _slot_slice(slot_mapping, start, end, device, offset=offset)
+        self._validate_memory_shape(memory_obj.tensor, int(slots.numel()))
+
+        if self.use_mla:
+            gathered = torch.stack(
+                [key_view.index_select(0, slots) for key_view, _ in views]
+            )
+            memory_obj.tensor.copy_(gathered, non_blocking=True)
+            memory_obj.metadata.fmt = MemoryFormat.KV_MLA_FMT
+        else:
+            keys = torch.stack(
+                [key_view.index_select(0, slots) for key_view, _ in views]
+            )
+            values = torch.stack(
+                [
+                    value_view.index_select(0, slots)
+                    for _, value_view in views
+                    if value_view is not None
+                ]
+            )
+            if values.shape[0] != self.num_layers:
+                raise ValueError("SGLang MHA cache is missing a value layer")
+            memory_obj.tensor.copy_(
+                torch.stack((keys, values)),
+                non_blocking=True,
+            )
+            memory_obj.metadata.fmt = MemoryFormat.KV_2LTD
+
+        if memory_obj.tensor.device.type != "musa":
+            torch.musa.synchronize()  # type: ignore[attr-defined]
+
+    def batched_to_gpu(
+        self,
+        memory_objs: list[list[MemoryObj]] | list[MemoryObj] | list[int] | None = None,
+        starts: list[int] | None = None,
+        ends: list[int] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        """Scatter several LMCache chunks into SGLang's MUSA KV cache.
+
+        Args:
+            memory_objs: Flat list of complete-chunk memory objects.
+            starts: Per-chunk start offsets.
+            ends: Per-chunk end offsets.
+            **kwargs: Forwarded to :meth:`to_gpu`.
+
+        Raises:
+            ValueError: If any required batch argument is missing.
+        """
+        if memory_objs is None or starts is None or ends is None:
+            raise ValueError("memory_objs, starts, and ends must be provided")
+        for memory_obj, start, end in zip(
+            cast(list[MemoryObj], memory_objs), starts, ends, strict=True
+        ):
+            self.to_gpu(memory_obj, start, end, **kwargs)
+
+    def batched_from_gpu(
+        self,
+        memory_objs: list[list[MemoryObj]] | list[MemoryObj],
+        starts: list[int],
+        ends: list[int],
+        **kwargs: Any,
+    ) -> None:
+        """Gather several SGLang MUSA KV chunks into LMCache memory.
+
+        Args:
+            memory_objs: Flat list of complete-chunk memory objects.
+            starts: Per-chunk start offsets.
+            ends: Per-chunk end offsets.
+            **kwargs: Forwarded to :meth:`from_gpu`.
+        """
+        for memory_obj, start, end in zip(
+            cast(list[MemoryObj], memory_objs), starts, ends, strict=True
+        ):
+            self.from_gpu(memory_obj, start, end, **kwargs)
+
+    def get_shape(self, num_tokens: int) -> torch.Size:
+        """Return the LMCache memory-object shape for ``num_tokens``.
+
+        Args:
+            num_tokens: Number of tokens in the memory object.
+
+        Returns:
+            MLA shape ``[layers, tokens, hidden]`` or MHA shape
+            ``[2, layers, tokens, hidden]``.
+        """
+        if self.use_mla:
+            return torch.Size([self.num_layers, num_tokens, self.hidden_dim_size])
+        return torch.Size([2, self.num_layers, num_tokens, self.hidden_dim_size])
+
+    def _validate_memory_format(self, memory_obj: MemoryObj) -> None:
+        expected = MemoryFormat.KV_MLA_FMT if self.use_mla else MemoryFormat.KV_2LTD
+        if memory_obj.metadata.fmt != expected:
+            raise ValueError(
+                f"SGLang MUSA expected memory format {expected}, "
+                f"got {memory_obj.metadata.fmt}"
+            )
+
+    def _validate_memory_shape(
+        self,
+        tensor: torch.Tensor,
+        num_tokens: int,
+    ) -> None:
+        expected = self.get_shape(num_tokens)
+        if tensor.shape != expected:
+            raise ValueError(
+                f"SGLang MUSA expected memory shape {tuple(expected)}, "
+                f"got {tuple(tensor.shape)}"
+            )
+
+
+class SGLangLayerwiseMUSAConnector(GPUConnectorInterface):
+    """Transfer MHA SGLang KV cache one layer at a time on MUSA.
+
+    The connector follows LMCache's layerwise generator protocol and uses
+    token-major memory objects shaped ``[tokens, 2, hidden]``. Operations run
+    on TorchMUSA's current stream, preserving ordering with SGLang attention
+    without relying on CUDA-only transfer kernels.
+    """
+
+    def __init__(
+        self,
+        hidden_dim_size: int,
+        num_layers: int,
+        use_gpu: bool = False,
+        *,
+        device: torch.device,
+        use_mla: bool = False,
+        **_: Any,
+    ) -> None:
+        """Create a layerwise SGLang MUSA connector.
+
+        Args:
+            hidden_dim_size: Flattened KV head width.
+            num_layers: Number of model KV-cache layers.
+            use_gpu: Whether LMCache requests a device intermediate buffer.
+            device: MUSA device that owns the SGLang KV cache.
+            use_mla: Whether the model uses MLA.
+            **_: Ignored forward-compatible connector options.
+
+        Raises:
+            NotImplementedError: If MLA layerwise mode is requested.
+        """
+        if use_mla:
+            raise NotImplementedError(
+                "Layerwise SGLang on MUSA does not support MLA; set use_layerwise=False"
+            )
+        self.hidden_dim_size = hidden_dim_size
+        self.num_layers = num_layers
+        self.use_gpu = use_gpu
+        self.device = device
+        self.use_mla = False
+
+    @classmethod
+    def from_metadata(
+        cls,
+        metadata: "LMCacheMetadata",
+        use_gpu: bool = False,
+        device: torch.device | None = None,
+        **kwargs: Any,
+    ) -> "SGLangLayerwiseMUSAConnector":
+        """Create a layerwise connector from LMCache engine metadata.
+
+        Args:
+            metadata: Engine metadata describing the SGLang KV layout.
+            use_gpu: Whether LMCache requests a device intermediate buffer.
+            device: MUSA device that owns the SGLang KV cache.
+            **kwargs: Additional forward-compatible connector options.
+
+        Returns:
+            A configured :class:`SGLangLayerwiseMUSAConnector`.
+
+        Raises:
+            ValueError: If ``device`` is not provided.
+            NotImplementedError: If metadata requests MLA layerwise mode.
+        """
+        if device is None:
+            raise ValueError("device must be provided for SGLang on MUSA")
+        num_layers, _, _, num_kv_heads, head_size = metadata.kv_shape
+        return cls(
+            hidden_dim_size=num_kv_heads * head_size,
+            num_layers=num_layers,
+            use_gpu=use_gpu,
+            device=device,
+            use_mla=metadata.use_mla,
+            **kwargs,
+        )
+
+    def to_gpu(
+        self,
+        memory_obj: MemoryObj,
+        start: int,
+        end: int,
+        **kwargs: Any,
+    ) -> None:
+        """Reject non-generator use of the layerwise connector.
+
+        Args:
+            memory_obj: Unused memory object.
+            start: Unused start offset.
+            end: Unused end offset.
+            **kwargs: Unused connector options.
+
+        Raises:
+            NotImplementedError: Always; use :meth:`batched_to_gpu`.
+        """
+        raise NotImplementedError("Layerwise SGLang uses batched_to_gpu")
+
+    def from_gpu(
+        self,
+        memory_obj: MemoryObj,
+        start: int,
+        end: int,
+        **kwargs: Any,
+    ) -> None:
+        """Reject non-generator use of the layerwise connector.
+
+        Args:
+            memory_obj: Unused memory object.
+            start: Unused start offset.
+            end: Unused end offset.
+            **kwargs: Unused connector options.
+
+        Raises:
+            NotImplementedError: Always; use :meth:`batched_from_gpu`.
+        """
+        raise NotImplementedError("Layerwise SGLang uses batched_from_gpu")
+
+    def batched_to_gpu(
+        self,
+        memory_objs: list[list[MemoryObj]] | list[MemoryObj] | list[int] | None = None,
+        starts: list[int] | None = None,
+        ends: list[int] | None = None,
+        **kwargs: Any,
+    ) -> Generator[None, list[MemoryObj], None]:
+        """Yield a consumer that scatters one layer per ``send`` call.
+
+        Args:
+            memory_objs: Positional compatibility slot containing start offsets
+                when LMCache calls ``batched_to_gpu(starts, ends)``.
+            starts: Positional compatibility slot containing end offsets, or
+                explicit start offsets when ``ends`` is also provided.
+            ends: Explicit end offsets for interface-style keyword calls.
+            **kwargs: Must contain ``kvcaches`` and ``slot_mapping``.
+
+        Yields:
+            ``None`` before each layer and once after the final layer. Send a
+            list of that layer's memory objects into each layer yield.
+
+        Raises:
+            ValueError: If required inputs, formats, or shapes are invalid.
+        """
+        if ends is None:
+            if memory_objs is None or starts is None:
+                raise ValueError("starts and ends must be provided")
+            token_starts = cast(list[int], memory_objs)
+            token_ends = starts
+        else:
+            if starts is None:
+                raise ValueError("starts and ends must be provided")
+            token_starts = starts
+            token_ends = ends
+
+        slot_mapping, offset, device, views = self._transfer_inputs(kwargs)
+
+        for layer_id, (key_view, value_view) in enumerate(views):
+            if value_view is None:
+                raise ValueError("SGLang MHA cache is missing a value layer")
+            memory_objs_layer = yield
+            for start, end, memory_obj in zip(
+                token_starts, token_ends, memory_objs_layer, strict=True
+            ):
+                if memory_obj.tensor is None:
+                    raise ValueError("memory_obj must contain a tensor")
+                expected = self.get_shape(end - start)
+                if memory_obj.tensor.shape != expected:
+                    raise ValueError(
+                        f"Layer {layer_id} expected memory shape "
+                        f"{tuple(expected)}, got {tuple(memory_obj.tensor.shape)}"
+                    )
+                if memory_obj.metadata.fmt != MemoryFormat.KV_T2D:
+                    raise ValueError(
+                        "Layerwise SGLang on MUSA requires KV_T2D memory objects"
+                    )
+                slots = _slot_slice(
+                    slot_mapping,
+                    start,
+                    end,
+                    device,
+                    offset=offset,
+                )
+                source = _to_device(memory_obj.tensor, device)
+                key_view.index_copy_(0, slots, source[:, 0])
+                value_view.index_copy_(0, slots, source[:, 1])
+        yield
+
+    def batched_from_gpu(
+        self,
+        memory_objs: list[list[MemoryObj]] | list[MemoryObj],
+        starts: list[int],
+        ends: list[int],
+        **kwargs: Any,
+    ) -> Generator[None, None, None]:
+        """Gather one SGLang MUSA KV layer before each generator yield.
+
+        Args:
+            memory_objs: Layer-major lists of destination memory objects.
+            starts: Per-chunk start offsets.
+            ends: Per-chunk end offsets.
+            **kwargs: Must contain ``kvcaches`` and ``slot_mapping``.
+
+        Yields:
+            ``None`` after each layer and once after the final layer.
+
+        Raises:
+            ValueError: If required inputs, formats, or shapes are invalid.
+        """
+        layer_memory_objs = cast(list[list[MemoryObj]], memory_objs)
+        slot_mapping, offset, device, views = self._transfer_inputs(kwargs)
+        if len(layer_memory_objs) != self.num_layers:
+            raise ValueError(
+                f"Expected memory objects for {self.num_layers} layers, "
+                f"got {len(layer_memory_objs)}"
+            )
+
+        for layer_id, (key_view, value_view) in enumerate(views):
+            if value_view is None:
+                raise ValueError("SGLang MHA cache is missing a value layer")
+            copied_to_host = False
+            for start, end, memory_obj in zip(
+                starts, ends, layer_memory_objs[layer_id], strict=True
+            ):
+                if memory_obj.tensor is None:
+                    raise ValueError("memory_obj must contain a tensor")
+                expected = self.get_shape(end - start)
+                if memory_obj.tensor.shape != expected:
+                    raise ValueError(
+                        f"Layer {layer_id} expected memory shape "
+                        f"{tuple(expected)}, got {tuple(memory_obj.tensor.shape)}"
+                    )
+                slots = _slot_slice(
+                    slot_mapping,
+                    start,
+                    end,
+                    device,
+                    offset=offset,
+                )
+                keys = key_view.index_select(0, slots)
+                values = value_view.index_select(0, slots)
+                memory_obj.tensor.copy_(
+                    torch.stack((keys, values), dim=1),
+                    non_blocking=True,
+                )
+                memory_obj.metadata.fmt = MemoryFormat.KV_T2D
+                copied_to_host = copied_to_host or (
+                    memory_obj.tensor.device.type != "musa"
+                )
+            if copied_to_host:
+                torch.musa.synchronize()  # type: ignore[attr-defined]
+            yield
+        yield
+
+    def get_shape(self, num_tokens: int) -> torch.Size:
+        """Return the per-layer token-major memory shape.
+
+        Args:
+            num_tokens: Number of tokens in the memory object.
+
+        Returns:
+            Shape ``[tokens, 2, hidden]``.
+        """
+        return torch.Size([num_tokens, 2, self.hidden_dim_size])
+
+    def _transfer_inputs(
+        self,
+        kwargs: dict[str, Any],
+    ) -> tuple[
+        torch.Tensor,
+        int,
+        torch.device,
+        list[tuple[torch.Tensor, torch.Tensor | None]],
+    ]:
+        if "kvcaches" not in kwargs:
+            raise ValueError("'kvcaches' should be provided in kwargs")
+        if "slot_mapping" not in kwargs:
+            raise ValueError("'slot_mapping' should be provided in kwargs")
+        kvcaches = cast(DiscoverableKVCache, kwargs["kvcaches"])
+        slot_mapping = cast(torch.Tensor, kwargs["slot_mapping"])
+        offset = int(kwargs.get("offset", 0))
+        device, views = _prepare_kvcaches(
+            kvcaches,
+            hidden_dim_size=self.hidden_dim_size,
+            num_layers=self.num_layers,
+            use_mla=False,
+        )
+        return slot_mapping, offset, device, views
