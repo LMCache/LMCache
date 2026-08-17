@@ -244,6 +244,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
     - lmcache.mp.mq_timeout: timeout (seconds) for message queue requests.
     - lmcache.mp.heartbeat_interval: interval (seconds) between server
       heartbeat pings.
+    - lmcache.mp.eager_prefetch: submit the LMCache lookup when a request
+      enters vLLM's waiting queue. Disabled by default.
     """
 
     def __init__(
@@ -259,6 +261,12 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         validate_kv_cache_groups(getattr(self, "_kv_cache_config", None))
 
         assert vllm_config.kv_transfer_config is not None
+
+        self._eager_prefetch: bool = bool(
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "lmcache.mp.eager_prefetch", False
+            )
+        )
 
         # Multi-server: prefer lmcache.mp.server_urls (list or comma-separated
         # string) over the single-server lmcache.mp.host / lmcache.mp.port.
@@ -791,6 +799,24 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             "vLLM hit is: %d, Need to load is %d", num_computed_tokens, need_to_load
         )
         return need_to_load, need_to_load > 0
+
+    def on_new_request(self, request: "Request") -> None:
+        """Submit an LMCache lookup when a request enters the waiting queue.
+
+        Args:
+            request (Request): The request object.
+        """
+        if self.role != KVConnectorRole.SCHEDULER:
+            return
+        if not self._eager_prefetch or request.resumable:
+            return
+
+        tracker = self._get_or_create_request_tracker(request)
+        self.scheduler_adapter.maybe_submit_lookup_request(
+            request.request_id,
+            token_ids=list(request.all_token_ids),
+            cache_salt=tracker.cache_salt,
+        )
 
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int

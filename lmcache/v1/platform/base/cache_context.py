@@ -211,9 +211,9 @@ class BaseCacheContext(ABC):
         Formats differ across layers for a mixed-format model. ``None`` marks a
         layer in no kernel group (a cross-layer KV-sharing layer).
         """
-        formats: list["lmcache_native.EngineKVFormat | None"] = [None] * len(
-            self.kv_caches_
-        )
+        formats: list["lmcache_native.EngineKVFormat | None"] = [
+            None
+        ] * self.num_layers_
         for kernel_group_idx, group in enumerate(
             self.kv_layer_groups_manager.kernel_groups
         ):

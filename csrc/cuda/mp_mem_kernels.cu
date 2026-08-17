@@ -8,10 +8,12 @@ namespace {
  * Key logic in the kernel implementation:
  * 1. Each thread block is for (BS, NH, HS) part (i.e., a single block in the
  * paged buffer)
- * 2. Within a thread block, each warp is for a single head. Number of warps
- * in a thread block is equal to the number of heads (NH).
- * 3. Within a thread block, we do the loop over the BS (i.e., number of tokens
- * in the block) dimension.
+ * 2. The thread block is 3D: threadIdx.x strides over the transfer units
+ * within a head (at most 32 threads), threadIdx.y selects the head (one head
+ * per y index, and threadIdx.z partitions the BS dimension (i.e., number of
+ * tokens in the block).
+ * 3. Within a thread block, we do loop over the BS dimension with a stride of
+ * blockDim.z.
  * 4. The grid will take over (2, NB, NL) dimensions. No matter what the actual
  * layout in memory is, we will calculate the global offset for the start of the
  * block
@@ -197,6 +199,8 @@ __device__ void multi_layer_block_transfer_single_block(
                                   // in LMCache object
 ) {
   const int head_idx = threadIdx.y;
+  const int init_token_offset = threadIdx.z;
+  const int token_stride = blockDim.z;
   const int k_or_v = blockIdx.x;
   const int layer_idx = blockIdx.z;
 
@@ -231,7 +235,7 @@ __device__ void multi_layer_block_transfer_single_block(
     const size_t spt = shape_desc.scalars_per_token<ScalarType>();
     const size_t scale_units = 4 / sizeof(ScalarType);
     const size_t val_units = spt - scale_units;
-    for (int t = 0; t < shape_desc.bs; ++t) {
+    for (int t = init_token_offset; t < shape_desc.bs; t += token_stride) {
       ScalarType* eng_vals =
           paged_buffer_layer_ptr + engine_global_offset + t * val_units;
       ScalarType* eng_scale = paged_buffer_layer_ptr + engine_global_offset +
@@ -248,7 +252,8 @@ __device__ void multi_layer_block_transfer_single_block(
     return;
   }
 
-  for (int token_offset = 0; token_offset < shape_desc.bs; ++token_offset) {
+  for (int token_offset = init_token_offset; token_offset < shape_desc.bs;
+       token_offset += token_stride) {
     const size_t engine_local_offset =
         calculate_engine_local_offset<ScalarType, format>(token_offset,
                                                           head_idx, shape_desc);
@@ -405,8 +410,14 @@ void multi_layer_block_kv_transfer_templated(
                           static_cast<int>(sizeof(ScalarType));
   int thread_dim_x = std::min(elements_per_head, 32);
   int thread_dim_y = shape_desc.nh;
+  TORCH_CHECK(thread_dim_y <= 32, "Number of heads (", thread_dim_y,
+              ") exceeds max threads per block in y-dim (32). This"
+              " should never happen in normal LLMs");
+  int thread_dim_z =
+      std::min(shape_desc.bs, 1024 / (thread_dim_x * thread_dim_y));
+  thread_dim_z = std::min(thread_dim_z, 64);  // max threads per block in z-dim
 
-  dim3 block(thread_dim_x, thread_dim_y);
+  dim3 block(thread_dim_x, thread_dim_y, thread_dim_z);
   dim3 grid(shape_desc.kv_size, total_blocks, shape_desc.nl);
 
   if (direction == TransferDirection::H2D) {

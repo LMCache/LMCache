@@ -52,6 +52,9 @@ class MPCoordinatorConfig:
         timeout_keep_alive: Seconds the HTTP server keeps idle connections
             open before closing them. Must be greater than the heartbeat
             interval of MP servers to avoid race-condition disconnects.
+        metrics_enabled: Whether to initialize OpenTelemetry metrics.
+        otlp_endpoint: OTLP gRPC endpoint for metrics push mode. When unset,
+            metrics use Prometheus pull mode on the coordinator HTTP port.
     """
 
     host: str = "0.0.0.0"
@@ -66,6 +69,8 @@ class MPCoordinatorConfig:
     enable_blend_lookup: bool = False
     blend_probe_stride: int = 1
     timeout_keep_alive: int = 10
+    metrics_enabled: bool = True
+    otlp_endpoint: str | None = None
 
     def __post_init__(self) -> None:
         """Validate timing parameters.
@@ -146,4 +151,6 @@ class MPCoordinatorConfig:
             timeout_keep_alive=int(
                 _num("TIMEOUT_KEEP_ALIVE", cls.timeout_keep_alive, int)
             ),
+            metrics_enabled=_bool("METRICS_ENABLED", cls.metrics_enabled),
+            otlp_endpoint=os.getenv(f"{_ENV_PREFIX}OTLP_ENDPOINT"),
         )
