@@ -19,7 +19,16 @@ class RocmDeviceSpec(CudaDeviceSpec):
             # Third Party
             import torch
 
-            hip_version = getattr(getattr(torch, "version", None), "hip", None)
-            return torch.cuda.is_available() and hip_version is not None
+            return torch.cuda.is_available() and self.is_runtime_compatible()
+        except Exception:
+            return False
+
+    def is_runtime_compatible(self) -> bool:
+        """Return whether torch uses the HIP runtime."""
+        try:
+            # Third Party
+            import torch
+
+            return getattr(getattr(torch, "version", None), "hip", None) is not None
         except Exception:
             return False
