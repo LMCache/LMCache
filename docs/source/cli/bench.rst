@@ -1380,6 +1380,7 @@ Final summary (one section per exercised operation):
    --------------------------- Store -----------------------
    Operation:                        Store
    Rounds:                           1
+   Rounds timed out:                 0
    Keys / round:                     96
    Total keys:                       96
    Total success:                    96
@@ -1398,6 +1399,15 @@ Each operation section reports per-round duration statistics
 (avg / min / max / p50 / p99 / std), aggregate throughput
 (``avg_throughput_mbps`` -- 0 for ``Lookup`` since it has no payload),
 average key-rate (``avg_ops_per_sec``), and a per-key latency.
+
+``Rounds`` counts every round that was issued, and ``Rounds timed out``
+counts the subset that hit the wait timeout. A round that times out has
+no meaningful duration, so it is excluded from all duration and
+throughput statistics; the keys it issued still count toward
+``Total keys``, and the keys that did succeed before the timeout still
+count toward ``Total success``. When ``Rounds timed out`` is non-zero,
+read the duration and throughput figures as describing the rounds that
+completed.
 
 For ``Lookup``, three additional fields are reported when
 ``--lookup-max-hit-rate`` is non-zero or some keys were found:
