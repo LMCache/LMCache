@@ -62,6 +62,9 @@ class TestCoordinatorCommandArguments:
                 "2",
                 "--timeout-keep-alive",
                 "15",
+                "--disable-metrics",
+                "--otlp-endpoint",
+                "http://collector:4317",
             ]
         )
         assert args.host == "127.0.0.1"
@@ -70,6 +73,8 @@ class TestCoordinatorCommandArguments:
         assert args.hash_algorithm == "sha256"
         assert args.blend_probe_stride == 2
         assert args.timeout_keep_alive == 15
+        assert args.disable_metrics is True
+        assert args.otlp_endpoint == "http://collector:4317"
 
     def test_enable_blend_lookup_flag(self, parser):
         """The blend-lookup switch parses as True when passed."""
@@ -84,6 +89,8 @@ class TestCoordinatorCommandArguments:
         assert args.enable_blend_lookup is None
         assert args.blend_probe_stride is None
         assert args.timeout_keep_alive is None
+        assert args.disable_metrics is None
+        assert args.otlp_endpoint is None
 
 
 class TestCoordinatorCommandExecute:
@@ -105,6 +112,8 @@ class TestCoordinatorCommandExecute:
             enable_blend_lookup=True,
             blend_probe_stride=2,
             timeout_keep_alive=None,
+            disable_metrics=True,
+            otlp_endpoint="http://collector:4317",
         )
 
         captured = {}
@@ -116,6 +125,9 @@ class TestCoordinatorCommandExecute:
         with (
             patch("uvicorn.run"),
             patch(
+                "lmcache.v1.mp_coordinator.observability.init_coordinator_metrics"
+            ) as mock_init_metrics,
+            patch(
                 "lmcache.v1.mp_coordinator.app.create_app",
                 side_effect=fake_create_app,
             ),
@@ -126,3 +138,6 @@ class TestCoordinatorCommandExecute:
         assert captured["config"].hash_algorithm == "sha256"
         assert captured["config"].enable_blend_lookup is True
         assert captured["config"].blend_probe_stride == 2
+        assert captured["config"].metrics_enabled is False
+        assert captured["config"].otlp_endpoint == "http://collector:4317"
+        mock_init_metrics.assert_called_once_with(captured["config"])
