@@ -23,6 +23,7 @@ from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
 )
 from lmcache.v1.memory_management import (
     MemoryFormat,
+    MemoryObj,
     MemoryObjMetadata,
     TensorMemoryObj,
 )
@@ -1205,6 +1206,110 @@ class TestDeleteInterface:
         for i in range(3, 5):
             assert bitmap.test(i) is True
         adapter.submit_unlock(keys[3:])
+
+
+# =============================================================================
+# Delete / Lock Interaction Tests
+# =============================================================================
+
+
+def _store_and_lock(
+    adapter: NativeConnectorL2Adapter,
+    keys: list[ObjectKey],
+    objs: list[MemoryObj],
+) -> None:
+    """Store ``keys`` then acquire lookup locks on all of them."""
+    store_fd = adapter.get_store_event_fd()
+    lookup_fd = adapter.get_lookup_and_lock_event_fd()
+
+    adapter.submit_store_task(keys, objs)
+    assert wait_for_event_fd(store_fd, timeout=5.0)
+    adapter.pop_completed_store_tasks()
+
+    task_id = adapter.submit_lookup_and_lock_task(keys, {0: _EMPTY_LAYOUT})
+    assert wait_for_event_fd(lookup_fd, timeout=5.0)
+    bitmap = adapter.query_lookup_and_lock_result(task_id)
+    assert bitmap is not None
+    for i in range(len(keys)):
+        assert bitmap.test(i) is True
+
+
+def _keys_present(
+    adapter: NativeConnectorL2Adapter,
+    keys: list[ObjectKey],
+) -> list[bool]:
+    """Look up ``keys`` and immediately unlock, returning per-key presence."""
+    lookup_fd = adapter.get_lookup_and_lock_event_fd()
+    task_id = adapter.submit_lookup_and_lock_task(keys, {0: _EMPTY_LAYOUT})
+    assert wait_for_event_fd(lookup_fd, timeout=5.0)
+    bitmap = adapter.query_lookup_and_lock_result(task_id)
+    assert bitmap is not None
+    present = [bitmap.test(i) for i in range(len(keys))]
+    adapter.submit_unlock([k for k, ok in zip(keys, present, strict=True) if ok])
+    return present
+
+
+class TestDeleteRespectsLocks:
+    """``lookup_and_lock`` must pin a key against concurrent eviction.
+
+    Same convention as the S3 / Valkey / Bigtable / HFBucket adapters:
+    ``delete()`` skips keys with a non-zero lock refcount.
+    """
+
+    def test_delete_skips_locked_key(self, adapter):
+        key = create_object_key(1)
+        _store_and_lock(adapter, [key], [create_memory_obj()])
+
+        adapter.delete([key])
+
+        assert _keys_present(adapter, [key]) == [True]
+
+    def test_delete_locked_key_succeeds_after_unlock(self, adapter):
+        key = create_object_key(1)
+        _store_and_lock(adapter, [key], [create_memory_obj()])
+
+        adapter.delete([key])
+        adapter.submit_unlock([key])
+        adapter.delete([key])
+
+        assert _keys_present(adapter, [key]) == [False]
+
+    def test_delete_partial_lock_batch(self, adapter_with_capacity):
+        """Only the unlocked key is deleted, and exactly its bytes are freed.
+
+        Distinct sizes matter here: the demux thread maps completion
+        results back onto the submitted key list positionally, so a
+        misaligned batch would free the wrong key's bytes while still
+        leaving the right set of keys present.
+        """
+        adp = adapter_with_capacity
+        keys = [create_object_key(i) for i in range(3)]
+        sizes = [50, 100, 150]
+        objs = [
+            create_memory_obj(size=s, fill_value=float(i)) for i, s in enumerate(sizes)
+        ]
+        _store_and_lock(adp, keys, objs)
+        total_before = adp.get_usage().total_bytes_used
+        # Release the lock on keys[1] only; keys[0] and keys[2] stay pinned.
+        adp.submit_unlock([keys[1]])
+
+        adp.delete(keys)
+
+        assert _keys_present(adp, keys) == [True, False, True]
+        freed = total_before - adp.get_usage().total_bytes_used
+        assert freed == objs[1].get_size()
+
+    def test_delete_locked_key_preserves_usage(self, adapter_with_capacity):
+        adp = adapter_with_capacity
+        key = create_object_key(1)
+        obj = create_memory_obj(size=100)
+        _store_and_lock(adp, [key], [obj])
+        stored_bytes = adp.get_usage().total_bytes_used
+        assert stored_bytes > 0
+
+        adp.delete([key])
+
+        assert adp.get_usage().total_bytes_used == stored_bytes
 
 
 # =============================================================================
