@@ -41,9 +41,7 @@ def test_mixed_rank_batch_raises_and_names_both_groups():
     """
     caches = {
         "layers.0.self_attn.attn": torch.zeros(ATTN, dtype=torch.bfloat16),
-        "layers.1.self_attn.attn.index_cache": torch.zeros(
-            INDEX, dtype=torch.bfloat16
-        ),
+        "layers.1.self_attn.attn.index_cache": torch.zeros(INDEX, dtype=torch.bfloat16),
     }
     with pytest.raises(ValueError, match="mixed tensor ranks") as excinfo:
         wrap_kv_caches(caches)
