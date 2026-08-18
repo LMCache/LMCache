@@ -5,7 +5,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
-DEFAULT_XPU_DEVICE_PLUGIN_SOURCE_URL="https://github.com/opendataio/lmcache_xpu_device_with_native/archive/refs/tags/v0.1.0.tar.gz"
+DEFAULT_XPU_DEVICE_PLUGIN_SOURCE_URL="https://github.com/opendataio/lmcache_xpu_device_with_native/archive/refs/tags/v0.1.1.tar.gz"
 XPU_DEVICE_PLUGIN_SOURCE_URL="${LMCACHE_XPU_DEVICE_PLUGIN_SOURCE_URL:-${DEFAULT_XPU_DEVICE_PLUGIN_SOURCE_URL}}"
 
 log() {
