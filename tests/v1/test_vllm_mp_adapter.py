@@ -204,6 +204,19 @@ def test_register_kv_caches_updates_kv_caches_and_submits(fake_adapter):
     assert args[1] == RequestType.REGISTER_KV_CACHE
 
 
+def test_register_kv_caches_starts_heartbeat_after_registration(fake_adapter):
+    """Successful registration immediately starts worker liveness refresh."""
+    adapter, _send_mock, _ = fake_adapter
+    fake_tensor = MagicMock()
+    fake_tensor.device.type = "cuda"
+
+    adapter.register_kv_caches({"layer.0": fake_tensor})
+
+    assert len(FakeHeartbeatThread.instances) == 1
+    heartbeat = FakeHeartbeatThread.instances[0]
+    assert heartbeat.calls == ["register_recover_callback", "start"]
+
+
 def test_register_kv_caches_raises_connection_error_on_timeout(fake_adapter):
     """Public register_kv_caches surfaces ConnectionError on MQ timeout."""
     adapter, _send_mock, future = fake_adapter
