@@ -112,6 +112,12 @@ fi
 echo "=== XPU extension dynamic deps (post-repair wheel) ==="
 python3 -c "import zipfile,glob; w=glob.glob('dist/*.whl')[0]; zipfile.ZipFile(w).extractall('/tmp/whcheck_xpu')"
 SO=$(find /tmp/whcheck_xpu -name 'xpu_ops*.so')
+
+echo "=== XPU device image in the built extension ==="
+OFFLOAD_SECTIONS=$(readelf -S -W "$SO" | grep -E '(__CLANG_OFFLOAD_BUNDLE__sycl-|\.llvm\.offloading)' || true)
+echo "$OFFLOAD_SECTIONS"
+grep -Eq '(__CLANG_OFFLOAD_BUNDLE__sycl-|\.llvm\.offloading)' <<< "$OFFLOAD_SECTIONS"
+
 readelf -d "$SO" | grep NEEDED || true
 
 echo "=== final XPU wheel ==="

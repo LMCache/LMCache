@@ -427,7 +427,6 @@ jobs:
             - name: Publish XPU wheel to dedicated GitHub Release
               env:
                   GITHUB_TOKEN: ${{ github.token }}
-                  XPU_WHEEL_VERSION: ${{ needs.build-xpu.outputs.xpu_version }}
               run: |
                   gh release create "${{ github.ref_name }}-xpu" \
                     --repo ${{ github.repository }} \
@@ -440,7 +439,7 @@ jobs:
                   Install into an upstream Intel vLLM XPU container:
                   \`\`\`
                   VERSION=${{ github.ref_name }}
-                  pip install lmcache==\${XPU_WHEEL_VERSION} --no-deps \\
+                  pip install lmcache==${{ needs.build-xpu.outputs.xpu_version }} --no-deps \\
                     --find-links https://github.com/${{ github.repository }}/releases/expanded_assets/\${VERSION}-xpu
                   \`\`\`" \
                     dist/*.whl
