@@ -394,14 +394,20 @@ tiers selected at startup (all satisfy ``L1ManagerProtocol``):
   device as the full L1 arena; a hybrid configuration uses DRAM first and
   spills overflow allocations into Device-DAX. See the *L1 Memory Manager*
   section of :doc:`configuration` for the accepted knobs.
-- ``GDSL1MemoryManager`` -- an NVMe slab file when ``--gds-l1-path`` is set.
-  The bytes live on disk; reads/writes DMA directly between the GPU staging
-  buffer and the slab, driven by the process-global ``GDSContext``
-  (``gpu_connector/gds_context.py``) and dispatched from ``gpu_ops``. The DMA
-  backend is selected by platform via ``gpu_connector/_gds_async.py`` --
-  cuFile (``libcufile.so``) on NVIDIA and hipFile (``libhipfile.so``) on AMD
-  ROCm; see the *GDS L1 Tier* section of :doc:`configuration` for the
-  vendor-specific requirements. The CPU tier is disabled in this mode.
+- ``GDSL1MemoryManager`` -- an NVMe-backed L1 slab when ``--gds-l1-path`` is
+  set. cuFile and hipFile back the slab as a file at
+  ``<path>/lmcache_gds_slab.bin``; the opt-in uGDS backend instead maps the
+  slab onto a raw character device such as ``/dev/ugds_drv0``, in which case
+  ``--gds-l1-path`` names that device. Reads/writes DMA directly between the
+  GPU staging buffer and the slab, driven by the process-global
+  ``GDSContext`` (``gpu_connector/gds_context.py``) and dispatched from
+  ``gpu_ops``. The DMA backend is chosen by ``--gds-l1-backend`` and
+  dispatched through ``gpu_connector/_gds_async.py``: ``auto`` picks cuFile
+  (``libcufile.so``) on NVIDIA CUDA and hipFile (``libhipfile.so``) on AMD
+  ROCm, while ``ugds`` (``libugds.so``) opts into the user-space GPUDirect
+  path on either platform. See the *GDS L1 Tier* section of
+  :doc:`configuration` for the vendor-specific requirements. The CPU tier is
+  disabled in this mode.
 
 L2 Adapters
 ~~~~~~~~~~~

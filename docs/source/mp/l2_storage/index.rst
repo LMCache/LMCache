@@ -4,9 +4,13 @@ Secondary KV Storage
 LMCache multiprocess mode supports a two-tier storage architecture:
 
 - **L1 (fast tier)** -- CPU memory by default, or an NVMe slab via GPUDirect
-  Storage (cuFile) when ``--gds-l1-path`` is set, managed by the L1 Manager.
-  All KV cache chunks live here during active use. (Byte-array L2 adapters are
-  unsupported under the GDS L1 tier, which exposes no L1 memory buffer.)
+  Storage (cuFile on NVIDIA CUDA, hipFile on AMD ROCm, or the opt-in uGDS
+  user-space backend on either platform) when ``--gds-l1-path`` is set,
+  managed by the L1 Manager. The backend is chosen with
+  ``--gds-l1-backend``; see the *GDS L1 Tier* section of
+  :doc:`../configuration` for platform requirements. All KV cache chunks
+  live here during active use. (Byte-array L2 adapters are unsupported
+  under the GDS L1 tier, which exposes no L1 memory buffer.)
 - **L2 (persistent)** -- Durable storage backends (NIXL-based or plain
   file-system/raw-block).  The StoreController asynchronously pushes data from L1
   to L2, and the PrefetchController loads data from L2 back into L1 on
