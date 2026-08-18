@@ -6,6 +6,7 @@ Managing objects and memory for L1 cache
 # Standard
 from dataclasses import dataclass
 from itertools import count
+from typing import TYPE_CHECKING
 import threading
 
 # First Party
@@ -32,6 +33,10 @@ from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
 from lmcache.v1.mp_observability.otel_init import register_gauge
+
+if TYPE_CHECKING:
+    # Third Party
+    import torch
 
 logger = init_logger(__name__)
 _l1_manager_ids = count()
@@ -268,6 +273,18 @@ class L1Manager:
         """
         with self._lock:
             self._registered_listeners.append(listener)
+
+    def warm_up(self, device: "int | torch.device") -> None:
+        """Begin deferred L1 memory initialization for ``device``.
+
+        Forwards to the memory manager tier; a no-op for tiers without
+        deferred host pinning.
+
+        Args:
+            device: Device whose context the deferred initialization
+                should run under.
+        """
+        self._memory_manager.warm_up(device)
 
     @l1_mgr_synchronized
     def reserve_read(

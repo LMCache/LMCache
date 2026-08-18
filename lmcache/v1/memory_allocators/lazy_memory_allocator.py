@@ -199,6 +199,30 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
             self._pinning_started = True
             self._expand_thread.start()
 
+    def warm_up(self, device: int | torch.device) -> None:
+        """Start pinning on ``device`` in a background thread.
+
+        Non-blocking counterpart of :meth:`ensure_pinning` for callers on
+        latency-sensitive paths (e.g. worker registration): the calling
+        thread returns immediately while the initial chunk is pinned and
+        background expansion starts. Idempotent: once pinning has started
+        (or after :meth:`close`), no thread is spawned and this is a no-op.
+        An allocation racing the background pin blocks until it completes.
+
+        Args:
+            device (int | torch.device): Device whose CUDA context the
+                pinned host pool is bound to.
+        """
+        with self._init_lock:
+            if self._pinning_started or self._closed:
+                return
+        threading.Thread(
+            target=self.ensure_pinning,
+            args=(device,),
+            name="lazy-allocator-warm-up",
+            daemon=True,
+        ).start()
+
     def allocate(
         self,
         shapes: Union[torch.Size, list[torch.Size]],
