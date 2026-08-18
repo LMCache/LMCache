@@ -5,6 +5,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+DEFAULT_XPU_DEVICE_WHEEL_URL="https://github.com/opendataio/lmcache_xpu_device/releases/download/v0.1.0/lmcache_xpu_device-0.1.0-py3-none-any.whl"
+XPU_DEVICE_WHEEL_URL="${LMCACHE_XPU_DEVICE_WHEEL_URL:-${DEFAULT_XPU_DEVICE_WHEEL_URL}}"
 
 log() {
   echo "[intel-xpu-unit-tests] $*"
@@ -13,6 +15,30 @@ log() {
 fail() {
   echo "[intel-xpu-unit-tests] ERROR: $*" >&2
   exit 1
+}
+
+install_external_xpu_device_plugin() {
+  log "installing external XPU device wheel"
+  log "wheel url: ${XPU_DEVICE_WHEEL_URL}"
+  uv pip install "${XPU_DEVICE_WHEEL_URL}"
+
+  python - <<'PY'
+import importlib.metadata
+
+from lmcache.v1.platform import get_device_spec, resolve_device_ops
+
+entry_points = importlib.metadata.entry_points(group="lmcache.device_plugins")
+assert any(ep.name == "xpu" for ep in entry_points), "xpu entry point not found"
+
+spec = get_device_spec("xpu")
+assert spec is not None, "xpu DeviceSpec not resolved"
+assert spec.backend_name == "xpu", spec.backend_name
+
+ops = resolve_device_ops("xpu")
+assert ops.device_type == "xpu", ops.device_type
+
+print("external xpu device plugin resolved successfully")
+PY
 }
 
 [ -f /opt/intel/oneapi/setvars.sh ] || fail "/opt/intel/oneapi/setvars.sh not found"
@@ -33,6 +59,7 @@ source "${REPO_ROOT}/.buildkite/k3_harness/setup-lmcache-only-env.sh"
 
 log "installing job dependencies"
 uv pip install -r requirements/common.txt -r requirements/test.txt
+install_external_xpu_device_plugin
 
 discover_xpu_tests() {
   python - <<'PY'
@@ -84,4 +111,3 @@ fi
 log "running XPU-related tests"
 pytest "${PYTEST_ARGS[@]}" "${XPU_TEST_FILES[@]}"
 log "xpu smoke test finished successfully"
-
