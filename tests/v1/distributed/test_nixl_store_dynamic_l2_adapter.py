@@ -30,6 +30,7 @@ from lmcache.v1.distributed.l2_adapters.nixl_store_dynamic_l2_adapter import (  
     DynamicNixlStoreL2Adapter,
     DynamicNixlStoreL2AdapterConfig,
     _object_key_to_filename,
+    _object_key_to_relpath,
 )
 from lmcache.v1.memory_management import (  # noqa: E402
     MemoryFormat,
@@ -709,6 +710,61 @@ class TestCapacity:
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
+    def test_batched_store_reports_failure_when_capacity_exceeded(self):
+        """A partial batch should preserve completed stores and report failure."""
+        tmp_dir = tempfile.mkdtemp(prefix="nixl_dyn_cap_test_")
+        try:
+            buffer = torch.empty(
+                PAGE_SIZE * NUM_BUFFER_PAGES, dtype=torch.uint8, device="cpu"
+            )
+            l1_memory = L1MemoryDesc(
+                ptr=buffer.data_ptr(),
+                size=buffer.numel(),
+                align_bytes=PAGE_SIZE,
+            )
+            tiny_cap_gb = PAGE_SIZE / (1024**3)
+            config = DynamicNixlStoreL2AdapterConfig(
+                backend="POSIX",
+                backend_params={
+                    "file_path": tmp_dir,
+                    "use_direct_io": "false",
+                    "max_capacity_gb": str(tiny_cap_gb),
+                },
+            )
+            adpt = DynamicNixlStoreL2Adapter(config, l1_memory)
+
+            key1 = create_object_key(1)
+            key2 = create_object_key(2)
+            objects = [
+                create_memory_obj(buffer, page_index=0),
+                create_memory_obj(buffer, page_index=1),
+            ]
+
+            task_id = adpt.submit_store_task([key1, key2], objects)
+            wait_for_event_fd(adpt.get_store_event_fd())
+            result = adpt.pop_completed_store_tasks()[task_id]
+
+            assert not result.is_successful()
+            assert result.bytes_transferred() == 0
+            assert adpt.get_usage().total_bytes_used == PAGE_SIZE
+
+            stored_file = os.path.join(tmp_dir, _object_key_to_filename(key1))
+            rejected_file = os.path.join(tmp_dir, _object_key_to_filename(key2))
+            assert os.path.exists(stored_file)
+            assert not os.path.exists(rejected_file)
+
+            lookup_task = adpt.submit_lookup_and_lock_task([key1, key2], _EMPTY_LAYOUT)
+            wait_for_event_fd(adpt.get_lookup_and_lock_event_fd())
+            bitmap = adpt.query_lookup_and_lock_result(lookup_task)
+            assert bitmap is not None
+            assert bitmap.test(0)
+            assert not bitmap.test(1)
+
+            adpt.submit_unlock([key1])
+            adpt.close()
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
 
 # =============================================================================
 # Persist / Secondary Lookup Tests
@@ -880,3 +936,87 @@ class TestPersistAndSecondaryLookup:
             assert not os.path.exists(data_file)
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+# ---- 2-level hex hash-prefix subdir layout (shard_dirs) ----
+# base/<hex[:2]>/<hex[2:4]>/filename, used when shard_dirs=true, where hex is
+# chunk_hash.hex() (the same value in the filename). create_object_key(n) uses
+# IntHash2Bytes(n)=n.to_bytes(4,"big"), so hex is n as 8 zero-padded hex chars.
+
+
+def test_relpath_is_hex_hash_prefix():
+    """Path = <hex[:2]>/<hex[2:4]>/filename, using the chunk-hash hex."""
+    key = create_object_key(0x834EBC79)
+    h = key.chunk_hash.hex()  # "834ebc79"
+    parts = _object_key_to_relpath(key).split(os.sep)
+    assert len(parts) == 3
+    assert parts[0] == h[:2]  # "83"
+    assert parts[1] == h[2:4]  # "4e"
+    assert parts[2] == _object_key_to_filename(key)
+
+
+def test_relpath_subdir_matches_filename_hash_prefix():
+    """The two subdir levels are the first four hex chars of the filename hash."""
+    for n in (0x834EBC79, 0xABCD1234, 0x00FF10A2):
+        key = create_object_key(n)
+        h = key.chunk_hash.hex()
+        parts = _object_key_to_relpath(key).split(os.sep)
+        assert parts[0] == h[:2]
+        assert parts[1] == h[2:4]
+        # filename embeds the same hex, so the subdir is its leading prefix
+        assert parts[2].endswith(f"_{h}.bin")
+
+
+def test_relpath_spreads_across_all_256_top_dirs():
+    """Varying the top hash byte reaches all 256 top-level hex subdirs."""
+    tops = {
+        _object_key_to_relpath(create_object_key(i << 24)).split(os.sep)[0]
+        for i in range(256)
+    }
+    assert len(tops) == 256  # "00".."ff"
+
+
+def test_store_uses_hashed_layout_and_loads_back():
+    """Integration: a store lands in the 2-level subdir (not flat), and loads back."""
+    tmp_dir = tempfile.mkdtemp(prefix="nixl_dyn_hashed_test_")
+    buffer = torch.empty(PAGE_SIZE * NUM_BUFFER_PAGES, dtype=torch.uint8, device="cpu")
+    l1_memory = L1MemoryDesc(
+        ptr=buffer.data_ptr(), size=buffer.numel(), align_bytes=PAGE_SIZE
+    )
+    config = DynamicNixlStoreL2AdapterConfig(
+        backend="POSIX",
+        backend_params={
+            "file_path": tmp_dir,
+            "use_direct_io": "false",
+            "max_capacity_gb": str(MAX_CAPACITY_GB),
+            "shard_dirs": "true",
+        },
+    )
+    adpt = DynamicNixlStoreL2Adapter(config, l1_memory)
+    try:
+        key = create_object_key(0xABCD1234)
+        store_obj = create_memory_obj(buffer, page_index=0, fill_value=42.0)
+        adpt.submit_store_task([key], [store_obj])
+        wait_for_event_fd(adpt.get_store_event_fd())
+        adpt.pop_completed_store_tasks()
+
+        hashed = os.path.join(tmp_dir, _object_key_to_relpath(key))
+        flat = os.path.join(tmp_dir, _object_key_to_filename(key))
+        assert os.path.exists(hashed), "store must write to the 2-level subdir"
+        assert not os.path.exists(flat), "store must not write to the flat path"
+
+        # Load it back and verify data.
+        tid = adpt.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+        wait_for_event_fd(adpt.get_lookup_and_lock_event_fd())
+        adpt.query_lookup_and_lock_result(tid)
+        load_obj = create_memory_obj(buffer, page_index=1, fill_value=0.0)
+        tid = adpt.submit_load_task([key], [load_obj])
+        wait_for_event_fd(adpt.get_load_event_fd())
+        bitmap = adpt.query_load_result(tid)
+        assert bitmap is not None and bitmap.test(0)
+        loaded = buffer[PAGE_SIZE : 2 * PAGE_SIZE].view(torch.float32)
+        assert torch.all(loaded == 42.0)
+        adpt.submit_unlock([key])
+    finally:
+        adpt.close()
+        shutil.rmtree(tmp_dir, ignore_errors=True)

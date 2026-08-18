@@ -4,7 +4,7 @@
 # Standard
 from dataclasses import dataclass
 from itertools import islice
-from typing import Generator, Sequence
+from typing import Any, Generator, Sequence
 import threading
 import time
 
@@ -12,7 +12,7 @@ import time
 import torch
 
 # First Party
-from lmcache import torch_dev
+from lmcache import device_ops, torch_dev
 from lmcache.logging import init_logger
 from lmcache.utils import (
     EngineType,
@@ -28,6 +28,7 @@ from lmcache.v1.gpu_connector.gpu_ops import (
     lmcache_memcpy_async_h2d,
 )
 from lmcache.v1.gpu_connector.utils import LayoutHints
+from lmcache.v1.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_management import GDSMemoryObject, MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType
@@ -53,11 +54,11 @@ from lmcache.v1.platform.base.event_ipc import (
     get_event_ipc_backend,
 )
 from lmcache.v1.platform.cache_context import create_cache_context
-import lmcache.c_ops as lmc_ops
+import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
 _HAS_NATIVE_OBJECT_GROUP_TRANSFER: bool = hasattr(
-    lmc_ops, "execute_object_group_transfer"
+    device_ops, "execute_object_group_transfer"
 )
 
 
@@ -129,6 +130,47 @@ def batched_iteration_with_skip(
     while batch := tuple(islice(it, batch_size)):
         yield batch_start_idx, batch
         batch_start_idx += len(batch)
+
+
+def all_null_chunk_masks(
+    block_ids: Sequence[Sequence[int]],
+    object_groups: Sequence[ObjectGroupInfo],
+    blocks_per_chunk: Sequence[int],
+    num_chunks: int,
+) -> list[list[bool]]:
+    """Mark, per object group, the chunks whose engine block ids are all null.
+
+    A chunk is null for an object group when every block id of every kernel
+    group in that group is 0 (the vLLM null block). Align-mode Mamba/linear
+    layers produce such chunks: only the block holding the last recurrent state
+    is real, so every earlier chunk is null. These chunks must not be stored --
+    the null block carries no valid KV, and object keys are content hashes, so
+    committing them would serve garbage to a later prefix hit.
+
+    Args:
+        block_ids: Raw per-kernel-group engine block ids (before any downsample),
+            indexed by kernel-group index.
+        object_groups: The object groups, indexed by object-group id.
+        blocks_per_chunk: Blocks in one chunk per kernel group, indexed by
+            kernel-group index.
+        num_chunks: Number of chunks in the request.
+
+    Returns:
+        ``mask[g][i]`` is True iff chunk ``i`` is all-null for object group ``g``.
+    """
+    masks: list[list[bool]] = []
+    for group in object_groups:
+        chunk_null: list[bool] = []
+        for i in range(num_chunks):
+            is_null = True
+            for kg in group.kernel_group_indices:
+                bpc = blocks_per_chunk[kg]
+                if any(block_ids[kg][i * bpc : (i + 1) * bpc]):
+                    is_null = False
+                    break
+            chunk_null.append(is_null)
+        masks.append(chunk_null)
+    return masks
 
 
 def downsample_and_stage_block_ids(
@@ -245,7 +287,7 @@ def _run_object_group_transfer_plan(
     object_group_id: int,
     batch_size: int,
     skip_first_n_tokens: int,
-    direction: "lmc_ops.TransferDirection",
+    direction: "lmcache_native.TransferDirection",
 ) -> None:
     """Plan and execute one object group's transfer in a single native call.
 
@@ -277,11 +319,11 @@ def _run_object_group_transfer_plan(
     kv_groups_manager = cache_context.kv_layer_groups_manager
     object_group = kv_groups_manager.object_groups[object_group_id]
     kernel_group_ids = object_group.kernel_group_indices
-    is_h2d = direction == lmc_ops.TransferDirection.H2D
+    is_h2d = direction == lmcache_native.TransferDirection.H2D
     max_batch_size = cache_context.max_batch_size
 
     # --- Per-kernel-group invariants, resolved once (vs. every batch before) ---
-    kernel_group_specs: list["lmc_ops.KernelGroupSpec"] = []
+    kernel_group_specs: list[Any] = []
     spec_index_by_kg: dict[int, int] = {}
     blocks_per_chunk_by_kg: dict[int, int] = {}
     blocks_per_window_by_kg: dict[int, int] = {}
@@ -308,7 +350,7 @@ def _run_object_group_transfer_plan(
 
         spec_index_by_kg[kernel_group_id] = len(kernel_group_specs)
         kernel_group_specs.append(
-            lmc_ops.KernelGroupSpec(
+            device_ops.KernelGroupSpec(
                 paged_ptrs.data_ptr(),
                 [buffer.data_ptr() for buffer in temp_buffers],
                 cache_context.get_shape_desc(kernel_group_id),
@@ -338,7 +380,7 @@ def _run_object_group_transfer_plan(
         )
 
     # --- Walk the batches in order, emitting staging + launch work per step ---
-    batch_steps: list["lmc_ops.BatchStep"] = []
+    batch_steps: list[Any] = []
     for start_object_idx, memory_object_batch in batched_iteration_with_skip(
         memory_objs, batch_size, skip_count=num_objects_to_skip
     ):
@@ -368,7 +410,7 @@ def _run_object_group_transfer_plan(
             is_h2d,
         )
 
-        launches: list["lmc_ops.LaunchVar"] = []
+        launches: list[Any] = []
         for kernel_group_id in kernel_group_ids:
             blocks_per_chunk = blocks_per_chunk_by_kg[kernel_group_id]
             blocks_per_window = blocks_per_window_by_kg[kernel_group_id]
@@ -386,7 +428,7 @@ def _run_object_group_transfer_plan(
             )
 
             launches.append(
-                lmc_ops.LaunchVar(
+                device_ops.LaunchVar(
                     spec_index_by_kg[kernel_group_id],
                     start_block_pos,
                     end_block_pos - start_block_pos,
@@ -395,12 +437,13 @@ def _run_object_group_transfer_plan(
                 )
             )
 
-        batch_steps.append(lmc_ops.BatchStep(staging, launches))
+        batch_steps.append(device_ops.BatchStep(staging, launches))
 
     if not batch_steps:
         return
 
-    lmc_ops.execute_object_group_transfer(
+    execute_object_group_transfer = device_ops.execute_object_group_transfer
+    execute_object_group_transfer(
         direction,
         cache_context.device,
         LazyMemoryAllocator.PIN_CHUNK_SIZE,
@@ -416,7 +459,7 @@ def transfer_kv_per_object_group(
     object_group_id: int,
     batch_size: int,
     skip_first_n_tokens: int,
-    direction: "lmc_ops.TransferDirection",
+    direction: "lmcache_native.TransferDirection",
 ) -> None:
     """Helper function to transfer memory objects of a single object group
     to/from GPU, with batching support.
@@ -462,7 +505,7 @@ def transfer_kv_per_object_group(
     kv_groups_manager = cache_context.kv_layer_groups_manager
     object_group = kv_groups_manager.object_groups[object_group_id]
     kernel_group_ids = object_group.kernel_group_indices
-    is_h2d = direction == lmc_ops.TransferDirection.H2D
+    is_h2d = direction == lmcache_native.TransferDirection.H2D
 
     attn_desc = kv_groups_manager.get_attn_desc()
     num_objects_to_skip = 0
@@ -553,7 +596,7 @@ def transfer_kv_per_object_group(
                 ).data_ptr()
                 for i in range(batch_len)
             ]
-            lmc_ops.multi_layer_block_kv_transfer(
+            device_ops.multi_layer_block_kv_transfer(
                 group_kv_pointers,
                 tmp_gpu_buffers_batched,
                 block_ids_curr_batch,
@@ -1041,6 +1084,17 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 event_backend.record_event(event, cache_context.stream)
                 return event_backend.export_event(event, cache_context.device), False
 
+            # Chunks whose block ids are all the null block (e.g. align-mode
+            # Mamba chunks holding no real state) carry no valid KV and must not
+            # be committed. Computed on the raw block ids before downsampling
+            # mutates them.
+            skipped_chunks = all_null_chunk_masks(
+                gpu_block_ids,
+                cache_context.kv_layer_groups_manager.object_groups,
+                blocks_per_chunk,
+                num_chunks,
+            )
+
             block_ids_per_group_gpu = downsample_and_stage_block_ids(
                 cache_context, gpu_block_ids
             )
@@ -1090,13 +1144,17 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             try:
                 for obj_group_id in range(num_object_groups):
                     obj_keys = obj_keys_per_obj_group[obj_group_id]
+                    skip_mask = skipped_chunks[obj_group_id]
+                    keys_to_reserve = [
+                        k for i, k in enumerate(obj_keys) if not skip_mask[i]
+                    ]
                     layout_desc = get_layout_desc(
                         cache_context,
                         self._ctx.chunk_size,
                         object_group_id=obj_group_id,
                     )
                     reserved_dict = self._ctx.storage_manager.reserve_write(
-                        obj_keys, layout_desc, "new"
+                        keys_to_reserve, layout_desc, "new"
                     )
                     all_dict.update(reserved_dict)
                     if reserved_dict:
@@ -1104,8 +1162,9 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                             iter(reserved_dict.values())
                         ).get_size() * len(reserved_dict)
 
-                    # Keys not in reserved_dict (skipped by the storage manager)
-                    # become None entries; the helper skips them for D2H.
+                    # Keys not in reserved_dict (all-null chunks skipped above, or
+                    # skipped by the storage manager) become None entries; the
+                    # helper skips them for D2H.
                     memory_objs: list[MemoryObj | None] = [
                         reserved_dict.get(obj_key) for obj_key in obj_keys
                     ]
@@ -1118,7 +1177,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                         object_group_id=obj_group_id,
                         batch_size=1,
                         skip_first_n_tokens=0,
-                        direction=lmc_ops.TransferDirection.D2H,
+                        direction=lmcache_native.TransferDirection.D2H,
                     )
 
                 store_succeeded = True
@@ -1283,21 +1342,39 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             )
             event_backend.wait_event(producer_event, cache_context.stream)
 
+            # Per object group, the prefetch only locked the in-window suffix
+            # (the last ``num_chunks_in_sw`` chunks; the whole prefix for full
+            # attention, where the value is < 0). Read and transfer only those.
+            attn_desc = cache_context.kv_layer_groups_manager.get_attn_desc()
+            group_skips = [
+                0 if window < 0 else max(0, num_chunks - window)
+                for window in attn_desc.num_chunks_in_sw
+            ]
+            expected_retained = sum(num_chunks - skip for skip in group_skips)
+
             prefetched_keys: list[ObjectKey] = []
             total_bytes = 0
             retrieve_succeeded = True
             try:
                 for obj_group_id in range(num_object_groups):
-                    obj_keys = obj_keys_per_obj_group[obj_group_id]
+                    skip = group_skips[obj_group_id]
+                    in_window_keys = obj_keys_per_obj_group[obj_group_id][skip:]
                     with self._ctx.storage_manager.read_prefetched_results(
-                        obj_keys
-                    ) as memory_objs:
-                        if not memory_objs or len(memory_objs) != len(obj_keys):
+                        in_window_keys
+                    ) as window_objs:
+                        if not window_objs or len(window_objs) != len(in_window_keys):
                             logger.error("Some keys not found during retrieve!")
                             retrieve_succeeded = False
                             break
 
-                        total_bytes += sum(mo.get_size() for mo in memory_objs)
+                        total_bytes += sum(mo.get_size() for mo in window_objs)
+
+                        # None-pad the skipped prefix to full length so the
+                        # transfer's ``num_objects_to_skip`` and block-id slicing
+                        # line up unchanged; the None entries are never read.
+                        memory_objs: list[MemoryObj | None] = [None] * skip + list(
+                            window_objs
+                        )
 
                         transfer_kv_per_object_group(
                             cache_context,
@@ -1306,12 +1383,12 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                             object_group_id=obj_group_id,
                             batch_size=cache_context.max_batch_size,
                             skip_first_n_tokens=skip_first_n_tokens,
-                            direction=lmc_ops.TransferDirection.H2D,
+                            direction=lmcache_native.TransferDirection.H2D,
                         )
                         # Extend only after the copy is enqueued: on exception,
                         # read_prefetched_results releases this group's locks
                         # itself, and a key must not be released twice.
-                        prefetched_keys.extend(obj_keys)
+                        prefetched_keys.extend(in_window_keys)
             except Exception:
                 logger.exception("Cannot retrieve keys due to exception")
                 retrieve_succeeded = False
@@ -1325,7 +1402,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                     )
                 num_tokens = (
                     num_chunks * self._ctx.chunk_size
-                    if len(prefetched_keys) == num_chunks * num_object_groups
+                    if len(prefetched_keys) == expected_retained
                     else 0
                 )
                 self._ctx.event_bus.publish_on_stream(
@@ -1364,22 +1441,26 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         """Publish one ``MP_TOKENS`` event for ``key``'s chunks.
 
         Pairs each complete chunk in ``[key.start, key.end)`` with its
-        ObjectKey chunk hash. Must be called at store submission — before
-        the write-finished events can reach the bus — so the cache-event
-        subscriber can stamp token ids onto the STORE entries. A store
-        that later fails leaves only unused cache entries (bounded).
+        ObjectKey chunk hash and token position. Must be called at store
+        submission, before the write-finished events reach the bus, so the
+        cache-event subscriber can stamp them onto the STORE entries. A
+        store that later fails leaves only unused cache entries.
 
         Args:
             key: The IPC key of the store being submitted.
             obj_keys: One ObjectKey per complete chunk, in chunk order.
         """
-        token_ids = list(key.token_ids)
+        # Complete chunks in [key.start, key.end) paired with the absolute
+        # position of each chunk's first token. Prefix-chained chunk hashes
+        # imply a position without revealing it, so it is reported here. A
+        # trailing partial chunk has no stored KV to bind to.
         chunk_size = self._ctx.chunk_size
+        token_ids = list(key.token_ids)
         effective_len = min(len(token_ids), key.end)
         num_complete = effective_len - effective_len % chunk_size
+        token_offsets = list(range(key.start, num_complete, chunk_size))
         token_chunks = [
-            token_ids[offset : offset + chunk_size]
-            for offset in range(key.start, num_complete, chunk_size)
+            token_ids[offset : offset + chunk_size] for offset in token_offsets
         ]
         if not token_chunks:
             return
@@ -1401,6 +1482,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 metadata={
                     "chunk_hashes": [obj_key.chunk_hash for obj_key in obj_keys],
                     "token_chunks": token_chunks,
+                    "token_offsets": token_offsets,
                 },
             )
         )

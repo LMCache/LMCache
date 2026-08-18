@@ -17,13 +17,11 @@ from fastapi import Request
 import httpx
 
 # First Party
-from lmcache.v1.distributed.quota_manager import QuotaManager
-from lmcache.v1.mp_coordinator.cache_control.event_broadcaster import (
-    CacheEventBroadcaster,
+from lmcache.v1.mp_coordinator.controllers.eviction_controller import (
+    FleetEvictionController,
 )
-from lmcache.v1.mp_coordinator.cache_control.eviction_manager import L2EvictionManager
-from lmcache.v1.mp_coordinator.cache_control.prefetch_manager import PrefetchManager
-from lmcache.v1.mp_coordinator.cache_control.usage_manager import L2UsageManager
+from lmcache.v1.mp_coordinator.controllers.prefetch_manager import PrefetchManager
+from lmcache.v1.mp_coordinator.ingest.event_gate import EventGate
 from lmcache.v1.mp_coordinator.key_directory import KeyDirectory
 from lmcache.v1.mp_coordinator.registry import InstanceRegistry
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
@@ -35,27 +33,24 @@ class CoordinatorContext:
 
     Attributes:
         registry: Fleet membership (``MPInstance`` by ``instance_id``).
-        quota_manager: Per-``cache_salt`` L2 quota state.
-        usage_manager: Per-``cache_salt`` L2 usage tracking.
-        eviction_manager: Quota/LRU L2 eviction dispatcher; also holds the L2
-            pin set consulted when computing eviction plans.
+        eviction_controller: The fleet L2 eviction control loop. Owns the
+            quota registry (``.quota``), the usage view (``.usage``), and
+            the L2 pin set.
         prefetch_manager: Warm-prefetch proxy to MP servers.
         token_hasher: Resolves a pin request's ``token_ids`` to object keys
             (configured to match the fleet's ``chunk_size`` / ``hash_algorithm``).
         key_directory: Fleet-wide key → placements directory built from
             MP-server cache events (eventually consistent).
-        event_broadcaster: Fans directory-applied cache-event batches out to
-            the registered consumers.
+        event_gate: Ingest entry point for the fleet cache-event stream
+            (``POST /events``).
     """
 
     registry: InstanceRegistry
-    quota_manager: QuotaManager
-    usage_manager: L2UsageManager
-    eviction_manager: L2EvictionManager
+    eviction_controller: FleetEvictionController
     prefetch_manager: PrefetchManager
     token_hasher: TokenHasher
     key_directory: KeyDirectory
-    event_broadcaster: CacheEventBroadcaster
+    event_gate: EventGate
 
 
 def get_context(request: Request) -> CoordinatorContext:

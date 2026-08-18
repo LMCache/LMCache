@@ -23,9 +23,17 @@ one of two ways, depending on whether ``--otlp-endpoint`` is set:
      ``/metrics`` is empty until the first store/retrieve — drive some
      traffic before you go looking.
 
+     The MP Coordinator follows the same embedded-HTTP pattern. In pull mode,
+     ``lmcache coordinator`` exposes ``/metrics`` on ``--port`` (default
+     **9300**) and never starts a separate Prometheus server. Use the
+     coordinator's ``--disable-metrics`` flag to disable metrics.
+
 - **Push mode (OTLP).** When ``--otlp-endpoint`` is set, metrics are pushed to
   an OpenTelemetry Collector, which re-exposes them for Prometheus to scrape.
   See :doc:`index` for the bundled Collector + Prometheus + Grafana stack.
+
+  The Coordinator also accepts ``--otlp-endpoint``. Its local ``/metrics``
+  route returns 404 in push mode, as it does when metrics are disabled.
 
 All metrics use the ``lmcache_mp.`` prefix (multiprocess). On Prometheus,
 dots are converted to underscores and counters get a ``_total`` suffix
@@ -582,4 +590,3 @@ In **push mode** (``--otlp-endpoint`` set), the server does not expose
 ``/metrics`` itself; scrape the OpenTelemetry Collector's Prometheus exporter
 instead. The bundled stack in ``examples/observability/`` wires this up for
 you — see :doc:`index`.
-

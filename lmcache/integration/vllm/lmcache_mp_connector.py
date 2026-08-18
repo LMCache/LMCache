@@ -44,11 +44,15 @@ from lmcache.integration.vllm.kv_cache_group_edits import (
 from lmcache.integration.vllm.kv_cache_groups import (
     create_engine_group_infos_from_vllm,
 )
+from lmcache.integration.vllm.lazy_offload_pending_store import (
+    LazyOffloadPendingStore,
+)
 from lmcache.integration.vllm.lmcache_mp_metadata import (
     LMCacheMPConnectorMetadata,
     LMCacheMPRequestMetadata,
     LMCacheMPRequestState,
     LMCacheMPRequestTracker,
+    LMCacheMPWorkerMetadata,
 )
 from lmcache.integration.vllm.utils import (
     mla_only,
@@ -98,6 +102,7 @@ if TYPE_CHECKING:
         PromMetricT,
     )
     from vllm.forward_context import ForwardContext
+    from vllm.v1.core.block_pool import BlockPool
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
@@ -141,39 +146,38 @@ def _has_preemption_reqs(scheduler_output: SchedulerOutput) -> bool:
 
 
 def validate_mamba_step_alignment(vllm_config: VllmConfig) -> None:
-    """Reject scheduler configs that can skip Mamba state snapshots.
+    """Reject scheduler configs whose steps cannot advance a whole Mamba block.
 
     In ``mamba_cache_mode="align"`` vLLM snapshots the recurrent state only at
-    the end of each scheduler step, and a step that advances more than one
-    block fills the skipped block-table positions with the null block
-    (``MambaManager.allocate_new_blocks``). LMCache keys chunks by token hash,
-    so a skipped boundary would be stored as null-block garbage under a valid
-    key and silently corrupt any request that later resumes from that prefix.
-    Requiring ``block_size <= max_num_batched_tokens < 2 * block_size`` makes
-    vLLM's block-aligned splitting (``Scheduler._mamba_block_aligned_split``)
-    advance every mid-prefill step by exactly one block, so every chunk
-    boundary holds a real snapshot.
+    the end of each scheduler step, on the last block the step advanced. A step
+    advancing more than one block fills the skipped block-table positions with
+    the null block (``MambaManager.allocate_new_blocks``); LMCache handles those
+    safely -- ``store`` never commits an all-null-block chunk and ``retrieve``
+    loads only each object group's sliding-window suffix -- so
+    ``max_num_batched_tokens`` may exceed ``2 * block_size`` (with
+    ``--separate-object-groups``). Only the lower bound remains: a step must
+    advance at least one full block, or vLLM's block-aligned splitting
+    (``Scheduler._mamba_block_aligned_split``) yields empty chunks and prefill
+    cannot progress.
 
     Args:
         vllm_config: The vLLM config; only Mamba-hybrid models in ``align``
             cache mode are constrained, others pass.
 
     Raises:
-        ValueError: If ``max_num_batched_tokens`` is not in
-            ``[block_size, 2 * block_size)``.
+        ValueError: If ``max_num_batched_tokens < block_size``.
     """
     if getattr(vllm_config.cache_config, "mamba_cache_mode", "none") != "align":
         return
     block_size = vllm_config.cache_config.block_size
     max_batched = vllm_config.scheduler_config.max_num_batched_tokens
-    if not (block_size <= max_batched < 2 * block_size):
+    if max_batched < block_size:
         raise ValueError(
             f"Mamba-hybrid models with LMCache require "
-            f"block_size <= max_num_batched_tokens < 2 * block_size so every "
-            f"prefill step advances exactly one block and every block boundary "
-            f"gets a state snapshot; got max_num_batched_tokens={max_batched}, "
-            f"block_size={block_size}. Set --max-num-batched-tokens "
-            f"{block_size}."
+            f"max_num_batched_tokens >= block_size so every prefill step "
+            f"advances at least one full block; got "
+            f"max_num_batched_tokens={max_batched}, block_size={block_size}. "
+            f"Set --max-num-batched-tokens to at least {block_size}."
         )
 
 
@@ -240,6 +244,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
     - lmcache.mp.mq_timeout: timeout (seconds) for message queue requests.
     - lmcache.mp.heartbeat_interval: interval (seconds) between server
       heartbeat pings.
+    - lmcache.mp.eager_prefetch: submit the LMCache lookup when a request
+      enters vLLM's waiting queue. Disabled by default.
     """
 
     def __init__(
@@ -255,6 +261,12 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         validate_kv_cache_groups(getattr(self, "_kv_cache_config", None))
 
         assert vllm_config.kv_transfer_config is not None
+
+        self._eager_prefetch: bool = bool(
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "lmcache.mp.eager_prefetch", False
+            )
+        )
 
         # Multi-server: prefer lmcache.mp.server_urls (list or comma-separated
         # string) over the single-server lmcache.mp.host / lmcache.mp.port.
@@ -321,6 +333,12 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         self.dispatcher = None
 
+        # Lazy offload configuration: when enabled, store operations are
+        # deferred until some threshold is reached, rather than submitted at every step
+        self.lazy_offload = vllm_config.kv_transfer_config.get_from_extra_config(
+            "lmcache.mp.lazy_offload", False
+        )
+
         if self.role == KVConnectorRole.SCHEDULER:
             # Banner from the scheduler role only, so tensor-parallel
             # deployments print it once rather than once per worker.
@@ -334,6 +352,15 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 extra_config=vllm_config.kv_transfer_config.kv_connector_extra_config,
             )
             self.request_trackers: dict[str, LMCacheMPRequestTracker] = {}
+
+            # GPU block pool reference
+            self._gpu_block_pool: "BlockPool | None" = None
+
+            # Initialize pending store for lazy offload mode
+            if self.lazy_offload:
+                self._pending_store = LazyOffloadPendingStore(
+                    vllm_config.kv_transfer_config.kv_connector_extra_config
+                )
         elif self.role == KVConnectorRole.WORKER:
             # Node routing: a worker connects only to its local LMCache server.
             # Global ranks are assigned to nodes in contiguous blocks:
@@ -632,9 +659,23 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             The finished saves/sends req ids must belong to a set provided in a
             call to this method (this call or a prior one).
         """
-        val = self.worker_adapter.get_finished(finished_req_ids)
+        if self.lazy_offload:
+            val = self.worker_adapter.get_finished_with_lazy_offload()
+        else:
+            val = self.worker_adapter.get_finished(finished_req_ids)
         # logger.error("Finished req ids: %s, %s", val[0], val[1])
         return val
+
+    def build_connector_worker_meta(self):
+        if not self.lazy_offload:
+            return None
+        completed_store_requests = self.worker_adapter.get_completed_store_requests()
+        if completed_store_requests:
+            return LMCacheMPWorkerMetadata(
+                completed_store_requests=completed_store_requests
+            )
+        else:
+            return None
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         """
@@ -677,6 +718,15 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
     # ==============================
     # Scheduler-side methods
     # ==============================
+
+    def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:
+        """Bind GPU block pool so that we can touch blocks during stores.
+        Called by Scheduler after kv_cache_manager is ready."""
+        if self.role == KVConnectorRole.SCHEDULER:
+            logger.info("Bind GPU block pool in LMCacheMPConnector scheduler")
+            self._gpu_block_pool = gpu_block_pool
+            if self.lazy_offload:
+                self._pending_store.bind_gpu_block_pool(gpu_block_pool)
 
     def get_num_new_matched_tokens(
         self,
@@ -749,6 +799,24 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             "vLLM hit is: %d, Need to load is %d", num_computed_tokens, need_to_load
         )
         return need_to_load, need_to_load > 0
+
+    def on_new_request(self, request: "Request") -> None:
+        """Submit an LMCache lookup when a request enters the waiting queue.
+
+        Args:
+            request (Request): The request object.
+        """
+        if self.role != KVConnectorRole.SCHEDULER:
+            return
+        if not self._eager_prefetch or request.resumable:
+            return
+
+        tracker = self._get_or_create_request_tracker(request)
+        self.scheduler_adapter.maybe_submit_lookup_request(
+            request.request_id,
+            token_ids=list(request.all_token_ids),
+            cache_salt=tracker.cache_salt,
+        )
 
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
@@ -865,7 +933,21 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             connector_output (KVConnectorOutput): the worker-side
                 connectors output.
         """
-        return
+        if not self.lazy_offload:
+            return
+        if not self._gpu_block_pool:
+            raise ValueError("Lazy offload is enabled but gpu block pool is not binded")
+        meta = connector_output.kv_connector_worker_meta
+        if not isinstance(meta, LMCacheMPWorkerMetadata):
+            return
+        for req_id, count in meta.completed_store_requests.items():
+            if self.scheduler_adapter.update_pending_store_count(req_id, count):
+                gpu_block_ids = self._pending_store.get_request_gpu_block_ids(req_id)
+                self._gpu_block_pool.free_blocks(
+                    [self._gpu_block_pool.blocks[bid] for bid in gpu_block_ids]
+                )
+                self._pending_store.remove_request_gpu_block_ids(req_id)
+                self.scheduler_adapter.end_session(req_id)
 
     def request_finished(
         self,
@@ -906,9 +988,14 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         # Clean up request tracker to prevent memory leak
         self._cleanup_request_tracker(request.request_id)
+
+        # have not been offloaded, the touch operation in end_session is incorrect
         # Notify LMCache to end the session for this request
         self.scheduler_adapter.end_session(request.request_id)
 
+        if self.lazy_offload:
+            self._pending_store.mark_req_finished(request.request_id)
+            return False, (return_params or None)
         return True, (return_params or None)
 
     def request_finished_all_groups(
@@ -1024,7 +1111,18 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 self._group_tokens_per_block,
             )
             if r_meta is not None:
-                metadata.add_request_metadata(r_meta)
+                # In lazy_offload mode, add to pending queue instead of immediate store
+                if self.lazy_offload:
+                    self._pending_store.add(r_meta)
+                else:
+                    metadata.add_request_metadata(r_meta)
+        # if scheduler_output.total_num_scheduled_tokens is 0,
+        # vllm `gpu_model_runner` will call `kv_connector_no_forward`
+        # in `execute_model`, which will result in lose some store ops.
+        # So we only trigger lazy offload when
+        # scheduler_output.total_num_scheduled_tokens > 0
+        if scheduler_output.total_num_scheduled_tokens:
+            self._process_lazy_offload_store_requests(metadata)
 
     def _process_cached_requests(
         self,
@@ -1054,7 +1152,58 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             )
 
             if r_meta is not None:
-                metadata.add_request_metadata(r_meta)
+                # In lazy_offload mode, add to pending queue instead of immediate store
+                if self.lazy_offload:
+                    self._pending_store.add(r_meta)
+                else:
+                    metadata.add_request_metadata(r_meta)
+        # if scheduler_output.total_num_scheduled_tokens is 0,
+        # vllm `gpu_model_runner` will call `kv_connector_no_forward`
+        # in `execute_model`, which will result in lose some store ops.
+        # So we only trigger lazy offload when
+        # scheduler_output.total_num_scheduled_tokens > 0
+        if scheduler_output.total_num_scheduled_tokens:
+            self._process_lazy_offload_store_requests(metadata)
+
+    def _process_lazy_offload_store_requests(
+        self, metadata: LMCacheMPConnectorMetadata
+    ):
+        if not self.lazy_offload:
+            return
+
+        if not self._gpu_block_pool:
+            raise ValueError("Lazy offload is enabled but no GPU block pool is bound")
+
+        # Each item aggregates store metadata for one request. Chunked prefill
+        # or the scheduler's ``max-num-batched-tokens`` limit can schedule one
+        # request multiple times, with each metadata entry containing only that
+        # scheduling pass's blocks.
+        for item in self._pending_store.pop_items_for_offload():
+            request_id = item.request_id
+            for meta, old_block_hashes in item.metadatas:
+                gpu_block_ids = list(old_block_hashes.keys())
+                self._gpu_block_pool.touch(
+                    [self._gpu_block_pool.blocks[bid] for bid in gpu_block_ids]
+                )
+                new_block_hashes = {
+                    bid: self._gpu_block_pool.blocks[bid].block_hash
+                    for bid in gpu_block_ids
+                }
+                if old_block_hashes == new_block_hashes:
+                    # remove block hashes and free blocks until store is done
+                    metadata.add_request_metadata(meta)
+                    self._pending_store.update_request_gpu_block_ids(
+                        request_id, gpu_block_ids
+                    )
+                else:
+                    logger.warning(
+                        "Part block hashes mismatch for request %s, skip it",
+                        request_id,
+                    )
+                    self._gpu_block_pool.free_blocks(
+                        [self._gpu_block_pool.blocks[bid] for bid in gpu_block_ids]
+                    )
+                    break
 
     def _report_block_allocation_deltas(
         self,

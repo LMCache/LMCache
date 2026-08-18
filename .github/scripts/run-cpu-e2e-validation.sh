@@ -495,10 +495,17 @@ LMCACHE_ARGS=(
 #   engine_driven -> EngineDrivenTransferContext (worker gathers/scatters data)
 #     sub-mode: SHM (--shm-name __default__) or pickle (--shm-name "")
 #   lmcache_driven -> LMCacheDrivenTransferContext (server-side IPC handle)
+# The server only loads the paths named by --supported-transfer-mode
+# (default: lmcache_driven), so every leg passes it explicitly. Likewise
+# the default --shm-name "" disables the SHM pool, so the shm legs name a
+# segment explicitly. Keep segment names short: macOS caps POSIX SHM
+# names at 31 chars including the server's lmcache_l1_pool_ prefix.
 # Step 5.5 verifies which one the worker actually entered.
 if [ "${LMCACHE_MP_TRANSFER_MODE}" = "engine_driven" ]; then
+  LMCACHE_ARGS+=(--supported-transfer-mode engine_driven)
   if [ "${LMCACHE_SHM_NAME}" = "__default__" ]; then
     echo "Transport mode: engine-driven/shm (shared memory)"
+    LMCACHE_ARGS+=(--shm-name "e2e_$$")
     EXPECTED_TRANSPORT="shm"
   else
     echo "Transport mode: engine-driven/pickle (--shm-name '${LMCACHE_SHM_NAME}')"
@@ -507,12 +514,15 @@ if [ "${LMCACHE_MP_TRANSFER_MODE}" = "engine_driven" ]; then
   fi
 elif [ "${LMCACHE_MP_TRANSFER_MODE}" = "lmcache_driven" ]; then
   echo "Transport mode: lmcache-driven (IPC handle path)"
+  LMCACHE_ARGS+=(--supported-transfer-mode lmcache_driven)
   EXPECTED_TRANSPORT="lmcache_driven"
 else
   echo "Transport mode: unknown '${LMCACHE_MP_TRANSFER_MODE}',"
   echo "  falling back to LMCACHE_SHM_NAME-based detection"
+  LMCACHE_ARGS+=(--supported-transfer-mode auto)
   if [ "${LMCACHE_SHM_NAME}" = "__default__" ]; then
     echo "Transport mode: data/shm (shared memory, fallback)"
+    LMCACHE_ARGS+=(--shm-name "e2e_$$")
     EXPECTED_TRANSPORT="shm"
   else
     echo "Transport mode: data/pickle (--shm-name '${LMCACHE_SHM_NAME}')"

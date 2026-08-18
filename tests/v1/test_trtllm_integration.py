@@ -13,13 +13,24 @@ import pytest
 import torch
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.utils import EngineType
+import lmcache.lmcache_native as lmcache_native
+
+# TRT-LLM connector path is CUDA-only.
+pytestmark = [
+    pytest.mark.cuda,
+    pytest.mark.skipif(
+        not (torch_dev.is_available() and torch_device_type == "cuda"),
+        reason="Requires CUDA backend",
+    ),
+]
 
 
-def _has_lmc_ops() -> bool:
+def _has_cuda_ops() -> bool:
     try:
         # First Party
-        import lmcache.c_ops  # noqa: F401
+        import lmcache.cuda_ops  # noqa: F401
 
         return True
     except ImportError:
@@ -27,7 +38,7 @@ def _has_lmc_ops() -> bool:
 
 
 def _has_cuda() -> bool:
-    return torch.cuda.is_available()
+    return torch_dev.is_available() and torch_device_type == "cuda"
 
 
 class TestEngineType:
@@ -67,16 +78,15 @@ class TestAssertContiguous:
             assert_contiguous(view)
 
 
-@pytest.mark.skipif(not _has_lmc_ops(), reason="lmcache C ops not built")
+@pytest.mark.skipif(not _has_cuda_ops(), reason="lmcache C ops not built")
 class TestGPUKVFormatEnum:
     def test_nb_nl_two_nh_bs_hs_exists(self) -> None:
         # First Party
-        import lmcache.c_ops as lmc_ops
 
-        assert hasattr(lmc_ops.EngineKVFormat, "NB_NL_TWO_NH_BS_HS")
+        assert hasattr(lmcache_native.EngineKVFormat, "NB_NL_TWO_NH_BS_HS")
 
 
-@pytest.mark.skipif(not _has_lmc_ops(), reason="lmcache C ops not built")
+@pytest.mark.skipif(not _has_cuda_ops(), reason="lmcache C ops not built")
 class TestNormalizeTRTLLM:
     """``normalize_kv_and_discover_format`` for ``EngineType.TRTLLM``."""
 
@@ -86,7 +96,6 @@ class TestNormalizeTRTLLM:
             LayoutHints,
             normalize_kv_and_discover_format,
         )
-        import lmcache.c_ops as lmc_ops
 
         nb, nl, kv = 4, 2, 2
         nh, bs, hs = 8, 16, 64
@@ -104,7 +113,7 @@ class TestNormalizeTRTLLM:
             t, EngineType.TRTLLM, layout_hints=layout_hints
         )
 
-        assert fmt == lmc_ops.EngineKVFormat.NB_NL_TWO_NH_BS_HS
+        assert fmt == lmcache_native.EngineKVFormat.NB_NL_TWO_NH_BS_HS
         assert isinstance(normalized, torch.Tensor)
         assert tuple(normalized.shape) == (nb, nl, kv, nh, bs, hs)
 
@@ -114,7 +123,6 @@ class TestNormalizeTRTLLM:
             LayoutHints,
             normalize_kv_and_discover_format,
         )
-        import lmcache.c_ops as lmc_ops
 
         nb, nl, kv, nh, bs, hs = 2, 2, 2, 4, 8, 32
         t = torch.zeros(nb, nl, kv, nh * bs * hs)
@@ -127,7 +135,7 @@ class TestNormalizeTRTLLM:
         fmt, normalized = normalize_kv_and_discover_format(
             [t], EngineType.TRTLLM, layout_hints=layout_hints
         )
-        assert fmt == lmc_ops.EngineKVFormat.NB_NL_TWO_NH_BS_HS
+        assert fmt == lmcache_native.EngineKVFormat.NB_NL_TWO_NH_BS_HS
         assert isinstance(normalized, torch.Tensor)
         assert normalized.shape == (nb, nl, kv, nh, bs, hs)
 
@@ -159,7 +167,7 @@ class TestNormalizeTRTLLM:
             )
 
 
-@pytest.mark.skipif(not _has_lmc_ops(), reason="lmcache C ops not built")
+@pytest.mark.skipif(not _has_cuda_ops(), reason="lmcache C ops not built")
 class TestAccessorsTRTLLM:
     """Format accessors for ``NB_NL_TWO_NH_BS_HS``."""
 
@@ -177,79 +185,75 @@ class TestAccessorsTRTLLM:
     def test_get_num_layers(self) -> None:
         # First Party
         from lmcache.v1.gpu_connector.utils import get_num_layers
-        import lmcache.c_ops as lmc_ops
 
         t = self._tensor()
-        assert get_num_layers(t, lmc_ops.EngineKVFormat.NB_NL_TWO_NH_BS_HS) == 3
+        assert get_num_layers(t, lmcache_native.EngineKVFormat.NB_NL_TWO_NH_BS_HS) == 3
 
     def test_get_num_blocks(self) -> None:
         # First Party
         from lmcache.v1.gpu_connector.utils import get_num_blocks
-        import lmcache.c_ops as lmc_ops
 
         t = self._tensor()
-        assert get_num_blocks(t, lmc_ops.EngineKVFormat.NB_NL_TWO_NH_BS_HS) == 4
+        assert get_num_blocks(t, lmcache_native.EngineKVFormat.NB_NL_TWO_NH_BS_HS) == 4
 
     def test_get_block_size(self) -> None:
         # First Party
         from lmcache.v1.gpu_connector.utils import get_block_size
-        import lmcache.c_ops as lmc_ops
 
         t = self._tensor()
-        assert get_block_size(t, lmc_ops.EngineKVFormat.NB_NL_TWO_NH_BS_HS) == 16
+        assert get_block_size(t, lmcache_native.EngineKVFormat.NB_NL_TWO_NH_BS_HS) == 16
 
     def test_get_num_heads(self) -> None:
         # First Party
         from lmcache.v1.gpu_connector.utils import get_num_heads
-        import lmcache.c_ops as lmc_ops
 
         t = self._tensor()
-        assert get_num_heads(t, lmc_ops.EngineKVFormat.NB_NL_TWO_NH_BS_HS) == 8
+        assert get_num_heads(t, lmcache_native.EngineKVFormat.NB_NL_TWO_NH_BS_HS) == 8
 
     def test_get_head_size(self) -> None:
         # First Party
         from lmcache.v1.gpu_connector.utils import get_head_size
-        import lmcache.c_ops as lmc_ops
 
         t = self._tensor()
-        assert get_head_size(t, lmc_ops.EngineKVFormat.NB_NL_TWO_NH_BS_HS) == 64
+        assert get_head_size(t, lmcache_native.EngineKVFormat.NB_NL_TWO_NH_BS_HS) == 64
 
     def test_get_hidden_dim_size(self) -> None:
         # First Party
         from lmcache.v1.gpu_connector.utils import get_hidden_dim_size
-        import lmcache.c_ops as lmc_ops
 
         t = self._tensor()
         assert (
-            get_hidden_dim_size(t, lmc_ops.EngineKVFormat.NB_NL_TWO_NH_BS_HS) == 8 * 64
+            get_hidden_dim_size(t, lmcache_native.EngineKVFormat.NB_NL_TWO_NH_BS_HS)
+            == 8 * 64
         )
 
     def test_get_page_buffer_size(self) -> None:
         # First Party
         from lmcache.v1.gpu_connector.utils import get_page_buffer_size
-        import lmcache.c_ops as lmc_ops
 
         t = self._tensor()
         assert (
-            get_page_buffer_size(t, lmc_ops.EngineKVFormat.NB_NL_TWO_NH_BS_HS) == 4 * 16
+            get_page_buffer_size(t, lmcache_native.EngineKVFormat.NB_NL_TWO_NH_BS_HS)
+            == 4 * 16
         )
 
     def test_get_dtype(self) -> None:
         # First Party
         from lmcache.v1.gpu_connector.utils import get_dtype
-        import lmcache.c_ops as lmc_ops
 
         t = self._tensor()
-        assert get_dtype(t, lmc_ops.EngineKVFormat.NB_NL_TWO_NH_BS_HS) == torch.bfloat16
+        assert (
+            get_dtype(t, lmcache_native.EngineKVFormat.NB_NL_TWO_NH_BS_HS)
+            == torch.bfloat16
+        )
 
     def test_get_group_data_ptrs_returns_single_base_pointer(self) -> None:
         # First Party
         from lmcache.v1.gpu_connector.utils import get_group_data_ptrs
-        import lmcache.c_ops as lmc_ops
 
         t = self._tensor()
         ptrs = get_group_data_ptrs(
-            t, lmc_ops.EngineKVFormat.NB_NL_TWO_NH_BS_HS, list(range(3))
+            t, lmcache_native.EngineKVFormat.NB_NL_TWO_NH_BS_HS, list(range(3))
         )
         assert len(ptrs) == 1
         assert ptrs[0] == t.data_ptr()
@@ -261,9 +265,8 @@ class TestAccessorsTRTLLM:
             get_concrete_engine_kv_shape,
             get_engine_kv_shape_description,
         )
-        import lmcache.c_ops as lmc_ops
 
-        fmt = lmc_ops.EngineKVFormat.NB_NL_TWO_NH_BS_HS
+        fmt = lmcache_native.EngineKVFormat.NB_NL_TWO_NH_BS_HS
         assert get_engine_kv_shape_description(fmt) == "[NB, NL, 2, NH, BS, HS]"
         assert "TRT-LLM" in get_attention_backend(fmt)
         assert get_concrete_engine_kv_shape(self._tensor(), fmt) == (
@@ -272,13 +275,13 @@ class TestAccessorsTRTLLM:
 
 
 @pytest.mark.skipif(not _has_cuda(), reason="CUDA required for connector init")
-@pytest.mark.skipif(not _has_lmc_ops(), reason="lmcache C ops not built")
+@pytest.mark.skipif(not _has_cuda_ops(), reason="lmcache C ops not built")
 class TestTRTLLMGPUConnector:
     def test_construct(self) -> None:
         # First Party
         from lmcache.v1.gpu_connector.gpu_connectors import TRTLLMGPUConnector
 
-        device = torch.device("cuda:0")
+        device = torch.device(f"{torch_device_type}:0")
         c = TRTLLMGPUConnector(
             num_kv_heads=2,
             head_dim=64,
@@ -296,7 +299,7 @@ class TestTRTLLMGPUConnector:
         # First Party
         from lmcache.v1.gpu_connector.gpu_connectors import TRTLLMGPUConnector
 
-        device = torch.device("cuda:0")
+        device = torch.device(f"{torch_device_type}:0")
         c = TRTLLMGPUConnector(
             num_kv_heads=2,
             head_dim=64,
@@ -313,7 +316,7 @@ class TestTRTLLMGPUConnector:
         # First Party
         from lmcache.v1.gpu_connector.gpu_connectors import TRTLLMGPUConnector
 
-        device = torch.device("cuda:0")
+        device = torch.device(f"{torch_device_type}:0")
         nh, bs, hs = 2, 16, 64
         nb, nl, kv = 4, 4, 2
         flat = nh * bs * hs

@@ -3,7 +3,8 @@
 # The webhook-injected alternative to vllm_deployment.yaml (which wires vLLM to
 # the engine by hand). You supply only the opt-in label + engine annotation and a
 # normal, args-only vLLM launch; at pod CREATE the webhook adds:
-#   - pod hostIPC=true (CUDA IPC with the node-local LMCache server);
+#   - a hostPath mount of the host's /dev/shm (CUDA IPC with the node-local
+#     LMCache server; hostIPC instead when the engine sets spec.hostIPC);
 #   - --kv-transfer-config <inline JSON> on the vLLM container (read verbatim from
 #     the engine's <name>-connection ConfigMap — injected inline, no volume mount);
 #   - PYTHONHASHSEED=0 env (deterministic prefix hashing, set only if you didn't).
@@ -17,14 +18,14 @@
 #      (its `<name>-connection` ConfigMap exists — the webhook reads it).
 #   2. The webhook is deployed: `make deploy` (not `make run`) + cert-manager.
 #   3. This namespace is labeled pod-security.kubernetes.io/enforce=privileged
-#      (the injected hostIPC is rejected by baseline/restricted PSS).
+#      (the injected hostPath /dev/shm mount is rejected by baseline/restricted PSS).
 #   4. The vLLM container launches via the image ENTRYPOINT (["vllm","serve"])
 #      with args ONLY. Do NOT use `command: ["/bin/sh","-c", ...]` — a command
 #      override makes the webhook SKIP injection (appended args can't reach
 #      `vllm serve`); it stamps lmcache.ai/lmcache-skip-reason=command-override.
 #
 # Verify after creation (the webhook mutates the POD, not the Deployment):
-#   kubectl get pod -l app=vllm-lmcache -o yaml | grep -E "hostIPC|kv-transfer-config|lmcache-injected|lmcache-payload|PYTHONPATH"
+#   kubectl get pod -l app=vllm-lmcache -o yaml | grep -E "lmcache-dev-shm|hostIPC|kv-transfer-config|lmcache-injected|lmcache-payload|PYTHONPATH"
 # If nothing was injected, check lmcache.ai/lmcache-skip-reason on the pod
 # (command-override, kv-transfer-config-present, engine-not-found, or
 # target-container-not-found).
@@ -54,8 +55,8 @@ spec:
     spec:
       # Needed for GPU access unless `nvidia` is the default containerd runtime.
       runtimeClassName: nvidia
-      # NOTE: do NOT set hostIPC here or mount an emptyDir at /dev/shm — the
-      # webhook injects hostIPC=true, which shares the host's /dev/shm for CUDA
+      # NOTE: do NOT mount an emptyDir at /dev/shm — the webhook injects a
+      # hostPath mount of the host's /dev/shm for CUDA
       # IPC; an emptyDir would shadow it and break cudaIpcOpenMemHandle.
       containers:
         - name: vllm

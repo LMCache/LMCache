@@ -15,7 +15,7 @@ from lmcache.v1.gpu_connector.kv_format.detectors.base import (
     measure_list_depth_until_tensor,
 )
 from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache, LayoutHints
-import lmcache.c_ops as lmc_ops
+import lmcache.lmcache_native as lmcache_native
 
 
 class SGLANG_Detector(EngineDetector):
@@ -23,7 +23,7 @@ class SGLANG_Detector(EngineDetector):
 
     def discover(
         self, kv_caches: DiscoverableKVCache, layout_hints: LayoutHints
-    ) -> "tuple[Optional[lmc_ops.EngineKVFormat], DiscoverableKVCache]":
+    ) -> "tuple[Optional[lmcache_native.EngineKVFormat], DiscoverableKVCache]":
         # MP path: a flat list[2*NL] of 3-D tensors (K layers then V layers)
         # plus a tokens_per_block hint. Regroup into [K_layers, V_layers] and
         # reshape each (PBS, NH, HS) -> (NB, BS, NH, HS).
@@ -59,9 +59,9 @@ class SGLANG_Detector(EngineDetector):
             kv_caches
         )
         if list_depth == 1 and first_tensor.shape[1] == 1:  # MLA, fused PBS
-            return lmc_ops.EngineKVFormat.NL_X_NBBS_ONE_HS, kv_caches
+            return lmcache_native.EngineKVFormat.NL_X_NBBS_ONE_HS, kv_caches
         if list_depth == 2:
             if tensor_ndim == 4:  # MP daemon: NB/BS split into separate axes
-                return lmc_ops.EngineKVFormat.TWO_X_NL_X_NB_BS_NH_HS, kv_caches
-            return lmc_ops.EngineKVFormat.TWO_X_NL_X_NBBS_NH_HS, kv_caches
+                return lmcache_native.EngineKVFormat.TWO_X_NL_X_NB_BS_NH_HS, kv_caches
+            return lmcache_native.EngineKVFormat.TWO_X_NL_X_NBBS_NH_HS, kv_caches
         return None, kv_caches
