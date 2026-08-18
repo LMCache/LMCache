@@ -199,6 +199,14 @@ def add_engine_arguments(parser: argparse.ArgumentParser) -> None:
         default=1,
         help="Max concurrent in-flight requests (default: 1).",
     )
+    ldp_group.add_argument(
+        "--ldp-max-output-length",
+        type=int,
+        default=128,
+        help="Max tokens to generate per permutation request (default: 128). "
+        "Use 1 to measure prefill alone; combine larger values with "
+        "--ignore-eos for a reproducible decode phase.",
+    )
 
     # --- Long-doc-qa workload args ---
     group = parser.add_argument_group("long-doc-qa workload options")

@@ -423,6 +423,7 @@ chunk-level cache lookup and eviction.
 | `num_permutations` | `--ldp-num-permutations` | 10 | Distinct permutations to send (capped at `N!`) |
 | `vocab_size` | (none — hardcoded in factory) | 8000 | Number of distinct single-token words contexts are sampled from |
 | `num_inflight_requests` | `--ldp-num-inflight-requests` | 1 | Max concurrent in-flight requests |
+| `max_output_length` | `--ldp-max-output-length` | 128 | Max tokens generated per request; `1` measures prefill alone |
 
 **Stress axes** (each config field tunes one):
 
