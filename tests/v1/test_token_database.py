@@ -8,6 +8,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache.utils import convert_token_range_to_list
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.token_database import ChunkedTokenDatabase, SegmentTokenDatabase
 
@@ -155,3 +156,46 @@ def test_process_tokens_returns_int_keys_for_bytes_hash_func() -> None:
         assert isinstance(hash_val, int), f"Expected int, got {type(hash_val)}"
         # Must fit in uint64 (msgpack range: 0 to 2**64 - 1)
         assert 0 <= hash_val <= 2**64 - 1
+
+
+@pytest.mark.parametrize("chunk_size", [4, 16])
+def test_kv_event_token_ids_cover_exactly_one_chunk(chunk_size) -> None:
+    """The KV-event token slice must match the chunk it describes.
+
+    ``process_tokens`` yields half-open ``[start, end)`` bounds while
+    ``convert_tokens_to_list`` is inclusive of its end index, so passing ``end``
+    straight through appends the first token of the *next* chunk to every
+    non-final event and breaks ``len(token_ids) == block_size``.
+    """
+    cfg = LMCacheEngineConfig.from_legacy(
+        chunk_size=chunk_size, backend="cpu", save_unfull_chunk=True
+    )
+    db = ChunkedTokenDatabase(cfg, dumb_metadata())
+
+    tokens = list(range(chunk_size * 2 + chunk_size // 2))
+    results = list(db.process_tokens(tokens=tokens))
+    assert len(results) > 1  # need at least one non-final chunk
+
+    for start, end, _ in results:
+        token_ids = convert_token_range_to_list(tokens, start, end)
+        assert token_ids == tokens[start:end]
+        assert len(token_ids) == end - start
+
+
+def test_kv_event_chunk_hash_matches_supplied_hashes() -> None:
+    """In the hashes variant the event carries this chunk's hash.
+
+    ``hashes`` holds one entry per chunk while ``start``/``end`` are token
+    offsets, so slicing ``hashes`` with them selects the wrong entries (every
+    hash for the first chunk, none for later ones).
+    """
+    cfg = LMCacheEngineConfig.from_legacy(chunk_size=256, backend="cpu")
+    db = ChunkedTokenDatabase(cfg, dumb_metadata())
+
+    hashes = [1111, 2222, 3333]
+    offsets = [256, 256, 256]
+    results = list(db.process_tokens(hashes=hashes, offsets=offsets))
+
+    assert len(results) == len(hashes)
+    for (_, _, key), expected in zip(results, hashes, strict=False):
+        assert [key.chunk_hash] == [expected]
