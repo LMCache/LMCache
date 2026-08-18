@@ -2,7 +2,11 @@
 """GDS slab-file L1 memory manager."""
 
 # Standard
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    # Third Party
+    import torch
 
 # First Party
 from lmcache.integration.vllm.utils import get_size_bytes
@@ -134,6 +138,9 @@ class GDSL1MemoryManager:
     def close(self) -> None:
         """No-op: the GDSContext owning the slab is closed at server shutdown."""
         return
+
+    def warm_up(self, device: "int | torch.device") -> None:
+        """No-op: the GDS slab tier has no deferred host pinning."""
 
     def memcheck(self) -> bool:
         """For debug purposes; logs allocator state and checks consistency.

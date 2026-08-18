@@ -967,6 +967,13 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             cache_context.num_layers,
         )
 
+        # Registration is the first moment a worker device is known, well
+        # before the first request: start deferred host pinning now, in the
+        # background, so the pool is warm when traffic arrives. Idempotent
+        # across workers; REGISTER runs on the SYNC lane, so the pin must
+        # not run inline here.
+        self._ctx.storage_manager.warm_up(cache_context.device)
+
     def unregister_kv_cache(self, instance_id: int) -> None:
         """Unregister the KV cache tensors for a given GPU instance ID.
 

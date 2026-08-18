@@ -191,3 +191,77 @@ def test_close_after_pinning_unpins(mock_device_spec, mock_torch_dev, mock_tma):
     allocator.close()
 
     mock_device_spec.unpin_memory.assert_called_once()
+
+
+def test_warm_up_pins_in_background_before_first_allocate(
+    mock_device_spec, mock_torch_dev, mock_tma
+):
+    """warm_up(d) pins on d without blocking the caller; the first
+    allocate then finds the pool already pinned and does not repin."""
+    allocator = _make_allocator()
+    pinned = threading.Event()
+    mock_device_spec.pin_memory.side_effect = lambda *a, **k: pinned.set() or True
+
+    allocator.warm_up(5)
+
+    assert pinned.wait(timeout=5.0), "background warm-up never pinned"
+    # Serialize with the background thread before asserting call counts.
+    allocator.ensure_pinning(5)
+    mock_device_spec.pin_memory.assert_called_once()
+    mock_torch_dev.device.assert_any_call(5)
+
+    allocator.allocate(torch.Size([1]), torch.uint8)
+    mock_device_spec.pin_memory.assert_called_once()
+
+
+def test_allocate_during_in_flight_warm_up_blocks_then_succeeds(
+    mock_device_spec, mock_torch_dev, mock_tma
+):
+    """An allocation racing the background pin blocks on the init lock and
+    proceeds once pinning completes, without pinning a second time."""
+    allocator = _make_allocator()
+    release = threading.Event()
+    entered = threading.Event()
+
+    def slow_pin(*args, **kwargs):
+        entered.set()
+        assert release.wait(timeout=5.0)
+        return True
+
+    mock_device_spec.pin_memory.side_effect = slow_pin
+
+    allocator.warm_up(2)
+    assert entered.wait(timeout=5.0), "background warm-up never started"
+
+    results: list = []
+    t = threading.Thread(
+        target=lambda: results.append(allocator.allocate(torch.Size([1]), torch.uint8))
+    )
+    t.start()
+    t.join(timeout=0.2)
+    assert t.is_alive(), "allocate should block behind the in-flight pin"
+
+    release.set()
+    t.join(timeout=5.0)
+    assert not t.is_alive(), "allocate never completed after pinning finished"
+    assert len(results) == 1
+    mock_device_spec.pin_memory.assert_called_once()
+
+
+def test_repeated_warm_up_pins_once(mock_device_spec, mock_torch_dev, mock_tma):
+    """warm_up is idempotent: repeated calls, even with a different device,
+    never pin a second time or rebind the device."""
+    allocator = _make_allocator()
+    pinned = threading.Event()
+    mock_device_spec.pin_memory.side_effect = lambda *a, **k: pinned.set() or True
+
+    allocator.warm_up(1)
+    assert pinned.wait(timeout=5.0)
+    allocator.warm_up(1)
+    allocator.warm_up(7)
+
+    # Serialize with any (incorrectly) spawned background pin before asserting.
+    allocator.ensure_pinning(1)
+    mock_device_spec.pin_memory.assert_called_once()
+    for c in mock_torch_dev.device.call_args_list:
+        assert c != call(7), "warm_up must not rebind the pin device"
