@@ -25,87 +25,81 @@ Expected log output:
 
     LMCache INFO: MP coordinator listening on http://0.0.0.0:9300
 
-The CLI accepts ``--host``, ``--port``, ``--instance-timeout``,
-``--health-check-interval``, ``--eviction-check-interval``,
-``--eviction-ratio``, ``--trigger-watermark``, ``--chunk-size``,
-``--hash-algorithm``, ``--enable-blend-lookup``, ``--blend-probe-stride``,
-``--timeout-keep-alive``, ``--disable-metrics``, and ``--otlp-endpoint``;
-any flag overrides the matching environment variable below. See
-:doc:`/cli/coordinator` for details.
-Equivalently, the coordinator can still be launched as a module with
-``python3 -m lmcache.v1.mp_coordinator``.
+See :doc:`/cli/coordinator` for the full flag list. Equivalently, the
+coordinator can be launched as a module with
+``python3 -m lmcache.v1.mp_coordinator``, which accepts the same flags.
 
 Configuration
 -------------
 
-The coordinator is configured through ``LMCACHE_MP_COORDINATOR_*`` environment
-variables:
+The coordinator is configured through CLI flags only; every flag left unset
+keeps the default below.
 
 .. list-table::
    :header-rows: 1
    :widths: 38 14 48
 
-   * - Environment variable
+   * - Flag
      - Default
      - Description
-   * - ``LMCACHE_MP_COORDINATOR_HOST``
+   * - ``--host``
      - ``0.0.0.0``
      - Host the HTTP server binds to.
-   * - ``LMCACHE_MP_COORDINATOR_PORT``
+   * - ``--port``
      - ``9300``
      - Port the HTTP server binds to.
-   * - ``LMCACHE_MP_COORDINATOR_INSTANCE_TIMEOUT``
+   * - ``--instance-timeout``
      - ``30``
      - Seconds without a heartbeat after which a server is dropped from the
        fleet.
-   * - ``LMCACHE_MP_COORDINATOR_HEALTH_CHECK_INTERVAL``
+   * - ``--health-check-interval``
      - ``10``
      - Seconds between health-check sweeps that expire stale MP-server
        registrations. ``0`` disables the stale-instance eviction loop; it does
        **not** affect the ``/quota`` L2 eviction loop (see
-       ``LMCACHE_MP_COORDINATOR_EVICTION_CHECK_INTERVAL`` below).
-   * - ``LMCACHE_MP_COORDINATOR_EVICTION_CHECK_INTERVAL``
+       ``--eviction-check-interval`` below).
+   * - ``--eviction-check-interval``
      - ``5``
      - Seconds between L2 eviction sweeps. ``0`` disables the loop.
-   * - ``LMCACHE_MP_COORDINATOR_EVICTION_RATIO``
+   * - ``--eviction-ratio``
      - ``0.2``
      - Fraction of tracked keys (by count) to evict per cycle (0.0 to 1.0).
-   * - ``LMCACHE_MP_COORDINATOR_TRIGGER_WATERMARK``
+   * - ``--trigger-watermark``
      - ``1.0``
      - Eviction fires when usage reaches this fraction of the quota
        (0.0 exclusive to 1.0).
-   * - ``LMCACHE_MP_COORDINATOR_CHUNK_SIZE``
+   * - ``--chunk-size``
      - ``256``
      - Tokens per KV chunk: the CacheBlend match unit and the unit used to
        resolve pin ``token_ids`` to keys. Must equal the MP servers'
        ``--chunk-size``.
-   * - ``LMCACHE_MP_COORDINATOR_HASH_ALGORITHM``
+   * - ``--hash-algorithm``
      - ``blake3``
      - Token hash algorithm for pin key resolution. Must equal the MP servers'
        ``--hash-algorithm``. ``blake3`` is self-contained; other algorithms
        require vLLM importable in the coordinator process.
-   * - ``LMCACHE_MP_COORDINATOR_ENABLE_BLEND_LOOKUP``
-     - ``False``
+   * - ``--enable-blend-lookup``
+     - off
      - Index stored chunk content so ``POST /directory/blend-lookup`` can serve
        fleet CacheBlend reuse. Off by default: hashing content costs CPU on
        every store. Also requires the MP servers'
        ``--coordinator-event-reporting``.
-   * - ``LMCACHE_MP_COORDINATOR_BLEND_PROBE_STRIDE``
+   * - ``--blend-probe-stride``
      - ``1``
      - Positions between CacheBlend match probes. ``1`` probes every offset
        for full recall. Ignored unless blend lookup is on.
-   * - ``LMCACHE_MP_COORDINATOR_TIMEOUT_KEEP_ALIVE``
+   * - ``--timeout-keep-alive``
      - ``10``
      - Seconds the HTTP server keeps idle connections open before closing
        them. Must be greater than the MP servers' heartbeat interval
        (default ``5``), otherwise heartbeat requests may hit a closing
        connection and fail with ``Server disconnected without sending a
        response``.
-   * - ``LMCACHE_MP_COORDINATOR_METRICS_ENABLED``
-     - ``True``
-     - Initialize OpenTelemetry metrics. Set to ``False`` to disable metrics;
-       the local ``/metrics`` endpoint then returns 404.
-   * - ``LMCACHE_MP_COORDINATOR_OTLP_ENDPOINT``
+   * - ``--disable-metrics``
+     - off
+     - Skip OpenTelemetry metrics initialization. Metrics are on by default;
+       pass this flag and the local ``/metrics`` endpoint returns 404.
+   * - ``--otlp-endpoint``
      - unset
      - OTLP gRPC endpoint for metrics push mode. When unset, Prometheus pull
        mode exposes ``/metrics`` on the coordinator HTTP port. When set, the
@@ -427,8 +421,7 @@ selects LRU keys to evict. Each batch carries the server's ``instance_id``,
 scoped to that instance, so replays are deduplicated and lost batches are
 detected.
 
-**Active eviction loop.** Every
-``LMCACHE_MP_COORDINATOR_EVICTION_CHECK_INTERVAL`` seconds, the
+**Active eviction loop.** Every ``--eviction-check-interval`` seconds, the
 coordinator inspects per-salt usage against the registered quotas and,
 for any salt over the trigger watermark, picks LRU victims and
 dispatches a single ``DELETE /cache/objects`` to a uniformly random registered MP
@@ -1148,9 +1141,9 @@ a separate publish call. Both feeds default to off and both are required: the
 coordinator needs ``--enable-blend-lookup``, and every MP server whose chunks
 should be discoverable needs ``--coordinator-event-reporting`` (a server with a
 coordinator URL but no event reporting warns at startup and matches locally
-only). Matching is chunked at ``LMCACHE_MP_COORDINATOR_CHUNK_SIZE`` — which
-must equal the MP servers' ``--chunk-size`` — probing every
-``LMCACHE_MP_COORDINATOR_BLEND_PROBE_STRIDE`` positions.
+only). Matching is chunked at the coordinator's ``--chunk-size`` — which must
+equal the MP servers' ``--chunk-size`` — probing every
+``--blend-probe-stride`` positions.
 
 **Request body:**
 
