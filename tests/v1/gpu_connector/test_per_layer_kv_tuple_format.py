@@ -12,12 +12,16 @@ pointer order, the layer-grouping shape, and the multiprocess layout detection
 for that format.
 """
 
+# Standard
+from typing import cast
+
 # Third Party
 import torch
 
 # First Party
 from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector import utils as U
+from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.multiprocess.transfer_context.base import compute_kv_layout
 import lmcache.lmcache_native as lmc_ops
@@ -38,7 +42,9 @@ def _per_layer_kv_tuple_caches() -> list[list[torch.Tensor]]:
 
 def test_discovery_preserves_per_layer_kv_tuple_structure() -> None:
     kv = _per_layer_kv_tuple_caches()
-    fmt, normalized = U.normalize_kv_and_discover_format(kv, EngineType.VLLM)
+    fmt, normalized = U.normalize_kv_and_discover_format(
+        cast(DiscoverableKVCache, kv), EngineType.VLLM
+    )
     assert fmt == F.NL_X_TWO_X_NB_BS_NH_HS
     # Native structure preserved: layers outermost, each a 2-element (K, V) pair
     # (normalize may rebuild the containers, so compare structure, not identity).
@@ -48,7 +54,7 @@ def test_discovery_preserves_per_layer_kv_tuple_structure() -> None:
 
 def test_accessors() -> None:
     fmt, norm = U.normalize_kv_and_discover_format(
-        _per_layer_kv_tuple_caches(), EngineType.VLLM
+        cast(DiscoverableKVCache, _per_layer_kv_tuple_caches()), EngineType.VLLM
     )
     assert fmt == F.NL_X_TWO_X_NB_BS_NH_HS
     assert U.get_num_layers(norm, fmt) == NL
@@ -66,7 +72,9 @@ def test_accessors() -> None:
 
 def test_group_data_ptrs_interleaved_kv_order() -> None:
     kv = _per_layer_kv_tuple_caches()
-    fmt, normalized = U.normalize_kv_and_discover_format(kv, EngineType.VLLM)
+    fmt, normalized = U.normalize_kv_and_discover_format(
+        cast(DiscoverableKVCache, kv), EngineType.VLLM
+    )
     # Interleaved [k_i, v_i, ...] pointer order the transfer kernel expects.
     ptrs = U.get_group_data_ptrs(normalized, fmt, [0, 2])
     assert ptrs == [
@@ -79,7 +87,9 @@ def test_group_data_ptrs_interleaved_kv_order() -> None:
 
 def test_layer_grouping_shape_desc() -> None:
     kv = _per_layer_kv_tuple_caches()
-    fmt, normalized = U.normalize_kv_and_discover_format(kv, EngineType.VLLM)
+    fmt, normalized = U.normalize_kv_and_discover_format(
+        cast(DiscoverableKVCache, kv), EngineType.VLLM
+    )
     mgr = KVLayerGroupsManager(normalized, engine_kv_formats=[fmt] * NL)
     groups = mgr.kernel_groups
     assert len(groups) == 1
@@ -104,7 +114,7 @@ def test_compute_kv_layout_detects_per_layer_tuple() -> None:
         dtype_str,
         detected_kv_format,
         kv_size,
-    ) = compute_kv_layout(src, layout_hints=None)
+    ) = compute_kv_layout(cast("dict[str, torch.Tensor]", src), layout_hints=None)
     assert block_size == BS
     assert num_layers == NL
     assert hidden_dim == NH * HS

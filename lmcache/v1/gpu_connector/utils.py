@@ -555,7 +555,7 @@ def resolve_block_stride_and_log_layout(
             return kv_caches[0][layer_idx]  # type: ignore[index,return-value]
         if lmcache_native.is_kv_second_tuple(engine_kv_format):
             return kv_caches[layer_idx][0]  # type: ignore[index,return-value]
-        return kv_caches[layer_idx]  # type: ignore[index]
+        return kv_caches[layer_idx]  # type: ignore[index,return-value]
 
     rep = _pick_layout_probe_tensor()
 
