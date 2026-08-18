@@ -63,19 +63,21 @@ _WORKLOAD_NAMES = (
     "random-prefill",
 )
 
-# Workloads that expose a user-configurable max output length, via a
-# ``max_output_length`` arg (``--ldqa-max-output-length`` / ``--mrc-output-length``).
+# Workloads that expose a user-configurable max output length, each via its own
+# flag (``--ldqa-max-output-length`` / ``--mrc-output-length`` /
+# ``--ldp-max-output-length``).
 _WORKLOADS_WITH_MAX_OUTPUT_LENGTH: frozenset[str] = frozenset(
-    {"long-doc-qa", "multi-round-chat"}
+    {"long-doc-permutator", "long-doc-qa", "multi-round-chat"}
 )
 
 
 def validate_max_output_length_supported(workload: str) -> None:
     """Validate that a max output length can be specified for ``workload``.
 
-    Only workloads with a max-output-length parameter (``long-doc-qa``,
-    ``multi-round-chat``) support setting it; every other workload fixes its
-    generation length internally, so requesting one is rejected.
+    Only workloads with a max-output-length parameter (``long-doc-permutator``,
+    ``long-doc-qa``, ``multi-round-chat``) support setting it; every other
+    workload fixes its generation length internally, so requesting one is
+    rejected.
 
     Args:
         workload: The selected workload name (``EngineBenchConfig.workload``).
@@ -126,6 +128,7 @@ def create_workload(
             num_permutations=args.ldp_num_permutations,
             vocab_size=8000,
             num_inflight_requests=args.ldp_num_inflight_requests,
+            max_output_length=args.ldp_max_output_length,
         )
         return LongDocPermutatorWorkload(
             config=ldp_workload_config,
