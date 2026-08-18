@@ -5,7 +5,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
-DEFAULT_XPU_DEVICE_PLUGIN_SOURCE_URL="https://github.com/opendataio/lmcache_xpu_device_with_native/archive/refs/tags/v0.1.2.tar.gz"
+DEFAULT_XPU_DEVICE_PLUGIN_SOURCE_URL="https://github.com/opendataio/lmcache_xpu_device_with_native/archive/refs/tags/v0.1.3.tar.gz"
 XPU_DEVICE_PLUGIN_SOURCE_URL="${LMCACHE_XPU_DEVICE_PLUGIN_SOURCE_URL:-${DEFAULT_XPU_DEVICE_PLUGIN_SOURCE_URL}}"
 
 log() {
@@ -21,6 +21,8 @@ assert_in_tree_xpu_removed() {
   [ ! -d "${REPO_ROOT}/lmcache/v1/platform/xpu" ] || fail "in-tree lmcache/v1/platform/xpu is still present"
   [ ! -d "${REPO_ROOT}/csrc/sycl" ] || fail "in-tree csrc/sycl is still present"
   [ ! -f "${REPO_ROOT}/setup_extensions/build_profiles/sycl.py" ] || fail "in-tree setup_extensions/build_profiles/sycl.py is still present"
+  [ -f "${REPO_ROOT}/csrc/kv_transfer_types.h" ] || fail "shared header csrc/kv_transfer_types.h is missing"
+  [ -f "${REPO_ROOT}/csrc/engine_kv_format.h" ] || fail "shared header csrc/engine_kv_format.h is missing"
 }
 
 build_and_install_external_xpu_device_plugin() {
@@ -55,6 +57,7 @@ PY
   log "building external native XPU device wheel"
   (
     cd "${plugin_source_dir}"
+    export LMCACHE_CSRC_INCLUDE_DIR="${REPO_ROOT}/csrc"
     uv pip install build
     python -m build --wheel --no-isolation
   )
