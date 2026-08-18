@@ -49,11 +49,6 @@ steps:
         Read the <a href="artifact://coverage-test/index.html">uploaded coverage report</a>
       EOF
 
-      export TARGET="$PWD"
-      echo "Deleting current workspace $TARGET"
-      cd /
-      sudo rm -rf "$TARGET"
-
     artifact_paths:
       - "durations/test.html"
       - "coverage-test.xml"

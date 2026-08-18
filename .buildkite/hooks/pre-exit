@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${BUILDKITE_PIPELINE_SLUG:-}" == "unit-tests-amd" ]]; then
+  checkout_path="${BUILDKITE_BUILD_CHECKOUT_PATH:-}"
+  if [[ -z "${checkout_path}" || "${checkout_path}" == "/" ]]; then
+    echo "Refusing to clean invalid checkout path: ${checkout_path:-<empty>}" >&2
+    exit 1
+  fi
+
+  echo "Deleting current workspace ${checkout_path}"
+  cd /
+  sudo rm -rf -- "${checkout_path}"
+fi
