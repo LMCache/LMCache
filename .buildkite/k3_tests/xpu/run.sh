@@ -5,7 +5,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
-DEFAULT_XPU_DEVICE_PLUGIN_SOURCE_URL="https://github.com/opendataio/lmcache_xpu_device_with_native/archive/refs/tags/v0.1.3.tar.gz"
+DEFAULT_XPU_DEVICE_PLUGIN_SOURCE_URL="https://github.com/opendataio/lmcache_xpu_device_with_native/archive/refs/tags/v0.1.4.tar.gz"
 XPU_DEVICE_PLUGIN_SOURCE_URL="${LMCACHE_XPU_DEVICE_PLUGIN_SOURCE_URL:-${DEFAULT_XPU_DEVICE_PLUGIN_SOURCE_URL}}"
 
 log() {
@@ -71,6 +71,7 @@ PY
 import importlib.metadata
 
 from lmcache.v1.platform import get_device_spec, resolve_device_ops
+import lmcache_xpu_device_with_native.xpu_ops as xpu_ops
 
 entry_points = importlib.metadata.entry_points(group="lmcache.device_plugins")
 assert any(ep.name == "xpu" for ep in entry_points), "xpu entry point not found"
@@ -78,11 +79,12 @@ assert any(ep.name == "xpu" for ep in entry_points), "xpu entry point not found"
 spec = get_device_spec("xpu")
 assert spec is not None, "xpu DeviceSpec not resolved"
 assert spec.backend_name == "xpu", spec.backend_name
+assert type(spec).__module__ == "lmcache_xpu_device_with_native.device"
 
 ops = resolve_device_ops("xpu")
 assert ops.device_type == "xpu", ops.device_type
-import lmcache.xpu_ops as xpu_ops
-assert xpu_ops is not None
+assert ops.calculate_cdf is xpu_ops.calculate_cdf
+assert ops.encode_fast_new is xpu_ops.encode_fast_new
 
 print("external native xpu device plugin resolved successfully")
 PY

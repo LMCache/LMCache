@@ -14,6 +14,7 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
+from lmcache.v1.platform import resolve_device_ops
 from lmcache.v1.platform import torch_ops as F
 
 if not (torch_device_type == "xpu" and torch_dev.is_available()):
@@ -27,10 +28,13 @@ pytestmark = pytest.mark.xpu
 
 @pytest.fixture(scope="module")
 def xops():
-    # First Party
-    import lmcache.xpu_ops as XOPS  # noqa: F401
+    # Third Party
+    import lmcache_xpu_device_with_native.xpu_ops as native_xops
 
-    return XOPS
+    ops = resolve_device_ops("xpu")
+    assert ops.calculate_cdf is native_xops.calculate_cdf
+
+    return ops
 
 
 # ---------------- calculate_cdf ----------------
