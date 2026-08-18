@@ -17,7 +17,7 @@ namespace py = pybind11;
 // by the `lmcache_native` module (csrc/lmcache_native/pybind.cpp).
 // Re-registering them here under a different module triggers pybind11's "type
 // already registered" error, so xpu_ops accepts them as plain ints and casts.
-// Same convention as csrc/pybind.cpp (c_ops).
+// Same convention as csrc/cuda/pybind.cpp (cuda_ops).
 PYBIND11_MODULE(xpu_ops, m) {
   m.def(
       "multi_layer_kv_transfer",
@@ -93,7 +93,7 @@ PYBIND11_MODULE(xpu_ops, m) {
       py::call_guard<py::gil_scoped_release>());
 
   // Pinned (USM host) allocation -- SYCL analog of the CUDA alloc_pinned_ptr.
-  // Bound under the same names as csrc/pybind.cpp / python_ops_fallback so
+  // Bound under the same names as csrc/cuda/pybind.cpp / torch_ops so
   // lmcache._get_backend() overrides them by name on XPU.
   m.def("alloc_pinned_ptr", &alloc_pinned_ptr, py::arg("size"),
         py::arg("flags") = 0);

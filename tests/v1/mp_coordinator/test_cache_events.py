@@ -535,8 +535,8 @@ def test_flush_with_empty_buffer_publishes_nothing():
 
 
 def test_publish_failure_drops_batches_and_leaves_a_seq_gap():
-    # Failed flushes consume their seq numbers so the directory sees a
-    # gap and can flag the instance for resync.
+    # Failed flushes consume their seq numbers so the ingest gate sees a
+    # gap and can flag the instance for replay.
     sink = _RecordingSink()
     subscriber = _subscriber(sink)
 
@@ -743,9 +743,8 @@ def test_http_sink_feeds_the_directory_end_to_end():
             assert results[1]["placements"] == []
 
             stats = (await client.get("/directory/stats")).json()
-            instance = stats["instances"]["node-a"]
-            assert instance["last_seq"] == 2
-            assert instance["gap_detected"] is False
+            assert stats["num_keys"] == 1
+            assert stats["num_placements"] == 1
 
     asyncio.run(_verify())
 

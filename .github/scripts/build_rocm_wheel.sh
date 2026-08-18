@@ -78,7 +78,7 @@ $PY -m auditwheel repair \
 
 echo "=== ROCm code-object targets in the built extension ==="
 python3 -c "import zipfile,glob,sys; w=glob.glob('dist/*.whl')[0]; zipfile.ZipFile(w).extractall('/tmp/whcheck')"
-SO=$(find /tmp/whcheck -name 'c_ops*.so')
+SO=$(find /tmp/whcheck -name 'cuda_ops*.so')
 /opt/rocm/llvm/bin/llvm-objdump --offloading "$SO" 2>/dev/null | grep -oE 'gfx[0-9a-z]+' | sort -u
 
 echo "=== final ROCm wheel ==="

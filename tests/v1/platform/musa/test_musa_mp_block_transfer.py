@@ -18,7 +18,7 @@ from lmcache.v1.platform.musa.ipc_wrapper import is_musa_block_transfer_availabl
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 import lmcache.lmcache_native as lmcache_native
 
-lmc_ops = cast(MusaDeviceOps, resolve_device_ops("musa"))
+device_ops = cast(MusaDeviceOps, resolve_device_ops("musa"))
 
 
 def _using_python_fallback() -> bool:
@@ -47,7 +47,7 @@ def _shape_desc(
     dtype: torch.dtype,
 ) -> PageBufferShapeDesc:
     """Build a block-transfer shape descriptor for compact test tensors."""
-    desc = lmc_ops.PageBufferShapeDesc()
+    desc = device_ops.PageBufferShapeDesc()
     desc.nl = num_layers
     desc.nb = num_blocks
     desc.bs = block_size
@@ -68,7 +68,7 @@ def _round_trip(
     engine_kv_format: EngineKVFormat,
 ) -> list[torch.Tensor]:
     """Gather selected blocks into ``chunk`` and scatter them to new tensors."""
-    lmc_ops.multi_layer_block_kv_transfer(
+    device_ops.multi_layer_block_kv_transfer(
         source,
         [chunk],
         block_ids,
@@ -80,7 +80,7 @@ def _round_trip(
         0,
     )
     target = [torch.zeros_like(layer) for layer in source]
-    lmc_ops.multi_layer_block_kv_transfer(
+    device_ops.multi_layer_block_kv_transfer(
         target,
         [chunk],
         block_ids,
@@ -286,7 +286,7 @@ def test_musa_cache_context_mla_operand_round_trip() -> None:
 
         expected = [layer.clone() for layer in source]
         block_ids = torch.tensor([2], dtype=torch.int64, device=device)
-        lmc_ops.multi_layer_block_kv_transfer(
+        device_ops.multi_layer_block_kv_transfer(
             context.get_kernel_group_kv_pointers(0),
             [staging.data_ptr()],
             block_ids,
@@ -299,7 +299,7 @@ def test_musa_cache_context_mla_operand_round_trip() -> None:
         )
         for layer in source:
             layer.zero_()
-        lmc_ops.multi_layer_block_kv_transfer(
+        device_ops.multi_layer_block_kv_transfer(
             context.get_kernel_group_kv_pointers(0),
             [staging.data_ptr()],
             block_ids,
@@ -333,7 +333,7 @@ def test_musa_block_transfer_rejects_unvalidated_layout() -> None:
     )
 
     with pytest.raises(ValueError, match="MUSA MP block transfer supports only"):
-        lmc_ops.multi_layer_block_kv_transfer(
+        device_ops.multi_layer_block_kv_transfer(
             [torch.zeros(1, 2, 1, 1, 1)],
             [torch.zeros(2, 1, 1, 1)],
             torch.tensor([0], dtype=torch.int64),

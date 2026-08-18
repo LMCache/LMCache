@@ -26,7 +26,7 @@ import numpy as np
 import torch
 
 # First Party
-from lmcache import torch_dev, torch_device_type
+from lmcache import device_ops, torch_dev, torch_device_type
 from lmcache.logging import init_logger
 from lmcache.utils import check_interprocess_event_support
 from lmcache.v1.distributed.api import (
@@ -64,7 +64,6 @@ from lmcache.v1.multiprocess.token_hasher import (
     update_table_id_numba,
 )
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
-import lmcache.c_ops as lmc_ops
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
@@ -75,9 +74,9 @@ _NOOP_REASONS_SEEN: set[str] = set()
 
 # Plan-then-execute retrieve: one native call enqueues all fill/rope/scatter
 # in a single GIL release, with the plan encoded as numpy int64 tables (one
-# pybind crossing). The Python wave loop stays as fallback for c_ops builds
+# pybind crossing). The Python wave loop stays as fallback for cuda_ops builds
 # that predate the op (and for inputs the planner declines).
-_HAS_NATIVE_RETRIEVE_PLAN = hasattr(lmc_ops, "execute_cb_retrieve_plan_flat")
+_HAS_NATIVE_RETRIEVE_PLAN = hasattr(device_ops, "execute_cb_retrieve_plan_flat")
 
 # torch dtype -> at::ScalarType (rope dispatch); missing -> Python fallback.
 _TORCH_TO_AT_SCALAR = {
@@ -1747,7 +1746,7 @@ class BlendV3Module(InstanceLivenessTarget):
                     # row width), so the non-contiguous view is safe. It then
                     # rotates rot_dim (= window width) dims from that base —
                     # the content dims [0, rot_offset) are never touched.
-                    lmc_ops.rotary_embedding_k_fused_strided(
+                    device_ops.rotary_embedding_k_fused_strided(
                         old_st + slot_positions_rep,
                         cur_st + slot_positions_rep,
                         k_view[..., rot_offset:],
@@ -1758,7 +1757,7 @@ class BlendV3Module(InstanceLivenessTarget):
                     )
                 elif fused_packed:
                     # Strided kernel rotates only the K half of each slot.
-                    lmc_ops.rotary_embedding_k_fused_strided(
+                    device_ops.rotary_embedding_k_fused_strided(
                         old_st + slot_positions_rep,
                         cur_st + slot_positions_rep,
                         k_view,
@@ -1768,7 +1767,7 @@ class BlendV3Module(InstanceLivenessTarget):
                         rope_state.is_neox_style,
                     )
                 else:
-                    lmc_ops.rotary_embedding_k_fused(
+                    device_ops.rotary_embedding_k_fused(
                         old_st + slot_positions_rep,
                         cur_st + slot_positions_rep,
                         k_view,
@@ -1827,7 +1826,7 @@ class BlendV3Module(InstanceLivenessTarget):
                     # kernel scatters size(2) tokens). Slicing dim 2 breaks
                     # contiguity, so this one slot pays a small copy.
                     key_value = key_value[:, :, :n_tok].contiguous()
-                lmc_ops.multi_layer_kv_transfer(
+                device_ops.multi_layer_kv_transfer(
                     key_value,
                     gpu_context.get_kernel_group_kv_pointers(group_idx),
                     slot_mapping[tok_off : tok_off + n_tok],
@@ -1877,6 +1876,7 @@ class BlendV3Module(InstanceLivenessTarget):
         unsupported layout (compressed / kv_size / dtype / head geometry).
         """
         kgm = gpu_context.kv_layer_groups_manager
+        cb_group_spec = device_ops.CBGroupSpec
         group_specs: list[Any] = []
         for group_idx in range(kgm.num_kernel_groups):
             group = kgm.kernel_groups[group_idx]
@@ -1915,7 +1915,7 @@ class BlendV3Module(InstanceLivenessTarget):
                 # must not run (a uint8 group would knock every group off
                 # the native plan).
                 group_specs.append(
-                    lmc_ops.CBGroupSpec(
+                    cb_group_spec(
                         cos_sin_cache=0,
                         rot_dim=0,
                         rope_num_kv_heads=1,
@@ -1947,7 +1947,7 @@ class BlendV3Module(InstanceLivenessTarget):
                 return None
 
             group_specs.append(
-                lmc_ops.CBGroupSpec(
+                cb_group_spec(
                     cos_sin_cache=group_cos_sin.data_ptr(),
                     rot_dim=int(group_cos_sin.shape[1]),
                     rope_num_kv_heads=n_heads,
@@ -2460,7 +2460,7 @@ class BlendV3Module(InstanceLivenessTarget):
 
                     # Fast path: one native call for the whole request; the
                     # per-wave Python loop is the fallback (returns None on old
-                    # c_ops, non-lazy objects, max_batch < 2, or size mismatch).
+                    # native ops, non-lazy objects, max_batch < 2, or size mismatch).
                     _stage_t = time.perf_counter()
                     native_flat = self._build_cb_retrieve_plan_flat(
                         gpu_context, rope_state, cpu_block_tables, runs, max_batch
@@ -2469,7 +2469,10 @@ class BlendV3Module(InstanceLivenessTarget):
                     if native_flat is not None:
                         plan_group_specs, plan_tables, _plan_keepalive = native_flat
                         _stage_t = time.perf_counter()
-                        lmc_ops.execute_cb_retrieve_plan_flat(
+                        execute_cb_retrieve_plan_flat = (
+                            device_ops.execute_cb_retrieve_plan_flat
+                        )
+                        execute_cb_retrieve_plan_flat(
                             gpu_context.device,
                             LazyMemoryAllocator.PIN_CHUNK_SIZE,
                             plan_group_specs,
