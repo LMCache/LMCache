@@ -78,8 +78,8 @@ class AsyncLRU:
             alloc_size = mock_obj.num_bytes
             if alloc_size > self.capacity:
                 raise ValueError(
-                    f"Allocation size {alloc_size} is",
-                    " greater than capacity {self.capacity}",
+                    f"Allocation size {alloc_size} is"
+                    f" greater than capacity {self.capacity}"
                 )
             if key in self.dict:
                 self.dict.move_to_end(key)
