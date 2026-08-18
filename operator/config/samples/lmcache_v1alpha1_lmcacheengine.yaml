@@ -91,7 +91,7 @@ spec:
 
   # -- Connection-injection webhook defaults (optional) --
   # The mutating webhook always wires opted-in vLLM pods to this engine
-  # (--kv-transfer-config, hostIPC, PYTHONHASHSEED). Set injection.payloadImage to
+  # (--kv-transfer-config, the /dev/shm sharing, PYTHONHASHSEED). Set injection.payloadImage to
   # ALSO stage an lmcache code tree into the vLLM container (emptyDir + init
   # container + read-only mount + PYTHONPATH), pinning vLLM's lmcache to a
   # specific build so client and server match. Leave unset for connection-only.

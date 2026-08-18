@@ -467,8 +467,9 @@ pass ``lmcache.mp.host`` / ``lmcache.mp.port`` in
 KV tensors with vLLM over POSIX shared memory. Start ``lmcache server``
 normally, then set ``lmcache.mp.mp_transfer_mode=lmcache_driven`` on the vLLM
 side to enable the zero-copy SHM handle path (the default ``auto`` routing
-maps non-CUDA devices to ``engine_driven``, which uses the worker-side
-gather/scatter copy path instead).
+maps non-CUDA devices to ``engine_driven``, a worker-side gather/scatter
+copy path that the server only loads when started with
+``--supported-transfer-mode engine_driven`` or ``auto``).
 
 **Docker** -- see :doc:`../production/docker_deployment`.
 

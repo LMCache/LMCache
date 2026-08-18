@@ -55,7 +55,7 @@ the relevant resource.
 lmcache/v1/mp_coordinator/
   app.py                # create_app + lifespan + router discovery + health/eviction loops
   __main__.py           # uvicorn entrypoint (`python -m lmcache.v1.mp_coordinator`)
-  config.py             # MPCoordinatorConfig (LMCACHE_MP_COORDINATOR_*)
+  config.py             # MPCoordinatorConfig (CLI flags only, no env vars)
   registry.py           # InstanceRegistry + MPInstance (pure membership)
   schemas.py            # Pydantic request/response models (shared wire contract)
   registrar.py          # mp-server-side register/heartbeat/deregister helpers
@@ -260,14 +260,12 @@ lmcache coordinator [--host HOST] [--port PORT] \
 
 (or, equivalently, `python -m lmcache.v1.mp_coordinator`).
 
-Configured via `LMCACHE_MP_COORDINATOR_*` environment variables — see
-`MPCoordinatorConfig` in `config.py`. The full env-var surface today is
-`HOST`, `PORT`, `INSTANCE_TIMEOUT`, `HEALTH_CHECK_INTERVAL`,
-`EVICTION_CHECK_INTERVAL`, `EVICTION_RATIO`, `TRIGGER_WATERMARK`,
-`CHUNK_SIZE`, `HASH_ALGORITHM`, `BLEND_PROBE_STRIDE`, and
-`TIMEOUT_KEEP_ALIVE`. The `lmcache coordinator` CLI
-flags override the matching env-derived field; unset flags fall back to the
-env vars and then the config defaults. See the
+Configured via CLI flags only — see `MPCoordinatorConfig` in `config.py`, whose
+field defaults are the single source of truth. An unset flag keeps its default;
+there are no coordinator environment variables. Both entrypoints share one flag
+set and one config path: `__main__.main()` builds a parser from
+`CoordinatorCommand.add_arguments` and hands the parsed args to
+`CoordinatorCommand.execute`. See the
 user-facing [`docs/source/mp/coordinator.rst`](../../../source/mp/coordinator.rst)
 for descriptions and defaults.
 
