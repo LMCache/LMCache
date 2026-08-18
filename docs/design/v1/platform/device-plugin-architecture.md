@@ -34,8 +34,9 @@ The loaded object must satisfy all of these rules:
    `lmcache.v1.platform.base.device_spec.DeviceSpec`, not an instance or
    factory.
 2. It has a no-argument constructor.
-3. Its `device_type` is a non-empty lowercase string equal to the entry-point
-   name.
+3. Its `device_type` and `backend_name` are non-empty lowercase strings. The
+   entry-point name equals `backend_name`; `device_type` may be shared by
+   multiple backends when torch exposes them through the same device category.
 4. Its import and constructor do not require the device to be present.
    Hardware probing belongs in `is_available()`.
 
@@ -57,11 +58,13 @@ scan lmcache.v1.platform subpackages ------> built-in DeviceSpec instances
 read importlib.metadata entry points ------> external DeviceSpec instances
         |                                    group: lmcache.device_plugins
         v
-merge by device_type (built-ins win)
+index by unique backend_name, then group by device_type
         |
-        +--> DEVICE_TYPE=<name> preference, when set and available
+        +--> LMCACHE_DEVICE_BACKEND=<name> exact selection, when set
         |
-        +--> otherwise first available accelerator
+        +--> DEVICE_TYPE=<type> limits selection to one torch category
+        |
+        +--> otherwise scan categories and select their only available backend
         |
         v
 one cached DeviceSpec instance
@@ -71,25 +74,31 @@ one cached DeviceSpec instance
         +--> IPC wrapper / event IPC / pinning / cache context
 ```
 
-`_build_device_registry()` owns the single process-wide registry used by both
-device detection and backend resolution. This is important because
-`DeviceSpec` caches its `DeviceOps` and pin-memory backend instances. Separate
-registries would create different capability objects for detection and use.
+`_build_backend_registry()` owns the process-wide `DeviceSpec` instances,
+indexed by `backend_name`. `_build_device_registry()` groups those same
+instances by `device_type`. Both device detection and backend resolution use
+these registries. This is important because `DeviceSpec` caches its `DeviceOps`
+and pin-memory backend instances; constructing separate specs would create
+different capability objects for detection and use.
 
 The registry and detected device are process-lifetime caches. Installing or
 removing a plugin requires restarting every LMCache and serving-engine process.
 
 ## Ordering, Conflicts, and Failure Isolation
 
-Built-in device specs are registered before external specs. An external wheel
-with a built-in `device_type` is ignored, preventing package installation from
-silently replacing LMCache's CUDA, CPU, or other bundled behavior.
+Built-in device specs are registered before external specs. External entry
+points are sorted by `(name, value)` before loading. If multiple specs claim the
+same `backend_name`, the first valid entry wins and later entries are logged and
+ignored. This prevents an external wheel from silently replacing a bundled
+backend with the same identity.
 
-External entry points are sorted by `(name, value)` before loading. If multiple
-distributions claim the same new `device_type`, the first valid entry wins and
-later entries are logged and ignored. Operators should remove the duplicate;
-the ordering is deterministic but duplicate ownership is not a supported
-extension model.
+Multiple backends may intentionally share one `device_type`. If exactly one of
+them reports `is_available()`, LMCache selects it automatically. If more than
+one reports available, LMCache raises an actionable error instead of choosing
+by registration order; operators can select the intended implementation with
+`LMCACHE_DEVICE_BACKEND`. CUDA and ROCm are the built-in example: both use
+torch's `cuda` device type, while mutually exclusive runtime checks select the
+`cuda` or `rocm` backend without an environment variable.
 
 Each external entry point has an independent failure boundary. Load,
 validation, and construction exceptions produce a warning and skip only that
@@ -112,7 +121,8 @@ must trust installed device-plugin distributions.
 ## Non-goals
 
 - Hot installation or registry refresh in a running process.
-- Overriding a built-in LMCache device backend.
-- Selecting among multiple implementations for one `device_type`.
+- Silently overriding an existing `backend_name`.
+- Priority-based automatic selection when multiple implementations for one
+  `device_type` report available simultaneously.
 - Guaranteeing ABI compatibility for native extensions outside the version
   range declared by the plugin.

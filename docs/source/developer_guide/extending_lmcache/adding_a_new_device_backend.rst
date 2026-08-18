@@ -301,13 +301,14 @@ default is ``lmcache_driven``):
         --supported-transfer-mode engine_driven
 
 Run vLLM with MP connector. If you want a specific torch device category, set
-``DEVICE_TYPE``. If multiple LMCache backends share that device type, set
-``LMCACHE_DEVICE_BACKEND`` as well to select the exact implementation:
+``DEVICE_TYPE``. Backends that share one device type are selected automatically
+when exactly one reports available. If multiple backends report available, set
+``LMCACHE_DEVICE_BACKEND`` to select the exact implementation:
 
 .. code-block:: bash
 
-    export DEVICE_TYPE=foo                    # optional; selects the torch-facing device type
-    export LMCACHE_DEVICE_BACKEND=foo        # optional; required only when multiple backends share one device_type
+    export DEVICE_TYPE=foo             # optional; selects the torch-facing device type
+    export LMCACHE_DEVICE_BACKEND=foo  # optional; disambiguates multiple available backends
 
     vllm serve <your-model> \
         --kv-transfer-config '{
@@ -345,8 +346,8 @@ Debugging checklist:
 - [ ] For an external wheel,
   ``importlib.metadata.entry_points(group="lmcache.device_plugins")`` includes
   ``foo`` and points to ``FooDeviceSpec``.
-- [ ] If another backend shares ``device_type="foo"``, set
-  ``LMCACHE_DEVICE_BACKEND=foo`` as well.
+- [ ] If another available backend shares ``device_type="foo"``, set
+  ``LMCACHE_DEVICE_BACKEND=foo`` to disambiguate them.
 - [ ] Set ``DEVICE_TYPE=foo`` to force the torch-facing device category if not
   picked up automatically.
 - [ ] Engine-driven transfer works end-to-end (check the LMCache logs
