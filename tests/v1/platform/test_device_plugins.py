@@ -2,7 +2,6 @@
 """Tests for wheel-installed device plugins discovered by entry point."""
 
 # Standard
-import sys
 from collections.abc import Callable
 from typing import Any
 
