@@ -45,7 +45,6 @@ import ctypes
 import enum
 import struct
 import threading
-import time
 
 # Third Party
 import torch
@@ -231,6 +230,12 @@ class TimelineSemaphoreEventIPCBackend:
         self._lock = threading.Lock()
         self._buffers: dict[int, _TimelineSemaphoreBuffer] = {}
         self._probed_devices: set[int] = set()
+        # Per-thread dedicated streams for host-blocking waits, by device
+        # index. synchronize_event enqueues a semaphore wait here and blocks
+        # in cudaStreamSynchronize; a shared stream would serialize
+        # concurrent synchronizes behind each other's pending waits, and the
+        # buffer's host-ops stream must stay wait-free for query_event reads.
+        self._sync_streams = threading.local()
 
     def check_event_support(self, device: object) -> None:
         """Validate timeline-semaphore event IPC on ``device`` with a live probe."""
@@ -488,10 +493,13 @@ class TimelineSemaphoreEventIPCBackend:
         return self._read_slot(event) >= event.seq
 
     def synchronize_event(self, event: object, device: object) -> None:
-        """Block the host until ``event`` completes (poll-based).
+        """Block the host until ``event`` completes.
 
-        Blocks indefinitely while the record point is unreached, like a
-        CUDA event synchronize.
+        Enqueues a semaphore wait on this thread's dedicated sync stream
+        and blocks in ``cudaStreamSynchronize``, so the calling thread is
+        parked in the driver and woken like a CUDA event synchronize (no
+        host-side polling). Blocks indefinitely while the record point is
+        unreached, like a CUDA event synchronize.
 
         Args:
             event: A local or imported :class:`TimelineSemaphoreEvent`.
@@ -500,10 +508,58 @@ class TimelineSemaphoreEventIPCBackend:
 
         Raises:
             RuntimeError: If ``event`` is not a :class:`TimelineSemaphoreEvent` or
-                a device read fails.
+                a driver call fails.
         """
-        while not self.query_event(event):
-            time.sleep(0.0001)
+        if not isinstance(event, TimelineSemaphoreEvent):
+            raise RuntimeError(
+                f"synchronize_event expected a TimelineSemaphoreEvent, "
+                f"got {type(event)!r}"
+            )
+        if event.seq == _UNRECORDED_SEQ:
+            return
+        if self._read_slot(event) >= event.seq:
+            return  # already complete; skip the stream round trip
+        sync_stream: cudaStream_t = self._get_sync_stream(event.device_index)
+        _enqueue_wait(event, sync_stream)
+        with torch.cuda.device(event.device_index):
+            _CHECK_CUDA(
+                _cuda.runtime.cudaStreamSynchronize(sync_stream),
+                "cudaStreamSynchronize (synchronize_event)",
+            )
+
+    def _get_sync_stream(self, device_index: int) -> cudaStream_t:
+        """Return this thread's dedicated sync stream for ``device_index``,
+        creating it on first use.
+
+        The stream lives for the process lifetime (like the semaphore
+        buffers); one per (thread, device) that calls
+        :meth:`synchronize_event`.
+
+        Args:
+            device_index: CUDA device ordinal.
+
+        Returns:
+            The raw ``cudaStream_t`` handle.
+
+        Raises:
+            RuntimeError: If stream creation fails.
+        """
+        streams: dict[int, cudaStream_t] | None = getattr(
+            self._sync_streams, "by_device", None
+        )
+        if streams is None:
+            streams = {}
+            self._sync_streams.by_device = streams
+        stream = streams.get(device_index)
+        if stream is None:
+            with torch.cuda.device(device_index):
+                result = _cuda.runtime.cudaStreamCreateWithFlags(
+                    _cuda.runtime.cudaStreamNonBlocking
+                )
+            _CHECK_CUDA(result, "cudaStreamCreateWithFlags (sync stream)")
+            _err, stream = result
+            streams[device_index] = stream
+        return stream
 
     def _get_buffer(self, device_index: int) -> _TimelineSemaphoreBuffer:
         """Return the semaphore buffer for ``device_index``, allocating it

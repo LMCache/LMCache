@@ -28,7 +28,8 @@ semaphore slots per GPU (4096 × 8 bytes) and exports it once with
 | `export_event` | pack `(version, mem handle, slot offset, seq)` — 81 bytes, self-contained, rides the existing opaque `bytes` wire field |
 | `import_event` | open the exporter's semaphore buffer once (cached), return a wait/query-only event |
 | `wait_event(e, stream)` | `cuStreamWaitValue64(slot, seq, GEQ)` on `stream` |
-| `query_event` / `synchronize_event` | 8-byte device read (poll) |
+| `query_event` | 8-byte device read |
+| `synchronize_event` | semaphore wait on a dedicated stream + `cudaStreamSynchronize` |
 
 Slots are assigned per recording stream: each slot's values are
 stream-ordered, hence monotonic, which keeps the `>= seq` wait race-free.
@@ -115,8 +116,11 @@ exists. Two empirically verified requirements for reviving it:
 - Requires `cuda-python` (`cuda.bindings`), resolved lazily on first use
   through the package-shared accessor in `platform/cuda/utils.py` (also
   used by `RawCudaIPCWrapper`), so importing lmcache never requires it.
-- `synchronize_event` host-polls (100 µs) instead of blocking in the
-  driver; a perf consideration for the wiring phase.
+- `synchronize_event` blocks in the driver like `cudaEventSynchronize`:
+  it enqueues the semaphore wait on a dedicated per-(thread, device)
+  stream and `cudaStreamSynchronize`s it. Measured wake latency on H200:
+  ~20 µs vs ~10 µs for CUDA events (an earlier 100 µs-poll implementation
+  measured ~174 µs). The sync streams live for the process lifetime.
 
 ## Integration constraints (must be resolved before spec binding)
 
