@@ -8,6 +8,7 @@ from lmcache.cli.commands.bench.l2_adapter_bench.data import (
     create_l1_memory_desc,
     make_aligned_tensor,
     make_memory_objects,
+    make_object_keys,
 )
 
 
@@ -27,6 +28,19 @@ def test_create_l1_memory_desc_uses_requested_alignment() -> None:
     assert desc.ptr == tensor.data_ptr()
     assert desc.size == 8192
     assert desc.align_bytes == 4096
+
+
+def test_make_object_keys_spread_hash_prefixes_deterministically() -> None:
+    keys = make_object_keys(512, key_offset=100)
+
+    assert keys == make_object_keys(512, key_offset=100)
+    assert len({key.chunk_hash for key in keys}) == len(keys)
+    assert all(len(key.chunk_hash) == 16 for key in keys)
+
+    level_one_prefixes = {key.chunk_hash[:1] for key in keys}
+    level_two_prefixes = {key.chunk_hash[:2] for key in keys}
+    assert len(level_one_prefixes) > 1
+    assert len(level_two_prefixes) > len(level_one_prefixes)
 
 
 def test_make_memory_objects_uses_shared_l1_range() -> None:
