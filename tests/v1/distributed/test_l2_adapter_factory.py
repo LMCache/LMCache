@@ -882,12 +882,14 @@ class _FakeLMCacheFSClient:
         relative_tmp_dir="",
         use_odirect=False,
         read_ahead_size=0,
+        hash_subdir_levels=0,
     ):
         self.base_path = base_path
         self.num_workers = num_workers
         self.relative_tmp_dir = relative_tmp_dir
         self.use_odirect = use_odirect
         self.read_ahead_size = read_ahead_size
+        self.hash_subdir_levels = hash_subdir_levels
         self._efd = create_event_notifier()
         self._closed = False
 
@@ -973,6 +975,7 @@ class TestFSNativeAdapterFactory:
                 config.relative_tmp_dir,
                 config.use_odirect,
                 config.read_ahead_size or 0,
+                config.hash_subdir_levels,
             )
             # First Party
             from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
@@ -991,6 +994,7 @@ class TestFSNativeAdapterFactory:
                 relative_tmp_dir=".tmp",
                 use_odirect=True,
                 read_ahead_size=4096,
+                hash_subdir_levels=2,
             )
             adapter = create_l2_adapter_from_registry(cfg)
             assert captured["args"] == (
@@ -999,6 +1003,7 @@ class TestFSNativeAdapterFactory:
                 ".tmp",
                 True,
                 4096,
+                2,
             )
             adapter.close()
         finally:
@@ -1093,6 +1098,7 @@ class TestFSNativeAdapterFactory:
                 config.relative_tmp_dir,
                 config.use_odirect,
                 config.read_ahead_size or 0,
+                config.hash_subdir_levels,
             )
             # First Party
             from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
@@ -1134,5 +1140,6 @@ def _patched_fs_factory(config, l1_memory_desc=None):
         config.relative_tmp_dir,
         config.use_odirect,
         config.read_ahead_size or 0,
+        config.hash_subdir_levels,
     )
     return NativeConnectorL2Adapter(client)
