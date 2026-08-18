@@ -59,9 +59,10 @@ class MockDeviceMemoryPool:
             obj = MagicMock()
             obj.get_size = MagicMock(return_value=size)
 
-            # Make raw_tensor a device tensor so free() routes correctly
-            raw = torch.empty(1, device=self._device)
-            obj.raw_tensor = raw
+            # Mock the raw tensor's device type — free() routes by
+            # raw_tensor.device.type, which is all these tests exercise.
+            # No real GPU/CUDA device is required (keeps CI green).
+            obj.raw_tensor.device.type = self._device.split(":")[0]  # "cuda"
             obj._size = size
             # Set parent to self so free() routes back
             obj.parent = MagicMock(return_value=self)
