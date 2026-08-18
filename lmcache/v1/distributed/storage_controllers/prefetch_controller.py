@@ -1110,15 +1110,22 @@ class PrefetchController(StorageControllerInterface):
                 else:
                     cpu_keys.append(k)
 
-            # Device path: device_reserve_write (kv_rank from first key)
+            # Device path: split by kv_rank so each sub-batch gets its
+            # buffers from its own device pool. The buffer must sit on the
+            # GPU that DMAs the data in (and serves the D2D retrieve), so a
+            # single routing decision cannot be shared across ranks.
             if device_keys:
-                gr = self._l1_manager.device_reserve_write(
-                    keys=device_keys,
-                    is_temporary=[not retention_map[k] for k in device_keys],
-                    layout_desc=gld,
-                    kv_rank=device_keys[0].kv_rank,
-                )
-                write_results.update(gr)
+                by_kv_rank: dict[int, list[ObjectKey]] = {}
+                for k in device_keys:
+                    by_kv_rank.setdefault(k.kv_rank, []).append(k)
+                for kv_rank, rank_keys in by_kv_rank.items():
+                    gr = self._l1_manager.device_reserve_write(
+                        keys=rank_keys,
+                        is_temporary=[not retention_map[k] for k in rank_keys],
+                        layout_desc=gld,
+                        kv_rank=kv_rank,
+                    )
+                    write_results.update(gr)
 
             # CPU path: existing reserve_write (unchanged)
             if cpu_keys:

@@ -99,6 +99,10 @@ class MockDeviceMemoryPool:
         with self._lock:
             return self._free
 
+    def get_total_bytes(self) -> int:
+        """Return total capacity bytes."""
+        return self._total
+
 
 # ---------------------------------------------------------------------------
 # DeviceMemoryPool protocol structural typing
@@ -320,3 +324,213 @@ class TestL1BackendType:
 
         assert L1BackendType.DEVICE == "device"
         assert L1BackendType.DEVICE.value == "device"
+
+
+# ---------------------------------------------------------------------------
+# get_memory_usage / get_device_memory_usage accounting
+# ---------------------------------------------------------------------------
+
+
+class TestMemoryUsageAccounting:
+    """get_memory_usage() must report the CPU tier (eviction semantics);
+    device pool usage is exposed separately via get_device_memory_usage().
+    """
+
+    @staticmethod
+    def _make_manager(pools, cpu_usage=(100, 200)):
+        """Build a manager bypassing __init__ (no backend in this PR)."""
+        # First Party
+        from lmcache.v1.distributed.memory_manager import (
+            device_resident_l1_memory_manager as drl1,
+        )
+
+        mgr = object.__new__(drl1.DeviceResidentL1MemoryManager)
+        mgr._device_pools = {i: p for i, p in enumerate(pools)}
+        mgr._cpu_manager = MagicMock()
+        mgr._cpu_manager.get_memory_usage.return_value = cpu_usage
+        return mgr
+
+    def test_get_memory_usage_reports_cpu_tier_only(self):
+        """get_memory_usage() must delegate to the CPU manager, even when
+        device pools hold allocations (device footprint is transient and
+        must not skew the eviction watermark)."""
+        pool = MockDeviceMemoryPool(total_bytes=1024)
+        pool.allocate(shapes=[torch.Size([256])], dtypes=[torch.float32])
+        mgr = self._make_manager(pools=[pool], cpu_usage=(100, 200))
+
+        assert mgr.get_memory_usage() == (100, 200)
+
+    def test_get_device_memory_usage_reports_per_device(self):
+        """get_device_memory_usage() must report per-device
+        ``(used, total)`` — aggregation could hide a single exhausted
+        pool behind healthy ones."""
+        pool0 = MockDeviceMemoryPool(total_bytes=1024)
+        pool1 = MockDeviceMemoryPool(total_bytes=2048)
+        # Allocate 128 bytes from pool0 (float32 x 32 elements)
+        pool0.allocate(shapes=[torch.Size([32])], dtypes=[torch.float32])
+        mgr = self._make_manager(pools=[pool0, pool1])
+
+        assert mgr.get_device_memory_usage() == {
+            0: (128, 1024),
+            1: (0, 2048),
+        }
+
+    def test_get_device_memory_usage_empty_pools(self):
+        """get_device_memory_usage() with no pools returns {}."""
+        mgr = self._make_manager(pools=[])
+        assert mgr.get_device_memory_usage() == {}
+
+
+# ---------------------------------------------------------------------------
+# L1Manager.get_device_memory_usage forwarding
+# ---------------------------------------------------------------------------
+
+
+class TestL1ManagerDeviceUsageForwarding:
+    """L1Manager.get_device_memory_usage() forwards when the device-resident
+    tier is present and returns an empty dict otherwise.
+    """
+
+    def test_forwards_to_device_resident_manager(self):
+        """With a device-resident tier, L1Manager must forward the call."""
+        # First Party
+        from lmcache.v1.distributed.l1_manager import L1Manager
+
+        wrapper = object.__new__(L1Manager)
+        mm = MagicMock()
+        mm.get_device_memory_usage.return_value = {0: (42, 84)}
+        wrapper._memory_manager = mm
+
+        assert L1Manager.get_device_memory_usage(wrapper) == {0: (42, 84)}
+        mm.get_device_memory_usage.assert_called_once()
+
+    def test_plain_manager_reports_empty(self):
+        """Managers without the device tier must report {} via the
+        L1Manager forwarding wrapper (getattr-based probe)."""
+        # First Party
+        from lmcache.v1.distributed.l1_manager import L1Manager
+
+        wrapper = object.__new__(L1Manager)
+        wrapper._memory_manager = MagicMock(spec=[])  # no device API
+        assert L1Manager.get_device_memory_usage(wrapper) == {}
+
+
+# ---------------------------------------------------------------------------
+# PrefetchController._reserve_load_buffers: kv_rank split (regression)
+# ---------------------------------------------------------------------------
+
+
+class TestReserveLoadBuffersKvRankSplit:
+    """Device keys must be split by kv_rank before device_reserve_write.
+
+    Regression test: the whole device batch used to inherit
+    ``device_keys[0].kv_rank``, so keys later in the batch could get
+    buffers from the wrong device pool (a single prefetch request can
+    span multiple kv_ranks).
+    """
+
+    @staticmethod
+    def _make_keys(n: int, num_ranks: int, gid: int = 7):
+        # First Party
+        from lmcache.v1.distributed.api import ObjectKey
+
+        return [
+            ObjectKey(
+                chunk_hash=bytes([i]),
+                model_name="test-model",
+                kv_rank=i % num_ranks,
+                object_group_id=gid,
+            )
+            for i in range(n)
+        ]
+
+    def test_device_keys_split_by_kv_rank(self):
+        """Each device_reserve_write batch must carry a single kv_rank."""
+        # First Party
+        from lmcache.v1.distributed.api import PrefetchMode
+        from lmcache.v1.distributed.error import L1Error
+        from lmcache.v1.distributed.storage_controllers.prefetch_controller import (
+            PrefetchController,
+        )
+
+        num_ranks = 3
+        keys = self._make_keys(n=6, num_ranks=num_ranks)
+
+        l1_manager = MagicMock()
+        l1_manager.has_device_l1.return_value = True
+
+        def fake_device_reserve_write(*, keys, is_temporary, layout_desc, kv_rank):
+            return {k: (L1Error.SUCCESS, MagicMock()) for k in keys}
+
+        l1_manager.device_reserve_write.side_effect = fake_device_reserve_write
+
+        controller = MagicMock()
+        controller._l1_manager = l1_manager
+        controller._adapter_descriptors = {0: MagicMock(l1_tier="device")}
+        controller._event_bus = MagicMock()
+
+        request = MagicMock()
+        request.mode = PrefetchMode.WARM  # skip retention policy
+        request.keys = keys
+        request.group_layout_descs = {7: MagicMock()}
+        request.write_reserved_keys = []
+        request.write_reserved_objs = {}
+
+        plan_bitmap = MagicMock()
+        plan_bitmap.gather.return_value = keys  # all keys on adapter 0
+
+        reserved = PrefetchController._reserve_load_buffers(
+            controller, request, keys, {0: plan_bitmap}
+        )
+
+        calls = l1_manager.device_reserve_write.call_args_list
+        assert len(calls) == num_ranks
+        seen_ranks: set[int] = set()
+        for call in calls:
+            batch_keys = call.kwargs["keys"]
+            batch_ranks = {k.kv_rank for k in batch_keys}
+            assert len(batch_ranks) == 1, (
+                f"device_reserve_write batch mixes kv_ranks: {batch_ranks}"
+            )
+            assert call.kwargs["kv_rank"] in batch_ranks
+            seen_ranks |= batch_ranks
+        assert seen_ranks == {0, 1, 2}
+
+        # All keys went through the device path; no CPU fallback reserve.
+        l1_manager.reserve_write.assert_not_called()
+        assert len(reserved) == len(keys)
+        assert set(request.write_reserved_keys) == set(keys)
+
+
+# ---------------------------------------------------------------------------
+# DeviceResidentL1MemoryManager.close(): cascade to the CPU manager
+# ---------------------------------------------------------------------------
+
+
+class TestCloseCascadesToCpuManager:
+    """close() must release the internal CPU manager too.
+
+    ``L1Manager.close()`` only calls ``close()`` once on its single
+    ``_memory_manager`` (this class), so the CPU slab / SHM path is only
+    released if close() cascades into ``_cpu_manager``.
+    """
+
+    def test_close_releases_cpu_manager(self):
+        """close() should close both device pools and the CPU manager."""
+        # First Party
+        from lmcache.v1.distributed.memory_manager import (
+            device_resident_l1_memory_manager as drl1,
+        )
+
+        pool = MagicMock()
+
+        # Bypass __init__ (no backend is implemented in this PR): patch the
+        # attributes close() consumes directly.
+        mgr = object.__new__(drl1.DeviceResidentL1MemoryManager)
+        mgr._device_pools = {0: pool}
+        mgr._cpu_manager = MagicMock()
+
+        mgr.close()
+
+        pool.close.assert_called_once()
+        mgr._cpu_manager.close.assert_called_once()

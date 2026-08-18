@@ -71,6 +71,14 @@ class DeviceMemoryPool(Protocol):
         """Return current free bytes in the pool."""
         ...
 
+    def get_total_bytes(self) -> int:
+        """Return the pool's total capacity in bytes.
+
+        Used with :meth:`get_free_bytes` to derive usage
+        (``used = total - free``) for observability.
+        """
+        ...
+
 
 class DeviceResidentL1MemoryManager:
     """L1 memory manager for the device-resident tier.
@@ -291,26 +299,47 @@ class DeviceResidentL1MemoryManager:
         return L1BackendType.DRAM
 
     def get_memory_usage(self) -> tuple[int, int]:
-        """Return ``(used_bytes, total_bytes)`` for device pools.
+        """Return ``(used_bytes, total_bytes)`` of the **CPU tier**.
 
-        Only device pool usage is reported here. CPU tier usage is tracked
-        separately by the internal ``_cpu_manager``.
+        Delegates to the internal CPU :class:`L1MemoryManager`. This is the
+        value :class:`L1Manager` gauges and the eviction controller consume
+        as the L1 usage signal, and eviction candidates are always CPU
+        objects — so it must reflect the CPU tier the evictor actually
+        acts on.
 
-        Note: this currently returns ``(0, sum_of_free_bytes)`` because the
-        :class:`DeviceMemoryPool` protocol only exposes ``get_free_bytes``,
-        not total capacity. Backend pools that track total capacity should
-        override this method for accurate reporting.
+        The device tier is deliberately **excluded**: device-resident
+        entries are temporary (freed on ``finish_read`` once the read locks
+        drain) and are managed by per-pool backpressure, not by eviction.
+        Folding their transient footprint into this ratio would spuriously
+        raise the watermark and evict CPU objects when the correct response
+        to a full device pool is to wait for backpressure. Device pool
+        usage is reported separately via :meth:`get_device_memory_usage`.
+
+        Returns:
+            ``(used_bytes, total_bytes)`` of the CPU pinned-DRAM tier.
         """
-        total_used = 0
-        total_capacity = 0
-        for pool in self._device_pools.values():
-            free = pool.get_free_bytes()
-            # We don't track total per-pool directly; approximate via
-            # used = total - free. Backend pools should override this if
-            # they track total capacity.
-            total_used += 0  # Updated by backend
-            total_capacity += free
-        return total_used, total_capacity
+        return self._cpu_manager.get_memory_usage()
+
+    def get_device_memory_usage(self) -> dict[int, tuple[int, int]]:
+        """Return per-device ``(used_bytes, total_bytes)`` of device pools.
+
+        For observability (gauges / status reporting) only — not consumed
+        by the eviction controller. Per-pool usage is derived as
+        ``total - free``; backpressure (``wait_for_available``) is the
+        mechanism that bounds device-pool usage. Per-device granularity is
+        intentional: each pool backpressures independently, so an
+        aggregated sum could hide a single exhausted pool behind healthy
+        ones.
+
+        Returns:
+            ``{device_id: (used_bytes, total_bytes)}`` keyed by device id;
+            empty dict when no pools are configured.
+        """
+        usage: dict[int, tuple[int, int]] = {}
+        for dev_id, pool in self._device_pools.items():
+            capacity = pool.get_total_bytes()
+            usage[dev_id] = (capacity - pool.get_free_bytes(), capacity)
+        return usage
 
     def get_l1_memory_desc(self) -> "L1MemoryDesc | None":
         """Return ``None``: device pools are not a single registerable region.
@@ -326,8 +355,12 @@ class DeviceResidentL1MemoryManager:
         """Release all device pool resources.
 
         Backend pools are responsible for their own cleanup (unregistering
-        DMA mappings, closing device handles, etc.). The CPU manager is
-        closed by :class:`L1Manager` separately.
+        DMA mappings, closing device handles, etc.).
+
+        The internal CPU manager is closed here as well:
+        :meth:`L1Manager.close` only calls ``close()`` once on its single
+        ``_memory_manager`` (this class), so the CPU slab / SHM path must
+        be released through this cascade on shutdown.
         """
         for dev_id, pool in self._device_pools.items():
             if hasattr(pool, "close"):
@@ -341,6 +374,7 @@ class DeviceResidentL1MemoryManager:
                         exc_info=True,
                     )
         self._device_pools.clear()
+        self._cpu_manager.close()
 
     def memcheck(self) -> bool:
         """Check allocator consistency across all device pools.

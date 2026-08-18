@@ -233,10 +233,12 @@ class L1ManagerConfig:
     """ Optional GDS L1 tier. When set, the GDS slab is the L1 medium
     (mutually exclusive with the pinned-DRAM tier in ``memory_config``). """
 
+    # TODO(MonthFall): implement the ``"phx"`` device pool backend
+    # (``_init_phx_pools``) in a follow-up PR.
     device_resident_l1_config: "DeviceResidentL1Config | None" = None
     """ Optional device-resident L1 tier. When set, the L1 tier can hold
     device memory objects directly (retrieve via D2D). Co-exists with the
-    CPU pinned-DRAM tier. A follow-up PR adds the ``"phx"`` backend."""
+    CPU pinned-DRAM tier."""
 
     write_ttl_seconds: int = field(default=600)
     """ Time to live for each object's write lock. Default is 600s (10 minutes). """

@@ -954,6 +954,23 @@ class L1Manager:
         """
         return self._memory_manager.get_memory_usage()
 
+    def get_device_memory_usage(self) -> dict[int, tuple[int, int]]:
+        """Get per-device memory usage of the device-resident tier, if any.
+
+        Delegates to
+        :meth:`DeviceResidentL1MemoryManager.get_device_memory_usage`.
+        For observability only — the eviction controller keys on
+        :meth:`get_memory_usage` (the CPU tier).
+
+        Returns:
+            ``{device_id: (used_bytes, total_bytes)}``, or an empty dict
+            when no device-resident tier is enabled.
+        """
+        getter = getattr(self._memory_manager, "get_device_memory_usage", None)
+        if getter is None:
+            return {}
+        return getter()
+
     def get_l1_memory_desc(self):
         """Return an L1MemoryDesc describing the underlying L1 memory buffer."""
         return self._memory_manager.get_l1_memory_desc()
