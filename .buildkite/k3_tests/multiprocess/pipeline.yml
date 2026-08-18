@@ -243,6 +243,16 @@ steps:
         plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
         artifact_paths: ["*.log"]
 
+      # Real GPU MP integration: vLLM is launched with FIFO lazy offload
+      # (threshold=2, select_count=1). Three requests verify that the first
+      # two remain pending and the third drains the first request.
+      - label: ":compression: lazy_offload"
+        command: .buildkite/k3_tests/multiprocess/run.sh lazy_offload
+        timeout_in_minutes: 30
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
+        artifact_paths: ["*.log"]
+
       - label: ":compression: http_api"
         command: .buildkite/k3_tests/multiprocess/run.sh http_api
         timeout_in_minutes: 30

@@ -13,6 +13,7 @@ import uvicorn
 from lmcache.logging import init_logger
 from lmcache.v1.mp_coordinator.app import create_app
 from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
+from lmcache.v1.mp_coordinator.observability import init_coordinator_metrics
 
 logger = init_logger(__name__)
 
@@ -20,6 +21,7 @@ logger = init_logger(__name__)
 def main() -> None:
     """Build the coordinator app from the environment and serve it."""
     config = MPCoordinatorConfig.from_env()
+    init_coordinator_metrics(config)
     app = create_app(config)
     uvicorn.run(
         app,
