@@ -36,6 +36,7 @@ from lmcache.cli.commands.bench.engine_bench.stats import (
     StatsCollector,
 )
 from lmcache.cli.commands.bench.engine_bench.workloads import (
+    DEFAULT_DOC_ALIGN_TOKENS,
     create_workload,
     parse_template_kwargs,
     validate_max_output_length_supported,
@@ -346,6 +347,18 @@ def add_engine_arguments(parser: argparse.ArgumentParser) -> None:
             "Token budget per answer (default: 1024). Must fit a reasoning "
             "model's thinking block as well as the <final_answer> tags, or "
             "samples fail to parse and drop out of the score."
+        ),
+    )
+    rag_group.add_argument(
+        "--rag-doc-align-tokens",
+        type=int,
+        default=DEFAULT_DOC_ALIGN_TOKENS,
+        help=(
+            f"Pad documents and the system block to a multiple of this many "
+            f"tokens (default: {DEFAULT_DOC_ALIGN_TOKENS}, LMCache's own "
+            "default chunk size). Set it to the deployment's chunk size: a "
+            "mismatch leaves documents off-phase and reuse partial. Both runs "
+            "being compared must use the same value."
         ),
     )
     rag_group.add_argument(

@@ -12,6 +12,11 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+# First Party
+from lmcache.cli.commands.bench.engine_bench.workloads.rag_qa_quality import (
+    DEFAULT_DOC_ALIGN_TOKENS,
+)
+
 # ---------------------------------------------------------------------------
 # Phases
 # ---------------------------------------------------------------------------
@@ -425,6 +430,20 @@ ALL_ITEMS: list[ConfigItem] = [
         ),
         input_type="int",
         default=1024,
+        condition=_workload_is("rag-qa-quality"),
+        phase=PHASE_WORKLOAD,
+    ),
+    ConfigItem(
+        key="rag_doc_align_tokens",
+        display_name="Document alignment (tokens)",
+        description=(
+            "Documents and the system block are padded to a multiple of this, "
+            "so each document occupies whole cache chunks.\n"
+            "  Set it to the deployment's LMCache chunk size (256 by default);\n"
+            "  a mismatch leaves documents off-phase and reuse partial."
+        ),
+        input_type="int",
+        default=DEFAULT_DOC_ALIGN_TOKENS,
         condition=_workload_is("rag-qa-quality"),
         phase=PHASE_WORKLOAD,
     ),

@@ -76,6 +76,7 @@ def _make_args(**overrides) -> argparse.Namespace:
         rag_dataset=None,
         rag_num_samples=50,
         rag_max_output_length=1024,
+        rag_doc_align_tokens=256,
         rag_template_kwargs=[],
         rag_output=None,
     )

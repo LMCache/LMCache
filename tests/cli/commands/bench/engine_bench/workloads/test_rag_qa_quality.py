@@ -20,7 +20,7 @@ from lmcache.cli.commands.bench.engine_bench.workloads.rag_qa_quality import (
 # Local
 from ..fake_tokenizer import make_fake_tokenizer
 
-_CHUNK = rag_qa_quality._CHUNK_ALIGN_TOKENS
+_CHUNK = rag_qa_quality.DEFAULT_DOC_ALIGN_TOKENS
 
 
 # ---------------------------------------------------------------------------
@@ -75,6 +75,7 @@ def _make_workload(
     successful: bool = True,
     num_samples: int = 10,
     max_output_length: int = 64,
+    doc_align_tokens: int = _CHUNK,
     template_kwargs: dict[str, bool | int | str] = {},  # noqa: B006
     output_path: str = "",
 ):
@@ -93,6 +94,7 @@ def _make_workload(
         dataset=_write_dataset(tmp_path, records),
         num_samples=num_samples,
         max_output_length=max_output_length,
+        doc_align_tokens=doc_align_tokens,
         template_kwargs=template_kwargs,
         output_path=output_path or str(tmp_path / "out.json"),
     )
@@ -130,6 +132,7 @@ class TestRagQaQualityConfig:
         cfg = RagQaQualityConfig(dataset="musique")
         assert cfg.num_samples == 50
         assert cfg.max_output_length == 1024
+        assert cfg.doc_align_tokens == _CHUNK
         assert cfg.template_kwargs == {}
 
     def test_empty_dataset_rejected(self) -> None:
@@ -144,6 +147,10 @@ class TestRagQaQualityConfig:
         with pytest.raises(ValueError, match="max_output_length must be >= 1"):
             RagQaQualityConfig(dataset="musique", max_output_length=0)
 
+    def test_doc_align_tokens_must_be_positive(self) -> None:
+        with pytest.raises(ValueError, match="doc_align_tokens must be >= 1"):
+            RagQaQualityConfig(dataset="musique", doc_align_tokens=0)
+
     def test_empty_output_path_rejected(self) -> None:
         with pytest.raises(ValueError, match="output_path must be non-empty"):
             RagQaQualityConfig(dataset="musique", output_path="")
@@ -155,6 +162,7 @@ class TestRagQaQualityConfig:
             dataset="musique",
             num_samples=5,
             max_output_length=32,
+            doc_align_tokens=_CHUNK,
             template_kwargs=kwargs,
             output_path="out.json",
         )
@@ -203,6 +211,17 @@ class TestPromptConstruction:
         workload, _ = _make_workload(tmp_path, monkeypatch)
         for block in workload._document_blocks.values():
             assert workload._token_length(block) % _CHUNK == 0
+
+    def test_documents_honour_a_custom_alignment(self, tmp_path, monkeypatch) -> None:
+        """Alignment tracks the deployment's chunk size, not the default."""
+        align = 64
+        workload, _ = _make_workload(tmp_path, monkeypatch, doc_align_tokens=align)
+        for block in workload._document_blocks.values():
+            assert workload._token_length(block) % align == 0
+        total = workload._chat_prefix_tokens() + workload._token_length(
+            workload._system_block
+        )
+        assert total % align == 0
 
     def test_system_block_ends_on_a_chunk_boundary(self, tmp_path, monkeypatch) -> None:
         """So every document starts on a boundary."""

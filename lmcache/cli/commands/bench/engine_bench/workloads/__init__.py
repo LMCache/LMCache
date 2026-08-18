@@ -36,6 +36,7 @@ from lmcache.cli.commands.bench.engine_bench.workloads.prefix_suffix_tuner impor
     PrefixSuffixTunerWorkload,
 )
 from lmcache.cli.commands.bench.engine_bench.workloads.rag_qa_quality import (
+    DEFAULT_DOC_ALIGN_TOKENS,
     RagQaQualityConfig,
     RagQaQualityWorkload,
     parse_template_kwargs,
@@ -46,6 +47,7 @@ from lmcache.cli.commands.bench.engine_bench.workloads.random_prefill import (
 )
 
 __all__ = [
+    "DEFAULT_DOC_ALIGN_TOKENS",
     "BaseWorkload",
     "LongDocPermutatorConfig",
     "LongDocPermutatorWorkload",
@@ -204,6 +206,7 @@ def create_workload(
             dataset=args.rag_dataset,
             num_samples=args.rag_num_samples,
             max_output_length=args.rag_max_output_length,
+            doc_align_tokens=args.rag_doc_align_tokens,
             template_kwargs=parse_template_kwargs(args.rag_template_kwargs),
             output_path=args.rag_output
             or os.path.join(config.output_dir, "rag_qa_quality.json"),

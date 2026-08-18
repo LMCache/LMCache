@@ -393,6 +393,7 @@ change is attributable to the cache rather than to the perturbation.
 | `dataset` | `--rag-dataset` | **required** |
 | `num_samples` | `--rag-num-samples` | 50 |
 | `max_output_length` | `--rag-max-output-length` | 1024 |
+| `doc_align_tokens` | `--rag-doc-align-tokens` | 256 (LMCache's default chunk size) |
 | `template_kwargs` | `--rag-template-kwargs` | `{}` (repeatable `KEY=VALUE`) |
 | `output_path` | `--rag-output` | `<output-dir>/rag_qa_quality.json` |
 
@@ -412,17 +413,19 @@ HotpotQA's `context` as either a `{title, sentences}` struct or
 `[[title, [sentence, …]], …]` pairs. Records missing passages, a question, or
 gold answers are skipped.
 
-**Chunk alignment.** Each document is padded to a multiple of
-`_CHUNK_ALIGN_TOKENS` (256, LMCache's default chunk size), and the system
-prompt is padded so the chat-template prefix plus system block is also a whole
-number of chunks. Documents then start on a chunk boundary in both the prefill
-and the composite, so their chunks hold document content alone and match.
-Without this they land off-phase and nothing matches, silently.
+**Document alignment.** Each document is padded to a multiple of
+`--rag-doc-align-tokens`, and the system prompt is padded so the
+chat-template prefix plus system block is also a whole multiple. Documents
+then start on a chunk boundary in both the prefill and the composite, so
+their chunks hold document content alone and match. Without this they land
+off-phase and nothing matches, silently.
 
-The unit is hardcoded, not read from the server: the baseline stack a run is
-compared against has no LMCache server to ask, and runs that padded
-differently would no longer share prompts. A different chunk size yields
-partial reuse.
+**Set it to the deployment's LMCache chunk size** — the default 256 is
+LMCache's own default, not a detected value. It is configured rather than
+queried because the baseline stack a run is compared against has no LMCache
+server to ask, and two runs that padded differently would no longer share
+prompts. A mismatch yields partial reuse, and both runs being compared must
+use the same value — it is part of the `run_fingerprint`.
 
 Nothing here reads LMCache's own counters: the workload measures answers, and
 its output is deliberately agnostic of engine-side metrics. Confirm the cache

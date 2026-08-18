@@ -48,10 +48,10 @@ from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
 
-# LMCache's default chunk size (``lmcache/v1/config.py``).  Hardcoded rather
-# than detected: the baseline stack has no LMCache server to ask, and runs
-# that padded differently would no longer share the same prompts.
-_CHUNK_ALIGN_TOKENS = 256
+# LMCache's own default chunk size (``lmcache/v1/config.py``).  Configurable
+# rather than detected: the baseline stack has no LMCache server to ask, and
+# two runs that padded differently would no longer share prompts.
+DEFAULT_DOC_ALIGN_TOKENS = 256
 
 # Padding words, drawn per document so no two documents share filler (which
 # would make their padded chunks collide in a content-addressed cache).
@@ -89,6 +89,11 @@ class RagQaQualityConfig:
             measure the same questions.
         max_output_length: Token budget per answer.  Must fit a reasoning
             model's thinking block as well as the answer tags.
+        doc_align_tokens: Documents and the system block are padded to a
+            multiple of this, so each document occupies whole cache chunks at
+            the same phase in the prefill and in the composite request.  Set
+            it to the deployment's LMCache chunk size; a mismatch leaves
+            documents off-phase and reuse partial.
         template_kwargs: Chat-template variables, already coerced to
             bool/int/str.  Empty means the model's own template default
             applies.  The workload does not send these itself — the caller
@@ -102,6 +107,7 @@ class RagQaQualityConfig:
     dataset: str
     num_samples: int = 50
     max_output_length: int = 1024
+    doc_align_tokens: int = DEFAULT_DOC_ALIGN_TOKENS
     template_kwargs: dict[str, bool | int | str] = field(default_factory=dict)
     output_path: str = "rag_qa_quality.json"
 
@@ -114,6 +120,10 @@ class RagQaQualityConfig:
             raise ValueError(
                 f"max_output_length must be >= 1, got {self.max_output_length}"
             )
+        if self.doc_align_tokens < 1:
+            raise ValueError(
+                f"doc_align_tokens must be >= 1, got {self.doc_align_tokens}"
+            )
         if not self.output_path:
             raise ValueError("output_path must be non-empty")
 
@@ -123,6 +133,7 @@ class RagQaQualityConfig:
         dataset: str,
         num_samples: int,
         max_output_length: int,
+        doc_align_tokens: int,
         template_kwargs: Mapping[str, bool | int | str],
         output_path: str,
     ) -> "RagQaQualityConfig":
@@ -132,6 +143,8 @@ class RagQaQualityConfig:
             dataset: Dataset name or local path.
             num_samples: Number of samples to measure.
             max_output_length: Token budget per answer.
+            doc_align_tokens: Token alignment for documents and the system
+                block; should match the deployment's LMCache chunk size.
             template_kwargs: Coerced chat-template variables.  Copied, so a
                 later mutation of the caller's mapping does not change the
                 config.
@@ -144,6 +157,7 @@ class RagQaQualityConfig:
             dataset=dataset,
             num_samples=num_samples,
             max_output_length=max_output_length,
+            doc_align_tokens=doc_align_tokens,
             template_kwargs=dict(template_kwargs),
             output_path=output_path,
         )
@@ -283,9 +297,10 @@ class RagQaQualityWorkload(BaseWorkload):
         Returns:
             The padded text, unchanged if already on a chunk boundary.
         """
+        align = self._config.doc_align_tokens
         current = self._token_length(text)
         total = offset + current
-        target = -(-total // _CHUNK_ALIGN_TOKENS) * _CHUNK_ALIGN_TOKENS
+        target = -(-total // align) * align
         if target == total:
             return text
 
@@ -304,7 +319,7 @@ class RagQaQualityWorkload(BaseWorkload):
         logger.warning(
             "Could not pad a block to a %d-token boundary (off by %d); "
             "cache reuse will be partial",
-            _CHUNK_ALIGN_TOKENS,
+            align,
             offset + self._token_length(padded) - target,
         )
         return padded
@@ -375,7 +390,7 @@ class RagQaQualityWorkload(BaseWorkload):
                 "num_samples": self._config.num_samples,
                 "max_output_length": self._config.max_output_length,
                 "template_kwargs": self._config.template_kwargs,
-                "chunk_align_tokens": _CHUNK_ALIGN_TOKENS,
+                "doc_align_tokens": self._config.doc_align_tokens,
                 "model": self._model_name,
                 "seed": self._seed,
                 "sample_ids": [s.sample_id for s in self._samples],
@@ -402,7 +417,7 @@ class RagQaQualityWorkload(BaseWorkload):
             f"  Samples:          {yellow}{len(self._samples)}{reset}\n"
             f"  Distinct docs:    {yellow}{len(self._corpus)}{reset}\n"
             f"  Max output:       {yellow}{c.max_output_length}{reset} tokens\n"
-            f"  Chunk alignment:  {yellow}{_CHUNK_ALIGN_TOKENS}{reset} tokens\n"
+            f"  Doc alignment:    {yellow}{c.doc_align_tokens}{reset} tokens\n"
             f"  Template kwargs:  {yellow}{c.template_kwargs or 'model default'}"
             f"{reset}\n"
             f"  Run fingerprint:  {yellow}{self._run_fingerprint()}{reset}\n"
@@ -534,6 +549,7 @@ class RagQaQualityWorkload(BaseWorkload):
 
 
 __all__ = [
+    "DEFAULT_DOC_ALIGN_TOKENS",
     "RagQaQualityConfig",
     "RagQaQualityWorkload",
     "parse_template_kwargs",
