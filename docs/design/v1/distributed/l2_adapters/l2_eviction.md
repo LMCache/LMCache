@@ -198,7 +198,7 @@ capacity) can omit steps 2–6 and rely on the base class no-op defaults.
 | `NixlStoreL2Adapter`       | ✓ (skips pinned) | ✓ (pool-based) | stored, deleted |
 | `RawBlockL2Adapter`        | ✓ (skips locked) | ✓ | stored, accessed, deleted |
 | `FSL2Adapter`              | ✓ (best-effort) | total only (no max cap) | stored, accessed, deleted |
-| `NativeConnectorL2Adapter` | ✓ (via `submit_batch_delete`) | ✓ (client-side, requires `max_capacity_gb`) | stored, deleted |
+| `NativeConnectorL2Adapter` | ✓ (skips locked, via `submit_batch_delete`) | ✓ (client-side, requires `max_capacity_gb`) | stored, deleted |
 
 **Note on `NativeConnectorL2Adapter`:** Eviction support requires two things:
 

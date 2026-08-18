@@ -291,28 +291,35 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
     def delete(self, keys: list[ObjectKey]) -> None:
         """Delete a batch of keys from the remote backend.
 
-        Submits a batch delete to the native connector and blocks
-        until the demux thread signals completion (up to 30s timeout).
-        Fires ``_notify_keys_deleted`` on success so eviction policy
-        tracking stays in sync.
+        Keys currently pinned by a lookup lock are skipped — deleting a
+        key mid-read would break the ``lookup_and_lock`` contract that a
+        found key stays resident until the matching ``submit_unlock``.
+        Same convention as the other L2 adapters (e.g. S3, Valkey).
 
-        No-op if the connector does not expose ``submit_batch_delete``
-        or if the key list is empty.
+        Submits a batch delete for the remaining keys to the native
+        connector and blocks until the demux thread signals completion
+        (up to 30s timeout). Fires ``_notify_keys_deleted`` on success so
+        eviction policy tracking stays in sync.
+
+        No-op if the connector does not expose ``submit_batch_delete``,
+        if the key list is empty, or if every key is locked.
         """
         if not keys or not self._has_delete:
             return
 
-        key_strings = [_object_key_to_string(k) for k in keys]
-        done_event = threading.Event()
-
         with self._lock:
+            deletable = [k for k in keys if self._locked_keys.get(k, 0) == 0]
+            if not deletable:
+                return
+            done_event = threading.Event()
+            key_strings = [_object_key_to_string(k) for k in deletable]
             task_id = self._get_next_task_id()
             future_id = int(self._client.submit_batch_delete(key_strings))
             self._pending_ops[future_id] = (
                 self._OP_DELETE,
                 task_id,
-                len(keys),
-                list(keys),
+                len(deletable),
+                deletable,
             )
             self._pending_delete_events[task_id] = done_event
 
@@ -328,7 +335,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                         break
             logger.warning(
                 "delete() timed out after 30s for %d keys",
-                len(keys),
+                len(deletable),
             )
             return
 
