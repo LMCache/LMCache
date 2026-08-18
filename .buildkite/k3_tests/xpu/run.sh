@@ -5,8 +5,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
-DEFAULT_XPU_DEVICE_WHEEL_URL="https://github.com/opendataio/lmcache_xpu_device/releases/download/v0.1.0/lmcache_xpu_device-0.1.0-py3-none-any.whl"
-XPU_DEVICE_WHEEL_URL="${LMCACHE_XPU_DEVICE_WHEEL_URL:-${DEFAULT_XPU_DEVICE_WHEEL_URL}}"
+DEFAULT_XPU_DEVICE_PLUGIN_SOURCE_URL="https://github.com/opendataio/lmcache_xpu_device_with_native/archive/refs/tags/v0.1.0.tar.gz"
+XPU_DEVICE_PLUGIN_SOURCE_URL="${LMCACHE_XPU_DEVICE_PLUGIN_SOURCE_URL:-${DEFAULT_XPU_DEVICE_PLUGIN_SOURCE_URL}}"
 
 log() {
   echo "[intel-xpu-unit-tests] $*"
@@ -17,10 +17,52 @@ fail() {
   exit 1
 }
 
-install_external_xpu_device_plugin() {
-  log "installing external XPU device wheel"
-  log "wheel url: ${XPU_DEVICE_WHEEL_URL}"
-  uv pip install "${XPU_DEVICE_WHEEL_URL}"
+assert_in_tree_xpu_removed() {
+  [ ! -d "${REPO_ROOT}/lmcache/v1/platform/xpu" ] || fail "in-tree lmcache/v1/platform/xpu is still present"
+  [ ! -d "${REPO_ROOT}/csrc/sycl" ] || fail "in-tree csrc/sycl is still present"
+  [ ! -f "${REPO_ROOT}/setup_extensions/build_profiles/sycl.py" ] || fail "in-tree setup_extensions/build_profiles/sycl.py is still present"
+}
+
+build_and_install_external_xpu_device_plugin() {
+  local plugin_build_dir
+  local plugin_source_dir
+  local wheel_path
+
+  plugin_build_dir="$(mktemp -d)"
+
+  log "downloading external native XPU device plugin source"
+  log "source url: ${XPU_DEVICE_PLUGIN_SOURCE_URL}"
+  plugin_source_dir="$(python - "${XPU_DEVICE_PLUGIN_SOURCE_URL}" "${plugin_build_dir}" <<'PY'
+import pathlib
+import sys
+import tarfile
+import urllib.request
+
+source_url = sys.argv[1]
+workdir = pathlib.Path(sys.argv[2])
+archive = workdir / "plugin.tar.gz"
+
+urllib.request.urlretrieve(source_url, archive)
+with tarfile.open(archive, "r:gz") as tar:
+    tar.extractall(workdir)
+
+dirs = sorted(path for path in workdir.iterdir() if path.is_dir())
+assert len(dirs) == 1, dirs
+print(dirs[0])
+PY
+)"
+
+  log "building external native XPU device wheel"
+  (
+    cd "${plugin_source_dir}"
+    uv pip install build
+    python -m build --wheel --no-isolation
+  )
+
+  wheel_path="$(find "${plugin_source_dir}/dist" -maxdepth 1 -name '*.whl' | head -n 1)"
+  [ -n "${wheel_path}" ] || fail "failed to build external XPU device wheel"
+  log "installing built wheel: ${wheel_path}"
+  uv pip install "${wheel_path}"
 
   python - <<'PY'
 import importlib.metadata
@@ -36,8 +78,10 @@ assert spec.backend_name == "xpu", spec.backend_name
 
 ops = resolve_device_ops("xpu")
 assert ops.device_type == "xpu", ops.device_type
+import lmcache.xpu_ops as xpu_ops
+assert xpu_ops is not None
 
-print("external xpu device plugin resolved successfully")
+print("external native xpu device plugin resolved successfully")
 PY
 }
 
@@ -55,11 +99,12 @@ print("torch.xpu.is_available() = True")
 PY
 
 cd "${REPO_ROOT}"
+assert_in_tree_xpu_removed
 source "${REPO_ROOT}/.buildkite/k3_harness/setup-lmcache-only-env.sh"
 
 log "installing job dependencies"
 uv pip install -r requirements/common.txt -r requirements/test.txt
-install_external_xpu_device_plugin
+build_and_install_external_xpu_device_plugin
 
 discover_xpu_tests() {
   python - <<'PY'
