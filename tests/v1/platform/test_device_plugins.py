@@ -346,7 +346,8 @@ def test_get_device_spec_uses_explicit_backend_with_shared_device_type(
 def test_external_device_participates_in_runtime_detection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A registered external spec is selected by the normal detector."""
+    """An explicit external device type resolves through normal detection."""
+    monkeypatch.setenv("DEVICE_TYPE", "external")
     _set_entry_points(
         monkeypatch,
         [
