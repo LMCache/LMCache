@@ -135,11 +135,22 @@ Install LMCache
                                 --group-add video --security-opt seccomp=unconfined \
                                 --entrypoint bash vllm/vllm-openai-rocm:v0.26.0
 
-                            pip install lmcache --pre --no-deps \
+                            pip install lmcache --pre --no-deps --no-index \
                                 --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/nightly-rocm
 
                         Nightly ROCm wheels are versioned like the CUDA nightlies with the
                         ROCm local segment appended, e.g. ``0.5.4.dev15+rocm7.2``.
+
+                        .. note::
+
+                            ``--no-index`` is required here. ``--find-links`` only *adds* a
+                            source, so without it pip also considers PyPI — and under PEP 440 a
+                            pre-release such as ``0.5.4rc4`` outranks ``0.5.4.dev15+rocm7.2``, so
+                            ``--pre`` would install the CUDA wheel instead. The stable tab does
+                            not need it because ``lmcache==${VERSION}+rocm7.2`` is an exact pin
+                            that only the ROCm release can satisfy. ``--no-deps`` is what makes
+                            ``--no-index`` safe here: torch and the ROCm runtime come from the
+                            container, so nothing else needs resolving.
 
             .. tab-item:: From Source
 
