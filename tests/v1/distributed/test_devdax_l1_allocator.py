@@ -7,11 +7,13 @@ manager wiring while keeping CI portable.
 """
 
 # Standard
+from pathlib import Path
 from typing import Any, cast
 import argparse
 import gc
 import json
 import os
+import stat
 
 # Third Party
 import pytest
@@ -40,6 +42,7 @@ from lmcache.v1.distributed.memory_manager.devdax_l1_memory_manager import (
 from lmcache.v1.memory_allocators.devdax_memory_allocator import (
     DevDaxArenaState,
     DevDaxMemoryAllocator,
+    DevDaxRemoveMode,
 )
 from lmcache.v1.multiprocess.config import add_mp_server_args
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
@@ -53,6 +56,19 @@ def _make_mmap_file(
     with open(path, "wb") as f:
         f.truncate(size)
     return str(path)
+
+
+def _open_fd_count(path: str) -> int:
+    """Count this process's open descriptors that resolve to ``path``."""
+    target = os.path.realpath(path)
+    count = 0
+    for name in os.listdir("/proc/self/fd"):
+        try:
+            if os.readlink(f"/proc/self/fd/{name}") == target:
+                count += 1
+        except OSError:
+            continue
+    return count
 
 
 def _key(seed: int = 0) -> ObjectKey:
@@ -235,6 +251,431 @@ def test_devdax_allocator_uses_mmap_backing_file(tmp_path):
 
     with open(path, "rb") as f:
         assert f.read(4096) == bytes([0x5A]) * 4096
+
+
+_FAKE_DAX_MAJOR = 511
+
+
+def _fake_char_devices(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    devices: dict[str, dict[str, Any]],
+) -> list[str]:
+    """Make descriptors opened on ``devices`` impersonate character devices.
+
+    ``devices`` maps a mapping-file path to ``{"minor": int, "subsystem":
+    str | None, "size": int | None, "align": int | None, "mode": int,
+    "expose": str}``. ``mode`` defaults to ``stat.S_IFCHR``. ``expose``
+    selects how the fake sysfs lists the device: ``"char"`` (default) creates
+    a ``char/<major>:<minor>`` symlink like the kernel's ``/sys/dev/char``,
+    ``"bus"`` creates only a ``bus/dax/<name>`` entry with a ``dev``
+    attribute like ``/sys/bus/dax/devices``, ``"both"`` creates both, and
+    ``"none"`` (or ``subsystem=None``) exposes nothing. Two paths given the
+    same minor impersonate two nodes of one device.
+
+    Returns:
+        Canonical paths whose opened descriptors were reported as fake
+        character devices.
+    """
+    sysfs_root = tmp_path / "sysfs"
+    char_root = sysfs_root / "char"
+    char_root.mkdir(parents=True, exist_ok=True)
+    dax_bus_root = sysfs_root / "bus" / "dax"
+    dax_bus_root.mkdir(parents=True, exist_ok=True)
+    node_by_path: dict[str, tuple[int, int]] = {}
+    for device_path, spec in devices.items():
+        rdev = os.makedev(_FAKE_DAX_MAJOR, spec["minor"])
+        canonical_path = os.path.realpath(device_path)
+        node = (
+            rdev,
+            spec.get("mode", stat.S_IFCHR),
+        )
+        node_by_path[canonical_path] = node
+        subsystem = spec.get("subsystem")
+        expose = spec.get("expose", "char")
+        char_link = char_root / f"{os.major(rdev)}:{os.minor(rdev)}"
+        if subsystem is None or expose == "none" or char_link.exists():
+            continue
+        name = os.path.basename(device_path)
+        device_dir = sysfs_root / "devices" / name
+        device_dir.mkdir(parents=True)
+        bus_dir = sysfs_root / "bus" / subsystem
+        bus_dir.mkdir(parents=True, exist_ok=True)
+        (device_dir / "subsystem").symlink_to(bus_dir)
+        (device_dir / "dev").write_text(f"{os.major(rdev)}:{os.minor(rdev)}")
+        for attribute in ("size", "align"):
+            if spec.get(attribute) is not None:
+                (device_dir / attribute).write_text(str(spec[attribute]))
+        if expose in ("bus", "both"):
+            (dax_bus_root / name).symlink_to(device_dir)
+        if expose in ("char", "both"):
+            char_link.symlink_to(device_dir)
+    monkeypatch.setattr(
+        "lmcache.v1.memory_allocators.devdax_memory_allocator._SYSFS_CHAR_ROOT",
+        str(char_root),
+    )
+    monkeypatch.setattr(
+        "lmcache.v1.memory_allocators.devdax_memory_allocator._DAX_BUS_ROOT",
+        str(dax_bus_root),
+    )
+    real_stat = os.stat
+    real_fstat = os.fstat
+    fake_fstat_calls: list[str] = []
+
+    def fake_device_status(
+        path_status: os.stat_result,
+        node: tuple[int, int],
+    ) -> os.stat_result:
+        rdev, mode = node
+        fields = list(path_status)[:10]
+        fields[stat.ST_MODE] = mode | 0o600
+        fields[stat.ST_SIZE] = 0
+        return os.stat_result(fields, {"st_rdev": rdev})
+
+    def character_device_stat(
+        path: int | str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        *,
+        dir_fd: int | None = None,
+        follow_symlinks: bool = True,
+    ) -> os.stat_result:
+        path_status = real_stat(
+            path,
+            dir_fd=dir_fd,
+            follow_symlinks=follow_symlinks,
+        )
+        if isinstance(path, int) or dir_fd is not None or not follow_symlinks:
+            return path_status
+        canonical_path = os.path.realpath(path)
+        if isinstance(canonical_path, bytes):
+            canonical_path = os.fsdecode(canonical_path)
+        node = node_by_path.get(canonical_path)
+        if node is None:
+            return path_status
+        return fake_device_status(path_status, node)
+
+    def character_device_fstat(fd: int) -> os.stat_result:
+        # Only descriptors opened on the listed mapping files impersonate a
+        # DAX character device; every other caller keeps the real result.
+        fd_status = real_fstat(fd)
+        try:
+            target = os.readlink(f"/proc/self/fd/{fd}")
+        except OSError:
+            return fd_status
+        node = node_by_path.get(target)
+        if node is None:
+            return fd_status
+        fake_fstat_calls.append(target)
+        return fake_device_status(fd_status, node)
+
+    monkeypatch.setattr(
+        "lmcache.v1.memory_allocators.devdax_memory_allocator.os.stat",
+        character_device_stat,
+    )
+    monkeypatch.setattr(
+        "lmcache.v1.memory_allocators.devdax_memory_allocator.os.fstat",
+        character_device_fstat,
+    )
+    return fake_fstat_calls
+
+
+def _single_arena_allocator(primary: str) -> DevDaxMemoryAllocator:
+    return DevDaxMemoryAllocator(size=4096, device_path=primary, align_bytes=4096)
+
+
+def test_character_device_uses_dax_sysfs_capacity_and_alignment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A character device is checked against the DAX sysfs entry found by its
+    device number, not by its path name."""
+    primary = _make_mmap_file(tmp_path, size=8192, name="dax0.0")
+    capacity_limited = _make_mmap_file(tmp_path, size=8192, name="dax0.1")
+    # Named unlike a DAX node on purpose: the sysfs lookup must not depend on
+    # the basename.
+    strictly_aligned = _make_mmap_file(tmp_path, size=8192, name="by-id-link")
+    _fake_char_devices(
+        tmp_path,
+        monkeypatch,
+        {
+            primary: {"minor": 0, "subsystem": "dax", "size": 8192, "align": 4096},
+            capacity_limited: {
+                "minor": 1,
+                "subsystem": "dax",
+                "size": 4096,
+                "align": 4096,
+            },
+            strictly_aligned: {
+                "minor": 2,
+                "subsystem": "dax",
+                "size": 8192,
+                "align": 8192,
+            },
+        },
+    )
+
+    allocator = _single_arena_allocator(primary)
+    try:
+        with pytest.raises(RuntimeError, match="exceeds.*capacity"):
+            allocator.add_device(capacity_limited, 8192)
+        with pytest.raises(ValueError, match="multiple of the device alignment"):
+            allocator.add_device(strictly_aligned, 4096)
+        # Both rejections happen before mmap: the pool is untouched and the
+        # descriptor opened for validation is released.
+        assert [s.device_path for s in allocator.arena_statuses()] == [primary]
+        assert _open_fd_count(capacity_limited) == 0
+        assert _open_fd_count(strictly_aligned) == 0
+    finally:
+        allocator.close()
+
+
+def test_character_device_alias_uses_device_number_for_runtime_lookup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A second node with the same device number resolves to one arena."""
+    primary = _make_mmap_file(tmp_path, size=8192, name="dax0.0")
+    extra = _make_mmap_file(tmp_path, size=8192, name="dax0.1")
+    alias = _make_mmap_file(tmp_path, size=8192, name="char-511-1")
+    fake_fstat_calls = _fake_char_devices(
+        tmp_path,
+        monkeypatch,
+        {
+            primary: {"minor": 0, "subsystem": "dax", "size": 8192, "align": 4096},
+            extra: {"minor": 1, "subsystem": "dax", "size": 8192, "align": 4096},
+            alias: {"minor": 1, "subsystem": "dax", "size": 8192, "align": 4096},
+        },
+    )
+
+    allocator = _single_arena_allocator(primary)
+    try:
+        allocator.add_device(extra, 4096)
+        assert allocator.arena_status(alias).device_path == extra
+
+        calls_before = len(fake_fstat_calls)
+        with pytest.raises(ValueError, match="already mapped"):
+            allocator.add_device(alias, 4096)
+        assert len(fake_fstat_calls) == calls_before
+
+        removed = allocator.remove_device(alias, DevDaxRemoveMode.DRAIN)
+        assert removed.device_path == extra
+        assert removed.state == DevDaxArenaState.REMOVED
+        assert [status.device_path for status in allocator.arena_statuses()] == [
+            primary
+        ]
+    finally:
+        allocator.close()
+
+
+def test_non_dax_character_device_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A character device outside the dax subsystem (e.g. /dev/zero) fails."""
+    primary = _make_mmap_file(tmp_path, size=8192, name="dax0.0")
+    zero_like = _make_mmap_file(tmp_path, size=8192, name="zero")
+    _fake_char_devices(
+        tmp_path,
+        monkeypatch,
+        {
+            primary: {"minor": 0, "subsystem": "dax", "size": 8192, "align": 4096},
+            zero_like: {"minor": 5, "subsystem": "mem"},
+        },
+    )
+
+    allocator = _single_arena_allocator(primary)
+    try:
+        with pytest.raises(ValueError, match="not a Device-DAX device"):
+            allocator.add_device(zero_like, 4096)
+        assert [s.device_path for s in allocator.arena_statuses()] == [primary]
+        assert _open_fd_count(zero_like) == 0
+    finally:
+        allocator.close()
+
+
+def test_block_device_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only character devices and regular files can back an arena."""
+    primary = _make_mmap_file(tmp_path, size=8192, name="dax0.0")
+    disk = _make_mmap_file(tmp_path, size=8192, name="sdb")
+    _fake_char_devices(
+        tmp_path,
+        monkeypatch,
+        {
+            primary: {"minor": 0, "subsystem": "dax", "size": 8192, "align": 4096},
+            disk: {"minor": 16, "subsystem": None, "mode": stat.S_IFBLK},
+        },
+    )
+
+    allocator = _single_arena_allocator(primary)
+    try:
+        with pytest.raises(ValueError, match="neither a character device"):
+            allocator.add_device(disk, 4096)
+        assert [s.device_path for s in allocator.arena_statuses()] == [primary]
+        assert _open_fd_count(disk) == 0
+    finally:
+        allocator.close()
+
+
+def test_character_device_without_sysfs_entry_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A character device that sysfs does not expose cannot be verified."""
+    primary = _make_mmap_file(tmp_path, size=8192, name="dax0.0")
+    unlisted = _make_mmap_file(tmp_path, size=8192, name="dax9.9")
+    _fake_char_devices(
+        tmp_path,
+        monkeypatch,
+        {
+            primary: {"minor": 0, "subsystem": "dax", "size": 8192, "align": 4096},
+            unlisted: {"minor": 9, "subsystem": "dax", "expose": "none"},
+        },
+    )
+
+    allocator = _single_arena_allocator(primary)
+    try:
+        with pytest.raises(ValueError, match="cannot verify"):
+            allocator.add_device(unlisted, 4096)
+        assert [s.device_path for s in allocator.arena_statuses()] == [primary]
+        assert _open_fd_count(unlisted) == 0
+    finally:
+        allocator.close()
+
+
+def test_character_device_resolves_through_dax_bus_listing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With /sys/dev/char masked, the dax bus listing identifies the device."""
+    primary = _make_mmap_file(tmp_path, size=8192, name="dax0.0")
+    bus_only = _make_mmap_file(tmp_path, size=8192, name="dax0.3")
+    _fake_char_devices(
+        tmp_path,
+        monkeypatch,
+        {
+            primary: {"minor": 0, "subsystem": "dax", "size": 8192, "align": 4096},
+            bus_only: {
+                "minor": 3,
+                "subsystem": "dax",
+                "size": 4096,
+                "align": 4096,
+                "expose": "bus",
+            },
+        },
+    )
+
+    allocator = _single_arena_allocator(primary)
+    try:
+        # The size attribute is read through the bus entry: 8192 > 4096.
+        with pytest.raises(RuntimeError, match="exceeds.*capacity"):
+            allocator.add_device(bus_only, 8192)
+        added = allocator.add_device(bus_only, 4096)
+        assert added.device_path == bus_only
+        assert added.state == DevDaxArenaState.ACTIVE
+    finally:
+        allocator.close()
+
+
+def test_character_device_with_unreadable_dax_attributes_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dax device whose align or size cannot be read is refused."""
+    primary = _make_mmap_file(tmp_path, size=8192, name="dax0.0")
+    opaque = _make_mmap_file(tmp_path, size=8192, name="dax0.4")
+    _fake_char_devices(
+        tmp_path,
+        monkeypatch,
+        {
+            primary: {"minor": 0, "subsystem": "dax", "size": 8192, "align": 4096},
+            opaque: {"minor": 4, "subsystem": "dax"},
+        },
+    )
+
+    allocator = _single_arena_allocator(primary)
+    try:
+        with pytest.raises(ValueError, match="unreadable or zero"):
+            allocator.add_device(opaque, 4096)
+        assert [s.device_path for s in allocator.arena_statuses()] == [primary]
+        assert _open_fd_count(opaque) == 0
+    finally:
+        allocator.close()
+
+
+@pytest.mark.parametrize(
+    ("zero_attribute", "expected_message"),
+    [("align", "align=0, size=8192"), ("size", "align=4096, size=0")],
+)
+def test_character_device_with_zero_dax_attribute_is_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    zero_attribute: str,
+    expected_message: str,
+) -> None:
+    """Readable but zero DAX alignment or capacity is unverifiable."""
+    primary = _make_mmap_file(tmp_path, size=8192, name="dax0.0")
+    invalid = _make_mmap_file(tmp_path, size=8192, name="dax0.7")
+    invalid_spec = {
+        "minor": 7,
+        "subsystem": "dax",
+        "size": 8192,
+        "align": 4096,
+    }
+    invalid_spec[zero_attribute] = 0
+    _fake_char_devices(
+        tmp_path,
+        monkeypatch,
+        {
+            primary: {"minor": 0, "subsystem": "dax", "size": 8192, "align": 4096},
+            invalid: invalid_spec,
+        },
+    )
+
+    allocator = _single_arena_allocator(primary)
+    try:
+        with pytest.raises(ValueError, match=expected_message):
+            allocator.add_device(invalid, 4096)
+        assert [status.device_path for status in allocator.arena_statuses()] == [
+            primary
+        ]
+        assert _open_fd_count(invalid) == 0
+    finally:
+        allocator.close()
+
+
+def test_regular_file_never_consults_sysfs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A regular file named like a DAX node ignores a conflicting sysfs entry.
+
+    Guards against reintroducing basename-keyed sysfs lookups: the base code
+    already gated sysfs on the character-device type, so this passes there too.
+    """
+    primary = _make_mmap_file(tmp_path, size=4096, name="primary.bin")
+    lookalike = _make_mmap_file(tmp_path, size=8192, name="dax0.0")
+    sysfs_root = tmp_path / "sysfs"
+    device_dir = sysfs_root / "devices" / "dax0.0"
+    device_dir.mkdir(parents=True)
+    # Either attribute would reject an 8192-byte mapping if it were consulted.
+    (device_dir / "size").write_text("4096")
+    (device_dir / "align").write_text("8192")
+    (device_dir / "dev").write_text(f"{_FAKE_DAX_MAJOR}:0")
+    dax_bus_root = sysfs_root / "bus" / "dax"
+    dax_bus_root.mkdir(parents=True)
+    (dax_bus_root / "dax0.0").symlink_to(device_dir)
+    char_root = sysfs_root / "char"
+    char_root.mkdir()
+    (char_root / f"{_FAKE_DAX_MAJOR}:0").symlink_to(device_dir)
+    monkeypatch.setattr(
+        "lmcache.v1.memory_allocators.devdax_memory_allocator._SYSFS_CHAR_ROOT",
+        str(char_root),
+    )
+    monkeypatch.setattr(
+        "lmcache.v1.memory_allocators.devdax_memory_allocator._DAX_BUS_ROOT",
+        str(dax_bus_root),
+    )
+
+    allocator = _single_arena_allocator(primary)
+    try:
+        added = allocator.add_device(lookalike, 8192)
+        assert added.size_in_bytes == 8192
+    finally:
+        allocator.close()
 
 
 def test_devdax_allocator_registers_cuda_host_mapping(tmp_path, monkeypatch):

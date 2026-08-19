@@ -95,10 +95,14 @@ The manager and allocator expose the same contract:
 
 Add:
 
-1. Validate the path is non-empty, the size is positive, the allocator is not
-   closed, and the path is not already mapped.
-2. Map the device: `open(O_RDWR)`, capacity check via `fstat.st_size`,
-   `mmap(MAP_SHARED, RW)`; build a `TensorMemoryAllocator`; best-effort pin.
+1. Canonicalize the path and reject if the allocator is closed or the current
+   node identity matches an already-mapped arena.
+2. Map the device -- the mapping attempt itself validates the request
+   (non-empty path, positive size, Device-DAX type, and the device's advertised
+   sysfs alignment) and acquires the resources: a single `open(O_RDWR)` whose
+   fd backs the identity and capacity checks and the `mmap(MAP_SHARED, RW)`.
+   The opened identity is checked again before the arena is built; then build a
+   `TensorMemoryAllocator` and best-effort pin it.
 3. Append the arena as `active` and non-primary. It is immediately available as
    overflow. Existing allocations are untouched.
 
@@ -126,7 +130,9 @@ supported here; see Current Limits.
 
 Configure the initial Device-DAX device when the server starts, either with the
 MP server CLI flag `--l1-devdax-path /dev/dax0.0` (the mapped size follows the
-L1 size settings) or programmatically:
+L1 size settings) or programmatically. The Device-DAX namespace must already
+exist and expose the requested capacity; namespace provisioning remains the
+operator's responsibility.
 
 ```python
 from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
@@ -167,14 +173,17 @@ A `DRAINING` device accepts no new allocations, keeps serving reads for the KV
 entries already on it, and unmaps automatically once the last of them is freed
 (deleted or evicted). Poll `get_arena_statuses()` until the path disappears
 from the list; `active_allocations` on the draining entry shows how many
-allocations still gate the unmap. Calling `remove_device` again on a draining
-path is safe and returns the current status.
+allocations still gate the unmap. Calling `remove_device` again while the path
+is still draining is safe and returns the current status; once the arena has
+been unmapped the path is no longer known and a repeat is rejected.
 
-`add_device` rejects paths that are already mapped, and `remove_device`
-rejects the primary arena (the initial device in pure Device-DAX mode); both
-raise `ValueError`. The device must already exist and be readable and
-writable; runtime reconfigure does not provision DAX namespaces (see Current
-Limits).
+`add_device` rejects devices that are already mapped under another spelling,
+and `remove_device` rejects the primary arena (the initial device in pure
+Device-DAX mode). Lookups accept another path to the same device and statuses
+report the canonical path recorded when the arena was mapped. These errors
+raise `ValueError`. The Device-DAX path must already exist, be readable and
+writable, and expose enough capacity. Runtime reconfigure does not provision
+or resize DAX namespaces (see Current Limits).
 
 ## Thread Safety
 
@@ -193,6 +202,23 @@ the arena buffer, and the ctypes array) is released before `mmap.close()`,
 because CPython refuses to close a buffer that still has exported pointers.
 `mmap` dups the underlying file descriptor, so unmap releases both the opened fd
 and the mmap's dup.
+
+## Device Identity
+
+The allocator identifies what it opened rather than comparing path strings.
+It records `st_rdev` for a character device and `(st_dev, st_ino)` for a
+regular file used as test backing; other file types are rejected. Device-DAX
+nodes that expose the same `major:minor` therefore cannot be mapped twice.
+Paths are canonicalized for stable status responses, while add, remove, and
+status lookup use the device identity.
+
+Device-DAX character devices normally report `st_size == 0`, so their type,
+capacity, and alignment are verified through sysfs by device number rather
+than by path basename. `/sys/dev/char/<major>:<minor>` is tried first; if it is
+not visible, `/sys/bus/dax/devices` is searched for a matching `dev` attribute.
+The entry must be on the `dax` subsystem and expose readable, positive `size`
+and `align` values. Verification fails closed when sysfs does not expose enough
+information. Regular mmap test files use `fstat` and never consult sysfs.
 
 CUDA host-memory registration (pinning) is per-arena and best-effort; a pin
 failure is logged and the arena falls back to pageable host copies.
@@ -235,8 +261,8 @@ real `/dev/dax` devices via `LMCACHE_TEST_DEVDAX_L1_PATHS`.
   live requests read and write, so relocation requires hooking L1 eviction.
 - The primary arena in pure Device-DAX mode cannot be removed at runtime.
 - Existing arenas cannot be resized; the pool grows and shrinks by whole arenas
-  (add / remove only).
-- Runtime reconfigure maps and unmaps already-provisioned devices; it does not
-  perform kernel-level CXL or DAX reconfiguration.
+  (`add_device` / `remove_device`).
+- Runtime reconfigure maps and unmaps already-provisioned Device-DAX devices;
+  it does not perform kernel-level CXL/DAX namespace reconfiguration.
 - No HTTP control surface yet; the reconfigure methods are the programmatic
   entry point.

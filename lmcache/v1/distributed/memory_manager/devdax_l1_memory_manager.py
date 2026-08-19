@@ -116,9 +116,10 @@ class DevDaxL1MemoryManager(L1MemoryManager):
 
         Raises:
             ValueError: If ``device_path`` is empty, ``size_in_bytes`` is not
-                positive, or the device is already mapped.
-            RuntimeError: If the underlying allocator is closed or the device
-                capacity is smaller than ``size_in_bytes``.
+                positive, the device is already mapped, or the mapping violates
+                the device's advertised alignment.
+            RuntimeError: If the allocator is closed or the device capacity is
+                smaller than ``size_in_bytes``.
             OSError: If the device cannot be opened or mapped.
         """
         allocator = cast(DevDaxMemoryAllocator, self._allocator)

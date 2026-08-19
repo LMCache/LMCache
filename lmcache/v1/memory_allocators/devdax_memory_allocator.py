@@ -7,6 +7,7 @@ from typing import Any, List, Optional, Union
 import ctypes
 import mmap
 import os
+import stat
 import threading
 
 # Third Party
@@ -26,6 +27,155 @@ from lmcache.v1.memory_management import (
     logger,
 )
 import lmcache.v1.memory_management as memory_management
+
+# sysfs exposes every character device under ``/sys/dev/char/<major>:<minor>``
+# as a symlink to its device directory. Resolving a device through its number
+# rather than its path name keeps aliases (``/dev//dax1.0``, symlinks,
+# ``/dev/char/<major>:<minor>``) from bypassing the Device-DAX checks.
+_SYSFS_CHAR_ROOT = "/sys/dev/char"
+_DAX_BUS_ROOT = "/sys/bus/dax/devices"
+_DAX_SUBSYSTEM = "dax"
+
+
+@dataclass(frozen=True)
+class _DeviceIdentity:
+    """Identity of an opened backing object, independent of the path used.
+
+    Character devices are identified by their device number: every node or
+    symlink with the same ``major:minor`` is the same device. Other files
+    (regular files used as test backing) are identified by ``(st_dev,
+    st_ino)``.
+    """
+
+    is_char_device: bool
+    device_number: int
+    inode: int
+
+    @classmethod
+    def from_stat(cls, fd_status: os.stat_result) -> "_DeviceIdentity":
+        if stat.S_ISCHR(fd_status.st_mode):
+            return cls(True, fd_status.st_rdev, 0)
+        return cls(False, fd_status.st_dev, fd_status.st_ino)
+
+
+def _sysfs_char_device_dir(st_rdev: int) -> str | None:
+    """Return the sysfs device directory of a character device.
+
+    Args:
+        st_rdev: The device number reported by ``fstat`` on the opened node.
+
+    Returns:
+        The resolved device directory, or ``None`` when sysfs does not expose
+        the device (sysfs not mounted, or masked in a container).
+    """
+    link = os.path.join(_SYSFS_CHAR_ROOT, f"{os.major(st_rdev)}:{os.minor(st_rdev)}")
+    try:
+        if not os.path.isdir(link):
+            return None
+        return os.path.realpath(link)
+    except OSError:
+        return None
+
+
+def _sysfs_subsystem(device_dir: str) -> str | None:
+    """Return the subsystem (bus) name a sysfs device directory belongs to."""
+    try:
+        return os.path.basename(os.readlink(os.path.join(device_dir, "subsystem")))
+    except OSError:
+        return None
+
+
+def _dax_bus_device_dir(major: int, minor: int) -> str | None:
+    """Find a device on the dax bus listing by its device number.
+
+    Used when ``/sys/dev/char`` is not visible but ``/sys/bus/dax/devices``
+    is. Every entry's ``dev`` attribute holds ``major:minor``.
+
+    Args:
+        major: Device major number.
+        minor: Device minor number.
+
+    Returns:
+        The resolved device directory, or ``None`` when no entry matches.
+    """
+    wanted = f"{major}:{minor}"
+    try:
+        names = os.listdir(_DAX_BUS_ROOT)
+    except OSError:
+        return None
+    for name in names:
+        entry = os.path.join(_DAX_BUS_ROOT, name)
+        try:
+            with open(os.path.join(entry, "dev")) as f:
+                if f.read().strip() == wanted:
+                    return os.path.realpath(entry)
+        except OSError:
+            continue
+    return None
+
+
+def _resolve_dax_device_dir(device_path: str, st_rdev: int) -> str:
+    """Return the sysfs directory of the Device-DAX device behind ``st_rdev``.
+
+    ``/sys/dev/char/<major>:<minor>`` is tried first and must belong to the
+    ``dax`` subsystem; when that tree is not visible, or its ``subsystem``
+    link cannot be read, the dax bus listing is searched by device number. A
+    device that sysfs does not expose cannot be verified and is refused.
+
+    Args:
+        device_path: Path the caller used, for error messages.
+        st_rdev: Device number of the opened character device.
+
+    Returns:
+        The device's sysfs directory.
+
+    Raises:
+        ValueError: If the device is on another subsystem or sysfs does not
+            expose it.
+    """
+    major, minor = os.major(st_rdev), os.minor(st_rdev)
+    device_dir = _sysfs_char_device_dir(st_rdev)
+    if device_dir is not None:
+        subsystem = _sysfs_subsystem(device_dir)
+        if subsystem == _DAX_SUBSYSTEM:
+            return device_dir
+        if subsystem is not None:
+            raise ValueError(
+                f"{device_path} is not a Device-DAX device "
+                f"(sysfs subsystem: {subsystem})"
+            )
+    # No char entry, or its subsystem link is unreadable: the dax bus listing
+    # can still identify the device positively.
+    bus_dir = _dax_bus_device_dir(major, minor)
+    if bus_dir is not None:
+        return bus_dir
+    raise ValueError(
+        f"cannot verify {device_path} as a Device-DAX device: sysfs exposes "
+        f"neither a readable {_SYSFS_CHAR_ROOT}/{major}:{minor} subsystem nor "
+        f"a {_DAX_BUS_ROOT} entry with that device number (mount sysfs in "
+        "the container)"
+    )
+
+
+def _sysfs_attr_int(device_dir: str, attribute: str) -> int | None:
+    """Read an integer sysfs attribute.
+
+    Args:
+        device_dir: The device's sysfs directory.
+        attribute: Attribute file name, e.g. ``size`` or ``align``.
+
+    Returns:
+        The attribute value, or ``None`` when it is missing or unreadable.
+    """
+    try:
+        with open(os.path.join(device_dir, attribute)) as f:
+            return int(f.read().strip(), 0)
+    except (OSError, ValueError):
+        return None
+
+
+class DevDaxNotMappedError(ValueError):
+    """No Device-DAX arena is mapped from the requested device path."""
 
 
 class DevDaxArenaState(Enum):
@@ -60,7 +210,8 @@ class DevDaxArenaStatus:
     """Immutable snapshot of one Device-DAX arena's runtime state.
 
     Attributes:
-        device_path: Path of the Device-DAX device backing this arena.
+        device_path: Canonical path (symlinks resolved) of the device backing
+            this arena.
         size_in_bytes: Mapped size of the arena in bytes.
         used_bytes: Bytes currently handed out to live allocations.
         free_bytes: Bytes still available for allocation.
@@ -88,7 +239,9 @@ class _DevDaxArena:
     :class:`TensorMemoryAllocator`. Allocations carry the owning
     :class:`DevDaxMemoryAllocator` as their parent; frees are routed back to the
     correct arena by locating the arena whose ``[base_ptr, base_ptr + size)``
-    range contains the object's data pointer.
+    range contains the object's data pointer. ``identity`` records which
+    backing device the mmap was opened on, so a second mapping of the same
+    device under another path is refused.
     """
 
     device_path: str
@@ -99,6 +252,7 @@ class _DevDaxArena:
     buffer: torch.Tensor
     allocator: TensorMemoryAllocator
     is_primary: bool
+    identity: _DeviceIdentity
     state: DevDaxArenaState = DevDaxArenaState.ACTIVE
     pinned_ptr: int | None = None
     # Captured at map time so ``contains`` stays correct after a deferred
@@ -193,7 +347,9 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
         # Primary (non-removable) only in pure Device-DAX mode. The constructor
         # runs single-threaded, so no lock is needed here.
         self._map_and_append_arena(
-            device_path, size, is_primary=self.local_allocator is None
+            os.path.realpath(device_path),
+            size,
+            is_primary=self.local_allocator is None,
         )
 
     @property
@@ -235,13 +391,55 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
         self,
         device_path: str,
         size: int,
-    ) -> tuple[int, mmap.mmap, Any, torch.Tensor]:
+    ) -> tuple[int, mmap.mmap, Any, torch.Tensor, _DeviceIdentity]:
+        """Validate and map one Device-DAX arena.
+
+        Character devices are validated against DAX sysfs metadata. Regular
+        files are supported as test backings.
+
+        Args:
+            device_path: Path to the Device-DAX device.
+            size: Number of bytes to map.
+
+        Returns:
+            The mapping resources and identity of the opened device.
+
+        Raises:
+            ValueError: If the arguments or device metadata are invalid.
+            RuntimeError: If the requested size exceeds the device capacity.
+            OSError: If the device cannot be opened or mapped read-write.
+        """
+        if not device_path:
+            raise ValueError("device_path must be a non-empty string")
+        if size <= 0:
+            raise ValueError("size_in_bytes must be > 0")
         fd: int | None = None
         mmap_obj: mmap.mmap | None = None
         try:
             fd = os.open(device_path, os.O_RDWR)
-            capacity = os.fstat(fd).st_size
-            if capacity > 0 and size > capacity:
+            fd_status = os.fstat(fd)
+            identity = _DeviceIdentity.from_stat(fd_status)
+            if not identity.is_char_device and not stat.S_ISREG(fd_status.st_mode):
+                raise ValueError(
+                    f"{device_path} is neither a character device nor a regular file"
+                )
+            # ``fstat`` reports 0 for character devices: capacity unknown.
+            capacity: int | None = fd_status.st_size or None
+            if identity.is_char_device:
+                device_dir = _resolve_dax_device_dir(device_path, fd_status.st_rdev)
+                align = _sysfs_attr_int(device_dir, "align")
+                capacity = _sysfs_attr_int(device_dir, "size")
+                if not align or not capacity:
+                    raise ValueError(
+                        f"cannot verify {device_path}: DAX sysfs attributes are "
+                        f"unreadable or zero (align={align}, size={capacity})"
+                    )
+                if size % align != 0:
+                    raise ValueError(
+                        f"size ({size}) must be a multiple of the device "
+                        f"alignment ({align})"
+                    )
+            if capacity is not None and size > capacity:
                 raise RuntimeError(
                     f"l1 devdax size ({size} bytes) exceeds "
                     f"{device_path} capacity ({capacity} bytes)"
@@ -256,7 +454,7 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
             array_type = ctypes.c_uint8 * size
             mmap_buffer = array_type.from_buffer(mmap_obj)
             buffer = torch.frombuffer(mmap_buffer, dtype=torch.uint8)
-            return fd, mmap_obj, mmap_buffer, buffer
+            return fd, mmap_obj, mmap_buffer, buffer, identity
         except Exception:
             if mmap_obj is not None:
                 mmap_obj.close()
@@ -286,12 +484,26 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
             The newly mapped arena.
 
         Raises:
+            ValueError: If the mapping arguments are invalid, the device is not
+                a Device-DAX device, the size violates the device's advertised
+                alignment, or the same device is already mapped under another
+                path.
             RuntimeError: If the device capacity is smaller than ``size``.
             OSError: If the device cannot be opened or mapped.
         """
-        fd, mmap_obj, mmap_buffer, buffer = self._open_devdax_mapping(device_path, size)
+        fd, mmap_obj, mmap_buffer, buffer, identity = self._open_devdax_mapping(
+            device_path, size
+        )
         arena: _DevDaxArena | None = None
         try:
+            # Authoritative duplicate check: the opened device, not the path
+            # string, decides whether this device is already in the pool.
+            for mapped in self._arenas:
+                if mapped.identity == identity:
+                    raise ValueError(
+                        f"Device-DAX arena {device_path} is already mapped "
+                        f"as {mapped.device_path}"
+                    )
             allocator = TensorMemoryAllocator(buffer, align_bytes=self.align_bytes)
             arena = _DevDaxArena(
                 device_path=device_path,
@@ -302,6 +514,7 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
                 buffer=buffer,
                 allocator=allocator,
                 is_primary=is_primary,
+                identity=identity,
             )
             self._register_arena_pin(arena)
         except Exception:
@@ -361,15 +574,45 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
         ]
 
     def _find_arena_locked(self, device_path: str) -> _DevDaxArena:
-        """Return the arena mapped at ``device_path``. Caller holds the lock.
+        """Return the arena backed by the device at ``device_path``.
+
+        The node's current identity decides: any alias of a mapped device
+        resolves to its arena, and a different device that now sits at a
+        mapped path is not found. The canonical path recorded at map time is
+        consulted only when ``stat`` reports that the node is missing. A
+        spelling the OS cannot interpret (for example one with an embedded NUL
+        byte) names nothing and is a lookup miss. The caller holds the lock.
 
         Raises:
-            ValueError: If no arena is mapped at ``device_path``.
+            DevDaxNotMappedError: If no arena is mapped at ``device_path``.
         """
-        for arena in self._arenas:
-            if arena.device_path == device_path:
-                return arena
-        raise ValueError(f"no Device-DAX arena mapped at {device_path}")
+        try:
+            path_status = os.stat(device_path)
+        except ValueError:
+            # ``os.stat`` raises ValueError, not OSError, for a path the OS
+            # cannot interpret (embedded NUL byte): nothing can be mapped
+            # there, so report a miss rather than let the error escape.
+            raise DevDaxNotMappedError(
+                f"no Device-DAX arena mapped at {device_path!r}"
+            ) from None
+        except FileNotFoundError:
+            identity = None
+        except OSError:
+            raise DevDaxNotMappedError(
+                f"no Device-DAX arena mapped at {device_path!r}"
+            ) from None
+        else:
+            identity = _DeviceIdentity.from_stat(path_status)
+        if identity is not None:
+            for arena in self._arenas:
+                if arena.identity == identity:
+                    return arena
+        else:
+            canonical = os.path.realpath(device_path)
+            for arena in self._arenas:
+                if arena.device_path == canonical:
+                    return arena
+        raise DevDaxNotMappedError(f"no Device-DAX arena mapped at {device_path}")
 
     def _arena_for_obj_locked(self, memory_obj: MemoryObj) -> _DevDaxArena:
         """Return the arena that owns ``memory_obj``. Caller holds the lock.
@@ -713,7 +956,8 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
 
         Args:
             device_path: Path to a readable and writable Device-DAX device that
-                is not already mapped by this allocator.
+                is not already mapped by this allocator under any alias. The
+                arena records the canonical path.
             size_in_bytes: Number of bytes to map from the device.
 
         Returns:
@@ -721,24 +965,35 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
 
         Raises:
             ValueError: If ``device_path`` is empty, ``size_in_bytes`` is not
-                positive, or the device is already mapped.
+                positive, the device is already mapped, the character device
+                is not a Device-DAX device, or the mapping violates the
+                device's advertised alignment.
             RuntimeError: If the allocator is closed or the device capacity is
                 smaller than ``size_in_bytes``.
             OSError: If the device cannot be opened or mapped.
         """
         if not device_path:
             raise ValueError("device_path must be a non-empty string")
-        if size_in_bytes <= 0:
-            raise ValueError("size_in_bytes must be > 0")
+        device_path = os.path.realpath(device_path)
         with self.host_mem_lock:
             if self._unregistered:
                 raise RuntimeError(
                     "cannot add a device to a closed DevDaxMemoryAllocator"
                 )
+            # Refuse a duplicate before open + mmap when the node can be
+            # inspected; the opened fd is checked again in
+            # _map_and_append_arena, which is the authoritative check.
+            try:
+                identity: _DeviceIdentity | None = _DeviceIdentity.from_stat(
+                    os.stat(device_path)
+                )
+            except OSError:
+                identity = None
             for arena in self._arenas:
-                if arena.device_path == device_path:
+                if identity is not None and arena.identity == identity:
                     raise ValueError(
-                        f"Device-DAX arena {device_path} is already mapped"
+                        f"Device-DAX arena {device_path} is already mapped "
+                        f"as {arena.device_path}"
                     )
             arena = self._map_and_append_arena(
                 device_path, size_in_bytes, is_primary=False
@@ -757,7 +1012,7 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
         automatically once its last allocation is freed.
 
         Args:
-            device_path: Path of the arena to remove.
+            device_path: Path (or any alias) of the arena to remove.
             mode: Removal strategy. Only :attr:`DevDaxRemoveMode.DRAIN` is
                 supported.
 
@@ -771,6 +1026,8 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
         """
         if mode != DevDaxRemoveMode.DRAIN:
             raise ValueError(f"unsupported Device-DAX L1 remove mode: {mode}")
+        if not device_path:
+            raise DevDaxNotMappedError("no Device-DAX arena mapped at ''")
         with self.host_mem_lock:
             arena = self._find_arena_locked(device_path)
             if arena.is_primary:
@@ -785,6 +1042,27 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
         """Return a status snapshot of every arena currently in the pool."""
         with self.host_mem_lock:
             return [arena.status() for arena in self._arenas]
+
+    def arena_status(self, device_path: str) -> DevDaxArenaStatus:
+        """Return the status of the arena mapped at ``device_path``.
+
+        Any alias of the mapped device (a symlink, another spelling, a hard
+        link, or a second node with the same device number) resolves to the
+        same arena; a different device at a mapped path does not.
+
+        Args:
+            device_path: Path of the arena to look up.
+
+        Returns:
+            The arena's current status.
+
+        Raises:
+            DevDaxNotMappedError: If no arena is mapped at ``device_path``.
+        """
+        if not device_path:
+            raise DevDaxNotMappedError("no Device-DAX arena mapped at ''")
+        with self.host_mem_lock:
+            return self._find_arena_locked(device_path).status()
 
     def memcheck(self) -> bool:
         local_ok = True

@@ -311,7 +311,9 @@ Source: ``lmcache/v1/distributed/config.py``
        backing arena.  When set, disable lazy allocation with
        ``--no-l1-use-lazy`` and leave ``--shm-name`` at its default ``""``
        (SHM transfer disabled) because the L1 bytes live in the DAX
-       mapping.  If a
+       mapping. Device-DAX character devices are verified through sysfs at
+       startup; containers must expose ``/sys/dev/char`` or
+       ``/sys/bus/dax/devices`` (a read-only sysfs mount is sufficient). If a
        DAX L2 adapter with the same ``device_path`` is registered, that
        adapter's ``max_dax_size_gb`` is used as the L1 Device-DAX overflow
        size.
