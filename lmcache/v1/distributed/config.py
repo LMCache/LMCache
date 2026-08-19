@@ -166,13 +166,15 @@ class GdsL1Config:
     When present on :class:`L1ManagerConfig`, the L1 medium becomes an NVMe
     slab accessed via GPUDirect Storage DMA instead of pinned DRAM (mutually
     exclusive with the pinned-DRAM tier in ``memory_config``). cuFile and
-    hipFile use a filesystem slab; uGDS uses a raw device. Carries the slab
-    location, capacity, backend, and DMA mode.
+    hipFile use a filesystem slab; uGDS uses a raw device. Phoenix uses a
+    filesystem slab on any VFS-mounted storage: local NVMe for the DMA fast
+    path, NFS / NVMe-oF mounts with degraded (non-DMA) performance. Carries
+    the slab location, capacity, backend, and DMA mode.
     """
 
     file_location: str
-    """Directory for a cuFile/hipFile slab, or an ``ugds_drv`` character-device
-    path for uGDS."""
+    """Directory for a cuFile/hipFile/phx slab, or an ``ugds_drv``
+    character-device path for uGDS."""
 
     size_in_bytes: int
     """Slab capacity in bytes (from ``--l1-size-gb``). For uGDS, this reserves
@@ -182,10 +184,12 @@ class GdsL1Config:
     use_direct_io: bool = True
     """Use ``O_DIRECT`` for cuFile/hipFile. Ignored by uGDS."""
 
-    backend: Literal["auto", "cufile", "hipfile", "ugds"] = "auto"
-    """GPU storage backend. ``auto`` selects cuFile on CUDA and hipFile on ROCm;
-    ``ugds`` can be used on either platform with a matching ``libugds.so`` and
-    treats ``file_location`` as a character-device path."""
+    backend: Literal["auto", "cufile", "hipfile", "ugds", "phx"] = "auto"
+    """GPU storage backend. ``auto`` selects cuFile on CUDA and hipFile on
+    ROCm; ``ugds`` can be used on either platform with a matching
+    ``libugds.so`` and treats ``file_location`` as a character-device path;
+    ``phx`` uses the Phoenix phxfs DMA path with a filesystem slab and a
+    matching ``libphoenix.so``."""
 
     align_bytes: int = 4096
     """Allocation alignment; cuFile/hipFile and O_DIRECT require 4 KiB."""
@@ -416,16 +420,18 @@ def add_storage_manager_args(
         "GDS L1 tier",
         "Configuration for the GDS L1 tier. Setting --gds-l1-path makes the "
         "L1 medium an NVMe slab accessed via GPUDirect Storage DMA instead of "
-        "pinned DRAM; --l1-size-gb then sizes the slab. cuFile and hipFile use "
-        "a slab file, while uGDS uses a dedicated raw device. Disable "
-        "byte-array L2 adapters when this is on.",
+        "pinned DRAM; --l1-size-gb then sizes the slab. cuFile, hipFile, and "
+        "phx use a slab file (phx takes any VFS path: local NVMe for the DMA "
+        "fast path, NFS/NVMe-oF with degraded performance), while uGDS uses "
+        "a dedicated raw device. Disable byte-array L2 adapters when this "
+        "is on.",
     )
     gds_group.add_argument(
         "--gds-l1-path",
         type=str,
         default=None,
-        help="NVMe directory for cuFile/hipFile, or /dev/ugds_drvX for uGDS. "
-        "Setting this enables GDS L1.",
+        help="NVMe directory for cuFile/hipFile/phx, or /dev/ugds_drvX for "
+        "uGDS. Setting this enables GDS L1.",
     )
     gds_group.add_argument(
         "--gds-l1-use-direct-io",
@@ -436,11 +442,12 @@ def add_storage_manager_args(
     )
     gds_group.add_argument(
         "--gds-l1-backend",
-        choices=("auto", "cufile", "hipfile", "ugds"),
+        choices=("auto", "cufile", "hipfile", "ugds", "phx"),
         default="auto",
         help="GDS implementation. auto selects cuFile on CUDA or hipFile on ROCm; "
         "ugds can be used on either platform with a matching libugds.so and "
-        "treats --gds-l1-path as /dev/ugds_drvX.",
+        "treats --gds-l1-path as /dev/ugds_drvX; phx uses the Phoenix phxfs "
+        "DMA path with a matching libphoenix.so.",
     )
     # L1 Manager Config (TTL settings)
     ttl_group = parser.add_argument_group(
