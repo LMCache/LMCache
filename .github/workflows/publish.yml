@@ -110,15 +110,31 @@ jobs:
         # dev image; reusable workflows do not auto-inherit secrets.
         secrets: inherit
 
-    build-xpu:
+    resolve-xpu-release-runtime:
         needs: changes
+        if: needs.changes.outputs.lmcache == 'true'
+        name: Resolve XPU release runtime
+        runs-on: ubuntu-latest
+        outputs:
+            image: ${{ steps.runtime.outputs.image }}
+        steps:
+            - name: Resolve immutable XPU runtime image
+              id: runtime
+              run: |
+                  set -Eeuo pipefail
+                  IMAGE="vllm/vllm-openai-xpu"
+                  TAG="v0.26.0"
+                  DIGEST="$(docker buildx imagetools inspect "${IMAGE}:${TAG}" --format '{{json .Manifest.Digest}}' | tr -d '\"')"
+                  [[ "${DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+                  echo "image=${IMAGE}@${DIGEST}" >> "$GITHUB_OUTPUT"
+
+    build-xpu:
+        needs: [changes, resolve-xpu-release-runtime]
         if: needs.changes.outputs.lmcache == 'true'
         name: Build XPU
         uses: ./.github/workflows/build_xpu_artifacts.yml
         with:
-            # Stable releases must be reproducible. Nightly builds resolve an
-            # immutable digest in nightly_build.yml instead.
-            xpu_image: vllm/vllm-openai-xpu:v0.26.0
+            xpu_image: ${{ needs.resolve-xpu-release-runtime.outputs.image }}
         # DockerHub creds avoid anonymous rate limits pulling the oneAPI image;
         # reusable workflows do not auto-inherit secrets.
         secrets: inherit

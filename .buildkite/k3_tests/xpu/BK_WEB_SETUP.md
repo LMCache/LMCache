@@ -57,8 +57,9 @@ steps:
 ## What this pipeline does
 
 - Runs the XPU smoke test on the `intel-xpu` queue
-- Uses `vllm/vllm-openai-xpu:nightly`; reproduce a failure by selecting the
-  corresponding immutable `nightly-<vLLM SHA>` image from the upstream hub
+- Uses the most recently Buildkite-validated XPU `image@sha256:...` from
+  `tested_runtimes.jsonl`; before the first successful pin it falls back to
+  `vllm/vllm-openai-xpu:nightly`
 - Installs LMCache from source via `setup-lmcache-only-env.sh`
 - Verifies `torch.xpu.is_available()` inside the job pod
 

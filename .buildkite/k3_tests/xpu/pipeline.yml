@@ -12,7 +12,7 @@ steps:
             # Device tests exercise the current vLLM XPU nightly runtime.
             containers:
               - name: container-0
-                image: vllm/vllm-openai-xpu:nightly
+                image: ${PINNED_XPU_IMAGE}
                 imagePullPolicy: IfNotPresent
                 resources:
                   requests:
