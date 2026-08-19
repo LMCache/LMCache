@@ -31,6 +31,45 @@ VLLM_MAX_MODEL_LEN="${VLLM_MAX_MODEL_LEN:-2048}"
 VLLM_MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-4}"
 LMCACHE_HEALTHCHECK_TIMEOUT="${LMCACHE_HEALTHCHECK_TIMEOUT:-30}"
 VLLM_READY_TIMEOUT="${VLLM_READY_TIMEOUT:-120}"
+# Model selection knobs. Defaults keep the historical opt-125m path so
+# existing callers see no behaviour change; matrix entries for other
+# models (e.g. deepseek-ai/DeepSeek-V2-Lite-Chat) override these.
+#   VLLM_MODEL_ID        HF repo id, passed to `vllm serve`
+#   VLLM_LOAD_FORMAT     empty = default (real weights), "dummy" = random init
+#                        (matches vLLM's --load-format flag)
+#   VLLM_HF_OVERRIDES    optional JSON, passed via --hf-overrides. Used with
+#                        dummy load to shrink layer/expert counts so large
+#                        MoE models (MLA etc.) fit in CI runners.
+#   VLLM_DOWNLOAD_SCRIPT relative filename under .github/scripts/ that
+#                        prepares the model files locally. Defaults to
+#                        the shared GH-Release downloader (which expects
+#                        MODEL_ID/GH_REPO/GH_TAG/SNAPSHOT/TARBALL_NAME/
+#                        TARBALL_TOP_DIR env vars, see the script for
+#                        details). Set to "" to skip the step entirely
+#                        (e.g. when weights are random-initialised and
+#                        no HF metadata is needed).
+#   VLLM_TARBALL_URL     Full https URL to the tar.gz consumed by the
+#                        downloader. Defaults to the opt-125m GitHub
+#                        release, so buildkite / historical callers keep
+#                        working unchanged. GHA overrides this per-model
+#                        via the matrix.
+#   VLLM_TARBALL_CACHE_MARKER  Cache-hit marker filename passed through
+#                              to the downloader. Defaults to
+#                              `pytorch_model.bin`, which is what the
+#                              opt-125m mirror ships.
+#   VLLM_HF_OFFLINE      1 (default) = pin transformers/huggingface_hub
+#                        to the local hub cache populated by
+#                        VLLM_DOWNLOAD_SCRIPT. Set to 0 to allow HF
+#                        network access during model load. Ignored when
+#                        VLLM_DOWNLOAD_SCRIPT is empty (nothing local to
+#                        serve from).
+VLLM_MODEL_ID="${VLLM_MODEL_ID:-facebook/opt-125m}"
+VLLM_LOAD_FORMAT="${VLLM_LOAD_FORMAT:-}"
+VLLM_HF_OVERRIDES="${VLLM_HF_OVERRIDES:-}"
+VLLM_DOWNLOAD_SCRIPT="${VLLM_DOWNLOAD_SCRIPT:-download_gh_release_model.sh}"
+VLLM_TARBALL_URL="${VLLM_TARBALL_URL:-https://github.com/LMCache/opt-125m/releases/download/v1.0/opt-125m.tar.gz}"
+VLLM_TARBALL_CACHE_MARKER="${VLLM_TARBALL_CACHE_MARKER:-pytorch_model.bin}"
+VLLM_HF_OFFLINE="${VLLM_HF_OFFLINE:-1}"
 # Transport mode selection:
 #   LMCACHE_MP_TRANSFER_MODE=engine_driven  -> engine-driven data path,
 #       sub-selected by LMCACHE_SHM_NAME:
@@ -134,6 +173,33 @@ wait_for_endpoint_contains() {
   return 1
 }
 
+# Same as wait_for_endpoint_contains, but aborts as soon as the vLLM
+# process is gone instead of polling a dead PID for the full timeout.
+# vLLM can die during engine construction (bad config, unreachable HF,
+# missing native symbol); without the liveness check those failures show
+# up ${VLLM_READY_TIMEOUT} seconds later as a misleading "did not become
+# ready" message that hides the real traceback.
+wait_for_vllm_ready() {
+  local url="http://localhost:${VLLM_PORT}/v1/models"
+  local response
+
+  for _ in $(seq 1 "${VLLM_READY_TIMEOUT}"); do
+    if response="$(curl -fsS "${url}" 2>/dev/null)"; then
+      if echo "${response}" | grep -q "${VLLM_MODEL_ID}"; then
+        return 0
+      fi
+    fi
+    if ! kill -0 "${VLLM_PID}" 2>/dev/null; then
+      echo "❌ vLLM server (PID=${VLLM_PID}) exited before becoming ready"
+      return 1
+    fi
+    sleep 1
+  done
+
+  echo "❌ vLLM server did not become ready within ${VLLM_READY_TIMEOUT}s"
+  return 1
+}
+
 # Scrape a Prometheus counter value from LMCache /metrics endpoint
 scrape_metric() {
   local metric_name="$1"
@@ -193,13 +259,14 @@ send_completion() {
   # file path and max_tokens via argv so the python snippet itself
   # does not need any shell interpolation inside its string body.
   PROMPT_FILE="${prompt_file}" MAX_TOKENS="${max_tokens}" \
+  VLLM_MODEL_ID="${VLLM_MODEL_ID}" \
     python3 - >"${body_file}" <<'PYEOF'
 import json
 import os
 
 prompt = open(os.environ['PROMPT_FILE']).read()
 print(json.dumps({
-    'model': 'facebook/opt-125m',
+    'model': os.environ['VLLM_MODEL_ID'],
     'prompt': prompt,
     'max_tokens': int(os.environ['MAX_TOKENS']),
     'temperature': 0,
@@ -225,6 +292,20 @@ start_vllm() {
   export VLLM_TARGET_DEVICE=cpu
   export VLLM_CPU_KVCACHE_SPACE="${VLLM_CPU_KVCACHE_SPACE}"
   export LMCACHE_MP_TRANSFER_MODE="${LMCACHE_MP_TRANSFER_MODE}"
+  # Force non-MLA attention backend when the matrix profile asks for it.
+  # vLLM's CPU backend still raises NotImplementedError for MLA today,
+  # so DeepSeek-V2-family models (which normally route through MLA) must
+  # set this on CPU to fall back to standard MHA.
+  #
+  # vLLM parses this env as `bool(int(os.getenv("VLLM_MLA_DISABLE","0")))`,
+  # so any non-integer value (including the empty string GitHub Actions
+  # injects for unset matrix fields) blows up with ValueError. We only
+  # export it when the caller explicitly set "1".
+  if [ "${VLLM_MLA_DISABLE:-0}" = "1" ]; then
+    export VLLM_MLA_DISABLE=1
+  else
+    unset VLLM_MLA_DISABLE
+  fi
   # Pin gloo / vLLM rendezvous to loopback. Otherwise vLLM's
   # network_utils.get_ip() picks a LAN address (e.g. 192.168.x.x on the
   # macOS GHA runner) and gloo's init_process_group sits there for ~16
@@ -255,7 +336,23 @@ print(json.dumps({
         'lmcache.mp.port': int('${LMCACHE_ZMQ_PORT}'),
     },
 }))")"
-  vllm serve facebook/opt-125m \
+  # Optional flags — appended only when set, so unrelated callers stay
+  # bit-identical to the pre-refactor invocation.
+  local -a extra_serve_args=()
+  if [ -n "${VLLM_LOAD_FORMAT}" ]; then
+    extra_serve_args+=(--load-format "${VLLM_LOAD_FORMAT}")
+  fi
+  if [ -n "${VLLM_HF_OVERRIDES}" ]; then
+    extra_serve_args+=(--hf-overrides "${VLLM_HF_OVERRIDES}")
+  fi
+  # trust-remote-code is required for models with custom python modelling
+  # code (e.g. DeepSeek-V2). Harmless for models that don't need it.
+  if [ "${VLLM_TRUST_REMOTE_CODE:-0}" = "1" ]; then
+    extra_serve_args+=(--trust-remote-code)
+  fi
+  echo "vLLM model: ${VLLM_MODEL_ID}"
+  echo "vLLM extra args: ${extra_serve_args[*]:-<none>}"
+  vllm serve "${VLLM_MODEL_ID}" \
     --port "${VLLM_PORT}" \
     --dtype bfloat16 \
     --disable-hybrid-kv-cache-manager \
@@ -266,6 +363,7 @@ print(json.dumps({
     --max-num-seqs "${VLLM_MAX_NUM_SEQS}" \
     --kv-transfer-config "${kv_transfer_config}" \
     --enforce-eager \
+    ${extra_serve_args[@]+"${extra_serve_args[@]}"} \
     >"${VLLM_LOG}" 2>&1 &
   VLLM_PID=$!
   echo "vLLM server started (PID=${VLLM_PID})"
@@ -275,7 +373,7 @@ print(json.dumps({
     return 1
   fi
   echo "Waiting for vLLM readiness at http://localhost:${VLLM_PORT}/v1/models (timeout: ${VLLM_READY_TIMEOUT}s)"
-  if ! wait_for_endpoint_contains "http://localhost:${VLLM_PORT}/v1/models" "${VLLM_READY_TIMEOUT}" "facebook/opt-125m" "vLLM server"; then
+  if ! wait_for_vllm_ready; then
     return 1
   fi
   echo "✅ vLLM server is ready"
@@ -345,9 +443,42 @@ else
   echo "✅ numpy<2 installed"
 fi
 
-echo "[Phase 2 / Step 2] Downloading facebook/opt-125m model (GitHub release)"
-bash "${SHARED_SCRIPTS_DIR}/download_opt125m_github.sh"
-echo "✅ Model download/check complete"
+if [ -z "${VLLM_DOWNLOAD_SCRIPT}" ]; then
+  echo "[Phase 2 / Step 2] Skipping model download (VLLM_DOWNLOAD_SCRIPT is empty)."
+else
+  echo "[Phase 2 / Step 2] Preparing model ${VLLM_MODEL_ID} via ${VLLM_DOWNLOAD_SCRIPT}"
+  # The downloader reads MODEL_ID / TARBALL_URL / CACHE_MARKER from
+  # env; thread them through explicitly so the buildkite path (which
+  # relies on the defaults above) and the GHA path (which pins them
+  # per matrix entry) both work without depending on the surrounding
+  # shell's env-var visibility rules.
+  MODEL_ID="${VLLM_MODEL_ID}" \
+    TARBALL_URL="${VLLM_TARBALL_URL}" \
+    CACHE_MARKER="${VLLM_TARBALL_CACHE_MARKER}" \
+    bash "${SHARED_SCRIPTS_DIR}/${VLLM_DOWNLOAD_SCRIPT}"
+  echo "✅ Model download/check complete"
+
+  # The downloader has laid down a complete HF snapshot (config, tokenizer,
+  # custom modelling code) and weights are either in the tarball or random
+  # (`--load-format dummy`), so model load needs nothing from the network.
+  # Pin the HF libraries to that local cache, because otherwise they HEAD
+  # huggingface.co on every server start to re-resolve revision "main":
+  #   - it makes a green CI run depend on HF being up and un-throttled;
+  #     an HTTP 429 there aborts `vllm serve` during engine construction
+  #     (transformers turns the 429 into "couldn't connect ... and couldn't
+  #     find them in the cached files").
+  #   - the commit sha a successful HEAD returns never matches our
+  #     tarball-derived SNAPSHOT, so the pre-populated files are re-fetched
+  #     from HF anyway and only ever used on the offline fallback path.
+  # Going offline makes the local cache authoritative, which is both the
+  # documented intent of the downloader and deterministic.
+  if [ "${VLLM_HF_OFFLINE}" = "1" ]; then
+    export HF_HUB_OFFLINE=1
+    echo "HF_HUB_OFFLINE=1 — serving ${VLLM_MODEL_ID} from the local HF hub cache"
+  else
+    echo "VLLM_HF_OFFLINE=0 — HF network access left enabled"
+  fi
+fi
 
 echo "[Phase 2 / Step 3] Starting LMCache server"
 echo "LMCache log: ${LMCACHE_LOG}"
@@ -364,10 +495,17 @@ LMCACHE_ARGS=(
 #   engine_driven -> EngineDrivenTransferContext (worker gathers/scatters data)
 #     sub-mode: SHM (--shm-name __default__) or pickle (--shm-name "")
 #   lmcache_driven -> LMCacheDrivenTransferContext (server-side IPC handle)
+# The server only loads the paths named by --supported-transfer-mode
+# (default: lmcache_driven), so every leg passes it explicitly. Likewise
+# the default --shm-name "" disables the SHM pool, so the shm legs name a
+# segment explicitly. Keep segment names short: macOS caps POSIX SHM
+# names at 31 chars including the server's lmcache_l1_pool_ prefix.
 # Step 5.5 verifies which one the worker actually entered.
 if [ "${LMCACHE_MP_TRANSFER_MODE}" = "engine_driven" ]; then
+  LMCACHE_ARGS+=(--supported-transfer-mode engine_driven)
   if [ "${LMCACHE_SHM_NAME}" = "__default__" ]; then
     echo "Transport mode: engine-driven/shm (shared memory)"
+    LMCACHE_ARGS+=(--shm-name "e2e_$$")
     EXPECTED_TRANSPORT="shm"
   else
     echo "Transport mode: engine-driven/pickle (--shm-name '${LMCACHE_SHM_NAME}')"
@@ -376,12 +514,15 @@ if [ "${LMCACHE_MP_TRANSFER_MODE}" = "engine_driven" ]; then
   fi
 elif [ "${LMCACHE_MP_TRANSFER_MODE}" = "lmcache_driven" ]; then
   echo "Transport mode: lmcache-driven (IPC handle path)"
+  LMCACHE_ARGS+=(--supported-transfer-mode lmcache_driven)
   EXPECTED_TRANSPORT="lmcache_driven"
 else
   echo "Transport mode: unknown '${LMCACHE_MP_TRANSFER_MODE}',"
   echo "  falling back to LMCACHE_SHM_NAME-based detection"
+  LMCACHE_ARGS+=(--supported-transfer-mode auto)
   if [ "${LMCACHE_SHM_NAME}" = "__default__" ]; then
     echo "Transport mode: data/shm (shared memory, fallback)"
+    LMCACHE_ARGS+=(--shm-name "e2e_$$")
     EXPECTED_TRANSPORT="shm"
   else
     echo "Transport mode: data/pickle (--shm-name '${LMCACHE_SHM_NAME}')"
@@ -406,27 +547,41 @@ if ! wait_for_endpoint_contains "http://localhost:${LMCACHE_HTTP_PORT}/healthche
 fi
 echo "✅ LMCache server is healthy"
 
-echo "[Phase 2 / Step 4] Installing libnuma (Linux only) and starting vLLM server"
+echo "[Phase 2 / Step 4] Installing system libs (Linux only) and starting vLLM server"
 if [ "$(uname -s)" = "Linux" ]; then
-  # libnuma1 is required by some vLLM CPU paths. On GitHub Actions
-  # ubuntu runners apt-get must be invoked via sudo; on hardened images
-  # without passwordless sudo it may not be available at all. Skip the
-  # install if the shared object is already present, and never let an
-  # apt-get hiccup fail the whole e2e step (vLLM startup itself will
-  # surface a clearer error if libnuma is genuinely missing).
+  # System libs vLLM's CPU serve path dlopens at import time:
+  #   - libnuma1: needed by some vLLM CPU code paths.
+  #   - ffmpeg:   provides libavutil.so.{56..60} etc. that torchcodec
+  #               dlopens. Recent vLLM nightlies import torchcodec
+  #               unconditionally, so `vllm serve` aborts with
+  #               "libavutil.so.NN: cannot open shared object file"
+  #               without FFmpeg — even for text-only models.
+  # Prefer sudo if present (GitHub ubuntu runners need it). Install only
+  # what's missing and never let an apt hiccup fail the step.
+  MISSING_PKGS=()
   if [ ! -e /usr/lib/x86_64-linux-gnu/libnuma.so.1 ] \
      && [ ! -e /lib/x86_64-linux-gnu/libnuma.so.1 ]; then
+    MISSING_PKGS+=(libnuma1)
+  fi
+  # torchcodec supports FFmpeg 4-8; the distro's ffmpeg package provides a
+  # compatible libavutil. Detect via ldconfig so we match whichever
+  # soname (56..60) the runner already ships.
+  if ! ldconfig -p 2>/dev/null | grep -q 'libavutil\.so'; then
+    MISSING_PKGS+=(ffmpeg)
+  fi
+  if [ "${#MISSING_PKGS[@]}" -gt 0 ]; then
+    echo "Installing missing system packages: ${MISSING_PKGS[*]}"
     if command -v sudo >/dev/null 2>&1; then
       sudo apt-get update \
-        && sudo apt-get install -y --no-install-recommends libnuma1 \
-        || echo "⚠️  libnuma1 install via sudo apt-get failed; continuing"
+        && sudo apt-get install -y --no-install-recommends "${MISSING_PKGS[@]}" \
+        || echo "⚠️  apt-get install (${MISSING_PKGS[*]}) via sudo failed; continuing"
     else
       apt-get update \
-        && apt-get install -y --no-install-recommends libnuma1 \
-        || echo "⚠️  libnuma1 install via apt-get failed; continuing"
+        && apt-get install -y --no-install-recommends "${MISSING_PKGS[@]}" \
+        || echo "⚠️  apt-get install (${MISSING_PKGS[*]}) failed; continuing"
     fi
   else
-    echo "libnuma1 already present, skipping apt install"
+    echo "libnuma1 and FFmpeg runtime libs already present, skipping apt install"
   fi
 fi
 # VLLM_DEVICE is the modern env var (vLLM 0.8+)
@@ -435,15 +590,22 @@ export VLLM_TARGET_DEVICE=cpu
 start_vllm
 
 echo "[Phase 2 / Step 5] Sending E2E test request"
+e2e_request_body="$(VLLM_MODEL_ID="${VLLM_MODEL_ID}" python3 -c "
+import json, os
+print(json.dumps({
+    'model': os.environ['VLLM_MODEL_ID'],
+    'prompt': 'Hello',
+    'max_tokens': 5,
+}))")"
 completion_response="$(curl -fsS "http://localhost:${VLLM_PORT}/v1/completions" \
   -H "Content-Type: application/json" \
-  -d '{"model":"facebook/opt-125m","prompt":"Hello","max_tokens":5}')"
+  -d "${e2e_request_body}")"
 echo "Completion response: ${completion_response}"
 if ! echo "${completion_response}" | grep -q '"choices"'; then
   echo "❌ E2E request response failed structural validation"
   false
 fi
-if ! echo "${completion_response}" | grep -q "facebook/opt-125m"; then
+if ! echo "${completion_response}" | grep -q "${VLLM_MODEL_ID}"; then
   echo "❌ E2E request response missing expected model"
   false
 fi
@@ -466,13 +628,6 @@ if [ "${EXPECTED_TRANSPORT}" = "lmcache_driven" ]; then
     false
   fi
   echo "✅ Transport mode confirmed: lmcache-driven (IPC handle path)"
-elif [ "${EXPECTED_TRANSPORT}" = "engine_driven" ]; then
-  if ! grep -q "Creating transfer context.*mode=engine_driven" "${VLLM_LOG}" 2>/dev/null; then
-    echo "❌ Expected engine-driven worker context but 'mode=engine_driven' not found in vLLM log"
-    tail -50 "${VLLM_LOG}"
-    false
-  fi
-  echo "✅ Transport mode confirmed: engine-driven"
 elif [ "${EXPECTED_TRANSPORT}" = "shm" ]; then
   if ! grep -q "Using shm non-GPU transfer strategy" "${LMCACHE_LOG}" 2>/dev/null; then
     echo "❌ Expected shm transport but server strategy line not found in log"

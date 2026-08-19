@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """``lmcache bench l2`` subcommand implementation.
 
-This module owns the full registration + execution flow for the L2
-adapter benchmark. ``BenchCommand`` only forwards CLI dispatch to
-:func:`run_l2_adapter_bench` and parser registration to
-:func:`register_l2_parser`.
+This module provides argument registration via :func:`add_l2_arguments`
+and the execution orchestrator :func:`run_l2_adapter_bench` for the L2
+adapter benchmark.
 """
 
 # Future
@@ -15,15 +14,6 @@ from typing import TYPE_CHECKING
 import argparse
 import os
 import sys
-
-# First Party
-# Reuse the common helper that wires up ``--format / --output /
-# --quiet`` onto a subparser. ``BenchCommand.register`` is overridden
-# and creates inner subparsers manually, bypassing the auto-wiring
-# that ``BaseCommand.register`` normally performs, so we attach those
-# common flags ourselves only on the L2 subparser. The ``engine`` and
-# ``kvcache`` subparsers intentionally stay untouched.
-from lmcache.cli.commands.base import _add_output_args
 
 if TYPE_CHECKING:
     # First Party
@@ -36,32 +26,12 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 
-def register_l2_parser(
-    subparsers: argparse._SubParsersAction,
-    dispatch_func,
-) -> argparse.ArgumentParser:
-    """Register the ``lmcache bench l2`` subcommand parser.
+def add_l2_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add ``lmcache bench l2`` arguments to *parser*.
 
     Args:
-        subparsers: The ``bench`` subparsers action.
-        dispatch_func: Function to bind via ``set_defaults(func=...)``.
-            Typically ``BenchCommand.execute`` so that the outer
-            dispatcher can route the call back into
-            :func:`run_l2_adapter_bench`.
-
-    Returns:
-        The created ``ArgumentParser`` (mostly for testing).
+        parser: The ``ArgumentParser`` for the L2 bench subcommand.
     """
-    parser = subparsers.add_parser(
-        "l2",
-        help="Benchmark an L2 adapter (store / lookup / load).",
-        description=(
-            "Benchmark L2 adapters using the standard LMCache adapter "
-            "configuration mechanism (parse_args_to_l2_adapters_config "
-            "+ create_l2_adapter). Any registered adapter type can be "
-            "tested without code changes."
-        ),
-    )
 
     parser.add_argument(
         "--l2-adapter",
@@ -152,14 +122,46 @@ def register_l2_parser(
         default=None,
         help="Run only the specified operation (default: run all).",
     )
-
-    # Common ``--format / --output / --quiet`` flags. Attached only
-    # to the L2 subparser; the ``engine`` and ``kvcache`` subparsers
-    # intentionally keep their existing arguments unchanged.
-    _add_output_args(parser)
-
-    parser.set_defaults(func=dispatch_func)
-    return parser
+    parser.add_argument(
+        "--flamegraph",
+        choices=["on", "off"],
+        default="off",
+        help=(
+            "Capture a flame graph of the measured phases if turned on. The benchmark "
+            "profiles itself and renders an SVG"
+        ),
+    )
+    parser.add_argument(
+        "--flamegraph-mode",
+        default="on-cpu",
+        metavar="MODE[,MODE...]",
+        help=(
+            "What to sample when profiling is on (default: on-cpu). Pass "
+            "several comma-separated to profile one benchmark run per mode. "
+            "Modes: on-cpu, off-cpu, wakeup, offwake (perf/bcc), wall, gil "
+            "(py-spy). See the 'lmcache tool flamegraph' docs for detail."
+        ),
+    )
+    parser.add_argument(
+        "--flamegraph-output",
+        default="",
+        metavar="PATH",
+        help=(
+            "SVG output path for '--flamegraph on'. Default: "
+            "/tmp/lmcache_bench_flames/<adapter>.<mode>.svg."
+        ),
+    )
+    parser.add_argument(
+        "--flamegraph-scripts-dir",
+        default="",
+        metavar="DIR",
+        help=(
+            "Directory with the FlameGraph scripts (flamegraph.pl, "
+            "stackcollapse-perf.pl); default ~/FlameGraph (cloned there on "
+            "first use). Unused by --flamegraph-mode wall / gil, which "
+            "render their own SVG."
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -189,6 +191,14 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
         bench_load,
         bench_lookup,
         bench_store,
+    )
+    from lmcache.cli.profiling import (
+        PY_SPY_MODES,
+        FlameProfiler,
+        ProfileError,
+        check_profiling_deps,
+        default_output_path,
+        resolve_flamegraph_dir,
     )
     from lmcache.v1.distributed.l2_adapters import create_l2_adapter
     from lmcache.v1.distributed.l2_adapters.config import (
@@ -262,6 +272,31 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
     l1_buffer = make_aligned_tensor(2 * keys_per_round * data_size, l1_align_bytes)
     l1_memory_desc = create_l1_memory_desc(l1_buffer, align_bytes=l1_align_bytes)
 
+    # Resolve and validate the flame-graph toolchain up front, before any
+    # adapter (and its worker threads) is created. A user who explicitly
+    # passes ``--flamegraph on`` gets a fast, actionable failure if a
+    # required tool is missing, rather than a benchmark that silently runs
+    # unprofiled. When ``--flamegraph`` is off (default), none of this runs
+    # and the benchmark behaves exactly as before.
+    flamegraph_on = getattr(args, "flamegraph", "off") == "on"
+    flamegraph_dir = ""
+    if flamegraph_on:
+        try:
+            check_profiling_deps(args.flamegraph_mode)
+            # py-spy renders its own SVG; only the perf/bcc modes need
+            # the FlameGraph scripts, so do not clone them otherwise.
+            if args.flamegraph_mode not in PY_SPY_MODES:
+                flamegraph_dir = resolve_flamegraph_dir(
+                    args.flamegraph_scripts_dir, log
+                )
+        except ProfileError as e:
+            print(
+                "Error: --flamegraph on was requested but the profiling "
+                f"toolchain is unavailable:\n  {e}",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+
     log("\n[Init] Creating adapter...")
     try:
         adapter = create_l2_adapter(adapter_cfg, l1_memory_desc=l1_memory_desc)
@@ -269,6 +304,38 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
     except Exception as e:
         print(f"[Init] Failed to create adapter: {e}", file=sys.stderr)
         sys.exit(1)
+
+    # Optional self-profiling: record a flame graph of the measured
+    # phases. Built here, after the adapter (and its worker threads)
+    # exist, so the recorder attaches to a fully-started process. The
+    # toolchain was already validated above, so a ProfileError here is a
+    # late failure (e.g. the output directory is not writable); since the
+    # user explicitly requested a flame graph we fail loudly rather than
+    # downgrade, closing the adapter we just opened first.
+    profiler: FlameProfiler | None = None
+    if flamegraph_on:
+        adapter_name = type(adapter).__name__
+        try:
+            profiler = FlameProfiler(
+                mode=args.flamegraph_mode,
+                output=(
+                    args.flamegraph_output
+                    or default_output_path(adapter_name, args.flamegraph_mode)
+                ),
+                flamegraph_dir=flamegraph_dir,
+                pid=os.getpid(),
+                title=f"{args.flamegraph_mode} ({adapter_name})",
+            )
+        except ProfileError as e:
+            print(
+                f"Error: cannot start flame-graph profiling: {e}",
+                file=sys.stderr,
+            )
+            try:
+                adapter.close()
+            except Exception:
+                pass
+            sys.exit(2)
 
     # ------------------------------------------------------------------
     # Idx layout
@@ -385,6 +452,18 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
     last_load_round_keys: list[list] | None = None
 
     try:
+        if profiler is not None:
+            # Pre-build the payload buffers before the recorder starts so
+            # the one-time tensor allocation + fill (benchmark harness work,
+            # not the adapter) is kept out of the flame graph. The batches
+            # are reused across rounds, so this is the only build; warming
+            # it here keeps the recording focused on adapter I/O.
+            if args.only is None or args.only == "store":
+                _store_objs(0)
+            if args.only is None or args.only == "load":
+                _load_objs(0)
+            profiler.start(log)
+
         # ---- Store ----
         if args.only is None or args.only == "store":
             log(f"[Store] Running {warmup} warmup + {rounds} measurement rounds...")
@@ -436,6 +515,11 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
             last_load_round_keys = _build_round_keys(total_rounds - 1)
             log("")
 
+        # Stop profiling before verification / summary so the flame
+        # graph reflects only the measured store/lookup/load work.
+        if profiler is not None:
+            profiler.stop(log)
+
         # ---- Round-trip verification (last measured round only) ----
         if (
             not args.skip_verify
@@ -471,6 +555,10 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
             results=results,
         )
     finally:
+        # Idempotent: a no-op if profiling already stopped on the normal
+        # path; tears the recorder down if a phase raised.
+        if profiler is not None:
+            profiler.stop(log)
         log("[Cleanup] Closing adapter...")
         try:
             adapter.close()
@@ -551,7 +639,8 @@ def _emit_l2_adapter_metrics(
         section_id = f"op_{idx}"
         section = metrics.add_section(section_id, r.operation)
         section.add("operation", "Operation", r.operation)
-        section.add("rounds", "Rounds", len(r.round_durations))
+        section.add("rounds", "Rounds", r.attempted_rounds)
+        section.add("rounds_timed_out", "Rounds timed out", r.timed_out_rounds)
         section.add("keys_per_round", "Keys / round", r.keys_per_round)
         section.add("total_keys", "Total keys", r.total_keys)
         section.add("total_success", "Total success", r.total_success)

@@ -91,8 +91,7 @@ RUN --mount=type=cache,target=/root/.cache/ccache,id=ccache \
     python3 setup.py bdist_wheel --dist-dir=dist_lmcache && \
     uv pip install ./dist_lmcache/*.whl --verbose && \
   
-    uv pip install --reinstall-package "nixl-cu${LMCACHE_CUDA_MAJOR}" \
-        "nixl-cu${LMCACHE_CUDA_MAJOR}"
+    uv pip install --reinstall-package nixl nixl
 
 WORKDIR /workspace
 ENTRYPOINT ["/opt/venv/bin/vllm", "serve"]
@@ -120,17 +119,18 @@ RUN . /opt/venv/bin/activate && \
         --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
         --index-strategy unsafe-best-match --verbose && \
   
-    uv pip install --reinstall-package "nixl-cu${CUDA_MAJOR}" "nixl-cu${CUDA_MAJOR}"
+    uv pip install --reinstall-package nixl nixl
 
 WORKDIR /workspace
 ENTRYPOINT ["/opt/venv/bin/vllm", "serve"]
 
 #################### vLLM IMAGE & LMCache (Release, cu129) ######################
-# Installs nightly cu129 vLLM  
+# Installs the stable cu129 vLLM release wheel and
 # lmcache from the v{tag}-cu129 GitHub Release.
+# The cu129 torch index is hinted explicitly so vLLM resolves to its cu129 build.
 
 FROM base AS image-release-cu129
- 
+
 ARG CUDA_VERSION=12.9
 ARG LMCACHE_VERSION
 
@@ -140,16 +140,15 @@ RUN . /opt/venv/bin/activate && \
     VER=$(echo ${LMCACHE_VERSION} | sed 's/^v//') && \
     VLLM_PRECOMPILED_WHEEL_VARIANT=${CUDA_TAG} uv pip install --prerelease=allow \
         vllm[runai,tensorizer,flashinfer] \
-        --extra-index-url https://wheels.vllm.ai/nightly/${CUDA_TAG} \
         --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
-        --index-strategy unsafe-first-match && \
+        --index-strategy unsafe-best-match && \
     python3 -c 'import torch; print("TORCH=", torch.__version__)' && \
     uv pip install lmcache==${VER} \
         --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
         --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/v${VER}-cu129 \
         --index-strategy unsafe-best-match --verbose && \
     
-    uv pip install --reinstall-package "nixl-cu${CUDA_MAJOR}" "nixl-cu${CUDA_MAJOR}"
+    uv pip install --reinstall-package nixl nixl
 
 WORKDIR /workspace
 ENTRYPOINT ["/opt/venv/bin/vllm", "serve"]

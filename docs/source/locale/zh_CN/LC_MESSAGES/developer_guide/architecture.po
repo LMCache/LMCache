@@ -49,8 +49,7 @@ msgstr "LMCache 实现了一个具有三个不同层次的分层存储系统："
 msgid ""
 "**GPU Memory**: Holds the active working set of KV caches that are "
 "currently being used by the model"
-msgstr ""
-"**显存**\\ ：保存当前模型使用的 KV Cache 的活动工作集"
+msgstr "**显存**\\ ：保存当前模型使用的 KV Cache 的活动工作集"
 
 #: ../../source/developer_guide/architecture.rst:15
 msgid ""
@@ -62,15 +61,13 @@ msgstr "**CPU DRAM**: 作为最近使用的 KV 块的“热缓存”，使用固
 msgid ""
 "**Local storage (e.g., local disk, NVMe GDS)**: Provides a large tier for"
 " local KV caching (e.g. for long documents)"
-msgstr ""
-"**本地存储（例如，本地磁盘、NVMe GDS）**\\ ：为本地 KV 缓存提供了一个大容量层（例如，用于长文档）。"
+msgstr "**本地存储（例如，本地磁盘、NVMe GDS）**\\ ：为本地 KV 缓存提供了一个大容量层（例如，用于长文档）。"
 
 #: ../../source/developer_guide/architecture.rst:17
 msgid ""
 "**Remote storage (e.g., Redis, Mooncake, InfiniStore)**: Persistent "
 "storage for KV caches. Reliable but not as performant as previous tiers."
-msgstr ""
-"**远程存储（例如，Redis、Mooncake、InfiniStore）**\\ ：KV 缓存的持久存储。可靠，但性能不如前面的层。"
+msgstr "**远程存储（例如，Redis、Mooncake、InfiniStore）**\\ ：KV 缓存的持久存储。可靠，但性能不如前面的层。"
 
 #: ../../source/developer_guide/architecture.rst:19
 msgid "**Data Flow and Operations**"
@@ -161,15 +158,13 @@ msgstr "集成到 LLM 引擎 (vLLM) 中，连接器利用分页 KV 内存管理�
 msgid ""
 "**Cache hit**: Fetches precomputed KV cache chunks from LMCache, "
 "bypassing computation"
-msgstr ""
-"**缓存命中**\\ ：从 LMCache 中获取预计算的 KV Cache 块，绕过计算"
+msgstr "**缓存命中**\\ ：从 LMCache 中获取预计算的 KV Cache 块，绕过计算"
 
 #: ../../source/developer_guide/architecture.rst:84
 msgid ""
 "**Cache miss**: Model computes KV as usual, then Connector hands newly-"
 "generated KV data to LMCache for storage"
-msgstr ""
-"**缓存未命中**\\ ：模型按常规计算 KV，然后连接器将新生成的 KV 数据交给 LMCache 进行存储"
+msgstr "**缓存未命中**\\ ：模型按常规计算 KV，然后连接器将新生成的 KV 数据交给 LMCache 进行存储"
 
 #: ../../source/developer_guide/architecture.rst:86
 msgid "**Cache Index (Token Database)**"
@@ -228,8 +223,7 @@ msgstr "控制器提供了一个用于运行时缓存操作的管理 API："
 msgid ""
 "**Lookup**: Query cache entries for given token sequences and their "
 "locations"
-msgstr ""
-"**查找**\\ ：查询给定令牌序列及其位置的缓存条目"
+msgstr "**查找**\\ ：查询给定令牌序列及其位置的缓存条目"
 
 #: ../../source/developer_guide/architecture.rst:104
 msgid "**Clear**: Purge KV cache entirely or for specific entries"
@@ -239,27 +233,23 @@ msgstr "**清除**: 完全清除 KV Cache 或特定条目"
 msgid ""
 "**Compress/Decompress**: On-demand compression using CacheGen or "
 "decompression to full precision"
-msgstr ""
-"**压缩/解压缩**\\ ：按需使用 CacheGen 进行压缩或解压缩到全精度"
+msgstr "**压缩/解压缩**\\ ：按需使用 CacheGen 进行压缩或解压缩到全精度"
 
 #: ../../source/developer_guide/architecture.rst:106
 msgid ""
 "**Move**: Migrate caches to specified locations for cache warming or "
 "optimization"
-msgstr ""
-"**移动**\\ ：将缓存迁移到指定位置以进行缓存预热或优化"
+msgstr "**移动**\\ ：将缓存迁移到指定位置以进行缓存预热或优化"
 
 #: ../../source/developer_guide/architecture.rst:107
 msgid "**Pin/Unpin**: Mark cache entries as persistent to prevent eviction"
-msgstr ""
-"**固定/解固定**\\ ：将缓存条目标记为持久，以防止逐出"
+msgstr "**固定/解固定**\\ ：将缓存条目标记为持久，以防止逐出"
 
 #: ../../source/developer_guide/architecture.rst:108
 msgid ""
 "**Health & Finish Checks**: Report worker health and confirm completion "
 "of async operations"
-msgstr ""
-"**健康与完成检查**\\ ：报告工作者健康状态并确认异步操作的完成"
+msgstr "**健康与完成检查**\\ ：报告工作者健康状态并确认异步操作的完成"
 
 #: ../../source/developer_guide/architecture.rst:110
 msgid ""

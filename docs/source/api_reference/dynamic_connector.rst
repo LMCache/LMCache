@@ -1,6 +1,11 @@
 vLLM Dynamic Connector
 ======================
 
+.. warning::
+
+   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance.
+
+
 Upstream Integration:
 ~~~~~~~~~~~~~~~~~~~~~
 

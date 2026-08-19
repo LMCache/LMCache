@@ -1,7 +1,7 @@
 .. _recipe_gemma3:
 
-Gemma3ForConditionalGeneration
-===============================
+Gemma 3
+=======
 
 Validated models
 ----------------

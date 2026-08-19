@@ -28,6 +28,20 @@ def _is_sliding_window_spec(spec: Any) -> bool:
     return any(cls.__name__ == "SlidingWindowSpec" for cls in type(spec).__mro__)
 
 
+def _is_mamba_align_spec(spec: Any) -> bool:
+    """Return whether the spec is an align-mode Mamba/linear-attention spec.
+
+    Align-mode Mamba layers keep only the state snapshot of the last block, so
+    they behave exactly like a cross-chunk sliding window of one block: a hit of
+    length ``L`` needs only the last block present. Checked by class name (like
+    :func:`_is_sliding_window_spec`) so this module stays importable without vLLM.
+    """
+    return (
+        any(cls.__name__ == "MambaSpec" for cls in type(spec).__mro__)
+        and getattr(spec, "mamba_cache_mode", "none") == "align"
+    )
+
+
 def _resolve_per_layer_sw_sizes(
     vllm_groups: Sequence[Any],
     layer_to_idx: Mapping[str, int],
@@ -44,8 +58,10 @@ def _resolve_per_layer_sw_sizes(
 
     Returns:
         A list of length ``num_layers`` mapping each registered tensor index
-        to its sliding window size in tokens, or ``-1`` for
-        non-sliding-window layers.
+        to its cross-chunk window size in tokens: the sliding window for
+        sliding-window attention, the engine-side block size for align-mode
+        Mamba/linear layers (a one-block window), or ``-1`` for full-attention
+        layers.
     """
     per_layer_sw_size = [-1] * num_layers
     for group in vllm_groups:
@@ -59,6 +75,8 @@ def _resolve_per_layer_sw_sizes(
             layer_spec = per_layer_specs[name] if per_layer_specs else spec
             if _is_sliding_window_spec(layer_spec):
                 per_layer_sw_size[layer_to_idx[name]] = layer_spec.sliding_window
+            elif _is_mamba_align_spec(layer_spec):
+                per_layer_sw_size[layer_to_idx[name]] = layer_spec.block_size
     return per_layer_sw_size
 
 
@@ -118,21 +136,12 @@ def create_engine_group_infos_from_vllm(
     # First Party
     from lmcache.utils import EngineType
     from lmcache.v1.gpu_connector.utils import (
-        get_num_layers,
-        normalize_kv_and_discover_format,
+        normalize_and_discover_per_layer_formats,
     )
     from lmcache.v1.kv_layer_groups import (
         EXCLUDED_ENGINE_GROUP,
         group_layers_by_identity,
     )
-
-    # Inspect the real registered tensors for physical layout and dtype.
-    engine_kv_format, normalized_kv_caches = normalize_kv_and_discover_format(
-        list(kv_caches.values()),
-        EngineType.VLLM,
-        layout_hints=layout_hints,
-    )
-    num_layers = get_num_layers(normalized_kv_caches, engine_kv_format)
 
     # vLLM-specific field access (confined to this function): map each
     # registered KV tensor to its vLLM engine KV cache group index. vLLM places
@@ -140,12 +149,24 @@ def create_engine_group_infos_from_vllm(
     # have disjoint block-id spaces and must not share an LMCache group. ``None``
     # means a single (non-hybrid) group, i.e. every layer shares one block-id
     # space.
+    per_layer_discoverable_kv_caches = list(kv_caches.values())
     layer_to_idx = {name: idx for idx, name in enumerate(kv_caches.keys())}
     vllm_groups = (
         getattr(kv_cache_config, "kv_cache_groups", ()) or ()
         if kv_cache_config is not None
         else ()
     )
+
+    layer_index_groups = [
+        [layer_to_idx[name] for name in group.layer_names] for group in vllm_groups
+    ]
+    normalized_kv_caches, engine_kv_formats = normalize_and_discover_per_layer_formats(
+        per_layer_discoverable_kv_caches,
+        layer_index_groups,
+        EngineType.VLLM,
+        layout_hints,
+    )
+    num_layers = len(engine_kv_formats)
     # Layers absent from every engine group's ``layer_names`` are cross-layer
     # KV-sharing layers (e.g. google/gemma-4-E4B-it): vLLM aliases them to a
     # target owner's KV tensor, so the owner's group already covers them. Tag
@@ -176,15 +197,14 @@ def create_engine_group_infos_from_vllm(
     # same grouping from the registered tensors.
     return [
         EngineGroupInfo(
-            engine_group_id=identity[4],
+            engine_group_id=identity.engine_group_idx,
             layer_indices=tuple(indices),
-            tokens_per_block=group_tokens_per_block.get(identity[4], 0),
+            tokens_per_block=group_tokens_per_block.get(identity.engine_group_idx, 0),
             sw_size_tokens=_merge_layer_sw_sizes(per_layer_sw_size, indices),
         )
         for identity, indices in group_layers_by_identity(
             normalized_kv_caches,
-            engine_kv_format,
-            num_layers,
+            engine_kv_formats,
             per_layer_group_idx,
         )
     ]

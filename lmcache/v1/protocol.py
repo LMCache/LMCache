@@ -2,7 +2,7 @@
 # Standard
 from dataclasses import dataclass
 from enum import IntEnum, auto
-from typing import Optional, Union
+from typing import TYPE_CHECKING, Optional, Union
 import struct
 
 # Third Party
@@ -10,8 +10,12 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.utils import CacheEngineKey, LayerCacheEngineKey, parse_cache_key
+from lmcache.utils import parse_cache_key
 from lmcache.v1.memory_management import MemoryFormat
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.utils import CacheEngineKey, LayerCacheEngineKey
 
 logger = init_logger(__name__)
 
@@ -214,7 +218,7 @@ class ClientMetaMessage:
     """
 
     command: ClientCommand
-    key: Union[CacheEngineKey, LayerCacheEngineKey]
+    key: Union["CacheEngineKey", "LayerCacheEngineKey"]
     length: int
     fmt: MemoryFormat
     dtype: Optional[torch.dtype]

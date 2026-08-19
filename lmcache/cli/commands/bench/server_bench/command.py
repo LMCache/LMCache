@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """``lmcache bench server`` subcommand implementation.
 
-This module owns the full registration + execution flow for the
-end-to-end LMCache MP cache-server sanity test. ``BenchCommand`` only
-forwards CLI dispatch to :func:`run_server_bench` and parser
-registration to :func:`register_server_parser`.
+This module provides argument registration via :func:`add_server_arguments`
+and the execution orchestrator :func:`run_server_bench` for the end-to-end
+LMCache MP cache-server sanity test.
 
 The command exercises the full store / retrieve data path:
 
@@ -50,29 +49,36 @@ from lmcache import torch_dev
 # time. On a slim install these symbols are placeholders; the
 # ``_require_full_install`` guard inside the helpers module keeps
 # orchestration safe.
-from lmcache.cli.commands.base import _add_output_args
 from lmcache.cli.commands.bench.server_bench.helpers import (
     _DEFAULT_SHAPE_SPEC,
-    _IMPORT_ERROR,
+    _INSTANCE_ID_BASE,
     DTYPE_MAP,
+    WorkerContext,
     _allocate_cpu_shm_kv_cache,
     _allocate_gpu_kv_cache,
     _get_chunk_size,
+    _is_mla_kv_size,
     _process_request,
     _require_full_install,
     _send_register_kv_cache,
+    _send_unregister_kv_cache,
     shm_open_pool_as_mmap,
 )
 
 if TYPE_CHECKING:
+    # Standard
+    from collections.abc import Callable
+
     # First Party
     from lmcache.cli.commands.base import BaseCommand
+    from lmcache.cli.profiling import FlameProfiler
+    from lmcache.v1.multiprocess.custom_types import KVCache
 
 
 # Stash the original (full-install) ImportError so the parser-stub
 # branch and the orchestrator branch can both surface it verbatim.
 __all__ = (
-    "register_server_parser",
+    "add_server_arguments",
     "run_server_bench",
 )
 
@@ -82,51 +88,15 @@ __all__ = (
 # ---------------------------------------------------------------------------
 
 
-def register_server_parser(
-    subparsers: argparse._SubParsersAction,
-    dispatch_func,
-) -> argparse.ArgumentParser:
-    """Register the ``lmcache bench server`` subcommand parser.
+def add_server_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add ``lmcache bench server`` arguments to *parser*.
 
-    On a slim ``lmcache-cli`` install (where torch / zmq / the MP
-    runtime are absent) this still registers a *stub* parser so
-    ``lmcache bench --help`` keeps working; the stub defers to
-    :func:`run_server_bench`, which prints an actionable install
-    hint and exits with status ``1``.
+    Requires the full LMCache install (torch, zmq, etc.).
+    Callers should check ``_IMPORT_ERROR`` before calling this.
 
     Args:
-        subparsers: The ``bench`` subparsers action.
-        dispatch_func: Function to bind via ``set_defaults(func=...)``.
-            Typically ``BenchCommand.execute`` so that the outer
-            dispatcher can route the call back into
-            :func:`run_server_bench`.
-
-    Returns:
-        The created ``ArgumentParser`` (mostly for testing).
+        parser: The ``ArgumentParser`` for the server bench subcommand.
     """
-    if _IMPORT_ERROR is not None:
-        # Slim install — register a stub parser only.
-        stub = subparsers.add_parser(
-            "server",
-            help="(requires full lmcache install)",
-            description=(
-                "End-to-end sanity test for the LMCache MP cache server. "
-                "Requires the full `lmcache` package; not available in "
-                "the `lmcache-cli` install."
-            ),
-        )
-        stub.set_defaults(func=dispatch_func)
-        return stub
-
-    parser = subparsers.add_parser(
-        "server",
-        help="End-to-end test for LMCache MP cache server (GPU mode).",
-        description=(
-            "End-to-end sanity test for the LMCache MP cache server: "
-            "runs LOOKUP / STORE / RETRIEVE against a live MP server "
-            "and verifies KV cache checksums."
-        ),
-    )
 
     parser.add_argument(
         "--rpc-url",
@@ -157,6 +127,31 @@ def register_server_parser(
             "PREPARE/COMMIT). "
             "`auto` keeps the historical mapping: "
             "gpu->lmcache_driven, cpu->engine_driven."
+        ),
+    )
+    parser.add_argument(
+        "--tp-size",
+        type=int,
+        default=1,
+        help=(
+            "Simulated tensor-parallel world size (default: 1). Each "
+            "rank registers its own KV cache under a distinct "
+            "instance_id, and STORE / RETRIEVE fan out per rank the "
+            "same way LMCacheMPWorkerAdapter routes them in a real "
+            "vLLM deployment (MLA -> only rank 0 stores; non-MLA -> "
+            "every rank stores; every rank always retrieves)."
+        ),
+    )
+    parser.add_argument(
+        "--use-mla",
+        action="store_true",
+        default=False,
+        help=(
+            "MLA mode: fold all TP ranks into a single kv_worker "
+            "so only rank 0 writes KV and every rank retrieves "
+            "the shared KV object (default: False). "
+            "Also implied when --kvcache-shape-spec declares "
+            "kv_size=1."
         ),
     )
     parser.add_argument(
@@ -229,16 +224,143 @@ def register_server_parser(
         help=("HTTP base URL for checksum API (default: http://localhost:8080)"),
     )
 
-    # Common ``--format / --output / --quiet`` flags.
-    _add_output_args(parser)
-
-    parser.set_defaults(func=dispatch_func)
-    return parser
+    prof = parser.add_argument_group(
+        "server profiling",
+        "Flame-graph the MP server process while this benchmark drives "
+        "load into it. The server's store path (hashing, allocation, "
+        "gather, D2H) runs in its own process, not in this client, so "
+        "profiling attaches to --profile-server-pid rather than to the "
+        "benchmark. See 'lmcache tool flamegraph' for the standalone form.",
+    )
+    prof.add_argument(
+        "--flamegraph",
+        choices=["on", "off"],
+        default="off",
+        help="Record a flame graph of the server during the run (default: off).",
+    )
+    prof.add_argument(
+        "--profile-server-pid",
+        type=int,
+        default=0,
+        metavar="PID",
+        help=(
+            "Server process to profile, e.g. $(pgrep -f 'lmcache server'). "
+            "Required when --flamegraph on."
+        ),
+    )
+    prof.add_argument(
+        "--flamegraph-mode",
+        default="gil",
+        metavar="MODE[,MODE...]",
+        help=(
+            "What to sample in the server (default: gil). Pass several "
+            "comma-separated to profile one load run per mode. Modes: on-cpu, "
+            "off-cpu, wakeup, offwake (perf/bcc), wall, gil (py-spy). perf/bcc "
+            "name Python functions only when the server was launched with "
+            "PYTHONPERFSUPPORT=1. See the 'lmcache tool flamegraph' docs."
+        ),
+    )
+    prof.add_argument(
+        "--flamegraph-output",
+        default="",
+        metavar="PATH",
+        help=(
+            "SVG output path. Default: "
+            "/tmp/lmcache_bench_flames/server-pid<PID>.<mode>.svg."
+        ),
+    )
+    prof.add_argument(
+        "--flamegraph-scripts-dir",
+        default="",
+        metavar="DIR",
+        help=(
+            "Directory with the FlameGraph scripts (flamegraph.pl, "
+            "stackcollapse-perf.pl); default ~/FlameGraph (cloned there on "
+            "first use). Unused by --flamegraph-mode wall / gil, which "
+            "render their own SVG."
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
+
+
+def _build_server_profiler(
+    args: argparse.Namespace,
+    log: "Callable[[str], None]",
+) -> "FlameProfiler | None":
+    """Build a profiler attached to the server, or ``None`` if disabled.
+
+    Validates the target pid and toolchain eagerly so a misconfigured run
+    fails before any load is sent. The returned profiler is not started;
+    the caller wraps the load loop with ``start`` / ``stop``.
+
+    Args:
+        args: Parsed CLI arguments for ``lmcache bench server``.
+        log: Progress logger.
+
+    Returns:
+        A ready :class:`FlameProfiler` targeting ``--profile-server-pid``,
+        or ``None`` when ``--flamegraph`` is off.
+    """
+    if getattr(args, "flamegraph", "off") != "on":
+        return None
+
+    # First Party
+    from lmcache.cli.profiling import (
+        PY_SPY_MODES,
+        FlameProfiler,
+        ProfileError,
+        check_profiling_deps,
+        default_output_path,
+        resolve_flamegraph_dir,
+    )
+
+    pid = args.profile_server_pid
+    if pid <= 0:
+        print(
+            "Error: --flamegraph on requires --profile-server-pid "
+            "(the pid of the running 'lmcache server').",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        print(f"Error: no such process: --profile-server-pid {pid}", file=sys.stderr)
+        sys.exit(2)
+    except PermissionError:
+        print(
+            f"Error: server pid {pid} belongs to another user; "
+            "profiling it needs root.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    try:
+        check_profiling_deps(args.flamegraph_mode)
+        flamegraph_dir = ""
+        if args.flamegraph_mode not in PY_SPY_MODES:
+            flamegraph_dir = resolve_flamegraph_dir(args.flamegraph_scripts_dir, log)
+        output = args.flamegraph_output or default_output_path(
+            f"server-pid{pid}", args.flamegraph_mode
+        )
+        return FlameProfiler(
+            mode=args.flamegraph_mode,
+            output=output,
+            flamegraph_dir=flamegraph_dir,
+            pid=pid,
+            title=f"{args.flamegraph_mode} (server pid {pid})",
+        )
+    except ProfileError as e:
+        print(
+            "Error: --flamegraph on was requested but profiling is "
+            f"unavailable:\n  {e}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
 
 
 def run_server_bench(
@@ -295,6 +417,12 @@ def run_server_bench(
             "using REGISTER_KV_CACHE + STORE/RETRIEVE over POSIX SHM"
         )
 
+    # The profiler targets the server process (--profile-server-pid), not
+    # this benchmark client. Build it before opening any connection so a
+    # bad pid or a missing toolchain fails immediately, not after a full
+    # benchmark has already run. ``None`` when --flamegraph is off.
+    profiler = _build_server_profiler(args, log)
+
     total_requests = 0
     total_checksum_ok = 0
     total_checksum_fail = 0
@@ -313,6 +441,10 @@ def run_server_bench(
 
     ctx = zmq.Context()
     client = MessageQueueClient(url, ctx)
+
+    # Tracks whether REGISTER_KV_CACHE succeeded so the ``finally`` block
+    # only deregisters a context that was actually registered.
+    registered = False
 
     try:
         # Query chunk size from server
@@ -394,6 +526,12 @@ def run_server_bench(
             "num_blocks": num_blocks,
             "block_size": block_size,
             "dtype": dtype_str,
+            # kv_size == 1 marks an MLA group (single-plane KV); the
+            # data-mode register path reads this to set ``use_mla`` on
+            # the server payload. For "mixed" specs the server has no
+            # single plane count, so the bench falls back to first
+            # group's ``kv_size`` in ``_send_register_kv_cache``.
+            "kv_size": kv_size_disp,
         }
         # Tell the server each group's true tokens-per-paged-chunk
         # explicitly. Otherwise the server falls back to the block size
@@ -433,67 +571,133 @@ def run_server_bench(
             )
         )
 
-        # Allocate KV tensors. GPU mode wraps real CUDA tensors
-        # via CUDA IPC; CPU mode allocates POSIX-SHM-backed
-        # tensors so the server can map the same physical pages.
-        # shm_names tracks per-layer SHM segment names allocated
-        # on demand (one per layer) so we can shm_unlink on exit.
+        # Allocate KV tensors and register the cache once per simulated
+        # TP rank. Each rank gets its own SHM prefix / CUDA tensors so
+        # the server holds one context per (instance_id) — mirroring the
+        # multi-process worker layout in vLLM. shm_names aggregates every
+        # rank's per-layer SHM segments for a best-effort cleanup on
+        # shutdown.
+        tp_size = max(1, int(getattr(args, "tp_size", 1)))
+        # Explicit --use-mla wins; otherwise infer MLA from the shape
+        # spec via ``_is_mla_kv_size`` (kv_size == 1 marks an MLA
+        # single-plane group). Routing all shape-derived MLA checks
+        # through ``_is_mla_kv_size`` keeps this file, the helpers
+        # module, and the server detector agreeing on one contract.
+        use_mla = bool(getattr(args, "use_mla", False)) or (
+            isinstance(kv_size_disp, int) and _is_mla_kv_size(kv_size_disp)
+        )
+        # Fail fast when --use-mla is set but the shape spec still
+        # declares a two-plane KV group: allocation would build rank-5
+        # classical tensors while the server expects the MLA single-
+        # plane layout, and the mismatch only surfaces mid-run.
+        if (
+            use_mla
+            and isinstance(kv_size_disp, int)
+            and not _is_mla_kv_size(kv_size_disp)
+        ):
+            raise ValueError(
+                "--use-mla requires --kvcache-shape-spec with kv_size=1 "
+                "(single-plane MLA group), got kv_size=%s" % kv_size_disp
+            )
+        # ``ParallelStrategy.kv_world_size`` folds all TP ranks into a
+        # single kv_worker under MLA; non-MLA keeps one kv_worker per
+        # rank. Bench mirrors that so ``IPCCacheServerKey.worker_id``
+        # and ``.world_size`` line up with what LMCacheMPWorkerAdapter
+        # produces in a real deployment (otherwise LOOKUP expands to
+        # kv_ranks the STORE side never wrote).
+        kv_world_size = 1 if use_mla else tp_size
         shm_names: list[str] = []
+        workers: list[WorkerContext] = []
+        registered_instance_ids: list[int] = []
+
+        # Import the wrapper class once per mode, outside the per-rank
+        # loop: importing ``CudaIPCWrapper`` on a non-CUDA host pulls in
+        # CUDA-specific symbols from torch and can crash, so it must stay
+        # behind the ``use_gpu`` gate; keeping it in the loop just paid
+        # the same cost every rank without adding any safety.
         if use_gpu:
             # First Party
-            from lmcache.v1.multiprocess.custom_types import CudaIPCWrapper
-
-            allocated = _allocate_gpu_kv_cache(groups=layer_groups)
-            log(
-                "Allocated %d GPU tensors on %s" % (len(allocated), allocated[0].device)
-            )
-            kv_wrappers = [CudaIPCWrapper(t) for t in allocated]
-            # Keep the CUDA tensors alive for the lifetime of the
-            # bench process -- storage may be reclaimed otherwise --
-            # and reuse the same list as the client-side data-mode
-            # source/sink for the round-trip self-check.
-            client_kv_tensors = allocated
+            from lmcache.v1.platform.cuda.ipc_wrapper import CudaIPCWrapper
         else:
             # First Party
             from lmcache.v1.platform.cpu.shm import CpuShmTensorWrapper
 
-            shm_prefix = CpuShmTensorWrapper.SHM_NAME_PREFIX + str(os.getpid())
-            cpu_tensors, cpu_wrappers, shm_names = _allocate_cpu_shm_kv_cache(
-                groups=layer_groups, shm_prefix=shm_prefix
+        for rank in range(tp_size):
+            instance_id = _INSTANCE_ID_BASE + rank
+            # MLA: every vLLM rank folds into kv_worker_id 0.
+            # Non-MLA: kv_worker_id == vLLM rank.
+            kv_worker_id = 0 if use_mla else rank
+            if use_gpu:
+                allocated = _allocate_gpu_kv_cache(groups=layer_groups)
+                log(
+                    "[rank %d] Allocated %d GPU tensors on %s"
+                    % (rank, len(allocated), allocated[0].device)
+                )
+                kv_wrappers: KVCache = [CudaIPCWrapper(t) for t in allocated]
+                client_kv_tensors = allocated
+            else:
+                shm_prefix = CpuShmTensorWrapper.SHM_NAME_PREFIX + "%s_r%d" % (
+                    os.getpid(),
+                    rank,
+                )
+                cpu_tensors, cpu_wrappers, rank_shm_names = _allocate_cpu_shm_kv_cache(
+                    groups=layer_groups, shm_prefix=shm_prefix
+                )
+                shm_names.extend(rank_shm_names)
+                log(
+                    "[rank %d] Allocated %d CPU SHM tensors (prefix=%s)"
+                    % (rank, len(cpu_tensors), shm_prefix)
+                )
+                kv_wrappers = list(cpu_wrappers)
+                client_kv_tensors = cpu_tensors
+
+            # Register KV cache before any store/retrieve. Handle mode
+            # (GPU CUDA-IPC / CPU POSIX-SHM) shares REGISTER_KV_CACHE;
+            # data mode falls through to the engine-driven register.
+            register_result = _send_register_kv_cache(
+                client,
+                instance_id=instance_id,
+                world_size=kv_world_size,
+                layout_hints=layout_hints,
+                kv_caches=kv_wrappers if use_handle else None,
+                use_gpu=use_gpu,
+                use_handle=use_handle,
+                engine_group_infos=engine_group_infos,
             )
             log(
-                "Allocated %d CPU SHM tensors (prefix=%s)"
-                % (len(cpu_tensors), shm_prefix)
+                "[rank %d] REGISTER_KV_CACHE: %s"
+                % (rank, "OK" if register_result else "FAIL")
             )
-            kv_wrappers = list(cpu_wrappers)
-            client_kv_tensors = cpu_tensors
+            if not register_result:
+                continue
+            registered_instance_ids.append(instance_id)
 
-        # Register KV cache before any store/retrieve. In handle mode
-        # both GPU (CUDA-IPC) and CPU (POSIX-SHM) paths share the same
-        # ``REGISTER_KV_CACHE`` protocol since ``CpuShmTensorWrapper``
-        # is a ``CudaIPCWrapper`` subclass on the wire. In data mode
-        # we fall through to the non-GPU registration protocol.
-        register_result = _send_register_kv_cache(
-            client,
-            layout_hints=layout_hints,
-            kv_caches=kv_wrappers if use_handle else None,
-            use_gpu=use_gpu,
-            use_handle=use_handle,
-            engine_group_infos=engine_group_infos,
-        )
-        log("REGISTER_KV_CACHE: %s" % ("OK" if register_result else "FAIL"))
+            # Data-mode register replies with the server's SHM pool name
+            # for this instance; each rank mmaps its own pool so PREPARE
+            # / COMMIT can hand out zero-copy slot views per worker.
+            rank_server_pool: "mmap.mmap | None" = None
+            if not use_handle and not isinstance(register_result, bool):
+                shm_name = getattr(register_result, "shm_name", "")
+                pool_size = getattr(register_result, "pool_size", 0)
+                if shm_name and pool_size > 0:
+                    rank_server_pool = shm_open_pool_as_mmap(shm_name, pool_size)
+
+            workers.append(
+                WorkerContext(
+                    kv_worker_id=kv_worker_id,
+                    kv_world_size=kv_world_size,
+                    instance_id=instance_id,
+                    client_tensors=None if use_handle else client_kv_tensors,
+                    server_pool=rank_server_pool,
+                    # MLA: only rank 0 stores; non-MLA: every rank stores.
+                    is_kv_writer=(rank == 0) if use_mla else True,
+                )
+            )
         log("")
-
-        # In data mode the server reply carries the SHM pool name
-        # and size; the bench mmaps the same pool so STORE/RETRIEVE
-        # can exchange tensor data via slot descriptors instead of
-        # round-tripping pickle through the RPC layer.
-        server_pool: "mmap.mmap | None" = None
-        if not use_handle and not isinstance(register_result, bool):
-            shm_name = getattr(register_result, "shm_name", "")
-            pool_size = getattr(register_result, "pool_size", 0)
-            if shm_name and pool_size > 0:
-                server_pool = shm_open_pool_as_mmap(shm_name, pool_size)
+        # ``registered`` retained purely as a boolean summary for a
+        # possible future log line; the ``finally`` block iterates the
+        # concrete instance-id list to send matching UNREGISTERs.
+        registered = bool(registered_instance_ids)
 
         if args.end is not None:
             seq_iter: itertools.count | range = range(args.start, args.end)
@@ -502,12 +706,9 @@ def run_server_bench(
 
         http_base = args.url.rstrip("/")
 
-        # In data mode the server has no paged ``kv_tensors`` view to
-        # hash, so we self-check on the client: cold pass captures
-        # ground truth, warm pass zero-fills + re-hashes after
-        # RETRIEVE. Handle mode keeps the legacy server-side
-        # ``/kvcache/check`` path.
-        client_tensors = None if use_handle else client_kv_tensors
+        # Record only the steady-state load, not the one-time registration.
+        if profiler is not None:
+            profiler.start(log)
 
         for seq_no in seq_iter:
             log("=== Request seq=%d ===" % seq_no)
@@ -525,8 +726,8 @@ def run_server_bench(
                 num_engine_group_infos=num_engine_group_infos,
                 use_gpu=use_gpu,
                 use_handle=use_handle,
-                client_tensors=client_tensors,
-                server_pool=server_pool,
+                workers=workers,
+                world_size=kv_world_size,
             )
             if cold_result is not None:
                 if cold_result.lookup_ms is not None:
@@ -549,8 +750,8 @@ def run_server_bench(
                 num_engine_group_infos=num_engine_group_infos,
                 use_gpu=use_gpu,
                 use_handle=use_handle,
-                client_tensors=client_tensors,
-                server_pool=server_pool,
+                workers=workers,
+                world_size=kv_world_size,
             )
             if warm_result is not None:
                 if warm_result.lookup_ms is not None:
@@ -591,11 +792,38 @@ def run_server_bench(
     except KeyboardInterrupt:
         log("\nStopping...")
     finally:
-        # Release the bench-side mmap of the server SHM pool first
-        # (data mode only; ``server_pool`` stays ``None`` otherwise).
-        if "server_pool" in locals() and server_pool is not None:
+        # Stop recording once load ends, before teardown
+        if profiler is not None:
+            profiler.stop(log)
+        # Deregister every rank we managed to register before tearing
+        # down the client. Otherwise the server keeps each rank's
+        # registration (and the CUDA-IPC / POSIX-SHM mappings it holds)
+        # alive forever, leaking one context entry per rank per bench
+        # run. Must run while the client is still connected, hence
+        # before ``client.close()``.
+        for _instance_id in locals().get("registered_instance_ids", []) or []:
             try:
-                server_pool.close()
+                ok = _send_unregister_kv_cache(
+                    client,
+                    instance_id=_instance_id,
+                    use_handle=use_handle,
+                )
+                log(
+                    "[iid %d] UNREGISTER_KV_CACHE: %s"
+                    % (_instance_id, "OK" if ok else "FAIL")
+                )
+            except zmq.ZMQError as exc:
+                log(
+                    "  [warning] UNREGISTER_KV_CACHE failed for "
+                    "iid %d: %s" % (_instance_id, exc)
+                )
+        # Release the bench-side mmap of every worker's SHM pool
+        # (data mode only; ``server_pool`` stays ``None`` otherwise).
+        for _w in locals().get("workers", []) or []:
+            if _w.server_pool is None:
+                continue
+            try:
+                _w.server_pool.close()
             except (BufferError, ValueError):
                 pass
         client.close()

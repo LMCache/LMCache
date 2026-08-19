@@ -105,15 +105,24 @@ Disable it for a correctness baseline:
 
    export LMCACHE_MUSA_NATIVE_KV_TRANSFER=0
 
-For MP transfer mode on MUSA, use the engine-driven data path unless you are validating
-Stage 4 handle mode explicitly:
+Stage 4 MUSA handle support is merged. Prefer the LMCache-driven handle path when
+TorchMUSA provides the required memory and event IPC APIs:
 
 .. code-block:: bash
 
-   export LMCACHE_MP_TRANSFER_MODE=engine_driven
+   export LMCACHE_MUSA_HANDLE_TRANSFER=1
+   export LMCACHE_MP_TRANSFER_MODE=lmcache_driven
 
-``auto`` should also keep MUSA on the engine-driven data path unless the MUSA handle
-path is explicitly available and requested by the selected LMCache branch.
+This path lets the LMCache server access registered MUSA KV-cache tensors through
+device handles and avoids worker-side gather/scatter copies. The ``auto`` mode still
+selects ``engine_driven`` for MUSA, so request ``lmcache_driven`` explicitly to use
+the handle path. If the required TorchMUSA IPC APIs are unavailable, use the
+engine-driven compatibility path instead:
+
+.. code-block:: bash
+
+   unset LMCACHE_MUSA_HANDLE_TRANSFER
+   export LMCACHE_MP_TRANSFER_MODE=engine_driven
 
 Step 5: Create an LMCache config
 --------------------------------
@@ -140,7 +149,8 @@ Example vLLM server command:
    export PYTHONPATH=$LMCACHE_SRC:$PYTHONPATH
    export LMCACHE_CONFIG_FILE=/tmp/lmcache_musa_e2e.yaml
    export LMCACHE_MUSA_NATIVE_KV_TRANSFER=1
-   export LMCACHE_MP_TRANSFER_MODE=engine_driven
+   export LMCACHE_MUSA_HANDLE_TRANSFER=1
+   export LMCACHE_MP_TRANSFER_MODE=lmcache_driven
    export VLLM_USE_V1=1
    export MUSA_VISIBLE_DEVICES=7
 

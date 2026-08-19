@@ -14,6 +14,13 @@ The observability system uses an **EventBus with pub/sub dispatch** and
 - **Export** is via OTLP push to an OTel collector (production) or an in-process
   Prometheus `/metrics` endpoint (dev/debug fallback).
 
+The MP Coordinator reuses the same `init_otel_metrics()` pipeline without
+starting a standalone Prometheus HTTP server. In pull mode its FastAPI app
+serves `GET /metrics` on the coordinator port (default `9300`). In OTLP push
+mode, or when coordinator metrics are disabled, that route returns 404. The
+coordinator provider carries `service.name=lmcache-mp-coordinator`; concrete
+coordinator instruments are registered separately from this transport setup.
+
 All metrics use the `lmcache_mp.` prefix (mp = multiprocess), distinct from the main
 engine's `lmcache.` namespace. On Prometheus, `.` is converted to `_` and counters get
 a `_total` suffix (e.g., `lmcache_mp.l1_read` with `unit="chunks"` is exposed as
@@ -102,6 +109,23 @@ require a cross-cutting API change out of scope for this PR.
 **What it answers:**
 - `l1_allocation_failure` — how often is L1 rejecting writes for lack of memory, split by whether the pressure is user stores or L2 prefetch?
 - `l1_read_failure` — a **post-lookup anomaly counter**, not a cache-miss counter. Should stay near zero in healthy operation; any non-zero value indicates a lookup/reserve race or unexpected eviction in MP mode.
+
+---
+
+## Timeout Metrics
+
+Cross-component anomaly counter. Incremented once per `LMCacheTimeoutError`
+constructed (see `errors.py` and the `TIMEOUT_RAISED` event in
+[EVENTS.md](EVENTS.md)), tagged by `exception_type` so operators can alert on
+the timeout rate per class.
+
+| OTel metric name | Prometheus name | Type | Source event | Calculation | Tags |
+|---|---|---|---|---|---|
+| `lmcache_mp.timeouts` | `lmcache_mp_timeouts_total` | Counter | `TIMEOUT_RAISED` | `+1` per event | `exception_type` |
+
+**What it answers:** how often are operations timing out, and of which kind?
+Should stay near zero in healthy operation; a rising rate signals an
+overloaded or stuck MQ/transfer/adapter path.
 
 ---
 

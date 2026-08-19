@@ -31,9 +31,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	appsv1 "k8s.io/api/apps/v1"
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/yaml"
 
 	lmcachev1alpha1 "github.com/LMCache/LMCache/api/v1alpha1"
@@ -48,10 +46,10 @@ import (
 //     --engine-type blend` DaemonSet pod.
 //  2. A vLLM Deployment opts in to CacheBlend injection (label + engine
 //     annotation). The mutating webhook injects the CacheBlend vLLM flags
-//     (--attention-backend CUSTOM, --kv-transfer-config <engine>, etc.), the
-//     cb-plugin init container, hostIPC, and the private payload's pull secret.
-//  3. vLLM loads the CUSTOM attention backend (asserted on the injected args
-//     AND on vLLM's own startup banner), starts, and serves /v1/models.
+//     (--kv-transfer-config <engine>, etc.), the cb-plugin init container,
+//     the /dev/shm hostPath mount, and the private payload's pull secret.
+//  3. vLLM comes up on the CUSTOM attention backend (asserted on its own
+//     startup banner), starts, and serves /v1/models.
 //  4. A completion request drives a forward pass, which makes vLLM's connector
 //     register its rope cache with the engine — the engine logs
 //     "Registered CB rope state for instance N".
@@ -168,9 +166,6 @@ var _ = Describe("vLLM + CacheBlendEngine integration smoke (GPU)", Ordered, fun
 			g.Expect(pod.Annotations).To(HaveKeyWithValue("lmcache.ai/cacheblend-injected", "true"),
 				"webhook did not stamp cacheblend-injected=true; injection did not fire "+
 					"(skip-reason=%q)", pod.Annotations["lmcache.ai/cacheblend-skip-reason"])
-			args := vllmContainerArgs(pod)
-			g.Expect(argValue(args, "--attention-backend")).To(Equal("CUSTOM"),
-				"injected args missing '--attention-backend CUSTOM': %v", args)
 		}, 60*time.Second, 2*time.Second).Should(Succeed())
 
 		By("waiting for the vLLM Deployment to become Available (model load + connector handshake)")
@@ -192,7 +187,7 @@ var _ = Describe("vLLM + CacheBlendEngine integration smoke (GPU)", Ordered, fun
 			return countLogLines(ctx, nsName, vllmPod.Name, backendLog)
 		}, 60*time.Second, 2*time.Second).Should(BeNumerically(">=", 1),
 			"vLLM never logged the CUSTOM attention backend banner (pattern %q) — "+
-				"the injected --attention-backend CUSTOM did not take effect", backendLog.String())
+				"the CB attention backend was not selected", backendLog.String())
 
 		By("port-forwarding to the vLLM service for completion requests")
 		vllmCloser, vllmBaseURL, err := utils.PortForward(
@@ -249,36 +244,6 @@ func setImageSpec(spec **lmcachev1alpha1.ImageSpec, ref string) {
 	(*spec).Tag = &tag
 }
 
-// firstPodForDeployment returns the first non-terminating pod selected by the
-// Deployment's pod selector, or nil if none exist yet. Returns the typed Pod
-// so callers can read both annotations (injection stamp) and container args.
-func firstPodForDeployment(ctx context.Context, ns string, dep *appsv1.Deployment) *corev1.Pod {
-	pods := &corev1.PodList{}
-	if err := k8sClient.List(ctx, pods,
-		client.InNamespace(ns),
-		client.MatchingLabels(dep.Spec.Selector.MatchLabels),
-	); err != nil {
-		return nil
-	}
-	for i := range pods.Items {
-		if pods.Items[i].DeletionTimestamp == nil {
-			return &pods.Items[i]
-		}
-	}
-	return nil
-}
-
-// vllmContainerArgs returns the args of the vLLM container in the pod (the one
-// named "vllm", falling back to the first container). The mutating webhook
-// appends the CacheBlend flags to this container's args.
-func vllmContainerArgs(pod *corev1.Pod) []string {
-	for i := range pod.Spec.Containers {
-		if pod.Spec.Containers[i].Name == "vllm" {
-			return pod.Spec.Containers[i].Args
-		}
-	}
-	if len(pod.Spec.Containers) > 0 {
-		return pod.Spec.Containers[0].Args
-	}
-	return nil
-}
+// firstPodForDeployment and vllmContainerArgs live in smoke_helpers_test.go so
+// the CPU-only LMCache injection smoke (build tag e2e, no e2e_gpu) can share
+// them.
