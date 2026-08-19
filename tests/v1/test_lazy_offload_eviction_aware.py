@@ -8,7 +8,7 @@ through the ``BlockPoolReader`` protocol.
 
 # Standard
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Iterator, cast
 
 # Third Party
 import pytest
@@ -29,24 +29,26 @@ if TYPE_CHECKING:
 class FakePoolView:
     """In-memory BlockPoolReader: a free queue (head first) and a hash map.
 
-    ``free_queue_ranks`` honours ``max_depth`` exactly, and records every
-    depth it was asked for in ``depth_requests``. The production view walks
-    the free list and stops at the bound, so a fake that returned the whole
-    queue would let a policy that reads ranks past the bound pass here and
-    read absent blocks in production.
+    ``free_queue_block_ids`` is a generator that counts the blocks the
+    policy actually consumes into ``blocks_walked``. The production view
+    walks a linked list on the scheduler's critical path, so a fake that
+    handed over the whole queue at once would hide how deep a step reads --
+    the quantity every token's decode latency pays for.
     """
 
     def __init__(self) -> None:
         self.free_queue: list[int] = []
         self.hashes: dict[int, bytes] = {}
-        self.depth_requests: list[int] = []
+        self.blocks_walked = 0
         self.hash_requests: list[int] = []
 
-    def free_queue_ranks(self, max_depth: int) -> dict[int, int]:
-        self.depth_requests.append(max_depth)
-        return {
-            block_id: rank for rank, block_id in enumerate(self.free_queue[:max_depth])
-        }
+    def free_queue_block_ids(self) -> Iterator[int]:
+        for block_id in self.free_queue:
+            self.blocks_walked += 1
+            yield block_id
+
+    def is_free(self, block_id: int) -> bool:
+        return block_id in self.free_queue
 
     def block_hash(self, block_id: int) -> bytes | None:
         self.hash_requests.append(block_id)
@@ -810,9 +812,15 @@ class TestFreeQueueSnapshotBound:
     Reading the whole free queue is O(free blocks) -- tens of thousands on a
     pool with room to spare -- while the only ranks any decision compares
     are those within the danger depth, extended by the blocks this same call
-    can pin out of the queue. Everything deeper is indistinguishable from a
-    block that is not in the queue at all, which the policy already treats
+    *does* pin out of the queue. Everything deeper is indistinguishable from
+    a block that is not in the queue at all, which the policy already treats
     as not at risk.
+
+    "Does", not "can": the depth a full-budget drain could reach is not what
+    a step should pay for, because a step almost never drains a full budget.
+    The read therefore follows the emissions rather than anticipating them,
+    which leaves ``max_drain_per_step`` bounding the D2H burst and nothing
+    else.
     """
 
     def test_snapshot_stops_at_danger_depth_plus_pending_blocks(self) -> None:
@@ -824,7 +832,7 @@ class TestFreeQueueSnapshotBound:
         assert queue.collect_due().to_store == []
         # 4 blocks per step over a 1-step horizon, plus the 2 pending blocks
         # that an emission in this call could shift the queue by.
-        assert pool.depth_requests == [6]
+        assert pool.blocks_walked == 4
 
     def test_incremental_step_checks_only_bounded_candidate_requests(self) -> None:
         pool = FakePoolView()
@@ -848,7 +856,7 @@ class TestFreeQueueSnapshotBound:
 
         # danger depth 1 plus at most 64 one-block emissions: neither the
         # free-list walk nor hash validation reaches the other 935 requests.
-        assert pool.depth_requests == [65]
+        assert pool.blocks_walked == 64
         assert set(pool.hash_requests) <= set(range(1, 66))
 
     def test_allocated_block_signal_revalidates_a_nonfree_op(self) -> None:
@@ -876,7 +884,7 @@ class TestFreeQueueSnapshotBound:
         queue.admit(make_op("req", [1, 2], pool, prefix_end_tokens=256))
         queue.observe_step(new_blocks_allocated=0, est_next_step_blocks=0)
         assert queue.collect_due().to_store == []
-        assert pool.depth_requests == []
+        assert pool.blocks_walked == 0
         assert queue.num_pending_ops() == 1
 
     def test_idle_step_still_drops_ops_whose_blocks_were_evicted(self) -> None:
@@ -893,7 +901,7 @@ class TestFreeQueueSnapshotBound:
         result = queue.collect_due()
         assert len(result.dropped_evicted) == 1
         assert queue.stats().dropped_evicted == 1
-        assert pool.depth_requests == []
+        assert pool.blocks_walked == 0
 
     def test_bound_covers_the_candidate_that_only_an_emission_shifts_into_reach(
         self,
@@ -914,5 +922,79 @@ class TestFreeQueueSnapshotBound:
         queue.observe_step(new_blocks_allocated=0, est_next_step_blocks=2)
         result = queue.collect_due()
         assert {op.request_id for op in result.to_store} == {"a", "b"}
-        # Danger depth 2, plus the 2 blocks pending across both requests.
-        assert pool.depth_requests == [4]
+        # Danger depth 2, widened by the one block emitting `a` pinned.
+        assert pool.blocks_walked == 3
+
+    def test_read_depth_does_not_scale_with_the_drain_budget(self) -> None:
+        """The budget bounds the emissions, not the read.
+
+        Both settings face the same queue, the same backlog and the same
+        danger depth, and neither has anything due; the ranks either one
+        compares are the same ranks, so the walk has to be the same length.
+        """
+        walked = []
+        for budget in (1, 64):
+            pool = FakePoolView()
+            seed_blocks(pool, list(range(1, 501)), free=True)
+            queue = make_queue(pool, horizon_steps=1.0, max_drain_per_step=budget)
+            for block_id in range(400, 500):
+                queue.admit(
+                    make_op(f"req-{block_id}", [block_id], pool, prefix_end_tokens=256)
+                )
+            queue.observe_step(new_blocks_allocated=3, est_next_step_blocks=0)
+            assert queue.collect_due().to_store == []
+            walked.append(pool.blocks_walked)
+        assert walked == [3, 3]
+
+    def test_read_depth_follows_the_shift_an_emission_causes(self) -> None:
+        pool = FakePoolView()
+        seed_blocks(pool, list(range(1, 501)), free=True)
+        queue = make_queue(pool, horizon_steps=1.0, max_drain_per_step=64)
+        queue.admit(make_op("req", [1, 2, 3], pool, prefix_end_tokens=256))
+        queue.observe_step(new_blocks_allocated=1, est_next_step_blocks=0)
+        assert len(queue.collect_due().to_store) == 1
+        # Danger depth 1 plus the three blocks the emission actually pinned
+        # out of the queue -- not 64 times the largest pending operation.
+        assert pool.blocks_walked == 4
+
+    def test_a_pin_deeper_than_the_window_still_counts_as_a_shift(self) -> None:
+        """Queue membership is read from the pool, not from the window.
+
+        `req-a` is due on its head block, but pinning it removes its deep
+        block from the queue as well, and both moves `req-b` toward the
+        head. Counting only the pins the window happened to cover would
+        widen the window by one instead of two, leave `req-b`'s block
+        unread, and lose it to the next allocation -- and the deeper the
+        pin, the less likely the window is to have covered it.
+        """
+        pool = FakePoolView()
+        seed_blocks(pool, list(range(1, 21)), free=True)
+        queue = make_queue(pool, horizon_steps=1.0)
+        queue.admit(make_op("req-a", [1, 15], pool, prefix_end_tokens=256))
+        queue.admit(make_op("req-b", [3], pool, prefix_end_tokens=256))
+        queue.observe_step(new_blocks_allocated=1, est_next_step_blocks=0)
+        result = queue.collect_due()
+        assert [op.request_id for op in result.to_store] == ["req-a", "req-b"]
+        # Danger depth 1, widened to 3 by `req-a`'s two pins and to 4 by
+        # `req-b`'s one -- the walk stops where the emissions stop.
+        assert pool.blocks_walked == 4
+
+    def test_counters_report_what_each_step_read_and_validated(self) -> None:
+        """The decision loop's own cost is observable, not inferred.
+
+        Nothing here is due on either step, which is the case that has to be
+        cheap: the backlog sits far from the eviction head and the step
+        still pays a walk and a validation pass for it.
+        """
+        pool = FakePoolView()
+        seed_blocks(pool, list(range(1, 101)), free=True)
+        queue = make_queue(pool, horizon_steps=1.0)
+        queue.admit(make_op("req", [90, 91], pool, prefix_end_tokens=256))
+        for _ in range(2):
+            queue.observe_step(new_blocks_allocated=2, est_next_step_blocks=0)
+            assert queue.collect_due().to_store == []
+        stats = queue.stats()
+        assert stats.drain_steps == 2
+        assert stats.free_queue_blocks_read == 4
+        assert stats.requests_validated == 2
+        assert stats.blocks_validated == 4

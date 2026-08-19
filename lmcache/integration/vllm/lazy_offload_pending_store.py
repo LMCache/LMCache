@@ -170,7 +170,7 @@ class LazyOffloadPendingStore:
         self._eviction_queue: EvictionAwareStoreQueue | None = None
         # Periodic counter-ledger logging state: the last snapshot written
         # to the log and when it was written (see _maybe_log_stats).
-        self._last_logged_stats = LazyOffloadCounters()
+        self._last_logged_decisions = LazyOffloadCounters().decisions()
         self._last_stats_log_time = 0.0
         # The throttle-versus-loss warning is emitted once per process (see
         # collect_due): it names a misconfiguration that persists for the
@@ -498,13 +498,17 @@ class LazyOffloadPendingStore:
         a step at least ``_STATS_LOG_INTERVAL_S`` after the last change --
         the shutdown hook alone is unreliable under a force-killed engine.
 
-        The change test looks at the counters only, not at the pending depth
-        the line also carries: every mutation of the pending queue moves a
-        counter with it (admission, emission, each drop cause), so a changed
-        depth always shows up as changed counters.
+        The change test looks at the decision counters only, not at the
+        pending depth the line also carries: every mutation of the pending
+        queue moves one of them with it (admission, emission, each drop
+        cause), so a changed depth always shows up as a changed decision.
+        The per-step cost sensors are excluded on purpose -- they advance
+        on every drain, so gating on them would log a line every interval
+        for the life of the engine.
         """
         stats = queue.stats()
-        if stats == self._last_logged_stats:
+        decisions = stats.decisions()
+        if decisions == self._last_logged_decisions:
             return
         now = time.monotonic()
         if now - self._last_stats_log_time < _STATS_LOG_INTERVAL_S:
@@ -513,7 +517,7 @@ class LazyOffloadPendingStore:
             "Lazy offload counters: %s",
             _format_ledger(stats, queue.num_pending_ops()),
         )
-        self._last_logged_stats = stats
+        self._last_logged_decisions = decisions
         self._last_stats_log_time = now
 
     def _pop_fifo_items(

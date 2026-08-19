@@ -53,7 +53,12 @@ class _FakeBlock:
 
     block_id: int
     block_hash: bytes | None
-    ref_cnt: int = 0
+    #: vLLM keeps exactly the unreferenced blocks in the free queue, and the
+    #: pool view reads that invariant to decide whether pinning a block
+    #: shifts the queue. Blocks therefore start out of the queue and held;
+    #: ``make_free`` is what drops the count to zero and enqueues them.
+    ref_cnt: int = 1
+    is_null: bool = False
     next_free_block: "_FakeBlock | None" = None
 
 
@@ -133,8 +138,9 @@ class _FakeBlockPool:
         self.blocks[block_id].block_hash = block_hash
 
     def make_free(self, block_ids: list[int]) -> None:
-        """Append unreferenced blocks to the tail of the free queue."""
+        """Release blocks to the tail of the free queue."""
         for bid in block_ids:
+            self.blocks[bid].ref_cnt = 0
             self.free_list.append(self.blocks[bid])
 
     def free_block_ids(self) -> list[int]:

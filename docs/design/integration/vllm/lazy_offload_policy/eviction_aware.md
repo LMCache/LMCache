@@ -17,18 +17,36 @@ whose blocks come under eviction pressure.
 ## Objects
 
 - **`BlockPoolReader`** (protocol) — read-only pool view:
-  `free_queue_ranks(max_depth)` (block id → LRU eviction rank, rank 0 = next
-  victim; absent = not free, *or* deeper than `max_depth`, which the policy
-  treats the same way) and `block_hash(block_id)`. Production impl
-  `GPUBlockPoolView` wraps the `BlockPool` bound via the vLLM
-  `bind_gpu_block_pool` hook; both must never mutate pool state. The depth
-  bound is not an optimisation detail the policy may ignore: this call is on
-  the scheduler's critical path once per step, and an unbounded read is
-  O(free blocks) — tens of thousands on a pool sized to fill the GPU.
-  `collect_due` asks for `danger_depth + max_drain_per_step × largest pending
-  op`, capped by the total pending blocks. This is a safe upper bound on the
-  deepest rank a pin cascade can reach without walking the pending queue to
-  size every operation; it skips the call entirely at danger depth 0.
+  `free_queue_block_ids()` (a *lazy* iterator over the free queue from the
+  eviction head; a block's position in it is its LRU rank, rank 0 = next
+  victim), `is_free(block_id)` (O(1) queue membership — vLLM keeps exactly
+  the unreferenced blocks in the queue, so the reference count answers it),
+  and `block_hash(block_id)`. Production impl `GPUBlockPoolView` wraps the
+  `BlockPool` bound via the vLLM `bind_gpu_block_pool` hook; both must never
+  mutate pool state.
+
+  Laziness is not an optimisation detail the policy may ignore: this walk is
+  on the scheduler's critical path once per step, and reading the whole
+  queue is O(free blocks) — tens of thousands on a pool sized to fill the
+  GPU. `collect_due` consumes the iterator through `_FreeQueueWindow`, which
+  opens at `danger_depth` and widens only by the blocks an emission has
+  *already* pinned out of the queue (see "Pin cascade" below), so a step
+  reads the ranks its decisions compare. It reads nothing at all at danger
+  depth 0.
+
+  The depth deliberately does **not** scale with `max_drain_per_step`. A
+  bound of `danger_depth + max_drain_per_step × largest pending op` is
+  sound, but it charges every step for a full-budget drain: measured on an
+  agentic replay at the default cap of 64, the mean drain emitted 0.2 ops
+  while the bound sized the read for 64, and the read — with the request
+  validation it pulls in behind it — became the policy's dominant cost late
+  in a run. The budget bounds the D2H burst; it is not a statement about
+  ranks.
+
+  `is_free` exists for the same accounting. Whether pinning a block shifts
+  the queue is a property of the pool, not of how far this step happened to
+  read: asking the window instead would miss a pin deeper than the window
+  and stall the widening that would have revealed it.
 - **`PendingStoreOp`** — one deferred store: opaque `store_metadata` (the
   ready `LMCacheMPRequestMetadata`), the covered blocks' hash snapshot taken
   at admission, `prefix_start_tokens` / `prefix_end_tokens` (the op's token
@@ -251,6 +269,21 @@ vLLM hit instead of 0 on a lookup miss.
   merely delaying a burst from one below the workload's admission rate.
   Neither symptom alone warns: ops lost without the cap binding is ordinary
   pressure, and a cap that binds without loss is the knob doing its job.
+- **Pin cascade.** Emitting a segment pins its blocks out of the free queue,
+  which moves every block behind them toward the head by that many positions
+  before the next step's allocation runs. Each candidate is therefore tested
+  against `danger_depth` extended by the blocks this drain has already
+  pinned, so a request an emission teleports into the danger window drains
+  now instead of losing the race. The first emission still needs a plain
+  `danger_depth` hit — an idle system never starts draining — which is what
+  keeps the extension from being a way to drain early on its own.
+
+  The threshold and the read grow together, alternating: emit, count the
+  pins that left the queue, widen the window to the new threshold, and let
+  the newly revealed blocks name more candidates. This terminates because
+  each round either emits (and `max_drain_per_step` is finite) or finds
+  nothing due. Only pins that *were* in the queue count, and a shared block
+  counts once.
 - **Idle consequences**: receipts travel in worker metadata, which only
   flows on steps that schedule tokens. If the engine goes idle with a
   batch in flight, its pins and its request's session stay held until the
@@ -285,6 +318,15 @@ boundaries, so completed request ids do not accumulate.
 (drop rate: data lost before we drained — lower the horizon is too tight);
 `emitted / admitted` is store precision's denominator; `rejected_short_prefix`
 audits gate 3. Tests: `tests/v1/test_lazy_offload_eviction_aware.py` (pure, no vLLM).
+
+Four counters measure the decision loop's own cost rather than any op's
+fate: `drain_steps`, `free_queue_blocks_read`, `requests_validated` and
+`blocks_validated`. Divided by `drain_steps` they give the mean free-queue
+depth a step walks and the mean number of block-hash comparisons it makes —
+the quantities that turn a policy which saves prefill time into one that
+spends more decode time than it saves. They are excluded from the ledger's
+change test (`LazyOffloadCounters.decisions()`) because they advance on
+every drain: gating the log line on them would never let it go quiet.
 
 The counters surface in the scheduler process log, not in vLLM's
 `get_kv_connector_stats` plumbing (that hook is polled worker-side, where the
