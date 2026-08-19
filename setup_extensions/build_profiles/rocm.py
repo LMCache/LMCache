@@ -25,7 +25,20 @@ HIPIFY_OUT_DIR = os.path.join(ROOT_DIR, "csrc_hip", "cuda")
 
 
 def _hipify_wrapper(source_names: list[str]) -> list[str]:
-    """Hipify ``csrc/cuda`` and return paths for requested source files."""
+    """Hipify ``csrc/cuda`` and return paths for the requested source files.
+
+    Args:
+        source_names: Base names of the CUDA sources to hipify, relative to
+            ``csrc/cuda`` (e.g. ``"ac_dec.cu"``).
+
+    Returns:
+        One path per entry in ``source_names``, in the same order, pointing at
+        the hipified file under ``csrc_hip/cuda``.  Paths are ``/``-separated
+        and relative to the project root (the ``setup.py`` directory).
+
+    Raises:
+        RuntimeError: If hipify did not yield a path for every requested source.
+    """
     # Third Party
     from torch.utils.hipify.hipify_python import hipify
 
@@ -57,7 +70,9 @@ def _hipify_wrapper(source_names: list[str]) -> list[str]:
             )
             else s_abs
         )
-        hipified_sources.append(hipified_s_abs)
+        hipified_sources.append(
+            os.path.relpath(hipified_s_abs, ROOT_DIR).replace(os.sep, "/")
+        )
 
     if len(hipified_sources) != len(source_names):
         raise RuntimeError(
