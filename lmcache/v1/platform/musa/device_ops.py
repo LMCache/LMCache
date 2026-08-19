@@ -19,7 +19,7 @@ import ctypes
 import torch
 
 # First Party
-from lmcache.lmcache_native import EngineKVFormat, TransferDirection
+from lmcache.lmcache_native import EngineKVFormat, TransferDirection, is_kv_list
 from lmcache.v1.platform import torch_ops
 from lmcache.v1.platform.base.device_ops import DeviceOps
 from lmcache.v1.platform.musa import native_kv_transfer
@@ -87,8 +87,8 @@ def _tensor_leaves(value: object) -> list[torch.Tensor]:
     return []
 
 
-def _sglang_tensor_lists(value: object) -> list[list[torch.Tensor]] | None:
-    """Return a validated ``[K_layers, V_layers]`` tensor structure."""
+def _kv_layer_lists(value: object) -> list[list[torch.Tensor]] | None:
+    """Return validated separate ``[key_layers, value_layers]`` tensor lists."""
     if not isinstance(value, list) or len(value) != 2:
         return None
     if not all(isinstance(group, list) for group in value):
@@ -101,17 +101,12 @@ def _sglang_tensor_lists(value: object) -> list[list[torch.Tensor]] | None:
     return groups
 
 
-def _is_sglang_mha_format(engine_kv_format: EngineKVFormat) -> bool:
-    """Return whether a transfer uses SGLang's MP MHA layout."""
-    return int(engine_kv_format) == int(EngineKVFormat.TWO_X_NL_X_NB_BS_NH_HS)
-
-
 def _paged_tensor_leaves(paged_operands: object) -> list[torch.Tensor]:
     """Return paged KV tensor leaves, ignoring packed pointer tensors."""
     tensor_layers = _tensor_list(paged_operands)
     if tensor_layers is not None:
         return tensor_layers
-    nested_layers = _sglang_tensor_lists(paged_operands)
+    nested_layers = _kv_layer_lists(paged_operands)
     if nested_layers is not None:
         return _tensor_leaves(nested_layers)
     return []
@@ -145,7 +140,7 @@ def _infer_dtype(
     descriptor_dtype = getattr(shape_desc, "dtype", None)
     if isinstance(descriptor_dtype, torch.dtype):
         return descriptor_dtype
-    # Flat tensor lists and nested SGLang ``[K, V]`` lists carry dtype.
+    # Flat tensor lists and nested ``[key_layers, value_layers]`` lists carry dtype.
     # A packed int64 pointer tensor is not a dtype source.
     paged_tensors = _paged_tensor_leaves(paged_operands)
     if paged_tensors:
@@ -178,7 +173,7 @@ def _paged_shape_and_stride(
         return (nb, bs, hs), (block_stride or bs * hs, hs, 1)
     if int(engine_kv_format) == int(EngineKVFormat.NL_X_TWO_NB_BS_NH_HS):
         return (2, nb, bs, nh, hs), None
-    if _is_sglang_mha_format(engine_kv_format):
+    if int(engine_kv_format) == int(EngineKVFormat.TWO_X_NL_X_NB_BS_NH_HS):
         return (nb, bs, nh, hs), None
     raise ValueError(f"Unsupported MUSA paged layout: {engine_kv_format!r}")
 
@@ -217,29 +212,26 @@ def _reconstruct_paged_layers(
 ) -> _PagedLayers:
     """Normalize pointer-form paged operands to non-owning MUSA views."""
     expected_layers = int(shape_desc.nl)
-    if _is_sglang_mha_format(engine_kv_format):
-        nested_layers = _sglang_tensor_lists(value)
+    separate_kv_lists = is_kv_list(engine_kv_format)
+    if separate_kv_lists:
+        nested_layers = _kv_layer_lists(value)
         if nested_layers is not None:
             if any(len(group) != expected_layers for group in nested_layers):
                 raise ValueError(
-                    f"expected {expected_layers} SGLang MUSA layers per K/V "
+                    f"expected {expected_layers} MUSA layers per key/value "
                     f"group, got {[len(group) for group in nested_layers]}"
                 )
             return nested_layers
 
     tensor_layers = _tensor_list(value)
     if tensor_layers is not None:
-        expected_tensors = (
-            2 * expected_layers
-            if _is_sglang_mha_format(engine_kv_format)
-            else expected_layers
-        )
+        expected_tensors = 2 * expected_layers if separate_kv_lists else expected_layers
         if expected_tensors > 0 and len(tensor_layers) != expected_tensors:
             raise ValueError(
                 f"expected {expected_tensors} MUSA paged tensors, "
                 f"got {len(tensor_layers)}"
             )
-        if _is_sglang_mha_format(engine_kv_format):
+        if separate_kv_lists:
             return [
                 tensor_layers[:expected_layers],
                 tensor_layers[expected_layers:],
@@ -249,11 +241,7 @@ def _reconstruct_paged_layers(
         raise TypeError(
             "MUSA paged operands must be a pointer tensor or supported tensor list"
         )
-    expected_pointers = (
-        2 * expected_layers
-        if _is_sglang_mha_format(engine_kv_format)
-        else expected_layers
-    )
+    expected_pointers = 2 * expected_layers if separate_kv_lists else expected_layers
     _validate_pointer_tensor(value, expected_pointers)
     if device.type != "musa":
         raise ValueError(
@@ -270,7 +258,7 @@ def _reconstruct_paged_layers(
         )
         for pointer in value
     ]
-    if _is_sglang_mha_format(engine_kv_format):
+    if separate_kv_lists:
         return [
             reconstructed[:expected_layers],
             reconstructed[expected_layers:],
@@ -343,8 +331,8 @@ class TorchMusaBlockTransfer:
         """Transfer normalized tensor operands through the torch backend.
 
         Args:
-            paged_layers: Per-layer MUSA KV-cache tensor views, or nested
-                ``[K_layers, V_layers]`` for SGLang MHA.
+            paged_layers: Per-layer MUSA KV-cache tensor views, or separate
+                ``[key_layers, value_layers]`` tensor lists for KV-list layouts.
             object_tensors: MUSA staging tensors.
             block_ids: Engine block IDs participating in the transfer.
             device: MUSA device on which the transfer runs.
@@ -387,8 +375,8 @@ class NativeMusaBlockTransfer:
         """Run native transfer when enabled and compatible.
 
         Args:
-            paged_layers: Per-layer MUSA KV-cache tensor views, or nested
-                ``[K_layers, V_layers]`` for SGLang MHA.
+            paged_layers: Per-layer MUSA KV-cache tensor views, or separate
+                ``[key_layers, value_layers]`` tensor lists for KV-list layouts.
             object_tensors: MUSA staging tensors.
             block_ids: Engine block IDs participating in the transfer.
             direction: Store or retrieve transfer direction.
@@ -628,9 +616,9 @@ class MusaDeviceOps(DeviceOps):
         """Transfer MUSA blocks through native code or the torch baseline.
 
         Args:
-            paged_buffer_ptrs_tensor: Packed per-layer pointer tensor or direct
-                MUSA Tensor list. SGLang MHA may also pass nested
-                ``[K_layers, V_layers]`` tensor lists.
+            paged_buffer_ptrs_tensor: Packed per-layer pointer tensor, direct
+                MUSA Tensor list, or separate ``[key_layers, value_layers]``
+                tensor lists for KV-list layouts.
             lmcache_objects_ptrs: Staging data pointers or direct Tensor list.
             block_ids: Ordered engine block IDs for the transfer.
             device: MUSA device on which the transfer runs.

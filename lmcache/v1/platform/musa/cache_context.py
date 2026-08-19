@@ -301,7 +301,7 @@ class MUSACacheContext(BaseCacheContext):
             engine_type,
             layout_hints,
         )
-        # SGLang MHA discovery returns nested ``[K_layers, V_layers]`` rather
+        # KV-list discovery returns nested ``[key_layers, value_layers]`` rather
         # than a flat per-layer tensor list, so only require a list layout here.
         if not isinstance(discovered, list):
             raise ValueError("MUSACacheContext requires a list-based KV layout")
@@ -329,7 +329,7 @@ class MUSACacheContext(BaseCacheContext):
             device=self.device_,
         )
 
-        # BaseCacheContext still types kv_caches as list[Tensor]; nested SGLang
+        # BaseCacheContext still types kv_caches as list[Tensor]; nested KV-list
         # layouts are stored as DiscoverableKVCache and cast at the boundary.
         super().__init__(
             kv_caches=cast(list[torch.Tensor], discovered),
@@ -412,8 +412,8 @@ class MUSACacheContext(BaseCacheContext):
             kernel_group_idx: Index of the requested kernel group.
 
         Returns:
-            A one-dimensional ``int64`` tensor in kernel order. SGLang MHA
-            groups contain K-layer pointers followed by V-layer pointers;
+            A one-dimensional ``int64`` tensor in kernel order. KV-list groups
+            contain key-layer pointers followed by value-layer pointers;
             other supported layouts contain one pointer per layer.
         """
         return self.group_kv_pointers_[kernel_group_idx]

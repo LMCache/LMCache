@@ -102,10 +102,10 @@ def test_pointer_transfer_rejects_ambiguous_two_byte_dtype() -> None:
         )
 
 
-def test_sglang_pointer_operands_preserve_k_then_v_order(
+def test_kv_list_pointer_operands_preserve_key_then_value_order(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """SGLang's 2*NL pointers become nested K/V layer lists in wire order."""
+    """KV-list pointers become nested key/value layer lists in wire order."""
     fake_device = SimpleNamespace(type="musa", index=0)
     calls: list[tuple[int, tuple[int, ...]]] = []
     captured: dict[str, object] = {}
