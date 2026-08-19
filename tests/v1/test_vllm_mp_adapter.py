@@ -45,21 +45,21 @@ def _parallel_strategy(
     *,
     vllm_worker_id: int = 0,
     tp_size: int = 1,
-    use_mla: bool = False,
+    mla_only: bool = False,
 ) -> ParallelStrategy:
     """Build a ``ParallelStrategy`` for a single-scheduler test setup.
 
     Args:
         vllm_worker_id: The worker's rank within its scheduler group.
         tp_size: The tensor parallel size.
-        use_mla: Whether MLA is enabled; under MLA the derived
+        mla_only: Whether the model is pure-MLA; under MLA the derived
             ``kv_worker_id`` collapses to ``vllm_worker_id // tp_size``.
 
     Returns:
         A ``ParallelStrategy`` whose world size covers ``vllm_worker_id``.
     """
     return ParallelStrategy(
-        use_mla=use_mla,
+        mla_only=mla_only,
         vllm_world_size=max(vllm_worker_id + 1, tp_size),
         vllm_worker_id=vllm_worker_id,
         tp_size=tp_size,
@@ -269,6 +269,7 @@ def test_worker_zero_autostarts_before_mq_client(monkeypatch) -> None:
     monkeypatch.setattr(adapter_mod, "wait_for_mp_server_from_url", wait_for_server)
     monkeypatch.setattr(adapter_mod, "MessageQueueClient", RecordingMQClient)
     monkeypatch.setattr(adapter_mod, "get_lmcache_chunk_size", lambda *a, **kw: 256)
+    monkeypatch.setattr(adapter_mod, "get_experimental", lambda *a, **kw: set())
 
     LMCacheMPWorkerAdapter(
         server_url="tcp://localhost:5555",
@@ -304,6 +305,7 @@ def test_nonzero_worker_waits_before_mq_client(monkeypatch) -> None:
     )
     monkeypatch.setattr(adapter_mod, "MessageQueueClient", RecordingMQClient)
     monkeypatch.setattr(adapter_mod, "get_lmcache_chunk_size", lambda *a, **kw: 256)
+    monkeypatch.setattr(adapter_mod, "get_experimental", lambda *a, **kw: set())
 
     LMCacheMPWorkerAdapter(
         server_url="tcp://localhost:5555",
@@ -312,7 +314,9 @@ def test_nonzero_worker_waits_before_mq_client(monkeypatch) -> None:
         vllm_block_size=16,
         # MLA with tp_size=2: rank 1 derives kv_worker_id == 0 yet must
         # still wait rather than race rank 0 for server ownership.
-        parallel_strategy=_parallel_strategy(vllm_worker_id=1, tp_size=2, use_mla=True),
+        parallel_strategy=_parallel_strategy(
+            vllm_worker_id=1, tp_size=2, mla_only=True
+        ),
         extra_config={"lmcache.mp.autostart": True},
     )
 
@@ -329,6 +333,7 @@ def test_legacy_worker_adapter_does_not_autostart(monkeypatch) -> None:
     monkeypatch.setattr(adapter_mod, "wait_for_mp_server_from_url", wait_for_server)
     monkeypatch.setattr(adapter_mod, "MessageQueueClient", FakeMQClient)
     monkeypatch.setattr(adapter_mod, "get_lmcache_chunk_size", lambda *a, **kw: 256)
+    monkeypatch.setattr(adapter_mod, "get_experimental", lambda *a, **kw: set())
 
     LMCacheMPWorkerAdapter(
         "tcp://localhost:5555",
