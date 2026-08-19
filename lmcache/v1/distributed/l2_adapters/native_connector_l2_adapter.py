@@ -29,7 +29,11 @@ import threading
 # First Party
 from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import (
+    OBJECT_KEY_TAG_MARKER,
+    MemoryLayoutDesc,
+    ObjectKey,
+)
 from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
@@ -59,10 +63,10 @@ def _object_key_to_string(key: ObjectKey) -> str:
 
         <model_name>@<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>@<cache_salt>
 
-    Tagged: zero or more ``@<name>%<value>`` segments are appended
-    after the base (and after ``cache_salt`` when present); a ``%``
-    inside a segment is the tag-name/value separator (forbidden inside
-    tags and inside ``cache_salt``), so segments are unambiguous.
+    Tagged: ``@tags`` followed by one or more ``@<name>%<value>``
+    segments is appended after the base (and after ``cache_salt`` when
+    present). The marker keeps tags unambiguous without reserving ``%``
+    in legacy cache salts.
     """
     base = (
         f"{key.model_name}{_KEY_SEP}{key.kv_rank:08x}"
@@ -70,6 +74,8 @@ def _object_key_to_string(key: ObjectKey) -> str:
     )
     if key.cache_salt:
         base = f"{base}{_KEY_SEP}{key.cache_salt}"
+    if key.tags:
+        base = f"{base}{_KEY_SEP}{OBJECT_KEY_TAG_MARKER}"
     for name, value in key.tags:
         base = f"{base}{_KEY_SEP}{name}%{value}"
     return base

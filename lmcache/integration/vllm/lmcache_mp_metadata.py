@@ -16,8 +16,8 @@ import torch
 # First Party
 from lmcache.integration.vllm.utils import (
     apply_mm_hashes_to_token_ids,
-    extract_request_configs_from_request,
     extract_mm_features,
+    extract_request_configs_from_request,
 )
 from lmcache.integration.vllm.vllm_multi_process_adapter import LoadStoreOp
 from lmcache.v1.multiprocess.group_view import slice_block_ids_per_group

@@ -16,6 +16,7 @@ namespace connector {
 
 // Key encoding constants — must match fs_l2_adapter.py
 static constexpr char KEY_SEP = '@';
+static constexpr const char* TAG_MARKER = "tags";
 static constexpr const char* PATH_SLASH_REPLACEMENT = "-SEP-";
 static constexpr const char* FILE_EXT = ".data";
 static constexpr const char* TMP_EXT = ".tmp";
@@ -52,23 +53,22 @@ class FSConnector : public ConnectorBase<WorkerFSConn> {
   // Build the filesystem-safe filename from a serialized key string.
   //
   // Input key (from NativeConnectorL2Adapter._object_key_to_string):
-  //   Unsalted: "{model}@{kv_rank:08x}@{hash.hex()}"
-  //   Salted  : "{model}@{kv_rank:08x}@{hash.hex()}@{cache_salt}"
-  //   Tagged  : any of the above followed by one or more
-  //             "@{name}%{value}" tag segments (segments containing
-  //             '%' are always tags).
+  //   Unsalted: "{model}@{kv_rank:08x}@{group:x}@{hash.hex()}"
+  //   Salted  : the above followed by "@{cache_salt}"
+  //   Tagged  : either core shape followed by
+  //             "@tags@{name}%{value}[...]".
+  //   Legacy native-client keys without object_group_id (3/4 core
+  //             fields) remain accepted.
   //
   // Output filename (matching fs_l2_adapter.py._object_key_to_filename):
-  //   Unsalted: "{safe_model}@{kv_rank:#010x}@{hash.hex()}.data"
-  //   Salted  : "{safe_model}@{kv_rank:#010x}@{hash.hex()}@{cache_salt}.data"
-  //   Tagged  : the above plus trailing "@{name}%{value}" segments
-  //             before ".data" (passed through verbatim).
+  //   Unsalted: "{safe_model}@{kv_rank:#010x}@{group:x}@{hash.hex()}.data"
+  //   Salted  : the above with "@{cache_salt}" before ".data"
+  //   Tagged  : the above with "@tags@{name}%{value}[...]" before ".data".
   //
   // Differences from the input: '/' in model becomes '-SEP-', kv_rank
-  // gains a '0x' prefix, and '.data' is appended. model_name,
-  // cache_salt, and tag fields are all forbidden from containing '@'
-  // (enforced on the Python side), and '%' is forbidden inside those
-  // core fields, so the parse is unambiguous.
+  // gains a '0x' prefix, and '.data' is appended; all later core fields
+  // are preserved verbatim. The explicit tag marker keeps '%' legal in
+  // legacy cache salts.
   static std::string key_to_filename(const std::string& key);
 
   static std::string replace_all(const std::string& str,

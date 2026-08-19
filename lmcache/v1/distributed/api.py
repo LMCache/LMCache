@@ -79,6 +79,10 @@ class PrefetchMode(enum.Enum):
     WARM = enum.auto()
 
 
+OBJECT_KEY_TAG_MARKER = "tags"
+"""Serialized field separating the optional cache salt from cache tags."""
+
+
 @dataclass(frozen=True)
 class ObjectKey:
     """
@@ -112,13 +116,12 @@ class ObjectKey:
     (no trailing salt field) — no migration is needed for un-salted
     deployments.
 
-    Invariant: must not contain ``@``, ``%``, ``/``, ``\\``, or NUL. The L2
+    Invariant: must not contain ``@``, ``/``, ``\\``, or NUL. The L2
     adapters use ``@`` as the field separator; ``/`` and ``\\`` are
     filesystem path separators (FS adapter embeds the salt into
-    filenames); NUL terminates C strings (C++ connector); and ``%`` is
-    reserved to identify trailing ``@name%value`` tag segments during
-    reverse parsing. Max length 128 to stay well within ``NAME_MAX``
-    (255) after the model, rank, hash, and extension are added.
+    filenames); and NUL terminates C strings (C++ connector). Max length
+    128 to stay well within ``NAME_MAX`` (255) after the model, rank,
+    hash, and extension are added.
     """
 
     tags: tuple[tuple[str, str], ...] = ()
@@ -137,7 +140,7 @@ class ObjectKey:
     on-wire ``@k%v`` suffix, so it must not appear inside a tag.
     """
 
-    _SALT_FORBIDDEN_CHARS = frozenset("@%/\\\x00")
+    _SALT_FORBIDDEN_CHARS = frozenset("@/\\\x00")
     _SALT_MAX_LEN = 128
     _TAG_FORBIDDEN_CHARS = frozenset("@%/\\\x00")
     _TAG_MAX_LEN = 128
@@ -161,7 +164,14 @@ class ObjectKey:
                 f"cache_salt exceeds max length {self._SALT_MAX_LEN} "
                 f"(got {len(self.cache_salt)})"
             )
+        normalized_tags: list[tuple[str, str]] = []
+        seen_names: set[str] = set()
         for name, value in self.tags:
+            if not isinstance(name, str) or not isinstance(value, str):
+                raise ValueError("tag names and values must be strings")
+            if name in seen_names:
+                raise ValueError(f"duplicate tag name {name!r}")
+            seen_names.add(name)
             for label, s in (("tag name", name), ("tag value", value)):
                 bad_t = self._TAG_FORBIDDEN_CHARS & set(s)
                 if bad_t:
@@ -170,6 +180,8 @@ class ObjectKey:
                     raise ValueError(
                         f"{label} exceeds max length {self._TAG_MAX_LEN} (got {len(s)})"
                     )
+            normalized_tags.append((name, value))
+        object.__setattr__(self, "tags", tuple(sorted(normalized_tags)))
 
     def to_encoded_object_key(self) -> "EncodedObjectKey":
         """Return the JSON-safe :class:`EncodedObjectKey` projection."""

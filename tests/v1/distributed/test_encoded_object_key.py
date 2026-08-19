@@ -100,15 +100,23 @@ class TestToObjectKeyValidation:
         with pytest.raises(ValueError):
             ck.to_object_key()
 
-    def test_rejects_percent_in_cache_salt(self):
+    def test_preserves_percent_in_cache_salt(self):
         ck = EncodedObjectKey(
             chunk_hash_hex="aa",
             model_name="m",
             kv_rank=0,
             cache_salt="tenant%prod",
         )
-        with pytest.raises(ValueError, match="cache_salt"):
-            ck.to_object_key()
+        assert ck.to_object_key().cache_salt == "tenant%prod"
+
+    def test_canonicalizes_tag_order(self):
+        ck = EncodedObjectKey(
+            chunk_hash_hex="aa",
+            model_name="m",
+            kv_rank=0,
+            tags=(("user", "alice"), ("lora", "v2")),
+        )
+        assert ck.to_object_key().tags == (("lora", "v2"), ("user", "alice"))
 
 
 class TestSchemasReExport:

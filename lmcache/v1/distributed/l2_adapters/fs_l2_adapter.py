@@ -31,7 +31,11 @@ import aiofiles.os
 # First Party
 from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import (
+    OBJECT_KEY_TAG_MARKER,
+    MemoryLayoutDesc,
+    ObjectKey,
+)
 from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
@@ -107,9 +111,10 @@ def _object_key_to_filename(key: ObjectKey) -> str:
 
         <safe_model>@0x<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>@<cache_salt>.data
 
-    Tagged: zero or more ``@<name>%<value>`` segments are appended
-    before ``.data`` (segments containing ``%`` are always tags), so
-    per-tag identity round-trips through the filesystem.
+    Tagged: ``@tags`` followed by one or more ``@<name>%<value>``
+    segments is appended before ``.data``, so per-tag identity
+    round-trips through the filesystem without reserving ``%`` in
+    legacy cache salts.
 
     ``kv_rank`` is written in ``0x`` prefixed hex so each byte
     of the bitmap ``(ws<<24)|(rank<<16)|(local_ws<<8)|local``
@@ -122,6 +127,8 @@ def _object_key_to_filename(key: ObjectKey) -> str:
     )
     if key.cache_salt:
         base = f"{base}{_KEY_SEP}{key.cache_salt}"
+    if key.tags:
+        base = f"{base}{_KEY_SEP}{OBJECT_KEY_TAG_MARKER}"
     for name, value in key.tags:
         base = f"{base}{_KEY_SEP}{name}%{value}"
     return f"{base}{_FILE_EXT}"
@@ -135,8 +142,8 @@ def _filename_to_object_key(
     Accepts:
       * 4-field unsalted, untagged shape,
       * 5-field salted, untagged shape (trailing ``cache_salt``),
-      * either of the above followed by one or more ``@<name>%<value>``
-        tag segments (segments containing ``%`` are always tags).
+      * either of the above followed by ``@tags`` and one or more
+        ``@<name>%<value>`` tag segments.
 
     Returns ``None`` for anything else. Since ``model_name``,
     ``cache_salt``, and tag fields all forbid ``@``, plain ``split``
@@ -146,16 +153,20 @@ def _filename_to_object_key(
         return None
     stem = filename[: -len(_FILE_EXT)]
     parts = stem.split(_KEY_SEP)
-    # Peel off trailing tag segments (those containing '%'). '%' is
-    # forbidden inside model_name / cache_salt / tag name / tag value,
-    # so its presence uniquely identifies tag segments.
-    tag_list: list[tuple[str, str]] = []
-    while len(parts) > 4 and "%" in parts[-1]:
-        seg = parts.pop()
-        name, _, value = seg.partition("%")
-        tag_list.append((name, value))
-    tag_list.reverse()
-    tags = tuple(tag_list)
+    tags: tuple[tuple[str, str], ...] = ()
+    marker_indexes = [
+        idx for idx in range(4, len(parts) - 1) if parts[idx] == OBJECT_KEY_TAG_MARKER
+    ]
+    if marker_indexes:
+        marker_idx = marker_indexes[-1]
+        tag_list: list[tuple[str, str]] = []
+        for segment in parts[marker_idx + 1 :]:
+            if "%" not in segment:
+                return None
+            name, value = segment.split("%", 1)
+            tag_list.append((name, value))
+        tags = tuple(tag_list)
+        parts = parts[:marker_idx]
     if len(parts) == 4:
         safe_model, kv_rank_str, object_group_str, chunk_hash_hex = parts
         cache_salt = ""

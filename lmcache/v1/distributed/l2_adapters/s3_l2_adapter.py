@@ -38,7 +38,12 @@ from awscrt.io import ClientTlsContext, TlsConnectionOptions, TlsContextOptions
 # First Party
 from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import KeyEntry, KeyListPage, ObjectKey
+from lmcache.v1.distributed.api import (
+    OBJECT_KEY_TAG_MARKER,
+    KeyEntry,
+    KeyListPage,
+    ObjectKey,
+)
 from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
@@ -66,10 +71,9 @@ def _string_to_object_key(name: str) -> ObjectKey:
 
     Expects
     ``<model_name>@<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>``
-    optionally followed by ``@<cache_salt>`` and/or one or more
-    ``@<name>%<value>`` tag segments (tags always come after the salt).
-    Segments containing ``%`` are treated as tags; a single non-tag
-    trailing segment (if any) is ``cache_salt``.
+    optionally followed by ``@<cache_salt>`` and/or ``@tags`` plus one
+    or more ``@<name>%<value>`` tag segments (tags always come after
+    the salt).
 
     Raises:
         ValueError: ``name`` does not match the expected format.
@@ -77,17 +81,20 @@ def _string_to_object_key(name: str) -> ObjectKey:
     parts = name.split("@")
     if len(parts) < 4:
         raise ValueError(f"unparsable S3 object name {name!r}: wrong field count")
-    # Peel off tag segments from the tail: an ``@k%v`` segment always
-    # contains ``%``, and ``%`` is forbidden inside model_name /
-    # cache_salt / tag name / tag value — so ``"%" in seg`` uniquely
-    # identifies tag segments regardless of order.
-    tag_list: list[tuple[str, str]] = []
-    while len(parts) > 4 and "%" in parts[-1]:
-        seg = parts.pop()
-        tag_name, _, tag_value = seg.partition("%")
-        tag_list.append((tag_name, tag_value))
-    tag_list.reverse()
-    tags = tuple(tag_list)
+    tags: tuple[tuple[str, str], ...] = ()
+    marker_indexes = [
+        idx for idx in range(4, len(parts) - 1) if parts[idx] == OBJECT_KEY_TAG_MARKER
+    ]
+    if marker_indexes:
+        marker_idx = marker_indexes[-1]
+        tag_list: list[tuple[str, str]] = []
+        for segment in parts[marker_idx + 1 :]:
+            if "%" not in segment:
+                raise ValueError(f"unparsable S3 object name {name!r}: malformed tag")
+            tag_name, tag_value = segment.split("%", 1)
+            tag_list.append((tag_name, tag_value))
+        tags = tuple(tag_list)
+        parts = parts[:marker_idx]
     if len(parts) == 4:
         model_name, kv_rank_hex, object_group_id_hex, chunk_hash_hex = parts
         cache_salt = ""
@@ -194,12 +201,10 @@ def _object_key_to_string(key: ObjectKey) -> str:
 
         <model_name>@<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>@<cache_salt>
 
-    Tagged: zero or more ``@<name>%<value>`` segments are appended
-    after the base (and after ``cache_salt`` when present). ``@`` is
-    forbidden inside ``model_name`` / ``cache_salt`` / tag fields, and
-    ``%`` is forbidden inside tag fields, so the tail segments are
-    unambiguously distinguishable from ``cache_salt`` (tag segments
-    contain ``%``, salt segments do not).
+    Tagged: ``@tags`` followed by one or more ``@<name>%<value>``
+    segments is appended after the base (and after ``cache_salt`` when
+    present). The marker keeps tags unambiguous without reserving ``%``
+    in legacy cache salts.
     """
     base = (
         f"{key.model_name}@{key.kv_rank:08x}"
@@ -207,6 +212,8 @@ def _object_key_to_string(key: ObjectKey) -> str:
     )
     if key.cache_salt:
         base = f"{base}@{key.cache_salt}"
+    if key.tags:
+        base = f"{base}@{OBJECT_KEY_TAG_MARKER}"
     for name, value in key.tags:
         base = f"{base}@{name}%{value}"
     return base

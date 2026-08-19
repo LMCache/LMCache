@@ -31,7 +31,9 @@ class TestFilenameRoundtrip:
             "meta-llama/Llama-3",  # has '/', must survive PATH_SLASH_REPLACEMENT
         ],
     )
-    @pytest.mark.parametrize("cache_salt", ["", "alice", "user-abc_123.xyz:42"])
+    @pytest.mark.parametrize(
+        "cache_salt", ["", "alice", "user-abc_123.xyz:42", "tenant%prod"]
+    )
     @pytest.mark.parametrize("object_group_id", [0, 1, 255])
     def test_roundtrip(self, model_name: str, cache_salt: str, object_group_id: int):
         key = ObjectKey(
@@ -356,7 +358,7 @@ class TestTagsRoundtrip:
             tags=(("user", "alice"),),
         )
         fn = _object_key_to_filename(key)
-        assert fn.endswith("@user%alice.data")
+        assert fn.endswith("@tags@user%alice.data")
         assert _filename_to_object_key(fn) == key
 
     def test_filename_roundtrip_with_salt_and_tags(self):
@@ -371,7 +373,19 @@ class TestTagsRoundtrip:
         fn = _object_key_to_filename(key)
         # Salt segment comes before tag segments (order fixed for
         # bit-compat with pre-tag layouts).
-        assert "@alice@lora%v2@user%alice.data" in fn
+        assert "@alice@tags@lora%v2@user%alice.data" in fn
+        assert _filename_to_object_key(fn) == key
+
+    def test_percent_salt_with_tags_roundtrip(self):
+        key = ObjectKey(
+            chunk_hash=b"\xde\xad\xbe\xef",
+            model_name="llama",
+            kv_rank=42,
+            cache_salt="tenant%prod",
+            tags=(("user", "alice"),),
+        )
+        fn = _object_key_to_filename(key)
+        assert "@tenant%prod@tags@user%alice.data" in fn
         assert _filename_to_object_key(fn) == key
 
     def test_tag_isolates_object_key_identity(self):

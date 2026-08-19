@@ -327,11 +327,31 @@ def test_submit_retrieve_request_tracks_returned_future(fake_adapter, monkeypatc
     assert transfer_ctx.submit_retrieve.call_args.args[1].request_configs == {
         "lmcache.tag.user": "alice"
     }
-    assert transfer_ctx.submit_retrieve.call_args.args[1].tags == (
-        ("user", "alice"),
-    )
+    assert transfer_ctx.submit_retrieve.call_args.args[1].tags == (("user", "alice"),)
     assert transfer_ctx.submit_retrieve.call_args.args[4] == [[0]]
     assert adapter.retrieve_futures["req-1"] == (fake_future, [0])
+
+
+@pytest.mark.parametrize(
+    "method_name",
+    ["batched_submit_store_requests", "batched_submit_retrieve_requests"],
+)
+def test_batched_submit_rejects_mismatched_parallel_lists(
+    fake_adapter, method_name: str
+) -> None:
+    adapter, _send_mock, _future = fake_adapter
+    method = getattr(adapter, method_name)
+
+    with pytest.raises(ValueError, match="must have the same length"):
+        method(["req-1"], [], MagicMock())
+
+    with pytest.raises(ValueError, match="must have the same length"):
+        method(
+            ["req-1"],
+            [_op([[0]])],
+            MagicMock(),
+            request_configs_list=[],
+        )
 
 
 def test_load_store_op_accepts_per_group_block_ids():

@@ -252,6 +252,19 @@ class TestObjectKeySerialization:
         s = _object_key_to_string(key)
         assert s == "llama@000000ff@0@00010203@alice"
 
+    def test_tagged_serialization_has_explicit_marker(self):
+        key = ObjectKey(
+            chunk_hash=b"\x00\x01\x02\x03",
+            model_name="llama",
+            kv_rank=255,
+            object_group_id=5,
+            cache_salt="tenant%prod",
+            tags=(("user", "alice"),),
+        )
+        assert _object_key_to_string(key) == (
+            "llama@000000ff@5@00010203@tenant%prod@tags@user%alice"
+        )
+
     def test_different_salts_produce_different_strings(self):
         base = {
             "chunk_hash": b"\x00\x01\x02\x03",

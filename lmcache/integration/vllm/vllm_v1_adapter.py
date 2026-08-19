@@ -33,8 +33,8 @@ from lmcache.banner import print_banner_once
 from lmcache.integration.vllm.utils import (
     ENGINE_NAME,
     apply_mm_hashes_to_token_ids,
-    extract_request_configs_from_sampling_params,
     extract_mm_features,
+    extract_request_configs_from_sampling_params,
     lmcache_get_or_create_config,
 )
 from lmcache.integration.vllm.vllm_service_factory import VllmServiceFactory

@@ -183,15 +183,17 @@ class TestIPCCacheServerKeyRequestConfigs:
                 request_configs={"lmcache.tag.user": "a%b"},
             )
 
-    def test_reject_percent_in_cache_salt(self):
-        with pytest.raises(ValueError, match="cache_salt"):
-            IPCCacheServerKey.from_token_ids(
-                model_name="m",
-                world_size=1,
-                worker_id=0,
-                token_ids=[1],
-                cache_salt="tenant%prod",
-            )
+    def test_percent_in_cache_salt_remains_supported(self):
+        key = IPCCacheServerKey.from_token_ids(
+            model_name="m",
+            world_size=1,
+            worker_id=0,
+            token_ids=[1],
+            cache_salt="tenant%prod",
+            request_configs={"lmcache.tag.user": "alice"},
+        )
+        assert key.cache_salt == "tenant%prod"
+        assert key.tags == (("user", "alice"),)
 
     def test_roundtrip_carries_request_configs(self):
         original = IPCCacheServerKey.from_token_ids(

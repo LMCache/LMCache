@@ -1660,8 +1660,18 @@ class LMCacheMPWorkerAdapter:
             cache_salts = [""] * len(request_ids)
         if request_configs_list is None:
             request_configs_list = [None] * len(request_ids)
+        if not (
+            len(request_ids)
+            == len(ops)
+            == len(cache_salts)
+            == len(request_configs_list)
+        ):
+            raise ValueError(
+                "request_ids, ops, cache_salts, and request_configs_list "
+                "must have the same length"
+            )
         for request_id, op, salt, request_configs in zip(
-            request_ids, ops, cache_salts, request_configs_list, strict=False
+            request_ids, ops, cache_salts, request_configs_list, strict=True
         ):
             self.submit_store_request(
                 request_id,
@@ -1700,8 +1710,18 @@ class LMCacheMPWorkerAdapter:
             cache_salts = [""] * len(request_ids)
         if request_configs_list is None:
             request_configs_list = [None] * len(request_ids)
+        if not (
+            len(request_ids)
+            == len(ops)
+            == len(cache_salts)
+            == len(request_configs_list)
+        ):
+            raise ValueError(
+                "request_ids, ops, cache_salts, and request_configs_list "
+                "must have the same length"
+            )
         for request_id, op, salt, request_configs in zip(
-            request_ids, ops, cache_salts, request_configs_list, strict=False
+            request_ids, ops, cache_salts, request_configs_list, strict=True
         ):
             self.submit_retrieve_request(
                 request_id,

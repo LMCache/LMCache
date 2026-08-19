@@ -28,6 +28,7 @@ if TYPE_CHECKING:
 # First Party
 from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
+from lmcache.v1.distributed.api import OBJECT_KEY_TAG_MARKER
 from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
@@ -85,8 +86,7 @@ def _object_key_to_string(key: ObjectKey) -> str:
     ``<model_name>@<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>``. Salted
     keys append ``@<cache_salt>`` so tenants/users with identical token chunks
     do not collide in the backing bucket. Tagged keys further append
-    zero or more ``@<name>%<value>`` segments (segments containing
-    ``%`` are always tags).
+    ``@tags`` followed by one or more ``@<name>%<value>`` segments.
     """
     base = (
         f"{key.model_name}@{key.kv_rank:08x}"
@@ -94,6 +94,8 @@ def _object_key_to_string(key: ObjectKey) -> str:
     )
     if key.cache_salt:
         base = f"{base}@{key.cache_salt}"
+    if key.tags:
+        base = f"{base}@{OBJECT_KEY_TAG_MARKER}"
     for name, value in key.tags:
         base = f"{base}@{name}%{value}"
     return base

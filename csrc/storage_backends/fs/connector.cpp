@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "connector.h"
-#include <algorithm>
 #include <cerrno>
 #include <cstdint>
 #include <cstdio>
@@ -29,26 +28,20 @@ std::string FSConnector::replace_all(const std::string& str,
 
 std::string FSConnector::key_to_filename(const std::string& key) {
   // Input key format (from _object_key_to_string):
-  //   Unsalted: <model_name>@<kv_rank_hex>@<chunk_hash_hex>
-  //   Salted  : <model_name>@<kv_rank_hex>@<chunk_hash_hex>@<cache_salt>
-  //   Tagged  : any of the above, followed by one or more
-  //             @<name>%<value> tag segments (segments containing '%'
-  //             are always tags; '%' is forbidden inside model_name,
-  //             cache_salt, and tag fields on the Python side).
+  //   Unsalted: <model>@<kv_rank>@<object_group>@<chunk_hash>
+  //   Salted  : the above followed by @<cache_salt>
+  //   Tagged  : either core shape followed by
+  //             @tags@<name>%<value>[...]
+  //   Legacy  : 3/4-field native-client keys without object_group_id
+  //             remain accepted.
   //
   // Output filename (matching fs_l2_adapter.py._object_key_to_filename):
-  //   Unsalted: <model_name_safe>@0x<kv_rank_hex>@<chunk_hash_hex>.data
-  //   Salted  :
-  //   <model_name_safe>@0x<kv_rank_hex>@<chunk_hash_hex>@<cache_salt>.data
-  //   Tagged  : as above plus trailing @<name>%<value> segments before
-  //   ``.data`` (tag segments passed through verbatim).
+  //   Unsalted: <safe_model>@0x<kv_rank>@<object_group>@<chunk_hash>.data
+  //   Salted  : the above with @<cache_salt> before .data
+  //   Tagged  : the above with @tags@<name>%<value>[...] before .data
   //
-  // The unsalted 3-field shape is bit-identical to the pre-cache_salt
-  // format, so existing cache directories remain valid.
-  //
-  // NOTE: both model_name and cache_salt are forbidden from containing
-  // '@' (invariant enforced on the Python side), so splitting on '@'
-  // is unambiguous — no marker, no rsplit.
+  // Untagged shapes are bit-identical to the input apart from the
+  // established model sanitization / rank prefix / file extension.
 
   // Split on '@'.
   std::vector<std::string> parts;
@@ -66,27 +59,38 @@ std::string FSConnector::key_to_filename(const std::string& key) {
         key);
   }
 
-  // Peel trailing tag segments (those containing '%') off the tail so
-  // the remaining prefix is either the 3-field (unsalted) or 4-field
-  // (salted) core shape.
-  std::vector<std::string> tag_segments;
-  while (parts.size() > 3 && parts.back().find('%') != std::string::npos) {
-    tag_segments.emplace_back(std::move(parts.back()));
-    parts.pop_back();
+  // The last non-terminal tag marker wins. This also handles the legal
+  // edge case where cache_salt itself equals TAG_MARKER.
+  size_t marker_index = parts.size();
+  for (size_t i = 3; i + 1 < parts.size(); ++i) {
+    if (parts[i] == TAG_MARKER) marker_index = i;
   }
-  std::reverse(tag_segments.begin(), tag_segments.end());
+  std::vector<std::string> tag_segments;
+  if (marker_index != parts.size()) {
+    if (marker_index < 3 || marker_index > 5) {
+      throw std::runtime_error(
+          "FSConnector: malformed key (tag marker follows invalid core): " +
+          key);
+    }
+    for (size_t i = marker_index + 1; i < parts.size(); ++i) {
+      if (parts[i].find('%') == std::string::npos) {
+        throw std::runtime_error(
+            "FSConnector: malformed key (tag lacks '%' separator): " + key);
+      }
+      tag_segments.emplace_back(parts[i]);
+    }
+    parts.resize(marker_index);
+  }
 
-  if (parts.size() != 3 && parts.size() != 4) {
+  if (parts.size() < 3 || parts.size() > 5) {
     throw std::runtime_error(
-        "FSConnector: malformed key (expected 3 or 4 '@'-separated core "
+        "FSConnector: malformed key (expected 3 to 5 '@'-separated core "
         "fields): " +
         key);
   }
 
   const std::string& model_name = parts[0];
   const std::string& kv_rank_hex = parts[1];
-  const std::string& chunk_hash = parts[2];
-  const std::string cache_salt = parts.size() == 4 ? parts[3] : std::string();
 
   // Replace '/' with '-SEP-' for filesystem safety
   std::string safe_model = replace_all(model_name, "/", PATH_SLASH_REPLACEMENT);
@@ -97,22 +101,28 @@ std::string FSConnector::key_to_filename(const std::string& key) {
   // builds.
   size_t tags_size = 0;
   for (const auto& seg : tag_segments) tags_size += seg.size() + 1;
+  size_t core_tail_size = 0;
+  for (size_t i = 2; i < parts.size(); ++i) {
+    core_tail_size += parts[i].size() + 1;
+  }
   std::string result;
-  result.reserve(safe_model.size() + kv_rank_hex.size() + chunk_hash.size() +
-                 cache_salt.size() + tags_size + 32);
+  result.reserve(safe_model.size() + kv_rank_hex.size() + core_tail_size +
+                 tags_size + 32);
   result += safe_model;
   result += KEY_SEP;
   result += "0x";
   result += kv_rank_hex;
-  result += KEY_SEP;
-  result += chunk_hash;
-  if (!cache_salt.empty()) {
+  for (size_t i = 2; i < parts.size(); ++i) {
     result += KEY_SEP;
-    result += cache_salt;
+    result += parts[i];
   }
-  for (const auto& seg : tag_segments) {
+  if (!tag_segments.empty()) {
     result += KEY_SEP;
-    result += seg;
+    result += TAG_MARKER;
+    for (const auto& seg : tag_segments) {
+      result += KEY_SEP;
+      result += seg;
+    }
   }
   result += FILE_EXT;
   return result;

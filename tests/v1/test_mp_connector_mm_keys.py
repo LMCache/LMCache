@@ -10,6 +10,8 @@ interfaces of ``lmcache_mp_connector``.
 
 # Standard
 from dataclasses import dataclass
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 # Third Party
 import pytest
@@ -17,9 +19,15 @@ import pytest
 pytest.importorskip("vllm", reason="MP connector imports vLLM at module top")
 
 # Third Party
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (  # noqa: E402
+    KVConnectorRole,
+)
 from vllm.v1.utils import ConstantList  # noqa: E402
 
 # First Party
+from lmcache.integration.vllm.lmcache_mp_connector import (  # noqa: E402
+    LMCacheMPConnector,
+)
 from lmcache.integration.vllm.lmcache_mp_metadata import (  # noqa: E402
     LMCacheMPRequestMetadata,
     LMCacheMPRequestState,
@@ -58,6 +66,7 @@ class _FakeRequest:
         sampling_params_extra_args: dict[str, object] | None = None,
     ):
         self.request_id = "req-0"
+        self.resumable = False
         self.cache_salt = cache_salt
         self.prompt_token_ids = list(prompt_token_ids)
         self._live_token_ids = list(prompt_token_ids)
@@ -144,6 +153,33 @@ def test_tracker_extracts_request_configs():
         "lmcache.tag.user": "alice",
         "lmcache.tag.lora": "adapter-v2",
     }
+
+
+def test_eager_prefetch_uses_adjusted_tokens_and_request_configs():
+    prompt = [1, IMAGE_PLACEHOLDER_ID, IMAGE_PLACEHOLDER_ID, 2]
+    request = _make_mm_request(prompt, identifier="0xabcd", offset=1, length=2)
+    request.sampling_params = _FakeSamplingParams(
+        extra_args={
+            "kv_transfer_params": {"lmcache.tag.user": "alice"},
+        }
+    )
+    tracker = LMCacheMPRequestTracker(request)
+    scheduler_adapter = MagicMock()
+    connector = SimpleNamespace(
+        role=KVConnectorRole.SCHEDULER,
+        _eager_prefetch=True,
+        scheduler_adapter=scheduler_adapter,
+        _get_or_create_request_tracker=MagicMock(return_value=tracker),
+    )
+
+    LMCacheMPConnector.on_new_request(connector, request)
+
+    scheduler_adapter.maybe_submit_lookup_request.assert_called_once_with(
+        request.request_id,
+        token_ids=tracker.get_token_ids(),
+        cache_salt="",
+        request_configs={"lmcache.tag.user": "alice"},
+    )
 
 
 def _prepare_storable_tracker(request: _FakeRequest) -> LMCacheMPRequestTracker:
