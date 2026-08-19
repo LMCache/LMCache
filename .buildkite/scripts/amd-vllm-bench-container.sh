@@ -28,12 +28,26 @@ uv pip install --system --no-cache openai pandas matplotlib
 vllm --help >/dev/null
 python3 - <<'PY'
 import lmcache
+import os
 import torch
 import vllm
 
 print(f"vLLM={vllm.__version__}")
 print(f"torch={torch.__version__}, HIP={torch.version.hip}")
 print(f"LMCache={lmcache.__version__}")
+print(
+    "Selected host AMD GPUs: "
+    f"LMCache vLLM={os.getenv('GPU_FOR_VLLM', 'unset')}, "
+    f"baseline={os.getenv('GPU_FOR_BASELINE', 'unset')}"
+)
+print(f"Visible torch CUDA/HIP devices: {torch.cuda.device_count()}")
+for device_idx in range(torch.cuda.device_count()):
+    props = torch.cuda.get_device_properties(device_idx)
+    total_memory_gib = props.total_memory / (1024 ** 3)
+    print(
+        f"torch device {device_idx}: "
+        f"name={props.name}, total_memory_gib={total_memory_gib:.1f}"
+    )
 PY
 
 exec .buildkite/k3_tests/multiprocess/scripts/run-single-test.sh vllm_bench

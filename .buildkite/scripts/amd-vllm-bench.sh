@@ -37,6 +37,40 @@ if [[ -z "${GPU_FOR_VLLM}" || -z "${GPU_FOR_BASELINE}" ]]; then
 fi
 export GPU_FOR_VLLM GPU_FOR_BASELINE
 
+print_selected_amd_gpu_info() {
+    local gpu_info
+    gpu_info="$(
+        rocm-smi --showproductname --showmeminfo vram --showuse 2>/dev/null | \
+            awk -v selected="${HIP_VISIBLE_DEVICES}" '
+                BEGIN {
+                    count = split(selected, ids, ",")
+                    for (i = 1; i <= count; i++) {
+                        wanted[ids[i] + 0] = 1
+                    }
+                }
+                {
+                    if (match($0, /GPU\[([0-9]+)\]/, m)) {
+                        gpu_idx = m[1] + 0
+                        if (gpu_idx in wanted) {
+                            print
+                        }
+                    }
+                }
+            '
+    )"
+
+    echo "=== Selected AMD GPU info (host rocm-smi) ==="
+    echo "GPU_FOR_VLLM=${GPU_FOR_VLLM}, GPU_FOR_BASELINE=${GPU_FOR_BASELINE}, HIP_VISIBLE_DEVICES=${HIP_VISIBLE_DEVICES}"
+    if [[ -n "${gpu_info}" ]]; then
+        echo "${gpu_info}"
+    else
+        echo "rocm-smi did not return per-device product details for the selected GPUs"
+    fi
+    echo ""
+}
+
+print_selected_amd_gpu_info
+
 cleanup() {
     "${DOCKER[@]}" rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
     # The image runs as root so compiled extensions and artifacts in the
