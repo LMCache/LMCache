@@ -112,7 +112,11 @@ exists. Two empirically verified requirements for reviving it:
   PID *values* (namespace isolation is fine); a collision fails at
   `cudaIpcOpenMemHandle` with error 201.
 - Buffers and imported mappings live for the process lifetime (32 KiB per
-  process/device); slots are not reclaimed.
+  process/device); slots are not reclaimed. Never freeing the buffer is
+  also a safety requirement, not just simplicity: the driver may hand a
+  new allocation at a freed address a **byte-identical** IPC handle
+  (observed on driver 580), so a stale handle still circulating in
+  another process could silently alias fresh memory.
 - Requires `cuda-python` (`cuda.bindings`), resolved lazily on first use
   through the package-shared accessor in `platform/cuda/utils.py` (also
   used by `RawCudaIPCWrapper`), so importing lmcache never requires it.

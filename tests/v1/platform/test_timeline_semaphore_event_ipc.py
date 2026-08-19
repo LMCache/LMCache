@@ -242,6 +242,74 @@ def test_event_object_satisfies_ipc_event_duck_protocol() -> None:
     waiter.synchronize()
 
 
+def test_exports_from_one_buffer_share_identical_handle_bytes() -> None:
+    """Every export from one device's buffer carries byte-identical mem-handle
+    bytes (packed at bytes 1..65 of the payload, after the version byte).
+    The importer's mapping cache is keyed by these bytes, so two events from
+    the same producer must resolve to one cached mapping, not two.
+    """
+    backend = TimelineSemaphoreEventIPCBackend()
+    device = torch.device(DEVICE)
+
+    first_event = backend.create_event(device)
+    backend.record_event(first_event, torch.cuda.Stream())
+    second_event = backend.create_event(device)
+    backend.record_event(second_event, torch.cuda.Stream())
+
+    first = backend.export_event(first_event, device)
+    second = backend.export_event(second_event, device)
+    assert first[1:65] == second[1:65]
+
+
+def test_ipc_mem_handle_stable_and_unique_across_live_allocations() -> None:
+    """Driver-behavior canary for the assumptions behind handle caching:
+    ``cudaIpcGetMemHandle`` bytes are stable across repeated calls on one
+    live allocation (including from interior pointers) and unique across
+    concurrently live allocations -- the property the importer's
+    ``(handle bytes, device)`` mapping cache relies on.
+
+    Deliberately NOT asserted: handle bytes after free + realloc at the
+    same address. The driver specifies nothing there, and we have observed
+    both a differing and a byte-identical handle for the reused address.
+    The identical case means a stale handle can silently alias a later
+    allocation, which is why the semaphore buffers are never freed
+    (process lifetime, see the design doc's constraints).
+    """
+    # Third Party
+    from cuda.bindings import runtime
+
+    def alloc(nbytes: int) -> int:
+        err, base = runtime.cudaMalloc(nbytes)
+        if int(err) != 0:
+            raise RuntimeError(f"cudaMalloc failed: {err}")
+        return int(base)
+
+    def free(base: int) -> None:
+        (err,) = runtime.cudaFree(base)
+        if int(err) != 0:
+            raise RuntimeError(f"cudaFree failed: {err}")
+
+    def handle_bytes_of(ptr: int) -> bytes:
+        err, handle = runtime.cudaIpcGetMemHandle(ptr)
+        if int(err) != 0:
+            raise RuntimeError(f"cudaIpcGetMemHandle failed: {err}")
+        return bytes(handle.reserved)
+
+    torch.cuda.init()
+    nbytes = 32768
+    first_base = alloc(nbytes)
+    first = handle_bytes_of(first_base)
+
+    assert handle_bytes_of(first_base) == first  # stable across repeated calls
+    assert handle_bytes_of(first_base + 4096) == first  # interior ptr, same alloc
+
+    second_base = alloc(nbytes)
+    assert handle_bytes_of(second_base) != first  # unique across live allocs
+
+    free(first_base)
+    free(second_base)
+
+
 def test_import_rejects_malformed_handles() -> None:
     backend = TimelineSemaphoreEventIPCBackend()
     device = torch.device(DEVICE)
