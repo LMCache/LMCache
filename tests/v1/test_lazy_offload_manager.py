@@ -13,18 +13,23 @@ transition; ``free_blocks`` decrements and enqueues only blocks that reach
 0. This makes double-pin/double-unpin bugs observable (a block pinned by
 two owners must not re-enter the free queue until both release it). Block
 ids start at 1, matching vLLM's convention of reserving id 0 for the null
-block, which never enters the free queue.
+block, which never enters the free queue. The mirror claim itself is
+enforced by the ``GPUBlockPoolView`` shape guards below, which read a real
+vLLM ``BlockPool`` through the production view and hold the fake to it.
 """
 
 # Standard
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 # Third Party
 import pytest
 
 pytest.importorskip("vllm", reason="MP connector imports vLLM at module top")
+
+# Third Party
+from vllm.v1.core.block_pool import BlockPool  # noqa: E402
 
 # First Party
 from lmcache.integration.vllm.lazy_offload_manager import (  # noqa: E402
@@ -32,12 +37,19 @@ from lmcache.integration.vllm.lazy_offload_manager import (  # noqa: E402
     LazyOffloadManager,
 )
 from lmcache.integration.vllm.lazy_offload_pending_store import AddOutcome  # noqa: E402
+from lmcache.integration.vllm.lazy_offload_policy.eviction_aware import (  # noqa: E402
+    GPUBlockPoolView,
+)
 from lmcache.integration.vllm.lmcache_mp_metadata import (  # noqa: E402
     LMCacheMPRequestMetadata,
 )
 from lmcache.integration.vllm.vllm_multi_process_adapter import (  # noqa: E402
     LoadStoreOp,
 )
+
+if TYPE_CHECKING:
+    # Third Party
+    from vllm.v1.core.kv_cache_utils import BlockHashWithGroupId
 
 TOKENS_PER_BLOCK = 16
 
@@ -331,6 +343,153 @@ def _report_store_complete(harness: _Harness, request_id: str, count: int = 1) -
 def _report_store_failed(harness: _Harness, request_id: str, count: int = 1) -> None:
     actions = harness.manager.on_store_results({request_id}, {request_id: count})
     _apply_actions(harness, actions)
+
+
+####
+# GPUBlockPoolView shape guards against the real vLLM pool
+####
+#
+# Everything in this file (and in the pure-policy suites behind it) reads
+# the block pool through fakes. The fakes encode two structural assumptions
+# about vLLM's ``BlockPool`` that ``GPUBlockPoolView`` also relies on: the
+# free queue is a linked list threaded through the blocks between two
+# sentinels, and ``ref_cnt == 0`` (null block aside) is exactly queue
+# membership. These tests pin the assumptions to the real structures, so a
+# vLLM upgrade that changes the queue's shape fails here instead of
+# silently desynchronising the eviction-aware policy from the pool.
+
+
+def _make_real_pool(num_gpu_blocks: int = 8) -> BlockPool:
+    """A real vLLM pool with caching on; block id 0 is its null block."""
+    return BlockPool(
+        num_gpu_blocks=num_gpu_blocks,
+        enable_caching=True,
+        hash_block_size=TOKENS_PER_BLOCK,
+    )
+
+
+def _vllm_free_ids(pool: BlockPool) -> list[int]:
+    """The free queue by vLLM's own materialiser, eviction head first."""
+    return [block.block_id for block in pool.free_block_queue.get_all_free_blocks()]
+
+
+def test_pool_view_walk_matches_vllm_own_queue_listing() -> None:
+    """The lazy walk yields what vLLM says the queue holds, in order.
+
+    The order is exercised beyond construction order: two blocks leave the
+    queue and return at opposite ends, so a walk that read construction
+    order, skipped a sentinel, or followed a link backwards would fail.
+    """
+    pool = _make_real_pool()
+    view = GPUBlockPoolView(pool)
+    to_tail, to_head = pool.get_new_blocks(2)
+    pool.free_blocks([to_tail])
+    pool.free_blocks([to_head], prepend=True)
+
+    expected = _vllm_free_ids(pool)
+    assert list(view.free_queue_block_ids()) == expected
+    assert expected[0] == to_head.block_id
+    assert expected[-1] == to_tail.block_id
+    assert view.num_free_blocks() == len(expected)
+
+
+def test_pool_view_is_free_agrees_with_real_queue_membership() -> None:
+    """``is_free`` answers real queue membership for every block.
+
+    The null block is the trap: vLLM keeps it at ``ref_cnt == 0`` but pops
+    it out of the queue at construction, so a view that read the count
+    alone would report it evictable.
+    """
+    pool = _make_real_pool()
+    view = GPUBlockPoolView(pool)
+    pool.get_new_blocks(3)
+
+    assert pool.null_block.ref_cnt == 0  # the trap this test exists for
+    assert not view.is_free(pool.null_block.block_id)
+    in_queue = set(_vllm_free_ids(pool))
+    for block_id in range(len(pool.blocks)):
+        assert view.is_free(block_id) == (block_id in in_queue)
+
+
+def test_pool_view_walks_an_emptied_queue_as_nothing() -> None:
+    """With every block allocated, the head links straight to the tail
+    sentinel: the walk yields nothing rather than raising."""
+    pool = _make_real_pool(num_gpu_blocks=4)
+    view = GPUBlockPoolView(pool)
+    pool.get_new_blocks(pool.get_num_free_blocks())
+
+    assert list(view.free_queue_block_ids()) == []
+    assert view.num_free_blocks() == 0
+
+
+def test_pool_view_rejects_a_queue_missing_its_tail_sentinel() -> None:
+    """A head with no successor is not a shape vLLM maintains: fail loudly
+    instead of reporting an empty queue over a structure that changed."""
+    malformed = SimpleNamespace(
+        free_block_queue=SimpleNamespace(
+            fake_free_list_head=SimpleNamespace(next_free_block=None)
+        )
+    )
+    view = GPUBlockPoolView(malformed)  # type: ignore[arg-type]
+    with pytest.raises(RuntimeError, match="no successor"):
+        list(view.free_queue_block_ids())
+
+
+def test_pool_view_reads_the_live_hash_of_the_block_it_indexes() -> None:
+    """``block_hash`` reads the addressed block's current hash: None while
+    uncached, the cached value after, None again once reset."""
+    pool = _make_real_pool()
+    view = GPUBlockPoolView(pool)
+    block = pool.blocks[5]
+
+    assert view.block_hash(5) is None
+    block.block_hash = cast("BlockHashWithGroupId", b"hash-5")
+    assert view.block_hash(5) == b"hash-5"
+    assert view.block_hash(4) is None
+    block.reset_hash()
+    assert view.block_hash(5) is None
+
+
+def test_fake_pool_is_indistinguishable_from_the_real_pool_through_the_view() -> None:
+    """One pin/unpin history, two pools, one production reader.
+
+    This is the fidelity contract behind every other test in this file:
+    ``_FakeBlockPool`` claims to mirror the real pool's reference counting,
+    and ``GPUBlockPoolView`` is the reader the scheduler path actually
+    uses. The history covers the transitions the drain and receipt paths
+    rely on: dequeue on the 0 -> 1 pin, no queue change on a shared pin or
+    its first release, and requeueing at both ends.
+    """
+    real = _make_real_pool()
+    fake = _FakeBlockPool(len(real.blocks) - 1)  # same ids 1..7, no null twin
+    fake.make_free(sorted(fake.blocks))
+    real_view = GPUBlockPoolView(real)
+    fake_view = GPUBlockPoolView(fake)  # type: ignore[arg-type]
+
+    def assert_agreement() -> None:
+        assert list(real_view.free_queue_block_ids()) == list(
+            fake_view.free_queue_block_ids()
+        )
+        for block_id in fake.blocks:
+            assert real_view.is_free(block_id) == fake_view.is_free(block_id)
+        assert real_view.num_free_blocks() == fake_view.num_free_blocks()
+
+    def touch(block_ids: list[int]) -> None:
+        real.touch([real.blocks[bid] for bid in block_ids])
+        fake.touch([fake.blocks[bid] for bid in block_ids])
+        assert_agreement()
+
+    def release(block_ids: list[int], prepend: bool = False) -> None:
+        real.free_blocks([real.blocks[bid] for bid in block_ids], prepend=prepend)
+        fake.free_blocks([fake.blocks[bid] for bid in block_ids], prepend=prepend)
+        assert_agreement()
+
+    assert_agreement()  # construction order, 1..7
+    touch([2, 3])  # 0 -> 1 dequeues both
+    touch([3])  # shared pin: no queue change
+    release([3])  # 2 -> 1: stays out of the queue
+    release([2], prepend=True)  # next eviction victim
+    release([3])  # 1 -> 0: tail
 
 
 ####
