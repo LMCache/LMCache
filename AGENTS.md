@@ -103,12 +103,6 @@ the explicit `SKIP=rust-fmt,rust-clippy` workflow above.
 
 C++/CUDA files use clang-format (Google style, 80-col). Rust code in `rust/` uses `cargo fmt` and `cargo clippy`.
 
-On macOS, the `rust-clippy` pre-commit hook cannot compile the Linux-only
-`io-uring` dependency (Linux constants and syscalls such as `MAP_POPULATE` and
-`SYS_io_uring_*` are unavailable). Run that hook in Linux CI or a Linux
-container; locally use `SKIP=rust-clippy pre-commit run --all-files` to verify
-the remaining hooks.
-
 All Python files require an `# SPDX-License-Identifier: Apache-2.0` header as the first line.
 
 ### Import Ordering
