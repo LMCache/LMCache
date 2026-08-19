@@ -172,19 +172,44 @@ wait_for_vllm() {
         fi
         if ! kill -0 "${VLLM_PID}" >/dev/null 2>&1; then
             echo "vLLM exited before becoming healthy"
+            echo "=== LMCache server log tail ==="
+            tail -n 200 "${LMCACHE_LOG}" || true
+            echo "=== vLLM log tail ==="
             tail -n 200 "${VLLM_LOG}" || true
             return 1
         fi
         sleep 5
     done
     echo "Timed out waiting for vLLM health endpoint"
+    echo "=== LMCache server log tail ==="
+    tail -n 200 "${LMCACHE_LOG}" || true
+    echo "=== vLLM log tail ==="
     tail -n 200 "${VLLM_LOG}" || true
+    return 1
+}
+
+wait_for_lmcache_server() {
+    local deadline=$((SECONDS + 120))
+    while (( SECONDS < deadline )); do
+        if ! kill -0 "${LMCACHE_PID}" >/dev/null 2>&1; then
+            echo "LMCache MP server exited before accepting connections"
+            cat "${LMCACHE_LOG}" || true
+            return 1
+        fi
+        if timeout 1 bash -c "</dev/tcp/localhost/${LMCACHE_PORT}" \
+            >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 2
+    done
+    echo "Timed out waiting for LMCache MP server on tcp://localhost:${LMCACHE_PORT}"
+    cat "${LMCACHE_LOG}" || true
     return 1
 }
 
 echo "=== Starting LMCache MP server ==="
 CUDA_VISIBLE_DEVICES="${GPU_FOR_VLLM}" \
-lmcache server \
+python3 -m lmcache.cli.main server \
     --l1-size-gb 10 \
     --eviction-policy LRU \
     --port "${LMCACHE_PORT}" \
@@ -192,7 +217,7 @@ lmcache server \
     > "${LMCACHE_LOG}" 2>&1 &
 LMCACHE_PID=$!
 echo "LMCache MP server PID=${LMCACHE_PID}, log=${LMCACHE_LOG}"
-sleep 10
+wait_for_lmcache_server
 
 echo "=== Starting vLLM DeepSeek-V2-Lite with LMCache MP connector ==="
 KV_TRANSFER_CONFIG="$(
