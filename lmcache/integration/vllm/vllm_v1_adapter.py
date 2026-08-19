@@ -1417,9 +1417,13 @@ class LMCacheConnectorV1Impl:
             mm_hashes, mm_positions = extract_mm_features(request)
             if mm_hashes and mm_positions:
                 # TODO(Jiayi): Optimize this
-                token_ids = torch.tensor(request.prompt_token_ids)
-                apply_mm_hashes_to_token_ids(token_ids, mm_hashes, mm_positions)
-                token_ids = token_ids.tolist()
+                # Placeholder positions are within the prompt; keep any decode
+                # tokens (preemption case) appended after the adjusted prompt.
+                prompt_ids = torch.tensor(request.prompt_token_ids)
+                apply_mm_hashes_to_token_ids(prompt_ids, mm_hashes, mm_positions)
+                token_ids = prompt_ids.tolist() + list(
+                    token_ids[len(request.prompt_token_ids) :]
+                )
 
             request_configs = extract_request_configs(request.sampling_params)
             if self.skip_last_n_tokens > 0:
