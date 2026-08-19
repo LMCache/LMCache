@@ -306,10 +306,11 @@ def _drain(
     harness: _Harness,
     total_num_scheduled_tokens: int = 2 * TOKENS_PER_BLOCK,
     new_request_block_ids: list[list[list[int]]] | None = None,
+    cached_new_block_ids: list[Any] | None = None,
 ) -> _DrainResult:
     """Run one public manager scheduler-step hook."""
     scheduler_output = _make_scheduler_output(
-        total_num_scheduled_tokens, new_request_block_ids
+        total_num_scheduled_tokens, new_request_block_ids, cached_new_block_ids
     )
     actions = harness.manager.on_scheduler_step(scheduler_output)  # type: ignore[arg-type]
     _apply_actions(harness, actions)
@@ -400,6 +401,48 @@ def test_drain_pressure_from_gross_allocation() -> None:
         harness,
         total_num_scheduled_tokens=8,
         new_request_block_ids=[[[20, 21, 22, 23]]],
+    )
+
+    assert len(metadata) == 1
+    assert harness.pool.touched == [[1, 2]]
+
+
+def test_drain_pressure_from_cached_request_allocation() -> None:
+    """Decode-heavy steps allocate blocks exclusively through
+    ``scheduled_cached_reqs``; that allocation alone must be able to
+    trigger a drain, exactly as new-request allocation does."""
+    harness = _make_lazy_connector()
+    _admit_op(harness, "req", [[1, 2]], 0, 32)
+    # Three blocks ahead: ranks 3 and 4.
+    harness.pool.make_free([11, 12, 13])
+    harness.pool.make_free([1, 2])
+
+    # Scheduled tokens alone give est 1 -> depth 2 (< rank 3). The gross
+    # allocation of 4 blocks, arriving on the cached side, seeds the
+    # EMA -> depth 8 -> due.
+    metadata = _drain(
+        harness,
+        total_num_scheduled_tokens=8,
+        cached_new_block_ids=[[[20, 21, 22, 23]]],
+    )
+
+    assert len(metadata) == 1
+    assert harness.pool.touched == [[1, 2]]
+
+
+def test_cached_allocation_placeholders_do_not_hide_pressure() -> None:
+    """vLLM reports ``None`` for cached requests that allocated nothing;
+    the pressure counter must skip the placeholders and still see the
+    step's real allocations."""
+    harness = _make_lazy_connector()
+    _admit_op(harness, "req", [[1, 2]], 0, 32)
+    harness.pool.make_free([11, 12, 13])
+    harness.pool.make_free([1, 2])
+
+    metadata = _drain(
+        harness,
+        total_num_scheduled_tokens=8,
+        cached_new_block_ids=[None, [[20, 21, 22, 23]], None],
     )
 
     assert len(metadata) == 1

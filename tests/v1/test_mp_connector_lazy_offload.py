@@ -23,8 +23,10 @@ from vllm.v1.request import RequestStatus  # noqa: E402
 # First Party
 from lmcache.integration.vllm.lazy_offload_manager import (  # noqa: E402
     LazyOffloadActions,
+    LazyOffloadManager,
 )
 from lmcache.integration.vllm.lmcache_mp_connector import (  # noqa: E402
+    KVConnectorRole,
     LMCacheMPConnector,
 )
 from lmcache.integration.vllm.lmcache_mp_metadata import (  # noqa: E402
@@ -37,6 +39,7 @@ from lmcache.integration.vllm.lmcache_mp_metadata import (  # noqa: E402
 from lmcache.integration.vllm.vllm_multi_process_adapter import (  # noqa: E402
     LoadStoreOp,
 )
+import lmcache.integration.vllm.lmcache_mp_connector as mp_connector_module  # noqa: E402
 
 TOKENS_PER_BLOCK = 16
 
@@ -112,6 +115,55 @@ class _FakeSchedulerAdapter:
         return self.lookup_result
 
 
+class _ConstructorFakeSchedulerAdapter:
+    """Stands in for the real adapter in full-constructor tests.
+
+    The real adapter opens a ZMQ handshake with the LMCache server at
+    construction; the constructor tests only need the attributes the
+    connector's ``__init__`` reads afterwards.
+    """
+
+    lmcache_tokens_per_chunk = 16 * TOKENS_PER_BLOCK
+
+    def __init__(self, **kwargs: Any) -> None:
+        self.kwargs = kwargs
+
+
+class _FakeKVTransferConfig:
+    """The two ``KVTransferConfig`` members the connector constructor reads."""
+
+    def __init__(self, extra_config: dict[str, Any]) -> None:
+        self.kv_connector_extra_config = extra_config
+
+    def get_from_extra_config(self, key: str, default: Any) -> Any:
+        return self.kv_connector_extra_config.get(key, default)
+
+
+def _make_vllm_config(
+    lazy_offload: bool, enable_prefix_caching: bool
+) -> SimpleNamespace:
+    """Duck-typed single-rank ``VllmConfig`` for constructor validation."""
+    return SimpleNamespace(
+        kv_transfer_config=_FakeKVTransferConfig(
+            {"lmcache.mp.lazy_offload": lazy_offload}
+        ),
+        cache_config=SimpleNamespace(
+            enable_prefix_caching=enable_prefix_caching,
+            block_size=TOKENS_PER_BLOCK,
+        ),
+        parallel_config=SimpleNamespace(
+            world_size=1,
+            rank=0,
+            tensor_parallel_size=1,
+            pipeline_parallel_size=1,
+            data_parallel_size=1,
+        ),
+        model_config=SimpleNamespace(
+            model="test-model", use_mla=False, is_hybrid=False
+        ),
+    )
+
+
 @dataclass
 class _Harness:
     connector: LMCacheMPConnector
@@ -166,6 +218,58 @@ def _stub_regular_step_processing(connector: LMCacheMPConnector) -> None:
     connector._process_new_requests = _no_op  # type: ignore[method-assign]
     connector._process_cached_requests = _no_op  # type: ignore[method-assign]
     connector._report_block_allocation_deltas = _no_op  # type: ignore[method-assign]
+
+
+def test_constructor_rejects_lazy_offload_without_prefix_caching() -> None:
+    """Eviction detection reads vLLM block hashes, which only exist while
+    prefix caching maintains them; the misconfiguration must fail fast,
+    before the server handshake."""
+    with pytest.raises(ValueError, match="prefix caching"):
+        LMCacheMPConnector(
+            _make_vllm_config(lazy_offload=True, enable_prefix_caching=False),  # type: ignore[arg-type]
+            KVConnectorRole.SCHEDULER,
+        )
+
+
+def test_constructor_accepts_eager_without_prefix_caching(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The guard is scoped to lazy mode; eager deployments keep working
+    with prefix caching off."""
+    monkeypatch.setattr(
+        mp_connector_module,
+        "LMCacheMPSchedulerAdapter",
+        _ConstructorFakeSchedulerAdapter,
+    )
+
+    connector = LMCacheMPConnector(
+        _make_vllm_config(lazy_offload=False, enable_prefix_caching=False),  # type: ignore[arg-type]
+        KVConnectorRole.SCHEDULER,
+    )
+
+    assert connector.lazy_offload is False
+
+
+def test_constructor_wires_the_manager_for_the_lazy_scheduler_role(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The scheduler-role constructor must build the manager the lazy
+    routing path delegates to; the harness elsewhere in this file wires a
+    recording double by hand, so only this test proves the production
+    wiring exists."""
+    monkeypatch.setattr(
+        mp_connector_module,
+        "LMCacheMPSchedulerAdapter",
+        _ConstructorFakeSchedulerAdapter,
+    )
+
+    connector = LMCacheMPConnector(
+        _make_vllm_config(lazy_offload=True, enable_prefix_caching=True),  # type: ignore[arg-type]
+        KVConnectorRole.SCHEDULER,
+    )
+
+    assert connector.lazy_offload is True
+    assert isinstance(connector._lazy_offload_manager, LazyOffloadManager)
 
 
 def test_build_connector_meta_forwards_step_and_applies_actions() -> None:
@@ -382,6 +486,81 @@ def test_eager_apc_backfill_uses_the_existing_immediate_store_path() -> None:
     assert store.direction == "STORE"
     assert (store.op.start, store.op.end) == (0, 3 * TOKENS_PER_BLOCK)
     assert harness.manager.candidates == []
+
+
+def test_lazy_new_request_store_routes_to_manager_not_metadata() -> None:
+    """In lazy mode a new request's store becomes a deferred candidate;
+    nothing may reach the step's connector metadata, or the worker would
+    store it immediately and the policy would have decided nothing."""
+    harness = _make_connector()
+    tokens = list(range(4 * TOKENS_PER_BLOCK))
+    request = SimpleNamespace(
+        request_id="L-new",
+        status=RequestStatus.WAITING,
+        cache_salt=None,
+        all_token_ids=tokens,
+        prompt_token_ids=tokens,
+    )
+    assert harness.connector.get_num_new_matched_tokens(
+        request, num_computed_tokens=0
+    ) == (0, False)
+    tracker = harness.connector.request_trackers["L-new"]
+    tracker.allocated_block_ids = {0: [1, 2, 3, 4]}
+    scheduler_output = SimpleNamespace(
+        scheduled_new_reqs=[SimpleNamespace(req_id="L-new")],
+        num_scheduled_tokens={"L-new": 4 * TOKENS_PER_BLOCK},
+    )
+    connector_metadata = LMCacheMPConnectorMetadata()
+
+    harness.connector._process_new_requests(
+        scheduler_output,
+        connector_metadata,  # type: ignore[arg-type]
+    )
+
+    assert connector_metadata.requests == []
+    assert [c.request_id for c in harness.manager.candidates] == ["L-new"]
+    store = harness.manager.candidates[0]
+    assert store.direction == "STORE"
+    assert (store.op.start, store.op.end) == (0, 4 * TOKENS_PER_BLOCK)
+
+
+def test_lazy_cached_request_store_routes_to_manager_not_metadata() -> None:
+    """The cached-request path (decode steps, APC backfill) must take the
+    same lazy fork as new requests: candidates to the manager, an empty
+    step metadata. Mirrors the eager immediate-store test above."""
+    harness = _make_connector()
+    tokens = list(range(4 * TOKENS_PER_BLOCK))
+    request = SimpleNamespace(
+        request_id="L-cached",
+        status=RequestStatus.WAITING,
+        cache_salt=None,
+        all_token_ids=tokens,
+        prompt_token_ids=tokens,
+    )
+    assert harness.connector.get_num_new_matched_tokens(
+        request, num_computed_tokens=3 * TOKENS_PER_BLOCK + 4
+    ) == (0, False)
+    tracker = harness.connector.request_trackers["L-cached"]
+    tracker.allocated_block_ids = {0: [1, 2, 3, 4]}
+    scheduler_output = SimpleNamespace(
+        scheduled_cached_reqs=SimpleNamespace(
+            req_ids=["L-cached"],
+            new_block_ids=[[]],
+            resumed_req_ids={"L-cached"},
+        ),
+        num_scheduled_tokens={"L-cached": 4},
+    )
+    connector_metadata = LMCacheMPConnectorMetadata()
+
+    harness.connector._process_cached_requests(
+        scheduler_output,
+        connector_metadata,  # type: ignore[arg-type]
+    )
+
+    assert connector_metadata.requests == []
+    assert [c.request_id for c in harness.manager.candidates] == ["L-cached"]
+    store = harness.manager.candidates[0]
+    assert (store.op.start, store.op.end) == (0, 3 * TOKENS_PER_BLOCK)
 
 
 def test_eager_without_an_aligned_apc_hit_keeps_the_old_chunk_threshold() -> None:
