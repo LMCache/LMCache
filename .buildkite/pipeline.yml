@@ -4,7 +4,6 @@ env:
 steps:
   - label: "Unit Tests"
     key: "unit_tests"
-    if: build.env("BUILDKITE_PIPELINE_SLUG") != "unit-tests-amd"
     timeout_in_minutes: 60
     command: |
       echo $PWD # for debugging
@@ -63,6 +62,7 @@ steps:
   - label: "vLLM + LMCache E2E (AMD)"
     key: "amd_vllm_bench"
     if: build.env("BUILDKITE_PIPELINE_SLUG") == "unit-tests-amd"
+    depends_on: "unit_tests"
     timeout_in_minutes: 90
     command: .buildkite/scripts/amd-vllm-bench.sh
     artifact_paths:
