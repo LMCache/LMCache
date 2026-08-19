@@ -40,6 +40,14 @@ NO_GPU_EXT=1 pip install -e . --no-build-isolation
 BUILD_WITH_HIP=1 pip install -e .
 ```
 
+For Python 3.14 ROCm/vLLM images, verify `pyproject.toml` first: current
+LMCache declares `<3.14`, so editable installs may be rejected. CI-only repros
+that intentionally use such images should run from the mounted source tree,
+build extensions in place with `BUILD_WITH_HIP=1 python3 setup.py build_ext
+--inplace`, keep `numpy<2.5` so numba-backed platform initialization exposes
+`lmcache.device_ops`, and explicitly install any runtime dependencies that the
+image does not already provide.
+
 ## Testing
 
 ### Running Tests

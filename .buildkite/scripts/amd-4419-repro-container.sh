@@ -59,7 +59,7 @@ echo "=== Installing build/runtime dependencies ==="
 uv pip install --system --no-cache -r requirements/build.txt
 uv pip uninstall --system -y cupy-cuda12x cupy-cuda11x cupy || true
 uv pip install --system --no-cache "numpy<2.5" cupy-rocm-7-0
-uv pip install --system --no-cache requests
+uv pip install --system --no-cache requests sortedcontainers
 
 # The tw22 repro image is Python 3.14 based. Use the mounted source tree plus
 # in-place native extensions, matching the environment where #4419 reproduced.
@@ -75,12 +75,17 @@ import os
 import torch
 import vllm
 from lmcache import device_ops
+from lmcache.integration.vllm import vllm_multi_process_adapter
 
 print(f"vLLM={vllm.__version__}")
 print(f"torch={torch.__version__}, HIP={torch.version.hip}")
 print(f"LMCache={lmcache.__version__}")
 print(f"CuPy={cupy.__version__}, is_hip={cupy.cuda.runtime.is_hip}")
 print(f"LMCache device={lmcache.torch_device_type}, ops={type(device_ops).__name__}")
+print(
+    "LMCache vLLM MP adapter import="
+    f"{vllm_multi_process_adapter.__name__}"
+)
 if not cupy.cuda.runtime.is_hip:
     raise RuntimeError("Expected ROCm CuPy backend, but cupy.cuda.runtime.is_hip is false")
 print(f"Selected host AMD GPU: {os.getenv('GPU_FOR_VLLM', 'unset')}")
