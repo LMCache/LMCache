@@ -53,6 +53,17 @@ if ! docker info >/dev/null 2>&1; then
 fi
 echo "Docker command: ${DOCKER[*]}"
 "${DOCKER[@]}" version || true
+echo "=== Host disk usage before Docker cleanup ==="
+df -h /var/lib/docker /var/lib/buildkite-agent "${REPO_ROOT}" 2>/dev/null || df -h
+"${DOCKER[@]}" system df || true
+
+echo "=== Pruning unused Docker data before pulling large ROCm image ==="
+"${DOCKER[@]}" container prune -f || true
+"${DOCKER[@]}" image prune -af || true
+"${DOCKER[@]}" builder prune -af || true
+"${DOCKER[@]}" system df || true
+echo "=== Host disk usage after Docker cleanup ==="
+df -h /var/lib/docker /var/lib/buildkite-agent "${REPO_ROOT}" 2>/dev/null || df -h
 
 # The reproducer needs one large MI300 GPU. The selector returns the host
 # physical GPU id, which is passed to the container and used by the native
