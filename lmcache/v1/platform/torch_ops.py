@@ -1077,7 +1077,10 @@ def _normalize_lmcache_objects(
             # Single plane: hs is the packed 2 * head_size.
             chunk_shape = (nl, chunk_tokens, nh * hs)
         else:
-            chunk_shape = (2, nl, chunk_tokens, nh * hs)
+            if getattr(shape_desc, "kv_interleaved", False):
+                chunk_shape = (nl, 2, chunk_tokens, nh * hs)
+            else:
+                chunk_shape = (2, nl, chunk_tokens, nh * hs)
         return [
             _tensor_from_ptr(ptr, chunk_shape, dtype, "cpu")
             for ptr in lmcache_objects_ptrs
@@ -1107,6 +1110,7 @@ def multi_layer_block_kv_transfer(
     lmcache_chunk_size: int,
     engine_kv_format: EngineKVFormat,
     skip_prefix_n_blocks: int,
+    layerwise: bool = False,
 ) -> None:
     """Python fallback implementation of block-based multi-layer KV transfer.
 
@@ -1182,6 +1186,7 @@ def multi_layer_block_kv_transfer(
             engine_kv_format,
             is_d2h,
             skip_prefix_n_blocks,
+            kv_interleaved=getattr(shape_desc, "kv_interleaved", False),
         )
     elif is_kv_list(engine_kv_format):
         _transfer_sglang_mha(
@@ -1194,6 +1199,7 @@ def multi_layer_block_kv_transfer(
             engine_kv_format,
             is_d2h,
             skip_prefix_n_blocks,
+            kv_interleaved=getattr(shape_desc, "kv_interleaved", False),
         )
     elif is_mla(engine_kv_format):
         _transfer_per_layer_mla(
@@ -1232,6 +1238,7 @@ def multi_layer_block_kv_transfer(
             engine_kv_format,
             is_d2h,
             skip_prefix_n_blocks,
+            kv_interleaved=getattr(shape_desc, "kv_interleaved", False),
         )
     else:
         _transfer_per_layer_nhd(
@@ -1244,6 +1251,7 @@ def multi_layer_block_kv_transfer(
             engine_kv_format,
             is_d2h,
             skip_prefix_n_blocks,
+            kv_interleaved=getattr(shape_desc, "kv_interleaved", False),
         )
 
 
@@ -1304,6 +1312,7 @@ def _transfer_cross_layer(
     engine_kv_format: EngineKVFormat,
     is_d2h: bool,
     skip_prefix_n_blocks: int,
+    kv_interleaved: bool = False,
 ) -> None:
     """Handle cross-layer formats: single tensor [NB, NL, 2, ...]."""
     # NHD: [NB, NL, 2, BS, NH, HS]  HND: [NB, NL, 2, NH, BS, HS]
@@ -1357,12 +1366,20 @@ def _transfer_cross_layer(
                     else:
                         # [N, BS, NH, HS] → [N*BS, NH*HS]
                         flat = slice_t.reshape(n_valid * block_size, nh * hs)
-                    obj[kv, layer_idx, offset_in_object:token_end].copy_(
-                        flat, non_blocking=True
-                    )
+                    if kv_interleaved:
+                        obj[layer_idx, kv, offset_in_object:token_end].copy_(
+                            flat, non_blocking=True
+                        )
+                    else:
+                        obj[kv, layer_idx, offset_in_object:token_end].copy_(
+                            flat, non_blocking=True
+                        )
                 else:
                     obj_device = objs_on_device[object_idx]
-                    src = obj_device[kv, layer_idx, offset_in_object:token_end]
+                    if kv_interleaved:
+                        src = obj_device[layer_idx, kv, offset_in_object:token_end]
+                    else:
+                        src = obj_device[kv, layer_idx, offset_in_object:token_end]
                     if is_hnd:
                         # N=n_valid, BS=block_size:
                         # [N*BS, NH*HS] -> [N, BS, NH, HS] -> [N, NH, BS, HS]
@@ -1386,6 +1403,7 @@ def _transfer_sglang_mha(
     engine_kv_format: EngineKVFormat,
     is_d2h: bool,
     skip_prefix_n_blocks: int,
+    kv_interleaved: bool = False,
 ) -> None:
     """Handle SGLang MHA formats: 2*NL tensors (list[list[Tensor]])."""
     # TWO_X_NL_X_NBBS_NH_HS: each tensor [NB*BS, NH, HS]
@@ -1439,12 +1457,20 @@ def _transfer_sglang_mha(
                             n_valid * block_size, nh, hs
                         )
                     flat = gathered.reshape(n_valid * block_size, nh * hs)
-                    obj[kv, layer_idx, offset_in_object:token_end].copy_(
-                        flat, non_blocking=True
-                    )
+                    if kv_interleaved:
+                        obj[layer_idx, kv, offset_in_object:token_end].copy_(
+                            flat, non_blocking=True
+                        )
+                    else:
+                        obj[kv, layer_idx, offset_in_object:token_end].copy_(
+                            flat, non_blocking=True
+                        )
                 else:
                     obj_device = objs_on_device[object_idx]
-                    src = obj_device[kv, layer_idx, offset_in_object:token_end]
+                    if kv_interleaved:
+                        src = obj_device[layer_idx, kv, offset_in_object:token_end]
+                    else:
+                        src = obj_device[kv, layer_idx, offset_in_object:token_end]
                     src_shaped = src.reshape(n_valid * block_size, nh, hs)
                     if is_flat:
                         # scatter into [NB*BS, NH, HS]
@@ -1540,6 +1566,7 @@ def _transfer_per_layer_hnd(
     engine_kv_format: EngineKVFormat,
     is_d2h: bool,
     skip_prefix_n_blocks: int,
+    kv_interleaved: bool = False,
 ) -> None:
     """Handle per-layer HND formats: heads before block tokens."""
     if not layer_tensors or not object_tensors:
@@ -1613,11 +1640,29 @@ def _transfer_per_layer_hnd(
                     chunk_gpu[1, layer_idx].view(n_valid, block_size, nh0, hs0).copy_(
                         selected[:, 1].permute(0, 2, 1, 3)
                     )
-            obj[:, :, offset_in_object:token_end].copy_(chunk_gpu, non_blocking=True)
+            if kv_interleaved:
+                # obj layout: (nl, 2, tokens, hidden)
+                # chunk_gpu: (2, nl, n_valid*bs, hidden) → permute to (nl, 2, ...)
+                obj[:, :, offset_in_object:token_end].copy_(
+                    chunk_gpu.permute(1, 0, 2, 3), non_blocking=True
+                )
+            else:
+                obj[:, :, offset_in_object:token_end].copy_(
+                    chunk_gpu, non_blocking=True
+                )
         else:
-            chunk_gpu = obj[:, :, offset_in_object:token_end].to(
-                target_device, non_blocking=True
-            )
+            if kv_interleaved:
+                # obj layout: (nl, 2, tokens, hidden) → permute to (2, nl, ...)
+                chunk_gpu = (
+                    obj[:, :, offset_in_object:token_end]
+                    .to(target_device, non_blocking=True)
+                    .permute(1, 0, 2, 3)
+                    .contiguous()
+                )
+            else:
+                chunk_gpu = obj[:, :, offset_in_object:token_end].to(
+                    target_device, non_blocking=True
+                )
             for layer_idx, layer in enumerate(layer_tensors):
                 if is_two_major:
                     k_t, v_t = layer[0], layer[1]
@@ -1736,6 +1781,7 @@ def _transfer_per_layer_nhd(
     engine_kv_format: EngineKVFormat,
     is_d2h: bool,
     skip_prefix_n_blocks: int,
+    kv_interleaved: bool = False,
 ) -> None:
     """Handle per-layer NHD formats: block tokens before heads."""
     if not layer_tensors or not object_tensors:
@@ -1805,11 +1851,29 @@ def _transfer_per_layer_nhd(
                     chunk_gpu[1, layer_idx].copy_(
                         selected[:, 1].reshape(n_valid * block_size, nh0 * hs0)
                     )
-            obj[:, :, offset_in_object:token_end].copy_(chunk_gpu, non_blocking=True)
+            if kv_interleaved:
+                # obj layout: (nl, 2, tokens, hidden)
+                # chunk_gpu: (2, nl, n_valid*bs, hidden) → permute to (nl, 2, ...)
+                obj[:, :, offset_in_object:token_end].copy_(
+                    chunk_gpu.permute(1, 0, 2, 3), non_blocking=True
+                )
+            else:
+                obj[:, :, offset_in_object:token_end].copy_(
+                    chunk_gpu, non_blocking=True
+                )
         else:
-            chunk_gpu = obj[:, :, offset_in_object:token_end].to(
-                target_device, non_blocking=True
-            )
+            if kv_interleaved:
+                # obj layout: (nl, 2, tokens, hidden) → permute to (2, nl, ...)
+                chunk_gpu = (
+                    obj[:, :, offset_in_object:token_end]
+                    .to(target_device, non_blocking=True)
+                    .permute(1, 0, 2, 3)
+                    .contiguous()
+                )
+            else:
+                chunk_gpu = obj[:, :, offset_in_object:token_end].to(
+                    target_device, non_blocking=True
+                )
             for layer_idx, layer in enumerate(layer_tensors):
                 if is_two_major:
                     k_t, v_t = layer[0], layer[1]

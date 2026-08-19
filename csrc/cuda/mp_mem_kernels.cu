@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "mp_mem_kernels.cuh"
+#include <cstring>
 
 namespace {
 
@@ -8,12 +9,10 @@ namespace {
  * Key logic in the kernel implementation:
  * 1. Each thread block is for (BS, NH, HS) part (i.e., a single block in the
  * paged buffer)
- * 2. The thread block is 3D: threadIdx.x strides over the transfer units
- * within a head (at most 32 threads), threadIdx.y selects the head (one head
- * per y index, and threadIdx.z partitions the BS dimension (i.e., number of
- * tokens in the block).
- * 3. Within a thread block, we do loop over the BS dimension with a stride of
- * blockDim.z.
+ * 2. Within a thread block, each warp is for a single head. Number of warps
+ * in a thread block is equal to the number of heads (NH).
+ * 3. Within a thread block, we do the loop over the BS (i.e., number of tokens
+ * in the block) dimension.
  * 4. The grid will take over (2, NB, NL) dimensions. No matter what the actual
  * layout in memory is, we will calculate the global offset for the start of the
  * block
@@ -132,7 +131,14 @@ __device__ inline size_t calculate_lmcache_global_offset(
     const int lmcache_chunk_size,  // e.g., 256
     const PageBufferShapeDesc shape_desc) {
   size_t scalars_per_token = shape_desc.scalars_per_token<ScalarType>();
-  // LMCache is using 2LTD all the times
+  if (shape_desc.kv_interleaved) {
+    // L2TD layout: [L, 2, T, D] — per-layer interleaved [K0,V0,K1,V1,...]
+    return token_offset_in_lmcache_object * scalars_per_token +
+           k_or_v * lmcache_chunk_size * scalars_per_token +
+           layer_idx * shape_desc.kv_size * lmcache_chunk_size *
+               scalars_per_token;
+  }
+  // Default 2LTD layout: [2, L, T, D] — all-K then all-V
   return token_offset_in_lmcache_object * scalars_per_token +
          layer_idx * lmcache_chunk_size * scalars_per_token +
          k_or_v * shape_desc.nl * lmcache_chunk_size * scalars_per_token;
@@ -199,8 +205,6 @@ __device__ void multi_layer_block_transfer_single_block(
                                   // in LMCache object
 ) {
   const int head_idx = threadIdx.y;
-  const int init_token_offset = threadIdx.z;
-  const int token_stride = blockDim.z;
   const int k_or_v = blockIdx.x;
   const int layer_idx = blockIdx.z;
 
@@ -235,7 +239,7 @@ __device__ void multi_layer_block_transfer_single_block(
     const size_t spt = shape_desc.scalars_per_token<ScalarType>();
     const size_t scale_units = 4 / sizeof(ScalarType);
     const size_t val_units = spt - scale_units;
-    for (int t = init_token_offset; t < shape_desc.bs; t += token_stride) {
+    for (int t = 0; t < shape_desc.bs; ++t) {
       ScalarType* eng_vals =
           paged_buffer_layer_ptr + engine_global_offset + t * val_units;
       ScalarType* eng_scale = paged_buffer_layer_ptr + engine_global_offset +
@@ -252,8 +256,7 @@ __device__ void multi_layer_block_transfer_single_block(
     return;
   }
 
-  for (int token_offset = init_token_offset; token_offset < shape_desc.bs;
-       token_offset += token_stride) {
+  for (int token_offset = 0; token_offset < shape_desc.bs; ++token_offset) {
     const size_t engine_local_offset =
         calculate_engine_local_offset<ScalarType, format>(token_offset,
                                                           head_idx, shape_desc);
@@ -275,6 +278,7 @@ __device__ void multi_layer_block_transfer_single_block(
 }
 
 template <typename ScalarType, bool lmcache_to_engine, EngineKVFormat format>
+// Per-chunk kernel: MemoryObj4 passed by value (zero GPU alloc, <=4 objects)
 __global__ void multi_layer_block_transfer_kernel(
     MemoryObj4<ScalarType> lmcache_objects,
     ScalarType** __restrict__ paged_buffer_ptrs,
@@ -293,7 +297,6 @@ __global__ void multi_layer_block_transfer_kernel(
   }
   const int obj_idx = flat_block_idx / num_blocks_per_object;
   const int block_idx_in_object = flat_block_idx % num_blocks_per_object;
-
   const int engine_block_idx = engine_block_ids[flat_block_idx];
   multi_layer_block_transfer_single_block<ScalarType, lmcache_to_engine,
                                           format>(
@@ -302,77 +305,118 @@ __global__ void multi_layer_block_transfer_kernel(
       shape_desc, lmcache_chunk_size);
 }
 
-#define LAUNCH_KERNEL(DIRECTION, FORMAT)                                 \
-  multi_layer_block_transfer_kernel<ScalarType, DIRECTION, FORMAT>       \
-      <<<grid, block, 0, stream>>>(lmcache_obj4, paged_buffer_ptrs,      \
-                                   block_ids_ptr, num_blocks_per_object, \
-                                   shape_desc, lmcache_chunk_size,       \
-                                   skip_prefix_n_blocks);                \
+// Per-layer kernel: ScalarType** via GPU device pointer array (arbitrary N)
+template <typename ScalarType, bool lmcache_to_engine, EngineKVFormat format>
+__global__ void multi_layer_block_transfer_kernel_layerwise(
+    ScalarType** __restrict__ lmcache_object_ptrs,
+    ScalarType** __restrict__ paged_buffer_ptrs,
+    const int64_t* engine_block_ids,
+    const int num_blocks_per_object,  // e.g. 16 for lmcache chunk size =
+                                      // 256 and block size = 16
+    const PageBufferShapeDesc shape_desc,
+    const int lmcache_chunk_size,  // e.g., 256, used to calculate global offset
+                                   // in LMCache object
+    const int skip_prefix_n_blocks) {
+  // blockIdx.y spans all blocks across all objects (total_blocks).
+  // Derive which object and local block index from the flat index.
+  const int flat_block_idx = blockIdx.y;
+  if (flat_block_idx < skip_prefix_n_blocks) {
+    return;
+  }
+  const int obj_idx = flat_block_idx / num_blocks_per_object;
+  const int block_idx_in_object = flat_block_idx % num_blocks_per_object;
+  const int engine_block_idx = engine_block_ids[flat_block_idx];
+  multi_layer_block_transfer_single_block<ScalarType, lmcache_to_engine,
+                                          format>(
+      lmcache_object_ptrs[obj_idx], paged_buffer_ptrs, engine_block_idx,
+      block_idx_in_object * shape_desc.bs,  // offset in LMCache object
+      shape_desc, lmcache_chunk_size);
+}
+
+#define LAUNCH_KERNEL(KERNEL, DIRECTION, FORMAT, FIRST_ARG)               \
+  KERNEL<ScalarType, DIRECTION, FORMAT><<<grid, block, 0, stream>>>(      \
+      FIRST_ARG, paged_buffer_ptrs, block_ids_ptr, num_blocks_per_object, \
+      shape_desc, lmcache_chunk_size, skip_prefix_n_blocks);              \
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 
-#define DISPATCH_FORMAT(DIRECTION)                                      \
-  switch (engine_kv_format) {                                           \
-    case EngineKVFormat::NB_NL_TWO_BS_NH_HS:                            \
-      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NB_NL_TWO_BS_NH_HS);     \
-      break;                                                            \
-    case EngineKVFormat::NL_X_TWO_NB_BS_NH_HS:                          \
-      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_TWO_NB_BS_NH_HS);   \
-      break;                                                            \
-    case EngineKVFormat::NL_X_TWO_NB_NH_BS_HS:                          \
-      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_TWO_NB_NH_BS_HS);   \
-      break;                                                            \
-    case EngineKVFormat::NL_X_NB_TWO_BS_NH_HS:                          \
-      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_TWO_BS_NH_HS);   \
-      break;                                                            \
-    case EngineKVFormat::NL_X_NB_TWO_NH_BS_HS:                          \
-      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_TWO_NH_BS_HS);   \
-      break;                                                            \
-    case EngineKVFormat::NL_X_NB_BS_HS:                                 \
-      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_BS_HS);          \
-      break;                                                            \
-    case EngineKVFormat::TWO_X_NL_X_NBBS_NH_HS:                         \
-      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::TWO_X_NL_X_NBBS_NH_HS);  \
-      break;                                                            \
-    case EngineKVFormat::TWO_X_NL_X_NB_BS_NH_HS:                        \
-      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::TWO_X_NL_X_NB_BS_NH_HS); \
-      break;                                                            \
-    case EngineKVFormat::NL_X_NBBS_ONE_HS:                              \
-      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NBBS_ONE_HS);       \
-      break;                                                            \
-    case EngineKVFormat::NB_NL_TWO_NH_BS_HS:                            \
-      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NB_NL_TWO_NH_BS_HS);     \
-      break;                                                            \
-    case EngineKVFormat::NL_X_NB_NH_BS_TWO_HS:                          \
-      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_NH_BS_TWO_HS);   \
-      break;                                                            \
-    case EngineKVFormat::NL_X_NB_BS_NH_TWO_HS:                          \
-      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_BS_NH_TWO_HS);   \
-      break;                                                            \
-    case EngineKVFormat::NL_X_NB_NH_BS_CS:                              \
-      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_NH_BS_CS);       \
-      break;                                                            \
-    case EngineKVFormat::NL_X_NB_BS_NH_CS:                              \
-      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_BS_NH_CS);       \
-      break;                                                            \
-    case EngineKVFormat::NL_X_NB_BSV_BSS:                               \
-      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_BSV_BSS);        \
-      break;                                                            \
-    default:                                                            \
-      TORCH_CHECK(false, "Unsupported EngineKVFormat: ",                \
-                  static_cast<int>(engine_kv_format));                  \
+#define DISPATCH_FORMAT(KERNEL, DIRECTION, FIRST_ARG)                          \
+  switch (engine_kv_format) {                                                  \
+    case EngineKVFormat::NB_NL_TWO_BS_NH_HS:                                   \
+      LAUNCH_KERNEL(KERNEL, DIRECTION, EngineKVFormat::NB_NL_TWO_BS_NH_HS,     \
+                    FIRST_ARG);                                                \
+      break;                                                                   \
+    case EngineKVFormat::NL_X_TWO_NB_BS_NH_HS:                                 \
+      LAUNCH_KERNEL(KERNEL, DIRECTION, EngineKVFormat::NL_X_TWO_NB_BS_NH_HS,   \
+                    FIRST_ARG);                                                \
+      break;                                                                   \
+    case EngineKVFormat::NL_X_TWO_NB_NH_BS_HS:                                 \
+      LAUNCH_KERNEL(KERNEL, DIRECTION, EngineKVFormat::NL_X_TWO_NB_NH_BS_HS,   \
+                    FIRST_ARG);                                                \
+      break;                                                                   \
+    case EngineKVFormat::NL_X_NB_TWO_BS_NH_HS:                                 \
+      LAUNCH_KERNEL(KERNEL, DIRECTION, EngineKVFormat::NL_X_NB_TWO_BS_NH_HS,   \
+                    FIRST_ARG);                                                \
+      break;                                                                   \
+    case EngineKVFormat::NL_X_NB_TWO_NH_BS_HS:                                 \
+      LAUNCH_KERNEL(KERNEL, DIRECTION, EngineKVFormat::NL_X_NB_TWO_NH_BS_HS,   \
+                    FIRST_ARG);                                                \
+      break;                                                                   \
+    case EngineKVFormat::NL_X_NB_BS_HS:                                        \
+      LAUNCH_KERNEL(KERNEL, DIRECTION, EngineKVFormat::NL_X_NB_BS_HS,          \
+                    FIRST_ARG);                                                \
+      break;                                                                   \
+    case EngineKVFormat::TWO_X_NL_X_NBBS_NH_HS:                                \
+      LAUNCH_KERNEL(KERNEL, DIRECTION, EngineKVFormat::TWO_X_NL_X_NBBS_NH_HS,  \
+                    FIRST_ARG);                                                \
+      break;                                                                   \
+    case EngineKVFormat::TWO_X_NL_X_NB_BS_NH_HS:                               \
+      LAUNCH_KERNEL(KERNEL, DIRECTION, EngineKVFormat::TWO_X_NL_X_NB_BS_NH_HS, \
+                    FIRST_ARG);                                                \
+      break;                                                                   \
+    case EngineKVFormat::NL_X_NBBS_ONE_HS:                                     \
+      LAUNCH_KERNEL(KERNEL, DIRECTION, EngineKVFormat::NL_X_NBBS_ONE_HS,       \
+                    FIRST_ARG);                                                \
+      break;                                                                   \
+    case EngineKVFormat::NB_NL_TWO_NH_BS_HS:                                   \
+      LAUNCH_KERNEL(KERNEL, DIRECTION, EngineKVFormat::NB_NL_TWO_NH_BS_HS,     \
+                    FIRST_ARG);                                                \
+      break;                                                                   \
+    case EngineKVFormat::NL_X_NB_NH_BS_TWO_HS:                                 \
+      LAUNCH_KERNEL(KERNEL, DIRECTION, EngineKVFormat::NL_X_NB_NH_BS_TWO_HS,   \
+                    FIRST_ARG);                                                \
+      break;                                                                   \
+    case EngineKVFormat::NL_X_NB_BS_NH_TWO_HS:                                 \
+      LAUNCH_KERNEL(KERNEL, DIRECTION, EngineKVFormat::NL_X_NB_BS_NH_TWO_HS,   \
+                    FIRST_ARG);                                                \
+      break;                                                                   \
+    case EngineKVFormat::NL_X_NB_NH_BS_CS:                                     \
+      LAUNCH_KERNEL(KERNEL, DIRECTION, EngineKVFormat::NL_X_NB_NH_BS_CS,       \
+                    FIRST_ARG);                                                \
+      break;                                                                   \
+    case EngineKVFormat::NL_X_NB_BS_NH_CS:                                     \
+      LAUNCH_KERNEL(KERNEL, DIRECTION, EngineKVFormat::NL_X_NB_BS_NH_CS,       \
+                    FIRST_ARG);                                                \
+      break;                                                                   \
+    case EngineKVFormat::NL_X_NB_BSV_BSS:                                      \
+      LAUNCH_KERNEL(KERNEL, DIRECTION, EngineKVFormat::NL_X_NB_BSV_BSS,        \
+                    FIRST_ARG);                                                \
+      break;                                                                   \
+    default:                                                                   \
+      TORCH_CHECK(false, "Unsupported EngineKVFormat: ",                       \
+                  static_cast<int>(engine_kv_format));                         \
   }
 
 template <typename ScalarType>
 void multi_layer_block_kv_transfer_templated(
     const torch::Tensor& paged_buffer_ptrs_tensor,
-    std::vector<int64_t> lmcache_objects_ptrs, const torch::Tensor& block_ids,
-    const torch::Device& device, TransferDirection direction,
-    PageBufferShapeDesc shape_desc, int lmcache_chunk_size,
-    EngineKVFormat engine_kv_format, int skip_prefix_n_blocks) {
+    const int64_t* lmcache_objects_ptrs, int num_objects,
+    const torch::Tensor& block_ids, const torch::Device& device,
+    TransferDirection direction, PageBufferShapeDesc shape_desc,
+    int lmcache_chunk_size, EngineKVFormat engine_kv_format,
+    int skip_prefix_n_blocks, bool layerwise) {
   // --- Validation ---
-  int num_objects = static_cast<int>(lmcache_objects_ptrs.size());
-  TORCH_CHECK(num_objects >= 1 && num_objects <= 4,
-              "Expected 1-4 LMCache objects, got ", num_objects);
+  TORCH_CHECK(num_objects >= 1, "Expected at least 1 LMCache object, got ",
+              num_objects);
 
   int total_blocks = block_ids.size(0);
   TORCH_CHECK(total_blocks % num_objects == 0, "block_ids length (",
@@ -384,16 +428,6 @@ void multi_layer_block_kv_transfer_templated(
               "blocks_per_object * block_size (",
               num_blocks_per_object * shape_desc.bs,
               ") must equal lmcache_chunk_size (", lmcache_chunk_size, ")");
-
-  // --- Build MemoryObj4 ---
-  MemoryObj4<ScalarType> lmcache_obj4;
-  lmcache_obj4.num_objects = num_objects;
-  for (int i = 0; i < 4; ++i) {
-    lmcache_obj4.objects[i] =
-        (i < num_objects)
-            ? reinterpret_cast<ScalarType*>(lmcache_objects_ptrs[i])
-            : nullptr;
-  }
 
   // --- Build paged buffer pointer array ---
   ScalarType** paged_buffer_ptrs =
@@ -410,20 +444,76 @@ void multi_layer_block_kv_transfer_templated(
                           static_cast<int>(sizeof(ScalarType));
   int thread_dim_x = std::min(elements_per_head, 32);
   int thread_dim_y = shape_desc.nh;
-  TORCH_CHECK(thread_dim_y <= 32, "Number of heads (", thread_dim_y,
-              ") exceeds max threads per block in y-dim (32). This"
-              " should never happen in normal LLMs");
-  int thread_dim_z =
-      std::min(shape_desc.bs, 1024 / (thread_dim_x * thread_dim_y));
-  thread_dim_z = std::min(thread_dim_z, 64);  // max threads per block in z-dim
 
-  dim3 block(thread_dim_x, thread_dim_y, thread_dim_z);
+  dim3 block(thread_dim_x, thread_dim_y);
   dim3 grid(shape_desc.kv_size, total_blocks, shape_desc.nl);
 
-  if (direction == TransferDirection::H2D) {
-    DISPATCH_FORMAT(true);
+  if (!layerwise) {
+    // Per-chunk path: MemoryObj4 by value, zero GPU alloc
+    TORCH_CHECK(num_objects <= 4,
+                "Per-chunk path supports at most 4 objects, got ", num_objects);
+    MemoryObj4<ScalarType> lmcache_obj4;
+    lmcache_obj4.num_objects = num_objects;
+    for (int i = 0; i < 4; ++i)
+      lmcache_obj4.objects[i] =
+          (i < num_objects)
+              ? reinterpret_cast<ScalarType*>(lmcache_objects_ptrs[i])
+              : nullptr;
+    if (direction == TransferDirection::H2D) {
+      DISPATCH_FORMAT(multi_layer_block_transfer_kernel, true, lmcache_obj4);
+    } else {
+      DISPATCH_FORMAT(multi_layer_block_transfer_kernel, false, lmcache_obj4);
+    }
   } else {
-    DISPATCH_FORMAT(false);
+    // Per-layer path: reusable pinned+device buffer for pointer upload.
+    // Avoids per-launch torch::empty (caching allocator overhead) and
+    // pageable copy_ (which forces a CPU-blocking bounce buffer in the
+    // CUDA driver).  Fixed 1024-element buffers (8 KB each) are allocated
+    // once on first use and reused forever; the pinned→device copy is
+    // truly async with zero CPU stall.
+    static constexpr int kMaxObjects = 1024;
+    static thread_local int64_t* pinned_host_ptr = nullptr;
+    static thread_local torch::Tensor dev_buf_tensor;
+    static thread_local int dev_buf_device_index = -1;
+
+    TORCH_CHECK(num_objects <= kMaxObjects, "Layerwise path supports at most ",
+                kMaxObjects, " objects, got ", num_objects);
+
+    const int dev_idx = device.index();
+
+    // One-time allocation of pinned host buffer
+    if (!pinned_host_ptr) {
+      auto err =
+          cudaHostAlloc(reinterpret_cast<void**>(&pinned_host_ptr),
+                        kMaxObjects * sizeof(int64_t), cudaHostAllocDefault);
+      TORCH_CHECK(err == cudaSuccess,
+                  "cudaHostAlloc failed: ", cudaGetErrorString(err));
+    }
+
+    // One-time allocation of device buffer (or on device change)
+    if (dev_buf_device_index != dev_idx) {
+      dev_buf_tensor = torch::empty(
+          {kMaxObjects},
+          torch::TensorOptions().dtype(torch::kInt64).device(device));
+      dev_buf_device_index = dev_idx;
+    }
+
+    // pinned staging → device (truly async, zero CPU stall)
+    std::memcpy(pinned_host_ptr, lmcache_objects_ptrs,
+                num_objects * sizeof(int64_t));
+    cudaMemcpyAsync(dev_buf_tensor.data_ptr(), pinned_host_ptr,
+                    num_objects * sizeof(int64_t), cudaMemcpyHostToDevice,
+                    stream);
+
+    ScalarType** lmcache_ptrs_dev =
+        reinterpret_cast<ScalarType**>(dev_buf_tensor.data_ptr());
+    if (direction == TransferDirection::H2D) {
+      DISPATCH_FORMAT(multi_layer_block_transfer_kernel_layerwise, true,
+                      lmcache_ptrs_dev);
+    } else {
+      DISPATCH_FORMAT(multi_layer_block_transfer_kernel_layerwise, false,
+                      lmcache_ptrs_dev);
+    }
   }
 }
 
@@ -432,20 +522,21 @@ void multi_layer_block_kv_transfer_templated(
 
 }  // namespace
 
-#define LAUNCH_TEMPLATED(type)                                             \
-  do {                                                                     \
-    multi_layer_block_kv_transfer_templated<type>(                         \
-        paged_buffer_ptrs_tensor, lmcache_objects_ptrs, block_ids, device, \
-        direction, shape_desc, lmcache_chunk_size, engine_kv_format,       \
-        skip_prefix_n_blocks);                                             \
+#define LAUNCH_TEMPLATED(type)                                        \
+  do {                                                                \
+    multi_layer_block_kv_transfer_templated<type>(                    \
+        paged_buffer_ptrs_tensor, lmcache_objects_ptrs, num_objects,  \
+        block_ids, device, direction, shape_desc, lmcache_chunk_size, \
+        engine_kv_format, skip_prefix_n_blocks, layerwise);           \
   } while (0)
 
 void multi_layer_block_kv_transfer(
     const torch::Tensor& paged_buffer_ptrs_tensor,
-    std::vector<int64_t> lmcache_objects_ptrs, const torch::Tensor& block_ids,
-    const torch::Device& device, TransferDirection direction,
-    PageBufferShapeDesc shape_desc, int lmcache_chunk_size,
-    EngineKVFormat engine_kv_format, int skip_prefix_n_blocks) {
+    const int64_t* lmcache_objects_ptrs, int num_objects,
+    const torch::Tensor& block_ids, const torch::Device& device,
+    TransferDirection direction, PageBufferShapeDesc shape_desc,
+    int lmcache_chunk_size, EngineKVFormat engine_kv_format,
+    int skip_prefix_n_blocks, bool layerwise) {
   int head_bytes = shape_desc.hs * shape_desc.element_size;
   TORCH_CHECK(head_bytes % sizeof(uint16_t) == 0, "head_size * element_size (",
               head_bytes, ") must be divisible by 2 for vectorized access");
@@ -475,7 +566,7 @@ void execute_object_group_transfer(
     TransferDirection direction, const torch::Device& device,
     size_t host_buffer_alignment,
     const std::vector<KernelGroupSpec>& kernel_group_specs,
-    const std::vector<BatchStep>& batch_steps) {
+    const std::vector<BatchStep>& batch_steps, bool layerwise) {
   // Set the device guard once for the whole plan so every staging copy and
   // kernel launch below is enqueued on this device's current stream, in order.
   const at::cuda::OptionalCUDAGuard device_guard(device);
@@ -538,14 +629,11 @@ void execute_object_group_transfer(
       const at::Tensor block_ids = at::from_blob(
           reinterpret_cast<void*>(block_ids_addr),
           {static_cast<int64_t>(launch.total_blocks)}, int64_opts);
-      std::vector<int64_t> lmcache_objects_ptrs(
-          group.lmcache_objects_ptrs.begin(),
-          group.lmcache_objects_ptrs.begin() + launch.num_objects);
-
       multi_layer_block_kv_transfer(
-          paged_buffer_ptrs_tensor, std::move(lmcache_objects_ptrs), block_ids,
-          device, direction, group.shape_desc, group.lmcache_chunk_size,
-          group.engine_kv_format, launch.skip_prefix_n_blocks);
+          paged_buffer_ptrs_tensor, group.lmcache_objects_ptrs.data(),
+          launch.num_objects, block_ids, device, direction, group.shape_desc,
+          group.lmcache_chunk_size, group.engine_kv_format,
+          launch.skip_prefix_n_blocks, layerwise);
     }
     if (!is_h2d) {
       do_staging(step.staging);

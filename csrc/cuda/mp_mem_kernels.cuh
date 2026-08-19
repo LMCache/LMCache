@@ -33,6 +33,11 @@ struct PageBufferShapeDesc {
   // pack non-block info into dim-0 or do not support dim-0 padding,
   // and ignore this field.
   int block_stride_elems;
+  // When true, the LMCache object uses L2TD layout [L, 2, T, D] (interleaved
+  // per-layer: [K0,V0,K1,V1,...]) instead of the default 2LTD layout
+  // [2, L, T, D] (all-K then all-V). The scatter kernel selects the
+  // corresponding offset formula.
+  bool kv_interleaved = false;
 
   template <typename ScalarType>
   __host__ __device__ inline size_t scalars_per_head() const {
@@ -134,7 +139,7 @@ void execute_object_group_transfer(
     TransferDirection direction, const torch::Device& device,
     size_t host_buffer_alignment,
     const std::vector<KernelGroupSpec>& kernel_group_specs,
-    const std::vector<BatchStep>& batch_steps);
+    const std::vector<BatchStep>& batch_steps, bool layerwise = false);
 
 /**
  * Block-level multi-layer KV transfer between vLLM paged buffers and
@@ -154,7 +159,8 @@ void execute_object_group_transfer(
  */
 void multi_layer_block_kv_transfer(
     const torch::Tensor& paged_buffer_ptrs_tensor,
-    std::vector<int64_t> lmcache_objects_ptrs, const torch::Tensor& block_ids,
-    const torch::Device& device, TransferDirection direction,
-    PageBufferShapeDesc shape_desc, int lmcache_chunk_size,
-    EngineKVFormat engine_kv_format, int skip_prefix_n_blocks);
+    const int64_t* lmcache_objects_ptrs, int num_objects,
+    const torch::Tensor& block_ids, const torch::Device& device,
+    TransferDirection direction, PageBufferShapeDesc shape_desc,
+    int lmcache_chunk_size, EngineKVFormat engine_kv_format,
+    int skip_prefix_n_blocks, bool layerwise = false);

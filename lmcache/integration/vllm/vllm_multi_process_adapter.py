@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, NoReturn, Protocol
 import enum
 import os
+import re
 import threading
 import uuid
 
@@ -23,6 +24,7 @@ from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
     IPCCacheServerKey,
 )
+from lmcache.v1.multiprocess.futures import LayerwiseDeviceMessagingFuture
 from lmcache.v1.multiprocess.group_view import (
     EngineGroupInfo,
     expand_engine_block_ids,
@@ -41,6 +43,10 @@ if TYPE_CHECKING:
     from lmcache.integration.vllm.experimental import Dispatcher
 
 logger = init_logger(__name__)
+
+# Regex to extract the integer layer index from vLLM layer names like
+# "model.layers.5.self_attn".
+_LAYER_RE = re.compile(r"model\.layers\.(\d+)")
 
 
 class ExtraConfigDefault(enum.Enum):
@@ -1128,6 +1134,10 @@ class LMCacheMPWorkerAdapter:
         # exactly once, or async loads hang in WAITING_FOR_REMOTE_KVS.
         self._dropped_retrieves: set[str] = set()
 
+        # Per-layer KV loading: set after registration from the
+        # server's advertised layerwise_batch value.
+        self._layerwise_loading: bool = False
+
         # The store requests that have finished execution in LMCache
         self.finished_stores: set[str] = set()
         # The finished request ids that are passed via vLLM and also
@@ -1307,6 +1317,8 @@ class LMCacheMPWorkerAdapter:
                 engine_group_infos=self.engine_group_infos,
                 engine_type=EngineType.VLLM,
             )
+            if hasattr(transfer_ctx, "layerwise_loading"):
+                self._layerwise_loading = transfer_ctx.layerwise_loading
         except TimeoutError:
             raise ConnectionError(
                 "LMCache server did not respond to "
@@ -1497,6 +1509,7 @@ class LMCacheMPWorkerAdapter:
             event,
             self.blocks_in_chunk,
             skip_first_n_tokens=op.skip_first_n_tokens,
+            **({"layerwise": True} if self._layerwise_loading else {}),
         )
         self.retrieve_futures[request_id] = (future, op.flat_block_ids)
         self.retrieve_events[request_id] = event
@@ -1552,6 +1565,41 @@ class LMCacheMPWorkerAdapter:
             cache_salts = [""] * len(request_ids)
         for request_id, op, salt in zip(request_ids, ops, cache_salts, strict=False):
             self.submit_retrieve_request(request_id, op, event, cache_salt=salt)
+
+    @_lmcache_nvtx_annotate
+    def wait_for_layer_load(
+        self, layer_name: str, request_ids: list[str] | None = None
+    ) -> None:
+        """Block until KV for a specific layer is loaded for all active retrieves.
+
+        When layerwise loading is disabled this is a no-op (all-layer
+        transfer completes in ``start_load_kv`` / ``get_finished``).
+
+        Args:
+            layer_name: vLLM layer name, e.g. ``"model.layers.5.self_attn"``.
+            request_ids: If provided, only wait for these request ids.
+                Otherwise wait for all pending layerwise retrieves.
+        """
+        if not self._layerwise_loading:
+            return
+
+        m = _LAYER_RE.search(layer_name)
+        if m is None:
+            return
+        layer_idx = int(m.group(1))
+
+        ids = (
+            request_ids
+            if request_ids is not None
+            else list(self.retrieve_futures.keys())
+        )
+        for req_id in ids:
+            entry = self.retrieve_futures.get(req_id)
+            if entry is None:
+                continue
+            future, _ = entry
+            if isinstance(future, LayerwiseDeviceMessagingFuture):
+                future.wait_for_layer(layer_idx)
 
     def _process_finished_stores(
         self,

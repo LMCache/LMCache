@@ -443,6 +443,7 @@ class MusaDeviceOps(DeviceOps):
         lmcache_chunk_size: int,
         engine_kv_format: EngineKVFormat,
         skip_prefix_n_blocks: int,
+        layerwise: bool = False,
     ) -> None:
         """Transfer MUSA blocks through native code or the torch baseline.
 

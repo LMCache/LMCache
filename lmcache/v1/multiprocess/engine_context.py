@@ -206,10 +206,13 @@ class MPCacheServerContext:
         hash_algorithm: str = "blake3",
         separate_object_groups: bool = False,
         full_sw_kv: bool = False,
+        layerwise_batch: int = 0,
     ) -> None:
         self._chunk_size = chunk_size
         self._separate_object_groups = separate_object_groups
         self._full_sw_kv = full_sw_kv
+        self._layerwise_batch = layerwise_batch
+        self._layerwise_loading: bool = layerwise_batch > 0
 
         # Initialize the process-global GDS context.
         # No-op when GDS L1 is disabled (config is None).
@@ -240,6 +243,16 @@ class MPCacheServerContext:
     def chunk_size(self) -> int:
         """Chunk size for KV cache operations."""
         return self._chunk_size
+
+    @property
+    def layerwise_loading(self) -> bool:
+        """Whether per-layer store/retrieve is enabled."""
+        return self._layerwise_loading
+
+    @property
+    def layerwise_batch(self) -> int:
+        """Per-layer batch size (0 = disabled)."""
+        return self._layerwise_batch
 
     @property
     def separate_object_groups(self) -> bool:

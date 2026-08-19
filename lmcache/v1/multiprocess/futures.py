@@ -1,13 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from typing import Any, Generic, Optional, TypeVar, cast
+import queue
 import threading
+
+# Third Party
+import msgspec
 
 # First Party
 from lmcache import torch_dev
 from lmcache.utils import lmcache_deprecate
 from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
-from lmcache.v1.platform.base.event_ipc import get_event_ipc_backend
+from lmcache.v1.platform.base.event_ipc import EventPool, get_event_ipc_backend
 
 T = TypeVar("T")
 
@@ -17,6 +21,7 @@ class MessagingFuture(Generic[T]):
         self.is_done_ = threading.Event()
         self.result_: T | None = None
         self._retained_references: list[object] = []
+        self._partial_queue: queue.Queue[bytes | None] | None = None
 
     def query(self) -> bool:
         """
@@ -59,6 +64,21 @@ class MessagingFuture(Generic[T]):
             raise LMCacheTimeoutError("Future result not available within timeout")
         return cast(T, self.result_)
 
+    def on_partial(self, data: bytes) -> None:
+        """Receive a partial streaming response from the MQ client.
+
+        Called by :meth:`MessageQueueClient.process_inbound` for each
+        partial frame.  Only effective if :meth:`enable_streaming` was
+        called first.
+        """
+        if self._partial_queue is not None:
+            self._partial_queue.put(data)
+
+    def enable_streaming(self) -> "queue.Queue[bytes | None]":
+        """Enable partial result streaming and return the internal queue."""
+        self._partial_queue = queue.Queue()  # type: ignore[assignment]
+        return self._partial_queue
+
     def set_result(self, result: T) -> None:
         """
         Set the result of the future and mark it as done. This function is NOT
@@ -70,6 +90,10 @@ class MessagingFuture(Generic[T]):
         """
         self.result_ = result
         self.is_done_.set()
+        # Wake any thread blocked in _drain_until_layer() so it can
+        # observe the final result instead of waiting for the 60-s timeout.
+        if self._partial_queue is not None:
+            self._partial_queue.put(None)
 
     def retain_reference(self, value: object) -> None:
         """Keep a resource alive for at least the lifetime of this future.
@@ -229,6 +253,222 @@ class DeviceMessagingFuture(MessagingFuture[T]):
         device: Any | None = None,
     ) -> "DeviceMessagingFuture[T]":
         return DeviceMessagingFuture(raw_future, device)
+
+
+class LayerwiseDeviceMessagingFuture(MessagingFuture[T]):
+    """Future that carries per-layer IPC events for layerwise KV loading.
+
+    Supports two modes:
+
+    * **Non-streaming** (``streaming=False``, default): the raw future
+      delivers all event handles at once in its result.
+    * **Streaming** (``streaming=True``): event handles arrive
+      incrementally via :meth:`MessagingFuture.on_partial` (partial ZMQ
+      frames).  :meth:`wait_for_layer` imports and waits on each
+      handle as soon as it arrives, overlapping H2D transfer of later
+      batches with GPU attention of earlier layers.
+    """
+
+    def __init__(
+        self,
+        raw_future: MessagingFuture[tuple[list[bytes], T]],
+        device: Any | None = None,
+        streaming: bool = False,
+        event_pool: EventPool | None = None,
+    ) -> None:
+        super().__init__()
+        self.raw_future_ = raw_future
+        self.layer_events_: list[Any] = []
+        self.result_: T | None = None
+        self.device_ = device if device is not None else torch_dev.current_device()
+        self._event_backend = get_event_ipc_backend(self.device_)
+        self._event_backend.check_event_support(self.device_)
+        self._resolved = False
+        self._last_waited_event: object | None = None
+        self._event_pool = event_pool
+
+        # Streaming state
+        self._streaming = streaming
+        self._layer_event_map: dict[int, Any] = {}
+        if streaming:
+            self._partial_queue = raw_future.enable_streaming()
+        else:
+            self._partial_queue = None
+
+    # ------------------------------------------------------------------
+    # Streaming helpers
+    # ------------------------------------------------------------------
+
+    def _import_partial(self, b_data: bytes) -> None:
+        """Import event from one partial message (pool index)."""
+        assert self._event_pool is not None
+        first_layer, count, pool_idx = msgspec.msgpack.decode(
+            b_data, type=tuple[int, int, int]
+        )
+        evt = self._event_pool.event_at(pool_idx)
+        for i in range(first_layer, first_layer + count):
+            self._layer_event_map[i] = evt
+
+    def _drain_until_layer(self, target_layer_idx: int) -> None:
+        """Block-drain the partial queue until *target_layer_idx* is available."""
+        assert self._partial_queue is not None
+        while target_layer_idx not in self._layer_event_map:
+            try:
+                b_data = self._partial_queue.get(timeout=60)
+            except queue.Empty:
+                raise LMCacheTimeoutError(
+                    f"Timed out waiting for streaming event of layer {target_layer_idx}"
+                ) from None
+            if b_data is None:
+                # Sentinel from set_result(): final response arrived
+                # with no more partials coming.  Break out so the
+                # caller can discover the outcome via the raw future.
+                break
+            self._import_partial(b_data)
+
+    def _drain_remaining(self) -> None:
+        """Non-blocking drain of any queued partial messages."""
+        if self._partial_queue is None:
+            return
+        while True:
+            try:
+                b_data = self._partial_queue.get_nowait()
+            except queue.Empty:
+                break
+            if b_data is None:
+                break
+            self._import_partial(b_data)
+
+    def _resolve_final(self) -> None:
+        """Extract the success flag from the final ZMQ response."""
+        if self.result_ is not None:
+            return
+        _, result = self.raw_future_.result()
+        self.result_ = result
+
+    # ------------------------------------------------------------------
+    # Non-streaming helpers
+    # ------------------------------------------------------------------
+
+    def _on_raw_future_complete(self) -> None:
+        if self._resolved:
+            return
+        event_data_list, result = self.raw_future_.result()
+        self.result_ = result
+        self.layer_events_ = []
+        assert self._event_pool is not None, (
+            "EventPool must exist when layerwise is enabled"
+        )
+        # Pool mode: server packs indices as bytes (struct "<Ni").
+        # Standard
+        import struct as _struct
+
+        assert isinstance(event_data_list, bytes)
+        n = len(event_data_list) // 4
+        pool_indices = list(_struct.unpack(f"<{n}i", event_data_list))
+        seen_idx: dict[int, object] = {}
+        for idx in pool_indices:
+            if idx not in seen_idx:
+                seen_idx[idx] = self._event_pool.event_at(idx)
+            self.layer_events_.append(seen_idx[idx])
+        self._resolved = True
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def wait_for_layer(self, layer_idx: int) -> None:
+        """Make the current stream wait for a specific layer's transfer."""
+        if self._streaming:
+            evt = self._layer_event_map.get(layer_idx)
+            if evt is None:
+                self._drain_until_layer(layer_idx)
+                evt = self._layer_event_map.get(layer_idx)
+            if evt is not None and evt is not self._last_waited_event:
+                current_stream = torch_dev.current_stream(self.device_)
+                self._event_backend.wait_event(evt, current_stream)
+                self._last_waited_event = evt
+            return
+
+        # Non-streaming path
+        if not self._resolved:
+            self.raw_future_.wait()
+            self._on_raw_future_complete()
+        if layer_idx < len(self.layer_events_):
+            evt = self.layer_events_[layer_idx]
+            if evt is not self._last_waited_event:
+                current_stream = torch_dev.current_stream(self.device_)
+                self._event_backend.wait_event(evt, current_stream)
+                self._last_waited_event = evt
+
+    def wait(self, timeout: Optional[float] = None) -> bool:
+        if self._streaming:
+            flag = self.raw_future_.wait(timeout)
+            if not flag:
+                return False
+            self._resolve_final()
+            self._drain_remaining()
+            if self._layer_event_map:
+                last_layer = max(self._layer_event_map.keys())
+                self._event_backend.synchronize_event(
+                    self._layer_event_map[last_layer], self.device_
+                )
+            return True
+
+        # Non-streaming path
+        if self.layer_events_:
+            self._event_backend.synchronize_event(self.layer_events_[-1], self.device_)
+            return True
+        flag = self.raw_future_.wait(timeout)
+        if not flag:
+            return False
+        self._on_raw_future_complete()
+        if self.layer_events_:
+            self._event_backend.synchronize_event(self.layer_events_[-1], self.device_)
+        return True
+
+    def result(self, timeout: Optional[float] = None) -> T:
+        flag = self.wait(timeout)
+        if not flag:
+            raise LMCacheTimeoutError(
+                "LayerwiseDeviceMessagingFuture result not available within timeout"
+            )
+        assert self.result_ is not None
+        return self.result_
+
+    def query(self) -> bool:
+        if self._streaming:
+            if not self.raw_future_.query():
+                return False
+            self._resolve_final()
+            self._drain_remaining()
+            if self._layer_event_map:
+                last_layer = max(self._layer_event_map.keys())
+                return self._event_backend.query_event(
+                    self._layer_event_map[last_layer]
+                )
+            return True
+
+        # Non-streaming path
+        if self.layer_events_:
+            return self._event_backend.query_event(self.layer_events_[-1])
+        if self.raw_future_.query():
+            self._on_raw_future_complete()
+            if self.layer_events_:
+                return self._event_backend.query_event(self.layer_events_[-1])
+            return True
+        return False
+
+    def set_result(self, result: T) -> None:
+        raise NotImplementedError(
+            "LayerwiseDeviceMessagingFuture does not support set_result"
+        )
+
+    @property
+    def num_layers(self) -> int:
+        if self._streaming:
+            return len(self._layer_event_map)
+        return len(self.layer_events_)
 
 
 # Backward-compatible alias for existing imports.

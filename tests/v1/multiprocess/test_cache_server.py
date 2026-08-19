@@ -349,7 +349,11 @@ def registered_instance(
         get_response_class(RequestType.REGISTER_KV_CACHE),
     )
     result = future.result(timeout=DEFAULT_TIMEOUT)
-    assert result is None, "Register should return None"
+    # Server returns (layerwise_batch, event_pool_handles); the handle
+    # list is empty when layerwise is disabled (layerwise_batch == 0).
+    layerwise_batch, pool_handles = result
+    assert isinstance(layerwise_batch, int)
+    assert isinstance(pool_handles, list)
 
     yield instance_id
 
@@ -404,7 +408,11 @@ def test_register_unregister_kv_cache(
         get_response_class(RequestType.REGISTER_KV_CACHE),
     )
     result = future.result(timeout=DEFAULT_TIMEOUT)
-    assert result is None
+    # Server returns (layerwise_batch, event_pool_handles); the handle
+    # list is empty when layerwise is disabled (layerwise_batch == 0).
+    layerwise_batch, pool_handles = result
+    assert isinstance(layerwise_batch, int)
+    assert isinstance(pool_handles, list)
 
     # Unregister
     future = client.submit_request(

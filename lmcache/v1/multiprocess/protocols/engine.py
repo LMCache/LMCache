@@ -77,6 +77,7 @@ REQUEST_NAMES = [
     "COMMIT_STORE",
     "PREPARE_RETRIEVE",
     "COMMIT_RETRIEVE",
+    "RETRIEVE_LAYERWISE",
 ]
 
 # Type alias for cache keys
@@ -113,7 +114,7 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
                 LayoutHints,
                 list[EngineGroupInfo],
             ],
-            response_class=None,
+            response_class=tuple[int, list[bytes]],
             handler_type=HandlerType.SYNC,
         ),
         # Unregister KV Cache
@@ -181,11 +182,25 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         #   - event_ipc_handle: bytes - CUDA event IPC handle for synchronization
         #   - skip_first_n_tokens: int - Number of tokens to skip writing at the
         #     start of the retrieve range (to avoid overwriting APC-shared blocks)
-        # Returns: tuple[bytes, bool] - (CUDA event handle, success flag)
+        #   - layerwise: bool - If True, perform per-layer H2D transfer and
+        #     return per-layer IPC event handles instead of a single handle
+        # Returns: tuple[bytes | list[bytes], bool]
+        #   (CUDA event handle(s), success flag)
         "RETRIEVE": ProtocolDefinition(
             payload_classes=[KeyType, int, list[list[int]], bytes, int],
-            response_class=tuple[bytes, bool],
+            response_class=tuple[bytes | list[bytes], bool],
             handler_type=HandlerType.BLOCKING,
+        ),
+        # Layerwise variant of RETRIEVE: identical payloads/response but the
+        # server streams per-batch IPC event handles back as partial ZMQ
+        # frames (streaming=True).  A dedicated request type keeps the plain
+        # RETRIEVE (per-chunk) dispatch path completely untouched -- no
+        # StreamingSink is ever allocated for it.
+        "RETRIEVE_LAYERWISE": ProtocolDefinition(
+            payload_classes=[KeyType, int, list[list[int]], bytes, int],
+            response_class=tuple[bytes | list[bytes], bool],
+            handler_type=HandlerType.BLOCKING,
+            streaming=True,
         ),
         # Submit a prefix lookup; job is tracked server-side by request_id
         # Payload:

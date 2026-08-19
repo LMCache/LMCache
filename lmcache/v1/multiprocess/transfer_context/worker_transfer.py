@@ -17,7 +17,10 @@ from lmcache.utils import EngineType, init_logger
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import RegisterEngineDrivenContextPayload
-from lmcache.v1.multiprocess.futures import MessagingFuture
+from lmcache.v1.multiprocess.futures import (
+    LayerwiseDeviceMessagingFuture,
+    MessagingFuture,
+)
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import RequestType
@@ -33,6 +36,7 @@ from lmcache.v1.multiprocess.transfer_context.base import (
 from lmcache.v1.platform import get_device_spec, resolve_kv_wrapper_factory
 from lmcache.v1.platform.base.event_ipc import (
     EventIPCBackend,
+    EventPool,
     get_event_ipc_backend,
 )
 from lmcache.v1.platform.kv_wrap import wrap_kv_caches
@@ -411,6 +415,8 @@ class LMCacheDrivenTransferContext(TransferContext):
         self._send_request: SendRequest | None = None
         self._device: torch.device | None = None
         self._event_backend: EventIPCBackend | None = None
+        self._event_pool: EventPool | None = None
+        self._layerwise_batch: int = 0
 
     def register(
         self,
@@ -464,7 +470,18 @@ class LMCacheDrivenTransferContext(TransferContext):
                 list(engine_group_infos),
             ],
         )
-        future.result(timeout=mq_timeout)
+        reg_result = future.result(timeout=mq_timeout)
+        # Server returns (layerwise_batch, pool_handles) or just layerwise_batch
+        # for backwards compatibility.
+        if isinstance(reg_result, (list, tuple)) and len(reg_result) == 2:
+            layerwise_batch, pool_handles = reg_result
+            self._layerwise_batch = layerwise_batch or 0
+            if pool_handles:
+                self._event_pool = EventPool.import_pool(
+                    event_backend, device, pool_handles
+                )
+        else:
+            self._layerwise_batch = reg_result or 0
         self._device = device
         self._event_backend = event_backend
 
@@ -581,6 +598,7 @@ class LMCacheDrivenTransferContext(TransferContext):
         event: IPCEvent,
         _blocks_in_chunk: int,
         skip_first_n_tokens: int = 0,
+        layerwise: bool = False,
     ) -> MessagingFuture:
         """Submit a handle-based retrieve ordered by ``event``.
 
@@ -613,11 +631,35 @@ class LMCacheDrivenTransferContext(TransferContext):
                 "Call register() before submit_retrieve()."
             )
         event_ipc_handle = self._event_backend.export_event(event, self._device)
-        return self._send_request(
+        # Layerwise retrieves use a dedicated request type so the server side
+        # streams per-batch IPC event handles back; the plain RETRIEVE path
+        # (per-chunk) is left completely unchanged.
+        req_type = RequestType.RETRIEVE_LAYERWISE if layerwise else RequestType.RETRIEVE
+        payload = [
+            key,
+            instance_id,
+            block_ids,
+            event_ipc_handle,
+            skip_first_n_tokens,
+        ]
+        raw_future = self._send_request(
             self._mq_client,
-            RequestType.RETRIEVE,
-            [key, instance_id, block_ids, event_ipc_handle, skip_first_n_tokens],
-        ).to_device_future(device=self._device)
+            req_type,
+            payload,
+        )
+        if layerwise:
+            return LayerwiseDeviceMessagingFuture(
+                raw_future,
+                device=self._device,
+                streaming=True,
+                event_pool=self._event_pool,
+            )
+        return raw_future.to_device_future(device=self._device)
+
+    @property
+    def layerwise_loading(self) -> bool:
+        """Whether the server has layerwise loading enabled."""
+        return self._layerwise_batch > 0
 
     def close(self) -> None:
         """Release the message queue and cached event-backend state."""
@@ -625,6 +667,7 @@ class LMCacheDrivenTransferContext(TransferContext):
         self._send_request = None
         self._device = None
         self._event_backend = None
+        self._event_pool = None
 
     def flush_inflight_stores(self) -> None:
         pass

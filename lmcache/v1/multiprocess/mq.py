@@ -109,6 +109,32 @@ def msgspec_decode(b_obj: bytes, cls: Any) -> Any:
     return msgspec.msgpack.decode(b_obj, type=cls)
 
 
+# Partial-response marker used by streaming handlers.
+_PARTIAL_MARKER = b"\x00"
+
+
+class StreamingSink:
+    """Send partial results from a blocking handler during execution.
+
+    Created by the MQ server for handlers whose protocol definition has
+    ``streaming=True``.  The handler calls :meth:`send_partial` with raw
+    *msgpack* bytes; each call enqueues one ZMQ partial frame that the
+    client dispatches to :meth:`MessagingFuture.on_partial`.
+    """
+
+    __slots__ = ("_output_queue", "_output_efd", "_prefix_frames")
+
+    def __init__(self, output_queue, output_efd, prefix_frames):
+        self._output_queue = output_queue
+        self._output_efd = output_efd
+        self._prefix_frames = prefix_frames
+
+    def send_partial(self, data: bytes) -> None:
+        """Enqueue a partial response frame for the requesting client."""
+        self._output_queue.put(self._prefix_frames + [_PARTIAL_MARKER, data])
+        self._output_efd.notify()
+
+
 # Shared polling loop for MessageQueueClient instances
 
 
@@ -349,6 +375,11 @@ class MessageQueueClient:
         response_cls = get_response_class(request_type)
 
         if request_uid in self.pending_futures:
+            # Partial streaming message: [uid, type, PARTIAL_MARKER, data]
+            if len(b_response) >= 2 and b_response[0] == _PARTIAL_MARKER:
+                self.pending_futures[request_uid].on_partial(b_response[1])
+                return
+
             future = self.pending_futures.pop(request_uid)
             if b_response:
                 response = msgspec_decode(b_response[0], cls=response_cls)
@@ -447,25 +478,36 @@ class BlockingRequestHandler(RequestHandlerBase[ResponseType]):
         payload_clss: list[Any],
         response_cls: ResponseType,
         handler: Callable[..., ResponseType],
+        streaming: bool = False,
     ):
         self.executor: ThreadPoolExecutor | AffinityThreadPool | None = None
         self.payload_clss = payload_clss
         self.handler = handler
         self.response_cls = response_cls
+        self.streaming = streaming
 
     def __call__(
-        self, payloads: list[bytes], affinity_key: int = 0
+        self,
+        payloads: list[bytes],
+        affinity_key: int = 0,
+        streaming_sink: "StreamingSink | None" = None,
     ) -> Future[ResponseType]:
         assert self.executor is not None, (
             "BlockingRequestHandler has no executor assigned. "
             "Call add_normal_thread_pool or add_affinity_thread_pool first."
         )
         decoded_payloads = unwrap_request_payloads(payloads, self.payload_clss)
+        extra_kw: dict = {}
+        if streaming_sink is not None:
+            extra_kw["streaming_sink"] = streaming_sink
         if isinstance(self.executor, AffinityThreadPool):
             return self.executor.submit(
-                self.handler, *decoded_payloads, affinity_key=affinity_key
+                self.handler,
+                *decoded_payloads,
+                affinity_key=affinity_key,
+                **extra_kw,
             )
-        return self.executor.submit(self.handler, *decoded_payloads)
+        return self.executor.submit(self.handler, *decoded_payloads, **extra_kw)
 
     def get_response_class(self) -> ResponseType:
         return self.response_cls
@@ -559,7 +601,12 @@ class MessageQueueServer:
                 prefix_frames[0] is the zmq identity used as affinity key.
         """
         affinity_key = hash(prefix_frames[0])
-        future = handler_entry(payloads, affinity_key=affinity_key)
+        sink = (
+            StreamingSink(self.output_queue, self._output_efd, prefix_frames)
+            if handler_entry.streaming
+            else None
+        )
+        future = handler_entry(payloads, affinity_key=affinity_key, streaming_sink=sink)
 
         def _notify_response(fut: Future):
             try:
@@ -715,6 +762,7 @@ class MessageQueueServer:
         payload_clss: list[Any],
         handler_type: HandlerType,
         handler,
+        streaming: bool = False,
     ) -> None:
         """Register a handler for a specific request type.
 
@@ -724,6 +772,8 @@ class MessageQueueServer:
                 This should be get from `get_payload_classes(request_type)`.
             handler (callable): The handler function that takes the payloads
                 as arguments.
+            streaming: If True, the handler can send partial results via
+                a :class:`StreamingSink` passed as ``streaming_sink`` kwarg.
         """
         if not self._inspect_handler_signature(request_type, handler):
             raise ValueError(
@@ -734,7 +784,9 @@ class MessageQueueServer:
             case HandlerType.SYNC:
                 self.add_sync_handler(request_type, payload_clss, handler)
             case HandlerType.BLOCKING:
-                self.add_blocking_handler(request_type, payload_clss, handler)
+                self.add_blocking_handler(
+                    request_type, payload_clss, handler, streaming=streaming
+                )
             case HandlerType.NON_BLOCKING:
                 raise NotImplementedError("Non-blocking handler is not supported yet")
             case _:
@@ -749,11 +801,15 @@ class MessageQueueServer:
         )
 
     def add_blocking_handler(
-        self, request_type: RequestType, payload_clss: list[Any], handler
+        self,
+        request_type: RequestType,
+        payload_clss: list[Any],
+        handler,
+        streaming: bool = False,
     ) -> None:
         response_cls = get_response_class(request_type)
         self.handlers[request_type] = BlockingRequestHandler(
-            payload_clss, response_cls, handler
+            payload_clss, response_cls, handler, streaming=streaming
         )
 
     def add_nonblocking_handler(
