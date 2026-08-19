@@ -1,6 +1,6 @@
 # Multimodal Cache Keying
 
-Status: implemented (in-process connector and main MP connector)
+Status: implemented (in-process connector and all MP connector variants)
 
 ## Problem
 
@@ -62,13 +62,17 @@ channel for request-scoped metadata that must NOT be baked into tokens
 
 Substitution is applied on:
 
-- the in-process connector (`vllm_v1_adapter.py`: save, load, lookup), and
-- the main MP connector (`lmcache_mp_metadata.py`).
+- the in-process connector (`vllm_v1_adapter.py`: save, load, lookup),
+- the main MP connector (`lmcache_mp_metadata.py`; every key-carrying call
+  in `lmcache_mp_connector.py` — lookup, store, retrieve, lock management,
+  eager prefetch — goes through the tracker's `get_token_ids()`), and
+- the version-pinned MP connector copies (`lmcache_mp_connector_0180.py`,
+  `lmcache_mp_connector_0201.py`), which embed the same tracker-level
+  substitution so vendored deployments on those vLLM versions are covered.
 
 NOT yet handled (multimodal requests on these paths can still cross-hit and
 need either substitution or an MM bypass guard):
 
-- `lmcache_mp_connector_0180.py` / `lmcache_mp_connector_0201.py`
 - SGLang and TRT-LLM integrations
 - token-addressed SDK/CLI paths
 
@@ -77,4 +81,7 @@ need either substitution or an MM bypass guard):
 - Unit: `lmcache/integration/vllm/tests/test_mm_hash_utils.py` (properties +
   16-bit collision regression), `tests/v1/test_mp_connector_mm_keys.py`.
 - Acceptance: `tests/e2e_mm/` (real-engine matrix: cross-image isolation,
-  collision pressure, chunk-boundary phases, mixed traffic, multi-image).
+  collision pressure, chunk-boundary phases, mixed traffic, multi-image,
+  video modality, preemption recompute; T3 `mp_connector` scenario reruns
+  the T0/T1 core against a real MP cache server through the main MP
+  connector, including a per-path detector negative control).
