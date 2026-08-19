@@ -82,9 +82,9 @@ def test_calls_storage_manager_without_timeout_and_without_accepted_response():
     sm = _FakeStorageManager()
     client = _client(sm)
 
-    status_resp = client.get("/reconfigure/dax/status")
+    status_resp = client.get("/reconfigure/l2/dax/status")
     add_resp = client.post(
-        "/reconfigure/dax/add",
+        "/reconfigure/l2/dax/add",
         json={
             "adapter_index": 0,
             "device_path": "/dev/daxX.X",
@@ -92,7 +92,7 @@ def test_calls_storage_manager_without_timeout_and_without_accepted_response():
         },
     )
     remove_resp = client.post(
-        "/reconfigure/dax/remove",
+        "/reconfigure/l2/dax/remove",
         json={
             "adapter_index": 0,
             "device_path": "/dev/daxX.X",
@@ -101,7 +101,7 @@ def test_calls_storage_manager_without_timeout_and_without_accepted_response():
         },
     )
     resize_resp = client.post(
-        "/reconfigure/dax/resize",
+        "/reconfigure/l2/dax/resize",
         json={
             "adapter_index": 0,
             "device_path": "/dev/daxX.X",
@@ -167,7 +167,7 @@ def test_status_filters_non_dax_reconfigurable_adapters():
         }
     )
 
-    resp = _client(sm).get("/reconfigure/dax/status")
+    resp = _client(sm).get("/reconfigure/l2/dax/status")
 
     assert resp.status_code == 200
     assert resp.json() == {
@@ -203,7 +203,7 @@ def test_add_resolves_public_dax_index_to_generic_reconfigure_index():
     )
 
     resp = _client(sm).post(
-        "/reconfigure/dax/add",
+        "/reconfigure/l2/dax/add",
         json={
             "adapter_index": 0,
             "device_path": "/dev/daxX.X",
@@ -229,8 +229,21 @@ def test_add_rejects_invalid_size_payloads(
     payload: dict[str, object],
     status_code: int,
 ):
-    resp = _client(_FakeStorageManager()).post("/reconfigure/dax/add", json=payload)
+    resp = _client(_FakeStorageManager()).post("/reconfigure/l2/dax/add", json=payload)
     assert resp.status_code == status_code
+
+
+def test_size_rejects_boolean_and_float_payloads() -> None:
+    """The strict wire type keeps booleans/floats out of ``size`` (422)."""
+    resp = _client(_FakeStorageManager()).post(
+        "/reconfigure/l2/dax/add", json={"device_path": "/dev/daxX.X", "size": True}
+    )
+    assert resp.status_code == 422
+    resp = _client(_FakeStorageManager()).post(
+        "/reconfigure/l2/dax/resize",
+        json={"device_path": "/dev/daxX.X", "size": 4096.0},
+    )
+    assert resp.status_code == 422
 
 
 def test_add_rejects_pathological_size_string_without_echoing_input():
@@ -238,7 +251,7 @@ def test_add_rejects_pathological_size_string_without_echoing_input():
     bad_size = "9" + " " * 5000 + "x"
 
     resp = _client(sm).post(
-        "/reconfigure/dax/add",
+        "/reconfigure/l2/dax/add",
         json={"device_path": "/dev/daxX.X", "size": bad_size},
     )
 
@@ -251,15 +264,15 @@ def test_add_rejects_pathological_size_string_without_echoing_input():
     ("path", "payload"),
     [
         (
-            "/reconfigure/dax/remove",
+            "/reconfigure/l2/dax/remove",
             {"device_path": "/dev/daxX.X", "timeout_s": 1},
         ),
         (
-            "/reconfigure/dax/resize",
+            "/reconfigure/l2/dax/resize",
             {"device_path": "/dev/daxX.X", "size": 1024, "timeout_s": 1},
         ),
         (
-            "/reconfigure/dax/resize",
+            "/reconfigure/l2/dax/resize",
             {"device_path": "/dev/daxX.X", "size": 1024, "mode": "drain"},
         ),
     ],
@@ -280,7 +293,7 @@ def test_hotplug_error_status_code_is_preserved():
         )
     )
     resp = _client(sm).post(
-        "/reconfigure/dax/add",
+        "/reconfigure/l2/dax/add",
         json={
             "device_path": "/dev/daxX.X",
             "size": 1024,
@@ -303,7 +316,7 @@ def test_generic_backend_routes_payload_to_matching_reconfigurable_adapter():
     )
 
     resp = _client(sm).post(
-        "/reconfigure/fake/flip",
+        "/reconfigure/l2/fake/flip",
         json={"adapter_index": 0, "enabled": True},
     )
 
@@ -325,12 +338,15 @@ def test_reconfigure_post_rejects_missing_backend_adapter():
         }
     )
 
-    resp = _client(sm).post("/reconfigure/fake/flip", json={"enabled": True})
+    resp = _client(sm).post("/reconfigure/l2/fake/flip", json={"enabled": True})
 
     assert resp.status_code == 404
     assert resp.json() == {"error": "fake adapter not found"}
 
 
-def test_old_dax_routes_are_not_registered():
+def test_old_dax_routes_are_not_registered() -> None:
     resp = _client(_FakeStorageManager()).get("/dax/status")
+    assert resp.status_code == 404
+    # The pre-tier /reconfigure/{backend}/... form moved under /l2.
+    resp = _client(_FakeStorageManager()).get("/reconfigure/dax/status")
     assert resp.status_code == 404

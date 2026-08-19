@@ -39,7 +39,7 @@ class _EngineLike(Protocol):
 
 
 class GenericReconfigureRequest(BaseModel):
-    """Request body for generic ``POST /reconfigure/{backend}/{operation}``."""
+    """Request body for generic ``POST /reconfigure/l2/{backend}/{operation}``."""
 
     model_config = ConfigDict(extra="allow")
 
@@ -47,7 +47,7 @@ class GenericReconfigureRequest(BaseModel):
 
 
 class DaxAddRequest(BaseModel):
-    """Request body for ``POST /reconfigure/dax/add``."""
+    """Request body for ``POST /reconfigure/l2/dax/add``."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -57,7 +57,7 @@ class DaxAddRequest(BaseModel):
 
 
 class DaxRemoveRequest(BaseModel):
-    """Request body for ``POST /reconfigure/dax/remove``."""
+    """Request body for ``POST /reconfigure/l2/dax/remove``."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -68,7 +68,7 @@ class DaxRemoveRequest(BaseModel):
 
 
 class DaxResizeRequest(BaseModel):
-    """Request body for ``POST /reconfigure/dax/resize``."""
+    """Request body for ``POST /reconfigure/l2/dax/resize``."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -233,7 +233,7 @@ def _operation_payload(
     return _generic_operation_payload(payload)
 
 
-@router.get("/reconfigure/{backend}/status", response_model=None)
+@router.get("/reconfigure/l2/{backend}/status", response_model=None)
 async def reconfigure_status(backend: str, request: Request) -> dict | JSONResponse:
     """Return runtime reconfiguration status for one backend type."""
     sm = _get_storage_manager(request)
@@ -247,7 +247,7 @@ async def reconfigure_status(backend: str, request: Request) -> dict | JSONRespo
         return reconfigure_error_response(exc)
 
 
-@router.post("/reconfigure/{backend}/{operation}", response_model=None)
+@router.post("/reconfigure/l2/{backend}/{operation}", response_model=None)
 async def reconfigure_backend(
     backend: str,
     operation: str,

@@ -36,7 +36,7 @@ reconfigure types.
 managers.
 
 The runtime-reconfigure HTTP surface is not part of this design; when added it
-is intended to mirror the L2 `/reconfigure/dax/*` endpoints (see
+is intended to mirror the L2 `/reconfigure/l2/dax/*` endpoints (see
 [../l2_adapters/dax.md](../l2_adapters/dax.md)) and route only `operation` plus
 payload down to the manager.
 

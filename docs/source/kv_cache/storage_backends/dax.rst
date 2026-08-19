@@ -124,14 +124,14 @@ Use JSON bodies because DAX paths contain slashes:
 
 .. code-block:: bash
 
-   curl http://127.0.0.1:9000/reconfigure/dax/status
-   curl -X POST http://127.0.0.1:9000/reconfigure/dax/add \
+   curl http://127.0.0.1:9000/reconfigure/l2/dax/status
+   curl -X POST http://127.0.0.1:9000/reconfigure/l2/dax/add \
      -H 'Content-Type: application/json' \
      -d '{"device_path": "/dev/daxX.X", "size": "100GiB"}'
-   curl -X POST http://127.0.0.1:9000/reconfigure/dax/remove \
+   curl -X POST http://127.0.0.1:9000/reconfigure/l2/dax/remove \
      -H 'Content-Type: application/json' \
      -d '{"device_path": "/dev/daxX.X", "mode": "migrate"}'
-   curl -X POST http://127.0.0.1:9000/reconfigure/dax/resize \
+   curl -X POST http://127.0.0.1:9000/reconfigure/l2/dax/resize \
      -H 'Content-Type: application/json' \
      -d '{"device_path": "/dev/daxX.X", "size": "200GiB"}'
 
@@ -160,27 +160,27 @@ Hardware Validation Flow
 ------------------------
 
 Use the same Qwen 8B or 14B long-context workload before and after a runtime
-capacity change. Without hotplug support, ``/reconfigure/dax/status`` and
-``/reconfigure/dax/add`` are not available; changing the DAX device set
+capacity change. Without hotplug support, ``/reconfigure/l2/dax/status`` and
+``/reconfigure/l2/dax/add`` are not available; changing the DAX device set
 requires restarting LMCache with a new ``--l2-adapter`` value, which drops the
 volatile DAX key index.
 
 .. code-block:: bash
 
    export MODEL=Qwen/Qwen3-8B  # or a local Qwen 8B/14B checkpoint
-   curl http://127.0.0.1:9000/reconfigure/dax/status
+   curl http://127.0.0.1:9000/reconfigure/l2/dax/status
    python benchmarks/long_doc_qa/long_doc_qa.py \
      --model "$MODEL" --num-documents 1 --document-length 1024 \
      --output-len 16 --repeat-count 2 --repeat-mode tile \
      --completions --host 127.0.0.1 --port 8000 --json-output
-   curl -X POST http://127.0.0.1:9000/reconfigure/dax/add \
+   curl -X POST http://127.0.0.1:9000/reconfigure/l2/dax/add \
      -H 'Content-Type: application/json' \
      -d '{"device_path": "/dev/daxX.X", "size": "100GiB"}'
-   curl http://127.0.0.1:9000/reconfigure/dax/status
+   curl http://127.0.0.1:9000/reconfigure/l2/dax/status
 
 Record these fields for the comparison:
 
-- ``total_capacity_bytes`` before and after ``/reconfigure/dax/add``.
+- ``total_capacity_bytes`` before and after ``/reconfigure/l2/dax/add``.
 - ``total_used_bytes`` while the Qwen workload is running.
 - Whether an LMCache restart was required.
 - Whether the same cached prompt remains retrievable after the capacity change.
