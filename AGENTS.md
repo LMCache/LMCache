@@ -47,7 +47,8 @@ build extensions in place with `BUILD_WITH_HIP=1 python3 setup.py build_ext
 --inplace`, keep `numpy<2.5` so numba-backed platform initialization exposes
 `lmcache.device_ops`, invoke the CLI as `python3 -m lmcache.cli.main` because
 the `lmcache` console script is not installed, and explicitly install any
-runtime dependencies that the image does not already provide.
+runtime dependencies that the image does not already provide (for example,
+`sortedcontainers` and `opentelemetry-exporter-prometheus` for the MP server).
 
 ## Testing
 

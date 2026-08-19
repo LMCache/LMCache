@@ -59,7 +59,10 @@ echo "=== Installing build/runtime dependencies ==="
 uv pip install --system --no-cache -r requirements/build.txt
 uv pip uninstall --system -y cupy-cuda12x cupy-cuda11x cupy || true
 uv pip install --system --no-cache "numpy<2.5" cupy-rocm-7-0
-uv pip install --system --no-cache requests sortedcontainers
+uv pip install --system --no-cache \
+    "opentelemetry-exporter-prometheus<=0.61b0" \
+    requests \
+    sortedcontainers
 
 # The tw22 repro image is Python 3.14 based. Use the mounted source tree plus
 # in-place native extensions, matching the environment where #4419 reproduced.
