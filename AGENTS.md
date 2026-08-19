@@ -42,28 +42,6 @@ BUILD_WITH_HIP=1 pip install -e .
 
 ## Testing
 
-### AMD Buildkite E2E
-
-The `unit-tests-amd` pipeline also runs the shared multiprocess `vllm_bench`
-scenario on two bare-metal ROCm GPUs. Use the official
-`vllm/vllm-openai-rocm:latest` image so the test covers the latest stable vLLM
-instead of being limited by the host's ROCm version. The image defaults to
-`vllm serve`, so use `--entrypoint bash`; ensure `git` exists and mark the
-mounted checkout as a safe directory before installing LMCache from source.
-Leave `ATTENTION_BACKEND=auto` so vLLM chooses a ROCm backend. Batch-invariant
-mode is CUDA-specific in this scenario and must remain disabled on AMD. The
-current AMD Buildkite agent exposes Docker through `sudo` only, so probe
-`docker info` first and fall back to `sudo -n docker ...` for `pull`, `run`,
-and cleanup when the unprivileged socket is denied. The shared
-`run-vllm-bench.sh` slowdown gate is parameterized via
-`MAX_SLOWDOWN_PERCENT`; keep the shared default at `5`, but pass `10` from the
-AMD ROCm pipeline because the latest-stable random-workload E2E check carries
-slightly higher overhead than the CUDA lane while still validating end-to-end
-correctness. The random `vllm_bench` load by itself is effectively store-only
-because it uses one-shot random prompts with no shared prefix; keep the
-follow-up cold/warm replay check that asks vLLM for `cached_token_stats` and
-asserts a new `Retrieved ... tokens` line in the LMCache server log.
-
 ### Running Tests
 
 ```bash
@@ -105,17 +83,6 @@ isort .                   # Import sorting (black profile, from_first=true)
 mypy --config-file=pyproject.toml   # Type checking
 codespell --toml pyproject.toml     # Spell checking
 ```
-
-Before running `pre-commit run --all-files`, verify that `cargo`, `rustfmt`, and
-`cargo clippy` are available. The repository's pre-commit config includes Rust
-format and clippy hooks, so the run will fail even for Python-only changes when
-those commands are missing.
-If you are validating only non-Rust changes and do not intend to touch Rust in
-that pass, run `SKIP=rust-fmt,rust-clippy pre-commit run --all-files` to skip
-those hooks explicitly.
-The `rust-clippy` hook also requires Linux because `rust/raw_block` depends on
-`io-uring`; on macOS it fails while compiling that dependency. Run the full
-hook set on Linux and use the explicit skip above for non-Rust macOS changes.
 
 C++/CUDA files use clang-format (Google style, 80-col). Rust code in `rust/` uses `cargo fmt` and `cargo clippy`.
 
@@ -249,3 +216,4 @@ When reviewing code (or self-checking before submitting), verify all of the foll
 - [ ] No unnecessary memory copies or allocations in hot paths.
 - [ ] Thread safety is maintained for shared data structures.
 - [ ] CUDA/GPU resources are properly managed (allocated, freed, synchronized).
+
