@@ -4,7 +4,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-VLLM_ROCM_IMAGE="${VLLM_ROCM_IMAGE:-vllm/vllm-openai-rocm:latest}"
+VLLM_ROCM_IMAGE="${VLLM_ROCM_IMAGE:-rocm/vllm:rocm7.14.0_cdna_ubuntu24.04_py3.14_pytorch_2.11.0_vllm_0.23.0}"
 CONTAINER_NAME="lmcache-amd-4419-repro-${BUILDKITE_BUILD_ID}"
 DOCKER=(docker)
 
@@ -89,6 +89,7 @@ echo "Pulling ${VLLM_ROCM_IMAGE}"
     --env "BUILDKITE_BUILD_ID=${BUILDKITE_BUILD_ID}" \
     --env "GPU_FOR_VLLM=${GPU_FOR_VLLM}" \
     --env "PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH:-gfx942}" \
+    --env "SETUPTOOLS_SCM_PRETEND_VERSION=${SETUPTOOLS_SCM_PRETEND_VERSION:-0.5.4rc5.dev16}" \
     --env "LMCACHE_PORT=${LMCACHE_PORT:-16555}" \
     --env "VLLM_PORT=${VLLM_PORT:-18080}" \
     --env RESULTS_DIR=/workspace/LMCache/amd-4419-repro-results \

@@ -41,11 +41,18 @@ git config --global --add safe.directory "${REPO_ROOT}"
 export CXX=hipcc
 export BUILD_WITH_HIP=1
 export TORCH_DONT_CHECK_COMPILER_ABI=1
-export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE="${SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE:-0.0.0+ci}"
+export SETUPTOOLS_SCM_PRETEND_VERSION="${SETUPTOOLS_SCM_PRETEND_VERSION:-0.5.4rc5.dev16}"
+export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE="${SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE:-${SETUPTOOLS_SCM_PRETEND_VERSION}}"
+export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 
 uv pip install --system --no-cache -r requirements/build.txt
-uv pip install --system --no-cache --no-build-isolation -e .
+uv pip uninstall --system -y cupy-cuda12x cupy-cuda11x cupy || true
+uv pip install --system --no-cache --force-reinstall cupy-rocm-7-0
 uv pip install --system --no-cache requests
+
+# The tw22 repro image is Python 3.14 based. Use the mounted source tree plus
+# in-place native extensions, matching the environment where #4419 reproduced.
+MAX_JOBS="${MAX_JOBS:-1}" python3 setup.py build_ext --inplace
 
 vllm --help >/dev/null
 python3 - <<'PY'
