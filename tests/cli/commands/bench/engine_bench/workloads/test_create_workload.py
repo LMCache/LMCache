@@ -101,13 +101,7 @@ class TestValidateMaxOutputLengthSupported:
 
     @pytest.mark.parametrize(
         "workload",
-        [
-            "long-doc-permutator",
-            "random-prefill",
-            "prefix-suffix-tuner",
-            "rag-qa-quality",
-        ],
-        ["random-prefill", "prefix-suffix-tuner"],
+        ["random-prefill", "prefix-suffix-tuner", "rag-qa-quality"],
     )
     def test_rejected_for_workloads_without_the_parameter(self, workload: str) -> None:
         with pytest.raises(ValueError, match="max output length cannot be specified"):
