@@ -59,7 +59,10 @@ and cleanup when the unprivileged socket is denied. The shared
 `MAX_SLOWDOWN_PERCENT`; keep the shared default at `5`, but pass `10` from the
 AMD ROCm pipeline because the latest-stable random-workload E2E check carries
 slightly higher overhead than the CUDA lane while still validating end-to-end
-correctness.
+correctness. The random `vllm_bench` load by itself is effectively store-only
+because it uses one-shot random prompts with no shared prefix; keep the
+follow-up cold/warm replay check that asks vLLM for `cached_token_stats` and
+asserts a new `Retrieved ... tokens` line in the LMCache server log.
 
 ### Running Tests
 
