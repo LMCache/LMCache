@@ -3,6 +3,7 @@
 
 # Standard
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 import asyncio
 import queue
 import time
@@ -14,6 +15,25 @@ from lmcache.cli.commands.bench.engine_bench.stats import StatsCollector
 from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class MetricSection:
+    """One extra section a workload contributes to the final summary.
+
+    ``StatsCollector`` covers what every workload has in common; a workload
+    measuring something of its own returns it as one of these.
+
+    Attributes:
+        key: Machine-readable section key, used in JSON output.
+        label: Human-readable section heading for terminal output.
+        entries: ``(key, label, value)`` triples, in display order.  A value
+            is a scalar the metrics system can render and serialize to JSON.
+    """
+
+    key: str
+    label: str
+    entries: list[tuple[str, str, str | int | float]] = field(default_factory=list)
 
 
 class BaseWorkload(ABC):
@@ -70,6 +90,15 @@ class BaseWorkload(ABC):
     # ------------------------------------------------------------------
     # Concrete methods
     # ------------------------------------------------------------------
+
+    def extra_metric_sections(self) -> list[MetricSection]:
+        """Return extra summary sections this workload measured.
+
+        Returns:
+            Sections to append to the final report, in display order.
+            Empty unless a workload overrides this.
+        """
+        return []
 
     def run(self) -> None:
         """Run warmup + benchmark, closing the HTTP client in the same loop.

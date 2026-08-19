@@ -67,10 +67,9 @@ lmcache coordinator \
     --health-check-interval 10
 ```
 
-Config resolves from `MPCoordinatorConfig.from_env()` (the
-`LMCACHE_MP_COORDINATOR_*` environment variables); any CLI flag that is supplied
-overrides the corresponding field. Each flag defaults to unset so env-only
-deployments keep working. See
+Config comes from the flags alone: `execute` builds an `MPCoordinatorConfig`
+from every flag that was supplied, and each flag defaults to unset so the
+dataclass default stands. The coordinator reads no environment variables. See
 [../v1/mp_coordinator/README.md](../v1/mp_coordinator/README.md).
 
 ### `lmcache describe`
