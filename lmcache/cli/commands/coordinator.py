@@ -2,8 +2,8 @@
 """``lmcache coordinator`` — launch the LMCache mp coordinator (HTTP).
 
 The coordinator tracks mp server instances via a registry and evicts those
-whose heartbeats lapse. Configuration falls back to ``LMCACHE_MP_COORDINATOR_*``
-environment variables; CLI flags override them.
+whose heartbeats lapse. Configuration comes from CLI flags only; an unset flag
+leaves the corresponding :class:`MPCoordinatorConfig` default.
 """
 
 # Standard
@@ -38,9 +38,9 @@ class CoordinatorCommand(BaseCommand):
     def add_arguments(self, parser: argparse.ArgumentParser) -> None:
         """Add coordinator-specific arguments to the parser.
 
-        Each flag defaults to ``None`` so that unset flags fall back to the
-        ``LMCACHE_MP_COORDINATOR_*`` environment variables (and then the
-        config defaults) in :meth:`execute`.
+        Each flag defaults to ``None`` so that :meth:`execute` can tell an
+        unset flag from an explicit one and leave the corresponding
+        :class:`MPCoordinatorConfig` default in place.
 
         Args:
             parser: The ``ArgumentParser`` for this subcommand.
@@ -169,8 +169,8 @@ class CoordinatorCommand(BaseCommand):
     def execute(self, args: argparse.Namespace) -> None:
         """Build the coordinator config and serve the app with uvicorn.
 
-        Resolves config from the environment, then overrides any field whose
-        corresponding CLI flag was supplied.
+        Builds the config from the supplied flags; every flag left unset keeps
+        its :class:`MPCoordinatorConfig` default.
 
         Args:
             args: Parsed CLI arguments.
@@ -179,7 +179,6 @@ class CoordinatorCommand(BaseCommand):
             SystemExit: When coordinator dependencies are not installed.
         """
         # Standard
-        import dataclasses
         import sys
 
         try:
@@ -200,9 +199,7 @@ class CoordinatorCommand(BaseCommand):
             )
             sys.exit(1)
 
-        config = MPCoordinatorConfig.from_env()
-
-        overrides = {
+        fields = {
             field: value
             for field, value in (
                 ("host", args.host),
@@ -222,9 +219,8 @@ class CoordinatorCommand(BaseCommand):
             if value is not None
         }
         if args.disable_metrics is not None:
-            overrides["metrics_enabled"] = not args.disable_metrics
-        if overrides:
-            config = dataclasses.replace(config, **overrides)
+            fields["metrics_enabled"] = not args.disable_metrics
+        config = MPCoordinatorConfig(**fields)
 
         init_coordinator_metrics(config)
         app = create_app(config)

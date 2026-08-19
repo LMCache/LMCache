@@ -2,6 +2,12 @@
 
 Guidelines for AI coding agents (Copilot, Cursor, Claude Code, etc.) working in this repository.
 
+## AGENTS.md Ownership
+
+`AGENTS.md` is a human-owned policy file.
+Agents must not modify this file unless the user explicitly requests changes to `AGENTS.md`.
+If an agent discovers recurring guidance or environment notes, it should report them in chat instead of editing this file.
+
 ## Project Overview
 
 LMCache is a KV cache management engine for LLM serving that reduces Time To First Token (TTFT) and increases throughput. It stores KV caches across multiple tiers (GPU, CPU, disk, S3) and integrates with vLLM and SGLang.
@@ -91,6 +97,9 @@ those commands are missing.
 If you are validating only non-Rust changes and do not intend to touch Rust in
 that pass, run `SKIP=rust-fmt,rust-clippy pre-commit run --all-files` to skip
 those hooks explicitly.
+On macOS, `rust-clippy` currently fails while building `io-uring` because that
+dependency expects Linux-only libc symbols. For non-Rust changes on macOS, use
+the explicit `SKIP=rust-fmt,rust-clippy` workflow above.
 
 C++/CUDA files use clang-format (Google style, 80-col). Rust code in `rust/` uses `cargo fmt` and `cargo clippy`.
 
