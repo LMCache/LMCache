@@ -4,6 +4,7 @@ env:
 steps:
   - label: "Unit Tests"
     key: "unit_tests"
+    if: build.env("BUILDKITE_PIPELINE_SLUG") != "unit-tests-amd"
     timeout_in_minutes: 60
     command: |
       echo $PWD # for debugging
@@ -57,4 +58,12 @@ steps:
     artifact_paths:
       - "durations/test.html"
       - "coverage-test.xml"
-      - "coverage-test/**/*"      
+      - "coverage-test/**/*"
+
+  - label: "Repro #4419: vLLM + LMCache MP on AMD"
+    key: "amd_repro_4419"
+    if: build.env("BUILDKITE_PIPELINE_SLUG") == "unit-tests-amd"
+    timeout_in_minutes: 90
+    command: .buildkite/scripts/amd-4419-repro.sh
+    artifact_paths:
+      - "amd-4419-repro-results/**/*"
