@@ -69,6 +69,27 @@ uv pip install --system --no-cache \
 echo "=== Building LMCache native extensions in-place ==="
 MAX_JOBS="${MAX_JOBS:-1}" python3 setup.py build_ext --inplace
 
+echo "=== Applying CI-only legacy vLLM MP adapter compatibility shim ==="
+python3 - <<'PY'
+from pathlib import Path
+
+adapter = Path("lmcache/integration/vllm/vllm_multi_process_adapter.py")
+text = adapter.read_text()
+old = """        assert len(server_urls) >= 1, "At least one server url required"
+        self._server_urls: list[str] = list(server_urls)
+"""
+new = """        if isinstance(server_urls, str):
+            server_urls = [server_urls]
+        assert len(server_urls) >= 1, "At least one server url required"
+        self._server_urls: list[str] = list(server_urls)
+"""
+if old in text and new not in text:
+    adapter.write_text(text.replace(old, new))
+    print("Patched scheduler adapter to accept legacy scalar server_url")
+else:
+    print("Scheduler adapter shim already present or pattern not found")
+PY
+
 echo "=== Verifying imports and ROCm runtime ==="
 vllm --help >/dev/null
 python3 - <<'PY'
