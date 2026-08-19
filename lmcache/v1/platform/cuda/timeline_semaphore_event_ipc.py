@@ -128,7 +128,7 @@ class _TimelineSemaphoreBuffer:
         device_index: CUDA device ordinal the buffer lives on.
         base_ptr: Device pointer of the buffer.
         handle_bytes: ``cudaIpcMemHandle`` bytes exported at allocation.
-        host_ops_stream: Dedicated non-blocking stream for host-initiated
+        buffer_ops_stream: Dedicated non-blocking stream for host-initiated
             slot reads/writes, so they never synchronize with (possibly
             blocked) caller streams.
         lock: Guards the mutable fields below; ``record_event`` holds it
@@ -141,7 +141,7 @@ class _TimelineSemaphoreBuffer:
     device_index: int
     base_ptr: int
     handle_bytes: bytes
-    host_ops_stream: object
+    buffer_ops_stream: object
     lock: threading.Lock = field(default_factory=threading.Lock)
     slot_by_stream: dict[cudaStream_t, int] = field(default_factory=dict)
     next_seq_by_slot: dict[int, int] = field(default_factory=dict)
@@ -252,7 +252,7 @@ class TimelineSemaphoreEventIPCBackend:
             buffer: _TimelineSemaphoreBuffer = self._get_buffer(device_index)
             probe_ptr: int = buffer.base_ptr + _PROBE_SLOT_OFFSET
             stream_hdl: cudaStream_t = _raw_stream_handle(
-                buffer.host_ops_stream, device_index
+                buffer.buffer_ops_stream, device_index
             )
             with torch.cuda.device(device_index):
                 _CHECK_CUDA(
@@ -274,7 +274,7 @@ class TimelineSemaphoreEventIPCBackend:
                     "cuStreamWaitValue64 (probe)",
                 )
                 _CHECK_CUDA(
-                    _cuda.runtime.cudaStreamSynchronize(buffer.host_ops_stream),
+                    _cuda.runtime.cudaStreamSynchronize(buffer.buffer_ops_stream),
                     "cudaStreamSynchronize (probe)",
                 )
         except Exception as e:
@@ -586,34 +586,34 @@ class TimelineSemaphoreEventIPCBackend:
                 malloc_result = _cuda.runtime.cudaMalloc(nbytes)
                 _CHECK_CUDA(malloc_result, "cudaMalloc")
                 _err, base = malloc_result
-                host_stream = None
+                buffer_stream = None
                 try:
                     stream_result = _cuda.runtime.cudaStreamCreateWithFlags(
                         _cuda.runtime.cudaStreamNonBlocking
                     )
                     _CHECK_CUDA(stream_result, "cudaStreamCreateWithFlags")
-                    _err, host_stream = stream_result
+                    _err, buffer_stream = stream_result
                     _CHECK_CUDA(
-                        _cuda.runtime.cudaMemsetAsync(base, 0, nbytes, host_stream),
+                        _cuda.runtime.cudaMemsetAsync(base, 0, nbytes, buffer_stream),
                         "cudaMemsetAsync",
                     )
                     _CHECK_CUDA(
-                        _cuda.runtime.cudaStreamSynchronize(host_stream),
+                        _cuda.runtime.cudaStreamSynchronize(buffer_stream),
                         "cudaStreamSynchronize (semaphore buffer init)",
                     )
                     handle_result = _cuda.runtime.cudaIpcGetMemHandle(base)
                     _CHECK_CUDA(handle_result, "cudaIpcGetMemHandle")
                     _err, handle = handle_result
                 except Exception:
-                    if host_stream is not None:
-                        _cuda.runtime.cudaStreamDestroy(host_stream)
+                    if buffer_stream is not None:
+                        _cuda.runtime.cudaStreamDestroy(buffer_stream)
                     _cuda.runtime.cudaFree(base)
                     raise
             buffer = _TimelineSemaphoreBuffer(
                 device_index=device_index,
                 base_ptr=int(base),
                 handle_bytes=bytes(handle.reserved),
-                host_ops_stream=host_stream,
+                buffer_ops_stream=buffer_stream,
             )
             with _HANDLE_REGISTRY_LOCK:
                 _LOCAL_BUFFERS_BY_HANDLE[buffer.handle_bytes] = buffer.base_ptr
@@ -637,7 +637,7 @@ class TimelineSemaphoreEventIPCBackend:
         Raises:
             RuntimeError: If the device read fails.
         """
-        host_stream: object = self._get_buffer(event.device_index).host_ops_stream
+        buffer_stream: object = self._get_buffer(event.device_index).buffer_ops_stream
         value: ctypes.c_uint64 = ctypes.c_uint64(0)
         with torch.cuda.device(event.device_index):
             _CHECK_CUDA(
@@ -646,12 +646,12 @@ class TimelineSemaphoreEventIPCBackend:
                     event.base_ptr + event.slot_offset,
                     _SLOT_BYTES,
                     _cuda.runtime.cudaMemcpyKind.cudaMemcpyDeviceToHost,
-                    host_stream,
+                    buffer_stream,
                 ),
                 "cudaMemcpyAsync (semaphore read)",
             )
             _CHECK_CUDA(
-                _cuda.runtime.cudaStreamSynchronize(host_stream),
+                _cuda.runtime.cudaStreamSynchronize(buffer_stream),
                 "cudaStreamSynchronize (semaphore read)",
             )
         return value.value
