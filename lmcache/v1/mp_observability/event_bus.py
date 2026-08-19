@@ -396,6 +396,14 @@ def init_event_bus(config: EventBusConfig | None = None) -> EventBus:
     exits and its subscribers run their shutdown hooks rather than being left
     running for the lifetime of the process.
 
+    Precondition: re-initialization is only safe once the existing producers
+    have stopped, or are prepared to re-fetch the global bus. A producer that
+    cached the result of ``get_event_bus()`` before this call keeps a reference
+    to the replaced bus, which is drained and stopped here, so anything it
+    publishes afterwards is dropped. Supporting reconfiguration while producers
+    are live needs a different design (lazy bus resolution in the publishers, or
+    a swap barrier) and is out of scope for this function.
+
     Returns the newly created bus.
     """
     global _global_bus, _observability_enabled
