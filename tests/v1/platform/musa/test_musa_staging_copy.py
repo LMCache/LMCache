@@ -202,10 +202,10 @@ def test_musa_device_ops_preserves_tensor_copy_mode() -> None:
     assert torch.equal(destination, source)
 
 
-def test_cachegen_uses_boundary_safe_copy_for_lazy_musa(
+def test_cachegen_uses_boundary_safe_copy_for_lazy_input(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """CacheGen uploads lazy MUSA inputs through the public staging helper."""
+    """CacheGen stages lazy inputs independently of the accelerator name."""
     source = torch.arange(24, dtype=torch.float32).reshape(2, 1, 3, 4)
     memory_obj = _FakeMemoryObj(
         source.data_ptr(),
@@ -233,7 +233,7 @@ def test_cachegen_uses_boundary_safe_copy_for_lazy_musa(
         encoded["tensor"] = tensor.clone()
         return SimpleNamespace(to_bytes=lambda: b"encoded")
 
-    monkeypatch.setattr(cachegen_encoder, "torch_device_type", "musa")
+    monkeypatch.setattr(cachegen_encoder, "torch_device_type", "cuda")
     monkeypatch.setattr(cachegen_encoder.torch, "empty_like", _cpu_empty_like)
     monkeypatch.setattr(
         cachegen_encoder,

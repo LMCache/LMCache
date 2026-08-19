@@ -25,9 +25,9 @@ def _to_accelerator(memory_obj: MemoryObj) -> torch.Tensor:
         memory_obj: CacheGen input object containing the source tensor.
 
     Returns:
-        The input tensor on the configured accelerator. Lazy MUSA inputs are
-        copied through the boundary-aware staging helper; all other inputs
-        preserve the existing ``Tensor.to`` behavior.
+        The input tensor on the configured accelerator. Lazy allocator-backed
+        inputs are copied through the platform-specific staging helper; all
+        other inputs preserve the existing ``Tensor.to`` behavior.
 
     Raises:
         ValueError: If ``memory_obj`` does not contain a tensor.
@@ -35,9 +35,7 @@ def _to_accelerator(memory_obj: MemoryObj) -> torch.Tensor:
     tensor = memory_obj.tensor
     if tensor is None:
         raise ValueError("CacheGen input memory object does not contain a tensor")
-    if torch_device_type != "musa" or not isinstance(
-        memory_obj.parent(), LazyMemoryAllocator
-    ):
+    if not isinstance(memory_obj.parent(), LazyMemoryAllocator):
         return tensor.to(torch_device_type)
 
     device_tensor = torch.empty_like(tensor, device=torch_device_type)
