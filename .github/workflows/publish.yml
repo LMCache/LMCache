@@ -440,6 +440,7 @@ jobs:
                   \`\`\`
                   VERSION=${{ github.ref_name }}
                   pip install lmcache==${{ needs.build-xpu.outputs.xpu_version }} --no-deps \\
+                    --no-index \\
                     --find-links https://github.com/${{ github.repository }}/releases/expanded_assets/\${VERSION}-xpu
                   \`\`\`" \
                     dist/*.whl

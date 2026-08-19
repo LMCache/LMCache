@@ -81,7 +81,8 @@ jobs:
                 if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
                   BASE="${GITHUB_REF_NAME#v}"
                 else
-                  BASE=$(git tag --list 'v[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 | sed 's/^v//' || echo "0.0.0.dev")
+                  BASE=$(git tag --list 'v[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 | sed 's/^v//')
+                  BASE="${BASE:-0.0.0.dev0}"
                 fi
                 XPU_VERSION="${BASE}+xpu"
                 echo "XPU_VERSION=${XPU_VERSION}" >> "$GITHUB_ENV"

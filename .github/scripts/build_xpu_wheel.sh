@@ -8,7 +8,7 @@
 # Env (set by workflow, with sensible defaults for local runs):
 #   TORCH_XPU_SPEC             pip torch spec      (default detected from preinstalled torch)
 #   TORCH_XPU_INDEX            torch wheel index   (default xpu index)
-#   SKIP_AUDITWHEEL_REPAIR     1 to skip repair    (default auto-detect)
+#   SKIP_AUDITWHEEL_REPAIR     1 to explicitly skip repair (default 0)
 #   SETUPTOOLS_SCM_PRETEND_VERSION wheel version   (default 0.0.0.dev0)
 set -euxo pipefail
 
@@ -78,20 +78,17 @@ $PY setup.py bdist_wheel --dist-dir=dist_xpu
 
 # Repair: exclude torch and oneAPI/SYCL runtime libs so the wheel binds to the
 # host image at runtime (same policy as ROCm/CUDA variant wheels).
-SKIP_AUDITWHEEL_REPAIR="${SKIP_AUDITWHEEL_REPAIR:-}"
-if [[ -z "$SKIP_AUDITWHEEL_REPAIR" ]]; then
-    if command -v patchelf >/dev/null 2>&1; then
-        SKIP_AUDITWHEEL_REPAIR=0
-    else
-        SKIP_AUDITWHEEL_REPAIR=1
-    fi
-fi
+SKIP_AUDITWHEEL_REPAIR="${SKIP_AUDITWHEEL_REPAIR:-0}"
 
 if [[ "$SKIP_AUDITWHEEL_REPAIR" == "1" ]]; then
-    echo "patchelf unavailable; skipping auditwheel repair and copying raw wheel"
+    echo "SKIP_AUDITWHEEL_REPAIR=1; copying raw wheel"
     mkdir -p dist
     cp dist_xpu/*.whl dist/
 else
+    if ! command -v patchelf >/dev/null 2>&1; then
+        echo "patchelf is required for auditwheel repair" >&2
+        exit 1
+    fi
     $PY -m auditwheel repair \
         --plat manylinux_2_35_x86_64 \
         --exclude 'libtorch*.so*' \

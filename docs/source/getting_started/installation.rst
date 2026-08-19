@@ -111,6 +111,7 @@ Install LMCache
 
                             VERSION=0.5.3  # replace with target release
                             pip install lmcache==${VERSION}+xpu --no-deps \
+                                --no-index \
                                 --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/v${VERSION}-xpu
 
                         .. note::
@@ -118,6 +119,9 @@ Install LMCache
                             The wheel excludes torch and oneAPI/SYCL runtime libraries, which bind to the
                             host image at runtime. Match the wheel's torch and oneAPI versions to the
                             container; for other bases, use the **From Source** tab.
+
+                            ``--no-index`` restricts pip to the GitHub Release asset, preventing it from
+                            selecting a same-version CUDA wheel from PyPI.
 
                         .. note::
 
