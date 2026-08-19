@@ -394,10 +394,11 @@ class LazyOffloadPendingStore:
         """
         queue = self._require_eviction_queue()
         result = queue.collect_due(blocked_request_ids)
+        stats = queue.stats()
         if (
-            result.ops_held_back
-            and result.dropped_evicted
-            and not self._warned_throttled_loss
+            not self._warned_throttled_loss
+            and stats.throttled_drains
+            and stats.dropped_evicted
         ):
             # The two symptoms together are what distinguishes a cap that
             # merely delays a burst from one set below the workload's
@@ -405,17 +406,26 @@ class LazyOffloadPendingStore:
             # queue it could not work off is dying. WARNING, and once:
             # neither counter alone justifies telling an operator their
             # configuration is wrong.
+            #
+            # Read cumulatively rather than from this drain, because the
+            # two are causally linked but not simultaneous: the cap builds
+            # the backlog on the steps where it binds, and the backlog dies
+            # on whatever later step reallocates its blocks. Requiring both
+            # in one drain makes the warning a coincidence -- measured on a
+            # cap of 1 that held ops back on 8 drains and lost 5 ops, the
+            # two never landed on the same step and the operator was never
+            # told.
             self._warned_throttled_loss = True
             logger.warning(
-                "Lazy offload: max_drain_per_step=%d held back %d due store "
-                "op(s) while %d op(s) were lost to eviction in the same "
-                "step. A cap below the number of concurrently prefilling "
+                "Lazy offload: max_drain_per_step=%d held back due store "
+                "ops on %d drain(s) while %d op(s) were lost to eviction. "
+                "A cap below the number of concurrently prefilling "
                 "requests loses the backlog instead of delaying it; raise "
                 "lmcache.mp.lazy_offload_max_drain_per_step. "
                 "throttled_drains counts the recurrence.",
                 self._eviction_config.max_drain_per_step,
-                result.ops_held_back,
-                len(result.dropped_evicted),
+                stats.throttled_drains,
+                stats.dropped_evicted,
             )
         if result.dropped_evicted:
             # INFO, not DEBUG: each drop is one unit of cache-quality loss
@@ -455,7 +465,7 @@ class LazyOffloadPendingStore:
                     dropped_op.request_id,
                     dropped_op.prefix_end_tokens,
                 )
-        self._maybe_log_stats(queue)
+        self._maybe_log_stats(stats, queue.num_pending_ops())
         return result
 
     def stats(self) -> LazyOffloadCounters:
@@ -490,8 +500,12 @@ class LazyOffloadPendingStore:
             ),
         )
 
-    def _maybe_log_stats(self, queue: EvictionAwareStoreQueue) -> None:
+    def _maybe_log_stats(self, stats: LazyOffloadCounters, num_pending: int) -> None:
         """Log the counter ledger if it changed and the throttle allows.
+
+        Args:
+            stats: The policy counters as of this drain.
+            num_pending: Operations still buffered at the same instant.
 
         Runs on every drain (the engine calls ``collect_due`` each step),
         so the log converges to the true ledger whenever the engine takes
@@ -506,7 +520,6 @@ class LazyOffloadPendingStore:
         on every drain, so gating on them would log a line every interval
         for the life of the engine.
         """
-        stats = queue.stats()
         decisions = stats.decisions()
         if decisions == self._last_logged_decisions:
             return
@@ -515,7 +528,7 @@ class LazyOffloadPendingStore:
             return
         logger.info(
             "Lazy offload counters: %s",
-            _format_ledger(stats, queue.num_pending_ops()),
+            _format_ledger(stats, num_pending),
         )
         self._last_logged_decisions = decisions
         self._last_stats_log_time = now

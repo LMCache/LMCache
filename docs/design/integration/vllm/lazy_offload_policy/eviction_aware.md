@@ -264,11 +264,19 @@ vLLM hit instead of 0 on a lookup miss.
   reports what a drain found due and did not emit (a lower bound: candidates
   the loop never reached are not counted, their due-ness being unevaluated),
   `throttled_drains` counts the drains that held anything back, and the
-  pending store logs one WARNING per process the first time a drain both
-  held ops back and lost ops to eviction — the pair that separates a cap
+  pending store logs one WARNING per process once `throttled_drains` and
+  `dropped_evicted` are *both* nonzero — the pair that separates a cap
   merely delaying a burst from one below the workload's admission rate.
   Neither symptom alone warns: ops lost without the cap binding is ordinary
   pressure, and a cap that binds without loss is the knob doing its job.
+
+  The pair is read cumulatively, not within one drain. The two are causally
+  linked but not simultaneous: the cap builds a backlog on the steps where
+  it binds, and the backlog dies on whatever later step reallocates its
+  blocks. Requiring both in the same drain turns the warning into a
+  coincidence — a measured run at a cap of 1 held ops back on 8 drains and
+  lost 5 ops to eviction without the two ever landing on the same step, so
+  nothing was reported.
 - **Pin cascade.** Emitting a segment pins its blocks out of the free queue,
   which moves every block behind them toward the head by that many positions
   before the next step's allocation runs. Each candidate is therefore tested

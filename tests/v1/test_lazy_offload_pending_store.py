@@ -455,7 +455,7 @@ class TestEvictionAwareMode:
         assert store.stats().throttled_drains == 1
         assert store.stats().dropped_evicted == 1
         (line,) = [m for m in warnings if "max_drain_per_step" in m]
-        assert "held back 1 due store op(s)" in line
+        assert "held back due store ops on 1 drain(s)" in line
         assert "1 op(s) were lost to eviction" in line
 
         # Same symptoms again, one line total.
