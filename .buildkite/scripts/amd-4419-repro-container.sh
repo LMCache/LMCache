@@ -31,6 +31,16 @@ cleanup() {
 }
 trap cleanup EXIT
 
+echo "=== AMD #4419 repro container setup ==="
+echo "repo=${REPO_ROOT}"
+echo "results_dir=${RESULTS_DIR}"
+echo "lmcache_port=${LMCACHE_PORT}"
+echo "vllm_port=${VLLM_PORT}"
+echo "gpu_for_vllm=${GPU_FOR_VLLM}"
+python3 --version
+uv --version
+git --version || true
+
 if ! command -v git >/dev/null 2>&1; then
     apt-get update
     apt-get install -y --no-install-recommends git
@@ -45,6 +55,7 @@ export SETUPTOOLS_SCM_PRETEND_VERSION="${SETUPTOOLS_SCM_PRETEND_VERSION:-0.5.4rc
 export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE="${SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE:-${SETUPTOOLS_SCM_PRETEND_VERSION}}"
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 
+echo "=== Installing build/runtime dependencies ==="
 uv pip install --system --no-cache -r requirements/build.txt
 uv pip uninstall --system -y cupy-cuda12x cupy-cuda11x cupy || true
 uv pip install --system --no-cache --force-reinstall cupy-rocm-7-0
@@ -52,8 +63,10 @@ uv pip install --system --no-cache requests
 
 # The tw22 repro image is Python 3.14 based. Use the mounted source tree plus
 # in-place native extensions, matching the environment where #4419 reproduced.
+echo "=== Building LMCache native extensions in-place ==="
 MAX_JOBS="${MAX_JOBS:-1}" python3 setup.py build_ext --inplace
 
+echo "=== Verifying imports and ROCm runtime ==="
 vllm --help >/dev/null
 python3 - <<'PY'
 import cupy

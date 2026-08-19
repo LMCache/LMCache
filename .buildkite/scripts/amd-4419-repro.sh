@@ -6,9 +6,21 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 VLLM_ROCM_IMAGE="${VLLM_ROCM_IMAGE:-rocm/vllm:rocm7.14.0_cdna_ubuntu24.04_py3.14_pytorch_2.11.0_vllm_0.23.0}"
 CONTAINER_NAME="lmcache-amd-4419-repro-${BUILDKITE_BUILD_ID}"
+RESULTS_DIR="${REPO_ROOT}/amd-4419-repro-results"
+HOST_LOG="${RESULTS_DIR}/host.log"
 DOCKER=(docker)
 
 cd "${REPO_ROOT}"
+mkdir -p "${RESULTS_DIR}"
+exec > >(tee -a "${HOST_LOG}") 2>&1
+
+echo "=== AMD #4419 repro host setup ==="
+echo "repo=${REPO_ROOT}"
+echo "buildkite_build_id=${BUILDKITE_BUILD_ID}"
+echo "image=${VLLM_ROCM_IMAGE}"
+echo "results_dir=${RESULTS_DIR}"
+git rev-parse --short HEAD
+git status --short
 
 if ! command -v docker >/dev/null 2>&1; then
     echo "docker is required to run the official vLLM ROCm image"
@@ -24,6 +36,8 @@ if ! docker info >/dev/null 2>&1; then
         exit 1
     fi
 fi
+echo "Docker command: ${DOCKER[*]}"
+"${DOCKER[@]}" version || true
 
 # The reproducer needs one large MI300 GPU. The selector returns the host
 # physical GPU id, which is passed to the container and used by the native
