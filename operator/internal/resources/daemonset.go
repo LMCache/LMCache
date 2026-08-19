@@ -59,6 +59,26 @@ const (
 // master key, referenced as master_key_path in the serde config.
 const l2EncryptionKeyPath = l2EncryptionKeyMountDir + "/" + l2EncryptionKeyFileName
 
+// startupProbeDefaultFailureThreshold is the baseline startup-probe failure
+// count. With the probe's InitialDelaySeconds=5 and PeriodSeconds=5 this is a
+// ~155s startup window.
+const startupProbeDefaultFailureThreshold int32 = 30
+
+// startupProbeFailureThreshold scales the startup-probe window to L1 size: the
+// engine pre-pins all of L1 before binding its port, so budget ~1 GB/s of pinning
+// (window = FailureThreshold * 5s period), floored at the default.
+func startupProbeFailureThreshold(l1SizeGB float64) int32 {
+	const (
+		pinBudgetGBPerSec  = 1.0 // assumed worst-case L1 pin bandwidth
+		probePeriodSeconds = 5.0 // must match the startup probe's PeriodSeconds
+	)
+	scaled := int32(l1SizeGB / pinBudgetGBPerSec / probePeriodSeconds)
+	if scaled > startupProbeDefaultFailureThreshold {
+		return scaled
+	}
+	return startupProbeDefaultFailureThreshold
+}
+
 // BuildDaemonSet constructs a DaemonSet for the given LMCacheEngine.
 func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
 	return buildDaemonSetCore(engine.Name, engine.Namespace, &engine.Spec, BuildContainerArgs(&engine.Spec), "lmcache/vllm-openai")
@@ -239,13 +259,16 @@ func buildDaemonSetCore(
 		Port: intstr.FromInt32(serverPort),
 	}
 
+	// Scale the startup window to the L1 pin time (see startupProbeFailureThreshold).
+	startupFailureThreshold := startupProbeFailureThreshold(spec.L1.SizeGB)
+
 	startupProbe := &corev1.Probe{
 		ProbeHandler: corev1.ProbeHandler{
 			TCPSocket: tcpProbe,
 		},
 		InitialDelaySeconds: 5,
 		PeriodSeconds:       5,
-		FailureThreshold:    30,
+		FailureThreshold:    startupFailureThreshold,
 	}
 
 	livenessProbe := &corev1.Probe{

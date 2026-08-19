@@ -161,25 +161,31 @@ class L1MemoryManagerConfig:
 
 @dataclass
 class GdsL1Config:
-    """Configuration for the GDS slab-file L1 tier.
+    """Configuration for the GDS L1 tier.
 
     When present on :class:`L1ManagerConfig`, the L1 medium becomes an NVMe
-    slab file accessed via GPUDirect Storage DMA (cuFile on NVIDIA, hipFile on
-    AMD ROCm) instead of pinned DRAM (mutually exclusive with the pinned-DRAM
-    tier in ``memory_config``). Carries the slab location, capacity, and DMA
-    mode.
+    slab accessed via GPUDirect Storage DMA instead of pinned DRAM (mutually
+    exclusive with the pinned-DRAM tier in ``memory_config``). cuFile and
+    hipFile use a filesystem slab; uGDS uses a raw device. Carries the slab
+    location, capacity, backend, and DMA mode.
     """
 
     file_location: str
-    """Directory for the slab file (one shared slab per process, used by all
-    GPU instances)."""
+    """Directory for a cuFile/hipFile slab, or an ``ugds_drv`` character-device
+    path for uGDS."""
 
     size_in_bytes: int
-    """Slab capacity in bytes (from ``--l1-size-gb``). Sizes both the
-    preallocated slab file and the GDS tier's address space."""
+    """Slab capacity in bytes (from ``--l1-size-gb``). For uGDS, this reserves
+    the corresponding leading range of the dedicated raw character device and
+    must not exceed its reported namespace capacity."""
 
     use_direct_io: bool = True
-    """Open the slab with ``O_DIRECT`` (required for the GDS DMA fast path)."""
+    """Use ``O_DIRECT`` for cuFile/hipFile. Ignored by uGDS."""
+
+    backend: Literal["auto", "cufile", "hipfile", "ugds"] = "auto"
+    """GPU storage backend. ``auto`` selects cuFile on CUDA and hipFile on ROCm;
+    ``ugds`` can be used on either platform with a matching ``libugds.so`` and
+    treats ``file_location`` as a character-device path."""
 
     align_bytes: int = 4096
     """Allocation alignment; cuFile/hipFile and O_DIRECT require 4 KiB."""
@@ -408,17 +414,18 @@ def add_storage_manager_args(
     # GDS L1 tier (optional, opt-in via --gds-l1-path)
     gds_group = parser.add_argument_group(
         "GDS L1 tier",
-        "Configuration for the GDS slab-file L1 tier. Setting --gds-l1-path "
-        "makes the L1 medium an NVMe slab accessed via GPUDirect Storage DMA "
-        "(cuFile on NVIDIA, hipFile on AMD ROCm) instead of pinned DRAM; "
-        "--l1-size-gb then sizes the slab. Disable byte-array L2 adapters when "
-        "this is on.",
+        "Configuration for the GDS L1 tier. Setting --gds-l1-path makes the "
+        "L1 medium an NVMe slab accessed via GPUDirect Storage DMA instead of "
+        "pinned DRAM; --l1-size-gb then sizes the slab. cuFile and hipFile use "
+        "a slab file, while uGDS uses a dedicated raw device. Disable "
+        "byte-array L2 adapters when this is on.",
     )
     gds_group.add_argument(
         "--gds-l1-path",
         type=str,
         default=None,
-        help="NVMe directory path for the GDS L1 slab. Setting this enables GDS L1.",
+        help="NVMe directory for cuFile/hipFile, or /dev/ugds_drvX for uGDS. "
+        "Setting this enables GDS L1.",
     )
     gds_group.add_argument(
         "--gds-l1-use-direct-io",
@@ -426,6 +433,14 @@ def add_storage_manager_args(
         default=True,
         help="Open the slab file with O_DIRECT (required for the GDS DMA fast "
         "path on ext4). Default True.",
+    )
+    gds_group.add_argument(
+        "--gds-l1-backend",
+        choices=("auto", "cufile", "hipfile", "ugds"),
+        default="auto",
+        help="GDS implementation. auto selects cuFile on CUDA or hipFile on ROCm; "
+        "ugds can be used on either platform with a matching libugds.so and "
+        "treats --gds-l1-path as /dev/ugds_drvX.",
     )
     # L1 Manager Config (TTL settings)
     ttl_group = parser.add_argument_group(
@@ -581,6 +596,7 @@ def parse_args_to_config(
             file_location=args.gds_l1_path,
             size_in_bytes=int(args.l1_size_gb * (1 << 30)),
             use_direct_io=args.gds_l1_use_direct_io,
+            backend=args.gds_l1_backend,
         )
 
     l1_manager_config = L1ManagerConfig(
