@@ -68,6 +68,7 @@ echo "Pulling ${VLLM_ROCM_IMAGE}"
     --env "PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH:-gfx942}" \
     --env ATTENTION_BACKEND=auto \
     --env BATCH_INVARIANT=0 \
+    --env "MAX_SLOWDOWN_PERCENT=${MAX_SLOWDOWN_PERCENT:-10}" \
     --env LMCACHE_TRACK_USAGE=false \
     --env RESULTS_DIR=/workspace/LMCache/amd-vllm-bench-results \
     --entrypoint bash \

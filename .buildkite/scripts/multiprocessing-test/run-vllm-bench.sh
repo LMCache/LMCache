@@ -21,7 +21,7 @@ RANDOM_OUTPUT_LEN="${RANDOM_OUTPUT_LEN:-1}"
 # Expected values
 EXPECTED_TOTAL_INPUT_TOKENS=$((NUM_PROMPTS * RANDOM_INPUT_LEN))
 EXPECTED_COMPLETED=$NUM_PROMPTS
-MAX_SLOWDOWN_PERCENT=5
+MAX_SLOWDOWN_PERCENT="${MAX_SLOWDOWN_PERCENT:-5}"
 
 # Generate a random seed once for reproducibility across both benchmarks
 RANDOM_SEED="${RANDOM_SEED:-$(date +%s)}"
@@ -174,13 +174,13 @@ verify_results() {
         failed=1
     fi
     
-    # Check throughput comparison (LMCache should not be more than 10% slower)
+    # Check throughput comparison against the configured slowdown allowance.
     throughput_check=$(python3 -c "
 lmcache_tp = $lmcache_throughput
 baseline_tp = $baseline_throughput
 max_slowdown = $MAX_SLOWDOWN_PERCENT
 
-# Calculate the minimum acceptable throughput (90% of baseline)
+# Calculate the minimum acceptable throughput.
 min_acceptable = baseline_tp * (1 - max_slowdown / 100.0)
 
 # Calculate actual slowdown percentage

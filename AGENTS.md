@@ -54,7 +54,12 @@ Leave `ATTENTION_BACKEND=auto` so vLLM chooses a ROCm backend. Batch-invariant
 mode is CUDA-specific in this scenario and must remain disabled on AMD. The
 current AMD Buildkite agent exposes Docker through `sudo` only, so probe
 `docker info` first and fall back to `sudo -n docker ...` for `pull`, `run`,
-and cleanup when the unprivileged socket is denied.
+and cleanup when the unprivileged socket is denied. The shared
+`run-vllm-bench.sh` slowdown gate is parameterized via
+`MAX_SLOWDOWN_PERCENT`; keep the shared default at `5`, but pass `10` from the
+AMD ROCm pipeline because the latest-stable random-workload E2E check carries
+slightly higher overhead than the CUDA lane while still validating end-to-end
+correctness.
 
 ### Running Tests
 
