@@ -203,6 +203,25 @@ compatibility with the vLLM-embedded API server.
      - ``/reconfigure/l2/{backend}/{operation}``
      - Apply one runtime reconfiguration operation to a backend adapter.
 
+**Runtime L1 reconfiguration (Device-DAX)**
+
+.. list-table::
+   :header-rows: 1
+   :widths: 10 35 55
+
+   * - Method
+     - Path
+     - Purpose
+   * - GET
+     - ``/reconfigure/l1/dax/status``
+     - Report every Device-DAX L1 arena with usage and lifecycle state.
+   * - POST
+     - ``/reconfigure/l1/dax/add``
+     - Map an additional Device-DAX device.
+   * - POST
+     - ``/reconfigure/l1/dax/remove``
+     - Remove one mapped Device-DAX L1 device (currently drain mode only).
+
 **Observability**
 
 .. list-table::
@@ -1299,6 +1318,90 @@ dict). A successful DAX ``add`` looks like:
 
 See :doc:`/kv_cache/storage_backends/dax` for detailed request examples,
 mode semantics, and validation guidance.
+
+Runtime L1 Reconfiguration (Device-DAX)
+---------------------------------------
+
+These routes manage the Device-DAX L1 arena pool configured with
+``--l1-devdax-path``. Devices must already be provisioned, and requests do not
+use ``adapter_index``.
+
+``GET /reconfigure/l1/dax/status``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {
+      "arenas": [
+        {
+          "device_path": "/dev/dax1.1",
+          "size_in_bytes": 17179869184,
+          "used_bytes": 4294967296,
+          "free_bytes": 12884901888,
+          "active_allocations": 2048,
+          "state": "active",
+          "is_primary": false
+        }
+      ]
+    }
+
+``POST /reconfigure/l1/dax/add``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+**Request body:** ``device_path`` (string) and ``size`` (integer byte count or a
+string such as ``"16GiB"``).
+
+**Response** (``200 OK``): ``{"added": <arena>}``.
+
+**Example:**
+
+.. code-block:: bash
+
+    curl -s -X POST http://localhost:8080/reconfigure/l1/dax/add \
+        -H 'Content-Type: application/json' \
+        -d '{"device_path": "/dev/dax1.2", "size": "16GiB"}'
+
+``POST /reconfigure/l1/dax/remove``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Only drain mode is supported. A draining arena accepts no new allocations and
+is unmapped after its live allocations are freed. The primary arena cannot be
+removed.
+
+**Request body:** ``device_path`` (string) and optional ``mode`` (``drain``;
+default ``drain``).
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {
+      "removed": {
+        "device_path": "/dev/dax1.2",
+        "arenas": [
+          {
+            "device_path": "/dev/dax1.2",
+            "state": "draining",
+            "active_allocations": 3,
+            "size_in_bytes": 17179869184,
+            "used_bytes": 6291456,
+            "free_bytes": 17173577728,
+            "is_primary": false
+          }
+        ]
+      }
+    }
+
+**HTTP status codes:**
+
+- ``200``: success.
+- ``400``: invalid ``size``.
+- ``404``: device is not mapped.
+- ``409``: incompatible L1 or device state, or mapping validation failure.
+- ``422``: invalid request body.
+- ``503``: engine not initialized.
 
 Observability
 -------------

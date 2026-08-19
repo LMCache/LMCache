@@ -175,7 +175,11 @@ def _sysfs_attr_int(device_dir: str, attribute: str) -> int | None:
 
 
 class DevDaxNotMappedError(ValueError):
-    """No Device-DAX arena is mapped from the requested device path."""
+    """No Device-DAX arena is mapped from the requested device path.
+
+    A specialized ``ValueError`` that lets the manager distinguish a lookup
+    miss from other invalid allocator requests.
+    """
 
 
 class DevDaxArenaState(Enum):
@@ -1063,6 +1067,22 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
             raise DevDaxNotMappedError("no Device-DAX arena mapped at ''")
         with self.host_mem_lock:
             return self._find_arena_locked(device_path).status()
+
+    def memory_region_count(self) -> int:
+        """Return how many distinct memory regions back this allocator.
+
+        The DRAM local allocator of a hybrid configuration is one region and
+        every mapped Device-DAX arena, active or draining, is another. A
+        transfer channel that registers a single L1 region (the buffer
+        returned by ``get_l1_memory_desc``) addresses objects correctly only
+        while this count is 1.
+
+        Returns:
+            The number of memory regions.
+        """
+        with self.host_mem_lock:
+            arena_count = len(self._arenas)
+        return (1 if self.local_allocator is not None else 0) + arena_count
 
     def memcheck(self) -> bool:
         local_ok = True

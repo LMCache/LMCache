@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal, Optional, Protocol, cast
 import os
+import stat
 import threading
 
 if TYPE_CHECKING:
@@ -59,6 +60,28 @@ HotplugRemoveMode = Literal["migrate", "evict", "drain"]
 HotplugResizeMode = Literal["migrate", "evict"]
 DaxHotplugError = L2ReconfigureError
 _DAX_RECONFIGURE_OPERATIONS = ["status", "add", "remove", "resize"]
+_DaxDeviceIdentity = tuple[bool, int, int]
+
+
+def _device_identity(fd_status: os.stat_result) -> _DaxDeviceIdentity | None:
+    """Return the physical identity of a supported DAX backing object.
+
+    Character devices are identified by ``st_rdev``. Regular mmap files used
+    by tests are identified by filesystem device and inode. Other file types
+    are not valid DAX backing objects and have no identity here.
+
+    Args:
+        fd_status: Result of ``stat`` or ``fstat`` for the backing object.
+
+    Returns:
+        A comparable identity tuple, or ``None`` for an unsupported file type.
+    """
+    if stat.S_ISCHR(fd_status.st_mode):
+        return True, fd_status.st_rdev, 0
+    if stat.S_ISREG(fd_status.st_mode):
+        return False, fd_status.st_dev, fd_status.st_ino
+    return None
+
 
 _READABLE_STATES: set[DaxDeviceState] = {
     "active",
@@ -387,6 +410,43 @@ class DaxL2Adapter(L2AdapterInterface):
             File descriptor owned by this adapter's load notifier.
         """
         return self._load_efd.fileno()
+
+    def owns_device(self, device_path: str) -> bool:
+        """Return whether this adapter maps the physical device at a path.
+
+        Device identity, rather than the path string, is compared so aliases of
+        one Device-DAX node cannot be assigned to another storage tier. An open
+        character device uses ``st_rdev``; a regular mmap test file uses
+        ``(st_dev, st_ino)``.
+
+        Args:
+            device_path: Path whose physical backing identity should be checked.
+
+        Returns:
+            ``True`` if a currently open DAX core maps the same device;
+            otherwise ``False``. Missing, uninterpretable, and unsupported
+            paths return ``False`` so their normal add validation remains the
+            error boundary.
+        """
+        try:
+            requested_identity = _device_identity(os.stat(device_path))
+        except (OSError, ValueError):
+            return False
+        if requested_identity is None:
+            return False
+
+        with self._device_lock:
+            for entry in self._devices:
+                fd = entry.core.fd
+                if fd is None:
+                    continue
+                try:
+                    mapped_identity = _device_identity(os.fstat(fd))
+                except OSError:
+                    continue
+                if mapped_identity == requested_identity:
+                    return True
+        return False
 
     def submit_store_task(
         self,

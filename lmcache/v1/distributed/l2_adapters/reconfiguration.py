@@ -40,6 +40,23 @@ class L2ReconfigureStatus(TypedDict):
 
 
 @runtime_checkable
+class L2DeviceOwner(Protocol):
+    """Protocol for L2 adapters that own a local physical device."""
+
+    def owns_device(self, device_path: str) -> bool:
+        """Return whether the adapter currently maps ``device_path``.
+
+        Args:
+            device_path: Path whose physical backing identity should be checked.
+
+        Returns:
+            ``True`` when the adapter owns the same physical device, even if it
+            was opened through another path; otherwise ``False``.
+        """
+        ...
+
+
+@runtime_checkable
 class L2ReconfigurableAdapter(Protocol):
     """Protocol implemented by L2 adapters with runtime reconfiguration."""
 

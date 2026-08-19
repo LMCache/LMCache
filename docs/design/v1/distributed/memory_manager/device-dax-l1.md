@@ -22,7 +22,10 @@ process keeps running.
 `DevDaxL1MemoryManager`, the L1 tier object. It is thin: it stores its config,
 delegates `allocate` / `free` / `get_memory_usage` / `get_l1_memory_desc` to the
 pooled allocator, and exposes the runtime-reconfigure surface
-(`add_device`, `remove_device`, `get_arena_statuses`).
+(`add_device`, `remove_device`, `get_arena_statuses`). The manager translates
+allocator failures into the HTTP-mappable `L1ReconfigureError`
+(`memory_manager/reconfiguration.py`); the allocator itself remains HTTP-free
+and raises plain `ValueError` / `RuntimeError` / `OSError`.
 
 `lmcache/v1/memory_allocators/devdax_memory_allocator.py` defines
 `DevDaxMemoryAllocator`, which owns the arena pool, the `host_mem_lock`, the
@@ -32,13 +35,23 @@ best-effort CUDA host-memory pinning. `_DevDaxArena` is the per-arena record.
 reconfigure types.
 
 `lmcache/v1/distributed/l1_manager.py` selects `DevDaxL1MemoryManager` when
-`memory_config.devdax_path` is set, in preference to the CPU-only and GDS L1
-managers.
+`memory_config.devdax_path` is set and GDS L1 is not configured. It exposes
+Device-DAX status, add, and remove as narrow delegation methods.
+`lmcache/v1/distributed/storage_manager.py` provides matching public methods
+for the HTTP layer, so HTTP handlers do not access either manager's private
+state.
 
-The runtime-reconfigure HTTP surface is not part of this design; when added it
-is intended to mirror the L2 `/reconfigure/l2/dax/*` endpoints (see
-[../l2_adapters/dax.md](../l2_adapters/dax.md)) and route only `operation` plus
-payload down to the manager.
+The runtime-reconfigure HTTP surface lives in
+`lmcache/v1/multiprocess/http_apis/l1_reconfigure_api.py` as tier-first routes:
+`GET /reconfigure/l1/dax/status` and `POST /reconfigure/l1/dax/{add,remove}`.
+Handlers stay thin -- request-shape validation (422 schema / 400 size values)
+happens at the HTTP layer, domain status-code decisions (404 lookup miss, 409
+state conflict or non-Device-DAX L1) come from the manager via
+`L1ReconfigureError`, the HTTP resolver answers 503 before engine or storage
+manager initialization, and arena mechanics stay in the allocator. L1 and L2
+use separate tier prefixes. An L1 URL that omits the `dax` segment, such as
+`/reconfigure/l1/status`, returns `404`. See
+[../l2_adapters/dax.md](../l2_adapters/dax.md) for the L2 counterpart.
 
 ## Arena Pool
 
@@ -86,7 +99,8 @@ local allocator.
 
 ## Runtime Reconfigure
 
-The manager and allocator expose the same contract:
+The manager and allocator expose the same return values; the manager translates
+allocator failures into `L1ReconfigureError` for the HTTP layer:
 
 - `add_device(device_path, size_in_bytes) -> DevDaxArenaStatus`
 - `remove_device(device_path, mode=DevDaxRemoveMode.DRAIN) -> DevDaxArenaStatus`
@@ -150,40 +164,41 @@ l1 = L1Manager(
 )
 ```
 
-Until the HTTP control surface lands, reconfiguration is programmatic, on the
-`DevDaxL1MemoryManager` owned by the `L1Manager`:
+Reconfiguration is available over HTTP (`/reconfigure/l1/dax/*`) and through
+the `L1Manager` delegation methods:
 
 ```python
-manager = l1._memory_manager  # DevDaxL1MemoryManager
-
 # Grow: map an already-provisioned device and add it to the pool. It serves
 # overflow allocations immediately.
-status = manager.add_device("/dev/dax1.0", 32 << 30)
+status = l1.add_devdax_device("/dev/dax1.0", 32 << 30)
 
 # Inspect per-device usage: used/free bytes, live allocations, state.
-for arena in manager.get_arena_statuses():
+for arena in l1.get_devdax_arena_statuses():
     print(arena.device_path, arena.state, arena.used_bytes, arena.free_bytes)
 
-# Shrink: drain-remove a device. REMOVED means it was empty and is already
-# unmapped; DRAINING means cached entries still live on it.
-status = manager.remove_device("/dev/dax1.0")
+# Shrink: remove a device (currently drain mode only). REMOVED means it was
+# empty and is already unmapped; DRAINING means cached entries still live on it.
+status = l1.remove_devdax_device("/dev/dax1.0")
 ```
 
 A `DRAINING` device accepts no new allocations, keeps serving reads for the KV
 entries already on it, and unmaps automatically once the last of them is freed
-(deleted or evicted). Poll `get_arena_statuses()` until the path disappears
-from the list; `active_allocations` on the draining entry shows how many
-allocations still gate the unmap. Calling `remove_device` again while the path
-is still draining is safe and returns the current status; once the arena has
-been unmapped the path is no longer known and a repeat is rejected.
+(deleted or evicted). Poll `get_devdax_arena_statuses()` until the path
+disappears from the list; `active_allocations` on the draining entry shows how
+many allocations still gate the unmap. Calling `remove_devdax_device` again
+while the path is still draining is safe and returns the current status; once
+the arena has been unmapped the path is no longer known and a repeat raises the
+404-mapped lookup error.
 
 `add_device` rejects devices that are already mapped under another spelling,
 and `remove_device` rejects the primary arena (the initial device in pure
 Device-DAX mode). Lookups accept another path to the same device and statuses
-report the canonical path recorded when the arena was mapped. These errors
-raise `ValueError`. The Device-DAX path must already exist, be readable and
-writable, and expose enough capacity. Runtime reconfigure does not provision
-or resize DAX namespaces (see Current Limits).
+report the canonical path recorded when the arena was mapped. At the allocator
+level these raise `ValueError`; the manager translates them into
+`L1ReconfigureError` (409, or 404 when the path is not mapped at all). The
+Device-DAX path must already exist, be readable and writable, and expose enough
+capacity. Runtime reconfigure does not provision or resize DAX namespaces (see
+Current Limits).
 
 ## Thread Safety
 
@@ -225,10 +240,11 @@ failure is logged and the arena falls back to pageable host copies.
 
 ## Transfer-Channel Compatibility
 
-Device-DAX L1 is not a single registerable memory region:
-`l1_exposes_single_memory_region()` returns `False`, and P2P / NIXL reject
-Device-DAX L1. Arenas can therefore be added and removed without invalidating a
-whole-arena transfer registration.
+P2P does not support Device-DAX L1 because
+`l1_exposes_single_memory_region()` returns `False`. NIXL-based adapters and
+Mooncake over RDMA require a single L1 memory region, so they cannot be used
+with hybrid or multi-arena Device-DAX L1. Other adapters allow arenas to be
+added and removed normally.
 
 ## Capacity
 
@@ -246,13 +262,15 @@ by capacity that is being removed.
 
 `tests/v1/distributed/test_devdax_l1_allocator.py` unit-tests the pool:
 add/remove lifecycle, drain gating, per-arena usage, deferred unmap while
-external views are alive, and mapping release on setup failure.
+external views are alive, mapping release on setup failure, and the
+`StorageManager` reconfiguration delegates.
 `tests/v1/distributed/test_devdax_l1_reconfigure_integration.py` (opt-in via
 `RUN_DEVDAX_L1_INTEGRATION=1`) drives real mmap-backed devices end to end,
-both at the memory-manager level and through the `L1Manager` KV-cache path:
-KV entries land on a runtime-added device, stay readable while it drains, and
-the device is unmapped only after the last cached entry is deleted. It accepts
-real `/dev/dax` devices via `LMCACHE_TEST_DEVDAX_L1_PATHS`.
+at the memory-manager level, through the `L1Manager` KV-cache path, and through
+the `/reconfigure/l1/dax/*` HTTP lifecycle. KV entries land on a runtime-added
+device, stay readable while it drains, and the device is unmapped only after
+the last cached entry is deleted. It accepts real `/dev/dax` devices via
+`LMCACHE_TEST_DEVDAX_L1_PATHS`.
 
 ## Current Limits
 
@@ -264,5 +282,17 @@ real `/dev/dax` devices via `LMCACHE_TEST_DEVDAX_L1_PATHS`.
   (`add_device` / `remove_device`).
 - Runtime reconfigure maps and unmaps already-provisioned Device-DAX devices;
   it does not perform kernel-level CXL/DAX namespace reconfiguration.
-- No HTTP control surface yet; the reconfigure methods are the programmatic
-  entry point.
+- The HTTP control surface is `/reconfigure/l1/dax/*`
+  (`l1_reconfigure_api.py`); the `L1Manager` delegation methods remain the
+  programmatic entry point.
+
+## Open Decisions / Deferred Work
+
+Decisions intentionally left to the upstream RFC; the behavior described here
+is what the code does today.
+
+- **Coordinator-owned shared pools (upstream RFC #4307).** These endpoints assume
+  the server privately owns its Device-DAX L1. In a shared-pool deployment the
+  region lifecycle belongs to the coordinator, so local reconfiguration must be
+  refused there. Guard insertion point: the public L1 Device-DAX methods on
+  `StorageManager`; not implemented until the shared-pool design lands upstream.

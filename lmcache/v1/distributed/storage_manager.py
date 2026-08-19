@@ -29,6 +29,7 @@ from lmcache.v1.distributed.config import (
     EvictionConfig,
     StorageManagerConfig,
     get_configured_capacity_bytes,
+    requires_single_l1_memory_region,
 )
 from lmcache.v1.distributed.error import L1Error, strerror
 from lmcache.v1.distributed.internal_api import L1MemoryDesc, L2AdapterListener
@@ -37,10 +38,14 @@ from lmcache.v1.distributed.l2_adapters import create_l2_adapter
 from lmcache.v1.distributed.l2_adapters.base import AdapterUsage, L2AdapterInterface
 from lmcache.v1.distributed.l2_adapters.config import L2AdapterConfigBase
 from lmcache.v1.distributed.l2_adapters.reconfiguration import (
+    L2DeviceOwner,
     L2ReconfigurableAdapter,
     L2ReconfigureError,
 )
 from lmcache.v1.distributed.l2_adapters.serde_wrapper import SerdeL2AdapterWrapper
+from lmcache.v1.distributed.memory_manager.reconfiguration import (
+    L1ReconfigureError,
+)
 from lmcache.v1.distributed.quota_manager import QuotaManager
 from lmcache.v1.distributed.serde import create_serde_processor
 from lmcache.v1.distributed.storage_controllers import (
@@ -56,6 +61,10 @@ from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
 from lmcache.v1.distributed.storage_controllers.store_policy import (
     AdapterDescriptor,
     create_store_policy,
+)
+from lmcache.v1.memory_allocators.devdax_memory_allocator import (
+    DevDaxArenaStatus,
+    DevDaxRemoveMode,
 )
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
@@ -898,6 +907,102 @@ class StorageManager:
         """
         return self._l1_manager.get_memory_usage()
 
+    # L1 reconfiguration APIs
+    def get_l1_devdax_arena_statuses(self) -> list[DevDaxArenaStatus]:
+        """Return runtime status for every Device-DAX L1 arena.
+
+        Returns:
+            One status per mapped arena, in pool order.
+
+        Raises:
+            L1ReconfigureError: If L1 is not Device-DAX backed.
+        """
+        return self._l1_manager.get_devdax_arena_statuses()
+
+    def add_l1_devdax_device(
+        self,
+        device_path: str,
+        size_in_bytes: int,
+    ) -> DevDaxArenaStatus:
+        """Add a Device-DAX device to the L1 arena pool.
+
+        The addition is refused while an L2 adapter that registers a single L1
+        memory region is configured, because such adapters register only the
+        primary arena: NIXL addresses objects by offset into it and would
+        transfer the wrong bytes for objects on a second arena, and Mooncake
+        over RDMA rejects buffers outside its registered region so their
+        stores and loads fail. The check and the addition run under
+        ``_lifecycle_lock`` so a concurrent ``add_l2_adapter`` cannot
+        interleave with them.
+
+        Args:
+            device_path: Path of the Device-DAX device to map.
+            size_in_bytes: Number of bytes to map.
+
+        Returns:
+            Status of the newly added arena.
+
+        Raises:
+            L1ReconfigureError: If L1 is not Device-DAX backed, a single-region
+                L2 adapter is configured (409), the physical device is already
+                mapped by L2 (409), or the request cannot be applied.
+        """
+        with self._lifecycle_lock:
+            # Report the L1 backing error before adapter compatibility.
+            self._l1_manager.get_devdax_arena_statuses()
+            incompatible = self._single_region_adapter_names()
+            if incompatible:
+                raise L1ReconfigureError(
+                    409,
+                    "cannot add a Device-DAX L1 arena: L2 adapters that "
+                    "register a single L1 memory region are configured "
+                    f"({', '.join(incompatible)}); their transfers cover "
+                    "only the primary arena",
+                )
+            device_owners = self._l2_device_owner_names(device_path)
+            if device_owners:
+                raise L1ReconfigureError(
+                    409,
+                    "cannot add a Device-DAX L1 arena: the physical device "
+                    "is already mapped by L2 adapter(s) "
+                    f"({', '.join(device_owners)})",
+                )
+            return self._l1_manager.add_devdax_device(device_path, size_in_bytes)
+
+    def remove_l1_devdax_device(
+        self,
+        device_path: str,
+        mode: DevDaxRemoveMode = DevDaxRemoveMode.DRAIN,
+    ) -> DevDaxArenaStatus:
+        """Remove a Device-DAX device from the L1 arena pool.
+
+        Args:
+            device_path: Path of the mapped Device-DAX device.
+            mode: Removal strategy. Only drain mode is currently supported.
+
+        Returns:
+            Status of the arena after the removal request.
+
+        Raises:
+            L1ReconfigureError: If L1 is not Device-DAX backed or the request
+                cannot be applied.
+        """
+        return self._l1_manager.remove_devdax_device(device_path, mode)
+
+    def _single_region_adapter_names(self) -> list[str]:
+        """Return type names of registered L2 adapters needing one L1 region.
+
+        The caller holds ``_lifecycle_lock`` so the answer stays valid while
+        it acts on it; ``_adapters_lock`` only guards the dict read.
+        """
+        with self._adapters_lock:
+            descriptors = list(self._adapter_descriptors.values())
+        return [
+            name
+            for descriptor in descriptors
+            if (name := requires_single_l1_memory_region(descriptor.config)) is not None
+        ]
+
     def get_usage_bytes_by_cache_salt(self) -> dict[str, int]:
         """Aggregate ``cache_salt`` byte usage across every L2 adapter.
 
@@ -1017,8 +1122,24 @@ class StorageManager:
 
         Returns:
             The stable id assigned to the new adapter.
+
+        Raises:
+            ValueError: If the adapter registers a single L1 memory region
+                while L1 spans more than one (hybrid DRAM + Device-DAX, or
+                more than one Device-DAX arena).
         """
         with self._lifecycle_lock:
+            # Mirror of the check in add_l1_devdax_device: a single-region
+            # adapter may only be added while L1 is exactly one memory region.
+            adapter_name = requires_single_l1_memory_region(config)
+            region_count = self._l1_manager.memory_region_count()
+            if adapter_name is not None and region_count > 1:
+                raise ValueError(
+                    f"{adapter_name} registers a single L1 memory region, but "
+                    f"L1 currently spans {region_count} regions (hybrid DRAM + "
+                    "Device-DAX, or more than one Device-DAX arena); remove the "
+                    "additional Device-DAX regions before adding it"
+                )
             adapter_id, adapter, descriptor = self._build_l2_adapter(config)
             for listener in self._registered_l2_listeners:
                 adapter.register_listener(listener)
@@ -1259,6 +1380,26 @@ class StorageManager:
             return inner
 
         return None
+
+    def _l2_device_owner_names(self, device_path: str) -> list[str]:
+        """Return L2 type names that own the physical device at a path.
+
+        The caller holds ``_lifecycle_lock`` so registered adapters cannot be
+        added or deleted between this check and the L1 mapping attempt.
+
+        Args:
+            device_path: Candidate Device-DAX path for the L1 arena.
+
+        Returns:
+            Registered adapter type names whose open device has the same
+            physical identity.
+        """
+        owners: list[str] = []
+        for _adapter_id, descriptor, adapter in self._snapshot_adapters():
+            owner = self._unwrap_reconfigurable_l2_adapter(adapter)
+            if isinstance(owner, L2DeviceOwner) and owner.owns_device(device_path):
+                owners.append(descriptor.type_name)
+        return owners
 
     def _list_reconfigurable_l2_adapters(
         self,

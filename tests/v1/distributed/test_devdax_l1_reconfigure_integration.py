@@ -13,25 +13,38 @@ LMCACHE_TEST_DEVDAX_L1_SLOT_BYTES.
 
 # Standard
 from collections.abc import Iterator
+from types import SimpleNamespace
 import gc
 import os
 
 # Third Party
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 import pytest
 import torch
 
 # First Party
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
-from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
+from lmcache.v1.distributed.config import (
+    EvictionConfig,
+    L1ManagerConfig,
+    L1MemoryManagerConfig,
+    StorageManagerConfig,
+)
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.memory_manager.devdax_l1_memory_manager import (
     DevDaxL1MemoryManager,
 )
+from lmcache.v1.distributed.memory_manager.reconfiguration import (
+    L1ReconfigureError,
+)
+from lmcache.v1.distributed.storage_manager import StorageManager
 from lmcache.v1.memory_allocators.devdax_memory_allocator import (
     DevDaxArenaState,
     DevDaxRemoveMode,
 )
+from lmcache.v1.multiprocess.http_apis.l1_reconfigure_api import router
 
 RUN_IT = os.environ.get("RUN_DEVDAX_L1_INTEGRATION") == "1"
 REAL_DEVICE_PATHS = [
@@ -197,7 +210,7 @@ def test_runtime_add_and_drain_remove_lifecycle(devices):
         assert _open_fd_count(third) == 0
 
         # The primary arena backs get_l1_memory_desc and cannot be removed.
-        with pytest.raises(ValueError, match="primary"):
+        with pytest.raises(L1ReconfigureError, match="primary"):
             manager.remove_device(primary)
 
         manager.free(primary_objs)
@@ -213,6 +226,63 @@ def test_runtime_add_and_drain_remove_lifecycle(devices):
     if not USING_REAL_DEVICES:
         with open(primary, "rb") as handle:
             assert handle.read(SLOT_BYTES) == bytes([0xAB]) * SLOT_BYTES
+
+
+def test_http_reconfigure_lifecycle(devices: _DeviceProvider) -> None:
+    """Exercise HTTP and production StorageManager delegates on live mappings."""
+    primary = devices.acquire(SLOT_BYTES)
+    storage_manager = StorageManager(
+        StorageManagerConfig(
+            l1_manager_config=L1ManagerConfig(
+                memory_config=L1MemoryManagerConfig(
+                    size_in_bytes=SLOT_BYTES,
+                    use_lazy=False,
+                    shm_name="",
+                    align_bytes=4096,
+                    devdax_path=primary,
+                ),
+            ),
+            eviction_config=EvictionConfig(eviction_policy="LRU"),
+        )
+    )
+    try:
+        app = FastAPI()
+        app.include_router(router)
+        app.state.engine = SimpleNamespace(storage_manager=storage_manager)
+        with TestClient(app) as client:
+            response = client.get("/reconfigure/l1/dax/status")
+            assert response.status_code == 200
+            (primary_status,) = response.json()["arenas"]
+            assert primary_status["device_path"] == primary
+            assert primary_status["is_primary"] is True
+
+            extra = devices.acquire(SLOT_BYTES)
+            response = client.post(
+                "/reconfigure/l1/dax/add",
+                json={"device_path": extra, "size": SLOT_BYTES},
+            )
+            assert response.status_code == 200
+            assert response.json()["added"]["device_path"] == extra
+            assert _open_fd_count(extra) > 0
+
+            response = client.post(
+                "/reconfigure/l1/dax/remove",
+                json={"device_path": extra},
+            )
+            assert response.status_code == 200
+            (removed,) = response.json()["removed"]["arenas"]
+            assert removed["state"] == "removed"
+            assert _open_fd_count(extra) == 0
+
+            response = client.get("/reconfigure/l1/dax/status")
+            assert response.status_code == 200
+            assert [arena["device_path"] for arena in response.json()["arenas"]] == [
+                primary
+            ]
+    finally:
+        storage_manager.close()
+
+    assert _open_fd_count(primary) == 0
 
 
 def test_kv_cache_drain_gates_device_removal(devices):
@@ -231,8 +301,6 @@ def test_kv_cache_drain_gates_device_removal(devices):
             )
         )
     )
-    memory_manager = l1._memory_manager
-    assert isinstance(memory_manager, DevDaxL1MemoryManager)
     try:
         # KV entry A fills the primary device.
         key_a, key_b, key_c = _key(1), _key(2), _key(3)
@@ -244,7 +312,7 @@ def test_kv_cache_drain_gates_device_removal(devices):
 
         # Add a device at runtime; KV entries B and C land on it as overflow.
         overflow = devices.acquire(2 * SLOT_BYTES)
-        added = memory_manager.add_device(overflow, 2 * SLOT_BYTES)
+        added = l1.add_devdax_device(overflow, 2 * SLOT_BYTES)
         assert added.state == DevDaxArenaState.ACTIVE
         for key, fill in ((key_b, 0xB2), (key_c, 0xC3)):
             write = l1.reserve_write([key], [False], _layout())
@@ -255,7 +323,7 @@ def test_kv_cache_drain_gates_device_removal(devices):
         gc.collect()
 
         # Per-device usage: the primary holds A, the added device holds B and C.
-        statuses = {s.device_path: s for s in memory_manager.get_arena_statuses()}
+        statuses = {s.device_path: s for s in l1.get_devdax_arena_statuses()}
         assert statuses[primary].used_bytes == SLOT_BYTES
         assert statuses[primary].active_allocations == 1
         assert statuses[overflow].used_bytes == 2 * SLOT_BYTES
@@ -263,7 +331,7 @@ def test_kv_cache_drain_gates_device_removal(devices):
         assert statuses[overflow].free_bytes == 0
 
         # Request removal while B and C are still cached: the device drains.
-        removing = memory_manager.remove_device(overflow, DevDaxRemoveMode.DRAIN)
+        removing = l1.remove_devdax_device(overflow, DevDaxRemoveMode.DRAIN)
         assert removing.state == DevDaxArenaState.DRAINING
         assert removing.active_allocations == 2
         assert _open_fd_count(overflow) > 0
@@ -279,7 +347,7 @@ def test_kv_cache_drain_gates_device_removal(devices):
         # Deleting one of the two entries keeps the device mapped and draining.
         assert l1.delete([key_b])[key_b] == L1Error.SUCCESS
         gc.collect()
-        statuses = {s.device_path: s for s in memory_manager.get_arena_statuses()}
+        statuses = {s.device_path: s for s in l1.get_devdax_arena_statuses()}
         assert statuses[overflow].state == DevDaxArenaState.DRAINING
         assert statuses[overflow].active_allocations == 1
         assert _open_fd_count(overflow) > 0
@@ -287,7 +355,7 @@ def test_kv_cache_drain_gates_device_removal(devices):
         # Deleting the last entry on the device unmaps it automatically.
         assert l1.delete([key_c])[key_c] == L1Error.SUCCESS
         gc.collect()
-        assert [s.device_path for s in memory_manager.get_arena_statuses()] == [primary]
+        assert [s.device_path for s in l1.get_devdax_arena_statuses()] == [primary]
         assert _open_fd_count(overflow) == 0
 
         # KV on the remaining device is untouched by the removal.

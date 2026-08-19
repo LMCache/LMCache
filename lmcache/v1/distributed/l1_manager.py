@@ -23,6 +23,13 @@ from lmcache.v1.distributed.memory_manager import (
 from lmcache.v1.distributed.memory_manager.devdax_l1_memory_manager import (
     DevDaxL1MemoryManager,
 )
+from lmcache.v1.distributed.memory_manager.reconfiguration import (
+    L1ReconfigureError,
+)
+from lmcache.v1.memory_allocators.devdax_memory_allocator import (
+    DevDaxArenaStatus,
+    DevDaxRemoveMode,
+)
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
@@ -851,6 +858,73 @@ class L1Manager:
         """Return an L1MemoryDesc describing the underlying L1 memory buffer."""
         return self._memory_manager.get_l1_memory_desc()
 
+    def get_devdax_arena_statuses(self) -> list[DevDaxArenaStatus]:
+        """Return runtime status for every Device-DAX arena.
+
+        Returns:
+            One status per mapped arena, in pool order.
+
+        Raises:
+            L1ReconfigureError: If L1 is not Device-DAX backed.
+        """
+        return self._require_devdax_memory_manager().get_arena_statuses()
+
+    def memory_region_count(self) -> int:
+        """Return how many memory regions back L1 for transfer registration.
+
+        A Device-DAX L1 counts its DRAM tier (hybrid mode) plus every mapped
+        arena, active or draining. Other memory managers expose one buffer.
+
+        Returns:
+            The number of memory regions.
+        """
+        manager = self._memory_manager
+        if isinstance(manager, DevDaxL1MemoryManager):
+            return manager.memory_region_count()
+        return 1
+
+    def add_devdax_device(
+        self,
+        device_path: str,
+        size_in_bytes: int,
+    ) -> DevDaxArenaStatus:
+        """Add a Device-DAX device to the L1 arena pool.
+
+        Args:
+            device_path: Path of the Device-DAX device to map.
+            size_in_bytes: Number of bytes to map.
+
+        Returns:
+            Status of the newly added arena.
+
+        Raises:
+            L1ReconfigureError: If L1 is not Device-DAX backed or the request
+                cannot be applied.
+        """
+        return self._require_devdax_memory_manager().add_device(
+            device_path, size_in_bytes
+        )
+
+    def remove_devdax_device(
+        self,
+        device_path: str,
+        mode: DevDaxRemoveMode = DevDaxRemoveMode.DRAIN,
+    ) -> DevDaxArenaStatus:
+        """Remove a Device-DAX device from the L1 arena pool.
+
+        Args:
+            device_path: Path of the mapped Device-DAX device.
+            mode: Removal strategy. Only drain mode is currently supported.
+
+        Returns:
+            Status of the arena after the removal request.
+
+        Raises:
+            L1ReconfigureError: If L1 is not Device-DAX backed or the request
+                cannot be applied.
+        """
+        return self._require_devdax_memory_manager().remove_device(device_path, mode)
+
     def close(self) -> None:
         """Close the L1Manager and free all resources."""
         with self._lock:
@@ -934,3 +1008,12 @@ class L1Manager:
             size_bytes=memory_obj.get_size(),
             backend=self._memory_manager.get_backend_type(memory_obj),
         )
+
+    def _require_devdax_memory_manager(self) -> DevDaxL1MemoryManager:
+        """Return the Device-DAX manager or raise a reconfiguration error."""
+        if not isinstance(self._memory_manager, DevDaxL1MemoryManager):
+            raise L1ReconfigureError(
+                409,
+                "L1 is not Device-DAX backed (--l1-devdax-path not set)",
+            )
+        return self._memory_manager
