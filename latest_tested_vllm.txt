@@ -1,4 +1,4 @@
-0.27.2rc1.dev193+gaa9903490
-short_sha=aa9903490
-full_sha=aa9903490c616dc6871e5acc62cec7bb1e5e9434
-archive_index_url=https://wheels.vllm.ai/aa9903490c616dc6871e5acc62cec7bb1e5e9434/cu130
+0.27.1
+short_sha=
+full_sha=
+archive_index_url=
