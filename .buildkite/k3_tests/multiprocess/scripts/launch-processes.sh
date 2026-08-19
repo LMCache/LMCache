@@ -27,7 +27,13 @@ echo "Using GPU $GPU_FOR_BASELINE for vLLM baseline"
 # Without this, vLLM allocates so much KV cache that APC covers all prefixes
 # and LMCache's cache path is never exercised, making the test pass vacuously.
 GPU_MEMORY_UTIL_ARG=""
-GPU_MEMORY_MB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits -i "${GPU_FOR_VLLM}" | tr -d ' ')
+GPU_MEMORY_MB=$(
+    CUDA_VISIBLE_DEVICES="${GPU_FOR_VLLM}" python3 - <<'PY'
+import torch
+
+print(torch.cuda.get_device_properties(0).total_memory // (1024 * 1024))
+PY
+)
 GPU_MEMORY_GB=$((GPU_MEMORY_MB / 1024))
 echo "Detected GPU memory: ${GPU_MEMORY_GB}GB (${GPU_MEMORY_MB}MB)"
 
@@ -245,7 +251,7 @@ if [[ "${LAUNCH_BASELINE:-true}" == "true" ]]; then
     CUDA_VISIBLE_DEVICES="${GPU_FOR_BASELINE}" \
     VLLM_ENABLE_V1_MULTIPROCESSING=0 \
     VLLM_SERVER_DEV_MODE=1 \
-    VLLM_BATCH_INVARIANT=1 \
+    VLLM_BATCH_INVARIANT=${BATCH_INVARIANT} \
     PYTHONHASHSEED=0 \
     vllm serve "$MODEL" \
         $ATTENTION_BACKEND_ARG \

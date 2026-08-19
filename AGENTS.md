@@ -42,6 +42,17 @@ BUILD_WITH_HIP=1 pip install -e .
 
 ## Testing
 
+### AMD Buildkite E2E
+
+The `unit-tests-amd` pipeline also runs the shared multiprocess `vllm_bench`
+scenario on two bare-metal ROCm GPUs. Keep its setup in
+`.buildkite/scripts/amd-vllm-bench.sh`: install the ROCm vLLM wheel before
+building LMCache, select two GPUs with `pick-free-gpu-amd.sh`, and leave
+`ATTENTION_BACKEND=auto` so vLLM chooses a ROCm backend. Batch-invariant mode
+is CUDA-specific in this scenario and must remain disabled on AMD.
+The agents currently run ROCm 7.0, so use the archived `rocm700` vLLM index;
+the older `https://wheels.vllm.ai/nightly/rocm70` path returns 404.
+
 ### Running Tests
 
 ```bash
@@ -91,6 +102,9 @@ those commands are missing.
 If you are validating only non-Rust changes and do not intend to touch Rust in
 that pass, run `SKIP=rust-fmt,rust-clippy pre-commit run --all-files` to skip
 those hooks explicitly.
+The `rust-clippy` hook also requires Linux because `rust/raw_block` depends on
+`io-uring`; on macOS it fails while compiling that dependency. Run the full
+hook set on Linux and use the explicit skip above for non-Rust macOS changes.
 
 C++/CUDA files use clang-format (Google style, 80-col). Rust code in `rust/` uses `cargo fmt` and `cargo clippy`.
 
