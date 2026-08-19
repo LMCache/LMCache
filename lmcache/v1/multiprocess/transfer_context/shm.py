@@ -14,6 +14,7 @@ import torch
 # First Party
 from lmcache import torch_dev
 from lmcache.logging import init_logger
+from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
@@ -21,6 +22,7 @@ from lmcache.v1.multiprocess.transfer_context.base import (
     EngineDrivenContext,
     EngineDrivenContextMetadata,
 )
+from lmcache.v1.platform import current_device_spec
 
 logger = init_logger(__name__)
 
@@ -163,13 +165,15 @@ class EngineDrivenContextShm(EngineDrivenContext):
             [key, instance_id],
             get_response_class(RequestType.PREPARE_STORE),
         )
-        try:
-            response = future.result(timeout=self.mq_timeout)
-        except TimeoutError as err:
-            raise TimeoutError(
+        # wait() first so a timeout raises exactly one LMCacheTimeoutError
+        # (one event); result() then returns without its own timeout.
+        if not future.wait(timeout=self.mq_timeout):
+            raise LMCacheTimeoutError(
                 f"PREPARE_STORE timed out for instance_id={instance_id} "
-                f"after {self.mq_timeout}s"
-            ) from err
+                f"after {self.mq_timeout}s",
+                session_id=key.request_id,
+            )
+        response = future.result()
         context = response.context if isinstance(response.context, dict) else {}
         slots = context.get("slots")
         if not isinstance(slots, list):
@@ -249,7 +253,7 @@ class EngineDrivenContextShm(EngineDrivenContext):
                 exc,
             )
             return
-        if torch_dev.ext.pin_memory(ptr, self._pool_size):
+        if current_device_spec.pin_memory(ptr, self._pool_size):
             self._pinned = True
             self._pinned_ptr = ptr
             self._pinned_size = self._pool_size
@@ -266,7 +270,7 @@ class EngineDrivenContextShm(EngineDrivenContext):
         """Unpin the SHM buffer if it was previously pinned via cudaHostRegister."""
         if not self._pinned or self._pinned_ptr == 0:
             return
-        torch_dev.ext.unpin_memory(self._pinned_ptr)
+        current_device_spec.unpin_memory(self._pinned_ptr)
         self._pinned = False
         self._pinned_ptr = 0
         self._pinned_size = 0

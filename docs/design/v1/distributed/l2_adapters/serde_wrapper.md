@@ -108,7 +108,7 @@ sequenceDiagram
     Controller->>W: submit_store_task(keys, objs)
     W->>L1: reserve_write(temp_keys, byte layout)
     L1-->>W: temp_objs (write-locked)
-    W->>Serde: submit_serialize(objs, temp_objs) → serde_id
+    W->>Serde: submit_serialize(objs, temp_objs, keys) → serde_id
     W-->>Controller: wrapped_id
 
     Note over Serde,Thread: serde thread pool transforms<br/>objs → temp_objs, signals fd

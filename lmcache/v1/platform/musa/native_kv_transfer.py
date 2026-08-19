@@ -96,7 +96,7 @@ def try_native_multi_layer_block_kv_transfer(
 
     This is the optional native fast path used by
     ``lmcache.v1.platform.musa.ops`` behind
-    ``lmc_ops.multi_layer_block_kv_transfer``. It hides the MUSA-specific
+    ``device_ops.multi_layer_block_kv_transfer``. It hides the MUSA-specific
     eligibility checks, slot mapping, and CPU staging from the generic
     multiprocess transfer context.
 
@@ -188,12 +188,12 @@ def try_native_to_gpu(
     Args:
         use_mla: Whether the active layout is MLA.
         memory_tensor: LMCache contiguous memory object tensor.
-        kvcaches: vLLM paged KV tensors.
-        slot_mapping: Full vLLM slot mapping tensor.
+        kvcaches: Engine paged KV tensors.
+        slot_mapping: Full engine slot mapping tensor.
         start: Inclusive token start for this transfer.
         end: Exclusive token end for this transfer.
-        skip_prefix_n_tokens: Prefix tokens already cached by vLLM.
-        block_size: vLLM paged KV block size.
+        skip_prefix_n_tokens: Prefix tokens already cached by the engine.
+        block_size: Engine paged KV block size.
         num_heads: Number of KV heads for non-MLA layouts.
         head_size: KV head size or MLA hidden size.
 
@@ -258,11 +258,11 @@ def try_native_from_gpu(
     Args:
         use_mla: Whether the active layout is MLA.
         memory_tensor: LMCache contiguous memory object tensor to populate.
-        kvcaches: vLLM paged KV tensors.
-        slot_mapping: Full vLLM slot mapping tensor.
+        kvcaches: Engine paged KV tensors.
+        slot_mapping: Full engine slot mapping tensor.
         start: Inclusive token start for this transfer.
         end: Exclusive token end for this transfer.
-        block_size: vLLM paged KV block size.
+        block_size: Engine paged KV block size.
         num_heads: Number of KV heads for non-MLA layouts.
         head_size: KV head size or MLA hidden size.
 

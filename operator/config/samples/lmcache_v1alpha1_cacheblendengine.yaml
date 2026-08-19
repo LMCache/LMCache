@@ -19,7 +19,7 @@ spec:
   # server:
   #   port: 6566                  # MP port the CB connector dials (default 6566)
   #   httpPort: 8080              # HTTP frontend port (health, admin)
-  #   chunkSize: 256              # FIXED at 256 (must equal vLLM --block-size * 4)
+  #   chunkSize: 256              # FIXED at 256 (required by the blend matcher)
   #   maxWorkers: 1               # default, worker threads
   #   hashAlgorithm: blake3       # builtin | sha256_cbor | blake3
 
@@ -31,6 +31,8 @@ spec:
   # blend:
   #   checkLayer: 1               # default, cb.check_layer
   #   recompRatio: 0.15           # default, cb.recomp_ratio
+  #   partialBucket: 4096         # cb.partial_bucket; PARTIAL row padding for
+  #                               # fp8-MoE models (unset = disabled)
 
   # -- Injection: how the webhook injects the plugin into annotated vLLM pods --
   injection:
@@ -70,10 +72,17 @@ spec:
   # -- Logging --
   # logLevel: INFO                # DEBUG | INFO | WARNING | ERROR
 
+  # -- Security --
+  # Run the engine container in privileged mode. Defaults to false. Set to true
+  # only on clusters where the engine cannot see the node GPUs otherwise
+  # (runtimeClassName: nvidia + NVIDIA_VISIBLE_DEVICES=all is enough on most).
+  # privileged: false
+
 # ---------------------------------------------------------------------------
 # To enable CacheBlend on a vLLM pod, label it for the webhook and annotate it
 # with this engine's name. The pod (and this engine) must run in a namespace
-# labeled `pod-security.kubernetes.io/enforce=privileged` (hostIPC is injected).
+# labeled `pod-security.kubernetes.io/enforce=privileged` (a hostPath /dev/shm
+# mount is injected).
 #
 #   metadata:
 #     labels:

@@ -34,7 +34,9 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
          .. tab-item:: MP mode (recommended)
             :sync: mp
 
-            Start the LMCache server:
+            Start the LMCache server. ``--host`` / ``--port`` set the ZMQ
+            address vLLM connects to; they are spelled out here so the two
+            commands line up (these are also the defaults):
 
             .. code-block:: bash
 
@@ -42,20 +44,26 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
                # prompt produces visible cache traffic; use the default
                # (256) in production.
                lmcache server \
+                   --host localhost --port 5555 \
                    --l1-size-gb 20 --eviction-policy LRU --chunk-size 16
 
-            The ZMQ port (default **5555**) accepts connections from vLLM;
-            the HTTP frontend (default **8080**) serves the management and
-            metrics endpoints. See :doc:`../mp/configuration` for the full
-            list of ``lmcache server`` and connector options.
+            The ZMQ port (``--port``, default **5555**) accepts connections
+            from vLLM; the HTTP frontend (default **8080**) serves the
+            management and metrics endpoints. See :doc:`../mp/configuration`
+            for the full list of ``lmcache server`` and connector options.
 
-            Start vLLM with the MP connector in a separate terminal:
+            Start vLLM with the MP connector in a separate terminal. Point the
+            connector at the server above via ``lmcache.mp.host`` /
+            ``lmcache.mp.port`` in ``kv_connector_extra_config``. The host may
+            include a ZMQ transport prefix (e.g. ``tcp://``); a bare
+            ``host``/``host:port`` is also accepted and is normalized to
+            ``tcp://`` automatically:
 
             .. code-block:: bash
 
                vllm serve Qwen/Qwen3-8B \
                    --port 8000 --kv-transfer-config \
-                   '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both"}'
+                   '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.host": "localhost", "lmcache.mp.port": 5555}}'
 
             .. note::
                **Where does** ``LMCacheMPConnector`` **resolve to?** This depends on your vLLM version:
@@ -221,6 +229,12 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
             - **Stored another 8 tokens**: The new 8 tokens form a full chunk and are stored for future reuse.
 
    .. tab-item:: SGLang
+
+      .. note::
+         The SGLang integration now defaults to MP (multi-process) mode.
+         Please refer to `examples/sgl_integration/README.md`_ for the current setup instructions.
+
+      .. _examples/sgl_integration/README.md: https://github.com/LMCache/LMCache/blob/dev/examples/sgl_integration/README.md
 
       **Install SGLang**
 
@@ -447,12 +461,15 @@ pass ``lmcache.mp.host`` / ``lmcache.mp.port`` in
 .. code-block:: bash
 
    vllm serve Qwen/Qwen3-8B --kv-transfer-config \
-     '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.host": "10.0.0.1", "lmcache.mp.port": 6555}}'
+     '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.host": "tcp://10.0.0.1", "lmcache.mp.port": 6555}}'
 
 **CPU-only (no GPU)** -- the server runs with a ``StubCPUDevice`` and shares
 KV tensors with vLLM over POSIX shared memory. Start ``lmcache server``
-normally, then set ``lmcache.mp.mp_transfer_mode=engine_driven`` on the vLLM
-side to enable the zero-copy SHM path.
+normally, then set ``lmcache.mp.mp_transfer_mode=lmcache_driven`` on the vLLM
+side to enable the zero-copy SHM handle path (the default ``auto`` routing
+maps non-CUDA devices to ``engine_driven``, a worker-side gather/scatter
+copy path that the server only loads when started with
+``--supported-transfer-mode engine_driven`` or ``auto``).
 
 **Docker** -- see :doc:`../production/docker_deployment`.
 

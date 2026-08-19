@@ -9,6 +9,15 @@ types share this backend:
 - ``nixl_store_dynamic`` — opens and registers files per operation, adding
   persist/recover across restarts and removing the open-file-descriptor limit.
 
+.. note::
+
+   Both adapters require the NIXL runtime, which ships as the optional
+   ``lmcache[nixl]`` extra:
+
+   .. code-block:: bash
+
+       uv pip install lmcache[nixl]
+
 Static pool — ``nixl_store``
 ----------------------------
 
@@ -101,6 +110,27 @@ per-operation instead of pre-allocating them at init. This enables:
 - ``max_capacity_gb``: Maximum storage capacity in GB. The adapter
   rejects stores when this limit is reached. Required for the eviction
   controller to compute usage.
+- ``shard_dirs``: ``"true"`` or ``"false"`` (default ``"false"``). When
+  ``"true"``, data files are spread across a two-level subdirectory tree
+  under ``file_path`` instead of all living in one flat directory. The two
+  levels are the first four hex characters of the chunk hash, matching the
+  hash prefix already embedded in the filename
+  (for example ``834ebc79...`` is stored as ``83/4e/<filename>``), giving a
+  fanout of up to 256 × 256 subdirectories. Leaving it unset preserves the
+  original flat layout.
+
+  Large flat directories slow down metadata operations on many filesystems,
+  so sharding helps once a single cache directory holds a large number of
+  files. Subdirectories are created lazily on first use and cached in
+  memory, so the store hot path issues at most one ``makedirs`` per bucket.
+
+  .. note::
+
+     ``shard_dirs`` changes where files are located, and lookup does not
+     fall back to the other layout. Toggling it against an existing cache
+     directory makes previously written files unreachable (they are not
+     deleted, just no longer found). Choose the layout when the cache
+     directory is first created, or clear it when changing the setting.
 
 **Optional fields (for persist):**
 
@@ -123,6 +153,9 @@ populates the in-memory index when a file is found.
 
     # With eviction
     --l2-adapter '{"type": "nixl_store_dynamic", "backend": "GDS", "backend_params": {"file_path": "/data/nvme/l2", "use_direct_io": "true", "max_capacity_gb": "50"}, "eviction": {"eviction_policy": "LRU", "trigger_watermark": 0.9, "eviction_ratio": 0.1}}'
+
+    # Shard data files across a two-level subdirectory tree
+    --l2-adapter '{"type": "nixl_store_dynamic", "backend": "POSIX", "backend_params": {"file_path": "/data/lmcache/l2", "use_direct_io": "false", "max_capacity_gb": "10", "shard_dirs": "true"}}'
 
 **Persist / secondary lookup behaviour:**
 

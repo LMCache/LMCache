@@ -89,14 +89,41 @@ if [ -n "${MAX_NUM_BATCHED_TOKENS:-}" ]; then
     MAX_NUM_BATCHED_TOKENS_ARG="--max-num-batched-tokens ${MAX_NUM_BATCHED_TOKENS}"
 fi
 
+# Split kernel groups into one object group per sliding-window size at
+# KV-cache registration. Required for hybrid models (e.g. gemma-4's
+# sliding-window + full-attention groups have different block sizes); without
+# it the hybrid groups collapse into a single full-attention group and the
+# per-group HMA store/retrieve corrupts the KV, failing the bit-exact check.
+# Set explicitly rather than relying on the server default so the test is
+# robust to default changes (the default flipped False in #3869/#4437).
+SEPARATE_OBJECT_GROUPS_ARG=""
+if [ "${SEPARATE_OBJECT_GROUPS:-0}" = "1" ] || [ "${SEPARATE_OBJECT_GROUPS:-0}" = "true" ]; then
+    SEPARATE_OBJECT_GROUPS_ARG="--separate-object-groups"
+fi
+
+# Server-side transfer paths. The server default flipped from 'auto' to
+# 'lmcache_driven' (#4447), so steps that force the engine-driven worker path
+# (LMCACHE_MP_TRANSFER_MODE=engine_driven, set by the pipeline matrix) must
+# tell the server to load it. Mirror the worker-side mode env; set explicitly
+# rather than relying on the server default so the test is robust to default
+# changes.
+TRANSFER_MODE_ARG="--supported-transfer-mode ${LMCACHE_MP_TRANSFER_MODE:-lmcache_driven}"
+
 # L1 lazy allocation mode. Default is lazy (--l1-use-lazy). Set L1_USE_LAZY=false
-# to disable lazy allocation, which enables POSIX SHM-backed L1 pool for the
-# engine_driven SHM transfer path. When lazy is enabled (default), the SHM pool
-# is disabled and engine_driven falls back to pickle transport.
+# to disable lazy allocation, which allows a POSIX SHM-backed L1 pool for the
+# engine_driven SHM transfer path. The pool also needs an explicit --shm-name:
+# the default "" disables it (and lazy allocation disables it regardless), in
+# which case engine_driven falls back to pickle transport.
 L1_LAZY_ARG=""
+SHM_NAME_ARG=""
 if [ "${L1_USE_LAZY:-true}" = "false" ]; then
     L1_LAZY_ARG="--no-l1-use-lazy"
-    echo "L1 lazy allocation disabled (SHM transport enabled)"
+    if [ "${LMCACHE_MP_TRANSFER_MODE:-}" = "engine_driven" ]; then
+        SHM_NAME_ARG="--shm-name mp_${BUILD_ID}"
+        echo "L1 lazy allocation disabled (SHM transport enabled)"
+    else
+        echo "L1 lazy allocation disabled"
+    fi
 fi
 
 # Store PIDs in a file so cleanup.sh can find them
@@ -126,6 +153,9 @@ lmcache server \
     --port "$LMCACHE_PORT" \
     ${GDS_L1_ARG} \
     ${L1_LAZY_ARG} \
+    ${SHM_NAME_ARG} \
+    ${TRANSFER_MODE_ARG} \
+    ${SEPARATE_OBJECT_GROUPS_ARG} \
     > "/tmp/build_${BUILD_ID}_lmcache.log" 2>&1 &
 
 LMCACHE_PID=$!
@@ -146,13 +176,51 @@ echo "=== Launching vLLM with LMCache ==="
 echo "Model: $MODEL"
 echo "Port: $vllm_port"
 
+# A dedicated GPU integration test enables FIFO lazy offload through this
+# flag. Keep the normal launch configuration eager so the existing test suite
+# preserves its current store timing.
+KV_TRANSFER_CONFIG="$(
+    LMCACHE_PORT="${LMCACHE_PORT}" \
+    LMCACHE_MP_LAZY_OFFLOAD="${LMCACHE_MP_LAZY_OFFLOAD:-false}" \
+    python3 - <<'PY'
+import json
+import os
+
+extra_config = {
+    "lmcache.mp.port": int(os.environ["LMCACHE_PORT"]),
+    "lmcache.mp.mq_timeout": 10,
+}
+if os.environ["LMCACHE_MP_LAZY_OFFLOAD"].lower() in {"1", "true"}:
+    extra_config.update(
+        {
+            "lmcache.mp.lazy_offload": True,
+            "lmcache.mp.lazy_offload_policy": "FIFO",
+            "lmcache.mp.lazy_offload_threshold": 2,
+            "lmcache.mp.lazy_offload_select_count": 1,
+        }
+    )
+
+print(
+    json.dumps(
+        {
+            "kv_connector": "LMCacheMPConnector",
+            "kv_role": "kv_both",
+            "kv_load_failure_policy": "recompute",
+            "kv_connector_extra_config": extra_config,
+        }
+    )
+)
+PY
+)"
+echo "LMCache KV transfer configuration: ${KV_TRANSFER_CONFIG}"
+
 CUDA_VISIBLE_DEVICES="${GPU_FOR_VLLM}" \
 VLLM_ENABLE_V1_MULTIPROCESSING=0 \
 VLLM_SERVER_DEV_MODE=1 \
 VLLM_BATCH_INVARIANT=${BATCH_INVARIANT} \
 PYTHONHASHSEED=0 \
 vllm serve "$MODEL" \
-    --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_load_failure_policy\": \"recompute\", \"kv_connector_extra_config\": {\"lmcache.mp.port\": $LMCACHE_PORT, \"lmcache.mp.mq_timeout\": 10}}" \
+    --kv-transfer-config "${KV_TRANSFER_CONFIG}" \
     $ATTENTION_BACKEND_ARG \
     --port "$vllm_port" \
     --no-async-scheduling \

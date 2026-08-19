@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Orchestrator for a single multiprocessing test (native, no Docker).
 # Usage: run-single-test.sh <test_name>
-#   test_name: lm_eval | hma_lm_eval_gemma4 | vllm_bench | long_doc_qa
-#              | long_doc_qa_l2 | fault_tolerance | deadlock | restart_recovery
-#              | gds_smoke_test
+#   test_name: lm_eval | lm_eval_preemption | hma_lm_eval_gemma4 | vllm_bench
+#              | long_doc_qa | long_doc_qa_l2 | fault_tolerance | deadlock
+#              | restart_recovery | lazy_offload | gds_smoke_test
 #
 # Each invocation is self-contained: launches servers, runs one test, cleans up.
 # This mirrors the comprehensive tests' run-single-config.sh pattern.
@@ -59,6 +59,26 @@ elif [ "$TEST_NAME" = "hma_lm_eval_qwen3_5" ]; then
     export BATCH_INVARIANT="${BATCH_INVARIANT:-0}"
     export SCORE_TOLERANCE="${SCORE_TOLERANCE:-0.05}"
     export LIMIT="${LIMIT:-300}"
+elif [ "$TEST_NAME" = "kimi_linear_tp" ]; then
+    # Self-contained test: run-kimi-linear-tp.sh owns the server lifecycle and
+    # all launch flags (TP=2, trust-remote-code, align, chunk/batch sizes). Only
+    # the model name is declared here so the banner and the script's ${MODEL:-}
+    # fallback both resolve to Kimi-Linear rather than the generic default below.
+    export MODEL="${MODEL:-moonshotai/Kimi-Linear-48B-A3B-Instruct}"
+elif [ "$TEST_NAME" = "dsv4_flash_tp" ]; then
+    # Self-contained test: run-dsv4-flash-tp.sh owns the server lifecycle and
+    # all launch flags (TP=4, fp8_ds_mla, deepseek_v4 tokenizer). Only the
+    # model name is declared here so the banner and the script's ${MODEL:-}
+    # fallback both resolve to DeepSeek-V4-Flash.
+    export MODEL="${MODEL:-deepseek-ai/DeepSeek-V4-Flash}"
+elif [ "$TEST_NAME" = "lazy_offload" ]; then
+    # The shared GPU launcher includes these values in the real vLLM
+    # kv-transfer configuration only for this integration test.
+    export LMCACHE_MP_LAZY_OFFLOAD=true
+    # vLLM's default paged-block size is 16 tokens. Matching it keeps this
+    # test's expected LMCache chunk counts exact and small.
+    export CHUNK_SIZE="${CHUNK_SIZE:-16}"
+    export MODEL="${MODEL:-Qwen/Qwen3-14B}"
 else
     export MODEL="${MODEL:-Qwen/Qwen3-14B}"
 fi
@@ -84,7 +104,7 @@ echo "Results dir: $RESULTS_DIR"
 echo ""
 
 # Tests that handle their own server lifecycle (different GPU/model config)
-SELF_CONTAINED_TESTS=" deadlock mp_autostart_tp2 p2p "
+SELF_CONTAINED_TESTS=" deadlock mp_autostart_tp2 p2p kimi_linear_tp dsv4_flash_tp "
 
 # Tests that compare against a baseline vLLM (no LMCache) on a second GPU.
 # Only these need the baseline server (and thus a 2-GPU pod); everything
@@ -127,6 +147,10 @@ case "$TEST_NAME" in
     lm_eval)
         exec_script="${SCRIPT_DIR}/run-lm-eval.sh"
         ;;
+    lm_eval_preemption)
+        export LM_EVAL_VERIFY_MODE=preemption
+        exec_script="${SCRIPT_DIR}/run-lm-eval.sh"
+        ;;
     hma_lm_eval_gemma4)
         exec_script="${SCRIPT_DIR}/run-hma-lm-eval.sh"
         ;;
@@ -157,8 +181,17 @@ case "$TEST_NAME" in
     cache_stats)
         exec_script="${SCRIPT_DIR}/run-cache-stats.sh"
         ;;
+    lazy_offload)
+        exec_script="${SCRIPT_DIR}/run-lazy-offload.sh"
+        ;;
     p2p)
         exec_script="${SCRIPT_DIR}/run-p2p.sh"
+        ;;
+    kimi_linear_tp)
+        exec_script="${SCRIPT_DIR}/run-kimi-linear-tp.sh"
+        ;;
+    dsv4_flash_tp)
+        exec_script="${SCRIPT_DIR}/run-dsv4-flash-tp.sh"
         ;;
     http_api)
         exec_script="${SCRIPT_DIR}/run-http-api.sh"
@@ -168,7 +201,7 @@ case "$TEST_NAME" in
         ;;
     *)
         echo "Unknown test: $TEST_NAME"
-        echo "Valid tests: lm_eval, hma_lm_eval_gemma4, vllm_bench, long_doc_qa, long_doc_qa_l2, fault_tolerance, deadlock, mp_autostart_tp2, restart_recovery, cache_stats, http_api, gds_smoke_test, p2p"
+        echo "Valid tests: lm_eval, lm_eval_preemption, hma_lm_eval_gemma4, vllm_bench, long_doc_qa, long_doc_qa_l2, fault_tolerance, deadlock, mp_autostart_tp2, restart_recovery, cache_stats, lazy_offload, http_api, gds_smoke_test, p2p, kimi_linear_tp, dsv4_flash_tp"
         exit 1
         ;;
 esac

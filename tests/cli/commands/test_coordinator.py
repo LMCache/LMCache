@@ -54,31 +54,48 @@ class TestCoordinatorCommandArguments:
                 "0.5",
                 "--trigger-watermark",
                 "0.9",
-                "--blend-chunk-size",
+                "--chunk-size",
                 "512",
+                "--hash-algorithm",
+                "sha256",
                 "--blend-probe-stride",
                 "2",
                 "--timeout-keep-alive",
                 "15",
+                "--disable-metrics",
+                "--otlp-endpoint",
+                "http://collector:4317",
             ]
         )
         assert args.host == "127.0.0.1"
         assert args.port == 9999
-        assert args.blend_chunk_size == 512
+        assert args.chunk_size == 512
+        assert args.hash_algorithm == "sha256"
         assert args.blend_probe_stride == 2
         assert args.timeout_keep_alive == 15
+        assert args.disable_metrics is True
+        assert args.otlp_endpoint == "http://collector:4317"
+
+    def test_enable_blend_lookup_flag(self, parser):
+        """The blend-lookup switch parses as True when passed."""
+        args = parser.parse_args(["coordinator", "--enable-blend-lookup"])
+        assert args.enable_blend_lookup is True
 
     def test_flags_default_to_none(self, parser):
-        """Unset flags default to None so env/config defaults win."""
+        """Unset flags default to None so the config defaults win."""
         args = parser.parse_args(["coordinator"])
-        assert args.blend_chunk_size is None
+        assert args.chunk_size is None
+        assert args.hash_algorithm is None
+        assert args.enable_blend_lookup is None
         assert args.blend_probe_stride is None
         assert args.timeout_keep_alive is None
+        assert args.disable_metrics is None
+        assert args.otlp_endpoint is None
 
 
 class TestCoordinatorCommandExecute:
-    def test_blend_overrides_applied(self, cmd):
-        """blend_chunk_size/blend_probe_stride flags override the config."""
+    def test_overrides_applied(self, cmd):
+        """chunk_size/hash_algorithm/blend flags override the config."""
         # First Party
         from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
 
@@ -90,9 +107,13 @@ class TestCoordinatorCommandExecute:
             eviction_check_interval=None,
             eviction_ratio=None,
             trigger_watermark=None,
-            blend_chunk_size=512,
+            chunk_size=512,
+            hash_algorithm="sha256",
+            enable_blend_lookup=True,
             blend_probe_stride=2,
             timeout_keep_alive=None,
+            disable_metrics=True,
+            otlp_endpoint="http://collector:4317",
         )
 
         captured = {}
@@ -104,11 +125,66 @@ class TestCoordinatorCommandExecute:
         with (
             patch("uvicorn.run"),
             patch(
+                "lmcache.v1.mp_coordinator.observability.init_coordinator_metrics"
+            ) as mock_init_metrics,
+            patch(
                 "lmcache.v1.mp_coordinator.app.create_app",
                 side_effect=fake_create_app,
             ),
         ):
             cmd.execute(args)
 
-        assert captured["config"].blend_chunk_size == 512
+        assert captured["config"].chunk_size == 512
+        assert captured["config"].hash_algorithm == "sha256"
+        assert captured["config"].enable_blend_lookup is True
         assert captured["config"].blend_probe_stride == 2
+        assert captured["config"].metrics_enabled is False
+        assert captured["config"].otlp_endpoint == "http://collector:4317"
+        # Unset flags keep the config defaults.
+        assert captured["config"].host == MPCoordinatorConfig.host
+        assert captured["config"].port == MPCoordinatorConfig.port
+        mock_init_metrics.assert_called_once_with(captured["config"])
+
+    def test_env_vars_ignored(self, cmd, monkeypatch):
+        """Config is CLI-only: LMCACHE_MP_COORDINATOR_* no longer has an effect."""
+        # First Party
+        from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
+
+        monkeypatch.setenv("LMCACHE_MP_COORDINATOR_PORT", "7777")
+        monkeypatch.setenv("LMCACHE_MP_COORDINATOR_HOST", "10.0.0.1")
+        monkeypatch.setenv("LMCACHE_MP_COORDINATOR_OTLP_ENDPOINT", "http://x:4317")
+
+        args = argparse.Namespace(
+            host=None,
+            port=None,
+            instance_timeout=None,
+            health_check_interval=None,
+            eviction_check_interval=None,
+            eviction_ratio=None,
+            trigger_watermark=None,
+            chunk_size=None,
+            hash_algorithm=None,
+            enable_blend_lookup=None,
+            blend_probe_stride=None,
+            timeout_keep_alive=None,
+            disable_metrics=None,
+            otlp_endpoint=None,
+        )
+
+        captured = {}
+
+        def fake_create_app(config: MPCoordinatorConfig):
+            captured["config"] = config
+            return MagicMock()
+
+        with (
+            patch("uvicorn.run"),
+            patch("lmcache.v1.mp_coordinator.observability.init_coordinator_metrics"),
+            patch(
+                "lmcache.v1.mp_coordinator.app.create_app",
+                side_effect=fake_create_app,
+            ),
+        ):
+            cmd.execute(args)
+
+        assert captured["config"] == MPCoordinatorConfig()
