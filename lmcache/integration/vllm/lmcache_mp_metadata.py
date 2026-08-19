@@ -30,11 +30,13 @@ class LMCacheMPRequestState(enum.Enum):
     """
     State machine:
     PREFETCHING -- update_state_after_alloc --> WAITING_FOR_LOAD
-    WAITING_FOR_LOAD -- process_loading_requests --> READY
+    WAITING_FOR_LOAD -- process_loading_requests --> LOADING
+    LOADING -- finished_recving --> READY
     """
 
     PREFETCHING = enum.auto()
     WAITING_FOR_LOAD = enum.auto()
+    LOADING = enum.auto()
     READY = enum.auto()
 
 
@@ -346,6 +348,7 @@ class LMCacheMPConnectorMetadata(KVConnectorMetadata):
         super().__init__()
         self.requests: list[LMCacheMPRequestMetadata] = []
         self.need_flush_before_forward: bool = False
+        self.aborted_retrieve_req_ids: set[str] = set()
 
     def add_request_metadata(self, request_metadata: LMCacheMPRequestMetadata):
         self.requests.append(request_metadata)
