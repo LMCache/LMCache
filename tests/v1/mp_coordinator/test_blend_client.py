@@ -57,7 +57,7 @@ def _stored(directory: KeyDirectory, chunks: list[list[int]]) -> list[bytes]:
     """Feed ``chunks`` in as cache events; return their chunk hashes."""
     hashes = [bytes([index + 1]) * 4 for index in range(len(chunks))]
     for seq, (chunk_hash, tokens) in enumerate(zip(hashes, chunks, strict=True), 1):
-        directory.apply_batch(
+        directory.consume(
             CacheEventBatch(
                 instance_id="node-a",
                 incarnation=1,
@@ -169,22 +169,30 @@ def test_take_match_clears():
         client.close()
 
 
-def test_maybe_create(monkeypatch: pytest.MonkeyPatch):
-    assert BlendCoordinatorClient.maybe_create("") is None
-    assert BlendCoordinatorClient.maybe_create("   ") is None
-    assert BlendCoordinatorClient.maybe_create(None) is None
+def test_maybe_create():
+    kwargs = {"timeout": 1.0, "match_concurrency": 8}
+    assert BlendCoordinatorClient.maybe_create("", **kwargs) is None
+    assert BlendCoordinatorClient.maybe_create("   ", **kwargs) is None
+    assert BlendCoordinatorClient.maybe_create(None, **kwargs) is None
 
-    monkeypatch.delenv("LMCACHE_COORDINATOR_BLEND_TIMEOUT", raising=False)
-    client = BlendCoordinatorClient.maybe_create("http://coord:9300")
+    client = BlendCoordinatorClient.maybe_create("http://coord:9300", **kwargs)
     assert client is not None
-    assert client.match_budget_s == 1.0  # default timeout
+    assert client.match_budget_s == 1.0
     client.close()
 
-    monkeypatch.setenv("LMCACHE_COORDINATOR_BLEND_TIMEOUT", "1.5")
-    client = BlendCoordinatorClient.maybe_create("http://coord:9300")
+    client = BlendCoordinatorClient.maybe_create(
+        "http://coord:9300", timeout=1.5, match_concurrency=2
+    )
     assert client is not None
-    assert client.match_budget_s == 1.5  # env override
+    assert client.match_budget_s == 1.5
     client.close()
+
+
+def test_maybe_create_rejects_bad_concurrency():
+    with pytest.raises(ValueError):
+        BlendCoordinatorClient.maybe_create(
+            "http://coord:9300", timeout=1.0, match_concurrency=0
+        )
 
 
 def test_pending_sentinel_distinct():

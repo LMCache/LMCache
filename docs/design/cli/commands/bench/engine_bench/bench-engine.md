@@ -362,6 +362,86 @@ and inflate the blend hit rate.
 **Behavior:** strictly sequential (`step()` awaits inline). Pass 1 sends each
 prefix once in pool order as warmup; pass 2 repeats in **identical order** and
 is what final stats capture.
+where `(i1, …, iN)` is one permutation of the `N` contexts. Most permutations
+share *some* chunks with prior requests but rarely the same prefix, exercising
+chunk-level cache lookup and eviction.
+
+**Config** (`LongDocPermutatorConfig`):
+
+| Field | CLI arg | Default | Description |
+|-------|---------|---------|-------------|
+| `num_contexts` | `--ldp-num-contexts` | 5 | Number of unique context documents (`N`) |
+| `context_length` | `--ldp-context-length` | 5000 | Tokens per context (exact) |
+| `system_prompt_length` | `--ldp-system-prompt-length` | 1000 | Shared system prompt tokens, exact (`0` disables) |
+| `num_permutations` | `--ldp-num-permutations` | 10 | Distinct permutations to send (capped at `N!`) |
+| `vocab_size` | (none — hardcoded in factory) | 8000 | Number of distinct single-token words contexts are sampled from |
+| `num_inflight_requests` | `--ldp-num-inflight-requests` | 1 | Max concurrent in-flight requests |
+| `max_output_length` | `--ldp-max-output-length` | 128 | Max tokens generated per request; `1` measures prefill alone |
+
+**Stress axes** (each config field tunes one):
+
+| Axis | Knob |
+|------|------|
+| Blended-context boundaries | `num_contexts` |
+| Eviction pressure | `num_permutations` |
+| Chunk homogeneity (hash collisions) | `vocab_size` |
+| Prefix domination | `system_prompt_length` |
+| Concurrency | `num_inflight_requests` |
+
+**Behavior:**
+
+- **Data generation:** Builds a deterministic pool of `vocab_size` words that
+  each cost exactly one token under the model's tokenizer, generates
+  `num_contexts` distinct contexts from it (each seeded independently so token
+  sequences truly diverge), and enumerates permutations. Because every word is
+  one token and begins a word, a context of `context_length` words is exactly
+  `context_length` tokens whatever order a permutation puts them in — the
+  configured lengths are exact, not estimates.
+- **Tokenizer families.** Candidates are read from the vocabulary's *keys*, so
+  byte-level BPE (`Ġthe`) and SentencePiece (`▁the`) are both covered;
+  `decode()` would drop the SentencePiece marker and find nothing. Words are
+  then joined by whichever convention that tokenizer makes exact — each word
+  carrying a leading space, or plain separators for tokenizers that charge a
+  token for an explicit leading space — and the total is checked before use.
+  WordPiece (BERT) marks continuations rather than word starts and is not
+  supported; the workload says so instead of guessing.
+- **Tokenizer is required.** Without one the workload cannot honour a length
+  expressed in tokens, so it raises instead of falling back to a text-level
+  approximation, which would silently benchmark a different operating point
+  than the flags describe. The tokenizer is loaded from `--model`, which
+  defaults to the name the engine reports from `/v1/models`; pass `--model`
+  explicitly when that name is not a HuggingFace repo ID or a local path.
+- **Permutation enumeration:** For small `N`, iterates `itertools.permutations`
+  and truncates. When `N!` is much larger than `num_permutations * 10`, samples
+  random permutations into a `set` to avoid exhausting an enormous search
+  space. Returns all `N!` permutations when `num_permutations >= N!`.
+- **Warmup:** A single dummy request (`max_tokens=1`) to prime the engine.
+- **Dispatch:** Semaphore-controlled — `step()` acquires the semaphore, fires
+  an async task with the next permutation, returns `0.0` for immediate
+  re-call. Once all permutations are dispatched, awaits remaining tasks via
+  `asyncio.wait(FIRST_COMPLETED)`.
+- **`on_request_finished`:** No-op (stateless).
+- **Termination:** Returns `-1.0` when the request list is exhausted and all
+  pending tasks have completed.
+
+**`run()` override:** Unlike the other workloads, `LongDocPermutatorWorkload`
+overrides `BaseWorkload.run()` to close `RequestSender`'s async HTTP client
+inside the same `asyncio.run()` call as the benchmark loop. `asyncio.run()`
+closes the loop on exit, which would orphan any open `httpx` connections;
+closing the client here ensures clean teardown. The orchestrator's subsequent
+`asyncio.run(request_sender.close())` then finds nothing to close and
+completes without error.
+
+### 4.5 `prefix-suffix-tuner` — Tiered KV-Cache Demonstrator
+
+A single sequential workload designed to be run **unchanged** across three
+LMCache configurations to demonstrate the value of each cache tier:
+
+| Baseline | LMCache config | Targeted overflow | Expected pass-2 hits |
+|----------|---------------|-------------------|----------------------|
+| 1 | vanilla vLLM (L0 only) | L0 (HBM) | none — every request a cold prefill |
+| 2 | vLLM + LMCache L1 + L2 | L1 (DRAM) | L2 prefix hits (suffix recomputed) |
+| 3 | vLLM + LMCache L1 + L2 + CacheBlend | L1 (DRAM) | L2 prefix hits + CacheBlend suffix hits |
 
 **Why 1.05× suffices:** with sequential dispatch and LRU in a tier of capacity
 `K`, after pass 1 of `N = 1.05K` prefixes the `0.05K` oldest are evicted. Pass

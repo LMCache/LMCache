@@ -209,8 +209,8 @@ class StatusListResponse(BaseModel):
 # -- Key directory -----------------------------------------------------------
 
 
-class DirectoryEventsRequest(BaseModel):
-    """Body of ``POST /directory/events``.
+class CacheEventsRequest(BaseModel):
+    """Body of ``POST /events``.
 
     Attributes:
         batches: Event batches to apply, in emission order per instance.
@@ -239,8 +239,8 @@ class DirectoryEventsRequest(BaseModel):
         return value
 
 
-class DirectoryEventsResponse(BaseModel):
-    """Reply to ``POST /directory/events``.
+class CacheEventsResponse(BaseModel):
+    """Reply to ``POST /events``.
 
     Attributes:
         applied: Batches applied to the directory.

@@ -25,104 +25,102 @@ Expected log output:
 
     LMCache INFO: MP coordinator listening on http://0.0.0.0:9300
 
-The CLI accepts ``--host``, ``--port``, ``--instance-timeout``,
-``--health-check-interval``, ``--eviction-check-interval``,
-``--eviction-ratio``, ``--trigger-watermark``, ``--chunk-size``,
-``--hash-algorithm``, ``--enable-blend-lookup``, ``--blend-probe-stride``,
-and ``--timeout-keep-alive``;
-any flag overrides the matching environment variable below. See
-:doc:`/cli/coordinator` for details.
-Equivalently, the coordinator can still be launched as a module with
-``python3 -m lmcache.v1.mp_coordinator``.
+See :doc:`/cli/coordinator` for the full flag list. Equivalently, the
+coordinator can be launched as a module with
+``python3 -m lmcache.v1.mp_coordinator``, which accepts the same flags.
 
 Configuration
 -------------
 
-The coordinator is configured through ``LMCACHE_MP_COORDINATOR_*`` environment
-variables:
+The coordinator is configured through CLI flags only; every flag left unset
+keeps the default below.
 
 .. list-table::
    :header-rows: 1
    :widths: 38 14 48
 
-   * - Environment variable
+   * - Flag
      - Default
      - Description
-   * - ``LMCACHE_MP_COORDINATOR_HOST``
+   * - ``--host``
      - ``0.0.0.0``
      - Host the HTTP server binds to.
-   * - ``LMCACHE_MP_COORDINATOR_PORT``
+   * - ``--port``
      - ``9300``
      - Port the HTTP server binds to.
-   * - ``LMCACHE_MP_COORDINATOR_INSTANCE_TIMEOUT``
+   * - ``--instance-timeout``
      - ``30``
      - Seconds without a heartbeat after which a server is dropped from the
        fleet.
-   * - ``LMCACHE_MP_COORDINATOR_HEALTH_CHECK_INTERVAL``
+   * - ``--health-check-interval``
      - ``10``
      - Seconds between health-check sweeps that expire stale MP-server
        registrations. ``0`` disables the stale-instance eviction loop; it does
        **not** affect the ``/quota`` L2 eviction loop (see
-       ``LMCACHE_MP_COORDINATOR_EVICTION_CHECK_INTERVAL`` below).
-   * - ``LMCACHE_MP_COORDINATOR_EVICTION_CHECK_INTERVAL``
+       ``--eviction-check-interval`` below).
+   * - ``--eviction-check-interval``
      - ``5``
      - Seconds between L2 eviction sweeps. ``0`` disables the loop.
-   * - ``LMCACHE_MP_COORDINATOR_EVICTION_RATIO``
+   * - ``--eviction-ratio``
      - ``0.2``
      - Fraction of tracked keys (by count) to evict per cycle (0.0 to 1.0).
-   * - ``LMCACHE_MP_COORDINATOR_TRIGGER_WATERMARK``
+   * - ``--trigger-watermark``
      - ``1.0``
      - Eviction fires when usage reaches this fraction of the quota
        (0.0 exclusive to 1.0).
-   * - ``LMCACHE_MP_COORDINATOR_CHUNK_SIZE``
+   * - ``--chunk-size``
      - ``256``
      - Tokens per KV chunk: the CacheBlend match unit and the unit used to
        resolve pin ``token_ids`` to keys. Must equal the MP servers'
        ``--chunk-size``.
-   * - ``LMCACHE_MP_COORDINATOR_HASH_ALGORITHM``
+   * - ``--hash-algorithm``
      - ``blake3``
      - Token hash algorithm for pin key resolution. Must equal the MP servers'
        ``--hash-algorithm``. ``blake3`` is self-contained; other algorithms
        require vLLM importable in the coordinator process.
-   * - ``LMCACHE_MP_COORDINATOR_ENABLE_BLEND_LOOKUP``
-     - ``False``
+   * - ``--enable-blend-lookup``
+     - off
      - Index stored chunk content so ``POST /directory/blend-lookup`` can serve
        fleet CacheBlend reuse. Off by default: hashing content costs CPU on
        every store. Also requires the MP servers'
        ``--coordinator-event-reporting``.
-   * - ``LMCACHE_MP_COORDINATOR_BLEND_PROBE_STRIDE``
+   * - ``--blend-probe-stride``
      - ``1``
      - Positions between CacheBlend match probes. ``1`` probes every offset
        for full recall. Ignored unless blend lookup is on.
-   * - ``LMCACHE_MP_COORDINATOR_TIMEOUT_KEEP_ALIVE``
+   * - ``--timeout-keep-alive``
      - ``10``
      - Seconds the HTTP server keeps idle connections open before closing
        them. Must be greater than the MP servers' heartbeat interval
        (default ``5``), otherwise heartbeat requests may hit a closing
        connection and fail with ``Server disconnected without sending a
        response``.
-   * - ``LMCACHE_MP_COORDINATOR_ENABLE_STARTUP_RESYNC``
-     - ``True``
-     - When ``True``, the coordinator runs a one-shot L2 resync on
-       startup that paginates an MP server's ``GET /cache/objects`` and
-       backfills the key directory's L2 placements plus the
-       usage/eviction trackers from existing L2 contents.
-       Disable to start from empty trackers (handy for tests, or
-       deployments that start the coordinator before any MP server).
-   * - ``LMCACHE_MP_COORDINATOR_RESYNC_POLL_INTERVAL``
-     - ``1``
-     - Seconds between registry checks while waiting for the first
-       MP server to register so startup resync can begin.
-   * - ``LMCACHE_MP_COORDINATOR_RESYNC_MAX_WAIT``
-     - ``60``
-     - Maximum seconds startup resync waits for an MP server before
-       giving up. The coordinator keeps running with empty trackers
-       until normal usage events fill them in.
-   * - ``LMCACHE_MP_COORDINATOR_RESYNC_PAGE_SIZE``
-     - ``1000``
-     - ``page_size`` forwarded to the MP server's ``GET /cache/objects``
-       during resync. Larger values reduce RTT count; the server
-       clamps to its own ceiling.
+   * - ``--disable-metrics``
+     - off
+     - Skip OpenTelemetry metrics initialization. Metrics are on by default;
+       pass this flag and the local ``/metrics`` endpoint returns 404.
+   * - ``--otlp-endpoint``
+     - unset
+     - OTLP gRPC endpoint for metrics push mode. When unset, Prometheus pull
+       mode exposes ``/metrics`` on the coordinator HTTP port. When set, the
+       local ``/metrics`` endpoint returns 404.
+
+Coordinator metrics export
+--------------------------
+
+Metrics are enabled by default. Without an OTLP endpoint, Prometheus scrapes
+the coordinator's existing FastAPI port; no separate metrics server or port is
+created:
+
+.. code-block:: bash
+
+   curl http://localhost:9300/metrics
+
+Set ``--otlp-endpoint http://collector:4317`` to push metrics to an
+OpenTelemetry Collector instead. In OTLP push mode, and when
+``--disable-metrics`` is set, ``GET /metrics`` returns 404. This infrastructure
+does not itself define coordinator business metrics; instruments register with
+the shared OpenTelemetry provider as coordinator capabilities add them.
 
 Connecting MP servers
 ---------------------
@@ -416,15 +414,14 @@ cycle):
 
 When MP servers enable ``--coordinator-event-reporting``, they stream cache
 ``store``, ``access``, and ``delete`` events to the coordinator's
-``POST /directory/events``. Applied ``l2`` batches also feed the quota side:
+``POST /events``. Applied ``l2`` batches also feed the quota side:
 the coordinator aggregates per-``cache_salt`` usage, enforces quotas, and
 selects LRU keys to evict. Each batch carries the server's ``instance_id``,
 ``incarnation``, and a monotonically increasing sequence number (``seq``)
 scoped to that instance, so replays are deduplicated and lost batches are
 detected.
 
-**Active eviction loop.** Every
-``LMCACHE_MP_COORDINATOR_EVICTION_CHECK_INTERVAL`` seconds, the
+**Active eviction loop.** Every ``--eviction-check-interval`` seconds, the
 coordinator inspects per-salt usage against the registered quotas and,
 for any salt over the trigger watermark, picks LRU victims and
 dispatches a single ``DELETE /cache/objects`` to a uniformly random registered MP
@@ -432,21 +429,19 @@ server. Because all MP servers share the same backing L2 (e.g. one S3
 bucket), one dispatch evicts the keys for the whole fleet. The MP
 server's L2 adapter fires ``on_l2_keys_deleted`` listeners after the
 delete completes; those listeners ship ``delete`` events back through
-``POST /directory/events``, which is what updates the coordinator's LRU +
+``POST /events``, which is what updates the coordinator's LRU +
 per-salt totals. Dispatch failures or no-instances-registered fall
 through to the next cycle — at-least-once semantics, safe because the
 S3 delete is idempotent.
 
-**Startup resync.** On boot, the coordinator waits up to
-``LMCACHE_MP_COORDINATOR_RESYNC_MAX_WAIT`` seconds for the first MP
-server to register, then paginates its
-``GET /cache/objects`` and seeds the key directory and the usage +
-eviction trackers with whatever is already resident in L2 — so a fresh
-coordinator does not start from zero usage. Set
-``LMCACHE_MP_COORDINATOR_ENABLE_STARTUP_RESYNC=False`` to skip this
-phase. Best-effort: resync failures are logged and the manager gives
-up; the ongoing usage-event stream from MP servers eventually corrects
-any initial blind spots.
+**Cold start.** The coordinator's trackers are in-memory and are built
+only from the cache-event stream, so after a restart per-salt usage
+starts at zero even though the bytes are still resident in L2. Quotas
+under-report until enough events accumulate. Unquota'd salts are exempt
+from eviction until the quota controller sets a default limit, so a cold
+coordinator cannot mass-evict — but it can under-evict, and an operator
+re-arming quotas right after a restart should expect the usage numbers
+to climb toward the true value rather than start at it.
 
 ``PUT /quota/config`` / ``GET /quota/config``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -632,7 +627,7 @@ entry has the same fields as the ``GET /quota/{cache_salt}`` response.
     # -> {"total_gb": 0.005, "by_cache_salt": [...]}
 
 Usage events arrive on the fleet cache-event stream
-(``POST /directory/events``); there is no separate quota ingestion
+(``POST /events``); there is no separate quota ingestion
 endpoint. See ``docs/design/v1/mp_coordinator/cache_events.md`` for the
 batch format and routing semantics.
 
@@ -1146,9 +1141,9 @@ a separate publish call. Both feeds default to off and both are required: the
 coordinator needs ``--enable-blend-lookup``, and every MP server whose chunks
 should be discoverable needs ``--coordinator-event-reporting`` (a server with a
 coordinator URL but no event reporting warns at startup and matches locally
-only). Matching is chunked at ``LMCACHE_MP_COORDINATOR_CHUNK_SIZE`` — which
-must equal the MP servers' ``--chunk-size`` — probing every
-``LMCACHE_MP_COORDINATOR_BLEND_PROBE_STRIDE`` positions.
+only). Matching is chunked at the coordinator's ``--chunk-size`` — which must
+equal the MP servers' ``--chunk-size`` — probing every
+``--blend-probe-stride`` positions.
 
 **Request body:**
 

@@ -268,6 +268,15 @@ ALL_ITEMS: list[ConfigItem] = [
         condition=_workload_is("long-doc-permutator"),
         phase=PHASE_WORKLOAD,
     ),
+    ConfigItem(
+        key="ldp_max_output_length",
+        display_name="Max output length (tokens)",
+        description="Max tokens per request. Use 1 to measure prefill alone.",
+        input_type="int",
+        default=128,
+        condition=_workload_is("long-doc-permutator"),
+        phase=PHASE_WORKLOAD,
+    ),
     # ── Phase 3: long-doc-qa ──────────────────────────────────────────
     ConfigItem(
         key="ldqa_document_length",

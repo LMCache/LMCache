@@ -36,6 +36,11 @@ class BenchResult:
     carries ``num_keys`` keys. ``round_durations[r]`` is the wall-clock
     elapsed for the whole round (from issuing the first submit to all
     submits of that round completing).
+
+    A round that hits the wait timeout has no duration, so it is counted in
+    ``timed_out_rounds`` rather than appended to ``round_durations``. Its
+    partial ``success_counts`` entry is still recorded and it still counts
+    toward ``attempted_rounds``, so key accounting is unchanged.
     """
 
     operation: str
@@ -44,6 +49,8 @@ class BenchResult:
     data_size_bytes: int
     round_durations: list[float] = field(default_factory=list)
     success_counts: list[int] = field(default_factory=list)
+    # Rounds that hit the wait timeout and therefore have no duration.
+    timed_out_rounds: int = 0
     # Lookup-specific metadata (left as defaults for store/load).
     expected_max_hit_rate: float = 0.0
     expected_hit_count: int = 0
@@ -57,8 +64,13 @@ class BenchResult:
         return self.in_flight * self.num_keys
 
     @property
+    def attempted_rounds(self) -> int:
+        """Rounds issued, including those that timed out."""
+        return len(self.round_durations) + self.timed_out_rounds
+
+    @property
     def total_keys(self) -> int:
-        return self.keys_per_round * len(self.round_durations)
+        return self.keys_per_round * self.attempted_rounds
 
     @property
     def total_data_bytes_per_round(self) -> int:

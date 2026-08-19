@@ -7,6 +7,7 @@ import abc
 import torch
 
 # First Party
+from lmcache import device_ops
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType, _lmcache_nvtx_annotate
 from lmcache.v1.compute.blend.utils import LMCBlenderBuilder
@@ -34,8 +35,7 @@ from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.memory_allocators.gpu_memory_allocator import GPUMemoryAllocator
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.metadata import LMCacheMetadata
-from lmcache.v1.platform.ops_types import set_shape_desc_dtype
-import lmcache.c_ops as lmc_ops
+from lmcache.v1.platform.ops_types import PageBufferShapeDesc, set_shape_desc_dtype
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
@@ -317,7 +317,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         vllm_cached = kwargs.get("vllm_cached_tokens", 0)
         skip_prefix_n_tokens = min(end - start, max(0, vllm_cached - start))
 
-        lmc_ops.multi_layer_kv_transfer(
+        device_ops.multi_layer_kv_transfer(
             memory_obj.tensor,
             kv_cache_pointers,
             slot_mapping[start:end],
@@ -365,7 +365,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
 
         with torch.cuda.stream(self.store_stream):
             if self.gpu_buffer is None or end - start != self.gpu_buffer.shape[2]:
-                lmc_ops.multi_layer_kv_transfer(
+                device_ops.multi_layer_kv_transfer(
                     memory_obj.tensor,
                     kv_cache_pointers,
                     slot_mapping[start:end],
@@ -380,7 +380,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
                 # kvcaches -> gpu_buffer -> memobj
                 assert self.gpu_buffer.device == self.kvcaches[0].device
                 tmp_gpu_buffer = self.gpu_buffer[:, :, : end - start, :]
-                lmc_ops.multi_layer_kv_transfer(
+                device_ops.multi_layer_kv_transfer(
                     tmp_gpu_buffer,
                     kv_cache_pointers,
                     slot_mapping[start:end],
@@ -555,7 +555,7 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         for i, kv_cache_pointer in enumerate(self.group_kv_cache_pointers_on_gpu):
             memory_obj_tensor = memory_obj.get_tensor(i)
             assert memory_obj_tensor is not None
-            lmc_ops.multi_layer_kv_transfer(
+            device_ops.multi_layer_kv_transfer(
                 memory_obj_tensor,
                 kv_cache_pointer,
                 slot_mapping[start:end],
@@ -586,7 +586,7 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
                 ):
                     memory_obj_tensor = memory_obj.get_tensor(i)
                     assert memory_obj_tensor is not None
-                    lmc_ops.multi_layer_kv_transfer(
+                    device_ops.multi_layer_kv_transfer(
                         memory_obj_tensor,
                         kv_cache_pointer,
                         slot_mapping[start:end],
@@ -604,7 +604,7 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
                     self.group_kv_cache_pointers_on_gpu
                 ):
                     tmp_gpu_buffer = self.group_tmp_buffer[i][:, :, : end - start, :]
-                    lmc_ops.multi_layer_kv_transfer(
+                    device_ops.multi_layer_kv_transfer(
                         tmp_gpu_buffer,
                         kv_cache_pointer,
                         slot_mapping[start:end],
@@ -860,7 +860,7 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
             )
         for layer_id in range(self.num_layers + 2):
             if layer_id > 1:
-                lmc_ops.single_layer_kv_transfer(
+                device_ops.single_layer_kv_transfer(
                     self.buffer_mapping[layer_id - 2].tensor,
                     self.kvcaches[layer_id - 2],
                     slot_mapping_full,
@@ -1022,7 +1022,7 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
             # kvcaches -> gpu_buffer -> memobj
             with torch.cuda.stream(self.store_stream):
                 self.store_stream.wait_stream(current_stream)
-                lmc_ops.single_layer_kv_transfer(
+                device_ops.single_layer_kv_transfer(
                     tmp_gpu_buffer_obj.tensor,
                     self.kvcaches[layer_id],
                     slot_mapping_full,
@@ -1275,7 +1275,7 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
                             memory_obj.tensor, non_blocking=True
                         )
                     else:
-                        lmc_ops.single_layer_kv_transfer(
+                        device_ops.single_layer_kv_transfer(
                             memory_obj.tensor,
                             self.kvcaches[layer_id],
                             slot_mapping_full,
@@ -1285,7 +1285,7 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
                         )
 
                 if self.use_gpu:
-                    lmc_ops.single_layer_kv_transfer(
+                    device_ops.single_layer_kv_transfer(
                         tmp_gpu_buffer_obj.tensor,
                         self.kvcaches[layer_id],
                         slot_mapping_full,
@@ -1385,7 +1385,7 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
             with torch.cuda.stream(self.store_stream):
                 self.store_stream.wait_stream(current_stream)
                 if self.use_gpu:
-                    lmc_ops.single_layer_kv_transfer(
+                    device_ops.single_layer_kv_transfer(
                         tmp_gpu_buffer_obj.tensor,
                         self.kvcaches[layer_id],
                         slot_mapping_full,
@@ -1403,7 +1403,7 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
                             non_blocking=True,
                         )
                     else:
-                        lmc_ops.single_layer_kv_transfer(
+                        device_ops.single_layer_kv_transfer(
                             memory_obj.tensor,
                             self.kvcaches[layer_id],
                             slot_mapping[start:end],
@@ -1551,7 +1551,7 @@ class SGLangGPUConnector(GPUConnectorInterface):
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
 
         kv_cache_pointers = self._initialize_pointers(kvcaches)
-        lmc_ops.multi_layer_kv_transfer_unilateral(
+        device_ops.multi_layer_kv_transfer_unilateral(
             memory_obj.tensor,
             kv_cache_pointers,
             slot_mapping[start - offset : end - offset],
@@ -1594,7 +1594,7 @@ class SGLangGPUConnector(GPUConnectorInterface):
         kv_cache_pointers = self._initialize_pointers(kvcaches)
 
         if self.gpu_buffer is None or end - start != self.gpu_buffer.shape[2]:
-            lmc_ops.multi_layer_kv_transfer_unilateral(
+            device_ops.multi_layer_kv_transfer_unilateral(
                 memory_obj.tensor,
                 kv_cache_pointers,
                 slot_mapping[start:end],
@@ -1607,7 +1607,7 @@ class SGLangGPUConnector(GPUConnectorInterface):
             # kvcaches -> gpu_buffer -> memobj
             assert self.gpu_buffer.device == get_device(kvcaches)
             tmp_gpu_buffer = self.gpu_buffer[:, :, : end - start, :]
-            lmc_ops.multi_layer_kv_transfer_unilateral(
+            device_ops.multi_layer_kv_transfer_unilateral(
                 tmp_gpu_buffer,
                 kv_cache_pointers,
                 slot_mapping[start:end],
@@ -1793,7 +1793,7 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
                         memory_obj.tensor, non_blocking=True
                     )
                 else:
-                    lmc_ops.single_layer_kv_transfer_sgl(
+                    device_ops.single_layer_kv_transfer_sgl(
                         memory_obj.tensor,
                         self.kvcaches[0][layer_id],
                         self.kvcaches[1][layer_id],
@@ -1805,7 +1805,7 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
             if self.use_gpu:
                 t, h, d = self.kvcaches[0][layer_id].shape
 
-                lmc_ops.single_layer_kv_transfer_sgl(
+                device_ops.single_layer_kv_transfer_sgl(
                     tmp_gpu_buffer_obj.tensor,
                     self.kvcaches[0][layer_id].view(t, 1, h, d),
                     self.kvcaches[1][layer_id].view(t, 1, h, d),
@@ -1895,7 +1895,7 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
             # kvcaches -> gpu_buffer -> memobj
             if self.use_gpu:
                 t, h, d = self.kvcaches[0][layer_id].shape
-                lmc_ops.single_layer_kv_transfer_sgl(
+                device_ops.single_layer_kv_transfer_sgl(
                     tmp_gpu_buffer_obj.tensor,
                     self.kvcaches[0][layer_id].view(t, 1, h, d),
                     self.kvcaches[1][layer_id].view(t, 1, h, d),
@@ -1918,7 +1918,7 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
                     )
                     start_idx += chunk_len
                 else:
-                    lmc_ops.single_layer_kv_transfer_sgl(
+                    device_ops.single_layer_kv_transfer_sgl(
                         memory_obj.tensor,
                         self.kvcaches[0][layer_id],
                         self.kvcaches[1][layer_id],
@@ -1955,7 +1955,7 @@ class TRTLLMGPUConnector(GPUConnectorInterface):
     canonical 6-D ``[NB, NL, 2, NH, BS, HS]`` form (format
     ``NB_NL_TWO_NH_BS_HS``).
 
-    Transfers go through :func:`lmc_ops.multi_layer_block_kv_transfer` —
+    Transfers go through :func:`device_ops.multi_layer_block_kv_transfer` —
     the multiprocess kernel — using the single base pointer of the pool
     tensor. Per-chunk block ids are taken from ``kwargs['block_ids']``,
     sliced as ``block_ids[i * blocks_per_chunk : (i+1) * blocks_per_chunk]``
@@ -1990,7 +1990,7 @@ class TRTLLMGPUConnector(GPUConnectorInterface):
 
         self.kv_cache_tensor: Optional[torch.Tensor] = None
         self.paged_buffer_ptrs: Optional[torch.Tensor] = None
-        self.shape_desc: Optional["lmc_ops.PageBufferShapeDesc"] = None
+        self.shape_desc: Optional[PageBufferShapeDesc] = None
         self._kv_format: Optional["lmcache_native.EngineKVFormat"] = None
         self.tokens_per_block: Optional[int] = None
         self.blocks_per_chunk: Optional[int] = None
@@ -2068,7 +2068,7 @@ class TRTLLMGPUConnector(GPUConnectorInterface):
         self._kv_format = kv_format
         self.kv_cache_tensor = normalized
 
-        shape_desc = lmc_ops.PageBufferShapeDesc()
+        shape_desc = device_ops.PageBufferShapeDesc()
         shape_desc.kv_size = kv_factor
         shape_desc.nl = num_layers
         shape_desc.nb = num_blocks
@@ -2109,9 +2109,11 @@ class TRTLLMGPUConnector(GPUConnectorInterface):
         direction: "lmcache_native.TransferDirection",
         stream: torch.cuda.Stream,
     ) -> None:
+        if self.shape_desc is None or self._kv_format is None:
+            raise RuntimeError("register_kv_caches must be called before transfer")
         with torch.cuda.stream(stream):
             block_ids_gpu = self._stage_block_ids(block_ids)
-            lmc_ops.multi_layer_block_kv_transfer(
+            device_ops.multi_layer_block_kv_transfer(
                 self.paged_buffer_ptrs,
                 [tensor_ptr],
                 block_ids_gpu,
@@ -2157,6 +2159,8 @@ class TRTLLMGPUConnector(GPUConnectorInterface):
         direction: "lmcache_native.TransferDirection",
         stream: torch.cuda.Stream,
     ) -> None:
+        if self.shape_desc is None or self._kv_format is None:
+            raise RuntimeError("register_kv_caches must be called before transfer")
         valid: List[Tuple[MemoryObj, List[int]]] = []
         for memory_obj, start in zip(memory_objs, starts, strict=False):
             if isinstance(memory_obj, list) or memory_obj.tensor is None:
@@ -2174,7 +2178,7 @@ class TRTLLMGPUConnector(GPUConnectorInterface):
                     all_block_ids.extend(blocks)
                     ptrs.append(mo.tensor.data_ptr())  # type: ignore[union-attr]
                 block_ids_gpu = self._stage_block_ids(all_block_ids)
-                lmc_ops.multi_layer_block_kv_transfer(
+                device_ops.multi_layer_block_kv_transfer(
                     self.paged_buffer_ptrs,
                     ptrs,
                     block_ids_gpu,

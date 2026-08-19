@@ -18,11 +18,11 @@
 
 namespace py = pybind11;
 
-PYBIND11_MODULE(c_ops, m) {
+PYBIND11_MODULE(cuda_ops, m) {
   // NOTE: ``TransferDirection`` and ``EngineKVFormat`` (and the format
   // predicates is_cross_layer / is_kv_list / is_layer_list / is_mla) are owned
   // exclusively by the device-independent ``lmcache_native`` module
-  // (csrc/lmcache_native/pybind.cpp). They are NOT exported here. ``c_ops``
+  // (csrc/lmcache_native/pybind.cpp). They are NOT exported here. ``cuda_ops``
   // functions that need a transfer direction accept the underlying ``int`` and
   // cast it to the C++ enum, so callers pass ``TransferDirection.H2D.value``
   // (an int) instead of the enum object.
