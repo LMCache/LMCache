@@ -51,7 +51,9 @@ consumed by the wrapper's internal thread.
    │                 │      signal wrapper.store_efd               
    └────────┬────────┘                                             
             │                                                      
-            │ (8) pop_completed_store_tasks() → {wrapped_id: True} 
+            │ (8) pop_completed_store_tasks() →                   
+            │     {wrapped_id: L2StoreResult(success=True,         
+            │                                bytes_transferred=N)}
             ▼                                                      
           caller                                                   
 ```
@@ -106,7 +108,7 @@ sequenceDiagram
     Controller->>W: submit_store_task(keys, objs)
     W->>L1: reserve_write(temp_keys, byte layout)
     L1-->>W: temp_objs (write-locked)
-    W->>Serde: submit_serialize(objs, temp_objs) → serde_id
+    W->>Serde: submit_serialize(objs, temp_objs, keys) → serde_id
     W-->>Controller: wrapped_id
 
     Note over Serde,Thread: serde thread pool transforms<br/>objs → temp_objs, signals fd
@@ -121,13 +123,13 @@ sequenceDiagram
 
     Inner-->>Thread: store_efd fires
     Thread->>Inner: pop_completed_store_tasks()
-    Inner-->>Thread: {inner_id: True}
+    Inner-->>Thread: {inner_id: L2StoreResult(ok=True, bytes=N)}
     Thread->>L1: finish_read(temp_keys)   %% auto-deletes temps
-    Thread->>W: _finalize_store(wrapped_id, True)
+    Thread->>W: _finalize_store(wrapped_id, inner_result)
     W-->>Controller: store_efd fires
 
     Controller->>W: pop_completed_store_tasks()
-    W-->>Controller: {wrapped_id: True}
+    W-->>Controller: {wrapped_id: L2StoreResult(ok=True, bytes=N)}
 ```
 
 ## Load Path
@@ -234,17 +236,18 @@ If **any** key's temp allocation fails or `submit_serialize` /
 `submit_deserialize` / `inner.submit_*` raises, the **whole wrapped
 task fails**:
 
-- Store task: `pop_completed_store_tasks()` returns `{wrapped_id: False}`.
+- Store task: `pop_completed_store_tasks()` returns
+  `{wrapped_id: L2StoreResult(success=False, bytes_transferred=0)}`.
 - Load task: `query_load_result(wrapped_id)` returns an all-zeros
   `Bitmap(len(keys))`.
 
 This preserves the **coarse-grained success semantic** of
-`L2AdapterInterface` — store is task-level, load is per-key via
-bitmap. The alternative ("drop the failed keys, succeed with the
-rest") would silently violate the caller's assumption that every key
-it passed either succeeded (task-level True) or failed (task-level
-False). Keeping the policy coarse is what lets the controllers stay
-untouched.
+`L2AdapterInterface` — store is task-level (the `L2StoreResult.is_successful()`
+flag), load is per-key via bitmap. The alternative ("drop the failed keys,
+succeed with the rest") would silently violate the caller's assumption
+that every key it passed either succeeded (task-level) or failed
+(task-level). Keeping the policy coarse is what lets the controllers
+stay untouched.
 
 Partial load failures inside the inner adapter (some keys in the
 inner bitmap succeed, some fail) are faithfully preserved: only keys

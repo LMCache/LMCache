@@ -6,7 +6,7 @@ RUN uv pip install --system --no-cache lmcache
 
 
 # Build: 
-# docker build -f Dockerfile.light -t 'lmcache/vllm-openai:light' .
+# docker build -f Dockerfile.lightweight -t 'lmcache/vllm-openai:lightweight' .
 
 # Run: 
 # export HF_TOKEN=<your_huggingface_token>
@@ -15,7 +15,7 @@ RUN uv pip install --system --no-cache lmcache
 #    --env "HF_TOKEN=$HF_TOKEN" \
 #    -p 8000:8000 \
 #    --ipc=host \
-#    lmcache/vllm-openai:light \
+#    lmcache/vllm-openai:lightweight \
 #    --model Qwen/Qwen3-0.6B \
 #    --kv-transfer-config \
 #    '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'

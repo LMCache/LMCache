@@ -8,15 +8,75 @@ Could be implemented by native code in the future
 
 # Standard
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+import enum
 
 # Third Party
 import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 
 logger = init_logger(__name__)
+
+
+class Tier(str, enum.Enum):
+    """A cache tier.
+
+    Subclasses ``str`` so it validates from / compares equal to the bare wire
+    value (``Tier.L2 == "l2"``) and serializes as that value. ``ALL`` is only
+    valid for operations that explicitly support multiple tiers.
+    """
+
+    L1 = "l1"
+    L2 = "l2"
+    ALL = "all"
+
+
+class L1BackendType(str, enum.Enum):
+    """The storage medium backing the L1 tier (a closed set, unlike L2
+    backends, which are an open adapter-type registry).
+
+    Subclasses ``str`` so it compares equal to and serializes as the bare
+    wire value (``L1BackendType.DRAM == "dram"``).
+    """
+
+    DRAM = "dram"
+    DEVDAX = "devdax"
+    GDS = "gds"
+
+
+class TrimPolicy(enum.Enum):
+    """How to pick the retained subset of found keys for a prefetch.
+
+    PREFIX retains the longest contiguous run from index 0; SEGMENTED_PREFIX
+    keeps the keys that loaded when an L2 hit failed to load into L1 mid-prefix
+    (gaps and all); SPARSE retains every found key for an intentional scatter.
+    """
+
+    PREFIX = enum.auto()
+    SEGMENTED_PREFIX = enum.auto()
+    SPARSE = enum.auto()
+
+
+class PrefetchMode(enum.Enum):
+    """The intent of a prefetch request.
+
+    ``LOOKUP`` -- prefetch for an imminent reader: loaded keys are read-locked
+    for the requesting workers, and whether they persist or are dropped after
+    use follows the configured prefetch policy.
+
+    ``WARM`` -- speculative pre-warm with no imminent reader: loaded keys are
+    retained and left unlocked (immediately resident and evictable), so a later
+    lookup can hit them.
+    """
+
+    LOOKUP = enum.auto()
+    WARM = enum.auto()
 
 
 @dataclass(frozen=True)
@@ -40,6 +100,9 @@ class ObjectKey:
 
     kv_rank: int
     """ The rank that uniquely identifies the slice of the KV cache """
+
+    object_group_id: int = 0
+    """ Index of the object group this chunk belongs to. """
 
     cache_salt: str = ""
     """ Per-user isolation salt. Same content from different users with
@@ -65,6 +128,10 @@ class ObjectKey:
             raise ValueError(
                 f"model_name must not contain '@' (got {self.model_name!r})"
             )
+        if self.object_group_id < 0:
+            raise ValueError(
+                f"object_group_id must be >= 0 (got {self.object_group_id})"
+            )
         bad = self._SALT_FORBIDDEN_CHARS & set(self.cache_salt)
         if bad:
             raise ValueError(
@@ -75,6 +142,16 @@ class ObjectKey:
                 f"cache_salt exceeds max length {self._SALT_MAX_LEN} "
                 f"(got {len(self.cache_salt)})"
             )
+
+    def to_encoded_object_key(self) -> "EncodedObjectKey":
+        """Return the JSON-safe :class:`EncodedObjectKey` projection."""
+        return EncodedObjectKey(
+            chunk_hash_hex=self.chunk_hash.hex(),
+            model_name=self.model_name,
+            kv_rank=self.kv_rank,
+            object_group_id=self.object_group_id,
+            cache_salt=self.cache_salt,
+        )
 
     @staticmethod
     def IntHash2Bytes(chunk_hash: int) -> bytes:
@@ -141,6 +218,60 @@ class ObjectKey:
 
 
 @dataclass(frozen=True)
+class EncodedObjectKey:
+    """JSON-safe wire form of :class:`ObjectKey` — ``chunk_hash`` is
+    hex-encoded; other fields are preserved verbatim."""
+
+    chunk_hash_hex: str
+    """Hex-encoded ``ObjectKey.chunk_hash``."""
+
+    model_name: str
+    kv_rank: int
+
+    object_group_id: int = 0
+    """Defaults to ``0`` so pre-``object_group_id`` wire payloads still
+    deserialize."""
+
+    cache_salt: str = ""
+
+    def to_object_key(self) -> ObjectKey:
+        """Recover the corresponding :class:`ObjectKey`.
+
+        Raises:
+            ValueError: ``chunk_hash_hex`` is not valid hex, or one of
+                :class:`ObjectKey`'s field invariants is violated.
+        """
+        return ObjectKey(
+            chunk_hash=bytes.fromhex(self.chunk_hash_hex),
+            model_name=self.model_name,
+            kv_rank=self.kv_rank,
+            object_group_id=self.object_group_id,
+            cache_salt=self.cache_salt,
+        )
+
+
+@dataclass(frozen=True)
+class KeyEntry:
+    """One entry in a :class:`KeyListPage` including the encoded object
+    key and its object size."""
+
+    key: EncodedObjectKey
+    size_bytes: int
+
+
+@dataclass(frozen=True)
+class KeyListPage:
+    """A page of keys returned by ``L2AdapterInterface.list_l2_keys``."""
+
+    entries: tuple[KeyEntry, ...]
+    """The keys in the current page."""
+
+    next_page_token: str | None
+    """``None`` means this is the last page. Otherwise pass the token
+    verbatim to the next call to fetch the next page."""
+
+
+@dataclass(frozen=True)
 class MemoryLayoutDesc:
     """
     Describes the layout of a memory object
@@ -153,6 +284,92 @@ class MemoryLayoutDesc:
         if len(self.shapes) != len(self.dtypes):
             raise ValueError(
                 "MemoryLayoutDesc: shapes and dtype must have the same length"
+            )
+
+
+@dataclass(frozen=True)
+class AttnWindowDesc:
+    """Per-object-group cross-chunk attention windows, in LMCache chunks.
+
+    ``num_chunks_in_sw[g]`` is the number of trailing prefix chunks that must
+    be present for object group ``g`` to serve a cache hit. ``-1`` means full
+    attention (the whole prefix); ``w >= 1`` is a sliding window of ``w``
+    chunks.
+    """
+
+    num_chunks_in_sw: list[int]
+
+    world_size: int = 1
+    """Number of kv_rank shards per chunk (tensor-parallel world size)."""
+
+    def __post_init__(self) -> None:
+        if self.world_size < 1:
+            raise ValueError(
+                f"AttnWindowDesc: world_size must be >= 1, got {self.world_size}"
+            )
+        for w in self.num_chunks_in_sw:
+            if w == 0 or w < -1:
+                raise ValueError(
+                    "AttnWindowDesc: each window must be -1 (full attention) "
+                    f"or >= 1 chunk, got {w}"
+                )
+
+    @property
+    def num_object_groups(self) -> int:
+        """Number of object groups this descriptor covers."""
+        return len(self.num_chunks_in_sw)
+
+    def is_full_attention(self, object_group_idx: int) -> bool:
+        """Whether the object group depends on the entire prefix.
+
+        Args:
+            object_group_idx: 0-based object group index.
+
+        Returns:
+            True if the group attends to the whole prefix, False if it uses a
+            bounded sliding window.
+        """
+        return self.num_chunks_in_sw[object_group_idx] < 0
+
+
+DEFAULT_ATTN_WINDOW_DESC = AttnWindowDesc(num_chunks_in_sw=[-1])
+"""A single full-attention object group; the default when no per-object-group
+windows are supplied."""
+
+
+@dataclass(frozen=True)
+class PrefetchRequestSpec:
+    """Immutable inputs of a single L2 prefetch request.
+
+    Bundles the caller-supplied arguments that travel together into the
+    prefetch controller's submission queue. See
+    ``PrefetchController._start_lookup_phase`` for per-field semantics.
+
+    Attributes:
+        keys: Object keys to prefetch; order defines the prefix.
+        group_layout_descs: Maps object_group_id to that group's memory
+            layout for L1 write-buffer allocation; one entry per object
+            group in ``attn_desc``.
+        extra_count: Extra read locks per key beyond the default 1.
+        policy: Retained-subset policy (see :class:`TrimPolicy`).
+        attn_desc: Cross-chunk attention windows, in object-group order.
+        mode: Prefetch intent (see :class:`PrefetchMode`).
+    """
+
+    keys: list[ObjectKey]
+    group_layout_descs: dict[int, MemoryLayoutDesc]
+    extra_count: int = 0
+    policy: TrimPolicy = TrimPolicy.PREFIX
+    attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC
+    mode: PrefetchMode = PrefetchMode.LOOKUP
+
+    def __post_init__(self) -> None:
+        expected = set(range(self.attn_desc.num_object_groups))
+        if set(self.group_layout_descs) != expected:
+            raise ValueError(
+                "PrefetchRequestSpec: group_layout_descs must map exactly the "
+                f"object groups {sorted(expected)}, got "
+                f"{sorted(self.group_layout_descs)}"
             )
 
 
@@ -171,22 +388,31 @@ class PrefetchHandle:
     external_request_id: str
     """Request ID from the caller for end-to-end tracing."""
 
-    l1_prefix_hit_count: int
-    """Number of leading keys already in L1 at submission time."""
+    l1_found_indices: tuple[int, ...]
+    """Original-key indices found (read-locked) in L1 at submission time."""
+
+    l1_hit_chunks: int
+    """Chunk-level prefix hit count from L1 (via fold_unfold_ranked)."""
 
     total_requested_keys: int
-    """Total number of keys originally requested."""
+    """Total number of keys originally requested (the result-bitmap size)."""
 
     submit_time: float
     """Monotonic timestamp when the prefetch task was submitted."""
 
+    l2_orig_indices: tuple[int, ...] = ()
+    """Original-key index of each key submitted to L2; maps the controller's
+    local result bitmap back to original positions."""
+
 
 def ipc_key_to_object_keys(
-    ipc_key: IPCCacheEngineKey,
+    ipc_key: "IPCCacheServerKey",
     chunk_hashes: list[bytes],
-) -> list[ObjectKey]:
+    object_group_ids: list[int],
+) -> list[list[ObjectKey]]:
     """
-    Convert a single IPCCacheEngineKey and its chunk hashes to a list of ObjectKey.
+    Convert a single IPCCacheServerKey and its chunk hashes to per-object-group
+    lists of ObjectKey.
 
     When the ipc_key's worker_id is None, each chunk hash is exploded into
     multiple ObjectKeys (one per worker in world_size).
@@ -201,48 +427,50 @@ def ipc_key_to_object_keys(
         ipc_key: The IPC key providing model_name, world_size, worker_id,
             and cache_salt.
         chunk_hashes: List of chunk hash bytes, one per chunk.
+        object_group_ids: Object group ids to produce keys for.
 
     Returns:
-        list[ObjectKey]: The converted list of ObjectKey.
+        list[list[ObjectKey]]: The i-th element is the list of ObjectKeys
+        for ``object_group_ids[i]``.
     """
     cache_salt = ipc_key.cache_salt
-    storage_keys = []
-    for chunk_hash in chunk_hashes:
-        if ipc_key.worker_id is None:
-            # For look up request, we want to expand to all workers
-            for worker_id in range(ipc_key.world_size):
-                # TODO (ApostaC): include local world size/rank info
-                # in the future once it's in IPCCacheEngineKey
-                kv_rank = ObjectKey.ComputeKVRank(
-                    world_size=ipc_key.world_size,
-                    global_rank=worker_id,
-                    local_world_size=ipc_key.world_size,
-                    local_rank=worker_id,
-                )
 
-                storage_keys.append(
-                    ObjectKey(
-                        chunk_hash=chunk_hash,
-                        model_name=ipc_key.model_name,
-                        kv_rank=kv_rank,
-                        cache_salt=cache_salt,
-                    )
-                )
-        else:
-            kv_rank = ObjectKey.ComputeKVRank(
+    # The (chunk_hash, kv_rank) expansion is independent of the object group,
+    # so compute it once and reuse it for every group.
+    if ipc_key.worker_id is None:
+        # For look up request, we want to expand to all workers
+        # TODO (ApostaC): include local world size/rank info
+        # in the future once it's in IPCCacheServerKey
+        kv_ranks = [
+            ObjectKey.ComputeKVRank(
+                world_size=ipc_key.world_size,
+                global_rank=worker_id,
+                local_world_size=ipc_key.world_size,
+                local_rank=worker_id,
+            )
+            for worker_id in range(ipc_key.world_size)
+        ]
+    else:
+        kv_ranks = [
+            ObjectKey.ComputeKVRank(
                 world_size=ipc_key.world_size,
                 global_rank=ipc_key.worker_id,
                 local_world_size=ipc_key.world_size,
                 local_rank=ipc_key.worker_id,
             )
+        ]
 
-            storage_keys.append(
-                ObjectKey(
-                    chunk_hash=chunk_hash,
-                    model_name=ipc_key.model_name,
-                    kv_rank=kv_rank,
-                    cache_salt=cache_salt,
-                )
+    return [
+        [
+            ObjectKey(
+                chunk_hash=chunk_hash,
+                model_name=ipc_key.model_name,
+                kv_rank=kv_rank,
+                object_group_id=object_group_id,
+                cache_salt=cache_salt,
             )
-
-    return storage_keys
+            for chunk_hash in chunk_hashes
+            for kv_rank in kv_ranks
+        ]
+        for object_group_id in object_group_ids
+    ]

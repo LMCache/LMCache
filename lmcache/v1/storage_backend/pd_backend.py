@@ -22,10 +22,12 @@ from lmcache.utils import (
     CacheEngineKey,
 )
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.memory_allocators.paged_cpu_gpu_memory_allocator import (
+    PagedCpuGpuMemoryAllocator,
+)
 from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
-    PagedCpuGpuMemoryAllocator,
 )
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.rpc_utils import get_zmq_context, get_zmq_socket
@@ -916,7 +918,7 @@ class PDBackend(AllocatorBackendInterface):
 
         for idx, key_str in enumerate(alloc_request.keys):
             key = CacheEngineKey.from_string(key_str)
-            if self.contains(key, pin=False):
+            if self.contains(key, pin=True):
                 already_send_indexes.append(idx)
                 continue
 

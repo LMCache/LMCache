@@ -8,21 +8,29 @@ import pytest
 import torch
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.observability import LMCStatsMonitor
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.memory_allocators.gpu_memory_allocator import GPUMemoryAllocator
+from lmcache.v1.memory_allocators.host_memory_allocator import HostMemoryAllocator
+from lmcache.v1.memory_allocators.mixed_memory_allocator import MixedMemoryAllocator
+from lmcache.v1.memory_allocators.paged_tensor_memory_allocator import (
+    PagedTensorMemoryAllocator,
+)
+from lmcache.v1.memory_allocators.pin_memory_allocator import PinMemoryAllocator
+from lmcache.v1.memory_allocators.tensor_memory_allocator import TensorMemoryAllocator
 from lmcache.v1.memory_management import (
     BytesBufferMemoryObj,
-    GPUMemoryAllocator,
-    HostMemoryAllocator,
     MemoryFormat,
     MemoryObjMetadata,
-    MixedMemoryAllocator,
-    PagedTensorMemoryAllocator,
-    PinMemoryAllocator,
-    TensorMemoryAllocator,
     TensorMemoryObj,
+    _allocate_cpu_memory,
+    _free_cpu_memory,
+    _read_hugepage_info,
 )
 from lmcache.v1.pin_monitor import PinMonitor
+
+HUGEPAGE_SIZE = 2 * 1024 * 1024  # MAP_HUGE_2MB
 
 
 def check_allocator(allocator, max_size):
@@ -231,6 +239,19 @@ def test_boundary_alloc(alloc_cls):
     allocator.close()
 
 
+def test_mixed_allocator_owns_returned_tensor_object():
+    allocator = MixedMemoryAllocator(1024 * 1024)
+
+    data = allocator.allocate(torch.Size([4096]), torch.float)
+    assert data is not None
+    assert data.parent() is allocator
+
+    data.ref_count_down()
+    assert not data.is_valid()
+    assert allocator.memcheck()
+    allocator.close()
+
+
 @pytest.mark.parametrize(
     "alloc_cls",
     [
@@ -281,6 +302,59 @@ def test_mixed_alloc(alloc_cls):
 
     allocator.memcheck()
     allocator.close()
+
+
+def test_byte_array_caches_ctypes_array_type():
+    """``TensorMemoryObj.byte_array`` must reuse the ctypes array type per length.
+
+    Regression for https://github.com/LMCache/LMCache/issues/3767.
+
+    ``ctypes`` does not cache ``(c_ubyte * N)`` array types: every ``*`` call
+    builds a fresh heap type whose metadata stays alive forever. On the remote
+    backend put/get path ``byte_array`` is accessed once per chunk, so without
+    caching every call permanently leaks ~1-2 kB of heap-type metadata. Long
+    timed-trace replays then see monotonic anonymous-memory growth that
+    eventually triggers an OOM kill.
+
+    Verify two contracts:
+    1. Repeated ``byte_array`` accesses with the same logical size return
+       memoryviews backed by the same underlying ctypes array type.
+    2. Different sizes hit different cached types (the cache is keyed on the
+       logical byte length).
+    """
+    # First Party
+    from lmcache.v1.memory_management import _get_cached_ubyte_array_type
+
+    # Direct helper contract.
+    t1 = _get_cached_ubyte_array_type(1024)
+    t2 = _get_cached_ubyte_array_type(1024)
+    t3 = _get_cached_ubyte_array_type(2048)
+    assert t1 is t2, "same length must map to the same cached array type"
+    assert t1 is not t3, "different lengths must not share a cached array type"
+
+    # Property-level contract: repeated TensorMemoryObj.byte_array accesses
+    # must not create new heap types.
+    total_size = 1 << 22
+    allocator = MixedMemoryAllocator(total_size)
+    shape = torch.Size([4096])
+    obj = allocator.allocate(shape, torch.uint8)
+    assert isinstance(obj, TensorMemoryObj)
+    try:
+        # Prime the cache with this object's size (and any other state the
+        # allocate path warmed up) so we measure only repeated-access growth.
+        _ = obj.byte_array
+        before = _get_cached_ubyte_array_type.cache_info().currsize
+        for _ in range(50):
+            mv = obj.byte_array
+            assert isinstance(mv, memoryview)
+        after = _get_cached_ubyte_array_type.cache_info().currsize
+        assert after == before, (
+            f"byte_array leaked array types across 50 repeated accesses: "
+            f"cache grew from {before} to {after}"
+        )
+    finally:
+        obj.ref_count_down()
+        allocator.close()
 
 
 def test_memory_obj_metadata_to_and_from_dict():
@@ -535,9 +609,10 @@ def test_tensor_memory_obj_pin_monitor_integration():
 # =============================================================================
 
 
+@pytest.mark.cuda
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="LazyMemoryAllocator requires CUDA for memory pinning",
+    not (torch_dev.is_available() and torch_device_type == "cuda"),
+    reason="Requires CUDA backend",
 )
 class TestLazyMemoryAllocator:
     """
@@ -563,7 +638,9 @@ class TestLazyMemoryAllocator:
         on CPU-only builds.
         """
         # First Party
-        from lmcache.v1.lazy_memory_allocator import LazyMemoryAllocator
+        from lmcache.v1.memory_allocators.lazy_memory_allocator import (
+            LazyMemoryAllocator,
+        )
 
         return LazyMemoryAllocator
 
@@ -885,3 +962,290 @@ class TestLazyMemoryAllocator:
 
         assert allocator.memcheck()
         allocator.close()
+
+    @pytest.mark.parametrize("align_bytes", [512, 4096, 1 << 16])
+    def test_buffer_base_is_aligned(self, lazy_allocator_cls, align_bytes):
+        """The buffer base is aligned to ``align_bytes``, not just the offsets.
+
+        ``torch.empty`` guarantees only 64-byte alignment, so before this was
+        fixed the base came back at ``page + 64`` and every object address was
+        congruent to 64 mod 512. Consumers cannot detect that from the reported
+        ``align_bytes``, and O_DIRECT rejects such a pointer with EINVAL.
+        """
+        allocator = lazy_allocator_cls(
+            init_size=self.INIT_SIZE,
+            final_size=self.FINAL_SIZE,
+            align_bytes=align_bytes,
+        )
+        try:
+            base = allocator.get_underlying_buffer().data_ptr()
+            assert base % align_bytes == 0, (
+                f"buffer base {base:#x} is {base % align_bytes} bytes past an "
+                f"{align_bytes}-byte boundary"
+            )
+        finally:
+            allocator.close()
+
+    def test_allocated_object_addresses_are_aligned(self, lazy_allocator_cls):
+        """Every object handed out is aligned, for a mix of sizes.
+
+        Offsets were always aligned; what mattered was the base. Mixed and
+        deliberately unaligned request sizes are used here so that a regression
+        in either the base or the per-object rounding shows up.
+        """
+        align_bytes = 4096
+        allocator = lazy_allocator_cls(
+            init_size=self.INIT_SIZE,
+            final_size=self.FINAL_SIZE,
+            align_bytes=align_bytes,
+        )
+        try:
+            objs = []
+            # 4096 is a whole number of alignment units; 100 and 5000 are not.
+            for nbytes in (4096, 100, 5000, 4096):
+                obj = allocator.allocate(torch.Size([nbytes]), torch.uint8)
+                assert obj is not None
+                objs.append(obj)
+                addr = obj.data_ptr
+                assert addr % align_bytes == 0, (
+                    f"object of {nbytes} bytes landed at {addr:#x}, "
+                    f"{addr % align_bytes} past an {align_bytes}-byte boundary"
+                )
+            for obj in objs:
+                allocator.free(obj)
+            assert allocator.memcheck()
+        finally:
+            allocator.close()
+
+    @pytest.mark.parametrize("bad", [0, -4096, 3, 1000])
+    def test_rejects_align_bytes_that_is_not_a_power_of_two(
+        self, lazy_allocator_cls, bad
+    ):
+        """A non-power-of-two alignment is a caller error, not silently accepted.
+
+        The base-alignment arithmetic assumes a power of two, and 0 would divide
+        by zero.
+        """
+        with pytest.raises(ValueError, match="power of two"):
+            lazy_allocator_cls(
+                init_size=self.INIT_SIZE,
+                final_size=self.FINAL_SIZE,
+                align_bytes=bad,
+            )
+
+
+def _get_num_free_hugepages() -> int:
+    """Return the number of free huge pages, or 0 if unknown."""
+    info = _read_hugepage_info()
+    if info is None:
+        return 0
+    _, free, _ = info
+    return free
+
+
+@pytest.mark.skipif(
+    _get_num_free_hugepages() < 1,
+    reason="Requires at least 1 free huge page (sysctl vm.nr_hugepages)",
+)
+class TestHugepageAllocation:
+    """Tests for hugepage-backed CPU memory allocation.
+
+    Skipped unless the system has pre-allocated huge pages.
+    """
+
+    def test_allocate_and_free(self):
+        """Allocate one huge page worth of memory and free it."""
+        buf = _allocate_cpu_memory(HUGEPAGE_SIZE, use_hugepages=True)
+        assert buf.numel() == HUGEPAGE_SIZE
+        assert buf.dtype == torch.uint8
+        buf[0] = 42
+        buf[-1] = 99
+        assert buf[0].item() == 42
+        assert buf[-1].item() == 99
+        _free_cpu_memory(buf, size=HUGEPAGE_SIZE, use_hugepages=True)
+
+    @pytest.mark.skipif(
+        _get_num_free_hugepages() < 4,
+        reason="Requires at least 4 free huge pages (sysctl vm.nr_hugepages)",
+    )
+    def test_allocate_multiple_pages(self):
+        """Allocate several huge pages and verify the buffer is usable."""
+        size = 4 * HUGEPAGE_SIZE
+        buf = _allocate_cpu_memory(size, use_hugepages=True)
+        assert buf.numel() == size
+        buf.fill_(7)
+        assert buf[size // 2].item() == 7
+        _free_cpu_memory(buf, size=size, use_hugepages=True)
+
+    def test_read_hugepage_info(self):
+        """_read_hugepage_info returns valid data on Linux."""
+        info = _read_hugepage_info()
+        assert info is not None
+        total, free, page_mb = info
+        assert total > 0
+        assert free >= 0
+        assert page_mb == 2
+
+
+# ---------------------------------------------------------------------------
+# set_used_size: narrowing logical size after a partial write
+# ---------------------------------------------------------------------------
+
+
+class TestSetUsedSize:
+    """``TensorMemoryObj.set_used_size`` narrows the logical view after a
+    write that did not fill the whole allocated buffer (e.g. when a serde
+    sizes its destination from ``estimate_serialized_size`` -- an upper
+    bound -- and then writes fewer bytes).  The override must survive
+    until the block is recycled by the paged allocator, at which point it
+    resets to ``None`` so the fresh allocation returns its layout-derived
+    size.
+    """
+
+    @staticmethod
+    def _make_byte_buffer(n_bytes: int) -> TensorMemoryObj:
+        """Construct a flat uint8 TensorMemoryObj of capacity ``n_bytes``
+        directly (no allocator), suitable for set_used_size mechanics
+        tests where allocator reuse isn't the focus."""
+        raw = torch.zeros(n_bytes, dtype=torch.uint8)
+        shape = torch.Size([n_bytes])
+        meta = MemoryObjMetadata(
+            shape=shape,
+            dtype=torch.uint8,
+            address=0,
+            phy_size=n_bytes,
+            ref_count=1,
+            pin_count=0,
+            fmt=MemoryFormat.BINARY_BUFFER,
+            shapes=[shape],
+            dtypes=[torch.uint8],
+        )
+        return TensorMemoryObj(raw_data=raw, metadata=meta, parent_allocator=None)
+
+    def test_default_get_size_is_layout_derived(self) -> None:
+        obj = self._make_byte_buffer(1024)
+        assert obj.get_size() == 1024
+        # No override set yet.
+        assert obj._used_size_override is None
+
+    def test_set_used_size_narrows_get_size_and_byte_array(self) -> None:
+        obj = self._make_byte_buffer(1024)
+        obj.set_used_size(213)
+        assert obj.get_size() == 213
+        # byte_array honors get_size, not the allocated capacity.
+        assert len(obj.byte_array) == 213
+
+    def test_set_used_size_keeps_tensor_and_shm_length_consistent(self) -> None:
+        """A narrowed buffer must expose ``tensor``, ``shm_byte_length``,
+        ``get_size`` and ``byte_array`` at the same length.  The SHM
+        transport builds a slot from ``tensor.shape`` plus
+        ``shm_byte_length`` and the worker rebuilds a view from both, so
+        any disagreement -- e.g. ``tensor`` reshaping to the original
+        (wider) layout while ``shm_byte_length`` reports the narrowed
+        length -- raises ``shape is invalid for input of size`` on one
+        side.  Accessing ``tensor`` must not raise.
+        """
+        obj = self._make_byte_buffer(1024)
+        obj.set_used_size(213)
+        t = obj.tensor
+        assert t is not None
+        # Flat uint8 view of exactly the used bytes -- not the 1024-wide
+        # layout that would fail to reshape.
+        assert t.dtype == torch.uint8
+        assert tuple(t.shape) == (213,)
+        assert obj.shm_byte_length == 213
+        assert t.numel() == obj.shm_byte_length == obj.get_size()
+
+    def test_set_used_size_zero_is_allowed(self) -> None:
+        obj = self._make_byte_buffer(1024)
+        obj.set_used_size(0)
+        assert obj.get_size() == 0
+        assert len(obj.byte_array) == 0
+
+    def test_set_used_size_at_physical_size_is_allowed(self) -> None:
+        obj = self._make_byte_buffer(1024)
+        obj.set_used_size(obj.get_physical_size())
+        assert obj.get_size() == obj.get_physical_size()
+
+    def test_set_used_size_rejects_out_of_range(self) -> None:
+        obj = self._make_byte_buffer(1024)
+        with pytest.raises(ValueError):
+            obj.set_used_size(-1)
+        with pytest.raises(ValueError):
+            obj.set_used_size(obj.get_physical_size() + 1)
+
+    def _paged_byte_allocator(
+        self, n_pages: int, page_bytes: int
+    ) -> "PagedTensorMemoryAllocator":
+        """Build a paged uint8 allocator with ``n_pages`` pages of
+        ``page_bytes`` each, suitable for testing block-recycle resets.
+        """
+        # The paged allocator splits a flat tensor into equal-sized
+        # pages; the page shape is what allocate/batched_allocate hand
+        # back per block.
+        shape = torch.Size([page_bytes])
+        buffer = torch.zeros(n_pages * page_bytes, dtype=torch.uint8)
+        return PagedTensorMemoryAllocator(
+            tensor=buffer,
+            shapes=[shape],
+            dtypes=[torch.uint8],
+            fmt=MemoryFormat.BINARY_BUFFER,
+        )
+
+    def test_used_size_override_resets_on_paged_allocator_reuse(self) -> None:
+        """After a free + re-allocate from the paged allocator, a
+        recycled block must return its layout-derived size, not the
+        previous owner's narrowed size. The reset is what makes
+        ``set_used_size`` safe to use on temp buffers that pass through
+        the L1 pool repeatedly."""
+        allocator = self._paged_byte_allocator(n_pages=2, page_bytes=1024)
+        shape = torch.Size([1024])
+
+        obj_a = allocator.allocate(shape, torch.uint8, fmt=MemoryFormat.BINARY_BUFFER)
+        assert obj_a is not None
+        assert obj_a.get_size() == 1024
+        obj_a.set_used_size(213)
+        assert obj_a.get_size() == 213
+
+        # Free returns the block to the free_blocks deque; the next
+        # allocate will hand it back, and the recycle path must clear
+        # _used_size_override.
+        allocator.free(obj_a)
+        obj_b = allocator.allocate(shape, torch.uint8, fmt=MemoryFormat.BINARY_BUFFER)
+        assert obj_b is not None
+        assert obj_b._used_size_override is None
+        assert obj_b.get_size() == 1024
+
+    def test_used_size_override_resets_on_paged_batched_reuse(self) -> None:
+        """Same contract as the single-allocate test but via
+        ``batched_allocate``, which has its own copy of the per-block
+        metadata-reset logic."""
+        allocator = self._paged_byte_allocator(n_pages=4, page_bytes=1024)
+        shape = torch.Size([1024])
+
+        batch = allocator.batched_allocate(
+            shape, torch.uint8, batch_size=2, fmt=MemoryFormat.BINARY_BUFFER
+        )
+        assert batch is not None and len(batch) == 2
+        for blk in batch:
+            blk.set_used_size(100)
+        for blk in batch:
+            allocator.free(blk)
+
+        batch2 = allocator.batched_allocate(
+            shape, torch.uint8, batch_size=2, fmt=MemoryFormat.BINARY_BUFFER
+        )
+        assert batch2 is not None and len(batch2) == 2
+        for blk in batch2:
+            assert blk._used_size_override is None
+            assert blk.get_size() == 1024
+
+    def test_bytes_buffer_memory_obj_set_used_size_is_noop(self) -> None:
+        """``BytesBufferMemoryObj`` does not distinguish "used" from
+        "allocated"; ``set_used_size`` is the base-class no-op so the
+        size stays the raw buffer length."""
+        buf = BytesBufferMemoryObj(b"abc")
+        assert buf.get_size() == 3
+        # Should not raise; should not change get_size.
+        buf.set_used_size(1)
+        assert buf.get_size() == 3

@@ -181,7 +181,7 @@ Monitoring Integration
 
 Prometheus metrics are enabled by default on port 9090.  Add a
 ``ServiceMonitor`` or Prometheus scrape annotation to collect metrics from the
-LMCache DaemonSet pods.  See :doc:`observability` for metric details.
+LMCache DaemonSet pods.  See :doc:`observability/index` for metric details.
 
 Cleanup
 ~~~~~~~
@@ -218,3 +218,54 @@ A larger L1 cache means fewer L2 round-trips.
 **Logging:**
 Use ``LMCACHE_LOG_LEVEL=DEBUG`` during initial setup to verify L2 store/load
 activity.  Switch to ``INFO`` (default) for production to reduce log volume.
+
+Transfer Mode (``--supported-transfer-mode``, ``--shm-name``)
+-------------------------------------------------------------
+
+LMCache supports two worker → server transfer paths: an
+**lmcache-driven** path (server pulls/pushes via CUDA IPC or CPU SHM,
+used for STORE/RETRIEVE) and an **engine-driven** path
+(PREPARE/COMMIT, used by CPU-only or non-CUDA accelerator workers).
+The server picks which paths to load via ``--supported-transfer-mode``:
+
+- ``lmcache_driven`` *(default)* -- load only the server-driven
+  transfer path.  Supports CUDA devices (IPC) and CPU devices (SHM),
+  and skips allocating the engine-driven prepare/commit resources
+  (pickle codec).
+- ``engine_driven`` -- load only the engine-driven path.  Use when
+  serving CPU-only or non-CUDA accelerator workers.
+- ``auto`` -- load both paths.  Workers of either device
+  type can connect without manual configuration; the server has no
+  upfront knowledge of the connecting worker's device.
+
+When the engine-driven path is loaded (``auto`` or ``engine_driven``),
+KV transfers between the server and vLLM workers use a pickle-based
+path by default.  Pass ``--shm-name`` with a segment name to create a
+shared-memory (SHM) pool instead:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
+
+   * - Value
+     - Effect
+   * - ``""`` (empty string, default)
+     - No SHM pool; KV transfer uses the pickle-based path.  Works
+       when ``/dev/shm`` is unavailable or when running without
+       ``--ipc host`` in Docker.
+   * - ``"my_pool"`` (any non-empty name)
+     - Create a SHM pool with that exact segment name and use it for
+       KV transfers.  The deterministic, human-readable name also
+       helps with monitoring and debugging.
+
+**Examples:**
+
+.. code-block:: bash
+
+    # Engine-driven path with pickle transfer (no SHM) -- the default:
+    lmcache server --l1-size-gb 60 --eviction-policy LRU \
+        --supported-transfer-mode engine_driven
+
+    # Engine-driven path with a named SHM segment:
+    lmcache server --l1-size-gb 60 --eviction-policy LRU \
+        --supported-transfer-mode engine_driven --shm-name "lmcache_pool"

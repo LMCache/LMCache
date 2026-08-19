@@ -18,7 +18,7 @@ from lmcache.v1.check.utils import (
     print_performance_results,
 )
 from lmcache.v1.distributed.api import ObjectKey
-from lmcache.v1.distributed.internal_api import L1MemoryDesc
+from lmcache.v1.distributed.internal_api import L1MemoryDesc, L2StoreResult
 from lmcache.v1.distributed.l2_adapters import create_l2_adapter
 from lmcache.v1.distributed.l2_adapters.config import (
     parse_args_to_l2_adapters_config,
@@ -108,7 +108,7 @@ def _run_store_phase(adapter, keys, objects):
         return None, False
     completed = adapter.pop_completed_store_tasks()
     elapsed_ms = (time.perf_counter() - start) * 1000
-    ok = completed.get(task_id, False)
+    ok = completed.get(task_id, L2StoreResult(False, 0)).is_successful()
     return elapsed_ms, ok
 
 
@@ -116,7 +116,7 @@ def _run_lookup_phase(adapter, keys):
     """Run lookup phase and return (stats, bitmap)."""
     efd = adapter.get_lookup_and_lock_event_fd()
     start = time.perf_counter()
-    task_id = adapter.submit_lookup_and_lock_task(keys)
+    task_id = adapter.submit_lookup_and_lock_task(keys, {})
     if not _wait_event_fd(efd):
         print("  Lookup: timed out waiting for eventfd")
         return None, None

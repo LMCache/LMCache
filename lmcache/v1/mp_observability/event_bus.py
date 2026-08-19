@@ -17,15 +17,16 @@ import time
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.mp_observability.event import Event, EventType
+from lmcache.v1.mp_observability.otel_init import register_gauge
 
 try:
     # Third Party
-    import torch  # noqa: F401 — must be imported before lmcache.c_ops
+    import torch  # noqa: F401 — must be imported before native extensions
 
     # First Party
-    import lmcache.c_ops as _lmc_ops
+    from lmcache import device_ops as _device_ops
 
-    _has_native_recorder = hasattr(_lmc_ops, "record_event_on_stream")
+    _has_native_recorder = hasattr(_device_ops, "record_event_on_stream")
 except ImportError:
     _has_native_recorder = False
 
@@ -118,6 +119,27 @@ class EventBus:
         self._last_discard_warning: float = 0.0
         self._subscriber_exception_counts: dict[str, int] = {}
 
+        self._register_self_gauges()
+
+    def _register_self_gauges(self) -> None:
+        """Register the two self-monitoring gauges via ``register_gauge``."""
+        register_gauge(
+            "lmcache.event_bus",
+            "lmcache_mp.event_bus.queue_depth",
+            "Events currently queued in the EventBus.",
+            self.queue_depth,
+        )
+        register_gauge(
+            "lmcache.event_bus",
+            "lmcache_mp.event_bus.drain_lag_seconds",
+            (
+                "Seconds since the oldest queued event was published; 0.0 "
+                "when empty.  Rising values mean the drain thread is "
+                "falling behind."
+            ),
+            self.oldest_event_lag_seconds,
+        )
+
     # -- Public API --------------------------------------------------------
 
     def subscribe(self, event_type: EventType, callback: EventCallback) -> None:
@@ -161,7 +183,7 @@ class EventBus:
                     int_metadata[k] = v
                 else:
                     str_metadata[k] = str(v)
-            _lmc_ops.record_event_on_stream(
+            _device_ops.record_event_on_stream(
                 stream.ptr,
                 event.event_type.value,
                 event.session_id,
@@ -291,7 +313,8 @@ class EventBus:
         """Pop all queued events and dispatch to subscribers."""
         # Drain events buffered on the C++ side (from CUDA host callbacks)
         if _has_native_recorder:
-            for name, sid, ts, str_meta, int_meta in _lmc_ops.drain_recorded_events():
+            native_events = _device_ops.drain_recorded_events()
+            for name, sid, ts, str_meta, int_meta in native_events:
                 metadata: dict[str, Any] = dict(str_meta)
                 metadata.update(int_meta)
                 self._queue.append(

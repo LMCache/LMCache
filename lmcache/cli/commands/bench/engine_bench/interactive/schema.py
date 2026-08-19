@@ -12,6 +12,11 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+# First Party
+from lmcache.cli.commands.bench.engine_bench.workloads.rag_qa_quality import (
+    DEFAULT_DOC_ALIGN_TOKENS,
+)
+
 # ---------------------------------------------------------------------------
 # Phases
 # ---------------------------------------------------------------------------
@@ -90,7 +95,8 @@ ALL_ITEMS: list[ConfigItem] = [
         key="engine_url",
         display_name="Engine URL",
         description=(
-            "URL of the inference engine. "
+            "URL of the inference engine. Enter just a port (e.g. 8000) to "
+            "use http://localhost:8000. "
             "Set OPENAI_API_KEY env var if authentication is needed."
         ),
         input_type="text",
@@ -116,6 +122,10 @@ ALL_ITEMS: list[ConfigItem] = [
                 "prefix-suffix-tuner",
                 "Two-pass sequential workload demonstrating tiered KV cache reuse",
             ),
+            (
+                "rag-qa-quality",
+                "Answer quality (F1) on real QA data with individually cached docs",
+            ),
             ("random-prefill", "Prefill-only requests fired simultaneously"),
         ],
         phase=PHASE_REQUIRED,
@@ -135,7 +145,10 @@ ALL_ITEMS: list[ConfigItem] = [
     ConfigItem(
         key="lmcache_url",
         display_name="LMCache Server URL",
-        description="URL of the running LMCache HTTP server.",
+        description=(
+            "URL of the running LMCache HTTP server. Enter just a port "
+            "(e.g. 8080) to use http://localhost:8080."
+        ),
         input_type="text",
         default="http://localhost:8080",
         required=False,
@@ -159,6 +172,24 @@ ALL_ITEMS: list[ConfigItem] = [
         condition=_no_lmcache_url,
         phase=PHASE_REQUIRED,
     ),
+    # Lives in phase 1 because it has no usable default. The condition keeps
+    # it inert for other workloads; ordered after ``workload`` so that choice
+    # is made first.
+    ConfigItem(
+        key="rag_dataset",
+        display_name="QA dataset",
+        description=(
+            "A known dataset name, or a path to a local QA file.\n"
+            "  musique   -- MuSiQue answerable dev (20 passages/question)\n"
+            "  hotpotqa  -- HotpotQA distractor validation (needs pyarrow)\n"
+            "Named datasets download from the HuggingFace Hub on first use."
+        ),
+        input_type="text",
+        default=None,
+        required=True,
+        condition=_workload_is("rag-qa-quality"),
+        phase=PHASE_REQUIRED,
+    ),
     # ── Phase 2: General ──────────────────────────────────────────────
     ConfigItem(
         key="model",
@@ -177,6 +208,18 @@ ALL_ITEMS: list[ConfigItem] = [
         description="Target active KV cache size for the benchmark.",
         input_type="float",
         default=100.0,
+        phase=PHASE_GENERAL,
+    ),
+    ConfigItem(
+        key="ignore_eos",
+        display_name="Ignore EOS",
+        description=(
+            "Force generation to run for the full output length by ignoring "
+            "the model's EOS token (vLLM extension). Makes decode throughput "
+            "reproducible."
+        ),
+        input_type="bool",
+        default=False,
         phase=PHASE_GENERAL,
     ),
     # ── Phase 3: long-doc-permutator ─────────────────────────────────
@@ -225,6 +268,15 @@ ALL_ITEMS: list[ConfigItem] = [
         condition=_workload_is("long-doc-permutator"),
         phase=PHASE_WORKLOAD,
     ),
+    ConfigItem(
+        key="ldp_max_output_length",
+        display_name="Max output length (tokens)",
+        description="Max tokens per request. Use 1 to measure prefill alone.",
+        input_type="int",
+        default=128,
+        condition=_workload_is("long-doc-permutator"),
+        phase=PHASE_WORKLOAD,
+    ),
     # ── Phase 3: long-doc-qa ──────────────────────────────────────────
     ConfigItem(
         key="ldqa_document_length",
@@ -263,6 +315,15 @@ ALL_ITEMS: list[ConfigItem] = [
         description="Maximum concurrent in-flight requests.",
         input_type="int",
         default=3,
+        condition=_workload_is("long-doc-qa"),
+        phase=PHASE_WORKLOAD,
+    ),
+    ConfigItem(
+        key="ldqa_max_output_length",
+        display_name="Max output length (tokens)",
+        description="Max tokens to generate per benchmark query.",
+        input_type="int",
+        default=128,
         condition=_workload_is("long-doc-qa"),
         phase=PHASE_WORKLOAD,
     ),
@@ -356,6 +417,43 @@ ALL_ITEMS: list[ConfigItem] = [
         input_type="float",
         default=20.0,
         condition=_workload_is("prefix-suffix-tuner"),
+        phase=PHASE_WORKLOAD,
+    ),
+    # ── Phase 3: rag-qa-quality ───────────────────────────────────────
+    ConfigItem(
+        key="rag_num_samples",
+        display_name="Number of samples",
+        description="Questions to measure, taken in dataset order.",
+        input_type="int",
+        default=50,
+        condition=_workload_is("rag-qa-quality"),
+        phase=PHASE_WORKLOAD,
+    ),
+    ConfigItem(
+        key="rag_max_output_length",
+        display_name="Max output length (tokens)",
+        description=(
+            "Token budget per answer. Must fit a reasoning model's thinking "
+            "block as well as the <final_answer> tags, or samples fail to "
+            "parse and drop out of the score."
+        ),
+        input_type="int",
+        default=1024,
+        condition=_workload_is("rag-qa-quality"),
+        phase=PHASE_WORKLOAD,
+    ),
+    ConfigItem(
+        key="rag_doc_align_tokens",
+        display_name="Document alignment (tokens)",
+        description=(
+            "Documents and the system block are padded to a multiple of this, "
+            "so each document occupies whole cache chunks.\n"
+            "  Set it to the deployment's LMCache chunk size (256 by default);\n"
+            "  a mismatch leaves documents off-phase and reuse partial."
+        ),
+        input_type="int",
+        default=DEFAULT_DOC_ALIGN_TOKENS,
+        condition=_workload_is("rag-qa-quality"),
         phase=PHASE_WORKLOAD,
     ),
     # ── Phase 3: random-prefill ───────────────────────────────────────

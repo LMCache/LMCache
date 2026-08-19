@@ -7,6 +7,7 @@ import contextlib
 import multiprocessing as mp
 import threading
 import time
+import traceback
 
 # Third Party
 import msgspec
@@ -22,10 +23,10 @@ from lmcache.v1.cache_controller.message import (
     BatchedP2PLookupRetMsg,
 )
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.memory_management import (
-    MemoryFormat,
+from lmcache.v1.memory_allocators.paged_cpu_gpu_memory_allocator import (
     PagedCpuGpuMemoryAllocator,
 )
+from lmcache.v1.memory_management import MemoryFormat
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.p2p_backend import P2PBackend
@@ -135,39 +136,47 @@ def run_mock_controller(
     peer_mappings: dict,
     stop_event: "mp.synchronize.Event",
     ready_event: "mp.synchronize.Event",
+    error_queue: "mp.Queue[str]",
 ):
     """Run a mock controller that handles P2P lookup requests"""
-    context = zmq.Context()
-    socket = context.socket(zmq.REP)
-    socket.bind(controller_url)
-    socket.setsockopt(zmq.RCVTIMEO, 1000)
+    context = None
+    socket = None
+    try:
+        context = zmq.Context()
+        socket = context.socket(zmq.REP)
+        socket.bind(controller_url)
+        socket.setsockopt(zmq.RCVTIMEO, 1000)
 
-    logger.info(f"Mock controller started at {controller_url}")
-    ready_event.set()  # Signal that the controller is ready
+        logger.info(f"Mock controller started at {controller_url}")
+        ready_event.set()  # Signal that the controller is ready
 
-    while not stop_event.is_set():
-        try:
-            msg_bytes = socket.recv()
-            msg = msgspec.msgpack.decode(msg_bytes, type=BatchedP2PLookupMsg)
+        while not stop_event.is_set():
+            try:
+                msg_bytes = socket.recv()
+                msg = msgspec.msgpack.decode(msg_bytes, type=BatchedP2PLookupMsg)
 
-            # Simulate lookup logic
-            response_key = (msg.instance_id, msg.worker_id, tuple(msg.hashes))
-            if response_key in peer_mappings:
-                response = peer_mappings[response_key]
-            else:
-                response = BatchedP2PLookupRetMsg(layout_info=[("", "", 0, "")])
+                # Simulate lookup logic
+                response_key = (msg.instance_id, msg.worker_id, tuple(msg.hashes))
+                if response_key in peer_mappings:
+                    response = peer_mappings[response_key]
+                else:
+                    response = BatchedP2PLookupRetMsg(layout_info=[("", "", 0, "")])
 
-            socket.send(msgspec.msgpack.encode(response))
-        except zmq.Again:
-            continue
-        except Exception as e:
-            logger.error("Controller error: %s", e)
-            if not stop_event.is_set():
-                time.sleep(0.01)
-
-    socket.close()
-    context.term()
-    logger.info("Mock controller stopped")
+                socket.send(msgspec.msgpack.encode(response))
+            except zmq.Again:
+                continue
+            except Exception as e:
+                logger.error("Controller error: %s", e)
+                if not stop_event.is_set():
+                    time.sleep(0.01)
+    except Exception as e:
+        error_queue.put(f"{type(e).__name__}: {e}\n{traceback.format_exc()}")
+    finally:
+        if socket is not None:
+            socket.close()
+        if context is not None:
+            context.term()
+        logger.info("Mock controller stopped")
 
 
 def create_test_config(
@@ -301,24 +310,70 @@ def local_cpu_backend():
 @contextlib.contextmanager
 def mock_controller_context(peer_mappings: dict):
     """Context manager for mock controller process"""
-    controller_port = get_available_ports(1)[0]
-    controller_url = f"tcp://localhost:{controller_port}"
-    stop_event = mp.Event()
-    ready_event = mp.Event()
+    max_attempts = 3
+    controller_url = ""
+    process = None
+    stop_event = None
+    last_error = ""
 
-    process = mp.Process(
-        target=run_mock_controller,
-        args=(controller_url, peer_mappings, stop_event, ready_event),
-    )
-    process.start()
+    for attempt in range(max_attempts):
+        controller_port = get_available_ports(1)[0]
+        controller_url = f"tcp://127.0.0.1:{controller_port}"
+        stop_event = mp.Event()
+        ready_event = mp.Event()
+        error_queue: "mp.Queue[str]" = mp.Queue()
 
-    # Wait for the controller to signal it's ready
-    if not ready_event.wait(timeout=5.0):
-        raise RuntimeError("Mock controller failed to start within 5 seconds")
+        process = mp.Process(
+            target=run_mock_controller,
+            args=(controller_url, peer_mappings, stop_event, ready_event, error_queue),
+            daemon=True,
+        )
+        process.start()
+
+        deadline = time.time() + 8.0
+        started = False
+        while time.time() < deadline:
+            if ready_event.is_set():
+                started = True
+                break
+            if process.exitcode is not None:
+                break
+            time.sleep(0.05)
+
+        if started:
+            break
+
+        if not error_queue.empty():
+            last_error = error_queue.get_nowait()
+        elif process.exitcode is not None:
+            last_error = f"controller process exited early with code {process.exitcode}"
+        else:
+            last_error = "timeout waiting for ready signal"
+
+        stop_event.set()
+        process.join(timeout=1)
+        if process.is_alive():
+            process.terminate()
+            process.join()
+
+        logger.warning(
+            "Mock controller startup attempt %s/%s failed at %s: %s",
+            attempt + 1,
+            max_attempts,
+            controller_url,
+            last_error,
+        )
+    else:
+        raise RuntimeError(
+            "Mock controller failed to start after 3 attempts. "
+            f"Last error: {last_error}"
+        )
 
     try:
         yield controller_url
     finally:
+        assert stop_event is not None
+        assert process is not None
         stop_event.set()
         process.join(timeout=5)
         if process.is_alive():

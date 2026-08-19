@@ -3,13 +3,14 @@
 
 #include "connector_interface.h"
 #include "connector_types.h"
-#include <sys/eventfd.h>
+#include "event_notifier.h"
 #include <unistd.h>
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
 #include <condition_variable>
 #include <cstdio>
+#include <memory>
 #include <mutex>
 #include <queue>
 #include <stdexcept>
@@ -64,13 +65,9 @@ class ConnectorBase : public IStorageConnector {
       }
     }
 
-    // create eventfd for async notification
-    // EFD_NONBLOCK: read() and write() are non-blocking
-    // EFD_CLOEXEC: close on exec
-    efd_ = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-    if (efd_ < 0) {
-      throw std::runtime_error("failed to create eventfd");
-    }
+    // Cross-platform poll-able wakeup fd (eventfd on Linux,
+    // self-pipe on macOS). See event_notifier.h.
+    notifier_ = make_event_notifier();
   }
 
   virtual ~ConnectorBase() { close(); }
@@ -78,7 +75,7 @@ class ConnectorBase : public IStorageConnector {
   ConnectorBase(const ConnectorBase&) = delete;
   ConnectorBase& operator=(const ConnectorBase&) = delete;
 
-  int event_fd() const override { return efd_; }
+  int event_fd() const override { return notifier_->fileno(); }
 
   uint64_t submit_batch_get(const std::vector<std::string>& keys,
                             const std::vector<void*>& bufs,
@@ -205,8 +202,7 @@ class ConnectorBase : public IStorageConnector {
           signaled_.store(false, std::memory_order_release);
           if (!completions_.empty() &&
               !signaled_.exchange(true, std::memory_order_acq_rel)) {
-            uint64_t x = 1;
-            ::write(efd_, &x, sizeof(x));
+            notifier_->notify();
           }
           break;
         }
@@ -248,10 +244,9 @@ class ConnectorBase : public IStorageConnector {
     // Derived cleanup that must only run after workers have stopped.
     on_workers_stopped();
 
-    // Close eventfd
-    if (efd_ >= 0) {
-      ::close(efd_);
-      efd_ = -1;
+    // Close wakeup fd
+    if (notifier_) {
+      notifier_->close();
     }
 
     // Clear queues (no GIL needed - python guarantees buffers stay alive)
@@ -461,44 +456,12 @@ class ConnectorBase : public IStorageConnector {
     signal_eventfd_();
   }
 
-  void drain_eventfd_() {
-    // loop to consume all writes that happened since last drain
-    for (;;) {
-      uint64_t x;
-      ssize_t r = ::read(efd_, &x, sizeof(x));
-      if (r == static_cast<ssize_t>(sizeof(x))) {
-        continue;  // keep draining
-      }
-      if (r < 0) {
-        if (errno == EINTR) {
-          continue;  // retry on EINTR
-        }
-        if (errno == EAGAIN) {
-          break;  // drained (no more data)
-        }
-      }
-      break;
-    }
-  }
+  void drain_eventfd_() { notifier_->consume(); }
 
   void signal_eventfd_() {
     bool already_signaled = signaled_.exchange(true, std::memory_order_acq_rel);
     if (already_signaled) return;  // only one signal at a time
-
-    uint64_t x = 1;
-    for (;;) {
-      ssize_t w = ::write(efd_, &x, sizeof(x));
-      if (w == static_cast<ssize_t>(sizeof(x))) {
-        return;  // success
-      }
-      if (w < 0) {
-        if (errno == EINTR) {
-          continue;  // retry on EINTR
-        }
-        throw std::runtime_error("eventfd write failed unexpectedly");
-      }
-      throw std::runtime_error("partial write to eventfd");
-    }
+    notifier_->notify();
   }
 
   static const std::unordered_map<std::string, std::vector<Op>>&
@@ -668,9 +631,9 @@ class ConnectorBase : public IStorageConnector {
   std::atomic<uint64_t> next_future_id_{1};
 
  private:
-  int efd_ = -1;
+  std::unique_ptr<EventNotifier> notifier_;
 
-  // treat eventfd as a binary wakeup flag:
+  // treat wakeup fd as a binary wakeup flag:
   // true: Python has been signaled (or will be)
   // false: Python is asleep, no wakeup pending
   std::atomic<bool> signaled_{false};

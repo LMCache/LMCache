@@ -44,6 +44,7 @@ class L1FailureMetricsSubscriber(EventSubscriber):
                 "reserve_write. Tagged by ``during`` = l1_store | l2_prefetch "
                 "and ``model_name``."
             ),
+            unit="chunks",
         )
         self._read_counter = meter.create_counter(
             "lmcache_mp.l1_read_failure",
@@ -54,6 +55,7 @@ class L1FailureMetricsSubscriber(EventSubscriber):
                 "near zero in healthy operation; non-zero indicates a "
                 "lookup/reserve race or unexpected eviction."
             ),
+            unit="chunks",
         )
 
     def get_subscriptions(self) -> dict[EventType, EventCallback]:

@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for TokenHasher."""
 
+# Standard
+import builtins
+
 # Third Party
 import numpy as np
 import pytest
@@ -26,6 +29,39 @@ class TestTokenHasher:
         hasher = TokenHasher(chunk_size=256, hash_algorithm="blake3")
         assert hasher.chunk_size == 256
         assert hasher.none_hash is not None
+
+    def test_init_blake3_does_not_import_vllm(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        real_import = builtins.__import__
+
+        def guarded_import(name, *args, **kwargs):
+            if name == "vllm" or name.startswith("vllm."):
+                raise AssertionError("blake3 TokenHasher should not import vLLM")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", guarded_import)
+
+        hasher = TokenHasher(chunk_size=256, hash_algorithm="blake3")
+
+        assert hasher.none_hash is not None
+
+    def test_init_none_hash_vllm_runtime_error_falls_back(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        real_import = builtins.__import__
+
+        def failing_vllm_import(name, *args, **kwargs):
+            if name == "vllm.v1.core":
+                raise RuntimeError("already a kernel registered")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", failing_vllm_import)
+        hasher = TokenHasher.__new__(TokenHasher)
+        hasher.hash_algorithm_name = "sha256_cbor"
+        hasher.hash_func = lambda _: b"fallback"
+
+        assert hasher._init_none_hash() == b"fallback"
 
     def test_hash_tokens_returns_bytes(self, hasher: TokenHasher) -> None:
         h = hasher.hash_tokens([1, 2, 3, 4])

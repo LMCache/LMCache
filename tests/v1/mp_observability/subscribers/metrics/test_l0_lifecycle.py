@@ -114,7 +114,7 @@ def subscriber(bus):
 
 class TestL0NewAllocation:
     def test_new_block_no_metrics_emitted(self, bus, subscriber):
-        count_before = _get_histogram_count("lmcache_mp.l0_block_lifetime_seconds")
+        count_before = _get_histogram_count("lmcache_mp.l0_block_lifetime")
         bus.start()
         bus.publish(
             _make_allocation_event(
@@ -124,7 +124,7 @@ class TestL0NewAllocation:
         time.sleep(_DRAIN_WAIT)
         bus.stop()
 
-        count_after = _get_histogram_count("lmcache_mp.l0_block_lifetime_seconds")
+        count_after = _get_histogram_count("lmcache_mp.l0_block_lifetime")
         assert count_after == count_before
 
     def test_shadow_map_populated(self, bus, subscriber):
@@ -158,7 +158,7 @@ class TestL0PrefixSharing:
         )
         time.sleep(_DRAIN_WAIT)
 
-        reuse_before = _get_histogram_count("lmcache_mp.l0_block_reuse_gap_seconds")
+        reuse_before = _get_histogram_count("lmcache_mp.l0_block_reuse_gap")
 
         # Request B also uses block 5 with same tokens (prefix sharing).
         bus.publish(
@@ -167,7 +167,7 @@ class TestL0PrefixSharing:
         time.sleep(_DRAIN_WAIT)
         bus.stop()
 
-        reuse_after = _get_histogram_count("lmcache_mp.l0_block_reuse_gap_seconds")
+        reuse_after = _get_histogram_count("lmcache_mp.l0_block_reuse_gap")
         # No reuse gap should be recorded — this is prefix sharing.
         assert reuse_after == reuse_before
 
@@ -274,7 +274,7 @@ class TestL0EndSessionAndReuse:
 
 class TestL0EvictionDetection:
     def test_different_tokens_triggers_eviction(self, bus, subscriber):
-        count_before = _get_histogram_count("lmcache_mp.l0_block_lifetime_seconds")
+        count_before = _get_histogram_count("lmcache_mp.l0_block_lifetime")
         bus.start()
 
         bus.publish(
@@ -288,13 +288,11 @@ class TestL0EvictionDetection:
         time.sleep(_DRAIN_WAIT)
         bus.stop()
 
-        count_after = _get_histogram_count("lmcache_mp.l0_block_lifetime_seconds")
+        count_after = _get_histogram_count("lmcache_mp.l0_block_lifetime")
         assert count_after == count_before + 1
 
     def test_eviction_records_idle_time(self, bus, subscriber):
-        idle_before = _get_histogram_count(
-            "lmcache_mp.l0_block_idle_before_evict_seconds"
-        )
+        idle_before = _get_histogram_count("lmcache_mp.l0_block_idle_before_evict")
         bus.start()
 
         bus.publish(
@@ -308,9 +306,7 @@ class TestL0EvictionDetection:
         time.sleep(_DRAIN_WAIT)
         bus.stop()
 
-        idle_after = _get_histogram_count(
-            "lmcache_mp.l0_block_idle_before_evict_seconds"
-        )
+        idle_after = _get_histogram_count("lmcache_mp.l0_block_idle_before_evict")
         assert idle_after == idle_before + 1
 
     def test_eviction_clears_old_owners(self, bus, subscriber):
@@ -362,7 +358,7 @@ class TestL0ReuseGaps:
         )
         time.sleep(_DRAIN_WAIT)
 
-        gap_before = _get_histogram_count("lmcache_mp.l0_block_reuse_gap_seconds")
+        gap_before = _get_histogram_count("lmcache_mp.l0_block_reuse_gap")
 
         # Now evict to flush reuse gaps.
         bus.publish(
@@ -373,7 +369,7 @@ class TestL0ReuseGaps:
         time.sleep(_DRAIN_WAIT)
         bus.stop()
 
-        gap_after = _get_histogram_count("lmcache_mp.l0_block_reuse_gap_seconds")
+        gap_after = _get_histogram_count("lmcache_mp.l0_block_reuse_gap")
         # 2 true reuses → 1 reuse gap.
         assert gap_after == gap_before + 1
 
@@ -472,7 +468,7 @@ class TestL0MetricAttributes:
         time.sleep(_DRAIN_WAIT)
         bus.stop()
 
-        attrs_list = _get_histogram_attrs("lmcache_mp.l0_block_lifetime_seconds")
+        attrs_list = _get_histogram_attrs("lmcache_mp.l0_block_lifetime")
         matching = [
             a
             for a in attrs_list

@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     # First Party
     from lmcache.v1.config import LMCacheEngineConfig
     from lmcache.v1.memory_management import MemoryObj
+    from lmcache.v1.metadata import LMCacheMetadata
 
 
 logger = init_logger(__name__)
@@ -35,7 +36,7 @@ class PinMonitor(PeriodicThread):
     _instance = None
     _instance_lock = threading.Lock()  # Class-level lock for singleton pattern
 
-    def __init__(self, config: "LMCacheEngineConfig"):
+    def __init__(self, config: "LMCacheEngineConfig") -> None:
         # Initialize PeriodicThread base class
         super().__init__(
             name="PinMonitor-thread",
@@ -59,12 +60,17 @@ class PinMonitor(PeriodicThread):
         self.start_monitoring()
 
     @staticmethod
-    def GetOrCreate(config: Optional["LMCacheEngineConfig"] = None) -> "PinMonitor":
+    def GetOrCreate(
+        config: Optional["LMCacheEngineConfig"] = None,
+        metadata: Optional["LMCacheMetadata"] = None,
+    ) -> "PinMonitor":
         """Get or create the singleton instance.
 
         Args:
             config: Required for first-time initialization.
                 Optional for subsequent calls.
+            metadata: Metadata for the label view that should publish
+                PinMonitor metrics.
 
         Raises:
             ValueError: If config is None when creating the instance
@@ -75,7 +81,12 @@ class PinMonitor(PeriodicThread):
                 if PinMonitor._instance is None:
                     assert config is not None, "config is required"
                     PinMonitor._instance = PinMonitor(config)
-        return PinMonitor._instance
+        instance = PinMonitor._instance
+        assert instance is not None
+        if metadata is not None:
+            assert config is not None, "config is required to set up metrics"
+            instance._setup_metrics(config, metadata)
+        return instance
 
     def on_pin(self, memory_obj: "MemoryObj"):
         """Register a pinned memory object for timeout monitoring.
@@ -202,7 +213,7 @@ class PinMonitor(PeriodicThread):
             },
         )
 
-    def start_monitoring(self):
+    def start_monitoring(self) -> None:
         """Start the background monitoring thread."""
         if self.is_running:
             return
@@ -211,12 +222,15 @@ class PinMonitor(PeriodicThread):
         self.start()
         logger.info("PinMonitor started")
 
-        # Setup metrics callback
-        prometheus_logger = PrometheusLogger.GetInstanceOrNone()
-        if prometheus_logger is not None:
-            prometheus_logger.pin_monitor_pinned_objects_count.set_function(
-                lambda: len(self._pinned_objects)
-            )
+    def _setup_metrics(
+        self,
+        config: "LMCacheEngineConfig",
+        metadata: "LMCacheMetadata",
+    ) -> None:
+        prometheus_logger = PrometheusLogger.GetOrCreate(metadata, config=config)
+        prometheus_logger.pin_monitor_pinned_objects_count.set_function(
+            lambda: len(self._pinned_objects)
+        )
 
     def stop_monitoring(self):
         """Stop the background monitoring thread."""

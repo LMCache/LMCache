@@ -7,20 +7,26 @@ import random
 import pytest
 import torch
 
+# First Party
+from lmcache import torch_dev, torch_device_type
+
 pytest.importorskip(
-    "lmcache.c_ops",
-    reason="Requires CUDA extension lmcache.c_ops",
+    "lmcache.cuda_ops",
+    reason="Requires CUDA extension lmcache.cuda_ops",
 )
 
 # First Party
-import lmcache.c_ops as lmc_ops
+import lmcache.cuda_ops as cuda_ops
+import lmcache.lmcache_native as lmcache_native
 
 # Skip all tests if cuda is unavailable
-pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available() or torch.cuda.device_count() == 0,
-    reason="No CUDA GPU present",
-)
-
+pytestmark = [
+    pytest.mark.cuda,
+    pytest.mark.skipif(
+        not (torch_dev.is_available() and torch_device_type == "cuda"),
+        reason="Requires CUDA backend",
+    ),
+]
 # ---------------------------------------------------------------------------
 # Tensor factories (ported from kernel harness)
 # ---------------------------------------------------------------------------
@@ -42,15 +48,24 @@ def _create_zero_tensor(
     return torch.zeros(shape, dtype=dtype, device=device)
 
 
-# Format enum values from c_ops
-FMT_NORMAL = lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS
-FMT_CROSS_LAYER = lmc_ops.GPUKVFormat.NB_NL_TWO_BS_NH_HS
-FMT_FLASH_INFER = lmc_ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS
-FMT_MLA = lmc_ops.GPUKVFormat.NL_X_NB_BS_HS
-FMT_SGLANG_MHA = lmc_ops.GPUKVFormat.TWO_X_NL_X_NBBS_NH_HS
-FMT_SGLANG_MLA = lmc_ops.GPUKVFormat.NL_X_NBBS_ONE_HS
+# Format enum values used by the DeviceOps compatibility shim
+FMT_NORMAL = lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
+FMT_CROSS_LAYER = lmcache_native.EngineKVFormat.NB_NL_TWO_BS_NH_HS
+FMT_FLASH_INFER = lmcache_native.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS
+FMT_MLA = lmcache_native.EngineKVFormat.NL_X_NB_BS_HS
+FMT_SGLANG_MHA = lmcache_native.EngineKVFormat.TWO_X_NL_X_NBBS_NH_HS
+FMT_SGLANG_MLA = lmcache_native.EngineKVFormat.NL_X_NBBS_ONE_HS
+FMT_NORMAL_HND = lmcache_native.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS
+FMT_FLASH_INFER_HND = lmcache_native.EngineKVFormat.NL_X_NB_TWO_NH_BS_HS
+FMT_VLLM_FUSED_HND = lmcache_native.EngineKVFormat.NL_X_NB_NH_BS_TWO_HS
+FMT_VLLM_FUSED_NHD = lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_TWO_HS
+FMT_VLLM_CS_HND = lmcache_native.EngineKVFormat.NL_X_NB_NH_BS_CS
+FMT_VLLM_CS_NHD = lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_CS
 
-# Format parameters: (gpu_kv_format, num_layers, num_heads, head_size, is_mla)
+# Format parameters: (engine_kv_format, num_layers, num_heads, head_size, is_mla)
+# The is_mla column really means "kv_size == 1": the fused-K/V and content-size
+# formats are not MLA but transfer with kv_size == 1 and hs already doubled
+# (kv-packed D).
 # Use small layer counts to keep GPU memory usage low in CI
 FORMAT_PARAMS = [
     (FMT_NORMAL, 4, 8, 128, False),
@@ -59,11 +74,17 @@ FORMAT_PARAMS = [
     (FMT_MLA, 4, 1, 576, True),
     (FMT_SGLANG_MHA, 4, 8, 128, False),
     (FMT_SGLANG_MLA, 4, 1, 576, True),
+    (FMT_NORMAL_HND, 4, 8, 128, False),
+    (FMT_FLASH_INFER_HND, 4, 8, 128, False),
+    (FMT_VLLM_FUSED_HND, 4, 8, 256, True),
+    (FMT_VLLM_FUSED_NHD, 4, 8, 256, True),
+    (FMT_VLLM_CS_HND, 4, 8, 256, True),
+    (FMT_VLLM_CS_NHD, 4, 8, 256, True),
 ]
 
 
 def create_vllm_tensors(
-    gpu_kv_format,
+    engine_kv_format,
     nl: int,
     nb: int,
     bs: int,
@@ -73,29 +94,41 @@ def create_vllm_tensors(
     device: torch.device,
 ) -> list[torch.Tensor]:
     nbbs = nb * bs
-    if gpu_kv_format == FMT_NORMAL:
+    if engine_kv_format == FMT_NORMAL:
         shape = [2, nb, bs, nh, hs]
         return [_create_random_tensor(shape, dtype, device) for _ in range(nl)]
-    elif gpu_kv_format == FMT_CROSS_LAYER:
+    elif engine_kv_format == FMT_NORMAL_HND:
+        shape = [2, nb, nh, bs, hs]
+        return [_create_random_tensor(shape, dtype, device) for _ in range(nl)]
+    elif engine_kv_format == FMT_CROSS_LAYER:
         shape = [nb, nl, 2, bs, nh, hs]
         return [_create_random_tensor(shape, dtype, device)]
-    elif gpu_kv_format == FMT_FLASH_INFER:
+    elif engine_kv_format == FMT_FLASH_INFER:
         shape = [nb, 2, bs, nh, hs]
         return [_create_random_tensor(shape, dtype, device) for _ in range(nl)]
-    elif gpu_kv_format == FMT_MLA:
+    elif engine_kv_format == FMT_FLASH_INFER_HND:
+        shape = [nb, 2, nh, bs, hs]
+        return [_create_random_tensor(shape, dtype, device) for _ in range(nl)]
+    elif engine_kv_format in (FMT_VLLM_FUSED_HND, FMT_VLLM_CS_HND):
+        shape = [nb, nh, bs, hs]  # hs is the fused 2 * head_size
+        return [_create_random_tensor(shape, dtype, device) for _ in range(nl)]
+    elif engine_kv_format in (FMT_VLLM_FUSED_NHD, FMT_VLLM_CS_NHD):
+        shape = [nb, bs, nh, hs]  # hs is the fused 2 * head_size
+        return [_create_random_tensor(shape, dtype, device) for _ in range(nl)]
+    elif engine_kv_format == FMT_MLA:
         shape = [nb, bs, hs]
         return [_create_random_tensor(shape, dtype, device) for _ in range(nl)]
-    elif gpu_kv_format == FMT_SGLANG_MHA:
+    elif engine_kv_format == FMT_SGLANG_MHA:
         shape = [nbbs, nh, hs]
         return [_create_random_tensor(shape, dtype, device) for _ in range(2 * nl)]
-    elif gpu_kv_format == FMT_SGLANG_MLA:
+    elif engine_kv_format == FMT_SGLANG_MLA:
         shape = [nbbs, 1, hs]
         return [_create_random_tensor(shape, dtype, device) for _ in range(nl)]
-    raise ValueError(f"Unknown format: {gpu_kv_format}")
+    raise ValueError(f"Unknown format: {engine_kv_format}")
 
 
 def create_zero_vllm_tensors(
-    gpu_kv_format,
+    engine_kv_format,
     nl: int,
     nb: int,
     bs: int,
@@ -105,25 +138,37 @@ def create_zero_vllm_tensors(
     device: torch.device,
 ) -> list[torch.Tensor]:
     nbbs = nb * bs
-    if gpu_kv_format == FMT_NORMAL:
+    if engine_kv_format == FMT_NORMAL:
         shape = [2, nb, bs, nh, hs]
         return [_create_zero_tensor(shape, dtype, device) for _ in range(nl)]
-    elif gpu_kv_format == FMT_CROSS_LAYER:
+    elif engine_kv_format == FMT_NORMAL_HND:
+        shape = [2, nb, nh, bs, hs]
+        return [_create_zero_tensor(shape, dtype, device) for _ in range(nl)]
+    elif engine_kv_format == FMT_CROSS_LAYER:
         shape = [nb, nl, 2, bs, nh, hs]
         return [_create_zero_tensor(shape, dtype, device)]
-    elif gpu_kv_format == FMT_FLASH_INFER:
+    elif engine_kv_format == FMT_FLASH_INFER:
         shape = [nb, 2, bs, nh, hs]
         return [_create_zero_tensor(shape, dtype, device) for _ in range(nl)]
-    elif gpu_kv_format == FMT_MLA:
+    elif engine_kv_format == FMT_FLASH_INFER_HND:
+        shape = [nb, 2, nh, bs, hs]
+        return [_create_zero_tensor(shape, dtype, device) for _ in range(nl)]
+    elif engine_kv_format in (FMT_VLLM_FUSED_HND, FMT_VLLM_CS_HND):
+        shape = [nb, nh, bs, hs]  # hs is the fused 2 * head_size
+        return [_create_zero_tensor(shape, dtype, device) for _ in range(nl)]
+    elif engine_kv_format in (FMT_VLLM_FUSED_NHD, FMT_VLLM_CS_NHD):
+        shape = [nb, bs, nh, hs]  # hs is the fused 2 * head_size
+        return [_create_zero_tensor(shape, dtype, device) for _ in range(nl)]
+    elif engine_kv_format == FMT_MLA:
         shape = [nb, bs, hs]
         return [_create_zero_tensor(shape, dtype, device) for _ in range(nl)]
-    elif gpu_kv_format == FMT_SGLANG_MHA:
+    elif engine_kv_format == FMT_SGLANG_MHA:
         shape = [nbbs, nh, hs]
         return [_create_zero_tensor(shape, dtype, device) for _ in range(2 * nl)]
-    elif gpu_kv_format == FMT_SGLANG_MLA:
+    elif engine_kv_format == FMT_SGLANG_MLA:
         shape = [nbbs, 1, hs]
         return [_create_zero_tensor(shape, dtype, device) for _ in range(nl)]
-    raise ValueError(f"Unknown format: {gpu_kv_format}")
+    raise ValueError(f"Unknown format: {engine_kv_format}")
 
 
 def create_memory_objects(
@@ -151,7 +196,7 @@ def create_memory_objects(
 
 def get_block_data(
     vllm_tensors: list[torch.Tensor],
-    gpu_kv_format,
+    engine_kv_format,
     nl: int,
     bs: int,
     nh: int,
@@ -160,20 +205,28 @@ def get_block_data(
     """Extract all layer data for a given block."""
     results = []
     for layer_idx in range(nl):
-        if gpu_kv_format == FMT_NORMAL:
+        if engine_kv_format == FMT_NORMAL:
             results.append(vllm_tensors[layer_idx][:, block_idx, :, :, :].clone())
-        elif gpu_kv_format == FMT_CROSS_LAYER:
+        elif engine_kv_format == FMT_NORMAL_HND:
+            results.append(vllm_tensors[layer_idx][:, block_idx, :, :, :].clone())
+        elif engine_kv_format == FMT_CROSS_LAYER:
             results.append(vllm_tensors[0][block_idx, layer_idx, :, :, :, :].clone())
-        elif gpu_kv_format == FMT_FLASH_INFER:
+        elif engine_kv_format == FMT_FLASH_INFER:
             results.append(vllm_tensors[layer_idx][block_idx, :, :, :, :].clone())
-        elif gpu_kv_format == FMT_MLA:
+        elif engine_kv_format == FMT_FLASH_INFER_HND:
+            results.append(vllm_tensors[layer_idx][block_idx, :, :, :, :].clone())
+        elif engine_kv_format in (FMT_VLLM_FUSED_HND, FMT_VLLM_CS_HND):
+            results.append(vllm_tensors[layer_idx][block_idx, :, :, :].clone())
+        elif engine_kv_format in (FMT_VLLM_FUSED_NHD, FMT_VLLM_CS_NHD):
+            results.append(vllm_tensors[layer_idx][block_idx, :, :, :].clone())
+        elif engine_kv_format == FMT_MLA:
             results.append(vllm_tensors[layer_idx][block_idx, :, :].clone())
-        elif gpu_kv_format == FMT_SGLANG_MHA:
+        elif engine_kv_format == FMT_SGLANG_MHA:
             ts, ed = block_idx * bs, (block_idx + 1) * bs
             k = vllm_tensors[layer_idx][ts:ed, :, :].clone()
             v = vllm_tensors[nl + layer_idx][ts:ed, :, :].clone()
             results.append(torch.stack([k, v], dim=0))
-        elif gpu_kv_format == FMT_SGLANG_MLA:
+        elif engine_kv_format == FMT_SGLANG_MLA:
             ts, ed = block_idx * bs, (block_idx + 1) * bs
             results.append(vllm_tensors[layer_idx][ts:ed, 0, :].clone())
     return results
@@ -188,7 +241,7 @@ def call_block_kernel(
     vllm_tensors: list[torch.Tensor],
     mem_objects: list[torch.Tensor],
     block_ids: list[int],
-    gpu_kv_format,
+    engine_kv_format,
     direction,
     nl: int,
     nb: int,
@@ -201,7 +254,7 @@ def call_block_kernel(
 ) -> None:
     device = vllm_tensors[0].device
 
-    shape_desc = lmc_ops.PageBufferShapeDesc()
+    shape_desc = cuda_ops.PageBufferShapeDesc()
     shape_desc.kv_size = 1 if is_mla else 2
     shape_desc.nl = nl
     shape_desc.nb = nb
@@ -215,7 +268,7 @@ def call_block_kernel(
     lmcache_objects_ptrs = [m.data_ptr() for m in mem_objects]
 
     block_ids_gpu = torch.tensor(block_ids, dtype=torch.int64, device=device)
-    lmc_ops.multi_layer_block_kv_transfer(
+    cuda_ops.multi_layer_block_kv_transfer(
         paged_buffer_ptrs_tensor,
         lmcache_objects_ptrs,
         block_ids_gpu,
@@ -223,7 +276,7 @@ def call_block_kernel(
         direction,
         shape_desc,
         tokens_per_object,
-        gpu_kv_format,
+        engine_kv_format,
         skip_prefix_n_blocks,
     )
 
@@ -241,28 +294,47 @@ TOTAL_BLOCKS = NUM_MEMORY_OBJECTS * BLOCKS_PER_OBJECT  # 64
 
 
 @pytest.mark.parametrize(
-    "gpu_kv_format,nl,nh,hs,is_mla",
+    "engine_kv_format,nl,nh,hs,is_mla",
     FORMAT_PARAMS,
-    ids=["normal", "cross_layer", "flash_infer", "mla", "sglang_mha", "sglang_mla"],
+    ids=[
+        "normal",
+        "cross_layer",
+        "flash_infer",
+        "mla",
+        "sglang_mha",
+        "sglang_mla",
+        "normal_hnd",
+        "flash_infer_hnd",
+        "vllm_fused_hnd",
+        "vllm_fused_nhd",
+        "vllm_cs_hnd",
+        "vllm_cs_nhd",
+    ],
 )
 @pytest.mark.parametrize(
     "dtype", [torch.bfloat16, torch.float8_e4m3fn], ids=["bf16", "fp8"]
 )
-@pytest.mark.parametrize("mem_device", ["cuda", "cpu"], ids=["mem_gpu", "mem_cpu"])
-def test_block_transfer_roundtrip(gpu_kv_format, nl, nh, hs, is_mla, dtype, mem_device):
+@pytest.mark.parametrize(
+    "mem_device", [torch_device_type, "cpu"], ids=["mem_gpu", "mem_cpu"]
+)
+def test_block_transfer_roundtrip(
+    engine_kv_format, nl, nh, hs, is_mla, dtype, mem_device
+):
     """
     D2H -> H2D roundtrip with different block IDs proves data flows through
     memory objects.
     """
-    device = torch.device("cuda")
+    device = torch.device(torch_device_type)
     mem_dev = torch.device(mem_device)
     kv_dim = 1 if is_mla else 2
     hidden_dim = nh * hs
 
     # Create tensors
-    source_vllm = create_vllm_tensors(gpu_kv_format, nl, NB, BS, nh, hs, dtype, device)
+    source_vllm = create_vllm_tensors(
+        engine_kv_format, nl, NB, BS, nh, hs, dtype, device
+    )
     target_vllm = create_zero_vllm_tensors(
-        gpu_kv_format, nl, NB, BS, nh, hs, dtype, device
+        engine_kv_format, nl, NB, BS, nh, hs, dtype, device
     )
     mem_objects = create_memory_objects(
         kv_dim,
@@ -287,8 +359,8 @@ def test_block_transfer_roundtrip(gpu_kv_format, nl, nh, hs, is_mla, dtype, mem_
         source_vllm,
         mem_objects,
         block_ids_d2h,
-        gpu_kv_format,
-        lmc_ops.TransferDirection.D2H,
+        engine_kv_format,
+        lmcache_native.TransferDirection.D2H,
         nl,
         NB,
         BS,
@@ -297,15 +369,15 @@ def test_block_transfer_roundtrip(gpu_kv_format, nl, nh, hs, is_mla, dtype, mem_
         is_mla,
         TOKENS_PER_OBJECT,
     )
-    torch.cuda.synchronize()
+    torch_dev.synchronize()
 
     # H2D: mem_objects -> target
     call_block_kernel(
         target_vllm,
         mem_objects,
         block_ids_h2d,
-        gpu_kv_format,
-        lmc_ops.TransferDirection.H2D,
+        engine_kv_format,
+        lmcache_native.TransferDirection.H2D,
         nl,
         NB,
         BS,
@@ -314,15 +386,15 @@ def test_block_transfer_roundtrip(gpu_kv_format, nl, nh, hs, is_mla, dtype, mem_
         is_mla,
         TOKENS_PER_OBJECT,
     )
-    torch.cuda.synchronize()
+    torch_dev.synchronize()
 
     # Verify: target[h2d_block] == source[d2h_block]
     for i in range(TOTAL_BLOCKS):
         src_data = get_block_data(
-            source_vllm, gpu_kv_format, nl, BS, nh, block_ids_d2h[i]
+            source_vllm, engine_kv_format, nl, BS, nh, block_ids_d2h[i]
         )
         tgt_data = get_block_data(
-            target_vllm, gpu_kv_format, nl, BS, nh, block_ids_h2d[i]
+            target_vllm, engine_kv_format, nl, BS, nh, block_ids_h2d[i]
         )
         for layer_idx in range(nl):
             assert torch.equal(src_data[layer_idx], tgt_data[layer_idx]), (
@@ -331,21 +403,36 @@ def test_block_transfer_roundtrip(gpu_kv_format, nl, nh, hs, is_mla, dtype, mem_
 
 
 @pytest.mark.parametrize(
-    "gpu_kv_format,nl,nh,hs,is_mla",
+    "engine_kv_format,nl,nh,hs,is_mla",
     FORMAT_PARAMS,
-    ids=["normal", "cross_layer", "flash_infer", "mla", "sglang_mha", "sglang_mla"],
+    ids=[
+        "normal",
+        "cross_layer",
+        "flash_infer",
+        "mla",
+        "sglang_mha",
+        "sglang_mla",
+        "normal_hnd",
+        "flash_infer_hnd",
+        "vllm_fused_hnd",
+        "vllm_fused_nhd",
+        "vllm_cs_hnd",
+        "vllm_cs_nhd",
+    ],
 )
 @pytest.mark.parametrize("dtype", [torch.bfloat16], ids=["bf16"])
-def test_block_transfer_skip_prefix(gpu_kv_format, nl, nh, hs, is_mla, dtype):
+def test_block_transfer_skip_prefix(engine_kv_format, nl, nh, hs, is_mla, dtype):
     """Verify skip_prefix_n_blocks=4 skips the first 4 blocks globally."""
-    device = torch.device("cuda")
+    device = torch.device(torch_device_type)
     kv_dim = 1 if is_mla else 2
     hidden_dim = nh * hs
     skip = 4
 
-    source_vllm = create_vllm_tensors(gpu_kv_format, nl, NB, BS, nh, hs, dtype, device)
+    source_vllm = create_vllm_tensors(
+        engine_kv_format, nl, NB, BS, nh, hs, dtype, device
+    )
     target_vllm = create_zero_vllm_tensors(
-        gpu_kv_format, nl, NB, BS, nh, hs, dtype, device
+        engine_kv_format, nl, NB, BS, nh, hs, dtype, device
     )
     mem_objects = create_memory_objects(
         kv_dim,
@@ -369,8 +456,8 @@ def test_block_transfer_skip_prefix(gpu_kv_format, nl, nh, hs, is_mla, dtype):
         source_vllm,
         mem_objects,
         block_ids_d2h,
-        gpu_kv_format,
-        lmc_ops.TransferDirection.D2H,
+        engine_kv_format,
+        lmcache_native.TransferDirection.D2H,
         nl,
         NB,
         BS,
@@ -380,15 +467,15 @@ def test_block_transfer_skip_prefix(gpu_kv_format, nl, nh, hs, is_mla, dtype):
         TOKENS_PER_OBJECT,
         skip_prefix_n_blocks=skip,
     )
-    torch.cuda.synchronize()
+    torch_dev.synchronize()
 
     # H2D with skip
     call_block_kernel(
         target_vllm,
         mem_objects,
         block_ids_h2d,
-        gpu_kv_format,
-        lmc_ops.TransferDirection.H2D,
+        engine_kv_format,
+        lmcache_native.TransferDirection.H2D,
         nl,
         NB,
         BS,
@@ -398,15 +485,15 @@ def test_block_transfer_skip_prefix(gpu_kv_format, nl, nh, hs, is_mla, dtype):
         TOKENS_PER_OBJECT,
         skip_prefix_n_blocks=skip,
     )
-    torch.cuda.synchronize()
+    torch_dev.synchronize()
 
     # Non-skipped blocks should match
     for i in range(skip, TOTAL_BLOCKS):
         src_data = get_block_data(
-            source_vllm, gpu_kv_format, nl, BS, nh, block_ids_d2h[i]
+            source_vllm, engine_kv_format, nl, BS, nh, block_ids_d2h[i]
         )
         tgt_data = get_block_data(
-            target_vllm, gpu_kv_format, nl, BS, nh, block_ids_h2d[i]
+            target_vllm, engine_kv_format, nl, BS, nh, block_ids_h2d[i]
         )
         for layer_idx in range(nl):
             assert torch.equal(src_data[layer_idx], tgt_data[layer_idx]), (
@@ -416,7 +503,7 @@ def test_block_transfer_skip_prefix(gpu_kv_format, nl, nh, hs, is_mla, dtype):
     # Skipped blocks in target should remain zero
     for i in range(skip):
         tgt_data = get_block_data(
-            target_vllm, gpu_kv_format, nl, BS, nh, block_ids_h2d[i]
+            target_vllm, engine_kv_format, nl, BS, nh, block_ids_h2d[i]
         )
         for layer_idx in range(nl):
             block = tgt_data[layer_idx]
@@ -424,4 +511,141 @@ def test_block_transfer_skip_prefix(gpu_kv_format, nl, nh, hs, is_mla, dtype):
                 block = block.to(torch.float32)
             assert block.abs().sum().item() == 0, (
                 f"Skipped block {i}, layer {layer_idx} is not zero"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Large-block content-size case (e.g., DeepSeek indexer k-cache): NH == 1 and
+# BS much larger than one thread block can cover with a single token slice,
+# exercising the blockDim.z token partitioning in the transfer kernel. This
+# geometry cannot reuse FORMAT_PARAMS because the tests above hard-code
+# BS = 16 and TOKENS_PER_OBJECT = 256, while the kernel requires
+# blocks_per_object * bs == lmcache_chunk_size (so here one engine block
+# fills a whole memory object).
+# ---------------------------------------------------------------------------
+
+LARGE_BLOCK_NL = 20
+LARGE_BLOCK_NH = 1
+LARGE_BLOCK_BS = 1536
+LARGE_BLOCK_CS = 576
+# Keep NB small: each layer tensor is [NB, 1, 1536, 576] and there are
+# source + target copies of LARGE_BLOCK_NL layers on the GPU.
+LARGE_BLOCK_NB = 8
+LARGE_BLOCK_TOKENS_PER_OBJECT = LARGE_BLOCK_BS  # one engine block per object
+LARGE_BLOCK_TOTAL_BLOCKS = NUM_MEMORY_OBJECTS
+
+
+@pytest.mark.parametrize(
+    "dtype", [torch.bfloat16, torch.float8_e4m3fn], ids=["bf16", "fp8"]
+)
+@pytest.mark.parametrize(
+    "mem_device", [torch_device_type, "cpu"], ids=["mem_gpu", "mem_cpu"]
+)
+def test_block_transfer_roundtrip_large_block(dtype, mem_device):
+    """
+    D2H -> H2D roundtrip for the content-size HND format (NL_X_NB_NH_BS_CS)
+    with a single head and a large block size (NH=1, BS=1536, CS=576).
+
+    Unlike the BS=16 cases above, this launches the kernel with multiple
+    z-slices per thread block, so it verifies the strided token loop copies
+    every token exactly once.
+    """
+    device = torch.device(torch_device_type)
+    mem_dev = torch.device(mem_device)
+    kv_dim = 1  # content-size formats transfer with kv_size == 1
+    hidden_dim = LARGE_BLOCK_NH * LARGE_BLOCK_CS
+
+    source_vllm = create_vllm_tensors(
+        FMT_VLLM_CS_HND,
+        LARGE_BLOCK_NL,
+        LARGE_BLOCK_NB,
+        LARGE_BLOCK_BS,
+        LARGE_BLOCK_NH,
+        LARGE_BLOCK_CS,
+        dtype,
+        device,
+    )
+    target_vllm = create_zero_vllm_tensors(
+        FMT_VLLM_CS_HND,
+        LARGE_BLOCK_NL,
+        LARGE_BLOCK_NB,
+        LARGE_BLOCK_BS,
+        LARGE_BLOCK_NH,
+        LARGE_BLOCK_CS,
+        dtype,
+        device,
+    )
+    mem_objects = create_memory_objects(
+        kv_dim,
+        LARGE_BLOCK_NL,
+        LARGE_BLOCK_TOKENS_PER_OBJECT,
+        hidden_dim,
+        NUM_MEMORY_OBJECTS,
+        dtype,
+        mem_dev,
+    )
+
+    # Disjoint block IDs for D2H and H2D
+    rng_d2h = random.Random(42)
+    block_ids_d2h = rng_d2h.sample(range(LARGE_BLOCK_NB), LARGE_BLOCK_TOTAL_BLOCKS)
+    excluded = set(block_ids_d2h)
+    available = [i for i in range(LARGE_BLOCK_NB) if i not in excluded]
+    rng_h2d = random.Random(123)
+    block_ids_h2d = rng_h2d.sample(available, LARGE_BLOCK_TOTAL_BLOCKS)
+
+    # D2H: source -> mem_objects
+    call_block_kernel(
+        source_vllm,
+        mem_objects,
+        block_ids_d2h,
+        FMT_VLLM_CS_HND,
+        lmcache_native.TransferDirection.D2H,
+        LARGE_BLOCK_NL,
+        LARGE_BLOCK_NB,
+        LARGE_BLOCK_BS,
+        LARGE_BLOCK_NH,
+        LARGE_BLOCK_CS,
+        True,
+        LARGE_BLOCK_TOKENS_PER_OBJECT,
+    )
+    torch_dev.synchronize()
+
+    # H2D: mem_objects -> target
+    call_block_kernel(
+        target_vllm,
+        mem_objects,
+        block_ids_h2d,
+        FMT_VLLM_CS_HND,
+        lmcache_native.TransferDirection.H2D,
+        LARGE_BLOCK_NL,
+        LARGE_BLOCK_NB,
+        LARGE_BLOCK_BS,
+        LARGE_BLOCK_NH,
+        LARGE_BLOCK_CS,
+        True,
+        LARGE_BLOCK_TOKENS_PER_OBJECT,
+    )
+    torch_dev.synchronize()
+
+    # Verify: target[h2d_block] == source[d2h_block]
+    for i in range(LARGE_BLOCK_TOTAL_BLOCKS):
+        src_data = get_block_data(
+            source_vllm,
+            FMT_VLLM_CS_HND,
+            LARGE_BLOCK_NL,
+            LARGE_BLOCK_BS,
+            LARGE_BLOCK_NH,
+            block_ids_d2h[i],
+        )
+        tgt_data = get_block_data(
+            target_vllm,
+            FMT_VLLM_CS_HND,
+            LARGE_BLOCK_NL,
+            LARGE_BLOCK_BS,
+            LARGE_BLOCK_NH,
+            block_ids_h2d[i],
+        )
+        for layer_idx in range(LARGE_BLOCK_NL):
+            assert torch.equal(src_data[layer_idx], tgt_data[layer_idx]), (
+                f"Mismatch at block index {i}, layer {layer_idx}"
             )

@@ -18,16 +18,30 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache import torch_dev, torch_device_type
+from lmcache.lmcache_native import Bitmap
+from lmcache.v1.distributed.api import (
+    AttnWindowDesc,
+    MemoryLayoutDesc,
+    ObjectKey,
+    PrefetchMode,
+    PrefetchRequestSpec,
+    TrimPolicy,
+)
 from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.l1_manager import L1Manager
+from lmcache.v1.distributed.l2_adapters.fault_inject_l2_adapter import (
+    FaultInjectL2Adapter,
+)
 from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import (
     MockL2Adapter,
     MockL2AdapterConfig,
 )
 from lmcache.v1.distributed.storage_controllers.prefetch_controller import (
     PrefetchController,
+    build_trim_mask,
+    merge_bitmaps,
 )
 from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
     DefaultPrefetchPolicy,
@@ -36,12 +50,13 @@ from lmcache.v1.distributed.storage_controllers.store_policy import (
     AdapterDescriptor,
 )
 from lmcache.v1.memory_management import MemoryObjMetadata, TensorMemoryObj
+from tests.v1.distributed.utils import should_use_lazy_alloc
 
-# Skip all tests in this module if CUDA is not available
-pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="CUDA is not available"
-)
-
+if not torch_dev.is_available():
+    pytest.skip(
+        f"Requires available {torch_device_type} runtime",
+        allow_module_level=True,
+    )
 
 # =============================================================================
 # Helpers
@@ -63,10 +78,6 @@ def make_layout() -> MemoryLayoutDesc:
         shapes=[torch.Size([100, 2, 512])],
         dtypes=[torch.bfloat16],
     )
-
-
-def should_use_lazy_alloc() -> bool:
-    return torch.cuda.is_available()
 
 
 def wait_for_condition(
@@ -94,7 +105,7 @@ def wait_for_prefetch_result(
     while time.monotonic() < deadline:
         result = ctrl.query_prefetch_result(req_id)
         if result is not None:
-            return result
+            return result.count_leading_ones()
         time.sleep(poll_interval)
     return None
 
@@ -109,6 +120,26 @@ def wait_for_lookup_result(
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         result = ctrl.query_lookup_result(req_id)
+        if result is not None:
+            return result
+        time.sleep(poll_interval)
+    return None
+
+
+def wait_for_prefetch_result_bitmap(
+    ctrl: PrefetchController,
+    req_id: int,
+    timeout: float = 5.0,
+    poll_interval: float = 0.05,
+):
+    """Poll query_prefetch_result, returning the raw retained Bitmap.
+
+    Unlike :func:`wait_for_prefetch_result`, this keeps the full bitmap so a
+    caller can inspect non-contiguous retained sets (e.g. SEGMENTED_PREFIX).
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        result = ctrl.query_prefetch_result(req_id)
         if result is not None:
             return result
         time.sleep(poll_interval)
@@ -235,7 +266,7 @@ class TestSingleAdapterPrefetch:
         )
         ctrl.start()
 
-        req_id = ctrl.submit_prefetch_request(keys, layout)
+        req_id = ctrl.submit_prefetch_request(PrefetchRequestSpec(keys, {0: layout}))
         result = wait_for_prefetch_result(ctrl, req_id)
 
         assert result == 5, f"Expected 5 prefix hits, got {result}"
@@ -268,7 +299,9 @@ class TestSingleAdapterPrefetch:
         )
         ctrl.start()
 
-        req_id = ctrl.submit_prefetch_request(all_keys, layout)
+        req_id = ctrl.submit_prefetch_request(
+            PrefetchRequestSpec(all_keys, {0: layout})
+        )
         result = wait_for_prefetch_result(ctrl, req_id)
 
         assert result == 2, f"Expected 2 prefix hits (gap at index 2), got {result}"
@@ -289,6 +322,92 @@ class TestSingleAdapterPrefetch:
         ctrl.stop()
         adapter.close()
 
+    def test_segmented_prefix_with_gap(self, l1_manager):
+        """SEGMENTED_PREFIX retains the post-gap keys: L2 {0,1,3,4} -> {0,1,3,4}.
+
+        The PREFIX counterpart (test_prefix_with_gap) truncates the same gap to
+        {0,1}; SEGMENTED_PREFIX keeps the post-gap chunks L1-resident so only
+        the hole (index 2) needs recomputing.
+        """
+        adapter = make_adapter()
+        layout = make_layout()
+        all_keys = [make_object_key(i) for i in range(5)]
+        # Store only keys 0, 1, 3, 4 (gap at index 2).
+        store_keys_in_l2(adapter, [all_keys[i] for i in [0, 1, 3, 4]], layout)
+
+        ctrl = PrefetchController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultPrefetchPolicy(),
+        )
+        ctrl.start()
+
+        req_id = ctrl.submit_prefetch_request(
+            PrefetchRequestSpec(
+                all_keys, {0: layout}, policy=TrimPolicy.SEGMENTED_PREFIX
+            )
+        )
+        retained = wait_for_prefetch_result_bitmap(ctrl, req_id)
+        assert retained is not None
+        assert retained.get_indices_list() == [0, 1, 3, 4], (
+            "SEGMENTED_PREFIX should retain post-gap keys, got "
+            f"{retained.get_indices_list()}"
+        )
+
+        # Retained keys {0,1,3,4} are read-locked in L1; the gap (2) is absent.
+        retained_keys = [all_keys[i] for i in [0, 1, 3, 4]]
+        read = l1_manager.unsafe_read(retained_keys)
+        for key in retained_keys:
+            assert read[key][0] == L1Error.SUCCESS
+        gap_read = l1_manager.reserve_read([all_keys[2]])
+        assert gap_read[all_keys[2]][0] == L1Error.KEY_NOT_EXIST
+
+        l1_manager.finish_read(retained_keys)
+        ctrl.stop()
+        adapter.close()
+
+    def test_fault_inject_load_gap_segmented_vs_prefix(self, l1_manager):
+        """fault_inject (load fails at index 2) drives the segmented path.
+
+        Lookup reports all 5 keys present; the *load* of index 2 fails (the L2
+        retrieve error the adapter simulates). SEGMENTED_PREFIX retains the
+        post-gap keys {0,1,3,4}; PREFIX truncates at the hole to {0,1}. Distinct
+        key ranges per policy keep the shared L1 from serving the second pass.
+        """
+        layout = make_layout()
+        for base, trim, expected in (
+            (0, TrimPolicy.SEGMENTED_PREFIX, [0, 1, 3, 4]),
+            (10, TrimPolicy.PREFIX, [0, 1]),
+        ):
+            keys = [make_object_key(base + i) for i in range(5)]
+            inner = make_adapter()
+            store_keys_in_l2(inner, keys, layout)  # all 5 present at lookup
+            # Drop task-position 2 at load -> a mid-prefix L2 retrieve failure.
+            fault = FaultInjectL2Adapter(inner, rate=0.0, seed=0, gap_indices=(2,))
+
+            ctrl = PrefetchController(
+                l1_manager=l1_manager,
+                l2_adapters=[fault],
+                adapter_descriptors=[make_descriptor(0)],
+                policy=DefaultPrefetchPolicy(),
+            )
+            ctrl.start()
+            req_id = ctrl.submit_prefetch_request(
+                PrefetchRequestSpec(keys, {0: layout}, policy=trim)
+            )
+            retained = wait_for_prefetch_result_bitmap(ctrl, req_id)
+            assert retained is not None
+            assert retained.get_indices_list() == expected, (
+                f"{trim.name}: expected {expected}, got {retained.get_indices_list()}"
+            )
+
+            held = [keys[i] for i in retained.get_indices_list()]
+            if held:
+                l1_manager.finish_read(held)
+            ctrl.stop()
+            fault.close()
+
     def test_key0_missing(self, l1_manager):
         """L2 has keys {1,2,3} but not 0 → prefix = 0, nothing loaded."""
         adapter = make_adapter()
@@ -306,7 +425,9 @@ class TestSingleAdapterPrefetch:
         )
         ctrl.start()
 
-        req_id = ctrl.submit_prefetch_request(all_keys, layout)
+        req_id = ctrl.submit_prefetch_request(
+            PrefetchRequestSpec(all_keys, {0: layout})
+        )
         result = wait_for_prefetch_result(ctrl, req_id)
 
         assert result == 0, f"Expected 0 prefix hits (key 0 missing), got {result}"
@@ -346,7 +467,7 @@ class TestMultiAdapterPrefetch:
         )
         ctrl.start()
 
-        req_id = ctrl.submit_prefetch_request(keys, layout)
+        req_id = ctrl.submit_prefetch_request(PrefetchRequestSpec(keys, {0: layout}))
         result = wait_for_prefetch_result(ctrl, req_id)
 
         assert result == 4, f"Expected 4 prefix hits, got {result}"
@@ -379,7 +500,7 @@ class TestMultiAdapterPrefetch:
         )
         ctrl.start()
 
-        req_id = ctrl.submit_prefetch_request(keys, layout)
+        req_id = ctrl.submit_prefetch_request(PrefetchRequestSpec(keys, {0: layout}))
         result = wait_for_prefetch_result(ctrl, req_id)
 
         assert result == 3, f"Expected 3 prefix hits, got {result}"
@@ -417,7 +538,7 @@ class TestNoHits:
         )
         ctrl.start()
 
-        req_id = ctrl.submit_prefetch_request(keys, layout)
+        req_id = ctrl.submit_prefetch_request(PrefetchRequestSpec(keys, {0: layout}))
         result = wait_for_prefetch_result(ctrl, req_id)
 
         assert result == 0, f"Expected 0 prefix hits, got {result}"
@@ -438,7 +559,7 @@ class TestNoHits:
         )
         ctrl.start()
 
-        req_id = ctrl.submit_prefetch_request(keys, layout)
+        req_id = ctrl.submit_prefetch_request(PrefetchRequestSpec(keys, {0: layout}))
         result = wait_for_prefetch_result(ctrl, req_id)
 
         assert result == 0, f"Expected 0 prefix hits, got {result}"
@@ -469,7 +590,7 @@ class TestQueryResult:
         )
         ctrl.start()
 
-        req_id = ctrl.submit_prefetch_request(keys, layout)
+        req_id = ctrl.submit_prefetch_request(PrefetchRequestSpec(keys, {0: layout}))
         result = wait_for_prefetch_result(ctrl, req_id)
 
         assert result == 2
@@ -518,7 +639,7 @@ class TestPrefetchL2LockRelease:
         )
         ctrl.start()
 
-        req_id = ctrl.submit_prefetch_request(keys, layout)
+        req_id = ctrl.submit_prefetch_request(PrefetchRequestSpec(keys, {0: layout}))
         result = wait_for_prefetch_result(ctrl, req_id)
         assert result == 3
 
@@ -550,7 +671,9 @@ class TestPrefetchL2LockRelease:
         )
         ctrl.start()
 
-        req_id = ctrl.submit_prefetch_request(all_keys, layout)
+        req_id = ctrl.submit_prefetch_request(
+            PrefetchRequestSpec(all_keys, {0: layout})
+        )
         result = wait_for_prefetch_result(ctrl, req_id)
         assert result == 2
 
@@ -580,7 +703,7 @@ class TestPrefetchL2LockRelease:
         )
         ctrl.start()
 
-        req_id = ctrl.submit_prefetch_request(keys, layout)
+        req_id = ctrl.submit_prefetch_request(PrefetchRequestSpec(keys, {0: layout}))
         result = wait_for_prefetch_result(ctrl, req_id)
         assert result == 0
 
@@ -612,7 +735,7 @@ class TestPrefetchL2LockRelease:
         )
         ctrl.start()
 
-        req_id = ctrl.submit_prefetch_request(keys, layout)
+        req_id = ctrl.submit_prefetch_request(PrefetchRequestSpec(keys, {0: layout}))
         result = wait_for_prefetch_result(ctrl, req_id)
         assert result == 3
 
@@ -660,7 +783,9 @@ class TestMaxInFlight:
         req_ids = []
         for i in range(4):
             batch_keys = all_keys[i * 2 : (i + 1) * 2]
-            req_id = ctrl.submit_prefetch_request(batch_keys, layout)
+            req_id = ctrl.submit_prefetch_request(
+                PrefetchRequestSpec(batch_keys, {0: layout})
+            )
             req_ids.append(req_id)
 
         # All 4 requests should eventually complete
@@ -705,11 +830,11 @@ class TestMultipleRequests:
         )
         ctrl.start()
 
-        req1 = ctrl.submit_prefetch_request(keys1, layout)
+        req1 = ctrl.submit_prefetch_request(PrefetchRequestSpec(keys1, {0: layout}))
         result1 = wait_for_prefetch_result(ctrl, req1)
         assert result1 == 3
 
-        req2 = ctrl.submit_prefetch_request(keys2, layout)
+        req2 = ctrl.submit_prefetch_request(PrefetchRequestSpec(keys2, {0: layout}))
         result2 = wait_for_prefetch_result(ctrl, req2)
         assert result2 == 4
 
@@ -757,7 +882,9 @@ class TestExtraCountPrefetch:
         )
         ctrl.start()
 
-        req_id = ctrl.submit_prefetch_request(keys, layout, extra_count=0)
+        req_id = ctrl.submit_prefetch_request(
+            PrefetchRequestSpec(keys, {0: layout}, extra_count=0)
+        )
         result = wait_for_prefetch_result(ctrl, req_id)
         assert result == 3
 
@@ -791,7 +918,9 @@ class TestExtraCountPrefetch:
         ctrl.start()
 
         # extra_count=1 → 2 read locks per key
-        req_id = ctrl.submit_prefetch_request(keys, layout, extra_count=1)
+        req_id = ctrl.submit_prefetch_request(
+            PrefetchRequestSpec(keys, {0: layout}, extra_count=1)
+        )
         result = wait_for_prefetch_result(ctrl, req_id)
         assert result == 3
 
@@ -837,7 +966,9 @@ class TestExtraCountPrefetch:
         ctrl.start()
 
         # extra_count=3 → 4 read locks per key
-        req_id = ctrl.submit_prefetch_request(keys, layout, extra_count=3)
+        req_id = ctrl.submit_prefetch_request(
+            PrefetchRequestSpec(keys, {0: layout}, extra_count=3)
+        )
         result = wait_for_prefetch_result(ctrl, req_id)
         assert result == 2
 
@@ -881,7 +1012,9 @@ class TestExtraCountPrefetch:
         )
         ctrl.start()
 
-        req_id = ctrl.submit_prefetch_request(all_keys, layout, extra_count=1)
+        req_id = ctrl.submit_prefetch_request(
+            PrefetchRequestSpec(all_keys, {0: layout}, extra_count=1)
+        )
         result = wait_for_prefetch_result(ctrl, req_id)
         assert result == 2, f"Expected 2 prefix hits (gap at index 2), got {result}"
 
@@ -917,47 +1050,40 @@ class TestExtraCountPrefetch:
 
     def test_extra_count_non_prefix_loaded_keys_fully_released(self, l1_manager):
         """Keys loaded beyond the prefix (due to partial load failure) must
-        have ALL extra locks released by _finalize_load so they can be evicted.
+        have ALL extra locks released by the finish so they can be evicted.
 
-        We simulate this by storing keys {0, 1, 2} in L2 but making key 1
-        fail to reserve in L1 (by pre-occupying it), creating a gap so that
-        key 2 is loaded but lies beyond the prefix.  _finalize_load must
-        release 1 + extra_count locks for key 2.
+        Keys {0, 1, 2} are in L2 and all reserve fine, but the *load* of
+        key 1 fails (fault-injected), creating a gap so that key 2 is loaded
+        but lies beyond the prefix.  The finish must release 1 + extra_count
+        locks for key 2.
         """
-        adapter = make_adapter()
         layout = make_layout()
         keys = [make_object_key(i) for i in range(3)]
-        store_keys_in_l2(adapter, keys, layout)
-
-        # Pre-occupy key[1] in L1 with a write lock so reserve_write fails for it.
-        # This forces a gap: key 0 is prefix (hit), key 1 fails reservation
-        # (gap), key 2 is loaded but beyond the prefix.
-        pre_write_results = l1_manager.reserve_write(
-            keys=[keys[1]],
-            is_temporary=[False],
-            layout_desc=layout,
-            mode="new",
-        )
-        assert pre_write_results[keys[1]][0] == L1Error.SUCCESS
+        inner = make_adapter()
+        store_keys_in_l2(inner, keys, layout)
+        # Drop task-position 1 at load -> a mid-prefix L2 retrieve failure.
+        fault = FaultInjectL2Adapter(inner, rate=0.0, seed=0, gap_indices=(1,))
 
         ctrl = PrefetchController(
             l1_manager=l1_manager,
-            l2_adapters=[adapter],
+            l2_adapters=[fault],
             adapter_descriptors=[make_descriptor(0)],
             policy=DefaultPrefetchPolicy(),
         )
         ctrl.start()
 
-        req_id = ctrl.submit_prefetch_request(keys, layout, extra_count=1)
+        req_id = ctrl.submit_prefetch_request(
+            PrefetchRequestSpec(keys, {0: layout}, extra_count=1)
+        )
         result = wait_for_prefetch_result(ctrl, req_id)
-        # Only key 0 is in the prefix (key 1 reservation failed → gap)
+        # Only key 0 is in the prefix (key 1 load failed → gap)
         assert result == 1, f"Expected 1 prefix hit, got {result}"
 
         # key[0] should be in L1 with 2 read locks (1 + extra_count=1)
         read_results = l1_manager.unsafe_read([keys[0]])
         assert read_results[keys[0]][0] == L1Error.SUCCESS
 
-        # key[2] was loaded but is beyond the prefix; _finalize_load must have
+        # key[2] was loaded but is beyond the prefix; the finish must have
         # released all 1 + extra_count=2 locks, so it should be gone from L1
         # (it's a temporary object and its lock count should be 0).
         reserve_results = l1_manager.reserve_read([keys[2]])
@@ -966,14 +1092,11 @@ class TestExtraCountPrefetch:
             "evicted from L1"
         )
 
-        # Clean up: release key[0]'s 2 locks and key[1]'s write lock
+        # Clean up: release key[0]'s 2 locks
         l1_manager.finish_read([keys[0]], extra_count=0)
         l1_manager.finish_read([keys[0]], extra_count=0)
-        l1_manager.finish_write([keys[1]])
-        l1_manager.delete([keys[1]])
-
         ctrl.stop()
-        adapter.close()
+        fault.close()
 
 
 # =============================================================================
@@ -999,7 +1122,7 @@ class TestQueryLookupResult:
         )
         ctrl.start()
 
-        req_id = ctrl.submit_prefetch_request(keys, layout)
+        req_id = ctrl.submit_prefetch_request(PrefetchRequestSpec(keys, {0: layout}))
 
         # Lookup result should be available before or at the same time as
         # the full prefetch result.
@@ -1031,7 +1154,7 @@ class TestQueryLookupResult:
         )
         ctrl.start()
 
-        req_id = ctrl.submit_prefetch_request(keys, layout)
+        req_id = ctrl.submit_prefetch_request(PrefetchRequestSpec(keys, {0: layout}))
         lookup_hits = wait_for_lookup_result(ctrl, req_id)
         assert lookup_hits is not None
         # Only key 0 is in the prefix (gap at key 1 breaks it)
@@ -1059,7 +1182,7 @@ class TestQueryLookupResult:
         )
         ctrl.start()
 
-        req_id = ctrl.submit_prefetch_request(keys, layout)
+        req_id = ctrl.submit_prefetch_request(PrefetchRequestSpec(keys, {0: layout}))
         lookup_hits = wait_for_lookup_result(ctrl, req_id)
         assert lookup_hits is not None
         assert lookup_hits == 0
@@ -1085,7 +1208,7 @@ class TestQueryLookupResult:
         )
         ctrl.start()
 
-        req_id = ctrl.submit_prefetch_request(keys, layout)
+        req_id = ctrl.submit_prefetch_request(PrefetchRequestSpec(keys, {0: layout}))
         lookup_hits = wait_for_lookup_result(ctrl, req_id)
         assert lookup_hits == 2
 
@@ -1114,7 +1237,7 @@ class TestQueryLookupResult:
         )
         ctrl.start()
 
-        req_id = ctrl.submit_prefetch_request(keys, layout)
+        req_id = ctrl.submit_prefetch_request(PrefetchRequestSpec(keys, {0: layout}))
         lookup_hits = wait_for_lookup_result(ctrl, req_id)
         assert lookup_hits == 2
 
@@ -1142,3 +1265,625 @@ class TestQueryLookupResult:
         assert ctrl.query_lookup_result(999) is None
 
         ctrl.stop()
+
+
+class TestBuildTrimMask:
+    """build_trim_mask picks the retained subset per policy: PREFIX trims at
+    the first gap; SEGMENTED_PREFIX and SPARSE keep every set bit (gaps and
+    all). The retained bitmap is consumed unchanged at the controller's load
+    sites, so testing the mask directly covers the policy semantics."""
+
+    @staticmethod
+    def _bm(n, idxs):
+        bm = Bitmap(n)
+        for i in idxs:
+            bm.set(i)
+        return bm
+
+    def test_prefix_trims_at_first_gap(self):
+        found = self._bm(5, [0, 1, 3, 4])  # gap at index 2
+        _hit, retained = build_trim_mask(found, 5, TrimPolicy.PREFIX)
+        assert retained.get_indices_list() == [0, 1]
+
+    def test_segmented_prefix_keeps_gaps(self):
+        # Models an L2 hit whose L1 load failed mid-prefix (e.g. OOM at index
+        # 2): the keys that did load are kept, not trimmed to the first gap.
+        found = self._bm(5, [0, 1, 3, 4])
+        _hit, retained = build_trim_mask(found, 5, TrimPolicy.SEGMENTED_PREFIX)
+        assert retained.get_indices_list() == [0, 1, 3, 4]
+
+    def test_sparse_keeps_all_found(self):
+        found = self._bm(5, [0, 2, 4])
+        _hit, retained = build_trim_mask(found, 5, TrimPolicy.SPARSE)
+        assert retained.get_indices_list() == [0, 2, 4]
+
+    def test_prefix_sliding_window_retains_window(self):
+        """With a sliding-window group (w=2) and a full-attention group, the
+        fold retains only the in-window chunks for the SW group."""
+        # 2 groups (full_attn=-1, sw=2), 1 rank, 4 chunks
+        # chunk-major layout: g0c0, g1c0, g0c1, g1c1, g0c2, g1c2, g0c3, g1c3
+        num_keys = 8
+        attn_desc = AttnWindowDesc(num_chunks_in_sw=[-1, 2])
+        # All present
+        found = self._bm(num_keys, range(num_keys))
+        hit_length, retained = build_trim_mask(
+            found,
+            num_keys,
+            TrimPolicy.PREFIX,
+            attn_desc,
+        )
+        indices = retained.get_indices_list()
+        # full-attn group (even indices): all 4 chunks retained
+        assert all(i in indices for i in [0, 2, 4, 6])
+        # SW group (odd indices): only last 2 chunks (indices 5, 7) retained
+        assert 1 not in indices  # chunk 0 out of window
+        assert 3 not in indices  # chunk 1 out of window
+        assert 5 in indices  # chunk 2 in window
+        assert 7 in indices  # chunk 3 in window
+        assert hit_length == 4
+
+    def test_prefix_full_attention_only_matches_leading_ones(self):
+        """With all-full-attention groups, fold reduces to count_leading_ones."""
+        attn_desc = AttnWindowDesc(num_chunks_in_sw=[-1])
+        found = self._bm(5, [0, 1, 3, 4])  # gap at index 2
+        hit_length, retained = build_trim_mask(
+            found,
+            5,
+            TrimPolicy.PREFIX,
+            attn_desc,
+        )
+        assert retained.get_indices_list() == [0, 1]
+        assert hit_length == 2
+
+    def test_prefix_sw_gap_in_full_attn_trims_correctly(self):
+        """A gap in a full-attention group limits the hit length for all groups
+        including sliding-window groups."""
+        # 2 groups (full=-1, sw=2), 1 rank, 3 chunks
+        # Layout: g0c0, g1c0, g0c1, g1c1, g0c2, g1c2
+        attn_desc = AttnWindowDesc(num_chunks_in_sw=[-1, 2])
+        # Full-attn group: chunks 0, 2 present (gap at chunk 1)
+        # SW group: all chunks present
+        # Chunk-major: g0c0=1, g1c0=1, g0c1=0, g1c1=1, g0c2=1, g1c2=1
+        found = self._bm(6, [0, 1, 3, 4, 5])  # missing index 2 (g0c1)
+        hit_length, retained = build_trim_mask(
+            found,
+            6,
+            TrimPolicy.PREFIX,
+            attn_desc,
+        )
+        # Full-attn gap at chunk 1 means hit_length=1
+        # Only chunk 0 retained: g0c0 and g1c0
+        indices = retained.get_indices_list()
+        assert indices == [0, 1]
+        assert hit_length == 1
+
+
+class TestMergeBitmaps:
+    """merge_bitmaps always returns a num_keys-sized bitmap."""
+
+    def test_empty_input_returns_sized_bitmap(self):
+        """Empty input -> num_keys-sized all-zeros bitmap (not Bitmap(0)), so a
+        downstream ``&`` with a same-sized mask never hits a size mismatch."""
+        merged = merge_bitmaps([], 5)
+        assert merged.popcount() == 0
+        mask = Bitmap(5)
+        mask.set(2)
+        assert (merged & mask).popcount() == 0  # would raise on size mismatch
+
+    def test_empty_generator_returns_sized_bitmap(self):
+        """A generator is truthy even when empty; the result is still size-5."""
+        merged = merge_bitmaps((b for b in []), 5)
+        assert merged.popcount() == 0
+        assert (merged & Bitmap(5)).popcount() == 0
+
+    def test_union_of_bitmaps(self):
+        """Non-empty inputs are OR-merged into one num_keys-sized bitmap."""
+        a, b = Bitmap(5), Bitmap(5)
+        a.set(0)
+        b.set(3)
+        assert merge_bitmaps([a, b], 5).get_indices_list() == [0, 3]
+
+
+class TestWaitPrefetchResult:
+    """Test the blocking wait_prefetch_result interface."""
+
+    def test_wait_blocks_until_result_ready(self, l1_manager):
+        """wait_prefetch_result blocks until the background result is published,
+        returns True, and does not consume the result."""
+        adapter = make_adapter()
+        layout = make_layout()
+        keys = [make_object_key(i) for i in range(5)]
+        store_keys_in_l2(adapter, keys, layout)
+
+        ctrl = PrefetchController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultPrefetchPolicy(),
+        )
+        ctrl.start()
+
+        req_id = ctrl.submit_prefetch_request(PrefetchRequestSpec(keys, {0: layout}))
+        # Blocks until the background thread publishes the result.
+        assert ctrl.wait_prefetch_result(req_id, timeout=10.0) is True
+        # wait_prefetch_result must not consume the result.
+        result = ctrl.query_prefetch_result(req_id)
+        assert result is not None
+        assert result.count_leading_ones() == 5
+
+        l1_manager.finish_read(keys)
+        ctrl.stop()
+        adapter.close()
+
+    def test_wait_times_out_for_unknown_request(self, l1_manager):
+        """wait_prefetch_result returns False, after genuinely waiting, when no
+        result arrives within the timeout."""
+        ctrl = PrefetchController(
+            l1_manager=l1_manager,
+            l2_adapters=[],
+            adapter_descriptors=[],
+            policy=DefaultPrefetchPolicy(),
+        )
+        ctrl.start()
+
+        start = time.monotonic()
+        assert ctrl.wait_prefetch_result(999999, timeout=0.2) is False
+        assert time.monotonic() - start >= 0.2
+
+        ctrl.stop()
+
+
+# =============================================================================
+# Retention Policy
+# =============================================================================
+
+
+class TestPrefetchMode:
+    """``mode=WARM`` (the warm path) loads keys **permanent** and
+    **without a read lock**, vs ``LOOKUP`` which read-locks temporary
+    objects that vanish on release.
+
+    Both tests use ``DefaultPrefetchPolicy`` so the only difference is the
+    per-request ``mode`` argument.
+    """
+
+    def test_warm_loads_unlocked_and_permanent(self, l1_manager):
+        """WARM loads keys permanent and with NO read lock: immediately ready
+        (reserve_read SUCCEEDS), holding no lock (unsafe_read NOT_READABLE), and
+        not deleted on a reserve_read/finish_read cycle (permanent, not temp)."""
+        adapter = make_adapter()
+        layout = make_layout()
+        keys = [make_object_key(i) for i in range(3)]
+        store_keys_in_l2(adapter, keys, layout)
+
+        ctrl = PrefetchController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultPrefetchPolicy(),
+        )
+        ctrl.start()
+
+        req_id = ctrl.submit_prefetch_request(
+            PrefetchRequestSpec(keys, {0: layout}, mode=PrefetchMode.WARM)
+        )
+        result = wait_for_prefetch_result(ctrl, req_id)
+        assert result == 3
+
+        # No warming lock: unsafe_read (which needs an active read lock) reports
+        # NOT_READABLE even though the keys are present and ready.
+        unsafe = l1_manager.unsafe_read(keys)
+        for key in keys:
+            assert unsafe[key][0] == L1Error.KEY_NOT_READABLE
+
+        # They are ready and re-lookupable: reserve_read SUCCEEDS...
+        read_results = l1_manager.reserve_read(keys)
+        for key in keys:
+            assert read_results[key][0] == L1Error.SUCCESS
+
+        # ...and releasing that probe lock does NOT delete them (permanent).
+        l1_manager.finish_read(keys)
+        again = l1_manager.reserve_read(keys)
+        for key in keys:
+            assert again[key][0] == L1Error.SUCCESS
+
+        l1_manager.finish_read(keys)
+        l1_manager.delete(keys)
+        ctrl.stop()
+        adapter.close()
+
+    def test_warm_aborts_when_any_key_contended(self, l1_manager):
+        """Reservation is all-or-nothing: a contended key (write-locked by a
+        concurrent request) abandons the whole L2 load; nothing is loaded
+        and no lock leaks."""
+        adapter = make_adapter()
+        layout = make_layout()
+        keys = [make_object_key(i) for i in range(3)]
+        store_keys_in_l2(adapter, keys, layout)
+
+        existing = l1_manager.reserve_write(
+            [keys[0]], is_temporary=[False], layout_desc=layout, mode="new"
+        )
+        assert existing[keys[0]][0] == L1Error.SUCCESS
+
+        ctrl = PrefetchController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultPrefetchPolicy(),
+        )
+        ctrl.start()
+
+        req_id = ctrl.submit_prefetch_request(
+            PrefetchRequestSpec(
+                keys,
+                {0: layout},
+                policy=TrimPolicy.SPARSE,
+                mode=PrefetchMode.WARM,
+            )
+        )
+        result = wait_for_prefetch_result_bitmap(ctrl, req_id)
+        assert result is not None
+        assert result.get_indices_list() == []
+
+        # Nothing was loaded; the abandoned buffers were returned.
+        l1_manager.finish_write([keys[0]])
+        read_results = l1_manager.reserve_read(keys[1:])
+        for key in keys[1:]:
+            assert read_results[key][0] == L1Error.KEY_NOT_EXIST
+
+        l1_manager.delete(keys)
+        ctrl.stop()
+        adapter.close()
+
+    def test_default_deletes_keys_after_finish_read(self, l1_manager):
+        """LOOKUP defers to ``DefaultPrefetchPolicy`` (temporary), so
+        the keys are deleted from L1 once the read-lock is released."""
+        adapter = make_adapter()
+        layout = make_layout()
+        keys = [make_object_key(i) for i in range(3)]
+        store_keys_in_l2(adapter, keys, layout)
+
+        ctrl = PrefetchController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultPrefetchPolicy(),
+        )
+        ctrl.start()
+
+        req_id = ctrl.submit_prefetch_request(PrefetchRequestSpec(keys, {0: layout}))
+        result = wait_for_prefetch_result(ctrl, req_id)
+        assert result == 3
+
+        # Releasing the read-lock deletes the temporary objects, so a
+        # subsequent lookup (reserve_read) misses with KEY_NOT_EXIST.
+        l1_manager.finish_read(keys)
+        read_results = l1_manager.reserve_read(keys)
+        for key in keys:
+            assert read_results[key][0] == L1Error.KEY_NOT_EXIST
+
+        ctrl.stop()
+        adapter.close()
+
+
+# =============================================================================
+# Concurrent-eviction race
+# =============================================================================
+
+
+class EvictionRacingL1Manager:
+    """L1Manager wrapper emulating a concurrent evictor, deterministically.
+
+    L1Manager methods are individually synchronized, so a concurrent
+    eviction thread can run exactly at the boundaries *between* two
+    manager calls.  This wrapper makes one such schedule deterministic:
+    after every delegated call returns, it attempts to evict
+    ``target_key`` via the public ``delete`` API (which, like real
+    eviction, only succeeds while the key holds no read or write lock).
+    The evictor stops after its first successful eviction.
+
+    Only the controller under test holds this wrapper, so eviction
+    attempts interleave with controller-issued calls only.
+    """
+
+    def __init__(self, inner: L1Manager, target_key: ObjectKey) -> None:
+        self._inner = inner
+        self._target_key = target_key
+        self._evicted = False
+        self.eviction_attempts: list[tuple[str, L1Error]] = []
+        """Per-attempt log of (l1_call_name, delete_result)."""
+
+    def _run_evictor(self, after_call: str) -> None:
+        if self._evicted:
+            return
+        result = self._inner.delete([self._target_key])[self._target_key]
+        self.eviction_attempts.append((after_call, result))
+        if result == L1Error.SUCCESS:
+            self._evicted = True
+
+    def __getattr__(self, name: str):
+        attr = getattr(self._inner, name)
+        if not callable(attr):
+            return attr
+
+        def wrapped(*args, **kwargs):
+            result = attr(*args, **kwargs)
+            self._run_evictor(name)
+            return result
+
+        return wrapped
+
+
+class TestConcurrentEvictionRace:
+    """A key present in both L1 and L2 must survive a racing evictor.
+
+    Setup: all keys are in L2 (and get L2-locked for the duration of the
+    request by the lookup phase); one key additionally already exists in
+    L1, unlocked.  Contract: the prefetch must retain the full prefix —
+    every key is durably available throughout the request, from L1 or,
+    failing that, from the still-locked L2 copy.
+
+    The controller currently discovers the L1-existing key with
+    ``reserve_write(mode="new")`` (KEY_NOT_WRITABLE) and read-locks it
+    with a separate ``reserve_read`` call.  An eviction between those two
+    calls deletes the key; the failed ``reserve_read`` then leaves a gap
+    that truncates the whole prefix behind it.
+    """
+
+    def test_eviction_between_reserve_write_and_reserve_read(self, l1_manager):
+        """Evictor racing the reservation must not shrink the prefix hit."""
+        adapter = make_adapter()
+        layout = make_layout()
+        keys = [make_object_key(i) for i in range(5)]
+        store_keys_in_l2(adapter, keys, layout)
+
+        # keys[1] already exists in L1, unlocked (a prior request stored it).
+        existing = l1_manager.reserve_write(
+            [keys[1]], is_temporary=[False], layout_desc=layout, mode="new"
+        )
+        assert existing[keys[1]][0] == L1Error.SUCCESS
+        l1_manager.finish_write([keys[1]])
+
+        racing_l1 = EvictionRacingL1Manager(l1_manager, target_key=keys[1])
+        ctrl = PrefetchController(
+            l1_manager=racing_l1,  # type: ignore[arg-type]
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultPrefetchPolicy(),
+        )
+        ctrl.start()
+
+        req_id = ctrl.submit_prefetch_request(PrefetchRequestSpec(keys, {0: layout}))
+        result = wait_for_prefetch_result_bitmap(ctrl, req_id)
+
+        ctrl.stop()
+        adapter.close()
+
+        assert result is not None
+        # The evictor must have gotten at least one chance to run.
+        assert racing_l1.eviction_attempts, "evictor never interleaved"
+        # Contract: full prefix retained despite the racing evictor.
+        assert result.count_leading_ones() == 5, (
+            f"prefix truncated to {result.count_leading_ones()} by racing "
+            f"eviction; attempts={racing_l1.eviction_attempts}"
+        )
+        # All keys must be present and read-locked in L1 for the retriever.
+        read_results = l1_manager.unsafe_read(keys)
+        for key in keys:
+            assert read_results[key][0] == L1Error.SUCCESS
+        l1_manager.finish_read(keys)
+
+    def test_l1_suffix_extends_l2_prefix(self, l1_manager):
+        """L1 has chunks 2-4, L2 has chunks 0-1 → the union prefix (5) wins.
+
+        The retained set must cover all five keys: 0-1 loaded from L2,
+        2-4 served from L1, every retained key read-locked for the
+        retriever.
+        """
+        adapter = make_adapter()
+        layout = make_layout()
+        keys = [make_object_key(i) for i in range(5)]
+
+        # L2 has only the first two chunks.
+        store_keys_in_l2(adapter, keys[:2], layout)
+
+        # L1 already holds the tail (chunks 2-4), unlocked.
+        existing = l1_manager.reserve_write(
+            keys[2:], is_temporary=[False] * 3, layout_desc=layout, mode="new"
+        )
+        for key in keys[2:]:
+            assert existing[key][0] == L1Error.SUCCESS
+        l1_manager.finish_write(keys[2:])
+
+        ctrl = PrefetchController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultPrefetchPolicy(),
+        )
+        ctrl.start()
+
+        req_id = ctrl.submit_prefetch_request(PrefetchRequestSpec(keys, {0: layout}))
+        result = wait_for_prefetch_result_bitmap(ctrl, req_id)
+
+        ctrl.stop()
+        adapter.close()
+
+        assert result is not None
+        assert result.count_leading_ones() == 5, (
+            f"union prefix is 5 (L2 has 0-1, L1 has 2-4) but only "
+            f"{result.count_leading_ones()} keys were retained"
+        )
+        read_results = l1_manager.unsafe_read(keys)
+        for key in keys:
+            assert read_results[key][0] == L1Error.SUCCESS
+        l1_manager.finish_read(keys)
+
+    def test_l1_existing_key_without_race(self, l1_manager):
+        """Control: same setup, no evictor — the full prefix is retained."""
+        adapter = make_adapter()
+        layout = make_layout()
+        keys = [make_object_key(i) for i in range(5)]
+        store_keys_in_l2(adapter, keys, layout)
+
+        existing = l1_manager.reserve_write(
+            [keys[1]], is_temporary=[False], layout_desc=layout, mode="new"
+        )
+        assert existing[keys[1]][0] == L1Error.SUCCESS
+        l1_manager.finish_write([keys[1]])
+
+        ctrl = PrefetchController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultPrefetchPolicy(),
+        )
+        ctrl.start()
+
+        req_id = ctrl.submit_prefetch_request(PrefetchRequestSpec(keys, {0: layout}))
+        result = wait_for_prefetch_result_bitmap(ctrl, req_id)
+
+        ctrl.stop()
+        adapter.close()
+
+        assert result is not None
+        assert result.count_leading_ones() == 5
+        read_results = l1_manager.unsafe_read(keys)
+        for key in keys:
+            assert read_results[key][0] == L1Error.SUCCESS
+        l1_manager.finish_read(keys)
+
+
+class TestSlidingWindowClaims:
+    """The lock pass must release out-of-window sliding-window chunks.
+
+    Layout (chunk-major, groups [full=-1, sw=2], 4 chunks, 8 keys): even
+    indices are the full-attention group, odd indices the sliding-window
+    group. The SW window covers chunks 2-3 (indices 5 and 7), leaving the
+    SW chunks at indices 1 and 3 out of the window — they can never enter
+    the retained set, so a prefetch must leave them evictable.
+    """
+
+    def test_dead_sw_chunks_released_at_lock_time(self, l1_manager):
+        """Out-of-window SW chunks are locked by the lock pass, released in
+        that same pass (before the L2 lookup) once the L1-only fold rules them
+        out, so they stay evictable and never enter the result."""
+        adapter = make_adapter()
+        layout = make_layout()
+        attn_desc = AttnWindowDesc(num_chunks_in_sw=[-1, 2])
+        keys = [make_object_key(i) for i in range(8)]
+
+        # All keys resident in L1, unlocked; L2 has nothing.
+        existing = l1_manager.reserve_write(
+            keys, is_temporary=[False] * 8, layout_desc=layout, mode="new"
+        )
+        for key in keys:
+            assert existing[key][0] == L1Error.SUCCESS
+        l1_manager.finish_write(keys)
+
+        # Evictor races for the evictable SW chunk 0 (index 1).
+        racing_l1 = EvictionRacingL1Manager(l1_manager, target_key=keys[1])
+        ctrl = PrefetchController(
+            l1_manager=racing_l1,  # type: ignore[arg-type]
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultPrefetchPolicy(),
+        )
+        ctrl.start()
+
+        req_id = ctrl.submit_prefetch_request(
+            PrefetchRequestSpec(keys, {0: layout, 1: layout}, attn_desc=attn_desc)
+        )
+        # query_prefetch_result pops the lookup result, so read the hit first.
+        hit = wait_for_lookup_result(ctrl, req_id)
+        result = wait_for_prefetch_result_bitmap(ctrl, req_id)
+
+        ctrl.stop()
+        adapter.close()
+
+        # The evictable chunk is locked by the lock pass (first eviction
+        # attempt bounces), then released in that same pass (a later
+        # attempt succeeds).
+        assert racing_l1.eviction_attempts
+        assert racing_l1.eviction_attempts[0][1] == L1Error.KEY_IS_LOCKED
+        assert any(err == L1Error.SUCCESS for _, err in racing_l1.eviction_attempts)
+
+        # The eviction did not affect the hit: full-attn chunks 0-3 plus the
+        # SW window (chunks 2-3) are retained and read-locked.
+        assert hit == 4
+        assert result is not None
+        retained_keys = [keys[i] for i in (0, 2, 4, 5, 6, 7)]
+        assert result.gather(keys) == retained_keys
+        read_results = l1_manager.unsafe_read(retained_keys)
+        for key in retained_keys:
+            assert read_results[key][0] == L1Error.SUCCESS
+
+        # The other evictable SW chunk is released in the lock pass too: it
+        # is deletable the moment the request completes.
+        assert l1_manager.delete([keys[3]])[keys[3]] == L1Error.SUCCESS
+
+        l1_manager.finish_read(retained_keys)
+
+    def test_load_abort_falls_back_to_l1_hit_window(self, l1_manager):
+        """If the L2 load aborts, finish falls back to the L1 hit — so the
+        L1 hit's own SW window must stay locked even though the union fold
+        placed the final window past it.
+
+        Layout (chunk-major, groups [full=-1, sw=2], 6 chunks): L1 holds
+        chunks 0-1 (L1 hit = 2), L2 holds the rest (final hit would be 6).
+        One plan key is write-locked by a concurrent writer, so the
+        all-or-nothing reservation abandons the load; the result must be
+        the intact L1 hit, not a collapsed one.
+        """
+        adapter = make_adapter()
+        layout = make_layout()
+        attn_desc = AttnWindowDesc(num_chunks_in_sw=[-1, 2])
+        keys = [make_object_key(100 + i) for i in range(12)]
+
+        # L1: chunks 0-1, both groups (indices 0-3), unlocked.
+        existing = l1_manager.reserve_write(
+            keys[:4], is_temporary=[False] * 4, layout_desc=layout, mode="new"
+        )
+        for key in keys[:4]:
+            assert existing[key][0] == L1Error.SUCCESS
+        l1_manager.finish_write(keys[:4])
+
+        # L2: full-attn chunks 2-5 (indices 4,6,8,10) + SW window chunks
+        # 4-5 (indices 9,11) — the windowed-store layout.
+        l2_indices = [4, 6, 8, 10, 9, 11]
+        store_keys_in_l2(adapter, [keys[i] for i in l2_indices], layout)
+
+        # A concurrent writer holds one plan key -> reservation aborts.
+        contended = l1_manager.reserve_write(
+            [keys[4]], is_temporary=[False], layout_desc=layout, mode="new"
+        )
+        assert contended[keys[4]][0] == L1Error.SUCCESS  # stays write-locked
+
+        ctrl = PrefetchController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultPrefetchPolicy(),
+        )
+        ctrl.start()
+
+        req_id = ctrl.submit_prefetch_request(
+            PrefetchRequestSpec(keys, {0: layout, 1: layout}, attn_desc=attn_desc)
+        )
+        hit = wait_for_lookup_result(ctrl, req_id)
+        result = wait_for_prefetch_result_bitmap(ctrl, req_id)
+
+        ctrl.stop()
+        adapter.close()
+
+        # Fallback: the intact L1 hit with its window still locked.
+        assert hit == 2
+        assert result is not None
+        assert result.get_indices_list() == [0, 1, 2, 3]
+        read_results = l1_manager.unsafe_read(keys[:4])
+        for key in keys[:4]:
+            assert read_results[key][0] == L1Error.SUCCESS
+
+        l1_manager.finish_read(keys[:4])
+        l1_manager.finish_write([keys[4]])

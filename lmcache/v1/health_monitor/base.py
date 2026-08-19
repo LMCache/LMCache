@@ -22,6 +22,7 @@ from lmcache.v1.periodic_thread import (
     ThreadLevel,
     ThreadRunSummary,
 )
+from lmcache.v1.utils.subclass_discovery import discover_subclasses
 
 if TYPE_CHECKING:
     # First Party
@@ -231,47 +232,27 @@ class HealthMonitor(PeriodicThread):
         finds all HealthCheck subclasses and calls their `create()`
         method to create instances.
         """
-        # Standard
-        import importlib
-        import inspect
-        import pkgutil
-
-        # First Party
-        # Import the checks package
-        import lmcache.v1.health_monitor.checks as checks_pkg
-
-        # Discover all modules in the checks package
-        for _, module_name, _ in pkgutil.iter_modules(checks_pkg.__path__):
-            # Skip private modules
-            if module_name.startswith("_"):
-                continue
-
+        cls: type[HealthCheck]
+        for cls in discover_subclasses(
+            "lmcache.v1.health_monitor.checks",
+            HealthCheck,  # type: ignore[type-abstract]
+            module_filter=lambda name: not name.startswith("_"),
+            include_abstract=True,
+            require_defined_in_module=False,
+        ):
             try:
-                module = importlib.import_module(f"{checks_pkg.__name__}.{module_name}")
-
-                # Find all HealthCheck subclasses in the module
-                for _, obj in inspect.getmembers(module):
-                    if (
-                        inspect.isclass(obj)
-                        and issubclass(obj, HealthCheck)
-                        and obj != HealthCheck
-                    ):
-                        try:
-                            instances = obj.create(self._manager)
-                            for instance in instances:
-                                self._health_checks.append(instance)
-                                # Initialize previous status as healthy
-                                self._previous_check_status[instance.name()] = True
-                                logger.info(
-                                    f"Registered health check: {instance.name()} "
-                                    f"with fallback_policy: {instance.fallback_policy}"
-                                )
-                        except Exception as e:
-                            logger.warning(
-                                f"Failed to create health check {obj.__name__}: {e}"
-                            )
-            except ImportError as e:
-                logger.warning(f"Failed to import module {module_name}: {e}")
+                instances = cls.create(self._manager)
+            except Exception as e:
+                logger.warning(f"Failed to create health check {cls.__name__}: {e}")
+                continue
+            for instance in instances:
+                self._health_checks.append(instance)
+                # Initialize previous status as healthy
+                self._previous_check_status[instance.name()] = True
+                logger.info(
+                    f"Registered health check: {instance.name()} "
+                    f"with fallback_policy: {instance.fallback_policy}"
+                )
 
     def get_health_checks(self) -> List[HealthCheck]:
         """Get all registered health checks"""

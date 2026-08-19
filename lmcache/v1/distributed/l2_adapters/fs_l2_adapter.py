@@ -18,18 +18,21 @@ import os
 import threading
 
 if TYPE_CHECKING:
+    # First Party
     from lmcache.v1.distributed.internal_api import (
         L1MemoryDesc,
     )
+    from lmcache.v1.memory_management import MemoryObj
 
 # Third Party
 import aiofiles
 import aiofiles.os
 
 # First Party
+from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
-from lmcache.native_storage_ops import Bitmap
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
     L2TaskId,
@@ -41,7 +44,6 @@ from lmcache.v1.distributed.l2_adapters.config import (
 from lmcache.v1.distributed.l2_adapters.factory import (
     register_l2_adapter_factory,
 )
-from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.platform import create_event_notifier
 
 logger = init_logger(__name__)
@@ -99,22 +101,21 @@ def _object_key_to_filename(key: ObjectKey) -> str:
 
     Unsalted::
 
-        <safe_model>@0x<kv_rank_hex>@<chunk_hash_hex>.data
+        <safe_model>@0x<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>.data
 
     Salted (trailing ``cache_salt``)::
 
-        <safe_model>@0x<kv_rank_hex>@<chunk_hash_hex>@<cache_salt>.data
-
-    The 3-field unsalted shape is bit-identical to the pre-cache_salt
-    format, so existing un-salted cache directories remain valid and
-    no migration is needed.
+        <safe_model>@0x<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>@<cache_salt>.data
 
     ``kv_rank`` is written in ``0x`` prefixed hex so each byte
     of the bitmap ``(ws<<24)|(rank<<16)|(local_ws<<8)|local``
-    is directly readable.
+    is directly readable. ``object_group_id`` is written in plain hex.
     """
     safe_model = key.model_name.replace("/", _PATH_SLASH_REPLACEMENT)
-    base = f"{safe_model}{_KEY_SEP}{key.kv_rank:#010x}{_KEY_SEP}{key.chunk_hash.hex()}"
+    base = (
+        f"{safe_model}{_KEY_SEP}{key.kv_rank:#010x}"
+        f"{_KEY_SEP}{key.object_group_id:x}{_KEY_SEP}{key.chunk_hash.hex()}"
+    )
     if key.cache_salt:
         return f"{base}{_KEY_SEP}{key.cache_salt}{_FILE_EXT}"
     return f"{base}{_FILE_EXT}"
@@ -125,7 +126,7 @@ def _filename_to_object_key(
 ) -> Optional[ObjectKey]:
     """Reverse ``_object_key_to_filename``.
 
-    Accepts both the 3-field unsalted shape and the 4-field salted
+    Accepts both the 4-field unsalted shape and the 5-field salted
     shape (trailing ``cache_salt``). Returns ``None`` for anything
     else. Since ``model_name`` is guaranteed not to contain ``@``,
     plain ``split`` suffices — no marker, no rsplit.
@@ -134,11 +135,11 @@ def _filename_to_object_key(
         return None
     stem = filename[: -len(_FILE_EXT)]
     parts = stem.split(_KEY_SEP)
-    if len(parts) == 3:
-        safe_model, kv_rank_str, chunk_hash_hex = parts
+    if len(parts) == 4:
+        safe_model, kv_rank_str, object_group_str, chunk_hash_hex = parts
         cache_salt = ""
-    elif len(parts) == 4:
-        safe_model, kv_rank_str, chunk_hash_hex, cache_salt = parts
+    elif len(parts) == 5:
+        safe_model, kv_rank_str, object_group_str, chunk_hash_hex, cache_salt = parts
     else:
         return None
 
@@ -146,6 +147,7 @@ def _filename_to_object_key(
     try:
         chunk_hash = bytes.fromhex(chunk_hash_hex)
         kv_rank = int(kv_rank_str, 16)
+        object_group_id = int(object_group_str, 16)
         # ObjectKey.__post_init__ raises ValueError when the decoded
         # model_name / cache_salt violate the forbidden-char or length
         # invariants (e.g. a stray file from another tool on disk).
@@ -155,6 +157,7 @@ def _filename_to_object_key(
             chunk_hash=chunk_hash,
             model_name=model_name,
             kv_rank=kv_rank,
+            object_group_id=object_group_id,
             cache_salt=cache_salt,
         )
     except ValueError:
@@ -250,6 +253,8 @@ class FSL2Adapter(L2AdapterInterface):
     thread.
     """
 
+    _DELETE_CONCURRENCY = 64
+
     def __init__(self, config: FSL2AdapterConfig):
         super().__init__()
         self._config = config
@@ -286,12 +291,7 @@ class FSL2Adapter(L2AdapterInterface):
 
         # Task bookkeeping
         self._next_task_id: L2TaskId = 0
-        self._completed_store_tasks: dict[L2TaskId, bool] = {}
-        # Bytes actually written per completed store task.  Excludes
-        # duplicate-key fast-paths (see ``_execute_store``).  Reported to
-        # the L2 throughput subscriber via ``pop_completed_store_task_bytes``
-        # so the histogram reflects real disk I/O, not skipped no-ops.
-        self._completed_store_task_bytes: dict[L2TaskId, int] = {}
+        self._completed_store_tasks: dict[L2TaskId, L2StoreResult] = {}
         self._completed_lookup_tasks: dict[L2TaskId, Bitmap] = {}
         self._completed_load_tasks: dict[L2TaskId, Bitmap] = {}
         self._lock = threading.Lock()
@@ -344,23 +344,26 @@ class FSL2Adapter(L2AdapterInterface):
 
     def pop_completed_store_tasks(
         self,
-    ) -> dict[L2TaskId, bool]:
+    ) -> dict[L2TaskId, L2StoreResult]:
+        """Pop all completed store tasks.
+
+        Returns:
+            dict[L2TaskId, L2StoreResult]: a dictionary mapping the task
+            id to an ``L2StoreResult`` that encodes both the success flag
+            and the bytes actually transferred.
+        """
         with self._lock:
             completed = self._completed_store_tasks
             self._completed_store_tasks = {}
         return completed
 
-    def pop_completed_store_task_bytes(self) -> dict[L2TaskId, int]:
-        with self._lock:
-            completed_bytes = self._completed_store_task_bytes
-            self._completed_store_task_bytes = {}
-        return completed_bytes
-
     # ------------------------------------------------------------------
     # Lookup and Lock Interface
     # ------------------------------------------------------------------
 
-    def submit_lookup_and_lock_task(self, keys: list[ObjectKey]) -> L2TaskId:
+    def submit_lookup_and_lock_task(
+        self, keys: list[ObjectKey], group_layout_descs: dict[int, MemoryLayoutDesc]
+    ) -> L2TaskId:
         with self._lock:
             task_id = self._get_next_task_id()
 
@@ -375,8 +378,8 @@ class FSL2Adapter(L2AdapterInterface):
             return self._completed_lookup_tasks.pop(task_id, None)
 
     def submit_unlock(self, keys: list[ObjectKey]) -> None:
-        # No-op: FS adapter has no eviction, so locking
-        # between lookup and load is unnecessary.
+        # No-op: the FS adapter tracks no per-key locks — a delete
+        # racing the lookup→load window degrades the load to a miss.
         pass
 
     # ------------------------------------------------------------------
@@ -420,14 +423,36 @@ class FSL2Adapter(L2AdapterInterface):
     # ------------------------------------------------------------------
 
     def delete(self, keys: list[ObjectKey]) -> None:
-        # Not implemented for the filesystem adapter.
-        pass
+        """Delete each key's backing file and notify listeners.
 
-    # ``get_usage()`` is inherited from ``L2AdapterInterface``. The FS
-    # adapter declares no max capacity (default 0) so ``supports_global_eviction``
-    # returns ``False`` and ``usage_fraction == -1.0`` — the eviction
-    # controller treats this as "no eviction signal" and skips the
-    # adapter entirely.
+        Args:
+            keys: The object keys to delete.
+
+        Note:
+            No per-key locks: a delete racing a load turns that load
+            into a miss; racing a store of the same key may leave the
+            key re-stored.
+        """
+        if not keys:
+            return
+        try:
+            fut = asyncio.run_coroutine_threadsafe(
+                self._execute_delete(keys),
+                self._loop,
+            )
+            deleted_keys, deleted_sizes = fut.result(timeout=30.0)
+        except Exception as e:
+            logger.warning("FSL2Adapter delete failed: %s", e)
+            return
+        if deleted_keys:
+            self._notify_keys_deleted(deleted_keys, deleted_sizes)
+
+    # ``get_usage()`` is inherited from ``L2AdapterInterface``. The base
+    # class maintains byte totals via ``_notify_keys_stored`` /
+    # ``_notify_keys_deleted``, but the FS adapter declares no max capacity
+    # (default 0) so ``supports_global_eviction`` returns ``False`` and
+    # ``usage_fraction == -1.0`` — the eviction controller treats this as
+    # "no eviction signal" and skips the adapter entirely.
 
     # ------------------------------------------------------------------
     # Cleanup
@@ -580,6 +605,8 @@ class FSL2Adapter(L2AdapterInterface):
     ) -> None:
         success = True
         bytes_written = 0
+        stored_keys: list[ObjectKey] = []
+        stored_sizes: list[int] = []
         try:
             for key, obj in zip(keys, objects, strict=True):
                 file_path, tmp_path = self._key_to_file_and_tmp_path(key)
@@ -619,6 +646,8 @@ class FSL2Adapter(L2AdapterInterface):
 
                     await aiofiles.os.replace(tmp_path, file_path)
                     bytes_written += size
+                    stored_keys.append(key)
+                    stored_sizes.append(size)
                     logger.debug(
                         "FSL2Adapter stored key %s (%d bytes)",
                         file_path.name,
@@ -639,9 +668,11 @@ class FSL2Adapter(L2AdapterInterface):
             )
             success = False
 
+        if stored_keys:
+            self._notify_keys_stored(stored_keys, stored_sizes)
+
         with self._lock:
-            self._completed_store_tasks[task_id] = success
-            self._completed_store_task_bytes[task_id] = bytes_written
+            self._completed_store_tasks[task_id] = L2StoreResult(success, bytes_written)
         self._store_efd.notify()
 
     # ---- lookup ---------------------------------------------------------
@@ -744,9 +775,48 @@ class FSL2Adapter(L2AdapterInterface):
                 )
                 continue
 
+        loaded_keys = [keys[i] for i in bitmap.get_indices_list()]
+        if loaded_keys:
+            self._notify_keys_accessed(loaded_keys)
+
         with self._lock:
             self._completed_load_tasks[task_id] = bitmap
         self._load_efd.notify()
+
+    # ---- delete ---------------------------------------------------------
+
+    async def _execute_delete(
+        self, keys: list[ObjectKey]
+    ) -> tuple[list[ObjectKey], list[int]]:
+        """Unlink each key's file concurrently; return removed keys + sizes."""
+        sem = asyncio.Semaphore(self._DELETE_CONCURRENCY)
+
+        async def _delete_one(key: ObjectKey) -> tuple[ObjectKey, int] | None:
+            file_path = self._key_to_path(key)
+            async with sem:
+                try:
+                    size = (await aiofiles.os.stat(file_path)).st_size
+                    await aiofiles.os.unlink(file_path)
+                except FileNotFoundError:
+                    return None
+                except Exception:
+                    logger.exception(
+                        "FSL2Adapter failed to delete %s",
+                        file_path,
+                    )
+                    return None
+            return key, size
+
+        results = await asyncio.gather(*(_delete_one(k) for k in keys))
+
+        deleted_keys: list[ObjectKey] = []
+        deleted_sizes: list[int] = []
+        for res in results:
+            if res is not None:
+                key, size = res
+                deleted_keys.append(key)
+                deleted_sizes.append(size)
+        return deleted_keys, deleted_sizes
 
 
 # Self-register config type and adapter factory

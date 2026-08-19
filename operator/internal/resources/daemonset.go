@@ -27,23 +27,101 @@ import (
 	lmcachev1alpha1 "github.com/LMCache/LMCache/api/v1alpha1"
 )
 
+const (
+	// nvidiaRuntimeClass is the RuntimeClass name registered by the NVIDIA GPU
+	// Operator; engine pods request it when gpuVendor is nvidia.
+	nvidiaRuntimeClass = "nvidia"
+
+	// lmcacheServerBinary is the entrypoint binary for the LMCache server inside
+	// the engine image.
+	lmcacheServerBinary = "/opt/venv/bin/lmcache"
+
+	// serverSubcommand is the `lmcache server` subcommand that starts the engine.
+	serverSubcommand = "server"
+
+	// serverPortName is the name of the engine's serving port on the container
+	// and the node-local Service.
+	serverPortName = "server"
+
+	// l2EncryptionKeyMountDir is where the L2 encryption master-key Secret is
+	// mounted inside the engine container.
+	l2EncryptionKeyMountDir = "/etc/lmcache/keys"
+
+	// l2EncryptionKeyFileName is the required data key in the user-provided
+	// master-key Secret and thus the file name under the mount dir.
+	l2EncryptionKeyFileName = "master"
+
+	// l2EncryptionKeyVolumeName is the pod volume name for the master-key mount.
+	l2EncryptionKeyVolumeName = "l2-master-key"
+)
+
+// l2EncryptionKeyPath is the in-container path of the mounted L2 encryption
+// master key, referenced as master_key_path in the serde config.
+const l2EncryptionKeyPath = l2EncryptionKeyMountDir + "/" + l2EncryptionKeyFileName
+
+// startupProbeDefaultFailureThreshold is the baseline startup-probe failure
+// count. With the probe's InitialDelaySeconds=5 and PeriodSeconds=5 this is a
+// ~155s startup window.
+const startupProbeDefaultFailureThreshold int32 = 30
+
+// startupProbeFailureThreshold scales the startup-probe window to L1 size: the
+// engine pre-pins all of L1 before binding its port, so budget ~1 GB/s of pinning
+// (window = FailureThreshold * 5s period), floored at the default.
+func startupProbeFailureThreshold(l1SizeGB float64) int32 {
+	const (
+		pinBudgetGBPerSec  = 1.0 // assumed worst-case L1 pin bandwidth
+		probePeriodSeconds = 5.0 // must match the startup probe's PeriodSeconds
+	)
+	scaled := int32(l1SizeGB / pinBudgetGBPerSec / probePeriodSeconds)
+	if scaled > startupProbeDefaultFailureThreshold {
+		return scaled
+	}
+	return startupProbeDefaultFailureThreshold
+}
+
 // BuildDaemonSet constructs a DaemonSet for the given LMCacheEngine.
 func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
-	spec := &engine.Spec
-	selectorLabels := SelectorLabels(engine.Name)
-	podLabels := MergeLabels(StandardLabels(engine.Name), spec.PodLabels)
+	return buildDaemonSetCore(engine.Name, engine.Namespace, &engine.Spec, BuildContainerArgs(&engine.Spec), "lmcache/vllm-openai")
+}
+
+// buildDaemonSetCore constructs the DaemonSet shared by the LMCacheEngine and
+// CacheBlendEngine controllers. It is the single source of truth for the
+// GPU/security pod-template scaffolding (host /dev/shm sharing for CUDA IPC —
+// a hostPath mount by default, or the host IPC namespace when spec.HostIPC is
+// true — runtimeClassName, optional privileged (default false, via
+// spec.Privileged), NVIDIA_VISIBLE_DEVICES, resources without a device-plugin
+// GPU claim) so those settings cannot drift between the two engines.
+//
+// Parameters:
+//   - name, namespace: the owning object's identity, used for labels and metadata.
+//   - spec: the engine spec (LMCacheEngine and CacheBlendEngine reuse the same
+//     shared sub-structs, so callers project the CacheBlendEngine spec into an
+//     *LMCacheEngineSpec before calling).
+//   - containerArgs: the fully serialized server CLI args (callers append any
+//     engine-specific flags such as --engine-type before passing them in).
+//   - defaultImageRepo: the container image repository to use when spec.Image
+//     does not set one.
+func buildDaemonSetCore(
+	name, namespace string,
+	spec *lmcachev1alpha1.LMCacheEngineSpec,
+	containerArgs []string,
+	defaultImageRepo string,
+) *appsv1.DaemonSet {
+	selectorLabels := SelectorLabels(name)
+	podLabels := MergeLabels(StandardLabels(name), spec.PodLabels)
 	podAnnotations := spec.PodAnnotations
 
 	gpuVendor := derefString(spec.GPUVendor, lmcachev1alpha1.GPUVendorNvidia)
 	var runtimeClassName *string
 	if gpuVendor == lmcachev1alpha1.GPUVendorNvidia {
-		rc := "nvidia"
+		rc := nvidiaRuntimeClass
 		runtimeClassName = &rc
 	}
-	privileged := true
+	privileged := derefBool(spec.Privileged, false)
+	hostIPC := derefBool(spec.HostIPC, false)
 
 	serverPort := derefInt32(getServerPort(spec), 5555)
-	imgRepo := "lmcache/vllm-openai"
+	imgRepo := defaultImageRepo
 	imgTag := "latest"
 	imgPullPolicy := corev1.PullIfNotPresent
 	if spec.Image != nil {
@@ -86,7 +164,7 @@ func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
 	// The DaemonSet references the local (same-namespace) managed copy
 	// created by the controller via reconcileRESPAuthSecret.
 	if spec.L2Backend != nil && spec.L2Backend.RESP != nil && spec.L2Backend.RESP.AuthSecretRef != nil {
-		secretName := RESPAuthSecretName(engine.Name)
+		secretName := RESPAuthSecretName(name)
 		optional := true
 		envVars = append(envVars,
 			corev1.EnvVar{
@@ -112,27 +190,77 @@ func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
 			},
 		)
 	}
+	// Inject the pod IP as the coordinator advertise address (downward API)
+	// when registration is enabled and no explicit advertiseIP is set, so the
+	// coordinator can reach this server. The server's --coordinator-advertise-ip
+	// flag falls back to this env var.
+	if spec.Coordinator != nil && derefString(spec.Coordinator.URL, "") != "" &&
+		(spec.Coordinator.AdvertiseIP == nil || *spec.Coordinator.AdvertiseIP == "") {
+		envVars = append(envVars, corev1.EnvVar{
+			Name: "LMCACHE_COORDINATOR_ADVERTISE_IP",
+			ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{
+					FieldPath: "status.podIP",
+				},
+			},
+		})
+	}
 	envVars = append(envVars, spec.Env...)
 
-	// No emptyDir /dev/shm mount — hostIPC: true exposes the host's /dev/shm
-	// directly. An emptyDir mount would shadow it and break CUDA IPC between
-	// LMCache and vLLM pods (cudaIpcOpenMemHandle requires shared /dev/shm).
+	// Cross-pod CUDA IPC needs the engine and vLLM pods to share the host's
+	// /dev/shm tmpfs (PyTorch CUDA IPC handles reference a ref-counter file
+	// there). By default that is a hostPath mount; with spec.hostIPC=true the
+	// shared IPC namespace already exposes the host's /dev/shm, so the mount is
+	// omitted. Never mount an emptyDir at /dev/shm — it would shadow the host's
+	// tmpfs and break CUDA IPC (cudaIpcOpenMemHandle fails with
+	// cudaErrorMapBufferObjectFailed).
 	volumes := append([]corev1.Volume{}, spec.Volumes...)
 	volumeMounts := append([]corev1.VolumeMount{}, spec.VolumeMounts...)
+	if !hostIPC && !HasDevShmMount(volumeMounts) && !HasDevShmVolume(volumes) {
+		volumes = append(volumes, BuildDevShmVolume())
+		volumeMounts = append(volumeMounts, BuildDevShmVolumeMount())
+	}
+
+	// Mount the L2 encryption master key (user-created Secret in the engine's
+	// namespace) read-only at the path the serde config references. Only the
+	// "master" data key is projected; a missing Secret or missing key fails
+	// the mount with a pod event and self-heals once the Secret is fixed.
+	if spec.L2Backend != nil && spec.L2Backend.Serde != nil && spec.L2Backend.Serde.AESGCM != nil {
+		keyMode := int32(0o400)
+		volumes = append(volumes, corev1.Volume{
+			Name: l2EncryptionKeyVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: spec.L2Backend.Serde.AESGCM.MasterKeySecretRef.Name,
+					Items: []corev1.KeyToPath{
+						{Key: l2EncryptionKeyFileName, Path: l2EncryptionKeyFileName},
+					},
+					DefaultMode: &keyMode,
+				},
+			},
+		})
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name:      l2EncryptionKeyVolumeName,
+			MountPath: l2EncryptionKeyMountDir,
+			ReadOnly:  true,
+		})
+	}
 
 	// Build container args. Auth credentials are handled via env vars
 	// (LMCACHE_RESP_USERNAME / LMCACHE_RESP_PASSWORD) injected above,
 	// so no shell wrapper is needed.
 	containerCommand := []string{
-		"/opt/venv/bin/lmcache",
-		"server",
+		lmcacheServerBinary,
+		serverSubcommand,
 	}
-	containerArgs := BuildContainerArgs(spec)
 
 	// Probes
 	tcpProbe := &corev1.TCPSocketAction{
 		Port: intstr.FromInt32(serverPort),
 	}
+
+	// Scale the startup window to the L1 pin time (see startupProbeFailureThreshold).
+	startupFailureThreshold := startupProbeFailureThreshold(spec.L1.SizeGB)
 
 	startupProbe := &corev1.Probe{
 		ProbeHandler: corev1.ProbeHandler{
@@ -140,7 +268,7 @@ func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
 		},
 		InitialDelaySeconds: 5,
 		PeriodSeconds:       5,
-		FailureThreshold:    30,
+		FailureThreshold:    startupFailureThreshold,
 	}
 
 	livenessProbe := &corev1.Probe{
@@ -161,7 +289,7 @@ func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
 	httpPort := getHTTPPort(spec)
 	containerPorts := []corev1.ContainerPort{
 		{
-			Name:          "server",
+			Name:          serverPortName,
 			ContainerPort: serverPort,
 			Protocol:      corev1.ProtocolTCP,
 		},
@@ -189,9 +317,9 @@ func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
 
 	ds := &appsv1.DaemonSet{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      engine.Name,
-			Namespace: engine.Namespace,
-			Labels:    StandardLabels(engine.Name),
+			Name:      name,
+			Namespace: namespace,
+			Labels:    StandardLabels(name),
 		},
 		Spec: appsv1.DaemonSetSpec{
 			Selector: &metav1.LabelSelector{
@@ -203,7 +331,8 @@ func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
 					Annotations: podAnnotations,
 				},
 				Spec: corev1.PodSpec{
-					HostIPC:            true,
+					HostIPC:            hostIPC,
+					HostNetwork:        derefBool(spec.HostNetwork, false),
 					RuntimeClassName:   runtimeClassName,
 					ServiceAccountName: spec.ServiceAccountName,
 					PriorityClassName:  spec.PriorityClassName,
@@ -211,6 +340,7 @@ func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
 					Affinity:           spec.Affinity,
 					Tolerations:        spec.Tolerations,
 					ImagePullSecrets:   spec.ImagePullSecrets,
+					InitContainers:     spec.InitContainers,
 					Containers: []corev1.Container{
 						{
 							Name:            "lmcache",
@@ -234,6 +364,10 @@ func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
 				},
 			},
 		},
+	}
+
+	if derefBool(spec.HostNetwork, false) {
+		ds.Spec.Template.Spec.DNSPolicy = corev1.DNSClusterFirstWithHostNet
 	}
 
 	return ds

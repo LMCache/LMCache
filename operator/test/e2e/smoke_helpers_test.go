@@ -53,12 +53,13 @@ var nsCounter atomic.Int64
 // each spec gets per-test isolation without relying on package state.
 //
 // The namespace is pre-labeled with the `privileged` PodSecurity profile
-// because the LMCache DaemonSet's pod template sets hostIPC=true and
-// privileged=true. On clusters that enforce PodSecurity admission (OCP
-// in particular), a `restricted` namespace would reject the DaemonSet at
-// creation time, which the smokes need to succeed even though they never
-// wait for pods to schedule. The label is a no-op on clusters that don't
-// enforce PodSecurity.
+// because the LMCache DaemonSet's pod template sets hostIPC=true (and
+// privileged=true only when spec.privileged is enabled), and hostIPC alone
+// is rejected by the restricted/baseline profiles. On clusters that enforce
+// PodSecurity admission (OCP in particular), a `restricted` namespace would
+// reject the DaemonSet at creation time, which the smokes need to succeed
+// even though they never wait for pods to schedule. The label is a no-op on
+// clusters that don't enforce PodSecurity.
 func createTestNamespace(ctx context.Context) string {
 	GinkgoHelper()
 	name := uniqueNamespaceName()
@@ -130,7 +131,13 @@ func dumpNamespace(ns string) {
 	for _, args := range [][]string{
 		{"get", "events", "-n", ns, "--sort-by=.lastTimestamp"},
 		{"get", "lmcacheengines", "-n", ns, "-o", "yaml"},
+		{"get", "cacheblendengines", "-n", ns, "-o", "yaml"},
 		{"get", "pods", "-n", ns, "-o", "wide"},
+		// imagePullSecrets is not rendered by `describe pod`; print it
+		// explicitly so a wedged private-image pull can be triaged as
+		// "secret not attached" vs "bad credentials".
+		{"get", "pods", "-n", ns, "-o",
+			"jsonpath={range .items[*]}{.metadata.name}{\" imagePullSecrets=\"}{.spec.imagePullSecrets}{\"\\n\"}{end}"},
 		{"describe", "pods", "-n", ns},
 	} {
 		out, _ := exec.Command("kubectl", args...).CombinedOutput()
@@ -258,4 +265,101 @@ func serviceMonitorCRDInstalled() bool {
 	}
 	Fail(fmt.Sprintf("unexpected error querying ServiceMonitor RESTMapping: %v", err))
 	return false // unreachable
+}
+
+// firstPodForDeployment returns the first non-terminating pod selected by the
+// Deployment's pod selector, or nil if none exist yet. Returns the typed Pod
+// so callers can read both annotations (injection stamp) and container args.
+func firstPodForDeployment(ctx context.Context, ns string, dep *appsv1.Deployment) *corev1.Pod {
+	pods := &corev1.PodList{}
+	if err := k8sClient.List(ctx, pods,
+		client.InNamespace(ns),
+		client.MatchingLabels(dep.Spec.Selector.MatchLabels),
+	); err != nil {
+		return nil
+	}
+	for i := range pods.Items {
+		if pods.Items[i].DeletionTimestamp == nil {
+			return &pods.Items[i]
+		}
+	}
+	return nil
+}
+
+// podInitContainer returns the named init container of the pod, or nil.
+func podInitContainer(pod *corev1.Pod, name string) *corev1.Container {
+	for i := range pod.Spec.InitContainers {
+		if pod.Spec.InitContainers[i].Name == name {
+			return &pod.Spec.InitContainers[i]
+		}
+	}
+	return nil
+}
+
+// podContainer returns the named (non-init) container of the pod, or nil.
+func podContainer(pod *corev1.Pod, name string) *corev1.Container {
+	for i := range pod.Spec.Containers {
+		if pod.Spec.Containers[i].Name == name {
+			return &pod.Spec.Containers[i]
+		}
+	}
+	return nil
+}
+
+// containerEnvValue returns the value of env var name on the container, or "".
+func containerEnvValue(c *corev1.Container, name string) string {
+	for _, e := range c.Env {
+		if e.Name == name {
+			return e.Value
+		}
+	}
+	return ""
+}
+
+// containerVolumeMount returns the named volume mount on the container, or nil.
+func containerVolumeMount(c *corev1.Container, name string) *corev1.VolumeMount {
+	for i := range c.VolumeMounts {
+		if c.VolumeMounts[i].Name == name {
+			return &c.VolumeMounts[i]
+		}
+	}
+	return nil
+}
+
+// podHasEmptyDirVolume reports whether the pod carries an emptyDir volume of the
+// given name.
+func podHasEmptyDirVolume(pod *corev1.Pod, name string) bool {
+	for i := range pod.Spec.Volumes {
+		if pod.Spec.Volumes[i].Name == name {
+			return pod.Spec.Volumes[i].EmptyDir != nil
+		}
+	}
+	return false
+}
+
+// vllmContainerArgs returns the args of the vLLM container in the pod (the one
+// named "vllm", falling back to the first container). The mutating webhooks
+// append vLLM flags to this container's args.
+func vllmContainerArgs(pod *corev1.Pod) []string {
+	for i := range pod.Spec.Containers {
+		if pod.Spec.Containers[i].Name == "vllm" {
+			return pod.Spec.Containers[i].Args
+		}
+	}
+	if len(pod.Spec.Containers) > 0 {
+		return pod.Spec.Containers[0].Args
+	}
+	return nil
+}
+
+// podHasDevShmHostPath reports whether the pod carries a hostPath volume for
+// /dev/shm — the webhook's default CUDA IPC wiring (hostIPC is opt-in).
+func podHasDevShmHostPath(pod *corev1.Pod) bool {
+	for i := range pod.Spec.Volumes {
+		hp := pod.Spec.Volumes[i].HostPath
+		if hp != nil && hp.Path == "/dev/shm" {
+			return true
+		}
+	}
+	return false
 }

@@ -33,10 +33,20 @@ jobs:
         if: contains(github.event.pull_request.labels.*.name, 'full')
         uses: ./.github/workflows/build_main_artifacts.yml
 
+    build-main-arm64:
+        name: Build main (arm64)
+        if: contains(github.event.pull_request.labels.*.name, 'full')
+        uses: ./.github/workflows/build_main_artifacts_arm64.yml
+
     build-cli:
         name: Build CLI
         if: contains(github.event.pull_request.labels.*.name, 'full')
         uses: ./.github/workflows/build_cli_artifacts.yml
+
+    build-cpu:
+        name: Build CPU
+        if: contains(github.event.pull_request.labels.*.name, 'full')
+        uses: ./.github/workflows/build_cpu_artifacts.yml
 
     build-cu129:
         name: Build cu129

@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
+# Future
+from __future__ import annotations
+
 # Standard
 from dataclasses import dataclass
-from typing import Any, Iterable, List, Optional
+from typing import TYPE_CHECKING, Any, Iterable, List, Optional
 import uuid
 
 # Third Party
-from sglang.srt.configs.model_config import ModelConfig
 import torch
 import torch.distributed as dist
 
@@ -24,15 +26,33 @@ from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.gpu_connector import CreateGPUConnector
 from lmcache.v1.metadata import LMCacheMetadata
 
+if TYPE_CHECKING:
+    # Third Party
+    from sglang.srt.configs.model_config import ModelConfig
+
 logger = init_logger(__name__)
+
+
+def _model_uses_mla(model_config: ModelConfig) -> bool:
+    """Return whether SGLang classified the model as MLA.
+
+    Args:
+        model_config: SGLang model metadata containing ``attention_arch``.
+
+    Returns:
+        ``True`` when ``attention_arch`` names the MLA architecture.
+    """
+    attention_arch = getattr(model_config, "attention_arch", None)
+    return getattr(attention_arch, "name", attention_arch) == "MLA"
 
 
 @dataclass
 class StoreMetadata:
-    last_node: Any
+    last_node: object
     token_ids: List[int]
     kv_indices: torch.Tensor
     offset: int
+    request_id: str = ""
 
 
 @dataclass
@@ -40,6 +60,8 @@ class LoadMetadata:
     token_ids: List[int]
     slot_mapping: torch.Tensor
     offset: int
+    prefix_pad: int = 0
+    request_id: str = ""
 
 
 def init_lmcache_engine(
@@ -48,6 +70,8 @@ def init_lmcache_engine(
     local_rank: int,
     global_rank: int,
     kv_dtype: torch.dtype,
+    config_file: str,
+    kv_head_dim: int | None = None,
 ) -> LMCacheEngine:
     """
     Initialize LMCache engine for SGLang integration.
@@ -58,11 +82,21 @@ def init_lmcache_engine(
         local_rank: Local GPU device index (for device selection)
         global_rank: Global tensor parallel rank (for metadata)
         kv_dtype: Data type for KV cache tensors
+        config_file: Path to the LMCache YAML configuration file
+        kv_head_dim: Actual width of one MLA cache row. Required for MLA
+            callers because it can differ from the attention head dimension.
+
+    Returns:
+        The initialized or existing SGLang LMCache engine.
+
+    Raises:
+        ValueError: If an MLA model does not provide a positive cache-row
+            width.
     """
     if curr_engine := LMCacheEngineBuilder.get(ENGINE_NAME):
         return curr_engine
 
-    config = lmcache_get_config()
+    config = lmcache_get_config(config_file)
     assert isinstance(config, LMCacheEngineConfig), (
         "LMCache v1 configuration is should be passed."
     )
@@ -70,10 +104,15 @@ def init_lmcache_engine(
     # construct kv shape (for mem pool)
     num_layer = model_config.num_hidden_layers
     chunk_size = config.chunk_size
-    num_kv_head = model_config.get_num_kv_heads(tp_size)
-    head_dim = model_config.head_dim
-
-    kv_shape = (num_layer, 2, chunk_size, num_kv_head, head_dim)
+    use_mla = _model_uses_mla(model_config)
+    if use_mla:
+        if kv_head_dim is None or kv_head_dim <= 0:
+            raise ValueError("SGLang MLA requires a positive KV-cache row width")
+        kv_shape = (num_layer, 1, chunk_size, 1, kv_head_dim)
+    else:
+        num_kv_head = model_config.get_num_kv_heads(tp_size)
+        head_dim = model_config.head_dim
+        kv_shape = (num_layer, 2, chunk_size, num_kv_head, head_dim)
 
     # Change current device using local GPU index
     # Use global rank for metadata (tensor parallel rank)
@@ -85,6 +124,7 @@ def init_lmcache_engine(
         local_worker_id=local_rank,
         kv_dtype=kv_dtype,
         kv_shape=kv_shape,
+        use_mla=use_mla,
     )
 
     gpu_connector = CreateGPUConnector(config, metadata, EngineType.SGLANG)
@@ -108,9 +148,11 @@ class LMCacheConnector:
         rank: int,
         k_pool: List[torch.Tensor],
         v_pool: List[torch.Tensor],
+        config_file: str,
     ):
         if not k_pool:
             raise ValueError("k_pool cannot be empty during initialization.")
+        use_mla = _model_uses_mla(sgl_config)
         kv_dtype = k_pool[0].dtype
         if (
             k_pool[0].device.type == torch_device_type
@@ -129,11 +171,13 @@ class LMCacheConnector:
             local_rank,
             rank,  # global_rank (tp_rank) for metadata
             kv_dtype,
+            config_file,
+            kv_head_dim=k_pool[0].shape[-1] if use_mla else None,
         )
         self.sgl_config = sgl_config
         self.tp_size = tp_size
         self.rank = local_rank  # Use local_rank for torch.device() calls
-        self.kvcaches = k_pool + v_pool
+        self.kvcaches = k_pool if use_mla else k_pool + v_pool
         self.num_layer = sgl_config.num_hidden_layers
 
         self.lmcache_engine.post_init(kvcaches=self.kvcaches)
@@ -148,14 +192,12 @@ class LMCacheConnector:
         )
         slot_mapping = load_metadata.slot_mapping.to(torch_device_type)
         offset = load_metadata.offset
-
-        assert isinstance(token_ids, torch.Tensor)
-        assert isinstance(slot_mapping, torch.Tensor)
-        assert (len(token_ids) - offset) == len(slot_mapping)
-
+        if (len(token_ids) - offset) != len(slot_mapping):
+            raise ValueError(
+                "Length of token_ids (minus offset) must match slot_mapping length"
+            )
         load_mask = torch.ones_like(token_ids, dtype=torch.bool)
         load_mask[:offset] = False
-
         ret_token_mask = self.lmcache_engine.retrieve(
             token_ids,
             mask=load_mask,
@@ -174,11 +216,8 @@ class LMCacheConnector:
         )
         slot_mapping = store_metadata.kv_indices.to(torch.int64).to(torch_device_type)
         offset = store_metadata.offset
-
-        assert isinstance(token_ids, torch.Tensor)
-        assert isinstance(slot_mapping, torch.Tensor)
-        assert len(token_ids) == len(slot_mapping)
-
+        if len(token_ids) != len(slot_mapping):
+            raise ValueError("Length of token_ids must match slot_mapping length")
         store_mask = torch.ones_like(token_ids, dtype=torch.bool)
 
         self.lmcache_engine.store(
@@ -212,9 +251,10 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
         rank: int,
         k_pool: List[torch.Tensor],
         v_pool: List[torch.Tensor],
+        config_file: str,
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
     ):
-        super().__init__(sgl_config, tp_size, rank, k_pool, v_pool)
+        super().__init__(sgl_config, tp_size, rank, k_pool, v_pool, config_file)
         self._lmcache_chunk_size = self.lmcache_engine.config.chunk_size
         self.layerwise_retrievers: List[Any] = []
         self.layer_load_layer: List[int] = []
@@ -283,8 +323,10 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
         if retrieve_token_num <= offset:
             self.lmcache_engine.lookup_unpin(lookup_id)
             logger.info(
-                f"LMCache retrieve skipped: lookup={retrieve_token_num}, "
-                f"offset={offset}, no new tokens to retrieve"
+                "LMCache retrieve skipped: lookup=%d, "
+                "offset=%d, no new tokens to retrieve",
+                retrieve_token_num,
+                offset,
             )
             return 0
 
@@ -293,6 +335,7 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
             mask=load_mask[:retrieve_token_num],
             kvcaches=self.kvcaches,
             slot_mapping=slot_mapping[:retrieve_token_num],
+            offset=offset,
             sync=False,
         )
 
@@ -307,8 +350,10 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
 
         num_new_tokens = retrieve_token_num - offset
         logger.info(
-            f"LMCache retrieve started: lookup={retrieve_token_num}, "
-            f"offset={offset}, retrieve {num_new_tokens} new tokens"
+            "LMCache retrieve started: lookup=%d, offset=%d, retrieve %d new tokens",
+            retrieve_token_num,
+            offset,
+            num_new_tokens,
         )
 
         return num_new_tokens
@@ -320,19 +365,57 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
         )
         store_mask = torch.ones_like(token_ids, dtype=torch.bool)
 
-        lookup_id = str(uuid.uuid4())
-        self.lmcache_engine.lookup(token_ids, lookup_id=lookup_id, pin=True)
-
-        layerwise_storer = self.lmcache_engine.store_layer(
-            token_ids,
-            mask=store_mask,
-            kvcaches=self.kvcaches,
-            slot_mapping=slot_mapping,
-            offset=store_metadata.offset,
-            sync=False,
+        logger.info(
+            "LMCache store_kv started: tokens=%d, num_layers=%d, offset=%d",
+            len(token_ids),
+            self.sgl_config.num_hidden_layers,
+            store_metadata.offset,
         )
-        next(layerwise_storer)
-        for _ in range(self.sgl_config.num_hidden_layers):
-            next(layerwise_storer)
 
-        self.lmcache_engine.lookup_unpin(lookup_id)
+        lookup_id = str(uuid.uuid4())
+        try:
+            self.lmcache_engine.lookup(token_ids, lookup_id=lookup_id, pin=True)
+
+            layerwise_storer = self.lmcache_engine.store_layer(
+                token_ids,
+                mask=store_mask,
+                kvcaches=self.kvcaches,
+                slot_mapping=slot_mapping,
+                offset=store_metadata.offset,
+                sync=False,
+            )
+
+            # Initial next() to start the generator
+            try:
+                next(layerwise_storer)
+            except StopIteration:
+                logger.error(
+                    "store_layer generator stopped prematurely before layer loop"
+                )
+                return
+
+            # Iterate through each layer
+            for layer_idx in range(self.sgl_config.num_hidden_layers):
+                try:
+                    next(layerwise_storer)
+                except StopIteration:
+                    logger.error(
+                        "store_layer generator stopped at layer %d/%d",
+                        layer_idx,
+                        self.sgl_config.num_hidden_layers,
+                    )
+                    break
+
+            self.lmcache_engine.lookup_unpin(lookup_id)
+            logger.info("LMCache store_kv completed: stored %d tokens", len(token_ids))
+        except Exception as e:
+            logger.error(
+                "LMCache store_kv failed: %s: %s",
+                type(e).__name__,
+                e,
+                exc_info=True,
+            )
+            try:
+                self.lmcache_engine.lookup_unpin(lookup_id)
+            except Exception as unpin_err:
+                logger.error("Failed to unpin lookup: %s", unpin_err, exc_info=True)

@@ -1,6 +1,11 @@
 Weka
 ====
 
+.. warning::
+
+   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance. For the MP mode equivalent of this page, see :doc:`/mp/l2_storage/index`.
+
+
 .. _weka-overview:
 
 Overview
@@ -28,7 +33,7 @@ Ways to configure LMCache WEKA Offloading
     # CPU can get in the way of GPUDirect operations
     export LMCACHE_LOCAL_CPU=False
     # GDS I/O Threads
-    export LMCACHE_EXTRA_CONFIG='{"gds_io_threads": 32}'
+    export LMCACHE_EXTRA_CONFIG='{"disk_io_threads": 32}'
 
 **2. Configuration File**:
 
@@ -48,7 +53,7 @@ Example ``config.yaml``:
     gds_buffer_size: 8192
     # GDS I/O Threads
     extra_config:
-      gds_io_threads: 32
+      disk_io_threads: 32
 
 GDS Buffer Size Explanation
 ---------------------------
@@ -110,7 +115,7 @@ Create a an lmcache configuration file called: ``weka-offload.yaml``
     gds_path: "/mnt/weka/cache"
     gds_buffer_size: 8192
     extra_config:
-      gds_io_threads: 32
+      disk_io_threads: 32
 
 If you don't want to use a config file, uncomment the first three environment variables
 and then comment out the ``LMCACHE_CONFIG_FILE`` below:
@@ -121,7 +126,7 @@ and then comment out the ``LMCACHE_CONFIG_FILE`` below:
     # LMCACHE_CHUNK_SIZE=256 \
     # LMCACHE_GDS_PATH="/mnt/weka/cache" \
     # LMCACHE_GDS_BUFFER_SIZE=8192 \
-    # LMCACHE_EXTRA_CONFIG='{"gds_io_threads": 32}' \
+    # LMCACHE_EXTRA_CONFIG='{"disk_io_threads": 32}' \
     LMCACHE_CONFIG_FILE="weka-offload.yaml" \
     vllm serve \
         meta-llama/Llama-3.1-8B-Instruct \

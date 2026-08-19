@@ -23,7 +23,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.l2_adapters.config import (
     parse_args_to_l2_adapters_config,
 )
@@ -33,6 +33,8 @@ from lmcache.v1.distributed.l2_adapters.factory import (
 from lmcache.v1.distributed.l2_adapters.plugin_l2_adapter import PluginL2AdapterConfig
 from lmcache.v1.memory_management import TensorMemoryObj
 from lmcache.v1.platform import consume_fd
+
+_EMPTY_LAYOUT = MemoryLayoutDesc(shapes=[], dtypes=[])
 
 if TYPE_CHECKING:
     pass
@@ -289,9 +291,10 @@ class TestPluginRoundTrip:
         tid = adapter.submit_store_task([key], [obj])
         assert _wait_event_fd(store_fd)
         done = adapter.pop_completed_store_tasks()
-        assert done.get(tid) is True
+        assert done.get(tid) is not None
+        assert done[tid].is_successful()
 
-        ltid = adapter.submit_lookup_and_lock_task([key])
+        ltid = adapter.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         assert _wait_event_fd(lookup_fd)
         bm = adapter.query_lookup_and_lock_result(ltid)
         assert bm is not None
@@ -311,7 +314,8 @@ class TestPluginRoundTrip:
         tid = adapter.submit_store_task([key], [obj])
         assert _wait_event_fd(store_fd)
         done = adapter.pop_completed_store_tasks()
-        assert done.get(tid) is True
+        assert done.get(tid) is not None
+        assert done[tid].is_successful()
 
         dst = torch.zeros_like(src)
         load_obj = _make_tensor_obj(dst)
@@ -334,9 +338,10 @@ class TestPluginRoundTrip:
         tid = adapter.submit_store_task(keys, objs)
         assert _wait_event_fd(store_fd)
         done = adapter.pop_completed_store_tasks()
-        assert done.get(tid) is True
+        assert done.get(tid) is not None
+        assert done[tid].is_successful()
 
-        ltid = adapter.submit_lookup_and_lock_task(keys)
+        ltid = adapter.submit_lookup_and_lock_task(keys, {0: _EMPTY_LAYOUT})
         assert _wait_event_fd(lookup_fd)
         bm = adapter.query_lookup_and_lock_result(ltid)
         assert bm is not None
@@ -358,7 +363,9 @@ class TestPluginRoundTrip:
         assert _wait_event_fd(store_fd)
         adapter.pop_completed_store_tasks()
 
-        ltid = adapter.submit_lookup_and_lock_task([stored_key, missing_key])
+        ltid = adapter.submit_lookup_and_lock_task(
+            [stored_key, missing_key], {0: _EMPTY_LAYOUT}
+        )
         assert _wait_event_fd(lookup_fd)
         bm = adapter.query_lookup_and_lock_result(ltid)
         assert bm is not None
@@ -387,16 +394,18 @@ class TestPluginRoundTrip:
             tid = adapter.submit_store_task([k], [_create_obj(OBJ_SIZE)])
             assert _wait_event_fd(store_fd)
             done = adapter.pop_completed_store_tasks()
-            assert done.get(tid) is True
+            assert done.get(tid) is not None
+            assert done[tid].is_successful()
 
         # Store k3 -- should evict k1
         tid = adapter.submit_store_task([k3], [_create_obj(OBJ_SIZE)])
         assert _wait_event_fd(store_fd)
         done = adapter.pop_completed_store_tasks()
-        assert done.get(tid) is True
+        assert done.get(tid) is not None
+        assert done[tid].is_successful()
 
         # Lookup all three
-        ltid = adapter.submit_lookup_and_lock_task([k1, k2, k3])
+        ltid = adapter.submit_lookup_and_lock_task([k1, k2, k3], {0: _EMPTY_LAYOUT})
         assert _wait_event_fd(lookup_fd)
         bm = adapter.query_lookup_and_lock_result(ltid)
         assert bm is not None

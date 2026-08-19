@@ -41,7 +41,7 @@ class FIFOCachePolicy(BaseCachePolicy[KeyType, dict[KeyType, Any]]):
         pass
 
     # NOTE(Jiayi): We do best effort to get eviction candidates so the number
-    # of returned keys mignt be smaller than num_candidates.
+    # of returned keys might be smaller than num_candidates.
     def get_evict_candidates(
         self,
         cache_dict: dict[KeyType, Any],

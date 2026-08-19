@@ -8,6 +8,7 @@ from lmcache.v1.storage_backend.raw_block.core import (
     RawBlockCoreConfig,
     RawBlockPutManyResult,
     normalize_raw_block_io_engine,
+    normalize_raw_block_placement_ids,
     round_up,
     validate_raw_block_io_options,
 )
@@ -31,6 +32,7 @@ __all__ = [
     "RawBlockKeySpec",
     "RawBlockPutManyResult",
     "decode_legacy_key",
+    "normalize_raw_block_placement_ids",
     "decode_object_key",
     "encode_legacy_key",
     "encode_object_key",

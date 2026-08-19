@@ -106,6 +106,32 @@ func BuildContainerArgs(spec *lmcachev1alpha1.LMCacheEngineSpec) []string {
 		)
 	}
 
+	// Coordinator registration. The URL is resolved by the controller (from a
+	// coordinator ref or an explicit url) before this builder runs; an empty URL
+	// means registration is disabled. The advertise IP falls back to the pod IP
+	// via the LMCACHE_COORDINATOR_ADVERTISE_IP env var injected by the DaemonSet
+	// builder, so it is only emitted as a flag when explicitly set.
+	if c := spec.Coordinator; c != nil {
+		if url := derefString(c.URL, ""); url != "" {
+			args = append(args, "--coordinator-url", url)
+			if c.AdvertiseIP != nil && *c.AdvertiseIP != "" {
+				args = append(args, "--coordinator-advertise-ip", *c.AdvertiseIP)
+			}
+			args = append(args,
+				"--coordinator-heartbeat-interval", formatFloat(derefFloat64(c.HeartbeatInterval, 5.0)),
+			)
+			// Renamed from --coordinator-l2-event-* in lmcache v0.5.3; servers
+			// < v0.5.3 reject these spellings at argparse, so this operator
+			// requires lmcache >= v0.5.3 when a coordinator is configured.
+			if derefBool(c.L2EventReporting, false) {
+				args = append(args, "--coordinator-event-reporting")
+			}
+			args = append(args,
+				"--coordinator-event-flush-interval", formatFloat(derefFloat64(c.L2EventFlushInterval, 1.0)),
+			)
+		}
+	}
+
 	// User-supplied extra args (appended last so they can override defaults)
 	args = append(args, spec.ExtraArgs...)
 
@@ -115,17 +141,29 @@ func BuildContainerArgs(spec *lmcachev1alpha1.LMCacheEngineSpec) []string {
 // buildL2AdapterJSON serializes an L2BackendSpec into the --l2-adapter JSON string.
 // For RESP adapters with authSecretRef, username/password are set to env var
 // placeholders that get interpolated by the shell wrapper (see BuildShellCommand).
+// When a serde is configured, a "serde" sub-dict is attached to the adapter
+// config so the server wraps the adapter with it.
 func buildL2AdapterJSON(backend *lmcachev1alpha1.L2BackendSpec) string {
-	if backend.RESP != nil {
-		return buildRESPL2JSON(backend.RESP)
+	var flat map[string]any
+	switch {
+	case backend.RESP != nil:
+		flat = buildRESPL2Config(backend.RESP)
+	case backend.Raw != nil:
+		flat = buildRawL2Config(backend.Raw)
+	default:
+		return ""
 	}
-	if backend.Raw != nil {
-		return buildRawL2JSON(backend.Raw)
+	if serde := buildSerdeConfig(backend.Serde); serde != nil {
+		flat["serde"] = serde
 	}
-	return ""
+	b, err := json.Marshal(flat)
+	if err != nil {
+		return ""
+	}
+	return string(b)
 }
 
-func buildRESPL2JSON(resp *lmcachev1alpha1.RESPL2AdapterSpec) string {
+func buildRESPL2Config(resp *lmcachev1alpha1.RESPL2AdapterSpec) map[string]any {
 	flat := map[string]any{
 		"type":        "resp",
 		"host":        resp.Host,
@@ -138,14 +176,10 @@ func buildRESPL2JSON(resp *lmcachev1alpha1.RESPL2AdapterSpec) string {
 	// Auth credentials are passed via LMCACHE_RESP_USERNAME /
 	// LMCACHE_RESP_PASSWORD env vars (injected by the DaemonSet builder),
 	// not in the JSON config.
-	b, err := json.Marshal(flat)
-	if err != nil {
-		return ""
-	}
-	return string(b)
+	return flat
 }
 
-func buildRawL2JSON(raw *lmcachev1alpha1.RawL2AdapterSpec) string {
+func buildRawL2Config(raw *lmcachev1alpha1.RawL2AdapterSpec) map[string]any {
 	flat := make(map[string]any)
 	flat["type"] = raw.Type
 	for k, v := range raw.Config {
@@ -156,11 +190,23 @@ func buildRawL2JSON(raw *lmcachev1alpha1.RawL2AdapterSpec) string {
 			flat[k] = parsed
 		}
 	}
-	b, err := json.Marshal(flat)
-	if err != nil {
-		return ""
+	return flat
+}
+
+// buildSerdeConfig renders L2SerdeSpec into the serde sub-dict consumed by
+// the server's adapter factory, or nil when no serde is configured. For
+// aesgcm, master_key_path points at the file mounted by the DaemonSet
+// builder from the managed master-key Secret.
+func buildSerdeConfig(serde *lmcachev1alpha1.L2SerdeSpec) map[string]any {
+	if serde == nil || serde.AESGCM == nil {
+		return nil
 	}
-	return string(b)
+	return map[string]any{
+		"type":            "aesgcm",
+		"key_provider":    derefString(serde.AESGCM.KeyProvider, "hkdf"),
+		"master_key_path": l2EncryptionKeyPath,
+		"aes_bits":        derefInt32(serde.AESGCM.AESBits, 128),
+	}
 }
 
 func getServerPort(spec *lmcachev1alpha1.LMCacheEngineSpec) *int32 {

@@ -3,7 +3,7 @@
 
 ``InteractiveState`` holds the partially-configured benchmark parameters,
 can be initialized from CLI args or a saved JSON file, and can be
-converted to the ``argparse.Namespace`` that ``_bench_engine()`` expects.
+converted to the ``argparse.Namespace`` that ``run_engine_bench()`` expects.
 """
 
 # Standard
@@ -73,6 +73,10 @@ class InteractiveState:
 
     def set(self, key: str, value: Any) -> None:
         self._values[key] = value
+
+    def unset(self, key: str) -> None:
+        """Remove a key so it counts as unset again (used when stepping back)."""
+        self._values.pop(key, None)
 
     @property
     def values(self) -> dict[str, Any]:
@@ -210,7 +214,7 @@ class InteractiveState:
         return state
 
     def to_namespace(self) -> argparse.Namespace:
-        """Convert to an ``argparse.Namespace`` compatible with ``_bench_engine``.
+        """Convert to ``argparse.Namespace`` compatible with ``run_engine_bench``.
 
         Fills defaults for any unset items, then builds the namespace
         with the attribute names that ``parse_args_to_config()`` and

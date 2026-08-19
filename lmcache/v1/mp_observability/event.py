@@ -25,6 +25,7 @@ class EventType(Enum):
     L1_WRITE_FINISHED = "l1.write.finished"
     L1_WRITE_FINISHED_AND_READ_RESERVED = "l1.write_finished_and_read_reserved"
     L1_KEYS_EVICTED = "l1.keys.evicted"
+    L1_KEYS_ACCESSED = "l1.keys.accessed"
     L1_EVICTION_LOOP_TICK = "l1.eviction.loop_tick"
 
     # L1 failure events (LM-291 health monitoring)
@@ -52,6 +53,14 @@ class EventType(Enum):
     L2_LOAD_TASK_SUBMITTED = "l2.load_task.submitted"
     L2_LOAD_TASK_COMPLETED = "l2.load_task.completed"
 
+    # L2 Eviction Controller events
+    L2_KEYS_EVICTED = "l2.keys.evicted"
+
+    # L2 adapter key-level events.
+    L2_KEYS_STORED = "l2.keys.stored"
+    L2_KEYS_ACCESSED = "l2.keys.accessed"
+    L2_KEYS_DELETED = "l2.keys.deleted"
+
     # L2 failure events (LM-291 health monitoring)
     L2_PREFETCH_FAILED = "l2.prefetch.failed"
 
@@ -66,6 +75,10 @@ class EventType(Enum):
     # Chunk hash logging events
     MP_LOOKUP = "mp.lookup"
 
+    # Per-chunk token bindings. Metadata (parallel lists):
+    # chunk_hashes (list[bytes]) and token_chunks (list[list[int]]).
+    MP_TOKENS = "mp.tokens"
+
     # MP Server lifecycle sentinels (CPU-synchronous)
     MP_REQUEST_START = "mp.request.start"
     MP_RETRIEVE_SUBMITTED = "mp.retrieve.submitted"
@@ -77,6 +90,11 @@ class EventType(Enum):
 
     # vLLM end session events
     MP_VLLM_END_SESSION = "mp.vllm.end_session"
+
+    # Published by LMCacheTimeoutError on construction (see errors.py).
+    # Metadata: message (str), exception_type (str), stacktrace (str, mapped
+    # to the OTel exception.stacktrace span attribute).
+    TIMEOUT_RAISED = "timeout.raised"
 
     # Trace recording — unified function-call entry event used by the
     # ``@enable_tracing`` decorator.  Metadata layout:
@@ -101,6 +119,29 @@ class EventType(Enum):
     CB_STORE_FINAL_END = "cb.store_final.end"
     CB_FINGERPRINTS_REGISTERED = "cb.fingerprints.registered"
     CB_CHUNKS_EVICTED = "cb.chunks.evicted"
+
+    # CB V3 lookup sub-spans (CPU) — nest under cb.lookup. Submitted-once but
+    # END may fire on a later poll (the non-blocking lookup re-issues), so the
+    # span captures submit→resident incl. poll-wait.
+    CB_FINGERPRINT_MATCH_START = "cb.fingerprint_match.start"
+    CB_FINGERPRINT_MATCH_END = "cb.fingerprint_match.end"
+    # Prefix leg: blend_v3 owns the submit/poll (direct storage_manager), so the
+    # prefix lookup is a CB-namespace span under cb.lookup. Its hit tokens ride
+    # the CB hit-rate metric via CB_LOOKUP_END (CB requests no longer feed the
+    # MP mp.lookup_prefetch span / hit-rate aggregate).
+    CB_PREFIX_LOOKUP_START = "cb.prefix_lookup.start"
+    CB_PREFIX_LOOKUP_END = "cb.prefix_lookup.end"
+    # Coordinator (fleet directory) match leg — cross-server analogue of
+    # cb.fingerprint_match. Async: START at submit, END on the resolving poll.
+    CB_COORDINATOR_MATCH_START = "cb.coordinator_match.start"
+    CB_COORDINATOR_MATCH_END = "cb.coordinator_match.end"
+    CB_SPARSE_PREFETCH_START = "cb.sparse_prefetch.start"
+    CB_SPARSE_PREFETCH_END = "cb.sparse_prefetch.end"
+
+    # CB V3 retrieve sub-span (GPU) — nest under cb.retrieve. Emitted via
+    # publish_on_stream for GPU-accurate timing of the L1->paged scatter.
+    CB_SCATTER_START = "cb.scatter.start"
+    CB_SCATTER_END = "cb.scatter.end"
 
     # Cache Blending (CB) events — lifecycle sentinels (CPU-synchronous)
     CB_REQUEST_START = "cb.request.start"

@@ -70,8 +70,15 @@ Producers:
 
 | EventType | Metadata keys | Types |
 |---|---|---|
-| `L2_STORE_SUBMITTED` | `adapter_index`, `task_id`, `l2_name`, `key_count`, `total_bytes` | `int`, `int`, `str`, `int`, `int` |
-| `L2_STORE_COMPLETED` | `adapter_index`, `task_id`, `l2_name`, `succeeded_count`, `failed_count` | `int`, `int`, `str`, `int`, `int` |
+| `L2_STORE_SUBMITTED` | `adapter_index`, `task_id`, `l2_name`, `key_count`, `total_bytes`, `key_count_per_salt` | `int`, `int`, `str`, `int`, `int`, `dict[str, int]` |
+| `L2_STORE_COMPLETED` | `adapter_index`, `task_id`, `l2_name`, `bytes_transferred`, `succeeded_count`, `failed_count`, `key_count_per_salt` | `int`, `int`, `str`, `int`, `int`, `int`, `dict[str, int]` |
+
+`key_count_per_salt` maps each `cache_salt` to its key count, pre-grouped
+at the emit site so the drain thread iterates tenants (O(T)) not keys (O(N)).
+Store tasks can batch keys from multiple tenants; `key_count_per_salt`
+enables per-tenant attribution on the subscriber side.
+On the failure path of `L2_STORE_COMPLETED`, `key_count_per_salt` is absent
+(no succeeded keys to attribute).
 
 ---
 
@@ -79,18 +86,35 @@ Producers:
 
 | EventType | Metadata keys | Types |
 |---|---|---|
-| `L2_PREFETCH_LOOKUP_SUBMITTED` | `request_id`, `key_count`, `adapter_count` | `int`, `int`, `int` |
+| `L2_PREFETCH_LOOKUP_SUBMITTED` | `request_id`, `key_count`, `adapter_count`, `key_count_per_salt` | `int`, `int`, `int`, `dict[str, int]` |
 | `L2_PREFETCH_LOOKUP_COMPLETED` | `request_id`, `prefix_hit_count` | `int`, `int` |
-| `L2_PREFETCH_LOAD_SUBMITTED` | `request_id`, `key_count`, `adapter_count` | `int`, `int`, `int` |
-| `L2_PREFETCH_LOAD_COMPLETED` | `request_id`, `loaded_count`, `failed_count` | `int`, `int`, `int` |
+| `L2_PREFETCH_LOAD_SUBMITTED` | `request_id`, `key_count`, `adapter_count`, `key_count_per_salt` | `int`, `int`, `int`, `dict[str, int]` |
+| `L2_PREFETCH_LOAD_COMPLETED` | `request_id`, `loaded_count`, `failed_count`, `key_count_per_salt` | `int`, `int`, `int`, `dict[str, int]` |
 | `L2_LOAD_TASK_SUBMITTED` | `request_id`, `adapter_index`, `task_id`, `l2_name`, `key_count`, `total_bytes` | `int`, `int`, `int`, `str`, `int`, `int` |
 | `L2_LOAD_TASK_COMPLETED` | `request_id`, `adapter_index`, `task_id`, `l2_name` | `int`, `int`, `int`, `str` |
+
+`key_count_per_salt` on `L2_PREFETCH_LOOKUP_SUBMITTED`,
+`L2_PREFETCH_LOAD_SUBMITTED`, and `L2_PREFETCH_LOAD_COMPLETED` enables
+per-tenant metric attribution. `key_count_per_salt` on load-completed
+covers only loaded (succeeded) keys.
 
 `L2_LOAD_TASK_*` events fire once per `(request_id, adapter_index)` pair
 — unlike the request-level `L2_PREFETCH_LOAD_*` events above, which
 aggregate across adapters.  Throughput subscribers that need per-adapter
 attribution (e.g. `L2ThroughputSubscriber`) consume these task-level
 events; key-count counters continue to consume the request-level events.
+
+---
+
+## L2 Eviction Controller Events
+
+| EventType | Metadata keys | Types |
+|---|---|---|
+| `L2_KEYS_EVICTED` | `key_count`, `key_count_per_salt` | `int`, `dict[str, int]` |
+
+Published by `L2EvictionController._execute_eviction_action` after
+`adapter.delete()` completes. Only emitted when at least one key was
+evicted. `key_count_per_salt` enables per-tenant eviction dashboards.
 
 ---
 
@@ -110,6 +134,31 @@ The third reason `serde_failure` will be added as an additive, non-breaking
 extension once the serde PR lands and adapters can distinguish
 deserialization errors from missing objects. No dashboard migration
 needed when that happens.
+
+---
+
+## Timeout Events
+
+Cross-component health event. Published by `LMCacheTimeoutError.__init__`
+(see `lmcache/v1/mp_observability/errors.py`) every time the exception is
+constructed, gated by `is_observability_enabled()` so it is a no-op outside
+the MP server process. The `session_id` on the `Event` dataclass correlates
+the timeout with the originating request when the raise site has it; it is
+empty otherwise.
+
+| EventType | Metadata keys | Types |
+|---|---|---|
+| `TIMEOUT_RAISED` | `message`, `exception_type`, `stacktrace` | `str`, `str`, `str` |
+
+- `message` — the exception's message string (`str(exc)`).
+- `exception_type` — the class name (`LMCacheTimeoutError` or a subclass).
+- `stacktrace` — the formatted construction stack (`traceback.format_stack()`
+  minus the `__init__` frame), surfaced as the OTel `exception.stacktrace`
+  attribute by the tracing subscriber.
+
+Consumed by `TimeoutMetricsSubscriber` (counter), `TimeoutLoggingSubscriber`
+(warning log), and `TimeoutTracingSubscriber` (OTel span with an `exception`
+event + ERROR status).
 
 ---
 
@@ -136,14 +185,21 @@ to correlate START/END pairs.
 | EventType | Metadata keys | Types |
 |---|---|---|
 | `MP_STORE_START` | `device`, `engine_id`, `model_name` | `str`, `int`, `str` |
-| `MP_STORE_END` | `device`, `stored_count`, `engine_id`, `model_name`, `total_bytes` | `str`, `int`, `int`, `str`, `int` |
+| `MP_STORE_END` | `device`, `stored_count`, `engine_id`, `model_name`, `total_bytes`, `num_tokens` | `str`, `int`, `int`, `str`, `int`, `int` |
 | `MP_RETRIEVE_START` | `device`, `engine_id`, `model_name` | `str`, `int`, `str` |
-| `MP_RETRIEVE_END` | `device`, `retrieved_count`, `engine_id`, `model_name`, `cache_salt`, `total_bytes` | `str`, `int`, `int`, `str`, `str`, `int` |
+| `MP_RETRIEVE_END` | `device`, `retrieved_count`, `engine_id`, `model_name`, `cache_salt`, `total_bytes`, `num_tokens` | `str`, `int`, `int`, `str`, `str`, `int`, `int` |
 | `MP_LOOKUP_PREFETCH_START` | *(none)* | — |
 | `MP_LOOKUP_PREFETCH_END` | `found_count`, `requested_tokens`, `hit_tokens`, `model_name`, `cache_salt` | `int`, `int`, `int`, `str`, `str` |
 | `MP_LOOKUP` | `request_id`, `chunk_hashes`, `model_name`, `chunk_size`, `seq_len`, `dtypes`, `shapes` | `str`, `list[str]`, `str`, `int`, `int`, `list[str]`, `list[list[int]]` |
 | `MP_VLLM_BLOCK_ALLOCATION` | `instance_id`, `model_name`, `records` | `int`, `str`, `list[BlockAllocationRecord]` (each has `req_id: str`, `new_block_ids: list[int]`, `new_token_ids: list[int]`) |
 | `MP_VLLM_END_SESSION` | `request_id` | `str` |
+
+### `num_tokens` on `MP_STORE_END` / `MP_RETRIEVE_END`
+
+Denormalized token count (`num_chunks * chunk_size`) so subscribers need
+not know `chunk_size`.  Fail-closed, matching `total_bytes`: `0` when the
+store committed nothing (`stored_count == 0`) or the retrieve did not
+fully succeed.
 
 ### `MP_LOOKUP_PREFETCH_END` metadata
 
@@ -158,7 +214,7 @@ know `chunk_size`:
   cannot hit at chunk granularity.
 - `hit_tokens = found_count * chunk_size`.
 - `model_name` and `cache_salt` are captured at lookup time from
-  `IPCCacheEngineKey` and surface as OTel attributes on the
+  `IPCCacheServerKey` and surface as OTel attributes on the
   `lmcache_mp.lookup_*_tokens` counters so the hit rate can be sliced
   per model and per tenant / isolation domain on the dashboard.
   `cache_salt` may have high cardinality (e.g. one entry per tenant);
@@ -203,7 +259,7 @@ request scope and guard GPU callback races.  Published via `EventBus.publish()`
 ## Blend Server Events
 
 These events use `session_id` on the `Event` dataclass (sourced from
-`IPCCacheEngineKey.request_id`) to correlate START/END pairs.
+`IPCCacheServerKey.request_id`) to correlate START/END pairs.
 
 | EventType | Metadata keys | Types |
 |---|---|---|

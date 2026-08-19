@@ -3,6 +3,7 @@
 
 # Standard
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 import asyncio
 import queue
 import time
@@ -14,6 +15,25 @@ from lmcache.cli.commands.bench.engine_bench.stats import StatsCollector
 from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class MetricSection:
+    """One extra section a workload contributes to the final summary.
+
+    ``StatsCollector`` covers what every workload has in common; a workload
+    measuring something of its own returns it as one of these.
+
+    Attributes:
+        key: Machine-readable section key, used in JSON output.
+        label: Human-readable section heading for terminal output.
+        entries: ``(key, label, value)`` triples, in display order.  A value
+            is a scalar the metrics system can render and serialize to JSON.
+    """
+
+    key: str
+    label: str
+    entries: list[tuple[str, str, str | int | float]] = field(default_factory=list)
 
 
 class BaseWorkload(ABC):
@@ -71,12 +91,31 @@ class BaseWorkload(ABC):
     # Concrete methods
     # ------------------------------------------------------------------
 
-    def run(self) -> None:
-        """Run the full workload: warmup, then the benchmark loop.
+    def extra_metric_sections(self) -> list[MetricSection]:
+        """Return extra summary sections this workload measured.
 
-        Blocks until the workload is complete.
+        Returns:
+            Sections to append to the final report, in display order.
+            Empty unless a workload overrides this.
         """
-        asyncio.run(self._run_async())
+        return []
+
+    def run(self) -> None:
+        """Run warmup + benchmark, closing the HTTP client in the same loop.
+
+        Blocks until the workload is complete. The ``RequestSender``'s
+        httpx transports are bound to this loop, so they must be closed
+        before ``asyncio.run`` destroys it — otherwise a later close
+        from a fresh loop raises ``RuntimeError: Event loop is closed``.
+        """
+
+        async def _run_and_close() -> None:
+            try:
+                await self._run_async()
+            finally:
+                await self._request_sender.close()
+
+        asyncio.run(_run_and_close())
 
     async def _run_async(self) -> None:
         """Internal async implementation of the run loop."""

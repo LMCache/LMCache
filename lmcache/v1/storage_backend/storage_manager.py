@@ -84,6 +84,7 @@ def allocate_and_copy_objects(
           that has been successfully allocated
         - list of the memory objects that has been successfully allocated
     """
+    allocated_keys = []
     allocated_objects = []
     for key, src_memory_obj in zip(keys, src_memory_objs, strict=False):
         if allocator_backend.contains(key):
@@ -111,11 +112,12 @@ def allocate_and_copy_objects(
 
         with torch_dev.stream(stream):
             memory_obj.tensor.copy_(src_memory_obj.tensor, non_blocking=True)
+        allocated_keys.append(key)
         allocated_objects.append(memory_obj)
 
     if stream is not None:
         stream.synchronize()
-    return keys[: len(allocated_objects)], allocated_objects
+    return allocated_keys, allocated_objects
 
 
 class WeightedSemaphore:
@@ -137,7 +139,7 @@ class WeightedSemaphore:
             )
 
         async with self._cond:
-            logger.debug(f"WeightedSemaphore: Attempting to acquire {n} chunks")
+            logger.debug("WeightedSemaphore: Attempting to acquire %d chunks", n)
             if n <= self._concurrent_budget_cap:
                 await self._cond.wait_for(lambda: self._current_chunks >= n)
                 self._current_chunks -= n
@@ -149,8 +151,9 @@ class WeightedSemaphore:
                 # Reserve everything
                 self._current_chunks = 0
             logger.debug(
-                f"WeightedSemaphore: Acquired {n} chunks, "
-                f"remaining chunks: {self._current_chunks}"
+                "WeightedSemaphore: Acquired %d chunks, remaining chunks: %d",
+                n,
+                self._current_chunks,
             )
 
     async def release(self, n: int = 1) -> None:
@@ -289,13 +292,10 @@ class StorageManager:
         self._setup_metrics()
 
     def _setup_metrics(self) -> None:
-        prometheus_logger = PrometheusLogger.GetInstanceOrNone()
-        if prometheus_logger is None:
-            logger.warning(
-                "PrometheusLogger is not initialized, "
-                "event metrics will not be collected"
-            )
-            return
+        prometheus_logger = PrometheusLogger.GetOrCreate(
+            self.metadata,
+            config=self.config,
+        )
 
         metric_map = {
             "storage_events_ongoing_count": EventStatus.ONGOING,
@@ -560,10 +560,15 @@ class StorageManager:
         lookup_id: str,
         cum_chunk_lengths_total: list[int],
         tier_expected_chunks: list[int],
+        keys_per_chunk: int = 1,
     ) -> None:
         """
         Callback function when all prefetch tasks
         (i.e., prefetching from all backends for the entire request) are done.
+
+        :param int keys_per_chunk: Number of storage keys per logical chunk
+            (``num_layers`` for layerwise mode, ``1`` otherwise). Used to
+            convert each tier's per-key result count back to chunk units.
         """
         assert self.async_lookup_server is not None
         self.event_manager.update_event_status(
@@ -616,23 +621,34 @@ class StorageManager:
         #   retrieved_length = cum_chunk_lengths_total[2] = 512
         total_retrieved_chunks = 0
         for tier_idx, tier_result in enumerate(res):
-            actual_chunks = len(tier_result)
+            # `tier_result` is a list of (key, mem_obj) pairs, one per
+            # storage key. With layerwise on, each logical chunk maps to
+            # keys_per_chunk per-layer keys, so divide to get chunk count.
+            # We round down so a partially-retrieved chunk (e.g., one
+            # layer evicted) is treated as a miss.
+            actual_chunks = len(tier_result) // keys_per_chunk
             expected_chunks = tier_expected_chunks[tier_idx]
             total_retrieved_chunks += actual_chunks
+
+            # Release the tail rounded off by actual_chunks; else staging buffer leaks.
+            tail_start = actual_chunks * keys_per_chunk
+            for _, mem_obj in tier_result[tail_start:]:
+                mem_obj.ref_count_down()
 
             # If a tier retrieved fewer chunks than expected, we stop counting
             # because subsequent chunks are not contiguous
             if actual_chunks < expected_chunks:
                 # Release all chunks in subsequent tiers since they won't be used
                 for subsequent_tier in res[tier_idx + 1 :]:
-                    for mem_obj in subsequent_tier:
+                    for _, mem_obj in subsequent_tier:
                         mem_obj.ref_count_down()
                 break
 
         retrieved_length = cum_chunk_lengths_total[total_retrieved_chunks]
         logger.info(
-            f"Responding to scheduler for lookup id {lookup_id}"
-            f" with retrieved length {retrieved_length}"
+            "Responding to scheduler for lookup id %s with retrieved length %s",
+            lookup_id,
+            retrieved_length,
         )
         self.async_lookup_server.send_response_to_scheduler(lookup_id, retrieved_length)
 
@@ -643,6 +659,7 @@ class StorageManager:
         cum_chunk_lengths: list[int],
         search_range: Optional[list[str]] = None,
         pin: bool = False,
+        keys_per_chunk: int = 1,
     ) -> None:
         """
         Perform asynchronous lookup and prefetching across all storage backends.
@@ -657,11 +674,19 @@ class StorageManager:
                 - chunk 1: 256 tokens (tokens 256-511)
                 - chunk 2: 128 tokens (tokens 512-639)
             Then cum_chunk_lengths = [0, 256, 512, 640]
-            Note: len(cum_chunk_lengths) = len(keys) + 1
+            Note: len(cum_chunk_lengths) = (len(keys) // keys_per_chunk) + 1
         :param Optional[list[str]] search_range: The range of storage backends
         to search in. Should be a subset of ["LocalCPUBackend",
         "LocalDiskBackend"] for now. If None, search in all backends.
         :param bool pin: Whether to pin the keys.
+        :param int keys_per_chunk: Number of storage keys per logical chunk.
+            For non-layerwise mode this is 1 (one key per chunk). For
+            layerwise mode the caller passes num_layers, since each chunk
+            is stored as num_layers per-layer keys (LayerCacheEngineKey).
+            All chunk-level accounting below is derived from
+            num_hit_keys // keys_per_chunk so that hit counts and
+            cum_chunk_lengths indexing stay in chunk units even though the
+            backend operates on per-layer keys.
         """
 
         # NOTE(Jiayi): Currently, the retrieval pattern is always
@@ -676,7 +701,19 @@ class StorageManager:
         # chunks than its lookup result indicated. This is especially helpful
         # for P2PBackend.
 
-        num_total_chunks = len(keys)
+        # All chunk-level accounting (num_total_chunks, num_total_hit_chunks,
+        # tier_expected_chunks, cum_chunk_lengths indexing) is in *chunk*
+        # units, while raw key indexing into `keys` is in *key* units.
+        # When keys_per_chunk == 1 these are identical; when layerwise is
+        # on, each chunk corresponds to num_layers keys.
+        if keys_per_chunk < 1:
+            raise ValueError(f"keys_per_chunk must be >= 1, got {keys_per_chunk}")
+        if len(keys) % keys_per_chunk != 0:
+            raise ValueError(
+                f"len(keys)={len(keys)} is not a multiple of "
+                f"keys_per_chunk={keys_per_chunk}"
+            )
+        num_total_chunks = len(keys) // keys_per_chunk
         num_total_hit_chunks = 0
         # cum_chunk_lengths_total: A copy of the original cumulative chunk lengths
         # for all chunks. This is preserved to calculate the final token count
@@ -693,7 +730,23 @@ class StorageManager:
         for backend_name, backend in self.get_active_storage_backends(
             search_range=search_range
         ):
-            num_hit_chunks = await backend.batched_async_contains(lookup_id, keys, pin)
+            num_hit_keys_raw = await backend.batched_async_contains(
+                lookup_id, keys, pin
+            )
+            # Round down to a whole-chunk boundary. If a backend has only
+            # some of a chunk's per-layer keys (e.g., partial eviction),
+            # we treat the chunk as a miss to keep the chunk-level
+            # invariant required by the prefix-match retrieval pattern.
+            num_hit_chunks = num_hit_keys_raw // keys_per_chunk
+            num_hit_keys = num_hit_chunks * keys_per_chunk
+
+            # `pin=True` pins every matching key inside batched_async_contains.
+            # The rounded-off tail (keys[num_hit_keys:num_hit_keys_raw]) is
+            # dropped from backend_keys and never retrieved, so release those
+            # pins here to avoid leaking refcount budget.
+            if pin and num_hit_keys < num_hit_keys_raw:
+                for k in keys[num_hit_keys:num_hit_keys_raw]:
+                    backend.unpin(k)
 
             if num_hit_chunks == 0:
                 continue
@@ -701,7 +754,7 @@ class StorageManager:
             num_total_hit_chunks += num_hit_chunks
             tier_expected_chunks.append(num_hit_chunks)
 
-            backend_keys = keys[:num_hit_chunks]
+            backend_keys = keys[:num_hit_keys]
             loading_task_keys.append(backend_keys)
 
             assert self.async_serializer is not None, (
@@ -732,7 +785,7 @@ class StorageManager:
 
             if num_total_hit_chunks == num_total_chunks:
                 break
-            keys = keys[num_hit_chunks:]
+            keys = keys[num_hit_keys:]
 
         # If no chunks were hit across all backends, respond immediately and return.
         if num_total_hit_chunks == 0:
@@ -772,6 +825,7 @@ class StorageManager:
                 lookup_id,
                 cum_chunk_lengths_total,
                 tier_expected_chunks,
+                keys_per_chunk=keys_per_chunk,
             )
         )
 
@@ -842,12 +896,13 @@ class StorageManager:
         with self._bypass_lock:
             if bypassed:
                 self._bypassed_backends.add(backend_name)
-                logger.info(f"StorageManager: Backend {backend_name} is now bypassed")
+                logger.info("StorageManager: Backend %s is now bypassed", backend_name)
             else:
                 self._bypassed_backends.discard(backend_name)
                 logger.info(
-                    f"StorageManager: Backend {backend_name} bypass removed, "
-                    "restored to normal operation"
+                    "StorageManager: Backend %s bypass removed, "
+                    "restored to normal operation",
+                    backend_name,
                 )
 
     def is_backend_bypassed(self, backend_name: str) -> bool:
@@ -1087,8 +1142,9 @@ class StorageManager:
                     num_cleared_tokens += backend.clear()
                 else:
                     logger.warning(
-                        f"Storage backend {backend_name} does not support "
-                        "clear operation. Skipping."
+                        "Storage backend %s does not support "
+                        "clear operation. Skipping.",
+                        backend_name,
                     )
 
         return num_cleared_tokens
@@ -1338,11 +1394,11 @@ class StorageManager:
         # Close all backends
         for name, backend in self.storage_backends.items():
             try:
-                logger.info(f"Closing storage backend: {name}")
+                logger.info("Closing storage backend: %s", name)
                 backend.close()
-                logger.info(f"Storage backend {name} closed successfully")
+                logger.info("Storage backend %s closed successfully", name)
             except Exception as e:
-                logger.error(f"Error closing backend {name}: {e}")
+                logger.error("Error closing backend %s: %s", name, e)
 
         # Stop event loop
         try:
@@ -1351,7 +1407,7 @@ class StorageManager:
                 self.loop.call_soon_threadsafe(self.loop.stop)
                 logger.info("Event loop stop signaled")
         except Exception as e:
-            logger.error(f"Error stopping event loop: {e}")
+            logger.error("Error stopping event loop: %s", e)
 
         # Wait for thread with timeout
         if self.thread.is_alive():

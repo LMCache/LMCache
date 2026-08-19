@@ -21,10 +21,10 @@ from nixl._api import (
 )
 
 # First Party
+from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
-from lmcache.native_storage_ops import Bitmap
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
-from lmcache.v1.distributed.internal_api import L1MemoryDesc
+from lmcache.v1.distributed.internal_api import L1MemoryDesc, L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
 from lmcache.v1.distributed.l2_adapters.config import (
     L2AdapterConfigBase,
@@ -254,6 +254,7 @@ class NixlStorageAgent:
             file_path: Directory where storage files are created.
             use_direct_io: Whether to open files with O_DIRECT.
         """
+        os.makedirs(file_path, exist_ok=True)
         if file_size % page_size != 0:
             raise ValueError(
                 f"file_size ({file_size}) must be a multiple of page_size ({page_size})"
@@ -457,13 +458,7 @@ class NixlStoreL2Adapter(L2AdapterInterface):
 
         # Task ID management
         self._next_task_id: L2TaskId = 0
-        self._completed_store_tasks: dict[L2TaskId, bool] = {}
-        # Bytes actually transferred per completed store task.  Excludes
-        # keys that were fast-pathed (already present in
-        # ``_memory_objects``) and any pool-exhaustion fallouts.  Surfaces
-        # to the L2 throughput subscriber so its histogram reflects real
-        # NIXL transfers, not skipped no-ops.
-        self._completed_store_task_bytes: dict[L2TaskId, int] = {}
+        self._completed_store_tasks: dict[L2TaskId, L2StoreResult] = {}
         self._completed_lookup_tasks: dict[L2TaskId, Bitmap] = {}
         self._completed_load_tasks: dict[L2TaskId, Bitmap] = {}
         self._lock = threading.Lock()  # lock for all shared state
@@ -517,32 +512,26 @@ class NixlStoreL2Adapter(L2AdapterInterface):
 
         return task_id
 
-    def pop_completed_store_tasks(self) -> dict[L2TaskId, bool]:
-        """
-        Pop all the completed store tasks with a flag indicating
-        whether the task is successful or not.
+    def pop_completed_store_tasks(self) -> dict[L2TaskId, L2StoreResult]:
+        """Pop all completed store tasks.
 
         Returns:
-            dict[L2TaskId, bool]: a dictionary mapping the task id to a boolean flag
-            indicating whether the task is successful or not. True means
-            successful, and False means failed.
+            dict[L2TaskId, L2StoreResult]: a dictionary mapping the task
+            id to an ``L2StoreResult`` that encodes both the success flag
+            and the bytes actually transferred.
         """
         with self._lock:
             completed = self._completed_store_tasks
             self._completed_store_tasks = {}
         return completed
 
-    def pop_completed_store_task_bytes(self) -> dict[L2TaskId, int]:
-        with self._lock:
-            completed_bytes = self._completed_store_task_bytes
-            self._completed_store_task_bytes = {}
-        return completed_bytes
-
     #####################
     # Lookup and Lock Interface
     #####################
 
-    def submit_lookup_and_lock_task(self, keys: list[ObjectKey]) -> L2TaskId:
+    def submit_lookup_and_lock_task(
+        self, keys: list[ObjectKey], group_layout_descs: dict[int, MemoryLayoutDesc]
+    ) -> L2TaskId:
         with self._lock:
             task_id = self._get_next_task_id()
 
@@ -589,7 +578,9 @@ class NixlStoreL2Adapter(L2AdapterInterface):
         with self._lock:
             return self._completed_load_tasks.pop(task_id, None)
 
-    def close(self):
+    def close(self) -> None:
+        """Close the adapter and release its event-loop and NIXL resources."""
+
         # Stop the event loop and wait for the thread to finish
         async def _stop_tasks():
             tasks = [
@@ -602,19 +593,27 @@ class NixlStoreL2Adapter(L2AdapterInterface):
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
 
-        if self._loop.is_running():
-            future = asyncio.run_coroutine_threadsafe(_stop_tasks(), self._loop)
+        # Gate on is_closed() rather than is_running(): the loop thread may not
+        # have reached run_forever() yet, and skipping the stop below would leave
+        # join() blocking forever. Both threadsafe calls are valid on a loop that
+        # has not started; their callbacks run once it does.
+        if not self._loop.is_closed():
+            try:
+                future = asyncio.run_coroutine_threadsafe(_stop_tasks(), self._loop)
 
-            future.result(timeout=5)  # Wait for tasks to be cancelled, with a timeout
-
-            self._loop.call_soon_threadsafe(self._loop.stop)
+                # Wait for tasks to be cancelled, with a timeout
+                future.result(timeout=5)
+            finally:
+                self._loop.call_soon_threadsafe(self._loop.stop)
 
         self._loop_thread.join()
-        self._loop.close()
-
-        self._store_efd.close()
-        self._lookup_efd.close()
-        self._load_efd.close()
+        try:
+            self.nixl_agent.close()
+        finally:
+            self._loop.close()
+            self._store_efd.close()
+            self._lookup_efd.close()
+            self._load_efd.close()
 
     #####################
     # Eviction Interface
@@ -777,8 +776,7 @@ class NixlStoreL2Adapter(L2AdapterInterface):
             if not mem_indices_flat:
                 # Nothing to store (all keys already existed or pool empty)
                 with self._lock:
-                    self._completed_store_tasks[task_id] = True
-                    self._completed_store_task_bytes[task_id] = 0
+                    self._completed_store_tasks[task_id] = L2StoreResult(True, 0)
                 self._signal_store_event()
                 return
 
@@ -812,8 +810,9 @@ class NixlStoreL2Adapter(L2AdapterInterface):
             self.nixl_agent.pool.batched_free(storage_indices_flat)
 
         with self._lock:
-            self._completed_store_tasks[task_id] = success
-            self._completed_store_task_bytes[task_id] = bytes_transferred
+            self._completed_store_tasks[task_id] = L2StoreResult(
+                success, bytes_transferred
+            )
 
         self._signal_store_event()
 

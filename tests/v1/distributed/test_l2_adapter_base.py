@@ -14,11 +14,12 @@ import threading
 import pytest
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey
-from lmcache.v1.distributed.internal_api import L2AdapterListener
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.internal_api import L2AdapterListener, L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import (
     AdapterUsage,
     L2AdapterInterface,
+    L2TaskId,
 )
 
 
@@ -47,10 +48,12 @@ class _StubAdapter(L2AdapterInterface):
     def submit_store_task(self, keys, objects):
         return 0
 
-    def pop_completed_store_tasks(self):
+    def pop_completed_store_tasks(self) -> dict[L2TaskId, L2StoreResult]:
         return {}
 
-    def submit_lookup_and_lock_task(self, keys):
+    def submit_lookup_and_lock_task(
+        self, keys, group_layout_descs: dict[int, MemoryLayoutDesc]
+    ):
         return 0
 
     def query_lookup_and_lock_result(self, task_id):
@@ -283,7 +286,7 @@ class _RecordingListener(L2AdapterListener):
         self.accessed: list[list[ObjectKey]] = []
         self.deleted: list[list[ObjectKey]] = []
 
-    def on_l2_keys_stored(self, keys: list[ObjectKey]) -> None:
+    def on_l2_keys_stored(self, keys: list[ObjectKey], sizes: list[int]) -> None:
         self.stored.append(list(keys))
 
     def on_l2_keys_accessed(self, keys: list[ObjectKey]) -> None:

@@ -30,8 +30,11 @@ uv pip install -e . --no-build-isolation
 # Standard install with CUDA extensions (requires torch pre-installed)
 pip install -e . --no-build-isolation
 
-# Source-only (no CUDA extensions)
-NO_CUDA_EXT=1 pip install -e .
+# Source-only (no native extensions)
+NO_NATIVE_EXT=1 pip install -e .
+
+# CPU-only (common C++ extensions, no GPU backend)
+NO_GPU_EXT=1 pip install -e . --no-build-isolation
 
 # HIP/ROCm build
 BUILD_WITH_HIP=1 pip install -e .
@@ -44,11 +47,10 @@ BUILD_WITH_HIP=1 pip install -e .
 ```bash
 # Run standard test suite (mirrors CI)
 pytest -xvs --ignore=tests/disagg \
-  --ignore=tests/v1/test_nixl_storage.py \
-  --ignore=tests/v1/multiprocess/ \
-  --ignore=tests/v1/distributed/ \
-  --ignore=tests/skipped \
-  --ignore=tests/v1/storage_backend/test_eic.py
+ --ignore=tests/v1/multiprocess/ \
+ --ignore=tests/v1/distributed/ \
+ --ignore=tests/skipped \
+ --ignore=tests/v1/storage_backend/test_eic.py
 
 # Run a single test file
 pytest -xvs tests/v1/test_cache_engine.py
@@ -81,6 +83,14 @@ isort .                   # Import sorting (black profile, from_first=true)
 mypy --config-file=pyproject.toml   # Type checking
 codespell --toml pyproject.toml     # Spell checking
 ```
+
+Before running `pre-commit run --all-files`, verify that `cargo`, `rustfmt`, and
+`cargo clippy` are available. The repository's pre-commit config includes Rust
+format and clippy hooks, so the run will fail even for Python-only changes when
+those commands are missing.
+If you are validating only non-Rust changes and do not intend to touch Rust in
+that pass, run `SKIP=rust-fmt,rust-clippy pre-commit run --all-files` to skip
+those hooks explicitly.
 
 C++/CUDA files use clang-format (Google style, 80-col). Rust code in `rust/` uses `cargo fmt` and `cargo clippy`.
 
@@ -214,4 +224,3 @@ When reviewing code (or self-checking before submitting), verify all of the foll
 - [ ] No unnecessary memory copies or allocations in hot paths.
 - [ ] Thread safety is maintained for shared data structures.
 - [ ] CUDA/GPU resources are properly managed (allocated, freed, synchronized).
-

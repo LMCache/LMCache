@@ -21,6 +21,25 @@ checkpointing, recovery, and MP task orchestration all live in Python.
 `use_iouring=True` remains accepted for backward compatibility. If `io_engine`
 is explicitly set, it wins over the legacy flag.
 
+## io_uring_cmd (NVMe Passthrough)
+
+When `io_engine="io_uring"`, you can optionally enable `use_uring_cmd=True` to
+use NVMe passthrough via the io_uring command interface for direct device access.
+
+**io_uring_cmd notes:**
+
+- Requires NVMe character device node (`/dev/ngXnY`) instead of the block device
+  node (`/dev/nvmeXnY`) for direct NVMe passthrough command.
+- Requires `io_engine="io_uring"` to be set.
+- Supports `max_data_transfer_size` parameter to split large transfers into
+  smaller chunks that fit within device limits.
+- Requires `alignment` to be a multiple of the NVMe namespace LBA size. An
+  incompatible value is rejected when the device opens.
+- When `use_uring_cmd=True`, `use_odirect` is ignored for NVMe namespace
+  character devices.
+- SQE build failures are returned by `wait_iouring` after the worker releases
+  the request's global and per-batch in-flight accounting.
+
 ## MP Mode Integration
 
 In MP mode, the stack looks like this:
@@ -77,7 +96,11 @@ No fixed numbers are included here because results are host/device/workload depe
 ## Limitations
 
 - Linux only (`pread` / `pwrite`, O_DIRECT semantics).
-- O_DIRECT requires aligned offset, size, and user buffer address.
+- `alignment` and `block_align` must be powers of two, such as 4096.
+- O_DIRECT requires aligned offsets and I/O lengths. `batched_write` rejects
+  requests whose offset or `total_len` is not a multiple of the configured
+  alignment; misaligned write buffers are copied through an aligned bounce
+  buffer.
 
 ## Build
 
@@ -112,6 +135,35 @@ dev = RawBlockDevice(
 )
 ```
 
+io_uring with io_uring_cmd (NVMe passthrough):
+
+```python
+dev = RawBlockDevice(
+    "/dev/ng0n1",  # Note: NVMe character device node
+    True,
+    use_odirect=False,
+    alignment=4096,
+    io_engine="io_uring",
+    use_uring_cmd=True,
+    iouring_queue_depth=256,
+    max_data_transfer_size=131072,  # Optional: split large transfers
+)
+```
+
+## FDP Notes
+
+FDP status can be queried from Python when `use_uring_cmd=True`:
+
+```python
+status = dev.fetch_fdp_status()  # [(placement_id, ruh_id), ...]
+```
+
+For writes, omitting `placement_id` leaves the NVMe directive unset
+(`dtype=0, dspec=0`). NVMe default writes use the RUH mapping associated with
+Placement Identifier 0, so LMCache rejects explicit `placement_id=0` at the
+`RawBlockCore` layer. The low-level status query reads the controller-reported
+16-bit `NRUHSD` count.
+
 ## MP Adapter Example
 
 To use the MP adapter from `lmcache server`, pass a `raw_block` L2 adapter
@@ -141,9 +193,13 @@ Notes:
 
 - `device_path` should point to an unmounted raw block device or a dedicated
   file used only by LMCache.
+- For `use_uring_cmd=true`, `device_path` must use the NVMe character
+  device node (e.g., `/dev/ng0n1`) instead of the block device node.
+- `block_align` must be a power of two. `slot_bytes`, `header_bytes`, and
+  `meta_total_bytes` must be multiples of `block_align`.
 - With `use_odirect=true`, LMCache MP L1 alignment must be at least
   `block_align`.
 - Restart recovery uses the metadata checkpoint region on the same device.
 - Raw-block slot reclamation is driven by the shared/global L2 eviction
   controller or explicit `delete()` calls.
-- `raw_block` remains the adapter type for both supported engines.
+- `raw_block` remains the adapter type for all supported engines.
