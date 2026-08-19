@@ -51,7 +51,10 @@ instead of being limited by the host's ROCm version. The image defaults to
 `vllm serve`, so use `--entrypoint bash`; ensure `git` exists and mark the
 mounted checkout as a safe directory before installing LMCache from source.
 Leave `ATTENTION_BACKEND=auto` so vLLM chooses a ROCm backend. Batch-invariant
-mode is CUDA-specific in this scenario and must remain disabled on AMD.
+mode is CUDA-specific in this scenario and must remain disabled on AMD. The
+current AMD Buildkite agent exposes Docker through `sudo` only, so probe
+`docker info` first and fall back to `sudo -n docker ...` for `pull`, `run`,
+and cleanup when the unprivileged socket is denied.
 
 ### Running Tests
 

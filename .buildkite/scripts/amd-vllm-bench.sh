@@ -6,12 +6,23 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 VLLM_ROCM_IMAGE="${VLLM_ROCM_IMAGE:-vllm/vllm-openai-rocm:latest}"
 CONTAINER_NAME="lmcache-amd-vllm-bench-${BUILDKITE_BUILD_ID}"
+DOCKER=(docker)
 
 cd "${REPO_ROOT}"
 
 if ! command -v docker >/dev/null 2>&1; then
     echo "docker is required to run the latest official vLLM ROCm image"
     exit 1
+fi
+
+if ! docker info >/dev/null 2>&1; then
+    if command -v sudo >/dev/null 2>&1 && sudo -n docker info >/dev/null 2>&1; then
+        DOCKER=(sudo docker)
+    else
+        echo "docker is installed but this Buildkite agent cannot access /var/run/docker.sock"
+        echo "Tried: docker info and sudo -n docker info"
+        exit 1
+    fi
 fi
 
 # vllm_bench compares LMCache-enabled vLLM against a baseline server, so it
@@ -27,7 +38,7 @@ fi
 export GPU_FOR_VLLM GPU_FOR_BASELINE
 
 cleanup() {
-    docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
+    "${DOCKER[@]}" rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
     # The image runs as root so compiled extensions and artifacts in the
     # mounted checkout must be returned to the Buildkite agent user.
     sudo chown -R "$(id -u):$(id -g)" "${REPO_ROOT}" 2>/dev/null || true
@@ -35,11 +46,11 @@ cleanup() {
 trap cleanup EXIT
 
 echo "Pulling ${VLLM_ROCM_IMAGE}"
-docker pull "${VLLM_ROCM_IMAGE}"
-docker image inspect "${VLLM_ROCM_IMAGE}" \
+"${DOCKER[@]}" pull "${VLLM_ROCM_IMAGE}"
+"${DOCKER[@]}" image inspect "${VLLM_ROCM_IMAGE}" \
     --format 'vLLM ROCm image: {{index .RepoDigests 0}}'
 
-docker run --rm \
+"${DOCKER[@]}" run --rm \
     --name "${CONTAINER_NAME}" \
     --network host \
     --ipc host \
