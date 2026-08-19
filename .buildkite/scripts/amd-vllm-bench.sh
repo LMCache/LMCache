@@ -1,42 +1,22 @@
 #!/usr/bin/env bash
-# Run the shared vLLM benchmark end to end on a bare-metal ROCm agent.
+# Run the shared vLLM benchmark in the latest official ROCm image.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+VLLM_ROCM_IMAGE="${VLLM_ROCM_IMAGE:-vllm/vllm-openai-rocm:latest}"
+CONTAINER_NAME="lmcache-amd-vllm-bench-${BUILDKITE_BUILD_ID}"
 
 cd "${REPO_ROOT}"
 
-uv venv --python 3.12 ".venv-${BUILDKITE_BUILD_ID}"
-# shellcheck disable=SC1090
-source ".venv-${BUILDKITE_BUILD_ID}/bin/activate"
-uv pip install --upgrade pip setuptools wheel
-uv pip install -r requirements/build.txt
-
-# vLLM's ROCm wheel provides the matching torch build. Install it before
-# building LMCache so the HIP extensions link against the same torch runtime.
-# The AMD agents run ROCm 7.0, whose newest archived vLLM release is 0.18.1.
-VLLM_VERSION="${VLLM_VERSION:-0.18.1}"
-VLLM_ROCM_VARIANT="${VLLM_ROCM_VARIANT:-rocm700}"
-uv pip install "vllm[runai,tensorizer]==${VLLM_VERSION}+${VLLM_ROCM_VARIANT}" \
-    --extra-index-url \
-    "https://wheels.vllm.ai/rocm/${VLLM_VERSION}/${VLLM_ROCM_VARIANT}" \
-    --index-strategy unsafe-best-match
-
-export AMD_SERIALIZE_KERNEL=1
-export PYTORCH_ROCM_ARCH="${PYTORCH_ROCM_ARCH:-gfx942}"
-export TORCH_DONT_CHECK_COMPILER_ABI=1
-export CXX=hipcc
-export BUILD_WITH_HIP=1
-
-uv pip install -r requirements/rocm_core.txt
-uv pip install -e . --no-build-isolation
-uv pip install openai pandas matplotlib
-uv pip freeze
+if ! command -v docker >/dev/null 2>&1; then
+    echo "docker is required to run the latest official vLLM ROCm image"
+    exit 1
+fi
 
 # vllm_bench compares LMCache-enabled vLLM against a baseline server, so it
-# needs two devices. Convert the selector's host-visible list into the physical
-# device IDs expected by the shared native-process launcher.
+# needs two devices. The host selector returns physical device IDs, which are
+# passed through to the native-process launcher inside the container.
 # shellcheck disable=SC1091
 source .buildkite/scripts/pick-free-gpu-amd.sh 70000 2
 IFS=',' read -r GPU_FOR_VLLM GPU_FOR_BASELINE <<< "${HIP_VISIBLE_DEVICES}"
@@ -45,13 +25,40 @@ if [[ -z "${GPU_FOR_VLLM}" || -z "${GPU_FOR_BASELINE}" ]]; then
     exit 1
 fi
 export GPU_FOR_VLLM GPU_FOR_BASELINE
-unset HIP_VISIBLE_DEVICES CUDA_VISIBLE_DEVICES
 
-# Let vLLM select the ROCm attention backend instead of the CUDA FLASH_ATTN
-# default used by the K3 NVIDIA jobs.
-export ATTENTION_BACKEND=auto
-export BATCH_INVARIANT=0
-export LMCACHE_TRACK_USAGE=false
-export RESULTS_DIR="${REPO_ROOT}/amd-vllm-bench-results"
+cleanup() {
+    docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
+    # The image runs as root so compiled extensions and artifacts in the
+    # mounted checkout must be returned to the Buildkite agent user.
+    sudo chown -R "$(id -u):$(id -g)" "${REPO_ROOT}" 2>/dev/null || true
+}
+trap cleanup EXIT
 
-exec .buildkite/k3_tests/multiprocess/scripts/run-single-test.sh vllm_bench
+echo "Pulling ${VLLM_ROCM_IMAGE}"
+docker pull "${VLLM_ROCM_IMAGE}"
+docker image inspect "${VLLM_ROCM_IMAGE}" \
+    --format 'vLLM ROCm image: {{index .RepoDigests 0}}'
+
+docker run --rm \
+    --name "${CONTAINER_NAME}" \
+    --network host \
+    --ipc host \
+    --group-add video \
+    --cap-add SYS_PTRACE \
+    --security-opt seccomp=unconfined \
+    --device /dev/kfd \
+    --device /dev/dri \
+    --volume "${REPO_ROOT}:/workspace/LMCache" \
+    --volume "${HOME}/.cache/huggingface:/root/.cache/huggingface" \
+    --workdir /workspace/LMCache \
+    --env "BUILDKITE_BUILD_ID=${BUILDKITE_BUILD_ID}" \
+    --env "GPU_FOR_VLLM=${GPU_FOR_VLLM}" \
+    --env "GPU_FOR_BASELINE=${GPU_FOR_BASELINE}" \
+    --env "PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH:-gfx942}" \
+    --env ATTENTION_BACKEND=auto \
+    --env BATCH_INVARIANT=0 \
+    --env LMCACHE_TRACK_USAGE=false \
+    --env RESULTS_DIR=/workspace/LMCache/amd-vllm-bench-results \
+    --entrypoint bash \
+    "${VLLM_ROCM_IMAGE}" \
+    .buildkite/scripts/amd-vllm-bench-container.sh

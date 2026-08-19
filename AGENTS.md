@@ -45,13 +45,13 @@ BUILD_WITH_HIP=1 pip install -e .
 ### AMD Buildkite E2E
 
 The `unit-tests-amd` pipeline also runs the shared multiprocess `vllm_bench`
-scenario on two bare-metal ROCm GPUs. Keep its setup in
-`.buildkite/scripts/amd-vllm-bench.sh`: install the ROCm vLLM wheel before
-building LMCache, select two GPUs with `pick-free-gpu-amd.sh`, and leave
-`ATTENTION_BACKEND=auto` so vLLM chooses a ROCm backend. Batch-invariant mode
-is CUDA-specific in this scenario and must remain disabled on AMD.
-The agents currently run ROCm 7.0, so use the archived `rocm700` vLLM index;
-the older `https://wheels.vllm.ai/nightly/rocm70` path returns 404.
+scenario on two bare-metal ROCm GPUs. Use the official
+`vllm/vllm-openai-rocm:latest` image so the test covers the latest stable vLLM
+instead of being limited by the host's ROCm version. The image defaults to
+`vllm serve`, so use `--entrypoint bash`; ensure `git` exists and mark the
+mounted checkout as a safe directory before installing LMCache from source.
+Leave `ATTENTION_BACKEND=auto` so vLLM chooses a ROCm backend. Batch-invariant
+mode is CUDA-specific in this scenario and must remain disabled on AMD.
 
 ### Running Tests
 
