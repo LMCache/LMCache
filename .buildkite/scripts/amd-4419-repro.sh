@@ -14,6 +14,21 @@ cd "${REPO_ROOT}"
 mkdir -p "${RESULTS_DIR}"
 exec > >(tee -a "${HOST_LOG}") 2>&1
 
+annotate_failure() {
+    local status=$?
+    if [[ "${status}" -ne 0 ]] && command -v buildkite-agent >/dev/null 2>&1; then
+        {
+            echo "### AMD #4419 repro failed"
+            echo ""
+            echo '```text'
+            tail -n 250 "${HOST_LOG}" || true
+            echo '```'
+        } | buildkite-agent annotate --style "error" --context "amd-4419-repro" || true
+    fi
+    exit "${status}"
+}
+trap annotate_failure EXIT
+
 echo "=== AMD #4419 repro host setup ==="
 echo "repo=${REPO_ROOT}"
 echo "buildkite_build_id=${BUILDKITE_BUILD_ID}"
