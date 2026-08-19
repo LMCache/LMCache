@@ -43,6 +43,7 @@ from typing import TYPE_CHECKING, Any
 import os
 
 # First Party
+from lmcache.logging import init_logger
 from lmcache.v1.platform._device_detect import (
     DEVICE_BACKEND_ENV_VAR,
     _build_backend_registry,
@@ -69,6 +70,8 @@ from lmcache.v1.platform.event_notifier import consume_fd as consume_fd
 from lmcache.v1.platform.event_notifier import (
     create_event_notifier as create_event_notifier,
 )
+
+logger = init_logger(__name__)
 
 # ---------------------------------------------------------------------------
 # Resolve device ops
@@ -131,6 +134,9 @@ def _resolve_device_spec(device_type: str) -> DeviceSpec:
         return candidates[0]
 
     if len(candidates) > 1:
+        candidate_backend_names = ", ".join(
+            sorted(spec.backend_name for spec in candidates)
+        )
         explicit_backend = os.environ.get(DEVICE_BACKEND_ENV_VAR, "").strip().lower()
         if explicit_backend:
             dev_spec = _DEVICE_REGISTRY.get(explicit_backend)
@@ -139,6 +145,13 @@ def _resolve_device_spec(device_type: str) -> DeviceSpec:
 
         available_candidates = [spec for spec in candidates if spec.is_available()]
         if len(available_candidates) == 1:
+            logger.info(
+                "Auto-selected backend [%s] for accelerator %r from candidate "
+                "backends [%s].",
+                available_candidates[0].backend_name,
+                device_type,
+                candidate_backend_names,
+            )
             return available_candidates[0]
         if len(available_candidates) > 1:
             backend_names = ", ".join(
