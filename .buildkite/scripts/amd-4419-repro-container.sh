@@ -58,7 +58,7 @@ export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 echo "=== Installing build/runtime dependencies ==="
 uv pip install --system --no-cache -r requirements/build.txt
 uv pip uninstall --system -y cupy-cuda12x cupy-cuda11x cupy || true
-uv pip install --system --no-cache --force-reinstall cupy-rocm-7-0
+uv pip install --system --no-cache "numpy<2.5" cupy-rocm-7-0
 uv pip install --system --no-cache requests
 
 # The tw22 repro image is Python 3.14 based. Use the mounted source tree plus
@@ -74,11 +74,13 @@ import lmcache
 import os
 import torch
 import vllm
+from lmcache import device_ops
 
 print(f"vLLM={vllm.__version__}")
 print(f"torch={torch.__version__}, HIP={torch.version.hip}")
 print(f"LMCache={lmcache.__version__}")
 print(f"CuPy={cupy.__version__}, is_hip={cupy.cuda.runtime.is_hip}")
+print(f"LMCache device={lmcache.torch_device_type}, ops={type(device_ops).__name__}")
 if not cupy.cuda.runtime.is_hip:
     raise RuntimeError("Expected ROCm CuPy backend, but cupy.cuda.runtime.is_hip is false")
 print(f"Selected host AMD GPU: {os.getenv('GPU_FOR_VLLM', 'unset')}")
