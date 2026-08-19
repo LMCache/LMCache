@@ -75,6 +75,16 @@ def _producer(buf: torch.Tensor, handle_q: "mp.Queue") -> None:
     torch.cuda.set_device(device)
     backend = get_event_ipc_backend(device)
     stream = torch.cuda.Stream(device=device)
+
+    # Warm the fill kernel while the device is idle. In a freshly spawned
+    # process the first ``fill_`` triggers a lazy module load that has to wait
+    # for the device, so issuing it after the delay below blocks the host until
+    # the delay drains -- measured at ~1.97s against a 2s delay on CUDA, versus
+    # ~7ms on ROCm. That would push the export past the write and leave nothing
+    # for the consumer to race, so the test would pass whatever the backend did.
+    buf.fill_(0.0)
+    torch.cuda.synchronize()
+
     event = backend.create_event(device)
     with torch.cuda.stream(stream):
         torch.cuda._sleep(SLEEP_CYCLES)
@@ -87,14 +97,25 @@ def _producer(buf: torch.Tensor, handle_q: "mp.Queue") -> None:
 
 
 @requires_event_ipc
-def test_imported_event_orders_consumer_behind_producer() -> None:
+def test_imported_event_orders_consumer_behind_producer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Waiting on an imported event must make the producer's write visible.
 
     The producer enqueues a long delay, then the write, then records the event,
     and ships the handle without synchronizing. A backend that returns a real
     imported event orders the consumer behind that write; one that returns a
     locally completed event does not, and the consumer observes zeros.
+
+    Args:
+        monkeypatch: Used to clear ``CUDA_LAUNCH_BLOCKING`` for the child.
     """
+    # CUDA_LAUNCH_BLOCKING makes every launch synchronous, which drains the
+    # delay before the write is even issued and removes the window this test
+    # depends on. The producer is spawned, so clearing it here is enough -- the
+    # child reads the environment when it initialises its own context.
+    monkeypatch.delenv("CUDA_LAUNCH_BLOCKING", raising=False)
+
     device = torch.device("cuda:0")
     backend = get_event_ipc_backend(device)
 
