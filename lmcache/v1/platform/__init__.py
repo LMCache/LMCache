@@ -239,4 +239,19 @@ def resolve_device_ops(device_type: str) -> DeviceOps:
 
 torch_dev, torch_device_type = get_torch_device()
 
+# Optional vendor note: Iluvatar CoreX keeps device_type="cuda".
+if torch_device_type == "cuda":
+    try:
+        # First Party
+        from lmcache.v1.platform.cuda import is_iluvatar_device
+
+        if is_iluvatar_device():
+            logger.info(
+                "Detected Iluvatar CUDA-compatible device "
+                "(torch_device_type remains 'cuda')"
+            )
+    except Exception as exc:
+        # Vendor probe must never block platform init (optional info only).
+        logger.debug("Iluvatar vendor probe skipped: %s", exc)
+
 current_device_spec: DeviceSpec = _current_device_spec_fn()

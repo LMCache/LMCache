@@ -6,9 +6,10 @@
 #include <ATen/ATen.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <algorithm>
+// USE_ILUVATAR is injected by IluvatarProfile (same pattern as USE_ROCM).
 #ifdef USE_ROCM
   #include <hip/hip_fp8.h>
-#else
+#elif !defined(USE_ILUVATAR)
   #include <cuda_fp8.h>
 #endif
 

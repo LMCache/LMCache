@@ -177,10 +177,24 @@ class BuildPolicy:
         # Phase 2: auto-detect with fallback
         # ---------------------------------------------------------------
         print("No profile explicitly selected, auto-detecting...")
-        for profile in self._platforms:
-            if profile.detect():
+        detected = [profile for profile in self._platforms if profile.detect()]
+        if detected:
+            # Several CUDA-API toolchains expose ``nvcc`` (NVIDIA + Iluvatar
+            # CoreX).  Prefer a more specific non-``cuda`` profile when
+            # multiple match so vendor profiles do not need to patch
+            # ``CudaProfile.detect()``.
+            preferred = [p for p in detected if p.name != "cuda"]
+            profile = preferred[0] if preferred else detected[0]
+            if len(detected) > 1:
+                names = ", ".join(p.name for p in detected)
+                print(
+                    "Auto-detected profile: %s "
+                    "(multiple matched: %s; preferring non-cuda when present)"
+                    % (profile.name, names)
+                )
+            else:
                 print("Auto-detected profile: %s" % profile.name)
-                return profile
+            return profile
 
         # ---------------------------------------------------------------
         # Phase 3: nothing found
