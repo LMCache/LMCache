@@ -4,7 +4,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-VLLM_ROCM_IMAGE="${VLLM_ROCM_IMAGE:-vllm/vllm-openai-rocm:latest}"
+VLLM_ROCM_IMAGE="${VLLM_ROCM_IMAGE:-vllm/vllm-openai-rocm:v0.23.0}"
 CONTAINER_NAME="lmcache-amd-4419-repro-${BUILDKITE_BUILD_ID}"
 RESULTS_DIR="${REPO_ROOT}/amd-4419-repro-results"
 HOST_LOG="${RESULTS_DIR}/host.log"
