@@ -55,6 +55,18 @@ def _create_cuda_event_in_process(event_queue: mp.Queue, delay: float = 0.0):
     event_queue.put(event_bytes)
 
 
+def _create_cuda_event_until_released(
+    event_queue: mp.Queue, release_queue: mp.Queue
+) -> None:
+    """Export an event and keep it alive until the importer acknowledges it."""
+    torch_dev.init()
+    event = torch_dev.Event(interprocess=True)
+    event.record()
+    event_bytes = event.ipc_handle()
+    event_queue.put(event_bytes)
+    assert release_queue.get(timeout=30) == event_bytes
+
+
 def test_messaging_future_basic_usage():
     """Test basic usage of MessagingFuture: set result and retrieve it."""
     future = MessagingFuture[int]()
@@ -626,6 +638,36 @@ def test_messaging_future_to_device_future():
     reason=f"requires available {torch_device_type} runtime",
 )
 @REQUIRES_EVENT_IPC
+def test_device_future_acknowledges_live_exporter_event():
+    """Exercise the completion-event lease lifecycle across real processes."""
+    torch_dev.init()
+    ctx = mp.get_context("spawn")
+    event_queue = ctx.Queue()
+    release_queue = ctx.Queue()
+    process = ctx.Process(
+        target=_create_cuda_event_until_released,
+        args=(event_queue, release_queue),
+    )
+    process.start()
+
+    event_bytes = event_queue.get(timeout=30)
+    raw_future = MessagingFuture[tuple[bytes, int]]()
+    device_future = raw_future.to_device_future(
+        event_release_callback=release_queue.put
+    )
+    raw_future.set_result((event_bytes, 999))
+
+    assert device_future.result() == 999
+    process.join(timeout=30)
+    assert process.exitcode == 0
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(
+    not torch_dev.is_available(),
+    reason=f"requires available {torch_device_type} runtime",
+)
+@REQUIRES_EVENT_IPC
 def test_cuda_messaging_future_with_explicit_device():
     """Test CUDAMessagingFuture with explicit device parameter."""
     torch_dev.init()
@@ -728,6 +770,50 @@ def test_device_future_delegates_to_backend(monkeypatch):
     assert ("check", "dev") in calls
     assert ("import", b"h", "dev") in calls
     assert any(c[0] == "sync" for c in calls)
+
+
+def test_device_future_releases_exporter_lease_after_synchronization(monkeypatch):
+    """The exporter release callback runs once, after imported-event sync."""
+    # First Party
+    from lmcache.v1.multiprocess.futures import DeviceMessagingFuture
+
+    calls = []
+
+    class _FakeBackend:
+        device_type = "fake"
+
+        def check_event_support(self, device):
+            calls.append(("check", device))
+
+        def import_event(self, handle, device):
+            calls.append(("import", handle, device))
+            return "EVT"
+
+        def synchronize_event(self, event, device):
+            calls.append(("sync", event, device))
+
+        def query_event(self, event):
+            calls.append(("query", event))
+            return True
+
+    monkeypatch.setattr(
+        "lmcache.v1.multiprocess.futures.get_event_ipc_backend",
+        lambda device=None: _FakeBackend(),
+    )
+
+    raw = MessagingFuture[tuple[bytes, bool]]()
+    future = DeviceMessagingFuture.FromMessagingFuture(
+        raw,
+        device="dev",
+        event_release_callback=lambda handle: calls.append(("release", handle)),
+    )
+    raw.set_result((b"completion", True))
+
+    assert future.result() is True
+    assert future.query() is True
+    assert future.wait() is True
+    assert [call[0] for call in calls].count("release") == 1
+    assert calls.index(("sync", "EVT", "dev")) < calls.index(("release", b"completion"))
 
 
 def test_device_future_checks_backend_support_during_initialization(

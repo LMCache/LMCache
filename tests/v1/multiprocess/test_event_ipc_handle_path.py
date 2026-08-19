@@ -6,7 +6,9 @@ from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 from typing import Any, Iterator, cast
 from unittest.mock import MagicMock
+import gc
 import inspect
+import weakref
 
 # Third Party
 import pytest
@@ -15,6 +17,12 @@ import torch
 # First Party
 from lmcache.v1.multiprocess.futures import DeviceMessagingFuture, MessagingFuture
 from lmcache.v1.multiprocess.protocol import RequestType
+
+
+class _FakeBackendEvent:
+    def __init__(self, kind: str, value: object) -> None:
+        self.kind = kind
+        self.value = value
 
 
 class _FakeEventBackend:
@@ -30,7 +38,7 @@ class _FakeEventBackend:
         self.calls.append(("check", device))
 
     def create_event(self, device: object) -> object:
-        event = ("local", self._next_event)
+        event = _FakeBackendEvent("local", self._next_event)
         self._next_event += 1
         self.calls.append(("create", device, event))
         return event
@@ -40,7 +48,7 @@ class _FakeEventBackend:
         return b"completion-handle"
 
     def import_event(self, handle: bytes, device: object) -> object:
-        event = ("remote", handle)
+        event = _FakeBackendEvent("remote", handle)
         self.calls.append(("import", handle, device, event))
         return event
 
@@ -191,6 +199,7 @@ def test_server_store_and_retrieve_delegate_event_ordering(
 ) -> None:
     """Server imports, waits, records, and exports through the event backend."""
     # First Party
+    from lmcache.v1.multiprocess.engine_context import EventLeaseRegistry
     from lmcache.v1.multiprocess.modules import lmcache_driven_transfer
 
     backend = _FakeEventBackend()
@@ -234,7 +243,26 @@ def test_server_store_and_retrieve_delegate_event_ordering(
         lambda stream: nullcontext(),
     )
 
+    class _TrackingEventLeaseRegistry(EventLeaseRegistry):
+        def __init__(self) -> None:
+            super().__init__()
+            self.dependent_handles: list[object] = []
+
+        def retain(
+            self,
+            instance_id: int,
+            handle: bytes,
+            event: object,
+            *dependent_events: object,
+        ) -> None:
+            self.dependent_handles.extend(
+                cast(_FakeBackendEvent, dependent_event).value
+                for dependent_event in dependent_events
+            )
+            super().retain(instance_id, handle, event, *dependent_events)
+
     storage_manager = _FakeStorageManager()
+    event_leases = _TrackingEventLeaseRegistry()
     server_context = SimpleNamespace(
         chunk_size=1,
         storage_manager=storage_manager,
@@ -244,6 +272,7 @@ def test_server_store_and_retrieve_delegate_event_ordering(
             has_subscribers=lambda event_type: False,
         ),
         resolve_obj_keys=lambda key, group_ids: [[]],
+        event_leases=event_leases,
     )
     module = lmcache_driven_transfer.LMCacheDrivenTransferModule(
         cast(Any, server_context)
@@ -278,15 +307,26 @@ def test_server_store_and_retrieve_delegate_event_ordering(
         b"completion-handle",
         True,
     )
+    assert len(server_context.event_leases) == 1
+    assert server_context.event_leases.release(1, b"completion-handle")
     assert module.retrieve(key, 1, [[]], b"retrieve-producer") == (
         b"completion-handle",
         False,
     )
+    assert len(server_context.event_leases) == 1
 
     imported_handles = [call[1] for call in backend.calls if call[0] == "import"]
-    waited_handles = [call[1][1] for call in backend.calls if call[0] == "wait"]
+    waited_handles = [
+        cast(_FakeBackendEvent, call[1]).value
+        for call in backend.calls
+        if call[0] == "wait"
+    ]
     assert imported_handles == [b"store-producer", b"retrieve-producer"]
     assert waited_handles == [b"store-producer", b"retrieve-producer"]
+    assert event_leases.dependent_handles == [
+        b"store-producer",
+        b"retrieve-producer",
+    ]
     assert sum(call[0] == "record" for call in backend.calls) == 2
     assert sum(call[0] == "export" for call in backend.calls) == 2
     for index, call in enumerate(backend.calls):
@@ -305,3 +345,31 @@ def test_handle_path_has_no_musa_specific_imports_or_branches() -> None:
         source = inspect.getsource(module)
         assert "lmcache.v1.platform.musa" not in source
         assert 'device.type == "musa"' not in source
+
+
+def test_event_lease_registry_retains_until_acknowledged() -> None:
+    """Leased events stay alive until their handle is explicitly released."""
+    # First Party
+    from lmcache.v1.multiprocess.engine_context import EventLeaseRegistry
+
+    class _Event:
+        pass
+
+    registry = EventLeaseRegistry()
+    event = _Event()
+    dependent_event = _Event()
+    event_ref = weakref.ref(event)
+    dependent_event_ref = weakref.ref(dependent_event)
+    registry.retain(7, b"handle", event, dependent_event)
+    del event
+    del dependent_event
+    gc.collect()
+
+    assert event_ref() is not None
+    assert dependent_event_ref() is not None
+    assert len(registry) == 1
+    assert registry.release(7, b"handle")
+    gc.collect()
+    assert event_ref() is None
+    assert dependent_event_ref() is None
+    assert len(registry) == 0

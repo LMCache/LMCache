@@ -29,6 +29,68 @@ from lmcache.v1.multiprocess.token_hasher import TokenHasher
 logger = init_logger(__name__)
 
 
+class EventLeaseRegistry:
+    """Keep IPC events alive until their importers release them.
+
+    HIP and CUDA require the exporting event object to outlive every imported
+    event that uses its IPC handle. Transfer handlers otherwise return a handle
+    to a function-local event, allowing it to be destroyed before the worker
+    imports it. The server also imports worker-side events and enqueues waits
+    on them before returning; those imported events must stay alive until the
+    queued wait has completed. This registry bridges both cross-process
+    lifetime gaps.
+    """
+
+    def __init__(self) -> None:
+        self._events: dict[tuple[int, bytes], tuple[object, ...]] = {}
+        self._lock = threading.Lock()
+
+    def retain(
+        self,
+        instance_id: int,
+        handle: bytes,
+        event: object,
+        *dependent_events: object,
+    ) -> None:
+        """Retain events under the worker and exported completion handle."""
+        key = (instance_id, handle)
+        with self._lock:
+            if key in self._events:
+                raise RuntimeError(
+                    f"Duplicate completion event IPC handle for instance {instance_id}"
+                )
+            self._events[key] = (event, *dependent_events)
+
+    def release(self, instance_id: int, handle: bytes) -> bool:
+        """Release one event lease, returning whether it existed."""
+        with self._lock:
+            events = self._events.pop((instance_id, handle), None)
+        # Event destruction may enter the accelerator runtime. Never do that
+        # while holding the registry lock.
+        found = events is not None
+        del events
+        return found
+
+    def release_instance(self, instance_id: int) -> int:
+        """Release all leases owned by a disconnected worker instance."""
+        with self._lock:
+            keys = [key for key in self._events if key[0] == instance_id]
+            events = [event for key in keys for event in self._events.pop(key)]
+        events.clear()
+        return len(keys)
+
+    def clear(self) -> None:
+        """Release every outstanding event lease during server shutdown."""
+        with self._lock:
+            events = [event for events in self._events.values() for event in events]
+            self._events.clear()
+        events.clear()
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._events)
+
+
 class ShmPoolInfo(TypedDict):
     """Shared-memory pool metadata returned during registration."""
 
@@ -225,6 +287,7 @@ class MPCacheServerContext:
         self._session_manager = SessionManager(self._token_hasher)
         self._event_bus = get_event_bus()
         self._layout_desc_registry = LayoutDescRegistry()
+        self._event_leases = EventLeaseRegistry()
 
     def close(self) -> None:
         """
@@ -232,6 +295,7 @@ class MPCacheServerContext:
         GDS context.
         """
         self._session_manager.close()
+        self._event_leases.clear()
         self._storage_manager.close()
         # Tear down the GDS cuFile context (the shared slab + its handle).
         get_gds_context().close()
@@ -255,6 +319,11 @@ class MPCacheServerContext:
     def storage_manager(self) -> StorageManager:
         """The storage manager instance."""
         return self._storage_manager
+
+    @property
+    def event_leases(self) -> EventLeaseRegistry:
+        """Registry retaining cross-process IPC events until release ACKs."""
+        return self._event_leases
 
     @property
     def token_hasher(self) -> TokenHasher:

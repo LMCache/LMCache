@@ -782,6 +782,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             )
             reaped_ids.append(iid)
             entries.append(e)
+            self._ctx.event_leases.release_instance(iid)
         if reaped:
             del e  # a bound name would pin the final entry (see _release_entries)
             reaped.clear()
@@ -973,6 +974,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         Args:
             instance_id: The GPU instance ID (such as PID).
         """
+        self._ctx.event_leases.release_instance(instance_id)
         with self._lock:
             popped = [
                 e
@@ -1082,7 +1084,9 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                     blocks_per_chunk,
                 )
                 event_backend.record_event(event, cache_context.stream)
-                return event_backend.export_event(event, cache_context.device), False
+                handle = event_backend.export_event(event, cache_context.device)
+                self._ctx.event_leases.retain(instance_id, handle, event)
+                return handle, False
 
             # Chunks whose block ids are all the null block (e.g. align-mode
             # Mamba chunks holding no real state) carry no valid KV and must not
@@ -1220,10 +1224,9 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 num_chunks * self._ctx.chunk_size,
                 ed - st,
             )
-        return (
-            event_backend.export_event(event, cache_context.device),
-            store_succeeded,
-        )
+        handle = event_backend.export_event(event, cache_context.device)
+        self._ctx.event_leases.retain(instance_id, handle, event, producer_event)
+        return handle, store_succeeded
 
     @_lmcache_nvtx_annotate
     def retrieve(
@@ -1331,7 +1334,9 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                     blocks_per_chunk,
                 )
                 event_backend.record_event(event, cache_context.stream)
-                return event_backend.export_event(event, cache_context.device), False
+                handle = event_backend.export_event(event, cache_context.device)
+                self._ctx.event_leases.retain(instance_id, handle, event)
+                return handle, False
 
             # Cut and stage all block_ids to GPU once before the transfer
             block_ids_per_group_gpu = downsample_and_stage_block_ids(
@@ -1430,10 +1435,9 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 ed - st,
             )
 
-        return (
-            event_backend.export_event(event, cache_context.device),
-            retrieve_succeeded,
-        )
+        handle = event_backend.export_event(event, cache_context.device)
+        self._ctx.event_leases.retain(instance_id, handle, event, producer_event)
+        return handle, retrieve_succeeded
 
     def _publish_token_bindings(
         self, key: IPCCacheServerKey, obj_keys: list[ObjectKey]

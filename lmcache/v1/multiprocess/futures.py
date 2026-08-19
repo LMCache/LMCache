@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from collections.abc import Callable
 from typing import Any, Generic, Optional, TypeVar, cast
 import threading
 
@@ -85,6 +86,7 @@ class MessagingFuture(Generic[T]):
     def to_device_future(
         self,
         device: Any | None = None,
+        event_release_callback: Callable[[bytes], object] | None = None,
     ) -> "DeviceMessagingFuture":
         """Wrap this future in a device-aware future.
 
@@ -96,7 +98,9 @@ class MessagingFuture(Generic[T]):
             A DeviceMessagingFuture pending on both this future and the event.
         """
         # TODO: need extra type checking for the future type
-        return DeviceMessagingFuture.FromMessagingFuture(self, device)  # type: ignore
+        return DeviceMessagingFuture.FromMessagingFuture(
+            cast(Any, self), device, event_release_callback
+        )
 
     @lmcache_deprecate("Use to_device_future() instead")
     def to_cuda_future(
@@ -127,12 +131,17 @@ class DeviceMessagingFuture(MessagingFuture[T]):
         self,
         raw_future: MessagingFuture[tuple[bytes, T]],
         device: Any | None = None,
+        event_release_callback: Callable[[bytes], object] | None = None,
     ) -> None:
         super().__init__()
         self.raw_future_ = raw_future
         self.event_: Any | None = None
         self.result_: T | None = None
         self.device_ = device if device is not None else torch_dev.current_device()
+        self._event_bytes: bytes | None = None
+        self._event_release_callback = event_release_callback
+        self._device_complete = False
+        self._completion_lock = threading.Lock()
         self._event_backend = get_event_ipc_backend(self.device_)
         self._event_backend.check_event_support(self.device_)
 
@@ -141,9 +150,29 @@ class DeviceMessagingFuture(MessagingFuture[T]):
         Update the device event and result when the raw future is complete.
         """
         event_bytes, result = self.raw_future_.result()
+        self._event_bytes = event_bytes
         self.result_ = result
 
         self.event_ = self._event_backend.import_event(event_bytes, self.device_)
+
+    def _synchronize_and_release(self) -> None:
+        """Finish the imported event, then release its exporter-side lease."""
+        with self._completion_lock:
+            if self._device_complete:
+                return
+            assert self.event_ is not None
+            event = self.event_
+            self._event_backend.synchronize_event(event, self.device_)
+            # Destroy the imported event before telling the exporter it may
+            # destroy its event. CPython drops the final local reference at
+            # ``del``; alternate runtimes still preserve the ordering because
+            # the callback follows removal from this future.
+            self.event_ = None
+            del event
+            self._device_complete = True
+            if self._event_release_callback is not None:
+                assert self._event_bytes is not None
+                self._event_release_callback(self._event_bytes)
 
     def wait(self, timeout: Optional[float] = None) -> bool:
         """
@@ -161,8 +190,11 @@ class DeviceMessagingFuture(MessagingFuture[T]):
         Notes:
             This function does not support waiting for a specific time.
         """
+        if self._device_complete:
+            return True
+
         if self.event_:
-            self._event_backend.synchronize_event(self.event_, self.device_)
+            self._synchronize_and_release()
             return True
 
         flag = self.raw_future_.wait(timeout)
@@ -172,7 +204,7 @@ class DeviceMessagingFuture(MessagingFuture[T]):
         self._on_raw_future_complete()
 
         assert self.event_ is not None
-        self._event_backend.synchronize_event(self.event_, self.device_)
+        self._synchronize_and_release()
 
         return True
 
@@ -208,13 +240,25 @@ class DeviceMessagingFuture(MessagingFuture[T]):
         Returns:
             bool: True if the future is done, False otherwise.
         """
+        if self._device_complete:
+            return True
+
         if self.event_:
-            return self._event_backend.query_event(self.event_)
+            if not self._event_backend.query_event(self.event_):
+                return False
+            # Cross-process event query has backend-specific edge cases. A
+            # positive query is confirmed by synchronization before releasing
+            # the exporter-side event.
+            self._synchronize_and_release()
+            return True
 
         if self.raw_future_.query():
             self._on_raw_future_complete()
             assert self.event_ is not None
-            return self._event_backend.query_event(self.event_)
+            if not self._event_backend.query_event(self.event_):
+                return False
+            self._synchronize_and_release()
+            return True
 
         return False
 
@@ -227,8 +271,9 @@ class DeviceMessagingFuture(MessagingFuture[T]):
     def FromMessagingFuture(
         raw_future: MessagingFuture[tuple[bytes, T]],
         device: Any | None = None,
+        event_release_callback: Callable[[bytes], object] | None = None,
     ) -> "DeviceMessagingFuture[T]":
-        return DeviceMessagingFuture(raw_future, device)
+        return DeviceMessagingFuture(raw_future, device, event_release_callback)
 
 
 # Backward-compatible alias for existing imports.

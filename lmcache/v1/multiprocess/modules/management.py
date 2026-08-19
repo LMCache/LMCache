@@ -102,6 +102,11 @@ class ManagementModule:
                 ThreadPoolType.SYNC,
             ),
             HandlerSpec(RequestType.PING, self.ping, ThreadPoolType.NORMAL),
+            HandlerSpec(
+                RequestType.RELEASE_EVENT,
+                self.release_event,
+                ThreadPoolType.NORMAL,
+            ),
             HandlerSpec(RequestType.NOOP, self.debug, ThreadPoolType.SYNC),
             HandlerSpec(
                 RequestType.REPORT_BLOCK_ALLOCATION,
@@ -109,6 +114,14 @@ class ManagementModule:
                 ThreadPoolType.NORMAL,
             ),
         ]
+
+    def release_event(self, instance_id: int, event_ipc_handle: bytes) -> None:
+        """Release an exported completion event after worker synchronization."""
+        if not self._ctx.event_leases.release(instance_id, event_ipc_handle):
+            logger.debug(
+                "Completion event lease was already absent for instance %d",
+                instance_id,
+            )
 
     def report_status(self) -> dict:
         """Return module-specific status information.
