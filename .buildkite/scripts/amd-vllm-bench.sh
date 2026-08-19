@@ -69,6 +69,7 @@ echo "Pulling ${VLLM_ROCM_IMAGE}"
     --env ATTENTION_BACKEND=auto \
     --env BATCH_INVARIANT=0 \
     --env "MAX_SLOWDOWN_PERCENT=${MAX_SLOWDOWN_PERCENT:-10}" \
+    --env "VLLM_DISABLE_PREFIX_CACHING=${VLLM_DISABLE_PREFIX_CACHING:-true}" \
     --env LMCACHE_TRACK_USAGE=false \
     --env RESULTS_DIR=/workspace/LMCache/amd-vllm-bench-results \
     --entrypoint bash \

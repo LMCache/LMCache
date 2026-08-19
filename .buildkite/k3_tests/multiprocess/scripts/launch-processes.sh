@@ -83,10 +83,18 @@ fi
 # vLLM batch-invariant mode. On by default; GDN/Mamba backends do not support it.
 BATCH_INVARIANT="${BATCH_INVARIANT:-1}"
 
-# Mamba KV cache mode + prefix caching, set only for hybrid Mamba models.
+# Prefix-caching policy. Default behavior is unchanged: ordinary models rely on
+# vLLM's existing default, while hybrid Mamba models explicitly enable prefix
+# caching. Tests that need to force LMCache retrieve can opt out with
+# VLLM_DISABLE_PREFIX_CACHING=true.
+PREFIX_CACHING_ARG=""
 MAMBA_ARGS=""
-if [ -n "${MAMBA_CACHE_MODE:-}" ]; then
-    MAMBA_ARGS="--mamba-cache-mode ${MAMBA_CACHE_MODE} --enable-prefix-caching"
+if [ "${VLLM_DISABLE_PREFIX_CACHING:-false}" = "1" ] || [ "${VLLM_DISABLE_PREFIX_CACHING:-false}" = "true" ]; then
+    echo "Disabling vLLM prefix caching via --no-enable-prefix-caching"
+    PREFIX_CACHING_ARG="--no-enable-prefix-caching"
+elif [ -n "${MAMBA_CACHE_MODE:-}" ]; then
+    MAMBA_ARGS="--mamba-cache-mode ${MAMBA_CACHE_MODE}"
+    PREFIX_CACHING_ARG="--enable-prefix-caching"
 fi
 
 # Max tokens per scheduler step. Empty -> vLLM default.
@@ -234,6 +242,7 @@ vllm serve "$MODEL" \
     $ENFORCE_EAGER_ARG \
     $GPU_MEMORY_UTIL_ARG \
     $MAMBA_ARGS \
+    $PREFIX_CACHING_ARG \
     $MAX_NUM_BATCHED_TOKENS_ARG \
     > "/tmp/build_${BUILD_ID}_vllm.log" 2>&1 &
 
@@ -260,6 +269,7 @@ if [[ "${LAUNCH_BASELINE:-true}" == "true" ]]; then
         $MAX_MODEL_LEN_ARG \
         $ENFORCE_EAGER_ARG \
         $GPU_MEMORY_UTIL_ARG \
+        $PREFIX_CACHING_ARG \
         > "/tmp/build_${BUILD_ID}_vllm_baseline.log" 2>&1 &
 
     VLLM_BASELINE_PID=$!
