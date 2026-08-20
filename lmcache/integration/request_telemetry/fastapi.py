@@ -87,12 +87,12 @@ class FastAPIRequestTelemetry(RequestTelemetry):
                 method="POST",
             )
             # TODO: this introduces blocking IO, should use asyncio.
-            with urlopen(request, timeout=self._timeout) as response:
-                if response.status >= 400:
-                    logger.warning(
-                        "FastAPI telemetry request failed with status %d",
-                        response.status
-                    )
+           with urlopen(request, timeout=self._timeout) as response:
+                    if response.status >= 400:
+                        logger.warning(
+                            "FastAPI telemetry request failed with status %d",
+                            response.status
+                        )
         except URLError as e:
             logger.warning("FastAPI telemetry request failed: %s", e)
         except Exception as e:
