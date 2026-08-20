@@ -58,6 +58,33 @@ existing substitution call sites at once. `extra_keys` remains the right
 channel for request-scoped metadata that must NOT be baked into tokens
 (e.g. LoRA IDs).
 
+## TODO: migrate to an explicit `extra_keys` channel
+
+Substitution is the right minimal change for image/video models, but it only
+works when the identity has placeholder tokens to overwrite. The end-state
+design is vLLM's: `key = hash(tokens, extra_keys)`, with identity carried
+out-of-band through every token-carrying interface (lookup RPC, MP metadata,
+storage key schema, SDK). At that point `mm_hash` substitution degenerates
+into one producer of extra keys and can be retired.
+
+Do the migration when the first of these lands, not before:
+
+- **Modality LoRA support** (Phi-4-multimodal): the LoRA affects all KV and
+  has no placeholder span to substitute — identity MUST go out-of-band.
+- **`cache_salt` / request-scoped key partitioning**: same shape, same
+  channel.
+- **A second engine integration wants shared keys with vLLM semantics**
+  (SGLang/TRT-LLM beyond the bypass guard).
+
+Migration sketch: (1) extend `CacheEngineKey`/`_hash_tokens` call sites to
+accept per-chunk `extra_keys`; (2) version the MP wire protocol and storage
+key schema (old entries miss, never collide); (3) reimplement `mm_hash` as
+an extra-key producer; (4) drop `apply_mm_hashes_to_token_ids` after one
+deprecation cycle. Keys must remain engine/transport-independent — do NOT
+shortcut by consuming vLLM `block_hashes` (couples key space to vLLM block
+size and version, breaking cross-engine sharing and offline key
+recomputation).
+
 ## Coverage
 
 Substitution is applied on:
