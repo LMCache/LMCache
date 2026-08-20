@@ -10,7 +10,6 @@ connector only forwards lifecycle events and applies the returned actions.
 # Standard
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol
-import functools
 import inspect
 
 # First Party
@@ -34,8 +33,12 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-@functools.lru_cache(maxsize=8)
-def _free_blocks_accepts_prepend(pool_cls: type) -> bool:
+# Cached per concrete pool class; a plain dict instead of functools.lru_cache
+# because mypy does not accept type objects for the wrapper's Hashable params.
+_FREE_BLOCKS_PREPEND_SUPPORT: dict[type, bool] = {}
+
+
+def _free_blocks_accepts_prepend(pool_cls: "type[BlockPool]") -> bool:
     """Whether ``pool_cls.free_blocks`` accepts the ``prepend`` parameter.
 
     Some vLLM releases let the caller requeue freed blocks at the eviction
@@ -51,9 +54,13 @@ def _free_blocks_accepts_prepend(pool_cls: type) -> bool:
     Returns:
         True when ``prepend`` can be passed.
     """
+    cached = _FREE_BLOCKS_PREPEND_SUPPORT.get(pool_cls)
+    if cached is not None:
+        return cached
     try:
         signature = inspect.signature(pool_cls.free_blocks)
     except (TypeError, ValueError):  # pragma: no cover - defensive
+        _FREE_BLOCKS_PREPEND_SUPPORT[pool_cls] = False
         return False
     supported = "prepend" in signature.parameters
     if not supported:
@@ -63,6 +70,7 @@ def _free_blocks_accepts_prepend(pool_cls: type) -> bool:
             "eviction head",
             pool_cls.__name__,
         )
+    _FREE_BLOCKS_PREPEND_SUPPORT[pool_cls] = supported
     return supported
 
 
