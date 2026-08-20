@@ -32,11 +32,13 @@ from lmcache.logging import init_logger
 from lmcache.utils import check_interprocess_event_support
 from lmcache.v1.distributed.api import (
     AttnWindowDesc,
+    GroupKind,
     MemoryLayoutDesc,
     PrefetchRequestSpec,
     TrimPolicy,
     ipc_key_to_object_keys,
 )
+from lmcache.v1.distributed.bitmap_ops.fold import fold_unfold_ranked
 from lmcache.v1.distributed.storage_manager import PrefetchHandle
 from lmcache.v1.gpu_connector.gpu_ops import lmcache_memcpy_async_h2d
 from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
@@ -209,7 +211,9 @@ class _CBUnifiedJob:
     # there is no GPU context / no full chunk (poll reports 0 coverage).
     prefix_handle: PrefetchHandle | None = None
     prefix_world_size: int = 1
-    prefix_read_groups: int = 1  # object groups per chunk in the prefix keys
+    prefix_lock_gids: tuple = ()  # the gids the prefix keys cover (lock model)
+    prefix_windows: tuple = ()  # per-gid cross-chunk windows (fold input)
+    prefix_num_chunks: int = 0  # chunks in the submitted prefix key list
     prefix_chunks: int | None = None  # stashed when the prefix poll completes
     retained_chunks: list[int] | None = None  # SEGMENTED_PREFIX: full gapped set
     sparse_started: bool = False  # prefix done -> sparse leg submitted/skipped
@@ -221,6 +225,7 @@ class _CBUnifiedJob:
     l2_keys: int = 0  # sparse keys needing an L2 load (0 => no L2 read, span skipped)
     coord_submitted: bool = False  # coordinator match query was issued
     coord_deadline: float = 0.0  # time.monotonic() wall-clock cutoff for the leg
+    segmented: bool = False  # SEGMENTED_PREFIX active for THIS registration
 
 
 class BlendTokenRangeMatcherV3:
@@ -547,30 +552,32 @@ def _cb_group_rope_geometry(
 
 @dataclass(frozen=True)
 class _CBReadGroups:
-    """CacheBlend's read set over a registration's object groups.
+    """CacheBlend's per-leg read sets over a registration's object groups.
+
+    Each leg keys, locks, and reads its own set; tuples are ascending.
 
     Attributes:
-        gids: Object groups blend reads, ascending: attention plus the
-            standalone fused-aux group when present, never recurrent-state
-            groups. All key lists / staging rows / divisors are chunk-major
-            over these.
+        gids: BLEND leg: attention + standalone aux, never recurrent.
+        prefix_gids: PREFIX leg: attention + recurrent, never aux.
+        recurrent_gids: The recurrent-state groups alone.
         attn_gid: The full-attention object group's id.
     """
 
     gids: tuple[int, ...]
+    prefix_gids: tuple[int, ...]
+    recurrent_gids: tuple[int, ...]
     attn_gid: int
 
 
 def _classify_cb_read_groups(
-    num_object_groups: int, group_kinds: tuple[str, ...]
+    num_object_groups: int, group_kinds: tuple[GroupKind, ...]
 ) -> _CBReadGroups:
     """Classify a registration's object groups into CacheBlend's read set.
 
     Args:
         num_object_groups: Total object groups in the registration.
-        group_kinds: Per-group kind labels (``"attention"`` /
-            ``"recurrent"`` / ``"standalone"``); empty only for
-            single-group layouts.
+        group_kinds: Per-group kind labels; empty only for single-group
+            layouts.
 
     Returns:
         The read set; a single-group (fused) layout maps to group 0.
@@ -579,7 +586,12 @@ def _classify_cb_read_groups(
         RuntimeError: If a multi-group layout has no resolvable read set.
     """
     if num_object_groups <= 1:
-        return _CBReadGroups(gids=(0,), attn_gid=0)
+        return _CBReadGroups(
+            gids=(0,),
+            prefix_gids=(0,),
+            recurrent_gids=(),
+            attn_gid=0,
+        )
     if len(group_kinds) != num_object_groups:
         raise RuntimeError(
             f"CacheBlend: {num_object_groups} object groups but "
@@ -588,6 +600,7 @@ def _classify_cb_read_groups(
         )
     attn = [i for i, k in enumerate(group_kinds) if k == "attention"]
     standalone = [i for i, k in enumerate(group_kinds) if k == "standalone"]
+    recurrent = [i for i, k in enumerate(group_kinds) if k == "recurrent"]
     if len(attn) != 1 or len(standalone) > 1:
         raise RuntimeError(
             f"CacheBlend supports exactly one attention object group and at "
@@ -595,7 +608,38 @@ def _classify_cb_read_groups(
             f"{group_kinds!r}."
         )
     gids = tuple(sorted(attn + standalone))
-    return _CBReadGroups(gids=gids, attn_gid=attn[0])
+    return _CBReadGroups(
+        gids=gids,
+        prefix_gids=tuple(sorted(attn + recurrent)),
+        recurrent_gids=tuple(recurrent),
+        attn_gid=attn[0],
+    )
+
+
+def _narrow_attn_desc(
+    attn_desc: AttnWindowDesc, gids: tuple[int, ...]
+) -> AttnWindowDesc:
+    """Narrow a registration descriptor to one leg's object groups.
+
+    The fold stride is ``num_object_groups * world_size``; a leg keying over
+    a subset must narrow the descriptor so the stride matches its keys.
+
+    Args:
+        attn_desc: The registration's full descriptor.
+        gids: The leg's object group ids, ascending.
+
+    Returns:
+        The descriptor over exactly ``gids``.
+    """
+    return AttnWindowDesc(
+        num_chunks_in_sw=[attn_desc.num_chunks_in_sw[g] for g in gids],
+        world_size=attn_desc.world_size,
+        group_kinds=(
+            tuple(attn_desc.group_kinds[g] for g in gids)
+            if attn_desc.group_kinds
+            else ()
+        ),
+    )
 
 
 def _cb_chunk_major_object_keys(
@@ -1031,8 +1075,10 @@ class BlendV3Module(InstanceLivenessTarget):
             world_size (int): Tensor-parallel world size to match.
 
         Returns:
-            ``(read_groups, group_layout_descs, attn_desc)``, or ``None``
-            when no registered CB context matches.
+            ``(read_groups, group_layout_descs, attn_desc)`` — the FULL
+            registration descriptor; each leg narrows it to its own gids via
+            :func:`_narrow_attn_desc` — or ``None`` when no registered CB
+            context matches.
 
         Raises:
             RuntimeError: If the layout has no resolvable blend read set.
@@ -1100,7 +1146,7 @@ class BlendV3Module(InstanceLivenessTarget):
                 keys=uniq_keys,
                 group_layout_descs=layouts,
                 policy=TrimPolicy.SPARSE,
-                attn_desc=attn_desc,
+                attn_desc=_narrow_attn_desc(attn_desc, read.gids),
             ),
             external_request_id=key.request_id,
         )
@@ -1196,7 +1242,7 @@ class BlendV3Module(InstanceLivenessTarget):
         key: IPCCacheServerKey,
         tp_size: int,
         policy: TrimPolicy,
-    ) -> "tuple[PrefetchHandle | None, int, int]":
+    ) -> "tuple[PrefetchHandle | None, int, tuple[int, ...], tuple[int, ...], int]":
         """Submit the CB prefix prefetch (non-blocking).
 
         Opens the ``cb.prefix_lookup`` span (CB namespace — CB requests no longer
@@ -1213,10 +1259,11 @@ class BlendV3Module(InstanceLivenessTarget):
             policy (TrimPolicy): ``PREFIX`` or ``SEGMENTED_PREFIX``.
 
         Returns:
-            tuple: ``(handle, world_size, read_groups)`` — ``read_groups`` is
-            the number of object groups each chunk's keys cover. ``handle``
-            is None when there is no GPU context or no full chunk (the poll
-            then reports 0 coverage).
+            tuple: ``(handle, world_size, prefix_gids, windows, n_chunks)``
+            — the object groups each chunk's keys cover (the leg's lock
+            model), their cross-chunk windows, and the chunk count (fold
+            inputs for the poll). ``handle`` is None when there is no GPU
+            context or no full chunk (the poll then reports 0 coverage).
         """
         rid = key.request_id
         model_name, world_size = key.model_name, key.world_size
@@ -1231,13 +1278,13 @@ class BlendV3Module(InstanceLivenessTarget):
                 model_name,
                 world_size,
             )
-            return None, world_size, 1
+            return None, world_size, (), (), 0
         read, layouts, attn_desc = resolved
         layout_desc = layouts[read.attn_gid]
 
         chunk_hashes = self._ctx.token_hasher.compute_chunk_hashes(list(key.token_ids))
         if not chunk_hashes:
-            return None, world_size, 1
+            return None, world_size, (), (), 0
 
         # Lookup-hash logger (chunk hashes, for debug); guarded so the metadata
         # dict is built only when a subscriber is listening.
@@ -1265,20 +1312,28 @@ class BlendV3Module(InstanceLivenessTarget):
         session.lookup_ipc_key = key
 
         extra_count = compute_extra_count(tp_size, world_size)
-        # Chunk-major over the read groups so count_leading_ones() stays
+        # PREFIX leg set: recurrent + attention (the planes a prefix restore
+        # consumes), never aux. Chunk-major so count_leading_ones() stays
         # prefix-aligned with _poll_prefix_leg's divisor.
-        obj_keys = _cb_chunk_major_object_keys(key, chunk_hashes, read.gids)
+        obj_keys = _cb_chunk_major_object_keys(key, chunk_hashes, read.prefix_gids)
+        prefix_desc = _narrow_attn_desc(attn_desc, read.prefix_gids)
         handle = self._ctx.storage_manager.submit_prefetch_task(
             PrefetchRequestSpec(
                 keys=obj_keys,
                 group_layout_descs=layouts,
                 extra_count=extra_count,
                 policy=policy,
-                attn_desc=attn_desc,
+                attn_desc=prefix_desc,
             ),
             external_request_id=rid,
         )
-        return handle, world_size, len(read.gids)
+        return (
+            handle,
+            world_size,
+            read.prefix_gids,
+            tuple(prefix_desc.num_chunks_in_sw),
+            len(chunk_hashes),
+        )
 
     def _poll_prefix_leg(
         self, job: "_CBUnifiedJob", rid: str, segmented: bool
@@ -1305,15 +1360,22 @@ class BlendV3Module(InstanceLivenessTarget):
             bm = self._ctx.storage_manager.query_prefetch_status(job.prefix_handle)
             if bm is None:
                 return None  # still loading
-            # Keys are chunk-major: every read group's rank shards for one
-            # chunk are contiguous, so the per-chunk stride is ws * groups.
-            per_chunk = job.prefix_world_size * job.prefix_read_groups
-            # NOTE(Kuntai): assumes uniform world size and prefix-ordered keys
-            # that break at the first miss.
-            leading = bm.count_leading_ones() // per_chunk
+            # Window-aware fold (a live handle implies >= 1 chunk): a
+            # windowed group's out-of-window keys are trimmed from the load
+            # (bits legitimately unset), so use the server's own fold;
+            # count_leading_ones would read those bits as a miss.
+            leading, _ = fold_unfold_ranked(
+                bm,
+                job.prefix_num_chunks,
+                job.prefix_world_size,
+                list(job.prefix_windows),
+            )
             # Retain a chunk only if EVERY key loaded (AND across the rank
             # shards of every read group); a chunk missing any is a gap.
             if segmented:
+                # Keys are chunk-major: one chunk spans ws shards per
+                # locked group.
+                per_chunk = job.prefix_world_size * len(job.prefix_lock_gids)
                 shard_counts: dict[int, int] = {}
                 for ki in bm.get_indices_list():
                     c = ki // per_chunk
@@ -1324,6 +1386,11 @@ class BlendV3Module(InstanceLivenessTarget):
         else:
             # No GPU context / no full chunk: nothing loaded.
             leading, retained = 0, ([] if segmented else None)
+        # Publish the lock model so free_lookup_locks (APC-shadowed hits,
+        # aborts before load) releases exactly what this leg locked.
+        session = self._ctx.session_manager.get_or_create(rid)
+        session.prefetch_hit_chunks = leading
+        session.prefetch_locked_gids = job.prefix_lock_gids
         self._event_bus.publish(
             Event(
                 event_type=EventType.CB_PREFIX_LOOKUP_END,
@@ -1371,17 +1438,25 @@ class BlendV3Module(InstanceLivenessTarget):
                     metadata={"num_tokens": len(key.token_ids)},
                 )
             )
-            # SEGMENTED_PREFIX: gap-tolerant retention keeps post-gap chunks
-            # L1-resident after a mid-prefix L2 failure.
+            # SEGMENTED_PREFIX keeps post-gap chunks L1-resident after a
+            # mid-prefix L2 failure. Forced OFF for recurrent registrations:
+            # its pure-load post-gap rows would hole the recurrence scan, so
+            # a gap must truncate the prefix.
+            resolved_pre = self._resolve_cb_read_layouts(key.model_name, key.world_size)
+            use_segmented = self._segmented_prefix and not (
+                resolved_pre is not None and resolved_pre[0].recurrent_gids
+            )
             prefix_policy = (
-                TrimPolicy.SEGMENTED_PREFIX
-                if self._segmented_prefix
-                else TrimPolicy.PREFIX
+                TrimPolicy.SEGMENTED_PREFIX if use_segmented else TrimPolicy.PREFIX
             )
             # Prefix leg: blend_v3 owns the submit + the cb.prefix_lookup span.
-            prefix_handle, prefix_ws, prefix_groups = self._submit_prefix_leg(
-                key, tp_size, prefix_policy
-            )
+            (
+                prefix_handle,
+                prefix_ws,
+                prefix_gids,
+                prefix_windows,
+                prefix_n_chunks,
+            ) = self._submit_prefix_leg(key, tp_size, prefix_policy)
             # With a coordinator the fleet directory is the only match source;
             # skip the local matcher. The coordinator leg resolves at poll.
             matches: list[CBMatchResult]
@@ -1408,8 +1483,11 @@ class BlendV3Module(InstanceLivenessTarget):
                 num_tokens=len(key.token_ids),
                 prefix_handle=prefix_handle,
                 prefix_world_size=prefix_ws,
-                prefix_read_groups=prefix_groups,
+                prefix_lock_gids=prefix_gids,
+                prefix_windows=prefix_windows,
+                prefix_num_chunks=prefix_n_chunks,
             )
+            job.segmented = use_segmented
             job.coord_submitted = self._submit_coordinator_match(key)
             if job.coord_submitted and self._coordinator is not None:
                 job.coord_deadline = time.monotonic() + self._coordinator.match_budget_s
@@ -1425,7 +1503,7 @@ class BlendV3Module(InstanceLivenessTarget):
                 self._cb_jobs[rid] = job
 
         assert job is not None
-        segmented = self._segmented_prefix
+        segmented = job.segmented
 
         # --- Prefix leg: poll (consume-once) until the L1+L2 prefix lands. ---
         if job.prefix_chunks is None:

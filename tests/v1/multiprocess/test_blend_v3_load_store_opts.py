@@ -1163,18 +1163,58 @@ def test_classify_read_groups_single_group_is_legacy():
 
     read = v3_mod._classify_cb_read_groups(1, ())
     assert read.gids == (0,)
+    assert read.prefix_gids == (0,)
+    assert read.recurrent_gids == ()
     assert read.attn_gid == 0
 
 
 def test_classify_read_groups_hybrid_layout():
-    """attention + recurrent + standalone -> read set = (attention, aux);
-    the recurrent group is excluded from every blend read."""
+    """Per-leg sets: blend = (attention, aux), never recurrent; prefix =
+    (attention, recurrent), never aux — each leg keys/locks exactly the
+    planes it consumes."""
     # First Party
     from lmcache.v1.multiprocess.modules import blend_v3 as v3_mod
 
     read = v3_mod._classify_cb_read_groups(3, ("attention", "recurrent", "standalone"))
     assert read.gids == (0, 2)
+    assert read.prefix_gids == (0, 1)
+    assert read.recurrent_gids == (1,)
     assert read.attn_gid == 0
+
+
+def test_classify_read_groups_multi_recurrent():
+    """Every recurrent group joins the prefix set (a hybrid may bucket its
+    state pages into more than one object group under separation)."""
+    # First Party
+    from lmcache.v1.multiprocess.modules import blend_v3 as v3_mod
+
+    read = v3_mod._classify_cb_read_groups(
+        4, ("recurrent", "attention", "recurrent", "standalone")
+    )
+    assert read.gids == (1, 3)
+    assert read.prefix_gids == (0, 1, 2)
+    assert read.recurrent_gids == (0, 2)
+
+
+def test_narrow_attn_desc_selects_the_leg_gids():
+    """The fold stride is groups x ranks, so each leg's descriptor must cover
+    exactly its own gids."""
+    # First Party
+    from lmcache.v1.distributed.api import AttnWindowDesc
+    from lmcache.v1.multiprocess.modules import blend_v3 as v3_mod
+
+    full = AttnWindowDesc(
+        num_chunks_in_sw=[1, -1, -1],
+        world_size=2,
+        group_kinds=("recurrent", "attention", "standalone"),
+    )
+    prefix = v3_mod._narrow_attn_desc(full, (0, 1))
+    assert prefix.num_chunks_in_sw == [1, -1]
+    assert prefix.group_kinds == ("recurrent", "attention")
+    assert prefix.world_size == 2
+    blend = v3_mod._narrow_attn_desc(full, (1, 2))
+    assert blend.num_chunks_in_sw == [-1, -1]
+    assert blend.group_kinds == ("attention", "standalone")
 
 
 def test_classify_read_groups_rejects_unresolvable_layouts():
