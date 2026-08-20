@@ -94,7 +94,7 @@ Registration order is invocation order. Today: the key directory
 (placements and token bindings, the source of truth), then the eviction
 controller (per-salt usage and the LRU). The two are independent — the
 controller's own read-after-write ordering is internal to it (see
-[l2_usage_and_eviction.md](l2_usage_and_eviction.md)), not a property of
+[usage_and_eviction.md](usage_and_eviction.md)), not a property of
 registration order.
 
 ## Where the state is

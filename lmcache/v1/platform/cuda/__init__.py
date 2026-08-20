@@ -79,7 +79,13 @@ class CudaDeviceSpec(DeviceSpec):
             # Third Party
             import torch
 
-            return torch.cuda.is_available()
+            torch_version = getattr(torch, "version", None)
+            if torch_version is None:
+                return torch.cuda.is_available()
+            return (
+                torch.cuda.is_available()
+                and getattr(torch_version, "cuda", None) is not None
+            )
         except Exception:
             return False
 

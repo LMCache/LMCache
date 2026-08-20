@@ -988,6 +988,12 @@ def test_scatter_rounds_down_partial_block_skip_first_n_tokens(
 def stub_lmcache_native() -> Any:
     """Stub native modules so server imports work in source-only test runs."""
     module = type(sys)("lmcache.lmcache_native")
+    module.PageBufferShapeDesc = type("PageBufferShapeDesc", (), {})  # type: ignore[attr-defined]
+    module.KernelGroupSpec = type(  # type: ignore[attr-defined]
+        "KernelGroupSpec",
+        (),
+        {"__init__": lambda self, *args, **kwargs: None},
+    )
     module.TTLLock = type("TTLLock", (), {})  # type: ignore[attr-defined]
     module.Bitmap = type("Bitmap", (), {})  # type: ignore[attr-defined]
     module.PeriodicEventNotifier = type(  # type: ignore[attr-defined]

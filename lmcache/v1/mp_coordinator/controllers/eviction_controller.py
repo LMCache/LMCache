@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Fleet-wide per-``cache_salt`` L2 eviction control loop.
 
-See ``docs/design/v1/mp_coordinator/l2_usage_and_eviction.md``.
+See ``docs/design/v1/mp_coordinator/usage_and_eviction.md``.
 """
 
 # Future
@@ -23,7 +23,6 @@ from lmcache.v1.distributed.eviction_policy.isolated_lru import (
 )
 from lmcache.v1.distributed.quota_manager import QuotaManager
 from lmcache.v1.mp_coordinator.api import CacheEventBatch, CacheEventType
-from lmcache.v1.mp_coordinator.controllers.usage_manager import L2UsageManager
 from lmcache.v1.multiprocess.cache_control.object_service import (
     MAX_DELETE_BATCH,
 )
@@ -31,6 +30,7 @@ from lmcache.v1.multiprocess.cache_control.object_service import (
 if TYPE_CHECKING:
     # First Party
     from lmcache.v1.distributed.api import ObjectKey
+    from lmcache.v1.mp_coordinator.controllers.usage_manager import CacheUsageManager
     from lmcache.v1.mp_coordinator.registry import InstanceRegistry
 
 logger = init_logger(__name__)
@@ -39,12 +39,15 @@ logger = init_logger(__name__)
 class FleetEvictionController:
     """Per-``cache_salt`` L2 eviction controller for the fleet.
 
-    Owns the quota registry and usage view it enforces against, both
-    exposed for the ``/quota`` endpoints and both fed from
-    :meth:`consume`. :meth:`run` is the loop, :meth:`execute_evictions`
-    one pass of it.
+    Owns the quota registry it enforces (exposed for the ``/quota``
+    endpoints) and reads the fleet usage view on the ``l2`` tier.
+    :meth:`run` is the loop, :meth:`execute_evictions` one pass of it.
 
     Args:
+        usage_manager: The fleet usage view. A consumer in its own
+            right, registered on the broadcaster **before** this
+            controller so it has accounted a batch by the time
+            :meth:`consume` reads sizes from it.
         eviction_ratio: Fraction of tracked keys to evict per cycle.
         trigger_watermark: Eviction fires when usage reaches this
             fraction of the quota.
@@ -52,11 +55,12 @@ class FleetEvictionController:
 
     def __init__(
         self,
+        usage_manager: CacheUsageManager,
         eviction_ratio: float = 0.5,
         trigger_watermark: float = 1.0,
     ) -> None:
         self._quota_manager = QuotaManager()
-        self._usage_manager = L2UsageManager()
+        self._usage_manager = usage_manager
         self._eviction_ratio = max(0.0, min(1.0, eviction_ratio))
         self._trigger_watermark = trigger_watermark
         self._policy = IsolatedLRUEvictionPolicy()
@@ -70,26 +74,22 @@ class FleetEvictionController:
         """The budgets this controller enforces."""
         return self._quota_manager
 
-    @property
-    def usage(self) -> L2UsageManager:
-        """The usage view this controller enforces against."""
-        return self._usage_manager
-
     def consume(self, batch: CacheEventBatch) -> None:
-        """Apply one gate-admitted batch to usage, then the LRU.
+        """Apply one gate-admitted batch to the LRU.
 
         A delete drops the key from the LRU only once its **last** L2
         placement is gone: usage is per placement, so while another copy
         still holds bytes the key must stay evictable, or those bytes
-        could exceed quota with nothing for the planner to select. Usage
-        consuming first is what makes that size read correct.
+        could exceed quota with nothing for the planner to select. That
+        size read is correct because the usage view consumed the same
+        batch first, which registration order in ``create_app``
+        guarantees.
 
         Args:
-            batch: The admitted batch.
+            batch: The admitted batch; other tiers are ignored.
         """
         if batch.tier != Tier.L2:
             return
-        self._usage_manager.consume(batch)
         for entry in batch.entries:
             key = entry.key.to_object_key()
             if batch.event_type == CacheEventType.STORE:
@@ -97,12 +97,12 @@ class FleetEvictionController:
             elif batch.event_type == CacheEventType.ACCESS:
                 self.on_lookup(key)
             elif batch.event_type == CacheEventType.DELETE:
-                if self._usage_manager.get_key_size(key) == 0:
+                if self._usage_manager.get_key_bytes(Tier.L2, key) == 0:
                     self.on_remove(key)
 
     def fence_instance(self, instance_id: str) -> None:
-        """No-op: fencing voids L1 only, and the L2 bytes this
-        controller accounts outlive the reporting process.
+        """No-op: fencing voids L1 only, and this controller's LRU
+        tracks L2 keys, which outlive the reporting process.
 
         Args:
             instance_id: The restarted or departed instance (unused).
@@ -160,7 +160,7 @@ class FleetEvictionController:
         eviction_plan: dict[str, list[ObjectKey]] = {}
 
         for cache_salt in tracked_salts:
-            current_bytes = self._usage_manager.get(cache_salt)
+            current_bytes = self._usage_manager.get_salt_bytes(Tier.L2, cache_salt)
             if current_bytes <= 0:
                 continue
             limit = self._quota_manager.effective_limit_bytes(cache_salt)
@@ -184,7 +184,7 @@ class FleetEvictionController:
             if keys_to_evict:
                 eviction_plan[cache_salt] = keys_to_evict
                 evict_bytes = sum(
-                    self._usage_manager.get_key_size(k) for k in keys_to_evict
+                    self._usage_manager.get_key_bytes(Tier.L2, k) for k in keys_to_evict
                 )
                 logger.info(
                     "Eviction plan for cache_salt=%r: %d keys "

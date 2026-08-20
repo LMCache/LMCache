@@ -571,7 +571,10 @@ Read the quota and live usage for a single salt.
 **Path parameters:** ``cache_salt`` — tenant identifier (``_default`` for the
 empty salt).
 
-**Query parameters:** ``tier`` — optional (default ``l2``).
+**Query parameters:** ``tier`` — ``l1`` or ``l2`` (default ``l2``). Every field
+describes the requested tier. Quotas are enforced on L2 only, so an ``l1`` read
+reports L1 usage with ``quota_exists: false`` and ``quota_limit_gb: 0.0`` --
+never the L2 budget, which governs different bytes.
 
 **Response** (``200 OK``):
 
@@ -599,7 +602,12 @@ current aggregate usage. This endpoint never returns ``404`` for an unknown salt
 
 List total usage and a per-salt breakdown.
 
-**Query parameters:** ``tier`` — optional (default ``l2``).
+**Query parameters:** ``tier`` — ``l1`` or ``l2`` (default ``l2``). Every field
+describes the requested tier, and rows come from that tier's usage plus the
+quotas that apply to it -- so an ``l1`` listing holds only salts with L1 bytes,
+each with ``quota_exists: false``. ``all`` is rejected with ``400``, because a
+key resident in both tiers holds bytes in both and a cross-tier total would
+count it twice.
 
 **Response** (``200 OK``):
 
