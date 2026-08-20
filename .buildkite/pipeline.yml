@@ -24,7 +24,12 @@ steps:
         export TORCH_DONT_CHECK_COMPILER_ABI=1
         export CXX=hipcc
         export BUILD_WITH_HIP=1
-        uv pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm7.0
+        # Match the ABI of the wheel we publish (TORCH_ROCM_SPEC /
+        # TORCH_ROCM_INDEX in .github/workflows/build_rocm_artifacts.yml).
+        # The pin is load-bearing: left unpinned this index resolves to a
+        # much newer torch than the one the release wheel is built against.
+        uv pip install "torch==2.11.0+rocm7.2" torchvision \
+          --index-url https://download.pytorch.org/whl/rocm7.2
         uv pip install -r requirements/rocm_core.txt
       fi
 
