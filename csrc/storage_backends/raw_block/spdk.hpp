@@ -39,6 +39,15 @@ class SpdkIoEngineCore {
    */
   void set_core_mask(const char* core_mask);
 
+  /**
+   * Set the SPDK memory size in MB. This controls how much hugepage
+   * memory SPDK reserves during initialization via DPDK's -m flag.
+   * Must be called before init_spdk().
+   *
+   * @param mem_size_mb: Memory size in megabytes (0 = use SPDK default).
+   */
+  void set_mem_size(int mem_size_mb);
+
   int init_spdk() const;
   void deinit_spdk() const;
 

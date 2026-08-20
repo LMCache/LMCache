@@ -55,6 +55,13 @@ static std::string g_pcie_addr =
 
 // SPDK core mask (configurable from Python)
 // Default: empty string means SPDK uses all available cores
+static int g_mem_size_mb = 0;  // SPDK memory size in MB (0 = default)
+
+// SPDK DPDK memory size setter (must be called before init_spdk)
+void SpdkIoEngineCore::set_mem_size(int mem_size_mb) {
+  g_mem_size_mb = mem_size_mb;
+}
+
 static bool probe_cb(void* cb_ctx, const struct spdk_nvme_transport_id* trid,
                      struct spdk_nvme_ctrlr_opts* opts) {
   return true;
@@ -319,6 +326,14 @@ int core_set_dpdk_core_mask(const char* core_mask) {
 }
 
 /**
+ * Set the SPDK memory size in MB. Must be called before init_spdk().
+ */
+void core_set_mem_size(void* core_ptr, int mem_size_mb) {
+  auto* core = static_cast<SpdkIoEngineCore*>(core_ptr);
+  core->set_mem_size(mem_size_mb);
+}
+
+/**
  * Get the resolved I/O worker core ID.
  */
 int core_get_io_worker_core(void) { return g_io_worker_core; }
@@ -445,6 +460,11 @@ int SpdkIoEngineCore::init_spdk() const {
 
   if (!g_dpdk_core_mask.empty()) {
     m_opts.core_mask = g_dpdk_core_mask.c_str();
+  }
+
+  // Set SPDK memory size for hugepage allocation (if configured)
+  if (g_mem_size_mb > 0) {
+    m_opts.mem_size = g_mem_size_mb;
   }
 
   ret = spdk_env_init(&m_opts);

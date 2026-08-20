@@ -92,6 +92,11 @@ class SpdkIoEngineFFI:
         self._init_spdk.argtypes = [ctypes.c_void_p]
         self._init_spdk.restype = ctypes.c_int
 
+        # Set up function signature for mem_size configuration
+        self._set_mem_size = self._lib.core_set_mem_size
+        self._set_mem_size.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        self._set_mem_size.restype = None
+
         self._deinit_spdk = self._lib.core_deinit_spdk
         self._deinit_spdk.argtypes = [ctypes.c_void_p]
         self._deinit_spdk.restype = None
@@ -253,6 +258,18 @@ class SpdkIoEngineFFI:
         else:
             logger.error("Failed to set DPDK core mask: %s", core_mask)
         return rc
+
+    def set_mem_size(self, mem_size_mb: int) -> None:
+        """Set the SPDK memory size in MB for hugepage allocation.
+
+        This controls how much hugepage memory SPDK reserves during
+        initialization via DPDK's -m flag. Must be called before init().
+
+        Args:
+            mem_size_mb: Memory size in megabytes (0 = use SPDK default).
+        """
+        if self._set_mem_size is not None:
+            self._set_mem_size(self._obj, ctypes.c_int(mem_size_mb))
 
     def init(self) -> int:
         """Initialize SPDK environment.

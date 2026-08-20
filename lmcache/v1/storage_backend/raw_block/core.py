@@ -74,16 +74,19 @@ def normalize_raw_block_io_engine(
     *,
     use_iouring: Any = None,
     use_uring: Any = None,
+    use_spdk: Any = None,
 ) -> str:
     """Normalize raw-block I/O engine config with legacy compatibility.
 
     Args:
         io_engine: Explicit engine string. Valid values are ``"posix"``,
-            and ``"io_uring"``.
+            ``"io_uring"``, and ``"spdk"``.
         use_iouring: Legacy boolean knob. Used only when ``io_engine`` is not
             set.
         use_uring: Legacy boolean alias. Used only when ``io_engine`` is not
             set.
+        use_spdk: Legacy boolean knob. Used only when ``io_engine`` is not
+            set. When True, returns ``"spdk"``.
 
     Returns:
         The normalized engine string.
@@ -92,6 +95,8 @@ def normalize_raw_block_io_engine(
         ValueError: If ``io_engine`` names an unsupported engine.
     """
     if io_engine is None or io_engine == "":
+        if bool(use_spdk):
+            return "spdk"
         if bool(use_iouring) or bool(use_uring):
             return "io_uring"
         return "posix"
@@ -198,6 +203,14 @@ class RawBlockCoreConfig:
     use_uring_cmd: bool = False
     meta_checkpoint_placement_id: PlacementId = None
     fdp_slot_affinity_enabled: bool = False
+
+    # SPDK-specific configuration (consumed when io_engine="spdk")
+    spdk_transport_type: str = "tcp"  # "pcie" for local NVMe, "tcp" for NVMe-oF
+    spdk_target_ip: str = "127.0.0.1"  # For PCIe: device address (e.g., "0000:01:00.0")
+    spdk_target_port: str = "4420"
+    spdk_target_nqn: str = "nqn.2019-04.pos:subsystem1"
+    spdk_use_hugepages: bool = True
+    spdk_core_mask: str = ""  # Hex core mask for SPDK (e.g., "0x3f" for cores 0-5)
 
 
 @dataclass
