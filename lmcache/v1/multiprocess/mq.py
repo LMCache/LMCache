@@ -1,21 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 """LMCache mp-mode message queue, backed by gRPC.
 
-Each ``RequestType`` maps to a distinct unary rpc method on the
-``MessageQueue`` service defined in ``proto/lmcache_mq.proto`` -- the
-old msgspec envelope (uid + request_type frame + payloads) is gone and
-gRPC's method routing takes over.  The request/response payload bytes
-themselves still carry msgspec-encoded values today, so the surrounding
-handler / client business code keeps the same signatures; a follow-up
-PR can promote individual rpc methods to typed proto messages without
-touching this file.
+Each ``RequestType`` maps to a distinct typed unary RPC method on the
+``MessageQueue`` service defined in ``proto/lmcache_mq.proto``. The old
+msgspec envelope (uid + request type + payload frames) is gone; gRPC method
+routing and protobuf request/response messages now define the wire protocol.
 """
 
 # Standard
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Callable, Generic, Optional, TypeVar, get_type_hints
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 import inspect
 import pickle
 import threading
@@ -83,21 +79,11 @@ _GRPC_UNLIMITED_MSG_OPTS: list[tuple[str, int]] = [
 
 
 # ---------------------------------------------------------------------------
-# Typed rpc registry (proto messages as first-class citizens).
+# Typed RPC registry (protobuf messages as first-class wire values).
 #
-# Each entry says "for this RequestType, don't touch the msgspec envelope
-# -- serialize / deserialize through these two typed proto messages
-# directly".  Migrating an rpc off the legacy BytesRequest / BytesResponse
-# envelope is a matter of:
-#
-#   1. Add a real message pair to ``lmcache_mq.proto`` (see PingRequest /
-#      PingResponse) and change the rpc to use them.
-#   2. Add one entry to this dict wiring the RequestType to those
-#      messages and the two small Python <-> proto adapters.
-#
-# The adapters intentionally stay next to the registry (rather than in
-# the business handler) so the whole "typed-vs-legacy" decision surface
-# lives in one file that grep's cheap to audit.
+# Every RequestType has one entry pairing its generated message classes with
+# Python <-> protobuf adapters. Keeping adapters next to the registry makes
+# protocol parity straightforward to audit and test.
 # ---------------------------------------------------------------------------
 
 
@@ -1360,7 +1346,7 @@ def _cb_register_rope_v3_python_to_request(
 
 
 # ---------------------------------------------------------------------------
-# msgspec encode / decode helpers (payload bytes wrapped inside proto)
+# msgspec helpers retained for explicit compatibility serialization.
 # ---------------------------------------------------------------------------
 
 _SPECIAL_ENCODER_DECODERS = {
@@ -1401,21 +1387,7 @@ def msgspec_decode(b_obj: bytes, cls: Any) -> Any:
     return msgspec.msgpack.decode(b_obj, type=cls)
 
 
-def unwrap_request_payloads(
-    b_payloads: list[bytes], payload_clss: list[Any]
-) -> list[Any]:
-    if len(b_payloads) != len(payload_clss):
-        raise ValueError("Payload count does not match expected count")
-
-    return [
-        msgspec_decode(payload, cls=cls)
-        for payload, cls in zip(b_payloads, payload_clss, strict=False)
-    ]
-
-
-# The one source of truth for "which RequestType has been promoted to a
-# typed proto message pair".  Entries here take priority over the
-# msgspec-envelope path in both ``submit_request`` and the servicer.
+# The one source of truth pairing every RequestType with its typed messages.
 _TYPED_RPCS: dict[RequestType, TypedRpcSpec] = {
     RequestType.PING: TypedRpcSpec(
         request_message=lmcache_mq_pb2.PingRequest,
@@ -1856,7 +1828,8 @@ def _parse_grpc_url(url: str) -> str:
     breaking existing deploys and tests.
     """
     if "://" not in url:
-        return url
+        target, _, _query = url.partition("?")
+        return target
     parsed = urlparse(url)
     if parsed.scheme in ("grpc", "tcp"):
         if not parsed.netloc:
@@ -1888,6 +1861,29 @@ def _parse_grpc_url(url: str) -> str:
     )
 
 
+def _parse_grpc_compression(url: str) -> Any:
+    """Resolve the optional gRPC compression mode from a transport URL."""
+    _ensure_grpc_runtime()
+    values = parse_qs(urlparse(url).query, keep_blank_values=True).get(
+        "compression", ["none"]
+    )
+    if len(values) != 1:
+        raise ValueError("compression must be specified at most once")
+
+    name = values[0].lower()
+    modes = {
+        "": grpc.Compression.NoCompression,
+        "none": grpc.Compression.NoCompression,
+        "gzip": grpc.Compression.Gzip,
+        "deflate": grpc.Compression.Deflate,
+    }
+    if name not in modes:
+        raise ValueError(
+            f"unknown gRPC compression {name!r}; expected gzip, deflate, or none"
+        )
+    return modes[name]
+
+
 # ---------------------------------------------------------------------------
 # Client
 # ---------------------------------------------------------------------------
@@ -1917,8 +1913,13 @@ class MessageQueueClient:
         del context, transport  # legacy positional slots, no longer used
         _ensure_grpc_runtime()
         target = _parse_grpc_url(server_url)
+        compression = _parse_grpc_compression(server_url)
         self._server_url = server_url
-        self._channel = grpc.insecure_channel(target, options=_GRPC_UNLIMITED_MSG_OPTS)
+        self._channel = grpc.insecure_channel(
+            target,
+            options=_GRPC_UNLIMITED_MSG_OPTS,
+            compression=compression,
+        )
         self._stub = lmcache_mq_pb2_grpc.MessageQueueStub(self._channel)
 
     def submit_request(
@@ -1996,7 +1997,7 @@ StateType = TypeVar("StateType", covariant=True)
 
 
 class RequestHandlerBase(Generic[ResponseType]):
-    def __call__(self, payloads: list[bytes]):
+    def __call__(self, payloads: tuple[Any, ...]):
         raise NotImplementedError
 
     def get_response_class(self) -> ResponseType:
@@ -2019,8 +2020,8 @@ class SyncRequestHandler(RequestHandlerBase[ResponseType]):
         self.response_cls = response_cls
         self.handler = handler
 
-    def __call__(self, payloads: list[bytes]) -> ResponseType:
-        return self.handler(*unwrap_request_payloads(payloads, self.payload_clss))
+    def __call__(self, payloads: tuple[Any, ...]) -> ResponseType:
+        return self.handler(*payloads)
 
     def get_response_class(self) -> ResponseType:
         return self.response_cls
@@ -2044,18 +2045,17 @@ class BlockingRequestHandler(RequestHandlerBase[ResponseType]):
         self.response_cls = response_cls
 
     def __call__(
-        self, payloads: list[bytes], affinity_key: Any = 0
+        self, payloads: tuple[Any, ...], affinity_key: Any = 0
     ) -> Future[ResponseType]:
         assert self.executor is not None, (
             "BlockingRequestHandler has no executor assigned. "
             "Call add_normal_thread_pool or add_affinity_thread_pool first."
         )
-        decoded_payloads = unwrap_request_payloads(payloads, self.payload_clss)
         if isinstance(self.executor, AffinityThreadPool):
             return self.executor.submit(
-                self.handler, *decoded_payloads, affinity_key=affinity_key
+                self.handler, *payloads, affinity_key=affinity_key
             )
-        return self.executor.submit(self.handler, *decoded_payloads)
+        return self.executor.submit(self.handler, *payloads)
 
     def get_response_class(self) -> ResponseType:
         return self.response_cls
@@ -2094,15 +2094,10 @@ class _RequestHandlerServicer:
     def _run_handler(
         self,
         request_type: RequestType,
-        payloads: list[bytes],
+        payloads: tuple[Any, ...],
         peer: str,
     ) -> Any:
-        """Route a legacy-envelope payload list into the registered
-        ``RequestHandlerBase`` and return the raw Python result.
-
-        Split out of the msgspec path so the typed path can share the
-        same executor / affinity dispatch without duplicating it.
-        """
+        """Route typed Python payloads into the registered request handler."""
         handler = self._handlers.get(request_type)
         if handler is None:
             raise RuntimeError(f"No handler registered for {request_type}")
@@ -2126,17 +2121,7 @@ class _RequestHandlerServicer:
         request_type: RequestType,
         spec: TypedRpcSpec,
     ) -> Any:
-        """Typed-rpc entry point.  Shares the executor / affinity logic
-        with ``_dispatch`` via ``_run_handler``; the only difference is
-        the wire format on either end.
-
-        The registered ``RequestHandlerBase`` still speaks the msgspec
-        payload-list ABI internally (business handlers haven't changed),
-        so we re-encode the unpacked positional args back to msgspec
-        bytes here.  That's a temporary crutch -- once every rpc is
-        typed, ``RequestHandlerBase`` itself will lose the ``list[bytes]``
-        parameter and take positional Python args directly.
-        """
+        """Decode a typed request, run its handler, and encode the response."""
         handler = self._handlers.get(request_type)
         if handler is None:
             context.abort(
@@ -2156,11 +2141,7 @@ class _RequestHandlerServicer:
                 ),
             )
             raise RuntimeError("unreachable")
-        b_payloads = [
-            msgspec_encode(arg, cls=cls)
-            for arg, cls in zip(py_args, payload_classes, strict=False)
-        ]
-        result = self._run_handler(request_type, b_payloads, context.peer())
+        result = self._run_handler(request_type, py_args, context.peer())
         return spec.python_to_response(result)
 
 
@@ -2438,12 +2419,14 @@ class MessageQueueServer:
                 )
 
         target = _parse_grpc_url(self._bind_url)
+        compression = _parse_grpc_compression(self._bind_url)
         server = grpc.server(
             ThreadPoolExecutor(
                 max_workers=self._grpc_max_workers,
                 thread_name_prefix="mq-grpc-server",
             ),
             options=_GRPC_UNLIMITED_MSG_OPTS,
+            compression=compression,
         )
         servicer = _RequestHandlerServicer(self.handlers)
         lmcache_mq_pb2_grpc.add_MessageQueueServicer_to_server(servicer, server)

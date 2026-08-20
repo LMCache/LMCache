@@ -7,6 +7,7 @@ import sys
 import time
 
 # Third Party
+import grpc
 import pytest
 import torch
 import zmq
@@ -22,6 +23,7 @@ from lmcache.v1.multiprocess.mq import (
     BlockingRequestHandler,
     MessageQueueClient,
     MessageQueueServer,
+    _parse_grpc_compression,
     _parse_grpc_url,
 )
 from lmcache.v1.multiprocess.protocol import (
@@ -43,6 +45,10 @@ from tests.v1.multiprocess import test_mq_handler_helpers
     ("url", "expected"),
     [
         ("127.0.0.1:5555", "127.0.0.1:5555"),
+        (
+            "127.0.0.1:5555?compression=gzip",
+            "127.0.0.1:5555",
+        ),
         ("grpc://127.0.0.1:5555", "127.0.0.1:5555"),
         ("tcp://127.0.0.1:5555", "127.0.0.1:5555"),
         ("grpc+unix:///tmp/lmcache.sock", "unix:///tmp/lmcache.sock"),
@@ -59,6 +65,27 @@ def test_parse_grpc_url_accepts_legacy_mp_aliases(
 def test_parse_grpc_url_rejects_unknown_scheme() -> None:
     with pytest.raises(ValueError, match="unsupported transport scheme"):
         _parse_grpc_url("http://127.0.0.1:5555")
+
+
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        ("", grpc.Compression.NoCompression),
+        ("?compression=none", grpc.Compression.NoCompression),
+        ("?compression=gzip", grpc.Compression.Gzip),
+        ("?compression=deflate", grpc.Compression.Deflate),
+    ],
+)
+def test_parse_grpc_compression(
+    query: str,
+    expected: grpc.Compression,
+) -> None:
+    assert _parse_grpc_compression(f"grpc://127.0.0.1:5555{query}") is expected
+
+
+def test_parse_grpc_compression_rejects_invalid_value() -> None:
+    with pytest.raises(ValueError, match="unknown gRPC compression"):
+        _parse_grpc_compression("grpc://127.0.0.1:5555?compression=snappy")
 
 
 def create_cache_key(index: int, model: str = "testmodel") -> IPCCacheServerKey:

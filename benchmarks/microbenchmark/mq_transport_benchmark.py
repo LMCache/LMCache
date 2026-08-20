@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""Microbenchmark for the mp mode message queue transport layer.
+"""Microbenchmark for the gRPC-backed mp mode message queue.
 
-Directly compares ``zmq://`` (ipc + tcp) against ``grpc://`` on the exact
-same code path (``MessageQueueClient`` / ``MessageQueueServer`` speaking
-``RequestType.PING``), isolating transport overhead from cache
-business logic.
+Compares canonical gRPC endpoint and compression configurations on the exact
+same ``MessageQueueClient`` / ``MessageQueueServer`` PING path, isolating RPC
+overhead from cache business logic. The historical ``ipc://`` and ``tcp://``
+schemes are now compatibility aliases for gRPC, so they are intentionally not
+reported as separate transports. Use an equivalent PING harness against the
+pre-gRPC branch when collecting a ZMQ baseline.
 
 Run with::
 
@@ -13,7 +15,7 @@ Run with::
 
     # Only a subset of transports
     python benchmarks/microbenchmark/mq_transport_benchmark.py \\
-        --transports ipc,grpc
+        --transports grpc-unix,grpc
 
     # Heavier load
     python benchmarks/microbenchmark/mq_transport_benchmark.py \\
@@ -25,11 +27,13 @@ Reported metrics per transport:
 * ``avg``   average round-trip latency (ms)
 * ``p50``   median round-trip latency (ms)
 * ``p99``   99th percentile round-trip latency (ms)
+
+Each reported value is the median across ``--repeats`` complete runs.
 """
 
 # Standard
 from concurrent.futures import ThreadPoolExecutor
-from typing import Callable
+from typing import Iterator
 import argparse
 import contextlib
 import socket
@@ -38,15 +42,13 @@ import tempfile
 import time
 
 # First Party
+from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.mq import (
     MessageQueueClient,
     MessageQueueServer,
 )
-from lmcache.v1.multiprocess.protocol import (
-    HandlerType,
-    RequestType,
-    get_payload_classes,
-)
+from lmcache.v1.multiprocess.protocol import get_payload_classes
+from lmcache.v1.multiprocess.protocols.base import HandlerType, RequestType
 
 
 def _handle_ping(instance_id: int | None) -> bool:  # noqa: D401
@@ -54,15 +56,13 @@ def _handle_ping(instance_id: int | None) -> bool:  # noqa: D401
 
 
 def _pick_free_port() -> int:
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    port = s.getsockname()[1]
-    s.close()
-    return port
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
 
 
 @contextlib.contextmanager
-def _running_server(url: str):
+def _running_server(url: str) -> Iterator[None]:
     server = MessageQueueServer(url)
     server.add_handler(
         RequestType.PING,
@@ -79,14 +79,14 @@ def _running_server(url: str):
         server.close()
 
 
-def _run_client(url: str, requests: int, concurrency: int) -> dict:
+def _run_client(url: str, requests: int, concurrency: int) -> dict[str, float]:
     client = MessageQueueClient(url)
     lat_ms: list[float] = []
 
     def one_call() -> float:
         start = time.perf_counter()
-        fut: object = client.submit_request(RequestType.PING, [None])
-        fut.result(timeout=10)  # type: ignore[attr-defined]
+        future: MessagingFuture[bool] = client.submit_request(RequestType.PING, [None])
+        future.result(timeout=10)
         return (time.perf_counter() - start) * 1000.0
 
     try:
@@ -111,7 +111,11 @@ def _run_client(url: str, requests: int, concurrency: int) -> dict:
     }
 
 
-def _bench_one(name: str, url: str, requests: int, concurrency: int) -> None:
+def _bench_one(
+    url: str,
+    requests: int,
+    concurrency: int,
+) -> dict[str, float]:
     with _running_server(url):
         # Warm-up so JIT / connection-establishment don't skew the numbers.
         warmup_client = MessageQueueClient(url)
@@ -123,10 +127,34 @@ def _bench_one(name: str, url: str, requests: int, concurrency: int) -> None:
         finally:
             warmup_client.close()
 
-        stats = _run_client(url, requests, concurrency)
+        return _run_client(url, requests, concurrency)
 
+
+@contextlib.contextmanager
+def _transport_url(name: str) -> Iterator[str]:
+    if name == "grpc-unix":
+        with tempfile.TemporaryDirectory(prefix="mq-bench-") as directory:
+            yield f"grpc+unix://{directory}/sock"
+        return
+    if name == "grpc":
+        yield f"grpc://127.0.0.1:{_pick_free_port()}"
+        return
+    if name == "grpc-gzip":
+        yield f"grpc://127.0.0.1:{_pick_free_port()}?compression=gzip"
+        return
+    raise ValueError(f"unknown transport: {name}")
+
+
+def _median_stats(samples: list[dict[str, float]]) -> dict[str, float]:
+    return {
+        key: statistics.median(sample[key] for sample in samples)
+        for key in ("rps", "avg", "p50", "p99")
+    }
+
+
+def _print_stats(name: str, stats: dict[str, float]) -> None:
     print(
-        "{:<10} rps={:>9.0f}  avg={:>6.2f} ms  p50={:>6.2f} ms  p99={:>6.2f} ms".format(
+        "{:<12} rps={:>9.0f}  avg={:>6.2f} ms  p50={:>6.2f} ms  p99={:>6.2f} ms".format(
             name,
             stats["rps"],
             stats["avg"],
@@ -136,26 +164,13 @@ def _bench_one(name: str, url: str, requests: int, concurrency: int) -> None:
     )
 
 
-def _make_url_factories() -> dict[str, Callable[[], str]]:
-    # Note: the ipc:// factory returns a fresh unique path every time it is
-    # invoked so successive runs of the same bench do not collide.
-    return {
-        "ipc": lambda: "ipc://" + tempfile.mkdtemp(prefix="mq-bench-") + "/sock",
-        "tcp": lambda: "tcp://127.0.0.1:" + str(_pick_free_port()),
-        "grpc": lambda: "grpc://127.0.0.1:" + str(_pick_free_port()),
-        "grpc-gzip": (
-            lambda: "grpc://127.0.0.1:" + str(_pick_free_port()) + "?compression=gzip"
-        ),
-    }
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--transports",
-        default="ipc,tcp,grpc,grpc-gzip",
+        default="grpc-unix,grpc,grpc-gzip",
         help="Comma-separated list of transports to bench "
-        "(default: ipc,tcp,grpc,grpc-gzip)",
+        "(default: grpc-unix,grpc,grpc-gzip)",
     )
     parser.add_argument(
         "--requests",
@@ -169,21 +184,35 @@ def main() -> None:
         default=1,
         help="Number of concurrent client threads (default: 1)",
     )
+    parser.add_argument(
+        "--repeats",
+        type=int,
+        default=5,
+        help="Complete runs per transport; reports the median (default: 5)",
+    )
     args = parser.parse_args()
 
-    factories = _make_url_factories()
     transports = [t.strip() for t in args.transports.split(",") if t.strip()]
+    valid_transports = {"grpc-unix", "grpc", "grpc-gzip"}
+    unknown = sorted(set(transports) - valid_transports)
+    if unknown:
+        parser.error("unknown transport(s): " + ", ".join(unknown))
+    if args.requests <= 0 or args.concurrency <= 0 or args.repeats <= 0:
+        parser.error("requests, concurrency, and repeats must all be positive")
 
     print(
-        "mq transport benchmark: requests={}, concurrency={}".format(
-            args.requests, args.concurrency
+        "mq transport benchmark: requests={}, concurrency={}, repeats={}".format(
+            args.requests,
+            args.concurrency,
+            args.repeats,
         ),
     )
-    for t in transports:
-        if t not in factories:
-            print("  skip unknown transport:", t)
-            continue
-        _bench_one(t, factories[t](), args.requests, args.concurrency)
+    for transport in transports:
+        samples = []
+        for _ in range(args.repeats):
+            with _transport_url(transport) as url:
+                samples.append(_bench_one(url, args.requests, args.concurrency))
+        _print_stats(transport, _median_stats(samples))
 
 
 if __name__ == "__main__":
