@@ -22,6 +22,7 @@ vLLM ``BlockPool`` through the production view and hold the fake to it.
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
+import inspect
 
 # Third Party
 import pytest
@@ -260,8 +261,9 @@ def _make_lazy_connector(
     extra_config: dict[str, Any] | None = None,
     expected_worker_count: int = 1,
     group_tokens_per_block: list[int] | None = None,
+    pool_cls: "type[_FakeBlockPool]" = _FakeBlockPool,
 ) -> _Harness:
-    pool = _FakeBlockPool(num_blocks)
+    pool = pool_cls(num_blocks)
     adapter = _FakeSchedulerAdapter(expected_worker_count)
     manager = LazyOffloadManager(
         {
@@ -373,6 +375,29 @@ def _vllm_free_ids(pool: BlockPool) -> list[int]:
     return [block.block_id for block in pool.free_block_queue.get_all_free_blocks()]
 
 
+#: Whether the installed vLLM's ``free_blocks`` accepts ``prepend`` (caller
+#: chooses head insertion). Releases without the parameter route placement
+#: themselves: uncached blocks requeue at the eviction head, cached blocks
+#: at the tail. The real-pool tests branch on this to reach both queue ends
+#: on either kind of release.
+_REAL_POOL_ACCEPTS_PREPEND = (
+    "prepend" in inspect.signature(BlockPool.free_blocks).parameters
+)
+
+
+def _set_real_block_hash(block: Any, block_hash: bytes) -> None:
+    """Assign a cached hash on a real vLLM block across versions.
+
+    Some vLLM releases expose a ``block_hash`` property setter; others
+    replace it with a ``set_block_hash`` method.
+    """
+    setter = getattr(block, "set_block_hash", None)
+    if setter is not None:
+        setter(cast("BlockHashWithGroupId", block_hash))
+        return
+    block.block_hash = cast("BlockHashWithGroupId", block_hash)
+
+
 def test_pool_view_walk_matches_vllm_own_queue_listing() -> None:
     """The lazy walk yields what vLLM says the queue holds, in order.
 
@@ -383,8 +408,15 @@ def test_pool_view_walk_matches_vllm_own_queue_listing() -> None:
     pool = _make_real_pool()
     view = GPUBlockPoolView(pool)
     to_tail, to_head = pool.get_new_blocks(2)
-    pool.free_blocks([to_tail])
-    pool.free_blocks([to_head], prepend=True)
+    if _REAL_POOL_ACCEPTS_PREPEND:
+        pool.free_blocks([to_tail])
+        pool.free_blocks([to_head], prepend=True)
+    else:
+        # Hash-routing vLLM: free_blocks itself sends uncached blocks to
+        # the eviction head and cached blocks to the tail, so hashing one
+        # of the two reaches both ends without a placement parameter.
+        _set_real_block_hash(to_tail, b"hash-tail")
+        pool.free_blocks([to_head, to_tail])
 
     expected = _vllm_free_ids(pool)
     assert list(view.free_queue_block_ids()) == expected
@@ -443,7 +475,7 @@ def test_pool_view_reads_the_live_hash_of_the_block_it_indexes() -> None:
     block = pool.blocks[5]
 
     assert view.block_hash(5) is None
-    block.block_hash = cast("BlockHashWithGroupId", b"hash-5")
+    _set_real_block_hash(block, b"hash-5")
     assert view.block_hash(5) == b"hash-5"
     assert view.block_hash(4) is None
     block.reset_hash()
@@ -479,17 +511,27 @@ def test_fake_pool_is_indistinguishable_from_the_real_pool_through_the_view() ->
         fake.touch([fake.blocks[bid] for bid in block_ids])
         assert_agreement()
 
-    def release(block_ids: list[int], prepend: bool = False) -> None:
-        real.free_blocks([real.blocks[bid] for bid in block_ids], prepend=prepend)
-        fake.free_blocks([fake.blocks[bid] for bid in block_ids], prepend=prepend)
+    def release(block_ids: list[int], to_head: bool = False) -> None:
+        real_blocks = [real.blocks[bid] for bid in block_ids]
+        if _REAL_POOL_ACCEPTS_PREPEND:
+            real.free_blocks(real_blocks, prepend=to_head)
+            fake_prepend = to_head
+        else:
+            # Hash-routing vLLM decides placement itself: every block in
+            # this scenario is uncached, so the real pool requeues them at
+            # the eviction head no matter what the caller asked. Both-ends
+            # coverage on such a release lives in the walk test above.
+            real.free_blocks(real_blocks)
+            fake_prepend = True
+        fake.free_blocks([fake.blocks[bid] for bid in block_ids], prepend=fake_prepend)
         assert_agreement()
 
     assert_agreement()  # construction order, 1..7
     touch([2, 3])  # 0 -> 1 dequeues both
     touch([3])  # shared pin: no queue change
     release([3])  # 2 -> 1: stays out of the queue
-    release([2], prepend=True)  # next eviction victim
-    release([3])  # 1 -> 0: tail
+    release([2], to_head=True)  # next eviction victim
+    release([3])  # 1 -> 0: rejoins the queue
 
 
 ####
@@ -758,6 +800,30 @@ def test_receipt_unpins_to_free_queue_head() -> None:
     # A duplicate receipt cannot unpin the blocks a second time.
     _report_store_complete(harness, "req")
     assert harness.pool.freed == [([5, 6], True)]
+
+
+class _LegacyFakeBlockPool(_FakeBlockPool):
+    """A pool whose ``free_blocks`` lacks the ``prepend`` parameter."""
+
+    def free_blocks(self, blocks: list[_FakeBlock]) -> None:  # type: ignore[override]
+        super().free_blocks(blocks)
+
+
+def test_receipt_unpin_survives_free_blocks_without_prepend() -> None:
+    """vLLM releases without ``free_blocks(prepend=...)`` must still unpin
+    completed stores -- at the free-queue tail -- instead of crashing the
+    receipt path with a TypeError."""
+    harness = _make_lazy_connector(pool_cls=_LegacyFakeBlockPool)
+    _admit_op(harness, "req", [[5, 6]], 0, 32)
+    harness.pool.make_free([5, 6])
+    _drain(harness)
+    # Other blocks joined the free queue while the store was in flight.
+    harness.pool.make_free([10, 11])
+
+    _report_store_complete(harness, "req")
+
+    assert harness.pool.freed == [([5, 6], False)]
+    assert harness.pool.free_block_ids() == [10, 11, 5, 6]
 
 
 def test_receipt_for_running_request_keeps_session() -> None:

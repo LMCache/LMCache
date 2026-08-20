@@ -10,6 +10,8 @@ connector only forwards lifecycle events and applies the returned actions.
 # Standard
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol
+import functools
+import inspect
 
 # First Party
 from lmcache.integration.vllm.lazy_offload_pending_store import (
@@ -30,6 +32,38 @@ if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
 
 logger = init_logger(__name__)
+
+
+@functools.lru_cache(maxsize=8)
+def _free_blocks_accepts_prepend(pool_cls: type) -> bool:
+    """Whether ``pool_cls.free_blocks`` accepts the ``prepend`` parameter.
+
+    Some vLLM releases let the caller requeue freed blocks at the eviction
+    head (``free_blocks(..., prepend=True)``); releases without the
+    parameter place freed blocks themselves (uncached at the head, cached
+    at the tail). Completed-store blocks keep their hashes, so on such a
+    vLLM they requeue at the tail and lose their preferred next-victim
+    placement -- an eviction-quality degradation, not a correctness one.
+
+    Args:
+        pool_cls: The concrete block-pool class in use.
+
+    Returns:
+        True when ``prepend`` can be passed.
+    """
+    try:
+        signature = inspect.signature(pool_cls.free_blocks)
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        return False
+    supported = "prepend" in signature.parameters
+    if not supported:
+        logger.info(
+            "%s.free_blocks has no 'prepend' parameter; completed-store "
+            "blocks will requeue at the free-queue tail instead of the "
+            "eviction head",
+            pool_cls.__name__,
+        )
+    return supported
 
 
 class StoreCompletionTracker(Protocol):
@@ -289,10 +323,13 @@ class LazyOffloadManager:
             ):
                 continue
             batch = self._requests.complete_batch(request_id)
-            pool.free_blocks(
-                [pool.blocks[block_id] for block_id in batch.block_ids],
-                prepend=True,
-            )
+            batch_blocks = [pool.blocks[block_id] for block_id in batch.block_ids]
+            if _free_blocks_accepts_prepend(type(pool)):
+                # The blocks have a copy below the GPU: requeue them at the
+                # eviction head so they are the next victims.
+                pool.free_blocks(batch_blocks, prepend=True)
+            else:
+                pool.free_blocks(batch_blocks)
             if not self._pending_store.has_pending_request(
                 request_id
             ) and self._requests.can_end_session(request_id):
