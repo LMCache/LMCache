@@ -1,15 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Unit tests for the Phoenix phxfs async wrapper (``_phx_async``).
+"""Unit tests for the Phoenix frozen-ABI wrapper (``_phx_async``).
 
-These tests are pure: ``libphoenix.so`` is never loaded and no phxfs device
-is opened. A fake library exercises the Python ctypes wrapper, including
-device lifecycle, buffer registration (page-size alignment, where the page
-size is whatever the library's ``phxfs_get_page_size`` reports -- never a
-hardcoded constant; per-GPU device open, duplicate handling), the no-op
-stream-registration surface, stream-ordered IO argument marshalling (byref
-ctypes storage + raw stream handle) and error propagation, the fail-fast taken
-when the library predates the stream API, handle lifecycle, and
-``close_driver`` cleanup.
+These tests are pure: neither ``libphxfile.so`` nor ``libphoenix.so`` is
+loaded and no phxfs device is opened. A fake library exercises the Python
+ctypes wrapper over the frozen ``phxFile*`` surface: library loading
+(including the fail-fast taken when the shim predates the async symbols),
+the device-free buffer registration (raw length passed through — device
+probing, alignment and the registration table live inside the shim, not
+here), address-only deregistration, the symbol-backed stream-registration
+surface, handle boxing, stream-ordered IO argument marshalling (hipFile
+parameter order: file_offset before buf_offset; byref ctypes storage +
+raw stream handle; late-binding error propagation via ``bytes_done``),
+handle lifecycle, and ``close_driver``.
 
 The real phxfs ABI and end-to-end DMA path are exercised on Phoenix
 hardware via the GDS L1 tier (``--gds-l1-backend phx``).
@@ -21,70 +23,65 @@ from typing import Any, Optional
 
 # Third Party
 import pytest
-import torch
 
 # First Party
 from lmcache.v1.gpu_connector import _phx_async as pa
 
 
 class _FakeLib:
-    """Stand-in for ``libphoenix.so`` that records all symbol calls."""
+    """Stand-in for ``libphxfile.so`` that records all symbol calls."""
 
     def __init__(self) -> None:
         self.calls: dict[str, list[tuple[Any, ...]]] = {}
-        self.events: list[tuple[str, ...]] = []
-        # Default mirrors NVIDIA's 64 KiB; individual tests override it to
-        # prove the wrapper derives alignment from the library, not a const.
-        self.page_size = 64 * 1024
-        self.map_mode = 0
-        # When False, stream symbols raise AttributeError like a CDLL
-        # without them (loading must then fail fast: no sync fallback).
-        self.has_stream_api = True
-        self.find_dev_results: dict[int, int] = {}
-        self.open_rc = 0
-        self.regmem_rc = 0
-        self.deregmem_rc = 0
-        self.read_stream_rc = 0
-        self.write_stream_rc = 0
+        # When False, the async symbols raise AttributeError like a CDLL
+        # without them (loading must then fail fast against a stale shim).
+        self.has_async_api = True
+        # Injectable return codes for each symbol.
+        self.register_rc = 0
+        self.deregister_rc = 0
+        self.handle_register_rc = 0
+        self.stream_register_rc = 0
+        self.stream_deregister_rc = 0
+        self.driver_close_rc = 0
+        self.read_async_rc = 0
+        self.write_async_rc = 0
         # Optional override for the value written into bytes_done by the
-        # fake stream call (None -> succeed with nbytes).
-        self.read_stream_bd: Optional[int] = None
-        self.write_stream_bd: Optional[int] = None
-
-    def phxfs_get_page_size(self) -> int:
-        self.calls.setdefault("phxfs_get_page_size", []).append(())
-        return self.page_size
+        # fake async call (None -> succeed with nbytes).
+        self.read_async_bd: Optional[int] = None
+        self.write_async_bd: Optional[int] = None
 
     def __getattr__(self, name: str) -> Any:
-        if not self.has_stream_api and name in (
-            "phxfs_read_stream",
-            "phxfs_write_stream",
+        if not self.has_async_api and name in (
+            "phxFileReadAsync",
+            "phxFileWriteAsync",
         ):
             raise AttributeError(name)
 
         def _record(*args: Any) -> Any:
             self.calls.setdefault(name, []).append(args)
-            self.events.append((name,))
-            if name == "phxfs_find_dev":
-                return self.find_dev_results.get(args[0], 0)
-            if name == "phxfs_open":
-                return self.open_rc
-            if name == "phxfs_regmem":
-                args[3]._obj.value = 0xFFFF0000  # target_addr out-param
-                return self.regmem_rc
-            if name == "phxfs_deregmem":
-                return self.deregmem_rc
-            if name == "phxfs_get_map_mode":
-                return self.map_mode
-            if name == "phxfs_read_stream":
-                # (fd, buf, nb_p, bo_p, fo_p, bd_p, stream)
-                bd = self.read_stream_bd
+            if name == "phxFileHandleRegister":
+                # fh_p, fd_c -> box the fd into the out-param (identity).
+                args[0]._obj.value = args[1].value
+                return self.handle_register_rc
+            if name == "phxFileBufRegister":
+                return self.register_rc
+            if name == "phxFileBufDeregister":
+                return self.deregister_rc
+            if name == "phxFileStreamRegister":
+                return self.stream_register_rc
+            if name == "phxFileStreamDeregister":
+                return self.stream_deregister_rc
+            if name == "phxFileDriverClose":
+                return self.driver_close_rc
+            if name == "phxFileReadAsync":
+                # (fh, buf, nb_p, fo_p, bo_p, bd_p, stream)
+                bd = self.read_async_bd
                 args[5]._obj.value = bd if bd is not None else args[2]._obj.value
-                return self.read_stream_rc
-            if name == "phxfs_write_stream":
-                bd = self.write_stream_bd
+                return self.read_async_rc
+            if name == "phxFileWriteAsync":
+                bd = self.write_async_bd
                 args[5]._obj.value = bd if bd is not None else args[2]._obj.value
-                return self.write_stream_rc
+                return self.write_async_rc
             return 0
 
         return _record
@@ -92,22 +89,15 @@ class _FakeLib:
 
 @pytest.fixture(autouse=True)
 def _fake_lib(monkeypatch: pytest.MonkeyPatch) -> _FakeLib:
-    """Replace the lazy-loaded CDLL and reset process-global phx state."""
+    """Replace the lazy-loaded CDLL with the fake frozen-ABI library."""
     lib = _FakeLib()
     monkeypatch.setattr(pa, "_lib", lib)
-    monkeypatch.setattr(pa, "_page_size", 0)
-    monkeypatch.setattr(pa, "_devices", {})
-    monkeypatch.setattr(pa, "_reg_bases", [])
-    monkeypatch.setattr(pa, "_reg_entries", [])
-    # register_buffer falls back to the current CUDA ordinal when the
-    # tensor's device index is unset; CI may have no GPU.
-    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
     return lib
 
 
 def _gpu_tensor(
     ptr: int = 0x100000, nbytes: int = 64 * 1024, cuda_index: int = 0
-) -> SimpleNamespace:
+) -> Any:
     """Return a GPU-tensor stand-in accepted by the wrapper."""
     return SimpleNamespace(
         is_cuda=True,
@@ -146,7 +136,7 @@ class TestLibLoading:
             raise OSError(f"cannot open {path}")
 
         monkeypatch.setattr(pa.ctypes, "CDLL", _raise)
-        with pytest.raises(OSError, match="libphoenix"):
+        with pytest.raises(OSError, match="libphxfile"):
             pa._get_lib()
 
     def test_get_lib_prefers_find_library_result(
@@ -155,7 +145,7 @@ class TestLibLoading:
         loaded: list[str] = []
         monkeypatch.setattr(pa, "_lib", None)
         monkeypatch.setattr(
-            pa.ctypes.util, "find_library", lambda _: "/opt/lib/libphoenix.so.1"
+            pa.ctypes.util, "find_library", lambda _: "/opt/lib/libphxfile.so.1"
         )
 
         class _Lib:
@@ -168,135 +158,14 @@ class TestLibLoading:
 
         monkeypatch.setattr(pa.ctypes, "CDLL", _load)
         pa._get_lib()
-        assert loaded == ["/opt/lib/libphoenix.so.1"]
+        assert loaded == ["/opt/lib/libphxfile.so.1"]
 
-
-class TestBufferRegistration:
-    def test_rejects_non_gpu_tensor(self) -> None:
-        with pytest.raises(ValueError, match="CUDA or ROCm"):
-            pa.register_buffer(SimpleNamespace(is_cuda=False))
-
-    def test_rejects_empty_tensor(self) -> None:
-        with pytest.raises(ValueError, match="empty"):
-            pa.register_buffer(_gpu_tensor(nbytes=0))
-
-    def test_opens_device_and_queries_page_size_from_library(
-        self, _fake_lib: _FakeLib
-    ) -> None:
-        pa.register_buffer(_gpu_tensor(ptr=0x200000, nbytes=4096, cuda_index=3))
-        assert _fake_lib.calls["phxfs_find_dev"] == [(3,)]
-        assert _fake_lib.calls["phxfs_open"] == [(0,)]
-        # The alignment granularity must come from the library interface.
-        assert "phxfs_get_page_size" in _fake_lib.calls
-        device, addr, length, _target = _fake_lib.calls["phxfs_regmem"][0]
-        assert device == 0
-        assert addr == 0x200000
-        assert length == _fake_lib.page_size
-
-    @pytest.mark.parametrize(
-        "page_size",
-        [4 * 1024, 64 * 1024, 128 * 1024, 2 * 1024 * 1024],
-    )
-    def test_registration_alignment_follows_library_page_size(
-        self, _fake_lib: _FakeLib, page_size: int
-    ) -> None:
-        """Alignment is derived from ``phxfs_get_page_size``, not a constant."""
-        _fake_lib.page_size = page_size
-        cases = [
-            (1, page_size),  # sub-page rounds up to one page
-            (page_size, page_size),  # exact single page stays
-            (2 * page_size, 2 * page_size),  # exact multiple stays
-            (page_size + 1, 2 * page_size),  # one page + 1 byte rounds up
-        ]
-        for i, (nbytes, expected_len) in enumerate(cases):
-            # Fresh base pointer per case: re-registering the same base with
-            # a different length is (correctly) rejected as a duplicate.
-            ptr = 0x200000 + i * 0x100000
-            _fake_lib.calls.clear()
-            pa.register_buffer(_gpu_tensor(ptr=ptr, nbytes=nbytes))
-            _device, _addr, length, _target = _fake_lib.calls["phxfs_regmem"][0]
-            assert length == expected_len, f"page_size={page_size}, nbytes={nbytes}"
-
-    def test_find_dev_failure_raises(self, _fake_lib: _FakeLib) -> None:
-        _fake_lib.find_dev_results = {0: -19}
-        with pytest.raises(RuntimeError, match="phxfs_find_dev"):
-            pa.register_buffer(_gpu_tensor())
-
-    def test_open_failure_raises(self, _fake_lib: _FakeLib) -> None:
-        _fake_lib.open_rc = -16
-        with pytest.raises(RuntimeError, match="phxfs_open"):
-            pa.register_buffer(_gpu_tensor())
-
-    def test_regmem_failure_raises(self, _fake_lib: _FakeLib) -> None:
-        _fake_lib.regmem_rc = -12
-        with pytest.raises(RuntimeError, match="phxfs_regmem"):
-            pa.register_buffer(_gpu_tensor())
-        # A failed registration must not leave a table entry behind.
-        assert pa._reg_bases == []
-
-    def test_device_opened_once_per_gpu(self, _fake_lib: _FakeLib) -> None:
-        _fake_lib.find_dev_results = {0: 0, 1: 5}
-        pa.register_buffer(_gpu_tensor(ptr=0x100000, cuda_index=0))
-        pa.register_buffer(_gpu_tensor(ptr=0x200000, cuda_index=0))
-        pa.register_buffer(_gpu_tensor(ptr=0x300000, cuda_index=1))
-        assert _fake_lib.calls["phxfs_find_dev"] == [(0,), (1,)]
-        assert _fake_lib.calls["phxfs_open"] == [(0,), (5,)]
-
-    def test_duplicate_register_same_base_and_len_passes_through(
-        self, _fake_lib: _FakeLib
-    ) -> None:
-        tensor = _gpu_tensor(ptr=0x200000)
-        pa.register_buffer(tensor)
-        pa.register_buffer(tensor)
-        # phxfs reference-counts the exact duplicate; the wrapper records
-        # every successful call so register/deregister stay symmetric.
-        assert len(_fake_lib.calls["phxfs_regmem"]) == 2
-        assert pa._reg_bases == [0x200000, 0x200000]
-
-    def test_deregister_calls_deregmem_with_aligned_length(
-        self, _fake_lib: _FakeLib
-    ) -> None:
-        pa.register_buffer(_gpu_tensor(ptr=0x200000, nbytes=4096))
-        pa.deregister_buffer(_gpu_tensor(ptr=0x200000))
-        device, addr, length = _fake_lib.calls["phxfs_deregmem"][0]
-        assert device == 0
-        assert addr == 0x200000
-        # Deregistration must pass back the same library-aligned length.
-        assert length == _fake_lib.page_size
-        assert pa._reg_bases == []
-
-    def test_deregister_unregistered_buffer_is_noop(self, _fake_lib: _FakeLib) -> None:
-        pa.deregister_buffer(_gpu_tensor(ptr=0x999000))
-        assert "phxfs_deregmem" not in _fake_lib.calls
-
-    def test_deregister_failure_raises_and_keeps_entry(
-        self, _fake_lib: _FakeLib
-    ) -> None:
-        pa.register_buffer(_gpu_tensor(ptr=0x200000))
-        _fake_lib.deregmem_rc = -22
-        with pytest.raises(RuntimeError, match="phxfs_deregmem"):
-            pa.deregister_buffer(_gpu_tensor(ptr=0x200000))
-        # The entry is kept so a retry can attempt the deregmem again.
-        assert pa._reg_bases == [0x200000]
-
-
-class TestStreamRegistration:
-    """phxfs has no stream registration; the surface functions are no-ops."""
-
-    def test_register_stream_is_noop(self, _fake_lib: _FakeLib) -> None:
-        pa.register_stream(0xABC)
-        assert _fake_lib.calls == {}
-
-    def test_deregister_stream_is_noop(self, _fake_lib: _FakeLib) -> None:
-        pa.deregister_stream(0xABC)
-        assert _fake_lib.calls == {}
-
-    def test_missing_stream_symbols_fail_fast(
+    def test_missing_async_symbols_fail_fast(
         self, _fake_lib: _FakeLib, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        _fake_lib.has_stream_api = False
+        _fake_lib.has_async_api = False
         monkeypatch.setattr(pa, "_lib", None)
-        monkeypatch.setattr(pa.ctypes.util, "find_library", lambda _: "libphoenix.so")
+        monkeypatch.setattr(pa.ctypes.util, "find_library", lambda _: "libphxfile.so")
 
         def _load(path: str) -> Any:
             return _fake_lib
@@ -306,13 +175,82 @@ class TestStreamRegistration:
             pa._get_lib()
 
 
+class TestBufferRegistration:
+    def test_rejects_non_gpu_tensor(self) -> None:
+        with pytest.raises(ValueError, match="CUDA or ROCm"):
+            pa.register_buffer(SimpleNamespace(is_cuda=False))  # type: ignore[arg-type]
+
+    def test_rejects_empty_tensor(self) -> None:
+        with pytest.raises(ValueError, match="empty"):
+            pa.register_buffer(_gpu_tensor(nbytes=0))
+
+    def test_passes_addr_and_raw_length(self, _fake_lib: _FakeLib) -> None:
+        pa.register_buffer(_gpu_tensor(ptr=0x200000, nbytes=4096))
+        addr, length = _fake_lib.calls["phxFileBufRegister"][0]
+        assert addr.value == 0x200000
+        # The raw length flows through unaligned: page-size rounding,
+        # device probing and the registration table live inside the
+        # shim, not in this wrapper.
+        assert length.value == 4096
+
+    def test_register_failure_raises(self, _fake_lib: _FakeLib) -> None:
+        _fake_lib.register_rc = -19  # ENODEV (no phxfs device present)
+        with pytest.raises(RuntimeError, match="phxFileBufRegister"):
+            pa.register_buffer(_gpu_tensor())
+
+
+class TestBufferDeregistration:
+    def test_passes_address_only(self, _fake_lib: _FakeLib) -> None:
+        pa.deregister_buffer(_gpu_tensor(ptr=0x200000))
+        (addr,) = _fake_lib.calls["phxFileBufDeregister"][0]
+        # Only the base address: the aligned length playback is the
+        # shim's job.
+        assert addr.value == 0x200000
+
+    def test_deregister_failure_raises(self, _fake_lib: _FakeLib) -> None:
+        _fake_lib.deregister_rc = -22  # EINVAL
+        with pytest.raises(RuntimeError, match="phxFileBufDeregister"):
+            pa.deregister_buffer(_gpu_tensor(ptr=0x200000))
+
+
+class TestStreamRegistration:
+    """Frozen no-ops in the shim, but real symbols on the wrapper surface."""
+
+    def test_register_stream_calls_symbol(self, _fake_lib: _FakeLib) -> None:
+        pa.register_stream(0xABC)
+        (stream,) = _fake_lib.calls["phxFileStreamRegister"][0]
+        assert stream.value == 0xABC
+
+    def test_deregister_stream_calls_symbol(self, _fake_lib: _FakeLib) -> None:
+        pa.deregister_stream(0xABC)
+        (stream,) = _fake_lib.calls["phxFileStreamDeregister"][0]
+        assert stream.value == 0xABC
+
+    def test_register_stream_failure_raises(self, _fake_lib: _FakeLib) -> None:
+        _fake_lib.stream_register_rc = -5
+        with pytest.raises(RuntimeError, match="phxFileStreamRegister"):
+            pa.register_stream(0xABC)
+
+    def test_deregister_stream_failure_raises(self, _fake_lib: _FakeLib) -> None:
+        _fake_lib.stream_deregister_rc = -5
+        with pytest.raises(RuntimeError, match="phxFileStreamDeregister"):
+            pa.deregister_stream(0xABC)
+
+
 class TestHandleRegistration:
-    def test_register_handle_returns_fd(self, _fake_lib: _FakeLib) -> None:
+    def test_register_handle_boxes_fd(self, _fake_lib: _FakeLib) -> None:
+        # Identity boxing today: the handle equals the fd.
         assert pa.register_handle(42) == 42
 
-    def test_deregister_handle_is_noop(self, _fake_lib: _FakeLib) -> None:
+    def test_register_handle_failure_raises(self, _fake_lib: _FakeLib) -> None:
+        _fake_lib.handle_register_rc = -9  # EBADF
+        with pytest.raises(RuntimeError, match="phxFileHandleRegister"):
+            pa.register_handle(42)
+
+    def test_deregister_handle_calls_symbol(self, _fake_lib: _FakeLib) -> None:
         pa.deregister_handle(42)
-        assert _fake_lib.calls == {}
+        (fh,) = _fake_lib.calls["phxFileHandleDeregister"][0]
+        assert fh.value == 42
 
 
 class TestSubmission:
@@ -327,23 +265,17 @@ class TestSubmission:
 
 
 class TestAsyncHandleIO:
-    """Stream-ordered submissions (default path with a stream-capable lib)."""
+    """Stream-ordered submissions through the frozen phxFile* surface."""
 
     def _handle(self) -> pa.AsyncHandle:
         return pa.AsyncHandle.from_fd(
             fd=5,
-            handle=5,  # phx handle == fd
+            handle=5,  # phx handle == fd (identity boxing)
             path="/mnt/nvme/lmcache_gds_slab.bin",
             writable=True,
         )
 
-    @staticmethod
-    def _registered(raw_stream: int = 0x9) -> None:
-        del raw_stream  # phxfs needs no stream registration
-        pa.register_buffer(_gpu_tensor(ptr=0x300000, nbytes=2 * 64 * 1024))
-
     def test_read_async_submits_stream_ordered(self, _fake_lib: _FakeLib) -> None:
-        self._registered()
         submission = self._handle().read_async(
             buf_base=0x300000,
             size=4096,
@@ -351,48 +283,26 @@ class TestAsyncHandleIO:
             buf_offset=512,
             raw_stream=0x9,
         )
-        # One stream-ordered submission, no synchronous fallback call.
-        assert len(_fake_lib.calls["phxfs_read_stream"]) == 1
-        assert "phxfs_read" not in _fake_lib.calls
-        fd, buf, nb_p, bo_p, fo_p, bd_p, stream = _fake_lib.calls["phxfs_read_stream"][
-            0
-        ]
-        assert fd == 5
-        assert buf == 0x300000
-        # The submission's ctypes storage is handed in by reference.
+        assert len(_fake_lib.calls["phxFileReadAsync"]) == 1
+        fh, buf, nb_p, fo_p, bo_p, bd_p, stream = _fake_lib.calls["phxFileReadAsync"][0]
+        assert fh.value == 5
+        assert buf.value == 0x300000
+        # The submission's ctypes storage is handed in by reference, in
+        # hipFile parameter order: file_offset before buf_offset.
         assert nb_p._obj is submission._size
-        assert bo_p._obj is submission._buf_offset
         assert fo_p._obj is submission._file_offset
+        assert bo_p._obj is submission._buf_offset
         assert bd_p._obj is submission._bytes_done
         assert nb_p._obj.value == 4096
-        assert bo_p._obj.value == 512
         assert fo_p._obj.value == 8192
+        assert bo_p._obj.value == 512
         assert stream.value == 0x9
         # The fake completed the transfer synchronously.
         assert submission.bytes_done == 4096
 
-    def test_read_async_submits_across_multiple_devices(
-        self, _fake_lib: _FakeLib
-    ) -> None:
-        # The device is resolved inside the library from the buffer; the
-        # wrapper no longer maps buf -> device (two devices registered,
-        # both buffers submit fine through the same path).
-        _fake_lib.find_dev_results = {0: 0, 1: 5}
-        pa.register_buffer(_gpu_tensor(ptr=0x100000, cuda_index=0))
-        pa.register_buffer(_gpu_tensor(ptr=0x300000, cuda_index=1))
-        self._handle().read_async(
-            buf_base=0x100000, size=4096, file_offset=0, buf_offset=0, raw_stream=0x9
-        )
-        self._handle().read_async(
-            buf_base=0x300000, size=4096, file_offset=0, buf_offset=0, raw_stream=0x9
-        )
-        bufs = [call[1] for call in _fake_lib.calls["phxfs_read_stream"]]
-        assert bufs == [0x100000, 0x300000]
-
     def test_read_async_submission_error_raises(self, _fake_lib: _FakeLib) -> None:
-        self._registered()
-        _fake_lib.read_stream_rc = -22  # submission-level failure
-        with pytest.raises(RuntimeError, match="phxfs_read_stream"):
+        _fake_lib.read_async_rc = -22  # submission-level failure
+        with pytest.raises(RuntimeError, match="phxFileReadAsync"):
             self._handle().read_async(
                 buf_base=0x300000,
                 size=4096,
@@ -404,8 +314,7 @@ class TestAsyncHandleIO:
     def test_read_async_defers_dma_error_to_bytes_done(
         self, _fake_lib: _FakeLib
     ) -> None:
-        self._registered()
-        _fake_lib.read_stream_bd = -28  # ENOSPC during the transfer
+        _fake_lib.read_async_bd = -28  # ENOSPC during the transfer
         submission = self._handle().read_async(
             buf_base=0x300000,
             size=4096,
@@ -417,26 +326,9 @@ class TestAsyncHandleIO:
         # in bytes_done after the stream sync -- no synchronous raise.
         assert submission.bytes_done == -28
 
-    def test_read_async_unregistered_buffer_passes_through(
-        self, _fake_lib: _FakeLib
-    ) -> None:
-        # The device resolution lives in the library now: an unregistered
-        # buffer is submitted as-is (the library treats a registration
-        # miss as a plain CPU address, like the synchronous API).
-        submission = self._handle().read_async(
-            buf_base=0x400000,
-            size=4096,
-            file_offset=0,
-            buf_offset=0,
-            raw_stream=0x9,
-        )
-        assert len(_fake_lib.calls["phxfs_read_stream"]) == 1
-        assert submission.bytes_done == 4096
-
     def test_io_needs_no_stream_registration(self, _fake_lib: _FakeLib) -> None:
         # No register_stream call anywhere: an unregistered stream is
         # submitted on first use (no-registration model, like cuFile).
-        pa.register_buffer(_gpu_tensor(ptr=0x300000))
         submission = self._handle().read_async(
             buf_base=0x300000,
             size=4096,
@@ -444,11 +336,10 @@ class TestAsyncHandleIO:
             buf_offset=0,
             raw_stream=0x9,
         )
-        assert len(_fake_lib.calls["phxfs_read_stream"]) == 1
+        assert "phxFileStreamRegister" not in _fake_lib.calls
         assert submission.bytes_done == 4096
 
     def test_write_async_submits_stream_ordered(self, _fake_lib: _FakeLib) -> None:
-        self._registered()
         submission = self._handle().write_async(
             buf_base=0x300000,
             size=2048,
@@ -456,25 +347,22 @@ class TestAsyncHandleIO:
             buf_offset=128,
             raw_stream=0x9,
         )
-        # Stream-ordered write: no host-side stream synchronization.
-        assert len(_fake_lib.calls["phxfs_write_stream"]) == 1
-        assert "phxfs_write" not in _fake_lib.calls
-        fd, buf, nb_p, bo_p, fo_p, bd_p, stream = _fake_lib.calls["phxfs_write_stream"][
+        assert len(_fake_lib.calls["phxFileWriteAsync"]) == 1
+        fh, buf, nb_p, fo_p, bo_p, bd_p, stream = _fake_lib.calls["phxFileWriteAsync"][
             0
         ]
-        assert fd == 5
-        assert buf == 0x300000
+        assert fh.value == 5
+        assert buf.value == 0x300000
         assert nb_p._obj.value == 2048
-        assert bo_p._obj.value == 128
         assert fo_p._obj.value == 512
+        assert bo_p._obj.value == 128
         assert stream.value == 0x9
         assert submission.bytes_done == 2048
 
     def test_write_async_defers_dma_error_to_bytes_done(
         self, _fake_lib: _FakeLib
     ) -> None:
-        self._registered()
-        _fake_lib.write_stream_bd = -5  # EIO during the transfer
+        _fake_lib.write_async_bd = -5  # EIO during the transfer
         submission = self._handle().write_async(
             buf_base=0x300000,
             size=2048,
@@ -545,18 +433,11 @@ class TestAsyncHandleLifecycle:
 
 
 class TestCloseDriver:
-    def test_releases_registrations_and_devices(self, _fake_lib: _FakeLib) -> None:
-        _fake_lib.find_dev_results = {0: 0, 1: 5}
-        pa.register_buffer(_gpu_tensor(ptr=0x100000, cuda_index=0))
-        pa.register_buffer(_gpu_tensor(ptr=0x300000, cuda_index=1))
+    def test_calls_driver_close(self, _fake_lib: _FakeLib) -> None:
         pa.close_driver()
-        assert len(_fake_lib.calls["phxfs_deregmem"]) == 2
-        closed = [call[0] for call in _fake_lib.calls["phxfs_close"]]
-        assert closed == [0, 5]
-        assert pa._reg_bases == []
-        assert pa._devices == {}
+        assert _fake_lib.calls["phxFileDriverClose"] == [()]
 
-    def test_without_state_is_noop(self, _fake_lib: _FakeLib) -> None:
-        pa.close_driver()
-        assert "phxfs_deregmem" not in _fake_lib.calls
-        assert "phxfs_close" not in _fake_lib.calls
+    def test_failure_raises(self, _fake_lib: _FakeLib) -> None:
+        _fake_lib.driver_close_rc = -5
+        with pytest.raises(RuntimeError, match="phxFileDriverClose"):
+            pa.close_driver()

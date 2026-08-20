@@ -1,19 +1,30 @@
 # SPDX-License-Identifier: Apache-2.0
-"""ctypes wrapper around the Phoenix phxfs C API (``libphoenix.so``).
+"""ctypes wrapper around the Phoenix frozen file-IO ABI (``libphxfile.so``).
 
 Backend for the GDS L1 tier's async dispatch shim
-(:mod:`lmcache.v1.gpu_connector._gds_async`). Phoenix (phxfs) DMAs NVMe
-data straight into registered GPU buffers like cuFile/hipFile/uGDS, so the
-common backend surface maps naturally:
+(:mod:`lmcache.v1.gpu_connector._gds_async`). ``libphxfile.so`` is a thin
+frozen-ABI layer maintained in the Phoenix tree
+(``phoenix/adapters/lmcache/phxfile``): the ``phxFile*`` symbols are frozen
+— names, signatures and semantics never change — so libphoenix evolution
+(e.g. dropping the device parameter from ``phxfs_regmem``) is absorbed
+inside that library. This wrapper only ever needs the library reinstalled,
+never re-coded.
 
-- :func:`register_buffer` wraps ``phxfs_regmem`` (lazily opens the phxfs
-  device and registers the buffer 64 KiB-aligned).
-- :func:`register_handle` is a passthrough: phxfs operates on plain POSIX
-  fds, so the "handle" is the fd itself.
-- :func:`register_stream` / :func:`deregister_stream` are no-ops: phxfs
-  has no stream registration (every submission carries the stream); the
-  functions exist for the shared backend surface. IO submissions are
-  stream-ordered via ``phxfs_read_stream`` / ``phxfs_write_stream``.
+Naming and semantics deliberately mirror AMD hipFile
+(:mod:`lmcache.v1.gpu_connector._hipfile_async`) so the four GDS backend
+wrappers (cuFile / hipFile / uGDS / phx) stay line-by-line analogous:
+
+- :func:`register_handle` wraps ``phxFileHandleRegister`` — currently an
+  identity boxing of the POSIX fd (phxfs reads/writes plain fds).
+- :func:`register_buffer` wraps ``phxFileBufRegister`` — the frozen,
+  device-free entry point. The shim resolves the buffer's device itself
+  (probe-based, like libphoenix's own stream path resolves buffers at IO
+  time); page-size alignment and the registration bookkeeping also live
+  inside the shim.
+- :func:`register_stream` / :func:`deregister_stream` wrap
+  ``phxFileStreamRegister`` / ``phxFileStreamDeregister`` — frozen no-ops
+  today (every phxfs submission carries the stream), reserved for future
+  per-stream resource pre-claiming.
 
 Execution semantics (stream-ordered, cuFile-compatible): submissions
 enqueue a DMA that is ordered on the caller's CUDA/ROCm stream -- after
@@ -21,23 +32,20 @@ everything the caller enqueued before the submission, and before
 everything enqueued after it. The submission returns immediately; the
 transfer outcome lands in :attr:`Submission.bytes_done` once the stream
 is synchronized past it. The :class:`Submission`'s ctypes storage is
-handed to the C API by reference and must stay alive until then (the
-caller -- :mod:`lmcache.v1.gpu_connector.gds_context` -- keeps
+handed to the C API by reference (late-binding) and must stay alive until
+then (the caller -- :mod:`lmcache.v1.gpu_connector.gds_context` -- keeps
 submissions behind a GPU event checkpoint).
 
-``libphoenix.so`` (resolving via ``ldconfig`` / ``LD_LIBRARY_PATH``) must
-expose the stream-ordered API (``phxfs_read_stream`` /
-``phxfs_write_stream``): loading fails fast otherwise (there is no
-synchronous fallback).
+``libphxfile.so`` (resolving via ``ldconfig`` / ``LD_LIBRARY_PATH``, after
+``bash phoenix/adapters/lmcache/phxfile/install.sh``) must expose the
+frozen ``phxFile*`` surface: loading fails fast otherwise.
 """
 
 # Standard
 from typing import Any, Optional
-import bisect
 import ctypes
 import ctypes.util
 import os
-import threading
 
 # Third Party
 import torch
@@ -47,198 +55,154 @@ from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
 
-# --- libphoenix.so lazy loading -----------------------------------------
+# --- libphxfile.so lazy loading ------------------------------------------
 
 _lib: Optional[ctypes.CDLL] = None
 
 
 def _declare_signatures(lib: ctypes.CDLL, path_hint: str) -> None:
-    """Set argtypes/restype on the phxfs symbols used by this module."""
-    # Stream-ordered API is required (no synchronous fallback): check for
-    # the symbols before touching anything else, so a pre-stream
-    # libphoenix fails fast with a clear message.
+    """Set argtypes/restype on the phxFile symbols used by this module."""
+    # The frozen ABI always provides the full surface; the check guards
+    # against a stale shim predating the async symbols, so it fails fast
+    # with a clear message instead of at the first DMA.
     missing = [
         sym
-        for sym in ("phxfs_read_stream", "phxfs_write_stream")
+        for sym in ("phxFileReadAsync", "phxFileWriteAsync")
         if not hasattr(lib, sym)
     ]
     if missing:
         raise RuntimeError(
-            f"libphoenix at {path_hint} lacks the stream-ordered API "
-            f"({', '.join(missing)}); build libphoenix with stream support"
+            f"libphxfile at {path_hint} lacks the stream-ordered API "
+            f"({', '.join(missing)}); reinstall "
+            f"phoenix/adapters/lmcache/phxfile"
         )
 
-    lib.phxfs_find_dev.argtypes = [ctypes.c_int]
-    lib.phxfs_find_dev.restype = ctypes.c_int
+    lib.phxFileDriverOpen.argtypes = []
+    lib.phxFileDriverOpen.restype = ctypes.c_int
 
-    lib.phxfs_open.argtypes = [ctypes.c_int]
-    lib.phxfs_open.restype = ctypes.c_int
+    lib.phxFileDriverClose.argtypes = []
+    lib.phxFileDriverClose.restype = ctypes.c_int
 
-    lib.phxfs_close.argtypes = [ctypes.c_int]
-    lib.phxfs_close.restype = ctypes.c_int
-
-    lib.phxfs_get_page_size.argtypes = []
-    lib.phxfs_get_page_size.restype = ctypes.c_uint64
-
-    lib.phxfs_regmem.argtypes = [
-        ctypes.c_int,  # int device_id (phxfs index)
-        ctypes.c_void_p,  # const void *addr (device address)
-        ctypes.c_size_t,  # size_t len
-        ctypes.POINTER(ctypes.c_void_p),  # void **target_addr (out)
-    ]
-    lib.phxfs_regmem.restype = ctypes.c_int
-
-    lib.phxfs_deregmem.argtypes = [
-        ctypes.c_int,  # int device_id (phxfs index)
+    lib.phxFileBufRegister.argtypes = [
         ctypes.c_void_p,  # const void *addr
-        ctypes.c_size_t,  # size_t len
+        ctypes.c_size_t,  # size_t length
     ]
-    lib.phxfs_deregmem.restype = ctypes.c_int
+    lib.phxFileBufRegister.restype = ctypes.c_int
 
-    stream_params: list[type] = [
+    lib.phxFileBufDeregister.argtypes = [
+        ctypes.c_void_p,  # const void *addr
+    ]
+    lib.phxFileBufDeregister.restype = ctypes.c_int
+
+    lib.phxFileHandleRegister.argtypes = [
+        ctypes.POINTER(ctypes.c_void_p),  # void **fh (out)
         ctypes.c_int,  # int fd
-        ctypes.c_void_p,  # void *buf
+    ]
+    lib.phxFileHandleRegister.restype = ctypes.c_int
+
+    lib.phxFileHandleDeregister.argtypes = [
+        ctypes.c_void_p,  # void *fh
+    ]
+    lib.phxFileHandleDeregister.restype = ctypes.c_int
+
+    lib.phxFileStreamRegister.argtypes = [
+        ctypes.c_void_p,  # void *stream
+    ]
+    lib.phxFileStreamRegister.restype = ctypes.c_int
+
+    lib.phxFileStreamDeregister.argtypes = [
+        ctypes.c_void_p,  # void *stream
+    ]
+    lib.phxFileStreamDeregister.restype = ctypes.c_int
+
+    # hipFile parameter order: (fh, buf, *nbytes, *file_offset,
+    # *buf_offset, *bytes_done, stream). The libphoenix order differs
+    # (buf_offset before f_offset); the shim performs the swap.
+    io_params: list[type] = [
+        ctypes.c_void_p,  # void *fh
+        ctypes.c_void_p,  # void *buf_base
         ctypes.POINTER(ctypes.c_size_t),  # size_t *nbytes
-        ctypes.POINTER(ctypes.c_int64),  # off_t *buf_offset
-        ctypes.POINTER(ctypes.c_int64),  # off_t *f_offset
-        ctypes.POINTER(ctypes.c_ssize_t),  # ssize_t *bytes_done
+        ctypes.POINTER(ctypes.c_int64),  # int64_t *file_offset
+        ctypes.POINTER(ctypes.c_int64),  # int64_t *buf_offset
+        ctypes.POINTER(ctypes.c_int64),  # int64_t *bytes_done
         ctypes.c_void_p,  # void *stream (vendor-opaque)
     ]
-    lib.phxfs_read_stream.argtypes = stream_params
-    lib.phxfs_read_stream.restype = ctypes.c_int
-    lib.phxfs_write_stream.argtypes = stream_params
-    lib.phxfs_write_stream.restype = ctypes.c_int
+    lib.phxFileReadAsync.argtypes = io_params
+    lib.phxFileReadAsync.restype = ctypes.c_int
+    lib.phxFileWriteAsync.argtypes = io_params
+    lib.phxFileWriteAsync.restype = ctypes.c_int
 
 
 def _get_lib() -> ctypes.CDLL:
-    """Load ``libphoenix.so`` on first use and declare the phxfs ABI."""
+    """Load ``libphxfile.so`` on first use and declare the frozen ABI."""
     global _lib
     if _lib is not None:
         return _lib
-    search = ctypes.util.find_library("phoenix")
-    path = search or "libphoenix.so"
+    search = ctypes.util.find_library("phxfile")
+    path = search or "libphxfile.so"
     lib = ctypes.CDLL(path)
     _declare_signatures(lib, path)
     _lib = lib
-    return _lib
+    return lib
 
 
 # --- Error checking ---------------------------------------------------
 
 
 def _check(rc: int, op: str) -> None:
-    """Convert a negative phxfs return code into a Python exception."""
+    """Convert a negative phxFile return code into a Python exception."""
     if rc < 0:
         try:
             why = os.strerror(-rc)
         except ValueError:
             why = "unknown error"
-        raise RuntimeError(f"{op} failed: phxfsError(rc={rc} [{why}])")
-
-
-# --- Device + buffer registration state ----------------------------------
-#
-# phxfs devices are opened once per CUDA/HIP ordinal (find_dev + open) and
-# cached. Registered buffers are tracked in a sorted table so that
-# deregistration passes the same (aligned) length that was registered and
-# so duplicate registrations are detected. (The IO path resolves the
-# buffer device inside libphoenix — this table is not consulted for IO.)
-
-_state_lock = threading.Lock()
-_devices: dict[int, int] = {}
-"""CUDA/HIP ordinal -> opened phxfs device index."""
-_reg_bases: list[int] = []
-"""Sorted registered buffer base pointers (parallel to ``_reg_entries``)."""
-_reg_entries: list[tuple[int, int]] = []
-"""(aligned_length, phxfs_device_index) per entry in ``_reg_bases``."""
-
-_page_size: int = 0
-"""Cached device page size in bytes (64 KiB on NVIDIA); 0 = not queried."""
-
-_MAP_MODE_NAMES = {0: "FULL", 1: "STAGING"}
-
-
-def _align_up(size: int, alignment: int) -> int:
-    return (size + alignment - 1) & ~(alignment - 1)
-
-
-def _get_page_size_locked(lib: ctypes.CDLL) -> int:
-    """Return the (cached) device page size. Caller holds ``_state_lock``."""
-    global _page_size
-    if _page_size == 0:
-        _page_size = int(lib.phxfs_get_page_size())
-        if _page_size <= 0:
-            raise RuntimeError(
-                f"phxfs_get_page_size returned invalid value {_page_size}"
-            )
-    return _page_size
-
-
-def _ensure_device_open_locked(lib: ctypes.CDLL, cuda_ordinal: int) -> int:
-    """Open the phxfs device for ``cuda_ordinal`` once. Caller holds the lock.
-
-    Returns the phxfs device index used for regmem / deregmem.
-
-    Raises:
-        RuntimeError: If ``phxfs_find_dev`` or ``phxfs_open`` fails.
-    """
-    phxfs_dev = _devices.get(cuda_ordinal)
-    if phxfs_dev is not None:
-        return phxfs_dev
-    phxfs_dev = int(lib.phxfs_find_dev(cuda_ordinal))
-    _check(phxfs_dev, f"phxfs_find_dev({cuda_ordinal})")
-    _check(int(lib.phxfs_open(phxfs_dev)), f"phxfs_open({phxfs_dev})")
-    _devices[cuda_ordinal] = phxfs_dev
-    try:
-        map_mode = int(lib.phxfs_get_map_mode(phxfs_dev))
-        mode_name = _MAP_MODE_NAMES.get(map_mode, f"unknown({map_mode})")
-    except AttributeError:
-        mode_name = "unknown"
-    logger.info(
-        "_phx_async: phxfs device %d opened for GPU %d (map_mode=%s, page_size=%d KiB)",
-        phxfs_dev,
-        cuda_ordinal,
-        mode_name,
-        _get_page_size_locked(lib) // 1024,
-    )
-    return phxfs_dev
+        raise RuntimeError(f"{op} failed: phxFileError(rc={rc} [{why}])")
 
 
 # --- Backend surface (contract of _gds_async) ----------------------------
 
 
 def register_handle(fd: int) -> int:
-    """Accept an open fd for phxfs IO and return the "handle".
+    """Accept an open fd for phx IO and return the "handle".
 
-    phxfs reads and writes plain POSIX fds (no library-side handle
-    registration), so the fd itself is the handle; :class:`AsyncHandle`
-    round-trips it and closes the fd on ``close()``. Loads ``libphoenix``
-    eagerly so a missing library fails at slab setup, not at first DMA.
+    Wraps ``phxFileHandleRegister`` — currently an identity boxing (the
+    handle IS the fd; phxfs performs IO on plain POSIX fds); :class:
+    `AsyncHandle` round-trips it and closes the fd on ``close()``. Loads
+    ``libphxfile`` eagerly so a missing library fails at slab setup, not
+    at first DMA.
 
     Args:
         fd: Open slab-file descriptor (as created by
             :meth:`gds_context.GDSContext.initialize`).
 
     Returns:
-        ``fd`` unchanged.
+        The registered ``phxFileHandle_t`` (equal to ``fd`` today).
     """
-    _get_lib()
-    return fd
+    lib = _get_lib()
+    fh = ctypes.c_void_p()
+    _check(
+        int(lib.phxFileHandleRegister(ctypes.byref(fh), ctypes.c_int(fd))),
+        "phxFileHandleRegister",
+    )
+    if fh.value is None:
+        raise RuntimeError("phxFileHandleRegister returned a null handle")
+    return fh.value
 
 
 def deregister_handle(handle: int) -> None:
-    """Reverse of :func:`register_handle`: nothing to do for phxfs."""
-    return
+    """Reverse of :func:`register_handle` (``phxFileHandleDeregister``)."""
+    _get_lib().phxFileHandleDeregister(ctypes.c_void_p(handle))
 
 
 def register_buffer(buf: torch.Tensor) -> None:
-    """Register a device tensor with phxfs for GDS DMA.
+    """Register a device tensor for GDS DMA via the frozen shim.
 
-    Opens the phxfs device for the tensor's GPU on first use, then
-    registers the buffer with ``phxfs_regmem``. phxfs requires the
-    registration length to be device-page aligned (64 KiB on NVIDIA), so
-    the length is rounded up; the IO size is independent of the
-    registration length and never exceeds the buffer.
+    Wraps ``phxFileBufRegister`` — the frozen, device-free entry point.
+    The shim resolves the buffer's device itself (probe-based: it opens
+    every FULL-mode phxfs device and registers on the one whose BAR
+    covers the buffer; failed probes roll back cleanly inside
+    libphoenix). Page-size alignment and the registration bookkeeping
+    also live inside the shim.
 
     Args:
         buf: Contiguous GPU tensor (a <=16 MiB slice of a staging buffer,
@@ -246,143 +210,94 @@ def register_buffer(buf: torch.Tensor) -> None:
 
     Raises:
         ValueError: If ``buf`` is not a GPU tensor or is empty.
-        RuntimeError: If the phxfs device cannot be opened or the
-            registration is rejected.
+        RuntimeError: If the shim rejects the registration (no phxfs
+            device, all-staging, or the last probe error).
     """
     if not buf.is_cuda:
         raise ValueError("register_buffer: tensor must be on a CUDA or ROCm GPU")
     nbytes = buf.numel() * buf.element_size()
     if nbytes == 0:
         raise ValueError("register_buffer: tensor is empty")
-    base = buf.data_ptr()
-    cuda_ordinal = buf.device.index
-    if cuda_ordinal is None:
-        cuda_ordinal = torch.cuda.current_device()
-    lib = _get_lib()
-    with _state_lock:
-        phxfs_dev = _ensure_device_open_locked(lib, cuda_ordinal)
-        page_size = _get_page_size_locked(lib)
-        aligned_len = _align_up(nbytes, page_size)
-        target_addr = ctypes.c_void_p()
-        _check(
-            int(
-                lib.phxfs_regmem(
-                    phxfs_dev, base, aligned_len, ctypes.byref(target_addr)
-                )
-            ),
-            "phxfs_regmem",
-        )
-        # NOTE: target_addr is an internal host-mapped handle; IO must use
-        # the original device address, so it is deliberately not recorded.
-        # Duplicate/overlap detection is entirely the library's job
-        # (phxfs_regmem reference-counts exact duplicates and rejects
-        # overlapping ranges); every successful call is recorded so
-        # register/deregister stay symmetric.
-        idx = bisect.bisect_left(_reg_bases, base)
-        _reg_bases.insert(idx, base)
-        _reg_entries.insert(idx, (aligned_len, phxfs_dev))
+    _check(
+        _get_lib().phxFileBufRegister(
+            ctypes.c_void_p(buf.data_ptr()),
+            ctypes.c_size_t(nbytes),
+        ),
+        "phxFileBufRegister",
+    )
     logger.debug(
-        "_phx_async: registered 0x%x..0x%x on phxfs device %d",
-        base,
-        base + aligned_len,
-        phxfs_dev,
+        "_phx_async: registered 0x%x (%d bytes) via libphxfile probe",
+        buf.data_ptr(),
+        nbytes,
     )
 
 
 def deregister_buffer(buf: torch.Tensor) -> None:
     """Reverse of :func:`register_buffer`.
 
-    Deregisters the buffer's registration with ``phxfs_deregmem`` using
-    the same aligned length that was registered. Unregistered buffers are
-    ignored (matching the tolerance of the cuFile path teardown).
+    Wraps ``phxFileBufDeregister``: only the base address is passed; the
+    aligned registration length and phxfs device are played back from the
+    shim's bookkeeping. Unregistered buffers are silently tolerated
+    inside the shim (matching the tolerance of the cuFile path teardown).
 
     Args:
         buf: The tensor previously passed to :func:`register_buffer`.
 
     Raises:
-        RuntimeError: If ``phxfs_deregmem`` fails.
+        RuntimeError: If ``phxFileBufDeregister`` fails.
     """
-    lib = _get_lib()
-    base = buf.data_ptr()
-    with _state_lock:
-        idx = bisect.bisect_left(_reg_bases, base)
-        if idx >= len(_reg_bases) or _reg_bases[idx] != base:
-            return
-        aligned_len, phxfs_dev = _reg_entries[idx]
-        _check(
-            int(lib.phxfs_deregmem(phxfs_dev, base, aligned_len)),
-            "phxfs_deregmem",
-        )
-        del _reg_bases[idx]
-        del _reg_entries[idx]
+    _check(
+        _get_lib().phxFileBufDeregister(ctypes.c_void_p(buf.data_ptr())),
+        "phxFileBufDeregister",
+    )
 
 
 def register_stream(raw_stream: int) -> None:
-    """No-op: phxfs needs no stream registration.
+    """Register a stream with the shim (``phxFileStreamRegister``).
 
-    Every phxfs submission carries the stream handle (unlike cuFile's
-    optional cuFileStreamRegister hint). Kept only because the shared
-    backend surface (``_gds_async`` re-exports it and ``gds_context``
-    calls it uniformly).
+    A frozen no-op today: phxfs has no stream registration (every
+    submission carries the stream handle, unlike cuFile's optional
+    cuFileStreamRegister hint). Kept on the shared backend surface for
+    wrapper parity and reserved for future per-stream resource
+    pre-claiming.
 
     Args:
-        raw_stream: Raw CUDA/ROCm stream handle (ignored).
+        raw_stream: Raw CUDA/ROCm stream handle.
     """
-    del raw_stream
+    _check(
+        _get_lib().phxFileStreamRegister(ctypes.c_void_p(raw_stream)),
+        "phxFileStreamRegister",
+    )
 
 
 def deregister_stream(raw_stream: int) -> None:
-    """Reverse of :func:`register_stream`: nothing to do for phxfs."""
-    del raw_stream
+    """Reverse of :func:`register_stream` (``phxFileStreamDeregister``)."""
+    _check(
+        _get_lib().phxFileStreamDeregister(ctypes.c_void_p(raw_stream)),
+        "phxFileStreamDeregister",
+    )
 
 
 def close_driver() -> None:
-    """Release every phxfs registration and close all opened devices.
+    """Release every shim-side registration and close all opened devices.
 
-    Sweeps any buffer registration still left in the table (the normal
-    teardown path deregisters each via :func:`deregister_buffer`), then
-    closes every opened phxfs device.
+    Wraps ``phxFileDriverClose``: the shim sweeps any buffer registration
+    still in its table, closes every phxfs device it opened, and resets
+    its caches. Individual cleanup failures are reported by the shim on
+    stderr and do not raise.
     """
-    lib = _get_lib()
-    with _state_lock:
-        for base, (aligned_len, phxfs_dev) in zip(
-            _reg_bases, _reg_entries, strict=True
-        ):
-            try:
-                rc = int(lib.phxfs_deregmem(phxfs_dev, base, aligned_len))
-                if rc < 0:
-                    logger.warning(
-                        "close_driver: phxfs_deregmem(0x%x) failed with %d",
-                        base,
-                        rc,
-                    )
-            except Exception as e:  # noqa: BLE001 - teardown sweep
-                logger.warning("close_driver: phxfs_deregmem raised %s", e)
-        _reg_bases.clear()
-        _reg_entries.clear()
-        for phxfs_dev in sorted(set(_devices.values())):
-            rc = int(lib.phxfs_close(phxfs_dev))
-            if rc < 0:
-                logger.warning(
-                    "close_driver: phxfs_close(%d) failed with %d",
-                    phxfs_dev,
-                    rc,
-                )
-        _devices.clear()
-
-
-# --- IO submission --------------------------------------------------------
+    _check(_get_lib().phxFileDriverClose(), "phxFileDriverClose")
 
 
 # --- Submission + AsyncHandle --------------------------------------------
 
 
 class Submission:
-    """One in-flight (stream-ordered) phxfs IO.
+    """One in-flight (stream-ordered) phx IO.
 
     Mirrors :class:`_cufile_async.Submission`: holds the transfer
     parameters and the ``bytes_done`` result storage. The ctypes fields
-    are handed to the stream-ordered C API by reference, so the
+    are handed to the frozen C API by reference (late-binding), so the
     keep-alive-until-stream-sync contract documented there applies
     unchanged (the GDS context's event checkpoint owns that lifetime).
     """
@@ -429,7 +344,7 @@ class AsyncHandle:
         path: str,
         writable: bool = False,
     ) -> "AsyncHandle":
-        """Wrap an already-opened fd (``handle`` is the fd itself for phxfs)."""
+        """Wrap an already-opened fd (``handle`` is the fd itself for phx)."""
         obj = cls.__new__(cls)
         obj._fd = fd
         obj._handle = handle
@@ -473,16 +388,16 @@ class AsyncHandle:
         """
         sub = Submission(size=size, file_offset=file_offset, buf_offset=buf_offset)
         _check(
-            _get_lib().phxfs_read_stream(
-                self._fd,
-                buf_base,
+            _get_lib().phxFileReadAsync(
+                ctypes.c_void_p(self._handle),
+                ctypes.c_void_p(buf_base),
                 ctypes.byref(sub._size),
-                ctypes.byref(sub._buf_offset),
                 ctypes.byref(sub._file_offset),
+                ctypes.byref(sub._buf_offset),
                 ctypes.byref(sub._bytes_done),
                 ctypes.c_void_p(raw_stream),
             ),
-            "phxfs_read_stream",
+            "phxFileReadAsync",
         )
         return sub
 
@@ -519,16 +434,16 @@ class AsyncHandle:
         """
         sub = Submission(size=size, file_offset=file_offset, buf_offset=buf_offset)
         _check(
-            _get_lib().phxfs_write_stream(
-                self._fd,
-                buf_base,
+            _get_lib().phxFileWriteAsync(
+                ctypes.c_void_p(self._handle),
+                ctypes.c_void_p(buf_base),
                 ctypes.byref(sub._size),
-                ctypes.byref(sub._buf_offset),
                 ctypes.byref(sub._file_offset),
+                ctypes.byref(sub._buf_offset),
                 ctypes.byref(sub._bytes_done),
                 ctypes.c_void_p(raw_stream),
             ),
-            "phxfs_write_stream",
+            "phxFileWriteAsync",
         )
         return sub
 
