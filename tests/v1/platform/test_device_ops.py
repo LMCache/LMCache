@@ -50,12 +50,15 @@ _OP_NAMES: tuple[str, ...] = tuple(
 @pytest.fixture
 def isolated_registry() -> Any:
     """Snapshot the device-spec table so tests can install fakes safely."""
-    saved = dict(platform_pkg._DEVICE_REGISTRY)
+    saved_backends = dict(platform_pkg._DEVICE_REGISTRY)
+    saved_device_types = dict(platform_pkg._DEVICE_TYPE_REGISTRY)
     try:
-        yield saved
+        yield saved_backends, saved_device_types
     finally:
         platform_pkg._DEVICE_REGISTRY.clear()
-        platform_pkg._DEVICE_REGISTRY.update(saved)
+        platform_pkg._DEVICE_REGISTRY.update(saved_backends)
+        platform_pkg._DEVICE_TYPE_REGISTRY.clear()
+        platform_pkg._DEVICE_TYPE_REGISTRY.update(saved_device_types)
 
 
 # -- Contract --------------------------------------------------------------
@@ -95,10 +98,11 @@ def test_shape_desc_accepts_dynamic_dtype_attr() -> None:
 
 def test_every_registered_device_has_all_ops(isolated_registry: Any) -> None:
     """Each discovered DeviceSpec resolves an ops instance with all ops."""
-    for device_type, spec in isolated_registry.items():
+    backend_registry, _ = isolated_registry
+    for backend_name, spec in backend_registry.items():
         ops = spec.ops_cls()
         for name in _OP_NAMES:
-            assert callable(getattr(ops, name)), (device_type, name)
+            assert callable(getattr(ops, name)), (backend_name, name)
 
 
 # -- Dispatch (MRO) --------------------------------------------------------
@@ -317,8 +321,11 @@ def test_resolve_device_ops_returns_cached_singleton() -> None:
 def test_cpu_without_registered_spec_falls_back_to_base_device_ops(
     isolated_registry: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    table = {k: v for k, v in isolated_registry.items() if k != "cpu"}
-    monkeypatch.setattr(platform_pkg, "_DEVICE_REGISTRY", table)
+    backend_registry, device_type_registry = isolated_registry
+    backend_table = {k: v for k, v in backend_registry.items() if k != "cpu"}
+    device_type_table = {k: v for k, v in device_type_registry.items() if k != "cpu"}
+    monkeypatch.setattr(platform_pkg, "_DEVICE_REGISTRY", backend_table)
+    monkeypatch.setattr(platform_pkg, "_DEVICE_TYPE_REGISTRY", device_type_table)
     assert type(resolve_device_ops("cpu")) is DeviceOps
 
 
@@ -330,8 +337,15 @@ def test_unregistered_accelerator_fails_fast(
     isolated_registry: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A requested accelerator with no registered class is a hard error."""
-    table = {k: v for k, v in isolated_registry.items() if k != torch_device_type}
-    monkeypatch.setattr(platform_pkg, "_DEVICE_REGISTRY", table)
+    backend_registry, device_type_registry = isolated_registry
+    backend_table = {
+        k: v for k, v in backend_registry.items() if k != torch_device_type
+    }
+    device_type_table = {
+        k: v for k, v in device_type_registry.items() if k != torch_device_type
+    }
+    monkeypatch.setattr(platform_pkg, "_DEVICE_REGISTRY", backend_table)
+    monkeypatch.setattr(platform_pkg, "_DEVICE_TYPE_REGISTRY", device_type_table)
     with pytest.raises(
         RuntimeError,
         match="refusing to silently fall back to the torch baseline",
@@ -364,9 +378,16 @@ def test_new_device_needs_zero_resolver_edits(
         def ops_cls(self) -> "type[DeviceOps]":
             return DummyDeviceOps
 
+    backend_registry, device_type_registry = isolated_registry
+    dummy_spec = DummyDeviceSpec()
     monkeypatch.setattr(
         platform_pkg,
         "_DEVICE_REGISTRY",
-        {**isolated_registry, "dummy": DummyDeviceSpec()},
+        {**backend_registry, "dummy": dummy_spec},
+    )
+    monkeypatch.setattr(
+        platform_pkg,
+        "_DEVICE_TYPE_REGISTRY",
+        {**device_type_registry, "dummy": (dummy_spec,)},
     )
     assert type(resolve_device_ops("dummy")) is DummyDeviceOps
