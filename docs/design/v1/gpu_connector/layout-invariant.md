@@ -108,7 +108,7 @@ kv_format/
 
 1. Add the enum value in `csrc/kv_transfer_types.h` (the single
    backend-agnostic definition shared by every accelerator backend), then
-   register it in each backend's pybind module — `csrc/cuda/pybind.cpp` (CUDA)
+   register it in the common native pybind module — `csrc/lmcache_native/pybind.cpp`
    and `csrc/sycl/pybind_sycl.cpp` (SYCL/XPU).
 2. Add a branch in the engine's `detectors/<engine>.py` `discover()`. It keys
    off `(list_depth, tensor_ndim)` from `measure_list_depth_until_tensor`,
@@ -158,6 +158,7 @@ an `EngineKVFormat`. Nothing else may index raw shapes.
 | `NL_X_NB_BS_NH_TWO_HS` | vLLM blocks-first fused | NHD | DEPRECATED (use `NL_X_NB_BS_NH_CS`): `NL × [NB, BS, NH, 2, HS]`, split from raw `[NB, BS, NH, 2·HS]` |
 | `NL_X_NB_NH_BS_CS` | vLLM blocks-first fused (unified KV cache) | HND | `NL × [NB, NH, BS, CS]`, raw registration; CS = content size = 2·HS (K/V packed) |
 | `NL_X_NB_BS_NH_CS` | vLLM blocks-first fused (unified KV cache) | NHD | `NL × [NB, BS, NH, CS]`, raw registration; CS = content size = 2·HS (K/V packed) |
+| `NL_X_TWO_NB_NH_ONE_BS_HS` | vLLM-RBLN attention | HND | `NL × [2, NB, NH, 1, BS, HS]`; axis 3 is always 1 (an RBLN attention-backend requirement) |
 
 The two cross-layer formats (`NB_NL_TWO_*`) share a single base
 pointer, the kernel walks layers internally via `shape_desc.nl`. Use

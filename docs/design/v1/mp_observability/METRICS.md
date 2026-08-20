@@ -14,6 +14,13 @@ The observability system uses an **EventBus with pub/sub dispatch** and
 - **Export** is via OTLP push to an OTel collector (production) or an in-process
   Prometheus `/metrics` endpoint (dev/debug fallback).
 
+The MP Coordinator reuses the same `init_otel_metrics()` pipeline without
+starting a standalone Prometheus HTTP server. In pull mode its FastAPI app
+serves `GET /metrics` on the coordinator port (default `9300`). In OTLP push
+mode, or when coordinator metrics are disabled, that route returns 404. The
+coordinator provider carries `service.name=lmcache-mp-coordinator`; concrete
+coordinator instruments are registered separately from this transport setup.
+
 All metrics use the `lmcache_mp.` prefix (mp = multiprocess), distinct from the main
 engine's `lmcache.` namespace. On Prometheus, `.` is converted to `_` and counters get
 a `_total` suffix (e.g., `lmcache_mp.l1_read` with `unit="chunks"` is exposed as

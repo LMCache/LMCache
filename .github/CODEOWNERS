@@ -26,9 +26,14 @@
 
 # GPU connector
 /lmcache/v1/gpu_connector/             @sammshen @ApostaC @hlin99
+/lmcache/v1/gpu_connector/_gds_async.py   @sammshen @ApostaC @hlin99 @andyluo7
+/lmcache/v1/gpu_connector/gds_context.py  @sammshen @ApostaC @hlin99 @andyluo7
+/lmcache/v1/gpu_connector/_hipfile_async.py @andyluo7
 
 # Platform
 /lmcache/v1/platform/                  @maobaolong @hlin99
+/lmcache/v1/platform/base/event_ipc.py @maobaolong @hlin99 @andyluo7
+/lmcache/v1/platform/rocm/             @maobaolong @hlin99 @andyluo7
 
 # Lookup client
 /lmcache/v1/lookup_client/             @maobaolong @YaoJiayi @sammshen
@@ -105,6 +110,14 @@
 /lmcache/v1/storage_backend/plugins/dax_backend.py     @DongDongJu
 /docs/source/kv_cache/storage_backends/maru.rst        @DongDongJu
 /docs/source/kv_cache/storage_backends/dax.rst         @DongDongJu
+
+# ROCm / AMD Instinct
+/.github/workflows/build_rocm_artifacts.yml  @andyluo7
+/.github/scripts/build_rocm_wheel.sh         @andyluo7
+/setup_extensions/build_profiles/rocm.py     @andyluo7
+/docker/Dockerfile.rocm                      @andyluo7
+/docker/Dockerfile.rocm-lightweight          @andyluo7
+/docs/design/v1/platform/base/event_ipc_abstraction.md  @maobaolong @hlin99 @andyluo7
 
 # Packaging
 pyproject.toml                         @sammshen @ApostaC @deng451e @hickeyma

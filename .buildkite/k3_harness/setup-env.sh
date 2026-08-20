@@ -11,6 +11,7 @@ trap 'echo "ERROR: setup-env.sh failed at line $LINENO (exit code $?)" >&2' ERR
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 source "${REPO_ROOT}/.buildkite/k3_tests/common_scripts/helpers.sh"
 check_gpu_health 80
+merge_pr_base_branch
 
 # Resolve which vLLM nightly to install. Sets PINNED_VLLM_VERSION (empty
 # string means "use latest nightly", any other value means

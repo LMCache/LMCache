@@ -179,13 +179,20 @@ class QuotaConfigResponse(BaseModel):
 
 
 class StatusResponse(BaseModel):
-    """Combined quota and usage for a single ``cache_salt``.
+    """Combined quota and usage for a single ``cache_salt``, on one tier.
+
+    Every field describes the tier the request asked for. Quotas are
+    enforced on L2 only, so an ``l1`` request reports L1 usage with
+    ``quota_exists=False`` — never the L2 quota, which governs different
+    bytes.
 
     Attributes:
         cache_salt: The tenant identifier.
-        quota_limit_gb: The byte budget in GiB (0.0 if no quota set).
-        quota_exists: Whether an explicit quota is registered.
-        usage_gb: Current usage in GiB.
+        quota_limit_gb: The byte budget in GiB (0.0 if no quota applies
+            to the requested tier).
+        quota_exists: Whether an explicit quota is registered for the
+            requested tier.
+        usage_gb: Current usage in GiB on the requested tier.
     """
 
     cache_salt: str
@@ -195,11 +202,13 @@ class StatusResponse(BaseModel):
 
 
 class StatusListResponse(BaseModel):
-    """Reply to ``GET /quota``.
+    """Reply to ``GET /quota``, scoped to the requested tier.
 
     Attributes:
-        total_gb: Aggregate usage in GiB.
-        by_cache_salt: Per-tenant breakdown with quota and usage.
+        total_gb: Aggregate usage in GiB on the requested tier.
+        by_cache_salt: Per-tenant breakdown with quota and usage. Rows
+            come from the tier's usage plus the quotas that apply to it,
+            so an ``l1`` listing holds only salts with L1 usage.
     """
 
     total_gb: float

@@ -254,7 +254,7 @@ def call_block_kernel(
 ) -> None:
     device = vllm_tensors[0].device
 
-    shape_desc = cuda_ops.PageBufferShapeDesc()
+    shape_desc = lmcache_native.PageBufferShapeDesc()
     shape_desc.kv_size = 1 if is_mla else 2
     shape_desc.nl = nl
     shape_desc.nb = nb
@@ -511,4 +511,141 @@ def test_block_transfer_skip_prefix(engine_kv_format, nl, nh, hs, is_mla, dtype)
                 block = block.to(torch.float32)
             assert block.abs().sum().item() == 0, (
                 f"Skipped block {i}, layer {layer_idx} is not zero"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Large-block content-size case (e.g., DeepSeek indexer k-cache): NH == 1 and
+# BS much larger than one thread block can cover with a single token slice,
+# exercising the blockDim.z token partitioning in the transfer kernel. This
+# geometry cannot reuse FORMAT_PARAMS because the tests above hard-code
+# BS = 16 and TOKENS_PER_OBJECT = 256, while the kernel requires
+# blocks_per_object * bs == lmcache_chunk_size (so here one engine block
+# fills a whole memory object).
+# ---------------------------------------------------------------------------
+
+LARGE_BLOCK_NL = 20
+LARGE_BLOCK_NH = 1
+LARGE_BLOCK_BS = 1536
+LARGE_BLOCK_CS = 576
+# Keep NB small: each layer tensor is [NB, 1, 1536, 576] and there are
+# source + target copies of LARGE_BLOCK_NL layers on the GPU.
+LARGE_BLOCK_NB = 8
+LARGE_BLOCK_TOKENS_PER_OBJECT = LARGE_BLOCK_BS  # one engine block per object
+LARGE_BLOCK_TOTAL_BLOCKS = NUM_MEMORY_OBJECTS
+
+
+@pytest.mark.parametrize(
+    "dtype", [torch.bfloat16, torch.float8_e4m3fn], ids=["bf16", "fp8"]
+)
+@pytest.mark.parametrize(
+    "mem_device", [torch_device_type, "cpu"], ids=["mem_gpu", "mem_cpu"]
+)
+def test_block_transfer_roundtrip_large_block(dtype, mem_device):
+    """
+    D2H -> H2D roundtrip for the content-size HND format (NL_X_NB_NH_BS_CS)
+    with a single head and a large block size (NH=1, BS=1536, CS=576).
+
+    Unlike the BS=16 cases above, this launches the kernel with multiple
+    z-slices per thread block, so it verifies the strided token loop copies
+    every token exactly once.
+    """
+    device = torch.device(torch_device_type)
+    mem_dev = torch.device(mem_device)
+    kv_dim = 1  # content-size formats transfer with kv_size == 1
+    hidden_dim = LARGE_BLOCK_NH * LARGE_BLOCK_CS
+
+    source_vllm = create_vllm_tensors(
+        FMT_VLLM_CS_HND,
+        LARGE_BLOCK_NL,
+        LARGE_BLOCK_NB,
+        LARGE_BLOCK_BS,
+        LARGE_BLOCK_NH,
+        LARGE_BLOCK_CS,
+        dtype,
+        device,
+    )
+    target_vllm = create_zero_vllm_tensors(
+        FMT_VLLM_CS_HND,
+        LARGE_BLOCK_NL,
+        LARGE_BLOCK_NB,
+        LARGE_BLOCK_BS,
+        LARGE_BLOCK_NH,
+        LARGE_BLOCK_CS,
+        dtype,
+        device,
+    )
+    mem_objects = create_memory_objects(
+        kv_dim,
+        LARGE_BLOCK_NL,
+        LARGE_BLOCK_TOKENS_PER_OBJECT,
+        hidden_dim,
+        NUM_MEMORY_OBJECTS,
+        dtype,
+        mem_dev,
+    )
+
+    # Disjoint block IDs for D2H and H2D
+    rng_d2h = random.Random(42)
+    block_ids_d2h = rng_d2h.sample(range(LARGE_BLOCK_NB), LARGE_BLOCK_TOTAL_BLOCKS)
+    excluded = set(block_ids_d2h)
+    available = [i for i in range(LARGE_BLOCK_NB) if i not in excluded]
+    rng_h2d = random.Random(123)
+    block_ids_h2d = rng_h2d.sample(available, LARGE_BLOCK_TOTAL_BLOCKS)
+
+    # D2H: source -> mem_objects
+    call_block_kernel(
+        source_vllm,
+        mem_objects,
+        block_ids_d2h,
+        FMT_VLLM_CS_HND,
+        lmcache_native.TransferDirection.D2H,
+        LARGE_BLOCK_NL,
+        LARGE_BLOCK_NB,
+        LARGE_BLOCK_BS,
+        LARGE_BLOCK_NH,
+        LARGE_BLOCK_CS,
+        True,
+        LARGE_BLOCK_TOKENS_PER_OBJECT,
+    )
+    torch_dev.synchronize()
+
+    # H2D: mem_objects -> target
+    call_block_kernel(
+        target_vllm,
+        mem_objects,
+        block_ids_h2d,
+        FMT_VLLM_CS_HND,
+        lmcache_native.TransferDirection.H2D,
+        LARGE_BLOCK_NL,
+        LARGE_BLOCK_NB,
+        LARGE_BLOCK_BS,
+        LARGE_BLOCK_NH,
+        LARGE_BLOCK_CS,
+        True,
+        LARGE_BLOCK_TOKENS_PER_OBJECT,
+    )
+    torch_dev.synchronize()
+
+    # Verify: target[h2d_block] == source[d2h_block]
+    for i in range(LARGE_BLOCK_TOTAL_BLOCKS):
+        src_data = get_block_data(
+            source_vllm,
+            FMT_VLLM_CS_HND,
+            LARGE_BLOCK_NL,
+            LARGE_BLOCK_BS,
+            LARGE_BLOCK_NH,
+            block_ids_d2h[i],
+        )
+        tgt_data = get_block_data(
+            target_vllm,
+            FMT_VLLM_CS_HND,
+            LARGE_BLOCK_NL,
+            LARGE_BLOCK_BS,
+            LARGE_BLOCK_NH,
+            block_ids_h2d[i],
+        )
+        for layer_idx in range(LARGE_BLOCK_NL):
+            assert torch.equal(src_data[layer_idx], tgt_data[layer_idx]), (
+                f"Mismatch at block index {i}, layer {layer_idx}"
             )
