@@ -72,6 +72,7 @@ def _build_backend_params() -> list:
             # First Party
             import lmcache.cuda_ops as cuda_ops
 
+            cuda_ops.PageBufferShapeDesc = lmcache_native.PageBufferShapeDesc
             params.append(pytest.param(("cuda_ops", cuda_ops, "cuda"), id="cuda_ops"))
         except ImportError:
             pass
@@ -2839,7 +2840,7 @@ def scenario_record_drain_event(ops: Any, device: str) -> dict[str, torch.Tensor
 # 3. Registry
 # ==========================================
 
-# cover pybind list in csrc/cuda/pybind.cpp
+# cover the torch baseline surface mirrored by the native pybind modules
 SCENARIO_REGISTRY = {
     "transfer_direction_enum": scenario_transfer_direction_enum,
     "multi_layer_kv_transfer": scenario_multi_layer_kv_transfer,

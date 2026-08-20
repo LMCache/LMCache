@@ -74,13 +74,23 @@ def test_base_class_declares_every_op_as_instance_method() -> None:
 
 
 def test_base_class_has_python_fallback_types() -> None:
-    """DeviceOps exposes the Python-only fallback types it owns."""
+    """DeviceOps exposes the shared/native types it owns."""
     assert DeviceOps.PageBufferShapeDesc is PageBufferShapeDesc
     assert DeviceOps.StagingCopy is StagingCopy
     assert DeviceOps.LaunchVar is LaunchVar
     assert DeviceOps.BatchStep is BatchStep
     assert DeviceOps.KernelGroupSpec is KernelGroupSpec
-    assert callable(DeviceOps.set_shape_desc_dtype)
+
+
+def test_shape_desc_accepts_dynamic_dtype_attr() -> None:
+    """The shared shape descriptor accepts the dtype side-channel."""
+    # Third Party
+    import torch
+
+    shape_desc = DeviceOps.PageBufferShapeDesc()
+    shape_desc.dtype = torch.bfloat16
+
+    assert getattr(shape_desc, "dtype", None) == torch.bfloat16
 
 
 def test_every_registered_device_has_all_ops(isolated_registry: Any) -> None:
