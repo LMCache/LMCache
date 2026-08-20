@@ -689,10 +689,20 @@ class NixlDynamicStorageAgent(NixlStorageAgent):
             xfer_desc.append((0, page_size, descs[i].device_id))
 
         reg_descs = self.nixl_agent.register_memory(reg_list, self.mem_type)
-        xfer_descs = self.nixl_agent.get_xfer_descs(xfer_desc, self.mem_type)
-        xfer_handler = self.nixl_agent.prep_xfer_dlist(
-            self.agent_name, xfer_descs, mem_type=self.mem_type
-        )
+        try:
+            xfer_descs = self.nixl_agent.get_xfer_descs(xfer_desc, self.mem_type)
+            xfer_handler = self.nixl_agent.prep_xfer_dlist(
+                self.agent_name, xfer_descs, mem_type=self.mem_type
+            )
+        except Exception:
+            # Registration ownership starts as soon as register_memory returns.
+            # If descriptor/handler preparation fails, roll it back here because
+            # the caller never receives reg_descs and cannot release it.
+            try:
+                self.nixl_agent.deregister_memory(reg_descs)
+            except Exception:
+                logger.exception("Failed to roll back NIXL storage memory registration")
+            raise
         return reg_descs, xfer_handler
 
     def post_async(self, handle: NixlXferHandle):
@@ -1260,9 +1270,22 @@ class NixlStaticStorageBackend(NixlStorageBackend):
         if not mem_indices:
             return obj_list
 
-        handle = self.agent.get_storage_to_mem_handle(mem_indices, storage_indices)
-        self.agent.post_blocking(handle)
-        self.agent.release_handle(handle)
+        handle: Optional[NixlXferHandle] = None
+        transfer_succeeded = False
+        try:
+            handle = self.agent.get_storage_to_mem_handle(mem_indices, storage_indices)
+            self.agent.post_blocking(handle)
+            transfer_succeeded = True
+        finally:
+            if handle is not None:
+                _release_handle_best_effort(self.agent, handle)
+            if not transfer_succeeded:
+                # Release/cancel the transfer handle before returning its
+                # destination pages to the allocator; an in-progress transfer
+                # must not write into a page that has already been recycled.
+                for obj in obj_list:
+                    if obj is not None:
+                        obj.ref_count_down()
 
         return obj_list
 

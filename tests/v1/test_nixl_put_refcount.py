@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for source-buffer ref counting in the NIXL storage backends.
+"""Tests for transfer lifecycle cleanup in the NIXL storage backends.
 
 When ``batched_submit_put_task`` returns before the transfer has completed
 (always in the static backend; async mode in the dynamic backend), the
@@ -9,7 +9,8 @@ of the transfer, the page can be recycled by the allocator and overwritten
 by a concurrent write while NIXL is still reading it.
 
 Covers both ``NixlStaticStorageBackend`` and ``NixlDynamicStorageBackend``
-(async and sync modes).
+(async and sync modes), including partial acquisition and read/write failure
+cleanup.
 
 These tests use lightweight mocks so they run without the NIXL Python
 package or CUDA hardware: the *real* unbound methods are exercised on a
@@ -86,6 +87,7 @@ from lmcache.v1.storage_backend.nixl_storage_backend import (  # noqa: E402
     NixlDesc,
     NixlDynamicStorageAgent,
     NixlDynamicStorageBackend,
+    NixlKeyMetadata,
     NixlStaticStorageBackend,
 )
 
@@ -661,3 +663,98 @@ class TestWriteFailureCleanup:
         agent.nixl_agent.deregister_memory.assert_called_once()
         with pytest.raises(OSError):
             os.fstat(fd)
+
+
+class TestReadAndAcquisitionCleanup:
+    """Pre-existing read/acquisition failures must release owned resources."""
+
+    @pytest.mark.parametrize("failure_stage", ["descs", "handler"])
+    def test_partial_storage_handler_acquisition_deregisters_memory(
+        self, failure_stage: str
+    ) -> None:
+        agent = Mock(spec=NixlDynamicStorageAgent)
+        agent.agent_name = "test-agent"
+        agent.mem_type = "OBJ"
+        agent.nixl_agent = Mock()
+        reg_descs = Mock()
+        agent.nixl_agent.register_memory.return_value = reg_descs
+
+        if failure_stage == "descs":
+            agent.nixl_agent.get_xfer_descs.side_effect = RuntimeError(
+                "descriptor preparation failed"
+            )
+        else:
+            agent.nixl_agent.get_xfer_descs.return_value = Mock()
+            agent.nixl_agent.prep_xfer_dlist.side_effect = RuntimeError(
+                "handler preparation failed"
+            )
+
+        with pytest.raises(RuntimeError, match="preparation failed"):
+            NixlDynamicStorageAgent.create_batched_storage_handler(
+                agent,
+                [NixlDesc(device_id=0, meta_info="test-key")],
+                page_size=4096,
+            )
+
+        agent.nixl_agent.deregister_memory.assert_called_once_with(reg_descs)
+
+    def test_partial_storage_handler_preserves_original_error(self) -> None:
+        agent = Mock(spec=NixlDynamicStorageAgent)
+        agent.mem_type = "OBJ"
+        agent.nixl_agent = Mock()
+        agent.nixl_agent.register_memory.return_value = Mock()
+        agent.nixl_agent.get_xfer_descs.side_effect = RuntimeError(
+            "descriptor preparation failed"
+        )
+        agent.nixl_agent.deregister_memory.side_effect = RuntimeError("rollback failed")
+
+        with pytest.raises(RuntimeError, match="descriptor preparation failed"):
+            NixlDynamicStorageAgent.create_batched_storage_handler(
+                agent,
+                [NixlDesc(device_id=0, meta_info="test-key")],
+                page_size=4096,
+            )
+
+    @pytest.mark.parametrize("failure_stage", ["handle", "transfer"])
+    def test_static_read_failure_releases_owned_resources(
+        self, failure_stage: str
+    ) -> None:
+        backend = Mock(spec=NixlStaticStorageBackend)
+        backend._local_cpu_backend = None
+        backend.memory_allocator = Mock()
+        obj = _make_obj()
+        backend.memory_allocator.allocate.return_value = obj
+        backend.agent = Mock()
+        handle = Mock()
+        backend.agent.get_storage_to_mem_handle.return_value = handle
+        release_ref_counts = []
+        backend.agent.release_handle.side_effect = (
+            lambda released_handle: release_ref_counts.append(obj.get_ref_count())
+        )
+
+        if failure_stage == "handle":
+            backend.agent.get_storage_to_mem_handle.side_effect = RuntimeError(
+                "handle acquisition failed"
+            )
+        else:
+            backend.agent.post_blocking.side_effect = RuntimeError(
+                "read transfer failed"
+            )
+
+        metadata = NixlKeyMetadata(
+            shape=obj.meta.shape,
+            dtype=obj.meta.dtype,
+            fmt=obj.meta.fmt,
+            index=7,
+        )
+        with pytest.raises(RuntimeError, match="failed"):
+            asyncio.run(
+                NixlStaticStorageBackend._nixl_transfer_async(backend, [metadata])
+            )
+
+        assert obj.get_ref_count() == 0
+        if failure_stage == "handle":
+            backend.agent.release_handle.assert_not_called()
+        else:
+            backend.agent.release_handle.assert_called_once_with(handle)
+            assert release_ref_counts == [1]
