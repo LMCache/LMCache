@@ -3,7 +3,7 @@
 # Standard
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, NoReturn, Protocol
+from typing import TYPE_CHECKING, Any, Callable, NoReturn, Protocol, cast
 import enum
 import os
 import threading
@@ -35,6 +35,8 @@ from lmcache.v1.multiprocess.transfer_context import (
     create_transfer_context,
 )
 from lmcache.v1.periodic_thread import PeriodicThread, ThreadLevel, ThreadRunSummary
+from lmcache.v1.platform.base.event_ipc import get_event_ipc_backend
+from lmcache.v1.platform.isolated_ipc import set_isolated_ipc
 
 if TYPE_CHECKING:
     # First Party
@@ -65,6 +67,11 @@ class ExtraConfigDefault(enum.Enum):
     # Mirrors the ``LMCACHE_MP_TRANSFER_MODE`` env var; this extra_config
     # key wins when both are set.
     mp_transfer_mode = "auto"
+    # Whether IPC mechanisms must work across isolated containers (no
+    # shared host IPC namespace or /dev/shm); see
+    # lmcache/v1/platform/isolated_ipc.py. Must match the LMCache server's
+    # ``--isolated-ipc`` setting.
+    isolated_ipc = False
 
 
 # Backward-compatible aliases for the legacy `lmcache_mp_connector_0180`
@@ -78,6 +85,27 @@ _EXTRA_CONFIG_KEY_PREFIX = "lmcache.mp."
 # default 10 s heartbeat interval (3 x 10 s); the adapter warns at startup
 # when 3 x heartbeat_interval exceeds it (server timeout must be raised too).
 _SERVER_REAP_TIMEOUT_FLOOR_SECONDS: float = 30.0
+
+
+def _coerce_extra_config_value(default: Any, raw: Any) -> Any:
+    """Coerce a user-provided extra_config value to its default's type.
+
+    Args:
+        default: The :class:`ExtraConfigDefault` member value, defining the
+            target type.
+        raw: The user-provided value (typed when the connector config came
+            from JSON, a string when it came from a CLI passthrough).
+
+    Returns:
+        ``raw`` coerced to ``type(default)``. Booleans accept the usual
+        string spellings (``1/true/yes/on``, case-insensitive) because
+        ``bool("false")`` is ``True``.
+    """
+    if isinstance(default, bool):
+        if isinstance(raw, bool):
+            return raw
+        return str(raw).strip().lower() in ("1", "true", "yes", "on")
+    return type(default)(raw)
 
 
 def _resolve_extra_config(
@@ -111,7 +139,7 @@ def _resolve_extra_config(
     for item in ExtraConfigDefault:
         default = item.value
         raw = stripped.get(item.name)
-        value = type(default)(raw) if raw is not None else default
+        value = _coerce_extra_config_value(default, raw) if raw is not None else default
         if value != default:
             logger.info(
                 "%s%s = %s (overridden, default: %s)",
@@ -132,8 +160,6 @@ def _resolve_extra_config(
 
 
 class _IpcEvent(Protocol):
-    def ipc_handle(self) -> Any: ...
-
     def wait(self, stream: Any = None) -> None: ...
 
 
@@ -1088,6 +1114,7 @@ class LMCacheMPWorkerAdapter:
                 self._mp_transfer_mode = cfg[ExtraConfigDefault.mp_transfer_mode.name]
             else:
                 self._mp_transfer_mode = None
+            set_isolated_ipc(cfg[ExtraConfigDefault.isolated_ipc.name])
         else:
             self._mp_transfer_mode = None
         self.mq_client = MessageQueueClient(server_url, context)
@@ -1394,6 +1421,27 @@ class LMCacheMPWorkerAdapter:
                 return False
 
         return True
+
+    def create_recorded_event(self) -> _IpcEvent:
+        """Create an IPC event recorded on the current stream with configured backend.
+
+        Returns:
+            An event recorded on the current stream, ready for
+            ``submit_store_request`` / ``submit_retrieve_request``.
+
+        Raises:
+            RuntimeError: If called before ``register_kv_caches()``.
+        """
+        if not self.kv_caches:
+            raise RuntimeError(
+                "KV caches are not registered. Call register_kv_caches() "
+                "before creating transfer events."
+            )
+        device = next(iter(self.kv_caches.values())).device
+        event_ipc_backend = get_event_ipc_backend(device)
+        event = event_ipc_backend.create_event(device)
+        event_ipc_backend.record_event(event, torch_dev.current_stream())
+        return cast(_IpcEvent, event)
 
     @_lmcache_nvtx_annotate
     def submit_store_request(

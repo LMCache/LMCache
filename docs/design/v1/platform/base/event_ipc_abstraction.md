@@ -168,7 +168,9 @@ class DeviceSpec:
 class CudaDeviceSpec(DeviceSpec):
     @property
     def event_ipc_backend(self) -> EventIPCBackend:
-        return DefaultEventIPCBackend(event_module=torch.cuda, ...)
+        # TimelineSemaphoreEventIPCBackend when isolated IPC is enabled
+        # (the default), else DefaultEventIPCBackend(event_module=torch.cuda)
+        return _select_event_ipc_backend(self.device_type)
 
 class MusaDeviceSpec(DeviceSpec):
     @property
@@ -178,6 +180,16 @@ class MusaDeviceSpec(DeviceSpec):
 
 This keeps platform capabilities together. Adding another backend requires a
 new platform package/spec, not an edit to the multiprocess transfer modules.
+
+CUDA selects between two backends via the process-global isolated-IPC switch
+(`lmcache/v1/platform/isolated_ipc.py`, default off): the timeline-semaphore
+backend works across containers that share no host IPC namespace or
+`/dev/shm` (see `../cuda/timeline_semaphore_event_ipc.md`), while
+`DefaultEventIPCBackend` uses CUDA interprocess event handles. The switch is
+set at process initialization from `lmcache.mp.isolated_ipc` (vLLM connector
+extra_config) and `--isolated-ipc` (MP server CLI), before the first backend
+resolution; the selection is module-level, not spec-instance state, so every
+`DeviceSpec` instance in the process resolves identically.
 
 ## Generic Multiprocess Flow
 
