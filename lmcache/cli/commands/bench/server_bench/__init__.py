@@ -30,9 +30,34 @@ class ServerBenchCommand(BaseCommand):
         add_server_arguments(parser)
 
     def execute(self, args: argparse.Namespace) -> None:
+        # Standard
+        import copy
+        import sys
+
         # First Party
         from lmcache.cli.commands.bench.server_bench.command import (
             run_server_bench,
         )
 
-        run_server_bench(self, args)
+        # A comma-separated --flamegraph-mode drives the load once per mode
+        # (the modes cannot share a recording window), each rendered to its
+        # own default path.
+        modes = [args.flamegraph_mode]
+        if getattr(args, "flamegraph", "off") == "on" and "," in args.flamegraph_mode:
+            modes = list(
+                dict.fromkeys(
+                    m.strip() for m in args.flamegraph_mode.split(",") if m.strip()
+                )
+            )
+            if args.flamegraph_output:
+                print(
+                    "Error: --flamegraph-output takes a single path; with "
+                    "several modes each graph uses its own default path.",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+
+        for mode in modes:
+            run_args = copy.copy(args)
+            run_args.flamegraph_mode = mode
+            run_server_bench(self, run_args)

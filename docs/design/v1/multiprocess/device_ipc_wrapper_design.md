@@ -22,14 +22,16 @@ A device-agnostic base, `DeviceIPCWrapper`, now owns everything that is not tran
 DeviceIPCWrapper                        base: contract + (de)serialize
 ├── CudaIPCWrapper                      cuda  — torch caching allocator
 ├── RawCudaIPCWrapper                   cuda — raw cudaMalloc, TRT-LLM
-└── CpuShmTensorWrapper                 cpu   — POSIX shared memory
+├── CpuShmTensorWrapper                 cpu   — POSIX shared memory
+└── MusaIPCWrapper                      musa  — TorchMUSA memory IPC
 ```
 
 All of them live behind a single msgspec ext code 1 and a single `KVCache = list[DeviceIPCWrapper]` wire type, so new device backends can be added as further siblings without touching the wire format.
 
 ## What the base class owns
 
-`DeviceIPCWrapper` (in `custom_types.py`) provides the parts that every transport shares:
+`DeviceIPCWrapper` (in `platform/base/ipc_wrapper.py`) provides the parts that every
+transport shares:
 
 - **Interface fields** — `dtype`, `shape`, `stride`, `storage_offset`, `device_uuid`. Subclasses populate these in `__init__`; the base uses them for equality and the receiving side uses them to rebuild the logical view.
 - **Device discovery** — `_get_device_uuid`, `_discover_devices`,`_get_device_index_from_uuid`. These are `@classmethod`s (not static) and route through the `torch_dev` abstraction, so they work across device backends, and a subclass can override `_get_device_uuid` if its backend needs a different identity source.
@@ -50,18 +52,37 @@ All of them live behind a single msgspec ext code 1 and a single `KVCache = list
 | `CudaIPCWrapper` | `cuda` | `UntypedStorage._share_cuda_()` | `_new_shared_cuda` + `set_()` |
 | `RawCudaIPCWrapper` | `cuda` | `cudaIpcGetMemHandle` (raw ptr) | `cudaIpcOpenMemHandle` → CuPy → DLPack |
 | `CpuShmTensorWrapper` | `cpu` | POSIX `shm_open` | `mmap` same segment |
+| `MusaIPCWrapper` | `musa` | TorchMUSA IPC API | `torch.musa.ipc.export_tensor` + `open_tensor` |
 
 ## Platform registration
 
-The factory lookup (`platform/_registry.py`) keys on `tensor.device.type`, so the integration adapter never has an if/elif chain. Each platform sub-package self-registers at import time:
+The factory lookup (`platform.resolve_kv_wrapper_factory`) keys on
+`tensor.device.type`, so the integration adapter never has an if/elif
+chain.  Concrete wrappers are bound to their device via
+`DeviceSpec.ipc_wrapper_cls` — no static `register_kv_wrapper` calls
+needed:
 
-```text
-platform/cuda/__init__.py  ->  register_kv_wrapper("cuda", CudaIPCWrapper)
-platform/cpu/__init__.py   ->  register_kv_wrapper("cpu",  migrate_to_shm_and_wrap)
-```
+- Each concrete subclass carries a ``device_type`` ClassVar (e.g.
+  ``"cuda"``) for introspection and exposes a ``wrap`` factory
+  classmethod.
+- Each accelerator's :class:`DeviceSpec` subclass (e.g.
+  :class:`CudaDeviceSpec`) overrides
+  :attr:`~DeviceSpec.ipc_wrapper_cls` to return its default
+  wrapper class.
+- :func:`~lmcache.v1.platform.resolve_kv_wrapper_factory` reads that
+  binding off the registered spec and returns the wrapper's ``wrap``
+  classmethod so callers can invoke ``factory(tensor)`` uniformly.
+- ``RawCudaIPCWrapper`` intentionally stays off the spec so it
+  coexists with ``CudaIPCWrapper`` without collision — callers
+  (TRT-LLM adapter) instantiate it directly.
+- Adding a new accelerator backend only requires shipping a sub-package
+  under ``platform/<device>/`` with a ``DeviceSpec`` subclass whose
+  ``ipc_wrapper_cls`` returns the wrapper — zero changes to the
+  dispatcher.
 
 ## Backward compatibility
 
-- Wire format is unchanged. Still ext code 1, still `pickle`-over-`Ext`. Previously serialized payloads round-trip.
+- The wire envelope remains ext code 1 and `pickle`-over-`Ext`. MUSA sender and receiver processes must use compatible `MusaIPCWrapper` versions because the payload carries a TorchMUSA tensor handle.
+- `MusaIPCWrapper` keeps the receiver-side `open_tensor()` owner alive locally and excludes that owner from serialized state.
 - `CudaIPCWrapper` / `RawCudaIPCWrapper` keep their names, fields, and behavior; only their base class changed. Existing callers and the TRT-LLM adapter are unaffected.
 - The single `isinstance`-based equality check now uses `type(self) is type(other)`, which is stricter and correct.

@@ -16,12 +16,13 @@ import torch
 
 # First Party
 from lmcache.v1.gpu_connector.kv_format.specs.base import KVFormatSpec
-import lmcache.c_ops as lmc_ops
+import lmcache.lmcache_native as lmcache_native
 
 
 class NL_X_NB_TWO_BS_NH_HS_Spec(KVFormatSpec):
-    engine_kv_format = lmc_ops.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS
+    engine_kv_format = lmcache_native.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS
     attention_backends = ("vLLM non-MLA flash infer",)
+    is_layer_list = True
 
     def num_layers(self) -> int:
         return len(self.kv_caches)
@@ -34,6 +35,9 @@ class NL_X_NB_TWO_BS_NH_HS_Spec(KVFormatSpec):
 
     def page_buffer_size(self) -> int:
         return self.kv_caches[0].shape[0] * self.kv_caches[0].shape[2]
+
+    def kv_size(self) -> int:
+        return 2
 
     def num_heads(self, layer_idx: int = 0) -> int:
         return self.kv_caches[layer_idx].shape[3]

@@ -5,8 +5,8 @@ Mirrors the GPU-mode CUDA-IPC zero-copy semantics for hosts without an
 accelerator: client and LMCache mp server map the **same** physical
 pages so transfers are pointer-shuffles rather than memcpys.
 
-Self-registers a ``"cpu"`` factory with
-:mod:`lmcache.v1.platform._registry` at import time, so the
+Bound to ``device_type="cpu"`` via
+:attr:`~lmcache.v1.platform.cpu.CpuDeviceSpec.ipc_wrapper_cls`, so the
 multiprocess adapter can dispatch by ``tensor.device.type`` without
 any if/elif chain.
 """
@@ -15,6 +15,7 @@ any if/elif chain.
 from __future__ import annotations
 
 # Standard
+from typing import ClassVar
 import ctypes
 import itertools
 import os
@@ -26,13 +27,13 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.multiprocess.custom_types import DeviceIPCWrapper
 from lmcache.v1.multiprocess.posix_shm import (
     shm_create_readwrite,
     shm_map_readwrite,
     shm_munmap,
     shm_unlink,
 )
+from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
 
 logger = init_logger(__name__)
 
@@ -57,8 +58,8 @@ __all__ = [
 class CpuShmTensorWrapper(DeviceIPCWrapper):
     """IPC wrapper for CPU tensors backed by POSIX shared memory.
 
-    Used by the ``lmcache bench kvcache --mode cpu`` path and the
-    vLLM CPU integration so that the client and the LMCache mp server
+    Used by the ``lmcache bench kvcache --mode cpu`` path and engine
+    CPU integrations so that the client and the LMCache mp server
     map the **same** physical pages for the KV cache, mirroring the
     GPU-mode CUDA-IPC zero-copy semantics.
 
@@ -70,9 +71,32 @@ class CpuShmTensorWrapper(DeviceIPCWrapper):
     so ``to_tensor`` dispatches correctly on both sides.
     """
 
+    #: ``torch.device.type`` this wrapper handles. Kept as a class-level
+    #: constant so external tooling / tests can introspect the binding
+    #: without instantiating the wrapper.
+    device_type: ClassVar[str] = "cpu"
+
     # POSIX shared-memory name (``/lmcache_...``) -- leading ``/`` is
     # required by ``shm_open(3)`` on both Linux and macOS.
     SHM_NAME_PREFIX = "/lmcache_kv_"
+
+    @classmethod
+    def wrap(cls, tensor: torch.Tensor) -> "CpuShmTensorWrapper":
+        """Factory used by
+        :func:`~lmcache.v1.platform.resolve_kv_wrapper_factory`.
+
+        Delegates to :func:`migrate_to_shm_and_wrap`, which migrates the
+        tensor's storage to a POSIX SHM segment so the LMCache mp server
+        can map the same physical pages.
+
+        Args:
+            tensor: A contiguous CPU tensor to migrate and wrap.
+
+        Returns:
+            A new :class:`CpuShmTensorWrapper` referencing the SHM
+            segment that now backs ``tensor``.
+        """
+        return migrate_to_shm_and_wrap(tensor)
 
     def __init__(self, tensor: torch.Tensor, shm_name: str) -> None:
         if tensor.device.type != "cpu":
@@ -207,12 +231,13 @@ def migrate_to_shm_and_wrap(tensor: torch.Tensor) -> CpuShmTensorWrapper:
 
     # Validate and normalise the tensor *before* touching the registry
     # or mutating storage, so a bad input never leaves things half-done.
-    tensor = attempt_permute_to_contiguous_view(tensor)
+    normalized = attempt_permute_to_contiguous_view(tensor)
+    assert isinstance(normalized, torch.Tensor)
     if tensor.device.type != "cpu":
         raise ValueError(
             "migrate_to_shm_and_wrap requires a CPU tensor, got %s" % tensor.device
         )
-    if not tensor.is_contiguous():
+    if not normalized.is_contiguous():
         raise ValueError("migrate_to_shm_and_wrap requires a contiguous tensor")
 
     tid = id(tensor)
@@ -255,9 +280,9 @@ def migrate_to_shm_and_wrap(tensor: torch.Tensor) -> CpuShmTensorWrapper:
         shm_storage = torch.frombuffer(buf, dtype=torch.uint8).untyped_storage()
         tensor.set_(
             shm_storage,
-            tensor.storage_offset(),
-            tensor.shape,
-            tensor.stride(),
+            normalized.storage_offset(),
+            normalized.shape,
+            normalized.stride(),
         )
     except Exception:
         # Make sure the SHM resources don't leak if migration fails

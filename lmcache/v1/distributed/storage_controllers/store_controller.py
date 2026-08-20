@@ -277,7 +277,7 @@ class StoreController(StorageControllerInterface):
             )
             register_gauge(
                 "lmcache.l2_store",
-                "lmcache_mp.l2_adapters",
+                "lmcache_mp.l2_store_adapters",
                 (
                     "Count of L2 adapters attached to the store controller, "
                     "tagged by ``state`` (active or draining)."
