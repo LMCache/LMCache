@@ -563,30 +563,154 @@ message CbRegisterRopeV3Request {
 
 message CbRegisterRopeV3Response {}
 
+// Concurrent callers can share one gRPC unary exchange without giving up
+// typed protobuf payloads.  Field names mirror RequestType names so the
+// Python registry can map them without a second hand-maintained table.
+message BatchRequestItem {
+  oneof request {
+    PingRequest ping = 2;
+    LookupRequest lookup = 3;
+    FreeLookupLocksRequest free_lookup_locks = 4;
+    EndSessionRequest end_session = 5;
+    UnregisterKvCacheRequest unregister_kv_cache = 6;
+    UnregisterKvCacheRequest unregister_q_cache = 7;
+    UnregisterKvCacheEngineDrivenContextRequest
+        unregister_kv_cache_engine_driven_context = 8;
+    QueryPrefetchStatusRequest query_prefetch_status = 9;
+    WaitPrefetchStatusRequest wait_prefetch_status = 10;
+    QueryPrefetchLookupHitsRequest query_prefetch_lookup_hits = 11;
+    ClearRequest clear = 12;
+    GetChunkSizeRequest get_chunk_size = 13;
+    GetExperimentalRequest get_experimental = 14;
+    NoopRequest noop = 15;
+    StoreRequest store = 16;
+    StoreRequest store_q = 17;
+    RetrieveRequest retrieve = 18;
+    ReportBlockAllocationRequest report_block_allocation = 19;
+    CbUnregisterKvCacheRequest cb_unregister_kv_cache = 20;
+    CbUnregisterRopeV3Request cb_unregister_rope_v3 = 21;
+    CbLookupPreComputedRequest cb_lookup_pre_computed = 22;
+    CbStorePreComputedRequest cb_store_pre_computed = 23;
+    CbStoreFinalRequest cb_store_final = 24;
+    CbRetrievePreComputedRequest cb_retrieve_pre_computed = 25;
+    CbLookupPreComputedV2Request cb_lookup_pre_computed_v2 = 26;
+    CbRetrievePreComputedV2Request cb_retrieve_pre_computed_v2 = 27;
+    CbRetrievePreComputedV3Request cb_retrieve_pre_computed_v3 = 28;
+    CbUnifiedLookupRequest cb_unified_lookup = 29;
+    RegisterKvCacheEngineDrivenContextRequest
+        register_kv_cache_engine_driven_context = 30;
+    PrepareStoreRequest prepare_store = 31;
+    CommitStoreRequest commit_store = 32;
+    PrepareRetrieveRequest prepare_retrieve = 33;
+    CommitRetrieveRequest commit_retrieve = 34;
+    P2pLookupAndLockRequest p2p_lookup_and_lock = 35;
+    P2pQueryLookupResultsRequest p2p_query_lookup_results = 36;
+    P2pUnlockObjectsRequest p2p_unlock_objects = 37;
+    RegisterKvCacheRequest register_kv_cache = 38;
+    RegisterKvCacheRequest register_q_cache = 39;
+    CbRegisterKvCacheRequest cb_register_kv_cache = 40;
+    CbRegisterRopeV3Request cb_register_rope_v3 = 41;
+  }
+}
+
+message BatchRequest {
+  repeated BatchRequestItem items = 1;
+}
+
+message BatchError {
+  string status = 1;
+  string details = 2;
+}
+
+message BatchResponseItem {
+  oneof response {
+    PingResponse ping = 2;
+    LookupResponse lookup = 3;
+    FreeLookupLocksResponse free_lookup_locks = 4;
+    EndSessionResponse end_session = 5;
+    UnregisterKvCacheResponse unregister_kv_cache = 6;
+    UnregisterKvCacheResponse unregister_q_cache = 7;
+    UnregisterKvCacheEngineDrivenContextResponse
+        unregister_kv_cache_engine_driven_context = 8;
+    QueryPrefetchStatusResponse query_prefetch_status = 9;
+    WaitPrefetchStatusResponse wait_prefetch_status = 10;
+    QueryPrefetchLookupHitsResponse query_prefetch_lookup_hits = 11;
+    ClearResponse clear = 12;
+    GetChunkSizeResponse get_chunk_size = 13;
+    GetExperimentalResponse get_experimental = 14;
+    NoopResponse noop = 15;
+    StoreResponse store = 16;
+    StoreResponse store_q = 17;
+    RetrieveResponse retrieve = 18;
+    ReportBlockAllocationResponse report_block_allocation = 19;
+    CbUnregisterKvCacheResponse cb_unregister_kv_cache = 20;
+    CbUnregisterRopeV3Response cb_unregister_rope_v3 = 21;
+    CbLookupPreComputedResponse cb_lookup_pre_computed = 22;
+    CbStorePreComputedResponse cb_store_pre_computed = 23;
+    CbStoreFinalResponse cb_store_final = 24;
+    CbRetrievePreComputedResponse cb_retrieve_pre_computed = 25;
+    CbLookupPreComputedV2Response cb_lookup_pre_computed_v2 = 26;
+    CbRetrievePreComputedV2Response cb_retrieve_pre_computed_v2 = 27;
+    CbRetrievePreComputedV3Response cb_retrieve_pre_computed_v3 = 28;
+    CbUnifiedLookupResponse cb_unified_lookup = 29;
+    RegisterKvCacheEngineDrivenContextResponse
+        register_kv_cache_engine_driven_context = 30;
+    PrepareStoreResponse prepare_store = 31;
+    CommitStoreResponse commit_store = 32;
+    PrepareRetrieveResponse prepare_retrieve = 33;
+    CommitRetrieveResponse commit_retrieve = 34;
+    P2pLookupAndLockResponse p2p_lookup_and_lock = 35;
+    P2pQueryLookupResultsResponse p2p_query_lookup_results = 36;
+    P2pUnlockObjectsResponse p2p_unlock_objects = 37;
+    RegisterKvCacheResponse register_kv_cache = 38;
+    RegisterKvCacheResponse register_q_cache = 39;
+    CbRegisterKvCacheResponse cb_register_kv_cache = 40;
+    CbRegisterRopeV3Response cb_register_rope_v3 = 41;
+    BatchError error = 42;
+  }
+}
+
+message BatchResponse {
+  repeated BatchResponseItem items = 1;
+}
+
 // -----------------------------------------------------------------------
-// Service.  One rpc per RequestType.  Method names are the CamelCase
-// form of the RequestType enum (STORE -> Store, CB_LOOKUP_PRE_COMPUTED_V2
-// -> CbLookupPreComputedV2, etc.) so gRPC's built-in method routing
-// takes over the dispatch that the old msgspec envelope did by hand.
+// Service. One typed unary rpc per RequestType, plus Batch for concurrent
+// callers. Method names are the CamelCase form of the RequestType enum
+// (STORE -> Store, CB_LOOKUP_PRE_COMPUTED_V2 -> CbLookupPreComputedV2, etc.)
+// so gRPC's built-in routing replaces the old hand-written msgspec dispatch.
 // -----------------------------------------------------------------------
 
 service MessageQueue {
+  // Transport optimization for concurrent callers. Single callers use the
+  // dedicated methods below and pay no batching delay.
+  rpc Batch(BatchRequest) returns (BatchResponse);
+
   // Engine operations
   rpc RegisterKvCache(RegisterKvCacheRequest) returns (RegisterKvCacheResponse);
   rpc RegisterQCache(RegisterKvCacheRequest) returns (RegisterKvCacheResponse);
-  rpc UnregisterKvCache(UnregisterKvCacheRequest) returns (UnregisterKvCacheResponse);
-  rpc UnregisterQCache(UnregisterKvCacheRequest) returns (UnregisterKvCacheResponse);
+  rpc UnregisterKvCache(UnregisterKvCacheRequest)
+      returns (UnregisterKvCacheResponse);
+  rpc UnregisterQCache(UnregisterKvCacheRequest)
+      returns (UnregisterKvCacheResponse);
   rpc StoreQ(StoreRequest) returns (StoreResponse);
   rpc Store(StoreRequest) returns (StoreResponse);
   rpc Retrieve(RetrieveRequest) returns (RetrieveResponse);
   rpc Lookup(LookupRequest) returns (LookupResponse);
-  rpc QueryPrefetchStatus(QueryPrefetchStatusRequest) returns (QueryPrefetchStatusResponse);
-  rpc WaitPrefetchStatus(WaitPrefetchStatusRequest) returns (WaitPrefetchStatusResponse);
-  rpc QueryPrefetchLookupHits(QueryPrefetchLookupHitsRequest) returns (QueryPrefetchLookupHitsResponse);
+  rpc QueryPrefetchStatus(QueryPrefetchStatusRequest)
+      returns (QueryPrefetchStatusResponse);
+  rpc WaitPrefetchStatus(WaitPrefetchStatusRequest)
+      returns (WaitPrefetchStatusResponse);
+  rpc QueryPrefetchLookupHits(QueryPrefetchLookupHitsRequest)
+      returns (QueryPrefetchLookupHitsResponse);
   rpc FreeLookupLocks(FreeLookupLocksRequest) returns (FreeLookupLocksResponse);
   rpc EndSession(EndSessionRequest) returns (EndSessionResponse);
-  rpc RegisterKvCacheEngineDrivenContext(RegisterKvCacheEngineDrivenContextRequest) returns (RegisterKvCacheEngineDrivenContextResponse);
-  rpc UnregisterKvCacheEngineDrivenContext(UnregisterKvCacheEngineDrivenContextRequest) returns (UnregisterKvCacheEngineDrivenContextResponse);
+  rpc RegisterKvCacheEngineDrivenContext(
+      RegisterKvCacheEngineDrivenContextRequest)
+      returns (RegisterKvCacheEngineDrivenContextResponse);
+  rpc UnregisterKvCacheEngineDrivenContext(
+      UnregisterKvCacheEngineDrivenContextRequest)
+      returns (UnregisterKvCacheEngineDrivenContextResponse);
   rpc PrepareStore(PrepareStoreRequest) returns (PrepareStoreResponse);
   rpc CommitStore(CommitStoreRequest) returns (CommitStoreResponse);
   rpc PrepareRetrieve(PrepareRetrieveRequest) returns (PrepareRetrieveResponse);
@@ -599,31 +723,45 @@ service MessageQueue {
   rpc Ping(PingRequest) returns (PingResponse);
 
   // Observability operations
-  rpc ReportBlockAllocation(ReportBlockAllocationRequest) returns (ReportBlockAllocationResponse);
+  rpc ReportBlockAllocation(ReportBlockAllocationRequest)
+      returns (ReportBlockAllocationResponse);
 
   // Debug operations
   rpc Noop(NoopRequest) returns (NoopResponse);
 
   // Blend V1
-  rpc CbRegisterKvCache(CbRegisterKvCacheRequest) returns (CbRegisterKvCacheResponse);
-  rpc CbUnregisterKvCache(CbUnregisterKvCacheRequest) returns (CbUnregisterKvCacheResponse);
-  rpc CbStorePreComputed(CbStorePreComputedRequest) returns (CbStorePreComputedResponse);
-  rpc CbLookupPreComputed(CbLookupPreComputedRequest) returns (CbLookupPreComputedResponse);
-  rpc CbRetrievePreComputed(CbRetrievePreComputedRequest) returns (CbRetrievePreComputedResponse);
+  rpc CbRegisterKvCache(CbRegisterKvCacheRequest)
+      returns (CbRegisterKvCacheResponse);
+  rpc CbUnregisterKvCache(CbUnregisterKvCacheRequest)
+      returns (CbUnregisterKvCacheResponse);
+  rpc CbStorePreComputed(CbStorePreComputedRequest)
+      returns (CbStorePreComputedResponse);
+  rpc CbLookupPreComputed(CbLookupPreComputedRequest)
+      returns (CbLookupPreComputedResponse);
+  rpc CbRetrievePreComputed(CbRetrievePreComputedRequest)
+      returns (CbRetrievePreComputedResponse);
   rpc CbStoreFinal(CbStoreFinalRequest) returns (CbStoreFinalResponse);
 
   // Blend V2
-  rpc CbLookupPreComputedV2(CbLookupPreComputedV2Request) returns (CbLookupPreComputedV2Response);
-  rpc CbRetrievePreComputedV2(CbRetrievePreComputedV2Request) returns (CbRetrievePreComputedV2Response);
+  rpc CbLookupPreComputedV2(CbLookupPreComputedV2Request)
+      returns (CbLookupPreComputedV2Response);
+  rpc CbRetrievePreComputedV2(CbRetrievePreComputedV2Request)
+      returns (CbRetrievePreComputedV2Response);
 
   // Blend V3
-  rpc CbRegisterRopeV3(CbRegisterRopeV3Request) returns (CbRegisterRopeV3Response);
-  rpc CbUnregisterRopeV3(CbUnregisterRopeV3Request) returns (CbUnregisterRopeV3Response);
-  rpc CbRetrievePreComputedV3(CbRetrievePreComputedV3Request) returns (CbRetrievePreComputedV3Response);
+  rpc CbRegisterRopeV3(CbRegisterRopeV3Request)
+      returns (CbRegisterRopeV3Response);
+  rpc CbUnregisterRopeV3(CbUnregisterRopeV3Request)
+      returns (CbUnregisterRopeV3Response);
+  rpc CbRetrievePreComputedV3(CbRetrievePreComputedV3Request)
+      returns (CbRetrievePreComputedV3Response);
   rpc CbUnifiedLookup(CbUnifiedLookupRequest) returns (CbUnifiedLookupResponse);
 
   // P2P
-  rpc P2PLookupAndLock(P2pLookupAndLockRequest) returns (P2pLookupAndLockResponse);
-  rpc P2PQueryLookupResults(P2pQueryLookupResultsRequest) returns (P2pQueryLookupResultsResponse);
-  rpc P2PUnlockObjects(P2pUnlockObjectsRequest) returns (P2pUnlockObjectsResponse);
+  rpc P2PLookupAndLock(P2pLookupAndLockRequest)
+      returns (P2pLookupAndLockResponse);
+  rpc P2PQueryLookupResults(P2pQueryLookupResultsRequest)
+      returns (P2pQueryLookupResultsResponse);
+  rpc P2PUnlockObjects(P2pUnlockObjectsRequest)
+      returns (P2pUnlockObjectsResponse);
 }

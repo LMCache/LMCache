@@ -2,12 +2,14 @@
 """LMCache mp-mode message queue, backed by gRPC.
 
 Each ``RequestType`` maps to a distinct typed unary RPC method on the
-``MessageQueue`` service defined in ``proto/lmcache_mq.proto``. The old
-msgspec envelope (uid + request type + payload frames) is gone; gRPC method
-routing and protobuf request/response messages now define the wire protocol.
+``MessageQueue`` service defined in ``proto/lmcache_mq.proto``. Concurrent
+control-plane calls may share a typed micro-batch. The old msgspec envelope
+(uid + request type + payload frames) is gone; gRPC method routing and protobuf
+request/response messages now define the wire protocol.
 """
 
 # Standard
+from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Callable, Generic, Optional, TypeVar, get_type_hints
@@ -15,6 +17,8 @@ from urllib.parse import parse_qs, urlparse
 import inspect
 import pickle
 import threading
+import time
+import uuid
 
 # Third Party
 import msgspec
@@ -76,6 +80,26 @@ _GRPC_UNLIMITED_MSG_OPTS: list[tuple[str, int]] = [
     ("grpc.max_send_message_length", -1),
     ("grpc.max_receive_message_length", -1),
 ]
+_GRPC_BATCH_COALESCE_SECONDS = 50 / 1_000_000
+_GRPC_BATCH_MAX_ITEMS = 64
+_GRPC_BATCH_MAX_ITEM_BYTES = 64 * 1024
+_GRPC_CLIENT_ID_METADATA_KEY = "lmcache-client-id-bin"
+# Data-plane and staged transfer operations retain dedicated unary calls because
+# they may carry large payloads or depend on per-call affinity and ordering.
+_GRPC_BATCH_UNSAFE_REQUEST_TYPES = {
+    RequestType.STORE,
+    RequestType.STORE_Q,
+    RequestType.RETRIEVE,
+    RequestType.PREPARE_STORE,
+    RequestType.COMMIT_STORE,
+    RequestType.PREPARE_RETRIEVE,
+    RequestType.COMMIT_RETRIEVE,
+    RequestType.CB_STORE_PRE_COMPUTED,
+    RequestType.CB_STORE_FINAL,
+    RequestType.CB_RETRIEVE_PRE_COMPUTED,
+    RequestType.CB_RETRIEVE_PRE_COMPUTED_V2,
+    RequestType.CB_RETRIEVE_PRE_COMPUTED_V3,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -1813,6 +1837,15 @@ def request_type_to_method_name(request_type: RequestType) -> str:
     return "".join(out)
 
 
+_RPC_METHOD_NAMES = {
+    request_type: request_type_to_method_name(request_type)
+    for request_type in RequestType
+}
+_BATCH_REQUEST_TYPES = {
+    request_type.name.lower(): request_type for request_type in RequestType
+}
+
+
 # ---------------------------------------------------------------------------
 # URL parsing
 # ---------------------------------------------------------------------------
@@ -1884,9 +1917,27 @@ def _parse_grpc_compression(url: str) -> Any:
     return modes[name]
 
 
+def _grpc_affinity_key(context: "grpc.ServicerContext") -> int:
+    """Return the stable client identity carried in gRPC metadata."""
+    for key, value in context.invocation_metadata():
+        if key == _GRPC_CLIENT_ID_METADATA_KEY:
+            return hash(value)
+    return hash(context.peer())
+
+
 # ---------------------------------------------------------------------------
 # Client
 # ---------------------------------------------------------------------------
+
+
+@dataclass
+class _PendingBatchRequest:
+    request_type: RequestType
+    method_name: str
+    stub_method: Any
+    spec: TypedRpcSpec
+    proto_request: Any
+    future: MessagingFuture[Any]
 
 
 class MessageQueueClient:
@@ -1921,6 +1972,20 @@ class MessageQueueClient:
             compression=compression,
         )
         self._stub = lmcache_mq_pb2_grpc.MessageQueueStub(self._channel)
+        self._call_metadata = ((_GRPC_CLIENT_ID_METADATA_KEY, uuid.uuid4().bytes),)
+        self._rpc_methods = {
+            request_type: (
+                _RPC_METHOD_NAMES[request_type],
+                getattr(self._stub, _RPC_METHOD_NAMES[request_type]),
+                typed_spec,
+            )
+            for request_type, typed_spec in _TYPED_RPCS.items()
+        }
+        self._batch_condition = threading.Condition()
+        self._batch_queue: deque[_PendingBatchRequest] = deque()
+        self._batch_thread: threading.Thread | None = None
+        self._inflight_requests = 0
+        self._closing = False
 
     def submit_request(
         self,
@@ -1941,50 +2006,220 @@ class MessageQueueClient:
             A ``MessagingFuture`` completed by the gRPC callback.
         """
         del response_cls
-        method_name = request_type_to_method_name(request_type)
-        stub_method = getattr(self._stub, method_name)
+        method_name, stub_method, typed_spec = self._rpc_methods[request_type]
         future: MessagingFuture[T] = MessagingFuture()
 
-        typed_spec = _TYPED_RPCS[request_type]
         proto_request = typed_spec.python_to_request(*request_payloads)
+        pending = _PendingBatchRequest(
+            request_type=request_type,
+            method_name=method_name,
+            stub_method=stub_method,
+            spec=typed_spec,
+            proto_request=proto_request,
+            future=future,
+        )
 
-        def _on_done_typed(call: "grpc.Future[Any]") -> None:
-            try:
-                proto_response = call.result()
-            except grpc.RpcError as exc:
-                if exc.code() is grpc.StatusCode.UNAVAILABLE:
-                    # Preserve the old DEALER behavior when a daemon disappears
-                    # mid-request. Callers can time out loads and recompute, while
-                    # fire-and-poll stores simply remain unfinished.
-                    logger.warning(
-                        "gRPC call %s lost its server and remains pending: %s",
-                        method_name,
-                        exc,
-                    )
-                    return
-                logger.error("gRPC call %s failed: %s", method_name, exc)
-                future.set_exception(exc)
-                return
-            except Exception as exc:  # defensive
-                logger.exception("gRPC call %s failed", method_name)
-                future.set_exception(exc)
-                return
-            try:
-                decoded = typed_spec.response_to_python(proto_response)
-            except Exception as exc:
-                logger.exception("failed to decode typed response for %s", method_name)
-                future.set_exception(exc)
-                return
-            future.set_result(decoded)
+        use_batch = False
+        with self._batch_condition:
+            if self._closing:
+                raise RuntimeError("MessageQueueClient is closed")
+            use_batch = (
+                self._inflight_requests > 0
+                and request_type not in _GRPC_BATCH_UNSAFE_REQUEST_TYPES
+                and proto_request.ByteSize() <= _GRPC_BATCH_MAX_ITEM_BYTES
+            )
+            self._inflight_requests += 1
+            if use_batch:
+                self._batch_queue.append(pending)
+                self._ensure_batch_thread()
+                self._batch_condition.notify()
 
-        # Match the old DEALER socket semantics: requests submitted while the
-        # daemon is starting or restarting remain pending until it is reachable.
-        call = stub_method.future(proto_request, wait_for_ready=True)
-        call.add_done_callback(_on_done_typed)
+        if not use_batch:
+            self._submit_unary(pending)
         return future
 
     def close(self) -> None:
+        with self._batch_condition:
+            if self._closing:
+                return
+            self._closing = True
+            self._batch_condition.notify()
+            batch_thread = self._batch_thread
+        if batch_thread is not None:
+            batch_thread.join()
         self._channel.close()
+
+    def _submit_unary(self, pending: _PendingBatchRequest) -> None:
+        def _on_done_typed(call: "grpc.Future[Any]") -> None:
+            self._on_unary_done(call, pending)
+
+        # Requests submitted while the daemon starts remain pending until it is
+        # reachable, matching the old DEALER socket behavior.
+        call = pending.stub_method.future(
+            pending.proto_request,
+            metadata=self._call_metadata,
+            wait_for_ready=True,
+        )
+        call.add_done_callback(_on_done_typed)
+
+    def _on_unary_done(
+        self,
+        call: "grpc.Future[Any]",
+        pending: _PendingBatchRequest,
+    ) -> None:
+        try:
+            proto_response = call.result()
+        except grpc.RpcError as exc:
+            self._finish_requests(1)
+            if exc.code() is grpc.StatusCode.UNAVAILABLE:
+                logger.warning(
+                    "gRPC call %s lost its server and remains pending: %s",
+                    pending.method_name,
+                    exc,
+                )
+                return
+            logger.error("gRPC call %s failed: %s", pending.method_name, exc)
+            pending.future.set_exception(exc)
+            return
+        except Exception as exc:  # defensive
+            self._finish_requests(1)
+            logger.exception("gRPC call %s failed", pending.method_name)
+            pending.future.set_exception(exc)
+            return
+
+        try:
+            decoded = pending.spec.response_to_python(proto_response)
+        except Exception as exc:
+            self._finish_requests(1)
+            logger.exception(
+                "failed to decode typed response for %s", pending.method_name
+            )
+            pending.future.set_exception(exc)
+            return
+        self._finish_requests(1)
+        pending.future.set_result(decoded)
+
+    def _ensure_batch_thread(self) -> None:
+        if self._batch_thread is not None:
+            return
+        self._batch_thread = threading.Thread(
+            target=self._batch_loop,
+            daemon=True,
+            name="mq-grpc-batch",
+        )
+        self._batch_thread.start()
+
+    def _batch_loop(self) -> None:
+        while True:
+            with self._batch_condition:
+                self._batch_condition.wait_for(
+                    lambda: self._batch_queue or self._closing
+                )
+                if self._closing and not self._batch_queue:
+                    return
+
+            time.sleep(_GRPC_BATCH_COALESCE_SECONDS)
+            with self._batch_condition:
+                count = min(len(self._batch_queue), _GRPC_BATCH_MAX_ITEMS)
+                batch = [self._batch_queue.popleft() for _ in range(count)]
+
+            request = lmcache_mq_pb2.BatchRequest()
+            for pending in batch:
+                item = request.items.add()
+                getattr(item, pending.request_type.name.lower()).CopyFrom(
+                    pending.proto_request
+                )
+
+            def _on_done_batch(
+                call: "grpc.Future[Any]",
+                _batch: list[_PendingBatchRequest] = batch,
+            ) -> None:
+                self._on_batch_done(call, _batch)
+
+            call = self._stub.Batch.future(
+                request,
+                metadata=self._call_metadata,
+                wait_for_ready=True,
+            )
+            call.add_done_callback(_on_done_batch)
+
+    def _on_batch_done(
+        self,
+        call: "grpc.Future[Any]",
+        batch: list[_PendingBatchRequest],
+    ) -> None:
+        try:
+            response = call.result()
+        except grpc.RpcError as exc:
+            if exc.code() is grpc.StatusCode.UNIMPLEMENTED:
+                for pending in batch:
+                    self._submit_unary(pending)
+                return
+            self._finish_requests(len(batch))
+            if exc.code() is grpc.StatusCode.UNAVAILABLE:
+                logger.warning(
+                    "gRPC batch lost its server and %d requests remain pending: %s",
+                    len(batch),
+                    exc,
+                )
+                return
+            logger.error("gRPC batch failed: %s", exc)
+            for pending in batch:
+                pending.future.set_exception(exc)
+            return
+        except Exception as exc:  # defensive
+            self._finish_requests(len(batch))
+            logger.exception("gRPC batch failed")
+            for pending in batch:
+                pending.future.set_exception(exc)
+            return
+
+        if len(response.items) != len(batch):
+            response_count_error = RuntimeError(
+                f"gRPC batch returned {len(response.items)} responses "
+                f"for {len(batch)} requests"
+            )
+            self._finish_requests(len(batch))
+            for pending in batch:
+                pending.future.set_exception(response_count_error)
+            return
+
+        outcomes: list[tuple[_PendingBatchRequest, Any, BaseException | None]] = []
+        for pending, item in zip(batch, response.items, strict=True):
+            response_field = item.WhichOneof("response")
+            expected_field = pending.request_type.name.lower()
+            if response_field == "error":
+                item_error = RuntimeError(
+                    f"batched gRPC call {pending.method_name} failed "
+                    f"with {item.error.status}: {item.error.details}"
+                )
+                outcomes.append((pending, None, item_error))
+                continue
+            if response_field != expected_field:
+                response_type_error = RuntimeError(
+                    f"batched gRPC call {pending.method_name} returned "
+                    f"{response_field!r}, expected {expected_field!r}"
+                )
+                outcomes.append((pending, None, response_type_error))
+                continue
+            try:
+                decoded = pending.spec.response_to_python(getattr(item, response_field))
+            except Exception as exc:
+                outcomes.append((pending, None, exc))
+            else:
+                outcomes.append((pending, decoded, None))
+
+        self._finish_requests(len(batch))
+        for pending, decoded, outcome_error in outcomes:
+            if outcome_error is not None:
+                pending.future.set_exception(outcome_error)
+            else:
+                pending.future.set_result(decoded)
+
+    def _finish_requests(self, count: int) -> None:
+        with self._batch_condition:
+            self._inflight_requests -= count
+            assert self._inflight_requests >= 0
 
 
 # ---------------------------------------------------------------------------
@@ -2091,28 +2326,107 @@ class _RequestHandlerServicer:
     ):
         self._handlers = handlers
 
-    def _run_handler(
-        self,
-        request_type: RequestType,
-        payloads: tuple[Any, ...],
-        peer: str,
-    ) -> Any:
-        """Route typed Python payloads into the registered request handler."""
-        handler = self._handlers.get(request_type)
-        if handler is None:
-            raise RuntimeError(f"No handler registered for {request_type}")
+    def Batch(self, request: Any, context: "grpc.ServicerContext") -> Any:
+        """Execute a typed micro-batch while preserving response order."""
+        if len(request.items) > _GRPC_BATCH_MAX_ITEMS:
+            context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                f"batch has {len(request.items)} items; "
+                f"maximum is {_GRPC_BATCH_MAX_ITEMS}",
+            )
+        response = lmcache_mq_pb2.BatchResponse()
+        executions: list[tuple[Any, str, TypedRpcSpec, Any]] = []
+        affinity_key = _grpc_affinity_key(context)
 
+        for request_item in request.items:
+            response_item = response.items.add()
+            request_field = request_item.WhichOneof("request")
+            if request_field is None:
+                self._set_batch_error(
+                    response_item,
+                    "INVALID_ARGUMENT",
+                    "batch request item has no request payload",
+                )
+                continue
+            request_type = _BATCH_REQUEST_TYPES.get(request_field)
+            if request_type is None:
+                self._set_batch_error(
+                    response_item,
+                    "INVALID_ARGUMENT",
+                    f"unknown batch request field {request_field!r}",
+                )
+                continue
+
+            handler = self._handlers.get(request_type)
+            if handler is None:
+                self._set_batch_error(
+                    response_item,
+                    "UNIMPLEMENTED",
+                    f"No handler registered for {request_type}",
+                )
+                continue
+
+            spec = _TYPED_RPCS[request_type]
+            try:
+                py_args = spec.request_to_python(getattr(request_item, request_field))
+                execution = self._submit_handler(handler, py_args, affinity_key)
+            except Exception as exc:
+                logger.exception("failed to start batched %s", request_type)
+                self._set_batch_error(
+                    response_item,
+                    "UNKNOWN",
+                    str(exc),
+                )
+                continue
+            executions.append((response_item, request_field, spec, execution))
+
+        for response_item, response_field, spec, execution in executions:
+            try:
+                result = (
+                    execution.result() if isinstance(execution, Future) else execution
+                )
+                proto_response = spec.python_to_response(result)
+                getattr(response_item, response_field).CopyFrom(proto_response)
+            except Exception as exc:
+                logger.exception("failed to complete batched %s", response_field)
+                self._set_batch_error(
+                    response_item,
+                    "UNKNOWN",
+                    str(exc),
+                )
+
+        return response
+
+    @staticmethod
+    def _submit_handler(
+        handler: RequestHandlerBase[Any],
+        payloads: tuple[Any, ...],
+        affinity_key: int,
+    ) -> Any:
         handler_type = handler.get_handler_type()
         if handler_type is HandlerType.SYNC:
             assert isinstance(handler, SyncRequestHandler)
             return handler(payloads)
         if handler_type is HandlerType.BLOCKING:
             assert isinstance(handler, BlockingRequestHandler)
-            # Peer id keeps the same affinity semantics as the old zmq
-            # DEALER-ROUTER identity: one thread per client, forever.
-            fut = handler(payloads, affinity_key=hash(peer))
-            return fut.result()
+            return handler(payloads, affinity_key=affinity_key)
         raise NotImplementedError(f"handler_type {handler_type} not supported")
+
+    def _run_handler(
+        self,
+        handler: RequestHandlerBase[Any],
+        payloads: tuple[Any, ...],
+        context: "grpc.ServicerContext",
+    ) -> Any:
+        """Route typed Python payloads into the registered request handler."""
+        affinity_key = 0
+        if isinstance(handler, BlockingRequestHandler) and isinstance(
+            handler.executor, AffinityThreadPool
+        ):
+            # Stable client metadata keeps old DEALER affinity semantics.
+            affinity_key = _grpc_affinity_key(context)
+        execution = self._submit_handler(handler, payloads, affinity_key)
+        return execution.result() if isinstance(execution, Future) else execution
 
     def _dispatch_typed(
         self,
@@ -2131,24 +2445,19 @@ class _RequestHandlerServicer:
             raise RuntimeError("unreachable")
 
         py_args = spec.request_to_python(request)
-        payload_classes = get_payload_classes(request_type)
-        if len(py_args) != len(payload_classes):
-            context.abort(
-                grpc.StatusCode.INTERNAL,
-                (
-                    f"typed rpc {request_type} produced {len(py_args)} args, "
-                    f"but protocol expects {len(payload_classes)}"
-                ),
-            )
-            raise RuntimeError("unreachable")
-        result = self._run_handler(request_type, py_args, context.peer())
+        result = self._run_handler(handler, py_args, context)
         return spec.python_to_response(result)
+
+    @staticmethod
+    def _set_batch_error(item: Any, status: str, details: str) -> None:
+        item.error.status = status
+        item.error.details = details
 
 
 def _install_servicer_methods() -> None:
     """Attach one typed dispatch method per ``RequestType`` to the servicer."""
     for rt in RequestType:
-        method_name = request_type_to_method_name(rt)
+        method_name = _RPC_METHOD_NAMES[rt]
         typed_spec = _TYPED_RPCS[rt]
         method: Callable[..., Any]
         _resolved_spec: TypedRpcSpec = typed_spec

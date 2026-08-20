@@ -27,8 +27,8 @@ _SHUTDOWN = object()
 class AffinityThreadPool:
     """Thread pool that routes tasks to workers by affinity key.
 
-    Not thread-safe: ``submit()`` must be called from a single thread (the
-    ``MessageQueueServer`` main loop).
+    Thread-safe: concurrent transport workers may submit tasks while routing
+    for each affinity key remains stable.
 
     Args:
         max_workers: Number of worker threads.
@@ -47,6 +47,7 @@ class AffinityThreadPool:
         self._key_to_slot: dict[int, int] = {}
         self._next_slot = 0
         self._overflow_warned = False
+        self._routing_lock = threading.Lock()
         for i in range(max_workers):
             t = threading.Thread(
                 target=self._worker,
@@ -137,7 +138,8 @@ class AffinityThreadPool:
         Returns a :class:`concurrent.futures.Future`.
         """
         future: Future = Future()
-        slot = self._slot_for_key(affinity_key)
+        with self._routing_lock:
+            slot = self._slot_for_key(affinity_key)
         self._queues[slot].put((future, fn, args, kwargs))
         return future
 

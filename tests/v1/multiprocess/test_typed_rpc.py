@@ -13,15 +13,18 @@ the invariants that:
 """
 
 # Standard
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Optional
 import inspect
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
 # Third Party
+import grpc
 import pytest
 import torch
 
@@ -49,6 +52,9 @@ from lmcache.v1.multiprocess.protocol import (
 )
 from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
     lmcache_mq_pb2 as _pb2_typed,
+)
+from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
+    lmcache_mq_pb2_grpc,
 )
 
 # See mq.py: message classes are dynamic; rebind through Any so
@@ -88,6 +94,247 @@ def test_ping_method_name_matches_proto() -> None:
     # If the CamelCase mapping ever drifts from the .proto file, gRPC
     # would 404 the method at handshake time -- catch that here.
     assert request_type_to_method_name(RequestType.PING) == "Ping"
+
+
+def test_batch_proto_covers_every_typed_rpc() -> None:
+    """Batch oneofs must stay in lockstep with the typed RPC registry."""
+    expected_fields = {request_type.name.lower() for request_type in RequestType}
+    request_fields = {
+        field.name: field
+        for field in lmcache_mq_pb2.BatchRequestItem.DESCRIPTOR.oneofs_by_name[
+            "request"
+        ].fields
+    }
+    response_fields = {
+        field.name: field
+        for field in lmcache_mq_pb2.BatchResponseItem.DESCRIPTOR.oneofs_by_name[
+            "response"
+        ].fields
+        if field.name != "error"
+    }
+    assert set(request_fields) == expected_fields
+    assert set(response_fields) == expected_fields
+
+    for request_type, spec in _TYPED_RPCS.items():
+        field_name = request_type.name.lower()
+        assert (
+            request_fields[field_name].message_type is spec.request_message.DESCRIPTOR
+        )
+        assert (
+            response_fields[field_name].message_type is spec.response_message.DESCRIPTOR
+        )
+
+
+def test_batch_rejects_more_than_transport_limit() -> None:
+    """The server bounds work submitted by a single batch RPC."""
+    port = _find_free_port()
+    target = f"127.0.0.1:{port}"
+    server = MessageQueueServer(f"grpc://{target}")
+    server.start()
+    channel = grpc.insecure_channel(target)
+    stub = lmcache_mq_pb2_grpc.MessageQueueStub(channel)
+    request = lmcache_mq_pb2.BatchRequest()
+    for _ in range(65):
+        request.items.add().ping.instance_id = -1
+
+    try:
+        with pytest.raises(grpc.RpcError) as exc_info:
+            stub.Batch(request)
+        assert exc_info.value.code() is grpc.StatusCode.INVALID_ARGUMENT
+    finally:
+        channel.close()
+        server.close()
+
+
+def test_concurrent_mixed_requests_roundtrip_through_batch() -> None:
+    """Concurrent typed methods retain their individual results."""
+    port = _find_free_port()
+    server_url = f"grpc://127.0.0.1:{port}"
+    first_ping_entered = threading.Event()
+    release_first_ping = threading.Event()
+
+    def ping_handler(instance_id: Optional[int]) -> bool:
+        if instance_id == 0:
+            first_ping_entered.set()
+            release_first_ping.wait(timeout=5.0)
+        return True
+
+    def noop_handler() -> str:
+        return "ok"
+
+    server = MessageQueueServer(server_url)
+    server.add_handler(
+        RequestType.PING,
+        get_payload_classes(RequestType.PING),
+        HandlerType.BLOCKING,
+        ping_handler,
+    )
+    server.add_handler(
+        RequestType.NOOP,
+        get_payload_classes(RequestType.NOOP),
+        HandlerType.SYNC,
+        noop_handler,
+    )
+    server.add_normal_thread_pool([RequestType.PING], max_workers=2)
+    server.start()
+    client = MessageQueueClient(server_url)
+
+    try:
+        first: MessagingFuture[bool] = client.submit_request(RequestType.PING, [0])
+        assert first_ping_entered.wait(timeout=5.0)
+        futures: list[MessagingFuture[Any]] = [
+            client.submit_request(RequestType.PING, [1]),
+            client.submit_request(RequestType.NOOP, []),
+            client.submit_request(RequestType.PING, [2]),
+            client.submit_request(RequestType.NOOP, []),
+        ]
+        release_first_ping.set()
+
+        assert first.result(timeout=5.0) is True
+        assert [future.result(timeout=5.0) for future in futures] == [
+            True,
+            "ok",
+            True,
+            "ok",
+        ]
+    finally:
+        release_first_ping.set()
+        client.close()
+        server.close()
+
+
+def test_unix_clients_keep_distinct_batch_affinity() -> None:
+    """Stable client metadata preserves affinity over Unix sockets."""
+    with tempfile.TemporaryDirectory(prefix="lmcache-mq-test-") as directory:
+        server_url = f"grpc+unix://{directory}/mq.sock"
+        threads_by_client: dict[int, set[str]] = {1: set(), 2: set()}
+        seen_lock = threading.Lock()
+
+        def ping_handler(instance_id: Optional[int]) -> bool:
+            assert instance_id is not None
+            client_id = instance_id // 100
+            with seen_lock:
+                threads_by_client[client_id].add(threading.current_thread().name)
+            time.sleep(0.005)
+            return True
+
+        server = MessageQueueServer(server_url)
+        server.add_handler(
+            RequestType.PING,
+            get_payload_classes(RequestType.PING),
+            HandlerType.BLOCKING,
+            ping_handler,
+        )
+        server.add_affinity_thread_pool([RequestType.PING], max_workers=2)
+        server.start()
+        clients = [MessageQueueClient(server_url), MessageQueueClient(server_url)]
+
+        try:
+            futures: list[MessagingFuture[bool]] = []
+            for index in range(8):
+                futures.append(
+                    clients[0].submit_request(RequestType.PING, [100 + index])
+                )
+                futures.append(
+                    clients[1].submit_request(RequestType.PING, [200 + index])
+                )
+            assert all(future.result(timeout=5.0) is True for future in futures)
+            assert all(len(names) == 1 for names in threads_by_client.values())
+            assert threads_by_client[1] != threads_by_client[2]
+        finally:
+            for client in clients:
+                client.close()
+            server.close()
+
+
+def test_batch_item_error_does_not_fail_siblings() -> None:
+    """A handler failure is reported only to its matching future."""
+    port = _find_free_port()
+    server_url = f"grpc://127.0.0.1:{port}"
+    first_ping_entered = threading.Event()
+    release_first_ping = threading.Event()
+
+    def ping_handler(instance_id: Optional[int]) -> bool:
+        if instance_id == 0:
+            first_ping_entered.set()
+            release_first_ping.wait(timeout=5.0)
+        return True
+
+    def failing_noop_handler() -> str:
+        raise ValueError("expected batch failure")
+
+    server = MessageQueueServer(server_url)
+    server.add_handler(
+        RequestType.PING,
+        get_payload_classes(RequestType.PING),
+        HandlerType.BLOCKING,
+        ping_handler,
+    )
+    server.add_handler(
+        RequestType.NOOP,
+        get_payload_classes(RequestType.NOOP),
+        HandlerType.SYNC,
+        failing_noop_handler,
+    )
+    server.add_normal_thread_pool([RequestType.PING], max_workers=2)
+    server.start()
+    client = MessageQueueClient(server_url)
+
+    try:
+        first: MessagingFuture[bool] = client.submit_request(RequestType.PING, [0])
+        assert first_ping_entered.wait(timeout=5.0)
+        failed: MessagingFuture[str] = client.submit_request(RequestType.NOOP, [])
+        succeeded: MessagingFuture[bool] = client.submit_request(RequestType.PING, [1])
+        release_first_ping.set()
+
+        assert first.result(timeout=5.0) is True
+        with pytest.raises(RuntimeError, match="expected batch failure"):
+            failed.result(timeout=5.0)
+        assert succeeded.result(timeout=5.0) is True
+    finally:
+        release_first_ping.set()
+        client.close()
+        server.close()
+
+
+def test_batch_falls_back_to_unary_for_older_server() -> None:
+    """A server without Batch support remains compatible with the client."""
+    port = _find_free_port()
+    target = f"127.0.0.1:{port}"
+    server_url = f"grpc://{target}"
+    first_ping_entered = threading.Event()
+    release_first_ping = threading.Event()
+
+    class LegacyServicer(lmcache_mq_pb2_grpc.MessageQueueServicer):
+        def Batch(self, request: Any, context: Any) -> Any:
+            del request
+            context.abort(grpc.StatusCode.UNIMPLEMENTED, "legacy server")
+
+        def Ping(self, request: Any, context: Any) -> Any:
+            del context
+            if request.instance_id == 0:
+                first_ping_entered.set()
+                release_first_ping.wait(timeout=5.0)
+            return lmcache_mq_pb2.PingResponse(ok=True)
+
+    server = grpc.server(ThreadPoolExecutor(max_workers=2))
+    lmcache_mq_pb2_grpc.add_MessageQueueServicer_to_server(LegacyServicer(), server)
+    server.add_insecure_port(target)
+    server.start()
+    client = MessageQueueClient(server_url)
+
+    try:
+        first: MessagingFuture[bool] = client.submit_request(RequestType.PING, [0])
+        assert first_ping_entered.wait(timeout=5.0)
+        fallback: MessagingFuture[bool] = client.submit_request(RequestType.PING, [1])
+        release_first_ping.set()
+
+        assert first.result(timeout=5.0) is True
+        assert fallback.result(timeout=5.0) is True
+    finally:
+        release_first_ping.set()
+        client.close()
+        server.stop(grace=None).wait()
 
 
 def test_ping_typed_roundtrip() -> None:

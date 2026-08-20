@@ -2,6 +2,7 @@
 """Tests for AffinityThreadPool."""
 
 # Standard
+from concurrent.futures import ThreadPoolExecutor
 import threading
 import time
 
@@ -42,6 +43,31 @@ def test_affinity_routing():
         else:
             results[key] = name
 
+    pool.shutdown()
+
+
+def test_concurrent_submit_keeps_affinity_routing_stable():
+    """Concurrent transport workers cannot race key-to-slot assignment."""
+    pool = AffinityThreadPool(max_workers=4, thread_name_prefix="concurrent")
+    barrier = threading.Barrier(16, timeout=5)
+
+    def submit(key: int) -> tuple[int, str]:
+        barrier.wait()
+        future = pool.submit(
+            lambda: threading.current_thread().name,
+            affinity_key=key,
+        )
+        return key, future.result(timeout=5)
+
+    keys = [index % 4 for index in range(16)]
+    with ThreadPoolExecutor(max_workers=16) as submitters:
+        results = list(submitters.map(submit, keys))
+
+    threads_by_key: dict[int, set[str]] = {}
+    for key, thread_name in results:
+        threads_by_key.setdefault(key, set()).add(thread_name)
+    assert all(len(thread_names) == 1 for thread_names in threads_by_key.values())
+    assert len({next(iter(names)) for names in threads_by_key.values()}) == 4
     pool.shutdown()
 
 
