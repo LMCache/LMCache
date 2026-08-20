@@ -120,6 +120,10 @@ exists. Two empirically verified requirements for reviving it:
 - Requires `cuda-python` (`cuda.bindings`), resolved lazily on first use
   through the package-shared accessor in `platform/cuda/utils.py` (also
   used by `RawCudaIPCWrapper`), so importing lmcache never requires it.
+- NVIDIA-only for now: ROCm reports the `cuda` device type but has no
+  `cuda.bindings`, so `check_event_support` fails closed there. HIP has
+  equivalent memops (`hipStreamWriteValue64`/`hipStreamWaitValue64`), so
+  a ROCm port is possible when needed.
 - `synchronize_event` blocks in the driver like `cudaEventSynchronize`:
   it enqueues the semaphore wait on a dedicated per-(thread, device)
   stream and `cudaStreamSynchronize`s it. Measured wake latency on H200:

@@ -27,6 +27,12 @@ from lmcache.v1.platform.cuda.timeline_semaphore_event_ipc import (
 pytestmark = [
     pytest.mark.cuda,
     pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA device"),
+    # ROCm reports torch.cuda.is_available() but has no cuda.bindings; the
+    # backend correctly fails check_event_support there (fails closed).
+    pytest.mark.skipif(
+        torch.version.hip is not None,
+        reason="timeline-semaphore event IPC is NVIDIA-only (cuda.bindings memops)",
+    ),
 ]
 
 DEVICE = "cuda:0"
