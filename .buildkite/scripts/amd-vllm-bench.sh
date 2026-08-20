@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# Run the shared vLLM benchmark in the latest official ROCm image.
+# Run the shared vLLM benchmark in a pinned official ROCm image.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-VLLM_ROCM_IMAGE="${VLLM_ROCM_IMAGE:-vllm/vllm-openai-rocm:latest}"
+# Pin to a released vLLM ROCm image so LMCache regressions can be separated
+# from upstream image changes. Override via VLLM_ROCM_IMAGE for explicit bumps.
+VLLM_ROCM_IMAGE="${VLLM_ROCM_IMAGE:-vllm/vllm-openai-rocm:v0.26.0}"
 CONTAINER_NAME="lmcache-amd-vllm-bench-${BUILDKITE_BUILD_ID}"
 DOCKER=(docker)
 
