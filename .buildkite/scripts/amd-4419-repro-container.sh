@@ -13,6 +13,7 @@ CLIENT_SCRIPT="${RESULTS_DIR}/repro_lmcache_4419_client.py"
 LMCACHE_PORT="${LMCACHE_PORT:-16555}"
 VLLM_PORT="${VLLM_PORT:-18080}"
 GPU_FOR_VLLM="${GPU_FOR_VLLM:-0}"
+VLLM_ROCM_USE_AITER="${VLLM_ROCM_USE_AITER:-0}"
 
 mkdir -p "${RESULTS_DIR}"
 
@@ -37,6 +38,7 @@ echo "results_dir=${RESULTS_DIR}"
 echo "lmcache_port=${LMCACHE_PORT}"
 echo "vllm_port=${VLLM_PORT}"
 echo "gpu_for_vllm=${GPU_FOR_VLLM}"
+echo "vllm_rocm_use_aiter=${VLLM_ROCM_USE_AITER}"
 python3 --version
 uv --version
 git --version || true
@@ -264,6 +266,7 @@ print(
 PY
 )"
 
+VLLM_ROCM_USE_AITER="${VLLM_ROCM_USE_AITER}" \
 CUDA_VISIBLE_DEVICES="${GPU_FOR_VLLM}" \
 vllm serve deepseek-ai/DeepSeek-V2-Lite \
     --host 127.0.0.1 \

@@ -4,7 +4,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-VLLM_ROCM_IMAGE="${VLLM_ROCM_IMAGE:-rocm/vllm:rocm7.13.0_gfx94X-dcgpu_ubuntu24.04_py3.13_pytorch_2.10.0_vllm_0.19.1}"
+VLLM_ROCM_IMAGE="${VLLM_ROCM_IMAGE:-rocm/vllm:rocm7.14.0_cdna_ubuntu24.04_py3.14_pytorch_2.11.0_vllm_0.23.0}"
 CONTAINER_NAME="lmcache-amd-4419-repro-${BUILDKITE_BUILD_ID}"
 RESULTS_DIR="${REPO_ROOT}/amd-4419-repro-results"
 HOST_LOG="${RESULTS_DIR}/host.log"
