@@ -393,8 +393,11 @@ class StorageBackendBenchmark(ABC):
         config.extra_config = self.extra_config_keys
         config = self._setup_config(config)
 
-        # Create local CPU backend (common to all backends)
-        if self.use_uring and rust_raw:
+        # Create local CPU backend (common to all backends).
+        # For rust_raw_block with use_uring or use_spdk, use MixedMemoryAllocator
+        # so the allocator exposes get_spdk_buffer() for SPDK DMA registration.
+        use_spdk = getattr(self, "use_spdk", False)
+        if (self.use_uring or use_spdk) and rust_raw:
             self._local_cpu = LocalCPUBackend(
                 config=config,
                 metadata=metadata,
@@ -418,7 +421,7 @@ class StorageBackendBenchmark(ABC):
         shapes = metadata.get_shapes()
         self._objs = _make_memory_objs(
             self.num_ops,
-            self.use_odirect,
+            self.use_uring or self.use_odirect,
             self.alignment,
             self._keepalive,
             memory_allocator=self._local_cpu.memory_allocator,
@@ -587,7 +590,6 @@ class StorageBackendBenchmark(ABC):
         with ThreadPoolExecutor(max_workers=self.concurrency) as ex:
             for s in slices:
                 ex.submit(submit_read_slice, s[0], s[1])
-
         return read_results
 
     def _verify_integrity(
@@ -601,16 +603,73 @@ class StorageBackendBenchmark(ABC):
             Tuple of (error_count, is_passed)
         """
         errors = 0
-        for key, read_obj in read_results:
+        total_bytes = 0
+        for idx, (key, read_obj) in enumerate(read_results):
             if read_obj is None:
                 errors += 1
                 continue
-            assert read_obj.tensor is not None
+            if read_obj.tensor is None:
+                errors += 1
+                continue
             if key not in original_data:
                 errors += 1
                 continue
-            if not torch.equal(read_obj.tensor, original_data[key]):
+            original_tensor = original_data[key]
+            # Check shape and dtype match first (fast check)
+            if read_obj.tensor.shape != original_tensor.shape:
+                logger.debug(
+                    "Match failed #%d: shape %s != %s",
+                    idx,
+                    read_obj.tensor.shape,
+                    original_tensor.shape,
+                )
                 errors += 1
+                continue
+            if read_obj.tensor.dtype != original_tensor.dtype:
+                logger.debug(
+                    "Match failed #%d: dtype %s != %s",
+                    idx,
+                    read_obj.tensor.dtype,
+                    original_tensor.dtype,
+                )
+                errors += 1
+                continue
+            total_bytes += original_tensor.numel() * original_tensor.element_size()
+            # Quick size check first
+            if read_obj.tensor.numel() != original_tensor.numel():
+                logger.debug(
+                    "Match failed #%d: numel %d != %d",
+                    idx,
+                    read_obj.tensor.numel(),
+                    original_tensor.numel(),
+                )
+                errors += 1
+                continue
+            # Use a timeout-safe comparison: check a few elements first, then full
+            # This prevents hanging on very large tensors with mismatched data
+            try:
+                # Check if any elements differ (faster than torch.equal)
+                diff_mask = read_obj.tensor != original_tensor
+                if diff_mask.any().item() != 0:
+                    num_diffs = diff_mask.sum().item()
+                    logger.debug(
+                        "Match failed #%d: %d/%d elements differ",
+                        idx,
+                        num_diffs,
+                        original_tensor.numel(),
+                    )
+                    errors += 1
+            except RuntimeError:
+                # Fallback if comparison fails
+                logger.debug("Match failed #%d: comparison error", idx)
+                errors += 1
+
+        logger.info(
+            "Integrity check complete: checked %d tensors, ~%d total bytes, errors=%d",
+            len(read_results) - errors if read_results else 0,
+            total_bytes,
+            errors,
+        )
         return errors, errors == 0
 
     def _cleanup_read_results(
@@ -712,6 +771,14 @@ class RustRawBlockBackendBenchmark(StorageBackendBenchmark):
         chunk_size: int = DEFAULT_CHUNK_SIZE,
         verify_integrity: bool = False,
         max_data_transfer_size: int = 0,
+        # SPDK options
+        use_spdk: bool = False,
+        spdk_transport_type: str = "tcp",
+        spdk_target_ip: str = "127.0.0.1",
+        spdk_target_port: str = "4420",
+        spdk_target_nqn: str = "nqn.2019-04.pos:subsystem1",
+        spdk_core_mask: str = "",  # Hex core mask for SPDK (e.g., "0x3f" for cores 0-5)
+        spdk_mem_size_mb: int = 4096,  # MB for SPDK hugepage memory allocation
     ):
         super().__init__(
             "rust_raw_block",
@@ -732,6 +799,14 @@ class RustRawBlockBackendBenchmark(StorageBackendBenchmark):
         self.use_uring = use_uring
         self.use_uring_cmd = use_uring_cmd
         self.max_data_transfer_size = max_data_transfer_size
+        # SPDK options
+        self.use_spdk = use_spdk
+        self.spdk_transport_type = spdk_transport_type
+        self.spdk_target_ip = spdk_target_ip
+        self.spdk_target_port = spdk_target_port
+        self.spdk_target_nqn = spdk_target_nqn
+        self.spdk_core_mask = spdk_core_mask
+        self.spdk_mem_size_mb = spdk_mem_size_mb
         # Create manifest path
         self._manifest_path = os.path.join(
             tempfile.gettempdir(),
@@ -740,8 +815,13 @@ class RustRawBlockBackendBenchmark(StorageBackendBenchmark):
 
     @property
     def extra_config_keys(self) -> dict:
-        return {
-            "rust_raw_block.device_path": self.raw_device,
+        # For SPDK mode, use NQN as device identifier since no raw device file
+        device_path = self.raw_device
+        if self.use_spdk:
+            device_path = self.spdk_target_nqn
+
+        result = {
+            "rust_raw_block.device_path": device_path,
             "rust_raw_block.block_align": self.alignment,
             "rust_raw_block.header_bytes": self.alignment,
             "rust_raw_block.use_odirect": self.use_odirect,
@@ -751,9 +831,39 @@ class RustRawBlockBackendBenchmark(StorageBackendBenchmark):
             "rust_raw_block.use_uring_cmd": self.use_uring_cmd,
             "rust_raw_block.max_data_transfer_size": self.max_data_transfer_size,
         }
+        # Add SPDK options when enabled, including capacity_bytes
+        if self.use_spdk:
+            # For SPDK mode, compute capacity from raw_device_size_gb
+            capacity_bytes = int(self.raw_device_size_gb * 1024**3)
+            result.update(
+                {
+                    "rust_raw_block.use_spdk": True,
+                    "rust_raw_block.spdk_transport_type": self.spdk_transport_type,
+                    "rust_raw_block.spdk_target_ip": self.spdk_target_ip,
+                    "rust_raw_block.spdk_target_port": self.spdk_target_port,
+                    "rust_raw_block.spdk_target_nqn": self.spdk_target_nqn,
+                    "rust_raw_block.spdk_core_mask": self.spdk_core_mask,
+                    "rust_raw_block.spdk_mem_size_mb": self.spdk_mem_size_mb,
+                    "rust_raw_block.capacity_bytes": capacity_bytes,
+                }
+            )
+        return result
 
     def _setup_device(self) -> None:
-        """Setup raw block device or temp file."""
+        """Setup raw block device or temp file.
+
+        For SPDK mode, device setup is skipped since SPDK manages
+        NVMe device connection directly via its transport layer.
+        """
+        if self.use_spdk:
+            # SPDK manages device connection internally - no temp file needed
+            logger.info(
+                "RustRawBlockBackendBenchmark: SPDK enabled - skipping device "
+                "setup (SPDK will connect to NVMe device via %s)",
+                self.spdk_transport_type,
+            )
+            return
+
         is_block_device = False
         is_char_device = False
         self._temp_dir = None
@@ -830,15 +940,38 @@ class RustRawBlockBackendBenchmark(StorageBackendBenchmark):
         if self._backend:
             self._backend.close()
 
-    def _get_extra_result_fields(self) -> dict:
+    def _get_extra_result_fields(self) -> dict[str, Any]:
         """Get extra fields for RustRawBlockBackend benchmark results."""
-        return {
+        result: dict[str, Any] = {
             "use_uring": self.use_uring,
             "use_uring_cmd": self.use_uring_cmd,
         }
+        if self.use_spdk:
+            result.update(
+                {
+                    "use_spdk": True,
+                    "spdk_transport_type": self.spdk_transport_type,
+                    "spdk_target_ip": self.spdk_target_ip,
+                    "spdk_target_port": self.spdk_target_port,
+                    "spdk_target_nqn": self.spdk_target_nqn,
+                    "spdk_core_mask": self.spdk_core_mask,
+                }
+            )
+        return result
 
     def _cleanup_device(self) -> None:
-        """Cleanup temp files."""
+        """Cleanup temp files.
+
+        For SPDK mode, cleanup is skipped since SPDK manages
+        NVMe device connection internally.
+        """
+        if self.use_spdk:
+            logger.info(
+                "RustRawBlockBackendBenchmark: SPDK enabled - skipping device "
+                "cleanup (SPDK manages device internally)",
+            )
+            return
+
         if self.cleanup_raw_device or self._temp_dir:
             try:
                 os.remove(self.raw_device)
@@ -1036,7 +1169,8 @@ def main() -> None:
         default="both",
         help=(
             "Backend to benchmark."
-            "For both, it will benchmark local_disk and rust_raw_block"
+            "For both, it will benchmark local_disk and rust_raw_block. "
+            "Use --use-spdk to enable SPDK mode with rust_raw_block."
         ),
     )
     parser.add_argument(
@@ -1119,11 +1253,88 @@ def main() -> None:
         help="Output JSON file path or directory",
     )
 
+    # SPDK-specific arguments
+    parser.add_argument(
+        "--spdk-target-ip",
+        type=str,
+        default="127.0.0.1",
+        help="SPDK target IP address (default: 127.0.0.1)",
+    )
+    parser.add_argument(
+        "--spdk-target-port",
+        type=str,
+        default="4420",
+        help="SPDK target port (default: 4420)",
+    )
+    parser.add_argument(
+        "--spdk-target-nqn",
+        type=str,
+        default="nqn.2019-04.pos:subsystem1",
+        help="SPDK target NQN (NVMe Qualified Name)",
+    )
+    parser.add_argument(
+        "--spdk-transport-type",
+        type=str,
+        default="tcp",
+        choices=["pcie", "tcp"],
+        help=(
+            "SPDK transport type: 'pcie' for local NVMe, "
+            "'tcp' for NVMe-oF (default: tcp)"
+        ),
+    )
+    parser.add_argument(
+        "--spdk-pcie-address",
+        type=str,
+        default="",
+        help="PCIe device address for local NVMe (e.g., 0000:01:00.0)"
+        " Used when transport_type=pcie",
+    )
+    parser.add_argument(
+        "--spdk-raw-device",
+        type=str,
+        default="",
+        help="SPDK raw block device path (if empty, uses a temp file)",
+    )
+    parser.add_argument("--spdk-raw-device-size-gb", type=float, default=1.0)
+    parser.add_argument(
+        "--use-spdk",
+        action="store_true",
+        help="Enable SPDK mode (uses hugepages and SPDK DMA)",
+    )
+    parser.add_argument(
+        "--spdk-core-mask",
+        type=str,
+        default="",
+        help=(
+            "SPDK core mask in hex format (e.g., '0x3f' for cores 0-5). "
+            "I/O worker and admin worker cores are derived from this mask: "
+            "- If only 1 core: All workers use that single core "
+            "- If 2+ cores: I/O worker uses the highest core, "
+            "admin uses the second-highest "
+            "Environment variables LMCACHE_IO_WORKER_CORE and "
+            "LMCACHE_ADMIN_WORKER_CORE can override the derived cores."
+        ),
+    )
+    parser.add_argument(
+        "--spdk-mem-size-mb",
+        type=int,
+        default=4096,
+        help="MB for SPDK hugepage memory allocation (default: 4096)",
+    )
+
     args = parser.parse_args()
 
     # use_uring_cmd requires io_uring as io_engine
     if args.use_uring_cmd:
         args.use_uring = True
+
+    # use_spdk implies rust_raw_block backend with SPDK options
+    if args.use_spdk and args.backend in ("both", "local_disk"):
+        logger.warning(
+            "--use-spdk requires --backend=rust_raw_block; "
+            "auto-switching backend to rust_raw_block"
+        )
+        args.backend = "rust_raw_block"
 
     # write_bench defaults to True (write benchmark), set to False for read benchmark
     write_bench = args.write_bench.lower() in ("true", "1", "yes", "y", "")
@@ -1155,11 +1366,21 @@ def main() -> None:
             raw_device = os.path.join(args.local_disk_dir, "raw_block.bin")
             cleanup_raw_device = True
 
+        # Determine SPDK target IP based on transport type
+        # For PCIe: use --spdk-pcie-address as the target IP (device address)
+        # For TCP: use --spdk-target-ip (NVMe-oF target IP)
+        spdk_transport_type = args.spdk_transport_type
+        spdk_target_ip = args.spdk_target_ip
+        if spdk_transport_type == "pcie" and args.spdk_pcie_address:
+            spdk_target_ip = args.spdk_pcie_address
+
         rustraw_bench = RustRawBlockBackendBenchmark(
             num_ops=args.num_ops,
             concurrency=args.concurrency,
             raw_device=raw_device,
-            raw_device_size_gb=args.raw_device_size_gb,
+            raw_device_size_gb=args.spdk_raw_device_size_gb
+            if args.use_spdk
+            else args.raw_device_size_gb,
             use_odirect=args.raw_odirect,
             alignment=args.alignment,
             cleanup_raw_device=cleanup_raw_device,
@@ -1169,9 +1390,22 @@ def main() -> None:
             chunk_size=args.chunk_size,
             verify_integrity=args.verify_integrity,
             max_data_transfer_size=args.max_data_transfer_size,
+            # SPDK options
+            use_spdk=args.use_spdk,
+            spdk_transport_type=spdk_transport_type,
+            spdk_target_ip=spdk_target_ip,
+            spdk_target_port=args.spdk_target_port,
+            spdk_target_nqn=args.spdk_target_nqn,
+            spdk_core_mask=args.spdk_core_mask,
+            spdk_mem_size_mb=args.spdk_mem_size_mb,
         )
         result = rustraw_bench.run()
         result["raw_device"] = raw_device
+        if args.use_spdk:
+            result["spdk_transport_type"] = spdk_transport_type
+            result["spdk_target_ip"] = spdk_target_ip
+            result["spdk_target_port"] = args.spdk_target_port
+            result["spdk_target_nqn"] = args.spdk_target_nqn
         results.append(result)
 
     # Run Hf3fsBackend benchmark

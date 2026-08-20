@@ -158,6 +158,20 @@ class RustRawBlockBackend(StoragePluginInterface):
                     e,
                 )
 
+        # Register LocalCPUBackend's hugepage-allocated buffer with SPDK
+        # for zero-copy DMA operations (same pattern as io_uring fixed buffers)
+        if self._core.io_engine == "spdk":
+            try:
+                self._core.register_spdk_external_buffers(
+                    self.local_cpu_backend.get_memory_allocator()
+                )
+            except Exception as e:
+                logger.warning(
+                    "RustRawBlockBackend: failed to register SPDK external "
+                    "buffers: %s. SPDK DMA operations may use internal buffers.",
+                    e,
+                )
+
         self._warn_if_loaded_metadata_looks_cross_rank()
 
         self._put_lock = threading.Lock()
@@ -306,8 +320,8 @@ class RustRawBlockBackend(StoragePluginInterface):
         spdk_target_nqn = str(
             extra.get("rust_raw_block.spdk_target_nqn", "nqn.2019-04.pos:subsystem1")
         )
-        spdk_use_hugepages = bool(extra.get("rust_raw_block.spdk_use_hugepages", True))
         spdk_core_mask = str(extra.get("rust_raw_block.spdk_core_mask", ""))
+        spdk_mem_size_mb = int(extra.get("rust_raw_block.spdk_mem_size_mb", 4096))
 
         return RawBlockCoreConfig(
             device_path=self.device_path,
@@ -343,8 +357,8 @@ class RustRawBlockBackend(StoragePluginInterface):
             spdk_target_ip=spdk_target_ip,
             spdk_target_port=spdk_target_port,
             spdk_target_nqn=spdk_target_nqn,
-            spdk_use_hugepages=spdk_use_hugepages,
             spdk_core_mask=spdk_core_mask,
+            spdk_mem_size_mb=spdk_mem_size_mb,
         )
 
     def _warn_if_loaded_metadata_looks_cross_rank(self) -> None:
@@ -441,7 +455,7 @@ class RustRawBlockBackend(StoragePluginInterface):
         # release their ref / put-task entry in their coroutine's finally.
         scheduled_count = 0
         try:
-            if self._core.io_engine == "io_uring" and len(pending) > 1:
+            if self._core.io_engine in ("io_uring", "spdk") and len(pending) > 1:
                 coro = self._submit_put_many(pending, on_complete_callback)
                 try:
                     fut = asyncio.run_coroutine_threadsafe(coro, loop)

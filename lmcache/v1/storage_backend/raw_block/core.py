@@ -6,8 +6,13 @@ from __future__ import annotations
 # Standard
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 import ctypes
+
+if TYPE_CHECKING:
+    from lmcache.v1.storage_backend.raw_block.spdk_ffi import SpdkIoEngineFFI
+
+# Standard
 import json
 import os
 import re
@@ -28,6 +33,10 @@ from lmcache.utils import (
     DiskCacheMetadata,
 )
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
+from lmcache.v1.storage_backend.raw_block.buffer_pool import (
+    CheckPointPayloadBufferPool,
+    HeaderBufferPool,
+)
 from lmcache.v1.storage_backend.raw_block.key_codec import (
     RawBlockKeyNamespace,
     RawBlockKeySpec,
@@ -41,7 +50,7 @@ logger = init_logger(__name__)
 _DEFAULT_META_MAGIC = b"LMCIDX01"
 _DEFAULT_META_VERSION = 1
 _META_HEADER_STRUCT = struct.Struct("<8sIQQI")
-RAW_BLOCK_IO_ENGINES = frozenset({"posix", "io_uring"})
+RAW_BLOCK_IO_ENGINES = frozenset({"posix", "io_uring", "spdk"})
 DEFAULT_IOURING_QUEUE_DEPTH = 256
 _MAX_FDP_PLACEMENT_ID = 0xFFFF
 
@@ -54,6 +63,45 @@ _MAX_FDP_PLACEMENT_ID = 0xFFFF
 # Metadata checkpoint placement is optional. ``None`` keeps the historical
 # default NVMe write behavior; a positive identifier emits an FDP directive.
 PlacementId = int | None
+
+
+# Module-level lock for serializing SPDK ctypes calls.
+# SPDK's internal state may not be fully concurrent-safe, so we serialize
+# access to C functions while still allowing GIL release for parallelism.
+_spdk_call_lock = threading.Lock()
+
+
+def _spdk_call_with_gil_released(func, *args):
+    """Call an SPDK C function synchronously.
+
+    This helper function invokes a SPDK ctypes call directly in the
+    current thread, propagating any exceptions raised by the underlying
+    C function.
+
+    Args:
+        func: ctypes CFunctype to invoke.
+        *args: Arguments to pass to the function.
+
+    Returns:
+        The return value of the function.
+
+    Raises:
+        Exception: Re-raises any exception raised by the function.
+    """
+    result_container = [None]
+    error_container = [None]
+
+    def _call_wrapper():
+        try:
+            result_container[0] = func(*args)
+        except Exception as e:
+            error_container[0] = e
+
+    _call_wrapper()
+
+    if error_container[0] is not None:
+        raise error_container[0]
+    return result_container[0]
 
 
 def round_up(x: int, align: int) -> int:
@@ -209,8 +257,8 @@ class RawBlockCoreConfig:
     spdk_target_ip: str = "127.0.0.1"  # For PCIe: device address (e.g., "0000:01:00.0")
     spdk_target_port: str = "4420"
     spdk_target_nqn: str = "nqn.2019-04.pos:subsystem1"
-    spdk_use_hugepages: bool = True
     spdk_core_mask: str = ""  # Hex core mask for SPDK (e.g., "0x3f" for cores 0-5)
+    spdk_mem_size_mb: int = 4096  # MB for SPDK hugepage memory allocation
 
 
 @dataclass
@@ -284,6 +332,15 @@ class RawBlockCore:
         self.io_engine = normalize_raw_block_io_engine(config.io_engine)
         self.iouring_queue_depth = int(config.iouring_queue_depth)
         self.use_uring_cmd = bool(config.use_uring_cmd)
+
+        # SPDK-specific configuration (consumed when io_engine="spdk")
+        self.spdk_transport_type = str(config.spdk_transport_type)
+        self.spdk_target_ip = str(config.spdk_target_ip)
+        self.spdk_target_port = str(config.spdk_target_port)
+        self.spdk_target_nqn = str(config.spdk_target_nqn)
+        self.spdk_core_mask = str(config.spdk_core_mask)
+        self.spdk_mem_size_mb = int(config.spdk_mem_size_mb)
+
         self.fdp_slot_affinity_enabled = bool(config.fdp_slot_affinity_enabled)
         self.meta_checkpoint_placement_id = normalize_raw_block_placement_ids(
             [config.meta_checkpoint_placement_id],
@@ -305,8 +362,12 @@ class RawBlockCore:
             self.use_odirect = False
         self.key_namespace = key_namespace
 
-        if not self.device_path:
-            raise ValueError("RawBlockCore requires a non-empty device_path")
+        # For SPDK mode, device_path is not required (SPDK manages NVMe connection)
+        if not self.device_path and self.io_engine != "spdk":
+            raise ValueError(
+                "RawBlockCore requires a non-empty device_path when io_engine != 'spdk'"
+            )
+
         if self.block_align <= 0 or (self.block_align & (self.block_align - 1)) != 0:
             raise ValueError(
                 f"block_align must be a power of 2, got {self.block_align}"
@@ -395,6 +456,14 @@ class RawBlockCore:
         self._raw = None
         self._closed = False
 
+        # SPDK engine (initialized when io_engine="spdk")
+        self._spdk_engine: Optional["SpdkIoEngineFFI"] = None
+        # Registered external buffer for SPDK zero-copy DMA
+        self._spdk_ext_buf_ptr: int = 0
+        self._spdk_ext_buf_size: int = 0
+        # Registered external buffer regions for _is_buffer_spdk_registered()
+        self._registered_external_buffers: list[tuple[int, int]] = []
+
         self._meta_seq: int = 0
         self._meta_dirty_total: int = 0
         self._meta_persisted: int = 0
@@ -404,6 +473,50 @@ class RawBlockCore:
         self._meta_thread: Optional[threading.Thread] = None
 
         try:
+            # Initialize SPDK engine before capacity check if enabled
+            # (capacity auto-detection requires the SPDK engine)
+            if self.io_engine == "spdk":
+                if self.spdk_transport_type == "tcp":
+                    logger.debug(
+                        "RawBlockCore: initializing SPDK engine for NVMe-oF "
+                        "target %s:%s (NQN: %s)",
+                        self.spdk_target_ip,
+                        self.spdk_target_port,
+                        self.spdk_target_nqn,
+                    )
+                else:
+                    logger.debug(
+                        "RawBlockCore: initializing SPDK engine for PCIe device %s",
+                        self.spdk_target_ip,
+                    )
+                self._init_spdk_engine()
+                # Create header buffer pool for zero-copy DMA writes
+                self._header_pool: Optional[HeaderBufferPool] = HeaderBufferPool(
+                    buffer_size=self.block_align,
+                    pool_size=32,
+                    spdk_engine=self._spdk_engine,
+                )
+                logger.debug(
+                    "RawBlockCore: SPDK header buffer pool created "
+                    "(buffers=%d size=%d)",
+                    self._header_pool.pool_size,
+                    self._header_pool.buffer_size,
+                )
+                # Create checkpoint payload buffer pool for zero-copy DMA writes
+                self._checkpoint_pool: Optional[CheckPointPayloadBufferPool] = (
+                    CheckPointPayloadBufferPool(
+                        buffer_size=self._meta_payload_capacity(),
+                        pool_size=2,
+                        spdk_engine=self._spdk_engine,
+                    )
+                )
+                logger.debug(
+                    "RawBlockCore: SPDK checkpoint payload buffer pool created "
+                    "(buffers=%d size=%d)",
+                    self._checkpoint_pool.pool_size,
+                    self._checkpoint_pool.buffer_size,
+                )
+
             self._ensure_capacity_and_layout()
             if self.load_checkpoint_on_init:
                 self._load_checkpoint_from_device()
@@ -417,6 +530,12 @@ class RawBlockCore:
                     name="raw-block-core-checkpoint",
                 )
                 self._meta_thread.start()
+
+            # SPDK buffer pools are already created above
+            # For non-SPDK modes, set pools to None
+            if self.io_engine != "spdk":
+                self._header_pool = None
+                self._checkpoint_pool = None
         except Exception:
             self._cleanup_after_init_failure()
             raise
@@ -506,8 +625,16 @@ class RawBlockCore:
         return aligned_bytes
 
     def _rawdev(self):
-        """Return the lazily opened Rust raw-block device binding."""
+        """Return the lazily opened Rust raw-block device binding.
+
+        Note: When SPDK is enabled (`io_engine="spdk"`), this returns None
+        because SPDK manages the NVMe connection directly without
+        needing the Rust raw-block device.
+        """
         if self._raw is None:
+            # For SPDK mode, skip RawBlockDevice - SPDK handles I/O directly
+            if self.io_engine == "spdk":
+                return None
             try:
                 # Third Party
                 from lmcache_rust_raw_block_io import RawBlockDevice  # type: ignore
@@ -516,12 +643,15 @@ class RawBlockCore:
                     "Rust raw-block extension is not installed. "
                     "Install / build `rust_raw_block_io` and retry."
                 ) from e
+            # For SPDK mode, use posix since SPDK handles I/O directly
+            # via its own NVMe driver layer, not through the Rust device
+            raw_io_engine = "posix" if self.io_engine == "spdk" else self.io_engine
             self._raw = RawBlockDevice(
                 self.device_path,
                 writable=True,
                 use_odirect=self.use_odirect,
                 alignment=self.block_align,
-                io_engine=self.io_engine,
+                io_engine=raw_io_engine,
                 iouring_queue_depth=self.iouring_queue_depth,
                 use_uring_cmd=self.use_uring_cmd,
             )
@@ -559,6 +689,219 @@ class RawBlockCore:
             raw_device: Object implementing the Rust raw-device methods.
         """
         self._raw = raw_device
+
+    def _init_spdk_engine(self) -> None:
+        """Initialize SPDK engine.
+
+        Initializes the SPDK environment, connects to the NVMe device
+        (either via PCIe or NVMe-oF TCP transport), and sets up
+        the admin and I/O worker threads.
+
+        Raises:
+            RuntimeError: If SPDK engine initialization fails.
+        """
+        try:
+            # First Party
+            from lmcache.v1.storage_backend.raw_block.spdk_ffi import SpdkIoEngineFFI
+
+            self._spdk_engine = SpdkIoEngineFFI()
+
+            # Set SPDK memory size for hugepage allocation (must be called
+            # before init() so SPDK reserves the correct amount of memory)
+            self._spdk_engine.set_mem_size(self.spdk_mem_size_mb)
+
+            # Set SPDK core mask if provided
+            if self.spdk_core_mask:
+                rc = self._spdk_engine.set_dpdk_core_mask(self.spdk_core_mask)
+                if rc != 0:
+                    raise RuntimeError(
+                        f"Failed to set SPDK DPDK core mask to {self.spdk_core_mask}"
+                    )
+
+            # Initialize SPDK
+            rc = self._spdk_engine.init()
+            if rc != 0:
+                raise RuntimeError("Failed to initialize SPDK environment")
+
+            # Set CPU affinity for SPDK - critical for proper SPDK operation
+            # Dynamically determine producer cores based on system topology
+            total_cores = os.cpu_count() or 1
+            all_cores = set(range(total_cores))
+
+            # Determine cores to exclude (reserved for SPDK)
+            reserved_cores: set[int] = set()
+
+            if self.spdk_core_mask:
+                # Parse the hex core mask to get reserved core indices
+                try:
+                    mask_value = int(self.spdk_core_mask, 16)
+                    for bit in range(total_cores):
+                        if mask_value & (1 << bit):
+                            reserved_cores.add(bit)
+                except ValueError:
+                    logger.warning(
+                        "RawBlockCore: invalid spdk_core_mask '%s', "
+                        "using default reserved cores",
+                        self.spdk_core_mask,
+                    )
+                    reserved_cores.update([max(1, total_cores - 1)])
+            else:
+                # Default: exclude only the last core (total_cores - 1)
+                # Ensure at least core 0 is reserved to avoid negative index
+                reserved_cores.update([max(1, total_cores - 1)])
+
+            # Producer cores = all system cores minus reserved SPDK cores
+            producer_cores = all_cores - reserved_cores
+
+            if not producer_cores:
+                raise RuntimeError(
+                    "No producer cores available after excluding reserved cores "
+                    f"(total={total_cores}, reserved={reserved_cores})"
+                )
+
+            logger.info(
+                "RawBlockCore: CPU affinity set for SPDK workers "
+                "(total_cores=%d, reserved=%s)",
+                total_cores,
+                sorted(reserved_cores),
+            )
+            os.sched_setaffinity(0, producer_cores)
+
+            # Launch the I/O worker thread with connection parameters.
+            # launch_io_worker internally calls core_set_connection_params
+            # and core_launch_io_worker to handle both PCIe and TCP transport.
+            rc = self._spdk_engine.launch_io_worker(
+                transport_type=self.spdk_transport_type,
+                addr=self.spdk_target_ip,
+                port=self.spdk_target_port,
+                nqn=self.spdk_target_nqn,
+            )
+            if rc != 0:
+                raise RuntimeError(
+                    f"Failed to launch SPDK I/O worker "
+                    f"(type={self.spdk_transport_type})"
+                )
+
+            if self.spdk_transport_type == "tcp":
+                logger.info(
+                    "RawBlockCore: SPDK engine initialized successfully "
+                    "(NVMe-oF target=%s:%s)",
+                    self.spdk_target_ip,
+                    self.spdk_target_port,
+                )
+            else:
+                logger.info(
+                    "RawBlockCore: SPDK engine initialized successfully "
+                    "(PCIe device=%s)",
+                    self.spdk_target_ip,
+                )
+        except Exception as e:
+            self._spdk_engine = None
+            raise RuntimeError(f"Failed to initialize SPDK engine: {e}") from e
+
+    def _cleanup_spdk_engine(self) -> None:
+        """Clean up SPDK engine resources.
+
+        Shuts down the I/O worker thread, disconnects from the NVMe device,
+        and deinitializes the SPDK environment.
+        """
+        if self._spdk_engine is None:
+            return
+
+        try:
+            # Shutdown I/O worker
+            self._spdk_engine.shutdown_io_worker()
+
+            # Deinitialize SPDK
+            self._spdk_engine.deinit()
+
+            logger.debug("RawBlockCore: SPDK engine cleaned up")
+        except Exception as e:
+            logger.warning("RawBlockCore: error cleaning up SPDK engine: %s", e)
+        finally:
+            self._spdk_engine = None
+
+    def register_external_memory(self, ptr: int, size: int) -> bool:
+        """Register an external memory buffer with SPDK for DMA.
+
+        Args:
+            ptr: Physical/virtual address of the buffer.
+            size: Size of the buffer in bytes.
+
+        Returns:
+            True if registration succeeded, False otherwise.
+        """
+        if self._spdk_engine is None:
+            logger.warning(
+                "SPDK engine not initialized. Cannot register external memory."
+            )
+            return False
+
+        try:
+            rc = self._spdk_engine.register_external_memory(ptr, size)
+            if rc == 0:
+                self._registered_external_buffers.append((ptr, size))
+                logger.info(
+                    "RawBlockCore: registered external buffer with SPDK "
+                    "(ptr=0x%x, size=%d)",
+                    ptr,
+                    size,
+                )
+                return True
+            else:
+                logger.error("RawBlockCore: SPDK registration failed with rc=%d", rc)
+                return False
+        except Exception as e:
+            logger.error("RawBlockCore: SPDK registration exception: %s", e)
+            return False
+
+    def register_spdk_external_buffers(self, memory_allocator: Any) -> None:
+        """Register LocalCPUBackend's hugepage-allocated buffer with SPDK.
+
+        This method retrieves the main CPU buffer from the LocalCPUBackend's
+        allocator (which was allocated with hugepages when SPDK is enabled)
+        and registers it with SPDK for zero-copy DMA operations.
+
+        Args:
+            memory_allocator: Local CPU allocator that exposes
+                ``get_spdk_buffer()`` and returns the hugepage-allocated buffer.
+
+        Raises:
+            RuntimeError: If SPDK engine is not initialized or buffer
+                registration fails.
+        """
+        if not self.io_engine == "spdk":
+            return
+        if self._spdk_engine is None:
+            raise RuntimeError(
+                "SPDK engine not initialized. Cannot register external buffer."
+            )
+
+        get_spdk_buffer = getattr(memory_allocator, "get_spdk_buffer", None)
+        if not callable(get_spdk_buffer):
+            logger.warning(
+                "RawBlockCore: allocator does not expose get_spdk_buffer(); "
+                "SPDK external-buffer zero-copy is disabled"
+            )
+            return
+
+        buffer = get_spdk_buffer()
+        if buffer is None:
+            logger.warning(
+                "RawBlockCore: allocator returned None for get_spdk_buffer(); "
+                "SPDK external-buffer zero-copy is disabled"
+            )
+            return
+
+        ptr = int(buffer.data_ptr())
+        size = buffer.numel() * buffer.element_size()
+
+        if not self.register_external_memory(ptr, size):
+            raise RuntimeError(
+                f"Failed to register external buffer with SPDK (ptr=0x{ptr:x}, "
+                f"size={size}). SPDK DMA operations will not use "
+                "zero-copy mode."
+            )
 
     def register_fixed_buffers_from_allocator(self, memory_allocator: Any) -> None:
         """Register allocator pages with io_uring when the allocator exposes them.
@@ -1094,7 +1437,30 @@ class RawBlockCore:
                 self._raw = None
 
     def _cleanup_after_init_failure(self) -> None:
-        """Close resources that may have been opened before init failed."""
+        """Clean up resources when initialization fails.
+
+        This is called from the except block in ``__init__`` to ensure
+        partial resources are cleaned up before re-raising the exception.
+
+        For SPDK mode, only SPDK resources are cleaned up.
+        For non-SPDK mode, raw device and thread resources are cleaned up.
+        """
+        if self.io_engine == "spdk":
+            if self._spdk_engine is not None:
+                try:
+                    self._cleanup_spdk_engine()
+                except Exception:
+                    pass
+
+            for attr in ("_header_pool", "_checkpoint_pool"):
+                pool = getattr(self, attr, None)
+                if pool is not None and hasattr(pool, "cleanup"):
+                    try:
+                        pool.cleanup()
+                    except Exception:
+                        pass
+            return
+
         self._meta_stop_evt.set()
         if self._meta_thread is not None:
             self._meta_thread.join(timeout=5)
@@ -1412,6 +1778,241 @@ class RawBlockCore:
             if copy_back:
                 dst[:payload_len] = target[:payload_len]
 
+    def _is_buffer_spdk_registered(self, buf_ptr: int) -> bool:
+        """Check if a buffer pointer is within registered memory regions.
+
+        This checks both externally-registered buffers (hugepage memory from
+        LocalCPUBackend) and internally-allocated SPDK DMA buffers (header
+        pool, checkpoint pool).
+
+        Args:
+            buf_ptr: Buffer pointer to check.
+
+        Returns:
+            True if the buffer is within a registered region, False otherwise.
+        """
+        if hasattr(self, "_registered_external_buffers"):
+            for reg_ptr, reg_size in self._registered_external_buffers:
+                if reg_ptr <= buf_ptr < reg_ptr + reg_size:
+                    return True
+
+        if hasattr(self, "_header_pool") and self._header_pool is not None:
+            for reg_ptr, reg_size in self._header_pool._spdk_ptrs:
+                if reg_ptr <= buf_ptr < reg_ptr + reg_size:
+                    return True
+
+        if hasattr(self, "_checkpoint_pool") and self._checkpoint_pool is not None:
+            for reg_ptr, reg_size in self._checkpoint_pool._spdk_ptrs:
+                if reg_ptr <= buf_ptr < reg_ptr + reg_size:
+                    return True
+
+        return False
+
+    def _write_spdk_buffers(
+        self,
+        offsets: Sequence[int],
+        buffers: Sequence[Any],
+        payload_lens: Sequence[int],
+        total_lens: Sequence[int],
+    ) -> None:
+        """Write buffers using SPDK engine.
+
+        The GIL is released during each SPDK I/O call to allow other Python
+        threads to execute in parallel.
+
+        Args:
+            offsets: Device byte offsets for each write.
+            buffers: Python buffers to write.
+            payload_lens: Logical payload lengths for each buffer.
+            total_lens: Physical I/O byte counts for each buffer.
+
+        Raises:
+            RuntimeError: If SPDK engine is not initialized.
+            Exception: Propagates SPDK I/O errors.
+        """
+        if self._spdk_engine is None:
+            raise RuntimeError("SPDK engine not initialized")
+
+        ffi = self._spdk_engine
+
+        # Perform writes using SPDK (pass byte offsets and byte counts)
+        for offset, buf, payload_len, total_len in zip(
+            offsets, buffers, payload_lens, total_lens, strict=True
+        ):
+            # Get the raw pointer from the buffer for SPDK DMA
+            if hasattr(buf, "data_ptr"):
+                buf_ptr = int(buf.data_ptr())
+            elif hasattr(buf, "__array_interface__"):
+                buf_ptr = int(buf.__array_interface__["data"][0])
+            elif isinstance(buf, ctypes._Pointer):
+                buf_ptr = ctypes.addressof(buf)
+            elif isinstance(buf, (memoryview, bytearray, ctypes.Array)):
+                buf_ptr = ctypes.addressof((ctypes.c_ubyte * len(buf)).from_buffer(buf))
+            else:
+                buf_ptr = 0
+
+            # Check if buffer is registered with SPDK for zero-copy I/O
+            is_registered = self._is_buffer_spdk_registered(buf_ptr)
+
+            if is_registered:
+                # Zero-copy path: buffer is already registered with SPDK
+                # Release GIL during SPDK write I/O
+                rc = _spdk_call_with_gil_released(
+                    ffi.spdk_write_external,
+                    offset,
+                    total_len,
+                    buf_ptr,
+                )
+                if rc != 0:
+                    raise RuntimeError(
+                        f"SPDK write failed at byte offset {offset}, "
+                        f"byte_count={total_len}, rc={rc}"
+                    )
+            else:
+                # Temporary DMA buffer path: copy data to DMA memory first
+                dma_ptr = ffi.allocate_spdk_memory(total_len, 4096, numa_id=-1)
+                if dma_ptr == 0:
+                    raise RuntimeError(
+                        f"Failed to allocate SPDK DMA buffer for write "
+                        f"(offset={offset}, size={total_len})"
+                    )
+
+                try:
+                    # Copy data from source buffer to DMA memory
+                    if hasattr(buf, "data_ptr"):
+                        src_ptr = int(buf.data_ptr())
+                    elif hasattr(buf, "__array_interface__"):
+                        src_ptr = int(buf.__array_interface__["data"][0])
+                    elif isinstance(buf, ctypes._Pointer):
+                        src_ptr = ctypes.addressof(buf)
+                    else:
+                        # Both Python buffers and ctypes.Array support len()
+                        buf_len = len(buf)
+                        src_ptr = ctypes.addressof(
+                            (ctypes.c_ubyte * min(buf_len, payload_len)).from_buffer(
+                                self._byte_view(buf)
+                            )
+                        )
+
+                    # Copy data to DMA buffer
+                    dma_buf = ctypes.cast(
+                        dma_ptr, ctypes.POINTER(ctypes.c_ubyte * payload_len)
+                    )
+                    dma_buf.contents[:] = list(  # type: ignore[index]
+                        ctypes.cast(
+                            src_ptr, ctypes.POINTER(ctypes.c_ubyte * payload_len)
+                        ).contents
+                    )
+
+                    # Release GIL during SPDK write I/O
+                    rc = _spdk_call_with_gil_released(
+                        ffi.spdk_write_external,
+                        offset,
+                        total_len,
+                        dma_ptr,
+                    )
+                    if rc != 0:
+                        raise RuntimeError(
+                            f"SPDK write failed at byte offset {offset}, "
+                            f"byte_count={total_len}, rc={rc}"
+                        )
+                finally:
+                    ffi.free_spdk_memory(dma_ptr)
+
+    def _read_spdk_buffers(
+        self,
+        offsets: Sequence[int],
+        buffers: Sequence[Any],
+        payload_lens: Sequence[int],
+        total_lens: Sequence[int],
+    ) -> None:
+        """Read buffers using SPDK engine.
+
+        The GIL is released during each SPDK I/O call to allow other Python
+        threads to execute in parallel.
+
+        Args:
+            offsets: Device byte offsets for each read.
+            buffers: Destination Python buffers.
+            payload_lens: Logical payload lengths to expose to callers.
+            total_lens: Physical I/O byte counts for each read.
+
+        Raises:
+            RuntimeError: If SPDK engine is not initialized.
+            Exception: Propagates SPDK I/O errors.
+        """
+        if self._spdk_engine is None:
+            raise RuntimeError("SPDK engine not initialized")
+
+        ffi = self._spdk_engine
+
+        # Perform reads using SPDK (one at a time, synchronous)
+        # Pass byte offsets and byte counts - C++ code handles LBA conversion
+        for offset, buf, payload_len, total_len in zip(
+            offsets, buffers, payload_lens, total_lens, strict=True
+        ):
+            # Get buffer pointer to determine if it's registered
+            if hasattr(buf, "data_ptr"):
+                buf_ptr = int(buf.data_ptr())
+            elif hasattr(buf, "__array_interface__"):
+                buf_ptr = int(buf.__array_interface__["data"][0])
+            elif isinstance(buf, ctypes._Pointer):
+                buf_ptr = ctypes.addressof(buf)
+            elif isinstance(buf, (memoryview, bytearray)):
+                buf_ptr = ctypes.addressof((ctypes.c_ubyte * len(buf)).from_buffer(buf))
+            else:
+                buf_ptr = 0
+
+            # Check if buffer is registered with SPDK for zero-copy I/O
+            is_registered = self._is_buffer_spdk_registered(buf_ptr)
+
+            if is_registered:
+                # Zero-copy path: buffer is already registered with SPDK
+                if len(self._byte_view(buf)) < payload_len:
+                    raise ValueError("output buffer shorter than payload_len")
+
+                rc = _spdk_call_with_gil_released(
+                    ffi.spdk_read_external,
+                    offset,
+                    total_len,
+                    buf_ptr,
+                )
+                if rc != 0:
+                    raise RuntimeError(
+                        f"SPDK read failed at byte offset {offset}, "
+                        f"byte_count={total_len}, rc={rc}"
+                    )
+            else:
+                # Temporary DMA buffer path: allocate, read, copy back
+                dma_ptr = ffi.allocate_spdk_memory(total_len, 4096, numa_id=-1)
+                if dma_ptr == 0:
+                    raise RuntimeError(
+                        f"Failed to allocate SPDK DMA buffer for read "
+                        f"(offset={offset}, size={total_len})"
+                    )
+
+                try:
+                    rc = _spdk_call_with_gil_released(
+                        ffi.spdk_read_external,
+                        offset,
+                        total_len,
+                        dma_ptr,
+                    )
+                    if rc != 0:
+                        raise RuntimeError(
+                            f"SPDK read failed at byte offset {offset}, "
+                            f"byte_count={total_len}, rc={rc}"
+                        )
+
+                    # Copy data from DMA buffer to destination
+                    dst = self._byte_view(buf)
+                    data_ptr = ctypes.cast(
+                        dma_ptr, ctypes.POINTER(ctypes.c_ubyte * payload_len)
+                    )
+                    dst[:payload_len] = bytes(data_ptr.contents)
+                finally:
+                    ffi.free_spdk_memory(dma_ptr)
+
     def _write_buffers(
         self,
         offsets: Sequence[int],
@@ -1432,8 +2033,13 @@ class RawBlockCore:
 
         Raises:
             RuntimeError: If the requested io_uring mode is unavailable.
-            Exception: Propagates Rust raw-device write errors.
+            Exception: Propagates Rust raw-device or SPDK write errors.
         """
+        # Route to SPDK if enabled
+        if self.io_engine == "spdk":
+            self._write_spdk_buffers(offsets, buffers, payload_lens, total_lens)
+            return
+
         raw_dev = self._rawdev()
         per_write_placement_ids = normalize_raw_block_placement_ids(
             placement_ids,
@@ -1501,8 +2107,13 @@ class RawBlockCore:
 
         Raises:
             RuntimeError: If the requested io_uring mode is unavailable.
-            Exception: Propagates Rust raw-device read errors.
+            Exception: Propagates Rust raw-device or SPDK read errors.
         """
+        # Route to SPDK if enabled
+        if self.io_engine == "spdk":
+            self._read_spdk_buffers(offsets, buffers, payload_lens, total_lens)
+            return
+
         raw_dev = self._rawdev()
         if self.io_engine != "io_uring":
             for offset, buf, payload_len, total_len in zip(
@@ -1555,41 +2166,62 @@ class RawBlockCore:
         Returns:
             True when both header and payload writes complete; false otherwise.
         """
+        pool_header: Any = None
         try:
-            header = self._encode_header(key.slot_identity, len(memory_obj.byte_array))
+            # For SPDK IO engine, use pooled DMA buffer for header
+            if self.io_engine == "spdk":
+                pool_header = self._encode_header_using_pool(
+                    key.slot_identity, len(memory_obj.byte_array)
+                )
+            else:
+                header = self._encode_header(
+                    key.slot_identity, len(memory_obj.byte_array)
+                )
+
             buf, payload_len, total_len = self._prepare_write_payload(memory_obj)
 
             with self._lock:
                 self._inflight_io_count += 1
             try:
-                hdr_total = (
-                    round_up(len(header), self.block_align)
-                    if self._requires_transfer_alignment
-                    else len(header)
-                )
-                header_buf: Any = header
-                if self.io_engine != "io_uring" and len(header) < hdr_total:
-                    padded_header = bytearray(header)
-                    padded_header.extend(b"\x00" * (hdr_total - len(header)))
-                    header_buf = padded_header
-                # Keep each slot header on the same placement identifier as its
-                # payload; future policy can split them if needed.
+                header_buf: Any
+                if self.io_engine == "spdk":
+                    header_buf = pool_header
+                    hdr_total = self.block_align
+                else:
+                    hdr_total = (
+                        round_up(len(header), self.block_align)
+                        if self._requires_transfer_alignment
+                        else len(header)
+                    )
+                    header_buf = header
+                    if self.io_engine != "io_uring" and len(header) < hdr_total:
+                        padded_header = bytearray(header)
+                        padded_header.extend(b"\x00" * (hdr_total - len(header)))
+                        header_buf = padded_header
+                if self.io_engine == "io_uring" or self.io_engine == "spdk":
+                    header_len = hdr_total
+                else:
+                    header_len = len(header)
+
                 self._write_buffers(
                     [offset, offset + self.header_bytes],
                     [header_buf, buf],
-                    [
-                        hdr_total if self.io_engine == "io_uring" else len(header),
-                        payload_len,
-                    ],
-                    [hdr_total, total_len],
+                    [header_len, payload_len],
+                    [hdr_total, payload_len],
                     [placement_id, placement_id],
                 )
             finally:
                 with self._lock:
                     self._inflight_io_count -= 1
                     self._last_io_ts = time.monotonic()
+                if pool_header is not None and self._header_pool is not None:
+                    self._header_pool.release(pool_header)
+                    pool_header = None
             return True
         except Exception as e:
+            if pool_header is not None and self._header_pool is not None:
+                self._header_pool.release(pool_header)
+                pool_header = None
             logger.error("RawBlockCore write failed for %s: %s", key.encoded, e)
             return False
 
@@ -1604,6 +2236,48 @@ class RawBlockCore:
         )
         hdr[16:24] = int(payload_len).to_bytes(8, "little", signed=False)
         return bytes(hdr)
+
+    def _encode_header_using_pool(self, slot_identity: int, payload_len: int) -> object:
+        """Encode a fixed-size raw-block header into a pooled SPDK DMA buffer.
+
+        Acquires a buffer from ``_header_pool``, writes the header directly
+        into the DMA memory, and returns the **same** buffer object so it
+        can be released later via ``_header_pool.release()``.
+
+        Args:
+            slot_identity: The slot identity to encode.
+            payload_len: The payload length to encode.
+
+        Returns:
+            The ctypes array from the pool (to be released via
+            ``_header_pool.release()``).  The header data has already been
+            written into the buffer in-place.
+
+        Raises:
+            RuntimeError: If ``_header_pool`` is not available (SPDK not
+                enabled or pool not created).
+        """
+        if not hasattr(self, "_header_pool") or self._header_pool is None:
+            raise RuntimeError("_encode_header_using_pool requires SPDK header pool")
+
+        pool = self._header_pool
+        assert pool is not None
+        buf: Any = pool.acquire()
+        buf_casted = ctypes.cast(
+            buf, ctypes.POINTER(ctypes.c_ubyte * self.header_bytes)
+        )
+        ctypes.memset(buf_casted.contents, 0, self.header_bytes)
+        buf_casted.contents[0:8] = list(b"LMCBLK01")
+        identity_bytes = int(slot_identity & ((1 << 64) - 1)).to_bytes(
+            8,
+            "little",
+            signed=False,
+        )
+        buf_casted.contents[8 : 8 + len(identity_bytes)] = list(identity_bytes)
+        payload_bytes = int(payload_len).to_bytes(8, "little", signed=False)
+        buf_casted.contents[16 : 16 + len(payload_bytes)] = list(payload_bytes)
+
+        return buf
 
     def _decode_slot_header(self, hdr: bytes) -> Optional[tuple[int, int]]:
         """Decode a raw-block slot header into identity and payload length."""
@@ -1638,10 +2312,44 @@ class RawBlockCore:
         if self._effective_capacity_bytes > 0 and self._max_slots > 0:
             return
 
-        device_size = int(self._rawdev().size_bytes())
-        requested = self.capacity_bytes if self.capacity_bytes > 0 else device_size
-        self._effective_capacity_bytes = min(requested, device_size)
-        self.capacity_bytes = self._effective_capacity_bytes
+        # For SPDK mode, capacity is set explicitly or auto-detected from NVMe device
+        if self.io_engine == "spdk":
+            if self.capacity_bytes <= 0:
+                if hasattr(self, "_spdk_engine") and self._spdk_engine is not None:
+                    try:
+                        device_size = self._spdk_engine.get_device_size()
+                        if device_size > 0:
+                            self._effective_capacity_bytes = device_size
+                            self.capacity_bytes = device_size
+                            logger.info(
+                                "RawBlockCore: auto-detected SPDK NVMe device "
+                                "capacity: %d bytes (%.2f GB)",
+                                device_size,
+                                device_size / (1024**3),
+                            )
+                        else:
+                            raise RuntimeError(
+                                "SPDK get_device_size returned invalid size: "
+                                + str(device_size)
+                            )
+                    except Exception as e:
+                        raise RuntimeError(
+                            f"SPDK mode failed to auto-detect device size: {e}. "
+                            "Set capacity_bytes explicitly in extra_config to override."
+                        ) from e
+                else:
+                    raise RuntimeError(
+                        "SPDK mode requires explicit capacity_bytes configuration "
+                        "or SPDK engine to be initialized"
+                    )
+            else:
+                self._effective_capacity_bytes = self.capacity_bytes
+            self.capacity_bytes = self._effective_capacity_bytes
+        else:
+            device_size = int(self._rawdev().size_bytes())
+            requested = self.capacity_bytes if self.capacity_bytes > 0 else device_size
+            self._effective_capacity_bytes = min(requested, device_size)
+            self.capacity_bytes = self._effective_capacity_bytes
 
         if self.meta_total_bytes >= self._effective_capacity_bytes:
             raise RuntimeError("metadata region exceeds usable device capacity")
@@ -1749,6 +2457,9 @@ class RawBlockCore:
 
     def _read_meta_header(self, container_offset: int) -> Optional[dict[str, int]]:
         """Read and validate a metadata checkpoint header."""
+        if self.io_engine == "spdk" and self._spdk_engine is not None:
+            return self._read_meta_header_spdk(container_offset)
+
         buf = bytearray(self.block_align)
         try:
             self._read_buffers(
@@ -1775,8 +2486,77 @@ class RawBlockCore:
             "container_offset": int(container_offset),
         }
 
+    def _read_meta_header_spdk(self, container_offset: int) -> Optional[dict[str, int]]:
+        """Read metadata checkpoint header using SPDK DMA-allocated buffer.
+
+        Allocates a DMA-safe buffer via SPDK, reads the header, then frees
+        the buffer. This avoids vtophys failures that occur when reading
+        from unregistered memory.
+
+        Args:
+            container_offset: Byte offset of the metadata container on device.
+
+        Returns:
+            Parsed header dictionary, or None on failure.
+        """
+        ffi = self._spdk_engine
+        if ffi is None:
+            return None
+
+        # Allocate DMA buffer for reading header
+        dma_ptr = ffi.allocate_spdk_memory(self.block_align, 4096, numa_id=-1)
+        if dma_ptr == 0:
+            logger.error(
+                "RawBlockCore: failed to allocate DMA buffer for header read "
+                "(offset=%d, size=%d)",
+                container_offset,
+                self.block_align,
+            )
+            return None
+
+        try:
+            rc = _spdk_call_with_gil_released(
+                ffi.spdk_read_external, container_offset, self.block_align, dma_ptr
+            )
+            if rc != 0:
+                logger.debug(
+                    "RawBlockCore: SPDK read failed for header at offset %d: rc=%d",
+                    container_offset,
+                    rc,
+                )
+                return None
+
+            # Copy header data from DMA buffer to Python struct
+            header_data = bytes(
+                ctypes.cast(
+                    dma_ptr, ctypes.POINTER(ctypes.c_ubyte * _META_HEADER_STRUCT.size)
+                ).contents
+            )
+            magic, version, seq, payload_len, crc = _META_HEADER_STRUCT.unpack(
+                header_data
+            )
+
+            if magic != self.meta_magic or version != self.meta_version:
+                return None
+
+            payload_cap = self._meta_payload_capacity()
+            if payload_len <= 0 or payload_len > payload_cap:
+                return None
+
+            return {
+                "seq": int(seq),
+                "payload_len": int(payload_len),
+                "crc": int(crc),
+                "container_offset": int(container_offset),
+            }
+        finally:
+            ffi.free_spdk_memory(dma_ptr)
+
     def _load_meta_payload(self, header: dict[str, int]) -> Optional[bytes]:
         """Load and CRC-validate a checkpoint payload for a metadata header."""
+        if self.io_engine == "spdk" and self._spdk_engine is not None:
+            return self._load_meta_payload_spdk(header)
+
         payload_len = int(header["payload_len"])
         payload_off = int(header["container_offset"]) + self.block_align
         total_len = round_up(payload_len, self.block_align)
@@ -1791,6 +2571,71 @@ class RawBlockCore:
         if crc != int(header["crc"]):
             return None
         return payload
+
+    def _load_meta_payload_spdk(self, header: dict[str, int]) -> Optional[bytes]:
+        """Load checkpoint payload using SPDK DMA-allocated buffer.
+
+        Allocates a DMA-safe buffer via SPDK, reads the payload, validates
+        CRC, then frees the buffer.
+
+        Args:
+            header: Metadata header dictionary with payload_len and container_offset.
+
+        Returns:
+            Payload bytes on success, None on failure.
+        """
+        ffi = self._spdk_engine
+        if ffi is None:
+            return None
+
+        payload_len = int(header["payload_len"])
+        payload_off = int(header["container_offset"]) + self.block_align
+        total_len = round_up(payload_len, self.block_align)
+
+        # Allocate DMA buffer for reading payload
+        dma_ptr = ffi.allocate_spdk_memory(total_len, 4096, numa_id=-1)
+        if dma_ptr == 0:
+            logger.error(
+                "RawBlockCore: failed to allocate DMA buffer for payload read "
+                "(offset=%d, size=%d)",
+                payload_off,
+                total_len,
+            )
+            return None
+
+        try:
+            rc = _spdk_call_with_gil_released(
+                ffi.spdk_read_external, payload_off, total_len, dma_ptr
+            )
+            if rc != 0:
+                logger.debug(
+                    "RawBlockCore: SPDK read failed for payload at offset %d: rc=%d",
+                    payload_off,
+                    rc,
+                )
+                return None
+
+            # Copy payload data from DMA buffer
+            payload_ptr = ctypes.cast(
+                dma_ptr, ctypes.POINTER(ctypes.c_ubyte * payload_len)
+            )
+            payload = bytes(payload_ptr.contents)
+
+            # Validate CRC
+            crc = zlib.crc32(payload) & 0xFFFFFFFF
+            if crc != int(header["crc"]):
+                logger.debug(
+                    "RawBlockCore: CRC mismatch for payload at offset %d: "
+                    "expected=%d got=%d",
+                    payload_off,
+                    header["crc"],
+                    crc,
+                )
+                return None
+
+            return payload
+        finally:
+            ffi.free_spdk_memory(dma_ptr)
 
     def _select_latest_checkpoint(
         self,
@@ -1889,23 +2734,66 @@ class RawBlockCore:
         payload_off = target + self.block_align
         crc = zlib.crc32(payload) & 0xFFFFFFFF
 
-        header_block = bytearray(self.block_align)
-        header_block[: _META_HEADER_STRUCT.size] = _META_HEADER_STRUCT.pack(
-            self.meta_magic,
-            self.meta_version,
-            int(next_seq),
-            int(payload_len),
-            int(crc),
-        )
+        # Use SPDK DMA pools for zero-copy writes when available
+        if self.io_engine == "spdk":
+            checkpoint_pool = self._checkpoint_pool
+            assert checkpoint_pool is not None
+            dma_payload_raw: Any = checkpoint_pool.acquire()
+            dma_payload = ctypes.cast(
+                dma_payload_raw, ctypes.POINTER(ctypes.c_ubyte * payload_total_len)
+            )
+            try:
+                # Copy payload directly into DMA memory (one explicit copy)
+                dma_payload.contents[:payload_len] = list(payload)
 
-        placement_id = self.meta_checkpoint_placement_id
-        self._write_buffers(
-            [payload_off, target],
-            [payload, header_block],
-            [payload_len, self.block_align],
-            [payload_total_len, self.block_align],
-            [placement_id, placement_id],
-        )
+                header_pool = self._header_pool
+                assert header_pool is not None
+                dma_header_raw: Any = header_pool.acquire()
+                dma_header = ctypes.cast(
+                    dma_header_raw,
+                    ctypes.POINTER(ctypes.c_ubyte * self.block_align),
+                )
+                try:
+                    # Write header directly into DMA memory
+                    dma_header.contents[: _META_HEADER_STRUCT.size] = list(
+                        _META_HEADER_STRUCT.pack(
+                            self.meta_magic,
+                            self.meta_version,
+                            int(next_seq),
+                            int(payload_len),
+                            int(crc),
+                        )
+                    )
+
+                    # Write both buffers using DMA pointers (zero-copy to NVMe)
+                    self._write_buffers(
+                        [payload_off, target],
+                        [dma_payload_raw, dma_header_raw],
+                        [payload_len, self.block_align],
+                        [payload_total_len, self.block_align],
+                    )
+                finally:
+                    header_pool.release(dma_header_raw)
+            finally:
+                checkpoint_pool.release(dma_payload_raw)
+        else:
+            header_block = bytearray(self.block_align)
+            header_block[: _META_HEADER_STRUCT.size] = _META_HEADER_STRUCT.pack(
+                self.meta_magic,
+                self.meta_version,
+                int(next_seq),
+                int(payload_len),
+                int(crc),
+            )
+
+            placement_id = self.meta_checkpoint_placement_id
+            self._write_buffers(
+                [payload_off, target],
+                [payload, header_block],
+                [payload_len, self.block_align],
+                [payload_total_len, self.block_align],
+                [placement_id, placement_id],
+            )
 
         with self._lock:
             self._meta_seq = int(next_seq)

@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # First Party
+from lmcache.v1.storage_backend.raw_block.buffer_pool import (
+    CheckPointPayloadBufferPool,
+    HeaderBufferPool,
+)
 from lmcache.v1.storage_backend.raw_block.core import (
     DEFAULT_IOURING_QUEUE_DEPTH,
     RAW_BLOCK_IO_ENGINES,
@@ -41,4 +45,6 @@ __all__ = [
     "round_up",
     "slot_identity_from_encoded_key",
     "validate_raw_block_io_options",
+    "HeaderBufferPool",
+    "CheckPointPayloadBufferPool",
 ]
