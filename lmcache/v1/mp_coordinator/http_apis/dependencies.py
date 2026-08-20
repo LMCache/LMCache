@@ -21,6 +21,7 @@ from lmcache.v1.mp_coordinator.controllers.eviction_controller import (
     FleetEvictionController,
 )
 from lmcache.v1.mp_coordinator.controllers.prefetch_manager import PrefetchManager
+from lmcache.v1.mp_coordinator.controllers.usage_manager import CacheUsageManager
 from lmcache.v1.mp_coordinator.ingest.event_gate import EventGate
 from lmcache.v1.mp_coordinator.key_directory import KeyDirectory
 from lmcache.v1.mp_coordinator.registry import InstanceRegistry
@@ -33,9 +34,11 @@ class CoordinatorContext:
 
     Attributes:
         registry: Fleet membership (``MPInstance`` by ``instance_id``).
+        usage_manager: Fleet byte usage per tier, rolled up by
+            ``cache_salt`` and by reporting instance.
         eviction_controller: The fleet L2 eviction control loop. Owns the
-            quota registry (``.quota``), the usage view (``.usage``), and
-            the L2 pin set.
+            quota registry (``.quota``) and the L2 pin set, and enforces
+            the former against the ``l2`` half of ``usage_manager``.
         prefetch_manager: Warm-prefetch proxy to MP servers.
         token_hasher: Resolves a pin request's ``token_ids`` to object keys
             (configured to match the fleet's ``chunk_size`` / ``hash_algorithm``).
@@ -46,6 +49,7 @@ class CoordinatorContext:
     """
 
     registry: InstanceRegistry
+    usage_manager: CacheUsageManager
     eviction_controller: FleetEvictionController
     prefetch_manager: PrefetchManager
     token_hasher: TokenHasher
