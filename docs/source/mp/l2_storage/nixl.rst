@@ -74,8 +74,8 @@ The ``OBJ`` and ``AZURE_BLOB`` backends (object stores) do not require ``file_pa
     # GDS_MT backend
     --l2-adapter '{"type": "nixl_store", "backend": "GDS_MT", "backend_params": {"file_path": "/data/nvme/lmcache", "use_direct_io": "true"}, "pool_size": 128}'
 
-    # HF3FS backend
-    --l2-adapter '{"type": "nixl_store", "backend": "HF3FS", "backend_params": {"file_path": "/mnt/hf3fs/lmcache", "use_direct_io": "false"}, "pool_size": 64}'
+    # HF3FS backend using NIXL's default /mnt/3fs mount point
+    --l2-adapter '{"type": "nixl_store", "backend": "HF3FS", "backend_params": {"file_path": "/mnt/3fs/lmcache", "use_direct_io": "false"}, "pool_size": 64}'
 
     # OBJ backend
     --l2-adapter '{"type": "nixl_store", "backend": "OBJ", "backend_params": {}, "pool_size": 32}'
@@ -147,6 +147,9 @@ populates the in-memory index when a file is found.
 
     # Basic dynamic POSIX backend (persist enabled by default)
     --l2-adapter '{"type": "nixl_store_dynamic", "backend": "POSIX", "backend_params": {"file_path": "/data/lmcache/l2", "use_direct_io": "false", "max_capacity_gb": "10"}}'
+
+    # Dynamic HF3FS backend with a custom mount point
+    --l2-adapter '{"type": "nixl_store_dynamic", "backend": "HF3FS", "backend_params": {"file_path": "/mnt/hf3fs/lmcache", "mount_point": "/mnt/hf3fs", "use_direct_io": "false", "max_capacity_gb": "100"}}'
 
     # Explicitly disable persist
     --l2-adapter '{"type": "nixl_store_dynamic", "backend": "POSIX", "backend_params": {"file_path": "/data/lmcache/l2", "use_direct_io": "false", "max_capacity_gb": "10"}, "persist_enabled": false}'
