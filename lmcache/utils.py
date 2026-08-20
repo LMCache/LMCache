@@ -682,7 +682,13 @@ def _lmcache_nvtx_annotate(func, domain="lmcache"):
 
 
 ##### Observability Threading related #####
-_shared_observability_lock = threading.Lock()
+# Reentrant on purpose. ``MemoryObj.__del__`` calls ``allocator.free()``, which
+# updates ``LMCStatsMonitor`` counters -- also guarded by this lock. The garbage
+# collector can run ``__del__`` at any allocation point, so that update can land
+# on a thread already holding this lock (e.g. inside
+# ``PrometheusLogger.GetOrCreate``, which allocates via ``prometheus_client``).
+# With a plain Lock that is an unrecoverable self-deadlock.
+_shared_observability_lock = threading.RLock()
 
 
 def thread_safe(func):
