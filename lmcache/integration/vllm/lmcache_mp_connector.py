@@ -791,11 +791,15 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         )
         tracker.num_lmcache_hit_tokens = ret
 
-        need_to_load = ret - num_computed_tokens
-        # A resumed full hit still needs the final token to produce logits.
-        if request.status == RequestStatus.PREEMPTED and ret == request.num_tokens:
-            need_to_load -= 1
-        need_to_load = max(0, need_to_load)
+        need_to_load = max(0, ret - num_computed_tokens)
+
+        # In full-prompt-hit case, we need to recompute the last token.
+        # Without this, num_computed_tokens would equal request.num_tokens,
+        # causing num_new_tokens to be 0 and triggering the
+        # `assert num_new_tokens > 0` in the scheduler.
+        if ret == len(request.all_token_ids):
+            need_to_load = max(0, need_to_load - 1)
+
         logger.debug(
             "vLLM hit is: %d, Need to load is %d", num_computed_tokens, need_to_load
         )

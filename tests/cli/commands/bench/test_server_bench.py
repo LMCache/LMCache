@@ -33,7 +33,7 @@ from lmcache.cli.commands.bench.server_bench.helpers import (
 )
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocols.base import RequestType
-from lmcache.v1.platform.ops_types import PageBufferShapeDesc, set_shape_desc_dtype
+from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 
 
 def _make_shape_desc(
@@ -55,7 +55,7 @@ def _make_shape_desc(
     shape_desc.nh = nh
     shape_desc.hs = hs
     shape_desc.element_size = dtype.itemsize
-    set_shape_desc_dtype(shape_desc, dtype)
+    shape_desc.dtype = dtype
     return shape_desc
 
 

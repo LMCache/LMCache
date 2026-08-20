@@ -55,7 +55,7 @@ the relevant resource.
 lmcache/v1/mp_coordinator/
   app.py                # create_app + lifespan + router discovery + health/eviction loops
   __main__.py           # uvicorn entrypoint (`python -m lmcache.v1.mp_coordinator`)
-  config.py             # MPCoordinatorConfig (LMCACHE_MP_COORDINATOR_*)
+  config.py             # MPCoordinatorConfig (CLI flags only, no env vars)
   registry.py           # InstanceRegistry + MPInstance (pure membership)
   schemas.py            # Pydantic request/response models (shared wire contract)
   registrar.py          # mp-server-side register/heartbeat/deregister helpers
@@ -69,7 +69,7 @@ lmcache/v1/mp_coordinator/
   controllers/
     __init__.py
     eviction_controller.py  # the fleet L2 control loop: quota + usage + LRU + pins
-    usage_manager.py    # per-salt L2 usage view (owned by the eviction controller)
+    usage_manager.py    # per-tier usage view, by salt and by instance (a consumer)
     prefetch_manager.py # dispatches warm prefetch to a named MP server
   http_apis/
     __init__.py
@@ -118,8 +118,9 @@ sequenceDiagram
 ## Extension seam (adding a capability)
 
 `app.state` carries the **shared collaborators** every capability composes
-from: `config`, `registry`, `key_directory`, `eviction_controller` (which owns
-the quota registry and usage view), the ingest `event_gate`, and the
+from: `config`, `registry`, `key_directory`, `usage_manager`,
+`eviction_controller` (which owns the quota registry), the ingest
+`event_gate`, and the
 `controllers/` managers. Endpoints use them directly — membership is thin
 enough to have no service layer (the `/instances` router calls the registry
 straight, matching the mp server's own `http_apis` convention).
@@ -183,20 +184,23 @@ Where the coordinator's fleet-level *doing* lives — the counterpart to
 
 - `eviction_controller.py` — `FleetEvictionController`, the fleet L2
   control loop: it holds the target (`QuotaManager` budgets), observes
-  the value (`L2UsageManager` byte totals), and acts to close the gap.
+  the value (`CacheUsageManager` byte totals, on the `l2` tier), and
+  acts to close the gap.
   Its `run()` wakes every `EVICTION_CHECK_INTERVAL` seconds, walks salts
   over their trigger watermark, and dispatches `DELETE /cache/objects`
   requests (chunked at `MAX_DELETE_BATCH`) to a uniformly random registered
   mp server (all servers share the backing L2, so one dispatch evicts the
   fleet). Also tracks the pins taken via `POST /cache/pins` so pinned keys
   are excluded from eviction and delete. Reachable as
-  `ctx.eviction_controller`, with `.quota` / `.usage` for the `/quota`
-  endpoints.
-- `usage_manager.py` — the per-`cache_salt` L2 byte totals, maintained
-  as a derived **view** of the key directory from the same admitted
-  event stream. Supporting state for the controller above, not a peer of
-  it (the same way `store_policy.py` supports `store_controller.py` in
-  `storage_controllers/`).
+  `ctx.eviction_controller`, with `.quota` for the `/quota` endpoints.
+- `usage_manager.py` — `CacheUsageManager`, byte totals per tier rolled
+  up per `cache_salt` (the tenant axis the eviction controller enforces
+  against) and per `(instance_id, backend)` (the capacity axis: how full
+  one node's L1 is). A consumer in its own right rather than supporting
+  state of the controller above, because it spans both tiers while the
+  controller reads only the L2 half. Registered before the controller,
+  which reads a key's remaining size for the batch it is consuming. See
+  [usage_and_eviction.md](usage_and_eviction.md).
 - `prefetch_manager.py` — implements `POST /cache/prefetches` dispatch to a
   named mp server and proxies status polls. A request-scoped proxy with no
   loop and no state of its own, so it stays a *manager*, not a controller.
@@ -260,14 +264,12 @@ lmcache coordinator [--host HOST] [--port PORT] \
 
 (or, equivalently, `python -m lmcache.v1.mp_coordinator`).
 
-Configured via `LMCACHE_MP_COORDINATOR_*` environment variables — see
-`MPCoordinatorConfig` in `config.py`. The full env-var surface today is
-`HOST`, `PORT`, `INSTANCE_TIMEOUT`, `HEALTH_CHECK_INTERVAL`,
-`EVICTION_CHECK_INTERVAL`, `EVICTION_RATIO`, `TRIGGER_WATERMARK`,
-`CHUNK_SIZE`, `HASH_ALGORITHM`, `BLEND_PROBE_STRIDE`, and
-`TIMEOUT_KEEP_ALIVE`. The `lmcache coordinator` CLI
-flags override the matching env-derived field; unset flags fall back to the
-env vars and then the config defaults. See the
+Configured via CLI flags only — see `MPCoordinatorConfig` in `config.py`, whose
+field defaults are the single source of truth. An unset flag keeps its default;
+there are no coordinator environment variables. Both entrypoints share one flag
+set and one config path: `__main__.main()` builds a parser from
+`CoordinatorCommand.add_arguments` and hands the parsed args to
+`CoordinatorCommand.execute`. See the
 user-facing [`docs/source/mp/coordinator.rst`](../../../source/mp/coordinator.rst)
 for descriptions and defaults.
 

@@ -176,13 +176,51 @@ echo "=== Launching vLLM with LMCache ==="
 echo "Model: $MODEL"
 echo "Port: $vllm_port"
 
+# A dedicated GPU integration test enables FIFO lazy offload through this
+# flag. Keep the normal launch configuration eager so the existing test suite
+# preserves its current store timing.
+KV_TRANSFER_CONFIG="$(
+    LMCACHE_PORT="${LMCACHE_PORT}" \
+    LMCACHE_MP_LAZY_OFFLOAD="${LMCACHE_MP_LAZY_OFFLOAD:-false}" \
+    python3 - <<'PY'
+import json
+import os
+
+extra_config = {
+    "lmcache.mp.port": int(os.environ["LMCACHE_PORT"]),
+    "lmcache.mp.mq_timeout": 10,
+}
+if os.environ["LMCACHE_MP_LAZY_OFFLOAD"].lower() in {"1", "true"}:
+    extra_config.update(
+        {
+            "lmcache.mp.lazy_offload": True,
+            "lmcache.mp.lazy_offload_policy": "FIFO",
+            "lmcache.mp.lazy_offload_threshold": 2,
+            "lmcache.mp.lazy_offload_select_count": 1,
+        }
+    )
+
+print(
+    json.dumps(
+        {
+            "kv_connector": "LMCacheMPConnector",
+            "kv_role": "kv_both",
+            "kv_load_failure_policy": "recompute",
+            "kv_connector_extra_config": extra_config,
+        }
+    )
+)
+PY
+)"
+echo "LMCache KV transfer configuration: ${KV_TRANSFER_CONFIG}"
+
 CUDA_VISIBLE_DEVICES="${GPU_FOR_VLLM}" \
 VLLM_ENABLE_V1_MULTIPROCESSING=0 \
 VLLM_SERVER_DEV_MODE=1 \
 VLLM_BATCH_INVARIANT=${BATCH_INVARIANT} \
 PYTHONHASHSEED=0 \
 vllm serve "$MODEL" \
-    --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_load_failure_policy\": \"recompute\", \"kv_connector_extra_config\": {\"lmcache.mp.port\": $LMCACHE_PORT, \"lmcache.mp.mq_timeout\": 10}}" \
+    --kv-transfer-config "${KV_TRANSFER_CONFIG}" \
     $ATTENTION_BACKEND_ARG \
     --port "$vllm_port" \
     --no-async-scheduling \

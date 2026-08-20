@@ -85,7 +85,7 @@ a coordinator only adds candidates.
 
 1. First call: run the local matcher **and** submit the coordinator query
    (request tokens). A per-lookup wall-clock deadline is armed
-   (`match_budget_s`, from `LMCACHE_COORDINATOR_BLEND_TIMEOUT`).
+   (`match_budget_s`, from the mp server's `--coordinator-blend-timeout`).
 2. After the prefix resolves, poll the coordinator **before** the sparse
    prefetch: defer while pending, give up at the deadline (then that
    lookup is local-only). The deadline — not just the per-request HTTP
