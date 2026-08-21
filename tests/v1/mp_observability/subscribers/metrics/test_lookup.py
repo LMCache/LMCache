@@ -358,3 +358,100 @@ class TestLookupAttributeLabels:
             after.get(req, {}).get(empty_key, 0)
             == before.get(req, {}).get(empty_key, 0) + 128
         )
+
+
+# ---------------------------------------------------------------------------
+# Per-tier attribution and early-exit counters
+# ---------------------------------------------------------------------------
+
+
+class TestAttributionCounters:
+    def test_l1_l2_split(self, bus, subscriber, snapshot):
+        """l1/l2 hit tokens land in their dedicated counters."""
+        bus.start()
+        bus.publish(
+            Event(
+                event_type=EventType.MP_LOOKUP_PREFETCH_END,
+                session_id="req-attr-1",
+                metadata={
+                    "found_count": 4,
+                    "requested_tokens": 2048,
+                    "hit_tokens": 1024,
+                    "l1_hit_tokens": 768,
+                    "l2_hit_tokens": 256,
+                    "early_exit_reason": "",
+                },
+            )
+        )
+        time.sleep(_DRAIN_WAIT)
+        bus.stop()
+
+        delta = snapshot()
+        assert delta["lmcache_mp.lookup_hit_l1"] == 768
+        assert delta["lmcache_mp.lookup_hit_l2"] == 256
+        assert delta["lmcache_mp.lookups"] == 1
+        assert delta.get("lmcache_mp.lookup_early_exit", 0) == 0
+
+    def test_early_exit_labeled_by_reason(self, bus, subscriber):
+        """Early exits count once on the reason-labeled series (with the
+        model/salt attrs preserved) and still count as a completed lookup."""
+        bus.start()
+        before = _read_counters_by_attrs()
+        bus.publish(
+            Event(
+                event_type=EventType.MP_LOOKUP_PREFETCH_END,
+                session_id="req-attr-2",
+                metadata={
+                    "found_count": 0,
+                    "requested_tokens": 0,
+                    "hit_tokens": 0,
+                    "l1_hit_tokens": 0,
+                    "l2_hit_tokens": 0,
+                    "early_exit_reason": "no_gpu_context",
+                    "model_name": "llama-3.1-8b",
+                    "cache_salt": "tenant-A",
+                },
+            )
+        )
+        time.sleep(_DRAIN_WAIT)
+        bus.stop()
+
+        after = _read_counters_by_attrs()
+        base_key = (
+            ("cache_salt", "tenant-A"),
+            ("model_name", "llama-3.1-8b"),
+        )
+        reason_key = base_key + (("reason", "no_gpu_context"),)
+        ee_before = before.get("lmcache_mp.lookup_early_exit", {})
+        ee_after = after.get("lmcache_mp.lookup_early_exit", {})
+        assert ee_after.get(reason_key, 0) == ee_before.get(reason_key, 0) + 1
+        # The reason label is additive: no unlabeled / base-only series moves.
+        assert ee_after.get(base_key, 0) == ee_before.get(base_key, 0)
+        assert ee_after.get((), 0) == ee_before.get((), 0)
+        # An early exit is still a completed lookup for the denominator.
+        lk_before = before.get("lmcache_mp.lookups", {}).get(base_key, 0)
+        lk_after = after.get("lmcache_mp.lookups", {}).get(base_key, 0)
+        assert lk_after == lk_before + 1
+
+    def test_missing_attribution_fields_are_tolerated(self, bus, subscriber, snapshot):
+        """Events from emitters without the new fields move nothing."""
+        bus.start()
+        bus.publish(
+            Event(
+                event_type=EventType.MP_LOOKUP_PREFETCH_END,
+                session_id="req-attr-3",
+                metadata={
+                    "found_count": 4,
+                    "requested_tokens": 1024,
+                    "hit_tokens": 1024,
+                },
+            )
+        )
+        time.sleep(_DRAIN_WAIT)
+        bus.stop()
+
+        delta = snapshot()
+        assert delta.get("lmcache_mp.lookup_hit_l1", 0) == 0
+        assert delta.get("lmcache_mp.lookup_hit_l2", 0) == 0
+        assert delta["lmcache_mp.lookups"] == 1
+        assert delta.get("lmcache_mp.lookup_early_exit", 0) == 0
