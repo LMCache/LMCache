@@ -65,7 +65,7 @@ logger = init_logger(__name__)
 _HAS_NATIVE_OBJECT_GROUP_TRANSFER: bool = hasattr(
     device_ops, "execute_object_group_transfer"
 )
-_HAS_PHASE_TIMING_POP: bool = hasattr(device_ops, "pop_completed_phase_timings")
+_HAS_TRANSFER_PHASE_TIMING: bool = hasattr(device_ops, "pop_completed_phase_timings")
 
 
 def get_layout_desc(
@@ -297,7 +297,7 @@ def publish_completed_phase_timings(event_bus: EventBus) -> None:
         event_bus: Bus that receives the ``MP_TRANSFER_PHASE_SAMPLES``
             event; see the ``EventType`` docstring for the metadata layout.
     """
-    if not _HAS_PHASE_TIMING_POP:
+    if not _HAS_TRANSFER_PHASE_TIMING:
         return
     samples = device_ops.pop_completed_phase_timings()
     if not samples:
@@ -472,12 +472,11 @@ def _run_object_group_transfer_plan(
     if not batch_steps:
         return
 
-    # phase_timing_enabled only exists on builds that also expose the pop op; on
-    # an older compiled extension the keyword would raise, so fall back to
-    # the untimed legacy signature (samples could not be consumed anyway).
+    # An older compiled extension has neither the keyword nor anything to
+    # consume the samples, so fall back to the untimed legacy signature.
     timing_kwargs = (
         {"phase_timing_enabled": is_observability_metrics_enabled()}
-        if _HAS_PHASE_TIMING_POP
+        if _HAS_TRANSFER_PHASE_TIMING
         else {}
     )
     device_ops.execute_object_group_transfer(

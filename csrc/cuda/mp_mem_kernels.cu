@@ -438,6 +438,47 @@ void multi_layer_block_kv_transfer_templated(
 #undef DISPATCH_FORMAT
 #undef LAUNCH_KERNEL
 
+/**
+ * Calculate the bytes the staging sections of one step move: the sum of
+ * its staging copies, i.e. whole memory objects.
+ */
+int64_t calculate_staging_section_bytes(const BatchStep& step) {
+  int64_t bytes = 0;
+  for (const auto& copy : step.staging) {
+    bytes += static_cast<int64_t>(copy.nbytes);
+  }
+  return bytes;
+}
+
+/**
+ * Calculate the bytes the kernel section of one step moves. Derived from
+ * the launches rather than the staged payload, because a launch may skip
+ * leading blocks (skip_prefix_n_blocks) that the staging copies still
+ * carried. Launches with an out-of-range group_idx contribute nothing;
+ * the executor's launch loop rejects such a plan via TORCH_CHECK.
+ */
+int64_t calculate_kernel_section_bytes(
+    const BatchStep& step,
+    const std::vector<KernelGroupSpec>& kernel_group_specs) {
+  int64_t bytes = 0;
+  for (const auto& launch : step.launches) {
+    if (launch.group_idx < 0 ||
+        launch.group_idx >= static_cast<int>(kernel_group_specs.size())) {
+      continue;
+    }
+    const PageBufferShapeDesc& desc =
+        kernel_group_specs[launch.group_idx].shape_desc;
+    const int64_t block_bytes = static_cast<int64_t>(desc.kv_size) * desc.nl *
+                                desc.bs * desc.nh * desc.hs * desc.element_size;
+    const int64_t moved_blocks =
+        static_cast<int64_t>(launch.total_blocks) - launch.skip_prefix_n_blocks;
+    if (moved_blocks > 0) {
+      bytes += block_bytes * moved_blocks;
+    }
+  }
+  return bytes;
+}
+
 }  // namespace
 
 #define LAUNCH_TEMPLATED(type)                                             \
@@ -504,30 +545,9 @@ void execute_object_group_transfer(
       batch_steps.size() * 2);
 
   for (const auto& step : batch_steps) {
-    // Exact per-section byte counts. Staging moves whole objects; the
-    // kernel may skip leading blocks (skip_prefix_n_blocks), so its bytes
-    // are derived from the launches instead of the staged payload.
-    int64_t step_bytes = 0;
-    for (const auto& copy : step.staging) {
-      step_bytes += static_cast<int64_t>(copy.nbytes);
-    }
-    int64_t kernel_bytes = 0;
-    for (const auto& launch : step.launches) {
-      if (launch.group_idx < 0 ||
-          launch.group_idx >= static_cast<int>(kernel_group_specs.size())) {
-        continue;  // the launch loop below rejects such a plan via TORCH_CHECK
-      }
-      const PageBufferShapeDesc& desc =
-          kernel_group_specs[launch.group_idx].shape_desc;
-      const int64_t block_bytes = static_cast<int64_t>(desc.kv_size) * desc.nl *
-                                  desc.bs * desc.nh * desc.hs *
-                                  desc.element_size;
-      const int64_t moved_blocks = static_cast<int64_t>(launch.total_blocks) -
-                                   launch.skip_prefix_n_blocks;
-      if (moved_blocks > 0) {
-        kernel_bytes += block_bytes * moved_blocks;
-      }
-    }
+    const int64_t step_bytes = calculate_staging_section_bytes(step);
+    const int64_t kernel_bytes =
+        calculate_kernel_section_bytes(step, kernel_group_specs);
 
     // H2D stages CPU->GPU temp buffers before the kernel reads them; D2H stages
     // GPU->CPU after the kernel writes them. The per-step ordering must be
