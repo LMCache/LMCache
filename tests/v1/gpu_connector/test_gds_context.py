@@ -275,7 +275,7 @@ class TestRegisterGpuBuffer:
         registered = []
         monkeypatch.setattr(ca, "register_buffer", registered.append)
         # GDS off -> registers nothing, makes no cuFile calls.
-        ctx.register_gpu_buffer(torch.empty(4096, dtype=torch.uint8))
+        ctx.register_gpu_buffer(torch.empty(4096, dtype=torch.uint8), _fake_stream(7))
         assert registered == []
 
     def test_splits_buffer_into_regions(self, monkeypatch):
@@ -289,15 +289,28 @@ class TestRegisterGpuBuffer:
             lambda buf: sizes.append(buf.numel() * buf.element_size()),
         )
         monkeypatch.setattr(ca, "register_stream", lambda raw: None)
-        monkeypatch.setattr(torch_dev, "current_stream", lambda: _fake_stream(0))
 
         # The whole buffer is registered in <=16 MiB regions, irrespective of
         # any chunk/slot layout. A 40 MiB buffer -> 16 + 16 + 8 MiB.
         # A CPU tensor is fine: the cuFile calls are mocked.
         buf = torch.empty(40 << 20, dtype=torch.uint8)
-        ctx.register_gpu_buffer(buf)
+        ctx.register_gpu_buffer(buf, _fake_stream(7))
 
         assert sizes == [16 << 20, 16 << 20, 8 << 20]
+
+    def test_registers_passed_stream_not_ambient_stream(self, monkeypatch):
+        """Registration uses the stream argument, never the ambient current
+        stream (regression test for issue #4589)."""
+        ctx = GDSContext()
+        ctx.initialized = True
+        reg_str: list[int] = []
+        monkeypatch.setattr(ca, "register_buffer", lambda b: None)
+        monkeypatch.setattr(ca, "register_stream", reg_str.append)
+        monkeypatch.setattr(torch_dev, "current_stream", lambda: _fake_stream(0))
+
+        ctx.register_gpu_buffer(torch.empty(4096, dtype=torch.uint8), _fake_stream(42))
+
+        assert reg_str == [42]
 
 
 class TestUgdsInitialization:
@@ -457,14 +470,14 @@ class TestResolveBuffer:
         ctx.initialized = True
         monkeypatch.setattr(ca, "register_buffer", lambda b: None)
         monkeypatch.setattr(ca, "register_stream", lambda raw: None)
-        monkeypatch.setattr(torch_dev, "current_stream", lambda: _fake_stream(0))
-        ctx.register_gpu_buffer(buf)
+        monkeypatch.setattr(torch_dev, "current_stream", lambda: _fake_stream(7))
+        ctx.register_gpu_buffer(buf, _fake_stream(7))
         resolved: list[tuple[int, int]] = []
         monkeypatch.setattr(
             ctx,
             "_slab_write",
-            lambda slab_offset, size, dev_offset, buf_base: resolved.append(
-                (buf_base, dev_offset)
+            lambda slab_offset, size, dev_offset, buf_base, stream_handle: (
+                resolved.append((buf_base, dev_offset))
             ),
         )
         return ctx, resolved
@@ -495,27 +508,18 @@ class TestPerStreamRegistration:
         monkeypatch.setattr(ca, "register_stream", reg_str.append)
         monkeypatch.setattr(ca, "deregister_stream", dereg_str.append)
 
-        def use_stream(handle: int):
-            monkeypatch.setattr(
-                torch_dev, "current_stream", lambda: _fake_stream(handle)
-            )
-
         buf_a = torch.empty(24 << 20, dtype=torch.uint8)  # 2 regions on stream 11
         buf_b = torch.empty(4096, dtype=torch.uint8)  # 1 region on stream 22
-        use_stream(11)
-        ctx.register_gpu_buffer(buf_a)
-        use_stream(22)
-        ctx.register_gpu_buffer(buf_b)
+        ctx.register_gpu_buffer(buf_a, _fake_stream(11))
+        ctx.register_gpu_buffer(buf_b, _fake_stream(22))
         # Each distinct stream registered exactly once.
         assert reg_str == [11, 22]
 
         # Deregistering buf_b frees stream 22's only region -> stream 22 dropped.
-        use_stream(22)
-        ctx.deregister_gpu_buffer(buf_b)
+        ctx.deregister_gpu_buffer(buf_b, _fake_stream(22))
         assert dereg_str == [22]
         # Stream 11 still has 2 regions (24 MiB -> 16 + 8), so not yet dropped.
-        use_stream(11)
-        ctx.deregister_gpu_buffer(buf_a)
+        ctx.deregister_gpu_buffer(buf_a, _fake_stream(11))
         assert dereg_str == [22, 11]
         assert len(dereg_buf) == 3  # all three slots deregistered
 
@@ -561,6 +565,47 @@ def test_ugds_context_roundtrip():
         ctx.close()
 
 
+class TestSubmissionStreamInvariant:
+    """DMA submissions must run with a registered stream current and fail
+    loudly otherwise (issue #4589)."""
+
+    def _ctx_with_fake_slab(self, monkeypatch, buf: torch.Tensor):
+        ctx = GDSContext()
+        ctx.initialized = True
+        monkeypatch.setattr(ca, "register_buffer", lambda b: None)
+        monkeypatch.setattr(ca, "register_stream", lambda raw: None)
+        ctx.register_gpu_buffer(buf, _fake_stream(11))
+        submitted: list[int] = []
+
+        def fake_write_async(base, size, foff, doff, stream) -> ca.Submission:
+            submitted.append(stream)
+            return ca.Submission(size=size, file_offset=foff, buf_offset=doff)
+
+        monkeypatch.setattr(
+            ctx, "_slab_handle", SimpleNamespace(write_async=fake_write_async)
+        )
+        return ctx, submitted
+
+    def test_transfer_on_unregistered_stream_raises(self, monkeypatch):
+        buf = torch.empty(4096, dtype=torch.uint8)
+        ctx, submitted = self._ctx_with_fake_slab(monkeypatch, buf)
+        mem_obj = SimpleNamespace(get_size=lambda: 4096, slab_offset=0)
+
+        monkeypatch.setattr(torch_dev, "current_stream", lambda: _fake_stream(99))
+        with pytest.raises(RuntimeError, match="not registered"):
+            ctx.transfer_async(mem_obj, buf, SlabDirection.WRITE)
+        assert submitted == []
+
+    def test_transfer_on_registered_stream_submits(self, monkeypatch):
+        buf = torch.empty(4096, dtype=torch.uint8)
+        ctx, submitted = self._ctx_with_fake_slab(monkeypatch, buf)
+        mem_obj = SimpleNamespace(get_size=lambda: 4096, slab_offset=0)
+
+        monkeypatch.setattr(torch_dev, "current_stream", lambda: _fake_stream(11))
+        ctx.transfer_async(mem_obj, buf, SlabDirection.WRITE)
+        assert submitted == [11]
+
+
 @requires_gds
 def test_gds_two_stream_write_read(gds_slab_dir: Path):
     """Verify independent chunk writes and reads on two GPU streams."""
@@ -574,7 +619,7 @@ def test_gds_two_stream_write_read(gds_slab_dir: Path):
         """Register a buffer on ``stream`` and write ``pattern`` to a chunk."""
         with torch.cuda.stream(stream):
             buf = torch.empty(chunk_bytes, dtype=torch.uint8, device="cuda")
-            ctx.register_gpu_buffer(buf)
+            ctx.register_gpu_buffer(buf, stream)
             err, objs = mgr.allocate(
                 MemoryLayoutDesc(
                     shapes=[torch.Size([chunk_bytes])], dtypes=[torch.uint8]
@@ -608,10 +653,9 @@ def test_gds_two_stream_write_read(gds_slab_dir: Path):
                 expected = torch.full((chunk_bytes,), pattern, dtype=torch.uint8)
                 assert torch.equal(buf.cpu(), expected)
 
-        # Deregister each buffer on its own stream.
+        # Deregister each buffer with its own stream.
         for stream, buf in ((stream_a, buf_a), (stream_b, buf_b)):
-            with torch.cuda.stream(stream):
-                ctx.deregister_gpu_buffer(buf)
+            ctx.deregister_gpu_buffer(buf, stream)
     finally:
         ctx.close()
 
@@ -624,8 +668,9 @@ def test_gds_write_read_roundtrip(gds_slab_dir: Path):
     ctx.initialize(cfg)
     try:
         chunk_bytes = 8 << 20
+        stream = torch.cuda.Stream()
         buf = torch.empty(chunk_bytes, dtype=torch.uint8, device="cuda")
-        ctx.register_gpu_buffer(buf)
+        ctx.register_gpu_buffer(buf, stream)
 
         mgr = GDSL1MemoryManager(cfg)
         err, objs = mgr.allocate(
@@ -636,14 +681,15 @@ def test_gds_write_read_roundtrip(gds_slab_dir: Path):
         mem_obj = objs[0]
         assert isinstance(mem_obj, GDSMemoryObject)
 
-        buf.fill_(0xAB)
-        torch.cuda.synchronize()
-        ctx.transfer_async(mem_obj, buf, SlabDirection.WRITE)
+        with torch.cuda.stream(stream):
+            buf.fill_(0xAB)
+            torch.cuda.synchronize()
+            ctx.transfer_async(mem_obj, buf, SlabDirection.WRITE)
 
-        buf.zero_()
-        torch.cuda.synchronize()
-        ctx.transfer_async(mem_obj, buf, SlabDirection.READ)
-        torch.cuda.synchronize()
+            buf.zero_()
+            torch.cuda.synchronize()
+            ctx.transfer_async(mem_obj, buf, SlabDirection.READ)
+            torch.cuda.synchronize()
 
         expected = torch.full((chunk_bytes,), 0xAB, dtype=torch.uint8)
         assert torch.equal(buf.cpu(), expected)
@@ -663,8 +709,9 @@ def test_gds_chunk_larger_than_region_roundtrip(gds_slab_dir: Path):
     ctx.initialize(cfg)
     try:
         chunk_bytes = 24 << 20  # > 16 MiB -> two registered regions / two DMAs
+        stream = torch.cuda.Stream()
         buf = torch.empty(chunk_bytes, dtype=torch.uint8, device="cuda")
-        ctx.register_gpu_buffer(buf)
+        ctx.register_gpu_buffer(buf, stream)
 
         mgr = GDSL1MemoryManager(cfg)
         err, objs = mgr.allocate(
@@ -679,14 +726,15 @@ def test_gds_chunk_larger_than_region_roundtrip(gds_slab_dir: Path):
         # second segment using the wrong slab offset) would corrupt the bytes
         # around the 16 MiB boundary, which a uniform fill would not catch.
         pattern = (torch.arange(chunk_bytes, dtype=torch.int64) % 251).to(torch.uint8)
-        buf.copy_(pattern.cuda())
-        torch.cuda.synchronize()
-        ctx.transfer_async(mem_obj, buf, SlabDirection.WRITE)
+        with torch.cuda.stream(stream):
+            buf.copy_(pattern.cuda())
+            torch.cuda.synchronize()
+            ctx.transfer_async(mem_obj, buf, SlabDirection.WRITE)
 
-        buf.zero_()
-        torch.cuda.synchronize()
-        ctx.transfer_async(mem_obj, buf, SlabDirection.READ)
-        torch.cuda.synchronize()
+            buf.zero_()
+            torch.cuda.synchronize()
+            ctx.transfer_async(mem_obj, buf, SlabDirection.READ)
+            torch.cuda.synchronize()
 
         assert torch.equal(buf.cpu(), pattern)
     finally:

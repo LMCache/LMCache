@@ -79,6 +79,7 @@ class _GroupSpec:
 def _make_kv_tensors(
     specs: Sequence[_GroupSpec],
     num_blocks: int = 4,
+    device: torch.device = _DEVICE,
 ) -> list[torch.Tensor]:
     """Build non-MLA per-layer KV tensors shaped ``[2, NB, BS, NH, HS]``."""
     tensors: list[torch.Tensor] = []
@@ -92,7 +93,7 @@ def _make_kv_tensors(
                     spec.num_heads,
                     spec.head_size,
                     dtype=spec.dtype,
-                    device=_DEVICE,
+                    device=device,
                 )
             )
     return tensors
@@ -555,6 +556,45 @@ class TestGPUCacheContextReportStatus:
             assert group["slots_per_block"] == kernel_group.slots_per_block
             assert group["tokens_per_block"] == kernel_group.tokens_per_block
             assert 0 <= group["object_group_idx"] < manager.num_object_groups
+
+
+class TestGDSStreamRegistration:
+    """The context hands its own transfer stream to the GDS context, also when
+    constructed from a thread on another device (regression for issue #4589)."""
+
+    @pytest.mark.skipif(
+        torch.cuda.device_count() < 2,
+        reason="needs 2 CUDA devices to reproduce the device mismatch",
+    )
+    def test_registers_context_stream_from_foreign_device_thread(
+        self, monkeypatch
+    ) -> None:
+        # First Party
+        from lmcache.v1.gpu_connector import _gds_async as ca
+        from lmcache.v1.gpu_connector.gds_context import get_gds_context
+
+        get_gds_context.cache_clear()
+        try:
+            gds = get_gds_context()
+            gds.initialized = True
+            registered_streams: list[int] = []
+            monkeypatch.setattr(ca, "register_buffer", lambda b: None)
+            monkeypatch.setattr(ca, "register_stream", registered_streams.append)
+
+            # A cuda:1 context constructed from a thread on cuda:0.
+            torch.cuda.set_device(0)
+            tensors = _make_kv_tensors(_SINGLE_GROUP, device=torch.device("cuda:1"))
+            kv_caches = [_FakeIPCWrapper(t) for t in tensors]
+            ctx = GPUCacheContext(
+                kv_caches,  # type: ignore
+                lmcache_tokens_per_chunk=256,
+                engine_group_infos=(),
+            )
+
+            assert ctx.stream.cuda_stream != 0
+            assert registered_streams == [ctx.stream.cuda_stream]
+        finally:
+            get_gds_context.cache_clear()
 
 
 if __name__ == "__main__":
