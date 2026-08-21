@@ -1,16 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 """CUDA IPC wrapper implementations.
 
-:class:`CudaIPCWrapper` handles tensors backed by PyTorch's caching
-allocator (vLLM default).  :class:`RawCudaIPCWrapper` handles tensors
-allocated outside PyTorch (e.g. TRT-LLM's ``cudaMalloc``'d pool).
+:class:`CudaIPCWrapper` shares tensors through PyTorch's storage IPC
+(needs a shared ``/dev/shm``); :class:`RawCudaIPCWrapper` shares them
+through driver-level CUDA IPC memory handles alone, which work across
+fully isolated containers and also cover tensors allocated outside
+PyTorch (e.g. TRT-LLM's ``cudaMalloc``'d pool).
 
-:class:`CudaIPCWrapper` is bound to ``device_type="cuda"`` via
-:attr:`~lmcache.v1.platform.cuda.CudaDeviceSpec.ipc_wrapper_cls`, so the
-multiprocess adapter dispatches to it via
-:func:`~lmcache.v1.platform.resolve_kv_wrapper_factory`.
-:class:`RawCudaIPCWrapper` is not exposed on the spec -- callers (the
-TRT-LLM adapter) instantiate it directly.
+``device_type="cuda"`` binds to one of the two via
+:attr:`~lmcache.v1.platform.cuda.CudaDeviceSpec.ipc_wrapper_cls`:
+:class:`CudaIPCWrapper` by default, :class:`RawCudaIPCWrapper` when the
+process-global isolated-IPC switch is on (see
+``lmcache/v1/platform/isolated_ipc.py``). The multiprocess adapter
+dispatches through
+:func:`~lmcache.v1.platform.resolve_kv_wrapper_factory`; the TRT-LLM
+adapter instantiates :class:`RawCudaIPCWrapper` directly.
 """
 
 # Future
@@ -26,6 +30,14 @@ import torch
 from lmcache import torch_device_type
 from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
 from lmcache.v1.platform.cuda.utils import _cuda
+
+_NON_IPC_MEMORY_HINT = (
+    "CUDA IPC memory handles only support cudaMalloc-style allocations. "
+    "Memory created through the CUDA VMM API cannot be shared this way -- "
+    "common sources are PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True "
+    "and vLLM's sleep mode (CuMemAllocator). Disable those or turn off "
+    "isolated IPC for this deployment."
+)
 
 
 class CudaIPCWrapper(DeviceIPCWrapper):
@@ -91,16 +103,32 @@ class CudaIPCWrapper(DeviceIPCWrapper):
 
 
 class RawCudaIPCWrapper(DeviceIPCWrapper):
-    """IPC wrapper for CUDA tensors allocated outside PyTorch's caching
-    allocator.
+    """IPC wrapper that shares CUDA tensors through driver-level IPC only.
 
-    PyTorch's ``UntypedStorage._share_cuda_()`` only works for tensors
-    backed by its own caching allocator. TRT-LLM publishes its KV pool
-    via ``at::for_blob`` over a ``cudaMalloc``'d buffer, which raises in
-    ``_share_cuda_()``. This subclass bypasses that path: it calls
-    ``cudaIpcGetMemHandle`` on the raw data pointer, then reconstructs
-    the tensor on the receiving side via ``cudaIpcOpenMemHandle`` plus
-    a CuPy ``UnownedMemory`` → DLPack → ``torch`` round-trip.
+    ``CudaIPCWrapper`` rides PyTorch's ``UntypedStorage._share_cuda_()``,
+    which requires a shared ``/dev/shm`` between the processes (torch
+    keeps its IPC reference counter there). This wrapper instead calls
+    ``cudaIpcGetMemHandle`` on the tensor's allocation and reconstructs
+    on the receiving side via ``cudaIpcOpenMemHandle`` plus a CuPy
+    ``UnownedMemory`` → DLPack → ``torch`` round-trip. CUDA IPC *memory*
+    handles rendezvous in the kernel driver, so this works across fully
+    isolated containers -- no shared IPC namespace, no common /dev/shm.
+
+    Two caller groups use it:
+
+    - the MP registration path selects it via
+      :attr:`~lmcache.v1.platform.cuda.CudaDeviceSpec.ipc_wrapper_cls`
+      when the isolated-IPC switch is on
+      (``lmcache/v1/platform/isolated_ipc.py``);
+    - the TRT-LLM adapter instantiates it directly for its
+      ``cudaMalloc``'d KV pool, which ``_share_cuda_()`` cannot wrap at
+      all.
+
+    An IPC mem handle always maps the *whole allocation* it was taken
+    from, and opening it returns the allocation's *base* pointer. Torch
+    caching-allocator tensors usually sit at an interior pointer, so the
+    wrapper ships ``data_ptr - cuMemGetAddressRange(data_ptr).base`` and
+    the consumer reads at that offset from the opened base.
 
     Sharing the ``DeviceIPCWrapper`` base (rather than introducing a
     parallel class with its own msgspec ext code) is load-bearing —
@@ -111,36 +139,81 @@ class RawCudaIPCWrapper(DeviceIPCWrapper):
     dispatches correctly.
     """
 
-    #: Same ``torch.device.type`` as ``CudaIPCWrapper``, but not exposed
-    #: on :attr:`~lmcache.v1.platform.cuda.CudaDeviceSpec.ipc_wrapper_cls`
-    #: -- callers (TRT-LLM adapter) instantiate it directly.
+    #: Same ``torch.device.type`` as ``CudaIPCWrapper``; exposed on
+    #: :attr:`~lmcache.v1.platform.cuda.CudaDeviceSpec.ipc_wrapper_cls`
+    #: under isolated IPC, instantiated directly by the TRT-LLM adapter.
     device_type: ClassVar[str] = "cuda"
+
+    @classmethod
+    def wrap(cls, tensor: torch.Tensor) -> "RawCudaIPCWrapper":
+        """Factory used by
+        :func:`~lmcache.v1.platform.resolve_kv_wrapper_factory`.
+
+        Args:
+            tensor: A CUDA tensor backed by ``cudaMalloc``-style memory
+                (PyTorch caching-allocator tensors included).
+
+        Returns:
+            A new :class:`RawCudaIPCWrapper` wrapping ``tensor`` for the
+            multiprocess wire.
+        """
+        return cls(tensor)
 
     def __init__(self, tensor: torch.Tensor) -> None:
         # First Party
-        from lmcache.v1.gpu_connector.utils import assert_contiguous
+        from lmcache.v1.gpu_connector.kv_format.contiguity import (
+            attempt_permute_to_contiguous_view,
+        )
 
-        assert_contiguous(tensor)
-
-        data_ptr = tensor.data_ptr()
-        err, ipc_handle = _cuda.runtime.cudaIpcGetMemHandle(data_ptr)
-        if err != _cuda.runtime.cudaError_t.cudaSuccess:
-            raise RuntimeError(
-                f"cudaIpcGetMemHandle failed: {err} (ptr=0x{data_ptr:x})"
+        # Same layout normalization as CudaIPCWrapper: permute
+        # non-contiguous views (e.g. vLLM's NHD-over-HND) into contiguous
+        # ones, metadata-only. The flat-bytes reconstruction below only
+        # supports contiguous tensors, so anything still non-contiguous
+        # is rejected rather than silently reordered.
+        tensor = attempt_permute_to_contiguous_view(tensor)
+        if not tensor.is_contiguous():
+            raise ValueError(
+                "RawCudaIPCWrapper requires a tensor that is contiguous "
+                f"(possibly after permutation); got shape={tuple(tensor.shape)} "
+                f"stride={tuple(tensor.stride())}"
             )
 
-        # Store only what's needed for reconstruction.
+        data_ptr = tensor.data_ptr()
+        range_result = _cuda.driver.cuMemGetAddressRange(
+            _cuda.driver.CUdeviceptr(data_ptr)
+        )
+        if range_result[0] != 0:
+            raise RuntimeError(
+                f"cuMemGetAddressRange failed: {range_result[0]} "
+                f"(ptr=0x{data_ptr:x}). " + _NON_IPC_MEMORY_HINT
+            )
+        _err, alloc_base, _alloc_size = range_result
+
+        err, ipc_handle = _cuda.runtime.cudaIpcGetMemHandle(int(alloc_base))
+        if err != _cuda.runtime.cudaError_t.cudaSuccess:
+            raise RuntimeError(
+                f"cudaIpcGetMemHandle failed: {err} (ptr=0x{data_ptr:x}). "
+                + _NON_IPC_MEMORY_HINT
+            )
+
+        # Store only what's needed for reconstruction. The handle maps
+        # the whole allocation; the offset locates the tensor within it.
         self._ipc_handle_reserved = bytes(ipc_handle.reserved)
-        self._nbytes = tensor.untyped_storage().nbytes()
+        self._alloc_offset = data_ptr - int(
+            alloc_base
+        )  # offset in bytes not the same as storage offset
+        self._nbytes = tensor.numel() * tensor.element_size()
 
         # DeviceIPCWrapper interface fields. ``handle`` is unused —
         # ``to_tensor`` is overridden to bypass it — but kept (None) so
         # the base-class equality check has a value to compare.
+        # ``storage_offset`` is 0 because ``data_ptr`` (folded into
+        # ``_alloc_offset``) already points at the tensor's first element.
         self.handle = None
         self.dtype = tensor.dtype
         self.shape = tuple(tensor.shape)
         self.stride = tuple(tensor.stride())
-        self.storage_offset = int(tensor.storage_offset())
+        self.storage_offset = 0
 
         device_index = tensor.device.index
         self.device_uuid = self._get_device_uuid(device_index)
@@ -160,13 +233,15 @@ class RawCudaIPCWrapper(DeviceIPCWrapper):
         if err != _cuda.runtime.cudaError_t.cudaSuccess:
             raise RuntimeError(f"cudaIpcOpenMemHandle failed: {err}")
 
-        # Wrap as a flat ``uint8`` CuPy array, DLPack to torch, then view
-        # as the original dtype/shape. ``uint8`` avoids dtype-conversion
-        # gaps (bfloat16, fp8 have no direct CuPy/NumPy equivalent without
-        # ml_dtypes).
+        # Wrap as a flat ``uint8`` CuPy array at the allocation offset,
+        # DLPack to torch, then view as the original dtype/shape.
+        # ``uint8`` avoids dtype-conversion gaps (bfloat16, fp8 have no
+        # direct CuPy/NumPy equivalent without ml_dtypes).
         with cupy.cuda.Device(device_index):
-            mem = cupy.cuda.UnownedMemory(ptr, self._nbytes, owner=self)
-            memptr = cupy.cuda.MemoryPointer(mem, 0)
+            mem = cupy.cuda.UnownedMemory(
+                int(ptr), self._alloc_offset + self._nbytes, owner=self
+            )
+            memptr = cupy.cuda.MemoryPointer(mem, self._alloc_offset)
             cp_flat = cupy.ndarray(self._nbytes, dtype=cupy.uint8, memptr=memptr)
 
         raw = torch.from_dlpack(cp_flat)
