@@ -197,11 +197,35 @@ def test_wrap_sglang_kv_caches_rejects_mismatched_layers() -> None:
         )
 
 
+def test_validate_sglang_kv_pools_accepts_fused_mla_empty_v_pool() -> None:
+    """Fused MLA registers latent buffers as K with an empty V pool."""
+    adapter_mod, _, _, _, _, _ = _import_adapter_symbols()
+    k_pool = [torch.zeros(4, 1, 8)]
+    assert adapter_mod._validate_sglang_kv_pools(k_pool, []) == k_pool[0].device
+
+
+def test_wrap_sglang_kv_caches_fused_mla_emits_n_not_2n(monkeypatch) -> None:
+    """Fused MLA wire payload is N latent buffers (depth-1), never 2N."""
+    adapter_mod, _, _, _, _, _ = _import_adapter_symbols()
+    k_pool = [torch.zeros(4, 1, 8), torch.zeros(4, 1, 8)]
+    seen: list[torch.Tensor] = []
+
+    def wrap_one(tensor: torch.Tensor) -> object:
+        seen.append(tensor)
+        return SimpleNamespace(tensor=tensor)
+
+    monkeypatch.setattr(adapter_mod, "wrap_one_kv_cache", wrap_one, raising=False)
+
+    wrapped = adapter_mod._wrap_sglang_kv_caches(k_pool, [])
+
+    assert len(wrapped) == len(k_pool)  # N, not 2N
+    assert seen == k_pool
+
+
 @pytest.mark.parametrize(
     ("k_pool", "v_pool", "message"),
     [
-        ([], [torch.tensor([1])], "non-empty K and V pools"),
-        ([torch.tensor([1])], [], "non-empty K and V pools"),
+        ([], [torch.tensor([1])], "non-empty K pool"),
         (
             [torch.tensor([1]), torch.tensor([2])],
             [torch.tensor([3])],

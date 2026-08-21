@@ -59,6 +59,28 @@ class SGLANG_Detector(EngineDetector):
             kv_caches
         )
         if list_depth == 1 and first_tensor.shape[1] == 1:  # MLA, fused PBS
+            mla_block_size = layout_hints.get("tokens_per_block")
+            if mla_block_size:
+                # Un-fuse the folded dim-0 (num_blocks*block_size) into a real
+                # block axis and drop the singleton head, so the tensor carries
+                # its own block size (NL_X_NB_BS_HS, same as vLLM MLA) instead of
+                # the block-less fused format whose block_size() is undefined.
+                mla_reshaped: list[DiscoverableKVCache] = []
+                for layer in kv_caches:
+                    page_buffer_size = layer.shape[0]
+                    if page_buffer_size % mla_block_size != 0:
+                        raise ValueError(
+                            f"SGLang MLA page_buffer_size {page_buffer_size} not "
+                            f"divisible by tokens_per_block {mla_block_size}"
+                        )
+                    mla_reshaped.append(
+                        layer.view(
+                            page_buffer_size // mla_block_size,
+                            mla_block_size,
+                            layer.shape[2],
+                        )
+                    )
+                return lmcache_native.EngineKVFormat.NL_X_NB_BS_HS, mla_reshaped
             return lmcache_native.EngineKVFormat.NL_X_NBBS_ONE_HS, kv_caches
         if list_depth == 2:
             if tensor_ndim == 4:  # MP daemon: NB/BS split into separate axes

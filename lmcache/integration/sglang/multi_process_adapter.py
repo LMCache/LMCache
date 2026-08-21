@@ -54,22 +54,30 @@ def _validate_sglang_kv_pools(
     k_pool: list[torch.Tensor],
     v_pool: list[torch.Tensor],
 ) -> torch.device:
-    """Validate SGLang's split MHA pools and return their shared device.
+    """Validate SGLang's KV pools and return their shared device.
+
+    Two layouts are accepted:
+
+    * Split MHA: a non-empty ``k_pool`` and a ``v_pool`` of equal length (one
+      physical key and value buffer per layer).
+    * Fused MLA: a non-empty ``k_pool`` of latent buffers and an empty
+      ``v_pool`` (V is a slice of the latent buffer, not registered
+      separately).
 
     Args:
-        k_pool: Per-layer key-cache tensors.
-        v_pool: Per-layer value-cache tensors.
+        k_pool: Per-layer key (or fused-MLA latent) cache tensors.
+        v_pool: Per-layer value-cache tensors; empty for fused MLA.
 
     Returns:
-        The device shared by every key and value tensor.
+        The device shared by every registered tensor.
 
     Raises:
-        ValueError: If either pool is empty, layer counts differ, or tensors
-            span multiple devices.
+        ValueError: If ``k_pool`` is empty, a non-empty ``v_pool`` has a
+            different layer count, or tensors span multiple devices.
     """
-    if not k_pool or not v_pool:
-        raise ValueError("SGLang MP registration requires non-empty K and V pools")
-    if len(k_pool) != len(v_pool):
+    if not k_pool:
+        raise ValueError("SGLang MP registration requires a non-empty K pool")
+    if v_pool and len(k_pool) != len(v_pool):
         raise ValueError("SGLang MP registration requires matching K and V layers")
     tensors = [*k_pool, *v_pool]
     device = tensors[0].device
@@ -82,16 +90,17 @@ def _wrap_sglang_kv_caches(
     k_pool: list[torch.Tensor],
     v_pool: list[torch.Tensor],
 ) -> KVCache:
-    """Flatten SGLang's depth-2 ``[K_layers, V_layers]`` KV layout into a
-    single flat ``KVCache`` so it fits upstream's wire
+    """Flatten SGLang's KV pools into a single flat ``KVCache`` for the wire
     ``KVCache`` payload type. The daemon's
-    :func:`normalize_kv_and_discover_format` recognizes this shape from
-    ``EngineType.SGLANG`` plus a ``tokens_per_block`` ``LayoutHints`` field
-    and splits it back at its midpoint before format detection.
+    :func:`normalize_kv_and_discover_format` detects the layout from
+    ``EngineType.SGLANG`` plus a ``tokens_per_block`` ``LayoutHints`` field:
+    split MHA (non-empty ``v_pool``) is a depth-2 ``[K_layers, V_layers]`` list
+    split back at its midpoint; fused MLA (empty ``v_pool``) is the ``k_pool``
+    latent buffers as a depth-1 list, detected as the single-buffer MLA format.
 
     Raises:
-        ValueError: If the pools are empty, use different devices, or the
-            selected platform cannot provide the complete handle-transfer
+        ValueError: If ``k_pool`` is empty, the pools use different devices, or
+            the selected platform cannot provide the complete handle-transfer
             path.
     """
     device = _validate_sglang_kv_pools(k_pool, v_pool)
@@ -215,9 +224,13 @@ class LMCacheMPConnector:
         # ([K_layers, V_layers]); we flatten it on the wire to fit
         # ``KVCache = list[DeviceIPCWrapper]``. The daemon recognizes the
         # SGLang-MHA flat-of-2NL pattern from ``EngineType.SGLANG`` plus the
-        # ``tokens_per_block`` hint and un-flattens + reshapes per layer.
-        # SGLang is non-hybrid (a single KV cache group), so engine_group_infos is the
-        # empty list -- which the server treats as one group spanning all layers
+        # ``tokens_per_block`` hint and un-flattens + reshapes per layer -- for
+        # both split MHA ([K_layers, V_layers]) and fused MLA (empty ``v_pool``,
+        # the latent buffers as a depth-1 list). The hint carries the page size,
+        # which the daemon uses to un-fuse the MLA tensor's dim-0
+        # (num_blocks*block_size) into a real block axis.
+        # SGLang is non-hybrid (a single KV cache group), so engine_group_infos is
+        # the empty list -- the server treats it as one group spanning all layers
         # (matching the vLLM non-hybrid and TensorRT-LLM register paths).
         send_lmcache_request(
             self.mq_client,
