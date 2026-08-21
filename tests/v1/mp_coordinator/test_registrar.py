@@ -224,3 +224,52 @@ def test_keep_registered_survives_unreachable_coordinator():
                 await task
 
     asyncio.run(run())
+
+
+def test_on_registered_fires_for_every_registration():
+    """The hook must fire on re-registration, not just the first one.
+
+    A restarted coordinator keeps declarations in memory only, so without
+    this the fleet view loses every capacity denominator until some
+    unrelated topology change happens to resend one.
+    """
+    calls = {"register": 0, "hook": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            calls["register"] += 1
+            return httpx.Response(
+                200, json={"instance_id": "i1", "re_registered": False}
+            )
+        if request.method == "PUT":
+            # Coordinator forgot us: forces a re-registration next tick.
+            return httpx.Response(404, json={"error": "unknown"})
+        return httpx.Response(204)
+
+    def hook() -> None:
+        calls["hook"] += 1
+
+    async def run():
+        async with _client(handler) as client:
+            await _run_loop_briefly(client, instance_id="i1", on_registered=hook)
+
+    asyncio.run(run())
+    assert calls["register"] >= 2, "expected a re-registration after the 404"
+    assert calls["hook"] == calls["register"]
+
+
+def test_on_registered_defaults_to_a_noop():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(
+                200, json={"instance_id": "i1", "re_registered": False}
+            )
+        if request.method == "PUT":
+            return httpx.Response(200, json={"instance_id": "i1"})
+        return httpx.Response(204)
+
+    async def run():
+        async with _client(handler) as client:
+            await _run_loop_briefly(client, instance_id="i1")
+
+    asyncio.run(run())  # no hook passed; must not raise

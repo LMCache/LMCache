@@ -251,6 +251,43 @@ class EncodedObjectKey:
 
 
 @dataclass(frozen=True)
+class ModuleMemoryCapacity:
+    """One compartment's configured capacity: an L1 medium or an L2 adapter.
+
+    Keyed on the same ``(tier, backend)`` axis cache events use.
+
+    Attributes:
+        tier: ``Tier.L1`` or ``Tier.L2``.
+        backend: Medium within the tier (``"dram"``, ``"devdax"``,
+            ``"gds"``, or an L2 adapter type such as ``"s3"``).
+        capacity_bytes: Configured capacity. ``0`` means undeclared --
+            reported as unknown, not as full.
+        shared: Set when instances mount this pool, so its capacity must
+            not be summed across them.
+    """
+
+    tier: "Tier"
+    backend: str
+    capacity_bytes: int
+    shared: bool = False
+
+
+@dataclass(frozen=True)
+class CapacitySnapshot:
+    """This server's memory capacities at one point in time.
+
+    Carries no revision: the cache-event subscriber numbers declarations as
+    it emits them, on the single event-bus drain thread, so the number and
+    the topology it labels cannot come apart.
+
+    Attributes:
+        modules: One entry per memory compartment.
+    """
+
+    modules: tuple["ModuleMemoryCapacity", ...]
+
+
+@dataclass(frozen=True)
 class KeyEntry:
     """One entry in a :class:`KeyListPage` including the encoded object
     key and its object size."""

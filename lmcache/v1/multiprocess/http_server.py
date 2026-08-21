@@ -138,6 +138,13 @@ async def lifespan(app: FastAPI):
                 heartbeat_interval=coordinator_config.heartbeat_interval,
                 p2p_advertised_url=mp_config.p2p_config.advertise_url,
                 mq_port=mp_config.port if mp_config.p2p_config.enabled else 0,
+                # Declare capacity after every registration. The coordinator
+                # holds declarations in memory only, so a restarted one has
+                # forgotten ours and no topology change would resend it.
+                # Safe to run on the first registration too: the task body
+                # does not start until this lifespan awaits, by which point
+                # the subscriber below is registered to carry the event.
+                on_registered=engine.storage_manager.publish_capacity,
             )
         )
     # Optionally report cache events to the coordinator

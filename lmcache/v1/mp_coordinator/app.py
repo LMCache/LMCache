@@ -57,6 +57,7 @@ from lmcache.v1.mp_coordinator.persistence.store import (
     NullArtifactStore,
 )
 from lmcache.v1.mp_coordinator.registry import InstanceRegistry
+from lmcache.v1.mp_coordinator.server_config import ServerConfigRegistry
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.utils.router_discovery import discover_api_routers
 
@@ -107,6 +108,9 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
         trigger_watermark=config.trigger_watermark,
     )
     prefetch_manager = PrefetchManager()
+    # Pressure's denominator; the numerator is usage_manager's per-instance
+    # rollup.
+    server_config = ServerConfigRegistry()
     # Resolves pin requests' token_ids to object keys; must match the fleet's
     # chunk size and hash algorithm (see MPCoordinatorConfig).
     token_hasher = TokenHasher(
@@ -120,6 +124,8 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
     # usage view for the same batch, so the usage view must consume first.
     event_broadcaster.register_consumer(usage_manager)
     event_broadcaster.register_consumer(eviction_controller)
+    # Consumes ``config`` batches only, so its position is free.
+    event_broadcaster.register_consumer(server_config)
     # Held by the ingest path; whoever captures durable state takes it
     # to read across the consumers consistently.
     quiesce = QuiesceLock()
@@ -131,6 +137,7 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
         key_directory,
         usage_manager,
         event_gate,
+        server_config,
         *eviction_controller.get_durable_components(),
     ]
     checkpoint_components = [
@@ -154,6 +161,7 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
         key_directory=key_directory,
         event_gate=event_gate,
         metadata_persister=metadata_persister,
+        server_config=server_config,
     )
 
     async def _checkpoint_loop() -> None:
