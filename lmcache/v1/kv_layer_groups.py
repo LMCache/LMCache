@@ -16,7 +16,7 @@ from lmcache import device_ops
 from lmcache.logging import init_logger
 from lmcache.utils import lmcache_deprecate
 from lmcache.v1.distributed.api import AttnWindowDesc
-from lmcache.v1.platform.ops_types import PageBufferShapeDesc, set_shape_desc_dtype
+from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 import lmcache.lmcache_native as lmcache_native
 
 if TYPE_CHECKING:
@@ -806,7 +806,7 @@ def parse_kvcache_shape_spec(
         shape_desc.nh = nh
         shape_desc.hs = hs
         shape_desc.element_size = dtype.itemsize
-        set_shape_desc_dtype(shape_desc, dtype)
+        shape_desc.dtype = dtype
 
         indices = list(range(layer_offset, layer_offset + layer_count))
         groups.append(
