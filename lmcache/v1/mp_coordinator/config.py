@@ -42,6 +42,14 @@ class MPCoordinatorConfig:
             no content.
         blend_probe_stride: Positions between match probes; ``1`` gives full
             recall. Ignored unless ``enable_blend_lookup`` is set.
+        checkpoint_path: File the coordinator's derived state is
+            checkpointed to. Empty disables checkpointing, and the
+            coordinator starts cold after every restart.
+        checkpoint_interval: Seconds between checkpoint writes; ``0``
+            writes only on a clean stop. Ignored without a path.
+        metadata_path: File the operator-set state (L2 pins and
+            per-``cache_salt`` quotas) is stored in. Empty disables it,
+            and that state is lost on restart.
         timeout_keep_alive: Seconds the HTTP server keeps idle connections
             open before closing them. Must be greater than the heartbeat
             interval of MP servers to avoid race-condition disconnects.
@@ -61,6 +69,9 @@ class MPCoordinatorConfig:
     hash_algorithm: str = "blake3"
     enable_blend_lookup: bool = False
     blend_probe_stride: int = 1
+    checkpoint_path: str = ""
+    checkpoint_interval: float = 60.0
+    metadata_path: str = ""
     timeout_keep_alive: int = 10
     metrics_enabled: bool = True
     otlp_endpoint: str | None = None
@@ -89,5 +100,7 @@ class MPCoordinatorConfig:
             raise ValueError("hash_algorithm must be a non-empty string")
         if self.blend_probe_stride < 1:
             raise ValueError("blend_probe_stride must be positive")
+        if self.checkpoint_interval < 0:
+            raise ValueError("checkpoint_interval must be non-negative")
         if self.timeout_keep_alive <= 0:
             raise ValueError("timeout_keep_alive must be positive")

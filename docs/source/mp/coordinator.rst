@@ -88,6 +88,19 @@ keeps the default below.
      - ``1``
      - Positions between CacheBlend match probes. ``1`` probes every offset
        for full recall. Ignored unless blend lookup is on.
+   * - ``--checkpoint-path``
+     - (empty)
+     - File the coordinator's derived state is checkpointed to. Empty
+       disables it and the coordinator starts cold after every restart.
+   * - ``--checkpoint-interval``
+     - ``60``
+     - Seconds between checkpoint writes; ``0`` writes only on a clean stop.
+       Ignored without a path. Does not affect the metadata file, which is
+       written whenever pins or quotas change.
+   * - ``--metadata-path``
+     - (empty)
+     - File the operator-set state (L2 pins and per-``cache_salt`` quotas)
+       is stored in. Empty means that state is lost on restart.
    * - ``--timeout-keep-alive``
      - ``10``
      - Seconds the HTTP server keeps idle connections open before closing
