@@ -69,6 +69,11 @@ Test dependencies: `uv pip install -r requirements/test.txt`
 
 Pytest marker: `@pytest.mark.no_shared_allocator` disables the shared-allocator monkeypatch for a test.
 
+### Buildkite Lane Boundaries
+
+- Keep the shared root `.buildkite/pipeline.yml` NVIDIA-only. AMD/ROCm unit tests belong in `.buildkite/k3_tests/amd/`; if a dedicated AMD lane exists, remove any AMD fallback from the root pipeline to avoid running the same AMD UT flow twice.
+- The shared path filter is a post-admission upload gate, not the PR admission gate itself. The call chain is `.buildkite/k3_tests/<lane>/buildkite-pipeline.yml` -> `.buildkite/k3_tests/common_scripts/upload-pipeline.sh` -> `.buildkite/k3_tests/common_scripts/path-filter.sh`. Use the Buildkite pipeline's GitHub trigger condition to control which PRs create AMD builds at all.
+
 ### Testing Practices
 
 - Write tests against the **public interface and docstring contract**, not the implementation. Test as if you don't know the internals — verify that behavior matches what the docstring describes.
