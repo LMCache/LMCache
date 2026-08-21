@@ -24,6 +24,7 @@ from lmcache.v1.mp_coordinator.controllers.prefetch_manager import PrefetchManag
 from lmcache.v1.mp_coordinator.controllers.usage_manager import CacheUsageManager
 from lmcache.v1.mp_coordinator.ingest.event_gate import EventGate
 from lmcache.v1.mp_coordinator.key_directory import KeyDirectory
+from lmcache.v1.mp_coordinator.persistence.metadata import MetadataPersister
 from lmcache.v1.mp_coordinator.registry import InstanceRegistry
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
@@ -46,6 +47,9 @@ class CoordinatorContext:
             MP-server cache events (eventually consistent).
         event_gate: Ingest entry point for the fleet cache-event stream
             (``POST /events``).
+        metadata_persister: Durable store for operator intent. Every
+            handler that changes a pin or a quota must ``save`` so the
+            change survives a restart.
     """
 
     registry: InstanceRegistry
@@ -55,6 +59,7 @@ class CoordinatorContext:
     token_hasher: TokenHasher
     key_directory: KeyDirectory
     event_gate: EventGate
+    metadata_persister: MetadataPersister
 
 
 def get_context(request: Request) -> CoordinatorContext:
