@@ -1,21 +1,9 @@
 #!/usr/bin/env bash
-# Run AMD unit tests with or without kernel serialization.
+# Run AMD unit tests with kernel serialization.
 set -euo pipefail
 
-case "${1:-}" in
-    serialized)
-        export AMD_SERIALIZE_KERNEL=1
-        ;;
-    unserialized)
-        unset AMD_SERIALIZE_KERNEL
-        ;;
-    *)
-        echo "Usage: $0 <serialized|unserialized>" >&2
-        exit 2
-        ;;
-esac
-
-echo "AMD kernel mode: $1"
+export AMD_SERIALIZE_KERNEL=1
+echo "AMD kernel mode: serialized"
 echo "$PWD" # for debugging
 
 uv venv --python 3.12 ".venv-${BUILDKITE_BUILD_ID}"

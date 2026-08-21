@@ -4,9 +4,20 @@ env:
   PATH: "$HOME/.local/bin:$PATH"
 
 steps:
-  - label: "AMD Unit Tests ({{matrix.mode}})"
+  - label: "AMD Unit Tests (Serialized)"
+    key: "amd_unit_tests"
     timeout_in_minutes: 60
-    command: bash .buildkite/k3_tests/amd/run-unit-tests.sh {{matrix.mode}}
+    command: bash .buildkite/k3_tests/amd/run-unit-tests.sh
+
+    artifact_paths:
+      - "durations/test.html"
+      - "coverage-test.xml"
+      - "coverage-test/**/*"
+
+  - label: "vLLM + LMCache E2E (AMD, {{matrix.mode}})"
+    depends_on: "amd_unit_tests"
+    timeout_in_minutes: 90
+    command: bash .buildkite/scripts/amd-vllm-bench.sh {{matrix.mode}}
     matrix:
       setup:
         mode:
@@ -18,13 +29,6 @@ steps:
       - "coverage-test.xml"
       - "coverage-test/**/*"
 
-  # The matrix is the only preceding test phase, so this waits for both modes.
-  - wait
-
-  - label: "vLLM + LMCache E2E (AMD)"
-    key: "amd_vllm_bench"
-    timeout_in_minutes: 90
-    command: .buildkite/scripts/amd-vllm-bench.sh
     artifact_paths:
       - "*.log"
       - "amd-vllm-bench-results/**/*"
