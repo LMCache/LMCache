@@ -883,6 +883,34 @@ class BlendV3Module(InstanceLivenessTarget):
         return self._token_range_matcher.match_sub_sequence(list(key.token_ids))
 
     @staticmethod
+    def _union_match_candidates(
+        local: list[CBMatchResult],
+        fleet: list[CBMatchResult],
+    ) -> list[CBMatchResult]:
+        """Union local and fleet fingerprint matches for one lookup.
+
+        Both sources are additive: the fleet directory is not a guaranteed
+        superset of the local table (best-effort cache events), so recall is
+        the union. Local is listed first so equal ``cur_st`` ties prefer the
+        local source under the stable sort in
+        :meth:`_non_overlapping_after_prefix`.
+
+        Args:
+            local: Matches from the on-server fingerprint matcher.
+            fleet: Matches from the coordinator directory (possibly empty on
+                timeout or when no coordinator query was submitted).
+
+        Returns:
+            Concatenated candidates; caller applies prefix filter + overlap
+            dedup via :meth:`_non_overlapping_after_prefix`.
+        """
+        if not fleet:
+            return local
+        if not local:
+            return fleet
+        return local + fleet
+
+    @staticmethod
     def _non_overlapping_after_prefix(
         matches: list[CBMatchResult], prefix_tokens: int
     ) -> list[CBMatchResult]:
@@ -1262,29 +1290,24 @@ class BlendV3Module(InstanceLivenessTarget):
             prefix_handle, prefix_ws = self._submit_prefix_leg(
                 key, tp_size, prefix_policy
             )
-            # Local and coordinator matching are mutually exclusive: with a
-            # coordinator the fleet directory is the only source, so skip the
-            # local matcher (and its span). The coordinator leg is async
-            # (submitted below, resolved at poll) and is timed by cb.lookup.
-            matches: list[CBMatchResult]
-            if self._coordinator is not None:
-                matches = []
-            else:
-                # Local fingerprint match: CPU-bound, tight span.
-                self._event_bus.publish(
-                    Event(
-                        event_type=EventType.CB_FINGERPRINT_MATCH_START,
-                        session_id=rid,
-                    )
+            # Local and fleet matching are additive: always run the local
+            # matcher; a coordinator only adds candidates (see blend_lookup.md).
+            # The coordinator leg is async (submitted below, resolved at poll)
+            # and is timed by cb.lookup.
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.CB_FINGERPRINT_MATCH_START,
+                    session_id=rid,
                 )
-                matches = self._match_fingerprints(key)
-                self._event_bus.publish(
-                    Event(
-                        event_type=EventType.CB_FINGERPRINT_MATCH_END,
-                        session_id=rid,
-                        metadata={"matches": len(matches)},
-                    )
+            )
+            matches = self._match_fingerprints(key)
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.CB_FINGERPRINT_MATCH_END,
+                    session_id=rid,
+                    metadata={"matches": len(matches)},
                 )
+            )
             job = _CBUnifiedJob(
                 matches=matches,
                 num_tokens=len(key.token_ids),
@@ -1325,9 +1348,12 @@ class BlendV3Module(InstanceLivenessTarget):
         if not job.sparse_started:
             prefix_tokens = prefix_chunks * chunk_size
             if self._coordinator is not None:
-                candidates = self._poll_coordinator_match(job, rid)
-                if candidates is None:
+                fleet = self._poll_coordinator_match(job, rid)
+                if fleet is None:
                     return None  # coordinator still in flight (bounded by deadline)
+                # Union local + fleet; timeout / empty fleet degrades to
+                # local-only via an empty fleet list.
+                candidates = self._union_match_candidates(job.matches, fleet)
             else:
                 candidates = job.matches
             # Under SEGMENTED_PREFIX, a same-position match the prefix leg already

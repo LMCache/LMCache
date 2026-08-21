@@ -428,7 +428,8 @@ def test_poll_coordinator_match_deferred_then_resolved():
 
 
 def test_poll_coordinator_match_gives_up_past_deadline():
-    """PENDING past the deadline degrades to local-only ([]) and drops state."""
+    """PENDING past the deadline returns [] (empty fleet); callers union with
+    local matches so the lookup degrades to local-only."""
     # First Party
     from lmcache.v1.mp_coordinator.blend_client import PENDING
 
@@ -440,6 +441,52 @@ def test_poll_coordinator_match_gives_up_past_deadline():
 
     assert eng._poll_coordinator_match(job, "rid") == []
     coordinator.take_match.assert_called_once_with("rid")
+
+
+def test_union_match_candidates_prefers_local_on_cur_st_tie():
+    """Local is listed first so equal cur_st ties keep the local old_st under
+    the stable sort in _non_overlapping_after_prefix."""
+    # First Party
+    from lmcache.v1.multiprocess.custom_types import CBMatchResult
+    from lmcache.v1.multiprocess.modules import blend_v3 as v3_mod
+
+    local = CBMatchResult(old_st=0, old_ed=4, cur_st=8, cur_ed=12, hash=b"\x01")
+    fleet = CBMatchResult(old_st=100, old_ed=104, cur_st=8, cur_ed=12, hash=b"\x01")
+    union = v3_mod.BlendV3Module._union_match_candidates([local], [fleet])
+    kept = v3_mod.BlendV3Module._non_overlapping_after_prefix(union, 0)
+
+    assert len(kept) == 1
+    assert kept[0].old_st == 0
+
+
+def test_union_match_candidates_empty_sides():
+    """Either empty side returns the other list unchanged (no copy)."""
+    # First Party
+    from lmcache.v1.multiprocess.custom_types import CBMatchResult
+    from lmcache.v1.multiprocess.modules import blend_v3 as v3_mod
+
+    local = [CBMatchResult(old_st=0, old_ed=4, cur_st=4, cur_ed=8, hash=b"\x01")]
+    fleet = [CBMatchResult(old_st=0, old_ed=4, cur_st=12, cur_ed=16, hash=b"\x02")]
+    union = v3_mod.BlendV3Module._union_match_candidates
+
+    assert union(local, []) is local
+    assert union([], fleet) is fleet
+    assert union([], []) == []
+
+
+def test_fleet_timeout_union_keeps_local_matches():
+    """Coordinator timeout yields an empty fleet list; union still keeps
+    whatever the local matcher already found."""
+    # First Party
+    from lmcache.v1.multiprocess.custom_types import CBMatchResult
+    from lmcache.v1.multiprocess.modules import blend_v3 as v3_mod
+
+    local = [CBMatchResult(old_st=0, old_ed=4, cur_st=4, cur_ed=8, hash=b"\x01")]
+    fleet_timed_out: list[CBMatchResult] = []
+    kept = v3_mod.BlendV3Module._non_overlapping_after_prefix(
+        v3_mod.BlendV3Module._union_match_candidates(local, fleet_timed_out), 0
+    )
+    assert [r.hash for r in kept] == [b"\x01"]
 
 
 def test_non_overlapping_after_prefix():
@@ -1038,13 +1085,13 @@ def test_union_of_local_and_fleet_matches_collapses_duplicates():
     from lmcache.v1.multiprocess.modules import blend_v3 as v3_mod
 
     dedup = v3_mod.BlendV3Module._non_overlapping_after_prefix
+    union_fn = v3_mod.BlendV3Module._union_match_candidates
     shared = CBMatchResult(old_st=0, old_ed=4, cur_st=8, cur_ed=12, hash=b"\x01")
     local_only = CBMatchResult(old_st=4, old_ed=8, cur_st=12, cur_ed=16, hash=b"\x02")
     fleet_only = CBMatchResult(old_st=8, old_ed=12, cur_st=16, cur_ed=20, hash=b"\x03")
 
     # Same chunk reported by both sources, plus one unique to each.
-    union = [shared, local_only] + [shared, fleet_only]
-    kept = dedup(union, 0)
+    kept = dedup(union_fn([shared, local_only], [shared, fleet_only]), 0)
 
     assert [r.hash for r in kept] == [b"\x01", b"\x02", b"\x03"]
 
@@ -1057,9 +1104,10 @@ def test_union_recall_is_at_least_either_source_alone():
     from lmcache.v1.multiprocess.modules import blend_v3 as v3_mod
 
     dedup = v3_mod.BlendV3Module._non_overlapping_after_prefix
+    union_fn = v3_mod.BlendV3Module._union_match_candidates
     local = [CBMatchResult(old_st=0, old_ed=4, cur_st=4, cur_ed=8, hash=b"\x01")]
     fleet = [CBMatchResult(old_st=0, old_ed=4, cur_st=12, cur_ed=16, hash=b"\x02")]
 
     assert len(dedup(local, 0)) == 1
     assert len(dedup(fleet, 0)) == 1
-    assert len(dedup(local + fleet, 0)) == 2
+    assert len(dedup(union_fn(local, fleet), 0)) == 2
