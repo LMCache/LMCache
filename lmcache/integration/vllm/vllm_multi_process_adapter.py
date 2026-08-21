@@ -656,10 +656,10 @@ class LMCacheMPSchedulerAdapter:
 
     def _ensure_heartbeat_started(self) -> None:
         """Lazily start the heartbeat thread on first use."""
-        if self._heartbeats is not None:
+        if self._heartbeats:
             return
         with self._heartbeat_lock:
-            if self._heartbeats is not None:
+            if self._heartbeats:
                 return
             for url, client in self.mq_clients.items():
                 hb = HeartbeatThread(

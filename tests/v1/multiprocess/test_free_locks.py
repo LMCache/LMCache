@@ -398,3 +398,64 @@ def test_adapter_free_lookup_locks_key_matches_lookup():
     assert lookup_key.end == free_key.end
     assert lookup_key.request_id == free_key.request_id
     assert lookup_key.token_ids == free_key.token_ids
+
+
+def test_scheduler_adapter_starts_heartbeat() -> None:
+    """LMCacheMPSchedulerAdapter._ensure_heartbeat_started should lazy-start
+    one HeartbeatThread per server connection, and early-exit on subsequent calls."""
+    # First Party
+    from lmcache.integration.vllm.vllm_multi_process_adapter import (
+        LMCacheMPSchedulerAdapter,
+        ParallelStrategy,
+    )
+
+    adapter = LMCacheMPSchedulerAdapter.__new__(LMCacheMPSchedulerAdapter)
+    adapter.model_name = "test_model"
+    adapter.lmcache_tokens_per_chunk = 256
+    adapter.blocks_in_chunk = 16
+    adapter.parallel_strategy = ParallelStrategy(False, 1, 0, 1, 1, 1)
+    adapter._server_urls = ["tcp://test0:0", "tcp://test1:0"]
+    adapter._health_events = {
+        "tcp://test0:0": threading.Event(),
+        "tcp://test1:0": threading.Event(),
+    }
+    for ev in adapter._health_events.values():
+        ev.set()
+    adapter._mq_timeout = 30.0
+    adapter._heartbeats = {}
+    adapter._heartbeat_lock = threading.Lock()
+    adapter._heartbeat_interval = 5.0
+
+    mock_client_0 = MagicMock(spec=MessageQueueClient)
+    mock_client_1 = MagicMock(spec=MessageQueueClient)
+    adapter.mq_clients = {
+        "tcp://test0:0": mock_client_0,
+        "tcp://test1:0": mock_client_1,
+    }
+
+    target_path = "lmcache.integration.vllm.vllm_multi_process_adapter.HeartbeatThread"
+    with patch(target_path) as mock_hb_cls:
+        mock_hb_0 = MagicMock()
+        mock_hb_1 = MagicMock()
+        mock_hb_cls.side_effect = [mock_hb_0, mock_hb_1]
+
+        # First call: should start heartbeats
+        adapter._ensure_heartbeat_started()
+
+        assert mock_hb_cls.call_count == 2
+        mock_hb_0.start.assert_called_once()
+        mock_hb_1.start.assert_called_once()
+        assert len(adapter._heartbeats) == 2
+        assert adapter._heartbeats["tcp://test0:0"] is mock_hb_0
+        assert adapter._heartbeats["tcp://test1:0"] is mock_hb_1
+
+        # Reset call counts
+        mock_hb_cls.reset_mock()
+        mock_hb_0.start.reset_mock()
+        mock_hb_1.start.reset_mock()
+
+        # Second call: should do nothing (early exit)
+        adapter._ensure_heartbeat_started()
+        assert mock_hb_cls.call_count == 0
+        mock_hb_0.start.assert_not_called()
+        mock_hb_1.start.assert_not_called()
