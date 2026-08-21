@@ -7,6 +7,9 @@
 - Rebuild on PR label change: Yes
 - Skip queued / cancel running branch builds: Yes
 
+This file is also a convenient `.buildkite/`-path validation target when
+checking that the shared path filter forces AMD lane uploads.
+
 This pipeline runs the bare-metal ROCm unit-test flow while making PR admission
 opt-in so AMD capacity is only consumed when requested.
 
