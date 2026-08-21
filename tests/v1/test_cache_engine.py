@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# Path-filter validation draft PR placeholder; no behavior change intended.
 # Standard
 from collections import OrderedDict
 from copy import deepcopy
