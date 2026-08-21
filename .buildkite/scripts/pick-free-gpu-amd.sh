@@ -6,9 +6,6 @@ MIN_FREE_MEM="${1:-10000}"      # MiB (default 10 GiB)
 REQUESTED_GPU_COUNT="${2:-1}"   # number of GPUs to select
 MAX_UTIL="${MAX_UTIL:-20}"      # (%)
 GPU_LIMIT="${GPU_LIMIT:-8}"     # only consider GPU index < GPU_LIMIT (default 8 for your node)
-# Optional comma-separated physical GPU indices. This lets concurrent jobs use
-# disjoint GPU sets while retaining free-memory and utilization checks.
-GPU_ALLOWLIST="${GPU_ALLOWLIST:-}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-3600}"
 INTERVAL="${INTERVAL:-10}"
 
@@ -24,28 +21,13 @@ get_candidates() {
   rocm-smi --showmeminfo vram --showuse 2>/dev/null | awk \
     -v min_mem="$MIN_FREE_MEM" \
     -v max_util="$MAX_UTIL" \
-    -v gpu_limit="$GPU_LIMIT" \
-    -v gpu_allowlist="$GPU_ALLOWLIST" '
+    -v gpu_limit="$GPU_LIMIT" '
     function mib_from_bytes(b) { return int(b / (1024*1024)) }
-
-    function allowed(idx) {
-      return gpu_allowlist == "" || idx in allowed_gpu
-    }
-
-    BEGIN {
-      if (gpu_allowlist != "") {
-        count = split(gpu_allowlist, ids, ",")
-        for (i = 1; i <= count; i++) {
-          allowed_gpu[ids[i] + 0] = 1
-        }
-      }
-    }
 
     # Util lines: "GPU[3] : GPU use (%): 0"
     /GPU\[[0-9]+\][[:space:]]*:[[:space:]]*GPU use[[:space:]]*\(%\):/ {
       if (match($0, /GPU\[([0-9]+)\]/, m)) idx=m[1]; else next
       if (idx+0 >= gpu_limit) next
-      if (!allowed(idx+0)) next
       if (match($0, /GPU use[[:space:]]*\(%\):[[:space:]]*([0-9]+)/, u)) util=u[1]; else next
       gpu_util[idx]=util+0
       next
@@ -55,7 +37,6 @@ get_candidates() {
     /GPU\[[0-9]+\][[:space:]]*:[[:space:]]*VRAM Total Memory \(B\):/ {
       if (match($0, /GPU\[([0-9]+)\]/, m)) idx=m[1]; else next
       if (idx+0 >= gpu_limit) next
-      if (!allowed(idx+0)) next
       if (match($0, /VRAM Total Memory \(B\):[[:space:]]*([0-9]+)/, t)) total=t[1]; else next
       vram_total[idx]=total+0
       next
@@ -65,7 +46,6 @@ get_candidates() {
     /GPU\[[0-9]+\][[:space:]]*:[[:space:]]*VRAM Total Used Memory \(B\):/ {
       if (match($0, /GPU\[([0-9]+)\]/, m)) idx=m[1]; else next
       if (idx+0 >= gpu_limit) next
-      if (!allowed(idx+0)) next
       if (match($0, /VRAM Total Used Memory \(B\):[[:space:]]*([0-9]+)/, t)) used=t[1]; else next
       vram_used[idx]=used+0
       next
@@ -73,7 +53,6 @@ get_candidates() {
 
     END {
       for (i=0; i<gpu_limit; i++) {
-        if (!allowed(i)) continue
         if ((i in vram_total) && (i in vram_used) && (i in gpu_util)) {
           free_bytes = vram_total[i] - vram_used[i]
           free_mib = mib_from_bytes(free_bytes)

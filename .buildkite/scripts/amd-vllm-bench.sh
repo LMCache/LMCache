@@ -14,16 +14,8 @@ DOCKER=(docker)
 case "${MODE}" in
     serialized)
         SERIALIZE_ENV=(--env "AMD_SERIALIZE_KERNEL=1")
-        GPU_ALLOWLIST="${AMD_E2E_SERIALIZED_GPU_INDICES:-0,1,2}"
-        LMCACHE_PORT="${AMD_E2E_SERIALIZED_LMCACHE_PORT:-6555}"
-        VLLM_PORT="${AMD_E2E_SERIALIZED_VLLM_PORT:-8000}"
-        VLLM_BASELINE_PORT="${AMD_E2E_SERIALIZED_VLLM_BASELINE_PORT:-9000}"
         ;;
     unserialized)
-        GPU_ALLOWLIST="${AMD_E2E_UNSERIALIZED_GPU_INDICES:-3,4,5}"
-        LMCACHE_PORT="${AMD_E2E_UNSERIALIZED_LMCACHE_PORT:-6556}"
-        VLLM_PORT="${AMD_E2E_UNSERIALIZED_VLLM_PORT:-8001}"
-        VLLM_BASELINE_PORT="${AMD_E2E_UNSERIALIZED_VLLM_BASELINE_PORT:-9001}"
         ;;
     *)
         echo "Usage: $0 <serialized|unserialized>" >&2
@@ -32,12 +24,9 @@ case "${MODE}" in
 esac
 
 CONTAINER_NAME="lmcache-amd-vllm-bench-${BUILDKITE_BUILD_ID}-${MODE}"
-export GPU_ALLOWLIST
 
 cd "${REPO_ROOT}"
 echo "AMD kernel mode: ${MODE}"
-echo "AMD GPU allowlist: ${GPU_ALLOWLIST}"
-echo "AMD ports: LMCache=${LMCACHE_PORT}, vLLM=${VLLM_PORT}, baseline=${VLLM_BASELINE_PORT}"
 
 if ! command -v docker >/dev/null 2>&1; then
     echo "docker is required to run the latest official vLLM ROCm image"
@@ -129,9 +118,6 @@ echo "Pulling ${VLLM_ROCM_IMAGE}"
     --env "GPU_FOR_VLLM=${GPU_FOR_VLLM}" \
     --env "GPU_FOR_BASELINE=${GPU_FOR_BASELINE}" \
     --env "PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH:-gfx942}" \
-    --env "LMCACHE_PORT=${LMCACHE_PORT}" \
-    --env "VLLM_PORT=${VLLM_PORT}" \
-    --env "VLLM_BASELINE_PORT=${VLLM_BASELINE_PORT}" \
     --env "AMD_KERNEL_MODE=${MODE}" \
     "${SERIALIZE_ENV[@]}" \
     --env ATTENTION_BACKEND=auto \

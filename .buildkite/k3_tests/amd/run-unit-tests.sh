@@ -3,9 +3,7 @@
 set -euo pipefail
 
 export AMD_SERIALIZE_KERNEL=1
-export GPU_ALLOWLIST="${AMD_UNIT_GPU_INDICES:-6,7}"
 echo "AMD kernel mode: serialized"
-echo "AMD GPU allowlist: ${GPU_ALLOWLIST}"
 echo "$PWD" # for debugging
 
 uv venv --python 3.12 ".venv-${BUILDKITE_BUILD_ID}"
