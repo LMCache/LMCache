@@ -4,49 +4,20 @@ env:
   PATH: "$HOME/.local/bin:$PATH"
 
 steps:
-  - label: "AMD Unit Tests"
-    key: "amd_unit_tests"
+  - label: "AMD Unit Tests (Serialized)"
+    key: "amd_unit_tests_serialized"
     timeout_in_minutes: 60
-    command: |
-      echo $PWD # for debugging
+    command: bash .buildkite/k3_tests/amd/run-unit-tests.sh serialized
 
-      uv venv --python 3.12 .venv-$BUILDKITE_BUILD_ID
-      source .venv-$BUILDKITE_BUILD_ID/bin/activate
-      uv pip install --upgrade pip setuptools wheel
+    artifact_paths:
+      - "durations/test.html"
+      - "coverage-test.xml"
+      - "coverage-test/**/*"
 
-      source .buildkite/scripts/pick-free-gpu-amd.sh 18000
-      export AMD_SERIALIZE_KERNEL=1
-      export PYTORCH_ROCM_ARCH="gfx942"
-      export TORCH_DONT_CHECK_COMPILER_ABI=1
-      export CXX=hipcc
-      export BUILD_WITH_HIP=1
-      uv pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm7.0
-      uv pip install -r requirements/rocm_core.txt
-
-      uv pip install -r requirements/common.txt
-      uv pip install -r requirements/test.txt
-      uv pip install -e . --no-build-isolation
-      uv pip freeze
-
-      LMCACHE_TRACK_USAGE="false" \
-      pytest --maxfail=1 --cov=lmcache \
-        --cov-report term --cov-report=html:coverage-test \
-        --cov-report=xml:coverage-test.xml --html=durations/test.html \
-        --ignore=tests/disagg --ignore=tests/v1/test_pos_kernels.py \
-        --ignore=tests/v1/test_nixl_batched_contains.py \
-        --ignore=tests/v1/test_device_id_race.py \
-        --ignore=tests/v1/test_nixl_multipath.py \
-        --ignore=tests/skipped \
-        --ignore=tests/v1/storage_backend/test_eic.py
-
-      cat << EOF | buildkite-agent annotate --style "info"
-        Read the <a href="artifact://coverage-test/index.html">uploaded coverage report</a>
-      EOF
-
-      export TARGET="$PWD"
-      echo "Deleting current workspace $TARGET"
-      cd /
-      sudo rm -rf "$TARGET"
+  - label: "AMD Unit Tests (Unserialized)"
+    key: "amd_unit_tests_unserialized"
+    timeout_in_minutes: 60
+    command: bash .buildkite/k3_tests/amd/run-unit-tests.sh unserialized
 
     artifact_paths:
       - "durations/test.html"
@@ -55,7 +26,9 @@ steps:
 
   - label: "vLLM + LMCache E2E (AMD)"
     key: "amd_vllm_bench"
-    depends_on: "amd_unit_tests"
+    depends_on:
+      - "amd_unit_tests_serialized"
+      - "amd_unit_tests_unserialized"
     timeout_in_minutes: 90
     command: .buildkite/scripts/amd-vllm-bench.sh
     artifact_paths:
