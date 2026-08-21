@@ -41,6 +41,7 @@ from lmcache.v1.mp_coordinator.http_apis.dependencies import CoordinatorContext
 from lmcache.v1.mp_coordinator.ingest.event_broadcaster import CacheEventBroadcaster
 from lmcache.v1.mp_coordinator.ingest.event_gate import EventGate
 from lmcache.v1.mp_coordinator.key_directory import KeyDirectory
+from lmcache.v1.mp_coordinator.persistence.quiesce import QuiesceLock
 from lmcache.v1.mp_coordinator.registry import InstanceRegistry
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.utils.router_discovery import discover_api_routers
@@ -105,7 +106,10 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
     # usage view for the same batch, so the usage view must consume first.
     event_broadcaster.register_consumer(usage_manager)
     event_broadcaster.register_consumer(eviction_controller)
-    event_gate = EventGate(event_broadcaster)
+    # Held by the ingest path; whoever captures durable state takes it
+    # to read across the consumers consistently.
+    quiesce = QuiesceLock()
+    event_gate = EventGate(event_broadcaster, quiesce)
 
     ctx = CoordinatorContext(
         registry=registry,
