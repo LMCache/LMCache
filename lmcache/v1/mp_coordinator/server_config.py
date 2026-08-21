@@ -8,6 +8,9 @@ like the key directory and the usage manager, so declarations arrive through
 the same gate -- inheriting its incarnation fencing, dedup, and ordering
 instead of carrying a second mechanism alongside.
 
+Compartments are :class:`ModuleMemoryCapacity`, the same type the MP server
+builds them as -- one shape for one concept on both sides of the wire.
+
 One declaration is one ``config`` batch per compartment, all sharing a
 ``capacity_revision``. A batch whose revision is newer than what is stored
 starts a fresh set; batches at the same revision extend it. That is what
@@ -19,13 +22,12 @@ from __future__ import annotations
 
 # Standard
 from collections.abc import Mapping
-from dataclasses import dataclass
 from typing import cast
 import threading
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import Tier
+from lmcache.v1.distributed.api import ModuleMemoryCapacity, Tier
 from lmcache.v1.mp_coordinator.api import CacheEventBatch, CacheEventType
 from lmcache.v1.mp_coordinator.persistence.durable_component import PersistenceType
 
@@ -34,43 +36,6 @@ logger = init_logger(__name__)
 # "No cap declared". Real caps are positive, so an unlimited adapter
 # reporting 0 would otherwise read as permanently full.
 UNDECLARED_CAPACITY = 0
-
-
-@dataclass(frozen=True)
-class ModuleCapacity:
-    """One compartment's declared capacity: the L1 pool or one L2 adapter.
-
-    Keyed on the same ``(tier, backend)`` axis cache events use.
-
-    Attributes:
-        tier: ``L1`` or ``L2``; never ``ALL``.
-        backend: Backend within the tier (``"dram"``, ``"fs"``, ...).
-            Non-empty.
-        capacity_bytes: Declared bytes, or :data:`UNDECLARED_CAPACITY`.
-        shared: Set when instances mount one storage domain (an S3 bucket,
-            a CXL pool). Count once for the fleet, never per mount.
-    """
-
-    tier: Tier
-    backend: str
-    capacity_bytes: int
-    shared: bool = False
-
-    def __post_init__(self) -> None:
-        """Validate the declaration.
-
-        Raises:
-            ValueError: If ``backend`` is empty, ``capacity_bytes`` is
-                negative, or ``tier`` is not concrete.
-        """
-        if not self.backend:
-            raise ValueError("backend must be non-empty")
-        if self.capacity_bytes < 0:
-            raise ValueError(f"capacity_bytes must be >= 0 (got {self.capacity_bytes})")
-        if self.tier not in (Tier.L1, Tier.L2):
-            raise ValueError(
-                f"capacity must target a concrete tier (got {self.tier.value!r})"
-            )
 
 
 class ServerConfigRegistry:
@@ -90,7 +55,7 @@ class ServerConfigRegistry:
         # genuinely races :meth:`consume`. Unsynchronized, it would iterate
         # ``_stamps`` while ``consume`` reassigns ``_by_instance``.
         self._lock = threading.Lock()
-        self._by_instance: dict[str, dict[tuple[Tier, str], ModuleCapacity]] = {}
+        self._by_instance: dict[str, dict[tuple[Tier, str], ModuleMemoryCapacity]] = {}
         self._stamps: dict[str, tuple[int, int]] = {}
 
     def consume(self, batch: CacheEventBatch) -> None:
@@ -106,7 +71,7 @@ class ServerConfigRegistry:
         """
         if batch.event_type != CacheEventType.CONFIG:
             return
-        module = ModuleCapacity(
+        module = ModuleMemoryCapacity(
             tier=batch.tier,
             backend=batch.backend,
             capacity_bytes=batch.capacity_bytes,
@@ -135,7 +100,7 @@ class ServerConfigRegistry:
             instance_id: The instance whose reported L1 state is void.
         """
 
-    def get(self, instance_id: str) -> tuple[ModuleCapacity, ...]:
+    def get(self, instance_id: str) -> tuple[ModuleMemoryCapacity, ...]:
         """Return ``instance_id``'s declared compartments.
 
         Args:
@@ -147,7 +112,7 @@ class ServerConfigRegistry:
         with self._lock:
             return tuple(self._by_instance.get(instance_id, {}).values())
 
-    def get_all(self) -> dict[str, tuple[ModuleCapacity, ...]]:
+    def get_all(self) -> dict[str, tuple[ModuleMemoryCapacity, ...]]:
         """Return a snapshot of every server's declarations.
 
         Returns:
@@ -238,7 +203,7 @@ class ServerConfigRegistry:
             for instance_id, incarnation, revision, modules in declarations:
                 self._stamps[instance_id] = (incarnation, revision)
                 self._by_instance[instance_id] = {
-                    (Tier(tier_value), backend): ModuleCapacity(
+                    (Tier(tier_value), backend): ModuleMemoryCapacity(
                         tier=Tier(tier_value),
                         backend=backend,
                         capacity_bytes=capacity_bytes,

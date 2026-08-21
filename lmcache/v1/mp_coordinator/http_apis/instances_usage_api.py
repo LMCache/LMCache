@@ -17,7 +17,7 @@ one ever shadowed this route.
 from fastapi import APIRouter, HTTPException, Request, status
 
 # First Party
-from lmcache.v1.distributed.api import Tier
+from lmcache.v1.distributed.api import ModuleMemoryCapacity, Tier
 from lmcache.v1.mp_coordinator.controllers.usage_manager import CacheUsageManager
 from lmcache.v1.mp_coordinator.http_apis.dependencies import get_context
 from lmcache.v1.mp_coordinator.schemas import (
@@ -25,7 +25,7 @@ from lmcache.v1.mp_coordinator.schemas import (
     InstanceMemoryStatus,
     ModuleMemoryStatus,
 )
-from lmcache.v1.mp_coordinator.server_config import UNDECLARED_CAPACITY, ModuleCapacity
+from lmcache.v1.mp_coordinator.server_config import UNDECLARED_CAPACITY
 
 router = APIRouter()
 
@@ -79,7 +79,7 @@ def _to_status(
 def _instance_status(
     instance_id: str,
     used: dict[tuple[Tier, str], int],
-    declared: tuple[ModuleCapacity, ...],
+    declared: tuple[ModuleMemoryCapacity, ...],
     registered: bool,
 ) -> InstanceMemoryStatus:
     """Build one server's status from its usage and its declaration.
@@ -119,7 +119,7 @@ def _instance_status(
 
 
 def _shared_capacities(
-    declarations: dict[str, tuple[ModuleCapacity, ...]],
+    declarations: dict[str, tuple[ModuleMemoryCapacity, ...]],
 ) -> dict[tuple[Tier, str], int]:
     """Resolve each shared pool's capacity across its declaring servers.
 

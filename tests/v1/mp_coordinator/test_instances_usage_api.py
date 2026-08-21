@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 import pytest
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey, Tier
+from lmcache.v1.distributed.api import ModuleMemoryCapacity, ObjectKey, Tier
 from lmcache.v1.mp_coordinator.api import (
     CacheEventBatch,
     CacheEventEntry,
@@ -20,7 +20,7 @@ from lmcache.v1.mp_coordinator.app import create_app
 from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
 from lmcache.v1.mp_coordinator.http_apis.dependencies import CoordinatorContext
 from lmcache.v1.mp_coordinator.persistence.durable_component import PersistenceType
-from lmcache.v1.mp_coordinator.server_config import ModuleCapacity, ServerConfigRegistry
+from lmcache.v1.mp_coordinator.server_config import ServerConfigRegistry
 
 GIB = 1 << 30
 
@@ -621,8 +621,8 @@ class TestDurableComponent:
         restored = ServerConfigRegistry()
         restored.restore(self._registry().capture())
         assert restored.get("mp-1") == (
-            ModuleCapacity(Tier.L1, "dram", 40 * GIB, False),
-            ModuleCapacity(Tier.L2, "s3", 0, True),
+            ModuleMemoryCapacity(Tier.L1, "dram", 40 * GIB, False),
+            ModuleMemoryCapacity(Tier.L2, "s3", 0, True),
         )
 
     def test_restore_keeps_the_stamp_so_a_straggler_cannot_win(self) -> None:
@@ -649,3 +649,47 @@ class TestDurableComponent:
         registry = self._registry()
         with pytest.raises(ValueError, match="requires an empty registry"):
             registry.restore(registry.capture())
+
+
+class TestCheckpointWiring:
+    """The registry must be in the coordinator's checkpoint set.
+
+    It declares itself ``CHECKPOINT``, but declaring is not wiring: the
+    component list in ``create_app`` is hand-built, so a registry left out
+    of it would advertise durability and never be captured.
+    """
+
+    def test_the_registry_is_a_checkpoint_component(self, client: TestClient) -> None:
+        # First Party
+        from lmcache.v1.mp_coordinator.persistence.durable_component import (
+            DurableComponent,
+            PersistenceType,
+        )
+
+        ctx = _ctx(client)
+        components: list[DurableComponent] = [
+            ctx.key_directory,
+            ctx.usage_manager,
+            ctx.event_gate,
+            ctx.server_config,
+            *ctx.eviction_controller.get_durable_components(),
+        ]
+        names = {
+            component.name
+            for component in components
+            if component.persistence_type is PersistenceType.CHECKPOINT
+        }
+        assert "server_config" in names
+
+    def test_a_declaration_survives_capture_and_restore(
+        self, client: TestClient
+    ) -> None:
+        _register(
+            client,
+            "mp-1",
+            [{"tier": "l1", "backend": "dram", "capacity_bytes": 64 * GIB}],
+        )
+        registry = _ctx(client).server_config
+        restored = ServerConfigRegistry()
+        restored.restore(registry.capture())
+        assert restored.get("mp-1") == registry.get("mp-1")
