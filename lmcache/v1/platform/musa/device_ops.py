@@ -486,8 +486,8 @@ class MusaDeviceOps(DeviceOps):
             src: Source tensor or raw pointer.
             nbytes: Number of bytes to copy.
             direction: H2D or D2H transfer direction.
-            host_buffer_offset: Host allocation offset retained for API
-                compatibility with native pointer-copy backends.
+            host_buffer_offset: Byte offset of the host pointer from the lazy
+                allocator base.
             host_buffer_alignments: Host pin-registration alignment. Must be a
                 positive power of two.
 
@@ -525,22 +525,36 @@ class MusaDeviceOps(DeviceOps):
         if nbytes == 0:
             return
 
-        if int(direction) == int(TransferDirection.H2D):
-            device_pointer, host_pointer = dest, src
+        direction_value = int(direction)
+        if direction_value == int(TransferDirection.H2D):
+            host_base, device_base = src, dest
+            is_h2d = True
         else:
-            device_pointer, host_pointer = src, dest
-        device_tensor = construct_musa_tensor_from_data_pointer(
-            device_pointer,
-            (nbytes,),
-            torch.uint8,
-            _current_musa_device(),
-            nbytes=nbytes,
-        )
-        host_tensor = _host_byte_tensor_from_pointer(host_pointer, nbytes)
-        if int(direction) == int(TransferDirection.H2D):
-            device_tensor.copy_(host_tensor, non_blocking=True)
-        else:
-            host_tensor.copy_(device_tensor, non_blocking=True)
+            host_base, device_base = dest, src
+            is_h2d = False
+
+        device = _current_musa_device()
+        copied = 0
+        while copied < nbytes:
+            bytes_to_boundary = host_buffer_alignments - (
+                (host_buffer_offset + copied) % host_buffer_alignments
+            )
+            copy_size = min(nbytes - copied, bytes_to_boundary)
+            host_tensor = _host_byte_tensor_from_pointer(
+                host_base + copied,
+                copy_size,
+            )
+            device_tensor = construct_musa_tensor_from_data_pointer(
+                device_base + copied,
+                (copy_size,),
+                torch.uint8,
+                device,
+            )
+            if is_h2d:
+                device_tensor.copy_(host_tensor, non_blocking=True)
+            else:
+                host_tensor.copy_(device_tensor, non_blocking=True)
+            copied += copy_size
 
     def record_completion_on_stream(
         self,

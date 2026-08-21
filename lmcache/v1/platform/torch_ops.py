@@ -35,10 +35,7 @@ from lmcache.v1.platform._device_detect import (
     current_device_spec,
     get_torch_device,
 )
-from lmcache.v1.platform.ops_types import set_shape_desc_dtype  # noqa: F401
-from lmcache.v1.platform.ops_types import (
-    PageBufferShapeDesc,
-)
+from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 
 if TYPE_CHECKING:
     # First Party
@@ -861,8 +858,7 @@ def _infer_kv_dtype(
     """Infer the KV element dtype from whichever inputs carry it.
 
     Inference order (first match wins):
-    1. ``shape_desc.dtype`` — authoritative when set (requires the
-       ``set_shape_desc_dtype`` helper from PR #3514; correctly distinguishes
+    1. ``shape_desc.dtype`` — authoritative when set; correctly distinguishes
        float16 vs bfloat16 which share ``element_size == 2``).
     2. ``paged_buffer_ptrs_tensor`` — if it is a non-pointer tensor or a list
        of tensors (including nested SGLang MHA lists), the dtype of the first

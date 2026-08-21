@@ -36,10 +36,12 @@ from lmcache.v1.mp_coordinator.controllers.eviction_controller import (
     FleetEvictionController,
 )
 from lmcache.v1.mp_coordinator.controllers.prefetch_manager import PrefetchManager
+from lmcache.v1.mp_coordinator.controllers.usage_manager import CacheUsageManager
 from lmcache.v1.mp_coordinator.http_apis.dependencies import CoordinatorContext
 from lmcache.v1.mp_coordinator.ingest.event_broadcaster import CacheEventBroadcaster
 from lmcache.v1.mp_coordinator.ingest.event_gate import EventGate
 from lmcache.v1.mp_coordinator.key_directory import KeyDirectory
+from lmcache.v1.mp_coordinator.persistence.quiesce import QuiesceLock
 from lmcache.v1.mp_coordinator.registry import InstanceRegistry
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.utils.router_discovery import discover_api_routers
@@ -84,7 +86,9 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
         key_directory.enable_blend_lookup(
             chunk_size=config.chunk_size, probe_stride=config.blend_probe_stride
         )
+    usage_manager = CacheUsageManager()
     eviction_controller = FleetEvictionController(
+        usage_manager=usage_manager,
         eviction_ratio=config.eviction_ratio,
         trigger_watermark=config.trigger_watermark,
     )
@@ -98,11 +102,18 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
     # consumer of the fleet's cache-event stream is a register call here.
     event_broadcaster = CacheEventBroadcaster()
     event_broadcaster.register_consumer(key_directory)
+    # Order matters: the eviction controller's delete handling reads the
+    # usage view for the same batch, so the usage view must consume first.
+    event_broadcaster.register_consumer(usage_manager)
     event_broadcaster.register_consumer(eviction_controller)
-    event_gate = EventGate(event_broadcaster)
+    # Held by the ingest path; whoever captures durable state takes it
+    # to read across the consumers consistently.
+    quiesce = QuiesceLock()
+    event_gate = EventGate(event_broadcaster, quiesce)
 
     ctx = CoordinatorContext(
         registry=registry,
+        usage_manager=usage_manager,
         eviction_controller=eviction_controller,
         prefetch_manager=prefetch_manager,
         token_hasher=token_hasher,
@@ -111,10 +122,17 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
     )
 
     async def _health_loop() -> None:
-        """Evict stale instances on a timer until cancelled."""
+        """Evict stale instances on a timer until cancelled.
+
+        A timed-out instance takes its L1 contents with it, so its
+        reported L1 state is fenced across every consumer. Its L2
+        contents stay: they live on storage the fleet shares and leave
+        only via ``DELETE`` events.
+        """
         while True:
             await asyncio.sleep(config.health_check_interval)
-            evict_stale(registry, config.instance_timeout)
+            for instance_id in evict_stale(registry, config.instance_timeout):
+                event_gate.drop_instance(instance_id)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:

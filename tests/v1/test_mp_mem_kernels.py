@@ -254,7 +254,7 @@ def call_block_kernel(
 ) -> None:
     device = vllm_tensors[0].device
 
-    shape_desc = cuda_ops.PageBufferShapeDesc()
+    shape_desc = lmcache_native.PageBufferShapeDesc()
     shape_desc.kv_size = 1 if is_mla else 2
     shape_desc.nl = nl
     shape_desc.nb = nb
