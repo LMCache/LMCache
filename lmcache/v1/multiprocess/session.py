@@ -42,6 +42,7 @@ class Session:
     created_at: float = field(default_factory=time.time)
     lookup_ipc_key: Optional[IPCCacheServerKey] = None
     prefetch_hit_chunks: int = -1
+    prefetch_extra_count: int = 0
     extras: dict[str, Any] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 

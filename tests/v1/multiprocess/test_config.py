@@ -168,6 +168,17 @@ def test_instance_id_dataclass_default_is_distinct():
     assert MPServerConfig().instance_id != MPServerConfig().instance_id
 
 
+def test_session_ttl_flag_is_parsed() -> None:
+    config = _parse_mp(["--session-ttl-seconds", "5400"])
+    assert config.session_ttl_seconds == 5400.0
+
+
+@pytest.mark.parametrize("ttl", ["0", "-1", "nan", "inf"])
+def test_invalid_session_ttl_rejected(ttl: str) -> None:
+    with pytest.raises(ValueError, match="session TTL must be a finite number > 0"):
+        _parse_mp(["--session-ttl-seconds", ttl])
+
+
 # -- Event reporting ----------------------------------------------------------
 
 

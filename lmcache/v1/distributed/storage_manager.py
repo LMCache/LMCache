@@ -255,6 +255,8 @@ class StorageManager:
     def read_prefetched_results(
         self,
         keys: list[ObjectKey],
+        recover_expired: bool = False,
+        extra_count: int = 0,
     ) -> Iterator[list[MemoryObj] | None]:
         """
         Read the memory objects from L1 storage that has been prefetched beforehand.
@@ -263,6 +265,10 @@ class StorageManager:
 
         Args:
             keys (list[ObjectKey]): List of object keys to reserve for reading.
+            recover_expired: Restore an expired read reservation for each
+                object that is still present and not write-locked.
+            extra_count: Extra reader claims to restore per key. Must match
+                the value used for the original prefetch reservation.
 
         Returns:
             Iterator[list[MemoryObj] | None]: An iterator yielding an optional list of
@@ -286,9 +292,17 @@ class StorageManager:
             publish_call_event(
                 "lmcache.v1.distributed.storage_manager."
                 "StorageManager.read_prefetched_results.__enter__",
-                {"keys": keys},
+                {
+                    "keys": keys,
+                    "recover_expired": recover_expired,
+                    "extra_count": extra_count,
+                },
             )
-        read_results = self._l1_manager.unsafe_read(keys)
+        read_results = self._l1_manager.unsafe_read(
+            keys,
+            recover_expired=recover_expired,
+            extra_count=extra_count,
+        )
         good_keys: list[ObjectKey] = []
         good_objs: list[MemoryObj] = []
         bad_keys: list[ObjectKey] = []
@@ -367,7 +381,11 @@ class StorageManager:
                 publish_call_event(
                     "lmcache.v1.distributed.storage_manager."
                     "StorageManager.read_prefetched_results.__exit__",
-                    {"keys": keys},
+                    {
+                        "keys": keys,
+                        "recover_expired": recover_expired,
+                        "extra_count": extra_count,
+                    },
                 )
 
     @enable_tracing()

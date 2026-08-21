@@ -174,7 +174,11 @@ def _enter_read_prefetched(ctx: ReplayContext, args: dict[str, Any]) -> None:
         args: Decoded record arguments.  Must contain ``"keys"``.
     """
     keys = args["keys"]
-    cm = ctx.sm.read_prefetched_results(keys)
+    cm = ctx.sm.read_prefetched_results(
+        keys,
+        recover_expired=bool(args.get("recover_expired", False)),
+        extra_count=int(args.get("extra_count", 0)),
+    )
     cm.__enter__()
     key_tuple = tuple(keys)
     ctx.open_read_contexts.setdefault(key_tuple, deque()).append(cm)

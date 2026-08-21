@@ -927,6 +927,43 @@ def _events_of_type(events: list, event_type: EventType) -> list:
     return [e for e in events if e.event_type == event_type]
 
 
+def test_read_prefetched_results_recovers_expired_tp4_lease(
+    basic_storage_manager_config, basic_layout
+):
+    """A resident object remains retrievable after its TP4 lease expires."""
+    sm = StorageManager(basic_storage_manager_config)
+    key = make_object_key(4242)
+    try:
+        reserved = sm.reserve_write([key], basic_layout, mode="new")
+        sm.finish_write(list(reserved))
+        handle = sm.submit_prefetch_task(
+            PrefetchRequestSpec([key], {0: basic_layout}, extra_count=3)
+        )
+        assert wait_for_prefetch_status(sm, handle) == 1
+
+        # Releasing all claims models the same resident-but-unlocked state
+        # produced by TTLLock expiry, without a wall-clock sleep.
+        sm.finish_read_prefetched([key], extra_count=3)
+        with sm.read_prefetched_results([key]) as objs:
+            assert objs is None
+
+        # Two ranks may race into retrieve. The first restores all four
+        # claims atomically; the second observes them without incrementing.
+        for _ in range(2):
+            with sm.read_prefetched_results(
+                [key], recover_expired=True, extra_count=3
+            ) as objs:
+                assert objs is not None
+                assert len(objs) == 1
+
+        for _ in range(4):
+            sm.finish_read_prefetched([key])
+        with sm.read_prefetched_results([key]) as objs:
+            assert objs is None
+    finally:
+        sm.close()
+
+
 class TestFailureEventProduction:
     """Verifies LM-291 health-monitoring events are published at the
     right producer call sites with the expected metadata."""
