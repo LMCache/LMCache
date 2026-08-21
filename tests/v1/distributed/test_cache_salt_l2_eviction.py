@@ -174,6 +174,56 @@ class TestOverQuotaEviction:
             "bob was within quota — nothing should have moved"
         )
 
+    def test_failed_oversized_delete_rotates_to_smaller_keys(
+        self, isolated_lru_setup, monkeypatch
+    ):
+        """A failed oversized LRU head cannot monopolize later passes."""
+        adapter, _, qm, controller, state = isolated_lru_setup
+        oversized = _key(0, "alice")
+        alternatives = [_key(i, "alice") for i in range(1, 101)]
+        qm.set_quota("alice", 1)
+        _store_sync(adapter, oversized, _memory_obj(100))
+        for key in alternatives:
+            _store_sync(adapter, key, _memory_obj(1))
+
+        attempts: list[list[ObjectKey]] = []
+        monkeypatch.setattr(
+            adapter, "delete", lambda selected: attempts.append(selected)
+        )
+
+        controller._check_and_evict(state)
+        controller._check_and_evict(state)
+
+        assert attempts[0] == [oversized]
+        assert attempts[1] == alternatives
+
+    def test_raising_delete_does_not_stop_later_passes(
+        self, isolated_lru_setup, monkeypatch
+    ):
+        """A raised delete is isolated and the next pass makes progress."""
+        adapter, _, qm, controller, _ = isolated_lru_setup
+        oversized = _key(0, "alice")
+        alternatives = [_key(i, "alice") for i in range(1, 101)]
+        qm.set_quota("alice", 1)
+        _store_sync(adapter, oversized, _memory_obj(100))
+        for key in alternatives:
+            _store_sync(adapter, key, _memory_obj(1))
+
+        attempts: list[list[ObjectKey]] = []
+
+        def flaky_delete(selected):
+            attempts.append(selected)
+            if len(attempts) == 1:
+                raise RuntimeError("delete failed")
+
+        monkeypatch.setattr(adapter, "delete", flaky_delete)
+
+        controller._run_eviction_pass()
+        controller._run_eviction_pass()
+
+        assert attempts[0] == [oversized]
+        assert attempts[1] == alternatives
+
     def test_unregistered_salt_gets_wiped(self, isolated_lru_setup):
         """A salt with no quota entry is fully evicted on the next
         cycle (allowlist semantics)."""
