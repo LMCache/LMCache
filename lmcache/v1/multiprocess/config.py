@@ -103,17 +103,22 @@ class MPServerConfig:
     sent a PING (model warmup, or death before its first request). Must be
     >= worker_reap_timeout_seconds."""
 
+    session_ttl_seconds: float = 600.0
+    """Retention window for per-request lookup state. This must cover the
+    longest expected delay between LOOKUP and RETRIEVE. Default is 600."""
+
     enable: list[str] = field(default_factory=list)
     """List of experimental transfer modules to enable. Options: transfer_query
     (see lmcache.v1.multiprocess.modules.experimental.__init___.py)."""
 
     def __post_init__(self) -> None:
-        """Validate the worker-reaping timeouts.
+        """Validate the worker-reaping and session timeouts.
 
         Raises:
             ValueError: If a timeout is non-finite, the reap timeout is
                 negative or a non-zero value below the 30 s floor, or the
-                registration grace is below the reap timeout.
+                registration grace is below the reap timeout, or the session
+                TTL is not a finite positive value.
         """
         reap = self.worker_reap_timeout_seconds
         grace = self.worker_registration_grace_seconds
@@ -127,6 +132,11 @@ class MPServerConfig:
             raise ValueError(
                 "worker registration grace must be >= the worker reap timeout "
                 f"({reap}s); got {grace}"
+            )
+        session_ttl = self.session_ttl_seconds
+        if not math.isfinite(session_ttl) or session_ttl <= 0:
+            raise ValueError(
+                f"session TTL must be a finite number > 0; got {session_ttl}"
             )
 
 
@@ -391,6 +401,14 @@ def add_mp_server_args(
         "timeout. Default is 3600.",
     )
     mp_group.add_argument(
+        "--session-ttl-seconds",
+        type=float,
+        default=600.0,
+        help="Retention window (s) for per-request lookup state. Keep this "
+        "above the longest expected delay between LOOKUP and RETRIEVE. "
+        "Default is 600.",
+    )
+    mp_group.add_argument(
         "--enable-segmented-prefix",
         action="store_true",
         help="CacheBlend (--engine-type blend) only: on a mid-prefix L2 "
@@ -450,6 +468,7 @@ def parse_args_to_mp_server_config(
         script_allowed_imports=args.script_allowed_imports or [],
         worker_reap_timeout_seconds=args.worker_reap_timeout_seconds,
         worker_registration_grace_seconds=args.worker_registration_grace_seconds,
+        session_ttl_seconds=args.session_ttl_seconds,
         enable=args.enable or [],
     )
 

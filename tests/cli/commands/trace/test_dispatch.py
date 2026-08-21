@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 # Standard
-from typing import Any
+from typing import Any, cast
 
 # Third Party
 import pytest
@@ -18,6 +18,7 @@ from lmcache.cli.commands.trace._dispatch import (
     build_default_dispatcher,
 )
 from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.storage_manager import StorageManager
 
 _SM_PREFIX = "lmcache.v1.distributed.storage_manager.StorageManager"
 
@@ -48,7 +49,22 @@ class _FakeSM:
     def finish_read_prefetched(self, **kw: Any) -> None:
         self.calls.append(("finish_read_prefetched", kw))
 
-    def read_prefetched_results(self, keys: list[ObjectKey]) -> "_FakeCM":
+    def read_prefetched_results(
+        self,
+        keys: list[ObjectKey],
+        recover_expired: bool = False,
+        extra_count: int = 0,
+    ) -> "_FakeCM":
+        self.calls.append(
+            (
+                "read_prefetched_results",
+                {
+                    "keys": keys,
+                    "recover_expired": recover_expired,
+                    "extra_count": extra_count,
+                },
+            )
+        )
         return _FakeCM(self, keys)
 
 
@@ -109,7 +125,7 @@ class TestDefaultDispatcher:
 
     def test_simple_method_forwarded_with_kwargs(self):
         sm = _FakeSM()
-        ctx = ReplayContext(sm=sm)
+        ctx = ReplayContext(sm=cast(StorageManager, sm))
         d = build_default_dispatcher()
         d.dispatch(
             f"{_SM_PREFIX}.reserve_write",
@@ -146,6 +162,29 @@ class TestDefaultDispatcher:
         assert sm.events == ["enter-2", "enter-2", "exit-2", "exit-2"]
         # Fully drained → dict cleaned up.
         assert ctx.open_read_contexts == {}
+
+    def test_read_prefetched_recovery_args_are_forwarded(self) -> None:
+        sm = _FakeSM()
+        ctx = ReplayContext(sm=cast(StorageManager, sm))
+        d = build_default_dispatcher()
+        keys = [_key(1)]
+
+        d.dispatch(
+            f"{_SM_PREFIX}.read_prefetched_results.__enter__",
+            ctx,
+            {"keys": keys, "recover_expired": True, "extra_count": 3},
+        )
+
+        assert sm.calls == [
+            (
+                "read_prefetched_results",
+                {
+                    "keys": keys,
+                    "recover_expired": True,
+                    "extra_count": 3,
+                },
+            )
+        ]
 
     def test_exit_without_matching_enter_is_warning_only(self, caplog):
         sm = _FakeSM()

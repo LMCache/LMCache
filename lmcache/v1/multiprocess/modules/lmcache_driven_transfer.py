@@ -1272,6 +1272,9 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         obj_keys_per_obj_group = self._ctx.resolve_obj_keys(
             key, list(range(num_object_groups))
         )
+        prefetch_extra_count = self._ctx.session_manager.get_or_create(
+            key.request_id
+        ).prefetch_extra_count
         num_chunks = len(obj_keys_per_obj_group[0])
 
         # CPU-synchronous sentinel: a GPU retrieve is about to be enqueued.
@@ -1360,7 +1363,9 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                     skip = group_skips[obj_group_id]
                     in_window_keys = obj_keys_per_obj_group[obj_group_id][skip:]
                     with self._ctx.storage_manager.read_prefetched_results(
-                        in_window_keys
+                        in_window_keys,
+                        recover_expired=True,
+                        extra_count=prefetch_extra_count,
                     ) as window_objs:
                         if not window_objs or len(window_objs) != len(in_window_keys):
                             logger.error("Some keys not found during retrieve!")

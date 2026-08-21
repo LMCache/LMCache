@@ -484,6 +484,35 @@ class TestUnsafeRead:
 
         manager.close()
 
+    def test_unsafe_read_recovers_multi_reader_reservation_once(
+        self, basic_l1_config, basic_layout
+    ):
+        """Concurrent TP readers restore one expired four-reader lease."""
+        manager = L1Manager(basic_l1_config)
+        key = make_object_key(12346)
+
+        manager.reserve_write([key], [False], basic_layout)
+        manager.finish_write([key])
+        manager.reserve_read([key], extra_count=3)
+
+        # Return the persistent object to the ready state, which is the state
+        # observed after its TTL lease expires without evicting the object.
+        manager.finish_read([key], extra_count=3)
+        assert manager.unsafe_read([key])[key][0] == L1Error.KEY_NOT_READABLE
+
+        first = manager.unsafe_read([key], recover_expired=True, extra_count=3)
+        second = manager.unsafe_read([key], recover_expired=True, extra_count=3)
+        assert first[key][0] == L1Error.SUCCESS
+        assert second[key][0] == L1Error.SUCCESS
+
+        # The second TP reader must not add another four claims. Exactly four
+        # worker completions return the object to the ready state.
+        for _ in range(4):
+            assert manager.finish_read([key])[key] == L1Error.SUCCESS
+        assert manager.unsafe_read([key])[key][0] == L1Error.KEY_NOT_READABLE
+
+        manager.close()
+
     def test_unsafe_read_multiple_keys(self, basic_l1_config, basic_layout):
         """Test unsafe_read with multiple keys in a single call."""
         manager = L1Manager(basic_l1_config)

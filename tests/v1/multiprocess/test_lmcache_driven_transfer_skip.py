@@ -130,11 +130,12 @@ def _make_module(monkeypatch, num_chunks, num_chunks_in_sw):
     read_calls: list[list[str]] = []
 
     @contextmanager
-    def fake_read(keys):
+    def fake_read(keys, **_kwargs):
         read_calls.append(list(keys))
         yield [MagicMock(get_size=MagicMock(return_value=10)) for _ in keys]
 
     ctx.storage_manager.read_prefetched_results = MagicMock(side_effect=fake_read)
+    ctx.session_manager.get_or_create.return_value.prefetch_extra_count = 3
     module._ctx = ctx
 
     transfer_calls: list[tuple[int, list]] = []
@@ -180,6 +181,8 @@ def test_retrieve_reads_and_transfers_only_in_window(monkeypatch):
     # Full-attention group reads all 5 keys; mamba group reads only the last.
     assert read_calls[0] == [f"g0c{c}" for c in range(5)]
     assert read_calls[1] == ["g1c4"]
+    for call in module.context.storage_manager.read_prefetched_results.call_args_list:
+        assert call.kwargs == {"recover_expired": True, "extra_count": 3}
 
     # memory_objs handed to the transfer stay full-length; the mamba group's
     # skipped prefix is None-padded (skip = num_chunks - window = 4).

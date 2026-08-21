@@ -197,6 +197,7 @@ class MPCacheServerContext:
         separate_object_groups: Whether to split kernel groups into one object
             group per sliding-window size at KV-cache registration. Default
             False.
+        session_ttl_seconds: Retention window for per-request lookup state.
     """
 
     def __init__(
@@ -206,6 +207,7 @@ class MPCacheServerContext:
         hash_algorithm: str = "blake3",
         separate_object_groups: bool = False,
         full_sw_kv: bool = False,
+        session_ttl_seconds: float = SessionManager.DEFAULT_SESSION_TTL,
     ) -> None:
         self._chunk_size = chunk_size
         self._separate_object_groups = separate_object_groups
@@ -222,7 +224,9 @@ class MPCacheServerContext:
         self._token_hasher = TokenHasher(
             chunk_size=chunk_size, hash_algorithm=hash_algorithm
         )
-        self._session_manager = SessionManager(self._token_hasher)
+        self._session_manager = SessionManager(
+            self._token_hasher, ttl=session_ttl_seconds
+        )
         self._event_bus = get_event_bus()
         self._layout_desc_registry = LayoutDescRegistry()
 

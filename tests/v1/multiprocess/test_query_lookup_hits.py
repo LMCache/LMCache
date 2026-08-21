@@ -249,8 +249,11 @@ def _lookup_key(world_size: int) -> IPCCacheServerKey:
 
 
 def _captured_lookup_object_keys(
-    world_size: int, num_groups: int, chunk_hashes: list[bytes]
-) -> list[ObjectKey]:
+    world_size: int,
+    num_groups: int,
+    chunk_hashes: list[bytes],
+    tp_size: int = 1,
+) -> tuple[list[ObjectKey], MagicMock]:
     """Drive the public ``lookup()`` and return the object keys it submits.
 
     The engine context is mocked so ``lookup()`` runs end-to-end; the
@@ -272,17 +275,20 @@ def _captured_lookup_object_keys(
     ctx.token_hasher.compute_chunk_hashes.return_value = chunk_hashes
 
     module = LookupModule(ctx)
-    module.lookup(_lookup_key(world_size=world_size), tp_size=1)
+    module.lookup(_lookup_key(world_size=world_size), tp_size=tp_size)
 
     ctx.storage_manager.submit_prefetch_task.assert_called_once()
-    return ctx.storage_manager.submit_prefetch_task.call_args.args[0].keys
+    return (
+        ctx.storage_manager.submit_prefetch_task.call_args.args[0].keys,
+        ctx.session_manager.get_or_create.return_value,
+    )
 
 
 def test_lookup_lays_keys_out_chunk_then_group_then_rank():
     """lookup() submits keys laid out chunk -> object group -> kv_rank, so each
     chunk's keys are contiguous (the property that makes a leading-ones prefix
     equal to the full-attention model-wide hit)."""
-    keys = _captured_lookup_object_keys(
+    keys, _session = _captured_lookup_object_keys(
         world_size=2, num_groups=2, chunk_hashes=[b"c0", b"c1"]
     )
 
@@ -303,9 +309,21 @@ def test_lookup_single_group_matches_single_group_layout():
     single-group layout (the object-group-separation-disabled / non-hybrid
     case)."""
     chunk_hashes = [b"c0", b"c1"]
-    keys = _captured_lookup_object_keys(
+    keys, _session = _captured_lookup_object_keys(
         world_size=2, num_groups=1, chunk_hashes=chunk_hashes
     )
 
     expected = ipc_key_to_object_keys(_lookup_key(world_size=2), chunk_hashes, [0])[0]
     assert keys == expected
+
+
+def test_lookup_records_tp4_reader_count_for_lease_recovery():
+    """The retrieve session retains the count used by the TP4 prefetch."""
+    _keys, session = _captured_lookup_object_keys(
+        world_size=1,
+        num_groups=1,
+        chunk_hashes=[b"c0"],
+        tp_size=4,
+    )
+
+    assert session.prefetch_extra_count == 3

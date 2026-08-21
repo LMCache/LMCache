@@ -279,6 +279,7 @@ class LookupModule:
         session = self._ctx.session_manager.get_or_create(key.request_id)
         session.set_tokens(list(key.token_ids))
         session.lookup_ipc_key = key
+        session.prefetch_extra_count = extra_count
 
         # Lay keys out chunk-major across object groups (see
         # _chunk_major_object_keys); pass the windows to the prefetch policy.

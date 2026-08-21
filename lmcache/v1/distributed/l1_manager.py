@@ -301,15 +301,24 @@ class L1Manager:
     def unsafe_read(
         self,
         keys: list[ObjectKey],
+        recover_expired: bool = False,
+        extra_count: int = 0,
     ) -> dict[ObjectKey, L1OperationResult]:
-        """Unsafe read the read-locked objects without adding new read locks.
+        """Read objects whose read locks were reserved beforehand.
 
-        This method does not acquire read locks. Therefore, the caller need
-        to make sure the `unsafe_read` is called between `reserve_read` and
-        `finish_read` calls.
+        Normally this method does not acquire read locks, so the caller must
+        call it between matching ``reserve_read`` and ``finish_read`` calls.
+        When ``recover_expired`` is enabled, an object that is still readable
+        after its read-lock TTL elapsed has its reservation restored atomically.
+        The first concurrent reader restores all ``1 + extra_count`` claims;
+        later readers observe the restored lock and do not increment it.
 
         Args:
             keys: The list of object keys to read.
+            recover_expired: Restore an expired read reservation when the
+                object still exists and is not write-locked.
+            extra_count: Extra reader claims to restore on top of the default
+                one. Must match the value used by ``reserve_read``.
 
         Returns:
             A dictionary mapping each object key to a tuple of
@@ -317,9 +326,13 @@ class L1Manager:
 
         Errors:
             KEY_NOT_EXIST: The key does not exist.
-            KEY_NOT_READABLE: The key is not readable (in this case, not read-locked).
+            KEY_NOT_READABLE: The key is not read-locked and recovery is
+                disabled, or the object is write-locked during recovery.
         """
+        extra_count = _validate_extra_count(extra_count)
+        total = 1 + extra_count
         ret: dict[ObjectKey, L1OperationResult] = {}
+        recovered_keys: list[ObjectKey] = []
 
         for key in keys:
             entry = self._objects.get(key, None)
@@ -328,10 +341,36 @@ class L1Manager:
                 continue
 
             if not entry.read_lock.is_locked():
-                ret[key] = (L1Error.KEY_NOT_READABLE, None)
-                continue
+                if not recover_expired or not entry.available_for_read():
+                    ret[key] = (L1Error.KEY_NOT_READABLE, None)
+                    continue
+
+                # The manager lock makes this check-and-restore atomic across
+                # concurrent TP workers. Only the first worker restores the
+                # full multi-reader reservation.
+                for _ in range(total):
+                    entry.read_lock.lock()
+                recovered_keys.append(key)
 
             ret[key] = (L1Error.SUCCESS, entry.memory_obj)
+
+        if recovered_keys:
+            logger.warning(
+                "Recovered expired L1 read leases for %d keys (readers per key=%d)",
+                len(recovered_keys),
+                total,
+            )
+            for listener in self._registered_listeners:
+                listener.on_l1_keys_reserved_read(recovered_keys)
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.L1_READ_RESERVED,
+                    metadata={
+                        "keys": recovered_keys,
+                        "reason": "expired_lease_recovery",
+                    },
+                )
+            )
 
         return ret
 
