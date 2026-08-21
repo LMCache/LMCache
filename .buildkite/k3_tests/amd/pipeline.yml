@@ -52,3 +52,12 @@ steps:
       - "durations/test.html"
       - "coverage-test.xml"
       - "coverage-test/**/*"
+
+  - label: "vLLM + LMCache E2E (AMD)"
+    key: "amd_vllm_bench"
+    depends_on: "amd_unit_tests"
+    timeout_in_minutes: 90
+    command: .buildkite/scripts/amd-vllm-bench.sh
+    artifact_paths:
+      - "*.log"
+      - "amd-vllm-bench-results/**/*"
