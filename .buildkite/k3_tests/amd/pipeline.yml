@@ -15,7 +15,6 @@ steps:
       - "coverage-test/**/*"
 
   - label: "vLLM + LMCache E2E (AMD, {{matrix.mode}})"
-    depends_on: "amd_unit_tests"
     timeout_in_minutes: 90
     command: bash .buildkite/scripts/amd-vllm-bench.sh {{matrix.mode}}
     matrix:
@@ -23,11 +22,6 @@ steps:
         mode:
           - "serialized"
           - "unserialized"
-
-    artifact_paths:
-      - "durations/test.html"
-      - "coverage-test.xml"
-      - "coverage-test/**/*"
 
     artifact_paths:
       - "*.log"
