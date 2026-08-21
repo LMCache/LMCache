@@ -2,17 +2,21 @@
 
 """Lookup metrics subscriber — OTel counters for L1+L2 token-level hit rate.
 
-Exposes two counters driven by the ``MP_LOOKUP_PREFETCH_END`` event.  Their
-ratio is the fraction of tokens requested by a lookup that were served from
-the L1 or L2 caches (L0/GPU prefix cache is vLLM-owned and not observable
-here):
+Exposes counters driven by the ``MP_LOOKUP_PREFETCH_END`` event.  The
+combined pair ``lookup_requested`` / ``lookup_hit`` gives the fraction of
+tokens requested by a lookup that were served from the L1 or L2 caches
+(L0/GPU prefix cache is vLLM-owned and not observable here):
 
     rate(lmcache_mp_lookup_hit_tokens_total[5m])
     / rate(lmcache_mp_lookup_requested_tokens_total[5m])
 
-Both counters carry ``model_name`` and ``cache_salt`` attributes so the
-ratio can be sliced per model and per tenant / isolation domain on the
-dashboard.
+``lookup_hit_l1`` / ``lookup_hit_l2`` split ``lookup_hit`` by tier
+(``l1 + l2 == hit`` per event); ``lookups`` counts completed lookups and
+``lookup_early_exit`` those that short-circuited before a cache probe,
+labeled by ``reason``.
+
+All counters carry ``model_name`` and ``cache_salt`` attributes so they can
+be sliced per model and per tenant / isolation domain on the dashboard.
 
 See ``docs/design/v1/mp_observability/L1_L2_HIT_RATE_PLAN.md`` for the full
 rationale behind co-locating numerator and denominator on a single event.
@@ -52,12 +56,21 @@ def _lookup_attrs(event: Event) -> dict[str, Any]:
 class LookupMetricsSubscriber(EventSubscriber):
     """Maintains OTel counters for L1+L2 token-level cache hit rate.
 
-    Metrics (both labeled by ``model_name`` and ``cache_salt``):
+    Metrics (all labeled by ``model_name`` and ``cache_salt``):
     - ``lmcache_mp.lookup_requested`` — tokens submitted for lookup
       (denominator).  Counts only the chunk-aligned portion; sub-chunk
       trailing tokens are excluded because they cannot hit by design.
     - ``lmcache_mp.lookup_hit`` — tokens found in L1+L2 during the
       lookup (numerator).  Counts the contiguous prefix hit only.
+    - ``lmcache_mp.lookup_hit_l1`` — of lookup_hit, tokens L1 could serve
+      on its own under each object group's attention-window rule.
+    - ``lmcache_mp.lookup_hit_l2`` — of lookup_hit, tokens L2 added beyond
+      the L1-servable prefix.  ``l1 + l2 == lookup_hit`` per event.
+    - ``lmcache_mp.lookups`` — completed lookups (denominator for
+      ``lookup_early_exit``).
+    - ``lmcache_mp.lookup_early_exit`` — lookups that exited before a
+      cache probe; extra ``reason`` label (``no_gpu_context``,
+      ``empty_chunk_hashes``, ``no_group_layout_descs``).
     """
 
     def __init__(self) -> None:
@@ -81,6 +94,37 @@ class LookupMetricsSubscriber(EventSubscriber):
             ),
             unit="tokens",
         )
+        self._l1_hit_tokens = meter.create_counter(
+            "lmcache_mp.lookup_hit_l1",
+            description=(
+                "Of lookup_hit: tokens L1 could serve on its own under each "
+                "object group's attention-window rule (from "
+                "PrefetchHandle.l1_hit_chunks)."
+            ),
+            unit="tokens",
+        )
+        self._l2_hit_tokens = meter.create_counter(
+            "lmcache_mp.lookup_hit_l2",
+            description=(
+                "Of lookup_hit: tokens L2 added beyond the L1-servable "
+                "prefix. lookup_hit_l1 + lookup_hit_l2 == lookup_hit."
+            ),
+            unit="tokens",
+        )
+        self._lookups = meter.create_counter(
+            "lmcache_mp.lookups",
+            description="Completed lookups (denominator for lookup_early_exit).",
+            unit="requests",
+        )
+        self._early_exits = meter.create_counter(
+            "lmcache_mp.lookup_early_exit",
+            description=(
+                "Lookups that exited before a normal cache probe, labeled "
+                "by reason (no_gpu_context, empty_chunk_hashes, "
+                "no_group_layout_descs)."
+            ),
+            unit="requests",
+        )
 
     def get_subscriptions(self) -> dict[EventType, EventCallback]:
         return {
@@ -91,3 +135,15 @@ class LookupMetricsSubscriber(EventSubscriber):
         attrs = _lookup_attrs(event)
         self._requested_tokens.add(event.metadata["requested_tokens"], attributes=attrs)
         self._hit_tokens.add(event.metadata["hit_tokens"], attributes=attrs)
+        self._lookups.add(1, attributes=attrs)
+        # .get(): tolerate events from emitters predating the attribution
+        # fields; they simply do not move the split counters.
+        self._l1_hit_tokens.add(
+            event.metadata.get("l1_hit_tokens", 0), attributes=attrs
+        )
+        self._l2_hit_tokens.add(
+            event.metadata.get("l2_hit_tokens", 0), attributes=attrs
+        )
+        early_exit_reason = event.metadata.get("early_exit_reason", "")
+        if early_exit_reason:
+            self._early_exits.add(1, attributes={**attrs, "reason": early_exit_reason})
