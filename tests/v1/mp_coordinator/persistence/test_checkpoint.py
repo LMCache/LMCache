@@ -249,3 +249,38 @@ def _capture(coordinator: _Coordinator) -> dict[str, Mapping[str, object]]:
     """Read a coordinator's sections, as a checkpoint would."""
     with coordinator.quiesce.quiesced():
         return {c.name: c.capture() for c in coordinator.components}
+
+
+class TestCapturesAreCopies:
+    def test_mutating_a_component_does_not_change_its_capture(self):
+        """The quiesce is released before the artifact is encoded, so a
+        capture that aliased live state would be serialized mid-mutation.
+        Copies are the contract; this is what enforces it.
+        """
+        live = _Coordinator()
+        live.gate.ingest(_store(seq=1, keys=[_key(1)]))
+        live.controller.pin([_key(1)])
+        live.controller.quota.set_quota("tenant-a", 4096)
+        every_component = [
+            live.directory,
+            live.usage,
+            live.gate,
+            *live.controller.get_durable_components(),
+        ]
+
+        captured = {c.name: c.capture() for c in every_component}
+
+        # Everything a live coordinator would go on to do while the
+        # checkpoint from those captures is still being encoded.
+        live.gate.ingest(_store(seq=2, keys=[_key(2), _key(3)]))
+        live.controller.pin([_key(2)])
+        live.controller.unpin([_key(1)])
+        live.controller.quota.set_quota("tenant-b", 8192)
+        live.gate.drop_instance("node-a")
+
+        assert len(captured["key_directory"]["keys"]) == 1
+        assert len(captured["cache_usage"]["placements"]) == 1
+        assert len(captured["lru_order"]["buckets"][""]) == 1
+        assert len(captured["pins"]["entries"]) == 1
+        assert captured["quotas"]["limits"] == {"tenant-a": 4096}
+        assert set(captured["stream_cursors"]["cursors"]) == {"node-a"}

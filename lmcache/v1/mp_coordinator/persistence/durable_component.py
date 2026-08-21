@@ -52,6 +52,12 @@ class DurableComponent(Protocol):
         strings and bytes. Domain objects would make every artifact
         writer know what a section means, and a section's shape is the
         component's business alone.
+
+        Copies, never references into live state. Ingest is quiesced for
+        the capture but released before the artifact is encoded, so a
+        returned reference would be serialized while the component is
+        being mutated -- a torn section, or an iteration error, long
+        after this returns.
         """
         ...
 

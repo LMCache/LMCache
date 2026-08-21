@@ -53,6 +53,8 @@ def save_checkpoint(
     way the sections agree with each other -- one batch is applied by
     several of them. It is released before the write: a disk write under
     the quiesce would park the fleet's event stream for its duration.
+    That is why ``capture`` must return copies -- by the time the
+    sections are encoded, the components they came from are moving again.
 
     Failures are logged rather than raised: a checkpoint is an
     optimization, and a coordinator that dies because it could not write
