@@ -91,7 +91,12 @@ def test_register_omits_mq_port_when_p2p_disabled():
 
 
 async def _run_loop_briefly(client: httpx.AsyncClient, **kwargs) -> None:
-    """Run keep_registered for a few ticks, then cancel it."""
+    """Run keep_registered for a few ticks, then cancel it.
+
+    Supplies a no-op ``on_registered`` unless the case under test overrides
+    it; the parameter is required, so only tests need the no-op.
+    """
+    kwargs.setdefault("on_registered", lambda: None)
     task = asyncio.create_task(
         keep_registered(
             client,
@@ -191,6 +196,7 @@ def test_keep_registered_survives_malformed_response():
                     http_port=8080,
                     advertise_ip="127.0.0.1",
                     heartbeat_interval=0.03,
+                    on_registered=lambda: None,
                 )
             )
             await asyncio.sleep(0.1)
@@ -215,6 +221,7 @@ def test_keep_registered_survives_unreachable_coordinator():
                     http_port=8080,
                     advertise_ip="127.0.0.1",
                     heartbeat_interval=0.03,
+                    on_registered=lambda: None,
                 )
             )
             await asyncio.sleep(0.1)
@@ -258,18 +265,11 @@ def test_on_registered_fires_for_every_registration():
     assert calls["hook"] == calls["register"]
 
 
-def test_on_registered_defaults_to_a_noop():
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.method == "POST":
-            return httpx.Response(
-                200, json={"instance_id": "i1", "re_registered": False}
-            )
-        if request.method == "PUT":
-            return httpx.Response(200, json={"instance_id": "i1"})
-        return httpx.Response(204)
+def test_on_registered_is_required():
+    """No default hook: a caller that republishes nothing says so."""
+    # Standard
+    import inspect
 
-    async def run():
-        async with _client(handler) as client:
-            await _run_loop_briefly(client, instance_id="i1")
-
-    asyncio.run(run())  # no hook passed; must not raise
+    parameter = inspect.signature(keep_registered).parameters["on_registered"]
+    assert parameter.default is inspect.Parameter.empty
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY

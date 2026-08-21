@@ -29,10 +29,6 @@ from lmcache.v1.rpc_utils import get_ip
 logger = init_logger(__name__)
 
 
-def _do_nothing() -> None:
-    """Default :func:`keep_registered` post-registration hook."""
-
-
 _DEFAULT_HEARTBEAT_INTERVAL = 5.0
 
 
@@ -90,7 +86,7 @@ async def keep_registered(
     heartbeat_interval: float = _DEFAULT_HEARTBEAT_INTERVAL,
     p2p_advertised_url: str = "",
     mq_port: int = 0,
-    on_registered: Callable[[], None] = _do_nothing,
+    on_registered: Callable[[], None],
 ) -> None:
     """Register, heartbeat on a timer, and deregister on cancellation.
 
@@ -115,10 +111,10 @@ async def keep_registered(
         mq_port: Port of this server's ZMQ message-queue server for P2P lookup
             RPCs. 0 when P2P is disabled.
         on_registered: Called after every successful registration, including
-            a re-registration. Republishes anything the coordinator keeps
-            only in memory -- capacity declarations above all, which a
-            restarted coordinator has forgotten and no topology change would
-            otherwise resend.
+            a re-registration. Required, not defaulted: the coordinator keeps
+            some state only in memory -- capacity declarations above all --
+            and a caller that republishes nothing has to say so. Pass
+            ``lambda: None`` to mean it.
     """
     base_url = coordinator_url.rstrip("/")
     ip = advertise_ip or get_ip()
