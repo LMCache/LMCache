@@ -435,7 +435,7 @@ jobs:
                     --repo "${{ github.repository }}" \
                     --target "$GITHUB_SHA" \
                     --latest=false \
-                    --title "Release ${{ github.ref_name }} · ROCm 7.2.4 / torch 2.10.0 / cp312 / CXX11 ABI=1" \
+                    --title "Release ${{ github.ref_name }} · AMD ROCm 7.2.4 / torch 2.10.0 git3d3aa833 / cp312 / CXX11 ABI=1" \
                     --notes "ROCm wheel for LMCache ${{ github.ref_name }}, built and tested in
                   \`rocm/pytorch:rocm7.2.4_ubuntu24.04_py3.12_pytorch_release_2.10.0\`
                   at digest \`sha256:4449f856653602317e4101a76fce599c7fcd58ccec2e539951fce5f73083179e\`.
