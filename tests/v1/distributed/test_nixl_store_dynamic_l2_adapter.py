@@ -1,16 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-Unit tests for DynamicNixlStoreL2Adapter with POSIX backend.
+Unit tests for DynamicNixlStoreL2Adapter with file and object backends.
 
-Tests cover the L2AdapterInterface contract, dynamic file operations,
-persist, secondary lookup, and capacity management.
+Tests cover the L2AdapterInterface contract, dynamic storage operations,
+persist, secondary lookup, capacity management, and OBJ behavior.
 """
 
 # Standard
+import asyncio
+import inspect
 import os
 import select
 import shutil
 import tempfile
+import threading
 
 # Third Party
 import pytest
@@ -25,12 +28,24 @@ from lmcache.v1.distributed.internal_api import (  # noqa: E402
     L1MemoryDesc,
     L2AdapterListener,
 )
+from lmcache.v1.distributed.l2_adapters import (  # noqa: E402
+    nixl_store_dynamic_l2_adapter as dynamic_nixl_module,
+)
 from lmcache.v1.distributed.l2_adapters.config import PersistConfig  # noqa: E402
-from lmcache.v1.distributed.l2_adapters.nixl_store_dynamic_l2_adapter import (  # noqa: E402
-    DynamicNixlStoreL2Adapter,
-    DynamicNixlStoreL2AdapterConfig,
+from lmcache.v1.distributed.l2_adapters.nixl_store_agents.dynamic_nixl_store_agent import (  # noqa: E402, E501
+    DynamicNixlStorageAgent,
     _object_key_to_filename,
     _object_key_to_relpath,
+)
+from lmcache.v1.distributed.l2_adapters.nixl_store_agents.file_dynamic_nixl_store_agent import (  # noqa: E402, E501
+    FileDynamicNixlStorageAgent,
+)
+from lmcache.v1.distributed.l2_adapters.nixl_store_agents.object_dynamic_nixl_store_agent import (  # noqa: E402, E501
+    ObjectDynamicNixlStorageAgent,
+)
+from lmcache.v1.distributed.l2_adapters.nixl_store_dynamic_l2_adapter import (  # noqa: E402, E501
+    DynamicNixlStoreL2Adapter,
+    DynamicNixlStoreL2AdapterConfig,
 )
 from lmcache.v1.memory_management import (  # noqa: E402
     MemoryFormat,
@@ -45,18 +60,18 @@ _EMPTY_LAYOUT = MemoryLayoutDesc(shapes=[], dtypes=[])
 class _RecordingListener(L2AdapterListener):
     """Listener that records all events for inspection in tests."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.stored: list[list[ObjectKey]] = []
         self.accessed: list[list[ObjectKey]] = []
         self.deleted: list[list[ObjectKey]] = []
 
-    def on_l2_keys_stored(self, keys: list[ObjectKey], sizes: list[int]):
+    def on_l2_keys_stored(self, keys: list[ObjectKey], sizes: list[int]) -> None:
         self.stored.append(list(keys))
 
-    def on_l2_keys_accessed(self, keys: list[ObjectKey]):
+    def on_l2_keys_accessed(self, keys: list[ObjectKey]) -> None:
         self.accessed.append(list(keys))
 
-    def on_l2_keys_deleted(self, keys: list[ObjectKey]):
+    def on_l2_keys_deleted(self, keys: list[ObjectKey]) -> None:
         self.deleted.append(list(keys))
 
 
@@ -79,6 +94,51 @@ if torch_device_type == "xpu":
         ),
         allow_module_level=True,
     )
+
+
+def test_dynamic_nixl_storage_agent_is_abstract() -> None:
+    """The backend-neutral storage agent must only be used via a subclass."""
+    assert inspect.isabstract(DynamicNixlStorageAgent)
+    assert issubclass(FileDynamicNixlStorageAgent, DynamicNixlStorageAgent)
+    assert not inspect.isabstract(FileDynamicNixlStorageAgent)
+    assert issubclass(ObjectDynamicNixlStorageAgent, DynamicNixlStorageAgent)
+    assert not inspect.isabstract(ObjectDynamicNixlStorageAgent)
+
+
+def test_file_agent_creates_directory_before_nixl_initialization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A directory creation failure must not initialize NIXL resources."""
+    base_initialized = False
+
+    def fake_base_init(
+        self: DynamicNixlStorageAgent,
+        device: str,
+        backend: str,
+        backend_params: dict[str, str],
+        l1_memory_desc: L1MemoryDesc,
+    ) -> None:
+        del self, device, backend, backend_params, l1_memory_desc
+        nonlocal base_initialized
+        base_initialized = True
+
+    def raise_permission_error(path: str, exist_ok: bool) -> None:
+        del path, exist_ok
+        raise PermissionError("cannot create storage directory")
+
+    monkeypatch.setattr(DynamicNixlStorageAgent, "__init__", fake_base_init)
+    monkeypatch.setattr(os, "makedirs", raise_permission_error)
+
+    with pytest.raises(PermissionError, match="cannot create storage directory"):
+        FileDynamicNixlStorageAgent(
+            device="cpu",
+            backend="POSIX",
+            backend_params={"file_path": "/unwritable", "use_direct_io": "false"},
+            l1_memory_desc=L1MemoryDesc(ptr=0, size=0, align_bytes=1),
+        )
+
+    assert not base_initialized
+
 
 # =============================================================================
 # Test Helpers
@@ -203,6 +263,32 @@ def adapter_with_persist():
     yield adpt, buffer, tmp_dir, l1_memory, config
 
     shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+# =============================================================================
+# Dynamic Storage Agent Tests
+# =============================================================================
+
+
+class TestDynamicStorageAgent:
+    """Tests for storage-agent selection and common agent behavior."""
+
+    def test_file_backend_creates_file_storage_agent(self, adapter) -> None:
+        """A file backend selects the file-specific storage agent."""
+        adpt, _, _ = adapter
+
+        assert isinstance(adpt.nixl_agent, FileDynamicNixlStorageAgent)
+
+    def test_storage_agent_calculates_and_validates_page_indices(self, adapter) -> None:
+        """The shared agent validates ranges and returns their page indices."""
+        adpt, _, _ = adapter
+
+        assert adpt.nixl_agent.get_memory_indices(PAGE_SIZE, PAGE_SIZE * 2) == [1, 2]
+
+        with pytest.raises(ValueError, match="not aligned"):
+            adpt.nixl_agent.get_memory_indices(PAGE_SIZE + 1, PAGE_SIZE)
+        with pytest.raises(ValueError, match="not a multiple"):
+            adpt.nixl_agent.get_memory_indices(PAGE_SIZE, PAGE_SIZE + 1)
 
 
 # =============================================================================
@@ -1020,3 +1106,231 @@ def test_store_uses_hashed_layout_and_loads_back():
     finally:
         adpt.close()
         shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+# =============================================================================
+# Object Backend Tests
+# =============================================================================
+
+
+class _FakeObjectNixlApi:
+    """Minimal NIXL fake for object registration and lookup tests."""
+
+    def __init__(self) -> None:
+        self.register_memory_calls: list[
+            tuple[list[tuple[int, int, int, str]], str]
+        ] = []
+        self.query_memory_calls: list[
+            tuple[list[tuple[int, int, int, str]], str, str]
+        ] = []
+        self.device_ids: list[int] = []
+        self.query_response: list[object | None] = [object()]
+
+    def register_memory(
+        self, reg_list: list[tuple[int, int, int, str]], mem_type: str
+    ) -> str:
+        self.register_memory_calls.append((reg_list, mem_type))
+        self.device_ids.append(reg_list[0][2])
+        return f"reg-{len(self.register_memory_calls)}"
+
+    def get_xfer_descs(
+        self, xfer_desc: list[tuple[int, int, int]], mem_type: str
+    ) -> list[tuple[int, int, int]]:
+        del mem_type
+        return xfer_desc
+
+    def prep_xfer_dlist(
+        self, agent_name: str, xfer_descs: list[tuple[int, int, int]], mem_type: str
+    ) -> str:
+        del agent_name, xfer_descs, mem_type
+        return "object-xfer"
+
+    def make_prepped_xfer(
+        self,
+        direction: str,
+        mem_xfer_handler: str,
+        mem_indices: list[int],
+        storage_xfer_handler: str,
+        storage_indices: list[int],
+    ) -> str:
+        del (
+            direction,
+            mem_xfer_handler,
+            mem_indices,
+            storage_xfer_handler,
+            storage_indices,
+        )
+        return "transfer"
+
+    def transfer(self, handle: str) -> str:
+        del handle
+        return "DONE"
+
+    def release_xfer_handle(self, handle: str) -> None:
+        del handle
+
+    def release_dlist_handle(self, xfer_handler: str) -> None:
+        del xfer_handler
+
+    def deregister_memory(self, reg_descs: str) -> None:
+        del reg_descs
+
+    def query_memory(
+        self,
+        reg_list: list[tuple[int, int, int, str]],
+        backend: str,
+        mem_type: str,
+    ) -> list[object | None]:
+        self.query_memory_calls.append((reg_list, backend, mem_type))
+        return self.query_response
+
+
+def _make_object_storage_agent() -> tuple[
+    ObjectDynamicNixlStorageAgent, _FakeObjectNixlApi
+]:
+    """Create an object agent shell backed by a fake NIXL API."""
+    nixl_api = _FakeObjectNixlApi()
+    agent = object.__new__(ObjectDynamicNixlStorageAgent)
+    agent.backend = "OBJ"
+    agent.agent_name = "test-agent"
+    agent.l1_align_bytes = PAGE_SIZE
+    agent.mem_xfer_handler = "memory-xfer"
+    agent.nixl_agent = nixl_api
+    agent._device_id_counter = 0
+    agent._device_id_lock = threading.Lock()
+    return agent, nixl_api
+
+
+class _FakeObjectStorageAgent:
+    """Object storage agent fake used to verify public adapter behavior."""
+
+    def __init__(self) -> None:
+        self.existing_keys: set[ObjectKey] = set()
+        self.store_calls: list[tuple[list[int], ObjectKey]] = []
+        self.load_calls: list[tuple[list[int], ObjectKey]] = []
+        self.delete_calls: list[ObjectKey] = []
+        self.cleaned_up = False
+        self.closed = False
+
+    def get_memory_indices(self, raw_addr: int, mem_size: int) -> list[int]:
+        return list(range(raw_addr // PAGE_SIZE, (raw_addr + mem_size) // PAGE_SIZE))
+
+    async def dynamic_store(self, mem_indices: list[int], key: ObjectKey) -> None:
+        self.store_calls.append((mem_indices, key))
+        self.existing_keys.add(key)
+
+    async def dynamic_load(self, mem_indices: list[int], key: ObjectKey) -> None:
+        self.load_calls.append((mem_indices, key))
+
+    def dynamic_delete(self, key: ObjectKey) -> None:
+        self.delete_calls.append(key)
+
+    def get_stored_size(self, key: ObjectKey) -> int | None:
+        return 0 if key in self.existing_keys else None
+
+    def cleanup(self) -> None:
+        self.cleaned_up = True
+
+    def close(self) -> None:
+        self.closed = True
+
+
+@pytest.mark.parametrize(
+    "backend,backend_params",
+    [
+        ("OBJ", {"bucket": "test-bucket"}),
+        (
+            "AZURE_BLOB",
+            {
+                "account_url": "https://example.blob.core.windows.net",
+                "container_name": "test-container",
+            },
+        ),
+    ],
+)
+def test_object_backend_config_does_not_require_file_parameters(
+    backend: str, backend_params: dict[str, str]
+) -> None:
+    """Object configs accept backend-native parameters without file settings."""
+    config = DynamicNixlStoreL2AdapterConfig.from_dict(
+        {"backend": backend, "backend_params": backend_params}
+    )
+
+    assert config.backend == backend
+    assert config.backend_params == backend_params
+
+
+def test_object_agent_uses_unique_device_ids_and_presence_query() -> None:
+    """Object transfers get unique IDs and recover through NIXL presence checks."""
+    agent, nixl_api = _make_object_storage_agent()
+    first_key = create_object_key(1)
+    second_key = create_object_key(2)
+
+    asyncio.run(agent.dynamic_store([3, 4], first_key))
+    asyncio.run(agent.dynamic_load([5], second_key))
+
+    assert nixl_api.device_ids == [0, 1]
+    assert agent.object_exists("present-key")
+    nixl_api.query_response = [None]
+    assert not agent.object_exists("missing-key")
+    assert nixl_api.query_memory_calls == [
+        ([(0, 0, 0, "present-key")], "OBJ", "OBJ"),
+        ([(0, 0, 0, "missing-key")], "OBJ", "OBJ"),
+    ]
+
+
+def test_object_adapter_uses_backend_managed_retention(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OBJ adapters store, load, and recover without adapter-side deletion."""
+    buffer = torch.empty(PAGE_SIZE * NUM_BUFFER_PAGES, dtype=torch.uint8)
+    l1_memory = L1MemoryDesc(
+        ptr=buffer.data_ptr(), size=buffer.numel(), align_bytes=PAGE_SIZE
+    )
+    agent = _FakeObjectStorageAgent()
+    monkeypatch.setattr(
+        dynamic_nixl_module,
+        "_create_dynamic_nixl_storage_agent",
+        lambda **kwargs: agent,
+    )
+    adapter = DynamicNixlStoreL2Adapter(
+        DynamicNixlStoreL2AdapterConfig(
+            backend="OBJ", backend_params={"bucket": "test-bucket"}
+        ),
+        l1_memory,
+    )
+    try:
+        assert not adapter.supports_global_eviction
+        assert adapter.get_usage().usage_fraction == -1.0
+
+        key = create_object_key(1)
+        store_task = adapter.submit_store_task(
+            [key], [create_memory_obj(buffer, page_index=0)]
+        )
+        assert wait_for_event_fd(adapter.get_store_event_fd())
+        assert adapter.pop_completed_store_tasks()[store_task].is_successful()
+
+        load_task = adapter.submit_load_task(
+            [key], [create_memory_obj(buffer, page_index=1)]
+        )
+        assert wait_for_event_fd(adapter.get_load_event_fd())
+        load_result = adapter.query_load_result(load_task)
+        assert load_result is not None and load_result.test(0)
+
+        recovered_key = create_object_key(2)
+        agent.existing_keys.add(recovered_key)
+        lookup_task = adapter.submit_lookup_and_lock_task(
+            [recovered_key], {0: _EMPTY_LAYOUT}
+        )
+        assert wait_for_event_fd(adapter.get_lookup_and_lock_event_fd())
+        lookup_result = adapter.query_lookup_and_lock_result(lookup_task)
+        assert lookup_result is not None and lookup_result.test(0)
+
+        adapter.delete([key])
+        assert agent.delete_calls == []
+        adapter.submit_unlock([key, recovered_key])
+    finally:
+        adapter.close()
+
+    assert agent.closed
+    assert not agent.cleaned_up
