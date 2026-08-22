@@ -122,6 +122,16 @@ class NixlObjPool:
         with self._lock:
             self.indices.extend(obj_indices)
 
+    def get_slot_counts(self) -> tuple[int, int]:
+        """Return the total and currently free storage slot counts.
+
+        Returns:
+            A tuple containing the total number of slots managed by the pool
+            and the number of slots currently available for allocation.
+        """
+        with self._lock:
+            return self._total, len(self.indices)
+
     def get_slot_usage(self) -> tuple[float, float]:
         """
         Return (current_usage, usage_after_ongoing_eviction) in [0, 1] for
@@ -668,16 +678,14 @@ class NixlStoreL2Adapter(L2AdapterInterface):
             pinned_object_count = sum(
                 1 for obj in self._memory_objects.values() if obj.pin_count > 0
             )
-        pool = self.nixl_agent.pool
-        with pool._lock:
-            pool_free_slots = len(pool.indices)
+        pool_size, pool_free_slots = self.nixl_agent.pool.get_slot_counts()
         return {
             "is_healthy": self._loop_thread.is_alive(),
             "type": "NixlStoreL2Adapter",
             "backend": self._config.backend,
             "stored_object_count": stored_object_count,
             "pinned_object_count": pinned_object_count,
-            "pool_size": self._config.pool_size,
+            "pool_size": pool_size,
             "pool_free_slots": pool_free_slots,
             "event_loop_alive": self._loop_thread.is_alive(),
         }
