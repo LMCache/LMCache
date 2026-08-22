@@ -112,8 +112,9 @@ async def set_quota_config(
     default_limit_bytes = (
         None if body.default_limit_gb is None else int(body.default_limit_gb * _GB)
     )
-    quota = get_context(request).eviction_controller.quota
-    quota.set_default_limit_bytes(default_limit_bytes)
+    ctx = get_context(request)
+    ctx.eviction_controller.quota.set_default_limit_bytes(default_limit_bytes)
+    ctx.metadata_persister.save()
     return QuotaConfigResponse(default_limit_gb=body.default_limit_gb)
 
 
@@ -157,12 +158,12 @@ async def set_quota(
     _require_quota_tier(body.tier)
     cache_salt = _resolve_salt_from_api_path(cache_salt)
     limit_bytes = int(body.limit_gb * _GB)
+    ctx = get_context(request)
     try:
-        get_context(request).eviction_controller.quota.set_quota(
-            cache_salt, limit_bytes
-        )
+        ctx.eviction_controller.quota.set_quota(cache_salt, limit_bytes)
     except ValueError:
         return JSONResponse(status_code=400, content={"error": "invalid quota limit"})
+    ctx.metadata_persister.save()
     return QuotaResponse(cache_salt=cache_salt, limit_gb=body.limit_gb, status="ok")
 
 
@@ -181,8 +182,9 @@ async def delete_quota(
     """
     _require_quota_tier(tier)
     cache_salt = _resolve_salt_from_api_path(cache_salt)
-    quota = get_context(request).eviction_controller.quota
-    removed = quota.delete_quota(cache_salt)
+    ctx = get_context(request)
+    removed = ctx.eviction_controller.quota.delete_quota(cache_salt)
+    ctx.metadata_persister.save()
     return QuotaResponse(
         cache_salt=cache_salt,
         limit_gb=0.0,
