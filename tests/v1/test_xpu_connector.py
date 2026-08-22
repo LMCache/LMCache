@@ -135,6 +135,9 @@ def test_vllm_paged_connector_v2_with_gpu_and_mla(use_gpu, engine_kv_format):
     slot_mapping = torch.tensor(
         slot_mapping, device=torch_device_type, dtype=torch.int64
     )
+    num_cached_tokens = 3
+    cached_slot_mapping = slot_mapping[:num_cached_tokens]
+    uncached_slot_mapping = slot_mapping[num_cached_tokens:]
 
     # Check the gpu_kv is not the same before copying
     with pytest.raises(AssertionError):
@@ -151,6 +154,24 @@ def test_vllm_paged_connector_v2_with_gpu_and_mla(use_gpu, engine_kv_format):
                 head_size,
                 engine_kv_format,
             )
+
+    # The cached prefix must already differ so the preservation check below
+    # cannot pass if H2D mistakenly overwrites it.
+    with pytest.raises(AssertionError):
+        if use_mla:
+            check_paged_kv_cache_equal_with_mla(
+                gpu_kv_src, gpu_kv_dst, cached_slot_mapping, head_size
+            )
+        else:
+            check_paged_kv_cache_equal(
+                gpu_kv_src,
+                gpu_kv_dst,
+                cached_slot_mapping,
+                num_heads,
+                head_size,
+                engine_kv_format,
+            )
+    gpu_kv_dst_before = [tensor.clone() for tensor in gpu_kv_dst]
 
     connector = VLLMPagedMemXPUConnectorV2(
         hidden_dim,
@@ -196,17 +217,34 @@ def test_vllm_paged_connector_v2_with_gpu_and_mla(use_gpu, engine_kv_format):
             kvcaches=gpu_kv_dst,
             slot_mapping=slot_mapping,
             offset=0,
+            vllm_cached_tokens=num_cached_tokens,
         )
         allocator.free(memory_obj)
         assert allocator.memcheck()
 
     if use_mla:
         check_paged_kv_cache_equal_with_mla(
-            gpu_kv_src, gpu_kv_dst, slot_mapping, head_size
+            gpu_kv_dst_before, gpu_kv_dst, cached_slot_mapping, head_size
+        )
+        check_paged_kv_cache_equal_with_mla(
+            gpu_kv_src, gpu_kv_dst, uncached_slot_mapping, head_size
         )
     else:
         check_paged_kv_cache_equal(
-            gpu_kv_src, gpu_kv_dst, slot_mapping, num_heads, head_size, engine_kv_format
+            gpu_kv_dst_before,
+            gpu_kv_dst,
+            cached_slot_mapping,
+            num_heads,
+            head_size,
+            engine_kv_format,
+        )
+        check_paged_kv_cache_equal(
+            gpu_kv_src,
+            gpu_kv_dst,
+            uncached_slot_mapping,
+            num_heads,
+            head_size,
+            engine_kv_format,
         )
     allocator.close()
 
@@ -264,6 +302,9 @@ def test_vllm_paged_connector_v3_with_gpu_and_mla(
     slot_mapping = torch.tensor(
         slot_mapping, device=torch_device_type, dtype=torch.int64
     )
+    num_cached_tokens = 3
+    cached_slot_mapping = slot_mapping[:num_cached_tokens]
+    uncached_slot_mapping = slot_mapping[num_cached_tokens:]
 
     # Check the kv group is not the same before copying
     with pytest.raises(AssertionError):
@@ -281,6 +322,31 @@ def test_vllm_paged_connector_v3_with_gpu_and_mla(
                     head_sizes[i],
                     engine_kv_format,
                 )
+
+    for i in range(num_groups):
+        with pytest.raises(AssertionError):
+            if use_mla:
+                check_paged_kv_cache_equal_with_mla(
+                    src_kv_groups[i],
+                    dst_kv_groups[i],
+                    cached_slot_mapping,
+                    head_sizes[i],
+                )
+            else:
+                check_paged_kv_cache_equal(
+                    src_kv_groups[i],
+                    dst_kv_groups[i],
+                    cached_slot_mapping,
+                    num_heads,
+                    head_sizes[i],
+                    engine_kv_format,
+                )
+
+    # Preserve the original destination so the prefix oracle is independent
+    # of the source values copied into the uncached suffix.
+    dst_kv_groups_before = [
+        [tensor.clone() for tensor in group] for group in dst_kv_groups
+    ]
 
     # create metadata and init kv layer groups
     metadata = _create_metadata(use_mla, src_kv_caches, engine_kv_format)
@@ -327,21 +393,39 @@ def test_vllm_paged_connector_v3_with_gpu_and_mla(
             kvcaches=list(dst_kv_caches.values()),
             slot_mapping=slot_mapping,
             offset=0,
+            vllm_cached_tokens=num_cached_tokens,
         )
         allocator.free(memory_obj)
         assert allocator.memcheck()
 
-    # Check the kv group is same after copying
+    # The cached prefix stays untouched; only the uncached suffix is loaded.
     for i in range(num_groups):
         if use_mla:
             check_paged_kv_cache_equal_with_mla(
-                src_kv_groups[i], dst_kv_groups[i], slot_mapping, head_sizes[i]
+                dst_kv_groups_before[i],
+                dst_kv_groups[i],
+                cached_slot_mapping,
+                head_sizes[i],
+            )
+            check_paged_kv_cache_equal_with_mla(
+                src_kv_groups[i],
+                dst_kv_groups[i],
+                uncached_slot_mapping,
+                head_sizes[i],
             )
         else:
             check_paged_kv_cache_equal(
+                dst_kv_groups_before[i],
+                dst_kv_groups[i],
+                cached_slot_mapping,
+                num_heads,
+                head_sizes[i],
+                engine_kv_format,
+            )
+            check_paged_kv_cache_equal(
                 src_kv_groups[i],
                 dst_kv_groups[i],
-                slot_mapping,
+                uncached_slot_mapping,
                 num_heads,
                 head_sizes[i],
                 engine_kv_format,
