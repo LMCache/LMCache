@@ -12,5 +12,6 @@ the cache.
    installation
    quickstart
    /mp/configuration
+   /mp/lazy_offload
    benchmarking
    kv_cache_calculator
