@@ -22,7 +22,9 @@ class SGLANG_Detector(EngineDetector):
     engine_type = EngineType.SGLANG
 
     def discover(
-        self, kv_caches: DiscoverableKVCache, layout_hints: LayoutHints
+        self,
+        kv_caches: DiscoverableKVCache,
+        layout_hints: LayoutHints,
     ) -> "tuple[Optional[lmcache_native.EngineKVFormat], DiscoverableKVCache]":
         # MP path: a flat list[2*NL] of 3-D tensors (K layers then V layers)
         # plus a tokens_per_block hint. Regroup into [K_layers, V_layers] and

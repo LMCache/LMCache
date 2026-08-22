@@ -14,7 +14,9 @@ See ``docs/design/v1/mp_coordinator/key_directory.md``.
 from __future__ import annotations
 
 # Standard
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from typing import cast
 import threading
 
 # Third Party
@@ -31,6 +33,8 @@ from lmcache.v1.mp_coordinator.api import (
     CacheEventType,
 )
 from lmcache.v1.mp_coordinator.blend_index import BlendIndex, BlendIndexStats
+from lmcache.v1.mp_coordinator.persistence.durable_component import PersistenceType
+from lmcache.v1.mp_coordinator.utils.encoding import decode_key, encode_key
 
 logger = init_logger(__name__)
 
@@ -38,6 +42,10 @@ logger = init_logger(__name__)
 # of the ~10 KB a ``tuple[int, ...]`` of boxed ints costs, and content
 # comparison against a query window stays vectorized.
 _TOKEN_DTYPE = np.uint32
+
+_CAPTURED_TOKEN_DTYPE = np.dtype("<u4")
+"""Token ids are captured little-endian regardless of host order, so a
+capture written on one machine restores on another."""
 
 # Shared empty array for chunks whose content is unknown.
 _NO_TOKENS = np.empty(0, dtype=_TOKEN_DTYPE)
@@ -107,7 +115,8 @@ class KeyDirectory:
 
     Mutations arrive through the ingest layer's two consumer hooks,
     :meth:`consume` and :meth:`fence_instance`; reads through
-    :meth:`lookup` and :meth:`stats`. Nothing is persisted.
+    :meth:`lookup` and :meth:`stats`. Its contents survive a
+    coordinator restart through :meth:`capture` and :meth:`restore`.
 
     Fragment (blend) lookup is off until :meth:`enable_blend_lookup` is
     called, so a fleet that does not run CacheBlend hashes no content.
@@ -304,6 +313,111 @@ class KeyDirectory:
                 removed,
             )
 
+    @property
+    def name(self) -> str:
+        """Name of the directory's section in a checkpoint."""
+        return "key_directory"
+
+    @property
+    def persistence_type(self) -> PersistenceType:
+        """Placements come from the event stream, so they are checkpoint
+        state: losing them costs hit rate, not correctness."""
+        return PersistenceType.CHECKPOINT
+
+    def capture(self) -> Mapping[str, object]:
+        """Return the directory's contents.
+
+        Returns:
+            ``{"keys": [(key, last_access, [placement, ...]), ...],
+            "bindings": [(chunk_hash, token_offset, token bytes), ...],
+            "l1_keys_by_instance": {instance_id: [key index, ...]}}``.
+            The blend index is derived, so it is absent.
+        """
+        with self._lock:
+            keys = [
+                (
+                    encode_key(key),
+                    record.last_access,
+                    [_encode_placement(p) for p in record.placements],
+                )
+                for key, record in self._directory.items()
+            ]
+            positions = {key: index for index, key in enumerate(self._directory)}
+            return {
+                "keys": keys,
+                "bindings": [
+                    (
+                        chunk_hash,
+                        binding.token_offset,
+                        binding.token_ids.astype(
+                            _CAPTURED_TOKEN_DTYPE, copy=False
+                        ).tobytes(),
+                    )
+                    for chunk_hash, binding in self._token_bindings.items()
+                ],
+                "l1_keys_by_instance": {
+                    instance_id: [positions[key] for key in l1_keys if key in positions]
+                    for instance_id, l1_keys in self._l1_keys_by_instance.items()
+                },
+            }
+
+    def restore(self, state: Mapping[str, object]) -> None:
+        """Load a captured directory into an empty one.
+
+        Call once at startup. Blend fingerprints are re-derived, so
+        :meth:`enable_blend_lookup` must run first for restored chunks to
+        be fragment-matchable.
+
+        Args:
+            state: A :meth:`capture` value.
+
+        Raises:
+            ValueError: If the directory already holds keys, or the
+                reverse index cites a key position that does not exist.
+        """
+        captured_keys = cast("list[tuple[object, float, list[object]]]", state["keys"])
+        bindings = cast("list[tuple[bytes, int, bytes]]", state["bindings"])
+        l1_by_instance = cast("Mapping[str, list[int]]", state["l1_keys_by_instance"])
+        with self._lock:
+            if self._directory or self._l1_keys_by_instance:
+                raise ValueError(
+                    "restore() requires an empty directory (holds "
+                    f"{len(self._directory)} keys, "
+                    f"{len(self._l1_keys_by_instance)} instances)"
+                )
+            key_table = []
+            for encoded_key, last_access, placements in captured_keys:
+                key = decode_key(encoded_key)
+                key_table.append(key)
+                self._directory[key] = _KeyRecord(
+                    placements=[_decode_placement(p) for p in placements],
+                    last_access=last_access,
+                )
+                self._add_token_binding(key)
+            for chunk_hash, token_offset, raw_tokens in bindings:
+                binding = self._token_bindings.get(chunk_hash)
+                if binding is None:
+                    # Content no surviving key references: nothing owns it.
+                    continue
+                token_ids = np.frombuffer(
+                    raw_tokens, dtype=_CAPTURED_TOKEN_DTYPE
+                ).astype(_TOKEN_DTYPE, copy=False)
+                token_ids.flags.writeable = False
+                binding.token_ids = token_ids
+                binding.token_offset = token_offset
+                if self._blend_lookup_enabled and token_offset != UNKNOWN_TOKEN_OFFSET:
+                    self._blend_index.add(token_ids, chunk_hash, token_offset)
+            for instance_id, positions_ in l1_by_instance.items():
+                for position in positions_:
+                    if not 0 <= position < len(key_table):
+                        raise ValueError(
+                            f"{instance_id!r} cites key position {position} "
+                            f"of {len(key_table)}"
+                        )
+                self._l1_keys_by_instance[instance_id] = {
+                    key_table[position] for position in positions_
+                }
+
     def stats(self) -> DirectoryStats:
         """Return a point-in-time summary of directory contents."""
         blend = self._blend_index.stats()
@@ -478,3 +592,37 @@ class KeyDirectory:
             del self._token_bindings[key.chunk_hash]
             if self._blend_lookup_enabled and binding.token_ids.size:
                 self._blend_index.remove(binding.token_ids, key.chunk_hash)
+
+
+# -- Durable encoding ---------------------------------------------------------
+#
+# Positional tuples rather than mappings: a capture runs on the caller's
+# thread over a fleet's worth of keys, and per-key field names cost more
+# than the fields themselves.
+
+
+def _encode_placement(placement: Placement) -> tuple[str, int, str, str, int, bool]:
+    """Flatten a placement for a capture."""
+    return (
+        placement.instance_id,
+        placement.incarnation,
+        placement.tier.value,
+        placement.backend,
+        placement.size_bytes,
+        placement.shared,
+    )
+
+
+def _decode_placement(encoded: object) -> Placement:
+    """Rebuild a placement from :func:`_encode_placement`."""
+    instance_id, incarnation, tier, backend, size_bytes, shared = cast(
+        "tuple[str, int, str, str, int, bool]", encoded
+    )
+    return Placement(
+        instance_id=instance_id,
+        incarnation=incarnation,
+        tier=Tier(tier),
+        backend=backend,
+        size_bytes=size_bytes,
+        shared=shared,
+    )

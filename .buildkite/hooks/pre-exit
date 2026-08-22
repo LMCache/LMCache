@@ -8,6 +8,12 @@ if [[ "${BUILDKITE_PIPELINE_SLUG:-}" == "unit-tests-amd" ]]; then
     exit 1
   fi
 
+  checkout_root="$(git rev-parse --show-toplevel)"
+  if [[ "${checkout_path}" != "${checkout_root}" ]]; then
+    echo "Refusing to clean path outside current checkout: ${checkout_path}" >&2
+    exit 1
+  fi
+
   echo "Deleting current workspace ${checkout_path}"
   cd /
   sudo rm -rf -- "${checkout_path}"
