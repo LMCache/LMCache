@@ -1,15 +1,82 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Validate an installed LMCache wheel against the ROCm torch 2.10 ABI."""
+"""Validate the exact AMD ROCm 7.2.4 / torch 2.10 build ABI."""
 
 # Standard
+import argparse
 import importlib.util
+from importlib.metadata import distribution
 import os
+import sys
 
 # Third Party
 import torch
 
-# First Party
-import lmcache.cuda_ops
+DEFAULT_TORCH_VERSION = "2.10.0+rocm7.2.4.git3d3aa833"
+DEFAULT_TORCH_GIT_VERSION = "3d3aa833db84eed6b7f5595cb5f162c2f78300a4"
+DEFAULT_HIP_VERSION = "7.2.53211"
+DEFAULT_ROCM_VERSION = "7.2.4"
+DEFAULT_PYTHON_ABI = "cp312"
+DEFAULT_CXX11_ABI = "1"
+DEFAULT_WHEEL_TAG = "cp312-cp312-manylinux_2_39_x86_64"
+
+
+def _required_value(name: str, default: str) -> str:
+    """Return an expected ABI value, allowing the workflow to override it."""
+    return os.environ.get(name, default)
+
+
+def _validate_runtime_abi() -> None:
+    """Require the exact torch, ROCm, Python, and libstdc++ ABI tuple."""
+    expected_torch = _required_value("EXPECTED_TORCH_VERSION", DEFAULT_TORCH_VERSION)
+    expected_git = _required_value(
+        "EXPECTED_TORCH_GIT_VERSION", DEFAULT_TORCH_GIT_VERSION
+    )
+    expected_hip = _required_value("EXPECTED_HIP_VERSION", DEFAULT_HIP_VERSION)
+    expected_rocm = _required_value("EXPECTED_ROCM_VERSION", DEFAULT_ROCM_VERSION)
+    expected_python_abi = _required_value("EXPECTED_PYTHON_ABI", DEFAULT_PYTHON_ABI)
+    expected_cxx11_abi = _required_value("EXPECTED_CXX11_ABI", DEFAULT_CXX11_ABI)
+
+    actual_python_abi = f"cp{sys.version_info.major}{sys.version_info.minor}"
+    actual_cxx11_abi = str(int(torch._C._GLIBCXX_USE_CXX11_ABI))
+    assert torch.__version__ == expected_torch, (torch.__version__, expected_torch)
+    assert torch.version.git_version == expected_git, (
+        torch.version.git_version,
+        expected_git,
+    )
+    assert torch.version.hip == expected_hip, (torch.version.hip, expected_hip)
+    assert torch.version.rocm == expected_rocm, (torch.version.rocm, expected_rocm)
+    assert actual_python_abi == expected_python_abi, (
+        actual_python_abi,
+        expected_python_abi,
+    )
+    assert actual_cxx11_abi == expected_cxx11_abi, (
+        actual_cxx11_abi,
+        expected_cxx11_abi,
+    )
+
+    print(
+        "ROCm torch 2.10 ABI:",
+        "torch",
+        torch.__version__,
+        "torch_git",
+        torch.version.git_version,
+        "hip",
+        torch.version.hip,
+        "rocm",
+        torch.version.rocm,
+        "python_abi",
+        actual_python_abi,
+        "cxx11abi",
+        actual_cxx11_abi,
+    )
+
+
+def _validate_installed_wheel_tag() -> None:
+    """Require the installed wheel to advertise the supported Python/platform ABI."""
+    expected_tag = _required_value("EXPECTED_WHEEL_TAG", DEFAULT_WHEEL_TAG)
+    wheel_metadata = distribution("lmcache").read_text("WHEEL")
+    assert wheel_metadata is not None, "installed lmcache has no WHEEL metadata"
+    assert f"Tag: {expected_tag}" in wheel_metadata, wheel_metadata
 
 
 def _validate_atom_integration() -> bool:
@@ -30,6 +97,9 @@ def _validate_atom_integration() -> bool:
 
 def _validate_gpu_kernels() -> str:
     """Run small LMCache D2H and H2D HIP kernel transfers."""
+    # First Party
+    import lmcache.cuda_ops  # noqa: PLC0415
+
     blocks, block_size, heads, head_size = 2, 16, 2, 8
     elements = blocks * block_size * heads * head_size
     key = torch.arange(elements, dtype=torch.float32, device="cuda").reshape(
@@ -75,12 +145,22 @@ def _validate_gpu_kernels() -> str:
 
 def main() -> None:
     """Validate native extension loading, adapters, and optional GPU access."""
-    torch_prefix = os.environ.get("TORCH_VERSION_PREFIX", "2.10.")
-    rocm_prefix = os.environ.get("ROCM_VERSION_PREFIX", "7.2")
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--runtime-only",
+        action="store_true",
+        help="validate the base environment before LMCache is installed",
+    )
+    args = parser.parse_args()
 
-    assert torch.__version__.startswith(torch_prefix), torch.__version__
-    assert torch.version.hip is not None, "installed torch is not a ROCm build"
-    assert torch.version.hip.startswith(rocm_prefix), torch.version.hip
+    _validate_runtime_abi()
+    if args.runtime_only:
+        return
+
+    # First Party
+    import lmcache.cuda_ops  # noqa: PLC0415
+
+    _validate_installed_wheel_tag()
     atom_available = _validate_atom_integration()
 
     if os.environ.get("LMCACHE_ROCM_REQUIRE_GPU", "0") == "1":

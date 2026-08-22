@@ -1,9 +1,8 @@
 name: Build ROCm Torch 2.10 Artifacts
 
-# Reusable workflow for the ROCm wheel that is ABI-matched to torch 2.10.
-# The pinned ATOM image provides the current reproducible torch 2.10/ROCm 7.2
-# toolchain, while the generic LMCache ROCm wheel targets public torch 2.11.
-# The resulting wheel is a general ROCm torch 2.10 artifact, not ATOM-specific.
+# Reusable workflow for the wheel built against AMD's public ROCm 7.2.4 /
+# torch 2.10.0 build. The same pinned, non-ATOM image builds and smoke-tests
+# the wheel so dependencies supplied only by an ATOM layer cannot mask issues.
 
 on:
     workflow_call:
@@ -11,19 +10,32 @@ on:
             rocm_torch210_version:
                 description: >-
                     Full wheel version including the ROCm torch 2.10 segment
-                    (for example, 0.5.4+rocm7.2.torch2.10).
+                    (for example,
+                    0.5.4+rocm7.2.4.torch2.10.git3d3aa833.cxx11abi1).
                 value: ${{ jobs.build-rocm-torch210-artifacts.outputs.rocm_torch210_version }}
+    workflow_dispatch:
+    # Temporary PR validation trigger. This makes a fork push execute the
+    # workflow end-to-end; remove it after the completed run is reviewed.
+    push:
+        branches:
+            - ci/rocm-torch210-wheel
 
 env:
     LC_ALL: en_US.UTF-8
-    # Pin the mutable atom-dev tag to make the torch/ROCm ABI reproducible.
-    ATOM_IMAGE: rocm/atom-dev@sha256:a5cfa1ab503af6e0f55e0ed83cd7e999edbea6940a38dba44aaeee9a22758976
-    TORCH_VERSION_PREFIX: "2.10."
-    ROCM_VERSION_PREFIX: "7.2"
-    # The pinned torch toolchain is based on Ubuntu 24.04 / glibc 2.39.
+    ROCM_PYTORCH_IMAGE: >-
+        rocm/pytorch:rocm7.2.4_ubuntu24.04_py3.12_pytorch_release_2.10.0@sha256:4449f856653602317e4101a76fce599c7fcd58ccec2e539951fce5f73083179e
+    TORCH_WHEEL_SOURCE: >-
+        https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.4/torch-2.10.0%2Brocm7.2.4.lw.git3d3aa833-cp312-cp312-linux_x86_64.whl
+    EXPECTED_TORCH_VERSION: 2.10.0+rocm7.2.4.git3d3aa833
+    EXPECTED_TORCH_GIT_VERSION: 3d3aa833db84eed6b7f5595cb5f162c2f78300a4
+    EXPECTED_HIP_VERSION: "7.2.53211"
+    EXPECTED_ROCM_VERSION: "7.2.4"
+    EXPECTED_PYTHON_ABI: cp312
+    EXPECTED_CXX11_ABI: "1"
+    EXPECTED_WHEEL_TAG: cp312-cp312-manylinux_2_39_x86_64
     MANYLINUX_PLATFORM: manylinux_2_39_x86_64
     PYTORCH_ROCM_ARCH: gfx942;gfx950
-    ROCM_TORCH210_LOCAL_VERSION: rocm7.2.torch2.10
+    ROCM_TORCH210_LOCAL_VERSION: rocm7.2.4.torch2.10.git3d3aa833.cxx11abi1
 
 defaults:
     run:
@@ -79,14 +91,20 @@ jobs:
 
             - name: Build ROCm torch 2.10 wheel
               run: |
+                  echo "AMD torch wheel source: ${TORCH_WHEEL_SOURCE}"
                   docker run --rm \
-                    -e ROCM_VERSION_PREFIX="${ROCM_VERSION_PREFIX}" \
-                    -e TORCH_VERSION_PREFIX="${TORCH_VERSION_PREFIX}" \
+                    -e EXPECTED_TORCH_VERSION="${EXPECTED_TORCH_VERSION}" \
+                    -e EXPECTED_TORCH_GIT_VERSION="${EXPECTED_TORCH_GIT_VERSION}" \
+                    -e EXPECTED_HIP_VERSION="${EXPECTED_HIP_VERSION}" \
+                    -e EXPECTED_ROCM_VERSION="${EXPECTED_ROCM_VERSION}" \
+                    -e EXPECTED_PYTHON_ABI="${EXPECTED_PYTHON_ABI}" \
+                    -e EXPECTED_CXX11_ABI="${EXPECTED_CXX11_ABI}" \
+                    -e EXPECTED_WHEEL_TAG="${EXPECTED_WHEEL_TAG}" \
                     -e PYTORCH_ROCM_ARCH="${PYTORCH_ROCM_ARCH}" \
                     -e MANYLINUX_PLATFORM="${MANYLINUX_PLATFORM}" \
                     -e SETUPTOOLS_SCM_PRETEND_VERSION="${ROCM_TORCH210_VERSION}" \
                     -v "${PWD}:/work/LMCache" \
-                    --entrypoint bash "${ATOM_IMAGE}" \
+                    --entrypoint bash "${ROCM_PYTORCH_IMAGE}" \
                     /work/LMCache/.github/scripts/build_rocm_torch210_wheel.sh
 
             # This catches torch C++ ABI mismatches without requiring a GPU.
@@ -94,11 +112,16 @@ jobs:
             - name: Smoke-test wheel in a clean ROCm torch 2.10 container
               run: |
                   docker run --rm \
-                    -e ROCM_VERSION_PREFIX="${ROCM_VERSION_PREFIX}" \
-                    -e TORCH_VERSION_PREFIX="${TORCH_VERSION_PREFIX}" \
+                    -e EXPECTED_TORCH_VERSION="${EXPECTED_TORCH_VERSION}" \
+                    -e EXPECTED_TORCH_GIT_VERSION="${EXPECTED_TORCH_GIT_VERSION}" \
+                    -e EXPECTED_HIP_VERSION="${EXPECTED_HIP_VERSION}" \
+                    -e EXPECTED_ROCM_VERSION="${EXPECTED_ROCM_VERSION}" \
+                    -e EXPECTED_PYTHON_ABI="${EXPECTED_PYTHON_ABI}" \
+                    -e EXPECTED_CXX11_ABI="${EXPECTED_CXX11_ABI}" \
+                    -e EXPECTED_WHEEL_TAG="${EXPECTED_WHEEL_TAG}" \
                     -v "${PWD}/dist_rocm_torch210:/wheel:ro" \
                     -v "${PWD}/.github/scripts/validate_rocm_torch210_wheel.py:/validate_rocm_torch210_wheel.py:ro" \
-                    --entrypoint bash "${ATOM_IMAGE}" -lc '
+                    --entrypoint bash "${ROCM_PYTORCH_IMAGE}" -lc '
                       python -m pip uninstall -y lmcache
                       # Minimal dependencies needed to import the integration
                       # adapters; never resolve the unpinned torch dependency.

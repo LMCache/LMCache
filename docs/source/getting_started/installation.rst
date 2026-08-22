@@ -60,7 +60,7 @@ Install LMCache
                             ``--extra-index-url https://download.pytorch.org/whl/cu129`` ensures the CUDA 12.9
                             build of PyTorch is resolved. Without it, pip may select a mismatched CUDA variant.
 
-                    .. tab-item:: ROCm
+                    .. tab-item:: ROCm / torch 2.11
 
                         The ROCm wheel targets AMD Instinct **gfx942** (MI300X / MI325X) and
                         **gfx950** (MI350X / MI355X) in one fat binary, and is ABI-matched to the
@@ -93,6 +93,46 @@ Install LMCache
                             ``pip show lmcache`` reports which build is installed and the ROCm
                             build can be requested explicitly. A bare ``lmcache==${VERSION}``
                             also resolves it, since ``==`` ignores the local segment.
+
+                    .. tab-item:: ROCm 7.2.4 / torch 2.10
+
+                        This wheel targets AMD Instinct **gfx942** (MI300X / MI325X) and
+                        **gfx950** (MI350X / MI355X). It is built and smoke-tested in the
+                        public AMD PyTorch image
+                        ``rocm/pytorch:rocm7.2.4_ubuntu24.04_py3.12_pytorch_release_2.10.0``
+                        pinned at digest
+                        ``sha256:4449f856653602317e4101a76fce599c7fcd58ccec2e539951fce5f73083179e``.
+                        It does not require the ATOM image.
+
+                        The supported ABI tuple is exact:
+
+                        * AMD wheel source:
+                          `torch-2.10.0+rocm7.2.4.lw.git3d3aa833-cp312-cp312-linux_x86_64.whl
+                          <https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.4/torch-2.10.0%2Brocm7.2.4.lw.git3d3aa833-cp312-cp312-linux_x86_64.whl>`__
+                        * torch runtime version: ``2.10.0+rocm7.2.4.git3d3aa833``
+                          (git ``3d3aa833db84eed6b7f5595cb5f162c2f78300a4``)
+                        * ROCm ``7.2.4`` with HIP runtime ``7.2.53211``
+                        * Python/platform tag: ``cp312-cp312-manylinux_2_39_x86_64``
+                        * C++ ABI: ``_GLIBCXX_USE_CXX11_ABI=1``
+
+                        Install the matching wheel inside that pinned image:
+
+                        .. code-block:: bash
+
+                            docker run -it --device /dev/kfd --device /dev/dri \
+                                --group-add video --security-opt seccomp=unconfined \
+                                --entrypoint bash \
+                                rocm/pytorch:rocm7.2.4_ubuntu24.04_py3.12_pytorch_release_2.10.0@sha256:4449f856653602317e4101a76fce599c7fcd58ccec2e539951fce5f73083179e
+
+                            VERSION=0.5.4  # replace with target release
+                            pip install \
+                                lmcache==${VERSION}+rocm7.2.4.torch2.10.git3d3aa833.cxx11abi1 \
+                                --no-deps \
+                                --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/v${VERSION}-rocm-torch210
+
+                        The wheel links torch and ROCm libraries from the container at runtime.
+                        Other torch 2.10, ROCm 7.2.x, Python, or C++ ABI combinations are not
+                        covered by this artifact; build from source for those environments.
 
             .. tab-item:: Nightly
 

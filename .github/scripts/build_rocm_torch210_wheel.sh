@@ -3,24 +3,27 @@
 #
 # This script runs in an environment that already contains the target torch.
 # It must not install or upgrade torch: the purpose of this variant is to bind
-# LMCache's native extensions to the ROCm torch 2.10 ABI. A pinned ATOM image
-# currently provides that reproducible toolchain, but the wheel is not
-# ATOM-specific.
+# LMCache's native extensions to the exact public AMD torch build selected by
+# the workflow. The wheel is not ATOM-specific.
 #
 # Env:
 #   PYTORCH_ROCM_ARCH          gfx target list      (default gfx942;gfx950)
-#   TORCH_VERSION_PREFIX      expected torch prefix (default 2.10.)
-#   ROCM_VERSION_PREFIX       expected ROCm prefix  (default 7.2)
+#   EXPECTED_TORCH_VERSION    exact torch runtime version
+#   EXPECTED_TORCH_GIT_VERSION exact torch source revision
+#   EXPECTED_HIP_VERSION      exact HIP runtime version
+#   EXPECTED_ROCM_VERSION     exact ROCm release
+#   EXPECTED_PYTHON_ABI       exact CPython ABI tag
+#   EXPECTED_CXX11_ABI        torch C++ ABI flag (0 or 1)
 #   MANYLINUX_PLATFORM        output wheel policy   (default manylinux_2_39_x86_64)
 #   SETUPTOOLS_SCM_PRETEND_VERSION wheel version    (default 0.0.0.dev0)
 set -euxo pipefail
 
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=.github/scripts/rocm_wheel_common.sh
+source "${SCRIPT_DIR}/rocm_wheel_common.sh"
+
 PYTORCH_ROCM_ARCH="${PYTORCH_ROCM_ARCH:-gfx942;gfx950}"
-TORCH_VERSION_PREFIX="${TORCH_VERSION_PREFIX:-2.10.}"
-ROCM_VERSION_PREFIX="${ROCM_VERSION_PREFIX:-7.2}"
 MANYLINUX_PLATFORM="${MANYLINUX_PLATFORM:-manylinux_2_39_x86_64}"
-export TORCH_VERSION_PREFIX
-export ROCM_VERSION_PREFIX
 export SETUPTOOLS_SCM_PRETEND_VERSION="${SETUPTOOLS_SCM_PRETEND_VERSION:-0.0.0.dev0}"
 export MAX_JOBS="${MAX_JOBS:-2}"
 
@@ -29,29 +32,13 @@ REPO_ROOT="${LMCACHE_REPO_ROOT:-/work/LMCache}"
 
 git config --global --add safe.directory "${REPO_ROOT}"
 
-"${PY}" - <<'PY'
-import os
-import torch
-
-torch_prefix = os.environ["TORCH_VERSION_PREFIX"]
-rocm_prefix = os.environ["ROCM_VERSION_PREFIX"]
-assert torch.__version__.startswith(torch_prefix), (
-    f"ROCm torch 2.10 wheel requires torch {torch_prefix}*, found {torch.__version__}"
-)
-assert torch.version.hip is not None and torch.version.hip.startswith(rocm_prefix), (
-    f"ROCm torch 2.10 wheel requires ROCm {rocm_prefix}*, found {torch.version.hip}"
-)
-print(
-    "ROCM TORCH 2.10 BUILD ABI:",
-    "torch", torch.__version__,
-    "hip", torch.version.hip,
-    "cxx11abi", torch._C._GLIBCXX_USE_CXX11_ABI,
-)
-PY
+"${PY}" "${SCRIPT_DIR}/validate_rocm_torch210_wheel.py" --runtime-only
 
 "${PY}" -m pip install --no-cache-dir \
     -r "${REPO_ROOT}/requirements/build.txt" \
-    pybind11 auditwheel
+    pybind11
+install_rocm_repair_tools "${PY}"
+preflight_rocm_repair_tools "${PY}"
 
 cd "${REPO_ROOT}"
 rm -rf build dist_rocm_torch210 dist_rocm_torch210_raw csrc_hip
@@ -63,21 +50,10 @@ export CXX=hipcc
 export PYTORCH_ROCM_ARCH
 "${PY}" setup.py bdist_wheel --dist-dir=dist_rocm_torch210_raw
 
-"${PY}" -m auditwheel repair \
-    --plat "${MANYLINUX_PLATFORM}" \
-    --exclude 'libtorch*.so*' \
-    --exclude 'libc10*.so*' \
-    --exclude 'libamdhip64.so*' \
-    --exclude 'libhsa-runtime64.so*' \
-    --exclude 'librocprofiler-register.so*' \
-    --exclude 'libamd_comgr.so*' \
-    --exclude 'librocm-core.so*' \
-    --exclude 'librocblas.so*' \
-    --exclude 'libhipblas.so*' \
-    --exclude 'libMIOpen.so*' \
-    --exclude 'libdrm.so*' \
-    --exclude 'libdrm_amdgpu.so*' \
-    -w dist_rocm_torch210 dist_rocm_torch210_raw/*.whl
+raw_wheels=(dist_rocm_torch210_raw/*.whl)
+test "${#raw_wheels[@]}" -eq 1
+repair_rocm_wheel \
+    "${PY}" "${MANYLINUX_PLATFORM}" "${raw_wheels[0]}" dist_rocm_torch210
 
 "${PY}" - <<'PY'
 from pathlib import Path
@@ -104,14 +80,9 @@ if Path("lmcache/integration/atom").is_dir():
 print("ROCM TORCH 2.10 WHEEL:", wheels[0])
 PY
 
-check_dir=$(mktemp -d)
-"${PY}" -c "import glob,zipfile; w=glob.glob('dist_rocm_torch210/*.whl')[0]; zipfile.ZipFile(w).extractall('${check_dir}')"
-cuda_ops=$(find "${check_dir}" -name 'cuda_ops*.so' -print -quit)
-test -n "${cuda_ops}"
-/opt/rocm/llvm/bin/llvm-objdump --offloading "${cuda_ops}" 2>/dev/null \
-    | grep -oE 'gfx[0-9a-z]+' | sort -u \
-    | tee "${check_dir}/gpu-archs.txt"
-grep -qx 'gfx942' "${check_dir}/gpu-archs.txt"
-grep -qx 'gfx950' "${check_dir}/gpu-archs.txt"
+repaired_wheels=(dist_rocm_torch210/*.whl)
+test "${#repaired_wheels[@]}" -eq 1
+assert_rocm_offload_arches \
+    "${PY}" "${repaired_wheels[0]}" "${PYTORCH_ROCM_ARCH}"
 
 ls -la dist_rocm_torch210/
