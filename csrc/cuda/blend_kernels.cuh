@@ -5,7 +5,7 @@
 #include <torch/all.h>
 
 #include "kv_transfer_types.h"
-#include "mp_mem_kernels.cuh"  // StagingCopy
+#include "transfer_plan_types.cuh"
 
 // ---------------------------------------------------------------------------
 // CacheBlend retrieve plan.

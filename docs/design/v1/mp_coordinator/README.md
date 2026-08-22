@@ -41,6 +41,8 @@ shape.
 | `GET /cache/prefetches/{instance_id}/{request_id}` | operator/scheduler | poll a warm prefetch |
 | `POST/DELETE /cache/pins` | operator | pin / unpin keys against fleet-wide eviction |
 | `POST /cache/delete` | operator | delete cached objects on a named server |
+| `GET /instances/usage` | operator/scheduler | fleet memory view: per-server, per-module usage vs declared capacity |
+| `GET /instances/{instance_id}/usage` | operator/scheduler | one server's memory compartments |
 
 For server-initiated work (fleet-wide eviction, warm prefetch) a coordinator
 router resolves an instance's address from the registry (`ip` + `http_port`)
@@ -62,6 +64,7 @@ lmcache/v1/mp_coordinator/
   key_directory.py      # KeyDirectory: placements + token bindings (a cache-event consumer)
   blend_index.py      # BlendIndex: fragment (blend) lookup over those bindings
   blend_client.py       # mp-server-side fragment-lookup query client
+  server_config.py      # ServerConfigRegistry: per-server module capacities (from registration)
   ingest/
     __init__.py
     event_gate.py       # EventGate: incarnation fencing, seq dedup, gap detection
@@ -69,7 +72,7 @@ lmcache/v1/mp_coordinator/
   controllers/
     __init__.py
     eviction_controller.py  # the fleet L2 control loop: quota + usage + LRU + pins
-    usage_manager.py    # per-salt L2 usage view (owned by the eviction controller)
+    usage_manager.py    # per-tier usage view, by salt and by instance (a consumer)
     prefetch_manager.py # dispatches warm prefetch to a named MP server
   http_apis/
     __init__.py
@@ -80,6 +83,7 @@ lmcache/v1/mp_coordinator/
     cache_api.py        # /cache/prefetches, /cache/pins, /cache/delete
     events_api.py       # /events (fleet cache-event ingest)
     directory_api.py    # /directory/lookup, /directory/blend-lookup, /directory/keys, ...
+    instances_usage_api.py  # /instances/usage, /instances/{id}/usage
 ```
 
 ## Request flow
@@ -118,8 +122,9 @@ sequenceDiagram
 ## Extension seam (adding a capability)
 
 `app.state` carries the **shared collaborators** every capability composes
-from: `config`, `registry`, `key_directory`, `eviction_controller` (which owns
-the quota registry and usage view), the ingest `event_gate`, and the
+from: `config`, `registry`, `key_directory`, `usage_manager`,
+`eviction_controller` (which owns the quota registry), the ingest
+`event_gate`, and the
 `controllers/` managers. Endpoints use them directly — membership is thin
 enough to have no service layer (the `/instances` router calls the registry
 straight, matching the mp server's own `http_apis` convention).
@@ -183,20 +188,23 @@ Where the coordinator's fleet-level *doing* lives — the counterpart to
 
 - `eviction_controller.py` — `FleetEvictionController`, the fleet L2
   control loop: it holds the target (`QuotaManager` budgets), observes
-  the value (`L2UsageManager` byte totals), and acts to close the gap.
+  the value (`CacheUsageManager` byte totals, on the `l2` tier), and
+  acts to close the gap.
   Its `run()` wakes every `EVICTION_CHECK_INTERVAL` seconds, walks salts
   over their trigger watermark, and dispatches `DELETE /cache/objects`
   requests (chunked at `MAX_DELETE_BATCH`) to a uniformly random registered
   mp server (all servers share the backing L2, so one dispatch evicts the
   fleet). Also tracks the pins taken via `POST /cache/pins` so pinned keys
   are excluded from eviction and delete. Reachable as
-  `ctx.eviction_controller`, with `.quota` / `.usage` for the `/quota`
-  endpoints.
-- `usage_manager.py` — the per-`cache_salt` L2 byte totals, maintained
-  as a derived **view** of the key directory from the same admitted
-  event stream. Supporting state for the controller above, not a peer of
-  it (the same way `store_policy.py` supports `store_controller.py` in
-  `storage_controllers/`).
+  `ctx.eviction_controller`, with `.quota` for the `/quota` endpoints.
+- `usage_manager.py` — `CacheUsageManager`, byte totals per tier rolled
+  up per `cache_salt` (the tenant axis the eviction controller enforces
+  against) and per `(instance_id, backend)` (the capacity axis: how full
+  one node's L1 is). A consumer in its own right rather than supporting
+  state of the controller above, because it spans both tiers while the
+  controller reads only the L2 half. Registered before the controller,
+  which reads a key's remaining size for the batch it is consuming. See
+  [usage_and_eviction.md](usage_and_eviction.md).
 - `prefetch_manager.py` — implements `POST /cache/prefetches` dispatch to a
   named mp server and proxies status polls. A request-scoped proxy with no
   loop and no state of its own, so it stays a *manager*, not a controller.
@@ -208,6 +216,34 @@ it. The one coupling is pins, and it runs the way you'd want: a pin's
 entire meaning is "exempt from eviction", so the pin set is eviction
 state that the cache-control endpoints write, not the reverse.
 
+
+## Fleet memory pressure (`server_config.py`)
+
+`GET /instances/usage` answers how full each server's memory compartments
+are, by joining two halves that ride the same channel at very different
+rates: **usage** from `CacheUsageManager.get_bytes_by_instance`, already
+maintained off the admitted cache-event stream, and **capacity** from
+`capacity_reports` on `POST /events`. Capacity is configuration — it changes
+at boot and at reconfiguration, not per event — so a server reports it once
+at startup and again on each change, each report a whole declaration fenced
+by `(incarnation, revision)`.
+
+The endpoint adds no usage tracking of its own: the per-instance,
+per-backend rollup it needs is exactly what the usage manager publishes.
+
+`ServerConfigRegistry` holds the declarations. It lives outside
+`registry.py` because that file is membership only; a capacity is not a way
+to reach a server.
+
+Two properties the endpoint depends on. Shared backends (one S3 bucket
+mounted by N servers) are counted **once** for the fleet, never summed —
+the same empty-owner convention the key directory uses. And `usage_ratio` is
+`null`, not a sentinel, whenever no capacity was declared: that is the
+common case for `fs` / `mooncake` / `p2p` / `sagemaker`, which expose no
+capacity knob at all.
+
+Read-only — it never evicts, throttles, or pushes. See
+[memory_pressure.md](memory_pressure.md).
 
 ## Fleet CacheBlend lookup (`blend_index.py`)
 

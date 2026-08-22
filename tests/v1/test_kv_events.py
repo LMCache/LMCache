@@ -66,6 +66,25 @@ def test_kv_events_use_half_open_chunk_bounds(
     ]
 
 
+def test_kv_events_use_half_open_chunk_bounds_for_tensor_tokens(
+    autorelease_v1: Callable[[LMCacheEngine], LMCacheEngine],
+) -> None:
+    engine = _create_engine(autorelease_v1)
+    tokens = torch.arange(10, dtype=torch.long)
+
+    engine.store(tokens=tokens)
+
+    events = list(engine.get_kv_events())
+    assert [event.token_ids for event in events] == [
+        [0, 1, 2, 3],
+        [4, 5, 6, 7],
+        [8, 9],
+    ]
+    assert [len(event.token_ids) for event in events] == [
+        event.block_size for event in events
+    ]
+
+
 def test_kv_events_map_hashes_by_chunk_index(
     autorelease_v1: Callable[[LMCacheEngine], LMCacheEngine],
 ) -> None:

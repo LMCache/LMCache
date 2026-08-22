@@ -37,6 +37,35 @@ class TransferDirection(IntEnum):
     H2D = 0
     D2H = 1
 
+class PageBufferShapeDesc:
+    """Descriptor for one engine page-buffer layout."""
+
+    kv_size: int
+    nl: int
+    nb: int
+    bs: int
+    nh: int
+    hs: int
+    element_size: int
+    block_stride_elems: int
+    dtype: Any
+
+    def __init__(self) -> None: ...
+
+class KernelGroupSpec:
+    """Backend-agnostic descriptor for one blocked-transfer kernel group."""
+
+    def __init__(
+        self,
+        paged_buffer_ptrs: int,
+        lmcache_objects_ptrs: Sequence[int],
+        shape_desc: PageBufferShapeDesc,
+        lmcache_chunk_size: int,
+        engine_kv_format: int,
+        block_ids_base: int,
+        block_ids_capacity: int,
+    ) -> None: ...
+
 def is_kv_list(format: EngineKVFormat) -> bool:
     """Return whether the format stores KV as a list of per-token KV tensors."""
 

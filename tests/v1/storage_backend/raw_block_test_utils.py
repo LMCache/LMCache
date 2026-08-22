@@ -338,7 +338,16 @@ def install_lmcache_native_fallback() -> None:
     class TTLLock:
         pass
 
+    class PageBufferShapeDesc:
+        pass
+
+    class KernelGroupSpec:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
     fallback_module = types.ModuleType("lmcache.lmcache_native")
+    fallback_module.__dict__["PageBufferShapeDesc"] = PageBufferShapeDesc
+    fallback_module.__dict__["KernelGroupSpec"] = KernelGroupSpec
     fallback_module.__dict__["Bitmap"] = Bitmap
     fallback_module.__dict__["TTLLock"] = TTLLock
     sys.modules["lmcache.lmcache_native"] = fallback_module
