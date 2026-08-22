@@ -1,16 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Mooncake Transfer Engine-backed implementation of the transfer channel abstraction."""
+"""Mooncake Transfer Engine implementation of the transfer channel abstraction."""
 
 # Standard
-from typing import TYPE_CHECKING, Optional, Union
-import importlib
-import math
+from typing import Union
+import os
 import threading
-import uuid
-from lmcache.logging import init_logger
 
-logger = init_logger(__name__)
 # Third Party
+from mooncake.engine import TransferEngine
 import msgspec
 import zmq
 
@@ -30,8 +27,6 @@ from lmcache.v1.distributed.transfer_channel.factory import (
     register_transfer_channel_factory,
 )
 from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
-from mooncake.engine import TransferEngine
-import os
 
 logger = init_logger(__name__)
 
@@ -207,8 +202,8 @@ class MooncakeTeTransferChannelClient(TransferChannelClient):
         Close the transfer channel, releasing any pending tasks and the remote handle.
 
         Note:
-            Mooncake Transfer Engine does not need anything when we close client since we
-            only read from remote memory and we don't have any remote handle to release.
+            Mooncake Transfer Engine does not need anything when we close the client
+            because reads do not create a remote handle that needs to be released.
         """
         pass
 
@@ -339,7 +334,8 @@ class MooncakeTeTransferChannelContext(TransferChannelContext):
             raise RuntimeError(f"Failed to initialize mooncake_te engine, ret={ret}")
         logger.info(
             f"mooncake_te engine created, mooncake transfer engine port "
-            f"{self._mooncake_te_engine.get_rpc_port()}, protocol: {self._protocol}, device: {self._device_id}"
+            f"{self._mooncake_te_engine.get_rpc_port()}, protocol: "
+            f"{self._protocol}, device: {self._device_id}"
         )
         self._mooncake_te_port = self._mooncake_te_engine.get_rpc_port()
         # Register the whole L1 buffer once (CPU/DRAM, fixed mooncake_te dev_id=0).
@@ -512,9 +508,9 @@ class MooncakeTeTransferChannelContext(TransferChannelContext):
 
         ret = self._mooncake_te_engine.unregister_memory(self._l1_memory_desc.ptr)
         if ret != 0:
-            raise ("Warning: unregister_memory failed.")
+            logger.warning("Failed to unregister the Mooncake memory buffer")
         else:
-            logger.info(f"Unregistered memory buffer.")
+            logger.info("Unregistered memory buffer.")
 
     ############################################################
     # Helper functions

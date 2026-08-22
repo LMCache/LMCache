@@ -9,7 +9,10 @@ self-registers its factory via ``register_transfer_channel_factory``.
 from lmcache.v1.distributed.transfer_channel.impl import nixl_impl  # noqa: F401
 
 try:
-    from lmcache.v1.distributed.transfer_channel.impl import mooncake_te_impl  # noqa: F401
+    # First Party
+    from lmcache.v1.distributed.transfer_channel.impl import (  # noqa: F401
+        mooncake_te_impl,
+    )
 except ModuleNotFoundError as e:
     if e.name != "mooncake":
         raise
