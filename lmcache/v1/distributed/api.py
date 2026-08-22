@@ -8,7 +8,7 @@ Could be implemented by native code in the future
 
 # Standard
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal, get_args
 import enum
 
 # Third Party
@@ -324,6 +324,11 @@ class MemoryLayoutDesc:
             )
 
 
+GroupKind = Literal["attention", "recurrent", "standalone"]
+"""Object-group kind label: attention KV, recurrent state pages, or a
+connector-private standalone group."""
+
+
 @dataclass(frozen=True)
 class AttnWindowDesc:
     """Per-object-group cross-chunk attention windows, in LMCache chunks.
@@ -339,6 +344,13 @@ class AttnWindowDesc:
     world_size: int = 1
     """Number of kv_rank shards per chunk (tensor-parallel world size)."""
 
+    group_kinds: tuple[GroupKind, ...] = ()
+    """Optional per-group kind labels parallel to ``num_chunks_in_sw``.
+    Empty when the producer predates kinds (treat every group as
+    attention)."""
+
+    _VALID_GROUP_KINDS = frozenset(get_args(GroupKind))
+
     def __post_init__(self) -> None:
         if self.world_size < 1:
             raise ValueError(
@@ -350,6 +362,16 @@ class AttnWindowDesc:
                     "AttnWindowDesc: each window must be -1 (full attention) "
                     f"or >= 1 chunk, got {w}"
                 )
+        if self.group_kinds:
+            if len(self.group_kinds) != len(self.num_chunks_in_sw):
+                raise ValueError(
+                    f"AttnWindowDesc: group_kinds has {len(self.group_kinds)} "
+                    f"entries but num_chunks_in_sw has "
+                    f"{len(self.num_chunks_in_sw)}"
+                )
+            bad = set(self.group_kinds) - self._VALID_GROUP_KINDS
+            if bad:
+                raise ValueError(f"AttnWindowDesc: unknown group kinds {bad!r}")
 
     @property
     def num_object_groups(self) -> int:
@@ -385,11 +407,14 @@ class PrefetchRequestSpec:
     Attributes:
         keys: Object keys to prefetch; order defines the prefix.
         group_layout_descs: Maps object_group_id to that group's memory
-            layout for L1 write-buffer allocation; one entry per object
-            group in ``attn_desc``.
+            layout for L1 write-buffer allocation; entries beyond
+            ``attn_desc``'s groups are harmless.
         extra_count: Extra read locks per key beyond the default 1.
         policy: Retained-subset policy (see :class:`TrimPolicy`).
-        attn_desc: Cross-chunk attention windows, in object-group order.
+        attn_desc: Cross-chunk attention windows for the groups ``keys``
+            covers; a caller prefetching a subset of the registration's
+            groups must narrow it to that subset (it drives the fold
+            stride).
         mode: Prefetch intent (see :class:`PrefetchMode`).
     """
 
@@ -401,11 +426,13 @@ class PrefetchRequestSpec:
     mode: PrefetchMode = PrefetchMode.LOOKUP
 
     def __post_init__(self) -> None:
+        # A caller prefetching a SUBSET of the groups narrows attn_desc, so
+        # extra layout entries are harmless; too FEW is the real mistake.
         expected = set(range(self.attn_desc.num_object_groups))
-        if set(self.group_layout_descs) != expected:
+        if not expected <= set(self.group_layout_descs):
             raise ValueError(
-                "PrefetchRequestSpec: group_layout_descs must map exactly the "
-                f"object groups {sorted(expected)}, got "
+                "PrefetchRequestSpec: group_layout_descs must cover at least "
+                f"the object groups {sorted(expected)}, got "
                 f"{sorted(self.group_layout_descs)}"
             )
 
