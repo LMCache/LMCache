@@ -410,9 +410,9 @@ class LookupModule:
         # free_lookup_locks can reconstruct which keys the prefetch
         # read-locked (see ``unfold``: full-attention groups lock the whole
         # hit prefix, sliding-window groups only its in-window suffix).
-        self._ctx.session_manager.get_or_create(
-            job.request_id
-        ).prefetch_hit_chunks = found_count
+        session = self._ctx.session_manager.get_or_create(job.request_id)
+        session.prefetch_hit_chunks = found_count
+        session.prefetch_locked_gids = tuple(range(job.attn_desc.num_object_groups))
 
         self._ctx.event_bus.publish(
             Event(
@@ -511,10 +511,16 @@ class LookupModule:
                 key.request_id,
             )
 
-        # Release across every object group, mirroring lookup, which locks
-        # keys in every group; releasing only group 0 would leak the rest.
+        # Release exactly the groups the prefetch locked (std lookup: all;
+        # CB prefix leg: its prefix set) -- releasing an unlocked group
+        # would drop another request's lock on the shared object key.
+        locked_gids = self._ctx.session_manager.get_or_create(
+            key.request_id
+        ).prefetch_locked_gids
         obj_keys: list[ObjectKey] = []
         for group_idx, window in enumerate(attn_desc.num_chunks_in_sw):
+            if locked_gids and group_idx not in locked_gids:
+                continue
             if hit_chunks < 0:
                 if window >= 0:
                     continue

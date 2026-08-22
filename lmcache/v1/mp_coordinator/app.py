@@ -36,11 +36,28 @@ from lmcache.v1.mp_coordinator.controllers.eviction_controller import (
     FleetEvictionController,
 )
 from lmcache.v1.mp_coordinator.controllers.prefetch_manager import PrefetchManager
+from lmcache.v1.mp_coordinator.controllers.usage_manager import CacheUsageManager
 from lmcache.v1.mp_coordinator.http_apis.dependencies import CoordinatorContext
 from lmcache.v1.mp_coordinator.ingest.event_broadcaster import CacheEventBroadcaster
 from lmcache.v1.mp_coordinator.ingest.event_gate import EventGate
 from lmcache.v1.mp_coordinator.key_directory import KeyDirectory
+from lmcache.v1.mp_coordinator.persistence.checkpoint import (
+    load_checkpoint,
+    save_checkpoint,
+)
+from lmcache.v1.mp_coordinator.persistence.durable_component import (
+    DurableComponent,
+    PersistenceType,
+)
+from lmcache.v1.mp_coordinator.persistence.metadata import MetadataPersister
+from lmcache.v1.mp_coordinator.persistence.quiesce import QuiesceLock
+from lmcache.v1.mp_coordinator.persistence.store import (
+    ArtifactStore,
+    LocalArtifactStore,
+    NullArtifactStore,
+)
 from lmcache.v1.mp_coordinator.registry import InstanceRegistry
+from lmcache.v1.mp_coordinator.server_config import ServerConfigRegistry
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.utils.router_discovery import discover_api_routers
 
@@ -84,11 +101,16 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
         key_directory.enable_blend_lookup(
             chunk_size=config.chunk_size, probe_stride=config.blend_probe_stride
         )
+    usage_manager = CacheUsageManager()
     eviction_controller = FleetEvictionController(
+        usage_manager=usage_manager,
         eviction_ratio=config.eviction_ratio,
         trigger_watermark=config.trigger_watermark,
     )
     prefetch_manager = PrefetchManager()
+    # Pressure's denominator; the numerator is usage_manager's per-instance
+    # rollup.
+    server_config = ServerConfigRegistry()
     # Resolves pin requests' token_ids to object keys; must match the fleet's
     # chunk size and hash algorithm (see MPCoordinatorConfig).
     token_hasher = TokenHasher(
@@ -98,23 +120,78 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
     # consumer of the fleet's cache-event stream is a register call here.
     event_broadcaster = CacheEventBroadcaster()
     event_broadcaster.register_consumer(key_directory)
+    # Order matters: the eviction controller's delete handling reads the
+    # usage view for the same batch, so the usage view must consume first.
+    event_broadcaster.register_consumer(usage_manager)
     event_broadcaster.register_consumer(eviction_controller)
-    event_gate = EventGate(event_broadcaster)
+    # Consumes ``config`` batches only, so its position is free.
+    event_broadcaster.register_consumer(server_config)
+    # Held by the ingest path; whoever captures durable state takes it
+    # to read across the consumers consistently.
+    quiesce = QuiesceLock()
+    event_gate = EventGate(event_broadcaster, quiesce)
+
+    # Durable state, split by where each component says it belongs. PR 3
+    # replaces this hand-built list with controller discovery.
+    durable: list[DurableComponent] = [
+        key_directory,
+        usage_manager,
+        event_gate,
+        server_config,
+        *eviction_controller.get_durable_components(),
+    ]
+    checkpoint_components = [
+        c for c in durable if c.persistence_type is PersistenceType.CHECKPOINT
+    ]
+    checkpoint_store = _artifact_store(config.checkpoint_path)
+    metadata_persister = MetadataPersister(_artifact_store(config.metadata_path))
+    for component in durable:
+        if component.persistence_type is PersistenceType.METADATA:
+            metadata_persister.register(component)
+    # Before the checkpoint, so a restored key arrives already pinned.
+    metadata_persister.load()
+    load_checkpoint(checkpoint_store, checkpoint_components)
 
     ctx = CoordinatorContext(
         registry=registry,
+        usage_manager=usage_manager,
         eviction_controller=eviction_controller,
         prefetch_manager=prefetch_manager,
         token_hasher=token_hasher,
         key_directory=key_directory,
         event_gate=event_gate,
+        metadata_persister=metadata_persister,
+        server_config=server_config,
     )
 
+    async def _checkpoint_loop() -> None:
+        """Checkpoint on a timer until cancelled.
+
+        Only derived state runs on a timer: it changes continuously, so a
+        cadence is the only sensible cost. Operator intent is written when
+        it changes instead (see ``MetadataPersister``).
+        """
+        while True:
+            await asyncio.sleep(config.checkpoint_interval)
+            await asyncio.to_thread(
+                save_checkpoint,
+                checkpoint_store,
+                quiesce,
+                checkpoint_components,
+            )
+
     async def _health_loop() -> None:
-        """Evict stale instances on a timer until cancelled."""
+        """Evict stale instances on a timer until cancelled.
+
+        A timed-out instance takes its L1 contents with it, so its
+        reported L1 state is fenced across every consumer. Its L2
+        contents stay: they live on storage the fleet shares and leave
+        only via ``DELETE`` events.
+        """
         while True:
             await asyncio.sleep(config.health_check_interval)
-            evict_stale(registry, config.instance_timeout)
+            for instance_id in evict_stale(registry, config.instance_timeout):
+                event_gate.drop_instance(instance_id)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -126,6 +203,9 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
         app.state.outbound_client = outbound_client
         health_task = None
         eviction_task = None
+        checkpoint_task = None
+        if config.checkpoint_path and config.checkpoint_interval > 0:
+            checkpoint_task = asyncio.create_task(_checkpoint_loop())
         if config.health_check_interval > 0:
             health_task = asyncio.create_task(_health_loop())
         if config.eviction_check_interval > 0:
@@ -140,11 +220,20 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
         try:
             yield
         finally:
-            for task in (health_task, eviction_task):
+            for task in (health_task, eviction_task, checkpoint_task):
                 if task is not None:
                     task.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
                         await task
+            if config.checkpoint_path:
+                # One last write, so a clean restart resumes where this
+                # process stopped rather than an interval-old copy.
+                await asyncio.to_thread(
+                    save_checkpoint,
+                    checkpoint_store,
+                    quiesce,
+                    checkpoint_components,
+                )
             await eviction_controller.wait_for_in_flight_dispatches()
             await outbound_client.aclose()
 
@@ -159,3 +248,12 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
         app.include_router(router)
 
     return app
+
+
+def _artifact_store(path: str) -> ArtifactStore:
+    """Return the store for ``path``, or one that discards if unset.
+
+    Args:
+        path: Configured location, empty when the operator wants none.
+    """
+    return LocalArtifactStore(Path(path)) if path else NullArtifactStore()
