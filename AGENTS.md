@@ -2,6 +2,12 @@
 
 Guidelines for AI coding agents (Copilot, Cursor, Claude Code, etc.) working in this repository.
 
+## AGENTS.md Ownership
+
+`AGENTS.md` is a human-owned policy file.
+Agents must not modify this file unless the user explicitly requests changes to `AGENTS.md`.
+If an agent discovers recurring guidance or environment notes, it should report them in chat instead of editing this file.
+
 ## Project Overview
 
 LMCache is a KV cache management engine for LLM serving that reduces Time To First Token (TTFT) and increases throughput. It stores KV caches across multiple tiers (GPU, CPU, disk, S3) and integrates with vLLM and SGLang.
@@ -83,6 +89,17 @@ isort .                   # Import sorting (black profile, from_first=true)
 mypy --config-file=pyproject.toml   # Type checking
 codespell --toml pyproject.toml     # Spell checking
 ```
+
+Before running `pre-commit run --all-files`, verify that `cargo`, `rustfmt`, and
+`cargo clippy` are available. The repository's pre-commit config includes Rust
+format and clippy hooks, so the run will fail even for Python-only changes when
+those commands are missing.
+If you are validating only non-Rust changes and do not intend to touch Rust in
+that pass, run `SKIP=rust-fmt,rust-clippy pre-commit run --all-files` to skip
+those hooks explicitly.
+On macOS, `rust-clippy` currently fails while building `io-uring` because that
+dependency expects Linux-only libc symbols. For non-Rust changes on macOS, use
+the explicit `SKIP=rust-fmt,rust-clippy` workflow above.
 
 C++/CUDA files use clang-format (Google style, 80-col). Rust code in `rust/` uses `cargo fmt` and `cargo clippy`.
 
@@ -216,4 +233,3 @@ When reviewing code (or self-checking before submitting), verify all of the foll
 - [ ] No unnecessary memory copies or allocations in hot paths.
 - [ ] Thread safety is maintained for shared data structures.
 - [ ] CUDA/GPU resources are properly managed (allocated, freed, synchronized).
-

@@ -51,6 +51,42 @@ def test_defaults_disable_registration():
     assert config.url == ""  # empty url => registration disabled
     assert config.advertise_ip == ""
     assert config.heartbeat_interval == 5.0
+    assert config.blend_timeout == 1.0
+    assert config.blend_match_concurrency == 8
+
+
+def test_blend_flags_are_parsed():
+    config = _parse(
+        [
+            "--coordinator-blend-timeout",
+            "2.5",
+            "--coordinator-blend-match-concurrency",
+            "4",
+        ]
+    )
+    assert config.blend_timeout == 2.5
+    assert config.blend_match_concurrency == 4
+
+
+@pytest.mark.parametrize("timeout", ["0", "-1", "nan", "inf"])
+def test_invalid_blend_timeout_rejected(timeout):
+    with pytest.raises(ValueError, match="blend timeout must be a finite number > 0"):
+        _parse(["--coordinator-blend-timeout", timeout])
+
+
+@pytest.mark.parametrize("concurrency", ["0", "-1"])
+def test_invalid_blend_concurrency_rejected(concurrency):
+    with pytest.raises(ValueError, match="blend match concurrency must be >= 1"):
+        _parse(["--coordinator-blend-match-concurrency", concurrency])
+
+
+def test_blend_flags_have_no_env_fallback(monkeypatch):
+    """The blend knobs are CLI-only; the old env names no longer apply."""
+    monkeypatch.setenv("LMCACHE_COORDINATOR_BLEND_TIMEOUT", "9.5")
+    monkeypatch.setenv("LMCACHE_COORDINATOR_BLEND_MATCH_CONCURRENCY", "32")
+    config = _parse([])
+    assert config.blend_timeout == 1.0
+    assert config.blend_match_concurrency == 8
 
 
 def test_flags_are_parsed():

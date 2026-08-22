@@ -58,7 +58,7 @@ def _batch(
 
 
 def _post_events(client: TestClient, batches: list[dict]) -> dict:
-    resp = client.post("/directory/events", json={"batches": batches})
+    resp = client.post("/events", json={"batches": batches})
     assert resp.status_code == 200
     return resp.json()
 
@@ -168,7 +168,9 @@ def test_lookup_tokens_invalid_model_name_is_400():
 # -- Stats -------------------------------------------------------------------
 
 
-def test_stats_reports_counts_and_gap_flag():
+def test_stats_reports_counts_and_per_instance_l1_keys():
+    """Directory contents only — per-emitter stream state (incarnation,
+    seq, gap flag) lives on the ingest gate and is not exposed here."""
     with _client() as client:
         _post_events(client, [_batch(seq=1)])
         _post_events(client, [_batch(seq=5, entries=[{"key": _key(h="bb")}])])
@@ -180,11 +182,10 @@ def test_stats_reports_counts_and_gap_flag():
         data = client.get("/directory/stats").json()
         assert data["num_keys"] == 2
         assert data["num_placements"] == 3
-        instance = data["instances"]["node-a"]
-        assert instance["incarnation"] == 1
-        assert instance["last_seq"] == 6
-        assert instance["gap_detected"] is True
-        assert instance["num_l1_keys"] == 2
+        # Both keys got an L1 placement from node-a; the third batch added
+        # an L2 placement, which the L1 index does not count.
+        assert data["l1_keys_by_instance"]["node-a"] == 2
+        assert "instances" not in data
 
 
 # -- Token bindings ----------------------------------------------------------
@@ -365,20 +366,20 @@ def test_lookup_requires_exactly_one_form():
 
 def test_tier_all_is_rejected():
     with _client() as client:
-        resp = client.post("/directory/events", json={"batches": [_batch(tier="all")]})
+        resp = client.post("/events", json={"batches": [_batch(tier="all")]})
         assert resp.status_code == 422
 
 
 def test_seq_zero_is_rejected():
     with _client() as client:
-        resp = client.post("/directory/events", json={"batches": [_batch(seq=0)]})
+        resp = client.post("/events", json={"batches": [_batch(seq=0)]})
         assert resp.status_code == 422
 
 
 def test_malformed_key_hex_is_rejected():
     with _client() as client:
         resp = client.post(
-            "/directory/events",
+            "/events",
             json={"batches": [_batch(entries=[{"key": _key(h="zz")}])]},
         )
         assert resp.status_code == 422

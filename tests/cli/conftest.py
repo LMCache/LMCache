@@ -34,20 +34,17 @@ def _stub_lmcache_native() -> Generator[None, None, None]:
         return
 
     stub: Any = types.ModuleType(_MOD_NAME)
+    stub.PageBufferShapeDesc = type("PageBufferShapeDesc", (), {})
+    stub.KernelGroupSpec = type(
+        "KernelGroupSpec",
+        (),
+        {"__init__": lambda self, *args, **kwargs: None},
+    )
     stub.TTLLock = MagicMock()
     stub.Bitmap = MagicMock()
     stub.PeriodicEventNotifier = MagicMock()
     stub.ParallelPatternMatcher = MagicMock()
     stub.RangePatternMatcher = MagicMock()
-    # Relocated KV-format / transfer types and format predicates.
-    stub.EngineKVFormat = MagicMock()
-    stub.GPUKVFormat = MagicMock()
-    stub.TransferDirection = MagicMock()
-    stub.is_cross_layer = MagicMock()
-    stub.is_kv_list = MagicMock()
-    stub.is_layer_list = MagicMock()
-    stub.is_mla = MagicMock()
-
     sys.modules[_MOD_NAME] = stub
     try:
         yield

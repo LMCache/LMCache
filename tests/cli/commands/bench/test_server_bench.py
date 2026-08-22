@@ -33,6 +33,31 @@ from lmcache.cli.commands.bench.server_bench.helpers import (
 )
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocols.base import RequestType
+from lmcache.v1.platform.ops_types import PageBufferShapeDesc
+
+
+def _make_shape_desc(
+    *,
+    kv_size: int,
+    nl: int,
+    nb: int,
+    bs: int,
+    nh: int,
+    hs: int,
+    dtype: torch.dtype,
+) -> PageBufferShapeDesc:
+    """Build a typed ``PageBufferShapeDesc`` for bench test groups."""
+    shape_desc = PageBufferShapeDesc()
+    shape_desc.kv_size = kv_size
+    shape_desc.nl = nl
+    shape_desc.nb = nb
+    shape_desc.bs = bs
+    shape_desc.nh = nh
+    shape_desc.hs = hs
+    shape_desc.element_size = dtype.itemsize
+    shape_desc.dtype = dtype
+    return shape_desc
+
 
 # ------------------------------------------------------------------ #
 #  Fixtures
@@ -388,9 +413,6 @@ class TestAllocateKVCache:
         (and the total ``num_layers`` from the sum), silently producing
         wrong tensors for layers in later groups.
         """
-        # Standard
-        from types import SimpleNamespace
-
         # First Party
         from lmcache.v1.kv_layer_groups import KVLayerGroupInfo
 
@@ -400,12 +422,28 @@ class TestAllocateKVCache:
         # requirement of paged KV, enforced in CLI execute().)
         group_a = KVLayerGroupInfo(
             layer_indices=[0, 1, 2],
-            shape_desc=SimpleNamespace(kv_size=2, nb=2, bs=2, nh=8, hs=16, nl=3),
+            shape_desc=_make_shape_desc(
+                kv_size=2,
+                nl=3,
+                nb=2,
+                bs=2,
+                nh=8,
+                hs=16,
+                dtype=torch.float16,
+            ),
             dtype=torch.float16,
         )
         group_b = KVLayerGroupInfo(
             layer_indices=[3, 4],
-            shape_desc=SimpleNamespace(kv_size=1, nb=2, bs=2, nh=4, hs=32, nl=2),
+            shape_desc=_make_shape_desc(
+                kv_size=1,
+                nl=2,
+                nb=2,
+                bs=2,
+                nh=4,
+                hs=32,
+                dtype=torch.bfloat16,
+            ),
             dtype=torch.bfloat16,
         )
         tensors = _allocate_kv_cache(
@@ -885,9 +923,6 @@ class TestAllocShapeContract:
     """
 
     def test_mla_alloc_shape_is_rank3(self) -> None:
-        # Standard
-        from types import SimpleNamespace
-
         # First Party
         from lmcache.cli.commands.bench.server_bench.helpers import (
             _allocate_kv_cache,
@@ -896,7 +931,15 @@ class TestAllocShapeContract:
 
         group = KVLayerGroupInfo(
             layer_indices=[0, 1],
-            shape_desc=SimpleNamespace(kv_size=1, nb=4, bs=2, nh=1, hs=32, nl=2),
+            shape_desc=_make_shape_desc(
+                kv_size=1,
+                nl=2,
+                nb=4,
+                bs=2,
+                nh=1,
+                hs=32,
+                dtype=torch.bfloat16,
+            ),
             dtype=torch.bfloat16,
         )
         tensors = _allocate_kv_cache(device="cpu", groups=[group])
@@ -907,9 +950,6 @@ class TestAllocShapeContract:
             assert t.dtype == torch.bfloat16
 
     def test_classical_alloc_shape_is_rank5(self) -> None:
-        # Standard
-        from types import SimpleNamespace
-
         # First Party
         from lmcache.cli.commands.bench.server_bench.helpers import (
             _allocate_kv_cache,
@@ -918,7 +958,15 @@ class TestAllocShapeContract:
 
         group = KVLayerGroupInfo(
             layer_indices=[0],
-            shape_desc=SimpleNamespace(kv_size=2, nb=4, bs=2, nh=8, hs=16, nl=1),
+            shape_desc=_make_shape_desc(
+                kv_size=2,
+                nl=1,
+                nb=4,
+                bs=2,
+                nh=8,
+                hs=16,
+                dtype=torch.float16,
+            ),
             dtype=torch.float16,
         )
         tensors = _allocate_kv_cache(device="cpu", groups=[group])

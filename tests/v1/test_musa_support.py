@@ -119,7 +119,8 @@ def _detect_with_stub(stub: _StubTorch) -> tuple[Any, str]:
     from lmcache.v1.platform._device_detect import _detect_device
 
     with patch.dict("sys.modules", {"torch": stub}):
-        return _detect_device()
+        dev, name, _ = _detect_device()
+        return dev, name
 
 
 def test_detect_device_prefers_musa_when_available() -> None:
