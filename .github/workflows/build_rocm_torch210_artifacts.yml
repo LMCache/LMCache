@@ -14,11 +14,6 @@ on:
                     0.5.4+rocm7.2.4.torch2.10.git3d3aa833.cxx11abi1).
                 value: ${{ jobs.build-rocm-torch210-artifacts.outputs.rocm_torch210_version }}
     workflow_dispatch:
-    # Temporary PR validation trigger. This makes a fork push execute the
-    # workflow end-to-end; remove it after the completed run is reviewed.
-    push:
-        branches:
-            - ci/rocm-torch210-wheel
 
 env:
     LC_ALL: en_US.UTF-8
