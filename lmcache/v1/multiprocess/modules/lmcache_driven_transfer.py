@@ -1016,7 +1016,6 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             Notes).
 
         Raises:
-            ValueError: If no GPU context is registered for the given instance ID.
             RuntimeError: If the backend does not support IPC event handles.
 
         Notes:
@@ -1031,7 +1030,15 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
 
         entry = self.get_and_touch_context_entry(instance_id)
         if entry is None:
-            raise ValueError(f"No GPU context registered for instance ID {instance_id}")
+            # The worker can reconnect to a replacement server before its next
+            # registration probe. No device work was submitted in that window,
+            # so echo the producer event and return a terminal False response
+            # instead of leaving the MQ future unanswered.
+            logger.warning(
+                "Rejecting STORE for unregistered GPU instance ID %d",
+                instance_id,
+            )
+            return event_ipc_handle, False
         cache_context = entry.cache_context
         model_name = entry.model_name
         event_backend = entry.event_backend
@@ -1254,14 +1261,19 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             second element indicates whether the key was successfully retrieved.
 
         Raises:
-            ValueError: If no GPU context is registered for the given instance ID.
             RuntimeError: If the backend does not support IPC event handles.
         """
         st = time.perf_counter()
 
         entry = self.get_and_touch_context_entry(instance_id)
         if entry is None:
-            raise ValueError(f"No GPU context registered for instance ID {instance_id}")
+            # See store(): the echoed producer event preserves device ordering
+            # while the False result lets the caller recover or recompute.
+            logger.warning(
+                "Rejecting RETRIEVE for unregistered GPU instance ID %d",
+                instance_id,
+            )
+            return event_ipc_handle, False
         cache_context = entry.cache_context
         model_name = entry.model_name
         event_backend = entry.event_backend
