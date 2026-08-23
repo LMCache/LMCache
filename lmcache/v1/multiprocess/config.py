@@ -199,14 +199,54 @@ class HTTPFrontendConfig:
 
 DEFAULT_HTTP_FRONTEND_CONFIG = HTTPFrontendConfig()
 
+DEFAULT_KAFKA_CACHE_EVENT_TOPIC = "lmcache-cache-events"
+DEFAULT_KAFKA_DELIVERY_TIMEOUT = 10.0
+
+
+@dataclass(frozen=True)
+class HttpCacheEventSinkConfig:
+    """Configuration for direct HTTP cache-event delivery."""
+
+
+@dataclass(frozen=True)
+class KafkaCacheEventSinkConfig:
+    """Configuration for publishing cache events to Kafka.
+
+    Attributes:
+        bootstrap_servers: Comma-separated Kafka bootstrap servers.
+        topic: Topic receiving cache-event records.
+        delivery_timeout: Seconds to wait for broker acknowledgement.
+    """
+
+    bootstrap_servers: str
+    topic: str = DEFAULT_KAFKA_CACHE_EVENT_TOPIC
+    delivery_timeout: float = DEFAULT_KAFKA_DELIVERY_TIMEOUT
+
+    def __post_init__(self) -> None:
+        """Validate Kafka connectivity and delivery settings.
+
+        Raises:
+            ValueError: If bootstrap servers or the topic are empty, or the
+                delivery timeout is not a positive finite number.
+        """
+        if not self.bootstrap_servers.strip():
+            raise ValueError("Kafka bootstrap servers must be non-empty")
+        if not self.topic.strip():
+            raise ValueError("Kafka cache-event topic must be non-empty")
+        if not math.isfinite(self.delivery_timeout) or self.delivery_timeout <= 0:
+            raise ValueError(
+                "Kafka delivery timeout must be a finite number > 0, "
+                f"got {self.delivery_timeout}"
+            )
+
 
 @dataclass
 class CoordinatorConfig:
     """Configuration for joining an MP coordinator (registrant side).
 
-    Consumed by the HTTP server's lifespan to start the registration task.
-    When :attr:`url` is empty, the server registers with no coordinator and
-    runs exactly as before.
+    Consumed by the HTTP server's lifespan to start registration and cache-event
+    reporting. When :attr:`url` is empty, coordinator registration is disabled;
+    Kafka cache-event reporting can still be enabled independently.
     """
 
     url: str = ""
@@ -228,6 +268,11 @@ class CoordinatorConfig:
 
     event_flush_interval: float = 1.0
     """Seconds between cache-event flush attempts to the coordinator."""
+
+    event_sink_config: HttpCacheEventSinkConfig | KafkaCacheEventSinkConfig = field(
+        default_factory=HttpCacheEventSinkConfig
+    )
+    """Transport-specific cache-event delivery configuration."""
 
     blend_timeout: float = 1.0
     """Seconds a fleet CacheBlend lookup may take: both the per-request HTTP
@@ -579,7 +624,8 @@ def add_coordinator_args(
     The registration flags fall back to their ``LMCACHE_COORDINATOR_*``
     environment variables so the server can be configured either way (the env
     var is convenient for the Kubernetes downward API); an explicit flag wins
-    over the env var. The blend client flags have no env fallback.
+    over the env var. The event transport defaults to direct HTTP. The blend
+    client flags have no env fallback.
 
     Args:
         parser: The argument parser to add arguments to.
@@ -627,6 +673,37 @@ def add_coordinator_args(
         default=None,
         help="Seconds between cache-event flush attempts (must be > 0). "
         "Defaults to LMCACHE_COORDINATOR_EVENT_FLUSH_INTERVAL, then 1.0.",
+    )
+    group.add_argument(
+        "--coordinator-event-transport",
+        choices=("http", "kafka"),
+        default=None,
+        help="Cache-event transport. Defaults to "
+        "LMCACHE_COORDINATOR_EVENT_TRANSPORT, then http.",
+    )
+    group.add_argument(
+        "--coordinator-kafka-bootstrap-servers",
+        type=str,
+        default=None,
+        help="Comma-separated Kafka bootstrap servers. Required when the "
+        "cache-event transport is kafka. Defaults to "
+        "LMCACHE_COORDINATOR_KAFKA_BOOTSTRAP_SERVERS.",
+    )
+    group.add_argument(
+        "--coordinator-kafka-topic",
+        type=str,
+        default=None,
+        help="Kafka topic receiving cache events. Defaults to "
+        "LMCACHE_COORDINATOR_KAFKA_TOPIC, then "
+        f"{DEFAULT_KAFKA_CACHE_EVENT_TOPIC}.",
+    )
+    group.add_argument(
+        "--coordinator-kafka-delivery-timeout",
+        type=float,
+        default=None,
+        help="Seconds to wait for Kafka broker acknowledgement. Defaults to "
+        "LMCACHE_COORDINATOR_KAFKA_DELIVERY_TIMEOUT, then "
+        f"{DEFAULT_KAFKA_DELIVERY_TIMEOUT}.",
     )
     group.add_argument(
         "--coordinator-blend-timeout",
@@ -687,9 +764,9 @@ def parse_args_to_coordinator_config(
         The configuration object.
 
     Raises:
-        ValueError: If the heartbeat interval, the event flush interval or the
-            blend timeout is not a positive finite number, or if the blend
-            match concurrency is less than 1.
+        ValueError: If a timing value is invalid, the selected event transport
+            is unknown, Kafka settings are incomplete, or the blend match
+            concurrency is less than 1.
     """
     url = (
         args.coordinator_url
@@ -763,6 +840,54 @@ def parse_args_to_coordinator_config(
             "got %s" % event_flush_interval
         )
 
+    event_transport = (
+        args.coordinator_event_transport
+        if args.coordinator_event_transport is not None
+        else os.getenv("LMCACHE_COORDINATOR_EVENT_TRANSPORT", "http")
+    ).lower()
+    if event_transport == "http":
+        event_sink_config: HttpCacheEventSinkConfig | KafkaCacheEventSinkConfig = (
+            HttpCacheEventSinkConfig()
+        )
+    elif event_transport == "kafka":
+        bootstrap_servers = (
+            args.coordinator_kafka_bootstrap_servers
+            if args.coordinator_kafka_bootstrap_servers is not None
+            else os.getenv("LMCACHE_COORDINATOR_KAFKA_BOOTSTRAP_SERVERS", "")
+        )
+        topic = (
+            args.coordinator_kafka_topic
+            if args.coordinator_kafka_topic is not None
+            else os.getenv(
+                "LMCACHE_COORDINATOR_KAFKA_TOPIC",
+                DEFAULT_KAFKA_CACHE_EVENT_TOPIC,
+            )
+        )
+        if args.coordinator_kafka_delivery_timeout is not None:
+            delivery_timeout = args.coordinator_kafka_delivery_timeout
+        else:
+            raw = os.getenv("LMCACHE_COORDINATOR_KAFKA_DELIVERY_TIMEOUT")
+            if raw:
+                try:
+                    delivery_timeout = float(raw)
+                except ValueError as exc:
+                    raise ValueError(
+                        "LMCACHE_COORDINATOR_KAFKA_DELIVERY_TIMEOUT is not "
+                        f"a number: {raw!r}"
+                    ) from exc
+            else:
+                delivery_timeout = DEFAULT_KAFKA_DELIVERY_TIMEOUT
+        event_sink_config = KafkaCacheEventSinkConfig(
+            bootstrap_servers=bootstrap_servers,
+            topic=topic,
+            delivery_timeout=delivery_timeout,
+        )
+    else:
+        raise ValueError(
+            "coordinator event transport must be 'http' or 'kafka', "
+            f"got {event_transport!r}"
+        )
+
     blend_timeout = args.coordinator_blend_timeout
     if not math.isfinite(blend_timeout) or blend_timeout <= 0:
         raise ValueError(
@@ -782,6 +907,7 @@ def parse_args_to_coordinator_config(
         heartbeat_interval=heartbeat_interval,
         event_reporting=event_reporting,
         event_flush_interval=event_flush_interval,
+        event_sink_config=event_sink_config,
         blend_timeout=blend_timeout,
         blend_match_concurrency=blend_match_concurrency,
     )

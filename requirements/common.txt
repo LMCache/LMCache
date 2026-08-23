@@ -5,6 +5,7 @@ aiohttp
 awscrt
 cryptography
 cufile-python
+confluent-kafka>=2.3.0
 fastapi
 httpx
 huggingface_hub>=1.5.0

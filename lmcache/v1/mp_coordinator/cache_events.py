@@ -5,7 +5,7 @@ A :class:`CacheEventSubscriber` on the observability event bus turns the
 storage layer's L1/L2 key events (plus the store path's token-binding
 events) into ordered :class:`CacheEventBatch`
 lists and delivers them through a :class:`CacheEventSink` — the
-transport seam (HTTP today, a message queue later). Mapping, batching,
+transport seam (direct HTTP or Kafka). Mapping, batching,
 and delivery all run on the bus's drain thread; there is no dedicated
 emission thread or task. See
 ``docs/design/v1/mp_coordinator/cache_events.md``.
@@ -15,9 +15,11 @@ emission thread or task. See
 from abc import ABC, abstractmethod
 from collections import OrderedDict
 from dataclasses import dataclass
+import math
 import time
 
 # Third Party
+from confluent_kafka import KafkaError, KafkaException, Message, Producer
 import httpx
 
 # First Party
@@ -33,6 +35,11 @@ from lmcache.v1.mp_coordinator.api import (
 from lmcache.v1.mp_coordinator.schemas import CacheEventsRequest
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventCallback, EventSubscriber
+from lmcache.v1.multiprocess.config import (
+    CoordinatorConfig,
+    HttpCacheEventSinkConfig,
+    KafkaCacheEventSinkConfig,
+)
 
 logger = init_logger(__name__)
 
@@ -41,6 +48,35 @@ _DEFAULT_FLUSH_INTERVAL = 1.0
 # Token-binding cache bound: covers the window between a chunk's
 # token-binding event and its last (async L2) store event.
 _TOKEN_BINDING_CACHE_SIZE = 65536
+
+
+def create_cache_event_sink(config: CoordinatorConfig) -> "CacheEventSink":
+    """Create the configured MP-server cache-event transport.
+
+    Args:
+        config: Coordinator connection and event-sink configuration.
+
+    Returns:
+        The configured HTTP or Kafka sink.
+
+    Raises:
+        ValueError: If HTTP delivery is selected without a coordinator URL.
+        TypeError: If the sink configuration type is unsupported.
+    """
+    sink_config = config.event_sink_config
+    if isinstance(sink_config, HttpCacheEventSinkConfig):
+        if not config.url:
+            raise ValueError("HTTP cache-event reporting requires a coordinator URL")
+        return HttpCacheEventSink(config.url)
+    if isinstance(sink_config, KafkaCacheEventSinkConfig):
+        return KafkaCacheEventSink(
+            bootstrap_servers=sink_config.bootstrap_servers,
+            topic=sink_config.topic,
+            delivery_timeout=sink_config.delivery_timeout,
+        )
+    raise TypeError(
+        f"unsupported cache-event sink config: {type(sink_config).__name__}"
+    )
 
 
 class CacheEventPublishError(Exception):
@@ -115,6 +151,109 @@ class HttpCacheEventSink(CacheEventSink):
     def close(self) -> None:
         """Close the HTTP client."""
         self._client.close()
+
+
+class KafkaCacheEventSink(CacheEventSink):
+    """Sink that publishes cache-event batches as keyed Kafka records.
+
+    Each :class:`CacheEventBatch` becomes one JSON record keyed by
+    ``instance_id``. Kafka therefore assigns every batch from one emitter to
+    the same partition, preserving the per-instance order required by the
+    coordinator. Publishing blocks until the broker acknowledges every record.
+
+    Args:
+        bootstrap_servers: Comma-separated Kafka bootstrap servers.
+        topic: Topic receiving cache-event records.
+        delivery_timeout: Seconds to wait for delivery acknowledgement.
+
+    Raises:
+        ValueError: If the Kafka sink configuration is invalid.
+    """
+
+    def __init__(
+        self,
+        bootstrap_servers: str,
+        topic: str,
+        delivery_timeout: float,
+    ) -> None:
+        sink_config = KafkaCacheEventSinkConfig(
+            bootstrap_servers=bootstrap_servers,
+            topic=topic,
+            delivery_timeout=delivery_timeout,
+        )
+        self._topic = sink_config.topic
+        self._delivery_timeout = sink_config.delivery_timeout
+        self._producer = Producer(
+            {
+                "bootstrap.servers": sink_config.bootstrap_servers,
+                "client.id": "lmcache-cache-events",
+                "enable.idempotence": True,
+                "acks": "all",
+                "message.timeout.ms": math.ceil(sink_config.delivery_timeout * 1000),
+            }
+        )
+
+    def publish(self, batches: list[CacheEventBatch]) -> None:
+        """Publish batches in list order and wait for broker acknowledgement.
+
+        Args:
+            batches: Batches to publish. Each becomes one keyed Kafka record.
+
+        Raises:
+            CacheEventPublishError: If enqueueing, flushing, or delivery fails.
+        """
+        delivery_errors: list[KafkaError] = []
+
+        def _on_delivery(error: KafkaError | None, message: Message) -> None:
+            del message
+            if error is not None:
+                delivery_errors.append(error)
+
+        try:
+            for batch in batches:
+                payload = CacheEventsRequest(batches=[batch]).model_dump_json().encode()
+                self._producer.produce(
+                    topic=self._topic,
+                    key=batch.instance_id.encode(),
+                    value=payload,
+                    on_delivery=_on_delivery,
+                )
+            remaining = self._producer.flush(self._delivery_timeout)
+        except (BufferError, KafkaException) as e:
+            raise CacheEventPublishError(
+                f"failed to publish {len(batches)} cache-event batches to "
+                f"Kafka topic {self._topic!r}: {e}"
+            ) from e
+
+        if remaining:
+            raise CacheEventPublishError(
+                f"{remaining} of {len(batches)} cache-event batches were not "
+                f"acknowledged by Kafka topic {self._topic!r} within "
+                f"{self._delivery_timeout}s"
+            )
+        if delivery_errors:
+            errors = "; ".join(str(error) for error in delivery_errors)
+            raise CacheEventPublishError(
+                f"Kafka topic {self._topic!r} rejected "
+                f"{len(delivery_errors)} of {len(batches)} cache-event "
+                f"batches: {errors}"
+            )
+
+    def close(self) -> None:
+        """Flush any records still queued during shutdown."""
+        try:
+            remaining = self._producer.flush(self._delivery_timeout)
+        except KafkaException as e:
+            logger.warning(
+                "Failed to flush Kafka cache-event producer during shutdown: %s",
+                e,
+            )
+            return
+        if remaining:
+            logger.warning(
+                "%d Kafka cache-event record(s) remained queued at shutdown",
+                remaining,
+            )
 
 
 @dataclass(frozen=True)
