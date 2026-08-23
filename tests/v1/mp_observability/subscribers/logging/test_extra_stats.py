@@ -113,14 +113,15 @@ class TestExtraStatsLoggingSubscriber:
     def test_store_window_logs_tokens_size_and_throughput(self):
         subs = ExtraStatsLoggingSubscriber(_INTERVAL).get_subscriptions()
         with _capture_logs() as handler:
+            now = time.time()
             subs[EventType.MP_STORE_START](
-                _start(EventType.MP_STORE_START, "req-1", 100.0)
+                _start(EventType.MP_STORE_START, "req-1", now)
             )
             subs[EventType.MP_STORE_END](
                 _end(
                     EventType.MP_STORE_END,
                     "req-1",
-                    100.5,
+                    now + 0.5,
                     total_bytes=5_000_000_000,
                     num_tokens=24576,
                 )
@@ -139,14 +140,15 @@ class TestExtraStatsLoggingSubscriber:
     def test_retrieve_window_logs_tokens_size_and_throughput(self):
         subs = ExtraStatsLoggingSubscriber(_INTERVAL).get_subscriptions()
         with _capture_logs() as handler:
+            now = time.time()
             subs[EventType.MP_RETRIEVE_START](
-                _start(EventType.MP_RETRIEVE_START, "req-1", 200.0)
+                _start(EventType.MP_RETRIEVE_START, "req-1", now)
             )
             subs[EventType.MP_RETRIEVE_END](
                 _end(
                     EventType.MP_RETRIEVE_END,
                     "req-1",
-                    200.25,
+                    now + 0.25,
                     total_bytes=2_000_000_000,
                     num_tokens=4096,
                 )
@@ -344,6 +346,34 @@ class TestExtraStatsLoggingSubscriber:
         window_lines = [m for m in handler.messages() if "last" in m]
         assert len(window_lines) == 1
         assert "store ops=1 tokens=1024 size=1.00GB avg_copy=n/a" in window_lines[0]
+
+    def test_recent_pending_start_survives_flush_before_end(self):
+        subs = ExtraStatsLoggingSubscriber(_INTERVAL).get_subscriptions()
+        with _capture_logs() as handler:
+            now = time.time()
+            subs[EventType.MP_STORE_START](
+                _start(EventType.MP_STORE_START, "req-1", now)
+            )
+            time.sleep(_WAIT)
+            subs[EventType.L1_EVICTION_LOOP_TICK](_tick())
+
+            subs[EventType.MP_STORE_END](
+                _end(
+                    EventType.MP_STORE_END,
+                    "req-1",
+                    now + 0.5,
+                    total_bytes=1_000_000_000,
+                    num_tokens=1024,
+                )
+            )
+            time.sleep(_WAIT)
+            subs[EventType.L1_EVICTION_LOOP_TICK](_tick())
+
+        window_lines = [m for m in handler.messages() if "last" in m]
+        assert len(window_lines) == 1
+        assert (
+            "store ops=1 tokens=1024 size=1.00GB avg_copy=2.00GB/s" in window_lines[0]
+        )
 
     def test_end_to_end_via_event_bus(self):
         bus = EventBus(EventBusConfig(enabled=True, max_queue_size=100))
