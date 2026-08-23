@@ -22,7 +22,7 @@ from lmcache.v1.distributed.config import (
 )
 from lmcache.v1.mp_coordinator.cache_events import (
     CacheEventSubscriber,
-    HttpCacheEventSink,
+    create_cache_event_sink,
 )
 from lmcache.v1.mp_coordinator.registrar import keep_registered
 from lmcache.v1.mp_observability.config import (
@@ -35,6 +35,7 @@ from lmcache.v1.multiprocess.config import (
     DEFAULT_COORDINATOR_CONFIG,
     CoordinatorConfig,
     HTTPFrontendConfig,
+    KafkaCacheEventSinkConfig,
     MPServerConfig,
     add_coordinator_args,
     add_http_frontend_args,
@@ -142,14 +143,16 @@ async def lifespan(app: FastAPI):
             )
         )
     # Optionally report cache events to the coordinator
-    if (
+    if coordinator_config.event_reporting and (
         coordinator_client is not None
-        and coordinator_config.url
-        and coordinator_config.event_reporting
+        or isinstance(
+            coordinator_config.event_sink_config,
+            KafkaCacheEventSinkConfig,
+        )
     ):
         get_event_bus().register_subscriber(
             CacheEventSubscriber(
-                sink=HttpCacheEventSink(coordinator_config.url),
+                sink=create_cache_event_sink(coordinator_config),
                 instance_id=mp_config.instance_id,
                 # Server start time: fences out placements this instance
                 # reported before a restart (its pools restarted empty).

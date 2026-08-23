@@ -283,9 +283,12 @@ directory.
 | --- | --- | --- | --- |
 | ``event_reporting`` | ``False`` | ``LMCACHE_COORDINATOR_EVENT_REPORTING`` | Enable event reporting (also gates the key-directory stream) |
 | ``event_flush_interval`` | ``1.0`` | ``LMCACHE_COORDINATOR_EVENT_FLUSH_INTERVAL`` | Seconds between flushes |
+| ``event_sink_config`` | HTTP | ``LMCACHE_COORDINATOR_EVENT_TRANSPORT`` | Direct HTTP or Kafka producer configuration |
 
 Both also accept CLI flags (``--coordinator-event-reporting``,
-``--coordinator-event-flush-interval``).
+``--coordinator-event-flush-interval``). Kafka delivery additionally uses
+``--coordinator-kafka-bootstrap-servers``, ``--coordinator-kafka-topic``, and
+``--coordinator-kafka-delivery-timeout``.
 
 ## Failure modes
 

@@ -257,6 +257,25 @@ Kubernetes downward API); an explicit flag wins over the env var.
      - ``LMCACHE_COORDINATOR_EVENT_FLUSH_INTERVAL``
      - Seconds between cache-event batch flushes (must be ``> 0``, default
        ``1``).
+   * - ``--coordinator-event-transport``
+     - ``LMCACHE_COORDINATOR_EVENT_TRANSPORT``
+     - Event delivery transport: ``http`` (default) or ``kafka``.
+   * - ``--coordinator-kafka-bootstrap-servers``
+     - ``LMCACHE_COORDINATOR_KAFKA_BOOTSTRAP_SERVERS``
+     - Comma-separated Kafka bootstrap servers. Required for the ``kafka``
+       event transport.
+   * - ``--coordinator-kafka-topic``
+     - ``LMCACHE_COORDINATOR_KAFKA_TOPIC``
+     - Kafka event topic (default ``lmcache-cache-events``).
+   * - ``--coordinator-kafka-delivery-timeout``
+     - ``LMCACHE_COORDINATOR_KAFKA_DELIVERY_TIMEOUT``
+     - Seconds to wait for Kafka broker acknowledgement (default ``10``).
+
+The Kafka transport currently implements MP-server publication only. A
+coordinator Kafka source with checkpointed offsets, seeking, and replay is a
+follow-up; use the default HTTP transport for an end-to-end deployment today.
+Kafka publication does not require ``--coordinator-url``; that URL controls
+the separate HTTP registration and heartbeat flow.
 
 The server registers under its stable identity (``--instance-id`` / OTel
 ``service.instance.id``); if the flag is not passed, the server mints a

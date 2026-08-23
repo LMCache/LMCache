@@ -1,18 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the POST /cache/checksums endpoint (and other MP HTTP routes)."""
+"""Tests for MP HTTP server routes and lifespan wiring."""
 
 # Standard
-from unittest.mock import MagicMock, PropertyMock
+from unittest.mock import MagicMock, PropertyMock, patch
+import asyncio
 
 # Third Party
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 import pytest
 import torch
 
 # First Party
+from lmcache.v1.mp_coordinator.cache_events import CacheEventSink
+from lmcache.v1.mp_observability.config import ObservabilityConfig
+from lmcache.v1.multiprocess.config import (
+    CoordinatorConfig,
+    HTTPFrontendConfig,
+    KafkaCacheEventSinkConfig,
+    MPServerConfig,
+)
 from lmcache.v1.multiprocess.http_apis.dependencies import build_context
 from lmcache.v1.multiprocess.http_server import app
 import lmcache.lmcache_native as lmcache_native
+import lmcache.v1.multiprocess.http_server as http_server
 
 
 def _make_kv_tensors(
@@ -377,3 +388,53 @@ class TestHealthAndMiscEndpoints:
         resp = client_with_engine.get("/status")
         assert resp.status_code == 200
         assert resp.json()["ok"] is True
+
+
+def test_kafka_event_reporting_registers_subscriber_without_coordinator_url() -> None:
+    """Kafka event reporting does not require HTTP coordinator registration."""
+    coordinator_config = CoordinatorConfig(
+        event_reporting=True,
+        event_sink_config=KafkaCacheEventSinkConfig(
+            bootstrap_servers="broker:9092",
+        ),
+    )
+    mp_config = MPServerConfig()
+    engine = MagicMock()
+    zmq_server = MagicMock()
+    event_bus = MagicMock()
+    sink = MagicMock(spec=CacheEventSink)
+    configs = {
+        "mp": mp_config,
+        "storage_manager": MagicMock(),
+        "observability": ObservabilityConfig(),
+        "http": HTTPFrontendConfig(),
+        "coordinator": coordinator_config,
+    }
+    test_app = FastAPI()
+
+    async def _exercise_lifespan(create_sink: MagicMock) -> None:
+        async with http_server.lifespan(test_app):
+            create_sink.assert_called_once_with(coordinator_config)
+            event_bus.register_subscriber.assert_called_once()
+
+    with (
+        patch.object(http_server, "_configs", configs),
+        patch.object(
+            http_server,
+            "run_cache_server",
+            return_value=(zmq_server, engine),
+        ),
+        patch.object(http_server, "build_context", return_value=MagicMock()),
+        patch.object(http_server, "get_event_bus", return_value=event_bus),
+        patch.object(
+            http_server,
+            "create_cache_event_sink",
+            return_value=sink,
+        ) as create_sink,
+        patch.object(http_server.torch_dev, "is_available", return_value=False),
+    ):
+        asyncio.run(_exercise_lifespan(create_sink))
+
+    event_bus.stop.assert_called_once()
+    zmq_server.close.assert_called_once()
+    engine.close.assert_called_once()
