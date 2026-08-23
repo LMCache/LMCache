@@ -361,6 +361,7 @@ class Hf3fsClient:
                 self.config.mount_point,
                 self.config.ior_entries,
                 for_read=True,
+                io_depth=self.config.io_depth,
                 timeout=self.config.timeout,
                 numa=self.config.numa_id,
             )
@@ -376,6 +377,7 @@ class Hf3fsClient:
                 self.config.mount_point,
                 self.config.ior_entries,
                 for_read=False,
+                io_depth=self.config.io_depth,
                 timeout=self.config.timeout,
                 numa=self.config.numa_id,
             )
