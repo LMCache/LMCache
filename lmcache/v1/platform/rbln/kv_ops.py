@@ -60,7 +60,7 @@ def _host_staging(
     return buf[:n_blocks]
 
 
-def gather_blocks_to_chunk(
+def gather_blocks_to_chunk_hnd(
     paged_layers: Sequence[torch.Tensor],
     block_ids: Sequence[int],
     dst: torch.Tensor,
@@ -105,7 +105,7 @@ def gather_blocks_to_chunk(
     by_block.copy_(staged.permute(2, 1, 0, 4, 3, 5))
 
 
-def scatter_chunk_to_blocks(
+def scatter_chunk_to_blocks_hnd(
     paged_layers: Sequence[torch.Tensor],
     block_ids: Sequence[int],
     src: torch.Tensor,

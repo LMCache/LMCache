@@ -16,8 +16,8 @@ import torch
 
 # First Party
 from lmcache.v1.platform.rbln.kv_ops import (
-    gather_blocks_to_chunk,
-    scatter_chunk_to_blocks,
+    gather_blocks_to_chunk_hnd,
+    scatter_chunk_to_blocks_hnd,
 )
 
 LAYERS, HEADS, BLOCK, HEAD_SIZE, BLOCKS = 4, 2, 8, 4, 8
@@ -41,9 +41,9 @@ def test_parallel_gathers_do_not_share_staging():
         layers = _paged(fill)
         dst = _chunk(2)
         for _ in range(50):
-            gather_blocks_to_chunk(layers, [0, 1], dst)
+            gather_blocks_to_chunk_hnd(layers, [0, 1], dst)
         expected = _chunk(2)
-        gather_blocks_to_chunk(layers, [0, 1], expected)
+        gather_blocks_to_chunk_hnd(layers, [0, 1], expected)
         return torch.equal(dst, expected)
 
     with ThreadPoolExecutor(max_workers=8) as pool:
@@ -57,9 +57,9 @@ def test_parallel_gather_and_scatter_do_not_share_staging():
         layers = _paged(fill)
         dst = _chunk(2)
         ref = _chunk(2)
-        gather_blocks_to_chunk(layers, [0, 1], ref)
+        gather_blocks_to_chunk_hnd(layers, [0, 1], ref)
         for _ in range(50):
-            gather_blocks_to_chunk(layers, [0, 1], dst)
+            gather_blocks_to_chunk_hnd(layers, [0, 1], dst)
             if not torch.equal(dst, ref):
                 return False
         return True
@@ -69,7 +69,7 @@ def test_parallel_gather_and_scatter_do_not_share_staging():
         src = _chunk(2)
         src.fill_(float(fill) + 100.0)
         for _ in range(50):
-            scatter_chunk_to_blocks(layers, [2, 3], src)
+            scatter_chunk_to_blocks_hnd(layers, [2, 3], src)
         return all(
             torch.equal(
                 layer[:, 2:4],

@@ -50,9 +50,9 @@ from lmcache.v1.platform.rbln.kv_layout import (
     validate_mla_layers,
 )
 from lmcache.v1.platform.rbln.kv_ops import (
-    gather_blocks_to_chunk,
+    gather_blocks_to_chunk_hnd,
     gather_blocks_to_chunk_mla,
-    scatter_chunk_to_blocks,
+    scatter_chunk_to_blocks_hnd,
     scatter_chunk_to_blocks_mla,
 )
 import lmcache.lmcache_native as lmcache_native
@@ -62,7 +62,7 @@ logger = init_logger(__name__)
 #: The layout the RBLN-tuned op sequence below is written for: the native
 #: vLLM-RBLN per-layer HND format the vLLM detector reports for an RBLN
 #: attention KV cache.
-_SUPPORTED_FORMAT = lmcache_native.EngineKVFormat.NL_X_TWO_NB_NH_ONE_BS_HS
+_HND_FORMAT = lmcache_native.EngineKVFormat.NL_X_TWO_NB_NH_ONE_BS_HS
 
 #: The MLA layout vLLM-RBLN's MLA attention backend allocates
 #: (``[NB, BS, HS]``). Moved by its own functional op sequence -- see the
@@ -117,11 +117,20 @@ class RblnDeviceOps(DeviceOps):
                 "form is only produced for compiled backends, and RBLN has "
                 "no compiled block-transfer extension in tree."
             )
-        is_mla = int(engine_kv_format) == int(_MLA_FORMAT)
-        if not is_mla and int(engine_kv_format) != int(_SUPPORTED_FORMAT):
+        is_mla = lmcache_native.is_mla(engine_kv_format)
+        if is_mla:
+            # is_mla() admits every MLA layout; only NL_X_NB_BS_HS has an
+            # RBLN op sequence, so reject the others here with a format
+            # error rather than a shape mismatch in validate_mla_layers.
+            if int(engine_kv_format) != int(_MLA_FORMAT):
+                raise ValueError(
+                    "RBLN block transfer supports only the "
+                    f"{_MLA_FORMAT.name} MLA layout; got {engine_kv_format!r}"
+                )
+        elif int(engine_kv_format) != int(_HND_FORMAT):
             raise ValueError(
                 "RBLN block transfer supports only "
-                f"{_SUPPORTED_FORMAT.name} and {_MLA_FORMAT.name}; "
+                f"{_HND_FORMAT.name} and {_MLA_FORMAT.name}; "
                 f"got {engine_kv_format!r}"
             )
 
@@ -166,7 +175,7 @@ class RblnDeviceOps(DeviceOps):
                 if is_mla:
                     gather_blocks_to_chunk_mla(paged_layers, blocks, chunk)
                 else:
-                    gather_blocks_to_chunk(paged_layers, blocks, chunk)
+                    gather_blocks_to_chunk_hnd(paged_layers, blocks, chunk)
             else:
                 # The prefix skip is global across the transfer; translate it
                 # into this chunk's local block offset.
@@ -176,7 +185,7 @@ class RblnDeviceOps(DeviceOps):
                         paged_layers, blocks, chunk, skip_prefix_n_blocks=local_skip
                     )
                 else:
-                    scatter_chunk_to_blocks(
+                    scatter_chunk_to_blocks_hnd(
                         paged_layers, blocks, chunk, skip_prefix_n_blocks=local_skip
                     )
             consumed += len(blocks)

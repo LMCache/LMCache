@@ -77,11 +77,11 @@ Consequences of the format being first-class:
   but that table no longer has an `rbln` entry.
 
 - **The squeeze happens where bytes move.** `RblnDeviceOps.multi_layer_block_kv_transfer`
-  accepts only format 15 and applies `squeeze_singleton_axis` at entry, so
-  `kv_ops.py` keeps indexing a 5-D tensor. `kv_layout.py` therefore exports the
-  strict squeeze plus the `is_rbln_kv_layout` predicate -- no tolerant
-  pass-through variant, since the detected format has already established what
-  the caller holds.
+  accepts only format 15 and the MLA layout (below) and applies
+  `squeeze_singleton_axis` at entry on the HND side, so `kv_ops.py` keeps
+  indexing a 5-D tensor. `kv_layout.py` therefore exports the strict squeeze
+  plus the `is_rbln_kv_layout` predicate -- no tolerant pass-through variant,
+  since the detected format has already established what the caller holds.
 
 - **No transfer kernel handles format 15.** RBLN has no compiled
   block-transfer extension in tree, and the CUDA / SYCL kernels never see an
@@ -93,3 +93,53 @@ The multiprocess path reaches the layout through `compute_kv_layout` / gather /
 scatter, all of which resolve it via `normalize_kv_and_discover_format` and
 never touch a connector -- which is why the format must be recognised by
 detection rather than by a connector.
+
+## The MLA layout
+
+vllm-rbln's MLA attention backend
+(`vllm_rbln/v1/attention/backends/mla`) allocates each layer as
+
+```
+[num_blocks, block_size, head_size]
+```
+
+-- a single latent plane with no K/V split and no head axis. Unlike the 6-D
+HND cache this is not an RBLN-only shape: the vLLM detector already classifies
+it as the existing `EngineKVFormat.NL_X_NB_BS_HS`, so no new format is
+registered and detection needs no RBLN knowledge. Chunks stay in the canonical
+single-plane wire layout `[L, T, HS]`, so -- as with HND -- a chunk stored
+from an RBLN MLA cache is byte-compatible with every other device.
+
+What is RBLN-specific is the **op sequence**, not the layout. The shared torch
+MLA path stages its gather through `torch.empty(device=...)` +
+`index_select(out=...)`, but on RBLN a raw `torch.empty` on the device is a
+lazy SHM tensor: ops against it run on the CPU-fallback path, never on the
+chip. `kv_ops.py` therefore builds the gather *functionally* --
+`index_select` per layer, `stack` across layers, both device-native v2v
+kernels -- and crosses the device boundary with one `copy_` per chunk. The
+scatter mirrors it: one `.to(device)` DMA for the chunk window, then a
+device-native `index_copy_` per layer.
+
+How the two layouts relate inside the backend:
+
+- **No transpose to hoist.** The HND sequence exists to move the head<->token
+  transpose to the host; MLA has no head axis, so its sequence exists purely
+  for the op ordering above. It uses no host staging buffers at all.
+- **Nothing to squeeze, so the rank is pinned instead.**
+  `validate_mla_layers` in `kv_layout.py` mirrors `squeeze_singleton_axis`'s
+  strictness -- the detected format has already established what the caller
+  holds, so any non-3-D tensor is a layout drift and fails loudly at the
+  transfer boundary -- but returns the tensors unchanged.
+- **Per-format addressing, shared bookkeeping.**
+  `RblnDeviceOps.multi_layer_block_kv_transfer` dispatches with
+  `lmcache_native.is_mla(engine_kv_format)`; the chunk/block bookkeeping
+  (blocks-per-chunk split, global prefix skip translated to a per-chunk
+  offset, direction handling) is shared between the layouts. The `kv_ops`
+  names carry the split: `gather_blocks_to_chunk_hnd` / `_mla` and
+  `scatter_chunk_to_blocks_hnd` / `_mla`.
+
+Both layouts require the engine's KV caches to be real device tensors
+(vLLM-RBLN: `VLLM_RBLN_USE_DEVICE_TENSOR=1`). With the default compile-mode
+allocation the per-layer tensors are `meta`, and any transfer -- this
+backend's or the shared path's -- dies at the first host copy with "Cannot
+copy out of meta tensor".
