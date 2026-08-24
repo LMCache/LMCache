@@ -14,15 +14,22 @@ import time
 from lmcache.lmcache_native import Bitmap, PeriodicEventNotifier
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import (
+    CapacitySnapshot,
     MemoryLayoutDesc,
+    ModuleMemoryCapacity,
     ObjectKey,
     PrefetchHandle,
     PrefetchMode,
     PrefetchRequestSpec,
+    Tier,
     TrimPolicy,
 )
 from lmcache.v1.distributed.bitmap_ops import fold_unfold_ranked
-from lmcache.v1.distributed.config import EvictionConfig, StorageManagerConfig
+from lmcache.v1.distributed.config import (
+    EvictionConfig,
+    StorageManagerConfig,
+    get_configured_capacity_bytes,
+)
 from lmcache.v1.distributed.error import L1Error, strerror
 from lmcache.v1.distributed.internal_api import L1MemoryDesc, L2AdapterListener
 from lmcache.v1.distributed.l1_manager import L1Manager
@@ -68,6 +75,9 @@ logger = init_logger(__name__)
 class StorageManager:
     def __init__(self, config: StorageManagerConfig):
         self._l1_manager = L1Manager(config.l1_manager_config)
+        # Retained for the L1 half of the capacity report; L1's configured
+        # size is a pure function of it.
+        self._l1_config = config.l1_manager_config
         self._event_bus = get_event_bus()
 
         # L1 eviction controller
@@ -832,6 +842,52 @@ class StorageManager:
             out_by_type.setdefault(desc.type_name, []).append(usage)
         return out_by_type
 
+    def publish_capacity(self) -> None:
+        """Announce the current capacity topology on the event bus.
+
+        Called after every coordinator registration, so a restarted
+        coordinator relearns this server's capacities even if nothing is
+        ever reconfigured. Later changes announce themselves.
+        """
+        self._publish_capacity_changed()
+
+    def _build_capacities(self) -> list[ModuleMemoryCapacity]:
+        """Assemble one capacity entry per memory compartment.
+
+        Returns:
+            L1 per backing medium, then one entry per L2 adapter.
+        """
+        capacities = [
+            ModuleMemoryCapacity(
+                tier=Tier.L1,
+                backend=backend.value,
+                capacity_bytes=configured,
+                shared=False,
+            )
+            for backend, configured in get_configured_capacity_bytes(
+                self._l1_config
+            ).items()
+        ]
+        for _adapter_id, desc, adapter in self._snapshot_adapters():
+            try:
+                usage = adapter.get_usage()
+            except Exception:
+                logger.exception(
+                    "L2 adapter %s get_usage() failed; omitting from the "
+                    "capacity report",
+                    desc.type_name,
+                )
+                continue
+            capacities.append(
+                ModuleMemoryCapacity(
+                    tier=Tier.L2,
+                    backend=desc.type_name,
+                    capacity_bytes=int(usage.total_capacity_bytes),
+                    shared=bool(desc.config.shared),
+                )
+            )
+        return capacities
+
     def get_l1_usage(self) -> tuple[int, int]:
         """Current occupancy of the L1 memory pool.
 
@@ -902,6 +958,33 @@ class StorageManager:
             if self._unwrap_reconfigurable_l2_adapter(adapter) is not None
         }
 
+    def _publish_capacity_changed(self) -> None:
+        """Announce the current capacity topology on the event bus.
+
+        Lock-free. ``_build_capacities`` guards its own reads
+        (``_snapshot_adapters`` takes ``_adapters_lock``), and ordering is
+        not this class's problem: the cache-event subscriber numbers
+        declarations as it emits them, on the one bus drain thread, so a
+        number cannot come apart from the topology it labels. Callers here
+        are concurrent -- registration publishes from the event loop while a
+        worker may be adding an adapter -- which is exactly why the counter
+        does not live here.
+
+        The event carries the whole topology, not a delta, so a dropped one
+        is repaired by the next rather than leaving the coordinator
+        permanently wrong.
+        """
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.SM_CAPACITY_CHANGED,
+                metadata={
+                    "snapshot": CapacitySnapshot(
+                        modules=tuple(self._build_capacities())
+                    )
+                },
+            )
+        )
+
     def reconfigure_l2_adapter(
         self,
         adapter_index: int,
@@ -921,6 +1004,9 @@ class StorageManager:
         adapter = self._get_reconfigurable_l2_adapter(adapter_index)
         result = adapter.reconfigure(operation, payload)
         result["adapter_index"] = adapter_index
+        # Lock-free: reconfigure did not serialize against adapter
+        # add/delete before, and publishing is no reason to start.
+        self._publish_capacity_changed()
         return result
 
     def add_l2_adapter(self, config: L2AdapterConfigBase) -> int:
@@ -951,6 +1037,7 @@ class StorageManager:
                     )
                 )
             logger.info("Added L2 adapter %d (%s)", adapter_id, descriptor.type_name)
+            self._publish_capacity_changed()
             return adapter_id
 
     def delete_l2_adapter(self, adapter_id: int, timeout: float = 30.0) -> None:
@@ -993,6 +1080,7 @@ class StorageManager:
                 self._adapter_descriptors.pop(adapter_id, None)
             adapter.close()
             logger.info("Deleted L2 adapter %d", adapter_id)
+            self._publish_capacity_changed()
 
     def l2_adapters(self) -> list[tuple[AdapterDescriptor, L2AdapterInterface]]:
         """Return all active L2 adapters paired with descriptors, in

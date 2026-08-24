@@ -235,7 +235,7 @@ server start time) is implemented — see
 stream: `/events` offers it to the gate, which fans admitted
 batches out to every consumer ([ingest.md](ingest.md)) — this
 directory, and the eviction manager's per-salt usage view and LRU (see
-[l2_usage_and_eviction.md](l2_usage_and_eviction.md)).
+[usage_and_eviction.md](usage_and_eviction.md)).
 
 ## Deliberately out of scope (follow-ups)
 - **Stream-level follow-ups** (replay on `gap_detected`, registry-driven
