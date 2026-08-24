@@ -385,6 +385,31 @@ def test_retrieve_keeps_event_until_future_finishes(fake_adapter):
     assert event_ref() is None
 
 
+@pytest.mark.parametrize("lazy_offload", [False, True])
+def test_failed_retrieve_marks_blocks_for_recompute(
+    fake_adapter,
+    lazy_offload: bool,
+) -> None:
+    """A terminal False retrieve never exposes unloaded KV to vLLM."""
+    adapter, _send_mock, _future = fake_adapter
+    adapter.lazy_offload = lazy_offload
+    retrieve_future = MagicMock(name="retrieve_future")
+    retrieve_future.query.return_value = True
+    retrieve_future.result.return_value = False
+    adapter.retrieve_futures["req-1"] = (retrieve_future, [7, 8])
+
+    if lazy_offload:
+        finished_stores, finished_retrieves = adapter.get_finished_with_lazy_offload()
+        assert finished_stores is None
+    else:
+        finished_stores, finished_retrieves = adapter.get_finished(set())
+        assert finished_stores == set()
+
+    assert finished_retrieves == {"req-1"}
+    assert adapter.get_block_ids_with_load_errors() == {7, 8}
+    assert "req-1" not in adapter.retrieve_futures
+
+
 def test_instance_id_is_uuid_derived_63_bit_int(fake_adapter) -> None:
     """instance_id is a 63-bit int, not the PID, and unique per adapter."""
     adapter, _send_mock, _ = fake_adapter
