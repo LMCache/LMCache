@@ -568,13 +568,14 @@ only when every rank's slice is present.
 
 One configuration change is required: the LMCache chunk size must be a
 multiple of ``block_size * decode_context_parallel_size``, not just
-``block_size``. Starting the server with a smaller chunk fails immediately
-with the required value in the message.
+``block_size``. If it is smaller, vLLM fails at connector startup with the
+required multiple in the message (the LMCache server itself starts fine).
 
 .. code-block:: bash
 
     # block_size 1024 x dcp 2 -> chunk size must be a multiple of 2048
-    lmcache server --host localhost --port 6000 --chunk-size 2048
+    lmcache server --host localhost --port 6000 --chunk-size 2048 \
+        --l1-size-gb 20 --eviction-policy LRU
 
     vllm serve moonshotai/Kimi-Linear-48B-A3B-Instruct \
         --tensor-parallel-size 2 \
