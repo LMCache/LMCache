@@ -571,6 +571,11 @@ multiple of ``block_size * decode_context_parallel_size``, not just
 ``block_size``. If it is smaller, vLLM fails at connector startup with the
 required multiple in the message (the LMCache server itself starts fine).
 
+The example model also needs a vLLM build that can run it under DCP:
+Kimi-Linear DCP support landed after v0.27.1 (vLLM commit ``63ac04a61e``,
+PR #50484). On stock v0.27.1 the command below fails at startup with
+``Kimi-K3 MultiHeadLatentAttention does not support context parallelism``.
+
 .. code-block:: bash
 
     # block_size 1024 x dcp 2 -> chunk size must be a multiple of 2048
@@ -578,6 +583,7 @@ required multiple in the message (the LMCache server itself starts fine).
         --l1-size-gb 20 --eviction-policy LRU
 
     vllm serve moonshotai/Kimi-Linear-48B-A3B-Instruct \
+        --trust-remote-code \
         --tensor-parallel-size 2 \
         --decode-context-parallel-size 2 \
         --kv-transfer-config \
