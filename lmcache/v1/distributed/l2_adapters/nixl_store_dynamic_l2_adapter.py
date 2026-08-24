@@ -166,12 +166,21 @@ class DynamicNixlStorageAgent:
     # ---- Per-operation file helpers ----
 
     def _open_flags(self, create: bool) -> int:
-        """Return os.open flags for storage files."""
-        flags = os.O_RDWR
+        """Return os.open flags for storage files.
+
+        Store path uses O_WRONLY so the IBM_SCALE plugin's
+        scale_infer_is_write() sees the correct access mode and fires the
+        GPFS ACCESS_RANGE(isWrite=1) prefetch hint at registerMem time.
+        Load path uses O_RDONLY for the matching read hint.
+        """
         if create:
+            # Store: write-only + create/truncate.
             # O_TRUNC ensures any orphaned file from a previous crash
             # is truncated, avoiding stale trailing bytes on disk.
-            flags |= os.O_CREAT | os.O_TRUNC
+            flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        else:
+            # Load: read-only.
+            flags = os.O_RDONLY
         if self.use_direct_io and hasattr(os, "O_DIRECT"):
             flags |= os.O_DIRECT
         return flags
@@ -316,14 +325,35 @@ class DynamicNixlStorageAgent:
         return os.path.join(self.file_path, _object_key_to_filename(key))
 
     async def _post_non_blocking(self, handle):
-        """Await a nixl transfer until done."""
+        """Await a nixl transfer until done.
+
+        Spin-checks up to 20 times without yielding before falling back to a
+        1 ms cooperative sleep.  io_uring-backed backends (IBM_SCALE, GDS)
+        typically complete in <1 ms and will be "DONE" during the spin,
+        eliminating the 10 ms floor that the old unconditional sleep imposed.
+
+        The sleep is placed *before* check_xfer_state in the back-off loop
+        (not after) so that a transfer completing on the first check exits
+        immediately without paying an extra sleep on the way out.
+        """
         state = self.nixl_agent.transfer(handle)
+        # Fast path: spin-check without yielding for io_uring-backed backends.
+        if state != "DONE" and state != "ERR":
+            for _ in range(20):
+                try:
+                    state = self.nixl_agent.check_xfer_state(handle)
+                except nixlBind.nixlBackendError:
+                    raise
+                if state == "DONE" or state == "ERR":
+                    break
+        # Back-off path: sleep *before* each check so we exit immediately
+        # once "DONE" is returned without paying an extra sleep on the way out.
         while state != "DONE" and state != "ERR":
+            await asyncio.sleep(0.001)
             try:
                 state = self.nixl_agent.check_xfer_state(handle)
             except nixlBind.nixlBackendError:
                 raise
-            await asyncio.sleep(0.01)
         if state == "ERR":
             raise RuntimeError("NIXL transfer failed")
 
@@ -623,18 +653,31 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
         objects: list[MemoryObj],
         task_id: L2TaskId,
     ) -> None:
-        """Store each key-object pair to its own file via dynamic DMA write."""
+        """Store each key-object pair to its own file via concurrent DMA writes.
+
+        All eligible keys in the batch are reserved under the lock first, then
+        their ``dynamic_store_file`` coroutines are launched concurrently via
+        ``asyncio.gather`` so the underlying io_uring ring can pipeline multiple
+        SQE submissions in a single pass -- the same pattern used by the load
+        path (``_execute_load_in_loop``).
+
+        Per-key failure isolation: ``return_exceptions=True`` means one file's
+        failure does not abort the rest of the batch; each key is committed or
+        un-reserved independently based on its own coroutine result.
+        """
         success = True
         stored_keys: list[ObjectKey] = []
         stored_sizes: list[int] = []
         try:
+            # ── Phase 1: reserve capacity and build the coroutine list ────────
+            # Each entry in ``prepared`` carries everything needed to either
+            # commit or roll back after the gather completes.
+            coros = []
+            prepared: list[tuple[ObjectKey, int, MemoryObj]] = []
+
             for key, obj in zip(keys, objects, strict=False):
-                mem_addr = obj.meta.address
                 mem_size = obj.meta.phy_size
 
-                # Reserve the key and capacity under the lock *before*
-                # the DMA write so that concurrent coroutines (other
-                # stores, secondary lookups) see the reservation.
                 with self._lock:
                     if key in self._memory_objects or key in self._inflight_stores:
                         continue
@@ -648,36 +691,49 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
                     self._inflight_stores.add(key)
                     self._total_bytes += mem_size
 
-                try:
-                    mem_indices = self.nixl_agent.get_memory_indices(mem_addr, mem_size)
-                    file_path = self.nixl_agent.get_file_path_for_key(key)
-
-                    await self.nixl_agent.dynamic_store_file(
+                mem_indices = self.nixl_agent.get_memory_indices(
+                    obj.meta.address, mem_size
+                )
+                file_path = self.nixl_agent.get_file_path_for_key(key)
+                coros.append(
+                    self.nixl_agent.dynamic_store_file(
                         mem_indices, file_path, self.nixl_agent.l1_align_bytes
                     )
+                )
+                prepared.append((key, mem_size, obj))
 
-                    store_obj = NixlStoreObj(
-                        page_indices=[],  # not used in dynamic mode
-                        size=mem_size,
-                        layout=MemoryLayoutDesc(
-                            [obj.meta.shape],
-                            [obj.meta.dtype],
-                        ),
-                        pin_count=1,
-                    )
-                    with self._lock:
-                        self._inflight_stores.discard(key)
-                        self._memory_objects[key] = store_obj
-                        store_obj.decrease_pin_count()
-                    stored_keys.append(key)
-                    stored_sizes.append(mem_size)
-                except Exception:
-                    # Un-reserve on failure so capacity accounting
-                    # stays correct.
-                    with self._lock:
-                        self._inflight_stores.discard(key)
-                        self._total_bytes -= mem_size
-                    raise
+            # ── Phase 2: run all DMA writes concurrently ──────────────────────
+            if coros:
+                # return_exceptions=True: one file's failure does not abort the
+                # rest of the batch -- commit each key independently below.
+                results = await asyncio.gather(*coros, return_exceptions=True)
+
+                for (key, mem_size, obj), result in zip(prepared, results, strict=True):
+                    if isinstance(result, BaseException):
+                        logger.error(
+                            "Dynamic NIXL store failed for key %s: %r", key, result
+                        )
+                        # Un-reserve so capacity accounting stays correct.
+                        with self._lock:
+                            self._inflight_stores.discard(key)
+                            self._total_bytes -= mem_size
+                        success = False
+                    else:
+                        store_obj = NixlStoreObj(
+                            page_indices=[],  # not used in dynamic mode
+                            size=mem_size,
+                            layout=MemoryLayoutDesc(
+                                [obj.meta.shape],
+                                [obj.meta.dtype],
+                            ),
+                            pin_count=1,
+                        )
+                        with self._lock:
+                            self._inflight_stores.discard(key)
+                            self._memory_objects[key] = store_obj
+                            store_obj.decrease_pin_count()
+                        stored_keys.append(key)
+                        stored_sizes.append(mem_size)
 
         except Exception:
             logger.exception("Dynamic NIXL store task %d failed", task_id)
@@ -703,60 +759,60 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
         data files found on disk.
         """
         bitmap = Bitmap(len(keys))
-        # Keys populated by secondary lookup need a ``_notify_keys_stored``
-        # so the base class accounting stays in sync with disk state.
         recovered_keys: list[ObjectKey] = []
         recovered_sizes: list[int] = []
+        missing: list[tuple[int, ObjectKey]] = []
+
         with self._lock:
             for i, key in enumerate(keys):
                 obj = self._memory_objects.get(key)
-                if obj is None:
-                    obj = self._secondary_lookup_locked(key)
-                    if obj is not None:
-                        recovered_keys.append(key)
-                        recovered_sizes.append(obj.size)
-                if obj is None:
+                if obj is not None:
+                    bitmap.set(i)
+                    obj.increase_pin_count()
+                else:
+                    missing.append((i, key))
+
+        # Filesystem I/O outside the lock to avoid blocking concurrent store/lookup/load operations
+        stats: dict[tuple[int, ObjectKey], int] = {}
+        for i, key in missing:
+            file_path = self.nixl_agent.get_file_path_for_key(key)
+            try:
+                obj_size = os.stat(file_path).st_size
+            except FileNotFoundError:
+                continue
+            stats[(i, key)] = obj_size
+
+        with self._lock:
+            for (i, key), obj_size in stats.items():
+                obj = self._memory_objects.get(key)
+                if obj is not None:
+                    bitmap.set(i)
+                    obj.increase_pin_count()
                     continue
+                if key in self._inflight_stores:
+                    continue
+                if self._total_bytes + obj_size > self._max_capacity_bytes:
+                    logger.debug(
+                        "Secondary lookup hit for %s but capacity exceeded, skipping",
+                        key,
+                    )
+                    continue
+                obj = NixlStoreObj(
+                    page_indices=[],
+                    size=obj_size,
+                    layout=None,
+                )
+                self._memory_objects[key] = obj
+                self._total_bytes += obj_size
+                recovered_keys.append(key)
+                recovered_sizes.append(obj_size)
                 bitmap.set(i)
                 obj.increase_pin_count()
             self._completed_lookup_tasks[task_id] = bitmap
+
         if recovered_keys:
             self._notify_keys_stored(recovered_keys, recovered_sizes)
         self._signal_lookup_event()
-
-    def _secondary_lookup_locked(self, key: ObjectKey) -> NixlStoreObj | None:
-        """Check if a data file for ``key`` exists on disk; if so, populate
-        ``_memory_objects`` and return the entry. Caller must hold ``_lock``.
-
-        The file size is read via ``os.stat``. Layout is left as ``None`` and
-        will be supplied by the caller's MemoryObj at load time.
-        """
-        # Skip keys with an in-flight store to avoid double-counting
-        # in _total_bytes.
-        if key in self._inflight_stores:
-            return None
-        file_path = self.nixl_agent.get_file_path_for_key(key)
-        try:
-            obj_size = os.stat(file_path).st_size
-        except FileNotFoundError:
-            return None
-
-        # Enforce capacity when populating lazily too.
-        if self._total_bytes + obj_size > self._max_capacity_bytes:
-            logger.debug(
-                "Secondary lookup hit for %s but capacity exceeded, skipping",
-                key,
-            )
-            return None
-
-        obj = NixlStoreObj(
-            page_indices=[],  # not used in dynamic mode
-            size=obj_size,
-            layout=None,
-        )
-        self._memory_objects[key] = obj
-        self._total_bytes += obj_size
-        return obj
 
     async def _execute_load_in_loop(
         self,
@@ -837,7 +893,7 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
 
 # TODO(Jiayi): OBJ backend is not supported in the dynamic adapter yet.
 # Only file-based backends are supported.
-_VALID_DYNAMIC_BACKENDS = ("GDS", "GDS_MT", "POSIX", "HF3FS")
+_VALID_DYNAMIC_BACKENDS = ("GDS", "GDS_MT", "POSIX", "HF3FS", "IBM_SCALE")
 
 
 class DynamicNixlStoreL2AdapterConfig(L2AdapterConfigBase):

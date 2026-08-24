@@ -368,19 +368,35 @@ class NixlStorageAgent:
             raise RuntimeError("NIXL transfer failed")
 
     async def post_non_blocking(self, handle: NixlXferHandle):
-        """Post a Nixl transfer handle and await until the transfer is done."""
+        """Post a Nixl transfer handle and await until the transfer is done.
 
+        Spin-checks up to 20 times without yielding before falling back to a
+        1 ms cooperative sleep.  io_uring-backed backends (IBM_SCALE, GDS)
+        typically complete in <1 ms and will be "DONE" during the spin,
+        eliminating the 10 ms floor that the old unconditional sleep imposed.
+
+        The sleep is placed *before* check_xfer_state in the back-off loop
+        (not after) so that a transfer completing on the first check exits
+        immediately without paying an extra sleep on the way out.
+        """
         state = self.nixl_agent.transfer(handle)
-
+        # Fast path: spin-check without yielding for io_uring-backed backends.
+        if state != "DONE" and state != "ERR":
+            for _ in range(20):
+                try:
+                    state = self.nixl_agent.check_xfer_state(handle)
+                except nixlBind.nixlBackendError:
+                    raise
+                if state == "DONE" or state == "ERR":
+                    break
+        # Back-off path: sleep *before* each check so we exit immediately
+        # once "DONE" is returned without paying an extra sleep on the way out.
         while state != "DONE" and state != "ERR":
+            await asyncio.sleep(0.001)
             try:
                 state = self.nixl_agent.check_xfer_state(handle)
             except nixlBind.nixlBackendError:
                 raise
-
-            # TODO(Jiayi): Tune this for better perf
-            await asyncio.sleep(0.01)
-
         if state == "ERR":
             raise RuntimeError("NIXL transfer failed")
 
@@ -918,8 +934,9 @@ _VALID_NIXL_BACKENDS = (
     "HF3FS",
     "OBJ",
     "AZURE_BLOB",
+    "IBM_SCALE",
 )
-_FILE_BACKENDS = ("GDS", "GDS_MT", "POSIX", "HF3FS")
+_FILE_BACKENDS = ("GDS", "GDS_MT", "POSIX", "HF3FS", "IBM_SCALE")
 
 
 class NixlStoreL2AdapterConfig(L2AdapterConfigBase):
