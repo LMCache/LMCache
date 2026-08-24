@@ -22,14 +22,18 @@ from __future__ import annotations
 
 # Standard
 from typing import ClassVar
+import threading
 
 # Third Party
 import torch
 
 # First Party
 from lmcache import torch_device_type
+from lmcache.logging import init_logger
 from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
 from lmcache.v1.platform.cuda.utils import _cuda
+
+logger = init_logger(__name__)
 
 _NON_IPC_MEMORY_HINT = (
     "CUDA IPC memory handles only support cudaMalloc-style allocations. "
@@ -38,6 +42,19 @@ _NON_IPC_MEMORY_HINT = (
     "and vLLM's sleep mode (CuMemAllocator). Disable those or turn off "
     "isolated IPC for this deployment."
 )
+
+# Refcounted registry of allocations this process has mapped via
+# cudaIpcOpenMemHandle, keyed by handle bytes: handle -> [mapped_ptr, opens].
+# The driver returns ONE mapping per (process, allocation) no matter how
+# often it is opened, and a single cudaIpcCloseMemHandle unmaps it for
+# every user -- so per-layer tensors sharing one allocation must be
+# counted, and the mapping unmapped only when the last wrapper closes.
+# An unclosed mapping pins the exporting process's device memory even
+# after the exporter dies (a dead vLLM worker's KV pool stays resident
+# until the server closes or exits). Keyed by handle bytes alone: a KV
+# allocation is only ever imported on the wrapper's own device.
+_MAPPED_ALLOCATIONS: dict[bytes, list[int]] = {}
+_MAPPINGS_LOCK = threading.Lock()
 
 
 class CudaIPCWrapper(DeviceIPCWrapper):
@@ -215,23 +232,43 @@ class RawCudaIPCWrapper(DeviceIPCWrapper):
         self.stride = tuple(tensor.stride())
         self.storage_offset = 0
 
+        # Opens this wrapper holds on the shared mapping registry;
+        # released by close(). Travels through pickle as 0 (the producer
+        # never opens), so a receiver always starts at 0.
+        self._opens = 0
+
         device_index = tensor.device.index
         self.device_uuid = self._get_device_uuid(device_index)
 
     def to_tensor(self) -> torch.Tensor:
-        """Reconstruct the tensor in this process via raw CUDA IPC."""
+        """Reconstruct the tensor in this process via raw CUDA IPC.
+
+        Opens the allocation's mem handle through the process-wide
+        refcounted registry (one physical mapping per allocation).
+        Every call takes one reference; :meth:`close` releases all
+        references this wrapper holds.
+        """
         # Third Party
         import cupy
 
         device_index = self._get_device_index_from_uuid(self.device_uuid)
 
-        handle = _cuda.runtime.cudaIpcMemHandle_t()
-        handle.reserved = self._ipc_handle_reserved
-        err, ptr = _cuda.runtime.cudaIpcOpenMemHandle(
-            handle, _cuda.runtime.cudaIpcMemLazyEnablePeerAccess
-        )
-        if err != _cuda.runtime.cudaError_t.cudaSuccess:
-            raise RuntimeError(f"cudaIpcOpenMemHandle failed: {err}")
+        with _MAPPINGS_LOCK:
+            entry = _MAPPED_ALLOCATIONS.get(self._ipc_handle_reserved)
+            if entry is None:
+                handle = _cuda.runtime.cudaIpcMemHandle_t()
+                handle.reserved = self._ipc_handle_reserved
+                with torch.cuda.device(device_index):
+                    err, ptr = _cuda.runtime.cudaIpcOpenMemHandle(
+                        handle, _cuda.runtime.cudaIpcMemLazyEnablePeerAccess
+                    )
+                if err != _cuda.runtime.cudaError_t.cudaSuccess:
+                    raise RuntimeError(f"cudaIpcOpenMemHandle failed: {err}")
+                entry = [int(ptr), 0]
+                _MAPPED_ALLOCATIONS[self._ipc_handle_reserved] = entry
+            entry[1] += 1
+            self._opens += 1
+            base_ptr = entry[0]
 
         # Wrap as a flat ``uint8`` CuPy array at the allocation offset,
         # DLPack to torch, then view as the original dtype/shape.
@@ -239,10 +276,45 @@ class RawCudaIPCWrapper(DeviceIPCWrapper):
         # direct CuPy/NumPy equivalent without ml_dtypes).
         with cupy.cuda.Device(device_index):
             mem = cupy.cuda.UnownedMemory(
-                int(ptr), self._alloc_offset + self._nbytes, owner=self
+                base_ptr, self._alloc_offset + self._nbytes, owner=self
             )
             memptr = cupy.cuda.MemoryPointer(mem, self._alloc_offset)
             cp_flat = cupy.ndarray(self._nbytes, dtype=cupy.uint8, memptr=memptr)
 
         raw = torch.from_dlpack(cp_flat)
         return raw.view(self.dtype).reshape(self.shape)
+
+    def close(self) -> None:
+        """Release this wrapper's references on the imported mapping.
+
+        Unmaps the allocation (``cudaIpcCloseMemHandle``) when the last
+        reference across all wrappers is released, returning the
+        exporter's device memory once the exporter itself has freed it.
+        Idempotent; safe on wrappers that never imported. Tensors from
+        :meth:`to_tensor` must no longer be dereferenced after the last
+        close -- their later garbage collection is harmless (the CuPy
+        memory is unowned; no device call is issued on collection).
+
+        Unmap failures are logged, not raised: close runs on teardown
+        paths (the worker reaper) where raising would abort cleanup of
+        the remaining entries.
+        """
+        opens = getattr(self, "_opens", 0)
+        if opens <= 0:
+            return
+        with _MAPPINGS_LOCK:
+            self._opens = 0
+            entry = _MAPPED_ALLOCATIONS.get(self._ipc_handle_reserved)
+            if entry is None:
+                return
+            entry[1] -= opens
+            if entry[1] > 0:
+                return
+            del _MAPPED_ALLOCATIONS[self._ipc_handle_reserved]
+            device_index = self._get_device_index_from_uuid(self.device_uuid)
+            with torch.cuda.device(device_index):
+                (err,) = _cuda.runtime.cudaIpcCloseMemHandle(entry[0])
+            if err != _cuda.runtime.cudaError_t.cudaSuccess:
+                logger.warning(
+                    "cudaIpcCloseMemHandle failed: %s (ptr=0x%x)", err, entry[0]
+                )

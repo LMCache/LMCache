@@ -58,9 +58,20 @@ ordering hazard. The TRT-LLM adapter keeps instantiating
 - Exporter and importer must have different PID *values* (namespace
   isolation is fine); a collision fails at `cudaIpcOpenMemHandle` with
   error 201.
-- Imported mappings are never closed (process lifetime). Repeated opens
-  of one allocation return the same mapping (driver refcounts), so
-  per-layer tensors from a shared segment do not multiply mappings.
+- Imported mappings are refcounted and explicitly closed. The driver
+  returns one mapping per (process, allocation) no matter how often it
+  is opened, and a single `cudaIpcCloseMemHandle` unmaps it for every
+  user — so opens are counted in a process-wide registry and the
+  mapping is unmapped when the last wrapper closes. Closing matters:
+  an open mapping pins the **exporting** process's device memory even
+  after the exporter dies, so an unclosed registration leaks a full KV
+  pool per worker restart (observed as a crash-looping vLLM pod whose
+  replacement could not allocate). `GPUCacheContext.close()` — called
+  by the server's unregister and worker-reaper teardown — closes the
+  wrappers; a registration that fails mid-construction rolls back the
+  mappings it already opened. Until a dead worker is reaped (grace
+  timeout), its pool stays transiently pinned — bounded and
+  self-healing.
 - The exporting process must stay alive while consumers import — same
   exporter-liveness rule as the event backend.
 - Consumer-side reconstruction needs `cupy` (already a hard dependency)
