@@ -1,12 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The native RBLN KV layout and the view that drops its singleton axis.
+"""The native RBLN KV layouts and the views/validators used to address them.
 
-vLLM-RBLN allocates each layer as
+vLLM-RBLN allocates each attention layer as
 ``[2, num_blocks, num_kv_heads, 1, block_size, head_size]`` -- HND with an
 extra singleton axis between heads and block tokens that the RBLN attention
 backend requires. Axis 3 is always 1, so the tensor is byte- and
 stride-identical to a ``[2, NB, NH, BS, HS]`` layout, and squeezing it is a
 free view.
+
+Its MLA attention backend (``vllm_rbln/v1/attention/backends/mla``) instead
+allocates ``[num_blocks, block_size, head_size]`` -- a single latent plane
+with no K/V split and no head axis, which the vLLM detector classifies as
+``EngineKVFormat.NL_X_NB_BS_HS``. There is nothing to squeeze there;
+:func:`validate_mla_layers` only pins the rank so a layout drift fails loudly
+at the transfer boundary instead of mis-addressing bytes.
 
 Detection does not squeeze: the layout is registered as its own
 ``EngineKVFormat.NL_X_TWO_NB_NH_ONE_BS_HS``, so the vLLM detector classifies
@@ -27,6 +34,9 @@ import torch
 
 #: Rank of the native RBLN per-layer KV tensor.
 RBLN_KV_NDIM = 6
+
+#: Rank of the native RBLN per-layer MLA KV tensor (``[NB, BS, HS]``).
+RBLN_MLA_KV_NDIM = 3
 
 #: Axis of the native layout that is always 1 and is squeezed away.
 RBLN_SINGLETON_AXIS = 3
@@ -77,3 +87,32 @@ def squeeze_singleton_axis(
             )
         views.append(tensor.squeeze(RBLN_SINGLETON_AXIS))
     return views
+
+
+def validate_mla_layers(
+    kv_caches: Sequence[torch.Tensor],
+) -> list[torch.Tensor]:
+    """Return MLA per-layer KV tensors after pinning their rank.
+
+    Mirrors :func:`squeeze_singleton_axis`'s strictness for the MLA layout:
+    the caller has already established the detected format is
+    ``NL_X_NB_BS_HS``, so any other rank is a layout drift and fails loudly.
+    Unlike the HND path there is no axis to squeeze -- the tensors are
+    returned unchanged.
+
+    Args:
+        kv_caches: Per-layer tensors shaped ``[NB, BS, HS]``.
+
+    Returns:
+        list[torch.Tensor]: The same tensors, as a list.
+
+    Raises:
+        ValueError: If a tensor is not 3-D.
+    """
+    for tensor in kv_caches:
+        if tensor.ndim != RBLN_MLA_KV_NDIM:
+            raise ValueError(
+                "RBLN MLA KV caches must be [NB, BS, HS]; got "
+                + str(tuple(tensor.shape))
+            )
+    return list(kv_caches)

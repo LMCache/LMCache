@@ -172,3 +172,35 @@ def test_geometry_reads_past_the_singleton() -> None:
     assert get_num_heads(normalized, fmt) == NUM_HEADS
     assert get_block_size(normalized, fmt) == BLOCK_SIZE
     assert get_head_size(normalized, fmt) == HEAD_SIZE
+
+
+# ---------------------------------------------------------------------------
+# MLA layout validation
+# ---------------------------------------------------------------------------
+
+
+def test_validate_mla_layers_passes_tensors_through() -> None:
+    """3-D MLA layers are returned unchanged -- no view, no copy."""
+    # First Party
+    from lmcache.v1.platform.rbln.kv_layout import validate_mla_layers
+
+    layers = [torch.zeros(4, 8, 16) for _ in range(2)]
+    out = validate_mla_layers(layers)
+    assert all(got is expected for got, expected in zip(out, layers, strict=True))
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        (2, 4, 2, 1, 8, 16),  # the 6-D attention layout
+        (4, 8),
+        (4, 8, 16, 2),
+    ],
+)
+def test_validate_mla_layers_rejects_other_ranks(shape: tuple[int, ...]) -> None:
+    """Anything but rank 3 is a layout drift and fails loudly."""
+    # First Party
+    from lmcache.v1.platform.rbln.kv_layout import validate_mla_layers
+
+    with pytest.raises(ValueError, match=r"\[NB, BS, HS\]"):
+        validate_mla_layers([torch.zeros(shape)])
