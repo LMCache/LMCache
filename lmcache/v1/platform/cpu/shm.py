@@ -265,12 +265,7 @@ def _cleanup_shm_segment(
             if cached is not None and cached[2] == shm_name:
                 _CPU_SHM_SEGMENTS.pop(sid, None)
     shm_munmap(addr, nbytes)
-    try:
-        shm_unlink(shm_name)
-    except OSError:
-        # Already unlinked, e.g. by wrap_kv_caches' partial-batch
-        # rollback. The mapping above is ours either way.
-        logger.debug("shm_unlink(%s) failed during cleanup", shm_name, exc_info=True)
+    shm_unlink(shm_name)
 
 
 def migrate_to_shm_and_wrap(tensor: torch.Tensor) -> CpuShmTensorWrapper:
