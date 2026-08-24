@@ -64,10 +64,6 @@ class CpuShmTensorWrapper(DeviceIPCWrapper):
     map the **same** physical pages for the KV cache, mirroring the
     GPU-mode CUDA-IPC zero-copy semantics.
 
-    ``nbytes`` is the ``mmap`` length of the SHM segment (which may
-    exceed the view's own span when views share one storage); ``shape``
-    / ``stride`` / ``storage_offset`` locate the view inside it.
-
     Subclassing :class:`DeviceIPCWrapper` is load-bearing for the same
     reason :class:`RawCudaIPCWrapper` does it: msgspec does not
     support unions of custom ext-encoded types, so all wire-level
@@ -91,8 +87,8 @@ class CpuShmTensorWrapper(DeviceIPCWrapper):
         :func:`~lmcache.v1.platform.resolve_kv_wrapper_factory`.
 
         Delegates to :func:`migrate_to_shm_and_wrap`, which migrates the
-        tensor's backing storage to a POSIX SHM segment so the LMCache
-        mp server can map the same physical pages.
+        tensor's storage to a POSIX SHM segment so the LMCache mp server
+        can map the same physical pages.
 
         Args:
             tensor: A contiguous CPU tensor to migrate and wrap.
