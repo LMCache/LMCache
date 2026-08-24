@@ -6,7 +6,7 @@ on the typed :class:`CoordinatorContext`: placement lookup, fragment
 (blend) lookup, key/token-id listing, and stats — all read-only. The
 directory is written by the cache-event stream, which arrives on
 ``POST /events`` (see :mod:`events_api`). See
-``docs/design/v1/mp_coordinator/key_directory.md``.
+``docs/design/v1/mp_coordinator/views/key_directory.md``.
 """
 
 # Standard

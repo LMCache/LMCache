@@ -7,7 +7,7 @@ ingest layer has already ordered, deduped, and fenced. Eventually
 consistent: lookups are hints to be validated at the owner. L1
 placements die with their reporter's incarnation; L2 placements persist.
 
-See ``docs/design/v1/mp_coordinator/key_directory.md``.
+See ``docs/design/v1/mp_coordinator/views/key_directory.md``.
 """
 
 # Future
