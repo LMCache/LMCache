@@ -5,11 +5,6 @@ Mirrors the GPU-mode CUDA-IPC zero-copy semantics for hosts without an
 accelerator: client and LMCache mp server map the **same** physical
 pages so transfers are pointer-shuffles rather than memcpys.
 
-Migration granularity is one SHM segment per *backing storage*, not
-per tensor: views sharing one storage share one segment and keep their
-``storage_offset`` / stride, so they stay aliased to the same bytes. A
-tensor owning its whole storage is simply the one-view case.
-
 Bound to ``device_type="cpu"`` via
 :attr:`~lmcache.v1.platform.cpu.CpuDeviceSpec.ipc_wrapper_cls`, so the
 multiprocess adapter can dispatch by ``tensor.device.type`` without
