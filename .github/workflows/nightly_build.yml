@@ -2,7 +2,8 @@ name: Build nightly container image of latest code
 
 on:
   schedule:
-    - cron: '30 7 * * *'
+    # 22:00 KST (UTC+9)
+    - cron: '0 13 * * *'
   workflow_dispatch:
 
 permissions:
