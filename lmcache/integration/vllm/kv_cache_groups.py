@@ -22,11 +22,9 @@ logger = init_logger(__name__)
 def _is_attention_spec(spec: Any) -> bool:
     """Return whether the KV cache spec is a vLLM attention spec.
 
-    Every paged-attention spec derives from vLLM's ``AttentionSpec``;
-    recurrent (Mamba) specs do not. Checked by class name (like
-    :func:`_is_sliding_window_spec`) so this module stays importable without
-    vLLM. ``UniformTypeKVCacheSpecs`` derives from ``KVCacheSpec`` directly,
-    so unwrap it first; its layers are same-typed, so one leaf suffices.
+    Checked by class name so this module stays importable without vLLM.
+    ``UniformTypeKVCacheSpecs`` is unwrapped first (same-typed layers, one
+    leaf suffices); it does not derive from ``AttentionSpec`` itself.
     """
     inner = getattr(spec, "kv_cache_specs", None)
     if isinstance(inner, dict) and inner:
@@ -37,11 +35,9 @@ def _is_attention_spec(spec: Any) -> bool:
 def get_tokens_per_block(kv_cache_spec: Any, dcp_size: int) -> int:
     """Global tokens covered by one block id of ``kv_cache_spec``.
 
-    Under DCP a rank holds only a strided ``1/dcp_size`` slice of each
-    attention block, so one block id spans ``block_size * dcp_size`` global
-    tokens -- the rule vLLM applies in ``resolve_kv_cache_block_sizes``.
-    Recurrent (Mamba) state is replicated per rank, not sharded, so it
-    stays at ``block_size``.
+    Attention blocks span ``block_size * dcp_size`` tokens under DCP
+    (vLLM's ``resolve_kv_cache_block_sizes`` rule); recurrent state is
+    replicated, not sharded, and stays at ``block_size``.
     """
     block_size = kv_cache_spec.block_size
     if dcp_size <= 1:
@@ -327,8 +323,7 @@ def create_engine_group_infos_from_vllm(
             # The spec's block_size is the logical tokens covered by one of
             # this group's paged chunks (block IDs); the physical slot count
             # per chunk is discovered later from the registered tensors.
-            # Under DCP the two diverge for attention groups (see
-            # get_tokens_per_block).
+            # Under DCP the two diverge (see get_tokens_per_block).
             group_tokens_per_block[engine_group_id] = get_tokens_per_block(
                 group.kv_cache_spec, dcp_size
             )

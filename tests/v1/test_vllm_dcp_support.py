@@ -1,20 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Unit tests for decode-context-parallel (DCP) support in the MP connector.
-
-Under DCP vLLM shards the KV cache across ranks along the token axis, so a
-chunk has ``dcp_size`` distinct shards instead of one replicated MLA copy, and
-one attention block id spans ``block_size * dcp_size`` global tokens. These
-tests pin the three public contracts that encode that:
-
-* ``ParallelStrategy`` -- shard count, this rank's shard index, writer election.
-* ``compute_extra_count`` -- how many readers share one stored object.
-* ``get_tokens_per_block`` -- the block-size scaling, attention only.
-
-Cross-rank hit folding is covered by
-``tests/v1/distributed/test_bitmap_ops.py::test_ranked_chunk_present_only_if_all_ranks_present``,
-which already asserts a chunk counts as a hit only when every rank's shard is
-present. No GPU or live server needed.
-"""
+"""DCP support in the MP connector: pins ``ParallelStrategy`` (shard count,
+shard index, writer election), ``compute_extra_count`` (readers per object),
+and ``get_tokens_per_block`` (attention-only block scaling). No GPU needed."""
 
 # Standard
 from dataclasses import dataclass, field
@@ -29,11 +16,8 @@ from lmcache.integration.vllm.kv_cache_groups import get_tokens_per_block
 from lmcache.integration.vllm.vllm_multi_process_adapter import ParallelStrategy
 from lmcache.v1.multiprocess.modules.lookup import compute_extra_count
 
-# ``lmcache_mp_connector`` imports vLLM at module scope, but the unit-test
-# environment deliberately runs without vLLM (see
-# .buildkite/k3_harness/setup-lmcache-only-env.sh), so those tests import it
-# lazily and skip when it is absent. Everything else here uses test doubles
-# that mirror the vLLM class names, as test_vllm_kv_cache_groups.py does.
+# ``lmcache_mp_connector`` imports vLLM, but the k3 unit env runs without it
+# (.buildkite/k3_harness/setup-lmcache-only-env.sh) -- import lazily and skip.
 requires_vllm = pytest.mark.skipif(
     importlib.util.find_spec("vllm") is None, reason="requires vLLM"
 )
@@ -149,11 +133,8 @@ def test_non_mla_unaffected_by_dcp_field():
     [("non-mla", 1), ("mla-tp8", 8), ("mla-tp4-pp2", 4), ("mla-tp8-dcp2", 4)],
 )
 def test_extra_count_is_exact_when_reader_count_is_sent(label: str, readers: int):
-    """With num_kv_readers the answer is exact regardless of topology.
-
-    tp_size/world_size are deliberately passed as values that would mislead
-    the legacy heuristic, to prove the exact path wins.
-    """
+    """tp_size/world_size would mislead the legacy heuristic; the exact
+    path must win."""
     assert compute_extra_count(8, 2, readers) == readers - 1, label
 
 
@@ -422,14 +403,9 @@ def test_validate_allows_multiple_servers_without_dcp():
 
 @pytest.mark.parametrize("tp_size,dcp_size", [(2, 2), (8, 2), (8, 4), (8, 8)])
 def test_dcp_rank_matches_vllm_group_construction(tp_size: int, dcp_size: int):
-    """``dcp_rank == tp_rank % dcp_size`` must match how vLLM builds DCP groups.
-
-    vLLM reshapes the rank grid into contiguous runs of ``dcp_size``
-    (``all_ranks.transpose(-1, -2).reshape(-1, dcp_size)``), so with pcp == 1 a
-    worker's rank-in-group is its offset within a consecutive block of TP
-    ranks. This reproduces that construction and asserts our derivation agrees;
-    it fails if upstream ever switches to a strided grouping.
-    """
+    """Reproduces vLLM's contiguous-run group construction and asserts
+    ``dcp_rank == tp_rank % dcp_size`` agrees; fails if upstream goes
+    strided."""
     # Third Party
     import torch
 
@@ -453,10 +429,8 @@ def test_dcp_rank_matches_vllm_group_construction(tp_size: int, dcp_size: int):
 
 
 def test_uniform_type_wrapper_still_scales_under_dcp():
-    """vLLM wraps same-type layers in UniformTypeKVCacheSpecs, which derives
-    from KVCacheSpec rather than AttentionSpec. Without unwrapping, a wrapped
-    attention group skips DCP scaling and every object is sized dcp times too
-    large -- silently, since the arithmetic stays self-consistent."""
+    """UniformTypeKVCacheSpecs derives from KVCacheSpec, not AttentionSpec;
+    without unwrapping, wrapped attention groups skip DCP scaling."""
     inner = _attention_spec(1024)
     wrapped = UniformTypeKVCacheSpecs(
         block_size=1024, kv_cache_specs={"layer.0": inner, "layer.1": inner}
@@ -481,11 +455,8 @@ def test_uniform_type_wrapper_of_mamba_is_not_scaled():
 def test_every_server_elects_one_writer_per_shard(
     tp_size: int, dcp_size: int, n_servers: int
 ):
-    """Each server must independently cover every shard exactly once.
-
-    Ranks map to servers in contiguous blocks and lookup takes the minimum hit
-    count across servers, so a server missing any shard reports no hits at all.
-    """
+    """Lookup takes the min across servers, so each server must cover every
+    shard exactly once."""
     ranks_per_server = tp_size // n_servers
     for server in range(n_servers):
         block = range(server * ranks_per_server, (server + 1) * ranks_per_server)
@@ -508,14 +479,9 @@ def test_every_server_elects_one_writer_per_shard(
 def test_num_kv_readers_never_under_reserves_any_shard(
     tp_size: int, dcp_size: int, n_servers: int
 ):
-    """The single reader count must cover the *busiest* shard.
-
-    ``kv_tp_size / dcp_size`` need not divide evenly -- vLLM accepts TP=6 with
-    DCP=2, and across two servers each server's three ranks leave shard 0 with
-    two readers and shard 1 with one. Under-reserving unpins an object while a
-    reader is still copying, so the count is derived here by simulating which
-    ranks actually read each shard rather than by repeating the formula.
-    """
+    """The count must cover the busiest shard: kv_tp/dcp can split unevenly
+    (e.g. TP=6, DCP=2, 2 servers), and under-reserving unpins mid-copy.
+    Derived by simulating readers, not by repeating the formula."""
     ranks_per_server = tp_size // n_servers
     declared = _strategy(
         tp_size=tp_size, dcp_size=dcp_size, worker_id=0, n_servers=n_servers

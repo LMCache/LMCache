@@ -433,13 +433,8 @@ def test_aux_pools_with_distinct_block_sizes_get_distinct_groups():
 
 
 def test_conversion_scales_attention_tokens_per_block_under_dcp():
-    """Under DCP one attention block id spans block_size * dcp global tokens.
-
-    ``EngineGroupInfo.tokens_per_block`` is what the server divides by the
-    discovered physical slot count to size each rank's memory object, so an
-    unscaled value here makes every object dcp-times too large and the gather
-    over-read into the next chunk.
-    """
+    """tokens_per_block sizes each rank's memory object; unscaled it would
+    be dcp times too large."""
     spec = create_engine_group_infos_from_vllm(
         MockKVCacheConfig(
             kv_cache_groups=[

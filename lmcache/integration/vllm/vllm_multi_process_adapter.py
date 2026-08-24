@@ -287,18 +287,16 @@ class ParallelStrategy:
     """Number of LMCache servers backing this deployment"""
 
     dcp_size: int = 1
-    """Decode-context-parallel size: vLLM shards the KV cache across
-    ``dcp_size`` ranks along the token axis, so one chunk has ``dcp_size``
-    distinct shards rather than a single replicated copy."""
+    """Decode-context-parallel size: each chunk's KV is split into
+    ``dcp_size`` token shards instead of one replicated copy."""
 
     @property
     def kv_world_size(self) -> int:
         """Number of pieces a single token chunk's KV cache is split into
         on the LMCache server storage."""
         if self.mla_only:
-            # MLA replicates the latent KV across TP, so a chunk is split
-            # only by the axes holding genuinely different bytes: pipeline
-            # stage (layers) and DCP token shard.
+            # MLA replicates KV across TP; distinct bytes exist only per
+            # pipeline stage and per DCP token shard.
             pp_stages = self.vllm_world_size // self.tp_size
             return pp_stages * self.dcp_size
         return self.vllm_world_size // self.n_servers
@@ -309,32 +307,23 @@ class ParallelStrategy:
         that the current worker is responsible for,
         in ``[0, kv_world_size)``."""
         if self.mla_only:
-            # Row-major over (pipeline stage, token shard), matching
-            # kv_world_size.
+            # Row-major over (pipeline stage, token shard).
             pp_stage = self.vllm_worker_id // self.tp_size
             return pp_stage * self.dcp_size + self._get_dcp_rank()
         return self.vllm_worker_id % (self.vllm_world_size // self.n_servers)
 
     def _get_dcp_rank(self) -> int:
-        """Index of the token shard this worker holds, in ``[0, dcp_size)``.
-
-        vLLM builds DCP groups as contiguous runs of ``dcp_size`` ranks
-        within each TP group (``all_ranks.transpose(-1, -2).reshape(-1,
-        dcp_size)``), so a worker's shard index is ``tp_rank % dcp_size``.
-        """
+        """Token shard index in ``[0, dcp_size)``: vLLM builds DCP groups as
+        contiguous runs within each TP group, so ``tp_rank % dcp_size``."""
         return (self.vllm_worker_id % self.tp_size) % self.dcp_size
 
     @property
     def num_kv_readers(self) -> int:
         """Number of workers that retrieve one stored object.
 
-        Head-sharded models: every rank reads its own object -> 1. MLA: an
-        object is shared by the TP ranks of one pipeline stage on one server
-        that hold the same token shard -> ``kv_tp_size / dcp_size``. Rounded
-        up because the split can be uneven and one count must cover the
-        largest shard group: under-reserving unpins an object mid-copy,
-        over-reserving only holds it until the read lock's TTL (see
-        ``compute_extra_count``).
+        Non-MLA: 1. MLA: the same-shard TP ranks of one stage on one
+        server, ``ceil(kv_tp_size / dcp_size)`` -- rounded up so an uneven
+        split never under-reserves (see ``compute_extra_count``).
         """
         if not self.mla_only:
             return 1
@@ -351,11 +340,9 @@ class ParallelStrategy:
         if not self.mla_only:
             return True
         if self.dcp_size > 1:
-            # Each dcp_rank holds a different token shard, so elect one
-            # writer per shard within every LMCache server and every
-            # pipeline stage (each must hold a full shard set). Both are
-            # contiguous rank runs, so electing the first dcp_size ranks of
-            # the smaller run covers every shard exactly once.
+            # One writer per token shard within every server and every
+            # pipeline stage; both are contiguous rank runs, so the first
+            # dcp_size ranks of the smaller run cover each shard once.
             ranks_per_server = self.vllm_world_size // self.n_servers
             block = min(ranks_per_server, self.tp_size)
             return (self.vllm_worker_id % block) < self.dcp_size

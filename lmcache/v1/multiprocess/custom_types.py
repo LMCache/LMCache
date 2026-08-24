@@ -61,9 +61,7 @@ class IPCCacheServerKey:
     cache_salt: str = ""
 
     # Number of workers that retrieve this key's object; the server reserves
-    # that many read locks (see ``compute_extra_count``). 0 means an older
-    # client did not send it and the server falls back to its legacy
-    # heuristic. Defaulted and excluded from identity for wire compatibility.
+    # that many read locks (see ``compute_extra_count``). 0 = legacy client.
     num_kv_readers: int = field(default=0, compare=False)
 
     # Duplicated from ObjectKey — cannot import ObjectKey here due to

@@ -37,37 +37,22 @@ def compute_extra_count(
     world_size: int,
     num_kv_readers: int = 0,
 ) -> int:
-    """Compute extra read-lock count for multi-reader objects.
+    """Extra read locks to reserve beyond the first: ``readers - 1``.
 
-    Lookup reserves ``1 + extra_count`` read locks on each object and every
-    worker's retrieve releases exactly one, so this must equal
-    ``readers - 1``. Under-counting unpins an object while readers are still
-    copying; over-counting only holds it until the read lock's TTL.
+    Each worker's retrieve releases one lock, so the count must be exact:
+    under-counting unpins an object mid-copy; over-counting only holds it
+    to the TTL. ``num_kv_readers`` is exact and not derivable here --
+    ``(tp_size=4, world_size=2)`` is both "PP=2, no DCP" (4 readers) and
+    "PP=1, DCP=2" (2 readers).
 
-    ``num_kv_readers`` carries the reader count directly and is exact. It is
-    required because the count is not recoverable from the other two
-    arguments: ``(tp_size=4, world_size=2)`` is produced both by "PP=2,
-    no DCP" (4 readers) and "PP=1, DCP=2" (2 readers).
+    Legacy fallback when ``num_kv_readers`` is 0 (old client, so no DCP):
 
-    Legacy fallback, used when ``num_kv_readers`` is 0 (client too old to
-    send it, so DCP is not in play either):
-
-    - Non-MLA: each TP worker owns a distinct shard, so one reader -> 0.
-    - MLA: TP does not split the KV cache, so all ``tp_size`` workers share
-      one object -> ``tp_size - 1``. Detected by ``tp > world_size``, since
-      vLLM passes ``world_size`` already divided by ``tp_size``.
-    - Old vLLM (<= 0.8.5) sends no ``tp_size`` (defaults to 1); falling back
-      to ``world_size`` yields 0, which is safe but may under-lock for MLA.
-
-    Args:
-        tp_size: Tensor-parallel size from the client.
-        world_size: World size from the cache key.
-        num_kv_readers: Exact number of workers retrieving each object;
-            ``0`` means the client did not send it.
-
-    Returns:
-        Number of extra readers beyond the first (0 when each object has a
-        single reader).
+    - Non-MLA: one reader per object -> 0.
+    - MLA: all ``tp_size`` workers share one object -> ``tp_size - 1``,
+      detected by ``tp > world_size`` (vLLM sends ``world_size`` already
+      divided by ``tp_size``).
+    - vLLM <= 0.8.5 sends no ``tp_size``; the ``world_size`` fallback
+      yields 0 (safe, may under-lock MLA).
     """
     if num_kv_readers > 0:
         return num_kv_readers - 1

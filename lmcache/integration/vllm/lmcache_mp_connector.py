@@ -185,15 +185,13 @@ def validate_mamba_step_alignment(vllm_config: VllmConfig) -> None:
 def validate_dcp_support(vllm_config: VllmConfig, n_servers: int) -> None:
     """Reject decode-context-parallel topologies this connector cannot serve.
 
-    On the rejected topologies the shard-to-rank mapping this connector
-    relies on does not hold, and running anyway would silently store wrong
-    or incomplete KV -- so they fail with an error at startup instead.
-    ``dcp_size > tensor_parallel_size`` is not re-checked because vLLM's
-    ``ParallelConfig`` already rejects it.
+    These would silently store wrong or incomplete KV, so fail at startup
+    instead. ``dcp > tp`` is not re-checked; vLLM's ``ParallelConfig``
+    already rejects it.
 
     Raises:
-        ValueError: On an unsupported DCP topology. Configurations with
-            ``decode_context_parallel_size == 1`` always pass.
+        ValueError: On an unsupported DCP topology (``dcp_size == 1``
+            always passes).
     """
     pc = vllm_config.parallel_config
     dcp_size = getattr(pc, "decode_context_parallel_size", 1)
@@ -211,8 +209,7 @@ def validate_dcp_support(vllm_config: VllmConfig, n_servers: int) -> None:
     if interleave != 1:
         raise ValueError(
             "LMCacheMPConnector requires cp_kv_cache_interleave_size == 1 "
-            f"under DCP (got {interleave}); other values change the "
-            "token-to-rank mapping."
+            f"under DCP (got {interleave})."
         )
 
     ranks_per_server = pc.world_size // n_servers
