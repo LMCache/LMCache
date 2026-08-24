@@ -735,11 +735,21 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             )
             return
 
-        lock_state = session.claim_failed_retrieve_release(instance_id, key)
+        lock_state = session.prepare_failed_retrieve_release(key)
         if lock_state is None:
             return
-        hit_chunks, locked_gids = lock_state
-        obj_keys = resolve_prefetched_obj_keys(self._ctx, key, hit_chunks, locked_gids)
+        hit_chunks, locked_gids, group_windows, lookup_generation = lock_state
+        obj_keys = resolve_prefetched_obj_keys(
+            self._ctx,
+            key,
+            hit_chunks,
+            locked_gids,
+            group_windows=group_windows,
+        )
+        if not session.claim_failed_retrieve_release(
+            instance_id, key, lookup_generation
+        ):
+            return
         if obj_keys:
             # One failed RETRIEVE owns one reader share per key.  In
             # particular, do not use the scheduler's MLA extra_count here:
@@ -1313,7 +1323,17 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 "Rejecting RETRIEVE for unregistered GPU instance ID %d",
                 instance_id,
             )
-            self._release_failed_retrieve_locks(key, instance_id)
+            try:
+                self._release_failed_retrieve_locks(key, instance_id)
+            except Exception:
+                # A cleanup failure must never suppress the terminal response:
+                # the client otherwise waits forever because blocking-handler
+                # exceptions are only logged by the MQ server.
+                logger.exception(
+                    "Failed to release RETRIEVE locks for unregistered "
+                    "GPU instance ID %d",
+                    instance_id,
+                )
             return b"", False
         cache_context = entry.cache_context
         model_name = entry.model_name

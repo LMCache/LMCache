@@ -77,6 +77,7 @@ def resolve_prefetched_obj_keys(
     key: IPCCacheServerKey,
     hit_chunks: int,
     locked_gids: tuple,
+    group_windows: tuple[int, ...] | None = None,
 ) -> list[ObjectKey]:
     """Resolve the subset of a request range that lookup actually locked.
 
@@ -92,10 +93,15 @@ def resolve_prefetched_obj_keys(
 
     start_chunk = key.start // ctx.chunk_size
     end_chunk = start_chunk + len(chunk_hashes)
-    attn_desc = ctx.layout_desc_registry.find_attn_desc(key.model_name, key.world_size)
+    if group_windows is None:
+        group_windows = tuple(
+            ctx.layout_desc_registry.find_attn_desc(
+                key.model_name, key.world_size
+            ).num_chunks_in_sw
+        )
 
     obj_keys: list[ObjectKey] = []
-    for group_idx, window in enumerate(attn_desc.num_chunks_in_sw):
+    for group_idx, window in enumerate(group_windows):
         if locked_gids and group_idx not in locked_gids:
             continue
         if hit_chunks < 0:
@@ -319,15 +325,14 @@ class LookupModule:
                 )
             )
 
-        session = self._ctx.session_manager.get_or_create(key.request_id)
-        session.set_tokens(list(key.token_ids))
-        session.lookup_ipc_key = key
-
         # Lay keys out chunk-major across object groups (see
         # _chunk_major_object_keys); pass the windows to the prefetch policy.
         attn_desc = self._ctx.layout_desc_registry.find_attn_desc(
             model_name, world_size
         )
+        session = self._ctx.session_manager.get_or_create(key.request_id)
+        session.set_tokens(list(key.token_ids))
+        session.begin_lookup(key, tuple(attn_desc.num_chunks_in_sw))
         obj_keys = self._chunk_major_object_keys(key, chunk_hashes)
 
         group_layout_descs = self._ctx.layout_desc_registry.find_group_layout_descs(
@@ -454,8 +459,10 @@ class LookupModule:
         # read-locked (see ``unfold``: full-attention groups lock the whole
         # hit prefix, sliding-window groups only its in-window suffix).
         session = self._ctx.session_manager.get_or_create(job.request_id)
-        session.prefetch_hit_chunks = found_count
-        session.prefetch_locked_gids = tuple(range(job.attn_desc.num_object_groups))
+        session.record_prefetch_result(
+            found_count,
+            tuple(range(job.attn_desc.num_object_groups)),
+        )
 
         self._ctx.event_bus.publish(
             Event(

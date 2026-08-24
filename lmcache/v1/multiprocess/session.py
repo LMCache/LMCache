@@ -43,8 +43,10 @@ class Session:
     lookup_ipc_key: Optional[IPCCacheServerKey] = None
     prefetch_hit_chunks: int = -1
     prefetch_locked_gids: tuple = ()
+    prefetch_group_windows: tuple[int, ...] = ()
     extras: dict[str, Any] = field(default_factory=dict)
-    _failed_retrieve_releases: set[tuple[int, int, int, int]] = field(
+    _lookup_generation: int = field(default=0, repr=False)
+    _failed_retrieve_releases: set[tuple[int, int, int, int, int]] = field(
         default_factory=set, repr=False
     )
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
@@ -138,24 +140,35 @@ class Session:
             self.chunk_hashes.append(h)
             self.num_chunks_processed += 1
 
-    def claim_failed_retrieve_release(
+    def begin_lookup(
         self,
-        instance_id: int,
         key: IPCCacheServerKey,
-    ) -> tuple[int, tuple] | None:
-        """Claim one failed worker's lookup-lock release.
+        group_windows: tuple[int, ...],
+    ) -> None:
+        """Record a new lookup and reset its per-lookup release state."""
+        with self._lock:
+            self.lookup_ipc_key = key
+            self.prefetch_hit_chunks = -1
+            self.prefetch_locked_gids = ()
+            self.prefetch_group_windows = group_windows
+            self._lookup_generation += 1
+            self._failed_retrieve_releases.clear()
 
-        A scheduler lookup acquires read locks for every KV worker (or one
-        reader count per TP worker for MLA), while RETRIEVE responses are
-        per worker instance.  When a worker has lost its GPU registration,
-        only that instance's share may be released.  This claim makes a
-        duplicate failed RETRIEVE idempotent and returns the lookup lock
-        model captured for the request.
+    def record_prefetch_result(
+        self,
+        hit_chunks: int,
+        locked_gids: tuple[int, ...],
+    ) -> None:
+        """Record the lock set acquired by the current lookup."""
+        with self._lock:
+            self.prefetch_hit_chunks = hit_chunks
+            self.prefetch_locked_gids = locked_gids
 
-        ``None`` is also returned when the session cannot prove ownership of
-        the requested range.  In that case it is safer to leave the lock to
-        its TTL than to decrement a concurrent request's anonymous L1 count.
-        """
+    def prepare_failed_retrieve_release(
+        self,
+        key: IPCCacheServerKey,
+    ) -> tuple[int, tuple[int, ...], tuple[int, ...], int] | None:
+        """Return a stable snapshot for a failed worker's lock release."""
         if key.worker_id is None:
             return None
 
@@ -176,11 +189,62 @@ class Session:
             if not same_lookup:
                 return None
 
-            owner = (instance_id, key.worker_id, key.start, key.end)
+            return (
+                hit_chunks,
+                self.prefetch_locked_gids,
+                self.prefetch_group_windows,
+                self._lookup_generation,
+            )
+
+    def claim_failed_retrieve_release(
+        self,
+        instance_id: int,
+        key: IPCCacheServerKey,
+        lookup_generation: int,
+    ) -> bool:
+        """Atomically claim one failed worker's prepared lock release.
+
+        A scheduler lookup acquires read locks for every KV worker (or one
+        reader count per TP worker for MLA), while RETRIEVE responses are
+        per worker instance.  When a worker has lost its GPU registration,
+        only that instance's share may be released.  Claiming after key
+        resolution makes duplicate failed RETRIEVEs idempotent without
+        consuming the claim when resolution itself fails.
+
+        ``False`` is also returned when the session cannot prove ownership of
+        the requested range.  In that case it is safer to leave the lock to
+        its TTL than to decrement a concurrent request's anonymous L1 count.
+        """
+        if key.worker_id is None:
+            return False
+
+        with self._lock:
+            lookup_key = self.lookup_ipc_key
+            if lookup_key is None or lookup_generation != self._lookup_generation:
+                return False
+
+            same_lookup = (
+                key.model_name == lookup_key.model_name
+                and key.world_size == lookup_key.world_size
+                and key.token_ids == lookup_key.token_ids
+                and key.cache_salt == lookup_key.cache_salt
+                and key.start >= lookup_key.start
+                and key.end <= lookup_key.end
+            )
+            if not same_lookup:
+                return False
+
+            owner = (
+                lookup_generation,
+                instance_id,
+                key.worker_id,
+                key.start,
+                key.end,
+            )
             if owner in self._failed_retrieve_releases:
-                return None
+                return False
             self._failed_retrieve_releases.add(owner)
-            return hit_chunks, self.prefetch_locked_gids
+            return True
 
 
 class SessionManager:

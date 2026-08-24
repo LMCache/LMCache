@@ -11,7 +11,6 @@ import pytest
 
 # First Party
 from lmcache.v1.distributed.api import (
-    AttnWindowDesc,
     ObjectKey,
     ipc_key_to_object_keys,
 )
@@ -131,13 +130,14 @@ def test_tp_failed_worker_releases_only_its_reader_share_once(mla: bool) -> None
         world_size=world_size, worker_id=None, request_id=request_id
     )
     session = sessions.get_or_create(request_id)
-    session.lookup_ipc_key = lookup_key
-    session.prefetch_hit_chunks = 2
-    session.prefetch_locked_gids = (0,)
+    session.begin_lookup(lookup_key, (-1,))
+    session.record_prefetch_result(2, (0,))
 
     storage = _CountingStorageManager()
     layout_registry = MagicMock()
-    layout_registry.find_attn_desc.return_value = AttnWindowDesc(num_chunks_in_sw=[-1])
+    layout_registry.find_attn_desc.side_effect = AssertionError(
+        "failed-retrieve cleanup must use the lookup session's layout"
+    )
     ctx = SimpleNamespace(
         chunk_size=hasher.chunk_size,
         token_hasher=hasher,
@@ -202,3 +202,29 @@ def test_tp_failed_worker_releases_only_its_reader_share_once(mla: bool) -> None
     )
     storage.finish_read_prefetched(all_rank_keys, extra_count=lookup_extra_count)
     assert all(storage.readers[key] == 0 for key in all_rank_keys)
+    layout_registry.find_attn_desc.assert_not_called()
+
+
+def test_cleanup_exception_does_not_suppress_terminal_false() -> None:
+    """A resolution failure must not consume the claim or strand the caller."""
+    module = LMCacheDrivenTransferModule.__new__(LMCacheDrivenTransferModule)
+    module.get_and_touch_context_entry = MagicMock(  # type: ignore[method-assign]
+        return_value=None
+    )
+    module._ctx = MagicMock()
+    session = MagicMock()
+    session.prepare_failed_retrieve_release.return_value = (2, (0,), (-1,), 7)
+    module._ctx.session_manager.get.return_value = session
+    module._ctx.token_hasher.compute_chunk_hashes.side_effect = RuntimeError(
+        "cleanup failed"
+    )
+
+    result = module.retrieve(
+        _cache_key(world_size=1, worker_id=0, request_id="request"),
+        42,
+        [[0]],
+        b"worker-producer-event",
+    )
+
+    assert result == (b"", False)
+    session.claim_failed_retrieve_release.assert_not_called()
