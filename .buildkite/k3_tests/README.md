@@ -59,14 +59,15 @@ plus a few suite-specific surfaces:
 
 | Scope | Surface |
 |------|---------|
-| Shared runtime surface | `lmcache/**`, `csrc/**`, `tests/**`, `requirements/**`, build files such as `pyproject.toml` / `setup.py` / `CMakeLists.txt`, shared CI files like `.buildkite/k3_harness/**`, and `.buildkite/k3_tests/common_scripts/` |
+| Shared runtime surface | `lmcache/**`, `csrc/**`, `requirements/**`, build files such as `pyproject.toml` / `setup.py` / `CMakeLists.txt`, shared CI files like `.buildkite/k3_harness/**`, and `.buildkite/k3_tests/common_scripts/` |
+| unit | Shared runtime surface + `tests/**` except `tests/v1/platform/musa/**`, `tests/v1/platform/rbln/**`, and `tests/v1/platform/xpu/**` |
 | integration | Shared runtime surface + `.buildkite/k3_tests/integration/**` |
 | correctness | Shared runtime surface + `.buildkite/k3_tests/correctness/**` |
 | multiprocess | Shared runtime surface + `benchmarks/long_doc_qa/**`, `.buildkite/k3_tests/multiprocess/**` |
 | comprehensive | Shared runtime surface + `benchmarks/**`, `examples/disagg_prefill*`, `.buildkite/k3_tests/comprehensive/**` |
 | blend | Shared runtime surface + `.buildkite/k3_tests/blend/**`, `.buildkite/k3_harness/setup-blend-env.sh` |
 | sglang | Shared runtime surface + `lmcache/integration/sglang/**`, `.buildkite/k3_tests/sglang/**`, `.buildkite/k3_harness/setup-sglang-env.sh` |
-| xpu | Shared runtime surface + `.buildkite/k3_tests/xpu/**` |
+| xpu | Shared runtime surface + `tests/**` except `tests/platform/**` and `tests/v1/platform/**`, plus `tests/v1/platform/xpu/**` and `.buildkite/k3_tests/xpu/**` |
 
 
 Detection:

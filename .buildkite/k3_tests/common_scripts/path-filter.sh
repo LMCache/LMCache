@@ -53,12 +53,22 @@ _path_filter_is_runtime_surface() {
     case "$1" in
         lmcache/*) return 0 ;;
         csrc/*) return 0 ;;
-        tests/*) return 0 ;;
         requirements/*) return 0 ;;
         pyproject.toml|pyproject_cli.toml|setup.py|hatch_build.py|conftest.py) return 0 ;;
         CMakeLists.txt|MANIFEST.in|Cargo.toml|rust-toolchain.toml) return 0 ;;
         .buildkite/k3_harness/*) return 0 ;;
         .buildkite/k3_tests/common_scripts/*) return 0 ;;
+    esac
+    return 1
+}
+
+_path_filter_is_unit_surface() {
+    case "$1" in
+        .buildkite/k3_tests/unit/*) return 0 ;;
+        tests/v1/platform/musa/*|tests/v1/platform/rbln/*|tests/v1/platform/xpu/*)
+            return 1
+            ;;
+        tests/*) return 0 ;;
     esac
     return 1
 }
@@ -116,6 +126,9 @@ _path_filter_is_sglang_surface() {
 
 _path_filter_is_xpu_surface() {
     case "$1" in
+        tests/v1/platform/xpu/*) return 0 ;;
+        tests/platform/*|tests/v1/platform/*) return 1 ;;
+        tests/*) return 0 ;;
         .buildkite/k3_tests/xpu/*) return 0 ;;
     esac
     return 1
@@ -141,7 +154,8 @@ _path_filter_file_affects_pipeline() {
 
     case "$pipeline_kind" in
         unit)
-            _path_filter_is_runtime_surface "$changed_file"
+            _path_filter_is_runtime_surface "$changed_file" ||
+                _path_filter_is_unit_surface "$changed_file"
             ;;
         integration)
             _path_filter_is_runtime_surface "$changed_file" ||
