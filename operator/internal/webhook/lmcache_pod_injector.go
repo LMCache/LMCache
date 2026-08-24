@@ -19,6 +19,7 @@ package webhook
 import (
 	"context"
 	"net/http"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -73,7 +74,8 @@ var lmCacheKeys = injectionKeys{
 
 // LMCachePodInjector is the mutating admission handler that wires an opted-in
 // vLLM pod to an LMCacheEngine so the user no longer has to hand-write the
-// --kv-transfer-config flag, hostIPC, and PYTHONHASHSEED. It is gated by the
+// --kv-transfer-config flag, the /dev/shm sharing for CUDA IPC, and
+// PYTHONHASHSEED. It is gated by the
 // engine's connection ConfigMap: it mutates a pod only when the pod's
 // lmcache.ai/lmcache-engine annotation names an engine whose <engine>-connection
 // ConfigMap exists. It fails open (failurePolicy: Ignore) and is idempotent.
@@ -94,7 +96,7 @@ type LMCachePodInjector struct {
 }
 
 // Handle implements admission.Handler. It applies the LMCache connection
-// mutations (hostIPC, --kv-transfer-config, PYTHONHASHSEED) to an opted-in pod
+// mutations (/dev/shm sharing, --kv-transfer-config, PYTHONHASHSEED) to an opted-in pod
 // whose named LMCacheEngine connection ConfigMap exists, optionally followed by
 // code-payload staging when the engine's injection.payloadImage is set, then
 // returns a JSON patch. It short-circuits to an unchanged Allowed response for
@@ -110,11 +112,13 @@ func (p *LMCachePodInjector) Handle(ctx context.Context, req admission.Request) 
 	}
 
 	// Read the engine CR for its optional injection defaults (payload staging +
-	// target-container default). Fail open: a missing CR or absent injection
-	// sub-spec just means connection-only injection — the connection ConfigMap
-	// (read below) remains the real gate, so existing behavior is unchanged.
+	// target-container default) and its IPC-sharing mode (spec.hostIPC). Fail
+	// open: a missing CR or absent injection sub-spec just means connection-only
+	// injection — the connection ConfigMap (read below) remains the real gate,
+	// so existing behavior is unchanged.
 	engine := &lmcachev1alpha1.LMCacheEngine{}
 	var targetDefault *string
+	engineHostIPC := false
 	if err := p.Client.Get(ctx, types.NamespacedName{Name: engineName, Namespace: namespace}, engine); err != nil {
 		if !apierrors.IsNotFound(err) {
 			return admission.Errored(http.StatusInternalServerError, err)
@@ -126,12 +130,17 @@ func (p *LMCachePodInjector) Handle(ctx context.Context, req admission.Request) 
 		if engine.Spec.Injection != nil {
 			targetDefault = engine.Spec.Injection.TargetContainer
 		}
+		engineHostIPC = derefBool(engine.Spec.HostIPC)
 	}
 
 	// Read the connection ConfigMap (existence gate), resolve the target
 	// container, and apply the command-override gate (shared with CacheBlend).
+	pdRole := ""
+	if engine.Spec.PD != nil {
+		pdRole = strings.TrimSpace(pod.Annotations[PDRoleAnnotationKey])
+	}
 	kvTransferConfigJSON, containerIdx, resp, ok := prepareInjection(
-		ctx, p.Client, req, pod, lmCacheKeys, engineName, namespace, targetDefault)
+		ctx, p.Client, req, pod, lmCacheKeys, engineName, namespace, targetDefault, pdRole)
 	if !ok {
 		return resp
 	}
@@ -142,8 +151,9 @@ func (p *LMCachePodInjector) Handle(ctx context.Context, req admission.Request) 
 
 	// --- Connection wiring (always applied) ---
 
-	// M0: pod hostIPC for CUDA IPC with the node-local engine.
-	pod.Spec.HostIPC = true
+	// M0: share the host's /dev/shm for CUDA IPC with the node-local engine,
+	// mirroring the engine's spec.hostIPC mode (hostPath mount by default).
+	applyIPCSharing(pod, target, engineHostIPC)
 
 	// Args: inject --kv-transfer-config unless the user already supplied one.
 	kvForArgs := kvTransferConfigJSON
@@ -158,6 +168,12 @@ func (p *LMCachePodInjector) Handle(ctx context.Context, req admission.Request) 
 	// --- Code-payload staging (only when injection.payloadImage is set) ---
 	if engine.Spec.Injection != nil {
 		stagePayload(ctx, pod, target, engine.Spec.Injection)
+	}
+
+	// PD disaggregation: inject NIXL side-channel env vars when the engine is
+	// configured for PD mode.
+	if engine.Spec.PD != nil {
+		target.Env = BuildPDEnv(target.Env, engine.Spec.PD)
 	}
 
 	log.Info("Injected LMCache connection", "engine", engineName, "container", target.Name)

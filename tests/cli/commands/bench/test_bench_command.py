@@ -24,10 +24,18 @@ from lmcache.cli.commands.bench.engine_bench.stats import (
     FinalStats,
     RequestResult,
 )
+from lmcache.cli.commands.bench.engine_bench.workloads.base import MetricSection
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _make_workload(sections: list[MetricSection] = []) -> MagicMock:  # noqa: B006
+    """A stand-in workload contributing *sections* to the report."""
+    workload = MagicMock()
+    workload.extra_metric_sections.return_value = list(sections)
+    return workload
 
 
 def _make_args(**overrides) -> argparse.Namespace:
@@ -417,7 +425,7 @@ class TestBenchCommandEmitMetrics:
         old_stdout = sys.stdout
         sys.stdout = buf = io.StringIO()
         try:
-            _emit_final_metrics(cmd, config, final, args)
+            _emit_final_metrics(cmd, config, final, args, _make_workload())
         finally:
             sys.stdout = old_stdout
 
@@ -437,7 +445,7 @@ class TestBenchCommandEmitMetrics:
         old_stdout = sys.stdout
         sys.stdout = buf = io.StringIO()
         try:
-            _emit_final_metrics(cmd, config, final, args)
+            _emit_final_metrics(cmd, config, final, args, _make_workload())
         finally:
             sys.stdout = old_stdout
 
@@ -447,6 +455,32 @@ class TestBenchCommandEmitMetrics:
         assert "decode" in data["metrics"]
         assert data["metrics"]["config"]["model"] == "test-model"
         assert data["metrics"]["results"]["successful"] == 10
+
+    def test_emit_final_metrics_renders_workload_sections(self) -> None:
+        """A workload's sections reach the report alongside the common ones."""
+        cmd = BenchCommand()
+        args = _make_args(quiet=False, format="json")
+        workload = _make_workload(
+            [
+                MetricSection(
+                    key="quality",
+                    label="Answer Quality",
+                    entries=[("f1_mean", "Mean F1", 0.61)],
+                )
+            ]
+        )
+
+        old_stdout = sys.stdout
+        sys.stdout = buf = io.StringIO()
+        try:
+            _emit_final_metrics(
+                cmd, _make_config(), _make_final_stats(), args, workload
+            )
+        finally:
+            sys.stdout = old_stdout
+
+        data = json.loads(buf.getvalue())
+        assert data["metrics"]["quality"]["f1_mean"] == 0.61
 
 
 # ---------------------------------------------------------------------------

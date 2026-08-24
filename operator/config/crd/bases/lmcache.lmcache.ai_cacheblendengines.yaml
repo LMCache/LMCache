@@ -979,6 +979,15 @@ spec:
                     format: int32
                     minimum: 0
                     type: integer
+                  partialBucket:
+                    description: |-
+                      partialBucket pads PARTIAL row counts to a multiple of this bucket size,
+                      surfaced to the connector as kv_connector_extra_config["cb.partial_bucket"].
+                      Unset (the default) omits the key, leaving the padding disabled. Needed
+                      on fp8-MoE models (see DESIGN.md).
+                    format: int32
+                    minimum: 1
+                    type: integer
                   recompRatio:
                     default: 0.15
                     description: |-
@@ -1237,6 +1246,22 @@ spec:
                 - nvidia
                 - amd
                 type: string
+              hostIPC:
+                default: false
+                description: |-
+                  hostIPC runs the pod in the host's IPC namespace. Cross-pod CUDA IPC does
+                  not require it on NVIDIA stacks: the operator instead mounts the host's
+                  /dev/shm into the engine pod (hostPath), which is the requirement —
+                  PyTorch's CUDA IPC handles reference a shared-memory ref-counter file in
+                  /dev/shm that both processes must open by name. It therefore defaults to
+                  false. Set it to true only where the hostPath /dev/shm mount is
+                  unavailable (e.g. blocked by an admission policy) or where the GPU stack
+                  still needs a shared IPC namespace; the AMD (ROCm) HIP IPC path is
+                  unverified without hostIPC, so gpuVendor "amd" deployments should set it
+                  to true. When true, the /dev/shm hostPath mount is omitted (the shared
+                  namespace already exposes the host's /dev/shm). The injection webhook
+                  mirrors this setting on opted-in vLLM pods. Default: false.
+                type: boolean
               image:
                 description: |-
                   image defines the container image to use for the blend_v3 engine. This
@@ -1460,6 +1485,58 @@ spec:
                     - host
                     - port
                     type: object
+                  serde:
+                    description: |-
+                      serde configures a transform applied to KV bytes on their way to
+                      and from the L2 adapter (whichever of resp or raw is configured).
+                      Exactly one serde type must be set.
+                    properties:
+                      aesgcm:
+                        description: |-
+                          aesgcm enables at-rest encryption of KV bytes in the L2 tier,
+                          keyed per cache_salt. L1 (host RAM) and L0 (GPU) remain plaintext.
+                        properties:
+                          aesBits:
+                            default: 128
+                            description: aesBits selects the AES key size (128 or
+                              256).
+                            enum:
+                            - 128
+                            - 256
+                            format: int32
+                            type: integer
+                          keyProvider:
+                            default: hkdf
+                            description: |-
+                              keyProvider selects how per-cache_salt keys are obtained from the
+                              master key. Only "hkdf" (HKDF-SHA256 derivation) is implemented.
+                            enum:
+                            - hkdf
+                            type: string
+                          masterKeySecretRef:
+                            description: |-
+                              masterKeySecretRef names a user-created Secret in the engine's
+                              namespace holding the master key under the "master" data key. The
+                              Secret is mounted directly into the engine pods; the reference is
+                              same-namespace only, so creating an engine CR cannot be used to
+                              read Secrets from other namespaces. The operator never generates
+                              key material.
+                            properties:
+                              name:
+                                default: ""
+                                description: |-
+                                  Name of the referent.
+                                  This field is effectively required, but due to backwards compatibility is
+                                  allowed to be empty. Instances of this type with an empty value here are
+                                  almost certainly wrong.
+                                  More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                type: string
+                            type: object
+                            x-kubernetes-map-type: atomic
+                        required:
+                        - masterKeySecretRef
+                        type: object
+                    type: object
                   storePolicy:
                     default: default
                     description: |-
@@ -1508,11 +1585,7 @@ spec:
                   claiming any via the nvidia.com/gpu device plugin; on many clusters
                   NVIDIA_VISIBLE_DEVICES=all already grants that visibility without it, so it
                   defaults to false. Set it to true only on clusters where the engine cannot
-                  otherwise see the GPUs. For gpuVendor "amd" this is effectively required:
-                  there is no NVIDIA-style RuntimeClass device injection, so privileged mode
-                  is the only way the engine reaches /dev/kfd and /dev/dri. Clusters using Pod
-                  Security Standards must allow the privileged profile for this namespace when
-                  it is enabled. Default: false.
+                  otherwise see the GPUs.
                 type: boolean
               prometheus:
                 description: prometheus defines Prometheus monitoring configuration.

@@ -28,6 +28,20 @@ def _is_sliding_window_spec(spec: Any) -> bool:
     return any(cls.__name__ == "SlidingWindowSpec" for cls in type(spec).__mro__)
 
 
+def _is_cachable_mamba_spec(spec: Any) -> bool:
+    """Return whether the spec is a snapshotting Mamba/linear-attention spec.
+
+    Align mode snapshots only the last block; all mode snapshots every block
+    boundary. Either way a restore consumes only the last matched block's
+    page, so both behave like a cross-chunk sliding window of one block.
+    Checked by class name (like :func:`_is_sliding_window_spec`) so this
+    module stays importable without vLLM.
+    """
+    return any(cls.__name__ == "MambaSpec" for cls in type(spec).__mro__) and getattr(
+        spec, "mamba_cache_mode", "none"
+    ) in ("align", "all")
+
+
 def _resolve_per_layer_sw_sizes(
     vllm_groups: Sequence[Any],
     layer_to_idx: Mapping[str, int],
@@ -44,8 +58,10 @@ def _resolve_per_layer_sw_sizes(
 
     Returns:
         A list of length ``num_layers`` mapping each registered tensor index
-        to its sliding window size in tokens, or ``-1`` for
-        non-sliding-window layers.
+        to its cross-chunk window size in tokens: the sliding window for
+        sliding-window attention, the engine-side block size for align-mode
+        Mamba/linear layers (a one-block window), or ``-1`` for full-attention
+        layers.
     """
     per_layer_sw_size = [-1] * num_layers
     for group in vllm_groups:
@@ -59,7 +75,109 @@ def _resolve_per_layer_sw_sizes(
             layer_spec = per_layer_specs[name] if per_layer_specs else spec
             if _is_sliding_window_spec(layer_spec):
                 per_layer_sw_size[layer_to_idx[name]] = layer_spec.sliding_window
+            elif _is_cachable_mamba_spec(layer_spec):
+                per_layer_sw_size[layer_to_idx[name]] = layer_spec.block_size
     return per_layer_sw_size
+
+
+#: Reserved layer-name prefix for CacheBlend fused-aux page pools:
+#: ``cb.aux_pool.<tokens_per_block>[.<label>]`` — the first suffix part is
+#: the logical block size; the optional label distinguishes multiple pools
+#: sharing one block size (they then share an engine group).
+CB_AUX_POOL_LAYER_PREFIX = "cb.aux_pool."
+
+
+def cb_aux_pool_entries(kv_caches) -> "list[tuple[str, int]]":
+    """CacheBlend fused-aux pool entries among the registered tensors.
+
+    Presence-gated: any layer name starting with
+    :data:`CB_AUX_POOL_LAYER_PREFIX` is a connector-owned aux page pool
+    served by a synthetic engine group (one group per block size).
+
+    Args:
+        kv_caches: Registered tensors keyed by layer name.
+
+    Returns:
+        ``(layer_name, tokens_per_block)`` per aux pool, in registration
+        order; empty for models without one.
+
+    Raises:
+        ValueError: If a marker name's block-size suffix does not parse.
+    """
+    entries: list[tuple[str, int]] = []
+    for name in kv_caches:
+        if not name.startswith(CB_AUX_POOL_LAYER_PREFIX):
+            continue
+        suffix = name[len(CB_AUX_POOL_LAYER_PREFIX) :].split(".", 1)[0]
+        try:
+            tokens_per_block = int(suffix)
+        except ValueError as exc:
+            raise ValueError(
+                f"aux pool layer name {name!r}: block-size suffix "
+                f"{suffix!r} is not an integer"
+            ) from exc
+        if tokens_per_block <= 0:
+            raise ValueError(
+                f"aux pool layer name {name!r}: tokens_per_block must be "
+                f"positive, got {tokens_per_block}"
+            )
+        entries.append((name, tokens_per_block))
+    return entries
+
+
+def _resolve_per_layer_recurrent(
+    vllm_groups: Sequence[Any],
+    layer_to_idx: Mapping[str, int],
+    num_layers: int,
+) -> list[bool]:
+    """Resolve whether each registered KV tensor holds recurrent state pages.
+
+    Args:
+        vllm_groups: vLLM ``KVCacheGroupSpec`` instances.
+        layer_to_idx: Layer name to registered tensor index mapping.
+        num_layers: Number of registered KV tensors.
+
+    Returns:
+        A list of length ``num_layers``: ``True`` for Mamba/linear-attention
+        layers in a snapshotting cache mode (see :func:`_is_cachable_mamba_spec`),
+        ``False`` for attention layers.
+    """
+    per_layer_recurrent = [False] * num_layers
+    for group in vllm_groups:
+        spec = getattr(group, "kv_cache_spec", None)
+        if spec is None:
+            continue
+        per_layer_specs = getattr(spec, "kv_cache_specs", None)
+        for name in group.layer_names:
+            layer_spec = per_layer_specs[name] if per_layer_specs else spec
+            if _is_cachable_mamba_spec(layer_spec):
+                per_layer_recurrent[layer_to_idx[name]] = True
+    return per_layer_recurrent
+
+
+def _merge_layer_recurrent(per_layer_recurrent: list[bool], indices: list[int]) -> bool:
+    """Merge the per-layer recurrent-state flags of one LMCache group.
+
+    Args:
+        per_layer_recurrent: Recurrent-state flag per registered tensor index.
+        indices: Registered tensor indices of the group's layers.
+
+    Returns:
+        The group's common flag.
+
+    Raises:
+        ValueError: If the group mixes recurrent and attention layers (vLLM
+            groups layers by KV cache spec, so a mix indicates inconsistent
+            metadata).
+    """
+    flags = {per_layer_recurrent[idx] for idx in indices}
+    if len(flags) != 1:
+        raise ValueError(
+            f"Layers with indices {indices} mix recurrent-state and attention "
+            "layers in one group. This should not happen because vLLM only "
+            "groups layers with the same KV cache spec."
+        )
+    return flags.pop()
 
 
 def _merge_layer_sw_sizes(per_layer_sw_size: list[int], indices: list[int]) -> int:
@@ -142,6 +260,11 @@ def create_engine_group_infos_from_vllm(
     layer_index_groups = [
         [layer_to_idx[name] for name in group.layer_names] for group in vllm_groups
     ]
+
+    # CacheBlend fused-aux (presence-gated): the pool joins detection as
+    # its own group so its rank-3 layout is classified independently.
+    aux_entries = cb_aux_pool_entries(kv_caches)
+    layer_index_groups += [[layer_to_idx[name]] for name, _ in aux_entries]
     normalized_kv_caches, engine_kv_formats = normalize_and_discover_per_layer_formats(
         per_layer_discoverable_kv_caches,
         layer_index_groups,
@@ -157,6 +280,7 @@ def create_engine_group_infos_from_vllm(
     per_layer_group_idx: list[int] | None = None
     group_tokens_per_block: dict[int, int] = {}
     per_layer_sw_size = [-1] * num_layers
+    per_layer_recurrent = [False] * num_layers
     if vllm_groups:
         per_layer_group_idx = [EXCLUDED_ENGINE_GROUP] * num_layers
         for engine_group_id, group in enumerate(vllm_groups):
@@ -169,6 +293,31 @@ def create_engine_group_infos_from_vllm(
         per_layer_sw_size = _resolve_per_layer_sw_sizes(
             vllm_groups, layer_to_idx, num_layers
         )
+        per_layer_recurrent = _resolve_per_layer_recurrent(
+            vllm_groups, layer_to_idx, num_layers
+        )
+
+    # Aux pools form synthetic engine groups after the vLLM groups (an
+    # unassigned marker layer would fall to EXCLUDED_ENGINE_GROUP and never
+    # store), bucketed by tokens_per_block: pools sharing a block size share
+    # one engine group — and thereby one kernel group when their tensor
+    # identities also match. Tags are 1-based per bucket.
+    aux_group_tags: dict[int, int] = {}
+    if aux_entries:
+        if per_layer_group_idx is None:
+            # Non-hybrid engine config: all real layers share group 0.
+            per_layer_group_idx = [0] * num_layers
+        next_group_id = len(vllm_groups) if vllm_groups else 1
+        group_by_tpb: dict[int, int] = {}
+        for name, tokens_per_block in aux_entries:
+            group_id = group_by_tpb.get(tokens_per_block)
+            if group_id is None:
+                group_id = next_group_id
+                next_group_id += 1
+                group_by_tpb[tokens_per_block] = group_id
+                group_tokens_per_block[group_id] = tokens_per_block
+                aux_group_tags[group_id] = len(group_by_tpb)
+            per_layer_group_idx[layer_to_idx[name]] = group_id
 
     # Within one vLLM engine group, layers can have different hidden dimensions
     # (e.g. a different head count), which require different GPU copy kernels.
@@ -183,6 +332,10 @@ def create_engine_group_infos_from_vllm(
             layer_indices=tuple(indices),
             tokens_per_block=group_tokens_per_block.get(identity.engine_group_idx, 0),
             sw_size_tokens=_merge_layer_sw_sizes(per_layer_sw_size, indices),
+            # Connector-private pools bucket by tag under
+            # --separate-object-groups, after the regular groups.
+            extra_object_group_tag=aux_group_tags.get(identity.engine_group_idx, 0),
+            recurrent_state=_merge_layer_recurrent(per_layer_recurrent, indices),
         )
         for identity, indices in group_layers_by_identity(
             normalized_kv_caches,

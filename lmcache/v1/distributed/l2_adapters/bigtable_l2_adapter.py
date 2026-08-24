@@ -27,8 +27,8 @@ import google.api_core.exceptions as google_exceptions
 import google.auth
 
 # First Party
+from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
-from lmcache.native_storage_ops import Bitmap
 from lmcache.utils import TTLCache
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.internal_api import L2StoreResult
@@ -461,7 +461,7 @@ class BigtableL2Adapter(L2AdapterInterface):
     def submit_lookup_and_lock_task(
         self,
         keys: list[ObjectKey],
-        layout_desc: MemoryLayoutDesc,
+        group_layout_descs: dict[int, MemoryLayoutDesc],
     ) -> L2TaskId:
         """See base class."""
         with self._lock:

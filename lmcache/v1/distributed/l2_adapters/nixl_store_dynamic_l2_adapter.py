@@ -38,8 +38,8 @@ from nixl._api import (
 )
 
 # First Party
+from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
-from lmcache.native_storage_ops import Bitmap
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.internal_api import L1MemoryDesc, L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
@@ -78,6 +78,19 @@ def _object_key_to_filename(key: ObjectKey) -> str:
     )
 
 
+def _object_key_to_relpath(key: ObjectKey) -> str:
+    """Relative path ``<hex[:2]>/<hex[2:4]>/filename`` — a 2-level hash-prefix
+    subdir tree (GDS-style) keyed on the chunk-hash hex.
+
+    ``hex`` is ``chunk_hash.hex()``, the same value embedded in the filename, so
+    the two subdir levels are the first four hex chars of the hash and match the
+    filename's hash prefix (e.g. ``834e...`` -> ``83/4e/``). Spreads files
+    across up to 256*256 subdirectories instead of one flat directory.
+    """
+    h = key.chunk_hash.hex()
+    return os.path.join(h[:2], h[2:4], _object_key_to_filename(key))
+
+
 # ---------------------------------------------------------------
 # Dynamic Nixl storage agent
 # ---------------------------------------------------------------
@@ -107,6 +120,15 @@ class DynamicNixlStorageAgent:
         self.use_direct_io = (
             str(backend_params.get("use_direct_io", "false")).lower() == "true"
         )
+        # Opt-in: spread per-key files across a fixed 2-level subdir tree
+        # instead of one flat directory. Default false = the original flat
+        # layout (unchanged). See _object_key_to_relpath / get_file_path_for_key.
+        self.shard_dirs = (
+            str(backend_params.get("shard_dirs", "false")).lower() == "true"
+        )
+        # Subdirs already created (shard_dirs only), to skip redundant makedirs
+        # on the store hot path. Bounded by the fanout (<= 256*256 entries).
+        self._created_subdirs: set[str] = set()
 
         self.agent_name = "DynNixlAgent_" + str(uuid.uuid4())
         nixl_conf = NixlAgentConfig(backends=[])
@@ -193,6 +215,13 @@ class DynamicNixlStorageAgent:
         """
         file_size = len(mem_indices) * page_size
         tmp_path = f"{file_path}.tmp.{uuid.uuid4().hex}"
+        # With sharding, create the subdir once per bucket (cached). Flat layout
+        # needs nothing here — the base dir is created at init.
+        if self.shard_dirs:
+            subdir = os.path.dirname(tmp_path)
+            if subdir not in self._created_subdirs:
+                os.makedirs(subdir, exist_ok=True)
+                self._created_subdirs.add(subdir)
         fd = os.open(tmp_path, self._open_flags(create=True))
         try:
             reg_descs, xfer_handler = self._register_single_file(
@@ -279,7 +308,11 @@ class DynamicNixlStorageAgent:
         return [(raw_addr // self.l1_align_bytes + i) for i in range(num_pages)]
 
     def get_file_path_for_key(self, key: ObjectKey) -> str:
-        """Return the full file path for a given ObjectKey."""
+        """Return the on-disk path for ``key``: sharded when ``shard_dirs`` is
+        set (see ``_object_key_to_relpath``), otherwise the flat layout.
+        """
+        if self.shard_dirs:
+            return os.path.join(self.file_path, _object_key_to_relpath(key))
         return os.path.join(self.file_path, _object_key_to_filename(key))
 
     async def _post_non_blocking(self, handle):
@@ -300,23 +333,21 @@ class DynamicNixlStorageAgent:
         These can be left behind if a store crashed between opening the
         temp file and the atomic rename. Called at shutdown as a best-effort
         GC; orphans don't affect correctness because they're never matched
-        by the deterministic ``ObjectKey → filename`` mapping.
+        by the deterministic ``ObjectKey → filename`` mapping. Walks
+        subdirectories so it also reaches temp files under the sharded layout.
         """
-        try:
-            entries = os.listdir(self.file_path)
-        except FileNotFoundError:
-            return
-        for name in entries:
-            # Temp suffix format: "<final_name>.tmp.<hex>"
-            if ".tmp." in name:
-                try:
-                    os.unlink(os.path.join(self.file_path, name))
-                except FileNotFoundError:
-                    pass
-                except OSError as e:
-                    logger.warning(
-                        "Failed to remove leftover temp file %s: %s", name, e
-                    )
+        for root, _dirs, files in os.walk(self.file_path):
+            for name in files:
+                # Temp suffix format: "<final_name>.tmp.<hex>"
+                if ".tmp." in name:
+                    try:
+                        os.unlink(os.path.join(root, name))
+                    except FileNotFoundError:
+                        pass
+                    except OSError as e:
+                        logger.warning(
+                            "Failed to remove leftover temp file %s: %s", name, e
+                        )
 
     def close(self):
         """Release L1 memory handlers."""
@@ -422,7 +453,7 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
     #####################
 
     def submit_lookup_and_lock_task(
-        self, keys: list[ObjectKey], layout_desc: MemoryLayoutDesc
+        self, keys: list[ObjectKey], group_layout_descs: dict[int, MemoryLayoutDesc]
     ) -> L2TaskId:
         with self._lock:
             task_id = self._get_next_task_id()
@@ -612,6 +643,7 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
                             "Storage capacity exceeded, skipping store for key %s",
                             key,
                         )
+                        success = False
                         break
                     self._inflight_stores.add(key)
                     self._total_bytes += mem_size

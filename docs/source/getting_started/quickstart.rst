@@ -54,14 +54,16 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
 
             Start vLLM with the MP connector in a separate terminal. Point the
             connector at the server above via ``lmcache.mp.host`` /
-            ``lmcache.mp.port`` in ``kv_connector_extra_config`` -- the host
-            **must** carry a ZMQ transport prefix such as ``tcp://``:
+            ``lmcache.mp.port`` in ``kv_connector_extra_config``. The host may
+            include a ZMQ transport prefix (e.g. ``tcp://``); a bare
+            ``host``/``host:port`` is also accepted and is normalized to
+            ``tcp://`` automatically:
 
             .. code-block:: bash
 
                vllm serve Qwen/Qwen3-8B \
                    --port 8000 --kv-transfer-config \
-                   '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.host": "tcp://localhost", "lmcache.mp.port": 5555}}'
+                   '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.host": "localhost", "lmcache.mp.port": 5555}}'
 
             .. note::
                **Where does** ``LMCacheMPConnector`` **resolve to?** This depends on your vLLM version:
@@ -465,8 +467,9 @@ pass ``lmcache.mp.host`` / ``lmcache.mp.port`` in
 KV tensors with vLLM over POSIX shared memory. Start ``lmcache server``
 normally, then set ``lmcache.mp.mp_transfer_mode=lmcache_driven`` on the vLLM
 side to enable the zero-copy SHM handle path (the default ``auto`` routing
-maps non-CUDA devices to ``engine_driven``, which uses the worker-side
-gather/scatter copy path instead).
+maps non-CUDA devices to ``engine_driven``, a worker-side gather/scatter
+copy path that the server only loads when started with
+``--supported-transfer-mode engine_driven`` or ``auto``).
 
 **Docker** -- see :doc:`../production/docker_deployment`.
 

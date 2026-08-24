@@ -33,6 +33,7 @@ from lmcache.v1.multiprocess.transfer_context.base import (
 )
 from lmcache.v1.multiprocess.transfer_context.pickle import EngineDrivenContextPickle
 from lmcache.v1.multiprocess.transfer_context.shm import EngineDrivenContextShm
+import lmcache.lmcache_native as lmcache_native
 
 if TYPE_CHECKING:
     # First Party
@@ -82,7 +83,7 @@ def _make_kv_caches(
     num_heads: int = 2,
     head_size: int = 8,
 ) -> dict[str, torch.Tensor]:
-    """Build per-layer NHD KV tensors for non-CUDA data transfer tests."""
+    """Build per-layer NHD KV tensors for device-agnostic data transfer tests."""
     kv_caches = {}
     for i in range(num_layers):
         kv_caches[f"layer_{i}"] = torch.randn(
@@ -97,7 +98,7 @@ def _make_mla_kv_caches(
     block_size: int = 4,
     hidden_size: int = 16,
 ) -> dict[str, torch.Tensor]:
-    """Build per-layer MLA KV tensors for non-CUDA data transfer tests.
+    """Build per-layer MLA KV tensors for device-agnostic data transfer tests.
 
     Args:
         num_layers: Number of KV layers to generate.
@@ -122,7 +123,7 @@ def _make_hnd_kv_caches(
     num_heads: int = 2,
     head_size: int = 8,
 ) -> dict[str, torch.Tensor]:
-    """Build per-layer HND KV tensors for non-CUDA data transfer tests."""
+    """Build per-layer HND KV tensors for device-agnostic data transfer tests."""
     kv_caches = {}
     for i in range(num_layers):
         kv_caches[f"layer_{i}"] = torch.randn(
@@ -138,7 +139,9 @@ def _make_hnd_flashinfer_kv_caches(
     num_heads: int = 2,
     head_size: int = 8,
 ) -> dict[str, torch.Tensor]:
-    """Build per-layer HND flash-infer KV tensors for non-CUDA data transfer tests."""
+    """Build per-layer HND flash-infer KV tensors for
+    device-agnostic data transfer tests.
+    """
     kv_caches = {}
     for i in range(num_layers):
         kv_caches[f"layer_{i}"] = torch.randn(
@@ -260,8 +263,8 @@ def _default_key(tokens: int = 8) -> "IPCCacheServerKey":
 def test_wrap_kv_caches_wraps_all_tensors() -> None:
     """Verify wrap_kv_caches wraps all provided KV tensors."""
     # First Party
-    from lmcache.integration.vllm import vllm_multi_process_adapter as adapter_mod
     from lmcache.v1.platform import get_device_spec
+    from lmcache.v1.platform.kv_wrap import wrap_kv_caches
 
     kv_caches = _make_kv_caches()
 
@@ -287,12 +290,12 @@ def test_wrap_kv_caches_wraps_all_tensors() -> None:
                     return_value=_FakeWrapper,
                 )
             )
-        wrapped = adapter_mod.wrap_kv_caches(kv_caches)
+        wrapped = wrap_kv_caches(kv_caches)
 
     assert len(wrapped) == len(kv_caches)
 
 
-def test_create_transfer_context_uses_non_cuda_context_on_cpu() -> None:
+def test_create_transfer_context_uses_default_context_on_cpu() -> None:
     """Ensure factory returns EngineDrivenTransferContext for CPU KV."""
     # First Party
     from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
@@ -432,6 +435,7 @@ def test_create_transfer_context_handle_mode_unsupported_device_raises(
         create_transfer_context({"layer_0": torch.randn(2, 2)}, mode="lmcache_driven")
 
 
+@pytest.mark.musa
 def test_musa_data_context_keeps_layout_validation_device_agnostic(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -441,7 +445,6 @@ def test_musa_data_context_keeps_layout_validation_device_agnostic(
         EngineDrivenTransferContext,
         worker_transfer,
     )
-    import lmcache.c_ops as lmc_ops
 
     def _fake_compute_kv_layout(
         *_args: Any, **_kwargs: Any
@@ -451,7 +454,7 @@ def test_musa_data_context_keeps_layout_validation_device_agnostic(
             2,
             16,
             "float32",
-            lmc_ops.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS,
+            lmcache_native.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS,
             2,
         )
 
@@ -477,6 +480,7 @@ def test_musa_data_context_keeps_layout_validation_device_agnostic(
     )
 
 
+@pytest.mark.musa
 def test_musa_data_context_store_uses_device_agnostic_gather(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -486,7 +490,6 @@ def test_musa_data_context_store_uses_device_agnostic_gather(
         EngineDrivenTransferContext,
         worker_transfer,
     )
-    import lmcache.c_ops as lmc_ops
 
     class _FakeEngineDrivenContext:
         def prepare_store(self, *_args: Any, **_kwargs: Any) -> None:
@@ -509,7 +512,7 @@ def test_musa_data_context_store_uses_device_agnostic_gather(
             2,
             16,
             "float32",
-            lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
+            lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
             2,
         ),
     )
@@ -550,6 +553,7 @@ def test_musa_data_context_store_uses_device_agnostic_gather(
     assert "prefer_musa_native" not in captured_kwargs
 
 
+@pytest.mark.musa
 def test_musa_data_context_retrieve_uses_device_agnostic_scatter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -559,7 +563,6 @@ def test_musa_data_context_retrieve_uses_device_agnostic_scatter(
         EngineDrivenTransferContext,
         worker_transfer,
     )
-    import lmcache.c_ops as lmc_ops
 
     class _FakeEngineDrivenContext:
         def prepare_retrieve(self, *_args: Any, **_kwargs: Any) -> list[torch.Tensor]:
@@ -582,7 +585,7 @@ def test_musa_data_context_retrieve_uses_device_agnostic_scatter(
             2,
             16,
             "float32",
-            lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
+            lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
             2,
         ),
     )
@@ -705,10 +708,16 @@ def test_compute_kv_layout_and_gather_scatter_roundtrip(
         scatter_cpu_to_paged_kv,
     )
 
+    def _vllm_detector_device_type() -> str:
+        """Keep the detector on the active accelerator, but bypass CPU hosts."""
+
+        return torch_device_type if torch_device_type != "cpu" else "cuda"
+
     # Bypass the CPU-host HND safeguard so the layout hint drives detection
     # regardless of the host running the test.
     monkeypatch.setattr(
-        "lmcache.v1.gpu_connector.kv_format.detectors.vllm.torch_device_type", "cuda"
+        "lmcache.v1.gpu_connector.kv_format.detectors.vllm.torch_device_type",
+        _vllm_detector_device_type(),
     )
 
     source = {k: v.to(torch_device_type) for k, v in builder_fn().items()}
@@ -771,7 +780,6 @@ def test_gather_scatter_roundtrip_hnd_layout(
         gather_paged_kv_to_cpu,
         scatter_cpu_to_paged_kv,
     )
-    import lmcache.c_ops as lmc_ops
 
     source = {k: v.to(torch_device_type) for k, v in hnd_builder(2, 8, 4, 2, 8).items()}
     layout_hints: LayoutHints = {"kv_layout": "HND"}
@@ -787,7 +795,7 @@ def test_gather_scatter_roundtrip_hnd_layout(
     assert num_layers == 2
     assert hidden_dim == 16
     assert dtype_str == "float32"
-    assert detected_kv_format == getattr(lmc_ops.EngineKVFormat, expected_format)
+    assert detected_kv_format == getattr(lmcache_native.EngineKVFormat, expected_format)
 
     blocks_per_chunk = 2
     gathered = gather_paged_kv_to_cpu(
@@ -808,7 +816,7 @@ def test_gather_scatter_roundtrip_hnd_layout(
     )
 
     for name in source:
-        if detected_kv_format == lmc_ops.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS:
+        if detected_kv_format == lmcache_native.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS:
             assert torch.allclose(source[name][:, 0], destination[name][:, 4])
             assert torch.allclose(source[name][:, 1], destination[name][:, 5])
         else:
@@ -977,9 +985,15 @@ def test_scatter_rounds_down_partial_block_skip_first_n_tokens(
 
 
 @pytest.fixture
-def stub_native_storage_ops() -> Any:
+def stub_lmcache_native() -> Any:
     """Stub native modules so server imports work in source-only test runs."""
-    module = type(sys)("lmcache.native_storage_ops")
+    module = type(sys)("lmcache.lmcache_native")
+    module.PageBufferShapeDesc = type("PageBufferShapeDesc", (), {})  # type: ignore[attr-defined]
+    module.KernelGroupSpec = type(  # type: ignore[attr-defined]
+        "KernelGroupSpec",
+        (),
+        {"__init__": lambda self, *args, **kwargs: None},
+    )
     module.TTLLock = type("TTLLock", (), {})  # type: ignore[attr-defined]
     module.Bitmap = type("Bitmap", (), {})  # type: ignore[attr-defined]
     module.PeriodicEventNotifier = type(  # type: ignore[attr-defined]
@@ -988,7 +1002,7 @@ def stub_native_storage_ops() -> Any:
     with patch.dict(
         sys.modules,
         {
-            "lmcache.native_storage_ops": module,
+            "lmcache.lmcache_native": module,
             "cupy": MagicMock(),
         },
     ):
@@ -997,7 +1011,7 @@ def stub_native_storage_ops() -> Any:
 
 @pytest.fixture
 def server_module_factory(
-    stub_native_storage_ops: Any,
+    stub_lmcache_native: Any,
 ) -> Iterator[ServerModuleFactory]:
     """Create a patched server module/context with configurable mocks."""
     # Standard
@@ -1096,7 +1110,7 @@ def server_module_factory(
     ],
 )
 def test_engine_context_shm_pool_info(
-    stub_native_storage_ops: Any,
+    stub_lmcache_native: Any,
     config_kwargs: dict[str, Any],
     expected_pool_info: dict[str, Any],
 ) -> None:
@@ -1122,10 +1136,10 @@ def test_engine_context_shm_pool_info(
 
 
 def test_server_register_and_find_non_cuda_context_layout(
-    stub_native_storage_ops: Any,
+    stub_lmcache_native: Any,
     server_module_factory: ServerModuleFactory,
 ) -> None:
-    """Ensure non-CUDA registration stores metadata and lookup finds layout."""
+    """Ensure backend-agnostic registration stores metadata and lookup finds layout."""
     module, _, _, ctx = server_module_factory(chunk_size=16)
     response = module.register_kv_cache_engine_driven_context(
         _default_register_payload(instance_id=1)
@@ -1139,7 +1153,7 @@ def test_server_register_and_find_non_cuda_context_layout(
 
 
 def test_server_store_and_retrieve_cpu_chunks(
-    stub_native_storage_ops: Any,
+    stub_lmcache_native: Any,
     server_module_factory: ServerModuleFactory,
 ) -> None:
     """Validate mocked server-side CPU chunk store and retrieve behavior."""
@@ -1180,7 +1194,7 @@ def test_server_store_and_retrieve_cpu_chunks(
 
 
 def test_server_shm_commit_store_allows_noop_when_all_keys_exist(
-    stub_native_storage_ops: Any,
+    stub_lmcache_native: Any,
     server_module_factory: ServerModuleFactory,
 ) -> None:
     """Regression: repeated prompt after worker restart should no-op-store cleanly.
@@ -1216,7 +1230,7 @@ def test_server_shm_commit_store_allows_noop_when_all_keys_exist(
 
 
 def test_server_prepare_store_releases_unused_reserved_write_locks(
-    stub_native_storage_ops: Any,
+    stub_lmcache_native: Any,
     server_module_factory: ServerModuleFactory,
 ) -> None:
     """Ensure SHM prepare_store releases reserved keys that have no writable tensor."""
@@ -1251,7 +1265,7 @@ def test_server_prepare_store_releases_unused_reserved_write_locks(
 
 
 def test_server_shm_transport_uses_engine_level_config(
-    stub_native_storage_ops: Any,
+    stub_lmcache_native: Any,
     server_module_factory: ServerModuleFactory,
 ) -> None:
     """Ensure all instances share the same engine-level SHM transport setting."""
@@ -1286,7 +1300,7 @@ def test_server_shm_transport_uses_engine_level_config(
 
 
 def test_server_engine_driven_reregister_returns_existing_shm_response(
-    stub_native_storage_ops: Any,
+    stub_lmcache_native: Any,
     server_module_factory: ServerModuleFactory,
 ) -> None:
     """Ensure duplicate non-GPU registration returns existing SHM response."""
@@ -1306,7 +1320,7 @@ def test_server_engine_driven_reregister_returns_existing_shm_response(
 
 
 def test_server_unregister_engine_driven_context_releases_pending_shm_locks(
-    stub_native_storage_ops: Any,
+    stub_lmcache_native: Any,
     server_module_factory: ServerModuleFactory,
 ) -> None:
     """Ensure unregister releases pending SHM read/write reservations."""
@@ -1398,7 +1412,7 @@ def test_gather_paged_kv_with_chunk_indices_subset() -> None:
 
 
 def test_server_prepare_store_includes_chunk_indices(
-    stub_native_storage_ops: Any,
+    stub_lmcache_native: Any,
     server_module_factory: ServerModuleFactory,
 ) -> None:
     """prepare_store response context includes chunk_indices for SHM mode.

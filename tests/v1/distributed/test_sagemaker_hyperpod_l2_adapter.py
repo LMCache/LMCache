@@ -233,7 +233,7 @@ def test_store_lookup_load_and_unlock(adapter: SageMakerHyperPodL2Adapter) -> No
     assert store_result.is_successful()
     assert store_result.bytes_transferred() == source.get_size()
 
-    lookup_id = adapter.submit_lookup_and_lock_task([key, _key(99)], _EMPTY_LAYOUT)
+    lookup_id = adapter.submit_lookup_and_lock_task([key, _key(99)], {0: _EMPTY_LAYOUT})
     _wait(adapter.get_lookup_and_lock_event_fd())
     lookup = adapter.query_lookup_and_lock_result(lookup_id)
     assert lookup is not None
@@ -449,7 +449,7 @@ def test_lookup_partial_exception_preserves_hits(
 
     lookup_id = adapter.submit_lookup_and_lock_task(
         [existing, failing],
-        _EMPTY_LAYOUT,
+        {0: _EMPTY_LAYOUT},
     )
     _wait(adapter.get_lookup_and_lock_event_fd())
     result = adapter.query_lookup_and_lock_result(lookup_id)
@@ -602,7 +602,7 @@ def test_close_releases_leases_once_without_ttl_retry(
     _wait(adapter.get_store_event_fd())
     assert adapter.pop_completed_store_tasks()[store_id].is_successful()
 
-    lookup_id = adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+    lookup_id = adapter.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
     _wait(adapter.get_lookup_and_lock_event_fd())
     lookup = adapter.query_lookup_and_lock_result(lookup_id)
     assert lookup is not None and lookup.test(0)
@@ -692,7 +692,7 @@ def test_load_reacquires_when_retained_lease_expired(
     assert client is not None
     client.lease_expires_in = 0.0
 
-    lookup_id = adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+    lookup_id = adapter.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
     _wait(adapter.get_lookup_and_lock_event_fd())
     lookup = adapter.query_lookup_and_lock_result(lookup_id)
     assert lookup is not None and lookup.test(0)
@@ -742,6 +742,91 @@ def test_copy_discards_result_when_lease_expires_mid_copy(
         destination.release()
         monkeypatch.undo()
         asyncio.run(client.close())
+    finally:
+        shm.close()
+        shm.unlink()
+
+
+def test_client_attach_does_not_unlink_segment_on_process_exit() -> None:
+    """Attach-only clients must never delete the daemon-owned segment.
+
+    CPython's multiprocessing resource tracker registers even attach-only
+    shared-memory segments and unlinks them at interpreter shutdown.
+    Against ai-toolkit's host-owned arena that deletes the node-local
+    cache for every client on the node (reproduced on HyperPod under
+    ``hostIPC``). The client therefore attaches via a plain read-only
+    ``mmap``, which involves no tracker: a client process exiting —
+    even without calling ``close()`` — must leave the segment intact.
+    """
+    # Standard
+    import os
+    import subprocess
+    import sys
+
+    if not os.path.isdir("/dev/shm"):
+        pytest.skip("requires /dev/shm (Linux)")
+
+    shm = shared_memory.SharedMemory(create=True, size=4096)
+    try:
+        shm.buf[:5] = b"hello"
+        script = (
+            "from lmcache.v1.distributed.l2_adapters.sagemaker_hyperpod_client "
+            "import SageMakerHyperPodClient\n"
+            "client = SageMakerHyperPodClient(\n"
+            f"    url='sagemaker-hyperpod://127.0.0.1:1',\n"
+            f"    shared_memory_name={shm.name!r},\n"
+            ")\n"
+            "assert client.report_status()['shared_memory_current'] is True\n"
+            "# exit WITHOUT close(): the worst case for tracker cleanup\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert result.returncode == 0, result.stderr
+        path = os.path.join("/dev/shm", shm.name.lstrip("/"))
+        assert os.path.exists(path), (
+            "client process exit deleted the daemon-owned segment "
+            "(resource tracker regression)"
+        )
+    finally:
+        shm.close()
+        shm.unlink()
+
+
+def test_client_arena_mapping_is_read_only_on_linux() -> None:
+    """On Linux the segment mapping must be read-only: the client never
+    writes to daemon-owned memory (writes go through the daemon's HTTP
+    API).
+
+    The read-only property is a memory-protection guarantee with no
+    public write path by design, so this test exercises the mapping
+    helper directly.
+    """
+    # Standard
+    import os
+
+    # First Party
+    from lmcache.v1.distributed.l2_adapters.sagemaker_hyperpod_client import (
+        _ReadOnlySharedMemoryMapping,
+    )
+
+    if not os.path.isdir("/dev/shm"):
+        pytest.skip("requires /dev/shm (Linux)")
+
+    shm = shared_memory.SharedMemory(create=True, size=64)
+    try:
+        shm.buf[:5] = b"hello"
+        mapping = _ReadOnlySharedMemoryMapping(shm.name)
+        try:
+            assert mapping.size == 64
+            assert bytes(mapping.buf[:5]) == b"hello"
+            with pytest.raises(TypeError):
+                mapping.buf[0:1] = b"x"
+        finally:
+            mapping.close()
     finally:
         shm.close()
         shm.unlink()

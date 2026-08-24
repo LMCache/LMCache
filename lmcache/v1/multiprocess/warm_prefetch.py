@@ -26,6 +26,7 @@ from lmcache.v1.distributed.api import (
     ObjectKey,
     PrefetchHandle,
     PrefetchMode,
+    PrefetchRequestSpec,
     TrimPolicy,
 )
 from lmcache.v1.distributed.storage_manager import StorageManager
@@ -89,10 +90,12 @@ class WarmPrefetchJobs:
             An opaque request id to pass to :meth:`poll`.
         """
         handle = storage_manager.submit_prefetch_task(
-            keys,
-            layout_desc,
-            mode=PrefetchMode.WARM,
-            policy=TrimPolicy.SPARSE,
+            PrefetchRequestSpec(
+                keys=keys,
+                group_layout_descs={0: layout_desc},
+                mode=PrefetchMode.WARM,
+                policy=TrimPolicy.SPARSE,
+            )
         )
         request_id = uuid.uuid4().hex
         with self._lock:

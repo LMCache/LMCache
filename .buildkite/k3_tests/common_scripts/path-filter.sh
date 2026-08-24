@@ -10,7 +10,7 @@
 #
 # Rules:
 #   - If EVERY changed file matches a "trivial" pattern (markdown, LICENSE,
-#     anything under docs/ or .github/, etc.), the build can be skipped.
+#     anything under docs/, asset/, or .github/, etc.), the build can be skipped.
 #   - Otherwise, a test-specific dependency surface is used to decide whether
 #     the uploaded pipeline is relevant for the changed files. This keeps
 #     unrelated test pipelines from running when the PR touches a different
@@ -43,6 +43,7 @@ _path_filter_is_trivial() {
         .gitignore|.gitattributes|.editorconfig|.mailmap) return 0 ;;
         CODEOWNERS) return 0 ;;
         docs/*) return 0 ;;
+        asset/*) return 0 ;;
         .github/*) return 0 ;;
     esac
     return 1

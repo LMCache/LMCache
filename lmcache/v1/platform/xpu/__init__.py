@@ -1,8 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 """XPU (Intel SYCL) platform helpers."""
 
+# Future
+from __future__ import annotations
+
 # First Party
-from lmcache.v1.platform.base_device_spec import DeviceSpec
+from lmcache.v1.platform.base.device_ops import DeviceOps
+from lmcache.v1.platform.base.device_spec import DeviceSpec
+from lmcache.v1.platform.xpu.device_ops import XpuDeviceOps
 
 # ---------------------------------------------------------------------------
 # Device detection registry entry
@@ -21,8 +26,8 @@ class XpuDeviceSpec(DeviceSpec):
         return "xpu"
 
     @property
-    def ops_module(self) -> str | None:
-        return "lmcache.xpu_ops"
+    def ops_cls(self) -> type[DeviceOps]:
+        return XpuDeviceOps
 
     def is_available(self) -> bool:
         """Check XPU availability without importing lmcache.__init__."""

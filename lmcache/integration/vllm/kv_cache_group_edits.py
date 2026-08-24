@@ -4,8 +4,8 @@
 This is needed to mask out attention-specific details while making sure that
 LMCache can still store / load KV cache correctly.
 
-Currently there are two edits, one per :class:`KVCacheGroupEdit` subclass
-below. Both are for Mamba-hybrid models; the registry is only consulted when
+Currently there are three edits, one per :class:`KVCacheGroupEdit` subclass
+below. All are for Mamba-hybrid models; the registry is only consulted when
 ``kv_cache_config.has_mamba_layers``. :func:`validate_kv_cache_groups`
 additionally rejects, at startup, group specs the transfer path cannot serve
 correctly yet (see its docstring).
@@ -51,6 +51,7 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.gpu_connector.utils import LayoutHints
 
 logger = init_logger(__name__)
 
@@ -100,8 +101,9 @@ def validate_kv_cache_groups(kv_cache_config: KVCacheConfig | None) -> None:
     Rejected, with one aggregated error listing every offending group:
 
     - ``CrossAttentionSpec`` (encoder-decoder caches).
-    - Mamba groups with ``mamba_cache_mode != "align"``: other modes keep no
-      reusable per-block state snapshots.
+    - Mamba groups with ``mamba_cache_mode`` other than ``"align"`` or
+      ``"all"``: the remaining mode (``"none"``) keeps no reusable per-block
+      state snapshots.
 
     Specs declaring slot compression (``compress_ratio > 1`` /
     ``tq_slot_size > 0``, e.g. DeepSeek-V4) are NOT rejected: they are served
@@ -123,14 +125,13 @@ def validate_kv_cache_groups(kv_cache_config: KVCacheConfig | None) -> None:
             kind = get_kv_cache_spec_kind(spec)
             if kind == KVCacheSpecKind.CROSS_ATTENTION:
                 unsupported.append(f"group {group_idx}: CrossAttentionSpec")
-            elif (
-                kind == KVCacheSpecKind.MAMBA
-                and getattr(spec, "mamba_cache_mode", "none") != "align"
-            ):
+            elif kind == KVCacheSpecKind.MAMBA and getattr(
+                spec, "mamba_cache_mode", "none"
+            ) not in ("align", "all"):
                 unsupported.append(
                     f"group {group_idx}: MambaSpec with mamba_cache_mode="
                     f"'{getattr(spec, 'mamba_cache_mode', 'none')}' "
-                    f"(only 'align' keeps reusable state snapshots)"
+                    f"(only 'align' and 'all' keep reusable state snapshots)"
                 )
     if unsupported:
         raise ValueError(
@@ -184,12 +185,18 @@ class KVCacheGroupEdit(ABC):
         """
 
     @abstractmethod
-    def apply(self, spec: KVCacheSpec, kv_cache: RegisteredKVCache) -> torch.Tensor:
+    def apply(
+        self,
+        spec: KVCacheSpec,
+        kv_cache: RegisteredKVCache,
+        layout_hints: LayoutHints,
+    ) -> torch.Tensor:
         """Return the edited view for a layer this rule matched.
 
         Args:
             spec: The layer's vLLM KV cache spec (from its group).
             kv_cache: The layer's registered cache value.
+            layout_hints: The layout hints from vLLM (see :class:`LayoutHints`).
 
         Raises:
             ValueError: If the cache's layout violates the rule's invariants.
@@ -216,9 +223,16 @@ class _MambaPageViewEdit(KVCacheGroupEdit):
     name = "mamba-page-view"
 
     def matches(self, spec: KVCacheSpec, kv_cache: RegisteredKVCache) -> bool:
-        return get_kv_cache_spec_kind(spec) == KVCacheSpecKind.MAMBA
+        return get_kv_cache_spec_kind(spec) == KVCacheSpecKind.MAMBA and isinstance(
+            kv_cache, list
+        )
 
-    def apply(self, spec: KVCacheSpec, kv_cache: RegisteredKVCache) -> torch.Tensor:
+    def apply(
+        self,
+        spec: KVCacheSpec,
+        kv_cache: RegisteredKVCache,
+        _layout_hints: LayoutHints,
+    ) -> torch.Tensor:
         # vLLM lays out one padded page per block as (conv | ssm | pad), and
         # the conv state is the view that starts at the page base: its leading
         # dim is the block count and its per-block stride is one full page.
@@ -290,7 +304,12 @@ class _SubpagedAttentionViewEdit(KVCacheGroupEdit):
             and kv_cache.shape[2] != spec.block_size
         )
 
-    def apply(self, spec: KVCacheSpec, kv_cache: RegisteredKVCache) -> torch.Tensor:
+    def apply(
+        self,
+        spec: KVCacheSpec,
+        kv_cache: RegisteredKVCache,
+        _layout_hints: LayoutHints,
+    ) -> torch.Tensor:
         """Re-view ``kv_cache`` at logical-block granularity.
 
         The tensor is kernel-paged as ``(num_kernel_pages, 2,
@@ -349,9 +368,138 @@ class _SubpagedAttentionViewEdit(KVCacheGroupEdit):
         return kv_cache.view(num_blocks, 2, logical_block_size, num_heads, head_size)
 
 
+######################
+# vLLM 0.26.0 or later
+######################
+
+
+class _MambaUnifiedViewEdit(KVCacheGroupEdit):
+    """Re-view mamba's unified state as a single attention tensor
+
+    This is for vLLM >= 0.26.0, where the unified KV cache layout is implemented.
+
+    In this case, Mamba's KV layer will be a single tensor with the shape of:
+    - [num_blocks, 1, 1, context_size]
+    Where the context size equals to vllm_block_size * ``head_size''
+
+
+    What we do here is to convert the shape to
+    - [num_blocks, 1, vllm_block_size, head_size]
+    """
+
+    name = "mamba-unified-view"
+
+    def matches(self, spec: KVCacheSpec, kv_cache: RegisteredKVCache) -> bool:
+        """
+        Matches the mamba kv cache with unified layout.
+        """
+        return (
+            get_kv_cache_spec_kind(spec) == KVCacheSpecKind.MAMBA
+            and isinstance(kv_cache, torch.Tensor)
+            and kv_cache.ndim == 4
+        )
+
+    def apply(
+        self,
+        spec: KVCacheSpec,
+        kv_cache: RegisteredKVCache,
+        layout_hints: LayoutHints,
+    ) -> torch.Tensor:
+        """
+        Convert [num_blocks, 1, 1, context_size] to
+        [num_blocks, 1, vllm_block_size, head_size] for HND layout, or
+        [num_blocks, vllm_block_size, 1, head_size] for NHD layout.
+        """
+        assert isinstance(kv_cache, torch.Tensor), (
+            "single-layer KV cache must be a torch.Tensor"
+        )
+        kv_layout = layout_hints.get("kv_layout", "none")
+        if kv_layout == "NHD":
+            return kv_cache.view(kv_cache.shape[0], spec.block_size, 1, -1)
+        elif kv_layout == "HND":
+            return kv_cache.view(kv_cache.shape[0], 1, spec.block_size, -1)
+        else:
+            raise ValueError(
+                f"Unsupported kv_layout: {kv_layout}. Only NHD and HND are supported."
+            )
+
+
+class _SubpagedMLAAttentionViewEdit(KVCacheGroupEdit):
+    """Re-view a kernel-paged attention tensor as logical-block pages.
+
+    For vLLM 0.26 or later
+
+    Example on Kimi K3 , where 768 is the block size
+    - Input: [N * 12, 64, 576]
+    - Output: [N, 768, 576] (where 768 = 12 * 64)
+    """
+
+    name = "subpaged-mla-attention-view"
+
+    def matches(self, spec: KVCacheSpec, kv_cache: RegisteredKVCache) -> bool:
+        return (
+            get_kv_cache_spec_kind(spec) == KVCacheSpecKind.MLA_ATTENTION
+            and not _declares_slot_compression(spec)
+            and isinstance(kv_cache, torch.Tensor)
+            and kv_cache.ndim == 3
+            and kv_cache.shape[1] != spec.block_size
+        )
+
+    def apply(
+        self,
+        spec: KVCacheSpec,
+        kv_cache: RegisteredKVCache,
+        _layout_hints: LayoutHints,
+    ) -> torch.Tensor:
+        """Re-view ``kv_cache`` at logical-block granularity.
+
+        The tensor is kernel-paged as ``(num_kernel_pages, 2,
+        kernel_block_size, num_kv_heads, head_size)``; the result is
+        ``(num_logical_blocks, 2, spec.block_size, num_heads, head_size)``
+        over the same storage.
+
+        Raises:
+            ValueError: If the layout is not the expected kernel-paged shape,
+                the sizes do not divide evenly, or the kernel pages of one
+                logical block do not tile its page bytes exactly (which would
+                indicate an undeclared packed layout that must not be edited).
+        """
+        assert isinstance(kv_cache, torch.Tensor)
+        logical_block_size = spec.block_size
+        kernel_block_size = kv_cache.shape[1]
+        if logical_block_size % kernel_block_size != 0:
+            raise ValueError(
+                f"logical block size {logical_block_size} is not a multiple of "
+                f"kernel block size {kernel_block_size}"
+            )
+        ratio = logical_block_size // kernel_block_size
+
+        num_kernel_pages = kv_cache.shape[0]
+        if num_kernel_pages % ratio != 0:
+            raise ValueError(
+                f"kernel page count {num_kernel_pages} is not a multiple of "
+                f"the logical/kernel block ratio {ratio}"
+            )
+        kernel_page_bytes = kv_cache.shape[1:].numel() * kv_cache.element_size()
+        if kernel_page_bytes * ratio != spec.page_size_bytes:
+            raise ValueError(
+                f"{ratio} kernel pages ({kernel_page_bytes * ratio} bytes) do "
+                f"not tile the logical page ({spec.page_size_bytes} bytes)"
+            )
+        if not kv_cache.is_contiguous():
+            raise ValueError(
+                "kernel-paged attention KV tensor must be contiguous to "
+                "re-view as logical pages"
+            )
+
+        return kv_cache.view(num_kernel_pages // ratio, logical_block_size, -1)
+
+
 # Rule registry, in match priority order.
 _EDITS: tuple[KVCacheGroupEdit, ...] = (
+    _MambaUnifiedViewEdit(),
     _MambaPageViewEdit(),
+    _SubpagedMLAAttentionViewEdit(),
     _SubpagedAttentionViewEdit(),
 )
 
@@ -359,6 +507,7 @@ _EDITS: tuple[KVCacheGroupEdit, ...] = (
 def apply_kv_cache_group_edits(
     kv_cache_config: KVCacheConfig | None,
     kv_caches: Mapping[str, RegisteredKVCache],
+    layout_hints: LayoutHints,
 ) -> dict[str, RegisteredKVCache]:
     """Apply all KV cache group metadata edits for LMCache registration.
 
@@ -371,6 +520,7 @@ def apply_kv_cache_group_edits(
         kv_cache_config: vLLM ``KVCacheConfig`` (read for per-group specs).
         kv_caches: Registered tensors keyed by layer name. Mamba entries are
             ``[conv_state, ssm_state]`` lists; others are single tensors.
+        layout_hints: layout hints from vLLM (see :class:`LayoutHints`).
 
     Returns:
         A new ``dict`` with edited layers re-viewed, others untouched.
@@ -392,7 +542,7 @@ def apply_kv_cache_group_edits(
         for name in group.layer_names:
             for edit in _EDITS:
                 if edit.matches(spec, kv_caches[name]):
-                    edited[name] = edit.apply(spec, kv_caches[name])
+                    edited[name] = edit.apply(spec, kv_caches[name], layout_hints)
                     counts[edit.name] += 1
                     break
     logger.info(

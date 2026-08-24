@@ -49,7 +49,7 @@ instead of `buildkite-agent pipeline upload` directly. The wrapper
   the uploaded test pipeline. This includes docs-only / trivial changes such
   as `*.md`, `LICENSE*`, `NOTICE*`, `.gitignore`, `.gitattributes`,
   `.editorconfig`, `.mailmap`, `CODEOWNERS`, or anything under `docs/` or
-  `.github/`. (`.github/` is trivial here because k3 tests run on Buildkite,
+  `asset/`, or `.github/`. (`.github/` is trivial here because k3 tests run on Buildkite,
   not GitHub Actions, so workflow / CODEOWNERS / template changes do not
   affect them.)
 
@@ -69,7 +69,6 @@ plus a few suite-specific surfaces:
 | xpu | Shared runtime surface + `.buildkite/k3_tests/xpu/**` |
 
 
-
 Detection:
 - PR builds diff against `origin/${BUILDKITE_PULL_REQUEST_BASE_BRANCH}`
   (default `main`) using the merge-base.
@@ -81,6 +80,7 @@ Detection:
 To bypass the skip and force a full run, add the **`force-ci`** label to the
 PR on GitHub. Buildkite picks up PR labels automatically; when the filter
 sees `force-ci` it runs the full pipeline regardless of which files changed.
+
 
 ### Trigger strategy
 
