@@ -38,7 +38,6 @@ from lmcache.v1.multiprocess.custom_types import (
 )
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.mq import (
-    _TYPED_RPCS,
     MessageQueueClient,
     MessageQueueServer,
     request_type_to_method_name,
@@ -56,8 +55,11 @@ from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
 from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
     lmcache_mq_pb2_grpc,
 )
+from lmcache.v1.multiprocess.transport.grpc_impl.typed_rpc import (
+    TYPED_RPCS as _TYPED_RPCS,
+)
 
-# See mq.py: message classes are dynamic; rebind through Any so
+# Generated message classes are dynamic; rebind through Any so
 # static analysis stops complaining about attribute lookups.
 lmcache_mq_pb2: Any = _pb2_typed
 
