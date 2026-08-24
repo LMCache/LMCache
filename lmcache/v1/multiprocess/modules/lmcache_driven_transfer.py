@@ -1013,7 +1013,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             that signals the completion of the store operation, and the second
             element indicates whether the store operation completed without a
             fatal error (not whether every requested chunk was stored; see
-            Notes).
+            Notes). The event handle is empty when no device work was submitted.
 
         Raises:
             RuntimeError: If the backend does not support IPC event handles.
@@ -1032,13 +1032,15 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         if entry is None:
             # The worker can reconnect to a replacement server before its next
             # registration probe. No device work was submitted in that window,
-            # so echo the producer event and return a terminal False response
-            # instead of leaving the MQ future unanswered.
+            # so return an empty completion-event handle and a terminal False
+            # response instead of leaving the MQ future unanswered. Echoing the
+            # producer handle would make the originating process import its own
+            # IPC event, which is invalid on HIP.
             logger.warning(
                 "Rejecting STORE for unregistered GPU instance ID %d",
                 instance_id,
             )
-            return event_ipc_handle, False
+            return b"", False
         cache_context = entry.cache_context
         model_name = entry.model_name
         event_backend = entry.event_backend
@@ -1259,6 +1261,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             A tuple where the first element is the IPC handle of the event
             that signals the completion of the retrieve operation, and the
             second element indicates whether the key was successfully retrieved.
+            The event handle is empty when no device work was submitted.
 
         Raises:
             RuntimeError: If the backend does not support IPC event handles.
@@ -1267,13 +1270,14 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
 
         entry = self.get_and_touch_context_entry(instance_id)
         if entry is None:
-            # See store(): the echoed producer event preserves device ordering
-            # while the False result lets the caller recover or recompute.
+            # See store(): there is no completion event because no device work
+            # was submitted. The False result lets the caller recover or
+            # recompute without importing its own producer event.
             logger.warning(
                 "Rejecting RETRIEVE for unregistered GPU instance ID %d",
                 instance_id,
             )
-            return event_ipc_handle, False
+            return b"", False
         cache_context = entry.cache_context
         model_name = entry.model_name
         event_backend = entry.event_backend

@@ -410,6 +410,62 @@ def test_failed_retrieve_marks_blocks_for_recompute(
     assert "req-1" not in adapter.retrieve_futures
 
 
+def test_failed_full_retrieve_is_recomputed_instead_of_retried_remotely() -> None:
+    """A failed full async load must not re-enter remote wait forever."""
+    pytest.importorskip("vllm")
+
+    # First Party
+    from lmcache.integration.vllm.lmcache_mp_connector import LMCacheMPConnector
+    from lmcache.integration.vllm.lmcache_mp_metadata import (
+        LMCacheMPRequestState,
+        LMCacheMPRequestTracker,
+    )
+    from vllm.v1.request import RequestStatus
+
+    class _Request:
+        def __init__(self) -> None:
+            self.request_id = "req-1"
+            self.status = RequestStatus.WAITING
+            self.num_computed_tokens = 0
+            self.num_preemptions = 0
+            self.cache_salt = ""
+            self.prompt_token_ids = [1, 2, 3, 4]
+            self.all_token_ids = [1, 2, 3, 4]
+            self.mm_features = []
+
+    request = _Request()
+    tracker = LMCacheMPRequestTracker(request)  # type: ignore[arg-type]
+    tracker.state = LMCacheMPRequestState.READY
+    tracker.num_lmcache_hit_tokens = 4
+    tracker.num_stored_tokens = 4
+    tracker.allocated_block_ids = {0: [7]}
+
+    connector = LMCacheMPConnector.__new__(LMCacheMPConnector)
+    connector.request_trackers = {request.request_id: tracker}
+    connector.scheduler_adapter = MagicMock(name="scheduler_adapter")
+
+    matched_tokens, load_async = connector.get_num_new_matched_tokens(
+        request,
+        num_computed_tokens=0,  # type: ignore[arg-type]
+    )
+
+    assert (matched_tokens, load_async) == (0, False)
+    connector.scheduler_adapter.maybe_submit_lookup_request.assert_not_called()
+    connector.scheduler_adapter.free_lookup_locks.assert_called_once_with(
+        token_ids=[1, 2, 3, 4],
+        start=0,
+        end=4,
+        request_id="req-1",
+        cache_salt="",
+    )
+    connector.scheduler_adapter.cleanup_lookup_result.assert_called_once_with("req-1")
+    assert tracker.state == LMCacheMPRequestState.PREFETCHING
+    assert tracker.allocated_block_ids == {}
+    assert tracker.num_stored_tokens == 0
+    assert tracker.num_vllm_hit_tokens == 0
+    assert tracker.num_lmcache_hit_tokens == 0
+
+
 def test_instance_id_is_uuid_derived_63_bit_int(fake_adapter) -> None:
     """instance_id is a 63-bit int, not the PID, and unique per adapter."""
     adapter, _send_mock, _ = fake_adapter

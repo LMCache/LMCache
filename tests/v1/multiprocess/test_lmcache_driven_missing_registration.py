@@ -16,11 +16,12 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
 
 @pytest.mark.parametrize("method_name", ["store", "retrieve"])
 def test_missing_registration_returns_terminal_false(method_name: str) -> None:
-    """An absent context returns the producer event instead of raising.
+    """An absent context returns an event-free response instead of raising.
 
     The MQ blocking-handler exception path does not send an error response.
     Returning a normal response therefore ensures the caller's future reaches
-    a terminal state during the restart-before-registration window.
+    a terminal state during the restart-before-registration window. The empty
+    handle indicates that the server submitted no device work.
     """
     module = LMCacheDrivenTransferModule.__new__(LMCacheDrivenTransferModule)
     module.get_and_touch_context_entry = MagicMock(  # type: ignore[method-assign]
@@ -36,5 +37,5 @@ def test_missing_registration_returns_terminal_false(method_name: str) -> None:
         producer_event,
     )
 
-    assert result == (producer_event, False)
+    assert result == (b"", False)
     module.get_and_touch_context_entry.assert_called_once_with(42)
