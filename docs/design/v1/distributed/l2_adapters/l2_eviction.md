@@ -198,7 +198,7 @@ capacity) can omit steps 2–6 and rely on the base class no-op defaults.
 | `NixlStoreL2Adapter`       | ✓ (skips pinned) | ✓ (pool-based) | stored, deleted |
 | `RawBlockL2Adapter`        | ✓ (skips locked) | ✓ | stored, accessed, deleted |
 | `FSL2Adapter`              | ✓ (best-effort) | total only (no max cap) | stored, accessed, deleted |
-| `NativeConnectorL2Adapter` | ✓ (skips locked, via `submit_batch_delete`) | ✓ (client-side, requires `max_capacity_gb`) | stored, deleted |
+| `NativeConnectorL2Adapter` | ✓ (serializes with lookup, via `submit_batch_delete`) | ✓ (client-side, requires `max_capacity_gb`) | stored, accessed, deleted |
 
 **Note on `NativeConnectorL2Adapter`:** Eviction support requires two things:
 
@@ -208,6 +208,10 @@ capacity) can omit steps 2–6 and rely on the base class no-op defaults.
 2. The adapter must be configured with `max_capacity_gb > 0` to enable client-side
    size tracking for `get_usage()`. Without it, `get_usage()` returns `(-1, -1)` and
    the eviction controller will not trigger.
+
+Lookup and delete submissions are serialized per key. An earlier lookup pins its
+keys before the delete eligibility check, while a lookup submitted after a delete
+treats the overlapping keys as misses until that delete completes.
 
 **Note on `FSL2Adapter`:** `delete()` and the listener events are implemented, so
 the base class tracks `total_bytes_used` from the store / delete notifications.

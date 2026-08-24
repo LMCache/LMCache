@@ -50,11 +50,16 @@ class MockNativeConnector:
       - close()
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._efd = create_event_notifier()
         self._store: dict[str, bytes] = {}
         self._next_id = 1
         self._completions: list[tuple[int, bool, str, list[bool] | None]] = []
+        self._defer_exists = False
+        self._deferred_exists: list[tuple[int, bool, str, list[bool] | None]] = []
+        self._defer_delete = False
+        self._deferred_deletes: list[tuple[int, list[str]]] = []
+        self._delete_submitted = threading.Event()
         self._lock = threading.Lock()
         self._closed = False
 
@@ -105,17 +110,83 @@ class MockNativeConnector:
         with self._lock:
             fid = self._next_id
             self._next_id += 1
+            defer_exists = self._defer_exists
 
         results = [key in self._store for key in keys]
-        self._push_completion(fid, True, "", results)
+        completion = (fid, True, "", results)
+        if defer_exists:
+            with self._lock:
+                self._deferred_exists.append(completion)
+        else:
+            self._push_completion(*completion)
 
         return fid
+
+    def defer_exists_completions(self) -> None:
+        """Hold future exists completions until explicitly released."""
+        with self._lock:
+            self._defer_exists = True
+
+    def release_next_exists_completion(self) -> None:
+        """Release one deferred exists completion."""
+        self._push_completion(*self._pop_deferred_exists_completion())
+
+    def release_next_exists_failure(self) -> None:
+        """Replace one deferred exists completion with a failed result."""
+        fid, _ok, _error, _results = self._pop_deferred_exists_completion()
+        self._push_completion(fid, False, "forced lookup failure", None)
+
+    def resume_exists_completions(self) -> None:
+        """Release all deferred exists completions and resume immediate delivery."""
+        with self._lock:
+            self._defer_exists = False
+            completions = self._deferred_exists
+            self._deferred_exists = []
+        for completion in completions:
+            self._push_completion(*completion)
 
     def submit_batch_delete(self, keys: list[str]) -> int:
         with self._lock:
             fid = self._next_id
             self._next_id += 1
+            if self._defer_delete:
+                self._deferred_deletes.append((fid, list(keys)))
+                self._delete_submitted.set()
+                return fid
 
+        self._complete_delete(fid, keys)
+        return fid
+
+    def defer_delete_completions(self) -> None:
+        """Hold future delete operations until explicitly released."""
+        with self._lock:
+            self._defer_delete = True
+            self._delete_submitted.clear()
+
+    def wait_for_delete_submission(self, timeout: float = 5.0) -> bool:
+        """Wait until a deferred delete has been submitted."""
+        return self._delete_submitted.wait(timeout=timeout)
+
+    def release_next_delete_completion(self) -> None:
+        """Execute and complete one deferred delete operation."""
+        fid, keys = self._pop_deferred_delete()
+        self._complete_delete(fid, keys)
+
+    def release_next_delete_failure(self) -> None:
+        """Complete one deferred delete as failed without removing keys."""
+        fid, keys = self._pop_deferred_delete()
+        self._push_completion(fid, False, "forced delete failure", [False] * len(keys))
+
+    def resume_delete_completions(self) -> None:
+        """Execute all deferred deletes and resume immediate delivery."""
+        with self._lock:
+            self._defer_delete = False
+            deferred = self._deferred_deletes
+            self._deferred_deletes = []
+        for fid, keys in deferred:
+            self._complete_delete(fid, keys)
+
+    def _complete_delete(self, fid: int, keys: list[str]) -> None:
         results = []
         for key in keys:
             if key in self._store:
@@ -124,8 +195,6 @@ class MockNativeConnector:
             else:
                 results.append(False)
         self._push_completion(fid, True, "", results)
-
-        return fid
 
     def drain_completions(self) -> list[tuple[int, bool, str, list[bool] | None]]:
         # Drain the eventfd
@@ -154,6 +223,23 @@ class MockNativeConnector:
             self._efd.notify()
         except OSError:
             pass
+
+    def _pop_deferred_exists_completion(
+        self,
+    ) -> tuple[int, bool, str, list[bool] | None]:
+        with self._lock:
+            if not self._deferred_exists:
+                raise RuntimeError("No deferred exists completion")
+            return self._deferred_exists.pop(0)
+
+    def _pop_deferred_delete(self) -> tuple[int, list[str]]:
+        with self._lock:
+            if not self._deferred_deletes:
+                raise RuntimeError("No deferred delete")
+            deferred = self._deferred_deletes.pop(0)
+            if not self._deferred_deletes:
+                self._delete_submitted.clear()
+            return deferred
 
 
 # =============================================================================
@@ -1310,6 +1396,179 @@ class TestDeleteRespectsLocks:
         adp.delete([key])
 
         assert adp.get_usage().total_bytes_used == stored_bytes
+
+
+class TestDeleteRespectsPendingLookups:
+    """Lookup submission must pin keys before completion is drained."""
+
+    def test_delete_skips_lookup_waiting_for_completion(self) -> None:
+        client = MockNativeConnector()
+        adapter = NativeConnectorL2Adapter(client)
+        key = create_object_key(1)
+        try:
+            store_fd = adapter.get_store_event_fd()
+            adapter.submit_store_task([key], [create_memory_obj()])
+            assert wait_for_event_fd(store_fd, timeout=5.0)
+            adapter.pop_completed_store_tasks()
+
+            client.defer_exists_completions()
+            lookup_fd = adapter.get_lookup_and_lock_event_fd()
+            task_id = adapter.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
+
+            adapter.delete([key])
+
+            client.resume_exists_completions()
+            assert wait_for_event_fd(lookup_fd, timeout=5.0)
+            bitmap = adapter.query_lookup_and_lock_result(task_id)
+            assert bitmap is not None
+            assert bitmap.test(0) is True
+            adapter.submit_unlock([key])
+            assert _keys_present(adapter, [key]) == [True]
+        finally:
+            adapter.close()
+
+    def test_failed_lookup_releases_pending_pin(self) -> None:
+        client = MockNativeConnector()
+        adapter = NativeConnectorL2Adapter(client)
+        key = create_object_key(1)
+        try:
+            store_fd = adapter.get_store_event_fd()
+            adapter.submit_store_task([key], [create_memory_obj()])
+            assert wait_for_event_fd(store_fd, timeout=5.0)
+            adapter.pop_completed_store_tasks()
+
+            client.defer_exists_completions()
+            lookup_fd = adapter.get_lookup_and_lock_event_fd()
+            task_id = adapter.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
+            client.release_next_exists_failure()
+            assert wait_for_event_fd(lookup_fd, timeout=5.0)
+            bitmap = adapter.query_lookup_and_lock_result(task_id)
+            assert bitmap is not None
+            assert bitmap.test(0) is False
+
+            client.resume_exists_completions()
+            adapter.delete([key])
+            assert _keys_present(adapter, [key]) == [False]
+        finally:
+            adapter.close()
+
+    def test_overlapping_lookups_keep_independent_pending_pins(self) -> None:
+        client = MockNativeConnector()
+        adapter = NativeConnectorL2Adapter(client)
+        key = create_object_key(1)
+        try:
+            client.defer_exists_completions()
+            lookup_fd = adapter.get_lookup_and_lock_event_fd()
+            first_task = adapter.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
+            second_task = adapter.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
+
+            client.release_next_exists_completion()
+            assert wait_for_event_fd(lookup_fd, timeout=5.0)
+            first = adapter.query_lookup_and_lock_result(first_task)
+            assert first is not None
+            assert first.test(0) is False
+
+            store_fd = adapter.get_store_event_fd()
+            adapter.submit_store_task([key], [create_memory_obj()])
+            assert wait_for_event_fd(store_fd, timeout=5.0)
+            adapter.pop_completed_store_tasks()
+            adapter.delete([key])
+
+            client.resume_exists_completions()
+            assert wait_for_event_fd(lookup_fd, timeout=5.0)
+            second = adapter.query_lookup_and_lock_result(second_task)
+            assert second is not None
+            assert second.test(0) is False
+            assert _keys_present(adapter, [key]) == [True]
+
+            adapter.delete([key])
+            assert _keys_present(adapter, [key]) == [False]
+        finally:
+            adapter.close()
+
+
+class TestLookupRespectsPendingDeletes:
+    """Lookups overlapping an earlier delete must not acquire stale locks."""
+
+    def test_lookup_treats_deleting_key_as_miss_in_mixed_batch(self) -> None:
+        client = MockNativeConnector()
+        adapter = NativeConnectorL2Adapter(client)
+        deleting_key = create_object_key(1)
+        retained_key = create_object_key(2)
+        delete_thread = threading.Thread(
+            target=adapter.delete,
+            args=([deleting_key],),
+            daemon=True,
+        )
+        try:
+            store_fd = adapter.get_store_event_fd()
+            lookup_fd = adapter.get_lookup_and_lock_event_fd()
+            adapter.submit_store_task(
+                [deleting_key, retained_key],
+                [create_memory_obj(), create_memory_obj()],
+            )
+            assert wait_for_event_fd(store_fd, timeout=5.0)
+            adapter.pop_completed_store_tasks()
+
+            client.defer_delete_completions()
+            delete_thread.start()
+            assert client.wait_for_delete_submission()
+
+            task_id = adapter.submit_lookup_and_lock_task(
+                [deleting_key, retained_key], {0: _EMPTY_LAYOUT}
+            )
+            assert wait_for_event_fd(lookup_fd, timeout=5.0)
+            bitmap = adapter.query_lookup_and_lock_result(task_id)
+            assert bitmap is not None
+            assert bitmap.test(0) is False
+            assert bitmap.test(1) is True
+            adapter.submit_unlock([retained_key])
+
+            client.release_next_delete_completion()
+            delete_thread.join(timeout=5.0)
+            assert not delete_thread.is_alive()
+        finally:
+            client.resume_delete_completions()
+            delete_thread.join(timeout=5.0)
+            adapter.close()
+
+    def test_failed_delete_releases_key_for_later_lookup(self) -> None:
+        client = MockNativeConnector()
+        adapter = NativeConnectorL2Adapter(client)
+        key = create_object_key(1)
+        delete_thread = threading.Thread(
+            target=adapter.delete,
+            args=([key],),
+            daemon=True,
+        )
+        try:
+            store_fd = adapter.get_store_event_fd()
+            lookup_fd = adapter.get_lookup_and_lock_event_fd()
+            adapter.submit_store_task([key], [create_memory_obj()])
+            assert wait_for_event_fd(store_fd, timeout=5.0)
+            adapter.pop_completed_store_tasks()
+
+            client.defer_delete_completions()
+            delete_thread.start()
+            assert client.wait_for_delete_submission()
+
+            pending_task = adapter.submit_lookup_and_lock_task(
+                [key], {0: _EMPTY_LAYOUT}
+            )
+            assert wait_for_event_fd(lookup_fd, timeout=5.0)
+            pending_result = adapter.query_lookup_and_lock_result(pending_task)
+            assert pending_result is not None
+            assert pending_result.test(0) is False
+
+            client.release_next_delete_failure()
+            delete_thread.join(timeout=5.0)
+            assert not delete_thread.is_alive()
+
+            assert _keys_present(adapter, [key]) == [True]
+        finally:
+            client.resume_delete_completions()
+            delete_thread.join(timeout=5.0)
+            adapter.close()
 
 
 # =============================================================================

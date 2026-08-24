@@ -122,12 +122,18 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         self._load_efd = create_event_notifier()
 
         # Pending ops: native future_id →
-        #   (op_type, task_id, num_keys, keys_for_locking)
-        # keys_for_locking is only set for lookup ops so
-        # we can apply locks
+        #   (op_type, task_id, result_size, op_keys, result_indices)
+        # result_indices maps lookup results back to the original batch when
+        # keys overlapping an earlier delete are omitted from the native call.
         self._pending_ops: dict[
             int,
-            tuple[str, L2TaskId, int, list[ObjectKey] | None],
+            tuple[
+                str,
+                L2TaskId,
+                int,
+                list[ObjectKey] | None,
+                list[int] | None,
+            ],
         ] = {}
 
         # Completed results (same pattern as MockL2Adapter)
@@ -137,12 +143,20 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
 
         # Client-side lock tracking (refcount per key)
         self._locked_keys: dict[ObjectKey, int] = defaultdict(int)
+        # Lookup submissions that have not reached the demux completion path.
+        # Delete checks this separately from completed lookup locks so a key
+        # stays protected across the entire submit-to-completion window.
+        self._pending_lookup_keys: dict[ObjectKey, int] = defaultdict(int)
 
         # Delete capability detection
         self._has_delete = callable(getattr(native_client, "submit_batch_delete", None))
 
         # Pending delete events for synchronous delete() calls
         self._pending_delete_events: dict[L2TaskId, threading.Event] = {}
+        # Delete submissions that have not reached the demux completion path.
+        # A later lookup reports these keys as misses so it cannot acquire a
+        # stale lock before an earlier backend delete finishes.
+        self._pending_delete_keys: dict[ObjectKey, int] = defaultdict(int)
 
         # Per-key size tracking. ``_key_sizes`` lets us look up byte sizes
         # at delete time (the native completion only carries booleans, not
@@ -206,6 +220,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                 task_id,
                 len(keys),
                 None,
+                None,
             )
             self._pending_store_sizes[future_id] = (list(keys), per_key_sizes)
 
@@ -228,16 +243,49 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         keys: list[ObjectKey],
         group_layout_descs: dict[int, MemoryLayoutDesc],
     ) -> L2TaskId:
-        key_strings = [_object_key_to_string(k) for k in keys]
+        """Submit an existence lookup and lock keys reported as present.
+
+        Keys covered by an earlier in-flight delete are resolved as misses
+        without querying the backend. Other keys in the same batch are still
+        queried and mapped to their original bitmap positions.
+
+        Args:
+            keys: Object keys to look up and lock.
+            group_layout_descs: Per-object-group layout hints. Native
+                connectors currently ignore these hints.
+
+        Returns:
+            The task ID used to query the eventual lookup bitmap.
+
+        Raises:
+            Exception: Propagates errors raised when the native connector
+                rejects the lookup submission.
+        """
+        lookup_keys = list(keys)
 
         with self._lock:
             task_id = self._get_next_task_id()
+            result_indices = [
+                i
+                for i, key in enumerate(lookup_keys)
+                if self._pending_delete_keys.get(key, 0) == 0
+            ]
+            submitted_keys = [lookup_keys[i] for i in result_indices]
+            if not submitted_keys:
+                self._completed_lookups[task_id] = Bitmap(len(lookup_keys))
+                self._lookup_efd.notify()
+                return task_id
+
+            key_strings = [_object_key_to_string(k) for k in submitted_keys]
             future_id = int(self._client.submit_batch_exists(key_strings))
+            for key in submitted_keys:
+                self._pending_lookup_keys[key] += 1
             self._pending_ops[future_id] = (
                 self._OP_LOOKUP,
                 task_id,
-                len(keys),
-                list(keys),
+                len(lookup_keys),
+                submitted_keys,
+                result_indices,
             )
 
         return task_id
@@ -276,6 +324,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                 task_id,
                 len(keys),
                 list(keys),
+                None,
             )
 
         return task_id
@@ -291,50 +340,76 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
     def delete(self, keys: list[ObjectKey]) -> None:
         """Delete a batch of keys from the remote backend.
 
-        Keys currently pinned by a lookup lock are skipped — deleting a
-        key mid-read would break the ``lookup_and_lock`` contract that a
-        found key stays resident until the matching ``submit_unlock``.
-        Same convention as the other L2 adapters (e.g. S3, Valkey).
+        Keys with a pending lookup, completed lookup lock, or earlier pending
+        delete are skipped. Protecting both lookup states prevents deletion
+        from lookup submission until the matching ``submit_unlock`` for a
+        found key. A later lookup treats keys submitted for deletion as misses
+        until the native completion arrives.
 
         Submits a batch delete for the remaining keys to the native
         connector and blocks until the demux thread signals completion
         (up to 30s timeout). Fires ``_notify_keys_deleted`` on success so
         eviction policy tracking stays in sync.
 
-        No-op if the connector does not expose ``submit_batch_delete``,
-        if the key list is empty, or if every key is locked.
+        Args:
+            keys: Object keys requested for deletion.
+
+        Returns:
+            None.
+
+        Raises:
+            Exception: Propagates errors raised when the native connector
+                rejects the delete submission.
+
+        Note:
+            A request that exceeds the caller's 30-second wait remains
+            registered until its required native completion arrives. Its keys
+            continue to resolve as misses; releasing them earlier would allow
+            a late delete to invalidate a newly acquired lookup lock.
+
+        No-op if the connector does not expose ``submit_batch_delete``, if the
+        key list is empty, or if every key is protected by an overlapping
+        lookup or delete.
         """
         if not keys or not self._has_delete:
             return
 
         with self._lock:
-            deletable = [k for k in keys if self._locked_keys.get(k, 0) == 0]
+            deletable = [
+                key
+                for key in keys
+                if self._pending_lookup_keys.get(key, 0) == 0
+                and self._locked_keys.get(key, 0) == 0
+                and self._pending_delete_keys.get(key, 0) == 0
+            ]
             if not deletable:
                 return
             done_event = threading.Event()
             key_strings = [_object_key_to_string(k) for k in deletable]
             task_id = self._get_next_task_id()
             future_id = int(self._client.submit_batch_delete(key_strings))
+            for key in deletable:
+                self._pending_delete_keys[key] += 1
             self._pending_ops[future_id] = (
                 self._OP_DELETE,
                 task_id,
                 len(deletable),
                 deletable,
+                None,
             )
             self._pending_delete_events[task_id] = done_event
 
         # Block until demux thread signals completion
         if not done_event.wait(timeout=30.0):
             with self._lock:
+                # Keep the pending op and its per-key quarantine until the
+                # connector's required completion arrives. Dropping either
+                # here would reopen the delete-before-lookup race if the
+                # backend completes after this caller returns.
                 self._pending_delete_events.pop(task_id, None)
-                # Note: _pending_ops entry may already be consumed
-                # by the demux thread; pop is safe either way.
-                for fid, entry in list(self._pending_ops.items()):
-                    if entry[1] == task_id:
-                        self._pending_ops.pop(fid, None)
-                        break
             logger.warning(
-                "delete() timed out after 30s for %d keys",
+                "delete() timed out after 30s for %d keys; "
+                "overlapping lookups will miss until completion",
                 len(deletable),
             )
             return
@@ -396,6 +471,22 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         self._next_task_id += 1
         return task_id
 
+    def _release_pending_lookup_key(self, key: ObjectKey) -> None:
+        """Release one pending lookup refcount while holding ``self._lock``."""
+        count = self._pending_lookup_keys.get(key, 0)
+        if count <= 1:
+            self._pending_lookup_keys.pop(key, None)
+        else:
+            self._pending_lookup_keys[key] = count - 1
+
+    def _release_pending_delete_key(self, key: ObjectKey) -> None:
+        """Release one pending delete refcount while holding ``self._lock``."""
+        count = self._pending_delete_keys.get(key, 0)
+        if count <= 1:
+            self._pending_delete_keys.pop(key, None)
+        else:
+            self._pending_delete_keys[key] = count - 1
+
     def _demux_loop(self) -> None:
         """Background thread that polls the native
         connector's eventfd, drains completions, and
@@ -453,7 +544,8 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                         op_type,
                         task_id,
                         num_keys,
-                        lookup_keys,
+                        op_keys,
+                        result_indices,
                     ) = entry
 
                     if op_type == self._OP_STORE:
@@ -482,12 +574,20 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
 
                     elif op_type == self._OP_LOOKUP:
                         bitmap = Bitmap(num_keys)
-                        if ok and result_bools is not None:
-                            for i, found in enumerate(result_bools):
+                        if op_keys is not None and result_indices is not None:
+                            for i, (result_index, key) in enumerate(
+                                zip(result_indices, op_keys, strict=True)
+                            ):
+                                self._release_pending_lookup_key(key)
+                                found = (
+                                    ok
+                                    and result_bools is not None
+                                    and i < len(result_bools)
+                                    and result_bools[i]
+                                )
                                 if found:
-                                    bitmap.set(i)
-                                    if lookup_keys is not None:
-                                        self._locked_keys[lookup_keys[i]] += 1
+                                    bitmap.set(result_index)
+                                    self._locked_keys[key] += 1
                         self._completed_lookups[task_id] = bitmap
                         self._lookup_efd.notify()
 
@@ -498,25 +598,29 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                             for i, loaded in enumerate(result_bools):
                                 if loaded:
                                     bitmap.set(i)
-                                    if lookup_keys is not None:
-                                        loaded_keys.append(lookup_keys[i])
+                                    if op_keys is not None:
+                                        loaded_keys.append(op_keys[i])
                         elif ok:
                             # Fallback for connectors that
                             # do not report per-key results
                             for i in range(num_keys):
                                 bitmap.set(i)
-                            if lookup_keys is not None:
-                                loaded_keys.extend(lookup_keys)
+                            if op_keys is not None:
+                                loaded_keys.extend(op_keys)
                         keys_accessed.extend(loaded_keys)
                         self._completed_loads[task_id] = bitmap
                         self._load_efd.notify()
 
                     elif op_type == self._OP_DELETE:
-                        if result_bools is not None and lookup_keys is not None:
-                            for i, deleted in enumerate(result_bools):
+                        if op_keys is not None:
+                            for key in op_keys:
+                                self._release_pending_delete_key(key)
+                        if result_bools is not None and op_keys is not None:
+                            for key, deleted in zip(
+                                op_keys, result_bools, strict=False
+                            ):
                                 if not deleted:
                                     continue
-                                key = lookup_keys[i]
                                 # Only notify (with size) for keys we've
                                 # actually accounted for via a prior store.
                                 if key in self._key_sizes:
