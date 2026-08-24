@@ -18,7 +18,6 @@ from fastapi import APIRouter, HTTPException, Query, Request
 # First Party
 from lmcache.v1.distributed.api import Tier
 from lmcache.v1.mp_coordinator.http_apis.dependencies import get_context
-from lmcache.v1.mp_coordinator.key_directory import DirectoryStats
 from lmcache.v1.mp_coordinator.schemas import (
     BlendLookupRequest,
     BlendLookupResponse,
@@ -30,6 +29,7 @@ from lmcache.v1.mp_coordinator.schemas import (
     DirectoryLookupResponse,
     decode_tokens,
 )
+from lmcache.v1.mp_coordinator.views.key_directory import DirectoryStats, KeyDirectory
 from lmcache.v1.multiprocess.cache_control.key_resolver import resolve_object_keys
 
 router = APIRouter()
@@ -77,8 +77,9 @@ async def lookup_placements(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         encoded_keys = [key.to_encoded_object_key() for key in obj_keys]
-    placements = ctx.key_directory.lookup(obj_keys)
-    token_ids = ctx.key_directory.get_token_ids([key.chunk_hash for key in obj_keys])
+    directory = ctx.views.get(KeyDirectory)
+    placements = directory.lookup(obj_keys)
+    token_ids = directory.get_token_ids([key.chunk_hash for key in obj_keys])
     return DirectoryLookupResponse(
         chunks=chunks,
         results=[
@@ -109,7 +110,7 @@ async def blend_lookup(
     Returns:
         Matched chunks, ascending by query position.
     """
-    directory = get_context(request).key_directory
+    directory = get_context(request).views.get(KeyDirectory)
     tokens = decode_tokens(body.tokens_b64)
 
     def _match() -> BlendLookupResponse:
@@ -158,7 +159,7 @@ async def list_directory_keys(
         each key with its matching placements and the number of token
         ids known for its chunk.
     """
-    directory = get_context(request).key_directory
+    directory = get_context(request).views.get(KeyDirectory)
 
     def _scan() -> DirectoryListResponse:
         """Page the directory and shape the rows for the wire."""
@@ -192,4 +193,4 @@ async def directory_stats(request: Request) -> DirectoryStats:
         applied seq, gap flag) lives on the ingest gate and is not
         exposed yet.
     """
-    return get_context(request).key_directory.stats()
+    return get_context(request).views.get(KeyDirectory).stats()
