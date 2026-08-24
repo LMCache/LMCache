@@ -8,8 +8,9 @@ See ``docs/design/v1/mp_coordinator/usage_and_eviction.md``.
 from __future__ import annotations
 
 # Standard
+from collections.abc import Mapping
 from dataclasses import asdict
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 import asyncio
 
 # Third Party
@@ -17,12 +18,17 @@ import httpx
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import Tier
+from lmcache.v1.distributed.api import EncodedObjectKey, Tier
+from lmcache.v1.distributed.eviction import EvictionPolicy
 from lmcache.v1.distributed.eviction_policy.isolated_lru import (
     IsolatedLRUEvictionPolicy,
 )
 from lmcache.v1.distributed.quota_manager import QuotaManager
 from lmcache.v1.mp_coordinator.api import CacheEventBatch, CacheEventType
+from lmcache.v1.mp_coordinator.persistence.durable_component import (
+    DurableComponent,
+    PersistenceType,
+)
 from lmcache.v1.multiprocess.cache_control.object_service import (
     MAX_DELETE_BATCH,
 )
@@ -65,14 +71,22 @@ class FleetEvictionController:
         self._trigger_watermark = trigger_watermark
         self._policy = IsolatedLRUEvictionPolicy()
         self._in_flight_dispatches: set[asyncio.Task] = set()
-        # Reference-counted L2 pins: a key is excluded from eviction plans while
-        # its count is > 0. Not persisted across coordinator restarts.
         self._pin_counts: dict[ObjectKey, int] = {}
 
     @property
     def quota(self) -> QuotaManager:
         """The budgets this controller enforces."""
         return self._quota_manager
+
+    @property
+    def policy(self) -> EvictionPolicy:
+        """The eviction policy, persisted as a durable component.
+
+        What it stores is the policy's business: an ordering-based policy
+        carries its order, one that derives everything from the keys
+        carries nothing.
+        """
+        return self._policy
 
     def consume(self, batch: CacheEventBatch) -> None:
         """Apply one gate-admitted batch to the LRU.
@@ -133,6 +147,56 @@ class FleetEvictionController:
                 self._pin_counts.pop(key, None)
             else:
                 self._pin_counts[key] = count - 1
+
+    def get_durable_components(self) -> tuple[DurableComponent, ...]:
+        """Return the state this controller owns that must outlive the process.
+
+        Each carries its own ``persistence_type``, so a caller routes
+        them without knowing what this controller is made of.
+
+        Returns:
+            The pin table (this object), the quota limits, and the policy.
+        """
+        return (self, self._quota_manager, self._policy)
+
+    @property
+    def persistence_type(self) -> PersistenceType:
+        """Pins are operator intent; nothing else can reconstruct them."""
+        return PersistenceType.METADATA
+
+    @property
+    def name(self) -> str:
+        """Name of the pin table's section in the metadata document."""
+        return "pins"
+
+    def capture(self) -> Mapping[str, object]:
+        """Return the pin table in its durable form.
+
+        Returns:
+            ``{"entries": [{"key": <EncodedObjectKey fields>, "count":
+            int}]}``.
+        """
+        return {
+            "entries": [
+                {"key": asdict(key.to_encoded_object_key()), "count": count}
+                for key, count in self._pin_counts.items()
+            ]
+        }
+
+    def restore(self, state: Mapping[str, object]) -> None:
+        """Replace the pin table with a captured one.
+
+        The document is the coordinator's own, so values are taken as
+        written.
+
+        Args:
+            state: A :meth:`capture` value, as decoded from the
+                metadata document — see there for the shape; non-positive
+                counts are dropped.
+        """
+        entries = cast("list[Mapping[str, object]]", state["entries"])
+        restored = (_decode_pin(entry) for entry in entries)
+        self._pin_counts = {key: count for key, count in restored if count > 0}
 
     def filter_unpinned(self, keys: list[ObjectKey]) -> list[ObjectKey]:
         """Return the subset of ``keys`` with no active L2 pin, in input order.
@@ -303,3 +367,23 @@ class FleetEvictionController:
             key_count,
             salt_count,
         )
+
+
+def _decode_pin(entry: Mapping[str, object]) -> tuple[ObjectKey, int]:
+    """Rebuild one pin from the form :meth:`capture` produced.
+
+    Args:
+        entry: One ``entries`` element of the pin section.
+
+    Returns:
+        The key and its pin count.
+    """
+    fields = cast("Mapping[str, object]", entry["key"])
+    encoded = EncodedObjectKey(
+        chunk_hash_hex=str(fields["chunk_hash_hex"]),
+        model_name=str(fields["model_name"]),
+        kv_rank=cast(int, fields["kv_rank"]),
+        object_group_id=cast(int, fields["object_group_id"]),
+        cache_salt=str(fields["cache_salt"]),
+    )
+    return encoded.to_object_key(), cast(int, entry["count"])

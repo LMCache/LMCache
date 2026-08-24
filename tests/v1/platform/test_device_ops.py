@@ -127,6 +127,7 @@ def test_musa_overrides_transfer_and_stream_ordering_ops() -> None:
         if getattr(musa_mod.MusaDeviceOps, name) is not getattr(DeviceOps, name)
     ]
     assert overridden == [
+        "lmcache_memcpy_async",
         "multi_layer_block_kv_transfer",
         "record_completion_on_stream",
         "record_event_on_stream",
