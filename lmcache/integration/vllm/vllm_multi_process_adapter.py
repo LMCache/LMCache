@@ -286,15 +286,27 @@ class ParallelStrategy:
     n_servers: int
     """Number of LMCache servers backing this deployment"""
 
+    dcp_size: int = 1
+    """Decode-context-parallel size.
+
+    ``> 1`` means vLLM shards the KV cache across ``dcp_size`` ranks along the
+    token axis, so one chunk has ``dcp_size`` distinct shards rather than a
+    single replicated copy. Defaults to 1 so callers that do not set it keep
+    the previous behaviour exactly.
+    """
+
     @property
     def kv_world_size(self) -> int:
         """Number of pieces a single token chunk's KV cache is split into
         on the LMCache server storage."""
         if self.mla_only:
-            # In this PR we do not support PP + TP + MLA in multi-server mode.
-            # A precondition check enforces pp_size == 1, so kv_world_size for
-            # MLA can be derived as world_size / tp_size.
-            return self.vllm_world_size // self.tp_size
+            # MLA replicates the latent KV across TP, so a chunk is split only
+            # by the axes that hold genuinely different bytes: the pipeline
+            # stage (different layers) and, under DCP, the token shard. The
+            # product is the fold fan-out on the lookup path. Reduces to
+            # world_size // tp_size (== pp_size) when dcp_size is 1.
+            pp_stages = self.vllm_world_size // self.tp_size
+            return pp_stages * self.dcp_size
         return self.vllm_world_size // self.n_servers
 
     @property
@@ -303,8 +315,46 @@ class ParallelStrategy:
         that the current worker is responsible for,
         in ``[0, kv_world_size)``."""
         if self.mla_only:
-            return self.vllm_worker_id // self.tp_size
+            # Row-major over (pipeline stage, token shard), matching the
+            # kv_world_size product above. Reduces to the PP stage when
+            # dcp_size is 1 and to the token shard when pp_size is 1.
+            pp_stage = self.vllm_worker_id // self.tp_size
+            return pp_stage * self.dcp_size + self._get_dcp_rank()
         return self.vllm_worker_id % (self.vllm_world_size // self.n_servers)
+
+    def _get_tp_rank(self) -> int:
+        """Return this worker's rank within its tensor-parallel group."""
+        return self.vllm_worker_id % self.tp_size
+
+    def _get_dcp_rank(self) -> int:
+        """Index of the token shard this worker holds, in ``[0, dcp_size)``.
+
+        vLLM builds the DCP groups by reshaping the rank grid into contiguous
+        runs of ``dcp_size`` (``parallel_state.initialize_model_parallel``:
+        ``all_ranks.transpose(-1, -2).reshape(-1, dcp_size)``). With
+        ``pcp_size == 1`` the flatten walks the TP axis in order, so each run is
+        a consecutive block of TP ranks starting at a multiple of ``dcp_size``
+        and a worker's position inside its run is ``tp_rank % dcp_size``.
+        """
+        return self._get_tp_rank() % self.dcp_size
+
+    @property
+    def num_kv_readers(self) -> int:
+        """Number of TP workers that retrieve one stored object.
+
+        Lookup reserves ``1 + extra_count`` read locks on each object and every
+        worker's retrieve releases exactly one, so this must be exact: too low
+        unpins an object while readers are still copying.
+
+        Head-sharded models give every rank its own object, so one reader. MLA
+        replicates the latent KV across TP, so the TP ranks of a pipeline stage
+        read the same object -- but only those on the same LMCache server, and
+        under DCP only those sharing a token shard. Hence ``kv_tp_size``
+        (already divided by ``n_servers``) over ``dcp_size``.
+        """
+        if not self.mla_only:
+            return 1
+        return self.kv_tp_size // self.dcp_size
 
     @property
     def kv_tp_size(self) -> int:
@@ -316,6 +366,21 @@ class ParallelStrategy:
         """Whether this rank is responsible for storing KV."""
         if not self.mla_only:
             return True
+        if self.dcp_size > 1:
+            # A single writer cannot cover the chunk any more: each dcp_rank
+            # holds a different token shard. Elect one writer per shard *per
+            # server*, since ranks map to servers in contiguous blocks and each
+            # server must hold an independently servable set. The first
+            # ``dcp_size`` ranks of a server are consecutive, and any run of
+            # ``dcp_size`` consecutive ranks covers every ``dcp_rank`` exactly
+            # once -- so one writer per shard, none twice, for any block size.
+            # Two groupings must each hold a full shard set: an LMCache
+            # server (lookup takes the minimum hit count across servers) and a
+            # pipeline stage (each owns different layers). Both are contiguous
+            # rank runs, so the binding constraint is the smaller of the two.
+            ranks_per_server = self.vllm_world_size // self.n_servers
+            block = min(ranks_per_server, self.tp_size)
+            return (self.vllm_worker_id % block) < self.dcp_size
         # MLA-only: only first rank per node is a writer.
         return self.vllm_worker_id % (self.tp_size // self.n_servers) == 0
 
@@ -613,9 +678,13 @@ class LMCacheMPSchedulerAdapter:
             )
         self.lmcache_tokens_per_chunk = unique_sizes.pop()
 
-        assert self.lmcache_tokens_per_chunk % vllm_block_size == 0, (
-            "LMCache chunk size should be a multiple of vLLM block size"
-        )
+        if self.lmcache_tokens_per_chunk % vllm_block_size != 0:
+            raise ValueError(
+                f"LMCache chunk size {self.lmcache_tokens_per_chunk} must be a "
+                f"multiple of {vllm_block_size} (the vLLM block size scaled by "
+                f"decode_context_parallel_size). Set --chunk-size to a multiple "
+                f"of {vllm_block_size}."
+            )
         self.blocks_in_chunk = self.lmcache_tokens_per_chunk // vllm_block_size
 
         # Health state: one Event per server. The adapter is considered healthy
@@ -1000,6 +1069,7 @@ class LMCacheMPSchedulerAdapter:
         # NOTE: for the scheduler adapter, we don't have a worker id,
         # so we set it to None in the key.
         return IPCCacheServerKey(
+            num_kv_readers=self.parallel_strategy.num_kv_readers,
             model_name=self.model_name,
             world_size=self.world_size,
             worker_id=None,
@@ -1149,9 +1219,13 @@ class LMCacheMPWorkerAdapter:
             self.mq_client.close()
             _raise_server_unreachable(server_url, self._mq_timeout)
         self.lmcache_tokens_per_chunk = lmcache_tokens_per_chunk
-        assert lmcache_tokens_per_chunk % vllm_block_size == 0, (
-            "LMCache chunk size should be a multiple of vLLM block size"
-        )
+        if lmcache_tokens_per_chunk % vllm_block_size != 0:
+            raise ValueError(
+                f"LMCache chunk size {lmcache_tokens_per_chunk} must be a "
+                f"multiple of {vllm_block_size} (the vLLM block size scaled by "
+                f"decode_context_parallel_size). Set --chunk-size to a multiple "
+                f"of {vllm_block_size}."
+            )
         self.blocks_in_chunk = lmcache_tokens_per_chunk // vllm_block_size
 
         # Experimental intermediate tensor transfer
@@ -1940,6 +2014,7 @@ class LMCacheMPWorkerAdapter:
             IPCCacheServerKey: The constructed key.
         """
         return IPCCacheServerKey(
+            num_kv_readers=self.parallel_strategy.num_kv_readers,
             model_name=self.model_name,
             world_size=self.world_size,
             worker_id=self.worker_id,

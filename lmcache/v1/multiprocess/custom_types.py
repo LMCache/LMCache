@@ -60,6 +60,17 @@ class IPCCacheServerKey:
     # ObjectKey.cache_salt). Validated in __post_init__.
     cache_salt: str = ""
 
+    # === Reader accounting (not part of cache identity) ===
+    # Number of TP workers that retrieve this key's object. Lookup reserves
+    # ``1 + extra_count`` read locks and each worker's retrieve releases one,
+    # so the server needs this exactly. It cannot be derived from
+    # ``(tp_size, world_size)``: (4, 2) is produced both by "PP=2, no DCP"
+    # (4 readers) and "PP=1, DCP=2" (2 readers). ``0`` means the client did
+    # not send it and the server falls back to the legacy heuristic.
+    # msgspec ignores unknown fields and fills defaults, so old clients and
+    # old servers both keep working across this addition.
+    num_kv_readers: int = field(default=0, compare=False)
+
     # Duplicated from ObjectKey — cannot import ObjectKey here due to
     # circular dependency (api.py imports IPCCacheServerKey).
     _SALT_FORBIDDEN_CHARS = frozenset("@/\\\x00")
@@ -108,6 +119,7 @@ class IPCCacheServerKey:
             model_name=self.model_name,
             world_size=self.world_size,
             worker_id=None,
+            num_kv_readers=self.num_kv_readers,
             token_ids=self.token_ids,
             start=self.start,
             end=self.end,

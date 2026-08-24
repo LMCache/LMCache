@@ -35,39 +35,42 @@ logger = init_logger(__name__)
 def compute_extra_count(
     tp_size: int,
     world_size: int,
+    num_kv_readers: int = 0,
 ) -> int:
-    """Compute extra count for MLA multi-reader locking.
+    """Compute extra read-lock count for multi-reader objects.
 
-    Non-MLA: each TP worker owns a distinct KV shard,
-      so each ObjectKey is retrieved by exactly 1
-      worker -> extra_count = 0.
-    MLA: TP does not split KV caches, all TP workers
-      share the same object. vLLM passes world_size
-      already divided by tp_size (e.g. world_size=1
-      for TP=4 PP=1), so ipc_keys_to_object_keys
-      only produces 1 ObjectKey per chunk.  All TP
-      workers retrieve that same ObjectKey, hence
-      extra_count = tp_size - 1.
+    Lookup reserves ``1 + extra_count`` read locks on each object and every
+    worker's retrieve releases exactly one, so this must equal
+    ``readers - 1``. Under-counting unpins an object while readers are still
+    copying; over-counting only holds it until the read lock's TTL.
 
-    Detection: tp > world_size means MLA (world_size
-    was divided by tp on the vLLM side).
+    ``num_kv_readers`` carries the reader count directly and is exact. It is
+    required because the count is not recoverable from the other two
+    arguments: ``(tp_size=4, world_size=2)`` is produced both by "PP=2,
+    no DCP" (4 readers) and "PP=1, DCP=2" (2 readers).
 
-    Fallback: old vLLM (<= 0.8.5) does not send
-    tp_size (defaults to 1); we fall back to
-    world_size which gives extra_count = 0
-    (safe but may under-lock for MLA).
+    Legacy fallback, used when ``num_kv_readers`` is 0 (client too old to
+    send it, so DCP is not in play either):
 
-    TODO: world_size currently carries an overloaded
-    meaning (total ranks for non-MLA vs total/tp for
-    MLA). Consider a dedicated field in the future.
+    - Non-MLA: each TP worker owns a distinct shard, so one reader -> 0.
+    - MLA: TP does not split the KV cache, so all ``tp_size`` workers share
+      one object -> ``tp_size - 1``. Detected by ``tp > world_size``, since
+      vLLM passes ``world_size`` already divided by ``tp_size``.
+    - Old vLLM (<= 0.8.5) sends no ``tp_size`` (defaults to 1); falling back
+      to ``world_size`` yields 0, which is safe but may under-lock for MLA.
 
     Args:
         tp_size: Tensor-parallel size from the client.
         world_size: World size from the cache key.
+        num_kv_readers: Exact number of workers retrieving each object;
+            ``0`` means the client did not send it.
 
     Returns:
-        Number of extra count (0 for non-MLA).
+        Number of extra readers beyond the first (0 when each object has a
+        single reader).
     """
+    if num_kv_readers > 0:
+        return num_kv_readers - 1
     tp = tp_size if tp_size > 1 else world_size
     return tp - 1 if tp > world_size else 0
 
@@ -275,7 +278,7 @@ class LookupModule:
             )
             return
 
-        extra_count = compute_extra_count(tp_size, world_size)
+        extra_count = compute_extra_count(tp_size, world_size, key.num_kv_readers)
 
         chunk_hashes = self._ctx.token_hasher.compute_chunk_hashes(list(key.token_ids))
         if not chunk_hashes:
@@ -563,7 +566,7 @@ class LookupModule:
         if not obj_keys:
             return
 
-        extra_count = compute_extra_count(tp_size, key.world_size)
+        extra_count = compute_extra_count(tp_size, key.world_size, key.num_kv_readers)
 
         self._ctx.storage_manager.finish_read_prefetched(
             obj_keys, extra_count=extra_count

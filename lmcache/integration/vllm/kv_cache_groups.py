@@ -19,6 +19,52 @@ from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 logger = init_logger(__name__)
 
 
+def _is_attention_spec(spec: Any) -> bool:
+    """Return whether the KV cache spec is a vLLM attention spec.
+
+    Every paged-attention spec (``FullAttentionSpec``, ``MLAAttentionSpec``,
+    ``SlidingWindowSpec``, ...) derives from vLLM's ``AttentionSpec``; Mamba and
+    other recurrent specs do not. Checked by class name (like
+    :func:`_is_sliding_window_spec`) so this module stays importable without
+    vLLM.
+
+    ``UniformTypeKVCacheSpecs`` is a container that derives from
+    ``KVCacheSpec`` directly, so it is unwrapped first -- every layer it holds
+    is the same type by construction, hence testing one leaf is enough. Without
+    this, a wrapped attention group would silently skip DCP scaling and every
+    memory object would be sized ``dcp_size`` times too large.
+    """
+    inner = getattr(spec, "kv_cache_specs", None)
+    if isinstance(inner, dict) and inner:
+        spec = next(iter(inner.values()))
+    return any(cls.__name__ == "AttentionSpec" for cls in type(spec).__mro__)
+
+
+def get_tokens_per_block(kv_cache_spec: Any, dcp_size: int) -> int:
+    """Global tokens covered by one block id of ``kv_cache_spec``.
+
+    Under decode-context parallelism a rank materialises only its 1/dcp strided
+    slice of an attention block, so one block id spans ``block_size * dcp_size``
+    global tokens while the rank still holds only ``block_size`` physical slots
+    for it. A Mamba group's recurrent state is replicated per rank rather than
+    sharded, so it spans ``block_size`` either way. This is the rule vLLM states
+    in ``resolve_kv_cache_block_sizes`` and the scheduler commits at.
+
+    Args:
+        kv_cache_spec: The engine group's vLLM KV cache spec.
+        dcp_size: Decode-context-parallel size; 1 disables the scaling.
+
+    Returns:
+        Global tokens per block id for this group.
+    """
+    block_size = kv_cache_spec.block_size
+    if dcp_size <= 1:
+        return block_size
+    if _is_attention_spec(kv_cache_spec):
+        return block_size * dcp_size
+    return block_size
+
+
 def _is_sliding_window_spec(spec: Any) -> bool:
     """Return whether the KV cache spec is a vLLM sliding-window spec.
 
@@ -209,6 +255,7 @@ def create_engine_group_infos_from_vllm(
     kv_cache_config: Any,
     kv_caches: Mapping[str, Any],
     layout_hints: "LayoutHints | None" = None,
+    dcp_size: int = 1,
 ) -> list[EngineGroupInfo]:
     """Build the LMCache engine group infos from vLLM metadata and registered tensors.
 
@@ -228,6 +275,15 @@ def create_engine_group_infos_from_vllm(
             are inspected for physical shape and dtype.
         layout_hints: Optional engine-provided layout hints forwarded to format
             detection (e.g. ``NHD``/``HND`` and compression metadata).
+        dcp_size: Decode context parallel size.
+
+    Note:
+        Under DCP each attention group's ``tokens_per_block`` is scaled by
+        ``dcp_size`` so it stays in the scheduler's coordinate space. The
+        group then presents to the server with
+        ``tokens_per_block // slots_per_block == dcp_size``, which is what
+        sizes each rank's memory object to its own strided slice. Mamba
+        groups are replicated per rank and stay unscaled.
 
     Returns:
         The list of ``EngineGroupInfo`` in protocol order, i.e. the LMCache group
@@ -286,8 +342,13 @@ def create_engine_group_infos_from_vllm(
         for engine_group_id, group in enumerate(vllm_groups):
             # The spec's block_size is the logical tokens covered by one of
             # this group's paged chunks (block IDs); the physical slot count
-            # per chunk is discovered later from the registered tensors.
-            group_tokens_per_block[engine_group_id] = group.kv_cache_spec.block_size
+            # per chunk is discovered later from the registered tensors. Under
+            # DCP those two diverge for attention groups -- one block id spans
+            # block_size * dcp global tokens but only block_size slots on this
+            # rank -- and that ratio is exactly what sizes the memory object.
+            group_tokens_per_block[engine_group_id] = get_tokens_per_block(
+                group.kv_cache_spec, dcp_size
+            )
             for name in group.layer_names:
                 per_layer_group_idx[layer_to_idx[name]] = engine_group_id
         per_layer_sw_size = _resolve_per_layer_sw_sizes(
