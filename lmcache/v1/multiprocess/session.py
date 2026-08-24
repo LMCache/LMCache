@@ -44,6 +44,9 @@ class Session:
     prefetch_hit_chunks: int = -1
     prefetch_locked_gids: tuple = ()
     extras: dict[str, Any] = field(default_factory=dict)
+    _failed_retrieve_releases: set[tuple[int, int, int, int]] = field(
+        default_factory=set, repr=False
+    )
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def set_tokens(self, full_token_ids: list[int]) -> None:
@@ -135,6 +138,50 @@ class Session:
             self.chunk_hashes.append(h)
             self.num_chunks_processed += 1
 
+    def claim_failed_retrieve_release(
+        self,
+        instance_id: int,
+        key: IPCCacheServerKey,
+    ) -> tuple[int, tuple] | None:
+        """Claim one failed worker's lookup-lock release.
+
+        A scheduler lookup acquires read locks for every KV worker (or one
+        reader count per TP worker for MLA), while RETRIEVE responses are
+        per worker instance.  When a worker has lost its GPU registration,
+        only that instance's share may be released.  This claim makes a
+        duplicate failed RETRIEVE idempotent and returns the lookup lock
+        model captured for the request.
+
+        ``None`` is also returned when the session cannot prove ownership of
+        the requested range.  In that case it is safer to leave the lock to
+        its TTL than to decrement a concurrent request's anonymous L1 count.
+        """
+        if key.worker_id is None:
+            return None
+
+        with self._lock:
+            lookup_key = self.lookup_ipc_key
+            hit_chunks = self.prefetch_hit_chunks
+            if lookup_key is None or hit_chunks < 0:
+                return None
+
+            same_lookup = (
+                key.model_name == lookup_key.model_name
+                and key.world_size == lookup_key.world_size
+                and key.token_ids == lookup_key.token_ids
+                and key.cache_salt == lookup_key.cache_salt
+                and key.start >= lookup_key.start
+                and key.end <= lookup_key.end
+            )
+            if not same_lookup:
+                return None
+
+            owner = (instance_id, key.worker_id, key.start, key.end)
+            if owner in self._failed_retrieve_releases:
+                return None
+            self._failed_retrieve_releases.add(owner)
+            return hit_chunks, self.prefetch_locked_gids
+
 
 class SessionManager:
     """Thread-safe manager for per-request sessions."""
@@ -174,6 +221,11 @@ class SessionManager:
                 )
                 logger.debug("Created session for request_id=%s", request_id)
             return self._sessions[request_id]
+
+    def get(self, request_id: str) -> Optional[Session]:
+        """Return an existing session without creating ownership state."""
+        with self._lock:
+            return self._sessions.get(request_id)
 
     def remove(self, request_id: str) -> Optional[Session]:
         """Remove a session by request_id.

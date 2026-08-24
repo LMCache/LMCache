@@ -72,6 +72,49 @@ def compute_extra_count(
     return tp - 1 if tp > world_size else 0
 
 
+def resolve_prefetched_obj_keys(
+    ctx: MPCacheServerContext,
+    key: IPCCacheServerKey,
+    hit_chunks: int,
+    locked_gids: tuple,
+) -> list[ObjectKey]:
+    """Resolve the subset of a request range that lookup actually locked.
+
+    ``key.worker_id=None`` resolves every KV rank for scheduler-owned cleanup.
+    A worker-specific key resolves only that worker's shard (or one MLA reader
+    share), which is required for per-instance RETRIEVE failure cleanup.
+    """
+    chunk_hashes = ctx.token_hasher.compute_chunk_hashes(
+        list(key.token_ids), start=key.start, end=key.end
+    )
+    if not chunk_hashes:
+        return []
+
+    start_chunk = key.start // ctx.chunk_size
+    end_chunk = start_chunk + len(chunk_hashes)
+    attn_desc = ctx.layout_desc_registry.find_attn_desc(key.model_name, key.world_size)
+
+    obj_keys: list[ObjectKey] = []
+    for group_idx, window in enumerate(attn_desc.num_chunks_in_sw):
+        if locked_gids and group_idx not in locked_gids:
+            continue
+        if hit_chunks < 0:
+            if window >= 0:
+                continue
+            lo, hi = start_chunk, end_chunk
+        else:
+            # Locked range per ``unfold``: the whole hit prefix for full
+            # attention, its trailing ``window`` chunks otherwise.
+            lo = 0 if window < 0 else max(0, hit_chunks - window)
+            lo = max(lo, start_chunk)
+            hi = min(hit_chunks, end_chunk)
+        if lo >= hi:
+            continue
+        group_hashes = chunk_hashes[lo - start_chunk : hi - start_chunk]
+        obj_keys.extend(ipc_key_to_object_keys(key, group_hashes, [group_idx])[0])
+    return obj_keys
+
+
 @dataclass
 class _PrefetchJob:
     handle: PrefetchHandle
@@ -489,18 +532,9 @@ class LookupModule:
             tp_size: Tensor-parallel size for MLA
                 multi-reader locking.
         """
-        chunk_hashes = self._ctx.token_hasher.compute_chunk_hashes(
-            list(key.token_ids), start=key.start, end=key.end
-        )
-        if not chunk_hashes:
+        if key.start >= key.end:
             return
 
-        start_chunk = key.start // self._ctx.chunk_size
-        end_chunk = start_chunk + len(chunk_hashes)
-
-        attn_desc = self._ctx.layout_desc_registry.find_attn_desc(
-            key.model_name, key.world_size
-        )
         hit_chunks = self._ctx.session_manager.get_or_create(
             key.request_id
         ).prefetch_hit_chunks
@@ -517,24 +551,7 @@ class LookupModule:
         locked_gids = self._ctx.session_manager.get_or_create(
             key.request_id
         ).prefetch_locked_gids
-        obj_keys: list[ObjectKey] = []
-        for group_idx, window in enumerate(attn_desc.num_chunks_in_sw):
-            if locked_gids and group_idx not in locked_gids:
-                continue
-            if hit_chunks < 0:
-                if window >= 0:
-                    continue
-                lo, hi = start_chunk, end_chunk
-            else:
-                # Locked range per ``unfold``: the whole hit prefix for full
-                # attention, its trailing ``window`` chunks otherwise.
-                lo = 0 if window < 0 else max(0, hit_chunks - window)
-                lo = max(lo, start_chunk)
-                hi = min(hit_chunks, end_chunk)
-            if lo >= hi:
-                continue
-            group_hashes = chunk_hashes[lo - start_chunk : hi - start_chunk]
-            obj_keys.extend(ipc_key_to_object_keys(key, group_hashes, [group_idx])[0])
+        obj_keys = resolve_prefetched_obj_keys(self._ctx, key, hit_chunks, locked_gids)
 
         if not obj_keys:
             return

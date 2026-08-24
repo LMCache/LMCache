@@ -765,6 +765,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         if request.status == RequestStatus.PREEMPTED:
             return 0, False
 
+        # A failed asynchronous load is bypassed until vLLM admits the request
+        # for local computation via update_state_after_alloc().  The scheduler
+        # may poll this method repeatedly before that admission; do not submit
+        # another lookup or re-enter WAITING_FOR_REMOTE_KVS in the meantime.
+        if tracker.state == LMCacheMPRequestState.BYPASS_LMCACHE:
+            return 0, False
+
         # A completed async load normally leaves num_computed_tokens > 0, so
         # the scheduler does not call this method again.  If vLLM reset the
         # request to zero after the worker reported invalid blocks, however,
@@ -772,7 +779,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # Reusing it would report another external hit without transitioning
         # back through WAITING_FOR_LOAD, leaving the request stuck forever in
         # WAITING_FOR_REMOTE_KVS.  Fail closed for this request instead: drop
-        # the stale lookup locks/tracker state and let vLLM recompute locally.
+        # the stale local lookup/tracker state and let vLLM recompute locally.
+        # The server has already released each failed worker's reader share.
         if (
             tracker.state == LMCacheMPRequestState.READY
             and request.num_computed_tokens == 0
@@ -783,19 +791,12 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 "the prompt will be recomputed locally.",
                 request.request_id,
             )
-            self.scheduler_adapter.free_lookup_locks(
-                token_ids=tracker.get_token_ids(),
-                start=0,
-                end=tracker.num_lmcache_hit_tokens,
-                request_id=request.request_id,
-                cache_salt=tracker.cache_salt,
-            )
             self.scheduler_adapter.cleanup_lookup_result(request.request_id)
             tracker.allocated_block_ids.clear()
             tracker.num_stored_tokens = 0
             tracker.num_vllm_hit_tokens = 0
             tracker.num_lmcache_hit_tokens = 0
-            tracker.state = LMCacheMPRequestState.PREFETCHING
+            tracker.state = LMCacheMPRequestState.BYPASS_LMCACHE
             return 0, False
 
         self.scheduler_adapter.maybe_submit_lookup_request(
@@ -898,6 +899,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             tracker.append_block_ids(tuple(new_block_ids))
 
         # Update the state of the tracker
+        if tracker.state == LMCacheMPRequestState.BYPASS_LMCACHE:
+            # Returning zero external tokens admitted this request for local
+            # computation.  Once vLLM publishes that allocation, normal READY
+            # tracking (including later stores) can resume.
+            tracker.state = LMCacheMPRequestState.READY
+            return
+
         condition = tracker.needs_retrieve()
         if tracker.state == LMCacheMPRequestState.PREFETCHING:
             # If need to retrieve, change to WAITING_FOR_LOAD

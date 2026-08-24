@@ -43,6 +43,7 @@ from lmcache.v1.multiprocess.engine_module import (
     ThreadPoolType,
 )
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
+from lmcache.v1.multiprocess.modules.lookup import resolve_prefetched_obj_keys
 from lmcache.v1.multiprocess.native_completion import (
     DeviceHostFuncDispatcher,
     submit_callback_to_stream,
@@ -711,6 +712,41 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 entry.last_seen = now
             return entry
 
+    def _release_failed_retrieve_locks(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+    ) -> None:
+        """Release only one failed instance's unconsumed lookup locks.
+
+        The lookup session is the ownership record.  If it is absent or does
+        not match the RETRIEVE range, no release is attempted: L1 locks are
+        anonymous refcounts, so guessing could consume a concurrent reader's
+        lock.  ``claim_failed_retrieve_release`` also makes duplicate failure
+        responses idempotent.
+        """
+        session = self._ctx.session_manager.get(key.request_id)
+        if session is None:
+            logger.warning(
+                "Cannot release RETRIEVE locks for unregistered instance %d: "
+                "request %s has no lookup session",
+                instance_id,
+                key.request_id,
+            )
+            return
+
+        lock_state = session.claim_failed_retrieve_release(instance_id, key)
+        if lock_state is None:
+            return
+        hit_chunks, locked_gids = lock_state
+        obj_keys = resolve_prefetched_obj_keys(self._ctx, key, hit_chunks, locked_gids)
+        if obj_keys:
+            # One failed RETRIEVE owns one reader share per key.  In
+            # particular, do not use the scheduler's MLA extra_count here:
+            # the remaining TP workers and concurrent requests still own
+            # their independent shares.
+            self._ctx.storage_manager.finish_read_prefetched(obj_keys, extra_count=0)
+
     def context_entries_snapshot(self) -> dict[int, ContextEntry]:
         """Return a shallow copy of the registry for iteration or status.
 
@@ -1277,6 +1313,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 "Rejecting RETRIEVE for unregistered GPU instance ID %d",
                 instance_id,
             )
+            self._release_failed_retrieve_locks(key, instance_id)
             return b"", False
         cache_context = entry.cache_context
         model_name = entry.model_name
