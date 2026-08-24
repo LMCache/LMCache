@@ -499,3 +499,36 @@ def test_every_server_elects_one_writer_per_shard(
             ).is_kv_writer
         )
         assert shards == list(range(dcp_size)), f"server {server}"
+
+
+@pytest.mark.parametrize(
+    "tp_size,dcp_size,n_servers",
+    [(8, 2, 1), (8, 4, 1), (8, 8, 1), (8, 2, 2), (8, 4, 2), (4, 2, 2), (6, 2, 2)],
+)
+def test_num_kv_readers_never_under_reserves_any_shard(
+    tp_size: int, dcp_size: int, n_servers: int
+):
+    """The single reader count must cover the *busiest* shard.
+
+    ``kv_tp_size / dcp_size`` need not divide evenly -- vLLM accepts TP=6 with
+    DCP=2, and across two servers each server's three ranks leave shard 0 with
+    two readers and shard 1 with one. Under-reserving unpins an object while a
+    reader is still copying, so the count is derived here by simulating which
+    ranks actually read each shard rather than by repeating the formula.
+    """
+    ranks_per_server = tp_size // n_servers
+    declared = _strategy(
+        tp_size=tp_size, dcp_size=dcp_size, worker_id=0, n_servers=n_servers
+    ).num_kv_readers
+
+    for server in range(n_servers):
+        block = range(server * ranks_per_server, (server + 1) * ranks_per_server)
+        readers_per_shard: dict[int, int] = {}
+        for rank in block:
+            shard = _strategy(
+                tp_size=tp_size, dcp_size=dcp_size, worker_id=rank, n_servers=n_servers
+            ).kv_worker_id
+            readers_per_shard[shard] = readers_per_shard.get(shard, 0) + 1
+        assert declared >= max(readers_per_shard.values()), (
+            f"server {server} shard readers {readers_per_shard} exceed {declared}"
+        )

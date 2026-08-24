@@ -351,10 +351,16 @@ class ParallelStrategy:
         read the same object -- but only those on the same LMCache server, and
         under DCP only those sharing a token shard. Hence ``kv_tp_size``
         (already divided by ``n_servers``) over ``dcp_size``.
+
+        Rounded up, because that division need not be exact: vLLM allows e.g.
+        TP=6 with DCP=2, and across two servers each server's three ranks give
+        shard 0 two readers and shard 1 one. A single count covers every shard,
+        so it must be the largest -- over-reserving merely holds a lock until
+        its TTL, while under-reserving would unpin an object mid-copy.
         """
         if not self.mla_only:
             return 1
-        return self.kv_tp_size // self.dcp_size
+        return -(-self.kv_tp_size // self.dcp_size)
 
     @property
     def kv_tp_size(self) -> int:
