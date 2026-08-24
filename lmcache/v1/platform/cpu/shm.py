@@ -17,7 +17,6 @@ from __future__ import annotations
 # Standard
 from typing import ClassVar
 import ctypes
-import dataclasses
 import itertools
 import os
 import threading
@@ -201,20 +200,18 @@ class CpuShmTensorWrapper(DeviceIPCWrapper):
 # ---------------------------------------------------------------------------
 
 
-@dataclasses.dataclass
-class _ShmSegmentRecord:
-    """Registry entry describing one migrated backing storage.
-
-    ``origin_ref`` weak-references the storage the entry was keyed for
-    (a CPython id-recycling collision reads as a miss); ``shm_storage_ref``
-    weak-references the SHM-backed storage so a hit can re-point sibling
-    views without the registry keeping the segment alive.
-    """
-
-    origin_ref: "weakref.ReferenceType[object]"
-    shm_storage_ref: "weakref.ReferenceType[object]"
-    shm_name: str
-    segment_nbytes: int
+# Registry record for one migrated backing storage:
+# ``(origin_ref, shm_storage_ref, shm_name, segment_nbytes)``.
+# ``origin_ref`` weak-references the storage the entry was keyed for (a
+# CPython id-recycling collision reads as a miss); ``shm_storage_ref``
+# weak-references the SHM-backed storage so a hit can re-point sibling
+# views without the registry keeping the segment alive.
+_ShmSegmentRecord = tuple[
+    "weakref.ReferenceType[object]",
+    "weakref.ReferenceType[object]",
+    str,
+    int,
+]
 
 
 # Per-process registry of SHM segments we have created, so each backing
@@ -265,7 +262,7 @@ def _cleanup_shm_segment(
             # Only drop an entry still pointing at *this* segment; a
             # future storage reusing the id may already have replaced it.
             cached = _CPU_SHM_SEGMENTS.get(sid)
-            if cached is not None and cached.shm_name == shm_name:
+            if cached is not None and cached[2] == shm_name:
                 _CPU_SHM_SEGMENTS.pop(sid, None)
     shm_munmap(addr, nbytes)
     try:
@@ -327,21 +324,24 @@ def migrate_to_shm_and_wrap(tensor: torch.Tensor) -> CpuShmTensorWrapper:
     # tensor, or a sibling view of the same buffer). Validate the hit
     # under the lock, re-point outside it.
     shm_storage: torch.UntypedStorage | None = None
-    hit: _ShmSegmentRecord | None = None
+    hit_name = ""
+    hit_nbytes = 0
     with _CPU_SHM_LOCK:
         cached = _CPU_SHM_SEGMENTS.get(id(storage))
         if cached is not None:
-            if cached.origin_ref() is storage:
-                resolved = cached.shm_storage_ref()
+            origin_ref, shm_storage_ref, cached_name, cached_nbytes = cached
+            if origin_ref() is storage:
+                resolved = shm_storage_ref()
                 if resolved is not None:
-                    hit = cached
                     shm_storage = resolved
-            if hit is None:
+                    hit_name = cached_name
+                    hit_nbytes = cached_nbytes
+            if shm_storage is None:
                 # Stale entry: a recycled id, or a segment whose last
                 # view already died. Fall through to a fresh migration.
                 _CPU_SHM_SEGMENTS.pop(id(storage), None)
 
-    if hit is not None and shm_storage is not None:
+    if shm_storage is not None:
         if storage is not shm_storage:
             # Sibling view: re-point it, keeping its offset / layout.
             tensor.set_(
@@ -353,11 +353,9 @@ def migrate_to_shm_and_wrap(tensor: torch.Tensor) -> CpuShmTensorWrapper:
             logger.debug(
                 "Re-pointed sibling KV view (offset=%d) onto SHM %s",
                 int(tensor.storage_offset()),
-                hit.shm_name,
+                hit_name,
             )
-        return CpuShmTensorWrapper(
-            tensor, hit.shm_name, segment_nbytes=hit.segment_nbytes
-        )
+        return CpuShmTensorWrapper(tensor, hit_name, segment_nbytes=hit_nbytes)
 
     shm_name = "%s%d_%d" % (
         CpuShmTensorWrapper.SHM_NAME_PREFIX,
@@ -390,16 +388,19 @@ def migrate_to_shm_and_wrap(tensor: torch.Tensor) -> CpuShmTensorWrapper:
         shm_unlink(shm_name)
         raise
 
-    record = _ShmSegmentRecord(
-        origin_ref=weakref.ref(storage),
-        shm_storage_ref=weakref.ref(shm_storage),
-        shm_name=shm_name,
-        segment_nbytes=segment_nbytes,
-    )
+    shm_storage_ref = weakref.ref(shm_storage)
     with _CPU_SHM_LOCK:
-        _CPU_SHM_SEGMENTS[id(storage)] = record
-        _CPU_SHM_SEGMENTS[id(shm_storage)] = dataclasses.replace(
-            record, origin_ref=weakref.ref(shm_storage)
+        _CPU_SHM_SEGMENTS[id(storage)] = (
+            weakref.ref(storage),
+            shm_storage_ref,
+            shm_name,
+            segment_nbytes,
+        )
+        _CPU_SHM_SEGMENTS[id(shm_storage)] = (
+            shm_storage_ref,
+            shm_storage_ref,
+            shm_name,
+            segment_nbytes,
         )
     # Unlink fires when the SHM-backed storage dies, i.e. once the last
     # view sharing the segment is garbage-collected.
@@ -435,9 +436,9 @@ def inject_stale_cache_entry_for_test(
     private dict / lock.
     """
     with _CPU_SHM_LOCK:
-        _CPU_SHM_SEGMENTS[id(tensor.untyped_storage())] = _ShmSegmentRecord(
-            origin_ref=dead_ref,
-            shm_storage_ref=dead_ref,
-            shm_name=stale_shm_name,
-            segment_nbytes=0,
+        _CPU_SHM_SEGMENTS[id(tensor.untyped_storage())] = (
+            dead_ref,
+            dead_ref,
+            stale_shm_name,
+            0,
         )
