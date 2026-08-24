@@ -255,11 +255,6 @@ def migrate_to_shm_and_wrap(tensor: torch.Tensor) -> CpuShmTensorWrapper:
         _CPU_SHM_NAMES.pop(tid, None)
 
     nbytes = tensor.numel() * tensor.element_size()
-    assert tensor.storage_offset() == 0, (
-        "migrate_to_shm_and_wrap: SHM segment is sized to "
-        "numel*elem_size; a nonzero storage_offset would cause "
-        "OOB access. Got offset=%d" % tensor.storage_offset()
-    )
     if nbytes == 0:
         # No SHM segment for empty tensors: ``mmap`` with length 0
         # is undefined / EINVAL on POSIX. ``to_tensor`` rebuilds an
@@ -280,7 +275,7 @@ def migrate_to_shm_and_wrap(tensor: torch.Tensor) -> CpuShmTensorWrapper:
         shm_storage = torch.frombuffer(buf, dtype=torch.uint8).untyped_storage()
         tensor.set_(
             shm_storage,
-            normalized.storage_offset(),
+            0,
             normalized.shape,
             normalized.stride(),
         )

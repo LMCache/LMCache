@@ -49,6 +49,21 @@ def test_migrate_to_shm_and_wrap_zero_copy_view():
         shm_unlink(wrapper.shm_name)
 
 
+def test_migrate_rebases_nonzero_storage_offset():
+    """A contiguous slice is rebased to offset zero in its dedicated SHM."""
+    src = torch.zeros(16, dtype=torch.float32)[4:12]
+    assert src.storage_offset() == 4
+
+    wrapper = migrate_to_shm_and_wrap(src)
+    try:
+        assert src.storage_offset() == 0
+        assert wrapper.storage_offset == 0
+        src.add_(7.0)
+        assert torch.equal(wrapper.to_tensor(), src)
+    finally:
+        shm_unlink(wrapper.shm_name)
+
+
 def test_migrate_normalizes_layout_in_place_on_caller_tensor():
     """Layout normalization must not detach migration from the caller's tensor.
 
