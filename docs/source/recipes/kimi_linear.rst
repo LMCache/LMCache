@@ -52,8 +52,11 @@ Validated models
            - 2
 
       Set the LMCache server's ``--chunk-size`` to that ``N`` (or a multiple of
-      it), and vLLM's ``--max-num-batched-tokens`` to ``2N-1`` (the largest
-      value below ``2N``).
+      it) and enable ``--separate-object-groups``, then set vLLM's
+      ``--max-num-batched-tokens`` to at least ``N``. Keeping it below ``2N``
+      (e.g. ``2N-1``) snapshots the KDA state at every block boundary for the
+      finest cache reuse; larger values raise prefill throughput at the cost of
+      coarser reuse (see *Why these settings*).
 
       .. note::
 
@@ -65,8 +68,8 @@ Validated models
          least as large as a KDA state page, so a smaller per-rank KDA state
          yields a smaller ``N`` — and vice versa. Concretely, going from
          **TP=2 → TP=1** doubles the per-rank KDA state, so ``N`` doubles from
-         ``944`` to ``1888``; ``--chunk-size`` (``= N``) and
-         ``--max-num-batched-tokens`` (``= 2N-1``, i.e. ``3775``) both double to
+         ``944`` to ``1888``; ``--chunk-size`` (``= N``) and the recommended
+         ``--max-num-batched-tokens`` (``2N-1``, i.e. ``3775``) both double to
          match. Always re-read ``N`` from the startup log after changing the TP
          degree — do not scale it by hand.
 
@@ -74,7 +77,8 @@ Validated models
 
       .. code-block:: bash
 
-         lmcache server --chunk-size 944 --l1-size-gb 100 --eviction-policy LRU
+         lmcache server --chunk-size 944 --separate-object-groups \
+             --l1-size-gb 100 --eviction-policy LRU
 
       |
 
@@ -100,20 +104,30 @@ Validated models
         **required**. ``align`` is the only Mamba cache mode the KDA backend
         supports, and prefix caching must be on for LMCache to store and reuse
         the recurrent state.
+      - ``--separate-object-groups`` (server) is **required** for hybrid
+        Mamba / linear-attention models: it gives the KDA layers their own
+        cache objects so their recurrent state is stored and loaded
+        independently of the MLA layers. It is what allows
+        ``--max-num-batched-tokens`` to exceed ``2N``; without it the budget
+        must stay in ``[N, 2N)``.
       - ``--chunk-size`` (server) must be a multiple of the unified block size
-        ``N`` — ``--chunk-size N`` is the simplest choice. LMCache raises at
-        engine startup if it is not.
-      - ``--max-num-batched-tokens`` must be in ``[N, 2N)``. ``align`` snapshots
-        the KDA state only at the *end* of each scheduler step, on a block
-        boundary, and the scheduler splits prefills into whole ``N``-token
-        blocks — so the per-step token budget must cover at least one block but
-        stay below two (a larger budget could advance past a boundary and leave
-        no snapshot for LMCache to store). Prefer the maximum, ``2N-1``: a
-        single request still advances exactly one block per step, and the spare
-        ``N-1`` budget lets decodes co-schedule with a prefill block instead of
-        serializing behind it. Setting it to exactly ``N`` makes the per-step
-        budget one block, so once any request is decoding no new request can
-        start prefill.
+        ``N`` — ``--chunk-size N`` is the simplest choice and gives the finest
+        cache granularity. LMCache raises at engine startup if it is not.
+      - ``--max-num-batched-tokens`` must be **at least** ``N``: a scheduler
+        step must advance at least one whole block, since ``align`` snapshots
+        the KDA state only at the *end* of each step, on a block boundary, and
+        the scheduler splits prefills into whole ``N``-token blocks. Two regimes:
+
+        - **``[N, 2N)`` (e.g. ``2N-1``)** — every step advances exactly one
+          block, so LMCache snapshots the state at *every* block boundary: the
+          finest partial-prefix reuse. ``2N-1`` also leaves ``N-1`` spare budget
+          so decodes co-schedule with a prefill block instead of serializing
+          behind it (exactly ``N`` blocks new prefills once any request is
+          decoding).
+        - **``≥ 2N``** (requires ``--separate-object-groups``) — larger prefill
+          steps raise throughput, but a step now spans several blocks and only
+          its last block gets a snapshot, so reuse is coarser: cached prefixes
+          align to step boundaries rather than to every block.
       - ``--trust-remote-code`` loads Kimi-Linear's custom modeling code.
       - ``--tensor-parallel-size 2`` shards the weights across two GPUs. Adjust
         it to your hardware — but note it changes ``N`` and the two derived

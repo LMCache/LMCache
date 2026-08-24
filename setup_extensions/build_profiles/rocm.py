@@ -2,13 +2,14 @@
 """ROCm/HIP GPU backend profile.
 
 Hipifies CUDA sources via ``torch.utils.hipify``, then builds
-``lmcache.c_ops`` with hipcc as the C++ compiler.
+``lmcache.cuda_ops`` with hipcc as the C++ compiler.
 """
 
 # Standard
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 import os
+import shutil
 
 if TYPE_CHECKING:
     # Third Party
@@ -18,18 +19,33 @@ if TYPE_CHECKING:
 from setup_extensions.build_profiles import BuildProfile
 
 ROOT_DIR = Path(__file__).parent.parent.parent
-HIPIFY_DIR = os.path.join(ROOT_DIR, "csrc/")
-HIPIFY_OUT_DIR = os.path.join(ROOT_DIR, "csrc_hip/")
+CSRC_DIR = os.path.join(ROOT_DIR, "csrc")
+HIPIFY_DIR = os.path.join(CSRC_DIR, "cuda")
+HIPIFY_OUT_DIR = os.path.join(ROOT_DIR, "csrc_hip", "cuda")
 
 
-def _hipify_wrapper() -> list[str]:
-    """Run torch hipify on csrc/ and return hipified source paths."""
+def _hipify_wrapper(source_names: list[str]) -> list[str]:
+    """Hipify ``csrc/cuda`` and return paths for the requested source files.
+
+    Args:
+        source_names: Base names of the CUDA sources to hipify, relative to
+            ``csrc/cuda`` (e.g. ``"ac_dec.cu"``).
+
+    Returns:
+        One path per entry in ``source_names``, in the same order, pointing at
+        the hipified file under ``csrc_hip/cuda``.  Paths are ``/``-separated
+        and relative to the project root (the ``setup.py`` directory).
+
+    Raises:
+        RuntimeError: If hipify did not yield a path for every requested source.
+    """
     # Third Party
     from torch.utils.hipify.hipify_python import hipify
 
     print("Hipifying sources")
+    shutil.copytree(HIPIFY_DIR, HIPIFY_OUT_DIR, dirs_exist_ok=True)
     extra_files = [
-        os.path.abspath(os.path.join(HIPIFY_DIR, item))
+        os.path.abspath(os.path.join(HIPIFY_OUT_DIR, item))
         for item in os.listdir(HIPIFY_DIR)
         if os.path.isfile(os.path.join(HIPIFY_DIR, item))
     ]
@@ -44,8 +60,8 @@ def _hipify_wrapper() -> list[str]:
         hipify_extra_files_only=True,
     )
     hipified_sources: list[str] = []
-    for source in extra_files:
-        s_abs = os.path.abspath(source)
+    for source_name in source_names:
+        s_abs = os.path.abspath(os.path.join(HIPIFY_OUT_DIR, source_name))
         hipified_s_abs = (
             hipify_result[s_abs].hipified_path
             if (
@@ -54,12 +70,14 @@ def _hipify_wrapper() -> list[str]:
             )
             else s_abs
         )
-        hipified_sources.append(hipified_s_abs)
+        hipified_sources.append(
+            os.path.relpath(hipified_s_abs, ROOT_DIR).replace(os.sep, "/")
+        )
 
-    if len(hipified_sources) != len(extra_files):
+    if len(hipified_sources) != len(source_names):
         raise RuntimeError(
             "Hipify failed: expected %d sources, got %d"
-            % (len(extra_files), len(hipified_sources))
+            % (len(source_names), len(hipified_sources))
         )
     return hipified_sources
 
@@ -83,24 +101,26 @@ class RocmProfile(BuildProfile):
         from torch.utils import cpp_extension
 
         print("Building ROCM extensions")
-        _hipify_wrapper()
-        hip_sources = [
-            "csrc/pybind_hip.cpp",
-            "csrc/mem_kernels.hip",
-            "csrc/mp_mem_kernels.hip",
-            "csrc/cal_cdf.hip",
-            "csrc/ac_enc.hip",
-            "csrc/ac_dec.hip",
-            "csrc/pos_kernels.hip",
-            "csrc/mem_alloc_hip.cpp",
-            "csrc/utils_hip.cpp",
-            "csrc/event_recorder.cpp",
-            "csrc/completion_recorder.cpp",
-        ]
+        hip_sources = _hipify_wrapper(
+            [
+                "pybind.cpp",
+                "mem_kernels.cu",
+                "mp_mem_kernels.cu",
+                "blend_kernels.cu",
+                "cal_cdf.cu",
+                "ac_enc.cu",
+                "ac_dec.cu",
+                "pos_kernels.cu",
+                "mem_alloc.cpp",
+                "utils.cpp",
+                "event_recorder.cpp",
+                "completion_recorder.cpp",
+            ]
+        )
         define_macros = [("__HIP_PLATFORM_HCC__", "1"), ("USE_ROCM", "1")]
         ext_modules = [
             cpp_extension.CppExtension(
-                "lmcache.c_ops",
+                "lmcache.cuda_ops",
                 sources=hip_sources,
                 extra_compile_args={
                     "cxx": [
@@ -109,7 +129,8 @@ class RocmProfile(BuildProfile):
                     ],
                 },
                 include_dirs=[
-                    os.path.join(os.environ.get("ROCM_PATH", "/opt/rocm"), "include")
+                    CSRC_DIR,
+                    os.path.join(os.environ.get("ROCM_PATH", "/opt/rocm"), "include"),
                 ],
                 library_dirs=[
                     os.path.join(os.environ.get("ROCM_PATH", "/opt/rocm"), "lib")

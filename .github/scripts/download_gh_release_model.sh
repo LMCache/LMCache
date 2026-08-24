@@ -59,8 +59,29 @@ HF_CACHE="${HF_HOME:-$HOME/.cache/huggingface}/hub"
 MODEL_DIR="${HF_CACHE}/${HF_DIR_NAME}"
 SNAPSHOT_DIR="${MODEL_DIR}/snapshots/${SNAPSHOT}"
 
+# Write the refs/main pointer HF uses to resolve revision "main" to a
+# snapshot directory.
+#
+# The pointer MUST NOT have a trailing newline: huggingface_hub reads it
+# with a bare `f.read()` and does not strip it (file_download.py, both
+# `_hf_hub_download_to_cache_dir` and `try_to_load_from_cache`). A
+# trailing "\n" makes the resolved path `snapshots/<sha>\n/<file>`, which
+# never exists, so every lookup misses the local cache and HF is contacted
+# instead — turning any HF outage or 429 into a CI failure. `printf '%s'`
+# keeps the pointer byte-exact.
+#
+# This runs on the cache-hit path too, and is deliberately unconditional:
+# `~/.cache/huggingface` is restored by actions/cache, so a directory
+# populated by an older version of this script carries a poisoned pointer
+# that the early exit below would otherwise preserve forever.
+write_refs_main() {
+    mkdir -p "${MODEL_DIR}/refs"
+    printf '%s' "${SNAPSHOT}" > "${MODEL_DIR}/refs/main"
+}
+
 if [ -f "${SNAPSHOT_DIR}/${CACHE_MARKER}" ]; then
     echo "${MODEL_ID} already cached in ${SNAPSHOT_DIR}, skipping download"
+    write_refs_main
     exit 0
 fi
 
@@ -120,8 +141,7 @@ mv "${EXTRACT_DIR}/${TARBALL_TOP_DIR}"/* "${SNAPSHOT_DIR}/"
 
 # Create the refs/main pointer so snapshot_download(local_files_only=True)
 # can resolve the snapshot hash.
-mkdir -p "${MODEL_DIR}/refs"
-echo "${SNAPSHOT}" > "${MODEL_DIR}/refs/main"
+write_refs_main
 
 echo "${MODEL_ID} cached at ${SNAPSHOT_DIR}"
 ls -lah "${SNAPSHOT_DIR}/"

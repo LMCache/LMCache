@@ -4,6 +4,7 @@ Tests for the DAX MP L2 adapter.
 """
 
 # Standard
+from types import SimpleNamespace
 from typing import cast
 import select
 import threading
@@ -14,7 +15,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache.native_storage_ops import Bitmap
+from lmcache.lmcache_native import Bitmap
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
@@ -28,7 +29,7 @@ from lmcache.v1.distributed.config import (
 )
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L2AdapterListener
-from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface
+from lmcache.v1.distributed.l2_adapters.base import AdapterUsage, L2AdapterInterface
 from lmcache.v1.distributed.l2_adapters.config import (
     L2AdaptersConfig,
     get_registered_l2_adapter_types,
@@ -42,12 +43,14 @@ from lmcache.v1.distributed.l2_adapters.reconfiguration import (
     L2ReconfigurableAdapter,
     L2ReconfigureError,
 )
+from lmcache.v1.distributed.storage_controllers.store_policy import AdapterDescriptor
 from lmcache.v1.distributed.storage_manager import StorageManager
 from lmcache.v1.memory_allocators.ad_hoc_memory_allocator import AdHocMemoryAllocator
 from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
 )
+from lmcache.v1.mp_observability.event_bus import EventBus
 from lmcache.v1.platform import consume_fd
 
 _EMPTY_LAYOUT = MemoryLayoutDesc(shapes=[], dtypes=[])
@@ -184,7 +187,7 @@ def bitmap_to_bools(bitmap: Bitmap, size: int) -> list[bool]:
 
 
 def lookup_and_wait(adapter: DaxL2Adapter, keys: list[ObjectKey]) -> list[bool]:
-    task_id = adapter.submit_lookup_and_lock_task(keys, _EMPTY_LAYOUT)
+    task_id = adapter.submit_lookup_and_lock_task(keys, {0: _EMPTY_LAYOUT})
     assert wait_for_event_fd(adapter.get_lookup_and_lock_event_fd())
     bitmap = adapter.query_lookup_and_lock_result(task_id)
     assert bitmap is not None
@@ -433,6 +436,10 @@ class _FakeReconfigurableAdapter:
         self.calls.append((operation, payload))
         return {"status": "ok", "operation": operation, "payload": payload}
 
+    def get_usage(self) -> AdapterUsage:
+        """Declare no capacity; reconfiguring still reports the compartment."""
+        return AdapterUsage(total_bytes_used=0, total_capacity_bytes=0)
+
 
 class _SerdeLikeWrapper:
     def __init__(self, inner_adapter: _FakeReconfigurableAdapter) -> None:
@@ -440,8 +447,43 @@ class _SerdeLikeWrapper:
 
 
 class _FakeAdapterDescriptor:
-    def __init__(self, type_name: str) -> None:
+    def __init__(self, type_name: str, shared: bool = False) -> None:
         self.type_name = type_name
+        # The real AdapterDescriptor always carries its config; capacity
+        # reporting reads ``shared`` off it.
+        self.config = SimpleNamespace(shared=shared)
+
+
+class _RecordingBus:
+    """Captures capacity-change events instead of publishing them."""
+
+    def __init__(self) -> None:
+        self.events: list[object] = []
+
+    def publish(self, event: object) -> None:
+        self.events.append(event)
+
+
+def _wire_capacity_publishing(sm: StorageManager) -> None:
+    """Give a bare StorageManager the state its capacity publish needs.
+
+    Reconfiguring an adapter also announces the new topology, which reads
+    the L1 config, the adapter descriptors, and the event bus.
+
+    Args:
+        sm: The partially-constructed storage manager to wire up.
+    """
+    sm._lifecycle_lock = threading.Lock()
+    sm._event_bus = cast(EventBus, _RecordingBus())
+    # Declares no L1, keeping these tests about the L2 path.
+    sm._l1_config = L1ManagerConfig(
+        memory_config=L1MemoryManagerConfig(size_in_bytes=0, use_lazy=True)
+    )
+    if not hasattr(sm, "_adapter_descriptors"):
+        sm._adapter_descriptors = {
+            adapter_id: cast(AdapterDescriptor, _FakeAdapterDescriptor("fake"))
+            for adapter_id in sm._l2_adapters
+        }
 
 
 def test_storage_manager_routes_generic_l2_reconfigure_to_adapter():
@@ -449,6 +491,9 @@ def test_storage_manager_routes_generic_l2_reconfigure_to_adapter():
     adapter = _FakeReconfigurableAdapter()
     sm._adapters_lock = threading.Lock()
     sm._l2_adapters = {0: cast(L2AdapterInterface, adapter)}
+    # Reconfiguring changes capacity, so the call also announces the new
+    # topology; that needs enough state to build a capacity snapshot.
+    _wire_capacity_publishing(sm)
 
     result = sm.reconfigure_l2_adapter(0, "flip", {"enabled": True})
 
@@ -501,7 +546,7 @@ def test_dax_adapter_store_lookup_load_and_one_shot_results(tmp_path):
         assert listener.stored == [[key0, key2]]
 
         lookup_task = adapter.submit_lookup_and_lock_task(
-            [key0, key1, key2], _EMPTY_LAYOUT
+            [key0, key1, key2], {0: _EMPTY_LAYOUT}
         )
         assert wait_for_event_fd(adapter.get_lookup_and_lock_event_fd())
         lookup_bitmap = adapter.query_lookup_and_lock_result(lookup_task)
@@ -545,11 +590,11 @@ def test_dax_adapter_unlock_refcount_and_delete_skips_locked_keys(tmp_path):
         key = create_object_key(20)
         store_and_wait(adapter, key, obj)
 
-        first_lookup = adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+        first_lookup = adapter.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         assert wait_for_event_fd(adapter.get_lookup_and_lock_event_fd())
         assert adapter.query_lookup_and_lock_result(first_lookup) is not None
 
-        second_lookup = adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+        second_lookup = adapter.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         assert wait_for_event_fd(adapter.get_lookup_and_lock_event_fd())
         assert adapter.query_lookup_and_lock_result(second_lookup) is not None
 
@@ -628,7 +673,7 @@ def test_dax_adapter_full_arena_does_not_evict_internally(tmp_path):
         assert adapter.get_usage().usage_fraction == pytest.approx(1.0)
 
         lookup_task = adapter.submit_lookup_and_lock_task(
-            [key0, key1, key2], _EMPTY_LAYOUT
+            [key0, key1, key2], {0: _EMPTY_LAYOUT}
         )
         assert wait_for_event_fd(adapter.get_lookup_and_lock_event_fd())
         bitmap = adapter.query_lookup_and_lock_result(lookup_task)
@@ -733,7 +778,9 @@ def test_dax_adapter_restart_is_volatile_only(tmp_path):
 
         reopened = DaxL2Adapter(config)
         try:
-            lookup_task = reopened.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+            lookup_task = reopened.submit_lookup_and_lock_task(
+                [key], {0: _EMPTY_LAYOUT}
+            )
             assert wait_for_event_fd(reopened.get_lookup_and_lock_event_fd())
             bitmap = reopened.query_lookup_and_lock_result(lookup_task)
             assert bitmap is not None
@@ -804,7 +851,7 @@ def test_storage_manager_dax_adapter_roundtrip(tmp_path):
             timeout=5.0,
         )
 
-        handle = sm.submit_prefetch_task(PrefetchRequestSpec([key], layout))
+        handle = sm.submit_prefetch_task(PrefetchRequestSpec([key], {0: layout}))
         assert wait_for_condition(
             lambda: sm.query_prefetch_lookup_hits(handle) is not None,
             timeout=5.0,

@@ -8,8 +8,11 @@ from __future__ import annotations
 import torch
 
 # First Party
+from lmcache.logging import init_logger
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.transfer_context.base import EngineDrivenContext
+
+logger = init_logger(__name__)
 
 
 class ContiguousTransferWrapper:
@@ -37,7 +40,8 @@ class ContiguousTransferWrapper:
         """
         result = self._context.prepare_store(key, instance_id)
         if result is None:
-            # Pickle: chunk the contiguous KV tensor (commit takes list of chunks).
+            # Pickle: chunk the contiguous KV tensor
+            # (commit takes list of chunks).
             num_chunks = kv.shape[2] // self._chunk_size
             chunks = [
                 kv[
@@ -55,21 +59,23 @@ class ContiguousTransferWrapper:
         return self._context.commit_store(key, instance_id, chunks)
 
     def retrieve(self, key: IPCCacheServerKey, instance_id: int) -> torch.Tensor | None:
-        """Retrieve the KV as a contiguous [2, L, hit_tokens, D] tensor
+        """Retrieve the cached tensor as a contiguous tensor.
+        KV's shape is [2, L, T, D], while Q's shape is [1, L, T, D].
 
         Args:
             key: The cache server key.
             instance_id: The cache server instance ID.
 
         Returns:
-            The contiguous KV tensor if found, None otherwise.
+            The contiguous tensor if found, None otherwise.
         """
         slot_tensors = self._context.prepare_retrieve(key, instance_id)
         if not slot_tensors:
             return None
         try:
-            # Both Pickle and SHM returns list of [2, L, T, D] tensors
+            # Q cache has shape [1, L, T, D], KV cache has shape [2, L, T, D].
+            token_dim = slot_tensors[0].ndim - 2
             # Concatenate along the token dimension.
-            return torch.cat(slot_tensors, dim=2)
+            return torch.cat(slot_tensors, dim=token_dim)
         finally:
             self._context.commit_retrieve(key, instance_id)

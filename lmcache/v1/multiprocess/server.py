@@ -4,6 +4,7 @@
 # Standard
 import argparse
 import shutil
+import signal
 import sys
 import time
 
@@ -13,6 +14,8 @@ import zmq
 # First Party
 from lmcache import torch_dev, torch_device_type
 from lmcache.logging import init_logger
+from lmcache.usage_telemetry.l1_usage import InitializeL1Usage
+from lmcache.usage_telemetry.l2_usage import InitializeL2ConnectorUsage
 from lmcache.usage_telemetry.mp import InitializeMPUsageContext
 from lmcache.usage_telemetry.mp_continuous import InitializeMPContinuousUsage
 from lmcache.v1.distributed.config import (
@@ -26,6 +29,10 @@ from lmcache.v1.mp_observability.config import (
     add_observability_args,
     init_observability,
     parse_args_to_observability_config,
+)
+from lmcache.v1.mp_observability.gc_monitor import (
+    init_gc_monitor,
+    shutdown_gc_monitor,
 )
 from lmcache.v1.mp_observability.trace import maybe_initialize_trace_recorder
 from lmcache.v1.multiprocess.config import (
@@ -47,6 +54,8 @@ from lmcache.v1.multiprocess.engine_module import (
 from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
     EngineDrivenTransferModule,
 )
+from lmcache.v1.multiprocess.modules.experimental import EXPERIMENTAL_TRANSFER
+from lmcache.v1.multiprocess.modules.experimental.qstore import QStoreModule
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
 )
@@ -252,7 +261,22 @@ def _build_modules(
         # Opt-in: enabled when a coordinator URL is configured (flag or
         # LMCACHE_COORDINATOR_URL, resolved at config parsing); otherwise
         # None and the blend module matches purely locally.
-        coordinator = BlendCoordinatorClient.maybe_create(coordinator_config.url)
+        #
+        # Fleet matching also needs cache-event reporting on: the blend
+        # index it queries is built from that stream.
+        if coordinator_config.url and not coordinator_config.event_reporting:
+            logger.warning(
+                "Coordinator URL is set but cache-event reporting is off, so "
+                "the coordinator has no cache state to match against: fleet "
+                "CacheBlend matching is disabled and blend will match "
+                "locally only. Pass --coordinator-event-reporting (or set "
+                "LMCACHE_COORDINATOR_EVENT_REPORTING=true) to enable it."
+            )
+        coordinator = BlendCoordinatorClient.maybe_create(
+            coordinator_config.url if coordinator_config.event_reporting else "",
+            timeout=coordinator_config.blend_timeout,
+            match_concurrency=coordinator_config.blend_match_concurrency,
+        )
         blend_v3 = BlendV3Module(
             ctx,
             transfer_module,
@@ -264,11 +288,35 @@ def _build_modules(
         # notify it via drop_instance_state when an instance is reaped.
         liveness_targets.append(blend_v3)
 
+    # Experimental intermediate tensor transfer modules
+    lmcache_driven_module = next(
+        (m for m in transfer_modules if isinstance(m, LMCacheDrivenTransferModule)),
+        None,
+    )
+    enabled_modules = set(mp_config.enable)
+    experimental_transfer: list[str] = []
+    experimental_modules: list[EngineModule] = []
+    for enabled_module in enabled_modules:
+        if enabled_module not in EXPERIMENTAL_TRANSFER:
+            raise ValueError(
+                f"Unknown --enable experimental module '{enabled_module}'."
+            )
+        if lmcache_driven_module is None:
+            raise ValueError(
+                f"Experimental module '{enabled_module}' requires "
+                "supported_transfer_mode='lmcache_driven' or 'auto'."
+            )
+        module = QStoreModule(ctx)
+        experimental_modules.append(module)
+        liveness_targets.append(module)
+        experimental_transfer.append(enabled_module)
+
     management = ManagementModule(
         ctx,
         liveness_targets=liveness_targets,
         worker_reap_timeout_seconds=mp_config.worker_reap_timeout_seconds,
         worker_registration_grace_seconds=mp_config.worker_registration_grace_seconds,
+        experimental_transfer=experimental_transfer,
     )
 
     # ManagementModule precedes the transfer/blend modules so close() stops
@@ -280,6 +328,7 @@ def _build_modules(
         p2p_controller,
         management,
         *transfer_modules,
+        *experimental_modules,
         *blend_modules,
     ]
 
@@ -322,6 +371,8 @@ def run_cache_server(
         obs_config, start_prometheus_http_server=start_prometheus_http_server
     )
 
+    init_gc_monitor(obs_config.gc_monitor)
+
     maybe_initialize_trace_recorder(event_bus, obs_config, storage_manager_config)
 
     # When the engine-driven path is loaded (auto or engine_driven):
@@ -349,14 +400,17 @@ def run_cache_server(
                 )
                 mem_cfg.shm_name = ""
 
-    # blend engine: single object group + full per-chunk SWA KV
+    # blend engine: full per-chunk SWA KV (blended chunks reuse at arbitrary
+    # positions). full_sw_kv widens attention groups only; recurrent groups
+    # keep their one-block restore window, so a blend server also serves
+    # stock hybrid clients.
     is_blend = mp_config.engine_type == "blend"
 
     ctx = MPCacheServerContext(
         storage_manager_config=storage_manager_config,
         chunk_size=mp_config.chunk_size,
         hash_algorithm=mp_config.hash_algorithm,
-        separate_object_groups=mp_config.separate_object_groups and not is_blend,
+        separate_object_groups=mp_config.separate_object_groups,
         full_sw_kv=is_blend,
     )
 
@@ -365,6 +419,8 @@ def run_cache_server(
 
     InitializeMPUsageContext(mp_config, storage_manager_config)
     InitializeMPContinuousUsage(event_bus, mp_config.chunk_size)
+    InitializeL2ConnectorUsage(event_bus, ctx.storage_manager)
+    InitializeL1Usage(event_bus, ctx.storage_manager)
 
     zmq_context = zmq.Context.instance()
     server = MessageQueueServer(
@@ -422,6 +478,8 @@ def run_cache_server(
         event_bus.stop()
         server.close()
         engine.close()
+    finally:
+        shutdown_gc_monitor()
     return None
 
 
@@ -442,6 +500,7 @@ def parse_args():
 
 
 if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, signal.default_int_handler)
     args = parse_args()
     mp_config = parse_args_to_mp_server_config(args)
     storage_manager_config = parse_args_to_config(args)

@@ -9,12 +9,12 @@ from typing import Literal
 import threading
 
 # First Party
+from lmcache.lmcache_native import TTLLock
 from lmcache.logging import init_logger
-from lmcache.native_storage_ops import TTLLock
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
-from lmcache.v1.distributed.config import L1ManagerConfig
+from lmcache.v1.distributed.config import L1ManagerConfig, get_configured_capacity_bytes
 from lmcache.v1.distributed.error import L1Error
-from lmcache.v1.distributed.internal_api import L1ManagerListener
+from lmcache.v1.distributed.internal_api import L1ManagerListener, L1ObjectMeta
 from lmcache.v1.distributed.memory_manager import (
     GDSL1MemoryManager,
     L1ManagerProtocol,
@@ -203,6 +203,11 @@ class L1Manager:
         else:
             self._memory_manager = L1MemoryManager(config.memory_config)
 
+        # Precomputed: it derives from config alone and never changes, and
+        # report_status runs under the global L1 lock on a hot polling path.
+        self._configured_capacity_bytes = sum(
+            get_configured_capacity_bytes(config).values()
+        )
         self._write_ttl_seconds = config.write_ttl_seconds
         self._read_ttl_seconds = config.read_ttl_seconds
 
@@ -414,6 +419,7 @@ class L1Manager:
             ret[key] = L1Error.SUCCESS
             successful_keys.append(key)
 
+        freed_meta = [self._object_meta(obj) for obj in need_to_free]
         self._memory_manager.free(need_to_free)
 
         for listener in self._registered_listeners:
@@ -428,7 +434,7 @@ class L1Manager:
         self._event_bus.publish(
             Event(
                 event_type=EventType.L1_KEYS_EVICTED,
-                metadata={"keys": need_to_free_keys},
+                metadata={"keys": need_to_free_keys, "meta": freed_meta},
             )
         )
 
@@ -551,6 +557,7 @@ class L1Manager:
         """
         ret: dict[ObjectKey, L1Error] = {}
         successful_keys: list[ObjectKey] = []
+        successful_keys_meta: list[L1ObjectMeta] = []
 
         for key in keys:
             entry = self._objects.get(key, None)
@@ -579,13 +586,14 @@ class L1Manager:
             entry.write_lock.unlock()
             ret[key] = L1Error.SUCCESS
             successful_keys.append(key)
+            successful_keys_meta.append(self._object_meta(entry.memory_obj))
 
         for listener in self._registered_listeners:
             listener.on_l1_keys_write_finished(successful_keys)
         self._event_bus.publish(
             Event(
                 event_type=EventType.L1_WRITE_FINISHED,
-                metadata={"keys": successful_keys},
+                metadata={"keys": successful_keys, "meta": successful_keys_meta},
             )
         )
         return ret
@@ -623,6 +631,7 @@ class L1Manager:
         total = 1 + extra_count
         ret: dict[ObjectKey, L1OperationResult] = {}
         successful_keys: list[ObjectKey] = []
+        successful_keys_meta: list[L1ObjectMeta] = []
 
         for key in keys:
             entry = self._objects.get(key, None)
@@ -652,13 +661,14 @@ class L1Manager:
                 entry.read_lock.lock()
             ret[key] = (L1Error.SUCCESS, entry.memory_obj)
             successful_keys.append(key)
+            successful_keys_meta.append(self._object_meta(entry.memory_obj))
 
         for listener in self._registered_listeners:
             listener.on_l1_keys_finish_write_and_reserve_read(successful_keys)
         self._event_bus.publish(
             Event(
                 event_type=EventType.L1_WRITE_FINISHED_AND_READ_RESERVED,
-                metadata={"keys": successful_keys},
+                metadata={"keys": successful_keys, "meta": successful_keys_meta},
             )
         )
         return ret
@@ -705,6 +715,7 @@ class L1Manager:
             ret[key] = L1Error.SUCCESS
             successful_keys.append(key)
 
+        freed_meta = [self._object_meta(obj) for obj in need_to_free]
         self._memory_manager.free(need_to_free)
 
         for listener in self._registered_listeners:
@@ -712,7 +723,7 @@ class L1Manager:
         self._event_bus.publish(
             Event(
                 event_type=EventType.L1_KEYS_EVICTED,
-                metadata={"keys": successful_keys},
+                metadata={"keys": successful_keys, "meta": freed_meta},
             )
         )
         return ret
@@ -725,6 +736,13 @@ class L1Manager:
         """
         for listener in self._registered_listeners:
             listener.on_l1_keys_accessed(keys)
+        if self._event_bus.has_subscribers(EventType.L1_KEYS_ACCESSED):
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.L1_KEYS_ACCESSED,
+                    metadata={"keys": keys},
+                )
+            )
 
     @l1_mgr_synchronized
     def clear(self, force: bool = False) -> None:
@@ -745,6 +763,7 @@ class L1Manager:
             )
             all_keys = list(self._objects.keys())
             all_memory_objs = [entry.memory_obj for entry in self._objects.values()]
+            all_meta = [self._object_meta(obj) for obj in all_memory_objs]
             self._memory_manager.free(all_memory_objs)
             self._objects.clear()
             for listener in self._registered_listeners:
@@ -752,7 +771,7 @@ class L1Manager:
             self._event_bus.publish(
                 Event(
                     event_type=EventType.L1_KEYS_EVICTED,
-                    metadata={"keys": all_keys},
+                    metadata={"keys": all_keys, "meta": all_meta},
                 )
             )
             logger.info(
@@ -775,6 +794,7 @@ class L1Manager:
         for key in keys_to_clear:
             del self._objects[key]
 
+        cleared_meta = [self._object_meta(obj) for obj in objs_to_free]
         self._memory_manager.free(objs_to_free)
 
         if keys_to_clear:
@@ -783,7 +803,7 @@ class L1Manager:
             self._event_bus.publish(
                 Event(
                     event_type=EventType.L1_KEYS_EVICTED,
-                    metadata={"keys": keys_to_clear},
+                    metadata={"keys": keys_to_clear, "meta": cleared_meta},
                 )
             )
 
@@ -852,6 +872,9 @@ class L1Manager:
             if entry.is_temporary:
                 temporary += 1
         used, total = self._memory_manager.get_memory_usage()
+        # ``memory_total_bytes`` is what the allocator currently backs (the
+        # grown heap on the lazy tier); this is the declared size. Summed to
+        # fit this dict's flat shape; ``0`` means undeclared.
         return {
             "is_healthy": self._memory_manager.memcheck(),
             "total_object_count": len(self._objects),
@@ -860,6 +883,7 @@ class L1Manager:
             "temporary_count": temporary,
             "memory_used_bytes": used,
             "memory_total_bytes": total,
+            "memory_configured_bytes": self._configured_capacity_bytes,
             "memory_usage_ratio": used / total if total > 0 else 0.0,
             "write_ttl_seconds": self._write_ttl_seconds,
             "read_ttl_seconds": self._read_ttl_seconds,
@@ -900,3 +924,10 @@ class L1Manager:
             num_read_locked,
         )
         return mem_check_result
+
+    def _object_meta(self, memory_obj: MemoryObj) -> L1ObjectMeta:
+        """Build the listener-facing metadata for one resident object."""
+        return L1ObjectMeta(
+            size_bytes=memory_obj.get_size(),
+            backend=self._memory_manager.get_backend_type(memory_obj),
+        )

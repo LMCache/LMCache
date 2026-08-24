@@ -6,11 +6,17 @@ Configuration for the multiprocess (ZMQ) server and HTTP frontend.
 
 # Standard
 from dataclasses import dataclass, field
+from typing import Literal
 import argparse
 import json
 import math
 import os
 import uuid
+
+# First Party
+from lmcache.logging import init_logger
+
+logger = init_logger(__name__)
 
 
 @dataclass
@@ -45,10 +51,10 @@ class MPServerConfig:
     ('default' for standard prefix caching, 'blend' when cacheblend is enabled).
     """
 
-    separate_object_groups: bool = True
-    """When True (default), split kernel groups into one object group per
-    sliding-window size at KV-cache registration (hybrid models). When False,
-    all kernel groups share a single full-attention object group."""
+    separate_object_groups: bool = False
+    """When True, split kernel groups into one object group per
+    sliding-window size at KV-cache registration (hybrid models). When False
+    (default), all kernel groups share a single full-attention object group."""
 
     enable_segmented_prefix: bool = False
     """CacheBlend only (engine_type='blend'): on a mid-prefix L2 retrieve
@@ -56,7 +62,9 @@ class MPServerConfig:
     L1-resident (served by the sparse leg as L1 hits, the hole recomputed)
     instead of truncating the prefix at the gap. No effect for other engines."""
 
-    supported_transfer_mode: str = "auto"
+    supported_transfer_mode: Literal["lmcache_driven", "engine_driven", "auto"] = (
+        "lmcache_driven"
+    )
     """Transfer mode: 'lmcache_driven' for server-driven transfer
     (STORE/RETRIEVE, supports CUDA IPC and CPU SHM), 'engine_driven' for
     engine-driven transfer (PREPARE/COMMIT), or 'auto' to enable both."""
@@ -70,9 +78,9 @@ class MPServerConfig:
     """Peer-to-peer configuration. P2P is enabled when its advertise URL is
     set."""
 
-    shm_name: str | None = None
+    shm_name: str | None = ""
     """SHM segment name for engine-driven KV transfer.
-    None: auto-allocate (default). "": force pickle. Other: use that name."""
+    "" (default): force pickle. None: auto-allocate. Other: use that name."""
 
     script_allowed_imports: list[str] = field(default_factory=list)
     """Modules that /run_script endpoint is allowed to import."""
@@ -94,6 +102,10 @@ class MPServerConfig:
     """Silence budget (seconds) for a worker that registered but has never
     sent a PING (model warmup, or death before its first request). Must be
     >= worker_reap_timeout_seconds."""
+
+    enable: list[str] = field(default_factory=list)
+    """List of experimental transfer modules to enable. Options: transfer_query
+    (see lmcache.v1.multiprocess.modules.experimental.__init___.py)."""
 
     def __post_init__(self) -> None:
         """Validate the worker-reaping timeouts.
@@ -209,12 +221,21 @@ class CoordinatorConfig:
     """Seconds between heartbeats. Must be strictly positive and kept well below
     the coordinator's ``INSTANCE_TIMEOUT``."""
 
-    l2_event_reporting: bool = False
-    """When ``True``, report L2 store/lookup events to the coordinator for
-    fleet-wide usage tracking and eviction."""
+    event_reporting: bool = False
+    """When ``True``, stream cache store/access/delete events to the
+    coordinator, feeding the key directory (fleet-wide placement
+    tracking) and, for L2 events, usage/quota tracking and eviction."""
 
-    l2_event_flush_interval: float = 1.0
-    """Seconds between L2 event flush attempts to the coordinator."""
+    event_flush_interval: float = 1.0
+    """Seconds between cache-event flush attempts to the coordinator."""
+
+    blend_timeout: float = 1.0
+    """Seconds a fleet CacheBlend lookup may take: both the per-request HTTP
+    timeout and the per-lookup match budget of the blend coordinator client."""
+
+    blend_match_concurrency: int = 8
+    """Max fleet CacheBlend match round-trips the blend coordinator client keeps
+    in flight at once. Must be strictly positive."""
 
 
 DEFAULT_COORDINATOR_CONFIG = CoordinatorConfig()
@@ -303,12 +324,13 @@ def add_mp_server_args(
     mp_group.add_argument(
         "--supported-transfer-mode",
         type=str,
-        default="auto",
+        default="lmcache_driven",
         choices=["lmcache_driven", "engine_driven", "auto"],
         help="Supported transfer mode: 'lmcache_driven' for server-driven "
         "transfer (STORE/RETRIEVE, supports CUDA IPC and CPU SHM), "
         "'engine_driven' for engine-driven transfer (PREPARE/COMMIT), "
-        "or 'auto' to enable both transfer paths. Default is 'auto'.",
+        "or 'auto' to enable both transfer paths. "
+        "Default is 'lmcache_driven'.",
     )
     mp_group.add_argument(
         "--runtime-plugin-locations",
@@ -330,11 +352,12 @@ def add_mp_server_args(
     mp_group.add_argument(
         "--shm-name",
         type=str,
-        default=None,
+        default="",
         help="SHM segment name for engine-driven KV transfer. "
-        "Default (not specified): auto-allocate. "
-        'Set to "" to force pickle path (disable SHM). '
-        "Set to a name to use that specific SHM segment.",
+        'Default "" (not specified): disable SHM. '
+        "Set to a name to create and use that specific SHM segment. "
+        "(Only use this for engine_driven transfer mode, see "
+        "`--supported-transfer-mode`.) ",
     )
     mp_group.add_argument(
         "--script-allowed-imports",
@@ -347,9 +370,9 @@ def add_mp_server_args(
     mp_group.add_argument(
         "--separate-object-groups",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=False,
         help="Split kernel groups into one object group per sliding-window size "
-        "at KV-cache registration (for hybrid models). (Default is True)",
+        "at KV-cache registration (for hybrid models). (Default is False)",
     )
     mp_group.add_argument(
         "--worker-reap-timeout-seconds",
@@ -373,6 +396,15 @@ def add_mp_server_args(
         help="CacheBlend (--engine-type blend) only: on a mid-prefix L2 "
         "retrieve failure, retain the gapped prefix so post-gap chunks stay "
         "L1-resident instead of truncating at the gap. No effect otherwise.",
+    )
+    mp_group.add_argument(
+        "--enable",
+        type=str,
+        nargs="*",
+        default=[],
+        help="List of experimental transfer modules to enable. "
+        "Options: transfer_query (see lmcache.v1.multiprocess.modules."
+        "experimental.__init___.py).",
     )
     return parser
 
@@ -418,6 +450,7 @@ def parse_args_to_mp_server_config(
         script_allowed_imports=args.script_allowed_imports or [],
         worker_reap_timeout_seconds=args.worker_reap_timeout_seconds,
         worker_registration_grace_seconds=args.worker_registration_grace_seconds,
+        enable=args.enable or [],
     )
 
 
@@ -543,9 +576,10 @@ def add_coordinator_args(
 ) -> argparse.ArgumentParser:
     """Add MP coordinator registration arguments to an existing parser.
 
-    Each flag falls back to its ``LMCACHE_COORDINATOR_*`` environment variable
-    so the server can be configured either way (the env var is convenient for
-    the Kubernetes downward API); an explicit flag wins over the env var.
+    The registration flags fall back to their ``LMCACHE_COORDINATOR_*``
+    environment variables so the server can be configured either way (the env
+    var is convenient for the Kubernetes downward API); an explicit flag wins
+    over the env var. The blend client flags have no env fallback.
 
     Args:
         parser: The argument parser to add arguments to.
@@ -579,19 +613,53 @@ def add_coordinator_args(
         "LMCACHE_COORDINATOR_HEARTBEAT_INTERVAL, then 5.0.",
     )
     group.add_argument(
-        "--coordinator-l2-event-reporting",
+        "--coordinator-event-reporting",
         action="store_true",
         default=None,
-        help="Report L2 store/lookup events to the coordinator for "
-        "fleet-wide usage tracking and eviction. Defaults to "
-        "LMCACHE_COORDINATOR_L2_EVENT_REPORTING; unset disables.",
+        help="Stream cache store/access/delete events to the coordinator, "
+        "feeding the key directory (placement tracking) and, for L2 "
+        "events, usage/quota tracking and eviction. Defaults to "
+        "LMCACHE_COORDINATOR_EVENT_REPORTING; unset disables.",
+    )
+    group.add_argument(
+        "--coordinator-event-flush-interval",
+        type=float,
+        default=None,
+        help="Seconds between cache-event flush attempts (must be > 0). "
+        "Defaults to LMCACHE_COORDINATOR_EVENT_FLUSH_INTERVAL, then 1.0.",
+    )
+    group.add_argument(
+        "--coordinator-blend-timeout",
+        type=float,
+        default=DEFAULT_COORDINATOR_CONFIG.blend_timeout,
+        help="Seconds a fleet CacheBlend lookup to the coordinator may take, "
+        "used as both the HTTP timeout and the per-lookup match budget "
+        f"(default: {DEFAULT_COORDINATOR_CONFIG.blend_timeout}).",
+    )
+    group.add_argument(
+        "--coordinator-blend-match-concurrency",
+        type=int,
+        default=DEFAULT_COORDINATOR_CONFIG.blend_match_concurrency,
+        help="Max fleet CacheBlend match round-trips in flight at once "
+        f"(default: {DEFAULT_COORDINATOR_CONFIG.blend_match_concurrency}).",
+    )
+    # Deprecated pre-v0.5.3 aliases, hidden from --help. Released deployers
+    # (operator <= v0.5.2, charts) still render these names into server args,
+    # and rejecting them crashes the pod on startup. Remove once those
+    # deployers are out of the support matrix.
+    group.add_argument(
+        "--coordinator-l2-event-reporting",
+        dest="coordinator_l2_event_reporting",
+        action="store_true",
+        default=None,
+        help=argparse.SUPPRESS,
     )
     group.add_argument(
         "--coordinator-l2-event-flush-interval",
+        dest="coordinator_l2_event_flush_interval",
         type=float,
         default=None,
-        help="Seconds between L2 event flush attempts (must be > 0). "
-        "Defaults to LMCACHE_COORDINATOR_L2_EVENT_FLUSH_INTERVAL, then 1.0.",
+        help=argparse.SUPPRESS,
     )
     return parser
 
@@ -601,9 +669,16 @@ def parse_args_to_coordinator_config(
 ) -> CoordinatorConfig:
     """Convert parsed command line arguments to a CoordinatorConfig.
 
-    A flag value takes precedence over its environment variable. The heartbeat
-    interval is validated here so a malformed value fails fast at startup
-    (runtime best-effort only covers coordinator *reachability*, not config).
+    For the registration settings a flag value takes precedence over its
+    environment variable; the blend client settings come from their flags
+    alone. Timing values are validated here so a malformed one fails fast at
+    startup (runtime best-effort only covers coordinator *reachability*, not
+    config).
+
+    The event-reporting flags also accept their deprecated pre-v0.5.3
+    spellings (``--coordinator-l2-event-*``), logging a deprecation warning
+    when used. Precedence per setting: new flag > deprecated flag > env var
+    > default.
 
     Args:
         args: Parsed arguments from the argument parser.
@@ -612,7 +687,9 @@ def parse_args_to_coordinator_config(
         The configuration object.
 
     Raises:
-        ValueError: If the heartbeat interval is not a positive number.
+        ValueError: If the heartbeat interval, the event flush interval or the
+            blend timeout is not a positive finite number, or if the blend
+            match concurrency is less than 1.
     """
     url = (
         args.coordinator_url
@@ -644,37 +721,67 @@ def parse_args_to_coordinator_config(
             "coordinator heartbeat interval must be a finite number > 0, "
             "got %s" % heartbeat_interval
         )
-    if args.coordinator_l2_event_reporting is not None:
-        l2_event_reporting = args.coordinator_l2_event_reporting
+    # Deprecated pre-v0.5.3 flag spellings. Precedence within each setting:
+    # new flag > deprecated flag > env var > default.
+    deprecated_reporting = getattr(args, "coordinator_l2_event_reporting", None)
+    if args.coordinator_event_reporting is not None:
+        event_reporting = args.coordinator_event_reporting
+    elif deprecated_reporting is not None:
+        logger.warning(
+            "--coordinator-l2-event-reporting is deprecated, "
+            "use --coordinator-event-reporting instead"
+        )
+        event_reporting = deprecated_reporting
     else:
-        l2_event_reporting = os.getenv(
-            "LMCACHE_COORDINATOR_L2_EVENT_REPORTING", ""
+        event_reporting = os.getenv(
+            "LMCACHE_COORDINATOR_EVENT_REPORTING", ""
         ).lower() in ("1", "true", "yes")
 
-    if args.coordinator_l2_event_flush_interval is not None:
-        l2_event_flush_interval = args.coordinator_l2_event_flush_interval
+    deprecated_flush = getattr(args, "coordinator_l2_event_flush_interval", None)
+    if args.coordinator_event_flush_interval is not None:
+        event_flush_interval = args.coordinator_event_flush_interval
+    elif deprecated_flush is not None:
+        logger.warning(
+            "--coordinator-l2-event-flush-interval is deprecated, "
+            "use --coordinator-event-flush-interval instead"
+        )
+        event_flush_interval = deprecated_flush
     else:
-        raw = os.getenv("LMCACHE_COORDINATOR_L2_EVENT_FLUSH_INTERVAL")
+        raw = os.getenv("LMCACHE_COORDINATOR_EVENT_FLUSH_INTERVAL")
         if raw:
             try:
-                l2_event_flush_interval = float(raw)
+                event_flush_interval = float(raw)
             except ValueError as exc:
                 raise ValueError(
-                    "LMCACHE_COORDINATOR_L2_EVENT_FLUSH_INTERVAL is not a number: %r"
-                    % raw
+                    "LMCACHE_COORDINATOR_EVENT_FLUSH_INTERVAL is not a number: %r" % raw
                 ) from exc
         else:
-            l2_event_flush_interval = 1.0
-    if not math.isfinite(l2_event_flush_interval) or l2_event_flush_interval <= 0:
+            event_flush_interval = 1.0
+    if not math.isfinite(event_flush_interval) or event_flush_interval <= 0:
         raise ValueError(
-            "coordinator L2 event flush interval must be a finite number > 0, "
-            "got %s" % l2_event_flush_interval
+            "coordinator event flush interval must be a finite number > 0, "
+            "got %s" % event_flush_interval
+        )
+
+    blend_timeout = args.coordinator_blend_timeout
+    if not math.isfinite(blend_timeout) or blend_timeout <= 0:
+        raise ValueError(
+            "coordinator blend timeout must be a finite number > 0, "
+            "got %s" % blend_timeout
+        )
+    blend_match_concurrency = args.coordinator_blend_match_concurrency
+    if blend_match_concurrency < 1:
+        raise ValueError(
+            "coordinator blend match concurrency must be >= 1, "
+            "got %s" % blend_match_concurrency
         )
 
     return CoordinatorConfig(
         url=url,
         advertise_ip=advertise_ip,
         heartbeat_interval=heartbeat_interval,
-        l2_event_reporting=l2_event_reporting,
-        l2_event_flush_interval=l2_event_flush_interval,
+        event_reporting=event_reporting,
+        event_flush_interval=event_flush_interval,
+        blend_timeout=blend_timeout,
+        blend_match_concurrency=blend_match_concurrency,
     )

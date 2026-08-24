@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import Any, Generator, List, Optional, Union, cast
+from typing import TYPE_CHECKING, Any, Generator, List, Optional, Union, cast
 import os
 
 # Third Party
@@ -26,26 +26,29 @@ from lmcache.v1.gpu_connector.utils import (
     get_num_heads,
     get_num_layers,
     get_page_buffer_size,
-    is_mla,
     normalize_kv_and_discover_format,
 )
 from lmcache.v1.memory_allocators.gpu_memory_allocator import GPUMemoryAllocator
+from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
 )
-from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.platform.musa.native_kv_transfer import (
     try_native_from_gpu,
     try_native_to_gpu,
 )
-import lmcache.c_ops as lmc_ops
+import lmcache.lmcache_native as lmcache_native
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.metadata import LMCacheMetadata
 
 logger = init_logger(__name__)
 
 _SUPPORTED_MUSA_KV_FORMATS = (
-    lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
-    lmc_ops.EngineKVFormat.NL_X_NB_BS_HS,
+    lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
+    lmcache_native.EngineKVFormat.NL_X_NB_BS_HS,
 )
 
 ALLOWED_FORMAT_TRANSITIONS = {
@@ -53,6 +56,91 @@ ALLOWED_FORMAT_TRANSITIONS = {
     (MemoryFormat.KV_MLA_FMT, MemoryFormat.KV_MLA_FMT),
     (MemoryFormat.KV_T2D, MemoryFormat.KV_MLA_FMT),
 }
+
+
+def _copy_tensor_at_pin_boundaries(
+    dest: torch.Tensor,
+    src: torch.Tensor,
+    memory_obj: MemoryObj,
+) -> None:
+    """Copy a host tensor without crossing lazy registration ranges.
+
+    Args:
+        dest: Destination tensor.
+        src: Source tensor with the same number of bytes as ``dest``.
+        memory_obj: Host memory object participating in the transfer.
+
+    Returns:
+        None.
+
+    Raises:
+        ValueError: If a lazy transfer has mismatched sizes, noncontiguous
+            tensors, or does not contain exactly one tensor in ``memory_obj``.
+    """
+    if not isinstance(memory_obj.parent(), LazyMemoryAllocator):
+        dest.copy_(src, non_blocking=True)
+        return
+    if dest.nbytes != src.nbytes:
+        raise ValueError(
+            f"MUSA copy size mismatch: dest={dest.nbytes}, src={src.nbytes}"
+        )
+    if not dest.is_contiguous() or not src.is_contiguous():
+        raise ValueError("Lazy MUSA transfers require contiguous tensors")
+
+    memory_start = memory_obj.data_ptr
+    memory_end = memory_start + memory_obj.get_size()
+    src_start = src.data_ptr()
+    dest_start = dest.data_ptr()
+    src_is_host = memory_start <= src_start and src_start + src.nbytes <= memory_end
+    dest_is_host = memory_start <= dest_start and dest_start + dest.nbytes <= memory_end
+    if src_is_host == dest_is_host:
+        raise ValueError(
+            "Lazy MUSA copy must have exactly one tensor in the memory object"
+        )
+
+    host_start = src_start if src_is_host else dest_start
+    host_offset = memory_obj.meta.address + host_start - memory_start
+    chunk_size = LazyMemoryAllocator.PIN_CHUNK_SIZE
+    dest_bytes = dest.view(torch.uint8).flatten()
+    src_bytes = src.view(torch.uint8).flatten()
+    copied = 0
+    while copied < src.nbytes:
+        bytes_to_boundary = chunk_size - ((host_offset + copied) % chunk_size)
+        copy_size = min(src.nbytes - copied, bytes_to_boundary)
+        dest_bytes[copied : copied + copy_size].copy_(
+            src_bytes[copied : copied + copy_size],
+            non_blocking=True,
+        )
+        copied += copy_size
+
+
+def _to_musa_at_pin_boundaries(
+    tensor: torch.Tensor,
+    memory_obj: MemoryObj,
+    device: torch.device,
+) -> torch.Tensor:
+    """Move a host tensor to MUSA without crossing lazy registration ranges.
+
+    Args:
+        tensor: Source tensor owned by ``memory_obj``.
+        memory_obj: Memory object that identifies lazy allocator ownership and
+            the host offset.
+        device: Destination MUSA device.
+
+    Returns:
+        ``tensor`` when already on ``device``; otherwise, a tensor on ``device``
+        containing the copied data.
+
+    Raises:
+        ValueError: If lazy-copy validation fails.
+    """
+    if tensor.device == device:
+        return tensor
+    if not isinstance(memory_obj.parent(), LazyMemoryAllocator):
+        return tensor.to(device, non_blocking=True)
+    musa_tensor = torch.empty_like(tensor, device=device)
+    _copy_tensor_at_pin_boundaries(musa_tensor, tensor, memory_obj)
+    return musa_tensor
 
 
 class VLLMPagedMemMUSAConnectorV2(VLLMPagedMemGPUConnectorV2):
@@ -86,7 +174,7 @@ class VLLMPagedMemMUSAConnectorV2(VLLMPagedMemGPUConnectorV2):
     @classmethod
     def from_metadata(
         cls,
-        metadata: LMCacheMetadata,
+        metadata: "LMCacheMetadata",
         use_gpu: bool = False,
         device: Optional[torch.device] = None,
         layout_hints: Optional[LayoutHints] = None,
@@ -160,15 +248,27 @@ class VLLMPagedMemMUSAConnectorV2(VLLMPagedMemGPUConnectorV2):
         )
 
         if self.use_mla:
-            tmp = memory_obj.tensor[0].to(self.device, non_blocking=True)
+            tmp = _to_musa_at_pin_boundaries(
+                memory_obj.tensor[0],
+                memory_obj,
+                self.device,
+            )
             total_blocks = self.num_blocks * self.block_size
             for i, kvcache in enumerate(self.kvcaches):
                 kvcache.view(total_blocks, self.head_size).index_copy_(
                     0, slices, tmp[i, skip_prefix_n_tokens:]
                 )
         else:
-            tmp_k = memory_obj.tensor[0].to(self.device, non_blocking=True)
-            tmp_v = memory_obj.tensor[1].to(self.device, non_blocking=True)
+            tmp_k = _to_musa_at_pin_boundaries(
+                memory_obj.tensor[0],
+                memory_obj,
+                self.device,
+            )
+            tmp_v = _to_musa_at_pin_boundaries(
+                memory_obj.tensor[1],
+                memory_obj,
+                self.device,
+            )
             total_blocks = self.num_blocks * self.block_size
             d = self.num_heads * self.head_size
             for i, (kcache, vcache) in enumerate(self.kvcaches):
@@ -258,7 +358,7 @@ class VLLMPagedMemMUSAConnectorV2(VLLMPagedMemGPUConnectorV2):
                 ]
             )
             tmp = torch.stack([tmp_k, tmp_v])
-        memory_obj.tensor.copy_(tmp, non_blocking=True)
+        _copy_tensor_at_pin_boundaries(memory_obj.tensor, tmp, memory_obj)
 
         if memory_obj.tensor.device.type != "musa":
             torch.musa.synchronize()  # type: ignore[attr-defined]
@@ -370,7 +470,7 @@ class VLLMPagedMemMUSAConnectorV2(VLLMPagedMemGPUConnectorV2):
             normalized_kv_caches, self.engine_kv_format
         )
         self.head_size = get_head_size(normalized_kv_caches, self.engine_kv_format)
-        self.use_mla = is_mla(self.engine_kv_format)
+        self.use_mla = lmcache_native.is_mla(self.engine_kv_format)
         self.dtype = get_dtype(normalized_kv_caches, self.engine_kv_format)
         self.num_heads = (
             1
@@ -448,7 +548,7 @@ class VLLMPagedMemLayerwiseMUSAConnector(GPUConnectorInterface):
     @classmethod
     def from_metadata(
         cls,
-        metadata: LMCacheMetadata,
+        metadata: "LMCacheMetadata",
         use_musa: bool = False,
         device: Optional[torch.device] = None,
     ) -> "VLLMPagedMemLayerwiseMUSAConnector":
@@ -534,6 +634,10 @@ class VLLMPagedMemLayerwiseMUSAConnector(GPUConnectorInterface):
                 return t.to(self.device, non_blocking=True)
             return t
 
+        def _ensure_musa_memory(mem: MemoryObj) -> torch.Tensor:
+            assert mem.tensor is not None
+            return _to_musa_at_pin_boundaries(mem.tensor, mem, self.device)
+
         slot_mapping_chunks = [
             slot_mapping[s:e] for s, e in zip(starts, ends, strict=False)
         ]
@@ -606,7 +710,7 @@ class VLLMPagedMemLayerwiseMUSAConnector(GPUConnectorInterface):
                             n = int(e - s)
                             if n <= 0:
                                 continue
-                            src = _ensure_musa(mem.tensor)
+                            src = _ensure_musa_memory(mem)
                             staged[cursor : cursor + n].copy_(src, non_blocking=True)
                             cursor += n
 
@@ -661,7 +765,7 @@ class VLLMPagedMemLayerwiseMUSAConnector(GPUConnectorInterface):
                             n = int(e - s)
                             if n <= 0:
                                 continue
-                            src = _ensure_musa(mem.tensor)
+                            src = _ensure_musa_memory(mem)
                             sl = slot_mapping_full[cursor : cursor + n]
                             sl = _ensure_musa(sl)
                             cursor += n
@@ -759,10 +863,13 @@ class VLLMPagedMemLayerwiseMUSAConnector(GPUConnectorInterface):
                         assert mem.tensor is not None
                         sl = slot_mapping_on_device[s:e]
                         gathered = src_flat.index_select(0, sl)
-                        mem.tensor.copy_(
-                            gathered.to(mem.tensor.device),
-                            non_blocking=True,
-                        )
+                        if isinstance(mem.parent(), LazyMemoryAllocator):
+                            _copy_tensor_at_pin_boundaries(mem.tensor, gathered, mem)
+                        else:
+                            mem.tensor.copy_(
+                                gathered.to(mem.tensor.device),
+                                non_blocking=True,
+                            )
 
                     target_fmt = MemoryFormat.KV_MLA_FMT
                     for mem in mem_layer:
@@ -778,7 +885,17 @@ class VLLMPagedMemLayerwiseMUSAConnector(GPUConnectorInterface):
                         k = src_k_flat.index_select(0, sl)
                         v = src_v_flat.index_select(0, sl)
 
-                        if mem.tensor.shape[0] == 2:
+                        if isinstance(mem.parent(), LazyMemoryAllocator):
+                            if mem.tensor.shape[0] == 2:
+                                gathered = torch.stack((k, v))
+                            elif mem.tensor.dim() >= 2 and mem.tensor.shape[1] == 2:
+                                gathered = torch.stack((k, v), dim=1)
+                            else:
+                                raise ValueError(
+                                    f"Unrecognized KV tensor layout: {mem.tensor.shape}"
+                                )
+                            _copy_tensor_at_pin_boundaries(mem.tensor, gathered, mem)
+                        elif mem.tensor.shape[0] == 2:
                             mem.tensor[0].copy_(
                                 k.to(mem.tensor.device), non_blocking=True
                             )

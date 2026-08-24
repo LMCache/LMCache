@@ -485,7 +485,7 @@ void multi_layer_kv_transfer(
     const EngineKVFormat engine_kv_format, const int block_size,
     const int head_size, const int skip_prefix_n_tokens) {
   // head_size is currently unused in the SYCL implementation; accepted to
-  // keep ABI parity with the CUDA c_ops binding so callers can pass the
+  // keep ABI parity with the CUDA cuda_ops binding so callers can pass the
   // same kwargs to either backend.
   (void)head_size;
   int num_origin_elements = key_value.size(3);
@@ -1020,4 +1020,34 @@ void lmcache_memcpy_async(uintptr_t dest, uintptr_t src, size_t nbytes,
 
     offset += max_nbytes;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Pinned host allocation (SYCL/XPU analog of the CUDA cudaHostAlloc path in
+// csrc/cuda/mem_alloc.cpp). LMCache local_cpu backend expects a
+// device-accessible (USM host) buffer; without this the XPU build silently fell
+// back to pageable host memory, dropping D2H store throughput ~20x.
+// sycl::malloc_host bound to the current XPU device context gives true
+// USM-pinned host memory.
+//
+// IMPORTANT: We use device 0's context for both alloc and free to ensure
+// context consistency. USM host memory is accessible from all devices, but
+// sycl::free() requires the same context used during allocation. Using device
+// 0 consistently avoids context mismatch when the current device changes
+// between allocation and deallocation.
+// ---------------------------------------------------------------------------
+uintptr_t alloc_pinned_ptr(size_t size, unsigned int flags) {
+  // Use device 0 context consistently for host memory allocation.
+  // DeviceGuard ensures we restore the original device after getting context.
+  const c10::DeviceGuard device_guard(c10::Device(c10::kXPU, 0));
+  void* ptr = sycl::malloc_host(size, c10::xpu::get_device_context());
+  TORCH_CHECK(ptr != nullptr, "sycl::malloc_host failed for ", size,
+              " bytes (XPU pinned host)");
+  return reinterpret_cast<uintptr_t>(ptr);
+}
+
+void free_pinned_ptr(uintptr_t ptr) {
+  // Use device 0 context consistently (must match alloc_pinned_ptr).
+  const c10::DeviceGuard device_guard(c10::Device(c10::kXPU, 0));
+  sycl::free(reinterpret_cast<void*>(ptr), c10::xpu::get_device_context());
 }
