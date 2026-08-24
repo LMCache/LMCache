@@ -591,7 +591,7 @@ DCP. These combinations are rejected at startup:
    * - Rejected with DCP
      - Reason
    * - ``--prefill-context-parallel-size > 1``
-     - A different sharding, not mirrored by the block-size scaling.
+     - Adds a second KV shard axis this connector does not map.
    * - ``--cp-kv-cache-interleave-size != 1``
      - Changes the token-to-rank mapping, which would store the wrong KV.
    * - Fewer than ``dcp_size`` ranks per LMCache server

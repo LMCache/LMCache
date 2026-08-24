@@ -342,12 +342,9 @@ class AttnWindowDesc:
     num_chunks_in_sw: list[int]
 
     world_size: int = 1
-    """Number of kv_rank shards per chunk.
-
-    Equals the tensor-parallel world size for head-sharded models and the
-    decode-context-parallel size for token-sharded (MLA + DCP) ones. Always
-    the fold fan-out used by ``fold_unfold_ranked``.
-    """
+    """Number of kv_rank shards per chunk (the ``fold_unfold_ranked``
+    fan-out): the TP world size for head-sharded models, pipeline stages
+    times DCP size for MLA."""
 
     group_kinds: tuple[GroupKind, ...] = ()
     """Optional per-group kind labels parallel to ``num_chunks_in_sw``.

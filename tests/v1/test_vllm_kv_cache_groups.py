@@ -29,12 +29,8 @@ class MockKVCacheSpec:
 
 @dataclass
 class AttentionSpec:
-    """Base of every paged-attention spec, mirroring vLLM's hierarchy.
-
-    ``group_tokens_per_block_for`` scales attention groups under DCP and
-    detects them by this class name, so the doubles must inherit it to
-    reproduce vLLM's behaviour.
-    """
+    """Base of the attention-spec doubles: ``get_tokens_per_block`` detects
+    attention groups by this class name, so the doubles must inherit it."""
 
     block_size: int
 

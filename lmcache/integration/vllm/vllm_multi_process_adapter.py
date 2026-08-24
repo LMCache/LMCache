@@ -287,24 +287,18 @@ class ParallelStrategy:
     """Number of LMCache servers backing this deployment"""
 
     dcp_size: int = 1
-    """Decode-context-parallel size.
-
-    ``> 1`` means vLLM shards the KV cache across ``dcp_size`` ranks along the
-    token axis, so one chunk has ``dcp_size`` distinct shards rather than a
-    single replicated copy. Defaults to 1 so callers that do not set it keep
-    the previous behaviour exactly.
-    """
+    """Decode-context-parallel size: vLLM shards the KV cache across
+    ``dcp_size`` ranks along the token axis, so one chunk has ``dcp_size``
+    distinct shards rather than a single replicated copy."""
 
     @property
     def kv_world_size(self) -> int:
         """Number of pieces a single token chunk's KV cache is split into
         on the LMCache server storage."""
         if self.mla_only:
-            # MLA replicates the latent KV across TP, so a chunk is split only
-            # by the axes that hold genuinely different bytes: the pipeline
-            # stage (different layers) and, under DCP, the token shard. The
-            # product is the fold fan-out on the lookup path. Reduces to
-            # world_size // tp_size (== pp_size) when dcp_size is 1.
+            # MLA replicates the latent KV across TP, so a chunk is split
+            # only by the axes holding genuinely different bytes: pipeline
+            # stage (layers) and DCP token shard.
             pp_stages = self.vllm_world_size // self.tp_size
             return pp_stages * self.dcp_size
         return self.vllm_world_size // self.n_servers
@@ -315,48 +309,32 @@ class ParallelStrategy:
         that the current worker is responsible for,
         in ``[0, kv_world_size)``."""
         if self.mla_only:
-            # Row-major over (pipeline stage, token shard), matching the
-            # kv_world_size product above. Reduces to the PP stage when
-            # dcp_size is 1 and to the token shard when pp_size is 1.
+            # Row-major over (pipeline stage, token shard), matching
+            # kv_world_size.
             pp_stage = self.vllm_worker_id // self.tp_size
             return pp_stage * self.dcp_size + self._get_dcp_rank()
         return self.vllm_worker_id % (self.vllm_world_size // self.n_servers)
 
-    def _get_tp_rank(self) -> int:
-        """Return this worker's rank within its tensor-parallel group."""
-        return self.vllm_worker_id % self.tp_size
-
     def _get_dcp_rank(self) -> int:
         """Index of the token shard this worker holds, in ``[0, dcp_size)``.
 
-        vLLM builds the DCP groups by reshaping the rank grid into contiguous
-        runs of ``dcp_size`` (``parallel_state.initialize_model_parallel``:
-        ``all_ranks.transpose(-1, -2).reshape(-1, dcp_size)``). With
-        ``pcp_size == 1`` the flatten walks the TP axis in order, so each run is
-        a consecutive block of TP ranks starting at a multiple of ``dcp_size``
-        and a worker's position inside its run is ``tp_rank % dcp_size``.
+        vLLM builds DCP groups as contiguous runs of ``dcp_size`` ranks
+        within each TP group (``all_ranks.transpose(-1, -2).reshape(-1,
+        dcp_size)``), so a worker's shard index is ``tp_rank % dcp_size``.
         """
-        return self._get_tp_rank() % self.dcp_size
+        return (self.vllm_worker_id % self.tp_size) % self.dcp_size
 
     @property
     def num_kv_readers(self) -> int:
-        """Number of TP workers that retrieve one stored object.
+        """Number of workers that retrieve one stored object.
 
-        Lookup reserves ``1 + extra_count`` read locks on each object and every
-        worker's retrieve releases exactly one, so this must be exact: too low
-        unpins an object while readers are still copying.
-
-        Head-sharded models give every rank its own object, so one reader. MLA
-        replicates the latent KV across TP, so the TP ranks of a pipeline stage
-        read the same object -- but only those on the same LMCache server, and
-        under DCP only those sharing a token shard. Hence ``kv_tp_size``
-        (already divided by ``n_servers``) over ``dcp_size``.
-
-        Rounded up, because that division need not be exact: vLLM allows e.g.
-        TP=6 with DCP=2, and across two servers each server's three ranks give
-        shard 0 two readers and shard 1 one. A single count covers every shard,
-        so it must be the largest -- over-reserving merely holds a lock until
-        its TTL, while under-reserving would unpin an object mid-copy.
+        Head-sharded models: every rank reads its own object -> 1. MLA: an
+        object is shared by the TP ranks of one pipeline stage on one server
+        that hold the same token shard -> ``kv_tp_size / dcp_size``. Rounded
+        up because the split can be uneven and one count must cover the
+        largest shard group: under-reserving unpins an object mid-copy,
+        over-reserving only holds it until the read lock's TTL (see
+        ``compute_extra_count``).
         """
         if not self.mla_only:
             return 1
@@ -373,17 +351,11 @@ class ParallelStrategy:
         if not self.mla_only:
             return True
         if self.dcp_size > 1:
-            # A single writer cannot cover the chunk any more: each dcp_rank
-            # holds a different token shard. Elect one writer per shard *per
-            # server*, since ranks map to servers in contiguous blocks and each
-            # server must hold an independently servable set. The first
-            # ``dcp_size`` ranks of a server are consecutive, and any run of
-            # ``dcp_size`` consecutive ranks covers every ``dcp_rank`` exactly
-            # once -- so one writer per shard, none twice, for any block size.
-            # Two groupings must each hold a full shard set: an LMCache
-            # server (lookup takes the minimum hit count across servers) and a
-            # pipeline stage (each owns different layers). Both are contiguous
-            # rank runs, so the binding constraint is the smaller of the two.
+            # Each dcp_rank holds a different token shard, so elect one
+            # writer per shard within every LMCache server and every
+            # pipeline stage (each must hold a full shard set). Both are
+            # contiguous rank runs, so electing the first dcp_size ranks of
+            # the smaller run covers every shard exactly once.
             ranks_per_server = self.vllm_world_size // self.n_servers
             block = min(ranks_per_server, self.tp_size)
             return (self.vllm_worker_id % block) < self.dcp_size

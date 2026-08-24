@@ -185,23 +185,15 @@ def validate_mamba_step_alignment(vllm_config: VllmConfig) -> None:
 def validate_dcp_support(vllm_config: VllmConfig, n_servers: int) -> None:
     """Reject decode-context-parallel topologies this connector cannot serve.
 
-    Under DCP a rank holds only its strided 1/dcp slice of every attention
-    block, and this connector stores that slice as its own object keyed by
-    ``kv_rank``. That mapping holds only for the topologies checked here, so
-    every other one is rejected up front -- nothing reaches the transfer path
-    and no wrong KV is ever stored. The guards exist precisely because those
-    topologies would otherwise produce wrong KV without any error.
-
-    Args:
-        vllm_config: The vLLM config. Configurations with
-            ``decode_context_parallel_size == 1`` always pass.
-        n_servers: Number of LMCache servers backing this deployment.
+    On the rejected topologies the shard-to-rank mapping this connector
+    relies on does not hold, and running anyway would silently store wrong
+    or incomplete KV -- so they fail with an error at startup instead.
+    ``dcp_size > tensor_parallel_size`` is not re-checked because vLLM's
+    ``ParallelConfig`` already rejects it.
 
     Raises:
-        ValueError: If prefill-context parallelism is combined with DCP, if
-            ``cp_kv_cache_interleave_size`` is not 1, or if a server would own
-            fewer than ``dcp_size`` ranks. vLLM already rejects
-            ``dcp_size > tensor_parallel_size``, so that is not re-checked.
+        ValueError: On an unsupported DCP topology. Configurations with
+            ``decode_context_parallel_size == 1`` always pass.
     """
     pc = vllm_config.parallel_config
     dcp_size = getattr(pc, "decode_context_parallel_size", 1)
@@ -212,18 +204,15 @@ def validate_dcp_support(vllm_config: VllmConfig, n_servers: int) -> None:
     if pcp_size > 1:
         raise ValueError(
             "LMCacheMPConnector does not support prefill-context parallelism "
-            f"together with DCP (got pcp={pcp_size}, dcp={dcp_size}). PCP is a "
-            "different sharding and is not mirrored by the block-size scaling "
-            "this connector applies."
+            f"together with DCP (got pcp={pcp_size}, dcp={dcp_size})."
         )
 
     interleave = getattr(pc, "cp_kv_cache_interleave_size", 1)
     if interleave != 1:
         raise ValueError(
             "LMCacheMPConnector requires cp_kv_cache_interleave_size == 1 "
-            f"under DCP (got {interleave}). Other values change the "
-            "token-to-rank mapping, which would store and scatter the wrong "
-            "KV with no crash. Set --cp-kv-cache-interleave-size 1."
+            f"under DCP (got {interleave}); other values change the "
+            "token-to-rank mapping."
         )
 
     ranks_per_server = pc.world_size // n_servers
@@ -231,10 +220,8 @@ def validate_dcp_support(vllm_config: VllmConfig, n_servers: int) -> None:
         raise ValueError(
             f"Each LMCache server needs at least decode_context_parallel_size "
             f"({dcp_size}) ranks to hold a complete set of shards, but "
-            f"{n_servers} server(s) leave only {ranks_per_server} rank(s) each. "
-            "Lookup takes the minimum hit count across servers, so a server "
-            "holding a partial set reports no hits at all. Use fewer servers "
-            "or a smaller DCP size."
+            f"{n_servers} server(s) leave only {ranks_per_server} rank(s) "
+            "each. Use fewer servers or a smaller DCP size."
         )
 
 
