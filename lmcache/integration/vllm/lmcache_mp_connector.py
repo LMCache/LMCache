@@ -205,6 +205,8 @@ def validate_dcp_support(vllm_config: VllmConfig, n_servers: int) -> None:
             f"together with DCP (got pcp={pcp_size}, dcp={dcp_size})."
         )
 
+    # Fail-closed, not fundamental: the interleave sets each object's byte
+    # layout but is absent from cache identity, and k != 1 is unvalidated.
     interleave = getattr(pc, "cp_kv_cache_interleave_size", 1)
     if interleave != 1:
         raise ValueError(
