@@ -257,7 +257,9 @@ def test_server_store_and_retrieve_delegate_event_ordering(
             num_object_groups=1,
             num_kernel_groups=1,
             object_groups=[SimpleNamespace(kernel_group_indices=[0])],
-            get_attn_desc=lambda: SimpleNamespace(num_chunks_in_sw=[-1]),
+            get_attn_desc=lambda: SimpleNamespace(
+                num_chunks_in_sw=[-1], group_kinds=()
+            ),
         ),
         calculate_num_blocks=lambda chunk_size, group_idx: 1,
     )

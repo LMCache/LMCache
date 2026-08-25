@@ -95,7 +95,7 @@ def test_object_group_null_only_when_all_its_kernel_groups_null():
 # ------------------------------------------------------------------ #
 
 
-def _make_module(monkeypatch, num_chunks, num_chunks_in_sw):
+def _make_module(monkeypatch, num_chunks, num_chunks_in_sw, group_kinds=()):
     """Build an LMCacheDrivenTransferModule with its collaborators mocked, and
     return (module, read_calls, transfer_calls) capturing what retrieve reads
     and transfers per object group."""
@@ -106,7 +106,9 @@ def _make_module(monkeypatch, num_chunks, num_chunks_in_sw):
     kvlgm = SimpleNamespace(
         num_object_groups=num_object_groups,
         num_kernel_groups=num_object_groups,
-        get_attn_desc=lambda: SimpleNamespace(num_chunks_in_sw=num_chunks_in_sw),
+        get_attn_desc=lambda: SimpleNamespace(
+            num_chunks_in_sw=num_chunks_in_sw, group_kinds=tuple(group_kinds)
+        ),
     )
     cache_context = MagicMock()
     cache_context.kv_layer_groups_manager = kvlgm
@@ -206,3 +208,33 @@ def test_retrieve_full_attention_only_reads_everything(monkeypatch):
     assert read_calls == [["g0c0", "g0c1", "g0c2"]]
     _grp, mem = transfer_calls[0]
     assert len(mem) == 3 and all(o is not None for o in mem)
+
+
+def test_retrieve_never_reads_standalone_groups(monkeypatch):
+    """The std retrieve skips connector-private (standalone) object groups.
+
+    Their consumer is the CB retrieve, the op's block-id entry for them is a
+    discard placeholder, and the lookup does not lock their keys -- reading
+    them here would be an unlocked read of a plane nobody consumes.
+    """
+    num_chunks = 3
+    module, read_calls, transfer_calls = _make_module(
+        monkeypatch,
+        num_chunks,
+        num_chunks_in_sw=[1, -1, -1],
+        group_kinds=("recurrent", "attention", "standalone"),
+    )
+    gpu_block_ids = [[0, 0, 7], [1, 2, 3], [9, 9, 9]]
+
+    _handle, ok = module.retrieve(
+        key=SimpleNamespace(request_id="req", cache_salt="salt"),
+        instance_id=1,
+        gpu_block_ids=gpu_block_ids,
+        event_ipc_handle=b"x",
+    )
+    assert ok is True
+
+    # Recurrent group reads its one-block window; attention reads everything;
+    # the standalone group is read by NOBODY and transferred by nobody.
+    assert read_calls == [["g0c2"], [f"g1c{c}" for c in range(3)]]
+    assert [g for g, _ in transfer_calls] == [0, 1]
