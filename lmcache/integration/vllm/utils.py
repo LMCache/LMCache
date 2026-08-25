@@ -36,40 +36,68 @@ def is_false(value: str) -> bool:
     return value.lower() in ("false", "0", "no", "n", "off")
 
 
-def vllm_layout_hints() -> "LayoutHints":
+def vllm_layout_hints(vllm_config: "VllmConfig | None" = None) -> "LayoutHints":
     """Build layout_hints dict by querying vLLM at runtime."""
     hints: dict[str, str] = {}
-    kv_layout = try_get_vllm_kv_cache_layout()
+    kv_layout = try_get_vllm_kv_cache_layout(vllm_config)
     if kv_layout is not None:
         hints["kv_layout"] = kv_layout
     return hints  # type: ignore[return-value]
 
 
-def try_get_vllm_kv_cache_layout() -> Literal["NHD", "HND"] | None:
-    """Try to query the KV cache layout from vLLM at runtime.
+def try_get_vllm_kv_cache_layout(
+    vllm_config: "VllmConfig | None" = None,
+) -> Literal["NHD", "HND"] | None:
+    """Query vLLM's resolved KV cache layout, normalized to ``NHD``/``HND``.
 
-    Returns ``"NHD"`` or ``"HND"`` if vLLM is available and the layout
-    has been configured, otherwise ``None``.
+    Returns ``None`` when vLLM is unavailable (i.e. the MP server) or the
+    layout has not been resolved yet.
 
-    Please only call this where vllm is available (i.e. not in the MP server)
-    We will print an error if we try to get vllm kv layout where vllm
-    is not available.
+    Raises:
+        NotImplementedError: if vLLM resolved a standardized layout LMCache
+            cannot transfer yet. Registration must fail here -- falling back
+            to a guessed layout would silently corrupt the cache.
     """
+    # Deferred: lmcache.v1.gpu_connector pulls in xpu_connectors, which
+    # imports this module back at the top level.
+    # First Party
+    from lmcache.v1.gpu_connector.kv_format.types import normalize_kv_layout
 
-    # Third Party
     try:
-        # Third Party
-        from vllm.v1.attention.backends.utils import (  # type: ignore[import-untyped]
-            get_kv_cache_layout,
-        )
+        if vllm_config is None:
+            # Third Party
+            from vllm.config import get_current_vllm_config
 
-        return get_kv_cache_layout()
+            vllm_config = get_current_vllm_config()
+        cache_config = vllm_config.cache_config
     except Exception:
         logger.error(
             "vLLM is not available but tried to query kv cache "
             "layout information, cannot get KV cache layout"
         )
         return None
+
+    # vllm#51718 and later: the engine core resolves the layout once into
+    # CacheConfig, and the attention-backend query below no longer exists.
+    if hasattr(cache_config, "kv_cache_layout"):
+        kv_layout = cache_config.kv_cache_layout
+        if kv_layout is None:
+            logger.warning(
+                "vLLM has not resolved a KV cache layout yet; "
+                "skipping the kv_layout hint"
+            )
+            return None
+        return normalize_kv_layout(kv_layout)
+
+    try:
+        # Third Party
+        from vllm.v1.attention.backends.utils import (  # type: ignore[import-untyped]
+            get_kv_cache_layout,
+        )
+    except Exception:
+        logger.error("Could not query the KV cache layout from this vLLM version")
+        return None
+    return normalize_kv_layout(get_kv_cache_layout())
 
 
 def lmcache_get_or_create_config() -> LMCacheEngineConfig:
