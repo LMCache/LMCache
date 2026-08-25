@@ -11,7 +11,7 @@ import sys
 import pytest
 
 # First Party
-from lmcache.multiprocess.custom_types import BlockAllocationRecord
+from lmcache.multiprocess.custom_types import BlockAllocationRecord, CBMatchResult
 
 
 def test_legacy_block_allocation_record_preserves_identity() -> None:
@@ -21,6 +21,17 @@ def test_legacy_block_allocation_record_preserves_identity() -> None:
     assert legacy_custom_types.BlockAllocationRecord is BlockAllocationRecord
     assert (
         legacy_custom_types.BlockAllocationRecord.__module__
+        == "lmcache.multiprocess.custom_types"
+    )
+
+
+def test_legacy_cb_match_result_preserves_identity() -> None:
+    """The CacheBlend compatibility import must use the canonical class."""
+    legacy_custom_types = import_module("lmcache.v1.multiprocess.custom_types")
+
+    assert legacy_custom_types.CBMatchResult is CBMatchResult
+    assert (
+        legacy_custom_types.CBMatchResult.__module__
         == "lmcache.multiprocess.custom_types"
     )
 
