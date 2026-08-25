@@ -215,6 +215,68 @@ class StatusListResponse(BaseModel):
     by_cache_salt: list[StatusResponse]
 
 
+# -- Memory pressure ---------------------------------------------------------
+
+
+class ModuleMemoryStatus(BaseModel):
+    """Usage joined to declared capacity for one memory compartment.
+
+    Attributes:
+        tier: ``l1`` or ``l2``.
+        backend: Storage backend within the tier.
+        shared: Set for a fleet-shared pool, whose bytes are counted once
+            for the fleet, not once per mounting instance.
+        used_bytes: Bytes held, from the admitted cache-event stream.
+        capacity_bytes: Declared capacity, or ``0`` if none was declared.
+        usage_ratio: ``used_bytes / capacity_bytes``, or ``None`` when no
+            capacity was declared -- ``None`` rather than a sentinel, which
+            would read as real occupancy. Values above ``1.0`` are not
+            clamped: they mean the declared cap disagrees with what the
+            tier admitted.
+    """
+
+    tier: Tier
+    backend: str
+    shared: bool
+    used_bytes: int
+    capacity_bytes: int
+    usage_ratio: float | None = None
+
+
+class InstanceMemoryStatus(BaseModel):
+    """One MP server's memory compartments.
+
+    Attributes:
+        instance_id: The server this describes.
+        registered: Whether it is currently in the instance registry. A
+            deregistered server can still hold L2 bytes, so ``False`` is
+            valid.
+        declared_capacity: Whether any capacity was declared. When
+            ``False``, every module's ``usage_ratio`` is ``None``.
+        modules: Privately-owned compartments, sorted by tier then backend.
+            Shared pools are reported at the fleet level instead.
+    """
+
+    instance_id: str
+    registered: bool
+    declared_capacity: bool
+    modules: list[ModuleMemoryStatus] = Field(default_factory=list)
+
+
+class FleetMemoryResponse(BaseModel):
+    """Fleet-wide memory view: every server plus the shared pools.
+
+    Attributes:
+        instances: Per-server status, sorted by ``instance_id``.
+        shared_modules: Fleet-shared compartments, counted once. Capacity is
+            reported only when every declaring server agrees; a disagreement
+            reads as undeclared.
+    """
+
+    instances: list[InstanceMemoryStatus] = Field(default_factory=list)
+    shared_modules: list[ModuleMemoryStatus] = Field(default_factory=list)
+
+
 # -- Key directory -----------------------------------------------------------
 
 
@@ -223,6 +285,8 @@ class CacheEventsRequest(BaseModel):
 
     Attributes:
         batches: Event batches to apply, in emission order per instance.
+            Includes ``config`` batches, which declare capacity rather than
+            report placements.
     """
 
     batches: list[CacheEventBatch] = Field(default_factory=list)
