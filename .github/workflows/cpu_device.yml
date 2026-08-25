@@ -209,11 +209,15 @@ jobs:
       - name: Install vLLM CPU (prebuilt nightly from PyPI)
         id: install-vllm
         env:
+          # Temporary PR-only pin to reproduce issue #4703 on the exact
+          # nightly that failed on 2026-08-22.
           # nightly_verify deliberately ignores the pin: its whole job is to
           # find out whether today's build works, and a pinned wheel would
           # just re-validate the same known-good one every night.
           VLLM_CPU_NIGHTLY_SPEC: >-
-            ${{ inputs.nightly_verify
+            ${{ github.event_name == 'pull_request'
+                && 'vllm-cpu-nightly==0.27.2.dev202608220641'
+                || inputs.nightly_verify
                 && 'vllm-cpu-nightly'
                 || steps.resolve-vllm.outputs.VLLM_CPU_NIGHTLY_SPEC }}
         run: bash .github/scripts/install_vllm_cpu.sh
