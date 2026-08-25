@@ -29,6 +29,12 @@ The path filter treats the following as trivial for the AMD lane:
 If you need the AMD pipeline to run for a docs/asset-only PR, add the
 `force-ci` label.
 
+### Parallel validation
+
+A documentation-only change under `.buildkite/` intentionally forces this
+lane to run. Verify that the resulting build schedules the serialized AMD unit
+tests and both serialized and unserialized vLLM benchmark matrix jobs.
+
 ## Buildkite UI snippet
 
 If you want to create or update the pipeline manually, paste this into the
