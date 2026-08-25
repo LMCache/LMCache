@@ -31,6 +31,8 @@ from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
 logger = init_logger(__name__)
 
+_legacy_extra_count_warned = False
+
 
 def compute_extra_count(
     tp_size: int,
@@ -45,7 +47,8 @@ def compute_extra_count(
     ``(tp_size=4, world_size=2)`` is both "PP=2, no DCP" (4 readers) and
     "PP=1, DCP=2" (2 readers).
 
-    Legacy fallback when ``num_kv_readers`` is 0 (old client, so no DCP):
+    Deprecated legacy fallback when ``num_kv_readers`` is 0 (old client, so
+    no DCP; removed once all clients send the exact count):
 
     - Non-MLA: one reader per object -> 0.
     - MLA: all ``tp_size`` workers share one object -> ``tp_size - 1``,
@@ -56,6 +59,14 @@ def compute_extra_count(
     """
     if num_kv_readers > 0:
         return num_kv_readers - 1
+    global _legacy_extra_count_warned
+    if not _legacy_extra_count_warned:
+        _legacy_extra_count_warned = True
+        logger.warning(
+            "Client did not send num_kv_readers; using the deprecated legacy "
+            "read-lock heuristic. Upgrade LMCache clients; this fallback will "
+            "be removed."
+        )
     tp = tp_size if tp_size > 1 else world_size
     return tp - 1 if tp > world_size else 0
 

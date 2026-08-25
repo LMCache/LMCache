@@ -1307,7 +1307,7 @@ class BlendV3Module(InstanceLivenessTarget):
 
         # Shared session: end_session reads lookup_ipc_key + the rolling hashes
         # to keep the request's KV alive in L1.
-        extra_count = compute_extra_count(tp_size, world_size)
+        extra_count = compute_extra_count(tp_size, world_size, key.num_kv_readers)
         # PREFIX leg set: recurrent + attention (the planes a prefix restore
         # consumes), never aux. Chunk-major so count_leading_ones() stays
         # prefix-aligned with _poll_prefix_leg's divisor.
