@@ -74,11 +74,29 @@ class RequestSender:
         completions_mode: bool = False,
         on_finished: list[OnFinishedCallback] = [],  # noqa: B006
         ignore_eos: bool = False,
+        extra_body: dict[str, object] = {},  # noqa: B006
     ) -> None:
+        """Initialize the sender and its OpenAI client.
+
+        Args:
+            engine_url: Base URL of the inference engine.
+            model: Model name sent with every request.
+            completions_mode: Send legacy ``/completions`` requests instead
+                of ``/chat/completions``.
+            on_finished: Callbacks invoked when a request completes.  Copied,
+                so later mutation of the caller's list has no effect.
+            ignore_eos: Add vLLM's ``ignore_eos`` to every request body, so
+                generation runs for the full ``max_tokens``.
+            extra_body: Extra fields merged into every request body, for
+                options the OpenAI client has no parameter for (notably
+                ``chat_template_kwargs``).  Copied, and sent verbatim, so the
+                caller owns their compatibility with the backend.
+        """
         self._model = model
         self._completions_mode = completions_mode
         self._on_finished = list(on_finished)
         self._ignore_eos = ignore_eos
+        self._extra_body = dict(extra_body)
 
         base_url = _normalize_url(engine_url)
         api_key = os.getenv("OPENAI_API_KEY", "")
@@ -228,12 +246,17 @@ class RequestSender:
         added to the request body (a vLLM sampling extension) so generation
         always runs for the full ``max_tokens`` instead of stopping at the
         model's EOS token. This makes decode-throughput numbers reproducible.
+
+        The sender's ``extra_body`` fields are merged in alongside it, for
+        request options the OpenAI client has no parameter for (notably
+        ``chat_template_kwargs``).
         """
-        # Attach extra_body only when ignore_eos is set; otherwise send the
+        # Attach extra_body only when something needs it; otherwise send the
         # plain request so no vLLM-specific field reaches non-vLLM backends.
-        extra: dict[str, dict[str, bool]] = {}
+        body: dict[str, object] = dict(self._extra_body)
         if self._ignore_eos:
-            extra["extra_body"] = {"ignore_eos": True}
+            body["ignore_eos"] = True
+        extra: dict[str, dict[str, object]] = {"extra_body": body} if body else {}
         if self._completions_mode:
             prompt = messages[0]["content"] if messages else ""
             return await self._client.completions.create(

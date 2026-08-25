@@ -32,6 +32,10 @@ import (
 const (
 	testEngineName = "test-engine"
 	testNamespace  = "default"
+
+	kvRoleBoth     = "kv_both"
+	kvRoleProducer = "kv_producer"
+	kvRoleConsumer = "kv_consumer"
 )
 
 // --- helpers ---
@@ -608,9 +612,10 @@ func TestBuildDaemonSet_Minimal(t *testing.T) {
 		t.Fatal("expected HostNetwork=false")
 	}
 
-	// Should have HostIPC=true (required for CUDA IPC)
-	if !ds.Spec.Template.Spec.HostIPC {
-		t.Fatal("expected HostIPC=true")
+	// Should NOT have HostIPC by default — CUDA IPC is wired via the /dev/shm
+	// hostPath mount instead (opt back in via spec.hostIPC).
+	if ds.Spec.Template.Spec.HostIPC {
+		t.Fatal("expected HostIPC=false by default")
 	}
 
 	// Should have exactly 1 container
@@ -640,21 +645,28 @@ func TestBuildDaemonSet_Minimal(t *testing.T) {
 		t.Fatal("missing readiness probe")
 	}
 
-	// Should NOT have emptyDir /dev/shm volume (hostIPC provides host's /dev/shm)
+	// Should NOT have emptyDir /dev/shm volume (it would shadow the host's
+	// /dev/shm and break CUDA IPC)
 	for _, v := range ds.Spec.Template.Spec.Volumes {
 		if v.Name == "dshm" {
 			t.Fatal("dshm emptyDir volume should not be present — it shadows host /dev/shm and breaks CUDA IPC")
 		}
 	}
 
-	// Should have no volumes by default (no user-specified volumes)
-	if len(ds.Spec.Template.Spec.Volumes) != 0 {
-		t.Fatalf("expected 0 volumes, got %d", len(ds.Spec.Template.Spec.Volumes))
+	// Should have exactly the lmcache-dev-shm hostPath volume by default (shares the
+	// host's /dev/shm tmpfs for CUDA IPC without hostIPC)
+	if len(ds.Spec.Template.Spec.Volumes) != 1 {
+		t.Fatalf("expected 1 volume, got %d", len(ds.Spec.Template.Spec.Volumes))
+	}
+	shm := ds.Spec.Template.Spec.Volumes[0]
+	if shm.Name != devShmVolumeName || shm.HostPath == nil || shm.HostPath.Path != devShmPath {
+		t.Fatalf("expected lmcache-dev-shm hostPath volume at /dev/shm, got %+v", shm)
 	}
 
-	// Should have no volume mounts by default
-	if len(c.VolumeMounts) != 0 {
-		t.Fatalf("expected 0 volume mounts, got %d", len(c.VolumeMounts))
+	// Should mount the lmcache-dev-shm volume at /dev/shm
+	if len(c.VolumeMounts) != 1 || c.VolumeMounts[0].Name != devShmVolumeName ||
+		c.VolumeMounts[0].MountPath != devShmPath {
+		t.Fatalf("expected a single lmcache-dev-shm mount at /dev/shm, got %+v", c.VolumeMounts)
 	}
 
 	// Should have LMCACHE_LOG_LEVEL env var
@@ -751,14 +763,65 @@ func TestBuildDaemonSet_CustomEnvAndVolumes(t *testing.T) {
 		t.Fatalf("expected 4 env vars, got %d", len(c.Env))
 	}
 
-	// Should have only user-specified extra-vol (no built-in dshm)
-	if len(ds.Spec.Template.Spec.Volumes) != 1 {
-		t.Fatalf("expected 1 volume, got %d", len(ds.Spec.Template.Spec.Volumes))
+	// Should have the user-specified extra-vol plus the default lmcache-dev-shm
+	// hostPath volume (the user mount is not at /dev/shm, so the default is
+	// still injected)
+	if len(ds.Spec.Template.Spec.Volumes) != 2 {
+		t.Fatalf("expected 2 volumes, got %d", len(ds.Spec.Template.Spec.Volumes))
+	}
+	foundExtra := false
+	for _, v := range ds.Spec.Template.Spec.Volumes {
+		if v.Name == "extra-vol" {
+			foundExtra = true
+		}
+	}
+	if !foundExtra {
+		t.Fatal("missing user-specified extra-vol volume")
 	}
 
-	// Should have only user-specified extra mount
-	if len(c.VolumeMounts) != 1 {
-		t.Fatalf("expected 1 volume mount, got %d", len(c.VolumeMounts))
+	// Should have the user-specified extra mount plus the lmcache-dev-shm mount
+	if len(c.VolumeMounts) != 2 {
+		t.Fatalf("expected 2 volume mounts, got %d", len(c.VolumeMounts))
+	}
+}
+
+func TestBuildDaemonSet_NoInitContainersByDefault(t *testing.T) {
+	engine := minimalEngine()
+
+	ds := BuildDaemonSet(engine)
+
+	if len(ds.Spec.Template.Spec.InitContainers) != 0 {
+		t.Fatalf("expected 0 init containers, got %d", len(ds.Spec.Template.Spec.InitContainers))
+	}
+}
+
+func TestBuildDaemonSet_InitContainers(t *testing.T) {
+	engine := minimalEngine()
+	engine.Spec.InitContainers = []corev1.Container{
+		{
+			Name:    "preallocate-raw-block",
+			Image:   "busybox",
+			Command: []string{"sh", "-c", "fallocate -l 1G /data/l2.raw"},
+			VolumeMounts: []corev1.VolumeMount{
+				{Name: "kv-cache-root", MountPath: "/data"},
+			},
+		},
+	}
+
+	ds := BuildDaemonSet(engine)
+	initContainers := ds.Spec.Template.Spec.InitContainers
+
+	if len(initContainers) != 1 {
+		t.Fatalf("expected 1 init container, got %d", len(initContainers))
+	}
+	if initContainers[0].Name != "preallocate-raw-block" {
+		t.Fatalf("expected init container name preallocate-raw-block, got %s", initContainers[0].Name)
+	}
+
+	// Init containers run before the lmcache container; the daemonset must
+	// still have exactly the one main container.
+	if len(ds.Spec.Template.Spec.Containers) != 1 {
+		t.Fatalf("expected 1 main container, got %d", len(ds.Spec.Template.Spec.Containers))
 	}
 }
 
@@ -1088,7 +1151,7 @@ func TestBuildConnectionConfigMap_Default(t *testing.T) {
 			config["kv_connector_module_path"],
 		)
 	}
-	if config["kv_role"] != "kv_both" {
+	if config["kv_role"] != kvRoleBoth {
 		t.Fatalf("expected kv_role=kv_both, got %v", config["kv_role"])
 	}
 
@@ -1116,6 +1179,108 @@ func TestBuildConnectionConfigMap_CustomPort(t *testing.T) {
 	extra := config["kv_connector_extra_config"].(map[string]any)
 	if extra["lmcache.mp.port"] != "8080" {
 		t.Fatalf("expected port 8080, got %v", extra["lmcache.mp.port"])
+	}
+}
+
+func TestBuildConnectionConfigMap_PDPrefiller(t *testing.T) {
+	engine := minimalEngine()
+	engine.Spec.PD = &lmcachev1alpha1.PDSpec{
+		NixlSideChannelPort: ptr(int32(5557)),
+	}
+	cm := BuildConnectionConfigMap(engine)
+
+	// PD ConfigMap must contain both prefiller and decoder keys.
+	if _, ok := cm.Data[KVTransferConfigPrefillerDataKey]; !ok {
+		t.Fatalf("missing key %q", KVTransferConfigPrefillerDataKey)
+	}
+	if _, ok := cm.Data[KVTransferConfigDecoderDataKey]; !ok {
+		t.Fatalf("missing key %q", KVTransferConfigDecoderDataKey)
+	}
+
+	var config map[string]any
+	if err := json.Unmarshal([]byte(cm.Data[KVTransferConfigPrefillerDataKey]), &config); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+
+	if config["kv_connector"] != "MultiConnector" {
+		t.Fatalf("expected kv_connector=MultiConnector, got %v", config["kv_connector"])
+	}
+	if config["kv_role"] != kvRoleProducer {
+		t.Fatalf("expected kv_role=kv_producer, got %v", config["kv_role"])
+	}
+
+	outer := config["kv_connector_extra_config"].(map[string]any)
+	connectors := outer["connectors"].([]any)
+	if len(connectors) != 2 {
+		t.Fatalf("expected 2 inner connectors, got %d", len(connectors))
+	}
+
+	nixl := connectors[0].(map[string]any)
+	if nixl["kv_connector"] != "NixlConnector" {
+		t.Fatalf("first connector must be NixlConnector, got %v", nixl["kv_connector"])
+	}
+	if nixl["kv_role"] != kvRoleProducer {
+		t.Fatalf("NixlConnector role must be kv_producer, got %v", nixl["kv_role"])
+	}
+	if nixl["kv_load_failure_policy"] != "fail" {
+		t.Fatalf("expected kv_load_failure_policy=fail, got %v", nixl["kv_load_failure_policy"])
+	}
+
+	lmc := connectors[1].(map[string]any)
+	if lmc["kv_connector"] != "LMCacheMPConnector" {
+		t.Fatalf("second connector must be LMCacheMPConnector, got %v", lmc["kv_connector"])
+	}
+	if lmc["kv_role"] != kvRoleBoth {
+		t.Fatalf("LMCacheMPConnector role must be kv_both, got %v", lmc["kv_role"])
+	}
+	lmcExtra := lmc["kv_connector_extra_config"].(map[string]any)
+	if lmcExtra["lmcache.mp.port"] != "5555" {
+		t.Fatalf("expected lmcache.mp.port=5555, got %v", lmcExtra["lmcache.mp.port"])
+	}
+}
+
+func TestBuildConnectionConfigMap_PDDecoder(t *testing.T) {
+	engine := minimalEngine()
+	engine.Spec.PD = &lmcachev1alpha1.PDSpec{}
+	cm := BuildConnectionConfigMap(engine)
+
+	var config map[string]any
+	if err := json.Unmarshal([]byte(cm.Data[KVTransferConfigDecoderDataKey]), &config); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+
+	if config["kv_role"] != kvRoleConsumer {
+		t.Fatalf("expected kv_role=kv_consumer, got %v", config["kv_role"])
+	}
+
+	outer := config["kv_connector_extra_config"].(map[string]any)
+	nixl := outer["connectors"].([]any)[0].(map[string]any)
+	if nixl["kv_role"] != kvRoleConsumer {
+		t.Fatalf("NixlConnector role must be kv_consumer, got %v", nixl["kv_role"])
+	}
+}
+
+func TestBuildConnectionConfigMap_PDEnforceHandshakeCompat(t *testing.T) {
+	engine := minimalEngine()
+	handshakeCompat := false
+	engine.Spec.PD = &lmcachev1alpha1.PDSpec{
+		EnforceHandshakeCompat: &handshakeCompat,
+	}
+	cm := BuildConnectionConfigMap(engine)
+
+	var config map[string]any
+	if err := json.Unmarshal([]byte(cm.Data[KVTransferConfigPrefillerDataKey]), &config); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+
+	outer := config["kv_connector_extra_config"].(map[string]any)
+	nixl := outer["connectors"].([]any)[0].(map[string]any)
+	nixlExtra, ok := nixl["kv_connector_extra_config"].(map[string]any)
+	if !ok {
+		t.Fatal("expected kv_connector_extra_config on NixlConnector")
+	}
+	if nixlExtra["enforce_handshake_compat"] != false {
+		t.Fatalf("expected enforce_handshake_compat=false, got %v", nixlExtra["enforce_handshake_compat"])
 	}
 }
 
@@ -1329,6 +1494,95 @@ func TestBuildDaemonSet_PrivilegedEnabled(t *testing.T) {
 
 	if c.SecurityContext == nil || c.SecurityContext.Privileged == nil || !*c.SecurityContext.Privileged {
 		t.Fatal("expected privileged=true when spec.privileged=true")
+	}
+}
+
+func TestBuildDaemonSet_HostIPCEnabled(t *testing.T) {
+	// spec.hostIPC=true restores the legacy shared-IPC-namespace mode: the pod
+	// joins the host IPC namespace and the /dev/shm hostPath mount is omitted
+	// (the namespace already exposes the host's /dev/shm).
+	engine := minimalEngine()
+	engine.Spec.HostIPC = ptr(true)
+
+	ds := BuildDaemonSet(engine)
+	podSpec := ds.Spec.Template.Spec
+
+	if !podSpec.HostIPC {
+		t.Fatal("expected HostIPC=true when spec.hostIPC=true")
+	}
+	for _, v := range podSpec.Volumes {
+		if v.Name == devShmVolumeName {
+			t.Fatal("lmcache-dev-shm hostPath volume must be omitted when hostIPC=true")
+		}
+	}
+}
+
+func TestBuildDaemonSet_UserDevShmMountWins(t *testing.T) {
+	// A user-supplied /dev/shm mount (any volume name) suppresses the default
+	// lmcache-dev-shm hostPath injection so the pod never gets two mounts at one path.
+	engine := minimalEngine()
+	engine.Spec.Volumes = []corev1.Volume{{
+		Name: "my-shm",
+		VolumeSource: corev1.VolumeSource{
+			HostPath: &corev1.HostPathVolumeSource{Path: devShmPath},
+		},
+	}}
+	engine.Spec.VolumeMounts = []corev1.VolumeMount{{
+		Name:      "my-shm",
+		MountPath: devShmPath,
+	}}
+
+	ds := BuildDaemonSet(engine)
+	podSpec := ds.Spec.Template.Spec
+
+	for _, v := range podSpec.Volumes {
+		if v.Name == devShmVolumeName {
+			t.Fatal("default lmcache-dev-shm volume must not be added when the user already mounts /dev/shm")
+		}
+	}
+	mounts := 0
+	for _, m := range podSpec.Containers[0].VolumeMounts {
+		if m.MountPath == devShmPath {
+			mounts++
+		}
+	}
+	if mounts != 1 {
+		t.Fatalf("expected exactly 1 mount at /dev/shm, got %d", mounts)
+	}
+}
+
+func TestBuildDaemonSet_UserDevShmVolumeNameCollision(t *testing.T) {
+	// A user volume that collides with the injected volume name (even if not mounted at
+	// /dev/shm) suppresses the default injection: appending a second volume
+	// with the same name would make the pod spec invalid.
+	engine := minimalEngine()
+	engine.Spec.Volumes = []corev1.Volume{{
+		Name: devShmVolumeName,
+		VolumeSource: corev1.VolumeSource{
+			EmptyDir: &corev1.EmptyDirVolumeSource{},
+		},
+	}}
+	engine.Spec.VolumeMounts = []corev1.VolumeMount{{
+		Name:      devShmVolumeName,
+		MountPath: "/custom",
+	}}
+
+	ds := BuildDaemonSet(engine)
+	podSpec := ds.Spec.Template.Spec
+
+	seen := 0
+	for _, v := range podSpec.Volumes {
+		if v.Name == devShmVolumeName {
+			seen++
+		}
+	}
+	if seen != 1 {
+		t.Fatalf("expected exactly 1 volume named lmcache-dev-shm, got %d (duplicate names are invalid)", seen)
+	}
+	for _, m := range podSpec.Containers[0].VolumeMounts {
+		if m.MountPath == devShmPath {
+			t.Fatal("must not mount the user's lmcache-dev-shm volume at /dev/shm")
+		}
 	}
 }
 

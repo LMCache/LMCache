@@ -556,14 +556,14 @@ class TestLookupAndLock:
         objs = [create_memory_obj(size=8) for _ in keys]
         _wait_for_store(adapter, adapter.submit_store_task(keys, objs))
 
-        task = adapter.submit_lookup_and_lock_task(keys, _EMPTY_LAYOUT)
+        task = adapter.submit_lookup_and_lock_task(keys, {0: _EMPTY_LAYOUT})
         bm = _wait_for_lookup(adapter, task)
         assert all(bm.test(i) for i in range(3))
 
     def test_lookup_miss(self, adapter):
         keys = [create_object_key(99)]
         bm = _wait_for_lookup(
-            adapter, adapter.submit_lookup_and_lock_task(keys, _EMPTY_LAYOUT)
+            adapter, adapter.submit_lookup_and_lock_task(keys, {0: _EMPTY_LAYOUT})
         )
         assert not bm.test(0)
 
@@ -574,7 +574,7 @@ class TestLookupAndLock:
         # Two successful lookups → refcount == 2 per key.
         for _ in range(2):
             _wait_for_lookup(
-                adapter, adapter.submit_lookup_and_lock_task(keys, _EMPTY_LAYOUT)
+                adapter, adapter.submit_lookup_and_lock_task(keys, {0: _EMPTY_LAYOUT})
             )
         # Two unlocks should bring it back to zero — no internal state
         # to assert publicly, just verify no exception and that we can
@@ -635,7 +635,7 @@ class TestDelete:
         assert any(set(batch) == set(keys) for batch in listener.deleted)
         # Subsequent lookup should miss.
         bm = _wait_for_lookup(
-            adapter, adapter.submit_lookup_and_lock_task(keys, _EMPTY_LAYOUT)
+            adapter, adapter.submit_lookup_and_lock_task(keys, {0: _EMPTY_LAYOUT})
         )
         assert not any(bm.test(i) for i in range(len(keys)))
 
@@ -652,7 +652,7 @@ class TestDelete:
 
         # Lookup bumps the lock refcount.
         bm = _wait_for_lookup(
-            adapter, adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+            adapter, adapter.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         )
         assert bm.test(0)
 
@@ -672,7 +672,7 @@ class TestDelete:
         )
         for _ in range(2):
             _wait_for_lookup(
-                adapter, adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+                adapter, adapter.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
             )
 
         adapter.submit_unlock([key])  # refcount 1, still pinned
@@ -694,7 +694,7 @@ class TestKeyNamespacing:
             _wait_for_store(a1, a1.submit_store_task([k], [obj]))
             # a2 sees no value for the same logical key.
             bm = _wait_for_lookup(
-                a2, a2.submit_lookup_and_lock_task([k], _EMPTY_LAYOUT)
+                a2, a2.submit_lookup_and_lock_task([k], {0: _EMPTY_LAYOUT})
             )
             assert not bm.test(0)
         finally:
@@ -709,6 +709,6 @@ class TestKeyNamespacing:
         obj = create_memory_obj(size=4)
         _wait_for_store(adapter, adapter.submit_store_task([k_a], [obj]))
         bm = _wait_for_lookup(
-            adapter, adapter.submit_lookup_and_lock_task([k_b], _EMPTY_LAYOUT)
+            adapter, adapter.submit_lookup_and_lock_task([k_b], {0: _EMPTY_LAYOUT})
         )
         assert not bm.test(0)

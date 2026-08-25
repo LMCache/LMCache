@@ -13,13 +13,14 @@ import pytest
 import torch
 
 # First Party
+from lmcache import torch_device_type
 from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.kv_format import detect_format, extract_kv_cache_shapes
-import lmcache.c_ops as lmc_ops
+import lmcache.lmcache_native as lmcache_native
 
 NB, NL, BS, NH, HS = 7, 5, 3, 2, 4
 DT = torch.float16
-F = lmc_ops.EngineKVFormat
+F = lmcache_native.EngineKVFormat
 
 
 def _t(*shape: int) -> torch.Tensor:
@@ -37,21 +38,18 @@ def test_vllm_cross_layer():
 # The CPU-HND safeguard forces HND regardless of hint when running on a CPU
 # host; bypass it so the hint-driven NHD/HND branch is exercised on any host.
 _VLLM_DEV = "lmcache.v1.gpu_connector.kv_format.detectors.vllm.torch_device_type"
+_MOCK_DEVICE_TYPE = "cuda" if torch_device_type == "cpu" else torch_device_type
 
 
-def test_vllm_flash_attn_nhd_vs_hnd(monkeypatch):
-    monkeypatch.setattr(_VLLM_DEV, "cuda")
+def test_vllm_flash_attn_hnd(monkeypatch):
+    monkeypatch.setattr(_VLLM_DEV, _MOCK_DEVICE_TYPE)
     kv = [_t(2, NB, BS, NH, HS) for _ in range(NL)]
-    fmt_nhd, _ = detect_format(kv, EngineType.VLLM, {"kv_layout": "NHD"})
-    assert fmt_nhd == F.NL_X_TWO_NB_BS_NH_HS
-    # HND geometry has heads before block-size: [2, NB, NH, BS, HS].
-    kv_hnd = [_t(2, NB, NH, BS, HS) for _ in range(NL)]
-    fmt_hnd, _ = detect_format(kv_hnd, EngineType.VLLM, {"kv_layout": "HND"})
+    fmt_hnd, _ = detect_format(kv, EngineType.VLLM, {"kv_layout": "HND"})
     assert fmt_hnd == F.NL_X_TWO_NB_NH_BS_HS
 
 
 def test_vllm_flash_infer_nhd(monkeypatch):
-    monkeypatch.setattr(_VLLM_DEV, "cuda")
+    monkeypatch.setattr(_VLLM_DEV, _MOCK_DEVICE_TYPE)
     kv = [_t(NB, 2, BS, NH, HS) for _ in range(NL)]
     fmt, _ = detect_format(kv, EngineType.VLLM, {"kv_layout": "NHD"})
     assert fmt == F.NL_X_NB_TWO_BS_NH_HS
@@ -63,26 +61,34 @@ def test_vllm_mla():
     assert fmt == F.NL_X_NB_BS_HS
 
 
+@pytest.mark.parametrize("hint", [{}, {"kv_layout": "NHD"}, {"kv_layout": "HND"}])
+def test_vllm_rbln_native_singleton_axis(monkeypatch, hint):
+    # vLLM-RBLN's 6-D HND layout is its own format, so it is detected from the
+    # shape alone on any host and whatever the hint says (vLLM-RBLN reports no
+    # layout, and the format is HND by definition).
+    monkeypatch.setattr(_VLLM_DEV, "cuda")
+    kv = [_t(2, NB, NH, 1, BS, HS) for _ in range(NL)]
+    fmt, out = detect_format(kv, EngineType.VLLM, hint)
+    assert fmt == F.NL_X_TWO_NB_NH_ONE_BS_HS
+    # Detection must not reshape it away: the singleton axis survives.
+    assert tuple(out[0].shape) == (2, NB, NH, 1, BS, HS)
+    assert out[0].data_ptr() == kv[0].data_ptr()
+
+
 def test_vllm_blocks_first_fused_num_heads_2(monkeypatch):
     # Raw 4-D [NB, NH, BS, 2*HS] with NH == 2 (a common GQA config): a 5-D
     # split would make the K/V axis and the head axis both equal 2, ambiguous
     # with flash-infer. Detection must use the rank-4 shape to land on the
     # content-size format, and keep the tensor raw.
-    monkeypatch.setattr(_VLLM_DEV, "cuda")
+    monkeypatch.setattr(_VLLM_DEV, _MOCK_DEVICE_TYPE)
     raw = [_t(NB, 2, BS, 2 * HS) for _ in range(NL)]
     fmt, out = detect_format(raw, EngineType.VLLM, {"kv_layout": "HND"})
     assert fmt == F.NL_X_NB_NH_BS_CS
     assert tuple(out[0].shape) == (NB, 2, BS, 2 * HS)
 
 
-def test_vllm_blocks_first_fused_nhd_vs_hnd(monkeypatch):
-    # The rank-4 fused layout is shape-ambiguous between NHD and HND (the two
-    # middle axes could be BS/NH or NH/BS), so the kv_layout hint decides.
-    monkeypatch.setattr(_VLLM_DEV, "cuda")
-    raw = [_t(NB, BS, NH, 2 * HS) for _ in range(NL)]
-    fmt_nhd, out = detect_format(raw, EngineType.VLLM, {"kv_layout": "NHD"})
-    assert fmt_nhd == F.NL_X_NB_BS_NH_CS
-    assert tuple(out[0].shape) == (NB, BS, NH, 2 * HS)
+def test_vllm_blocks_first_fused_hnd(monkeypatch):
+    monkeypatch.setattr(_VLLM_DEV, _MOCK_DEVICE_TYPE)
     raw_hnd = [_t(NB, NH, BS, 2 * HS) for _ in range(NL)]
     fmt_hnd, _ = detect_format(raw_hnd, EngineType.VLLM, {"kv_layout": "HND"})
     assert fmt_hnd == F.NL_X_NB_NH_BS_CS

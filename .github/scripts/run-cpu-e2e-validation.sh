@@ -57,12 +57,19 @@ VLLM_READY_TIMEOUT="${VLLM_READY_TIMEOUT:-120}"
 #                              to the downloader. Defaults to
 #                              `pytorch_model.bin`, which is what the
 #                              opt-125m mirror ships.
+#   VLLM_HF_OFFLINE      1 (default) = pin transformers/huggingface_hub
+#                        to the local hub cache populated by
+#                        VLLM_DOWNLOAD_SCRIPT. Set to 0 to allow HF
+#                        network access during model load. Ignored when
+#                        VLLM_DOWNLOAD_SCRIPT is empty (nothing local to
+#                        serve from).
 VLLM_MODEL_ID="${VLLM_MODEL_ID:-facebook/opt-125m}"
 VLLM_LOAD_FORMAT="${VLLM_LOAD_FORMAT:-}"
 VLLM_HF_OVERRIDES="${VLLM_HF_OVERRIDES:-}"
 VLLM_DOWNLOAD_SCRIPT="${VLLM_DOWNLOAD_SCRIPT:-download_gh_release_model.sh}"
 VLLM_TARBALL_URL="${VLLM_TARBALL_URL:-https://github.com/LMCache/opt-125m/releases/download/v1.0/opt-125m.tar.gz}"
 VLLM_TARBALL_CACHE_MARKER="${VLLM_TARBALL_CACHE_MARKER:-pytorch_model.bin}"
+VLLM_HF_OFFLINE="${VLLM_HF_OFFLINE:-1}"
 # Transport mode selection:
 #   LMCACHE_MP_TRANSFER_MODE=engine_driven  -> engine-driven data path,
 #       sub-selected by LMCACHE_SHM_NAME:
@@ -163,6 +170,33 @@ wait_for_endpoint_contains() {
   done
 
   echo "❌ ${label} did not become ready within ${timeout}s"
+  return 1
+}
+
+# Same as wait_for_endpoint_contains, but aborts as soon as the vLLM
+# process is gone instead of polling a dead PID for the full timeout.
+# vLLM can die during engine construction (bad config, unreachable HF,
+# missing native symbol); without the liveness check those failures show
+# up ${VLLM_READY_TIMEOUT} seconds later as a misleading "did not become
+# ready" message that hides the real traceback.
+wait_for_vllm_ready() {
+  local url="http://localhost:${VLLM_PORT}/v1/models"
+  local response
+
+  for _ in $(seq 1 "${VLLM_READY_TIMEOUT}"); do
+    if response="$(curl -fsS "${url}" 2>/dev/null)"; then
+      if echo "${response}" | grep -q "${VLLM_MODEL_ID}"; then
+        return 0
+      fi
+    fi
+    if ! kill -0 "${VLLM_PID}" 2>/dev/null; then
+      echo "❌ vLLM server (PID=${VLLM_PID}) exited before becoming ready"
+      return 1
+    fi
+    sleep 1
+  done
+
+  echo "❌ vLLM server did not become ready within ${VLLM_READY_TIMEOUT}s"
   return 1
 }
 
@@ -339,7 +373,7 @@ print(json.dumps({
     return 1
   fi
   echo "Waiting for vLLM readiness at http://localhost:${VLLM_PORT}/v1/models (timeout: ${VLLM_READY_TIMEOUT}s)"
-  if ! wait_for_endpoint_contains "http://localhost:${VLLM_PORT}/v1/models" "${VLLM_READY_TIMEOUT}" "${VLLM_MODEL_ID}" "vLLM server"; then
+  if ! wait_for_vllm_ready; then
     return 1
   fi
   echo "✅ vLLM server is ready"
@@ -423,6 +457,27 @@ else
     CACHE_MARKER="${VLLM_TARBALL_CACHE_MARKER}" \
     bash "${SHARED_SCRIPTS_DIR}/${VLLM_DOWNLOAD_SCRIPT}"
   echo "✅ Model download/check complete"
+
+  # The downloader has laid down a complete HF snapshot (config, tokenizer,
+  # custom modelling code) and weights are either in the tarball or random
+  # (`--load-format dummy`), so model load needs nothing from the network.
+  # Pin the HF libraries to that local cache, because otherwise they HEAD
+  # huggingface.co on every server start to re-resolve revision "main":
+  #   - it makes a green CI run depend on HF being up and un-throttled;
+  #     an HTTP 429 there aborts `vllm serve` during engine construction
+  #     (transformers turns the 429 into "couldn't connect ... and couldn't
+  #     find them in the cached files").
+  #   - the commit sha a successful HEAD returns never matches our
+  #     tarball-derived SNAPSHOT, so the pre-populated files are re-fetched
+  #     from HF anyway and only ever used on the offline fallback path.
+  # Going offline makes the local cache authoritative, which is both the
+  # documented intent of the downloader and deterministic.
+  if [ "${VLLM_HF_OFFLINE}" = "1" ]; then
+    export HF_HUB_OFFLINE=1
+    echo "HF_HUB_OFFLINE=1 — serving ${VLLM_MODEL_ID} from the local HF hub cache"
+  else
+    echo "VLLM_HF_OFFLINE=0 — HF network access left enabled"
+  fi
 fi
 
 echo "[Phase 2 / Step 3] Starting LMCache server"
@@ -440,10 +495,17 @@ LMCACHE_ARGS=(
 #   engine_driven -> EngineDrivenTransferContext (worker gathers/scatters data)
 #     sub-mode: SHM (--shm-name __default__) or pickle (--shm-name "")
 #   lmcache_driven -> LMCacheDrivenTransferContext (server-side IPC handle)
+# The server only loads the paths named by --supported-transfer-mode
+# (default: lmcache_driven), so every leg passes it explicitly. Likewise
+# the default --shm-name "" disables the SHM pool, so the shm legs name a
+# segment explicitly. Keep segment names short: macOS caps POSIX SHM
+# names at 31 chars including the server's lmcache_l1_pool_ prefix.
 # Step 5.5 verifies which one the worker actually entered.
 if [ "${LMCACHE_MP_TRANSFER_MODE}" = "engine_driven" ]; then
+  LMCACHE_ARGS+=(--supported-transfer-mode engine_driven)
   if [ "${LMCACHE_SHM_NAME}" = "__default__" ]; then
     echo "Transport mode: engine-driven/shm (shared memory)"
+    LMCACHE_ARGS+=(--shm-name "e2e_$$")
     EXPECTED_TRANSPORT="shm"
   else
     echo "Transport mode: engine-driven/pickle (--shm-name '${LMCACHE_SHM_NAME}')"
@@ -452,12 +514,15 @@ if [ "${LMCACHE_MP_TRANSFER_MODE}" = "engine_driven" ]; then
   fi
 elif [ "${LMCACHE_MP_TRANSFER_MODE}" = "lmcache_driven" ]; then
   echo "Transport mode: lmcache-driven (IPC handle path)"
+  LMCACHE_ARGS+=(--supported-transfer-mode lmcache_driven)
   EXPECTED_TRANSPORT="lmcache_driven"
 else
   echo "Transport mode: unknown '${LMCACHE_MP_TRANSFER_MODE}',"
   echo "  falling back to LMCACHE_SHM_NAME-based detection"
+  LMCACHE_ARGS+=(--supported-transfer-mode auto)
   if [ "${LMCACHE_SHM_NAME}" = "__default__" ]; then
     echo "Transport mode: data/shm (shared memory, fallback)"
+    LMCACHE_ARGS+=(--shm-name "e2e_$$")
     EXPECTED_TRANSPORT="shm"
   else
     echo "Transport mode: data/pickle (--shm-name '${LMCACHE_SHM_NAME}')"
@@ -563,13 +628,6 @@ if [ "${EXPECTED_TRANSPORT}" = "lmcache_driven" ]; then
     false
   fi
   echo "✅ Transport mode confirmed: lmcache-driven (IPC handle path)"
-elif [ "${EXPECTED_TRANSPORT}" = "engine_driven" ]; then
-  if ! grep -q "Creating transfer context.*mode=engine_driven" "${VLLM_LOG}" 2>/dev/null; then
-    echo "❌ Expected engine-driven worker context but 'mode=engine_driven' not found in vLLM log"
-    tail -50 "${VLLM_LOG}"
-    false
-  fi
-  echo "✅ Transport mode confirmed: engine-driven"
 elif [ "${EXPECTED_TRANSPORT}" = "shm" ]; then
   if ! grep -q "Using shm non-GPU transfer strategy" "${LMCACHE_LOG}" 2>/dev/null; then
     echo "❌ Expected shm transport but server strategy line not found in log"

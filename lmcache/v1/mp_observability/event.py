@@ -57,6 +57,9 @@ class EventType(Enum):
     L2_KEYS_EVICTED = "l2.keys.evicted"
 
     # L2 adapter key-level events.
+    # Capacity topology changed (adapter added/removed/reconfigured).
+    SM_CAPACITY_CHANGED = "sm.capacity.changed"
+
     L2_KEYS_STORED = "l2.keys.stored"
     L2_KEYS_ACCESSED = "l2.keys.accessed"
     L2_KEYS_DELETED = "l2.keys.deleted"
@@ -74,6 +77,10 @@ class EventType(Enum):
 
     # Chunk hash logging events
     MP_LOOKUP = "mp.lookup"
+
+    # Per-chunk token bindings. Metadata (parallel lists):
+    # chunk_hashes (list[bytes]) and token_chunks (list[list[int]]).
+    MP_TOKENS = "mp.tokens"
 
     # MP Server lifecycle sentinels (CPU-synchronous)
     MP_REQUEST_START = "mp.request.start"

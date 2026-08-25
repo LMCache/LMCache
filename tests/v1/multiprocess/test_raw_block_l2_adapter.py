@@ -18,7 +18,7 @@ from tests.v1.storage_backend.raw_block_test_utils import (
     RAW_BLOCK_CI_HEADER_BYTES,
     RAW_BLOCK_CI_META_TOTAL_BYTES,
     RAW_BLOCK_CI_SLOT_BYTES,
-    install_native_storage_ops_fallback,
+    install_lmcache_native_fallback,
     make_empty_memory_obj,
     make_memory_obj,
     make_object_key,
@@ -27,7 +27,7 @@ from tests.v1.storage_backend.raw_block_test_utils import (
     wait_for_event_fd,
 )
 
-install_native_storage_ops_fallback()
+install_lmcache_native_fallback()
 pytest.importorskip("lmcache_rust_raw_block_io")
 
 # First Party
@@ -77,7 +77,7 @@ def test_raw_block_l2_adapter_store_lookup_load_roundtrip(tmp_path):
         assert store_result.bytes_transferred() == RAW_BLOCK_CI_SLOT_BYTES
 
         lookup_task_id = adapter.submit_lookup_and_lock_task(
-            [key, missing_key], _EMPTY_LAYOUT
+            [key, missing_key], {0: _EMPTY_LAYOUT}
         )
         assert wait_for_event_fd(adapter.get_lookup_and_lock_event_fd())
         lookup_bitmap = adapter.query_lookup_and_lock_result(lookup_task_id)
@@ -114,7 +114,7 @@ def test_raw_block_l2_adapter_delete_makes_key_miss(tmp_path):
 
         adapter.delete([key])
 
-        lookup_task_id = adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+        lookup_task_id = adapter.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         assert wait_for_event_fd(adapter.get_lookup_and_lock_event_fd())
         lookup_bitmap = adapter.query_lookup_and_lock_result(lookup_task_id)
         assert lookup_bitmap is not None

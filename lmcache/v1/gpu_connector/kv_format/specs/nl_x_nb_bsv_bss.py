@@ -15,9 +15,11 @@ the MLA spec.
 from lmcache.v1.gpu_connector.kv_format.specs.nl_x_nb_bs_hs import (
     NL_X_NB_BS_HS_Spec,
 )
-import lmcache.c_ops as lmc_ops
+import lmcache.lmcache_native as lmcache_native
 
 
 class NL_X_NB_BSV_BSS_Spec(NL_X_NB_BS_HS_Spec):
-    engine_kv_format = lmc_ops.EngineKVFormat.NL_X_NB_BSV_BSS
+    engine_kv_format = lmcache_native.EngineKVFormat.NL_X_NB_BSV_BSS
     attention_backends = ("vLLM MLA",)
+    is_layer_list = True
+    is_mla = True

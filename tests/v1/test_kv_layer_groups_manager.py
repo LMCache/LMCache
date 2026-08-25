@@ -20,10 +20,7 @@ from lmcache.v1.kv_layer_groups import (
     parse_kvcache_shape_spec,
 )
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
-
-pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="PageBufferShapeDesc requires CUDA build"
-)
+import lmcache.lmcache_native as lmcache_native
 
 
 def _build_manager(
@@ -40,11 +37,11 @@ def _build_manager(
     per-layer from the tensor shapes, so callers pass neither.
     """
     # First Party
-    import lmcache.c_ops as lmc_ops
 
     return KVLayerGroupsManager(
         tensors,
-        engine_kv_formats=[lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS] * len(tensors),
+        engine_kv_formats=[lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS]
+        * len(tensors),
         engine_group_infos=engine_group_infos,
         separate_object_groups=separate_object_groups,
     )
@@ -78,7 +75,6 @@ class TestKVLayerGroupsManager:
         with their own per-layer formats (kv_size 2 and 1), not one shared
         format -- the server-side per-group path."""
         # First Party
-        import lmcache.c_ops as lmc_ops
 
         tensors = [
             torch.randn(2, 32, 256, 8, 64, dtype=torch.bfloat16),  # K+V (rank-5)
@@ -87,8 +83,8 @@ class TestKVLayerGroupsManager:
         manager = KVLayerGroupsManager(
             tensors,
             engine_kv_formats=[
-                lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
-                lmc_ops.EngineKVFormat.NL_X_NB_BS_HS,
+                lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
+                lmcache_native.EngineKVFormat.NL_X_NB_BS_HS,
             ],
             engine_group_infos=[
                 EngineGroupInfo(0, (0,)),
@@ -106,9 +102,12 @@ class TestKVLayerGroupsManager:
         assert by_group[1].shape_desc.hs == 128
         # Each kernel group persists its own format for the transfer path.
         assert (
-            by_group[0].engine_kv_format == lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
+            by_group[0].engine_kv_format
+            == lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
         )
-        assert by_group[1].engine_kv_format == lmc_ops.EngineKVFormat.NL_X_NB_BS_HS
+        assert (
+            by_group[1].engine_kv_format == lmcache_native.EngineKVFormat.NL_X_NB_BS_HS
+        )
 
     def test_build_multiple_layers_same_shape(self):
         tensors = [
@@ -381,9 +380,8 @@ class TestKernelGroupIdentity:
 
     def test_fields_and_alias(self):
         # First Party
-        import lmcache.c_ops as lmc_ops
 
-        fmt = lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
+        fmt = lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
         ident = KernelGroupIdentity(
             kv_size=2,
             num_heads=8,
@@ -404,9 +402,8 @@ class TestKernelGroupIdentity:
 
     def test_hashable_as_dict_key(self):
         # First Party
-        import lmcache.c_ops as lmc_ops
 
-        fmt = lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
+        fmt = lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
         ident = KernelGroupIdentity(2, 8, 64, 16, 0, torch.float16, fmt)
         assert {ident: "x"}[ident] == "x"
 
@@ -420,7 +417,6 @@ class TestKernelGroupIdentity:
         layout instead of one transferring the other with the wrong axis order.
         """
         # First Party
-        import lmcache.c_ops as lmc_ops
 
         # NH == BS == 16, so NHD [.., BS, NH, ..] and HND [.., NH, BS, ..] yield
         # the same kv_size/num_heads/head_size/block_size; only axis order differs.
@@ -431,8 +427,8 @@ class TestKernelGroupIdentity:
         groups = group_layers_by_identity(
             tensors,
             [
-                lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,  # NHD
-                lmc_ops.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS,  # HND
+                lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,  # NHD
+                lmcache_native.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS,  # HND
             ],
         )
         # Without the format in the identity these share one geometry and would
@@ -515,6 +511,121 @@ class TestKernelAndObjectGroups:
         assert manager.object_groups[1].kernel_group_indices == [1]
         assert manager.object_groups[1].sw_size_chunks >= 1
         assert attn_desc.num_chunks_in_sw[1] == manager.object_groups[1].sw_size_chunks
+
+    def test_object_group_separation_standalone_group_buckets_alone(self):
+        # A tagged extra group (connector-private pool) buckets alone even
+        # though its window (-1) matches the full-attention bucket. The rest
+        # bucket as usual, ordered by first kernel group index, so a client
+        # registering without the pool sees identical object group indices
+        # for the shared groups.
+        tensors = [torch.randn(2, 32, 32, 8, 64, dtype=torch.float16) for _ in range(3)]
+        manager = _build_manager(
+            tensors,
+            engine_group_infos=[
+                EngineGroupInfo(0, (0,)),
+                EngineGroupInfo(1, (1,), sw_size_tokens=32),
+                EngineGroupInfo(2, (2,), extra_object_group_tag=1),
+            ],
+            separate_object_groups=True,
+        )
+        assert manager.num_kernel_groups == 3
+        assert manager.num_object_groups == 3
+        assert manager.object_groups[0].kernel_group_indices == [0]
+        assert manager.object_groups[0].sw_size_chunks == -1
+        assert manager.object_groups[1].kernel_group_indices == [1]
+        assert manager.object_groups[1].sw_size_chunks >= 1
+        assert manager.object_groups[2].kernel_group_indices == [2]
+        assert manager.object_groups[2].sw_size_chunks == -1
+        assert manager.object_groups[2].standalone
+
+    def test_extra_groups_sort_last_regardless_of_registration_order(self):
+        # The shared (regular) group ids must not shift when a connector
+        # registers its private pool FIRST: extras always sort after every
+        # regular group, so a stock client without the pool sees identical
+        # ids for the shared groups.
+        tensors = [torch.randn(2, 32, 32, 8, 64, dtype=torch.float16) for _ in range(3)]
+        manager = _build_manager(
+            tensors,
+            engine_group_infos=[
+                EngineGroupInfo(0, (0,), extra_object_group_tag=1),
+                EngineGroupInfo(1, (1,)),
+                EngineGroupInfo(2, (2,), sw_size_tokens=32),
+            ],
+            separate_object_groups=True,
+        )
+        assert manager.num_object_groups == 3
+        # Regular groups first, in kernel order — same ids as pool-less.
+        assert manager.object_groups[0].kernel_group_indices == [1]
+        assert not manager.object_groups[0].standalone
+        assert manager.object_groups[1].kernel_group_indices == [2]
+        assert not manager.object_groups[1].standalone
+        # The extra pool lands last despite registering first.
+        assert manager.object_groups[2].kernel_group_indices == [0]
+        assert manager.object_groups[2].standalone
+        assert manager.get_attn_desc().group_kinds[2] == "standalone"
+
+    def test_extra_groups_sharing_a_tag_share_an_object_group(self):
+        # Two kernel groups carrying the same extra tag (e.g. same-block-size
+        # pools whose tensor identities differ) still form ONE object group.
+        # The third tensor's head count differs so identity detection keeps
+        # the pools as two kernel groups.
+        tensors = [
+            torch.randn(2, 32, 32, 8, 64, dtype=torch.float16),
+            torch.randn(2, 32, 32, 8, 64, dtype=torch.float16),
+            torch.randn(2, 32, 32, 16, 64, dtype=torch.float16),
+        ]
+        manager = _build_manager(
+            tensors,
+            engine_group_infos=[
+                EngineGroupInfo(0, (0,)),
+                EngineGroupInfo(1, (1,), extra_object_group_tag=1),
+                EngineGroupInfo(1, (2,), extra_object_group_tag=1),
+            ],
+            separate_object_groups=True,
+        )
+        assert manager.num_kernel_groups == 3
+        assert manager.num_object_groups == 2
+        assert manager.object_groups[0].kernel_group_indices == [0]
+        assert manager.object_groups[1].kernel_group_indices == [1, 2]
+        assert manager.object_groups[1].standalone
+
+    def test_full_sw_kv_exempts_recurrent_groups(self):
+        # Blend-mode full-window forcing widens sliding-window ATTENTION
+        # groups to full attention, but recurrent-state groups keep their
+        # restore window: position-bound snapshots the blend never touches.
+        tensors = [torch.randn(2, 32, 32, 8, 64, dtype=torch.float16) for _ in range(3)]
+        manager = _build_manager(
+            tensors,
+            engine_group_infos=[
+                EngineGroupInfo(0, (0,)),
+                EngineGroupInfo(1, (1,), sw_size_tokens=64),
+                EngineGroupInfo(2, (2,), sw_size_tokens=32, recurrent_state=True),
+            ],
+            separate_object_groups=True,
+        )
+        manager.enable_full_sw_kv()
+        attn_desc = manager.get_attn_desc()
+        assert attn_desc.num_chunks_in_sw[0] == -1
+        # The sliding-window attention group is forced to full attention...
+        assert attn_desc.num_chunks_in_sw[1] == -1
+        # ...but the recurrent group keeps its one-block window.
+        assert attn_desc.num_chunks_in_sw[2] >= 1
+        assert attn_desc.group_kinds == ("attention", "attention", "recurrent")
+
+    def test_object_group_separation_disabled_ignores_standalone_flag(self):
+        # With separation off, the extra-group tag has no effect: everything
+        # still collapses into the single fused object group.
+        tensors = [torch.randn(2, 32, 32, 8, 64, dtype=torch.float16) for _ in range(2)]
+        manager = _build_manager(
+            tensors,
+            engine_group_infos=[
+                EngineGroupInfo(0, (0,)),
+                EngineGroupInfo(1, (1,), extra_object_group_tag=1),
+            ],
+            separate_object_groups=False,
+        )
+        assert manager.num_object_groups == 1
+        assert manager.object_groups[0].kernel_group_indices == [0, 1]
 
     def test_object_group_separation_enabled_non_hybrid_single_group(self):
         # Even with separation on, a non-hybrid model (no sliding-window groups)

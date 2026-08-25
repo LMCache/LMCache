@@ -20,8 +20,12 @@ export MAX_JOBS="${MAX_JOBS:-$(nproc)}"
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -q
+# patchelf deliberately NOT installed from apt: jammy ships 0.14.3, and
+# auditwheel enforces a minimum patchelf version at repair time (6.8.1 raised
+# it to >= 0.14.5). It is installed from PyPI below so both tools come from the
+# same index and move together.
 apt-get install -y -q --no-install-recommends \
-    software-properties-common curl ca-certificates patchelf git
+    software-properties-common curl ca-certificates git
 add-apt-repository -y ppa:deadsnakes/ppa
 apt-get update -q
 # Match the upstream vllm/vllm-openai-rocm interpreter (cp312).
@@ -40,8 +44,40 @@ $PY --version
 # Build against the public ROCm torch whose ABI matches the vLLM image.
 $PY -m pip install --no-cache-dir "${TORCH_ROCM_SPEC}" --index-url "${TORCH_ROCM_INDEX}"
 $PY -m pip install --no-cache-dir \
-    ninja "setuptools>=77.0.3,<81.0.0" setuptools_scm wheel pybind11 auditwheel
+    ninja "setuptools>=77.0.3,<81.0.0" setuptools_scm wheel pybind11 auditwheel \
+    "patchelf>=0.17"
 $PY -c 'import torch; print("BUILD TORCH:", torch.__version__, "hip:", torch.version.hip, "cxx11abi:", torch._C._GLIBCXX_USE_CXX11_ABI)'
+
+# Preflight the repair toolchain before the ~12-minute compile. auditwheel only
+# checks patchelf when `repair` runs, which is the very last step -- so a version
+# mismatch otherwise costs a full build before surfacing. Report versions either
+# way; they are the first thing to look at when a wheel misbehaves.
+$PY - <<'PREFLIGHT'
+from importlib.metadata import version
+import shutil
+import subprocess
+import sys
+
+patchelf = shutil.which("patchelf")
+if patchelf is None:
+    sys.exit("patchelf not found on PATH")
+reported = subprocess.run(
+    [patchelf, "--version"], capture_output=True, text=True, check=True
+).stdout.strip()
+print(f"BUILD auditwheel: {version('auditwheel')}")
+print(f"BUILD patchelf:   {version('patchelf')} ({reported}) at {patchelf}")
+
+try:
+    from auditwheel.patcher import _verify_patchelf
+except ImportError:
+    # Internal helper moved; `repair` still enforces its own requirement.
+    sys.exit(0)
+try:
+    _verify_patchelf("patchelf")
+except TypeError:
+    _verify_patchelf()  # signature before auditwheel grew patcher variants
+print("BUILD patchelf accepted by auditwheel")
+PREFLIGHT
 
 cd /work/LMCache
 rm -rf build dist dist_rocm csrc_hip
@@ -78,7 +114,7 @@ $PY -m auditwheel repair \
 
 echo "=== ROCm code-object targets in the built extension ==="
 python3 -c "import zipfile,glob,sys; w=glob.glob('dist/*.whl')[0]; zipfile.ZipFile(w).extractall('/tmp/whcheck')"
-SO=$(find /tmp/whcheck -name 'c_ops*.so')
+SO=$(find /tmp/whcheck -name 'cuda_ops*.so')
 /opt/rocm/llvm/bin/llvm-objdump --offloading "$SO" 2>/dev/null | grep -oE 'gfx[0-9a-z]+' | sort -u
 
 echo "=== final ROCm wheel ==="

@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any, Optional, cast
 import threading
 
 if TYPE_CHECKING:
-    from lmcache.native_storage_ops import Bitmap
+    from lmcache.lmcache_native import Bitmap
     from lmcache.v1.distributed.internal_api import L1MemoryDesc, L2AdapterListener
 
 # First Party
@@ -205,7 +205,7 @@ def _local_rank_from_kv_rank(kv_rank: int) -> int:
 
 def _make_bitmap(size: int) -> "Bitmap":
     # First Party
-    from lmcache.native_storage_ops import Bitmap
+    from lmcache.lmcache_native import Bitmap
 
     return Bitmap(size)
 
@@ -714,7 +714,7 @@ class RawBlockL2Adapter(L2AdapterInterface):
         return completed
 
     def submit_lookup_and_lock_task(
-        self, keys: list[ObjectKey], layout_desc: MemoryLayoutDesc
+        self, keys: list[ObjectKey], group_layout_descs: dict[int, MemoryLayoutDesc]
     ) -> L2TaskId:
         """Submit a non-blocking lookup-and-lock task.
 

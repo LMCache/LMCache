@@ -11,9 +11,10 @@ import threading
 import httpx
 
 # First Party
+from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
-from lmcache.native_storage_ops import Bitmap
 from lmcache.v1.distributed.api import (
+    AttnWindowDesc,
     MemoryLayoutDesc,
     ObjectKey,
     PrefetchHandle,
@@ -225,7 +226,7 @@ class P2PController:
     def p2p_lookup_and_lock(
         self,
         keys: list[ObjectKey],
-        layout_desc: MemoryLayoutDesc,
+        group_layout_descs: dict[int, MemoryLayoutDesc],
     ) -> int:
         """Submit a lookup and lock.
 
@@ -234,7 +235,8 @@ class P2PController:
 
         Args:
             keys: the list of object keys to look up and lock.
-            layout_desc: memory layout description of the objects.
+            group_layout_descs: memory layout of the objects, per object
+                group.
 
         Returns:
             A unique task id (int) for querying the lookup status later
@@ -247,11 +249,12 @@ class P2PController:
         handle = self._ctx.storage_manager.submit_prefetch_task(
             PrefetchRequestSpec(
                 keys=keys,
-                # TODO(KuntaiDu): pass per-group layout descs once L2
-                # adapters' submit_lookup_and_lock_task takes them (see the
-                # matching TODO in prefetch_controller._start_lookup_phase).
-                # Follow-up immediately after this PR.
-                group_layout_descs={0: layout_desc},
+                group_layout_descs=group_layout_descs,
+                # SPARSE + skip_l2 never folds windows; the attn_desc only
+                # has to cover the same object groups as group_layout_descs.
+                attn_desc=AttnWindowDesc(
+                    num_chunks_in_sw=[-1] * len(group_layout_descs)
+                ),
                 policy=TrimPolicy.SPARSE,
             ),
             external_request_id=f"p2p-{task_id}",

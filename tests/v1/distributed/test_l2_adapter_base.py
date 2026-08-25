@@ -51,7 +51,9 @@ class _StubAdapter(L2AdapterInterface):
     def pop_completed_store_tasks(self) -> dict[L2TaskId, L2StoreResult]:
         return {}
 
-    def submit_lookup_and_lock_task(self, keys, layout_desc: MemoryLayoutDesc):
+    def submit_lookup_and_lock_task(
+        self, keys, group_layout_descs: dict[int, MemoryLayoutDesc]
+    ):
         return 0
 
     def query_lookup_and_lock_result(self, task_id):
