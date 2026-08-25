@@ -2,38 +2,13 @@
 //
 // Wire format for the LMCache mp-mode message queue over gRPC.
 //
-// Two rpc flavors coexist here on purpose:
-//
-//   1. Typed rpcs -- request / response are real proto messages, so
-//      the wire is self-describing and callers never touch msgspec.
-//      New rpcs should go this way; migrating existing ones is a
-//      per-rpc chore because each has a bespoke Python payload shape.
-//   2. Legacy rpcs -- request / response are ``BytesRequest`` /
-//      ``BytesResponse`` wrappers whose ``payload`` / ``result``
-//      still carry msgspec-encoded values.  Kept only so we can
-//      promote rpcs to typed messages incrementally without
-//      touching the 30+ callers in one PR.
-//
-// The end state is "every rpc typed"; ``BytesRequest`` / ``BytesResponse``
-// will be deleted once the last handler stops using them.
+// Every service method uses concrete request and response messages. Python
+// bindings are derived from this descriptor and the public ProtocolDefinition,
+// so ordinary RPCs do not need hand-written transport adapters.
 
 syntax = "proto3";
 
 package lmcache.mp;
-
-// -----------------------------------------------------------------------
-// Legacy msgspec envelope.  Do not use for new rpcs -- add a real proto
-// message pair instead (see PingRequest / PingResponse below for the
-// smallest possible reference impl).
-// -----------------------------------------------------------------------
-
-message BytesRequest {
-  bytes payload = 1;
-}
-
-message BytesResponse {
-  bytes result = 1;
-}
 
 // -----------------------------------------------------------------------
 // Typed rpc messages start here.  Each new pair lives right above the
@@ -41,13 +16,11 @@ message BytesResponse {
 // -----------------------------------------------------------------------
 
 // Ping: liveness probe.  ``instance_id`` is the caller's worker id, or
-// -1 for an untracked prober (the scheduler adapter uses this).  The
+// absent for an untracked prober (the scheduler adapter uses this).  The
 // server always returns ``ok=true`` -- the mere fact that the rpc
-// completes is the health signal.  Chosen as the first typed rpc
-// precisely because both sides are trivial.
+// completes is the health signal.
 message PingRequest {
-  // -1 => untracked prober; otherwise the worker instance id.
-  int64 instance_id = 1;
+  optional int64 instance_id = 1;
 }
 
 message PingResponse {
@@ -58,9 +31,8 @@ message PingResponse {
 // Shared: cache key used by 9+ engine rpcs (Lookup / Store / Retrieve /
 // FreeLookupLocks / PrepareStore / CommitStore / PrepareRetrieve /
 // CommitRetrieve / EndSession / CB_LOOKUP_PRE_COMPUTED / ...).  Kept
-// here so those rpcs can just embed it once they migrate off the
-// legacy BytesRequest envelope, instead of each redeclaring the same
-// eight fields.  Field numbers mirror the dataclass declaration order
+// here so those rpcs can embed it instead of each redeclaring the same
+// eight fields. Field numbers mirror the dataclass declaration order
 // in ``lmcache/v1/multiprocess/custom_types.py`` for readability.
 //
 // ``worker_id`` is optional to preserve the ``int | None`` semantics
@@ -513,6 +485,8 @@ message EngineGroupInfo {
   repeated int64 layer_indices = 2;
   int64 tokens_per_block = 3;
   int64 sw_size_tokens = 4;
+  int64 extra_object_group_tag = 5;
+  bool recurrent_state = 6;
 }
 
 // RegisterKvCache: the GPU-path registration.  ``engine_type`` is
@@ -563,54 +537,13 @@ message CbRegisterRopeV3Request {
 
 message CbRegisterRopeV3Response {}
 
-// Concurrent callers can share one gRPC unary exchange without giving up
-// typed protobuf payloads.  Field names mirror RequestType names so the
-// Python registry can map them without a second hand-maintained table.
+// Concurrent callers can share one gRPC unary exchange. Dedicated unary RPCs
+// remain fully typed; Batch is a transport optimization and therefore carries
+// each typed message as bytes plus its RequestType-derived method id. Adding an
+// RPC does not require another Batch oneof arm.
 message BatchRequestItem {
-  oneof request {
-    PingRequest ping = 2;
-    LookupRequest lookup = 3;
-    FreeLookupLocksRequest free_lookup_locks = 4;
-    EndSessionRequest end_session = 5;
-    UnregisterKvCacheRequest unregister_kv_cache = 6;
-    UnregisterKvCacheRequest unregister_q_cache = 7;
-    UnregisterKvCacheEngineDrivenContextRequest
-        unregister_kv_cache_engine_driven_context = 8;
-    QueryPrefetchStatusRequest query_prefetch_status = 9;
-    WaitPrefetchStatusRequest wait_prefetch_status = 10;
-    QueryPrefetchLookupHitsRequest query_prefetch_lookup_hits = 11;
-    ClearRequest clear = 12;
-    GetChunkSizeRequest get_chunk_size = 13;
-    GetExperimentalRequest get_experimental = 14;
-    NoopRequest noop = 15;
-    StoreRequest store = 16;
-    StoreRequest store_q = 17;
-    RetrieveRequest retrieve = 18;
-    ReportBlockAllocationRequest report_block_allocation = 19;
-    CbUnregisterKvCacheRequest cb_unregister_kv_cache = 20;
-    CbUnregisterRopeV3Request cb_unregister_rope_v3 = 21;
-    CbLookupPreComputedRequest cb_lookup_pre_computed = 22;
-    CbStorePreComputedRequest cb_store_pre_computed = 23;
-    CbStoreFinalRequest cb_store_final = 24;
-    CbRetrievePreComputedRequest cb_retrieve_pre_computed = 25;
-    CbLookupPreComputedV2Request cb_lookup_pre_computed_v2 = 26;
-    CbRetrievePreComputedV2Request cb_retrieve_pre_computed_v2 = 27;
-    CbRetrievePreComputedV3Request cb_retrieve_pre_computed_v3 = 28;
-    CbUnifiedLookupRequest cb_unified_lookup = 29;
-    RegisterKvCacheEngineDrivenContextRequest
-        register_kv_cache_engine_driven_context = 30;
-    PrepareStoreRequest prepare_store = 31;
-    CommitStoreRequest commit_store = 32;
-    PrepareRetrieveRequest prepare_retrieve = 33;
-    CommitRetrieveRequest commit_retrieve = 34;
-    P2pLookupAndLockRequest p2p_lookup_and_lock = 35;
-    P2pQueryLookupResultsRequest p2p_query_lookup_results = 36;
-    P2pUnlockObjectsRequest p2p_unlock_objects = 37;
-    RegisterKvCacheRequest register_kv_cache = 38;
-    RegisterKvCacheRequest register_q_cache = 39;
-    CbRegisterKvCacheRequest cb_register_kv_cache = 40;
-    CbRegisterRopeV3Request cb_register_rope_v3 = 41;
-  }
+  uint32 method_id = 1;
+  bytes payload = 2;
 }
 
 message BatchRequest {
@@ -623,50 +556,9 @@ message BatchError {
 }
 
 message BatchResponseItem {
-  oneof response {
-    PingResponse ping = 2;
-    LookupResponse lookup = 3;
-    FreeLookupLocksResponse free_lookup_locks = 4;
-    EndSessionResponse end_session = 5;
-    UnregisterKvCacheResponse unregister_kv_cache = 6;
-    UnregisterKvCacheResponse unregister_q_cache = 7;
-    UnregisterKvCacheEngineDrivenContextResponse
-        unregister_kv_cache_engine_driven_context = 8;
-    QueryPrefetchStatusResponse query_prefetch_status = 9;
-    WaitPrefetchStatusResponse wait_prefetch_status = 10;
-    QueryPrefetchLookupHitsResponse query_prefetch_lookup_hits = 11;
-    ClearResponse clear = 12;
-    GetChunkSizeResponse get_chunk_size = 13;
-    GetExperimentalResponse get_experimental = 14;
-    NoopResponse noop = 15;
-    StoreResponse store = 16;
-    StoreResponse store_q = 17;
-    RetrieveResponse retrieve = 18;
-    ReportBlockAllocationResponse report_block_allocation = 19;
-    CbUnregisterKvCacheResponse cb_unregister_kv_cache = 20;
-    CbUnregisterRopeV3Response cb_unregister_rope_v3 = 21;
-    CbLookupPreComputedResponse cb_lookup_pre_computed = 22;
-    CbStorePreComputedResponse cb_store_pre_computed = 23;
-    CbStoreFinalResponse cb_store_final = 24;
-    CbRetrievePreComputedResponse cb_retrieve_pre_computed = 25;
-    CbLookupPreComputedV2Response cb_lookup_pre_computed_v2 = 26;
-    CbRetrievePreComputedV2Response cb_retrieve_pre_computed_v2 = 27;
-    CbRetrievePreComputedV3Response cb_retrieve_pre_computed_v3 = 28;
-    CbUnifiedLookupResponse cb_unified_lookup = 29;
-    RegisterKvCacheEngineDrivenContextResponse
-        register_kv_cache_engine_driven_context = 30;
-    PrepareStoreResponse prepare_store = 31;
-    CommitStoreResponse commit_store = 32;
-    PrepareRetrieveResponse prepare_retrieve = 33;
-    CommitRetrieveResponse commit_retrieve = 34;
-    P2pLookupAndLockResponse p2p_lookup_and_lock = 35;
-    P2pQueryLookupResultsResponse p2p_query_lookup_results = 36;
-    P2pUnlockObjectsResponse p2p_unlock_objects = 37;
-    RegisterKvCacheResponse register_kv_cache = 38;
-    RegisterKvCacheResponse register_q_cache = 39;
-    CbRegisterKvCacheResponse cb_register_kv_cache = 40;
-    CbRegisterRopeV3Response cb_register_rope_v3 = 41;
-    BatchError error = 42;
+  oneof result {
+    bytes payload = 1;
+    BatchError error = 2;
   }
 }
 

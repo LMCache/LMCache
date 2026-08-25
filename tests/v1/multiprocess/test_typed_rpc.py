@@ -1,21 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
-"""End-to-end tests for the typed-rpc migration path on the mp-mode mq.
+"""End-to-end tests for typed gRPC on the mp-mode message queue.
 
-These tests exercise the very first typed rpc (``PING``) and lock in
-the invariants that:
+These tests lock in the invariants that:
 
 1. The typed proto messages (``PingRequest`` / ``PingResponse``) hit
    the wire directly, so the payload bytes are NOT a msgspec envelope.
-2. Business handlers registered via ``add_handler`` keep the exact
-   same Python signature they had on the legacy path.
-3. Legacy rpcs (``NOOP`` here as representative) still work on the
-   same server, i.e. the two paths coexist in the same servicer.
+2. Business handlers registered via ``add_handler`` keep their public
+   Python signatures.
+3. Every ``RequestType`` maps to one descriptor-derived typed RPC.
 """
 
 # Standard
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Optional
-import inspect
 import socket
 import subprocess
 import sys
@@ -85,7 +82,6 @@ def _find_free_port() -> int:
 
 
 def test_ping_is_registered_as_typed_rpc() -> None:
-    # The whole point of Phase 1: PING is the reference typed rpc.
     assert RequestType.PING in _TYPED_RPCS
     spec = _TYPED_RPCS[RequestType.PING]
     assert spec.request_message is lmcache_mq_pb2.PingRequest
@@ -98,33 +94,32 @@ def test_ping_method_name_matches_proto() -> None:
     assert request_type_to_method_name(RequestType.PING) == "Ping"
 
 
-def test_batch_proto_covers_every_typed_rpc() -> None:
-    """Batch oneofs must stay in lockstep with the typed RPC registry."""
-    expected_fields = {request_type.name.lower() for request_type in RequestType}
-    request_fields = {
-        field.name: field
-        for field in lmcache_mq_pb2.BatchRequestItem.DESCRIPTOR.oneofs_by_name[
-            "request"
-        ].fields
+def test_service_descriptor_covers_every_typed_rpc() -> None:
+    """The registry is derived from, and stays aligned with, the service."""
+    service = lmcache_mq_pb2.DESCRIPTOR.services_by_name["MessageQueue"]
+    expected_methods = {
+        request_type_to_method_name(request_type) for request_type in RequestType
     }
-    response_fields = {
-        field.name: field
-        for field in lmcache_mq_pb2.BatchResponseItem.DESCRIPTOR.oneofs_by_name[
-            "response"
-        ].fields
-        if field.name != "error"
-    }
-    assert set(request_fields) == expected_fields
-    assert set(response_fields) == expected_fields
+    assert set(service.methods_by_name) == expected_methods | {"Batch"}
 
     for request_type, spec in _TYPED_RPCS.items():
-        field_name = request_type.name.lower()
-        assert (
-            request_fields[field_name].message_type is spec.request_message.DESCRIPTOR
-        )
-        assert (
-            response_fields[field_name].message_type is spec.response_message.DESCRIPTOR
-        )
+        method = service.methods_by_name[request_type_to_method_name(request_type)]
+        assert method.input_type is spec.request_message.DESCRIPTOR
+        assert method.output_type is spec.response_message.DESCRIPTOR
+        assert spec.payload_types == tuple(get_payload_classes(request_type))
+        assert spec.response_type == get_response_class(request_type)
+
+
+def test_batch_envelope_is_rpc_agnostic() -> None:
+    """Adding an RPC must not require another Batch schema field."""
+    request_fields = lmcache_mq_pb2.BatchRequestItem.DESCRIPTOR.fields_by_name
+    response = lmcache_mq_pb2.BatchResponseItem.DESCRIPTOR
+    assert set(request_fields) == {"method_id", "payload"}
+    assert set(response.fields_by_name) == {"payload", "error"}
+    assert {field.name for field in response.oneofs_by_name["result"].fields} == {
+        "payload",
+        "error",
+    }
 
 
 def test_batch_rejects_more_than_transport_limit() -> None:
@@ -137,7 +132,9 @@ def test_batch_rejects_more_than_transport_limit() -> None:
     stub = lmcache_mq_pb2_grpc.MessageQueueStub(channel)
     request = lmcache_mq_pb2.BatchRequest()
     for _ in range(65):
-        request.items.add().ping.instance_id = -1
+        item = request.items.add()
+        item.method_id = RequestType.PING.value
+        item.payload = lmcache_mq_pb2.PingRequest().SerializeToString()
 
     try:
         with pytest.raises(grpc.RpcError) as exc_info:
@@ -392,13 +389,8 @@ def test_ping_typed_roundtrip() -> None:
         server.close()
 
 
-def test_typed_and_legacy_coexist() -> None:
-    """Sanity check: a typed rpc and a legacy rpc served by the same
-    ``MessageQueueServer`` instance both work independently.
-
-    NOOP is chosen as the legacy witness because it's the smallest
-    surviving legacy rpc (no payload, no response).
-    """
+def test_distinct_typed_rpcs_coexist() -> None:
+    """Distinct typed methods served by one server do not interfere."""
     port = _find_free_port()
     server_url = f"grpc://127.0.0.1:{port}"
 
@@ -432,10 +424,10 @@ def test_typed_and_legacy_coexist() -> None:
         client = MessageQueueClient(server_url)
 
         fut_typed: MessagingFuture[bool] = client.submit_request(RequestType.PING, [7])
-        fut_legacy: MessagingFuture[str] = client.submit_request(RequestType.NOOP, [])
+        fut_noop: MessagingFuture[str] = client.submit_request(RequestType.NOOP, [])
 
         assert fut_typed.result(timeout=5.0) is True
-        assert fut_legacy.result(timeout=5.0) == "ok"
+        assert fut_noop.result(timeout=5.0) == "ok"
         assert ping_hits.is_set()
 
         client.close()
@@ -456,7 +448,7 @@ def test_ping_wire_encoding_boundary_values(instance_id: Optional[int]) -> None:
     proto_resp = spec.python_to_response(True)
     assert spec.response_to_python(proto_resp) is True
 
-    # Sanity: the wire really is a PingRequest, not BytesRequest.
+    # Sanity: the concrete PingRequest is the wire message.
     assert isinstance(proto_req, lmcache_mq_pb2.PingRequest)
 
 
@@ -577,8 +569,8 @@ def test_wave2_rpc_is_typed(request_type: RequestType) -> None:
     """Each Wave 2 rpc must be off the msgspec envelope."""
     assert request_type in _TYPED_RPCS
     spec = _TYPED_RPCS[request_type]
-    assert spec.request_message is not lmcache_mq_pb2.BytesRequest
-    assert spec.response_message is not lmcache_mq_pb2.BytesResponse
+    assert spec.request_message.DESCRIPTOR.file is lmcache_mq_pb2.DESCRIPTOR
+    assert spec.response_message.DESCRIPTOR.file is lmcache_mq_pb2.DESCRIPTOR
 
 
 def test_optional_chunk_count_none_roundtrip() -> None:
@@ -718,8 +710,8 @@ def test_wave3_rpc_is_typed(request_type: RequestType) -> None:
     """Wave 3 rpcs must all be off the msgspec envelope."""
     assert request_type in _TYPED_RPCS
     spec = _TYPED_RPCS[request_type]
-    assert spec.request_message is not lmcache_mq_pb2.BytesRequest
-    assert spec.response_message is not lmcache_mq_pb2.BytesResponse
+    assert spec.request_message.DESCRIPTOR.file is lmcache_mq_pb2.DESCRIPTOR
+    assert spec.response_message.DESCRIPTOR.file is lmcache_mq_pb2.DESCRIPTOR
 
 
 def test_store_retrieve_roundtrip() -> None:
@@ -865,8 +857,8 @@ def test_store_typed_grpc_roundtrip() -> None:
 def test_wave4_rpc_is_typed(request_type: RequestType) -> None:
     assert request_type in _TYPED_RPCS
     spec = _TYPED_RPCS[request_type]
-    assert spec.request_message is not lmcache_mq_pb2.BytesRequest
-    assert spec.response_message is not lmcache_mq_pb2.BytesResponse
+    assert spec.request_message.DESCRIPTOR.file is lmcache_mq_pb2.DESCRIPTOR
+    assert spec.response_message.DESCRIPTOR.file is lmcache_mq_pb2.DESCRIPTOR
 
 
 def test_register_edc_roundtrip() -> None:
@@ -1048,8 +1040,8 @@ def test_wave5_rpc_is_typed(request_type: RequestType) -> None:
     """Wave 5 finishes the migration: all request types use typed RPCs."""
     assert request_type in _TYPED_RPCS
     spec = _TYPED_RPCS[request_type]
-    assert spec.request_message is not lmcache_mq_pb2.BytesRequest
-    assert spec.response_message is not lmcache_mq_pb2.BytesResponse
+    assert spec.request_message.DESCRIPTOR.file is lmcache_mq_pb2.DESCRIPTOR
+    assert spec.response_message.DESCRIPTOR.file is lmcache_mq_pb2.DESCRIPTOR
 
 
 def test_typed_rpc_coverage_is_complete() -> None:
@@ -1060,19 +1052,10 @@ def test_typed_rpc_coverage_is_complete() -> None:
 
 @pytest.mark.parametrize("request_type", list(RequestType))
 def test_typed_rpc_request_arity_matches_protocol(request_type: RequestType) -> None:
-    """Keep typed adapters aligned with the public protocol payload contract."""
-    signature = inspect.signature(_TYPED_RPCS[request_type].python_to_request)
-    positional = [
-        parameter
-        for parameter in signature.parameters.values()
-        if parameter.kind
-        in (
-            inspect.Parameter.POSITIONAL_ONLY,
-            inspect.Parameter.POSITIONAL_OR_KEYWORD,
-        )
-        and parameter.default is inspect.Parameter.empty
-    ]
-    assert len(positional) == len(get_payload_classes(request_type))
+    """Keep generated bindings aligned with the public protocol contract."""
+    spec = _TYPED_RPCS[request_type]
+    assert spec.payload_types == tuple(get_payload_classes(request_type))
+    assert spec.response_type == get_response_class(request_type)
 
 
 def test_register_kv_cache_roundtrip() -> None:
@@ -1097,6 +1080,8 @@ def test_register_kv_cache_roundtrip() -> None:
             layer_indices=(3, 4),
             tokens_per_block=16,
             sw_size_tokens=128,
+            extra_object_group_tag=2,
+            recurrent_state=True,
         ),
     ]
     proto_req = spec.python_to_request(

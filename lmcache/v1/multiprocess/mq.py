@@ -46,6 +46,9 @@ from lmcache.v1.multiprocess.transport.grpc_impl.typed_rpc import (
 from lmcache.v1.multiprocess.transport.grpc_impl.typed_rpc import (
     msgspec_encode as msgspec_encode,
 )
+from lmcache.v1.multiprocess.transport.grpc_impl.typed_rpc import (
+    request_type_to_method_name as request_type_to_method_name,
+)
 
 # Message classes come out of the protobuf descriptor pool at runtime
 # and are invisible to static analysis; rebind through Any so mypy
@@ -67,7 +70,9 @@ _GRPC_UNLIMITED_MSG_OPTS: list[tuple[str, int]] = [
     ("grpc.max_send_message_length", -1),
     ("grpc.max_receive_message_length", -1),
 ]
-_GRPC_BATCH_COALESCE_SECONDS = 50 / 1_000_000
+# Amortize one gRPC exchange across concurrent control-plane callers. Single
+# callers bypass Batch entirely, so this window does not delay unary traffic.
+_GRPC_BATCH_COALESCE_SECONDS = 150 / 1_000_000
 _GRPC_BATCH_MAX_ITEMS = 64
 _GRPC_BATCH_MAX_ITEM_BYTES = 64 * 1024
 _GRPC_CLIENT_ID_METADATA_KEY = "lmcache-client-id-bin"
@@ -111,36 +116,11 @@ def _ensure_grpc_runtime() -> None:
         grpc = grpc_module
 
 
-# ---------------------------------------------------------------------------
-# RequestType <-> gRPC method name
-# ---------------------------------------------------------------------------
-
-
-def request_type_to_method_name(request_type: RequestType) -> str:
-    """Return the CamelCase gRPC method name for a ``RequestType``.
-
-    ``STORE`` -> ``Store``; ``CB_LOOKUP_PRE_COMPUTED_V2`` ->
-    ``CbLookupPreComputedV2``; ``P2P_LOOKUP_AND_LOCK`` ->
-    ``P2PLookupAndLock``.  These names are baked into ``lmcache_mq.proto``
-    so any drift shows up immediately at handshake time.
-    """
-    parts = request_type.name.split("_")
-    out: list[str] = []
-    for part in parts:
-        if part == "P2P":
-            out.append("P2P")
-        else:
-            out.append(part[:1].upper() + part[1:].lower())
-    return "".join(out)
-
-
 _RPC_METHOD_NAMES = {
     request_type: request_type_to_method_name(request_type)
     for request_type in RequestType
 }
-_BATCH_REQUEST_TYPES = {
-    request_type.name.lower(): request_type for request_type in RequestType
-}
+_RPC_REQUEST_TYPES = {request_type.value: request_type for request_type in RequestType}
 
 
 # ---------------------------------------------------------------------------
@@ -423,9 +403,8 @@ class MessageQueueClient:
             request = lmcache_mq_pb2.BatchRequest()
             for pending in batch:
                 item = request.items.add()
-                getattr(item, pending.request_type.name.lower()).CopyFrom(
-                    pending.proto_request
-                )
+                item.method_id = pending.request_type.value
+                item.payload = pending.proto_request.SerializeToString()
 
             def _on_done_batch(
                 call: "grpc.Future[Any]",
@@ -483,24 +462,25 @@ class MessageQueueClient:
 
         outcomes: list[tuple[_PendingBatchRequest, Any, BaseException | None]] = []
         for pending, item in zip(batch, response.items, strict=True):
-            response_field = item.WhichOneof("response")
-            expected_field = pending.request_type.name.lower()
-            if response_field == "error":
+            result_field = item.WhichOneof("result")
+            if result_field == "error":
                 item_error = RuntimeError(
                     f"batched gRPC call {pending.method_name} failed "
                     f"with {item.error.status}: {item.error.details}"
                 )
                 outcomes.append((pending, None, item_error))
                 continue
-            if response_field != expected_field:
+            if result_field != "payload":
                 response_type_error = RuntimeError(
                     f"batched gRPC call {pending.method_name} returned "
-                    f"{response_field!r}, expected {expected_field!r}"
+                    f"an invalid result {result_field!r}"
                 )
                 outcomes.append((pending, None, response_type_error))
                 continue
             try:
-                decoded = pending.spec.response_to_python(getattr(item, response_field))
+                proto_response = pending.spec.response_message()
+                proto_response.ParseFromString(item.payload)
+                decoded = pending.spec.response_to_python(proto_response)
             except Exception as exc:
                 outcomes.append((pending, None, exc))
             else:
@@ -637,22 +617,23 @@ class _RequestHandlerServicer:
 
         for request_item in request.items:
             response_item = response.items.add()
-            request_field = request_item.WhichOneof("request")
-            if request_field is None:
+            method_id = request_item.method_id
+            if not method_id:
                 self._set_batch_error(
                     response_item,
                     "INVALID_ARGUMENT",
-                    "batch request item has no request payload",
+                    "batch request item has no method id",
                 )
                 continue
-            request_type = _BATCH_REQUEST_TYPES.get(request_field)
+            request_type = _RPC_REQUEST_TYPES.get(method_id)
             if request_type is None:
                 self._set_batch_error(
                     response_item,
                     "INVALID_ARGUMENT",
-                    f"unknown batch request field {request_field!r}",
+                    f"unknown batch method id {method_id}",
                 )
                 continue
+            method_name = _RPC_METHOD_NAMES[request_type]
 
             handler = self._handlers.get(request_type)
             if handler is None:
@@ -665,7 +646,9 @@ class _RequestHandlerServicer:
 
             spec = _TYPED_RPCS[request_type]
             try:
-                py_args = spec.request_to_python(getattr(request_item, request_field))
+                proto_request = spec.request_message()
+                proto_request.ParseFromString(request_item.payload)
+                py_args = spec.request_to_python(proto_request)
                 execution = self._submit_handler(handler, py_args, affinity_key)
             except Exception as exc:
                 logger.exception("failed to start batched %s", request_type)
@@ -675,17 +658,17 @@ class _RequestHandlerServicer:
                     str(exc),
                 )
                 continue
-            executions.append((response_item, request_field, spec, execution))
+            executions.append((response_item, method_name, spec, execution))
 
-        for response_item, response_field, spec, execution in executions:
+        for response_item, method_name, spec, execution in executions:
             try:
                 result = (
                     execution.result() if isinstance(execution, Future) else execution
                 )
                 proto_response = spec.python_to_response(result)
-                getattr(response_item, response_field).CopyFrom(proto_response)
+                response_item.payload = proto_response.SerializeToString()
             except Exception as exc:
-                logger.exception("failed to complete batched %s", response_field)
+                logger.exception("failed to complete batched %s", method_name)
                 self._set_batch_error(
                     response_item,
                     "UNKNOWN",
