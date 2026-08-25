@@ -825,7 +825,15 @@ def _per_layer_paged_shape(
     fmt = int(engine_kv_format)
     if fmt == int(EngineKVFormat.NL_X_NBBS_ONE_HS):
         return (nb * bs, 1, hs)
-    if fmt == int(EngineKVFormat.NL_X_NB_BS_HS):
+    if fmt in (
+        int(EngineKVFormat.NL_X_NB_BS_HS),
+        int(EngineKVFormat.NL_X_NB_BSV_BSS),
+    ):
+        # NL_X_NB_BSV_BSS (DSA indexer) is logically identical to
+        # NL_X_NB_BS_HS: a 3-D (NB, BS, HS) per-layer tensor with nh=1.
+        # The physical per-block layout interleaves values and scales
+        # differently, but the transfer kernels address them via raw
+        # ptrs, so the logical shape matches.
         return (nb, bs, hs)
     if fmt == int(EngineKVFormat.NL_X_TWO_NB_NH_BS_HS):
         return (2, nb, nh, bs, hs)

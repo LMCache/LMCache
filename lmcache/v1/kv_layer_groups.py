@@ -78,6 +78,7 @@ def group_layers_by_identity(
     kv_caches: "DiscoverableKVCache",
     engine_kv_formats: "Sequence[lmcache_native.EngineKVFormat]",
     per_layer_engine_group_idx: Sequence[int] | None = None,
+    per_layer_tokens_per_block: Sequence[int] | None = None,
 ) -> list[tuple[LayerGroupIdentity, list[int]]]:
     """Partition layer indices by :data:`LayerGroupIdentity`.
 
@@ -94,6 +95,11 @@ def group_layers_by_identity(
             identity even if their tensor shapes match. Layers whose value is
             ``EXCLUDED_ENGINE_GROUP`` are left out of all groups (e.g. cross-layer
             KV-sharing layers whose KV lives in their target owner's blocks).
+        per_layer_tokens_per_block: Optional logical tokens-per-block per layer,
+            as declared by the engine (``EngineGroupInfo.tokens_per_block``).
+            Used as a fallback for ``block_size`` when the format's spec raises
+            ``ValueError`` — i.e. for NBBS-fused formats (SGLang MLA) where the
+            block axis is folded into PBS and ``block_size()`` is undefined.
 
     Returns:
         A list of ``(identity, layer_indices)`` pairs sorted by each group's
@@ -138,7 +144,16 @@ def group_layers_by_identity(
         nh = 1 if mla else get_num_heads(kv_caches, layer_format, idx)
         hs = get_head_size(kv_caches, layer_format, idx)
         dt = get_dtype(kv_caches, layer_format, idx)
-        bs = get_block_size(kv_caches, layer_format, idx)
+        try:
+            bs = get_block_size(kv_caches, layer_format, idx)
+        except ValueError:
+            # NBBS-fused formats (e.g. SGLang MLA NL_X_NBBS_ONE_HS) fold the
+            # block axis into PBS, so block_size() is undefined. Fall back to
+            # the engine-declared tokens_per_block from EngineGroupInfo.
+            if per_layer_tokens_per_block is not None:
+                bs = per_layer_tokens_per_block[idx]
+            else:
+                raise
 
         identity = LayerGroupIdentity(
             kv_size=kv_size,
@@ -363,6 +378,7 @@ class KVLayerGroupsManager:
         # First Party
         from lmcache.v1.gpu_connector.utils import (
             get_num_blocks,
+            get_page_buffer_size,
             make_page_buffer_shape_desc,
             resolve_block_stride_and_log_layout,
         )
@@ -379,8 +395,20 @@ class KVLayerGroupsManager:
         per_layer_engine_group_idx = get_engine_group_indices(
             engine_group_infos, num_layers
         )
+        # Build a per-layer tokens_per_block mapping from engine_group_infos so
+        # that group_layers_by_identity can fall back to it for NBBS-fused
+        # formats (SGLang MLA) where block_size() is undefined.
+        per_layer_tokens_per_block: list[int] | None = None
+        if engine_group_infos:
+            per_layer_tokens_per_block = [0] * num_layers
+            for info in engine_group_infos:
+                for layer_idx in info.layer_indices:
+                    per_layer_tokens_per_block[layer_idx] = info.tokens_per_block
         groups_by_identity = group_layers_by_identity(
-            kv_caches, engine_kv_formats, per_layer_engine_group_idx
+            kv_caches,
+            engine_kv_formats,
+            per_layer_engine_group_idx,
+            per_layer_tokens_per_block=per_layer_tokens_per_block,
         )
 
         # Engine group infos are produced by the same group_layers_by_identity
@@ -404,7 +432,14 @@ class KVLayerGroupsManager:
             group_format = identity.engine_kv_format
             # Block count is per engine group (each is its own block-id space), so
             # read it from this group's own tensor rather than a context-wide value.
-            group_num_blocks = get_num_blocks([kv_caches[indices[0]]], group_format)
+            try:
+                group_num_blocks = get_num_blocks([kv_caches[indices[0]]], group_format)
+            except ValueError:
+                # NBBS-fused formats have no separate block axis; derive
+                # num_blocks from page_buffer_size // block_size.
+                group_num_blocks = get_page_buffer_size(
+                    [kv_caches[indices[0]]], group_format
+                ) // bs
             block_stride_elems = resolve_block_stride_and_log_layout(
                 kv_caches,
                 group_format,

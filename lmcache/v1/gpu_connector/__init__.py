@@ -138,6 +138,18 @@ def CreateGPUConnector(
             )
 
             if config.use_layerwise:
+                if metadata.use_mla:
+                    raise ValueError(
+                        "Layerwise mode (use_layerwise=True) is not yet "
+                        "supported for MLA/DSA models. The layerwise "
+                        "store_layer/retrieve_layer path in cache_engine "
+                        "iterates per-layer with a single uniform shape and "
+                        "has no awareness of layer groups — incompatible "
+                        "with MLA's fused single-buffer layout and DSA's "
+                        "dual-buffer layout. Set use_layerwise=False (the "
+                        "default) to use the fully-supported non-layerwise "
+                        "MP path."
+                    )
                 return SGLangLayerwiseGPUConnector(
                     hidden_dim_size,
                     num_layer,
@@ -154,6 +166,9 @@ def CreateGPUConnector(
                     chunk_size=chunk_size,
                     dtype=kv_dtype,
                     device=device,
+                    use_mla=metadata.use_mla,
+                    metadata=metadata,
+                    layout_hints=layout_hints,
                 )
     elif engine == EngineType.VLLM:
         _validate_vllm_device_features(config)

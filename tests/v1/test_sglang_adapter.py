@@ -16,7 +16,7 @@ from lmcache.v1.metadata import LMCacheMetadata
 
 
 @pytest.mark.parametrize(
-    ("attention_arch", "kv_head_dim", "expected_shape", "expected_use_mla"),
+    ("attention_arch", "kv_cache_dim", "expected_shape", "expected_use_mla"),
     [
         ("MHA", None, (2, 2, 16, 4, 128), False),
         ("MLA", 576, (2, 1, 16, 1, 576), True),
@@ -25,7 +25,7 @@ from lmcache.v1.metadata import LMCacheMetadata
 def test_init_lmcache_engine_propagates_sglang_attention_arch(
     monkeypatch: pytest.MonkeyPatch,
     attention_arch: str,
-    kv_head_dim: int | None,
+    kv_cache_dim: int | None,
     expected_shape: tuple[int, int, int, int, int],
     expected_use_mla: bool,
 ) -> None:
@@ -40,6 +40,7 @@ def test_init_lmcache_engine_propagates_sglang_attention_arch(
         _connector_config: LMCacheEngineConfig,
         metadata: object,
         engine_type: EngineType,
+        **_kwargs: object,
     ) -> object:
         captured["metadata"] = metadata
         captured["engine_type"] = engine_type
@@ -67,7 +68,9 @@ def test_init_lmcache_engine_propagates_sglang_attention_arch(
         global_rank=0,
         kv_dtype=torch.float16,
         config_file="",
-        kv_head_dim=kv_head_dim,
+        use_mla=expected_use_mla,
+        kv_cache_dim=kv_cache_dim,
+        page_size=1,
     )
 
     metadata = cast(LMCacheMetadata, captured["metadata"])
@@ -90,7 +93,7 @@ def test_init_lmcache_engine_rejects_mla_without_pool_width(
         model_path="test-model",
     )
 
-    with pytest.raises(ValueError, match="positive KV-cache row width"):
+    with pytest.raises(ValueError, match="kv_cache_dim must be provided when use_mla=True"):
         adapter_mod.init_lmcache_engine(
             model_config,
             tp_size=1,
@@ -98,6 +101,7 @@ def test_init_lmcache_engine_rejects_mla_without_pool_width(
             global_rank=0,
             kv_dtype=torch.float16,
             config_file="",
+            use_mla=True,
         )
 
 
@@ -132,6 +136,7 @@ def test_connector_registers_only_the_model_kv_layout(
         num_hidden_layers=2,
     )
 
+    use_mla = attention_arch == "MLA"
     connector = adapter_mod.LMCacheConnector(
         model_config,
         tp_size=1,
@@ -139,9 +144,13 @@ def test_connector_registers_only_the_model_kv_layout(
         k_pool=k_pool,
         v_pool=v_pool,
         config_file="",
+        use_mla=use_mla,
+        kv_cache_dim=width if use_mla else None,
+        page_size=1,
     )
 
     assert len(connector.kvcaches) == expected_cache_count
     init_kwargs = cast(dict[str, object], captured["kwargs"])
-    assert init_kwargs["kv_head_dim"] == expected_width
+    assert init_kwargs["use_mla"] is use_mla
+    assert init_kwargs["kv_cache_dim"] == expected_width
     engine.post_init.assert_called_once_with(kvcaches=connector.kvcaches)

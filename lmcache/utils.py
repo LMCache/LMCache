@@ -324,6 +324,12 @@ class DiskCacheMetadata:
     cached_positions: Optional[torch.Tensor] = None
     fmt: Optional[MemoryFormat] = None
     pin_count: int = 0
+    # Plural shapes/dtypes for multi-group memory objects (e.g. DSA
+    # dual-buffer).  When set, the retrieve path allocates with these
+    # instead of the singular shape/dtype so the loaded MemoryObj
+    # preserves the multi-group layout needed by get_tensor(i).
+    shapes: Optional[list[torch.Size]] = None
+    dtypes: Optional[list[torch.dtype]] = None
 
     def pin(self) -> bool:
         self.pin_count += 1

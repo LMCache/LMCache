@@ -34,6 +34,10 @@ from lmcache.v1.multiprocess.custom_types import (
     KVCache,
 )
 from lmcache.v1.multiprocess.futures import MessagingFuture
+from lmcache.v1.multiprocess.group_view import (
+    EngineGroupInfo,
+    expand_engine_block_ids,
+)
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import RequestType
 from lmcache.v1.platform import get_device_spec
@@ -50,52 +54,79 @@ logger = init_logger(__name__)
 _WAIT_LOOKUP_RESPONSE_BUFFER_S = 5.0
 
 
-def _validate_sglang_kv_pools(
-    k_pool: list[torch.Tensor],
-    v_pool: list[torch.Tensor],
+def _validate_sglang_kv_caches(
+    kv_caches: list[torch.Tensor],
 ) -> torch.device:
-    """Validate SGLang's split MHA pools and return their shared device.
+    """Validate a flat SGLang KV cache list and return the shared device.
 
     Args:
-        k_pool: Per-layer key-cache tensors.
-        v_pool: Per-layer value-cache tensors.
+        kv_caches: Flat per-layer KV cache tensors. Layout depends on
+            attention type: MHA ``[K..., V...]``, MLA ``[KV...]``,
+            DSA ``[KV..., indexer...]``.
 
     Returns:
-        The device shared by every key and value tensor.
+        The device shared by every tensor.
 
     Raises:
-        ValueError: If either pool is empty, layer counts differ, or tensors
-            span multiple devices.
+        ValueError: If the list is empty or tensors span multiple devices.
     """
-    if not k_pool or not v_pool:
-        raise ValueError("SGLang MP registration requires non-empty K and V pools")
-    if len(k_pool) != len(v_pool):
-        raise ValueError("SGLang MP registration requires matching K and V layers")
-    tensors = [*k_pool, *v_pool]
-    device = tensors[0].device
-    if any(tensor.device != device for tensor in tensors):
-        raise ValueError("SGLang MP K and V pools must use one device")
+    if not kv_caches:
+        raise ValueError("SGLang MP registration requires non-empty KV caches")
+    device = kv_caches[0].device
+    if any(tensor.device != device for tensor in kv_caches):
+        raise ValueError("SGLang MP KV caches must use one device")
+    return device
+
+
+def _validate_sglang_kv_caches(
+    kv_caches: list[torch.Tensor],
+) -> torch.device:
+    """Validate a flat SGLang KV cache list and return the shared device.
+
+    Args:
+        kv_caches: Flat per-layer KV cache tensors. Layout depends on
+            attention type: MHA ``[K..., V...]``, MLA ``[KV...]``,
+            DSA ``[KV..., indexer...]``.
+
+    Returns:
+        The device shared by every tensor.
+
+    Raises:
+        ValueError: If the list is empty or tensors span multiple devices.
+    """
+    if not kv_caches:
+        raise ValueError("SGLang MP registration requires non-empty KV caches")
+    device = kv_caches[0].device
+    if any(tensor.device != device for tensor in kv_caches):
+        raise ValueError("SGLang MP KV caches must use one device")
     return device
 
 
 def _wrap_sglang_kv_caches(
-    k_pool: list[torch.Tensor],
-    v_pool: list[torch.Tensor],
+    kv_caches: list[torch.Tensor],
 ) -> KVCache:
-    """Flatten SGLang's depth-2 ``[K_layers, V_layers]`` KV layout into a
-    single flat ``KVCache`` so it fits upstream's wire
-    ``KVCache`` payload type. The daemon's
-    :func:`normalize_kv_and_discover_format` recognizes this shape from
-    ``EngineType.SGLANG`` plus a ``tokens_per_block`` ``LayoutHints`` field
-    and splits it back at its midpoint before format detection.
+    """Wrap a flat list of SGLang KV cache tensors for IPC transport.
+
+    The caller (``LMCacheMPConnector.__init__``) supplies a flat
+    ``list[torch.Tensor]`` whose layout depends on the attention type:
+
+    - **MHA**: ``[K_layers..., V_layers...]`` (depth-2 flattened).
+    - **MLA**: ``[KV_layers...]`` — one fused buffer per layer.
+    - **DSA**: ``[KV_layers..., indexer_layers...]`` — MLA latent
+      layers followed by DSA indexer layers.
+
+    The daemon's
+    :func:`normalize_and_discover_per_layer_formats` splits this flat
+    list by per-layer tensor shape and assigns each contiguous run of
+    same-shape layers to its own kernel group. The
+    ``engine_group_infos`` sent alongside ``REGISTER_KV_CACHE`` tells
+    the daemon how many groups to expect and which layers each covers.
 
     Raises:
-        ValueError: If the pools are empty, use different devices, or the
-            selected platform cannot provide the complete handle-transfer
-            path.
+        ValueError: If the list is empty or the selected platform
+            cannot provide the complete handle-transfer path.
     """
-    device = _validate_sglang_kv_pools(k_pool, v_pool)
-    tensors = [*k_pool, *v_pool]
+    device = _validate_sglang_kv_caches(kv_caches)
     device_spec = get_device_spec(device.type)
     if device_spec is None or not device_spec.is_handle_transfer_available():
         raise ValueError(
@@ -103,7 +134,7 @@ def _wrap_sglang_kv_caches(
             f"{device.type!r}: required memory IPC, event IPC, cache context, "
             "or block-transfer capabilities are missing"
         )
-    return [wrap_one_kv_cache(tensor) for tensor in tensors]
+    return [wrap_one_kv_cache(tensor) for tensor in kv_caches]
 
 
 def _completed_future(result: bool) -> MessagingFuture[bool]:
@@ -175,19 +206,23 @@ class LMCacheMPConnector:
         page_size: int,
         host: str,
         port: int,
-        k_pool: list[torch.Tensor],
-        v_pool: list[torch.Tensor],
+        kv_caches: list[torch.Tensor],
+        use_mla: bool = False,
+        kv_cache_dim: Optional[int] = None,
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
         mq_timeout: float = DEFAULT_MQ_TIMEOUT,
         heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
     ):
-        device = _validate_sglang_kv_pools(k_pool, v_pool)
         self.tp_size = tp_size
         self.worker_id = rank
         self.page_size = page_size
-        self.device = device
+        self.kvcaches = kv_caches
+        self.use_mla = use_mla
+        # Validate early so an empty list raises ValueError before
+        # we try to read a device or open a ZMQ socket.
+        self.device = _validate_sglang_kv_caches(kv_caches)
         self.model_name = sgl_config.model_path
-        self.num_layers = len(k_pool)
+        self.num_layers = sgl_config.num_hidden_layers
         self.tp_group = tp_group
         self.instance_id = os.getpid()
         self._mq_timeout = mq_timeout
@@ -198,6 +233,12 @@ class LMCacheMPConnector:
         self._health_event.set()
         self._pending_lookups: dict[str, _PendingLookup] = {}
         self._pending_lookups_lock = threading.Lock()
+
+        # Build engine_group_infos for the daemon. DSA has two kernel
+        # groups (MLA latent + DSA indexer) that share the same engine
+        # block-id address space (engine_group_id=0). MLA and MHA have
+        # a single group (empty list = server treats as one group).
+        self.engine_group_infos = self._build_engine_group_infos()
 
         self.context = zmq.Context.instance()
         self.mq_client = MessageQueueClient(f"tcp://{host}:{port}", self.context)
@@ -211,25 +252,22 @@ class LMCacheMPConnector:
 
         # Upstream's REGISTER_KV_CACHE protocol takes flat positional args:
         # (instance_id, kv_cache, model_name, world_size, engine_type,
-        # layout_hints, engine_group_infos). SGLang's natural KV layout is depth-2
-        # ([K_layers, V_layers]); we flatten it on the wire to fit
-        # ``KVCache = list[DeviceIPCWrapper]``. The daemon recognizes the
-        # SGLang-MHA flat-of-2NL pattern from ``EngineType.SGLANG`` plus the
-        # ``tokens_per_block`` hint and un-flattens + reshapes per layer.
-        # SGLang is non-hybrid (a single KV cache group), so engine_group_infos is the
-        # empty list -- which the server treats as one group spanning all layers
-        # (matching the vLLM non-hybrid and TensorRT-LLM register paths).
+        # layout_hints, engine_group_infos). The kv_caches list is wrapped
+        # into KVCache (list[DeviceIPCWrapper]) for IPC transport. The
+        # daemon's normalize_and_discover_per_layer_formats splits the flat
+        # list by per-layer tensor shape into kernel groups, and
+        # engine_group_infos tells it the layer boundaries.
         send_lmcache_request(
             self.mq_client,
             RequestType.REGISTER_KV_CACHE,
             [
                 self.instance_id,
-                _wrap_sglang_kv_caches(k_pool, v_pool),
+                _wrap_sglang_kv_caches(kv_caches),
                 self.model_name,
                 self.tp_size,
                 EngineType.SGLANG,
                 {"tokens_per_block": self.page_size},
-                [],
+                list(self.engine_group_infos),
             ],
         ).result(timeout=self._mq_timeout)
         self._registered = True
@@ -246,12 +284,54 @@ class LMCacheMPConnector:
         )
         self._heartbeat.start()
 
+    def _build_engine_group_infos(self) -> list[EngineGroupInfo]:
+        """Build ``EngineGroupInfo`` entries for the daemon.
+
+        DSA has two kernel groups (MLA latent layers + DSA indexer
+        layers) that share the same engine block-id address space
+        (``engine_group_id=0``) — both buffers are indexed by the same
+        ``slot_mapping`` and page table. MLA and MHA have a single group
+        (empty list — the server treats empty as one group spanning all
+        layers, matching the vLLM non-hybrid register path).
+        """
+        num_kv_tensors = len(self.kvcaches)
+        if self.use_mla and num_kv_tensors > self.num_layers:
+            # DSA: first num_layers tensors are MLA latent, the rest are
+            # DSA indexer layers. Both share engine_group_id=0 (same
+            # page address space).
+            return [
+                EngineGroupInfo(
+                    engine_group_id=0,
+                    layer_indices=tuple(range(self.num_layers)),
+                    tokens_per_block=self.page_size,
+                ),
+                EngineGroupInfo(
+                    engine_group_id=0,
+                    layer_indices=tuple(
+                        range(self.num_layers, num_kv_tensors)
+                    ),
+                    tokens_per_block=self.page_size,
+                ),
+            ]
+        return []
+
     @property
     def is_healthy(self) -> bool:
         return self._health_event.is_set()
 
     def chunk_size(self) -> int:
         return self._lmcache_chunk_size
+
+    def _daemon_rid(self, request_id: str) -> str:
+        """Return a daemon-side request_id unique per TP worker.
+
+        All TP workers share the same external ``request_id`` (from
+        ``req.rid``). The daemon's ``_prefetch_jobs`` dict is keyed by
+        request_id, so concurrent LOOKUPs from different workers for the
+        same request overwrite each other. Appending ``#worker_id``
+        makes the daemon-side key unique per worker.
+        """
+        return f"{request_id}#{self.worker_id}"
 
     @torch.no_grad()
     def _global_min_tokens(self, local_tokens: int) -> int:
@@ -374,7 +454,8 @@ class LMCacheMPConnector:
             stale = self._pending_lookups.pop(request_id, None)
         if stale is not None and stale.locks_held:
             self._free_lookup_locks(
-                stale.token_ids, 0, stale.matched_token_num, request_id
+                stale.token_ids, 0, stale.matched_token_num,
+                self._daemon_rid(request_id),
             )
 
         aligned_end = (len(token_ids) // self._lmcache_chunk_size) * (
@@ -383,11 +464,12 @@ class LMCacheMPConnector:
         if aligned_end == 0:
             return 0  # too few tokens; no chunk-aligned range to LOOKUP
 
+        daemon_rid = self._daemon_rid(request_id)
         lookup_key = self._create_key(
             token_ids,
             start=0,
             end=aligned_end,
-            request_id=request_id,
+            request_id=daemon_rid,
             no_worker_id=True,
         )
         send_lmcache_request(
@@ -395,7 +477,7 @@ class LMCacheMPConnector:
             RequestType.LOOKUP,
             [lookup_key, self.tp_size],
         ).result(timeout=self._mq_timeout)
-        matched = self._wait_for_lookup(request_id)
+        matched = self._wait_for_lookup(daemon_rid)
         matched = self._global_min_tokens(matched)
 
         # Daemon now holds read locks for the matched chunks. Record
@@ -422,7 +504,9 @@ class LMCacheMPConnector:
             token_ids = pending.token_ids
             matched = pending.matched_token_num
         if matched > 0:
-            self._free_lookup_locks(token_ids, 0, matched, request_id)
+            self._free_lookup_locks(
+                token_ids, 0, matched, self._daemon_rid(request_id),
+            )
 
     def end_session(self, request_id: str) -> None:
         """Tell the daemon we're done with this request_id.
@@ -444,9 +528,13 @@ class LMCacheMPConnector:
             return
         if pending.locks_held and pending.matched_token_num > 0:
             self._free_lookup_locks(
-                pending.token_ids, 0, pending.matched_token_num, request_id
+                pending.token_ids, 0, pending.matched_token_num,
+                self._daemon_rid(request_id),
             )
-        send_lmcache_request(self.mq_client, RequestType.END_SESSION, [request_id])
+        send_lmcache_request(
+            self.mq_client, RequestType.END_SESSION,
+            [self._daemon_rid(request_id)],
+        )
 
     def _submit_retrieve(
         self,
@@ -459,6 +547,12 @@ class LMCacheMPConnector:
     ) -> MessagingFuture[bool]:
         event = torch_dev.Event(interprocess=True)
         event.record(torch_dev.current_stream())
+        # RETRIEVE takes per-group block IDs (list[list[int]]). DSA has
+        # two kernel groups that share the same page address space, so
+        # both get the same block_ids. MLA/MHA has one group.
+        block_ids_per_group = expand_engine_block_ids(
+            self.engine_group_infos, [block_ids]
+        )
         future = send_lmcache_request(
             self.mq_client,
             RequestType.RETRIEVE,
@@ -470,9 +564,7 @@ class LMCacheMPConnector:
                     request_id=request_id,
                 ),
                 self.instance_id,
-                # RETRIEVE takes per-group block IDs (list[list[int]]); SGLang is
-                # non-hybrid, so wrap the flat list as a single group.
-                [block_ids],
+                block_ids_per_group,
                 event.ipc_handle(),
                 skip_prefix_n_blocks,
             ],
@@ -527,7 +619,7 @@ class LMCacheMPConnector:
         fresh_start = offset + prefix_pad
         prefix_pad_pages = prefix_pad // self.page_size
 
-        self._free_lookup_locks(token_ids, 0, offset, request_id)
+        self._free_lookup_locks(token_ids, 0, offset, self._daemon_rid(request_id))
         fresh_block_ids = self._slot_mapping_to_block_ids(
             load_metadata.slot_mapping[fresh_start:retrieve_token_num]
         )
@@ -541,7 +633,7 @@ class LMCacheMPConnector:
         retrieve_succeeded = False
         try:
             future = self._submit_retrieve(
-                request_id=request_id,
+                request_id=self._daemon_rid(request_id),
                 token_ids=token_ids,
                 offset=offset,
                 matched_end=retrieve_token_num,
@@ -556,7 +648,8 @@ class LMCacheMPConnector:
         finally:
             if not retrieve_succeeded:
                 self._free_lookup_locks(
-                    token_ids, offset, retrieve_token_num, request_id
+                    token_ids, offset, retrieve_token_num,
+                    self._daemon_rid(request_id),
                 )
             with self._pending_lookups_lock:
                 if request_id in self._pending_lookups:
@@ -608,6 +701,12 @@ class LMCacheMPConnector:
         )
         event = torch_dev.Event(interprocess=True)
         event.record(torch_dev.current_stream())
+        # STORE takes per-group block IDs (list[list[int]]). DSA has two
+        # kernel groups that share the same page address space, so both
+        # get the same block_ids. MLA/MHA has one group.
+        block_ids_per_group = expand_engine_block_ids(
+            self.engine_group_infos, [block_ids]
+        )
         future = send_lmcache_request(
             self.mq_client,
             RequestType.STORE,
@@ -616,12 +715,10 @@ class LMCacheMPConnector:
                     store_metadata.token_ids,
                     start=0,
                     end=aligned_end,
-                    request_id=request_id,
+                    request_id=self._daemon_rid(request_id),
                 ),
                 self.instance_id,
-                # STORE takes per-group block IDs (list[list[int]]); SGLang is
-                # non-hybrid, so wrap the flat list as a single group.
-                [block_ids],
+                block_ids_per_group,
                 event.ipc_handle(),
             ],
         ).to_device_future(device=self.device)
@@ -648,6 +745,12 @@ class LMCacheMPConnector:
         )
         event = torch_dev.Event(interprocess=True)
         event.record(torch_dev.current_stream())
+        # STORE takes per-group block IDs (list[list[int]]). DSA has two
+        # kernel groups that share the same page address space, so both
+        # get the same block_ids. MLA/MHA has one group.
+        block_ids_per_group = expand_engine_block_ids(
+            self.engine_group_infos, [block_ids]
+        )
         success = (
             send_lmcache_request(
                 self.mq_client,
@@ -657,12 +760,10 @@ class LMCacheMPConnector:
                         store_metadata.token_ids,
                         start=0,
                         end=aligned_end,
-                        request_id=request_id,
+                        request_id=self._daemon_rid(request_id),
                     ),
                     self.instance_id,
-                    # STORE takes per-group block IDs (list[list[int]]); SGLang is
-                    # non-hybrid, so wrap the flat list as a single group.
-                    [block_ids],
+                    block_ids_per_group,
                     event.ipc_handle(),
                 ],
             )

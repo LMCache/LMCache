@@ -845,6 +845,27 @@ def test_sglang_connector_with_gpu_and_mla(use_gpu, use_mla):
                 gpu_kv_src, gpu_kv_dst, slot_mapping, num_heads, head_size
             )
 
+    metadata = LMCacheMetadata(
+        model_name="test",
+        world_size=1,
+        local_world_size=1,
+        worker_id=0,
+        local_worker_id=0,
+        kv_dtype=dtype,
+        kv_shape=(num_layers, 1 if use_mla else 2, chunk_size, num_heads, head_size),
+        use_mla=use_mla,
+    )
+    metadata2 = LMCacheMetadata(
+        model_name="test",
+        world_size=1,
+        local_world_size=1,
+        worker_id=0,
+        local_worker_id=0,
+        kv_dtype=dtype,
+        kv_shape=(num_layers, 1 if use_mla else 2, chunk_size, num_heads, head_size),
+        use_mla=use_mla,
+    )
+
     connector = SGLangGPUConnector(
         hidden_dim,
         num_layers,
@@ -853,6 +874,8 @@ def test_sglang_connector_with_gpu_and_mla(use_gpu, use_mla):
         dtype=dtype,
         device=device,
         use_mla=use_mla,
+        metadata=metadata,
+        layout_hints={"tokens_per_block": block_size},
     )
     connector2 = SGLangGPUConnector(
         hidden_dim,
@@ -862,13 +885,16 @@ def test_sglang_connector_with_gpu_and_mla(use_gpu, use_mla):
         dtype=dtype,
         device=device,
         use_mla=use_mla,
+        metadata=metadata2,
+        layout_hints={"tokens_per_block": block_size},
     )
     assert connector.use_mla == use_mla
     assert connector2.use_mla == use_mla
     for start in range(0, num_tokens, chunk_size):
         end = min(start + chunk_size, num_tokens)
-        shape = connector.get_shape(end - start)
-        memory_obj = allocator.allocate(shape, gpu_kv_src[0][0].dtype)
+        memory_obj = allocator.allocate(
+            metadata.get_shapes(end - start), metadata.get_dtypes()
+        )
         connector.from_gpu(
             memory_obj,
             start,

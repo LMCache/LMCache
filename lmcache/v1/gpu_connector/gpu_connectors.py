@@ -519,7 +519,7 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         self.group_kv_cache_pointers_on_gpu = []
         for group in klg_manager.kernel_groups:
             ptrs = get_group_data_ptrs(
-                self.kvcaches, self.engine_kv_format, group.layer_indices
+                self.kvcaches, group.engine_kv_format, group.layer_indices
             )
             cpu = torch.empty(len(ptrs), dtype=torch.int64, device="cpu")
             cpu.numpy()[:] = ptrs
@@ -545,6 +545,7 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         assert self.kvcaches[0].device == self.device
         self._initialize_kv_cache_pointers()
         assert self.group_kv_cache_pointers_on_gpu is not None
+        klg_manager = self.metadata.kv_layer_groups_manager
 
         # avoid read/write stream race condition for shared block
         # this will only be potentially non-zero for the first
@@ -553,6 +554,7 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         skip_prefix_n_tokens = min(end - start, max(0, vllm_cached - start))
 
         for i, kv_cache_pointer in enumerate(self.group_kv_cache_pointers_on_gpu):
+            group = klg_manager.kernel_groups[i]
             memory_obj_tensor = memory_obj.get_tensor(i)
             assert memory_obj_tensor is not None
             device_ops.multi_layer_kv_transfer(
@@ -560,11 +562,11 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
                 kv_cache_pointer,
                 slot_mapping[start:end],
                 self.device,
-                self.page_buffer_size,
+                group.shape_desc.nb * group.shape_desc.bs,
                 lmcache_native.TransferDirection.H2D,
-                self.engine_kv_format,
-                block_size=self.block_size,
-                head_size=self.head_size,
+                group.engine_kv_format,
+                block_size=group.shape_desc.bs,
+                head_size=group.shape_desc.hs,
                 skip_prefix_n_tokens=skip_prefix_n_tokens,
             )
 
@@ -579,11 +581,13 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         assert self.kvcaches[0].device == self.device
         self._initialize_kv_cache_pointers()
         assert self.group_kv_cache_pointers_on_gpu is not None
+        klg_manager = self.metadata.kv_layer_groups_manager
         with torch.cuda.stream(self.store_stream):
             if not self.use_gpu or end - start != self.chunk_size:
                 for i, kv_cache_pointer in enumerate(
                     self.group_kv_cache_pointers_on_gpu
                 ):
+                    group = klg_manager.kernel_groups[i]
                     memory_obj_tensor = memory_obj.get_tensor(i)
                     assert memory_obj_tensor is not None
                     device_ops.multi_layer_kv_transfer(
@@ -591,11 +595,11 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
                         kv_cache_pointer,
                         slot_mapping[start:end],
                         self.device,
-                        self.page_buffer_size,
+                        group.shape_desc.nb * group.shape_desc.bs,
                         lmcache_native.TransferDirection.D2H,
-                        self.engine_kv_format,
-                        block_size=self.block_size,
-                        head_size=self.head_size,
+                        group.engine_kv_format,
+                        block_size=group.shape_desc.bs,
+                        head_size=group.shape_desc.hs,
                     )
             else:
                 # kvcaches -> gpu_buffer -> memobj
@@ -603,17 +607,18 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
                 for i, kv_cache_pointer in enumerate(
                     self.group_kv_cache_pointers_on_gpu
                 ):
+                    group = klg_manager.kernel_groups[i]
                     tmp_gpu_buffer = self.group_tmp_buffer[i][:, :, : end - start, :]
                     device_ops.multi_layer_kv_transfer(
                         tmp_gpu_buffer,
                         kv_cache_pointer,
                         slot_mapping[start:end],
                         self.device,
-                        self.page_buffer_size,
+                        group.shape_desc.nb * group.shape_desc.bs,
                         lmcache_native.TransferDirection.D2H,
-                        self.engine_kv_format,
-                        block_size=self.block_size,
-                        head_size=self.head_size,
+                        group.engine_kv_format,
+                        block_size=group.shape_desc.bs,
+                        head_size=group.shape_desc.hs,
                     )
                     memory_obj_tensor = memory_obj.get_tensor(i)
                     assert memory_obj_tensor is not None
@@ -1436,18 +1441,25 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
 
 
 class SGLangGPUConnector(GPUConnectorInterface):
-    """
-    The GPU KV cache should be a list of tensors, one for each layer,
-    with separate key and value pointers.
-    More specifically, we have:
-    - kvcaches: Tuple[List[Tensor], List[Tensor]]
-      - The first element is a list of key tensors, one per layer.
-      - The second element is a list of value tensors, one per layer.
-    - Each tensor: [page_buffer_size, head_num, head_size]
+    """SGLang GPU connector with per-layer-group transfer support.
 
-    The connector manages the transfer of KV cache data between CPU and GPU
-    memory for SGLang using pointer arrays for efficient access.
-    It will produce/consume memory objects with KV_2LTD format.
+    For MHA models the KV cache is a flat ``list[2*NL]`` of per-layer
+    tensors (K layers then V layers), each ``[page_buffer_size, num_heads,
+    head_size]``.  The connector discovers a single format and transfers
+    all layers in one kernel launch.
+
+    For MLA/DSA models the KV cache is a flat ``list[NL]`` (MLA) or
+    ``list[2*NL]`` (DSA: NL latent layers + NL indexer layers).  The
+    connector uses :func:`normalize_and_discover_per_layer_formats` to
+    split the list into kernel groups by tensor identity, builds a
+    :class:`KVLayerGroupsManager`, and dispatches one
+    ``multi_layer_kv_transfer`` per group — each with its own
+    ``engine_kv_format``, ``page_buffer_size``, ``block_size`` and
+    ``head_size`` from the group's ``PageBufferShapeDesc``.
+
+    Memory objects are multi-group: ``metadata.get_shapes()`` returns one
+    shape per group, and ``memory_obj.get_tensor(i)`` slices the flat
+    buffer into a per-group view via ``group_prefix_sum``.
     """
 
     def __init__(
@@ -1456,75 +1468,174 @@ class SGLangGPUConnector(GPUConnectorInterface):
         self.hidden_dim_size = hidden_dim_size
         self.num_layers = num_layers
 
-        self.kv_cache_pointers_on_gpu: dict[int, torch.Tensor] = {}
-        self.page_buffer_size = 0
-
-        self.gpu_buffer: Optional[torch.Tensor] = None
         self.use_mla = "use_mla" in kwargs and kwargs["use_mla"]
+        self.metadata: Optional[LMCacheMetadata] = kwargs.get("metadata", None)
+        self.layout_hints: LayoutHints = kwargs.get("layout_hints", None) or {}
 
-        self.num_kv_cache = num_layers if self.use_mla else num_layers * 2
-        self.kv_cache_pointers = torch.empty(
-            self.num_kv_cache, dtype=torch.int64, device="cpu"
-        )
+        # Per-group GPU pointer tensors, built lazily in _initialize_pointers.
+        self.group_kv_cache_pointers_on_gpu: list[torch.Tensor] = []
+        self._layer_groups_initialized = False
+        # Legacy single-pointer dict kept for backward-compatible callers.
+        self.kv_cache_pointers_on_gpu: dict[int, torch.Tensor] = {}
 
-        if use_gpu:
-            assert "chunk_size" in kwargs, (
-                "chunk_size should be provided to create a GPU buffer."
-            )
-            assert "device" in kwargs, (
-                "device should be provided to create a GPU buffer."
-            )
+        self.use_gpu = use_gpu
+        self.chunk_size: Optional[int] = kwargs.get("chunk_size", None)
+
+        # MHA (single group): allocate the legacy single GPU staging buffer
+        # at construction time.  MLA/DSA (multi-group): per-group staging
+        # buffers are allocated lazily in _initialize_pointers after the
+        # layer-groups manager is built, because the per-group shapes and
+        # dtypes are not known until then.
+        self.gpu_buffer: Optional[torch.Tensor] = None
+        self.group_tmp_buffer: Optional[list[torch.Tensor]] = None
+        if use_gpu and not self.use_mla:
+            if "chunk_size" not in kwargs:
+                raise ValueError(
+                    "chunk_size should be provided to create a GPU buffer."
+                )
+            if "device" not in kwargs:
+                raise ValueError(
+                    "device should be provided to create a GPU buffer."
+                )
             shape = self.get_shape(kwargs["chunk_size"])
             self.gpu_buffer = torch.empty(
                 shape, dtype=kwargs["dtype"], device=kwargs["device"]
             )
             logger.info("GPU buffer: %s", self.gpu_buffer.shape)
 
-    def _initialize_pointers(self, kv_caches: DiscoverableKVCache) -> torch.Tensor:
-        self.engine_kv_format, kv_caches = normalize_kv_and_discover_format(
-            kv_caches, EngineType.SGLANG
+        # CUDA stream isolation: store_stream for D2H (from_gpu), load_stream
+        # for H2D (batched_to_gpu).  Keeps transfers from serializing with
+        # compute on the default stream, mirroring V2/V3 connectors.
+        self.store_stream = torch.cuda.Stream()
+        self.load_stream = torch.cuda.Stream()
+
+        self.kvcaches: Optional[List[torch.Tensor]] = None
+
+    def _initialize_pointers(self, kv_caches: DiscoverableKVCache) -> list[torch.Tensor]:
+        """Discover per-layer formats, build the layer-groups manager, and
+        capture per-group GPU pointer tensors.
+
+        For MHA (single group) this is equivalent to the legacy single-format
+        path.  For MLA/DSA the flat ``kv_caches`` list is split into one or
+        two kernel groups by :func:`normalize_and_discover_per_layer_formats`
+        — DSA's indexer tensors (uint8, last-dim 132) have a different
+        identity from the MLA latent tensors and naturally form their own
+        group.
+
+        Like ``VLLMPagedMemGPUConnectorV3``, this connector dispatches each
+        group with its own ``group.engine_kv_format``.  The difference is
+        that this connector also builds ``engine_group_infos`` from the
+        detected formats and passes them to ``KVLayerGroupsManager`` so that
+        fused formats (``NL_X_NBBS_ONE_HS``) whose ``block_size()`` is
+        undefined can fall back to ``tokens_per_block`` from the layout
+        hints — V3 omits ``engine_group_infos`` because vLLM does not use
+        SGLang's fused PBS layout.
+        """
+        if self._layer_groups_initialized:
+            return self.group_kv_cache_pointers_on_gpu
+
+        empty_layer_index_groups: list[list[int]] = []
+        kv_caches, engine_kv_formats = normalize_and_discover_per_layer_formats(
+            kv_caches, empty_layer_index_groups, EngineType.SGLANG, self.layout_hints
         )
-        num_layers = get_num_layers(kv_caches, self.engine_kv_format)
-        # SGLang registers every layer as one group; pass all indices in order.
-        ptrs = get_group_data_ptrs(
-            kv_caches, self.engine_kv_format, list(range(num_layers))
-        )
-        assert len(ptrs) == self.num_kv_cache, (
-            f"Expected {self.num_kv_cache} KV cache pointers, got {len(ptrs)}"
-        )
-        self.kv_cache_pointers.numpy()[:] = ptrs
+
+        # Build engine_group_infos from detected formats so that
+        # KVLayerGroupsManager can fall back to tokens_per_block for
+        # fused formats (NL_X_NBBS_ONE_HS) whose block_size() is undefined.
+        # One EngineGroupInfo per distinct format — this matches the kernel
+        # group split because engine_kv_format is part of LayerGroupIdentity.
+        # First Party
+        from lmcache.v1.multiprocess.group_view import EngineGroupInfo
+
+        tokens_per_block = self.layout_hints.get("tokens_per_block", 0)
+        if tokens_per_block:
+            format_to_layers: dict[lmcache_native.EngineKVFormat, list[int]] = {}
+            for idx, fmt in enumerate(engine_kv_formats):
+                format_to_layers.setdefault(fmt, []).append(idx)
+            engine_group_infos: list[EngineGroupInfo] = [
+                EngineGroupInfo(
+                    engine_group_id=0,
+                    layer_indices=tuple(indices),
+                    tokens_per_block=tokens_per_block,
+                )
+                for indices in format_to_layers.values()
+            ]
+        else:
+            engine_group_infos = []
+
+        if self.metadata is not None and self.metadata.kv_layer_groups_manager is None:
+            self.metadata.kv_layer_groups_manager = KVLayerGroupsManager(
+                kv_caches,
+                engine_kv_formats=engine_kv_formats,
+                engine_group_infos=engine_group_infos,
+            )
+        klg_manager = self.metadata.kv_layer_groups_manager if self.metadata is not None else None
+        if klg_manager is None:
+            raise RuntimeError(
+                "SGLangGPUConnector requires metadata with a KVLayerGroupsManager"
+            )
 
         device = get_device(kv_caches)
-        assert device.type == "cuda", "The device should be CUDA."
-        idx = device.index
-        if idx not in self.kv_cache_pointers_on_gpu:
-            self.kv_cache_pointers_on_gpu[idx] = torch.empty(
-                self.num_kv_cache, dtype=torch.int64, device=device
+        if device.type != "cuda":
+            raise ValueError(
+                f"SGLangGPUConnector requires a CUDA device, got {device.type}."
             )
-        self.kv_cache_pointers_on_gpu[idx].copy_(self.kv_cache_pointers)
 
-        self.page_buffer_size = get_page_buffer_size(kv_caches, self.engine_kv_format)
-        return self.kv_cache_pointers_on_gpu[idx]
+        # Allocate per-group GPU staging buffers for MLA/DSA (multi-group).
+        # MHA uses the legacy single self.gpu_buffer allocated in __init__.
+        if self.use_gpu and self.use_mla and self.group_tmp_buffer is None:
+            tmp_buf_shapes = self.metadata.get_shapes(self.chunk_size)
+            tmp_buf_dtypes = self.metadata.get_dtypes()
+            if len(tmp_buf_shapes) != len(tmp_buf_dtypes):
+                raise ValueError(
+                    f"Shape count ({len(tmp_buf_shapes)}) != dtype count "
+                    f"({len(tmp_buf_dtypes)}) from metadata."
+                )
+            self.group_tmp_buffer = [
+                torch.empty(shape, dtype=dtype, device=device)
+                for shape, dtype in zip(tmp_buf_shapes, tmp_buf_dtypes, strict=True)
+            ]
+
+        self.group_kv_cache_pointers_on_gpu = []
+        for group in klg_manager.kernel_groups:
+            ptrs = get_group_data_ptrs(
+                kv_caches, group.engine_kv_format, group.layer_indices
+            )
+            cpu = torch.empty(len(ptrs), dtype=torch.int64, device="cpu")
+            cpu.numpy()[:] = ptrs
+            gpu = torch.empty(len(ptrs), dtype=torch.int64, device=device)
+            gpu.copy_(cpu)
+            self.group_kv_cache_pointers_on_gpu.append(gpu)
+
+        # Keep the legacy dict populated for any caller that still reads it.
+        self.kv_cache_pointers_on_gpu[device.index] = (
+            self.group_kv_cache_pointers_on_gpu[0]
+        )
+
+        self._layer_groups_initialized = True
+        logger.debug(
+            "SGLangGPUConnector initialized %d layer group(s): %s",
+            len(klg_manager.kernel_groups),
+            [g.engine_kv_format for g in klg_manager.kernel_groups],
+        )
+        return self.group_kv_cache_pointers_on_gpu
 
     @_lmcache_nvtx_annotate
     def to_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
-        """Expect a kwarg 'kvcaches' which is a nested tuple of K and V tensors.
-        The kvcaches should correspond to the "WHOLE token sequence".
+        """Transfer a memory object from CPU to GPU KV cache slots.
 
-        Note:
-          1. This function expects the 'slot_mapping' is a "partial slot mapping"
-             where its length is the same as the uncached token sequence.
-          2. In the case that there is prefix caching, slot_mapping will starts
-             with -1s until the end of the matched prefix. The start and end
-             should NEVER overlap with the prefix caching (which means the
-             underlying CUDA kernel will never see -1 in slot_mapping)
+        For MLA/DSA the memory object is multi-group (``meta.shapes`` is a
+        list); each group is dispatched with its own ``engine_kv_format``,
+        ``page_buffer_size``, ``block_size`` and ``head_size`` derived from
+        the group's ``shape_desc``.  For MHA the single-group path is
+        equivalent to the legacy ``multi_layer_kv_transfer_unilateral`` call.
 
-
-        :raises ValueError: If 'kvcaches' is not provided in kwargs.
-        :raises AssertionError: If the memory object does not have a tensor.
-        :raises ValueError: If 'slot_mapping' is not provided in kwargs.
+        :raises ValueError: If 'kvcaches' or 'slot_mapping' is missing.
+        :raises ValueError: If the memory object format does not match the
+            connector's MLA/MHA mode.
         """
-        assert memory_obj.tensor is not None
+        if memory_obj.raw_tensor is None:
+            raise ValueError("Memory object has no raw tensor.")
 
         if self.use_mla:
             if memory_obj.metadata.fmt != MemoryFormat.KV_MLA_FMT:
@@ -1541,99 +1652,178 @@ class SGLangGPUConnector(GPUConnectorInterface):
 
         if "kvcaches" not in kwargs:
             raise ValueError("'kvcaches' should be provided in kwargs.")
-
         if "slot_mapping" not in kwargs:
             raise ValueError("'slot_mapping' should be provided in kwargs.")
 
         offset = kwargs.get("offset", 0)
-
         kvcaches: DiscoverableKVCache = kwargs["kvcaches"]
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
 
-        kv_cache_pointers = self._initialize_pointers(kvcaches)
-        device_ops.multi_layer_kv_transfer_unilateral(
-            memory_obj.tensor,
-            kv_cache_pointers,
-            slot_mapping[start - offset : end - offset],
-            get_device(kvcaches),
-            self.page_buffer_size,
-            lmcache_native.TransferDirection.H2D,
-            self.engine_kv_format,
-        )
+        self.initialize_kvcaches_ptr(**kwargs)
+        group_pointers = self._initialize_pointers(self.kvcaches)
+        klg_manager = self.metadata.kv_layer_groups_manager
+        device = get_device(kvcaches)
+
+        for i, group in enumerate(klg_manager.kernel_groups):
+            group_tensor = memory_obj.get_tensor(i)
+            if group_tensor is None:
+                raise ValueError(
+                    f"Memory object has no tensor for group {i} of "
+                    f"{len(klg_manager.kernel_groups)} groups."
+                )
+            page_buffer_size = group.shape_desc.nb * group.shape_desc.bs
+            if lmcache_native.is_mla(group.engine_kv_format):
+                # MLA/DSA: layer-list formats handled by multi_layer_kv_transfer
+                device_ops.multi_layer_kv_transfer(
+                    group_tensor,
+                    group_pointers[i],
+                    slot_mapping[start - offset : end - offset],
+                    device,
+                    page_buffer_size,
+                    lmcache_native.TransferDirection.H2D,
+                    group.engine_kv_format,
+                    block_size=group.shape_desc.bs,
+                    head_size=group.shape_desc.hs,
+                )
+            else:
+                # MHA: K/V-split (KV-list) formats handled by unilateral
+                device_ops.multi_layer_kv_transfer_unilateral(
+                    group_tensor,
+                    group_pointers[i],
+                    slot_mapping[start - offset : end - offset],
+                    device,
+                    page_buffer_size,
+                    lmcache_native.TransferDirection.H2D,
+                    group.engine_kv_format,
+                )
 
     @_lmcache_nvtx_annotate
     def from_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
-        """Expect a kwarg 'kvcaches' which is a nested tuple of K and V tensors.
-        The kvcaches should correspond to the "WHOLE token sequence".
+        """Transfer KV cache from GPU slots into the memory object.
 
-        Will set the memory_obj.metadata.fmt to MemoryFormat.KV_2LTD.
+        For MLA/DSA each group is dispatched with its own format and geometry.
+        When ``use_gpu`` is True and the transfer size matches ``chunk_size``,
+        a per-group GPU staging buffer (``group_tmp_buffer``) is used as an
+        intermediate stop to keep the D2H copy off the default stream.  For
+        MHA the legacy single ``gpu_buffer`` is used instead.
 
-        Note:
-          1. This function expects the 'slot_mapping' is a "partial slot mapping"
-             where its length is the same as the uncached token sequence.
-          2. In the case that there is prefix caching, slot_mapping will starts
-             with -1s until the end of the matched prefix. The start and end
-             should NEVER overlap with the prefix caching (which means the
-             underlying CUDA kernel will never see -1 in slot_mapping)
-
-        :raises ValueError: If 'kvcaches' is not provided in kwargs,
-        :raises AssertionError: If the memory object does not have a tensor.
-        :raises ValueError: If 'slot_mapping' is not provided in kwargs.
+        :raises ValueError: If 'kvcaches' or 'slot_mapping' is missing.
         """
-        assert memory_obj.tensor is not None
+        if memory_obj.raw_tensor is None:
+            raise ValueError("Memory object has no raw tensor.")
 
         if "kvcaches" not in kwargs:
             raise ValueError("'kvcaches' should be provided in kwargs.")
-
         if "slot_mapping" not in kwargs:
             raise ValueError("'slot_mapping' should be provided in kwargs.")
 
         kvcaches: DiscoverableKVCache = kwargs["kvcaches"]
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
 
-        kv_cache_pointers = self._initialize_pointers(kvcaches)
+        self.initialize_kvcaches_ptr(**kwargs)
+        group_pointers = self._initialize_pointers(self.kvcaches)
+        klg_manager = self.metadata.kv_layer_groups_manager
+        device = get_device(kvcaches)
 
-        if self.gpu_buffer is None or end - start != self.gpu_buffer.shape[2]:
-            device_ops.multi_layer_kv_transfer_unilateral(
-                memory_obj.tensor,
-                kv_cache_pointers,
-                slot_mapping[start:end],
-                get_device(kvcaches),
-                self.page_buffer_size,
-                lmcache_native.TransferDirection.D2H,
-                self.engine_kv_format,
-            )
-        else:
-            # kvcaches -> gpu_buffer -> memobj
-            assert self.gpu_buffer.device == get_device(kvcaches)
-            tmp_gpu_buffer = self.gpu_buffer[:, :, : end - start, :]
-            device_ops.multi_layer_kv_transfer_unilateral(
-                tmp_gpu_buffer,
-                kv_cache_pointers,
-                slot_mapping[start:end],
-                get_device(kvcaches),
-                self.page_buffer_size,
-                lmcache_native.TransferDirection.D2H,
-                self.engine_kv_format,
-            )
-            memory_obj.tensor.copy_(tmp_gpu_buffer, non_blocking=True)
+        with torch.cuda.stream(self.store_stream):
+            for i, group in enumerate(klg_manager.kernel_groups):
+                group_tensor = memory_obj.get_tensor(i)
+                if group_tensor is None:
+                    raise ValueError(
+                        f"Memory object has no tensor for group {i} of "
+                        f"{len(klg_manager.kernel_groups)} groups."
+                    )
+                page_buffer_size = group.shape_desc.nb * group.shape_desc.bs
 
-        if not memory_obj.tensor.is_cuda:
+                if (
+                    self.use_mla
+                    and self.use_gpu
+                    and self.group_tmp_buffer is not None
+                    and end - start == self.chunk_size
+                ):
+                    # MLA/DSA: per-group staging buffer (full chunks only).
+                    # Partial chunks would slice a non-contiguous view from
+                    # the chunk_size-sized buffer, corrupting the transfer.
+                    tmp = self.group_tmp_buffer[i][:, :, : end - start, :]
+                    device_ops.multi_layer_kv_transfer(
+                        tmp,
+                        group_pointers[i],
+                        slot_mapping[start:end],
+                        device,
+                        page_buffer_size,
+                        lmcache_native.TransferDirection.D2H,
+                        group.engine_kv_format,
+                        block_size=group.shape_desc.bs,
+                        head_size=group.shape_desc.hs,
+                    )
+                    group_tensor.copy_(tmp, non_blocking=True)
+                elif (
+                    not self.use_mla
+                    and self.gpu_buffer is not None
+                    and end - start == self.gpu_buffer.shape[2]
+                ):
+                    # MHA: single legacy staging buffer (full chunks only)
+                    if self.gpu_buffer.device != device:
+                        raise ValueError(
+                            f"GPU buffer device {self.gpu_buffer.device} "
+                            f"!= transfer device {device}."
+                        )
+                    tmp_gpu_buffer = self.gpu_buffer[:, :, : end - start, :]
+                    device_ops.multi_layer_kv_transfer_unilateral(
+                        tmp_gpu_buffer,
+                        group_pointers[i],
+                        slot_mapping[start:end],
+                        device,
+                        page_buffer_size,
+                        lmcache_native.TransferDirection.D2H,
+                        group.engine_kv_format,
+                    )
+                    group_tensor.copy_(tmp_gpu_buffer, non_blocking=True)
+                elif lmcache_native.is_mla(group.engine_kv_format):
+                    # MLA/DSA direct transfer (partial chunks or no GPU buffer)
+                    device_ops.multi_layer_kv_transfer(
+                        group_tensor,
+                        group_pointers[i],
+                        slot_mapping[start:end],
+                        device,
+                        page_buffer_size,
+                        lmcache_native.TransferDirection.D2H,
+                        group.engine_kv_format,
+                        block_size=group.shape_desc.bs,
+                        head_size=group.shape_desc.hs,
+                    )
+                else:
+                    # MHA direct transfer (partial chunks or no GPU buffer)
+                    device_ops.multi_layer_kv_transfer_unilateral(
+                        group_tensor,
+                        group_pointers[i],
+                        slot_mapping[start:end],
+                        device,
+                        page_buffer_size,
+                        lmcache_native.TransferDirection.D2H,
+                        group.engine_kv_format,
+                    )
+
+        if not memory_obj.raw_tensor.is_cuda:
             # Force a synchronize if the target buffer is NOT CUDA device
             # NOTE: for better performance, we may not want to sync for every
             # memory object
-            torch.cuda.synchronize()
+            self.store_stream.synchronize()
 
         if self.use_mla:
             memory_obj.metadata.fmt = MemoryFormat.KV_MLA_FMT
 
     def get_shape(self, num_tokens: int) -> torch.Size:
+        if self.use_mla:
+            return torch.Size([1, self.num_layers, num_tokens, self.hidden_dim_size])
         return torch.Size([2, self.num_layers, num_tokens, self.hidden_dim_size])
 
     # TODO(Jiayi): need to optimize to enable real batching
     def batched_to_gpu(self, memory_objs, starts, ends, **kwargs):
-        for memory_obj, start, end in zip(memory_objs, starts, ends, strict=False):
-            self.to_gpu(memory_obj, start, end, **kwargs)
+        with torch.cuda.stream(self.load_stream):
+            for memory_obj, start, end in zip(memory_objs, starts, ends, strict=False):
+                self.to_gpu(memory_obj, start, end, **kwargs)
+        self.load_stream.synchronize()
 
     # TODO(Yuwei): need to optimize to enable real batching
     def batched_from_gpu(self, memory_objs, starts, ends, **kwargs):
@@ -1641,9 +1831,21 @@ class SGLangGPUConnector(GPUConnectorInterface):
             self.from_gpu(memory_obj, start, end, **kwargs)
 
 
-# TODO: support MLA
 class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
-    """
+    """Layerwise GPU connector for SGLang MHA models.
+
+    .. warning::
+
+        This connector does **not** support MLA/DSA models.
+        :func:`CreateGPUConnector` rejects ``use_layerwise=True`` when
+        ``metadata.use_mla`` is set, and ``lmc_radix_cache.py`` forces
+        MP mode for MLA/DSA.  The layerwise ``store_layer`` /
+        ``retrieve_layer`` path in ``cache_engine.py`` iterates
+        ``for layer_id in range(self.num_layers)`` with a single uniform
+        shape from ``gpu_connector.get_shape()`` — it has no awareness of
+        layer groups, which is incompatible with MLA's fused single-buffer
+        layout and DSA's dual-buffer layout.
+
     The GPU KV cache should be a list of tensors, one for each layer,
     with separate key and value pointers.
     More specifically, we have:
@@ -1660,9 +1862,11 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
     def __init__(
         self, hidden_dim_size: int, num_layers: int, use_gpu: bool = False, **kwargs
     ):
-        assert "dtype" in kwargs, "dtype should be provided to create a GPU buffer."
+        if "dtype" not in kwargs:
+            raise ValueError("dtype should be provided to create a GPU buffer.")
         self.dtype = kwargs["dtype"]
-        assert "device" in kwargs, "device should be provided to create a GPU buffer."
+        if "device" not in kwargs:
+            raise ValueError("device should be provided to create a GPU buffer.")
         self.device = kwargs["device"]
 
         self.hidden_dim_size = hidden_dim_size
@@ -1936,7 +2140,7 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
         yield
 
     def get_shape(self, num_tokens: int) -> torch.Size:
-        # TODO: support MLA
+        # MLA/DSA is not supported in the layerwise path — see class docstring.
         return torch.Size([num_tokens, 2, self.hidden_dim_size])
 
 
