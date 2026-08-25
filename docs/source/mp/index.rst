@@ -28,6 +28,19 @@ Key Benefits
 - **Built-in observability** -- Prometheus metrics and a telemetry event system
   out of the box.
 
+Server Restart Recovery
+-----------------------
+
+The vLLM MP worker records a per-process boot token returned by the LMCache
+server. If a later heartbeat observes a different token, the worker pauses cache
+operations, re-registers its KV cache handles, and then resumes. Detection can
+take up to one ``lmcache.mp.heartbeat_interval`` (10 seconds by default).
+
+Re-registration restores connectivity to the new server process. It does not
+restore cache entries that existed only in the old server's L1 memory; those
+entries are rebuilt by later inference requests. See
+:doc:`configuration` for the heartbeat setting.
+
 Prerequisites
 -------------
 
@@ -235,7 +248,7 @@ Communication between vLLM and LMCache uses ZMQ (DEALER/ROUTER pattern).
      - Return the server's chunk size.
    * - ``PING``
      - BLOCKING
-     - Liveness ping; the handler always returns ``True``.
+     - Liveness ping; returns a per-process boot token used to detect server restarts.
    * - ``REPORT_BLOCK_ALLOCATION``
      - BLOCKING
      - Fire-and-forget channel for the vLLM scheduler to report GPU block

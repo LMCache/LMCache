@@ -48,6 +48,7 @@ class FakeHeartbeatThread:
         health_event: threading.Event | None = None,
         interval: float = 0.0,
         instance_id: int | None = None,
+        initial_server_boot_token: int | None = None,
     ) -> None:
         self.mq_client = mq_client
         self.health_event = (
@@ -55,6 +56,9 @@ class FakeHeartbeatThread:
         )
         self.interval = interval
         self.instance_id = instance_id
+        self.server_boot_token = initial_server_boot_token
+        self.initial_check_complete = threading.Event()
+        self.wait_started = threading.Event()
         # Snapshot of the health event at construction time: lets tests
         # assert the adapter starts the heartbeat healthy (event still set).
         self.health_event_set_at_init = self.health_event.is_set()
@@ -80,17 +84,33 @@ class FakeHeartbeatThread:
     def stop(self, timeout: float = 5.0) -> None:
         self.calls.append("stop")
         self.stop_requested = True
+        self.initial_check_complete.set()
 
-    def simulate_successful_ping(self) -> None:
-        """Mimic one successful heartbeat cycle: on the unhealthy->healthy
-        edge the recover callback runs first, and the event is set only
-        when the callback returns ``True``."""
+    def wait_for_initial_check(self, timeout: float | None = None) -> bool:
+        self.calls.append("wait_for_initial_check")
+        self.wait_started.set()
+        return self.initial_check_complete.wait(timeout=timeout)
+
+    def simulate_failed_ping(self) -> None:
+        """Mimic one failed heartbeat cycle and complete the first check."""
+        self.health_event.clear()
+        self.initial_check_complete.set()
+
+    def simulate_successful_ping(self, server_boot_token: int | None = None) -> None:
+        """Mimic one successful heartbeat cycle and restart detection."""
+        token = server_boot_token or self.server_boot_token or 1
         was_healthy = self.health_event.is_set()
+        server_restarted = (
+            self.server_boot_token is not None and token != self.server_boot_token
+        )
         ok = True
-        if not was_healthy and self.recover_callback is not None:
+        if (not was_healthy or server_restarted) and self.recover_callback is not None:
+            self.health_event.clear()
             ok = self.recover_callback()
         if ok:
+            self.server_boot_token = token
             self.health_event.set()
+        self.initial_check_complete.set()
 
 
 def _make_worker_adapter(
@@ -154,6 +174,7 @@ def fake_adapter(monkeypatch):
     monkeypatch.setattr(adapter_mod, "MessageQueueClient", lambda *a, **kw: fake_client)
     monkeypatch.setattr(adapter_mod, "get_lmcache_chunk_size", lambda *a, **kw: 256)
     monkeypatch.setattr(adapter_mod, "get_experimental", lambda *a, **kw: set())
+    monkeypatch.setattr(adapter_mod, "send_ping", lambda *a, **kw: 101)
 
     future = MagicMock(name="future")
     future.result.return_value = None
@@ -518,7 +539,11 @@ def test_heartbeat_lazy_start_wires_callback_before_start(fake_adapter) -> None:
     # the first store is not dropped.
     assert heartbeat.health_event_set_at_init is True
     # The recover callback is wired before start() (for genuine recovery).
-    assert heartbeat.calls == ["register_recover_callback", "start"]
+    assert heartbeat.calls == [
+        "register_recover_callback",
+        "start",
+        "wait_for_initial_check",
+    ]
     assert adapter.is_healthy
     assert adapter.transfer_ctx.submit_store.call_count == 1
 
@@ -526,6 +551,59 @@ def test_heartbeat_lazy_start_wires_callback_before_start(fake_adapter) -> None:
     adapter.submit_store_request("req-2", _op([[1]]), MagicMock())
     assert len(FakeHeartbeatThread.instances) == 1
     assert adapter.transfer_ctx.submit_store.call_count == 2
+
+
+def test_first_store_recovers_restart_before_heartbeat(
+    fake_adapter, monkeypatch
+) -> None:
+    """A restart after registration is repaired before the first store."""
+    adapter, send_mock, _ = fake_adapter
+    contexts = _patch_transfer_context_factory(monkeypatch)
+    fake_tensor = MagicMock()
+    fake_tensor.device.type = "cuda"
+    adapter.register_kv_caches({"layer.0": fake_tensor})
+
+    FakeHeartbeatThread.start_hook = lambda heartbeat: (
+        heartbeat.simulate_successful_ping(202)
+    )
+    adapter.submit_store_request("req-1", _op([[0]]), MagicMock())
+
+    assert send_mock.call_args_list == []
+    assert len(contexts) == 2
+    contexts[0].register.assert_called_once()
+    contexts[1].register.assert_called_once()
+    contexts[-1].submit_store.assert_called_once()
+
+
+def test_first_store_waits_for_initial_heartbeat(fake_adapter) -> None:
+    """The first cache operation waits until the initial PING completes."""
+    adapter, _send_mock, _ = fake_adapter
+    transfer_ctx = MagicMock()
+    adapter.transfer_ctx = transfer_ctx
+    FakeHeartbeatThread.start_hook = lambda heartbeat: None
+    errors: list[BaseException] = []
+
+    def submit_store() -> None:
+        try:
+            adapter.submit_store_request("req-1", _op([[0]]), MagicMock())
+        except BaseException as error:
+            errors.append(error)
+
+    submit_thread = threading.Thread(target=submit_store)
+    submit_thread.start()
+    deadline = time.time() + 10.0
+    while not FakeHeartbeatThread.instances and time.time() < deadline:
+        time.sleep(0.01)
+    heartbeat = FakeHeartbeatThread.instances[0]
+    assert heartbeat.wait_started.wait(timeout=10.0)
+    transfer_ctx.submit_store.assert_not_called()
+
+    heartbeat.simulate_successful_ping(101)
+    submit_thread.join(timeout=10.0)
+
+    assert not submit_thread.is_alive()
+    assert errors == []
+    transfer_ctx.submit_store.assert_called_once()
 
 
 def test_heartbeat_first_ping_runs_callback_before_setting_event(
@@ -559,6 +637,79 @@ def test_heartbeat_first_ping_runs_callback_before_setting_event(
     assert event_state_during_callback == [False]
 
 
+def test_heartbeat_detects_server_restart_without_failed_ping(
+    monkeypatch,
+) -> None:
+    """A changed boot token triggers recovery even when both pings succeed."""
+    boot_tokens = iter([202])
+    monkeypatch.setattr(
+        adapter_mod,
+        "send_ping",
+        lambda mq_client, timeout, instance_id=None: next(boot_tokens),
+    )
+    health_event = threading.Event()
+    health_event.set()
+    heartbeat = HeartbeatThread(
+        mq_client=MagicMock(name="mq_client"),
+        health_event=health_event,
+        interval=60.0,
+        initial_server_boot_token=101,
+    )
+    event_state_during_callback: list[bool] = []
+
+    def recover() -> bool:
+        event_state_during_callback.append(health_event.is_set())
+        return True
+
+    heartbeat.register_recover_callback(recover)
+    try:
+        heartbeat.start()
+        assert heartbeat.wait_for_initial_check(timeout=10.0)
+    finally:
+        heartbeat.stop(timeout=10.0)
+
+    assert event_state_during_callback == [False]
+    assert health_event.is_set()
+
+
+def test_heartbeat_retries_restart_recovery_until_success(
+    monkeypatch,
+) -> None:
+    """A failed restart recovery keeps the worker unhealthy and retries."""
+    boot_tokens = iter([202, 202])
+    monkeypatch.setattr(
+        adapter_mod,
+        "send_ping",
+        lambda mq_client, timeout, instance_id=None: next(boot_tokens),
+    )
+    health_event = threading.Event()
+    health_event.set()
+    heartbeat = HeartbeatThread(
+        mq_client=MagicMock(name="mq_client"),
+        health_event=health_event,
+        interval=60.0,
+        initial_server_boot_token=101,
+    )
+    recover = MagicMock(side_effect=[False, True])
+    heartbeat.register_recover_callback(recover)
+    try:
+        heartbeat.start()
+        assert heartbeat.wait_for_initial_check(timeout=10.0)
+        assert not health_event.is_set()
+        assert recover.call_count == 1
+
+        heartbeat.wake()
+        deadline = time.time() + 10.0
+        while heartbeat.total_runs < 2 and time.time() < deadline:
+            time.sleep(0.01)
+        assert heartbeat.total_runs == 2
+    finally:
+        heartbeat.stop(timeout=10.0)
+
+    assert recover.call_count == 2
+    assert health_event.is_set()
+
+
 def test_dropped_retrieve_reported_once_via_unhealthy_get_finished(
     fake_adapter,
 ) -> None:
@@ -569,7 +720,7 @@ def test_dropped_retrieve_reported_once_via_unhealthy_get_finished(
     transfer_ctx = MagicMock()
     adapter.transfer_ctx = transfer_ctx
     # Simulate a failed first ping: the heartbeat start clears the event.
-    FakeHeartbeatThread.start_hook = lambda hb: hb.health_event.clear()
+    FakeHeartbeatThread.start_hook = lambda heartbeat: heartbeat.simulate_failed_ping()
 
     adapter.submit_retrieve_request("req-1", _op([[3, 4]]), MagicMock())
 
@@ -595,7 +746,7 @@ def test_dropped_retrieve_reported_once_via_healthy_get_finished(
     adapter, _send_mock, _ = fake_adapter
     adapter.transfer_ctx = MagicMock()
     # Simulate a failed first ping: the heartbeat start clears the event.
-    FakeHeartbeatThread.start_hook = lambda hb: hb.health_event.clear()
+    FakeHeartbeatThread.start_hook = lambda heartbeat: heartbeat.simulate_failed_ping()
 
     adapter.submit_retrieve_request("req-1", _op([[5]]), MagicMock())
     assert not adapter.is_healthy

@@ -47,13 +47,13 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         # Ping
         # Payload: [instance_id] -- the sender's worker instance ID, or None
         #   for an untracked prober (the scheduler adapter).
-        # Returns: bool - Always True
+        # Returns: int - Server boot token (>1); legacy servers return True (1)
         # BLOCKING on the NORMAL pool: keeps PING off the MQ main loop (where a
         # slow SYNC REGISTER_KV_CACHE would stall it) and lets pool saturation
         # surface as worker degraded mode.
         "PING": ProtocolDefinition(
             payload_classes=[int | None],
-            response_class=bool,
+            response_class=int,
             handler_type=HandlerType.BLOCKING,
         ),
         # Get the enabled experimental intermediate tensor transfer types

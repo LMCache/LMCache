@@ -3,6 +3,7 @@
 
 # Standard
 from collections.abc import Sequence
+import secrets
 import threading
 
 # First Party
@@ -62,6 +63,7 @@ class ManagementModule:
         self._reap_timeout = worker_reap_timeout_seconds
         self._reap_grace = worker_registration_grace_seconds
         self._experimental_transfer = tuple(experimental_transfer)
+        self._server_boot_token = secrets.randbelow(2**63 - 2) + 2
 
         # Periodic reaper, started only when reaping is enabled and there is
         # something to scan. Scans every reap_timeout/4, so an instance is
@@ -134,7 +136,7 @@ class ManagementModule:
         if self._reaper is not None:
             self._reaper.stop()
 
-    def ping(self, instance_id: int | None) -> bool:
+    def ping(self, instance_id: int | None) -> int:
         """Respond to a ping and refresh the sender's liveness.
 
         Args:
@@ -143,12 +145,13 @@ class ManagementModule:
                 worker's last-seen time is refreshed on every liveness target.
 
         Returns:
-            Always True.
+            A process-unique boot token greater than one. Clients use token
+            changes to detect a server restart even when no ping is missed.
         """
         if instance_id is not None:
             for target in self._liveness_targets:
                 target.touch_instance(instance_id)
-        return True
+        return self._server_boot_token
 
     def _reap_cycle(self) -> ThreadRunSummary:
         """Run one reaper scan: reap stale workers, drop mirrored state.

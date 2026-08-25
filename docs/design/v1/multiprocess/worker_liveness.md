@@ -19,25 +19,27 @@ silently binds it to the stale context — wrong IPC handles, corrupted transfer
 ## 2. Design Overview
 
 The server already receives a periodic signal from every actively serving worker:
-the heartbeat PING. The design adds the worker's `instance_id` to that message,
-stamps `last_seen` on the per-instance entries that already exist, and runs one
-periodic scan that reaps entries silent longer than a timeout via the same cleanup
-as a client unregister. The heartbeat keeps its lazy start (first store/retrieve)
-and starts healthy; a live worker pings every interval, refreshing its `last_seen`,
-so it is never reaped while alive. Entries that never produced a liveness signal
-fall under a generous registration grace. Recovery reuses existing client
-machinery: on a genuine outage the heartbeat's pings fail, clearing `health_event`;
-when the server returns the unhealthy-to-healthy edge fires the recover callback,
-which re-registers — a noop when the entry survived.
+the heartbeat PING. The request carries the worker's `instance_id`, stamps
+`last_seen` on existing per-instance entries, and returns a random per-process
+boot token. A periodic server scan reaps entries silent longer than a timeout via
+the same cleanup as a client unregister.
+
+The worker captures the boot token during adapter initialization. The heartbeat
+still starts lazily on the first store/retrieve, but that operation waits for the
+first PING. A changed token therefore detects a server restart even when no PING
+failed between the old and new processes. Both an unhealthy-to-healthy transition
+and a token change run the existing re-registration callback before cache traffic
+resumes. Entries that never produced a liveness signal remain covered by the
+registration grace.
 
 ```
 engine worker adapter                            MP server
 +---------------------------+                   +--------------------------------------+
 | HeartbeatThread           |   PING [id]       | ManagementModule                     |
-|  (instance_id, 10s)  -----+------------------>|  ping(id) -> touch_instance(id)      |
+|  (instance_id, 10s)  -----+------------------>|  ping(id) -> boot token + touch      |
 |  lazy start on first req, |   (NORMAL pool)   |  reaper thread (scan = timeout/4)    |
-|   (starts healthy)        |                   |   -> reap_stale_instances(           |
-|  unhealthy->healthy edge  |                   |        timeout, registration_grace)  |
+|   first req waits         |                   |   -> reap_stale_instances(           |
+|  recovery or token change |                   |        timeout, registration_grace)  |
 |   -> re-register callback |   REGISTER        |   -> drop_instance_state(id) fan-out |
 |                           +------------------>|        |                |            |
 | register_kv_caches        |   STORE/RETRIEVE  |        v                v            |
@@ -139,30 +141,36 @@ the worker adapter warns at startup when `3 x interval` exceeds the 30 s floor.
 
 ## 6. Adapter Side
 
-### 6.1 Lazy start
+### 6.1 Lazy start and first-check barrier
 
-The heartbeat keeps its lazy start on first store/retrieve — no pings during
-warmup; the registration grace covers that window. It starts healthy (the event
-is set at construction), so the first store/retrieve is not gated. A live worker
-then pings every interval, refreshing its server-side `last_seen`, so it is never
-reaped while alive — no re-registration is needed at start. The recover callback
-re-registers only on a genuine recovery edge (Section 6.2). A retrieve dropped
-while the server is unhealthy is still reported via `get_finished` so async loads
-cannot hang.
+The adapter captures the current server boot token synchronously during
+initialization. The periodic heartbeat still starts lazily on the first
+store/retrieve, so model loading and warmup do not generate background pings. The
+first cache operation waits for the initial heartbeat check. If the token differs
+from the initialization token, the server restarted after initialization and the
+worker re-registers before the operation proceeds.
 
-### 6.2 Recovery after a reap
+After that barrier, a live worker pings every interval and refreshes its
+server-side `last_seen`. A retrieve dropped while the server is unhealthy is
+still reported via `get_finished` so async loads cannot hang.
+
+### 6.2 Recovery after an outage or restart
 
 ```
 T0        outage begins; pings time out -> health_event cleared, traffic stops
 T0+120s   server: entry stale -> reap pops it, frees GPUCacheContext/IPC,
           layout-desc refcount; blend rope state dropped via listener <- leak fixed
-T1        connectivity back; next ping succeeds -> unhealthy->healthy edge
+T1        connectivity back, or a new boot token is observed
 T1        recover callback re-registers (id absent -> fresh context) before
           health_event is set; traffic resumes             <- exactly one context
 ```
 
 A shorter outage hits the NOOP register path, which refreshes `last_seen` and
-builds nothing — the server never asks a worker to re-register.
+builds nothing. A process restart produces a new boot token and rebuilds the
+worker registration. KV entries held only in the old server process are lost and
+must be populated again; re-registration restores future cache operations, not
+the old in-memory cache contents. Detection takes at most one configured
+`lmcache.mp.heartbeat_interval` after the restart once the heartbeat is running.
 
 ### 6.3 Shutdown
 
@@ -180,5 +188,6 @@ stop is already requested — a straggling cycle cannot re-create a ghost contex
 | Worker alive but never pinged, idle past the grace | Reaped while alive only if it never pinged (heartbeat never started). Once the heartbeat is running, pings refresh `last_seen` every interval, so a live worker is never reaped regardless of traffic. |
 | Heartbeat thread starved, worker transferring | Store/retrieve/prepare/commit refresh `last_seen`; never reaped. |
 | Partition shorter than the reap window | No reap. On heal, the recover callback re-registers; the NOOP path refreshes `last_seen`; zero context churn. |
+| MP server process restart | The changed boot token triggers worker re-registration before cache traffic resumes. Old process-local L1 entries are lost and rebuild on later stores. |
 | Worker crash + restart | The new process gets a fresh uuid-derived id and a fresh entry; the dead id is reaped independently. No PID-reuse aliasing. |
-| Mixed client/server versions | Every PING fails the payload-count check; the client sits permanently unhealthy. Loud, never silent corruption; upgrade both sides together. |
+| Mixed client/server versions | Compatible during rolling upgrades: old boolean PING replies decode as reserved token `1`, while old clients treat a new positive integer token as a successful PING. Restart detection becomes available once both sides support boot tokens. |

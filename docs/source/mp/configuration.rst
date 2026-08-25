@@ -660,7 +660,10 @@ All connector-level options are passed through
    * - ``lmcache.mp.heartbeat_interval``
      - ``10.0``
      - Interval (seconds) between periodic heartbeat pings sent from the
-       connector to the server.
+       connector to the server. A server restart is detected by a changed
+       boot token on the next ping, so detection can take up to this interval.
+       The worker then re-registers its KV cache handles; cache entries held
+       only by the old server process are lost and must be rebuilt.
    * - ``lmcache.mp.eager_prefetch``
      - ``false``
      - Submit the LMCache lookup when a request enters vLLM's waiting queue,
