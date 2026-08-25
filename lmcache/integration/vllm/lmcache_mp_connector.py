@@ -599,12 +599,14 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         request_ids = []
         ops = []
         cache_salts = []
+        retention_ttl_secs = []
         for meta in metadata.requests:
             if meta.direction != "STORE":
                 continue
             request_ids.append(meta.request_id)
             ops.append(meta.op)
             cache_salts.append(meta.cache_salt)
+            retention_ttl_secs.append(meta.retention_ttl_sec)
 
         if len(request_ids) == 0:
             if self.dispatcher is not None:
@@ -615,7 +617,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         event.record()
 
         self.worker_adapter.batched_submit_store_requests(
-            request_ids, ops, event, cache_salts=cache_salts
+            request_ids,
+            ops,
+            event,
+            cache_salts=cache_salts,
+            retention_ttl_secs=retention_ttl_secs,
         )
         if self.dispatcher is not None:
             dispatch(self.dispatcher, "wait_for_save", event=event)
@@ -780,8 +786,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         assert ret % self.scheduler_adapter.lmcache_tokens_per_chunk == 0
 
-        # Update num stored tokens for the tracker
-        tracker.increase_num_stored_tokens(ret)
+        # Update num stored tokens for the tracker. A retention request
+        # deliberately skips this: its store op must also cover the
+        # already-cached prefix so the server can extend those chunks'
+        # retention windows. Reserve mode "new" skips the re-copy, so
+        # the wider op stores nothing twice.
+        if tracker.retention_ttl_sec <= 0:
+            tracker.increase_num_stored_tokens(ret)
 
         # Save the vllm and lmcache hit tokens. The vLLM hit count is
         # rounded down to a boundary aligned for every engine group (e.g.

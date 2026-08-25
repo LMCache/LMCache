@@ -149,7 +149,9 @@ class ObjectService:
         Key-addressed. L1 deletion respects read/write locks unless ``force``;
         L2 deletion is idempotent at the adapter level (absent / locked keys are
         skipped). The L2 adapter is only resolved when the tier includes L2, so a
-        pure ``l1`` delete works on an L1-only server.
+        pure ``l1`` delete works on an L1-only server. An L2 delete also drops
+        the keys' retention ledger entries -- an explicit delete outranks a
+        retention window.
 
         Returns:
             ``{"deleted", "skipped", "ok"[, "error"]}``: ``deleted`` is the total
@@ -193,6 +195,9 @@ class ObjectService:
             try:
                 await asyncio.to_thread(adapter.delete, parsed)
                 deleted += len(parsed)
+                # The data is gone; release any retention windows now
+                # rather than at ttl expiry.
+                self._engine.storage_manager.retention_manager.forget(parsed)
             except Exception as exc:  # noqa: BLE001 - structured result, not a crash
                 ok = False
                 error = str(exc)

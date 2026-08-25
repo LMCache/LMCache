@@ -1139,6 +1139,8 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
 
             reserved_dict: dict[ObjectKey, MemoryObj] = {}
             all_dict: dict[ObjectKey, MemoryObj] = {}
+            retain_keys: list[ObjectKey] = []
+            retain_sizes: list[int] = []
             total_bytes: int = 0
             store_succeeded = False
             try:
@@ -1162,6 +1164,25 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                             iter(reserved_dict.values())
                         ).get_size() * len(reserved_dict)
 
+                    if key.retention_ttl_sec > 0:
+                        # A ttl store also extends already-present chunks;
+                        # keys that failed reservation hold no data and are
+                        # not shielded.
+                        group_retain = [
+                            k
+                            for k in obj_keys
+                            if k in reserved_dict
+                            or self._ctx.storage_manager.has_l1_object(k)
+                        ]
+                        chunk_bytes = sum(
+                            shape.numel() * dtype.itemsize
+                            for shape, dtype in zip(
+                                layout_desc.shapes, layout_desc.dtypes, strict=True
+                            )
+                        )
+                        retain_keys.extend(group_retain)
+                        retain_sizes.extend([chunk_bytes] * len(group_retain))
+
                     # Keys not in reserved_dict (all-null chunks skipped above, or
                     # skipped by the storage manager) become None entries; the
                     # helper skips them for D2H.
@@ -1181,6 +1202,10 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                     )
 
                 store_succeeded = True
+                if retain_keys:
+                    self._ctx.storage_manager.retention_manager.note_stored(
+                        retain_keys, retain_sizes, key.retention_ttl_sec
+                    )
             except Exception:
                 logger.exception("Cannot store keys due to exception")
             finally:

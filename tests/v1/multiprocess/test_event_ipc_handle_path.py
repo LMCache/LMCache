@@ -274,7 +274,9 @@ def test_server_store_and_retrieve_delegate_event_ordering(
         "get_and_touch_context_entry",
         lambda instance_id: entry,
     )
-    key = SimpleNamespace(request_id="request", cache_salt="", worker_id=0)
+    key = SimpleNamespace(
+        request_id="request", cache_salt="", worker_id=0, retention_ttl_sec=0
+    )
 
     assert module.store(key, 1, [[]], b"store-producer") == (
         b"completion-handle",

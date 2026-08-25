@@ -1402,6 +1402,7 @@ class LMCacheMPWorkerAdapter:
         op: LoadStoreOp,
         event: _IpcEvent,
         cache_salt: str = "",
+        retention_ttl_sec: int = 0,
     ):
         """
         Submit a KV cache store request to LMCache
@@ -1412,6 +1413,8 @@ class LMCacheMPWorkerAdapter:
             event: The CUDA event that is recorded after the current
                 model inference step
             cache_salt: Per-user isolation salt.
+            retention_ttl_sec: Shield the stored chunks from eviction for
+                this many seconds; 0 requests no retention.
         """
         self._ensure_heartbeat_started()
 
@@ -1428,6 +1431,7 @@ class LMCacheMPWorkerAdapter:
             op.end,
             request_id=request_id,
             cache_salt=cache_salt,
+            retention_ttl_sec=retention_ttl_sec,
         )
         if self.transfer_ctx is None:
             raise RuntimeError(
@@ -1508,6 +1512,7 @@ class LMCacheMPWorkerAdapter:
         ops: list[LoadStoreOp],
         event: _IpcEvent,
         cache_salts: list[str] | None = None,
+        retention_ttl_secs: list[int] | None = None,
     ):
         """
         Submit a batched store request to LMCache
@@ -1521,11 +1526,19 @@ class LMCacheMPWorkerAdapter:
             cache_salts: Per-user isolation salts, one per request. If None,
                 all requests use cache_salt="". The list length should be the same as
                 request_ids.
+            retention_ttl_secs: Retention windows in seconds, one per request.
+                If None, no request asks for retention.
         """
         if cache_salts is None:
             cache_salts = [""] * len(request_ids)
-        for request_id, op, salt in zip(request_ids, ops, cache_salts, strict=False):
-            self.submit_store_request(request_id, op, event, cache_salt=salt)
+        if retention_ttl_secs is None:
+            retention_ttl_secs = [0] * len(request_ids)
+        for request_id, op, salt, ttl in zip(
+            request_ids, ops, cache_salts, retention_ttl_secs, strict=False
+        ):
+            self.submit_store_request(
+                request_id, op, event, cache_salt=salt, retention_ttl_sec=ttl
+            )
 
     @_lmcache_nvtx_annotate
     def batched_submit_retrieve_requests(
@@ -1924,6 +1937,7 @@ class LMCacheMPWorkerAdapter:
         end: int,
         request_id: str,
         cache_salt: str = "",
+        retention_ttl_sec: int = 0,
     ) -> IPCCacheServerKey:
         """Convert token IDs to an IPC cache engine key.
 
@@ -1933,6 +1947,7 @@ class LMCacheMPWorkerAdapter:
             end: End token index.
             request_id: The request ID.
             cache_salt: Per-user isolation salt.
+            retention_ttl_sec: Retention window in seconds (0 = none).
 
         Returns:
             IPCCacheServerKey: The constructed key.
@@ -1946,4 +1961,5 @@ class LMCacheMPWorkerAdapter:
             end=end,
             request_id=request_id,
             cache_salt=cache_salt,
+            retention_ttl_sec=retention_ttl_sec,
         )

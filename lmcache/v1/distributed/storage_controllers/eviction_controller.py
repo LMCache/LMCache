@@ -6,6 +6,7 @@ from __future__ import annotations
 # Standard
 from abc import abstractmethod
 from collections import Counter
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 import threading
 import time
@@ -29,6 +30,7 @@ from lmcache.v1.mp_observability.event_bus import get_event_bus
 if TYPE_CHECKING:
     # First Party
     from lmcache.v1.distributed.quota_manager import QuotaManager
+    from lmcache.v1.distributed.retention_manager import RetentionManager
 
 logger = init_logger(__name__)
 
@@ -235,9 +237,11 @@ class L2EvictionController(StorageControllerInterface):
         self,
         l2_adapter_states: list[L2AdapterEvictionState],
         quota_manager: QuotaManager | None = None,
+        retention_manager: "RetentionManager | None" = None,
     ):
         self._adapter_states = l2_adapter_states
         self._quota_manager = quota_manager
+        self._retention_manager = retention_manager
         # Guards _adapter_states against concurrent runtime add/remove.
         self._states_lock = threading.Lock()
         self._stop_flag = threading.Event()
@@ -294,15 +298,22 @@ class L2EvictionController(StorageControllerInterface):
                     "num_cache_salt_buckets": len(usage.bytes_by_cache_salt),
                 }
             )
-        return {
+        status = {
             "is_healthy": self._thread.is_alive(),
             "thread_alive": self._thread.is_alive(),
             "adapters": adapter_statuses,
         }
+        if self._retention_manager is not None:
+            status["retention"] = self._retention_manager.report_status()
+        return status
 
     def _eviction_loop(self):
         while not self._stop_flag.is_set():
             time.sleep(1)
+            # Expired retention entries rejoin the LRU pool; sweeping
+            # here also releases their budget bytes.
+            if self._retention_manager is not None:
+                self._retention_manager.sweep()
             # Hold the lock across the whole pass so remove_adapter_state
             # cannot detach (and the caller close) an adapter while we are
             # calling into it.
@@ -315,6 +326,12 @@ class L2EvictionController(StorageControllerInterface):
             self._check_and_evict_by_cache_salt(state)
         else:
             self._check_and_evict_global(state)
+
+    def _key_eligible_filter(self) -> Callable[[ObjectKey], bool] | None:
+        """Retention veto for eviction candidates; None when disabled."""
+        if self._retention_manager is None:
+            return None
+        return self._retention_manager.is_evictable
 
     def _check_and_evict_global(self, state: L2AdapterEvictionState):
         """Aggregate-usage eviction (``LRU`` / ``noop``)."""
@@ -340,7 +357,10 @@ class L2EvictionController(StorageControllerInterface):
             current_usage,
             watermark,
         )
-        actions = state.eviction_policy.get_eviction_actions(eviction_ratio)
+        actions = state.eviction_policy.get_eviction_actions(
+            eviction_ratio,
+            key_eligible_filter=self._key_eligible_filter(),
+        )
         for action in actions:
             self._execute_eviction_action(state.adapter, action)
 
@@ -392,7 +412,9 @@ class L2EvictionController(StorageControllerInterface):
                 effective_ratio,
             )
             actions = state.eviction_policy.get_eviction_actions(
-                effective_ratio, cache_salt=cache_salt
+                effective_ratio,
+                key_eligible_filter=self._key_eligible_filter(),
+                cache_salt=cache_salt,
             )
             for action in actions:
                 pending.setdefault(action.destination, []).extend(action.keys)

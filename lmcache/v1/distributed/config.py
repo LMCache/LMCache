@@ -297,6 +297,12 @@ class StorageManagerConfig:
     )
     """ The configuration for L2 adapters. """
 
+    retention_max_fraction: float = 0.0
+    """ Fraction of the eviction-enabled L2 adapter's capacity that
+    retention may shield from eviction. 0 disables retention. Requires
+    at most one eviction-enabled adapter and must stay below its
+    trigger_watermark. """
+
     store_policy: str = "default"
     """ The L2 store policy name. """
 
@@ -354,6 +360,34 @@ def validate_storage_manager_config(config: StorageManagerConfig) -> None:
         and config.l1_manager_config.memory_config.devdax_path
     ):
         raise ValueError("gds-l1-path cannot be used with l1-devdax-path")
+
+    if config.retention_max_fraction > 0:
+        eviction_configs = [
+            ec
+            for ac in config.l2_adapter_config.adapters
+            if (ec := ac.eviction_config) is not None
+        ]
+        if len(eviction_configs) > 1:
+            raise ValueError(
+                "retention_max_fraction supports at most one eviction-enabled "
+                f"L2 adapter (got {len(eviction_configs)}): the default store "
+                "policy replicates chunks to every adapter, so one budget "
+                "cannot keep each adapter below its eviction watermark"
+            )
+        for ec in eviction_configs:
+            if ec.eviction_policy == "IsolatedLRU":
+                raise ValueError(
+                    "retention_max_fraction does not support the IsolatedLRU "
+                    "eviction policy: the retention budget has no per-salt "
+                    "dimension, so one tenant could shield the whole budget "
+                    "and starve the rest"
+                )
+            if config.retention_max_fraction >= ec.trigger_watermark:
+                raise ValueError(
+                    f"retention_max_fraction ({config.retention_max_fraction}) "
+                    "must be below the L2 trigger_watermark "
+                    f"({ec.trigger_watermark})"
+                )
 
     memory_config = config.l1_manager_config.memory_config
     if not (memory_config.devdax_path and memory_config.devdax_size_in_bytes):
@@ -533,6 +567,14 @@ def add_storage_manager_args(
         help="The fraction of memory to evict when triggered (0.0 to 1.0). "
         "Default is 0.2.",
     )
+    eviction_group.add_argument(
+        "--retention-max-fraction",
+        type=float,
+        default=0.0,
+        help="Fraction of total L2 capacity that explicit retention may "
+        "shield from eviction. 0 disables retention. Must be below the "
+        "eviction trigger watermark. Default is 0.0.",
+    )
 
     # L2 Policies
     # Import here to break circular dependency:
@@ -667,6 +709,7 @@ def parse_args_to_config(
         l1_manager_config=l1_manager_config,
         eviction_config=eviction_config,
         l2_adapter_config=l2_adapter_config,
+        retention_max_fraction=args.retention_max_fraction,
         store_policy=args.l2_store_policy,
         prefetch_policy=args.l2_prefetch_policy,
         prefetch_max_in_flight=args.l2_prefetch_max_in_flight,

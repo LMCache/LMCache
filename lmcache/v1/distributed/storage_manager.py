@@ -42,6 +42,7 @@ from lmcache.v1.distributed.l2_adapters.reconfiguration import (
 )
 from lmcache.v1.distributed.l2_adapters.serde_wrapper import SerdeL2AdapterWrapper
 from lmcache.v1.distributed.quota_manager import QuotaManager
+from lmcache.v1.distributed.retention_manager import RetentionManager
 from lmcache.v1.distributed.serde import create_serde_processor
 from lmcache.v1.distributed.storage_controllers import (
     L1EvictionController,
@@ -118,6 +119,23 @@ class StorageManager:
         # just a dict protected by a lock and has no OS resources.
         self._quota_manager = QuotaManager()
 
+        # Retention budget: a fraction of the eviction-enabled adapter's
+        # capacity (validation caps retention configs at one such adapter,
+        # so this sum is that adapter's capacity, or zero). Capacity is
+        # taken at boot, so adapters added at runtime do not grow the
+        # budget.
+        l2_capacity_bytes = 0
+        for adapter_id, ac in zip(
+            self._l2_adapters, config.l2_adapter_config.adapters, strict=True
+        ):
+            if ac.eviction_config is None:
+                continue
+            usage = self._l2_adapters[adapter_id].get_usage()
+            l2_capacity_bytes += max(0, usage.total_capacity_bytes)
+        self._retention_manager = RetentionManager(
+            max_retained_bytes=int(config.retention_max_fraction * l2_capacity_bytes)
+        )
+
         # Unified L2 eviction controller for all adapters with eviction
         # config. Aggregate-usage policies (``LRU``, ``noop``) need
         # ``max_capacity_bytes > 0`` to compute a usage fraction;
@@ -140,7 +158,9 @@ class StorageManager:
                     )
                 )
         self._l2_eviction_controller = L2EvictionController(
-            l2_eviction_states, quota_manager=self._quota_manager
+            l2_eviction_states,
+            quota_manager=self._quota_manager,
+            retention_manager=self._retention_manager,
         )
         self._l2_eviction_controller.start()
 
@@ -234,6 +254,18 @@ class StorageManager:
             )
 
         return result
+
+    def has_l1_object(self, key: ObjectKey) -> bool:
+        """Whether L1 currently holds an entry for the key.
+
+        Args:
+            key: The object key to look up.
+
+        Returns:
+            True if an L1 entry exists (written or being written),
+            False otherwise.
+        """
+        return self._l1_manager.get_object_state(key) is not None
 
     @enable_tracing()
     def finish_write(
@@ -791,6 +823,11 @@ class StorageManager:
         storage manager creates the registry at construction time.
         """
         return self._quota_manager
+
+    @property
+    def retention_manager(self) -> RetentionManager:
+        """The per-key retention registry shared by store and eviction."""
+        return self._retention_manager
 
     @property
     def l1_memory_desc(self) -> L1MemoryDesc:
