@@ -57,6 +57,9 @@ class EventType(Enum):
     L2_KEYS_EVICTED = "l2.keys.evicted"
 
     # L2 adapter key-level events.
+    # Capacity topology changed (adapter added/removed/reconfigured).
+    SM_CAPACITY_CHANGED = "sm.capacity.changed"
+
     L2_KEYS_STORED = "l2.keys.stored"
     L2_KEYS_ACCESSED = "l2.keys.accessed"
     L2_KEYS_DELETED = "l2.keys.deleted"

@@ -13,6 +13,7 @@ from lmcache.v1.mp_coordinator.api import (
 from lmcache.v1.mp_coordinator.ingest.event_broadcaster import CacheEventBroadcaster
 from lmcache.v1.mp_coordinator.ingest.event_gate import EventGate, IngestResult
 from lmcache.v1.mp_coordinator.key_directory import KeyDirectory
+from lmcache.v1.mp_coordinator.persistence.quiesce import QuiesceLock
 
 
 class _RecordingConsumer:
@@ -63,7 +64,7 @@ def _gate(*consumers: _RecordingConsumer | KeyDirectory) -> EventGate:
     broadcaster = CacheEventBroadcaster()
     for consumer in consumers:
         broadcaster.register_consumer(consumer)
-    return EventGate(broadcaster)
+    return EventGate(broadcaster, QuiesceLock())
 
 
 # -- Admission ---------------------------------------------------------------

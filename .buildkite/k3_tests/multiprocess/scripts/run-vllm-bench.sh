@@ -19,17 +19,23 @@ RANDOM_INPUT_LEN="${RANDOM_INPUT_LEN:-10000}"
 RANDOM_OUTPUT_LEN="${RANDOM_OUTPUT_LEN:-1}"
 BUILD_ID="${BUILD_ID:-local_$$}"
 RESULTS_DIR="${RESULTS_DIR:-/tmp/lmcache_ci_results_${BUILD_ID}}"
+LMCACHE_LOG_FILE="${LMCACHE_LOG_FILE:-/tmp/build_${BUILD_ID}_lmcache.log}"
 
 # Expected values
 EXPECTED_TOTAL_INPUT_TOKENS=$((NUM_PROMPTS * RANDOM_INPUT_LEN))
 EXPECTED_COMPLETED=$NUM_PROMPTS
-MAX_SLOWDOWN_PERCENT=5
+MAX_SLOWDOWN_PERCENT="${MAX_SLOWDOWN_PERCENT:-5}"
 
 # Reproducible seed
 RANDOM_SEED="${RANDOM_SEED:-$(date +%s)}"
 
 # Output directory
 VLLM_BENCH_DIR="$RESULTS_DIR/vllm_bench"
+CACHE_HIT_DIR="$VLLM_BENCH_DIR/cache_hit_validation"
+
+# A repeated long prompt is used after the random benchmark to validate that
+# the LMCache-backed vLLM path performs a real retrieve on a warm request.
+LONG_CACHE_HIT_CONTENT="Explain the history of computer science in great detail. $(printf 'The Turing machine is a fundamental concept in theoretical computer science that defines an abstract machine capable of manipulating symbols on a strip of tape according to a table of rules. %.0s' {1..20})"
 
 echo "=== vLLM Bench Serve Test ==="
 echo "Model: $MODEL"
@@ -42,6 +48,7 @@ echo "Results dir: $VLLM_BENCH_DIR"
 echo ""
 
 mkdir -p "$VLLM_BENCH_DIR"
+mkdir -p "$CACHE_HIT_DIR"
 
 run_vllm_bench() {
     local port="$1"
@@ -238,6 +245,168 @@ warmup_server() {
     echo "$description warmup complete"
 }
 
+count_retrieve_log_lines() {
+    if [ ! -f "$LMCACHE_LOG_FILE" ]; then
+        echo 0
+        return 0
+    fi
+    python3 - <<'PY' "$LMCACHE_LOG_FILE"
+import pathlib
+import re
+import sys
+
+log_path = pathlib.Path(sys.argv[1])
+pattern = re.compile(r"Retrieved \d+ tokens in ")
+count = sum(1 for line in log_path.read_text(errors="ignore").splitlines() if pattern.search(line))
+print(count)
+PY
+}
+
+send_cache_hit_request() {
+    local label="$1"
+    local output_file="$2"
+
+    echo "--- Sending ${label} cache-hit validation request ---"
+    local http_code
+    http_code=$(curl -s -o "$output_file" -w "%{http_code}" \
+        -X POST "http://localhost:${VLLM_PORT}/v1/chat/completions" \
+        -H "Content-Type: application/json" \
+        -d "{
+            \"model\": \"${MODEL}\",
+            \"messages\": [{\"role\": \"user\", \"content\": $(python3 -c "import json; print(json.dumps('$LONG_CACHE_HIT_CONTENT'))")}],
+            \"max_tokens\": 1,
+            \"kv_transfer_params\": {\"cached_token_stats\": true}
+        }")
+
+    if [ "$http_code" -ne 200 ]; then
+        echo "${label} request returned HTTP $http_code"
+        cat "$output_file" 2>/dev/null || true
+        return 1
+    fi
+    echo "${label} request completed (HTTP 200)"
+}
+
+validate_cache_hit_response() {
+    local label="$1"
+    local response_file="$2"
+
+    python3 - <<'PY' "$label" "$response_file"
+import json
+import sys
+
+label = sys.argv[1]
+response_file = sys.argv[2]
+with open(response_file) as f:
+    data = json.load(f)
+
+stats = (data.get("kv_transfer_params") or {}).get("cached_token_stats")
+if stats is None:
+    print(f"{label}: missing kv_transfer_params.cached_token_stats")
+    sys.exit(1)
+
+required_keys = [
+    "num_vllm_cached_tokens",
+    "num_lmcache_cached_tokens",
+    "num_lmcache_extra_cached_tokens",
+]
+missing = [k for k in required_keys if k not in stats]
+if missing:
+    print(f"{label}: missing cached_token_stats keys: {missing}")
+    sys.exit(1)
+
+for key in required_keys:
+    value = stats[key]
+    if not isinstance(value, int) or value < 0:
+        print(f"{label}: {key} should be a non-negative integer, got {value!r}")
+        sys.exit(1)
+
+print(
+    f"{label}: vLLM cached={stats['num_vllm_cached_tokens']}, "
+    f"LMCache cached={stats['num_lmcache_cached_tokens']}, "
+    f"LMCache extra={stats['num_lmcache_extra_cached_tokens']}"
+)
+PY
+}
+
+validate_cache_hit_progression() {
+    local cold_file="$1"
+    local warm_file="$2"
+
+    python3 - <<'PY' "$cold_file" "$warm_file"
+import json
+import sys
+
+cold_file, warm_file = sys.argv[1:3]
+with open(cold_file) as f:
+    cold = json.load(f)
+with open(warm_file) as f:
+    warm = json.load(f)
+
+cold_stats = cold["kv_transfer_params"]["cached_token_stats"]
+warm_stats = warm["kv_transfer_params"]["cached_token_stats"]
+
+cold_lmcache = cold_stats["num_lmcache_cached_tokens"]
+warm_lmcache = warm_stats["num_lmcache_cached_tokens"]
+
+print(f"Cold LMCache cached tokens: {cold_lmcache}")
+print(f"Warm LMCache cached tokens: {warm_lmcache}")
+
+if warm_lmcache <= cold_lmcache:
+    print("Warm request should report more LMCache cached tokens than cold request")
+    sys.exit(1)
+
+if warm_lmcache == 0:
+    print("Warm request reported 0 LMCache cached tokens")
+    sys.exit(1)
+PY
+}
+
+validate_retrieve_log_growth() {
+    local retrieve_before="$1"
+    local retrieve_after="$2"
+
+    echo "LMCache retrieve log lines before replay: $retrieve_before"
+    echo "LMCache retrieve log lines after replay:  $retrieve_after"
+
+    if [ "$retrieve_after" -le "$retrieve_before" ]; then
+        echo "Expected LMCache log to record at least one retrieve during warm replay"
+        if [ -f "$LMCACHE_LOG_FILE" ]; then
+            echo "--- Last 80 LMCache log lines ---"
+            tail -n 80 "$LMCACHE_LOG_FILE"
+        fi
+        return 1
+    fi
+}
+
+verify_cache_hit_replay() {
+    local cold_file="$CACHE_HIT_DIR/cold_response.json"
+    local warm_file="$CACHE_HIT_DIR/warm_response.json"
+    local retrieve_before
+    local retrieve_after
+
+    echo "============================================"
+    echo "=== Cache Hit Replay Validation ==="
+    echo "============================================"
+
+    retrieve_before=$(count_retrieve_log_lines)
+    send_cache_hit_request "Cold" "$cold_file"
+    validate_cache_hit_response "Cold" "$cold_file"
+
+    # Allow the asynchronous store path to commit objects before replaying the
+    # same prompt. Without this short delay the second request can race the
+    # offload and spuriously observe a cold cache.
+    sleep 2
+
+    send_cache_hit_request "Warm" "$warm_file"
+    validate_cache_hit_response "Warm" "$warm_file"
+    sleep 2
+
+    retrieve_after=$(count_retrieve_log_lines)
+    validate_cache_hit_progression "$cold_file" "$warm_file"
+    validate_retrieve_log_growth "$retrieve_before" "$retrieve_after"
+    echo ""
+}
+
 echo "Using random seed: $RANDOM_SEED"
 echo ""
 
@@ -268,6 +437,11 @@ echo "=== Verifying benchmark results ==="
 echo "============================================"
 if ! verify_results; then
     echo "Verification failed"
+    exit 1
+fi
+
+if ! verify_cache_hit_replay; then
+    echo "Cache-hit replay validation failed"
     exit 1
 fi
 
