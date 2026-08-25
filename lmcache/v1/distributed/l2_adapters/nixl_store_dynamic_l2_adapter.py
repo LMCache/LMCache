@@ -33,6 +33,7 @@ import uuid
 # Third Party
 from nixl._api import nixl_agent as NixlAgent
 from nixl._api import nixl_agent_config as NixlAgentConfig
+from nixl._api import nixl_xfer_handle as NixlXferHandle
 from nixl._api import (
     nixlBind,
 )
@@ -315,7 +316,7 @@ class DynamicNixlStorageAgent:
             return os.path.join(self.file_path, _object_key_to_relpath(key))
         return os.path.join(self.file_path, _object_key_to_filename(key))
 
-    async def _post_non_blocking(self, handle):
+    async def _post_non_blocking(self, handle: NixlXferHandle) -> None:
         """Await a nixl transfer until done."""
         state = self.nixl_agent.transfer(handle)
         while state != "DONE" and state != "ERR":
@@ -323,7 +324,8 @@ class DynamicNixlStorageAgent:
                 state = self.nixl_agent.check_xfer_state(handle)
             except nixlBind.nixlBackendError:
                 raise
-            await asyncio.sleep(0.01)
+            if state != "DONE" and state != "ERR":
+                await asyncio.sleep(0.01)
         if state == "ERR":
             raise RuntimeError("NIXL transfer failed")
 
