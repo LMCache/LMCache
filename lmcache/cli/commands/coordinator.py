@@ -142,6 +142,33 @@ class CoordinatorCommand(BaseCommand):
             ),
         )
         parser.add_argument(
+            "--checkpoint-path",
+            type=str,
+            default=None,
+            help=(
+                "File to checkpoint the coordinator's derived state to, so a "
+                "restart resumes instead of starting cold. Unset disables it."
+            ),
+        )
+        parser.add_argument(
+            "--checkpoint-interval",
+            type=float,
+            default=None,
+            help=(
+                "Seconds between checkpoint writes; 0 writes only on a clean "
+                "stop (default: 60). Ignored without --checkpoint-path."
+            ),
+        )
+        parser.add_argument(
+            "--metadata-path",
+            type=str,
+            default=None,
+            help=(
+                "File to store operator-set state (L2 pins and per-cache_salt "
+                "quotas) in. Unset means that state is lost on restart."
+            ),
+        )
+        parser.add_argument(
             "--timeout-keep-alive",
             type=int,
             default=None,
@@ -213,6 +240,9 @@ class CoordinatorCommand(BaseCommand):
                 ("hash_algorithm", args.hash_algorithm),
                 ("enable_blend_lookup", args.enable_blend_lookup),
                 ("blend_probe_stride", args.blend_probe_stride),
+                ("checkpoint_path", args.checkpoint_path),
+                ("checkpoint_interval", args.checkpoint_interval),
+                ("metadata_path", args.metadata_path),
                 ("timeout_keep_alive", args.timeout_keep_alive),
                 ("otlp_endpoint", args.otlp_endpoint),
             )

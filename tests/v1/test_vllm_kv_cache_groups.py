@@ -385,3 +385,44 @@ def test_group_layers_by_identity_rejects_group_idx_length_mismatch():
             [lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS],
             per_layer_engine_group_idx=[0, 1],
         )
+
+
+def test_aux_pools_with_one_block_size_share_engine_and_kernel_group():
+    """Same-shape pools sharing a block size fold into ONE group.
+
+    The block-size bucket puts them in one engine group; identity grouping
+    then merges the shape-identical tensors into one kernel group.
+    """
+    caches = _same_shape_caches(["layer.0", "layer.1"])
+    caches["cb.aux_pool.16"] = torch.randn(4, 16, 8, dtype=torch.float16)
+    caches["cb.aux_pool.16.b"] = torch.randn(4, 16, 8, dtype=torch.float16)
+
+    spec = create_engine_group_infos_from_vllm(None, caches)
+
+    aux = [g for g in spec if g.extra_object_group_tag]
+    assert len(aux) == 1
+    assert aux[0].layer_indices == (2, 3)
+    assert aux[0].tokens_per_block == 16
+    assert aux[0].extra_object_group_tag == 1
+    # The regular layers keep engine group 0; the pool group comes after.
+    assert aux[0].engine_group_id > max(
+        g.engine_group_id for g in spec if not g.extra_object_group_tag
+    )
+
+
+def test_aux_pools_with_distinct_block_sizes_get_distinct_groups():
+    """Different block sizes are different paged address spaces: no sharing."""
+    caches = _same_shape_caches(["layer.0"])
+    caches["cb.aux_pool.16"] = torch.randn(4, 16, 8, dtype=torch.float16)
+    caches["cb.aux_pool.32"] = torch.randn(4, 16, 8, dtype=torch.float16)
+
+    spec = create_engine_group_infos_from_vllm(None, caches)
+
+    aux = sorted(
+        (g for g in spec if g.extra_object_group_tag),
+        key=lambda g: g.engine_group_id,
+    )
+    assert len(aux) == 2
+    assert aux[0].engine_group_id != aux[1].engine_group_id
+    assert {g.tokens_per_block for g in aux} == {16, 32}
+    assert {g.extra_object_group_tag for g in aux} == {1, 2}

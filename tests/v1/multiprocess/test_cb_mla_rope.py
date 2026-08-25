@@ -30,6 +30,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.v1.multiprocess.modules.blend_v3 import _cb_group_rope_geometry
 import lmcache.lmcache_native as lmcache_native
 
@@ -91,7 +92,9 @@ def test_undeclared_mla_width_still_infers_phantom_heads():
 # 2/3. Kernel + native plan (GPU)
 # --------------------------------------------------------------------------
 
-_gpu = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+_gpu = pytest.mark.skipif(
+    not torch_dev.is_available(), reason=f"needs available {torch_device_type}"
+)
 
 
 def _cuda_ops():
@@ -139,7 +142,7 @@ def test_strided_kernel_rotates_only_the_trailing_window():
     bit-identical afterwards; the window must match the fp32 reference."""
     cuda_ops = _cuda_ops()
     torch.manual_seed(0)
-    device = "cuda"
+    device = torch_device_type
     n_tok, max_pos = 64, 4096
 
     cache_bf16, cache_f32 = _cos_sin_cache(max_pos, _ROPE, device)
@@ -159,7 +162,7 @@ def test_strided_kernel_rotates_only_the_trailing_window():
         cache_bf16,
         False,  # GLM/DeepSeek MLA is interleaved (GPT-J), not NeoX
     )
-    torch.cuda.synchronize()
+    torch_dev.synchronize()
 
     assert torch.equal(latents[:, 0, :_CONTENT], before[:, 0, :_CONTENT]), (
         "content dims were rotated — the exact corruption the declared "
@@ -182,13 +185,15 @@ def test_native_plan_rope_base_offset():
     if not hasattr(cuda_ops, "execute_cb_retrieve_plan_flat"):
         pytest.skip("cuda_ops build lacks execute_cb_retrieve_plan_flat")
     torch.manual_seed(1)
-    device = torch.device("cuda")
+    device = torch.device(torch_device_type)
     nl, spc, max_pos = 2, 8, 4096  # layers, slot tokens
     n_chunks = 2
 
     cache_bf16, cache_f32 = _cos_sin_cache(max_pos, _ROPE, device)
     host = [
-        torch.randn(1, nl, spc, _HIDDEN, dtype=_DTYPE, device="cuda").cpu().pin_memory()
+        torch.randn(1, nl, spc, _HIDDEN, dtype=_DTYPE, device=torch_device_type)
+        .cpu()
+        .pin_memory()
         for _ in range(n_chunks)
     ]
     slots = [
@@ -238,7 +243,7 @@ def test_native_plan_rope_base_offset():
         np.zeros((0, 4), dtype=np.int64),
         np.asarray(step_offsets, dtype=np.int64),
     )
-    torch.cuda.synchronize()
+    torch_dev.synchronize()
 
     for i in range(n_chunks):
         # Positions ramp per slot token and repeat across layers (the ramp

@@ -28,10 +28,9 @@ logger = init_logger(__name__)
 def wrap_one_kv_cache(tensor: torch.Tensor) -> Any:
     """Dispatch by ``tensor.device.type`` via the platform registry.
 
-    Concrete factories are auto-discovered from ``DeviceIPCWrapper``
-    subclasses under ``lmcache.v1.platform``, so this call site stays
-    free of if/elif chains and new accelerators plug in by shipping a
-    sibling wrapper class.
+    Concrete factories are supplied by the registered ``DeviceSpec`` objects,
+    so this call site stays free of if/elif chains and external accelerators
+    can provide their wrapper from an installed device-plugin wheel.
     """
     return resolve_kv_wrapper_factory(tensor.device.type)(tensor)
 
