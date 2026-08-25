@@ -433,7 +433,7 @@ def test_failed_full_retrieve_is_recomputed_instead_of_retried_remotely() -> Non
             self.cache_salt = ""
             self.prompt_token_ids = [1, 2, 3, 4]
             self.all_token_ids = [1, 2, 3, 4]
-            self.mm_features = []
+            self.mm_features: list[object] = []
 
     request = _Request()
     tracker = LMCacheMPRequestTracker(request)  # type: ignore[arg-type]
