@@ -176,10 +176,23 @@ per-instance HTTP server or the controller HTTP server.
   (`lmcache/cli/request.py`) streams an OpenAI-compatible `/v1/chat/completions`
   or `/v1/completions` request; **Latency Metrics** repeats server usage (labeled
   **Input tokens**, not a duplicate client-side total).
-- **`query kvcache`:** stub; no handler yet.
-- **Errors:** `query_engine` catches `RuntimeError` / `ValueError`, prints the
-  message to stderr, exits `1`; unknown `query_target` prints to stderr and exits
-  `1`.
+- **`query kvcache`:** lookup mode implemented (`kvcache_command.py` +
+  `_lookup.py`). `PromptBuilder` expands `--documents`; `CacheLookup` tokenizes
+  the prompt locally via `AutoTokenizer(--model)` and posts the token IDs to the
+  controller `POST /lookup`, then `summarize_coverage` renders cached tokens,
+  cache status (`HIT` / `MISS` / `HIT (partial)`), the matched location(s), and
+  chunk counts derived from `--chunk-size` (default 256).
+  - **Honest subset (see below).** `POST /lookup` returns the longest cached
+    *prefix* and a single location per instance, so this command reports
+    token-based coverage plus that location. The design's per-tier chunk
+    histogram (`[cpu=12, disk=0]`), exact chunk counts, single-instance support,
+    and round-trip mode need a per-instance server endpoint and are deferred to a
+    follow-up PR. Chunk counts are exact only when `--chunk-size` matches the
+    server's configured chunk size. Coverage is prefix-based (breaks at first
+    miss). Token IDs must match the engine's tokenizer or coverage reads low.
+- **Errors:** both `query engine` and `query kvcache` catch `RuntimeError` /
+  `ValueError`, print the message to stderr, and exit `1`; unknown `query_target`
+  prints to stderr and exits `1`.
 
 ---
 
@@ -187,7 +200,8 @@ per-instance HTTP server or the controller HTTP server.
 
 | Phase | Work |
 |-------|------|
-| **1a** | `query engine` with prompt, max-tokens, TTFT/TPOT/throughput metrics |
-| **1b** | `query kvcache` lookup mode (prompt tokenization + cache coverage) |
-| **future** | richer query diagnostics (per-chunk detail) |
+| **1a** | `query engine` with prompt, max-tokens, TTFT/TPOT/throughput metrics (done) |
+| **1b** | `query kvcache` lookup mode against the controller `POST /lookup` (done, honest subset) |
+| **2** | per-instance lookup endpoint: per-tier chunk histogram, exact chunks, single-instance, server-side tokenization |
+| **future** | richer query diagnostics (per-chunk detail), round-trip verification |
 
