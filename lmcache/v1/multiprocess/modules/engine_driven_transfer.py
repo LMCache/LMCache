@@ -297,6 +297,30 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         non-GPU transfers."""
         return self._ctx.resolve_obj_keys(key, [0])[0]
 
+    def _resolve_obj_keys_by_group(
+        self, key: IPCCacheServerKey, num_groups: int
+    ) -> list[list[ObjectKey]]:
+        """Resolve object keys for every LMCache group, group-major.
+
+        Args:
+            key: Cache key for the token range.
+            num_groups: Number of LMCache groups the worker registered.
+
+        Returns:
+            ``keys[g][c]`` is chunk ``c``'s key in group ``g``
+            (``ObjectKey.object_group_id == g``).
+        """
+        return self._ctx.resolve_obj_keys(key, list(range(num_groups)))
+
+    def _group_keys_for(
+        self, entry: "EngineDrivenContextEntry", key: IPCCacheServerKey
+    ) -> "list[list[ObjectKey]] | None":
+        """Group-major keys when ``entry`` registered multi-group, else None."""
+        layouts = entry.metadata.group_layouts
+        if not layouts or len(layouts) < 2:
+            return None
+        return self._resolve_obj_keys_by_group(key, len(layouts))
+
     def register_kv_cache_engine_driven_context(
         self,
         payload: RegisterEngineDrivenContextPayload,
@@ -345,10 +369,33 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
             )
         )
         layout_desc = MemoryLayoutDesc(shapes=[shape], dtypes=[dtype])
+        group_layouts: list[MemoryLayoutDesc] | None = None
+        if payload.group_layouts:
+            group_layouts = []
+            for gl in payload.group_layouts:
+                g_dtype = getattr(torch, gl.dtype_str, None)
+                if g_dtype is None or not isinstance(g_dtype, torch.dtype):
+                    raise ValueError(
+                        f"Invalid group dtype_str '{gl.dtype_str}' in "
+                        "engine-driven registration"
+                    )
+                g_shape = (
+                    torch.Size(
+                        [gl.num_layers, self._ctx.chunk_size, gl.hidden_dim_size]
+                    )
+                    if payload.use_mla
+                    else torch.Size(
+                        [2, gl.num_layers, self._ctx.chunk_size, gl.hidden_dim_size]
+                    )
+                )
+                group_layouts.append(
+                    MemoryLayoutDesc(shapes=[g_shape], dtypes=[g_dtype])
+                )
         metadata = EngineDrivenContextMetadata(
             layout_desc=layout_desc,
             block_size=payload.block_size,
             use_mla=payload.use_mla,
+            group_layouts=group_layouts,
         )
         # Build the entry and strategy outside the lock, then insert the pair
         # atomically so a concurrent reap can never strand one without the
@@ -428,6 +475,7 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
             instance_id=instance_id,
             context=entry.metadata,
             resolve_obj_keys=self._resolve_single_group_obj_keys,
+            group_keys=self._group_keys_for(entry, key),
         )
         session = self._ctx.session_manager.get_or_create(key.request_id)
         session.extras["store_start_time"] = time.perf_counter()
@@ -494,11 +542,12 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
             ValueError: If no non-GPU context is registered for the given
                 instance ID.
         """
-        _, strategy = self._resolve_for_transfer(instance_id)
+        entry, strategy = self._resolve_for_transfer(instance_id)
         response = strategy.prepare_retrieve(
             key=key,
             instance_id=instance_id,
             resolve_obj_keys=self._resolve_single_group_obj_keys,
+            group_keys=self._group_keys_for(entry, key),
         )
         session = self._ctx.session_manager.get_or_create(key.request_id)
         session.extras["retrieve_start_time"] = time.perf_counter()
