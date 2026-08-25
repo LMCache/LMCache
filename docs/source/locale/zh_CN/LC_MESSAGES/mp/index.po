@@ -118,8 +118,8 @@ msgid "**Recommended.** ZMQ + FastAPI HTTP frontend — see :doc:`http_api`."
 msgstr "**推荐。** ZMQ + FastAPI HTTP 前端 — 参见 :doc:`http_api`。"
 
 #: ../../source/mp/index.rst:50
-msgid "``python3 -m lmcache.v1.multiprocess.server``"
-msgstr "``python3 -m lmcache.v1.multiprocess.server``"
+msgid "``python3 -m lmcache.multiprocess.server``"
+msgstr "``python3 -m lmcache.multiprocess.server``"
 
 #: ../../source/mp/index.rst:51
 msgid ""
@@ -881,14 +881,14 @@ msgstr "可观察性内部实现"
 
 #: ../../source/mp/index.rst:497
 msgid ""
-"**EventBus** (``lmcache/v1/mp_observability/event_bus.py``) is a global "
+"**EventBus** (``lmcache/mp_observability/event_bus.py``) is a global "
 "singleton initialized at server startup by ``init_observability()``. "
 "Producers (L1Manager, StorageManager, MPCacheServer) publish ``Event`` "
 "objects to a bounded queue (``--event-bus-queue-size``, default 10000, "
 "tail-drop on overflow).  A background drain thread dispatches each event "
 "to all registered subscribers."
 msgstr ""
-"**EventBus** (``lmcache/v1/mp_observability/event_bus.py``) "
+"**EventBus** (``lmcache/mp_observability/event_bus.py``) "
 "是一个全局单例，在服务器启动时由 ``init_observability()`` "
 "初始化。生产者（L1Manager、StorageManager、MPCacheServer）将 ``Event`` 对象发布到有界队列（\\ "
 "``--event-bus-queue-size``\\ ，默认 10000，溢出时尾部丢弃）。一个后台排空线程（drain "
@@ -896,14 +896,14 @@ msgstr ""
 
 #: ../../source/mp/index.rst:504
 msgid ""
-"**Subscribers** live under ``lmcache/v1/mp_observability/subscribers/`` "
+"**Subscribers** live under ``lmcache/mp_observability/subscribers/`` "
 "and are grouped by concern: ``metrics/`` (OTel counters and lifecycle "
 "histograms), ``logging/`` (Python logging handlers, lookup-hash JSONL), "
 "and ``tracing/`` (OTel spans built from START/END event pairs). "
 "``init_observability()`` registers the set selected by CLI flags "
 "(``--disable-metrics``, ``--disable-logging``, ``--enable-tracing``)."
 msgstr ""
-"**订阅者** 位于 ``lmcache/v1/mp_observability/subscribers/`` 下，按关注点分组：\\ "
+"**订阅者** 位于 ``lmcache/mp_observability/subscribers/`` 下，按关注点分组：\\ "
 "``metrics/``\\ （OTel 计数器和生命周期直方图）、\\ ``logging/``\\ （Python 日志处理器、查找哈希 "
 "JSONL）以及 ``tracing/``\\ （由 START/END 事件对构建的 OTel span）。\\ "
 "``init_observability()`` 根据 CLI 标志（\\ ``--disable-metrics``\\ 、\\ "
@@ -974,12 +974,12 @@ msgstr "添加可观察性订阅者"
 #, python-brace-format
 msgid ""
 "Create a subscriber class subclassing ``EventSubscriber`` (defined in "
-"``lmcache/v1/mp_observability/event_bus.py``): implement "
+"``lmcache/mp_observability/event_bus.py``): implement "
 "``get_subscriptions()`` to return an ``{EventType: callback}`` mapping; "
 "optionally override ``shutdown()`` for cleanup."
 msgstr ""
 "创建一个继承自 ``EventSubscriber`` 的订阅者类（定义在 "
-"``lmcache/v1/mp_observability/event_bus.py`` 中）：实现 "
+"``lmcache/mp_observability/event_bus.py`` 中）：实现 "
 "``get_subscriptions()`` 以返回 ``{EventType: callback}`` 映射；可选地重写 "
 "``shutdown()`` 以进行清理。"
 
@@ -996,13 +996,13 @@ msgstr ""
 #: ../../source/mp/index.rst:555
 msgid ""
 "Register the subscriber in ``init_observability()`` "
-"(``lmcache/v1/mp_observability/config.py``) via "
+"(``lmcache/mp_observability/config.py``) via "
 "``bus.register_subscriber(...)`` inside the branch matching its concern "
 "(metrics / logging / tracing), gated on the corresponding CLI flag if "
 "needed."
 msgstr ""
 "在 ``init_observability()``\\ （\\ "
-"``lmcache/v1/mp_observability/config.py``\\ ）中，通过 "
+"``lmcache/mp_observability/config.py``\\ ）中，通过 "
 "``bus.register_subscriber(...)`` 在与其关注点（metrics / logging / "
 "tracing）匹配的分支内注册订阅者，如有需要可受相应 CLI 标志控制。"
 
@@ -1054,32 +1054,32 @@ msgid "Purpose"
 msgstr "目的"
 
 #: ../../source/mp/index.rst:585
-msgid "``lmcache/v1/multiprocess/server.py``"
-msgstr "``lmcache/v1/multiprocess/server.py``"
+msgid "``lmcache/multiprocess/server.py``"
+msgstr "``lmcache/multiprocess/server.py``"
 
 #: ../../source/mp/index.rst:586
 msgid "MPCacheServer + ZMQ server entry point"
 msgstr "MPCacheServer + ZMQ 服务器入口点"
 
 #: ../../source/mp/index.rst:587
-msgid "``lmcache/v1/multiprocess/config.py``"
-msgstr "``lmcache/v1/multiprocess/config.py``"
+msgid "``lmcache/multiprocess/config.py``"
+msgstr "``lmcache/multiprocess/config.py``"
 
 #: ../../source/mp/index.rst:588
 msgid "MPServerConfig, HTTPFrontendConfig"
 msgstr "MPServerConfig, HTTPFrontendConfig"
 
 #: ../../source/mp/index.rst:589
-msgid "``lmcache/v1/multiprocess/engine_context.py``"
-msgstr "``lmcache/v1/multiprocess/engine_context.py``"
+msgid "``lmcache/multiprocess/engine_context.py``"
+msgstr "``lmcache/multiprocess/engine_context.py``"
 
 #: ../../source/mp/index.rst:590
 msgid "MPCacheServerContext (shared state passed to every EngineModule)"
 msgstr "MPCacheServerContext（传递给每个 EngineModule 的共享状态）"
 
 #: ../../source/mp/index.rst:591
-msgid "``lmcache/v1/multiprocess/engine_module.py``"
-msgstr "``lmcache/v1/multiprocess/engine_module.py``"
+msgid "``lmcache/multiprocess/engine_module.py``"
+msgstr "``lmcache/multiprocess/engine_module.py``"
 
 #: ../../source/mp/index.rst:592
 msgid ""
@@ -1090,8 +1090,8 @@ msgstr ""
 "（每个模块的处理程序注册）"
 
 #: ../../source/mp/index.rst:594
-msgid "``lmcache/v1/multiprocess/modules/``"
-msgstr "``lmcache/v1/multiprocess/modules/``"
+msgid "``lmcache/multiprocess/modules/``"
+msgstr "``lmcache/multiprocess/modules/``"
 
 #: ../../source/mp/index.rst:595
 msgid ""
@@ -1112,24 +1112,24 @@ msgstr ""
 "选择的分页感知 CacheBlend V3 流水线）。"
 
 #: ../../source/mp/index.rst:603
-msgid "``lmcache/v1/multiprocess/http_server.py``"
-msgstr "``lmcache/v1/multiprocess/http_server.py``"
+msgid "``lmcache/multiprocess/http_server.py``"
+msgstr "``lmcache/multiprocess/http_server.py``"
 
 #: ../../source/mp/index.rst:604
 msgid "FastAPI wrapper with health check and many other useful APIs"
 msgstr "带健康检查和许多其他有用 API 的 FastAPI 包装器"
 
 #: ../../source/mp/index.rst:605
-msgid "``lmcache/v1/multiprocess/http_api_registry.py``"
-msgstr "``lmcache/v1/multiprocess/http_api_registry.py``"
+msgid "``lmcache/multiprocess/http_api_registry.py``"
+msgstr "``lmcache/multiprocess/http_api_registry.py``"
 
 #: ../../source/mp/index.rst:606
 msgid "``HTTPAPIRegistry`` that auto-discovers routers in ``http_apis/``"
 msgstr "``HTTPAPIRegistry`` 会自动发现 ``http_apis/`` 中的路由器"
 
 #: ../../source/mp/index.rst:607
-msgid "``lmcache/v1/multiprocess/http_apis/``"
-msgstr "``lmcache/v1/multiprocess/http_apis/``"
+msgid "``lmcache/multiprocess/http_apis/``"
+msgstr "``lmcache/multiprocess/http_apis/``"
 
 #: ../../source/mp/index.rst:608
 msgid ""
@@ -1138,8 +1138,8 @@ msgid ""
 msgstr "可扩展的 HTTP 端点 (``/``, ``/healthcheck``, ``/cache/clear``, ``/status``)"
 
 #: ../../source/mp/index.rst:610
-msgid "``lmcache/v1/multiprocess/mp_runtime_plugin_launcher.py``"
-msgstr "``lmcache/v1/multiprocess/mp_runtime_plugin_launcher.py``"
+msgid "``lmcache/multiprocess/mp_runtime_plugin_launcher.py``"
+msgstr "``lmcache/multiprocess/mp_runtime_plugin_launcher.py``"
 
 #: ../../source/mp/index.rst:611
 msgid ""
@@ -1148,8 +1148,8 @@ msgid ""
 msgstr "``MPRuntimePluginLauncher`` 通过将完整的服务器配置序列化为环境变量来生成运行时插件"
 
 #: ../../source/mp/index.rst:613
-msgid "``lmcache/v1/multiprocess/protocols/base.py``"
-msgstr "``lmcache/v1/multiprocess/protocols/base.py``"
+msgid "``lmcache/multiprocess/protocols/base.py``"
+msgstr "``lmcache/multiprocess/protocols/base.py``"
 
 #: ../../source/mp/index.rst:614
 msgid "RequestType, HandlerType, ProtocolDefinition"
@@ -1212,48 +1212,48 @@ msgid "PrefetchController (L2->L1 on miss)"
 msgstr "PrefetchController (L2->L1 未命中时)"
 
 #: ../../source/mp/index.rst:631
-msgid "``lmcache/v1/mp_observability/config.py``"
-msgstr "``lmcache/v1/mp_observability/config.py``"
+msgid "``lmcache/mp_observability/config.py``"
+msgstr "``lmcache/mp_observability/config.py``"
 
 #: ../../source/mp/index.rst:632
 msgid "ObservabilityConfig + ``init_observability()`` entry point"
 msgstr "可观察性配置 + ``init_observability()`` 入口点"
 
 #: ../../source/mp/index.rst:633
-msgid "``lmcache/v1/mp_observability/event_bus.py``"
-msgstr "``lmcache/v1/mp_observability/event_bus.py``"
+msgid "``lmcache/mp_observability/event_bus.py``"
+msgstr "``lmcache/mp_observability/event_bus.py``"
 
 #: ../../source/mp/index.rst:634
 msgid "EventBus singleton and ``EventSubscriber`` base class"
 msgstr "事件总线单例和 ``EventSubscriber`` 基类"
 
 #: ../../source/mp/index.rst:635
-msgid "``lmcache/v1/mp_observability/event.py``"
-msgstr "``lmcache/v1/mp_observability/event.py``"
+msgid "``lmcache/mp_observability/event.py``"
+msgstr "``lmcache/mp_observability/event.py``"
 
 #: ../../source/mp/index.rst:636
 msgid "``Event`` / ``EventType`` definitions"
 msgstr "``Event`` / ``EventType`` 定义"
 
 #: ../../source/mp/index.rst:637
-msgid "``lmcache/v1/mp_observability/otel_init.py``"
-msgstr "``lmcache/v1/mp_observability/otel_init.py``"
+msgid "``lmcache/mp_observability/otel_init.py``"
+msgstr "``lmcache/mp_observability/otel_init.py``"
 
 #: ../../source/mp/index.rst:638
 msgid "OTel metrics / tracing provider setup"
 msgstr "OTel 指标 / 跟踪提供程序设置"
 
 #: ../../source/mp/index.rst:639
-msgid "``lmcache/v1/mp_observability/subscribers/``"
-msgstr "``lmcache/v1/mp_observability/subscribers/``"
+msgid "``lmcache/mp_observability/subscribers/``"
+msgstr "``lmcache/mp_observability/subscribers/``"
 
 #: ../../source/mp/index.rst:640
 msgid "Metrics, logging, and tracing subscribers"
 msgstr "指标、日志和追踪订阅者"
 
 #: ../../source/mp/index.rst:641
-msgid "``lmcache/v1/mp_observability/trace/``"
-msgstr "``lmcache/v1/mp_observability/trace/``"
+msgid "``lmcache/mp_observability/trace/``"
+msgstr "``lmcache/mp_observability/trace/``"
 
 #: ../../source/mp/index.rst:642
 msgid "Trace recording (``--trace-level storage``) capture stack"
@@ -1279,8 +1279,8 @@ msgstr "追踪记录 (``--trace-level storage``) 捕获堆栈"
 #~ "``lmcache server``."
 #~ msgstr "(遗留) 仅使用 MPCacheEngine 的 ZMQ 服务器（没有 HTTP 端点）。请使用 ``lmcache server``。"
 
-#~ msgid "``python3 -m lmcache.v1.multiprocess.blend_server_v2``"
-#~ msgstr "``python3 -m lmcache.v1.multiprocess.blend_server_v2``"
+#~ msgid "``python3 -m lmcache.multiprocess.blend_server_v2``"
+#~ msgstr "``python3 -m lmcache.multiprocess.blend_server_v2``"
 
 #~ msgid ""
 #~ "(Legacy) CacheBlend-enabled server. Prefer "

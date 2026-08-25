@@ -52,19 +52,19 @@ from lmcache.cli.commands.trace._dispatch import (
 )
 from lmcache.cli.commands.trace._stats import ReplayStatsCollector
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.config import StorageManagerConfig
-from lmcache.v1.distributed.storage_manager import StorageManager
-from lmcache.v1.mp_observability.config import (
+from lmcache.mp_observability.config import (
     ObservabilityConfig,
     init_observability,
 )
-from lmcache.v1.mp_observability.trace import codecs
-from lmcache.v1.mp_observability.trace.reader import TraceReader
-from lmcache.v1.mp_observability.trace.recorder import safe_storage_config_dict
+from lmcache.mp_observability.trace import codecs
+from lmcache.mp_observability.trace.reader import TraceReader
+from lmcache.mp_observability.trace.recorder import safe_storage_config_dict
+from lmcache.v1.distributed.config import StorageManagerConfig
+from lmcache.v1.distributed.storage_manager import StorageManager
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.mp_observability.event_bus import EventBus
+    from lmcache.mp_observability.event_bus import EventBus
 
 logger = init_logger(__name__)
 

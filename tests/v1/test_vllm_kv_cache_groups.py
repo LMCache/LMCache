@@ -10,7 +10,7 @@ import torch
 from lmcache.integration.vllm.kv_cache_groups import (
     create_engine_group_infos_from_vllm,
 )
-from lmcache.v1.multiprocess.group_view import (
+from lmcache.multiprocess.group_view import (
     expand_engine_block_ids,
     get_engine_group_indices,
     num_engine_groups,

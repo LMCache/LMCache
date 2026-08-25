@@ -22,7 +22,7 @@ import (
 
 // ValidateSpec validates the LMCacheCoordinatorSpec and returns any validation
 // errors. The checks mirror MPCoordinatorConfig.__post_init__
-// (lmcache/v1/mp_coordinator/config.py) so an invalid spec is rejected before
+// (lmcache/mp_coordinator/config.py) so an invalid spec is rejected before
 // the coordinator pod would fail to start.
 func (c *LMCacheCoordinator) ValidateSpec() field.ErrorList {
 	var errs field.ErrorList

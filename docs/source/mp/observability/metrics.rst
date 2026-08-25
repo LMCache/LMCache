@@ -16,7 +16,7 @@ one of two ways, depending on whether ``--otlp-endpoint`` is set:
      ``--prometheus-port`` is *ignored* by ``lmcache server``: the standalone
      Prometheus HTTP server is disabled because the HTTP frontend already
      serves ``/metrics``. The frontend-less entrypoints
-     (``python -m lmcache.v1.multiprocess.server`` and ``lmcache trace
+     (``python -m lmcache.multiprocess.server`` and ``lmcache trace
      replay``) have no HTTP frontend, so *they* serve ``/metrics`` on
      ``--prometheus-port`` (default 9090). See
      :ref:`mp-obs-metrics-endpoint` for the full breakdown. Either way,
@@ -263,7 +263,7 @@ needed when that lands.
 
 For the full design rationale (including which event types drive each
 counter and why ``lmcache_instance_id`` is deferred), see
-``docs/design/v1/mp_observability/METRICS.md`` in the source tree.
+``docs/design/mp_observability/METRICS.md`` in the source tree.
 
 Lookup Hit-Rate Metrics
 ~~~~~~~~~~~~~~~~~~~~~~~
@@ -569,8 +569,8 @@ and tail-dropping; raise that flag or investigate slow subscribers.
        for free functions).
 
 For the full design rationale and the in-process accessors that back
-each metric see ``docs/design/v1/mp_observability/METRICS.md`` and
-``docs/design/v1/mp_observability/event-bus.md`` in the source tree.
+each metric see ``docs/design/mp_observability/METRICS.md`` and
+``docs/design/mp_observability/event-bus.md`` in the source tree.
 
 Prometheus Scrape Configuration
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

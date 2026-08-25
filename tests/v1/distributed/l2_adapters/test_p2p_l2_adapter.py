@@ -10,6 +10,7 @@ import time
 import pytest
 
 # First Party
+from lmcache.multiprocess.protocol import RequestType
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.l2_adapters import p2p_l2_adapter as p2p_mod
 from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import (
@@ -20,7 +21,6 @@ from lmcache.v1.distributed.transfer_channel.api import (
     TransferChannelAddress,
     TransferChannelReadResult,
 )
-from lmcache.v1.multiprocess.protocol import RequestType
 
 _LAYOUT = MemoryLayoutDesc(shapes=[], dtypes=[])
 

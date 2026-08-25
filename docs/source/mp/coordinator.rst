@@ -27,7 +27,7 @@ Expected log output:
 
 See :doc:`/cli/coordinator` for the full flag list. Equivalently, the
 coordinator can be launched as a module with
-``python3 -m lmcache.v1.mp_coordinator``, which accepts the same flags.
+``python3 -m lmcache.mp_coordinator``, which accepts the same flags.
 
 Configuration
 -------------
@@ -204,7 +204,7 @@ The coordinator's HTTP surface (base URL ``http://localhost:9300``) groups into:
 
 Each endpoint is documented below. Success is ``200`` unless noted, and
 ``{cache_salt}`` uses the ``_default`` sentinel for the empty salt. The wire
-types live in ``lmcache/v1/mp_coordinator/schemas.py``.
+types live in ``lmcache/mp_coordinator/schemas.py``.
 
 Fleet membership and health
 ---------------------------
@@ -651,7 +651,7 @@ entry has the same fields as the ``GET /quota/{cache_salt}`` response.
 
 Usage events arrive on the fleet cache-event stream
 (``POST /events``); there is no separate quota ingestion
-endpoint. See ``docs/design/v1/mp_coordinator/cache_events.md`` for the
+endpoint. See ``docs/design/mp_coordinator/cache_events.md`` for the
 batch format and routing semantics.
 
 Key directory

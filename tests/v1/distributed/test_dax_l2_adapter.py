@@ -16,6 +16,7 @@ import torch
 
 # First Party
 from lmcache.lmcache_native import Bitmap
+from lmcache.mp_observability.event_bus import EventBus
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
@@ -50,7 +51,6 @@ from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
 )
-from lmcache.v1.mp_observability.event_bus import EventBus
 from lmcache.v1.platform import consume_fd
 
 _EMPTY_LAYOUT = MemoryLayoutDesc(shapes=[], dtypes=[])

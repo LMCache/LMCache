@@ -23,8 +23,8 @@ from lmcache.usage_telemetry.transport import UsageMessageSender
 
 if TYPE_CHECKING:
     # First Party
+    from lmcache.multiprocess.config import MPServerConfig
     from lmcache.v1.distributed.config import StorageManagerConfig
-    from lmcache.v1.multiprocess.config import MPServerConfig
 
 logger = init_logger(__name__)
 

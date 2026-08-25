@@ -8,6 +8,7 @@ from abc import abstractmethod
 from collections.abc import Callable, Mapping
 
 # First Party
+from lmcache.mp_coordinator.persistence.durable_component import PersistenceType
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.internal_api import (
     EvictionAction,
@@ -15,7 +16,6 @@ from lmcache.v1.distributed.internal_api import (
     L1ManagerListener,
     L2AdapterListener,
 )
-from lmcache.v1.mp_coordinator.persistence.durable_component import PersistenceType
 
 
 class EvictionPolicy:

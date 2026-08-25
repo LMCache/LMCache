@@ -112,7 +112,7 @@ A full docstring must include:
   - A clear, documented meaning
   - A clear invariant (at any point in time, a developer should know what the value should be without running the code)
   - A docstring or inline comment explaining it
-- **Private members must never be directly accessed by other classes.** Interact only through public APIs. This is enforced by CI in `lmcache/v1/multiprocess/` and `lmcache/v1/distributed/`, but applies project-wide.
+- **Private members must never be directly accessed by other classes.** Interact only through public APIs. This is enforced by CI in `lmcache/multiprocess/` and `lmcache/v1/distributed/`, but applies project-wide.
 - Prefer `@property` that derives from existing data over storing redundant fields.
 
 ### 4.5 Config and Dispatch

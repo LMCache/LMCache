@@ -8,7 +8,7 @@ is the registry of metrics sent today; adding a metric means adding a
 spec here and its field to the message schema in ``messages.py``.
 
 Like :mod:`.mp_continuous`, this module is not re-exported from the
-package root: it imports :mod:`lmcache.v1.mp_observability`, which the
+package root: it imports :mod:`lmcache.mp_observability`, which the
 single-process engine path must not pull in.
 """
 
@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from typing import Callable, Sequence
 
 # First Party
-from lmcache.v1.mp_observability.event import Event, EventType
+from lmcache.mp_observability.event import Event, EventType
 
 
 @dataclass(frozen=True)
@@ -33,7 +33,7 @@ class MetricSpec:
             reduced value. The reduced value is cast to ``int``.
         extract: Map step — turns one event into a numeric sample, or
             ``None`` to skip the event. May rely on the event metadata
-            keys documented in ``docs/design/v1/mp_observability/EVENTS.md``.
+            keys documented in ``docs/design/mp_observability/EVENTS.md``.
         reduce: Reduce step — folds all samples buffered in one flush
             interval into the field value. Must accept an empty sequence
             (idle intervals are flushed as heartbeats); ``sum`` is the

@@ -336,7 +336,7 @@ type RawL2AdapterSpec struct {
 
 // CoordinatorConnectionSpec configures how an engine server registers with an
 // MP coordinator. It maps to the server's coordinator-client flags
-// (lmcache/v1/multiprocess/config.py: add_coordinator_args). Exactly one of
+// (lmcache/multiprocess/config.py: add_coordinator_args). Exactly one of
 // ref or url must be set.
 type CoordinatorConnectionSpec struct {
 	// ref names an LMCacheCoordinator in the same namespace. The operator

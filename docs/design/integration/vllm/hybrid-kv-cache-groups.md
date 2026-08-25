@@ -178,10 +178,10 @@ no cross-backend cache sharing).
 
 | Area | File |
 |---|---|
-| Engine group info (IPC type) + helpers | `lmcache/v1/multiprocess/group_view.py` |
+| Engine group info (IPC type) + helpers | `lmcache/multiprocess/group_view.py` |
 | Shared grouping primitive | `lmcache/v1/kv_layer_groups.py` |
 | vLLM → `list[EngineGroupInfo]` | `lmcache/integration/vllm/kv_cache_groups.py` |
 | Group metadata edits (Mamba, sub-paged attention) | `lmcache/integration/vllm/kv_cache_group_edits.py` |
 | Register / store / retrieve | `lmcache/integration/vllm/{lmcache_mp_connector,vllm_multi_process_adapter}.py` |
-| Server GPU context / transfer | `lmcache/v1/multiprocess/{gpu_context,modules/lmcache_driven_transfer}.py` |
-| ZMQ protocol | `lmcache/v1/multiprocess/protocols/engine.py` |
+| Server GPU context / transfer | `lmcache/multiprocess/{gpu_context,modules/lmcache_driven_transfer}.py` |
+| ZMQ protocol | `lmcache/multiprocess/protocols/engine.py` |

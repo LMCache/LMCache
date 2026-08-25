@@ -12,6 +12,7 @@ import pytest
 
 # First Party
 from lmcache import torch_dev
+from lmcache.mp_observability.config import add_observability_args
 from lmcache.v1.distributed.config import (
     EvictionConfig,
     L1ManagerConfig,
@@ -24,7 +25,6 @@ from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.storage_controllers.eviction_controller import (
     L1EvictionController,
 )
-from lmcache.v1.mp_observability.config import add_observability_args
 
 _EVICTION_LOGGER = "lmcache.v1.distributed.storage_controllers.eviction_controller"
 

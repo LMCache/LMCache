@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.multiprocess.group_view import EngineGroupInfo
+from lmcache.multiprocess.group_view import EngineGroupInfo
 
 logger = init_logger(__name__)
 

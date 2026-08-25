@@ -27,7 +27,7 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.multiprocess.posix_shm import (
+from lmcache.multiprocess.posix_shm import (
     shm_create_readwrite,
     shm_map_readwrite,
     shm_munmap,
@@ -38,7 +38,7 @@ from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
 logger = init_logger(__name__)
 
 # Re-export POSIX-SHM primitives so existing callers keep working.
-# The canonical home is :mod:`lmcache.v1.multiprocess.posix_shm`; new
+# The canonical home is :mod:`lmcache.multiprocess.posix_shm`; new
 # code (e.g. the MP non-GPU SHM transport) should import from there.
 __all__ = [
     "CpuShmTensorWrapper",

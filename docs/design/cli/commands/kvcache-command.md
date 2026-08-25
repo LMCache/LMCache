@@ -22,7 +22,7 @@ sequence.
 ZMQ is reserved for **performance-critical data-path** communication between the
 inference engine and LMCache (store, retrieve, prefetch). Every `lmcache kvcache`
 CLI operation goes through the **MP HTTP server**
-(`lmcache/v1/multiprocess/http_server.py`).
+(`lmcache/multiprocess/http_server.py`).
 
 Today some operations (e.g. `pin`) only have ZMQ implementations. These
 need new HTTP endpoints on the MP HTTP server before the CLI can use them.
@@ -215,7 +215,7 @@ $ lmcache kvcache compress --url http://localhost:8000 \
 ## Existing API Surface & Gaps
 
 All CLI operations target the **MP HTTP server**
-(`lmcache/v1/multiprocess/http_server.py`).
+(`lmcache/multiprocess/http_server.py`).
 
 ### Usable today (no new endpoints needed)
 

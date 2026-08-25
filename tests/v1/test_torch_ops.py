@@ -11,7 +11,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.multiprocess.native_completion import (
+from lmcache.multiprocess.native_completion import (
     DeviceHostFuncDispatcher,
     submit_callback_to_stream,
 )
@@ -1812,7 +1812,7 @@ def scenario_dispatcher_integration(ops: Any, device: str) -> dict[str, torch.Te
     default stream which fires before the dispatcher's drain loop polls.
     """
     # First Party
-    import lmcache.v1.multiprocess.native_completion as nc
+    import lmcache.multiprocess.native_completion as nc
 
     original = nc._device_ops
     nc._device_ops = ops

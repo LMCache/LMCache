@@ -29,7 +29,7 @@ self-registers adapter type `dax`, owns separate event notifiers and worker
 pools for store, lookup, and load operations, and uses one or more
 `DaxCore[ObjectKey]` instances behind a stable facade.
 
-`lmcache/v1/multiprocess/http_apis/reconfigure_api.py` exposes runtime
+`lmcache/multiprocess/http_apis/reconfigure_api.py` exposes runtime
 reconfiguration endpoints:
 
 - `GET /reconfigure/dax/status`

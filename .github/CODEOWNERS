@@ -9,11 +9,11 @@
 /lmcache/v1/memory_management.py       @sammshen @deng451e @chunxiaozheng @DongDongJu @ApostaC
 
 # Multiprocess
-/lmcache/v1/multiprocess/              @ApostaC @Oasis-git @DongDongJu @hlin99
-/lmcache/v1/multiprocess/protocols/observability.py  @royyhuang @ApostaC
-/lmcache/v1/multiprocess/http_server.py              @royyhuang @ApostaC @Oasis-git
-/lmcache/v1/mp_coordinator/              @ruizhang0101
-/lmcache/v1/mp_observability/            @yoo-kumaneko @royyhuang @ApostaC @Oasis-git @sammshen @ruizhang0101
+/lmcache/multiprocess/              @ApostaC @Oasis-git @DongDongJu @hlin99
+/lmcache/multiprocess/protocols/observability.py  @royyhuang @ApostaC
+/lmcache/multiprocess/http_server.py              @royyhuang @ApostaC @Oasis-git
+/lmcache/mp_coordinator/              @ruizhang0101
+/lmcache/mp_observability/            @yoo-kumaneko @royyhuang @ApostaC @Oasis-git @sammshen @ruizhang0101
 
 # Distributed / L2
 /lmcache/v1/distributed/               @ApostaC @maobaolong @chunxiaozheng @DongDongJu

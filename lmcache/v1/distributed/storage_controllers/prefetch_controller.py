@@ -58,6 +58,9 @@ import threading
 # First Party
 from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
+from lmcache.mp_observability.event import Event, EventType
+from lmcache.mp_observability.event_bus import get_event_bus
+from lmcache.mp_observability.otel_init import register_gauge
 from lmcache.v1.distributed.api import (
     DEFAULT_ATTN_WINDOW_DESC,
     AttnWindowDesc,
@@ -82,9 +85,6 @@ from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
 from lmcache.v1.distributed.storage_controllers.store_policy import (
     AdapterDescriptor,
 )
-from lmcache.v1.mp_observability.event import Event, EventType
-from lmcache.v1.mp_observability.event_bus import get_event_bus
-from lmcache.v1.mp_observability.otel_init import register_gauge
 from lmcache.v1.platform import (
     consume_fd,
     create_event_notifier,

@@ -30,7 +30,7 @@ class InfoCommand(BaseCommand):
 
     def execute(self, args: argparse.Namespace) -> None:
         # First Party
-        from lmcache.v1.mp_observability.trace.reader import TraceReader
+        from lmcache.mp_observability.trace.reader import TraceReader
 
         with TraceReader(args.trace_path) as r:
             header = r.header

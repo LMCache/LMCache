@@ -14,9 +14,9 @@ import torch
 
 # First Party
 from lmcache.integration.vllm.utils import vllm_layout_hints
+from lmcache.multiprocess.group_view import EngineGroupInfo
+from lmcache.multiprocess.protocol import RequestType
 from lmcache.utils import init_logger as lmcache_init_logger
-from lmcache.v1.multiprocess.group_view import EngineGroupInfo
-from lmcache.v1.multiprocess.protocol import RequestType
 
 if TYPE_CHECKING:
     # Third Party
@@ -33,7 +33,7 @@ if TYPE_CHECKING:
         StoreResult,
         _IpcEvent,
     )
-    from lmcache.v1.multiprocess.mq import MessagingFuture
+    from lmcache.multiprocess.mq import MessagingFuture
 
 logger = lmcache_init_logger(__name__)
 

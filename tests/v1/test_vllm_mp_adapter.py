@@ -25,8 +25,8 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (
     LoadStoreOp,
     ParallelStrategy,
 )
-from lmcache.v1.multiprocess.group_view import EngineGroupInfo
-from lmcache.v1.multiprocess.protocol import RequestType
+from lmcache.multiprocess.group_view import EngineGroupInfo
+from lmcache.multiprocess.protocol import RequestType
 
 
 class FakeCudaEvent:
@@ -166,7 +166,7 @@ def fake_adapter(monkeypatch):
 
     # KV-cache wrapping pulls in CUDA IPC; bypass for unit tests.
     # First Party
-    from lmcache.v1.multiprocess.transfer_context import worker_transfer
+    from lmcache.multiprocess.transfer_context import worker_transfer
 
     monkeypatch.setattr(
         worker_transfer,
@@ -659,7 +659,7 @@ def test_register_uses_local_context_when_self_transfer_ctx_nulled(
     monkeypatch.setattr(adapter_mod, "send_lmcache_request", lambda *a, **kw: future)
     monkeypatch.setattr(adapter_mod, "HeartbeatThread", FakeHeartbeatThread)
     # First Party
-    from lmcache.v1.multiprocess.transfer_context import worker_transfer
+    from lmcache.multiprocess.transfer_context import worker_transfer
 
     monkeypatch.setattr(
         worker_transfer,

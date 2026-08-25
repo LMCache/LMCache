@@ -1,0 +1,221 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Blend mp-server side client for the coordinator's fragment lookup.
+
+Queries ``POST /directory/blend-lookup``. Blend handlers run in sync thread
+pools with no asyncio loop, so this owns a synchronous ``httpx.Client`` plus a
+daemon and follows the submit-once / poll-on-recall pattern the prefix and
+sparse legs already use, never blocking a worker thread on the round-trip.
+
+Query only: the chunks the coordinator matches against arrive on the fleet
+cache-event stream, so there is no publish path here. Opt-in — with no
+coordinator URL the blend module gets ``None`` and matches purely locally.
+"""
+
+# Standard
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from queue import Empty, Queue
+import threading
+
+# First Party
+from lmcache.logging import init_logger
+from lmcache.mp_coordinator.api import BlendMatch
+from lmcache.mp_coordinator.schemas import encode_tokens
+
+logger = init_logger(__name__)
+
+# poll_match sentinel: query submitted, round-trip not finished yet.
+PENDING = object()
+
+# (method, path, json_body) -> json_dict
+_RequestFn = Callable[[str, str, dict], dict]
+
+
+@dataclass
+class _MatchItem:
+    """A queued match query for request ``rid``."""
+
+    rid: str
+    tokens: list[int]
+
+
+class BlendCoordinatorClient:
+    """Background bridge from the blend module to the coordinator directory.
+
+    Thread-safe. Handler threads enqueue match queries; one daemon thread
+    dequeues them, dispatching each to a thread pool so round-trips run
+    concurrently. Results land in a dict the handler polls.
+    """
+
+    def __init__(
+        self,
+        base_url: str = "",
+        *,
+        request_fn: _RequestFn | None = None,
+        request_timeout: float = 2.0,
+        match_budget_s: float = 2.0,
+        match_concurrency: int = 8,
+    ) -> None:
+        """Create the client and start its daemon.
+
+        Args:
+            base_url: Coordinator base URL (e.g. ``http://coordinator:9300``).
+                Ignored when ``request_fn`` is supplied.
+            request_fn: Optional injected ``(method, path, json_body) ->
+                json_dict`` used instead of the built-in HTTP client (for
+                testing). Must raise on transport failure.
+            request_timeout: Per-request HTTP timeout in seconds.
+            match_budget_s: Per-lookup wall-clock budget the blend module uses to
+                bound the optional global leg, including queue wait.
+            match_concurrency: Max match round-trips in flight at once (the
+                match dispatch pool size). Must be >= 1.
+
+        Raises:
+            ValueError: If ``match_concurrency`` is not positive.
+        """
+        if match_concurrency < 1:
+            raise ValueError(f"match_concurrency must be >= 1, got {match_concurrency}")
+        self.match_budget_s = match_budget_s
+        self._client = None
+        if request_fn is None:
+            # Third Party
+            import httpx
+
+            client = httpx.Client(timeout=request_timeout)
+            base = base_url.rstrip("/")
+
+            def _http_request(method: str, path: str, payload: dict) -> dict:
+                resp = client.request(method, f"{base}{path}", json=payload)
+                resp.raise_for_status()
+                return resp.json()
+
+            self._client = client
+            self._request: _RequestFn = _http_request
+        else:
+            self._request = request_fn
+
+        self._match_q: "Queue[_MatchItem]" = Queue()
+        self._results: dict[str, object] = {}
+        self._results_lock = threading.Lock()
+        self._stop = threading.Event()
+        self._match_pool = ThreadPoolExecutor(
+            max_workers=match_concurrency, thread_name_prefix="cb-coord-match"
+        )
+        self._worker = threading.Thread(
+            target=self._run, name="cb-coordinator-client", daemon=True
+        )
+        self._worker.start()
+
+    def submit_match(self, rid: str, tokens: list[int]) -> None:
+        """Submit a match query for a request once (idempotent per ``rid``).
+
+        Args:
+            rid: Request id, the poll key.
+            tokens: The request tokens (the coordinator hashes and probes them).
+        """
+        with self._results_lock:
+            if rid in self._results:
+                return
+            self._results[rid] = PENDING
+        self._match_q.put(_MatchItem(rid=rid, tokens=tokens))
+
+    def poll_match(self, rid: str) -> object:
+        """Return the match state for a request.
+
+        Args:
+            rid: Request id used in :meth:`submit_match`.
+
+        Returns:
+            :data:`PENDING` while in flight, a ``list[BlendMatch]`` when ready,
+            or ``None`` if never submitted (or already consumed).
+        """
+        with self._results_lock:
+            return self._results.get(rid)
+
+    def take_match(self, rid: str) -> None:
+        """Drop a request's stored match state once consumed.
+
+        Args:
+            rid: Request id to clear.
+        """
+        with self._results_lock:
+            self._results.pop(rid, None)
+
+    def close(self) -> None:
+        """Stop the daemon, drain the match pool, and close the HTTP client."""
+        self._stop.set()
+        self._worker.join(timeout=2.0)
+        self._match_pool.shutdown(wait=False)
+        if self._client is not None:
+            self._client.close()
+
+    @classmethod
+    def maybe_create(
+        cls,
+        url: str | None,
+        *,
+        timeout: float,
+        match_concurrency: int,
+    ) -> "BlendCoordinatorClient | None":
+        """Build a started client for ``url``; an empty URL returns ``None``.
+
+        Args:
+            url: Coordinator base URL; empty or ``None`` disables the client.
+            timeout: Seconds used as both the per-request HTTP timeout and the
+                per-lookup match budget.
+            match_concurrency: Max match round-trips in flight at once.
+
+        Returns:
+            A started client, or ``None`` when ``url`` is empty (the blend
+            module then runs purely local).
+
+        Raises:
+            ValueError: If ``match_concurrency`` is not positive.
+        """
+        url = (url or "").strip()
+        if not url:
+            return None
+        logger.info("Blend coordinator client enabled -> %s", url)
+        return cls(
+            url,
+            request_timeout=timeout,
+            match_budget_s=timeout,
+            match_concurrency=match_concurrency,
+        )
+
+    # -- daemon ------------------------------------------------------------
+
+    def _run(self) -> None:
+        """Dispatch queued match queries to the pool."""
+        while not self._stop.is_set():
+            try:
+                item = self._match_q.get(timeout=0.05)
+            except Empty:
+                continue
+            self._match_pool.submit(self._handle_match, item)
+
+    def _handle_match(self, item: _MatchItem) -> None:
+        """POST a match query and store the parsed matches (miss on error)."""
+        matches: list[BlendMatch] = []
+        try:
+            body = self._request(
+                "POST",
+                "/directory/blend-lookup",
+                {"tokens_b64": encode_tokens(item.tokens)},
+            )
+            matches = [
+                BlendMatch(
+                    chunk_hash=bytes.fromhex(m["chunk_hash"]),
+                    old_st=int(m["old_st"]),
+                    cur_st=int(m["cur_st"]),
+                )
+                for m in body.get("matches", [])
+            ]
+        except Exception as e:
+            # Best-effort: a failed query degrades to local-only (empty result).
+            logger.warning("Blend coordinator match failed for %s: %r", item.rid, e)
+        with self._results_lock:
+            # Only fill if still awaited (not taken/cleared meanwhile).
+            if self._results.get(item.rid) is PENDING:
+                self._results[item.rid] = matches

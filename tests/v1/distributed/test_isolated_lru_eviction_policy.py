@@ -7,12 +7,12 @@ Unit tests for :class:`IsolatedLRUEvictionPolicy`.
 import pytest
 
 # First Party
+from lmcache.mp_coordinator.utils.encoding import encode_key
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.eviction_policy.isolated_lru import (
     IsolatedLRUEvictionPolicy,
 )
 from lmcache.v1.distributed.internal_api import EvictionDestination
-from lmcache.v1.mp_coordinator.utils.encoding import encode_key
 
 
 def _key(chunk_id: int, cache_salt: str = "") -> ObjectKey:

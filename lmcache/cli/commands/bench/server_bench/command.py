@@ -72,7 +72,7 @@ if TYPE_CHECKING:
     # First Party
     from lmcache.cli.commands.base import BaseCommand
     from lmcache.cli.profiling import FlameProfiler
-    from lmcache.v1.multiprocess.custom_types import KVCache
+    from lmcache.multiprocess.custom_types import KVCache
 
 
 # Stash the original (full-install) ImportError so the parser-stub
@@ -382,12 +382,12 @@ def run_server_bench(
     import zmq
 
     # First Party
+    from lmcache.multiprocess.group_view import EngineGroupInfo
+    from lmcache.multiprocess.mq import MessageQueueClient
     from lmcache.v1.kv_layer_groups import (
         format_kvcache_shape_spec,
         parse_kvcache_shape_spec,
     )
-    from lmcache.v1.multiprocess.group_view import EngineGroupInfo
-    from lmcache.v1.multiprocess.mq import MessageQueueClient
 
     quiet = getattr(args, "quiet", False)
 

@@ -34,6 +34,13 @@ nixl = pytest.importorskip("nixl")
 import zmq  # noqa: E402
 
 # First Party
+from lmcache.multiprocess.config import (  # noqa: E402
+    CoordinatorConfig,
+    P2PConfig,
+)
+from lmcache.multiprocess.modules.p2p_controller import P2PController  # noqa: E402
+from lmcache.multiprocess.mq import MessageQueueServer  # noqa: E402
+from lmcache.multiprocess.protocol import get_payload_classes  # noqa: E402
 from lmcache.v1.distributed.api import (  # noqa: E402
     MemoryLayoutDesc,
     ObjectKey,
@@ -57,13 +64,6 @@ from lmcache.v1.distributed.transfer_channel import (  # noqa: E402
 from lmcache.v1.distributed.transfer_channel.impl.nixl_impl import (  # noqa: E402
     NixlTransferChannelContext,
 )
-from lmcache.v1.multiprocess.config import (  # noqa: E402
-    CoordinatorConfig,
-    P2PConfig,
-)
-from lmcache.v1.multiprocess.modules.p2p_controller import P2PController  # noqa: E402
-from lmcache.v1.multiprocess.mq import MessageQueueServer  # noqa: E402
-from lmcache.v1.multiprocess.protocol import get_payload_classes  # noqa: E402
 
 _PAGE = 4096
 _NUM_KEYS = 3

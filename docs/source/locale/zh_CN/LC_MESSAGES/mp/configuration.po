@@ -36,8 +36,8 @@ msgstr "MP 服务器"
 
 #: ../../source/mp/configuration.rst:14 ../../source/mp/configuration.rst:169
 #: ../../source/mp/configuration.rst:190
-msgid "Source: ``lmcache/v1/multiprocess/config.py``"
-msgstr "源: ``lmcache/v1/multiprocess/config.py``"
+msgid "Source: ``lmcache/multiprocess/config.py``"
+msgstr "源: ``lmcache/multiprocess/config.py``"
 
 #: ../../source/mp/configuration.rst:20 ../../source/mp/configuration.rst:147
 #: ../../source/mp/configuration.rst:177 ../../source/mp/configuration.rst:202
@@ -383,8 +383,8 @@ msgid "Lookup Hash Logging"
 msgstr "查找哈希日志记录"
 
 #: ../../source/mp/configuration.rst:135
-msgid "Source: ``lmcache/v1/mp_observability/subscribers/logging/lookup_hash.py``"
-msgstr "源: ``lmcache/v1/mp_observability/subscribers/logging/lookup_hash.py``"
+msgid "Source: ``lmcache/mp_observability/subscribers/logging/lookup_hash.py``"
+msgstr "源: ``lmcache/mp_observability/subscribers/logging/lookup_hash.py``"
 
 #: ../../source/mp/configuration.rst:137
 msgid ""
@@ -904,8 +904,8 @@ msgid "Observability"
 msgstr "可观察性"
 
 #: ../../source/mp/configuration.rst:426
-msgid "Source: ``lmcache/v1/mp_observability/config.py``"
-msgstr "源: ``lmcache/v1/mp_observability/config.py``"
+msgid "Source: ``lmcache/mp_observability/config.py``"
+msgstr "源: ``lmcache/mp_observability/config.py``"
 
 #: ../../source/mp/configuration.rst:428
 msgid ""

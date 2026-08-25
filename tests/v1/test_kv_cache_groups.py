@@ -3,7 +3,7 @@
 import msgspec
 
 # First Party
-from lmcache.v1.multiprocess.group_view import (
+from lmcache.multiprocess.group_view import (
     EngineGroupInfo,
     expand_engine_block_ids,
     get_engine_group_indices,

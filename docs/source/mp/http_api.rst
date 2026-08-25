@@ -11,15 +11,15 @@ Where the routes come from
 --------------------------
 
 Routes are assembled from three sources, all merged into one FastAPI app by
-:class:`~lmcache.v1.multiprocess.http_api_registry.HTTPAPIRegistry` at startup:
+:class:`~lmcache.multiprocess.http_api_registry.HTTPAPIRegistry` at startup:
 
 - **MP-native routes** — any module named ``*_api.py`` under
-  ``lmcache/v1/multiprocess/http_apis/`` that exposes a module-level
+  ``lmcache/multiprocess/http_apis/`` that exposes a module-level
   ``router`` (a :class:`fastapi.APIRouter`) is auto-discovered. This covers
   the operational surface: status, cache control, L2 management, quota, and
   runtime reconfiguration.
 - **Shared "common" routes** —
-  ``lmcache/v1/multiprocess/http_apis/common_api.py`` aggregates every
+  ``lmcache/multiprocess/http_apis/common_api.py`` aggregates every
   compatible router under ``lmcache/v1/internal_api_server/common/`` (skipping
   any module listed in ``_MP_INCOMPATIBLE_MODULES``, currently empty) and
   forwards them to the auto-discovery pipeline. These are the cross-server
@@ -28,7 +28,7 @@ Routes are assembled from three sources, all merged into one FastAPI app by
   ``/run_script``). Adding a new compatible module under
   ``internal_api_server/common`` requires no wiring changes on the MP side.
 - **Re-exported version routes** — the basic-info group
-  ``lmcache/v1/multiprocess/http_apis/info_api.py`` includes the router
+  ``lmcache/multiprocess/http_apis/info_api.py`` includes the router
   from ``lmcache/v1/internal_api_server/vllm/version_api.py``, exposing
   ``/version``, ``/lmc_version``, and ``/commit_id`` alongside ``/``,
   ``/healthcheck`` and ``/status``.
@@ -1657,7 +1657,7 @@ Adding New Endpoints
 --------------------
 
 Endpoints are auto-discovered from
-``lmcache/v1/multiprocess/http_apis/``. To add a new MP-only endpoint:
+``lmcache/multiprocess/http_apis/``. To add a new MP-only endpoint:
 
 1. Create a new module in that directory named ``<name>_api.py``.
 2. Define a module-level ``router = APIRouter()``.
@@ -1665,7 +1665,7 @@ Endpoints are auto-discovered from
 4. Access the engine via ``request.app.state.engine`` and guard for the
    ``None`` case (engine not yet initialized).
 
-The :class:`~lmcache.v1.multiprocess.http_api_registry.HTTPAPIRegistry`
+The :class:`~lmcache.multiprocess.http_api_registry.HTTPAPIRegistry`
 will pick the module up automatically at startup — no central
 registration list to edit.
 

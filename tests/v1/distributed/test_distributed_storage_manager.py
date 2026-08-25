@@ -12,6 +12,8 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
+from lmcache.mp_observability.event import Event, EventType
+from lmcache.mp_observability.event_bus import EventBusConfig, init_event_bus
 from lmcache.v1.distributed.api import (
     AttnWindowDesc,
     MemoryLayoutDesc,
@@ -30,8 +32,6 @@ from lmcache.v1.distributed.l2_adapters.config import (
     L2AdaptersConfig,
 )
 from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import MockL2AdapterConfig
-from lmcache.v1.mp_observability.event import Event, EventType
-from lmcache.v1.mp_observability.event_bus import EventBusConfig, init_event_bus
 from tests.v1.distributed.utils import should_use_lazy_alloc
 
 if not torch_dev.is_available():

@@ -28,6 +28,9 @@ from lmcache.cli.commands.trace._dispatch import (
     build_default_dispatcher,
 )
 from lmcache.cli.commands.trace._driver import StorageReplayDriver
+from lmcache.mp_observability.event_bus import EventBus, EventBusConfig
+from lmcache.mp_observability.trace.decorator import set_tracing_enabled
+from lmcache.mp_observability.trace.recorder import StorageTraceRecorder
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
@@ -40,10 +43,7 @@ from lmcache.v1.distributed.config import (
     StorageManagerConfig,
 )
 from lmcache.v1.distributed.storage_manager import StorageManager
-from lmcache.v1.mp_observability.event_bus import EventBus, EventBusConfig
-from lmcache.v1.mp_observability.trace.decorator import set_tracing_enabled
-from lmcache.v1.mp_observability.trace.recorder import StorageTraceRecorder
-import lmcache.v1.mp_observability.event_bus as _bus_module
+import lmcache.mp_observability.event_bus as _bus_module
 
 # ---------------------------------------------------------------------------
 # Fixtures

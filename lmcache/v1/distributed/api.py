@@ -19,7 +19,7 @@ from lmcache.logging import init_logger
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+    from lmcache.multiprocess.custom_types import IPCCacheServerKey
 
 logger = init_logger(__name__)
 

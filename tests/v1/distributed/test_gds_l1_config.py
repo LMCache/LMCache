@@ -5,11 +5,11 @@
 import argparse
 
 # First Party
+from lmcache.multiprocess.config import add_mp_server_args
 from lmcache.v1.distributed.config import (
     add_storage_manager_args,
     parse_args_to_config,
 )
-from lmcache.v1.multiprocess.config import add_mp_server_args
 
 
 def test_cli_parses_ugds_raw_device() -> None:

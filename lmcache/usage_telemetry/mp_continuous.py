@@ -10,7 +10,7 @@ are still sent and double as session heartbeats.
 
 This module is not re-exported from the package root so that importing
 :mod:`lmcache.usage_telemetry` (done by the single-process engine path)
-never pulls in :mod:`lmcache.v1.mp_observability`.
+never pulls in :mod:`lmcache.mp_observability`.
 
 Note:
     The default metrics are sourced from ``MP_RETRIEVE_END`` /
@@ -28,6 +28,12 @@ import time
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.mp_observability.event import Event, EventType
+from lmcache.mp_observability.event_bus import (
+    EventBus,
+    EventCallback,
+    EventSubscriber,
+)
 from lmcache.usage_telemetry.flush import start_usage_flush_thread
 from lmcache.usage_telemetry.guard import swallow_telemetry_errors
 from lmcache.usage_telemetry.identity import (
@@ -41,12 +47,6 @@ from lmcache.usage_telemetry.transport import (
     UsageMessageSender,
     build_usage_payload,
     usage_server_url,
-)
-from lmcache.v1.mp_observability.event import Event, EventType
-from lmcache.v1.mp_observability.event_bus import (
-    EventBus,
-    EventCallback,
-    EventSubscriber,
 )
 
 logger = init_logger(__name__)

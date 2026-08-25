@@ -182,7 +182,7 @@ Run these checks and report the outcome. Do NOT auto-run them; print the command
 ```bash
 pre-commit run --all-files
 pytest -xvs tests/v1/distributed/        # if distributed/ changed
-pytest -xvs tests/v1/mp_observability/   # if mp_observability/ changed
+pytest -xvs tests/mp_observability/   # if mp_observability/ changed
 ```
 
 ## Output Format

@@ -14,6 +14,9 @@ import torch
 
 # First Party
 from lmcache import torch_device_type
+from lmcache.mp_observability.event import Event, EventType
+from lmcache.mp_observability.event_bus import EventBus, EventBusConfig
+from lmcache.multiprocess.config import MPServerConfig
 from lmcache.usage_telemetry import (
     USAGE_SCHEMA_VERSION,
     ContinuousUsageContext,
@@ -56,9 +59,6 @@ from lmcache.v1.distributed.l2_adapters.config import (
     get_type_name_for_config,
 )
 from lmcache.v1.metadata import LMCacheMetadata
-from lmcache.v1.mp_observability.event import Event, EventType
-from lmcache.v1.mp_observability.event_bus import EventBus, EventBusConfig
-from lmcache.v1.multiprocess.config import MPServerConfig
 
 
 class RecordingSender(UsageMessageSender):

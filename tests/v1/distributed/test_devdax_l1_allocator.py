@@ -18,6 +18,8 @@ import pytest
 import torch
 
 # First Party
+from lmcache.multiprocess.config import add_mp_server_args
+from lmcache.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.distributed.api import L1BackendType, MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import (
     EvictionConfig,
@@ -41,8 +43,6 @@ from lmcache.v1.memory_allocators.devdax_memory_allocator import (
     DevDaxArenaState,
     DevDaxMemoryAllocator,
 )
-from lmcache.v1.multiprocess.config import add_mp_server_args
-from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 import lmcache.v1.memory_management as memory_management
 
 
