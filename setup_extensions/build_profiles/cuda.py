@@ -21,6 +21,8 @@ from setup_extensions.build_profiles import BuildProfile
 ENABLE_CXX11_ABI = os.environ.get("ENABLE_CXX11_ABI", "1") == "1"
 CSRC_DIR = str(Path(__file__).resolve().parents[2] / "csrc")
 
+NVCC_THREADS = int(os.environ.get("NVCC_THREADS", "2"))
+
 
 class CudaProfile(BuildProfile):
     """CUDA GPU extension build profile."""
@@ -70,7 +72,7 @@ class CudaProfile(BuildProfile):
                 include_dirs=[CSRC_DIR],
                 extra_compile_args={
                     "cxx": [flag_cxx_abi, "-std=c++17"],
-                    "nvcc": [flag_cxx_abi],
+                    "nvcc": [flag_cxx_abi, f"--threads={NVCC_THREADS}"],
                 },
             ),
         ]
