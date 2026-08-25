@@ -15,7 +15,7 @@ import torch
 from lmcache import device_ops
 from lmcache.logging import init_logger
 from lmcache.utils import lmcache_deprecate
-from lmcache.v1.distributed.api import AttnWindowDesc
+from lmcache.v1.distributed.api import AttnWindowDesc, GroupKind
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 import lmcache.lmcache_native as lmcache_native
 
@@ -207,6 +207,16 @@ class KernelGroupInfo:
     sw_size_tokens: int = -1
     """Sliding window size in logical tokens for this group's layers.
     ``-1`` means the layers are not sliding-window attention."""
+    extra_object_group_tag: int = 0
+    """Connector-private extra-group tag. ``0`` = a regular group, bucketed
+    by (recurrent, window) under ``separate_object_groups``; ``> 0`` = an
+    extra group (e.g. the CacheBlend fused-aux pool) that buckets by tag —
+    groups sharing a tag share an object group, and extras always sort
+    after the regular groups."""
+    recurrent_state: bool = False
+    """Whether this group's pages hold recurrent state snapshots (Mamba/GDN)
+    rather than per-token attention KV. The window reflects restore
+    semantics, so ``full_sw_kv`` forcing must not widen it."""
 
     def __repr__(self) -> str:
         if not self.layer_indices:
@@ -255,6 +265,19 @@ class KernelGroupInfo:
 KVLayerGroupInfo = KernelGroupInfo  # Alias for compatibility
 
 
+class _ObjectBucket(NamedTuple):
+    """Object-group bucket key under ``separate_object_groups``.
+
+    Regular groups (``extra_tag == 0``) bucket by ``(recurrent, sw_chunks)``;
+    tagged extras bucket by ``extra_tag`` (their other fields ride along for
+    bookkeeping but extras never mix with regular groups).
+    """
+
+    extra_tag: int
+    recurrent: bool
+    sw_chunks: int
+
+
 @dataclass
 class ObjectGroupInfo:
     """Metadata for an 'object group'.
@@ -275,6 +298,14 @@ class ObjectGroupInfo:
     """Cross-chunk sliding window size in LMCache chunks shared by every
     kernel group in this object group. ``-1`` means the kernel groups are
     not sliding-window attention."""
+
+    standalone: bool = False
+    """Whether this is a connector-private (standalone) object group (see
+    ``KernelGroupInfo.extra_object_group_tag``)."""
+
+    recurrent: bool = False
+    """Whether every kernel group in this object group holds recurrent state
+    pages; such groups keep their window even under ``full_sw_kv``."""
 
 
 class KVLayerGroupsManager:
@@ -425,6 +456,12 @@ class KVLayerGroupsManager:
                     tokens_per_block=tokens_per_block,
                     engine_group_idx=engine_group_idx,
                     sw_size_tokens=sw_size_tokens,
+                    extra_object_group_tag=(
+                        info.extra_object_group_tag if info is not None else 0
+                    ),
+                    recurrent_state=(
+                        info.recurrent_state if info is not None else False
+                    ),
                 )
             )
 
@@ -568,21 +605,39 @@ class KVLayerGroupsManager:
         Returns:
             An :class:`AttnWindowDesc` with one entry per object group, in
             object-group order; the entry is ``-1`` for a non-sliding-window
-            group.
+            group. ``group_kinds`` labels each object group so consumers can
+            tell attention, recurrent-state, and connector-private standalone
+            groups apart.
 
         Note:
             With object-group separation disabled (the default), the result
             has a single full-attention entry.
         """
+        kinds: tuple[GroupKind, ...] = tuple(
+            "standalone"
+            if g.standalone
+            else ("recurrent" if g.recurrent else "attention")
+            for g in self._object_groups
+        )
         if self._full_sw_kv:
-            # full_sw_kv: every group reports full attention, no cross-chunk
-            # window skipping (mirrors get_subchunk_sw_size_tokens).
-            return AttnWindowDesc(num_chunks_in_sw=[-1] * len(self._object_groups))
+            # full_sw_kv: attention groups report full attention;
+            # recurrent-state groups keep their window (position-bound
+            # snapshots the blend never touches).
+            return AttnWindowDesc(
+                num_chunks_in_sw=[
+                    (g.sw_size_chunks if g.sw_size_chunks >= 1 else -1)
+                    if g.recurrent
+                    else -1
+                    for g in self._object_groups
+                ],
+                group_kinds=kinds,
+            )
         return AttnWindowDesc(
             num_chunks_in_sw=[
                 w if w >= 1 else -1
                 for w in (g.sw_size_chunks for g in self._object_groups)
-            ]
+            ],
+            group_kinds=kinds,
         )
 
     def calculate_num_blocks(self, kernel_group_idx: int, num_tokens: int) -> int:
@@ -614,8 +669,11 @@ class KVLayerGroupsManager:
         """Bucket kernel groups into object groups.
 
         Puts all kernel groups into a single object group when object-group
-        separation is disabled (the default). Otherwise groups the kernel groups
-        by sliding-window size measured in number of chunks.
+        separation is disabled (the default). Otherwise groups the kernel
+        groups by (recurrent, sliding-window chunks), except that tagged
+        extra groups (``extra_object_group_tag``, connector-private) bucket
+        by tag — and always sort after the regular groups, so the shared
+        group ids match a registration without any extras.
 
         Args:
             engine_group_infos: LMCache-owned engine KV cache group metadata.
@@ -631,20 +689,37 @@ class KVLayerGroupsManager:
             ]
 
         chunk_size = self._lmcache_tokens_per_chunk
-        groups_by_sw_size: dict[int, list[int]] = defaultdict(list)
+        # Recurrent pages and SW attention KV never share an object even when
+        # windows coincide; tagged extras bucket by tag alone.
+        groups_by_bucket: dict[_ObjectBucket, list[int]] = defaultdict(list)
+        bucket_sw_size: dict[_ObjectBucket, int] = {}
         for kernel_group_idx, group in enumerate(self._kernel_groups):
             if group.sw_size_tokens == -1:
                 sw_size_chunks = -1
             else:
                 sw_size_chunks = (group.sw_size_tokens + chunk_size - 1) // chunk_size
-            groups_by_sw_size[sw_size_chunks].append(kernel_group_idx)
+            bucket = _ObjectBucket(
+                extra_tag=group.extra_object_group_tag,
+                recurrent=group.recurrent_state,
+                sw_chunks=sw_size_chunks,
+            )
+            groups_by_bucket[bucket].append(kernel_group_idx)
+            bucket_sw_size[bucket] = sw_size_chunks
+        # Extras sort AFTER every regular group, so the shared (regular)
+        # group ids are identical to a registration without extras —
+        # regardless of the order the connector registered its pools in.
         return [
             ObjectGroupInfo(
                 kernel_group_indices=kernel_group_indices,
-                sw_size_chunks=sw_size_chunks,
+                sw_size_chunks=bucket_sw_size[bucket],
+                standalone=bucket.extra_tag != 0,
+                recurrent=all(
+                    self._kernel_groups[i].recurrent_state for i in kernel_group_indices
+                ),
             )
-            for sw_size_chunks, kernel_group_indices in sorted(
-                groups_by_sw_size.items(), key=lambda kv: kv[1][0]
+            for bucket, kernel_group_indices in sorted(
+                groups_by_bucket.items(),
+                key=lambda kv: (kv[0].extra_tag != 0, kv[1][0]),
             )
         ]
 

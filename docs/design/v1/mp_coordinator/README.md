@@ -41,6 +41,8 @@ shape.
 | `GET /cache/prefetches/{instance_id}/{request_id}` | operator/scheduler | poll a warm prefetch |
 | `POST/DELETE /cache/pins` | operator | pin / unpin keys against fleet-wide eviction |
 | `POST /cache/delete` | operator | delete cached objects on a named server |
+| `GET /instances/usage` | operator/scheduler | fleet memory view: per-server, per-module usage vs declared capacity |
+| `GET /instances/{instance_id}/usage` | operator/scheduler | one server's memory compartments |
 
 For server-initiated work (fleet-wide eviction, warm prefetch) a coordinator
 router resolves an instance's address from the registry (`ip` + `http_port`)
@@ -62,6 +64,7 @@ lmcache/v1/mp_coordinator/
   key_directory.py      # KeyDirectory: placements + token bindings (a cache-event consumer)
   blend_index.py      # BlendIndex: fragment (blend) lookup over those bindings
   blend_client.py       # mp-server-side fragment-lookup query client
+  server_config.py      # ServerConfigRegistry: per-server module capacities (from registration)
   ingest/
     __init__.py
     event_gate.py       # EventGate: incarnation fencing, seq dedup, gap detection
@@ -80,6 +83,7 @@ lmcache/v1/mp_coordinator/
     cache_api.py        # /cache/prefetches, /cache/pins, /cache/delete
     events_api.py       # /events (fleet cache-event ingest)
     directory_api.py    # /directory/lookup, /directory/blend-lookup, /directory/keys, ...
+    instances_usage_api.py  # /instances/usage, /instances/{id}/usage
 ```
 
 ## Request flow
@@ -212,6 +216,34 @@ it. The one coupling is pins, and it runs the way you'd want: a pin's
 entire meaning is "exempt from eviction", so the pin set is eviction
 state that the cache-control endpoints write, not the reverse.
 
+
+## Fleet memory pressure (`server_config.py`)
+
+`GET /instances/usage` answers how full each server's memory compartments
+are, by joining two halves that ride the same channel at very different
+rates: **usage** from `CacheUsageManager.get_bytes_by_instance`, already
+maintained off the admitted cache-event stream, and **capacity** from
+`capacity_reports` on `POST /events`. Capacity is configuration — it changes
+at boot and at reconfiguration, not per event — so a server reports it once
+at startup and again on each change, each report a whole declaration fenced
+by `(incarnation, revision)`.
+
+The endpoint adds no usage tracking of its own: the per-instance,
+per-backend rollup it needs is exactly what the usage manager publishes.
+
+`ServerConfigRegistry` holds the declarations. It lives outside
+`registry.py` because that file is membership only; a capacity is not a way
+to reach a server.
+
+Two properties the endpoint depends on. Shared backends (one S3 bucket
+mounted by N servers) are counted **once** for the fleet, never summed —
+the same empty-owner convention the key directory uses. And `usage_ratio` is
+`null`, not a sentinel, whenever no capacity was declared: that is the
+common case for `fs` / `mooncake` / `p2p` / `sagemaker`, which expose no
+capacity knob at all.
+
+Read-only — it never evicts, throttles, or pushes. See
+[memory_pressure.md](memory_pressure.md).
 
 ## Fleet CacheBlend lookup (`blend_index.py`)
 
