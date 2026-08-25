@@ -8,9 +8,12 @@
 import pytest
 import torch
 
+# First Party
+from lmcache import torch_dev, torch_device_type
+
 pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="CUDA is required for the device-pointer assertions",
+    not torch_dev.is_available(),
+    reason="an accelerator is required for the device-pointer assertions",
 )
 
 # First Party
@@ -112,7 +115,7 @@ def test_make_shape_desc_sglang_mha():
 def test_per_layer_scalar_accessors_per_layer_list():
     """For per-layer list formats, each scalar accessor honours layer_idx."""
     kv_caches = [
-        torch.randn(2, 32, 16, 8 + i, 64, dtype=torch.float16, device="cuda")
+        torch.randn(2, 32, 16, 8 + i, 64, dtype=torch.float16, device=torch_device_type)
         for i in range(3)  # distinct num_heads per layer: 8, 9, 10
     ]
     fmt = lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
@@ -125,8 +128,14 @@ def test_per_layer_scalar_accessors_per_layer_list():
 
 def test_per_layer_scalar_accessors_sglang_mha():
     """For SGLang MHA (nested list), accessors walk into [k_list|v_list]."""
-    k = [torch.randn(512, 8, 64, dtype=torch.bfloat16, device="cuda") for _ in range(2)]
-    v = [torch.randn(512, 8, 64, dtype=torch.bfloat16, device="cuda") for _ in range(2)]
+    k = [
+        torch.randn(512, 8, 64, dtype=torch.bfloat16, device=torch_device_type)
+        for _ in range(2)
+    ]
+    v = [
+        torch.randn(512, 8, 64, dtype=torch.bfloat16, device=torch_device_type)
+        for _ in range(2)
+    ]
     kv_caches = [k, v]
     fmt = lmcache_native.EngineKVFormat.TWO_X_NL_X_NBBS_NH_HS
 
@@ -136,7 +145,7 @@ def test_per_layer_scalar_accessors_sglang_mha():
 
 def test_get_group_data_ptrs_per_layer_list_flattens_in_order():
     kv_caches = [
-        torch.randn(2, 32, 16, 8, 64, dtype=torch.float16, device="cuda")
+        torch.randn(2, 32, 16, 8, 64, dtype=torch.float16, device=torch_device_type)
         for _ in range(4)
     ]
     fmt = lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
@@ -152,8 +161,14 @@ def test_get_group_data_ptrs_per_layer_list_flattens_in_order():
 def test_get_group_data_ptrs_sglang_mha_groups_k_before_v():
     """SGLang MHA kernel contract: [K0, K1, ..., KN, V0, V1, ..., VN] —
     not per-layer [K0, V0, K1, V1, ...]."""
-    k = [torch.randn(512, 8, 64, dtype=torch.bfloat16, device="cuda") for _ in range(3)]
-    v = [torch.randn(512, 8, 64, dtype=torch.bfloat16, device="cuda") for _ in range(3)]
+    k = [
+        torch.randn(512, 8, 64, dtype=torch.bfloat16, device=torch_device_type)
+        for _ in range(3)
+    ]
+    v = [
+        torch.randn(512, 8, 64, dtype=torch.bfloat16, device=torch_device_type)
+        for _ in range(3)
+    ]
     kv_caches = [k, v]
     fmt = lmcache_native.EngineKVFormat.TWO_X_NL_X_NBBS_NH_HS
 
@@ -174,7 +189,9 @@ def test_get_group_data_ptrs_cross_layer_returns_single_base():
     (csrc/cuda/mp_mem_kernels.cu) reads paged_buffer_ptrs[0] and computes
     per-layer offsets from shape_desc.nl internally. The group helper
     must return a single base pointer, not num_layers entries."""
-    big = torch.empty(32, 80, 2, 16, 8, 64, dtype=torch.bfloat16, device="cuda")
+    big = torch.empty(
+        32, 80, 2, 16, 8, 64, dtype=torch.bfloat16, device=torch_device_type
+    )
     fmt = lmcache_native.EngineKVFormat.NB_NL_TWO_BS_NH_HS
     ptrs = get_group_data_ptrs(big, fmt, list(range(80)))
     assert ptrs == [big.data_ptr()]
@@ -184,7 +201,9 @@ def test_attempt_permute_preserves_bare_tensor():
     """A bare torch.Tensor input (cross-layer shape) must come back as a bare
     tensor — no list wrapping, no copy, shape intact — so the
     DiscoverableKVCache recursive union is respected end-to-end."""
-    big = torch.empty(32, 80, 2, 16, 8, 64, dtype=torch.bfloat16, device="cuda")
+    big = torch.empty(
+        32, 80, 2, 16, 8, 64, dtype=torch.bfloat16, device=torch_device_type
+    )
     out = attempt_permute_to_contiguous_view(big)
     assert isinstance(out, torch.Tensor)
     assert tuple(out.shape) == tuple(big.shape)
@@ -197,7 +216,7 @@ def test_attempt_permute_recurses_all_shapes():
     # Build a flash-attention HND-layout tensor (non-contiguous after
     # logical→physical permute exposure — the vLLM HND case).
     nhd_view = (
-        torch.empty(2, 32, 8, 16, 64, dtype=torch.bfloat16, device="cuda")
+        torch.empty(2, 32, 8, 16, 64, dtype=torch.bfloat16, device=torch_device_type)
         .permute(0, 1, 3, 2, 4)
         .contiguous()
         .permute(0, 1, 3, 2, 4)  # NHD logical view over HND physical
@@ -228,7 +247,7 @@ def test_attempt_permute_reorders_misleading_size_one_dims():
     check would pass it through with a shape that lies about the physical
     layout. The stride sort must still reorder it to the stride-truthful
     HND shape, zero-copy."""
-    phys = torch.empty(2, 32, 1, 16, 64, dtype=torch.bfloat16, device="cuda")
+    phys = torch.empty(2, 32, 1, 16, 64, dtype=torch.bfloat16, device=torch_device_type)
     logical = phys.permute(0, 1, 3, 2, 4)  # [2, NB, BS, 1, HS]
     assert logical.is_contiguous()
 
@@ -241,7 +260,7 @@ def test_attempt_permute_reviews_collapsed_size_one_strides():
     """A contiguous view whose size-1 dims carry collapsed (stride-1) strides
     hides the true extent of its inner dim; the re-view must recover the
     tightest shape implied by the strides, zero-copy."""
-    base = torch.empty(8 * 32, dtype=torch.bfloat16, device="cuda")
+    base = torch.empty(8 * 32, dtype=torch.bfloat16, device=torch_device_type)
     t = base.as_strided((8, 1, 1, 32), (32, 1, 1, 1))
     assert t.is_contiguous()
 
@@ -252,14 +271,20 @@ def test_attempt_permute_reviews_collapsed_size_one_strides():
 
 def test_get_device_handles_every_kvcaches_shape():
     """get_device must work for every DiscoverableKVCache shape without format hints."""
-    t = torch.empty(8, dtype=torch.bfloat16, device="cuda")
+    t = torch.empty(8, dtype=torch.bfloat16, device=torch_device_type)
     assert get_device(t) == t.device
 
-    flat = [torch.empty(4, dtype=torch.bfloat16, device="cuda") for _ in range(3)]
+    flat = [
+        torch.empty(4, dtype=torch.bfloat16, device=torch_device_type) for _ in range(3)
+    ]
     assert get_device(flat) == flat[0].device
 
-    k = [torch.empty(4, dtype=torch.bfloat16, device="cuda") for _ in range(2)]
-    v = [torch.empty(4, dtype=torch.bfloat16, device="cuda") for _ in range(2)]
+    k = [
+        torch.empty(4, dtype=torch.bfloat16, device=torch_device_type) for _ in range(2)
+    ]
+    v = [
+        torch.empty(4, dtype=torch.bfloat16, device=torch_device_type) for _ in range(2)
+    ]
     assert get_device([k, v]) == k[0].device
 
 
