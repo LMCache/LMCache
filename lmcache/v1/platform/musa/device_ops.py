@@ -13,6 +13,7 @@ from __future__ import annotations
 
 # Standard
 from typing import ClassVar
+import ctypes
 
 # Third Party
 import torch
@@ -224,6 +225,36 @@ def _synchronize_stream_pointer(stream_ptr: int) -> None:
         ) from exc
 
 
+def _host_byte_tensor_from_pointer(ptr: int, nbytes: int) -> torch.Tensor:
+    """Create a non-owning CPU byte tensor for a host pointer span.
+
+    Args:
+        ptr: Raw host pointer at the start of the span.
+        nbytes: Number of bytes exposed by the tensor.
+
+    Returns:
+        A one-dimensional CPU byte tensor that aliases the host span.
+    """
+    buffer_type = ctypes.c_uint8 * nbytes
+    return torch.frombuffer(buffer_type.from_address(ptr), dtype=torch.uint8)
+
+
+def _current_musa_device() -> torch.device:
+    """Return the current TorchMUSA device without synchronizing it.
+
+    Returns:
+        The current MUSA device.
+
+    Raises:
+        RuntimeError: If TorchMUSA does not expose ``current_device``.
+    """
+    musa = getattr(torch, "musa", None)
+    current_device = getattr(musa, "current_device", None)
+    if not callable(current_device):
+        raise RuntimeError("torch.musa.current_device is unavailable")
+    return torch.device("musa", int(current_device()))
+
+
 class TorchMusaBlockTransfer:
     """Execute block transfer with the TorchMUSA-compatible torch backend."""
 
@@ -372,6 +403,96 @@ class MusaDeviceOps(DeviceOps):
     """MUSA block-transfer and stream-ordering operations."""
 
     device_type: ClassVar[str] = "musa"
+
+    def lmcache_memcpy_async(
+        self,
+        dest: int | torch.Tensor,
+        src: int | torch.Tensor,
+        nbytes: int,
+        direction: TransferDirection,
+        host_buffer_offset: int,
+        host_buffer_alignments: int,
+    ) -> None:
+        """Copy bytes between host and MUSA storage on the current stream.
+
+        Tensor operands retain the platform-independent torch fallback
+        semantics. For raw pointers, each submitted ``Tensor.copy_`` is
+        contained within one independently registered host-memory range. This
+        is required by MUSA even when two registered ranges are adjacent.
+
+        Args:
+            dest: Destination host/MUSA pointer or tensor.
+            src: Source host/MUSA pointer or tensor.
+            nbytes: Number of bytes to copy.
+            direction: Host-to-device or device-to-host transfer direction.
+            host_buffer_offset: Host pointer offset from the lazy allocator base.
+            host_buffer_alignments: Host registration granularity in bytes.
+
+        Returns:
+            None.
+
+        Raises:
+            TypeError: If pointer and tensor operands are mixed.
+            ValueError: If the size, alignment, or direction is invalid.
+            RuntimeError: If TorchMUSA cannot expose the current device or a
+                non-owning tensor for the MUSA pointer.
+        """
+        if not isinstance(dest, int) or not isinstance(src, int):
+            torch_ops.lmcache_memcpy_async(
+                dest,
+                src,
+                nbytes,
+                direction,
+                host_buffer_offset,
+                host_buffer_alignments,
+            )
+            return
+
+        if nbytes < 0:
+            raise ValueError("nbytes must be non-negative")
+        if (
+            host_buffer_alignments <= 0
+            or (host_buffer_alignments & (host_buffer_alignments - 1)) != 0
+        ):
+            raise ValueError("host_buffer_alignments must be power of two")
+
+        direction_value = int(direction)
+        if direction_value == int(TransferDirection.H2D):
+            host_base = src
+            device_base = dest
+            is_h2d = True
+        elif direction_value == int(TransferDirection.D2H):
+            host_base = dest
+            device_base = src
+            is_h2d = False
+        else:
+            raise ValueError(f"Unsupported direction: {direction}")
+
+        if nbytes == 0:
+            return
+
+        device = _current_musa_device()
+        copied = 0
+        while copied < nbytes:
+            bytes_to_boundary = host_buffer_alignments - (
+                (host_buffer_offset + copied) % host_buffer_alignments
+            )
+            copy_size = min(nbytes - copied, bytes_to_boundary)
+            host_tensor = _host_byte_tensor_from_pointer(
+                host_base + copied,
+                copy_size,
+            )
+            device_tensor = construct_musa_tensor_from_data_pointer(
+                device_base + copied,
+                (copy_size,),
+                torch.uint8,
+                device,
+            )
+            if is_h2d:
+                device_tensor.copy_(host_tensor, non_blocking=True)
+            else:
+                host_tensor.copy_(device_tensor, non_blocking=True)
+            copied += copy_size
 
     def record_completion_on_stream(
         self,

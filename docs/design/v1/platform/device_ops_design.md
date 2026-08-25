@@ -24,7 +24,7 @@ what it accelerates and inherits the torch baseline for everything else.
 | Compiled CUDA ops | `PYBIND11_MODULE(cuda_ops)` — CUDA/HIP native kernels loaded only by `CudaDeviceOps` | `csrc/cuda/pybind.cpp` |
 | Compiled SYCL ops | `PYBIND11_MODULE(xpu_ops)` — 12 ops + 2 enums (+`GPUKVFormat`); **24 ops fall back to torch** | `csrc/sycl/pybind_sycl.cpp` |
 | Torch/CPU reference | `torch_ops.py` — 36 ops (migrated from former `python_ops_fallback.py`) | `lmcache/v1/platform/torch_ops.py` |
-| Shared types | `ops_types.py` — `TransferDirection`, `EngineKVFormat`, `PageBufferShapeDesc`, `StagingCopy`, `LaunchVar`, `BatchStep`, `KernelGroupSpec`, `set_shape_desc_dtype` | `lmcache/v1/platform/ops_types.py` |
+| Shared types | `lmcache_native` owns `TransferDirection`, `EngineKVFormat`, `PageBufferShapeDesc`, `StagingCopy`, `LaunchVar`, `BatchStep`, `KernelGroupSpec`; `ops_types.py` re-exports them and adds `set_shape_desc_dtype` fallback glue | `csrc/lmcache_native/pybind.cpp`, `lmcache/v1/platform/ops_types.py` |
 | MUSA ops | Python override: 1 native op, rest inherited | `lmcache/v1/platform/musa/device_ops.py` |
 | HPU ops | None — uses torch baseline entirely | (via `DeviceOps` inheritance) |
 | Runtime selection | `device_ops = resolve_device_ops(torch_device_type)` | `lmcache/__init__.py` |

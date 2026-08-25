@@ -1345,18 +1345,33 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             # Per object group, the prefetch only locked the in-window suffix
             # (the last ``num_chunks_in_sw`` chunks; the whole prefix for full
             # attention, where the value is < 0). Read and transfer only those.
+            # Standalone (connector-private) groups are never served by the
+            # std retrieve: the lookup does not lock their keys and their
+            # block-id entry is a placeholder -- reading them would be an
+            # unlocked read of a plane nobody consumes here.
             attn_desc = cache_context.kv_layer_groups_manager.get_attn_desc()
+            skipped_groups = {
+                g
+                for g, kind in enumerate(attn_desc.group_kinds)
+                if kind == "standalone"
+            }
             group_skips = [
                 0 if window < 0 else max(0, num_chunks - window)
                 for window in attn_desc.num_chunks_in_sw
             ]
-            expected_retained = sum(num_chunks - skip for skip in group_skips)
+            expected_retained = sum(
+                num_chunks - skip
+                for g, skip in enumerate(group_skips)
+                if g not in skipped_groups
+            )
 
             prefetched_keys: list[ObjectKey] = []
             total_bytes = 0
             retrieve_succeeded = True
             try:
                 for obj_group_id in range(num_object_groups):
+                    if obj_group_id in skipped_groups:
+                        continue
                     skip = group_skips[obj_group_id]
                     in_window_keys = obj_keys_per_obj_group[obj_group_id][skip:]
                     with self._ctx.storage_manager.read_prefetched_results(
