@@ -60,7 +60,7 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
 )
 from lmcache.v1.multiprocess.modules.lookup import compute_extra_count
-from lmcache.v1.multiprocess.protocol import RequestType
+from lmcache.v1.multiprocess.protocol import RPC
 from lmcache.v1.multiprocess.token_hasher import (
     TokenHasher,
     chunk_hash_windows_numba,
@@ -765,24 +765,24 @@ class BlendV3Module(InstanceLivenessTarget):
     def get_handlers(self) -> list[HandlerSpec]:
         # STORE shadows LMCacheDrivenTransfer's; compositor registers V3 last.
         return [
-            HandlerSpec(RequestType.STORE, self.store, ThreadPoolType.AFFINITY),
+            HandlerSpec(RPC.Store, self.store, ThreadPoolType.AFFINITY),
             HandlerSpec(
-                RequestType.CB_REGISTER_ROPE_V3,
+                RPC.CbRegisterRopeV3,
                 self.cb_register_rope,
                 ThreadPoolType.SYNC,
             ),
             HandlerSpec(
-                RequestType.CB_UNREGISTER_ROPE_V3,
+                RPC.CbUnregisterRopeV3,
                 self.cb_unregister_rope,
                 ThreadPoolType.SYNC,
             ),
             HandlerSpec(
-                RequestType.CB_UNIFIED_LOOKUP,
+                RPC.CbUnifiedLookup,
                 self.cb_unified_lookup,
                 ThreadPoolType.NORMAL,
             ),
             HandlerSpec(
-                RequestType.CB_RETRIEVE_PRE_COMPUTED_V3,
+                RPC.CbRetrievePreComputedV3,
                 self.cb_retrieve_pre_computed,
                 ThreadPoolType.AFFINITY,
             ),

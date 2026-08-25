@@ -47,7 +47,7 @@ from lmcache.v1.multiprocess.native_completion import (
     DeviceHostFuncDispatcher,
     submit_callback_to_stream,
 )
-from lmcache.v1.multiprocess.protocols.base import RequestType
+from lmcache.v1.multiprocess.protocol import RPC
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.base.event_ipc import (
     EventIPCBackend,
@@ -821,22 +821,22 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         """
         return [
             HandlerSpec(
-                RequestType.REGISTER_KV_CACHE,
+                RPC.RegisterKvCache,
                 self.register_kv_cache,
                 ThreadPoolType.SYNC,
             ),
             HandlerSpec(
-                RequestType.UNREGISTER_KV_CACHE,
+                RPC.UnregisterKvCache,
                 self.unregister_kv_cache,
                 ThreadPoolType.SYNC,
             ),
             HandlerSpec(
-                RequestType.STORE,
+                RPC.Store,
                 self.store,
                 ThreadPoolType.AFFINITY,
             ),
             HandlerSpec(
-                RequestType.RETRIEVE,
+                RPC.Retrieve,
                 self.retrieve,
                 ThreadPoolType.AFFINITY,
             ),

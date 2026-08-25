@@ -26,7 +26,7 @@ from lmcache.v1.multiprocess.engine_module import (
     InstanceLivenessTarget,
     ThreadPoolType,
 )
-from lmcache.v1.multiprocess.protocols.base import RequestType
+from lmcache.v1.multiprocess.protocol import RPC
 from lmcache.v1.multiprocess.protocols.engine import (
     PrepareRetrieveResponse,
     PrepareStoreResponse,
@@ -106,32 +106,32 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         """
         return [
             HandlerSpec(
-                RequestType.REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT,
+                RPC.RegisterKvCacheEngineDrivenContext,
                 self.register_kv_cache_engine_driven_context,
                 ThreadPoolType.SYNC,
             ),
             HandlerSpec(
-                RequestType.UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT,
+                RPC.UnregisterKvCacheEngineDrivenContext,
                 self.unregister_kv_cache,
                 ThreadPoolType.SYNC,
             ),
             HandlerSpec(
-                RequestType.PREPARE_STORE,
+                RPC.PrepareStore,
                 self.prepare_store,
                 ThreadPoolType.AFFINITY,
             ),
             HandlerSpec(
-                RequestType.COMMIT_STORE,
+                RPC.CommitStore,
                 self.commit_store,
                 ThreadPoolType.AFFINITY,
             ),
             HandlerSpec(
-                RequestType.PREPARE_RETRIEVE,
+                RPC.PrepareRetrieve,
                 self.prepare_retrieve,
                 ThreadPoolType.AFFINITY,
             ),
             HandlerSpec(
-                RequestType.COMMIT_RETRIEVE,
+                RPC.CommitRetrieve,
                 self.commit_retrieve,
                 ThreadPoolType.AFFINITY,
             ),

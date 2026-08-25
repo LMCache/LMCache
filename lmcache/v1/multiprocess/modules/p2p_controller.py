@@ -34,7 +34,7 @@ from lmcache.v1.multiprocess.engine_module import (
     HandlerSpec,
     ThreadPoolType,
 )
-from lmcache.v1.multiprocess.protocol import RequestType
+from lmcache.v1.multiprocess.protocol import RPC
 from lmcache.v1.periodic_thread import (
     PeriodicThread,
     ThreadLevel,
@@ -169,17 +169,17 @@ class P2PController:
         """
         return [
             HandlerSpec(
-                RequestType.P2P_LOOKUP_AND_LOCK,
+                RPC.P2PLookupAndLock,
                 self.p2p_lookup_and_lock,
                 ThreadPoolType.NORMAL,
             ),
             HandlerSpec(
-                RequestType.P2P_QUERY_LOOKUP_RESULTS,
+                RPC.P2PQueryLookupResults,
                 self.p2p_query_lookup_results,
                 ThreadPoolType.NORMAL,
             ),
             HandlerSpec(
-                RequestType.P2P_UNLOCK_OBJECTS,
+                RPC.P2PUnlockObjects,
                 self.p2p_unlock_objects,
                 ThreadPoolType.NORMAL,
             ),

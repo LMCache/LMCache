@@ -35,7 +35,7 @@ from lmcache.v1.multiprocess.engine_module import (
     HandlerSpec,
     ThreadPoolType,
 )
-from lmcache.v1.multiprocess.protocols.base import RequestType
+from lmcache.v1.multiprocess.protocol import RPC
 from lmcache.v1.multiprocess.token_hasher import (
     chunk_hash_windows_numba,
     rolling_hash_windows_numba,
@@ -343,32 +343,32 @@ class BlendModule:
         """
         return [
             HandlerSpec(
-                RequestType.CB_REGISTER_KV_CACHE,
+                RPC.CbRegisterKvCache,
                 self.cb_register_kv_cache,
                 ThreadPoolType.SYNC,
             ),
             HandlerSpec(
-                RequestType.CB_UNREGISTER_KV_CACHE,
+                RPC.CbUnregisterKvCache,
                 self.cb_unregister_kv_cache,
                 ThreadPoolType.SYNC,
             ),
             HandlerSpec(
-                RequestType.CB_STORE_PRE_COMPUTED,
+                RPC.CbStorePreComputed,
                 self.cb_store_pre_computed,
                 ThreadPoolType.AFFINITY,
             ),
             HandlerSpec(
-                RequestType.CB_RETRIEVE_PRE_COMPUTED_V2,
+                RPC.CbRetrievePreComputedV2,
                 self.cb_retrieve_pre_computed,
                 ThreadPoolType.AFFINITY,
             ),
             HandlerSpec(
-                RequestType.CB_STORE_FINAL,
+                RPC.CbStoreFinal,
                 self.cb_store_final,
                 ThreadPoolType.AFFINITY,
             ),
             HandlerSpec(
-                RequestType.CB_LOOKUP_PRE_COMPUTED_V2,
+                RPC.CbLookupPreComputedV2,
                 self.cb_lookup_pre_computed,
                 ThreadPoolType.NORMAL,
             ),

@@ -38,7 +38,7 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     transfer_kv_per_object_group,
 )
 from lmcache.v1.multiprocess.native_completion import submit_callback_to_stream
-from lmcache.v1.multiprocess.protocols.base import RequestType
+from lmcache.v1.multiprocess.protocol import RPC
 from lmcache.v1.platform.cache_context import create_cache_context
 import lmcache.lmcache_native as lmcache_native
 
@@ -200,17 +200,17 @@ class QStoreModule(InstanceLivenessTarget):
         """
         return [
             HandlerSpec(
-                RequestType.REGISTER_Q_CACHE,
+                RPC.RegisterQCache,
                 self.register_q_cache,
                 ThreadPoolType.SYNC,
             ),
             HandlerSpec(
-                RequestType.UNREGISTER_Q_CACHE,
+                RPC.UnregisterQCache,
                 self.unregister_q_cache,
                 ThreadPoolType.SYNC,
             ),
             HandlerSpec(
-                RequestType.STORE_Q,
+                RPC.StoreQ,
                 self.store_q,
                 ThreadPoolType.AFFINITY,
             ),

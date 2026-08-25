@@ -122,24 +122,19 @@ def test_batch_envelope_is_rpc_agnostic() -> None:
     }
 
 
-def test_batch_rejects_more_than_transport_limit() -> None:
-    """The server bounds work submitted by a single batch RPC."""
+def test_batch_is_explicitly_unimplemented() -> None:
+    """The experimental unary-only transport rejects Batch explicitly."""
     port = _find_free_port()
     target = f"127.0.0.1:{port}"
     server = MessageQueueServer(f"grpc://{target}")
     server.start()
     channel = grpc.insecure_channel(target)
     stub = lmcache_mq_pb2_grpc.MessageQueueStub(channel)
-    request = lmcache_mq_pb2.BatchRequest()
-    for _ in range(65):
-        item = request.items.add()
-        item.method_id = RequestType.PING.value
-        item.payload = lmcache_mq_pb2.PingRequest().SerializeToString()
 
     try:
         with pytest.raises(grpc.RpcError) as exc_info:
-            stub.Batch(request)
-        assert exc_info.value.code() is grpc.StatusCode.INVALID_ARGUMENT
+            stub.Batch(lmcache_mq_pb2.BatchRequest())
+        assert exc_info.value.code() is grpc.StatusCode.UNIMPLEMENTED
     finally:
         channel.close()
         server.close()
@@ -246,8 +241,8 @@ def test_unix_clients_keep_distinct_batch_affinity() -> None:
             server.close()
 
 
-def test_batch_item_error_does_not_fail_siblings() -> None:
-    """A handler failure is reported only to its matching future."""
+def test_unary_item_error_surfaces_as_grpc_failure() -> None:
+    """A handler failure surfaces as the matching unary gRPC failure only."""
     port = _find_free_port()
     server_url = f"grpc://127.0.0.1:{port}"
     first_ping_entered = threading.Event()
@@ -287,8 +282,9 @@ def test_batch_item_error_does_not_fail_siblings() -> None:
         release_first_ping.set()
 
         assert first.result(timeout=5.0) is True
-        with pytest.raises(RuntimeError, match="expected batch failure"):
+        with pytest.raises(grpc.RpcError, match="expected batch failure") as exc_info:
             failed.result(timeout=5.0)
+        assert exc_info.value.code() is grpc.StatusCode.UNKNOWN
         assert succeeded.result(timeout=5.0) is True
     finally:
         release_first_ping.set()

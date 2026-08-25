@@ -26,7 +26,7 @@ from lmcache.v1.multiprocess.engine_module import (
     HandlerSpec,
     ThreadPoolType,
 )
-from lmcache.v1.multiprocess.protocol import RequestType
+from lmcache.v1.multiprocess.protocol import RPC
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
 logger = init_logger(__name__)
@@ -125,29 +125,29 @@ class LookupModule:
             List of handler specs for lookup-related request types.
         """
         return [
-            HandlerSpec(RequestType.LOOKUP, self.lookup, ThreadPoolType.NORMAL),
+            HandlerSpec(RPC.Lookup, self.lookup, ThreadPoolType.NORMAL),
             HandlerSpec(
-                RequestType.QUERY_PREFETCH_STATUS,
+                RPC.QueryPrefetchStatus,
                 self.query_prefetch_status,
                 ThreadPoolType.NORMAL,
             ),
             HandlerSpec(
-                RequestType.WAIT_PREFETCH_STATUS,
+                RPC.WaitPrefetchStatus,
                 self.wait_prefetch_status,
                 ThreadPoolType.NORMAL,
             ),
             HandlerSpec(
-                RequestType.QUERY_PREFETCH_LOOKUP_HITS,
+                RPC.QueryPrefetchLookupHits,
                 self.query_prefetch_lookup_hits,
                 ThreadPoolType.NORMAL,
             ),
             HandlerSpec(
-                RequestType.FREE_LOOKUP_LOCKS,
+                RPC.FreeLookupLocks,
                 self.free_lookup_locks,
                 ThreadPoolType.NORMAL,
             ),
             HandlerSpec(
-                RequestType.END_SESSION,
+                RPC.EndSession,
                 self.end_session,
                 ThreadPoolType.NORMAL,
             ),

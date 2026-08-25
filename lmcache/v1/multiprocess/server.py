@@ -60,11 +60,6 @@ from lmcache.v1.multiprocess.modules.lookup import LookupModule
 from lmcache.v1.multiprocess.modules.management import ManagementModule
 from lmcache.v1.multiprocess.modules.p2p_controller import P2PController
 from lmcache.v1.multiprocess.mq import MessageQueueServer
-from lmcache.v1.multiprocess.protocol import (
-    RequestType,
-    get_handler_type,
-    get_payload_classes,
-)
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 
 logger = init_logger(__name__)
@@ -149,24 +144,15 @@ class MPCacheServer:
         raise RuntimeError("MPCacheServer.clear: no ManagementModule registered")
 
 
-def add_handler_helper(
-    server: MessageQueueServer, request_type: RequestType, handler_function
-):
+def add_handler_helper(server: MessageQueueServer, rpc_method, handler_function):
     """Register a handler with the message queue server.
 
     Args:
         server: The message queue server.
-        request_type: The request type to handle.
+        rpc_method: The gRPC method to handle.
         handler_function: The handler callable.
     """
-    payload_classes = get_payload_classes(request_type)
-    handler_type = get_handler_type(request_type)
-    server.add_handler(
-        request_type,
-        payload_classes,
-        handler_type,
-        handler_function,
-    )
+    server.add_handler(rpc_method, handler_function)
 
 
 def _build_modules(
@@ -432,13 +418,13 @@ def run_cache_server(
         all_specs.extend(module.get_handlers())
 
     for spec in all_specs:
-        add_handler_helper(server, spec.request_type, spec.handler)
+        add_handler_helper(server, spec.rpc_method, spec.handler)
 
     affinity_types = [
-        s.request_type for s in all_specs if s.pool == ThreadPoolType.AFFINITY
+        s.rpc_method for s in all_specs if s.pool == ThreadPoolType.AFFINITY
     ]
     normal_types = [
-        s.request_type for s in all_specs if s.pool == ThreadPoolType.NORMAL
+        s.rpc_method for s in all_specs if s.pool == ThreadPoolType.NORMAL
     ]
     if affinity_types:
         server.add_affinity_thread_pool(

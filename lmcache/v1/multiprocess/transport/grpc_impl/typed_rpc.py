@@ -33,7 +33,9 @@ from lmcache.v1.multiprocess.custom_types import (
     get_customized_encoder,
 )
 from lmcache.v1.multiprocess.protocol import (
-    RequestType,
+    RPC_METHODS,
+    RpcMethod,
+    coerce_rpc_method,
     get_payload_classes,
     get_response_class,
 )
@@ -47,7 +49,7 @@ lmcache_mq_pb2: Any = _pb2_typed
 _NONE_TYPE = type(None)
 
 
-def request_type_to_method_name(request_type: RequestType) -> str:
+def request_type_to_method_name(request_type: RpcMethod | str) -> str:
     """Return the protobuf service method name for a request type.
 
     Args:
@@ -56,11 +58,7 @@ def request_type_to_method_name(request_type: RequestType) -> str:
     Returns:
         The CamelCase method name used by ``MessageQueue``.
     """
-    parts = request_type.name.split("_")
-    return "".join(
-        "P2P" if part == "P2P" else part[:1].upper() + part[1:].lower()
-        for part in parts
-    )
+    return str(coerce_rpc_method(request_type))
 
 
 def _unwrap_optional(py_type: Any) -> tuple[Any, bool]:
@@ -560,7 +558,7 @@ def _compile_response_codec(
 class TypedRpcSpec:
     """A descriptor-derived binding between one RPC and its Python contract."""
 
-    request_type: RequestType
+    rpc_method: RpcMethod
     method_name: str
     request_message: Any
     response_message: Any
@@ -571,34 +569,39 @@ class TypedRpcSpec:
     python_to_response: ResponseEncoder
     response_to_python: ResponseDecoder
 
+    @property
+    def request_type(self) -> RpcMethod:
+        """Backward-compatible alias for older tests and helper code."""
+        return self.rpc_method
 
-def _build_typed_rpcs() -> dict[RequestType, TypedRpcSpec]:
+
+def _build_typed_rpcs() -> dict[RpcMethod, TypedRpcSpec]:
     service = lmcache_mq_pb2.DESCRIPTOR.services_by_name["MessageQueue"]
-    expected_methods = {request_type_to_method_name(item) for item in RequestType}
+    expected_methods = {request_type_to_method_name(item) for item in RPC_METHODS}
     actual_methods = set(service.methods_by_name) - {"Batch"}
     if actual_methods != expected_methods:
         missing = sorted(expected_methods - actual_methods)
         extra = sorted(actual_methods - expected_methods)
         raise RuntimeError(
-            f"MessageQueue/RequestType mismatch: missing={missing}, extra={extra}"
+            f"MessageQueue/RpcMethod mismatch: missing={missing}, extra={extra}"
         )
 
-    specs: dict[RequestType, TypedRpcSpec] = {}
-    for request_type in RequestType:
-        method_name = request_type_to_method_name(request_type)
+    specs: dict[RpcMethod, TypedRpcSpec] = {}
+    for rpc_method in RPC_METHODS:
+        method_name = request_type_to_method_name(rpc_method)
         method = service.methods_by_name[method_name]
         request_message = getattr(lmcache_mq_pb2, method.input_type.name)
         response_message = getattr(lmcache_mq_pb2, method.output_type.name)
-        payload_types = tuple(get_payload_classes(request_type))
-        response_type = get_response_class(request_type)
+        payload_types = tuple(get_payload_classes(rpc_method))
+        response_type = get_response_class(rpc_method)
         request_encoder, request_decoder = _compile_request_codec(
             request_message, payload_types
         )
         response_encoder, response_decoder = _compile_response_codec(
             response_message, response_type
         )
-        specs[request_type] = TypedRpcSpec(
-            request_type=request_type,
+        specs[rpc_method] = TypedRpcSpec(
+            rpc_method=rpc_method,
             method_name=method_name,
             request_message=request_message,
             response_message=response_message,

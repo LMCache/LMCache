@@ -10,7 +10,7 @@ from enum import Enum, auto
 from typing import TYPE_CHECKING, Callable, Protocol
 
 # First Party
-from lmcache.v1.multiprocess.protocol import RequestType
+from lmcache.v1.multiprocess.protocol import RpcMethod
 
 if TYPE_CHECKING:
     # First Party
@@ -30,14 +30,19 @@ class HandlerSpec:
     """Specification for a single message queue handler.
 
     Args:
-        request_type: The ZMQ request type this handler serves.
+        rpc_method: The typed gRPC method this handler serves.
         handler: The callable that processes the request.
         pool: Which thread pool the handler runs in.
     """
 
-    request_type: RequestType
+    rpc_method: RpcMethod
     handler: Callable
     pool: ThreadPoolType
+
+    @property
+    def request_type(self) -> RpcMethod:
+        """Backward-compatible alias while callers migrate to rpc_method."""
+        return self.rpc_method
 
 
 class EngineModule(Protocol):

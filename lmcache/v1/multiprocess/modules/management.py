@@ -15,7 +15,7 @@ from lmcache.v1.multiprocess.engine_module import (
     InstanceLivenessTarget,
     ThreadPoolType,
 )
-from lmcache.v1.multiprocess.protocols.base import RequestType
+from lmcache.v1.multiprocess.protocol import RPC
 from lmcache.v1.periodic_thread import (
     PeriodicThread,
     ThreadLevel,
@@ -90,21 +90,21 @@ class ManagementModule:
             their handler callables and thread pool assignments.
         """
         return [
-            HandlerSpec(RequestType.CLEAR, self.clear, ThreadPoolType.NORMAL),
+            HandlerSpec(RPC.Clear, self.clear, ThreadPoolType.NORMAL),
             HandlerSpec(
-                RequestType.GET_CHUNK_SIZE,
+                RPC.GetChunkSize,
                 self.get_chunk_size,
                 ThreadPoolType.SYNC,
             ),
             HandlerSpec(
-                RequestType.GET_EXPERIMENTAL,
+                RPC.GetExperimental,
                 self.get_experimental,
                 ThreadPoolType.SYNC,
             ),
-            HandlerSpec(RequestType.PING, self.ping, ThreadPoolType.NORMAL),
-            HandlerSpec(RequestType.NOOP, self.debug, ThreadPoolType.SYNC),
+            HandlerSpec(RPC.Ping, self.ping, ThreadPoolType.NORMAL),
+            HandlerSpec(RPC.Noop, self.debug, ThreadPoolType.SYNC),
             HandlerSpec(
-                RequestType.REPORT_BLOCK_ALLOCATION,
+                RPC.ReportBlockAllocation,
                 self.report_block_allocations,
                 ThreadPoolType.NORMAL,
             ),

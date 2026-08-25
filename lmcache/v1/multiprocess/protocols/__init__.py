@@ -4,9 +4,14 @@ Protocol initialization and registration system.
 
 This module provides the initialize_protocols() function that:
 1. Collects protocol definitions from all protocol modules
-2. Validates that the static RequestType enum matches protocol definitions
-3. Ensures all enum members have definitions and vice versa
+2. Validates that the gRPC service descriptor matches protocol definitions
+3. Ensures all protocol definitions have matching gRPC methods and vice versa
 """
+
+# First Party
+from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
+    lmcache_mq_pb2 as _pb2_typed,
+)
 
 # First Party
 from lmcache.v1.multiprocess.protocols import (
@@ -22,8 +27,10 @@ from lmcache.v1.multiprocess.protocols import (
 from lmcache.v1.multiprocess.protocols.base import (
     HandlerType,
     ProtocolDefinition,
-    RequestType,
+    request_name_to_method_name,
 )
+
+lmcache_mq_pb2 = _pb2_typed
 
 
 class ProtocolInitializationError(Exception):
@@ -44,30 +51,30 @@ _PROTOCOL_MODULES = [
 ]
 
 
-def initialize_protocols() -> dict[RequestType, ProtocolDefinition]:
+def initialize_protocols() -> dict[str, ProtocolDefinition]:
     """
     Initialize the protocol system by collecting all protocol definitions
-    and validating them against the RequestType enum.
+    and validating them against the gRPC service descriptor.
 
     This function:
     1. Collects protocol definitions from all protocol modules
-    2. Validates that each RequestType enum member has a definition
-    3. Validates that each definition has a corresponding enum member
+    2. Validates that each service method has a definition
+    3. Validates that each definition has a corresponding service method
     4. Ensures no duplicate or orphaned definitions
 
     Returns:
-        protocol_definitions: Dict mapping RequestType enum values to
-        ProtocolDefinition
+        protocol_definitions: Dict mapping legacy request names
+        (for example ``"PING"``) to ProtocolDefinition.
 
     Raises:
-        ProtocolInitializationError: If there are mismatches between enum and
-        definitions
+        ProtocolInitializationError: If there are mismatches between the proto
+        service and the Python protocol definitions.
     """
     # Protocol modules to load
     global _PROTOCOL_MODULES
 
     # Step 1: Collect protocol definitions from all modules
-    protocol_definitions = {}
+    protocol_definitions: dict[str, ProtocolDefinition] = {}
     defined_names = set()
     name_to_module: dict[str, str] = {}
 
@@ -92,31 +99,40 @@ def initialize_protocols() -> dict[RequestType, ProtocolDefinition]:
                 )
             defined_names.add(name)
 
-        # Convert string names to enum values and store definitions
+        # Keep the legacy request names as the registry keys so other layers
+        # can decide whether they want ``PING`` or ``Ping`` style spellings.
         for name, definition in module_defs.items():
-            try:
-                enum_value = RequestType[name]
-                protocol_definitions[enum_value] = definition
-            except KeyError as err:
+            if name not in module.REQUEST_NAMES:
                 raise ProtocolInitializationError(
                     f"Protocol definition '{name}' in module '{module_name}' "
-                    f"has no corresponding RequestType enum member. "
-                    f"Add 'RequestType.{name}' to protocols/base.py"
-                ) from err
+                    "is not listed in REQUEST_NAMES"
+                )
+            protocol_definitions[name] = definition
 
-    # Step 2: Validate that all enum members have definitions
-    all_enum_names = {member.name for member in RequestType}
-    missing_definitions = all_enum_names - defined_names
-
-    if missing_definitions:
+    missing_declared_definitions = {
+        name for name in defined_names if name not in protocol_definitions
+    }
+    if missing_declared_definitions:
         raise ProtocolInitializationError(
-            f"RequestType enum members {missing_definitions} have no protocol "
-            "definitions. Add definitions to the appropriate protocol module or "
-            "remove from the enum."
+            "REQUEST_NAMES entries without definitions: "
+            f"{sorted(missing_declared_definitions)}"
         )
 
-    # Step 3: Validate that all definitions have enum members (already done in step 1)
-    # This is implicitly checked when we do RequestType[name]
+    service = lmcache_mq_pb2.DESCRIPTOR.services_by_name["MessageQueue"]
+    actual_methods = {method.name for method in service.methods if method.name != "Batch"}
+    expected_methods = {
+        request_name_to_method_name(request_name)
+        for request_name in protocol_definitions
+    }
+
+    missing_methods = sorted(expected_methods - actual_methods)
+    missing_definitions = sorted(actual_methods - expected_methods)
+    if missing_methods or missing_definitions:
+        raise ProtocolInitializationError(
+            "MessageQueue proto / protocol definition mismatch: "
+            f"missing_methods={missing_methods}, "
+            f"missing_definitions={missing_definitions}"
+        )
 
     return protocol_definitions
 
@@ -124,7 +140,6 @@ def initialize_protocols() -> dict[RequestType, ProtocolDefinition]:
 # Export the base types for convenience
 __all__ = [
     "initialize_protocols",
-    "RequestType",
     "ProtocolDefinition",
     "HandlerType",
     "ProtocolInitializationError",
