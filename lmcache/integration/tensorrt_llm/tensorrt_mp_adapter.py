@@ -122,7 +122,7 @@ class LMCacheMPKvConnectorScheduler(KvCacheConnectorScheduler):
             model_name=self._model_name,
             world_size=self._world_size,
             # Each worker stores and reads only its own object (no MLA-style
-            # sharing in this adapter).
+            # sharing in this adapter yet).
             num_kv_readers=1,
             worker_id=None,
             token_ids=tuple(token_ids),
