@@ -68,6 +68,17 @@ Options
    * - ``--blend-probe-stride N``
      - Positions between CacheBlend match probes; ``1`` probes every offset
        for full recall (default: ``1``). Ignored unless blend lookup is on.
+   * - ``--checkpoint-path FILE``
+     - Checkpoint the coordinator's directory, usage view and stream cursors
+       to this file, so a restart resumes instead of starting cold. Unset
+       disables checkpointing.
+   * - ``--checkpoint-interval SECS``
+     - Seconds between checkpoint writes; ``0`` writes only on a clean stop
+       (default: ``60``). Ignored unless ``--checkpoint-path`` is set.
+   * - ``--metadata-path FILE``
+     - Store operator-set state -- L2 pins and per-``cache_salt`` quotas -- in
+       this file, written whenever it changes. Unset means that state is lost
+       on restart.
    * - ``--timeout-keep-alive SECS``
      - Seconds the HTTP server keeps idle connections open before closing
        them. Must be greater than the MP servers' heartbeat interval

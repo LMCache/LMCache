@@ -30,12 +30,15 @@ class CacheEventType(str, Enum):
 
     ``STORE`` commits placements; ``DELETE`` removes them (owners report
     evictions as deletes); ``ACCESS`` refreshes recency without changing
-    placement state.
+    placement state. ``CONFIG`` carries no placement at all: it declares
+    one compartment's configured capacity, so the fleet view has a
+    denominator for the bytes the other three report.
     """
 
     STORE = "store"
     DELETE = "delete"
     ACCESS = "access"
+    CONFIG = "config"
 
 
 @dataclass(frozen=True)
@@ -114,11 +117,19 @@ class CacheEventBatch:
             for ``store``/``delete`` (it is part of the placement
             identity); empty for ``access``, which only refreshes
             key-level recency and carries no placement identity.
-        entries: The affected keys.
+        entries: The affected keys. Always empty for ``config``, which
+            declares a compartment rather than reporting placements.
         shared: ``True`` when the backend is a storage domain mounted by
             several instances (e.g. one S3 bucket or CXL pool). ``False``
             (default) marks the storage private to this instance.
         ts: Emitter wall-clock seconds for the batch (``0.0`` if unknown).
+        capacity_bytes: ``config`` only. The compartment's configured
+            capacity; ``0`` declares no limit.
+        capacity_revision: ``config`` only. Which declaration this batch
+            belongs to. One declaration spans one batch per compartment,
+            all sharing a revision, so the consumer can tell a fresh
+            declaration from a continuation and drop compartments the new
+            one omits.
     """
 
     instance_id: str
@@ -130,21 +141,33 @@ class CacheEventBatch:
     entries: list[CacheEventEntry] = field(default_factory=list)
     shared: bool = False
     ts: float = 0.0
+    capacity_bytes: int = 0
+    capacity_revision: int = 0
 
     def __post_init__(self) -> None:
         """Enforce intrinsic invariants.
 
         Raises:
             ValueError: If ``instance_id`` is empty, ``backend`` is empty
-                on a placement-bearing batch (``store``/``delete``),
-                ``incarnation`` or ``ts`` is negative, ``seq`` < 1, or
-                ``tier`` is not a concrete tier (``l1``/``l2``).
+                on a placement-bearing batch (``store``/``delete``) or on
+                ``config``, ``incarnation``, ``ts``, ``capacity_bytes`` or
+                ``capacity_revision`` is negative, ``seq`` < 1, ``tier`` is
+                not a concrete tier (``l1``/``l2``), or a ``config`` batch
+                carries entries.
         """
         if not self.instance_id:
             raise ValueError("instance_id must be non-empty")
         if not self.backend and self.event_type != CacheEventType.ACCESS:
             raise ValueError(
                 f"backend must be non-empty for {self.event_type.value} batches"
+            )
+        if self.event_type == CacheEventType.CONFIG and self.entries:
+            raise ValueError("config batches declare capacity and carry no entries")
+        if self.capacity_bytes < 0:
+            raise ValueError(f"capacity_bytes must be >= 0 (got {self.capacity_bytes})")
+        if self.capacity_revision < 0:
+            raise ValueError(
+                f"capacity_revision must be >= 0 (got {self.capacity_revision})"
             )
         if self.incarnation < 0:
             raise ValueError(f"incarnation must be >= 0 (got {self.incarnation})")

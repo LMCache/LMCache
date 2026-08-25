@@ -35,7 +35,7 @@ from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.memory_allocators.gpu_memory_allocator import GPUMemoryAllocator
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.metadata import LMCacheMetadata
-from lmcache.v1.platform.ops_types import PageBufferShapeDesc, set_shape_desc_dtype
+from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
@@ -2076,7 +2076,7 @@ class TRTLLMGPUConnector(GPUConnectorInterface):
         shape_desc.nh = self.num_kv_heads
         shape_desc.hs = self.head_dim
         shape_desc.element_size = normalized.element_size()
-        set_shape_desc_dtype(shape_desc, self.dtype)
+        shape_desc.dtype = self.dtype
         self.shape_desc = shape_desc
 
         self.paged_buffer_ptrs = torch.tensor(

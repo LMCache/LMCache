@@ -28,6 +28,9 @@ async def report_cache_events(
     emission order. Duplicates and stale incarnations are dropped and
     counted, not errors.
 
+    ``config`` batches ride the same path and reach the server-config
+    registry as a consumer, so they inherit the gate's fencing and ordering.
+
     Args:
         body: The event batches to ingest.
 
