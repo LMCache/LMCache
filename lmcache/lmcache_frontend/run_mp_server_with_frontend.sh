@@ -37,7 +37,7 @@ if [[ -n "${REPORT_HOST}" ]]; then
 fi
 PLUGIN_CFG="${PLUGIN_CFG}}"
 
-python3 -m lmcache.v1.multiprocess.http_server \
+python3 -m lmcache.multiprocess.http_server \
     --host "${MP_HOST}" --port "${MP_PORT}" \
     --http-host "${HTTP_HOST}" --http-port "${HTTP_PORT}" \
     --l1-size-gb "${L1_SIZE_GB}" \

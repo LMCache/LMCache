@@ -3,7 +3,7 @@
 Cache hit-rate simulator driven by LMCache lookup-hash JSONL logs.
 
 The simulator replays ``MP_LOOKUP`` events recorded by
-:class:`~lmcache.v1.mp_observability.subscribers.logging.lookup_hash.LookupHashLoggingSubscriber`.
+:class:`~lmcache.mp_observability.subscribers.logging.lookup_hash.LookupHashLoggingSubscriber`.
 Each event contains the ordered list of *full-chunk* hashes that were looked up
 for a single request, together with the sequence length and chunk size.
 

@@ -33,13 +33,13 @@ try:
     )
 
     try:
-        from lmcache.v1.multiprocess.custom_types import RequestAllocationRecord
+        from lmcache.multiprocess.custom_types import RequestAllocationRecord
     except ImportError:
-        from lmcache.v1.multiprocess.custom_types import (
+        from lmcache.multiprocess.custom_types import (
             BlockAllocationRecord as RequestAllocationRecord,
         )
 except ImportError:
-    from lmcache.v1.multiprocess.custom_types import (
+    from lmcache.multiprocess.custom_types import (
         BlockAllocationRecord as RequestAllocationRecord,
     )
 

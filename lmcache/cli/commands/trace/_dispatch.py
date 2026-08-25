@@ -2,7 +2,7 @@
 
 """Dispatcher mapping recorded ``qualname`` strings to live callables.
 
-The recorder writes one :class:`~lmcache.v1.mp_observability.trace.format.Record`
+The recorder writes one :class:`~lmcache.mp_observability.trace.format.Record`
 per decorated call, tagged by the function's fully-qualified name.
 The dispatcher translates those strings back into concrete calls on a
 live :class:`~lmcache.v1.distributed.storage_manager.StorageManager`.
@@ -63,7 +63,7 @@ class ReplayContext:
 #: Type of a dispatcher handler: takes a :class:`ReplayContext` and an
 #: already-decoded ``args`` dict (keys = parameter names, values =
 #: native Python values restored by
-#: :mod:`lmcache.v1.mp_observability.trace.codecs`).  Handlers return
+#: :mod:`lmcache.mp_observability.trace.codecs`).  Handlers return
 #: nothing; any return value from the live call is discarded.
 Handler = Callable[[ReplayContext, dict[str, Any]], None]
 

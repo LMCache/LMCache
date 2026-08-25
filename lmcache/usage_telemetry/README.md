@@ -2,7 +2,7 @@
 
 Phone-home usage statistics: what LMCache deployments look like and how much
 caching they do. This is **not** operator observability — Prometheus/OTel
-metrics for operators live in `lmcache/v1/mp_observability/` (MP mode) and
+metrics for operators live in `lmcache/mp_observability/` (MP mode) and
 `lmcache/observability.py` (single-process mode). The two systems share event
 sources in places but have different consumers (LMCache maintainers vs.
 deployment operators), different transports, and independent opt-outs.

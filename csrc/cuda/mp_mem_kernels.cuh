@@ -21,7 +21,7 @@ struct MemoryObj4 {
 // described as a plan on the Python side, then executed in a single native call
 // (execute_object_group_transfer) that releases the GIL once for the entire
 // burst instead of once per copy/launch. See the design in
-// docs/design/v1/multiprocess/modules/ and lmcache_driven_transfer.py.
+// docs/design/multiprocess/modules/ and lmcache_driven_transfer.py.
 // ---------------------------------------------------------------------------
 
 /**

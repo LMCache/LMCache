@@ -20,7 +20,7 @@ This plugin demonstrates:
 Usage:
   Launch the LMCache MP server with:
 
-    python -m lmcache.v1.multiprocess.server \
+    python -m lmcache.multiprocess.server \
         --host localhost --port 5555 \
         --l1-size-gb 10 --eviction-policy LRU \
         --runtime-plugin-locations \

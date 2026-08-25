@@ -11,7 +11,7 @@ server.  Arguments are grouped by the config module that defines them.
 MP Server
 ---------
 
-Source: ``lmcache/v1/multiprocess/config.py``
+Source: ``lmcache/multiprocess/config.py``
 
 .. list-table::
    :header-rows: 1
@@ -133,7 +133,7 @@ Source: ``lmcache/v1/multiprocess/config.py``
 Lookup Hash Logging
 -------------------
 
-Source: ``lmcache/v1/mp_observability/subscribers/logging/lookup_hash.py``
+Source: ``lmcache/mp_observability/subscribers/logging/lookup_hash.py``
 
 When enabled, the server publishes chunk hashes computed during ``lookup()``
 as ``MP_LOOKUP`` events on the EventBus.  The
@@ -167,7 +167,7 @@ Observability group.
 HTTP Frontend
 -------------
 
-Source: ``lmcache/v1/multiprocess/config.py``
+Source: ``lmcache/multiprocess/config.py``
 
 The HTTP frontend is included when running ``lmcache server``.
 
@@ -188,7 +188,7 @@ The HTTP frontend is included when running ``lmcache server``.
 P2P
 ---
 
-Source: ``lmcache/v1/multiprocess/config.py``
+Source: ``lmcache/multiprocess/config.py``
 
 These flags configure peer-to-peer KV cache sharing between MP servers
 (see :doc:`p2p`). They are registered by ``add_p2p_args()`` on the
@@ -468,7 +468,7 @@ Pass ``--l2-adapter`` multiple times.  Adapters are used in the order given:
 Observability
 -------------
 
-Source: ``lmcache/v1/mp_observability/config.py``
+Source: ``lmcache/mp_observability/config.py``
 
 See :doc:`observability/index` for full details on the three modes (metrics,
 logging, tracing).

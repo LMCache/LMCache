@@ -544,7 +544,7 @@ a user-supplied `--flag=value`.
 
 ## Coordinator: `LMCacheCoordinator` CRD
 
-The **coordinator** (`lmcache/v1/mp_coordinator/`) is the fleet-level HTTP service
+The **coordinator** (`lmcache/mp_coordinator/`) is the fleet-level HTTP service
 that engine servers register/heartbeat against, and which drives L2 quota
 eviction and global CacheBlend lookups. Unlike the engines (one DaemonSet pod per
 GPU node), the coordinator is a single fleet-wide service, so `LMCacheCoordinator`
@@ -553,7 +553,7 @@ controller carries no finalizer — owner-reference GC cascade-deletes the child
 
 ### `LMCacheCoordinatorSpec`
 
-The spec mirrors `MPCoordinatorConfig` (`lmcache/v1/mp_coordinator/config.py`); the
+The spec mirrors `MPCoordinatorConfig` (`lmcache/mp_coordinator/config.py`); the
 controller renders each field into the matching `lmcache coordinator` CLI flag:
 `host`, `port` (9300), `instanceTimeout` (30), `healthCheckInterval` (10),
 `evictionCheckInterval` (5), `evictionRatio` (0.2), `triggerWatermark` (1.0),
@@ -574,7 +574,7 @@ The global-CacheBlend knobs (`blendChunkSize`, `blendProbeStride`) render into t
 
 `LMCacheEngineSpec` and `CacheBlendEngineSpec` gained a `coordinator` block
 (`CoordinatorConnectionSpec`) that maps to the server's coordinator-client flags
-(`lmcache/v1/multiprocess/config.py`: `add_coordinator_args`):
+(`lmcache/multiprocess/config.py`: `add_coordinator_args`):
 
 - `ref` — name of an `LMCacheCoordinator` in the same namespace. The controller
   resolves it to the coordinator's Service URL (`http://<name>.<ns>.svc:<port>`)
@@ -618,12 +618,12 @@ register (unchanged behavior).
 | File | What it defines |
 |---|---|
 | `lmcache/v1/distributed/config.py` | `L1MemoryManagerConfig`, `L1ManagerConfig`, `EvictionConfig`, `StorageManagerConfig`, argparse |
-| `lmcache/v1/mp_observability/config.py` | `PrometheusConfig`, `add_prometheus_args`, `parse_args_to_prometheus_config` |
-| `lmcache/v1/multiprocess/server.py` | `MPCacheServer`, server CLI entry point, argparse (lines 629–653) |
-| `lmcache/v1/multiprocess/http_server.py` | HTTP server with `/healthcheck` endpoint (FastAPI + ZMQ) |
-| `lmcache/v1/mp_coordinator/config.py` | `MPCoordinatorConfig` (coordinator knobs mapped by `LMCacheCoordinator`) |
+| `lmcache/mp_observability/config.py` | `PrometheusConfig`, `add_prometheus_args`, `parse_args_to_prometheus_config` |
+| `lmcache/multiprocess/server.py` | `MPCacheServer`, server CLI entry point, argparse (lines 629–653) |
+| `lmcache/multiprocess/http_server.py` | HTTP server with `/healthcheck` endpoint (FastAPI + ZMQ) |
+| `lmcache/mp_coordinator/config.py` | `MPCoordinatorConfig` (coordinator knobs mapped by `LMCacheCoordinator`) |
 | `lmcache/cli/commands/coordinator.py` | `lmcache coordinator` CLI (flags rendered into the coordinator Deployment) |
-| `lmcache/v1/multiprocess/config.py` | `add_coordinator_args` (engine `coordinator` connection flags) |
+| `lmcache/multiprocess/config.py` | `add_coordinator_args` (engine `coordinator` connection flags) |
 | `lmcache/v1/distributed/l2_adapters/config.py` | L2 adapter registry pattern, `L2AdapterConfigBase`, `L2AdaptersConfig` |
 | `examples/multi_process/lmcache-daemonset.yaml` | Reference DaemonSet manifest |
 | `examples/multi_process/vllm-deployment.yaml` | Reference vLLM deployment with kv-transfer-config |

@@ -11,6 +11,9 @@ import threading
 # First Party
 from lmcache.lmcache_native import TTLLock
 from lmcache.logging import init_logger
+from lmcache.mp_observability.event import Event, EventType
+from lmcache.mp_observability.event_bus import get_event_bus
+from lmcache.mp_observability.otel_init import register_gauge
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import L1ManagerConfig, get_configured_capacity_bytes
 from lmcache.v1.distributed.error import L1Error
@@ -24,9 +27,6 @@ from lmcache.v1.distributed.memory_manager.devdax_l1_memory_manager import (
     DevDaxL1MemoryManager,
 )
 from lmcache.v1.memory_management import MemoryObj
-from lmcache.v1.mp_observability.event import Event, EventType
-from lmcache.v1.mp_observability.event_bus import get_event_bus
-from lmcache.v1.mp_observability.otel_init import register_gauge
 
 logger = init_logger(__name__)
 

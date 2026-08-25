@@ -46,7 +46,7 @@ const (
 	coordinatorDefaultPort int32 = 9300
 
 	// coordinatorHealthPath is the liveness/readiness probe path served by the
-	// coordinator (lmcache/v1/mp_coordinator/http_apis/health_api.py).
+	// coordinator (lmcache/mp_coordinator/http_apis/health_api.py).
 	coordinatorHealthPath = "/healthz"
 
 	// coordinatorComponentLabel is the app.kubernetes.io/component value for

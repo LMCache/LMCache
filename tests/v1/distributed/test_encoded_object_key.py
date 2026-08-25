@@ -105,6 +105,6 @@ class TestSchemasReExport:
         # The mp_coordinator schemas module re-exports the canonical
         # type from ``api.py`` for callers that import from there.
         # First Party
-        from lmcache.v1.mp_coordinator import schemas
+        from lmcache.mp_coordinator import schemas
 
         assert schemas.EncodedObjectKey is EncodedObjectKey

@@ -23,7 +23,7 @@ import (
 
 // LMCacheCoordinatorSpec defines the desired state of LMCacheCoordinator. The
 // fields mirror the coordinator's MPCoordinatorConfig (see
-// lmcache/v1/mp_coordinator/config.py); the controller renders them into the
+// lmcache/mp_coordinator/config.py); the controller renders them into the
 // matching `lmcache coordinator` CLI flags.
 type LMCacheCoordinatorSpec struct {
 	// image defines the container image to use. The coordinator runs the same

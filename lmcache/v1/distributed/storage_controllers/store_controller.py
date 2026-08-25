@@ -18,6 +18,9 @@ import threading
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.mp_observability.event import Event, EventType
+from lmcache.mp_observability.event_bus import get_event_bus
+from lmcache.mp_observability.otel_init import register_gauge
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L1ManagerListener
@@ -32,9 +35,6 @@ from lmcache.v1.distributed.storage_controllers.store_policy import (
     AdapterDescriptor,
     StorePolicy,
 )
-from lmcache.v1.mp_observability.event import Event, EventType
-from lmcache.v1.mp_observability.event_bus import get_event_bus
-from lmcache.v1.mp_observability.otel_init import register_gauge
 from lmcache.v1.platform import (
     consume_fd,
     create_event_notifier,

@@ -71,12 +71,12 @@ try:
 
     try:
         # First Party
-        from lmcache.v1.multiprocess.custom_types import (  # type: ignore[attr-defined]
+        from lmcache.multiprocess.custom_types import (  # type: ignore[attr-defined]
             RequestAllocationRecord,
         )
     except ImportError:
         # First Party
-        from lmcache.v1.multiprocess.custom_types import (
+        from lmcache.multiprocess.custom_types import (
             BlockAllocationRecord as RequestAllocationRecord,
         )
 except ImportError:
@@ -88,7 +88,7 @@ except ImportError:
     )
 
     # First Party
-    from lmcache.v1.multiprocess.custom_types import (
+    from lmcache.multiprocess.custom_types import (
         BlockAllocationRecord as RequestAllocationRecord,
     )
 
@@ -384,7 +384,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                     FeatureContext,
                     init_dispatcher,
                 )
-                from lmcache.v1.multiprocess.modules.experimental import TRANSFER_QUERY
+                from lmcache.multiprocess.modules.experimental import TRANSFER_QUERY
 
                 ctx = FeatureContext(
                     worker_adapter=self.worker_adapter,

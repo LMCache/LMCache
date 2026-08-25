@@ -216,7 +216,7 @@ policy — no special "disable" flag is needed.
 
 ### 4. HTTP API for Quota Management
 
-The existing FastAPI HTTP server (`lmcache/v1/multiprocess/http_server.py`)
+The existing FastAPI HTTP server (`lmcache/multiprocess/http_server.py`)
 already serves `/healthcheck`, `/status`, and `/cache/clear`.
 Add quota management endpoints:
 
@@ -294,7 +294,7 @@ so callers cannot accidentally drop the salt.
 
 ### 2. Server — `cache_salt` is carried by `IPCCacheServerKey`
 
-**File:** `lmcache/v1/multiprocess/server.py`
+**File:** `lmcache/multiprocess/server.py`
 
 Since both the scheduler and worker adapters set `cache_salt` on
 `IPCCacheServerKey`, the server simply calls `ipc_key_to_object_keys(...)`
@@ -796,8 +796,8 @@ it through. Update serialization. No behavioral change with `cache_salt=""`.
 | File | Change |
 |------|--------|
 | `lmcache/v1/distributed/api.py` | `cache_salt: str = ""` on `ObjectKey` with `__post_init__` validation (`@`, `/`, `\`, NUL, length cap on `cache_salt`; `@` rejected on `model_name`); `ipc_key_to_object_keys()` reads `ipc_key.cache_salt` directly (no separate param) |
-| `lmcache/v1/multiprocess/custom_types.py` | `cache_salt: str = ""` on `IPCCacheServerKey` with `__post_init__` validation; update `no_worker_id_version()`, `from_token_ids()` |
-| `lmcache/v1/multiprocess/server.py` / `blend_server_v2.py` | No code changes — existing `ipc_key_to_object_keys(key, chunk_hashes)` calls now carry salt automatically |
+| `lmcache/multiprocess/custom_types.py` | `cache_salt: str = ""` on `IPCCacheServerKey` with `__post_init__` validation; update `no_worker_id_version()`, `from_token_ids()` |
+| `lmcache/multiprocess/server.py` / `blend_server_v2.py` | No code changes — existing `ipc_key_to_object_keys(key, chunk_hashes)` calls now carry salt automatically |
 | `lmcache/integration/vllm/vllm_multi_process_adapter.py` | Scheduler + worker `_create_key()` now forward `cache_salt` to `IPCCacheServerKey` |
 | `lmcache/v1/distributed/l2_adapters/native_connector_l2_adapter.py` | `_object_key_to_string()` appends trailing `@<cache_salt>` when salted; un-salted output is unchanged |
 | `lmcache/v1/distributed/l2_adapters/fs_l2_adapter.py` | `_object_key_to_filename()` / `_filename_to_object_key()` accept 3-field (unsalted) or 4-field (salted) shapes |
@@ -844,7 +844,7 @@ The feature PR. Depends on PR1a + PR1b + PR2 + PR3 + PR4.
 | `lmcache/v1/distributed/l2_adapters/config.py` | Add `"IsolatedLRU"` to allowed values |
 | `lmcache/v1/distributed/storage_controllers/eviction_controller.py` | `QuotaManager`; per-user branch using `is_user_level` + `bytes_by_cache_salt` |
 | `lmcache/v1/distributed/storage_manager.py` | Create `QuotaManager`; wire to controller + HTTP |
-| `lmcache/v1/multiprocess/http_server.py` | Quota CRUD endpoints |
+| `lmcache/multiprocess/http_server.py` | Quota CRUD endpoints |
 | `tests/v1/distributed/test_isolated_lru_eviction_policy.py` (new) | Unit tests |
 | `tests/v1/distributed/test_quota_manager.py` (new) | Unit tests |
 | `tests/v1/distributed/test_per_user_l2_eviction.py` (new) | Integration tests |

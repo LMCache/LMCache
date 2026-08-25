@@ -84,7 +84,7 @@ The same three attributes appear on the `"cb.request"` root span and are set
 when `CB_LOOKUP_END` is processed by `BlendTracingSubscriber`.
 
 `CB_LOOKUP_END` carries `hit_tokens` and `requested_tokens` in its metadata,
-computed at the emit site in `lmcache/v1/multiprocess/modules/blend.py`:
+computed at the emit site in `lmcache/multiprocess/modules/blend.py`:
 
 | Field | Value |
 |-------|-------|
@@ -265,15 +265,15 @@ root "request"  [═════════════════════
 
 | File | Change |
 |------|--------|
-| `lmcache/v1/mp_observability/event.py` | Add `MP_REQUEST_START`, `MP_STORE_SUBMITTED`, `MP_RETRIEVE_SUBMITTED`, `MP_REQUEST_END` |
-| `lmcache/v1/multiprocess/server.py` | Emit the 4 events at `lookup_prefetch_start()`, `store()`, `retrieve()`, `end_session()` |
-| `lmcache/v1/mp_observability/subscribers/tracing/mp_server.py` | Root span logic: `_pending_store_count`, `_pending_retrieve_count`, `_deferred_session_end_ts`; handlers `_on_request_start`, `_on_store_submitted`, `_on_retrieve_submitted`, `_on_session_end`; helpers `_get_or_create_request_span`, `_close_request_span` |
-| `lmcache/v1/mp_observability/subscribers/tracing/span_registry.py` | `SpanRegistry`: shared dict of open spans keyed by `(session_id, span_name)` for cross-subscriber parent lookup |
-| `tests/v1/mp_observability/subscribers/tracing/test_mp_server.py` | Tests for all scenarios including retrieve deferral |
-| `lmcache/v1/multiprocess/modules/blend.py` | Prefix probe in `cb_lookup_pre_computed`; lazy registration; `has_chunk` on `BlendTokenRangeMatcher`; `prefix_hits` in `CB_LOOKUP_END` metadata |
-| `lmcache/v1/mp_observability/subscribers/tracing/cb_server.py` | Stamp `prefix_hits` on `"cb.request"` root span from `CB_LOOKUP_END` |
-| `tests/v1/multiprocess/test_blend_server_v2.py` | `has_chunk` unit tests |
-| `tests/v1/mp_observability/subscribers/tracing/test_cb_server.py` | `prefix_hits` attribute tests |
+| `lmcache/mp_observability/event.py` | Add `MP_REQUEST_START`, `MP_STORE_SUBMITTED`, `MP_RETRIEVE_SUBMITTED`, `MP_REQUEST_END` |
+| `lmcache/multiprocess/server.py` | Emit the 4 events at `lookup_prefetch_start()`, `store()`, `retrieve()`, `end_session()` |
+| `lmcache/mp_observability/subscribers/tracing/mp_server.py` | Root span logic: `_pending_store_count`, `_pending_retrieve_count`, `_deferred_session_end_ts`; handlers `_on_request_start`, `_on_store_submitted`, `_on_retrieve_submitted`, `_on_session_end`; helpers `_get_or_create_request_span`, `_close_request_span` |
+| `lmcache/mp_observability/subscribers/tracing/span_registry.py` | `SpanRegistry`: shared dict of open spans keyed by `(session_id, span_name)` for cross-subscriber parent lookup |
+| `tests/mp_observability/subscribers/tracing/test_mp_server.py` | Tests for all scenarios including retrieve deferral |
+| `lmcache/multiprocess/modules/blend.py` | Prefix probe in `cb_lookup_pre_computed`; lazy registration; `has_chunk` on `BlendTokenRangeMatcher`; `prefix_hits` in `CB_LOOKUP_END` metadata |
+| `lmcache/mp_observability/subscribers/tracing/cb_server.py` | Stamp `prefix_hits` on `"cb.request"` root span from `CB_LOOKUP_END` |
+| `tests/multiprocess/test_blend_server_v2.py` | `has_chunk` unit tests |
+| `tests/mp_observability/subscribers/tracing/test_cb_server.py` | `prefix_hits` attribute tests |
 
 ---
 
@@ -309,9 +309,9 @@ No existing files need to change.
 # SPDX-License-Identifier: Apache-2.0
 from opentelemetry import trace
 
-from lmcache.v1.mp_observability.event import Event, EventType
-from lmcache.v1.mp_observability.event_bus import EventCallback, EventSubscriber
-from lmcache.v1.mp_observability.subscribers.tracing.span_registry import SpanRegistry
+from lmcache.mp_observability.event import Event, EventType
+from lmcache.mp_observability.event_bus import EventCallback, EventSubscriber
+from lmcache.mp_observability.subscribers.tracing.span_registry import SpanRegistry
 
 _tracer = trace.get_tracer("lmcache_mp.l1")
 

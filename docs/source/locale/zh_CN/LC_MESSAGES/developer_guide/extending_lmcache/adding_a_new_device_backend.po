@@ -512,7 +512,7 @@ msgstr "引擎驱动的调用站点"
 
 #: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:360
 msgid ""
-"``lmcache/v1/multiprocess/transfer_context/worker_transfer.py`` "
+"``lmcache/multiprocess/transfer_context/worker_transfer.py`` "
 "(``EngineDrivenTransferContext``, ``create_transfer_context``)"
-msgstr "``lmcache/v1/multiprocess/transfer_context/worker_transfer.py`` (``EngineDrivenTransferContext``, ``create_transfer_context``)"
+msgstr "``lmcache/multiprocess/transfer_context/worker_transfer.py`` (``EngineDrivenTransferContext``, ``create_transfer_context``)"
 

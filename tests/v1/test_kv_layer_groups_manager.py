@@ -7,6 +7,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.kv_layer_groups import (
     EXCLUDED_ENGINE_GROUP,
     KernelGroupIdentity,
@@ -19,7 +20,6 @@ from lmcache.v1.kv_layer_groups import (
     group_layers_by_identity,
     parse_kvcache_shape_spec,
 )
-from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 import lmcache.lmcache_native as lmcache_native
 
 

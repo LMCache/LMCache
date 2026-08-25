@@ -19,7 +19,7 @@ from lmcache.integration.vllm.utils import (
     extract_mm_features,
 )
 from lmcache.integration.vllm.vllm_multi_process_adapter import LoadStoreOp
-from lmcache.v1.multiprocess.group_view import slice_block_ids_per_group
+from lmcache.multiprocess.group_view import slice_block_ids_per_group
 
 if TYPE_CHECKING:
     # Third Party

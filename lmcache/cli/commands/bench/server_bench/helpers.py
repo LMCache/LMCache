@@ -45,6 +45,20 @@ try:
     import zmq  # noqa: F401  # availability probe; used by command.py
 
     # First Party
+    from lmcache.multiprocess.custom_types import (
+        IPCCacheServerKey,
+        KVCache,
+        RegisterEngineDrivenContextPayload,
+    )
+    from lmcache.multiprocess.futures import MessagingFuture
+    from lmcache.multiprocess.group_view import EngineGroupInfo
+    from lmcache.multiprocess.mq import MessageQueueClient
+    from lmcache.multiprocess.posix_shm import shm_open_pool_as_mmap
+    from lmcache.multiprocess.protocols.base import RequestType
+    from lmcache.multiprocess.protocols.engine import (
+        RegisterEngineDrivenContextResponse,
+    )
+    from lmcache.multiprocess.transfer_context.shm import ShmSlotDescriptor
     from lmcache.utils import (
         EngineType,
         check_interprocess_event_support,
@@ -53,20 +67,6 @@ try:
         DTYPE_MAP,
         KVLayerGroupInfo,
     )
-    from lmcache.v1.multiprocess.custom_types import (
-        IPCCacheServerKey,
-        KVCache,
-        RegisterEngineDrivenContextPayload,
-    )
-    from lmcache.v1.multiprocess.futures import MessagingFuture
-    from lmcache.v1.multiprocess.group_view import EngineGroupInfo
-    from lmcache.v1.multiprocess.mq import MessageQueueClient
-    from lmcache.v1.multiprocess.posix_shm import shm_open_pool_as_mmap
-    from lmcache.v1.multiprocess.protocols.base import RequestType
-    from lmcache.v1.multiprocess.protocols.engine import (
-        RegisterEngineDrivenContextResponse,
-    )
-    from lmcache.v1.multiprocess.transfer_context.shm import ShmSlotDescriptor
     from lmcache.v1.platform.cpu.shm import (
         CpuShmTensorWrapper,
         shm_create_readwrite,
@@ -573,7 +573,7 @@ def _send_lookup(
     later retrieves the same shared KV object; without the extra
     locks the second RETRIEVE tries to release a lock that the
     first RETRIEVE already dropped and reads stale bytes). See
-    ``compute_extra_count`` in ``lmcache/v1/multiprocess/modules/
+    ``compute_extra_count`` in ``lmcache/multiprocess/modules/
     lookup.py`` -- MLA is detected on the server via
     ``tp_size > world_size``.
 

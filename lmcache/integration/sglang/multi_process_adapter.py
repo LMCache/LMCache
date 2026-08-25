@@ -27,15 +27,15 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (
     send_lmcache_request,
 )
 from lmcache.logging import init_logger
-from lmcache.utils import EngineType
-from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
-from lmcache.v1.multiprocess.custom_types import (
+from lmcache.mp_observability.errors import LMCacheTimeoutError
+from lmcache.multiprocess.custom_types import (
     IPCCacheServerKey,
     KVCache,
 )
-from lmcache.v1.multiprocess.futures import MessagingFuture
-from lmcache.v1.multiprocess.mq import MessageQueueClient
-from lmcache.v1.multiprocess.protocol import RequestType
+from lmcache.multiprocess.futures import MessagingFuture
+from lmcache.multiprocess.mq import MessageQueueClient
+from lmcache.multiprocess.protocol import RequestType
+from lmcache.utils import EngineType
 from lmcache.v1.platform import get_device_spec
 from lmcache.v1.platform.kv_wrap import wrap_one_kv_cache
 

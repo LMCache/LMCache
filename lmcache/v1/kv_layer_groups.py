@@ -21,8 +21,8 @@ import lmcache.lmcache_native as lmcache_native
 
 if TYPE_CHECKING:
     # First Party
+    from lmcache.multiprocess.group_view import EngineGroupInfo
     from lmcache.v1.gpu_connector.utils import DiscoverableKVCache
-    from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 
 logger = init_logger(__name__)
 
@@ -361,12 +361,12 @@ class KVLayerGroupsManager:
         # Import here to break a circular import via
         # lmcache.v1.gpu_connector.__init__ → metadata → kv_layer_groups.
         # First Party
+        from lmcache.multiprocess.group_view import get_engine_group_indices
         from lmcache.v1.gpu_connector.utils import (
             get_num_blocks,
             make_page_buffer_shape_desc,
             resolve_block_stride_and_log_layout,
         )
-        from lmcache.v1.multiprocess.group_view import get_engine_group_indices
 
         self._kernel_groups: list[KernelGroupInfo] = []
         self._object_groups: list[ObjectGroupInfo] = []

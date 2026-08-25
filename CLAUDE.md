@@ -26,7 +26,7 @@ A design doc for code at `lmcache/<path>/` is located at `docs/design/<path>/`:
 
 - `lmcache/cli/commands/ping.py` → `docs/design/cli/commands/ping.md`
 - `lmcache/v1/distributed/l2_adapters/` → `docs/design/v1/distributed/l2_adapters/`
-- `lmcache/v1/mp_observability/` → `docs/design/v1/mp_observability/`
+- `lmcache/mp_observability/` → `docs/design/mp_observability/`
 
 When investigating a module, always check the mirrored `docs/design/<path>/` first for
 design rationale, contracts, and extension guides. When adding or updating a design

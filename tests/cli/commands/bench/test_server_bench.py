@@ -31,8 +31,8 @@ from lmcache.cli.commands.bench.server_bench.helpers import (
     _send_lookup,
     _send_unregister_kv_cache,
 )
-from lmcache.v1.multiprocess.mq import MessageQueueClient
-from lmcache.v1.multiprocess.protocols.base import RequestType
+from lmcache.multiprocess.mq import MessageQueueClient
+from lmcache.multiprocess.protocols.base import RequestType
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 
 
@@ -682,7 +682,7 @@ class _RegisterEngineDrivenRouter:
 
     def __init__(self, endpoint: str) -> None:
         # First Party
-        from lmcache.v1.multiprocess.custom_types import (
+        from lmcache.multiprocess.custom_types import (
             RegisterEngineDrivenContextPayload,
         )
 
@@ -718,7 +718,7 @@ class _RegisterEngineDrivenRouter:
 
     def _run(self) -> None:
         # First Party
-        from lmcache.v1.multiprocess.protocols.engine import (
+        from lmcache.multiprocess.protocols.engine import (
             RegisterEngineDrivenContextResponse,
         )
 
@@ -758,7 +758,7 @@ class TestRegisterKVCacheMLA:
         from lmcache.cli.commands.bench.server_bench.helpers import (
             _send_register_kv_cache,
         )
-        from lmcache.v1.multiprocess.custom_types import (
+        from lmcache.multiprocess.custom_types import (
             RegisterEngineDrivenContextPayload,
         )
 

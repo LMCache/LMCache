@@ -19,7 +19,7 @@ Two modes are supported:
 
     1. Start the LMCache server::
 
-        python -m lmcache.v1.multiprocess.server \\
+        python -m lmcache.multiprocess.server \\
             --host 0.0.0.0 --port 5555 \\
             --l1-size-gb 10 --eviction-policy LRU --max-workers 4
 

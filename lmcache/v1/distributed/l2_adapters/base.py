@@ -22,8 +22,8 @@ if TYPE_CHECKING:
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.mp_observability.event import Event, EventType
-from lmcache.v1.mp_observability.event_bus import get_event_bus
+from lmcache.mp_observability.event import Event, EventType
+from lmcache.mp_observability.event_bus import get_event_bus
 
 logger = init_logger(__name__)
 

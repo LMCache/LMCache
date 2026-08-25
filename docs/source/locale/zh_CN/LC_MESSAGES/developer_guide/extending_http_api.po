@@ -27,13 +27,13 @@ msgstr "扩展 HTTP API"
 msgid ""
 "You can add new endpoints to the ``lmcache server`` HTTP frontend "
 "**without modifying any existing code**. An endpoint is just a Python "
-"module placed in ``lmcache/v1/multiprocess/http_apis/`` that exposes a "
+"module placed in ``lmcache/multiprocess/http_apis/`` that exposes a "
 "FastAPI ``APIRouter``; ``HTTPAPIRegistry`` auto-discovers and mounts it "
 "at startup -- the same zero-modification pattern used by the :doc:`L2 "
 "adapters </mp/l2_storage/index>`."
 msgstr ""
 "您可以向 ``lmcache server`` HTTP 前端添加新端点，\\ **无需修改任何现有代码**\\ 。端点只需是放置在 "
-"``lmcache/v1/multiprocess/http_apis/`` 中的 Python 模块，并公开一个 FastAPI "
+"``lmcache/multiprocess/http_apis/`` 中的 Python 模块，并公开一个 FastAPI "
 "``APIRouter``\\ ；\\ ``HTTPAPIRegistry`` 会在启动时自动发现并挂载它——与 :doc:`L2 "
 "adapters </mp/l2_storage/index>` 所采用的零修改模式相同。"
 
@@ -44,13 +44,13 @@ msgstr "自动发现机制"
 #: ../../source/developer_guide/extending_http_api.rst:14
 msgid ""
 "At startup, ``http_server.py`` hands the FastAPI app to "
-"``HTTPAPIRegistry`` (``lmcache/v1/multiprocess/http_api_registry.py``), "
+"``HTTPAPIRegistry`` (``lmcache/multiprocess/http_api_registry.py``), "
 "which scans the ``http_apis/`` directory with ``pkgutil``, imports every "
 "module whose name ends with ``_api``, and includes any module-level "
 "``router``. The built-in modules follow this pattern:"
 msgstr ""
 "启动时，\\ ``http_server.py`` 将 FastAPI 应用实例传递给 ``HTTPAPIRegistry``\\ （\\ "
-"``lmcache/v1/multiprocess/http_api_registry.py``\\ ）。该注册器使用 ``pkgutil`` "
+"``lmcache/multiprocess/http_api_registry.py``\\ ）。该注册器使用 ``pkgutil`` "
 "扫描 ``http_apis/`` 目录，导入所有名称以 ``_api`` 结尾的模块，并将其中定义的模块级 ``router`` "
 "注册到应用中。内置模块均遵循此模式："
 
@@ -128,10 +128,10 @@ msgstr "添加端点"
 
 #: ../../source/developer_guide/extending_http_api.rst:48
 msgid ""
-"Create a file in ``lmcache/v1/multiprocess/http_apis/`` whose name ends "
+"Create a file in ``lmcache/multiprocess/http_apis/`` whose name ends "
 "with ``_api.py`` and expose a ``router``:"
 msgstr ""
-"在 ``lmcache/v1/multiprocess/http_apis/`` 中创建一个文件，文件名以 ``_api.py`` "
+"在 ``lmcache/multiprocess/http_apis/`` 中创建一个文件，文件名以 ``_api.py`` "
 "结尾，并公开一个 ``router``\\ ："
 
 #: ../../source/developer_guide/extending_http_api.rst:72
@@ -150,9 +150,9 @@ msgstr "API 模块 **必须**\\ ："
 
 #: ../../source/developer_guide/extending_http_api.rst:80
 msgid ""
-"live in ``lmcache/v1/multiprocess/http_apis/`` with a filename ending in "
+"live in ``lmcache/multiprocess/http_apis/`` with a filename ending in "
 "``_api.py``;"
-msgstr "位于 ``lmcache/v1/multiprocess/http_apis/`` 目录下，文件名以 ``_api.py`` 结尾；"
+msgstr "位于 ``lmcache/multiprocess/http_apis/`` 目录下，文件名以 ``_api.py`` 结尾；"
 
 #: ../../source/developer_guide/extending_http_api.rst:82
 msgid "expose a module-level ``router`` of type ``fastapi.APIRouter``."
@@ -197,8 +197,8 @@ msgstr "``app.state`` 是服务器启动时填充的共享上下文，可通过�
 #: ../../source/developer_guide/extending_http_api.rst:108
 msgid ""
 "For the full design rationale see "
-"``docs/design/v1/multiprocess/http_api_extension.md`` in the source tree."
-msgstr "完整的设计说明请参见源码树中的 ``docs/design/v1/multiprocess/http_api_extension.md``\\ 。"
+"``docs/design/multiprocess/http_api_extension.md`` in the source tree."
+msgstr "完整的设计说明请参见源码树中的 ``docs/design/multiprocess/http_api_extension.md``\\ 。"
 
 #~ msgid "``healthcheck_api.py``"
 #~ msgstr "``healthcheck_api.py``"

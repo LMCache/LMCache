@@ -54,10 +54,10 @@ jobs:
               - 'rust/raw_block/**'
               - 'lmcache/v1/storage_backend/raw_block/**'
               - 'lmcache/v1/distributed/l2_adapters/raw_block_l2_adapter.py'
-              - 'lmcache/v1/multiprocess/**'
+              - 'lmcache/multiprocess/**'
               - 'tests/v1/storage_backend/test_raw_block*.py'
               - 'tests/v1/storage_backend/raw_block_test_utils.py'
-              - 'tests/v1/multiprocess/test_raw_block_l2_adapter.py'
+              - 'tests/multiprocess/test_raw_block_l2_adapter.py'
               - '.github/workflows/test.yml'
 
   test:
@@ -166,4 +166,4 @@ jobs:
           pytest -q --basetemp=.pytest-tmp/raw-block \
             tests/v1/storage_backend/test_raw_block_device.py \
             tests/v1/storage_backend/test_raw_block_core.py \
-            tests/v1/multiprocess/test_raw_block_l2_adapter.py
+            tests/multiprocess/test_raw_block_l2_adapter.py

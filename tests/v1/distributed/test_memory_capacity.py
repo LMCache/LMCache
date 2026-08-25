@@ -13,6 +13,7 @@ import threading
 import pytest
 
 # First Party
+from lmcache.mp_observability.event import Event, EventType
 from lmcache.v1.distributed.api import L1BackendType, ModuleMemoryCapacity, Tier
 from lmcache.v1.distributed.config import (
     GdsL1Config,
@@ -23,7 +24,6 @@ from lmcache.v1.distributed.config import (
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.memory_manager.l1_manager_protocol import L1ManagerProtocol
 from lmcache.v1.distributed.storage_manager import StorageManager
-from lmcache.v1.mp_observability.event import Event, EventType
 
 GIB = 1 << 30
 

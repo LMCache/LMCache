@@ -3,7 +3,7 @@ Extending the HTTP API
 
 You can add new endpoints to the ``lmcache server`` HTTP frontend **without
 modifying any existing code**. An endpoint is just a Python module placed in
-``lmcache/v1/multiprocess/http_apis/`` that exposes a FastAPI ``APIRouter``;
+``lmcache/multiprocess/http_apis/`` that exposes a FastAPI ``APIRouter``;
 ``HTTPAPIRegistry`` auto-discovers and mounts it at startup -- the same
 zero-modification pattern used by the :doc:`L2 adapters
 </mp/l2_storage/index>`.
@@ -12,7 +12,7 @@ How discovery works
 -------------------
 
 At startup, ``http_server.py`` hands the FastAPI app to ``HTTPAPIRegistry``
-(``lmcache/v1/multiprocess/http_api_registry.py``), which scans the
+(``lmcache/multiprocess/http_api_registry.py``), which scans the
 ``http_apis/`` directory with ``pkgutil``, imports every module whose name ends
 with ``_api``, and includes any module-level ``router``. The built-in modules
 follow this pattern:
@@ -45,12 +45,12 @@ follow this pattern:
 Adding an endpoint
 ------------------
 
-Create a file in ``lmcache/v1/multiprocess/http_apis/`` whose name ends with
+Create a file in ``lmcache/multiprocess/http_apis/`` whose name ends with
 ``_api.py`` and expose a ``router``:
 
 .. code-block:: python
 
-   # lmcache/v1/multiprocess/http_apis/metrics_api.py
+   # lmcache/multiprocess/http_apis/metrics_api.py
    # SPDX-License-Identifier: Apache-2.0
    from fastapi import APIRouter, Request
    from fastapi.responses import JSONResponse
@@ -77,7 +77,7 @@ Module contract
 
 An API module **must**:
 
-- live in ``lmcache/v1/multiprocess/http_apis/`` with a filename ending in
+- live in ``lmcache/multiprocess/http_apis/`` with a filename ending in
   ``_api.py``;
 - expose a module-level ``router`` of type ``fastapi.APIRouter``.
 
@@ -106,4 +106,4 @@ through the request object:
        ...
 
 For the full design rationale see
-``docs/design/v1/multiprocess/http_api_extension.md`` in the source tree.
+``docs/design/multiprocess/http_api_extension.md`` in the source tree.

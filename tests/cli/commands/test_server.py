@@ -129,7 +129,7 @@ class TestServerCommandExecute:
 
     def test_execute_calls_run_http_server(self, parser):
         """execute() should call run_http_server with parsed configs."""
-        http_server = pytest.importorskip("lmcache.v1.multiprocess.http_server")
+        http_server = pytest.importorskip("lmcache.multiprocess.http_server")
         with patch.object(http_server, "run_http_server") as mock_run:
             args = parser.parse_args(
                 [

@@ -213,9 +213,9 @@ class CoordinatorCommand(BaseCommand):
             import uvicorn
 
             # First Party
-            from lmcache.v1.mp_coordinator.app import create_app
-            from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
-            from lmcache.v1.mp_coordinator.observability import (
+            from lmcache.mp_coordinator.app import create_app
+            from lmcache.mp_coordinator.config import MPCoordinatorConfig
+            from lmcache.mp_coordinator.observability import (
                 init_coordinator_metrics,
             )
         except ImportError:

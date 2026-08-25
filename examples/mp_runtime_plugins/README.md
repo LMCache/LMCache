@@ -14,7 +14,7 @@ This directory contains example runtime plugins designed for the
 ## Design
 
 For architecture details, component diagrams, and data flow, see
-[docs/design/v1/multiprocess/mp_runtime_plugin.md](../../docs/design/v1/multiprocess/mp_runtime_plugin.md).
+[docs/design/multiprocess/mp_runtime_plugin.md](../../docs/design/multiprocess/mp_runtime_plugin.md).
 
 ## Files
 
@@ -76,7 +76,7 @@ Plugins receive the following environment variables:
 Launch the LMCache MP server with the plugin directory:
 
 ```bash
-python -m lmcache.v1.multiprocess.server \
+python -m lmcache.multiprocess.server \
     --host localhost --port 5555 \
     --l1-size-gb 10 \
     --eviction-policy LRU \

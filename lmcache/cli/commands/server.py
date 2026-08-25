@@ -44,14 +44,14 @@ class ServerCommand(BaseCommand):
         """
         try:
             # First Party
-            from lmcache.v1.distributed.config import add_storage_manager_args
-            from lmcache.v1.mp_observability.config import add_observability_args
-            from lmcache.v1.multiprocess.config import (
+            from lmcache.mp_observability.config import add_observability_args
+            from lmcache.multiprocess.config import (
                 add_coordinator_args,
                 add_http_frontend_args,
                 add_mp_server_args,
                 add_p2p_args,
             )
+            from lmcache.v1.distributed.config import add_storage_manager_args
 
             add_mp_server_args(parser)
             add_p2p_args(parser)
@@ -81,16 +81,16 @@ class ServerCommand(BaseCommand):
 
         try:
             # First Party
-            from lmcache.v1.distributed.config import parse_args_to_config
-            from lmcache.v1.mp_observability.config import (
+            from lmcache.mp_observability.config import (
                 parse_args_to_observability_config,
             )
-            from lmcache.v1.multiprocess.config import (
+            from lmcache.multiprocess.config import (
                 parse_args_to_coordinator_config,
                 parse_args_to_http_frontend_config,
                 parse_args_to_mp_server_config,
             )
-            from lmcache.v1.multiprocess.http_server import run_http_server
+            from lmcache.multiprocess.http_server import run_http_server
+            from lmcache.v1.distributed.config import parse_args_to_config
         except ImportError:
             print(
                 "The 'lmcache server' command requires the full lmcache "

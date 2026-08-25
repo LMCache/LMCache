@@ -9,7 +9,7 @@ The concrete implementations live in their respective sub-packages:
   CPU-only fallback (POSIX-SHM-backed KV tensors).
 
 :func:`create_cache_context` keeps the dispatch out of the call site
-in :mod:`lmcache.v1.multiprocess.server`. Selection is data-driven
+in :mod:`lmcache.multiprocess.server`. Selection is data-driven
 and delegated to the :class:`~lmcache.v1.platform.base.device_spec.
 DeviceSpec` registry maintained by :mod:`lmcache.v1.platform`: each built-in
 backend sub-package or external device plugin ships a ``DeviceSpec`` whose
@@ -29,15 +29,15 @@ from typing import TYPE_CHECKING
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.multiprocess.custom_types import KVCache
 from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.utils import LayoutHints
-from lmcache.v1.multiprocess.custom_types import KVCache
 from lmcache.v1.platform import get_device_spec
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.multiprocess.group_view import EngineGroupInfo
+    from lmcache.multiprocess.group_view import EngineGroupInfo
 
 logger = init_logger(__name__)
 

@@ -30,8 +30,8 @@ from typing import cast
 import threading
 
 # First Party
+from lmcache.mp_coordinator.persistence.durable_component import PersistenceType
 from lmcache.v1.distributed.internal_api import QuotaEntry
-from lmcache.v1.mp_coordinator.persistence.durable_component import PersistenceType
 
 
 class QuotaManager:

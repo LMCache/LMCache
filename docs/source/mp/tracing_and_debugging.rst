@@ -325,6 +325,6 @@ See Also
 
 - :ref:`trace-recording` — the short ``Trace Recording`` section in
   the Observability page focuses on the recording-side flags.
-- ``docs/design/v1/mp_observability/trace.md`` in the source tree —
+- ``docs/design/mp_observability/trace.md`` in the source tree —
   full design doc: architecture, replay dispatcher, context-manager
   pairing, stats collector, and test matrix.

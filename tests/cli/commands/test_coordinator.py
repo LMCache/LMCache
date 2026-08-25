@@ -109,7 +109,7 @@ class TestCoordinatorCommandExecute:
     def test_overrides_applied(self, cmd):
         """chunk_size/hash_algorithm/blend flags override the config."""
         # First Party
-        from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
+        from lmcache.mp_coordinator.config import MPCoordinatorConfig
 
         args = argparse.Namespace(
             host=None,
@@ -140,10 +140,10 @@ class TestCoordinatorCommandExecute:
         with (
             patch("uvicorn.run"),
             patch(
-                "lmcache.v1.mp_coordinator.observability.init_coordinator_metrics"
+                "lmcache.mp_coordinator.observability.init_coordinator_metrics"
             ) as mock_init_metrics,
             patch(
-                "lmcache.v1.mp_coordinator.app.create_app",
+                "lmcache.mp_coordinator.app.create_app",
                 side_effect=fake_create_app,
             ),
         ):
@@ -166,7 +166,7 @@ class TestCoordinatorCommandExecute:
     def test_env_vars_ignored(self, cmd, monkeypatch):
         """Config is CLI-only: LMCACHE_MP_COORDINATOR_* no longer has an effect."""
         # First Party
-        from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
+        from lmcache.mp_coordinator.config import MPCoordinatorConfig
 
         monkeypatch.setenv("LMCACHE_MP_COORDINATOR_PORT", "7777")
         monkeypatch.setenv("LMCACHE_MP_COORDINATOR_HOST", "10.0.0.1")
@@ -200,9 +200,9 @@ class TestCoordinatorCommandExecute:
 
         with (
             patch("uvicorn.run"),
-            patch("lmcache.v1.mp_coordinator.observability.init_coordinator_metrics"),
+            patch("lmcache.mp_coordinator.observability.init_coordinator_metrics"),
             patch(
-                "lmcache.v1.mp_coordinator.app.create_app",
+                "lmcache.mp_coordinator.app.create_app",
                 side_effect=fake_create_app,
             ),
         ):

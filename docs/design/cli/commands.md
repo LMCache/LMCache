@@ -4,7 +4,7 @@
 
 ## Why
 
-Today users must remember `python3 -m lmcache.v1.multiprocess.http_server ...` and
+Today users must remember `python3 -m lmcache.multiprocess.http_server ...` and
 similar module paths. We need a single `lmcache` command as the front door to all
 LMCache functionality.
 
@@ -38,7 +38,7 @@ All client commands use a `--url` flag pointing to the **LMCache HTTP server**
 
 ### `lmcache server`
 
-Replaces `python3 -m lmcache.v1.multiprocess.http_server`. Runs in foreground,
+Replaces `python3 -m lmcache.multiprocess.http_server`. Runs in foreground,
 Ctrl-C to stop. HTTP frontend is enabled by default; use `--no-http` to run
 ZMQ-only.
 
@@ -56,7 +56,7 @@ Server args are composed from existing helpers: `add_mp_server_args()`,
 
 ### `lmcache coordinator`
 
-Replaces `python3 -m lmcache.v1.mp_coordinator`. Runs the mp coordinator's
+Replaces `python3 -m lmcache.mp_coordinator`. Runs the mp coordinator's
 FastAPI/HTTP app in the foreground (Ctrl-C to stop). The coordinator tracks mp
 server instances in a registry and evicts those whose heartbeats lapse.
 
@@ -70,7 +70,7 @@ lmcache coordinator \
 Config comes from the flags alone: `execute` builds an `MPCoordinatorConfig`
 from every flag that was supplied, and each flag defaults to unset so the
 dataclass default stands. The coordinator reads no environment variables. See
-[../v1/mp_coordinator/README.md](../v1/mp_coordinator/README.md).
+[../mp_coordinator/README.md](../mp_coordinator/README.md).
 
 ### `lmcache describe`
 

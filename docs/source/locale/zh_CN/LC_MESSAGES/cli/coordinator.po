@@ -37,10 +37,10 @@ msgstr ""
 
 #: ../../source/cli/coordinator.rst:9
 msgid ""
-"It replaces ``python -m lmcache.v1.mp_coordinator``. The process runs in "
+"It replaces ``python -m lmcache.mp_coordinator``. The process runs in "
 "the foreground; stop it with ``Ctrl-C``."
 msgstr ""
-"它替代了 ``python -m lmcache.v1.mp_coordinator``\\ 。该进程在前台运行；使用 ``Ctrl-C`` "
+"它替代了 ``python -m lmcache.mp_coordinator``\\ 。该进程在前台运行；使用 ``Ctrl-C`` "
 "停止它。"
 
 #: ../../source/cli/coordinator.rst:17

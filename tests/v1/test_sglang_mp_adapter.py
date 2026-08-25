@@ -18,7 +18,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.multiprocess.futures import MessagingFuture
+from lmcache.multiprocess.futures import MessagingFuture
 
 pytestmark = pytest.mark.sglang
 

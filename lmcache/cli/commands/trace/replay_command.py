@@ -88,8 +88,8 @@ def add_replay_arguments(parser: argparse.ArgumentParser) -> None:
 
     try:
         # First Party
+        from lmcache.mp_observability.config import add_observability_args
         from lmcache.v1.distributed.config import add_storage_manager_args
-        from lmcache.v1.mp_observability.config import add_observability_args
 
         add_storage_manager_args(parser)
         add_observability_args(parser)
@@ -117,9 +117,9 @@ def run_trace_replay(args: argparse.Namespace) -> None:
     """
     # First Party
     from lmcache.cli.commands.trace._driver import StorageReplayDriver
+    from lmcache.mp_observability.config import parse_args_to_observability_config
+    from lmcache.mp_observability.trace.reader import TraceReader
     from lmcache.v1.distributed.config import StorageManagerConfig, parse_args_to_config
-    from lmcache.v1.mp_observability.config import parse_args_to_observability_config
-    from lmcache.v1.mp_observability.trace.reader import TraceReader
 
     sm_config: StorageManagerConfig = parse_args_to_config(args)
 

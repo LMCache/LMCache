@@ -28,7 +28,7 @@ const (
 	// cbEngineType is the value of the --engine-type flag that selects the
 	// CacheBlend V3 engine on the lmcache server binary. The server maps the
 	// value "blend" to BlendV3Module; "blend_v3" is no longer recognized
-	// (lmcache/v1/multiprocess/server.py).
+	// (lmcache/multiprocess/server.py).
 	cbEngineType = "blend"
 
 	// cbL1AlignBytes is the value of the --l1-align-bytes flag required by the

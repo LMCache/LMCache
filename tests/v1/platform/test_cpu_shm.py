@@ -14,7 +14,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.multiprocess.posix_shm import shm_unlink
+from lmcache.multiprocess.posix_shm import shm_unlink
 from lmcache.v1.platform.cpu.shm import (
     CpuShmTensorWrapper,
     migrate_to_shm_and_wrap,

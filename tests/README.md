@@ -13,14 +13,14 @@ Top-level test areas:
 - `tests/lmcache_frontend/`: frontend integration tests.
 - `tests/sdk/`: SDK-level tests.
 - `tests/tools/`: utility/tooling tests.
-- `tests/v1/`: core v1 unit and integration-style tests (platform, storage, multiprocess, compute, etc.); representative v1 sub-areas include:
+- `tests/v1/`: core v1 unit and integration-style tests (platform, storage, MP integrations, compute, etc.); representative v1 sub-areas include:
 - Top-level files like `tests/test_*.py`: cross-cutting tests (utils, serde, telemetry, observability, and similar).
 
 - `tests/v1/platform/`: platform abstraction and device-specific behavior tests.
 - `tests/v1/storage_backend/`: storage backends and storage path behavior tests.
-- `tests/v1/multiprocess/`: multiprocess runtime behavior, IPC primitives, engine-driven transfer, and process-interaction scenarios.
-- `tests/v1/mp_coordinator/`: coordinator lifecycle, worker orchestration, and MP control-plane coordination checks.
-- `tests/v1/mp_observability/`: MP observability coverage, including event recording, error surfacing, and timeout/reporting behavior.
+- `tests/multiprocess/`: multiprocess runtime behavior, IPC primitives, engine-driven transfer, and process-interaction scenarios.
+- `tests/mp_coordinator/`: coordinator lifecycle, worker orchestration, and MP control-plane coordination checks.
+- `tests/mp_observability/`: MP observability coverage, including event recording, error surfacing, and timeout/reporting behavior.
 - `tests/v1/shm_allocator/`: shared-memory allocation, reuse, boundary handling, and allocator safety checks.
 - Other v1 areas (for example `compute`, `gpu_connector`, `distributed`, `cache_controller`, etc.): specialized kernel, connector, distributed, and service-behavior tests.
 

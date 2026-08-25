@@ -480,10 +480,10 @@ msgstr ":ref:`trace-recording` — 可观察性页面中的短小 ``Trace Record
 
 #: ../../source/mp/tracing_and_debugging.rst:328
 msgid ""
-"``docs/design/v1/mp_observability/trace.md`` in the source tree — full "
+"``docs/design/mp_observability/trace.md`` in the source tree — full "
 "design doc: architecture, replay dispatcher, context-manager pairing, "
 "stats collector, and test matrix."
 msgstr ""
-"``docs/design/v1/mp_observability/trace.md`` 在源代码树中 — "
+"``docs/design/mp_observability/trace.md`` 在源代码树中 — "
 "完整设计文档：架构、重放调度器、上下文管理器配对、统计收集器和测试矩阵。"
 
