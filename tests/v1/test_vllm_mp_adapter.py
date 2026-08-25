@@ -188,7 +188,7 @@ def fake_adapter(monkeypatch):
 
 
 def test_register_kv_caches_updates_kv_caches_and_submits(fake_adapter):
-    """Public register_kv_caches stores the dict and submits one request."""
+    """Registration stores the caches, submits, and starts heartbeats."""
     adapter, send_mock, _ = fake_adapter
     fake_tensor = MagicMock()
     fake_tensor.device.type = "cuda"
@@ -200,6 +200,10 @@ def test_register_kv_caches_updates_kv_caches_and_submits(fake_adapter):
     assert send_mock.call_count == 1
     args, _kwargs = send_mock.call_args
     assert args[1] == RequestType.REGISTER_KV_CACHE
+    assert len(FakeHeartbeatThread.instances) == 1
+    heartbeat = FakeHeartbeatThread.instances[0]
+    assert heartbeat.health_event_set_at_init is True
+    assert heartbeat.calls == ["register_recover_callback", "start"]
 
 
 def test_register_kv_caches_raises_connection_error_on_timeout(fake_adapter):
@@ -211,6 +215,8 @@ def test_register_kv_caches_raises_connection_error_on_timeout(fake_adapter):
         fake_tensor = MagicMock()
         fake_tensor.device.type = "cuda"
         adapter.register_kv_caches({"layer.0": fake_tensor})
+
+    assert FakeHeartbeatThread.instances == []
 
 
 def test_register_kv_caches_cpu_submits_engine_driven_context_registration(
@@ -415,23 +421,27 @@ def test_instance_id_logged_at_info_on_construction(fake_adapter, monkeypatch) -
     assert any(str(adapter.instance_id) in msg for msg in messages)
 
 
-def test_heartbeat_lazy_start_wires_callback_before_start(fake_adapter) -> None:
-    """The lazy create path starts the heartbeat healthy (no pessimistic
-    clear) and wires the recover callback before ``start()``; the first
-    store is not gated. Idempotent on re-entry (no second thread)."""
+def test_registration_starts_heartbeat_before_first_store(
+    fake_adapter, monkeypatch
+) -> None:
+    """A registered idle worker heartbeats before its first store request."""
     adapter, _send_mock, _ = fake_adapter
-    adapter.transfer_ctx = MagicMock()
+    contexts = _patch_transfer_context_factory(monkeypatch)
+    fake_tensor = MagicMock()
+    fake_tensor.device.type = "cuda"
     assert adapter.is_healthy  # the constructor leaves the event set
+
+    adapter.register_kv_caches({"layer.0": fake_tensor})
+
+    assert len(contexts) == 1
+    assert len(FakeHeartbeatThread.instances) == 1
+    heartbeat = FakeHeartbeatThread.instances[0]
+    assert heartbeat.health_event_set_at_init is True
+    assert heartbeat.calls == ["register_recover_callback", "start"]
 
     adapter.submit_store_request("req-1", _op([[0]]), MagicMock())
 
     assert len(FakeHeartbeatThread.instances) == 1
-    heartbeat = FakeHeartbeatThread.instances[0]
-    # Started healthy: the event was NOT cleared before construction, so
-    # the first store is not dropped.
-    assert heartbeat.health_event_set_at_init is True
-    # The recover callback is wired before start() (for genuine recovery).
-    assert heartbeat.calls == ["register_recover_callback", "start"]
     assert adapter.is_healthy
     assert adapter.transfer_ctx.submit_store.call_count == 1
 
@@ -551,9 +561,7 @@ def test_shutdown_stops_heartbeat_before_unregister(fake_adapter) -> None:
 
 
 def test_shutdown_without_heartbeat_sends_unregister(fake_adapter) -> None:
-    """shutdown() on an adapter whose heartbeat was never lazily started
-    (cold shutdown before any traffic) still sends UNREGISTER and does
-    not raise."""
+    """Shutdown before KV registration still sends UNREGISTER and does not raise."""
     adapter, send_mock, _future = fake_adapter
 
     adapter.shutdown()

@@ -1164,10 +1164,9 @@ class LMCacheMPWorkerAdapter:
         self._health_event = threading.Event()
         self._health_event.set()
 
-        # Heartbeat thread is created but NOT started yet.
-        # It will be lazily started on the first store or retrieve
-        # request, by which time vLLM is fully ready (model loaded,
-        # KV caches allocated, warmup & CUDA graph capture done).
+        # Heartbeat thread is created after KV-cache registration succeeds.
+        # Starting it at registration keeps live but idle workers from being
+        # reaped before their first store or retrieve request.
         self._heartbeat_interval = heartbeat_interval
         self._heartbeat: HeartbeatThread | None = None
         self._heartbeat_lock = threading.Lock()
@@ -1266,6 +1265,7 @@ class LMCacheMPWorkerAdapter:
         self.kv_caches = kv_caches
         self.engine_group_infos = list(engine_group_infos)
         self._send_register_kv_caches_request(kv_caches)
+        self._ensure_heartbeat_started()
 
     def _block_ids_per_group(self, op: LoadStoreOp) -> list[list[int]]:
         return expand_engine_block_ids(self.engine_group_infos, op.block_ids)
@@ -1315,14 +1315,13 @@ class LMCacheMPWorkerAdapter:
             ) from None
 
     def _ensure_heartbeat_started(self) -> None:
-        """Lazily start the heartbeat thread on first store/retrieve.
+        """Start the heartbeat thread after KV-cache registration.
 
         The heartbeat starts healthy (the event was set at construction). A
         live worker pings every interval, refreshing its server-side
-        ``last_seen``, so it is never reaped while alive -- no re-registration
-        is needed at startup, and the first store/retrieve is not gated. The
-        recover callback still re-registers on a genuine unhealthy->healthy
-        edge (server restart).
+        ``last_seen``, so it is never reaped while alive, including while idle
+        before its first store/retrieve. The recover callback re-registers on
+        a genuine unhealthy->healthy edge (server restart).
         """
         if self._heartbeat is not None:
             return
