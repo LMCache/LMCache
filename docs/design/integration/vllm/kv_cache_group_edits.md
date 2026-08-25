@@ -67,6 +67,19 @@ page space. The edit re-views the tensor as
 `view()`, valid because `k` kernel pages tile each logical page's bytes
 exactly (enforced; see Invariants).
 
+vLLM >= 0.26 registers non-MLA attention K/V-*packed* instead: K and V share
+the trailing content axis (`CS == 2 * head_size`) and the tensor is rank-4,
+`[#pages, kernel_block_size, #heads, CS]` (NHD) or `[#pages, #heads,
+kernel_block_size, CS]` (HND) — the only rank-4 vLLM layouts (see
+`kv_format/detectors/vllm.py`). Same problem, same fix, one extra rule
+(`subpaged-packed-attention-view`): a rank-4 attention tensor whose page is
+smaller than `spec.page_size_bytes` was re-paged by the backend, and is
+re-viewed to `(#pages / k, block_size, 1, CS')` (NHD) or `(#pages / k, 1,
+block_size, CS')` (HND). The result stays K/V-packed, so the same rank-4
+format spec describes it at logical-block granularity. Which middle axis
+carries tokens is not derivable from the shape, so `apply` reads the
+`kv_layout` hint (as `mamba-unified-view` does) and refuses an absent one.
+
 ## Startup validation
 
 `validate_kv_cache_groups` (called at connector init and again at
@@ -144,7 +157,11 @@ bijective block-id → bytes mapping. Consequences:
 | vLLM kernel-page split + block-table expansion | `vllm/v1/worker/utils.py`, `vllm/v1/worker/block_table.py` |
 | End-to-end test | `.buildkite/k3_tests/multiprocess/scripts/run-single-test.sh` (`hma_lm_eval_qwen3_5`) |
 
-Testing is end-to-end only (the `hma_lm_eval_qwen3_5` store-vs-retrieve gsm8k
-check): the edit internals are expected to change as more group kinds are
-covered, so tests pin the observable contract — faithful retrieve — rather
-than view shapes.
+Testing is primarily end-to-end (the `hma_lm_eval_qwen3_5` store-vs-retrieve
+gsm8k check): the edit internals are expected to change as more group kinds
+are covered, so tests pin the observable contract — faithful retrieve —
+rather than view shapes. `tests/v1/test_vllm_kv_cache_group_edits.py` adds a
+GPU-free guard for the one property the e2e test cannot localize: that a
+sub-paged attention group is matched and re-viewed at block-id granularity in
+every registered layout, since an unmatched group is silently mis-transferred
+rather than failing.

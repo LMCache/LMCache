@@ -4,8 +4,8 @@
 This is needed to mask out attention-specific details while making sure that
 LMCache can still store / load KV cache correctly.
 
-Currently there are three edits, one per :class:`KVCacheGroupEdit` subclass
-below. All are for Mamba-hybrid models; the registry is only consulted when
+There is one edit per :class:`KVCacheGroupEdit` subclass below, registered in
+``_EDITS``. All are for Mamba-hybrid models; the registry is only consulted when
 ``kv_cache_config.has_mamba_layers``. :func:`validate_kv_cache_groups`
 additionally rejects, at startup, group specs the transfer path cannot serve
 correctly yet (see its docstring).
@@ -162,6 +162,87 @@ def _synthetic_attention_shape(elems_per_page: int, block_size: int) -> tuple[in
             f"(2, block_size={block_size}, num_heads={_SYNTHETIC_NUM_HEADS}, head_size)"
         )
     return _SYNTHETIC_NUM_HEADS, elems_per_page // denom
+
+
+def _synthetic_packed_content_size(elems_per_page: int, block_size: int) -> int:
+    """Factor a K/V-packed page's element count into its content size.
+
+    The K/V-packed layouts keep both planes in the trailing content axis
+    (``CS == 2 * head_size``) instead of a separate ``2`` axis, so unlike
+    :func:`_synthetic_attention_shape` there is no factor of two to divide out.
+
+    Args:
+        elems_per_page: Total elements in one page (one logical block).
+        block_size: Logical block size (tokens per page).
+
+    Returns:
+        ``content_size`` such that
+        ``block_size * num_heads * content_size == elems_per_page`` for the
+        synthetic head count.
+
+    Raises:
+        ValueError: If the page size does not factor into the target shape.
+    """
+    denom = block_size * _SYNTHETIC_NUM_HEADS
+    if elems_per_page % denom != 0:
+        raise ValueError(
+            f"page ({elems_per_page} elems) does not factor into "
+            f"(block_size={block_size}, num_heads={_SYNTHETIC_NUM_HEADS}, "
+            f"content_size)"
+        )
+    return elems_per_page // denom
+
+
+def _logical_block_ratio(
+    spec: KVCacheSpec, kv_cache: torch.Tensor, kernel_block_size: int
+) -> int:
+    """Return how many kernel pages tile one logical block, validating the fit.
+
+    Shared by every sub-paged rule: the tensor's leading dim counts kernel
+    pages, and everything after it is one kernel page's payload.
+
+    Args:
+        spec: The layer's vLLM KV cache spec (for the logical block size and
+            page size).
+        kv_cache: The kernel-paged tensor.
+        kernel_block_size: Tokens per kernel page, read from the axis the
+            caller's layout puts them on.
+
+    Returns:
+        ``spec.block_size // kernel_block_size``.
+
+    Raises:
+        ValueError: If the sizes do not divide evenly, the kernel pages of one
+            logical block do not tile its page bytes exactly (which would
+            indicate an undeclared packed layout that must not be edited), or
+            the tensor is not contiguous.
+    """
+    logical_block_size = spec.block_size
+    if logical_block_size % kernel_block_size != 0:
+        raise ValueError(
+            f"logical block size {logical_block_size} is not a multiple of "
+            f"kernel block size {kernel_block_size}"
+        )
+    ratio = logical_block_size // kernel_block_size
+
+    num_kernel_pages = kv_cache.shape[0]
+    if num_kernel_pages % ratio != 0:
+        raise ValueError(
+            f"kernel page count {num_kernel_pages} is not a multiple of "
+            f"the logical/kernel block ratio {ratio}"
+        )
+    kernel_page_bytes = kv_cache.shape[1:].numel() * kv_cache.element_size()
+    if kernel_page_bytes * ratio != spec.page_size_bytes:
+        raise ValueError(
+            f"{ratio} kernel pages ({kernel_page_bytes * ratio} bytes) do "
+            f"not tile the logical page ({spec.page_size_bytes} bytes)"
+        )
+    if not kv_cache.is_contiguous():
+        raise ValueError(
+            "kernel-paged attention KV tensor must be contiguous to "
+            "re-view as logical pages"
+        )
+    return ratio
 
 
 class KVCacheGroupEdit(ABC):
@@ -334,33 +415,9 @@ class _SubpagedAttentionViewEdit(KVCacheGroupEdit):
                 f"attention KV tensor, got {got}"
             )
         logical_block_size = spec.block_size
-        kernel_block_size = kv_cache.shape[2]
-        if logical_block_size % kernel_block_size != 0:
-            raise ValueError(
-                f"logical block size {logical_block_size} is not a multiple of "
-                f"kernel block size {kernel_block_size}"
-            )
-        ratio = logical_block_size // kernel_block_size
+        ratio = _logical_block_ratio(spec, kv_cache, kv_cache.shape[2])
 
-        num_kernel_pages = kv_cache.shape[0]
-        if num_kernel_pages % ratio != 0:
-            raise ValueError(
-                f"kernel page count {num_kernel_pages} is not a multiple of "
-                f"the logical/kernel block ratio {ratio}"
-            )
-        kernel_page_bytes = kv_cache.shape[1:].numel() * kv_cache.element_size()
-        if kernel_page_bytes * ratio != spec.page_size_bytes:
-            raise ValueError(
-                f"{ratio} kernel pages ({kernel_page_bytes * ratio} bytes) do "
-                f"not tile the logical page ({spec.page_size_bytes} bytes)"
-            )
-        if not kv_cache.is_contiguous():
-            raise ValueError(
-                "kernel-paged attention KV tensor must be contiguous to "
-                "re-view as logical pages"
-            )
-
-        num_blocks = num_kernel_pages // ratio
+        num_blocks = kv_cache.shape[0] // ratio
         elems_per_page = spec.page_size_bytes // kv_cache.element_size()
         num_heads, head_size = _synthetic_attention_shape(
             elems_per_page, logical_block_size
@@ -465,34 +522,100 @@ class _SubpagedMLAAttentionViewEdit(KVCacheGroupEdit):
                 indicate an undeclared packed layout that must not be edited).
         """
         assert isinstance(kv_cache, torch.Tensor)
+        ratio = _logical_block_ratio(spec, kv_cache, kv_cache.shape[1])
+        return kv_cache.view(kv_cache.shape[0] // ratio, spec.block_size, -1)
+
+
+class _SubpagedPackedAttentionViewEdit(KVCacheGroupEdit):
+    """Re-view a kernel-paged, K/V-packed attention tensor as logical pages.
+
+    Same problem and same fix as :class:`_SubpagedAttentionViewEdit`, for the
+    rank-4 layout vLLM >= 0.26 registers for non-MLA attention: K and V share
+    the trailing content axis (``CS == 2 * head_size``) instead of getting
+    their own ``2`` axis, so the tensor is paged as
+
+        ``[#pages, kernel_block_size, #heads, CS]``  (NHD), or
+        ``[#pages, #heads, kernel_block_size, CS]``  (HND)
+
+    -- the only rank-4 vLLM layouts (see
+    ``lmcache.v1.gpu_connector.kv_format.detectors.vllm``). Without this rule
+    the rank-4 tensors of a hybrid model never match any edit, LMCache
+    discovers ``block_size == kernel_block_size < spec.block_size``, and
+    ``lmcache.v1.kv_layer_groups`` misclassifies the group as slot-compressed:
+    only one of the ``ratio`` kernel pages per logical block is transferred.
+
+    The result keeps the K/V-packed convention -- ``[#pages / ratio,
+    block_size, 1, CS']`` (NHD) or ``[#pages / ratio, 1, block_size, CS']``
+    (HND) -- so the same rank-4 format spec still describes it, now at
+    logical-block granularity.
+
+    The opaque-page contract of :class:`_SubpagedAttentionViewEdit` applies
+    here too: the dims are addressing metadata, the bytes of one logical page
+    interleave K and V at kernel-page granularity, so content-aware processing
+    does not apply.
+    """
+
+    name = "subpaged-packed-attention-view"
+
+    def matches(self, spec: KVCacheSpec, kv_cache: RegisteredKVCache) -> bool:
+        return (
+            # Standard-paged attention only; MLA layouts and declared slot
+            # compression (DeepSeek) belong to other transfer paths.
+            get_kv_cache_spec_kind(spec) in _SUBPAGEABLE_ATTENTION_KINDS
+            and not _declares_slot_compression(spec)
+            # Rank-4 is blocks-first K/V-packed attention. Which middle axis
+            # carries the tokens depends on the kv_layout hint, which
+            # ``matches`` does not get -- but the byte accounting settles it
+            # either way: a page registered at block-id granularity holds
+            # exactly ``page_size_bytes``, so anything smaller means the
+            # backend re-paged the tensor at its kernel block size.
+            and isinstance(kv_cache, torch.Tensor)
+            and kv_cache.ndim == 4
+            and kv_cache.shape[1:].numel() * kv_cache.element_size()
+            != spec.page_size_bytes
+        )
+
+    def apply(
+        self,
+        spec: KVCacheSpec,
+        kv_cache: RegisteredKVCache,
+        layout_hints: LayoutHints,
+    ) -> torch.Tensor:
+        """Re-view ``kv_cache`` at logical-block granularity.
+
+        The token axis is axis 1 for NHD and axis 2 for HND, so the layout
+        hint decides which axis carries the kernel block size and where the
+        synthetic head axis goes.
+
+        Raises:
+            ValueError: If the layout hint is missing or unsupported, or the
+                kernel pages of one logical block do not tile its page bytes
+                exactly (see :func:`_logical_block_ratio`).
+        """
+        assert isinstance(kv_cache, torch.Tensor), (
+            "single-layer KV cache must be a torch.Tensor"
+        )
+        kv_layout = layout_hints.get("kv_layout", "none")
+        if kv_layout not in ("NHD", "HND"):
+            raise ValueError(
+                f"Unsupported kv_layout: {kv_layout}. Only NHD and HND are supported."
+            )
+        token_axis = 1 if kv_layout == "NHD" else 2
         logical_block_size = spec.block_size
-        kernel_block_size = kv_cache.shape[1]
-        if logical_block_size % kernel_block_size != 0:
-            raise ValueError(
-                f"logical block size {logical_block_size} is not a multiple of "
-                f"kernel block size {kernel_block_size}"
-            )
-        ratio = logical_block_size // kernel_block_size
+        ratio = _logical_block_ratio(spec, kv_cache, kv_cache.shape[token_axis])
 
-        num_kernel_pages = kv_cache.shape[0]
-        if num_kernel_pages % ratio != 0:
-            raise ValueError(
-                f"kernel page count {num_kernel_pages} is not a multiple of "
-                f"the logical/kernel block ratio {ratio}"
+        num_blocks = kv_cache.shape[0] // ratio
+        elems_per_page = spec.page_size_bytes // kv_cache.element_size()
+        content_size = _synthetic_packed_content_size(
+            elems_per_page, logical_block_size
+        )
+        if kv_layout == "NHD":
+            return kv_cache.view(
+                num_blocks, logical_block_size, _SYNTHETIC_NUM_HEADS, content_size
             )
-        kernel_page_bytes = kv_cache.shape[1:].numel() * kv_cache.element_size()
-        if kernel_page_bytes * ratio != spec.page_size_bytes:
-            raise ValueError(
-                f"{ratio} kernel pages ({kernel_page_bytes * ratio} bytes) do "
-                f"not tile the logical page ({spec.page_size_bytes} bytes)"
-            )
-        if not kv_cache.is_contiguous():
-            raise ValueError(
-                "kernel-paged attention KV tensor must be contiguous to "
-                "re-view as logical pages"
-            )
-
-        return kv_cache.view(num_kernel_pages // ratio, logical_block_size, -1)
+        return kv_cache.view(
+            num_blocks, _SYNTHETIC_NUM_HEADS, logical_block_size, content_size
+        )
 
 
 # Rule registry, in match priority order.
@@ -501,6 +624,7 @@ _EDITS: tuple[KVCacheGroupEdit, ...] = (
     _MambaPageViewEdit(),
     _SubpagedMLAAttentionViewEdit(),
     _SubpagedAttentionViewEdit(),
+    _SubpagedPackedAttentionViewEdit(),
 )
 
 
