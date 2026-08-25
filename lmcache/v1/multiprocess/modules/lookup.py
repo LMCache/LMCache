@@ -31,44 +31,22 @@ from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
 logger = init_logger(__name__)
 
-_legacy_extra_count_warned = False
 
-
-def compute_extra_count(
-    tp_size: int,
-    world_size: int,
-    num_kv_readers: int = 0,
-) -> int:
+def compute_extra_count(num_kv_readers: int) -> int:
     """Extra read locks to reserve beyond the first: ``readers - 1``.
 
     Each worker's retrieve releases one lock, so the count must be exact:
     under-counting unpins an object mid-copy; over-counting only holds it
-    to the TTL. ``num_kv_readers`` is exact and not derivable here --
-    ``(tp_size=4, world_size=2)`` is both "PP=2, no DCP" (4 readers) and
-    "PP=1, DCP=2" (2 readers).
-
-    Deprecated legacy fallback when ``num_kv_readers`` is 0 (old client, so
-    no DCP; removed once all clients send the exact count):
-
-    - Non-MLA: one reader per object -> 0.
-    - MLA: all ``tp_size`` workers share one object -> ``tp_size - 1``,
-      detected by ``tp > world_size`` (vLLM sends ``world_size`` already
-      divided by ``tp_size``).
-    - vLLM <= 0.8.5 sends no ``tp_size``; the ``world_size`` fallback
-      yields 0 (safe, may under-lock MLA).
+    to the TTL. Clients declare it as ``IPCCacheServerKey.num_kv_readers``;
+    requests without it (pre-field clients) are rejected, not guessed.
     """
-    if num_kv_readers > 0:
-        return num_kv_readers - 1
-    global _legacy_extra_count_warned
-    if not _legacy_extra_count_warned:
-        _legacy_extra_count_warned = True
-        logger.warning(
-            "Client did not send num_kv_readers; using the deprecated legacy "
-            "read-lock heuristic. Upgrade LMCache clients; this fallback will "
-            "be removed."
+    if num_kv_readers < 1:
+        raise ValueError(
+            f"num_kv_readers={num_kv_readers}: this server requires clients "
+            "that send IPCCacheServerKey.num_kv_readers. Upgrade the LMCache "
+            "client."
         )
-    tp = tp_size if tp_size > 1 else world_size
-    return tp - 1 if tp > world_size else 0
+    return num_kv_readers - 1
 
 
 def resolve_prefetched_obj_keys(
@@ -232,7 +210,7 @@ class LookupModule:
 
         Args:
             key: Cache key with request_id embedded.
-            tp_size: Tensor-parallel size for MLA multi-reader locking.
+            tp_size: Legacy wire field; ignored (kept for payload arity).
         """
         model_name, world_size = key.model_name, key.world_size
         self._ctx.event_bus.publish(
@@ -274,7 +252,7 @@ class LookupModule:
             )
             return
 
-        extra_count = compute_extra_count(tp_size, world_size, key.num_kv_readers)
+        extra_count = compute_extra_count(key.num_kv_readers)
 
         chunk_hashes = self._ctx.token_hasher.compute_chunk_hashes(list(key.token_ids))
         if not chunk_hashes:
@@ -529,14 +507,12 @@ class LookupModule:
 
         Only the keys the prefetch actually read-locked are released.
 
-        Computes the extra reader count from ``tp_size`` and
-        ``world_size`` the same way :meth:`lookup` does, so
-        the correct number of locks is released.
+        Releases the same per-object count the lookup reserved
+        (``key.num_kv_readers``).
 
         Args:
             key: Cache key whose read locks should be released.
-            tp_size: Tensor-parallel size for MLA
-                multi-reader locking.
+            tp_size: Legacy wire field; ignored (kept for payload arity).
         """
         if key.start >= key.end:
             return
@@ -562,7 +538,7 @@ class LookupModule:
         if not obj_keys:
             return
 
-        extra_count = compute_extra_count(tp_size, key.world_size, key.num_kv_readers)
+        extra_count = compute_extra_count(key.num_kv_readers)
 
         self._ctx.storage_manager.finish_read_prefetched(
             obj_keys, extra_count=extra_count

@@ -133,26 +133,8 @@ def test_non_mla_unaffected_by_dcp_field():
     [("non-mla", 1), ("mla-tp8", 8), ("mla-tp4-pp2", 4), ("mla-tp8-dcp2", 4)],
 )
 def test_extra_count_is_exact_when_reader_count_is_sent(label: str, readers: int):
-    """tp_size/world_size would mislead the legacy heuristic; the exact
-    path must win."""
-    assert compute_extra_count(8, 2, readers) == readers - 1, label
-
-
-@pytest.mark.parametrize(
-    "label,tp_size,world_size,expected",
-    [
-        ("mla-tp8-pp1", 8, 1, 7),
-        ("mla-tp4-pp2", 4, 2, 3),
-        ("non-mla-tp8", 8, 8, 0),
-        ("no-tp-size", 1, 4, 0),
-    ],
-)
-def test_extra_count_falls_back_to_legacy_heuristic(
-    label: str, tp_size: int, world_size: int, expected: int
-):
-    """num_kv_readers == 0 means an older client; keep the previous behaviour."""
-    assert compute_extra_count(tp_size, world_size) == expected, label
-    assert compute_extra_count(tp_size, world_size, 0) == expected, label
+    """The declared reader count maps to readers - 1."""
+    assert compute_extra_count(readers) == readers - 1, label
 
 
 @pytest.mark.parametrize(
@@ -190,9 +172,7 @@ def test_reader_count_round_trips_and_balances_locks():
         )
         readers = strategy.num_kv_readers
         assert readers == tp_size // dcp_size
-        assert (
-            compute_extra_count(tp_size, strategy.kv_world_size, readers) == readers - 1
-        )
+        assert compute_extra_count(readers) == readers - 1
 
 
 # --------------------------------------------------------------------------- #

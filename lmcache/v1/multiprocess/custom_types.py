@@ -61,7 +61,8 @@ class IPCCacheServerKey:
     cache_salt: str = ""
 
     # Number of workers that retrieve this key's object; the server reserves
-    # that many read locks (see ``compute_extra_count``). 0 = legacy client.
+    # that many read locks (see ``compute_extra_count``). 0 = not sent;
+    # lookups reject it.
     num_kv_readers: int = field(default=0, compare=False)
 
     # Duplicated from ObjectKey — cannot import ObjectKey here due to
@@ -93,12 +94,14 @@ class IPCCacheServerKey:
         end: int = 0,
         request_id: str = "",
         cache_salt: str = "",
+        num_kv_readers: int = 1,
     ) -> "IPCCacheServerKey":
         """Create a key from token ids. Only used by the tests."""
         return cls(
             model_name=model_name,
             world_size=world_size,
             worker_id=worker_id,
+            num_kv_readers=num_kv_readers,
             token_ids=tuple(token_ids),
             start=start,
             end=end,

@@ -150,6 +150,7 @@ def _free_locks_key(num_tokens: int, start: int, end: int) -> IPCCacheServerKey:
     return IPCCacheServerKey(
         model_name="testmodel",
         world_size=1,
+        num_kv_readers=1,
         worker_id=None,
         token_ids=tuple(range(num_tokens)),
         start=start,
@@ -261,6 +262,7 @@ def test_server_free_lookup_locks_no_matching_chunks():
     key = IPCCacheServerKey(
         model_name="testmodel",
         world_size=1,
+        num_kv_readers=1,
         worker_id=None,
         token_ids=tuple(range(256)),
         start=0,

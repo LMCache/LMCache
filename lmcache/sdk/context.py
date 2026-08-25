@@ -149,7 +149,7 @@ class LMCacheSDKContext:
         try:
             self._world_size = int(entry.get("world_size", 1))
             # Readers per stored object; registrations that do not publish it
-            # get 1 (matches the legacy heuristic for this client).
+            # get 1 (single reader).
             self._num_kv_readers = int(entry.get("num_kv_readers", 1))
             kv_cache_layout = entry.get("kv_cache_layout", {})
             if not kv_cache_layout:
