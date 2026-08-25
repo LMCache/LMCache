@@ -40,8 +40,3 @@ pytest --maxfail=1 --cov=lmcache \
 cat << EOF | buildkite-agent annotate --style "info"
   Read the <a href="artifact://coverage-test/index.html">uploaded coverage report</a>
 EOF
-
-TARGET="$PWD"
-echo "Deleting current workspace $TARGET"
-cd /
-sudo rm -rf "$TARGET"
