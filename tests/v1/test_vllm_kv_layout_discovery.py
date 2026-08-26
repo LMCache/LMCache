@@ -75,9 +75,10 @@ class TestTryGetVllmKVCacheLayout:
         config = make_vllm_config(kv_cache_layout="HND")
         assert try_get_vllm_kv_cache_layout(config) == "HND"
 
-    def test_unresolved_layout_returns_none(self):
+    def test_unresolved_layout_fails_loudly(self):
         config = make_vllm_config(kv_cache_layout=None)
-        assert try_get_vllm_kv_cache_layout(config) is None
+        with pytest.raises(ValueError, match="not resolved"):
+            try_get_vllm_kv_cache_layout(config)
 
     @pytest.mark.parametrize("name", UNSUPPORTED_LAYOUTS)
     def test_unsupported_resolved_layout_raises(self, name):
@@ -110,9 +111,10 @@ class TestVllmLayoutHints:
         config = make_vllm_config(kv_cache_layout="LBHNC")
         assert vllm_layout_hints(config) == {"kv_layout": "HND"}
 
-    def test_hint_absent_when_unresolved(self):
+    def test_unresolved_layout_raises_through_hints(self):
         config = make_vllm_config(kv_cache_layout=None)
-        assert vllm_layout_hints(config) == {}
+        with pytest.raises(ValueError, match="not resolved"):
+            vllm_layout_hints(config)
 
 
 class TestResolveVllmKVLayout:

@@ -18,6 +18,7 @@ from lmcache import torch_dev
 from lmcache.integration.request_telemetry.factory import RequestTelemetryFactory
 from lmcache.integration.vllm.experimental import dispatch
 from lmcache.integration.vllm.utils import vllm_layout_hints
+from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.utils import EngineType, _lmcache_nvtx_annotate, init_logger
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
@@ -1104,6 +1105,7 @@ class LMCacheMPWorkerAdapter:
 
         # Registered kv caches from vLLM
         self.kv_caches: dict[str, torch.Tensor] = {}
+        self._layout_hints: "LayoutHints | None" = None
         self.engine_group_infos: list[EngineGroupInfo] = []
 
         # Transport context for transfer operations.
@@ -1288,7 +1290,12 @@ class LMCacheMPWorkerAdapter:
         """
         self.kv_caches = kv_caches
         transfer_ctx = create_transfer_context(kv_caches, mode=self._mp_transfer_mode)
-        layout_hints = vllm_layout_hints()
+        # Captured once: the layout is final for the process lifetime, and
+        # heartbeat recovery may re-register from a context without the
+        # ambient vLLM config.
+        if self._layout_hints is None:
+            self._layout_hints = vllm_layout_hints()
+        layout_hints = self._layout_hints
         self.transfer_ctx = transfer_ctx
         try:
             # Register on the local, not self.transfer_ctx: a concurrent

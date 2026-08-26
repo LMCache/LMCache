@@ -59,7 +59,9 @@ _KNOWN_VLLM_KV_LAYOUTS = (
 )
 
 
-def translate_vllm_kv_cache_layout(kv_cache_layout: str) -> Literal["NHD", "HND"]:
+def translate_vllm_kv_cache_layout(
+    kv_cache_layout: str | None,
+) -> Literal["NHD", "HND"]:
     """Translate a vLLM ``KVCacheLayout`` name to the ``kv_layout`` hint.
 
     ``LayoutHints.kv_layout`` is strictly ``NHD``/``HND``; engine KV formats
@@ -72,6 +74,11 @@ def translate_vllm_kv_cache_layout(kv_cache_layout: str) -> Literal["NHD", "HND"
             NHD/HND would silently corrupt the cache.
         ValueError: for names that are not vLLM KV cache layouts at all.
     """
+    if kv_cache_layout is None:
+        raise ValueError(
+            "vLLM has not resolved a KV cache layout yet; layout hints must "
+            "be built at KV-cache registration time, after resolution."
+        )
     translated = _VLLM_KV_LAYOUT_ALIASES.get(kv_cache_layout, kv_cache_layout)
     if translated in ("NHD", "HND"):
         return translated  # type: ignore[return-value]
@@ -93,8 +100,7 @@ def try_get_vllm_kv_cache_layout(
 ) -> Literal["NHD", "HND"] | None:
     """Query vLLM's resolved KV cache layout, normalized to ``NHD``/``HND``.
 
-    Returns ``None`` when vLLM is unavailable (i.e. the MP server) or the
-    layout has not been resolved yet.
+    Returns ``None`` when vLLM is unavailable (i.e. the MP server).
 
     Raises:
         NotImplementedError: if vLLM resolved a standardized layout LMCache
@@ -118,14 +124,7 @@ def try_get_vllm_kv_cache_layout(
     # vllm#51718 and later: the engine core resolves the layout once into
     # CacheConfig, and the attention-backend query below no longer exists.
     if hasattr(cache_config, "kv_cache_layout"):
-        kv_layout = cache_config.kv_cache_layout
-        if kv_layout is None:
-            logger.warning(
-                "vLLM has not resolved a KV cache layout yet; "
-                "skipping the kv_layout hint"
-            )
-            return None
-        return translate_vllm_kv_cache_layout(kv_layout)
+        return translate_vllm_kv_cache_layout(cache_config.kv_cache_layout)
 
     try:
         # Third Party
