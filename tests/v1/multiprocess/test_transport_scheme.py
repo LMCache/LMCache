@@ -7,7 +7,7 @@ LMCache mp-mode server and the vLLM connector rely on:
 1. Bare ``host:port`` URLs are prefixed with the correct default scheme
    before reaching the transport layer.
 2. Every ``RpcMethod`` token maps to a real gRPC rpc method on
-   the generated ``MessageQueueServicer``, i.e. the ``.proto`` file
+   its generated service servicer, i.e. the ``.proto`` file
    never drifts away from the Python protocol layer.
 """
 
@@ -67,15 +67,11 @@ def test_request_type_to_method_name(request_type, expected):
 def test_every_request_type_maps_to_a_real_grpc_method():
     # The .proto file must define a rpc method for every RpcMethod,
     # otherwise the servicer dispatch layer would 404 that rpc.
-    servicer_methods = {
-        m
-        for m in dir(lmcache_mq_pb2_grpc.MessageQueueServicer)
-        if not m.startswith("_")
-    }
     missing = [
-        (rt.name, request_type_to_method_name(rt))
+        (rt.service_name, rt.name, request_type_to_method_name(rt))
         for rt in RpcMethod
-        if request_type_to_method_name(rt) not in servicer_methods
+        if request_type_to_method_name(rt)
+        not in dir(getattr(lmcache_mq_pb2_grpc, f"{rt.service_name}Servicer"))
     ]
     assert not missing, (
         f"RpcMethod members without a matching proto rpc method: {missing}"

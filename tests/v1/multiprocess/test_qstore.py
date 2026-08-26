@@ -17,10 +17,10 @@ import pytest
 # First Party
 from lmcache.v1.multiprocess import server as server_mod
 from lmcache.v1.multiprocess.config import MPServerConfig
-from lmcache.v1.multiprocess.modules.experimental import TRANSFER_QUERY
-from lmcache.v1.multiprocess.modules.experimental import qstore as qstore_mod
-from lmcache.v1.multiprocess.modules.experimental.qstore import QStoreModule
-from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import ContextEntry
+from lmcache.v1.multiprocess.services.experimental import TRANSFER_QUERY
+from lmcache.v1.multiprocess.services.experimental import qstore as qstore_mod
+from lmcache.v1.multiprocess.services.experimental.qstore import QStoreModule
+from lmcache.v1.multiprocess.services.lmcache_driven_transfer import ContextEntry
 
 REGISTER_ARGS = ("model##query", 2)
 
@@ -236,10 +236,10 @@ class _FakeQStore:
 
 
 @pytest.fixture
-def stub_server_modules(monkeypatch):
-    """Stub the server's module constructors. Returns the ManagementModule mock.
-    The transfer modules stay real classes: _build_modules isinstance-checks
-    them to pick liveness targets and the lmcache-driven module."""
+def stub_server_services(monkeypatch):
+    """Stub server service constructors. Returns the ManagementModule mock.
+    The transfer services stay real classes: _build_services isinstance-checks
+    them to pick liveness targets and the lmcache-driven service."""
     monkeypatch.setattr(server_mod, "LookupModule", lambda ctx: MagicMock())
     monkeypatch.setattr(server_mod, "P2PController", lambda *a, **kw: MagicMock())
     monkeypatch.setattr(server_mod, "LMCacheDrivenTransferModule", _FakeLMCacheDriven)
@@ -250,50 +250,50 @@ def stub_server_modules(monkeypatch):
     return management
 
 
-def _build(stub_server_modules, **config) -> list:
-    return server_mod._build_modules(
+def _build(stub_server_services, **config) -> list:
+    return server_mod._build_services(
         MagicMock(name="ctx"), MPServerConfig(**config), MagicMock(url="")
     )
 
 
-def test_server_rejects_an_unknown_experimental_module(stub_server_modules) -> None:
-    """Check that the server rejects an unknown experimental module.
+def test_server_rejects_an_unknown_experimental_service(stub_server_services) -> None:
+    """Check that the server rejects an unknown experimental service.
     Only 'transfer_query' is supported right now."""
     with pytest.raises(ValueError, match="Unknown --enable"):
-        _build(stub_server_modules, enable=["query"])
+        _build(stub_server_services, enable=["query"])
 
 
-def test_server_requires_lmcache_driven_transfer(stub_server_modules) -> None:
+def test_server_requires_lmcache_driven_transfer(stub_server_services) -> None:
     """Check that the server rejects a request to enable transfer_query when the
     transfer mode is not lmcache-driven."""
     with pytest.raises(ValueError, match="lmcache_driven"):
         _build(
-            stub_server_modules,
+            stub_server_services,
             enable=[TRANSFER_QUERY],
             supported_transfer_mode="engine_driven",
         )
 
 
-def test_server_builds_q_store_module(stub_server_modules) -> None:
-    """Check that the server builds the Q store module and puts it to the
+def test_server_builds_q_store_service(stub_server_services) -> None:
+    """Check that the server builds the Q store service and puts it to the
     ManagementModule."""
-    modules = _build(
-        stub_server_modules,
+    services = _build(
+        stub_server_services,
         enable=[TRANSFER_QUERY],
         supported_transfer_mode="lmcache_driven",
     )
 
-    assert any(isinstance(m, _FakeQStore) for m in modules)
-    kwargs = stub_server_modules.call_args.kwargs
+    assert any(isinstance(s, _FakeQStore) for s in services)
+    kwargs = stub_server_services.call_args.kwargs
     assert kwargs["experimental_transfer"] == [TRANSFER_QUERY]
     assert any(isinstance(t, _FakeQStore) for t in kwargs["liveness_targets"])
 
 
 def test_server_builds_nothing_when_no_feature_is_enabled(
-    stub_server_modules,
+    stub_server_services,
 ) -> None:
     """Check that the server builds nothing when no feature is enabled."""
-    modules = _build(stub_server_modules)
+    services = _build(stub_server_services)
 
-    assert not any(isinstance(m, _FakeQStore) for m in modules)
-    assert stub_server_modules.call_args.kwargs["experimental_transfer"] == []
+    assert not any(isinstance(s, _FakeQStore) for s in services)
+    assert stub_server_services.call_args.kwargs["experimental_transfer"] == []

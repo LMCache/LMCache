@@ -10,12 +10,12 @@ from lmcache.logging import init_logger
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.custom_types import BlockAllocationRecord
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
-from lmcache.v1.multiprocess.engine_module import (
-    HandlerSpec,
-    InstanceLivenessTarget,
-    ThreadPoolType,
-)
 from lmcache.v1.multiprocess.protocol import RPC
+from lmcache.v1.multiprocess.service import (
+    InstanceLivenessTarget,
+    RpcExecutionPool,
+    RpcHandlerSpec,
+)
 from lmcache.v1.periodic_thread import (
     PeriodicThread,
     ThreadLevel,
@@ -82,31 +82,31 @@ class ManagementModule:
         """Return the shared engine context. Exposed for testing only."""
         return self._ctx
 
-    def get_handlers(self) -> list[HandlerSpec]:
+    def get_handlers(self) -> list[RpcHandlerSpec]:
         """Return handler specs for all request types this module serves.
 
         Returns:
-            A list of HandlerSpec entries mapping request types to
+            A list of RpcHandlerSpec entries mapping request types to
             their handler callables and thread pool assignments.
         """
         return [
-            HandlerSpec(RPC.Clear, self.clear, ThreadPoolType.NORMAL),
-            HandlerSpec(
+            RpcHandlerSpec(RPC.Clear, self.clear, RpcExecutionPool.NORMAL),
+            RpcHandlerSpec(
                 RPC.GetChunkSize,
                 self.get_chunk_size,
-                ThreadPoolType.SYNC,
+                RpcExecutionPool.SYNC,
             ),
-            HandlerSpec(
+            RpcHandlerSpec(
                 RPC.GetExperimental,
                 self.get_experimental,
-                ThreadPoolType.SYNC,
+                RpcExecutionPool.SYNC,
             ),
-            HandlerSpec(RPC.Ping, self.ping, ThreadPoolType.NORMAL),
-            HandlerSpec(RPC.Noop, self.debug, ThreadPoolType.SYNC),
-            HandlerSpec(
+            RpcHandlerSpec(RPC.Ping, self.ping, RpcExecutionPool.NORMAL),
+            RpcHandlerSpec(RPC.Noop, self.debug, RpcExecutionPool.SYNC),
+            RpcHandlerSpec(
                 RPC.ReportBlockAllocation,
                 self.report_block_allocations,
-                ThreadPoolType.NORMAL,
+                RpcExecutionPool.NORMAL,
             ),
         ]
 
@@ -183,7 +183,7 @@ class ManagementModule:
 
         Returns:
             The enabled experimental intermediate tensor transfer types.
-            See ``lmcache.v1.multiprocess.modules.experimental.__init__``.
+            See ``lmcache.v1.multiprocess.services.experimental.__init__``.
         """
         return list(self._experimental_transfer)
 

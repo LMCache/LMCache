@@ -30,11 +30,11 @@ from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.mp_observability.otel_init import register_gauge
 from lmcache.v1.multiprocess.config import CoordinatorConfig, P2PConfig
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
-from lmcache.v1.multiprocess.engine_module import (
-    HandlerSpec,
-    ThreadPoolType,
-)
 from lmcache.v1.multiprocess.protocol import RPC
+from lmcache.v1.multiprocess.service import (
+    RpcExecutionPool,
+    RpcHandlerSpec,
+)
 from lmcache.v1.periodic_thread import (
     PeriodicThread,
     ThreadLevel,
@@ -161,27 +161,27 @@ class P2PController:
         """Return the shared engine context. Exposed for testing only."""
         return self._ctx
 
-    def get_handlers(self) -> list[HandlerSpec]:
+    def get_handlers(self) -> list[RpcHandlerSpec]:
         """Return handler specs for all request types this module serves.
 
         Returns:
             List of handler specs for lookup-related request types.
         """
         return [
-            HandlerSpec(
+            RpcHandlerSpec(
                 RPC.P2PLookupAndLock,
                 self.p2p_lookup_and_lock,
-                ThreadPoolType.NORMAL,
+                RpcExecutionPool.NORMAL,
             ),
-            HandlerSpec(
+            RpcHandlerSpec(
                 RPC.P2PQueryLookupResults,
                 self.p2p_query_lookup_results,
-                ThreadPoolType.NORMAL,
+                RpcExecutionPool.NORMAL,
             ),
-            HandlerSpec(
+            RpcHandlerSpec(
                 RPC.P2PUnlockObjects,
                 self.p2p_unlock_objects,
-                ThreadPoolType.NORMAL,
+                RpcExecutionPool.NORMAL,
             ),
         ]
 

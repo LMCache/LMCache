@@ -96,15 +96,24 @@ def test_ping_method_name_matches_proto() -> None:
 
 
 def test_service_descriptor_covers_every_typed_rpc() -> None:
-    """The registry is derived from, and stays aligned with, the service."""
-    service = lmcache_mq_pb2.DESCRIPTOR.services_by_name["MessageQueue"]
+    """The registry is derived from, and stays aligned with, gRPC services."""
+    services = lmcache_mq_pb2.DESCRIPTOR.services_by_name
+    service_methods = {
+        method.name: (service.name, method)
+        for service in services.values()
+        for method in service.methods
+    }
     expected_methods = {
         request_type_to_method_name(request_type) for request_type in RpcMethod
     }
-    assert set(service.methods_by_name) == expected_methods
+    assert set(service_methods) == expected_methods
 
     for request_type, spec in _TYPED_RPCS.items():
-        method = service.methods_by_name[request_type_to_method_name(request_type)]
+        service_name, method = service_methods[
+            request_type_to_method_name(request_type)
+        ]
+        assert service_name == request_type.service_name
+        assert spec.service_name == service_name
         assert method.input_type is spec.request_message.DESCRIPTOR
         assert method.output_type is spec.response_message.DESCRIPTOR
         assert spec.payload_types == tuple(get_payload_classes(request_type))
@@ -113,8 +122,9 @@ def test_service_descriptor_covers_every_typed_rpc() -> None:
 
 def test_service_descriptor_has_no_legacy_batch_rpc() -> None:
     """The transport contract is unary-only; Batch is no longer part of it."""
-    service = lmcache_mq_pb2.DESCRIPTOR.services_by_name["MessageQueue"]
-    assert "Batch" not in service.methods_by_name
+    services = lmcache_mq_pb2.DESCRIPTOR.services_by_name
+    assert "MessageQueue" not in services
+    assert all("Batch" not in service.methods_by_name for service in services.values())
 
 
 def test_concurrent_mixed_requests_roundtrip_over_unary_rpcs() -> None:
@@ -273,7 +283,7 @@ def test_client_works_with_minimal_unary_servicer() -> None:
     first_ping_entered = threading.Event()
     release_first_ping = threading.Event()
 
-    class LegacyServicer(lmcache_mq_pb2_grpc.MessageQueueServicer):
+    class LegacyServicer(lmcache_mq_pb2_grpc.ControllerServiceServicer):
         def Ping(self, request: Any, context: Any) -> Any:
             del context
             if request.instance_id == 0:
@@ -282,7 +292,9 @@ def test_client_works_with_minimal_unary_servicer() -> None:
             return lmcache_mq_pb2.PingResponse(ok=True)
 
     server = grpc.server(ThreadPoolExecutor(max_workers=2))
-    lmcache_mq_pb2_grpc.add_MessageQueueServicer_to_server(LegacyServicer(), server)
+    lmcache_mq_pb2_grpc.add_ControllerServiceServicer_to_server(
+        LegacyServicer(), server
+    )
     server.add_insecure_port(target)
     server.start()
     client = MessageQueueClient(server_url)

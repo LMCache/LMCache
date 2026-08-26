@@ -17,12 +17,6 @@ from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey, TrimPolicy
 from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import P2PL2AdapterConfig
 from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.multiprocess.config import CoordinatorConfig, P2PConfig
-from lmcache.v1.multiprocess.modules.p2p_controller import (
-    _MAX_MISSES,
-    P2PController,
-    _P2PState,
-    _PeerInstance,
-)
 from lmcache.v1.multiprocess.mq import msgspec_decode, msgspec_encode
 from lmcache.v1.multiprocess.protocol import (
     RPC,
@@ -32,6 +26,12 @@ from lmcache.v1.multiprocess.protocol import (
     get_response_class,
 )
 from lmcache.v1.multiprocess.protocols.base import HandlerType
+from lmcache.v1.multiprocess.services.p2p_controller import (
+    _MAX_MISSES,
+    P2PController,
+    _P2PState,
+    _PeerInstance,
+)
 
 
 def _make_key(i: int) -> ObjectKey:

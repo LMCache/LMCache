@@ -82,7 +82,7 @@ def test_unregister_one_shared_gpu_layout_keeps_registry_until_last_instance(
     from lmcache.utils import EngineType
     from lmcache.v1.distributed.api import MemoryLayoutDesc
     from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
-    from lmcache.v1.multiprocess.modules import (
+    from lmcache.v1.multiprocess.services import (
         lmcache_driven_transfer as lmcache_driven_transfer_mod,
     )
 

@@ -61,9 +61,9 @@ from lmcache.v1.multiprocess.config import (  # noqa: E402
     CoordinatorConfig,
     P2PConfig,
 )
-from lmcache.v1.multiprocess.modules.p2p_controller import P2PController  # noqa: E402
 from lmcache.v1.multiprocess.mq import MessageQueueServer  # noqa: E402
 from lmcache.v1.multiprocess.protocol import get_payload_classes  # noqa: E402
+from lmcache.v1.multiprocess.services.p2p_controller import P2PController  # noqa: E402
 
 _PAGE = 4096
 _NUM_KEYS = 3

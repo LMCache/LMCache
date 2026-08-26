@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Regression: HTTP-layer passthroughs dropped by the engine refactor."""
+"""Regression: HTTP-layer passthroughs kept through the service refactor."""
 
 # Standard
 from unittest.mock import MagicMock
@@ -8,12 +8,12 @@ from unittest.mock import MagicMock
 import pytest
 
 # First Party
-from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
+from lmcache.v1.multiprocess.server import MPCacheServer
+from lmcache.v1.multiprocess.services.lmcache_driven_transfer import (
     ContextEntry,
     LMCacheDrivenTransferModule,
 )
-from lmcache.v1.multiprocess.modules.management import ManagementModule
-from lmcache.v1.multiprocess.server import MPCacheServer
+from lmcache.v1.multiprocess.services.management import ManagementModule
 
 
 def test_storage_manager_returns_context_storage_manager() -> None:
@@ -21,7 +21,7 @@ def test_storage_manager_returns_context_storage_manager() -> None:
     ctx = MagicMock()
     ctx.storage_manager = sm
 
-    engine = MPCacheServer(ctx, modules=[])
+    engine = MPCacheServer(ctx, services=[])
     assert engine.storage_manager is sm
 
 
@@ -33,24 +33,24 @@ def test_cache_contexts_unwraps_entries_from_gpu_transfer_module() -> None:
         7: ContextEntry(cache_context=gpu1, model_name="m", world_size=1),
     }
 
-    engine = MPCacheServer(MagicMock(), modules=[MagicMock(), gpu_transfer])
+    engine = MPCacheServer(MagicMock(), services=[MagicMock(), gpu_transfer])
     # Values must be unwrapped GPUCacheContexts.
     assert engine.cache_contexts == {0: gpu0, 7: gpu1}
 
 
 def test_cache_contexts_returns_none_in_engine_driven_mode() -> None:
-    engine = MPCacheServer(MagicMock(), modules=[MagicMock()])
+    engine = MPCacheServer(MagicMock(), services=[MagicMock()])
     assert engine.cache_contexts is None
 
 
 def test_clear_delegates_to_management_module() -> None:
     mgmt = MagicMock(spec=ManagementModule)
-    engine = MPCacheServer(MagicMock(), modules=[MagicMock(), mgmt])
+    engine = MPCacheServer(MagicMock(), services=[MagicMock(), mgmt])
     engine.clear()
     mgmt.clear.assert_called_once_with()
 
 
 def test_clear_raises_without_management_module() -> None:
-    engine = MPCacheServer(MagicMock(), modules=[])
+    engine = MPCacheServer(MagicMock(), services=[])
     with pytest.raises(RuntimeError, match="no ManagementModule"):
         engine.clear()

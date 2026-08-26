@@ -39,8 +39,8 @@ MPCacheServer (server)
 │    ├─ EventBus
 │    ├─ LayoutDescRegistry
 │    └─ shm_pool_info (pre-computed once)
-└─ EngineDrivenTransferModule (modules/engine_driven_transfer.py)
-     └─ TransferStrategy (modules/server_transfer.py)
+└─ EngineDrivenTransferModule (services/engine_driven_transfer.py)
+     └─ TransferStrategy (services/server_transfer.py)
           ├─ PickleTransferStrategy
           └─ ShmTransferStrategy
 ```
@@ -205,8 +205,8 @@ It also computes `shm_pool_info` once from `StorageManagerConfig`:
 
 ### 2.5 Current File Layout (Key Components)
 
-- `lmcache/v1/multiprocess/modules/engine_driven_transfer.py`: `EngineDrivenTransferModule`
-- `lmcache/v1/multiprocess/modules/server_transfer.py`: `TransferStrategy`, `PickleTransferStrategy`, `ShmTransferStrategy`
+- `lmcache/v1/multiprocess/services/engine_driven_transfer.py`: `EngineDrivenTransferModule`
+- `lmcache/v1/multiprocess/services/server_transfer.py`: `TransferStrategy`, `PickleTransferStrategy`, `ShmTransferStrategy`
 - `lmcache/v1/multiprocess/transfer_context/worker_transfer.py`: `EngineDrivenTransferContext`, `LMCacheDrivenTransferContext`, `create_transfer_context`, `MPTransferMode`
 - `lmcache/v1/multiprocess/transfer_context/async_engine_driven.py`: `AsyncEngineDrivenTransferContext`
 - `lmcache/v1/multiprocess/transfer_context/base.py`: `EngineDrivenContext`, `gather_paged_kv_to_cpu`, `scatter_cpu_to_paged_kv`, `compute_kv_layout`

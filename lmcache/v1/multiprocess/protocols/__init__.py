@@ -116,8 +116,11 @@ def initialize_protocols() -> dict[str, ProtocolDefinition]:
             f"{sorted(missing_declared_definitions)}"
         )
 
-    service = lmcache_mq_pb2.DESCRIPTOR.services_by_name["MessageQueue"]
-    actual_methods = {method.name for method in service.methods}
+    actual_methods = {
+        method.name
+        for service in lmcache_mq_pb2.DESCRIPTOR.services_by_name.values()
+        for method in service.methods
+    }
     expected_methods = {
         request_name_to_method_name(request_name)
         for request_name in protocol_definitions
@@ -127,7 +130,7 @@ def initialize_protocols() -> dict[str, ProtocolDefinition]:
     missing_definitions = sorted(actual_methods - expected_methods)
     if missing_methods or missing_definitions:
         raise ProtocolInitializationError(
-            "MessageQueue proto / protocol definition mismatch: "
+            "gRPC services / protocol definition mismatch: "
             f"missing_methods={missing_methods}, "
             f"missing_definitions={missing_definitions}"
         )

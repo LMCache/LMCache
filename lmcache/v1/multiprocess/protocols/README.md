@@ -33,7 +33,8 @@ The protocol system has two sources of truth:
 2. **The gRPC service descriptor** in
    `transport/grpc_impl/proto/lmcache_mq.proto`.
    It defines the concrete request/response protobuf messages and the unary RPC
-   methods exposed by `MessageQueue`.
+   methods exposed by the Engine, Controller, Debug, Blend, Observability, and
+   P2P services.
 
 At import time:
 
@@ -42,7 +43,8 @@ At import time:
    request name is duplicated across modules, and that every definition has a
    matching gRPC service method.
 3. `protocol.py` reads the generated gRPC descriptor and builds:
-   - `RpcMethod`: descriptor-derived string tokens
+   - `RpcMethod`: descriptor-derived string tokens, including their owning
+     gRPC `service_name`
    - `RPC`: a CamelCase namespace for ergonomic attribute access
 
 There is no central request enum anymore. Adding an RPC no longer requires
@@ -77,7 +79,8 @@ If the new operation belongs in an existing category:
        }
    ```
 
-3. **Add the protobuf request/response messages and unary RPC** to
+3. **Add the protobuf request/response messages and unary RPC** to the matching
+   service in
    `transport/grpc_impl/proto/lmcache_mq.proto`:
    ```proto
    message YourNewOpRequest {
@@ -89,7 +92,7 @@ If the new operation belongs in an existing category:
      bool ok = 1;
    }
 
-   service MessageQueue {
+   service EngineService {
      rpc YourNewOp(YourNewOpRequest) returns (YourNewOpResponse);
    }
    ```
@@ -110,7 +113,8 @@ If the operation belongs in a new category:
 2. **Register the module** in `protocols/__init__.py` by importing it and
    appending it to `_PROTOCOL_MODULES`.
 
-3. **Add the protobuf messages and unary RPC** to `lmcache_mq.proto`.
+3. **Add the protobuf messages and a new gRPC service** to `lmcache_mq.proto`,
+   or add the RPC to the existing service that owns that category.
 
 4. **Regenerate the stubs** with `_proto_gen._generate`.
 
@@ -159,7 +163,7 @@ to the mismatch.
 ProtocolInitializationError: Request name 'YOUR_NEW_OP' in module 'engine' is listed in REQUEST_NAMES but has no protocol definition
 
 # If you add a definition but forget the proto rpc:
-ProtocolInitializationError: MessageQueue proto / protocol definition mismatch: missing_methods=['YourNewOp'], missing_definitions=[]
+ProtocolInitializationError: gRPC services / protocol definition mismatch: missing_methods=['YourNewOp'], missing_definitions=[]
 ```
 
 ## Current Protocol Groups

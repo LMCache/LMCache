@@ -18,16 +18,16 @@ import pytest
 
 # First Party
 from lmcache.v1.multiprocess.config import MPServerConfig
-from lmcache.v1.multiprocess.modules import engine_driven_transfer as non_gpu_mod
-from lmcache.v1.multiprocess.modules import lmcache_driven_transfer as gpu_mod
-from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
+from lmcache.v1.multiprocess.services import engine_driven_transfer as non_gpu_mod
+from lmcache.v1.multiprocess.services import lmcache_driven_transfer as gpu_mod
+from lmcache.v1.multiprocess.services.engine_driven_transfer import (
     EngineDrivenTransferModule,
 )
-from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
+from lmcache.v1.multiprocess.services.lmcache_driven_transfer import (
     ContextEntry,
     LMCacheDrivenTransferModule,
 )
-from lmcache.v1.multiprocess.modules.management import ManagementModule
+from lmcache.v1.multiprocess.services.management import ManagementModule
 from lmcache.v1.periodic_thread import PeriodicThreadRegistry
 
 
@@ -298,7 +298,7 @@ def test_blend_drop_instance_state_drops_rope_state() -> None:
     entry frees it directly), so only the rope state is dropped here.
     """
     # First Party
-    from lmcache.v1.multiprocess.modules.blend_v3 import BlendV3Module
+    from lmcache.v1.multiprocess.services.blend_v3 import BlendV3Module
 
     module = BlendV3Module.__new__(BlendV3Module)
     module._cb_rope_state = {5: MagicMock()}

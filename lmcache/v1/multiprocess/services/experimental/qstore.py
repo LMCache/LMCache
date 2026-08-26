@@ -25,20 +25,20 @@ from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey, KVCache
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
-from lmcache.v1.multiprocess.engine_module import (
-    HandlerSpec,
-    InstanceLivenessTarget,
-    ThreadPoolType,
-)
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
-from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
+from lmcache.v1.multiprocess.native_completion import submit_callback_to_stream
+from lmcache.v1.multiprocess.protocol import RPC
+from lmcache.v1.multiprocess.service import (
+    InstanceLivenessTarget,
+    RpcExecutionPool,
+    RpcHandlerSpec,
+)
+from lmcache.v1.multiprocess.services.lmcache_driven_transfer import (
     ContextEntry,
     downsample_and_stage_block_ids,
     get_layout_desc,
     transfer_kv_per_object_group,
 )
-from lmcache.v1.multiprocess.native_completion import submit_callback_to_stream
-from lmcache.v1.multiprocess.protocol import RPC
 from lmcache.v1.platform.cache_context import create_cache_context
 import lmcache.lmcache_native as lmcache_native
 
@@ -191,28 +191,28 @@ class QStoreModule(InstanceLivenessTarget):
             # Non-CUDA device modules (xpu / musa) do not expose ipc_collect.
             ipc_collect()
 
-    def get_handlers(self) -> list[HandlerSpec]:
+    def get_handlers(self) -> list[RpcHandlerSpec]:
         """Return handler specs for all request types this module serves.
 
         Returns:
-            A list of HandlerSpec entries mapping request types to
+            A list of RpcHandlerSpec entries mapping request types to
             their handler callables and thread pool assignments.
         """
         return [
-            HandlerSpec(
+            RpcHandlerSpec(
                 RPC.RegisterQCache,
                 self.register_q_cache,
-                ThreadPoolType.SYNC,
+                RpcExecutionPool.SYNC,
             ),
-            HandlerSpec(
+            RpcHandlerSpec(
                 RPC.UnregisterQCache,
                 self.unregister_q_cache,
-                ThreadPoolType.SYNC,
+                RpcExecutionPool.SYNC,
             ),
-            HandlerSpec(
+            RpcHandlerSpec(
                 RPC.StoreQ,
                 self.store_q,
-                ThreadPoolType.AFFINITY,
+                RpcExecutionPool.AFFINITY,
             ),
         ]
 

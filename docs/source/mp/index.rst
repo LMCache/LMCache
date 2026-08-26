@@ -88,29 +88,30 @@ High-Level Architecture
          v
     EventBus + OTel providers (observability)
 
-Engine and Modules
-------------------
+Engine and Services
+-------------------
 
 All server entry points share the same ``MPCacheServer`` and
 ``StorageManager`` core. ``MPCacheServer`` is now a thin compositor:
-it holds an ``MPCacheServerContext`` and a list of ``EngineModule``
-instances assembled by ``_build_modules()`` (in ``server.py``)
+it holds an ``MPCacheServerContext`` and a list of ``MPService``
+instances assembled by ``_build_services()`` (in ``server.py``)
 based on ``--engine-type`` and ``--supported-transfer-mode``.
 
-**``server.py``** -- The default ZMQ-only server.  Creates an
-``MPCacheServer``, assembles the engine modules
+**``server.py``** -- The default gRPC server.  Creates an
+``MPCacheServer``, assembles the server services
 (``LookupModule`` + ``ManagementModule`` + ``LMCacheDrivenTransferModule``
 and/or ``EngineDrivenTransferModule`` depending on
 ``--supported-transfer-mode`` — ``lmcache_driven`` (default) or
 ``engine_driven`` loads just one,
-``auto`` loads both — plus a CacheBlend module when
+``auto`` loads both — plus a CacheBlend service when
 ``--engine-type`` is set: ``blend`` appends ``BlendV3Module`` (the
 current paged-aware implementation), and ``blend_legacy`` appends
 ``BlendModule`` (the original)). Starts a ``MessageQueueServer``,
-registers handlers for every ``RequestType`` exposed by the loaded
-modules, and blocks in a keep-alive loop.
+mounts handlers exposed by the loaded services, and blocks in a
+keep-alive loop. The concrete gRPC service boundary is defined in
+``transport/grpc_impl/proto/lmcache_mq.proto``.
 
-**``modules/blend.py``** -- Defines ``BlendModule`` and ``BlendEngineV2``,
+**``services/blend.py``** -- Defines ``BlendModule`` and ``BlendEngineV2``,
 which add the original CacheBlend operations (``CB_REGISTER_KV_CACHE``,
 ``CB_LOOKUP_PRE_COMPUTED``, ``CB_STORE_PRE_COMPUTED``,
 ``CB_RETRIEVE_PRE_COMPUTED``, ``CB_STORE_FINAL`` and their V2
@@ -118,7 +119,7 @@ variants). Enables non-prefix KV cache reuse across document
 paragraphs. Selected by passing ``--engine-type blend_legacy`` to
 ``lmcache server``.
 
-**``modules/blend_v3.py``** -- Defines ``BlendV3Module``, the
+**``services/blend_v3.py``** -- Defines ``BlendV3Module``, the
 paged-aware CacheBlend V3 pipeline that runs on the sparse-prefetch
 path. Adds the V3 RPCs (``CB_REGISTER_ROPE_V3``,
 ``CB_UNREGISTER_ROPE_V3``, ``CB_RETRIEVE_PRE_COMPUTED_V3``,
@@ -294,7 +295,7 @@ Communication between vLLM and LMCache uses ZMQ (DEALER/ROUTER pattern).
        prefix. Returns a task id which the caller passes to
        ``P2P_QUERY_LOOKUP_RESULTS`` to poll for the transfer addresses.
        Served by ``P2PController`` (loaded unconditionally by
-       ``_build_modules()``); whether this server also acts as a P2P
+       ``_build_services()``); whether this server also acts as a P2P
        client is controlled by ``--p2p-advertise-url`` -- see
        :doc:`p2p`.
    * - ``P2P_QUERY_LOOKUP_RESULTS``
@@ -567,17 +568,18 @@ Adding an observability subscriber
 Adding a new request type
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-1. Add a new member to ``RequestType`` in ``protocols/base.py``.
-2. Create a ``ProtocolDefinition`` in the appropriate ``protocols/*.py`` file
+1. Add the request name to the appropriate ``protocols/*.py`` file
    (``engine``, ``controller``, ``observability``, ``debug``, ``blend``,
-   ``blend_v2``, ``blend_v3``, or ``p2p``) and add the request name to that
-   module's ``REQUEST_NAMES``.
-3. Implement the handler method on the appropriate ``EngineModule``
-   (e.g. ``LookupModule``, ``LMCacheDrivenTransferModule``, ``BlendV3Module``) and
-   expose it as a ``HandlerSpec`` from that module's ``get_handlers()``.
-4. ``run_cache_server()`` registers every ``HandlerSpec`` returned by the
-   loaded modules via ``add_handler_helper()`` — no manual registration
-   step is needed.
+   ``blend_v2``, ``blend_v3``, or ``p2p``) and create its
+   ``ProtocolDefinition``.
+2. Add the request/response messages and method to the matching service in
+   ``transport/grpc_impl/proto/lmcache_mq.proto``.
+3. Implement the handler method on the appropriate ``MPService``
+   (e.g. ``LookupModule``, ``LMCacheDrivenTransferModule``, ``BlendV3Module``)
+   and expose it as a ``RpcHandlerSpec`` from that service's ``get_handlers()``.
+4. ``run_cache_server()`` passes loaded services to
+   ``MessageQueueServer.mount_services()``; the transport attaches the
+   generated gRPC service servicers when it starts.
 
 Key Source Files
 ----------------
@@ -589,16 +591,16 @@ Key Source Files
    * - File
      - Purpose
    * - ``lmcache/v1/multiprocess/server.py``
-     - MPCacheServer + ZMQ server entry point
+     - MPCacheServer + gRPC server entry point
    * - ``lmcache/v1/multiprocess/config.py``
      - MPServerConfig, HTTPFrontendConfig
    * - ``lmcache/v1/multiprocess/engine_context.py``
-     - MPCacheServerContext (shared state passed to every EngineModule)
-   * - ``lmcache/v1/multiprocess/engine_module.py``
-     - ``EngineModule`` protocol, ``HandlerSpec``, ``ThreadPoolType``
-       (per-module handler registration)
-   * - ``lmcache/v1/multiprocess/modules/``
-     - Engine module implementations: ``lookup.py`` (``LookupModule``),
+     - MPCacheServerContext (shared state passed to every ``MPService``)
+   * - ``lmcache/v1/multiprocess/service.py``
+     - ``MPService`` protocol, ``RpcHandlerSpec``, ``RpcExecutionPool``
+       (per-service handler metadata)
+   * - ``lmcache/v1/multiprocess/services/``
+     - Server service implementations: ``lookup.py`` (``LookupModule``),
        ``management.py`` (``ManagementModule``), ``lmcache_driven_transfer.py``
        (``LMCacheDrivenTransferModule``), ``engine_driven_transfer.py``
        (``EngineDrivenTransferModule``), ``blend.py``

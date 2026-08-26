@@ -31,11 +31,11 @@ from lmcache.v1.multiprocess.custom_types import (
     KVCache,
 )
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
-from lmcache.v1.multiprocess.engine_module import (
-    HandlerSpec,
-    ThreadPoolType,
-)
 from lmcache.v1.multiprocess.protocol import RPC
+from lmcache.v1.multiprocess.service import (
+    RpcExecutionPool,
+    RpcHandlerSpec,
+)
 from lmcache.v1.multiprocess.token_hasher import (
     chunk_hash_windows_numba,
     rolling_hash_windows_numba,
@@ -334,43 +334,43 @@ class BlendModule:
         """Return the shared engine context. Exposed for testing only."""
         return self._ctx
 
-    def get_handlers(self) -> list[HandlerSpec]:
+    def get_handlers(self) -> list[RpcHandlerSpec]:
         """Return handler specs for all request types this module serves.
 
         Returns:
-            A list of HandlerSpec entries mapping request types to
+            A list of RpcHandlerSpec entries mapping request types to
             their handler callables and thread pool assignments.
         """
         return [
-            HandlerSpec(
+            RpcHandlerSpec(
                 RPC.CbRegisterKvCache,
                 self.cb_register_kv_cache,
-                ThreadPoolType.SYNC,
+                RpcExecutionPool.SYNC,
             ),
-            HandlerSpec(
+            RpcHandlerSpec(
                 RPC.CbUnregisterKvCache,
                 self.cb_unregister_kv_cache,
-                ThreadPoolType.SYNC,
+                RpcExecutionPool.SYNC,
             ),
-            HandlerSpec(
+            RpcHandlerSpec(
                 RPC.CbStorePreComputed,
                 self.cb_store_pre_computed,
-                ThreadPoolType.AFFINITY,
+                RpcExecutionPool.AFFINITY,
             ),
-            HandlerSpec(
+            RpcHandlerSpec(
                 RPC.CbRetrievePreComputedV2,
                 self.cb_retrieve_pre_computed,
-                ThreadPoolType.AFFINITY,
+                RpcExecutionPool.AFFINITY,
             ),
-            HandlerSpec(
+            RpcHandlerSpec(
                 RPC.CbStoreFinal,
                 self.cb_store_final,
-                ThreadPoolType.AFFINITY,
+                RpcExecutionPool.AFFINITY,
             ),
-            HandlerSpec(
+            RpcHandlerSpec(
                 RPC.CbLookupPreComputedV2,
                 self.cb_lookup_pre_computed,
-                ThreadPoolType.NORMAL,
+                RpcExecutionPool.NORMAL,
             ),
         ]
 

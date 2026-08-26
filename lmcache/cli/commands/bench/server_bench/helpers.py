@@ -571,7 +571,7 @@ def _send_lookup(
     later retrieves the same shared KV object; without the extra
     locks the second RETRIEVE tries to release a lock that the
     first RETRIEVE already dropped and reads stale bytes). See
-    ``compute_extra_count`` in ``lmcache/v1/multiprocess/modules/
+    ``compute_extra_count`` in ``lmcache/v1/multiprocess/services/
     lookup.py`` -- MLA is detected on the server via
     ``tp_size > world_size``.
 

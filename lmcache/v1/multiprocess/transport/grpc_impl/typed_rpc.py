@@ -559,6 +559,7 @@ class TypedRpcSpec:
     """A descriptor-derived binding between one RPC and its Python contract."""
 
     rpc_method: RpcMethod
+    service_name: str
     method_name: str
     request_message: Any
     response_message: Any
@@ -576,20 +577,26 @@ class TypedRpcSpec:
 
 
 def _build_typed_rpcs() -> dict[RpcMethod, TypedRpcSpec]:
-    service = lmcache_mq_pb2.DESCRIPTOR.services_by_name["MessageQueue"]
     expected_methods = {request_type_to_method_name(item) for item in RPC_METHODS}
-    actual_methods = set(service.methods_by_name)
+    service_methods: dict[str, Any] = {}
+    for service in lmcache_mq_pb2.DESCRIPTOR.services_by_name.values():
+        for method in service.methods:
+            if method.name in service_methods:
+                raise RuntimeError(f"Duplicate gRPC method name: {method.name}")
+            service_methods[method.name] = method
+
+    actual_methods = set(service_methods)
     if actual_methods != expected_methods:
         missing = sorted(expected_methods - actual_methods)
         extra = sorted(actual_methods - expected_methods)
         raise RuntimeError(
-            f"MessageQueue/RpcMethod mismatch: missing={missing}, extra={extra}"
+            f"gRPC service/RpcMethod mismatch: missing={missing}, extra={extra}"
         )
 
     specs: dict[RpcMethod, TypedRpcSpec] = {}
     for rpc_method in RPC_METHODS:
         method_name = request_type_to_method_name(rpc_method)
-        method = service.methods_by_name[method_name]
+        method = service_methods[method_name]
         request_message = getattr(lmcache_mq_pb2, method.input_type.name)
         response_message = getattr(lmcache_mq_pb2, method.output_type.name)
         payload_types = tuple(get_payload_classes(rpc_method))
@@ -602,6 +609,7 @@ def _build_typed_rpcs() -> dict[RpcMethod, TypedRpcSpec]:
         )
         specs[rpc_method] = TypedRpcSpec(
             rpc_method=rpc_method,
+            service_name=rpc_method.service_name,
             method_name=method_name,
             request_message=request_message,
             response_message=response_message,

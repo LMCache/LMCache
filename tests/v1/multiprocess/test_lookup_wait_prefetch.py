@@ -15,7 +15,7 @@ import threading
 # First Party
 from lmcache.lmcache_native import Bitmap
 from lmcache.v1.distributed.api import PrefetchHandle
-from lmcache.v1.multiprocess.modules.lookup import LookupModule, _PrefetchJob
+from lmcache.v1.multiprocess.services.lookup import LookupModule, _PrefetchJob
 
 
 def _make_ctx(wait_result=True, found=None):

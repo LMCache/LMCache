@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """LMCache mp-mode message queue, backed by gRPC.
 
-Each RPC method maps to a distinct typed unary gRPC method on the
-``MessageQueue`` service defined in ``proto/lmcache_mq.proto``. Concurrent
-control-plane calls now go directly over typed unary RPCs. The old msgspec
-envelope (uid + request type + payload frames) is gone; gRPC method routing and
-protobuf request/response messages now define the wire protocol.
+Each RPC method maps to a distinct typed unary gRPC method on one of the
+services defined in ``proto/lmcache_mq.proto``. Concurrent control-plane calls
+go directly over typed unary RPCs. The old msgspec envelope (uid + request type
++ payload frames) is gone; gRPC service/method routing and protobuf
+request/response messages now define the wire protocol.
 """
 
 # Standard
@@ -31,6 +31,11 @@ from lmcache.v1.multiprocess.protocol import (
     get_handler_type,
     get_payload_classes,
     get_response_class,
+)
+from lmcache.v1.multiprocess.service import (
+    MPService,
+    RpcExecutionPool,
+    RpcHandlerSpec,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
     lmcache_mq_pb2 as _pb2_typed,
@@ -226,12 +231,22 @@ class MessageQueueClient:
             options=_GRPC_UNLIMITED_MSG_OPTS,
             compression=compression,
         )
-        self._stub = lmcache_mq_pb2_grpc.MessageQueueStub(self._channel)
+        self._stubs = {
+            service_name: getattr(lmcache_mq_pb2_grpc, f"{service_name}Stub")(
+                self._channel
+            )
+            for service_name in {
+                typed_spec.service_name for typed_spec in _TYPED_RPCS.values()
+            }
+        }
         self._call_metadata = ((_GRPC_CLIENT_ID_METADATA_KEY, uuid.uuid4().bytes),)
         self._rpc_methods = {
             rpc_method: (
                 _RPC_METHOD_NAMES[rpc_method],
-                getattr(self._stub, _RPC_METHOD_NAMES[rpc_method]),
+                getattr(
+                    self._stubs[typed_spec.service_name],
+                    _RPC_METHOD_NAMES[rpc_method],
+                ),
                 typed_spec,
             )
             for rpc_method, typed_spec in _TYPED_RPCS.items()
@@ -676,6 +691,44 @@ class MessageQueueServer:
         del request_type, handler
         raise NotImplementedError
 
+    def mount_services(
+        self,
+        services: Sequence[MPService],
+        *,
+        max_cpu_workers: int,
+        max_gpu_workers: int,
+    ) -> None:
+        """Mount RPC handlers exposed by service objects.
+
+        Args:
+            services: Service objects implementing generated gRPC operations.
+            max_cpu_workers: Worker count for normal blocking handlers.
+            max_gpu_workers: Worker count for affinity-routed blocking handlers.
+        """
+        specs: list[RpcHandlerSpec] = []
+        for service in services:
+            specs.extend(service.get_handlers())
+
+        for spec in specs:
+            self.add_handler(spec.rpc_method, spec.handler)
+
+        affinity_types = [
+            spec.rpc_method for spec in specs if spec.pool == RpcExecutionPool.AFFINITY
+        ]
+        normal_types = [
+            spec.rpc_method for spec in specs if spec.pool == RpcExecutionPool.NORMAL
+        ]
+        if affinity_types:
+            self.add_affinity_thread_pool(
+                affinity_types,
+                max_workers=max_gpu_workers,
+            )
+        if normal_types:
+            self.add_normal_thread_pool(
+                normal_types,
+                max_workers=max_cpu_workers,
+            )
+
     def _validate_blocking_handlers(
         self,
         request_types: Sequence[RpcMethod | str],
@@ -772,7 +825,14 @@ class MessageQueueServer:
             compression=compression,
         )
         servicer = _RequestHandlerServicer(self.handlers)
-        lmcache_mq_pb2_grpc.add_MessageQueueServicer_to_server(servicer, server)
+        for service_name in sorted(
+            {typed_spec.service_name for typed_spec in _TYPED_RPCS.values()}
+        ):
+            add_servicer = getattr(
+                lmcache_mq_pb2_grpc,
+                f"add_{service_name}Servicer_to_server",
+            )
+            add_servicer(servicer, server)
         server.add_insecure_port(target)
         server.start()
         self._server = server

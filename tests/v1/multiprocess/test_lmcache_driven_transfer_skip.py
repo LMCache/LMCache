@@ -15,8 +15,8 @@ from unittest.mock import MagicMock
 
 # First Party
 from lmcache.v1.kv_layer_groups import ObjectGroupInfo
-from lmcache.v1.multiprocess.modules import lmcache_driven_transfer as mod
-from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
+from lmcache.v1.multiprocess.services import lmcache_driven_transfer as mod
+from lmcache.v1.multiprocess.services.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
     all_null_chunk_masks,
 )

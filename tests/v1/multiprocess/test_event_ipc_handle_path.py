@@ -191,7 +191,7 @@ def test_server_store_and_retrieve_delegate_event_ordering(
 ) -> None:
     """Server imports, waits, records, and exports through the event backend."""
     # First Party
-    from lmcache.v1.multiprocess.modules import lmcache_driven_transfer
+    from lmcache.v1.multiprocess.services import lmcache_driven_transfer
 
     backend = _FakeEventBackend()
 
@@ -300,7 +300,7 @@ def test_handle_path_has_no_musa_specific_imports_or_branches() -> None:
     """The scoped multiprocess modules remain backend-neutral."""
     # First Party
     from lmcache.v1.multiprocess import futures
-    from lmcache.v1.multiprocess.modules import lmcache_driven_transfer
+    from lmcache.v1.multiprocess.services import lmcache_driven_transfer
     from lmcache.v1.multiprocess.transfer_context import worker_transfer
 
     for module in (futures, lmcache_driven_transfer, worker_transfer):

@@ -32,7 +32,6 @@ from lmcache.v1.multiprocess.protocol import (
     get_handler_type,
     get_payload_classes,
 )
-from lmcache.v1.multiprocess.server import add_handler_helper
 
 # Test helpers
 from tests.v1.multiprocess import test_mq_handler_helpers
@@ -665,8 +664,8 @@ def test_add_normal_thread_pool():
     context = zmq.Context.instance()
     server = MessageQueueServer("grpc://127.0.0.1:15700", context)
 
-    add_handler_helper(server, RPC.Lookup, test_mq_handler_helpers.lookup_handler)
-    add_handler_helper(server, RPC.Noop, test_mq_handler_helpers.noop_handler)
+    server.add_handler(RPC.Lookup, test_mq_handler_helpers.lookup_handler)
+    server.add_handler(RPC.Noop, test_mq_handler_helpers.noop_handler)
 
     lookup_handler = server.handlers[RPC.Lookup]
     assert isinstance(lookup_handler, BlockingRequestHandler)
@@ -690,8 +689,8 @@ def test_add_affinity_thread_pool():
     context = zmq.Context.instance()
     server = MessageQueueServer("grpc://127.0.0.1:15700", context)
 
-    add_handler_helper(server, RPC.Store, test_mq_handler_helpers.store_handler)
-    add_handler_helper(server, RPC.Retrieve, test_mq_handler_helpers.retrieve_handler)
+    server.add_handler(RPC.Store, test_mq_handler_helpers.store_handler)
+    server.add_handler(RPC.Retrieve, test_mq_handler_helpers.retrieve_handler)
 
     store_handler = server.handlers[RPC.Store]
     retrieve_handler = server.handlers[RPC.Retrieve]
@@ -715,7 +714,7 @@ def test_normal_pool_error_on_sync_handler():
     context = zmq.Context.instance()
     server = MessageQueueServer("grpc://127.0.0.1:15701", context)
 
-    add_handler_helper(server, RPC.Noop, test_mq_handler_helpers.noop_handler)
+    server.add_handler(RPC.Noop, test_mq_handler_helpers.noop_handler)
 
     with pytest.raises(TypeError, match="not BlockingRequestHandler"):
         server.add_normal_thread_pool([RPC.Noop], max_workers=1)
@@ -730,7 +729,7 @@ def test_affinity_pool_error_on_sync_handler():
     context = zmq.Context.instance()
     server = MessageQueueServer("grpc://127.0.0.1:15701", context)
 
-    add_handler_helper(server, RPC.Noop, test_mq_handler_helpers.noop_handler)
+    server.add_handler(RPC.Noop, test_mq_handler_helpers.noop_handler)
 
     with pytest.raises(TypeError, match="not BlockingRequestHandler"):
         server.add_affinity_thread_pool([RPC.Noop], max_workers=1)
@@ -764,9 +763,9 @@ def test_multiple_pools():
     context = zmq.Context.instance()
     server = MessageQueueServer("grpc://127.0.0.1:15703", context)
 
-    add_handler_helper(server, RPC.Store, test_mq_handler_helpers.store_handler)
-    add_handler_helper(server, RPC.Retrieve, test_mq_handler_helpers.retrieve_handler)
-    add_handler_helper(server, RPC.Lookup, test_mq_handler_helpers.lookup_handler)
+    server.add_handler(RPC.Store, test_mq_handler_helpers.store_handler)
+    server.add_handler(RPC.Retrieve, test_mq_handler_helpers.retrieve_handler)
+    server.add_handler(RPC.Lookup, test_mq_handler_helpers.lookup_handler)
 
     server.add_affinity_thread_pool([RPC.Store, RPC.Retrieve], max_workers=2)
     server.add_normal_thread_pool([RPC.Lookup], max_workers=3)
@@ -797,7 +796,7 @@ def test_start_fails_without_pool_assignment():
     context = zmq.Context.instance()
     server = MessageQueueServer("grpc://127.0.0.1:15704", context)
 
-    add_handler_helper(server, RPC.Store, test_mq_handler_helpers.store_handler)
+    server.add_handler(RPC.Store, test_mq_handler_helpers.store_handler)
     # Don't assign any pool
 
     with pytest.raises(RuntimeError, match="no thread pool assigned"):

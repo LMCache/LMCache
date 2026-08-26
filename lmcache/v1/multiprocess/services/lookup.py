@@ -22,11 +22,11 @@ from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.otel_init import register_gauge
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
-from lmcache.v1.multiprocess.engine_module import (
-    HandlerSpec,
-    ThreadPoolType,
-)
 from lmcache.v1.multiprocess.protocol import RPC
+from lmcache.v1.multiprocess.service import (
+    RpcExecutionPool,
+    RpcHandlerSpec,
+)
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
 logger = init_logger(__name__)
@@ -118,38 +118,38 @@ class LookupModule:
         """Return the shared engine context. Exposed for testing only."""
         return self._ctx
 
-    def get_handlers(self) -> list[HandlerSpec]:
+    def get_handlers(self) -> list[RpcHandlerSpec]:
         """Return handler specs for all request types this module serves.
 
         Returns:
             List of handler specs for lookup-related request types.
         """
         return [
-            HandlerSpec(RPC.Lookup, self.lookup, ThreadPoolType.NORMAL),
-            HandlerSpec(
+            RpcHandlerSpec(RPC.Lookup, self.lookup, RpcExecutionPool.NORMAL),
+            RpcHandlerSpec(
                 RPC.QueryPrefetchStatus,
                 self.query_prefetch_status,
-                ThreadPoolType.NORMAL,
+                RpcExecutionPool.NORMAL,
             ),
-            HandlerSpec(
+            RpcHandlerSpec(
                 RPC.WaitPrefetchStatus,
                 self.wait_prefetch_status,
-                ThreadPoolType.NORMAL,
+                RpcExecutionPool.NORMAL,
             ),
-            HandlerSpec(
+            RpcHandlerSpec(
                 RPC.QueryPrefetchLookupHits,
                 self.query_prefetch_lookup_hits,
-                ThreadPoolType.NORMAL,
+                RpcExecutionPool.NORMAL,
             ),
-            HandlerSpec(
+            RpcHandlerSpec(
                 RPC.FreeLookupLocks,
                 self.free_lookup_locks,
-                ThreadPoolType.NORMAL,
+                RpcExecutionPool.NORMAL,
             ),
-            HandlerSpec(
+            RpcHandlerSpec(
                 RPC.EndSession,
                 self.end_session,
-                ThreadPoolType.NORMAL,
+                RpcExecutionPool.NORMAL,
             ),
         ]
 

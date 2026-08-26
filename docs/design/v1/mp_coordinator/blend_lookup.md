@@ -8,7 +8,7 @@ cache-event reporting) and **additive** (the local matcher still runs).
 
 Code: `lmcache/v1/mp_coordinator/blend_index.py`,
 `lmcache/v1/mp_coordinator/blend_client.py`,
-`lmcache/v1/multiprocess/modules/blend_v3.py`.
+`lmcache/v1/multiprocess/services/blend_v3.py`.
 Index internals: [blend_index.md](blend_index.md).
 
 ## Why

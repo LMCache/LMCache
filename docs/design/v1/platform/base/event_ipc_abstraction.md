@@ -205,7 +205,7 @@ Worker: futures.py
 
 The following generic modules use only the platform API:
 
-- `lmcache/v1/multiprocess/modules/lmcache_driven_transfer.py`
+- `lmcache/v1/multiprocess/services/lmcache_driven_transfer.py`
 - `lmcache/v1/multiprocess/futures.py`
 - `lmcache/v1/multiprocess/transfer_context/worker_transfer.py`
 

@@ -21,16 +21,16 @@ from lmcache.v1.multiprocess.custom_types import (
     RegisterEngineDrivenContextPayload,
 )
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext, ShmPoolInfo
-from lmcache.v1.multiprocess.engine_module import (
-    HandlerSpec,
-    InstanceLivenessTarget,
-    ThreadPoolType,
-)
 from lmcache.v1.multiprocess.protocol import RPC
 from lmcache.v1.multiprocess.protocols.engine import (
     PrepareRetrieveResponse,
     PrepareStoreResponse,
     RegisterEngineDrivenContextResponse,
+)
+from lmcache.v1.multiprocess.service import (
+    InstanceLivenessTarget,
+    RpcExecutionPool,
+    RpcHandlerSpec,
 )
 from lmcache.v1.multiprocess.transfer_context.base import EngineDrivenContextMetadata
 
@@ -97,43 +97,43 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         """Return the shared engine context. Exposed for testing only."""
         return self._ctx
 
-    def get_handlers(self) -> list[HandlerSpec]:
+    def get_handlers(self) -> list[RpcHandlerSpec]:
         """Return handler specs for all request types this module serves.
 
         Returns:
-            A list of HandlerSpec entries mapping request types to
+            A list of RpcHandlerSpec entries mapping request types to
             their handler callables and thread pool assignments.
         """
         return [
-            HandlerSpec(
+            RpcHandlerSpec(
                 RPC.RegisterKvCacheEngineDrivenContext,
                 self.register_kv_cache_engine_driven_context,
-                ThreadPoolType.SYNC,
+                RpcExecutionPool.SYNC,
             ),
-            HandlerSpec(
+            RpcHandlerSpec(
                 RPC.UnregisterKvCacheEngineDrivenContext,
                 self.unregister_kv_cache,
-                ThreadPoolType.SYNC,
+                RpcExecutionPool.SYNC,
             ),
-            HandlerSpec(
+            RpcHandlerSpec(
                 RPC.PrepareStore,
                 self.prepare_store,
-                ThreadPoolType.AFFINITY,
+                RpcExecutionPool.AFFINITY,
             ),
-            HandlerSpec(
+            RpcHandlerSpec(
                 RPC.CommitStore,
                 self.commit_store,
-                ThreadPoolType.AFFINITY,
+                RpcExecutionPool.AFFINITY,
             ),
-            HandlerSpec(
+            RpcHandlerSpec(
                 RPC.PrepareRetrieve,
                 self.prepare_retrieve,
-                ThreadPoolType.AFFINITY,
+                RpcExecutionPool.AFFINITY,
             ),
-            HandlerSpec(
+            RpcHandlerSpec(
                 RPC.CommitRetrieve,
                 self.commit_retrieve,
-                ThreadPoolType.AFFINITY,
+                RpcExecutionPool.AFFINITY,
             ),
         ]
 

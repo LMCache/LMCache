@@ -22,10 +22,10 @@ import time
 import weakref
 
 # First Party
-from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
+from lmcache.v1.multiprocess.services.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
 )
-import lmcache.v1.multiprocess.modules.lmcache_driven_transfer as gpu_mod
+import lmcache.v1.multiprocess.services.lmcache_driven_transfer as gpu_mod
 
 
 class _FakeTorchDev:

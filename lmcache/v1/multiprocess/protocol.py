@@ -59,10 +59,12 @@ class RpcMethod(str, metaclass=_RpcMethodMeta):  # type: ignore[misc]
     _by_method_name: ClassVar[dict[str, "RpcMethod"]] = {}
     _by_request_name: ClassVar[dict[str, "RpcMethod"]] = {}
     _request_name: str
+    _service_name: str
 
-    def __new__(cls, method_name: str, request_name: str):
+    def __new__(cls, method_name: str, request_name: str, service_name: str):
         instance = str.__new__(cls, method_name)
         instance._request_name = request_name
+        instance._service_name = service_name
         return instance
 
     @property
@@ -75,9 +77,14 @@ class RpcMethod(str, metaclass=_RpcMethodMeta):  # type: ignore[misc]
         """Return the concrete gRPC method name."""
         return str(self)
 
-    def __getnewargs__(self) -> tuple[str, str]:  # type: ignore[override]
+    @property
+    def service_name(self) -> str:
+        """Return the generated gRPC service that owns this method."""
+        return self._service_name
+
+    def __getnewargs__(self) -> tuple[str, str, str]:  # type: ignore[override]
         """Preserve the request-name metadata across pickle/spawn."""
-        return (str(self), self.name)
+        return (str(self), self.name, self.service_name)
 
 
 class _RpcNamespace:
@@ -102,19 +109,23 @@ class _RpcNamespace:
 
 
 def _build_rpc_methods() -> tuple[tuple[RpcMethod, ...], dict[RpcMethod, Any]]:
-    service = lmcache_mq_pb2.DESCRIPTOR.services_by_name["MessageQueue"]
     request_name_by_method = {
         request_name_to_method_name(request_name): request_name
         for request_name in _REQUEST_NAME_DEFINITIONS
     }
     methods: list[RpcMethod] = []
     definitions: dict[RpcMethod, Any] = {}
-    for method in service.methods:
-        request_name = request_name_by_method[method.name]
-        rpc_method = RpcMethod(method.name, request_name)
-        methods.append(rpc_method)
-        definitions[rpc_method] = _REQUEST_NAME_DEFINITIONS[request_name]
-        setattr(RpcMethod, request_name, rpc_method)
+    seen_method_names: set[str] = set()
+    for service in lmcache_mq_pb2.DESCRIPTOR.services_by_name.values():
+        for method in service.methods:
+            if method.name in seen_method_names:
+                raise RuntimeError(f"Duplicate gRPC method name: {method.name}")
+            seen_method_names.add(method.name)
+            request_name = request_name_by_method[method.name]
+            rpc_method = RpcMethod(method.name, request_name, service.name)
+            methods.append(rpc_method)
+            definitions[rpc_method] = _REQUEST_NAME_DEFINITIONS[request_name]
+            setattr(RpcMethod, request_name, rpc_method)
 
     members = tuple(methods)
     RpcMethod._members = members

@@ -538,14 +538,14 @@ message CbRegisterRopeV3Request {
 message CbRegisterRopeV3Response {}
 
 // -----------------------------------------------------------------------
-// Service. One typed unary rpc per protocol operation. Method names are the
-// CamelCase form of the historical ALL_CAPS request names
-// (STORE -> Store, CB_LOOKUP_PRE_COMPUTED_V2 -> CbLookupPreComputedV2, etc.),
-// so gRPC's built-in routing replaces the old hand-written msgspec dispatch.
+// Services. Each service is one protocol module boundary; gRPC service names
+// carry the grouping that the old Python-side request registry used to own.
+// Method names remain the CamelCase form of the historical ALL_CAPS request
+// names (STORE -> Store, CB_LOOKUP_PRE_COMPUTED_V2 ->
+// CbLookupPreComputedV2, etc.).
 // -----------------------------------------------------------------------
 
-service MessageQueue {
-  // Engine operations
+service EngineService {
   rpc RegisterKvCache(RegisterKvCacheRequest) returns (RegisterKvCacheResponse);
   rpc RegisterQCache(RegisterKvCacheRequest) returns (RegisterKvCacheResponse);
   rpc UnregisterKvCache(UnregisterKvCacheRequest)
@@ -574,21 +574,25 @@ service MessageQueue {
   rpc CommitStore(CommitStoreRequest) returns (CommitStoreResponse);
   rpc PrepareRetrieve(PrepareRetrieveRequest) returns (PrepareRetrieveResponse);
   rpc CommitRetrieve(CommitRetrieveRequest) returns (CommitRetrieveResponse);
+}
 
-  // Controller operations
+service ControllerService {
   rpc Clear(ClearRequest) returns (ClearResponse);
   rpc GetChunkSize(GetChunkSizeRequest) returns (GetChunkSizeResponse);
   rpc GetExperimental(GetExperimentalRequest) returns (GetExperimentalResponse);
   rpc Ping(PingRequest) returns (PingResponse);
+}
 
-  // Observability operations
+service ObservabilityService {
   rpc ReportBlockAllocation(ReportBlockAllocationRequest)
       returns (ReportBlockAllocationResponse);
+}
 
-  // Debug operations
+service DebugService {
   rpc Noop(NoopRequest) returns (NoopResponse);
+}
 
-  // Blend V1
+service BlendService {
   rpc CbRegisterKvCache(CbRegisterKvCacheRequest)
       returns (CbRegisterKvCacheResponse);
   rpc CbUnregisterKvCache(CbUnregisterKvCacheRequest)
@@ -600,14 +604,16 @@ service MessageQueue {
   rpc CbRetrievePreComputed(CbRetrievePreComputedRequest)
       returns (CbRetrievePreComputedResponse);
   rpc CbStoreFinal(CbStoreFinalRequest) returns (CbStoreFinalResponse);
+}
 
-  // Blend V2
+service BlendV2Service {
   rpc CbLookupPreComputedV2(CbLookupPreComputedV2Request)
       returns (CbLookupPreComputedV2Response);
   rpc CbRetrievePreComputedV2(CbRetrievePreComputedV2Request)
       returns (CbRetrievePreComputedV2Response);
+}
 
-  // Blend V3
+service BlendV3Service {
   rpc CbRegisterRopeV3(CbRegisterRopeV3Request)
       returns (CbRegisterRopeV3Response);
   rpc CbUnregisterRopeV3(CbUnregisterRopeV3Request)
@@ -615,8 +621,9 @@ service MessageQueue {
   rpc CbRetrievePreComputedV3(CbRetrievePreComputedV3Request)
       returns (CbRetrievePreComputedV3Response);
   rpc CbUnifiedLookup(CbUnifiedLookupRequest) returns (CbUnifiedLookupResponse);
+}
 
-  // P2P
+service P2PService {
   rpc P2PLookupAndLock(P2pLookupAndLockRequest)
       returns (P2pLookupAndLockResponse);
   rpc P2PQueryLookupResults(P2pQueryLookupResultsRequest)

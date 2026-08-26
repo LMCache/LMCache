@@ -37,17 +37,17 @@ from lmcache.v1.multiprocess.custom_types import (
     KVCache,
 )
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
-from lmcache.v1.multiprocess.engine_module import (
-    HandlerSpec,
-    InstanceLivenessTarget,
-    ThreadPoolType,
-)
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.native_completion import (
     DeviceHostFuncDispatcher,
     submit_callback_to_stream,
 )
 from lmcache.v1.multiprocess.protocol import RPC
+from lmcache.v1.multiprocess.service import (
+    InstanceLivenessTarget,
+    RpcExecutionPool,
+    RpcHandlerSpec,
+)
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.base.event_ipc import (
     EventIPCBackend,
@@ -812,33 +812,33 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             # Backends without IPC collection omit this optional operation.
             ipc_collect()
 
-    def get_handlers(self) -> list[HandlerSpec]:
+    def get_handlers(self) -> list[RpcHandlerSpec]:
         """Return handler specs for all request types this module serves.
 
         Returns:
-            A list of HandlerSpec entries mapping request types to
+            A list of RpcHandlerSpec entries mapping request types to
             their handler callables and thread pool assignments.
         """
         return [
-            HandlerSpec(
+            RpcHandlerSpec(
                 RPC.RegisterKvCache,
                 self.register_kv_cache,
-                ThreadPoolType.SYNC,
+                RpcExecutionPool.SYNC,
             ),
-            HandlerSpec(
+            RpcHandlerSpec(
                 RPC.UnregisterKvCache,
                 self.unregister_kv_cache,
-                ThreadPoolType.SYNC,
+                RpcExecutionPool.SYNC,
             ),
-            HandlerSpec(
+            RpcHandlerSpec(
                 RPC.Store,
                 self.store,
-                ThreadPoolType.AFFINITY,
+                RpcExecutionPool.AFFINITY,
             ),
-            HandlerSpec(
+            RpcHandlerSpec(
                 RPC.Retrieve,
                 self.retrieve,
-                ThreadPoolType.AFFINITY,
+                RpcExecutionPool.AFFINITY,
             ),
         ]
 

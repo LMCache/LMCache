@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Shared context and layout descriptor registry for engine modules."""
+"""Shared context and layout descriptor registry for server services."""
 
 # Standard
 from dataclasses import dataclass, replace
@@ -184,7 +184,7 @@ class LayoutDescRegistry:
 
 
 class MPCacheServerContext:
-    """Shared infrastructure for all engine modules.
+    """Shared infrastructure for all server services.
 
     Holds the storage manager, token hasher, session manager, event bus,
     and layout descriptor registry. Modules receive this context at init
