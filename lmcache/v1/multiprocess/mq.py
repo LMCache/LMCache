@@ -280,6 +280,9 @@ class MessageQueueClient:
         # Pending job's futures
         self._request_counter = itertools.count()
         self.pending_futures: dict[int, MessagingFuture[Any]] = {}
+        self._state_lock = threading.Lock()
+        self._closed = False
+        self._close_complete = threading.Event()
 
         # Register with the shared polling loop
         self._polling_loop = ClientPollingLoop.get_instance()
@@ -292,7 +295,11 @@ class MessageQueueClient:
 
                 # Update the pending futures
                 request_uid = wrapped_request.request_uid
-                self.pending_futures[request_uid] = wrapped_request.future
+                with self._state_lock:
+                    if self._closed:
+                        wrapped_request.future.cancel()
+                        continue
+                    self.pending_futures[request_uid] = wrapped_request.future
 
                 # Send the request
                 b_request_uid = msgspec_encode(request_uid, cls=RequestUID)
@@ -348,8 +355,9 @@ class MessageQueueClient:
         request_type = msgspec_decode(b_request_type, cls=RequestType)
         response_cls = get_response_class(request_type)
 
-        if request_uid in self.pending_futures:
-            future = self.pending_futures.pop(request_uid)
+        with self._state_lock:
+            future = self.pending_futures.pop(request_uid, None)
+        if future is not None:
             if b_response:
                 response = msgspec_decode(b_response[0], cls=response_cls)
                 future.set_result(response)
@@ -373,23 +381,61 @@ class MessageQueueClient:
         Returns:
             MessagingFuture[T]: A future that will hold the response.
         """
-        future: MessagingFuture[T] = MessagingFuture()
-        request_uid = next(self._request_counter)
-        self.input_queue.put(
-            MessageQueueClient.WrappedRequest(
-                request_uid=request_uid,
-                future=future,
-                request_type=request_type,
-                request_payloads=request_payloads,
+        with self._state_lock:
+            if self._closed:
+                raise RuntimeError("Cannot submit a request on a closed MQ client")
+            future: MessagingFuture[T] = MessagingFuture()
+            request_uid = next(self._request_counter)
+            self.input_queue.put(
+                MessageQueueClient.WrappedRequest(
+                    request_uid=request_uid,
+                    future=future,
+                    request_type=request_type,
+                    request_payloads=request_payloads,
+                )
             )
-        )
         self._polling_loop.notify()
         return future
 
     def close(self) -> None:
-        self._polling_loop.unregister(self)
-        ClientPollingLoop.release_instance()
-        self.socket.close()
+        """Close the client and cancel every request without a response."""
+        with self._state_lock:
+            if self._closed:
+                wait_for_close = True
+            else:
+                wait_for_close = False
+                self._closed = True
+        if wait_for_close:
+            self._close_complete.wait()
+            return
+
+        try:
+            try:
+                self._polling_loop.unregister(self)
+            finally:
+                # unregister() is an acknowledgement from the polling thread: it
+                # can no longer move queued requests into pending_futures or
+                # dispatch a response for this client. Complete both sets before
+                # releasing the shared loop so callers never retain an unresolved
+                # future.
+                with self._state_lock:
+                    futures = list(self.pending_futures.values())
+                    self.pending_futures.clear()
+                    try:
+                        while True:
+                            futures.append(self.input_queue.get_nowait().future)
+                    except queue.Empty:
+                        pass
+                for future in futures:
+                    future.cancel()
+        finally:
+            try:
+                try:
+                    ClientPollingLoop.release_instance()
+                finally:
+                    self.socket.close()
+            finally:
+                self._close_complete.set()
 
 
 ResponseType = TypeVar("ResponseType", covariant=True)

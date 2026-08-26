@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from concurrent.futures import CancelledError
 from multiprocessing.synchronize import Event as EventClass
 from typing import Any, Callable
 import multiprocessing as mp
@@ -18,6 +19,7 @@ from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
     IPCCacheServerKey,
 )
+from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.mq import (
     BlockingRequestHandler,
     MessageQueueClient,
@@ -73,7 +75,7 @@ def _server_process(
     # First Party
     from lmcache.v1.multiprocess.protocol import HandlerType
 
-    context = zmq.Context.instance()
+    context: zmq.Context = zmq.Context.instance()
     server = MessageQueueServer(server_url, context)
 
     # Register all handlers
@@ -133,7 +135,7 @@ def _run_client_test(
     # Small delay to ensure server is fully initialized
     time.sleep(0.1)
 
-    context = zmq.Context.instance()
+    context: zmq.Context = zmq.Context.instance()
     client = MessageQueueClient(server_url, context)
     successful = True
 
@@ -617,7 +619,7 @@ def test_shared_loop_lifecycle():
     # First Party
     from lmcache.v1.multiprocess.mq import ClientPollingLoop
 
-    context = zmq.Context.instance()
+    context: zmq.Context = zmq.Context.instance()
 
     # No loop before any clients exist
     assert ClientPollingLoop._instance is None
@@ -709,6 +711,24 @@ def test_shared_loop_recreate():
     assert second_loop is not first_loop
     client2.close()
     assert ClientPollingLoop._instance is None
+
+
+def test_client_close_cancels_every_unanswered_future() -> None:
+    """Queued and sent requests both become terminal when their client closes."""
+    context: zmq.Context = zmq.Context.instance()
+    client = MessageQueueClient("inproc://unanswered-future-close-test", context)
+    futures: list[MessagingFuture[Any]] = [
+        client.submit_request(RequestType.NOOP, []) for _ in range(4)
+    ]
+
+    client.close()
+
+    for future in futures:
+        assert future.cancelled() is True
+        with pytest.raises(CancelledError, match="Message queue client closed"):
+            future.result(timeout=0)
+    with pytest.raises(RuntimeError, match="closed MQ client"):
+        client.submit_request(RequestType.NOOP, [])
 
 
 # ==============================================================================
