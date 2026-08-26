@@ -1,4 +1,11 @@
 # Examples vLLM + LMCache w. CacheBlend
+
+> [!WARNING]
+> This example uses the deprecated in-process CacheBlend integration. The vLLM
+> patch below applies to vLLM v0.8.5 through v0.11.0 and does not apply to
+> v0.12.0 or later. For current vLLM releases, use the
+> [MP-mode CacheBlend guide](https://docs.lmcache.ai/kv_cache_optimizations/cacheblend.html).
+
 LMCache should be able to reduce the generation time of the second and following calls (even though the reused KV cache is not a prefix).
 
 ## Some ad-hoc changes needed in vLLM
@@ -16,4 +23,4 @@ at the end of the function `def load_model`.
 ## CPU offloading
 - `python blend.py` - CacheBlend with CPU as backend
 ## Disk offloading
-- `python blend.py --use-disk` - CachBlend with local disk as backend
+- `python blend.py --use-disk` - CacheBlend with local disk as backend
