@@ -932,8 +932,15 @@ def _normalize_paged_layers(
                 bs = int(shape_desc.bs)
                 nh = int(shape_desc.nh)
                 hs = int(shape_desc.hs)
-                if _is_hnd_format(engine_kv_format):
-                    shape: tuple[int, ...] = (nb, nl, 2, nh, bs, hs)
+                if _is_fused_kv_format(engine_kv_format):
+                    # Fused K/V: no separate 2 axis; hs is the packed content.
+                    shape: tuple[int, ...] = (
+                        (nb, nl, nh, bs, hs)
+                        if _is_hnd_format(engine_kv_format)
+                        else (nb, nl, bs, nh, hs)
+                    )
+                elif _is_hnd_format(engine_kv_format):
+                    shape = (nb, nl, 2, nh, bs, hs)
                 else:
                     shape = (nb, nl, 2, bs, nh, hs)
                 ptr = int(paged_buffer_ptrs_tensor[0].item())

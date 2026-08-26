@@ -145,6 +145,26 @@ enum class EngineKVFormat : int {
   NL_X_NB_BSV_BSS = 14,
 
   NL_X_TWO_NB_NH_ONE_BS_HS = 15,
+
+  NB_NL_NH_BS_CS = 16,
+  /*
+  used by:
+  - vLLM standardized BLHNC layout (blocks-first; each block packs every
+    layer's [NH, BS, CS] run back to back, heads before block tokens)
+  physical shape: [num_blocks, num_layers, num_heads, block_size, content_size]
+  Registered as per-layer strided views into one buffer; detection
+  reconstructs the single cross-layer tensor. Per-(layer, block) content is
+  contiguous; the per-block step is num_layers * num_heads * block_size *
+  content_size (carried via block_stride_elems).
+  */
+
+  NB_NL_BS_NH_CS = 17,
+  /*
+  used by:
+  - vLLM standardized BLNHC layout (blocks-first, tokens before heads)
+  physical shape: [num_blocks, num_layers, block_size, num_heads, content_size]
+  Like NB_NL_NH_BS_CS with the NHD middle order.
+  */
 };
 
 // __host__ __device__ under CUDA/HIP so the kernels can call these; the guard
@@ -255,6 +275,15 @@ LMC_KV_FORMAT_HD constexpr FormatFacts format_facts(EngineKVFormat f) {
       facts.is_layer_list = true;
       facts.is_hnd = true;
       facts.is_two_major = true;
+      break;
+    case EngineKVFormat::NB_NL_NH_BS_CS:
+      facts.is_cross_layer = true;
+      facts.is_hnd = true;
+      facts.is_fused_packed = true;
+      break;
+    case EngineKVFormat::NB_NL_BS_NH_CS:
+      facts.is_cross_layer = true;
+      facts.is_fused_packed = true;
       break;
     default:
       unsupported_engine_kv_format();

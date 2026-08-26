@@ -490,6 +490,10 @@ _BLOCK_AXIS_FORMATS: frozenset = frozenset(
     {
         lmcache_native.EngineKVFormat.NL_X_NB_BS_HS,
         lmcache_native.EngineKVFormat.NL_X_NB_BSV_BSS,
+        # Blocks-first cross-layer: stride(0) of the reconstructed tensor is
+        # the per-block step including every layer's bytes.
+        lmcache_native.EngineKVFormat.NB_NL_NH_BS_CS,
+        lmcache_native.EngineKVFormat.NB_NL_BS_NH_CS,
     }
 )
 

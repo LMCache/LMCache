@@ -45,8 +45,8 @@ def vllm_layout_hints(vllm_config: "VllmConfig | None" = None) -> "LayoutHints":
     return hints  # type: ignore[return-value]
 
 
-_VLLM_KV_LAYOUT_ALIASES = {"LBNHC": "NHD", "LBHNC": "HND"}
-_UNSUPPORTED_VLLM_KV_LAYOUTS = frozenset({"LHBNC", "BLHNC", "BLNHC", "BHLNC"})
+_VLLM_KV_LAYOUT_ALIASES = {"NHD": "LBNHC", "HND": "LBHNC"}
+_UNSUPPORTED_VLLM_KV_LAYOUTS = frozenset({"LHBNC", "BHLNC"})
 _KNOWN_VLLM_KV_LAYOUTS = (
     "NHD",
     "HND",
@@ -61,18 +61,21 @@ _KNOWN_VLLM_KV_LAYOUTS = (
 
 def translate_vllm_kv_cache_layout(
     kv_cache_layout: str | None,
-) -> Literal["NHD", "HND"]:
-    """Translate a vLLM ``KVCacheLayout`` name to the ``kv_layout`` hint.
+) -> Literal["LBNHC", "LBHNC", "BLHNC", "BLNHC"]:
+    """Translate a vLLM ``KVCacheLayout`` name to the canonical hint name.
 
-    ``LayoutHints.kv_layout`` is strictly ``NHD``/``HND``; engine KV formats
-    live in ``EngineKVFormat``. The layer-compact standardized layouts map
-    onto that pair, the rest cannot be expressed yet.
+    Legacy spellings normalize to their standardized names (``NHD`` ->
+    ``LBNHC``, ``HND`` -> ``LBHNC``). ``LHBNC`` and ``BHLNC`` are rejected:
+    their per-(layer, block) content is fragmented per head, which the
+    transfer kernels cannot address.
 
     Raises:
         NotImplementedError: for standardized layouts LMCache cannot
-            transfer yet. Registration must fail here -- treating them as
-            NHD/HND would silently corrupt the cache.
-        ValueError: for names that are not vLLM KV cache layouts at all.
+            transfer. Registration must fail here -- guessing a layout
+            would silently corrupt the cache.
+        ValueError: for ``None`` (layout not resolved yet -- hints must be
+            built at registration time) or names that are not vLLM KV
+            cache layouts at all.
     """
     if kv_cache_layout is None:
         raise ValueError(
@@ -80,14 +83,14 @@ def translate_vllm_kv_cache_layout(
             "be built at KV-cache registration time, after resolution."
         )
     translated = _VLLM_KV_LAYOUT_ALIASES.get(kv_cache_layout, kv_cache_layout)
-    if translated in ("NHD", "HND"):
+    if translated in ("LBNHC", "LBHNC", "BLHNC", "BLNHC"):
         return translated  # type: ignore[return-value]
     if translated in _UNSUPPORTED_VLLM_KV_LAYOUTS:
         raise NotImplementedError(
-            f"LMCache does not support the {kv_cache_layout!r} KV cache layout yet. "
-            "If it was selected via VLLM_KV_CACHE_LAYOUT, set LBNHC or LBHNC "
-            "instead; if the attention backend requires it (e.g. DeepSeek V4 "
-            "requires BLHNC), LMCache cannot cache this model yet."
+            f"LMCache does not support the {kv_cache_layout!r} KV cache "
+            "layout: per-block content is fragmented per head. If it was "
+            "selected via VLLM_KV_CACHE_LAYOUT, unset it or choose LBNHC, "
+            "LBHNC, BLHNC, or BLNHC."
         )
     raise ValueError(
         f"Unknown KV cache layout {kv_cache_layout!r}; expected one of "
@@ -97,8 +100,8 @@ def translate_vllm_kv_cache_layout(
 
 def try_get_vllm_kv_cache_layout(
     vllm_config: "VllmConfig | None" = None,
-) -> Literal["NHD", "HND"] | None:
-    """Query vLLM's resolved KV cache layout, normalized to ``NHD``/``HND``.
+) -> Literal["LBNHC", "LBHNC", "BLHNC", "BLNHC"] | None:
+    """Query vLLM's resolved KV cache layout as its canonical name.
 
     Returns ``None`` when vLLM is unavailable (i.e. the MP server).
 

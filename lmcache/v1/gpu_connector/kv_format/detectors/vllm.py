@@ -19,20 +19,105 @@ from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache, Layout
 import lmcache.lmcache_native as lmcache_native
 
 
+_CANONICAL_KV_LAYOUTS = {
+    "NHD": "LBNHC",
+    "HND": "LBHNC",
+    "LBNHC": "LBNHC",
+    "LBHNC": "LBHNC",
+    "BLHNC": "BLHNC",
+    "BLNHC": "BLNHC",
+}
+
+
 def resolve_vllm_kv_layout(
     layout_hints: LayoutHints, cpu_attention_backend: bool
 ) -> str:
-    """Resolve vLLM's KV layout from engine hints and backend behavior."""
+    """Resolve vLLM's canonical KV layout name from hints and backend.
+
+    Raises:
+        ValueError: for hint values outside the supported vocabulary --
+            guessing a layout would silently corrupt the cache.
+    """
     if cpu_attention_backend:
-        return "HND"
-    kv_layout = layout_hints.get("kv_layout", "NHD")
-    if kv_layout not in ("NHD", "HND"):
+        return "LBHNC"
+    kv_layout = layout_hints.get("kv_layout", "LBNHC")
+    canonical = _CANONICAL_KV_LAYOUTS.get(kv_layout)
+    if canonical is None:
         raise ValueError(
-            f"kv_layout hint must be 'NHD' or 'HND', got {kv_layout!r}; "
-            "engine adapters translate engine-specific layout names "
-            "before sending hints."
+            f"kv_layout hint {kv_layout!r} is not a layout LMCache supports; "
+            "expected one of NHD, HND, LBNHC, LBHNC, BLHNC, BLNHC."
         )
-    return kv_layout
+    return canonical
+
+
+def _reconstruct_blocks_first(
+    kv_caches: DiscoverableKVCache, kv_layout: str
+) -> "tuple[lmcache_native.EngineKVFormat, torch.Tensor]":
+    """Rebuild the single cross-layer tensor a blocks-first layout declares.
+
+    vLLM registers per-layer strided views into one buffer; under a
+    blocks-first layout each view's block step spans every layer's bytes.
+    Every structural property implied by the declaration is verified so a
+    declaration/allocation drift fails here instead of corrupting
+    transfers.
+    """
+    fmt = (
+        lmcache_native.EngineKVFormat.NB_NL_NH_BS_CS
+        if kv_layout == "BLHNC"
+        else lmcache_native.EngineKVFormat.NB_NL_BS_NH_CS
+    )
+    if not (
+        isinstance(kv_caches, list)
+        and kv_caches
+        and all(isinstance(t, torch.Tensor) and t.dim() == 4 for t in kv_caches)
+    ):
+        raise ValueError(
+            f"{kv_layout} declared but kv_caches is not a list of rank-4 "
+            "per-layer views."
+        )
+    layers = sorted(kv_caches, key=lambda t: t.storage_offset())
+    base = layers[0]
+    num_layers = len(layers)
+    inner = tuple(base.shape[1:])
+    chunk = 1
+    for dim in inner:
+        chunk *= int(dim)
+    tight_inner = []
+    stride = 1
+    for dim in reversed(inner):
+        tight_inner.append(stride)
+        stride *= int(dim)
+    tight_inner.reverse()
+
+    def _drift(reason: str) -> ValueError:
+        return ValueError(
+            f"{kv_layout} declared but the registered views disagree: "
+            f"{reason}. shape={tuple(base.shape)}, stride={base.stride()}, "
+            f"num_layers={num_layers}."
+        )
+
+    if tuple(base.stride()[1:]) != tuple(tight_inner):
+        raise _drift("per-(layer, block) content is not contiguous")
+    if base.stride(0) != num_layers * chunk:
+        raise _drift(
+            f"block step {base.stride(0)} != num_layers * per-layer block "
+            f"chunk {num_layers * chunk}"
+        )
+    storage_ptr = base.untyped_storage().data_ptr()
+    for i, t in enumerate(layers):
+        if t.untyped_storage().data_ptr() != storage_ptr:
+            raise _drift("layer views do not share one storage")
+        if tuple(t.shape) != tuple(base.shape) or t.stride() != base.stride():
+            raise _drift(f"layer {i} shape/stride mismatch")
+        if t.storage_offset() != base.storage_offset() + i * chunk:
+            raise _drift(f"layer {i} is not at offset base + {i} * chunk")
+
+    full = base.as_strided(
+        (base.shape[0], num_layers, *inner),
+        (num_layers * chunk, chunk, *tight_inner),
+        storage_offset=base.storage_offset(),
+    )
+    return fmt, full
 
 
 class VLLM_Detector(EngineDetector):
@@ -48,7 +133,9 @@ class VLLM_Detector(EngineDetector):
         kv_layout = resolve_vllm_kv_layout(
             layout_hints, cpu_attention_backend=torch_device_type == "cpu"
         )
-        is_hnd = kv_layout == "HND"
+        if kv_layout in ("BLHNC", "BLNHC"):
+            return _reconstruct_blocks_first(kv_caches, kv_layout)
+        is_hnd = kv_layout == "LBHNC"
 
         # Blocks-first fused K/V is the only rank-4 vLLM layout, so its raw rank
         # identifies it unambiguously (a 5-D split would collide with

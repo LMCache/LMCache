@@ -21,6 +21,8 @@ F = lmcache_native.EngineKVFormat
 EXPECTED = {
     F.NB_NL_TWO_BS_NH_HS: (True, False, False, False),
     F.NB_NL_TWO_NH_BS_HS: (True, False, False, False),
+    F.NB_NL_NH_BS_CS: (True, False, False, False),
+    F.NB_NL_BS_NH_CS: (True, False, False, False),
     F.TWO_X_NL_X_NBBS_NH_HS: (False, True, False, False),
     F.TWO_X_NL_X_NB_BS_NH_HS: (False, True, False, False),
     F.NL_X_TWO_NB_BS_NH_HS: (False, False, True, False),
@@ -42,6 +44,8 @@ EXPECTED = {
 EXPECTED_SPEC_FACTS = {
     F.NB_NL_TWO_BS_NH_HS: (False, False, False, False),
     F.NB_NL_TWO_NH_BS_HS: (True, False, False, False),
+    F.NB_NL_NH_BS_CS: (True, True, False, False),
+    F.NB_NL_BS_NH_CS: (False, True, False, False),
     F.TWO_X_NL_X_NBBS_NH_HS: (False, False, False, True),
     F.TWO_X_NL_X_NB_BS_NH_HS: (False, False, False, False),
     F.NL_X_TWO_NB_BS_NH_HS: (False, False, True, False),

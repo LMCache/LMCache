@@ -214,7 +214,7 @@ template <EngineKVFormat format>
 __device__ __forceinline__ int64_t page_buffer_offset(
     const int k_or_v, const int token_idx, const int scalar_offset,
     const int scalars_per_token, const int page_buffer_size,
-    const int block_size, const int head_size) {
+    const int block_size, const int head_size, const int num_layers) {
   /*
   logical semantics of arguments (agnostic to physical format):
   k_or_v:            0 for key, 1 for value
@@ -226,6 +226,8 @@ __device__ __forceinline__ int64_t page_buffer_offset(
   block_size:        BS — number of token slots per block
   head_size:         HS in xword units — only used by HND formats to decompose
   scalar_offset into (head_idx, head_offset)
+  num_layers:        NL — only used by blocks-first cross-layer formats, whose
+  per-block step spans every layer's bytes
 
   The job of page_buffer_offset is to translate these logical arguments into a
   physical address based on the EngineKVFormat.
@@ -301,6 +303,27 @@ __device__ __forceinline__ int64_t page_buffer_offset(
   } else if constexpr (format == EngineKVFormat::NL_X_NB_BS_NH_TWO_HS ||
                        format == EngineKVFormat::NL_X_NB_BS_NH_CS) {
     return token_idx * scalars_per_token + scalar_offset;
+  }
+  // vLLM standardized BLHNC: [NB, NL, NH, BS, CS]. Callers pass per-layer
+  // base pointers (one (layer, block) chunk apart); the block step spans all
+  // layers. Within-block math matches NL_X_NB_NH_BS_CS.
+  else if constexpr (format == EngineKVFormat::NB_NL_NH_BS_CS) {
+    const int hs2 = 2 * head_size;
+    const int block_idx = token_idx / block_size;
+    const int block_offset = token_idx % block_size;
+    const int head_idx = scalar_offset / hs2;
+    const int head_offset = scalar_offset % hs2;
+    return static_cast<int64_t>(block_idx) * num_layers * block_size *
+               scalars_per_token +
+           head_idx * block_size * hs2 + block_offset * hs2 + head_offset;
+  }
+  // vLLM standardized BLNHC: [NB, NL, BS, NH, CS]; NHD within-block math.
+  else if constexpr (format == EngineKVFormat::NB_NL_BS_NH_CS) {
+    const int block_idx = token_idx / block_size;
+    const int block_offset = token_idx % block_size;
+    return static_cast<int64_t>(block_idx) * num_layers * block_size *
+               scalars_per_token +
+           block_offset * scalars_per_token + scalar_offset;
   }
   // DSA indexer: page [BSxvals][BSxscales]; 4B units, so scale == 1 unit
   else if constexpr (format == EngineKVFormat::NL_X_NB_BSV_BSS) {
@@ -436,7 +459,8 @@ __global__ void load_and_reshape_multi_layer_fused_kernel(
                          num_tokens, num_layers);
     const int64_t vllm_offset =
         page_buffer_offset<format>(k_or_v, slot_idx, i, scalars_per_token,
-                                   page_buffer_size, block_size, head_size);
+                                   page_buffer_size, block_size, head_size,
+                                   num_layers);
     if (DIRECTION)
       chunk.key_value[lmcache_offset] = paged_buffer_ptr[vllm_offset];
     else
@@ -487,7 +511,8 @@ __global__ void load_and_reshape_multi_layer_kernel(
 
     const int64_t vllm_offset =
         page_buffer_offset<format>(k_or_v, slot_idx, i, scalars_per_token,
-                                   page_buffer_size, block_size, head_size);
+                                   page_buffer_size, block_size, head_size,
+                                   num_layers);
 
     if (DIRECTION)  // 1 is paged buffer to LMCache
       key_value[lmcache_offset] = paged_buffer_ptr[vllm_offset];
@@ -652,6 +677,12 @@ void multi_layer_kv_transfer_templated(
 
   if (direction == TransferDirection::H2D) {
     switch (engine_kv_format) {
+      case EngineKVFormat::NB_NL_NH_BS_CS:
+        LAUNCH_KERNEL_WITH_FORMAT(T, false, EngineKVFormat::NB_NL_NH_BS_CS);
+        break;
+      case EngineKVFormat::NB_NL_BS_NH_CS:
+        LAUNCH_KERNEL_WITH_FORMAT(T, false, EngineKVFormat::NB_NL_BS_NH_CS);
+        break;
       case EngineKVFormat::NB_NL_TWO_BS_NH_HS:
         LAUNCH_KERNEL_WITH_FORMAT(T, false, EngineKVFormat::NB_NL_TWO_BS_NH_HS);
         break;
@@ -699,6 +730,12 @@ void multi_layer_kv_transfer_templated(
     }
   } else {
     switch (engine_kv_format) {
+      case EngineKVFormat::NB_NL_NH_BS_CS:
+        LAUNCH_KERNEL_WITH_FORMAT(T, true, EngineKVFormat::NB_NL_NH_BS_CS);
+        break;
+      case EngineKVFormat::NB_NL_BS_NH_CS:
+        LAUNCH_KERNEL_WITH_FORMAT(T, true, EngineKVFormat::NB_NL_BS_NH_CS);
+        break;
       case EngineKVFormat::NB_NL_TWO_BS_NH_HS:
         LAUNCH_KERNEL_WITH_FORMAT(T, true, EngineKVFormat::NB_NL_TWO_BS_NH_HS);
         break;
@@ -811,6 +848,12 @@ void multi_layer_kv_transfer_fused_templated(
 #ifndef FUSED_FORMAT_SWITCH
   #define FUSED_FORMAT_SWITCH(T_, DIR)                                        \
     switch (engine_kv_format) {                                               \
+      case EngineKVFormat::NB_NL_NH_BS_CS:                                    \
+        LAUNCH_FUSED_WITH_FORMAT(T_, DIR, EngineKVFormat::NB_NL_NH_BS_CS)     \
+        break;                                                                \
+      case EngineKVFormat::NB_NL_BS_NH_CS:                                    \
+        LAUNCH_FUSED_WITH_FORMAT(T_, DIR, EngineKVFormat::NB_NL_BS_NH_CS)     \
+        break;                                                                \
       case EngineKVFormat::NB_NL_TWO_BS_NH_HS:                                \
         LAUNCH_FUSED_WITH_FORMAT(T_, DIR, EngineKVFormat::NB_NL_TWO_BS_NH_HS) \
         break;                                                                \
