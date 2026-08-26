@@ -34,13 +34,13 @@ from lmcache.v1.multiprocess.transfer_context import (
     TransferContext,
     create_transfer_context,
 )
+from lmcache.v1.multiprocess.transfer_context.worker_transfer import IPCEvent
 from lmcache.v1.periodic_thread import PeriodicThread, ThreadLevel, ThreadRunSummary
 from lmcache.v1.platform.base.event_ipc import create_event, record_event
 
 if TYPE_CHECKING:
     # First Party
     from lmcache.integration.vllm.experimental import Dispatcher
-    from lmcache.v1.multiprocess.transfer_context.worker_transfer import IPCEvent
 
 logger = init_logger(__name__)
 
