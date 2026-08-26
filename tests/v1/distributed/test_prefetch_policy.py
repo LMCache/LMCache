@@ -10,13 +10,13 @@ prefetch_policy.py.
 from lmcache.lmcache_native import Bitmap
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import MockL2AdapterConfig
+from lmcache.v1.distributed.storage_controllers.prefetch_controller import (
+    remap_lookup_bitmap,
+)
 from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
     DefaultPrefetchPolicy,
     RetainPrefetchPolicy,
     StripedPrefetchPolicy,
-)
-from lmcache.v1.distributed.storage_controllers.prefetch_controller import (
-    remap_lookup_bitmap,
 )
 from lmcache.v1.distributed.storage_controllers.store_policy import (
     AdapterDescriptor,

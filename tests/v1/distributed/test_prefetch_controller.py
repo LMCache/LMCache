@@ -31,6 +31,7 @@ from lmcache.v1.distributed.api import (
 from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.l1_manager import L1Manager
+from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface
 from lmcache.v1.distributed.l2_adapters.fault_inject_l2_adapter import (
     FaultInjectL2Adapter,
 )
@@ -536,9 +537,10 @@ class TestMultiAdapterPrefetch:
         for key in keys:
             assert sum(adapter.debug_has_key(key) for adapter in adapters) == 1
 
+        controller_adapters: list[L2AdapterInterface] = [*adapters]
         ctrl = PrefetchController(
             l1_manager=l1_manager,
-            l2_adapters=adapters,
+            l2_adapters=controller_adapters,
             adapter_descriptors=descriptors,
             policy=StripedPrefetchPolicy(),
         )

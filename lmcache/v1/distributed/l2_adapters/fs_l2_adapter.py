@@ -45,11 +45,15 @@ from lmcache.v1.distributed.l2_adapters.factory import (
     register_l2_adapter_factory,
 )
 from lmcache.v1.distributed.l2_adapters.fs_key_codec import (
-    # Preserve the existing module-level test/debug import path.
-    filename_to_object_key as _filename_to_object_key,  # noqa: F401
+    filename_to_object_key,
+)
+from lmcache.v1.distributed.l2_adapters.fs_key_codec import (
     object_key_to_filename as _object_key_to_filename,
 )
 from lmcache.v1.platform import create_event_notifier
+
+# Preserve the existing module-level test/debug import path.
+_filename_to_object_key = filename_to_object_key
 
 logger = init_logger(__name__)
 

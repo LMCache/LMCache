@@ -77,7 +77,7 @@ def test_striped_policy_rejects_non_fs_native_adapter() -> None:
 
 
 def test_striped_policy_accepts_multiple_fs_native_adapters(tmp_path: Path) -> None:
-    adapters = [
+    adapters: list[L2AdapterConfigBase] = [
         FSNativeL2AdapterConfig(str(tmp_path / "disk-a")),
         FSNativeL2AdapterConfig(str(tmp_path / "disk-b")),
     ]
