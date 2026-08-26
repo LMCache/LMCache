@@ -14,7 +14,7 @@ import argparse
 import pytest
 
 # First Party
-from lmcache.cli.commands.query._coordinator import APIS, normalize_url
+from lmcache.cli.commands.query._coordinator import APIS, get_text, normalize_url
 from lmcache.cli.commands.query.coordinator_command import CoordinatorQueryCommand
 from lmcache.cli.metrics import Metrics, get_formatter
 from lmcache.cli.metrics.section import sections_to_dict
@@ -286,3 +286,33 @@ class TestRequiredArguments:
 
     def test_metrics_is_the_only_non_json_api(self) -> None:
         assert {name for name, api in APIS.items() if api.raw} == {"metrics"}
+
+
+class TestFetchErrors:
+    def test_timeout_exits_without_traceback(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A coordinator timeout is reported as a normal CLI failure."""
+        errors: list[tuple[object, ...]] = []
+
+        def raise_timeout(_url: str, timeout: int) -> None:
+            raise TimeoutError(f"timed out after {timeout}s")
+
+        monkeypatch.setattr(
+            "lmcache.cli.commands.query._coordinator.urllib.request.urlopen",
+            raise_timeout,
+        )
+        monkeypatch.setattr(
+            "lmcache.cli.commands.query._coordinator.logger.error",
+            lambda *args: errors.append(args),
+        )
+
+        with pytest.raises(SystemExit, match="1"):
+            get_text("http://127.0.0.1:9300/health")
+
+        assert errors[0][:3] == (
+            "Timed out contacting %s after %ds (%s)",
+            "http://127.0.0.1:9300/health",
+            10,
+        )
+        assert str(errors[0][3]) == "timed out after 10s"
