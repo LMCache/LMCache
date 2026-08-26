@@ -33,6 +33,7 @@ from lmcache.v1.multiprocess.transfer_context.base import (
 )
 from lmcache.v1.multiprocess.transfer_context.pickle import EngineDrivenContextPickle
 from lmcache.v1.multiprocess.transfer_context.shm import EngineDrivenContextShm
+import lmcache.lmcache_native as lmcache_native
 
 if TYPE_CHECKING:
     # First Party
@@ -444,7 +445,6 @@ def test_musa_data_context_keeps_layout_validation_device_agnostic(
         EngineDrivenTransferContext,
         worker_transfer,
     )
-    import lmcache.c_ops as lmc_ops
 
     def _fake_compute_kv_layout(
         *_args: Any, **_kwargs: Any
@@ -454,7 +454,7 @@ def test_musa_data_context_keeps_layout_validation_device_agnostic(
             2,
             16,
             "float32",
-            lmc_ops.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS,
+            lmcache_native.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS,
             2,
         )
 
@@ -490,7 +490,6 @@ def test_musa_data_context_store_uses_device_agnostic_gather(
         EngineDrivenTransferContext,
         worker_transfer,
     )
-    import lmcache.c_ops as lmc_ops
 
     class _FakeEngineDrivenContext:
         def prepare_store(self, *_args: Any, **_kwargs: Any) -> None:
@@ -513,7 +512,7 @@ def test_musa_data_context_store_uses_device_agnostic_gather(
             2,
             16,
             "float32",
-            lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
+            lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
             2,
         ),
     )
@@ -564,7 +563,6 @@ def test_musa_data_context_retrieve_uses_device_agnostic_scatter(
         EngineDrivenTransferContext,
         worker_transfer,
     )
-    import lmcache.c_ops as lmc_ops
 
     class _FakeEngineDrivenContext:
         def prepare_retrieve(self, *_args: Any, **_kwargs: Any) -> list[torch.Tensor]:
@@ -587,7 +585,7 @@ def test_musa_data_context_retrieve_uses_device_agnostic_scatter(
             2,
             16,
             "float32",
-            lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
+            lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
             2,
         ),
     )
@@ -782,7 +780,6 @@ def test_gather_scatter_roundtrip_hnd_layout(
         gather_paged_kv_to_cpu,
         scatter_cpu_to_paged_kv,
     )
-    import lmcache.c_ops as lmc_ops
 
     source = {k: v.to(torch_device_type) for k, v in hnd_builder(2, 8, 4, 2, 8).items()}
     layout_hints: LayoutHints = {"kv_layout": "HND"}
@@ -798,7 +795,7 @@ def test_gather_scatter_roundtrip_hnd_layout(
     assert num_layers == 2
     assert hidden_dim == 16
     assert dtype_str == "float32"
-    assert detected_kv_format == getattr(lmc_ops.EngineKVFormat, expected_format)
+    assert detected_kv_format == getattr(lmcache_native.EngineKVFormat, expected_format)
 
     blocks_per_chunk = 2
     gathered = gather_paged_kv_to_cpu(
@@ -819,7 +816,7 @@ def test_gather_scatter_roundtrip_hnd_layout(
     )
 
     for name in source:
-        if detected_kv_format == lmc_ops.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS:
+        if detected_kv_format == lmcache_native.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS:
             assert torch.allclose(source[name][:, 0], destination[name][:, 4])
             assert torch.allclose(source[name][:, 1], destination[name][:, 5])
         else:
@@ -991,6 +988,12 @@ def test_scatter_rounds_down_partial_block_skip_first_n_tokens(
 def stub_lmcache_native() -> Any:
     """Stub native modules so server imports work in source-only test runs."""
     module = type(sys)("lmcache.lmcache_native")
+    module.PageBufferShapeDesc = type("PageBufferShapeDesc", (), {})  # type: ignore[attr-defined]
+    module.KernelGroupSpec = type(  # type: ignore[attr-defined]
+        "KernelGroupSpec",
+        (),
+        {"__init__": lambda self, *args, **kwargs: None},
+    )
     module.TTLLock = type("TTLLock", (), {})  # type: ignore[attr-defined]
     module.Bitmap = type("Bitmap", (), {})  # type: ignore[attr-defined]
     module.PeriodicEventNotifier = type(  # type: ignore[attr-defined]

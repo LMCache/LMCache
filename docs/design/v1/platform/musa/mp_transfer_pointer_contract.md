@@ -23,7 +23,7 @@ The generic path keeps the existing calls:
 ```python
 paged_ptrs = context.get_kernel_group_kv_pointers(group_idx)
 staging_ptrs = [context.get_temp_kernel_group_buffer(i, group_idx).data_ptr()]
-lmc_ops.multi_layer_block_kv_transfer(paged_ptrs, staging_ptrs, ...)
+device_ops.multi_layer_block_kv_transfer(paged_ptrs, staging_ptrs, ...)
 ```
 
 `MUSACacheContext` returns the same packed `int64` pointer tensor shape used by
