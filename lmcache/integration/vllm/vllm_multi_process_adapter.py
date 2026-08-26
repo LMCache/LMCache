@@ -5,6 +5,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, NoReturn, Protocol
 import enum
+import math
 import os
 import threading
 import uuid
@@ -328,7 +329,7 @@ class ParallelStrategy:
         """
         if not self.mla_only:
             return 1
-        return -(-self.kv_tp_size // self.dcp_size)
+        return math.ceil(self.kv_tp_size / self.dcp_size)
 
     @property
     def kv_tp_size(self) -> int:
