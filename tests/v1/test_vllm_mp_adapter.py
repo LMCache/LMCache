@@ -357,25 +357,36 @@ def test_isolated_ipc_untouched_without_extra_config(
 
 
 def test_create_recorded_event_routes_through_backend(fake_adapter, monkeypatch):
-    """create_recorded_event creates and records via the resolved backend."""
+    """create_recorded_event uses the backend resolved once at registration."""
     adapter, _send_mock, _future = fake_adapter
+    _patch_transfer_context_factory(monkeypatch)
     kv = torch.zeros(1)
-    adapter.kv_caches = {"layer.0": kv}
 
     backend = MagicMock(name="event_backend")
     created_event = MagicMock(name="event")
     backend.create_event.return_value = created_event
-    monkeypatch.setattr(adapter_mod, "get_event_ipc_backend", lambda device: backend)
+    resolve_calls: list[object] = []
+
+    def fake_get_backend(device: object) -> MagicMock:
+        resolve_calls.append(device)
+        return backend
+
+    monkeypatch.setattr(adapter_mod, "get_event_ipc_backend", fake_get_backend)
     current_stream = MagicMock(name="current_stream")
     fake_torch_dev = MagicMock(name="torch_dev")
     fake_torch_dev.current_stream.return_value = current_stream
     monkeypatch.setattr(adapter_mod, "torch_dev", fake_torch_dev)
 
+    adapter.register_kv_caches({"layer.0": kv})
     event = adapter.create_recorded_event()
+    adapter.create_recorded_event()
 
     assert event is created_event
-    backend.create_event.assert_called_once_with(kv.device)
-    backend.record_event.assert_called_once_with(created_event, current_stream)
+    # Backend lookup happens once at registration, not per event.
+    assert resolve_calls == [kv.device]
+    backend.create_event.assert_called_with(kv.device)
+    assert backend.create_event.call_count == 2
+    backend.record_event.assert_called_with(created_event, current_stream)
 
 
 def test_create_recorded_event_before_registration_raises(fake_adapter):

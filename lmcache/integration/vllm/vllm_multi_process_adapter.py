@@ -35,7 +35,10 @@ from lmcache.v1.multiprocess.transfer_context import (
     create_transfer_context,
 )
 from lmcache.v1.periodic_thread import PeriodicThread, ThreadLevel, ThreadRunSummary
-from lmcache.v1.platform.base.event_ipc import get_event_ipc_backend
+from lmcache.v1.platform.base.event_ipc import (
+    EventIPCBackend,
+    get_event_ipc_backend,
+)
 from lmcache.v1.platform.isolated_ipc import set_isolated_ipc
 
 if TYPE_CHECKING:
@@ -1132,6 +1135,10 @@ class LMCacheMPWorkerAdapter:
         # Registered kv caches from vLLM
         self.kv_caches: dict[str, torch.Tensor] = {}
         self.engine_group_infos: list[EngineGroupInfo] = []
+        # KV-cache device and event backend, resolved once at registration
+        # so per-request event creation stays off the lookup path.
+        self._kv_device: torch.device | None = None
+        self._event_ipc_backend: EventIPCBackend | None = None
 
         # Transport context for transfer operations.
         self.transfer_ctx: TransferContext | None = None
@@ -1314,6 +1321,8 @@ class LMCacheMPWorkerAdapter:
                 mq_timeout.
         """
         self.kv_caches = kv_caches
+        self._kv_device = next(iter(kv_caches.values())).device
+        self._event_ipc_backend = get_event_ipc_backend(self._kv_device)
         transfer_ctx = create_transfer_context(kv_caches, mode=self._mp_transfer_mode)
         layout_hints = vllm_layout_hints()
         self.transfer_ctx = transfer_ctx
@@ -1432,15 +1441,13 @@ class LMCacheMPWorkerAdapter:
         Raises:
             RuntimeError: If called before ``register_kv_caches()``.
         """
-        if not self.kv_caches:
+        if self._kv_device is None or self._event_ipc_backend is None:
             raise RuntimeError(
                 "KV caches are not registered. Call register_kv_caches() "
                 "before creating transfer events."
             )
-        device = next(iter(self.kv_caches.values())).device
-        event_ipc_backend = get_event_ipc_backend(device)
-        event = event_ipc_backend.create_event(device)
-        event_ipc_backend.record_event(event, torch_dev.current_stream())
+        event = self._event_ipc_backend.create_event(self._kv_device)
+        self._event_ipc_backend.record_event(event, torch_dev.current_stream())
         return cast(_IpcEvent, event)
 
     @_lmcache_nvtx_annotate
