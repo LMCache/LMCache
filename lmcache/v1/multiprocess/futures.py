@@ -124,7 +124,9 @@ class DeviceMessagingFuture(MessagingFuture[T]):
     The `query`, `wait`, and `result` methods pend on both the original
     future and the device event, ordered through the platform event backend.
     The original future should return tuple[bytes, T], where the first
-    element is the serialized device event handle.
+    element is the serialized device event handle. An empty handle means the
+    remote side submitted no device work, so completion of the original future
+    is also terminal completion of this future.
     """
 
     def __init__(
@@ -137,6 +139,7 @@ class DeviceMessagingFuture(MessagingFuture[T]):
         self.raw_future_ = raw_future
         self.event_: Any | None = None
         self.result_: T | None = None
+        self._raw_response_processed = False
         self.device_ = device if device is not None else torch_dev.current_device()
         self._event_bytes: bytes | None = None
         self._event_release_callback = event_release_callback
@@ -149,18 +152,30 @@ class DeviceMessagingFuture(MessagingFuture[T]):
         """
         Update the device event and result when the raw future is complete.
         """
+        if self._raw_response_processed:
+            return
+
         event_bytes, result = self.raw_future_.result()
+        event = None
+        if event_bytes:
+            event = self._event_backend.import_event(event_bytes, self.device_)
+        else:
+            self._device_complete = True
+
         self._event_bytes = event_bytes
         self.result_ = result
-
-        self.event_ = self._event_backend.import_event(event_bytes, self.device_)
+        self.event_ = event
+        self._raw_response_processed = True
 
     def _synchronize_and_release(self) -> None:
         """Finish the imported event, then release its exporter-side lease."""
         with self._completion_lock:
             if self._device_complete:
                 return
-            assert self.event_ is not None
+            if self.event_ is None:
+                self._device_complete = True
+                return
+
             event = self.event_
             self._event_backend.synchronize_event(event, self.device_)
             # Destroy the imported event before telling the exporter it may
@@ -193,7 +208,12 @@ class DeviceMessagingFuture(MessagingFuture[T]):
         if self._device_complete:
             return True
 
-        if self.event_:
+        if self._raw_response_processed:
+            if self.event_ is not None:
+                self._synchronize_and_release()
+            return True
+
+        if self.event_ is not None:
             self._synchronize_and_release()
             return True
 
@@ -203,8 +223,8 @@ class DeviceMessagingFuture(MessagingFuture[T]):
 
         self._on_raw_future_complete()
 
-        assert self.event_ is not None
-        self._synchronize_and_release()
+        if self.event_ is not None:
+            self._synchronize_and_release()
 
         return True
 
@@ -243,7 +263,10 @@ class DeviceMessagingFuture(MessagingFuture[T]):
         if self._device_complete:
             return True
 
-        if self.event_:
+        if self._raw_response_processed:
+            if self.event_ is None:
+                self._device_complete = True
+                return True
             if not self._event_backend.query_event(self.event_):
                 return False
             # Cross-process event query has backend-specific edge cases. A
@@ -254,7 +277,8 @@ class DeviceMessagingFuture(MessagingFuture[T]):
 
         if self.raw_future_.query():
             self._on_raw_future_complete()
-            assert self.event_ is not None
+            if self._device_complete or self.event_ is None:
+                return True
             if not self._event_backend.query_event(self.event_):
                 return False
             self._synchronize_and_release()
