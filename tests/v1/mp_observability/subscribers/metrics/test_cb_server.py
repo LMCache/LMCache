@@ -568,6 +568,76 @@ class TestBlendPhaseDurations:
         _dispatch(subscriber, EventType.CB_SCATTER_END, newest, now + 0.001)
         assert histogram_count(name) == before + 1
 
+    def test_eviction_logs_a_warning_once(self, subscriber, monkeypatch):
+        """Evicting an unmatched START is a leak signal: warn on the first one,
+        then stay quiet -- a flood would hide everything else."""
+        # First Party
+        from lmcache.v1.mp_observability.subscribers.metrics import cb_server
+
+        # The module logger does not propagate (see ``lmcache.logging``), so
+        # spy on it instead of relying on caplog's root-handler capture.
+        warnings: list[str] = []
+        monkeypatch.setattr(
+            cb_server.logger,
+            "warning",
+            lambda msg, *args, **kwargs: warnings.append(str(msg) % args),
+        )
+
+        now = time.time()
+        for i in range(cb_server._MAX_PENDING_PHASES + 50):
+            _dispatch(subscriber, EventType.CB_SCATTER_START, f"evict-{i}", now)
+
+        assert len(warnings) == 1, warnings
+        assert "evicted an unmatched START" in warnings[0]
+        assert str(cb_server._MAX_PENDING_PHASES) in warnings[0]
+
+    @pytest.mark.parametrize(
+        ("phase", "start_type", "end_type"),
+        [
+            ("retrieve", EventType.CB_RETRIEVE_START, EventType.CB_RETRIEVE_END),
+            ("scatter", EventType.CB_SCATTER_START, EventType.CB_SCATTER_END),
+        ],
+    )
+    def test_tp_ranks_pair_independently(self, subscriber, phase, start_type, end_type):
+        """At TP>1 every rank publishes its own retrieve/scatter pair under the
+        shared request_id; each must record its own interval, not a span
+        stitched from two workers."""
+        name = f"lmcache_blend.{phase}_duration"
+        before = histogram_count(name)
+        now = time.time()
+        sid = f"tp-{phase}"
+        # Rank 0 starts, then rank 1 starts; rank 0 ends first, then rank 1.
+        _dispatch(subscriber, start_type, sid, now, worker_id=0)
+        _dispatch(subscriber, start_type, sid, now + 0.010, worker_id=1)
+        _dispatch(subscriber, end_type, sid, now + 0.020, worker_id=0)
+        assert histogram_count(name) == before + 1, "rank 0's END pairs with its START"
+        _dispatch(subscriber, end_type, sid, now + 0.030, worker_id=1)
+        assert histogram_count(name) == before + 2, "rank 1's END still has its START"
+
+    def test_end_from_other_rank_does_not_consume_start(self, subscriber):
+        """Rank 1's END must not close rank 0's open START."""
+        name = "lmcache_blend.retrieve_duration"
+        before = histogram_count(name)
+        now = time.time()
+        _dispatch(subscriber, EventType.CB_RETRIEVE_START, "tp-x", now, worker_id=0)
+        _dispatch(
+            subscriber, EventType.CB_RETRIEVE_END, "tp-x", now + 0.01, worker_id=1
+        )
+        assert histogram_count(name) == before
+        _dispatch(
+            subscriber, EventType.CB_RETRIEVE_END, "tp-x", now + 0.02, worker_id=0
+        )
+        assert histogram_count(name) == before + 1
+
+    def test_events_without_worker_id_pair_as_before(self, subscriber):
+        """Lookup legs (and V2 events) carry no worker_id and pair by session."""
+        name = "lmcache_blend.prefix_lookup_duration"
+        before = histogram_count(name)
+        now = time.time()
+        _dispatch(subscriber, EventType.CB_PREFIX_LOOKUP_START, "no-wid", now)
+        _dispatch(subscriber, EventType.CB_PREFIX_LOOKUP_END, "no-wid", now + 0.005)
+        assert histogram_count(name) == before + 1
+
 
 # ---------------------------------------------------------------------------
 # V3 phase payload counters

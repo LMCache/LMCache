@@ -140,6 +140,11 @@ Three V3-specific wiring points that are easy to get wrong:
   `expects_store_final=False`: at TP>1 a worker whose retrieve is a no-op
   publishes `CB_REQUEST_END` on the CPU while another worker's scatter is still
   on the stream, which would otherwise close `cb.request` early.
+- **Lookup-only requests end at the lookup.** `CB_REQUEST_END` is otherwise
+  published only by `cb_retrieve_pre_computed`, so a request whose unified
+  lookup returns nothing to retrieve (miss, or prefix-only) would never close
+  `cb.request` — `cb_unified_lookup` publishes it itself when the finalized
+  result has neither non-prefix segments nor a segmented tail.
 - **The V2-only store counters** (`store_pre_computed_*`, `store_final_*`) stay
   flat under V3, whose store goes through `LMCacheDrivenTransfer` and is already
   observed by `mp.store`.  What V3 adds is `CB_FINGERPRINTS_REGISTERED`.

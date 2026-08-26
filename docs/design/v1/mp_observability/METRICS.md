@@ -565,17 +565,22 @@ rate(lmcache_blend_retrieve_noops_total[5m])
 
 | OTel metric name | Prometheus name | Type | Source event | Calculation |
 |---|---|---|---|---|
-| `lmcache_blend.fingerprints_registered` | `lmcache_blend_fingerprints_registered_total` | Counter | `CB_FINGERPRINTS_REGISTERED` | `+num_chunks` |
+| `lmcache_blend.fingerprints_registered` | `lmcache_blend_fingerprints_registered_total` | Counter | `CB_FINGERPRINTS_REGISTERED` | `+num_chunks` (chunks newly indexed; re-stores of known content add 0) |
 | `lmcache_blend.chunks_evicted` | `lmcache_blend_chunks_evicted_total` | Counter | `CB_CHUNKS_EVICTED` | `+num_chunks` |
 
 **What it answers:** How many chunks are indexed into the fingerprint table? How many stale entries are evicted?
 
 ### CB V3 Phase Metrics
 
-Each `*_duration` histogram pairs its leg's START/END events by session, so it
-measures the same interval as the same-named trace span (see
-[blend_v3_observability.md](blend_v3_observability.md)) — but is always on,
-where traces are sampled.
+Each `*_duration` histogram pairs its leg's START/END events by
+`(session, worker_id)` and measures the interval the same-named trace span
+covers (see [blend_v3_observability.md](blend_v3_observability.md)) — but is
+always on, where traces are sampled.  The lookup legs run once per request
+(`worker_id=None`); at TP>1 each rank's retrieve/scatter is its own sample, so
+`retrieve_duration` and `scatter_duration` record one observation per rank.
+(The tracing subscriber still pairs those two spans by session only, so at
+TP>1 its `cb.retrieve` / `cb.scatter` spans do not yet match these histograms —
+known follow-up.)
 
 | OTel metric name | Prometheus name | Type | Source events | Calculation |
 |---|---|---|---|---|
@@ -611,6 +616,9 @@ Caveats:
   not a subset, so don't divide them.
 - `retrieve_duration` and `scatter_duration` come from stream callbacks; a pair
   that inverts against a CPU timestamp is dropped, never recorded negative.
+- Unmatched STARTs (abandoned lookups) are evicted from a bounded LRU; the
+  first eviction logs one warning per subscriber.  A steady stream of evictions
+  means some phase is not publishing its END.
 
 ---
 

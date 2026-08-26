@@ -279,11 +279,13 @@ class BlendTokenRangeMatcherV3:
         token_hashes: list[bytes],
         start_chunk_idx: int = 0,
         position_offset: int = 0,
-    ) -> None:
+    ) -> int:
         """Index a stored sequence's non-overlapping chunks into the matcher.
 
         Records each new chunk's poly hash + start position so a later
-        match_sub_sequence can find it. Thread-safe (holds the matcher lock).
+        match_sub_sequence can find it. Chunks whose token hash is already
+        indexed are skipped (dedup), so a re-store of the same content
+        registers nothing. Thread-safe (holds the matcher lock).
 
         Args:
             token_ids (list[int]): The stored sequence's token IDs.
@@ -295,13 +297,15 @@ class BlendTokenRangeMatcherV3:
                 indexing a tail-slice of a larger sequence).
 
         Returns:
-            None.
+            int: The number of chunks newly indexed by this call -- ``0`` when
+            every chunk was already registered, the range holds no full
+            chunk, or the compact-ID table is full.
         """
         arr = np.array(token_ids, dtype=np.uint64)
         chunk_hashes = chunk_hash_windows_numba(arr, self.chunk_size, self._BASE)
         n = int(chunk_hashes.shape[0])
         if n == 0 or start_chunk_idx >= n:
-            return
+            return 0
 
         with self._lock:
             new_idxs = [
@@ -310,7 +314,7 @@ class BlendTokenRangeMatcherV3:
                 if token_hashes[i] not in self._token_hash_to_compact_id
             ]
             if not new_idxs:
-                return
+                return 0
             n_new = len(new_idxs)
             new_chunk_hashes = chunk_hashes[new_idxs]
 
@@ -323,7 +327,7 @@ class BlendTokenRangeMatcherV3:
                     n_new,
                     self._TABLE_SIZE,
                 )
-                return
+                return 0
             if base_id + n_new > int(self._TABLE_SIZE * 0.8):
                 logger.warning(
                     "BlendTokenRangeMatcherV3 nearing capacity: %d/%d "
@@ -348,6 +352,7 @@ class BlendTokenRangeMatcherV3:
                 )
                 self._compact_id_to_slot[cid] = slot
                 self._token_hash_to_compact_id[th] = cid
+        return n_new
 
     def match_sub_sequence(
         self,
@@ -1033,44 +1038,41 @@ class BlendV3Module(InstanceLivenessTarget):
                 break
             tokens_in_range, chunk_hashes, start_chunk_idx, position_offset, rid = job
             try:
-                self._token_range_matcher.on_new_token_hashes(
+                n_new = self._token_range_matcher.on_new_token_hashes(
                     tokens_in_range,
                     chunk_hashes,
                     start_chunk_idx=start_chunk_idx,
                     position_offset=position_offset,
                 )
-                self._emit_fingerprints_registered(
-                    rid, chunk_hashes, start_chunk_idx, tokens_in_range
-                )
+                self._emit_fingerprints_registered(rid, n_new)
             except Exception:
                 logger.exception("CB fingerprint registration failed (sync drain)")
 
-    def _emit_fingerprints_registered(
-        self,
-        rid: str,
-        chunk_hashes: list[bytes],
-        start_chunk_idx: int,
-        tokens_in_range: list[int],
-    ) -> None:
+    def _emit_fingerprints_registered(self, rid: str, num_chunks: int) -> None:
         """Publish CB_FINGERPRINTS_REGISTERED for one drained registration job.
 
-        Must be called after ``on_new_token_hashes`` returns, so the reported
-        ``num_chunks`` counts only chunks actually indexed into the match table
-        (it excludes the ``start_chunk_idx`` chunks the store skipped).
+        ``num_chunks`` is what ``on_new_token_hashes`` returned, so the event
+        counts only chunks actually indexed into the match table: it excludes
+        the ``start_chunk_idx`` chunks the store skipped *and* chunks the
+        matcher deduplicated (already registered by an earlier store). Nothing
+        is published when no chunk was indexed -- a re-store of known content
+        is not a registration.
 
         Args:
             rid: Request ID of the store that enqueued the job.
-            chunk_hashes: The job's per-chunk storage keys.
-            start_chunk_idx: Index of the first chunk that was registered.
-            tokens_in_range: The stored tokens the hashes cover.
+            num_chunks: Chunks newly indexed by the matcher for this job.
         """
+        if num_chunks <= 0:
+            return
         self._event_bus.publish(
             Event(
                 event_type=EventType.CB_FINGERPRINTS_REGISTERED,
                 session_id=rid,
                 metadata={
-                    "num_chunks": max(len(chunk_hashes) - start_chunk_idx, 0),
-                    "num_tokens": len(tokens_in_range),
+                    "num_chunks": num_chunks,
+                    # Only full chunks are hashed, so every indexed chunk
+                    # covers exactly chunk_size tokens.
+                    "num_tokens": num_chunks * self._token_range_matcher.chunk_size,
                 },
             )
         )
@@ -1471,7 +1473,9 @@ class BlendV3Module(InstanceLivenessTarget):
         Returns:
             CBUnifiedLookupResult | None: ``None`` while either leg is still
             loading (the caller re-issues to poll); on completion, the prefix
-            coverage in tokens plus the found non-prefix segments.
+            coverage in tokens plus the found non-prefix segments. When that
+            result carries nothing to retrieve, the request is also ended
+            (``CB_REQUEST_END``) here, since no retrieve will follow.
         """
         rid = key.request_id
         chunk_size = self._ctx.chunk_size
@@ -1726,6 +1730,14 @@ class BlendV3Module(InstanceLivenessTarget):
                 },
             )
         )
+        if not found and not segmented_tail:
+            # Nothing for the connector to retrieve, so no worker will call
+            # cb_retrieve_pre_computed -- the only other place V3 ends the
+            # request. Close cb.request here or a miss / prefix-only request
+            # leaks its root span until shutdown.
+            self._event_bus.publish(
+                Event(event_type=EventType.CB_REQUEST_END, session_id=rid)
+            )
         with self._cb_jobs_lock:
             self._cb_jobs.pop(rid, None)
         return CBUnifiedLookupResult(
@@ -1929,15 +1941,13 @@ class BlendV3Module(InstanceLivenessTarget):
                 continue
             tokens_in_range, chunk_hashes, start_chunk_idx, position_offset, rid = job
             try:
-                self._token_range_matcher.on_new_token_hashes(
+                n_new = self._token_range_matcher.on_new_token_hashes(
                     tokens_in_range,
                     chunk_hashes,
                     start_chunk_idx=start_chunk_idx,
                     position_offset=position_offset,
                 )
-                self._emit_fingerprints_registered(
-                    rid, chunk_hashes, start_chunk_idx, tokens_in_range
-                )
+                self._emit_fingerprints_registered(rid, n_new)
             except Exception:
                 logger.exception("CB fingerprint registration failed (async)")
             finally:
@@ -2798,6 +2808,7 @@ class BlendV3Module(InstanceLivenessTarget):
                     metadata={
                         "num_chunks": len(cb_match_result),
                         "model_name": key.model_name,
+                        "worker_id": key.worker_id,
                     },
                 ),
             )
@@ -2836,7 +2847,10 @@ class BlendV3Module(InstanceLivenessTarget):
                             Event(
                                 event_type=EventType.CB_RETRIEVE_END,
                                 session_id=key.request_id,
-                                metadata={"success": False},
+                                metadata={
+                                    "success": False,
+                                    "worker_id": key.worker_id,
+                                },
                             ),
                         )
                         self._event_bus.publish_on_stream(
@@ -2902,6 +2916,7 @@ class BlendV3Module(InstanceLivenessTarget):
                                     1 for r, _ in pairs if r.old_st != r.cur_st
                                 ),
                                 "dropped": len(cb_match_result) - len(pairs),
+                                "worker_id": key.worker_id,
                             },
                         ),
                     )
@@ -3015,7 +3030,7 @@ class BlendV3Module(InstanceLivenessTarget):
                         Event(
                             event_type=EventType.CB_SCATTER_END,
                             session_id=key.request_id,
-                            metadata={"success": True},
+                            metadata={"success": True, "worker_id": key.worker_id},
                         ),
                     )
                     scatter_open = False
@@ -3027,7 +3042,7 @@ class BlendV3Module(InstanceLivenessTarget):
                         Event(
                             event_type=EventType.CB_SCATTER_END,
                             session_id=key.request_id,
-                            metadata={"success": False},
+                            metadata={"success": False, "worker_id": key.worker_id},
                         ),
                     )
                 self._event_bus.publish_on_stream(
@@ -3035,7 +3050,7 @@ class BlendV3Module(InstanceLivenessTarget):
                     Event(
                         event_type=EventType.CB_RETRIEVE_END,
                         session_id=key.request_id,
-                        metadata={"success": False},
+                        metadata={"success": False, "worker_id": key.worker_id},
                     ),
                 )
                 self._event_bus.publish_on_stream(
@@ -3056,7 +3071,7 @@ class BlendV3Module(InstanceLivenessTarget):
                 Event(
                     event_type=EventType.CB_RETRIEVE_END,
                     session_id=key.request_id,
-                    metadata={"success": True},
+                    metadata={"success": True, "worker_id": key.worker_id},
                 ),
             )
 

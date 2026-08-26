@@ -34,6 +34,9 @@ def _make_engine_with_mocked_matcher():
     eng_mock = MagicMock(spec=v3_mod.BlendV3Module)
     eng_mock._fingerprint_stop = threading.Event()
     eng_mock._token_range_matcher = MagicMock()
+    # The drainer reports the matcher's indexed-chunk count on the event.
+    eng_mock._token_range_matcher.on_new_token_hashes.return_value = 1
+    eng_mock._token_range_matcher.chunk_size = 256
     eng_mock._pending_fp_lock = threading.Lock()
     eng_mock._pending_fp_hashes = set()
     eng_mock._event_bus = MagicMock()
@@ -98,7 +101,7 @@ def test_fingerprint_worker_survives_kernel_exception():
     # First call raises, subsequent succeed.
     eng._token_range_matcher.on_new_token_hashes.side_effect = [
         RuntimeError("boom"),
-        None,
+        1,
     ]
 
     worker = threading.Thread(target=eng._drain_fingerprint_queue, daemon=True)

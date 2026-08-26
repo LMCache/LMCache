@@ -27,7 +27,9 @@ V3 ends the request at ``CB_RETRIEVE_END``, so its ``CB_RETRIEVE_SUBMITTED``
 carries ``expects_store_final=False``: the bridge stays empty and the root close
 is gated on ``_pending_gpu_ops`` alone. The sentinel still matters there — at
 TP>1, a worker whose retrieve is a no-op publishes ``CB_REQUEST_END`` on the CPU
-while another worker's scatter is still on the stream.
+while another worker's scatter is still on the stream. A V3 request whose lookup
+found nothing to retrieve (miss, or prefix-only) never reaches a retrieve, so
+``cb_unified_lookup`` publishes ``CB_REQUEST_END`` itself when it finalizes.
 
 ``cb.request`` is the trace root: blend_v3 owns the CB lookup end-to-end (prefix
 + non-prefix legs, direct against the storage manager), so a CB request never

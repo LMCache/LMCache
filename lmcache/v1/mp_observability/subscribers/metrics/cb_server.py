@@ -7,19 +7,29 @@ from __future__ import annotations
 
 # Standard
 from collections import OrderedDict
-from typing import Any
 
 # Third Party
 from opentelemetry import metrics
+from opentelemetry.metrics import Histogram
 
 # First Party
+from lmcache.logging import init_logger
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventCallback, EventSubscriber
+
+logger = init_logger(__name__)
 
 # Cap on outstanding START timestamps awaiting their END. A lookup abandoned
 # mid-poll never sends its END, so unmatched STARTs are normal; evict the
 # oldest rather than grow without bound.
 _MAX_PENDING_PHASES = 8192
+
+#: Pairing key for a phase's START/END: ``(phase, session_id, worker_id)``.
+#: ``worker_id`` is ``None`` for the once-per-request lookup legs; at TP>1
+#: every rank publishes its own retrieve/scatter pair under the shared
+#: request_id, so the worker must be part of the key or rank B's START
+#: overwrites rank A's and the recorded interval spans two workers.
+_PhaseKey = tuple[str, str, int | None]
 
 
 class BlendMetricsSubscriber(EventSubscriber):
@@ -51,8 +61,9 @@ class BlendMetricsSubscriber(EventSubscriber):
     - ``lmcache_blend.chunks_evicted``               — evicted from fingerprint table
 
     V3 phase metrics — the sub-legs of the unified lookup and the retrieve
-    scatter. Each ``*_duration`` pairs the phase's START/END events by session,
-    so the numbers match the same-named trace spans (see
+    scatter. Each ``*_duration`` pairs the phase's START/END events by
+    ``(session, worker_id)`` -- at TP>1 each rank's retrieve/scatter is its own
+    sample -- and measures the interval the same-named trace span covers (see
     ``docs/design/v1/mp_observability/blend_v3_observability.md``):
 
     - ``lmcache_blend.lookup_duration``              — cb.lookup, incl. poll waits
@@ -100,9 +111,12 @@ class BlendMetricsSubscriber(EventSubscriber):
     def __init__(self) -> None:
         meter = metrics.get_meter("lmcache.blend")
 
-        # (phase, session_id) -> START timestamp, bounded LRU.
-        self._phase_starts: OrderedDict[tuple[str, str], float] = OrderedDict()
-        self._phase_hists: dict[str, Any] = {
+        # _PhaseKey -> START timestamp, bounded LRU (see _MAX_PENDING_PHASES).
+        self._phase_starts: OrderedDict[_PhaseKey, float] = OrderedDict()
+        # Set once the LRU has evicted a START; the warning fires once per
+        # subscriber so a leak (or a too-small cap) is visible without flooding.
+        self._phase_eviction_logged = False
+        self._phase_hists: dict[str, Histogram] = {
             phase: meter.create_histogram(
                 f"lmcache_blend.{phase}_duration",
                 description=(
@@ -293,18 +307,44 @@ class BlendMetricsSubscriber(EventSubscriber):
     # Phase duration pairing
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _phase_key(phase: str, event: Event) -> _PhaseKey:
+        """Build the START/END pairing key for ``event`` (see ``_PhaseKey``).
+
+        Anything that is not an ``int`` counts as "no worker": V2 events and
+        the lookup legs omit the field, and ``publish_on_stream``'s native
+        recorder carries a ``None`` ``worker_id`` as the string ``"None"``.
+        """
+        worker_id = event.metadata.get("worker_id")
+        return (
+            phase,
+            event.session_id,
+            worker_id if isinstance(worker_id, int) else None,
+        )
+
     def _on_phase_start(self, event: Event) -> None:
         """Stash a phase START timestamp for the matching END to consume."""
         phase = self._PHASE_BY_START[event.event_type]
-        self._phase_starts[(phase, event.session_id)] = event.timestamp
-        self._phase_starts.move_to_end((phase, event.session_id))
+        key = self._phase_key(phase, event)
+        self._phase_starts[key] = event.timestamp
+        self._phase_starts.move_to_end(key)
         while len(self._phase_starts) > _MAX_PENDING_PHASES:
-            self._phase_starts.popitem(last=False)
+            evicted, _ = self._phase_starts.popitem(last=False)
+            if not self._phase_eviction_logged:
+                self._phase_eviction_logged = True
+                logger.warning(
+                    "CB phase-duration pairing evicted an unmatched START %r: "
+                    "more than %d STARTs are awaiting their END. Abandoned "
+                    "lookups cause this legitimately; a steady stream means a "
+                    "phase is not publishing its END. Logged once per subscriber.",
+                    evicted,
+                    _MAX_PENDING_PHASES,
+                )
 
     def _on_phase_end(self, event: Event) -> None:
         """Record the phase duration in ms, if its START was seen."""
         phase = self._PHASE_BY_END[event.event_type]
-        start_ts = self._phase_starts.pop((phase, event.session_id), None)
+        start_ts = self._phase_starts.pop(self._phase_key(phase, event), None)
         if start_ts is None:
             return  # no matching START (evicted, or the bus started mid-request)
         dt_ms = (event.timestamp - start_ts) * 1000.0
