@@ -106,6 +106,13 @@ def test_default_backend_record_wait_query_synchronize_delegate():
     assert ("synchronize",) in event.calls
 
 
+def test_default_backend_is_event_ipc_backend() -> None:
+    backend = DefaultEventIPCBackend(
+        event_module=_FakeEventModule(), device_type="fake"
+    )
+    assert isinstance(backend, EventIPCBackend)
+
+
 def test_check_event_support_raises_with_device_name_when_no_interprocess():
     backend = DefaultEventIPCBackend(
         event_module=_NoInterprocessModule(), device_type="weirddev"
@@ -221,6 +228,10 @@ def test_cpu_device_spec_exposes_cached_default_event_backend() -> None:
 
 
 @pytest.mark.cuda
+@pytest.mark.skipif(
+    torch_device_type != "cuda",
+    reason="CUDA device spec test requires the CUDA platform to be active",
+)
 def test_cuda_device_spec_exposes_cached_default_event_backend() -> None:
     spec = CudaDeviceSpec()
     assert isinstance(spec.event_ipc_backend, DefaultEventIPCBackend)
