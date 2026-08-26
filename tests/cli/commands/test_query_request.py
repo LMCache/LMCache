@@ -18,12 +18,9 @@ from lmcache.cli.commands.query._request import Request
 
 
 def _sse_lines(text: str, *, chat: bool) -> list[bytes]:
-    payload = (
-        {"choices": [{"delta": {"content": text}}]}
-        if chat
-        else {"choices": [{"text": text}]}
-    )
-    usage = {"usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+    choice: dict[str, Any] = {"delta": {"content": text}} if chat else {"text": text}
+    payload: dict[str, Any] = {"choices": [choice]}
+    usage: dict[str, Any] = {"usage": {"prompt_tokens": 1, "completion_tokens": 1}}
     return [
         f"data: {json.dumps(payload)}\n".encode(),
         f"data: {json.dumps(usage)}\n".encode(),
