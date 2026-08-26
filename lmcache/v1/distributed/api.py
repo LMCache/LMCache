@@ -342,7 +342,9 @@ class AttnWindowDesc:
     num_chunks_in_sw: list[int]
 
     world_size: int = 1
-    """Number of kv_rank shards per chunk (tensor-parallel world size)."""
+    """Number of kv_rank shards per chunk (the ``fold_unfold_ranked``
+    fan-out): the TP world size for head-sharded models, pipeline stages
+    times DCP size for MLA."""
 
     group_kinds: tuple[GroupKind, ...] = ()
     """Optional per-group kind labels parallel to ``num_chunks_in_sw``.
@@ -409,7 +411,8 @@ class PrefetchRequestSpec:
         group_layout_descs: Maps object_group_id to that group's memory
             layout for L1 write-buffer allocation; entries beyond
             ``attn_desc``'s groups are harmless.
-        extra_count: Extra read locks per key beyond the default 1.
+        num_kv_readers: Total read locks to take per key -- one per
+            reader that will retrieve the object.
         policy: Retained-subset policy (see :class:`TrimPolicy`).
         attn_desc: Cross-chunk attention windows for the groups ``keys``
             covers; a caller prefetching a subset of the registration's
@@ -420,12 +423,17 @@ class PrefetchRequestSpec:
 
     keys: list[ObjectKey]
     group_layout_descs: dict[int, MemoryLayoutDesc]
-    extra_count: int = 0
+    num_kv_readers: int = 1
     policy: TrimPolicy = TrimPolicy.PREFIX
     attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC
     mode: PrefetchMode = PrefetchMode.LOOKUP
 
     def __post_init__(self) -> None:
+        if self.num_kv_readers < 1:
+            raise ValueError(
+                f"PrefetchRequestSpec: num_kv_readers={self.num_kv_readers} "
+                "must be >= 1 (total read locks per key)"
+            )
         # A caller prefetching a SUBSET of the groups narrows attn_desc, so
         # extra layout entries are harmless; too FEW is the real mistake.
         expected = set(range(self.attn_desc.num_object_groups))
