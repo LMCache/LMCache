@@ -7,7 +7,8 @@ defaults below.
 """
 
 # Standard
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
@@ -53,6 +54,10 @@ class MPCoordinatorConfig:
         timeout_keep_alive: Seconds the HTTP server keeps idle connections
             open before closing them. Must be greater than the heartbeat
             interval of MP servers to avoid race-condition disconnects.
+        extra_config: Settings the core config does not name, keyed by
+            whatever reads them. Discovery means a new view or controller
+            is one file; without this, giving it a setting would still
+            mean editing this class, the CLI, and the docs.
         metrics_enabled: Whether to initialize OpenTelemetry metrics.
         otlp_endpoint: OTLP gRPC endpoint for metrics push mode. When unset,
             metrics use Prometheus pull mode on the coordinator HTTP port.
@@ -72,6 +77,7 @@ class MPCoordinatorConfig:
     checkpoint_path: str = ""
     checkpoint_interval: float = 60.0
     metadata_path: str = ""
+    extra_config: Mapping[str, object] = field(default_factory=dict)
     timeout_keep_alive: int = 10
     metrics_enabled: bool = True
     otlp_endpoint: str | None = None
