@@ -90,6 +90,19 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+
+# NIXL object-store backends map to NIXL mem_type "OBJ"; file/GDS backends map to
+# "FILE". Custom NIXL object-store plugins can be declared OBJ-type through
+# extra_config["nixl_extra_obj_backends"], so LMCache accepts them instead of
+# rejecting every create_backend name outside this built-in set.
+NIXL_OBJ_BACKENDS = frozenset({"OBJ", "AZURE_BLOB", "DOCA_MEMOS"})
+
+
+def _is_nixl_obj_backend(
+    backend: str, extra_obj_backends: frozenset = frozenset()
+) -> bool:
+    return backend in NIXL_OBJ_BACKENDS or backend in extra_obj_backends
+
 # POSIX permission mode for files created via ``os.open()`` with ``O_CREAT``.
 # 0o644 = rw-r--r-- (owner read/write, group/others read-only).
 DEFAULT_FILE_CREATE_MODE = 0o644
@@ -119,11 +132,14 @@ class NixlStorageConfig:
     sync_mode: Optional[Any]  # nixl_thread_sync_t, None if unsupported
     presence_cache_only: bool
     path_sharding: str
+    extra_obj_backends: frozenset = frozenset()
 
     @staticmethod
-    def validate_nixl_backend(backend: str, device: str) -> bool:
+    def validate_nixl_backend(
+        backend: str, device: str, extra_obj_backends: frozenset = frozenset()
+    ) -> bool:
         device = device.split(":", 1)[0]
-        if backend in ("GDS", "GDS_MT", "OBJ"):
+        if backend in ("GDS", "GDS_MT", "OBJ") or backend in extra_obj_backends:
             return device == "cpu" or device == "cuda"
         elif backend in ("POSIX", "HF3FS", "AZURE_BLOB", "DOCA_MEMOS"):
             return device == "cpu"
@@ -149,6 +165,9 @@ class NixlStorageConfig:
         pool_size = extra_config.get("nixl_pool_size")
 
         backend = extra_config.get("nixl_backend")
+        extra_obj_backends = frozenset(
+            extra_config.get("nixl_extra_obj_backends", []) or []
+        )
 
         # Per-worker endpoint distribution: if nixl_endpoint_list is set,
         # override endpoint_override so each TP worker targets a different
@@ -238,7 +257,7 @@ class NixlStorageConfig:
                 buffer_size = config.nixl_buffer_size
 
         assert NixlStorageConfig.validate_nixl_backend(
-            backend, config.nixl_buffer_device
+            backend, config.nixl_buffer_device, extra_obj_backends
         ), "Invalid NIXL backend & device combination"
 
         if backend in ("GDS", "GDS_MT", "POSIX", "HF3FS"):
@@ -260,6 +279,7 @@ class NixlStorageConfig:
             sync_mode=sync_mode,
             presence_cache_only=presence_cache_only,
             path_sharding=path_sharding,
+            extra_obj_backends=extra_obj_backends,
         )
 
 
@@ -638,12 +658,13 @@ class NixlDynamicStorageAgent(NixlStorageAgent):
         backend_params: dict[str, str],
         enable_prog_thread: bool,
         sync_mode: Optional[Any] = None,
+        extra_obj_backends: frozenset = frozenset(),
     ):
         super().__init__(
             allocator, device, backend, backend_params, enable_prog_thread, sync_mode
         )
 
-        if backend in ("OBJ", "AZURE_BLOB", "DOCA_MEMOS"):
+        if _is_nixl_obj_backend(backend, extra_obj_backends):
             self.mem_type = "OBJ"
         else:
             self.mem_type = "FILE"
@@ -1029,6 +1050,7 @@ class NixlStaticStorageBackend(NixlStorageBackend):
             nixl_config.use_direct_io,
             nixl_config.path_sharding,
             f"cuda:{metadata.worker_id}",
+            nixl_config.extra_obj_backends,
         )
         assert self.pool is not None
 
@@ -1053,6 +1075,7 @@ class NixlStaticStorageBackend(NixlStorageBackend):
         use_direct_io: bool,
         path_sharding: str,
         dst_device: str,
+        extra_obj_backends: frozenset = frozenset(),
     ) -> NixlDescPool:
         """Create a NIXL descriptor pool with path sharding support.
 
@@ -1090,7 +1113,7 @@ class NixlStaticStorageBackend(NixlStorageBackend):
                 create_dirs=True,
             )
             return NixlFilePool(size, sharder, use_direct_io)
-        elif backend in ("OBJ", "AZURE_BLOB", "DOCA_MEMOS"):
+        elif _is_nixl_obj_backend(backend, extra_obj_backends):
             return NixlObjectPool(size, b128=(backend == "DOCA_MEMOS"))
         else:
             raise ValueError(f"Unsupported NIXL backend: {backend}")
@@ -1456,6 +1479,7 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
             nixl_config.backend_params,
             nixl_config.enable_prog_thread,
             nixl_config.sync_mode,
+            nixl_config.extra_obj_backends,
         )
 
     def set_presence_cache(self, cache: PresenceCache) -> None:
