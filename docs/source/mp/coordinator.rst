@@ -206,6 +206,15 @@ Each endpoint is documented below. Success is ``200`` unless noted, and
 ``{cache_salt}`` uses the ``_default`` sentinel for the empty salt. The wire
 types live in ``lmcache/v1/mp_coordinator/schemas.py``.
 
+.. tip::
+
+   The read-only endpoints below can be read without ``curl`` and ``jq``.
+   ``lmcache query coordinator --api NAME`` fetches one of them — ``usage``,
+   ``instances``, ``health``, ``directory``, ``keys``, ``quota``,
+   ``quota-config``, ``prefetch``, or ``metrics`` — and prints it as an
+   aligned table with byte counts and ratios already formatted. See
+   :doc:`/cli/query`.
+
 Fleet membership and health
 ---------------------------
 

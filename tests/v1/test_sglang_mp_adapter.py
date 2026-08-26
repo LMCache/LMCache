@@ -306,14 +306,15 @@ def test_submit_retrieve_retains_exported_device_event(monkeypatch) -> None:
     connector.tp_size = 1
     connector.worker_id = 0
     sentinel = _SpyFuture()
+    raw = _FakeRaw(sentinel)
     monkeypatch.setattr(adapter_mod, "torch_dev", _FakeTorchDev)
     monkeypatch.setattr(
         adapter_mod,
         "send_lmcache_request",
-        lambda mq_client, request_type, payload: _FakeRaw(sentinel),
+        lambda mq_client, request_type, payload: raw,
     )
 
-    future = connector._submit_retrieve(
+    raw_future, future = connector._submit_retrieve(
         request_id="request-1",
         token_ids=[1, 2],
         offset=0,
@@ -321,9 +322,76 @@ def test_submit_retrieve_retains_exported_device_event(monkeypatch) -> None:
         block_ids=[0],
     )
 
+    assert raw_future is raw
     assert future is sentinel
     assert len(sentinel.retained_references) == 1
     assert isinstance(sentinel.retained_references[0], _FakeEvent)
+
+
+@pytest.mark.parametrize(
+    ("event_handle", "expected_free_ranges"),
+    [
+        (b"", [(0, _CHUNK_SIZE)]),
+        (
+            b"completion-event",
+            [(0, _CHUNK_SIZE), (_CHUNK_SIZE, 2 * _CHUNK_SIZE)],
+        ),
+    ],
+)
+def test_retrieve_failure_uses_single_cleanup_owner(
+    event_handle: bytes,
+    expected_free_ranges: list[tuple[int, int]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An event-free failure must not repeat server-side lock cleanup."""
+    adapter_mod, _, _completed_future, _, LoadMetadata, _ = _import_adapter_symbols()
+    connector = _make_connector(healthy=True)
+    connector.mq_client = object()  # type: ignore[assignment]
+    connector.model_name = "test-model"
+    connector.tp_size = 2
+    connector.worker_id = 0
+    connector.page_size = _CHUNK_SIZE
+    connector._pending_lookups = {
+        "request-1": SimpleNamespace(
+            token_ids=list(range(2 * _CHUNK_SIZE)),
+            matched_token_num=2 * _CHUNK_SIZE,
+            locks_held=True,
+        )
+    }
+    connector._pending_lookups_lock = threading.Lock()
+    connector._slot_mapping_to_block_ids = MagicMock(return_value=[1])
+
+    free_ranges: list[tuple[int, int]] = []
+
+    def record_free_request(
+        _mq_client: object,
+        request_type: object,
+        payload: list[Any],
+    ) -> MessagingFuture[bool]:
+        assert request_type is adapter_mod.RequestType.FREE_LOOKUP_LOCKS
+        free_ranges.append((payload[0].start, payload[0].end))
+        return _completed_future(True)
+
+    monkeypatch.setattr(adapter_mod, "send_lmcache_request", record_free_request)
+
+    raw_future: MessagingFuture[tuple[bytes, bool]] = MessagingFuture()
+    raw_future.set_result((event_handle, False))
+    connector._submit_retrieve = MagicMock(
+        return_value=(raw_future, _completed_future(False))
+    )
+    token_ids = connector._pending_lookups["request-1"].token_ids
+    metadata = LoadMetadata(
+        token_ids=token_ids,
+        slot_mapping=torch.arange(2 * _CHUNK_SIZE),
+        offset=_CHUNK_SIZE,
+        request_id="request-1",
+    )
+
+    with pytest.raises(RuntimeError, match="LMCache MP retrieve failed"):
+        connector.retrieve_kv(metadata)
+
+    assert free_ranges == expected_free_ranges
+    assert connector._pending_lookups["request-1"].locks_held is False
 
 
 def test_layerwise_load_forwards_partial_slot_mapping_offset() -> None:
