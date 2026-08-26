@@ -69,6 +69,8 @@ lmcache/v1/mp_coordinator/
     __init__.py
     event_gate.py       # EventGate: incarnation fencing, seq dedup, gap detection
     event_broadcaster.py  # fans admitted events to the registered consumers
+    event_source.py     # source lifecycle/status contract
+    http_event_source.py  # non-durable POST /events push source
   controllers/
     __init__.py
     eviction_controller.py  # the fleet L2 control loop: quota + usage + LRU + pins
@@ -172,10 +174,15 @@ Every fact the coordinator holds about fleet cache contents arrives
 through this layer, which decides **what** is admitted and **who** sees
 it. It holds no cache state itself. See [ingest.md](ingest.md).
 
+- `event_source.py` — common source lifecycle/status contract.
+- `http_event_source.py` — `HttpCacheEventSource`, today's non-durable
+  `POST /events` push adapter. Future durable sources use the same
+  `EventGate.ingest_batches` method but own their transport lifecycle
+  separately.
 - `event_gate.py` — the admission point for every source. Owns the
   per-emitter stream cursor: incarnation fencing (a restart voids the
-  emitter's L1 facts), `seq` dedup, gap detection. `ingest()` for a live
-  emitter stream, `reconcile()` for a scan that has no stream position.
+  emitter's L1 facts), `seq` dedup, and gap detection. Scan sources
+  without stream positions are deliberately unsupported.
 - `event_broadcaster.py` — fans admitted batches (and fence
   notifications) to its registered `CacheEventConsumer`s: the key
   directory and the eviction manager. Adding a consumer is a wiring

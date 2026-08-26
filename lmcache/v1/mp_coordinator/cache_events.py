@@ -50,9 +50,11 @@ class CacheEventPublishError(Exception):
 class CacheEventSink(ABC):
     """Transport seam for delivering cache-event batches to the directory.
 
-    Implementations provide at-least-once delivery and preserve batch
-    order within and across :meth:`publish` calls; the directory's seq
-    dedup, gap detection, and incarnation fencing absorb everything else.
+    Successful calls preserve batch order within and across
+    :meth:`publish` calls. Retrying an uncertain call is safe because the
+    gate deduplicates sequence numbers. Dropping a failed call consumes
+    sequence numbers and exposes a gap; a non-durable source such as HTTP
+    cannot repair it.
     """
 
     @abstractmethod
@@ -63,8 +65,9 @@ class CacheEventSink(ABC):
             batches: The batches to deliver.
 
         Raises:
-            CacheEventPublishError: If delivery failed. Retrying and
-                dropping are both safe (dedup / gap-flagged replay).
+            CacheEventPublishError: If delivery failed. Retrying is safe;
+                dropping may leave the coordinator's view stale. Replay can
+                repair only events already retained by a durable source.
         """
         raise NotImplementedError
 
