@@ -18,7 +18,6 @@ from lmcache.v1.gpu_connector.kv_format.detectors.base import (
 from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache, LayoutHints
 import lmcache.lmcache_native as lmcache_native
 
-
 _CANONICAL_KV_LAYOUTS = {
     "NHD": "LBNHC",
     "HND": "LBHNC",

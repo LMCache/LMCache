@@ -211,11 +211,11 @@ __global__ void single_layer_kv_transfer_kernel(
 }
 
 template <EngineKVFormat format>
-__device__ __forceinline__ int64_t page_buffer_offset(
-    const int k_or_v, const int token_idx, const int scalar_offset,
-    const int scalars_per_token, const int page_buffer_size,
-    const int block_size, const int head_size,
-    const int64_t block_stride_xwords) {
+__device__ __forceinline__ int64_t
+page_buffer_offset(const int k_or_v, const int token_idx,
+                   const int scalar_offset, const int scalars_per_token,
+                   const int page_buffer_size, const int block_size,
+                   const int head_size, const int64_t block_stride_xwords) {
   /*
   logical semantics of arguments (agnostic to physical format):
   k_or_v:            0 for key, 1 for value
@@ -322,8 +322,8 @@ __device__ __forceinline__ int64_t page_buffer_offset(
   else if constexpr (format == EngineKVFormat::NB_NL_BS_NH_CS) {
     const int block_idx = token_idx / block_size;
     const int block_offset = token_idx % block_size;
-    return block_idx * block_stride_xwords +
-           block_offset * scalars_per_token + scalar_offset;
+    return block_idx * block_stride_xwords + block_offset * scalars_per_token +
+           scalar_offset;
   }
   // DSA indexer: page [BSxvals][BSxscales]; 4B units, so scale == 1 unit
   else if constexpr (format == EngineKVFormat::NL_X_NB_BSV_BSS) {
@@ -458,10 +458,9 @@ __global__ void load_and_reshape_multi_layer_fused_kernel(
     const int64_t lmcache_offset =
         key_value_offset(k_or_v, layer_id, token_id, i, scalars_per_token,
                          num_tokens, num_layers);
-    const int64_t vllm_offset =
-        page_buffer_offset<format>(k_or_v, slot_idx, i, scalars_per_token,
-                                   page_buffer_size, block_size, head_size,
-                                   block_stride_xwords);
+    const int64_t vllm_offset = page_buffer_offset<format>(
+        k_or_v, slot_idx, i, scalars_per_token, page_buffer_size, block_size,
+        head_size, block_stride_xwords);
     if (DIRECTION)
       chunk.key_value[lmcache_offset] = paged_buffer_ptr[vllm_offset];
     else
@@ -489,8 +488,7 @@ __global__ void load_and_reshape_multi_layer_kernel(
     const int64_t* __restrict__ slot_mapping,   // [num_tokens]
     const int scalars_per_token, const int num_tokens, const int num_layers,
     const int page_buffer_size, const int block_size, const int head_size,
-    const int skip_prefix_n_tokens,
-    const int64_t block_stride_xwords) {
+    const int skip_prefix_n_tokens, const int64_t block_stride_xwords) {
   const int token_id = blockIdx.x;
   const int layer_id = blockIdx.y;
   const int k_or_v = blockIdx.z;
@@ -511,10 +509,9 @@ __global__ void load_and_reshape_multi_layer_kernel(
         key_value_offset(k_or_v, layer_id, kv_token_id, i, scalars_per_token,
                          num_tokens, num_layers);
 
-    const int64_t vllm_offset =
-        page_buffer_offset<format>(k_or_v, slot_idx, i, scalars_per_token,
-                                   page_buffer_size, block_size, head_size,
-                                   block_stride_xwords);
+    const int64_t vllm_offset = page_buffer_offset<format>(
+        k_or_v, slot_idx, i, scalars_per_token, page_buffer_size, block_size,
+        head_size, block_stride_xwords);
 
     if (DIRECTION)  // 1 is paged buffer to LMCache
       key_value[lmcache_offset] = paged_buffer_ptr[vllm_offset];
@@ -621,12 +618,12 @@ T* get_kernel_ptr(TENSOR_TYPE& tensor) {
  *  - direction: H2D  means LMCache to PagedBuffer, D2H  means PagedBuffer to
  * LMCache
  */
-#define LAUNCH_KERNEL_WITH_FORMAT(T, DIRECTION, FORMAT)                      \
-  lmc::load_and_reshape_multi_layer_kernel<T, DIRECTION, FORMAT>             \
-      <<<grid, block, 0, stream>>>(                                          \
-          key_value_ptr, page_buffer_ptrs, slot_mapping_ptr, num_xwords,     \
-          num_tokens, num_layers, page_buffer_size, block_size,              \
-          head_size_xword, skip_prefix_n_tokens, block_stride_xwords);       \
+#define LAUNCH_KERNEL_WITH_FORMAT(T, DIRECTION, FORMAT)                  \
+  lmc::load_and_reshape_multi_layer_kernel<T, DIRECTION, FORMAT>         \
+      <<<grid, block, 0, stream>>>(                                      \
+          key_value_ptr, page_buffer_ptrs, slot_mapping_ptr, num_xwords, \
+          num_tokens, num_layers, page_buffer_size, block_size,          \
+          head_size_xword, skip_prefix_n_tokens, block_stride_xwords);   \
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 
 template <typename T>
@@ -806,8 +803,7 @@ void multi_layer_kv_transfer_fused_templated(
     const int element_size, const torch::Device& paged_memory_device,
     const int page_buffer_size, const TransferDirection direction,
     const EngineKVFormat engine_kv_format, const int block_size,
-    const int head_size,
-    const int64_t block_stride_elems) {
+    const int head_size, const int64_t block_stride_elems) {
   const int n_chunks = static_cast<int>(key_values.size());
   TORCH_CHECK(n_chunks >= 1 && n_chunks <= MAX_FUSED_TRANSFER_CHUNKS,
               "fused transfer chunk count out of range: ", n_chunks);
@@ -858,11 +854,11 @@ void multi_layer_kv_transfer_fused_templated(
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
 #ifndef LAUNCH_FUSED_WITH_FORMAT
-  #define LAUNCH_FUSED_WITH_FORMAT(T_, DIR, FORMAT)                      \
-    lmc::load_and_reshape_multi_layer_fused_kernel<T_, DIR, FORMAT>      \
-        <<<grid, block, 0, stream>>>(pack, page_buffer_ptrs, k_or_v_size, \
-                                     num_xwords, num_tokens, num_layers,   \
-                                     page_buffer_size, block_size,         \
+  #define LAUNCH_FUSED_WITH_FORMAT(T_, DIR, FORMAT)                         \
+    lmc::load_and_reshape_multi_layer_fused_kernel<T_, DIR, FORMAT>         \
+        <<<grid, block, 0, stream>>>(pack, page_buffer_ptrs, k_or_v_size,   \
+                                     num_xwords, num_tokens, num_layers,    \
+                                     page_buffer_size, block_size,          \
                                      head_size_xword, block_stride_xwords); \
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 #endif
@@ -938,8 +934,7 @@ void multi_layer_kv_transfer_fused_ptr(
     const int element_size, const torch::Device& paged_memory_device,
     const int page_buffer_size, const TransferDirection direction,
     const EngineKVFormat engine_kv_format, const int block_size,
-    const int head_size,
-    const int64_t block_stride_elems) {
+    const int head_size, const int64_t block_stride_elems) {
   int copy_size = num_origin_elements * element_size;
 #ifndef LAUNCH_FUSED_TRANSFER
   #define LAUNCH_FUSED_TRANSFER(type)                                         \
@@ -948,7 +943,7 @@ void multi_layer_kv_transfer_fused_ptr(
           key_values, slot_mappings, n_toks, page_buffer_ptrs, num_layers,    \
           layout_num_tokens, num_origin_elements, element_size,               \
           paged_memory_device, page_buffer_size, direction, engine_kv_format, \
-          block_size, head_size, block_stride_elems);                                             \
+          block_size, head_size, block_stride_elems);                         \
     } while (0)
 #endif
   if (copy_size % 8 == 0) {

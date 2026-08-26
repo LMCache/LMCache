@@ -12,10 +12,10 @@ import pytest
 import torch
 
 # First Party
+from lmcache import device_ops
 from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.kv_format import detect_format, get_spec
 import lmcache.lmcache_native as lmcache_native
-from lmcache import device_ops
 
 cuda_only = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
 

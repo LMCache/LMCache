@@ -45,8 +45,7 @@ PYBIND11_MODULE(cuda_ops, m) {
       py::arg("paged_memory_device"), py::arg("page_buffer_size"),
       py::arg("direction"), py::arg("engine_kv_format"),
       py::arg("block_size") = 0, py::arg("head_size") = 0,
-      py::arg("skip_prefix_n_tokens") = 0,
-      py::arg("block_stride_elems") = 0,
+      py::arg("skip_prefix_n_tokens") = 0, py::arg("block_stride_elems") = 0,
       py::call_guard<py::gil_scoped_release>());
   m.def("multi_layer_kv_transfer_unilateral",
         [](torch::Tensor& key_value, const torch::Tensor& key_value_ptrs,

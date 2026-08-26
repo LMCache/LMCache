@@ -15,7 +15,6 @@ from lmcache.v1.gpu_connector.kv_format.contiguity import (
     attempt_permute_to_contiguous_view,
 )
 from lmcache.v1.gpu_connector.utils import (
-    get_spec,
     DiscoverableKVCache,
     LayoutHints,
     assert_is_vllm_flash_attn_or_flash_infer,
@@ -28,6 +27,7 @@ from lmcache.v1.gpu_connector.utils import (
     get_num_blocks,
     get_num_layers,
     get_page_buffer_size,
+    get_spec,
     get_tokens_per_layer,
     normalize_and_discover_per_layer_formats,
     normalize_kv_and_discover_format,
