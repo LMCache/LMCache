@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, Any, Callable, List, Optional, Tuple, TypeVar,
 import asyncio
 import functools
 import hashlib
-import inspect
 import re
 import threading
 import traceback
@@ -48,51 +47,19 @@ KVCache = Tuple[Tuple[torch.Tensor, torch.Tensor], ...]
 
 # Device utility functions
 def check_interprocess_event_support() -> None:
-    """Check if the current backend supports interprocess Events.
+    """Check if the current backend supports interprocess device events.
 
-    This function checks if torch_dev.Event exists and exposes the
-    interprocess parameter, which is required for multiprocess IPC.
+    This compatibility helper delegates to the platform event IPC backend for
+    the active device type.
 
     Raises:
-        RuntimeError: If the backend does not support interprocess Events
-            or if the Event class doesn't expose the interprocess parameter.
+        RuntimeError: If the active backend does not support event IPC.
     """
     # First Party
-    from lmcache import torch_dev, torch_device_type
+    from lmcache import torch_device_type
+    from lmcache.v1.platform.base.event_ipc import check_event_support
 
-    if not hasattr(torch_dev, "Event"):
-        raise RuntimeError(
-            f"Backend '{torch_device_type}' does not support "
-            "interprocess Events (torch_dev.Event not available). "
-            "Multiprocess IPC requires CUDA."
-        )
-
-    event_cls = torch_dev.Event
-
-    def has_interprocess_parameter(obj) -> bool:
-        try:
-            sig = inspect.signature(obj)
-        except (TypeError, ValueError):
-            return False
-
-        return "interprocess" in sig.parameters
-
-    if not (
-        has_interprocess_parameter(event_cls)
-        or has_interprocess_parameter(event_cls.__new__)
-    ):
-        raise RuntimeError(
-            f"Backend '{torch_device_type}' does not support "
-            "interprocess=True parameter for Events. "
-            "Multiprocess IPC requires CUDA."
-        )
-
-    if not hasattr(torch_dev.Event, "from_ipc_handle"):
-        raise RuntimeError(
-            f"Backend '{torch_device_type}' does not support IPC event "
-            "handles (Event.from_ipc_handle not available). "
-            "Multiprocess IPC requires CUDA."
-        )
+    check_event_support(torch_device_type)
 
 
 # Math utility functions

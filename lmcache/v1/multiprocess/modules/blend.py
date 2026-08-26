@@ -10,9 +10,8 @@ import time
 import numpy as np
 
 # First Party
-from lmcache import torch_dev, torch_device_type
+from lmcache import torch_dev
 from lmcache.logging import init_logger
-from lmcache.utils import check_interprocess_event_support
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
@@ -41,6 +40,13 @@ from lmcache.v1.multiprocess.token_hasher import (
     rolling_hash_windows_numba,
     unique_hits_direct_id_numba,
     update_table_id_numba,
+)
+from lmcache.v1.platform.base.event_ipc import (
+    create_event,
+    export_event,
+    import_event,
+    record_event,
+    wait_event,
 )
 from lmcache.v1.platform.cuda.cache_context import PlainGPUCacheContext
 
@@ -705,22 +711,11 @@ class BlendModule:
             torch_dev.device(gpu_context.device),
             torch_dev.stream(gpu_context.stream),
         ):
-            # Not all backends support interprocess Events (CUDA IPC specific)
-            check_interprocess_event_support()
-            event = torch_dev.Event(interprocess=True)
+            event = create_event(gpu_context.device)
 
             # Wait for vLLM event to finish
-            # Not all backends support IPC event handles (CUDA IPC specific)
-            if not hasattr(torch_dev.Event, "from_ipc_handle"):
-                raise RuntimeError(
-                    f"Backend '{torch_device_type}' does not support IPC event "
-                    "handles (Event.from_ipc_handle not available). "
-                    "Multiprocess IPC requires CUDA."
-                )
-            vllm_event = torch_dev.Event.from_ipc_handle(
-                gpu_context.device, event_ipc_handle
-            )
-            vllm_event.wait(stream=gpu_context.stream)
+            vllm_event = import_event(event_ipc_handle, gpu_context.device)
+            wait_event(vllm_event, gpu_context.device, gpu_context.stream)
 
             if start_event is not None:
                 self._ctx.event_bus.publish_on_stream(
@@ -756,7 +751,7 @@ class BlendModule:
                     tmp_buffer.copy_(gpu_kv_slice, non_blocking=True)
                     lmcache_memcpy_async_d2h(tmp_buffer, memory_obj)
 
-            event.record()
+            record_event(event, gpu_context.device, gpu_context.stream)
         # Call finish_write after the copy is done
         gpu_context.cupy_stream.launch_host_func(
             self._ctx.storage_manager.finish_write,
@@ -890,7 +885,7 @@ class BlendModule:
                 },
             ),
         )
-        return event.ipc_handle(), True
+        return export_event(event, gpu_context.device), True
 
     def cb_retrieve_pre_computed(
         self,
@@ -954,9 +949,7 @@ class BlendModule:
             torch_dev.device(gpu_context.device),
             torch_dev.stream(gpu_context.stream),
         ):
-            # Not all backends support interprocess Events (CUDA IPC specific)
-            check_interprocess_event_support()
-            event = torch_dev.Event(interprocess=True)
+            event = create_event(gpu_context.device)
 
             self._ctx.event_bus.publish_on_stream(
                 gpu_context.cupy_stream,
@@ -970,6 +963,7 @@ class BlendModule:
                 ),
             )
 
+            retrieve_succeeded = False
             try:
                 with self._ctx.storage_manager.read_prefetched_results(
                     all_obj_keys
@@ -988,22 +982,22 @@ class BlendModule:
                                 },
                             ),
                         )
-                        return event.ipc_handle(), False
-
-                    for r, memory_obj in zip(
-                        cb_match_result, memory_objs, strict=False
-                    ):
-                        gpu_st = r.cur_st + offset
-                        gpu_ed = gpu_st + self._ctx.chunk_size
-                        tmp_buffer = gpu_context.get_tmp_gpu_buffer(
-                            self._ctx.chunk_size
-                        )
-                        target_buffer = gpu_context.slice_kv_cache_on_tokens(
-                            gpu_st, gpu_ed
-                        )
-                        with self._gpu_copy_lock:
-                            lmcache_memcpy_async_h2d(memory_obj, tmp_buffer)
-                            target_buffer.copy_(tmp_buffer, non_blocking=True)
+                    else:
+                        for r, memory_obj in zip(
+                            cb_match_result, memory_objs, strict=False
+                        ):
+                            gpu_st = r.cur_st + offset
+                            gpu_ed = gpu_st + self._ctx.chunk_size
+                            tmp_buffer = gpu_context.get_tmp_gpu_buffer(
+                                self._ctx.chunk_size
+                            )
+                            target_buffer = gpu_context.slice_kv_cache_on_tokens(
+                                gpu_st, gpu_ed
+                            )
+                            with self._gpu_copy_lock:
+                                lmcache_memcpy_async_h2d(memory_obj, tmp_buffer)
+                                target_buffer.copy_(tmp_buffer, non_blocking=True)
+                        retrieve_succeeded = True
 
             except Exception:
                 logger.exception("Error during retrieving prefetched results")
@@ -1019,10 +1013,9 @@ class BlendModule:
                         },
                     ),
                 )
-                return event.ipc_handle(), False
 
             finally:
-                event.record()
+                record_event(event, gpu_context.device, gpu_context.stream)
                 # TODO: here we simply "unlock" all the keys, which may cause
                 # double-unlock if error happens during read_prefetched_results.
                 # We should consider not unlocking objects in read_prefetched_results
@@ -1031,6 +1024,9 @@ class BlendModule:
                     self._ctx.storage_manager.finish_read_prefetched,
                     all_obj_keys,
                 )
+
+        if not retrieve_succeeded:
+            return export_event(event, gpu_context.device), False
 
         logger.info(
             "Retrieved pre-computed for %d match results to GPU offset starting at %d",
@@ -1049,7 +1045,7 @@ class BlendModule:
                 },
             ),
         )
-        return event.ipc_handle(), True
+        return export_event(event, gpu_context.device), True
 
     def cb_store_final(
         self,
@@ -1182,4 +1178,4 @@ class BlendModule:
                 },
             ),
         )
-        return event.ipc_handle(), True
+        return export_event(event, gpu_context.device), True

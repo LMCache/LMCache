@@ -69,12 +69,16 @@ def test_failed_retrieve_waits_for_device_result_and_fails_closed(
     worker._mq_client = MagicMock(name="mq_client")
     worker._mq_timeout = 5.0
     worker._instance_id = 42
+    worker._device = "cpu"
     worker._create_key = MagicMock(return_value=SimpleNamespace())
 
     event = MagicMock(name="event")
     event.ipc_handle.return_value = b"producer-event"
-    monkeypatch.setattr(module, "check_interprocess_event_support", MagicMock())
-    monkeypatch.setattr(module.torch_dev, "Event", MagicMock(return_value=event))
+    monkeypatch.setattr(module, "create_event", MagicMock(return_value=event))
+    monkeypatch.setattr(module, "record_event", MagicMock())
+    monkeypatch.setattr(
+        module, "export_event", lambda event, device: event.ipc_handle()
+    )
 
     device_future = MagicMock(name="device_future")
     device_future.result.return_value = False

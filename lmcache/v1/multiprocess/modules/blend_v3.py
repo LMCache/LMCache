@@ -27,9 +27,8 @@ import numpy as np
 import torch
 
 # First Party
-from lmcache import device_ops, torch_dev, torch_device_type
+from lmcache import device_ops, torch_dev
 from lmcache.logging import init_logger
-from lmcache.utils import check_interprocess_event_support
 from lmcache.v1.distributed.api import (
     AttnWindowDesc,
     GroupKind,
@@ -68,6 +67,13 @@ from lmcache.v1.multiprocess.token_hasher import (
     update_table_id_numba,
 )
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
+from lmcache.v1.platform.base.event_ipc import (
+    create_event,
+    export_event,
+    import_event,
+    record_event,
+    wait_event,
+)
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
@@ -2533,10 +2539,9 @@ class BlendV3Module(InstanceLivenessTarget):
                 torch_dev.device(gpu_context.device),
                 torch_dev.stream(gpu_context.stream),
             ):
-                check_interprocess_event_support()
-                done_event = torch_dev.Event(interprocess=True)
-                done_event.record()
-                handle = done_event.ipc_handle()
+                done_event = create_event(gpu_context.device)
+                record_event(done_event, gpu_context.device, gpu_context.stream)
+                handle = export_event(done_event, gpu_context.device)
             self._event_bus.publish(
                 Event(
                     event_type=EventType.CB_REQUEST_END,
@@ -2662,8 +2667,7 @@ class BlendV3Module(InstanceLivenessTarget):
             torch_dev.device(gpu_context.device),
             torch_dev.stream(retrieve_stream),
         ):
-            check_interprocess_event_support()
-            event = torch_dev.Event(interprocess=True)
+            event = create_event(gpu_context.device)
 
             # Resolve each kernel group's block table + block size once, selected
             # by engine_group_idx (kernel groups may share one). CPU tables only;
@@ -2699,16 +2703,8 @@ class BlendV3Module(InstanceLivenessTarget):
                 ),
             )
 
-            if not hasattr(torch_dev.Event, "from_ipc_handle"):
-                raise RuntimeError(
-                    f"Backend '{torch_device_type}' does not support IPC "
-                    "event handles (Event.from_ipc_handle not available). "
-                    "Multiprocess IPC requires CUDA."
-                )
-            vllm_event = torch_dev.Event.from_ipc_handle(
-                gpu_context.device, event_ipc_handle
-            )
-            vllm_event.wait(stream=retrieve_stream)
+            vllm_event = import_event(event_ipc_handle, gpu_context.device)
+            wait_event(vllm_event, gpu_context.device, retrieve_stream)
 
             # Stage marks for the scatter_ms log line (CPU enqueue wall time):
             # fetch = L1 prefetched read, plan = flat-plan table build,
@@ -2724,8 +2720,8 @@ class BlendV3Module(InstanceLivenessTarget):
                         # Read failed: return a valid server event + False, never
                         # the client's own handle (self-import raises
                         # cudaErrorDeviceUninitialized, crashing TP).
-                        event.record()
-                        return event.ipc_handle(), False
+                        record_event(event, gpu_context.device, retrieve_stream)
+                        return export_event(event, gpu_context.device), False
 
                     # Per-token scatter handles any cur_st. Each match owns n_read
                     # consecutive memory objects (chunk-major).
@@ -2913,10 +2909,10 @@ class BlendV3Module(InstanceLivenessTarget):
                 )
                 # Valid server event + False (never echo the client handle; see
                 # the memory_objs-None path above).
-                event.record()
-                return event.ipc_handle(), False
+                record_event(event, gpu_context.device, retrieve_stream)
+                return export_event(event, gpu_context.device), False
 
-            event.record()
+            record_event(event, gpu_context.device, retrieve_stream)
             self._event_bus.publish_on_stream(
                 gpu_context.cupy_stream,
                 Event(
@@ -2956,4 +2952,4 @@ class BlendV3Module(InstanceLivenessTarget):
                 session_id=key.request_id,
             ),
         )
-        return event.ipc_handle(), True
+        return export_event(event, gpu_context.device), True

@@ -3,7 +3,7 @@
 # Standard
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, NoReturn, Protocol
+from typing import TYPE_CHECKING, Any, Callable, NoReturn, cast
 import enum
 import os
 import threading
@@ -35,10 +35,12 @@ from lmcache.v1.multiprocess.transfer_context import (
     create_transfer_context,
 )
 from lmcache.v1.periodic_thread import PeriodicThread, ThreadLevel, ThreadRunSummary
+from lmcache.v1.platform.base.event_ipc import create_event, record_event
 
 if TYPE_CHECKING:
     # First Party
     from lmcache.integration.vllm.experimental import Dispatcher
+    from lmcache.v1.multiprocess.transfer_context.worker_transfer import IPCEvent
 
 logger = init_logger(__name__)
 
@@ -129,12 +131,6 @@ def _resolve_extra_config(
             )
         resolved[item.name] = value
     return resolved
-
-
-class _IpcEvent(Protocol):
-    def ipc_handle(self) -> Any: ...
-
-    def wait(self, stream: Any = None) -> None: ...
 
 
 def send_lmcache_request(
@@ -1115,10 +1111,10 @@ class LMCacheMPWorkerAdapter:
         self.retrieve_futures: dict[
             str, tuple[MessagingFuture[RetrieveResult], list[int]]
         ] = {}
-        # The IPC handle is not enough by itself; CUDA needs the exporting
-        # event object to stay alive until the consumer is done with it.
-        self.store_events: dict[str, _IpcEvent] = {}
-        self.retrieve_events: dict[str, _IpcEvent] = {}
+        # The IPC handle is not enough by itself; the exporting event object
+        # must stay alive until the consumer is done with it.
+        self.store_events: dict[str, object] = {}
+        self.retrieve_events: dict[str, object] = {}
 
         # Block IDs that failed due to retrieve timeout
         self.error_block_ids: set[int] = set()
@@ -1270,6 +1266,30 @@ class LMCacheMPWorkerAdapter:
     def _block_ids_per_group(self, op: LoadStoreOp) -> list[list[int]]:
         return expand_engine_block_ids(self.engine_group_infos, op.block_ids)
 
+    def create_and_record_event(self, stream: object | None = None) -> IPCEvent:
+        """Create and record a producer event for this worker's KV device.
+
+        Args:
+            stream: Stream that should record the event. ``None`` means the
+                active backend's current stream.
+
+        Returns:
+            A backend-native event object.
+
+        Raises:
+            RuntimeError: If KV caches are not registered or event IPC is
+                unsupported for their device.
+        """
+        if not self.kv_caches:
+            raise RuntimeError(
+                "KV caches are not registered. Call register_kv_caches() "
+                "before creating transfer events."
+            )
+        device = next(iter(self.kv_caches.values())).device
+        event = create_event(device)
+        record_event(event, device, stream)
+        return cast(IPCEvent, event)
+
     def _send_register_kv_caches_request(
         self,
         kv_caches: dict[str, torch.Tensor],
@@ -1400,7 +1420,7 @@ class LMCacheMPWorkerAdapter:
         self,
         request_id: str,
         op: LoadStoreOp,
-        event: _IpcEvent,
+        event: IPCEvent,
         cache_salt: str = "",
     ):
         """
@@ -1409,8 +1429,8 @@ class LMCacheMPWorkerAdapter:
         Args:
             request_id: The ID of the request
             op: The LoadStoreOp describing the store operation.
-            event: The CUDA event that is recorded after the current
-                model inference step
+            event: The device event that is recorded after the current model
+                inference step.
             cache_salt: Per-user isolation salt.
         """
         self._ensure_heartbeat_started()
@@ -1451,7 +1471,7 @@ class LMCacheMPWorkerAdapter:
         self,
         request_id: str,
         op: LoadStoreOp,
-        event: _IpcEvent,
+        event: IPCEvent,
         cache_salt: str = "",
     ) -> None:
         """
@@ -1464,8 +1484,8 @@ class LMCacheMPWorkerAdapter:
         Args:
             request_id: The ID of the request
             op: The LoadStoreOp describing the retrieve operation.
-            event: The CUDA event that is recorded after the current
-                model inference step
+            event: The device event that is recorded after the current model
+                inference step.
             cache_salt: Per-user isolation salt.
         """
         self._ensure_heartbeat_started()
@@ -1506,7 +1526,7 @@ class LMCacheMPWorkerAdapter:
         self,
         request_ids: list[str],
         ops: list[LoadStoreOp],
-        event: _IpcEvent,
+        event: IPCEvent,
         cache_salts: list[str] | None = None,
     ):
         """
@@ -1516,8 +1536,8 @@ class LMCacheMPWorkerAdapter:
             request_ids: The IDs of the requests
             ops: The LoadStoreOps describing the store operations. Should have
                 the same length as request_ids
-            event: The CUDA event that is recorded after the current
-                model inference step
+            event: The device event that is recorded after the current model
+                inference step.
             cache_salts: Per-user isolation salts, one per request. If None,
                 all requests use cache_salt="". The list length should be the same as
                 request_ids.
@@ -1532,7 +1552,7 @@ class LMCacheMPWorkerAdapter:
         self,
         request_ids: list[str],
         ops: list[LoadStoreOp],
-        event: _IpcEvent,
+        event: IPCEvent,
         cache_salts: list[str] | None = None,
     ):
         """
@@ -1542,8 +1562,8 @@ class LMCacheMPWorkerAdapter:
             request_ids: The IDs of the requests
             ops: The LoadStoreOps describing the retrieve operations. Should have
                 the same length as request_ids
-            event: The CUDA event that is recorded after the current
-                model inference step
+            event: The device event that is recorded after the current model
+                inference step.
             cache_salts: Per-user isolation salts, one per request. If None,
                 all requests use cache_salt="". The list length should be same as
                 request_ids.

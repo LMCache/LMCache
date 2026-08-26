@@ -272,3 +272,91 @@ def get_event_ipc_backend(device: object) -> EventIPCBackend:
     if backend is None:
         raise RuntimeError(f"Device type {device_type!r} does not support event IPC.")
     return backend
+
+
+def check_event_support(device: object) -> None:
+    """Validate that event IPC is available for ``device``.
+
+    Args:
+        device: Device whose platform backend must support event IPC.
+
+    Raises:
+        RuntimeError: If the device has no event IPC backend or the backend
+            cannot provide event IPC support.
+    """
+    get_event_ipc_backend(device).check_event_support(device)
+
+
+def create_event(device: object) -> object:
+    """Create an interprocess event using ``device``'s platform backend.
+
+    Args:
+        device: Device on which to create the event.
+
+    Returns:
+        A backend-native event object.
+
+    Raises:
+        RuntimeError: If the device backend cannot provide event IPC support.
+    """
+    backend = get_event_ipc_backend(device)
+    backend.check_event_support(device)
+    return backend.create_event(device)
+
+
+def export_event(event: object, device: object) -> bytes:
+    """Serialize ``event`` using ``device``'s platform backend.
+
+    Args:
+        event: Backend-native event to export.
+        device: Device that owns the event.
+
+    Returns:
+        Serialized event handle.
+    """
+    return get_event_ipc_backend(device).export_event(event, device)
+
+
+def import_event(handle: bytes, device: object) -> object:
+    """Import ``handle`` using ``device``'s platform backend.
+
+    Args:
+        handle: Serialized event handle.
+        device: Device on which to import the event.
+
+    Returns:
+        A backend-native event object.
+    """
+    return get_event_ipc_backend(device).import_event(handle, device)
+
+
+def record_event(
+    event: object,
+    device: object,
+    stream: object | None = None,
+) -> None:
+    """Record ``event`` on ``stream`` using ``device``'s platform backend.
+
+    Args:
+        event: Backend-native event to record.
+        device: Device that owns the event.
+        stream: Stream that should record the event; ``None`` means the
+            backend's current stream.
+    """
+    get_event_ipc_backend(device).record_event(event, stream)
+
+
+def wait_event(
+    event: object,
+    device: object,
+    stream: object | None = None,
+) -> None:
+    """Make ``stream`` wait for ``event`` using ``device``'s platform backend.
+
+    Args:
+        event: Backend-native event to wait for.
+        device: Device that owns the event.
+        stream: Stream that should wait for the event; ``None`` means the
+            backend's current stream.
+    """
+    get_event_ipc_backend(device).wait_event(event, stream)

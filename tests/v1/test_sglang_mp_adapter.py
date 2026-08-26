@@ -278,6 +278,15 @@ def test_store_kv_async_happy_path_returns_daemon_future_without_blocking(
 
     sentinel = _SpyFuture()
     monkeypatch.setattr(adapter_mod, "torch_dev", _FakeTorchDev)
+    monkeypatch.setattr(adapter_mod, "create_event", lambda device: _FakeEvent())
+    monkeypatch.setattr(
+        adapter_mod,
+        "record_event",
+        lambda event, device, stream: event.record(stream),
+    )
+    monkeypatch.setattr(
+        adapter_mod, "export_event", lambda event, device: event.ipc_handle()
+    )
     monkeypatch.setattr(
         adapter_mod,
         "send_lmcache_request",
@@ -308,6 +317,15 @@ def test_submit_retrieve_retains_exported_device_event(monkeypatch) -> None:
     sentinel = _SpyFuture()
     raw = _FakeRaw(sentinel)
     monkeypatch.setattr(adapter_mod, "torch_dev", _FakeTorchDev)
+    monkeypatch.setattr(adapter_mod, "create_event", lambda device: _FakeEvent())
+    monkeypatch.setattr(
+        adapter_mod,
+        "record_event",
+        lambda event, device, stream: event.record(stream),
+    )
+    monkeypatch.setattr(
+        adapter_mod, "export_event", lambda event, device: event.ipc_handle()
+    )
     monkeypatch.setattr(
         adapter_mod,
         "send_lmcache_request",

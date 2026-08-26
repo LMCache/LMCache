@@ -45,6 +45,7 @@ def _stub_registration(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     create = MagicMock(return_value=MagicMock(num_layers=2))
     monkeypatch.setattr(qstore_mod, "create_cache_context", create)
     monkeypatch.setattr(qstore_mod, "get_layout_desc", lambda *a, **kw: MagicMock())
+    monkeypatch.setattr(qstore_mod, "check_event_support", lambda device: None)
     return create
 
 
@@ -158,7 +159,7 @@ class _FakeEvent:
         self.records = 0
         _FakeEvent.created.append(self)
 
-    def record(self) -> None:
+    def record(self, stream=None) -> None:
         self.records += 1
 
     def ipc_handle(self) -> bytes:
@@ -172,6 +173,28 @@ class _FakeEvent:
         return cls()
 
 
+class _FakeEventBackend:
+    def __init__(self) -> None:
+        self.created: list[_FakeEvent] = []
+
+    def create_event(self, device) -> _FakeEvent:
+        event = _FakeEvent()
+        self.created.append(event)
+        return event
+
+    def record_event(self, event: _FakeEvent, device, stream=None) -> None:
+        event.record(stream)
+
+    def export_event(self, event: _FakeEvent, device) -> bytes:
+        return event.ipc_handle()
+
+    def import_event(self, handle: bytes, device) -> _FakeEvent:
+        return _FakeEvent.from_ipc_handle(device, handle)
+
+    def wait_event(self, event: _FakeEvent, device, stream=None) -> None:
+        event.wait(stream)
+
+
 @pytest.fixture
 def stub_device(monkeypatch):
     """Replace the device module so store_q runs on CPU."""
@@ -181,13 +204,19 @@ def stub_device(monkeypatch):
         yield
 
     _FakeEvent.created.clear()
+    backend = _FakeEventBackend()
     monkeypatch.setattr(
         qstore_mod,
         "torch_dev",
         SimpleNamespace(device=_null, stream=_null, Event=_FakeEvent),
     )
-    monkeypatch.setattr(qstore_mod, "check_interprocess_event_support", lambda: None)
-    return _FakeEvent.created
+    monkeypatch.setattr(qstore_mod, "check_event_support", lambda device: None)
+    monkeypatch.setattr(qstore_mod, "create_event", backend.create_event)
+    monkeypatch.setattr(qstore_mod, "record_event", backend.record_event)
+    monkeypatch.setattr(qstore_mod, "export_event", backend.export_event)
+    monkeypatch.setattr(qstore_mod, "import_event", backend.import_event)
+    monkeypatch.setattr(qstore_mod, "wait_event", backend.wait_event)
+    return backend
 
 
 def test_store_q_unregistered_instance_raises() -> None:
@@ -215,7 +244,7 @@ def test_store_q_block_id_underflow_fails_closed(stub_device) -> None:
 
     assert ok is False
     assert handle == b"event-handle"
-    assert stub_device[0].records == 1
+    assert stub_device.created[0].records == 1
     cast(MagicMock, ctx.storage_manager.reserve_write).assert_not_called()
     cast(MagicMock, ctx.event_bus.publish).assert_not_called()
 

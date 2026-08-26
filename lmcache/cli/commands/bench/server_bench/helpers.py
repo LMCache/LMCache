@@ -45,10 +45,7 @@ try:
     import zmq  # noqa: F401  # availability probe; used by command.py
 
     # First Party
-    from lmcache.utils import (
-        EngineType,
-        check_interprocess_event_support,
-    )
+    from lmcache.utils import EngineType
     from lmcache.v1.kv_layer_groups import (
         DTYPE_MAP,
         KVLayerGroupInfo,
@@ -67,6 +64,11 @@ try:
         RegisterEngineDrivenContextResponse,
     )
     from lmcache.v1.multiprocess.transfer_context.shm import ShmSlotDescriptor
+    from lmcache.v1.platform.base.event_ipc import (
+        create_event,
+        export_event,
+        record_event,
+    )
     from lmcache.v1.platform.cpu.shm import (
         CpuShmTensorWrapper,
         shm_create_readwrite,
@@ -620,10 +622,10 @@ def _make_event_handle(use_gpu: bool = True) -> bytes:
     """
     if not use_gpu:
         return b""
-    check_interprocess_event_support()
-    event = torch_dev.Event(interprocess=True)
-    event.record()
-    return event.ipc_handle()
+    device = torch_dev.current_device()
+    event = create_event(device)
+    record_event(event, device)
+    return export_event(event, device)
 
 
 def _build_server_slot_views(
