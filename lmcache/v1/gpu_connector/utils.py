@@ -264,8 +264,15 @@ def normalize_and_discover_per_layer_formats(
                 serving_engine,
                 layout_hints,
             )
-            for sub_idx, layer_idx in enumerate(same_shape_indices):
-                detected[layer_idx] = (normalized[sub_idx], fmt)
+            if lmcache_native.is_layer_list(fmt):
+                for sub_idx, layer_idx in enumerate(same_shape_indices):
+                    detected[layer_idx] = (normalized[sub_idx], fmt)
+            else:
+                # Cross-layer (e.g. reconstructed blocks-first): one tensor
+                # covers the whole sub-group; identity grouping downstream
+                # folds the repeated entries back into one group.
+                for layer_idx in same_shape_indices:
+                    detected[layer_idx] = (normalized, fmt)
 
     # A layer in no group (cross-layer KV sharing) keeps its own tensor and is
     # skipped downstream; give it any detected format so every layer has one.
