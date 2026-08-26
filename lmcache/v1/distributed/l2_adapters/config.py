@@ -180,6 +180,11 @@ class L2AdapterConfigBase(ABC):
     #: Defaults to ``PersistConfig()`` (persist enabled).
     persist_config: PersistConfig = PersistConfig()
 
+    #: Stable identifier used by placement policies that must survive process
+    #: restarts and adapter reordering. Backends without a persistent identity
+    #: leave this as ``None`` and cannot participate in those policies.
+    placement_id: str | None = None
+
     #: Populated by ``_parse_serde_config`` after ``from_dict``; ``None``
     #: means serde is disabled for this adapter. When set,
     #: ``StorageManager`` wraps the adapter with

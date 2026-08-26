@@ -13,9 +13,14 @@ from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import MockL2AdapterConf
 from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
     DefaultPrefetchPolicy,
     RetainPrefetchPolicy,
+    StripedPrefetchPolicy,
+)
+from lmcache.v1.distributed.storage_controllers.prefetch_controller import (
+    remap_lookup_bitmap,
 )
 from lmcache.v1.distributed.storage_controllers.store_policy import (
     AdapterDescriptor,
+    StripedStorePolicy,
 )
 
 # =============================================================================
@@ -35,6 +40,13 @@ def make_object_key(chunk_id: int) -> ObjectKey:
 def make_descriptor(index: int) -> AdapterDescriptor:
     """Create an AdapterDescriptor for testing."""
     config = MockL2AdapterConfig(max_size_gb=1.0, mock_bandwidth_gb=10.0)
+    return AdapterDescriptor(index=index, config=config)
+
+
+def make_stable_descriptor(index: int, placement_id: str) -> AdapterDescriptor:
+    """Create a descriptor with a persistent placement identifier."""
+    config = MockL2AdapterConfig(max_size_gb=1.0, mock_bandwidth_gb=10.0)
+    config.placement_id = placement_id
     return AdapterDescriptor(index=index, config=config)
 
 
@@ -306,3 +318,32 @@ class TestRetainPrefetchPolicyLoadPlan:
         result = policy.select_load_plan(keys, lookup_results, adapters)
 
         assert plan_to_indices(result) == {0: [0, 1], 1: [2]}
+
+
+class TestStripedPrefetchPolicy:
+    """Targeted lookup must match stable store placement."""
+
+    def test_default_policy_keeps_broadcast_lookup(self) -> None:
+        assert (
+            DefaultPrefetchPolicy().select_lookup_targets(
+                [make_object_key(0)], [make_descriptor(0)]
+            )
+            is None
+        )
+
+    def test_lookup_targets_match_store_targets(self) -> None:
+        keys = [make_object_key(i) for i in range(100)]
+        adapters = [make_stable_descriptor(i, f"disk-{i}") for i in range(4)]
+        stores = StripedStorePolicy().select_store_targets(keys, adapters)
+        lookups = StripedPrefetchPolicy().select_lookup_targets(keys, adapters)
+
+        assert lookups is not None
+        for adapter_index, stored_keys in stores.items():
+            assert [keys[index] for index in lookups[adapter_index]] == stored_keys
+
+    def test_targeted_bitmap_is_remapped_to_global_positions(self) -> None:
+        subset = make_bitmap(3, [0, 2])
+
+        result = remap_lookup_bitmap(subset, [1, 4, 7], 8)
+
+        assert result.get_indices_list() == [1, 7]
