@@ -426,6 +426,13 @@ def get_group_data_ptrs(
     Raises:
         ValueError: If *engine_kv_format* is not recognized.
     """
+    if lmcache_native.is_cross_layer(engine_kv_format):
+        # The group's entries are the reconstructed whole-group tensor, and
+        # its layer axis is local to the group.
+        source = kv_caches[layer_indices[0]]
+        return get_spec(source, engine_kv_format).data_ptrs(
+            list(range(len(layer_indices)))
+        )
     return get_spec(kv_caches, engine_kv_format).data_ptrs(layer_indices)
 
 
