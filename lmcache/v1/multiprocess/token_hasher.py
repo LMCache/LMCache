@@ -16,11 +16,11 @@ from typing import Any, Callable
 import os
 
 # Third Party
-from numba import njit
 import numpy as np
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.numba_utils import njit_cached
 
 logger = init_logger(__name__)
 
@@ -243,7 +243,7 @@ class TokenHasher:
 ### Functions for fast rolling/chunk hash and dict lookup
 
 
-@njit(cache=True)
+@njit_cached
 def rolling_hash_windows_numba(
     arr_u64: np.ndarray, k: int, base: np.uint64
 ) -> np.ndarray:
@@ -307,7 +307,7 @@ def rolling_hash_windows_numba(
     return out
 
 
-@njit(cache=True)
+@njit_cached
 def chunk_hash_windows_numba(arr_u64, k, base):
     """Compute polynomial hashes over non-overlapping (chunked) windows.
 
@@ -351,7 +351,7 @@ def chunk_hash_windows_numba(arr_u64, k, base):
     return out
 
 
-@njit(cache=True)
+@njit_cached
 def update_table_id_numba(
     hashes_u64: np.ndarray,
     table_id_i64: np.ndarray,
@@ -388,7 +388,7 @@ def update_table_id_numba(
         table_id_i64[idx] = vals_to_update[i]
 
 
-@njit(cache=True)
+@njit_cached
 def unique_hits_direct_id_numba(
     hashes_u64: np.ndarray, table_id_i64: np.ndarray, mask_u64: np.uint64, num_ids: int
 ) -> np.ndarray:
