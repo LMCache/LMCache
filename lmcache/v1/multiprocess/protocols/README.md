@@ -74,7 +74,7 @@ If your operation fits an existing category (engine / controller / debug / blend
            # ... existing definitions ...
            "YOUR_NEW_OP": ProtocolDefinition(
                payload_classes=[int, str],  # Your payload types
-               response_class=bool,          # Your response type
+               response_class=bool,  # Your response type
                handler_type=HandlerType.SYNC,  # or BLOCKING
            ),
        }
@@ -101,17 +101,19 @@ If you're adding a new category of operations:
    # SPDX-License-Identifier: Apache-2.0
    """
    Monitoring protocol definitions.
-   
+
    This module defines protocols for:
    - HEALTH_CHECK: Check server health status
    - GET_STATS: Get cache statistics
    """
+
    from lmcache.v1.multiprocess.protocols.base import ProtocolDefinition, HandlerType
 
    REQUEST_NAMES = [
        "HEALTH_CHECK",
        "GET_STATS",
    ]
+
 
    def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
        return {

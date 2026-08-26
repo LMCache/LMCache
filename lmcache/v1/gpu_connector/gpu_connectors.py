@@ -15,6 +15,7 @@ from lmcache.v1.gpu_connector.kv_format.contiguity import (
     attempt_permute_to_contiguous_view,
 )
 from lmcache.v1.gpu_connector.utils import (
+    get_spec,
     DiscoverableKVCache,
     LayoutHints,
     assert_is_vllm_flash_attn_or_flash_infer,
@@ -253,7 +254,8 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
             kv_caches, EngineType.VLLM, layout_hints=self.layout_hints
         )
 
-        self.kv_cache_pointers.numpy()[:] = [t.data_ptr() for t in kv_caches]
+        spec = get_spec(kv_caches, self.engine_kv_format)
+        self.kv_cache_pointers.numpy()[:] = spec.data_ptrs(list(range(self.num_layers)))
         self.kv_cache_pointers_on_gpu[idx] = torch.empty(
             self.num_layers, dtype=torch.int64, device=self.device
         )
@@ -262,6 +264,12 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         self.block_size = get_block_size(kv_caches, self.engine_kv_format)
         self.page_buffer_size = self.num_blocks * self.block_size
         self.head_size = get_head_size(kv_caches, self.engine_kv_format)
+        self.block_stride_elems = (
+            int(kv_caches.stride(0))
+            if lmcache_native.is_cross_layer(self.engine_kv_format)
+            and isinstance(kv_caches, torch.Tensor)
+            else 0
+        )
 
         return self.kv_cache_pointers_on_gpu[idx]
 
@@ -327,6 +335,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
             self.engine_kv_format,
             block_size=self.block_size,
             head_size=self.head_size,
+            block_stride_elems=self.block_stride_elems,
             skip_prefix_n_tokens=skip_prefix_n_tokens,
         )
 
@@ -375,6 +384,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
                     self.engine_kv_format,
                     block_size=self.block_size,
                     head_size=self.head_size,
+                    block_stride_elems=self.block_stride_elems,
                 )
             else:
                 # kvcaches -> gpu_buffer -> memobj
@@ -390,6 +400,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
                     self.engine_kv_format,
                     block_size=self.block_size,
                     head_size=self.head_size,
+                    block_stride_elems=self.block_stride_elems,
                 )
                 memory_obj.tensor.copy_(tmp_gpu_buffer, non_blocking=True)
 
@@ -474,6 +485,12 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         self.block_size = get_block_size(self.kvcaches, self.engine_kv_format)
         self.page_buffer_size = self.num_blocks * self.block_size
         self.head_size = get_head_size(self.kvcaches, self.engine_kv_format)
+        self.block_stride_elems = (
+            int(self.kvcaches.stride(0))
+            if lmcache_native.is_cross_layer(self.engine_kv_format)
+            and isinstance(self.kvcaches, torch.Tensor)
+            else 0
+        )
 
         if self.metadata.kv_layer_groups_manager is None:
             self.metadata.kv_layer_groups_manager = KVLayerGroupsManager(
@@ -565,6 +582,7 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
                 self.engine_kv_format,
                 block_size=self.block_size,
                 head_size=self.head_size,
+                block_stride_elems=self.block_stride_elems,
                 skip_prefix_n_tokens=skip_prefix_n_tokens,
             )
 
@@ -596,6 +614,7 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
                         self.engine_kv_format,
                         block_size=self.block_size,
                         head_size=self.head_size,
+                        block_stride_elems=self.block_stride_elems,
                     )
             else:
                 # kvcaches -> gpu_buffer -> memobj
@@ -614,6 +633,7 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
                         self.engine_kv_format,
                         block_size=self.block_size,
                         head_size=self.head_size,
+                        block_stride_elems=self.block_stride_elems,
                     )
                     memory_obj_tensor = memory_obj.get_tensor(i)
                     assert memory_obj_tensor is not None

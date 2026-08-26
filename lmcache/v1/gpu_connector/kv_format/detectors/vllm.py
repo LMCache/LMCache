@@ -98,9 +98,9 @@ def _reconstruct_blocks_first(
 
     if tuple(base.stride()[1:]) != tuple(tight_inner):
         raise _drift("per-(layer, block) content is not contiguous")
-    if base.stride(0) != num_layers * chunk:
+    if base.stride(0) < num_layers * chunk:
         raise _drift(
-            f"block step {base.stride(0)} != num_layers * per-layer block "
+            f"block step {base.stride(0)} < num_layers * per-layer block "
             f"chunk {num_layers * chunk}"
         )
     storage_ptr = base.untyped_storage().data_ptr()
@@ -112,9 +112,11 @@ def _reconstruct_blocks_first(
         if t.storage_offset() != base.storage_offset() + i * chunk:
             raise _drift(f"layer {i} is not at offset base + {i} * chunk")
 
+    # HMA pools shared with other groups pad the block step past this
+    # group's layers; keep the observed step so addressing stays honest.
     full = base.as_strided(
         (base.shape[0], num_layers, *inner),
-        (num_layers * chunk, chunk, *tight_inner),
+        (base.stride(0), chunk, *tight_inner),
         storage_offset=base.storage_offset(),
     )
     return fmt, full

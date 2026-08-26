@@ -216,8 +216,11 @@ class KVFormatSpec(ABC):
         """Return device pointers for ``layer_indices`` in kernel-expected order.
 
         Per-layer formats: one pointer per layer. SGLang two-list MHA: all K
-        pointers then all V. Cross-layer: a single base pointer (the kernel
-        walks layers itself, so ``layer_indices`` is ignored).
+        pointers then all V. Cross-layer with a K/V axis: a single base
+        pointer (the kernel walks layers itself, so ``layer_indices`` is
+        ignored). Blocks-first fused cross-layer: one pointer per layer, one
+        (layer, block) chunk apart, since the transfer kernels index the
+        pointer array by layer.
         """
 
     def concrete_shape_str(self) -> str:
