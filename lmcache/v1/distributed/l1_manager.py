@@ -92,29 +92,29 @@ L1OperationResult = tuple[L1Error, MemoryObj | None]
 MAX_READ_LOCK_COUNT = 128
 
 
-def _validate_shares(shares: int) -> int:
+def _validate_read_locks(read_locks: int) -> int:
     """Validate and clamp a per-key read-lock count.
 
     Args:
-        shares: Total read locks to take or release per key.
+        read_locks: Total read locks to take or release per key.
 
     Returns:
         Clamped value in [1, MAX_READ_LOCK_COUNT].
     """
-    if shares < 1:
+    if read_locks < 1:
         logger.warning(
-            "L1Manager: shares=%d is invalid, clamping to 1",
-            shares,
+            "L1Manager: read_locks=%d is invalid, clamping to 1",
+            read_locks,
         )
         return 1
-    if shares > MAX_READ_LOCK_COUNT:
+    if read_locks > MAX_READ_LOCK_COUNT:
         logger.warning(
-            "L1Manager: shares=%d exceeds limit=%d, clamping",
-            shares,
+            "L1Manager: read_locks=%d exceeds limit=%d, clamping",
+            read_locks,
             MAX_READ_LOCK_COUNT,
         )
         return MAX_READ_LOCK_COUNT
-    return shares
+    return read_locks
 
 
 def _l1_usage_ratio_or_zero(target: "L1Manager | None") -> float:
@@ -246,14 +246,14 @@ class L1Manager:
     def reserve_read(
         self,
         keys: list[ObjectKey],
-        shares: int = 1,
+        read_locks: int = 1,
     ) -> dict[ObjectKey, L1OperationResult]:
         """Reserve read access for the given keys.
 
         Args:
             keys: The list of object keys to reserve
                 read access for.
-            shares: Total read locks acquired per key --
+            read_locks: Total read locks acquired per key --
                 one per worker that consumes a read lock
                 for the same key (e.g. MLA models with
                 TP > 1).
@@ -267,7 +267,7 @@ class L1Manager:
             KEY_NOT_READABLE: The key exists but is not
                 readable.
         """
-        total = _validate_shares(shares)
+        total = _validate_read_locks(read_locks)
         ret: dict[ObjectKey, L1OperationResult] = {}
         successful_keys: list[ObjectKey] = []
         for key in keys:
@@ -340,7 +340,7 @@ class L1Manager:
     def finish_read(
         self,
         keys: list[ObjectKey],
-        shares: int = 1,
+        read_locks: int = 1,
     ) -> dict[ObjectKey, L1Error]:
         """Finish read access for the given keys.
 
@@ -350,8 +350,8 @@ class L1Manager:
         Args:
             keys: The list of object keys to finish read
                 access for.
-            shares: Read locks to release per key.  A caller
-                releasing only its own share passes 1 (the
+            read_locks: Read locks to release per key.  A caller
+                releasing only its own read lock passes 1 (the
                 default); the reservation owner releasing the
                 whole reservation passes the ``reserve_read``
                 total.
@@ -366,7 +366,7 @@ class L1Manager:
                 non-read-locked, which means the reader may
                 read inconsistent data.
         """
-        total = _validate_shares(shares)
+        total = _validate_read_locks(read_locks)
         need_to_free: list[MemoryObj] = []
         need_to_free_keys: list[ObjectKey] = []
         ret: dict[ObjectKey, L1Error] = {}
@@ -598,7 +598,7 @@ class L1Manager:
     def finish_write_and_reserve_read(
         self,
         keys: list[ObjectKey],
-        shares: int = 1,
+        read_locks: int = 1,
     ) -> dict[ObjectKey, L1OperationResult]:
         """Atomically finish write and acquire read lock for the given keys.
 
@@ -609,7 +609,7 @@ class L1Manager:
 
         Args:
             keys: Keys to transition from write-locked to read-locked.
-            shares: Total read locks acquired per key -- one per TP
+            read_locks: Total read locks acquired per key -- one per TP
                 worker that consumes a read lock for the same key
                 (e.g. MLA models with TP > 1).
 
@@ -622,7 +622,7 @@ class L1Manager:
             KEY_IN_WRONG_STATE: The key is not write-locked, or it already
                 has read locks.
         """
-        total = _validate_shares(shares)
+        total = _validate_read_locks(read_locks)
         ret: dict[ObjectKey, L1OperationResult] = {}
         successful_keys: list[ObjectKey] = []
         successful_keys_meta: list[L1ObjectMeta] = []

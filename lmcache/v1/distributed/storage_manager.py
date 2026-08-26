@@ -384,16 +384,16 @@ class StorageManager:
     def finish_read_prefetched(
         self,
         keys: list[ObjectKey],
-        shares: int = 1,
+        read_locks: int = 1,
     ) -> None:
         """Finish reading prefetched objects.
 
         Args:
             keys: Object keys that have been read.
-            shares: Read locks to release per key (the whole
+            read_locks: Read locks to release per key (the whole
                 reservation when releasing a lookup's locks).
         """
-        finish_result = self._l1_manager.finish_read(keys, shares=shares)
+        finish_result = self._l1_manager.finish_read(keys, read_locks=read_locks)
         successful_keys = [k for k, e in finish_result.items() if e == L1Error.SUCCESS]
         failed_keys = [k for k, e in finish_result.items() if e != L1Error.SUCCESS]
         self._event_bus.publish(
@@ -449,7 +449,9 @@ class StorageManager:
         # NOTE: now we only have L1, so the prefetch is essentially checking how many
         # objects are already in L1, and adding read locks to them.
 
-        l1_read_result = self._l1_manager.reserve_read(keys, shares=spec.num_kv_readers)
+        l1_read_result = self._l1_manager.reserve_read(
+            keys, read_locks=spec.num_kv_readers
+        )
 
         if spec.policy is TrimPolicy.SPARSE:
             # SPARSE: retain a read lock on every L1 hit (not just the leading
@@ -557,7 +559,7 @@ class StorageManager:
         released_bitmap = l1_presence & (~retain)
         released = released_bitmap.gather(keys)
         if released:
-            self._l1_manager.finish_read(released, shares=spec.num_kv_readers)
+            self._l1_manager.finish_read(released, read_locks=spec.num_kv_readers)
 
         # Keys from chunk l1_hit_chunks onwards are candidates for L2.
         l1_key_boundary = l1_hit_chunks * stride

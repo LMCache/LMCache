@@ -280,8 +280,8 @@ class TestReserveRead:
 
         manager.close()
 
-    def test_reserve_read_with_multiple_shares(self, basic_l1_config, basic_layout):
-        """Test reserve_read(shares=N) acquires N locks."""
+    def test_reserve_read_with_multiple_read_locks(self, basic_l1_config, basic_layout):
+        """Test reserve_read(read_locks=N) acquires N locks."""
         manager = L1Manager(basic_l1_config)
         key = make_object_key(12345)
 
@@ -289,8 +289,8 @@ class TestReserveRead:
         manager.reserve_write([key], [False], basic_layout)
         manager.finish_write([key])
 
-        # Reserve with shares=3 -> 3 locks
-        result = manager.reserve_read([key], shares=3)
+        # Reserve with read_locks=3 -> 3 locks
+        result = manager.reserve_read([key], read_locks=3)
         assert result[key][0] == L1Error.SUCCESS
         assert result[key][1] is not None
 
@@ -312,8 +312,10 @@ class TestReserveRead:
 
         manager.close()
 
-    def test_reserve_read_default_is_single_share(self, basic_l1_config, basic_layout):
-        """Default shares=1 acquires exactly 1 lock."""
+    def test_reserve_read_default_is_single_read_lock(
+        self, basic_l1_config, basic_layout
+    ):
+        """Default read_locks=1 acquires exactly 1 lock."""
         manager = L1Manager(basic_l1_config)
         key = make_object_key(12345)
 
@@ -673,10 +675,10 @@ class TestFinishRead:
 
         manager.close()
 
-    def test_finish_read_with_multiple_shares_releases_multiple(
+    def test_finish_read_with_multiple_read_locks_releases_multiple(
         self, basic_l1_config, basic_layout
     ):
-        """finish_read(shares=3) releases 3 locks at once."""
+        """finish_read(read_locks=3) releases 3 locks at once."""
         manager = L1Manager(basic_l1_config)
         key = make_object_key(12345)
 
@@ -684,11 +686,11 @@ class TestFinishRead:
         manager.reserve_write([key], [False], basic_layout)
         manager.finish_write([key])
 
-        # Acquire 3 read locks (shares=3)
-        manager.reserve_read([key], shares=3)
+        # Acquire 3 read locks (read_locks=3)
+        manager.reserve_read([key], read_locks=3)
 
         # Release all 3 at once
-        result = manager.finish_read([key], shares=3)
+        result = manager.finish_read([key], read_locks=3)
         assert result[key] == L1Error.SUCCESS
 
         state = manager.get_object_state(key)
@@ -697,24 +699,24 @@ class TestFinishRead:
 
         manager.close()
 
-    def test_finish_read_partial_share_release(self, basic_l1_config, basic_layout):
-        """Partial share release leaves remaining locks."""
+    def test_finish_read_partial_read_lock_release(self, basic_l1_config, basic_layout):
+        """Partial read-lock release leaves remaining locks."""
         manager = L1Manager(basic_l1_config)
         key = make_object_key(12345)
 
         manager.reserve_write([key], [False], basic_layout)
         manager.finish_write([key])
 
-        # 3 locks total (shares=3)
-        manager.reserve_read([key], shares=3)
+        # 3 locks total (read_locks=3)
+        manager.reserve_read([key], read_locks=3)
 
-        # Release 2 of 3 (shares=2)
-        manager.finish_read([key], shares=2)
+        # Release 2 of 3 (read_locks=2)
+        manager.finish_read([key], read_locks=2)
         state = manager.get_object_state(key)
         assert state is not None
         assert state.read_lock.is_locked()
 
-        # Release last one (shares=1)
+        # Release last one (read_locks=1)
         manager.finish_read([key])
         state = manager.get_object_state(key)
         assert state is not None
@@ -722,10 +724,10 @@ class TestFinishRead:
 
         manager.close()
 
-    def test_finish_read_all_shares_deletes_temporary(
+    def test_finish_read_all_read_locks_deletes_temporary(
         self, basic_l1_config, basic_layout
     ):
-        """Temp objects deleted when the release covers all shares."""
+        """Temp objects deleted when the release covers all read locks."""
         manager = L1Manager(basic_l1_config)
         key = make_object_key(12345)
 
@@ -733,18 +735,18 @@ class TestFinishRead:
         manager.reserve_write([key], [True], basic_layout)
         manager.finish_write([key])
 
-        # Acquire 3 read locks at once (shares=3)
-        manager.reserve_read([key], shares=3)
+        # Acquire 3 read locks at once (read_locks=3)
+        manager.reserve_read([key], read_locks=3)
         assert manager.get_object_state(key) is not None
 
         # Release all 3 at once -> temp deleted
-        result = manager.finish_read([key], shares=3)
+        result = manager.finish_read([key], read_locks=3)
         assert result[key] == L1Error.SUCCESS
         assert manager.get_object_state(key) is None
 
         manager.close()
 
-    def test_finish_read_temp_survives_partial_shares(
+    def test_finish_read_temp_survives_partial_read_locks(
         self, basic_l1_config, basic_layout
     ):
         """Temp object survives a partial share release."""
@@ -754,15 +756,15 @@ class TestFinishRead:
         manager.reserve_write([key], [True], basic_layout)
         manager.finish_write([key])
 
-        # 4 locks total (shares=4)
-        manager.reserve_read([key], shares=4)
+        # 4 locks total (read_locks=4)
+        manager.reserve_read([key], read_locks=4)
 
         # Release 2 of 4 -> still locked
-        manager.finish_read([key], shares=2)
+        manager.finish_read([key], read_locks=2)
         assert manager.get_object_state(key) is not None
 
         # Release remaining 2 -> deleted
-        manager.finish_read([key], shares=2)
+        manager.finish_read([key], read_locks=2)
         assert manager.get_object_state(key) is None
 
         manager.close()
@@ -1600,18 +1602,18 @@ class TestStateMachineTransitions:
         """Full lifecycle of a shared key (MLA TP>1 scenario).
 
         Simulates multiple workers sharing the same key:
-        reserve_read(shares=N) acquires N locks,
-        finish_read(shares=N) releases them all.
+        reserve_read(read_locks=N) acquires N locks,
+        finish_read(read_locks=N) releases them all.
         """
         manager = L1Manager(basic_l1_config)
         key = make_object_key(12345)
-        shares = 4
+        read_locks = 4
 
         # write -> ready
         manager.reserve_write([key], [False], basic_layout)
         manager.finish_write([key])
 
-        result = manager.reserve_read([key], shares=shares)
+        result = manager.reserve_read([key], read_locks=read_locks)
         assert result[key][0] == L1Error.SUCCESS
 
         # unsafe_read should work while read-locked
@@ -1619,7 +1621,7 @@ class TestStateMachineTransitions:
         assert ur[key][0] == L1Error.SUCCESS
 
         # finish_read releasing the whole reservation
-        fr = manager.finish_read([key], shares=shares)
+        fr = manager.finish_read([key], read_locks=read_locks)
         assert fr[key] == L1Error.SUCCESS
 
         # All locks released -> writable again
@@ -1630,18 +1632,18 @@ class TestStateMachineTransitions:
         manager.close()
 
     def test_temp_object_multi_reader_deletion(self, basic_l1_config, basic_layout):
-        """Temporary object deleted after all shares are released."""
+        """Temporary object deleted after all read locks are released."""
         manager = L1Manager(basic_l1_config)
         key = make_object_key(12345)
-        shares = 3
+        read_locks = 3
 
         manager.reserve_write([key], [True], basic_layout)
         manager.finish_write([key])
 
-        manager.reserve_read([key], shares=shares)
+        manager.reserve_read([key], read_locks=read_locks)
         assert manager.get_object_state(key) is not None
 
-        manager.finish_read([key], shares=shares)
+        manager.finish_read([key], read_locks=read_locks)
         assert manager.get_object_state(key) is None
 
         manager.close()
@@ -1944,7 +1946,7 @@ class TestIsKeyEvictable:
     def test_key_with_multiple_read_locks_not_evictable(
         self, basic_l1_config, basic_layout
     ):
-        """A key with multiple read-lock shares should not be evictable
+        """A key with multiple read locks should not be evictable
         until all locks are released."""
         manager = L1Manager(basic_l1_config)
         key = make_object_key(1)
@@ -1953,16 +1955,16 @@ class TestIsKeyEvictable:
         manager.reserve_write([key], [False], basic_layout)
         manager.finish_write([key])
 
-        # Reserve read with shares=3
-        manager.reserve_read([key], shares=3)
+        # Reserve read with read_locks=3
+        manager.reserve_read([key], read_locks=3)
         assert manager.is_key_evictable(key) is False
 
-        # Release only 1 share -> still locked
-        manager.finish_read([key], shares=1)
+        # Release only 1 read lock -> still locked
+        manager.finish_read([key], read_locks=1)
         assert manager.is_key_evictable(key) is False
 
-        # Release the remaining 2 shares
-        manager.finish_read([key], shares=2)
+        # Release the remaining 2 read locks
+        manager.finish_read([key], read_locks=2)
         assert manager.is_key_evictable(key) is True
 
         manager.close()

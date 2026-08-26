@@ -522,7 +522,7 @@ class LookupModule:
             return
 
         self._ctx.storage_manager.finish_read_prefetched(
-            obj_keys, shares=key.require_num_kv_readers()
+            obj_keys, read_locks=key.require_num_kv_readers()
         )
 
     def end_session(self, request_id: str) -> None:

@@ -427,7 +427,7 @@ class TestStorageManagerMultiReader:
         assert hit == len(keys)
 
         # Release the whole reservation
-        sm.finish_read_prefetched(keys, shares=num_kv_readers)
+        sm.finish_read_prefetched(keys, read_locks=num_kv_readers)
 
         # All locks released -> objects writable again
         ret = sm.reserve_write(keys, basic_layout, mode="update")
@@ -435,10 +435,10 @@ class TestStorageManagerMultiReader:
 
         sm.close()
 
-    def test_finish_read_prefetched_partial_shares(
+    def test_finish_read_prefetched_partial_read_locks(
         self, basic_storage_manager_config, basic_layout
     ):
-        """Partial share release leaves locks held."""
+        """Partial read-lock release leaves locks held."""
         sm = StorageManager(basic_storage_manager_config)
         keys = [make_object_key(i) for i in range(2)]
 
@@ -452,15 +452,15 @@ class TestStorageManagerMultiReader:
         hit = sm.query_prefetch_status(handle).count_leading_ones()
         assert hit == len(keys)
 
-        # Release 2 of 4 shares
-        sm.finish_read_prefetched(keys, shares=2)
+        # Release 2 of 4 read locks
+        sm.finish_read_prefetched(keys, read_locks=2)
 
         # Objects should NOT be writable (2 locks remain)
         ret = sm.reserve_write(keys, basic_layout, mode="update")
         assert len(ret) == 0
 
-        # Release the remaining 2 shares
-        sm.finish_read_prefetched(keys, shares=2)
+        # Release the remaining 2 read locks
+        sm.finish_read_prefetched(keys, read_locks=2)
 
         # Now writable
         ret = sm.reserve_write(keys, basic_layout, mode="update")
@@ -496,7 +496,7 @@ class TestStorageManagerMultiReader:
         assert hit == 2
 
         # Finish the prefix hits
-        sm.finish_read_prefetched(all_keys[:2], shares=num_kv_readers)
+        sm.finish_read_prefetched(all_keys[:2], read_locks=num_kv_readers)
 
         # Keys {3,4} should be writable (skipped locks released)
         ret = sm.reserve_write(

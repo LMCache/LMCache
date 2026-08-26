@@ -851,7 +851,7 @@ class PrefetchController(StorageControllerInterface):
             Bitmap of the key indices read-locked in L1, after releasing
             out-of-window sliding-window chunks.
         """
-        lock_results = self._l1_manager.reserve_read(keys, shares=num_kv_readers)
+        lock_results = self._l1_manager.reserve_read(keys, read_locks=num_kv_readers)
         l1_readlocks = Bitmap(len(keys))
         for i, key in enumerate(keys):
             err, _obj = lock_results[key]
@@ -868,7 +868,9 @@ class PrefetchController(StorageControllerInterface):
         # hit -- won't be read again, so release their locks.
         evictable = l1_readlocks & ~l1_window & within_l1_hit
         if evictable.popcount() > 0:
-            self._l1_manager.finish_read(evictable.gather(keys), shares=num_kv_readers)
+            self._l1_manager.finish_read(
+                evictable.gather(keys), read_locks=num_kv_readers
+            )
             l1_readlocks = l1_readlocks & ~evictable
         return l1_readlocks
 
@@ -999,7 +1001,7 @@ class PrefetchController(StorageControllerInterface):
                 retained | l1_fallback_retain
             )
             self._l1_manager.finish_read(
-                stale.gather(request.keys), shares=request.num_kv_readers
+                stale.gather(request.keys), read_locks=request.num_kv_readers
             )
 
         # Step 3 — reserve L1 write buffers for the plan keys.
@@ -1345,7 +1347,7 @@ class PrefetchController(StorageControllerInterface):
                 # write-locked -> read-locked; num_kv_readers so each TP
                 # worker gets its own read lock.
                 l1_mgr.finish_write_and_reserve_read(
-                    loaded_keys, shares=request.num_kv_readers
+                    loaded_keys, read_locks=request.num_kv_readers
                 )
 
         # Clean up failed keys
@@ -1395,13 +1397,13 @@ class PrefetchController(StorageControllerInterface):
             if request.l1_readlocks.popcount() > 0:
                 l1_mgr.finish_read(
                     request.l1_readlocks.gather(request.keys),
-                    shares=request.num_kv_readers,
+                    read_locks=request.num_kv_readers,
                 )
                 request.l1_readlocks = Bitmap(num_keys)
         else:
             released = (result_bitmap & (~retained)).gather(request.keys)
             if released:
-                l1_mgr.finish_read(released, shares=request.num_kv_readers)
+                l1_mgr.finish_read(released, read_locks=request.num_kv_readers)
 
         # LRU: the retained keys are the ones this request actually serves;
         # touch them (locking/unlocking never refreshes recency).
@@ -1482,7 +1484,7 @@ class PrefetchController(StorageControllerInterface):
             if request.l1_readlocks.popcount() > 0:
                 l1_mgr.finish_read(
                     request.l1_readlocks.gather(request.keys),
-                    shares=request.num_kv_readers,
+                    read_locks=request.num_kv_readers,
                 )
             logger.warning(
                 "Cleaning up in-flight prefetch request %d (%d keys).",

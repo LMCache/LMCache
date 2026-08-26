@@ -855,7 +855,7 @@ class TestNumKVReadersPrefetch:
     When num_kv_readers=N is passed on the spec, the controller must
     acquire N read locks per key (one per reader that will retrieve the
     object).  Each consumer must call finish_read (or
-    finish_read_prefetched) once to release its share.
+    finish_read_prefetched) once to release its read lock.
 
     These tests verify:
     1. Keys remain accessible after the first finish_read when N > 1.
@@ -863,7 +863,7 @@ class TestNumKVReadersPrefetch:
     3. num_kv_readers=1 (default) behaves identically to the original
        single-lock path.
     4. Prefix trimming still works correctly with N > 1.
-    5. Non-prefix loaded keys have all shares released by _finalize_load.
+    5. Non-prefix loaded keys have all read locks released by _finalize_load.
     """
 
     def test_single_reader_default_behavior(self, l1_manager):
@@ -894,7 +894,7 @@ class TestNumKVReadersPrefetch:
             assert read_results[key][0] == L1Error.SUCCESS
 
         # Release the single read lock — keys should become unlocked
-        finish_results = l1_manager.finish_read(keys, shares=1)
+        finish_results = l1_manager.finish_read(keys, read_locks=1)
         for key in keys:
             assert finish_results[key] == L1Error.SUCCESS
 
@@ -929,8 +929,8 @@ class TestNumKVReadersPrefetch:
         for key in keys:
             assert read_results[key][0] == L1Error.SUCCESS
 
-        # Release lock #1 (the "prefetch controller" share)
-        finish_results = l1_manager.finish_read(keys, shares=1)
+        # Release lock #1 (the "prefetch controller" read lock)
+        finish_results = l1_manager.finish_read(keys, read_locks=1)
         for key in keys:
             assert finish_results[key] == L1Error.SUCCESS
 
@@ -941,8 +941,8 @@ class TestNumKVReadersPrefetch:
                 f"Key {key} should still be read-locked after first finish_read"
             )
 
-        # Release lock #2 (the TP worker share)
-        finish_results2 = l1_manager.finish_read(keys, shares=1)
+        # Release lock #2 (the TP worker read lock)
+        finish_results2 = l1_manager.finish_read(keys, read_locks=1)
         for key in keys:
             assert finish_results2[key] == L1Error.SUCCESS
 
@@ -974,7 +974,7 @@ class TestNumKVReadersPrefetch:
 
         # Release locks one by one; key must remain readable until the last
         for release_idx in range(3):
-            finish_results = l1_manager.finish_read(keys, shares=1)
+            finish_results = l1_manager.finish_read(keys, read_locks=1)
             for key in keys:
                 assert finish_results[key] == L1Error.SUCCESS
 
@@ -987,7 +987,7 @@ class TestNumKVReadersPrefetch:
                 )
 
         # Release the final lock
-        finish_results = l1_manager.finish_read(keys, shares=1)
+        finish_results = l1_manager.finish_read(keys, read_locks=1)
         for key in keys:
             assert finish_results[key] == L1Error.SUCCESS
 
@@ -1026,7 +1026,7 @@ class TestNumKVReadersPrefetch:
             assert read_results[key][0] == L1Error.SUCCESS
 
         # Release lock #1 — prefix keys still held by lock #2
-        l1_manager.finish_read(prefix_keys, shares=1)
+        l1_manager.finish_read(prefix_keys, read_locks=1)
 
         read_results2 = l1_manager.unsafe_read(prefix_keys)
         for key in prefix_keys:
@@ -1035,7 +1035,7 @@ class TestNumKVReadersPrefetch:
             )
 
         # Release lock #2
-        l1_manager.finish_read(prefix_keys, shares=1)
+        l1_manager.finish_read(prefix_keys, read_locks=1)
 
         # Non-prefix keys must NOT be in L1
         non_prefix_keys = all_keys[2:]
@@ -1054,7 +1054,7 @@ class TestNumKVReadersPrefetch:
 
         Keys {0, 1, 2} are in L2 and all reserve fine, but the *load* of
         key 1 fails (fault-injected), creating a gap so that key 2 is loaded
-        but lies beyond the prefix.  The finish must release every share
+        but lies beyond the prefix.  The finish must release every read lock
         locks for key 2.
         """
         layout = make_layout()
@@ -1084,7 +1084,7 @@ class TestNumKVReadersPrefetch:
         assert read_results[keys[0]][0] == L1Error.SUCCESS
 
         # key[2] was loaded but is beyond the prefix; the finish must have
-        # released all 2 shares, so it should be gone from L1
+        # released all 2 read locks, so it should be gone from L1
         # (it's a temporary object and its lock count should be 0).
         reserve_results = l1_manager.reserve_read([keys[2]])
         assert reserve_results[keys[2]][0] == L1Error.KEY_NOT_EXIST, (
@@ -1093,8 +1093,8 @@ class TestNumKVReadersPrefetch:
         )
 
         # Clean up: release key[0]'s 2 locks
-        l1_manager.finish_read([keys[0]], shares=1)
-        l1_manager.finish_read([keys[0]], shares=1)
+        l1_manager.finish_read([keys[0]], read_locks=1)
+        l1_manager.finish_read([keys[0]], read_locks=1)
         ctrl.stop()
         fault.close()
 

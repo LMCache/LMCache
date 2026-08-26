@@ -41,21 +41,23 @@ class _TestTokenHasher:
 
 
 class _CountingStorageManager:
-    """Track anonymous L1 reader shares and fail on an over-release."""
+    """Track anonymous L1 read locks and fail on an over-release."""
 
     def __init__(self) -> None:
         self.readers: Counter[ObjectKey] = Counter()
         self.finish_calls: list[tuple[list[ObjectKey], int]] = []
 
-    def acquire(self, keys: list[ObjectKey], shares: int = 1) -> None:
+    def acquire(self, keys: list[ObjectKey], read_locks: int = 1) -> None:
         for key in keys:
-            self.readers[key] += shares
+            self.readers[key] += read_locks
 
-    def finish_read_prefetched(self, keys: list[ObjectKey], shares: int = 1) -> None:
-        self.finish_calls.append((list(keys), shares))
+    def finish_read_prefetched(
+        self, keys: list[ObjectKey], read_locks: int = 1
+    ) -> None:
+        self.finish_calls.append((list(keys), read_locks))
         for key in keys:
-            assert self.readers[key] >= shares
-            self.readers[key] -= shares
+            assert self.readers[key] >= read_locks
+            self.readers[key] -= read_locks
 
 
 def _cache_key(
@@ -112,7 +114,7 @@ def test_tp_failed_worker_releases_only_its_reader_share_once(mla: bool) -> None
 
     Two lookups of the same content are represented: the request under test
     and a concurrent request.  One worker's missing registration releases one
-    reader share, the successful worker releases its own queued share, and the
+    read lock, the successful worker releases its own queued read lock, and the
     concurrent request must still retain its complete lock allocation.  The
     duplicate failed response verifies exactly-once cleanup.
     """
@@ -146,16 +148,16 @@ def test_tp_failed_worker_releases_only_its_reader_share_once(mla: bool) -> None
 
     hashes = hasher.compute_chunk_hashes(list(lookup_key.token_ids), end=lookup_key.end)
     all_rank_keys = ipc_key_to_object_keys(lookup_key, hashes, [0])[0]
-    lookup_shares = tp_size if mla else 1
-    # The request under test and a concurrent reader both own lock shares.
-    storage.acquire(all_rank_keys, shares=lookup_shares)
-    storage.acquire(all_rank_keys, shares=lookup_shares)
+    lookup_read_locks = tp_size if mla else 1
+    # The request under test and a concurrent reader both own read locks.
+    storage.acquire(all_rank_keys, read_locks=lookup_read_locks)
+    storage.acquire(all_rank_keys, read_locks=lookup_read_locks)
 
     # vLLM already owns the first chunk locally, so the scheduler legitimately
     # releases that prefix for every rank.  The worker RETRIEVEs only the
     # remaining partial-prefix range.
     request_prefix_keys = ipc_key_to_object_keys(lookup_key, hashes[:1], [0])[0]
-    storage.finish_read_prefetched(request_prefix_keys, shares=lookup_shares)
+    storage.finish_read_prefetched(request_prefix_keys, read_locks=lookup_read_locks)
 
     module = LMCacheDrivenTransferModule.__new__(LMCacheDrivenTransferModule)
     module._ctx = ctx  # type: ignore[assignment]
@@ -177,7 +179,7 @@ def test_tp_failed_worker_releases_only_its_reader_share_once(mla: bool) -> None
     retrieve_hashes = hashes[1:]
     failed_keys = ipc_key_to_object_keys(failed_key, retrieve_hashes, [0])[0]
     assert storage.finish_calls == [
-        (request_prefix_keys, lookup_shares),
+        (request_prefix_keys, lookup_read_locks),
         (failed_keys, 1),
     ]
 
@@ -190,15 +192,15 @@ def test_tp_failed_worker_releases_only_its_reader_share_once(mla: bool) -> None
         end=4,
     )
     successful_keys = ipc_key_to_object_keys(successful_key, retrieve_hashes, [0])[0]
-    storage.finish_read_prefetched(successful_keys, shares=1)
+    storage.finish_read_prefetched(successful_keys, read_locks=1)
 
-    # Only the concurrent lookup's reader shares remain.  Releasing those must
+    # Only the concurrent lookup's read locks remain.  Releasing those must
     # neither underflow nor encounter a lock already consumed by the failure.
-    expected_concurrent_shares = lookup_shares
+    expected_concurrent_read_locks = lookup_read_locks
     assert all(
-        storage.readers[key] == expected_concurrent_shares for key in all_rank_keys
+        storage.readers[key] == expected_concurrent_read_locks for key in all_rank_keys
     )
-    storage.finish_read_prefetched(all_rank_keys, shares=lookup_shares)
+    storage.finish_read_prefetched(all_rank_keys, read_locks=lookup_read_locks)
     assert all(storage.readers[key] == 0 for key in all_rank_keys)
     layout_registry.find_attn_desc.assert_not_called()
 
