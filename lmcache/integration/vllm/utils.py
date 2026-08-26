@@ -45,6 +45,49 @@ def vllm_layout_hints(vllm_config: "VllmConfig | None" = None) -> "LayoutHints":
     return hints  # type: ignore[return-value]
 
 
+_VLLM_KV_LAYOUT_ALIASES = {"LBNHC": "NHD", "LBHNC": "HND"}
+_UNSUPPORTED_VLLM_KV_LAYOUTS = frozenset({"LHBNC", "BLHNC", "BLNHC", "BHLNC"})
+_KNOWN_VLLM_KV_LAYOUTS = (
+    "NHD",
+    "HND",
+    "LBNHC",
+    "LBHNC",
+    "LHBNC",
+    "BLHNC",
+    "BLNHC",
+    "BHLNC",
+)
+
+
+def translate_vllm_kv_cache_layout(kv_cache_layout: str) -> Literal["NHD", "HND"]:
+    """Translate a vLLM ``KVCacheLayout`` name to the ``kv_layout`` hint.
+
+    ``LayoutHints.kv_layout`` is strictly ``NHD``/``HND``; engine KV formats
+    live in ``EngineKVFormat``. The layer-compact standardized layouts map
+    onto that pair, the rest cannot be expressed yet.
+
+    Raises:
+        NotImplementedError: for standardized layouts LMCache cannot
+            transfer yet. Registration must fail here -- treating them as
+            NHD/HND would silently corrupt the cache.
+        ValueError: for names that are not vLLM KV cache layouts at all.
+    """
+    translated = _VLLM_KV_LAYOUT_ALIASES.get(kv_cache_layout, kv_cache_layout)
+    if translated in ("NHD", "HND"):
+        return translated  # type: ignore[return-value]
+    if translated in _UNSUPPORTED_VLLM_KV_LAYOUTS:
+        raise NotImplementedError(
+            f"LMCache does not support the {kv_cache_layout!r} KV cache layout yet. "
+            "If it was selected via VLLM_KV_CACHE_LAYOUT, set LBNHC or LBHNC "
+            "instead; if the attention backend requires it (e.g. DeepSeek V4 "
+            "requires BLHNC), LMCache cannot cache this model yet."
+        )
+    raise ValueError(
+        f"Unknown KV cache layout {kv_cache_layout!r}; expected one of "
+        f"{', '.join(_KNOWN_VLLM_KV_LAYOUTS)}."
+    )
+
+
 def try_get_vllm_kv_cache_layout(
     vllm_config: "VllmConfig | None" = None,
 ) -> Literal["NHD", "HND"] | None:
@@ -58,11 +101,6 @@ def try_get_vllm_kv_cache_layout(
             cannot transfer yet. Registration must fail here -- falling back
             to a guessed layout would silently corrupt the cache.
     """
-    # Deferred: lmcache.v1.gpu_connector pulls in xpu_connectors, which
-    # imports this module back at the top level.
-    # First Party
-    from lmcache.v1.gpu_connector.kv_format.types import normalize_kv_layout
-
     try:
         if vllm_config is None:
             # Third Party
@@ -87,7 +125,7 @@ def try_get_vllm_kv_cache_layout(
                 "skipping the kv_layout hint"
             )
             return None
-        return normalize_kv_layout(kv_layout)
+        return translate_vllm_kv_cache_layout(kv_layout)
 
     try:
         # Third Party
@@ -97,7 +135,7 @@ def try_get_vllm_kv_cache_layout(
     except Exception:
         logger.error("Could not query the KV cache layout from this vLLM version")
         return None
-    return normalize_kv_layout(get_kv_cache_layout())
+    return translate_vllm_kv_cache_layout(get_kv_cache_layout())
 
 
 def lmcache_get_or_create_config() -> LMCacheEngineConfig:

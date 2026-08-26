@@ -16,10 +16,10 @@ import pytest
 
 # First Party
 from lmcache.integration.vllm.utils import (
+    translate_vllm_kv_cache_layout,
     try_get_vllm_kv_cache_layout,
     vllm_layout_hints,
 )
-from lmcache.v1.gpu_connector.kv_format.types import normalize_kv_layout
 
 UNSUPPORTED_LAYOUTS = ("LHBNC", "BLHNC", "BLNHC", "BHLNC")
 
@@ -47,23 +47,23 @@ def stub_module(
     return module
 
 
-class TestNormalizeKVLayout:
+class TestTranslateVllmKVCacheLayout:
     def test_legacy_names_pass_through(self):
-        assert normalize_kv_layout("NHD") == "NHD"
-        assert normalize_kv_layout("HND") == "HND"
+        assert translate_vllm_kv_cache_layout("NHD") == "NHD"
+        assert translate_vllm_kv_cache_layout("HND") == "HND"
 
-    def test_layer_compact_names_map_to_legacy(self):
-        assert normalize_kv_layout("LBNHC") == "NHD"
-        assert normalize_kv_layout("LBHNC") == "HND"
+    def test_layer_compact_names_map_to_hint_vocabulary(self):
+        assert translate_vllm_kv_cache_layout("LBNHC") == "NHD"
+        assert translate_vllm_kv_cache_layout("LBHNC") == "HND"
 
     @pytest.mark.parametrize("name", UNSUPPORTED_LAYOUTS)
     def test_unsupported_layouts_fail_loudly(self, name):
         with pytest.raises(NotImplementedError, match=name):
-            normalize_kv_layout(name)
+            translate_vllm_kv_cache_layout(name)
 
     def test_unknown_name_raises_value_error(self):
         with pytest.raises(ValueError, match="XYZ"):
-            normalize_kv_layout("XYZ")
+            translate_vllm_kv_cache_layout("XYZ")
 
 
 class TestTryGetVllmKVCacheLayout:
@@ -129,9 +129,9 @@ class TestResolveVllmKVLayout:
     def test_missing_hint_defaults_to_nhd(self, resolve):
         assert resolve({}, cpu_attention_backend=False) == "NHD"
 
-    def test_standardized_hint_is_normalized(self, resolve):
-        assert resolve({"kv_layout": "LBHNC"}, cpu_attention_backend=False) == "HND"
+    def test_hint_passes_through(self, resolve):
+        assert resolve({"kv_layout": "HND"}, cpu_attention_backend=False) == "HND"
 
-    def test_unsupported_hint_raises(self, resolve):
-        with pytest.raises(NotImplementedError, match="BLHNC"):
-            resolve({"kv_layout": "BLHNC"}, cpu_attention_backend=False)
+    def test_untranslated_hint_rejected(self, resolve):
+        with pytest.raises(ValueError, match="LBHNC"):
+            resolve({"kv_layout": "LBHNC"}, cpu_attention_backend=False)

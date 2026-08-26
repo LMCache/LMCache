@@ -8,7 +8,7 @@ sites.
 """
 
 # Standard
-from typing import Literal, TypedDict, Union, cast
+from typing import Literal, TypedDict, Union
 
 # Third Party
 import torch
@@ -22,43 +22,6 @@ import torch
 # for unwrapping to this form before calling the helpers.
 DiscoverableKVCache = Union[torch.Tensor, list["DiscoverableKVCache"]]
 
-# vLLM's standardized ``KVCacheLayout`` names (vllm#42082): stride
-# permutations of the logical [layers, blocks, heads, states, content]
-# shape. ``NHD``/``HND`` are the legacy per-layer names and remain
-# LMCache's internal vocabulary; hints are normalized at ingest.
-KVLayoutName = Literal[
-    "NHD", "HND", "LBNHC", "LBHNC", "LHBNC", "BLHNC", "BLNHC", "BHLNC"
-]
-
-_KV_LAYOUT_ALIASES = {"LBNHC": "NHD", "LBHNC": "HND"}
-_UNSUPPORTED_KV_LAYOUTS = frozenset({"LHBNC", "BLHNC", "BLNHC", "BHLNC"})
-_KNOWN_KV_LAYOUTS = ("NHD", "HND", "LBNHC", "LBHNC", "LHBNC", "BLHNC", "BLNHC", "BHLNC")
-
-
-def normalize_kv_layout(kv_layout: str) -> Literal["NHD", "HND"]:
-    """Normalize an engine-reported KV layout name to ``NHD``/``HND``.
-
-    Raises:
-        NotImplementedError: for standardized layouts LMCache cannot
-            transfer yet. Treating them as NHD/HND would silently
-            corrupt the cache, so registration must fail instead.
-        ValueError: for names that are not KV layouts at all.
-    """
-    normalized = _KV_LAYOUT_ALIASES.get(kv_layout, kv_layout)
-    if normalized in ("NHD", "HND"):
-        return cast('Literal["NHD", "HND"]', normalized)
-    if normalized in _UNSUPPORTED_KV_LAYOUTS:
-        raise NotImplementedError(
-            f"LMCache does not support the {kv_layout!r} KV cache layout yet. "
-            "If it was selected via VLLM_KV_CACHE_LAYOUT, set LBNHC or LBHNC "
-            "instead; if the attention backend requires it (e.g. DeepSeek V4 "
-            "requires BLHNC), LMCache cannot cache this model yet."
-        )
-    raise ValueError(
-        f"Unknown KV cache layout {kv_layout!r}; expected one of "
-        f"{', '.join(_KNOWN_KV_LAYOUTS)}."
-    )
-
 
 class LayoutHints(TypedDict, total=False):
     """Hints passed from a serving engine to LMCache during KV cache
@@ -68,11 +31,10 @@ class LayoutHints(TypedDict, total=False):
     schema -- importing this type is optional.
 
     Keys:
-        kv_layout: Physical ordering of the KV cache dimensions. Either a
-            legacy name (``"NHD"`` -- heads after block-size, ``"HND"`` --
-            heads before block-size) or a standardized vLLM
-            ``KVCacheLayout`` name such as ``"LBNHC"``/``"LBHNC"``
-            (vllm#42082). Consumers normalize via :func:`normalize_kv_layout`.
+        kv_layout: Physical ordering of the KV cache dimensions.
+            ``"NHD"`` -- heads after block-size (default for most
+            vLLM builds).
+            ``"HND"`` -- heads before block-size (``VLLM_KV_CACHE_LAYOUT=HND``).
         num_kv_heads: Number of KV heads per layer. Used by TRT-LLM to
             reshape its 4-D pool tensor into the canonical 6-D form.
         tokens_per_block: Tokens per paged block. Used by TRT-LLM (to
@@ -84,7 +46,7 @@ class LayoutHints(TypedDict, total=False):
         head_dim: Per-head dimension. Used by TRT-LLM (same).
     """
 
-    kv_layout: KVLayoutName
+    kv_layout: Literal["NHD", "HND"]
     num_kv_heads: int
     tokens_per_block: int
     head_dim: int

@@ -15,11 +15,7 @@ from lmcache.v1.gpu_connector.kv_format.detectors.base import (
     EngineDetector,
     measure_list_depth_until_tensor,
 )
-from lmcache.v1.gpu_connector.kv_format.types import (
-    DiscoverableKVCache,
-    LayoutHints,
-    normalize_kv_layout,
-)
+from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache, LayoutHints
 import lmcache.lmcache_native as lmcache_native
 
 
@@ -29,10 +25,14 @@ def resolve_vllm_kv_layout(
     """Resolve vLLM's KV layout from engine hints and backend behavior."""
     if cpu_attention_backend:
         return "HND"
-    kv_layout = layout_hints.get("kv_layout")
-    if kv_layout is None:
-        return "NHD"
-    return normalize_kv_layout(kv_layout)
+    kv_layout = layout_hints.get("kv_layout", "NHD")
+    if kv_layout not in ("NHD", "HND"):
+        raise ValueError(
+            f"kv_layout hint must be 'NHD' or 'HND', got {kv_layout!r}; "
+            "engine adapters translate engine-specific layout names "
+            "before sending hints."
+        )
+    return kv_layout
 
 
 class VLLM_Detector(EngineDetector):
