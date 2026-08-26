@@ -21,12 +21,51 @@ from lmcache.integration.vllm import vllm_multi_process_adapter as adapter_mod
 from lmcache.integration.vllm.experimental.dispatcher import Dispatcher
 from lmcache.integration.vllm.vllm_multi_process_adapter import (
     HeartbeatThread,
+    LMCacheMPSchedulerAdapter,
     LMCacheMPWorkerAdapter,
     LoadStoreOp,
     ParallelStrategy,
 )
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.protocol import RequestType
+
+
+class FakeMQClient:
+    """MessageQueueClient double that records close calls."""
+
+    def __init__(self, *_args, **_kwargs) -> None:
+        self.closed = False
+
+    def close(self) -> None:
+        """Record that the client was closed."""
+        self.closed = True
+
+
+def _parallel_strategy(
+    *,
+    vllm_worker_id: int = 0,
+    tp_size: int = 1,
+    mla_only: bool = False,
+) -> ParallelStrategy:
+    """Build a ``ParallelStrategy`` for a single-scheduler test setup.
+
+    Args:
+        vllm_worker_id: The worker's rank within its scheduler group.
+        tp_size: The tensor parallel size.
+        mla_only: Whether the model is pure-MLA; under MLA the derived
+            ``kv_worker_id`` collapses to ``vllm_worker_id // tp_size``.
+
+    Returns:
+        A ``ParallelStrategy`` whose world size covers ``vllm_worker_id``.
+    """
+    return ParallelStrategy(
+        mla_only=mla_only,
+        vllm_world_size=max(vllm_worker_id + 1, tp_size),
+        vllm_worker_id=vllm_worker_id,
+        tp_size=tp_size,
+        pp_size=1,
+        n_servers=1,
+    )
 
 
 class FakeCudaEvent:
@@ -185,6 +224,167 @@ def fake_adapter(monkeypatch):
     # so individual tests start with a clean call count.
     send_mock.reset_mock()
     return adapter, send_mock, future
+
+
+def test_scheduler_adapter_does_not_autostart(monkeypatch) -> None:
+    """Scheduler adapter keeps connect-only behavior for MP server startup."""
+    maybe_start = MagicMock(name="maybe_start_mp_server_from_url")
+    wait_for_server = MagicMock(name="wait_for_mp_server_from_url")
+
+    monkeypatch.setattr(adapter_mod, "maybe_start_mp_server_from_url", maybe_start)
+    monkeypatch.setattr(adapter_mod, "wait_for_mp_server_from_url", wait_for_server)
+    monkeypatch.setattr(adapter_mod, "MessageQueueClient", FakeMQClient)
+    monkeypatch.setattr(adapter_mod, "get_lmcache_chunk_size", lambda *a, **kw: 256)
+
+    LMCacheMPSchedulerAdapter(
+        server_urls=["tcp://localhost:5555"],
+        context=MagicMock(name="zmq_context"),
+        model_name="test-model",
+        vllm_block_size=16,
+        parallel_strategy=_parallel_strategy(),
+        extra_config={"lmcache.mp.autostart": True},
+    )
+
+    maybe_start.assert_not_called()
+    wait_for_server.assert_not_called()
+
+
+def test_worker_zero_autostarts_before_mq_client(monkeypatch) -> None:
+    """Actual worker 0 ensures the MP server is ready before MQ connects."""
+    events: list[str] = []
+    launcher = MagicMock(name="launcher")
+
+    def fake_maybe_start(**kwargs):
+        events.append("maybe_start")
+        assert kwargs["server_url"] == "tcp://localhost:5555"
+        return launcher
+
+    class RecordingMQClient(FakeMQClient):
+        def __init__(self, *_args, **_kwargs) -> None:
+            events.append("mq_client")
+            super().__init__(*_args, **_kwargs)
+
+    monkeypatch.setattr(adapter_mod, "maybe_start_mp_server_from_url", fake_maybe_start)
+    wait_for_server = MagicMock(name="wait_for_mp_server_from_url")
+    monkeypatch.setattr(adapter_mod, "wait_for_mp_server_from_url", wait_for_server)
+    monkeypatch.setattr(adapter_mod, "MessageQueueClient", RecordingMQClient)
+    monkeypatch.setattr(adapter_mod, "get_lmcache_chunk_size", lambda *a, **kw: 256)
+    monkeypatch.setattr(adapter_mod, "get_experimental", lambda *a, **kw: set())
+
+    LMCacheMPWorkerAdapter(
+        server_url="tcp://localhost:5555",
+        context=MagicMock(name="zmq_context"),
+        model_name="test-model",
+        vllm_block_size=16,
+        parallel_strategy=_parallel_strategy(vllm_worker_id=0),
+        extra_config={"lmcache.mp.autostart": True},
+    )
+
+    assert events == ["maybe_start", "mq_client"]
+    wait_for_server.assert_not_called()
+    launcher.shutdown.assert_not_called()
+
+
+def test_nonzero_worker_waits_before_mq_client(monkeypatch) -> None:
+    """Nonzero vLLM worker ranks wait even when ``kv_worker_id`` is zero."""
+    events: list[str] = []
+
+    def fake_wait_for_server(**kwargs):
+        events.append("wait_for_server")
+        assert kwargs["server_url"] == "tcp://localhost:5555"
+
+    class RecordingMQClient(FakeMQClient):
+        def __init__(self, *_args, **_kwargs) -> None:
+            events.append("mq_client")
+            super().__init__(*_args, **_kwargs)
+
+    maybe_start = MagicMock(name="maybe_start_mp_server_from_url")
+    monkeypatch.setattr(adapter_mod, "maybe_start_mp_server_from_url", maybe_start)
+    monkeypatch.setattr(
+        adapter_mod, "wait_for_mp_server_from_url", fake_wait_for_server
+    )
+    monkeypatch.setattr(adapter_mod, "MessageQueueClient", RecordingMQClient)
+    monkeypatch.setattr(adapter_mod, "get_lmcache_chunk_size", lambda *a, **kw: 256)
+    monkeypatch.setattr(adapter_mod, "get_experimental", lambda *a, **kw: set())
+
+    LMCacheMPWorkerAdapter(
+        server_url="tcp://localhost:5555",
+        context=MagicMock(name="zmq_context"),
+        model_name="test-model",
+        vllm_block_size=16,
+        # MLA with tp_size=2: rank 1 derives kv_worker_id == 0 yet must
+        # still wait rather than race rank 0 for server ownership.
+        parallel_strategy=_parallel_strategy(
+            vllm_worker_id=1, tp_size=2, mla_only=True
+        ),
+        extra_config={"lmcache.mp.autostart": True},
+    )
+
+    assert events == ["wait_for_server", "mq_client"]
+    maybe_start.assert_not_called()
+
+
+def test_legacy_worker_adapter_does_not_autostart(monkeypatch) -> None:
+    """Legacy positional callers stay connect-only without actual worker rank."""
+    maybe_start = MagicMock(name="maybe_start_mp_server_from_url")
+    wait_for_server = MagicMock(name="wait_for_mp_server_from_url")
+
+    monkeypatch.setattr(adapter_mod, "maybe_start_mp_server_from_url", maybe_start)
+    monkeypatch.setattr(adapter_mod, "wait_for_mp_server_from_url", wait_for_server)
+    monkeypatch.setattr(adapter_mod, "MessageQueueClient", FakeMQClient)
+    monkeypatch.setattr(adapter_mod, "get_lmcache_chunk_size", lambda *a, **kw: 256)
+    monkeypatch.setattr(adapter_mod, "get_experimental", lambda *a, **kw: set())
+
+    LMCacheMPWorkerAdapter(
+        "tcp://localhost:5555",
+        MagicMock(name="zmq_context"),
+        "test-model",
+        1,
+        0,
+        16,
+        extra_config={"lmcache.mp.autostart": True},
+    )
+
+    maybe_start.assert_not_called()
+    wait_for_server.assert_not_called()
+
+
+def test_worker_adapter_does_not_shutdown_autostarted_server_on_init_failure(
+    monkeypatch,
+) -> None:
+    """A shared auto-started server is not stopped by worker init failure."""
+    launcher = MagicMock(name="launcher")
+    fake_client = FakeMQClient()
+
+    monkeypatch.setattr(
+        adapter_mod,
+        "maybe_start_mp_server_from_url",
+        MagicMock(return_value=launcher),
+    )
+    monkeypatch.setattr(
+        adapter_mod,
+        "wait_for_mp_server_from_url",
+        MagicMock(name="wait_for_mp_server_from_url"),
+    )
+    monkeypatch.setattr(adapter_mod, "MessageQueueClient", lambda *a, **kw: fake_client)
+    monkeypatch.setattr(
+        adapter_mod,
+        "get_lmcache_chunk_size",
+        MagicMock(side_effect=TimeoutError),
+    )
+
+    with pytest.raises(ConnectionError, match="Cannot reach the LMCache MP server"):
+        LMCacheMPWorkerAdapter(
+            server_url="tcp://localhost:5555",
+            context=MagicMock(name="zmq_context"),
+            model_name="test-model",
+            vllm_block_size=16,
+            parallel_strategy=_parallel_strategy(),
+            extra_config={"lmcache.mp.autostart": True},
+        )
+
+    assert fake_client.closed
+    launcher.shutdown.assert_not_called()
 
 
 def test_register_kv_caches_updates_kv_caches_and_submits(fake_adapter):

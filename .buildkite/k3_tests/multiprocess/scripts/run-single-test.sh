@@ -104,7 +104,7 @@ echo "Results dir: $RESULTS_DIR"
 echo ""
 
 # Tests that handle their own server lifecycle (different GPU/model config)
-SELF_CONTAINED_TESTS=" deadlock p2p kimi_linear_tp dsv4_flash_tp "
+SELF_CONTAINED_TESTS=" deadlock mp_autostart_tp2 p2p kimi_linear_tp dsv4_flash_tp "
 
 # Tests that compare against a baseline vLLM (no LMCache) on a second GPU.
 # Only these need the baseline server (and thus a 2-GPU pod); everything
@@ -172,6 +172,9 @@ case "$TEST_NAME" in
     deadlock)
         exec_script="${SCRIPT_DIR}/run-deadlock.sh"
         ;;
+    mp_autostart_tp2)
+        exec_script="${SCRIPT_DIR}/run-mp-autostart-tp2.sh"
+        ;;
     restart_recovery)
         exec_script="${SCRIPT_DIR}/run-restart-recovery.sh"
         ;;
@@ -198,7 +201,7 @@ case "$TEST_NAME" in
         ;;
     *)
         echo "Unknown test: $TEST_NAME"
-        echo "Valid tests: lm_eval, lm_eval_preemption, hma_lm_eval_gemma4, vllm_bench, long_doc_qa, long_doc_qa_l2, fault_tolerance, deadlock, restart_recovery, cache_stats, lazy_offload, http_api, gds_smoke_test, p2p, kimi_linear_tp, dsv4_flash_tp"
+        echo "Valid tests: lm_eval, lm_eval_preemption, hma_lm_eval_gemma4, vllm_bench, long_doc_qa, long_doc_qa_l2, fault_tolerance, deadlock, mp_autostart_tp2, restart_recovery, cache_stats, lazy_offload, http_api, gds_smoke_test, p2p, kimi_linear_tp, dsv4_flash_tp"
         exit 1
         ;;
 esac
