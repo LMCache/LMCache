@@ -180,9 +180,7 @@ def gather_blocks_to_chunk_mla(
     """
     n_blocks = len(block_ids)
     _nb, block_size, head_size = paged_layers[0].shape
-    idx = torch.as_tensor(
-        block_ids, dtype=torch.long, device=paged_layers[0].device
-    )
+    idx = torch.as_tensor(block_ids, dtype=torch.long, device=paged_layers[0].device)
     # [L, B, BS, HS] on the paged tensors' device; stack decomposes to the
     # v2v cat kernel, and the result is contiguous so the view below is free.
     gathered = torch.stack(
