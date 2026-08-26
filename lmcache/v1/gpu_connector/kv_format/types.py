@@ -40,13 +40,17 @@ class LayoutHints(TypedDict, total=False):
         tokens_per_block: Tokens per paged block. Used by TRT-LLM (to
             reshape its pool tensor) and by SGLang MHA (to split the
             folded ``page_buffer_size`` dimension into separate
-            ``num_blocks`` and ``block_size``). Presence of this field
-            on a SGLang registration is what triggers the daemon-side
-            depth-1 -> depth-2 un-flatten + 3-D -> 4-D reshape.
+            ``num_blocks`` and ``block_size``).
+        kv_list_layout: Outer SGLang KV-cache list organization. ``"k_v"``
+            identifies a flat registration containing equal K and V layer
+            halves; combined with ``tokens_per_block``, it triggers
+            daemon-side un-flattening and 3-D to 4-D reshaping even when
+            tensor parallelism leaves one KV head per rank.
         head_dim: Per-head dimension. Used by TRT-LLM (same).
     """
 
     kv_layout: Literal["NHD", "HND"]
     num_kv_heads: int
     tokens_per_block: int
+    kv_list_layout: Literal["k_v"]
     head_dim: int

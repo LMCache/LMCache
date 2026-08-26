@@ -197,6 +197,71 @@ def test_wrap_sglang_kv_caches_rejects_mismatched_layers() -> None:
         )
 
 
+def test_mp_connector_registration_marks_kv_list_layout(monkeypatch) -> None:
+    """Registration identifies flat single-head pools as split K/V MHA."""
+    adapter_mod, LMCacheMPConnector, _, _, _, _ = _import_adapter_symbols()
+    mq_client = object()
+    requests: list[tuple[object, list[object]]] = []
+
+    class FakeHeartbeatThread:
+        def __init__(
+            self,
+            mq_client: object,
+            health_event: threading.Event,
+            interval: float,
+            instance_id: int | None,
+        ) -> None:
+            pass
+
+        def start(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        adapter_mod,
+        "zmq",
+        SimpleNamespace(Context=SimpleNamespace(instance=lambda: object())),
+    )
+    monkeypatch.setattr(
+        adapter_mod,
+        "MessageQueueClient",
+        lambda _endpoint, _context: mq_client,
+    )
+    monkeypatch.setattr(adapter_mod, "get_lmcache_chunk_size", lambda _client: 4)
+    monkeypatch.setattr(adapter_mod, "HeartbeatThread", FakeHeartbeatThread)
+    monkeypatch.setattr(
+        adapter_mod,
+        "get_device_spec",
+        lambda _device_type: SimpleNamespace(is_handle_transfer_available=lambda: True),
+    )
+    monkeypatch.setattr(adapter_mod, "wrap_one_kv_cache", lambda tensor: tensor)
+
+    def send_request(
+        _client: object, request_type: object, payload: list[object]
+    ) -> object:
+        requests.append((request_type, payload))
+        return SimpleNamespace(result=MagicMock(return_value=None))
+
+    monkeypatch.setattr(adapter_mod, "send_lmcache_request", send_request)
+
+    k_pool = [torch.empty(4, 1, 8) for _ in range(2)]
+    v_pool = [torch.empty(4, 1, 8) for _ in range(2)]
+    LMCacheMPConnector(
+        sgl_config=SimpleNamespace(model_path="test-model"),
+        tp_size=1,
+        rank=0,
+        page_size=2,
+        host="127.0.0.1",
+        port=5556,
+        k_pool=k_pool,
+        v_pool=v_pool,
+    )
+
+    assert len(requests) == 1
+    request_type, payload = requests[0]
+    assert request_type == adapter_mod.RequestType.REGISTER_KV_CACHE
+    assert payload[5] == {"tokens_per_block": 2, "kv_list_layout": "k_v"}
+
+
 @pytest.mark.parametrize(
     ("k_pool", "v_pool", "message"),
     [
