@@ -30,14 +30,14 @@ NB, NL, BS, NH, HS = 8, 3, 4, 2, 8
 F = lmc_ops.EngineKVFormat
 
 
-def _per_layer_kv_tuple_caches() -> list[list[torch.Tensor]]:
-    """Per-layer ``(K, V)`` tuples as vLLM-Ascend registers them.
-
-    Layers are outermost; each layer is a length-2 ``[K, V]`` pair of paged
+def _per_layer_kv_tuple_caches() -> list[tuple[torch.Tensor, torch.Tensor]]:
+    """Layers are outermost; each layer is a ``(K, V)`` pair of paged
     ``[NB, BS, NH, HS]`` tensors.
     """
     torch.manual_seed(0)
-    return [[torch.randn(NB, BS, NH, HS) for _ in range(2)] for _ in range(NL)]
+    return [
+        (torch.randn(NB, BS, NH, HS), torch.randn(NB, BS, NH, HS)) for _ in range(NL)
+    ]
 
 
 def test_discovery_preserves_per_layer_kv_tuple_structure() -> None:
