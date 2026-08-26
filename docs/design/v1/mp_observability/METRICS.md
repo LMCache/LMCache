@@ -292,6 +292,54 @@ Are some workers or GPUs underperforming?
 
 ---
 
+## MP Transfer Counters (in-flight GPU copies)
+
+Submitted/finished counter pairs for the LMCache-driven GPU transfers, via
+`MPTransferCountersSubscriber`.  The SUBMITTED events are published
+CPU-synchronously right before the copy is enqueued; the END events are
+published *from* the device stream once the copy has run.  Subtracting the
+two gives the number of transfers currently in flight on each GPU:
+
+```promql
+lmcache_mp_num_submitted_stores_total - lmcache_mp_num_finished_stores_total
+```
+
+All four counters carry exactly one attribute, `device` (e.g. `"cuda:3"`).
+This is deliberate: `MP_STORE_SUBMITTED` / `MP_RETRIEVE_SUBMITTED` carry no
+`engine_id` or `model_name` (see [EVENTS.md](EVENTS.md)), so labeling the END
+side more richly would force a PromQL aggregation to line the two label sets
+back up before subtracting them.  Slice by `engine_id` / `model_name` using
+the L0↔L1 throughput histograms or `lmcache_mp.num_chunks_loaded` instead.
+
+| OTel metric name | Prometheus name | Type | Source event | Calculation |
+|---|---|---|---|---|
+| `lmcache_mp.num_submitted_stores` | `lmcache_mp_num_submitted_stores_total` | Counter (attr: `device`) | `MP_STORE_SUBMITTED` | +1 per event |
+| `lmcache_mp.num_finished_stores` | `lmcache_mp_num_finished_stores_total` | Counter (attr: `device`) | `MP_STORE_END` | +1 per event |
+| `lmcache_mp.num_submitted_retrieves` | `lmcache_mp_num_submitted_retrieves_total` | Counter (attr: `device`) | `MP_RETRIEVE_SUBMITTED` | +1 per event |
+| `lmcache_mp.num_finished_retrieves` | `lmcache_mp_num_finished_retrieves_total` | Counter (attr: `device`) | `MP_RETRIEVE_END` | +1 per event |
+
+**What it answers:** How many GPU KV copies is each device carrying right
+now?  Is a worker's copy queue backing up (submitted climbing while finished
+lags), or is the device keeping pace?  The counters also give store/retrieve
+*rates* per device via `rate(...[1m])`.
+
+"Finished" counts a transfer leaving the device stream, not its success: a
+store that committed nothing (`stored_count == 0`) and a retrieve that
+missed both increment.  Counting only successes would strand a phantom
+in-flight transfer in the subtraction forever.
+
+> **Caveat — RETRIEVE block-id underflow.** `retrieve()` publishes
+> `MP_RETRIEVE_SUBMITTED` *before* its fail-closed block-id underflow check,
+> and that check returns early without publishing `MP_RETRIEVE_END`.  A
+> request hitting that path (logged at ERROR by the transfer module, and
+> also leaving the tracing subscriber's span open) permanently adds 1 to the
+> derived in-flight retrieve count.  It should never fire in healthy
+> operation; a steadily rising in-flight floor alongside those ERROR logs is
+> the signature.  The store path publishes its SUBMITTED sentinel *after*
+> the equivalent check, so it is unaffected.
+
+---
+
 ## L1 ↔ L2 Throughput Histograms
 
 Per-task throughput of L1↔L2 transfers via
