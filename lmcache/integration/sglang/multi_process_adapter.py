@@ -272,6 +272,9 @@ class LMCacheMPConnector:
         return IPCCacheServerKey(
             model_name=self.model_name,
             world_size=self.tp_size,
+            # Each worker stores and reads only its own object (no MLA-style
+            # sharing in this adapter yet).
+            num_kv_readers=1,
             worker_id=None if no_worker_id else self.worker_id,
             token_ids=tuple(token_ids),
             start=start,

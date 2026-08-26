@@ -18,6 +18,7 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 import hashlib
 import json
+import math
 import os
 import random
 
@@ -300,7 +301,7 @@ class RagQaQualityWorkload(BaseWorkload):
         align = self._config.doc_align_tokens
         current = self._token_length(text)
         total = offset + current
-        target = -(-total // align) * align
+        target = math.ceil(total / align) * align
         if target == total:
             return text
 
