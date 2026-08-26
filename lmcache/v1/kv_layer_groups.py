@@ -368,6 +368,7 @@ class KVLayerGroupsManager:
         # First Party
         from lmcache.v1.gpu_connector.utils import (
             get_num_blocks,
+            group_spec_source,
             make_page_buffer_shape_desc,
             resolve_block_stride_and_log_layout,
         )
@@ -409,7 +410,10 @@ class KVLayerGroupsManager:
             group_format = identity.engine_kv_format
             # Block count is per engine group (each is its own block-id space), so
             # read it from this group's own tensor rather than a context-wide value.
-            group_num_blocks = get_num_blocks([kv_caches[indices[0]]], group_format)
+            group_num_blocks = get_num_blocks(
+                group_spec_source(kv_caches[indices[0]], group_format),
+                group_format,
+            )
             block_stride_elems = resolve_block_stride_and_log_layout(
                 kv_caches,
                 group_format,

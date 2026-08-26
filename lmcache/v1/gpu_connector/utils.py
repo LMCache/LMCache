@@ -287,6 +287,20 @@ def normalize_and_discover_per_layer_formats(
     return normalized_per_layer, engine_kv_formats
 
 
+def group_spec_source(
+    entry: "torch.Tensor", engine_kv_format: "lmcache_native.EngineKVFormat"
+) -> DiscoverableKVCache:
+    """Spec-facing kv_caches for one group representative entry.
+
+    Cross-layer entries in a normalized per-layer structure are the
+    reconstructed whole-group tensor; per-layer entries wrap as a
+    single-layer list.
+    """
+    if lmcache_native.is_cross_layer(engine_kv_format):
+        return entry
+    return [entry]
+
+
 def get_num_layers(
     kv_caches: DiscoverableKVCache, engine_kv_format: "lmcache_native.EngineKVFormat"
 ) -> int:
