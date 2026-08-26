@@ -137,12 +137,13 @@ device event; this backend only exports its own event objects. Call sites that
 bypass the backend break the moment `CudaDeviceSpec.event_ipc_backend`
 returns it:
 
-- vLLM MP connectors create producer events with
-  `torch_dev.Event(interprocess=True)` (`lmcache_mp_connector.py:510/:586`
-  + `_0180`/`_0201` twins); SGLang and TRT-LLM adapters likewise. They
-  must use `backend.create_event` / `record_event` — the event objects satisfy the
-  `IPCEvent` duck protocol, so `event.wait(stream)` call sites keep
-  working.
+- vLLM MP connectors now create producer events through the shared LMCache
+  helper, which selects an IPC event only for `lmcache_driven` transfers and a
+  normal local event for `engine_driven` transfers. That keeps the existing
+  `IPCEvent` duck-typed `event.wait(stream)` contract while staying compatible
+  with older vendored adapters that do not yet expose the helper method.
+- SGLang and TRT-LLM adapters already route producer-event creation through
+  `backend.create_event` / `record_event`.
 - CacheBlend/qstore server modules return raw `event.ipc_handle()` bytes
   instead of `export_event(...)`; already outside the event-IPC
   abstraction (see `event_ipc_abstraction.md` non-goals), must migrate
@@ -154,5 +155,7 @@ event operation through the backend today.
 ## Status
 
 Standalone implementation, not yet bound to
-`CudaDeviceSpec.event_ipc_backend`. Selection/config plumbing is a
-follow-up, alongside the raw KV-wrapper work for hostIPC-free deployment.
+`CudaDeviceSpec.event_ipc_backend`. The vLLM connector call sites now route
+through the platform event helper, but selection/config plumbing and the
+remaining raw KV-wrapper / raw-event exporters are still follow-up work for
+hostIPC-free deployment.

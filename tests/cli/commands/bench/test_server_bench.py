@@ -1047,7 +1047,7 @@ class TestProcessRequestMultiWorker:
                 )
             )
 
-        # ``_make_event_handle`` creates a real CUDA-IPC event via
+        # ``_make_exported_event`` creates a real CUDA-IPC event via
         # ``check_interprocess_event_support()``, which requires a
         # backend that supports ``Event(interprocess=True)`` (e.g.
         # CUDA). This test only exercises the STORE/RETRIEVE
@@ -1057,7 +1057,7 @@ class TestProcessRequestMultiWorker:
         # interprocess=True parameter for Events".
         with (
             patch.object(sv_helpers, "_call", side_effect=fake_call),
-            patch.object(sv_helpers, "_make_event_handle", return_value=b""),
+            patch.object(sv_helpers, "_make_exported_event", return_value=(None, b"")),
         ):
             _process_request(
                 client=None,  # type: ignore[arg-type]  # unused: _call mocked
@@ -1140,3 +1140,91 @@ class TestProcessRequestMultiWorker:
                     "LOOKUP payload tp_size must equal simulated tp "
                     "(is_mla=%s, tp=%d, got=%s)" % (is_mla, tp, lookups[0][1][1])
                 )
+
+
+class _RetainingFuture:
+    def __init__(self, result):
+        self._result = result
+        self.retained_references: list[object] = []
+
+    def retain_reference(self, value: object) -> None:
+        self.retained_references.append(value)
+
+    def result(self, timeout=None):
+        return self._result
+
+
+class _RetainingClient:
+    def __init__(self, future: _RetainingFuture) -> None:
+        self.future = future
+        self.calls: list[tuple[RequestType, list[object]]] = []
+
+    def submit_request(self, request_type: RequestType, payloads: list[object]):
+        self.calls.append((request_type, payloads))
+        return self.future
+
+
+@pytest.mark.parametrize(
+    ("request_type", "invoke", "expected_status"),
+    [
+        (
+            RequestType.STORE,
+            lambda helpers, client, key: helpers._send_store(  # noqa: SLF001
+                client,
+                key,
+                block_size=2,
+                num_engine_group_infos=1,
+                use_gpu=True,
+                use_handle=True,
+            ),
+            "stored",
+        ),
+        (
+            RequestType.RETRIEVE,
+            lambda helpers, client, key: helpers._send_retrieve(  # noqa: SLF001
+                client,
+                key,
+                chunk_size=2,
+                hit_chunks=1,
+                block_size=2,
+                num_engine_group_infos=1,
+                use_gpu=True,
+                use_handle=True,
+            ),
+            "retrieved",
+        ),
+    ],
+)
+def test_handle_mode_retains_exported_event_until_reply(
+    monkeypatch: pytest.MonkeyPatch,
+    request_type: RequestType,
+    invoke,
+    expected_status: str,
+) -> None:
+    """Single-shot handle-mode RPCs must retain the exported producer event."""
+    # First Party
+    from lmcache.cli.commands.bench.server_bench import helpers as sv_helpers
+
+    event = object()
+    future = _RetainingFuture((0, True))
+    client = _RetainingClient(future)
+    key = _make_key((0, 9906, 9906, 9906), request_id="req-handle")
+
+    monkeypatch.setattr(
+        sv_helpers,
+        "_make_exported_event",
+        lambda use_gpu=True: (event, b"evt-handle"),
+    )
+
+    status = invoke(sv_helpers, client, key)
+
+    assert status == expected_status
+    assert client.calls == [
+        (
+            request_type,
+            [key, 0, [[0, 1]], b"evt-handle"]
+            if request_type is RequestType.STORE
+            else [key, 0, [[0]], b"evt-handle", 0],
+        )
+    ]
+    assert future.retained_references == [event]

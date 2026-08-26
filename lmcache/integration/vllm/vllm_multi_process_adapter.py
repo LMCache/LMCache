@@ -3,7 +3,7 @@
 # Standard
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, NoReturn, cast
+from typing import TYPE_CHECKING, Any, Callable, NoReturn
 import enum
 import os
 import threading
@@ -17,7 +17,10 @@ import zmq
 from lmcache import torch_dev
 from lmcache.integration.request_telemetry.factory import RequestTelemetryFactory
 from lmcache.integration.vllm.experimental import dispatch
-from lmcache.integration.vllm.utils import vllm_layout_hints
+from lmcache.integration.vllm.utils import (
+    create_recorded_transfer_event,
+    vllm_layout_hints,
+)
 from lmcache.utils import EngineType, _lmcache_nvtx_annotate, init_logger
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
@@ -36,7 +39,6 @@ from lmcache.v1.multiprocess.transfer_context import (
 )
 from lmcache.v1.multiprocess.transfer_context.worker_transfer import IPCEvent
 from lmcache.v1.periodic_thread import PeriodicThread, ThreadLevel, ThreadRunSummary
-from lmcache.v1.platform.base.event_ipc import create_event, record_event
 
 if TYPE_CHECKING:
     # First Party
@@ -1267,28 +1269,22 @@ class LMCacheMPWorkerAdapter:
         return expand_engine_block_ids(self.engine_group_infos, op.block_ids)
 
     def create_and_record_event(self, stream: object | None = None) -> IPCEvent:
-        """Create and record a producer event for this worker's KV device.
+        """Create and record the producer event for this worker's transfer mode.
 
         Args:
             stream: Stream that should record the event. ``None`` means the
                 active backend's current stream.
 
         Returns:
-            A backend-native event object.
+            A backend-native event object. LMCache-driven transfers return a
+            platform IPC event; engine-driven transfers return a normal local
+            event because the handle never leaves the worker process.
 
         Raises:
             RuntimeError: If KV caches are not registered or event IPC is
-                unsupported for their device.
+                unsupported for an LMCache-driven device event.
         """
-        if not self.kv_caches:
-            raise RuntimeError(
-                "KV caches are not registered. Call register_kv_caches() "
-                "before creating transfer events."
-            )
-        device = next(iter(self.kv_caches.values())).device
-        event = create_event(device)
-        record_event(event, device, stream)
-        return cast(IPCEvent, event)
+        return create_recorded_transfer_event(self, stream)
 
     def _send_register_kv_caches_request(
         self,

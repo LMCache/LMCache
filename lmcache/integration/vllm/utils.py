@@ -1,12 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import TYPE_CHECKING, Literal, Optional, Tuple
+from typing import TYPE_CHECKING, Literal, Optional, Tuple, cast
 import hashlib
 import os
 import string
 import threading
 
 if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.multiprocess.transfer_context.worker_transfer import IPCEvent
+
     from vllm.config import ModelConfig, VllmConfig
     from vllm.multimodal.inputs import PlaceholderRange
     from vllm.v1.request import Request
@@ -15,9 +18,12 @@ if TYPE_CHECKING:
 import torch
 
 # First Party
+from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.v1.config import LMCacheEngineConfig, load_ec_engine_config
 from lmcache.v1.config_base import apply_remote_configs, fetch_remote_config
+from lmcache.v1.multiprocess.transfer_context import LMCacheDrivenTransferContext
+from lmcache.v1.platform.base.event_ipc import create_event, record_event
 
 if TYPE_CHECKING:
     # First Party
@@ -43,6 +49,63 @@ def vllm_layout_hints() -> "LayoutHints":
     if kv_layout is not None:
         hints["kv_layout"] = kv_layout
     return hints  # type: ignore[return-value]
+
+
+def transfer_context_uses_ipc_event(transfer_ctx: object) -> bool:
+    """Whether ``transfer_ctx`` must export its producer event cross-process."""
+    return isinstance(transfer_ctx, LMCacheDrivenTransferContext)
+
+
+def create_recorded_transfer_event(
+    worker_adapter: object,
+    stream: object | None = None,
+) -> "IPCEvent":
+    """Create the correct producer event for the worker's transfer context.
+
+    LMCache-driven transfers export the event to another process, so they need
+    the platform event-IPC backend. Engine-driven transfers keep the event
+    local to the worker process, so a normal backend-local event is enough and
+    preserves compatibility with non-CUDA event implementations.
+    """
+    kv_caches = getattr(worker_adapter, "kv_caches", None)
+    if not kv_caches:
+        raise RuntimeError(
+            "KV caches are not registered. Call register_kv_caches() before "
+            "creating transfer events."
+        )
+
+    if transfer_context_uses_ipc_event(getattr(worker_adapter, "transfer_ctx", None)):
+        device = next(iter(kv_caches.values())).device
+        event = create_event(device)
+        record_event(event, device, stream)
+        return cast("IPCEvent", event)
+
+    event = torch_dev.Event()
+    if stream is None:
+        current_stream = getattr(torch_dev, "current_stream", None)
+        if callable(current_stream):
+            stream = current_stream()
+    if stream is None:
+        event.record()
+    else:
+        event.record(stream)
+    return cast("IPCEvent", event)
+
+
+def create_recorded_connector_event(
+    worker_adapter: object,
+    stream: object | None = None,
+) -> "IPCEvent":
+    """Create a recorded producer event, tolerating vendored adapter fallbacks.
+
+    Recent LMCache-owned adapters expose ``create_and_record_event`` directly,
+    but older/vendored vLLM adapters may not. In that case, rebuild the event
+    from the adapter's public state so connector code stays compatible.
+    """
+    create_and_record = getattr(worker_adapter, "create_and_record_event", None)
+    if callable(create_and_record):
+        return cast("IPCEvent", create_and_record(stream))
+    return create_recorded_transfer_event(worker_adapter, stream)
 
 
 def try_get_vllm_kv_cache_layout() -> Literal["NHD", "HND"] | None:

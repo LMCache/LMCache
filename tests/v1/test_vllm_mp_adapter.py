@@ -4,6 +4,7 @@ stubbed (see ``fake_adapter``); no GPU or live server needed. End-to-end
 recovery: ``.buildkite/k3_tests/multiprocess/scripts/run-restart-recovery.sh``."""
 
 # Standard
+from types import SimpleNamespace
 from typing import Callable, ClassVar
 from unittest.mock import MagicMock
 import gc
@@ -232,6 +233,108 @@ def test_register_kv_caches_cpu_submits_engine_driven_context_registration(
     args, _kwargs = send_mock.call_args
     assert args[1] == RequestType.REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT
     assert len(args[2]) == 1
+
+
+def test_create_and_record_event_uses_ipc_backend_for_lmcache_driven_transfer(
+    fake_adapter, monkeypatch
+) -> None:
+    """LMCache-driven transfers must create exportable IPC events."""
+    adapter, _send_mock, _future = fake_adapter
+    fake_tensor = MagicMock(name="kv_tensor")
+    fake_tensor.device = torch.device("cpu")
+    adapter.kv_caches = {"layer0": fake_tensor}
+    adapter.transfer_ctx = adapter_mod.LMCacheDrivenTransferContext()
+
+    created_event = object()
+    record_calls: list[tuple[object, object, object | None]] = []
+    monkeypatch.setattr(
+        "lmcache.integration.vllm.utils.create_event",
+        lambda device: created_event,
+    )
+    monkeypatch.setattr(
+        "lmcache.integration.vllm.utils.record_event",
+        lambda event, device, stream=None: record_calls.append((event, device, stream)),
+    )
+    monkeypatch.setattr(
+        "lmcache.integration.vllm.utils.torch_dev.Event",
+        lambda: pytest.fail("engine-local event should not be used here"),
+    )
+
+    stream = object()
+    event = adapter.create_and_record_event(stream)
+
+    assert event is created_event
+    assert record_calls == [(created_event, fake_tensor.device, stream)]
+
+
+def test_create_and_record_event_uses_local_event_for_engine_driven_transfer(
+    fake_adapter, monkeypatch
+) -> None:
+    """Engine-driven transfers keep their producer event local to the worker."""
+    adapter, _send_mock, _future = fake_adapter
+    fake_tensor = MagicMock(name="kv_tensor")
+    fake_tensor.device = torch.device("cpu")
+    adapter.kv_caches = {"layer0": fake_tensor}
+    adapter.transfer_ctx = object()
+
+    class _LocalEvent:
+        def __init__(self) -> None:
+            self.recorded: list[object | None] = []
+
+        def record(self, stream: object | None = None) -> None:
+            self.recorded.append(stream)
+
+    monkeypatch.setattr(
+        "lmcache.integration.vllm.utils.create_event",
+        lambda device: pytest.fail("IPC event should not be used here"),
+    )
+    monkeypatch.setattr(
+        "lmcache.integration.vllm.utils.record_event",
+        lambda *args, **kwargs: pytest.fail("IPC record helper should not be used"),
+    )
+    monkeypatch.setattr(
+        "lmcache.integration.vllm.utils.torch_dev.Event",
+        _LocalEvent,
+    )
+
+    stream = object()
+    event = adapter.create_and_record_event(stream)
+
+    assert isinstance(event, _LocalEvent)
+    assert event.recorded == [stream]
+
+
+def test_connector_event_helper_handles_vendored_adapter_without_helper(
+    monkeypatch,
+) -> None:
+    """Connectors must not assume vendored adapters expose create_and_record_event."""
+    # First Party
+    from lmcache.integration.vllm.utils import create_recorded_connector_event
+
+    fake_tensor = MagicMock(name="kv_tensor")
+    fake_tensor.device = torch.device("cpu")
+
+    class _LocalEvent:
+        def __init__(self) -> None:
+            self.recorded: list[object | None] = []
+
+        def record(self, stream: object | None = None) -> None:
+            self.recorded.append(stream)
+
+    monkeypatch.setattr(
+        "lmcache.integration.vllm.utils.torch_dev.Event",
+        _LocalEvent,
+    )
+
+    adapter = SimpleNamespace(
+        kv_caches={"layer0": fake_tensor},
+        transfer_ctx=object(),
+    )
+    stream = object()
+    event = create_recorded_connector_event(adapter, stream)
+
+    assert isinstance(event, _LocalEvent)
+    assert event.recorded == [stream]
 
 
 def test_submit_store_request_tracks_returned_future(fake_adapter, monkeypatch):

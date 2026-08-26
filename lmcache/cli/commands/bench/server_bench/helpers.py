@@ -195,6 +195,7 @@ def _call(
     request_type: RequestType,
     payloads: list,
     timeout_s: float = _DEFAULT_RPC_TIMEOUT_S,
+    retain_refs: tuple[object, ...] = (),
 ) -> Any:
     """Submit a request through ``MessageQueueClient`` and block.
 
@@ -202,6 +203,8 @@ def _call(
     on success, or the sentinel ``_TIMEOUT`` on RPC timeout.
     """
     future: MessagingFuture[Any] = client.submit_request(request_type, payloads)
+    for ref in retain_refs:
+        future.retain_reference(ref)
     try:
         return future.result(timeout=timeout_s)
     except TimeoutError:
@@ -613,19 +616,25 @@ def _poll_prefetch_status(
     return None
 
 
-def _make_event_handle(use_gpu: bool = True) -> bytes:
-    """Create a CUDA event IPC handle for GPU mode.
+def _make_exported_event(use_gpu: bool = True) -> tuple[object | None, bytes]:
+    """Create and export the producer event for handle-mode bench requests.
 
     CPU mode does not need a cross-process event (SHM mappings are
     coherent without device-side sync), so an empty handle is
     returned and the server treats it as a no-op.
     """
     if not use_gpu:
-        return b""
+        return None, b""
     device = torch_dev.current_device()
     event = create_event(device)
     record_event(event, device)
-    return export_event(event, device)
+    return event, export_event(event, device)
+
+
+def _make_event_handle(use_gpu: bool = True) -> bytes:
+    """Backward-compatible handle-only wrapper for tests and callers."""
+    _event, handle = _make_exported_event(use_gpu)
+    return handle
 
 
 def _build_server_slot_views(
@@ -855,13 +864,15 @@ def _send_store(
         num_tokens = key.end - key.start
         num_blocks = num_tokens // block_size
         block_ids = list(range(block_offset, block_offset + num_blocks))
+        event, event_handle = _make_exported_event(use_gpu)
         payloads = [
             key,
             instance_id,
             [block_ids] * num_engine_group_infos,
-            _make_event_handle(),
+            event_handle,
         ]
-        result = _call(client, RequestType.STORE, payloads)
+        retain_refs = (event,) if event is not None else ()
+        result = _call(client, RequestType.STORE, payloads, retain_refs=retain_refs)
         if result is _TIMEOUT:
             return "timeout"
         return "stored" if result[1] else "store_failed"
@@ -925,14 +936,21 @@ def _send_retrieve(
         hit_tokens = hit_chunks * chunk_size
         num_blocks = hit_tokens // block_size
         block_ids = list(range(block_offset, block_offset + num_blocks))
+        event, event_handle = _make_exported_event(use_gpu)
         payloads = [
             key,
             instance_id,
             [block_ids] * num_engine_group_infos,
-            _make_event_handle(),
+            event_handle,
             0,  # skip_first_n_tokens
         ]
-        result = _call(client, RequestType.RETRIEVE, payloads)
+        retain_refs = (event,) if event is not None else ()
+        result = _call(
+            client,
+            RequestType.RETRIEVE,
+            payloads,
+            retain_refs=retain_refs,
+        )
         if result is _TIMEOUT:
             return "timeout"
         return "retrieved" if result[1] else "retrieve_failed"
