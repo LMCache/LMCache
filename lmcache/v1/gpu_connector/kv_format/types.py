@@ -49,9 +49,10 @@ def normalize_kv_layout(kv_layout: str) -> Literal["NHD", "HND"]:
         return cast('Literal["NHD", "HND"]', normalized)
     if normalized in _UNSUPPORTED_KV_LAYOUTS:
         raise NotImplementedError(
-            f"LMCache does not support the {kv_layout!r} KV cache layout yet; "
-            "set VLLM_KV_CACHE_LAYOUT=LBNHC (or LBHNC), or unset it to use "
-            "vLLM's default."
+            f"LMCache does not support the {kv_layout!r} KV cache layout yet. "
+            "If it was selected via VLLM_KV_CACHE_LAYOUT, set LBNHC or LBHNC "
+            "instead; if the attention backend requires it (e.g. DeepSeek V4 "
+            "requires BLHNC), LMCache cannot cache this model yet."
         )
     raise ValueError(
         f"Unknown KV cache layout {kv_layout!r}; expected one of "
