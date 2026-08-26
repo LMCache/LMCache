@@ -129,6 +129,18 @@ Source: ``lmcache/v1/multiprocess/config.py``
        independently, and is what allows ``--max-num-batched-tokens`` to exceed
        twice the block size). For a non-hybrid model it makes no difference —
        every layer resolves to one object group. See :doc:`/mp/hybrid_models`.
+   * - ``--enable``
+     - ``[]``
+     - Zero or more experimental intermediate-tensor transfer modules
+       to load alongside the standard KV transfer path. Currently the
+       only supported value is ``transfer_query``, which loads the
+       ``QStoreModule`` (paged Q ring buffer for query-tensor caching)
+       and its ``REGISTER_Q_CACHE`` / ``UNREGISTER_Q_CACHE`` / ``STORE_Q``
+       RPCs. Requires ``--supported-transfer-mode`` to be
+       ``lmcache_driven`` or ``auto``; the enabled names are also
+       reported back over the ``GET_EXPERIMENTAL`` RPC. See
+       ``lmcache/v1/multiprocess/modules/experimental/__init__.py`` for
+       the current set of supported values.
 
 Lookup Hash Logging
 -------------------
