@@ -610,3 +610,129 @@ class TestBatchedGetBlocking:
         results = local_disk_backend.batched_get_blocking([])
         assert results == []
         local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+
+def _fake_memory_obj(size: int) -> MagicMock:
+    memory_obj = MagicMock(spec=MemoryObj)
+    memory_obj.tensor = torch.tensor([1.0])
+    memory_obj.get_physical_size.return_value = size
+    return memory_obj
+
+
+def _inject_resident(
+    backend: LocalDiskBackend,
+    key: CacheEngineKey,
+    size: int,
+    *,
+    pin: bool = False,
+) -> None:
+    meta = DiskCacheMetadata(
+        path="/nonexistent/disk-admission.pt",
+        size=size,
+        shape=torch.Size([1]),
+        dtype=torch.float32,
+        cached_positions=None,
+        fmt=MemoryFormat.KV_2LTD,
+        pin_count=1 if pin else 0,
+    )
+    with backend.disk_lock:
+        backend.dict[key] = meta
+        backend.current_cache_size += size
+        backend.cache_policy.update_on_put(key)
+
+
+class TestDiskPutAdmission:
+    """Rollback-safe disk put admission (issue #4659)."""
+
+    def test_rejected_put_can_be_retried(
+        self, local_disk_backend: LocalDiskBackend
+    ) -> None:
+        """A rejected put must not stay in put_tasks, so a later retry proceeds."""
+        backend = local_disk_backend
+        backend.max_cache_size = 100
+        resident = create_test_key(401)
+        retry_key = create_test_key(402)
+        _inject_resident(backend, resident, 100, pin=True)
+
+        backend.submit_put_task(retry_key, _fake_memory_obj(40))
+
+        assert not backend.exists_in_put_tasks(retry_key)
+        assert resident in backend.dict
+
+        with backend.disk_lock:
+            backend.dict.pop(resident)
+            backend.current_cache_size = 0
+
+        with patch(
+            "lmcache.v1.storage_backend.local_disk_backend.asyncio.run_coroutine_threadsafe"
+        ):
+            backend.submit_put_task(retry_key, _fake_memory_obj(40))
+
+        assert backend.exists_in_put_tasks(retry_key)
+        backend.local_cpu_backend.memory_allocator.close()
+
+    def test_insufficient_capacity_does_not_evict(
+        self, local_disk_backend: LocalDiskBackend
+    ) -> None:
+        """Failing admission must not delete valid resident entries."""
+        backend = local_disk_backend
+        backend.max_cache_size = 100
+        key_a = create_test_key(411)
+        key_b = create_test_key(412)
+        key_new = create_test_key(413)
+        _inject_resident(backend, key_a, 50)
+        _inject_resident(backend, key_b, 50)
+
+        with patch.object(backend.cache_policy, "get_evict_candidates") as mock_evict:
+            backend.submit_put_task(key_new, _fake_memory_obj(120))
+            mock_evict.assert_not_called()
+
+        assert key_a in backend.dict
+        assert key_b in backend.dict
+        assert not backend.exists_in_put_tasks(key_new)
+        assert backend.current_cache_size == 100
+        backend.local_cpu_backend.memory_allocator.close()
+
+    def test_oversized_object_fails_before_eviction(
+        self, local_disk_backend: LocalDiskBackend
+    ) -> None:
+        """A chunk larger than the full budget is rejected without eviction."""
+        backend = local_disk_backend
+        backend.max_cache_size = 100
+        resident = create_test_key(421)
+        oversized = create_test_key(422)
+        _inject_resident(backend, resident, 80)
+
+        with patch.object(backend.cache_policy, "get_evict_candidates") as mock_evict:
+            backend.submit_put_task(oversized, _fake_memory_obj(120))
+            mock_evict.assert_not_called()
+
+        assert resident in backend.dict
+        assert not backend.exists_in_put_tasks(oversized)
+        backend.local_cpu_backend.memory_allocator.close()
+
+    def test_concurrent_duplicate_registration(
+        self, local_disk_backend: LocalDiskBackend
+    ) -> None:
+        """Only one concurrent submit_put_task for the same key is admitted."""
+        backend = local_disk_backend
+        backend.max_cache_size = 100
+        key = create_test_key(431)
+        barrier = threading.Barrier(2)
+
+        def worker() -> None:
+            barrier.wait()
+            backend.submit_put_task(key, _fake_memory_obj(10))
+
+        with patch(
+            "lmcache.v1.storage_backend.local_disk_backend.asyncio.run_coroutine_threadsafe"
+        ) as mock_coro:
+            threads = [threading.Thread(target=worker) for _ in range(2)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+        assert mock_coro.call_count == 1
+        assert backend.exists_in_put_tasks(key)
+        backend.local_cpu_backend.memory_allocator.close()
