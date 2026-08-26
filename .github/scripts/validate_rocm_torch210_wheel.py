@@ -2,9 +2,9 @@
 """Validate the exact AMD ROCm 7.2.4 / torch 2.10 build ABI."""
 
 # Standard
+from importlib.metadata import distribution
 import argparse
 import importlib.util
-from importlib.metadata import distribution
 import os
 import sys
 

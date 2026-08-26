@@ -117,6 +117,7 @@ jobs:
                     -v "${PWD}/dist_rocm_torch210:/wheel:ro" \
                     -v "${PWD}/.github/scripts/validate_rocm_torch210_wheel.py:/validate_rocm_torch210_wheel.py:ro" \
                     --entrypoint bash "${ROCM_PYTORCH_IMAGE}" -lc '
+                      set -euo pipefail
                       python -m pip uninstall -y lmcache
                       # Minimal dependencies needed to import the integration
                       # adapters; never resolve the unpinned torch dependency.
