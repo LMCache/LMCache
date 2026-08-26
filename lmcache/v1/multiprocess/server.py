@@ -273,7 +273,9 @@ def _build_modules(
                 "LMCACHE_COORDINATOR_EVENT_REPORTING=true) to enable it."
             )
         coordinator = BlendCoordinatorClient.maybe_create(
-            coordinator_config.url if coordinator_config.event_reporting else ""
+            coordinator_config.url if coordinator_config.event_reporting else "",
+            timeout=coordinator_config.blend_timeout,
+            match_concurrency=coordinator_config.blend_match_concurrency,
         )
         blend_v3 = BlendV3Module(
             ctx,
@@ -398,9 +400,10 @@ def run_cache_server(
                 )
                 mem_cfg.shm_name = ""
 
-    # blend engine: full per-chunk SWA KV. It also requires the
-    # single-object-group layout; BlendV3Module enforces that at
-    # construction (RuntimeError unless --no-separate-object-groups).
+    # blend engine: full per-chunk SWA KV (blended chunks reuse at arbitrary
+    # positions). full_sw_kv widens attention groups only; recurrent groups
+    # keep their one-block restore window, so a blend server also serves
+    # stock hybrid clients.
     is_blend = mp_config.engine_type == "blend"
 
     ctx = MPCacheServerContext(

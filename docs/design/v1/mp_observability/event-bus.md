@@ -188,7 +188,7 @@ bus's bounded-queue drop semantics.
 The bus additionally carries the **cache-event stream** for the coordinator's
 key directory (`mp_coordinator/cache_events.py`): eventually-consistent
 placement hints that tolerate loss by design (a dropped event surfaces as a
-``seq`` gap and a resync flag), so bus semantics fit.  For that consumer the
+``seq`` gap and a replay flag), so bus semantics fit.  For that consumer the
 L1 store/evict events carry a ``meta`` list (``L1ObjectMeta``: per-object
 size and backing medium, parallel to ``keys``), ``touch_keys`` publishes
 ``l1.keys.accessed`` with keys only, and the L2 base adapter's

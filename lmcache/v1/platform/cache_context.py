@@ -11,14 +11,13 @@ The concrete implementations live in their respective sub-packages:
 :func:`create_cache_context` keeps the dispatch out of the call site
 in :mod:`lmcache.v1.multiprocess.server`. Selection is data-driven
 and delegated to the :class:`~lmcache.v1.platform.base.device_spec.
-DeviceSpec` registry maintained by :mod:`lmcache.v1.platform`: each
-backend sub-package ships a ``DeviceSpec`` subclass whose
+DeviceSpec` registry maintained by :mod:`lmcache.v1.platform`: each built-in
+backend sub-package or external device plugin ships a ``DeviceSpec`` whose
 ``create_cache_context`` hook lazy-imports and instantiates the
 matching :class:`~lmcache.v1.platform.base.cache_context.
 BaseCacheContext`. Adding a new accelerator therefore requires
-*zero* edits to this module -- just implement
-``DeviceSpec.create_cache_context`` in the sub-package's
-``__init__.py``.
+*zero* edits to this module -- implement the hook in the built-in backend or
+external plugin.
 """
 
 # Future
@@ -111,8 +110,8 @@ def create_cache_context(
     if spec is None:
         raise ValueError(
             "No cache-context class registered for device type %r. "
-            "Make sure ``lmcache.v1.platform.<backend>.__init__`` "
-            "ships a DeviceSpec subclass whose ``create_cache_context`` "
+            "Make sure a built-in backend or installed lmcache.device_plugins "
+            "entry point provides a DeviceSpec whose ``create_cache_context`` "
             "hook returns a BaseCacheContext instance." % device_type
         )
     return spec.create_cache_context(

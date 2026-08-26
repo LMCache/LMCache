@@ -2,16 +2,10 @@
 """Fleet-wide key directory for the MP coordinator.
 
 Maps each :class:`ObjectKey` to its placements (instance, tier, backend,
-size) across the fleet, using :class:`CacheEventBatch` streams from MP
-servers. The directory is eventually consistent: lookups are hints to be
-validated at the owner.
-
-Events are processed in order per instance and only the latest L1
-placements for each incarnation are kept. L2 placements persist across
-restarts.
-
-Views like per-``cache_salt`` L2 usage are maintained separately from
-the same event stream.
+size) across the fleet, built by consuming the cache-event stream the
+ingest layer has already ordered, deduped, and fenced. Eventually
+consistent: lookups are hints to be validated at the owner. L1
+placements die with their reporter's incarnation; L2 placements persist.
 
 See ``docs/design/v1/mp_coordinator/key_directory.md``.
 """
@@ -20,8 +14,9 @@ See ``docs/design/v1/mp_coordinator/key_directory.md``.
 from __future__ import annotations
 
 # Standard
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from enum import Enum
+from typing import cast
 import threading
 
 # Third Party
@@ -38,6 +33,8 @@ from lmcache.v1.mp_coordinator.api import (
     CacheEventType,
 )
 from lmcache.v1.mp_coordinator.blend_index import BlendIndex, BlendIndexStats
+from lmcache.v1.mp_coordinator.persistence.durable_component import PersistenceType
+from lmcache.v1.mp_coordinator.utils.encoding import decode_key, encode_key
 
 logger = init_logger(__name__)
 
@@ -45,6 +42,10 @@ logger = init_logger(__name__)
 # of the ~10 KB a ``tuple[int, ...]`` of boxed ints costs, and content
 # comparison against a query window stays vectorized.
 _TOKEN_DTYPE = np.uint32
+
+_CAPTURED_TOKEN_DTYPE = np.dtype("<u4")
+"""Token ids are captured little-endian regardless of host order, so a
+capture written on one machine restores on another."""
 
 # Shared empty array for chunks whose content is unknown.
 _NO_TOKENS = np.empty(0, dtype=_TOKEN_DTYPE)
@@ -72,40 +73,6 @@ class Placement:
     shared: bool = False
 
 
-class ApplyResult(str, Enum):
-    """Result of applying one :class:`CacheEventBatch` to the directory.
-
-    ``APPLIED`` — the batch was applied.
-    ``DUPLICATE`` — the batch's ``seq`` was already applied for the
-    instance's current incarnation; the batch was dropped.
-    ``STALE_INCARNATION`` — the batch carries an incarnation older than the
-    instance's current one; the batch was dropped.
-    """
-
-    APPLIED = "applied"
-    DUPLICATE = "duplicate"
-    STALE_INCARNATION = "stale_incarnation"
-
-
-@dataclass(frozen=True)
-class InstanceDirectoryStats:
-    """Directory-side bookkeeping for one reporting instance.
-
-    Attributes:
-        incarnation: The instance's current incarnation.
-        last_seq: Highest batch ``seq`` applied for that incarnation.
-        gap_detected: ``True`` if a ``seq`` gap was observed for the
-            instance's stream.
-        num_l1_keys: Number of keys the stream has reported L1
-            placements for (eventually consistent).
-    """
-
-    incarnation: int
-    last_seq: int
-    gap_detected: bool
-    num_l1_keys: int
-
-
 @dataclass(frozen=True)
 class DirectoryStats:
     """A point-in-time summary of directory contents.
@@ -113,14 +80,14 @@ class DirectoryStats:
     Attributes:
         num_keys: Keys with at least one placement.
         num_placements: Total placements across all keys.
-        instances: Per-instance bookkeeping, keyed by ``instance_id``.
-        blend: Blend-index counts — how much of the directory is
-            fragment-matchable (see :class:`BlendIndexStats`).
+        l1_keys_by_instance: Keys each instance reported L1 placements
+            for; its stream cursor lives on the ingest gate.
+        blend: How much of the directory is fragment-matchable.
     """
 
     num_keys: int
     num_placements: int
-    instances: dict[str, InstanceDirectoryStats]
+    l1_keys_by_instance: dict[str, int]
     blend: BlendIndexStats
 
 
@@ -143,21 +110,13 @@ class _TokenBinding:
     keys: set[ObjectKey]
 
 
-@dataclass
-class _InstanceState:
-    """Per-instance event-stream cursor and reverse index."""
-
-    incarnation: int
-    last_seq: int = 0
-    gap_detected: bool = False
-    keys: set[ObjectKey] = field(default_factory=set)
-
-
 class KeyDirectory:
     """Thread-safe in-memory key directory built from cache events.
 
-    Mutations arrive through :meth:`apply_batch` and :meth:`drop_instance`;
-    reads through :meth:`lookup` and :meth:`stats`. Nothing is persisted.
+    Mutations arrive through the ingest layer's two consumer hooks,
+    :meth:`consume` and :meth:`fence_instance`; reads through
+    :meth:`lookup` and :meth:`stats`. Its contents survive a
+    coordinator restart through :meth:`capture` and :meth:`restore`.
 
     Fragment (blend) lookup is off until :meth:`enable_blend_lookup` is
     called, so a fleet that does not run CacheBlend hashes no content.
@@ -166,7 +125,10 @@ class KeyDirectory:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._directory: dict[ObjectKey, _KeyRecord] = {}
-        self._instances: dict[str, _InstanceState] = {}
+        # instance_id → keys it reported L1 placements for. The reverse
+        # index that makes fencing proportional to the instance's own
+        # keys instead of a full directory scan.
+        self._l1_keys_by_instance: dict[str, set[ObjectKey]] = {}
         # chunk hash → tokens + keys, for chunk hashes of >= 1 record.
         self._token_bindings: dict[bytes, _TokenBinding] = {}
         # Derived from the bindings; owns its own lock (order: self → index).
@@ -192,50 +154,18 @@ class KeyDirectory:
         self._blend_index = BlendIndex(chunk_size=chunk_size, probe_stride=probe_stride)
         self._blend_lookup_enabled = True
 
-    def apply_batch(self, batch: CacheEventBatch) -> ApplyResult:
-        """Apply one event batch to the directory.
-
-        Applies incarnation fencing, seq dedup, and gap detection, then
-        the entries. Entry application is idempotent: re-storing upserts
-        the placement (and its token binding), deleting an absent
-        placement is a no-op.
+    def consume(self, batch: CacheEventBatch) -> None:
+        """Apply one gate-admitted batch, idempotently: re-storing
+        upserts the placement (and its token binding), deleting an
+        absent placement is a no-op.
 
         Args:
-            batch: The event batch to apply.
-
-        Returns:
-            Whether the batch was applied, or why it was dropped.
+            batch: The admitted batch.
         """
         with self._lock:
-            state = self._instances.get(batch.instance_id)
-            if state is None:
-                state = _InstanceState(incarnation=batch.incarnation)
-                self._instances[batch.instance_id] = state
-            elif batch.incarnation < state.incarnation:
-                return ApplyResult.STALE_INCARNATION
-            elif batch.incarnation > state.incarnation:
-                # Restart: fence out the previous incarnation's placements.
-                self._drop_instance(batch.instance_id)
-                state = _InstanceState(incarnation=batch.incarnation)
-                self._instances[batch.instance_id] = state
-            elif batch.seq <= state.last_seq:
-                return ApplyResult.DUPLICATE
-
-            if batch.seq > state.last_seq + 1 and not state.gap_detected:
-                state.gap_detected = True
-                logger.warning(
-                    "Event gap for instance %s (incarnation %d): "
-                    "seq jumped %d -> %d; slice needs replay",
-                    batch.instance_id,
-                    batch.incarnation,
-                    state.last_seq,
-                    batch.seq,
-                )
-            state.last_seq = batch.seq
-
+            l1_keys = self._l1_keys_by_instance.setdefault(batch.instance_id, set())
             for entry in batch.entries:
-                self._apply_entry(state, batch, entry)
-            return ApplyResult.APPLIED
+                self._apply_entry(l1_keys, batch, entry)
 
     def lookup(self, keys: list[ObjectKey]) -> list[list[Placement]]:
         """Return the known placements for each requested key.
@@ -364,62 +294,144 @@ class KeyDirectory:
                 total += 1
             return total, page
 
-    def drop_instance(self, instance_id: str) -> int:
+    def fence_instance(self, instance_id: str) -> None:
         """Remove every **L1** placement reported by ``instance_id``.
 
-        The instance's stream cursor is removed too, so a later reconnect
-        starts fresh with any incarnation.
+        L2 placements survive: their bytes persist across the reporter's
+        restarts and leave only via ``DELETE`` events.
 
         Args:
-            instance_id: The instance whose placements to drop.
+            instance_id: The instance whose L1 placements to drop.
+        """
+        with self._lock:
+            removed = self._drop_l1_placements(instance_id)
+            self._l1_keys_by_instance.pop(instance_id, None)
+        if removed:
+            logger.info(
+                "Fenced instance %s: dropped %d L1 placement(s)",
+                instance_id,
+                removed,
+            )
+
+    @property
+    def name(self) -> str:
+        """Name of the directory's section in a checkpoint."""
+        return "key_directory"
+
+    @property
+    def persistence_type(self) -> PersistenceType:
+        """Placements come from the event stream, so they are checkpoint
+        state: losing them costs hit rate, not correctness."""
+        return PersistenceType.CHECKPOINT
+
+    def capture(self) -> Mapping[str, object]:
+        """Return the directory's contents.
 
         Returns:
-            The number of placements removed.
+            ``{"keys": [(key, last_access, [placement, ...]), ...],
+            "bindings": [(chunk_hash, token_offset, token bytes), ...],
+            "l1_keys_by_instance": {instance_id: [key index, ...]}}``.
+            The blend index is derived, so it is absent.
         """
         with self._lock:
-            removed = self._drop_instance(instance_id)
-            self._instances.pop(instance_id, None)
-            return removed
+            keys = [
+                (
+                    encode_key(key),
+                    record.last_access,
+                    [_encode_placement(p) for p in record.placements],
+                )
+                for key, record in self._directory.items()
+            ]
+            positions = {key: index for index, key in enumerate(self._directory)}
+            return {
+                "keys": keys,
+                "bindings": [
+                    (
+                        chunk_hash,
+                        binding.token_offset,
+                        binding.token_ids.astype(
+                            _CAPTURED_TOKEN_DTYPE, copy=False
+                        ).tobytes(),
+                    )
+                    for chunk_hash, binding in self._token_bindings.items()
+                ],
+                "l1_keys_by_instance": {
+                    instance_id: [positions[key] for key in l1_keys if key in positions]
+                    for instance_id, l1_keys in self._l1_keys_by_instance.items()
+                },
+            }
 
-    def reconcile(self, batch: CacheEventBatch) -> None:
-        """Apply ``batch``'s entries without stream-cursor bookkeeping.
+    def restore(self, state: Mapping[str, object]) -> None:
+        """Load a captured directory into an empty one.
+
+        Call once at startup. Blend fingerprints are re-derived, so
+        :meth:`enable_blend_lookup` must run first for restored chunks to
+        be fragment-matchable.
 
         Args:
-            batch: The synthesized batch to apply.
+            state: A :meth:`capture` value.
+
+        Raises:
+            ValueError: If the directory already holds keys, or the
+                reverse index cites a key position that does not exist.
         """
+        captured_keys = cast("list[tuple[object, float, list[object]]]", state["keys"])
+        bindings = cast("list[tuple[bytes, int, bytes]]", state["bindings"])
+        l1_by_instance = cast("Mapping[str, list[int]]", state["l1_keys_by_instance"])
         with self._lock:
-            state = self._instances.get(batch.instance_id)
-            if state is None:
-                state = _InstanceState(incarnation=batch.incarnation)
-                self._instances[batch.instance_id] = state
-            for entry in batch.entries:
-                self._apply_entry(state, batch, entry)
+            if self._directory or self._l1_keys_by_instance:
+                raise ValueError(
+                    "restore() requires an empty directory (holds "
+                    f"{len(self._directory)} keys, "
+                    f"{len(self._l1_keys_by_instance)} instances)"
+                )
+            key_table = []
+            for encoded_key, last_access, placements in captured_keys:
+                key = decode_key(encoded_key)
+                key_table.append(key)
+                self._directory[key] = _KeyRecord(
+                    placements=[_decode_placement(p) for p in placements],
+                    last_access=last_access,
+                )
+                self._add_token_binding(key)
+            for chunk_hash, token_offset, raw_tokens in bindings:
+                binding = self._token_bindings.get(chunk_hash)
+                if binding is None:
+                    # Content no surviving key references: nothing owns it.
+                    continue
+                token_ids = np.frombuffer(
+                    raw_tokens, dtype=_CAPTURED_TOKEN_DTYPE
+                ).astype(_TOKEN_DTYPE, copy=False)
+                token_ids.flags.writeable = False
+                binding.token_ids = token_ids
+                binding.token_offset = token_offset
+                if self._blend_lookup_enabled and token_offset != UNKNOWN_TOKEN_OFFSET:
+                    self._blend_index.add(token_ids, chunk_hash, token_offset)
+            for instance_id, positions_ in l1_by_instance.items():
+                for position in positions_:
+                    if not 0 <= position < len(key_table):
+                        raise ValueError(
+                            f"{instance_id!r} cites key position {position} "
+                            f"of {len(key_table)}"
+                        )
+                self._l1_keys_by_instance[instance_id] = {
+                    key_table[position] for position in positions_
+                }
 
     def stats(self) -> DirectoryStats:
-        """Return a point-in-time summary of directory contents.
-
-        Returns:
-            Key/placement counts, per-instance stream state keyed by
-            ``instance_id``, and the blend-index counts.
-        """
+        """Return a point-in-time summary of directory contents."""
         blend = self._blend_index.stats()
         with self._lock:
             num_placements = sum(
                 len(record.placements) for record in self._directory.values()
             )
-            instances = {
-                instance_id: InstanceDirectoryStats(
-                    incarnation=state.incarnation,
-                    last_seq=state.last_seq,
-                    gap_detected=state.gap_detected,
-                    num_l1_keys=len(state.keys),
-                )
-                for instance_id, state in self._instances.items()
-            }
             return DirectoryStats(
                 num_keys=len(self._directory),
                 num_placements=num_placements,
-                instances=instances,
+                l1_keys_by_instance={
+                    instance_id: len(keys)
+                    for instance_id, keys in self._l1_keys_by_instance.items()
+                },
                 blend=blend,
             )
 
@@ -427,11 +439,12 @@ class KeyDirectory:
 
     def _apply_entry(
         self,
-        state: _InstanceState,
+        l1_keys: set[ObjectKey],
         batch: CacheEventBatch,
         entry: CacheEventEntry,
     ) -> None:
-        """Apply one entry of ``batch`` under the directory lock."""
+        """Apply one entry under the directory lock, maintaining
+        ``l1_keys`` (the emitter's L1 reverse index)."""
         key = entry.key.to_object_key()
         if batch.event_type == CacheEventType.STORE:
             record = self._directory.get(key)
@@ -456,7 +469,7 @@ class KeyDirectory:
                 self._create_token_binding(key.chunk_hash, entry)
             record.last_access = max(record.last_access, batch.ts)
             if batch.tier == Tier.L1:
-                state.keys.add(key)
+                l1_keys.add(key)
         elif batch.event_type == CacheEventType.DELETE:
             record = self._directory.get(key)
             if record is None:
@@ -471,7 +484,7 @@ class KeyDirectory:
                 p.tier == Tier.L1 and p.instance_id == batch.instance_id
                 for p in record.placements
             ):
-                state.keys.discard(key)
+                l1_keys.discard(key)
         elif batch.event_type == CacheEventType.ACCESS:
             record = self._directory.get(key)
             if record is not None:
@@ -493,15 +506,13 @@ class KeyDirectory:
                 return index
         return None
 
-    def _drop_instance(self, instance_id: str) -> int:
-        """Remove the **L1** placements ``instance_id`` reported; return
-        the count. L2 placements survive: their bytes persist across the
-        reporter's restarts and leave only via ``DELETE`` events."""
-        state = self._instances.get(instance_id)
-        if state is None:
+    def _drop_l1_placements(self, instance_id: str) -> int:
+        """Remove and count the **L1** placements ``instance_id`` reported."""
+        l1_keys = self._l1_keys_by_instance.get(instance_id)
+        if l1_keys is None:
             return 0
         removed = 0
-        for key in state.keys:
+        for key in l1_keys:
             record = self._directory.get(key)
             if record is None:
                 continue
@@ -516,7 +527,7 @@ class KeyDirectory:
             else:
                 del self._directory[key]
                 self._remove_token_binding(key)
-        state.keys.clear()
+        l1_keys.clear()
         return removed
 
     def _create_token_binding(self, chunk_hash: bytes, entry: CacheEventEntry) -> None:
@@ -581,3 +592,37 @@ class KeyDirectory:
             del self._token_bindings[key.chunk_hash]
             if self._blend_lookup_enabled and binding.token_ids.size:
                 self._blend_index.remove(binding.token_ids, key.chunk_hash)
+
+
+# -- Durable encoding ---------------------------------------------------------
+#
+# Positional tuples rather than mappings: a capture runs on the caller's
+# thread over a fleet's worth of keys, and per-key field names cost more
+# than the fields themselves.
+
+
+def _encode_placement(placement: Placement) -> tuple[str, int, str, str, int, bool]:
+    """Flatten a placement for a capture."""
+    return (
+        placement.instance_id,
+        placement.incarnation,
+        placement.tier.value,
+        placement.backend,
+        placement.size_bytes,
+        placement.shared,
+    )
+
+
+def _decode_placement(encoded: object) -> Placement:
+    """Rebuild a placement from :func:`_encode_placement`."""
+    instance_id, incarnation, tier, backend, size_bytes, shared = cast(
+        "tuple[str, int, str, str, int, bool]", encoded
+    )
+    return Placement(
+        instance_id=instance_id,
+        incarnation=incarnation,
+        tier=Tier(tier),
+        backend=backend,
+        size_bytes=size_bytes,
+        shared=shared,
+    )

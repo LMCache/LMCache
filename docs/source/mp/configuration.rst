@@ -64,12 +64,12 @@ Source: ``lmcache/v1/multiprocess/config.py``
        ``--supported-transfer-mode`` to be ``lmcache_driven`` or ``auto``.
        Choices: ``default``, ``blend``, ``blend_legacy``.
    * - ``--supported-transfer-mode``
-     - ``auto``
+     - ``lmcache_driven``
      - Which worker → server transfer paths the server loads.
-       ``lmcache_driven`` enables only the server-driven transfer
-       path (STORE/RETRIEVE, supports both CUDA IPC and CPU SHM);
-       ``engine_driven`` enables only the non-GPU (PREPARE/COMMIT)
-       transfer path; ``auto`` (default) loads both
+       ``lmcache_driven`` (default) enables only the server-driven
+       transfer path (STORE/RETRIEVE, supports both CUDA IPC and CPU
+       SHM); ``engine_driven`` enables only the non-GPU
+       (PREPARE/COMMIT) transfer path; ``auto`` loads both
        so workers of either device type can connect without manual
        configuration.
        Choices: ``lmcache_driven``, ``engine_driven``, ``auto``.
@@ -90,14 +90,13 @@ Source: ``lmcache/v1/multiprocess/config.py``
        to the HTTP ``/run_script`` endpoint are allowed to import.
        Example: ``--script-allowed-imports numpy pandas``.
    * - ``--shm-name``
-     - *(not set)*
+     - ``""``
      - SHM segment name for non-GPU KV transfer (only used when the
        non-GPU path is loaded, i.e. ``--supported-transfer-mode`` is
        ``auto`` or ``engine_driven``).
-       Not set (default): auto-allocate a shared-memory pool.
-       ``""`` (empty string): disable SHM and force the pickle transfer
-       path.  Any other value: use that exact name for the SHM pool
-       segment.
+       ``""`` (empty string, default): SHM disabled; KV transfer uses
+       the pickle path.  Any other value: create a SHM pool and use
+       that exact name for its segment.
    * - ``--worker-reap-timeout-seconds``
      - ``120.0``
      - Silence budget (seconds) after which a worker that has sent at
@@ -253,8 +252,9 @@ Source: ``lmcache/v1/distributed/config.py``
      - *(not set)*
      - Optional ``/dev/dax*`` device or mmap-able file to use as the L1
        backing arena.  When set, disable lazy allocation with
-       ``--no-l1-use-lazy`` and disable SHM transfer advertising with
-       ``--shm-name ""`` because the L1 bytes live in the DAX mapping.  If a
+       ``--no-l1-use-lazy`` and leave ``--shm-name`` at its default ``""``
+       (SHM transfer disabled) because the L1 bytes live in the DAX
+       mapping.  If a
        DAX L2 adapter with the same ``device_path`` is registered, that
        adapter's ``max_dax_size_gb`` is used as the L1 Device-DAX overflow
        size.
@@ -275,6 +275,19 @@ The DMA path is selected automatically by platform: **cuFile**
 `ROCm/hipFile <https://github.com/ROCm/hipFile>`_) on AMD ROCm. The same
 flags apply to both; no configuration change is needed to switch vendors.
 
+**uGDS** (``libugds.so``) is a third, opt-in backend selected with
+``--gds-l1-backend ugds``. It is a user-space GPUDirect Storage library that
+builds NVMe commands and rings doorbells from user space, so its IO path issues
+no syscall. LMCache can use uGDS on either NVIDIA CUDA or AMD ROCm. Each
+deployment must use a ``libugds.so`` built for its active platform. Unlike
+cuFile and hipFile, uGDS does not use a filesystem: the slab is mapped directly
+onto a raw character device, and ``--gds-l1-path`` must name that device (for
+example ``/dev/ugds_drv0``) rather than a directory. The first
+``--l1-size-gb`` bytes of the device are the slab, so the device must be at
+least that large and must not hold anything else.
+
+
+
 .. note::
 
    AMD hipFile requires ROCm >= 7.2.0. The zero-copy GPUDirect fast path
@@ -282,6 +295,28 @@ flags apply to both; no configuration change is needed to switch vendors.
    ``amdgpu-dkms >= 30.20.1``, and the slab on a local NVMe ext4/xfs
    filesystem; where those are unavailable hipFile transparently falls back to
    a host-bounce compatibility path (correct, but not zero-copy).
+
+.. note::
+
+   uGDS requires its kernel module loaded and the NVMe device bound to it, and
+   a platform-matching ``libugds.so`` reachable through the loader
+   (``LD_LIBRARY_PATH`` or ``ldconfig``). Because the device is claimed by
+   ``ugds_drv`` rather than the kernel NVMe driver, it carries no filesystem
+   and cannot be shared with any other consumer while in use. Follow the
+   `uGDS installation guide <https://github.com/ScaleX-IO/uGDS/blob/main/docs/installation.md>`_
+   to build and load the kernel module, bind the NVMe device, build
+   ``libugds.so``, and verify the installation.
+
+   At startup LMCache queries the namespace capacity through
+   ``uGDSGetDeviceCapacity`` and rejects an aligned ``--l1-size-gb`` value larger
+   than the device. The installed ``libugds.so`` must provide this API; LMCache
+   fails closed with an upgrade message when an older library cannot report
+   capacity.
+.. warning::
+
+   uGDS requires an **entire dedicated SSD whose contents may be destroyed**.
+   Ensure the SSD is not used for any other purpose and that its contents are
+   not critical.
 
 .. list-table::
    :header-rows: 1
@@ -292,13 +327,18 @@ flags apply to both; no configuration change is needed to switch vendors.
      - Description
    * - ``--gds-l1-path``
      - Not set
-     - NVMe directory for the GDS L1 slab. Setting this enables the GDS L1
-       tier; one shared slab per process lives at
+     - NVMe directory for the GDS L1 slab, or the raw device path when
+       ``--gds-l1-backend ugds`` is used. Setting this enables the GDS L1
+       tier; with cuFile or hipFile one shared slab per process lives at
        ``<path>/lmcache_gds_slab.bin``.
+   * - ``--gds-l1-backend``
+     - ``auto``
+     - GDS implementation: ``auto``, ``cufile``, ``hipfile``, or ``ugds``.
+       ``auto`` selects cuFile on CUDA and hipFile on ROCm.
    * - ``--gds-l1-use-direct-io`` / ``--no-gds-l1-use-direct-io``
      - ``True``
      - Open the slab with ``O_DIRECT`` (required for the GDS DMA fast path on
-       ext4).
+       ext4). Ignored by ``ugds``, whose IO bypasses the kernel entirely.
 
 L1 Manager TTLs
 ----------------
@@ -517,6 +557,57 @@ data parallelism (``dp_size > 1``) are rejected with a clear error.
         --kv-transfer-config \
         '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.server_urls": "tcp://host1:6667,tcp://host2:6667"}}'
 
+Decode context parallelism (DCP)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``--decode-context-parallel-size`` is supported. Under DCP, vLLM shards the
+attention KV cache across ranks along the token axis, so each rank holds only
+a strided ``1/dcp`` slice and one block ID spans ``block_size * dcp`` tokens.
+LMCache stores each rank's slice as its own object and a chunk counts as a hit
+only when every rank's slice is present.
+
+One configuration change is required: the LMCache chunk size must be a
+multiple of ``block_size * decode_context_parallel_size``, not just
+``block_size``. If it is smaller, vLLM fails at connector startup with the
+required multiple in the message (the LMCache server itself starts fine).
+
+The example model also needs a vLLM build that can run it under DCP:
+Kimi-Linear DCP support landed after v0.27.1 (vLLM commit ``63ac04a61e``,
+PR #50484). On stock v0.27.1 the command below fails at startup with
+``Kimi-K3 MultiHeadLatentAttention does not support context parallelism``.
+
+.. code-block:: bash
+
+    # block_size 1024 x dcp 2 -> chunk size must be a multiple of 2048
+    lmcache server --host localhost --port 6000 --chunk-size 2048 \
+        --l1-size-gb 20 --eviction-policy LRU
+
+    vllm serve moonshotai/Kimi-Linear-48B-A3B-Instruct \
+        --trust-remote-code \
+        --tensor-parallel-size 2 \
+        --decode-context-parallel-size 2 \
+        --kv-transfer-config \
+        '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.host": "127.0.0.1", "lmcache.mp.port": 6000}}'
+
+Pipeline parallelism and multiple LMCache servers may both be combined with
+DCP. These combinations are rejected at startup:
+
+.. list-table::
+   :header-rows: 1
+
+   * - Rejected with DCP
+     - Reason
+   * - ``--prefill-context-parallel-size > 1``
+     - Adds a second KV shard axis this connector does not map.
+   * - ``--cp-kv-cache-interleave-size != 1``
+     - Changes the token-to-rank mapping, which would store the wrong KV.
+   * - Fewer than ``dcp_size`` ranks per LMCache server
+     - No server holds a complete set of shards, and lookup takes the
+       minimum hit count across servers, so it reports no hits.
+
+``decode_context_parallel_size > tensor_parallel_size`` is rejected by vLLM
+itself, so this connector does not re-check it.
+
 ``LMCacheMPConnector`` reads the following keys from
 ``kv_connector_extra_config``:
 
@@ -565,6 +656,12 @@ All connector-level options are passed through
      - ``10.0``
      - Interval (seconds) between periodic heartbeat pings sent from the
        connector to the server.
+   * - ``lmcache.mp.eager_prefetch``
+     - ``false``
+     - Submit the LMCache lookup when a request enters vLLM's waiting queue,
+       allowing L2-to-L1 KV staging to overlap with scheduler queue wait.
+       Resumable requests are skipped because their token IDs may be incomplete
+       at enqueue time.
    * - ``lmcache.mp.mp_transfer_mode``
      - ``auto``
      - Routing mode for the worker -> server transfer context. One of

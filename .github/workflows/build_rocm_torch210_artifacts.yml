@@ -1,0 +1,134 @@
+name: Build ROCm Torch 2.10 Artifacts
+
+# Reusable workflow for the wheel built against AMD's public ROCm 7.2.4 /
+# torch 2.10.0 build. The same pinned, non-ATOM image builds and smoke-tests
+# the wheel so dependencies supplied only by an ATOM layer cannot mask issues.
+
+on:
+    workflow_call:
+        outputs:
+            rocm_torch210_version:
+                description: >-
+                    Full wheel version including the ROCm torch 2.10 segment
+                    (for example,
+                    0.5.4+rocm7.2.4.torch2.10.git3d3aa833.cxx11abi1).
+                value: ${{ jobs.build-rocm-torch210-artifacts.outputs.rocm_torch210_version }}
+    workflow_dispatch:
+
+env:
+    LC_ALL: en_US.UTF-8
+    ROCM_PYTORCH_IMAGE: >-
+        rocm/pytorch:rocm7.2.4_ubuntu24.04_py3.12_pytorch_release_2.10.0@sha256:4449f856653602317e4101a76fce599c7fcd58ccec2e539951fce5f73083179e
+    TORCH_WHEEL_SOURCE: >-
+        https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.4/torch-2.10.0%2Brocm7.2.4.lw.git3d3aa833-cp312-cp312-linux_x86_64.whl
+    EXPECTED_TORCH_VERSION: 2.10.0+rocm7.2.4.git3d3aa833
+    EXPECTED_TORCH_GIT_VERSION: 3d3aa833db84eed6b7f5595cb5f162c2f78300a4
+    EXPECTED_HIP_VERSION: "7.2.53211"
+    EXPECTED_ROCM_VERSION: "7.2.4"
+    EXPECTED_PYTHON_ABI: cp312
+    EXPECTED_CXX11_ABI: "1"
+    EXPECTED_WHEEL_TAG: cp312-cp312-manylinux_2_39_x86_64
+    MANYLINUX_PLATFORM: manylinux_2_39_x86_64
+    PYTORCH_ROCM_ARCH: gfx942;gfx950
+    ROCM_TORCH210_LOCAL_VERSION: rocm7.2.4.torch2.10.git3d3aa833.cxx11abi1
+
+defaults:
+    run:
+        shell: bash
+
+permissions:
+    contents: read
+
+jobs:
+    build-rocm-torch210-artifacts:
+        name: Build ROCm torch 2.10 wheel (gfx942, gfx950)
+        runs-on: ubuntu-latest
+        outputs:
+            rocm_torch210_version: ${{ steps.rocm-torch210-version.outputs.rocm_torch210_version }}
+        steps:
+            - name: Harden Runner
+              uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+              with:
+                  disable-sudo-and-containers: false
+                  egress-policy: audit
+
+            - name: Checkout code
+              uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+              with:
+                  fetch-depth: 0
+
+            - name: Remove non-release tags (keep stable + rc/a/b pre-releases)
+              run: git tag -l | grep -vE '^v[0-9]+\.[0-9]+\.[0-9]+((rc|a|b)[0-9]+)?$' | xargs -r git tag -d
+
+            - name: Login to DockerHub
+              if: vars.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != ''
+              env:
+                  DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+              uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
+              with:
+                  username: ${{ vars.DOCKERHUB_USERNAME }}
+                  password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+            - name: Free disk space
+              uses: ./.github/actions/free-disk-space
+
+            - name: Get base version for ROCm torch 2.10 wheel
+              id: rocm-torch210-version
+              run: |
+                  if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+                    BASE="${GITHUB_REF_NAME#v}"
+                  else
+                    BASE=$(git tag --list 'v[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 | sed 's/^v//' || echo "0.0.0.dev")
+                  fi
+                  VERSION="${BASE}+${ROCM_TORCH210_LOCAL_VERSION}"
+                  echo "ROCM_TORCH210_VERSION=${VERSION}" >> "$GITHUB_ENV"
+                  echo "rocm_torch210_version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+            - name: Build ROCm torch 2.10 wheel
+              run: |
+                  echo "AMD torch wheel source: ${TORCH_WHEEL_SOURCE}"
+                  docker run --rm \
+                    -e EXPECTED_TORCH_VERSION="${EXPECTED_TORCH_VERSION}" \
+                    -e EXPECTED_TORCH_GIT_VERSION="${EXPECTED_TORCH_GIT_VERSION}" \
+                    -e EXPECTED_HIP_VERSION="${EXPECTED_HIP_VERSION}" \
+                    -e EXPECTED_ROCM_VERSION="${EXPECTED_ROCM_VERSION}" \
+                    -e EXPECTED_PYTHON_ABI="${EXPECTED_PYTHON_ABI}" \
+                    -e EXPECTED_CXX11_ABI="${EXPECTED_CXX11_ABI}" \
+                    -e EXPECTED_WHEEL_TAG="${EXPECTED_WHEEL_TAG}" \
+                    -e PYTORCH_ROCM_ARCH="${PYTORCH_ROCM_ARCH}" \
+                    -e MANYLINUX_PLATFORM="${MANYLINUX_PLATFORM}" \
+                    -e SETUPTOOLS_SCM_PRETEND_VERSION="${ROCM_TORCH210_VERSION}" \
+                    -v "${PWD}:/work/LMCache" \
+                    --entrypoint bash "${ROCM_PYTORCH_IMAGE}" \
+                    /work/LMCache/.github/scripts/build_rocm_torch210_wheel.sh
+
+            # This catches torch C++ ABI mismatches without requiring a GPU.
+            # On-device kernel validation remains a separate AMD-hosted check.
+            - name: Smoke-test wheel in a clean ROCm torch 2.10 container
+              run: |
+                  docker run --rm \
+                    -e EXPECTED_TORCH_VERSION="${EXPECTED_TORCH_VERSION}" \
+                    -e EXPECTED_TORCH_GIT_VERSION="${EXPECTED_TORCH_GIT_VERSION}" \
+                    -e EXPECTED_HIP_VERSION="${EXPECTED_HIP_VERSION}" \
+                    -e EXPECTED_ROCM_VERSION="${EXPECTED_ROCM_VERSION}" \
+                    -e EXPECTED_PYTHON_ABI="${EXPECTED_PYTHON_ABI}" \
+                    -e EXPECTED_CXX11_ABI="${EXPECTED_CXX11_ABI}" \
+                    -e EXPECTED_WHEEL_TAG="${EXPECTED_WHEEL_TAG}" \
+                    -v "${PWD}/dist_rocm_torch210:/wheel:ro" \
+                    -v "${PWD}/.github/scripts/validate_rocm_torch210_wheel.py:/validate_rocm_torch210_wheel.py:ro" \
+                    --entrypoint bash "${ROCM_PYTORCH_IMAGE}" -lc '
+                      set -euo pipefail
+                      python -m pip uninstall -y lmcache
+                      # Minimal dependencies needed to import the integration
+                      # adapters; never resolve the unpinned torch dependency.
+                      python -m pip install "numpy<=2.2.6" cachetools numba
+                      python -m pip install --no-deps --force-reinstall /wheel/*.whl
+                      cd /tmp
+                      python /validate_rocm_torch210_wheel.py
+                    '
+
+            - name: Upload ROCm torch 2.10 release artifacts to GHA
+              uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+              with:
+                  name: release-rocm-torch210-artifacts
+                  path: dist_rocm_torch210/

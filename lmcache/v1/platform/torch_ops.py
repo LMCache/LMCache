@@ -2,10 +2,8 @@
 """Device-agnostic torch baseline for the unified ``DeviceOps`` surface.
 
 Migrated verbatim from the former ``lmcache.python_ops_fallback`` module.
-Owns the torch/CPU implementation of every op in ``DeviceOps.OPS``; shared
-types live in :mod:`lmcache.v1.platform.ops_types`. Internal to the platform
-package -- consumers go through :class:`DeviceOps` or the ``lmcache.c_ops``
-shim, never this module directly.
+Owns the torch/CPU implementation of every device op. Internal to the platform
+package -- consumers go through :class:`DeviceOps`, never this module directly.
 """
 
 # Standard
@@ -24,18 +22,20 @@ import numpy as np
 import torch
 
 # First Party
+from lmcache.lmcache_native import GPUKVFormat  # noqa: F401
+from lmcache.lmcache_native import (
+    EngineKVFormat,
+    TransferDirection,
+    is_cross_layer,
+    is_kv_list,
+    is_mla,
+)
 from lmcache.logging import init_logger
 from lmcache.v1.platform._device_detect import (
     current_device_spec,
     get_torch_device,
 )
-from lmcache.v1.platform.ops_types import (  # noqa: F401
-    EngineKVFormat,
-    GPUKVFormat,
-    PageBufferShapeDesc,
-    TransferDirection,
-    set_shape_desc_dtype,
-)
+from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 
 if TYPE_CHECKING:
     # First Party
@@ -372,10 +372,6 @@ def _alloc_page_aligned_pinned_view(size: int) -> Tuple[torch.Tensor, int]:
     return aligned_view, aligned_view.data_ptr()
 
 
-# Every static fact about a format lives on its ``KVFormatSpec``; the public
-# ``is_*`` helpers below only look it up. They mirror the c_ops predicates
-# (csrc/engine_kv_format.h) -- the parity test pins them to the same names and
-# signatures.
 def _format_spec(engine_kv_format: EngineKVFormat) -> "type[KVFormatSpec]":
     """Return the spec class owning *engine_kv_format*'s static layout facts.
 
@@ -389,7 +385,7 @@ def _format_spec(engine_kv_format: EngineKVFormat) -> "type[KVFormatSpec]":
         ValueError: If the format has no spec.
     """
     # Imported lazily, not at module scope: the specs package reads
-    # ``lmcache.c_ops``, whose shim is installed only once this module (the
+    # ``lmcache.device_ops``, which is resolved only once this module (the
     # torch baseline behind it) has been imported.
     # First Party
     from lmcache.v1.gpu_connector.kv_format.specs.registry import get_spec_class
@@ -811,26 +807,6 @@ def multi_layer_kv_transfer_unilateral(
                 key_value[kv_idx, layer_id, valid_mask_kv, :] = gathered.to(kv_device)
 
 
-def is_cross_layer(engine_kv_format: EngineKVFormat) -> bool:
-    """Return True when all layers live in one fused tensor."""
-    return _format_spec(engine_kv_format).is_cross_layer
-
-
-def is_kv_list(engine_kv_format: EngineKVFormat) -> bool:
-    """Return True when keys and values are two separate top-level lists."""
-    return _format_spec(engine_kv_format).is_kv_list
-
-
-def is_layer_list(engine_kv_format: EngineKVFormat) -> bool:
-    """Return True when the structure is one list entry per layer."""
-    return _format_spec(engine_kv_format).is_layer_list
-
-
-def is_mla(engine_kv_format: EngineKVFormat) -> bool:
-    """Return True when a KV format uses MLA paged layout."""
-    return _format_spec(engine_kv_format).is_mla
-
-
 def _is_hnd_format(engine_kv_format: EngineKVFormat) -> bool:
     """Return True when a KV format stores heads before block tokens (HND)."""
     return _format_spec(engine_kv_format).is_hnd
@@ -929,8 +905,7 @@ def _infer_kv_dtype(
     """Infer the KV element dtype from whichever inputs carry it.
 
     Inference order (first match wins):
-    1. ``shape_desc.dtype`` — authoritative when set (requires the
-       ``set_shape_desc_dtype`` helper from PR #3514; correctly distinguishes
+    1. ``shape_desc.dtype`` — authoritative when set; correctly distinguishes
        float16 vs bfloat16 which share ``element_size == 2``).
     2. ``paged_buffer_ptrs_tensor`` — if it is a non-pointer tensor or a list
        of tensors (including nested SGLang MHA lists), the dtype of the first
@@ -1179,7 +1154,7 @@ def multi_layer_block_kv_transfer(
     """Python fallback implementation of block-based multi-layer KV transfer.
 
     Signature intentionally mirrors the C++ binding so callers can invoke
-    ``lmcache.c_ops.multi_layer_block_kv_transfer`` uniformly on native and
+    ``lmcache.device_ops.multi_layer_block_kv_transfer`` uniformly on native and
     fallback backends.
 
     Args:
