@@ -11,11 +11,7 @@ one -- so the direction cannot invert by accident.
 """
 
 # Standard
-from collections.abc import Sequence
 from typing import TYPE_CHECKING
-
-# First Party
-from lmcache.v1.mp_coordinator.persistence.durable_component import DurableComponent
 
 if TYPE_CHECKING:
     # First Party
@@ -27,8 +23,10 @@ if TYPE_CHECKING:
 class Controller:
     """A collaborator the coordinator builds once at startup.
 
-    Subclass to have discovery construct it, register it as a cache-event
-    consumer, and route whatever durable state it advertises.
+    Subclass to have discovery construct it. Consuming the cache-event
+    stream and holding durable state are separate protocols -- implement
+    ``consume`` or ``get_durable_components`` and discovery picks that up
+    too, so a controller that does neither declares neither.
     """
 
     @classmethod
@@ -51,12 +49,3 @@ class Controller:
             controllers: The registry being populated.
         """
         return cls()
-
-    def get_durable_components(self) -> Sequence[DurableComponent]:
-        """Return the state this controller needs to outlive the process.
-
-        Empty by default, so a controller holding nothing durable says
-        nothing about persistence. Each component it does return carries
-        the ``persistence_type`` that decides where it is stored.
-        """
-        return ()

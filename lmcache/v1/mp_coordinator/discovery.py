@@ -16,6 +16,7 @@ import pkgutil
 
 # First Party
 from lmcache.v1.mp_coordinator.persistence.durable_component import (
+    Durability,
     DurableComponent,
     PersistenceType,
 )
@@ -118,11 +119,11 @@ class Registry(Generic[MemberT]):
             persistence_type: [] for persistence_type in PersistenceType
         }
         for member in self.all():
-            components = cast(
-                "Sequence[DurableComponent]",
-                member.get_durable_components(),  # type: ignore[attr-defined]
-            )
-            for component in components:
+            # Holding durable state is a property of the class, not of the
+            # package, so the protocol decides rather than the base.
+            if not isinstance(member, Durability):
+                continue
+            for component in member.get_durable_components():
                 collected[component.persistence_type].append(component)
         return collected
 

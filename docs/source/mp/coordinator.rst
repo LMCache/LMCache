@@ -101,6 +101,10 @@ keeps the default below.
      - (empty)
      - File the operator-set state (L2 pins and per-``cache_salt`` quotas)
        is stored in. Empty means that state is lost on restart.
+   * - ``--extra-config``
+     - (empty)
+     - JSON object of settings the core flags do not name, read by whichever
+       view or controller looks for them.
    * - ``--timeout-keep-alive``
      - ``10``
      - Seconds the HTTP server keeps idle connections open before closing

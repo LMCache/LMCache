@@ -3,8 +3,20 @@
 A `Controller` is a collaborator the coordinator builds once at startup.
 Subclassing the marker in
 [`base.py`](../../../../../lmcache/v1/mp_coordinator/controllers/base.py) is
-the whole of adding one: `build_controllers` scans this package, constructs
-every class it finds, and routes whatever durable state that class advertises.
+the whole of adding one: `build_controllers` scans this package and constructs
+every class it finds.
+
+The marker carries construction and nothing else. Consuming the cache-event
+stream and holding durable state are **protocols**, matched structurally:
+implement `consume` (`CacheEventConsumer`) and the fan-out subscribes you,
+implement `get_durable_components` (`Durability`) and your state is routed to
+an artifact. A controller
+that does neither declares neither, and a class outside these packages can
+still satisfy either -- which is why the ingest gate is captured without being
+a view or a controller.
+
+A setting a controller needs but the core config does not name goes in
+`MPCoordinatorConfig.extra_config`, so shipping one stays a single file.
 
 ## Why discovery rather than a list
 
@@ -37,5 +49,5 @@ for the batch the usage view has just consumed. Discovery returns controllers
 in class-name order, which happens to be correct today and would be a trap to
 depend on.
 
-**Anything outside this package.** The key directory and the ingest gate hold
-durable state but are not controllers, so `create_app` names them.
+**Anything outside this package.** The ingest gate holds durable state but is
+neither a view nor a controller, so `create_app` names it.
