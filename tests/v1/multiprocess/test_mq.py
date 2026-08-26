@@ -27,7 +27,8 @@ from lmcache.v1.multiprocess.mq import (
     _parse_grpc_url,
 )
 from lmcache.v1.multiprocess.protocol import (
-    RequestType,
+    RPC,
+    RpcMethod,
     get_handler_type,
     get_payload_classes,
 )
@@ -109,7 +110,7 @@ def _server_process(
     server_url: str,
     ready_event: EventClass,
     shutdown_event: EventClass,
-    request_handlers: dict[RequestType, Callable],
+    request_handlers: dict[RpcMethod, Callable],
 ):
     """
     Server process that runs the MessageQueueServer.
@@ -118,7 +119,7 @@ def _server_process(
         server_url: URL to bind the server to
         ready_event: Event to signal when server is ready
         shutdown_event: Event to signal server shutdown
-        request_handlers: Dict mapping RequestType to handler functions
+        request_handlers: Dict mapping RpcMethod to handler functions
     """
     # First Party
     from lmcache.v1.multiprocess.protocol import HandlerType
@@ -127,7 +128,7 @@ def _server_process(
     server = MessageQueueServer(server_url, context)
 
     # Register all handlers
-    blocking_types: list[RequestType] = []
+    blocking_types: list[RpcMethod] = []
     for request_type, handler in request_handlers.items():
         payload_classes = get_payload_classes(request_type)
         handler_type = get_handler_type(request_type)
@@ -154,7 +155,7 @@ def _server_process(
 def _run_client_test(
     server_url: str,
     ready_event: EventClass,
-    request_type: RequestType,
+    request_type: RpcMethod,
     payloads: list[Any],
     expected_response: Any,
     num_requests: int = 1,
@@ -225,14 +226,14 @@ class MessageQueueTestHelper:
 
     Usage:
         1. Create an instance with server URL
-        2. Register handlers for different RequestTypes
+        2. Register handlers for different RpcMethods
         3. Call run_test() to execute the test with client requests
 
     Example:
         helper = MessageQueueTestHelper(server_url="grpc://127.0.0.1:5556")
-        helper.register_handler(RequestType.NOOP, noop_handler)
+        helper.register_handler(RPC.Noop, noop_handler)
         helper.run_test(
-            request_type=RequestType.NOOP,
+            request_type=RPC.Noop,
             payloads=[],
             expected_response="NOOP_OK",
             num_requests=10,  # Each client sends 10 requests
@@ -242,16 +243,16 @@ class MessageQueueTestHelper:
 
     def __init__(self, server_url: str = "grpc://127.0.0.1:5556"):
         self.server_url = server_url
-        self.handlers: dict[RequestType, Callable] = {}
+        self.handlers: dict[RpcMethod, Callable] = {}
         self.ctx = mp.get_context("spawn")
 
     def register_handler(
         self,
-        request_type: RequestType,
+        request_type: RpcMethod,
         handler: Callable,
     ) -> "MessageQueueTestHelper":
         """
-        Register a handler for a specific RequestType.
+        Register a handler for a specific RpcMethod.
 
         Args:
             request_type: The type of request to handle
@@ -265,7 +266,7 @@ class MessageQueueTestHelper:
 
     def run_test(
         self,
-        request_type: RequestType,
+        request_type: RpcMethod,
         payloads: list[Any],
         expected_response: Any,
         num_requests: int = 1,
@@ -351,7 +352,7 @@ class MessageQueueTestHelper:
 
 
 # ==============================================================================
-# Tests for Different RequestTypes
+# Tests for Different RpcMethods
 # ==============================================================================
 
 
@@ -362,11 +363,11 @@ def test_mq_noop_request():
     """
     # Create test helper and register handler
     helper = MessageQueueTestHelper(server_url="grpc://127.0.0.1:5556")
-    helper.register_handler(RequestType.NOOP, test_mq_handler_helpers.noop_handler)
+    helper.register_handler(RPC.Noop, test_mq_handler_helpers.noop_handler)
 
     # Run test with single request
     helper.run_test(
-        request_type=RequestType.NOOP,
+        request_type=RPC.Noop,
         payloads=[],
         expected_response="NOOP_OK",
         num_requests=1,
@@ -379,11 +380,11 @@ def test_mq_noop_multiple_requests():
     Verifies that server can handle multiple sequential requests.
     """
     helper = MessageQueueTestHelper(server_url="grpc://127.0.0.1:5557")
-    helper.register_handler(RequestType.NOOP, test_mq_handler_helpers.noop_handler)
+    helper.register_handler(RPC.Noop, test_mq_handler_helpers.noop_handler)
 
     # Run test with multiple requests
     helper.run_test(
-        request_type=RequestType.NOOP,
+        request_type=RPC.Noop,
         payloads=[],
         expected_response="NOOP_OK",
         num_requests=10,
@@ -396,11 +397,11 @@ def test_mq_noop_multiple_clients():
     Verifies that server can handle requests from multiple clients simultaneously.
     """
     helper = MessageQueueTestHelper(server_url="grpc://127.0.0.1:5558")
-    helper.register_handler(RequestType.NOOP, test_mq_handler_helpers.noop_handler)
+    helper.register_handler(RPC.Noop, test_mq_handler_helpers.noop_handler)
 
     # Run test with multiple clients, each sending multiple requests
     helper.run_test(
-        request_type=RequestType.NOOP,
+        request_type=RPC.Noop,
         payloads=[],
         expected_response="NOOP_OK",
         num_requests=5,
@@ -433,12 +434,12 @@ def test_mq_register_kv_cache():
     # Create test helper and register handler
     helper = MessageQueueTestHelper(server_url="grpc://127.0.0.1:5559")
     helper.register_handler(
-        RequestType.REGISTER_KV_CACHE, test_mq_handler_helpers.register_kv_cache_handler
+        RPC.RegisterKvCache, test_mq_handler_helpers.register_kv_cache_handler
     )
 
     # Run test with REGISTER_KV_CACHE request
     helper.run_test(
-        request_type=RequestType.REGISTER_KV_CACHE,
+        request_type=RPC.RegisterKvCache,
         payloads=[
             gpu_id,
             kv_cache,
@@ -463,13 +464,13 @@ def test_mq_unregister_kv_cache():
     # Create test helper and register handler
     helper = MessageQueueTestHelper(server_url="grpc://127.0.0.1:5560")
     helper.register_handler(
-        RequestType.UNREGISTER_KV_CACHE,
+        RPC.UnregisterKvCache,
         test_mq_handler_helpers.unregister_kv_cache_handler,
     )
 
     # Run test with UNREGISTER_KV_CACHE request
     helper.run_test(
-        request_type=RequestType.UNREGISTER_KV_CACHE,
+        request_type=RPC.UnregisterKvCache,
         payloads=[gpu_id],
         expected_response=None,
         num_requests=1,
@@ -486,13 +487,13 @@ def test_mq_unregister_kv_cache_multiple_clients():
     # Create test helper and register handler
     helper = MessageQueueTestHelper(server_url="grpc://127.0.0.1:5561")
     helper.register_handler(
-        RequestType.UNREGISTER_KV_CACHE,
+        RPC.UnregisterKvCache,
         test_mq_handler_helpers.unregister_kv_cache_handler,
     )
 
     # Run test with multiple clients
     helper.run_test(
-        request_type=RequestType.UNREGISTER_KV_CACHE,
+        request_type=RPC.UnregisterKvCache,
         payloads=[gpu_id],
         expected_response=None,
         num_requests=3,
@@ -514,11 +515,11 @@ def test_mq_store():
 
     # Create test helper and register handler
     helper = MessageQueueTestHelper(server_url="grpc://127.0.0.1:5562")
-    helper.register_handler(RequestType.STORE, test_mq_handler_helpers.store_handler)
+    helper.register_handler(RPC.Store, test_mq_handler_helpers.store_handler)
 
     # Run test with STORE request
     helper.run_test(
-        request_type=RequestType.STORE,
+        request_type=RPC.Store,
         payloads=[key, gpu_id, gpu_block_ids, test_handle],
         expected_response=(b"\x01" * 64, True),
         num_requests=1,
@@ -539,13 +540,11 @@ def test_mq_retrieve():
 
     # Create test helper and register handler
     helper = MessageQueueTestHelper(server_url="grpc://127.0.0.1:5563")
-    helper.register_handler(
-        RequestType.RETRIEVE, test_mq_handler_helpers.retrieve_handler
-    )
+    helper.register_handler(RPC.Retrieve, test_mq_handler_helpers.retrieve_handler)
 
     # Run test with RETRIEVE request
     helper.run_test(
-        request_type=RequestType.RETRIEVE,
+        request_type=RPC.Retrieve,
         payloads=[key, gpu_id, gpu_block_ids, test_handle, 0],
         expected_response=(b"\x01" * 64, True),
         num_requests=1,
@@ -566,11 +565,11 @@ def test_mq_lookup():
 
     # Create test helper and register handler
     helper = MessageQueueTestHelper(server_url="grpc://127.0.0.1:5564")
-    helper.register_handler(RequestType.LOOKUP, test_mq_handler_helpers.lookup_handler)
+    helper.register_handler(RPC.Lookup, test_mq_handler_helpers.lookup_handler)
 
     # Run test with LOOKUP request
     helper.run_test(
-        request_type=RequestType.LOOKUP,
+        request_type=RPC.Lookup,
         payloads=[key, 1],
         expected_response=expected_response,
         num_requests=1,
@@ -590,11 +589,11 @@ def test_mq_lookup_with_different_key():
 
     # Create test helper and register handler
     helper = MessageQueueTestHelper(server_url="grpc://127.0.0.1:5565")
-    helper.register_handler(RequestType.LOOKUP, test_mq_handler_helpers.lookup_handler)
+    helper.register_handler(RPC.Lookup, test_mq_handler_helpers.lookup_handler)
 
     # Run test with LOOKUP request
     helper.run_test(
-        request_type=RequestType.LOOKUP,
+        request_type=RPC.Lookup,
         payloads=[key, 1],
         expected_response=expected_response,
         num_requests=1,
@@ -622,12 +621,12 @@ def test_mq_report_block_allocation():
 
     helper = MessageQueueTestHelper(server_url="grpc://127.0.0.1:5566")
     helper.register_handler(
-        RequestType.REPORT_BLOCK_ALLOCATION,
+        RPC.ReportBlockAllocation,
         test_mq_handler_helpers.report_block_allocations_handler,
     )
 
     helper.run_test(
-        request_type=RequestType.REPORT_BLOCK_ALLOCATION,
+        request_type=RPC.ReportBlockAllocation,
         payloads=[42, "test-model", records],
         expected_response=None,
         num_requests=1,
@@ -642,12 +641,12 @@ def test_mq_report_block_allocation_empty():
 
     helper = MessageQueueTestHelper(server_url="grpc://127.0.0.1:5567")
     helper.register_handler(
-        RequestType.REPORT_BLOCK_ALLOCATION,
+        RPC.ReportBlockAllocation,
         test_mq_handler_helpers.report_block_allocations_handler,
     )
 
     helper.run_test(
-        request_type=RequestType.REPORT_BLOCK_ALLOCATION,
+        request_type=RPC.ReportBlockAllocation,
         payloads=[0, "", records],
         expected_response=None,
         num_requests=1,
@@ -666,16 +665,14 @@ def test_add_normal_thread_pool():
     context = zmq.Context.instance()
     server = MessageQueueServer("grpc://127.0.0.1:15700", context)
 
-    add_handler_helper(
-        server, RequestType.LOOKUP, test_mq_handler_helpers.lookup_handler
-    )
-    add_handler_helper(server, RequestType.NOOP, test_mq_handler_helpers.noop_handler)
+    add_handler_helper(server, RPC.Lookup, test_mq_handler_helpers.lookup_handler)
+    add_handler_helper(server, RPC.Noop, test_mq_handler_helpers.noop_handler)
 
-    lookup_handler = server.handlers[RequestType.LOOKUP]
+    lookup_handler = server.handlers[RPC.Lookup]
     assert isinstance(lookup_handler, BlockingRequestHandler)
     assert lookup_handler.executor is None
 
-    server.add_normal_thread_pool([RequestType.LOOKUP], max_workers=4)
+    server.add_normal_thread_pool([RPC.Lookup], max_workers=4)
 
     assert lookup_handler.executor is not None
     assert len(server.extra_pools) == 1
@@ -693,20 +690,16 @@ def test_add_affinity_thread_pool():
     context = zmq.Context.instance()
     server = MessageQueueServer("grpc://127.0.0.1:15700", context)
 
-    add_handler_helper(server, RequestType.STORE, test_mq_handler_helpers.store_handler)
-    add_handler_helper(
-        server, RequestType.RETRIEVE, test_mq_handler_helpers.retrieve_handler
-    )
+    add_handler_helper(server, RPC.Store, test_mq_handler_helpers.store_handler)
+    add_handler_helper(server, RPC.Retrieve, test_mq_handler_helpers.retrieve_handler)
 
-    store_handler = server.handlers[RequestType.STORE]
-    retrieve_handler = server.handlers[RequestType.RETRIEVE]
+    store_handler = server.handlers[RPC.Store]
+    retrieve_handler = server.handlers[RPC.Retrieve]
     assert isinstance(store_handler, BlockingRequestHandler)
     assert isinstance(retrieve_handler, BlockingRequestHandler)
     assert store_handler.executor is None
 
-    server.add_affinity_thread_pool(
-        [RequestType.STORE, RequestType.RETRIEVE], max_workers=2
-    )
+    server.add_affinity_thread_pool([RPC.Store, RPC.Retrieve], max_workers=2)
 
     assert isinstance(store_handler.executor, AffinityThreadPool)
     assert store_handler.executor is retrieve_handler.executor
@@ -722,10 +715,10 @@ def test_normal_pool_error_on_sync_handler():
     context = zmq.Context.instance()
     server = MessageQueueServer("grpc://127.0.0.1:15701", context)
 
-    add_handler_helper(server, RequestType.NOOP, test_mq_handler_helpers.noop_handler)
+    add_handler_helper(server, RPC.Noop, test_mq_handler_helpers.noop_handler)
 
     with pytest.raises(TypeError, match="not BlockingRequestHandler"):
-        server.add_normal_thread_pool([RequestType.NOOP], max_workers=1)
+        server.add_normal_thread_pool([RPC.Noop], max_workers=1)
 
     server.close()
 
@@ -737,10 +730,10 @@ def test_affinity_pool_error_on_sync_handler():
     context = zmq.Context.instance()
     server = MessageQueueServer("grpc://127.0.0.1:15701", context)
 
-    add_handler_helper(server, RequestType.NOOP, test_mq_handler_helpers.noop_handler)
+    add_handler_helper(server, RPC.Noop, test_mq_handler_helpers.noop_handler)
 
     with pytest.raises(TypeError, match="not BlockingRequestHandler"):
-        server.add_affinity_thread_pool([RequestType.NOOP], max_workers=1)
+        server.add_affinity_thread_pool([RPC.Noop], max_workers=1)
 
     server.close()
 
@@ -753,10 +746,10 @@ def test_pool_error_on_unregistered():
     server = MessageQueueServer("grpc://127.0.0.1:15702", context)
 
     with pytest.raises(ValueError, match="No handler registered"):
-        server.add_normal_thread_pool([RequestType.STORE], max_workers=1)
+        server.add_normal_thread_pool([RPC.Store], max_workers=1)
 
     with pytest.raises(ValueError, match="No handler registered"):
-        server.add_affinity_thread_pool([RequestType.STORE], max_workers=1)
+        server.add_affinity_thread_pool([RPC.Store], max_workers=1)
 
     server.close()
 
@@ -771,22 +764,16 @@ def test_multiple_pools():
     context = zmq.Context.instance()
     server = MessageQueueServer("grpc://127.0.0.1:15703", context)
 
-    add_handler_helper(server, RequestType.STORE, test_mq_handler_helpers.store_handler)
-    add_handler_helper(
-        server, RequestType.RETRIEVE, test_mq_handler_helpers.retrieve_handler
-    )
-    add_handler_helper(
-        server, RequestType.LOOKUP, test_mq_handler_helpers.lookup_handler
-    )
+    add_handler_helper(server, RPC.Store, test_mq_handler_helpers.store_handler)
+    add_handler_helper(server, RPC.Retrieve, test_mq_handler_helpers.retrieve_handler)
+    add_handler_helper(server, RPC.Lookup, test_mq_handler_helpers.lookup_handler)
 
-    server.add_affinity_thread_pool(
-        [RequestType.STORE, RequestType.RETRIEVE], max_workers=2
-    )
-    server.add_normal_thread_pool([RequestType.LOOKUP], max_workers=3)
+    server.add_affinity_thread_pool([RPC.Store, RPC.Retrieve], max_workers=2)
+    server.add_normal_thread_pool([RPC.Lookup], max_workers=3)
 
-    store_handler = server.handlers[RequestType.STORE]
-    retrieve_handler = server.handlers[RequestType.RETRIEVE]
-    lookup_handler = server.handlers[RequestType.LOOKUP]
+    store_handler = server.handlers[RPC.Store]
+    retrieve_handler = server.handlers[RPC.Retrieve]
+    lookup_handler = server.handlers[RPC.Lookup]
     assert isinstance(store_handler, BlockingRequestHandler)
     assert isinstance(retrieve_handler, BlockingRequestHandler)
     assert isinstance(lookup_handler, BlockingRequestHandler)
@@ -810,7 +797,7 @@ def test_start_fails_without_pool_assignment():
     context = zmq.Context.instance()
     server = MessageQueueServer("grpc://127.0.0.1:15704", context)
 
-    add_handler_helper(server, RequestType.STORE, test_mq_handler_helpers.store_handler)
+    add_handler_helper(server, RPC.Store, test_mq_handler_helpers.store_handler)
     # Don't assign any pool
 
     with pytest.raises(RuntimeError, match="no thread pool assigned"):

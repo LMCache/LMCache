@@ -423,9 +423,7 @@ def run_cache_server(
     affinity_types = [
         s.rpc_method for s in all_specs if s.pool == ThreadPoolType.AFFINITY
     ]
-    normal_types = [
-        s.rpc_method for s in all_specs if s.pool == ThreadPoolType.NORMAL
-    ]
+    normal_types = [s.rpc_method for s in all_specs if s.pool == ThreadPoolType.NORMAL]
     if affinity_types:
         server.add_affinity_thread_pool(
             affinity_types, max_workers=mp_config.max_gpu_workers

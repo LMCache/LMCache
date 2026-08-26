@@ -38,7 +38,7 @@ from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
 )
 from lmcache.v1.multiprocess.mq import MessageQueueClient, MessagingFuture
-from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
+from lmcache.v1.multiprocess.protocol import RPC, RpcMethod, get_response_class
 from lmcache.v1.platform.cuda.ipc_wrapper import RawCudaIPCWrapper
 
 logger = init_logger(__name__)
@@ -57,7 +57,7 @@ def _get_server_url(llm_args: "TorchLlmArgs") -> str:
 
 def _send_request(
     mq_client: MessageQueueClient,
-    request_type: RequestType,
+    request_type: RpcMethod,
     payloads: list,
 ) -> MessagingFuture:
     return mq_client.submit_request(
@@ -94,7 +94,7 @@ class LMCacheMPKvConnectorScheduler(KvCacheConnectorScheduler):
             os.environ.get("LMCACHE_MQ_TIMEOUT", DEFAULT_MQ_TIMEOUT)
         )
 
-        future = _send_request(self._mq_client, RequestType.GET_CHUNK_SIZE, [])
+        future = _send_request(self._mq_client, RPC.GetChunkSize, [])
         self._chunk_size = future.result(timeout=self._mq_timeout)
         logger.info(
             "LMCache MP scheduler: connected to server at %s (chunk_size=%d)",
@@ -161,12 +161,12 @@ class LMCacheMPKvConnectorScheduler(KvCacheConnectorScheduler):
         t1 = time.perf_counter()
 
         try:
-            _send_request(self._mq_client, RequestType.LOOKUP, [key, 1]).result(
+            _send_request(self._mq_client, RPC.Lookup, [key, 1]).result(
                 timeout=self._mq_timeout
             )
             result = _send_request(
                 self._mq_client,
-                RequestType.QUERY_PREFETCH_STATUS,
+                RPC.QueryPrefetchStatus,
                 [str(request.request_id)],
             ).result(timeout=self._mq_timeout)
             cached_tokens = result * self._chunk_size if result is not None else 0
@@ -196,7 +196,7 @@ class LMCacheMPKvConnectorScheduler(KvCacheConnectorScheduler):
             try:
                 _send_request(
                     self._mq_client,
-                    RequestType.FREE_LOOKUP_LOCKS,
+                    RPC.FreeLookupLocks,
                     [free_key, 1],
                 )
             except Exception as e:
@@ -259,7 +259,7 @@ class LMCacheMPKvConnectorScheduler(KvCacheConnectorScheduler):
         try:
             _send_request(
                 self._mq_client,
-                RequestType.END_SESSION,
+                RPC.EndSession,
                 [str(request.request_id)],
             )
         except Exception as e:
@@ -300,7 +300,7 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
         self._world_size = tp_size * pp_size
         self._model_name = str(getattr(llm_args, "model", "unknown_model"))
 
-        future = _send_request(self._mq_client, RequestType.GET_CHUNK_SIZE, [])
+        future = _send_request(self._mq_client, RPC.GetChunkSize, [])
         self._chunk_size = future.result(timeout=self._mq_timeout)
 
     def _create_key(
@@ -360,7 +360,7 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
 
         future = _send_request(
             self._mq_client,
-            RequestType.REGISTER_KV_CACHE,
+            RPC.RegisterKvCache,
             [
                 self._instance_id,
                 wrapped,
@@ -408,7 +408,7 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
             try:
                 _send_request(
                     self._mq_client,
-                    RequestType.RETRIEVE,
+                    RPC.Retrieve,
                     [
                         key,
                         self._instance_id,
@@ -458,7 +458,7 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
             try:
                 _send_request(
                     self._mq_client,
-                    RequestType.STORE,
+                    RPC.Store,
                     [
                         key,
                         self._instance_id,

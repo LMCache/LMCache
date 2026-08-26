@@ -47,8 +47,8 @@ from lmcache.v1.multiprocess.mq import (
     MessageQueueClient,
     MessageQueueServer,
 )
-from lmcache.v1.multiprocess.protocol import get_payload_classes
-from lmcache.v1.multiprocess.protocols.base import HandlerType, RequestType
+from lmcache.v1.multiprocess.protocol import RPC, get_payload_classes
+from lmcache.v1.multiprocess.protocols.base import HandlerType
 
 
 def _handle_ping(instance_id: int | None) -> bool:  # noqa: D401
@@ -65,12 +65,12 @@ def _pick_free_port() -> int:
 def _running_server(url: str) -> Iterator[None]:
     server = MessageQueueServer(url)
     server.add_handler(
-        RequestType.PING,
-        get_payload_classes(RequestType.PING),
+        RPC.Ping,
+        get_payload_classes(RPC.Ping),
         HandlerType.BLOCKING,
         _handle_ping,
     )
-    server.add_normal_thread_pool([RequestType.PING], max_workers=8)
+    server.add_normal_thread_pool([RPC.Ping], max_workers=8)
     server.start()
     time.sleep(0.05)  # let the accept loop settle
     try:
@@ -85,7 +85,7 @@ def _run_client(url: str, requests: int, concurrency: int) -> dict[str, float]:
 
     def one_call() -> float:
         start = time.perf_counter()
-        future: MessagingFuture[bool] = client.submit_request(RequestType.PING, [None])
+        future: MessagingFuture[bool] = client.submit_request(RPC.Ping, [None])
         future.result(timeout=10)
         return (time.perf_counter() - start) * 1000.0
 
@@ -121,7 +121,7 @@ def _bench_one(
         warmup_client = MessageQueueClient(url)
         try:
             for _ in range(200):
-                warmup_client.submit_request(RequestType.PING, [None]).result(
+                warmup_client.submit_request(RPC.Ping, [None]).result(
                     timeout=5,
                 )
         finally:

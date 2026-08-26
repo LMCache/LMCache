@@ -21,7 +21,7 @@ from lmcache.v1.multiprocess.posix_shm import (
     shm_open_pool_as_mmap,
     shm_unlink,
 )
-from lmcache.v1.multiprocess.protocol import RequestType
+from lmcache.v1.multiprocess.protocol import RPC
 from lmcache.v1.multiprocess.protocols.engine import (
     PrepareRetrieveResponse,
     PrepareStoreResponse,
@@ -1529,21 +1529,21 @@ def test_engine_driven_context_shm_store_retrieve_flow_with_mocked_mq() -> None:
     mq_client = MagicMock()
 
     def _submit_request(req_type, payload, response_cls):  # noqa: ARG001
-        if req_type == RequestType.PREPARE_STORE:
+        if req_type == RPC.PrepareStore:
             return _CompletedFuture(
                 PrepareStoreResponse(context={"slots": slots, "chunk_indices": [0]})
             )
-        if req_type == RequestType.COMMIT_STORE:
+        if req_type == RPC.CommitStore:
             _, _, commit_cpu_data = payload
             assert commit_cpu_data == b""
             return _CompletedFuture(True)
-        if req_type == RequestType.PREPARE_RETRIEVE:
+        if req_type == RPC.PrepareRetrieve:
             return _CompletedFuture(
                 PrepareRetrieveResponse(
                     success=True, data=b"", context={"slots": slots}
                 )
             )
-        if req_type == RequestType.COMMIT_RETRIEVE:
+        if req_type == RPC.CommitRetrieve:
             return _CompletedFuture(True)
         raise AssertionError(f"Unexpected request type: {req_type}")
 

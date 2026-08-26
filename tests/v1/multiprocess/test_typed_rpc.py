@@ -7,7 +7,7 @@ These tests lock in the invariants that:
    the wire directly, so the payload bytes are NOT a msgspec envelope.
 2. Business handlers registered via ``add_handler`` keep their public
    Python signatures.
-3. Every ``RequestType`` maps to one descriptor-derived typed RPC.
+3. Every ``RpcMethod`` maps to one descriptor-derived typed RPC.
 """
 
 # Standard
@@ -40,8 +40,9 @@ from lmcache.v1.multiprocess.mq import (
     request_type_to_method_name,
 )
 from lmcache.v1.multiprocess.protocol import (
+    RPC,
     HandlerType,
-    RequestType,
+    RpcMethod,
     get_handler_type,
     get_payload_classes,
     get_response_class,
@@ -70,7 +71,7 @@ from lmcache.v1.multiprocess import mq
 assert "grpc" not in sys.modules
 assert "grpc_tools" not in sys.modules
 assert mq.grpc is None
-assert mq.request_type_to_method_name(mq.RequestType.PING) == "Ping"
+assert mq.request_type_to_method_name("PING") == "Ping"
 """
     subprocess.run([sys.executable, "-c", script], check=True)
 
@@ -82,8 +83,8 @@ def _find_free_port() -> int:
 
 
 def test_ping_is_registered_as_typed_rpc() -> None:
-    assert RequestType.PING in _TYPED_RPCS
-    spec = _TYPED_RPCS[RequestType.PING]
+    assert RPC.Ping in _TYPED_RPCS
+    spec = _TYPED_RPCS[RPC.Ping]
     assert spec.request_message is lmcache_mq_pb2.PingRequest
     assert spec.response_message is lmcache_mq_pb2.PingResponse
 
@@ -91,16 +92,16 @@ def test_ping_is_registered_as_typed_rpc() -> None:
 def test_ping_method_name_matches_proto() -> None:
     # If the CamelCase mapping ever drifts from the .proto file, gRPC
     # would 404 the method at handshake time -- catch that here.
-    assert request_type_to_method_name(RequestType.PING) == "Ping"
+    assert request_type_to_method_name(RPC.Ping) == "Ping"
 
 
 def test_service_descriptor_covers_every_typed_rpc() -> None:
     """The registry is derived from, and stays aligned with, the service."""
     service = lmcache_mq_pb2.DESCRIPTOR.services_by_name["MessageQueue"]
     expected_methods = {
-        request_type_to_method_name(request_type) for request_type in RequestType
+        request_type_to_method_name(request_type) for request_type in RpcMethod
     }
-    assert set(service.methods_by_name) == expected_methods | {"Batch"}
+    assert set(service.methods_by_name) == expected_methods
 
     for request_type, spec in _TYPED_RPCS.items():
         method = service.methods_by_name[request_type_to_method_name(request_type)]
@@ -110,37 +111,13 @@ def test_service_descriptor_covers_every_typed_rpc() -> None:
         assert spec.response_type == get_response_class(request_type)
 
 
-def test_batch_envelope_is_rpc_agnostic() -> None:
-    """Adding an RPC must not require another Batch schema field."""
-    request_fields = lmcache_mq_pb2.BatchRequestItem.DESCRIPTOR.fields_by_name
-    response = lmcache_mq_pb2.BatchResponseItem.DESCRIPTOR
-    assert set(request_fields) == {"method_id", "payload"}
-    assert set(response.fields_by_name) == {"payload", "error"}
-    assert {field.name for field in response.oneofs_by_name["result"].fields} == {
-        "payload",
-        "error",
-    }
+def test_service_descriptor_has_no_legacy_batch_rpc() -> None:
+    """The transport contract is unary-only; Batch is no longer part of it."""
+    service = lmcache_mq_pb2.DESCRIPTOR.services_by_name["MessageQueue"]
+    assert "Batch" not in service.methods_by_name
 
 
-def test_batch_is_explicitly_unimplemented() -> None:
-    """The experimental unary-only transport rejects Batch explicitly."""
-    port = _find_free_port()
-    target = f"127.0.0.1:{port}"
-    server = MessageQueueServer(f"grpc://{target}")
-    server.start()
-    channel = grpc.insecure_channel(target)
-    stub = lmcache_mq_pb2_grpc.MessageQueueStub(channel)
-
-    try:
-        with pytest.raises(grpc.RpcError) as exc_info:
-            stub.Batch(lmcache_mq_pb2.BatchRequest())
-        assert exc_info.value.code() is grpc.StatusCode.UNIMPLEMENTED
-    finally:
-        channel.close()
-        server.close()
-
-
-def test_concurrent_mixed_requests_roundtrip_through_batch() -> None:
+def test_concurrent_mixed_requests_roundtrip_over_unary_rpcs() -> None:
     """Concurrent typed methods retain their individual results."""
     port = _find_free_port()
     server_url = f"grpc://127.0.0.1:{port}"
@@ -158,29 +135,29 @@ def test_concurrent_mixed_requests_roundtrip_through_batch() -> None:
 
     server = MessageQueueServer(server_url)
     server.add_handler(
-        RequestType.PING,
-        get_payload_classes(RequestType.PING),
+        RPC.Ping,
+        get_payload_classes(RPC.Ping),
         HandlerType.BLOCKING,
         ping_handler,
     )
     server.add_handler(
-        RequestType.NOOP,
-        get_payload_classes(RequestType.NOOP),
+        RPC.Noop,
+        get_payload_classes(RPC.Noop),
         HandlerType.SYNC,
         noop_handler,
     )
-    server.add_normal_thread_pool([RequestType.PING], max_workers=2)
+    server.add_normal_thread_pool([RPC.Ping], max_workers=2)
     server.start()
     client = MessageQueueClient(server_url)
 
     try:
-        first: MessagingFuture[bool] = client.submit_request(RequestType.PING, [0])
+        first: MessagingFuture[bool] = client.submit_request(RPC.Ping, [0])
         assert first_ping_entered.wait(timeout=5.0)
         futures: list[MessagingFuture[Any]] = [
-            client.submit_request(RequestType.PING, [1]),
-            client.submit_request(RequestType.NOOP, []),
-            client.submit_request(RequestType.PING, [2]),
-            client.submit_request(RequestType.NOOP, []),
+            client.submit_request(RPC.Ping, [1]),
+            client.submit_request(RPC.Noop, []),
+            client.submit_request(RPC.Ping, [2]),
+            client.submit_request(RPC.Noop, []),
         ]
         release_first_ping.set()
 
@@ -197,7 +174,7 @@ def test_concurrent_mixed_requests_roundtrip_through_batch() -> None:
         server.close()
 
 
-def test_unix_clients_keep_distinct_batch_affinity() -> None:
+def test_unix_clients_keep_distinct_grpc_affinity() -> None:
     """Stable client metadata preserves affinity over Unix sockets."""
     with tempfile.TemporaryDirectory(prefix="lmcache-mq-test-") as directory:
         server_url = f"grpc+unix://{directory}/mq.sock"
@@ -214,24 +191,20 @@ def test_unix_clients_keep_distinct_batch_affinity() -> None:
 
         server = MessageQueueServer(server_url)
         server.add_handler(
-            RequestType.PING,
-            get_payload_classes(RequestType.PING),
+            RPC.Ping,
+            get_payload_classes(RPC.Ping),
             HandlerType.BLOCKING,
             ping_handler,
         )
-        server.add_affinity_thread_pool([RequestType.PING], max_workers=2)
+        server.add_affinity_thread_pool([RPC.Ping], max_workers=2)
         server.start()
         clients = [MessageQueueClient(server_url), MessageQueueClient(server_url)]
 
         try:
             futures: list[MessagingFuture[bool]] = []
             for index in range(8):
-                futures.append(
-                    clients[0].submit_request(RequestType.PING, [100 + index])
-                )
-                futures.append(
-                    clients[1].submit_request(RequestType.PING, [200 + index])
-                )
+                futures.append(clients[0].submit_request(RPC.Ping, [100 + index]))
+                futures.append(clients[1].submit_request(RPC.Ping, [200 + index]))
             assert all(future.result(timeout=5.0) is True for future in futures)
             assert all(len(names) == 1 for names in threads_by_client.values())
             assert threads_by_client[1] != threads_by_client[2]
@@ -255,34 +228,34 @@ def test_unary_item_error_surfaces_as_grpc_failure() -> None:
         return True
 
     def failing_noop_handler() -> str:
-        raise ValueError("expected batch failure")
+        raise ValueError("expected unary failure")
 
     server = MessageQueueServer(server_url)
     server.add_handler(
-        RequestType.PING,
-        get_payload_classes(RequestType.PING),
+        RPC.Ping,
+        get_payload_classes(RPC.Ping),
         HandlerType.BLOCKING,
         ping_handler,
     )
     server.add_handler(
-        RequestType.NOOP,
-        get_payload_classes(RequestType.NOOP),
+        RPC.Noop,
+        get_payload_classes(RPC.Noop),
         HandlerType.SYNC,
         failing_noop_handler,
     )
-    server.add_normal_thread_pool([RequestType.PING], max_workers=2)
+    server.add_normal_thread_pool([RPC.Ping], max_workers=2)
     server.start()
     client = MessageQueueClient(server_url)
 
     try:
-        first: MessagingFuture[bool] = client.submit_request(RequestType.PING, [0])
+        first: MessagingFuture[bool] = client.submit_request(RPC.Ping, [0])
         assert first_ping_entered.wait(timeout=5.0)
-        failed: MessagingFuture[str] = client.submit_request(RequestType.NOOP, [])
-        succeeded: MessagingFuture[bool] = client.submit_request(RequestType.PING, [1])
+        failed: MessagingFuture[str] = client.submit_request(RPC.Noop, [])
+        succeeded: MessagingFuture[bool] = client.submit_request(RPC.Ping, [1])
         release_first_ping.set()
 
         assert first.result(timeout=5.0) is True
-        with pytest.raises(grpc.RpcError, match="expected batch failure") as exc_info:
+        with pytest.raises(grpc.RpcError, match="expected unary failure") as exc_info:
             failed.result(timeout=5.0)
         assert exc_info.value.code() is grpc.StatusCode.UNKNOWN
         assert succeeded.result(timeout=5.0) is True
@@ -292,8 +265,8 @@ def test_unary_item_error_surfaces_as_grpc_failure() -> None:
         server.close()
 
 
-def test_batch_falls_back_to_unary_for_older_server() -> None:
-    """A server without Batch support remains compatible with the client."""
+def test_client_works_with_minimal_unary_servicer() -> None:
+    """The client only depends on the typed unary method it invokes."""
     port = _find_free_port()
     target = f"127.0.0.1:{port}"
     server_url = f"grpc://{target}"
@@ -301,10 +274,6 @@ def test_batch_falls_back_to_unary_for_older_server() -> None:
     release_first_ping = threading.Event()
 
     class LegacyServicer(lmcache_mq_pb2_grpc.MessageQueueServicer):
-        def Batch(self, request: Any, context: Any) -> Any:
-            del request
-            context.abort(grpc.StatusCode.UNIMPLEMENTED, "legacy server")
-
         def Ping(self, request: Any, context: Any) -> Any:
             del context
             if request.instance_id == 0:
@@ -319,13 +288,13 @@ def test_batch_falls_back_to_unary_for_older_server() -> None:
     client = MessageQueueClient(server_url)
 
     try:
-        first: MessagingFuture[bool] = client.submit_request(RequestType.PING, [0])
+        first: MessagingFuture[bool] = client.submit_request(RPC.Ping, [0])
         assert first_ping_entered.wait(timeout=5.0)
-        fallback: MessagingFuture[bool] = client.submit_request(RequestType.PING, [1])
+        second: MessagingFuture[bool] = client.submit_request(RPC.Ping, [1])
         release_first_ping.set()
 
         assert first.result(timeout=5.0) is True
-        assert fallback.result(timeout=5.0) is True
+        assert second.result(timeout=5.0) is True
     finally:
         release_first_ping.set()
         client.close()
@@ -350,25 +319,25 @@ def test_ping_typed_roundtrip() -> None:
 
     server = MessageQueueServer(server_url)
     server.add_handler(
-        RequestType.PING,
-        get_payload_classes(RequestType.PING),
+        RPC.Ping,
+        get_payload_classes(RPC.Ping),
         HandlerType.BLOCKING,
         ping_handler,
     )
-    server.add_normal_thread_pool([RequestType.PING], max_workers=2)
+    server.add_normal_thread_pool([RPC.Ping], max_workers=2)
     server.start()
 
     try:
         client = MessageQueueClient(server_url)
 
         # Case 1: real instance id.  Should reach the handler as int.
-        fut: MessagingFuture[bool] = client.submit_request(RequestType.PING, [42])
+        fut: MessagingFuture[bool] = client.submit_request(RPC.Ping, [42])
         assert fut.result(timeout=5.0) is True
         assert seen_calls[-1] == 42
 
         # Case 2: untracked prober.  The wire sentinel is -1 but the
         # handler should still see Python ``None``.
-        fut = client.submit_request(RequestType.PING, [None])
+        fut = client.submit_request(RPC.Ping, [None])
         assert fut.result(timeout=5.0) is True  # type: ignore[union-attr]
         assert seen_calls[-1] is None
 
@@ -378,7 +347,7 @@ def test_ping_typed_roundtrip() -> None:
         # Typed rpc has no msgspec envelope; make sure the response
         # class the server reports for PING is still ``bool``, so the
         # legacy call sites don't get a surprise.
-        assert get_response_class(RequestType.PING) is bool
+        assert get_response_class(RPC.Ping) is bool
 
         client.close()
     finally:
@@ -402,25 +371,25 @@ def test_distinct_typed_rpcs_coexist() -> None:
 
     server = MessageQueueServer(server_url)
     server.add_handler(
-        RequestType.PING,
-        get_payload_classes(RequestType.PING),
+        RPC.Ping,
+        get_payload_classes(RPC.Ping),
         HandlerType.BLOCKING,
         ping_handler,
     )
     server.add_handler(
-        RequestType.NOOP,
-        get_payload_classes(RequestType.NOOP),
-        get_handler_type(RequestType.NOOP),
+        RPC.Noop,
+        get_payload_classes(RPC.Noop),
+        get_handler_type(RPC.Noop),
         noop_handler,
     )
-    server.add_normal_thread_pool([RequestType.PING], max_workers=1)
+    server.add_normal_thread_pool([RPC.Ping], max_workers=1)
     server.start()
 
     try:
         client = MessageQueueClient(server_url)
 
-        fut_typed: MessagingFuture[bool] = client.submit_request(RequestType.PING, [7])
-        fut_noop: MessagingFuture[str] = client.submit_request(RequestType.NOOP, [])
+        fut_typed: MessagingFuture[bool] = client.submit_request(RPC.Ping, [7])
+        fut_noop: MessagingFuture[str] = client.submit_request(RPC.Noop, [])
 
         assert fut_typed.result(timeout=5.0) is True
         assert fut_noop.result(timeout=5.0) == "ok"
@@ -436,7 +405,7 @@ def test_ping_wire_encoding_boundary_values(instance_id: Optional[int]) -> None:
     """Exercise a handful of instance_id values through the typed
     encode / decode pair to catch signed-int overflow or ``None``
     handling regressions before they reach the wire."""
-    spec = _TYPED_RPCS[RequestType.PING]
+    spec = _TYPED_RPCS[RPC.Ping]
     proto_req = spec.python_to_request(instance_id)
     (round_tripped,) = spec.request_to_python(proto_req)
     assert round_tripped == instance_id
@@ -472,8 +441,8 @@ def _sample_key(
 
 
 def test_lookup_is_registered_as_typed_rpc() -> None:
-    assert RequestType.LOOKUP in _TYPED_RPCS
-    spec = _TYPED_RPCS[RequestType.LOOKUP]
+    assert RPC.Lookup in _TYPED_RPCS
+    spec = _TYPED_RPCS[RPC.Lookup]
     assert spec.request_message is lmcache_mq_pb2.LookupRequest
     assert spec.response_message is lmcache_mq_pb2.LookupResponse
 
@@ -495,7 +464,7 @@ def test_lookup_key_roundtrip(
     """The shared IpcCacheServerKey proto <-> dataclass helpers must
     preserve every field, including the None/optional worker_id and
     empty/large token_ids edge cases."""
-    spec = _TYPED_RPCS[RequestType.LOOKUP]
+    spec = _TYPED_RPCS[RPC.Lookup]
     key = _sample_key(worker_id=worker_id, token_ids=token_ids, cache_salt=cache_salt)
     proto_req = spec.python_to_request(key, 4)
     assert isinstance(proto_req, lmcache_mq_pb2.LookupRequest)
@@ -517,19 +486,19 @@ def test_lookup_typed_roundtrip() -> None:
 
     server = MessageQueueServer(server_url)
     server.add_handler(
-        RequestType.LOOKUP,
-        get_payload_classes(RequestType.LOOKUP),
+        RPC.Lookup,
+        get_payload_classes(RPC.Lookup),
         HandlerType.BLOCKING,
         lookup_handler,
     )
-    server.add_normal_thread_pool([RequestType.LOOKUP], max_workers=2)
+    server.add_normal_thread_pool([RPC.Lookup], max_workers=2)
     server.start()
 
     try:
         client = MessageQueueClient(server_url)
         key = _sample_key(cache_salt="tenant-b")
 
-        fut: MessagingFuture[None] = client.submit_request(RequestType.LOOKUP, [key, 8])
+        fut: MessagingFuture[None] = client.submit_request(RPC.Lookup, [key, 8])
         assert fut.result(timeout=5.0) is None
         assert seen == [(key, 8)]
 
@@ -547,21 +516,21 @@ def test_lookup_typed_roundtrip() -> None:
 @pytest.mark.parametrize(
     "request_type",
     [
-        RequestType.FREE_LOOKUP_LOCKS,
-        RequestType.END_SESSION,
-        RequestType.UNREGISTER_KV_CACHE,
-        RequestType.UNREGISTER_Q_CACHE,
-        RequestType.UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT,
-        RequestType.QUERY_PREFETCH_STATUS,
-        RequestType.WAIT_PREFETCH_STATUS,
-        RequestType.QUERY_PREFETCH_LOOKUP_HITS,
-        RequestType.CLEAR,
-        RequestType.GET_CHUNK_SIZE,
-        RequestType.GET_EXPERIMENTAL,
-        RequestType.NOOP,
+        RPC.FreeLookupLocks,
+        RPC.EndSession,
+        RPC.UnregisterKvCache,
+        RPC.UnregisterQCache,
+        RPC.UnregisterKvCacheEngineDrivenContext,
+        RPC.QueryPrefetchStatus,
+        RPC.WaitPrefetchStatus,
+        RPC.QueryPrefetchLookupHits,
+        RPC.Clear,
+        RPC.GetChunkSize,
+        RPC.GetExperimental,
+        RPC.Noop,
     ],
 )
-def test_wave2_rpc_is_typed(request_type: RequestType) -> None:
+def test_wave2_rpc_is_typed(request_type: RpcMethod) -> None:
     """Each Wave 2 rpc must be off the msgspec envelope."""
     assert request_type in _TYPED_RPCS
     spec = _TYPED_RPCS[request_type]
@@ -572,9 +541,9 @@ def test_wave2_rpc_is_typed(request_type: RequestType) -> None:
 def test_optional_chunk_count_none_roundtrip() -> None:
     """``int | None`` -> ``optional int64`` must preserve None."""
     for rt in (
-        RequestType.QUERY_PREFETCH_STATUS,
-        RequestType.WAIT_PREFETCH_STATUS,
-        RequestType.QUERY_PREFETCH_LOOKUP_HITS,
+        RPC.QueryPrefetchStatus,
+        RPC.WaitPrefetchStatus,
+        RPC.QueryPrefetchLookupHits,
     ):
         spec = _TYPED_RPCS[rt]
         for value in (None, 0, 1, 42, 2**31):
@@ -595,18 +564,18 @@ def test_free_lookup_locks_typed_roundtrip() -> None:
 
     server = MessageQueueServer(server_url)
     server.add_handler(
-        RequestType.FREE_LOOKUP_LOCKS,
-        get_payload_classes(RequestType.FREE_LOOKUP_LOCKS),
+        RPC.FreeLookupLocks,
+        get_payload_classes(RPC.FreeLookupLocks),
         HandlerType.BLOCKING,
         free_locks_handler,
     )
-    server.add_normal_thread_pool([RequestType.FREE_LOOKUP_LOCKS], max_workers=1)
+    server.add_normal_thread_pool([RPC.FreeLookupLocks], max_workers=1)
     server.start()
     try:
         client = MessageQueueClient(server_url)
         key = _sample_key(cache_salt="wave2")
         fut: MessagingFuture[None] = client.submit_request(
-            RequestType.FREE_LOOKUP_LOCKS, [key, 2]
+            RPC.FreeLookupLocks, [key, 2]
         )
         assert fut.result(timeout=5.0) is None
         assert seen == [(key, 2)]
@@ -625,17 +594,15 @@ def test_get_chunk_size_typed_roundtrip() -> None:
 
     server = MessageQueueServer(server_url)
     server.add_handler(
-        RequestType.GET_CHUNK_SIZE,
-        get_payload_classes(RequestType.GET_CHUNK_SIZE),
+        RPC.GetChunkSize,
+        get_payload_classes(RPC.GetChunkSize),
         HandlerType.SYNC,
         chunk_size_handler,
     )
     server.start()
     try:
         client = MessageQueueClient(server_url)
-        fut: MessagingFuture[int] = client.submit_request(
-            RequestType.GET_CHUNK_SIZE, []
-        )
+        fut: MessagingFuture[int] = client.submit_request(RPC.GetChunkSize, [])
         assert fut.result(timeout=5.0) == 256
         client.close()
     finally:
@@ -654,20 +621,20 @@ def test_query_prefetch_status_typed_roundtrip() -> None:
 
     server = MessageQueueServer(server_url)
     server.add_handler(
-        RequestType.QUERY_PREFETCH_STATUS,
-        get_payload_classes(RequestType.QUERY_PREFETCH_STATUS),
+        RPC.QueryPrefetchStatus,
+        get_payload_classes(RPC.QueryPrefetchStatus),
         HandlerType.BLOCKING,
         status_handler,
     )
-    server.add_normal_thread_pool([RequestType.QUERY_PREFETCH_STATUS], max_workers=2)
+    server.add_normal_thread_pool([RPC.QueryPrefetchStatus], max_workers=2)
     server.start()
     try:
         client = MessageQueueClient(server_url)
         fut1: MessagingFuture[Optional[int]] = client.submit_request(
-            RequestType.QUERY_PREFETCH_STATUS, ["req-1"]
+            RPC.QueryPrefetchStatus, ["req-1"]
         )
         fut2: MessagingFuture[Optional[int]] = client.submit_request(
-            RequestType.QUERY_PREFETCH_STATUS, ["req-2"]
+            RPC.QueryPrefetchStatus, ["req-2"]
         )
         assert fut1.result(timeout=5.0) == 7
         assert fut2.result(timeout=5.0) is None
@@ -686,23 +653,23 @@ def test_query_prefetch_status_typed_roundtrip() -> None:
 @pytest.mark.parametrize(
     "request_type",
     [
-        RequestType.STORE_Q,
-        RequestType.STORE,
-        RequestType.RETRIEVE,
-        RequestType.REPORT_BLOCK_ALLOCATION,
-        RequestType.CB_UNREGISTER_KV_CACHE,
-        RequestType.CB_UNREGISTER_ROPE_V3,
-        RequestType.CB_LOOKUP_PRE_COMPUTED,
-        RequestType.CB_STORE_PRE_COMPUTED,
-        RequestType.CB_STORE_FINAL,
-        RequestType.CB_RETRIEVE_PRE_COMPUTED,
-        RequestType.CB_LOOKUP_PRE_COMPUTED_V2,
-        RequestType.CB_RETRIEVE_PRE_COMPUTED_V2,
-        RequestType.CB_RETRIEVE_PRE_COMPUTED_V3,
-        RequestType.CB_UNIFIED_LOOKUP,
+        RPC.StoreQ,
+        RPC.Store,
+        RPC.Retrieve,
+        RPC.ReportBlockAllocation,
+        RPC.CbUnregisterKvCache,
+        RPC.CbUnregisterRopeV3,
+        RPC.CbLookupPreComputed,
+        RPC.CbStorePreComputed,
+        RPC.CbStoreFinal,
+        RPC.CbRetrievePreComputed,
+        RPC.CbLookupPreComputedV2,
+        RPC.CbRetrievePreComputedV2,
+        RPC.CbRetrievePreComputedV3,
+        RPC.CbUnifiedLookup,
     ],
 )
-def test_wave3_rpc_is_typed(request_type: RequestType) -> None:
+def test_wave3_rpc_is_typed(request_type: RpcMethod) -> None:
     """Wave 3 rpcs must all be off the msgspec envelope."""
     assert request_type in _TYPED_RPCS
     spec = _TYPED_RPCS[request_type]
@@ -713,7 +680,7 @@ def test_wave3_rpc_is_typed(request_type: RequestType) -> None:
 def test_store_retrieve_roundtrip() -> None:
     """Store/Retrieve payload preservation across the wire boundary."""
     key = _sample_key()
-    store_spec = _TYPED_RPCS[RequestType.STORE]
+    store_spec = _TYPED_RPCS[RPC.Store]
     proto_req = store_spec.python_to_request(key, 12, [[1, 2, 3], [4, 5]], b"event")
     assert isinstance(proto_req, lmcache_mq_pb2.StoreRequest)
     round_key, iid, blocks, event = store_spec.request_to_python(proto_req)
@@ -725,7 +692,7 @@ def test_store_retrieve_roundtrip() -> None:
     proto_resp = store_spec.python_to_response((b"eh", True))
     assert store_spec.response_to_python(proto_resp) == (b"eh", True)
 
-    retrieve_spec = _TYPED_RPCS[RequestType.RETRIEVE]
+    retrieve_spec = _TYPED_RPCS[RPC.Retrieve]
     proto_req = retrieve_spec.python_to_request(key, 12, [[7], [8, 9]], b"event2", 128)
     round_key, iid, blocks, event, skip = retrieve_spec.request_to_python(proto_req)
     assert round_key == key
@@ -737,7 +704,7 @@ def test_store_retrieve_roundtrip() -> None:
 
 def test_report_block_allocation_roundtrip() -> None:
     """BlockAllocationRecord list survives the wire in order."""
-    spec = _TYPED_RPCS[RequestType.REPORT_BLOCK_ALLOCATION]
+    spec = _TYPED_RPCS[RPC.ReportBlockAllocation]
     records = [
         BlockAllocationRecord(
             req_id="r1", new_block_ids=[1, 2], new_token_ids=[10, 20]
@@ -755,12 +722,12 @@ def test_cb_lookup_v1_and_v2_roundtrip() -> None:
     """(start,end) tuples and CBMatchResult both survive the wire."""
     key = _sample_key()
 
-    v1 = _TYPED_RPCS[RequestType.CB_LOOKUP_PRE_COMPUTED]
+    v1 = _TYPED_RPCS[RPC.CbLookupPreComputed]
     ranges = [(0, 8), (16, 24)]
     proto_resp = v1.python_to_response(ranges)
     assert v1.response_to_python(proto_resp) == ranges
 
-    v2 = _TYPED_RPCS[RequestType.CB_LOOKUP_PRE_COMPUTED_V2]
+    v2 = _TYPED_RPCS[RPC.CbLookupPreComputedV2]
     matches = [
         CBMatchResult(old_st=0, old_ed=8, cur_st=0, cur_ed=8, hash=b"h1"),
         CBMatchResult(old_st=8, old_ed=16, cur_st=16, cur_ed=24, hash=b"h2"),
@@ -774,7 +741,7 @@ def test_cb_lookup_v1_and_v2_roundtrip() -> None:
 
 def test_cb_unified_lookup_nullable() -> None:
     """None (still loading) and populated result must both roundtrip."""
-    spec = _TYPED_RPCS[RequestType.CB_UNIFIED_LOOKUP]
+    spec = _TYPED_RPCS[RPC.CbUnifiedLookup]
 
     # Absent payload -> Python None.
     proto_resp = spec.python_to_response(None)
@@ -812,18 +779,18 @@ def test_store_typed_grpc_roundtrip() -> None:
 
     server = MessageQueueServer(server_url)
     server.add_handler(
-        RequestType.STORE,
-        get_payload_classes(RequestType.STORE),
+        RPC.Store,
+        get_payload_classes(RPC.Store),
         HandlerType.BLOCKING,
         store_handler,
     )
-    server.add_normal_thread_pool([RequestType.STORE], max_workers=2)
+    server.add_normal_thread_pool([RPC.Store], max_workers=2)
     server.start()
     try:
         client = MessageQueueClient(server_url)
         key = _sample_key(cache_salt="wave3")
         fut: MessagingFuture[tuple[bytes, bool]] = client.submit_request(
-            RequestType.STORE, [key, 42, [[1, 2], [3]], b"ev"]
+            RPC.Store, [key, 42, [[1, 2], [3]], b"ev"]
         )
         assert fut.result(timeout=5.0) == (b"handle-back", True)
         assert seen == [(key, 42, [[1, 2], [3]], b"ev")]
@@ -840,17 +807,17 @@ def test_store_typed_grpc_roundtrip() -> None:
 @pytest.mark.parametrize(
     "request_type",
     [
-        RequestType.REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT,
-        RequestType.PREPARE_STORE,
-        RequestType.COMMIT_STORE,
-        RequestType.PREPARE_RETRIEVE,
-        RequestType.COMMIT_RETRIEVE,
-        RequestType.P2P_LOOKUP_AND_LOCK,
-        RequestType.P2P_QUERY_LOOKUP_RESULTS,
-        RequestType.P2P_UNLOCK_OBJECTS,
+        RPC.RegisterKvCacheEngineDrivenContext,
+        RPC.PrepareStore,
+        RPC.CommitStore,
+        RPC.PrepareRetrieve,
+        RPC.CommitRetrieve,
+        RPC.P2PLookupAndLock,
+        RPC.P2PQueryLookupResults,
+        RPC.P2PUnlockObjects,
     ],
 )
-def test_wave4_rpc_is_typed(request_type: RequestType) -> None:
+def test_wave4_rpc_is_typed(request_type: RpcMethod) -> None:
     assert request_type in _TYPED_RPCS
     spec = _TYPED_RPCS[request_type]
     assert spec.request_message.DESCRIPTOR.file is lmcache_mq_pb2.DESCRIPTOR
@@ -866,7 +833,7 @@ def test_register_edc_roundtrip() -> None:
         RegisterEngineDrivenContextResponse,
     )
 
-    spec = _TYPED_RPCS[RequestType.REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT]
+    spec = _TYPED_RPCS[RPC.RegisterKvCacheEngineDrivenContext]
     payload = RegisterEngineDrivenContextPayload(
         instance_id=7,
         model_name="opt-125m",
@@ -890,7 +857,7 @@ def test_prepare_store_pickle_context_roundtrip() -> None:
     # First Party
     from lmcache.v1.multiprocess.protocols.engine import PrepareStoreResponse
 
-    spec = _TYPED_RPCS[RequestType.PREPARE_STORE]
+    spec = _TYPED_RPCS[RPC.PrepareStore]
     key = _sample_key()
     proto_req = spec.python_to_request(key, 3)
     round_key, iid = spec.request_to_python(proto_req)
@@ -914,7 +881,7 @@ def test_prepare_retrieve_pickle_context_roundtrip() -> None:
         PrepareRetrieveResponse,
     )
 
-    spec = _TYPED_RPCS[RequestType.PREPARE_RETRIEVE]
+    spec = _TYPED_RPCS[RPC.PrepareRetrieve]
     resp = PrepareRetrieveResponse(success=True, data=b"hello", context={"slots": [7]})
     proto_resp = spec.python_to_response(resp)
     round = spec.response_to_python(proto_resp)
@@ -926,14 +893,14 @@ def test_prepare_retrieve_pickle_context_roundtrip() -> None:
 def test_commit_store_and_retrieve_bool_roundtrip() -> None:
     key = _sample_key()
 
-    cs = _TYPED_RPCS[RequestType.COMMIT_STORE]
+    cs = _TYPED_RPCS[RPC.CommitStore]
     proto_req = cs.python_to_request(key, 4, b"ctx-bytes")
     r_key, r_iid, r_ctx = cs.request_to_python(proto_req)
     assert (r_key, r_iid, r_ctx) == (key, 4, b"ctx-bytes")
     assert cs.response_to_python(cs.python_to_response(True)) is True
     assert cs.response_to_python(cs.python_to_response(False)) is False
 
-    cr = _TYPED_RPCS[RequestType.COMMIT_RETRIEVE]
+    cr = _TYPED_RPCS[RPC.CommitRetrieve]
     proto_req = cr.python_to_request(key, 5)
     r_key, r_iid = cr.request_to_python(proto_req)
     assert (r_key, r_iid) == (key, 5)
@@ -950,7 +917,7 @@ def test_p2p_lookup_and_query_roundtrip() -> None:
         TransferChannelAddress,
     )
 
-    lookup = _TYPED_RPCS[RequestType.P2P_LOOKUP_AND_LOCK]
+    lookup = _TYPED_RPCS[RPC.P2PLookupAndLock]
     keys = [
         ObjectKey(
             chunk_hash=b"\x01\x02",
@@ -980,7 +947,7 @@ def test_p2p_lookup_and_query_roundtrip() -> None:
     assert lookup.response_to_python(proto_resp) == 99
 
     # Query: None <-> present addr list.
-    query = _TYPED_RPCS[RequestType.P2P_QUERY_LOOKUP_RESULTS]
+    query = _TYPED_RPCS[RPC.P2PQueryLookupResults]
     assert query.response_to_python(query.python_to_response(None)) is None
 
     addrs = [
@@ -995,7 +962,7 @@ def test_p2p_lookup_and_query_roundtrip() -> None:
     assert query.response_to_python(proto_resp) == []
 
     # Unlock: keys survive round-trip, response is None.
-    unlock = _TYPED_RPCS[RequestType.P2P_UNLOCK_OBJECTS]
+    unlock = _TYPED_RPCS[RPC.P2PUnlockObjects]
     proto_req = unlock.python_to_request(keys)
     (round_keys,) = unlock.request_to_python(proto_req)
     assert round_keys == keys
@@ -1026,13 +993,13 @@ class _FakeIPCWrapper(DeviceIPCWrapper):
 @pytest.mark.parametrize(
     "request_type",
     [
-        RequestType.REGISTER_KV_CACHE,
-        RequestType.REGISTER_Q_CACHE,
-        RequestType.CB_REGISTER_KV_CACHE,
-        RequestType.CB_REGISTER_ROPE_V3,
+        RPC.RegisterKvCache,
+        RPC.RegisterQCache,
+        RPC.CbRegisterKvCache,
+        RPC.CbRegisterRopeV3,
     ],
 )
-def test_wave5_rpc_is_typed(request_type: RequestType) -> None:
+def test_wave5_rpc_is_typed(request_type: RpcMethod) -> None:
     """Wave 5 finishes the migration: all request types use typed RPCs."""
     assert request_type in _TYPED_RPCS
     spec = _TYPED_RPCS[request_type]
@@ -1041,13 +1008,13 @@ def test_wave5_rpc_is_typed(request_type: RequestType) -> None:
 
 
 def test_typed_rpc_coverage_is_complete() -> None:
-    """Enforce the migration invariant: every RequestType is typed."""
-    missing = [rt.name for rt in RequestType if rt not in _TYPED_RPCS]
+    """Enforce the migration invariant: every RpcMethod is typed."""
+    missing = [rt.name for rt in RpcMethod if rt not in _TYPED_RPCS]
     assert not missing, f"legacy rpcs remain: {missing}"
 
 
-@pytest.mark.parametrize("request_type", list(RequestType))
-def test_typed_rpc_request_arity_matches_protocol(request_type: RequestType) -> None:
+@pytest.mark.parametrize("request_type", list(RpcMethod))
+def test_typed_rpc_request_arity_matches_protocol(request_type: RpcMethod) -> None:
     """Keep generated bindings aligned with the public protocol contract."""
     spec = _TYPED_RPCS[request_type]
     assert spec.payload_types == tuple(get_payload_classes(request_type))
@@ -1061,7 +1028,7 @@ def test_register_kv_cache_roundtrip() -> None:
     from lmcache.utils import EngineType
     from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 
-    spec = _TYPED_RPCS[RequestType.REGISTER_KV_CACHE]
+    spec = _TYPED_RPCS[RPC.RegisterKvCache]
     kv_cache = [_FakeIPCWrapper("a"), _FakeIPCWrapper("b")]
     hints: dict = {"kv_layout": "NHD", "tokens_per_block": 16}
     groups = [
@@ -1117,7 +1084,7 @@ def test_register_kv_cache_roundtrip() -> None:
 
 
 def test_cb_register_kv_cache_roundtrip() -> None:
-    spec = _TYPED_RPCS[RequestType.CB_REGISTER_KV_CACHE]
+    spec = _TYPED_RPCS[RPC.CbRegisterKvCache]
     kv_cache = [_FakeIPCWrapper("cb")]
     proto_req = spec.python_to_request(9, kv_cache, "llama", 2)
     iid, r_kv, model, world = spec.request_to_python(proto_req)
@@ -1127,7 +1094,7 @@ def test_cb_register_kv_cache_roundtrip() -> None:
 
 
 def test_cb_register_rope_v3_roundtrip() -> None:
-    spec = _TYPED_RPCS[RequestType.CB_REGISTER_ROPE_V3]
+    spec = _TYPED_RPCS[RPC.CbRegisterRopeV3]
     caches = [_FakeIPCWrapper("rope-0"), _FakeIPCWrapper("rope-1")]
     group_rot = [[0, 64], [], [128, 32]]
     proto_req = spec.python_to_request(3, caches, 128, True, [0, 1, 0], group_rot)
@@ -1180,8 +1147,8 @@ def test_register_kv_cache_grpc_roundtrip() -> None:
 
     server = MessageQueueServer(server_url)
     server.add_handler(
-        RequestType.REGISTER_KV_CACHE,
-        get_payload_classes(RequestType.REGISTER_KV_CACHE),
+        RPC.RegisterKvCache,
+        get_payload_classes(RPC.RegisterKvCache),
         HandlerType.SYNC,
         handler,
     )
@@ -1199,7 +1166,7 @@ def test_register_kv_cache_grpc_roundtrip() -> None:
             ),
         ]
         fut: MessagingFuture = client.submit_request(
-            RequestType.REGISTER_KV_CACHE,
+            RPC.RegisterKvCache,
             [5, kv, "opt-125m", 2, EngineType.VLLM, hints, groups],
         )
         assert fut.result(timeout=5.0) is None
@@ -1227,7 +1194,7 @@ def test_grpc_request_waits_for_server_startup() -> None:
     port = _find_free_port()
     server_url = f"grpc://127.0.0.1:{port}"
     client = MessageQueueClient(server_url)
-    future: MessagingFuture[bool] = client.submit_request(RequestType.PING, [None])
+    future: MessagingFuture[bool] = client.submit_request(RPC.Ping, [None])
     time.sleep(0.25)
     assert not future.query()
 
@@ -1237,8 +1204,8 @@ def test_grpc_request_waits_for_server_startup() -> None:
         return instance_id is None
 
     server.add_handler(
-        RequestType.PING,
-        get_payload_classes(RequestType.PING),
+        RPC.Ping,
+        get_payload_classes(RPC.Ping),
         HandlerType.SYNC,
         handler,
     )
@@ -1265,14 +1232,14 @@ def test_grpc_request_stays_pending_when_server_stops_mid_call() -> None:
 
     server = MessageQueueServer(server_url)
     server.add_handler(
-        RequestType.PING,
-        get_payload_classes(RequestType.PING),
+        RPC.Ping,
+        get_payload_classes(RPC.Ping),
         HandlerType.SYNC,
         handler,
     )
     server.start()
     client = MessageQueueClient(server_url)
-    future: MessagingFuture[bool] = client.submit_request(RequestType.PING, [None])
+    future: MessagingFuture[bool] = client.submit_request(RPC.Ping, [None])
     assert handler_entered.wait(timeout=5.0)
 
     server.close()

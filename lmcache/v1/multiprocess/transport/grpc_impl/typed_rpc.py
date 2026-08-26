@@ -578,7 +578,7 @@ class TypedRpcSpec:
 def _build_typed_rpcs() -> dict[RpcMethod, TypedRpcSpec]:
     service = lmcache_mq_pb2.DESCRIPTOR.services_by_name["MessageQueue"]
     expected_methods = {request_type_to_method_name(item) for item in RPC_METHODS}
-    actual_methods = set(service.methods_by_name) - {"Batch"}
+    actual_methods = set(service.methods_by_name)
     if actual_methods != expected_methods:
         missing = sorted(expected_methods - actual_methods)
         extra = sorted(actual_methods - expected_methods)

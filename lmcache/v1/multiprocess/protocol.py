@@ -52,12 +52,13 @@ class _RpcMethodMeta(type):
         return item in cls._members
 
 
-class RpcMethod(str, metaclass=_RpcMethodMeta):
+class RpcMethod(str, metaclass=_RpcMethodMeta):  # type: ignore[misc]
     """String token representing one typed gRPC method."""
 
     _members: ClassVar[tuple["RpcMethod", ...]] = ()
     _by_method_name: ClassVar[dict[str, "RpcMethod"]] = {}
     _by_request_name: ClassVar[dict[str, "RpcMethod"]] = {}
+    _request_name: str
 
     def __new__(cls, method_name: str, request_name: str):
         instance = str.__new__(cls, method_name)
@@ -74,7 +75,7 @@ class RpcMethod(str, metaclass=_RpcMethodMeta):
         """Return the concrete gRPC method name."""
         return str(self)
 
-    def __getnewargs__(self) -> tuple[str, str]:
+    def __getnewargs__(self) -> tuple[str, str]:  # type: ignore[override]
         """Preserve the request-name metadata across pickle/spawn."""
         return (str(self), self.name)
 
@@ -93,6 +94,12 @@ class _RpcNamespace:
     def __len__(self) -> int:
         return len(self._methods)
 
+    def __getattr__(self, name: str) -> RpcMethod:
+        for method in self._methods:
+            if str(method) == name:
+                return method
+        raise AttributeError(f"{self.__class__.__name__!r} has no attribute {name!r}")
+
 
 def _build_rpc_methods() -> tuple[tuple[RpcMethod, ...], dict[RpcMethod, Any]]:
     service = lmcache_mq_pb2.DESCRIPTOR.services_by_name["MessageQueue"]
@@ -103,8 +110,6 @@ def _build_rpc_methods() -> tuple[tuple[RpcMethod, ...], dict[RpcMethod, Any]]:
     methods: list[RpcMethod] = []
     definitions: dict[RpcMethod, Any] = {}
     for method in service.methods:
-        if method.name == "Batch":
-            continue
         request_name = request_name_by_method[method.name]
         rpc_method = RpcMethod(method.name, request_name)
         methods.append(rpc_method)
@@ -120,7 +125,6 @@ def _build_rpc_methods() -> tuple[tuple[RpcMethod, ...], dict[RpcMethod, Any]]:
 
 RPC_METHODS, _PROTOCOL_DEFINITIONS = _build_rpc_methods()
 RPC = _RpcNamespace(RPC_METHODS)
-RequestType = RpcMethod
 
 
 def coerce_rpc_method(req_type: RpcMethod | str) -> RpcMethod:

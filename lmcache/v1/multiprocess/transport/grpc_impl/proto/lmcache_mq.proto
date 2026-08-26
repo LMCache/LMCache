@@ -537,47 +537,14 @@ message CbRegisterRopeV3Request {
 
 message CbRegisterRopeV3Response {}
 
-// Concurrent callers can share one gRPC unary exchange. Dedicated unary RPCs
-// remain fully typed; Batch is a transport optimization and therefore carries
-// each typed message as bytes plus its RequestType-derived method id. Adding an
-// RPC does not require another Batch oneof arm.
-message BatchRequestItem {
-  uint32 method_id = 1;
-  bytes payload = 2;
-}
-
-message BatchRequest {
-  repeated BatchRequestItem items = 1;
-}
-
-message BatchError {
-  string status = 1;
-  string details = 2;
-}
-
-message BatchResponseItem {
-  oneof result {
-    bytes payload = 1;
-    BatchError error = 2;
-  }
-}
-
-message BatchResponse {
-  repeated BatchResponseItem items = 1;
-}
-
 // -----------------------------------------------------------------------
-// Service. One typed unary rpc per RequestType, plus Batch for concurrent
-// callers. Method names are the CamelCase form of the RequestType enum
-// (STORE -> Store, CB_LOOKUP_PRE_COMPUTED_V2 -> CbLookupPreComputedV2, etc.)
+// Service. One typed unary rpc per protocol operation. Method names are the
+// CamelCase form of the historical ALL_CAPS request names
+// (STORE -> Store, CB_LOOKUP_PRE_COMPUTED_V2 -> CbLookupPreComputedV2, etc.),
 // so gRPC's built-in routing replaces the old hand-written msgspec dispatch.
 // -----------------------------------------------------------------------
 
 service MessageQueue {
-  // Transport optimization for concurrent callers. Single callers use the
-  // dedicated methods below and pay no batching delay.
-  rpc Batch(BatchRequest) returns (BatchResponse);
-
   // Engine operations
   rpc RegisterKvCache(RegisterKvCacheRequest) returns (RegisterKvCacheResponse);
   rpc RegisterQCache(RegisterKvCacheRequest) returns (RegisterKvCacheResponse);

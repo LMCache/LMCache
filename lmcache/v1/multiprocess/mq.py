@@ -11,7 +11,7 @@ protobuf request/response messages now define the wire protocol.
 # Standard
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Any, Callable, Generic, Optional, TypeVar, get_type_hints
+from typing import Any, Callable, Generic, Optional, Sequence, TypeVar, get_type_hints
 from urllib.parse import parse_qs, urlparse
 import inspect
 import threading
@@ -24,13 +24,12 @@ from lmcache.v1.multiprocess.futures import (
     MessagingFuture,
 )
 from lmcache.v1.multiprocess.protocol import (
-    HandlerType,
     RPC_METHODS,
-    RequestType,
+    HandlerType,
     RpcMethod,
     coerce_rpc_method,
-    get_payload_classes,
     get_handler_type,
+    get_payload_classes,
     get_response_class,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
@@ -187,7 +186,7 @@ def _grpc_affinity_key(context: "grpc.ServicerContext") -> int:
 
 
 @dataclass
-class _PendingBatchRequest:
+class _PendingUnaryRequest:
     rpc_method: RpcMethod
     method_name: str
     stub_method: Any
@@ -262,7 +261,7 @@ class MessageQueueClient:
         future: MessagingFuture[T] = MessagingFuture()
 
         proto_request = typed_spec.python_to_request(*request_payloads)
-        pending = _PendingBatchRequest(
+        pending = _PendingUnaryRequest(
             rpc_method=rpc_method,
             method_name=method_name,
             stub_method=stub_method,
@@ -276,7 +275,7 @@ class MessageQueueClient:
     def close(self) -> None:
         self._channel.close()
 
-    def _submit_unary(self, pending: _PendingBatchRequest) -> None:
+    def _submit_unary(self, pending: _PendingUnaryRequest) -> None:
         def _on_done_typed(call: "grpc.Future[Any]") -> None:
             self._on_unary_done(call, pending)
 
@@ -292,7 +291,7 @@ class MessageQueueClient:
     def _on_unary_done(
         self,
         call: "grpc.Future[Any]",
-        pending: _PendingBatchRequest,
+        pending: _PendingUnaryRequest,
     ) -> None:
         try:
             proto_response = call.result()
@@ -420,14 +419,6 @@ class _RequestHandlerServicer:
     ):
         self._handlers = handlers
 
-    def Batch(self, request: Any, context: "grpc.ServicerContext") -> Any:
-        del request
-        context.abort(
-            grpc.StatusCode.UNIMPLEMENTED,
-            "Batch transport optimization has been removed; use typed unary RPCs",
-        )
-        raise RuntimeError("unreachable")
-
     @staticmethod
     def _submit_handler(
         handler: RequestHandlerBase[Any],
@@ -478,6 +469,7 @@ class _RequestHandlerServicer:
         py_args = spec.request_to_python(request)
         result = self._run_handler(handler, py_args, context)
         return spec.python_to_response(result)
+
 
 def _install_servicer_methods() -> None:
     """Attach one typed dispatch method per RpcMethod to the servicer."""
@@ -686,7 +678,7 @@ class MessageQueueServer:
 
     def _validate_blocking_handlers(
         self,
-        request_types: list[RpcMethod | str],
+        request_types: Sequence[RpcMethod | str],
         method_name: str,
     ) -> None:
         for request_type in request_types:
@@ -705,7 +697,7 @@ class MessageQueueServer:
 
     def add_normal_thread_pool(
         self,
-        request_types: list[RpcMethod | str],
+        request_types: Sequence[RpcMethod | str],
         max_workers: int,
     ) -> None:
         self._validate_blocking_handlers(request_types, "add_normal_thread_pool")
@@ -731,7 +723,7 @@ class MessageQueueServer:
 
     def add_affinity_thread_pool(
         self,
-        request_types: list[RpcMethod | str],
+        request_types: Sequence[RpcMethod | str],
         max_workers: int,
     ) -> None:
         self._validate_blocking_handlers(request_types, "add_affinity_thread_pool")

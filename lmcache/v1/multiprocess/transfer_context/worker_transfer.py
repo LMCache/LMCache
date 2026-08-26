@@ -20,7 +20,7 @@ from lmcache.v1.multiprocess.custom_types import RegisterEngineDrivenContextPayl
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.mq import MessageQueueClient
-from lmcache.v1.multiprocess.protocol import RequestType
+from lmcache.v1.multiprocess.protocol import RPC, RpcMethod
 from lmcache.v1.multiprocess.protocols.engine import RegisterEngineDrivenContextResponse
 from lmcache.v1.multiprocess.transfer_context.base import (
     EngineDrivenContext,
@@ -171,7 +171,7 @@ class IPCEvent(Protocol):
         """Make ``stream`` wait for this event (async ordering primitive)."""
 
 
-SendRequest = Callable[[MessageQueueClient, RequestType, list[object]], MessagingFuture]
+SendRequest = Callable[[MessageQueueClient, RpcMethod, list[object]], MessagingFuture]
 
 
 def _single_group_block_ids(block_ids: list[list[int]]) -> list[int]:
@@ -453,7 +453,7 @@ class LMCacheDrivenTransferContext(TransferContext):
         self._send_request = send_request
         future = send_request(
             mq_client,
-            RequestType.REGISTER_KV_CACHE,
+            RPC.RegisterKvCache,
             [
                 instance_id,
                 wrap_kv_caches(kv_caches),
@@ -485,7 +485,7 @@ class LMCacheDrivenTransferContext(TransferContext):
         self._send_request = send_request
         future = send_request(
             mq_client,
-            RequestType.REGISTER_Q_CACHE,
+            RPC.RegisterQCache,
             [
                 instance_id,
                 wrap_kv_caches(q_caches),
@@ -540,7 +540,7 @@ class LMCacheDrivenTransferContext(TransferContext):
         event_ipc_handle = self._event_backend.export_event(event, self._device)
         return self._send_request(
             self._mq_client,
-            RequestType.STORE,
+            RPC.Store,
             [key, instance_id, block_ids, event_ipc_handle],
         ).to_device_future(device=self._device)
 
@@ -567,7 +567,7 @@ class LMCacheDrivenTransferContext(TransferContext):
         event_ipc_handle = self._event_backend.export_event(event, self._device)
         return self._send_request(
             self._mq_client,
-            RequestType.STORE_Q,
+            RPC.StoreQ,
             [key, instance_id, block_ids, event_ipc_handle],
         ).to_device_future(device=self._device)
 
@@ -615,7 +615,7 @@ class LMCacheDrivenTransferContext(TransferContext):
         event_ipc_handle = self._event_backend.export_event(event, self._device)
         return self._send_request(
             self._mq_client,
-            RequestType.RETRIEVE,
+            RPC.Retrieve,
             [key, instance_id, block_ids, event_ipc_handle, skip_first_n_tokens],
         ).to_device_future(device=self._device)
 
@@ -708,7 +708,7 @@ class EngineDrivenTransferContext(TransferContext):
 
         future = send_request(
             mq_client,
-            RequestType.REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT,
+            RPC.RegisterKvCacheEngineDrivenContext,
             [
                 RegisterEngineDrivenContextPayload(
                     instance_id=instance_id,

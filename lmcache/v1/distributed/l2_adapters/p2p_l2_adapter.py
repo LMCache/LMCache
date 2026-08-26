@@ -38,7 +38,7 @@ from lmcache.v1.distributed.transfer_channel import get_transfer_channel_context
 from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.multiprocess.mq import MessageQueueClient
-from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
+from lmcache.v1.multiprocess.protocol import RPC, get_response_class
 from lmcache.v1.platform import HAS_EVENTFD, create_event_notifier
 
 logger = init_logger(__name__)
@@ -225,9 +225,9 @@ class P2PL2Adapter(L2AdapterInterface):
             return task_id
 
         future = self._mq_client.submit_request(
-            RequestType.P2P_LOOKUP_AND_LOCK,
+            RPC.P2PLookupAndLock,
             [keys, group_layout_descs],
-            get_response_class(RequestType.P2P_LOOKUP_AND_LOCK),
+            get_response_class(RPC.P2PLookupAndLock),
         )
         failed = False
         remote_task_id = -1
@@ -261,9 +261,9 @@ class P2PL2Adapter(L2AdapterInterface):
             return Bitmap(len(task.keys))
 
         future = self._mq_client.submit_request(
-            RequestType.P2P_QUERY_LOOKUP_RESULTS,
+            RPC.P2PQueryLookupResults,
             [task.remote_task_id],
-            get_response_class(RequestType.P2P_QUERY_LOOKUP_RESULTS),
+            get_response_class(RPC.P2PQueryLookupResults),
         )
         try:
             addresses = future.result(timeout=_LOOKUP_RPC_TIMEOUT_S)
@@ -285,9 +285,9 @@ class P2PL2Adapter(L2AdapterInterface):
         if not keys:
             return
         self._mq_client.submit_request(
-            RequestType.P2P_UNLOCK_OBJECTS,
+            RPC.P2PUnlockObjects,
             [keys],
-            get_response_class(RequestType.P2P_UNLOCK_OBJECTS),
+            get_response_class(RPC.P2PUnlockObjects),
         )
         for key in keys:
             self._remote_addresses.pop(key, None)

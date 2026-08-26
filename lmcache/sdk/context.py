@@ -28,7 +28,7 @@ from lmcache.v1.gpu_connector.utils import (
 )
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.mq import MessageQueueClient
-from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
+from lmcache.v1.multiprocess.protocol import RPC, get_response_class
 from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
     EngineDrivenTransferContext,
     create_transfer_context,
@@ -301,9 +301,9 @@ class LMCacheSDKContext:
         ).no_worker_id_version()
 
         future = self._mq_client.submit_request(
-            RequestType.LOOKUP,
+            RPC.Lookup,
             [key, self._world_size],
-            get_response_class(RequestType.LOOKUP),
+            get_response_class(RPC.Lookup),
         )
         try:
             future.result(timeout=self._mq_timeout)
@@ -339,9 +339,9 @@ class LMCacheSDKContext:
 
         try:
             result = self._mq_client.submit_request(
-                RequestType.QUERY_PREFETCH_STATUS,
+                RPC.QueryPrefetchStatus,
                 [request_id],
-                get_response_class(RequestType.QUERY_PREFETCH_STATUS),
+                get_response_class(RPC.QueryPrefetchStatus),
             ).result(timeout=self._mq_timeout)
         except TimeoutError:
             logger.warning(
@@ -368,9 +368,9 @@ class LMCacheSDKContext:
         self._finished_lookups.pop(request_id, None)
         try:
             self._mq_client.submit_request(
-                RequestType.END_SESSION,
+                RPC.EndSession,
                 [request_id],
-                get_response_class(RequestType.END_SESSION),
+                get_response_class(RPC.EndSession),
             ).result(timeout=self._mq_timeout)
         except TimeoutError:
             logger.warning(

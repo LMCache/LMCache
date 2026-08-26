@@ -35,7 +35,7 @@ from lmcache.v1.multiprocess.custom_types import (
 )
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.mq import MessageQueueClient
-from lmcache.v1.multiprocess.protocol import RequestType
+from lmcache.v1.multiprocess.protocol import RPC
 from lmcache.v1.platform import get_device_spec
 from lmcache.v1.platform.kv_wrap import wrap_one_kv_cache
 
@@ -221,7 +221,7 @@ class LMCacheMPConnector:
         # (matching the vLLM non-hybrid and TensorRT-LLM register paths).
         send_lmcache_request(
             self.mq_client,
-            RequestType.REGISTER_KV_CACHE,
+            RPC.RegisterKvCache,
             [
                 self.instance_id,
                 _wrap_sglang_kv_caches(k_pool, v_pool),
@@ -313,7 +313,7 @@ class LMCacheMPConnector:
         # the response itself a little longer than that to cover the round trip.
         matched_chunks = send_lmcache_request(
             self.mq_client,
-            RequestType.WAIT_PREFETCH_STATUS,
+            RPC.WaitPrefetchStatus,
             [request_id, self._mq_timeout],
         ).result(timeout=self._mq_timeout + _WAIT_LOOKUP_RESPONSE_BUFFER_S)
         if matched_chunks is None:
@@ -334,7 +334,7 @@ class LMCacheMPConnector:
             return
         send_lmcache_request(
             self.mq_client,
-            RequestType.FREE_LOOKUP_LOCKS,
+            RPC.FreeLookupLocks,
             [
                 self._create_key(
                     token_ids,
@@ -392,7 +392,7 @@ class LMCacheMPConnector:
         )
         send_lmcache_request(
             self.mq_client,
-            RequestType.LOOKUP,
+            RPC.Lookup,
             [lookup_key, self.tp_size],
         ).result(timeout=self._mq_timeout)
         matched = self._wait_for_lookup(request_id)
@@ -446,7 +446,7 @@ class LMCacheMPConnector:
             self._free_lookup_locks(
                 pending.token_ids, 0, pending.matched_token_num, request_id
             )
-        send_lmcache_request(self.mq_client, RequestType.END_SESSION, [request_id])
+        send_lmcache_request(self.mq_client, RPC.EndSession, [request_id])
 
     def _submit_retrieve(
         self,
@@ -461,7 +461,7 @@ class LMCacheMPConnector:
         event.record(torch_dev.current_stream())
         future = send_lmcache_request(
             self.mq_client,
-            RequestType.RETRIEVE,
+            RPC.Retrieve,
             [
                 self._create_key(
                     token_ids,
@@ -610,7 +610,7 @@ class LMCacheMPConnector:
         event.record(torch_dev.current_stream())
         future = send_lmcache_request(
             self.mq_client,
-            RequestType.STORE,
+            RPC.Store,
             [
                 self._create_key(
                     store_metadata.token_ids,
@@ -651,7 +651,7 @@ class LMCacheMPConnector:
         success = (
             send_lmcache_request(
                 self.mq_client,
-                RequestType.STORE,
+                RPC.Store,
                 [
                     self._create_key(
                         store_metadata.token_ids,
@@ -687,7 +687,7 @@ class LMCacheMPConnector:
             try:
                 send_lmcache_request(
                     self.mq_client,
-                    RequestType.UNREGISTER_KV_CACHE,
+                    RPC.UnregisterKvCache,
                     [self.instance_id],
                 ).result(timeout=self._mq_timeout)
             except Exception:

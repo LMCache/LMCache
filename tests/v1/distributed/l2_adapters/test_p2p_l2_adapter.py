@@ -20,7 +20,7 @@ from lmcache.v1.distributed.transfer_channel.api import (
     TransferChannelAddress,
     TransferChannelReadResult,
 )
-from lmcache.v1.multiprocess.protocol import RequestType
+from lmcache.v1.multiprocess.protocol import RPC
 
 _LAYOUT = MemoryLayoutDesc(shapes=[], dtypes=[])
 
@@ -79,9 +79,9 @@ def _lookup_side_effect(remote_task_id, addresses):
     """submit_request dispatcher keyed on request type."""
 
     def _dispatch(request_type, payloads, response_cls=None):
-        if request_type == RequestType.P2P_LOOKUP_AND_LOCK:
+        if request_type == RPC.P2PLookupAndLock:
             return _FakeFuture(value=remote_task_id)
-        if request_type == RequestType.P2P_QUERY_LOOKUP_RESULTS:
+        if request_type == RPC.P2PQueryLookupResults:
             return _FakeFuture(value=addresses)
         return _FakeFuture(value=None)
 
@@ -184,7 +184,7 @@ def test_lookup_forwards_group_layout_descs_and_returns_addresses():
         # The real group_layout_descs dict is forwarded into the lookup
         # payload.
         lookup_call = mq.submit_request.call_args_list[0]
-        assert lookup_call.args[0] == RequestType.P2P_LOOKUP_AND_LOCK
+        assert lookup_call.args[0] == RPC.P2PLookupAndLock
         assert lookup_call.args[1] == [keys, group_layout_descs]
         assert lookup_call.args[1][1] is group_layout_descs
 
@@ -207,9 +207,9 @@ def test_lookup_query_not_ready_then_ready():
         responses = iter([_FakeFuture(value=None), _FakeFuture(value=addresses)])
 
         def _dispatch(request_type, payloads, response_cls=None):
-            if request_type == RequestType.P2P_LOOKUP_AND_LOCK:
+            if request_type == RPC.P2PLookupAndLock:
                 return _FakeFuture(value=7)
-            if request_type == RequestType.P2P_QUERY_LOOKUP_RESULTS:
+            if request_type == RPC.P2PQueryLookupResults:
                 return next(responses)
             return _FakeFuture(value=None)
 
@@ -228,7 +228,7 @@ def test_lookup_submit_timeout_yields_miss():
     with _adapter() as (adapter, mq, _tc_ctx, _tc, _notifier):
 
         def _dispatch(request_type, payloads, response_cls=None):
-            if request_type == RequestType.P2P_LOOKUP_AND_LOCK:
+            if request_type == RPC.P2PLookupAndLock:
                 return _FakeFuture(exc=TimeoutError())
             return _FakeFuture(value=None)
 
@@ -240,7 +240,7 @@ def test_lookup_submit_timeout_yields_miss():
         assert bitmap.popcount() == 0
         # No P2P_QUERY_LOOKUP_RESULTS was issued for a failed lookup.
         assert all(
-            c.args[0] != RequestType.P2P_QUERY_LOOKUP_RESULTS
+            c.args[0] != RPC.P2PQueryLookupResults
             for c in mq.submit_request.call_args_list
         )
 
@@ -250,7 +250,7 @@ def test_lookup_deadline_expired_yields_miss():
     with _adapter(lookup_timeout_s=0.01) as (adapter, mq, _tc_ctx, _tc, _notifier):
         # Lookup id resolves, but the query is never ready before the deadline.
         def _dispatch(request_type, payloads, response_cls=None):
-            if request_type == RequestType.P2P_LOOKUP_AND_LOCK:
+            if request_type == RPC.P2PLookupAndLock:
                 return _FakeFuture(value=7)
             return _FakeFuture(value=None)
 
@@ -343,7 +343,7 @@ def test_unlock_sends_rpc_and_clears_addresses():
         adapter._remote_addresses[keys[0]] = TransferChannelAddress(offset=1, size=1)
         adapter.submit_unlock(keys)
         unlock_call = mq.submit_request.call_args
-        assert unlock_call.args[0] == RequestType.P2P_UNLOCK_OBJECTS
+        assert unlock_call.args[0] == RPC.P2PUnlockObjects
         assert unlock_call.args[1] == [keys]
         assert keys[0] not in adapter._remote_addresses
 

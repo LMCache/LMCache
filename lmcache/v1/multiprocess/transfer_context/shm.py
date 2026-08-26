@@ -17,7 +17,7 @@ from lmcache.logging import init_logger
 from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.mq import MessageQueueClient
-from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
+from lmcache.v1.multiprocess.protocol import RPC, get_response_class
 from lmcache.v1.multiprocess.transfer_context.base import (
     EngineDrivenContext,
     EngineDrivenContextMetadata,
@@ -161,9 +161,9 @@ class EngineDrivenContextShm(EngineDrivenContext):
         self, key: IPCCacheServerKey, instance_id: int
     ) -> tuple[list[torch.Tensor], list[int]] | None:
         future = self.mq_client.submit_request(
-            RequestType.PREPARE_STORE,
+            RPC.PrepareStore,
             [key, instance_id],
-            get_response_class(RequestType.PREPARE_STORE),
+            get_response_class(RPC.PrepareStore),
         )
         # wait() first so a timeout raises exactly one LMCacheTimeoutError
         # (one event); result() then returns without its own timeout.
@@ -188,9 +188,9 @@ class EngineDrivenContextShm(EngineDrivenContext):
         self, key: IPCCacheServerKey, instance_id: int, _chunks: list[torch.Tensor]
     ) -> bool:
         future = self.mq_client.submit_request(
-            RequestType.COMMIT_STORE,
+            RPC.CommitStore,
             [key, instance_id, b""],
-            get_response_class(RequestType.COMMIT_STORE),
+            get_response_class(RPC.CommitStore),
         )
         try:
             return bool(future.result(timeout=self.mq_timeout))
@@ -201,9 +201,9 @@ class EngineDrivenContextShm(EngineDrivenContext):
         self, key: IPCCacheServerKey, instance_id: int
     ) -> list[torch.Tensor] | None:
         future = self.mq_client.submit_request(
-            RequestType.PREPARE_RETRIEVE,
+            RPC.PrepareRetrieve,
             [key, instance_id],
-            get_response_class(RequestType.PREPARE_RETRIEVE),
+            get_response_class(RPC.PrepareRetrieve),
         )
         try:
             response = future.result(timeout=self.mq_timeout)
@@ -216,9 +216,9 @@ class EngineDrivenContextShm(EngineDrivenContext):
 
     def commit_retrieve(self, key: IPCCacheServerKey, instance_id: int) -> bool:
         future = self.mq_client.submit_request(
-            RequestType.COMMIT_RETRIEVE,
+            RPC.CommitRetrieve,
             [key, instance_id],
-            get_response_class(RequestType.COMMIT_RETRIEVE),
+            get_response_class(RPC.CommitRetrieve),
         )
         try:
             return bool(future.result(timeout=self.mq_timeout))

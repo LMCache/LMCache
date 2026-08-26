@@ -6,7 +6,7 @@ LMCache mp-mode server and the vLLM connector rely on:
 
 1. Bare ``host:port`` URLs are prefixed with the correct default scheme
    before reaching the transport layer.
-2. Every ``RequestType`` enum member maps to a real gRPC rpc method on
+2. Every ``RpcMethod`` token maps to a real gRPC rpc method on
    the generated ``MessageQueueServicer``, i.e. the ``.proto`` file
    never drifts away from the Python protocol layer.
 """
@@ -26,7 +26,7 @@ from lmcache.integration.vllm.lmcache_mp_connector import (  # noqa: E402
 from lmcache.v1.multiprocess.mq import (  # noqa: E402
     request_type_to_method_name,
 )
-from lmcache.v1.multiprocess.protocol import RequestType  # noqa: E402
+from lmcache.v1.multiprocess.protocol import RPC, RpcMethod  # noqa: E402
 from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (  # noqa: E402
     lmcache_mq_pb2_grpc,
 )
@@ -53,11 +53,11 @@ def test_ensure_transport_scheme_preserves_existing_scheme(url):
 @pytest.mark.parametrize(
     "request_type,expected",
     [
-        (RequestType.STORE, "Store"),
-        (RequestType.RETRIEVE, "Retrieve"),
-        (RequestType.PREPARE_STORE, "PrepareStore"),
-        (RequestType.CB_LOOKUP_PRE_COMPUTED_V2, "CbLookupPreComputedV2"),
-        (RequestType.P2P_LOOKUP_AND_LOCK, "P2PLookupAndLock"),
+        (RPC.Store, "Store"),
+        (RPC.Retrieve, "Retrieve"),
+        (RPC.PrepareStore, "PrepareStore"),
+        (RPC.CbLookupPreComputedV2, "CbLookupPreComputedV2"),
+        (RPC.P2PLookupAndLock, "P2PLookupAndLock"),
     ],
 )
 def test_request_type_to_method_name(request_type, expected):
@@ -65,7 +65,7 @@ def test_request_type_to_method_name(request_type, expected):
 
 
 def test_every_request_type_maps_to_a_real_grpc_method():
-    # The .proto file must define a rpc method for every RequestType,
+    # The .proto file must define a rpc method for every RpcMethod,
     # otherwise the servicer dispatch layer would 404 that rpc.
     servicer_methods = {
         m
@@ -74,9 +74,9 @@ def test_every_request_type_maps_to_a_real_grpc_method():
     }
     missing = [
         (rt.name, request_type_to_method_name(rt))
-        for rt in RequestType
+        for rt in RpcMethod
         if request_type_to_method_name(rt) not in servicer_methods
     ]
     assert not missing, (
-        f"RequestType members without a matching proto rpc method: {missing}"
+        f"RpcMethod members without a matching proto rpc method: {missing}"
     )

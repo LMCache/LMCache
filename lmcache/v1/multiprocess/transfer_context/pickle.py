@@ -10,7 +10,7 @@ import torch
 # First Party
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.mq import MessageQueueClient
-from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
+from lmcache.v1.multiprocess.protocol import RPC, get_response_class
 from lmcache.v1.multiprocess.transfer_context.base import (
     EngineDrivenContext,
     EngineDrivenContextMetadata,
@@ -42,9 +42,9 @@ class EngineDrivenContextPickle(EngineDrivenContext):
     ) -> tuple[list[torch.Tensor], list[int]] | None:
         """Send PREPARE_STORE RPC. For pickle, returns no pre-allocated buffers."""
         future = self.mq_client.submit_request(
-            RequestType.PREPARE_STORE,
+            RPC.PrepareStore,
             [key, instance_id],
-            get_response_class(RequestType.PREPARE_STORE),
+            get_response_class(RPC.PrepareStore),
         )
         try:
             future.result(timeout=self.mq_timeout)
@@ -62,9 +62,9 @@ class EngineDrivenContextPickle(EngineDrivenContext):
         """
         serialised = pickle.dumps(chunks)
         future = self.mq_client.submit_request(
-            RequestType.COMMIT_STORE,
+            RPC.CommitStore,
             [key, instance_id, serialised],
-            get_response_class(RequestType.COMMIT_STORE),
+            get_response_class(RPC.CommitStore),
         )
         try:
             return bool(future.result(timeout=self.mq_timeout))
@@ -80,9 +80,9 @@ class EngineDrivenContextPickle(EngineDrivenContext):
             Chunks on hit, or None on miss/timeout.
         """
         future = self.mq_client.submit_request(
-            RequestType.PREPARE_RETRIEVE,
+            RPC.PrepareRetrieve,
             [key, instance_id],
-            get_response_class(RequestType.PREPARE_RETRIEVE),
+            get_response_class(RPC.PrepareRetrieve),
         )
         try:
             response = future.result(timeout=self.mq_timeout)
@@ -96,9 +96,9 @@ class EngineDrivenContextPickle(EngineDrivenContext):
     def commit_retrieve(self, key: IPCCacheServerKey, instance_id: int) -> bool:
         """Send COMMIT_RETRIEVE (no-op for pickle path)."""
         future = self.mq_client.submit_request(
-            RequestType.COMMIT_RETRIEVE,
+            RPC.CommitRetrieve,
             [key, instance_id],
-            get_response_class(RequestType.COMMIT_RETRIEVE),
+            get_response_class(RPC.CommitRetrieve),
         )
         try:
             future.result(timeout=self.mq_timeout)

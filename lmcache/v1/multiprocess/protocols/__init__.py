@@ -9,11 +9,6 @@ This module provides the initialize_protocols() function that:
 """
 
 # First Party
-from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
-    lmcache_mq_pb2 as _pb2_typed,
-)
-
-# First Party
 from lmcache.v1.multiprocess.protocols import (
     blend,
     blend_v2,
@@ -28,6 +23,9 @@ from lmcache.v1.multiprocess.protocols.base import (
     HandlerType,
     ProtocolDefinition,
     request_name_to_method_name,
+)
+from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
+    lmcache_mq_pb2 as _pb2_typed,
 )
 
 lmcache_mq_pb2 = _pb2_typed
@@ -119,7 +117,7 @@ def initialize_protocols() -> dict[str, ProtocolDefinition]:
         )
 
     service = lmcache_mq_pb2.DESCRIPTOR.services_by_name["MessageQueue"]
-    actual_methods = {method.name for method in service.methods if method.name != "Batch"}
+    actual_methods = {method.name for method in service.methods}
     expected_methods = {
         request_name_to_method_name(request_name)
         for request_name in protocol_definitions

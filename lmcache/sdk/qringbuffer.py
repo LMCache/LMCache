@@ -16,7 +16,7 @@ import torch
 from lmcache.integration.vllm.utils import vllm_layout_hints
 from lmcache.utils import init_logger as lmcache_init_logger
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
-from lmcache.v1.multiprocess.protocol import RequestType
+from lmcache.v1.multiprocess.protocol import RPC
 
 if TYPE_CHECKING:
     # Third Party
@@ -754,7 +754,7 @@ class QRingBufferAdapter:
         try:
             self.send_lmcache_request(
                 self._adapter.mq_client,
-                RequestType.UNREGISTER_Q_CACHE,
+                RPC.UnregisterQCache,
                 [self._adapter.instance_id],
             ).result(timeout=self._adapter._mq_timeout)
         except TimeoutError:

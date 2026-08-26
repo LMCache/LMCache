@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-Tests for the QUERY_PREFETCH_LOOKUP_HITS protocol: enum registration,
+Tests for the QUERY_PREFETCH_LOOKUP_HITS protocol: RPC registration,
 protocol definition, message-queue round-trip, and server handler.
 """
 
@@ -18,7 +18,8 @@ from lmcache.v1.distributed.storage_manager import PrefetchHandle
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.modules.lookup import LookupModule, _PrefetchJob
 from lmcache.v1.multiprocess.protocol import (
-    RequestType,
+    RPC,
+    RpcMethod,
     get_handler_type,
     get_payload_classes,
     get_response_class,
@@ -36,27 +37,27 @@ from tests.v1.multiprocess.test_mq import (
 
 
 def test_query_prefetch_lookup_hits_in_request_type():
-    """QUERY_PREFETCH_LOOKUP_HITS should be a member of RequestType."""
-    assert hasattr(RequestType, "QUERY_PREFETCH_LOOKUP_HITS")
-    assert isinstance(RequestType.QUERY_PREFETCH_LOOKUP_HITS, RequestType)
+    """QUERY_PREFETCH_LOOKUP_HITS should be a member of RpcMethod."""
+    assert hasattr(RpcMethod, "QUERY_PREFETCH_LOOKUP_HITS")
+    assert isinstance(RPC.QueryPrefetchLookupHits, RpcMethod)
 
 
 def test_query_prefetch_lookup_hits_payload_classes():
     """QUERY_PREFETCH_LOOKUP_HITS payload should be [str]."""
-    payload_classes = get_payload_classes(RequestType.QUERY_PREFETCH_LOOKUP_HITS)
+    payload_classes = get_payload_classes(RPC.QueryPrefetchLookupHits)
     assert len(payload_classes) == 1
     assert payload_classes[0] is str
 
 
 def test_query_prefetch_lookup_hits_response_class():
     """QUERY_PREFETCH_LOOKUP_HITS response should be int | None."""
-    response_class = get_response_class(RequestType.QUERY_PREFETCH_LOOKUP_HITS)
+    response_class = get_response_class(RPC.QueryPrefetchLookupHits)
     assert response_class == int | None
 
 
 def test_query_prefetch_lookup_hits_handler_type():
     """QUERY_PREFETCH_LOOKUP_HITS should use BLOCKING handler type."""
-    handler_type = get_handler_type(RequestType.QUERY_PREFETCH_LOOKUP_HITS)
+    handler_type = get_handler_type(RPC.QueryPrefetchLookupHits)
     assert handler_type == HandlerType.BLOCKING
 
 
@@ -74,12 +75,10 @@ def _query_lookup_hits_handler(request_id: str) -> int | None:
 def test_mq_query_prefetch_lookup_hits():
     """Test MessageQueue with QUERY_PREFETCH_LOOKUP_HITS request type."""
     helper = MessageQueueTestHelper(server_url="grpc://127.0.0.1:5575")
-    helper.register_handler(
-        RequestType.QUERY_PREFETCH_LOOKUP_HITS, _query_lookup_hits_handler
-    )
+    helper.register_handler(RPC.QueryPrefetchLookupHits, _query_lookup_hits_handler)
 
     helper.run_test(
-        request_type=RequestType.QUERY_PREFETCH_LOOKUP_HITS,
+        request_type=RPC.QueryPrefetchLookupHits,
         payloads=["req-1"],
         expected_response=42,
         num_requests=1,
@@ -96,11 +95,11 @@ def test_mq_query_prefetch_lookup_hits_none_response():
     """Test MessageQueue returns None when lookup is still in progress."""
     helper = MessageQueueTestHelper(server_url="grpc://127.0.0.1:5576")
     helper.register_handler(
-        RequestType.QUERY_PREFETCH_LOOKUP_HITS, _query_lookup_hits_none_handler
+        RPC.QueryPrefetchLookupHits, _query_lookup_hits_none_handler
     )
 
     helper.run_test(
-        request_type=RequestType.QUERY_PREFETCH_LOOKUP_HITS,
+        request_type=RPC.QueryPrefetchLookupHits,
         payloads=["req-1"],
         expected_response=None,
         num_requests=1,
