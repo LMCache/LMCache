@@ -35,10 +35,7 @@ from lmcache.v1.platform._device_detect import (
     current_device_spec,
     get_torch_device,
 )
-from lmcache.v1.platform.ops_types import set_shape_desc_dtype  # noqa: F401
-from lmcache.v1.platform.ops_types import (
-    PageBufferShapeDesc,
-)
+from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 
 if TYPE_CHECKING:
     # First Party
@@ -388,7 +385,7 @@ def _format_spec(engine_kv_format: EngineKVFormat) -> "type[KVFormatSpec]":
         ValueError: If the format has no spec.
     """
     # Imported lazily, not at module scope: the specs package reads
-    # ``lmcache.c_ops``, whose shim is installed only once this module (the
+    # ``lmcache.device_ops``, which is resolved only once this module (the
     # torch baseline behind it) has been imported.
     # First Party
     from lmcache.v1.gpu_connector.kv_format.specs.registry import get_spec_class
@@ -861,8 +858,7 @@ def _infer_kv_dtype(
     """Infer the KV element dtype from whichever inputs carry it.
 
     Inference order (first match wins):
-    1. ``shape_desc.dtype`` — authoritative when set (requires the
-       ``set_shape_desc_dtype`` helper from PR #3514; correctly distinguishes
+    1. ``shape_desc.dtype`` — authoritative when set; correctly distinguishes
        float16 vs bfloat16 which share ``element_size == 2``).
     2. ``paged_buffer_ptrs_tensor`` — if it is a non-pointer tensor or a list
        of tensors (including nested SGLang MHA lists), the dtype of the first
@@ -1111,7 +1107,7 @@ def multi_layer_block_kv_transfer(
     """Python fallback implementation of block-based multi-layer KV transfer.
 
     Signature intentionally mirrors the C++ binding so callers can invoke
-    ``lmcache.c_ops.multi_layer_block_kv_transfer`` uniformly on native and
+    ``lmcache.device_ops.multi_layer_block_kv_transfer`` uniformly on native and
     fallback backends.
 
     Args:

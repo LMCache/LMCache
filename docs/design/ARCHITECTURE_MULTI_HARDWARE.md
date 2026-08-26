@@ -20,15 +20,16 @@ multiprocess (MP) mode.
 │                                 "hpu"/"cpu"; auto-discoverable) │
 │                                                                 │
 │  [Registry Discovery Point]                                     │
-│  DeviceSpec subclasses are auto-discovered under                │
-│  lmcache.v1.platform and selected by availability.              │
+│  Built-in DeviceSpecs are discovered under lmcache.v1.platform; │
+│  wheel plugins use the lmcache.device_plugins entry-point group.│
+│  Both sources share one registry and availability selection.    │
 │  The DEVICE_TYPE env var forces the detector to prefer one      │
 │  registered device_type when multiple are available.            │
 │                                                                 │
 │  [DeviceOps Resolution]                                         │
 │  DeviceSpec.ops_cls → DeviceOps subclass (e.g. CudaDeviceOps)  │
 │  DeviceSpec.get_ops() → cached singleton instance               │
-│  lmcache.c_ops shim → resolve_device_ops(device_type)           │
+│  lmcache.device_ops = resolve_device_ops(device_type)           │
 └──────────────────────────────┬──────────────────────────────────┘
                                │
               ┌────────────────┼──────────────────┐
@@ -95,7 +96,7 @@ multiprocess (MP) mode.
 | **Entry** `v1/platform/__init__.py` | `_detect_device()` + `resolve_device_ops()` | Registry-driven detection and DeviceOps resolution. |
 | **Entry** DeviceOps | `DeviceSpec.ops_cls` → `DeviceSpec.get_ops()` | OOP polymorphism: each accelerator subclasses `DeviceOps` with native ops. |
 | **Middle** engine / storage / multiprocess | `from lmcache import torch_dev` | Hardware-agnostic unified code |
-| **Middle** ops call sites | `import lmcache.c_ops as lmc_ops` | The `c_ops` shim proxies to the resolved `DeviceOps` singleton. |
+| **Middle** ops call sites | `from lmcache import device_ops` | Direct reference to the resolved `DeviceOps` singleton. |
 | **Middle** IPC-capable / device-specific APIs | `hasattr(torch_dev, 'xxx')` guard | Graceful runtime degradation |
 | **Bottom** Transfer Context | `create_transfer_context(kv_caches, mode)` | Per-device routing. In `AUTO` mode: CUDA→LMCacheDriven, other devices→EngineDriven. Other IPC-capable devices (e.g. MUSA) can opt-in to LMCacheDriven via explicit `mode=lmcache_driven` when their `DeviceSpec` reports `is_handle_transfer_available() == True`. |
 | **Bottom** Cache Context | `DeviceSpec.create_cache_context()` | Per-device cache context factory dispatched via `DeviceSpec` registry. |
@@ -104,10 +105,9 @@ multiprocess (MP) mode.
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
-│                   lmcache.c_ops (shim module)                  │
+│              lmcache.device_ops (DeviceOps instance)          │
 │                                                                │
-│  Attribute access proxies to:                                  │
-│    resolve_device_ops(torch_device_type) → DeviceOps instance  │
+│  resolve_device_ops(torch_device_type) returns this singleton  │
 └────────────────────────────────┬───────────────────────────────┘
                                  │
                                  ▼
@@ -134,7 +134,8 @@ multiprocess (MP) mode.
          │ensure_ ││ensure_ ││ensure_ ││(no     ││(no     │
          │native: ││native: ││native: ││native) ││native) │
          │lmcache ││lmcache ││method  ││        ││        │
-         │.c_ops  ││.xpu_ops││override││        ││        │
+         │.cuda_  ││.xpu_ops││override││        ││        │
+         │ops     ││        ││        ││        ││        │
          │(pybind)││(SYCL)  ││        ││        ││        │
          └────────┘└────────┘└────────┘└────────┘└────────┘
 ```
@@ -148,7 +149,7 @@ multiprocess (MP) mode.
   rebinds them on the instance, replacing torch baseline ops with compiled implementations
   or adding native-only symbols that have no pure-Python equivalent
   (e.g. `execute_object_group_transfer`). Consumers feature-detect with
-  `hasattr(lmc_ops, "op_name")`.
+  `hasattr(device_ops, "op_name")`.
 - `ops_types.py` defines shared enums, descriptors, and native plan type stubs.
 
 ## Transfer Mode Routing (`transfer_context/worker_transfer.py`)
@@ -216,19 +217,25 @@ which is wrong for that backend's actual KV cache layout.
 
 ## Adding New Hardware
 
-1. Add a ``DeviceSpec`` subclass under
-   ``lmcache/v1/platform/<device>/__init__.py``.  Override ``ops_cls``
-   to return your ``DeviceOps`` subclass (or inherit the base which
-   returns ``DeviceOps`` itself for pure torch baseline).
-2. Add a ``DeviceOps`` subclass under
-   ``lmcache/v1/platform/<device>/device_ops.py``.  Override
-   ``ensure_native()`` to bind your compiled extension (or leave it
-   empty for pure torch baseline).
-3. Verify with MP ``engine_driven`` mode (see the :doc:`developer guide
-   <../source/developer_guide/extending_lmcache/adding_a_new_device_backend>`).
-4. (Optional) Add ``ipc_wrapper_cls`` and ``create_cache_context()``
-   overrides on your ``DeviceSpec`` for LMCache-driven transfer.
+Device vendors choose one of two ownership models:
 
-No edits to ``lmcache/__init__.py`` or global backend candidate lists
-are required. Users can set ``DEVICE_TYPE=<device_type>`` at runtime to
-force selection of a registered device when multiple are available.
+- **In-tree:** contribute the `DeviceSpec`, `DeviceOps`, tests, and optional
+  IPC capabilities under `lmcache/v1/platform/<device>/`. Subclass discovery
+  finds the backend without a registration list. This model ships and tests
+  the device on the LMCache release cadence.
+- **External wheel:** maintain the same interfaces in a vendor repository and
+  publish the `DeviceSpec` through the `lmcache.device_plugins` entry-point
+  group. This model lets the vendor own its release cadence and native binary
+  distribution without an LMCache code change.
+
+Both models enter the same registry and dispatch paths. Start with MP
+`engine_driven` mode, then optionally add `ipc_wrapper_cls`,
+`event_ipc_backend`, and `create_cache_context()` implementations for
+LMCache-driven transfer. Users can set `DEVICE_TYPE=<device_type>` at runtime
+to force selection when multiple devices are available.
+
+See the
+[developer guide](../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst)
+for both integration procedures. The
+[external device plugin design](v1/platform/device-plugin-architecture.md)
+defines the wheel package contract, conflict policy, and failure behavior.

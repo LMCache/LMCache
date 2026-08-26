@@ -26,7 +26,7 @@ from lmcache.v1.gpu_connector.kv_format import (
     get_spec_class,
 )
 from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache, LayoutHints
-from lmcache.v1.platform.ops_types import set_shape_desc_dtype
+from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 import lmcache.lmcache_native as lmcache_native
 
 if TYPE_CHECKING:
@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from lmcache.v1.gpu_connector.gpu_connectors import GPUConnectorInterface
 
 # First Party
-import lmcache.c_ops as lmc_ops
+from lmcache import device_ops
 
 logger = init_logger(__name__)
 
@@ -74,7 +74,11 @@ def assert_layerwise_gpu_connector(gpu_connector: "GPUConnectorInterface"):
     """
     # Import at runtime to avoid circular dependency
     # First Party
-    from lmcache.v1.gpu_connector import gpu_connectors, xpu_connectors
+    from lmcache.v1.gpu_connector import (
+        gpu_connectors,
+        musa_connectors,
+        xpu_connectors,
+    )
 
     valid_connectors = (
         gpu_connectors.VLLMPagedMemLayerwiseGPUConnector,
@@ -83,6 +87,7 @@ def assert_layerwise_gpu_connector(gpu_connector: "GPUConnectorInterface"):
         xpu_connectors.VLLMPagedMemLayerwiseXPUConnector,
         xpu_connectors.VLLMBufferLayerwiseXPUConnector,
         xpu_connectors.SGLangLayerwiseXPUConnector,
+        musa_connectors.SGLangLayerwiseMUSAConnector,
     )
 
     assert isinstance(gpu_connector, valid_connectors)
@@ -132,7 +137,7 @@ def get_concrete_engine_kv_shape(
 
 
 def get_concrete_engine_kv_shape_from_shape_desc(
-    shape_desc: "lmc_ops.PageBufferShapeDesc",
+    shape_desc: PageBufferShapeDesc,
     engine_kv_format: "lmcache_native.EngineKVFormat",
 ) -> str:
     """Return the concrete shape for a single kernel group's ``shape_desc``.
@@ -622,7 +627,7 @@ def make_page_buffer_shape_desc(
     num_blocks: int,
     block_size: int,
     block_stride_elems: Optional[int] = None,
-) -> "lmc_ops.PageBufferShapeDesc":
+) -> PageBufferShapeDesc:
     """Build a :class:`PageBufferShapeDesc` from a representative layer.
 
     Args:
@@ -647,7 +652,7 @@ def make_page_buffer_shape_desc(
     Returns:
         A populated ``PageBufferShapeDesc``.
     """
-    desc = lmc_ops.PageBufferShapeDesc()
+    desc = device_ops.PageBufferShapeDesc()
     desc.kv_size = get_kv_size(kv_caches, engine_kv_format)
     desc.nl = num_layers_in_group
     desc.nb = num_blocks
@@ -660,10 +665,9 @@ def make_page_buffer_shape_desc(
     desc.hs = get_head_size(kv_caches, engine_kv_format, layer_idx)
     dtype = get_dtype(kv_caches, engine_kv_format, layer_idx)
     desc.element_size = dtype.itemsize
-    # The C++ PageBufferShapeDesc has no ``dtype`` field, but the pure-Python
-    # CPU fallback does -- and needs it to disambiguate float16 vs bfloat16
-    # (both have itemsize 2, so element_size alone is not enough). Best-effort.
-    set_shape_desc_dtype(desc, dtype)
+    # ``dtype`` is a Python-side side channel used by the torch fallback to
+    # disambiguate float16 vs bfloat16 when ``element_size == 2``.
+    desc.dtype = dtype
 
     resolved_stride = int(block_stride_elems) if block_stride_elems else 0
     desc.block_stride_elems = resolved_stride

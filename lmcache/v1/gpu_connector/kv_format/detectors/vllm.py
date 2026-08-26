@@ -19,19 +19,28 @@ from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache, Layout
 import lmcache.lmcache_native as lmcache_native
 
 
+def resolve_vllm_kv_layout(
+    layout_hints: LayoutHints, cpu_attention_backend: bool
+) -> str:
+    """Resolve vLLM's KV layout from engine hints and backend behavior."""
+    if cpu_attention_backend:
+        return "HND"
+    return layout_hints.get("kv_layout", "NHD")
+
+
 class VLLM_Detector(EngineDetector):
     engine_type = EngineType.VLLM
 
     def discover(
-        self, kv_caches: DiscoverableKVCache, layout_hints: LayoutHints
+        self,
+        kv_caches: DiscoverableKVCache,
+        layout_hints: LayoutHints,
     ) -> "tuple[Optional[lmcache_native.EngineKVFormat], DiscoverableKVCache]":
         # vLLM's CPU attention backend stores KV in HND but misreports it, so
         # force HND there; otherwise honor the hint, defaulting to NHD.
-        kv_layout = layout_hints.get("kv_layout")
-        if torch_device_type == "cpu":
-            kv_layout = "HND"
-        elif kv_layout is None:
-            kv_layout = "NHD"
+        kv_layout = resolve_vllm_kv_layout(
+            layout_hints, cpu_attention_backend=torch_device_type == "cpu"
+        )
         is_hnd = kv_layout == "HND"
 
         # Blocks-first fused K/V is the only rank-4 vLLM layout, so its raw rank
@@ -56,6 +65,15 @@ class VLLM_Detector(EngineDetector):
 
         if list_depth == 0:
             return lmcache_native.EngineKVFormat.NB_NL_TWO_BS_NH_HS, kv_caches
+        # vLLM-RBLN: HND with a singleton between heads and block tokens that
+        # its attention backend requires. Always HND, so the hint is not read.
+        if (
+            list_depth == 1
+            and tensor_ndim == 6
+            and first_tensor.shape[0] == 2
+            and first_tensor.shape[3] == 1
+        ):
+            return lmcache_native.EngineKVFormat.NL_X_TWO_NB_NH_ONE_BS_HS, kv_caches
         if list_depth == 1 and tensor_ndim == 5:
             if first_tensor.shape[0] == 2:  # K/V axis first
                 if is_hnd:
