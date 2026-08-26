@@ -654,6 +654,25 @@ def test_cuda_messaging_future_with_explicit_device():
     assert result == "explicit device", f"Expected 'explicit device', got {result}"
 
 
+@pytest.mark.cuda
+@pytest.mark.skipif(
+    not torch_dev.is_available(),
+    reason=f"requires available {torch_device_type} runtime",
+)
+@REQUIRES_EVENT_IPC
+def test_device_future_empty_handle_is_terminal_without_event_import():
+    """An event-free response completes on a real device event backend."""
+    torch_dev.init()
+
+    raw_future = MessagingFuture[tuple[bytes, bool]]()
+    device_future = raw_future.to_device_future()
+    raw_future.set_result((b"", False))
+
+    assert device_future.query() is True
+    assert device_future.wait(timeout=1.0) is True
+    assert device_future.result(timeout=1.0) is False
+
+
 # ==============================================================================
 # Device-neutral future wiring (no CUDA required)
 # ==============================================================================
@@ -728,6 +747,83 @@ def test_device_future_delegates_to_backend(monkeypatch):
     assert ("check", "dev") in calls
     assert ("import", b"h", "dev") in calls
     assert any(c[0] == "sync" for c in calls)
+
+
+def test_device_future_empty_handle_is_terminal(monkeypatch):
+    """An empty handle completes without importing a device event."""
+    # First Party
+    from lmcache.v1.multiprocess.futures import DeviceMessagingFuture
+
+    calls = []
+
+    class _FakeBackend:
+        device_type = "fake"
+
+        def check_event_support(self, device):
+            calls.append(("check", device))
+
+        def import_event(self, handle, device):
+            calls.append(("import", handle, device))
+            raise AssertionError("an empty event handle must not be imported")
+
+        def synchronize_event(self, event, device):
+            calls.append(("sync", event, device))
+
+        def query_event(self, event):
+            calls.append(("query", event))
+            return True
+
+    monkeypatch.setattr(
+        "lmcache.v1.multiprocess.futures.get_event_ipc_backend",
+        lambda device=None: _FakeBackend(),
+    )
+
+    raw = MessagingFuture[tuple[bytes, bool]]()
+    fut = DeviceMessagingFuture.FromMessagingFuture(raw, device="dev")
+    raw.set_result((b"", False))
+
+    assert fut.query() is True
+    assert fut.wait() is True
+    assert fut.result() is False
+    assert calls == [("check", "dev")]
+
+
+def test_device_future_false_with_event_still_waits(monkeypatch):
+    """A False result with a nonempty handle still waits for device work."""
+    # First Party
+    from lmcache.v1.multiprocess.futures import DeviceMessagingFuture
+
+    calls = []
+
+    class _FakeBackend:
+        device_type = "fake"
+
+        def check_event_support(self, device):
+            calls.append(("check", device))
+
+        def import_event(self, handle, device):
+            calls.append(("import", handle, device))
+            return "EVT"
+
+        def synchronize_event(self, event, device):
+            calls.append(("sync", event, device))
+
+        def query_event(self, event):
+            calls.append(("query", event))
+            return True
+
+    monkeypatch.setattr(
+        "lmcache.v1.multiprocess.futures.get_event_ipc_backend",
+        lambda device=None: _FakeBackend(),
+    )
+
+    raw = MessagingFuture[tuple[bytes, bool]]()
+    fut = DeviceMessagingFuture.FromMessagingFuture(raw, device="dev")
+    raw.set_result((b"completion-event", False))
+
+    assert fut.result() is False
+    assert ("import", b"completion-event", "dev") in calls
+    assert ("sync", "EVT", "dev") in calls
 
 
 def test_device_future_checks_backend_support_during_initialization(

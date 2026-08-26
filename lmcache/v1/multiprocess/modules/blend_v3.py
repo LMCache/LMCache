@@ -59,7 +59,6 @@ from lmcache.v1.multiprocess.engine_module import (
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
 )
-from lmcache.v1.multiprocess.modules.lookup import compute_extra_count
 from lmcache.v1.multiprocess.protocol import RequestType
 from lmcache.v1.multiprocess.token_hasher import (
     TokenHasher,
@@ -1307,21 +1306,20 @@ class BlendV3Module(InstanceLivenessTarget):
 
         # Shared session: end_session reads lookup_ipc_key + the rolling hashes
         # to keep the request's KV alive in L1.
-        session = self._ctx.session_manager.get_or_create(rid)
-        session.set_tokens(list(key.token_ids))
-        session.lookup_ipc_key = key
-
-        extra_count = compute_extra_count(tp_size, world_size)
+        num_kv_readers = key.require_num_kv_readers()
         # PREFIX leg set: recurrent + attention (the planes a prefix restore
         # consumes), never aux. Chunk-major so count_leading_ones() stays
         # prefix-aligned with _poll_prefix_leg's divisor.
         obj_keys = _cb_chunk_major_object_keys(key, chunk_hashes, read.prefix_gids)
         prefix_desc = _narrow_attn_desc(attn_desc, read.prefix_gids)
+        session = self._ctx.session_manager.get_or_create(rid)
+        session.set_tokens(list(key.token_ids))
+        session.begin_lookup(key, tuple(attn_desc.num_chunks_in_sw))
         handle = self._ctx.storage_manager.submit_prefetch_task(
             PrefetchRequestSpec(
                 keys=obj_keys,
                 group_layout_descs=layouts,
-                extra_count=extra_count,
+                num_kv_readers=num_kv_readers,
                 policy=policy,
                 attn_desc=prefix_desc,
             ),
@@ -1389,8 +1387,7 @@ class BlendV3Module(InstanceLivenessTarget):
         # Publish the lock model so free_lookup_locks (APC-shadowed hits,
         # aborts before load) releases exactly what this leg locked.
         session = self._ctx.session_manager.get_or_create(rid)
-        session.prefetch_hit_chunks = leading
-        session.prefetch_locked_gids = job.prefix_lock_gids
+        session.record_prefetch_result(leading, job.prefix_lock_gids)
         self._event_bus.publish(
             Event(
                 event_type=EventType.CB_PREFIX_LOOKUP_END,
