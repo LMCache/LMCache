@@ -25,6 +25,7 @@ import torch
 # First Party
 from lmcache import torch_device_type
 from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
+from lmcache.v1.platform.cuda.utils import _cuda
 
 
 class CudaIPCWrapper(DeviceIPCWrapper):
@@ -121,16 +122,9 @@ class RawCudaIPCWrapper(DeviceIPCWrapper):
 
         assert_contiguous(tensor)
 
-        try:
-            # Third Party
-            from cuda.bindings import runtime as cudart
-        except ImportError:
-            # Third Party
-            from cuda import cudart
-
         data_ptr = tensor.data_ptr()
-        err, ipc_handle = cudart.cudaIpcGetMemHandle(data_ptr)
-        if err != cudart.cudaError_t.cudaSuccess:
+        err, ipc_handle = _cuda.runtime.cudaIpcGetMemHandle(data_ptr)
+        if err != _cuda.runtime.cudaError_t.cudaSuccess:
             raise RuntimeError(
                 f"cudaIpcGetMemHandle failed: {err} (ptr=0x{data_ptr:x})"
             )
@@ -156,21 +150,14 @@ class RawCudaIPCWrapper(DeviceIPCWrapper):
         # Third Party
         import cupy
 
-        try:
-            # Third Party
-            from cuda.bindings import runtime as cudart
-        except ImportError:
-            # Third Party
-            from cuda import cudart
-
         device_index = self._get_device_index_from_uuid(self.device_uuid)
 
-        handle = cudart.cudaIpcMemHandle_t()
+        handle = _cuda.runtime.cudaIpcMemHandle_t()
         handle.reserved = self._ipc_handle_reserved
-        err, ptr = cudart.cudaIpcOpenMemHandle(
-            handle, cudart.cudaIpcMemLazyEnablePeerAccess
+        err, ptr = _cuda.runtime.cudaIpcOpenMemHandle(
+            handle, _cuda.runtime.cudaIpcMemLazyEnablePeerAccess
         )
-        if err != cudart.cudaError_t.cudaSuccess:
+        if err != _cuda.runtime.cudaError_t.cudaSuccess:
             raise RuntimeError(f"cudaIpcOpenMemHandle failed: {err}")
 
         # Wrap as a flat ``uint8`` CuPy array, DLPack to torch, then view

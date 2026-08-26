@@ -4,6 +4,7 @@ Tests for the DAX MP L2 adapter.
 """
 
 # Standard
+from types import SimpleNamespace
 from typing import cast
 import select
 import threading
@@ -14,7 +15,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache.native_storage_ops import Bitmap
+from lmcache.lmcache_native import Bitmap
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
@@ -28,7 +29,7 @@ from lmcache.v1.distributed.config import (
 )
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L2AdapterListener
-from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface
+from lmcache.v1.distributed.l2_adapters.base import AdapterUsage, L2AdapterInterface
 from lmcache.v1.distributed.l2_adapters.config import (
     L2AdaptersConfig,
     get_registered_l2_adapter_types,
@@ -42,12 +43,14 @@ from lmcache.v1.distributed.l2_adapters.reconfiguration import (
     L2ReconfigurableAdapter,
     L2ReconfigureError,
 )
+from lmcache.v1.distributed.storage_controllers.store_policy import AdapterDescriptor
 from lmcache.v1.distributed.storage_manager import StorageManager
 from lmcache.v1.memory_allocators.ad_hoc_memory_allocator import AdHocMemoryAllocator
 from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
 )
+from lmcache.v1.mp_observability.event_bus import EventBus
 from lmcache.v1.platform import consume_fd
 
 _EMPTY_LAYOUT = MemoryLayoutDesc(shapes=[], dtypes=[])
@@ -433,6 +436,10 @@ class _FakeReconfigurableAdapter:
         self.calls.append((operation, payload))
         return {"status": "ok", "operation": operation, "payload": payload}
 
+    def get_usage(self) -> AdapterUsage:
+        """Declare no capacity; reconfiguring still reports the compartment."""
+        return AdapterUsage(total_bytes_used=0, total_capacity_bytes=0)
+
 
 class _SerdeLikeWrapper:
     def __init__(self, inner_adapter: _FakeReconfigurableAdapter) -> None:
@@ -440,8 +447,43 @@ class _SerdeLikeWrapper:
 
 
 class _FakeAdapterDescriptor:
-    def __init__(self, type_name: str) -> None:
+    def __init__(self, type_name: str, shared: bool = False) -> None:
         self.type_name = type_name
+        # The real AdapterDescriptor always carries its config; capacity
+        # reporting reads ``shared`` off it.
+        self.config = SimpleNamespace(shared=shared)
+
+
+class _RecordingBus:
+    """Captures capacity-change events instead of publishing them."""
+
+    def __init__(self) -> None:
+        self.events: list[object] = []
+
+    def publish(self, event: object) -> None:
+        self.events.append(event)
+
+
+def _wire_capacity_publishing(sm: StorageManager) -> None:
+    """Give a bare StorageManager the state its capacity publish needs.
+
+    Reconfiguring an adapter also announces the new topology, which reads
+    the L1 config, the adapter descriptors, and the event bus.
+
+    Args:
+        sm: The partially-constructed storage manager to wire up.
+    """
+    sm._lifecycle_lock = threading.Lock()
+    sm._event_bus = cast(EventBus, _RecordingBus())
+    # Declares no L1, keeping these tests about the L2 path.
+    sm._l1_config = L1ManagerConfig(
+        memory_config=L1MemoryManagerConfig(size_in_bytes=0, use_lazy=True)
+    )
+    if not hasattr(sm, "_adapter_descriptors"):
+        sm._adapter_descriptors = {
+            adapter_id: cast(AdapterDescriptor, _FakeAdapterDescriptor("fake"))
+            for adapter_id in sm._l2_adapters
+        }
 
 
 def test_storage_manager_routes_generic_l2_reconfigure_to_adapter():
@@ -449,6 +491,9 @@ def test_storage_manager_routes_generic_l2_reconfigure_to_adapter():
     adapter = _FakeReconfigurableAdapter()
     sm._adapters_lock = threading.Lock()
     sm._l2_adapters = {0: cast(L2AdapterInterface, adapter)}
+    # Reconfiguring changes capacity, so the call also announces the new
+    # topology; that needs enough state to build a capacity snapshot.
+    _wire_capacity_publishing(sm)
 
     result = sm.reconfigure_l2_adapter(0, "flip", {"enabled": True})
 

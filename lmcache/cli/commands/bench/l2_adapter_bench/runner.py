@@ -19,7 +19,7 @@ from typing import Callable
 import time
 
 # First Party
-from lmcache.native_storage_ops import Bitmap
+from lmcache.lmcache_native import Bitmap
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.memory_management import MemoryObj
@@ -182,7 +182,7 @@ def bench_store(
                 f"({len(completed)}/{len(task_ids)} tasks completed, "
                 f"success_keys={success_keys}/{in_flight * num_keys})"
             )
-            result.round_durations.append(float("inf"))
+            result.timed_out_rounds += 1
             result.success_counts.append(success_keys)
             continue
 
@@ -252,7 +252,7 @@ def bench_lookup(
                 f"({len(results)}/{len(task_ids)} tasks completed, "
                 f"found={total_found}/{in_flight * num_keys})"
             )
-            result.round_durations.append(float("inf"))
+            result.timed_out_rounds += 1
             result.success_counts.append(total_found)
             continue
 
@@ -318,7 +318,7 @@ def bench_load(
                 f"({len(results)}/{len(task_ids)} tasks completed, "
                 f"loaded={total_loaded}/{in_flight * num_keys})"
             )
-            result.round_durations.append(float("inf"))
+            result.timed_out_rounds += 1
             result.success_counts.append(total_loaded)
             continue
 

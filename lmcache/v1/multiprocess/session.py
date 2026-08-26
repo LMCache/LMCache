@@ -41,7 +41,14 @@ class Session:
     num_chunks_processed: int = 0
     created_at: float = field(default_factory=time.time)
     lookup_ipc_key: Optional[IPCCacheServerKey] = None
+    prefetch_hit_chunks: int = -1
+    prefetch_locked_gids: tuple = ()
+    prefetch_group_windows: tuple[int, ...] = ()
     extras: dict[str, Any] = field(default_factory=dict)
+    _lookup_generation: int = field(default=0, repr=False)
+    _failed_retrieve_releases: set[tuple[int, int, int, int, int]] = field(
+        default_factory=set, repr=False
+    )
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def set_tokens(self, full_token_ids: list[int]) -> None:
@@ -78,6 +85,10 @@ class Session:
 
         Returns:
             List of hash values for chunks in [start_chunk, end_chunk).
+
+        Raises:
+            ValueError: If an explicit ``end`` exceeds the current tokens
+                (hashing past them yields valid-looking garbage).
         """
         chunk_size = self.hasher.chunk_size
         assert start % chunk_size == 0, (
@@ -86,6 +97,12 @@ class Session:
         start_chunk = start // chunk_size
 
         with self._lock:
+            if end is not None and end > len(self.token_ids):
+                raise ValueError(
+                    f"get_hashes end ({end}) exceeds the session's "
+                    f"{len(self.token_ids)} token(s); the session may have "
+                    "been recreated after request cleanup"
+                )
             if end is None:
                 # No explicit end: use the last full-chunk boundary.
                 # Lock must be held here because `self.token_ids` may be
@@ -122,6 +139,112 @@ class Session:
             self.last_prefix_hash = h
             self.chunk_hashes.append(h)
             self.num_chunks_processed += 1
+
+    def begin_lookup(
+        self,
+        key: IPCCacheServerKey,
+        group_windows: tuple[int, ...],
+    ) -> None:
+        """Record a new lookup and reset its per-lookup release state."""
+        with self._lock:
+            self.lookup_ipc_key = key
+            self.prefetch_hit_chunks = -1
+            self.prefetch_locked_gids = ()
+            self.prefetch_group_windows = group_windows
+            self._lookup_generation += 1
+            self._failed_retrieve_releases.clear()
+
+    def record_prefetch_result(
+        self,
+        hit_chunks: int,
+        locked_gids: tuple[int, ...],
+    ) -> None:
+        """Record the lock set acquired by the current lookup."""
+        with self._lock:
+            self.prefetch_hit_chunks = hit_chunks
+            self.prefetch_locked_gids = locked_gids
+
+    def prepare_failed_retrieve_release(
+        self,
+        key: IPCCacheServerKey,
+    ) -> tuple[int, tuple[int, ...], tuple[int, ...], int] | None:
+        """Return a stable snapshot for a failed worker's lock release."""
+        if key.worker_id is None:
+            return None
+
+        with self._lock:
+            lookup_key = self.lookup_ipc_key
+            hit_chunks = self.prefetch_hit_chunks
+            if lookup_key is None or hit_chunks < 0:
+                return None
+
+            same_lookup = (
+                key.model_name == lookup_key.model_name
+                and key.world_size == lookup_key.world_size
+                and key.token_ids == lookup_key.token_ids
+                and key.cache_salt == lookup_key.cache_salt
+                and key.start >= lookup_key.start
+                and key.end <= lookup_key.end
+            )
+            if not same_lookup:
+                return None
+
+            return (
+                hit_chunks,
+                self.prefetch_locked_gids,
+                self.prefetch_group_windows,
+                self._lookup_generation,
+            )
+
+    def claim_failed_retrieve_release(
+        self,
+        instance_id: int,
+        key: IPCCacheServerKey,
+        lookup_generation: int,
+    ) -> bool:
+        """Atomically claim one failed worker's prepared lock release.
+
+        A scheduler lookup acquires read locks for every KV worker (or one
+        reader count per TP worker for MLA), while RETRIEVE responses are
+        per worker instance.  When a worker has lost its GPU registration,
+        only that instance's share may be released.  Claiming after key
+        resolution makes duplicate failed RETRIEVEs idempotent without
+        consuming the claim when resolution itself fails.
+
+        ``False`` is also returned when the session cannot prove ownership of
+        the requested range.  In that case it is safer to leave the lock to
+        its TTL than to decrement a concurrent request's anonymous L1 count.
+        """
+        if key.worker_id is None:
+            return False
+
+        with self._lock:
+            lookup_key = self.lookup_ipc_key
+            if lookup_key is None or lookup_generation != self._lookup_generation:
+                return False
+
+            same_lookup = (
+                key.model_name == lookup_key.model_name
+                and key.world_size == lookup_key.world_size
+                and key.token_ids == lookup_key.token_ids
+                and key.cache_salt == lookup_key.cache_salt
+                and key.start >= lookup_key.start
+                and key.end <= lookup_key.end
+            )
+            if not same_lookup:
+                return False
+
+            owner = (
+                lookup_generation,
+                instance_id,
+                key.worker_id,
+                key.start,
+                key.end,
+            )
+            if owner in self._failed_retrieve_releases:
+                return False
+            self._failed_retrieve_releases.add(owner)
+            return True
 
 
 class SessionManager:
@@ -162,6 +285,11 @@ class SessionManager:
                 )
                 logger.debug("Created session for request_id=%s", request_id)
             return self._sessions[request_id]
+
+    def get(self, request_id: str) -> Optional[Session]:
+        """Return an existing session without creating ownership state."""
+        with self._lock:
+            return self._sessions.get(request_id)
 
     def remove(self, request_id: str) -> Optional[Session]:
         """Remove a session by request_id.
