@@ -98,10 +98,20 @@ def _reconstruct_blocks_first(
 
     if tuple(base.stride()[1:]) != tuple(tight_inner):
         raise _drift("per-(layer, block) content is not contiguous")
-    if base.stride(0) < num_layers * chunk:
+    # HMA pools interleave groups inside each block: this group's layers sit
+    # a uniform step apart that may exceed its own chunk (other groups'
+    # bytes in between), and the block step may exceed the group's total.
+    layer_step = (
+        layers[1].storage_offset() - layers[0].storage_offset()
+        if num_layers > 1
+        else chunk
+    )
+    if layer_step < chunk:
+        raise _drift(f"layer step {layer_step} < per-layer block chunk {chunk}")
+    if base.stride(0) < (num_layers - 1) * layer_step + chunk:
         raise _drift(
-            f"block step {base.stride(0)} < num_layers * per-layer block "
-            f"chunk {num_layers * chunk}"
+            f"block step {base.stride(0)} cannot hold {num_layers} layers "
+            f"{layer_step} apart"
         )
     storage_ptr = base.untyped_storage().data_ptr()
     for i, t in enumerate(layers):
@@ -109,14 +119,12 @@ def _reconstruct_blocks_first(
             raise _drift("layer views do not share one storage")
         if tuple(t.shape) != tuple(base.shape) or t.stride() != base.stride():
             raise _drift(f"layer {i} shape/stride mismatch")
-        if t.storage_offset() != base.storage_offset() + i * chunk:
-            raise _drift(f"layer {i} is not at offset base + {i} * chunk")
+        if t.storage_offset() != base.storage_offset() + i * layer_step:
+            raise _drift(f"layer {i} is not at offset base + {i} * layer step")
 
-    # HMA pools shared with other groups pad the block step past this
-    # group's layers; keep the observed step so addressing stays honest.
     full = base.as_strided(
         (base.shape[0], num_layers, *inner),
-        (base.stride(0), chunk, *tight_inner),
+        (base.stride(0), layer_step, *tight_inner),
         storage_offset=base.storage_offset(),
     )
     return fmt, full

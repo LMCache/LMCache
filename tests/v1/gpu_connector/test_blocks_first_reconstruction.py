@@ -54,7 +54,7 @@ def test_view_order_does_not_matter():
 def test_foreign_storage_is_drift():
     _, views = make_views("BLHNC")
     views[1] = views[1].clone()
-    with pytest.raises(ValueError, match="share one storage"):
+    with pytest.raises(ValueError, match="disagree"):
         detect_format(views, EngineType.VLLM, {"kv_layout": "BLHNC"})
 
 
@@ -68,3 +68,17 @@ def test_bare_tensor_is_rejected():
     buf, _ = make_views("BLHNC")
     with pytest.raises(ValueError, match="rank-4"):
         detect_format(buf, EngineType.VLLM, {"kv_layout": "BLHNC"})
+
+
+def test_interleaved_groups_reconstruct():
+    """Two groups woven inside each block: this group's layer step is
+    2 * chunk (the other group's layer sits in between)."""
+    inner = (NH, BS, CS)
+    buf = torch.arange(NB * 2 * NL * NH * BS * CS, dtype=torch.float32)
+    buf = buf.reshape(NB, 2 * NL, *inner)
+    views = [buf[:, 2 * layer] for layer in range(NL)]  # even slots = ours
+    fmt, kv = detect_format(views, EngineType.VLLM, {"kv_layout": "BLHNC"})
+    assert fmt == lmcache_native.EngineKVFormat.NB_NL_NH_BS_CS
+    assert kv.shape == (NB, NL, *inner)
+    assert kv.stride(1) == 2 * NH * BS * CS
+    assert torch.equal(kv, buf[:, ::2])
