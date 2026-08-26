@@ -81,8 +81,9 @@ MP server (store/lookup)
   execute_evictions():
     for each tracked salt:
       limit = quota (default 0 → evict all)
-      if usage ≥ watermark·limit → select LRU keys,
-        fire-and-forget DELETE /cache/objects to a holder
+      if usage ≥ watermark·limit → select LRU keys whose copies are reachable,
+        fire-and-forget DELETE /cache/objects to each holder
+        (shared pool → any server; local L2 → its owning instance)
 ```
 
 ## Wire types (`schemas.py`)
@@ -214,23 +215,64 @@ accounting lives in ``CacheUsageManager``; the LRU only tracks order.
 - ``on_lookup(key)`` — touch (``policy.on_keys_touched``, move to MRU end).
 - ``on_remove(key)`` — drop from the LRU (``policy.on_keys_removed``); the paired
   byte decrement happens in the usage view consuming the same event.
-- ``compute_eviction_plan() -> dict[str, list[ObjectKey]]`` — **pure**: for each
-  tracked salt, fire when ``usage ≥ trigger_watermark · quota`` (quota 0 ⇒ evict
-  all), selecting ``eviction_ratio`` of the salt's LRU keys via
-  ``policy.get_eviction_actions``. Salts without an explicit quota use the
-  registry's default limit; while it is unset (``None``) they are skipped
-  entirely — see QuotaManager above. No network, no mutation.
+- Selection (internal to ``execute_evictions``) — for each tracked salt, fire
+  when ``usage ≥ trigger_watermark · quota`` (quota 0 ⇒ evict all), selecting
+  ``eviction_ratio`` of the salt's LRU keys via ``policy.get_eviction_actions``.
+  Salts without an explicit quota use the registry's default limit; while it is
+  unset (``None``) they are skipped entirely — see QuotaManager above. Pinned
+  keys and keys no registered server can delete (see Routing below) are not
+  selected. The result is one plan object carrying both the victims and each
+  victim's routes: deciding whether a key is evictable already means resolving
+  where it would be deleted, so routing is a by-product of selection rather
+  than a second pass.
 - ``run(registry, http_client, check_interval)`` — the control loop
   itself, started as an asyncio task by the app lifespan and cancelled on
   shutdown. ``EVICTION_CHECK_INTERVAL = 0`` disables it (the task is
   never created).
 - ``execute_evictions(registry, http_client)`` — one pass: computes the plan and
-  **fire-and-forget** ``DELETE /cache/objects`` to a holder MP server for each
-  salt's victims; on confirmed deletion ``on_remove`` drops them from tracking.
-  The plan's keys are split into chunks of at most ``MAX_DELETE_BATCH`` (imported
-  from the MP server's ``object_service``) and each chunk is dispatched as its
-  own request, because the endpoint rejects any single delete over that cap with
+  **fire-and-forget** ``DELETE /cache/objects`` to each holder of each victim;
+  on confirmed deletion ``on_remove`` drops the key from tracking. Each holder's
+  keys are split into chunks of at most ``MAX_DELETE_BATCH`` (imported from the
+  MP server's ``object_service``) and each chunk is dispatched as its own
+  request, because the endpoint rejects any single delete over that cap with
   HTTP 400 — a full-salt eviction (quota dropped to 0) routinely exceeds it.
+
+#### Routing: shared vs local
+
+``DELETE /cache/objects`` is **node-scoped** — it removes keys from the backend
+of the server it reaches. That makes the victim's placement, not the fleet, the
+address of the delete. The controller reads it from the ``KeyDirectory`` view
+(the same placements the cache-event stream maintains) and the
+``InstanceRegistry``:
+
+| Placement of the victim | Where the DELETE goes | Copies deleted |
+| --- | --- | --- |
+| ``shared=True`` (fleet pool, e.g. S3) | The placement's reporter if still registered, else any registered server | One request; one copy |
+| ``shared=False`` (local L2, e.g. per-node disk) | The **owning** instance | One request per owner — N private copies cost N deletes |
+| Local, owner deregistered | Nowhere; the key is **skipped** | None |
+| No L2 placement in the directory | Any registered server, primary adapter | Best-effort single request |
+
+Each request also names the placement's ``tier`` and its ``backend`` (as the
+``adapter`` selector — the adapter's ``type_name``, the same identity the store
+event carried), so a multi-adapter server deletes from the one that actually
+holds the key rather than its primary. Keys with no known placement carry no
+selector and fall back to the primary adapter, which is what every delete used
+to do.
+
+A route is ``(instance, tier, backend)`` and the tier is request data, not an
+assumption: resolution filters the directory's placements to the tier being
+evicted and the request states it, rather than relying on the endpoint's ``l2``
+default. Eviction plans the ``l2`` tier today — that is what the LRU tracks and
+what quotas are accounted against — so ``l2`` is what the planner passes; the
+routing and dispatch path itself is tier-neutral.
+
+Skipping stranded keys is what keeps eviction converging: a local copy whose
+owner has left cannot be deleted by anyone, and dispatching it to another server
+would delete nothing, produce no ``DELETE`` event, and leave the key at the LRU
+head to be re-selected — burning the salt's eviction budget every cycle while
+its deletable keys stay put. The bytes stay counted against the salt until the
+owner rejoins (its disk contents survive the restart) or an operator deletes
+them out of band.
 
 ## REST endpoints (`quota_api.py`)
 
@@ -295,11 +337,14 @@ Both also accept CLI flags (``--coordinator-event-reporting``,
 | Coordinator restart | Usage/LRU state lost | Rebuilt from the cache-event stream as events arrive; usage under-reports until it catches up |
 | Flush timeout | One batch delayed | Next flush sends new batch; no retry of old batch |
 | Usage accounting drift | Quota enforcement imprecise | Self-correcting as new events arrive |
+| Local-L2 owner leaves the fleet | Its copies are undeletable | Those keys are skipped by the planner (not dispatched elsewhere) and stay counted against the salt until the owner re-registers |
 
 ## Scope
 
 Additive: no change to per-server eviction, L2 adapter store/lookup paths, or
-the coordinator's membership/health loop. Composes via the ``L2AdapterListener``
+the coordinator's membership/health loop. Quota scope is unchanged too — the
+limit is per ``cache_salt`` across the whole fleet, and a key held privately by
+N instances counts N times, exactly as the usage view already accounted for it. Composes via the ``L2AdapterListener``
 interface and the ``http_apis`` auto-discovery — a new router reading
 ``app.state``, plus the opt-in event listener — with no edits to existing
 controllers or adapters beyond passing ``sizes`` through to

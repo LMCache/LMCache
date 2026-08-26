@@ -5,6 +5,10 @@ Quota writes, usage events, and status reads moved to the ``/quota`` group --
 see ``test_quota_api.py``.
 """
 
+# Standard
+import asyncio
+import time
+
 # Third Party
 from fastapi.testclient import TestClient
 import httpx
@@ -21,6 +25,7 @@ from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
 from lmcache.v1.mp_coordinator.controllers.eviction_controller import (
     FleetEvictionController,
 )
+from lmcache.v1.mp_coordinator.registry import MPInstance
 from lmcache.v1.multiprocess.cache_control.key_resolver import resolve_object_keys
 
 
@@ -122,6 +127,27 @@ def _pin_body(salt: str = "alice") -> dict:
     }
 
 
+def _eviction_plan(ctx) -> dict[str, list[ObjectKey]]:
+    """Run one eviction pass and return its plan.
+
+    Selection is only observable through ``execute_evictions``, so the
+    DELETEs the pass issues are absorbed by a mock transport. Dispatch does
+    not touch the LRU, so calling this twice is safe.
+    """
+    eviction = ctx.controllers.get(FleetEvictionController)
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(200, json={"ok": True})
+    )
+
+    async def run() -> dict[str, list[ObjectKey]]:
+        async with httpx.AsyncClient(transport=transport) as client:
+            plan = await eviction.execute_evictions(ctx.registry, client)
+            await eviction.wait_for_in_flight_dispatches()
+        return plan
+
+    return asyncio.run(run())
+
+
 def _resolve(ctx, salt: str = "alice") -> list[ObjectKey]:
     """Resolve the pin body's keys the same way the handler will."""
     keys, _ = resolve_object_keys(
@@ -134,16 +160,27 @@ def test_pin_then_unpin_tracks_l2_eviction():
     """Pin excludes the resolved keys from L2 eviction; unpin restores them."""
     with _pin_client() as client:
         ctx = client.app.state.ctx
-        eviction = ctx.controllers.get(FleetEvictionController)
         keys = _resolve(ctx)
         assert keys  # 2 chunks x world_size 1
 
         # Arm allowlist enforcement (unquota'd salts are exempt until the
         # default limit is set), then track the keys in the L2 eviction LRU
         # with no quota (evict-all), so the plan would evict them unless
-        # pinned.
+        # pinned. ``mp-1`` must be a fleet member: the reported placements
+        # are local to it, so only it can delete them and the planner skips
+        # them while it is out of the fleet.
         assert (
             client.put("/quota/config", json={"default_limit_gb": 0}).status_code == 200
+        )
+        now = time.time()
+        ctx.registry.register(
+            MPInstance(
+                instance_id="mp-1",
+                ip="10.0.0.1",
+                http_port=8000,
+                registration_time=now,
+                last_heartbeat_time=now,
+            )
         )
         for seq, k in enumerate(keys, start=1):
             ctx.event_gate.ingest(
@@ -159,7 +196,7 @@ def test_pin_then_unpin_tracks_l2_eviction():
                     ],
                 )
             )
-        assert eviction.compute_eviction_plan()["alice"]
+        assert _eviction_plan(ctx)["alice"]
 
         resp = client.post("/cache/pins", json=_pin_body())
         assert resp.status_code == 200, resp.text
@@ -169,7 +206,7 @@ def test_pin_then_unpin_tracks_l2_eviction():
             "status": "pinned",
         }
         # Pinned: the keys drop out of the eviction plan.
-        assert eviction.compute_eviction_plan() == {}
+        assert _eviction_plan(ctx) == {}
 
         resp = client.request("DELETE", "/cache/pins", json=_pin_body())
         assert resp.status_code == 200, resp.text
@@ -179,7 +216,7 @@ def test_pin_then_unpin_tracks_l2_eviction():
             "status": "unpinned",
         }
         # Unpinned: the keys are eligible for eviction again.
-        assert eviction.compute_eviction_plan()["alice"]
+        assert _eviction_plan(ctx)["alice"]
 
 
 def test_pin_short_sequence_is_noop():
