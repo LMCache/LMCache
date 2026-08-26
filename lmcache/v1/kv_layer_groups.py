@@ -415,15 +415,15 @@ class KVLayerGroupsManager:
                 group_format,
             )
             block_stride_elems = resolve_block_stride_and_log_layout(
-                kv_caches,
+                group_spec_source(kv_caches[indices[0]], group_format),
                 group_format,
-                layer_idx=indices[0],
+                layer_idx=0,
                 group_idx=group_idx,
             )
             shape_desc = make_page_buffer_shape_desc(
-                kv_caches,
+                group_spec_source(kv_caches[indices[0]], group_format),
                 group_format,
-                layer_idx=indices[0],
+                layer_idx=0,
                 num_layers_in_group=len(indices),
                 num_blocks=group_num_blocks,
                 block_size=bs,
