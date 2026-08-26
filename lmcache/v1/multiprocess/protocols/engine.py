@@ -101,7 +101,7 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         #     caches (vLLM, SGLang, ...). Drives format detection.
         #   - layout_hints: LayoutHints - See custom_types.LayoutHints.
         #   - engine_group_infos: list[EngineGroupInfo] - Engine-neutral KV cache
-        #     group metadata (msgspec-encoded by the message queue).
+        #     group metadata carried by the typed gRPC request.
         # Returns: None
         "REGISTER_KV_CACHE": ProtocolDefinition(
             payload_classes=[
@@ -158,6 +158,7 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
             payload_classes=[KeyType, int, list[list[int]], bytes],
             response_class=tuple[bytes, bool],
             handler_type=HandlerType.BLOCKING,
+            requires_client_affinity=True,
         ),
         # Store KV cache blocks
         # Payload:
@@ -171,6 +172,7 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
             payload_classes=[KeyType, int, list[list[int]], bytes],
             response_class=tuple[bytes, bool],
             handler_type=HandlerType.BLOCKING,
+            requires_client_affinity=True,
         ),
         # Retrieve KV cache blocks
         # Payload:
@@ -186,6 +188,7 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
             payload_classes=[KeyType, int, list[list[int]], bytes, int],
             response_class=tuple[bytes, bool],
             handler_type=HandlerType.BLOCKING,
+            requires_client_affinity=True,
         ),
         # Submit a prefix lookup; job is tracked server-side by request_id
         # Payload:
@@ -269,20 +272,24 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
             payload_classes=[KeyType, int],
             response_class=PrepareStoreResponse,
             handler_type=HandlerType.BLOCKING,
+            requires_client_affinity=True,
         ),
         "COMMIT_STORE": ProtocolDefinition(
             payload_classes=[KeyType, int, bytes],
             response_class=bool,
             handler_type=HandlerType.BLOCKING,
+            requires_client_affinity=True,
         ),
         "PREPARE_RETRIEVE": ProtocolDefinition(
             payload_classes=[KeyType, int],
             response_class=PrepareRetrieveResponse,
             handler_type=HandlerType.BLOCKING,
+            requires_client_affinity=True,
         ),
         "COMMIT_RETRIEVE": ProtocolDefinition(
             payload_classes=[KeyType, int],
             response_class=bool,
             handler_type=HandlerType.BLOCKING,
+            requires_client_affinity=True,
         ),
     }

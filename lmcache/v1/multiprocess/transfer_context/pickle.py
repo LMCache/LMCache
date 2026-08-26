@@ -9,7 +9,7 @@ import torch
 
 # First Party
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.mq import MessageQueueClient
+from lmcache.v1.multiprocess.mq import MultiprocessGrpcClient
 from lmcache.v1.multiprocess.protocol import RPC, get_response_class
 from lmcache.v1.multiprocess.transfer_context.base import (
     EngineDrivenContext,
@@ -32,7 +32,7 @@ class EngineDrivenContextPickle(EngineDrivenContext):
     def __init__(
         self,
         metadata: EngineDrivenContextMetadata,
-        mq_client: MessageQueueClient,
+        mq_client: MultiprocessGrpcClient,
         mq_timeout: float,
     ) -> None:
         super().__init__(metadata, mq_client, mq_timeout)

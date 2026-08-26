@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """P2P L2 adapter: reads KV objects from a single peer cache server.
 
-Lookups and unlocks are sent to the peer's P2P controller over the MQ; the
+Lookups and unlocks are sent to the peer's P2P controller over gRPC; the
 located objects are pulled from the peer's L1 over the transfer channel. The
 adapter never stores, evicts, or deletes -- a peer's cache is read-only here.
 
@@ -20,9 +20,6 @@ its own task-id counter and bookkeeping dicts), so this class needs no locks.
 from dataclasses import dataclass
 import time
 
-# Third Party
-import zmq
-
 # First Party
 from lmcache.lmcache_native import Bitmap, PeriodicEventNotifier
 from lmcache.logging import init_logger
@@ -37,7 +34,7 @@ from lmcache.v1.distributed.l2_adapters.factory import register_l2_adapter_facto
 from lmcache.v1.distributed.transfer_channel import get_transfer_channel_context
 from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.memory_management import MemoryObj
-from lmcache.v1.multiprocess.mq import MessageQueueClient
+from lmcache.v1.multiprocess.mq import MultiprocessGrpcClient
 from lmcache.v1.multiprocess.protocol import RPC, get_response_class
 from lmcache.v1.platform import HAS_EVENTFD, create_event_notifier
 
@@ -67,7 +64,7 @@ class P2PL2AdapterConfig(L2AdapterConfigBase):
     """Config for the P2P L2 adapter.
 
     Fields:
-    - peer_mq_server_url: ZMQ url of the peer's MQ server (lookup/unlock RPCs).
+    - peer_mq_server_url: gRPC URL of the peer's MP server (lookup/unlock RPCs).
     - peer_transfer_channel_server_url: the peer's transfer-channel server url.
     - lookup_timeout_s: deadline for a lookup result before it counts as a miss.
     - load_timeout_s: deadline for a load before it counts as a failure.
@@ -115,7 +112,8 @@ class P2PL2AdapterConfig(L2AdapterConfigBase):
     def help(cls) -> str:
         return (
             "P2P L2 adapter config fields:\n"
-            "- peer_mq_server_url (str): ZMQ url of the peer's MQ server (required)\n"
+            "- peer_mq_server_url (str): gRPC URL of the peer's MP server "
+            "(required)\n"
             "- peer_transfer_channel_server_url (str): the peer's transfer channel "
             "server url (required)\n"
             "- lookup_timeout_s (float): lookup result deadline in seconds "
@@ -132,9 +130,7 @@ class P2PL2Adapter(L2AdapterInterface):
         super().__init__(max_capacity_bytes=0)
         self._config = config
 
-        self._mq_client = MessageQueueClient(
-            config.peer_mq_server_url, zmq.Context.instance()
-        )
+        self._mq_client = MultiprocessGrpcClient(config.peer_mq_server_url)
         self._tc_context = get_transfer_channel_context()
         self._tc_client = self._tc_context.get_transfer_channel_client(
             config.peer_transfer_channel_server_url

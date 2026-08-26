@@ -33,7 +33,10 @@ from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
     RegisterEngineDrivenContextPayload,
 )
-from lmcache.v1.multiprocess.mq import MessageQueueClient, MessageQueueServer
+from lmcache.v1.multiprocess.mq import (
+    MultiprocessGrpcClient,
+    MultiprocessGrpcServer,
+)
 from lmcache.v1.multiprocess.protocol import RPC, RpcMethod, get_payload_classes
 from lmcache.v1.multiprocess.protocols.base import HandlerType
 from lmcache.v1.multiprocess.protocols.engine import (
@@ -491,7 +494,7 @@ class _LookupRouter:
         self._in_progress_left = in_progress_polls
         self._hit_chunks = hit_chunks
         self.last_query_request_id: str | None = None
-        self._server = MessageQueueServer(endpoint)
+        self._server = MultiprocessGrpcServer(endpoint)
         request_types = [RPC.Lookup, RPC.QueryPrefetchStatus]
         self._server.add_handler(
             RPC.Lookup,
@@ -525,8 +528,8 @@ class _LookupRouter:
 
 
 class TestLookupProtocol:
-    def _make_client(self, endpoint: str) -> MessageQueueClient:
-        return MessageQueueClient(endpoint)
+    def _make_client(self, endpoint: str) -> MultiprocessGrpcClient:
+        return MultiprocessGrpcClient(endpoint)
 
     def test_send_lookup_void_reply_is_success(
         self,
@@ -588,7 +591,7 @@ class _UnregisterRouter:
     def __init__(self, endpoint: str) -> None:
         self.last_request_type: RpcMethod | None = None
         self.last_instance_id: int | None = None
-        self._server = MessageQueueServer(endpoint)
+        self._server = MultiprocessGrpcServer(endpoint)
         self._server.add_handler(
             RPC.UnregisterKvCache,
             get_payload_classes(RPC.UnregisterKvCache),
@@ -618,8 +621,8 @@ class _UnregisterRouter:
 
 
 class TestUnregisterKVCache:
-    def _make_client(self, endpoint: str) -> MessageQueueClient:
-        return MessageQueueClient(endpoint)
+    def _make_client(self, endpoint: str) -> MultiprocessGrpcClient:
+        return MultiprocessGrpcClient(endpoint)
 
     def test_handle_mode_sends_unregister_kv_cache(
         self,
@@ -675,7 +678,7 @@ class _RegisterEngineDrivenRouter:
 
     def __init__(self, endpoint: str) -> None:
         self.last_payload: RegisterEngineDrivenContextPayload | None = None
-        self._server = MessageQueueServer(endpoint)
+        self._server = MultiprocessGrpcServer(endpoint)
         request_type = RPC.RegisterKvCacheEngineDrivenContext
         self._server.add_handler(
             request_type,
@@ -707,8 +710,8 @@ class TestRegisterKVCacheMLA:
     shape and every STORE / RETRIEVE afterwards would corrupt data.
     """
 
-    def _make_client(self, endpoint: str) -> MessageQueueClient:
-        return MessageQueueClient(endpoint)
+    def _make_client(self, endpoint: str) -> MultiprocessGrpcClient:
+        return MultiprocessGrpcClient(endpoint)
 
     def _register(self, endpoint: str, kv_size):
         # First Party

@@ -4,7 +4,7 @@
 Implements ``LMCacheMPKvConnectorScheduler`` and
 ``LMCacheMPKvConnectorWorker`` — the two classes TRT-LLM's
 ``kv_connector_config`` requires — backed by a standalone LMCache server
-reached over ZMQ. Provides process isolation and shared caching across
+reached over gRPC. Provides process isolation and shared caching across
 multiple TRT-LLM instances on the same node.
 
 The KV pool tensor is shared with the server via :class:`RawCudaIPCWrapper`
@@ -28,7 +28,6 @@ from tensorrt_llm._torch.pyexecutor.connectors.kv_cache_connector import (
 from tensorrt_llm.bindings.internal.batch_manager import LlmRequest
 from tensorrt_llm.llmapi.llm_args import TorchLlmArgs
 import torch
-import zmq
 
 # First Party
 from lmcache import torch_dev
@@ -37,7 +36,7 @@ from lmcache.utils import EngineType, check_interprocess_event_support
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
 )
-from lmcache.v1.multiprocess.mq import MessageQueueClient, MessagingFuture
+from lmcache.v1.multiprocess.mq import MessagingFuture, MultiprocessGrpcClient
 from lmcache.v1.multiprocess.protocol import RPC, RpcMethod, get_response_class
 from lmcache.v1.platform.cuda.ipc_wrapper import RawCudaIPCWrapper
 
@@ -56,7 +55,7 @@ def _get_server_url(llm_args: "TorchLlmArgs") -> str:
 
 
 def _send_request(
-    mq_client: MessageQueueClient,
+    mq_client: MultiprocessGrpcClient,
     request_type: RpcMethod,
     payloads: list,
 ) -> MessagingFuture:
@@ -86,10 +85,7 @@ class LMCacheMPKvConnectorScheduler(KvCacheConnectorScheduler):
         # request_id -> (all_tokens, num_matched).
         self._pending: dict = {}
 
-        self._zmq_context = zmq.Context()
-        self._mq_client = MessageQueueClient(
-            _get_server_url(self._llm_args), self._zmq_context
-        )
+        self._mq_client = MultiprocessGrpcClient(_get_server_url(self._llm_args))
         self._mq_timeout = float(
             os.environ.get("LMCACHE_MQ_TIMEOUT", DEFAULT_MQ_TIMEOUT)
         )
@@ -280,10 +276,7 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
         super().__init__(llm_args)
         self._block_size: int = self._llm_args.kv_cache_config.tokens_per_block
 
-        self._zmq_context = zmq.Context()
-        self._mq_client = MessageQueueClient(
-            _get_server_url(self._llm_args), self._zmq_context
-        )
+        self._mq_client = MultiprocessGrpcClient(_get_server_url(self._llm_args))
         self._mq_timeout = float(
             os.environ.get("LMCACHE_MQ_TIMEOUT", DEFAULT_MQ_TIMEOUT)
         )

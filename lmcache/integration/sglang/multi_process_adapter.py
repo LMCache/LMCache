@@ -11,7 +11,6 @@ import threading
 # Third Party
 import torch
 import torch.distributed as dist
-import zmq
 
 # First Party
 from lmcache import torch_dev
@@ -34,7 +33,7 @@ from lmcache.v1.multiprocess.custom_types import (
     KVCache,
 )
 from lmcache.v1.multiprocess.futures import MessagingFuture
-from lmcache.v1.multiprocess.mq import MessageQueueClient
+from lmcache.v1.multiprocess.mq import MultiprocessGrpcClient
 from lmcache.v1.multiprocess.protocol import RPC
 from lmcache.v1.platform import get_device_spec
 from lmcache.v1.platform.kv_wrap import wrap_one_kv_cache
@@ -151,7 +150,7 @@ class _PendingLookup:
 class LMCacheMPConnector:
     """SGLang LMCache multi-process connector.
 
-    Talks to a standalone LMCache daemon over ZMQ.
+    Talks to a standalone LMCache daemon over gRPC.
 
     - ``lookup_kv``: fires LOOKUP. Daemon prefetches missing
       chunks L2→L1 (DRAM), keeps the read locks held, returns the
@@ -199,8 +198,7 @@ class LMCacheMPConnector:
         self._pending_lookups: dict[str, _PendingLookup] = {}
         self._pending_lookups_lock = threading.Lock()
 
-        self.context = zmq.Context.instance()
-        self.mq_client = MessageQueueClient(f"tcp://{host}:{port}", self.context)
+        self.mq_client = MultiprocessGrpcClient(f"grpc://{host}:{port}")
 
         self._lmcache_chunk_size = get_lmcache_chunk_size(self.mq_client)
         if self._lmcache_chunk_size % self.page_size != 0:

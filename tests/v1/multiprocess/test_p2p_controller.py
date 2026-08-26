@@ -17,7 +17,11 @@ from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey, TrimPolicy
 from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import P2PL2AdapterConfig
 from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.multiprocess.config import CoordinatorConfig, P2PConfig
-from lmcache.v1.multiprocess.mq import msgspec_decode, msgspec_encode
+from lmcache.v1.multiprocess.mq import (
+    MultiprocessGrpcServer,
+    msgspec_decode,
+    msgspec_encode,
+)
 from lmcache.v1.multiprocess.protocol import (
     RPC,
     RpcMethod,
@@ -317,15 +321,19 @@ def test_report_status_counts_active_jobs():
     assert status["p2p_state"] == _P2PState.UNREGISTERED.value
 
 
-def test_get_handlers_covers_all_p2p_request_types():
-    """get_handlers wires exactly the three P2P request types."""
+def test_mount_services_covers_all_p2p_request_types():
+    """mount_services wires exactly the three P2P request types."""
     controller, _ = _make_controller()
-    request_types = {spec.request_type for spec in controller.get_handlers()}
-    assert request_types == {
+    server = MultiprocessGrpcServer("grpc://127.0.0.1:1")
+
+    server.mount_services([controller], max_cpu_workers=1, max_gpu_workers=1)
+
+    assert set(server.handlers) == {
         RPC.P2PLookupAndLock,
         RPC.P2PQueryLookupResults,
         RPC.P2PUnlockObjects,
     }
+    server.close()
 
 
 # ============================================================================
@@ -357,7 +365,7 @@ def test_reconcile_adds_new_peer():
     ctx.storage_manager.add_l2_adapter.assert_called_once()
     config = ctx.storage_manager.add_l2_adapter.call_args.args[0]
     assert isinstance(config, P2PL2AdapterConfig)
-    assert config.peer_mq_server_url == "tcp://10.0.0.2:5555"
+    assert config.peer_mq_server_url == "grpc://10.0.0.2:5555"
     assert config.peer_transfer_channel_server_url == "tc-host:9"
     assert controller.report_status()["p2p_peers"] == ["peerA"]
 

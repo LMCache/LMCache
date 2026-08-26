@@ -151,7 +151,9 @@ def fake_adapter(monkeypatch):
     # Stub the MQ boundary so __init__'s chunk-size query and any later
     # send_lmcache_request call don't touch a real socket.
     fake_client = MagicMock(name="mq_client")
-    monkeypatch.setattr(adapter_mod, "MessageQueueClient", lambda *a, **kw: fake_client)
+    monkeypatch.setattr(
+        adapter_mod, "MultiprocessGrpcClient", lambda *a, **kw: fake_client
+    )
     monkeypatch.setattr(adapter_mod, "get_lmcache_chunk_size", lambda *a, **kw: 256)
     monkeypatch.setattr(adapter_mod, "get_experimental", lambda *a, **kw: set())
 
@@ -651,7 +653,9 @@ def test_register_uses_local_context_when_self_transfer_ctx_nulled(
             pass
 
     fake_client = MagicMock(name="mq_client")
-    monkeypatch.setattr(adapter_mod, "MessageQueueClient", lambda *a, **kw: fake_client)
+    monkeypatch.setattr(
+        adapter_mod, "MultiprocessGrpcClient", lambda *a, **kw: fake_client
+    )
     monkeypatch.setattr(adapter_mod, "get_lmcache_chunk_size", lambda *a, **kw: 256)
     monkeypatch.setattr(adapter_mod, "get_experimental", lambda *a, **kw: set())
     future = MagicMock(name="future")

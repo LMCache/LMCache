@@ -27,7 +27,7 @@ Key Types:
 class IPCCacheServerKey:
     """Cache key for the IPC (multiprocess) protocol.
 
-    This key type is sent by the client over ZMQ (serialized via msgspec).
+    This key type is carried in typed gRPC requests.
 
     The client sends token_ids, start, end, and request_id (all required).
     The server computes chunk hashes via TokenHasher and converts to

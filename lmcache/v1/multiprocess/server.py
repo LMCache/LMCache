@@ -42,7 +42,7 @@ from lmcache.v1.multiprocess.config import (
     parse_args_to_mp_server_config,
 )
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
-from lmcache.v1.multiprocess.mq import MessageQueueServer
+from lmcache.v1.multiprocess.mq import MultiprocessGrpcServer
 from lmcache.v1.multiprocess.service import (
     InstanceLivenessTarget,
     MPService,
@@ -318,8 +318,8 @@ def run_cache_server(
     return_engine: bool = False,
     start_prometheus_http_server: bool = True,
     coordinator_config: CoordinatorConfig = DEFAULT_COORDINATOR_CONFIG,
-) -> tuple[MessageQueueServer, MPCacheServer] | None:
-    """Run the LMCache cache server with a gRPC message queue.
+) -> tuple[MultiprocessGrpcServer, MPCacheServer] | None:
+    """Run the LMCache cache server with typed gRPC services.
 
     Args:
         mp_config: Configuration for the gRPC multiprocess server.
@@ -335,7 +335,7 @@ def run_cache_server(
             ``/metrics`` to avoid port conflicts or redundant servers.
 
     Returns:
-        If return_engine is True: tuple of (MessageQueueServer, MPCacheServer).
+        If return_engine is True: tuple of (MultiprocessGrpcServer, MPCacheServer).
         If return_engine is False: None (blocks until interrupted).
     """
     # mp_config.instance_id is this server's single source of identity (set via
@@ -402,11 +402,11 @@ def run_cache_server(
 
     # gRPC is now the only supported mp-mode transport; ``host`` may
     # optionally carry the ``grpc://`` scheme for readability but is not
-    # required (``mq.MessageQueueServer`` also accepts a bare host:port).
+    # required (``MultiprocessGrpcServer`` also accepts a bare host:port).
     host = mp_config.host
     bind_prefix = host if "://" in host else "grpc://" + host
     bind_url = bind_prefix + ":" + str(mp_config.port)
-    server = MessageQueueServer(bind_url=bind_url)
+    server = MultiprocessGrpcServer(bind_url=bind_url)
     server.mount_services(
         services,
         max_cpu_workers=mp_config.max_cpu_workers,

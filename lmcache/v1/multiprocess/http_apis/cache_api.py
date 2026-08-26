@@ -184,7 +184,7 @@ async def clear_cache(
         )
     # TODO(cache-control): ``body.force`` is accepted for API forward-compat but
     # not honored -- the engine's CLEAR path always force-clears. Wiring it
-    # through would require extending the ZMQ ``RPC.Clear`` payload
+    # through would require extending the typed ``RPC.Clear`` payload
     # (which currently carries no fields) so the cross-process op can pass force.
     get_context(request).engine.clear()
     logger.info("Cache cleared via HTTP API")

@@ -21,8 +21,8 @@ from lmcache.v1.multiprocess.custom_types import (
 )
 from lmcache.v1.multiprocess.mq import (
     BlockingRequestHandler,
-    MessageQueueClient,
-    MessageQueueServer,
+    MultiprocessGrpcClient,
+    MultiprocessGrpcServer,
     _parse_grpc_compression,
     _parse_grpc_url,
 )
@@ -37,7 +37,7 @@ from lmcache.v1.multiprocess.protocol import (
 from tests.v1.multiprocess import test_mq_handler_helpers
 
 # ==============================================================================
-# MessageQueueServer and MessageQueueClient Tests Infrastructure
+# MultiprocessGrpcServer and MultiprocessGrpcClient Tests Infrastructure
 # ==============================================================================
 
 
@@ -112,7 +112,7 @@ def _server_process(
     request_handlers: dict[RpcMethod, Callable],
 ):
     """
-    Server process that runs the MessageQueueServer.
+    Server process that runs the MultiprocessGrpcServer.
 
     Args:
         server_url: URL to bind the server to
@@ -124,7 +124,7 @@ def _server_process(
     from lmcache.v1.multiprocess.protocol import HandlerType
 
     context = zmq.Context.instance()
-    server = MessageQueueServer(server_url, context)
+    server = MultiprocessGrpcServer(server_url, context)
 
     # Register all handlers
     blocking_types: list[RpcMethod] = []
@@ -184,7 +184,7 @@ def _run_client_test(
     time.sleep(0.1)
 
     context = zmq.Context.instance()
-    client = MessageQueueClient(server_url, context)
+    client = MultiprocessGrpcClient(server_url, context)
     successful = True
 
     try:
@@ -218,7 +218,7 @@ def _run_client_test(
 
 class MessageQueueTestHelper:
     """
-    Helper class to facilitate testing MessageQueueServer and MessageQueueClient.
+    Helper class to facilitate testing the multiprocess gRPC client/server.
 
     Supports testing with single or multiple concurrent clients, where each client
     can send multiple requests to the server.
@@ -662,7 +662,7 @@ def test_add_normal_thread_pool():
     Test that add_normal_thread_pool assigns handler executors.
     """
     context = zmq.Context.instance()
-    server = MessageQueueServer("grpc://127.0.0.1:15700", context)
+    server = MultiprocessGrpcServer("grpc://127.0.0.1:15700", context)
 
     server.add_handler(RPC.Lookup, test_mq_handler_helpers.lookup_handler)
     server.add_handler(RPC.Noop, test_mq_handler_helpers.noop_handler)
@@ -687,7 +687,7 @@ def test_add_affinity_thread_pool():
     from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
 
     context = zmq.Context.instance()
-    server = MessageQueueServer("grpc://127.0.0.1:15700", context)
+    server = MultiprocessGrpcServer("grpc://127.0.0.1:15700", context)
 
     server.add_handler(RPC.Store, test_mq_handler_helpers.store_handler)
     server.add_handler(RPC.Retrieve, test_mq_handler_helpers.retrieve_handler)
@@ -712,7 +712,7 @@ def test_normal_pool_error_on_sync_handler():
     Test that add_normal_thread_pool raises TypeError for SYNC handlers.
     """
     context = zmq.Context.instance()
-    server = MessageQueueServer("grpc://127.0.0.1:15701", context)
+    server = MultiprocessGrpcServer("grpc://127.0.0.1:15701", context)
 
     server.add_handler(RPC.Noop, test_mq_handler_helpers.noop_handler)
 
@@ -727,7 +727,7 @@ def test_affinity_pool_error_on_sync_handler():
     Test that add_affinity_thread_pool raises TypeError for SYNC handlers.
     """
     context = zmq.Context.instance()
-    server = MessageQueueServer("grpc://127.0.0.1:15701", context)
+    server = MultiprocessGrpcServer("grpc://127.0.0.1:15701", context)
 
     server.add_handler(RPC.Noop, test_mq_handler_helpers.noop_handler)
 
@@ -742,7 +742,7 @@ def test_pool_error_on_unregistered():
     Test that pool methods raise ValueError for unregistered request types.
     """
     context = zmq.Context.instance()
-    server = MessageQueueServer("grpc://127.0.0.1:15702", context)
+    server = MultiprocessGrpcServer("grpc://127.0.0.1:15702", context)
 
     with pytest.raises(ValueError, match="No handler registered"):
         server.add_normal_thread_pool([RPC.Store], max_workers=1)
@@ -761,7 +761,7 @@ def test_multiple_pools():
     from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
 
     context = zmq.Context.instance()
-    server = MessageQueueServer("grpc://127.0.0.1:15703", context)
+    server = MultiprocessGrpcServer("grpc://127.0.0.1:15703", context)
 
     server.add_handler(RPC.Store, test_mq_handler_helpers.store_handler)
     server.add_handler(RPC.Retrieve, test_mq_handler_helpers.retrieve_handler)
@@ -794,7 +794,7 @@ def test_start_fails_without_pool_assignment():
     has no executor assigned.
     """
     context = zmq.Context.instance()
-    server = MessageQueueServer("grpc://127.0.0.1:15704", context)
+    server = MultiprocessGrpcServer("grpc://127.0.0.1:15704", context)
 
     server.add_handler(RPC.Store, test_mq_handler_helpers.store_handler)
     # Don't assign any pool

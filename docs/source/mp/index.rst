@@ -2,7 +2,7 @@ Overview
 ========
 
 LMCache multiprocess (MP) mode runs LMCache as a **standalone service** that
-vLLM instances connect to over ZMQ.  One LMCache server per node can serve
+vLLM instances connect to over typed gRPC.  One LMCache server per node can serve
 multiple vLLM pods, providing process isolation, shared caching, and
 independent resource scaling.
 
@@ -46,9 +46,9 @@ LMCache ships two server entry points:
    * - Entry Point
      - Description
    * - ``lmcache server``
-     - **Recommended.** ZMQ + FastAPI HTTP frontend — see :doc:`http_api`.
+     - **Recommended.** gRPC + FastAPI HTTP frontend — see :doc:`http_api`.
    * - ``python3 -m lmcache.v1.multiprocess.server``
-     - (Legacy) ZMQ-only server with no HTTP endpoints; same
+     - gRPC-only server with no HTTP endpoints; same
        ``--engine-type`` / ``--supported-transfer-mode`` flags as
        ``lmcache server``. Prefer ``lmcache server``.
 
@@ -62,11 +62,11 @@ High-Level Architecture
 
     vLLM Instance(s)
          |
-         | ZMQ (tcp)
+         | typed gRPC
          v
-    MessageQueueServer (mq.py)
+    MultiprocessGrpcServer (mq.py)
          |
-         | dispatch by RequestType
+         | protobuf service/method dispatch
          v
     MPCacheServer (server.py)
          |
@@ -106,8 +106,8 @@ and/or ``EngineDrivenTransferModule`` depending on
 ``auto`` loads both — plus a CacheBlend service when
 ``--engine-type`` is set: ``blend`` appends ``BlendV3Module`` (the
 current paged-aware implementation), and ``blend_legacy`` appends
-``BlendModule`` (the original)). Starts a ``MessageQueueServer``,
-mounts handlers exposed by the loaded services, and blocks in a
+``BlendModule`` (the original)). Starts a ``MultiprocessGrpcServer``,
+mounts generated gRPC methods exposed by the loaded services, and blocks in a
 keep-alive loop. The concrete gRPC service boundary is defined in
 ``transport/grpc_impl/proto/lmcache_mq.proto``.
 
@@ -137,22 +137,25 @@ inside a FastAPI application.  Endpoints are contributed by modules under
 ``http_apis/`` and auto-registered via ``HTTPAPIRegistry``: ``GET /`` (basic
 liveness), ``GET /healthcheck`` for Kubernetes probes, ``POST /cache/clear``
 for clearing all KV cache data in L1 (CPU) memory, and ``GET /status``
-for inspecting detailed internal state.  The ZMQ server runs as part of the
+for inspecting detailed internal state.  The gRPC server runs as part of the
 same process, and any configured runtime plugins are spawned by
 ``MPRuntimePluginLauncher`` during FastAPI startup.
 
-ZMQ Protocol
-------------
+gRPC Protocol
+-------------
 
-Communication between vLLM and LMCache uses ZMQ (DEALER/ROUTER pattern).
+Communication between vLLM and LMCache uses typed unary gRPC methods defined in
+``transport/grpc_impl/proto/lmcache_mq.proto``. Python-side protocol metadata
+in ``protocols/*.py`` declares handler type, payload conversion, and dispatch
+affinity for each generated method.
 
-**RequestType enum** (defined in ``protocols/base.py``):
+**RPC methods**:
 
 .. list-table::
    :header-rows: 1
    :widths: 35 20 45
 
-   * - Request Type
+   * - RPC Method
      - Handler Type
      - Description
    * - ``REGISTER_KV_CACHE``
@@ -311,7 +314,7 @@ Communication between vLLM and LMCache uses ZMQ (DEALER/ROUTER pattern).
 
 **Handler types:**
 
-- **SYNC** -- Runs directly in the ZMQ main loop (fast, non-blocking).
+- **SYNC** -- Runs directly in the gRPC worker thread (fast, non-blocking).
 - **BLOCKING** -- Dispatched to a thread pool (may involve GPU copies or I/O).
 
 Config System
@@ -565,10 +568,10 @@ Adding an observability subscriber
    concern (metrics / logging / tracing), gated on the corresponding
    CLI flag if needed.
 
-Adding a new request type
-~~~~~~~~~~~~~~~~~~~~~~~~~~
+Adding a new gRPC method
+~~~~~~~~~~~~~~~~~~~~~~~~
 
-1. Add the request name to the appropriate ``protocols/*.py`` file
+1. Add the method metadata to the appropriate ``protocols/*.py`` file
    (``engine``, ``controller``, ``observability``, ``debug``, ``blend``,
    ``blend_v2``, ``blend_v3``, or ``p2p``) and create its
    ``ProtocolDefinition``.
@@ -576,10 +579,13 @@ Adding a new request type
    ``transport/grpc_impl/proto/lmcache_mq.proto``.
 3. Implement the handler method on the appropriate ``MPService``
    (e.g. ``LookupModule``, ``LMCacheDrivenTransferModule``, ``BlendV3Module``)
-   and expose it as a ``RpcHandlerSpec`` from that service's ``get_handlers()``.
+   using the lower-case request name
+   (``QUERY_PREFETCH_STATUS`` -> ``query_prefetch_status``). If the Python
+   method name is intentionally different, add a short ``GRPC_METHOD_ALIASES``
+   entry on that service class.
 4. ``run_cache_server()`` passes loaded services to
-   ``MessageQueueServer.mount_services()``; the transport attaches the
-   generated gRPC service servicers when it starts.
+   ``MultiprocessGrpcServer.mount_services()``; the transport reads each service's
+   ``GRPC_SERVICE_NAMES`` and binds generated gRPC methods from the descriptor.
 
 Key Source Files
 ----------------
@@ -597,8 +603,7 @@ Key Source Files
    * - ``lmcache/v1/multiprocess/engine_context.py``
      - MPCacheServerContext (shared state passed to every ``MPService``)
    * - ``lmcache/v1/multiprocess/service.py``
-     - ``MPService`` protocol, ``RpcHandlerSpec``, ``RpcExecutionPool``
-       (per-service handler metadata)
+     - ``MPService`` protocol and gRPC service declaration contract
    * - ``lmcache/v1/multiprocess/services/``
      - Server service implementations: ``lookup.py`` (``LookupModule``),
        ``management.py`` (``ManagementModule``), ``lmcache_driven_transfer.py``
@@ -619,7 +624,7 @@ Key Source Files
      - ``MPRuntimePluginLauncher`` that spawns runtime plugins with the
        full server config serialized into environment variables
    * - ``lmcache/v1/multiprocess/protocols/base.py``
-     - RequestType, HandlerType, ProtocolDefinition
+     - RPC method metadata, HandlerType, ProtocolDefinition
    * - ``lmcache/v1/distributed/storage_manager.py``
      - StorageManager (top-level manager)
    * - ``lmcache/v1/distributed/config.py``

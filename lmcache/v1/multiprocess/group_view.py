@@ -30,7 +30,7 @@ class EngineGroupInfo(msgspec.Struct, frozen=True):
     ``EngineGroupInfo`` instances may share the same ``engine_group_id`` when
     one engine group is split by physical transfer identity (e.g. differing
     hidden dims). A ``list[EngineGroupInfo]`` is carried verbatim in the
-    ``REGISTER_KV_CACHE`` IPC payload; the message queue handles
+    ``REGISTER_KV_CACHE`` payload; the typed gRPC layer handles
     encoding/decoding.
     """
 

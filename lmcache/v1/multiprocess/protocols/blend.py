@@ -52,6 +52,7 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
             payload_classes=[IPCCacheServerKey, int, int, bytes],
             response_class=tuple[bytes, bool],
             handler_type=HandlerType.BLOCKING,
+            requires_client_affinity=True,
         ),
         # Retrieve pre-computed chunks
         # Payload:
@@ -69,6 +70,7 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
             payload_classes=[IPCCacheServerKey, list[tuple[int, int]], int, int, bytes],
             response_class=tuple[bytes, bool],
             handler_type=HandlerType.BLOCKING,
+            requires_client_affinity=True,
         ),
         # Store final chunks after processing
         # Payload:
@@ -84,6 +86,7 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
             payload_classes=[IPCCacheServerKey, int, int, bytes],
             response_class=tuple[bytes, bool],
             handler_type=HandlerType.BLOCKING,
+            requires_client_affinity=True,
         ),
         # Register CB KV Cache
         # Payload:

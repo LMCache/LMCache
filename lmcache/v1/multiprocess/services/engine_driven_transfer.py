@@ -21,17 +21,12 @@ from lmcache.v1.multiprocess.custom_types import (
     RegisterEngineDrivenContextPayload,
 )
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext, ShmPoolInfo
-from lmcache.v1.multiprocess.protocol import RPC
 from lmcache.v1.multiprocess.protocols.engine import (
     PrepareRetrieveResponse,
     PrepareStoreResponse,
     RegisterEngineDrivenContextResponse,
 )
-from lmcache.v1.multiprocess.service import (
-    InstanceLivenessTarget,
-    RpcExecutionPool,
-    RpcHandlerSpec,
-)
+from lmcache.v1.multiprocess.service import InstanceLivenessTarget
 from lmcache.v1.multiprocess.transfer_context.base import EngineDrivenContextMetadata
 
 # Local
@@ -75,6 +70,12 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         ctx: The shared engine context.
     """
 
+    GRPC_SERVICE_NAMES = ("EngineService",)
+    GRPC_METHOD_ALIASES = {
+        "UnregisterKvCacheEngineDrivenContext": "unregister_kv_cache",
+    }
+    GRPC_SKIP_METHODS = frozenset({"UnregisterKvCache"})
+
     def __init__(self, ctx: MPCacheServerContext) -> None:
         self._ctx = ctx
         self._engine_driven_contexts: dict[int, EngineDrivenContextEntry] = {}
@@ -96,46 +97,6 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
     def context(self) -> MPCacheServerContext:
         """Return the shared engine context. Exposed for testing only."""
         return self._ctx
-
-    def get_handlers(self) -> list[RpcHandlerSpec]:
-        """Return handler specs for all request types this module serves.
-
-        Returns:
-            A list of RpcHandlerSpec entries mapping request types to
-            their handler callables and thread pool assignments.
-        """
-        return [
-            RpcHandlerSpec(
-                RPC.RegisterKvCacheEngineDrivenContext,
-                self.register_kv_cache_engine_driven_context,
-                RpcExecutionPool.SYNC,
-            ),
-            RpcHandlerSpec(
-                RPC.UnregisterKvCacheEngineDrivenContext,
-                self.unregister_kv_cache,
-                RpcExecutionPool.SYNC,
-            ),
-            RpcHandlerSpec(
-                RPC.PrepareStore,
-                self.prepare_store,
-                RpcExecutionPool.AFFINITY,
-            ),
-            RpcHandlerSpec(
-                RPC.CommitStore,
-                self.commit_store,
-                RpcExecutionPool.AFFINITY,
-            ),
-            RpcHandlerSpec(
-                RPC.PrepareRetrieve,
-                self.prepare_retrieve,
-                RpcExecutionPool.AFFINITY,
-            ),
-            RpcHandlerSpec(
-                RPC.CommitRetrieve,
-                self.commit_retrieve,
-                RpcExecutionPool.AFFINITY,
-            ),
-        ]
 
     def report_status(self) -> dict:
         """Return non-GPU transfer module status information.

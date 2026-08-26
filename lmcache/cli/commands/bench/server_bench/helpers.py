@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Internal helpers for ``lmcache bench server``.
 
-This module owns the heavy runtime imports (``torch`` / ``zmq`` /
+This module owns the heavy runtime imports (``torch`` / ``grpc`` /
 ``lmcache.v1.*``) and all pure / low-level helper functions used by
 the ``server`` bench target. The CLI registration and execute
 orchestration live in :mod:`lmcache.cli.commands.bench.server_bench.command`.
@@ -10,7 +10,7 @@ Splitting the module this way keeps the public command surface in line
 with the ``engine_bench`` and ``l2_adapter_bench`` siblings, while
 still quarantining the heavy imports behind a single guarded block so
 the slim ``lmcache-cli`` install can load the bench parser without
-torch / zmq.
+torch / grpc.
 """
 
 # Future
@@ -32,8 +32,8 @@ import urllib.request
 from lmcache import torch_dev, torch_device_type
 
 # ``lmcache bench server`` allocates real CUDA tensors and talks to
-# the MP server via ZMQ, both of which are absent from the thin
-# ``lmcache-cli`` distribution (no torch, no zmq, no lmcache.v1.*).
+# the MP server via gRPC, both of which are absent from the thin
+# ``lmcache-cli`` distribution (no torch, no grpc, no lmcache.v1.*).
 # Importing them unconditionally would kill the *entire* ``lmcache``
 # CLI at registry load time with an opaque ImportError. Wrap the
 # heavy imports and remember the error so ``add_arguments`` /
@@ -41,8 +41,8 @@ from lmcache import torch_dev, torch_device_type
 _IMPORT_ERROR: ImportError | None = None
 try:
     # Third Party
+    import grpc  # noqa: F401  # availability probe for the MP gRPC client
     import torch
-    import zmq  # noqa: F401  # availability probe; used by command.py
 
     # First Party
     from lmcache.utils import (
@@ -60,7 +60,7 @@ try:
     )
     from lmcache.v1.multiprocess.futures import MessagingFuture
     from lmcache.v1.multiprocess.group_view import EngineGroupInfo
-    from lmcache.v1.multiprocess.mq import MessageQueueClient
+    from lmcache.v1.multiprocess.mq import MultiprocessGrpcClient
     from lmcache.v1.multiprocess.posix_shm import shm_open_pool_as_mmap
     from lmcache.v1.multiprocess.protocol import RPC, RpcMethod
     from lmcache.v1.multiprocess.protocols.engine import (
@@ -89,7 +89,7 @@ except ImportError as _exc:
 def _require_full_install() -> None:
     """Exit with an install hint if the full LMCache runtime is missing.
 
-    ``lmcache bench server`` needs torch, zmq and ``lmcache.v1.*``
+    ``lmcache bench server`` needs torch, grpc and ``lmcache.v1.*``
     (MP client, KV layer-group parser). When those imports failed at
     module load — almost always because the user installed
     ``lmcache-cli`` instead of the full package — print the shortest
@@ -100,7 +100,7 @@ def _require_full_install() -> None:
         return
     print(
         "ERROR: `lmcache bench server` needs the full LMCache package "
-        "(torch, zmq, MP runtime), but only the `lmcache-cli` shell "
+        "(torch, grpc, MP runtime), but only the `lmcache-cli` shell "
         "appears to be installed.\n"
         "  Install the full package with `pip install lmcache` and try "
         "again.\n"
@@ -189,12 +189,12 @@ _TIMEOUT = object()
 
 
 def _call(
-    client: MessageQueueClient,
+    client: MultiprocessGrpcClient,
     request_type: RpcMethod,
     payloads: list,
     timeout_s: float = _DEFAULT_RPC_TIMEOUT_S,
 ) -> Any:
-    """Submit a request through ``MessageQueueClient`` and block.
+    """Submit a request through ``MultiprocessGrpcClient`` and block.
 
     Returns the decoded response (possibly ``None`` for void replies)
     on success, or the sentinel ``_TIMEOUT`` on RPC timeout.
@@ -422,7 +422,7 @@ def _allocate_cpu_shm_kv_cache(
 
 
 def _send_register_kv_cache(
-    client: MessageQueueClient,
+    client: MultiprocessGrpcClient,
     instance_id: int = 0,
     model_name: str = _MODEL_NAME,
     world_size: int = _WORLD_SIZE,
@@ -519,7 +519,7 @@ def _send_register_kv_cache(
 
 
 def _send_unregister_kv_cache(
-    client: MessageQueueClient,
+    client: MultiprocessGrpcClient,
     instance_id: int = 0,
     use_handle: bool = True,
 ) -> bool:
@@ -560,7 +560,7 @@ def _send_unregister_kv_cache(
 
 
 def _send_lookup(
-    client: MessageQueueClient,
+    client: MultiprocessGrpcClient,
     key: IPCCacheServerKey,
     tp_size: int = 1,
 ) -> bool:
@@ -583,7 +583,7 @@ def _send_lookup(
 
 
 def _poll_prefetch_status(
-    client: MessageQueueClient,
+    client: MultiprocessGrpcClient,
     request_id: str,
     max_polls: int = 50,
     poll_interval: float = 0.05,
@@ -821,7 +821,7 @@ def _zero_fill_client_blocks(
 
 
 def _send_store(
-    client: MessageQueueClient,
+    client: MultiprocessGrpcClient,
     key: IPCCacheServerKey,
     block_offset: int = 0,
     block_size: int = 16,
@@ -890,7 +890,7 @@ def _send_store(
 
 
 def _send_retrieve(
-    client: MessageQueueClient,
+    client: MultiprocessGrpcClient,
     key: IPCCacheServerKey,
     chunk_size: int,
     hit_chunks: int,
@@ -961,7 +961,7 @@ def _send_retrieve(
 
 
 def _send_end_session(
-    client: MessageQueueClient,
+    client: MultiprocessGrpcClient,
     request_id: str,
 ) -> None:
     """END_SESSION — clean up server-side session state."""
@@ -1067,7 +1067,7 @@ class RequestResult:
 
 
 def _process_request(
-    client: MessageQueueClient,
+    client: MultiprocessGrpcClient,
     seq_no: int,
     num_tokens: int,
     chunk_size: int,
@@ -1387,7 +1387,7 @@ def _process_request(
 # ------------------------------------------------------------------ #
 
 
-def _get_chunk_size(client: MessageQueueClient) -> int:
+def _get_chunk_size(client: MultiprocessGrpcClient) -> int:
     """Query the server's chunk size."""
     result = _call(client, RPC.GetChunkSize, [])
     if result is _TIMEOUT or result is None:

@@ -10,12 +10,7 @@ from lmcache.logging import init_logger
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.custom_types import BlockAllocationRecord
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
-from lmcache.v1.multiprocess.protocol import RPC
-from lmcache.v1.multiprocess.service import (
-    InstanceLivenessTarget,
-    RpcExecutionPool,
-    RpcHandlerSpec,
-)
+from lmcache.v1.multiprocess.service import InstanceLivenessTarget
 from lmcache.v1.periodic_thread import (
     PeriodicThread,
     ThreadLevel,
@@ -47,6 +42,16 @@ class ManagementModule:
         experimental_transfer: Types of experimental intermediate tensor
             transfer built in the server.
     """
+
+    GRPC_SERVICE_NAMES = (
+        "ControllerService",
+        "DebugService",
+        "ObservabilityService",
+    )
+    GRPC_METHOD_ALIASES = {
+        "Noop": "debug",
+        "ReportBlockAllocation": "report_block_allocations",
+    }
 
     def __init__(
         self,
@@ -81,34 +86,6 @@ class ManagementModule:
     def context(self) -> MPCacheServerContext:
         """Return the shared engine context. Exposed for testing only."""
         return self._ctx
-
-    def get_handlers(self) -> list[RpcHandlerSpec]:
-        """Return handler specs for all request types this module serves.
-
-        Returns:
-            A list of RpcHandlerSpec entries mapping request types to
-            their handler callables and thread pool assignments.
-        """
-        return [
-            RpcHandlerSpec(RPC.Clear, self.clear, RpcExecutionPool.NORMAL),
-            RpcHandlerSpec(
-                RPC.GetChunkSize,
-                self.get_chunk_size,
-                RpcExecutionPool.SYNC,
-            ),
-            RpcHandlerSpec(
-                RPC.GetExperimental,
-                self.get_experimental,
-                RpcExecutionPool.SYNC,
-            ),
-            RpcHandlerSpec(RPC.Ping, self.ping, RpcExecutionPool.NORMAL),
-            RpcHandlerSpec(RPC.Noop, self.debug, RpcExecutionPool.SYNC),
-            RpcHandlerSpec(
-                RPC.ReportBlockAllocation,
-                self.report_block_allocations,
-                RpcExecutionPool.NORMAL,
-            ),
-        ]
 
     def report_status(self) -> dict:
         """Return module-specific status information.

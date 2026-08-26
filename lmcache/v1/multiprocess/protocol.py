@@ -209,3 +209,22 @@ def get_handler_type(req_type: RpcMethod | str) -> HandlerType:
         return pd.handler_type
     else:
         raise ValueError(f"Invalid request type: {req_type}")
+
+
+def requires_client_affinity(req_type: RpcMethod | str) -> bool:
+    """Return whether a request must run on a stable per-client worker slot.
+
+    Args:
+        req_type: The request type or gRPC method to look up.
+
+    Returns:
+        True when the blocking handler requires client affinity.
+
+    Raises:
+        ValueError: If the request type is not recognized.
+    """
+    rpc_method = coerce_rpc_method(req_type)
+    if pd := _PROTOCOL_DEFINITIONS.get(rpc_method, None):
+        return pd.requires_client_affinity
+    else:
+        raise ValueError(f"Invalid request type: {req_type}")

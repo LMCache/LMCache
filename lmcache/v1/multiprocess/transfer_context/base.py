@@ -32,7 +32,7 @@ from lmcache.utils import EngineType
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.mq import MessageQueueClient
+from lmcache.v1.multiprocess.mq import MultiprocessGrpcClient
 import lmcache.lmcache_native as lmcache_native
 
 if TYPE_CHECKING:
@@ -124,20 +124,20 @@ class EngineDrivenContextMetadata:
 class EngineDrivenContext(ABC):
     """Abstract base class for CPU-side KV data transfer contexts.
 
-    All concrete implementations share a common message-queue client and
+    All concrete implementations share a common gRPC client and
     expose a uniform two-phase ``prepare/commit`` interface so that the
     worker adapter is implementation-agnostic.
 
     Args:
         metadata: Layout metadata describing the chunk format.
-        mq_client: Message-queue client used for server communication.
-        mq_timeout: Timeout in seconds for blocking MQ requests.
+        mq_client: gRPC client used for server communication.
+        mq_timeout: Timeout in seconds for blocking RPC requests.
     """
 
     def __init__(
         self,
         metadata: EngineDrivenContextMetadata,
-        mq_client: MessageQueueClient,
+        mq_client: MultiprocessGrpcClient,
         mq_timeout: float,
     ) -> None:
         self.metadata = metadata
@@ -198,7 +198,7 @@ class EngineDrivenContext(ABC):
 
 def create_engine_driven_context(
     metadata: EngineDrivenContextMetadata,
-    mq_client: MessageQueueClient,
+    mq_client: MultiprocessGrpcClient,
     mq_timeout: float,
     shm_name: str,
     pool_size: int,
@@ -214,8 +214,8 @@ def create_engine_driven_context(
 
     Args:
         metadata: Layout metadata for the non-GPU context.
-        mq_client: Message-queue client for server communication.
-        mq_timeout: Timeout in seconds for blocking MQ requests.
+        mq_client: gRPC client for server communication.
+        mq_timeout: Timeout in seconds for blocking RPC requests.
         shm_name: Shared-memory segment name. Empty values force pickle mode.
         pool_size: Shared-memory pool size in bytes. Non-positive values force
             pickle mode.

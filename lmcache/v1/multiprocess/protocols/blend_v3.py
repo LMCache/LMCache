@@ -64,6 +64,7 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
             ],
             response_class=tuple[bytes, bool],
             handler_type=HandlerType.BLOCKING,
+            requires_client_affinity=True,
         ),
         # Unified lookup: server runs prefix lookup + non-prefix fingerprint
         # match in one RPC, reconciles, and prefetches only the complement.

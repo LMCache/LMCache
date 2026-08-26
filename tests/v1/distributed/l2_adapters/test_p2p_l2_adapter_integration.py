@@ -30,8 +30,6 @@ if not torch_dev.is_available():
     )
 
 nixl = pytest.importorskip("nixl")
-# Third Party
-import zmq  # noqa: E402
 
 # First Party
 from lmcache.v1.distributed.api import (  # noqa: E402
@@ -61,8 +59,7 @@ from lmcache.v1.multiprocess.config import (  # noqa: E402
     CoordinatorConfig,
     P2PConfig,
 )
-from lmcache.v1.multiprocess.mq import MessageQueueServer  # noqa: E402
-from lmcache.v1.multiprocess.protocol import get_payload_classes  # noqa: E402
+from lmcache.v1.multiprocess.mq import MultiprocessGrpcServer  # noqa: E402
 from lmcache.v1.multiprocess.services.p2p_controller import P2PController  # noqa: E402
 
 _PAGE = 4096
@@ -153,15 +150,12 @@ def test_p2p_adapter_end_to_end():
             instance_id="peer",
         )
         peer_mq_url = f"tcp://{_next_url()}"
-        mq_server = MessageQueueServer(peer_mq_url, zmq.Context.instance())
-        specs = controller.get_handlers()
-        for spec in specs:
-            mq_server.add_blocking_handler(
-                spec.request_type,
-                get_payload_classes(spec.request_type),
-                spec.handler,
-            )
-        mq_server.add_normal_thread_pool([s.request_type for s in specs], max_workers=4)
+        mq_server = MultiprocessGrpcServer(peer_mq_url)
+        mq_server.mount_services(
+            [controller],
+            max_cpu_workers=4,
+            max_gpu_workers=1,
+        )
         mq_server.start()
 
         # --- Local side: global NIXL context over the destination buffer ---

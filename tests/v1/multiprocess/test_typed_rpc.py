@@ -35,8 +35,8 @@ from lmcache.v1.multiprocess.custom_types import (
 )
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.mq import (
-    MessageQueueClient,
-    MessageQueueServer,
+    MultiprocessGrpcClient,
+    MultiprocessGrpcServer,
     request_type_to_method_name,
 )
 from lmcache.v1.multiprocess.protocol import (
@@ -143,7 +143,7 @@ def test_concurrent_mixed_requests_roundtrip_over_unary_rpcs() -> None:
     def noop_handler() -> str:
         return "ok"
 
-    server = MessageQueueServer(server_url)
+    server = MultiprocessGrpcServer(server_url)
     server.add_handler(
         RPC.Ping,
         get_payload_classes(RPC.Ping),
@@ -158,7 +158,7 @@ def test_concurrent_mixed_requests_roundtrip_over_unary_rpcs() -> None:
     )
     server.add_normal_thread_pool([RPC.Ping], max_workers=2)
     server.start()
-    client = MessageQueueClient(server_url)
+    client = MultiprocessGrpcClient(server_url)
 
     try:
         first: MessagingFuture[bool] = client.submit_request(RPC.Ping, [0])
@@ -199,7 +199,7 @@ def test_unix_clients_keep_distinct_grpc_affinity() -> None:
             time.sleep(0.005)
             return True
 
-        server = MessageQueueServer(server_url)
+        server = MultiprocessGrpcServer(server_url)
         server.add_handler(
             RPC.Ping,
             get_payload_classes(RPC.Ping),
@@ -208,7 +208,10 @@ def test_unix_clients_keep_distinct_grpc_affinity() -> None:
         )
         server.add_affinity_thread_pool([RPC.Ping], max_workers=2)
         server.start()
-        clients = [MessageQueueClient(server_url), MessageQueueClient(server_url)]
+        clients = [
+            MultiprocessGrpcClient(server_url),
+            MultiprocessGrpcClient(server_url),
+        ]
 
         try:
             futures: list[MessagingFuture[bool]] = []
@@ -240,7 +243,7 @@ def test_unary_item_error_surfaces_as_grpc_failure() -> None:
     def failing_noop_handler() -> str:
         raise ValueError("expected unary failure")
 
-    server = MessageQueueServer(server_url)
+    server = MultiprocessGrpcServer(server_url)
     server.add_handler(
         RPC.Ping,
         get_payload_classes(RPC.Ping),
@@ -255,7 +258,7 @@ def test_unary_item_error_surfaces_as_grpc_failure() -> None:
     )
     server.add_normal_thread_pool([RPC.Ping], max_workers=2)
     server.start()
-    client = MessageQueueClient(server_url)
+    client = MultiprocessGrpcClient(server_url)
 
     try:
         first: MessagingFuture[bool] = client.submit_request(RPC.Ping, [0])
@@ -297,7 +300,7 @@ def test_client_works_with_minimal_unary_servicer() -> None:
     )
     server.add_insecure_port(target)
     server.start()
-    client = MessageQueueClient(server_url)
+    client = MultiprocessGrpcClient(server_url)
 
     try:
         first: MessagingFuture[bool] = client.submit_request(RPC.Ping, [0])
@@ -329,7 +332,7 @@ def test_ping_typed_roundtrip() -> None:
         seen_calls.append(instance_id)
         return True
 
-    server = MessageQueueServer(server_url)
+    server = MultiprocessGrpcServer(server_url)
     server.add_handler(
         RPC.Ping,
         get_payload_classes(RPC.Ping),
@@ -340,7 +343,7 @@ def test_ping_typed_roundtrip() -> None:
     server.start()
 
     try:
-        client = MessageQueueClient(server_url)
+        client = MultiprocessGrpcClient(server_url)
 
         # Case 1: real instance id.  Should reach the handler as int.
         fut: MessagingFuture[bool] = client.submit_request(RPC.Ping, [42])
@@ -381,7 +384,7 @@ def test_distinct_typed_rpcs_coexist() -> None:
     def noop_handler() -> str:
         return "ok"
 
-    server = MessageQueueServer(server_url)
+    server = MultiprocessGrpcServer(server_url)
     server.add_handler(
         RPC.Ping,
         get_payload_classes(RPC.Ping),
@@ -398,7 +401,7 @@ def test_distinct_typed_rpcs_coexist() -> None:
     server.start()
 
     try:
-        client = MessageQueueClient(server_url)
+        client = MultiprocessGrpcClient(server_url)
 
         fut_typed: MessagingFuture[bool] = client.submit_request(RPC.Ping, [7])
         fut_noop: MessagingFuture[str] = client.submit_request(RPC.Noop, [])
@@ -496,7 +499,7 @@ def test_lookup_typed_roundtrip() -> None:
         seen.append((key, tp_size))
         return None
 
-    server = MessageQueueServer(server_url)
+    server = MultiprocessGrpcServer(server_url)
     server.add_handler(
         RPC.Lookup,
         get_payload_classes(RPC.Lookup),
@@ -507,7 +510,7 @@ def test_lookup_typed_roundtrip() -> None:
     server.start()
 
     try:
-        client = MessageQueueClient(server_url)
+        client = MultiprocessGrpcClient(server_url)
         key = _sample_key(cache_salt="tenant-b")
 
         fut: MessagingFuture[None] = client.submit_request(RPC.Lookup, [key, 8])
@@ -574,7 +577,7 @@ def test_free_lookup_locks_typed_roundtrip() -> None:
         seen.append((key, tp_size))
         return None
 
-    server = MessageQueueServer(server_url)
+    server = MultiprocessGrpcServer(server_url)
     server.add_handler(
         RPC.FreeLookupLocks,
         get_payload_classes(RPC.FreeLookupLocks),
@@ -584,7 +587,7 @@ def test_free_lookup_locks_typed_roundtrip() -> None:
     server.add_normal_thread_pool([RPC.FreeLookupLocks], max_workers=1)
     server.start()
     try:
-        client = MessageQueueClient(server_url)
+        client = MultiprocessGrpcClient(server_url)
         key = _sample_key(cache_salt="wave2")
         fut: MessagingFuture[None] = client.submit_request(
             RPC.FreeLookupLocks, [key, 2]
@@ -604,7 +607,7 @@ def test_get_chunk_size_typed_roundtrip() -> None:
     def chunk_size_handler() -> int:
         return 256
 
-    server = MessageQueueServer(server_url)
+    server = MultiprocessGrpcServer(server_url)
     server.add_handler(
         RPC.GetChunkSize,
         get_payload_classes(RPC.GetChunkSize),
@@ -613,7 +616,7 @@ def test_get_chunk_size_typed_roundtrip() -> None:
     )
     server.start()
     try:
-        client = MessageQueueClient(server_url)
+        client = MultiprocessGrpcClient(server_url)
         fut: MessagingFuture[int] = client.submit_request(RPC.GetChunkSize, [])
         assert fut.result(timeout=5.0) == 256
         client.close()
@@ -631,7 +634,7 @@ def test_query_prefetch_status_typed_roundtrip() -> None:
     def status_handler(request_id: str) -> Optional[int]:
         return results[request_id]
 
-    server = MessageQueueServer(server_url)
+    server = MultiprocessGrpcServer(server_url)
     server.add_handler(
         RPC.QueryPrefetchStatus,
         get_payload_classes(RPC.QueryPrefetchStatus),
@@ -641,7 +644,7 @@ def test_query_prefetch_status_typed_roundtrip() -> None:
     server.add_normal_thread_pool([RPC.QueryPrefetchStatus], max_workers=2)
     server.start()
     try:
-        client = MessageQueueClient(server_url)
+        client = MultiprocessGrpcClient(server_url)
         fut1: MessagingFuture[Optional[int]] = client.submit_request(
             RPC.QueryPrefetchStatus, ["req-1"]
         )
@@ -789,7 +792,7 @@ def test_store_typed_grpc_roundtrip() -> None:
         seen.append((key, instance_id, gpu_block_ids, event_ipc_handle))
         return (b"handle-back", True)
 
-    server = MessageQueueServer(server_url)
+    server = MultiprocessGrpcServer(server_url)
     server.add_handler(
         RPC.Store,
         get_payload_classes(RPC.Store),
@@ -799,7 +802,7 @@ def test_store_typed_grpc_roundtrip() -> None:
     server.add_normal_thread_pool([RPC.Store], max_workers=2)
     server.start()
     try:
-        client = MessageQueueClient(server_url)
+        client = MultiprocessGrpcClient(server_url)
         key = _sample_key(cache_salt="wave3")
         fut: MessagingFuture[tuple[bytes, bool]] = client.submit_request(
             RPC.Store, [key, 42, [[1, 2], [3]], b"ev"]
@@ -1157,7 +1160,7 @@ def test_register_kv_cache_grpc_roundtrip() -> None:
         )
         return None
 
-    server = MessageQueueServer(server_url)
+    server = MultiprocessGrpcServer(server_url)
     server.add_handler(
         RPC.RegisterKvCache,
         get_payload_classes(RPC.RegisterKvCache),
@@ -1166,7 +1169,7 @@ def test_register_kv_cache_grpc_roundtrip() -> None:
     )
     server.start()
     try:
-        client = MessageQueueClient(server_url)
+        client = MultiprocessGrpcClient(server_url)
         kv = [_FakeIPCWrapper("e2e")]
         hints = {"kv_layout": "HND"}
         groups = [
@@ -1205,12 +1208,12 @@ def test_grpc_request_waits_for_server_startup() -> None:
     """Requests submitted during daemon startup must not fail fast."""
     port = _find_free_port()
     server_url = f"grpc://127.0.0.1:{port}"
-    client = MessageQueueClient(server_url)
+    client = MultiprocessGrpcClient(server_url)
     future: MessagingFuture[bool] = client.submit_request(RPC.Ping, [None])
     time.sleep(0.25)
     assert not future.query()
 
-    server = MessageQueueServer(server_url)
+    server = MultiprocessGrpcServer(server_url)
 
     def handler(instance_id: Optional[int]) -> bool:
         return instance_id is None
@@ -1242,7 +1245,7 @@ def test_grpc_request_stays_pending_when_server_stops_mid_call() -> None:
         release_handler.wait(timeout=5.0)
         return True
 
-    server = MessageQueueServer(server_url)
+    server = MultiprocessGrpcServer(server_url)
     server.add_handler(
         RPC.Ping,
         get_payload_classes(RPC.Ping),
@@ -1250,7 +1253,7 @@ def test_grpc_request_stays_pending_when_server_stops_mid_call() -> None:
         handler,
     )
     server.start()
-    client = MessageQueueClient(server_url)
+    client = MultiprocessGrpcClient(server_url)
     future: MessagingFuture[bool] = client.submit_request(RPC.Ping, [None])
     assert handler_entered.wait(timeout=5.0)
 

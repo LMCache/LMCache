@@ -16,7 +16,7 @@ from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.mq import MessageQueueClient
+from lmcache.v1.multiprocess.mq import MultiprocessGrpcClient
 from lmcache.v1.multiprocess.protocol import RPC, get_response_class
 from lmcache.v1.multiprocess.transfer_context.base import (
     EngineDrivenContext,
@@ -86,7 +86,7 @@ class EngineDrivenContextShm(EngineDrivenContext):
     def __init__(
         self,
         metadata: EngineDrivenContextMetadata,
-        mq_client: MessageQueueClient,
+        mq_client: MultiprocessGrpcClient,
         mq_timeout: float,
         shm_name: str,
         pool_size: int,

@@ -19,7 +19,7 @@ from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import RegisterEngineDrivenContextPayload
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
-from lmcache.v1.multiprocess.mq import MessageQueueClient
+from lmcache.v1.multiprocess.mq import MultiprocessGrpcClient
 from lmcache.v1.multiprocess.protocol import RPC, RpcMethod
 from lmcache.v1.multiprocess.protocols.engine import RegisterEngineDrivenContextResponse
 from lmcache.v1.multiprocess.transfer_context.base import (
@@ -171,7 +171,9 @@ class IPCEvent(Protocol):
         """Make ``stream`` wait for this event (async ordering primitive)."""
 
 
-SendRequest = Callable[[MessageQueueClient, RpcMethod, list[object]], MessagingFuture]
+SendRequest = Callable[
+    [MultiprocessGrpcClient, RpcMethod, list[object]], MessagingFuture
+]
 
 
 def _single_group_block_ids(block_ids: list[list[int]]) -> list[int]:
@@ -205,7 +207,7 @@ class TransferContext(ABC):
 
     Concrete implementations encapsulate how worker-side store/retrieve
     operations are transmitted to the multiprocess server. Device-handle paths
-    return event-aware futures backed by MQ requests, while CPU paths may perform
+    return event-aware futures backed by gRPC requests, while CPU paths may perform
     gather/scatter synchronously and return already-resolved futures.
     """
 
@@ -217,7 +219,7 @@ class TransferContext(ABC):
         model_name: str,
         world_size: int,
         blocks_in_chunk: int,
-        mq_client: MessageQueueClient,
+        mq_client: MultiprocessGrpcClient,
         mq_timeout: float,
         send_request: SendRequest,
         layout_hints: LayoutHints | None = None,
@@ -232,9 +234,9 @@ class TransferContext(ABC):
             model_name: Model name used by cache keys.
             world_size: KV world size.
             blocks_in_chunk: Number of vLLM blocks per LMCache chunk.
-            mq_client: Message queue client used to communicate with server.
+            mq_client: gRPC client used to communicate with server.
             mq_timeout: Timeout in seconds for synchronous request wait.
-            send_request: Request sender callable used to issue MQ requests.
+            send_request: Request sender callable used to issue gRPC requests.
             layout_hints: Optional inference-engine-provided layout hints.
             engine_group_infos: LMCache-owned engine KV cache group metadata.
             engine_type: Serving engine that produced the caches. Only
@@ -256,7 +258,7 @@ class TransferContext(ABC):
         model_name: str,
         world_size: int,
         blocks_in_chunk: int,
-        mq_client: MessageQueueClient,
+        mq_client: MultiprocessGrpcClient,
         mq_timeout: float,
         send_request: SendRequest,
         layout_hints: LayoutHints | None = None,
@@ -271,9 +273,9 @@ class TransferContext(ABC):
             model_name: Model name used by cache keys (model_name##query).
             world_size: KV world size.
             blocks_in_chunk: Number of Q ring blocks per LMCache chunk.
-            mq_client: Message queue client used to communicate with server.
+            mq_client: gRPC client used to communicate with server.
             mq_timeout: Timeout in seconds for synchronous request wait.
-            send_request: Request sender callable used to issue MQ requests.
+            send_request: Request sender callable used to issue gRPC requests.
             layout_hints: Optional inference-engine-provided layout hints.
             engine_group_infos: LMCache-owned engine KV cache group metadata.
 
@@ -407,7 +409,7 @@ class LMCacheDrivenTransferContext(TransferContext):
     """
 
     def __init__(self) -> None:
-        self._mq_client: MessageQueueClient | None = None
+        self._mq_client: MultiprocessGrpcClient | None = None
         self._send_request: SendRequest | None = None
         self._device: torch.device | None = None
         self._event_backend: EventIPCBackend | None = None
@@ -419,7 +421,7 @@ class LMCacheDrivenTransferContext(TransferContext):
         model_name: str,
         world_size: int,
         _blocks_in_chunk: int,
-        mq_client: MessageQueueClient,
+        mq_client: MultiprocessGrpcClient,
         mq_timeout: float,
         send_request: SendRequest,
         layout_hints: LayoutHints | None = None,
@@ -475,7 +477,7 @@ class LMCacheDrivenTransferContext(TransferContext):
         model_name: str,
         world_size: int,
         _blocks_in_chunk: int,
-        mq_client: MessageQueueClient,
+        mq_client: MultiprocessGrpcClient,
         mq_timeout: float,
         send_request: SendRequest,
         layout_hints: LayoutHints | None = None,
@@ -620,7 +622,7 @@ class LMCacheDrivenTransferContext(TransferContext):
         ).to_device_future(device=self._device)
 
     def close(self) -> None:
-        """Release the message queue and cached event-backend state."""
+        """Release the gRPC client and cached event-backend state."""
         self._mq_client = None
         self._send_request = None
         self._device = None
@@ -663,7 +665,7 @@ class EngineDrivenTransferContext(TransferContext):
         model_name: str,
         world_size: int,
         blocks_in_chunk: int,
-        mq_client: MessageQueueClient,
+        mq_client: MultiprocessGrpcClient,
         mq_timeout: float,
         send_request: SendRequest,
         layout_hints: LayoutHints | None = None,

@@ -11,7 +11,7 @@ import threading
 # First Party
 from lmcache.v1.distributed.api import AttnWindowDesc
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.mq import MessageQueueClient
+from lmcache.v1.multiprocess.mq import MultiprocessGrpcClient
 from lmcache.v1.multiprocess.protocol import (
     RPC,
     RpcMethod,
@@ -307,7 +307,7 @@ def test_adapter_free_lookup_locks_sends_request():
     adapter._server_urls = ["tcp://test:0"]
     adapter._mq_timeout = 30.0
 
-    mock_client = MagicMock(spec=MessageQueueClient)
+    mock_client = MagicMock(spec=MultiprocessGrpcClient)
     mock_future = MagicMock()
     mock_client.submit_request.return_value = mock_future
     adapter.mq_clients = {"tcp://test:0": mock_client}
@@ -361,7 +361,7 @@ def test_adapter_free_lookup_locks_key_matches_lookup():
     adapter._heartbeat_lock = threading.Lock()
     adapter._heartbeat_interval = 5.0
 
-    mock_client = MagicMock(spec=MessageQueueClient)
+    mock_client = MagicMock(spec=MultiprocessGrpcClient)
     mock_future = MagicMock()
     mock_future.result.return_value = None  # LOOKUP returns None
     mock_client.submit_request.return_value = mock_future

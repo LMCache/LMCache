@@ -26,11 +26,11 @@ msgstr "概述"
 #: ../../source/mp/index.rst:4
 msgid ""
 "LMCache multiprocess (MP) mode runs LMCache as a **standalone service** "
-"that vLLM instances connect to over ZMQ.  One LMCache server per node can"
-" serve multiple vLLM pods, providing process isolation, shared caching, "
+"that vLLM instances connect to over typed gRPC.  One LMCache server per "
+"node can serve multiple vLLM pods, providing process isolation, shared caching, "
 "and independent resource scaling."
 msgstr ""
-"LMCache MP 模式（多进程）将 LMCache 作为一个 **独立服务** 运行，vLLM 实例通过 ZMQ 连接到该服务。每个节点的 "
+"LMCache MP 模式（多进程）将 LMCache 作为一个 **独立服务** 运行，vLLM 实例通过 typed gRPC 连接到该服务。每个节点的 "
 "LMCache 服务器可以为多个 vLLM Pod 提供服务，提供进程隔离、共享缓存和独立资源扩展。"
 
 #: ../../source/mp/index.rst:14
@@ -114,8 +114,8 @@ msgid "``lmcache server``"
 msgstr "``lmcache server``"
 
 #: ../../source/mp/index.rst:49
-msgid "**Recommended.** ZMQ + FastAPI HTTP frontend — see :doc:`http_api`."
-msgstr "**推荐。** ZMQ + FastAPI HTTP 前端 — 参见 :doc:`http_api`。"
+msgid "**Recommended.** gRPC + FastAPI HTTP frontend — see :doc:`http_api`."
+msgstr "**推荐。** gRPC + FastAPI HTTP 前端 — 参见 :doc:`http_api`。"
 
 #: ../../source/mp/index.rst:50
 msgid "``python3 -m lmcache.v1.multiprocess.server``"
@@ -123,11 +123,11 @@ msgstr "``python3 -m lmcache.v1.multiprocess.server``"
 
 #: ../../source/mp/index.rst:51
 msgid ""
-"(Legacy) ZMQ-only server with no HTTP endpoints; same ``--engine-type`` /"
-" ``--supported-transfer-mode`` flags as ``lmcache server``. Prefer "
+"gRPC-only server with no HTTP endpoints; same ``--engine-type`` / "
+"``--supported-transfer-mode`` flags as ``lmcache server``. Prefer "
 "``lmcache server``."
 msgstr ""
-"（旧版）仅支持 ZMQ 的服务器，没有 HTTP 端点；与 ``lmcache server`` 相同的 ``--engine-type`` / "
+"仅支持 gRPC 的服务器，没有 HTTP 端点；与 ``lmcache server`` 相同的 ``--engine-type`` / "
 "``--supported-transfer-mode`` 标志。建议使用 ``lmcache server``\\ 。"
 
 #: ../../source/mp/index.rst:55
@@ -159,26 +159,27 @@ msgstr ""
 
 #: ../../source/mp/index.rst:99
 msgid ""
-"**``server.py``** -- The default ZMQ-only server.  Creates an "
-"``MPCacheServer``, assembles the engine modules (``LookupModule`` + "
+"**``server.py``** -- The default gRPC server.  Creates an "
+"``MPCacheServer``, assembles the server services (``LookupModule`` + "
 "``ManagementModule`` + ``LMCacheDrivenTransferModule`` and/or "
 "``EngineDrivenTransferModule`` depending on ``--supported-transfer-mode``"
-" — ``lmcache_driven`` or ``engine_driven`` loads just one, ``auto`` "
-"(default) loads both — plus a CacheBlend module when ``--engine-type`` is"
+" — ``lmcache_driven`` (default) or ``engine_driven`` loads just one, "
+"``auto`` loads both — plus a CacheBlend service when ``--engine-type`` is"
 " set: ``blend`` appends ``BlendV3Module`` (the current paged-aware "
 "implementation), and ``blend_legacy`` appends ``BlendModule`` (the "
-"original)). Starts a ``MessageQueueServer``, registers handlers for every"
-" ``RequestType`` exposed by the loaded services, and blocks in a keep-"
-"alive loop."
+"original)). Starts a ``MultiprocessGrpcServer``, mounts generated gRPC "
+"methods exposed by the loaded services, and blocks in a keep-alive loop. "
+"The concrete gRPC service boundary is defined in "
+"``transport/grpc_impl/proto/lmcache_mq.proto``."
 msgstr ""
-"**``server.py``** -- 默认的纯 ZMQ 服务器。创建 ``MPCacheServer``\\ ，组装引擎模块（\\ "
+"**``server.py``** -- 默认的 gRPC 服务器。创建 ``MPCacheServer``\\ ，组装服务器服务（\\ "
 "``LookupModule`` + ``ManagementModule`` + ``LMCacheDrivenTransferModule``"
 " 和/或 ``EngineDrivenTransferModule``\\ ，具体取决于 ``--supported-transfer-"
-"mode`` — ``lmcache_driven`` 或 ``engine_driven`` 仅加载其中一个，\\ ``auto``\\ "
-"（默认）两者均加载 — 当设置了 ``--engine-type`` 时，还会附加 CacheBlend 模块：\\ ``blend`` 附加 "
+"mode`` — ``lmcache_driven``\\ （默认）或 ``engine_driven`` 仅加载其中一个，\\ ``auto``\\ "
+"两者均加载 — 当设置了 ``--engine-type`` 时，还会附加 CacheBlend 服务：\\ ``blend`` 附加 "
 "``BlendV3Module``\\ （当前的分页感知实现），\\ ``blend_legacy`` 附加 ``BlendModule``\\ "
-"（原始实现））。启动 ``MessageQueueServer``\\ ，为已加载模块暴露的每个 ``RequestType`` "
-"注册处理程序，并在保活循环中阻塞。"
+"（原始实现））。启动 ``MultiprocessGrpcServer``\\ ，挂载已加载服务暴露的生成 gRPC 方法，并在保活循环中阻塞。"
+"具体 gRPC 服务边界定义在 ``transport/grpc_impl/proto/lmcache_mq.proto``。"
 
 #: ../../source/mp/index.rst:112
 msgid ""
@@ -229,22 +230,29 @@ msgid ""
 "``HTTPAPIRegistry``: ``GET /`` (basic liveness), ``GET /healthcheck`` for"
 " Kubernetes probes, ``POST /cache/clear`` for clearing all KV cache data "
 "in L1 (CPU) memory, and ``GET /status`` for inspecting detailed internal "
-"state.  The ZMQ server runs as part of the same process, and any "
+"state.  The gRPC server runs as part of the same process, and any "
 "configured runtime plugins are spawned by ``MPRuntimePluginLauncher`` "
 "during FastAPI startup."
-msgstr "**``http_server.py``** -- 将 ``run_cache_server()``（来自 ``server.py``）封装在 FastAPI 应用程序中。端点由 ``http_apis/`` 下的模块贡献，并通过 ``HTTPAPIRegistry`` 自动注册：``GET /``（基本存活检查）、``GET /healthcheck`` 用于 Kubernetes 探针、``POST /cache/clear`` 用于清除 L1（CPU）内存中的所有 KV Cache 数据，以及 ``GET /status`` 用于检查详细的内部状态。ZMQ 服务器作为同一进程的一部分运行，任何配置的运行时插件在 FastAPI 启动期间由 ``MPRuntimePluginLauncher`` 生成。"
+msgstr "**``http_server.py``** -- 将 ``run_cache_server()``（来自 ``server.py``）封装在 FastAPI 应用程序中。端点由 ``http_apis/`` 下的模块贡献，并通过 ``HTTPAPIRegistry`` 自动注册：``GET /``（基本存活检查）、``GET /healthcheck`` 用于 Kubernetes 探针、``POST /cache/clear`` 用于清除 L1（CPU）内存中的所有 KV Cache 数据，以及 ``GET /status`` 用于检查详细的内部状态。gRPC 服务器作为同一进程的一部分运行，任何配置的运行时插件在 FastAPI 启动期间由 ``MPRuntimePluginLauncher`` 生成。"
 
 #: ../../source/mp/index.rst:143
-msgid "ZMQ Protocol"
-msgstr "ZMQ 协议"
+msgid "gRPC Protocol"
+msgstr "gRPC 协议"
 
 #: ../../source/mp/index.rst:145
-msgid "Communication between vLLM and LMCache uses ZMQ (DEALER/ROUTER pattern)."
-msgstr "vLLM 和 LMCache 之间的通信使用 ZMQ（DEALER/ROUTER 模式）。"
+msgid ""
+"Communication between vLLM and LMCache uses typed unary gRPC methods "
+"defined in ``transport/grpc_impl/proto/lmcache_mq.proto``. Python-side "
+"protocol metadata in ``protocols/*.py`` declares handler type, payload "
+"conversion, and dispatch affinity for each generated method."
+msgstr ""
+"vLLM 和 LMCache 之间的通信使用 ``transport/grpc_impl/proto/lmcache_mq.proto`` "
+"中定义的 typed unary gRPC 方法。Python 侧 ``protocols/*.py`` 中的协议元数据为每个生成方法声明 "
+"handler type、payload 转换和 dispatch affinity。"
 
 #: ../../source/mp/index.rst:147
-msgid "**RequestType enum** (defined in ``protocols/base.py``):"
-msgstr "**RequestType 枚举**\\ （在 ``protocols/base.py`` 中定义）："
+msgid "**RPC methods**:"
+msgstr "**RPC 方法**："
 
 #: ../../source/mp/index.rst:153
 msgid "Request Type"
@@ -650,8 +658,8 @@ msgid "**Handler types:**"
 msgstr "**处理程序类型:**"
 
 #: ../../source/mp/index.rst:312
-msgid "**SYNC** -- Runs directly in the ZMQ main loop (fast, non-blocking)."
-msgstr "**SYNC** -- 直接在 ZMQ 主循环中运行（快速，非阻塞）。"
+msgid "**SYNC** -- Runs directly in the gRPC worker thread (fast, non-blocking)."
+msgstr "**SYNC** -- 直接在 gRPC worker 线程中运行（快速，非阻塞）。"
 
 #: ../../source/mp/index.rst:313
 msgid ""
@@ -1007,39 +1015,52 @@ msgstr ""
 "tracing）匹配的分支内注册订阅者，如有需要可受相应 CLI 标志控制。"
 
 #: ../../source/mp/index.rst:562
-msgid "Adding a new request type"
-msgstr "添加新的请求类型"
+msgid "Adding a new gRPC method"
+msgstr "添加新的 gRPC 方法"
 
 #: ../../source/mp/index.rst:564
-msgid "Add a new member to ``RequestType`` in ``protocols/base.py``."
-msgstr "在 ``protocols/base.py`` 中向 ``RequestType`` 添加一个新成员。"
+msgid ""
+"Add the method metadata to the appropriate ``protocols/*.py`` file "
+"(``engine``, ``controller``, ``observability``, ``debug``, ``blend``, "
+"``blend_v2``, ``blend_v3``, or ``p2p``) and create its "
+"``ProtocolDefinition``."
+msgstr ""
+"在适当的 ``protocols/*.py`` 文件（``engine``、``controller``、``observability``、"
+"``debug``、``blend``、``blend_v2``、``blend_v3`` 或 ``p2p``）中添加方法元数据，并创建对应的 "
+"``ProtocolDefinition``。"
 
 #: ../../source/mp/index.rst:565
 msgid ""
-"Create a ``ProtocolDefinition`` in the appropriate ``protocols/*.py`` "
-"file (``engine``, ``controller``, ``observability``, ``debug``, "
-"``blend``, ``blend_v2``, ``blend_v3``, or ``p2p``) and add the request "
-"name to that module's ``REQUEST_NAMES``."
-msgstr "在适当的 ``protocols/*.py`` 文件（``engine``、``controller``、``observability``、``debug``、``blend``、``blend_v2``、``blend_v3`` 或 ``p2p``）中创建一个 ``ProtocolDefinition``，并将请求名称添加到该模块的 ``REQUEST_NAMES`` 中。"
+"Add the request/response messages and method to the matching service in "
+"``transport/grpc_impl/proto/lmcache_mq.proto``."
+msgstr ""
+"在 ``transport/grpc_impl/proto/lmcache_mq.proto`` 的匹配 service 中添加 "
+"request/response message 和 method。"
 
 #: ../../source/mp/index.rst:569
 msgid ""
 "Implement the handler method on the appropriate ``MPService`` (e.g. "
-"``LookupModule``, ``LMCacheDrivenTransferModule``, ``BlendV3Module``) and"
-" expose it as a ``RpcHandlerSpec`` from that module's ``get_handlers()``."
+"``LookupModule``, ``LMCacheDrivenTransferModule``, ``BlendV3Module``) "
+"using the lower-case request name (``QUERY_PREFETCH_STATUS`` -> "
+"``query_prefetch_status``). If the Python method name is intentionally "
+"different, add a short ``GRPC_METHOD_ALIASES`` entry on that service "
+"class."
 msgstr ""
 "在适当的 ``MPService`` 上实现处理程序方法（例如 ``LookupModule``\\ 、\\ "
-"``LMCacheDrivenTransferModule``\\ 、\\ ``BlendV3Module``\\ ），并将其作为该模块的 "
-"``get_handlers()`` 中的 ``RpcHandlerSpec`` 公开。"
+"``LMCacheDrivenTransferModule``\\ 、\\ ``BlendV3Module``\\ ），使用小写 request name "
+"作为方法名（``QUERY_PREFETCH_STATUS`` -> ``query_prefetch_status``）。如果 Python 方法名有意不同，"
+"就在该 service class 上添加简短的 ``GRPC_METHOD_ALIASES`` 条目。"
 
 #: ../../source/mp/index.rst:572
 msgid ""
-"``run_cache_server()`` registers every ``RpcHandlerSpec`` returned by the "
-"loaded services via ``MessageQueueServer.mount_services()`` — no manual registration step"
-" is needed."
+"``run_cache_server()`` passes loaded services to "
+"``MultiprocessGrpcServer.mount_services()``; the transport reads each "
+"service's ``GRPC_SERVICE_NAMES`` and binds generated gRPC methods from "
+"the descriptor."
 msgstr ""
-"``run_cache_server()`` 通过 ``MessageQueueServer.mount_services()`` 注册各已加载模块返回的每一个 "
-"``RpcHandlerSpec``\\ ，无需手动注册。"
+"``run_cache_server()`` 将已加载 services 传给 "
+"``MultiprocessGrpcServer.mount_services()``；transport 读取每个 service 的 "
+"``GRPC_SERVICE_NAMES`` 并从 descriptor 绑定生成的 gRPC 方法。"
 
 #: ../../source/mp/index.rst:577
 msgid "Key Source Files"
@@ -1058,8 +1079,8 @@ msgid "``lmcache/v1/multiprocess/server.py``"
 msgstr "``lmcache/v1/multiprocess/server.py``"
 
 #: ../../source/mp/index.rst:586
-msgid "MPCacheServer + ZMQ server entry point"
-msgstr "MPCacheServer + ZMQ 服务器入口点"
+msgid "MPCacheServer + gRPC server entry point"
+msgstr "MPCacheServer + gRPC 服务器入口点"
 
 #: ../../source/mp/index.rst:587
 msgid "``lmcache/v1/multiprocess/config.py``"
@@ -1083,11 +1104,8 @@ msgstr "``lmcache/v1/multiprocess/service.py``"
 
 #: ../../source/mp/index.rst:592
 msgid ""
-"``MPService`` protocol, ``RpcHandlerSpec``, ``RpcExecutionPool`` (per-"
-"module handler registration)"
-msgstr ""
-"``MPService`` 协议， ``RpcHandlerSpec``\\ ， ``RpcExecutionPool``\\ "
-"（每个模块的处理程序注册）"
+"``MPService`` protocol and gRPC service declaration contract"
+msgstr "``MPService`` 协议和 gRPC service 声明约定"
 
 #: ../../source/mp/index.rst:594
 msgid "``lmcache/v1/multiprocess/services/``"
@@ -1152,8 +1170,8 @@ msgid "``lmcache/v1/multiprocess/protocols/base.py``"
 msgstr "``lmcache/v1/multiprocess/protocols/base.py``"
 
 #: ../../source/mp/index.rst:614
-msgid "RequestType, HandlerType, ProtocolDefinition"
-msgstr "请求类型，处理程序类型，协议定义"
+msgid "RPC method metadata, HandlerType, ProtocolDefinition"
+msgstr "RPC 方法元数据，处理程序类型，协议定义"
 
 #: ../../source/mp/index.rst:616
 msgid "StorageManager (top-level manager)"
@@ -1259,26 +1277,6 @@ msgstr "``lmcache/v1/mp_observability/trace/``"
 msgid "Trace recording (``--trace-level storage``) capture stack"
 msgstr "追踪记录 (``--trace-level storage``) 捕获堆栈"
 
-#~ msgid ""
-#~ "**Recommended.** ZMQ + FastAPI HTTP "
-#~ "frontend (adds ``/healthcheck`` for K8s "
-#~ "probes, ``/clear-cache``, ``/status`` — "
-#~ "see :doc:`http_api`). Use ``--engine-type "
-#~ "blend`` to enable BlendEngineV2 for "
-#~ "cross-request KV reuse."
-#~ msgstr ""
-#~ "**推荐。** ZMQ + FastAPI HTTP 前端（为 "
-#~ "K8s 探针添加 ``/healthcheck``、``/clear-"
-#~ "cache``、``/status`` — 参见 :doc:`http_api`）。使用 "
-#~ "``--engine-type blend`` 启用 BlendEngineV2 "
-#~ "以实现跨请求的 KV 重用。"
-
-#~ msgid ""
-#~ "(Legacy) ZMQ-only server using "
-#~ "MPCacheEngine (no HTTP endpoints). Prefer "
-#~ "``lmcache server``."
-#~ msgstr "(遗留) 仅使用 MPCacheEngine 的 ZMQ 服务器（没有 HTTP 端点）。请使用 ``lmcache server``。"
-
 #~ msgid "``python3 -m lmcache.v1.multiprocess.blend_server_v2``"
 #~ msgstr "``python3 -m lmcache.v1.multiprocess.blend_server_v2``"
 
@@ -1289,4 +1287,3 @@ msgstr "追踪记录 (``--trace-level storage``) 捕获堆栈"
 
 #~ msgid "Multiprocess Mode"
 #~ msgstr "多进程模式"
-

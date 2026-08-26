@@ -27,12 +27,7 @@ from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey, KVCache
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.native_completion import submit_callback_to_stream
-from lmcache.v1.multiprocess.protocol import RPC
-from lmcache.v1.multiprocess.service import (
-    InstanceLivenessTarget,
-    RpcExecutionPool,
-    RpcHandlerSpec,
-)
+from lmcache.v1.multiprocess.service import InstanceLivenessTarget
 from lmcache.v1.multiprocess.services.lmcache_driven_transfer import (
     ContextEntry,
     downsample_and_stage_block_ids,
@@ -54,6 +49,8 @@ class QStoreModule(InstanceLivenessTarget):
     Args:
         ctx: The shared engine context.
     """
+
+    GRPC_SERVICE_NAMES = ("EngineService",)
 
     def __init__(self, ctx: MPCacheServerContext) -> None:
         self._ctx = ctx
@@ -191,31 +188,6 @@ class QStoreModule(InstanceLivenessTarget):
             # Non-CUDA device modules (xpu / musa) do not expose ipc_collect.
             ipc_collect()
 
-    def get_handlers(self) -> list[RpcHandlerSpec]:
-        """Return handler specs for all request types this module serves.
-
-        Returns:
-            A list of RpcHandlerSpec entries mapping request types to
-            their handler callables and thread pool assignments.
-        """
-        return [
-            RpcHandlerSpec(
-                RPC.RegisterQCache,
-                self.register_q_cache,
-                RpcExecutionPool.SYNC,
-            ),
-            RpcHandlerSpec(
-                RPC.UnregisterQCache,
-                self.unregister_q_cache,
-                RpcExecutionPool.SYNC,
-            ),
-            RpcHandlerSpec(
-                RPC.StoreQ,
-                self.store_q,
-                RpcExecutionPool.AFFINITY,
-            ),
-        ]
-
     def report_status(self) -> dict:
         """Return Q transfer module status information.
 
@@ -268,14 +240,14 @@ class QStoreModule(InstanceLivenessTarget):
                 Forwarded to GPUCacheContext for format detection.
             layout_hints: See LayoutHints.  Forwarded to
                 GPUCacheContext for GPU KV format detection.
-            engine_group_infos: Engine-neutral KV cache group metadata
-                (already msgspec-decoded by the message queue).
+            engine_group_infos: Engine-neutral KV cache group metadata decoded
+                from the typed gRPC request.
         """
         now = time.monotonic()
         # NOOP-register: an already-registered instance (e.g. a recovering
         # worker re-registering on its first ping) refreshes its last-seen
         # time so a stale entry is not reaped right after recovery.
-        # REGISTER_Q_CACHE is SYNC-serialized on the MQ main loop, so it is
+        # REGISTER_Q_CACHE is SYNC-serialized by the gRPC worker, so it is
         # the sole inserter.
         with self._lock:
             existing = self._q_contexts.get(instance_id)

@@ -42,8 +42,12 @@ class ProtocolDefinition:
         payload_classes: List of expected payload types in order
         response_class: Expected response type, or None if no response
         handler_type: How the handler should be executed (SYNC/BLOCKING/NON_BLOCKING)
+        requires_client_affinity: Whether blocking calls must be routed to a
+            stable per-client worker slot. Used for GPU/IPC calls whose stream
+            ordering semantics depend on client affinity.
     """
 
     payload_classes: list[Any]
     response_class: Optional[Any]
     handler_type: HandlerType
+    requires_client_affinity: bool = False

@@ -25,7 +25,7 @@ from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
     KVCache,
 )
-from lmcache.v1.multiprocess.mq import MessageQueueClient
+from lmcache.v1.multiprocess.mq import MultiprocessGrpcClient
 from lmcache.v1.multiprocess.protocol import (
     RPC,
     get_response_class,
@@ -156,7 +156,7 @@ BLOCKS_PER_KEY = 16
 
 
 def lookup_all(
-    client: MessageQueueClient,
+    client: MultiprocessGrpcClient,
     keys: list[IPCCacheServerKey],
     timeout: float = DEFAULT_TIMEOUT,
 ) -> int:
@@ -188,7 +188,7 @@ def lookup_all(
 
 
 def store_keys(
-    client: MessageQueueClient,
+    client: MultiprocessGrpcClient,
     keys: list[IPCCacheServerKey],
     instance_id: int,
     gpu_block_ids: list[int],
@@ -210,7 +210,7 @@ def store_keys(
 
 
 def retrieve_keys(
-    client: MessageQueueClient,
+    client: MultiprocessGrpcClient,
     keys: list[IPCCacheServerKey],
     instance_id: int,
     gpu_block_ids: list[int],
@@ -298,11 +298,11 @@ def zmq_context() -> Generator[zmq.Context, None, None]:
 @pytest.fixture(scope="function")
 def client(
     server_process: mp.Process, zmq_context: zmq.Context
-) -> Generator[MessageQueueClient, None, None]:
+) -> Generator[MultiprocessGrpcClient, None, None]:
     """
     Fixture that provides a message queue client for each test function.
     """
-    client = MessageQueueClient(server_url=SERVER_URL, context=zmq_context)
+    client = MultiprocessGrpcClient(server_url=SERVER_URL, context=zmq_context)
     yield client
     # Client cleanup
     client.close()
@@ -324,7 +324,7 @@ def client_context() -> Generator[ClientContext, None, None]:
 
 @pytest.fixture(scope="function")
 def registered_instance(
-    client: MessageQueueClient, client_context: ClientContext
+    client: MultiprocessGrpcClient, client_context: ClientContext
 ) -> Generator[int, None, None]:
     """
     Fixture that registers a KV cache instance and returns the instance ID.
@@ -381,7 +381,7 @@ def test_server_running(server_process: mp.Process):
 
 
 def test_register_unregister_kv_cache(
-    client: MessageQueueClient, client_context: ClientContext
+    client: MultiprocessGrpcClient, client_context: ClientContext
 ):
     """
     Test registering and unregistering a KV cache.
@@ -417,7 +417,7 @@ def test_register_unregister_kv_cache(
 
 
 def test_store_and_lookup(
-    client: MessageQueueClient,
+    client: MultiprocessGrpcClient,
     client_context: ClientContext,
     registered_instance: int,
 ):
@@ -444,7 +444,7 @@ def test_store_and_lookup(
 
 
 def test_store_fails_closed_on_incomplete_block_ids(
-    client: MessageQueueClient,
+    client: MultiprocessGrpcClient,
     client_context: ClientContext,
     registered_instance: int,
 ):
@@ -486,7 +486,7 @@ def test_store_fails_closed_on_incomplete_block_ids(
 
 
 def test_store_retrieve_verify(
-    client: MessageQueueClient,
+    client: MultiprocessGrpcClient,
     client_context: ClientContext,
     registered_instance: int,
 ):
@@ -539,7 +539,7 @@ def test_store_retrieve_verify(
 
 
 def test_retrieve_partial_miss(
-    client: MessageQueueClient,
+    client: MultiprocessGrpcClient,
     client_context: ClientContext,
     registered_instance: int,
 ):
@@ -600,7 +600,7 @@ def test_retrieve_partial_miss(
 
 
 def test_multiple_retrieve_operations(
-    client: MessageQueueClient,
+    client: MultiprocessGrpcClient,
     client_context: ClientContext,
     registered_instance: int,
 ):
@@ -683,7 +683,7 @@ def test_multiple_retrieve_operations(
 
 
 def test_multiple_store_operations(
-    client: MessageQueueClient,
+    client: MultiprocessGrpcClient,
     client_context: ClientContext,
     registered_instance: int,
 ):
@@ -711,7 +711,7 @@ def test_multiple_store_operations(
 
 
 def test_get_chunk_size(
-    client: MessageQueueClient,
+    client: MultiprocessGrpcClient,
 ):
     """
     Test retrieving the chunk size from the server.

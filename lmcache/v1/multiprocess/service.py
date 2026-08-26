@@ -5,60 +5,26 @@
 from __future__ import annotations
 
 # Standard
-from dataclasses import dataclass
-from enum import Enum, auto
-from typing import TYPE_CHECKING, Callable, Protocol
-
-# First Party
-from lmcache.v1.multiprocess.protocol import RpcMethod
+from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
     # First Party
     from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 
 
-class RpcExecutionPool(Enum):
-    """Declares which thread pool a handler should run in."""
-
-    SYNC = auto()
-    AFFINITY = auto()
-    NORMAL = auto()
-
-
-@dataclass
-class RpcHandlerSpec:
-    """Specification for one RPC handler exposed by a server service.
-
-    Args:
-        rpc_method: The typed gRPC method this handler serves.
-        handler: The callable that processes the request.
-        pool: Which thread pool the handler runs in.
-    """
-
-    rpc_method: RpcMethod
-    handler: Callable
-    pool: RpcExecutionPool
-
-    @property
-    def request_type(self) -> RpcMethod:
-        """Backward-compatible alias while callers migrate to rpc_method."""
-        return self.rpc_method
-
-
 class MPService(Protocol):
     """Protocol for pluggable server services.
 
-    Each service owns its internal state and exposes RPC handlers that are
-    mounted by the gRPC transport.
+    Each service owns its internal state and declares which generated gRPC
+    service descriptors it implements. The transport discovers concrete
+    handler methods from those descriptors by converting gRPC method names to
+    snake_case method names, with optional class-level aliases for Python
+    method names that intentionally differ.
     """
 
     @property
     def context(self) -> MPCacheServerContext:
         """Return the shared engine context. Exposed for testing only."""
-        ...
-
-    def get_handlers(self) -> list[RpcHandlerSpec]:
-        """Return handler specs for all RPC methods this service implements."""
         ...
 
     def report_status(self) -> dict:

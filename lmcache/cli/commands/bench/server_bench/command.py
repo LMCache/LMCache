@@ -69,6 +69,9 @@ if TYPE_CHECKING:
     # Standard
     from collections.abc import Callable
 
+    # Third Party
+    import grpc
+
     # First Party
     from lmcache.cli.commands.base import BaseCommand
     from lmcache.cli.profiling import FlameProfiler
@@ -91,7 +94,7 @@ __all__ = (
 def add_server_arguments(parser: argparse.ArgumentParser) -> None:
     """Add ``lmcache bench server`` arguments to *parser*.
 
-    Requires the full LMCache install (torch, zmq, etc.).
+    Requires the full LMCache install (torch, grpc, etc.).
     Callers should check ``_IMPORT_ERROR`` before calling this.
 
     Args:
@@ -382,16 +385,13 @@ def run_server_bench(
     _require_full_install()
 
     # Heavy imports — safe now that _require_full_install passed.
-    # Third Party
-    import zmq
-
     # First Party
     from lmcache.v1.kv_layer_groups import (
         format_kvcache_shape_spec,
         parse_kvcache_shape_spec,
     )
     from lmcache.v1.multiprocess.group_view import EngineGroupInfo
-    from lmcache.v1.multiprocess.mq import MessageQueueClient
+    from lmcache.v1.multiprocess.mq import MultiprocessGrpcClient
 
     quiet = getattr(args, "quiet", False)
 
@@ -443,8 +443,7 @@ def run_server_bench(
         "Connecting to LMCache MP Server at %s (mode=%s) ..." % (url, args.mode),
     )
 
-    ctx = zmq.Context()
-    client = MessageQueueClient(url, ctx)
+    client = MultiprocessGrpcClient(url)
 
     # Tracks whether REGISTER_KV_CACHE succeeded so the ``finally`` block
     # only deregisters a context that was actually registered.
@@ -816,7 +815,7 @@ def run_server_bench(
                     "[iid %d] UNREGISTER_KV_CACHE: %s"
                     % (_instance_id, "OK" if ok else "FAIL")
                 )
-            except zmq.ZMQError as exc:
+            except (grpc.RpcError, RuntimeError, TimeoutError) as exc:
                 log(
                     "  [warning] UNREGISTER_KV_CACHE failed for "
                     "iid %d: %s" % (_instance_id, exc)
@@ -831,7 +830,6 @@ def run_server_bench(
             except (BufferError, ValueError):
                 pass
         client.close()
-        ctx.term()
         # Best-effort SHM cleanup so segments don't linger.
         for _name in shm_names if "shm_names" in locals() else []:
             try:

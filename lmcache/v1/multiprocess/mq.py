@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""LMCache mp-mode message queue, backed by gRPC.
+"""LMCache mp-mode gRPC transport.
 
 Each RPC method maps to a distinct typed unary gRPC method on one of the
 services defined in ``proto/lmcache_mq.proto``. Concurrent control-plane calls
@@ -31,12 +31,9 @@ from lmcache.v1.multiprocess.protocol import (
     get_handler_type,
     get_payload_classes,
     get_response_class,
+    requires_client_affinity,
 )
-from lmcache.v1.multiprocess.service import (
-    MPService,
-    RpcExecutionPool,
-    RpcHandlerSpec,
-)
+from lmcache.v1.multiprocess.service import MPService
 from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
     lmcache_mq_pb2 as _pb2_typed,
 )
@@ -104,6 +101,34 @@ def _ensure_grpc_runtime() -> None:
 _RPC_METHOD_NAMES = {
     rpc_method: request_type_to_method_name(rpc_method) for rpc_method in RPC_METHODS
 }
+_RPC_METHODS_BY_SERVICE: dict[str, tuple[RpcMethod, ...]] = {
+    service_name: tuple(
+        rpc_method
+        for rpc_method in RPC_METHODS
+        if rpc_method.service_name == service_name
+    )
+    for service_name in {rpc_method.service_name for rpc_method in RPC_METHODS}
+}
+
+
+def _service_handler_name(service: MPService, rpc_method: RpcMethod) -> str | None:
+    """Resolve the Python handler name for a service/rpc pair."""
+    service_type = type(service)
+    skipped: frozenset[str] = getattr(service_type, "GRPC_SKIP_METHODS", frozenset())
+    method_name = str(rpc_method)
+    if method_name in skipped or rpc_method.name in skipped:
+        return None
+    aliases: dict[str, str] = getattr(service_type, "GRPC_METHOD_ALIASES", {})
+    return aliases.get(method_name, rpc_method.name.lower())
+
+
+def _has_declared_handler(service: MPService, handler_name: str) -> bool:
+    """Return True only for methods declared by the concrete service class."""
+    try:
+        inspect.getattr_static(service, handler_name)
+    except AttributeError:
+        return False
+    return callable(getattr(service, handler_name))
 
 
 # ---------------------------------------------------------------------------
@@ -200,8 +225,8 @@ class _PendingUnaryRequest:
     future: MessagingFuture[Any]
 
 
-class MessageQueueClient:
-    """gRPC-backed client for the LMCache mp cache server.
+class MultiprocessGrpcClient:
+    """Typed gRPC client for the LMCache mp cache server.
 
     Instances are cheap; a shared ``grpc.Channel`` is created per client
     and callers can share one client across many threads (gRPC channels
@@ -513,7 +538,7 @@ _install_servicer_methods()
 
 
 # ---------------------------------------------------------------------------
-# Server: public MessageQueueServer API preserved
+# Server: typed gRPC server
 # ---------------------------------------------------------------------------
 
 
@@ -523,13 +548,13 @@ class _ServerConfig:
     max_concurrency: int = 32
 
 
-class MessageQueueServer:
-    """gRPC server that wraps ``RequestHandlerBase`` instances.
+class MultiprocessGrpcServer:
+    """gRPC server that mounts descriptor-derived service methods.
 
-    Public API accepts descriptor-derived RPC methods directly. A
-    compatibility form of ``add_handler`` that still passes explicit payload
-    classes / handler types is retained temporarily so older tests and
-    adapters can migrate incrementally.
+    The normal path is ``mount_services()``: services declare generated gRPC
+    service names, and the transport discovers the Python handler method for
+    each protobuf method from that descriptor. Direct ``add_handler`` remains
+    available for focused transport tests and external compatibility.
 
     Args:
         bind_url: Either ``grpc://host:port`` or a bare ``host:port``.
@@ -557,7 +582,7 @@ class MessageQueueServer:
         self._closed = threading.Event()
 
     # ------------------------------------------------------------------
-    # Handler registration (identical semantics to the old zmq server)
+    # Direct handler registration for transport tests and compatibility.
     # ------------------------------------------------------------------
 
     def _inspect_handler_signature(
@@ -698,25 +723,48 @@ class MessageQueueServer:
         max_cpu_workers: int,
         max_gpu_workers: int,
     ) -> None:
-        """Mount RPC handlers exposed by service objects.
+        """Mount RPC handlers implemented by service objects.
+
+        Services declare generated gRPC service names through
+        ``GRPC_SERVICE_NAMES``. For each method in those descriptors, the
+        transport binds a same-named Python method using the lower-case
+        request name (``P2P_LOOKUP_AND_LOCK`` -> ``p2p_lookup_and_lock``),
+        with optional class-level aliases for Python method names that
+        intentionally differ.
 
         Args:
             services: Service objects implementing generated gRPC operations.
             max_cpu_workers: Worker count for normal blocking handlers.
             max_gpu_workers: Worker count for affinity-routed blocking handlers.
         """
-        specs: list[RpcHandlerSpec] = []
+        mounted_types: list[RpcMethod] = []
+        mounted_seen: set[RpcMethod] = set()
         for service in services:
-            specs.extend(service.get_handlers())
-
-        for spec in specs:
-            self.add_handler(spec.rpc_method, spec.handler)
+            for service_name in getattr(type(service), "GRPC_SERVICE_NAMES", ()):
+                if service_name not in _RPC_METHODS_BY_SERVICE:
+                    raise ValueError(f"Unknown gRPC service {service_name!r}")
+                for rpc_method in _RPC_METHODS_BY_SERVICE[service_name]:
+                    handler_name = _service_handler_name(service, rpc_method)
+                    if handler_name is None or not _has_declared_handler(
+                        service, handler_name
+                    ):
+                        continue
+                    self.add_handler(rpc_method, getattr(service, handler_name))
+                    if rpc_method not in mounted_seen:
+                        mounted_types.append(rpc_method)
+                        mounted_seen.add(rpc_method)
 
         affinity_types = [
-            spec.rpc_method for spec in specs if spec.pool == RpcExecutionPool.AFFINITY
+            rpc_method
+            for rpc_method in mounted_types
+            if get_handler_type(rpc_method) is HandlerType.BLOCKING
+            and requires_client_affinity(rpc_method)
         ]
         normal_types = [
-            spec.rpc_method for spec in specs if spec.pool == RpcExecutionPool.NORMAL
+            rpc_method
+            for rpc_method in mounted_types
+            if get_handler_type(rpc_method) is HandlerType.BLOCKING
+            and not requires_client_affinity(rpc_method)
         ]
         if affinity_types:
             self.add_affinity_thread_pool(
@@ -836,7 +884,7 @@ class MessageQueueServer:
         server.add_insecure_port(target)
         server.start()
         self._server = server
-        logger.info("MessageQueueServer listening on %s (gRPC)", self._bind_url)
+        logger.info("MultiprocessGrpcServer listening on %s", self._bind_url)
 
     def close(self) -> None:
         if self._closed.is_set():
@@ -847,3 +895,9 @@ class MessageQueueServer:
             self._server = None
         for pool in self.extra_pools:
             pool.shutdown(wait=False)
+
+
+# Compatibility aliases for existing public imports. New code should use the
+# gRPC names above; these aliases intentionally carry no separate behavior.
+MessageQueueClient = MultiprocessGrpcClient
+MessageQueueServer = MultiprocessGrpcServer

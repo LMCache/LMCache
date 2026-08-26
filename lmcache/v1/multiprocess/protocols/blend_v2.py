@@ -53,5 +53,6 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
             payload_classes=[IPCCacheServerKey, list[CBMatchResult], int, int, bytes],
             response_class=tuple[bytes, bool],
             handler_type=HandlerType.BLOCKING,
+            requires_client_affinity=True,
         ),
     }

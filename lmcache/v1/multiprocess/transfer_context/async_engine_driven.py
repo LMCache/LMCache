@@ -90,9 +90,8 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
         # the window where preemption could overwrite paged KV blocks before an
         # in-flight gather has had a chance to record its CUDA event.
         self._pending_stores: set[threading.Event] = set()
-        # Serializes commit_store calls across worker threads, since the
-        # underlying ZMQ socket is not thread-safe and commit_workers defaults
-        # to >1.
+        # Serializes commit_store calls across worker threads so server-side
+        # prepare/commit state is consumed in order when commit_workers > 1.
         self._commit_lock = threading.Lock()
         self._staging_pool: dict[
             tuple[tuple[int, ...], torch.dtype], list[torch.Tensor]

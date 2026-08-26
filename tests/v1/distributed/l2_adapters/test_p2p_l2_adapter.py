@@ -57,13 +57,13 @@ def _adapter(lookup_timeout_s: float = 10.0, load_timeout_s: float = 10.0):
     notifier = MagicMock()
 
     with (
-        patch.object(p2p_mod, "MessageQueueClient", return_value=mq),
+        patch.object(p2p_mod, "MultiprocessGrpcClient", return_value=mq),
         patch.object(p2p_mod, "get_transfer_channel_context", return_value=tc_ctx),
         patch.object(p2p_mod, "PeriodicEventNotifier") as mock_pen,
     ):
         mock_pen.get.return_value = notifier
         config = P2PL2AdapterConfig(
-            peer_mq_server_url="tcp://peer:5555",
+            peer_mq_server_url="grpc://peer:5555",
             peer_transfer_channel_server_url="peer:7600",
             lookup_timeout_s=lookup_timeout_s,
             load_timeout_s=load_timeout_s,
@@ -97,13 +97,13 @@ def test_config_from_dict_roundtrip():
     config = P2PL2AdapterConfig.from_dict(
         {
             "type": "p2p",
-            "peer_mq_server_url": "tcp://peer:5555",
+            "peer_mq_server_url": "grpc://peer:5555",
             "peer_transfer_channel_server_url": "peer:7600",
             "lookup_timeout_s": 4,
             "load_timeout_s": 6,
         }
     )
-    assert config.peer_mq_server_url == "tcp://peer:5555"
+    assert config.peer_mq_server_url == "grpc://peer:5555"
     assert config.peer_transfer_channel_server_url == "peer:7600"
     assert config.lookup_timeout_s == 4.0
     assert config.load_timeout_s == 6.0
@@ -113,10 +113,10 @@ def test_config_from_dict_roundtrip():
     "bad",
     [
         {"type": "p2p", "peer_transfer_channel_server_url": "peer:7600"},
-        {"type": "p2p", "peer_mq_server_url": "tcp://peer:5555"},
+        {"type": "p2p", "peer_mq_server_url": "grpc://peer:5555"},
         {
             "type": "p2p",
-            "peer_mq_server_url": "tcp://peer:5555",
+            "peer_mq_server_url": "grpc://peer:5555",
             "peer_transfer_channel_server_url": "peer:7600",
             "lookup_timeout_s": -1,
         },
@@ -132,12 +132,12 @@ def test_factory_creates_adapter():
     from lmcache.v1.distributed.l2_adapters import create_l2_adapter
 
     with (
-        patch.object(p2p_mod, "MessageQueueClient", return_value=MagicMock()),
+        patch.object(p2p_mod, "MultiprocessGrpcClient", return_value=MagicMock()),
         patch.object(p2p_mod, "get_transfer_channel_context", return_value=MagicMock()),
         patch.object(p2p_mod, "PeriodicEventNotifier") as mock_pen,
     ):
         mock_pen.get.return_value = MagicMock()
-        config = P2PL2AdapterConfig("tcp://peer:5555", "peer:7600")
+        config = P2PL2AdapterConfig("grpc://peer:5555", "peer:7600")
         adapter = create_l2_adapter(config)
         assert isinstance(adapter, P2PL2Adapter)
         adapter.close()
@@ -396,7 +396,7 @@ def test_report_status():
     with _adapter() as (adapter, _mq, _tc_ctx, _tc, _notifier):
         status = adapter.report_status()
         assert status["is_healthy"] is True
-        assert status["peer_mq_server_url"] == "tcp://peer:5555"
+        assert status["peer_mq_server_url"] == "grpc://peer:5555"
         assert status["peer_transfer_channel_server_url"] == "peer:7600"
         assert status["in_flight_lookups"] == 0
         assert status["in_flight_loads"] == 0

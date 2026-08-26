@@ -51,12 +51,7 @@ from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
 )
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
-from lmcache.v1.multiprocess.protocol import RPC
-from lmcache.v1.multiprocess.service import (
-    InstanceLivenessTarget,
-    RpcExecutionPool,
-    RpcHandlerSpec,
-)
+from lmcache.v1.multiprocess.service import InstanceLivenessTarget
 from lmcache.v1.multiprocess.services.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
 )
@@ -674,6 +669,13 @@ class BlendV3Module(InstanceLivenessTarget):
     fingerprints; serves CB rope/lookup/retrieve RPCs; reads cross-module
     GPU state via :class:`LMCacheDrivenTransferModule.cache_contexts`."""
 
+    GRPC_SERVICE_NAMES = ("EngineService", "BlendV3Service")
+    GRPC_METHOD_ALIASES = {
+        "CbRegisterRopeV3": "cb_register_rope",
+        "CbUnregisterRopeV3": "cb_unregister_rope",
+        "CbRetrievePreComputedV3": "cb_retrieve_pre_computed",
+    }
+
     def __init__(
         self,
         ctx: MPCacheServerContext,
@@ -761,32 +763,6 @@ class BlendV3Module(InstanceLivenessTarget):
     @property
     def context(self) -> MPCacheServerContext:
         return self._ctx
-
-    def get_handlers(self) -> list[RpcHandlerSpec]:
-        # STORE shadows LMCacheDrivenTransfer's; compositor registers V3 last.
-        return [
-            RpcHandlerSpec(RPC.Store, self.store, RpcExecutionPool.AFFINITY),
-            RpcHandlerSpec(
-                RPC.CbRegisterRopeV3,
-                self.cb_register_rope,
-                RpcExecutionPool.SYNC,
-            ),
-            RpcHandlerSpec(
-                RPC.CbUnregisterRopeV3,
-                self.cb_unregister_rope,
-                RpcExecutionPool.SYNC,
-            ),
-            RpcHandlerSpec(
-                RPC.CbUnifiedLookup,
-                self.cb_unified_lookup,
-                RpcExecutionPool.NORMAL,
-            ),
-            RpcHandlerSpec(
-                RPC.CbRetrievePreComputedV3,
-                self.cb_retrieve_pre_computed,
-                RpcExecutionPool.AFFINITY,
-            ),
-        ]
 
     def report_status(self) -> dict:
         # Meta is derived live from MP server gpu_transfe
