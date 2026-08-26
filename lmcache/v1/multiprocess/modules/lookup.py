@@ -32,23 +32,6 @@ from lmcache.v1.multiprocess.token_hasher import TokenHasher
 logger = init_logger(__name__)
 
 
-def compute_extra_count(num_kv_readers: int) -> int:
-    """Extra read locks to reserve beyond the first: ``readers - 1``.
-
-    Each worker's retrieve releases one lock, so the count must be exact:
-    under-counting unpins an object mid-copy; over-counting only holds it
-    to the TTL. Clients declare it as ``IPCCacheServerKey.num_kv_readers``;
-    requests without it (pre-field clients) are rejected, not guessed.
-    """
-    if num_kv_readers < 1:
-        raise ValueError(
-            f"num_kv_readers={num_kv_readers}: this server requires clients "
-            "that send IPCCacheServerKey.num_kv_readers. Upgrade the LMCache "
-            "client."
-        )
-    return num_kv_readers - 1
-
-
 def resolve_prefetched_obj_keys(
     ctx: MPCacheServerContext,
     key: IPCCacheServerKey,
@@ -252,7 +235,7 @@ class LookupModule:
             )
             return
 
-        extra_count = compute_extra_count(key.num_kv_readers)
+        num_kv_readers = key.require_num_kv_readers()
 
         chunk_hashes = self._ctx.token_hasher.compute_chunk_hashes(list(key.token_ids))
         if not chunk_hashes:
@@ -345,7 +328,7 @@ class LookupModule:
             PrefetchRequestSpec(
                 keys=obj_keys,
                 group_layout_descs=group_layout_descs,
-                extra_count=extra_count,
+                num_kv_readers=num_kv_readers,
                 attn_desc=attn_desc,
             ),
             external_request_id=key.request_id,
@@ -538,10 +521,8 @@ class LookupModule:
         if not obj_keys:
             return
 
-        extra_count = compute_extra_count(key.num_kv_readers)
-
         self._ctx.storage_manager.finish_read_prefetched(
-            obj_keys, extra_count=extra_count
+            obj_keys, shares=key.require_num_kv_readers()
         )
 
     def end_session(self, request_id: str) -> None:

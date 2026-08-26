@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """DCP support in the MP connector: pins ``ParallelStrategy`` (shard count,
-shard index, writer election), ``compute_extra_count`` (readers per object),
+shard index, writer election), ``require_num_kv_readers`` (readers per object),
 and ``get_tokens_per_block`` (attention-only block scaling). No GPU needed."""
 
 # Standard
@@ -14,7 +14,7 @@ import pytest
 # First Party
 from lmcache.integration.vllm.kv_cache_groups import get_tokens_per_block
 from lmcache.integration.vllm.vllm_multi_process_adapter import ParallelStrategy
-from lmcache.v1.multiprocess.modules.lookup import compute_extra_count
+from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 
 # ``lmcache_mp_connector`` imports vLLM, but the k3 unit env runs without it
 # (.buildkite/k3_harness/setup-lmcache-only-env.sh) -- import lazily and skip.
@@ -124,17 +124,30 @@ def test_non_mla_unaffected_by_dcp_field():
 
 
 # --------------------------------------------------------------------------- #
-# compute_extra_count: readers sharing one stored object                       #
+# require_num_kv_readers: readers sharing one stored object                    #
 # --------------------------------------------------------------------------- #
+
+
+def _reader_key(readers: int) -> IPCCacheServerKey:
+    return IPCCacheServerKey(
+        model_name="m",
+        world_size=8,
+        num_kv_readers=readers,
+        worker_id=0,
+        token_ids=(1, 2, 3),
+        start=0,
+        end=3,
+        request_id="req",
+    )
 
 
 @pytest.mark.parametrize(
     "label,readers",
     [("non-mla", 1), ("mla-tp8", 8), ("mla-tp4-pp2", 4), ("mla-tp8-dcp2", 4)],
 )
-def test_extra_count_is_exact_when_reader_count_is_sent(label: str, readers: int):
-    """The declared reader count maps to readers - 1."""
-    assert compute_extra_count(readers) == readers - 1, label
+def test_reader_count_is_exact_when_sent(label: str, readers: int):
+    """The declared reader count is used as-is: one read lock per reader."""
+    assert _reader_key(readers).require_num_kv_readers() == readers, label
 
 
 @pytest.mark.parametrize(
@@ -172,7 +185,7 @@ def test_reader_count_round_trips_and_balances_locks():
         )
         readers = strategy.num_kv_readers
         assert readers == tp_size // dcp_size
-        assert compute_extra_count(readers) == readers - 1
+        assert _reader_key(readers).require_num_kv_readers() == readers
 
 
 # --------------------------------------------------------------------------- #

@@ -571,8 +571,8 @@ def _send_lookup(
     """LOOKUP — submit a prefix lookup.
 
     The server reserves ``key.num_kv_readers`` read locks per chunk
-    (each reader's RETRIEVE releases one; see ``compute_extra_count``
-    in ``lmcache/v1/multiprocess/modules/lookup.py``). ``tp_size`` is
+    (each reader's RETRIEVE releases one; see
+    ``IPCCacheServerKey.require_num_kv_readers``). ``tp_size`` is
     a legacy wire field the server ignores.
 
     The server-side handler returns ``None`` (void) on success, so

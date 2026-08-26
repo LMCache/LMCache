@@ -141,7 +141,7 @@ def test_server_free_lookup_locks_calls_finish_read_prefetched():
         module.free_lookup_locks(key, 1)
 
     module.context.storage_manager.finish_read_prefetched.assert_called_once_with(
-        sentinel_obj_keys, extra_count=0
+        sentinel_obj_keys, shares=1
     )
 
 
@@ -162,7 +162,7 @@ def _free_locks_key(num_tokens: int, start: int, end: int) -> IPCCacheServerKey:
 def _released_chunks(finish_read_mock: MagicMock) -> set[tuple[int, bytes]]:
     """Collect (object_group_id, chunk_hash) pairs released by the module."""
     (obj_keys,), kwargs = finish_read_mock.call_args
-    assert kwargs == {"extra_count": 0}
+    assert kwargs == {"shares": 1}
     return {(k.object_group_id, k.chunk_hash) for k in obj_keys}
 
 

@@ -59,7 +59,6 @@ from lmcache.v1.multiprocess.engine_module import (
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
 )
-from lmcache.v1.multiprocess.modules.lookup import compute_extra_count
 from lmcache.v1.multiprocess.protocol import RequestType
 from lmcache.v1.multiprocess.token_hasher import (
     TokenHasher,
@@ -1307,7 +1306,7 @@ class BlendV3Module(InstanceLivenessTarget):
 
         # Shared session: end_session reads lookup_ipc_key + the rolling hashes
         # to keep the request's KV alive in L1.
-        extra_count = compute_extra_count(key.num_kv_readers)
+        num_kv_readers = key.require_num_kv_readers()
         # PREFIX leg set: recurrent + attention (the planes a prefix restore
         # consumes), never aux. Chunk-major so count_leading_ones() stays
         # prefix-aligned with _poll_prefix_leg's divisor.
@@ -1320,7 +1319,7 @@ class BlendV3Module(InstanceLivenessTarget):
             PrefetchRequestSpec(
                 keys=obj_keys,
                 group_layout_descs=layouts,
-                extra_count=extra_count,
+                num_kv_readers=num_kv_readers,
                 policy=policy,
                 attn_desc=prefix_desc,
             ),

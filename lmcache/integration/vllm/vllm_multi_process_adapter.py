@@ -323,7 +323,8 @@ class ParallelStrategy:
 
         Non-MLA: 1. MLA: the same-shard TP ranks of one stage on one
         server, ``ceil(kv_tp_size / dcp_size)`` -- rounded up so an uneven
-        split never under-reserves (see ``compute_extra_count``).
+        split never under-reserves (the server takes one read lock per
+        declared reader).
         """
         if not self.mla_only:
             return 1

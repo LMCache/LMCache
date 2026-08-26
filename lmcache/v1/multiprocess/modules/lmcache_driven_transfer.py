@@ -752,10 +752,10 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             return
         if obj_keys:
             # One failed RETRIEVE owns one reader share per key.  In
-            # particular, do not use the scheduler's MLA extra_count here:
-            # the remaining TP workers and concurrent requests still own
-            # their independent shares.
-            self._ctx.storage_manager.finish_read_prefetched(obj_keys, extra_count=0)
+            # particular, do not release the scheduler's whole MLA
+            # reservation here: the remaining TP workers and concurrent
+            # requests still own their independent shares.
+            self._ctx.storage_manager.finish_read_prefetched(obj_keys, shares=1)
 
     def context_entries_snapshot(self) -> dict[int, ContextEntry]:
         """Return a shallow copy of the registry for iteration or status.

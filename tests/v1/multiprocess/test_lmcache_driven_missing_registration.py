@@ -47,17 +47,15 @@ class _CountingStorageManager:
         self.readers: Counter[ObjectKey] = Counter()
         self.finish_calls: list[tuple[list[ObjectKey], int]] = []
 
-    def acquire(self, keys: list[ObjectKey], extra_count: int = 0) -> None:
+    def acquire(self, keys: list[ObjectKey], shares: int = 1) -> None:
         for key in keys:
-            self.readers[key] += 1 + extra_count
+            self.readers[key] += shares
 
-    def finish_read_prefetched(
-        self, keys: list[ObjectKey], extra_count: int = 0
-    ) -> None:
-        self.finish_calls.append((list(keys), extra_count))
+    def finish_read_prefetched(self, keys: list[ObjectKey], shares: int = 1) -> None:
+        self.finish_calls.append((list(keys), shares))
         for key in keys:
-            assert self.readers[key] >= 1 + extra_count
-            self.readers[key] -= 1 + extra_count
+            assert self.readers[key] >= shares
+            self.readers[key] -= shares
 
 
 def _cache_key(
@@ -148,16 +146,16 @@ def test_tp_failed_worker_releases_only_its_reader_share_once(mla: bool) -> None
 
     hashes = hasher.compute_chunk_hashes(list(lookup_key.token_ids), end=lookup_key.end)
     all_rank_keys = ipc_key_to_object_keys(lookup_key, hashes, [0])[0]
-    lookup_extra_count = tp_size - 1 if mla else 0
+    lookup_shares = tp_size if mla else 1
     # The request under test and a concurrent reader both own lock shares.
-    storage.acquire(all_rank_keys, extra_count=lookup_extra_count)
-    storage.acquire(all_rank_keys, extra_count=lookup_extra_count)
+    storage.acquire(all_rank_keys, shares=lookup_shares)
+    storage.acquire(all_rank_keys, shares=lookup_shares)
 
     # vLLM already owns the first chunk locally, so the scheduler legitimately
     # releases that prefix for every rank.  The worker RETRIEVEs only the
     # remaining partial-prefix range.
     request_prefix_keys = ipc_key_to_object_keys(lookup_key, hashes[:1], [0])[0]
-    storage.finish_read_prefetched(request_prefix_keys, extra_count=lookup_extra_count)
+    storage.finish_read_prefetched(request_prefix_keys, shares=lookup_shares)
 
     module = LMCacheDrivenTransferModule.__new__(LMCacheDrivenTransferModule)
     module._ctx = ctx  # type: ignore[assignment]
@@ -179,8 +177,8 @@ def test_tp_failed_worker_releases_only_its_reader_share_once(mla: bool) -> None
     retrieve_hashes = hashes[1:]
     failed_keys = ipc_key_to_object_keys(failed_key, retrieve_hashes, [0])[0]
     assert storage.finish_calls == [
-        (request_prefix_keys, lookup_extra_count),
-        (failed_keys, 0),
+        (request_prefix_keys, lookup_shares),
+        (failed_keys, 1),
     ]
 
     # The peer succeeded and queued its normal device-completion release.
@@ -192,15 +190,15 @@ def test_tp_failed_worker_releases_only_its_reader_share_once(mla: bool) -> None
         end=4,
     )
     successful_keys = ipc_key_to_object_keys(successful_key, retrieve_hashes, [0])[0]
-    storage.finish_read_prefetched(successful_keys, extra_count=0)
+    storage.finish_read_prefetched(successful_keys, shares=1)
 
     # Only the concurrent lookup's reader shares remain.  Releasing those must
     # neither underflow nor encounter a lock already consumed by the failure.
-    expected_concurrent_shares = 1 + lookup_extra_count
+    expected_concurrent_shares = lookup_shares
     assert all(
         storage.readers[key] == expected_concurrent_shares for key in all_rank_keys
     )
-    storage.finish_read_prefetched(all_rank_keys, extra_count=lookup_extra_count)
+    storage.finish_read_prefetched(all_rank_keys, shares=lookup_shares)
     assert all(storage.readers[key] == 0 for key in all_rank_keys)
     layout_registry.find_attn_desc.assert_not_called()
 

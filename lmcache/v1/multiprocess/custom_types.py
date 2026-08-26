@@ -61,7 +61,7 @@ class IPCCacheServerKey:
     cache_salt: str = ""
 
     # Number of workers that retrieve this key's object; the server reserves
-    # that many read locks (see ``compute_extra_count``). 0 = not sent;
+    # that many read locks (see ``require_num_kv_readers``). 0 = not sent;
     # lookups reject it.
     num_kv_readers: int = field(default=0, compare=False)
 
@@ -108,6 +108,23 @@ class IPCCacheServerKey:
             request_id=request_id,
             cache_salt=cache_salt,
         )
+
+    def require_num_kv_readers(self) -> int:
+        """Declared reader count; rejects keys from pre-field clients.
+
+        Each reader's retrieve releases one read lock, so the count must
+        be exact: under-counting unpins an object mid-copy; over-counting
+        only holds it to the TTL. 0 means the field was never sent --
+        rejected, not guessed.
+        """
+        if self.num_kv_readers < 1:
+            raise ValueError(
+                f"num_kv_readers={self.num_kv_readers}: this server "
+                "requires clients that send "
+                "IPCCacheServerKey.num_kv_readers. Upgrade the LMCache "
+                "client."
+            )
+        return self.num_kv_readers
 
     def no_worker_id_version(self) -> "IPCCacheServerKey":
         """Create a copy with worker_id=None for lookup requests."""
