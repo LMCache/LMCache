@@ -31,8 +31,12 @@ from lmcache.v1.platform._device_detect import (
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 import lmcache.lmcache_native as lmcache_native
 
-EngineKVFormat = KVLayout
-GPUKVFormat = KVLayout
+if TYPE_CHECKING:
+    EngineKVFormat = lmcache_native.EngineKVFormat
+    GPUKVFormat = lmcache_native.GPUKVFormat
+else:
+    EngineKVFormat = KVLayout
+    GPUKVFormat = KVLayout
 TransferDirection = lmcache_native.TransferDirection
 
 if TYPE_CHECKING:
