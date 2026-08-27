@@ -42,6 +42,7 @@ from lmcache.v1.storage_backend.raw_block import (
     RawBlockKeySpec,
     RawBlockPutManyResult,
 )
+from tests.v1.storage_backend.raw_block_test_utils import is_skip_safe_io_error
 
 
 def _has_ext() -> bool:
@@ -78,7 +79,15 @@ class _FakeRawBlockDevice:
     def read_uring(self, offset, out, payload_len, total_len=None):
         self.pread_into(offset, out, payload_len, total_len)
 
-    def write_uring(self, offset, data, payload_len=None, total_len=None):
+    def write_uring(
+        self,
+        offset: int,
+        data: Any,
+        payload_len: int | None = None,
+        total_len: int | None = None,
+        placement_id: int | None = None,
+    ) -> None:
+        del placement_id
         self.pwrite_from_buffer(offset, data, payload_len, total_len)
 
     def batched_read(self, offsets, buffers, total_lens):
@@ -92,7 +101,14 @@ class _FakeRawBlockDevice:
         self._batch_results[batch_id] = results
         return batch_id
 
-    def batched_write(self, offsets, buffers, total_lens):
+    def batched_write(
+        self,
+        offsets: list[int],
+        buffers: list[Any],
+        total_lens: list[int],
+        placement_ids: list[int | None] | None = None,
+    ) -> int:
+        del placement_ids
         batch_id = self._next_batch_id
         self._next_batch_id += 1
         self.batched_writes.append((list(offsets), list(total_lens)))
@@ -470,7 +486,9 @@ def test_raw_block_core_odirect_prepare_payload_boundaries(monkeypatch):
     not _has_ext(), reason="lmcache_rust_raw_block_io extension not installed"
 )
 @pytest.mark.parametrize("io_engine", ["posix", "io_uring"])
-def test_raw_block_device_all_io_engines_roundtrip_on_tmp_file(io_engine):
+def test_raw_block_device_all_io_engines_roundtrip_on_tmp_file(
+    io_engine: str,
+):
     # Third Party
     from lmcache_rust_raw_block_io import RawBlockDevice
 
@@ -479,13 +497,18 @@ def test_raw_block_device_all_io_engines_roundtrip_on_tmp_file(io_engine):
         with open(dev_path, "wb") as f:
             f.truncate(1024 * 1024)
 
-        dev = RawBlockDevice(
-            dev_path,
-            writable=True,
-            use_odirect=False,
-            alignment=4096,
-            io_engine=io_engine,
-        )
+        try:
+            dev = RawBlockDevice(
+                dev_path,
+                writable=True,
+                use_odirect=False,
+                alignment=4096,
+                io_engine=io_engine,
+            )
+        except Exception as e:
+            if io_engine == "io_uring" and is_skip_safe_io_error(e):
+                pytest.skip(f"io_uring is unavailable on this runner: {e}")
+            raise
 
         try:
             payload = bytearray(f"raw-block-{io_engine}".encode())
