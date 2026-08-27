@@ -119,6 +119,11 @@ Source: ``lmcache/v1/multiprocess/config.py``
        L1-resident and only the dropped gap is recomputed, instead of
        truncating the prefix at the gap. No effect for other engines. See
        :doc:`/mp/l2_storage/fault_inject` for a way to exercise it.
+   * - ``--enable-dedup-content``
+     - ``False``
+     - ``--engine-type blend`` only: skip fingerprint registration for a chunk
+       whose content is already indexed, so the same text stored behind two
+       prefixes is indexed once. No effect for other engines.
    * - ``--separate-object-groups`` / ``--no-separate-object-groups``
      - ``False``
      - Split a hybrid model's kernel groups into one object group per
