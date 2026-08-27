@@ -15,17 +15,12 @@ from lmcache.v1.gpu_connector.kv_format.detectors.base import (
     EngineDetector,
     measure_list_depth_until_tensor,
 )
-from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache, LayoutHints
+from lmcache.v1.gpu_connector.kv_format.types import (
+    CANONICAL_KV_LAYOUTS,
+    DiscoverableKVCache,
+    LayoutHints,
+)
 import lmcache.lmcache_native as lmcache_native
-
-_CANONICAL_KV_LAYOUTS = {
-    "NHD": "LBNHC",
-    "HND": "LBHNC",
-    "LBNHC": "LBNHC",
-    "LBHNC": "LBHNC",
-    "BLHNC": "BLHNC",
-    "BLNHC": "BLNHC",
-}
 
 
 def resolve_vllm_kv_layout(
@@ -38,7 +33,7 @@ def resolve_vllm_kv_layout(
             guessing a layout would silently corrupt the cache.
     """
     kv_layout = layout_hints.get("kv_layout", "LBNHC")
-    canonical = _CANONICAL_KV_LAYOUTS.get(kv_layout)
+    canonical = CANONICAL_KV_LAYOUTS.get(kv_layout)
     if canonical is None:
         raise ValueError(
             f"kv_layout hint {kv_layout!r} is not a layout LMCache supports; "

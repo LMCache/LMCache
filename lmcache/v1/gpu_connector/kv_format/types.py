@@ -31,6 +31,18 @@ KVLayoutName = Literal[
     "NHD", "HND", "LBNHC", "LBHNC", "LHBNC", "BLHNC", "BLNHC", "BHLNC"
 ]
 
+# One canonical spelling per supported layout; keys are every accepted hint
+# spelling (legacy names are aliases of the layer-compact pair). Absence
+# means the layout is not supported.
+CANONICAL_KV_LAYOUTS: dict[str, str] = {
+    "NHD": "LBNHC",
+    "HND": "LBHNC",
+    "LBNHC": "LBNHC",
+    "LBHNC": "LBHNC",
+    "BLHNC": "BLHNC",
+    "BLNHC": "BLNHC",
+}
+
 
 class LayoutHints(TypedDict, total=False):
     """Hints passed from a serving engine to LMCache during KV cache
