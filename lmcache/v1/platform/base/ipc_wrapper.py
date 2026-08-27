@@ -115,14 +115,7 @@ class DeviceIPCWrapper:
         """Release process-local resources held for reconstruction.
 
         Called by cache-context teardown once the tensors returned by
-        :meth:`to_tensor` are no longer used. The default is a no-op:
-        the torch storage path releases its imported segments through
-        garbage collection plus ``torch_dev.ipc_collect()``, and
-        producer-side wrappers hold nothing to release. Wrappers that
-        open driver-level mappings (:class:`RawCudaIPCWrapper`)
-        override this -- without an explicit close, such mappings pin
-        the exporting process's device memory for this process's
-        lifetime, even after the exporter dies.
+        :meth:`to_tensor` are no longer used. The default is a no-op.
         """
         return None
 
