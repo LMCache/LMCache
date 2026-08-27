@@ -413,15 +413,14 @@ class _MambaUnifiedViewEdit(KVCacheGroupEdit):
         assert isinstance(kv_cache, torch.Tensor), (
             "single-layer KV cache must be a torch.Tensor"
         )
-        kv_layout = layout_hints.get("kv_layout")
+        kv_layout = layout_hints.get("kv_layout", "none")
         if kv_layout == "NHD":
             return kv_cache.view(kv_cache.shape[0], spec.block_size, 1, -1)
         elif kv_layout == "HND":
             return kv_cache.view(kv_cache.shape[0], 1, spec.block_size, -1)
         else:
             raise ValueError(
-                f"Unsupported kv_layout for the subpaged MLA view: "
-                f"{kv_layout}. Expected NHD or HND."
+                f"Unsupported kv_layout: {kv_layout}. Only NHD and HND are supported."
             )
 
 
