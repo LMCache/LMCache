@@ -20,6 +20,7 @@ from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
     IPCCacheServerKey,
 )
+from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.mq import (
     BlockingRequestHandler,
     MessageQueueClient,
@@ -730,13 +731,17 @@ def test_client_survives_undecodable_response() -> None:
         # The poisoned request cannot be resolved: without a decodable
         # request_type there is no way to match it to its future, so it times
         # out. That much is expected -- what matters is what happens after.
-        poisoned = client.submit_request(RequestType.GET_CHUNK_SIZE, [])
+        poisoned: MessagingFuture[int] = client.submit_request(
+            RequestType.GET_CHUNK_SIZE, []
+        )
         with pytest.raises(TimeoutError):
             poisoned.result(timeout=1)
 
         # A later, well-formed request must still be served. If the bad
         # response tore down the shared polling loop, this times out too.
-        healthy = client.submit_request(RequestType.GET_CHUNK_SIZE, [])
+        healthy: MessagingFuture[int] = client.submit_request(
+            RequestType.GET_CHUNK_SIZE, []
+        )
         assert healthy.result(timeout=5) == chunk_size
 
         client.close()
