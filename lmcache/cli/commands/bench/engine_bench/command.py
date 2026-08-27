@@ -100,7 +100,16 @@ def add_engine_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--model",
         default=None,
-        help="Model name (auto-detected from engine if omitted).",
+        help="Model name (auto-detected from engine if omitted). Used for "
+        "LMCache /status matching and tokenizer loading; pass the HF model "
+        "path when the engine runs with --served-model-name.",
+    )
+    parser.add_argument(
+        "--served-model-name",
+        default=None,
+        help="Model name used in vLLM OpenAI API requests when it differs "
+        "from --model (the engine's --served-model-name alias). "
+        "Defaults to --model.",
     )
     parser.add_argument(
         "--workload",
@@ -505,6 +514,7 @@ def _export_config(
     state = InteractiveState()
     state.set("engine_url", config.engine_url)
     state.set("model", config.model)
+    state.set("served_model_name", config.api_model)
     state.set("workload", config.workload)
     state.set("kv_cache_volume", config.kv_cache_volume_gb)
     state.set("tokens_per_gb_kvcache", config.tokens_per_gb_kvcache)
@@ -681,9 +691,11 @@ def run_engine_bench(command: "BaseCommand", args: argparse.Namespace) -> None:
     )
 
     # 3. Create request sender (callbacks wired after workload creation)
+    # Use api_model (the --served-model-name alias) for OpenAI API requests;
+    # config.model stays the HF path for LMCache /status + tokenizer. See #3809.
     request_sender = RequestSender(
         config.engine_url,
-        config.model,
+        config.api_model,
         ignore_eos=config.ignore_eos,
         extra_body=_resolve_extra_body(args),
     )

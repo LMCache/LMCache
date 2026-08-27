@@ -203,6 +203,18 @@ ALL_ITEMS: list[ConfigItem] = [
         phase=PHASE_GENERAL,
     ),
     ConfigItem(
+        key="served_model_name",
+        display_name="Served model name (API alias)",
+        description=(
+            "Model name used in OpenAI API requests when it differs from the "
+            "model above (the engine's --served-model-name alias). Leave empty "
+            "to reuse the model name."
+        ),
+        input_type="text",
+        default="",
+        phase=PHASE_GENERAL,
+    ),
+    ConfigItem(
         key="kv_cache_volume",
         display_name="KV cache volume (GB)",
         description="Target active KV cache size for the benchmark.",

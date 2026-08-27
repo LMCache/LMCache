@@ -74,6 +74,15 @@ class TestEngineBenchConfig:
         assert self._make_config().ignore_eos is False
         assert self._make_config(ignore_eos=True).ignore_eos is True
 
+    def test_api_model_defaults_to_model(self) -> None:
+        # When no alias is given, API requests reuse the model name (#3809).
+        assert self._make_config(model="hf/path").api_model == "hf/path"
+
+    def test_api_model_independent_of_model(self) -> None:
+        cfg = self._make_config(model="hf/path", api_model="alias")
+        assert cfg.model == "hf/path"
+        assert cfg.api_model == "alias"
+
     def test_empty_engine_url(self) -> None:
         with pytest.raises(ValueError, match="engine_url must be non-empty"):
             self._make_config(engine_url="")
@@ -152,6 +161,21 @@ class TestParseArgsToConfig:
         cfg = parse_args_to_config(base_namespace)
         assert cfg.model == "auto-detected-model"
         mock_auto_detect.assert_called_once_with("http://localhost:8000")
+
+    def test_api_model_defaults_to_model_when_no_alias(self, base_namespace) -> None:
+        # Backward compatible: api_model mirrors model when not overridden (#3809).
+        cfg = parse_args_to_config(base_namespace)
+        assert cfg.model == "test-model"
+        assert cfg.api_model == "test-model"
+
+    def test_served_model_name_sets_api_model(self, base_namespace) -> None:
+        # --served-model-name selects the API name; --model stays the HF path
+        # used for LMCache /status matching + tokenizer loading (#3809).
+        base_namespace.model = "/llm/Kimi-K2.5"
+        base_namespace.served_model_name = "kimi-k2.5"
+        cfg = parse_args_to_config(base_namespace)
+        assert cfg.model == "/llm/Kimi-K2.5"
+        assert cfg.api_model == "kimi-k2.5"
 
     def test_no_tokens_per_gb_no_lmcache_url_raises(
         self,
