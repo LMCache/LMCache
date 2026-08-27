@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from lmcache.v1.mp_coordinator.app import create_app
 from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
 from lmcache.v1.mp_coordinator.schemas import encode_tokens
+from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
 
 
 def _client() -> TestClient:
@@ -202,7 +203,7 @@ def test_store_entry_with_tokens_populates_bindings():
         data = _post_events(client, [_batch(entries=[entry])])
         assert data == {"applied": 1, "duplicates": 0, "stale": 0}
 
-        key_directory = client.app.state.ctx.key_directory
+        key_directory = client.app.state.ctx.views.get(KeyDirectory)
         assert key_directory.get_token_ids([bytes.fromhex("aa")]) == [(1, 2, 3)]
 
 

@@ -1,6 +1,6 @@
 # Key directory
 
-Module: `lmcache/v1/mp_coordinator/key_directory.py`
+Module: `lmcache/v1/mp_coordinator/views/key_directory.py`
 Contract vocabulary: `lmcache/v1/mp_coordinator/api.py`
 HTTP surface: `lmcache/v1/mp_coordinator/http_apis/directory_api.py` (`/directory/*`)
 

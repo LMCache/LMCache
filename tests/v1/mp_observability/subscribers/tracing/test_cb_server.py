@@ -919,9 +919,8 @@ class TestCBHitRateAttributes:
 
 
 class TestCBLookupSubspans:
-    """V3 lookup sub-spans (cb.fingerprint_match / cb.sparse_prefetch) nest under
-    cb.lookup, not the cb.request root. The prefix lookup has no cb.* span (it is
-    traced by mp.lookup_prefetch); prefix_chunks rides on cb.lookup."""
+    """V3 lookup sub-spans (cb.fingerprint_match / cb.prefix_lookup /
+    cb.sparse_prefetch) nest under cb.lookup, not the cb.request root."""
 
     @pytest.fixture
     def exporter(self):
@@ -952,8 +951,10 @@ class TestCBLookupSubspans:
         seq = [
             (EventType.CB_REQUEST_START, {}),
             (EventType.CB_LOOKUP_START, {"num_tokens": 1024}),
+            (EventType.CB_PREFIX_LOOKUP_START, {}),
             (EventType.CB_FINGERPRINT_MATCH_START, {}),
             (EventType.CB_FINGERPRINT_MATCH_END, {"matches": 7}),
+            (EventType.CB_PREFIX_LOOKUP_END, {"prefix_chunks": 2}),
             (EventType.CB_SPARSE_PREFETCH_START, {"n_chunks": 5}),
             (EventType.CB_SPARSE_PREFETCH_END, {"found_keys": 5}),
             (EventType.CB_LOOKUP_END, {"num_tokens": 1024, "prefix_chunks": 2}),
@@ -975,13 +976,12 @@ class TestCBLookupSubspans:
         for name in (
             "cb.lookup",
             "cb.fingerprint_match",
+            "cb.prefix_lookup",
             "cb.sparse_prefetch",
         ):
             assert name in spans, f"missing span {name}; have {sorted(spans)}"
-        # No cb.prefix_lookup span (traced by mp.lookup_prefetch instead).
-        assert "cb.prefix_lookup" not in spans
         lookup_id = spans["cb.lookup"].context.span_id
-        for name in ("cb.fingerprint_match", "cb.sparse_prefetch"):
+        for name in ("cb.fingerprint_match", "cb.prefix_lookup", "cb.sparse_prefetch"):
             assert spans[name].parent is not None, f"{name} has no parent span"
             assert spans[name].parent.span_id == lookup_id, (
                 f"{name} should nest under cb.lookup"
@@ -990,7 +990,8 @@ class TestCBLookupSubspans:
         assert spans["cb.lookup"].parent.span_id == spans["cb.request"].context.span_id
         # sub-span metadata propagates as attributes.
         assert spans["cb.fingerprint_match"].attributes.get("matches") == "7"
-        # prefix coverage rides on cb.lookup (no dedicated prefix span).
+        # prefix coverage lands on both the prefix leg and cb.lookup.
+        assert spans["cb.prefix_lookup"].attributes.get("prefix_chunks") == "2"
         assert spans["cb.lookup"].attributes.get("prefix_chunks") == "2"
         assert spans["cb.sparse_prefetch"].attributes.get("found_keys") == "5"
 
@@ -1074,3 +1075,159 @@ class TestCBLookupSubspans:
         assert spans["cb.scatter"].attributes.get("scattered_tokens") == "1280"
         assert spans["cb.scatter"].attributes.get("n_shifted") == "4"
         assert spans["cb.scatter"].attributes.get("dropped") == "0"
+
+
+class TestCBV3RootSpanClose:
+    """V3 publishes CB_RETRIEVE_SUBMITTED but never a store_final, so the root
+    close must be gated on in-flight GPU ops alone."""
+
+    @pytest.fixture
+    def exporter(self):
+        exp = InMemorySpanExporter()
+        provider = TracerProvider()
+        provider.add_span_processor(SimpleSpanProcessor(exp))
+        real_tracer = provider.get_tracer("lmcache_mp.blend")
+        with (
+            patch.object(cb_server_module, "_tracer", real_tracer),
+            patch.object(cb_server_module, "_HAS_OTEL", True),
+        ):
+            yield exp
+        exp.shutdown()
+
+    def _root(self, exporter: InMemorySpanExporter, sid: str):
+        for span in exporter.get_finished_spans():
+            if span.name == "cb.request" and span.attributes.get("session_id") == sid:
+                return span
+        return None
+
+    def _start_bus(self):
+        """A running bus with only the tracing subscriber attached."""
+        bus = EventBus(EventBusConfig(enabled=True, max_queue_size=100))
+        bus.register_subscriber(BlendTracingSubscriber(SpanRegistry()))
+        bus.start()
+        return bus
+
+    def _drain(self, bus, sid, events):
+        """Publish ``(event_type, metadata)`` pairs and wait for the drain."""
+        for event_type, metadata in events:
+            bus.publish(Event(event_type=event_type, session_id=sid, metadata=metadata))
+        time.sleep(0.3)
+
+    def test_v3_root_closes_without_store_final(self, exporter):
+        """``expects_store_final=False`` keeps the store-final bridge empty, so
+        CB_REQUEST_END after the retrieve closes the root."""
+        bus = self._start_bus()
+        sid = "cb-v3-close"
+        self._drain(
+            bus,
+            sid,
+            [
+                (EventType.CB_REQUEST_START, {}),
+                (
+                    EventType.CB_RETRIEVE_SUBMITTED,
+                    {"instance_id": 0, "expects_store_final": False},
+                ),
+                (EventType.CB_RETRIEVE_START, {"num_chunks": 2}),
+                (EventType.CB_RETRIEVE_END, {"success": True}),
+                (EventType.CB_REQUEST_END, {}),
+            ],
+        )
+        bus.stop()
+
+        assert self._root(exporter, sid) is not None, (
+            "cb.request never closed; the V2 store-final bridge leaked into V3"
+        )
+
+    def test_v3_submitted_defers_close_until_retrieve_end(self, exporter):
+        """At TP>1 a no-op retrieve on one worker publishes CB_REQUEST_END on the
+        CPU while another worker's scatter is still on the stream — the root must
+        wait for CB_RETRIEVE_END."""
+        bus = self._start_bus()
+        sid = "cb-v3-defer"
+        self._drain(
+            bus,
+            sid,
+            [
+                (EventType.CB_REQUEST_START, {}),
+                (
+                    EventType.CB_RETRIEVE_SUBMITTED,
+                    {"instance_id": 0, "expects_store_final": False},
+                ),
+                (EventType.CB_RETRIEVE_START, {"num_chunks": 2}),
+                # The other worker's no-op retrieve ends the request early.
+                (EventType.CB_REQUEST_END, {}),
+            ],
+        )
+
+        assert self._root(exporter, sid) is None, (
+            "root closed while a retrieve was live"
+        )
+
+        self._drain(bus, sid, [(EventType.CB_RETRIEVE_END, {"success": True})])
+        bus.stop()
+
+        assert self._root(exporter, sid) is not None
+
+    def test_v2_submitted_still_waits_for_store_final(self, exporter):
+        """Without the flag (V2), the store-final bridge is unchanged."""
+        bus = self._start_bus()
+        sid = "cb-v2-bridge"
+        self._drain(
+            bus,
+            sid,
+            [
+                (EventType.CB_REQUEST_START, {}),
+                (EventType.CB_RETRIEVE_SUBMITTED, {"instance_id": 0}),
+                (EventType.CB_RETRIEVE_START, {"num_chunks": 2}),
+                (EventType.CB_RETRIEVE_END, {"success": True}),
+                (EventType.CB_REQUEST_END, {}),
+            ],
+        )
+
+        assert self._root(exporter, sid) is None, (
+            "root closed before the expected store_final"
+        )
+
+        self._drain(
+            bus,
+            sid,
+            [
+                (EventType.CB_STORE_FINAL_SUBMITTED, {"instance_id": 0}),
+                (EventType.CB_STORE_FINAL_START, {"instance_id": 0, "num_tokens": 128}),
+                (
+                    EventType.CB_STORE_FINAL_END,
+                    {"instance_id": 0, "stored_chunks": 1, "success": True},
+                ),
+            ],
+        )
+        bus.stop()
+
+        assert self._root(exporter, sid) is not None
+
+    def test_retrieve_noop_emits_point_span_under_root(self, exporter):
+        bus = self._start_bus()
+        sid = "cb-noop-span"
+        self._drain(
+            bus,
+            sid,
+            [
+                (EventType.CB_REQUEST_START, {}),
+                (
+                    EventType.CB_RETRIEVE_NOOP,
+                    {"reason": "beyond_slot_bound", "dropped_matches": 4},
+                ),
+                (EventType.CB_REQUEST_END, {}),
+            ],
+        )
+        bus.stop()
+
+        spans = {
+            s.name: s
+            for s in exporter.get_finished_spans()
+            if s.attributes.get("session_id") == sid
+        }
+        assert "cb.retrieve.noop" in spans, f"have {sorted(spans)}"
+        noop = spans["cb.retrieve.noop"]
+        assert noop.attributes.get("reason") == "beyond_slot_bound"
+        assert noop.attributes.get("dropped_matches") == "4"
+        assert noop.parent.span_id == spans["cb.request"].context.span_id

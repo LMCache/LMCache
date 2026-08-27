@@ -21,12 +21,20 @@ See ``docs/design/v1/mp_coordinator/usage_and_eviction.md``.
 from __future__ import annotations
 
 # Standard
+from collections.abc import Mapping
+from typing import cast
 import threading
 
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import ObjectKey, Tier
 from lmcache.v1.mp_coordinator.api import CacheEventBatch, CacheEventType
+from lmcache.v1.mp_coordinator.persistence.durable_component import (
+    DurableComponent,
+    PersistenceType,
+)
+from lmcache.v1.mp_coordinator.utils.encoding import decode_key, encode_key
+from lmcache.v1.mp_coordinator.views.base import View
 
 logger = init_logger(__name__)
 
@@ -37,7 +45,7 @@ logger = init_logger(__name__)
 _PlacementId = tuple[Tier, ObjectKey, str, str]
 
 
-class CacheUsageManager:
+class CacheUsageManager(View):
     """Thread-safe per-tier byte usage view, rolled up two ways.
 
     Every read is tier-explicit: a key resident in both tiers holds
@@ -140,6 +148,73 @@ class CacheUsageManager:
                 for (placement_tier, _), n_bytes in self._salt_bytes.items()
                 if placement_tier == tier
             )
+
+    def get_durable_components(self) -> tuple[DurableComponent, ...]:
+        """Return this view: the bytes it accounts are its own section.
+
+        Returns:
+            Itself, since nothing else owns the placement sizes.
+        """
+        return (self,)
+
+    @property
+    def name(self) -> str:
+        """Name of the usage view's section in a checkpoint."""
+        return "cache_usage"
+
+    @property
+    def persistence_type(self) -> PersistenceType:
+        """Byte accounting follows the placements it came from, so it is
+        checkpoint state."""
+        return PersistenceType.CHECKPOINT
+
+    def capture(self) -> Mapping[str, object]:
+        """Return the per-placement byte sizes.
+
+        Only the placements: every read this class serves is a rollup of
+        them, so persisting the rollups too would store the same bytes
+        twice and admit totals that disagree with their placements.
+
+        Returns:
+            ``{"placements": [(tier, key, owner, backend, size), ...]}``.
+        """
+        with self._lock:
+            return {
+                "placements": [
+                    (tier.value, encode_key(key), owner, backend, size_bytes)
+                    for (tier, key, owner, backend), size_bytes in (
+                        self._placement_sizes.items()
+                    )
+                ]
+            }
+
+    def restore(self, state: Mapping[str, object]) -> None:
+        """Load captured placements, rebuilding every rollup from them.
+
+        Call once at startup.
+
+        Args:
+            state: A :meth:`capture` value.
+
+        Raises:
+            ValueError: If any bytes are already accounted.
+        """
+        placements = cast(
+            "list[tuple[str, object, str, str, int]]", state["placements"]
+        )
+        with self._lock:
+            if self._placement_sizes:
+                raise ValueError(
+                    "restore() requires an empty usage view (holds "
+                    f"{len(self._placement_sizes)} placements)"
+                )
+            for tier_value, encoded_key, owner, backend, size_bytes in placements:
+                tier = Tier(tier_value)
+                placement_id = (tier, decode_key(encoded_key), owner, backend)
+                self._placement_sizes[placement_id] = size_bytes
+                if tier == Tier.L1 and owner:
+                    self._l1_by_instance.setdefault(owner, set()).add(placement_id)
+                self._adjust(placement_id, size_bytes)
 
     # -- Internals (call with self._lock held) --------------------------------
 
