@@ -69,6 +69,7 @@ from lmcache.v1.multiprocess.protocol import (
     get_payload_classes,
 )
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
+from lmcache.v1.platform.isolated_ipc import set_isolated_ipc
 
 logger = init_logger(__name__)
 
@@ -361,6 +362,10 @@ def run_cache_server(
         If return_engine is True: tuple of (MessageQueueServer, MPCacheServer).
         If return_engine is False: None (blocks until interrupted).
     """
+    # Before any event IPC backend is resolved (KV-cache registration), so
+    # the setting is observed by every resolver in this process.
+    set_isolated_ipc(mp_config.isolated_ipc)
+
     # mp_config.instance_id is this server's single source of identity (set via
     # --instance-id, else a random UUID v4). Project it onto the OTel
     # service.instance.id unless observability set that attribute explicitly, so

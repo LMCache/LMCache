@@ -168,6 +168,16 @@ def test_instance_id_dataclass_default_is_distinct():
     assert MPServerConfig().instance_id != MPServerConfig().instance_id
 
 
+def test_isolated_ipc_defaults_to_false():
+    assert _parse_mp([]).isolated_ipc is False
+    assert MPServerConfig().isolated_ipc is False
+
+
+def test_isolated_ipc_flag_enables():
+    assert _parse_mp(["--isolated-ipc"]).isolated_ipc is True
+    assert _parse_mp(["--no-isolated-ipc"]).isolated_ipc is False
+
+
 # -- Event reporting ----------------------------------------------------------
 
 

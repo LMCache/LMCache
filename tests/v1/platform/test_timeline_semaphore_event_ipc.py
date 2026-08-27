@@ -19,10 +19,12 @@ import torch
 from lmcache.v1.platform.base.event_ipc import (
     DefaultEventIPCBackend,
     EventIPCBackend,
+    get_event_ipc_backend,
 )
 from lmcache.v1.platform.cuda.timeline_semaphore_event_ipc import (
     TimelineSemaphoreEventIPCBackend,
 )
+from lmcache.v1.platform.isolated_ipc import set_isolated_ipc
 
 pytestmark = [
     pytest.mark.cuda,
@@ -395,6 +397,74 @@ def _cross_process_consumer(kind: str, conn: Connection) -> None:
     backend.synchronize_event(event, device)
     blocked_for = time.monotonic() - start
     conn.send((blocked_for, backend.query_event(event)))
+
+
+def _resolved_backend_producer(conn: Connection) -> None:
+    """Child: enable isolated IPC (as the worker adapter does at init),
+    resolve the backend through the production path, and export a recorded
+    event. Stays alive until released -- the exported handle is only
+    importable while this process is.
+    """
+    torch.cuda.init()
+    torch.cuda.set_device(0)
+    set_isolated_ipc(True)
+    device = torch.device(DEVICE)
+    backend = get_event_ipc_backend(device)
+    conn.send(type(backend).__name__)
+
+    event = backend.create_event(device)
+    backend.record_event(event, torch.cuda.current_stream())
+    torch.cuda.current_stream().synchronize()
+    conn.send(backend.export_event(event, device))
+    conn.recv()
+
+
+def _resolved_backend_consumer(conn: Connection) -> None:
+    """Child: enable isolated IPC (as the MP server does at startup),
+    resolve through the production path, import the received handle,
+    synchronize, and report the final query.
+    """
+    torch.cuda.init()
+    torch.cuda.set_device(0)
+    set_isolated_ipc(True)
+    device = torch.device(DEVICE)
+    backend = get_event_ipc_backend(device)
+    conn.send(type(backend).__name__)
+
+    handle = conn.recv()
+    event = backend.import_event(handle, device)
+    backend.synchronize_event(event, device)
+    conn.send(backend.query_event(event))
+
+
+def test_cross_process_resolution_under_isolated_ipc() -> None:
+    """Two processes opt in via ``set_isolated_ipc`` (as the worker adapter
+    and the MP server do at initialization), resolve via
+    ``get_event_ipc_backend``, and exchange a working timeline handle -- the
+    wiring MP STORE/RETRIEVE relies on.
+    """
+    ctx = get_context("spawn")
+    producer_conn, producer_end = ctx.Pipe()
+    consumer_conn, consumer_end = ctx.Pipe()
+    producer = ctx.Process(target=_resolved_backend_producer, args=(producer_end,))
+    consumer = ctx.Process(target=_resolved_backend_consumer, args=(consumer_end,))
+    producer.start()
+    consumer.start()
+    try:
+        assert producer_conn.recv() == "TimelineSemaphoreEventIPCBackend"
+        assert consumer_conn.recv() == "TimelineSemaphoreEventIPCBackend"
+
+        consumer_conn.send(producer_conn.recv())
+        assert consumer_conn.recv() is True
+        producer_conn.send("release")
+    finally:
+        for child in (producer, consumer):
+            child.join(timeout=60)
+            if child.is_alive():
+                child.kill()
+                child.join()
+    assert producer.exitcode == 0
+    assert consumer.exitcode == 0
 
 
 @pytest.mark.parametrize("kind", ["default", "timeline_semaphore"])

@@ -73,6 +73,19 @@ Source: ``lmcache/v1/multiprocess/config.py``
        so workers of either device type can connect without manual
        configuration.
        Choices: ``lmcache_driven``, ``engine_driven``, ``auto``.
+   * - ``--isolated-ipc`` / ``--no-isolated-ipc``
+     - ``false``
+     - Assume engine workers and this server run in containers that share
+       no host IPC namespace (``hostIPC``) and no common ``/dev/shm``, and
+       use IPC mechanisms that work there: on CUDA, timeline-semaphore
+       events (over CUDA IPC *memory* handles) instead of CUDA
+       interprocess *event* handles. Must match the workers'
+       ``lmcache.mp.isolated_ipc`` setting -- the two mechanisms exchange
+       incompatible event handles, and a mismatch fails at event import
+       on whichever side receives the foreign handle. Currently supported
+       by the vLLM MP connector only; the default stays ``false`` until
+       the integrations that still create raw CUDA interprocess events
+       (SGLang, TensorRT-LLM, CacheBlend, qstore) migrate.
    * - ``--runtime-plugin-locations``
      - ``[]``
      - Zero or more paths to runtime plugin scripts or directories to
@@ -716,6 +729,15 @@ All connector-level options are passed through
        ``engine_driven`` (force the worker-side gather/scatter copy
        path). Overrides the ``LMCACHE_MP_TRANSFER_MODE`` env var when
        set.
+   * - ``lmcache.mp.isolated_ipc``
+     - ``false``
+     - Assume the vLLM workers and the LMCache server run in containers
+       that share no host IPC namespace (``hostIPC``) and no common
+       ``/dev/shm``, and use IPC mechanisms that work there: on CUDA,
+       timeline-semaphore events (over CUDA IPC *memory* handles) instead
+       of CUDA interprocess *event* handles. Set it together with the
+       server's ``--isolated-ipc`` flag -- a mismatch fails at event
+       import on whichever side receives the foreign handle.
 
 Environment Variables
 ---------------------
