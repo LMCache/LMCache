@@ -6,6 +6,13 @@ set -o pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# shellcheck source=.buildkite/k3_tests/common_scripts/helpers.sh
+source "${SCRIPT_DIR}/../../k3_tests/common_scripts/helpers.sh"
+if ! merge_pr_base_branch; then
+    echo "Failed to pre-merge PR base branch"
+    exit 1
+fi
+
 # Export container names and configuration for all scripts
 export LMCACHE_CONTAINER_NAME="lmcache-mp-test-$$"
 export VLLM_CONTAINER_NAME="vllm-mp-test-$$"
