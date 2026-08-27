@@ -327,7 +327,7 @@ class BaseCacheContext(ABC):
                     group.shape_desc, engine_kv_format
                 )
             ),
-            "is_mla": lmcache_native.is_mla(engine_kv_format),
+            "is_mla": engine_kv_format.is_mla,
             "engine_kv_format": engine_kv_format.name,
             "engine_kv_shape": get_engine_kv_shape_description(engine_kv_format),
             "attention_backend": get_attention_backend(engine_kv_format),

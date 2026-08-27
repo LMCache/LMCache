@@ -544,16 +544,16 @@ def resolve_block_stride_and_log_layout(
         # - SGL MHA: outer list is K/V (length 2), inner list is
         #   per-layer; K & V share shape/stride by construction.
         # - Other formats: ``kv_caches`` is already a per-layer list.
-        if lmcache_native.is_cross_layer(engine_kv_format):
+        if engine_kv_format.is_cross_layer:
             if not isinstance(kv_caches, torch.Tensor):
                 raise TypeError(
                     "Cross-layer EngineKVFormat expects a single backing "
                     f"torch.Tensor, got {type(kv_caches).__name__}."
                 )
             return kv_caches
-        if lmcache_native.is_kv_list(engine_kv_format):
+        if engine_kv_format.is_kv_list:
             return kv_caches[0][layer_idx]  # type: ignore[index,return-value]
-        if lmcache_native.is_kv_second_tuple(engine_kv_format):
+        if engine_kv_format.is_kv_second_tuple:
             return kv_caches[layer_idx][0]  # type: ignore[index,return-value]
         return kv_caches[layer_idx]  # type: ignore[index,return-value]
 
@@ -661,7 +661,7 @@ def make_page_buffer_shape_desc(
     desc.bs = block_size
     desc.nh = (
         1
-        if lmcache_native.is_mla(engine_kv_format)
+        if engine_kv_format.is_mla
         else get_num_heads(kv_caches, engine_kv_format, layer_idx)
     )
     desc.hs = get_head_size(kv_caches, engine_kv_format, layer_idx)

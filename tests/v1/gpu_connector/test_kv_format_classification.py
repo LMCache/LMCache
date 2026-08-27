@@ -63,7 +63,7 @@ EXPECTED_SPEC_FACTS = {
 
 
 def _all_formats():
-    return [v for v in vars(F).values() if isinstance(v, F)]
+    return list(F.all())
 
 
 def test_classification_matches_golden():
@@ -122,3 +122,16 @@ def test_structural_flags_partition_every_format():
             lmcache_native.is_layer_list(fmt),
         )
         assert sum(structural) == 1, f"{fmt}: structural flags {structural}"
+
+
+def test_layout_objects_expose_direct_facts_and_registry():
+    fmt = F.NL_X_NB_BS_HS
+
+    assert isinstance(fmt, F)
+    assert fmt is F.from_code(3)
+    assert fmt is F.from_name("NL_X_NB_BS_HS")
+    assert fmt.value == 3
+    assert fmt.name == "NL_X_NB_BS_HS"
+    assert fmt.is_mla
+    assert fmt.is_layer_list
+    assert not fmt.is_kv_list

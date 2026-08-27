@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The ``EngineKVFormat`` -> spec table, discovered from this folder.
+"""The KV layout -> spec table, discovered from this folder.
 
 Every ``specs/<engine_kv_format>.py`` defines one :class:`KVFormatSpec`
 subclass. This imports them all and indexes each by the ``engine_kv_format`` it
@@ -37,9 +37,8 @@ def _discover_specs() -> dict["lmcache_native.EngineKVFormat", type[KVFormatSpec
 
 SPECS = _discover_specs()
 
-# Indexed by enum *value*: the native pybind ``EngineKVFormat`` and the
-# pure-Python fallback one are distinct types with the same members, and both
-# reach this table (e.g. from ``lmcache.v1.platform.torch_ops``).
+# Indexed by integer layout code so every caller reaches the same table even if
+# it is holding a native pybind enum, a ``KVLayout`` object, or a raw int.
 _SPECS_BY_VALUE = {int(fmt): spec for fmt, spec in SPECS.items()}
 
 

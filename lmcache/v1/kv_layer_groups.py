@@ -133,7 +133,7 @@ def group_layers_by_identity(
         if engine_group_idx == EXCLUDED_ENGINE_GROUP:
             continue
         layer_format = engine_kv_formats[idx]
-        mla = lmcache_native.is_mla(layer_format)
+        mla = layer_format.is_mla
         kv_size = 1 if mla else 2
         nh = 1 if mla else get_num_heads(kv_caches, layer_format, idx)
         hs = get_head_size(kv_caches, layer_format, idx)
