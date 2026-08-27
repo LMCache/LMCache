@@ -7,7 +7,7 @@ import string
 import threading
 
 if TYPE_CHECKING:
-    from vllm.config import ModelConfig, VllmConfig
+    from vllm.config import ModelConfig, ParallelConfig, VllmConfig
     from vllm.multimodal.inputs import PlaceholderRange
     from vllm.v1.request import Request
 
@@ -288,13 +288,17 @@ def create_lmcache_metadata(
                 kv_transfer_config, "kv_connector_extra_config", None
             )
 
+    # Compute local_worker_id with DP offset so the metadata reflects the
+    # actual local GPU device (matches vLLM's gpu_worker DP adjustment).
+    local_worker_id = parallel_cfg.rank + compute_dp_device_offset(parallel_cfg)
+
     # Create metadata
     metadata = LMCacheMetadata(
         model_name=model_cfg.model,
         world_size=parallel_cfg.world_size,
         local_world_size=parallel_cfg.world_size,
         worker_id=parallel_cfg.rank,
-        local_worker_id=parallel_cfg.rank,
+        local_worker_id=local_worker_id,
         kv_dtype=kv_dtype,
         kv_shape=kv_shape,
         use_mla=use_mla,
@@ -363,9 +367,84 @@ def get_size_bytes(shapes: list[torch.Size], kv_dtypes: list[torch.dtype]):
     )
 
 
+def get_dp_local_rank(parallel_config: "ParallelConfig") -> int:
+    """
+    Return the data parallel rank local to this node, or 0 if DP is disabled
+    or unavailable on the running vLLM version.
+
+    Mirrors the logic vLLM uses in ``gpu_worker.py`` to compute its worker
+    device index under data parallelism. Used by LMCache to derive the
+    correct local GPU device when DP > 1.
+
+    Args:
+        parallel_config: vLLM ``ParallelConfig``.
+
+    Returns:
+        int: The local DP rank for the current process (0 if DP is not used).
+    """
+    dp_local_rank = getattr(parallel_config, "data_parallel_rank_local", None)
+    if dp_local_rank is None:
+        dp_local_rank = getattr(parallel_config, "data_parallel_index", 0) or 0
+    return int(dp_local_rank)
+
+
+def compute_dp_device_offset(parallel_config: "ParallelConfig") -> int:
+    """
+    Compute the local GPU index offset introduced by data parallelism.
+
+    vLLM's ``gpu_worker.init_device`` shifts each worker's local device
+    index by ``dp_local_rank * tp_size * pp_size`` so that DP replica ``k``
+    on a single node binds to GPUs ``[k*W, (k+1)*W)`` where
+    ``W = tp_size * pp_size``. LMCache must apply the **same** offset when
+    it sets the active device so its buffers / events / streams live on
+    the same physical GPU as the corresponding vLLM worker — otherwise
+    CUDA operations fail with ``Event device index does not match
+    recording stream's device index``.
+
+    However, vLLM only performs this shift in a specific configuration:
+
+    - ``nnodes_within_dp == 1`` — each DP replica fits on a single node.
+      With multi-node DP, ``dp_local_rank * W`` is no longer a valid
+      device index on the current node.
+    - ``distributed_executor_backend`` is not ``ray`` or
+      ``external_launcher`` — Ray and external launchers (e.g. torchrun)
+      already isolate each worker to its own visible device, so the
+      offset is unnecessary and would over-index.
+    - ``data_parallel_backend != "ray"`` — same reasoning for the DP
+      coordinator backend.
+
+    Outside those conditions vLLM leaves the device index untouched, and
+    so does LMCache. In that case this function returns 0.
+
+    Args:
+        parallel_config: vLLM ``ParallelConfig`` for the current process.
+
+    Returns:
+        int: Device index offset to add to ``parallel_config.rank``. Zero
+        when DP is disabled, when running on a backend that handles GPU
+        isolation externally, or when DP spans multiple nodes.
+    """
+    nnodes_within_dp = getattr(parallel_config, "nnodes_within_dp", 1) or 1
+    executor_backend = getattr(parallel_config, "distributed_executor_backend", None)
+    dp_backend = getattr(parallel_config, "data_parallel_backend", None)
+    if (
+        nnodes_within_dp != 1
+        or executor_backend in ("ray", "external_launcher")
+        or dp_backend == "ray"
+    ):
+        return 0
+    dp_local_rank = get_dp_local_rank(parallel_config)
+    if dp_local_rank == 0:
+        return 0
+    tp_size = parallel_config.tensor_parallel_size
+    pp_size = parallel_config.pipeline_parallel_size
+    return dp_local_rank * tp_size * pp_size
+
+
 def calculate_local_rank_and_world_size(vllm_config: "VllmConfig") -> Tuple[int, int]:
     """
-    Calculate the local worker id and local world size.
+    Calculate the local worker id (i.e. local GPU device index) and the
+    local world size for the current LMCache worker.
 
     Current assumption (TODO: add custom logic in the future):
     - Tensor Parallel is intra-node
@@ -380,20 +459,25 @@ def calculate_local_rank_and_world_size(vllm_config: "VllmConfig") -> Tuple[int,
     parallel_config = vllm_config.parallel_config
     global_rank = parallel_config.rank
     global_world_size = parallel_config.world_size
+    tp_size = parallel_config.tensor_parallel_size
+    pp_size = parallel_config.pipeline_parallel_size
     num_gpus = torch_dev.device_count()
+
+    # DP offset: see ``compute_dp_device_offset`` for the rationale and the
+    # set of vLLM backends where this offset is (or isn't) required.
+    dp_offset = compute_dp_device_offset(parallel_config)
+
     if global_world_size <= num_gpus:
-        # single node case
-        return parallel_config.rank, parallel_config.world_size
+        # single node case (per DP replica)
+        return parallel_config.rank + dp_offset, parallel_config.world_size
     else:
-        tp_size = parallel_config.tensor_parallel_size
-        pp_size = parallel_config.pipeline_parallel_size
         local_world_size = global_world_size // pp_size
         assert local_world_size == tp_size, (
             "LMCache is operating under the assumption that the "
             "local world size is equal to the tensor parallel size "
             "in multi-node deployment."
         )
-        local_worker_id = global_rank % local_world_size
+        local_worker_id = (global_rank % local_world_size) + dp_offset
         return local_worker_id, local_world_size
 
 
