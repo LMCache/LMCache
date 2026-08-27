@@ -209,7 +209,7 @@ class CoordinatorCommand(BaseCommand):
             default=None,
             help="ZMQ PUB bind address (e.g. tcp://*:5557) on which admitted "
             "cache events are re-published in vLLM KV-event wire format for "
-            "KV-cache-aware routers such as llm-d (default: off).",
+            "KV-cache-aware routers (llm-d, Dynamo) (default: off).",
         )
         parser.add_argument(
             "--kv-events-replay-port",

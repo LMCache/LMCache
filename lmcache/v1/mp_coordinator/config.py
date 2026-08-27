@@ -61,7 +61,7 @@ class MPCoordinatorConfig:
         metrics_enabled: Whether to initialize OpenTelemetry metrics.
         kv_events_endpoint: ZMQ PUB bind address (e.g. ``tcp://*:5557``) on
             which gate-admitted cache events are re-published in vLLM
-            KV-event wire format for KV-cache-aware routers such as llm-d.
+            KV-event wire format for KV-cache-aware routers (llm-d, Dynamo).
             Empty (default) disables the publisher.
         kv_events_replay_port: TCP port of the ZMQ ROUTER socket answering
             vLLM-style KV-event replay requests from a ring of recent

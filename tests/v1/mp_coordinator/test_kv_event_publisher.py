@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for the engine-format (vLLM KV event) publisher: wire layout of
-the msgpack payload against the positional field order llm-d's vLLM
-adapter parses, golden payloads, ZMQ framing / topic identity, fencing,
+the msgpack payload against the positional field order vLLM (and its
+consumers, verified with llm-d's adapter) use, golden payloads, ZMQ framing / topic identity, fencing,
 replay, and its mount behind the coordinator's ingest gate."""
 
 # Standard
@@ -214,13 +214,13 @@ def test_non_placement_and_malformed_batches_rejected():
         )
 
 
-# -- Golden fixtures (shared with llm-d's adapter tests) ------------------------
+# -- Golden payloads (cross-checked with llm-d's vLLM adapter) ------------------
 
 
 # Golden payloads: the third ZMQ frame, byte for byte, for four
-# representative batches. They pin the wire format llm-d's vLLM adapter
-# (pkg/kvevents/engineadapter/vllm_adapter.go, ParseMessage) decodes; the
-# same hex strings are the fixtures on the llm-d side. Layout:
+# representative batches. They pin vLLM's KV-event wire format; the same
+# hex strings were decoded unchanged by llm-d's adapter
+# (pkg/kvevents/engineadapter/vllm_adapter.go, ParseMessage). Layout:
 # [ts, [event, ...], nil] with each event positional, tag first.
 _GOLDEN = [
     (

@@ -125,7 +125,7 @@ keeps the default below.
      - (empty)
      - ZMQ PUB bind address (e.g. ``tcp://*:5557``) on which admitted cache
        events are re-published in vLLM KV-event wire format for KV-cache-aware
-       routers such as llm-d: ``BlockStored`` (with token ids and the
+       routers (llm-d, Dynamo): ``BlockStored`` (with token ids and the
        predecessor chunk as ``parent_block_hash``) for every L1/L2 store,
        ``BlockRemoved`` for every eviction/delete, ``AllBlocksCleared`` when
        an instance is fenced; medium ``lmcache-l1`` / ``lmcache-l2-<backend>``.

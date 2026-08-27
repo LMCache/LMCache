@@ -2,7 +2,7 @@
 """Engine-format KV event publisher: re-emits the fleet's gate-admitted
 cache events in vLLM's ``KVEventBatch`` wire format over ZMQ.
 
-KV-cache-aware routers (llm-d's EPP, for one) index engine KV events
+KV-cache-aware routers (llm-d, Dynamo, ...) index engine KV events
 they read from a ZMQ PUB socket: msgpack
 ``[ts, [event, ...], data_parallel_rank]`` batches under a
 ``kv@<emitter_id>@<model_name>`` topic. This consumer sits behind the
@@ -99,7 +99,7 @@ def encode_batch(
     each carries its own ``parent_block_hash`` and ``token_ids``);
     ``DELETE`` entries become one ``BlockRemoved`` event. Tokenless
     ``STORE`` entries (the emitter no longer held the chunk's token
-    binding) are skipped: llm-d recomputes its own keys from the tokens
+    binding) are skipped: routers derive their own keys from the tokens
     and cannot index an unknown hash without them. ``DELETE`` entries are
     never skipped, so a removal always reaches the router even when its
     store did not. HMA fields are never set.
@@ -225,7 +225,7 @@ class ZmqKVEventPublisher:
         self._pub.setsockopt(zmq.LINGER, 0)
         self._pub.setsockopt(zmq.SNDHWM, hwm)
         self._pub.bind(endpoint)
-        # vLLM numbers messages from 0; llm-d accepts a first live seq of 0
+        # vLLM numbers messages from 0; subscribers accept a first live seq of 0
         # without requesting a full replay.
         self._seq = 0
         # Recently sent frames for replay, shared with the replay thread.

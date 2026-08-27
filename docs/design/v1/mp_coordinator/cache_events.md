@@ -171,7 +171,7 @@ semantics need no change.
 
 Module: `lmcache/v1/mp_coordinator/kv_event_publisher.py` (coordinator side)
 
-KV-cache-aware routers (llm-d's EPP; see the RFC in
+KV-cache-aware routers (llm-d's EPP, Dynamo's KV router; see the RFC in
 [issue #4770](https://github.com/LMCache/LMCache/issues/4770)) learn
 placements only from engine KV events: vLLM `KVEventBatch` msgpack over
 a ZMQ PUB socket, topic `kv@<emitter_id>@<model>`. In MP mode the MP
@@ -201,11 +201,14 @@ The emitter identity is a deployment convention: an MP server is per
 node and serves every engine on it, so run it with `--instance-id
 node:<nodeName>` and a router that understands node pseudo-pods
 (llm-d-router#2586) credits every engine on that node; `pool:<backend>`
-is credited to every engine of the model. The coordinator adds nothing
-of its own to the identity.
+is credited to every engine of the model. A router without that notion
+still indexes the stream — it credits the identity as one opaque pod.
+The coordinator adds nothing of its own to the identity, and nothing in
+the wire format is specific to one router: it is vLLM's, verified
+against llm-d's adapter.
 
-A tokenless `store` entry (token-binding cache miss) is skipped: llm-d
-recomputes its own keys from the tokens and cannot index an unknown hash
+A tokenless `store` entry (token-binding cache miss) is skipped: routers
+derive their own keys from the tokens and cannot index an unknown hash
 without them. A `delete` is never skipped. The `seq` frame is one counter
 across all topics, numbered from 0 like vLLM; with
 `--kv-events-replay-port` a ROUTER socket answers vLLM-style replay
