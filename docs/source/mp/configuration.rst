@@ -662,6 +662,23 @@ All connector-level options are passed through
        allowing L2-to-L1 KV staging to overlap with scheduler queue wait.
        Resumable requests are skipped because their token IDs may be incomplete
        at enqueue time.
+   * - ``lmcache.mp.lazy_offload``
+     - ``false``
+     - Defer store operations and submit finished requests in FIFO batches.
+       Available only with vLLM and ``LMCacheMPConnector``. See
+       :doc:`lazy_offload` for behavior, limitations, and tuning guidance.
+   * - ``lmcache.mp.lazy_offload_policy``
+     - ``FIFO``
+     - Policy used to select finished pending requests. ``FIFO`` is currently
+       the only supported value. Used only when lazy offload is enabled.
+   * - ``lmcache.mp.lazy_offload_threshold``
+     - ``100``
+     - Number of finished pending requests required before a lazy-offload
+       batch becomes eligible for submission.
+   * - ``lmcache.mp.lazy_offload_select_count``
+     - ``10``
+     - Maximum number of finished requests selected each time the
+       lazy-offload threshold is met.
    * - ``lmcache.mp.mp_transfer_mode``
      - ``auto``
      - Routing mode for the worker -> server transfer context. One of

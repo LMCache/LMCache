@@ -2,7 +2,7 @@
 
 Module: `lmcache/v1/mp_coordinator/cache_events.py`
 Contract vocabulary: `lmcache/v1/mp_coordinator/api.py`
-Consumer: `lmcache/v1/mp_coordinator/key_directory.py` (see
+Consumer: `lmcache/v1/mp_coordinator/views/key_directory.py` (see
 [key_directory.md](key_directory.md))
 
 This is the emission half of the key directory (M1 of the control-plane
