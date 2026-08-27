@@ -1118,28 +1118,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> str | None:
-        """Return LMCache's preferred KV cache layout.
-
-        Prefer the head-contiguous layout for non-MLA models and defer for
-        MLA, where the layout is immaterial (single latent head). A
-        preference only fills the resolution slot below backend-required
-        and ``VLLM_KV_CACHE_LAYOUT``; layouts forced past it are still
-        validated at registration by ``translate_vllm_kv_cache_layout``.
-
-        Args:
-            vllm_config (VllmConfig): the vllm config.
-
-        Returns:
-            The preferred layout name, or None to defer to vLLM.
-        """
+        """Prefer the head-contiguous layout; None (MLA) defers to vLLM."""
         model_config = getattr(vllm_config, "model_config", None)
         if model_config is None or model_config.use_mla:
             return None
         if not hasattr(vllm_config.cache_config, "kv_cache_layout"):
             return "HND"
-        # The standardized name, not its legacy alias: MultiConnector
-        # compares preference strings verbatim, so two spellings of the
-        # same layout are rejected as a conflict.
+        # Not "HND": MultiConnector compares preference strings verbatim.
         return "LBHNC"
 
     def get_finished_count(self) -> int | None:

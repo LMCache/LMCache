@@ -26,12 +26,7 @@ import lmcache.lmcache_native as lmcache_native
 def resolve_vllm_kv_layout(
     layout_hints: LayoutHints, cpu_attention_backend: bool
 ) -> str:
-    """Resolve vLLM's canonical KV layout name from hints and backend.
-
-    Raises:
-        ValueError: for hint values outside the supported vocabulary --
-            guessing a layout would silently corrupt the cache.
-    """
+    """Canonicalize the ``kv_layout`` hint, e.g. ``"NHD"`` -> ``"LBNHC"``."""
     kv_layout = layout_hints.get("kv_layout", "LBNHC")
     canonical = CANONICAL_KV_LAYOUTS.get(kv_layout)
     if canonical is None:
@@ -39,9 +34,7 @@ def resolve_vllm_kv_layout(
             f"kv_layout hint {kv_layout!r} is not a layout LMCache supports; "
             "expected one of NHD, HND, LBNHC, LBHNC, BLHNC, BLNHC."
         )
-    # vLLM's CPU attention backend stores the layer-compact cache in HND but
-    # misreports the hint; explicit blocks-first declarations are unambiguous
-    # and win.
+    # The CPU attention backend allocates HND but hints NHD.
     if cpu_attention_backend and canonical in ("LBNHC", "LBHNC"):
         return "LBHNC"
     return canonical
@@ -50,13 +43,13 @@ def resolve_vllm_kv_layout(
 def _reconstruct_blocks_first(
     kv_caches: DiscoverableKVCache, kv_layout: str
 ) -> "tuple[lmcache_native.EngineKVFormat, torch.Tensor]":
-    """Rebuild the single cross-layer tensor a blocks-first layout declares.
+    """Stack the per-layer views into one [num_blocks, num_layers, ...] tensor.
 
-    vLLM registers per-layer strided views into one buffer; under a
-    blocks-first layout each view's block step spans every layer's bytes.
-    Every structural property implied by the declaration is verified so a
-    declaration/allocation drift fails here instead of corrupting
-    transfers.
+    kv_caches holds one rank-4 view per layer into a single buffer: all
+    views share shape, strides, and storage, and layer i starts at
+    base offset + i * layer_step. Verify that, then as_strided layer 0
+    into a rank-5 tensor with the layer dim at position 1 (stride
+    layer_step). Raise ValueError if the views don't match.
     """
     fmt = (
         lmcache_native.EngineKVFormat.NB_NL_NH_BS_CS
@@ -95,9 +88,8 @@ def _reconstruct_blocks_first(
 
     if tuple(base.stride()[1:]) != tuple(tight_inner):
         raise _drift("per-(layer, block) content is not contiguous")
-    # HMA pools interleave groups inside each block: this group's layers sit
-    # a uniform step apart that may exceed its own chunk (other groups'
-    # bytes in between), and the block step may exceed the group's total.
+    # >= not ==: HMA pools put other groups' bytes between this group's
+    # layers within each block.
     layer_step = (
         layers[1].storage_offset() - layers[0].storage_offset()
         if num_layers > 1
@@ -135,8 +127,6 @@ class VLLM_Detector(EngineDetector):
         kv_caches: DiscoverableKVCache,
         layout_hints: LayoutHints,
     ) -> "tuple[Optional[lmcache_native.EngineKVFormat], DiscoverableKVCache]":
-        # vLLM's CPU attention backend stores KV in HND but misreports it, so
-        # force HND there; otherwise honor the hint, defaulting to NHD.
         kv_layout = resolve_vllm_kv_layout(
             layout_hints, cpu_attention_backend=torch_device_type == "cpu"
         )

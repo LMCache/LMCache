@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Cross-layer, HND, fused K/V: a single tensor ``[NB, NL, BS, NH, CS]``.
+"""Cross-layer, NHD, fused K/V: a single tensor ``[NB, NL, BS, NH, CS]``.
 
-vLLM's standardized ``BLNHC`` layout: blocks first, tokens before heads; every layer's
-``[BS, NH, CS]`` run packed inside each block. Reconstructed by detection
-from the per-layer views vLLM registers into one shared buffer.
+vLLM's ``BLNHC`` layout; detection stacks the per-layer views into this
+tensor.
 """
 
 # Each spec indexes ``kv_caches`` (Tensor | nested list) per its format, so the
@@ -61,9 +60,6 @@ class NB_NL_BS_NH_CS_Spec(KVFormatSpec):
         return self.kv_caches.dtype
 
     def data_ptrs(self, layer_indices: list[int]) -> list[int]:
-        # Per-layer base pointers: layer l's data starts one per-(layer,
-        # block) chunk after layer l-1's within every block, so the bases
-        # step by chunk bytes and the kernels stride whole blocks.
         tensor = cast(torch.Tensor, self.kv_caches)
         chunk_bytes = tensor.stride(1) * tensor.element_size()
         base = tensor.data_ptr()

@@ -46,10 +46,8 @@ def vllm_layout_hints(vllm_config: "VllmConfig | None" = None) -> "LayoutHints":
 
 
 _VLLM_KV_LAYOUT_ALIASES = {"NHD": "LBNHC", "HND": "LBHNC"}
-# TODO: heads-outermost layouts fragment a (layer, block)'s content into
-# per-head pieces; the transfer kernels address one contiguous run per
-# (layer, block). Support needs a head-stride field in PageBufferShapeDesc
-# plus fragmented within-block address math in both kernel families.
+# TODO: support heads-outermost layouts; the transfer kernels address one
+# contiguous run per (layer, block), which these fragment per head.
 _UNSUPPORTED_VLLM_KV_LAYOUTS = frozenset({"LHBNC", "BHLNC"})
 _KNOWN_VLLM_KV_LAYOUTS = (
     "NHD",
@@ -66,20 +64,12 @@ _KNOWN_VLLM_KV_LAYOUTS = (
 def translate_vllm_kv_cache_layout(
     kv_cache_layout: str | None,
 ) -> Literal["LBNHC", "LBHNC", "BLHNC", "BLNHC"]:
-    """Translate a vLLM ``KVCacheLayout`` name to the canonical hint name.
-
-    Legacy spellings normalize to their standardized names (``NHD`` ->
-    ``LBNHC``, ``HND`` -> ``LBHNC``). TODO: ``LHBNC`` and ``BHLNC`` are
-    rejected for now: their per-(layer, block) content is fragmented per
-    head, which the transfer kernels cannot address yet.
+    """Canonicalize a vLLM ``KVCacheLayout`` name (``NHD``/``HND`` are
+    legacy aliases of ``LBNHC``/``LBHNC``).
 
     Raises:
-        NotImplementedError: for standardized layouts LMCache cannot
-            transfer. Registration must fail here -- guessing a layout
-            would silently corrupt the cache.
-        ValueError: for ``None`` (layout not resolved yet -- hints must be
-            built at registration time) or names that are not vLLM KV
-            cache layouts at all.
+        NotImplementedError: for layouts LMCache cannot transfer.
+        ValueError: for ``None`` or unknown names.
     """
     if kv_cache_layout is None:
         raise ValueError(
@@ -105,14 +95,9 @@ def translate_vllm_kv_cache_layout(
 def try_get_vllm_kv_cache_layout(
     vllm_config: "VllmConfig | None" = None,
 ) -> Literal["LBNHC", "LBHNC", "BLHNC", "BLNHC"] | None:
-    """Query vLLM's resolved KV cache layout as its canonical name.
+    """Return vLLM's resolved KV cache layout as its canonical name.
 
     Returns ``None`` when vLLM is unavailable (i.e. the MP server).
-
-    Raises:
-        NotImplementedError: if vLLM resolved a standardized layout LMCache
-            cannot transfer yet. Registration must fail here -- falling back
-            to a guessed layout would silently corrupt the cache.
     """
     try:
         if vllm_config is None:
@@ -128,8 +113,7 @@ def try_get_vllm_kv_cache_layout(
         )
         return None
 
-    # vllm#51718 and later: the engine core resolves the layout once into
-    # CacheConfig, and the attention-backend query below no longer exists.
+    # vllm#51718 and later resolve the layout once into CacheConfig.
     if hasattr(cache_config, "kv_cache_layout"):
         return translate_vllm_kv_cache_layout(cache_config.kv_cache_layout)
 

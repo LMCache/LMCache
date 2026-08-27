@@ -1311,8 +1311,7 @@ class LMCacheMPWorkerAdapter:
                 )
         self.kv_caches = kv_caches
         self.engine_group_infos = list(engine_group_infos)
-        # Persisted like the rest of the registration payload: heartbeat
-        # recovery re-registers from a context without the ambient config.
+        # Reused when heartbeat recovery re-registers.
         self._layout_hints = (
             layout_hints if layout_hints is not None else vllm_layout_hints()
         )

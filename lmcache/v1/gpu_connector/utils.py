@@ -273,9 +273,8 @@ def normalize_and_discover_per_layer_formats(
                 for sub_idx, layer_idx in enumerate(same_shape_indices):
                     detected[layer_idx] = (normalized[sub_idx], fmt)
             else:
-                # Cross-layer (e.g. reconstructed blocks-first): one tensor
-                # covers the whole sub-group; identity grouping downstream
-                # folds the repeated entries back into one group.
+                # Every layer of the sub-group maps to the one cross-layer
+                # tensor; identity grouping later folds them into one group.
                 for layer_idx in same_shape_indices:
                     detected[layer_idx] = (normalized, fmt)
 
@@ -297,12 +296,11 @@ def _resolve_spec_view(
     engine_kv_format: "lmcache_native.EngineKVFormat",
     layer_idx: int = 0,
 ) -> "tuple[DiscoverableKVCache, int]":
-    """Map a per-layer index onto the structure a format's spec expects.
+    """Pick the spec input for ``layer_idx``.
 
-    In a normalized per-layer structure, every layer of a cross-layer group
-    holds the group's single reconstructed tensor, so the spec receives that
-    tensor and a local index. Bare cross-layer tensors and per-layer lists
-    pass through unchanged.
+    Normalized per-layer lists repeat a cross-layer group's tensor at every
+    layer: return that tensor with a local index of 0. Anything else passes
+    through unchanged.
     """
     if lmcache_native.is_cross_layer(engine_kv_format) and isinstance(kv_caches, list):
         return kv_caches[layer_idx], 0

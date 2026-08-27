@@ -306,9 +306,8 @@ page_buffer_offset(const int k_or_v, const int token_idx,
                        format == EngineKVFormat::NL_X_NB_BS_NH_CS) {
     return token_idx * scalars_per_token + scalar_offset;
   }
-  // vLLM standardized BLHNC: [NB, NL, NH, BS, CS]. Callers pass per-layer
-  // base pointers (one (layer, block) chunk apart); the block step spans all
-  // layers. Within-block math matches NL_X_NB_NH_BS_CS.
+  // [NB, NL, NH, BS, CS]: per-layer base pointers, block step in
+  // block_stride_xwords.
   else if constexpr (format == EngineKVFormat::NB_NL_NH_BS_CS) {
     const int hs2 = 2 * head_size;
     const int block_idx = token_idx / block_size;
@@ -318,7 +317,7 @@ page_buffer_offset(const int k_or_v, const int token_idx,
     return block_idx * block_stride_xwords + head_idx * block_size * hs2 +
            block_offset * hs2 + head_offset;
   }
-  // vLLM standardized BLNHC: [NB, NL, BS, NH, CS]; NHD within-block math.
+  // [NB, NL, BS, NH, CS]: NHD within-block math.
   else if constexpr (format == EngineKVFormat::NB_NL_BS_NH_CS) {
     const int block_idx = token_idx / block_size;
     const int block_offset = token_idx % block_size;
@@ -659,9 +658,7 @@ void multi_layer_kv_transfer_templated(
 
   lmc::check_block_size(engine_kv_format, block_size);
   lmc::check_head_size(engine_kv_format, head_size_xword);
-  // Physical per-block step for blocks-first cross-layer formats; 0 means
-  // tight (num_layers * block_size * scalars_per_token). HMA pools shared
-  // with other groups have a larger step.
+  // 0 means tight (num_layers * block_size * scalars_per_token).
   int64_t block_stride_xwords = block_stride_elems / elements_per_xword;
   if (block_stride_xwords == 0) {
     block_stride_xwords =
@@ -829,9 +826,7 @@ void multi_layer_kv_transfer_fused_templated(
 
   lmc::check_block_size(engine_kv_format, block_size);
   lmc::check_head_size(engine_kv_format, head_size_xword);
-  // Physical per-block step for blocks-first cross-layer formats; 0 means
-  // tight (num_layers * block_size * scalars_per_token). HMA pools shared
-  // with other groups have a larger step.
+  // 0 means tight (num_layers * block_size * scalars_per_token).
   int64_t block_stride_xwords = block_stride_elems / elements_per_xword;
   if (block_stride_xwords == 0) {
     block_stride_xwords =

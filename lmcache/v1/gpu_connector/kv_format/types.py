@@ -22,18 +22,14 @@ import torch
 # for unwrapping to this form before calling the helpers.
 DiscoverableKVCache = Union[torch.Tensor, list["DiscoverableKVCache"]]
 
-# Layout names accepted in ``LayoutHints.kv_layout``: the standardized
-# stride-permutation vocabulary over the logical [layers, blocks, heads,
-# states, content] shape, plus the legacy per-layer spellings (``NHD`` ==
-# ``LBNHC``, ``HND`` == ``LBHNC``). Names describe geometry, not any one
-# engine; formats remain in ``EngineKVFormat``.
+# Layout names accepted in ``LayoutHints.kv_layout``: vLLM's standardized
+# [L, B, H, N, C] permutations plus the legacy spellings (``NHD`` ==
+# ``LBNHC``, ``HND`` == ``LBHNC``).
 KVLayoutName = Literal[
     "NHD", "HND", "LBNHC", "LBHNC", "LHBNC", "BLHNC", "BLNHC", "BHLNC"
 ]
 
-# One canonical spelling per supported layout; keys are every accepted hint
-# spelling (legacy names are aliases of the layer-compact pair). Absence
-# means the layout is not supported.
+# Accepted spelling -> canonical name; absent means unsupported.
 CANONICAL_KV_LAYOUTS: dict[str, str] = {
     "NHD": "LBNHC",
     "HND": "LBHNC",

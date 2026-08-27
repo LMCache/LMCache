@@ -86,9 +86,7 @@ __device__ inline size_t calculate_engine_global_offset(
     return engine_block_idx * scalars_per_block;
   } else if constexpr (format == EngineKVFormat::NB_NL_NH_BS_CS ||
                        format == EngineKVFormat::NB_NL_BS_NH_CS) {
-    // Blocks-first fused cross-layer: per-layer base pointers sit one
-    // (layer, block) chunk apart, and scalars_per_block() carries the full
-    // interleaved block step via block_stride_elems.
+    // scalars_per_block() carries the block step via block_stride_elems.
     return engine_block_idx * scalars_per_block;
   } else if constexpr (format == EngineKVFormat::NB_NL_TWO_NH_BS_HS) {
     // TRT-LLM cross-layer HND: single tensor [NB, NL, 2, NH, BS, HS]
