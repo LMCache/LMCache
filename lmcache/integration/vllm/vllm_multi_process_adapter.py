@@ -1279,6 +1279,7 @@ class LMCacheMPWorkerAdapter:
         self,
         kv_caches: dict[str, torch.Tensor],
         engine_group_infos: Sequence[EngineGroupInfo] = (),
+        layout_hints: "LayoutHints | None" = None,
     ) -> None:
         """
         Register the kv caches with LMCache server.
@@ -1287,6 +1288,8 @@ class LMCacheMPWorkerAdapter:
             kv_caches: A dict of kv caches to register. The keys are the
                 layer names and the values are the corresponding tensors.
             engine_group_infos: LMCache-owned engine KV cache group metadata.
+            layout_hints: Engine layout hints forwarded to the server; built
+                here from the ambient vLLM config when not provided.
 
         Raises:
             ConnectionError: if the server does not respond within
@@ -1308,6 +1311,11 @@ class LMCacheMPWorkerAdapter:
                 )
         self.kv_caches = kv_caches
         self.engine_group_infos = list(engine_group_infos)
+        # Persisted like the rest of the registration payload: heartbeat
+        # recovery re-registers from a context without the ambient config.
+        self._layout_hints = (
+            layout_hints if layout_hints is not None else vllm_layout_hints()
+        )
         self._send_register_kv_caches_request(kv_caches)
 
     def _block_ids_per_group(self, op: LoadStoreOp) -> list[list[int]]:
@@ -1331,11 +1339,6 @@ class LMCacheMPWorkerAdapter:
         """
         self.kv_caches = kv_caches
         transfer_ctx = create_transfer_context(kv_caches, mode=self._mp_transfer_mode)
-        # Captured once: the layout is final for the process lifetime, and
-        # heartbeat recovery may re-register from a context without the
-        # ambient vLLM config.
-        if self._layout_hints is None:
-            self._layout_hints = vllm_layout_hints()
         layout_hints = self._layout_hints
         self.transfer_ctx = transfer_ctx
         try:

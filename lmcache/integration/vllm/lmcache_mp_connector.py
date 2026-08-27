@@ -541,7 +541,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             dcp_size=self._dcp_size,
         )
         self.worker_adapter.register_kv_caches(
-            kv_caches, engine_group_infos=engine_group_infos
+            kv_caches,
+            engine_group_infos=engine_group_infos,
+            layout_hints=layout_hints,
         )
         if self.dispatcher is not None:
             dispatch(
