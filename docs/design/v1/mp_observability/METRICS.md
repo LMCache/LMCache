@@ -552,7 +552,7 @@ rate(lmcache_blend_lookup_hit_tokens_total[5m])
 / rate(lmcache_blend_lookup_requested_tokens_total[5m])
 ```
 
-Under V3 the numerator splits into three disjoint paths that sum to
+The numerator splits into three disjoint paths that sum to
 `hit_tokens`: `prefix_hit_tokens` (contiguous prefix, pure load),
 `segmented_prefix_hit_tokens` (post-gap, original positions), and
 `non_prefix_hit_tokens` (cross-context, re-RoPE'd).
@@ -589,25 +589,9 @@ rate(lmcache_blend_retrieve_noops_total[5m])
    + rate(lmcache_blend_retrieve_requests_total[5m]))
 ```
 
-### CB Store Pre-computed Metrics
-
-| OTel metric name | Prometheus name | Type | Source event | Calculation |
-|---|---|---|---|---|
-| `lmcache_blend.store_pre_computed_requests` | `lmcache_blend_store_pre_computed_requests_total` | Counter | `CB_STORE_PRE_COMPUTED_START` | +1 per event |
-| `lmcache_blend.store_pre_computed_chunks` | `lmcache_blend_store_pre_computed_chunks_total` | Counter | `CB_STORE_PRE_COMPUTED_END` | `+stored_chunks` |
-| `lmcache_blend.store_pre_computed_failures` | `lmcache_blend_store_pre_computed_failures_total` | Counter | `CB_STORE_PRE_COMPUTED_END` | +1 when `success=False` |
-
-**What it answers:** How often is pre-computed CB storage invoked? How many chunks are written? What is the failure rate?
-
-### CB Store Final Metrics
-
-| OTel metric name | Prometheus name | Type | Source event | Calculation |
-|---|---|---|---|---|
-| `lmcache_blend.store_final_requests` | `lmcache_blend_store_final_requests_total` | Counter | `CB_STORE_FINAL_START` | +1 per event |
-| `lmcache_blend.store_final_chunks` | `lmcache_blend_store_final_chunks_total` | Counter | `CB_STORE_FINAL_END` | `+stored_chunks` |
-| `lmcache_blend.store_final_failures` | `lmcache_blend_store_final_failures_total` | Counter | `CB_STORE_FINAL_END` | +1 when `success=False` |
-
-**What it answers:** How often is final CB storage invoked? How many chunks are committed? What is the failure rate?
+The blend server has no store RPCs of its own: stores ride the standard `STORE`
+path (counted under the `lmcache_mp.` metrics) and the blend module only
+registers the stored chunks as fingerprints (below).
 
 ### CB Fingerprint Table Metrics
 
@@ -618,11 +602,11 @@ rate(lmcache_blend_retrieve_noops_total[5m])
 
 **What it answers:** How many chunks are indexed into the fingerprint table? How many stale entries are evicted?
 
-### CB V3 Phase Metrics
+### CB Phase Metrics
 
 Each `*_duration` histogram pairs its leg's START/END events by
 `(session, worker_id)` and measures the interval the same-named trace span
-covers (see [blend_v3_observability.md](blend_v3_observability.md)) — but is
+covers (see [blend_observability.md](blend_observability.md)) — but is
 always on, where traces are sampled.  The lookup legs run once per request
 (`worker_id=None`); at TP>1 each rank's retrieve/scatter is its own sample, so
 `retrieve_duration` and `scatter_duration` record one observation per rank.

@@ -220,33 +220,18 @@ def _build_modules(
     logger.info("Supported transfer mode: %s", mp_config.supported_transfer_mode)
 
     # Targets the reaper scans (and reap-notifies). The transfer modules own
-    # per-instance liveness; BlendV3Module is appended below as a state mirror.
+    # per-instance liveness; BlendModule is appended below as a state mirror.
     liveness_targets: list[InstanceLivenessTarget] = [
         m
         for m in transfer_modules
         if isinstance(m, (LMCacheDrivenTransferModule, EngineDrivenTransferModule))
     ]
 
-    # At most one blend module is ever built (engine_type selects one).
     blend_module: EngineModule | None = None
-
-    if mp_config.engine_type == "blend_legacy":
-        if mp_config.supported_transfer_mode == "engine_driven":
-            raise ValueError(
-                "Legacy blend engine requires supported_transfer_mode to be "
-                f"'lmcache_driven' or 'auto', got "
-                f"'{mp_config.supported_transfer_mode}'"
-            )
-        # First Party
-        from lmcache.v1.multiprocess.modules.blend import BlendModule
-
-        blend_module = BlendModule(ctx)
-
-    # "blend" selects CacheBlend V3 (the current implementation).
     if mp_config.engine_type == "blend":
         if mp_config.supported_transfer_mode == "engine_driven":
             raise ValueError(
-                "blend (V3) engine requires supported_transfer_mode "
+                "blend engine requires supported_transfer_mode "
                 f"'lmcache_driven' or 'auto', got "
                 f"'{mp_config.supported_transfer_mode}'"
             )
@@ -254,7 +239,7 @@ def _build_modules(
         from lmcache.v1.mp_coordinator.blend_client import (
             BlendCoordinatorClient,
         )
-        from lmcache.v1.multiprocess.modules.blend_v3 import BlendV3Module
+        from lmcache.v1.multiprocess.modules.blend import BlendModule
 
         transfer_module = next(
             m for m in transfer_modules if isinstance(m, LMCacheDrivenTransferModule)
@@ -278,17 +263,17 @@ def _build_modules(
             timeout=coordinator_config.blend_timeout,
             match_concurrency=coordinator_config.blend_match_concurrency,
         )
-        blend_v3 = BlendV3Module(
+        blend = BlendModule(
             ctx,
             transfer_module,
             coordinator=coordinator,
             enable_segmented_prefix=mp_config.enable_segmented_prefix,
             enable_dedup_content=mp_config.enable_dedup_content,
         )
-        blend_module = blend_v3
-        # blend_v3 mirrors per-instance CB rope state, so the reaper must
-        # notify it via drop_instance_state when an instance is reaped.
-        liveness_targets.append(blend_v3)
+        blend_module = blend
+        # The blend module mirrors per-instance CB rope state, so the reaper
+        # must notify it via drop_instance_state when an instance is reaped.
+        liveness_targets.append(blend)
 
     # Experimental intermediate tensor transfer modules
     lmcache_driven_module = next(

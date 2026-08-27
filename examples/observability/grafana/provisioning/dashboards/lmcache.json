@@ -2398,18 +2398,6 @@
             },
             {
               "editorMode": "code",
-              "expr": "rate(lmcache_blend_store_pre_computed_requests_total[$__rate_interval])",
-              "legendFormat": "store_pre_computed requests/s",
-              "refId": "E"
-            },
-            {
-              "editorMode": "code",
-              "expr": "rate(lmcache_blend_store_final_requests_total[$__rate_interval])",
-              "legendFormat": "store_final requests/s",
-              "refId": "F"
-            },
-            {
-              "editorMode": "code",
               "expr": "rate(lmcache_blend_retrieve_requests_total[$__rate_interval])",
               "legendFormat": "retrieve requests/s",
               "refId": "G"
@@ -2419,18 +2407,6 @@
               "expr": "rate(lmcache_blend_retrieve_failures_total[$__rate_interval])",
               "legendFormat": "retrieve failure/s",
               "refId": "H"
-            },
-            {
-              "editorMode": "code",
-              "expr": "rate(lmcache_blend_store_pre_computed_failures_total[$__rate_interval])",
-              "legendFormat": "store_pre_computed failure/s",
-              "refId": "I"
-            },
-            {
-              "editorMode": "code",
-              "expr": "rate(lmcache_blend_store_final_failures_total[$__rate_interval])",
-              "legendFormat": "store_final failure/s",
-              "refId": "J"
             },
             {
               "editorMode": "code",
@@ -2641,18 +2617,6 @@
             },
             {
               "editorMode": "code",
-              "expr": "rate(lmcache_blend_store_pre_computed_chunks_total[$__rate_interval])",
-              "legendFormat": "store_pre_computed chunks/s",
-              "refId": "C"
-            },
-            {
-              "editorMode": "code",
-              "expr": "rate(lmcache_blend_store_final_chunks_total[$__rate_interval])",
-              "legendFormat": "store_final chunks/s",
-              "refId": "D"
-            },
-            {
-              "editorMode": "code",
               "expr": "rate(lmcache_blend_fingerprints_registered_total[$__rate_interval])",
               "legendFormat": "fingerprints registered chunks/s",
               "refId": "E"
@@ -2779,7 +2743,7 @@
           "datasource": {
             "uid": "tempo"
           },
-          "description": "Waterfall of CacheBlend (blend server) request spans: cb.request \u2192 cb.lookup {cb.fingerprint_match, cb.sparse_prefetch}, cb.retrieve {cb.scatter}, cb.store_pre_computed, cb.store_final. Click a row for the full Tempo waterfall.",
+          "description": "Waterfall of CacheBlend (blend server) request spans: cb.request \u2192 cb.lookup {cb.fingerprint_match, cb.sparse_prefetch}, cb.retrieve {cb.scatter}. Click a row for the full Tempo waterfall.",
           "fieldConfig": {
             "defaults": {},
             "overrides": []

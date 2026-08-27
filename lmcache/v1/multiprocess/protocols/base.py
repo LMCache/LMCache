@@ -70,22 +70,12 @@ class RequestType(enum.Enum):
     # Debug operations
     NOOP = enum.auto()
 
-    # Blend operations
-    CB_REGISTER_KV_CACHE = enum.auto()
-    CB_UNREGISTER_KV_CACHE = enum.auto()
-    CB_STORE_PRE_COMPUTED = enum.auto()
-    CB_LOOKUP_PRE_COMPUTED = enum.auto()
+    # Blend operations (paged-aware; KV cache registration rides the
+    # standard REGISTER_KV_CACHE). A payload-shape change means a new request
+    # name -- the blend plugin dispatches on these.
+    CB_REGISTER_ROPE = enum.auto()
+    CB_UNREGISTER_ROPE = enum.auto()
     CB_RETRIEVE_PRE_COMPUTED = enum.auto()
-    CB_STORE_FINAL = enum.auto()
-
-    # Blend V2 operations (use CBMatchResult instead of list[tuple[int, int]])
-    CB_LOOKUP_PRE_COMPUTED_V2 = enum.auto()
-    CB_RETRIEVE_PRE_COMPUTED_V2 = enum.auto()
-
-    # Blend V3 — paged-aware CB.
-    CB_REGISTER_ROPE_V3 = enum.auto()
-    CB_UNREGISTER_ROPE_V3 = enum.auto()
-    CB_RETRIEVE_PRE_COMPUTED_V3 = enum.auto()
     CB_UNIFIED_LOOKUP = enum.auto()
 
     # P2P operations

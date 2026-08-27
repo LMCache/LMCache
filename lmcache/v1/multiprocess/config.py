@@ -47,9 +47,8 @@ class MPServerConfig:
     """Hash algorithm for token-based operations (builtin, sha256_cbor, blake3)."""
 
     engine_type: str = "default"
-    """Cache engine backend type
-    ('default' for standard prefix caching, 'blend' when cacheblend is enabled).
-    """
+    """Cache engine backend type: 'default' for standard prefix caching,
+    'blend' to compose the blend module (non-prefix KV reuse)."""
 
     separate_object_groups: bool = False
     """When True, split kernel groups into one object group per
@@ -326,10 +325,10 @@ def add_mp_server_args(
         "--engine-type",
         type=str,
         default="default",
-        choices=["default", "blend", "blend_legacy"],
+        choices=["default", "blend"],
         help="Cache engine backend type. 'default' uses standard prefix caching; "
-        "'blend' selects CacheBlend V3 (the current implementation); "
-        "'blend_legacy' selects the original CacheBlend. Default is 'default'.",
+        "'blend' composes the blend module for non-prefix KV reuse. "
+        "Default is 'default'.",
     )
     mp_group.add_argument(
         "--supported-transfer-mode",
