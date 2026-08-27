@@ -27,7 +27,7 @@ import numpy as np
 from lmcache.v1.distributed.api import EncodedObjectKey  # noqa: F401  re-exported
 from lmcache.v1.distributed.api import Tier
 from lmcache.v1.mp_coordinator.api import CacheEventBatch
-from lmcache.v1.mp_coordinator.key_directory import Placement
+from lmcache.v1.mp_coordinator.views.key_directory import Placement
 
 
 def encode_tokens(tokens: "list[int] | np.ndarray") -> str:

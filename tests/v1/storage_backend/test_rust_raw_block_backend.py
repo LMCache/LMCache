@@ -604,6 +604,105 @@ def test_rust_raw_block_backend_pin_and_contains_are_idempotent(
 @pytest.mark.skipif(
     not _has_ext(), reason="lmcache_rust_raw_block_io extension not installed"
 )
+def test_rust_raw_block_backend_batched_remove(memory_allocator, loop_in_thread):
+    """batched_remove should drop every supplied key in a single locked batch.
+
+    Also verifies that pinned keys are preserved when ``force=False``, mirroring
+    the contract of single-key ``remove`` and ``RawBlockCore.delete_many``.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dev.bin")
+        with open(dev_path, "wb") as f:
+            f.truncate(64 * 1024 * 1024)
+
+        config = LMCacheEngineConfig.from_defaults(
+            chunk_size=256,
+            local_cpu=True,
+            max_local_cpu_size=0.1,
+            lmcache_instance_id="test_rust_raw_block_backend_batched_remove",
+        )
+        config.storage_plugins = []
+        config.extra_config = {
+            "rust_raw_block.device_path": dev_path,
+            "rust_raw_block.block_align": 4096,
+            "rust_raw_block.header_bytes": 4096,
+            "rust_raw_block.meta_total_bytes": 4 * 1024 * 1024,
+            "rust_raw_block.meta_enable_periodic": False,
+        }
+        metadata = LMCacheMetadata(
+            model_name="test_model",
+            world_size=1,
+            local_world_size=1,
+            worker_id=0,
+            local_worker_id=0,
+            kv_dtype=torch.bfloat16,
+            kv_shape=(4, 2, 256, 8, 128),
+        )
+        local_cpu = LocalCPUBackend(
+            config=config,
+            metadata=metadata,
+            dst_device="cpu",
+            memory_allocator=memory_allocator,
+        )
+        backend = RustRawBlockBackend(
+            config=config,
+            metadata=metadata,
+            local_cpu_backend=local_cpu,
+            loop=loop_in_thread,
+            dst_device="cpu",
+        )
+
+        try:
+            # Empty input must short-circuit cleanly.
+            assert backend.batched_remove([]) == 0
+
+            keys = [
+                CacheEngineKey("test_model", 1, 0, 1000 + i, torch.bfloat16)
+                for i in range(5)
+            ]
+            allocator = AdHocMemoryAllocator(device="cpu")
+            objs = []
+            for _ in keys:
+                obj = allocator.allocate(
+                    [torch.Size([2, 16, 8, 128])],
+                    [torch.bfloat16],
+                    fmt=MemoryFormat.KV_T2D,
+                )
+                assert obj is not None
+                objs.append(obj)
+
+            futs = backend.batched_submit_put_task(keys, objs)
+            assert futs is not None
+            for fut in futs:
+                fut.result(timeout=10)
+            for obj in objs:
+                obj.ref_count_down()
+
+            for key in keys:
+                assert backend.contains(key, pin=False) is True
+
+            # Pin one key; force=False should preserve it and remove the rest.
+            assert backend.pin(keys[2]) is True
+
+            removed = backend.batched_remove(keys, force=False)
+            assert removed == len(keys) - 1
+            assert backend.contains(keys[2], pin=False) is True
+            for key in keys[:2] + keys[3:]:
+                assert backend.contains(key, pin=False) is False
+
+            # Removing a fully-missing batch returns zero, no error.
+            assert backend.batched_remove(keys[:2]) == 0
+
+            # force=True drops the pinned key as well.
+            assert backend.batched_remove([keys[2]], force=True) == 1
+            assert backend.contains(keys[2], pin=False) is False
+        finally:
+            backend.close()
+
+
+@pytest.mark.skipif(
+    not _has_ext(), reason="lmcache_rust_raw_block_io extension not installed"
+)
 def test_rust_raw_block_backend_close_is_thread_safe(memory_allocator, loop_in_thread):
     """Concurrent close calls should not double-clean raw-block resources."""
     with tempfile.TemporaryDirectory() as td:

@@ -115,7 +115,7 @@ never reads. The controller takes it as a dependency instead. Its
 node-local counterpart one scope down is
 `distributed/storage_controllers/eviction_controller.py`.
 
-### CacheUsageManager (`usage_manager.py`)
+### CacheUsageManager (`views/usage_manager.py`)
 
 The byte totals are a **derived view of the global key directory**,
 constructed and maintained in this manager rather than inside the
