@@ -25,10 +25,12 @@ from lmcache.v1.distributed.eviction_policy.isolated_lru import (
 )
 from lmcache.v1.distributed.quota_manager import QuotaManager
 from lmcache.v1.mp_coordinator.api import CacheEventBatch, CacheEventType
+from lmcache.v1.mp_coordinator.controllers.base import Controller
 from lmcache.v1.mp_coordinator.persistence.durable_component import (
     DurableComponent,
     PersistenceType,
 )
+from lmcache.v1.mp_coordinator.views.usage_manager import CacheUsageManager
 from lmcache.v1.multiprocess.cache_control.object_service import (
     MAX_DELETE_BATCH,
 )
@@ -36,13 +38,15 @@ from lmcache.v1.multiprocess.cache_control.object_service import (
 if TYPE_CHECKING:
     # First Party
     from lmcache.v1.distributed.api import ObjectKey
-    from lmcache.v1.mp_coordinator.controllers.usage_manager import CacheUsageManager
+    from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
+    from lmcache.v1.mp_coordinator.discovery import Registry
     from lmcache.v1.mp_coordinator.registry import InstanceRegistry
+    from lmcache.v1.mp_coordinator.views.base import View
 
 logger = init_logger(__name__)
 
 
-class FleetEvictionController:
+class FleetEvictionController(Controller):
     """Per-``cache_salt`` L2 eviction controller for the fleet.
 
     Owns the quota registry it enforces (exposed for the ``/quota``
@@ -147,6 +151,30 @@ class FleetEvictionController:
                 self._pin_counts.pop(key, None)
             else:
                 self._pin_counts[key] = count - 1
+
+    @classmethod
+    def from_config(
+        cls,
+        config: "MPCoordinatorConfig",
+        views: "Registry[View]",
+        controllers: "Registry[Controller]",
+    ) -> "FleetEvictionController":
+        """Build the controller from configuration and the fleet's views.
+
+        The usage view comes from the registry rather than being made
+        here: the coordinator has exactly one, and the eviction plan is
+        only correct if it reads the same bytes the fleet reported.
+
+        Args:
+            config: The coordinator configuration.
+            views: The fleet's read models.
+            controllers: Unused; this controller depends on no peer.
+        """
+        return cls(
+            usage_manager=views.get(CacheUsageManager),
+            eviction_ratio=config.eviction_ratio,
+            trigger_watermark=config.trigger_watermark,
+        )
 
     def get_durable_components(self) -> tuple[DurableComponent, ...]:
         """Return the state this controller owns that must outlive the process.

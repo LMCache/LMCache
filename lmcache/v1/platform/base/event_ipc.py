@@ -160,7 +160,7 @@ class EventIPCBackend(Protocol):
         ...
 
 
-class DefaultEventIPCBackend:
+class DefaultEventIPCBackend(EventIPCBackend):
     """CUDA-style event IPC backend over an injectable event module.
 
     Works for any backend whose ``Event`` class supports interprocess handles,
