@@ -1,0 +1,14 @@
+env:
+  DOCKER_BUILDKIT: 1
+
+steps:
+  - label: ":compression: Multiprocessing tests"
+    key: "test"
+    timeout_in_minutes: 60
+    command: |
+      set -euo pipefail
+      source .buildkite/k3_tests/common_scripts/helpers.sh
+      merge_pr_base_branch
+      .buildkite/scripts/should-run-comprehensive.sh || exit 0
+      chmod +x .buildkite/scripts/multiprocessing-test/*.sh
+      BUILD_ID=${BUILDKITE_BUILD_ID} .buildkite/scripts/multiprocessing-test/run-mp-test.sh

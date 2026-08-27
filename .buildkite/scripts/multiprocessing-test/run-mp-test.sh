@@ -6,6 +6,9 @@ set -o pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+source "${SCRIPT_DIR}/../../k3_tests/common_scripts/helpers.sh"
+merge_pr_base_branch
+
 # Export container names and configuration for all scripts
 export LMCACHE_CONTAINER_NAME="lmcache-mp-test-$$"
 export VLLM_CONTAINER_NAME="vllm-mp-test-$$"
@@ -125,4 +128,3 @@ echo "=== ✅ All tests passed! ==="
 echo "============================================"
 
 # Step 8: Cleanup runs automatically via trap
-
