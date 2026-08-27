@@ -178,6 +178,23 @@ def test_isolated_ipc_flag_enables():
     assert _parse_mp(["--no-isolated-ipc"]).isolated_ipc is False
 
 
+# -- Engine type --------------------------------------------------------------
+
+
+def test_engine_type_defaults_to_default():
+    assert _parse_mp([]).engine_type == "default"
+
+
+def test_engine_type_blend_selects_blend_module():
+    assert _parse_mp(["--engine-type", "blend"]).engine_type == "blend"
+
+
+def test_engine_type_blend_legacy_removed():
+    # The original blend engine was removed; only ``blend`` remains.
+    with pytest.raises(SystemExit):
+        _parse_mp(["--engine-type", "blend_legacy"])
+
+
 # -- Event reporting ----------------------------------------------------------
 
 

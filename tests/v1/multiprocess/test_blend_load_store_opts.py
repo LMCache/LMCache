@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Unit tests for V3 load/store optimizations: L1 (batched rope), L2
+"""Unit tests for blend load/store optimizations: L1 (batched rope), L2
 (obj_keys cache), S1 (async fingerprint).
 
 These tests exercise the wiring/state changes without touching CUDA or
@@ -26,12 +26,12 @@ import lmcache.lmcache_native as lmcache_native
 
 
 def _make_engine_with_mocked_matcher():
-    """Construct a real BlendV3Module with the matcher mocked so we can
+    """Construct a real BlendModule with the matcher mocked so we can
     observe `on_new_token_hashes` calls without setting up storage."""
     # First Party
-    from lmcache.v1.multiprocess.modules import blend_v3 as v3_mod
+    from lmcache.v1.multiprocess.modules import blend as blend_mod
 
-    eng_mock = MagicMock(spec=v3_mod.BlendV3Module)
+    eng_mock = MagicMock(spec=blend_mod.BlendModule)
     eng_mock._fingerprint_stop = threading.Event()
     eng_mock._token_range_matcher = MagicMock()
     # The drainer reports the matcher's indexed-chunk count on the event.
@@ -42,10 +42,10 @@ def _make_engine_with_mocked_matcher():
     eng_mock._event_bus = MagicMock()
     # Bind the real drainer + its registration-event helper to our mock.
     eng_mock._emit_fingerprints_registered = (
-        v3_mod.BlendV3Module._emit_fingerprints_registered.__get__(eng_mock)
+        blend_mod.BlendModule._emit_fingerprints_registered.__get__(eng_mock)
     )
     eng_mock._drain_fingerprint_queue = (
-        v3_mod.BlendV3Module._drain_fingerprint_queue.__get__(eng_mock)
+        blend_mod.BlendModule._drain_fingerprint_queue.__get__(eng_mock)
     )
     return eng_mock
 
@@ -268,26 +268,26 @@ def test_batched_rope_calls_kernel_per_group_per_slot():
     (matching today's CUDA-level work) but the Python ``per-group setup``
     runs only G times (vs N*G under the legacy path)."""
     # First Party
-    from lmcache.v1.multiprocess.modules import blend_v3 as v3_mod
+    from lmcache.v1.multiprocess.modules import blend as blend_mod
 
     gpu_context, head_size = _build_fake_gpu_context(batch_size=4, num_groups=2)
-    rope_state = v3_mod._CBRopeState(
+    rope_state = blend_mod._CBRopeState(
         head_size=head_size,
         is_neox_style=True,
         cos_sin_caches=[MagicMock()],
         group_to_cache=[],
     )
 
-    eng = MagicMock(spec=v3_mod.BlendV3Module)
-    eng._apply_cb_rope_batched = v3_mod.BlendV3Module._apply_cb_rope_batched.__get__(
+    eng = MagicMock(spec=blend_mod.BlendModule)
+    eng._apply_cb_rope_batched = blend_mod.BlendModule._apply_cb_rope_batched.__get__(
         eng
     )
 
     slots_to_rope = [(0, 100, 200), (2, 300, 400)]  # 2 non-prefix slots
 
     with (
-        patch.object(v3_mod, "device_ops") as ops,
-        patch.object(v3_mod, "torch") as torch_mod,
+        patch.object(blend_mod, "device_ops") as ops,
+        patch.object(blend_mod, "torch") as torch_mod,
     ):
         torch_mod.long = "long"
 
@@ -319,21 +319,21 @@ def test_batched_rope_calls_kernel_per_group_per_slot():
 def test_batched_rope_noop_on_empty_slots():
     """No non-prefix slots → no setup, no kernel calls."""
     # First Party
-    from lmcache.v1.multiprocess.modules import blend_v3 as v3_mod
+    from lmcache.v1.multiprocess.modules import blend as blend_mod
 
     gpu_context, head_size = _build_fake_gpu_context(batch_size=2, num_groups=2)
-    rope_state = v3_mod._CBRopeState(
+    rope_state = blend_mod._CBRopeState(
         head_size=head_size,
         is_neox_style=False,
         cos_sin_caches=[MagicMock()],
         group_to_cache=[],
     )
-    eng = MagicMock(spec=v3_mod.BlendV3Module)
-    eng._apply_cb_rope_batched = v3_mod.BlendV3Module._apply_cb_rope_batched.__get__(
+    eng = MagicMock(spec=blend_mod.BlendModule)
+    eng._apply_cb_rope_batched = blend_mod.BlendModule._apply_cb_rope_batched.__get__(
         eng
     )
 
-    with patch.object(v3_mod, "device_ops") as ops:
+    with patch.object(blend_mod, "device_ops") as ops:
         eng._apply_cb_rope_batched(gpu_context, rope_state, 2, [], list(range(2)))
 
     assert gpu_context.get_temp_kernel_group_buffer.call_count == 0
@@ -343,7 +343,7 @@ def test_batched_rope_noop_on_empty_slots():
 def test_batched_rope_raises_on_compressed_layout():
     """A compressed group (tokens_per_block != slots_per_block) → RuntimeError."""
     # First Party
-    from lmcache.v1.multiprocess.modules import blend_v3 as v3_mod
+    from lmcache.v1.multiprocess.modules import blend as blend_mod
 
     gpu_context = MagicMock()
     gpu_context.kv_layer_groups_manager.num_kernel_groups = 1
@@ -355,15 +355,15 @@ def test_batched_rope_raises_on_compressed_layout():
     )
     # Real rope state: the batched path resolves the group's rot window
     # (rot_for_group) before the geometry check that this test targets.
-    rope_state = v3_mod._CBRopeState(
+    rope_state = blend_mod._CBRopeState(
         head_size=32,
         is_neox_style=True,
         cos_sin_caches=[MagicMock()],
         group_to_cache=[],
     )
 
-    eng = MagicMock(spec=v3_mod.BlendV3Module)
-    eng._apply_cb_rope_batched = v3_mod.BlendV3Module._apply_cb_rope_batched.__get__(
+    eng = MagicMock(spec=blend_mod.BlendModule)
+    eng._apply_cb_rope_batched = blend_mod.BlendModule._apply_cb_rope_batched.__get__(
         eng
     )
 
@@ -377,19 +377,19 @@ def test_batched_rope_raises_on_compressed_layout():
 
 
 def _coord_engine(chunk_size: int = 4):
-    """A BlendV3Module mock with the coordinator-leg methods bound."""
+    """A BlendModule mock with the coordinator-leg methods bound."""
     # First Party
-    from lmcache.v1.multiprocess.modules import blend_v3 as v3_mod
+    from lmcache.v1.multiprocess.modules import blend as blend_mod
 
-    eng = MagicMock(spec=v3_mod.BlendV3Module)
+    eng = MagicMock(spec=blend_mod.BlendModule)
     eng._ctx = SimpleNamespace(chunk_size=chunk_size)
     # _event_bus is an instance attr (set in __init__), so spec= omits it;
     # _poll_coordinator_match publishes CB_COORDINATOR_MATCH_END through it.
     eng._event_bus = MagicMock()
-    eng._build_global_segments = v3_mod.BlendV3Module._build_global_segments.__get__(
+    eng._build_global_segments = blend_mod.BlendModule._build_global_segments.__get__(
         eng
     )
-    eng._poll_coordinator_match = v3_mod.BlendV3Module._poll_coordinator_match.__get__(
+    eng._poll_coordinator_match = blend_mod.BlendModule._poll_coordinator_match.__get__(
         eng
     )
     return eng
@@ -455,9 +455,9 @@ def test_non_overlapping_after_prefix():
     """Prefix filter + leftmost-greedy overlap dedup, filter applied first."""
     # First Party
     from lmcache.v1.multiprocess.custom_types import CBMatchResult
-    from lmcache.v1.multiprocess.modules import blend_v3 as v3_mod
+    from lmcache.v1.multiprocess.modules import blend as blend_mod
 
-    f = v3_mod.BlendV3Module._non_overlapping_after_prefix
+    f = blend_mod.BlendModule._non_overlapping_after_prefix
 
     def m(cur_st: int, cur_ed: int) -> CBMatchResult:
         return CBMatchResult(
@@ -489,17 +489,17 @@ def test_cache_for_group_uniform_and_mapped():
     """Empty map -> every group uses cache 0; a map indexes per group;
     a group past the map's end raises instead of guessing."""
     # First Party
-    from lmcache.v1.multiprocess.modules import blend_v3 as v3_mod
+    from lmcache.v1.multiprocess.modules import blend as blend_mod
 
     local, global_ = MagicMock(), MagicMock()
 
-    uniform = v3_mod._CBRopeState(
+    uniform = blend_mod._CBRopeState(
         head_size=32, is_neox_style=True, cos_sin_caches=[local], group_to_cache=[]
     )
     assert uniform.cache_for_group(0) is local
     assert uniform.cache_for_group(5) is local
 
-    mapped = v3_mod._CBRopeState(
+    mapped = blend_mod._CBRopeState(
         head_size=32,
         is_neox_style=True,
         cos_sin_caches=[local, global_],
@@ -512,12 +512,12 @@ def test_cache_for_group_uniform_and_mapped():
 
 
 def _rope_registration_engine(engine_group_indices: list[int]):
-    """A BlendV3Module mock with ``cb_register_rope`` bound and a registered
+    """A BlendModule mock with ``cb_register_rope`` bound and a registered
     instance whose kernel groups span the given engine group indices."""
     # First Party
-    from lmcache.v1.multiprocess.modules import blend_v3 as v3_mod
+    from lmcache.v1.multiprocess.modules import blend as blend_mod
 
-    eng = MagicMock(spec=v3_mod.BlendV3Module)
+    eng = MagicMock(spec=blend_mod.BlendModule)
     eng._cb_rope_state = {}
     eng._transfer_module = MagicMock()
     entry = SimpleNamespace(
@@ -531,7 +531,7 @@ def _rope_registration_engine(engine_group_indices: list[int]):
         )
     )
     eng._transfer_module.get_and_touch_context_entry.return_value = entry
-    eng.cb_register_rope = v3_mod.BlendV3Module.cb_register_rope.__get__(eng)
+    eng.cb_register_rope = blend_mod.BlendModule.cb_register_rope.__get__(eng)
     return eng
 
 
@@ -602,7 +602,7 @@ def test_register_rope_accepts_nope_zero_caches():
 
 
 def test_register_rope_requires_registered_instance():
-    """CB_REGISTER_ROPE_V3 before REGISTER_KV_CACHE is rejected."""
+    """CB_REGISTER_ROPE before REGISTER_KV_CACHE is rejected."""
     eng = _rope_registration_engine(engine_group_indices=[0])
     eng._transfer_module.get_and_touch_context_entry.return_value = None
 
@@ -626,10 +626,10 @@ def _build_scatter_engine_and_context(
     GPU context whose tmp slot buffers are real (CPU) tensors — distinct
     objects per (slot, group) so kernel calls can be identity-checked."""
     # First Party
-    from lmcache.v1.multiprocess.modules import blend_v3 as v3_mod
+    from lmcache.v1.multiprocess.modules import blend as blend_mod
 
-    eng = MagicMock(spec=v3_mod.BlendV3Module)
-    eng._scatter_batch_to_paged = v3_mod.BlendV3Module._scatter_batch_to_paged.__get__(
+    eng = MagicMock(spec=blend_mod.BlendModule)
+    eng._scatter_batch_to_paged = blend_mod.BlendModule._scatter_batch_to_paged.__get__(
         eng
     )
 
@@ -664,7 +664,7 @@ def test_scatter_launches_per_slot_without_cat():
     import torch
 
     # First Party
-    from lmcache.v1.multiprocess.modules import blend_v3 as v3_mod
+    from lmcache.v1.multiprocess.modules import blend as blend_mod
 
     eng, gpu_context, buffers = _build_scatter_engine_and_context(
         num_groups=2, num_slots=3, spc=4
@@ -676,7 +676,7 @@ def test_scatter_launches_per_slot_without_cat():
         (torch.tensor([20, 21, 22], dtype=torch.long), 4),
     ]
 
-    with patch.object(v3_mod, "device_ops") as ops:
+    with patch.object(blend_mod, "device_ops") as ops:
         eng._scatter_batch_to_paged(
             gpu_context, resolved_groups, batch, 32, list(range(2))
         )
@@ -707,7 +707,7 @@ def test_scatter_narrows_partial_chunk_and_keeps_alignment():
     import torch
 
     # First Party
-    from lmcache.v1.multiprocess.modules import blend_v3 as v3_mod
+    from lmcache.v1.multiprocess.modules import blend as blend_mod
 
     eng, gpu_context, buffers = _build_scatter_engine_and_context(
         num_groups=1, num_slots=3, spc=4
@@ -716,7 +716,7 @@ def test_scatter_narrows_partial_chunk_and_keeps_alignment():
     batch = [(_match(0, 4), None), (_match(4, 6), None), (_match(6, 10), None)]
     resolved_groups = [(torch.tensor([10, 11, 12], dtype=torch.long), 4)]
 
-    with patch.object(v3_mod, "device_ops") as ops:
+    with patch.object(blend_mod, "device_ops") as ops:
         eng._scatter_batch_to_paged(gpu_context, resolved_groups, batch, 32, [0])
 
     calls = ops.multi_layer_kv_transfer.call_args_list
@@ -746,10 +746,10 @@ def test_scatter_narrows_partial_chunk_and_keeps_alignment():
 def _native_retrieve_plan_available() -> bool:
     """Return whether the C++ native retrieve-plan interfaces are available."""
     # First Party
-    from lmcache.v1.multiprocess.modules import blend_v3 as v3_mod
+    from lmcache.v1.multiprocess.modules import blend as blend_mod
 
-    return v3_mod._HAS_NATIVE_RETRIEVE_PLAN and hasattr(
-        v3_mod.device_ops, "CBGroupSpec"
+    return blend_mod._HAS_NATIVE_RETRIEVE_PLAN and hasattr(
+        blend_mod.device_ops, "CBGroupSpec"
     )
 
 
@@ -777,16 +777,16 @@ def _build_plan_engine_and_context(
     import torch
 
     # First Party
-    from lmcache.v1.multiprocess.modules import blend_v3 as v3_mod
+    from lmcache.v1.multiprocess.modules import blend as blend_mod
 
-    eng = MagicMock(spec=v3_mod.BlendV3Module)
+    eng = MagicMock(spec=blend_mod.BlendModule)
     for name in (
         "_build_cb_retrieve_plan_flat",
         "_resolve_cb_plan_invariants",
         "_cb_slot_buffers",
         "_cb_staged_groups",
     ):
-        setattr(eng, name, getattr(v3_mod.BlendV3Module, name).__get__(eng))
+        setattr(eng, name, getattr(blend_mod.BlendModule, name).__get__(eng))
     eng._cb_plan_invariants = weakref.WeakKeyDictionary()
     eng._cb_slot_staging = weakref.WeakKeyDictionary()
     eng._cb_plan_done_events = weakref.WeakKeyDictionary()
@@ -834,7 +834,7 @@ def _build_plan_engine_and_context(
     obj_buffers = [torch.zeros(obj_bytes, dtype=torch.uint8) for _ in range(max_batch)]
     gpu_context.get_temp_object_group_buffer.side_effect = lambda s, og: obj_buffers[s]
 
-    rope_state = v3_mod._CBRopeState(
+    rope_state = blend_mod._CBRopeState(
         head_size=head_size,
         is_neox_style=True,
         cos_sin_caches=[torch.zeros(64, head_size)],
@@ -1127,9 +1127,9 @@ def test_union_of_local_and_fleet_matches_collapses_duplicates():
     keeps a chunk both sources report from scattering twice."""
     # First Party
     from lmcache.v1.multiprocess.custom_types import CBMatchResult
-    from lmcache.v1.multiprocess.modules import blend_v3 as v3_mod
+    from lmcache.v1.multiprocess.modules import blend as blend_mod
 
-    dedup = v3_mod.BlendV3Module._non_overlapping_after_prefix
+    dedup = blend_mod.BlendModule._non_overlapping_after_prefix
     shared = CBMatchResult(old_st=0, old_ed=4, cur_st=8, cur_ed=12, hash=b"\x01")
     local_only = CBMatchResult(old_st=4, old_ed=8, cur_st=12, cur_ed=16, hash=b"\x02")
     fleet_only = CBMatchResult(old_st=8, old_ed=12, cur_st=16, cur_ed=20, hash=b"\x03")
@@ -1146,9 +1146,9 @@ def test_union_recall_is_at_least_either_source_alone():
     prefix survives the merge."""
     # First Party
     from lmcache.v1.multiprocess.custom_types import CBMatchResult
-    from lmcache.v1.multiprocess.modules import blend_v3 as v3_mod
+    from lmcache.v1.multiprocess.modules import blend as blend_mod
 
-    dedup = v3_mod.BlendV3Module._non_overlapping_after_prefix
+    dedup = blend_mod.BlendModule._non_overlapping_after_prefix
     local = [CBMatchResult(old_st=0, old_ed=4, cur_st=4, cur_ed=8, hash=b"\x01")]
     fleet = [CBMatchResult(old_st=0, old_ed=4, cur_st=12, cur_ed=16, hash=b"\x02")]
 
@@ -1166,9 +1166,9 @@ def test_classify_read_groups_single_group_is_legacy():
     """A single-object-group layout maps to group 0 with no aux group,
     regardless of kind labels (legacy fused layout)."""
     # First Party
-    from lmcache.v1.multiprocess.modules import blend_v3 as v3_mod
+    from lmcache.v1.multiprocess.modules import blend as blend_mod
 
-    read = v3_mod._classify_cb_read_groups(1, ())
+    read = blend_mod._classify_cb_read_groups(1, ())
     assert read.gids == (0,)
     assert read.prefix_gids == (0,)
     assert read.recurrent_gids == ()
@@ -1180,9 +1180,11 @@ def test_classify_read_groups_hybrid_layout():
     (attention, recurrent), never aux — each leg keys/locks exactly the
     planes it consumes."""
     # First Party
-    from lmcache.v1.multiprocess.modules import blend_v3 as v3_mod
+    from lmcache.v1.multiprocess.modules import blend as blend_mod
 
-    read = v3_mod._classify_cb_read_groups(3, ("attention", "recurrent", "standalone"))
+    read = blend_mod._classify_cb_read_groups(
+        3, ("attention", "recurrent", "standalone")
+    )
     assert read.gids == (0, 2)
     assert read.prefix_gids == (0, 1)
     assert read.recurrent_gids == (1,)
@@ -1193,9 +1195,9 @@ def test_classify_read_groups_multi_recurrent():
     """Every recurrent group joins the prefix set (a hybrid may bucket its
     state pages into more than one object group under separation)."""
     # First Party
-    from lmcache.v1.multiprocess.modules import blend_v3 as v3_mod
+    from lmcache.v1.multiprocess.modules import blend as blend_mod
 
-    read = v3_mod._classify_cb_read_groups(
+    read = blend_mod._classify_cb_read_groups(
         4, ("recurrent", "attention", "recurrent", "standalone")
     )
     assert read.gids == (1, 3)
@@ -1208,18 +1210,18 @@ def test_narrow_attn_desc_selects_the_leg_gids():
     exactly its own gids."""
     # First Party
     from lmcache.v1.distributed.api import AttnWindowDesc
-    from lmcache.v1.multiprocess.modules import blend_v3 as v3_mod
+    from lmcache.v1.multiprocess.modules import blend as blend_mod
 
     full = AttnWindowDesc(
         num_chunks_in_sw=[1, -1, -1],
         world_size=2,
         group_kinds=("recurrent", "attention", "standalone"),
     )
-    prefix = v3_mod._narrow_attn_desc(full, (0, 1))
+    prefix = blend_mod._narrow_attn_desc(full, (0, 1))
     assert prefix.num_chunks_in_sw == [1, -1]
     assert prefix.group_kinds == ("recurrent", "attention")
     assert prefix.world_size == 2
-    blend = v3_mod._narrow_attn_desc(full, (1, 2))
+    blend = blend_mod._narrow_attn_desc(full, (1, 2))
     assert blend.num_chunks_in_sw == [-1, -1]
     assert blend.group_kinds == ("attention", "standalone")
 
@@ -1229,14 +1231,14 @@ def test_classify_read_groups_rejects_unresolvable_layouts():
     with several standalone groups are refused loudly (silent mis-addressing
     would corrupt reads)."""
     # First Party
-    from lmcache.v1.multiprocess.modules import blend_v3 as v3_mod
+    from lmcache.v1.multiprocess.modules import blend as blend_mod
 
     with pytest.raises(RuntimeError):
-        v3_mod._classify_cb_read_groups(2, ())
+        blend_mod._classify_cb_read_groups(2, ())
     with pytest.raises(RuntimeError):
-        v3_mod._classify_cb_read_groups(2, ("attention", "attention"))
+        blend_mod._classify_cb_read_groups(2, ("attention", "attention"))
     with pytest.raises(RuntimeError):
-        v3_mod._classify_cb_read_groups(3, ("attention", "standalone", "standalone"))
+        blend_mod._classify_cb_read_groups(3, ("attention", "standalone", "standalone"))
 
 
 def test_chunk_major_object_keys_ordering():
@@ -1245,13 +1247,13 @@ def test_chunk_major_object_keys_ordering():
     stride (coverage math, found-classification, retrieve pairing)."""
     # First Party
     from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-    from lmcache.v1.multiprocess.modules import blend_v3 as v3_mod
+    from lmcache.v1.multiprocess.modules import blend as blend_mod
 
     key = IPCCacheServerKey.from_token_ids(
         model_name="m", world_size=2, worker_id=None, token_ids=[1, 2, 3]
     )
     hashes = [b"\x01" * 8, b"\x02" * 8]
-    keys = v3_mod._cb_chunk_major_object_keys(key, hashes, (0, 2))
+    keys = blend_mod._cb_chunk_major_object_keys(key, hashes, (0, 2))
     # 2 hashes x 2 groups x world_size 2.
     assert len(keys) == 8
     assert [k.object_group_id for k in keys] == [0, 0, 2, 2, 0, 0, 2, 2]
@@ -1262,7 +1264,7 @@ def test_chunk_major_object_keys_ordering():
     wkey = IPCCacheServerKey.from_token_ids(
         model_name="m", world_size=2, worker_id=1, token_ids=[1, 2, 3]
     )
-    wkeys = v3_mod._cb_chunk_major_object_keys(wkey, hashes, (0, 2))
+    wkeys = blend_mod._cb_chunk_major_object_keys(wkey, hashes, (0, 2))
     assert len(wkeys) == 4
     assert [k.object_group_id for k in wkeys] == [0, 2, 0, 2]
 
@@ -1273,9 +1275,11 @@ def test_classify_read_groups_recurrent_first_layout():
     must key its layout off attn_gid, never off group 0 (that would hand it
     the state-page layout)."""
     # First Party
-    from lmcache.v1.multiprocess.modules import blend_v3 as v3_mod
+    from lmcache.v1.multiprocess.modules import blend as blend_mod
 
-    read = v3_mod._classify_cb_read_groups(3, ("recurrent", "attention", "standalone"))
+    read = blend_mod._classify_cb_read_groups(
+        3, ("recurrent", "attention", "standalone")
+    )
     assert read.attn_gid == 1
     # Read set ascending, recurrent excluded.
     assert read.gids == (1, 2)

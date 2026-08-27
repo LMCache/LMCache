@@ -53,15 +53,11 @@ class TestBlendMetricsSubscriber:
         assert EventType.CB_LOOKUP_END in subs
         assert EventType.CB_RETRIEVE_START in subs
         assert EventType.CB_RETRIEVE_END in subs
-        assert EventType.CB_STORE_PRE_COMPUTED_START in subs
-        assert EventType.CB_STORE_PRE_COMPUTED_END in subs
-        assert EventType.CB_STORE_FINAL_START in subs
-        assert EventType.CB_STORE_FINAL_END in subs
         assert EventType.CB_FINGERPRINTS_REGISTERED in subs
         assert EventType.CB_CHUNKS_EVICTED in subs
 
-    def test_subscriptions_cover_v3_sub_phase_events(self, subscriber):
-        """Every V3 lookup/retrieve sub-phase event feeds a metric, so the phase
+    def test_subscriptions_cover_sub_phase_events(self, subscriber):
+        """Every lookup/retrieve sub-phase event feeds a metric, so the phase
         breakdown survives trace sampling."""
         subs = subscriber.get_subscriptions()
         for event_type in (
@@ -83,9 +79,7 @@ class TestBlendMetricsSubscriber:
         subs = subscriber.get_subscriptions()
         assert EventType.CB_REQUEST_START not in subs
         assert EventType.CB_REQUEST_END not in subs
-        assert EventType.CB_STORE_PRE_COMPUTED_SUBMITTED not in subs
         assert EventType.CB_RETRIEVE_SUBMITTED not in subs
-        assert EventType.CB_STORE_FINAL_SUBMITTED not in subs
 
     def test_lookup_start_increments_counter(self, bus, subscriber):
         bus.start()
@@ -170,44 +164,6 @@ class TestBlendMetricsSubscriber:
                 event_type=EventType.CB_RETRIEVE_END,
                 session_id="req-2",
                 metadata={"instance_id": 0, "num_chunks": 2, "success": False},
-            )
-        )
-        time.sleep(0.15)
-        bus.stop()
-
-    def test_store_pre_computed_failure_counted(self, bus, subscriber):
-        bus.start()
-        bus.publish(
-            Event(
-                event_type=EventType.CB_STORE_PRE_COMPUTED_START,
-                session_id="req-3",
-                metadata={"instance_id": 0, "num_tokens": 64},
-            )
-        )
-        bus.publish(
-            Event(
-                event_type=EventType.CB_STORE_PRE_COMPUTED_END,
-                session_id="req-3",
-                metadata={"instance_id": 0, "stored_chunks": 0, "success": False},
-            )
-        )
-        time.sleep(0.15)
-        bus.stop()
-
-    def test_store_final_failure_counted(self, bus, subscriber):
-        bus.start()
-        bus.publish(
-            Event(
-                event_type=EventType.CB_STORE_FINAL_START,
-                session_id="req-4",
-                metadata={"instance_id": 1, "num_tokens": 256},
-            )
-        )
-        bus.publish(
-            Event(
-                event_type=EventType.CB_STORE_FINAL_END,
-                session_id="req-4",
-                metadata={"instance_id": 1, "stored_chunks": 0, "success": False},
             )
         )
         time.sleep(0.15)
@@ -422,13 +378,13 @@ class TestBlendLookupHitTokenCounters:
 
 
 # ---------------------------------------------------------------------------
-# V3 hit-token split
+# Blend hit-token split
 # ---------------------------------------------------------------------------
 
 
 class TestBlendHitTokenSplitCounters:
     def test_prefix_segmented_and_non_prefix_split(self, bus, subscriber, snapshot):
-        """The three V3 reuse paths are counted separately and sum to
+        """The three blend reuse paths are counted separately and sum to
         ``hit_tokens``, so a dashboard can attribute the hit rate."""
         bus.start()
         bus.publish(
@@ -459,7 +415,7 @@ class TestBlendHitTokenSplitCounters:
 
 
 # ---------------------------------------------------------------------------
-# V3 phase durations
+# Blend phase durations
 #
 # Dispatched directly rather than through the bus: ``EventBus.publish()``
 # overwrites ``Event.timestamp`` with the publish time, which would make the
@@ -640,7 +596,7 @@ class TestBlendPhaseDurations:
 
 
 # ---------------------------------------------------------------------------
-# V3 phase payload counters
+# Blend phase payload counters
 # ---------------------------------------------------------------------------
 
 

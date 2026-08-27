@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Content-fingerprint dedup in the V3 matcher (``--enable-dedup-content``).
+"""Content-fingerprint dedup in the blend matcher (``--enable-dedup-content``).
 
 The default dedup key is the caller's content hash, which is prefix-chained:
 the same text behind two prefixes is indexed twice, the second registration
@@ -20,7 +20,7 @@ from lmcache.v1.multiprocess.config import (
     add_mp_server_args,
     parse_args_to_mp_server_config,
 )
-from lmcache.v1.multiprocess.modules.blend_v3 import BlendTokenRangeMatcherV3
+from lmcache.v1.multiprocess.modules.blend import BlendTokenRangeMatcher
 
 CHUNK_SIZE = 256
 
@@ -31,7 +31,7 @@ def _chunk(seed: int) -> list[int]:
 
 
 def _register(
-    matcher: BlendTokenRangeMatcherV3,
+    matcher: BlendTokenRangeMatcher,
     tokens: list[int],
     chunk_hash_seeds: list[int],
     position_offset: int = 0,
@@ -43,7 +43,7 @@ def _register(
     )
 
 
-def _matched_hashes(matcher: BlendTokenRangeMatcherV3, query: list[int]) -> set[bytes]:
+def _matched_hashes(matcher: BlendTokenRangeMatcher, query: list[int]) -> set[bytes]:
     return {m.hash for m in matcher.match_sub_sequence(query)}
 
 
@@ -52,7 +52,7 @@ def _matched_hashes(matcher: BlendTokenRangeMatcherV3, query: list[int]) -> set[
 
 def test_duplicate_content_registers_twice_by_default():
     """Without the flag, the second registration takes over the slot."""
-    matcher = BlendTokenRangeMatcherV3(chunk_size=CHUNK_SIZE)
+    matcher = BlendTokenRangeMatcher(chunk_size=CHUNK_SIZE)
     first, second = ObjectKey.IntHash2Bytes(101), ObjectKey.IntHash2Bytes(202)
 
     _register(matcher, _chunk(1), [101])
@@ -73,7 +73,7 @@ def test_duplicate_content_registers_twice_by_default():
 
 def test_duplicate_content_is_skipped_when_enabled():
     """The first registration keeps the slot; the duplicate is not indexed."""
-    matcher = BlendTokenRangeMatcherV3(chunk_size=CHUNK_SIZE, dedup_content=True)
+    matcher = BlendTokenRangeMatcher(chunk_size=CHUNK_SIZE, dedup_content=True)
     first, second = ObjectKey.IntHash2Bytes(101), ObjectKey.IntHash2Bytes(202)
 
     _register(matcher, _chunk(1), [101])
@@ -90,7 +90,7 @@ def test_duplicate_content_is_skipped_when_enabled():
 
 def test_distinct_content_still_registers_when_enabled():
     """Dedup keys on content only — different text is always indexed."""
-    matcher = BlendTokenRangeMatcherV3(chunk_size=CHUNK_SIZE, dedup_content=True)
+    matcher = BlendTokenRangeMatcher(chunk_size=CHUNK_SIZE, dedup_content=True)
     _register(matcher, _chunk(1) + _chunk(2) + _chunk(3), [101, 102, 103])
 
     assert _matched_hashes(matcher, _chunk(1) + _chunk(2) + _chunk(3)) == {
@@ -102,7 +102,7 @@ def test_distinct_content_still_registers_when_enabled():
 
 def test_duplicate_content_within_one_batch_is_skipped():
     """In-batch duplicates are invisible to the probe table — dedup anyway."""
-    matcher = BlendTokenRangeMatcherV3(chunk_size=CHUNK_SIZE, dedup_content=True)
+    matcher = BlendTokenRangeMatcher(chunk_size=CHUNK_SIZE, dedup_content=True)
     first, second = ObjectKey.IntHash2Bytes(101), ObjectKey.IntHash2Bytes(102)
 
     _register(matcher, _chunk(1) + _chunk(1), [101, 102])
@@ -116,7 +116,7 @@ def test_duplicate_content_within_one_batch_is_skipped():
 
 def test_content_is_reregistered_after_eviction():
     """Evicting the retained entry frees the text for a later registration."""
-    matcher = BlendTokenRangeMatcherV3(chunk_size=CHUNK_SIZE, dedup_content=True)
+    matcher = BlendTokenRangeMatcher(chunk_size=CHUNK_SIZE, dedup_content=True)
     first, second = ObjectKey.IntHash2Bytes(101), ObjectKey.IntHash2Bytes(202)
 
     _register(matcher, _chunk(1), [101])
@@ -131,7 +131,7 @@ def test_content_is_reregistered_after_eviction():
 
 def test_repeated_registration_of_same_hash_is_idempotent():
     """The token-hash dedup path is unchanged by the content dedup."""
-    matcher = BlendTokenRangeMatcherV3(chunk_size=CHUNK_SIZE, dedup_content=True)
+    matcher = BlendTokenRangeMatcher(chunk_size=CHUNK_SIZE, dedup_content=True)
     _register(matcher, _chunk(1), [101])
     _register(matcher, _chunk(1), [101], position_offset=CHUNK_SIZE)
 
