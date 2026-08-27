@@ -462,6 +462,7 @@ def _sample_key(
     worker_id: Optional[int] = 3,
     token_ids: tuple[int, ...] = (10, 20, 30, 40),
     cache_salt: str = "",
+    num_kv_readers: int = 1,
 ) -> IPCCacheServerKey:
     return IPCCacheServerKey(
         model_name="mymodel",
@@ -472,6 +473,7 @@ def _sample_key(
         end=len(token_ids),
         request_id="req-42",
         cache_salt=cache_salt,
+        num_kv_readers=num_kv_readers,
     )
 
 
@@ -483,28 +485,35 @@ def test_lookup_is_registered_as_typed_rpc() -> None:
 
 
 @pytest.mark.parametrize(
-    "worker_id,token_ids,cache_salt",
+    "worker_id,token_ids,cache_salt,num_kv_readers",
     [
-        (None, (1,), ""),
-        (0, (), ""),
-        (7, (1, 2, 3), "tenant-a"),
-        (999, tuple(range(2048)), "long-token-list"),
+        (None, (1,), "", 1),
+        (0, (), "", 2),
+        (7, (1, 2, 3), "tenant-a", 4),
+        (999, tuple(range(2048)), "long-token-list", 8),
     ],
 )
 def test_lookup_key_roundtrip(
     worker_id: Optional[int],
     token_ids: tuple[int, ...],
     cache_salt: str,
+    num_kv_readers: int,
 ) -> None:
     """The shared IpcCacheServerKey proto <-> dataclass helpers must
     preserve every field, including the None/optional worker_id and
     empty/large token_ids edge cases."""
     spec = _TYPED_RPCS[RequestType.LOOKUP]
-    key = _sample_key(worker_id=worker_id, token_ids=token_ids, cache_salt=cache_salt)
+    key = _sample_key(
+        worker_id=worker_id,
+        token_ids=token_ids,
+        cache_salt=cache_salt,
+        num_kv_readers=num_kv_readers,
+    )
     proto_req = spec.python_to_request(key, 4)
     assert isinstance(proto_req, lmcache_mq_pb2.LookupRequest)
     round_tripped_key, tp_size = spec.request_to_python(proto_req)
     assert round_tripped_key == key
+    assert round_tripped_key.num_kv_readers == num_kv_readers
     assert tp_size == 4
 
 

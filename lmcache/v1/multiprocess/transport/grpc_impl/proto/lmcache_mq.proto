@@ -32,7 +32,7 @@ message PingResponse {
 // FreeLookupLocks / PrepareStore / CommitStore / PrepareRetrieve /
 // CommitRetrieve / EndSession / CB_LOOKUP_PRE_COMPUTED / ...).  Kept
 // here so those rpcs can embed it instead of each redeclaring the same
-// eight fields. Field numbers mirror the dataclass declaration order
+// nine fields. Field numbers mirror the dataclass declaration order
 // in ``lmcache/v1/multiprocess/custom_types.py`` for readability.
 //
 // ``worker_id`` is optional to preserve the ``int | None`` semantics
@@ -48,6 +48,7 @@ message IpcCacheServerKey {
   int64 end = 6;
   string request_id = 7;
   string cache_salt = 8;
+  int64 num_kv_readers = 9;
 }
 
 // Lookup: submit a prefix lookup and return once the job is registered.
