@@ -1,9 +1,9 @@
 # Golden KV-event payloads (vLLM wire format)
 
 Each `*.msgpack` file is one `KVEventBatch` payload exactly as
-`lmcache.v1.mp_coordinator.kv_event_sink.ZmqKVEventSink` sends it in the
+`lmcache.v1.mp_coordinator.kv_event_publisher.ZmqKVEventPublisher` sends it in the
 third ZMQ frame (`[topic, seq, payload]`). They are produced and checked by
-`tests/v1/mp_coordinator/test_kv_event_sink.py` (`test_golden_fixture`) and
+`tests/v1/mp_coordinator/test_kv_event_publisher.py` (`test_golden_fixture`) and
 are meant to be decoded unchanged by a consumer's vLLM adapter (llm-d:
 `pkg/kvevents/engineadapter/vllm_adapter.go`, `ParseMessage`).
 
@@ -20,7 +20,7 @@ array with the tag first:
 All batches have `ts = 1700000000.5`; hashes are 32-byte `bin` values
 (consumers truncate to the last 8 bytes); `block_size = len(token_ids)`;
 `lora_id` is `nil`; no HMA fields (`group_idx`, ...) are present. The
-corresponding topics are `kv@<emitter_id>@m`.
+corresponding topics are `kv@node:n1@m` (private) and `kv@pool:fs@m` (shared).
 
 Regenerate after an intended wire change with
-`LMCACHE_UPDATE_FIXTURES=1 pytest tests/v1/mp_coordinator/test_kv_event_sink.py`.
+`LMCACHE_UPDATE_FIXTURES=1 pytest tests/v1/mp_coordinator/test_kv_event_publisher.py`.

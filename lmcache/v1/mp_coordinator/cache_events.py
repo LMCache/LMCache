@@ -117,51 +117,6 @@ class HttpCacheEventSink(CacheEventSink):
         self._client.close()
 
 
-class CompositeCacheEventSink(CacheEventSink):
-    """Sink that fans every publish out to several sinks.
-
-    Each sink is attempted even when an earlier one fails, so one broken
-    transport (say, an unreachable coordinator) does not silence the
-    others. Failures are logged and re-raised together at the end.
-
-    Args:
-        sinks: The sinks to deliver to, in order. Must be non-empty.
-
-    Raises:
-        ValueError: If ``sinks`` is empty.
-    """
-
-    def __init__(self, sinks: list[CacheEventSink]) -> None:
-        if not sinks:
-            raise ValueError("CompositeCacheEventSink needs at least one sink")
-        self._sinks = list(sinks)
-
-    def publish(self, batches: list[CacheEventBatch]) -> None:
-        """Deliver ``batches`` to every sink.
-
-        Args:
-            batches: The batches to deliver.
-
-        Raises:
-            CacheEventPublishError: If any sink failed (after all were
-                attempted).
-        """
-        failures: list[str] = []
-        for sink in self._sinks:
-            try:
-                sink.publish(batches)
-            except CacheEventPublishError as e:
-                logger.warning("%s failed to publish: %s", type(sink).__name__, e)
-                failures.append(f"{type(sink).__name__}: {e}")
-        if failures:
-            raise CacheEventPublishError("; ".join(failures))
-
-    def close(self) -> None:
-        """Close every sink."""
-        for sink in self._sinks:
-            sink.close()
-
-
 @dataclass(frozen=True)
 class _ChunkTokens:
     """One chunk's token content, held between its token-binding event

@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the engine-format (vLLM KV event) sink: wire layout of the
-msgpack payload against the positional field order llm-d's vLLM adapter
-parses, golden fixtures, ZMQ framing / fan-out, and replay."""
+"""Tests for the engine-format (vLLM KV event) publisher: wire layout of
+the msgpack payload against the positional field order llm-d's vLLM
+adapter parses, golden fixtures, ZMQ framing / topic identity, fencing,
+replay, and its mount behind the coordinator's ingest gate."""
 
 # Standard
 from pathlib import Path
@@ -10,6 +11,7 @@ import struct
 import time
 
 # Third Party
+from fastapi.testclient import TestClient
 import msgspec
 import pytest
 import zmq
@@ -21,9 +23,12 @@ from lmcache.v1.mp_coordinator.api import (
     CacheEventEntry,
     CacheEventType,
 )
-from lmcache.v1.mp_coordinator.cache_events import CacheEventPublishError
-from lmcache.v1.mp_coordinator.kv_event_sink import (
-    ZmqKVEventSink,
+from lmcache.v1.mp_coordinator.app import create_app
+from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
+from lmcache.v1.mp_coordinator.kv_event_publisher import (
+    ZmqKVEventPublisher,
+    emitter_id_for,
+    encode_all_blocks_cleared,
     encode_batch,
     medium_for,
 )
@@ -61,11 +66,13 @@ def _batch(
     tier: Tier = Tier.L1,
     backend: str = "dram",
     shared: bool = False,
+    instance_id: str = "node:n1",
+    seq: int = 1,
 ) -> CacheEventBatch:
     return CacheEventBatch(
-        instance_id="node-a",
+        instance_id=instance_id,
         incarnation=1,
-        seq=1,
+        seq=seq,
         event_type=event_type,
         tier=tier,
         backend=backend,
@@ -138,6 +145,27 @@ def test_shared_l2_store_uses_backend_medium():
 def test_medium_is_stable_between_store_and_delete():
     assert medium_for(Tier.L1, "dram") == medium_for(Tier.L1, "cxl") == "lmcache-l1"
     assert medium_for(Tier.L2, "mooncake") == "lmcache-l2-mooncake"
+
+
+def test_emitter_identity_is_instance_or_pool():
+    private = _batch(CacheEventType.STORE, [_store_entry(1, [1])])
+    assert emitter_id_for(private) == "node:n1"
+    shared = _batch(
+        CacheEventType.DELETE,
+        [_delete_entry(1)],
+        tier=Tier.L2,
+        backend="FS",
+        shared=True,
+    )
+    assert emitter_id_for(shared) == "pool:fs"
+
+
+def test_all_blocks_cleared_layout():
+    assert _decode(encode_all_blocks_cleared(_TS)) == [
+        _TS,
+        [["AllBlocksCleared"]],
+        None,
+    ]
 
 
 def test_tokenless_store_is_skipped_but_delete_never_is():
@@ -239,63 +267,107 @@ def zmq_ctx():
     ctx.term()
 
 
-def test_publish_fans_out_three_frame_messages(zmq_ctx):
-    sink = ZmqKVEventSink("tcp://127.0.0.1:*", emitter_ids=["pod-a", "pod-b"])
+def test_consume_publishes_three_frame_messages_per_identity(zmq_ctx):
+    publisher = ZmqKVEventPublisher("tcp://127.0.0.1:*")
     try:
-        sub = _subscriber(zmq_ctx, sink.endpoint)
-        sink.publish(
-            [
-                _batch(CacheEventType.STORE, [_store_entry(1, [1, 2])]),
-                # Ignored: not a placement.
-                CacheEventBatch(
-                    instance_id="node-a",
-                    incarnation=1,
-                    seq=2,
-                    event_type=CacheEventType.ACCESS,
-                    tier=Tier.L1,
-                    backend="",
-                    entries=[_delete_entry(1)],
-                ),
-                _batch(CacheEventType.DELETE, [_delete_entry(1)]),
-            ]
+        sub = _subscriber(zmq_ctx, publisher.endpoint)
+        publisher.consume(_batch(CacheEventType.STORE, [_store_entry(1, [1, 2])]))
+        # Ignored: not a placement.
+        publisher.consume(
+            CacheEventBatch(
+                instance_id="node:n1",
+                incarnation=1,
+                seq=2,
+                event_type=CacheEventType.ACCESS,
+                tier=Tier.L1,
+                backend="",
+                entries=[_delete_entry(1)],
+            )
         )
-        messages = [sub.recv_multipart() for _ in range(4)]
+        publisher.consume(
+            _batch(
+                CacheEventType.STORE,
+                [_store_entry(2, [3])],
+                tier=Tier.L2,
+                backend="fs",
+                shared=True,
+                instance_id="node:n2",
+            )
+        )
+        publisher.consume(_batch(CacheEventType.DELETE, [_delete_entry(1)]))
+        messages = [sub.recv_multipart() for _ in range(3)]
         sub.close()
     finally:
-        sink.close()
+        publisher.close()
 
-    # [topic, seq (8-byte big-endian, from 0), payload]
+    # [topic, seq (8-byte big-endian, from 0), payload]; private placements
+    # go out under the reporting instance, shared ones under the pool.
     assert [m[0] for m in messages] == [
-        b"kv@pod-a@m",
-        b"kv@pod-b@m",
-        b"kv@pod-a@m",
-        b"kv@pod-b@m",
+        b"kv@node:n1@m",
+        b"kv@pool:fs@m",
+        b"kv@node:n1@m",
     ]
-    assert [struct.unpack(">Q", m[1])[0] for m in messages] == [0, 1, 2, 3]
+    assert [struct.unpack(">Q", m[1])[0] for m in messages] == [0, 1, 2]
     assert [_decode(m[2])[1][0][0] for m in messages] == [
         "BlockStored",
         "BlockStored",
         "BlockRemoved",
-        "BlockRemoved",
     ]
 
 
+def test_fence_clears_every_model_of_the_instance_only(zmq_ctx):
+    publisher = ZmqKVEventPublisher("tcp://127.0.0.1:*")
+    try:
+        sub = _subscriber(zmq_ctx, publisher.endpoint)
+        publisher.consume(_batch(CacheEventType.STORE, [_store_entry(1, [1])]))
+        publisher.consume(
+            _batch(CacheEventType.STORE, [_store_entry(2, [2], model="m2")], seq=2)
+        )
+        publisher.consume(
+            _batch(
+                CacheEventType.STORE,
+                [_store_entry(3, [3])],
+                tier=Tier.L2,
+                backend="fs",
+                shared=True,
+            )
+        )
+        publisher.consume(
+            _batch(CacheEventType.STORE, [_store_entry(4, [4])], instance_id="node:n2")
+        )
+        for _ in range(4):
+            sub.recv_multipart()
+        publisher.fence_instance("node:n1")
+        publisher.fence_instance("node:n1")  # forgotten: nothing more
+        publisher.fence_instance("unknown")  # never seen: nothing
+        cleared = [sub.recv_multipart() for _ in range(2)]
+        sub.setsockopt(zmq.RCVTIMEO, 300)
+        with pytest.raises(zmq.Again):
+            sub.recv_multipart()
+        sub.close()
+    finally:
+        publisher.close()
+
+    # One AllBlocksCleared per model n1 published under; pool:fs and n2 untouched.
+    assert sorted(m[0] for m in cleared) == [b"kv@node:n1@m", b"kv@node:n1@m2"]
+    assert all(_decode(m[2])[1] == [["AllBlocksCleared"]] for m in cleared)
+
+
 def test_replay_returns_buffered_messages_from_start_seq(zmq_ctx):
-    sink = ZmqKVEventSink(
+    publisher = ZmqKVEventPublisher(
         "tcp://127.0.0.1:*",
-        emitter_ids=["pod-a"],
         replay_endpoint="tcp://127.0.0.1:*",
         replay_depth=8,
     )
     try:
         # No subscriber: PUB drops, but the ring still records every send.
         for _ in range(3):
-            sink.publish([_batch(CacheEventType.DELETE, [_delete_entry(1)])])
+            publisher.consume(_batch(CacheEventType.DELETE, [_delete_entry(1)]))
 
         dealer = zmq_ctx.socket(zmq.DEALER)
         dealer.setsockopt(zmq.LINGER, 0)
         dealer.setsockopt(zmq.RCVTIMEO, 5000)
-        dealer.connect(sink.replay_endpoint)
+        dealer.connect(publisher.replay_endpoint)
         dealer.send_multipart([b"", struct.pack(">Q", 1)])
         replies = []
         while True:
@@ -305,35 +377,112 @@ def test_replay_returns_buffered_messages_from_start_seq(zmq_ctx):
                 break
         dealer.close()
     finally:
-        sink.close()
+        publisher.close()
 
     *events, end = replies
     # Each replayed message is the live frame set behind an empty delimiter.
     assert [f[0] for f in events] == [b"", b""]
-    assert [f[1] for f in events] == [b"kv@pod-a@m"] * 2
+    assert [f[1] for f in events] == [b"kv@node:n1@m"] * 2
     assert [struct.unpack(">Q", f[2])[0] for f in events] == [1, 2]
     # End marker: empty topic, seq -1, empty payload.
     assert end == [b"", b"", struct.pack(">q", -1), b""]
 
 
-def test_publish_after_close_raises():
-    sink = ZmqKVEventSink("tcp://127.0.0.1:*", emitter_ids=["pod-a"])
-    sink.close()
-    with pytest.raises(CacheEventPublishError):
-        sink.publish([_batch(CacheEventType.DELETE, [_delete_entry(1)])])
-    sink.close()  # idempotent
+def test_consume_after_close_is_dropped_not_raised():
+    publisher = ZmqKVEventPublisher("tcp://127.0.0.1:*")
+    publisher.close()
+    publisher.consume(_batch(CacheEventType.DELETE, [_delete_entry(1)]))
+    publisher.close()  # idempotent
 
 
-@pytest.mark.parametrize(
-    "kwargs",
-    [
-        {"emitter_ids": []},
-        {"emitter_ids": ["a@b"]},
-        {"emitter_ids": [""]},
-        {"emitter_ids": ["a"], "replay_depth": 0},
-        {"emitter_ids": ["a"], "hwm": 0},
-    ],
-)
+@pytest.mark.parametrize("kwargs", [{"replay_depth": 0}, {"hwm": 0}])
 def test_invalid_construction_rejected(kwargs):
     with pytest.raises(ValueError):
-        ZmqKVEventSink("tcp://127.0.0.1:*", **kwargs)
+        ZmqKVEventPublisher("tcp://127.0.0.1:*", **kwargs)
+
+
+# -- Mount behind the coordinator's ingest gate ----------------------------------
+
+
+def _events_body(batch: CacheEventBatch) -> dict:
+    return {
+        "batches": [
+            {
+                "instance_id": batch.instance_id,
+                "incarnation": batch.incarnation,
+                "seq": batch.seq,
+                "event_type": batch.event_type.value,
+                "tier": batch.tier.value,
+                "backend": batch.backend,
+                "shared": batch.shared,
+                "ts": batch.ts,
+                "entries": [
+                    {
+                        "key": {
+                            "chunk_hash_hex": e.key.chunk_hash_hex,
+                            "model_name": e.key.model_name,
+                            "kv_rank": e.key.kv_rank,
+                        },
+                        "size_bytes": e.size_bytes,
+                        "token_ids": list(e.token_ids),
+                        "token_offset": e.token_offset,
+                        "parent_hash_hex": e.parent_hash_hex,
+                    }
+                    for e in batch.entries
+                ],
+            }
+        ]
+    }
+
+
+def test_coordinator_publishes_admitted_events_and_fences_restarts(zmq_ctx):
+    port = _free_port()
+    config = MPCoordinatorConfig(
+        health_check_interval=0.0,
+        eviction_check_interval=0.0,
+        kv_events_endpoint=f"tcp://127.0.0.1:{port}",
+    )
+    with TestClient(create_app(config)) as client:
+        sub = _subscriber(zmq_ctx, f"tcp://127.0.0.1:{port}")
+        store = _batch(CacheEventType.STORE, [_store_entry(1, [1, 2], parent=0)])
+        assert client.post("/events", json=_events_body(store)).json()["applied"] == 1
+        # A replayed seq is dropped by the gate and never reaches the router.
+        assert (
+            client.post("/events", json=_events_body(store)).json()["duplicates"] == 1
+        )
+        restarted = CacheEventBatch(
+            instance_id="node:n1",
+            incarnation=2,
+            seq=1,
+            event_type=CacheEventType.DELETE,
+            tier=Tier.L1,
+            backend="dram",
+            entries=[_delete_entry(1)],
+            ts=_TS,
+        )
+        assert (
+            client.post("/events", json=_events_body(restarted)).json()["applied"] == 1
+        )
+        messages = [sub.recv_multipart() for _ in range(3)]
+        sub.setsockopt(zmq.RCVTIMEO, 300)
+        with pytest.raises(zmq.Again):
+            sub.recv_multipart()
+        sub.close()
+
+    assert [m[0] for m in messages] == [b"kv@node:n1@m"] * 3
+    # Store, then the incarnation bump fences n1 (AllBlocksCleared) before
+    # the new incarnation's first batch is published.
+    assert [_decode(m[2])[1][0][0] for m in messages] == [
+        "BlockStored",
+        "AllBlocksCleared",
+        "BlockRemoved",
+    ]
+
+
+def _free_port() -> int:
+    # Standard
+    import socket
+
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]

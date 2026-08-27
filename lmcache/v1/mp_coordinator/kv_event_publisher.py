@@ -1,21 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Engine-format KV event sink: re-emits the MP server's cache events in
-vLLM's ``KVEventBatch`` wire format over ZMQ.
+"""Engine-format KV event publisher: re-emits the fleet's gate-admitted
+cache events in vLLM's ``KVEventBatch`` wire format over ZMQ.
 
 KV-cache-aware routers (llm-d's EPP, for one) index engine KV events
 they read from a ZMQ PUB socket: msgpack
 ``[ts, [event, ...], data_parallel_rank]`` batches under a
-``kv@<emitter_id>@<model_name>`` topic. This sink translates
-:class:`CacheEventBatch` lists into that format so an unmodified vLLM
-adapter indexes LMCache's L1/L2 tiers next to the engines' GPU tier. See
+``kv@<emitter_id>@<model_name>`` topic. This consumer sits behind the
+coordinator's ingest gate and translates every admitted
+:class:`CacheEventBatch` into that format, so an unmodified vLLM adapter
+indexes LMCache's L1/L2 tiers next to the engines' GPU tier. See
 ``docs/design/v1/mp_coordinator/cache_events.md`` ("Engine-format KV
-event sink").
+event publisher").
 """
 
 # Standard
 from collections import deque
 import struct
 import threading
+import time
 
 # Third Party
 import msgspec
@@ -28,10 +30,6 @@ from lmcache.v1.mp_coordinator.api import (
     CacheEventBatch,
     CacheEventEntry,
     CacheEventType,
-)
-from lmcache.v1.mp_coordinator.cache_events import (
-    CacheEventPublishError,
-    CacheEventSink,
 )
 
 logger = init_logger(__name__)
@@ -63,6 +61,33 @@ def medium_for(tier: Tier, backend: str) -> str:
     if tier is Tier.L1:
         return "lmcache-l1"
     return f"lmcache-l2-{backend.lower()}"
+
+
+def emitter_id_for(batch: CacheEventBatch) -> str:
+    """Return the topic identity (segment two of ``kv@<id>@<model>``) a
+    batch's placements are credited to.
+
+    A private placement is served by the engines attached to the
+    reporting MP server, so it is credited to that server's
+    ``instance_id`` — deploy the server as ``--instance-id
+    node:<nodeName>`` and a router that understands node pseudo-pods
+    credits every engine on the node. A shared placement (one fleet-wide
+    storage domain) is credited to ``pool:<backend>``, which such a
+    router expands to every engine of the model.
+
+    Args:
+        batch: A ``store`` or ``delete`` batch.
+
+    Returns:
+        ``pool:<backend>`` when the batch is ``shared``, else its
+        ``instance_id``.
+    """
+    # ponytail: identity is the reporter's instance_id by deployment
+    # convention; map through registry metadata (node_name) if a
+    # deployment cannot control --instance-id.
+    if batch.shared:
+        return f"pool:{batch.backend.lower()}"
+    return batch.instance_id
 
 
 def encode_batch(
@@ -121,6 +146,21 @@ def encode_batch(
     return model_names.pop(), msgspec.msgpack.encode([batch.ts, events, None])
 
 
+def encode_all_blocks_cleared(ts: float) -> bytes:
+    """Encode a ``KVEventBatch`` holding one ``AllBlocksCleared`` event.
+
+    Routers treat it as pod-wide: every entry indexed under the topic's
+    identity, in every tier, is dropped.
+
+    Args:
+        ts: Wall-clock seconds stamped on the batch.
+
+    Returns:
+        The msgpack-encoded ``[ts, [["AllBlocksCleared"]], None]`` batch.
+    """
+    return msgspec.msgpack.encode([ts, [["AllBlocksCleared"]], None])
+
+
 def _block_stored(entry: CacheEventEntry, medium: str) -> list[object]:
     """Lay out one ``BlockStored`` event in vLLM's positional order:
     ``[tag, block_hashes, parent_block_hash, token_ids, block_size,
@@ -137,15 +177,22 @@ def _block_stored(entry: CacheEventEntry, medium: str) -> list[object]:
     ]
 
 
-class ZmqKVEventSink(CacheEventSink):
-    """Sink that publishes cache events as vLLM KV events on a ZMQ PUB socket.
+class ZmqKVEventPublisher:
+    """Cache-event consumer that publishes admitted batches as vLLM KV
+    events on a ZMQ PUB socket.
 
-    Every publishable batch is sent once per emitter id (fan-out) as a
-    3-frame message ``[topic, seq, payload]`` with ``seq`` an 8-byte
-    big-endian counter shared by all topics (routers detect gaps per
-    endpoint, not per topic). ``ACCESS`` and ``CONFIG`` batches are not
-    forwarded. Sends never block: the PUB socket drops at its high-water
-    mark, so a slow router cannot stall the event bus's drain thread.
+    Implements the ingest layer's ``CacheEventConsumer`` protocol. Each
+    publishable batch goes out as one 3-frame message ``[topic, seq,
+    payload]`` under ``kv@<emitter_id>@<model>`` (see
+    :func:`emitter_id_for`), ``seq`` an 8-byte big-endian counter shared
+    by all topics (routers detect gaps per endpoint, not per topic).
+    ``ACCESS`` and ``CONFIG`` batches are not forwarded. A fenced
+    instance (restart, departure) gets one ``AllBlocksCleared`` per model
+    it published under, so the router drops what that instance held.
+
+    Publishing never blocks and never fails the ingest path: the PUB
+    socket drops at its high-water mark and send errors are logged. The
+    stream is a routing hint; the directory stays the source of truth.
 
     With a ``replay_endpoint``, a ROUTER socket answers vLLM-style replay
     requests (one frame holding the 8-byte start seq) from a bounded ring
@@ -153,37 +200,26 @@ class ZmqKVEventSink(CacheEventSink):
 
     Args:
         endpoint: ZMQ bind address for the PUB socket (``tcp://*:5557``).
-        emitter_ids: Router identities to publish under (topic segment
-            two); one message per id per batch. Must be non-empty.
         replay_endpoint: ZMQ bind address for the replay ROUTER socket;
             empty disables replay.
         replay_depth: Number of most recent messages kept for replay.
         hwm: PUB send high-water mark (messages).
 
     Raises:
-        ValueError: If ``emitter_ids`` is empty or contains ``@``, or
-            ``replay_depth`` / ``hwm`` is not positive.
+        ValueError: If ``replay_depth`` or ``hwm`` is not positive.
     """
 
     def __init__(
         self,
         endpoint: str,
-        emitter_ids: list[str],
         replay_endpoint: str = "",
         replay_depth: int = _DEFAULT_REPLAY_DEPTH,
         hwm: int = _DEFAULT_HWM,
     ) -> None:
-        if not emitter_ids:
-            raise ValueError("emitter_ids must be non-empty")
-        if any("@" in emitter_id or not emitter_id for emitter_id in emitter_ids):
-            raise ValueError(
-                f"emitter ids must be non-empty and free of '@' (got {emitter_ids})"
-            )
         if replay_depth < 1:
             raise ValueError(f"replay_depth must be >= 1 (got {replay_depth})")
         if hwm < 1:
             raise ValueError(f"hwm must be >= 1 (got {hwm})")
-        self._emitter_ids = list(emitter_ids)
         self._ctx = zmq.Context()
         self._pub = self._ctx.socket(zmq.PUB)
         self._pub.setsockopt(zmq.LINGER, 0)
@@ -194,6 +230,9 @@ class ZmqKVEventSink(CacheEventSink):
         self._seq = 0
         # Recently sent frames for replay, shared with the replay thread.
         self._replay_buffer: deque[tuple[int, list[bytes]]] = deque(maxlen=replay_depth)
+        # Models each private emitter published under, so a fence can name
+        # every topic that needs an AllBlocksCleared.
+        self._models_by_emitter: dict[str, set[str]] = {}
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._replay_thread: threading.Thread | None = None
@@ -207,9 +246,8 @@ class ZmqKVEventSink(CacheEventSink):
             )
             self._replay_thread.start()
         logger.info(
-            "KV event sink bound to %s (emitters %s, replay %s)",
+            "KV event publisher bound to %s (replay %s)",
             endpoint,
-            self._emitter_ids,
             replay_endpoint or "off",
         )
 
@@ -227,36 +265,52 @@ class ZmqKVEventSink(CacheEventSink):
             return ""
         return self._router.getsockopt_string(zmq.LAST_ENDPOINT)
 
-    def publish(self, batches: list[CacheEventBatch]) -> None:
-        """Publish ``batches`` as vLLM KV event batches, in list order.
+    def consume(self, batch: CacheEventBatch) -> None:
+        """Publish one gate-admitted batch as a vLLM KV event batch.
 
         Args:
-            batches: The batches to deliver; non-placement batches
-                (``access``, ``config``) are ignored.
-
-        Raises:
-            CacheEventPublishError: If the socket is closed or a send fails.
+            batch: The admitted batch; non-placement batches (``access``,
+                ``config``) are ignored.
         """
-        for batch in batches:
-            if batch.event_type not in (CacheEventType.STORE, CacheEventType.DELETE):
-                continue
-            model_name, payload = encode_batch(batch)
-            if not payload:
-                continue
-            for emitter_id in self._emitter_ids:
-                self._send(f"kv@{emitter_id}@{model_name}".encode(), payload)
+        if batch.event_type not in (CacheEventType.STORE, CacheEventType.DELETE):
+            return
+        model_name, payload = encode_batch(batch)
+        if not payload:
+            return
+        emitter_id = emitter_id_for(batch)
+        with self._lock:
+            if not batch.shared:
+                self._models_by_emitter.setdefault(emitter_id, set()).add(model_name)
+            self._send(f"kv@{emitter_id}@{model_name}".encode(), payload)
+
+    def fence_instance(self, instance_id: str) -> None:
+        """Publish ``AllBlocksCleared`` under every model ``instance_id``
+        reported private placements for, then forget it.
+
+        Shared (``pool:``) placements are not touched: the bytes outlive
+        the reporting process.
+
+        Args:
+            instance_id: The restarted or departed instance.
+        """
+        payload = encode_all_blocks_cleared(time.time())
+        with self._lock:
+            for model_name in sorted(self._models_by_emitter.pop(instance_id, ())):
+                self._send(f"kv@{instance_id}@{model_name}".encode(), payload)
 
     def _send(self, topic: bytes, payload: bytes) -> None:
-        with self._lock:
-            if self._pub.closed:
-                raise CacheEventPublishError("KV event sink is closed")
-            frames = [topic, struct.pack(">Q", self._seq), payload]
-            try:
-                self._pub.send_multipart(frames, flags=zmq.NOBLOCK)
-            except zmq.ZMQError as e:
-                raise CacheEventPublishError(f"KV event send failed: {e}") from e
-            self._replay_buffer.append((self._seq, frames))
-            self._seq += 1
+        """Send one message and record it for replay; caller holds the lock."""
+        if self._pub.closed:
+            logger.warning("KV event publisher is closed; dropping %r", topic)
+            return
+        frames = [topic, struct.pack(">Q", self._seq), payload]
+        try:
+            self._pub.send_multipart(frames, flags=zmq.NOBLOCK)
+        except zmq.ZMQError as e:
+            logger.warning("KV event send on %r failed: %s", topic, e)
+            return
+        self._replay_buffer.append((self._seq, frames))
+        self._seq += 1
 
     def _serve_replay(self) -> None:
         """Replay thread: answer each request with every buffered message

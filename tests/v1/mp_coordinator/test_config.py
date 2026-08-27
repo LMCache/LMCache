@@ -42,3 +42,9 @@ def test_explicit_values_kept() -> None:
     assert config.otlp_endpoint == "http://collector:4317"
     # Unspecified fields keep their defaults.
     assert config.health_check_interval == MPCoordinatorConfig.health_check_interval
+
+
+def test_kv_events_replay_port_range_enforced() -> None:
+    MPCoordinatorConfig(kv_events_endpoint="tcp://*:5557", kv_events_replay_port=0)
+    with pytest.raises(ValueError, match="kv_events_replay_port"):
+        MPCoordinatorConfig(kv_events_replay_port=70000)

@@ -34,7 +34,6 @@ from lmcache.v1.mp_coordinator.cache_events import (
     CacheEventPublishError,
     CacheEventSink,
     CacheEventSubscriber,
-    CompositeCacheEventSink,
     HttpCacheEventSink,
 )
 from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
@@ -929,7 +928,7 @@ def test_a_declaration_survives_a_publish_failure():
     assert [b.capacity_revision for b in sink.published[0]] == [2]
 
 
-# -- Parent chain and composite sink ------------------------------------------
+# -- Parent chain ----------------------------------------------------------------
 
 
 def test_tokens_event_chains_parent_hashes():
@@ -983,35 +982,3 @@ def test_unknown_binding_has_no_parent():
 def test_parent_hash_hex_must_be_hex():
     with pytest.raises(ValueError, match="parent_hash_hex"):
         CacheEventEntry(key=_key(1).to_encoded_object_key(), parent_hash_hex="zz")
-
-
-def test_composite_sink_attempts_every_sink_and_reraises():
-    first, second = _RecordingSink(), _RecordingSink()
-    first.fail_next = True
-    composite = CompositeCacheEventSink([first, second])
-    batches = [
-        CacheEventBatch(
-            instance_id="node-a",
-            incarnation=1,
-            seq=1,
-            event_type=CacheEventType.STORE,
-            tier=Tier.L1,
-            backend="dram",
-            entries=[_entry(1, 10)],
-        )
-    ]
-
-    with pytest.raises(CacheEventPublishError, match="injected failure"):
-        composite.publish(batches)
-    assert first.published == [] and second.published == [batches]
-
-    composite.publish(batches)
-    assert first.published == [batches]
-
-    composite.close()
-    assert first.closed and second.closed
-
-
-def test_composite_sink_rejects_no_sinks():
-    with pytest.raises(ValueError):
-        CompositeCacheEventSink([])

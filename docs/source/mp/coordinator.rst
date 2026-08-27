@@ -121,6 +121,21 @@ keeps the default below.
      - OTLP gRPC endpoint for metrics push mode. When unset, Prometheus pull
        mode exposes ``/metrics`` on the coordinator HTTP port. When set, the
        local ``/metrics`` endpoint returns 404.
+   * - ``--kv-events-endpoint``
+     - (empty)
+     - ZMQ PUB bind address (e.g. ``tcp://*:5557``) on which admitted cache
+       events are re-published in vLLM KV-event wire format for KV-cache-aware
+       routers such as llm-d: ``BlockStored`` (with token ids and the
+       predecessor chunk as ``parent_block_hash``) for every L1/L2 store,
+       ``BlockRemoved`` for every eviction/delete, ``AllBlocksCleared`` when
+       an instance is fenced; medium ``lmcache-l1`` / ``lmcache-l2-<backend>``.
+       Topic identity is the reporting server's ``--instance-id`` (deploy as
+       ``node:<nodeName>``) or ``pool:<backend>`` for shared L2. Empty
+       disables it.
+   * - ``--kv-events-replay-port``
+     - ``0``
+     - TCP port of a ZMQ ROUTER socket answering vLLM-style replay requests
+       from a ring of recent messages; ``0`` disables replay.
 
 Coordinator metrics export
 --------------------------
@@ -177,29 +192,6 @@ Kubernetes downward API); an explicit flag wins over the env var.
      - ``LMCACHE_COORDINATOR_EVENT_FLUSH_INTERVAL``
      - Seconds between cache-event batch flushes (must be ``> 0``, default
        ``1``).
-   * - ``--kv-events-endpoint``
-     - ``LMCACHE_KV_EVENTS_ENDPOINT``
-     - ZMQ PUB bind address (e.g. ``tcp://*:5557``) on which the same cache
-       events are re-emitted in vLLM KV-event wire format for KV-cache-aware
-       routers such as llm-d. Works with or without a coordinator URL; unset
-       disables it.
-   * - ``--kv-events-emitter-ids``
-     - ``LMCACHE_KV_EVENTS_EMITTER_IDS``
-     - Comma-separated router identities the events are published under
-       (topic ``kv@<id>@<model>``, one message per id). Default
-       ``node:$NODE_NAME`` or ``node:<hostname>``.
-   * - ``--kv-events-replay-port``
-     - ``LMCACHE_KV_EVENTS_REPLAY_PORT``
-     - TCP port of a ZMQ ROUTER socket answering vLLM-style replay requests
-       from a ring of recent messages; ``0`` (default) disables replay.
-
-The engine-format sink publishes ``BlockStored`` (with the chunk's token ids
-and its predecessor as ``parent_block_hash``) for every L1/L2 store and
-``BlockRemoved`` for every eviction/delete, under medium ``lmcache-l1`` or
-``lmcache-l2-<backend>``; ``access`` and capacity events are not forwarded.
-Like ``--coordinator-event-reporting`` it rides the observability event bus,
-so it is rejected together with ``--disable-observability``.
-
 The server registers under its stable identity (``--instance-id`` / OTel
 ``service.instance.id``); if the flag is not passed, the server mints a
 random UUID v4 at startup and registers under that.

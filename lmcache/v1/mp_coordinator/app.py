@@ -42,6 +42,7 @@ from lmcache.v1.mp_coordinator.ingest.event_broadcaster import (
     CacheEventConsumer,
 )
 from lmcache.v1.mp_coordinator.ingest.event_gate import EventGate
+from lmcache.v1.mp_coordinator.kv_event_publisher import ZmqKVEventPublisher
 from lmcache.v1.mp_coordinator.persistence.checkpoint import (
     load_checkpoint,
     save_checkpoint,
@@ -111,6 +112,18 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
     for collaborator in (*views.all(), *controllers.all()):
         if isinstance(collaborator, CacheEventConsumer):
             event_broadcaster.register_consumer(collaborator)
+    # Last, so routers see a placement only after the directory holds it.
+    kv_event_publisher: ZmqKVEventPublisher | None = None
+    if config.kv_events_endpoint:
+        kv_event_publisher = ZmqKVEventPublisher(
+            endpoint=config.kv_events_endpoint,
+            replay_endpoint=(
+                f"tcp://*:{config.kv_events_replay_port}"
+                if config.kv_events_replay_port
+                else ""
+            ),
+        )
+        event_broadcaster.register_consumer(kv_event_publisher)
     # Held by the ingest path; whoever captures durable state takes it
     # to read across the consumers consistently.
     quiesce = QuiesceLock()
@@ -212,6 +225,8 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
                 )
             await eviction_controller.wait_for_in_flight_dispatches()
             await outbound_client.aclose()
+            if kv_event_publisher is not None:
+                kv_event_publisher.close()
 
     app = FastAPI(title="LMCache MP Coordinator", version="1.0.0", lifespan=lifespan)
     app.state.ctx = ctx
