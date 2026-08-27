@@ -54,6 +54,7 @@ def transfer_context_uses_ipc_event(transfer_ctx: object) -> bool:
     """Whether ``transfer_ctx`` must export its producer event cross-process."""
     # Import lazily to avoid pulling the whole MP transfer stack into every
     # vLLM utility import path, which creates a cycle on CPU-only startup.
+    # First Party
     from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
         LMCacheDrivenTransferContext,
     )
