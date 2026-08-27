@@ -302,7 +302,7 @@ class DaxL2AdapterConfig(L2AdapterConfigBase):
             "- max_dax_size_gb (float): legacy single-device mapped size in GiB\n"
             "- devices (list): optional multi-device entries with device_path and "
             "max_dax_size_gb\n"
-            "- hotplug_enabled (bool): enables runtime /reconfigure/l2/dax/* "
+            "- hotplug_enabled (bool): enables runtime /reconfigure/dax/l2/* "
             "management APIs\n"
             "- slot_bytes (int): fixed slot size in bytes (required, >0)\n"
             "- num_store_workers (int): store worker threads (optional, default 1)\n"

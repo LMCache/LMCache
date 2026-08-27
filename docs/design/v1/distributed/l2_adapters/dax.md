@@ -32,10 +32,10 @@ pools for store, lookup, and load operations, and uses one or more
 `lmcache/v1/multiprocess/http_apis/reconfigure_api.py` exposes runtime
 reconfiguration endpoints:
 
-- `GET /reconfigure/l2/dax/status`
-- `POST /reconfigure/l2/dax/add`
-- `POST /reconfigure/l2/dax/remove`
-- `POST /reconfigure/l2/dax/resize`
+- `GET /reconfigure/dax/l2/status`
+- `POST /reconfigure/dax/l2/add`
+- `POST /reconfigure/dax/l2/remove`
+- `POST /reconfigure/dax/l2/resize`
 
 The HTTP layer routes `backend`, `operation`, and adapter-specific JSON payloads
 into the generic L2 adapter reconfiguration API on `StorageManager`.

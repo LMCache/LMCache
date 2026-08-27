@@ -53,7 +53,7 @@ class _StorageManagerLike(Protocol):
 
 
 class L1DaxAddRequest(BaseModel):
-    """Request body for ``POST /reconfigure/l1/dax/add``."""
+    """Request body for ``POST /reconfigure/dax/l1/add``."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -62,7 +62,7 @@ class L1DaxAddRequest(BaseModel):
 
 
 class L1DaxRemoveRequest(BaseModel):
-    """Request body for ``POST /reconfigure/l1/dax/remove``."""
+    """Request body for ``POST /reconfigure/dax/l1/remove``."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -124,7 +124,7 @@ def _device_dict(
     }
 
 
-@router.get("/reconfigure/l1/dax/status")
+@router.get("/reconfigure/dax/l1/status")
 async def l1_dax_status(request: Request) -> JSONResponse:
     """Return Device-DAX L1 arena status.
 
@@ -147,7 +147,7 @@ async def l1_dax_status(request: Request) -> JSONResponse:
     )
 
 
-@router.post("/reconfigure/l1/dax/add")
+@router.post("/reconfigure/dax/l1/add")
 async def l1_dax_add(
     body: L1DaxAddRequest,
     request: Request,
@@ -176,7 +176,7 @@ async def l1_dax_add(
     return JSONResponse(status_code=200, content={"added": _arena_dict(status)})
 
 
-@router.post("/reconfigure/l1/dax/remove")
+@router.post("/reconfigure/dax/l1/remove")
 async def l1_dax_remove(
     body: L1DaxRemoveRequest,
     request: Request,

@@ -250,7 +250,7 @@ def test_http_reconfigure_lifecycle(devices: _DeviceProvider) -> None:
         app.include_router(router)
         app.state.engine = SimpleNamespace(storage_manager=storage_manager)
         with TestClient(app) as client:
-            response = client.get("/reconfigure/l1/dax/status")
+            response = client.get("/reconfigure/dax/l1/status")
             assert response.status_code == 200
             (primary_status,) = response.json()["arenas"]
             assert primary_status["device_path"] == primary
@@ -258,7 +258,7 @@ def test_http_reconfigure_lifecycle(devices: _DeviceProvider) -> None:
 
             extra = devices.acquire(SLOT_BYTES)
             response = client.post(
-                "/reconfigure/l1/dax/add",
+                "/reconfigure/dax/l1/add",
                 json={"device_path": extra, "size": SLOT_BYTES},
             )
             assert response.status_code == 200
@@ -266,7 +266,7 @@ def test_http_reconfigure_lifecycle(devices: _DeviceProvider) -> None:
             assert _open_fd_count(extra) > 0
 
             response = client.post(
-                "/reconfigure/l1/dax/remove",
+                "/reconfigure/dax/l1/remove",
                 json={"device_path": extra},
             )
             assert response.status_code == 200
@@ -274,7 +274,7 @@ def test_http_reconfigure_lifecycle(devices: _DeviceProvider) -> None:
             assert removed["state"] == "removed"
             assert _open_fd_count(extra) == 0
 
-            response = client.get("/reconfigure/l1/dax/status")
+            response = client.get("/reconfigure/dax/l1/status")
             assert response.status_code == 200
             assert [arena["device_path"] for arena in response.json()["arenas"]] == [
                 primary

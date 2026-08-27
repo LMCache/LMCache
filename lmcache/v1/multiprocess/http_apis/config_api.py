@@ -79,7 +79,7 @@ async def list_adapters(request: Request) -> dict[str, object]:
         dict[str, object]: ``{"adapters": [{"index", "type_name", "tier",
         "primary", "reconfigurable"}, ...]}``. Pass a ``reconfigurable``
         adapter's ``type_name`` as the ``{backend}`` path parameter to
-        ``GET /reconfigure/l2/{backend}/status`` and the reconfigure operations.
+        ``GET /reconfigure/{backend}/l2/status`` and the reconfigure operations.
 
     Raises:
         HTTPException: ``503`` if the engine context is not initialized yet.

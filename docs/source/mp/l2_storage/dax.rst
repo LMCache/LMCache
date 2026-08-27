@@ -28,8 +28,8 @@ the DAX device, but they are unreachable after the LMCache server restarts.
 **Optional fields:**
 
 - ``hotplug_enabled`` (bool, default ``false``): Enables runtime
-  ``/reconfigure/l2/dax/status``, ``/reconfigure/l2/dax/add``,
-  ``/reconfigure/l2/dax/remove``, and ``/reconfigure/l2/dax/resize``.
+  ``/reconfigure/dax/l2/status``, ``/reconfigure/dax/l2/add``,
+  ``/reconfigure/dax/l2/remove``, and ``/reconfigure/dax/l2/resize``.
 - ``num_store_workers`` (int, default ``1``): Store worker threads.
 - ``num_lookup_workers`` (int, default ``1``): Lookup worker threads.
 - ``num_load_workers`` (int, default ``min(4, os.cpu_count())``): Load worker
@@ -82,8 +82,8 @@ future adapters such as P2P.
 
 .. code-block:: bash
 
-    curl http://127.0.0.1:9000/reconfigure/l2/dax/status
-    curl -X POST http://127.0.0.1:9000/reconfigure/l2/dax/add \
+    curl http://127.0.0.1:9000/reconfigure/dax/l2/status
+    curl -X POST http://127.0.0.1:9000/reconfigure/dax/l2/add \
       -H 'Content-Type: application/json' \
       -d '{"device_path": "/dev/daxX.X", "size": "100GiB"}'
 

@@ -42,15 +42,19 @@ for the HTTP layer, so HTTP handlers do not access either manager's private
 state.
 
 The runtime-reconfigure HTTP surface lives in
-`lmcache/v1/multiprocess/http_apis/l1_reconfigure_api.py` as tier-first routes:
-`GET /reconfigure/l1/dax/status` and `POST /reconfigure/l1/dax/{add,remove}`.
+`lmcache/v1/multiprocess/http_apis/l1_reconfigure_api.py` as backend-first,
+tier-scoped routes: `GET /reconfigure/dax/l1/status` and
+`POST /reconfigure/dax/l1/{add,remove}`.
 Handlers stay thin -- request-shape validation (422 schema / 400 size values)
 happens at the HTTP layer, domain status-code decisions (404 lookup miss, 409
 state conflict or non-Device-DAX L1) come from the manager via
 `L1ReconfigureError`, the HTTP resolver answers 503 before engine or storage
-manager initialization, and arena mechanics stay in the allocator. L1 and L2
-use separate tier prefixes. An L1 URL that omits the `dax` segment, such as
-`/reconfigure/l1/status`, returns `404`. See
+manager initialization, and arena mechanics stay in the allocator. The current
+L1 surface fixes `dax` as the backend and `l1` as the tier segment, keeping it
+disjoint from the parametric L2 family (`/reconfigure/{backend}/l2/*`).
+Additional L1 backends are not exposed by this API and require corresponding
+routing and delegation support. A URL that omits the tier segment, such as
+`/reconfigure/dax/status`, returns `404`. See
 [../l2_adapters/dax.md](../l2_adapters/dax.md) for the L2 counterpart.
 
 ## Arena Pool
@@ -164,7 +168,7 @@ l1 = L1Manager(
 )
 ```
 
-Reconfiguration is available over HTTP (`/reconfigure/l1/dax/*`) and through
+Reconfiguration is available over HTTP (`/reconfigure/dax/l1/*`) and through
 the `L1Manager` delegation methods:
 
 ```python
@@ -267,7 +271,7 @@ external views are alive, mapping release on setup failure, and the
 `tests/v1/distributed/test_devdax_l1_reconfigure_integration.py` (opt-in via
 `RUN_DEVDAX_L1_INTEGRATION=1`) drives real mmap-backed devices end to end,
 at the memory-manager level, through the `L1Manager` KV-cache path, and through
-the `/reconfigure/l1/dax/*` HTTP lifecycle. KV entries land on a runtime-added
+the `/reconfigure/dax/l1/*` HTTP lifecycle. KV entries land on a runtime-added
 device, stay readable while it drains, and the device is unmapped only after
 the last cached entry is deleted. It accepts real `/dev/dax` devices via
 `LMCACHE_TEST_DEVDAX_L1_PATHS`.
@@ -282,7 +286,7 @@ the last cached entry is deleted. It accepts real `/dev/dax` devices via
   (`add_device` / `remove_device`).
 - Runtime reconfigure maps and unmaps already-provisioned Device-DAX devices;
   it does not perform kernel-level CXL/DAX namespace reconfiguration.
-- The HTTP control surface is `/reconfigure/l1/dax/*`
+- The HTTP control surface is `/reconfigure/dax/l1/*`
   (`l1_reconfigure_api.py`); the `L1Manager` delegation methods remain the
   programmatic entry point.
 
