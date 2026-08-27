@@ -86,11 +86,47 @@ Install LMCache
                             The wheel excludes torch and the ROCm runtime libraries (they bind to the
                             host image at runtime). Match the wheel's minor torch/ROCm version to your
                             container; for other bases, use the **From Source** tab.
-
+                            
                         .. note::
 
                             The ROCm wheel carries a ``+rocm7.2`` PEP 440 local version, so
                             ``pip show lmcache`` reports which build is installed and the ROCm
+                            build can be requested explicitly. A bare ``lmcache==${VERSION}``
+                            also resolves it, since ``==`` ignores the local segment.
+
+                    .. tab-item:: Intel XPU
+
+                        The Intel XPU wheel is ABI-matched to the upstream
+                        ``vllm/vllm-openai-xpu:v0.26.0`` image (torch 2.12.0+xpu and oneAPI/SYCL).
+                        It is published to a dedicated
+                        `GitHub Release <https://github.com/LMCache/LMCache/releases>`__ rather than PyPI.
+
+                        Install directly inside the matching upstream vLLM XPU container. Torch and the
+                        oneAPI/SYCL runtime are already present, so ``--no-deps`` preserves that runtime stack:
+
+                        .. code-block:: bash
+
+                            docker run -it --device /dev/dri --shm-size=4g \
+                                --entrypoint bash vllm/vllm-openai-xpu:v0.26.0
+
+                            VERSION=0.5.3  # replace with target release
+                            pip install lmcache==${VERSION}+xpu --no-deps \
+                                --no-index \
+                                --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/v${VERSION}-xpu
+
+                        .. note::
+
+                            The wheel excludes torch and oneAPI/SYCL runtime libraries, which bind to the
+                            host image at runtime. Match the wheel's torch and oneAPI versions to the
+                            container; for other bases, use the **From Source** tab.
+
+                            ``--no-index`` restricts pip to the GitHub Release asset, preventing it from
+                            selecting a same-version CUDA wheel from PyPI.
+
+                        .. note::
+
+                            The XPU wheel carries a ``+xpu`` PEP 440 local version, so
+                            ``pip show lmcache`` reports which build is installed and the XPU
                             build can be requested explicitly. A bare ``lmcache==${VERSION}``
                             also resolves it, since ``==`` ignores the local segment.
 
@@ -325,7 +361,7 @@ Install LMCache
 
                 .. code-block:: bash
 
-                    docker pull intel/vllm:0.17.0-xpu
+                    docker pull vllm/vllm-openai-xpu:v0.26.0
 
         See :ref:`docker_deployment` for running the container and ROCm images.
 
