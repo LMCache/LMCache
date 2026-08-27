@@ -150,6 +150,9 @@ class KVFormatSpec(ABC):
     # ``num_blocks`` and ``block_size`` are folded into one PBS axis, which
     # leaves both of them undefined for this format.
     is_pbs_fused: ClassVar[bool] = False
+    # Each per-layer list entry is a ``(K, V)`` tuple of paged tensors, rather
+    # than a single stacked per-layer tensor.
+    is_kv_second_tuple: ClassVar[bool] = False
 
     def __init__(self, kv_caches: DiscoverableKVCache) -> None:
         # Borrowed, not owned: see the class docstring's "Lifetime" note. The

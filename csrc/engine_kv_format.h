@@ -146,7 +146,14 @@ enum class EngineKVFormat : int {
 
   NL_X_TWO_NB_NH_ONE_BS_HS = 15,
 
-  NB_NL_NH_BS_CS = 16,
+  /*
+  used by:
+  - vLLM per-layer (K, V) tuples
+  physical shape per layer: [num_blocks, block_size, num_heads, head_size]
+  One list entry per layer; each entry is a (K, V) pair of paged tensors.
+  */
+  NL_X_TWO_X_NB_BS_NH_HS = 16,
+  NB_NL_NH_BS_CS = 17,
   /*
   used by:
   - vLLM standardized BLHNC layout (blocks-first; each block packs every
@@ -158,13 +165,14 @@ enum class EngineKVFormat : int {
   content_size (carried via block_stride_elems).
   */
 
-  NB_NL_BS_NH_CS = 17,
+  NB_NL_BS_NH_CS = 18,
   /*
   used by:
   - vLLM standardized BLNHC layout (blocks-first, tokens before heads)
   physical shape: [num_blocks, num_layers, block_size, num_heads, content_size]
   Like NB_NL_NH_BS_CS with the NHD middle order.
   */
+
 };
 
 // __host__ __device__ under CUDA/HIP so the kernels can call these; the guard
@@ -202,6 +210,7 @@ struct FormatFacts {
   bool is_fused_packed = false;  // K/V packed in trailing dim (kv_size == 1)
   bool is_two_major = false;     // size-2 K/V axis precedes the block axis
   bool is_pbs_fused = false;     // paged buffer size fused into one axis
+  bool is_kv_second_tuple = false;  // each per-layer entry is a (K, V) pair
 };
 
 // Return facts by value rather than indexing a global table. This keeps the
@@ -276,6 +285,10 @@ LMC_KV_FORMAT_HD constexpr FormatFacts format_facts(EngineKVFormat f) {
       facts.is_hnd = true;
       facts.is_two_major = true;
       break;
+    case EngineKVFormat::NL_X_TWO_X_NB_BS_NH_HS:
+      facts.is_layer_list = true;
+      facts.is_kv_second_tuple = true;
+      break;
     case EngineKVFormat::NB_NL_NH_BS_CS:
       facts.is_cross_layer = true;
       facts.is_hnd = true;
@@ -284,6 +297,7 @@ LMC_KV_FORMAT_HD constexpr FormatFacts format_facts(EngineKVFormat f) {
     case EngineKVFormat::NB_NL_BS_NH_CS:
       facts.is_cross_layer = true;
       facts.is_fused_packed = true;
+
       break;
     default:
       unsupported_engine_kv_format();
@@ -301,7 +315,7 @@ LMC_KV_FORMAT_HD constexpr bool is_kv_list(EngineKVFormat f) {
   return format_facts(f).is_kv_list;
 }
 
-// One list entry per layer: kv_caches[layer_idx] is that layer's tensor.
+// The outermost dimension indexes the list of layers
 LMC_KV_FORMAT_HD constexpr bool is_layer_list(EngineKVFormat f) {
   return format_facts(f).is_layer_list;
 }
@@ -317,4 +331,9 @@ LMC_KV_FORMAT_HD constexpr bool is_mla(EngineKVFormat f) {
 // separate K/V axis — transferred as one k_or_v == 0 pass (like MLA).
 LMC_KV_FORMAT_HD constexpr bool is_fused_packed(EngineKVFormat f) {
   return format_facts(f).is_fused_packed;
+}
+
+// One list entry per layer, each entry is a tuple of paged tensors.
+LMC_KV_FORMAT_HD constexpr bool is_kv_second_tuple(EngineKVFormat f) {
+  return format_facts(f).is_kv_second_tuple;
 }
