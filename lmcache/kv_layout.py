@@ -14,7 +14,7 @@ from __future__ import annotations
 # Standard
 from collections.abc import Callable
 from types import ModuleType
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 if TYPE_CHECKING:
     # First Party
@@ -41,6 +41,23 @@ class KVLayout(int):
     is_two_major: bool
     is_pbs_fused: bool
     is_kv_second_tuple: bool
+    NB_NL_TWO_BS_NH_HS: ClassVar["KVLayout"]
+    NL_X_TWO_NB_BS_NH_HS: ClassVar["KVLayout"]
+    NL_X_NB_TWO_BS_NH_HS: ClassVar["KVLayout"]
+    NL_X_NB_BS_HS: ClassVar["KVLayout"]
+    TWO_X_NL_X_NBBS_NH_HS: ClassVar["KVLayout"]
+    NL_X_NBBS_ONE_HS: ClassVar["KVLayout"]
+    NL_X_TWO_NB_NH_BS_HS: ClassVar["KVLayout"]
+    NL_X_NB_TWO_NH_BS_HS: ClassVar["KVLayout"]
+    NB_NL_TWO_NH_BS_HS: ClassVar["KVLayout"]
+    TWO_X_NL_X_NB_BS_NH_HS: ClassVar["KVLayout"]
+    NL_X_NB_NH_BS_TWO_HS: ClassVar["KVLayout"]
+    NL_X_NB_BS_NH_TWO_HS: ClassVar["KVLayout"]
+    NL_X_NB_NH_BS_CS: ClassVar["KVLayout"]
+    NL_X_NB_BS_NH_CS: ClassVar["KVLayout"]
+    NL_X_NB_BSV_BSS: ClassVar["KVLayout"]
+    NL_X_TWO_NB_NH_ONE_BS_HS: ClassVar["KVLayout"]
+    NL_X_TWO_X_NB_BS_NH_HS: ClassVar["KVLayout"]
 
     def __new__(
         cls,

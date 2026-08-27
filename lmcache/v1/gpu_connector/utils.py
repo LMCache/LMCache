@@ -246,7 +246,7 @@ def normalize_and_discover_per_layer_formats(
         whole_format, whole_normalized = detect_format(
             kv_caches, serving_engine, layout_hints
         )
-        if not lmcache_native.is_layer_list(whole_format):
+        if not whole_format.is_layer_list:
             return whole_normalized, [whole_format] * get_num_layers(
                 whole_normalized, whole_format
             )
