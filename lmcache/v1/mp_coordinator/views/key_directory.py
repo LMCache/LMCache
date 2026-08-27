@@ -7,7 +7,7 @@ ingest layer has already ordered, deduped, and fenced. Eventually
 consistent: lookups are hints to be validated at the owner. L1
 placements die with their reporter's incarnation; L2 placements persist.
 
-See ``docs/design/v1/mp_coordinator/key_directory.md``.
+See ``docs/design/v1/mp_coordinator/views/key_directory.md``.
 """
 
 # Future
@@ -16,7 +16,7 @@ from __future__ import annotations
 # Standard
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import cast
+from typing import TYPE_CHECKING, cast
 import threading
 
 # Third Party
@@ -33,7 +33,18 @@ from lmcache.v1.mp_coordinator.api import (
     CacheEventType,
 )
 from lmcache.v1.mp_coordinator.blend_index import BlendIndex, BlendIndexStats
-from lmcache.v1.mp_coordinator.persistence.durable_component import PersistenceType
+from lmcache.v1.mp_coordinator.persistence.durable_component import (
+    DurableComponent,
+    PersistenceType,
+)
+from lmcache.v1.mp_coordinator.views.base import View
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
+    from lmcache.v1.mp_coordinator.discovery import Registry
+
+# First Party
 from lmcache.v1.mp_coordinator.utils.encoding import decode_key, encode_key
 
 logger = init_logger(__name__)
@@ -110,7 +121,7 @@ class _TokenBinding:
     keys: set[ObjectKey]
 
 
-class KeyDirectory:
+class KeyDirectory(View):
     """Thread-safe in-memory key directory built from cache events.
 
     Mutations arrive through the ingest layer's two consumer hooks,
@@ -136,6 +147,35 @@ class KeyDirectory:
         # enable_blend_lookup() swaps in one sized to the fleet's chunk size.
         self._blend_index = BlendIndex()
         self._blend_lookup_enabled = False
+
+    @classmethod
+    def from_config(
+        cls, config: "MPCoordinatorConfig", views: "Registry[View]"
+    ) -> "KeyDirectory":
+        """Build the directory, indexing chunk content only if asked.
+
+        Blend lookup lives here rather than at the call site because the
+        window it matches on is the fleet chunk size -- the same value the
+        directory keys on.
+
+        Args:
+            config: The coordinator configuration.
+            views: Unused; the directory depends on nothing.
+        """
+        directory = cls()
+        if config.enable_blend_lookup:
+            directory.enable_blend_lookup(
+                chunk_size=config.chunk_size, probe_stride=config.blend_probe_stride
+            )
+        return directory
+
+    def get_durable_components(self) -> tuple[DurableComponent, ...]:
+        """Return this directory: nothing else knows what the fleet cached.
+
+        Returns:
+            Itself.
+        """
+        return (self,)
 
     def enable_blend_lookup(self, chunk_size: int, probe_stride: int) -> None:
         """Start indexing chunk content so :meth:`blend_match` can serve.

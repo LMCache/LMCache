@@ -61,7 +61,6 @@ lmcache/v1/mp_coordinator/
   registry.py           # InstanceRegistry + MPInstance (pure membership)
   schemas.py            # Pydantic request/response models (shared wire contract)
   registrar.py          # mp-server-side register/heartbeat/deregister helpers
-  key_directory.py      # KeyDirectory: placements + token bindings (a cache-event consumer)
   blend_index.py      # BlendIndex: fragment (blend) lookup over those bindings
   blend_client.py       # mp-server-side fragment-lookup query client
   server_config.py      # ServerConfigRegistry: per-server module capacities (from registration)
@@ -69,10 +68,16 @@ lmcache/v1/mp_coordinator/
     __init__.py
     event_gate.py       # EventGate: incarnation fencing, seq dedup, gap detection
     event_broadcaster.py  # fans admitted events to the registered consumers
-  controllers/
-    __init__.py
-    eviction_controller.py  # the fleet L2 control loop: quota + usage + LRU + pins
+  discovery.py          # Registry + package scan, shared by views and controllers
+  views/                # read models of the fleet: what is cached, and how much
+    __init__.py         # build_views: scans this package
+    base.py             # View: the marker; may depend on other views only
+    key_directory.py    # KeyDirectory: placements + token bindings (a consumer)
     usage_manager.py    # per-tier usage view, by salt and by instance (a consumer)
+  controllers/          # policy: loops and request handling, reading the views
+    __init__.py         # build_controllers: scans this package
+    base.py             # Controller: the marker; may depend on views and peers
+    eviction_controller.py  # the fleet L2 control loop: quota + usage + LRU + pins
     prefetch_manager.py # dispatches warm prefetch to a named MP server
   http_apis/
     __init__.py
@@ -122,10 +127,12 @@ sequenceDiagram
 ## Extension seam (adding a capability)
 
 `app.state` carries the **shared collaborators** every capability composes
-from: `config`, `registry`, `key_directory`, `usage_manager`,
-`eviction_controller` (which owns the quota registry), the ingest
-`event_gate`, and the
-`controllers/` managers. Endpoints use them directly — membership is thin
+from: `config`, `registry`, the ingest `event_gate`, and two registries --
+`views` (the key directory and the usage view) and `controllers` (the
+eviction loop, which owns the quota registry, and the prefetch proxy).
+Adding either is one file in `views/` or `controllers/`: discovery builds
+it, subscribes it to the event stream if it consumes, and routes whatever
+durable state it advertises. Endpoints use them directly — membership is thin
 enough to have no service layer (the `/instances` router calls the registry
 straight, matching the mp server's own `http_apis` convention).
 
@@ -197,7 +204,7 @@ Where the coordinator's fleet-level *doing* lives — the counterpart to
   fleet). Also tracks the pins taken via `POST /cache/pins` so pinned keys
   are excluded from eviction and delete. Reachable as
   `ctx.eviction_controller`, with `.quota` for the `/quota` endpoints.
-- `usage_manager.py` — `CacheUsageManager`, byte totals per tier rolled
+- `views/usage_manager.py` — `CacheUsageManager`, byte totals per tier rolled
   up per `cache_salt` (the tenant axis the eviction controller enforces
   against) and per `(instance_id, backend)` (the capacity axis: how full
   one node's L1 is). A consumer in its own right rather than supporting
