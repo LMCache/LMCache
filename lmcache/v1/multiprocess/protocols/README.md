@@ -226,6 +226,10 @@ cacheblend plugin dispatches on these.
 - `CB_RETRIEVE_PRE_COMPUTED`
 - `CB_UNIFIED_LOOKUP`
 
+`CB_REGISTER_ROPE_V3`, `CB_UNREGISTER_ROPE_V3` and `CB_RETRIEVE_PRE_COMPUTED_V3`
+remain as deprecated enum aliases (same member and wire value) for plugins that
+have not yet moved to the unversioned names; they are not separate requests.
+
 ### Observability (`observability.py`)
 Server-side observability events:
 - `REPORT_BLOCK_ALLOCATION`
