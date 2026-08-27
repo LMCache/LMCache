@@ -3018,6 +3018,112 @@ class TestScenarios:
 
 
 # ==========================================
+# HND multi-layer transfers
+# ==========================================
+
+
+@pytest.mark.parametrize(
+    "engine_kv_format",
+    [
+        _py_ops.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS,
+        _py_ops.EngineKVFormat.NL_X_NB_TWO_NH_BS_HS,
+    ],
+)
+@pytest.mark.parametrize(
+    "direction",
+    [_py_ops.TransferDirection.H2D, _py_ops.TransferDirection.D2H],
+)
+def test_multi_layer_kv_transfer_hnd(
+    engine_kv_format: _py_ops.EngineKVFormat,
+    direction: _py_ops.TransferDirection,
+) -> None:
+    """Transfer HND KV data in both directions through the Python fallback."""
+    num_layers = 2
+    num_blocks = 3
+    num_heads = 2
+    block_size = 2
+    head_size = 4
+    num_tokens = 4
+    page_buffer_size = num_blocks * block_size
+    hidden_size = num_heads * head_size
+    slot_mapping = torch.tensor([0, 1, 3, 5], dtype=torch.int64)
+
+    key_value = torch.zeros(
+        (2, num_layers, num_tokens, hidden_size), dtype=torch.float32
+    )
+    if direction == _py_ops.TransferDirection.H2D:
+        key_value.copy_(torch.arange(key_value.numel()).reshape(key_value.shape))
+
+    if engine_kv_format == _py_ops.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS:
+        paged_shape = (2, num_blocks, num_heads, block_size, head_size)
+    else:
+        paged_shape = (num_blocks, 2, num_heads, block_size, head_size)
+
+    paged_buffers = [
+        torch.zeros(paged_shape, dtype=torch.float32) for _ in range(num_layers)
+    ]
+    if direction == _py_ops.TransferDirection.D2H:
+        for layer_id, paged_buffer in enumerate(paged_buffers):
+            values = torch.arange(paged_buffer.numel(), dtype=torch.float32)
+            paged_buffer.copy_(values.reshape(paged_shape) + layer_id * 1000)
+
+    key_value_ptrs = torch.tensor(
+        [buffer.data_ptr() for buffer in paged_buffers], dtype=torch.uint64
+    )
+    _py_ops.multi_layer_kv_transfer(
+        key_value,
+        key_value_ptrs,
+        slot_mapping,
+        torch.device("cpu"),
+        page_buffer_size,
+        direction,
+        engine_kv_format,
+        block_size=block_size,
+        head_size=head_size,
+    )
+
+    for token_id, slot in enumerate(slot_mapping.tolist()):
+        block_id, block_offset = divmod(slot, block_size)
+        for layer_id, paged_buffer in enumerate(paged_buffers):
+            for kv_idx in range(2):
+                if engine_kv_format == _py_ops.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS:
+                    paged_value = paged_buffer[kv_idx, block_id, :, block_offset, :]
+                else:
+                    paged_value = paged_buffer[block_id, kv_idx, :, block_offset, :]
+                torch.testing.assert_close(
+                    key_value[kv_idx, layer_id, token_id], paged_value.reshape(-1)
+                )
+
+
+@pytest.mark.parametrize(
+    "block_size,head_size,error_match",
+    [
+        (0, 4, "block_size"),
+        (2, 0, "head_size"),
+        (4, 4, "page_buffer_size"),
+        (2, 3, "hidden size"),
+    ],
+)
+def test_multi_layer_kv_transfer_hnd_validates_dimensions(
+    block_size: int, head_size: int, error_match: str
+) -> None:
+    key_value = torch.zeros((2, 1, 1, 8), dtype=torch.float32)
+
+    with pytest.raises(ValueError, match=error_match):
+        _py_ops.multi_layer_kv_transfer(
+            key_value,
+            [torch.empty(0)],
+            torch.tensor([0], dtype=torch.int64),
+            torch.device("cpu"),
+            6,
+            _py_ops.TransferDirection.H2D,
+            _py_ops.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS,
+            block_size=block_size,
+            head_size=head_size,
+        )
+
+
+# ==========================================
 # Allocation page alignment
 # ==========================================
 #

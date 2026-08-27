@@ -561,27 +561,53 @@ def multi_layer_kv_transfer(
     block_size: int = 0,
     head_size: int = 0,
     skip_prefix_n_tokens: int = 0,
-):
-    """
-    Fully vectorized Python fallback for multi_layer_kv_transfer.
-    Eliminates ALL token- and KV-level Python loops.
+) -> None:
+    """Transfer multiple KV layers between LMCache and paged engine buffers.
+
+    Args:
+        key_value: LMCache tensor shaped as KV, layer, token, and hidden size.
+        key_value_ptrs: Per-layer paged tensors or their raw pointers.
+        slot_mapping: Engine slot index for each LMCache token.
+        paged_memory_device: Device containing the paged buffers.
+        page_buffer_size: Number of token slots in each paged buffer.
+        direction: Direction of the transfer.
+        engine_kv_format: Physical layout of each paged buffer.
+        block_size: Tokens per block for blocked layouts.
+        head_size: Elements per head for HND layouts.
+        skip_prefix_n_tokens: Leading tokens to omit from the transfer.
+
+    Returns:
+        None.
+
+    Raises:
+        TypeError: If ``key_value_ptrs`` is not a tensor or tensor list.
+        ValueError: If HND dimensions are missing or inconsistent.
     """
     if not isinstance(key_value_ptrs, (torch.Tensor, list)):
         raise TypeError(
             f"Expected torch.Tensor or list, but got {type(key_value_ptrs).__name__}"
         )
 
-    # TODO: Implement head_size support for HND layouts (NL_X_TWO_NB_NH_BS_HS,
-    # NL_X_NB_TWO_NH_BS_HS) as next step.
-    if int(engine_kv_format) in (
-        int(EngineKVFormat.NL_X_TWO_NB_NH_BS_HS),
-        int(EngineKVFormat.NL_X_NB_TWO_NH_BS_HS),
-    ):
-        raise NotImplementedError(
-            "HND layouts (NL_X_TWO_NB_NH_BS_HS, NL_X_NB_TWO_NH_BS_HS) "
-            "are not supported in the non-CUDA fallback. "
-            "head_size parameter is required but not implemented in this path."
-        )
+    is_mla = _format_spec(engine_kv_format).is_mla
+    is_flash_infer = int(engine_kv_format) == int(EngineKVFormat.NL_X_NB_TWO_BS_NH_HS)
+    is_hnd = int(engine_kv_format) == int(EngineKVFormat.NL_X_TWO_NB_NH_BS_HS)
+    is_flash_infer_hnd = int(engine_kv_format) == int(
+        EngineKVFormat.NL_X_NB_TWO_NH_BS_HS
+    )
+
+    num_layers = key_value.size(1)
+    hidden_size = key_value.size(3)
+
+    if is_hnd or is_flash_infer_hnd:
+        if block_size <= 0:
+            raise ValueError("block_size must be greater than zero for HND layouts")
+        if head_size <= 0:
+            raise ValueError("head_size must be greater than zero for HND layouts")
+        if page_buffer_size % block_size != 0:
+            raise ValueError("page_buffer_size must be divisible by block_size")
+        if hidden_size % head_size != 0:
+            raise ValueError("key_value hidden size must be divisible by head_size")
+        num_heads = hidden_size // head_size
 
     # 1. Filter out invalid slots.
     #    valid_mask_kv:  on key_value.device, used to index key_value
@@ -602,15 +628,9 @@ def multi_layer_kv_transfer(
 
     valid_slots = slots_kv[valid_mask_kv].to(paged_memory_device)
 
-    # 2. Determine architecture variant and tensor dimensions.
-    is_mla = _format_spec(engine_kv_format).is_mla
-    is_flash_infer = int(engine_kv_format) == int(EngineKVFormat.NL_X_NB_TWO_BS_NH_HS)
-
-    num_layers = key_value.size(1)
-    hidden_size = key_value.size(3)
-
-    # For the flash_infer interleaved layout, pre-compute block-level indices.
-    if is_flash_infer:
+    # 2. Determine blocked slot indices and physical tensor dimensions.
+    # Blocked layouts need physical block and offset indices.
+    if is_flash_infer or is_hnd or is_flash_infer_hnd:
         block_indices = valid_slots // block_size
         block_offsets = valid_slots % block_size
 
@@ -620,6 +640,12 @@ def multi_layer_kv_transfer(
 
     if is_mla:
         layer_shape = (page_buffer_size, hidden_size)
+    elif is_hnd:
+        num_blocks = page_buffer_size // block_size
+        layer_shape = (2, num_blocks, num_heads, block_size, head_size)
+    elif is_flash_infer_hnd:
+        num_blocks = page_buffer_size // block_size
+        layer_shape = (num_blocks, 2, num_heads, block_size, head_size)
     elif is_flash_infer:
         num_blocks = page_buffer_size // block_size
         layer_shape = (num_blocks, 2, block_size, hidden_size)
@@ -650,6 +676,27 @@ def multi_layer_kv_transfer(
             else:
                 gathered = paged_tensor.index_select(0, valid_slots)
                 key_value[0, layer_id, valid_mask_kv, :] = gathered.to(
+                    kv_device, non_blocking=False
+                )
+        elif is_hnd or is_flash_infer_hnd:
+            # HND paged layouts keep heads before the block-token dimension.
+            if int(direction) == int(TransferDirection.H2D):
+                lmc_valid = key_value[:, layer_id, valid_mask_kv, :]
+                src_data = lmc_valid.transpose(0, 1).reshape(
+                    -1, 2, num_heads, head_size
+                )
+                src_data = src_data.to(paged_memory_device)
+                if is_hnd:
+                    paged_tensor[:, block_indices, :, block_offsets, :] = src_data
+                else:
+                    paged_tensor[block_indices, :, :, block_offsets, :] = src_data
+            else:
+                if is_hnd:
+                    gathered = paged_tensor[:, block_indices, :, block_offsets, :]
+                else:
+                    gathered = paged_tensor[block_indices, :, :, block_offsets, :]
+                gathered = gathered.reshape(-1, 2, hidden_size).transpose(0, 1)
+                key_value[:, layer_id, valid_mask_kv, :] = gathered.to(
                     kv_device, non_blocking=False
                 )
         elif is_flash_infer:
