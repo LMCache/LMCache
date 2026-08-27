@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for the engine-format (vLLM KV event) publisher: wire layout of
-the msgpack payload against the positional field order vLLM (and its
-consumers, verified with llm-d's adapter) use, golden payloads, ZMQ framing / topic identity, fencing,
+the msgpack payload against vLLM's positional field order (verified with
+llm-d's adapter), golden payloads, ZMQ framing / topic identity, fencing,
 replay, and its mount behind the coordinator's ingest gate."""
 
 # Standard
