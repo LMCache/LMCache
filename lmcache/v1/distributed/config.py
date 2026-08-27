@@ -421,10 +421,8 @@ def add_storage_manager_args(
         "Configuration for the GDS L1 tier. Setting --gds-l1-path makes the "
         "L1 medium an NVMe slab accessed via GPUDirect Storage DMA instead of "
         "pinned DRAM; --l1-size-gb then sizes the slab. cuFile, hipFile, and "
-        "phx use a slab file (phx takes any VFS path: local NVMe for the DMA "
-        "fast path, NFS/NVMe-oF with degraded performance), while uGDS uses "
-        "a dedicated raw device. Disable byte-array L2 adapters when this "
-        "is on.",
+        "phx use a slab file, while uGDS uses a dedicated raw device. "
+        "Disable byte-array L2 adapters when this is on.",
     )
     gds_group.add_argument(
         "--gds-l1-path",

@@ -296,7 +296,10 @@ phxfs (``phxfs_regmem``, 64 KiB-aligned) and the slab is read and written
 with stream-ordered submissions (``phxfs_read_stream`` /
 ``phxfs_write_stream``) that keep the DMA ordered with the other work on
 the stream. A ``libphoenix`` build without the stream-ordered API fails
-to load.
+to load. Follow the
+`Phoenix installation guide <https://github.com/xPU-IO/Phoenix/blob/main/doc/install.md>`_
+to build ``libphoenix.so``, load the ``phoenixfs`` kernel module, and
+verify the installation.
 
 
 
