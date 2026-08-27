@@ -22,26 +22,26 @@ The server already receives a periodic signal from every actively serving worker
 the heartbeat PING. The design adds the worker's `instance_id` to that message,
 stamps `last_seen` on the per-instance entries that already exist, and runs one
 periodic scan that reaps entries silent longer than a timeout via the same cleanup
-as a client unregister. The heartbeat keeps its lazy start (first store/retrieve)
-and starts healthy; a live worker pings every interval, refreshing its `last_seen`,
-so it is never reaped while alive. Entries that never produced a liveness signal
-fall under a generous registration grace. Recovery reuses existing client
-machinery: on a genuine outage the heartbeat's pings fail, clearing `health_event`;
-when the server returns the unhealthy-to-healthy edge fires the recover callback,
-which re-registers — a noop when the entry survived.
+as a client unregister. The heartbeat starts immediately after successful KV-cache
+registration and starts healthy; a live worker pings every interval, refreshing
+its `last_seen`, so it is never reaped while alive. Entries that never produced a
+liveness signal fall under a generous registration grace. Recovery reuses
+existing client machinery: on a genuine outage the heartbeat's pings fail,
+clearing `health_event`; when the server returns, the unhealthy-to-healthy edge
+fires the recover callback, which re-registers — a noop when the entry survived.
 
 ```
 engine worker adapter                            MP server
 +---------------------------+                   +--------------------------------------+
 | HeartbeatThread           |   PING [id]       | ManagementModule                     |
 |  (instance_id, 10s)  -----+------------------>|  ping(id) -> touch_instance(id)      |
-|  lazy start on first req, |   (NORMAL pool)   |  reaper thread (scan = timeout/4)    |
+|  start after registration |   (NORMAL pool)   |  reaper thread (scan = timeout/4)    |
 |   (starts healthy)        |                   |   -> reap_stale_instances(           |
 |  unhealthy->healthy edge  |                   |        timeout, registration_grace)  |
 |   -> re-register callback |   REGISTER        |   -> drop_instance_state(id) fan-out |
 |                           +------------------>|        |                |            |
 | register_kv_caches        |   STORE/RETRIEVE  |        v                v            |
-|  (no pings until traffic) |   (refresh too)   | LMCacheDriven/          BlendV3      |
+|  then start heartbeat      |   (refresh too)   | LMCacheDriven/          BlendV3      |
 |                           |                   |  EngineDriven           (CB rope     |
 |                           |                   |  TransferModule          dropped)    |
 |                           |                   |  Entry{.., last_seen,               |
@@ -78,10 +78,11 @@ Every id-carrying request reads the same field, so no other payloads change.
 `last_seen: float` (`time.monotonic()`) and `has_liveness_signal: bool`, latched
 only by PING. The flag selects the staleness window: an entry that has pinged
 provably runs the heartbeat protocol and is judged on the reap timeout; one that
-never pinged (e.g. still warming under lazy start) is judged on the generous
-registration grace. `last_seen` is refreshed by PING (`touch_instance`: refresh
-if present, never insert), register (create and NOOP paths), and every transfer
-path, so a worker mid-transfer is never reaped; traffic never latches the flag.
+never pinged (for example, an older client or interrupted registration) is judged
+on the generous registration grace. `last_seen` is refreshed by PING
+(`touch_instance`: refresh if present, never insert), register (create and NOOP
+paths), and every transfer path, so a worker mid-transfer is never reaped; traffic
+never latches the flag.
 
 ### 5.2 Locking
 
@@ -139,16 +140,28 @@ the worker adapter warns at startup when `3 x interval` exceeds the 30 s floor.
 
 ## 6. Adapter Side
 
-### 6.1 Lazy start
+### 6.1 Post-registration start
 
-The heartbeat keeps its lazy start on first store/retrieve — no pings during
-warmup; the registration grace covers that window. It starts healthy (the event
-is set at construction), so the first store/retrieve is not gated. A live worker
-then pings every interval, refreshing its server-side `last_seen`, so it is never
-reaped while alive — no re-registration is needed at start. The recover callback
-re-registers only on a genuine recovery edge (Section 6.2). A retrieve dropped
-while the server is unhealthy is still reported via `get_finished` so async loads
-cannot hang.
+The heartbeat starts immediately after the first successful KV-cache registration.
+vLLM performs this registration while initializing the KV cache, before model
+warmup and CUDA graph capture. Starting here intentionally keeps the registered
+context live through that potentially long startup phase and prevents it from
+aging out before the first request. The heartbeat starts healthy (the event is
+set at construction), so the first store/retrieve is not gated. Store/retrieve
+retain an idempotent start call
+for compatibility. The recover callback re-registers only on a genuine recovery
+edge (Section 6.2). A retrieve dropped while the server is unhealthy is still
+reported via `get_finished` so async loads cannot hang.
+
+The worker adapter accepts `lmcache.mp.heartbeat_interval` (default `10.0` seconds)
+for the PING cadence and `lmcache.mp.heartbeat_timeout` (default `0.0`) for the
+response deadline. A non-positive timeout inherits the interval, preserving
+legacy behavior. Deployments whose NORMAL pool can run longer than the desired
+PING cadence may set a larger timeout—for example, a 5-second interval with a
+30-second timeout—without reducing how often live workers refresh `last_seen`.
+While a PING is blocked, the refresh gap can reach `interval + timeout`, so the
+server's worker reap timeout must exceed that bound. This setting is consumed
+by the worker adapter; scheduler-adapter heartbeat behavior is unchanged.
 
 ### 6.2 Recovery after a reap
 
@@ -176,8 +189,8 @@ stop is already requested — a straggling cycle cannot re-create a ghost contex
 | Scenario | Behavior |
 |---|---|
 | Worker crash (SIGKILL, no UNREGISTER) after serving | Pings stop; reaped within ~`timeout + timeout/4`. Context, IPC handles, layout-desc refcount, and non-GPU strategy released via the same cleanup as a clean unregister; blend rope state dropped via the reap listener. The bug being fixed. |
-| Worker crash during warmup (registered, never pinged) | Reaped on the registration grace. Bounded leak instead of a permanent one. |
-| Worker alive but never pinged, idle past the grace | Reaped while alive only if it never pinged (heartbeat never started). Once the heartbeat is running, pings refresh `last_seen` every interval, so a live worker is never reaped regardless of traffic. |
+| Worker crash during or immediately after registration, before the first ping | Reaped on the registration grace. Bounded leak instead of a permanent one. |
+| Older worker alive but never pinged, idle past the grace | Reaped while alive only if it never adopts the heartbeat protocol. Current workers start heartbeat after registration and refresh `last_seen` regardless of traffic. |
 | Heartbeat thread starved, worker transferring | Store/retrieve/prepare/commit refresh `last_seen`; never reaped. |
 | Partition shorter than the reap window | No reap. On heal, the recover callback re-registers; the NOOP path refreshes `last_seen`; zero context churn. |
 | Worker crash + restart | The new process gets a fresh uuid-derived id and a fresh entry; the dead id is reaped independently. No PID-reuse aliasing. |

@@ -48,6 +48,7 @@ class FakeHeartbeatThread:
         health_event: threading.Event | None = None,
         interval: float = 0.0,
         instance_id: int | None = None,
+        timeout: float = 0.0,
     ) -> None:
         self.mq_client = mq_client
         self.health_event = (
@@ -55,6 +56,7 @@ class FakeHeartbeatThread:
         )
         self.interval = interval
         self.instance_id = instance_id
+        self.timeout = timeout
         # Snapshot of the health event at construction time: lets tests
         # assert the adapter starts the heartbeat healthy (event still set).
         self.health_event_set_at_init = self.health_event.is_set()
@@ -200,6 +202,19 @@ def test_register_kv_caches_updates_kv_caches_and_submits(fake_adapter):
     assert send_mock.call_count == 1
     args, _kwargs = send_mock.call_args
     assert args[1] == RequestType.REGISTER_KV_CACHE
+
+
+def test_register_kv_caches_starts_heartbeat_after_registration(fake_adapter):
+    """Successful registration immediately starts worker liveness refresh."""
+    adapter, _send_mock, _ = fake_adapter
+    fake_tensor = MagicMock()
+    fake_tensor.device.type = "cuda"
+
+    adapter.register_kv_caches({"layer.0": fake_tensor})
+
+    assert len(FakeHeartbeatThread.instances) == 1
+    heartbeat = FakeHeartbeatThread.instances[0]
+    assert heartbeat.calls == ["register_recover_callback", "start"]
 
 
 def test_register_kv_caches_raises_connection_error_on_timeout(fake_adapter):
@@ -559,6 +574,79 @@ def test_heartbeat_first_ping_runs_callback_before_setting_event(
     assert event_state_during_callback == [False]
 
 
+def test_heartbeat_uses_timeout_independent_of_interval(monkeypatch) -> None:
+    """Heartbeat ping timeout can exceed its scheduling interval.
+
+    Large multiprocess transfers may occupy the server's NORMAL pool longer
+    than the desired heartbeat cadence. A separate timeout keeps liveness
+    checks frequent without treating expected queue latency as an outage.
+    """
+    observed_timeouts: list[float] = []
+    ping_observed = threading.Event()
+
+    def record_ping(
+        mq_client: object, timeout: float, instance_id: int | None = None
+    ) -> bool:
+        observed_timeouts.append(timeout)
+        ping_observed.set()
+        return True
+
+    monkeypatch.setattr(adapter_mod, "send_ping", record_ping)
+    health_event = threading.Event()
+    health_event.set()
+    heartbeat = HeartbeatThread(
+        mq_client=MagicMock(name="mq_client"),
+        health_event=health_event,
+        interval=5.0,
+        timeout=30.0,
+    )
+
+    try:
+        heartbeat.start()
+        assert ping_observed.wait(timeout=10.0)
+    finally:
+        heartbeat.stop(timeout=10.0)
+
+    assert observed_timeouts
+    assert set(observed_timeouts) == {30.0}
+
+
+def test_heartbeat_timeout_defaults_to_interval(monkeypatch) -> None:
+    observed_timeouts: list[float] = []
+
+    def record_ping(
+        mq_client: object, timeout: float, instance_id: int | None = None
+    ) -> bool:
+        observed_timeouts.append(timeout)
+        return True
+
+    monkeypatch.setattr(adapter_mod, "send_ping", record_ping)
+    heartbeat = HeartbeatThread(
+        mq_client=MagicMock(name="mq_client"),
+        health_event=threading.Event(),
+        interval=7.0,
+    )
+
+    heartbeat._execute()
+
+    assert observed_timeouts == [7.0]
+
+
+def test_worker_heartbeat_uses_configured_timeout(fake_adapter) -> None:
+    adapter = _make_worker_adapter(
+        extra_config={
+            "lmcache.mp.heartbeat_interval": 5.0,
+            "lmcache.mp.heartbeat_timeout": 30.0,
+        }
+    )
+
+    adapter._ensure_heartbeat_started()
+
+    heartbeat = FakeHeartbeatThread.instances[-1]
+    assert heartbeat.interval == 5.0
+    assert heartbeat.timeout == 30.0
+
+
 def test_dropped_retrieve_reported_once_via_unhealthy_get_finished(
     fake_adapter,
 ) -> None:
@@ -801,6 +889,26 @@ def test_startup_warns_when_heartbeat_interval_exceeds_reap_floor(
     _make_worker_adapter(extra_config={"lmcache.mp.heartbeat_interval": 15})
 
     assert any("reap" in msg for msg in warnings)
+
+
+def test_startup_warns_when_heartbeat_timeout_exceeds_reap_floor(
+    fake_adapter, monkeypatch
+) -> None:
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        adapter_mod.logger,
+        "warning",
+        lambda msg, *args, **kwargs: warnings.append(str(msg)),
+    )
+
+    _make_worker_adapter(
+        extra_config={
+            "lmcache.mp.heartbeat_interval": 5.0,
+            "lmcache.mp.heartbeat_timeout": 30.0,
+        }
+    )
+
+    assert any("refresh gap" in msg for msg in warnings)
 
 
 def test_startup_does_not_warn_for_default_heartbeat_interval(
