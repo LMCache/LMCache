@@ -1018,7 +1018,14 @@ class TestProcessRequestMultiWorker:
         #   PREPARE_* -> _FakePrep()
         #   COMMIT_* -> True
         #   END_SESSION -> None
-        def fake_call(_client, req_type, payloads):
+        def fake_call(
+            _client,
+            req_type,
+            payloads,
+            timeout_s: float = sv_helpers._DEFAULT_RPC_TIMEOUT_S,
+            retain_refs: tuple[object, ...] = (),
+        ):
+            del timeout_s, retain_refs
             calls.append((req_type, payloads))
             name = req_type.name
             if name == "QUERY_PREFETCH_STATUS":
