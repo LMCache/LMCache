@@ -1,12 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for the engine-format (vLLM KV event) publisher: wire layout of
 the msgpack payload against the positional field order llm-d's vLLM
-adapter parses, golden fixtures, ZMQ framing / topic identity, fencing,
+adapter parses, golden payloads, ZMQ framing / topic identity, fencing,
 replay, and its mount behind the coordinator's ingest gate."""
 
 # Standard
-from pathlib import Path
-import os
 import struct
 import time
 
@@ -33,7 +31,6 @@ from lmcache.v1.mp_coordinator.kv_event_publisher import (
     medium_for,
 )
 
-_FIXTURES = Path(__file__).parent / "fixtures" / "kv_events"
 _TS = 1700000000.5
 
 
@@ -220,31 +217,50 @@ def test_non_placement_and_malformed_batches_rejected():
 # -- Golden fixtures (shared with llm-d's adapter tests) ------------------------
 
 
-_GOLDEN = {
-    "store_offset0": _batch(CacheEventType.STORE, [_store_entry(1, [1, 2, 3, 4])]),
-    "store_offset256_parent": _batch(
-        CacheEventType.STORE, [_store_entry(2, [5, 6, 7, 8], parent=1)]
+# Golden payloads: the third ZMQ frame, byte for byte, for four
+# representative batches. They pin the wire format llm-d's vLLM adapter
+# (pkg/kvevents/engineadapter/vllm_adapter.go, ParseMessage) decodes; the
+# same hex strings are the fixtures on the llm-d side. Layout:
+# [ts, [event, ...], nil] with each event positional, tag first.
+_GOLDEN = [
+    (
+        # BlockStored, hash 0x01*32, no parent, tokens [1,2,3,4], lmcache-l1
+        _batch(CacheEventType.STORE, [_store_entry(1, [1, 2, 3, 4])]),
+        "93cb41d954fc402000009197ab426c6f636b53746f72656491c4200101010101010101010101010101010101010101010101010101010101010101"
+        "c0940102030404c0aa6c6d63616368652d6c31c0",
     ),
-    "delete": _batch(CacheEventType.DELETE, [_delete_entry(1), _delete_entry(2)]),
-    "store_shared_l2": _batch(
-        CacheEventType.STORE,
-        [_store_entry(3, [9, 10, 11, 12])],
-        tier=Tier.L2,
-        backend="fs",
-        shared=True,
+    (
+        # BlockStored, hash 0x02*32, parent 0x01*32, tokens [5,6,7,8]
+        _batch(CacheEventType.STORE, [_store_entry(2, [5, 6, 7, 8], parent=1)]),
+        "93cb41d954fc402000009197ab426c6f636b53746f72656491c4200202020202020202020202020202020202020202020202020202020202020202"
+        "c4200101010101010101010101010101010101010101010101010101010101010101940506070804c0aa6c6d63616368652d6c31c0",
     ),
-}
+    (
+        # BlockRemoved, hashes 0x01*32 and 0x02*32, lmcache-l1
+        _batch(CacheEventType.DELETE, [_delete_entry(1), _delete_entry(2)]),
+        "93cb41d954fc402000009193ac426c6f636b52656d6f76656492c4200101010101010101010101010101010101010101010101010101010101010101"
+        "c4200202020202020202020202020202020202020202020202020202020202020202aa6c6d63616368652d6c31c0",
+    ),
+    (
+        # BlockStored, hash 0x03*32, tokens [9,10,11,12], shared L2 → lmcache-l2-fs
+        _batch(
+            CacheEventType.STORE,
+            [_store_entry(3, [9, 10, 11, 12])],
+            tier=Tier.L2,
+            backend="fs",
+            shared=True,
+        ),
+        "93cb41d954fc402000009197ab426c6f636b53746f72656491c4200303030303030303030303030303030303030303030303030303030303030303"
+        "c094090a0b0c04c0ad6c6d63616368652d6c322d6673c0",
+    ),
+]
 
 
-@pytest.mark.parametrize("name", sorted(_GOLDEN))
-def test_golden_fixture(name):
-    """The encoded bytes match the checked-in fixture. Set
-    ``LMCACHE_UPDATE_FIXTURES=1`` to regenerate after an intended change."""
-    _, payload = encode_batch(_GOLDEN[name])
-    path = _FIXTURES / f"{name}.msgpack"
-    if os.environ.get("LMCACHE_UPDATE_FIXTURES") == "1":
-        path.write_bytes(payload)
-    assert payload == path.read_bytes()
+@pytest.mark.parametrize(("batch", "hex_payload"), _GOLDEN)
+def test_golden_payload(batch, hex_payload):
+    """The encoded bytes match the pinned wire format."""
+    _, payload = encode_batch(batch)
+    assert payload.hex() == hex_payload
 
 
 # -- ZMQ transport ---------------------------------------------------------------
