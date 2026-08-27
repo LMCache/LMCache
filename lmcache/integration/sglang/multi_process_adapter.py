@@ -87,8 +87,9 @@ def _wrap_sglang_kv_caches(
     single flat ``KVCache`` so it fits upstream's wire
     ``KVCache`` payload type. The daemon's
     :func:`normalize_kv_and_discover_format` recognizes this shape from
-    ``EngineType.SGLANG`` plus a ``tokens_per_block`` ``LayoutHints`` field
-    and splits it back at its midpoint before format detection.
+    ``EngineType.SGLANG`` plus ``tokens_per_block`` and ``kv_list_layout``
+    ``LayoutHints`` fields, then splits it back at its midpoint before format
+    detection.
 
     Raises:
         ValueError: If the pools are empty, use different devices, or the
@@ -216,7 +217,8 @@ class LMCacheMPConnector:
         # ([K_layers, V_layers]); we flatten it on the wire to fit
         # ``KVCache = list[DeviceIPCWrapper]``. The daemon recognizes the
         # SGLang-MHA flat-of-2NL pattern from ``EngineType.SGLANG`` plus the
-        # ``tokens_per_block`` hint and un-flattens + reshapes per layer.
+        # ``tokens_per_block`` and ``kv_list_layout`` hints, then un-flattens
+        # and reshapes per layer.
         # SGLang is non-hybrid (a single KV cache group), so engine_group_infos is the
         # empty list -- which the server treats as one group spanning all layers
         # (matching the vLLM non-hybrid and TensorRT-LLM register paths).
@@ -229,7 +231,7 @@ class LMCacheMPConnector:
                 self.model_name,
                 self.tp_size,
                 EngineType.SGLANG,
-                {"tokens_per_block": self.page_size},
+                {"tokens_per_block": self.page_size, "kv_list_layout": "k_v"},
                 [],
             ],
         ).result(timeout=self._mq_timeout)
@@ -273,6 +275,9 @@ class LMCacheMPConnector:
         return IPCCacheServerKey(
             model_name=self.model_name,
             world_size=self.tp_size,
+            # Each worker stores and reads only its own object (no MLA-style
+            # sharing in this adapter yet).
+            num_kv_readers=1,
             worker_id=None if no_worker_id else self.worker_id,
             token_ids=tuple(token_ids),
             start=start,

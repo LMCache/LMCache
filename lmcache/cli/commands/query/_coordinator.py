@@ -65,6 +65,9 @@ def _fetch(url: str, timeout: int = _TIMEOUT) -> str:
             pass
         logger.error("Coordinator returned %s: %s", e.code, detail)
         sys.exit(1)
+    except TimeoutError as e:
+        logger.error("Timed out contacting %s after %ds (%s)", url, timeout, e)
+        sys.exit(1)
     except urllib.error.URLError as e:
         logger.error(
             "Cannot reach %s -- is the coordinator running? (%s)", url, e.reason

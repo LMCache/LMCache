@@ -622,6 +622,7 @@ class CacheStoreEvent:
 
 class EngineType(Enum):
     VLLM = "vllm"
+    ATOM = "atom"
     SGLANG = "sglang"
     TRTLLM = "trtllm"
     MOCK = "mock"

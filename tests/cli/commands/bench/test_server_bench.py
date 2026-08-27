@@ -1130,12 +1130,11 @@ class TestProcessRequestMultiWorker:
                     "LOOKUP should fire exactly once regardless of tp_size "
                     "(is_mla=%s, tp=%d)" % (is_mla, tp)
                 )
-                # LOOKUP payload is ``[key, tp_size]``. MLA with tp>1
-                # needs tp_size on the wire so the server adds
-                # ``tp_size - 1`` extra read locks per chunk (see
-                # compute_extra_count in lookup.py); a hard-coded 1
-                # under-locks and subsequent-rank RETRIEVE reads stale
-                # bytes with a "non-read-locked key" warning.
+                # LOOKUP payload is ``[key, tp_size]``. The server
+                # reserves ``key.num_kv_readers`` read locks per chunk
+                # (see IPCCacheServerKey.require_num_kv_readers);
+                # tp_size is a legacy wire field kept for
+                # compatibility, so assert it still travels intact.
                 assert lookups[0][1][1] == tp, (
                     "LOOKUP payload tp_size must equal simulated tp "
                     "(is_mla=%s, tp=%d, got=%s)" % (is_mla, tp, lookups[0][1][1])

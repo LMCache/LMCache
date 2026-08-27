@@ -636,6 +636,10 @@ References
      - ``lmcache/v1/platform/xpu/device_ops.py``
    * - Reference ``DeviceOps`` (MUSA, method overrides)
      - ``lmcache/v1/platform/musa/device_ops.py``
+   * - Reference ``DeviceSpec`` (Neuron / Trainium, engine-driven only)
+     - ``lmcache/v1/platform/neuron/__init__.py``
+   * - Reference ``DeviceOps`` (Neuron, torch baseline)
+     - ``lmcache/v1/platform/neuron/device_ops.py``
    * - Engine-driven call site
      - ``lmcache/v1/multiprocess/transfer_context/worker_transfer.py``
        (``EngineDrivenTransferContext``, ``create_transfer_context``)
