@@ -922,11 +922,17 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         asynchronously loaded into, and second when any additional blocks
         are allocated, after the load/transfer is complete.
 
+        Per the vLLM connector contract (vLLM PR #46865), the decision to
+        load must be based on ``num_external_tokens == 0``, not on whether
+        ``blocks`` is empty: ``blocks`` may be non-empty even when nothing
+        should be loaded (e.g. a non-chosen sub-connector in MultiConnector
+        still receives the request's real blocks).
+
         Args:
             request (Request): the request object.
             blocks (KVCacheBlocks): the blocks allocated for the request.
-            num_external_tokens (int): the number of tokens that will be
-                loaded from the external KV cache.
+            num_external_tokens (int): the number of tokens to load from
+                the external KV cache. 0 means nothing should be loaded.
         """
         # NOTE: `blocks` comes from kv_cache_manager.get_blocks(request_id),
         # which returns ALL blocks for the request (not just newly allocated).
@@ -947,6 +953,27 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             new_block_ids.append(list(group_blocks[existing:]))
         if any(new_block_ids):
             tracker.append_block_ids(tuple(new_block_ids))
+
+        # Per the vLLM connector contract (PR #46865): when
+        # num_external_tokens == 0, nothing should be loaded. This happens
+        # when this connector is a non-chosen sub-connector in MultiConnector
+        # (another connector won the load), or when get_num_new_matched_tokens
+        # returned 0. Transition to READY so the store path can proceed, and
+        # release any lookup locks held from a prior lookup that hit but was
+        # not chosen for loading.
+        if num_external_tokens == 0:
+            if tracker.state == LMCacheMPRequestState.PREFETCHING:
+                tracker.state = LMCacheMPRequestState.READY
+                self.scheduler_adapter.cleanup_lookup_result(request.request_id)
+                if tracker.num_lmcache_hit_tokens > 0:
+                    self.scheduler_adapter.free_lookup_locks(
+                        token_ids=tracker.get_token_ids(),
+                        start=0,
+                        end=tracker.num_lmcache_hit_tokens,
+                        request_id=request.request_id,
+                        cache_salt=tracker.cache_salt,
+                    )
+            return
 
         # Update the state of the tracker
         if tracker.state == LMCacheMPRequestState.BYPASS_LMCACHE:
