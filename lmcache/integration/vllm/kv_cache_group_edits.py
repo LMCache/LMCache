@@ -51,7 +51,6 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.gpu_connector.kv_format.types import CANONICAL_KV_LAYOUTS
 from lmcache.v1.gpu_connector.utils import LayoutHints
 
 logger = init_logger(__name__)
@@ -414,15 +413,15 @@ class _MambaUnifiedViewEdit(KVCacheGroupEdit):
         assert isinstance(kv_cache, torch.Tensor), (
             "single-layer KV cache must be a torch.Tensor"
         )
-        kv_layout = CANONICAL_KV_LAYOUTS.get(layout_hints.get("kv_layout", "none"))
-        if kv_layout == "LBNHC":
+        kv_layout = layout_hints.get("kv_layout")
+        if kv_layout == "NHD":
             return kv_cache.view(kv_cache.shape[0], spec.block_size, 1, -1)
-        elif kv_layout == "LBHNC":
+        elif kv_layout == "HND":
             return kv_cache.view(kv_cache.shape[0], 1, spec.block_size, -1)
         else:
             raise ValueError(
                 f"Unsupported kv_layout for the subpaged MLA view: "
-                f"{kv_layout}. Expected NHD/LBNHC or HND/LBHNC."
+                f"{kv_layout}. Expected NHD or HND."
             )
 
 

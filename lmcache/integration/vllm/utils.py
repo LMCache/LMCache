@@ -45,7 +45,6 @@ def vllm_layout_hints(vllm_config: "VllmConfig | None" = None) -> "LayoutHints":
     return hints  # type: ignore[return-value]
 
 
-_VLLM_KV_LAYOUT_ALIASES = {"NHD": "LBNHC", "HND": "LBHNC"}
 # TODO: support heads-outermost layouts; the transfer kernels address one
 # contiguous run per (layer, block), which these fragment per head.
 _UNSUPPORTED_VLLM_KV_LAYOUTS = frozenset({"LHBNC", "BHLNC"})
@@ -63,9 +62,9 @@ _KNOWN_VLLM_KV_LAYOUTS = (
 
 def translate_vllm_kv_cache_layout(
     kv_cache_layout: str | None,
-) -> Literal["LBNHC", "LBHNC", "BLHNC", "BLNHC"]:
-    """Canonicalize a vLLM ``KVCacheLayout`` name (``NHD``/``HND`` are
-    legacy aliases of ``LBNHC``/``LBHNC``).
+) -> Literal["NHD", "HND", "BLHNC", "BLNHC"]:
+    """Translate a vLLM ``KVCacheLayout`` name to LMCache's (``LBNHC`` ->
+    ``NHD``, ``LBHNC`` -> ``HND``).
 
     Raises:
         NotImplementedError: for layouts LMCache cannot transfer.
@@ -76,8 +75,9 @@ def translate_vllm_kv_cache_layout(
             "vLLM has not resolved a KV cache layout yet; layout hints must "
             "be built at KV-cache registration time, after resolution."
         )
-    translated = _VLLM_KV_LAYOUT_ALIASES.get(kv_cache_layout, kv_cache_layout)
-    if translated in ("LBNHC", "LBHNC", "BLHNC", "BLNHC"):
+    aliases = {"LBNHC": "NHD", "LBHNC": "HND"}
+    translated = aliases.get(kv_cache_layout, kv_cache_layout)
+    if translated in ("NHD", "HND", "BLHNC", "BLNHC"):
         return translated  # type: ignore[return-value]
     if translated in _UNSUPPORTED_VLLM_KV_LAYOUTS:
         raise NotImplementedError(
@@ -94,8 +94,8 @@ def translate_vllm_kv_cache_layout(
 
 def try_get_vllm_kv_cache_layout(
     vllm_config: "VllmConfig | None" = None,
-) -> Literal["LBNHC", "LBHNC", "BLHNC", "BLNHC"] | None:
-    """Return vLLM's resolved KV cache layout as its canonical name.
+) -> Literal["NHD", "HND", "BLHNC", "BLNHC"] | None:
+    """Return vLLM's resolved KV cache layout as LMCache's name.
 
     Returns ``None`` when vLLM is unavailable (i.e. the MP server).
     """

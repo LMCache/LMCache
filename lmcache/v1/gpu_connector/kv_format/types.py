@@ -22,22 +22,7 @@ import torch
 # for unwrapping to this form before calling the helpers.
 DiscoverableKVCache = Union[torch.Tensor, list["DiscoverableKVCache"]]
 
-# Layout names accepted in ``LayoutHints.kv_layout``: vLLM's standardized
-# [L, B, H, N, C] permutations plus the legacy spellings (``NHD`` ==
-# ``LBNHC``, ``HND`` == ``LBHNC``).
-KVLayoutName = Literal[
-    "NHD", "HND", "LBNHC", "LBHNC", "LHBNC", "BLHNC", "BLNHC", "BHLNC"
-]
-
-# Accepted spelling -> canonical name; absent means unsupported.
-CANONICAL_KV_LAYOUTS: dict[str, str] = {
-    "NHD": "LBNHC",
-    "HND": "LBHNC",
-    "LBNHC": "LBNHC",
-    "LBHNC": "LBHNC",
-    "BLHNC": "BLHNC",
-    "BLNHC": "BLNHC",
-}
+KVLayoutName = Literal["NHD", "HND", "BLHNC", "BLNHC"]
 
 
 class LayoutHints(TypedDict, total=False):
@@ -48,12 +33,10 @@ class LayoutHints(TypedDict, total=False):
     schema -- importing this type is optional.
 
     Keys:
-        kv_layout: Physical ordering of the KV cache dimensions: a
-            standardized layout name (``"LBNHC"``, ``"LBHNC"``,
-            ``"BLHNC"``, ``"BLNHC"``, ...) or a legacy spelling
-            (``"NHD"`` == ``"LBNHC"``, ``"HND"`` == ``"LBHNC"``).
-            Detection treats it as the declaration of axis semantics
-            that shapes alone cannot carry.
+        kv_layout: Physical ordering of the KV cache dimensions:
+            ``"NHD"``, ``"HND"``, or the blocks-first ``"BLHNC"`` /
+            ``"BLNHC"``. Detection treats it as the declaration of axis
+            semantics that shapes alone cannot carry.
         num_kv_heads: Number of KV heads per layer. Used by TRT-LLM to
             reshape its 4-D pool tensor into the canonical 6-D form.
         tokens_per_block: Tokens per paged block. Used by TRT-LLM (to

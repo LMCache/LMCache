@@ -48,12 +48,12 @@ def stub_module(
 
 
 class TestTranslateVllmKVCacheLayout:
-    def test_legacy_names_canonicalize(self):
-        assert translate_vllm_kv_cache_layout("NHD") == "LBNHC"
-        assert translate_vllm_kv_cache_layout("HND") == "LBHNC"
+    def test_standardized_names_map_to_lmcache_names(self):
+        assert translate_vllm_kv_cache_layout("LBNHC") == "NHD"
+        assert translate_vllm_kv_cache_layout("LBHNC") == "HND"
 
-    def test_standardized_names_pass_through(self):
-        for name in ("LBNHC", "LBHNC", "BLHNC", "BLNHC"):
+    def test_lmcache_names_pass_through(self):
+        for name in ("NHD", "HND", "BLHNC", "BLNHC"):
             assert translate_vllm_kv_cache_layout(name) == name
 
     @pytest.mark.parametrize("name", UNSUPPORTED_LAYOUTS)
@@ -69,11 +69,11 @@ class TestTranslateVllmKVCacheLayout:
 class TestTryGetVllmKVCacheLayout:
     def test_resolved_layout_from_explicit_config(self):
         config = make_vllm_config(kv_cache_layout="LBNHC")
-        assert try_get_vllm_kv_cache_layout(config) == "LBNHC"
+        assert try_get_vllm_kv_cache_layout(config) == "NHD"
 
     def test_stored_alias_from_explicit_config(self):
         config = make_vllm_config(kv_cache_layout="HND")
-        assert try_get_vllm_kv_cache_layout(config) == "LBHNC"
+        assert try_get_vllm_kv_cache_layout(config) == "HND"
 
     def test_unresolved_layout_fails_loudly(self):
         config = make_vllm_config(kv_cache_layout=None)
@@ -89,7 +89,7 @@ class TestTryGetVllmKVCacheLayout:
     def test_ambient_config_is_used_when_not_passed(self, monkeypatch):
         config = make_vllm_config(kv_cache_layout="LBHNC")
         stub_module(monkeypatch, "vllm.config", get_current_vllm_config=lambda: config)
-        assert try_get_vllm_kv_cache_layout() == "LBHNC"
+        assert try_get_vllm_kv_cache_layout() == "HND"
 
     def test_legacy_vllm_falls_back_to_backend_query(self, monkeypatch):
         stub_module(
@@ -98,7 +98,7 @@ class TestTryGetVllmKVCacheLayout:
             get_kv_cache_layout=lambda: "HND",
         )
         config = SimpleNamespace(cache_config=LegacyCacheConfig())
-        assert try_get_vllm_kv_cache_layout(config) == "LBHNC"
+        assert try_get_vllm_kv_cache_layout(config) == "HND"
 
     def test_vllm_absent_returns_none(self, monkeypatch):
         monkeypatch.setitem(sys.modules, "vllm", None)
@@ -107,9 +107,9 @@ class TestTryGetVllmKVCacheLayout:
 
 
 class TestVllmLayoutHints:
-    def test_hint_present_and_canonical(self):
+    def test_hint_present_and_translated(self):
         config = make_vllm_config(kv_cache_layout="LBHNC")
-        assert vllm_layout_hints(config) == {"kv_layout": "LBHNC"}
+        assert vllm_layout_hints(config) == {"kv_layout": "HND"}
 
     def test_unresolved_layout_raises_through_hints(self):
         config = make_vllm_config(kv_cache_layout=None)
@@ -126,13 +126,13 @@ class TestResolveVllmKVLayout:
         return detectors_vllm.resolve_vllm_kv_layout
 
     def test_cpu_backend_forces_head_contiguous(self, resolve):
-        assert resolve({"kv_layout": "NHD"}, cpu_attention_backend=True) == "LBHNC"
+        assert resolve({"kv_layout": "NHD"}, cpu_attention_backend=True) == "HND"
 
-    def test_missing_hint_defaults_to_lbnhc(self, resolve):
-        assert resolve({}, cpu_attention_backend=False) == "LBNHC"
+    def test_missing_hint_defaults_to_nhd(self, resolve):
+        assert resolve({}, cpu_attention_backend=False) == "NHD"
 
-    def test_legacy_hint_canonicalizes(self, resolve):
-        assert resolve({"kv_layout": "HND"}, cpu_attention_backend=False) == "LBHNC"
+    def test_hnd_hint_passes_through(self, resolve):
+        assert resolve({"kv_layout": "HND"}, cpu_attention_backend=False) == "HND"
 
     def test_unsupported_hint_rejected(self, resolve):
         with pytest.raises(ValueError, match="LHBNC"):

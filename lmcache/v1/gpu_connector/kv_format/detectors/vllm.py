@@ -16,7 +16,6 @@ from lmcache.v1.gpu_connector.kv_format.detectors.base import (
     measure_list_depth_until_tensor,
 )
 from lmcache.v1.gpu_connector.kv_format.types import (
-    CANONICAL_KV_LAYOUTS,
     DiscoverableKVCache,
     LayoutHints,
 )
@@ -26,18 +25,17 @@ import lmcache.lmcache_native as lmcache_native
 def resolve_vllm_kv_layout(
     layout_hints: LayoutHints, cpu_attention_backend: bool
 ) -> str:
-    """Canonicalize the ``kv_layout`` hint, e.g. ``"NHD"`` -> ``"LBNHC"``."""
-    kv_layout = layout_hints.get("kv_layout", "LBNHC")
-    canonical = CANONICAL_KV_LAYOUTS.get(kv_layout)
-    if canonical is None:
+    """Validate the ``kv_layout`` hint and apply the CPU-backend override."""
+    kv_layout = layout_hints.get("kv_layout", "NHD")
+    if kv_layout not in ("NHD", "HND", "BLHNC", "BLNHC"):
         raise ValueError(
             f"kv_layout hint {kv_layout!r} is not a layout LMCache supports; "
-            "expected one of NHD, HND, LBNHC, LBHNC, BLHNC, BLNHC."
+            "expected one of NHD, HND, BLHNC, BLNHC."
         )
     # The CPU attention backend allocates HND but hints NHD.
-    if cpu_attention_backend and canonical in ("LBNHC", "LBHNC"):
-        return "LBHNC"
-    return canonical
+    if cpu_attention_backend and kv_layout in ("NHD", "HND"):
+        return "HND"
+    return kv_layout
 
 
 def _reconstruct_blocks_first(
@@ -132,7 +130,7 @@ class VLLM_Detector(EngineDetector):
         )
         if kv_layout in ("BLHNC", "BLNHC"):
             return _reconstruct_blocks_first(kv_caches, kv_layout)
-        is_hnd = kv_layout == "LBHNC"
+        is_hnd = kv_layout == "HND"
 
         # Blocks-first fused K/V is the only rank-4 vLLM layout, so its raw rank
         # identifies it unambiguously (a 5-D split would collide with
