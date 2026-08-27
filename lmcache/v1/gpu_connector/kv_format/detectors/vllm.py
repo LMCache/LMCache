@@ -42,13 +42,25 @@ def resolve_vllm_kv_layout(
 def _reconstruct_blocks_first(
     kv_caches: DiscoverableKVCache, kv_layout: str
 ) -> "tuple[lmcache_native.EngineKVFormat, torch.Tensor]":
-    """Stack the per-layer views into one [num_blocks, num_layers, ...] tensor.
+    """Stack the per-layer views into one blocks-first tensor.
 
-    kv_caches holds one rank-4 view per layer into a single buffer: all
-    views share shape, strides, and storage, and layer i starts at
-    base offset + i * layer_step. Verify that, then as_strided layer 0
-    into a rank-5 tensor with the layer dim at position 1 (stride
-    layer_step). Raise ValueError if the views don't match.
+    Args:
+        kv_caches: one rank-4 view per layer into a single shared buffer,
+            shaped [num_blocks, num_heads, block_size, content_size] for
+            BLHNC or [num_blocks, block_size, num_heads, content_size] for
+            BLNHC. All views share shape, strides, and storage; layer i
+            starts i * layer_step elements after layer 0.
+        kv_layout: "BLHNC" or "BLNHC".
+
+    Returns:
+        NB_NL_NH_BS_CS and an as_strided view shaped
+        [num_blocks, num_layers, num_heads, block_size, content_size] for
+        BLHNC; NB_NL_BS_NH_CS and
+        [num_blocks, num_layers, block_size, num_heads, content_size] for
+        BLNHC.
+
+    Raises:
+        ValueError: if the views don't match this pattern.
     """
     fmt = (
         lmcache_native.EngineKVFormat.NB_NL_NH_BS_CS
