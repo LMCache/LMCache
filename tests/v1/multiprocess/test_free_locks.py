@@ -92,6 +92,7 @@ def _make_free_locks_ctx(
     chunk_hashes: list[bytes],
     windows: list[int],
     hit_chunks: int,
+    locked_gids: tuple = (),
 ) -> MagicMock:
     """Build a mock engine context for free_lookup_locks tests.
 
@@ -100,6 +101,8 @@ def _make_free_locks_ctx(
         windows: Per-object-group windows for the registered AttnWindowDesc.
         hit_chunks: Prefetch hit length recorded on the session (-1 for
             "never recorded").
+        locked_gids: The lock model recorded on the session; empty means
+            "every group" (legacy std-lookup behavior).
 
     Returns:
         The configured MagicMock context.
@@ -111,7 +114,9 @@ def _make_free_locks_ctx(
     ctx.layout_desc_registry.find_attn_desc.return_value = AttnWindowDesc(
         num_chunks_in_sw=windows
     )
-    ctx.session_manager.get_or_create.return_value.prefetch_hit_chunks = hit_chunks
+    session = ctx.session_manager.get_or_create.return_value
+    session.prefetch_hit_chunks = hit_chunks
+    session.prefetch_locked_gids = tuple(locked_gids)
     return ctx
 
 
@@ -136,7 +141,7 @@ def test_server_free_lookup_locks_calls_finish_read_prefetched():
         module.free_lookup_locks(key, 1)
 
     module.context.storage_manager.finish_read_prefetched.assert_called_once_with(
-        sentinel_obj_keys, extra_count=0
+        sentinel_obj_keys, read_locks=1
     )
 
 
@@ -145,6 +150,7 @@ def _free_locks_key(num_tokens: int, start: int, end: int) -> IPCCacheServerKey:
     return IPCCacheServerKey(
         model_name="testmodel",
         world_size=1,
+        num_kv_readers=1,
         worker_id=None,
         token_ids=tuple(range(num_tokens)),
         start=start,
@@ -156,7 +162,7 @@ def _free_locks_key(num_tokens: int, start: int, end: int) -> IPCCacheServerKey:
 def _released_chunks(finish_read_mock: MagicMock) -> set[tuple[int, bytes]]:
     """Collect (object_group_id, chunk_hash) pairs released by the module."""
     (obj_keys,), kwargs = finish_read_mock.call_args
-    assert kwargs == {"extra_count": 0}
+    assert kwargs == {"read_locks": 1}
     return {(k.object_group_id, k.chunk_hash) for k in obj_keys}
 
 
@@ -256,6 +262,7 @@ def test_server_free_lookup_locks_no_matching_chunks():
     key = IPCCacheServerKey(
         model_name="testmodel",
         world_size=1,
+        num_kv_readers=1,
         worker_id=None,
         token_ids=tuple(range(256)),
         start=0,
@@ -398,3 +405,30 @@ def test_adapter_free_lookup_locks_key_matches_lookup():
     assert lookup_key.end == free_key.end
     assert lookup_key.request_id == free_key.request_id
     assert lookup_key.token_ids == free_key.token_ids
+
+
+def test_server_free_lookup_locks_honors_the_session_lock_model():
+    """A prefetch that locked only a subset of groups (the CB prefix leg:
+    recurrent + attention, never aux) must release exactly that subset --
+    releasing an unlocked group would drop another request's lock on the
+    shared object key."""
+    # First Party
+    from lmcache.v1.multiprocess.modules.lookup import LookupModule
+
+    hashes = [b"h0", b"h1", b"h2"]
+    ctx = _make_free_locks_ctx(
+        hashes, windows=[1, -1, -1], hit_chunks=3, locked_gids=(0, 1)
+    )
+    module = LookupModule(ctx)
+    key = _free_locks_key(768, 0, 768)
+
+    with patch(
+        "lmcache.v1.multiprocess.modules.lookup.ipc_key_to_object_keys",
+        side_effect=lambda k, hs, gids: [[f"g{gids[0]}-{h.decode()}" for h in hs]],
+    ):
+        module.free_lookup_locks(key, 1)
+
+    released = ctx.storage_manager.finish_read_prefetched.call_args[0][0]
+    # Group 0 (recurrent, window 1): only the boundary chunk. Group 1
+    # (attention): the whole hit prefix. Group 2 (standalone aux): NOTHING.
+    assert released == ["g0-h2", "g1-h0", "g1-h1", "g1-h2"]

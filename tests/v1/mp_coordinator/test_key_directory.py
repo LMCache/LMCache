@@ -16,7 +16,7 @@ from lmcache.v1.mp_coordinator.api import (
     CacheEventEntry,
     CacheEventType,
 )
-from lmcache.v1.mp_coordinator.key_directory import KeyDirectory
+from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
 
 
 def _key(hash_byte: int) -> ObjectKey:

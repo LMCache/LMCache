@@ -12,6 +12,7 @@ import os
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.distributed.api import L1BackendType
 from lmcache.v1.distributed.l2_adapters.config import (
     L2AdapterConfigBase,
     L2AdaptersConfig,
@@ -209,6 +210,52 @@ class L1ManagerConfig:
 
     read_ttl_seconds: int = field(default=300)
     """ Time to live for each object's read lock. Default is 300s (5 minutes). """
+
+
+def get_configured_capacity_bytes(
+    config: L1ManagerConfig,
+) -> dict[L1BackendType, int]:
+    """Return the configured L1 capacity of each backing medium.
+
+    The single source for "how large is L1". Unlike
+    ``L1Manager.get_memory_usage()``, whose total is the grown heap on the
+    lazy tier, this is stable from boot. Keyed per medium because a hybrid
+    Device-DAX tier spans two, matching how L1 events tag placements.
+    Reports the *configured* topology, so devices added later via
+    ``add_device`` are not counted.
+
+    Expects a **normalized** config: ``normalize_storage_manager_config``
+    back-fills ``devdax_size_in_bytes`` from a matching DAX L2 adapter,
+    without which a hybrid deployment reads as pure Device-DAX. A config
+    from a constructed ``StorageManagerConfig`` satisfies this already.
+
+    Args:
+        config: The L1 manager configuration.
+
+    Returns:
+        Configured bytes per medium, omitting any sized zero.
+    """
+    if config.gds_l1_config is not None:
+        size = config.gds_l1_config.size_in_bytes
+        return {L1BackendType.GDS: size} if size > 0 else {}
+
+    memory_config = config.memory_config
+    if memory_config.devdax_path:
+        # Mirrors DevDaxL1MemoryManager.__init__: an unset devdax size means
+        # the whole tier is Device-DAX, else size_in_bytes is the DRAM half.
+        devdax_size = memory_config.devdax_size_in_bytes or memory_config.size_in_bytes
+        local_size = (
+            memory_config.size_in_bytes if memory_config.devdax_size_in_bytes else 0
+        )
+        capacities: dict[L1BackendType, int] = {}
+        if devdax_size > 0:
+            capacities[L1BackendType.DEVDAX] = devdax_size
+        if local_size > 0:
+            capacities[L1BackendType.DRAM] = local_size
+        return capacities
+
+    size = memory_config.size_in_bytes
+    return {L1BackendType.DRAM: size} if size > 0 else {}
 
 
 @dataclass

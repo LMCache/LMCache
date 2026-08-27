@@ -57,6 +57,9 @@ class EventType(Enum):
     L2_KEYS_EVICTED = "l2.keys.evicted"
 
     # L2 adapter key-level events.
+    # Capacity topology changed (adapter added/removed/reconfigured).
+    SM_CAPACITY_CHANGED = "sm.capacity.changed"
+
     L2_KEYS_STORED = "l2.keys.stored"
     L2_KEYS_ACCESSED = "l2.keys.accessed"
     L2_KEYS_DELETED = "l2.keys.deleted"
@@ -142,6 +145,12 @@ class EventType(Enum):
     # publish_on_stream for GPU-accurate timing of the L1->paged scatter.
     CB_SCATTER_START = "cb.scatter.start"
     CB_SCATTER_END = "cb.scatter.end"
+
+    # CB V3 retrieve that returned success without scattering anything, so the
+    # request degrades to a full recompute. Point event (CPU), published only
+    # when reuse was actually lost. Metadata: ``reason`` (str, a fixed
+    # low-cardinality code — it is a metric attribute), ``dropped_matches``.
+    CB_RETRIEVE_NOOP = "cb.retrieve.noop"
 
     # Cache Blending (CB) events — lifecycle sentinels (CPU-synchronous)
     CB_REQUEST_START = "cb.request.start"

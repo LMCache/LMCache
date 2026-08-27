@@ -47,7 +47,7 @@ class TestEngineType:
         assert EngineType.TRTLLM.value == "trtllm"
 
     def test_all_engine_types(self) -> None:
-        expected = {"vllm", "sglang", "trtllm", "mock"}
+        expected = {"vllm", "atom", "sglang", "trtllm", "mock"}
         actual = {e.value for e in EngineType}
         assert expected == actual
 
