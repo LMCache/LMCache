@@ -8,7 +8,7 @@ sites.
 """
 
 # Standard
-from typing import Literal, TypedDict, Union
+from typing import Literal, TypedDict, Union, get_args
 
 # Third Party
 import torch
@@ -23,6 +23,7 @@ import torch
 DiscoverableKVCache = Union[torch.Tensor, list["DiscoverableKVCache"]]
 
 KVLayoutName = Literal["NHD", "HND", "BLHNC", "BLNHC"]
+KV_LAYOUT_NAMES: tuple[str, ...] = get_args(KVLayoutName)
 
 
 class LayoutHints(TypedDict, total=False):

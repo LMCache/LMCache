@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import TYPE_CHECKING, Literal, Optional, Tuple
+from typing import TYPE_CHECKING, Optional, Tuple
 import hashlib
 import os
 import string
@@ -21,6 +21,7 @@ from lmcache.v1.config_base import apply_remote_configs, fetch_remote_config
 
 if TYPE_CHECKING:
     # First Party
+    from lmcache.v1.gpu_connector.kv_format.types import KVLayoutName
     from lmcache.v1.gpu_connector.utils import LayoutHints
 
 logger = init_logger(__name__)
@@ -45,24 +46,9 @@ def vllm_layout_hints(vllm_config: "VllmConfig | None" = None) -> "LayoutHints":
     return hints  # type: ignore[return-value]
 
 
-# TODO: support heads-outermost layouts; the transfer kernels address one
-# contiguous run per (layer, block), which these fragment per head.
-_UNSUPPORTED_VLLM_KV_LAYOUTS = frozenset({"LHBNC", "BHLNC"})
-_KNOWN_VLLM_KV_LAYOUTS = (
-    "NHD",
-    "HND",
-    "LBNHC",
-    "LBHNC",
-    "LHBNC",
-    "BLHNC",
-    "BLNHC",
-    "BHLNC",
-)
-
-
 def translate_vllm_kv_cache_layout(
     kv_cache_layout: str | None,
-) -> Literal["NHD", "HND", "BLHNC", "BLNHC"]:
+) -> "KVLayoutName":
     """Translate a vLLM ``KVCacheLayout`` name to LMCache's (``LBNHC`` ->
     ``NHD``, ``LBHNC`` -> ``HND``).
 
@@ -75,11 +61,18 @@ def translate_vllm_kv_cache_layout(
             "vLLM has not resolved a KV cache layout yet; layout hints must "
             "be built at KV-cache registration time, after resolution."
         )
+    # Import here to break a circular import via
+    # lmcache.v1.gpu_connector.__init__ -> memory allocators -> this module.
+    # First Party
+    from lmcache.v1.gpu_connector.kv_format.types import KV_LAYOUT_NAMES
+
     aliases = {"LBNHC": "NHD", "LBHNC": "HND"}
     translated = aliases.get(kv_cache_layout, kv_cache_layout)
-    if translated in ("NHD", "HND", "BLHNC", "BLNHC"):
+    if translated in KV_LAYOUT_NAMES:
         return translated  # type: ignore[return-value]
-    if translated in _UNSUPPORTED_VLLM_KV_LAYOUTS:
+    # TODO: support heads-outermost layouts; the transfer kernels address
+    # one contiguous run per (layer, block), which these fragment per head.
+    if translated in ("LHBNC", "BHLNC"):
         raise NotImplementedError(
             f"LMCache does not support the {kv_cache_layout!r} KV cache "
             "layout: per-block content is fragmented per head. If it was "
@@ -87,14 +80,15 @@ def translate_vllm_kv_cache_layout(
             "LBHNC, BLHNC, or BLNHC."
         )
     raise ValueError(
-        f"Unknown KV cache layout {kv_cache_layout!r}; expected one of "
-        f"{', '.join(_KNOWN_VLLM_KV_LAYOUTS)}."
+        f"Unknown KV cache layout {kv_cache_layout!r}; expected a vLLM "
+        "KVCacheLayout name (NHD, HND, LBNHC, LBHNC, LHBNC, BLHNC, BLNHC, "
+        "BHLNC)."
     )
 
 
 def try_get_vllm_kv_cache_layout(
     vllm_config: "VllmConfig | None" = None,
-) -> Literal["NHD", "HND", "BLHNC", "BLNHC"] | None:
+) -> "KVLayoutName | None":
     """Return vLLM's resolved KV cache layout as LMCache's name.
 
     Returns ``None`` when vLLM is unavailable (i.e. the MP server).

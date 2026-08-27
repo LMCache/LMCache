@@ -16,6 +16,7 @@ from lmcache.v1.gpu_connector.kv_format.detectors.base import (
     measure_list_depth_until_tensor,
 )
 from lmcache.v1.gpu_connector.kv_format.types import (
+    KV_LAYOUT_NAMES,
     DiscoverableKVCache,
     LayoutHints,
 )
@@ -27,10 +28,10 @@ def resolve_vllm_kv_layout(
 ) -> str:
     """Validate the ``kv_layout`` hint and apply the CPU-backend override."""
     kv_layout = layout_hints.get("kv_layout", "NHD")
-    if kv_layout not in ("NHD", "HND", "BLHNC", "BLNHC"):
+    if kv_layout not in KV_LAYOUT_NAMES:
         raise ValueError(
             f"kv_layout hint {kv_layout!r} is not a layout LMCache supports; "
-            "expected one of NHD, HND, BLHNC, BLNHC."
+            f"expected one of {', '.join(KV_LAYOUT_NAMES)}."
         )
     # The CPU attention backend allocates HND but hints NHD.
     if cpu_attention_backend and kv_layout in ("NHD", "HND"):
