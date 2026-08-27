@@ -143,10 +143,17 @@ class DeviceMessagingFuture(MessagingFuture[T]):
         self.device_ = device if device is not None else torch_dev.current_device()
         self._event_bytes: bytes | None = None
         self._event_release_callback = event_release_callback
-        self._device_complete = False
         self._completion_lock = threading.Lock()
         self._event_backend = get_event_ipc_backend(self.device_)
         self._event_backend.check_event_support(self.device_)
+
+    def _is_device_complete(self) -> bool:
+        """Return whether the raw response and any device work are complete.
+
+        ``self.event_ is None`` alone is not sufficient because a fresh future
+        starts with no imported event before the raw MQ response arrives.
+        """
+        return self._raw_response_processed and self.event_ is None
 
     def _on_raw_future_complete(self) -> None:
         """
@@ -159,8 +166,6 @@ class DeviceMessagingFuture(MessagingFuture[T]):
         event = None
         if event_bytes:
             event = self._event_backend.import_event(event_bytes, self.device_)
-        else:
-            self._device_complete = True
 
         self._event_bytes = event_bytes
         self.result_ = result
@@ -170,10 +175,9 @@ class DeviceMessagingFuture(MessagingFuture[T]):
     def _synchronize_and_release(self) -> None:
         """Finish the imported event, then release its exporter-side lease."""
         with self._completion_lock:
-            if self._device_complete:
+            if self._is_device_complete():
                 return
             if self.event_ is None:
-                self._device_complete = True
                 return
 
             event = self.event_
@@ -184,27 +188,24 @@ class DeviceMessagingFuture(MessagingFuture[T]):
             # the callback follows removal from this future.
             self.event_ = None
             del event
-            self._device_complete = True
             if self._event_release_callback is not None:
                 assert self._event_bytes is not None
                 self._event_release_callback(self._event_bytes)
 
     def _finish_processed_response(self) -> None:
         """Complete a processed raw response, blocking on device work if needed."""
-        if self._device_complete:
+        if self._is_device_complete():
             return
         if self.event_ is None:
-            self._device_complete = True
             return
         self._synchronize_and_release()
 
     def _query_processed_response(self) -> bool:
         """Check whether a processed raw response is fully complete."""
-        if self._device_complete:
+        if self._is_device_complete():
             return True
         if self.event_ is None:
-            self._device_complete = True
-            return True
+            return self._raw_response_processed
         if not self._event_backend.query_event(self.event_):
             return False
         # Cross-process event query has backend-specific edge cases. A
@@ -229,7 +230,7 @@ class DeviceMessagingFuture(MessagingFuture[T]):
         Notes:
             This function does not support waiting for a specific time.
         """
-        if self._device_complete:
+        if self._is_device_complete():
             return True
 
         if self._raw_response_processed:
@@ -276,7 +277,7 @@ class DeviceMessagingFuture(MessagingFuture[T]):
         Returns:
             bool: True if the future is done, False otherwise.
         """
-        if self._device_complete:
+        if self._is_device_complete():
             return True
 
         if not self._raw_response_processed:
