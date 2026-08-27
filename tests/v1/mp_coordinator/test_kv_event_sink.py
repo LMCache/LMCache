@@ -87,7 +87,8 @@ def test_store_at_offset_zero_has_no_parent():
         _batch(CacheEventType.STORE, [_store_entry(1, [10, 11, 12, 13])])
     )
     assert model == "m"
-    ts, events = _decode(payload)
+    ts, events, dp_rank = _decode(payload)
+    assert dp_rank is None
     assert ts == _TS
     # vLLM BlockStored positional layout, as read by llm-d's vllm_adapter.go:
     # [tag, block_hashes, parent_block_hash, token_ids, block_size, lora_id, medium]
@@ -103,7 +104,7 @@ def test_store_chain_carries_parent_hash():
             [_store_entry(1, [1, 2]), _store_entry(2, [3, 4], parent=1)],
         )
     )
-    _, events = _decode(payload)
+    _, events, _ = _decode(payload)
     assert [e[0] for e in events] == ["BlockStored", "BlockStored"]
     assert events[0][2] is None
     assert events[1][1] == [_hash(2)] and events[1][2] == _hash(1)
@@ -115,7 +116,7 @@ def test_delete_becomes_one_block_removed():
     _, payload = encode_batch(
         _batch(CacheEventType.DELETE, [_delete_entry(1), _delete_entry(2)])
     )
-    _, events = _decode(payload)
+    _, events, _ = _decode(payload)
     # [tag, block_hashes, medium]
     assert events == [["BlockRemoved", [_hash(1), _hash(2)], "lmcache-l1"]]
 
@@ -130,7 +131,7 @@ def test_shared_l2_store_uses_backend_medium():
             shared=True,
         )
     )
-    _, events = _decode(payload)
+    _, events, _ = _decode(payload)
     assert events[0][6] == "lmcache-l2-fs"
 
 
@@ -146,7 +147,7 @@ def test_tokenless_store_is_skipped_but_delete_never_is():
     _, payload = encode_batch(
         _batch(CacheEventType.STORE, [_store_entry(1, []), _store_entry(2, [7])])
     )
-    _, events = _decode(payload)
+    _, events, _ = _decode(payload)
     assert [e[1] for e in events] == [[_hash(2)]]
 
     _, payload = encode_batch(_batch(CacheEventType.DELETE, [_delete_entry(1)]))

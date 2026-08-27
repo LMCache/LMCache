@@ -7,7 +7,7 @@ third ZMQ frame (`[topic, seq, payload]`). They are produced and checked by
 are meant to be decoded unchanged by a consumer's vLLM adapter (llm-d:
 `pkg/kvevents/engineadapter/vllm_adapter.go`, `ParseMessage`).
 
-Layout: `[ts: float, events: [event, ...]]`, each event a positional
+Layout: `[ts: float, events: [event, ...], data_parallel_rank: nil]` (vLLM `KVEventBatch`, three fields), each event a positional
 array with the tag first:
 
 | File | Event | Fields |

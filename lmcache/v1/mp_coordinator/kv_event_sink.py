@@ -3,8 +3,9 @@
 vLLM's ``KVEventBatch`` wire format over ZMQ.
 
 KV-cache-aware routers (llm-d's EPP, for one) index engine KV events
-they read from a ZMQ PUB socket: msgpack ``[ts, [event, ...]]`` batches
-under a ``kv@<emitter_id>@<model_name>`` topic. This sink translates
+they read from a ZMQ PUB socket: msgpack
+``[ts, [event, ...], data_parallel_rank]`` batches under a
+``kv@<emitter_id>@<model_name>`` topic. This sink translates
 :class:`CacheEventBatch` lists into that format so an unmodified vLLM
 adapter indexes LMCache's L1/L2 tiers next to the engines' GPU tier. See
 ``docs/design/v1/mp_coordinator/cache_events.md`` ("Engine-format KV
@@ -83,8 +84,10 @@ def encode_batch(
 
     Returns:
         ``(model_name, payload)`` where ``payload`` is the msgpack-encoded
-        ``[ts, events]`` batch; ``payload`` is empty when nothing is
-        publishable (e.g. every entry was tokenless).
+        ``[ts, events, data_parallel_rank]`` batch (rank is ``None``; vLLM's
+        ``KVEventBatch`` has three fields and array-struct decoders check
+        the count); ``payload`` is empty when nothing is publishable (e.g.
+        every entry was tokenless).
 
     Raises:
         ValueError: If ``batch`` is not a ``store``/``delete`` batch, has
@@ -115,7 +118,7 @@ def encode_batch(
         )
     if not events:
         return model_names.pop(), b""
-    return model_names.pop(), msgspec.msgpack.encode([batch.ts, events])
+    return model_names.pop(), msgspec.msgpack.encode([batch.ts, events, None])
 
 
 def _block_stored(entry: CacheEventEntry, medium: str) -> list[object]:
