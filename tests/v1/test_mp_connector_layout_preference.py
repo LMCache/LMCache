@@ -12,11 +12,13 @@ import pytest
 def connector_cls():
     """Import lazily: the connector module initializes process-wide MP
     transfer state at import time, which contaminates later cache-server
-    tests when imported at collection."""
-    # First Party
-    from lmcache.integration.vllm.lmcache_mp_connector import LMCacheMPConnector
-
-    return LMCacheMPConnector
+    tests when imported at collection. Skips where vLLM is not installed
+    (e.g. the LMCache-only unit environment)."""
+    module = pytest.importorskip(
+        "lmcache.integration.vllm.lmcache_mp_connector",
+        reason="requires vLLM",
+    )
+    return module.LMCacheMPConnector
 
 
 class LegacyCacheConfig:
