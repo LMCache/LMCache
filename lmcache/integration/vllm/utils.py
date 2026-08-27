@@ -46,6 +46,8 @@ def vllm_layout_hints(vllm_config: "VllmConfig | None" = None) -> "LayoutHints":
 
 
 _VLLM_KV_LAYOUT_ALIASES = {"NHD": "LBNHC", "HND": "LBHNC"}
+# Heads-outermost layouts fragment a (layer, block)'s content into per-head
+# pieces; the transfer kernels address one contiguous run per (layer, block).
 _UNSUPPORTED_VLLM_KV_LAYOUTS = frozenset({"LHBNC", "BHLNC"})
 _KNOWN_VLLM_KV_LAYOUTS = (
     "NHD",
