@@ -24,7 +24,8 @@ KernelGroupSpec = _native.KernelGroupSpec
 class TransferPhase(IntEnum):
     """Timed sections of the native object-group transfer plan executor.
 
-    Mirrors the C++ ``TransferPhase`` enum in ``csrc/cuda/mp_mem_kernels.cuh``;
+    Mirrors the C++ ``TransferPhase`` enum in
+    ``csrc/cuda/phase_timing_recorder.cuh``;
     values appear in ``device_ops.pop_completed_phase_timings()`` samples.
     Python-only: unlike ``TransferDirection`` (in
     :mod:`lmcache.lmcache_native`), this enum is not exposed by a native

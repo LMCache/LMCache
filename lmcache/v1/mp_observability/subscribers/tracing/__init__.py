@@ -11,11 +11,11 @@ from lmcache.v1.mp_observability.subscribers.tracing.span_registry import (
     SpanRegistry,
     get_span_registry,
 )
-from lmcache.v1.mp_observability.subscribers.tracing.transfer_phase import (
-    TransferPhaseTracingSubscriber,
-)
 from lmcache.v1.mp_observability.subscribers.tracing.timeout import (
     TimeoutTracingSubscriber,
+)
+from lmcache.v1.mp_observability.subscribers.tracing.transfer_phase import (
+    TransferPhaseTracingSubscriber,
 )
 
 __all__ = [
