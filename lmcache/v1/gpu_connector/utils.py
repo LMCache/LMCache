@@ -315,16 +315,14 @@ def get_num_layers(
 
 
 def get_num_blocks(
-    kv_caches: DiscoverableKVCache,
-    engine_kv_format: "lmcache_native.EngineKVFormat",
-    layer_idx: int = 0,
+    kv_caches: DiscoverableKVCache, engine_kv_format: "lmcache_native.EngineKVFormat"
 ) -> int:
     """Return the number of blocks from ``kv_caches``.
 
     Raises:
         ValueError: For NBBS-fused formats with no separate block axis.
     """
-    kv_caches, _ = _resolve_spec_view(kv_caches, engine_kv_format, layer_idx)
+    kv_caches, _ = _resolve_spec_view(kv_caches, engine_kv_format)
     return get_spec(kv_caches, engine_kv_format).num_blocks()
 
 
