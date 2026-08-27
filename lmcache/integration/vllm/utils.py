@@ -22,7 +22,6 @@ from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.v1.config import LMCacheEngineConfig, load_ec_engine_config
 from lmcache.v1.config_base import apply_remote_configs, fetch_remote_config
-from lmcache.v1.multiprocess.transfer_context import LMCacheDrivenTransferContext
 from lmcache.v1.platform.base.event_ipc import create_event, record_event
 
 if TYPE_CHECKING:
@@ -53,6 +52,12 @@ def vllm_layout_hints() -> "LayoutHints":
 
 def transfer_context_uses_ipc_event(transfer_ctx: object) -> bool:
     """Whether ``transfer_ctx`` must export its producer event cross-process."""
+    # Import lazily to avoid pulling the whole MP transfer stack into every
+    # vLLM utility import path, which creates a cycle on CPU-only startup.
+    from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
+        LMCacheDrivenTransferContext,
+    )
+
     return isinstance(transfer_ctx, LMCacheDrivenTransferContext)
 
 

@@ -28,6 +28,7 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (
 )
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.protocol import RequestType
+from lmcache.v1.multiprocess.transfer_context import LMCacheDrivenTransferContext
 
 
 class FakeCudaEvent:
@@ -243,7 +244,7 @@ def test_create_and_record_event_uses_ipc_backend_for_lmcache_driven_transfer(
     fake_tensor = MagicMock(name="kv_tensor")
     fake_tensor.device = torch.device("cpu")
     adapter.kv_caches = {"layer0": fake_tensor}
-    adapter.transfer_ctx = adapter_mod.LMCacheDrivenTransferContext()
+    adapter.transfer_ctx = LMCacheDrivenTransferContext()
 
     created_event = object()
     record_calls: list[tuple[object, object, object | None]] = []
