@@ -292,18 +292,21 @@ def normalize_and_discover_per_layer_formats(
     return normalized_per_layer, engine_kv_formats
 
 
-def group_spec_source(
-    entry: "torch.Tensor", engine_kv_format: "lmcache_native.EngineKVFormat"
-) -> DiscoverableKVCache:
-    """Spec-facing kv_caches for one group representative entry.
+def _resolve_spec_view(
+    kv_caches: DiscoverableKVCache,
+    engine_kv_format: "lmcache_native.EngineKVFormat",
+    layer_idx: int = 0,
+) -> "tuple[DiscoverableKVCache, int]":
+    """Map a per-layer index onto the structure a format's spec expects.
 
-    Cross-layer entries in a normalized per-layer structure are the
-    reconstructed whole-group tensor; per-layer entries wrap as a
-    single-layer list.
+    In a normalized per-layer structure, every layer of a cross-layer group
+    holds the group's single reconstructed tensor, so the spec receives that
+    tensor and a local index. Bare cross-layer tensors and per-layer lists
+    pass through unchanged.
     """
-    if lmcache_native.is_cross_layer(engine_kv_format):
-        return entry
-    return [entry]
+    if lmcache_native.is_cross_layer(engine_kv_format) and isinstance(kv_caches, list):
+        return kv_caches[layer_idx], 0
+    return kv_caches, layer_idx
 
 
 def get_num_layers(
@@ -314,13 +317,16 @@ def get_num_layers(
 
 
 def get_num_blocks(
-    kv_caches: DiscoverableKVCache, engine_kv_format: "lmcache_native.EngineKVFormat"
+    kv_caches: DiscoverableKVCache,
+    engine_kv_format: "lmcache_native.EngineKVFormat",
+    layer_idx: int = 0,
 ) -> int:
     """Return the number of blocks from ``kv_caches``.
 
     Raises:
         ValueError: For NBBS-fused formats with no separate block axis.
     """
+    kv_caches, _ = _resolve_spec_view(kv_caches, engine_kv_format, layer_idx)
     return get_spec(kv_caches, engine_kv_format).num_blocks()
 
 
@@ -339,6 +345,7 @@ def get_block_size(
     Raises:
         ValueError: For NBBS-fused formats with no separate block axis.
     """
+    kv_caches, layer_idx = _resolve_spec_view(kv_caches, engine_kv_format, layer_idx)
     return get_spec(kv_caches, engine_kv_format).block_size(layer_idx)
 
 
@@ -366,6 +373,7 @@ def get_num_heads(
     layer_idx: int = 0,
 ) -> int:
     """Return the number of heads for a layer (defaults to layer 0)."""
+    kv_caches, layer_idx = _resolve_spec_view(kv_caches, engine_kv_format, layer_idx)
     return get_spec(kv_caches, engine_kv_format).num_heads(layer_idx)
 
 
@@ -384,6 +392,7 @@ def get_head_size(
     layer_idx: int = 0,
 ) -> int:
     """Return the head size for a layer (defaults to layer 0)."""
+    kv_caches, layer_idx = _resolve_spec_view(kv_caches, engine_kv_format, layer_idx)
     return get_spec(kv_caches, engine_kv_format).head_size(layer_idx)
 
 
@@ -407,6 +416,7 @@ def get_dtype(
     layer_idx: int = 0,
 ) -> torch.dtype:
     """Return the dtype for a layer (defaults to layer 0)."""
+    kv_caches, layer_idx = _resolve_spec_view(kv_caches, engine_kv_format, layer_idx)
     return get_spec(kv_caches, engine_kv_format).dtype(layer_idx)
 
 
@@ -432,9 +442,9 @@ def get_group_data_ptrs(
         ValueError: If *engine_kv_format* is not recognized.
     """
     if lmcache_native.is_cross_layer(engine_kv_format):
-        # The group's entries are the reconstructed whole-group tensor, and
-        # its layer axis is local to the group.
-        source = kv_caches[layer_indices[0]]
+        # A cross-layer group's spec sees its own tensor: layer indices are
+        # local to the group.
+        source, _ = _resolve_spec_view(kv_caches, engine_kv_format, layer_indices[0])
         return get_spec(source, engine_kv_format).data_ptrs(
             list(range(len(layer_indices)))
         )
@@ -577,12 +587,13 @@ def resolve_block_stride_and_log_layout(
         #   per-layer; K & V share shape/stride by construction.
         # - Other formats: ``kv_caches`` is already a per-layer list.
         if lmcache_native.is_cross_layer(engine_kv_format):
-            if not isinstance(kv_caches, torch.Tensor):
+            source, _ = _resolve_spec_view(kv_caches, engine_kv_format, layer_idx)
+            if not isinstance(source, torch.Tensor):
                 raise TypeError(
                     "Cross-layer EngineKVFormat expects a single backing "
-                    f"torch.Tensor, got {type(kv_caches).__name__}."
+                    f"torch.Tensor, got {type(source).__name__}."
                 )
-            return kv_caches
+            return source
         if lmcache_native.is_kv_list(engine_kv_format):
             return kv_caches[0][layer_idx]  # type: ignore[index,return-value]
         return kv_caches[layer_idx]  # type: ignore[index,return-value]

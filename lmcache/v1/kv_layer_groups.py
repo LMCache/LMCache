@@ -134,16 +134,11 @@ def group_layers_by_identity(
             continue
         layer_format = engine_kv_formats[idx]
         mla = lmcache_native.is_mla(layer_format)
-        # Cross-layer formats: this layer's entry is the reconstructed
-        # whole-group tensor, so geometry reads it directly (index 0).
-        cross = lmcache_native.is_cross_layer(layer_format)
-        source = kv_caches[idx] if cross else kv_caches
-        source_idx = 0 if cross else idx
         kv_size = 1 if mla else 2
-        nh = 1 if mla else get_num_heads(source, layer_format, source_idx)
-        hs = get_head_size(source, layer_format, source_idx)
-        dt = get_dtype(source, layer_format, source_idx)
-        bs = get_block_size(source, layer_format, source_idx)
+        nh = 1 if mla else get_num_heads(kv_caches, layer_format, idx)
+        hs = get_head_size(kv_caches, layer_format, idx)
+        dt = get_dtype(kv_caches, layer_format, idx)
+        bs = get_block_size(kv_caches, layer_format, idx)
 
         identity = LayerGroupIdentity(
             kv_size=kv_size,
@@ -368,7 +363,6 @@ class KVLayerGroupsManager:
         # First Party
         from lmcache.v1.gpu_connector.utils import (
             get_num_blocks,
-            group_spec_source,
             make_page_buffer_shape_desc,
             resolve_block_stride_and_log_layout,
         )
@@ -411,19 +405,18 @@ class KVLayerGroupsManager:
             # Block count is per engine group (each is its own block-id space), so
             # read it from this group's own tensor rather than a context-wide value.
             group_num_blocks = get_num_blocks(
-                group_spec_source(kv_caches[indices[0]], group_format),
-                group_format,
+                kv_caches, group_format, layer_idx=indices[0]
             )
             block_stride_elems = resolve_block_stride_and_log_layout(
-                group_spec_source(kv_caches[indices[0]], group_format),
+                kv_caches,
                 group_format,
-                layer_idx=0,
+                layer_idx=indices[0],
                 group_idx=group_idx,
             )
             shape_desc = make_page_buffer_shape_desc(
-                group_spec_source(kv_caches[indices[0]], group_format),
+                kv_caches,
                 group_format,
-                layer_idx=0,
+                layer_idx=indices[0],
                 num_layers_in_group=len(indices),
                 num_blocks=group_num_blocks,
                 block_size=bs,
