@@ -37,8 +37,6 @@ def resolve_vllm_kv_layout(
         ValueError: for hint values outside the supported vocabulary --
             guessing a layout would silently corrupt the cache.
     """
-    if cpu_attention_backend:
-        return "LBHNC"
     kv_layout = layout_hints.get("kv_layout", "LBNHC")
     canonical = _CANONICAL_KV_LAYOUTS.get(kv_layout)
     if canonical is None:
@@ -46,6 +44,11 @@ def resolve_vllm_kv_layout(
             f"kv_layout hint {kv_layout!r} is not a layout LMCache supports; "
             "expected one of NHD, HND, LBNHC, LBHNC, BLHNC, BLNHC."
         )
+    # vLLM's CPU attention backend stores the layer-compact cache in HND but
+    # misreports the hint; explicit blocks-first declarations are unambiguous
+    # and win.
+    if cpu_attention_backend and canonical in ("LBNHC", "LBHNC"):
+        return "LBHNC"
     return canonical
 
 
