@@ -2111,7 +2111,7 @@ class RawBlockCore:
         headers = self._read_slot_headers(offsets)
         to_drop = [
             encoded_key
-            for (encoded_key, entry), slot_hdr in zip(items, headers, strict=False)
+            for (encoded_key, entry), slot_hdr in zip(items, headers, strict=True)
             if self._is_stale_header(encoded_key, entry, slot_hdr)
         ]
 
