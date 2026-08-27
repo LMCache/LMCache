@@ -47,7 +47,7 @@ class VLLMModelTracker:
         """
         Register a vllm model by instance_id.
         """
-        logger.info(f"Registering vllm model for {instance_id}")
+        logger.info("Registering vllm model for %s", instance_id)
         if instance_id not in cls._vllm_models:
             cls._vllm_models[instance_id] = vllm_model
         else:

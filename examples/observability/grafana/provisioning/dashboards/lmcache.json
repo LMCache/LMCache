@@ -1009,12 +1009,111 @@
       "type": "timeseries"
     },
     {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "GPU KV copies currently on the device stream, per GPU: submitted minus finished. Sourced from the MP_{STORE,RETRIEVE}_SUBMITTED events (published just before a copy is enqueued) and the matching _END events (published from the GPU stream once the copy has run). A line that climbs and stays up means that GPU's copy queue is backing up. Caveat: a RETRIEVE rejected by the block-id underflow check publishes SUBMITTED but no END, so each occurrence adds a permanent +1 offset to the retrieve line; that path also logs at ERROR, which is how to tell it apart from a genuinely busy GPU.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "showValues": false,
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 33
+      },
+      "id": 15,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "lmcache_mp_num_submitted_stores_total - lmcache_mp_num_finished_stores_total",
+          "legendFormat": "inflight stores ({{device}}) [{{service_instance_id}}]",
+          "refId": "A"
+        },
+        {
+          "editorMode": "code",
+          "expr": "lmcache_mp_num_submitted_retrieves_total - lmcache_mp_num_finished_retrieves_total",
+          "legendFormat": "inflight retrieves ({{device}}) [{{service_instance_id}}]",
+          "refId": "B"
+        }
+      ],
+      "title": "Inflight GPU Copies (L0 \u2194 L1)",
+      "type": "timeseries"
+    },
+    {
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 33
+        "y": 41
       },
       "id": 200,
       "title": "Performance",
@@ -1083,7 +1182,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 34
+        "y": 42
       },
       "id": 10,
       "options": {
@@ -1182,7 +1281,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 34
+        "y": 42
       },
       "id": 11,
       "options": {
@@ -1281,7 +1380,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 42
+        "y": 50
       },
       "id": 8,
       "options": {
@@ -1395,7 +1494,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 42
+        "y": 50
       },
       "id": 14,
       "options": {
@@ -1488,7 +1587,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 50
+        "y": 58
       },
       "id": 12,
       "options": {
@@ -1587,7 +1686,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 50
+        "y": 58
       },
       "id": 13,
       "options": {
@@ -1686,7 +1785,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 58
+        "y": 66
       },
       "id": 16,
       "options": {
@@ -1722,7 +1821,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 66
+        "y": 74
       },
       "id": 300,
       "title": "Production Insights",
@@ -1791,7 +1890,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 67
+        "y": 75
       },
       "id": 20,
       "options": {
@@ -1896,7 +1995,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 67
+        "y": 75
       },
       "id": 21,
       "options": {
@@ -2001,7 +2100,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 75
+        "y": 83
       },
       "id": 22,
       "options": {
@@ -2127,7 +2226,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 75
+        "y": 83
       },
       "id": 23,
       "options": {
@@ -2169,7 +2268,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 83
+        "y": 91
       },
       "id": 400,
       "title": "CacheBlend (expand if using blend_server)",
@@ -2254,7 +2353,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 84
+            "y": 92
           },
           "id": 30,
           "options": {
@@ -2508,7 +2607,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 84
+            "y": 92
           },
           "id": 31,
           "options": {
@@ -2632,7 +2731,7 @@
             "h": 8,
             "w": 24,
             "x": 0,
-            "y": 92
+            "y": 100
           },
           "id": 34,
           "options": {
@@ -2689,7 +2788,7 @@
             "h": 12,
             "w": 24,
             "x": 0,
-            "y": 100
+            "y": 108
           },
           "id": 51,
           "options": {
@@ -2724,7 +2823,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 84
+        "y": 92
       },
       "id": 500,
       "title": "Request Traces",
@@ -2743,7 +2842,7 @@
         "h": 12,
         "w": 24,
         "x": 0,
-        "y": 85
+        "y": 93
       },
       "id": 50,
       "options": {
@@ -2786,6 +2885,6 @@
   "timezone": "browser",
   "title": "LMCache",
   "uid": "lmcache-standard",
-  "version": 8,
+  "version": 9,
   "weekStart": ""
 }

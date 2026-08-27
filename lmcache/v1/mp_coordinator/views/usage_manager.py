@@ -29,8 +29,12 @@ import threading
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import ObjectKey, Tier
 from lmcache.v1.mp_coordinator.api import CacheEventBatch, CacheEventType
-from lmcache.v1.mp_coordinator.persistence.durable_component import PersistenceType
+from lmcache.v1.mp_coordinator.persistence.durable_component import (
+    DurableComponent,
+    PersistenceType,
+)
 from lmcache.v1.mp_coordinator.utils.encoding import decode_key, encode_key
+from lmcache.v1.mp_coordinator.views.base import View
 
 logger = init_logger(__name__)
 
@@ -41,7 +45,7 @@ logger = init_logger(__name__)
 _PlacementId = tuple[Tier, ObjectKey, str, str]
 
 
-class CacheUsageManager:
+class CacheUsageManager(View):
     """Thread-safe per-tier byte usage view, rolled up two ways.
 
     Every read is tier-explicit: a key resident in both tiers holds
@@ -144,6 +148,14 @@ class CacheUsageManager:
                 for (placement_tier, _), n_bytes in self._salt_bytes.items()
                 if placement_tier == tier
             )
+
+    def get_durable_components(self) -> tuple[DurableComponent, ...]:
+        """Return this view: the bytes it accounts are its own section.
+
+        Returns:
+            Itself, since nothing else owns the placement sizes.
+        """
+        return (self,)
 
     @property
     def name(self) -> str:

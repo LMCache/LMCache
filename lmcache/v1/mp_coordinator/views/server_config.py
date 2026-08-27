@@ -29,7 +29,11 @@ import threading
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import ModuleMemoryCapacity, Tier
 from lmcache.v1.mp_coordinator.api import CacheEventBatch, CacheEventType
-from lmcache.v1.mp_coordinator.persistence.durable_component import PersistenceType
+from lmcache.v1.mp_coordinator.persistence.durable_component import (
+    DurableComponent,
+    PersistenceType,
+)
+from lmcache.v1.mp_coordinator.views.base import View
 
 logger = init_logger(__name__)
 
@@ -38,7 +42,7 @@ logger = init_logger(__name__)
 UNDECLARED_CAPACITY = 0
 
 
-class ServerConfigRegistry:
+class ServerConfigRegistry(View):
     """Thread-safe store of each MP server's declared capacities.
 
     A :class:`CacheEventConsumer`: :meth:`consume` accumulates ``config``
@@ -133,6 +137,14 @@ class ServerConfigRegistry:
         with self._lock:
             self._by_instance.pop(instance_id, None)
             self._stamps.pop(instance_id, None)
+
+    def get_durable_components(self) -> tuple[DurableComponent, ...]:
+        """Return this registry: the capacities it holds are its section.
+
+        Returns:
+            Itself.
+        """
+        return (self,)
 
     @property
     def name(self) -> str:

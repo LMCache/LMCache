@@ -32,15 +32,16 @@ import httpx
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
+from lmcache.v1.mp_coordinator.controllers import build_controllers
 from lmcache.v1.mp_coordinator.controllers.eviction_controller import (
     FleetEvictionController,
 )
-from lmcache.v1.mp_coordinator.controllers.prefetch_manager import PrefetchManager
-from lmcache.v1.mp_coordinator.controllers.usage_manager import CacheUsageManager
 from lmcache.v1.mp_coordinator.http_apis.dependencies import CoordinatorContext
-from lmcache.v1.mp_coordinator.ingest.event_broadcaster import CacheEventBroadcaster
+from lmcache.v1.mp_coordinator.ingest.event_broadcaster import (
+    CacheEventBroadcaster,
+    CacheEventConsumer,
+)
 from lmcache.v1.mp_coordinator.ingest.event_gate import EventGate
-from lmcache.v1.mp_coordinator.key_directory import KeyDirectory
 from lmcache.v1.mp_coordinator.persistence.checkpoint import (
     load_checkpoint,
     save_checkpoint,
@@ -57,7 +58,7 @@ from lmcache.v1.mp_coordinator.persistence.store import (
     NullArtifactStore,
 )
 from lmcache.v1.mp_coordinator.registry import InstanceRegistry
-from lmcache.v1.mp_coordinator.server_config import ServerConfigRegistry
+from lmcache.v1.mp_coordinator.views import build_views
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.utils.router_discovery import discover_api_routers
 
@@ -94,23 +95,9 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
         ``http_apis`` routers are registered.
     """
     registry = InstanceRegistry()
-    key_directory = KeyDirectory()
-    if config.enable_blend_lookup:
-        # Only now does the directory hash chunk content: chunk_size is the
-        # match window (the fleet chunk), blend_probe_stride the probe density.
-        key_directory.enable_blend_lookup(
-            chunk_size=config.chunk_size, probe_stride=config.blend_probe_stride
-        )
-    usage_manager = CacheUsageManager()
-    eviction_controller = FleetEvictionController(
-        usage_manager=usage_manager,
-        eviction_ratio=config.eviction_ratio,
-        trigger_watermark=config.trigger_watermark,
-    )
-    prefetch_manager = PrefetchManager()
-    # Pressure's denominator; the numerator is usage_manager's per-instance
-    # rollup.
-    server_config = ServerConfigRegistry()
+    views = build_views(config)
+    controllers = build_controllers(config, views)
+    eviction_controller = controllers.get(FleetEvictionController)
     # Resolves pin requests' token_ids to object keys; must match the fleet's
     # chunk size and hash algorithm (see MPCoordinatorConfig).
     token_hasher = TokenHasher(
@@ -119,49 +106,38 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
     # Ingest layer: the gate admits, the broadcaster fans out. Adding a
     # consumer of the fleet's cache-event stream is a register call here.
     event_broadcaster = CacheEventBroadcaster()
-    event_broadcaster.register_consumer(key_directory)
-    # Order matters: the eviction controller's delete handling reads the
-    # usage view for the same batch, so the usage view must consume first.
-    event_broadcaster.register_consumer(usage_manager)
-    event_broadcaster.register_consumer(eviction_controller)
-    # Consumes ``config`` batches only, so its position is free.
-    event_broadcaster.register_consumer(server_config)
+    # Views first: a controller acts on the batch a view has consumed.
+    # Not everything discovered consumes, so the protocol decides.
+    for collaborator in (*views.all(), *controllers.all()):
+        if isinstance(collaborator, CacheEventConsumer):
+            event_broadcaster.register_consumer(collaborator)
     # Held by the ingest path; whoever captures durable state takes it
     # to read across the consumers consistently.
     quiesce = QuiesceLock()
     event_gate = EventGate(event_broadcaster, quiesce)
 
-    # Durable state, split by where each component says it belongs. PR 3
-    # replaces this hand-built list with controller discovery.
-    durable: list[DurableComponent] = [
-        key_directory,
-        usage_manager,
+    # The gate is named because it is durable but is neither a view nor
+    # a controller; everything else advertises its own state.
+    checkpoint_components: list[DurableComponent] = [
         event_gate,
-        server_config,
-        *eviction_controller.get_durable_components(),
-    ]
-    checkpoint_components = [
-        c for c in durable if c.persistence_type is PersistenceType.CHECKPOINT
+        *views.durable_components()[PersistenceType.CHECKPOINT],
+        *controllers.durable_components()[PersistenceType.CHECKPOINT],
     ]
     checkpoint_store = _artifact_store(config.checkpoint_path)
     metadata_persister = MetadataPersister(_artifact_store(config.metadata_path))
-    for component in durable:
-        if component.persistence_type is PersistenceType.METADATA:
-            metadata_persister.register(component)
+    for component in controllers.durable_components()[PersistenceType.METADATA]:
+        metadata_persister.register(component)
     # Before the checkpoint, so a restored key arrives already pinned.
     metadata_persister.load()
     load_checkpoint(checkpoint_store, checkpoint_components)
 
     ctx = CoordinatorContext(
         registry=registry,
-        usage_manager=usage_manager,
-        eviction_controller=eviction_controller,
-        prefetch_manager=prefetch_manager,
+        views=views,
+        controllers=controllers,
         token_hasher=token_hasher,
-        key_directory=key_directory,
         event_gate=event_gate,
         metadata_persister=metadata_persister,
-        server_config=server_config,
     )
 
     async def _checkpoint_loop() -> None:
