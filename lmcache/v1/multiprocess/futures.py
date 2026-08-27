@@ -175,8 +175,6 @@ class DeviceMessagingFuture(MessagingFuture[T]):
     def _synchronize_and_release(self) -> None:
         """Finish the imported event, then release its exporter-side lease."""
         with self._completion_lock:
-            if self._is_device_complete():
-                return
             if self.event_ is None:
                 return
 
