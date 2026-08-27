@@ -29,6 +29,7 @@ from lmcache.v1.distributed.api import (
     AttnWindowDesc,
     GroupKind,
     MemoryLayoutDesc,
+    ObjectKey,
     PrefetchRequestSpec,
     TrimPolicy,
     ipc_key_to_object_keys,
@@ -54,6 +55,7 @@ from lmcache.v1.multiprocess.engine_module import (
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
 )
+from lmcache.v1.multiprocess.native_completion import submit_callback_to_stream
 from lmcache.v1.multiprocess.protocol import RequestType
 from lmcache.v1.multiprocess.token_hasher import (
     TokenHasher,
@@ -775,6 +777,9 @@ class BlendModule(InstanceLivenessTarget):
         # Retrieve-owned stream per context: keeps retrieves out of the shared
         # stream's store gather/commit traffic.
         self._cb_retrieve_streams: "weakref.WeakKeyDictionary[Any, Any]" = (
+            weakref.WeakKeyDictionary()
+        )
+        self._cb_retrieve_cupy_streams: "weakref.WeakKeyDictionary[Any, Any]" = (
             weakref.WeakKeyDictionary()
         )
 
@@ -2129,6 +2134,44 @@ class BlendModule(InstanceLivenessTarget):
                         rope_state.is_neox_style,
                     )
 
+    def _release_applied_read_locks(
+        self,
+        cb_match_result: list[CBMatchResult],
+        applied: list[CBMatchResult],
+        all_obj_keys: list[ObjectKey],
+        n_read: int,
+        stream: Any,
+    ) -> int:
+        """Release the sparse-prefetch read locks of the scattered matches.
+
+        Stream-ordered on ``stream`` so it fires after the scatter has read the
+        objects. Matches not in ``applied`` (beyond the allocated slots) stay
+        locked for vLLM's full-alloc follow-up retrieve.
+
+        Args:
+            cb_match_result (list[CBMatchResult]): Every match submitted to this
+                retrieve, in the chunk-major order ``all_obj_keys`` was built in.
+            applied (list[CBMatchResult]): The subset actually scattered (same
+                objects as in ``cb_match_result``).
+            all_obj_keys (list[ObjectKey]): Chunk-major object keys: ``n_read``
+                consecutive keys (one per read group) per match.
+            n_read (int): Read groups per match.
+            stream (Any): The cupy stream (``.ptr``) the scatter was enqueued on.
+
+        Returns:
+            int: The number of object keys whose release was enqueued.
+        """
+        applied_ids = {id(r) for r in applied}
+        release_keys = [
+            all_obj_keys[i * n_read + g]
+            for i, r in enumerate(cb_match_result)
+            if id(r) in applied_ids
+            for g in range(n_read)
+        ]
+        if release_keys:
+            submit_callback_to_stream(stream, "finish_read_prefetched", release_keys)
+        return len(release_keys)
+
     def _scatter_batch_to_paged(
         self,
         gpu_context: BaseCacheContext,
@@ -2782,9 +2825,18 @@ class BlendModule(InstanceLivenessTarget):
         if retrieve_stream is None:
             if gpu_context.device.type == "cuda":
                 retrieve_stream = torch_dev.Stream(device=gpu_context.device)
+                # Third Party
+                import cupy
+
+                retrieve_cupy_stream = cupy.cuda.ExternalStream(
+                    retrieve_stream.cuda_stream, gpu_context.device.index
+                )
             else:
                 retrieve_stream = gpu_context.stream
+                retrieve_cupy_stream = gpu_context.cupy_stream
             self._cb_retrieve_streams[gpu_context] = retrieve_stream
+            self._cb_retrieve_cupy_streams[gpu_context] = retrieve_cupy_stream
+        retrieve_cupy_stream = self._cb_retrieve_cupy_streams[gpu_context]
 
         with (
             torch_dev.device(gpu_context.device),
@@ -3044,6 +3096,15 @@ class BlendModule(InstanceLivenessTarget):
                     applied_now = {
                         (r.hash, r.cur_st, r.cur_ed, dest_fp) for r, _ in pairs
                     }
+
+                    # Release read locks of the scattered matches (stream-ordered).
+                    self._release_applied_read_locks(
+                        cb_match_result,
+                        [r for r, _ in pairs],
+                        all_obj_keys,
+                        n_read,
+                        retrieve_cupy_stream,
+                    )
 
                     # Record this retrieve's device work for the next request's scoped
                     # barrier.
