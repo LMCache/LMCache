@@ -189,6 +189,30 @@ class DeviceMessagingFuture(MessagingFuture[T]):
                 assert self._event_bytes is not None
                 self._event_release_callback(self._event_bytes)
 
+    def _finish_processed_response(self) -> None:
+        """Complete a processed raw response, blocking on device work if needed."""
+        if self._device_complete:
+            return
+        if self.event_ is None:
+            self._device_complete = True
+            return
+        self._synchronize_and_release()
+
+    def _query_processed_response(self) -> bool:
+        """Check whether a processed raw response is fully complete."""
+        if self._device_complete:
+            return True
+        if self.event_ is None:
+            self._device_complete = True
+            return True
+        if not self._event_backend.query_event(self.event_):
+            return False
+        # Cross-process event query has backend-specific edge cases. A
+        # positive query is confirmed by synchronization before releasing
+        # the exporter-side event.
+        self._synchronize_and_release()
+        return True
+
     def wait(self, timeout: Optional[float] = None) -> bool:
         """
         Wait for the future to be done, ordered through the device event.
@@ -209,12 +233,7 @@ class DeviceMessagingFuture(MessagingFuture[T]):
             return True
 
         if self._raw_response_processed:
-            if self.event_ is not None:
-                self._synchronize_and_release()
-            return True
-
-        if self.event_ is not None:
-            self._synchronize_and_release()
+            self._finish_processed_response()
             return True
 
         flag = self.raw_future_.wait(timeout)
@@ -222,10 +241,7 @@ class DeviceMessagingFuture(MessagingFuture[T]):
             return False
 
         self._on_raw_future_complete()
-
-        if self.event_ is not None:
-            self._synchronize_and_release()
-
+        self._finish_processed_response()
         return True
 
     def result(self, timeout: Optional[float] = None) -> T:
@@ -263,28 +279,12 @@ class DeviceMessagingFuture(MessagingFuture[T]):
         if self._device_complete:
             return True
 
-        if self._raw_response_processed:
-            if self.event_ is None:
-                self._device_complete = True
-                return True
-            if not self._event_backend.query_event(self.event_):
+        if not self._raw_response_processed:
+            if not self.raw_future_.query():
                 return False
-            # Cross-process event query has backend-specific edge cases. A
-            # positive query is confirmed by synchronization before releasing
-            # the exporter-side event.
-            self._synchronize_and_release()
-            return True
-
-        if self.raw_future_.query():
             self._on_raw_future_complete()
-            if self._device_complete or self.event_ is None:
-                return True
-            if not self._event_backend.query_event(self.event_):
-                return False
-            self._synchronize_and_release()
-            return True
 
-        return False
+        return self._query_processed_response()
 
     def set_result(self, result: T) -> None:
         raise NotImplementedError(

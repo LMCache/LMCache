@@ -412,6 +412,21 @@ class LMCacheDrivenTransferContext(TransferContext):
         self._device: torch.device | None = None
         self._event_backend: EventIPCBackend | None = None
 
+    @staticmethod
+    def _submit_release_event_request(
+        mq_client: MessageQueueClient,
+        instance_id: int,
+        handle: bytes,
+    ) -> None:
+        """Queue a RELEASE_EVENT request from a device-future callback.
+
+        ``DeviceMessagingFuture`` may invoke the release callback on whichever
+        adapter thread calls ``query()``, ``wait()``, or ``result()``. Use the
+        MQ client's queue-based submission path here so that only the shared
+        polling-loop thread touches the underlying ZMQ socket.
+        """
+        mq_client.submit_request(RequestType.RELEASE_EVENT, [instance_id, handle])
+
     def register(
         self,
         instance_id: int,
@@ -546,10 +561,8 @@ class LMCacheDrivenTransferContext(TransferContext):
             [key, instance_id, block_ids, event_ipc_handle],
         ).to_device_future(
             device=self._device,
-            event_release_callback=lambda handle: send_request(
-                mq_client,
-                RequestType.RELEASE_EVENT,
-                [instance_id, handle],
+            event_release_callback=lambda handle: self._submit_release_event_request(
+                mq_client, instance_id, handle
             ),
         )
 
@@ -630,10 +643,8 @@ class LMCacheDrivenTransferContext(TransferContext):
             [key, instance_id, block_ids, event_ipc_handle, skip_first_n_tokens],
         ).to_device_future(
             device=self._device,
-            event_release_callback=lambda handle: send_request(
-                mq_client,
-                RequestType.RELEASE_EVENT,
-                [instance_id, handle],
+            event_release_callback=lambda handle: self._submit_release_event_request(
+                mq_client, instance_id, handle
             ),
         )
 

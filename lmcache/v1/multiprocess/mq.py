@@ -372,6 +372,12 @@ class MessageQueueClient:
 
         Returns:
             MessagingFuture[T]: A future that will hold the response.
+
+        Notes:
+            This method is safe to call from arbitrary adapter or callback
+            threads. It only enqueues onto ``input_queue`` and wakes the shared
+            polling loop; the polling-loop thread remains the sole owner of the
+            DEALER socket and ``pending_futures`` mutations.
         """
         future: MessagingFuture[T] = MessagingFuture()
         request_uid = next(self._request_counter)

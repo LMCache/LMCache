@@ -52,7 +52,21 @@ class EventLeaseRegistry:
         event: object,
         *dependent_events: object,
     ) -> None:
-        """Retain events under the worker and exported completion handle."""
+        """Retain an exported completion event lease.
+
+        Args:
+            instance_id: Worker instance that owns the lease.
+            handle: Serialized completion-event IPC handle exported to the
+                worker.
+            event: Exporter-side completion event that must stay alive until the
+                worker acknowledges release.
+            dependent_events: Additional imported events whose lifetime must be
+                coupled to the same completion handle.
+
+        Raises:
+            RuntimeError: If the same instance reuses an existing completion
+                handle without releasing it first.
+        """
         key = (instance_id, handle)
         with self._lock:
             if key in self._events:
@@ -62,7 +76,15 @@ class EventLeaseRegistry:
             self._events[key] = (event, *dependent_events)
 
     def release(self, instance_id: int, handle: bytes) -> bool:
-        """Release one event lease, returning whether it existed."""
+        """Release one completion-event lease.
+
+        Args:
+            instance_id: Worker instance that owned the lease.
+            handle: Serialized completion-event IPC handle being acknowledged.
+
+        Returns:
+            True if a lease was removed, else False.
+        """
         with self._lock:
             events = self._events.pop((instance_id, handle), None)
         # Event destruction may enter the accelerator runtime. Never do that
@@ -72,7 +94,14 @@ class EventLeaseRegistry:
         return found
 
     def release_instance(self, instance_id: int) -> int:
-        """Release all leases owned by a disconnected worker instance."""
+        """Release every outstanding lease for one worker instance.
+
+        Args:
+            instance_id: Worker instance whose leases should be dropped.
+
+        Returns:
+            The number of completion handles released for that instance.
+        """
         with self._lock:
             keys = [key for key in self._events if key[0] == instance_id]
             events = [event for key in keys for event in self._events.pop(key)]
@@ -87,6 +116,7 @@ class EventLeaseRegistry:
         events.clear()
 
     def __len__(self) -> int:
+        """Return the number of active completion-handle leases."""
         with self._lock:
             return len(self._events)
 

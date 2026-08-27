@@ -5,7 +5,6 @@
 from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 from typing import Any, Iterator, cast
-from unittest.mock import MagicMock
 import gc
 import inspect
 import weakref
@@ -105,6 +104,23 @@ class _FakeStorageManager:
         yield []
 
 
+class _RecordingMQClient:
+    """Minimal MQ client that records queue-based submission requests."""
+
+    def __init__(self) -> None:
+        self.requests: list[tuple[RequestType, list[object]]] = []
+
+    def submit_request(
+        self,
+        request_type: RequestType,
+        request_payloads: list[object],
+        response_cls: object | None = None,
+    ) -> MessagingFuture[object]:
+        del response_cls
+        self.requests.append((request_type, request_payloads))
+        return _resolved_future(None)
+
+
 def _resolved_future(result: object) -> MessagingFuture[object]:
     """Return a messaging future already resolved to ``result``."""
     future: MessagingFuture[object] = MessagingFuture()
@@ -131,19 +147,23 @@ def test_worker_exports_events_through_platform_backend(
         lambda kv_caches: list(kv_caches.values()),
     )
 
-    sent: list[tuple[RequestType, list[object]]] = []
+    sent: list[tuple[RequestType, list[object], MessagingFuture[object]]] = []
 
     def send_request(
         _client: object,
         request_type: RequestType,
         payload: list[object],
     ) -> MessagingFuture:
-        sent.append((request_type, payload))
+        future: MessagingFuture[object]
         if request_type == RequestType.REGISTER_KV_CACHE:
-            return _resolved_future(True)
-        return MessagingFuture()
+            future = _resolved_future(True)
+        else:
+            future = MessagingFuture()
+        sent.append((request_type, payload, future))
+        return future
 
     context = worker_transfer.LMCacheDrivenTransferContext()
+    mq_client = _RecordingMQClient()
     kv_caches = {"layer_0": torch.empty(1)}
     context.register(
         1,
@@ -151,7 +171,7 @@ def test_worker_exports_events_through_platform_backend(
         "model",
         1,
         1,
-        MagicMock(),
+        cast(Any, mq_client),
         1.0,
         send_request,
     )
@@ -178,11 +198,11 @@ def test_worker_exports_events_through_platform_backend(
 
     assert isinstance(store_future, DeviceMessagingFuture)
     assert isinstance(retrieve_future, DeviceMessagingFuture)
-    assert sent[1] == (
+    assert sent[1][:2] == (
         RequestType.STORE,
         ["key", 1, [[0]], b"completion-handle"],
     )
-    assert sent[2] == (
+    assert sent[2][:2] == (
         RequestType.RETRIEVE,
         ["key", 1, [[0]], b"completion-handle", 2],
     )
@@ -192,6 +212,12 @@ def test_worker_exports_events_through_platform_backend(
         "export",
     ]
     assert all(call[-1] == torch.device("cpu") for call in backend.calls)
+
+    cast(MessagingFuture[object], sent[1][2]).set_result((b"server-store-done", True))
+    assert store_future.result() is True
+    assert mq_client.requests == [
+        (RequestType.RELEASE_EVENT, [1, b"server-store-done"])
+    ]
 
 
 def test_server_store_and_retrieve_delegate_event_ordering(
