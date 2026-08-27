@@ -387,8 +387,6 @@ events = [
     {"chunk_hashes": ["0xaa", "0xbb"], "seq_len": 600, "chunk_size": 256},
     {"chunk_hashes": ["0xaa", "0xbb"], "seq_len": 600, "chunk_size": 256},
 ]
-result = simulate(
-    events, cache_capacity_bytes=10 * 1024**3, kv_bytes_per_chunk=20971520
-)
+result = simulate(events, cache_capacity_bytes=10 * 1024**3, kv_bytes_per_chunk=20971520)
 print(f"Token hit rate: {result['token_hit_rate']:.2%}")
 ```

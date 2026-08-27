@@ -124,7 +124,6 @@ In your component (e.g., a manager class), publish to the EventBus:
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
 
-
 class MyComponent:
     def __init__(self):
         self._event_bus = get_event_bus()
@@ -132,12 +131,10 @@ class MyComponent:
     def do_operation(self, keys):
         # ... business logic ...
 
-        self._event_bus.publish(
-            Event(
-                event_type=EventType.MY_COMPONENT_OPERATION,
-                metadata={"keys": keys},
-            )
-        )
+        self._event_bus.publish(Event(
+            event_type=EventType.MY_COMPONENT_OPERATION,
+            metadata={"keys": keys},
+        ))
 ```
 
 ### Step 3 — Create a subscriber
@@ -195,7 +192,6 @@ if obs_config.metrics_enabled:
     from lmcache.v1.mp_observability.subscribers.metrics import (
         MyComponentMetricsSubscriber,
     )
-
     bus.register_subscriber(MyComponentMetricsSubscriber())
 ```
 

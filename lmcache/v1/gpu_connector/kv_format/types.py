@@ -33,10 +33,12 @@ class LayoutHints(TypedDict, total=False):
     schema -- importing this type is optional.
 
     Keys:
-        kv_layout: Physical ordering of the KV cache dimensions:
-            ``"NHD"``, ``"HND"``, or the blocks-first ``"BLHNC"`` /
-            ``"BLNHC"``. Detection treats it as the declaration of axis
-            semantics that shapes alone cannot carry.
+        kv_layout: Physical ordering of the KV cache dimensions.
+            ``"NHD"`` -- heads after block-size (default for most
+            vLLM builds).
+            ``"HND"`` -- heads before block-size (``VLLM_KV_CACHE_LAYOUT=HND``).
+            ``"BLHNC"`` / ``"BLNHC"`` -- blocks outermost, all layers
+            packed per block (vLLM standardized layouts).
         num_kv_heads: Number of KV heads per layer. Used by TRT-LLM to
             reshape its 4-D pool tensor into the canonical 6-D form.
         tokens_per_block: Tokens per paged block. Used by TRT-LLM (to

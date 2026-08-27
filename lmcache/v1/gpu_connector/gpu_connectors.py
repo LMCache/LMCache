@@ -28,10 +28,10 @@ from lmcache.v1.gpu_connector.utils import (
     get_num_layers,
     get_page_buffer_size,
     get_spec,
-    resolve_block_stride_and_log_layout,
     get_tokens_per_layer,
     normalize_and_discover_per_layer_formats,
     normalize_kv_and_discover_format,
+    resolve_block_stride_and_log_layout,
 )
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.memory_allocators.gpu_memory_allocator import GPUMemoryAllocator
