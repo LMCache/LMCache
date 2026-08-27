@@ -27,6 +27,15 @@ from lmcache.usage_telemetry import (
     is_usage_tracking_enabled,
 )
 from lmcache.usage_telemetry.guard import swallow_telemetry_errors
+from lmcache.usage_telemetry.l1_usage import (
+    InitializeL1Usage,
+    L1UsageReporter,
+)
+from lmcache.usage_telemetry.l2_usage import (
+    InitializeL2ConnectorUsage,
+    L2ConnectorUsageReporter,
+    L2TypeUsage,
+)
 from lmcache.usage_telemetry.metric_specs import MetricSpec
 from lmcache.usage_telemetry.mp_continuous import (
     InitializeMPContinuousUsage,
@@ -41,6 +50,7 @@ from lmcache.v1.distributed.config import (
     L1MemoryManagerConfig,
     StorageManagerConfig,
 )
+from lmcache.v1.distributed.l2_adapters.base import AdapterUsage
 from lmcache.v1.distributed.l2_adapters.config import (
     L2AdaptersConfig,
     get_type_name_for_config,
@@ -484,7 +494,8 @@ class TestMPContinuous:
         assert payload["interval_num_stored_tokens"] == 4
         assert payload["interval_stored_kv_size"] == 1000  # max, not 2000
 
-    def test_buffer_overflow_triggers_early_flush(self, usage_env):
+    def test_buffer_overflow_triggers_early_flush(self, usage_env, monkeypatch):
+        monkeypatch.setenv("LMCACHE_USAGE_TRACK_INTERVAL", "3")
         sender = RecordingSender()
         bus = EventBus(EventBusConfig(enabled=True))
         bus.start()
@@ -492,16 +503,256 @@ class TestMPContinuous:
             chunk_size=256, sender=sender, max_buffered_samples=2
         )
         bus.register_subscriber(reporter)
-        # 2 store events fill the 2-sample stored-tokens buffer and wake
-        # the flush thread well before the 600 s interval.
-        publish_mp_traffic(bus)
-        publish_mp_traffic(bus)
+        # Wake requests during the flush thread's initial wait are
+        # deferred to the first run, so let the first periodic flush
+        # pass before testing the overflow path.
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline and not sender.sent:
             time.sleep(0.01)
-        assert sender.sent, "overflow did not trigger an early flush"
+        assert sender.sent, "no first periodic flush"
+        baseline = len(sender.sent)
+        # The second round of traffic fills a 2-sample buffer and wakes
+        # the flush thread: a new message arrives well before the next
+        # 3 s tick.
+        publish_mp_traffic(bus)
+        publish_mp_traffic(bus)
+        deadline = time.monotonic() + 1.5
+        while time.monotonic() < deadline and len(sender.sent) == baseline:
+            time.sleep(0.01)
+        assert len(sender.sent) > baseline, "overflow did not wake the flush thread"
+        # The early flush can race the drain thread and split the samples
+        # across messages; stop() flushes the rest, so assert the totals
+        # across all sent messages.
+        bus.stop()
+        assert (
+            sum(
+                int(payload["interval_num_stored_tokens"]) for _, payload in sender.sent
+            )
+            == 2 * 2 * 256
+        )
+        assert (
+            sum(int(payload["interval_num_hit_tokens"]) for _, payload in sender.sent)
+            == 2 * 4 * 256
+        )
+
+
+def publish_l2_traffic(bus: EventBus) -> None:
+    """Publish L2 store/load events: dax traffic twice, posix once."""
+    for stored_bytes, ok, failed in ((1000, 3, 1), (500, 2, 0)):
+        bus.publish(
+            Event(
+                event_type=EventType.L2_STORE_COMPLETED,
+                metadata={
+                    "adapter_index": 0,
+                    "task_id": 1,
+                    "l2_name": "dax",
+                    "bytes_transferred": stored_bytes,
+                    "succeeded_count": ok,
+                    "failed_count": failed,
+                },
+            )
+        )
+    bus.publish(
+        Event(
+            event_type=EventType.L2_LOAD_TASK_SUBMITTED,
+            metadata={
+                "request_id": 7,
+                "adapter_index": 0,
+                "task_id": 2,
+                "l2_name": "dax",
+                "key_count": 4,
+                "total_bytes": 2048,
+            },
+        )
+    )
+    bus.publish(
+        Event(
+            event_type=EventType.L2_STORE_COMPLETED,
+            metadata={
+                "adapter_index": 1,
+                "task_id": 3,
+                "l2_name": "posix",
+                "bytes_transferred": 256,
+                "succeeded_count": 1,
+                "failed_count": 0,
+            },
+        )
+    )
+
+
+class StubStorageManager:
+    """Duck-typed StorageManager exposing only the usage accessor."""
+
+    def __init__(self, usages_by_type: dict[str, list[AdapterUsage]]) -> None:
+        self._usages_by_type = usages_by_type
+
+    def get_l2_usages_by_type(self) -> dict[str, list[AdapterUsage]]:
+        return self._usages_by_type
+
+
+class TestL2ConnectorUsage:
+    def _messages_by_type(
+        self, sender: RecordingSender
+    ) -> dict[str, dict[str, object]]:
+        return {str(payload["l2_name"]): payload for _, payload in sender.sent}
+
+    def test_traffic_and_occupancy_flush_on_bus_stop(self, usage_env):
+        sender = RecordingSender()
+        bus = EventBus(EventBusConfig(enabled=True))
+        bus.start()
+        reporter = L2ConnectorUsageReporter(
+            usage_probe=lambda: {"dax": L2TypeUsage(100, 1000, 0)}, sender=sender
+        )
+        bus.register_subscriber(reporter)
+        publish_l2_traffic(bus)
+        bus.stop()  # drains, then the shutdown hook sends the final flush
+
+        by_type = self._messages_by_type(sender)
+        assert set(by_type) == {"dax", "posix"}
+        for _, payload in sender.sent:
+            assert payload["message_type"] == "L2ConnectorUsageMessage"
+            assert payload["deployment_mode"] == "mp_server"
+            assert payload["sequence_number"] == 1
+            assert payload["active_seconds"] > 0
+
+        dax = by_type["dax"]
+        assert dax["interval_stored_bytes"] == 1500
+        assert dax["interval_store_succeeded_keys"] == 5
+        assert dax["interval_store_failed_keys"] == 1
+        assert dax["interval_load_submitted_keys"] == 4
+        assert dax["interval_load_submitted_bytes"] == 2048
+        assert dax["bytes_used"] == 100
+        assert dax["capacity_bytes"] == 1000
+
+        # posix had traffic but was absent from the probe (removed
+        # mid-interval): occupancy is the unavailable sentinel.
+        posix = by_type["posix"]
+        assert posix["interval_stored_bytes"] == 256
+        assert posix["bytes_used"] == -1
+
+        assert sender.sent[0][0].endswith("l2-usage")
+
+    def test_idle_present_type_reports_presence(self, usage_env):
+        sender = RecordingSender()
+        reporter = L2ConnectorUsageReporter(
+            usage_probe=lambda: {"dax": L2TypeUsage(50, 200, 0)}, sender=sender
+        )
+        reporter.flush()
+        assert len(sender.sent) == 1
         payload = sender.sent[0][1]
-        assert payload["interval_num_stored_tokens"] == 2 * 2 * 256
+        assert payload["l2_name"] == "dax"
+        assert payload["interval_stored_bytes"] == 0
+        assert payload["bytes_used"] == 50
+        reporter.shutdown()
+
+    def test_no_adapters_sends_nothing(self, usage_env):
+        sender = RecordingSender()
+        reporter = L2ConnectorUsageReporter(usage_probe=dict, sender=sender)
+        reporter.flush()
+        assert sender.sent == []
+        reporter.shutdown()
+
+    def test_probe_failure_keeps_traffic_with_sentinel(self, usage_env):
+        def broken_probe() -> dict[str, L2TypeUsage]:
+            raise RuntimeError("probe failure")
+
+        sender = RecordingSender()
+        bus = EventBus(EventBusConfig(enabled=True))
+        bus.start()
+        reporter = L2ConnectorUsageReporter(usage_probe=broken_probe, sender=sender)
+        bus.register_subscriber(reporter)
+        publish_l2_traffic(bus)
+        bus.stop()
+
+        by_type = self._messages_by_type(sender)
+        assert set(by_type) == {"dax", "posix"}
+        assert by_type["dax"]["interval_stored_bytes"] == 1500
+        assert by_type["dax"]["bytes_used"] == -1
+
+    def test_initialize_aggregates_bounded_and_unbounded(self, usage_env):
+        storage_manager = StubStorageManager(
+            {
+                "dax": [
+                    AdapterUsage(total_bytes_used=100, total_capacity_bytes=1000),
+                    AdapterUsage(total_bytes_used=25, total_capacity_bytes=0),
+                ]
+            }
+        )
+        sender = RecordingSender()
+        bus = EventBus(EventBusConfig(enabled=True))
+        bus.start()
+        reporter = InitializeL2ConnectorUsage(bus, storage_manager, sender=sender)
+        assert reporter is not None
+        bus.stop()
+
+        payload = sender.sent[0][1]
+        assert payload["l2_name"] == "dax"
+        assert payload["bytes_used"] == 125
+        assert payload["capacity_bytes"] == 1000
+        assert payload["unbounded_adapters"] == 1
+
+    def test_initialize_returns_none_when_disabled(self, usage_env, monkeypatch):
+        monkeypatch.setenv("LMCACHE_TRACK_USAGE", "false")
+        bus = EventBus(EventBusConfig(enabled=True))
+        assert InitializeL2ConnectorUsage(bus, StubStorageManager({})) is None
+        bus.stop()
+
+
+class StubL1StorageManager:
+    """Duck-typed StorageManager exposing only the L1 usage accessor."""
+
+    def __init__(self, used: int, total: int) -> None:
+        self._used = used
+        self._total = total
+
+    def get_l1_usage(self) -> tuple[int, int]:
+        return self._used, self._total
+
+
+class TestL1Usage:
+    def test_flush_sends_occupancy(self, usage_env):
+        sender = RecordingSender()
+        reporter = L1UsageReporter(usage_probe=lambda: (512, 4096), sender=sender)
+        reporter.flush()
+        assert len(sender.sent) == 1
+        url, payload = sender.sent[0]
+        assert url.endswith("l1-usage")
+        assert payload["message_type"] == "L1UsageMessage"
+        assert payload["deployment_mode"] == "mp_server"
+        assert payload["bytes_used"] == 512
+        assert payload["capacity_bytes"] == 4096
+        assert payload["sequence_number"] == 1
+        assert payload["active_seconds"] > 0
+        reporter.shutdown()
+
+    def test_probe_failure_sends_sentinels(self, usage_env):
+        def broken_probe() -> tuple[int, int]:
+            raise RuntimeError("probe failure")
+
+        sender = RecordingSender()
+        reporter = L1UsageReporter(usage_probe=broken_probe, sender=sender)
+        reporter.flush()
+        payload = sender.sent[0][1]
+        assert payload["bytes_used"] == -1
+        assert payload["capacity_bytes"] == 0
+        reporter.shutdown()
+
+    def test_bus_stop_sends_final_flush(self, usage_env):
+        sender = RecordingSender()
+        bus = EventBus(EventBusConfig(enabled=True))
+        bus.start()
+        reporter = InitializeL1Usage(
+            bus, StubL1StorageManager(100, 1000), sender=sender
+        )
+        assert reporter is not None
+        bus.stop()
+        assert len(sender.sent) == 1
+        assert sender.sent[0][1]["bytes_used"] == 100
+
+    def test_initialize_returns_none_when_disabled(self, usage_env, monkeypatch):
+        monkeypatch.setenv("LMCACHE_TRACK_USAGE", "false")
+        bus = EventBus(EventBusConfig(enabled=True))
+        assert InitializeL1Usage(bus, StubL1StorageManager(0, 0)) is None
         bus.stop()
 
 
@@ -513,7 +764,7 @@ class TestMPUsage:
         assert message.chunk_size == 256
         assert message.hash_algorithm == "blake3"
         assert message.engine_type == "default"
-        assert message.supported_transfer_mode == "auto"
+        assert message.supported_transfer_mode == "lmcache_driven"
         assert not message.p2p_enabled
         assert message.l1_size_bytes == 1 << 30
         assert message.l1_medium == "dram"
@@ -531,11 +782,11 @@ class TestMPUsage:
         # builds without it.
         fs_l2_adapter = pytest.importorskip(
             "lmcache.v1.distributed.l2_adapters.fs_l2_adapter",
-            reason="requires lmcache.native_storage_ops",
+            reason="requires lmcache.lmcache_native",
         )
         serde = pytest.importorskip(
             "lmcache.v1.distributed.serde",
-            reason="requires lmcache.native_storage_ops",
+            reason="requires lmcache.lmcache_native",
         )
         fs_config = fs_l2_adapter.FSL2AdapterConfig(
             base_path=str(tmp_path),

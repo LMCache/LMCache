@@ -23,9 +23,17 @@ one of two ways, depending on whether ``--otlp-endpoint`` is set:
      ``/metrics`` is empty until the first store/retrieve — drive some
      traffic before you go looking.
 
+     The MP Coordinator follows the same embedded-HTTP pattern. In pull mode,
+     ``lmcache coordinator`` exposes ``/metrics`` on ``--port`` (default
+     **9300**) and never starts a separate Prometheus server. Use the
+     coordinator's ``--disable-metrics`` flag to disable metrics.
+
 - **Push mode (OTLP).** When ``--otlp-endpoint`` is set, metrics are pushed to
   an OpenTelemetry Collector, which re-exposes them for Prometheus to scrape.
   See :doc:`index` for the bundled Collector + Prometheus + Grafana stack.
+
+  The Coordinator also accepts ``--otlp-endpoint``. Its local ``/metrics``
+  route returns 404 in push mode, as it does when metrics are disabled.
 
 All metrics use the ``lmcache_mp.`` prefix (multiprocess). On Prometheus,
 dots are converted to underscores and counters get a ``_total`` suffix
@@ -364,6 +372,90 @@ Prometheus (e.g.
      - Histogram
      - CPU→GPU (L1→L0) load throughput in GB/s per request.
 
+MP Transfer Counters (in-flight GPU copies)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Submitted / finished counter pairs for the LMCache-driven GPU transfers,
+via ``MPTransferCountersSubscriber``. The ``MP_{STORE,RETRIEVE}_SUBMITTED``
+events are published CPU-synchronously right before a copy is enqueued;
+the ``MP_{STORE,RETRIEVE}_END`` events are published *from* the GPU cupy
+stream once the copy has actually run. Subtracting the two gives the
+number of transfers currently in flight on each GPU.
+
+All four counters carry exactly one attribute, ``device`` (e.g.
+``"cuda:3"``). This is deliberate: the ``SUBMITTED`` events carry no
+``engine_id`` or ``model_name``, so labeling the ``END`` side more richly
+would force a PromQL aggregation to line the two label sets back up
+before subtracting them. To slice GPU transfer activity by worker or
+model, use the L0 ↔ L1 throughput histograms or
+``lmcache_mp.num_chunks_loaded`` instead.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 25 35
+
+   * - Metric
+     - Type
+     - Description
+   * - ``lmcache_mp.num_submitted_stores``
+     - Counter (attr: ``device``)
+     - GPU→CPU store transfers enqueued on the device stream, +1 per
+       ``store()`` call that reaches the copy.
+   * - ``lmcache_mp.num_finished_stores``
+     - Counter (attr: ``device``)
+     - GPU→CPU store transfers completed on the device stream, +1 per
+       completion.
+   * - ``lmcache_mp.num_submitted_retrieves``
+     - Counter (attr: ``device``)
+     - CPU→GPU retrieve transfers enqueued on the device stream, +1 per
+       ``retrieve()`` call that reaches the copy.
+   * - ``lmcache_mp.num_finished_retrieves``
+     - Counter (attr: ``device``)
+     - CPU→GPU retrieve transfers completed on the device stream, +1 per
+       completion.
+
+**PromQL for in-flight GPU copies:**
+
+.. code-block:: promql
+
+    # Stores currently on the device stream, per GPU:
+    lmcache_mp_num_submitted_stores_total
+    - lmcache_mp_num_finished_stores_total
+
+    # Retrieves currently on the device stream, per GPU:
+    lmcache_mp_num_submitted_retrieves_total
+    - lmcache_mp_num_finished_retrieves_total
+
+    # Store / retrieve rates per GPU (ops/sec):
+    rate(lmcache_mp_num_submitted_stores_total[1m])
+    rate(lmcache_mp_num_submitted_retrieves_total[1m])
+
+**What it answers:** how many GPU KV copies is each device carrying right
+now? A submitted count that climbs while finished lags means the copy
+queue is backing up on that GPU; the two tracking together means the
+device is keeping pace.
+
+.. note::
+
+   "Finished" counts a transfer *leaving* the device stream, not its
+   success. A store that committed nothing (``stored_count == 0``) and a
+   retrieve that missed both increment the finished counter. Counting only
+   successes would strand a phantom in-flight transfer in the subtraction
+   forever. Use ``lmcache_mp.num_chunks_loaded`` and the L0 ↔ L1
+   throughput histograms to measure what actually moved.
+
+.. warning::
+
+   The derived in-flight retrieve count can drift upward on one fail-closed
+   path. ``retrieve()`` publishes ``MP_RETRIEVE_SUBMITTED`` *before* its
+   block-id underflow check, and that check returns early without
+   publishing ``MP_RETRIEVE_END``, so each request hitting it permanently
+   adds 1 to the difference. That path should never fire in healthy
+   operation and logs at ERROR when it does — an in-flight floor that
+   ratchets up alongside those log lines is the signature, not a stuck GPU.
+   The store path publishes its sentinel *after* the equivalent check and
+   is unaffected.
+
 L1 ↔ L2 Throughput Histograms
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -582,4 +674,3 @@ In **push mode** (``--otlp-endpoint`` set), the server does not expose
 ``/metrics`` itself; scrape the OpenTelemetry Collector's Prometheus exporter
 instead. The bundled stack in ``examples/observability/`` wires this up for
 you — see :doc:`index`.
-

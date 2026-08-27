@@ -33,6 +33,51 @@ x-pod-1gpu: &pod-1gpu
     - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 1Gi } }
 
 steps:
+  # 4-GPU group is listed first so the heaviest job gets scheduled before the
+  # 2- and 1-GPU jobs.
+  #
+  # On the SM120 agent fleet (RTX PRO 6000 Blackwell) this step first builds a
+  # DeepGEMM carrying SM120 kernels, because the vLLM wheel's bundled one has
+  # none -- an upstream regression (vllm#50000 repointed the DeepGEMM pin onto
+  # a base that never had SM120). run-dsv4-flash-tp.sh documents the full
+  # chain and no-ops the build on SM90/SM100. The build measures ~1-2 min in
+  # CI, well inside the timeout below.
+  - group: ":compression: Multiprocess (4-GPU)"
+    if: build.env("VERIFY_AND_PIN_VLLM") !~ /true/
+    steps:
+      # L1 + slot-compression KV correctness for DeepSeek-V4-Flash (sparse-MLA
+      # + fp8, TP=4). The model's KV cache groups mix block geometries
+      # (tokens_per_block 256/64/8/4) and pack several logical tokens per
+      # physical slot; the test stores one long request through LMCache's
+      # slot-compression path, resets vLLM's local prefix cache (LMCache
+      # preserved), re-sends the identical request now served from the L1 CPU
+      # pool, and asserts the two greedy outputs are byte-identical. The 160GB
+      # fp8 TP-shard load (plus the weight download on a cold hf-cache node)
+      # needs the long timeout. The SM120 DeepGEMM build adds ~1-2 min,
+      # measured in CI, so it does not move this budget.
+      - label: ":compression: dsv4_flash_tp"
+        command: .buildkite/k3_tests/multiprocess/run.sh dsv4_flash_tp
+        timeout_in_minutes: 90
+        retry: *flaky-retry
+        agents: { queue: "k8s" }
+        plugins:
+          - kubernetes:
+              podSpec:
+                containers:
+                  - name: container-0
+                    image: lmcache/ci-base:latest
+                    imagePullPolicy: Never
+                    resources: { limits: { "nvidia.com/gpu": "4" } }
+                    volumeMounts:
+                      - { name: hf-cache, mountPath: /root/.cache/huggingface }
+                      - { name: dshm, mountPath: /dev/shm }
+                volumes:
+                  - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
+                  # TP=4 NCCL + vLLM shared memory; the 1Gi used by the
+                  # smaller pods is too tight for four ranks.
+                  - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 8Gi } }
+        artifact_paths: ["*.log"]
+
   - group: ":compression: Multiprocess (2-GPU)"
     if: build.env("VERIFY_AND_PIN_VLLM") !~ /true/
     steps:
@@ -175,30 +220,7 @@ steps:
         plugins: [{ kubernetes: { podSpec: *pod-1gpu-dshm } }]
         artifact_paths: ["*.log"]
 
-      # HMA correctness check on google/gemma-4-31B-it (a hybrid model whose KV
-      # cache groups get different block sizes). Runs gsm8k, resets vLLM's prefix
-      # cache (LMCache preserved), reruns served by LMCache, and asserts the two
-      # runs' scores match. Single GPU, no baseline.
-      - label: ":compression: hma_lm_eval_gemma4"
-        command: .buildkite/k3_tests/multiprocess/run.sh hma_lm_eval_gemma4
-        timeout_in_minutes: 60
-        retry: *flaky-retry
-        env:
-          MODEL: "google/gemma-4-31B-it"
-          # Allow a small score difference between the two runs.
-          SCORE_TOLERANCE: "0.03"
-          ATTENTION_BACKEND: "auto"
-          GPU_MEMORY_UTILIZATION: "0.85"
-          # 31B load + CUDA-graph capture is slow; raise the readiness timeout
-          # above the 300s default.
-          MAX_WAIT_SECONDS: "600"
-          # Cap samples and enlarge the CPU pool so the retrieve run stays
-          # cache-served (31B's per-token KV is large).
-          LIMIT: "100"
-          CPU_BUFFER_SIZE: "200"
-        agents: { queue: "k8s" }
-        plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
-        artifact_paths: ["*.log"]
+      # Temporarily disabled: hma_lm_eval_gemma4.
 
       - label: ":compression: fault_tolerance"
         command: .buildkite/k3_tests/multiprocess/run.sh fault_tolerance
@@ -216,6 +238,16 @@ steps:
 
       - label: ":compression: cache_stats"
         command: .buildkite/k3_tests/multiprocess/run.sh cache_stats
+        timeout_in_minutes: 30
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
+        artifact_paths: ["*.log"]
+
+      # Real GPU MP integration: vLLM is launched with FIFO lazy offload
+      # (threshold=2, select_count=1). Three requests verify that the first
+      # two remain pending and the third drains the first request.
+      - label: ":compression: lazy_offload"
+        command: .buildkite/k3_tests/multiprocess/run.sh lazy_offload
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]

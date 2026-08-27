@@ -260,8 +260,8 @@ def require_fdp_char_device_path() -> str:
     return device_path
 
 
-def install_native_storage_ops_fallback() -> None:
-    """Install a small native_storage_ops fallback for test environments.
+def install_lmcache_native_fallback() -> None:
+    """Install a small lmcache_native fallback for test environments.
 
     Args:
         None.
@@ -270,10 +270,8 @@ def install_native_storage_ops_fallback() -> None:
         None.
     """
     try:
-        native_storage_ops = importlib.import_module("lmcache.native_storage_ops")
-        if hasattr(native_storage_ops, "Bitmap") and hasattr(
-            native_storage_ops, "TTLLock"
-        ):
+        lmcache_native = importlib.import_module("lmcache.lmcache_native")
+        if hasattr(lmcache_native, "Bitmap") and hasattr(lmcache_native, "TTLLock"):
             return
     except Exception:
         pass
@@ -340,7 +338,16 @@ def install_native_storage_ops_fallback() -> None:
     class TTLLock:
         pass
 
-    fallback_module = types.ModuleType("lmcache.native_storage_ops")
+    class PageBufferShapeDesc:
+        pass
+
+    class KernelGroupSpec:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+    fallback_module = types.ModuleType("lmcache.lmcache_native")
+    fallback_module.__dict__["PageBufferShapeDesc"] = PageBufferShapeDesc
+    fallback_module.__dict__["KernelGroupSpec"] = KernelGroupSpec
     fallback_module.__dict__["Bitmap"] = Bitmap
     fallback_module.__dict__["TTLLock"] = TTLLock
-    sys.modules["lmcache.native_storage_ops"] = fallback_module
+    sys.modules["lmcache.lmcache_native"] = fallback_module

@@ -30,7 +30,9 @@ import pytest
 import torch
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.v1.multiprocess.modules.blend_v3 import _cb_group_rope_geometry
+import lmcache.lmcache_native as lmcache_native
 
 _CONTENT, _ROPE = 24, 8  # latent = [content | rope], hidden = 32
 _HIDDEN = _CONTENT + _ROPE
@@ -90,14 +92,16 @@ def test_undeclared_mla_width_still_infers_phantom_heads():
 # 2/3. Kernel + native plan (GPU)
 # --------------------------------------------------------------------------
 
-_gpu = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+_gpu = pytest.mark.skipif(
+    not torch_dev.is_available(), reason=f"needs available {torch_device_type}"
+)
 
 
-def _lmc_ops():
-    lmc_ops = pytest.importorskip("lmcache.c_ops")
-    if not hasattr(lmc_ops, "rotary_embedding_k_fused_strided"):
-        pytest.skip("c_ops build lacks rotary_embedding_k_fused_strided")
-    return lmc_ops
+def _cuda_ops():
+    cuda_ops = pytest.importorskip("lmcache.cuda_ops")
+    if not hasattr(cuda_ops, "rotary_embedding_k_fused_strided"):
+        pytest.skip("cuda_ops build lacks rotary_embedding_k_fused_strided")
+    return cuda_ops
 
 
 def _cos_sin_cache(max_pos, width, device):
@@ -136,9 +140,9 @@ def test_strided_kernel_rotates_only_the_trailing_window():
     """The batched-rope path's MLA launch: slice the trailing window off a
     (tokens, 1, hidden) latent view and rotate in place. Content dims must be
     bit-identical afterwards; the window must match the fp32 reference."""
-    lmc_ops = _lmc_ops()
+    cuda_ops = _cuda_ops()
     torch.manual_seed(0)
-    device = "cuda"
+    device = torch_device_type
     n_tok, max_pos = 64, 4096
 
     cache_bf16, cache_f32 = _cos_sin_cache(max_pos, _ROPE, device)
@@ -149,7 +153,7 @@ def test_strided_kernel_rotates_only_the_trailing_window():
 
     ref = _reference_rerope(before[:, 0].to(torch.float32), old_pos, new_pos, cache_f32)
 
-    lmc_ops.rotary_embedding_k_fused_strided(
+    cuda_ops.rotary_embedding_k_fused_strided(
         old_pos,
         new_pos,
         latents[..., _CONTENT:],  # data_ptr advances to the window start
@@ -158,7 +162,7 @@ def test_strided_kernel_rotates_only_the_trailing_window():
         cache_bf16,
         False,  # GLM/DeepSeek MLA is interleaved (GPT-J), not NeoX
     )
-    torch.cuda.synchronize()
+    torch_dev.synchronize()
 
     assert torch.equal(latents[:, 0, :_CONTENT], before[:, 0, :_CONTENT]), (
         "content dims were rotated — the exact corruption the declared "
@@ -177,17 +181,19 @@ def test_native_plan_rope_base_offset():
     """The native-plan path: same window as a byte offset in CBGroupSpec.
     Stage two host chunks into tmp slots and re-RoPE them (no scatters);
     the slots must match the strided-kernel result."""
-    lmc_ops = _lmc_ops()
-    if not hasattr(lmc_ops, "execute_cb_retrieve_plan_flat"):
-        pytest.skip("c_ops build lacks execute_cb_retrieve_plan_flat")
+    cuda_ops = _cuda_ops()
+    if not hasattr(cuda_ops, "execute_cb_retrieve_plan_flat"):
+        pytest.skip("cuda_ops build lacks execute_cb_retrieve_plan_flat")
     torch.manual_seed(1)
-    device = torch.device("cuda")
+    device = torch.device(torch_device_type)
     nl, spc, max_pos = 2, 8, 4096  # layers, slot tokens
     n_chunks = 2
 
     cache_bf16, cache_f32 = _cos_sin_cache(max_pos, _ROPE, device)
     host = [
-        torch.randn(1, nl, spc, _HIDDEN, dtype=_DTYPE, device="cuda").cpu().pin_memory()
+        torch.randn(1, nl, spc, _HIDDEN, dtype=_DTYPE, device=torch_device_type)
+        .cpu()
+        .pin_memory()
         for _ in range(n_chunks)
     ]
     slots = [
@@ -197,14 +203,14 @@ def test_native_plan_rope_base_offset():
     old_sts, cur_sts = [128, 512], [640, 96]
 
     try:
-        spec = lmc_ops.CBGroupSpec(
+        spec = cuda_ops.CBGroupSpec(
             paged_kv_ptrs=0,
             temp_buffer_ptrs=[s.data_ptr() for s in slots],
             num_layers=nl,
             slot_tokens=spc,
             hidden_elems=_HIDDEN,
             element_size=_DTYPE.itemsize,
-            engine_kv_format=lmc_ops.EngineKVFormat.NL_X_NB_BS_HS,
+            engine_kv_format=lmcache_native.EngineKVFormat.NL_X_NB_BS_HS,
             page_buffer_size=1,
             block_size=1,
             head_size=_ROPE,
@@ -219,7 +225,7 @@ def test_native_plan_rope_base_offset():
             rope_base_offset=_CONTENT * _DTYPE.itemsize,
         )
     except TypeError:
-        pytest.skip("c_ops build predates CBGroupSpec.rope_base_offset")
+        pytest.skip("cuda_ops build predates CBGroupSpec.rope_base_offset")
 
     chunk_bytes = nl * spc * _HIDDEN * _DTYPE.itemsize
     staging = [
@@ -228,7 +234,7 @@ def test_native_plan_rope_base_offset():
     ]
     ropes = [(0, i, old_sts[i], cur_sts[i]) for i in range(n_chunks)]
     step_offsets = [(len(staging), len(ropes), 0)]
-    lmc_ops.execute_cb_retrieve_plan_flat(
+    cuda_ops.execute_cb_retrieve_plan_flat(
         device,
         1 << 26,
         [spec],
@@ -237,7 +243,7 @@ def test_native_plan_rope_base_offset():
         np.zeros((0, 4), dtype=np.int64),
         np.asarray(step_offsets, dtype=np.int64),
     )
-    torch.cuda.synchronize()
+    torch_dev.synchronize()
 
     for i in range(n_chunks):
         # Positions ramp per slot token and repeat across layers (the ramp

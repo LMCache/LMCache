@@ -14,6 +14,8 @@ import zmq
 # First Party
 from lmcache import torch_dev, torch_device_type
 from lmcache.logging import init_logger
+from lmcache.usage_telemetry.l1_usage import InitializeL1Usage
+from lmcache.usage_telemetry.l2_usage import InitializeL2ConnectorUsage
 from lmcache.usage_telemetry.mp import InitializeMPUsageContext
 from lmcache.usage_telemetry.mp_continuous import InitializeMPContinuousUsage
 from lmcache.v1.distributed.config import (
@@ -259,12 +261,28 @@ def _build_modules(
         # Opt-in: enabled when a coordinator URL is configured (flag or
         # LMCACHE_COORDINATOR_URL, resolved at config parsing); otherwise
         # None and the blend module matches purely locally.
-        coordinator = BlendCoordinatorClient.maybe_create(coordinator_config.url)
+        #
+        # Fleet matching also needs cache-event reporting on: the blend
+        # index it queries is built from that stream.
+        if coordinator_config.url and not coordinator_config.event_reporting:
+            logger.warning(
+                "Coordinator URL is set but cache-event reporting is off, so "
+                "the coordinator has no cache state to match against: fleet "
+                "CacheBlend matching is disabled and blend will match "
+                "locally only. Pass --coordinator-event-reporting (or set "
+                "LMCACHE_COORDINATOR_EVENT_REPORTING=true) to enable it."
+            )
+        coordinator = BlendCoordinatorClient.maybe_create(
+            coordinator_config.url if coordinator_config.event_reporting else "",
+            timeout=coordinator_config.blend_timeout,
+            match_concurrency=coordinator_config.blend_match_concurrency,
+        )
         blend_v3 = BlendV3Module(
             ctx,
             transfer_module,
             coordinator=coordinator,
             enable_segmented_prefix=mp_config.enable_segmented_prefix,
+            enable_dedup_content=mp_config.enable_dedup_content,
         )
         blend_module = blend_v3
         # blend_v3 mirrors per-instance CB rope state, so the reaper must
@@ -383,9 +401,10 @@ def run_cache_server(
                 )
                 mem_cfg.shm_name = ""
 
-    # blend engine: full per-chunk SWA KV. It also requires the
-    # single-object-group layout; BlendV3Module enforces that at
-    # construction (RuntimeError unless --no-separate-object-groups).
+    # blend engine: full per-chunk SWA KV (blended chunks reuse at arbitrary
+    # positions). full_sw_kv widens attention groups only; recurrent groups
+    # keep their one-block restore window, so a blend server also serves
+    # stock hybrid clients.
     is_blend = mp_config.engine_type == "blend"
 
     ctx = MPCacheServerContext(
@@ -401,6 +420,8 @@ def run_cache_server(
 
     InitializeMPUsageContext(mp_config, storage_manager_config)
     InitializeMPContinuousUsage(event_bus, mp_config.chunk_size)
+    InitializeL2ConnectorUsage(event_bus, ctx.storage_manager)
+    InitializeL1Usage(event_bus, ctx.storage_manager)
 
     zmq_context = zmq.Context.instance()
     server = MessageQueueServer(

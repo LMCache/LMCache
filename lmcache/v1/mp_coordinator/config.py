@@ -1,20 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 """Configuration for the mp coordinator process.
 
-A small, explicit, frozen dataclass with environment-variable loading
-(``LMCACHE_MP_COORDINATOR_*``).
+A small, explicit, frozen dataclass. Values come from ``lmcache coordinator``
+CLI flags (see :mod:`lmcache.cli.commands.coordinator`); unset flags leave the
+defaults below.
 """
 
 # Standard
-from dataclasses import dataclass
-import os
-
-# First Party
-from lmcache.logging import init_logger
-
-logger = init_logger(__name__)
-
-_ENV_PREFIX = "LMCACHE_MP_COORDINATOR_"
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
@@ -43,21 +37,30 @@ class MPCoordinatorConfig:
             the MP servers' ``--hash-algorithm`` (default ``blake3``, which is
             self-contained; other algorithms require vLLM importable in the
             coordinator process).
-        blend_probe_stride: Positions between match probes. With partial-fill
-            reuse any offset is usable, so ``1`` (probe every offset) gives full
-            recall; raise only to trade recall for coordinator CPU.
-        enable_startup_resync: When ``True``, run a one-shot L2 resync
-            on startup to backfill trackers from an MP server's
-            ``GET /cache/objects``.
-        resync_poll_interval: Seconds between registry checks while
-            waiting for the first MP server to register.
-        resync_max_wait: Maximum seconds startup resync waits for an MP
-            server before giving up.
-        resync_page_size: ``page_size`` forwarded to ``GET /cache/objects``
-            during resync.
+        enable_blend_lookup: When ``True``, index stored chunk content so
+            ``POST /directory/blend-lookup`` can serve fleet CacheBlend
+            reuse. Off by default; a fleet without CacheBlend then hashes
+            no content.
+        blend_probe_stride: Positions between match probes; ``1`` gives full
+            recall. Ignored unless ``enable_blend_lookup`` is set.
+        checkpoint_path: File the coordinator's derived state is
+            checkpointed to. Empty disables checkpointing, and the
+            coordinator starts cold after every restart.
+        checkpoint_interval: Seconds between checkpoint writes; ``0``
+            writes only on a clean stop. Ignored without a path.
+        metadata_path: File the operator-set state (L2 pins and
+            per-``cache_salt`` quotas) is stored in. Empty disables it,
+            and that state is lost on restart.
         timeout_keep_alive: Seconds the HTTP server keeps idle connections
             open before closing them. Must be greater than the heartbeat
             interval of MP servers to avoid race-condition disconnects.
+        extra_config: Settings the core config does not name, keyed by
+            whatever reads them. Discovery means a new view or controller
+            is one file; without this, giving it a setting would still
+            mean editing this class, the CLI, and the docs.
+        metrics_enabled: Whether to initialize OpenTelemetry metrics.
+        otlp_endpoint: OTLP gRPC endpoint for metrics push mode. When unset,
+            metrics use Prometheus pull mode on the coordinator HTTP port.
     """
 
     host: str = "0.0.0.0"
@@ -69,12 +72,15 @@ class MPCoordinatorConfig:
     trigger_watermark: float = 1.0
     chunk_size: int = 256
     hash_algorithm: str = "blake3"
+    enable_blend_lookup: bool = False
     blend_probe_stride: int = 1
-    enable_startup_resync: bool = True
-    resync_poll_interval: float = 1.0
-    resync_max_wait: float = 60.0
-    resync_page_size: int = 1000
+    checkpoint_path: str = ""
+    checkpoint_interval: float = 60.0
+    metadata_path: str = ""
+    extra_config: Mapping[str, object] = field(default_factory=dict)
     timeout_keep_alive: int = 10
+    metrics_enabled: bool = True
+    otlp_endpoint: str | None = None
 
     def __post_init__(self) -> None:
         """Validate timing parameters.
@@ -94,78 +100,13 @@ class MPCoordinatorConfig:
             raise ValueError(
                 "trigger_watermark must be between 0.0 (exclusive) and 1.0"
             )
-        if self.resync_poll_interval <= 0:
-            raise ValueError("resync_poll_interval must be positive")
-        if self.resync_max_wait < 0:
-            raise ValueError("resync_max_wait must be non-negative")
-        if self.resync_page_size <= 0:
-            raise ValueError("resync_page_size must be positive")
         if self.chunk_size < 1:
             raise ValueError("chunk_size must be positive")
         if not self.hash_algorithm:
             raise ValueError("hash_algorithm must be a non-empty string")
         if self.blend_probe_stride < 1:
             raise ValueError("blend_probe_stride must be positive")
+        if self.checkpoint_interval < 0:
+            raise ValueError("checkpoint_interval must be non-negative")
         if self.timeout_keep_alive <= 0:
             raise ValueError("timeout_keep_alive must be positive")
-
-    @classmethod
-    def from_env(cls) -> "MPCoordinatorConfig":
-        """Build a config from ``LMCACHE_MP_COORDINATOR_*`` environment variables.
-
-        Unset variables fall back to the dataclass defaults.
-
-        Returns:
-            A validated configuration instance.
-        """
-
-        def _str(name: str, default: str) -> str:
-            return os.getenv(f"{_ENV_PREFIX}{name}", default)
-
-        def _num(name: str, default: float, cast) -> float:
-            raw = os.getenv(f"{_ENV_PREFIX}{name}")
-            if raw is None:
-                return default
-            try:
-                return cast(raw)
-            except ValueError:
-                logger.warning(
-                    "Invalid %s%s=%r; using default %s", _ENV_PREFIX, name, raw, default
-                )
-                return default
-
-        def _bool(name: str, default: bool) -> bool:
-            raw = os.getenv(f"{_ENV_PREFIX}{name}")
-            if raw is None:
-                return default
-            return raw.strip().lower() in ("1", "true", "yes", "on")
-
-        return cls(
-            host=_str("HOST", cls.host),
-            port=int(_num("PORT", cls.port, int)),
-            instance_timeout=_num("INSTANCE_TIMEOUT", cls.instance_timeout, float),
-            health_check_interval=_num(
-                "HEALTH_CHECK_INTERVAL", cls.health_check_interval, float
-            ),
-            eviction_check_interval=_num(
-                "EVICTION_CHECK_INTERVAL", cls.eviction_check_interval, float
-            ),
-            eviction_ratio=_num("EVICTION_RATIO", cls.eviction_ratio, float),
-            trigger_watermark=_num("TRIGGER_WATERMARK", cls.trigger_watermark, float),
-            chunk_size=int(_num("CHUNK_SIZE", cls.chunk_size, int)),
-            hash_algorithm=_str("HASH_ALGORITHM", cls.hash_algorithm),
-            blend_probe_stride=int(
-                _num("BLEND_PROBE_STRIDE", cls.blend_probe_stride, int)
-            ),
-            enable_startup_resync=_bool(
-                "ENABLE_STARTUP_RESYNC", cls.enable_startup_resync
-            ),
-            resync_poll_interval=_num(
-                "RESYNC_POLL_INTERVAL", cls.resync_poll_interval, float
-            ),
-            resync_max_wait=_num("RESYNC_MAX_WAIT", cls.resync_max_wait, float),
-            resync_page_size=int(_num("RESYNC_PAGE_SIZE", cls.resync_page_size, int)),
-            timeout_keep_alive=int(
-                _num("TIMEOUT_KEEP_ALIVE", cls.timeout_keep_alive, int)
-            ),
-        )

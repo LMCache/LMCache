@@ -14,7 +14,7 @@ from sortedcontainers import SortedList
 import torch
 
 # First Party
-from lmcache import torch_dev
+from lmcache import device_ops, torch_dev
 from lmcache import torch_device_type as torch_device_type  # noqa: F401
 from lmcache.integration.vllm.utils import get_size_bytes
 from lmcache.logging import init_logger
@@ -23,7 +23,6 @@ from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.pin_monitor import PinMonitor
 from lmcache.v1.platform import current_device_spec as current_device_spec  # noqa: F401
 from lmcache.v1.system_detection import NUMAMapping
-import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
 
@@ -477,9 +476,9 @@ def _resolve_pinned_alloc_free(
         if use_hugepages:
             raise ValueError("Hugepages are not supported with shared memory (shm)")
         return PinnedAllocFree(
-            alloc_fn=lmc_ops.alloc_shm_pinned_ptr,
+            alloc_fn=device_ops.alloc_shm_pinned_ptr,
             alloc_args=(size, shm_name),
-            free_fn=lmc_ops.free_shm_pinned_ptr,
+            free_fn=device_ops.free_shm_pinned_ptr,
             free_args=(size, shm_name),
         )
     elif numa_mapping:
@@ -494,32 +493,32 @@ def _resolve_pinned_alloc_free(
         numa_id = gpu_to_numa_mapping[current_device_id]
         if use_hugepages:
             return PinnedAllocFree(
-                alloc_fn=lmc_ops.alloc_hugepage_pinned_numa_ptr,
+                alloc_fn=device_ops.alloc_hugepage_pinned_numa_ptr,
                 alloc_args=(size, numa_id),
-                free_fn=lmc_ops.free_hugepage_pinned_numa_ptr,
+                free_fn=device_ops.free_hugepage_pinned_numa_ptr,
                 free_args=(size,),
             )
         else:
             return PinnedAllocFree(
-                alloc_fn=lmc_ops.alloc_pinned_numa_ptr,
+                alloc_fn=device_ops.alloc_pinned_numa_ptr,
                 alloc_args=(size, numa_id),
-                free_fn=lmc_ops.free_pinned_numa_ptr,
+                free_fn=device_ops.free_pinned_numa_ptr,
                 free_args=(size,),
             )
     else:
         flags = 0
         if use_hugepages:
             return PinnedAllocFree(
-                alloc_fn=lmc_ops.alloc_hugepage_pinned_ptr,
+                alloc_fn=device_ops.alloc_hugepage_pinned_ptr,
                 alloc_args=(size, flags),
-                free_fn=lmc_ops.free_hugepage_pinned_ptr,
+                free_fn=device_ops.free_hugepage_pinned_ptr,
                 free_args=(size,),
             )
         else:
             return PinnedAllocFree(
-                alloc_fn=lmc_ops.alloc_pinned_ptr,
+                alloc_fn=device_ops.alloc_pinned_ptr,
                 alloc_args=(size, flags),
-                free_fn=lmc_ops.free_pinned_ptr,
+                free_fn=device_ops.free_pinned_ptr,
                 free_args=(),
             )
 

@@ -19,8 +19,8 @@ if TYPE_CHECKING:
     )
 
 # First Party
+from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
-from lmcache.native_storage_ops import Bitmap
 from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
 from lmcache.v1.distributed.l2_adapters.config import (

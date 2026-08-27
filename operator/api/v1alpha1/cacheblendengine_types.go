@@ -22,8 +22,8 @@ import (
 )
 
 // CacheBlendChunkSize is the only chunk size CacheBlend supports. The blend
-// matcher requires chunk_size == vLLM --block-size (64) * 4 == 256, so the
-// CacheBlendEngine server is locked to this value (see design §4).
+// matcher requires chunk_size == 256 (the default vLLM --block-size of 64 * 4),
+// so the CacheBlendEngine server is locked to this value (see design §4).
 const CacheBlendChunkSize int32 = 256
 
 // Cudagraph mode constants for CacheBlendEngine injection.
@@ -52,6 +52,14 @@ type BlendSpec struct {
 	// +optional
 	// +kubebuilder:default=0.15
 	RecompRatio *float64 `json:"recompRatio,omitempty"`
+
+	// partialBucket pads PARTIAL row counts to a multiple of this bucket size,
+	// surfaced to the connector as kv_connector_extra_config["cb.partial_bucket"].
+	// Unset (the default) omits the key, leaving the padding disabled. Needed
+	// on fp8-MoE models (see DESIGN.md).
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	PartialBucket *int32 `json:"partialBucket,omitempty"`
 }
 
 // InjectionSpec defines the defaults the mutating webhook reads when injecting
@@ -195,6 +203,22 @@ type CacheBlendEngineSpec struct {
 	// priorityClassName is the priority class for the pods.
 	// +optional
 	PriorityClassName string `json:"priorityClassName,omitempty"`
+
+	// hostIPC runs the pod in the host's IPC namespace. Cross-pod CUDA IPC does
+	// not require it on NVIDIA stacks: the operator instead mounts the host's
+	// /dev/shm into the engine pod (hostPath), which is the requirement —
+	// PyTorch's CUDA IPC handles reference a shared-memory ref-counter file in
+	// /dev/shm that both processes must open by name. It therefore defaults to
+	// false. Set it to true only where the hostPath /dev/shm mount is
+	// unavailable (e.g. blocked by an admission policy) or where the GPU stack
+	// still needs a shared IPC namespace; the AMD (ROCm) HIP IPC path is
+	// unverified without hostIPC, so gpuVendor "amd" deployments should set it
+	// to true. When true, the /dev/shm hostPath mount is omitted (the shared
+	// namespace already exposes the host's /dev/shm). The injection webhook
+	// mirrors this setting on opted-in vLLM pods. Default: false.
+	// +optional
+	// +kubebuilder:default=false
+	HostIPC *bool `json:"hostIPC,omitempty"`
 
 	// privileged runs the engine container in privileged mode. On some clusters
 	// this is required for the engine to see all node GPUs (for CUDA IPC) without

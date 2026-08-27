@@ -1,0 +1,28 @@
+# AMD bare-metal unit tests.
+
+env:
+  PATH: "$HOME/.local/bin:$PATH"
+
+steps:
+  - label: "AMD Unit Tests (Serialized)"
+    key: "amd_unit_tests"
+    timeout_in_minutes: 60
+    command: bash .buildkite/k3_tests/amd/run-unit-tests.sh
+
+    artifact_paths:
+      - "durations/test.html"
+      - "coverage-test.xml"
+      - "coverage-test/**/*"
+
+  - label: "vLLM + LMCache E2E (AMD, {{matrix.mode}})"
+    timeout_in_minutes: 90
+    command: bash .buildkite/scripts/amd-vllm-bench.sh {{matrix.mode}}
+    matrix:
+      setup:
+        mode:
+          - "serialized"
+          - "unserialized"
+
+    artifact_paths:
+      - "*.log"
+      - "amd-vllm-bench-results/**/*"
