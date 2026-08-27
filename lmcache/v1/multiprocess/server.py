@@ -282,6 +282,7 @@ def _build_modules(
             transfer_module,
             coordinator=coordinator,
             enable_segmented_prefix=mp_config.enable_segmented_prefix,
+            enable_dedup_content=mp_config.enable_dedup_content,
         )
         blend_module = blend_v3
         # blend_v3 mirrors per-instance CB rope state, so the reaper must
@@ -400,9 +401,10 @@ def run_cache_server(
                 )
                 mem_cfg.shm_name = ""
 
-    # blend engine: full per-chunk SWA KV. It also requires the
-    # single-object-group layout; BlendV3Module enforces that at
-    # construction (RuntimeError unless --no-separate-object-groups).
+    # blend engine: full per-chunk SWA KV (blended chunks reuse at arbitrary
+    # positions). full_sw_kv widens attention groups only; recurrent groups
+    # keep their one-block restore window, so a blend server also serves
+    # stock hybrid clients.
     is_blend = mp_config.engine_type == "blend"
 
     ctx = MPCacheServerContext(

@@ -62,6 +62,11 @@ class MPServerConfig:
     L1-resident (served by the sparse leg as L1 hits, the hole recomputed)
     instead of truncating the prefix at the gap. No effect for other engines."""
 
+    enable_dedup_content: bool = False
+    """engine_type='blend' only: skip fingerprint registration for a chunk whose
+    content is already indexed, so the same text stored behind two prefixes is
+    indexed once. No effect for other engines."""
+
     supported_transfer_mode: Literal["lmcache_driven", "engine_driven", "auto"] = (
         "lmcache_driven"
     )
@@ -398,6 +403,13 @@ def add_mp_server_args(
         "L1-resident instead of truncating at the gap. No effect otherwise.",
     )
     mp_group.add_argument(
+        "--enable-dedup-content",
+        action="store_true",
+        help="--engine-type blend only: skip fingerprint registration for a "
+        "chunk whose content is already indexed, so the same text stored "
+        "behind different prefixes is indexed once. No effect otherwise.",
+    )
+    mp_group.add_argument(
         "--enable",
         type=str,
         nargs="*",
@@ -440,6 +452,7 @@ def parse_args_to_mp_server_config(
         engine_type=args.engine_type,
         separate_object_groups=args.separate_object_groups,
         enable_segmented_prefix=args.enable_segmented_prefix,
+        enable_dedup_content=args.enable_dedup_content,
         supported_transfer_mode=args.supported_transfer_mode,
         runtime_plugin_config=RuntimePluginConfig(
             locations=(args.runtime_plugin_locations or []),

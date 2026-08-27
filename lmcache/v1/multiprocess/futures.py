@@ -120,7 +120,9 @@ class DeviceMessagingFuture(MessagingFuture[T]):
     The `query`, `wait`, and `result` methods pend on both the original
     future and the device event, ordered through the platform event backend.
     The original future should return tuple[bytes, T], where the first
-    element is the serialized device event handle.
+    element is the serialized device event handle. An empty handle means the
+    remote side submitted no device work, so completion of the original future
+    is also terminal completion of this future.
     """
 
     def __init__(
@@ -132,6 +134,7 @@ class DeviceMessagingFuture(MessagingFuture[T]):
         self.raw_future_ = raw_future
         self.event_: Any | None = None
         self.result_: T | None = None
+        self._raw_response_processed = False
         self.device_ = device if device is not None else torch_dev.current_device()
         self._event_backend = get_event_ipc_backend(self.device_)
         self._event_backend.check_event_support(self.device_)
@@ -140,10 +143,17 @@ class DeviceMessagingFuture(MessagingFuture[T]):
         """
         Update the device event and result when the raw future is complete.
         """
-        event_bytes, result = self.raw_future_.result()
-        self.result_ = result
+        if self._raw_response_processed:
+            return
 
-        self.event_ = self._event_backend.import_event(event_bytes, self.device_)
+        event_bytes, result = self.raw_future_.result()
+        event = None
+        if event_bytes:
+            event = self._event_backend.import_event(event_bytes, self.device_)
+
+        self.result_ = result
+        self.event_ = event
+        self._raw_response_processed = True
 
     def wait(self, timeout: Optional[float] = None) -> bool:
         """
@@ -161,8 +171,9 @@ class DeviceMessagingFuture(MessagingFuture[T]):
         Notes:
             This function does not support waiting for a specific time.
         """
-        if self.event_:
-            self._event_backend.synchronize_event(self.event_, self.device_)
+        if self._raw_response_processed:
+            if self.event_ is not None:
+                self._event_backend.synchronize_event(self.event_, self.device_)
             return True
 
         flag = self.raw_future_.wait(timeout)
@@ -171,8 +182,8 @@ class DeviceMessagingFuture(MessagingFuture[T]):
 
         self._on_raw_future_complete()
 
-        assert self.event_ is not None
-        self._event_backend.synchronize_event(self.event_, self.device_)
+        if self.event_ is not None:
+            self._event_backend.synchronize_event(self.event_, self.device_)
 
         return True
 
@@ -208,12 +219,15 @@ class DeviceMessagingFuture(MessagingFuture[T]):
         Returns:
             bool: True if the future is done, False otherwise.
         """
-        if self.event_:
+        if self._raw_response_processed:
+            if self.event_ is None:
+                return True
             return self._event_backend.query_event(self.event_)
 
         if self.raw_future_.query():
             self._on_raw_future_complete()
-            assert self.event_ is not None
+            if self.event_ is None:
+                return True
             return self._event_backend.query_event(self.event_)
 
         return False

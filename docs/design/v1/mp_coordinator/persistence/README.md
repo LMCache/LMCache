@@ -19,6 +19,13 @@ contract below and restores itself from its own section:
 | `FleetEvictionController` | `pins` | Operator intent |
 | `QuotaManager` | `quotas` | Operator intent |
 
+Nothing in `create_app` enumerates them. Controllers are discovered by
+scanning `controllers/`, each advertises what it needs persisted, and each
+component says which artifact it belongs in -- so a new controller with
+durable state is one file, and the wiring follows. The directory and the
+ingest gate are named explicitly because they are durable but are not
+controllers.
+
 The alternative -- restore the directory, then re-deliver its placements
 as synthesized `STORE` batches to rebuild the views -- couples every
 component to a fake event stream and to an ordering: views must be
@@ -134,3 +141,34 @@ The one real consequence is for whoever writes the artifact: the
 directory's capture holds numpy token arrays, which must be written
 outside the msgpack document rather than inlined, or peak write memory
 tracks the whole token corpus instead of the metadata.
+
+## The two artifacts
+
+| | Checkpoint | Metadata document |
+|---|---|---|
+| Holds | `CHECKPOINT` sections | `METADATA` sections |
+| Format | msgpack, 12-byte header | JSON, indented |
+| Written | every `--checkpoint-interval` and on a clean stop | synchronously, by whatever changed a pin or a quota |
+| Losing it costs | hit rate until the fleet re-stores | an operator noticing and re-applying |
+| Enabled by | `--checkpoint-path` | `--metadata-path` |
+
+Both go through `ArtifactStore`: one whole object, replaced atomically,
+at one location. The local backend writes beside the target and renames,
+so a reader sees the previous artifact or the new one and never a torn
+one; an unconfigured path gets a store that discards writes, so
+persistence being off is not a case every caller tests for.
+
+**The codec knows nothing about any section.** That is the payoff from
+the plain-data contract: `write_checkpoint` is one `msgspec.msgpack`
+encode of every section together, and adding a component changes no code
+here. The cost is that a checkpoint is encoded whole before it is
+written -- peak memory runs about 1.3x the file, so roughly 1.6 GB for a
+fleet holding a million chunks, of which 84% is token content. Encoding
+section by section is the escape hatch if that ever bites.
+
+**Every failure is survivable.** A missing, corrupt, or future-version
+artifact logs and leaves the coordinator cold rather than refusing to
+boot; one unreadable section does not cost the others; a failed write is
+logged and retried on the next tick. A checkpoint is an optimization, and
+a coordinator that dies because it could not write one is strictly worse
+than one that keeps serving.

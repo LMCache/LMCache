@@ -74,7 +74,11 @@ def assert_layerwise_gpu_connector(gpu_connector: "GPUConnectorInterface"):
     """
     # Import at runtime to avoid circular dependency
     # First Party
-    from lmcache.v1.gpu_connector import gpu_connectors, xpu_connectors
+    from lmcache.v1.gpu_connector import (
+        gpu_connectors,
+        musa_connectors,
+        xpu_connectors,
+    )
 
     valid_connectors = (
         gpu_connectors.VLLMPagedMemLayerwiseGPUConnector,
@@ -83,6 +87,7 @@ def assert_layerwise_gpu_connector(gpu_connector: "GPUConnectorInterface"):
         xpu_connectors.VLLMPagedMemLayerwiseXPUConnector,
         xpu_connectors.VLLMBufferLayerwiseXPUConnector,
         xpu_connectors.SGLangLayerwiseXPUConnector,
+        musa_connectors.SGLangLayerwiseMUSAConnector,
     )
 
     assert isinstance(gpu_connector, valid_connectors)
@@ -459,12 +464,12 @@ def assert_is_vllm_mla_or_flash_attn_or_flash_infer(
 def get_device(kv_caches: DiscoverableKVCache) -> torch.device:
     """Return the device of the KV cache tensors.
 
-    Descends into any list nesting until a tensor is found; assumes all
-    tensors in *kv_caches* live on the same device (true for every
+    Descends into any list or tuple nesting until a tensor is found; assumes
+    all tensors in *kv_caches* live on the same device (true for every
     current :class:`EngineKVFormat`).
     """
     probe: DiscoverableKVCache = kv_caches
-    while isinstance(probe, list):
+    while isinstance(probe, (list, tuple)):
         probe = probe[0]
     return probe.device
 
@@ -548,6 +553,8 @@ def resolve_block_stride_and_log_layout(
             return kv_caches
         if lmcache_native.is_kv_list(engine_kv_format):
             return kv_caches[0][layer_idx]  # type: ignore[index,return-value]
+        if lmcache_native.is_kv_second_tuple(engine_kv_format):
+            return kv_caches[layer_idx][0]  # type: ignore[index,return-value]
         return kv_caches[layer_idx]  # type: ignore[index,return-value]
 
     rep = _pick_layout_probe_tensor()
