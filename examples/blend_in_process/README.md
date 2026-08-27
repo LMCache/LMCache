@@ -1,5 +1,9 @@
-# Examples vLLM + LMCache w. CacheBlend
+# CacheBlend with vLLM + LMCache (in-process mode)
 LMCache should be able to reduce the generation time of the second and following calls (even though the reused KV cache is not a prefix).
+
+This example runs LMCache in in-process mode, where the cache engine lives inside the vLLM
+worker process. See the [blending documentation](https://docs.lmcache.ai/kv_cache_optimizations/blending.html)
+for the configuration reference.
 
 ## Some ad-hoc changes needed in vLLM
 - In `vllm/vllm/v1/worker/gpu_worker.py`, comment out `ensure_kv_transfer_initialized(vllm_config)` in function `def init_worker_distributed_environment`.
