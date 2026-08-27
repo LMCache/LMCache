@@ -39,13 +39,22 @@ discover_xpu_tests() {
 from pathlib import Path
 
 root = Path(".")
-# Keep this job as an XPU smoke test. Running every non-CUDA Python test in the
-# single XPU Buildkite job exceeds the job timeout before reaching the XPU cases.
+# Temporary allowlist of XPU cases that are known to run in the current
+# vLLM-based XPU image.
+#
+# Future plan:
+#   1. Replace this allowlist with denylist + blocklist and run full test
+#      discovery by default.
+#   2. denylist: CUDA-only tests that should never run in XPU jobs.
+#   3. blocklist: tests that are expected to fail on current XPU runtime and
+#      are not ready yet.
+#   4. As tests become ready, shrink blocklist until XPU jobs run the full set.
 allowlist = {
-  "tests/v1/test_torch_ops.py",
-  "tests/v1/test_xpu_*.py",
-  "tests/v1/multiprocess/test_ipc_memory_reclaim.py",
-  "tests/v1/multiprocess/test_qstore.py",
+  "tests/benchmarks/test_*.py",
+  "tests/test_*.py",
+  "tests/cli/**/test_*.py",
+  "tests/disagg/test_*.py",
+  "tests/v1/**/test_*.py",
 }
 selected: set[str] = set()
 
@@ -75,3 +84,4 @@ fi
 log "running XPU-related tests"
 pytest "${PYTEST_ARGS[@]}" "${XPU_TEST_FILES[@]}"
 log "xpu smoke test finished successfully"
+
