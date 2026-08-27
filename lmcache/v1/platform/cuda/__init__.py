@@ -49,16 +49,30 @@ class CudaDeviceSpec(DeviceSpec):
         """Return the CUDA event IPC backend."""
         backend = self._event_backend_cache
         if backend is None:
-            # Third Party
-            import torch
+            # Standard
+            import os
 
-            # First Party
-            from lmcache.v1.platform.base.event_ipc import DefaultEventIPCBackend
+            choice = os.getenv("LMCACHE_EVENT_IPC_BACKEND", "default").lower()
+            if choice in ("timeline_semaphore", "semaphore"):
+                # First Party
+                from lmcache.v1.platform.cuda.timeline_semaphore_event_ipc import (
+                    TimelineSemaphoreEventIPCBackend,
+                )
 
-            backend = DefaultEventIPCBackend(
-                event_module=torch.cuda,
-                device_type=self.device_type,
-            )
+                backend = TimelineSemaphoreEventIPCBackend()
+            else:
+                # Third Party
+                import torch
+
+                # First Party
+                from lmcache.v1.platform.base.event_ipc import (
+                    DefaultEventIPCBackend,
+                )
+
+                backend = DefaultEventIPCBackend(
+                    event_module=torch.cuda,
+                    device_type=self.device_type,
+                )
             self._event_backend_cache = backend
         return backend
 
