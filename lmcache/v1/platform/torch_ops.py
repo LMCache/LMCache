@@ -561,10 +561,15 @@ def multi_layer_kv_transfer(
     block_size: int = 0,
     head_size: int = 0,
     skip_prefix_n_tokens: int = 0,
+    block_stride_elems: int = 0,
 ):
     """
     Fully vectorized Python fallback for multi_layer_kv_transfer.
     Eliminates ALL token- and KV-level Python loops.
+
+    ``block_stride_elems`` mirrors the cuda_ops signature (physical per-block
+    step for blocks-first cross-layer formats); those formats are not
+    implemented in this fallback.
     """
     if not isinstance(key_value_ptrs, (torch.Tensor, list)):
         raise TypeError(
@@ -581,6 +586,14 @@ def multi_layer_kv_transfer(
             "HND layouts (NL_X_TWO_NB_NH_BS_HS, NL_X_NB_TWO_NH_BS_HS) "
             "are not supported in the non-CUDA fallback. "
             "head_size parameter is required but not implemented in this path."
+        )
+    if (
+        _format_spec(engine_kv_format).is_cross_layer
+        and _format_spec(engine_kv_format).is_fused_packed
+    ):
+        raise NotImplementedError(
+            "Blocks-first cross-layer layouts (NB_NL_NH_BS_CS, "
+            "NB_NL_BS_NH_CS) are not supported in the non-CUDA fallback."
         )
 
     # 1. Filter out invalid slots.
