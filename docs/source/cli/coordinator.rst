@@ -79,6 +79,10 @@ Options
      - Store operator-set state -- L2 pins and per-``cache_salt`` quotas -- in
        this file, written whenever it changes. Unset means that state is lost
        on restart.
+   * - ``--extra-config JSON``
+     - JSON object of settings the core flags do not name, read by whichever
+       view or controller looks for them. Lets a new one ship with its own
+       settings without a flag here.
    * - ``--timeout-keep-alive SECS``
      - Seconds the HTTP server keeps idle connections open before closing
        them. Must be greater than the MP servers' heartbeat interval

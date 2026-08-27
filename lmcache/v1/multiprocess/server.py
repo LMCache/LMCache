@@ -282,6 +282,7 @@ def _build_modules(
             transfer_module,
             coordinator=coordinator,
             enable_segmented_prefix=mp_config.enable_segmented_prefix,
+            enable_dedup_content=mp_config.enable_dedup_content,
         )
         blend_module = blend_v3
         # blend_v3 mirrors per-instance CB rope state, so the reaper must

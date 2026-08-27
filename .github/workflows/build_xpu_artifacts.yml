@@ -1,0 +1,125 @@
+name: Build XPU Artifacts
+
+# Reusable workflow that builds the Intel XPU/SYCL wheel.
+#
+# The wheel is built against a pinned XPU PyTorch and oneAPI compiler image so
+# its C++ ABI matches the target Intel vLLM XPU runtime. auditwheel excludes
+# torch and oneAPI/SYCL runtime libraries, so the wheel binds to the host torch
+# and userspace drivers at runtime -- like the ROCm/CUDA variant flows.
+#
+# Runtime install guidance (manual and scripted validation):
+# - launch runtime containers with --shm-size=4g to avoid /dev/shm starvation.
+# - install LMCache wheel with --no-deps to preserve pinned torch/oneAPI stack.
+#
+# Uploaded as the `release-xpu-artifacts` GHA artifact. The XPU wheel carries a
+# +xpu local version and is published to a dedicated v{tag}-xpu GitHub Release
+# (not PyPI).
+on:
+    workflow_call:
+        outputs:
+            xpu_version:
+                description: Resolved LMCache version baked into the XPU wheel.
+                value: ${{ jobs.build-xpu-artifacts.outputs.xpu_version }}
+
+env:
+    LC_ALL: en_US.UTF-8
+    # Version pins that define the wheel's ABI target, consolidated here as the
+    # single place to update. Keep torch minor and oneAPI toolchain aligned with
+    # the upstream Intel vLLM runtime image used for install/run.
+    XPU_IMAGE: vllm/vllm-openai-xpu:v0.26.0
+    TORCH_XPU_SPEC: torch==2.12.0+xpu
+    TORCH_XPU_INDEX: https://download.pytorch.org/whl/xpu
+
+defaults:
+    run:
+        shell: bash
+
+permissions:
+    contents: read
+
+jobs:
+    build-xpu-artifacts:
+        name: Build XPU wheel (SYCL)
+        runs-on: ubuntu-latest
+        outputs:
+            xpu_version: ${{ steps.version.outputs.xpu_version }}
+        steps:
+            - name: "Harden Runner"
+              uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+              with:
+                disable-sudo-and-containers: false
+                egress-policy: audit
+
+            - name: Checkout code
+              uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+              with:
+                fetch-depth: 0
+
+            # Keep stable vX.Y.Z and rc/a/b pre-release tags; strip variant tags
+            # (v*-xpu, v*-cu129, v*-rocm) that yield invalid PEP 440 versions.
+            - name: Remove non-release tags (keep stable + rc/a/b pre-releases)
+              run: git tag -l | grep -vE '^v[0-9]+\.[0-9]+\.[0-9]+((rc|a|b)[0-9]+)?$' | xargs -r git tag -d
+
+            - name: Login to DockerHub
+              # Skip when creds are absent (fork PRs never get secrets). The
+              # image pull works unauthenticated, but anonymous rate limits can
+              # still bite CI.
+              if: vars.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != ''
+              env:
+                DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+              uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
+              with:
+                username: ${{ vars.DOCKERHUB_USERNAME }}
+                password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+            - name: Free disk space
+              uses: ./.github/actions/free-disk-space
+
+            - name: Resolve xpu wheel version
+              id: version
+              run: |
+                if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+                  BASE="${GITHUB_REF_NAME#v}"
+                else
+                  BASE=$(git tag --list 'v[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 | sed 's/^v//')
+                  BASE="${BASE:-0.0.0.dev0}"
+                fi
+                XPU_VERSION="${BASE}+xpu"
+                echo "XPU_VERSION=${XPU_VERSION}" >> "$GITHUB_ENV"
+                echo "xpu_version=${XPU_VERSION}" >> "$GITHUB_OUTPUT"
+
+            # Build inside oneAPI image. No GPU required for compiling the
+            # extension itself.
+            - name: Build XPU wheel
+              run: |
+                docker run --rm \
+                  -e SETUPTOOLS_SCM_PRETEND_VERSION="${XPU_VERSION}" \
+                  -e TORCH_XPU_SPEC="${TORCH_XPU_SPEC}" \
+                  -e TORCH_XPU_INDEX="${TORCH_XPU_INDEX}" \
+                  -v "${PWD}:/work/LMCache" \
+                  --entrypoint bash "${XPU_IMAGE}" \
+                  /work/LMCache/.github/scripts/build_xpu_wheel.sh
+
+            - name: Smoke-check wheel install in XPU runtime image
+              run: |
+                docker run --rm \
+                  --shm-size=4g \
+                  -v "${PWD}:/work/LMCache" \
+                  --entrypoint bash "${XPU_IMAGE}" \
+                  -lc '
+                    set -euxo pipefail
+                    WHEEL=$(ls /work/LMCache/dist/*.whl | head -n 1)
+                    python3 -m pip install --no-deps "$WHEEL"
+                    python3 -c "import lmcache, torch; print(\"LMCache import OK\"); print(\"Torch:\", torch.__version__)"
+                  '
+
+            - name: Upload XPU release artifacts to GHA
+              uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+              with:
+                name: release-xpu-artifacts
+                path: dist/
+
+# On-device validation requires Intel GPU hardware and is not available on
+# GitHub-hosted runners. Run manual validation by installing this wheel in an
+# Intel XPU runtime image and executing XPU kernel tests. Use --shm-size=4g and
+# install the wheel with --no-deps in that runtime environment.

@@ -24,8 +24,8 @@ from lmcache.v1.mp_coordinator.blend_client import (
     PENDING,
     BlendCoordinatorClient,
 )
-from lmcache.v1.mp_coordinator.key_directory import KeyDirectory
 from lmcache.v1.mp_coordinator.schemas import decode_tokens
+from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
 
 CHUNK = 3
 
