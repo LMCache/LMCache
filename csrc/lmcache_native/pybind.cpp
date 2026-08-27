@@ -43,7 +43,8 @@ PYBIND11_MODULE(lmcache_native, m) {
       .value("NL_X_NB_BS_NH_CS", EngineKVFormat::NL_X_NB_BS_NH_CS)
       .value("NL_X_NB_BSV_BSS", EngineKVFormat::NL_X_NB_BSV_BSS)
       .value("NL_X_TWO_NB_NH_ONE_BS_HS",
-             EngineKVFormat::NL_X_TWO_NB_NH_ONE_BS_HS);
+             EngineKVFormat::NL_X_TWO_NB_NH_ONE_BS_HS)
+      .value("NL_X_TWO_X_NB_BS_NH_HS", EngineKVFormat::NL_X_TWO_X_NB_BS_NH_HS);
   m.attr("GPUKVFormat") = m.attr("EngineKVFormat");
 
   py::enum_<TransferDirection>(m, "TransferDirection")
@@ -93,6 +94,9 @@ PYBIND11_MODULE(lmcache_native, m) {
   m.def("is_mla", &is_mla, py::arg("format"),
         "Return whether the format is an MLA variant (single latent KV "
         "head).");
+  m.def("is_kv_second_tuple", &is_kv_second_tuple, py::arg("format"),
+        "Return whether each per-layer list entry is a (K, V) tuple of "
+        "paged tensors.");
 
   m.def("fold", &lmcache::lmcache_native::fold, py::arg("found"),
         py::arg("num_chunks"), py::arg("num_ranks"), py::arg("group_windows"),

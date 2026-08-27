@@ -12,8 +12,8 @@ from lmcache.v1.mp_coordinator.api import (
 )
 from lmcache.v1.mp_coordinator.ingest.event_broadcaster import CacheEventBroadcaster
 from lmcache.v1.mp_coordinator.ingest.event_gate import EventGate, IngestResult
-from lmcache.v1.mp_coordinator.key_directory import KeyDirectory
 from lmcache.v1.mp_coordinator.persistence.quiesce import QuiesceLock
+from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
 
 
 class _RecordingConsumer:

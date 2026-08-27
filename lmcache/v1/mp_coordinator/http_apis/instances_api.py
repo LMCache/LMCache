@@ -25,6 +25,9 @@ from lmcache.v1.mp_coordinator.schemas import (
     RegisterRequest,
     RegisterResponse,
 )
+from lmcache.v1.mp_coordinator.views.server_config import (
+    ServerConfigRegistry,
+)
 
 logger = init_logger(__name__)
 
@@ -106,7 +109,7 @@ async def deregister_instance(instance_id: str, request: Request) -> Response:
     ctx.event_gate.drop_instance(instance_id)
     # Dropped with the membership, or declarations grow without bound
     # across a churning fleet. Surviving L2 bytes lose their ratio.
-    ctx.server_config.forget(instance_id)
+    ctx.views.get(ServerConfigRegistry).forget(instance_id)
     return Response(status_code=204)
 
 
