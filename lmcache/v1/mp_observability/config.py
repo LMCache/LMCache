@@ -362,7 +362,6 @@ def init_observability(
     from lmcache.v1.mp_observability.event_bus import (
         EventBusConfig,
         init_event_bus,
-        set_observability_metrics_enabled,
     )
 
     # Set up OTel providers BEFORE creating subscribers so that
@@ -401,7 +400,13 @@ def init_observability(
         )
     )
 
-    set_observability_metrics_enabled(obs_config.enabled and obs_config.metrics_enabled)
+    if obs_config.metrics_enabled or obs_config.tracing_enabled:
+        # First Party
+        from lmcache.v1.mp_observability.subscribers.transfer_phase_sampler import (
+            TransferPhaseSampler,
+        )
+
+        bus.register_subscriber(TransferPhaseSampler(bus))
 
     if obs_config.metrics_enabled:
         # First Party
@@ -422,7 +427,7 @@ def init_observability(
             MPTransferCountersSubscriber,
             SMLifecycleSubscriber,
             TimeoutMetricsSubscriber,
-            TransferPhaseSubscriber,
+            TransferPhaseMetricsSubscriber,
         )
 
         sample_rate = obs_config.metrics_sample_rate
@@ -442,7 +447,7 @@ def init_observability(
         bus.register_subscriber(EngineMetricsSubscriber())
         bus.register_subscriber(EventBusSelfMetricsSubscriber(bus))
         bus.register_subscriber(TimeoutMetricsSubscriber())
-        bus.register_subscriber(TransferPhaseSubscriber())
+        bus.register_subscriber(TransferPhaseMetricsSubscriber())
 
     if obs_config.logging_enabled:
         # First Party
@@ -468,13 +473,17 @@ def init_observability(
             BlendTracingSubscriber,
             MPServerTracingSubscriber,
             TimeoutTracingSubscriber,
+            TransferPhaseTracingSubscriber,
             get_span_registry,
         )
 
         registry = get_span_registry()
+        # MPServerTracingSubscriber must register first: the transfer-phase
+        # subscriber reads the store/retrieve span it opens on the same event.
         bus.register_subscriber(MPServerTracingSubscriber(registry))
         bus.register_subscriber(BlendTracingSubscriber(registry))
         bus.register_subscriber(TimeoutTracingSubscriber(registry))
+        bus.register_subscriber(TransferPhaseTracingSubscriber(registry))
 
     # Lookup hash file logging (independent of the logging_enabled flag —
     # it has its own enable gate via output_dir).

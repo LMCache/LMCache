@@ -303,12 +303,14 @@ gather/scatter kernel (paged blocks ↔ GPU staging buffer, occupies SMs)
 and the DMA staging copy (GPU staging buffer ↔ pinned host memory,
 occupies copy engines).  The native plan executor brackets each phase
 with CUDA event pairs when the caller requests it: the transfer module
-passes `phase_timing_enabled=is_metrics_enabled()` per executor call, so
-recording is off with `--disable-observability` / `--disable-metrics`
-(only a metrics subscriber consumes the samples) and costs nothing in
-processes that never initialize observability.  The store/retrieve
-handlers drain finished pairs and publish them as
-`MP_TRANSFER_PHASE_SAMPLES`.
+passes `phase_timing_enabled` per executor call, true only when the bus
+is enabled and something subscribes to `MP_TRANSFER_PHASE_SAMPLES` (this
+metrics subscriber and/or the tracing consumer described in `EVENTS.md` /
+`docs/design/observability/request-event-span.md`), so recording is off
+with `--disable-observability` and costs nothing in processes that never
+initialize observability.  `TransferPhaseSampler`
+pops finished pairs on `MP_STORE_END` / `MP_RETRIEVE_END` and publishes them
+as `MP_TRANSFER_PHASE_SAMPLES`.
 
 Labels: `device_index` (e.g. `"0"`), `direction` (`"h2d"` / `"d2h"`);
 the counters additionally carry `phase` (`"kernel"` / `"staging"`).

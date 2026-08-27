@@ -53,7 +53,7 @@ def _direction_name(direction: Any) -> str:
         return str(direction)
 
 
-class TransferPhaseSubscriber(EventSubscriber):
+class TransferPhaseMetricsSubscriber(EventSubscriber):
     """Records per-phase transfer metrics from executor timing samples."""
 
     def __init__(self) -> None:
@@ -108,15 +108,18 @@ class TransferPhaseSubscriber(EventSubscriber):
             self._record_sample(sample)
 
     def _record_sample(self, sample: Sequence[Any]) -> None:
-        """Record one ``(phase, direction, device_index, ms, nbytes)`` tuple.
+        """Record one sample; see ``EventType.MP_TRANSFER_PHASE_SAMPLES``.
 
-        Malformed or degenerate samples (wrong arity, non-numeric fields,
-        non-positive time/bytes, unknown phase) are dropped silently so a
-        version-skewed native module cannot break the drain thread.
+        Only the first five fields (phase, direction, device_index,
+        elapsed_ms, nbytes) feed metrics; the session and wall-clock fields
+        are for tracing. Malformed or degenerate samples (wrong arity,
+        non-numeric fields, non-positive time/bytes, unknown phase) are
+        dropped silently so a version-skewed native module cannot break the
+        drain thread.
         """
-        if len(sample) != 5:
+        if len(sample) != 8:
             return
-        phase, direction, device_index, elapsed_ms, nbytes = sample
+        phase, direction, device_index, elapsed_ms, nbytes = sample[:5]
         if not isinstance(elapsed_ms, (int, float)) or not isinstance(
             nbytes, (int, float)
         ):

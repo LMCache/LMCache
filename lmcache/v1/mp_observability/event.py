@@ -70,9 +70,10 @@ class EventType(Enum):
     # MP Server request-level events (start/end pairs)
     MP_STORE_START = "mp.store.start"
     MP_STORE_END = "mp.store.end"
-    # Batched gather/DMA phase timings drained from the native plan executor.
-    # Metadata: ``samples`` (list[tuple]), one (phase, direction,
-    # device_index, elapsed_ms, nbytes) tuple per finished timed section;
+    # Gather/DMA phase timings popped from the native plan executor by
+    # TransferPhaseSampler on MP_*_END. Metadata: ``samples`` (list[tuple]),
+    # one (phase, direction, device_index, elapsed_ms, nbytes, session_id,
+    # start_time_s, end_time_s) tuple per finished timed section;
     # phase/direction are TransferPhase / TransferDirection values.
     MP_TRANSFER_PHASE_SAMPLES = "mp.transfer.phase_samples"
     MP_RETRIEVE_START = "mp.retrieve.start"

@@ -2,6 +2,8 @@
 
 #include "phase_timing_recorder.cuh"
 
+#include "event_recorder.h"
+
 #include <exception>
 
 namespace {
@@ -18,17 +20,92 @@ void destroy_phase_timing_events(cudaEvent_t start, cudaEvent_t end) {
   (void)cudaGetLastError();
 }
 
+void destroy_anchor(PhaseTimingContext& ctx) {
+  destroy_phase_timing_events(ctx.anchor, nullptr);
+  ctx.anchor = nullptr;
+}
+
+// Drop one record's reference to its context; the last reference destroys
+// the anchor event.
+void release_context(PhaseTimingRecord& record) {
+  if (record.ctx->pending_records.fetch_sub(1) == 1) {
+    destroy_anchor(*record.ctx);
+  }
+  record.ctx.reset();
+}
+
+// Host callback enqueued right after the anchor event: stamps the wall
+// clock. Owns and frees the shared_ptr copy it was handed.
+void
+#ifndef USE_ROCM
+    CUDART_CB
+#endif
+    stamp_anchor_wall_time(void* data) {
+  auto* holder = static_cast<std::shared_ptr<PhaseTimingContext>*>(data);
+  (*holder)->anchor_wall_time_s.store(lmcache_wall_clock_time());
+  delete holder;
+}
+
+// Record the anchor event and its wall-clock stamp on the stream. On
+// failure the context keeps a null anchor and its samples carry no wall
+// clock.
+void open_anchor(cudaStream_t stream,
+                 const std::shared_ptr<PhaseTimingContext>& ctx) {
+  if (cudaEventCreate(&ctx->anchor) != cudaSuccess ||
+      cudaEventRecord(ctx->anchor, stream) != cudaSuccess) {
+    destroy_anchor(*ctx);
+    return;
+  }
+  auto* holder = new std::shared_ptr<PhaseTimingContext>(ctx);
+  if (LMCACHE_LAUNCH_HOST_FUNC(stream, stamp_anchor_wall_time, holder) !=
+      cudaSuccess) {
+    delete holder;
+    destroy_anchor(*ctx);
+  }
+}
+
+// Build the sample of a completed record. False if the elapsed time could
+// not be read (the record is then dropped).
+bool measure(const PhaseTimingRecord& record, PhaseTimingSample& sample) {
+  float elapsed_ms = 0.0f;
+  if (cudaEventElapsedTime(&elapsed_ms, record.start, record.end) !=
+      cudaSuccess) {
+    return false;
+  }
+  const PhaseTimingContext& ctx = *record.ctx;
+  sample.phase = static_cast<int>(record.phase);
+  sample.direction = ctx.direction;
+  sample.device_index = ctx.device_index;
+  sample.elapsed_ms = elapsed_ms;
+  sample.nbytes = record.nbytes;
+  sample.session_id = ctx.session_id;
+  sample.start_time_s = 0.0;
+  sample.end_time_s = 0.0;
+  float offset_ms = 0.0f;
+  if (ctx.anchor != nullptr &&
+      cudaEventElapsedTime(&offset_ms, ctx.anchor, record.start) ==
+          cudaSuccess) {
+    sample.start_time_s = ctx.anchor_wall_time_s.load() + offset_ms / 1e3;
+    sample.end_time_s = sample.start_time_s + elapsed_ms / 1e3;
+  }
+  return true;
+}
+
 }  // namespace
 
 PhaseTimer::PhaseTimer(bool enabled, cudaStream_t stream, int direction,
-                       int device_index, size_t max_sections)
-    : enabled_(enabled),
-      stream_(stream),
-      direction_(direction),
-      device_index_(device_index) {
-  if (enabled_) {
-    records_.reserve(max_sections);
+                       int device_index, size_t max_sections,
+                       std::string session_id)
+    : enabled_(enabled), stream_(stream) {
+  if (!enabled_) {
+    return;
   }
+  records_.reserve(max_sections);
+  ctx_ = std::make_shared<PhaseTimingContext>();
+  ctx_->session_id = std::move(session_id);
+  ctx_->direction = direction;
+  ctx_->device_index = device_index;
+  open_anchor(stream, ctx_);
 }
 
 PhaseTimer::~PhaseTimer() {
@@ -40,12 +117,23 @@ PhaseTimer::~PhaseTimer() {
   for (auto& record : records_) {
     destroy_phase_timing_events(record.start, record.end);
   }
+  if (ctx_) {
+    destroy_anchor(*ctx_);
+  }
 }
 
 void PhaseTimer::commit() {
   // Set the flag first: if push_batch throws, the destructor must not
   // destroy events whose copies may already sit in the recorder.
   committed_ = true;
+  if (!enabled_) {
+    return;
+  }
+  if (records_.empty()) {
+    destroy_anchor(*ctx_);
+    return;
+  }
+  ctx_->pending_records.store(static_cast<int>(records_.size()));
   PhaseTimingRecorder::instance().push_batch(records_);
 }
 
@@ -110,8 +198,7 @@ PhaseTimer::Section::~Section() {
     return;
   }
 
-  timer_->add({start_, end_, static_cast<int>(phase_), timer_->direction_,
-               timer_->device_index_, nbytes_});
+  timer_->add({phase_, nbytes_, start_, end_, timer_->ctx_});
 }
 
 PhaseTimingRecorder& PhaseTimingRecorder::instance() {
@@ -131,8 +218,7 @@ void PhaseTimingRecorder::push_batch(
   }
 }
 
-std::vector<std::tuple<int, int, int, double, int64_t>>
-PhaseTimingRecorder::pop_completed() {
+std::vector<PhaseTimingSample> PhaseTimingRecorder::pop_completed() {
   // Take the whole queue, then run every CUDA call unlocked so executor
   // pushes never wait.
   std::deque<PhaseTimingRecord> pending;
@@ -141,25 +227,26 @@ PhaseTimingRecorder::pop_completed() {
     pending.swap(pending_);
   }
 
-  std::vector<std::tuple<int, int, int, double, int64_t>> samples;
+  std::vector<PhaseTimingSample> samples;
   std::deque<PhaseTimingRecord> not_ready;
   for (auto& record : pending) {
+    // Ready once the end event has completed and, with an anchor, its
+    // wall-clock stamp has landed.
     const cudaError_t status = cudaEventQuery(record.end);
-    if (status == cudaErrorNotReady) {
+    const bool anchor_pending = record.ctx->anchor != nullptr &&
+                                record.ctx->anchor_wall_time_s.load() == 0.0;
+    if (status == cudaErrorNotReady ||
+        (status == cudaSuccess && anchor_pending)) {
       (void)cudaGetLastError();  // clear cudaErrorNotReady
       not_ready.push_back(record);
       continue;
     }
-    if (status == cudaSuccess) {
-      float elapsed_ms = 0.0f;
-      if (cudaEventElapsedTime(&elapsed_ms, record.start, record.end) ==
-          cudaSuccess) {
-        samples.emplace_back(record.phase, record.direction,
-                             record.device_index,
-                             static_cast<double>(elapsed_ms), record.nbytes);
-      }
+    PhaseTimingSample sample;
+    if (status == cudaSuccess && measure(record, sample)) {
+      samples.push_back(std::move(sample));
     }
     destroy_phase_timing_events(record.start, record.end);
+    release_context(record);
   }
 
   // Not-yet-completed records go back at the front: they predate anything
@@ -176,11 +263,11 @@ void PhaseTimingRecorder::evict_until_below_cap(size_t headroom) {
   while (pending_.size() + headroom > kMaxPending) {
     PhaseTimingRecord& oldest = pending_.front();
     destroy_phase_timing_events(oldest.start, oldest.end);
+    release_context(oldest);
     pending_.pop_front();
   }
 }
 
-std::vector<std::tuple<int, int, int, double, int64_t>>
-pop_completed_phase_timings() {
+std::vector<PhaseTimingSample> pop_completed_phase_timings() {
   return PhaseTimingRecorder::instance().pop_completed();
 }

@@ -372,6 +372,93 @@ Prometheus (e.g.
      - Histogram
      - CPU→GPU (L1→L0) load throughput in GB/s per request.
 
+.. note::
+
+   On the store path the window opens before ``reserve_write`` runs on the
+   CPU, so the store histogram also contains that CPU share. It was measured
+   at well under 1% of the window, so no separate metric or correction is
+   provided.
+
+.. _mp-obs-transfer-phase:
+
+Transfer Phase Metrics (gather kernel vs DMA)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The L0↔L1 histograms above give one number per request. A GPU↔CPU
+transfer, however, is two serialized GPU phases per batch step:
+
+- **kernel** — the gather/scatter kernel moving paged KV blocks ↔ GPU
+  staging buffers (occupies SMs, bounded by GPU memory bandwidth);
+- **staging** — the DMA copies moving GPU staging buffers ↔ pinned host
+  memory (occupies copy engines, bounded by PCIe).
+
+The native plan executor brackets each phase of each batch step with a
+pair of CUDA events on the transfer stream (no GPU-side synchronization);
+when a transfer ends the completed pairs are popped onto the event bus and
+``TransferPhaseMetricsSubscriber`` turns them into the metrics below. Recording
+is on whenever metrics or tracing consume the samples and costs nothing
+otherwise (``--disable-metrics`` without ``--enable-tracing``, or
+``--disable-observability``).
+
+All four metrics carry ``device_index`` (e.g. ``"0"``) and ``direction``
+(``"d2h"`` for stores, ``"h2d"`` for retrieves); the two counters
+additionally carry ``phase`` (``"kernel"`` / ``"staging"``).
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 15 45
+
+   * - Metric
+     - Type
+     - Description
+   * - ``lmcache_mp.transfer_kernel_throughput``
+     - Histogram
+     - Gather/scatter kernel throughput in GB/s, one sample per batch step.
+   * - ``lmcache_mp.transfer_staging_throughput``
+     - Histogram
+     - DMA staging throughput in GB/s, one sample per batch step.
+   * - ``lmcache_mp.transfer_phase_bytes``
+     - Counter (attr: ``phase``)
+     - Cumulative bytes moved per phase. Kernel-phase bytes are derived
+       from the launches, so blocks skipped via ``skip_prefix_n_blocks``
+       (sliding windows, partial prefix hits) are not counted as moved;
+       the staging phase counts the whole staged payload. The difference
+       between the two is the payload that crossed PCIe without being
+       consumed by the kernel.
+   * - ``lmcache_mp.transfer_phase_busy_time``
+     - Counter (attr: ``phase``)
+     - Cumulative stream-clocked seconds each phase was busy.
+
+**What it answers:** which phase does a slow transfer path spend its time
+in? A low kernel number with a healthy staging number points at launch
+geometry / batching (SM side); the reverse points at PCIe or pinned-memory
+issues (DMA side). The histograms show the per-step distribution; use the
+counters for aggregate answers, because a mean over per-step histogram
+samples is not byte-weighted:
+
+.. code-block:: promql
+
+    # Byte-weighted aggregate throughput per phase (bytes/s):
+    rate(lmcache_mp_transfer_phase_bytes_total[1m])
+    / rate(lmcache_mp_transfer_phase_busy_time_seconds_total[1m])
+
+    # Time share of each phase (busy seconds per wall-clock second).
+    # Both shares summing to well below 1 while each phase's throughput
+    # looks healthy means the time goes to per-step serialization, not to
+    # a slow phase:
+    rate(lmcache_mp_transfer_phase_busy_time_seconds_total[1m])
+
+    # Per-step p95 of the kernel phase:
+    histogram_quantile(0.95,
+      sum by (le) (rate(lmcache_mp_transfer_kernel_throughput_GB_per_second_bucket[1m])))
+
+.. note::
+
+   A phase's elapsed time is stream-clocked from section start to end, so
+   it includes any stream idle while the CPU enqueues that section's work.
+   Samples are popped when the transfer's ``MP_*_END`` event is dispatched,
+   i.e. shortly after the copy has actually finished on the GPU.
+
 MP Transfer Counters (in-flight GPU copies)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

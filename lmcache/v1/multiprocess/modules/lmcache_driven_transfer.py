@@ -33,8 +33,8 @@ from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocat
 from lmcache.v1.memory_management import GDSMemoryObject, MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import (
-    EventBus,
-    is_observability_metrics_enabled,
+    get_event_bus,
+    is_observability_enabled,
 )
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
@@ -286,30 +286,6 @@ def _recalculate_blocks_to_skip(
     return full_windows_to_skip * blocks_per_window + max(0, tail_blocks_to_skip)
 
 
-def publish_completed_phase_timings(event_bus: EventBus) -> None:
-    """Publish the gather/DMA phase timings that have finished on the GPU.
-
-    Samples complete asynchronously and belong to transfers enqueued
-    earlier, so publication is decoupled from any single request. No-op
-    when the native op is unavailable or nothing has finished.
-
-    Args:
-        event_bus: Bus that receives the ``MP_TRANSFER_PHASE_SAMPLES``
-            event; see the ``EventType`` docstring for the metadata layout.
-    """
-    if not _HAS_TRANSFER_PHASE_TIMING:
-        return
-    samples = device_ops.pop_completed_phase_timings()
-    if not samples:
-        return
-    event_bus.publish(
-        Event(
-            event_type=EventType.MP_TRANSFER_PHASE_SAMPLES,
-            metadata={"samples": samples},
-        )
-    )
-
-
 def _run_object_group_transfer_plan(
     cache_context: BaseCacheContext,
     block_ids_gpu: list[torch.Tensor],
@@ -318,6 +294,7 @@ def _run_object_group_transfer_plan(
     batch_size: int,
     skip_first_n_tokens: int,
     direction: "lmcache_native.TransferDirection",
+    session_id: str = "",
 ) -> None:
     """Plan and execute one object group's transfer in a single native call.
 
@@ -340,6 +317,8 @@ def _run_object_group_transfer_plan(
         batch_size: Number of memory objects per batched copy.
         skip_first_n_tokens: Tokens to skip writing at the start of the range.
         direction: H2D (retrieve) or D2H (store).
+        session_id: Request the transfer serves; attached to the phase-timing
+            samples so tracing can nest them under the request span.
 
     Raises:
         ValueError: If a None entry is found in memory_objs when direction is
@@ -472,10 +451,15 @@ def _run_object_group_transfer_plan(
     if not batch_steps:
         return
 
-    # An older compiled extension has neither the keyword nor anything to
-    # consume the samples, so fall back to the untimed legacy signature.
+    # Time the phases only when a subscriber consumes the samples. An older
+    # compiled extension has neither the keywords nor anything to consume
+    # them, so fall back to the untimed legacy signature.
     timing_kwargs = (
-        {"phase_timing_enabled": is_observability_metrics_enabled()}
+        {
+            "phase_timing_enabled": is_observability_enabled()
+            and get_event_bus().has_subscribers(EventType.MP_TRANSFER_PHASE_SAMPLES),
+            "session_id": session_id,
+        }
         if _HAS_TRANSFER_PHASE_TIMING
         else {}
     )
@@ -497,6 +481,7 @@ def transfer_kv_per_object_group(
     batch_size: int,
     skip_first_n_tokens: int,
     direction: "lmcache_native.TransferDirection",
+    session_id: str = "",
 ) -> None:
     """Helper function to transfer memory objects of a single object group
     to/from GPU, with batching support.
@@ -517,6 +502,8 @@ def transfer_kv_per_object_group(
             the retrieve range. This avoids overwriting APC-shared GPU blocks that
             may be read concurrently by other requests.
         direction: The transfer direction, H2D (retrieve) or D2H (store).
+        session_id: Request the transfer serves; attached to the phase-timing
+            samples so tracing can nest them under the request span.
 
     Raises:
         ValueError: If it founds None entry in memory_objs when direction is H2D.
@@ -535,6 +522,7 @@ def transfer_kv_per_object_group(
             batch_size,
             skip_first_n_tokens,
             direction,
+            session_id,
         )
         return
 
@@ -1269,6 +1257,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                         batch_size=1,
                         skip_first_n_tokens=0,
                         direction=lmcache_native.TransferDirection.D2H,
+                        session_id=key.request_id,
                     )
 
                 store_succeeded = True
@@ -1304,7 +1293,6 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                     ),
                 )
 
-        publish_completed_phase_timings(self._ctx.event_bus)
         ed = time.perf_counter()
         if stored_count:
             logger.info(
@@ -1509,6 +1497,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                             batch_size=cache_context.max_batch_size,
                             skip_first_n_tokens=skip_first_n_tokens,
                             direction=lmcache_native.TransferDirection.H2D,
+                            session_id=key.request_id,
                         )
                         # Extend only after the copy is enqueued: on exception,
                         # read_prefetched_results releases this group's locks
@@ -1546,7 +1535,6 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                         },
                     ),
                 )
-        publish_completed_phase_timings(self._ctx.event_bus)
         if retrieve_succeeded:
             tokens_retrieved = num_chunks * self._ctx.chunk_size
             ed = time.perf_counter()

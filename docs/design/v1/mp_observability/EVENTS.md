@@ -186,7 +186,7 @@ to correlate START/END pairs.
 |---|---|---|
 | `MP_STORE_START` | `device`, `engine_id`, `model_name` | `str`, `int`, `str` |
 | `MP_STORE_END` | `device`, `stored_count`, `engine_id`, `model_name`, `total_bytes`, `num_tokens` | `str`, `int`, `int`, `str`, `int`, `int` |
-| `MP_TRANSFER_PHASE_SAMPLES` | `samples` | `list[tuple[int, int, int, float, int]]` — `(phase, direction, device_index, elapsed_ms, nbytes)` per finished executor section; `phase` is a `TransferPhase` value (0 = kernel, 1 = staging), `direction` a `TransferDirection` value |
+| `MP_TRANSFER_PHASE_SAMPLES` | `samples` | `list[tuple[int, int, int, float, int, str, float, float]]` — `(phase, direction, device_index, elapsed_ms, nbytes, session_id, start_time_s, end_time_s)` per finished executor section; `phase` is a `TransferPhase` value (0 = kernel, 1 = staging), `direction` a `TransferDirection` value, `session_id` the request the transfer served, `start_time_s`/`end_time_s` its bounds on the EventRecorder wall clock (empty / `0.0` only if the call's anchor event could not be recorded) |
 | `MP_RETRIEVE_START` | `device`, `engine_id`, `model_name` | `str`, `int`, `str` |
 | `MP_RETRIEVE_END` | `device`, `retrieved_count`, `engine_id`, `model_name`, `cache_salt`, `total_bytes`, `num_tokens` | `str`, `int`, `int`, `str`, `str`, `int`, `int` |
 | `MP_LOOKUP_PREFETCH_START` | *(none)* | — |
@@ -197,14 +197,20 @@ to correlate START/END pairs.
 
 ### `MP_TRANSFER_PHASE_SAMPLES`
 
-Published CPU-synchronously from the store/retrieve handlers after popping
-finished samples via `device_ops.pop_completed_phase_timings()`.  Samples
-complete asynchronously, so a batch belongs to transfers enqueued earlier
-and carries its own `device_index`/`direction` labels instead of
-correlating with any request.
-Because popping piggybacks on request handling, the samples of the last
-transfers before an idle period stay queued (bounded) until the next
-store/retrieve arrives.
+Published by `TransferPhaseSampler` while dispatching `MP_STORE_END` /
+`MP_RETRIEVE_END`: those are stream-published, so every section of the
+ending transfer has completed and `device_ops.pop_completed_phase_timings()`
+returns its full sample set (plus any other transfer's sections that have
+finished meanwhile). Each sample carries its own `session_id`,
+`device_index` and `direction`.
+
+Timing is on when the bus is enabled and this event has a subscriber
+(`EventBus.has_subscribers`), i.e. with metrics or tracing on. Besides the per-section event pairs the
+executor records one anchor event per call plus a host callback stamping the
+EventRecorder wall clock, which gives each sample its `session_id` and
+`start_time_s`/`end_time_s`. `TransferPhaseTracingSubscriber` folds them into
+per-transfer `transfer.kernel` / `transfer.staging` child spans (see
+`docs/design/observability/request-event-span.md`, Example 3).
 
 ### `num_tokens` on `MP_STORE_END` / `MP_RETRIEVE_END`
 

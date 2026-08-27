@@ -5,16 +5,19 @@
 // times each batch step of a transfer plan in two phases:
 //   1. gather/scatter kernel: paged KV blocks <-> GPU staging buffers
 //   2. DMA copies: GPU staging buffers <-> pinned host memory
-// The metrics layer derives per-phase throughput from the drained samples.
+// The metrics layer derives per-phase throughput from the popped samples;
+// the tracing layer uses their wall-clock bounds and session id.
 
 #pragma once
 
 #include <cuda_runtime.h>
 
+#include <atomic>
 #include <cstdint>
 #include <deque>
+#include <memory>
 #include <mutex>
-#include <tuple>
+#include <string>
 #include <vector>
 
 // Timed sections of execute_object_group_transfer.
@@ -23,14 +26,39 @@ enum class TransferPhase : int {
   STAGING = 1,  // host<->device DMA staging copies
 };
 
-// One timed section.
+// State shared by every section of one executor call, including the
+// GPU-to-wall-clock reference: an event recorded on the stream before the
+// first section, and the EventRecorder wall clock at which the GPU reached
+// it (stamped by a host callback on the same stream).
+struct PhaseTimingContext {
+  std::string session_id;        // request the transfer served
+  int direction;                 // TransferDirection value
+  int device_index;              // CUDA device the transfer ran on
+  cudaEvent_t anchor = nullptr;  // null if it could not be recorded
+  std::atomic<double> anchor_wall_time_s{0.0};  // 0 => not stamped yet
+  std::atomic<int> pending_records{0};  // records still referencing anchor
+};
+
+// One timed section in flight.
 struct PhaseTimingRecord {
+  TransferPhase phase;
+  int64_t nbytes;     // bytes this section moved
   cudaEvent_t start;  // recorded on the transfer stream at section start
   cudaEvent_t end;    // recorded at section end; complete => sample ready
-  int phase;          // TransferPhase value
-  int direction;      // TransferDirection value
-  int device_index;   // CUDA device the section ran on
-  int64_t nbytes;     // bytes this section moved
+  std::shared_ptr<PhaseTimingContext> ctx;
+};
+
+// One popped sample. The wall-clock bounds are 0.0 if the call's anchor
+// could not be recorded.
+struct PhaseTimingSample {
+  int phase;               // TransferPhase value
+  int direction;           // TransferDirection value
+  int device_index;        // CUDA device the section ran on
+  double elapsed_ms;       // GPU time between the section's events
+  int64_t nbytes;          // bytes this section moved
+  std::string session_id;  // request the transfer served
+  double start_time_s;     // EventRecorder wall clock at section start
+  double end_time_s;       // ... and at section end
 };
 
 // Collects the timed sections of one executor call and hands them to the
@@ -64,7 +92,7 @@ class PhaseTimer {
   };
 
   PhaseTimer(bool enabled, cudaStream_t stream, int direction, int device_index,
-             size_t max_sections);
+             size_t max_sections, std::string session_id);
   ~PhaseTimer();
   PhaseTimer(const PhaseTimer&) = delete;
   PhaseTimer& operator=(const PhaseTimer&) = delete;
@@ -84,9 +112,8 @@ class PhaseTimer {
 
   bool enabled_;
   cudaStream_t stream_;  // stream the sections record their events on
-  int direction_;        // TransferDirection value
-  int device_index_;
-  std::vector<PhaseTimingRecord> records_;  // completed sections
+  std::shared_ptr<PhaseTimingContext> ctx_;  // shared by this call's records
+  std::vector<PhaseTimingRecord> records_;   // completed sections
   bool committed_ = false;
 };
 
@@ -101,9 +128,8 @@ class PhaseTimingRecorder {
   void push_batch(const std::vector<PhaseTimingRecord>& records);
 
   // Measure and remove the records whose end event has completed;
-  // unfinished records stay queued. See pop_completed_phase_timings()
-  // for the tuple layout.
-  std::vector<std::tuple<int, int, int, double, int64_t>> pop_completed();
+  // unfinished records stay queued.
+  std::vector<PhaseTimingSample> pop_completed();
 
  private:
   PhaseTimingRecorder() = default;
@@ -126,11 +152,8 @@ class PhaseTimingRecorder {
  * Returns the finished CUDA event pairs recorded by
  * execute_object_group_transfer; unfinished pairs stay queued.
  *
- * @return One tuple per finished section:
- *         (phase, direction, device_index, elapsed_ms, nbytes), with phase a
- *         TransferPhase value, direction a TransferDirection value, and
- *         nbytes the bytes that section moved (staged payload for
- *         staging sections; skip-aware launch bytes for kernel sections).
+ * @return One PhaseTimingSample per finished section. nbytes is the bytes
+ *         that section moved (staged payload for staging sections;
+ *         skip-aware launch bytes for kernel sections).
  */
-std::vector<std::tuple<int, int, int, double, int64_t>>
-pop_completed_phase_timings();
+std::vector<PhaseTimingSample> pop_completed_phase_timings();

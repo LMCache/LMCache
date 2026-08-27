@@ -348,3 +348,39 @@ The `"retrieve"` entry is live in the registry from `MP_RETRIEVE_START` to
 ```
 
 This produces a three-level trace: `request → mp.retrieve → l2.disk_load`.
+
+---
+
+### Example 3 — attaching work that finishes after the parent ended
+
+GPU-clocked samples (`MP_TRANSFER_PHASE_SAMPLES`) are popped when a transfer's
+`MP_*_END` is dispatched -- after `mp.store` / `mp.retrieve` has ended and been
+popped from the registry, and possibly across several pops when other
+transfers end in between. `TransferPhaseTracingSubscriber`
+therefore captures the parent context on `MP_*_START` and keeps it (bounded by
+a TTL) and accumulates the transfer's samples. `MP_*_END` is published on the
+transfer stream, so any samples event queued after it was popped after the
+last section finished: at the first samples event after END the subscriber
+starts one child per phase with
+explicit `start_time` / `end_time` against the retained context. OTel accepts children of an ended parent as long as the
+timestamps are supplied. The children are stacked back to back (each as long
+as its phase's busy time) rather than placed at their real, interleaved
+intervals, so the bars read as a breakdown.
+
+```python
+    def _on_transfer_start(self, event: Event) -> None:
+        ctx = self._registry.get_context(event.session_id, "store")
+        self._parents[(event.session_id, "store")] = (ctx, time.monotonic())
+
+    def _flush(self) -> None:
+        cursor_s = transfer_first_start_s
+        for phase, totals in phases_in_execution_order:
+            span = _tracer.start_span(name_of(phase), context=parent_ctx,
+                                      start_time=int(cursor_s * 1e9))
+            span.set_attribute("busy_seconds", totals.busy_s)
+            cursor_s += totals.busy_s
+            span.end(end_time=int(cursor_s * 1e9))
+```
+
+This produces `request → mp.store → transfer.kernel / transfer.staging`
+(one child per phase, stacked, each as long as that phase's busy time).

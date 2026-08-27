@@ -524,7 +524,8 @@ void execute_object_group_transfer(
     TransferDirection direction, const torch::Device& device,
     size_t host_buffer_alignment,
     const std::vector<KernelGroupSpec>& kernel_group_specs,
-    const std::vector<BatchStep>& batch_steps, bool phase_timing_enabled) {
+    const std::vector<BatchStep>& batch_steps, bool phase_timing_enabled,
+    const std::string& session_id) {
   // Set the device guard once for the whole plan so every staging copy and
   // kernel launch below is enqueued on this device's current stream, in order.
   const at::cuda::OptionalCUDAGuard device_guard(device);
@@ -542,7 +543,7 @@ void execute_object_group_transfer(
       phase_timing_enabled,
       static_cast<cudaStream_t>(at::cuda::getCurrentCUDAStream()),
       static_cast<int>(direction), static_cast<int>(device.index()),
-      batch_steps.size() * 2);
+      batch_steps.size() * 2, session_id);
 
   for (const auto& step : batch_steps) {
     const int64_t step_bytes = calculate_staging_section_bytes(step);

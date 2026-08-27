@@ -361,7 +361,6 @@ class EventBus:
 
 _global_bus = EventBus(EventBusConfig(enabled=False))
 _observability_enabled: bool = False
-_observability_metrics_enabled: bool = False
 
 
 def is_observability_enabled() -> bool:
@@ -371,32 +370,6 @@ def is_observability_enabled() -> bool:
     scheduling when observability is disabled.
     """
     return _observability_enabled
-
-
-def is_observability_metrics_enabled() -> bool:
-    """True when the observability metrics pipeline is consuming events.
-
-    Set by ``init_observability`` when both master switches are on, i.e.
-    OTel metrics subscribers are registered on the bus. Use it to guard
-    instrumentation that only exists to feed those subscribers (e.g.
-    requesting phase timing from the native plan executor) so it costs
-    nothing when nobody consumes the samples.
-    """
-    return _observability_metrics_enabled
-
-
-def set_observability_metrics_enabled(enabled: bool) -> None:
-    """Record whether the observability metrics pipeline is active.
-
-    Called by ``init_observability`` once the observability and metrics
-    master switches are resolved; not intended for use elsewhere.
-
-    Args:
-        enabled: True when OTel metrics subscribers are registered on
-            the bus.
-    """
-    global _observability_metrics_enabled
-    _observability_metrics_enabled = enabled
 
 
 def get_event_bus() -> EventBus:
