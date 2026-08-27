@@ -587,10 +587,7 @@ def multi_layer_kv_transfer(
             "are not supported in the non-CUDA fallback. "
             "head_size parameter is required but not implemented in this path."
         )
-    if (
-        _format_spec(engine_kv_format).is_cross_layer
-        and _format_spec(engine_kv_format).is_fused_packed
-    ):
+    if _is_blocks_first_format(engine_kv_format):
         raise NotImplementedError(
             "Blocks-first cross-layer layouts (NB_NL_NH_BS_CS, "
             "NB_NL_BS_NH_CS) are not supported in the non-CUDA fallback."
@@ -776,6 +773,12 @@ def multi_layer_kv_transfer_unilateral(
 def _is_hnd_format(engine_kv_format: EngineKVFormat) -> bool:
     """Return True when a KV format stores heads before block tokens (HND)."""
     return _format_spec(engine_kv_format).is_hnd
+
+
+def _is_blocks_first_format(engine_kv_format: EngineKVFormat) -> bool:
+    """Return True for blocks-first cross-layer formats with fused K/V."""
+    spec = _format_spec(engine_kv_format)
+    return spec.is_cross_layer and spec.is_fused_packed
 
 
 def _is_fused_kv_format(engine_kv_format: EngineKVFormat) -> bool:

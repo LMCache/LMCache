@@ -28,6 +28,7 @@ from lmcache.v1.gpu_connector.utils import (
     get_num_layers,
     get_page_buffer_size,
     get_spec,
+    resolve_block_stride_and_log_layout,
     get_tokens_per_layer,
     normalize_and_discover_per_layer_formats,
     normalize_kv_and_discover_format,
@@ -265,10 +266,10 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         self.page_buffer_size = self.num_blocks * self.block_size
         self.head_size = get_head_size(kv_caches, self.engine_kv_format)
         self.block_stride_elems = (
-            int(kv_caches.stride(0))
-            if lmcache_native.is_cross_layer(self.engine_kv_format)
-            and isinstance(kv_caches, torch.Tensor)
-            else 0
+            resolve_block_stride_and_log_layout(
+                kv_caches, self.engine_kv_format, layer_idx=0, group_idx=0
+            )
+            or 0
         )
 
         return self.kv_cache_pointers_on_gpu[idx]
@@ -486,10 +487,10 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         self.page_buffer_size = self.num_blocks * self.block_size
         self.head_size = get_head_size(self.kvcaches, self.engine_kv_format)
         self.block_stride_elems = (
-            int(self.kvcaches.stride(0))
-            if lmcache_native.is_cross_layer(self.engine_kv_format)
-            and isinstance(self.kvcaches, torch.Tensor)
-            else 0
+            resolve_block_stride_and_log_layout(
+                self.kvcaches, self.engine_kv_format, layer_idx=0, group_idx=0
+            )
+            or 0
         )
 
         if self.metadata.kv_layer_groups_manager is None:
