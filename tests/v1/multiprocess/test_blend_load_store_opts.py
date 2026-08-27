@@ -213,6 +213,80 @@ def test_obj_keys_cache_miss_falls_back():
 
 
 # ---------------------------------------------------------------------------
+# L2: sparse-prefetch read-lock release after retrieve
+# ---------------------------------------------------------------------------
+
+
+def _release_match(i: int):
+    # First Party
+    from lmcache.v1.multiprocess.custom_types import CBMatchResult
+
+    chunk = 256
+    return CBMatchResult(
+        old_st=i * chunk,
+        old_ed=(i + 1) * chunk,
+        cur_st=(i + 3) * chunk,
+        cur_ed=(i + 4) * chunk,
+        hash=bytes([i]) * 32,
+    )
+
+
+def _release_applied(matches, applied, n_read, stream):
+    """Call the helper unbound on a bare mock ``self``; return (n, keys, cb)."""
+    # First Party
+    from lmcache.v1.multiprocess.modules import blend as blend_mod
+
+    keys = [f"k{i}g{g}" for i in range(len(matches)) for g in range(n_read)]
+    with patch.object(blend_mod, "submit_callback_to_stream") as cb:
+        n = blend_mod.BlendModule._release_applied_read_locks(
+            MagicMock(), matches, applied, keys, n_read, stream
+        )
+    return n, keys, cb
+
+
+def test_release_applied_read_locks_all_keys_on_retrieve_stream():
+    """Every applied match releases its n_read keys, chunk-major, via a
+    ``finish_read_prefetched`` callback ordered on the retrieve stream."""
+    stream = MagicMock(name="retrieve_cupy_stream")
+    matches = [_release_match(i) for i in range(3)]
+    n, keys, cb = _release_applied(matches, matches, 2, stream)
+
+    assert n == 6
+    cb.assert_called_once()
+    got_stream, kind, payload = cb.call_args.args
+    assert got_stream is stream
+    assert kind == "finish_read_prefetched"
+    assert payload == keys
+
+
+def test_release_applied_read_locks_keeps_dropped_matches_locked():
+    """Beyond-slot matches are retried on vLLM's full-alloc call: not released."""
+    matches = [_release_match(i) for i in range(4)]
+    applied = [matches[0], matches[2]]
+    n, keys, cb = _release_applied(matches, applied, 1, MagicMock())
+
+    assert n == 2
+    assert cb.call_args.args[2] == [keys[0], keys[2]]
+
+
+def test_release_applied_read_locks_nothing_applied():
+    n, _keys, cb = _release_applied([_release_match(0)], [], 1, MagicMock())
+
+    assert n == 0
+    cb.assert_not_called()
+
+
+def test_release_applied_read_locks_selects_by_identity():
+    """Equal-valued but distinct match objects: only the scattered one is
+    released (mirrors how ``pairs`` is built in the retrieve)."""
+    a, b = _release_match(0), _release_match(0)
+    n, keys, cb = _release_applied([a, b], [b], 1, MagicMock())
+
+    assert n == 1
+    assert cb.call_args.args[2] == [keys[1]]
+
+
+# ---------------------------------------------------------------------------
 # L1: batched rope structure
 # ---------------------------------------------------------------------------
 
