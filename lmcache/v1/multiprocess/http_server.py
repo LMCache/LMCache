@@ -21,9 +21,12 @@ from lmcache.v1.distributed.config import (
     parse_args_to_config,
 )
 from lmcache.v1.mp_coordinator.cache_events import (
+    CacheEventSink,
     CacheEventSubscriber,
+    CompositeCacheEventSink,
     HttpCacheEventSink,
 )
+from lmcache.v1.mp_coordinator.kv_event_sink import ZmqKVEventSink
 from lmcache.v1.mp_coordinator.registrar import keep_registered
 from lmcache.v1.mp_observability.config import (
     ObservabilityConfig,
@@ -40,6 +43,7 @@ from lmcache.v1.multiprocess.config import (
     add_http_frontend_args,
     add_mp_server_args,
     add_p2p_args,
+    default_kv_events_emitter_id,
     parse_args_to_coordinator_config,
     parse_args_to_http_frontend_config,
     parse_args_to_mp_server_config,
@@ -141,15 +145,29 @@ async def lifespan(app: FastAPI):
                 on_registered=engine.storage_manager.publish_capacity,
             )
         )
-    # Optionally report cache events to the coordinator
-    if (
-        coordinator_client is not None
-        and coordinator_config.url
-        and coordinator_config.event_reporting
-    ):
+    # Optionally stream cache events: to the coordinator's key directory
+    # and/or, in engine KV-event format, to KV-cache-aware routers. One
+    # subscriber feeds every configured sink.
+    sinks: list[CacheEventSink] = []
+    if coordinator_client is not None and coordinator_config.event_reporting:
+        sinks.append(HttpCacheEventSink(coordinator_config.url))
+    if coordinator_config.kv_events_endpoint:
+        sinks.append(
+            ZmqKVEventSink(
+                endpoint=coordinator_config.kv_events_endpoint,
+                emitter_ids=coordinator_config.kv_events_emitter_ids
+                or [default_kv_events_emitter_id()],
+                replay_endpoint=(
+                    f"tcp://*:{coordinator_config.kv_events_replay_port}"
+                    if coordinator_config.kv_events_replay_port
+                    else ""
+                ),
+            )
+        )
+    if sinks:
         get_event_bus().register_subscriber(
             CacheEventSubscriber(
-                sink=HttpCacheEventSink(coordinator_config.url),
+                sink=sinks[0] if len(sinks) == 1 else CompositeCacheEventSink(sinks),
                 instance_id=mp_config.instance_id,
                 # Server start time: fences out placements this instance
                 # reported before a restart (its pools restarted empty).
@@ -219,8 +237,9 @@ def run_http_server(
     Raises:
         ValueError: If P2P is enabled without a coordinator URL, or with an L1
             tier that is not a single registerable memory region; or if
-            coordinator event reporting is enabled with observability
-            disabled (the cache-event stream rides the event bus).
+            coordinator event reporting or the KV-events endpoint is enabled
+            with observability disabled (the cache-event stream rides the
+            event bus).
     """
     if mp_config.p2p_config.enabled:
         if not coordinator_config.url:
@@ -235,10 +254,13 @@ def run_http_server(
                 "can register; it is incompatible with GDS L1 (--gds-l1-path) "
                 "and Device-DAX L1 (--l1-devdax-path)."
             )
-    if coordinator_config.event_reporting and not obs_config.enabled:
+    if (
+        coordinator_config.event_reporting or coordinator_config.kv_events_endpoint
+    ) and not obs_config.enabled:
         raise ValueError(
-            "--coordinator-event-reporting rides the observability event "
-            "bus: remove --disable-observability to report cache events."
+            "--coordinator-event-reporting and --kv-events-endpoint ride the "
+            "observability event bus: remove --disable-observability to "
+            "report cache events."
         )
     _configs["mp"] = mp_config
     _configs["storage_manager"] = storage_manager_config

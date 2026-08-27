@@ -117,6 +117,51 @@ class HttpCacheEventSink(CacheEventSink):
         self._client.close()
 
 
+class CompositeCacheEventSink(CacheEventSink):
+    """Sink that fans every publish out to several sinks.
+
+    Each sink is attempted even when an earlier one fails, so one broken
+    transport (say, an unreachable coordinator) does not silence the
+    others. Failures are logged and re-raised together at the end.
+
+    Args:
+        sinks: The sinks to deliver to, in order. Must be non-empty.
+
+    Raises:
+        ValueError: If ``sinks`` is empty.
+    """
+
+    def __init__(self, sinks: list[CacheEventSink]) -> None:
+        if not sinks:
+            raise ValueError("CompositeCacheEventSink needs at least one sink")
+        self._sinks = list(sinks)
+
+    def publish(self, batches: list[CacheEventBatch]) -> None:
+        """Deliver ``batches`` to every sink.
+
+        Args:
+            batches: The batches to deliver.
+
+        Raises:
+            CacheEventPublishError: If any sink failed (after all were
+                attempted).
+        """
+        failures: list[str] = []
+        for sink in self._sinks:
+            try:
+                sink.publish(batches)
+            except CacheEventPublishError as e:
+                logger.warning("%s failed to publish: %s", type(sink).__name__, e)
+                failures.append(f"{type(sink).__name__}: {e}")
+        if failures:
+            raise CacheEventPublishError("; ".join(failures))
+
+    def close(self) -> None:
+        """Close every sink."""
+        for sink in self._sinks:
+            sink.close()
+
+
 @dataclass(frozen=True)
 class _ChunkTokens:
     """One chunk's token content, held between its token-binding event
@@ -125,10 +170,15 @@ class _ChunkTokens:
     Attributes:
         token_ids: The chunk's token ids.
         token_offset: Position of its first token in the stored sequence.
+        parent_hash: Chunk hash of the chunk preceding it in the same
+            token-binding event; empty for the event's first chunk (the
+            sequence start, or a predecessor stored by an earlier request
+            and therefore unknown here).
     """
 
     token_ids: tuple[int, ...]
     token_offset: int
+    parent_hash: bytes = b""
 
 
 # Stands in for a chunk the binding cache does not know, so a STORE entry
@@ -351,13 +401,15 @@ class CacheEventSubscriber(EventSubscriber):
         chunk_hashes: list[bytes] = event.metadata["chunk_hashes"]
         token_chunks: list[list[int]] = event.metadata["token_chunks"]
         token_offsets: list[int] = event.metadata["token_offsets"]
+        parent_hash = b""
         for chunk_hash, chunk, offset in zip(
             chunk_hashes, token_chunks, token_offsets, strict=True
         ):
             self._token_bindings[chunk_hash] = _ChunkTokens(
-                token_ids=tuple(chunk), token_offset=offset
+                token_ids=tuple(chunk), token_offset=offset, parent_hash=parent_hash
             )
             self._token_bindings.move_to_end(chunk_hash)
+            parent_hash = chunk_hash
         if len(self._token_bindings) <= _TOKEN_BINDING_CACHE_SIZE:
             return
         # Evict in one batch down to half the bound: the next eviction is
@@ -419,6 +471,7 @@ class CacheEventSubscriber(EventSubscriber):
             size_bytes=size_bytes,
             token_ids=list(binding.token_ids),
             token_offset=binding.token_offset,
+            parent_hash_hex=binding.parent_hash.hex(),
         )
 
     def _record(

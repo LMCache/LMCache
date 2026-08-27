@@ -11,6 +11,7 @@ import argparse
 import json
 import math
 import os
+import socket
 import uuid
 
 # First Party
@@ -242,8 +243,33 @@ class CoordinatorConfig:
     """Max fleet CacheBlend match round-trips the blend coordinator client keeps
     in flight at once. Must be strictly positive."""
 
+    kv_events_endpoint: str = ""
+    """ZMQ PUB bind address (e.g. ``tcp://*:5557``) on which cache events are
+    re-emitted in vLLM KV-event wire format for KV-cache-aware routers. Empty
+    disables the engine-format sink. Rides the same cache-event stream as
+    :attr:`event_reporting`, so it also requires the observability bus."""
+
+    kv_events_emitter_ids: list[str] = field(default_factory=list)
+    """Router identities the KV events are published under (topic
+    ``kv@<emitter_id>@<model>``), one message per id. Empty resolves to
+    ``node:$NODE_NAME`` (or ``node:<hostname>``) at parse time."""
+
+    kv_events_replay_port: int = 0
+    """TCP port of the ZMQ ROUTER socket answering KV-event replay requests
+    (``tcp://*:<port>``); ``0`` disables replay."""
+
 
 DEFAULT_COORDINATOR_CONFIG = CoordinatorConfig()
+
+
+def default_kv_events_emitter_id() -> str:
+    """Return the default router identity for engine-format KV events.
+
+    Returns:
+        ``node:$NODE_NAME`` when ``NODE_NAME`` is set (the Kubernetes
+        downward API convention), else ``node:<hostname>``.
+    """
+    return "node:" + (os.getenv("NODE_NAME") or socket.gethostname())
 
 
 def add_mp_server_args(
@@ -660,6 +686,36 @@ def add_coordinator_args(
     # (operator <= v0.5.2, charts) still render these names into server args,
     # and rejecting them crashes the pod on startup. Remove once those
     # deployers are out of the support matrix.
+    kv_group = parser.add_argument_group(
+        "KV events",
+        "Re-emit cache events in vLLM KV-event wire format (ZMQ PUB) for "
+        "KV-cache-aware routers such as llm-d",
+    )
+    kv_group.add_argument(
+        "--kv-events-endpoint",
+        type=str,
+        default=None,
+        help="ZMQ PUB bind address for engine-format KV events (e.g. "
+        "tcp://*:5557). Defaults to LMCACHE_KV_EVENTS_ENDPOINT; unset "
+        "disables the sink. Requires the observability event bus.",
+    )
+    kv_group.add_argument(
+        "--kv-events-emitter-ids",
+        type=str,
+        default=None,
+        help="Comma-separated router identities to publish under (topic "
+        "kv@<id>@<model>; one message per id). Defaults to "
+        "LMCACHE_KV_EVENTS_EMITTER_IDS, then node:$NODE_NAME or "
+        "node:<hostname>.",
+    )
+    kv_group.add_argument(
+        "--kv-events-replay-port",
+        type=int,
+        default=None,
+        help="TCP port of the ZMQ ROUTER socket answering KV-event replay "
+        "requests. Defaults to LMCACHE_KV_EVENTS_REPLAY_PORT; 0 disables "
+        "replay.",
+    )
     group.add_argument(
         "--coordinator-l2-event-reporting",
         dest="coordinator_l2_event_reporting",
@@ -701,8 +757,10 @@ def parse_args_to_coordinator_config(
 
     Raises:
         ValueError: If the heartbeat interval, the event flush interval or the
-            blend timeout is not a positive finite number, or if the blend
-            match concurrency is less than 1.
+            blend timeout is not a positive finite number, if the blend
+            match concurrency is less than 1, if a KV-events emitter id is
+            empty or contains ``@``, or if the KV-events replay port is
+            outside ``[0, 65535]``.
     """
     url = (
         args.coordinator_url
@@ -789,6 +847,34 @@ def parse_args_to_coordinator_config(
             "got %s" % blend_match_concurrency
         )
 
+    kv_events_endpoint = (
+        args.kv_events_endpoint
+        if args.kv_events_endpoint is not None
+        else os.getenv("LMCACHE_KV_EVENTS_ENDPOINT", "")
+    )
+    raw_emitter_ids = (
+        args.kv_events_emitter_ids
+        if args.kv_events_emitter_ids is not None
+        else os.getenv("LMCACHE_KV_EVENTS_EMITTER_IDS", "")
+    )
+    kv_events_emitter_ids = [
+        part.strip() for part in raw_emitter_ids.split(",") if part.strip()
+    ] or [default_kv_events_emitter_id()]
+    if any("@" in emitter_id for emitter_id in kv_events_emitter_ids):
+        raise ValueError(
+            "kv-events emitter ids must not contain '@' "
+            "(it separates topic segments), got %s" % kv_events_emitter_ids
+        )
+    if args.kv_events_replay_port is not None:
+        kv_events_replay_port = args.kv_events_replay_port
+    else:
+        kv_events_replay_port = int(os.getenv("LMCACHE_KV_EVENTS_REPLAY_PORT", "0"))
+    if not 0 <= kv_events_replay_port <= 65535:
+        raise ValueError(
+            "kv-events replay port must be in [0, 65535], got %s"
+            % kv_events_replay_port
+        )
+
     return CoordinatorConfig(
         url=url,
         advertise_ip=advertise_ip,
@@ -797,4 +883,7 @@ def parse_args_to_coordinator_config(
         event_flush_interval=event_flush_interval,
         blend_timeout=blend_timeout,
         blend_match_concurrency=blend_match_concurrency,
+        kv_events_endpoint=kv_events_endpoint,
+        kv_events_emitter_ids=kv_events_emitter_ids,
+        kv_events_replay_port=kv_events_replay_port,
     )

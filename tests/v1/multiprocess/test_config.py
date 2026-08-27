@@ -256,3 +256,77 @@ def test_deprecated_flags_log_warning():
 def test_deprecated_flush_interval_flag_rejects_nonpositive():
     with pytest.raises(ValueError):
         _parse(["--coordinator-l2-event-flush-interval", "0"])
+
+
+# -- KV events (engine-format sink) -------------------------------------------
+
+
+_KV_ENV = (
+    "LMCACHE_KV_EVENTS_ENDPOINT",
+    "LMCACHE_KV_EVENTS_EMITTER_IDS",
+    "LMCACHE_KV_EVENTS_REPLAY_PORT",
+    "NODE_NAME",
+)
+
+
+@pytest.fixture(autouse=True)
+def _clear_kv_env(monkeypatch):
+    for name in _KV_ENV:
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_kv_events_default_to_disabled_with_node_emitter_id():
+    config = _parse([])
+    assert config.kv_events_endpoint == ""
+    assert config.kv_events_replay_port == 0
+    [emitter_id] = config.kv_events_emitter_ids
+    assert emitter_id.startswith("node:") and len(emitter_id) > len("node:")
+
+
+def test_kv_events_emitter_id_defaults_to_node_name(monkeypatch):
+    monkeypatch.setenv("NODE_NAME", "worker-7")
+    assert _parse([]).kv_events_emitter_ids == ["node:worker-7"]
+
+
+def test_kv_events_flags_are_parsed():
+    config = _parse(
+        [
+            "--kv-events-endpoint",
+            "tcp://*:5557",
+            "--kv-events-emitter-ids",
+            "pod-a, pod-b,",
+            "--kv-events-replay-port",
+            "5558",
+        ]
+    )
+    assert config.kv_events_endpoint == "tcp://*:5557"
+    assert config.kv_events_emitter_ids == ["pod-a", "pod-b"]
+    assert config.kv_events_replay_port == 5558
+
+
+def test_kv_events_env_fallback_and_flag_precedence(monkeypatch):
+    monkeypatch.setenv("LMCACHE_KV_EVENTS_ENDPOINT", "tcp://*:1")
+    monkeypatch.setenv("LMCACHE_KV_EVENTS_EMITTER_IDS", "env-a")
+    monkeypatch.setenv("LMCACHE_KV_EVENTS_REPLAY_PORT", "2")
+    config = _parse([])
+    assert (
+        config.kv_events_endpoint,
+        config.kv_events_emitter_ids,
+        config.kv_events_replay_port,
+    ) == ("tcp://*:1", ["env-a"], 2)
+    assert _parse(["--kv-events-emitter-ids", "flag-a"]).kv_events_emitter_ids == [
+        "flag-a"
+    ]
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--kv-events-emitter-ids", "a@b"],
+        ["--kv-events-replay-port", "-1"],
+        ["--kv-events-replay-port", "65536"],
+    ],
+)
+def test_kv_events_invalid_values_rejected(argv):
+    with pytest.raises(ValueError):
+        _parse(argv)

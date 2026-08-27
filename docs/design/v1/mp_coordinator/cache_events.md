@@ -167,13 +167,57 @@ records per `L1BackendType`, so it stamps `shared` on the pooled
 backend's runs — the vocabulary, batching identity, and directory
 semantics need no change.
 
+## Engine-format KV event sink
+
+Module: `lmcache/v1/mp_coordinator/kv_event_sink.py`
+
+KV-cache-aware routers (llm-d's EPP; see the RFC linked from
+[issue #4352](https://github.com/LMCache/LMCache/issues/4352)) learn
+placements only from engine KV events: vLLM `KVEventBatch` msgpack over
+a ZMQ PUB socket, topic `kv@<emitter_id>@<model>`. In MP mode the MP
+connectors emit nothing there, so LMCache tiers are invisible to such a
+router. `ZmqKVEventSink` is a second `CacheEventSink` that re-emits the
+same `CacheEventBatch` stream in that wire format, so an unmodified vLLM
+adapter indexes LMCache's tiers next to the engines' GPU tier.
+`CompositeCacheEventSink` fans one subscriber out to both sinks when the
+coordinator sink is also configured.
+
+Translation (vLLM positional layout, tag first; HMA fields never set):
+
+| vLLM wire | Source |
+|---|---|
+| topic `kv@<emitter_id>@<model>` | one message per configured emitter id (`--kv-events-emitter-ids`, default `node:<node name>`); `model` from the entry's `ObjectKey` |
+| `BlockStored.block_hashes` | `[chunk_hash]` (raw bytes; routers truncate to the last 8) |
+| `BlockStored.parent_block_hash` | `CacheEventEntry.parent_hash_hex`: the previous chunk in the same `mp.tokens` binding event, `nil` for the first (sequence start or a predecessor stored by an earlier request) |
+| `BlockStored.token_ids` / `block_size` | the entry's `token_ids` / their count (the chunk size) |
+| `medium` | `lmcache-l1` for L1, `lmcache-l2-<backend>` for L2 — identical on store and delete (routers refcount per medium) |
+| `BlockRemoved` | `delete` batches (L1 evictions, L2 deletes), one event per batch |
+| `access`, `config` | not forwarded |
+
+A tokenless `store` entry (token-binding cache miss) is skipped: llm-d
+recomputes its own keys from the tokens and cannot index an unknown hash
+without them. A `delete` is never skipped. The `seq` frame is one counter
+across all topics, numbered from 0 like vLLM; with
+`--kv-events-replay-port` a ROUTER socket answers vLLM-style replay
+requests (`[b"", start_seq:8]` → the buffered `[topic, seq, payload]`
+frames from `start_seq` on, then `[b"", -1:8, b""]`) from a bounded
+ring of recent messages. Sends are non-blocking (PUB drops at its
+high-water mark), so a slow router never stalls the bus drain thread.
+
+Deliberately out of scope here, tracked in the RFC: engine identity from
+`REGISTER_KV_CACHE` (fan-out currently uses configured ids only), and
+mounting the same sink on the coordinator's `POST /events` so shared L2
+is credited fleet-wide once.
+
 ## Wiring and configuration
 
 Enabled in the MP HTTP server lifespan when a coordinator URL is set
 and `--coordinator-event-reporting` (or
-`LMCACHE_COORDINATOR_EVENT_REPORTING`) is on;
+`LMCACHE_COORDINATOR_EVENT_REPORTING`) is on, and/or when
+`--kv-events-endpoint` (or `LMCACHE_KV_EVENTS_ENDPOINT`) is set;
 `--coordinator-event-flush-interval` paces the subscriber's
-event-driven flushes (default 1s).
+event-driven flushes (default 1s). Both ride the observability bus, so
+both are rejected with `--disable-observability`.
 
 ## Known limitations (follow-ups)
 
