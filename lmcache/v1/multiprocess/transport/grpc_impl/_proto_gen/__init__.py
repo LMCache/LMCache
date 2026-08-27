@@ -1,16 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Generated protobuf and gRPC stubs for the multiprocess message queue.
-
-The stub modules are created during package builds and test setup. They are
-never checked into Git; ``lmcache_mq.proto`` is the single source of truth.
-Regenerate them manually after changing the schema with::
-
-    pip install -r requirements/proto.txt
-    python -m lmcache.v1.multiprocess.transport.grpc_impl._proto_gen._generate
-
-Stub modules are imported independently so loading protobuf message types does
-not also initialize the gRPC native runtime.
-"""
 
 # Standard
 from typing import Any
