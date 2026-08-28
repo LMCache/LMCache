@@ -32,7 +32,11 @@ cd "${REPO_ROOT}"
 source "${REPO_ROOT}/.buildkite/k3_harness/setup-lmcache-only-env.sh"
 
 log "installing job dependencies"
-uv pip install -r requirements/common.txt -r requirements/test.txt
+# setup-lmcache-only-env.sh already installs editable LMCache together with the
+# runtime deps from requirements/common.txt. Re-resolving common.txt here is
+# redundant and can pull torch/nvtx candidates from the image's XPU package
+# index, introducing an avoidable network dependency before tests even start.
+uv pip install -r requirements/test.txt
 
 discover_xpu_tests() {
   python - <<'PY'
@@ -84,4 +88,3 @@ fi
 log "running XPU-related tests"
 pytest "${PYTEST_ARGS[@]}" "${XPU_TEST_FILES[@]}"
 log "xpu smoke test finished successfully"
-

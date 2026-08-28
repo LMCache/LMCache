@@ -169,6 +169,8 @@ def _resolve_extra_config(
 
 class _IpcEvent(Protocol):
     def wait(self, stream: Any = None) -> None: ...
+
+
 def send_lmcache_request(
     mq_client: MessageQueueClient,
     request_type: RequestType,
