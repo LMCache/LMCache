@@ -100,8 +100,11 @@ The lookups this serves:
   window is verified against `binding.token_ids` (exact), and the
   binding's keys give the placements. Discovery uses blend's cheap
   polynomial hash family; the index itself never needs a
-  content-addressed key because every hit is token-verified. Implemented
-  as a derived view over these bindings — see
+  content-addressed key because every hit is token-verified. It takes
+  the same tokens form as the prefix lookup and reads its
+  `model_name`/`cache_salt`/`world_size` as the namespace to scope
+  matches to, so a match names a chunk the caller's own key expansion
+  can reach. Implemented as a derived view over these bindings — see
   [blend_index.md](blend_index.md), served by `POST
   /directory/blend-lookup`.
 
@@ -219,7 +222,8 @@ yet (see [ingest.md](ingest.md)).
 Type placement:
 
 - **`api.py`** — the cache-event vocabulary (`CacheEventType`,
-`CacheEventEntry`, `CacheEventBatch`): the contract between the
+`CacheEventEntry`, `CacheEventBatch`) plus the blend vocabulary
+(`BlendMatch`, `BlendNamespace`): the contract between the
 MP-server emitter and the directory. Plain dataclasses with intrinsic
 invariants in `__post_init__` (the `ObjectKey` pattern: `seq >= 1`,
 concrete tier, non-empty ids are unconstructible anywhere).

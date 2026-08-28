@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 # First Party
-from lmcache.v1.distributed.api import EncodedObjectKey, Tier
+from lmcache.v1.distributed.api import EncodedObjectKey, ObjectKey, Tier
 
 # ``token_offset`` value meaning "the emitter did not report a position".
 # Distinct from 0, which is a real position (a chunk at the start of its
@@ -39,6 +39,49 @@ class CacheEventType(str, Enum):
     DELETE = "delete"
     ACCESS = "access"
     CONFIG = "config"
+
+
+@dataclass(frozen=True)
+class BlendNamespace:
+    """The retrieval namespace a chunk hash is reachable in.
+
+    A ``chunk_hash`` is content-and-prefix only: everything that decides
+    *whose* KV it names lives on :class:`ObjectKey` beside it. A blend
+    match is therefore usable only by a requester whose key expansion
+    lands in the same namespace -- another model's KV is not
+    interchangeable, another tenant's salt is isolated on purpose, and
+    another parallel setup shards heads differently.
+
+    ``object_group_id`` is deliberately absent: groups partition a
+    server's own layout rather than the fleet, and blend servers must not
+    enable ``--separate-object-groups``.
+
+    Attributes:
+        model_name: Model the KV belongs to.
+        cache_salt: Per-tenant isolation salt applied to the keys.
+        world_size: Parallel world size (TP x PP) selecting the rank
+            fan-out.
+    """
+
+    model_name: str
+    cache_salt: str = ""
+    world_size: int = 1
+
+    @classmethod
+    def from_object_key(cls, key: "ObjectKey") -> "BlendNamespace":
+        """Return the namespace ``key`` was stored in.
+
+        Args:
+            key: A stored key, whose ``kv_rank`` carries the world size.
+
+        Returns:
+            The namespace a requester must share to reach ``key``.
+        """
+        return cls(
+            model_name=key.model_name,
+            cache_salt=key.cache_salt,
+            world_size=ObjectKey.WorldSizeFromKVRank(key.kv_rank),
+        )
 
 
 @dataclass(frozen=True)

@@ -40,6 +40,7 @@ directory removes:
 | collision | wasted prefetch | candidate skipped |
 | eviction | lazy tombstone, stale entries tolerated | exact, with the binding |
 | placements | unknown; prefetch is blind | known (peer L1 vs shared L2) |
+| identity | one chunk hash, namespace-blind | per-namespace claims on each chunk |
 
 The cost is coordinator memory: verification needs the tokens resident,
 `O(m)` rather than `O(m/C)`. See
@@ -50,30 +51,68 @@ representation that keeps that affordable.
 
 Entries are keyed by a **content fingerprint only** — the 64-bit
 polynomial hash of one chunk's tokens (`POLY_BASE`, fleet-constant).
-Deliberately absent:
+Content is the key; **identity rides on the occupants**.
 
-- **No model, salt, or rank.** A match names a `chunk_hash`; the querying
-  server expands it into `ObjectKey`s with **its own** model, salt, and
-  world size, exactly as the local blend path does. A cross-model or
-  cross-tenant match therefore lands in the requester's own namespace and
-  confirmed-misses at prefetch. Filtering by the *storer's* identity
-  would be wrong: content is shared first-writer-wins, so the first
-  storer's tenant would get pinned and others could never match their own
-  copies.
-- **No prefix.** `chunk_hash` is prefix-chained, so the same text stored
-  after different prefixes is two chunks; both attach to **one** content
-  entry (each with its own `token_offset`), so evicting one leaves the
-  other discoverable.
+- **No prefix in the key.** `chunk_hash` is prefix-chained, so the same
+  text stored after different prefixes is two chunks; both attach to
+  **one** content entry (each with its own `token_offset`), so evicting
+  one leaves the other discoverable.
+- **Each occupant carries its namespaces.** A `chunk_hash` names content
+  and prefix only — everything deciding *whose* KV it is lives on
+  `ObjectKey` beside it. So every occupant records the
+  `BlendNamespace`s that stored it, and a match is offered only to a
+  requester in one of them.
+
+### The namespace
+
+`BlendNamespace` (`api.py`) is `(model_name, cache_salt, world_size)` —
+exactly the three fields `ipc_key_to_object_keys` reads to turn a
+`chunk_hash` into `ObjectKey`s. On the store side it is derived from the
+key itself, `world_size` from the top byte `ComputeKVRank` packed into
+`kv_rank`; on the query side it arrives on the request. `object_group_id`
+is deliberately out: groups partition a server's own layout rather than
+the fleet, and blend servers must not enable `--separate-object-groups`.
+
+**Scoping loses no legitimate reuse.** Each dimension is one the
+requester's own key expansion would miss on anyway: another model's KV is
+not interchangeable, another tenant's salt is isolated by design, and
+another parallel setup shards heads differently. What scoping removes is
+two real defects of a namespace-blind table:
+
+| defect | namespace-blind | with claims |
+| --- | --- | --- |
+| a match no requester key can reach | returned; confirmed-misses at prefetch, burning a blend slot | never offered |
+| the requester's own chunk hidden behind another namespace's | lost hit — one occupant per content is returned, and it may be someone else's | found; the walk skips occupants this namespace does not hold |
+
+The second is the one that costs reuse rather than work: the same
+document cached under a different prefix is a *different* `chunk_hash`,
+so it is a second occupant, and returning only the first silently drops
+it.
+
+The earlier design rejected filtering on the grounds that "the first
+storer's tenant would get pinned and others could never match their own
+copies." That is a consequence of treating a content entry as
+single-tenant. A content entry is inherently multi-tenant: the fix is to
+filter by *membership* — every namespace that stored the chunk — not by
+first-writer identity.
+
+**Residual.** Ranks and object groups within one namespace are not
+tracked individually, so a chunk stored by only some ranks of a world
+size still matches and confirms at expansion, as before.
 
 ## Structure and the recall property
 
 ```
-_contents : dict[fingerprint -> _Entry { token_ids, occupants[] }]   # authoritative
+_contents : dict[fingerprint -> _Entry { token_ids, occupants{} }]   # authoritative
 _slots    : uint8[2^k]  occupancy filter, 1 where any fingerprint lands
 ```
 
-`occupants` is `(chunk_hash, token_offset)` per chunk holding that
-content — usually exactly one.
+`occupants` maps `chunk_hash -> { token_offset, namespaces }`, in
+first-indexed order — usually exactly one chunk, claimed by one
+namespace. A chunk stored under identical prefixes by two tenants is
+**one** occupant with two claims, so the tokens are held once. Cost is
+one small tuple per `(chunk, namespace)` pair, reported as `num_claims`
+in `stats()`.
 
 A match rolls a `chunk_size` window hash over the query
 (`rolling_hash_windows_numba`), gathers `_slots` at every
@@ -105,14 +144,24 @@ Driven entirely by binding lifecycle in `KeyDirectory`:
 
 | directory event | index |
 | --- | --- |
-| `STORE` with `token_ids` | `add(tokens, chunk_hash, token_offset)` |
-| re-`STORE` with different content | old fingerprint removed, new added |
-| `DELETE` of a chunk's last placement | `remove(tokens, chunk_hash)` |
+| `STORE` with `token_ids` | `add(tokens, chunk_hash, token_offset, ns)` |
+| `STORE` first filling a binding's content | `add` for **every** namespace on the binding |
+| re-`STORE` with different content | `remove_chunk`, then re-`add` per namespace |
+| `DELETE` of a namespace's last key for a chunk | `remove(tokens, chunk_hash, ns)` |
+| `DELETE` of a chunk's last placement overall | last `remove` drops the occupant |
 | `fence_instance` (restart / deregistration) | `remove` per dropped chunk |
+
+The namespace comes from the key the event carries, so nothing new is
+published for it. The steady-state store path claims for one namespace
+per entry; only the two content-changing rows walk the binding's keys, so
+per-rank stores do not rehash the content once per rank.
 
 A chunk whose `STORE` carried no tokens (the emitter's bound cache had
 already evicted it) is simply not indexed — a lookup miss, repaired by
-the chunk's next stamped store. Content whose length is not the fleet
+the chunk's next stamped store. A **key** arriving without tokens for a
+chunk whose content is already known is different: it claims the chunk
+for its namespace immediately, so a second tenant storing content the
+fleet already holds is matchable without waiting for a re-store. Content whose length is not the fleet
 `chunk_size` is not indexed either: it can never fill a `chunk_size`
 match window. Both are logged, never errors.
 
@@ -124,10 +173,18 @@ application.
 
 ## HTTP surface
 
-`POST /directory/blend-lookup` takes `tokens_b64` (base64 little-endian
-`uint32`, ~1.4x smaller than a JSON list and decoded in one
-`np.frombuffer`) and returns matches as
-`(chunk_hash, old_st, cur_st)`:
+`POST /directory/blend-lookup` takes **the same tokens form as
+`POST /directory/lookup`** — `token_ids`, `model_name`, `world_size`,
+`cache_salt`, shared as `TokenSequenceForm` in `schemas.py`. The two
+questions differ in where the content may sit, not in how it is
+described, and both need the same identity for the same reason: a
+`chunk_hash` names content only. Prefix lookup uses those fields to
+*build* keys; fragment lookup uses them to keep matches inside the
+namespace the caller can retrieve from. Only the tokens form exists here
+— a fragment query is a search over content, so there is nothing to name
+by key.
+
+It returns matches as `(chunk_hash, old_st, cur_st)`:
 
 - `old_st` — where the chunk sat in the sequence it was stored under
   (the re-RoPE source).
@@ -151,5 +208,9 @@ thread rather than on the event loop.
   reuse; see the future-evolution table in the blend design notes.
 - **Placement-aware ranking.** Matches do not yet prefer a peer holding
   the chunk in L1 over a shared-L2 copy, though the directory knows both.
-- **Cross-model filtering.** Left to the requester's key expansion, as
-  above.
+- **Liveness beyond the binding.** A claim says some instance stored the
+  chunk in that namespace, not that the bytes are reachable *now* — the
+  directory is eventually consistent, so a match is still a hint the
+  owner validates. Filtering on placements would tighten this, at the
+  cost of taking the directory lock on the serving path (see
+  [key_directory.md](key_directory.md)).

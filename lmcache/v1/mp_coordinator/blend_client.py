@@ -20,8 +20,7 @@ import threading
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.mp_coordinator.api import BlendMatch
-from lmcache.v1.mp_coordinator.schemas import encode_tokens
+from lmcache.v1.mp_coordinator.api import BlendMatch, BlendNamespace
 
 logger = init_logger(__name__)
 
@@ -38,6 +37,7 @@ class _MatchItem:
 
     rid: str
     tokens: list[int]
+    namespace: BlendNamespace
 
 
 class BlendCoordinatorClient:
@@ -107,18 +107,22 @@ class BlendCoordinatorClient:
         )
         self._worker.start()
 
-    def submit_match(self, rid: str, tokens: list[int]) -> None:
+    def submit_match(
+        self, rid: str, tokens: list[int], namespace: BlendNamespace
+    ) -> None:
         """Submit a match query for a request once (idempotent per ``rid``).
 
         Args:
             rid: Request id, the poll key.
             tokens: The request tokens (the coordinator hashes and probes them).
+            namespace: This server's retrieval namespace, which scopes the
+                matches to chunk hashes its own key expansion can reach.
         """
         with self._results_lock:
             if rid in self._results:
                 return
             self._results[rid] = PENDING
-        self._match_q.put(_MatchItem(rid=rid, tokens=tokens))
+        self._match_q.put(_MatchItem(rid=rid, tokens=tokens, namespace=namespace))
 
     def poll_match(self, rid: str) -> object:
         """Return the match state for a request.
@@ -202,7 +206,12 @@ class BlendCoordinatorClient:
             body = self._request(
                 "POST",
                 "/directory/blend-lookup",
-                {"tokens_b64": encode_tokens(item.tokens)},
+                {
+                    "token_ids": item.tokens,
+                    "model_name": item.namespace.model_name,
+                    "cache_salt": item.namespace.cache_salt,
+                    "world_size": item.namespace.world_size,
+                },
             )
             matches = [
                 BlendMatch(

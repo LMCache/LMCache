@@ -28,6 +28,7 @@ from lmcache.v1.distributed.api import ObjectKey, Tier
 from lmcache.v1.mp_coordinator.api import (
     UNKNOWN_TOKEN_OFFSET,
     BlendMatch,
+    BlendNamespace,
     CacheEventBatch,
     CacheEventEntry,
     CacheEventType,
@@ -251,16 +252,21 @@ class KeyDirectory(View):
                 for chunk_hash in chunk_hashes
             ]
 
-    def blend_match(self, tokens: np.ndarray) -> list[BlendMatch]:
-        """Find cached chunks contained anywhere in ``tokens``.
+    def blend_match(
+        self, tokens: np.ndarray, namespace: BlendNamespace
+    ) -> list[BlendMatch]:
+        """Find chunks ``namespace`` can retrieve, anywhere in ``tokens``.
 
         Unlike :meth:`lookup` the query need not be a prefix. Matches name
         a ``chunk_hash`` only, which the caller expands with its own
-        model, salt, and world size. Takes the blend index's lock, not
-        the directory's.
+        model, salt, and world size -- so they are restricted to chunks
+        some instance stored in ``namespace``, whose expansion therefore
+        names keys that exist. Takes the blend index's lock, not the
+        directory's.
 
         Args:
             tokens: The query token ids.
+            namespace: The requester's retrieval namespace.
 
         Returns:
             Matches in ascending ``cur_st`` order, at most one per chunk;
@@ -270,7 +276,7 @@ class KeyDirectory(View):
         """
         if not self._blend_lookup_enabled:
             return []
-        return self._blend_index.match(tokens)
+        return self._blend_index.match(tokens, namespace)
 
     def blend_stats(self) -> BlendIndexStats:
         """Return a point-in-time summary of the blend index.
@@ -445,8 +451,7 @@ class KeyDirectory(View):
                 token_ids.flags.writeable = False
                 binding.token_ids = token_ids
                 binding.token_offset = token_offset
-                if self._blend_lookup_enabled and token_offset != UNKNOWN_TOKEN_OFFSET:
-                    self._blend_index.add(token_ids, chunk_hash, token_offset)
+                self._index_binding(chunk_hash, binding)
             for instance_id, positions_ in l1_by_instance.items():
                 for position in positions_:
                     if not 0 <= position < len(key_table):
@@ -506,7 +511,7 @@ class KeyDirectory(View):
             else:
                 record.placements[index] = placement
             if entry.token_ids:
-                self._create_token_binding(key.chunk_hash, entry)
+                self._create_token_binding(key, entry)
             record.last_access = max(record.last_access, batch.ts)
             if batch.tier == Tier.L1:
                 l1_keys.add(key)
@@ -570,8 +575,8 @@ class KeyDirectory(View):
         l1_keys.clear()
         return removed
 
-    def _create_token_binding(self, chunk_hash: bytes, entry: CacheEventEntry) -> None:
-        """Record ``entry``'s token content on ``chunk_hash``'s binding.
+    def _create_token_binding(self, key: ObjectKey, entry: CacheEventEntry) -> None:
+        """Record ``entry``'s token content on ``key``'s chunk binding.
 
         Token ids outside ``uint32`` leave the binding as it was, so one
         bad entry is a lookup miss rather than a failed batch. An entry
@@ -581,9 +586,10 @@ class KeyDirectory(View):
         no stored position would re-RoPE from the wrong source.
 
         Args:
-            chunk_hash: Chunk hash whose binding to fill.
+            key: The stored key whose chunk binding to fill.
             entry: The store entry carrying the token ids and offset.
         """
+        chunk_hash = key.chunk_hash
         try:
             token_ids = np.asarray(entry.token_ids, dtype=_TOKEN_DTYPE)
         except (OverflowError, TypeError, ValueError):
@@ -594,44 +600,83 @@ class KeyDirectory(View):
             return
         token_ids.flags.writeable = False
         binding = self._token_bindings[chunk_hash]
-        if (
-            self._blend_lookup_enabled
-            and binding.token_ids.size
-            and not np.array_equal(binding.token_ids, token_ids)
-        ):
-            # Re-store with different content: retire the old fingerprint,
-            # or the chunk stays discoverable under content it no longer has.
-            self._blend_index.remove(binding.token_ids, chunk_hash)
+        replaced = bool(binding.token_ids.size) and not np.array_equal(
+            binding.token_ids, token_ids
+        )
+        if self._blend_lookup_enabled and replaced:
+            # Re-store with different content: retire the old fingerprint
+            # for every namespace, or the chunk stays discoverable under
+            # content it no longer has.
+            self._blend_index.remove_chunk(binding.token_ids, chunk_hash)
+        fresh_content = replaced or not binding.token_ids.size
         binding.token_ids = token_ids
         binding.token_offset = entry.token_offset
-        if not self._blend_lookup_enabled:
-            return
-        if entry.token_offset == UNKNOWN_TOKEN_OFFSET:
-            return
-        self._blend_index.add(token_ids, chunk_hash, entry.token_offset)
+        if fresh_content:
+            # Keys of other namespaces may have attached while the binding
+            # had no content (or held content this store just replaced),
+            # so claim it for all of them. Steady-state stores take the
+            # single-key path below instead of rehashing per rank.
+            self._index_binding(chunk_hash, binding)
+        else:
+            self._claim_binding(chunk_hash, binding, key)
 
     def _add_token_binding(self, key: ObjectKey) -> None:
         """Index ``key`` under its chunk's token binding, creating an
-        empty binding on first reference."""
+        empty binding on first reference. A key joining a binding that
+        already has content claims it for the key's namespace."""
         binding = self._token_bindings.get(key.chunk_hash)
         if binding is None:
             self._token_bindings[key.chunk_hash] = _TokenBinding(
                 token_ids=_NO_TOKENS, token_offset=UNKNOWN_TOKEN_OFFSET, keys={key}
             )
-        else:
-            binding.keys.add(key)
+            return
+        binding.keys.add(key)
+        self._claim_binding(key.chunk_hash, binding, key)
 
     def _remove_token_binding(self, key: ObjectKey) -> None:
-        """Remove ``key`` from its chunk's token binding, dropping the
-        binding — and its blend-index entry — with its last key."""
+        """Remove ``key`` from its chunk's token binding, releasing the
+        chunk's blend claim with the namespace's last key and dropping the
+        binding with its last key overall."""
         binding = self._token_bindings.get(key.chunk_hash)
         if binding is None:
             return
         binding.keys.discard(key)
+        if self._blend_lookup_enabled and binding.token_ids.size:
+            namespace = BlendNamespace.from_object_key(key)
+            # Ranks and object groups of the same namespace hold the same
+            # bytes, so the claim survives until the last of them goes.
+            if not any(
+                BlendNamespace.from_object_key(held) == namespace
+                for held in binding.keys
+            ):
+                self._blend_index.remove(binding.token_ids, key.chunk_hash, namespace)
         if not binding.keys:
             del self._token_bindings[key.chunk_hash]
-            if self._blend_lookup_enabled and binding.token_ids.size:
-                self._blend_index.remove(binding.token_ids, key.chunk_hash)
+
+    def _index_binding(self, chunk_hash: bytes, binding: _TokenBinding) -> None:
+        """Claim ``chunk_hash`` for every namespace holding it."""
+        for held in binding.keys:
+            self._claim_binding(chunk_hash, binding, held)
+
+    def _claim_binding(
+        self, chunk_hash: bytes, binding: _TokenBinding, key: ObjectKey
+    ) -> None:
+        """Claim ``chunk_hash`` in the blend index for ``key``'s namespace.
+
+        A no-op while blend lookup is off, before the binding has content,
+        or without a stored position -- the cases a fragment match cannot
+        be served from anyway.
+        """
+        if not self._blend_lookup_enabled:
+            return
+        if not binding.token_ids.size or binding.token_offset == UNKNOWN_TOKEN_OFFSET:
+            return
+        self._blend_index.add(
+            binding.token_ids,
+            chunk_hash,
+            binding.token_offset,
+            BlendNamespace.from_object_key(key),
+        )
 
 
 # -- Durable encoding ---------------------------------------------------------

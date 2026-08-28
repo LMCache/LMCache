@@ -216,6 +216,21 @@ class ObjectKey:
             | local_rank
         )
 
+    @staticmethod
+    def WorldSizeFromKVRank(kv_rank: int) -> int:
+        """Recover the world size :meth:`ComputeKVRank` packed into a rank.
+
+        The inverse of that packing's top byte, kept beside it so the bit
+        layout has exactly one owner.
+
+        Args:
+            kv_rank: A ``kv_rank`` produced by :meth:`ComputeKVRank`.
+
+        Returns:
+            The parallel setup's world size (TP x PP).
+        """
+        return (kv_rank >> 24) & 0xFF
+
 
 @dataclass(frozen=True)
 class EncodedObjectKey:

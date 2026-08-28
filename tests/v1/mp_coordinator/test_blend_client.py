@@ -11,11 +11,13 @@ from collections.abc import Callable
 import time
 
 # Third Party
+import numpy as np
 import pytest
 
 # First Party
 from lmcache.v1.distributed.api import ObjectKey, Tier
 from lmcache.v1.mp_coordinator.api import (
+    BlendNamespace,
     CacheEventBatch,
     CacheEventEntry,
     CacheEventType,
@@ -24,10 +26,12 @@ from lmcache.v1.mp_coordinator.blend_client import (
     PENDING,
     BlendCoordinatorClient,
 )
-from lmcache.v1.mp_coordinator.schemas import decode_tokens
 from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
 
 CHUNK = 3
+MODEL = "m"
+WORLD_SIZE = 1
+NS = BlendNamespace(model_name=MODEL, world_size=WORLD_SIZE)
 
 
 def _directory_request(
@@ -37,7 +41,13 @@ def _directory_request(
 
     def request(method: str, path: str, payload: dict) -> dict:
         if method == "POST" and path == "/directory/blend-lookup":
-            matches = directory.blend_match(decode_tokens(payload["tokens_b64"]))
+            namespace = BlendNamespace(
+                model_name=payload["model_name"],
+                cache_salt=payload["cache_salt"],
+                world_size=payload["world_size"],
+            )
+            tokens = np.asarray(payload["token_ids"], dtype=np.uint64)
+            matches = directory.blend_match(tokens, namespace)
             return {
                 "matches": [
                     {
@@ -68,7 +78,14 @@ def _stored(directory: KeyDirectory, chunks: list[list[int]]) -> list[bytes]:
                 entries=[
                     CacheEventEntry(
                         key=ObjectKey(
-                            chunk_hash=chunk_hash, model_name="m", kv_rank=0
+                            chunk_hash=chunk_hash,
+                            model_name=MODEL,
+                            kv_rank=ObjectKey.ComputeKVRank(
+                                world_size=WORLD_SIZE,
+                                global_rank=0,
+                                local_world_size=WORLD_SIZE,
+                                local_rank=0,
+                            ),
                         ).to_encoded_object_key(),
                         size_bytes=100,
                         token_ids=tokens,
@@ -101,7 +118,7 @@ def test_match_finds_chunks_the_event_stream_reported():
     hashes = _stored(directory, [[1, 2, 3], [4, 5, 6]])
     client = BlendCoordinatorClient(request_fn=_directory_request(directory))
     try:
-        client.submit_match("r1", [1, 2, 3, 4, 5, 6])
+        client.submit_match("r1", [1, 2, 3, 4, 5, 6], NS)
         matches = _wait_match(client, "r1")
         assert isinstance(matches, list)
         # chunk_hash arrives as bytes, matching a local CBMatchResult.hash.
@@ -116,7 +133,7 @@ def test_match_finds_chunks_the_event_stream_reported():
 def test_match_is_empty_when_nothing_is_cached():
     client = BlendCoordinatorClient(request_fn=_directory_request(_directory()))
     try:
-        client.submit_match("r1", [1, 2, 3])
+        client.submit_match("r1", [1, 2, 3], NS)
         assert _wait_match(client, "r1") == []
     finally:
         client.close()
@@ -135,8 +152,8 @@ def test_submit_is_idempotent():
     _stored(directory, [[1, 2, 3]])
     client = BlendCoordinatorClient(request_fn=_directory_request(directory))
     try:
-        client.submit_match("r1", [1, 2, 3])
-        client.submit_match("r1", [1, 2, 3])  # no-op
+        client.submit_match("r1", [1, 2, 3], NS)
+        client.submit_match("r1", [1, 2, 3], NS)  # no-op
         matches = _wait_match(client, "r1")
         assert isinstance(matches, list) and len(matches) == 1
     finally:
@@ -149,7 +166,7 @@ def test_match_error_degrades_to_empty():
 
     client = BlendCoordinatorClient(request_fn=boom)
     try:
-        client.submit_match("r1", [1, 2, 3])
+        client.submit_match("r1", [1, 2, 3], NS)
         matches = _wait_match(client, "r1")
         assert matches == []  # failure -> local-only, never hangs
     finally:
@@ -161,7 +178,7 @@ def test_take_match_clears():
     _stored(directory, [[1, 2, 3]])
     client = BlendCoordinatorClient(request_fn=_directory_request(directory))
     try:
-        client.submit_match("r1", [1, 2, 3])
+        client.submit_match("r1", [1, 2, 3], NS)
         _wait_match(client, "r1")
         client.take_match("r1")
         assert client.poll_match("r1") is None
@@ -197,3 +214,42 @@ def test_maybe_create_rejects_bad_concurrency():
 
 def test_pending_sentinel_distinct():
     assert PENDING is not None and not isinstance(PENDING, list)
+
+
+def test_match_carries_the_namespace_to_the_coordinator():
+    """The server's own model, salt, and world size travel with the query
+    so the coordinator can scope matches to keys this server can expand."""
+    sent: list[dict] = []
+
+    def capture(method: str, path: str, payload: dict) -> dict:
+        sent.append(payload)
+        return {"matches": []}
+
+    client = BlendCoordinatorClient(request_fn=capture)
+    try:
+        namespace = BlendNamespace(
+            model_name="llama", cache_salt="tenant-a", world_size=4
+        )
+        client.submit_match("r1", [1, 2, 3], namespace)
+        _wait_match(client, "r1")
+        assert sent == [
+            {
+                "token_ids": [1, 2, 3],
+                "model_name": "llama",
+                "cache_salt": "tenant-a",
+                "world_size": 4,
+            }
+        ]
+    finally:
+        client.close()
+
+
+def test_another_namespace_gets_no_match_for_the_same_content():
+    directory = _directory()
+    _stored(directory, [[1, 2, 3]])
+    client = BlendCoordinatorClient(request_fn=_directory_request(directory))
+    try:
+        client.submit_match("r1", [1, 2, 3], BlendNamespace(model_name="other"))
+        assert _wait_match(client, "r1") == []
+    finally:
+        client.close()

@@ -6,9 +6,9 @@ ingestion, placement lookup, and stats)."""
 from fastapi.testclient import TestClient
 
 # First Party
+from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.mp_coordinator.app import create_app
 from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
-from lmcache.v1.mp_coordinator.schemas import encode_tokens
 from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
 
 
@@ -27,11 +27,28 @@ def _blend_client() -> TestClient:
     return TestClient(create_app(config))
 
 
-def _key(h: str = "aa", model: str = "m", rank: int = 0, salt: str = "") -> dict:
+MODEL = "m"
+WORLD_SIZE = 1
+
+
+def _key(
+    h: str = "aa",
+    model: str = MODEL,
+    rank: int = 0,
+    salt: str = "",
+    world_size: int = WORLD_SIZE,
+) -> dict:
+    """A key shaped the way a server emits one -- ``kv_rank`` packs the
+    parallel setup, which the blend namespace is derived from."""
     return {
         "chunk_hash_hex": h,
         "model_name": model,
-        "kv_rank": rank,
+        "kv_rank": ObjectKey.ComputeKVRank(
+            world_size=world_size,
+            global_rank=rank,
+            local_world_size=world_size,
+            local_rank=rank,
+        ),
         "cache_salt": salt,
     }
 
@@ -228,9 +245,21 @@ def _chunk_tokens(first: int, count: int) -> list[int]:
     return list(range(first, first + count))
 
 
-def _blend_lookup(client: TestClient, tokens: list[int]) -> dict:
+def _blend_lookup(
+    client: TestClient,
+    tokens: list[int],
+    model: str = MODEL,
+    salt: str = "",
+    world_size: int = WORLD_SIZE,
+) -> dict:
     resp = client.post(
-        "/directory/blend-lookup", json={"tokens_b64": encode_tokens(tokens)}
+        "/directory/blend-lookup",
+        json={
+            "token_ids": tokens,
+            "model_name": model,
+            "cache_salt": salt,
+            "world_size": world_size,
+        },
     )
     assert resp.status_code == 200
     return resp.json()
@@ -262,10 +291,34 @@ def test_blend_lookup_without_a_match_is_empty():
         assert data["matches"] == []
 
 
-def test_blend_lookup_rejects_a_malformed_token_buffer():
+def test_blend_lookup_rejects_a_query_missing_its_identity():
+    """The tokens form of ``/directory/lookup`` needs a model to resolve
+    keys with; the fragment form needs the same one to scope matches."""
     with _blend_client() as client:
-        resp = client.post("/directory/blend-lookup", json={"tokens_b64": "not!b64"})
+        resp = client.post("/directory/blend-lookup", json={"token_ids": [1, 2, 3]})
         assert resp.status_code == 422
+
+        resp = client.post("/directory/blend-lookup", json={"model_name": MODEL})
+        assert resp.status_code == 422
+
+
+def test_blend_lookup_does_not_match_across_namespaces():
+    """The chunk was stored by another model, so its hash expands into
+    keys this caller has nothing under -- offering it would only buy a
+    confirmed miss."""
+    chunk_size = MPCoordinatorConfig().chunk_size
+    content = _chunk_tokens(1000, chunk_size)
+    with _blend_client() as client:
+        entry = {
+            "key": _key(model="other"),
+            "size_bytes": 1024,
+            "token_ids": content,
+            "token_offset": 0,
+        }
+        _post_events(client, [_batch(entries=[entry])])
+
+        assert _blend_lookup(client, content)["matches"] == []
+        assert _blend_lookup(client, content, model="other")["matches"]
 
 
 def test_blend_lookup_stops_matching_a_deleted_chunk():
@@ -395,6 +448,8 @@ def test_stats_reports_blend_index_counts():
         assert client.get("/directory/stats").json()["blend"] == {
             "num_contents": 0,
             "num_chunks": 0,
+            "num_claims": 0,
+            "num_namespaces": 0,
             "table_size": 1024,
         }
 
@@ -409,3 +464,5 @@ def test_stats_reports_blend_index_counts():
         data = client.get("/directory/stats").json()["blend"]
         assert data["num_contents"] == 1
         assert data["num_chunks"] == 1
+        assert data["num_claims"] == 1
+        assert data["num_namespaces"] == 1

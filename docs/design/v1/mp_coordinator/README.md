@@ -258,9 +258,12 @@ Cross-request, cross-instance blend reuse is served by the **blend index**,
 a derived view of the key directory's token bindings: no separate publish
 path, matches verified token-exact, and eviction exact because it follows
 binding lifecycle. Blend servers query it with `POST
-/directory/blend-lookup` and get `(chunk_hash, old_st, cur_st)` per match,
-which they expand into per-rank object keys with their own model and salt.
-The match window is the fleet chunk size (`CHUNK_SIZE`), probed at
+/directory/blend-lookup` — the same tokens form `/directory/lookup` takes —
+and get `(chunk_hash, old_st, cur_st)` per match, which they expand into
+per-rank object keys with their own model and salt. The query's
+`model_name`/`cache_salt`/`world_size` scope matches to chunks stored in
+that namespace, so a match always expands into keys that exist. The match
+window is the fleet chunk size (`CHUNK_SIZE`), probed at
 `BLEND_PROBE_STRIDE`. See [blend_index.md](blend_index.md).
 
 The previous design — `blend_directory.py` (`GlobalBlendMatcher`) with its own

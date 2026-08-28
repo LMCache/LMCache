@@ -12,6 +12,7 @@ import pytest
 from lmcache.v1.distributed.api import ObjectKey, Tier
 from lmcache.v1.mp_coordinator.api import (
     UNKNOWN_TOKEN_OFFSET,
+    BlendNamespace,
     CacheEventBatch,
     CacheEventEntry,
     CacheEventType,
@@ -21,6 +22,11 @@ from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
 
 def _key(hash_byte: int) -> ObjectKey:
     return ObjectKey(chunk_hash=bytes([hash_byte]) * 4, model_name="m", kv_rank=0)
+
+
+# The namespace ``_key`` stores in, and therefore the one fragment queries
+# over these fixtures must ask from.
+NS = BlendNamespace.from_object_key(_key(0))
 
 
 def _batch(
@@ -293,7 +299,7 @@ def test_binding_records_the_chunks_token_offset():
     directory.consume(_batch(seq=1, keys=[_key(1)], token_ids=[7, 8], token_offset=512))
 
     assert directory.get_token_ids([_chash(1)]) == [(7, 8)]
-    (match,) = directory.blend_match(np.asarray([7, 8], dtype=np.uint64))
+    (match,) = directory.blend_match(np.asarray([7, 8], dtype=np.uint64), NS)
     assert match.old_st == 512
 
 
@@ -322,10 +328,10 @@ def test_restore_replaces_tokens_and_offset():
     directory.consume(_batch(seq=2, keys=[_key(1)], token_ids=[3, 4], token_offset=256))
 
     assert directory.get_token_ids([_chash(1)]) == [(3, 4)]
-    (match,) = directory.blend_match(np.asarray([3, 4], dtype=np.uint64))
+    (match,) = directory.blend_match(np.asarray([3, 4], dtype=np.uint64), NS)
     assert match.old_st == 256
     # The superseded content is no longer discoverable.
-    assert directory.blend_match(np.asarray([1, 2], dtype=np.uint64)) == []
+    assert directory.blend_match(np.asarray([1, 2], dtype=np.uint64), NS) == []
 
 
 def test_token_ids_outside_uint32_leave_the_binding_unfilled():

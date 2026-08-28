@@ -1293,7 +1293,9 @@ only). Matching is chunked at the coordinator's ``--chunk-size`` — which must
 equal the MP servers' ``--chunk-size`` — probing every
 ``--blend-probe-stride`` positions.
 
-**Request body:**
+**Request body** — the same tokens form ``/directory/lookup`` takes, since
+both questions describe content the same way. The identity fields are not
+optional here: they name the namespace matches are scoped to.
 
 .. list-table::
    :header-rows: 1
@@ -1302,10 +1304,19 @@ equal the MP servers' ``--chunk-size`` — probing every
    * - Field
      - Type
      - Description
-   * - ``tokens_b64``
+   * - ``token_ids``
+     - list[int]
+     - The request's full query token sequence. Required.
+   * - ``model_name``
      - string
-     - Query tokens packed as base64 little-endian ``uint32`` (see
-       ``encode_tokens`` / ``decode_tokens`` in ``schemas.py``).
+     - Model the caller retrieves under. Required.
+   * - ``world_size``
+     - int
+     - The caller's world size (TP x PP), selecting its rank fan-out.
+       Defaults to ``1``.
+   * - ``cache_salt``
+     - string
+     - The caller's per-tenant isolation salt. Defaults to ``""``.
 
 **Response** (``200 OK``):
 
@@ -1326,10 +1337,17 @@ position in the query (re-RoPE target). Matches are sorted ascending by
 them resolves overlaps itself. A query shorter than one chunk, or a coordinator
 without ``--enable-blend-lookup``, returns ``{"matches": []}``.
 
+Only chunks some instance stored under the request's
+``model_name`` / ``cache_salt`` / ``world_size`` are returned. A chunk hash
+names content and prefix only, so an unscoped match could name KV under
+another model or tenant, which the caller's own key expansion could never
+retrieve. Content held solely by another namespace therefore returns no
+match rather than one that misses at prefetch.
+
 **HTTP status codes:**
 
 - ``200``: lookup completed (an empty match list is not an error).
-- ``422``: ``tokens_b64`` is not valid base64 or not a whole number of
-  ``uint32`` tokens.
+- ``400``: ``token_ids`` exceeds the per-request cap.
+- ``422``: ``token_ids`` is missing, or supplied without ``model_name``.
 
 Index counts are reported under the ``blend`` key of ``GET /directory/stats``.
