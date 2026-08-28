@@ -184,6 +184,13 @@ The L1 reverse index (`_l1_keys_by_instance`) is what makes
 full directory scan. The emitter's stream cursor is **not** here — it
 belongs to the gate ([ingest.md](ingest.md)).
 
+Placement counts and reported logical bytes are maintained per tier alongside
+these mutations. They are derived state rather than checkpoint payload:
+`restore()` rebuilds them from the restored placements. `placement_stats()`
+copies the four scalar totals under the directory lock, keeping an
+OpenTelemetry collection O(1) instead of scanning a fleet-wide directory while
+holding that lock.
+
 The Python-phase directory is keyed by `ObjectKey` directly (hashable
 frozen dataclass). The RFC's 16-byte
 `key_hash` with interned `model_id`/`salt_id` is a memory/native-port
@@ -255,4 +262,3 @@ directives (M3–M4 of the RFC).
 `key → tokens` introspection, fed by `TOKENS` events and refcounted from
 key records via the `content_hash` back-pointer. Nothing
 correctness-bearing reads it, so it ships with its first real consumer.
-

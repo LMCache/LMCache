@@ -4,6 +4,9 @@ from gate-admitted cache events, lookup, listing, and fencing cleanup.
 Stream admission itself (seq dedup, gap detection, incarnation
 comparison) is the gate's job -- see ``test_event_gate.py``."""
 
+# Standard
+from dataclasses import FrozenInstanceError
+
 # Third Party
 import numpy as np
 import pytest
@@ -16,7 +19,7 @@ from lmcache.v1.mp_coordinator.api import (
     CacheEventEntry,
     CacheEventType,
 )
-from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
+from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory, PlacementStats
 
 
 def _key(hash_byte: int) -> ObjectKey:
@@ -523,6 +526,177 @@ def test_stats_counts_keys_and_placements():
     # node-b reported only an L2 placement: absent from the L1 fencing
     # index (its placement stays visible via lookup / the keys listing).
     assert stats.l1_keys_by_instance["node-b"] == 0
+
+
+# -- Placement stats ---------------------------------------------------------
+
+
+def test_empty_placement_stats_are_zero_and_immutable() -> None:
+    stats = KeyDirectory().placement_stats()
+
+    assert stats == PlacementStats(
+        l1_count=0,
+        l1_size_bytes=0,
+        l2_count=0,
+        l2_size_bytes=0,
+    )
+    with pytest.raises(FrozenInstanceError):
+        stats.l1_count = 1  # type: ignore[misc]
+
+
+def test_placement_stats_count_every_current_placement() -> None:
+    directory = KeyDirectory()
+    directory.consume(_batch(instance_id="node-a", keys=[_key(1)], size_bytes=100))
+    directory.consume(_batch(instance_id="node-b", keys=[_key(1)], size_bytes=200))
+    directory.consume(
+        _batch(
+            instance_id="node-a",
+            seq=2,
+            keys=[_key(1)],
+            backend="cxl",
+            size_bytes=300,
+        )
+    )
+    directory.consume(
+        _batch(
+            instance_id="node-a",
+            seq=3,
+            keys=[_key(1)],
+            tier=Tier.L2,
+            backend="fs",
+            size_bytes=400,
+        )
+    )
+
+    assert directory.placement_stats() == PlacementStats(
+        l1_count=3,
+        l1_size_bytes=600,
+        l2_count=1,
+        l2_size_bytes=400,
+    )
+
+
+def test_placement_stats_follow_upsert_and_delete() -> None:
+    directory = KeyDirectory()
+    directory.consume(_batch(seq=1, keys=[_key(1)], size_bytes=100))
+    directory.consume(_batch(seq=2, keys=[_key(1)], size_bytes=100))
+    directory.consume(_batch(seq=3, keys=[_key(1)], size_bytes=250))
+
+    assert directory.placement_stats().l1_count == 1
+    assert directory.placement_stats().l1_size_bytes == 250
+
+    directory.consume(
+        _batch(
+            seq=4,
+            event_type=CacheEventType.DELETE,
+            keys=[_key(1)],
+            backend="missing",
+        )
+    )
+    directory.consume(_batch(seq=5, event_type=CacheEventType.DELETE, keys=[_key(9)]))
+    assert directory.placement_stats().l1_size_bytes == 250
+
+    directory.consume(
+        _batch(
+            seq=6,
+            event_type=CacheEventType.DELETE,
+            keys=[_key(1)],
+            size_bytes=999,
+        )
+    )
+    assert directory.placement_stats() == PlacementStats(0, 0, 0, 0)
+
+
+def test_placement_stats_follow_instance_fencing() -> None:
+    directory = KeyDirectory()
+    directory.consume(
+        _batch(instance_id="node-a", seq=1, keys=[_key(1)], size_bytes=100)
+    )
+    directory.consume(
+        _batch(instance_id="node-b", seq=1, keys=[_key(1)], size_bytes=200)
+    )
+    directory.consume(
+        _batch(
+            instance_id="node-a",
+            seq=2,
+            keys=[_key(1)],
+            tier=Tier.L2,
+            backend="fs",
+            size_bytes=300,
+        )
+    )
+
+    directory.fence_instance("node-a")
+
+    assert directory.placement_stats() == PlacementStats(
+        l1_count=1,
+        l1_size_bytes=200,
+        l2_count=1,
+        l2_size_bytes=300,
+    )
+
+
+def test_shared_l1_stats_follow_reporter_replacement_and_fencing() -> None:
+    directory = KeyDirectory()
+    directory.consume(
+        _batch(
+            instance_id="node-a",
+            seq=1,
+            keys=[_key(1)],
+            backend="cxl",
+            size_bytes=100,
+            shared=True,
+        )
+    )
+    directory.consume(
+        _batch(
+            instance_id="node-b",
+            seq=1,
+            keys=[_key(1)],
+            backend="cxl",
+            size_bytes=160,
+            shared=True,
+        )
+    )
+    assert directory.placement_stats() == PlacementStats(1, 160, 0, 0)
+
+    directory.fence_instance("node-a")
+    assert directory.placement_stats() == PlacementStats(1, 160, 0, 0)
+
+    directory.fence_instance("node-b")
+    assert directory.placement_stats() == PlacementStats(0, 0, 0, 0)
+
+
+def test_placement_stats_are_rebuilt_from_a_capture() -> None:
+    live = KeyDirectory()
+    live.consume(_batch(seq=1, keys=[_key(1), _key(2)], size_bytes=100))
+    live.consume(
+        _batch(
+            seq=2,
+            keys=[_key(1)],
+            tier=Tier.L2,
+            backend="fs",
+            size_bytes=250,
+        )
+    )
+
+    restarted = KeyDirectory()
+    restarted.restore(live.capture())
+
+    assert restarted.placement_stats() == live.placement_stats()
+
+
+def test_failed_restore_keeps_existing_placement_stats() -> None:
+    source = KeyDirectory()
+    source.consume(_batch(keys=[_key(1)], size_bytes=100))
+    target = KeyDirectory()
+    target.consume(_batch(keys=[_key(2)], size_bytes=300))
+    before = target.placement_stats()
+
+    with pytest.raises(ValueError, match="requires an empty directory"):
+        target.restore(source.capture())
+
+    assert target.placement_stats() == before
 
 
 # -- Shared locations ----------------------------------------------------------

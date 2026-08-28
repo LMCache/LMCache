@@ -545,6 +545,13 @@ Observable Gauges
 Point-in-time state snapshots registered via ``register_gauge``
 (pull-based OTel observable gauges).
 
+The Coordinator Key Directory gauges always emit one observation for each
+``tier`` value, ``l1`` and ``l2``, including zero-valued observations for an
+empty tier.  They describe the directory's current placements.  Placement
+bytes are the sum of the logical object sizes reported for those placements,
+not unique-object bytes, physical allocation, or storage capacity.  The same
+object is therefore included once for every placement recorded for it.
+
 The three in-flight metrics carry two attributes that distinguish
 adapters even when more than one is registered with the same backend
 type — same shape as ``lmcache_mp.l2_store_completed``:
@@ -562,6 +569,14 @@ Adapters with no in-flight work emit no datapoint for that scrape.
    * - Metric
      - Type
      - Description
+   * - ``lmcache_mp.key_directory_placement_count``
+     - ObservableGauge (attr: ``tier``)
+     - Placements currently recorded in the Coordinator Key Directory for
+       each cache tier.
+   * - ``lmcache_mp.key_directory_placement_size_bytes``
+     - ObservableGauge (attr: ``tier``)
+     - Reported logical object bytes summed across the placements currently
+       recorded in each cache tier.
    * - ``lmcache_mp.active_prefetch_jobs``
      - ObservableGauge
      - Number of prefetch jobs currently in-flight. A sustained high
