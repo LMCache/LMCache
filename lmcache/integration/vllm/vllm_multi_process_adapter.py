@@ -42,6 +42,7 @@ from lmcache.v1.platform.base.event_ipc import (
     get_event_ipc_backend,
 )
 from lmcache.v1.platform.isolated_ipc import set_isolated_ipc
+from lmcache.v1.platform.vmm_ipc import set_use_vmm_api
 
 if TYPE_CHECKING:
     # First Party
@@ -53,9 +54,22 @@ logger = init_logger(__name__)
 class ExtraConfigDefault(enum.Enum):
     """Centralized default values for extra_config keys.
 
-    Each member's *name* is the key used in the extra_config dict,
-    and its *value* is the default.
+    Each member's *name* is the key used in the extra_config dict, and
+    its ``default`` attribute is the default value. Defaults live in an
+    attribute rather than the enum value because equal enum values
+    silently alias members (two ``False`` defaults would collapse into
+    one member); each member's ``_value_`` is a unique ordinal instead.
     """
+
+    #: The default value for this key (annotation only -- enum members
+    #: are created from the assigned literals below, not from this).
+    default: Any
+
+    def __new__(cls, default: Any) -> "ExtraConfigDefault":
+        obj = object.__new__(cls)
+        obj._value_ = len(cls.__members__)
+        obj.default = default
+        return obj
 
     # Timeout (seconds) for blocking MQ requests: initial
     # chunk-size query, KV cache registration/unregistration,
@@ -77,12 +91,17 @@ class ExtraConfigDefault(enum.Enum):
     # lmcache/v1/platform/isolated_ipc.py. Must match the LMCache server's
     # ``--isolated-ipc`` setting.
     isolated_ipc = False
+    # Whether the engine allocates its KV cache through the CUDA VMM API
+    # (vLLM's ``--enable-cumem-allocator``), so KV registration must use
+    # VMM IPC instead of legacy CUDA IPC handles; see
+    # lmcache/v1/platform/vmm_ipc.py.
+    use_vmm_api = False
 
 
 # Backward-compatible aliases for the legacy `lmcache_mp_connector_0180`
 # entry point, which still passes these as positional/keyword args.
-DEFAULT_MQ_TIMEOUT: float = ExtraConfigDefault.mq_timeout.value
-DEFAULT_HEARTBEAT_INTERVAL: float = ExtraConfigDefault.heartbeat_interval.value
+DEFAULT_MQ_TIMEOUT: float = ExtraConfigDefault.mq_timeout.default
+DEFAULT_HEARTBEAT_INTERVAL: float = ExtraConfigDefault.heartbeat_interval.default
 
 _EXTRA_CONFIG_KEY_PREFIX = "lmcache.mp."
 
@@ -142,7 +161,7 @@ def _resolve_extra_config(
 
     resolved: dict[str, Any] = {}
     for item in ExtraConfigDefault:
-        default = item.value
+        default = item.default
         raw = stripped.get(item.name)
         value = _coerce_extra_config_value(default, raw) if raw is not None else default
         if value != default:
@@ -1156,6 +1175,7 @@ class LMCacheMPWorkerAdapter:
             else:
                 self._mp_transfer_mode = None
             set_isolated_ipc(cfg[ExtraConfigDefault.isolated_ipc.name])
+            set_use_vmm_api(cfg[ExtraConfigDefault.use_vmm_api.name])
         else:
             self._mp_transfer_mode = None
         self.mq_client = MessageQueueClient(server_url, context)

@@ -28,6 +28,7 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.protocol import RequestType
 from lmcache.v1.platform.isolated_ipc import is_isolated_ipc, set_isolated_ipc
+from lmcache.v1.platform.vmm_ipc import is_use_vmm_api, set_use_vmm_api
 
 
 class FakeCudaEvent:
@@ -354,6 +355,27 @@ def test_isolated_ipc_untouched_without_extra_config(
     set_isolated_ipc(True)
     _make_worker_adapter(extra_config=None)
     assert is_isolated_ipc() is True
+
+
+@pytest.fixture
+def restore_use_vmm_api():
+    """Restore the process-global VMM-API switch after the test."""
+    previous = is_use_vmm_api()
+    yield
+    set_use_vmm_api(previous)
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [(False, False), (True, True), ("false", False), ("true", True)],
+)
+def test_use_vmm_api_extra_config_sets_process_switch(
+    fake_adapter, restore_use_vmm_api, raw, expected
+):
+    """The lmcache.mp.use_vmm_api key drives the process-global switch,
+    accepting both JSON booleans and their string spellings."""
+    _make_worker_adapter(extra_config={"lmcache.mp.use_vmm_api": raw})
+    assert is_use_vmm_api() is expected
 
 
 def test_create_recorded_event_routes_through_backend(fake_adapter, monkeypatch):
