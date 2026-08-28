@@ -19,6 +19,10 @@
 #     on them. Suite-local files under .buildkite/k3_tests/<suite>/ stay scoped
 #     to that suite, while shared harness changes under .buildkite/k3_harness/
 #     are classified by the harness file they touch.
+#   - Special-case platform tests are treated as unrelated for the unit
+#     pipeline: tests/v1/platform/{musa,rbln,xpu} do not trigger unit. The xpu
+#     pipeline also treats these platform paths as non-targets while allowing
+#     tests/platform/* to remain relevant.
 #
 # Opt-out: add a "force-ci" label to the PR on GitHub. Buildkite exposes
 # PR labels via BUILDKITE_PULL_REQUEST_LABELS; if "force-ci" is present
@@ -49,88 +53,103 @@ _path_filter_is_trivial() {
     return 1
 }
 
-_path_filter_is_runtime_surface() {
-    case "$1" in
-        lmcache/*) return 0 ;;
-        csrc/*) return 0 ;;
-        requirements/*) return 0 ;;
-        pyproject.toml|pyproject_cli.toml|setup.py|hatch_build.py|conftest.py) return 0 ;;
-        CMakeLists.txt|MANIFEST.in|Cargo.toml|rust-toolchain.toml) return 0 ;;
-        .buildkite/k3_harness/*) return 0 ;;
-        .buildkite/k3_tests/common_scripts/*) return 0 ;;
-    esac
-    return 1
-}
+_path_filter_should_skip_for_pipeline() {
+    local pipeline_kind="$1"
+    local changed_file="$2"
 
-_path_filter_is_unit_surface() {
-    case "$1" in
-        .buildkite/k3_tests/unit/*) return 0 ;;
-        tests/v1/platform/musa/*|tests/v1/platform/rbln/*|tests/v1/platform/xpu/*)
+    # 1) trivial files are always skipped.
+    if _path_filter_is_trivial "$changed_file"; then
+        return 0
+    fi
+
+    case "$pipeline_kind" in
+        unit)
+            case "$changed_file" in
+                tests/v1/platform/musa/*|tests/v1/platform/rbln/*|tests/v1/platform/xpu/*)
+                    return 0
+                    ;;
+                .buildkite/k3_tests/unit/*|tests/*)
+                    return 1
+                    ;;
+            esac
+            ;;
+        integration)
+            case "$changed_file" in
+                .buildkite/k3_tests/integration/*|.buildkite/configs/local_cpu.yaml|.buildkite/configs/local_disk.yaml)
+                    return 1
+                    ;;
+                tests/*|.buildkite/k3_tests/*)
+                    return 0
+                    ;;
+            esac
+            ;;
+        correctness)
+            case "$changed_file" in
+                .buildkite/correctness/*|.buildkite/k3_tests/correctness/*)
+                    return 1
+                    ;;
+                tests/*|.buildkite/k3_tests/*)
+                    return 0
+                    ;;
+            esac
+            ;;
+        multiprocess)
+            case "$changed_file" in
+                benchmarks/long_doc_qa/*|.buildkite/k3_tests/multiprocess/*)
+                    return 1
+                    ;;
+                tests/*|.buildkite/k3_tests/*)
+                    return 0
+                    ;;
+            esac
+            ;;
+        comprehensive)
+            case "$changed_file" in
+                .buildkite/configs/*|benchmarks/*|examples/disagg_prefill*/*|.buildkite/k3_tests/comprehensive/*)
+                    return 1
+                    ;;
+                tests/*|.buildkite/k3_tests/*)
+                    return 0
+                    ;;
+            esac
+            ;;
+        blend)
+            case "$changed_file" in
+                .buildkite/k3_harness/setup-blend-env.sh|.buildkite/k3_tests/blend/*)
+                    return 1
+                    ;;
+                tests/*|.buildkite/k3_tests/*)
+                    return 0
+                    ;;
+            esac
+            ;;
+        sglang)
+            case "$changed_file" in
+                .buildkite/k3_harness/setup-sglang-env.sh|lmcache/integration/sglang/*|.buildkite/k3_tests/sglang/*)
+                    return 1
+                    ;;
+                tests/*|.buildkite/k3_tests/*)
+                    return 0
+                    ;;
+            esac
+            ;;
+        xpu)
+            case "$changed_file" in
+                tests/v1/platform/xpu/*|.buildkite/k3_tests/xpu/*)
+                    return 1
+                    ;;
+                tests/platform/*|tests/v1/platform/musa/*|tests/v1/platform/rbln/*)
+                    return 0
+                    ;;
+            esac
+            ;;
+        generic)
             return 1
             ;;
-        tests/*) return 0 ;;
     esac
-    return 1
-}
 
-_path_filter_is_integration_surface() {
-    case "$1" in
-        .buildkite/configs/local_cpu.yaml|.buildkite/configs/local_disk.yaml) return 0 ;;
-        .buildkite/k3_tests/integration/*) return 0 ;;
-    esac
-    return 1
-}
-
-_path_filter_is_correctness_surface() {
-    case "$1" in
-        .buildkite/correctness/*) return 0 ;;
-        .buildkite/k3_tests/correctness/*) return 0 ;;
-    esac
-    return 1
-}
-
-_path_filter_is_multiprocess_surface() {
-    case "$1" in
-        benchmarks/long_doc_qa/*) return 0 ;;
-        .buildkite/k3_tests/multiprocess/*) return 0 ;;
-    esac
-    return 1
-}
-
-_path_filter_is_comprehensive_surface() {
-    case "$1" in
-        .buildkite/configs/*) return 0 ;;
-        benchmarks/*) return 0 ;;
-        examples/disagg_prefill*/*) return 0 ;;
-        .buildkite/k3_tests/comprehensive/*) return 0 ;;
-    esac
-    return 1
-}
-
-_path_filter_is_blend_surface() {
-    case "$1" in
-        .buildkite/k3_harness/setup-blend-env.sh) return 0 ;;
-        .buildkite/k3_tests/blend/*) return 0 ;;
-    esac
-    return 1
-}
-
-_path_filter_is_sglang_surface() {
-    case "$1" in
-        .buildkite/k3_harness/setup-sglang-env.sh) return 0 ;;
-        lmcache/integration/sglang/*) return 0 ;;
-        .buildkite/k3_tests/sglang/*) return 0 ;;
-    esac
-    return 1
-}
-
-_path_filter_is_xpu_surface() {
-    case "$1" in
-        tests/v1/platform/xpu/*) return 0 ;;
-        tests/platform/*|tests/v1/platform/*) return 1 ;;
-        tests/*) return 0 ;;
-        .buildkite/k3_tests/xpu/*) return 0 ;;
-    esac
+    # 4) fallback: unknown / not explicitly classified files are treated as
+    # relevant and therefore do not skip the pipeline.
     return 1
 }
 
@@ -152,46 +171,13 @@ _path_filter_file_affects_pipeline() {
     local pipeline_kind="$1"
     local changed_file="$2"
 
-    case "$pipeline_kind" in
-        unit)
-            _path_filter_is_runtime_surface "$changed_file" ||
-                _path_filter_is_unit_surface "$changed_file"
-            ;;
-        integration)
-            _path_filter_is_runtime_surface "$changed_file" ||
-                _path_filter_is_integration_surface "$changed_file"
-            ;;
-        correctness)
-            _path_filter_is_runtime_surface "$changed_file" ||
-                _path_filter_is_correctness_surface "$changed_file"
-            ;;
-        multiprocess)
-            _path_filter_is_runtime_surface "$changed_file" ||
-                _path_filter_is_multiprocess_surface "$changed_file"
-            ;;
-        comprehensive)
-            _path_filter_is_runtime_surface "$changed_file" ||
-                _path_filter_is_comprehensive_surface "$changed_file"
-            ;;
-        blend)
-            _path_filter_is_runtime_surface "$changed_file" ||
-                _path_filter_is_blend_surface "$changed_file"
-            ;;
-        sglang)
-            _path_filter_is_runtime_surface "$changed_file" ||
-                _path_filter_is_sglang_surface "$changed_file"
-            ;;
-        xpu)
-            _path_filter_is_runtime_surface "$changed_file" ||
-                _path_filter_is_xpu_surface "$changed_file"
-            ;;
-        generic)
-            _path_filter_is_runtime_surface "$changed_file"
-            ;;
-        *)
-            return 1
-            ;;
-    esac
+    # This is the boolean inverse of _path_filter_should_skip_for_pipeline:
+    # if we would skip, then this file does not affect the pipeline.
+    if _path_filter_should_skip_for_pipeline "$pipeline_kind" "$changed_file"; then
+        return 1
+    fi
+
+    return 0
 }
 
 # ── Changed-files detection ───────────────────────────────────
@@ -280,12 +266,12 @@ should_skip_ci() {
             echo "  [trivial]       $f" >&2
         else
             has_non_trivial=1
-            if _path_filter_file_affects_pipeline "$pipeline_kind" "$f"; then
-                has_relevant_change=1
-                echo "  [relevant]      $f" >&2
-            else
+            if _path_filter_should_skip_for_pipeline "$pipeline_kind" "$f"; then
                 has_unrelated_change=1
                 echo "  [unrelated]     $f" >&2
+            else
+                has_relevant_change=1
+                echo "  [relevant]      $f" >&2
             fi
         fi
     done <<< "$changed_files"

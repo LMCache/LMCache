@@ -53,21 +53,18 @@ instead of `buildkite-agent pipeline upload` directly. The wrapper
   not GitHub Actions, so workflow / CODEOWNERS / template changes do not
   affect them.)
 
-The filter is now test-aware instead of one global non-trivial rule. In
-practice, it evaluates the uploaded pipeline against a shared runtime surface
-plus a few suite-specific surfaces:
+The filter intentionally uses a conservative blacklist instead of a whitelist.
+In other words, only files that are explicitly known to be irrelevant are
+skipped. Anything else is treated as potentially functional and therefore keeps
+that pipeline enabled.
 
-| Scope | Surface |
-|------|---------|
-| Shared runtime surface | `lmcache/**`, `csrc/**`, `requirements/**`, build files such as `pyproject.toml` / `setup.py` / `CMakeLists.txt`, shared CI files like `.buildkite/k3_harness/**`, and `.buildkite/k3_tests/common_scripts/` |
-| unit | Shared runtime surface + `tests/**` except `tests/v1/platform/musa/**`, `tests/v1/platform/rbln/**`, and `tests/v1/platform/xpu/**` |
-| integration | Shared runtime surface + `.buildkite/k3_tests/integration/**` |
-| correctness | Shared runtime surface + `.buildkite/k3_tests/correctness/**` |
-| multiprocess | Shared runtime surface + `benchmarks/long_doc_qa/**`, `.buildkite/k3_tests/multiprocess/**` |
-| comprehensive | Shared runtime surface + `benchmarks/**`, `examples/disagg_prefill*`, `.buildkite/k3_tests/comprehensive/**` |
-| blend | Shared runtime surface + `.buildkite/k3_tests/blend/**`, `.buildkite/k3_harness/setup-blend-env.sh` |
-| sglang | Shared runtime surface + `lmcache/integration/sglang/**`, `.buildkite/k3_tests/sglang/**`, `.buildkite/k3_harness/setup-sglang-env.sh` |
-| xpu | Shared runtime surface + `tests/**` except `tests/platform/**` and `tests/v1/platform/**`, plus `tests/v1/platform/xpu/**` and `.buildkite/k3_tests/xpu/**` |
+Known-irrelevant patterns include docs-only changes (`*.md`, `docs/**`,
+`asset/**`, `.github/**`, `LICENSE*`, `NOTICE*`, `.gitignore`,
+`.gitattributes`, `.editorconfig`, `.mailmap`, `CODEOWNERS`) and the K3 docs
+pages under `.buildkite/k3_tests/`.
+
+This policy is safer than a whitelist because it avoids false negatives: when a
+change may affect behavior, even if it is not 100% confirmed, the job still runs.
 
 
 Detection:
