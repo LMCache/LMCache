@@ -242,17 +242,15 @@ inside `metadata` discriminates ops.
 
 ## Blend Server Lifecycle Sentinels
 
-CPU-synchronous sentinels published by `modules/blend.py` (V2) and `modules/blend_v3.py` (V3)
-to bracket request scope and guard GPU callback races.  Published via
+CPU-synchronous sentinels published by `modules/blend.py` (`BlendModule`) to
+bracket request scope and guard GPU callback races.  Published via
 `EventBus.publish()` (not `publish_on_stream`).
 
 | EventType | Metadata keys | Types | Published by / when |
 |---|---|---|---|
-| `CB_REQUEST_START` | *(none)* | — | `BlendModule.cb_lookup_pre_computed` — at request arrival **or** `BlendV3Module.cb_unified_lookup` — first (submitting) call |
-| `CB_STORE_PRE_COMPUTED_SUBMITTED` | `instance_id` | `int` | `BlendModule.cb_store_pre_computed` — before GPU store enqueue |
-| `CB_RETRIEVE_SUBMITTED` | `instance_id`, `expects_store_final` | `int`, `bool` (default `True`) | `BlendModule.cb_retrieve_pre_computed` **or** `BlendV3Module.cb_retrieve_pre_computed` — before GPU retrieve enqueue.  V3 sends `expects_store_final=False`: it has no post-inference store_final, so the root span closes on the last `CB_RETRIEVE_END` instead of waiting for one |
-| `CB_STORE_FINAL_SUBMITTED` | `instance_id` | `int` | `BlendModule.cb_store_final` — before GPU store enqueue |
-| `CB_REQUEST_END` | *(none)* | — | V2: `BlendModule.cb_lookup_pre_computed` (early return: no matches or no GPU context) **or** `BlendModule.cb_store_final` — after SUBMITTED, before GPU work.  V3: `BlendV3Module.cb_unified_lookup` when the finalized result carries nothing to retrieve (miss / prefix-only — no retrieve will follow), otherwise `BlendV3Module.cb_retrieve_pre_computed` on every exit (no-op success, read failure, exception, success — the last on the GPU stream) |
+| `CB_REQUEST_START` | *(none)* | — | `BlendModule.cb_unified_lookup` — first (submitting) call |
+| `CB_RETRIEVE_SUBMITTED` | `instance_id` | `int` | `BlendModule.cb_retrieve_pre_computed` — before GPU retrieve enqueue. Holds `cb.request` open across the scatter so a sibling TP worker's early `CB_REQUEST_END` cannot close the root; the root closes on the last `CB_RETRIEVE_END` |
+| `CB_REQUEST_END` | *(none)* | — | `BlendModule.cb_unified_lookup` when the finalized result carries nothing to retrieve (miss / prefix-only — no retrieve will follow), otherwise `BlendModule.cb_retrieve_pre_computed` on every exit (no-op success, read failure, exception, success — the last on the GPU stream) |
 
 ---
 
@@ -265,22 +263,18 @@ These events use `session_id` on the `Event` dataclass (sourced from
 |---|---|---|
 | `CB_LOOKUP_START` | `num_tokens` | `int` |
 | `CB_LOOKUP_END` | `num_tokens`, `requested_tokens`, `hit_tokens`, `fingerprint_hits`, `storage_hits`, `stale_chunks`, `no_gpu_context` | `int`, `int`, `int`, `int`, `int`, `int`, `bool` |
-| `CB_STORE_PRE_COMPUTED_START` | `instance_id`, `num_tokens` | `int`, `int` |
-| `CB_STORE_PRE_COMPUTED_END` | `instance_id`, `num_tokens`, `stored_chunks`, `success` | `int`, `int`, `int`, `bool` |
-| `CB_RETRIEVE_START` | V2: `instance_id`, `num_chunks` — V3: `num_chunks`, `model_name`, `worker_id` | `int`, `int` — `int`, `str`, `int \| None` |
-| `CB_RETRIEVE_END` | V2: `instance_id`, `num_chunks`, `success` — V3: `success`, `worker_id` | `int`, `int`, `bool` — `bool`, `int \| None` |
-| `CB_STORE_FINAL_START` | `instance_id`, `num_tokens` | `int`, `int` |
-| `CB_STORE_FINAL_END` | `instance_id`, `num_tokens`, `stored_chunks`, `success` | `int`, `int`, `int`, `bool` |
+| `CB_RETRIEVE_START` | `num_chunks`, `model_name`, `worker_id` | `int`, `str`, `int \| None` |
+| `CB_RETRIEVE_END` | `success`, `worker_id` | `bool`, `int \| None` |
 | `CB_FINGERPRINTS_REGISTERED` | `num_chunks`, `num_tokens` | `int`, `int` |
 | `CB_CHUNKS_EVICTED` | `num_chunks` | `int` |
 
-Under V3 (`blend_v3.py`) `CB_LOOKUP_END` carries `prefix_hit_tokens`,
+`CB_LOOKUP_END` also carries `prefix_hit_tokens`,
 `segmented_prefix_hit_tokens`, `non_prefix_hit_tokens`, `prefix_hits` and
-`prefix_chunks` (all `int`), with `hit_tokens` their sum.  V3 also reports the
-real `no_gpu_context` and, unlike V2, the real `requested_tokens`, so such a
-request lands in the hit-rate denominator as a miss.
+`prefix_chunks` (all `int`), with `hit_tokens` their sum.  A `no_gpu_context`
+lookup still reports the real `requested_tokens`, so such a request lands in
+the hit-rate denominator as a miss.
 
-Under V3 `CB_FINGERPRINTS_REGISTERED` is published by the fingerprint-queue
+`CB_FINGERPRINTS_REGISTERED` is published by the fingerprint-queue
 drainers from what `on_new_token_hashes` returned, so `num_chunks` counts only
 chunks *newly indexed*: it excludes the chunks the store skipped **and** chunks
 the matcher deduplicated (already registered by an earlier store); `num_tokens`
@@ -288,7 +282,7 @@ is `num_chunks × chunk_size`.  A job that indexed nothing (a re-store of known
 content) publishes no event.  `session_id` is the enqueuing store's request —
 generally *not* the request that drained the queue.
 
-Under V3 the retrieve and scatter events (`CB_RETRIEVE_START/END`,
+The retrieve and scatter events (`CB_RETRIEVE_START/END`,
 `CB_SCATTER_START/END`) also carry `worker_id` (`int | None`, the
 `IPCCacheServerKey.worker_id` of the calling rank).  At TP>1 every rank issues
 its own retrieve under the shared `request_id`, so a consumer that pairs
@@ -298,12 +292,11 @@ still keys `cb.retrieve` / `cb.scatter` spans by session only (known follow-up
 — `worker_id` is on the events, so the fix is mechanical).  Two caveats for
 consumers: these events travel through `publish_on_stream`, whose native
 recorder carries non-`int` metadata as strings, so a `None` `worker_id` can
-arrive as the string `"None"` — treat any non-`int` value as "no worker"; and
-V2 (`blend.py`) does not send `worker_id` at all.
+arrive as the string `"None"` — treat any non-`int` value as "no worker".
 
-### Blend Server V3 sub-phase events
+### Blend Server sub-phase events
 
-Published by `blend_v3.py` around the legs of the unified lookup and the
+Published by `blend.py` around the legs of the unified lookup and the
 retrieve scatter, correlated by `session_id` (plus `worker_id` for the scatter
 pair, see above).  The scatter pair goes through `publish_on_stream`, so its
 timing is GPU-accurate.

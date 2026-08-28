@@ -183,7 +183,7 @@ PYBIND11_MODULE(cuda_ops, m) {
       py::arg("kernel_group_specs"), py::arg("batch_steps"),
       py::call_guard<py::gil_scoped_release>());
   // CB retrieve plan spec (see blend_kernels.cuh). Built on the Python side
-  // (blend_v3.cb_retrieve_pre_computed) and consumed by
+  // (blend.cb_retrieve_pre_computed) and consumed by
   // execute_cb_retrieve_plan_flat.
   py::class_<CBGroupSpec>(m, "CBGroupSpec")
       .def(
