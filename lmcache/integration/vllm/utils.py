@@ -40,10 +40,12 @@ def is_false(value: str) -> bool:
 
 def vllm_layout_hints(vllm_config: "VllmConfig | None" = None) -> "LayoutHints":
     """Build layout_hints dict by querying vLLM at runtime."""
-    hints: dict[str, str] = {}
-    kv_layout = try_get_vllm_kv_cache_layout(vllm_config)
+    hints: dict[str, str | bool] = {}
+    kv_layout, is_authoritative = _try_get_vllm_kv_cache_layout(vllm_config)
     if kv_layout is not None:
         hints["kv_layout"] = kv_layout
+        if is_authoritative:
+            hints["kv_layout_is_authoritative"] = True
     return hints  # type: ignore[return-value]
 
 
@@ -86,6 +88,13 @@ def try_get_vllm_kv_cache_layout(
         ValueError: from vLLM, if the layout has not been resolved yet;
             hints must be built at KV-cache registration time.
     """
+    return _try_get_vllm_kv_cache_layout(vllm_config)[0]
+
+
+def _try_get_vllm_kv_cache_layout(
+    vllm_config: "VllmConfig | None" = None,
+) -> tuple[KVLayoutName | None, bool]:
+    """Return the translated layout and whether vLLM resolved it centrally."""
     try:
         if vllm_config is None:
             # Third Party
@@ -98,13 +107,16 @@ def try_get_vllm_kv_cache_layout(
             "vLLM is not available but tried to query kv cache "
             "layout information, cannot get KV cache layout"
         )
-        return None
+        return None, False
 
     # vllm#51718 and later: vLLM owns alias resolution, unknown-name
     # validation, and the not-yet-resolved error.
     if hasattr(cache_config, "get_resolved_kv_cache_layout"):
-        return translate_vllm_kv_cache_layout(
-            cache_config.get_resolved_kv_cache_layout().name
+        return (
+            translate_vllm_kv_cache_layout(
+                cache_config.get_resolved_kv_cache_layout().name
+            ),
+            True,
         )
 
     try:
@@ -114,8 +126,8 @@ def try_get_vllm_kv_cache_layout(
         )
     except Exception:
         logger.error("Could not query the KV cache layout from this vLLM version")
-        return None
-    return translate_vllm_kv_cache_layout(get_kv_cache_layout())
+        return None, False
+    return translate_vllm_kv_cache_layout(get_kv_cache_layout()), False
 
 
 def lmcache_get_or_create_config() -> LMCacheEngineConfig:

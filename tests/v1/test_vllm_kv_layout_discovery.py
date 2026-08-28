@@ -116,7 +116,19 @@ class TestTryGetVllmKVCacheLayout:
 class TestVllmLayoutHints:
     def test_hint_present_and_translated(self):
         config = make_vllm_config("LBHNC")
-        assert vllm_layout_hints(config) == {"kv_layout": "HND"}
+        assert vllm_layout_hints(config) == {
+            "kv_layout": "HND",
+            "kv_layout_is_authoritative": True,
+        }
+
+    def test_legacy_hint_is_not_marked_authoritative(self, monkeypatch):
+        stub_module(
+            monkeypatch,
+            "vllm.v1.attention.backends.utils",
+            get_kv_cache_layout=lambda: "NHD",
+        )
+        config = SimpleNamespace(cache_config=LegacyCacheConfig())
+        assert vllm_layout_hints(config) == {"kv_layout": "NHD"}
 
     def test_unresolved_layout_raises_through_hints(self):
         with pytest.raises(ValueError, match="resolved"):
@@ -133,6 +145,10 @@ class TestResolveVllmKVLayout:
 
     def test_cpu_backend_forces_head_contiguous(self, resolve):
         assert resolve({"kv_layout": "NHD"}, cpu_attention_backend=True) == "HND"
+
+    def test_cpu_backend_honors_authoritative_layout(self, resolve):
+        hints = {"kv_layout": "NHD", "kv_layout_is_authoritative": True}
+        assert resolve(hints, cpu_attention_backend=True) == "NHD"
 
     def test_missing_hint_defaults_to_nhd(self, resolve):
         assert resolve({}, cpu_attention_backend=False) == "NHD"

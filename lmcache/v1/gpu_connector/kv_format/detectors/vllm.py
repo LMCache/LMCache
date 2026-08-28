@@ -33,8 +33,15 @@ def resolve_vllm_kv_layout(
             f"kv_layout hint {kv_layout!r} is not a layout LMCache supports; "
             f"expected one of {', '.join(KV_LAYOUT_NAMES)}."
         )
-    # The CPU attention backend allocates HND but hints NHD.
-    if cpu_attention_backend and kv_layout in ("NHD", "HND"):
+    # Legacy CPU attention backends allocate HND but report NHD. New vLLM
+    # versions resolve the actual physical layout centrally on CacheConfig;
+    # overriding that authoritative LBNHC/NHD value swaps the token and head
+    # axes for CPU MLA's rank-4 cache.
+    if (
+        cpu_attention_backend
+        and kv_layout in ("NHD", "HND")
+        and not layout_hints.get("kv_layout_is_authoritative", False)
+    ):
         return "HND"
     return kv_layout
 

@@ -762,6 +762,51 @@ def test_compute_kv_layout_and_gather_scatter_roundtrip(
             assert torch.allclose(source[name][1], destination[name][5])
 
 
+def test_authoritative_cpu_nhd_layout_matches_engine_driven_chunk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for DeepSeek MLA on post-vllm#51718 CPU layouts.
+
+    vLLM reports LBNHC/NHD and registers a rank-4 per-layer view. Treating it
+    as the legacy CPU HND layout swaps BS and NH, so the worker gathers the
+    right bytes into the wrong shape and the server rejects the store.
+    """
+    # First Party
+    from lmcache.v1.multiprocess.transfer_context.base import (
+        compute_kv_layout,
+        gather_paged_kv_to_cpu,
+    )
+
+    monkeypatch.setattr(
+        "lmcache.v1.gpu_connector.kv_format.detectors.vllm.torch_device_type",
+        "cpu",
+    )
+    source = _make_fused_nhd_kv_caches(
+        num_layers=2,
+        num_blocks=16,
+        block_size=16,
+        num_heads=1,
+        head_size=288,
+    )
+    layout_hints: LayoutHints = {
+        "kv_layout": "NHD",
+        "kv_layout_is_authoritative": True,
+    }
+
+    block_size, num_layers, hidden_dim, _, _, kv_size = compute_kv_layout(
+        source, layout_hints=layout_hints
+    )
+    gathered = gather_paged_kv_to_cpu(
+        source,
+        list(range(8)),
+        blocks_per_chunk=8,
+        layout_hints=layout_hints,
+    )
+
+    assert (block_size, num_layers, hidden_dim, kv_size) == (16, 2, 576, 1)
+    assert tuple(gathered[0].shape) == (2, 128, 576)
+
+
 @pytest.mark.parametrize(
     ("hnd_builder", "expected_format"),
     [
