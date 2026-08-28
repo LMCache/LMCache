@@ -604,12 +604,22 @@ Decode context parallelism (DCP)
 ``--decode-context-parallel-size`` is supported. Under DCP, vLLM shards the
 attention KV cache across ranks along the token axis, so each rank holds only
 a strided ``1/dcp`` slice and one block ID spans ``block_size * dcp`` tokens.
-LMCache stores each rank's slice as its own object and a chunk counts as a hit
-only when every rank's slice is present.
+LMCache stores each rank's opaque page as its own object and a chunk counts as
+a hit only when every rank's slice is present. Non-trivial
+``--cp-kv-cache-interleave-size`` values are supported when they evenly divide
+every resolved attention cache block size. Because interleave changes the
+token-to-slot byte layout, the connector automatically adds the DCP size and
+interleave value to its internal cache namespace. This prevents pages written
+by one interleave layout from being loaded by another. It does not change the
+model name served by vLLM, but the decorated cache model name is visible in MP
+metric labels so operators can distinguish incompatible cache layouts.
 
 One configuration change is required: the LMCache chunk size must be a
-multiple of ``block_size * decode_context_parallel_size``, not just
-``block_size``. If it is smaller, vLLM fails at connector startup with the
+multiple of vLLM's resolved scheduler block size. For a single attention
+group, that is ``block_size * decode_context_parallel_size``. For a hybrid
+model, it is the least common multiple of every attention group's DCP-scaled
+block span and every recurrent-state group's unscaled physical block span. If
+the chunk size is incompatible, vLLM fails at connector startup with the
 required multiple in the message (the LMCache server itself starts fine).
 
 The example model also needs a vLLM build that can run it under DCP:
@@ -640,11 +650,13 @@ DCP. These combinations are rejected at startup:
      - Reason
    * - ``--prefill-context-parallel-size > 1``
      - Adds a second KV shard axis this connector does not map.
-   * - ``--cp-kv-cache-interleave-size != 1``
-     - Changes the token-to-rank mapping, which would store the wrong KV.
    * - Fewer than ``dcp_size`` ranks per LMCache server
      - No server holds a complete set of shards, and lookup takes the
        minimum hit count across servers, so it reports no hits.
+
+An interleave value that is non-positive, larger than a resolved attention
+cache block, or does not evenly divide every resolved attention block is
+rejected at connector startup.
 
 ``decode_context_parallel_size > tensor_parallel_size`` is rejected by vLLM
 itself, so this connector does not re-check it.
