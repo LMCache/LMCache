@@ -151,7 +151,6 @@ when the failure is on the server).
 device event; this backend only exports its own event objects. Call sites
 that bypass the backend break under isolated IPC:
 
-- **Migrated**: the vLLM MP connector (`lmcache_mp_connector.py`) creates
 - **Migrated**: the vLLM MP connectors create producer events through the
   shared LMCache helper, which prefers
   `LMCacheMPWorkerAdapter.create_and_record_event` when available and

@@ -1192,8 +1192,8 @@ class LMCacheMPWorkerAdapter:
         ] = {}
         # The IPC handle is not enough by itself; the exporting event object
         # must stay alive until the consumer is done with it.
-        self.store_events: dict[str, object] = {}
-        self.retrieve_events: dict[str, object] = {}
+        self.store_events: dict[str, IPCEvent] = {}
+        self.retrieve_events: dict[str, IPCEvent] = {}
 
         # Block IDs that failed due to retrieve timeout
         self.error_block_ids: set[int] = set()
