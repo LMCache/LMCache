@@ -87,7 +87,7 @@ class SGLANG_Detector(EngineDetector):
         list_depth, tensor_ndim, first_tensor = measure_list_depth_until_tensor(
             kv_caches
         )
-        if list_depth == 1 and first_tensor.shape[1] == 1:
+        if list_depth == 1:
             if "tokens_per_block" in layout_hints:
                 # MP MLA, non-fused PBS
                 return lmcache_native.EngineKVFormat.NL_X_NB_BS_HS, kv_caches
