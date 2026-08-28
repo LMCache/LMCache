@@ -21,7 +21,7 @@ import lmcache.lmcache_native as lmcache_native
 
 class NL_X_NB_BS_HS_Spec(KVFormatSpec):
     engine_kv_format = lmcache_native.EngineKVFormat.NL_X_NB_BS_HS
-    attention_backends = ("vLLM MLA", "SGLang MLA (MP)")
+    attention_backends = ("vLLM MLA / SGLang MLA (MP)",)
     is_layer_list = True
     is_mla = True
 
