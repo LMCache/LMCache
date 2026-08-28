@@ -143,8 +143,8 @@ def _call_sm_method(method_name: str) -> Handler:
 
     The returned callable invokes ``getattr(ctx.sm, method_name)(**args)``
     and discards the result.  Used for every "plain" traced method on
-    StorageManager — ``reserve_write``, ``finish_write``,
-    ``submit_prefetch_task``, ``finish_read_prefetched``.
+    StorageManager — ``reserve_write``, ``finish_write``, and
+    ``submit_prefetch_task``.
 
     Args:
         method_name: Attribute name on the live StorageManager.
@@ -159,6 +159,24 @@ def _call_sm_method(method_name: str) -> Handler:
 
     _handler.__name__ = f"_call_sm_{method_name}"
     return _handler
+
+
+def _finish_read_prefetched(ctx: ReplayContext, args: dict[str, Any]) -> None:
+    """Replay current and legacy finish-read records.
+
+    Traces recorded before the read-lock API cleanup store ``extra_count``,
+    meaning additional locks beyond the default one. Convert that field to
+    the current total ``read_locks`` count before dispatching.
+
+    Args:
+        ctx: Active replay context.
+        args: Decoded record arguments.
+    """
+    migrated_args = dict(args)
+    extra_count = migrated_args.pop("extra_count", None)
+    if extra_count is not None and "read_locks" not in migrated_args:
+        migrated_args["read_locks"] = extra_count + 1
+    ctx.sm.finish_read_prefetched(**migrated_args)
 
 
 def _enter_read_prefetched(ctx: ReplayContext, args: dict[str, Any]) -> None:
@@ -232,12 +250,15 @@ def build_default_dispatcher() -> CallDispatcher:
         "reserve_write",
         "finish_write",
         "submit_prefetch_task",
-        "finish_read_prefetched",
     ):
         dispatcher.register(
             f"{_SM_PREFIX}.{method_name}",
             _call_sm_method(method_name),
         )
+    dispatcher.register(
+        f"{_SM_PREFIX}.finish_read_prefetched",
+        _finish_read_prefetched,
+    )
     dispatcher.register(
         f"{_SM_PREFIX}.read_prefetched_results.__enter__",
         _enter_read_prefetched,
