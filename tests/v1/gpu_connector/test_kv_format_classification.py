@@ -37,6 +37,21 @@ EXPECTED = {
     F.NL_X_NBBS_ONE_HS: (False, False, True, True, False),
     F.NL_X_NB_BSV_BSS: (False, False, True, True, False),
     F.NL_X_TWO_X_NB_BS_NH_HS: (False, False, True, False, True),
+    F.NB_NL_TWO_NH_BS_HS: (True, False, False, False, False),
+    F.TWO_X_NL_X_NBBS_NH_HS: (False, True, False, False, False),
+    F.TWO_X_NL_X_NB_BS_NH_HS: (False, True, False, False, False),
+    F.NL_X_TWO_NB_BS_NH_HS: (False, False, True, False, False),
+    F.NL_X_NB_TWO_BS_NH_HS: (False, False, True, False, False),
+    F.NL_X_TWO_NB_NH_BS_HS: (False, False, True, False, False),
+    F.NL_X_NB_TWO_NH_BS_HS: (False, False, True, False, False),
+    F.NL_X_TWO_NB_NH_ONE_BS_HS: (False, False, True, False, False),
+    F.NL_X_NB_NH_BS_TWO_HS: (False, False, True, False, False),
+    F.NL_X_NB_BS_NH_TWO_HS: (False, False, True, False, False),
+    F.NL_X_NB_NH_BS_CS: (False, False, True, False, False),
+    F.NL_X_NB_BS_NH_CS: (False, False, True, False, False),
+    F.NL_X_NB_BS_HS: (False, False, True, True, False),
+    F.NL_X_NBBS_ONE_HS: (False, False, True, True, False),
+    F.NL_X_NB_BSV_BSS: (False, False, True, True, False),
 }
 
 # Facts that only the spec carries (no native predicate mirrors them):
