@@ -374,17 +374,9 @@ class _SubpagedAttentionViewEdit(KVCacheGroupEdit):
 
 
 class _MambaUnifiedViewEdit(KVCacheGroupEdit):
-    """Re-view mamba's unified state as a single attention tensor
+    """Re-view mamba's unified state as a per-token paged tensor.
 
-    This is for vLLM >= 0.26.0, where the unified KV cache layout is implemented.
-
-    In this case, Mamba's KV layer will be a single tensor with the shape of:
-    - [num_blocks, 1, 1, context_size]
-    Where the context size equals to vllm_block_size * ``head_size''
-
-
-    What we do here is to convert the shape to
-    - [num_blocks, 1, vllm_block_size, head_size]
+    For vLLM >= 0.26.0, where the unified KV cache layout is implemented.
     """
 
     name = "mamba-unified-view"
@@ -405,17 +397,22 @@ class _MambaUnifiedViewEdit(KVCacheGroupEdit):
         kv_cache: RegisteredKVCache,
         layout_hints: LayoutHints,
     ) -> torch.Tensor:
-        """
-        Convert [num_blocks, 1, 1, context_size] to
-        [num_blocks, 1, vllm_block_size, head_size] for HND layout, or
-        [num_blocks, vllm_block_size, 1, head_size] for NHD layout.
+        """Re-view the per-block state row as block_size tokens.
 
-        The state row need not divide evenly by the block size: under
-        mamba-cache-mode=align vLLM pads each page up to the attention page
-        size but registers the state as a tight view, with the padding
-        expressed only in stride(0). The per-token tiling rounds head_size
-        up, spilling only into this layer's own page padding, and keeps
-        stride(0) as the dim-0 step, which the transfer path honours.
+        Input: [num_blocks, 1, 1, row] with strides (S, row, row, 1),
+        where the row is this layer's state and S >= row (the page
+        padding, and any sibling layers on a shared pool, live between
+        row and S).
+
+        Output for NHD: [num_blocks, block_size, 1, head_size] with
+        strides (S, head_size, head_size, 1). HND swaps dims 1 and 2:
+        [num_blocks, 1, block_size, head_size] with strides
+        (S, block_size * head_size, head_size, 1).
+
+        head_size = ceil(row / block_size), rounded up to the kernels'
+        vector alignment, and block_size * head_size may exceed the row
+        by at most this layer's own page padding
+        (spec.page_size_bytes), never reaching sibling bytes.
         """
         assert isinstance(kv_cache, torch.Tensor), (
             "single-layer KV cache must be a torch.Tensor"
