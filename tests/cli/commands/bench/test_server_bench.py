@@ -33,7 +33,7 @@ from lmcache.cli.commands.bench.server_bench.helpers import (
 )
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocols.base import RequestType
-from lmcache.v1.platform.ops_types import PageBufferShapeDesc, set_shape_desc_dtype
+from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 
 
 def _make_shape_desc(
@@ -55,7 +55,7 @@ def _make_shape_desc(
     shape_desc.nh = nh
     shape_desc.hs = hs
     shape_desc.element_size = dtype.itemsize
-    set_shape_desc_dtype(shape_desc, dtype)
+    shape_desc.dtype = dtype
     return shape_desc
 
 
@@ -1130,12 +1130,11 @@ class TestProcessRequestMultiWorker:
                     "LOOKUP should fire exactly once regardless of tp_size "
                     "(is_mla=%s, tp=%d)" % (is_mla, tp)
                 )
-                # LOOKUP payload is ``[key, tp_size]``. MLA with tp>1
-                # needs tp_size on the wire so the server adds
-                # ``tp_size - 1`` extra read locks per chunk (see
-                # compute_extra_count in lookup.py); a hard-coded 1
-                # under-locks and subsequent-rank RETRIEVE reads stale
-                # bytes with a "non-read-locked key" warning.
+                # LOOKUP payload is ``[key, tp_size]``. The server
+                # reserves ``key.num_kv_readers`` read locks per chunk
+                # (see IPCCacheServerKey.require_num_kv_readers);
+                # tp_size is a legacy wire field kept for
+                # compatibility, so assert it still travels intact.
                 assert lookups[0][1][1] == tp, (
                     "LOOKUP payload tp_size must equal simulated tp "
                     "(is_mla=%s, tp=%d, got=%s)" % (is_mla, tp, lookups[0][1][1])

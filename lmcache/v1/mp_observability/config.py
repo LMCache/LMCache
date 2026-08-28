@@ -416,6 +416,7 @@ def init_observability(
             L2MetricsSubscriber,
             L2ThroughputSubscriber,
             LookupMetricsSubscriber,
+            MPTransferCountersSubscriber,
             SMLifecycleSubscriber,
             TimeoutMetricsSubscriber,
         )
@@ -427,6 +428,7 @@ def init_observability(
         bus.register_subscriber(L1FailureMetricsSubscriber())
         bus.register_subscriber(L1EvictionLoopSubscriber())
         bus.register_subscriber(L0L1ThroughputSubscriber())
+        bus.register_subscriber(MPTransferCountersSubscriber())
         bus.register_subscriber(L2MetricsSubscriber())
         bus.register_subscriber(L2FailureMetricsSubscriber())
         bus.register_subscriber(L2ThroughputSubscriber())

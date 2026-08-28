@@ -19,13 +19,13 @@
 namespace py = pybind11;
 
 PYBIND11_MODULE(cuda_ops, m) {
-  // NOTE: ``TransferDirection`` and ``EngineKVFormat`` (and the format
-  // predicates is_cross_layer / is_kv_list / is_layer_list / is_mla) are owned
-  // exclusively by the device-independent ``lmcache_native`` module
-  // (csrc/lmcache_native/pybind.cpp). They are NOT exported here. ``cuda_ops``
-  // functions that need a transfer direction accept the underlying ``int`` and
-  // cast it to the C++ enum, so callers pass ``TransferDirection.H2D.value``
-  // (an int) instead of the enum object.
+  py::module_::import("lmcache.lmcache_native");
+
+  // NOTE: ``TransferDirection`` / ``EngineKVFormat`` plus the portable
+  // descriptors (``PageBufferShapeDesc``, ``KernelGroupSpec``) live in
+  // ``lmcache_native``. The CUDA-only per-batch plan descriptors stay here.
+  // Functions that need enums accept their underlying ``int`` values and cast
+  // locally, so callers pass the canonical ``lmcache_native`` enums.
 
   m.def(
       "multi_layer_kv_transfer",
@@ -144,17 +144,6 @@ PYBIND11_MODULE(cuda_ops, m) {
       py::arg("shape_desc"), py::arg("lmcache_chunk_size"),
       py::arg("engine_kv_format"), py::arg("skip_prefix_n_blocks"),
       py::call_guard<py::gil_scoped_release>());
-  py::class_<PageBufferShapeDesc>(m, "PageBufferShapeDesc")
-      .def(py::init<>())
-      .def_readwrite("kv_size", &PageBufferShapeDesc::kv_size)
-      .def_readwrite("nl", &PageBufferShapeDesc::nl)
-      .def_readwrite("nb", &PageBufferShapeDesc::nb)
-      .def_readwrite("bs", &PageBufferShapeDesc::bs)
-      .def_readwrite("nh", &PageBufferShapeDesc::nh)
-      .def_readwrite("hs", &PageBufferShapeDesc::hs)
-      .def_readwrite("element_size", &PageBufferShapeDesc::element_size)
-      .def_readwrite("block_stride_elems",
-                     &PageBufferShapeDesc::block_stride_elems);
   // Object-group transfer plan types (see mp_mem_kernels.cuh). Built on the
   // Python side and consumed by execute_object_group_transfer.
   py::class_<StagingCopy>(m, "StagingCopy")
@@ -180,25 +169,6 @@ PYBIND11_MODULE(cuda_ops, m) {
              return BatchStep{std::move(staging), std::move(launches)};
            }),
            py::arg("staging"), py::arg("launches"));
-  py::class_<KernelGroupSpec>(m, "KernelGroupSpec")
-      .def(py::init([](uintptr_t paged_buffer_ptrs,
-                       std::vector<int64_t> lmcache_objects_ptrs,
-                       PageBufferShapeDesc shape_desc, int lmcache_chunk_size,
-                       int engine_kv_format, uintptr_t block_ids_base,
-                       int64_t block_ids_capacity) {
-             return KernelGroupSpec{
-                 paged_buffer_ptrs,
-                 std::move(lmcache_objects_ptrs),
-                 shape_desc,
-                 lmcache_chunk_size,
-                 static_cast<EngineKVFormat>(engine_kv_format),
-                 block_ids_base,
-                 block_ids_capacity};
-           }),
-           py::arg("paged_buffer_ptrs"), py::arg("lmcache_objects_ptrs"),
-           py::arg("shape_desc"), py::arg("lmcache_chunk_size"),
-           py::arg("engine_kv_format"), py::arg("block_ids_base"),
-           py::arg("block_ids_capacity"));
   m.def(
       "execute_object_group_transfer",
       [](int direction, const torch::Device& device,
@@ -213,7 +183,7 @@ PYBIND11_MODULE(cuda_ops, m) {
       py::arg("kernel_group_specs"), py::arg("batch_steps"),
       py::call_guard<py::gil_scoped_release>());
   // CB retrieve plan spec (see blend_kernels.cuh). Built on the Python side
-  // (blend_v3.cb_retrieve_pre_computed) and consumed by
+  // (blend.cb_retrieve_pre_computed) and consumed by
   // execute_cb_retrieve_plan_flat.
   py::class_<CBGroupSpec>(m, "CBGroupSpec")
       .def(
