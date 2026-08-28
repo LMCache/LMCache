@@ -90,9 +90,9 @@ def test_raw_block_device_iouring_best_effort_roundtrip(tmp_path):
         out = bytearray(len(payload))
 
         batch_id = dev.batched_write([4096], [payload], [len(payload)])
-        assert dev.wait_iouring(batch_id) == [True]
+        assert dev.wait_iouring(batch_id) == ([True], [])
         batch_id = dev.batched_read([4096], [out], [len(out)])
-        assert dev.wait_iouring(batch_id) == [True]
+        assert dev.wait_iouring(batch_id) == ([True], [])
 
         assert out == payload
     except Exception as e:

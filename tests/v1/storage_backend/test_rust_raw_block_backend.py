@@ -120,7 +120,7 @@ class _FakeRawBlockDevice:
         return batch_id
 
     def wait_iouring(self, batch_id):
-        return self._batch_results.pop(batch_id, [])
+        return self._batch_results.pop(batch_id, []), []
 
     def close(self):
         return None
@@ -373,7 +373,7 @@ def test_raw_block_core_uring_cmd_write_rejects_short_completion_bitmap(
     core = _make_raw_block_core(io_engine="io_uring")
     try:
         raw_dev = core._rawdev()
-        raw_dev.wait_iouring = lambda batch_id: completion_results
+        raw_dev.wait_iouring = lambda batch_id: (completion_results, [])
         core.max_data_transfer_size = core.block_align
 
         payload = bytearray(b"x" * (core.block_align * 2))
@@ -396,7 +396,7 @@ def test_raw_block_core_uring_cmd_read_rejects_short_completion_bitmap(
     core = _make_raw_block_core(io_engine="io_uring")
     try:
         raw_dev = core._rawdev()
-        raw_dev.wait_iouring = lambda batch_id: completion_results
+        raw_dev.wait_iouring = lambda batch_id: (completion_results, [])
         core.max_data_transfer_size = core.block_align
 
         out = bytearray(core.block_align * 2)
@@ -420,7 +420,7 @@ def test_raw_block_core_iouring_write_rejects_short_completion_bitmap(
     core = _make_raw_block_core(io_engine="io_uring")
     try:
         raw_dev = core._rawdev()
-        raw_dev.wait_iouring = lambda batch_id: completion_results
+        raw_dev.wait_iouring = lambda batch_id: (completion_results, [])
 
         payloads = [bytearray(b"x" * 512), bytearray(b"y" * 512)]
         with pytest.raises(RuntimeError, match="io_uring write failed"):
@@ -442,7 +442,7 @@ def test_raw_block_core_iouring_read_rejects_short_completion_bitmap(
     core = _make_raw_block_core(io_engine="io_uring")
     try:
         raw_dev = core._rawdev()
-        raw_dev.wait_iouring = lambda batch_id: completion_results
+        raw_dev.wait_iouring = lambda batch_id: (completion_results, [])
 
         out1 = bytearray(512)
         out2 = bytearray(512)
@@ -454,6 +454,38 @@ def test_raw_block_core_iouring_read_rejects_short_completion_bitmap(
         )
 
         assert results == [False, False]
+    finally:
+        core.close()
+
+
+def test_raw_block_core_logs_iouring_completion_errors(monkeypatch):
+    _install_fake_raw_block_device(monkeypatch)
+    core = _make_raw_block_core(io_engine="io_uring")
+    try:
+        raw_dev = core._rawdev()
+        raw_dev.wait_iouring = lambda batch_id: (
+            [True, False],
+            [(1, "io_uring I/O error")],
+        )
+
+        with patch(
+            "lmcache.v1.storage_backend.raw_block.core.logger.error"
+        ) as log_error:
+            results = core._wait_iouring_results(
+                raw_dev,
+                batch_id=7,
+                expected_count=2,
+                operation="io_uring read",
+            )
+
+        assert results == [True, False]
+        log_error.assert_called_once_with(
+            "RawBlockCore %s batch %d operation %d failed: %s",
+            "io_uring read",
+            7,
+            1,
+            "io_uring I/O error",
+        )
     finally:
         core.close()
 

@@ -37,8 +37,9 @@ use NVMe passthrough via the io_uring command interface for direct device access
   incompatible value is rejected when the device opens.
 - When `use_uring_cmd=True`, `use_odirect` is ignored for NVMe namespace
   character devices.
-- SQE build failures are returned by `wait_iouring` after the worker releases
-  the request's global and per-batch in-flight accounting.
+- `wait_iouring` returns a success bitmap and a sparse
+  `(operation_index, error_message)` list after the worker releases the
+  request's global and per-batch in-flight accounting.
 
 ## MP Mode Integration
 

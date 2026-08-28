@@ -85,9 +85,9 @@ class _RecordingRawDevice:
         self._batch_results[17] = [True] * len(offsets)
         return 17
 
-    def wait_iouring(self, batch_id: int) -> list[bool]:
+    def wait_iouring(self, batch_id: int) -> tuple[list[bool], list[tuple[int, str]]]:
         self.waited_batch_id = batch_id
-        return self._batch_results.pop(batch_id)
+        return self._batch_results.pop(batch_id), []
 
     def read_uring(
         self,
@@ -393,9 +393,9 @@ class _FakeRawDevice:
         self._batch_results[123] = [True] * len(offsets)
         return 123
 
-    def wait_iouring(self, batch_id: int) -> list[bool]:
+    def wait_iouring(self, batch_id: int) -> tuple[list[bool], list[tuple[int, str]]]:
         assert batch_id == 123
-        return self._batch_results.pop(batch_id)
+        return self._batch_results.pop(batch_id), []
 
     def write_uring(
         self,
