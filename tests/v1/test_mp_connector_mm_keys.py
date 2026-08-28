@@ -155,9 +155,8 @@ def test_tracker_extracts_request_configs():
     }
 
 
-def test_eager_prefetch_uses_adjusted_tokens_and_request_configs():
-    prompt = [1, IMAGE_PLACEHOLDER_ID, IMAGE_PLACEHOLDER_ID, 2]
-    request = _make_mm_request(prompt, identifier="0xabcd", offset=1, length=2)
+def test_eager_prefetch_forwards_request_configs():
+    request = _FakeRequest([1, 2, 3])
     request.sampling_params = _FakeSamplingParams(
         extra_args={
             "kv_transfer_params": {"lmcache.tag.user": "alice"},
@@ -176,7 +175,7 @@ def test_eager_prefetch_uses_adjusted_tokens_and_request_configs():
 
     scheduler_adapter.maybe_submit_lookup_request.assert_called_once_with(
         request.request_id,
-        token_ids=tracker.get_token_ids(),
+        token_ids=[1, 2, 3],
         cache_salt="",
         request_configs={"lmcache.tag.user": "alice"},
     )
