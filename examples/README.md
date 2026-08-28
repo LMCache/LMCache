@@ -82,8 +82,7 @@ Focus: deploying, monitoring, and operating LMCache in production.
 
 | Example | What it does | Hardware |
 |---------|-------------|----------|
-| [`blend_kv_v1/`](blend_kv_v1/) | CacheBlend v1: reuse KV cache even when the new prompt is not a prefix of the cached one (e.g., RAG with swapped documents). Requires a small patch to vLLM source. | 1 GPU (experimental) |
-| [`blend_kv/`](blend_kv/) | CacheBlend v0 (legacy): same concept using the old `lmcache_vllm` integration. Kept for reference. | 1+ GPUs (legacy) |
+| [`blend_in_process/`](blend_in_process/) | CacheBlend in LMCache's in-process mode: reuse KV cache even when the new prompt is not a prefix of the cached one (e.g., RAG with swapped documents). Requires a small patch to vLLM source. | 1 GPU (experimental) |
 
 ### Developer Extensibility
 

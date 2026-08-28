@@ -57,12 +57,10 @@ Source: ``lmcache/v1/multiprocess/config.py``
    * - ``--engine-type``
      - ``default``
      - Cache engine backend type. ``default`` uses standard prefix
-       caching; ``blend`` selects the current CacheBlend V3 implementation
-       (composes a ``BlendV3Module`` into the engine);
-       ``blend_legacy`` selects the original CacheBlend
-       (composes a ``BlendModule``). Both blend variants require
+       caching; ``blend`` composes the CacheBlend ``BlendModule`` into the
+       engine for non-prefix KV reuse and requires
        ``--supported-transfer-mode`` to be ``lmcache_driven`` or ``auto``.
-       Choices: ``default``, ``blend``, ``blend_legacy``.
+       Choices: ``default``, ``blend``.
    * - ``--supported-transfer-mode``
      - ``lmcache_driven``
      - Which worker → server transfer paths the server loads.
@@ -73,6 +71,21 @@ Source: ``lmcache/v1/multiprocess/config.py``
        so workers of either device type can connect without manual
        configuration.
        Choices: ``lmcache_driven``, ``engine_driven``, ``auto``.
+   * - ``--isolated-ipc`` / ``--no-isolated-ipc``
+     - ``false``
+     - Assume engine workers and this server run in containers that share
+       no host IPC namespace (``hostIPC``) and no common ``/dev/shm``, and
+       use IPC mechanisms that work there: on CUDA, raw CUDA IPC memory
+       handles for KV-cache registration (instead of PyTorch storage IPC,
+       which needs a shared ``/dev/shm``) and timeline-semaphore events
+       (instead of CUDA interprocess *event* handles). Must match the
+       workers'
+       ``lmcache.mp.isolated_ipc`` setting -- the two mechanisms exchange
+       incompatible event handles, and a mismatch fails at event import
+       on whichever side receives the foreign handle. Currently supported
+       by the vLLM MP connector only; the default stays ``false`` until
+       the integrations that still create raw CUDA interprocess events
+       (SGLang, TensorRT-LLM, CacheBlend, qstore) migrate.
    * - ``--runtime-plugin-locations``
      - ``[]``
      - Zero or more paths to runtime plugin scripts or directories to
@@ -291,6 +304,21 @@ example ``/dev/ugds_drv0``) rather than a directory. The first
 ``--l1-size-gb`` bytes of the device are the slab, so the device must be at
 least that large and must not hold anything else.
 
+**Phoenix** (``libphoenix.so``) is a fourth opt-in backend selected with
+``--gds-l1-backend phx``. Phoenix (phxfs) provides a kernel-mediated
+user-space NVMe-to-GPU DMA path with a very low software-stack overhead.
+Like cuFile and hipFile it uses a filesystem slab: ``--gds-l1-path`` names
+an NVMe directory, ``--gds-l1-use-direct-io`` applies, and the slab file
+can share the disk with other data. Each GPU staging buffer is registered with
+phxfs (``phxfs_regmem``, 64 KiB-aligned) and the slab is read and written
+with stream-ordered submissions (``phxfs_read_stream`` /
+``phxfs_write_stream``) that keep the DMA ordered with the other work on
+the stream. A ``libphoenix`` build without the stream-ordered API fails
+to load. Follow the
+`Phoenix installation guide <https://github.com/xPU-IO/Phoenix/blob/main/doc/install.md>`_
+to build ``libphoenix.so``, load the ``phoenixfs`` kernel module, and
+verify the installation.
+
 
 
 .. note::
@@ -323,6 +351,14 @@ least that large and must not hold anything else.
    Ensure the SSD is not used for any other purpose and that its contents are
    not critical.
 
+.. note::
+
+   Phoenix requires the ``phoenixfs`` kernel module loaded and a
+   platform-matching ``libphoenix.so`` reachable through the loader
+   (``ldconfig`` or ``LD_LIBRARY_PATH``). It has been validated on NVIDIA
+   GPUs; other platforms require a matching ``libphoenix`` build and are not
+   yet tested.
+
 .. list-table::
    :header-rows: 1
    :widths: 30 15 55
@@ -334,12 +370,12 @@ least that large and must not hold anything else.
      - Not set
      - NVMe directory for the GDS L1 slab, or the raw device path when
        ``--gds-l1-backend ugds`` is used. Setting this enables the GDS L1
-       tier; with cuFile or hipFile one shared slab per process lives at
-       ``<path>/lmcache_gds_slab.bin``.
+       tier; with cuFile, hipFile, or phx one shared slab per process lives
+       at ``<path>/lmcache_gds_slab.bin``.
    * - ``--gds-l1-backend``
      - ``auto``
-     - GDS implementation: ``auto``, ``cufile``, ``hipfile``, or ``ugds``.
-       ``auto`` selects cuFile on CUDA and hipFile on ROCm.
+     - GDS implementation: ``auto``, ``cufile``, ``hipfile``, ``ugds``, or
+       ``phx``. ``auto`` selects cuFile on CUDA and hipFile on ROCm.
    * - ``--gds-l1-use-direct-io`` / ``--no-gds-l1-use-direct-io``
      - ``True``
      - Open the slab with ``O_DIRECT`` (required for the GDS DMA fast path on
@@ -693,6 +729,16 @@ All connector-level options are passed through
        ``engine_driven`` (force the worker-side gather/scatter copy
        path). Overrides the ``LMCACHE_MP_TRANSFER_MODE`` env var when
        set.
+   * - ``lmcache.mp.isolated_ipc``
+     - ``false``
+     - Assume the vLLM workers and the LMCache server run in containers
+       that share no host IPC namespace (``hostIPC``) and no common
+       ``/dev/shm``, and use IPC mechanisms that work there: on CUDA, raw
+       CUDA IPC memory handles for KV-cache registration and
+       timeline-semaphore events instead of CUDA interprocess *event*
+       handles. Set it together with the
+       server's ``--isolated-ipc`` flag -- a mismatch fails at event
+       import on whichever side receives the foreign handle.
 
 Environment Variables
 ---------------------

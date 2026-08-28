@@ -38,7 +38,7 @@ class ManagementModule:
         ctx: The shared engine context.
         liveness_targets: Modules the reaper drives -- the transfer modules
             whose per-instance registrations are refreshed on PING and scanned
-            for staleness, plus any state mirror (e.g. ``BlendV3Module``)
+            for staleness, plus any state mirror (e.g. ``BlendModule``)
             notified via ``drop_instance_state`` when an instance is reaped.
         worker_reap_timeout_seconds: Silence budget for a ping-proven worker;
             0 disables reaping (no thread is started).
