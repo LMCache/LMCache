@@ -414,8 +414,8 @@ class _MambaUnifiedViewEdit(KVCacheGroupEdit):
         mamba-cache-mode=align vLLM pads each page up to the attention page
         size but registers the state as a tight view, with the padding
         expressed only in stride(0). The per-token tiling rounds head_size
-        up, spilling at most block_size - 1 elements into that padding, and
-        keeps stride(0) as the dim-0 step, which the transfer path honours.
+        up, spilling only into this layer's own page padding, and keeps
+        stride(0) as the dim-0 step, which the transfer path honours.
         """
         assert isinstance(kv_cache, torch.Tensor), (
             "single-layer KV cache must be a torch.Tensor"
@@ -432,21 +432,23 @@ class _MambaUnifiedViewEdit(KVCacheGroupEdit):
         block_step = kv_cache.stride(0)
         base = -(-row // block_size)
         # The transfer kernels vectorize by token width, so round it up to
-        # the widest alignment that still tiles within the block step and
-        # divides it (the extra columns land in the page padding).
+        # the widest alignment that divides the block step. The spill must
+        # stay inside this layer's own padded page -- on a shared pool
+        # stride(0) spans sibling layers, so it is not the bound.
+        page_bytes = spec.page_size_bytes
         head_size = 0
         for align_bytes in (16, 8, 4, 2):
             if align_bytes % elem != 0 or (block_step * elem) % align_bytes != 0:
                 continue
             step = align_bytes // elem
             candidate = -(-base // step) * step
-            if candidate * block_size <= block_step:
+            if candidate * block_size * elem <= page_bytes:
                 head_size = candidate
                 break
         if head_size == 0:
             raise ValueError(
                 f"cannot tile a {row}-element state row into {block_size} "
-                f"aligned tokens within the {block_step}-element block step"
+                f"aligned tokens within the {page_bytes}-byte page"
             )
         if kv_layout == "NHD":
             inner = (block_size, 1, head_size)
