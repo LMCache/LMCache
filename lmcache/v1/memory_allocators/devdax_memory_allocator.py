@@ -13,8 +13,7 @@ import threading
 import torch
 
 # First Party
-from lmcache.integration.vllm.utils import get_size_bytes
-from lmcache.utils import _lmcache_nvtx_annotate
+from lmcache.utils import _lmcache_nvtx_annotate, get_size_bytes
 from lmcache.v1.memory_allocators.buffer_allocator import BufferAllocator
 from lmcache.v1.memory_allocators.mixed_memory_allocator import MixedMemoryAllocator
 from lmcache.v1.memory_allocators.tensor_memory_allocator import TensorMemoryAllocator
