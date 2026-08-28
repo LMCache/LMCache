@@ -273,7 +273,9 @@ def _build_modules(
                 "LMCACHE_COORDINATOR_EVENT_REPORTING=true) to enable it."
             )
         coordinator = BlendCoordinatorClient.maybe_create(
-            coordinator_config.url if coordinator_config.event_reporting else ""
+            coordinator_config.url if coordinator_config.event_reporting else "",
+            timeout=coordinator_config.blend_timeout,
+            match_concurrency=coordinator_config.blend_match_concurrency,
         )
         blend_v3 = BlendV3Module(
             ctx,
