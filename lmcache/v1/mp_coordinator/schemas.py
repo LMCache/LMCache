@@ -347,6 +347,8 @@ class DirectoryLookupRequest(BaseModel):
             (tokens form).
         cache_salt: Per-tenant isolation salt applied to produced keys
             (tokens form).
+        tags: Per-request cache-identity tags applied to produced keys
+            (tokens form).
     """
 
     keys: list[EncodedObjectKey] = Field(default_factory=list)
@@ -354,6 +356,7 @@ class DirectoryLookupRequest(BaseModel):
     model_name: str = ""
     world_size: int = Field(default=1, ge=1)
     cache_salt: str = ""
+    tags: dict[str, str] = Field(default_factory=dict)
 
     @field_validator("keys")
     @classmethod
@@ -523,6 +526,7 @@ class PrefetchRequest(BaseModel):
         world_size: World size selecting the layout and the per-rank fan-out.
         token_ids: Prompt tokens whose complete chunks should be warmed.
         cache_salt: Per-tenant isolation salt applied to the produced keys.
+        tags: Per-request cache-identity tags applied to the produced keys.
     """
 
     instance_id: str
@@ -530,6 +534,7 @@ class PrefetchRequest(BaseModel):
     world_size: int = Field(ge=1)
     token_ids: list[int] = Field(default_factory=list)
     cache_salt: str = ""
+    tags: dict[str, str] = Field(default_factory=dict)
 
 
 class PrefetchResponse(BaseModel):
@@ -563,12 +568,14 @@ class PinRequest(BaseModel):
         world_size: World size selecting the per-rank fan-out.
         token_ids: Prompt tokens whose complete chunks should be (un)pinned.
         cache_salt: Per-tenant isolation salt applied to the produced keys.
+        tags: Per-request cache-identity tags applied to the produced keys.
     """
 
     model_name: str
     world_size: int = Field(ge=1)
     token_ids: list[int] = Field(default_factory=list)
     cache_salt: str = ""
+    tags: dict[str, str] = Field(default_factory=dict)
 
 
 class PinResponse(BaseModel):
@@ -595,6 +602,7 @@ class DeleteRequest(BaseModel):
         world_size: World size selecting the layout and the per-rank fan-out.
         token_ids: Prompt tokens whose complete chunks should be deleted.
         cache_salt: Per-tenant isolation salt applied to the produced keys.
+        tags: Per-request cache-identity tags applied to the produced keys.
         tier: Which tier(s) to delete: ``l1`` (L1 only), ``l2`` (L2 only), or
             ``all`` (both). ``l1`` never touches L2 and vice versa.
         force: When True, delete even locked/pinned keys -- bypasses L1
@@ -606,6 +614,7 @@ class DeleteRequest(BaseModel):
     world_size: int = Field(ge=1)
     token_ids: list[int] = Field(default_factory=list)
     cache_salt: str = ""
+    tags: dict[str, str] = Field(default_factory=dict)
     tier: Tier = Tier.ALL
     force: bool = False
 

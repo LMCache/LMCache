@@ -114,9 +114,12 @@ class TestToObjectKeyValidation:
             chunk_hash_hex="aa",
             model_name="m",
             kv_rank=0,
-            tags=(("user", "alice"), ("lora", "v2")),
+            tags=(("user", "alice"), ("application_version", "v2")),
         )
-        assert ck.to_object_key().tags == (("lora", "v2"), ("user", "alice"))
+        assert ck.to_object_key().tags == (
+            ("application_version", "v2"),
+            ("user", "alice"),
+        )
 
 
 class TestSchemasReExport:

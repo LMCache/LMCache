@@ -118,6 +118,11 @@ class L2AdapterInterface(ABC):
     and prefetch controller), therefore, it needs to be thread-safe.
     """
 
+    @property
+    def supports_key_tags(self) -> bool:
+        """Whether this adapter preserves ``ObjectKey.tags`` in storage keys."""
+        return False
+
     def __init__(self, max_capacity_bytes: int = 0) -> None:
         """
         Args:

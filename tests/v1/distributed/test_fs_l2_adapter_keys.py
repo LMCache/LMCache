@@ -326,8 +326,7 @@ class TestIPCCacheServerKeyCacheSalt:
 
 
 class TestTagsRoundtrip:
-    """Per-tag identity flows from IPCCacheServerKey.request_configs to
-    ObjectKey.tags and survives the filename round-trip."""
+    """Tags flow from request configs through the filesystem filename."""
 
     def test_tags_flow_through_ipc_key_to_object_keys(self):
         # First Party
@@ -341,13 +340,13 @@ class TestTagsRoundtrip:
             token_ids=[1, 2, 3],
             request_configs={
                 "lmcache.tag.user": "alice",
-                "lmcache.tag.lora": "v2",
+                "lmcache.tag.application_version": "v2",
             },
         )
         out = ipc_key_to_object_keys(k, [b"h1", b"h2"], [0])[0]
         assert len(out) == 2
         for o in out:
-            assert o.tags == (("lora", "v2"), ("user", "alice"))
+            assert o.tags == (("application_version", "v2"), ("user", "alice"))
 
     def test_filename_roundtrip_with_tags_only(self):
         key = ObjectKey(
@@ -368,12 +367,11 @@ class TestTagsRoundtrip:
             kv_rank=42,
             object_group_id=1,
             cache_salt="alice",
-            tags=(("lora", "v2"), ("user", "alice")),
+            tags=(("application_version", "v2"), ("user", "alice")),
         )
         fn = _object_key_to_filename(key)
-        # Salt segment comes before tag segments (order fixed for
-        # bit-compat with pre-tag layouts).
-        assert "@alice@tags@lora%v2@user%alice.data" in fn
+        # The salt stays before tag segments for legacy compatibility.
+        assert "@alice@tags@application_version%v2@user%alice.data" in fn
         assert _filename_to_object_key(fn) == key
 
     def test_percent_salt_with_tags_roundtrip(self):
@@ -405,8 +403,7 @@ class TestTagsRoundtrip:
         assert hash(base) != hash(other)
 
     def test_untagged_filename_bit_identical_to_pre_tag_shape(self):
-        """Un-tagged, un-salted keys must serialize to the exact
-        pre-tag filename shape so existing on-disk caches remain valid."""
+        """Untagged keys retain the legacy filename shape."""
         key = ObjectKey(
             chunk_hash=b"\xde\xad\xbe\xef",
             model_name="llama",
@@ -416,8 +413,7 @@ class TestTagsRoundtrip:
         assert _object_key_to_filename(key) == "llama@0x0000002a@0@deadbeef.data"
 
     def test_reject_percent_in_tag_field(self):
-        # ``%`` splits tag name/value on wire; it must not appear inside
-        # either field.
+        # ``%`` separates tag names and values in filenames.
         with pytest.raises(ValueError, match="tag"):
             ObjectKey(
                 chunk_hash=b"\xaa",
@@ -427,9 +423,7 @@ class TestTagsRoundtrip:
             )
 
     def test_filename_with_forbidden_tag_returns_none(self):
-        # Simulate a stray file whose "tag" segment decodes into a value
-        # longer than the cap. ``_filename_to_object_key`` returns None
-        # for anything the ObjectKey invariants reject.
+        # Invalid tag fields make the filename unreadable.
         too_long = "x" * 129
-        fn = f"llama@0x0000002a@0@deadbeef@user%{too_long}.data"
+        fn = f"llama@0x0000002a@0@deadbeef@tags@user%{too_long}.data"
         assert _filename_to_object_key(fn) is None

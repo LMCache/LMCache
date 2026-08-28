@@ -198,8 +198,8 @@ See [ingest.md](ingest.md).
 ids, in either direction (POST because the payload rides in the body).
 Supply exactly one of: `keys` (resolve keys directly) or `token_ids`
 (prefix-exact resolution via the fleet `TokenHasher` + per-rank fan-out,
-as the pin APIs do; requires `model_name` / `world_size` / `cache_salt`
-since key identity includes them — and the sequence must be the
+as the pin APIs do; requires `model_name` / `world_size` / `cache_salt` /
+optional `tags` since key identity includes them — and the sequence must be the
 request's whole prefix, since chunk hashes are prefix-chained). One
 result per resolved key, request order, both fields empty for unknown
 keys. Position-independent token matching arrives with the content
@@ -252,4 +252,3 @@ directives (M3–M4 of the RFC).
 `key → tokens` introspection, fed by `TOKENS` events and refcounted from
 key records via the `content_hash` back-pointer. Nothing
 correctness-bearing reads it, so it ships with its first real consumer.
-

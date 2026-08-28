@@ -55,7 +55,7 @@ async def request_prefetch(body: PrefetchRequest, request: Request) -> PrefetchR
 
     Args:
         body: Target instance, model/world_size, the token_ids to warm, and the
-            per-tenant cache_salt.
+            per-tenant cache_salt / optional cache-identity tags.
 
     Returns:
         ``PrefetchResponse`` carrying the server's ``request_id`` (empty when the
@@ -82,6 +82,7 @@ async def request_prefetch(body: PrefetchRequest, request: Request) -> PrefetchR
             world_size=body.world_size,
             token_ids=body.token_ids,
             cache_salt=body.cache_salt,
+            tags=body.tags,
         )
     except httpx.HTTPError as exc:
         raise HTTPException(
@@ -155,7 +156,8 @@ async def request_pin(body: PinRequest, request: Request) -> PinResponse:
     per ``cache_salt``). No MP-server round-trip.
 
     Args:
-        body: model/world_size, token_ids, cache_salt.
+        body: model/world_size, token_ids, cache_salt, and optional
+            cache-identity tags.
 
     Returns:
         ``PinResponse`` with ``requested`` chunks and ``affected`` L2 keys pinned.
@@ -172,6 +174,7 @@ async def request_pin(body: PinRequest, request: Request) -> PinResponse:
             body.world_size,
             body.token_ids,
             body.cache_salt,
+            body.tags,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
@@ -193,7 +196,8 @@ async def request_unpin(body: PinRequest, request: Request) -> PinResponse:
     eligible for L2 eviction again.
 
     Args:
-        body: model/world_size, token_ids, cache_salt.
+        body: model/world_size, token_ids, cache_salt, and optional
+            cache-identity tags.
 
     Returns:
         ``PinResponse`` with ``requested`` chunks and ``affected`` L2 keys unpinned.
@@ -210,6 +214,7 @@ async def request_unpin(body: PinRequest, request: Request) -> PinResponse:
             body.world_size,
             body.token_ids,
             body.cache_salt,
+            body.tags,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
@@ -259,6 +264,7 @@ async def request_delete(body: DeleteRequest, request: Request) -> DeleteRespons
             body.world_size,
             body.token_ids,
             body.cache_salt,
+            body.tags,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None

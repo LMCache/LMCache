@@ -16,6 +16,7 @@ from lmcache.v1.mp_coordinator.api import (
     CacheEventEntry,
     CacheEventType,
 )
+from lmcache.v1.mp_coordinator.utils.encoding import decode_key
 from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
 
 
@@ -97,6 +98,45 @@ def test_restore_updates_size_without_duplicating_placement():
     [placements] = directory.lookup([_key(1)])
     assert len(placements) == 1
     assert placements[0].size_bytes == 200
+
+
+def test_capture_restore_preserves_tags():
+    key = ObjectKey(
+        chunk_hash=b"\x01" * 4,
+        model_name="m",
+        kv_rank=0,
+        tags=(("tenant", "a"),),
+    )
+    directory = KeyDirectory()
+    directory.consume(_batch(keys=[key]))
+
+    restored = KeyDirectory()
+    restored.restore(directory.capture())
+
+    assert len(restored.lookup([key])[0]) == 1
+    assert restored.lookup([_key(1)]) == [[]]
+
+
+def test_restore_accepts_legacy_key_encoding_without_tags():
+    key = _key(1)
+    directory = KeyDirectory()
+    directory.consume(_batch(keys=[key]))
+    captured = dict(directory.capture())
+    encoded_key, last_access, placements = captured["keys"][0]
+    captured["keys"] = [(encoded_key[:5], last_access, placements)]
+
+    restored = KeyDirectory()
+    restored.restore(captured)
+
+    assert len(restored.lookup([key])[0]) == 1
+
+
+@pytest.mark.parametrize("tags", [("not-a-pair",), (("tenant", 1),)])
+def test_decode_key_rejects_malformed_tags(tags):
+    encoded = (b"\x01" * 4, "m", 0, 0, "", tags)
+
+    with pytest.raises(ValueError, match="string name/value pairs"):
+        decode_key(encoded)
 
 
 def test_same_key_on_two_instances():

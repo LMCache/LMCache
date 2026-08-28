@@ -47,10 +47,21 @@ class PrefetchService:
         world_size: int,
         token_ids: list[int],
         cache_salt: str,
+        tags: dict[str, str],
         source_tier: Tier,
         target_tier: Tier,
     ) -> dict[str, object]:
         """Submit a warm prefetch of a token sequence's chunks from L2 into L1.
+
+        Args:
+            model_name: Model whose registered layout sizes the target L1.
+            world_size: World size selecting the layout and rank fan-out.
+            token_ids: Full prompt token sequence to resolve.
+            cache_salt: Per-tenant cache-identity salt.
+            tags: Per-request cache-identity tags, without the internal
+                ``lmcache.tag.`` prefix.
+            source_tier: Source tier (currently L2 only).
+            target_tier: Target tier (currently L1 only).
 
         Returns:
             ``{"request_id", "chunks", "status": "submitted"}``, or
@@ -77,7 +88,12 @@ class PrefetchService:
             )
         try:
             obj_keys, chunks = resolve_object_keys(
-                ctx.token_hasher, model_name, world_size, token_ids, cache_salt
+                ctx.token_hasher,
+                model_name,
+                world_size,
+                token_ids,
+                cache_salt,
+                tags,
             )
         except ValueError as exc:
             raise InvalidRequest(str(exc)) from None

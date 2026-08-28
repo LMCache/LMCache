@@ -142,7 +142,7 @@ def test_tracker_extracts_request_configs():
             sampling_params_extra_args={
                 "kv_transfer_params": {
                     "lmcache.tag.user": "alice",
-                    "lmcache.tag.lora": "adapter-v2",
+                    "lmcache.tag.application_version": "v2",
                     "temperature": 0.8,
                 }
             },
@@ -151,7 +151,7 @@ def test_tracker_extracts_request_configs():
 
     assert tracker.request_configs == {
         "lmcache.tag.user": "alice",
-        "lmcache.tag.lora": "adapter-v2",
+        "lmcache.tag.application_version": "v2",
     }
 
 

@@ -38,13 +38,15 @@ class PrefetchRequest:
 
     Callers describe content by ``token_ids``; the server resolves the per-rank
     keys itself. ``source_tier`` / ``target_tier`` are request data (today only
-    ``l2`` -> ``l1``).
+    ``l2`` -> ``l1``). ``tags`` holds optional external cache-identity tags;
+    each key omits the internal ``lmcache.tag.`` prefix.
     """
 
     model_name: str
     world_size: int
     token_ids: list[int]
     cache_salt: str = ""
+    tags: dict[str, str] = field(default_factory=dict)
     source_tier: Tier = Tier.L2
     target_tier: Tier = Tier.L1
 

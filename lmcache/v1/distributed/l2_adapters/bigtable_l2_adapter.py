@@ -30,11 +30,7 @@ import google.auth
 from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
 from lmcache.utils import TTLCache
-from lmcache.v1.distributed.api import (
-    OBJECT_KEY_TAG_MARKER,
-    MemoryLayoutDesc,
-    ObjectKey,
-)
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
@@ -70,21 +66,13 @@ def _object_key_to_string(key: ObjectKey) -> str:
 
     Salted (trailing ``cache_salt``):
         <model_name>@<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>@<cache_salt>
-
-    Tagged: ``@tags`` followed by one or more ``@<name>%<value>``
-    segments is appended for per-tag isolation (e.g. per-lora,
-    per-tenant).
     """
     base = (
         f"{key.model_name}@{key.kv_rank:08x}"
         f"@{key.object_group_id:x}@{key.chunk_hash.hex()}"
     )
     if key.cache_salt:
-        base = f"{base}@{key.cache_salt}"
-    if key.tags:
-        base = f"{base}@{OBJECT_KEY_TAG_MARKER}"
-    for name, value in key.tags:
-        base = f"{base}@{name}%{value}"
+        return f"{base}@{key.cache_salt}"
     return base
 
 

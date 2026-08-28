@@ -769,7 +769,7 @@ forms -- supply exactly one:
 * **keys form** -- ``{"keys": [...]}``: resolve keys you already have (e.g.
   from ``GET /directory/keys``).
 * **tokens form** -- ``{"token_ids": [...], "model_name": ..., "world_size":
-  ..., "cache_salt": ...}``: resolve a request's tokens to the keys of its
+  ..., "cache_salt": ..., "tags": ...}``: resolve a request's tokens to the keys of its
   complete chunks (the same fan-out the pin APIs use).
 
 .. important::
@@ -780,6 +780,11 @@ forms -- supply exactly one:
    different (nonexistent) keys. Trailing tokens that do not fill a chunk are
    ignored.
 
+For an experimental tagged entry, include ``tags`` as an object of string names
+and values (for example, ``{"tenant": "tenant-a"}``) in the tokens form. It
+must exactly match the tags used to store the entry; see :doc:`request_tags`
+for the current support boundary.
+
 **Request body** (tokens form):
 
 .. code-block:: json
@@ -788,7 +793,8 @@ forms -- supply exactly one:
       "token_ids": [15496, 11, 995, 314],
       "model_name": "meta-llama/Llama-3.1-8B-Instruct",
       "world_size": 1,
-      "cache_salt": ""
+      "cache_salt": "",
+      "tags": {"tenant": "tenant-a"}
     }
 
 **Request body** (keys form):
@@ -862,6 +868,12 @@ The ``/cache`` group dispatches cache operations to a named MP server. It covers
 **warm prefetch**, **pin/unpin**, and **delete**; further cache-control
 operations will be documented as endpoints here as they land.
 
+All token-addressed cache-control operations accept optional experimental
+``tags`` as an object of string names and values (for example,
+``{"tenant": "tenant-a"}``). They must match the store's tags exactly. Tags
+are passed without the internal ``lmcache.tag.`` prefix; see
+:doc:`request_tags` for the current support boundary.
+
 **Warm prefetch (pre-loading L1 from L2).** Pre-warm one MP server's L1 with the
 KV for a known prompt **before** the requests arrive, so the first request hits
 L1 instead of paying the L2 fetch inline -- useful when you know a workload is
@@ -909,6 +921,9 @@ Submit a warm prefetch of a token sequence on one named server.
      - string
      - Optional (default ``""``). Per-tenant isolation salt applied to the
        produced keys.
+   * - ``tags``
+     - object[string, string]
+     - Optional experimental cache-identity tags; must match the store's tags.
 
 **Response** (``200 OK``):
 
@@ -949,7 +964,8 @@ submitted to warm.
             "model_name": "Qwen/Qwen3-8B",
             "world_size": 1,
             "token_ids": [101, 102, 103, "..."],
-            "cache_salt": "user-a"
+            "cache_salt": "user-a",
+            "tags": {"tenant": "tenant-a"}
         }'
     # -> {"instance_id": "server-1", "request_id": "abc123", "chunks": 12, "status": "submitted"}
 
@@ -1044,6 +1060,9 @@ Pin a token sequence's keys in the L2 eviction plan.
    * - ``cache_salt``
      - string
      - Optional (default ``""``). Per-tenant isolation salt.
+   * - ``tags``
+     - object[string, string]
+     - Optional experimental cache-identity tags; must match the store's tags.
 
 **Response** (``200 OK``):
 
@@ -1071,7 +1090,8 @@ of L2 keys pinned (chunks times the per-rank fan-out).
             "model_name": "Qwen/Qwen3-8B",
             "world_size": 1,
             "token_ids": [101, 102, 103, "..."],
-            "cache_salt": "user-a"
+            "cache_salt": "user-a",
+            "tags": {"tenant": "tenant-a"}
         }'
     # -> {"requested": 12, "affected": 12, "status": "pinned"}
 
@@ -1120,9 +1140,9 @@ the delete would have touched; ``force`` deletes them and drops those pins.
 
 Delete a token sequence on one named server.
 
-**Request body:** (``model_name``,
-``world_size``, ``token_ids``, ``cache_salt``) plus ``tier`` (``l1`` / ``l2`` /
-``all``) and ``force`` (bool, default ``false``). When ``force`` is ``true``,
+**Request body:** (``model_name``, ``world_size``, ``token_ids``,
+``cache_salt``, optional ``tags``) plus ``tier`` (``l1`` / ``l2`` / ``all``) and
+``force`` (bool, default ``false``). When ``force`` is ``true``,
 locked keys are deleted anyway (L1 read/write locks on the node and the
 coordinator's L2 pin set).
 
@@ -1158,6 +1178,7 @@ sequence returns ``status`` ``"noop"``.
             "world_size": 1,
             "token_ids": [101, 102, 103, "..."],
             "cache_salt": "user-a",
+            "tags": {"tenant": "tenant-a"},
             "tier": "all",
             "force": false
         }'

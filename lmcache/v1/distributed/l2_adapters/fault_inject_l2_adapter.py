@@ -398,6 +398,11 @@ class FaultInjectL2Adapter(L2AdapterInterface):
         return self._inner.get_usage()
 
     @property
+    def supports_key_tags(self) -> bool:
+        """Whether the wrapped adapter preserves request tags."""
+        return self._inner.supports_key_tags
+
+    @property
     def supports_global_eviction(self) -> bool:
         """Whether the inner adapter supports aggregate usage-based eviction."""
         return self._inner.supports_global_eviction

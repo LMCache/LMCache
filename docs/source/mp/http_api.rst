@@ -916,6 +916,10 @@ configured L2 adapters, so there is no ``?adapter=`` selector.
    * - ``cache_salt``
      - string
      - Per-tenant key isolation; must match the store (default ``""``).
+   * - ``tags``
+     - object[string, string]
+     - Optional experimental cache-identity tags. See :doc:`request_tags` for
+       the support boundary and request format.
 
 **Response** (``202 Accepted``):
 
@@ -933,8 +937,8 @@ no ``request_id`` to poll:
 **HTTP status codes:**
 
 - ``202``: submitted (or a ``noop`` as above).
-- ``400``: ``token_ids`` exceeds the per-request cap, or ``cache_salt``
-  violates its invariants.
+- ``400``: ``token_ids`` exceeds the per-request cap, or ``cache_salt`` / a
+  tag violates the cache-key invariants.
 - ``409``: no layout registered for ``(model_name, world_size)`` — the model
   has not allocated KV cache on this node yet (start vLLM first).
 - ``422``: request body fails field-level validation.
@@ -947,7 +951,8 @@ no ``request_id`` to poll:
     curl -s -X POST http://localhost:8080/cache/prefetches \
         -H 'Content-Type: application/json' \
         -d '{"model_name": "Qwen/Qwen3-8B", "world_size": 1,
-             "token_ids": [101, 102, 103], "cache_salt": "user-a"}'
+             "token_ids": [101, 102, 103], "cache_salt": "user-a",
+             "tags": {"tenant": "tenant-a"}}'
     # -> {"request_id": "abc123", "chunks": 1, "status": "submitted"}
 
 ``GET /cache/prefetches/{request_id}``

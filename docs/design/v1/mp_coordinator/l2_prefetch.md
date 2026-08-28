@@ -15,7 +15,7 @@ sequenceDiagram
     participant Co as coordinator
     participant M as mp server
 
-    Cl->>Co: POST /cache/prefetches {instance_id, model_name, world_size, token_ids, cache_salt}
+    Cl->>Co: POST /cache/prefetches {instance_id, model_name, world_size, token_ids, cache_salt, tags?}
     Co->>M: POST /cache/prefetches (tokens forwarded verbatim)
     M-->>Co: {request_id, chunks, status: "submitted"}
     Co-->>Cl: {instance_id, request_id, chunks, status}
@@ -28,8 +28,8 @@ sequenceDiagram
 ```
 
 A client names **one** registered MP server and a **token sequence** (plus the
-model/world_size and tenant salt, and the optional `source_tier`=`l2` /
-`target_tier`=`l1`). The coordinator resolves the target's address from the
+model/world_size, tenant salt, and optional cache-identity tags). The
+coordinator resolves the target's address from the
 registry, `POST`s to its `/cache/prefetches`, and relays the server's
 `request_id` back. The client then polls
 `GET /cache/prefetches/{instance_id}/{request_id}` on the coordinator, which proxies
@@ -43,7 +43,7 @@ status calls are quick and the client drives completion on demand.
 ## Components
 
 - **`schemas.py`** — `PrefetchRequest {instance_id, model_name, world_size,
-  token_ids, cache_salt, source_tier=l2, target_tier=l1}` and
+  token_ids, cache_salt, tags={}}` and
   `PrefetchResponse {instance_id, request_id, chunks, status}`.
 - **`controllers/prefetch_manager.py`** — `PrefetchManager`. `submit_prefetch`
   awaits the target's `POST /cache/prefetches` and returns its reply;

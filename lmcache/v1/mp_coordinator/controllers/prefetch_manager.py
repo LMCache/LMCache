@@ -41,6 +41,7 @@ class PrefetchManager(Controller):
         world_size: int,
         token_ids: list[int],
         cache_salt: str,
+        tags: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """``POST /cache/prefetches`` to ``target`` and return its JSON reply.
 
@@ -51,6 +52,7 @@ class PrefetchManager(Controller):
             world_size: World size selecting the layout and per-rank fan-out.
             token_ids: Prompt tokens whose complete chunks should be warmed.
             cache_salt: Per-tenant isolation salt applied to the produced keys.
+            tags: Optional cache-identity tags applied to the produced keys.
 
         Returns:
             The server's reply, e.g. ``{"request_id", "chunks", "status"}`` or
@@ -66,6 +68,8 @@ class PrefetchManager(Controller):
             "token_ids": token_ids,
             "cache_salt": cache_salt,
         }
+        if tags:
+            body["tags"] = tags
         resp = await http_client.post(url, json=body)
         resp.raise_for_status()
         logger.info(

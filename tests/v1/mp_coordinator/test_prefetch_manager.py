@@ -63,6 +63,31 @@ async def test_submit_prefetch_posts_body_and_returns_reply():
 
 
 @pytest.mark.asyncio
+async def test_submit_prefetch_forwards_tags():
+    """Tags are included when the caller supplies them."""
+    mgr = PrefetchManager()
+    target = _instance("mp-1")
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["json"] = (request.read() or b"").decode()
+        return httpx.Response(202, json={"chunks": 1, "status": "submitted"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        await mgr.submit_prefetch(
+            target=target,
+            http_client=client,
+            model_name="m",
+            world_size=1,
+            token_ids=[1, 2],
+            cache_salt="tenant-a",
+            tags={"tenant": "tenant-a"},
+        )
+
+    assert _json.loads(captured["json"])["tags"] == {"tenant": "tenant-a"}
+
+
+@pytest.mark.asyncio
 async def test_submit_prefetch_raises_on_http_error():
     """A non-2xx submit surfaces as an httpx error for the caller to map."""
     mgr = PrefetchManager()

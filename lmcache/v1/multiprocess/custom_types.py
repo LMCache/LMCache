@@ -23,22 +23,10 @@ Key Types:
 """
 
 
-# The prefix used to extract per-request tag entries from
-# ``request_configs``. Only entries whose key starts with this prefix
-# participate in cache identity (they surface as ``tags`` on the key);
-# everything else in ``request_configs`` is transport-only metadata
-# (e.g. sampling params) and does NOT affect the cache key.
-#
-# Mirrors ``lmcache.utils.CacheEngineKey`` so the in-process and
-# multi-process modes share one tag convention.
+# Only ``request_configs`` entries with this prefix affect cache identity.
 TAG_PREFIX = "lmcache.tag."
-
-# Tag keys/values are embedded into serialized ObjectKey strings and
-# filenames (``@k%v`` segments), so they must be free of the field/value
-# separators used by the L2 adapters and of filesystem/NUL chars. Also
-# capped in length to keep filenames well within NAME_MAX.
-_TAG_FORBIDDEN_CHARS = frozenset("@%/\\\x00")
-_TAG_MAX_LEN = 128
+TAG_FORBIDDEN_CHARS = frozenset("@%/\\\x00")
+TAG_MAX_LEN = 128
 
 
 def _extract_tags(
@@ -46,13 +34,12 @@ def _extract_tags(
 ) -> tuple[tuple[str, str], ...]:
     """Return the sorted, validated ``(name, value)`` tag tuple.
 
-    Non-``lmcache.tag.<name>`` entries are ignored — only tag entries
-    take part in cache identity. Sorting keeps hashing/equality
-    order-insensitive across producers.
+    Only tag-prefixed entries participate in identity. Sorting makes their
+    order irrelevant.
 
     Raises:
         ValueError: a tag name or value contains a forbidden char or
-            exceeds :data:`_TAG_MAX_LEN`.
+            exceeds :data:`TAG_MAX_LEN`.
     """
     if not request_configs:
         return ()
@@ -63,12 +50,12 @@ def _extract_tags(
         name = raw_k[len(TAG_PREFIX) :]
         value = raw_v if isinstance(raw_v, str) else str(raw_v)
         for label, s in (("tag name", name), ("tag value", value)):
-            bad = _TAG_FORBIDDEN_CHARS & set(s)
+            bad = TAG_FORBIDDEN_CHARS & set(s)
             if bad:
                 raise ValueError(f"{label} must not contain {bad!r} (got {s!r})")
-            if len(s) > _TAG_MAX_LEN:
+            if len(s) > TAG_MAX_LEN:
                 raise ValueError(
-                    f"{label} exceeds max length {_TAG_MAX_LEN} (got {len(s)})"
+                    f"{label} exceeds max length {TAG_MAX_LEN} (got {len(s)})"
                 )
         out.append((name, value))
     out.sort()
@@ -112,24 +99,10 @@ class IPCCacheServerKey:
     # ObjectKey.cache_salt). Validated in __post_init__.
     cache_salt: str = ""
 
-    # === Per-request configs (participate in identity via ``tags``) ===
-    # Analogous to ``CacheEngineKey.request_configs`` in in-process mode.
-    # Only entries whose key starts with :data:`TAG_PREFIX` are turned
-    # into ``tags`` and thus contribute to cache identity; other
-    # entries (e.g. ``temperature``) are transport-only metadata and
-    # do NOT participate in equality or hashing.
-    #
-    # Kept as a plain dict for msgspec wire compatibility with the
-    # in-process convention. A new decoder receiving an old payload
-    # without ``request_configs`` gets ``None`` and produces an empty
-    # ``tags`` tuple. ``compare=False`` because identity is carried by
-    # the derived ``tags`` tuple, not the raw dict (dicts aren't
-    # hashable and their key order is not canonical).
+    # Tag-prefixed entries populate ``tags``; the raw dict stays wire-compatible.
     request_configs: Optional[dict] = field(default=None, compare=False)
 
-    # Derived (see __post_init__): validated, sorted tag tuple. Part
-    # of cache identity — two keys with the same content but different
-    # tags are different keys.
+    # Derived canonical tags carry cache identity.
     tags: tuple[tuple[str, str], ...] = field(default=(), init=False)
 
     # Number of workers that retrieve this key's object; the server reserves
@@ -153,10 +126,7 @@ class IPCCacheServerKey:
                 f"cache_salt exceeds max length {self._SALT_MAX_LEN} "
                 f"(got {len(self.cache_salt)})"
             )
-        # Extract + validate tags. ``frozen=True`` blocks direct
-        # attribute assignment, so route through ``object.__setattr__``
-        # like the stdlib dataclass docs recommend for __post_init__
-        # mutations on frozen instances.
+        # ``frozen=True`` requires ``object.__setattr__`` in ``__post_init__``.
         object.__setattr__(self, "tags", _extract_tags(self.request_configs))
 
     # Helper function for unit tests only

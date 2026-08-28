@@ -202,6 +202,7 @@ class StorageManager:
                 reserved memory objects. Note that not all requested keys could be
                 reserved (e.g., out of memory or write conflict)
         """
+        self._ensure_tagged_keys_supported(keys)
         reserve_result = self._l1_manager.reserve_write(
             keys=keys,
             is_temporary=[False] * len(keys),
@@ -426,6 +427,8 @@ class StorageManager:
             PrefetchHandle to track the task.
         """
         keys = spec.keys
+        if not skip_l2:
+            self._ensure_tagged_keys_supported(keys)
 
         if spec.mode is PrefetchMode.WARM:
             # Warm path: load all keys, lock none. skip_l2 makes it a no-op.
@@ -1189,6 +1192,24 @@ class StorageManager:
         """Return whether any L2 adapter is currently active."""
         with self._adapters_lock:
             return bool(self._l2_adapters)
+
+    def _ensure_tagged_keys_supported(self, keys: list[ObjectKey]) -> None:
+        """Reject tagged keys when a configured L2 adapter lacks support."""
+        if not any(key.tags for key in keys):
+            return
+        with self._adapters_lock:
+            unsupported = sorted(
+                {
+                    descriptor.type_name
+                    for adapter_id, descriptor in self._adapter_descriptors.items()
+                    if not self._l2_adapters[adapter_id].supports_key_tags
+                }
+            )
+        if unsupported:
+            raise ValueError(
+                "request tags are not supported by configured L2 adapters: "
+                f"{', '.join(unsupported)}"
+            )
 
     def _build_l2_adapter(
         self,

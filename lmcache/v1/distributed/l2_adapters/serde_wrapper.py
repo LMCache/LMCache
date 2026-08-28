@@ -305,6 +305,11 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
         return self._inner
 
     @property
+    def supports_key_tags(self) -> bool:
+        """Whether the wrapped adapter preserves request tags."""
+        return self._inner.supports_key_tags
+
+    @property
     def supports_global_eviction(self) -> bool:
         return self._inner.supports_global_eviction
 

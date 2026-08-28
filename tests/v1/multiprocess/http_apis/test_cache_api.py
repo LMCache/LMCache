@@ -499,13 +499,21 @@ def _ctx(layout: Optional[object]) -> _FakeContext:
     )
 
 
-def _prefetch_body(token_ids: list[int], world_size: int = 2, salt: str = "") -> dict:
-    return {
+def _prefetch_body(
+    token_ids: list[int],
+    world_size: int = 2,
+    salt: str = "",
+    tags: dict[str, str] | None = None,
+) -> dict:
+    body = {
         "model_name": "m",
         "world_size": world_size,
         "token_ids": token_ids,
         "cache_salt": salt,
     }
+    if tags:
+        body["tags"] = tags
+    return body
 
 
 class TestPrefetchEndpoint:
@@ -522,6 +530,20 @@ class TestPrefetchEndpoint:
         assert body["chunks"] == 2
         assert body["request_id"]
         assert ("m", 2) in ctx.layout_desc_registry.find_calls
+
+    def test_tags_are_applied_to_resolved_prefetch_keys(self):
+        ctx = _ctx(layout=object())
+        client = TestClient(_make_prefetch_app(ctx))
+
+        resp = client.post(
+            "/cache/prefetches",
+            json=_prefetch_body([1, 2, 3, 4], tags={"tenant": "a"}),
+        )
+
+        assert resp.status_code == 202, resp.text
+        keys = ctx.storage_manager.submit_calls[0]["keys"]
+        assert keys
+        assert all(key.tags == (("tenant", "a"),) for key in keys)
 
     def test_status_poll_completes_then_404(self):
         ctx = _ctx(layout=object())

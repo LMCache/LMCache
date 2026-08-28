@@ -124,13 +124,18 @@ def test_duplicate_and_stale_batches_are_counted():
 # -- Token -> placement lookup -------------------------------------------------
 
 
-def _lookup_tokens_body(n_tokens: int, model: str = "m") -> dict:
-    return {
+def _lookup_tokens_body(
+    n_tokens: int, model: str = "m", tags: dict[str, str] | None = None
+) -> dict:
+    body = {
         "model_name": model,
         "world_size": 1,
         "token_ids": list(range(n_tokens)),
         "cache_salt": "",
     }
+    if tags:
+        body["tags"] = tags
+    return body
 
 
 def test_lookup_tokens_short_sequence_resolves_no_chunks():
@@ -156,6 +161,27 @@ def test_lookup_tokens_roundtrip():
         [placement] = second["results"][0]["placements"]
         assert placement["instance_id"] == "node-a"
         assert placement["size_bytes"] == 64
+
+
+def test_lookup_tokens_with_tags_isolated_from_untagged_key():
+    with _client() as client:
+        tags = {"tenant": "a"}
+        tagged = client.post(
+            "/directory/lookup", json=_lookup_tokens_body(256, tags=tags)
+        ).json()
+        key = tagged["results"][0]["key"]
+        assert key["tags"] == [["tenant", "a"]]
+        _post_events(client, [_batch(entries=[{"key": key, "size_bytes": 64}])])
+
+        tagged_hit = client.post(
+            "/directory/lookup", json=_lookup_tokens_body(256, tags=tags)
+        ).json()
+        untagged = client.post(
+            "/directory/lookup", json=_lookup_tokens_body(256)
+        ).json()
+
+        assert tagged_hit["results"][0]["placements"]
+        assert untagged["results"][0]["placements"] == []
 
 
 def test_lookup_tokens_invalid_model_name_is_400():

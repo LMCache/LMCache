@@ -12,9 +12,9 @@ from typing import cast
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
 
-EncodedKey = tuple[bytes, str, int, int, str]
+EncodedKey = tuple[bytes, str, int, int, str, tuple[tuple[str, str], ...]]
 """An :class:`ObjectKey` as ``(chunk_hash, model_name, kv_rank,
-object_group_id, cache_salt)``."""
+object_group_id, cache_salt, tags)``."""
 
 
 def encode_key(key: ObjectKey) -> EncodedKey:
@@ -25,6 +25,7 @@ def encode_key(key: ObjectKey) -> EncodedKey:
         key.kv_rank,
         key.object_group_id,
         key.cache_salt,
+        key.tags,
     )
 
 
@@ -39,15 +40,41 @@ def decode_key(encoded: object) -> ObjectKey:
         The key, validated by ``ObjectKey`` itself.
 
     Raises:
-        ValueError: If a field violates an ``ObjectKey`` invariant.
+        ValueError: If the payload shape or a field violates an ``ObjectKey``
+            invariant.
     """
-    chunk_hash, model_name, kv_rank, object_group_id, cache_salt = cast(
-        "EncodedKey", encoded
-    )
+    if not isinstance(encoded, (list, tuple)):
+        raise ValueError("captured ObjectKey must be a sequence")
+    if len(encoded) == 5:
+        # Captures written before request tags existed have no tag field.
+        chunk_hash, model_name, kv_rank, object_group_id, cache_salt = encoded
+        tags: tuple[tuple[str, str], ...] = ()
+    elif len(encoded) == 6:
+        chunk_hash, model_name, kv_rank, object_group_id, cache_salt, raw_tags = encoded
+        if not isinstance(raw_tags, (list, tuple)):
+            raise ValueError("captured ObjectKey tags must be a sequence")
+        tag_pairs: list[tuple[str, str]] = []
+        for raw_tag in raw_tags:
+            if (
+                not isinstance(raw_tag, (list, tuple))
+                or len(raw_tag) != 2
+                or not isinstance(raw_tag[0], str)
+                or not isinstance(raw_tag[1], str)
+            ):
+                raise ValueError(
+                    "captured ObjectKey tags must contain string name/value pairs"
+                )
+            tag_pairs.append((raw_tag[0], raw_tag[1]))
+        tags = tuple(tag_pairs)
+    else:
+        raise ValueError(
+            "captured ObjectKey must have 5 legacy fields or 6 current fields"
+        )
     return ObjectKey(
-        chunk_hash=chunk_hash,
-        model_name=model_name,
-        kv_rank=kv_rank,
-        object_group_id=object_group_id,
-        cache_salt=cache_salt,
+        chunk_hash=cast(bytes, chunk_hash),
+        model_name=cast(str, model_name),
+        kv_rank=cast(int, kv_rank),
+        object_group_id=cast(int, object_group_id),
+        cache_salt=cast(str, cache_salt),
+        tags=tags,
     )

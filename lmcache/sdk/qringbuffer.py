@@ -47,12 +47,14 @@ class _QLayerStore:
         op: The store op whose ``[start, end)`` token range is stored.
         ring_block_ids: Ring blocks (in token order) holding this op's query.
         cache_salt: Per-user isolation salt for the query key.
+        request_configs: LMCache request configs carried into the query key.
     """
 
     request_id: str
     op: "LoadStoreOp"
     ring_block_ids: list[int]
     cache_salt: str
+    request_configs: dict[str, Any] | None
 
 
 @dataclass
@@ -487,6 +489,7 @@ class QRingBufferCapture:
                     op=op,
                     ring_block_ids=ring_blocks,
                     cache_salt=meta.cache_salt,
+                    request_configs=meta.request_configs,
                 )
             )
 
@@ -517,7 +520,7 @@ class QRingBufferCapture:
         Submit a batched Q store request to LMCache.
         A copy of batched_submit_store_requests for Q stores.
         The recorded step state has all request IDs, ops, ring block IDs, and
-        cache salts for the current forward step.
+        cache salts and request configs for the current forward step.
 
         Args:
             event: The CUDA event that is recorded after the current
@@ -537,6 +540,7 @@ class QRingBufferCapture:
                 q_store.ring_block_ids,
                 event,
                 cache_salt=q_store.cache_salt,
+                request_configs=q_store.request_configs,
             )
 
 
@@ -680,6 +684,7 @@ class QRingBufferAdapter:
         ring_block_ids: list[int],
         event: "_IpcEvent",
         cache_salt: str = "",
+        request_configs: dict[str, Any] | None = None,
     ) -> None:
         """Submit a store request for QRingBuffer content at ring_block_ids
         to LMCache. This is called after the query tensor is scattered, every
@@ -691,6 +696,8 @@ class QRingBufferAdapter:
             ring_block_ids: The ring block IDs to store.
             event: The IPC event to signal when the store is complete.
             cache_salt: Per-user isolation salt.
+            request_configs: Optional LMCache request configs. Only
+                ``lmcache.tag.*`` entries affect key identity.
         """
         if not self.q_ring or not self._adapter.transfer_ctx:
             return
@@ -708,6 +715,7 @@ class QRingBufferAdapter:
             op.end,
             request_id=request_id,
             cache_salt=cache_salt,
+            request_configs=request_configs,
         )
         key = replace(key, model_name=self.q_model_name)
         future = self._adapter.transfer_ctx.submit_q_store(

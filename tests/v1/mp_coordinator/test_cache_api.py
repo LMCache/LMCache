@@ -5,6 +5,9 @@ Quota writes, usage events, and status reads moved to the ``/quota`` group --
 see ``test_quota_api.py``.
 """
 
+# Standard
+import json
+
 # Third Party
 from fastapi.testclient import TestClient
 import httpx
@@ -42,11 +45,15 @@ def _prefetch_body(instance_id: str, salt: str = "alice") -> dict:
     }
 
 
-def _mock_mp_server() -> httpx.AsyncClient:
+def _mock_mp_server(
+    prefetch_bodies: list[dict[str, object]] | None = None,
+) -> httpx.AsyncClient:
     """An outbound client that emulates the target MP server's prefetch API."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.method == "POST" and request.url.path == "/cache/prefetches":
+            if prefetch_bodies is not None:
+                prefetch_bodies.append(json.loads(request.content))
             return httpx.Response(
                 202, json={"request_id": "abc", "chunks": 2, "status": "submitted"}
             )
@@ -95,6 +102,31 @@ def test_prefetch_submit_then_status_proxy():
         }
 
 
+def test_prefetch_forwards_tags_to_mp_server():
+    with _client() as client:
+        client.post(
+            "/instances",
+            json={"instance_id": "mp-1", "ip": "127.0.0.1", "http_port": 8080},
+        )
+        prefetch_bodies: list[dict[str, object]] = []
+        client.app.state.outbound_client = _mock_mp_server(prefetch_bodies)
+        body = _prefetch_body("mp-1")
+        body["tags"] = {"tenant": "a"}
+
+        resp = client.post("/cache/prefetches", json=body)
+
+        assert resp.status_code == 200, resp.text
+        assert prefetch_bodies == [
+            {
+                "model_name": "m",
+                "world_size": 1,
+                "token_ids": [1, 2, 3, 4],
+                "cache_salt": "alice",
+                "tags": {"tenant": "a"},
+            }
+        ]
+
+
 def test_prefetch_status_unknown_instance_returns_404():
     """Status for an unregistered instance must 404."""
     with _client() as client:
@@ -113,19 +145,24 @@ def _pin_client() -> TestClient:
     return TestClient(create_app(config))
 
 
-def _pin_body(salt: str = "alice") -> dict:
-    return {
+def _pin_body(salt: str = "alice", tags: dict[str, str] | None = None) -> dict:
+    body = {
         "model_name": "m",
         "world_size": 1,
         "token_ids": [1, 2, 3, 4, 5, 6, 7, 8],
         "cache_salt": salt,
     }
+    if tags:
+        body["tags"] = tags
+    return body
 
 
-def _resolve(ctx, salt: str = "alice") -> list[ObjectKey]:
+def _resolve(
+    ctx, salt: str = "alice", tags: dict[str, str] | None = None
+) -> list[ObjectKey]:
     """Resolve the pin body's keys the same way the handler will."""
     keys, _ = resolve_object_keys(
-        ctx.token_hasher, "m", 1, [1, 2, 3, 4, 5, 6, 7, 8], salt
+        ctx.token_hasher, "m", 1, [1, 2, 3, 4, 5, 6, 7, 8], salt, tags
     )
     return keys
 
@@ -180,6 +217,22 @@ def test_pin_then_unpin_tracks_l2_eviction():
         }
         # Unpinned: the keys are eligible for eviction again.
         assert eviction.compute_eviction_plan()["alice"]
+
+
+def test_pin_tags_are_part_of_the_resolved_identity():
+    with _pin_client() as client:
+        ctx = client.app.state.ctx
+        eviction = ctx.controllers.get(FleetEvictionController)
+        tags = {"tenant": "a"}
+        keys = _resolve(ctx, tags=tags)
+        assert keys and keys[0].tags == (("tenant", "a"),)
+
+        resp = client.post("/cache/pins", json=_pin_body(tags=tags))
+
+        assert resp.status_code == 200, resp.text
+        assert eviction.filter_unpinned(keys) == []
+        untagged = _resolve(ctx)
+        assert eviction.filter_unpinned(untagged) == untagged
 
 
 def test_pin_short_sequence_is_noop():

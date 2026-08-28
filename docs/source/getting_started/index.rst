@@ -12,5 +12,6 @@ the cache.
    installation
    quickstart
    /mp/configuration
+   /mp/request_tags
    benchmarking
    kv_cache_calculator

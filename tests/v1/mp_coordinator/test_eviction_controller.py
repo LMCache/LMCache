@@ -520,6 +520,25 @@ def test_unpin_restores_eviction_eligibility():
     assert ctrl.compute_eviction_plan()["a"] == [k]
 
 
+def test_pin_restore_preserves_tags():
+    ctrl, _, _ = _setup(eviction_ratio=1.0)
+    key = ObjectKey(
+        chunk_hash=b"\xaa",
+        model_name="m",
+        kv_rank=0,
+        cache_salt="a",
+        tags=(("tenant", "a"),),
+    )
+    ctrl.pin([key])
+
+    restored, _, _ = _setup(eviction_ratio=1.0)
+    restored.restore(ctrl.capture())
+
+    assert restored.filter_unpinned([key]) == []
+    untagged = _make_key("a")
+    assert restored.filter_unpinned([untagged]) == [untagged]
+
+
 def test_pin_is_reference_counted():
     """Two pins require two unpins before the key can be evicted."""
     ctrl, _, kd = _setup(eviction_ratio=1.0)

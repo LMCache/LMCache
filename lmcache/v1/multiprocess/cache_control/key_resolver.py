@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING
 
 # First Party
 from lmcache.v1.distributed.api import ObjectKey, ipc_key_to_object_keys
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.custom_types import TAG_PREFIX, IPCCacheServerKey
 
 if TYPE_CHECKING:
     # First Party
@@ -35,6 +35,7 @@ def resolve_object_keys(
     world_size: int,
     token_ids: list[int],
     cache_salt: str,
+    tags: dict[str, str] | None = None,
 ) -> tuple[list[ObjectKey], int]:
     """Resolve a token sequence to the object keys of its complete chunks.
 
@@ -51,6 +52,8 @@ def resolve_object_keys(
         world_size: Tensor-parallel world size selecting the per-rank fan-out.
         token_ids: The token sequence to resolve.
         cache_salt: Per-tenant isolation salt.
+        tags: Optional per-request cache-identity tags. Tag names are exposed
+            without the internal ``lmcache.tag.`` prefix.
 
     Returns:
         ``(obj_keys, chunk_count)``. ``obj_keys`` holds one key per (chunk, rank)
@@ -75,6 +78,11 @@ def resolve_object_keys(
         end=len(token_ids),
         request_id="",
         cache_salt=cache_salt,
+        request_configs=(
+            {f"{TAG_PREFIX}{name}": value for name, value in tags.items()}
+            if tags
+            else None
+        ),
     )
     chunk_hashes = token_hasher.compute_chunk_hashes(list(token_ids))
     if not chunk_hashes:

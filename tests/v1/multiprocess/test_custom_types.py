@@ -71,9 +71,7 @@ def test_ipc_cache_engine_key_serialization_with_cache_salt():
 
 
 class TestIPCCacheServerKeyRequestConfigs:
-    """``request_configs`` mirrors ``CacheEngineKey.request_configs``:
-    only ``lmcache.tag.<name>`` entries feed into identity via
-    ``tags``; other entries are transport-only metadata."""
+    """Only tag-prefixed request configs participate in cache identity."""
 
     def test_tags_extracted_from_request_configs(self):
         k = IPCCacheServerKey.from_token_ids(
@@ -84,11 +82,10 @@ class TestIPCCacheServerKeyRequestConfigs:
             request_configs={
                 "temperature": 0.8,
                 "lmcache.tag.user": "alice",
-                "lmcache.tag.lora": "v2",
+                "lmcache.tag.application_version": "v2",
             },
         )
-        # Sorted by tag name so hashing is order-insensitive.
-        assert k.tags == (("lora", "v2"), ("user", "alice"))
+        assert k.tags == (("application_version", "v2"), ("user", "alice"))
 
     def test_non_tag_entries_do_not_affect_identity(self):
         base = IPCCacheServerKey.from_token_ids(
@@ -136,7 +133,7 @@ class TestIPCCacheServerKeyRequestConfigs:
             token_ids=[1],
             request_configs={
                 "lmcache.tag.user": "alice",
-                "lmcache.tag.lora": "v2",
+                "lmcache.tag.application_version": "v2",
             },
         )
         b = IPCCacheServerKey.from_token_ids(
@@ -145,7 +142,7 @@ class TestIPCCacheServerKeyRequestConfigs:
             worker_id=0,
             token_ids=[1],
             request_configs={
-                "lmcache.tag.lora": "v2",
+                "lmcache.tag.application_version": "v2",
                 "lmcache.tag.user": "alice",
             },
         )
@@ -172,8 +169,7 @@ class TestIPCCacheServerKeyRequestConfigs:
             )
 
     def test_reject_percent_in_tag_value(self):
-        # ``%`` is the on-wire tag-name/value separator so it cannot
-        # appear inside a tag field or the encoding becomes ambiguous.
+        # ``%`` separates tag names and values in filenames.
         with pytest.raises(ValueError, match="tag value"):
             IPCCacheServerKey.from_token_ids(
                 model_name="m",
@@ -203,7 +199,7 @@ class TestIPCCacheServerKeyRequestConfigs:
             token_ids=[1, 2, 3],
             request_configs={
                 "lmcache.tag.user": "alice",
-                "lmcache.tag.lora": "v2",
+                "lmcache.tag.application_version": "v2",
             },
         )
         encoded = msgspec.msgpack.encode(original)

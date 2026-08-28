@@ -111,7 +111,8 @@ async def submit_prefetch(body: PrefetchRequest, request: Request) -> dict[str, 
     Responses:
         202: ``{"request_id", "chunks", "status": "submitted"}``, or
             ``{"chunks": 0, "status": "noop"}`` for a sub-chunk sequence.
-        400: token cap exceeded, invalid ``cache_salt``, or unsupported tiers.
+        400: token cap exceeded, invalid ``cache_salt`` / tag, or unsupported
+            tiers.
         422: body validation.
         503: not initialized, or no layout registered for the model.
     """
@@ -120,6 +121,7 @@ async def submit_prefetch(body: PrefetchRequest, request: Request) -> dict[str, 
         body.world_size,
         body.token_ids,
         body.cache_salt,
+        body.tags,
         body.source_tier,
         body.target_tier,
     )

@@ -46,6 +46,7 @@ class _FakeRequestMeta:
     direction: str
     op: _FakeOp
     cache_salt: str = ""
+    request_configs: dict[str, str] | None = None
 
 
 @dataclass
@@ -64,6 +65,7 @@ class _Request:
         store_tokens: int | None = None,
         direction: str = "STORE",
         computed_offset: int = 0,
+        request_configs: dict[str, str] | None = None,
     ):
         """
         Args:
@@ -88,6 +90,7 @@ class _Request:
         )
         self.gpu_blocks = list(range(first_gpu_block, first_gpu_block + n_blocks))
         self.direction = direction
+        self.request_configs = request_configs
 
     def meta(self) -> _FakeRequestMeta:
         op_blocks = self.gpu_blocks[: self.store_tokens // BLOCK_SIZE]
@@ -95,6 +98,7 @@ class _Request:
             request_id=self.request_id,
             direction=self.direction,
             op=_FakeOp(block_ids=[op_blocks], start=0, end=self.store_tokens),
+            request_configs=self.request_configs,
         )
 
     def row_slots(self) -> list[int]:
@@ -195,6 +199,18 @@ def test_aligned_two_request_step():
         got = _captured_tokens(capture, state, query, req)
         want = _expected_tokens(req, query, [a, b])
         assert torch.equal(got, want)
+
+
+def test_step_state_preserves_request_configs():
+    request_configs = {"lmcache.tag.tenant": "a"}
+    request = _Request("A", 256, first_gpu_block=0, request_configs=request_configs)
+    capture = _make_capture()
+    query, metadata, attn_metadata = _build_step([request])
+
+    state = capture._build_q_step_state(query, metadata, attn_metadata)
+
+    assert state is not None
+    assert state.stores[0].request_configs == request_configs
 
 
 def test_unaligned_tail_does_not_shift_next_request():

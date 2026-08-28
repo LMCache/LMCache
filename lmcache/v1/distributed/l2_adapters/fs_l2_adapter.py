@@ -111,10 +111,7 @@ def _object_key_to_filename(key: ObjectKey) -> str:
 
         <safe_model>@0x<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>@<cache_salt>.data
 
-    Tagged: ``@tags`` followed by one or more ``@<name>%<value>``
-    segments is appended before ``.data``, so per-tag identity
-    round-trips through the filesystem without reserving ``%`` in
-    legacy cache salts.
+    Tagged keys append ``@tags@<name>%<value>`` segments before ``.data``.
 
     ``kv_rank`` is written in ``0x`` prefixed hex so each byte
     of the bitmap ``(ws<<24)|(rank<<16)|(local_ws<<8)|local``
@@ -139,15 +136,8 @@ def _filename_to_object_key(
 ) -> Optional[ObjectKey]:
     """Reverse ``_object_key_to_filename``.
 
-    Accepts:
-      * 4-field unsalted, untagged shape,
-      * 5-field salted, untagged shape (trailing ``cache_salt``),
-      * either of the above followed by ``@tags`` and one or more
-        ``@<name>%<value>`` tag segments.
-
-    Returns ``None`` for anything else. Since ``model_name``,
-    ``cache_salt``, and tag fields all forbid ``@``, plain ``split``
-    suffices — no marker, no rsplit.
+    Supports legacy names and tagged names with ``@tags@<name>%<value>``
+    segments. Returns ``None`` for malformed names.
     """
     if not filename.endswith(_FILE_EXT):
         return None
@@ -180,11 +170,7 @@ def _filename_to_object_key(
         chunk_hash = bytes.fromhex(chunk_hash_hex)
         kv_rank = int(kv_rank_str, 16)
         object_group_id = int(object_group_str, 16)
-        # ObjectKey.__post_init__ raises ValueError when the decoded
-        # model_name / cache_salt / tags violate the forbidden-char or
-        # length invariants (e.g. a stray file from another tool on
-        # disk). The contract here is to return None for anything
-        # unparsable, so keep the constructor inside the try block.
+        # Invalid fields make the filename unreadable to this adapter.
         return ObjectKey(
             chunk_hash=chunk_hash,
             model_name=model_name,
@@ -287,6 +273,11 @@ class FSL2Adapter(L2AdapterInterface):
     """
 
     _DELETE_CONCURRENCY = 64
+
+    @property
+    def supports_key_tags(self) -> bool:
+        """Return whether filesystem keys preserve request tags."""
+        return True
 
     def __init__(self, config: FSL2AdapterConfig):
         super().__init__()
