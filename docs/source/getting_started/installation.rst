@@ -347,7 +347,11 @@ Install LMCache
                             # requirements/common.txt's cufile-python/nvtx (NVIDIA-only,
                             # not needed on MACA) and the unpinned generic "torch" entry
                             # (which would otherwise risk resolving over the MACA build).
-                            # Install any other runtime deps you actually need yourself first.
+                            # Install any other runtime deps you actually need yourself first --
+                            # MP mode needs mcpy (MetaX's cupy equivalent), published on MetaX's
+                            # own pip index rather than PyPI:
+                            #   pip install mcpy -i https://repos.metax-tech.com/r/maca-pypi/simple \
+                            #       --trusted-host repos.metax-tech.com
 
                             # SETUPTOOLS_SCM_PRETEND_VERSION makes the wheel filename and
                             # lmcache.__version__ carry the MACA build identity (mirrors how

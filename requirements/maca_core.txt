@@ -5,7 +5,12 @@
 # users install a MACA-enabled torch build themselves before compiling
 # lmcache from source, per the "LMCache on MACA" installation docs.
 #
-# mcpy is MetaX's own cupy-equivalent for MACA, the analogue of
-# cupy-rocm-7-0 in requirements/rocm_core.txt.
+# MP mode's MACA counterpart to cupy is mcpy (the analogue of
+# cupy-rocm-7-0 in requirements/rocm_core.txt). It's published as a real
+# wheel on MetaX's own pip index (repos.metax-tech.com/r/maca-pypi), not
+# PyPI, so a plain `pip install` (without --no-deps and without pointing
+# at that index) won't resolve it. See the "LMCache on MACA" installation
+# docs for the index URL. --no-deps (the documented default self-compile
+# flow) skips this file's contents entirely either way.
 
 mcpy
