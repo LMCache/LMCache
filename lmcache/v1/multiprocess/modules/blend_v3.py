@@ -1831,8 +1831,7 @@ class BlendV3Module(InstanceLivenessTarget):
         """Issue a fleet directory match query for this request (best-effort).
 
         The query carries this server's retrieval namespace, so the
-        coordinator returns only chunk hashes that expand into keys this
-        model, tenant, and parallel setup actually stored.
+        coordinator returns only chunk hashes this server can expand.
 
         Args:
             key: The lookup request key.

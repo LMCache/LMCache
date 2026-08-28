@@ -104,9 +104,7 @@ async def blend_lookup(
     be a prefix, and each match reports both where the content sits in
     the query and where it sat when stored, so the caller can re-RoPE it.
 
-    Matches are restricted to the namespace the body names, so every one
-    of them expands into keys that exist for this caller rather than into
-    another model's or tenant's.
+    Matches are restricted to the namespace the body names.
 
     Args:
         body: The query tokens and the caller's key-resolution

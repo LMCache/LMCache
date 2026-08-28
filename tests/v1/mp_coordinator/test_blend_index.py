@@ -24,8 +24,8 @@ from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
 
 CHUNK = 4
 
-# The namespace most index-level tests store and query in; matches are
-# scoped to it, so a test that does not care about identity uses one.
+# The namespace index-level tests store and query in; matches are scoped
+# to it, so a test that does not care about identity uses one.
 NS = BlendNamespace(model_name="m", world_size=1)
 OTHER_NS = BlendNamespace(model_name="other", world_size=1)
 
@@ -574,10 +574,7 @@ def test_enabling_does_not_retroactively_index_earlier_stores():
 
 
 def test_content_stored_by_another_namespace_is_not_offered():
-    """A chunk hash names content only; the model, salt, and parallel
-    setup that make it retrievable live on the key beside it. Offering
-    another namespace's chunk would expand into keys that exist nowhere,
-    buying a confirmed miss and a burned blend slot."""
+    """Another namespace's chunk expands into keys that exist nowhere."""
     index = _index()
     index.add(_content(1, 2, 3, 4), b"A", token_offset=0, namespace=OTHER_NS)
 
@@ -588,10 +585,8 @@ def test_content_stored_by_another_namespace_is_not_offered():
 
 
 def test_the_requester_s_own_chunk_is_found_behind_another_namespace_s():
-    """The regression this scoping exists for: the same text stored after
-    different prefixes yields several chunk hashes for one content. With
-    a single untagged occupant the first-indexed one wins and hides the
-    requester's own copy, which is a lost hit, not just a wasted one."""
+    """The regression this scoping exists for: one content can have several
+    chunk hashes, and an untagged occupant list returns only the first."""
     index = _index()
     content = _content(1, 2, 3, 4)
     index.add(content, b"THEIRS", token_offset=0, namespace=OTHER_NS)
@@ -603,8 +598,8 @@ def test_the_requester_s_own_chunk_is_found_behind_another_namespace_s():
 
 
 def test_one_chunk_shared_by_two_namespaces_serves_both():
-    """Identical prefixes across namespaces produce the same chunk hash,
-    so both claims ride on one occupant and one copy of the content."""
+    """Identical prefixes produce one chunk hash, so both claims ride on
+    one occupant and one copy of the content."""
     index = _index()
     content = _content(1, 2, 3, 4)
     index.add(content, b"A", token_offset=0, namespace=NS)
@@ -645,8 +640,8 @@ def test_releasing_the_last_namespace_drops_the_content():
 
 
 def test_remove_chunk_retires_every_namespace_at_once():
-    """Re-storing a chunk hash with different content invalidates it for
-    everyone, not just the namespace that re-stored it."""
+    """New content invalidates the chunk for every namespace, not just the
+    one that re-stored it."""
     index = _index()
     content = _content(1, 2, 3, 4)
     index.add(content, b"A", token_offset=0, namespace=NS)
@@ -672,10 +667,7 @@ def test_remove_chunk_retires_every_namespace_at_once():
 def test_directory_does_not_offer_matches_across_namespaces(
     requester: BlendNamespace,
 ):
-    """Each dimension of the namespace is one the requester's own key
-    expansion would miss on: another model's KV is not interchangeable,
-    another tenant's salt is isolated by design, and another parallel
-    setup shards heads differently."""
+    """Each dimension is one the requester's own key expansion misses on."""
     directory = _directory()
     directory.consume(_store([_key(1)], [10, 11, 12, 13], seq=1))
 
@@ -700,8 +692,8 @@ def test_directory_offers_a_chunk_two_tenants_stored_to_each_of_them():
 
 
 def test_directory_releases_a_namespace_claim_when_its_last_key_goes():
-    """The other tenant still holds the chunk, so the content stays
-    indexed — but the departing tenant must stop matching it."""
+    """The other tenant still holds the chunk, so the content stays indexed
+    — but the departing tenant must stop matching it."""
     directory = _directory()
     tenant_a = _key(1, cache_salt="a")
     tenant_b = _key(1, cache_salt="b")
@@ -716,8 +708,7 @@ def test_directory_releases_a_namespace_claim_when_its_last_key_goes():
 
 
 def test_a_namespace_joining_a_bound_chunk_without_tokens_still_claims_it():
-    """The second storer's emitter had already evicted the tokens, so its
-    store carries none. The content is already known, so the claim must
+    """The second storer's tokens were already evicted, so its claim must
     be recorded from the key alone rather than waiting for a re-store."""
     directory = _directory()
     directory.consume(_store([_key(1, cache_salt="a")], [10, 11, 12, 13], seq=1))

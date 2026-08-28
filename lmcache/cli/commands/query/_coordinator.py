@@ -171,11 +171,7 @@ def _render_health(body: Any, metrics: Metrics) -> None:
 
 
 def _render_directory_stats(body: Any, metrics: Metrics) -> None:
-    """Key-directory size, and how much of it is fragment-matchable.
-
-    Claims and namespaces separate a chunk many tenants share from many
-    chunks held one apiece -- the same ``num_chunks`` reads either way.
-    """
+    """Key-directory size, and how much of it is fragment-matchable."""
     metrics.add("num_keys", "Keys", body.get("num_keys"))
     metrics.add("num_placements", "Placements", body.get("num_placements"))
     blend = body.get("blend") or {}

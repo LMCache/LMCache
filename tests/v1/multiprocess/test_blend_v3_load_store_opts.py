@@ -399,9 +399,8 @@ def _coord_engine(chunk_size: int = 4):
 
 
 def test_submit_coordinator_match_sends_this_server_s_namespace():
-    """The coordinator scopes matches to chunk hashes the caller can
-    expand, so the query must carry this server's model, salt, and world
-    size -- the same three the retrieve path keys with."""
+    """The query carries the same model, salt, and world size the retrieve
+    path keys with."""
     # First Party
     from lmcache.v1.mp_coordinator.api import BlendNamespace
     from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey

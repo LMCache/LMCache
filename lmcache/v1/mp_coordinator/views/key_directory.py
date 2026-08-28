@@ -259,10 +259,9 @@ class KeyDirectory(View):
 
         Unlike :meth:`lookup` the query need not be a prefix. Matches name
         a ``chunk_hash`` only, which the caller expands with its own
-        model, salt, and world size -- so they are restricted to chunks
-        some instance stored in ``namespace``, whose expansion therefore
-        names keys that exist. Takes the blend index's lock, not the
-        directory's.
+        model, salt, and world size, so they are restricted to chunks some
+        instance stored in ``namespace``. Takes the blend index's lock,
+        not the directory's.
 
         Args:
             tokens: The query token ids.
@@ -612,10 +611,9 @@ class KeyDirectory(View):
         binding.token_ids = token_ids
         binding.token_offset = entry.token_offset
         if fresh_content:
-            # Keys of other namespaces may have attached while the binding
-            # had no content (or held content this store just replaced),
-            # so claim it for all of them. Steady-state stores take the
-            # single-key path below instead of rehashing per rank.
+            # Other namespaces' keys may have attached while the binding had
+            # no content, so claim it for all of them. Steady-state stores
+            # take the single-key path instead of rehashing per rank.
             self._index_binding(chunk_hash, binding)
         else:
             self._claim_binding(chunk_hash, binding, key)
@@ -643,8 +641,8 @@ class KeyDirectory(View):
         binding.keys.discard(key)
         if self._blend_lookup_enabled and binding.token_ids.size:
             namespace = BlendNamespace.from_object_key(key)
-            # Ranks and object groups of the same namespace hold the same
-            # bytes, so the claim survives until the last of them goes.
+            # The namespace's other ranks and groups hold the same bytes,
+            # so the claim survives until the last of them goes.
             if not any(
                 BlendNamespace.from_object_key(held) == namespace
                 for held in binding.keys
@@ -664,8 +662,7 @@ class KeyDirectory(View):
         """Claim ``chunk_hash`` in the blend index for ``key``'s namespace.
 
         A no-op while blend lookup is off, before the binding has content,
-        or without a stored position -- the cases a fragment match cannot
-        be served from anyway.
+        or without a stored position.
         """
         if not self._blend_lookup_enabled:
             return

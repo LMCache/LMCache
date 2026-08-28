@@ -451,17 +451,8 @@ class BlendLookupRequest(BaseModel):
     """Body of ``POST /directory/blend-lookup``.
 
     Unlike ``/directory/lookup`` the query need not be a prefix. It
-    carries the same identity fields for a different reason: prefix
-    lookup uses them to *build* keys, while a fragment match already
-    names a stored ``chunk_hash`` and uses them to stay inside the
-    namespace the caller can retrieve from. A `chunk_hash` names content
-    and prefix only, so without them a match could name another model's
-    or tenant's KV.
-
-    The query tokens ride as ``tokens_b64`` rather than
-    ``/directory/lookup``'s ``token_ids`` list: a fragment query is the
-    request's whole sequence and the compact form saves the wire. The two
-    endpoints are free to converge later.
+    carries the same identity fields, but uses them to scope matches to
+    the caller's namespace rather than to build keys.
 
     Attributes:
         tokens_b64: The query tokens, packed via :func:`encode_tokens`
