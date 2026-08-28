@@ -14,7 +14,6 @@ import asyncio
 
 # Third Party
 from fastapi import APIRouter, HTTPException, Query, Request
-import numpy as np
 
 # First Party
 from lmcache.v1.distributed.api import Tier
@@ -29,12 +28,10 @@ from lmcache.v1.mp_coordinator.schemas import (
     DirectoryListResponse,
     DirectoryLookupRequest,
     DirectoryLookupResponse,
+    decode_tokens,
 )
 from lmcache.v1.mp_coordinator.views.key_directory import DirectoryStats, KeyDirectory
-from lmcache.v1.multiprocess.cache_control.key_resolver import (
-    MAX_TOKEN_IDS,
-    resolve_object_keys,
-)
+from lmcache.v1.multiprocess.cache_control.key_resolver import resolve_object_keys
 
 router = APIRouter()
 
@@ -107,11 +104,9 @@ async def blend_lookup(
     be a prefix, and each match reports both where the content sits in
     the query and where it sat when stored, so the caller can re-RoPE it.
 
-    Takes the same tokens form as ``/directory/lookup`` and reads its
-    identity fields the same way -- as the namespace the caller's chunk
-    hashes resolve in. Matches are restricted to it, so every match
-    expands into keys that exist rather than into another model's or
-    tenant's.
+    Matches are restricted to the namespace the body names, so every one
+    of them expands into keys that exist for this caller rather than into
+    another model's or tenant's.
 
     Args:
         body: The query tokens and the caller's key-resolution
@@ -120,20 +115,9 @@ async def blend_lookup(
 
     Returns:
         Matched chunks, ascending by query position.
-
-    Raises:
-        HTTPException: 400 when the token sequence exceeds the
-            per-request cap.
     """
-    if len(body.token_ids) > MAX_TOKEN_IDS:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"too many token_ids in a single request "
-                f"(limit={MAX_TOKEN_IDS}, got={len(body.token_ids)})"
-            ),
-        )
     directory = get_context(request).views.get(KeyDirectory)
+    tokens = decode_tokens(body.tokens_b64)
     namespace = BlendNamespace(
         model_name=body.model_name,
         cache_salt=body.cache_salt,
@@ -142,7 +126,6 @@ async def blend_lookup(
 
     def _match() -> BlendLookupResponse:
         """Run the fragment match and shape it for the wire."""
-        tokens = np.asarray(body.token_ids, dtype=np.uint64)
         return BlendLookupResponse(
             matches=[
                 BlendMatchModel(

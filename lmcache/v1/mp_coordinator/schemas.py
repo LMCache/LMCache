@@ -11,6 +11,7 @@ This module holds HTTP models only.
 
 # Standard
 from typing import Annotated
+import base64
 
 # Third Party
 from pydantic import (
@@ -20,12 +21,55 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+import numpy as np
 
 # First Party
 from lmcache.v1.distributed.api import EncodedObjectKey  # noqa: F401  re-exported
 from lmcache.v1.distributed.api import Tier
 from lmcache.v1.mp_coordinator.api import CacheEventBatch
 from lmcache.v1.mp_coordinator.views.key_directory import Placement
+
+
+def encode_tokens(tokens: "list[int] | np.ndarray") -> str:
+    """Encode token ids into a compact base64 wire string.
+
+    Token ids fit in ``uint32``, so a little-endian ``uint32`` buffer is far
+    smaller than a JSON integer list and decodes in one ``np.frombuffer`` call.
+
+    Args:
+        tokens: Token ids (a ``list[int]`` or any array castable to ``uint32``).
+
+    Returns:
+        Base64 of the little-endian ``uint32`` token buffer.
+    """
+    arr = np.ascontiguousarray(np.asarray(tokens, dtype="<u4"))
+    return base64.b64encode(arr.tobytes()).decode("ascii")
+
+
+def decode_tokens(tokens_b64: str) -> np.ndarray:
+    """Decode a base64 token string produced by :func:`encode_tokens`.
+
+    Args:
+        tokens_b64: Base64 of a little-endian ``uint32`` token buffer.
+
+    Returns:
+        A ``uint64`` array of token ids (widened so it feeds the hashers
+        directly).
+
+    Raises:
+        ValueError: If ``tokens_b64`` is not valid base64 or not a multiple of
+            4 bytes.
+    """
+    try:
+        raw = base64.b64decode(tokens_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"tokens_b64 is not valid base64: {exc}") from exc
+    if len(raw) % 4 != 0:
+        raise ValueError(
+            f"tokens_b64 byte length {len(raw)} is not a multiple of 4 "
+            "(malformed uint32 token buffer)"
+        )
+    return np.frombuffer(raw, dtype="<u4").astype(np.uint64)
 
 
 class RegisterRequest(BaseModel):
@@ -282,63 +326,34 @@ class CacheEventsResponse(BaseModel):
     stale: int = 0
 
 
-class TokenSequenceForm(BaseModel):
-    """A token sequence plus the identity that resolves it to keys.
-
-    The shared shape of every directory query that speaks tokens rather
-    than keys: a `chunk_hash` names content only, so the model, salt, and
-    rank fan-out that turn it into an :class:`EncodedObjectKey` have to
-    travel with it. ``/directory/lookup`` uses them to *build* keys;
-    ``/directory/blend-lookup`` uses them to keep matches inside the
-    namespace the caller can actually retrieve from.
-
-    Chunk hashes are prefix-chained, so ``token_ids`` must be the
-    request's **full** sequence from position 0; a mid-request slice
-    resolves to different keys. Trailing incomplete chunks are ignored.
-
-    Attributes:
-        token_ids: The request's full token sequence.
-        model_name: Model whose rank fan-out to use.
-        world_size: World size selecting the per-rank fan-out.
-        cache_salt: Per-tenant isolation salt applied to produced keys.
-    """
-
-    token_ids: list[int] = Field(default_factory=list)
-    model_name: str = ""
-    world_size: int = Field(default=1, ge=1)
-    cache_salt: str = ""
-
-    @model_validator(mode="after")
-    def _validate_token_identity(self) -> "TokenSequenceForm":
-        """Reject a token sequence with no model to resolve it against.
-
-        Returns:
-            The unchanged request once any token sequence names a model.
-
-        Raises:
-            ValueError: If ``token_ids`` is supplied without
-                ``model_name``.
-        """
-        if self.token_ids and not self.model_name:
-            raise ValueError("'model_name' is required with 'token_ids'")
-        return self
-
-
-class DirectoryLookupRequest(TokenSequenceForm):
+class DirectoryLookupRequest(BaseModel):
     """Body of ``POST /directory/lookup``.
 
     Supply exactly one of the two lookup forms:
 
     * ``keys`` — resolve these keys directly.
-    * the inherited tokens form — resolve a request's token sequence to
-      the object keys of its complete chunks, the same fan-out the pin
-      APIs use.
+    * ``token_ids`` (with ``model_name`` / ``world_size``) — resolve a
+      request's token sequence to the object keys of its complete
+      chunks, the same fan-out the pin APIs use. Chunk hashes are
+      prefix-chained, so this must be the request's **full** token
+      sequence from position 0; a mid-request slice resolves to
+      different keys. Trailing incomplete chunks are ignored.
 
     Attributes:
         keys: The keys to resolve (keys form).
+        token_ids: The request's full token sequence (tokens form).
+        model_name: Model whose rank fan-out to use (tokens form).
+        world_size: World size selecting the per-rank fan-out
+            (tokens form).
+        cache_salt: Per-tenant isolation salt applied to produced keys
+            (tokens form).
     """
 
     keys: list[EncodedObjectKey] = Field(default_factory=list)
+    token_ids: list[int] = Field(default_factory=list)
+    model_name: str = ""
+    world_size: int = Field(default=1, ge=1)
+    cache_salt: str = ""
 
     @field_validator("keys")
     @classmethod
@@ -367,10 +382,12 @@ class DirectoryLookupRequest(TokenSequenceForm):
 
         Raises:
             ValueError: If both or neither of ``keys`` / ``token_ids``
-                is supplied.
+                is supplied, or the tokens form omits ``model_name``.
         """
         if bool(self.keys) == bool(self.token_ids):
             raise ValueError("supply exactly one of 'keys' or 'token_ids'")
+        if self.token_ids and not self.model_name:
+            raise ValueError("'model_name' is required with 'token_ids'")
         return self
 
 
@@ -430,31 +447,71 @@ class DirectoryListResponse(BaseModel):
     keys: list[DirectoryKeyInfo] = Field(default_factory=list)
 
 
-class BlendLookupRequest(TokenSequenceForm):
+class BlendLookupRequest(BaseModel):
     """Body of ``POST /directory/blend-lookup``.
 
-    The same tokens form ``/directory/lookup`` takes -- the two questions
-    differ in where the content may sit, not in how it is described. Only
-    the tokens form exists here: a fragment query is a search over
-    content, so there is nothing to name by key.
+    Unlike ``/directory/lookup`` the query need not be a prefix. It
+    carries the same identity fields for a different reason: prefix
+    lookup uses them to *build* keys, while a fragment match already
+    names a stored ``chunk_hash`` and uses them to stay inside the
+    namespace the caller can retrieve from. A `chunk_hash` names content
+    and prefix only, so without them a match could name another model's
+    or tenant's KV.
 
-    Unlike ``/directory/lookup`` the query need not be a prefix, but the
-    identity fields matter just as much: they scope matches to chunks the
-    caller's own key expansion can retrieve.
+    The query tokens ride as ``tokens_b64`` rather than
+    ``/directory/lookup``'s ``token_ids`` list: a fragment query is the
+    request's whole sequence and the compact form saves the wire. The two
+    endpoints are free to converge later.
+
+    Attributes:
+        tokens_b64: The query tokens, packed via :func:`encode_tokens`
+            (base64 little-endian ``uint32``).
+        model_name: Model the caller retrieves under; matches are
+            restricted to chunks stored for it.
+        world_size: The caller's world size (TP x PP), selecting its rank
+            fan-out.
+        cache_salt: The caller's per-tenant isolation salt.
     """
 
-    @model_validator(mode="after")
-    def _validate_tokens_present(self) -> "BlendLookupRequest":
-        """Enforce that a query sequence was supplied.
+    tokens_b64: str = ""
+    model_name: str = ""
+    world_size: int = Field(default=1, ge=1)
+    cache_salt: str = ""
+
+    @field_validator("tokens_b64")
+    @classmethod
+    def _validate_tokens_b64(cls, value: str) -> str:
+        """Reject a malformed token buffer at request validation.
+
+        Validating here returns 422 rather than the 500 a decode failure
+        inside the handler would produce.
+
+        Args:
+            value: The base64 ``tokens_b64`` field.
 
         Returns:
-            The unchanged request once it carries tokens.
+            The unchanged value once it is confirmed decodable.
 
         Raises:
-            ValueError: If ``token_ids`` is empty.
+            ValueError: If ``value`` is not valid base64 or not a whole
+                number of ``uint32`` tokens.
         """
-        if not self.token_ids:
-            raise ValueError("'token_ids' is required")
+        decode_tokens(value)
+        return value
+
+    @model_validator(mode="after")
+    def _validate_namespace(self) -> "BlendLookupRequest":
+        """Enforce that the query names the namespace to scope it to.
+
+        Returns:
+            The unchanged request once a query sequence names a model.
+
+        Raises:
+            ValueError: If ``tokens_b64`` is supplied without
+                ``model_name``.
+        """
+        if self.tokens_b64 and not self.model_name:
+            raise ValueError("'model_name' is required with 'tokens_b64'")
         return self
 
 

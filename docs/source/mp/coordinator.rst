@@ -1293,9 +1293,9 @@ only). Matching is chunked at the coordinator's ``--chunk-size`` — which must
 equal the MP servers' ``--chunk-size`` — probing every
 ``--blend-probe-stride`` positions.
 
-**Request body** — the same tokens form ``/directory/lookup`` takes, since
-both questions describe content the same way. The identity fields are not
-optional here: they name the namespace matches are scoped to.
+**Request body** — the query tokens plus the caller's identity, which names
+the namespace matches are scoped to. ``model_name`` is not optional: without
+it there is no namespace to scope to.
 
 .. list-table::
    :header-rows: 1
@@ -1304,9 +1304,10 @@ optional here: they name the namespace matches are scoped to.
    * - Field
      - Type
      - Description
-   * - ``token_ids``
-     - list[int]
-     - The request's full query token sequence. Required.
+   * - ``tokens_b64``
+     - string
+     - Query tokens packed as base64 little-endian ``uint32`` (see
+       ``encode_tokens`` / ``decode_tokens`` in ``schemas.py``). Required.
    * - ``model_name``
      - string
      - Model the caller retrieves under. Required.
@@ -1317,6 +1318,13 @@ optional here: they name the namespace matches are scoped to.
    * - ``cache_salt``
      - string
      - The caller's per-tenant isolation salt. Defaults to ``""``.
+
+``model_name`` / ``world_size`` / ``cache_salt`` are the same three fields
+``/directory/lookup``'s tokens form carries, but serve a different purpose
+here: prefix lookup uses them to *build* the keys it resolves, while a
+fragment match already names a stored chunk hash and uses them to stay in
+the namespace the caller can retrieve from. The token encodings differ
+between the two endpoints for now.
 
 **Response** (``200 OK``):
 
@@ -1347,7 +1355,7 @@ match rather than one that misses at prefetch.
 **HTTP status codes:**
 
 - ``200``: lookup completed (an empty match list is not an error).
-- ``400``: ``token_ids`` exceeds the per-request cap.
-- ``422``: ``token_ids`` is missing, or supplied without ``model_name``.
+- ``422``: ``tokens_b64`` is not valid base64 or not a whole number of
+  ``uint32`` tokens, or it is supplied without ``model_name``.
 
 Index counts are reported under the ``blend`` key of ``GET /directory/stats``.

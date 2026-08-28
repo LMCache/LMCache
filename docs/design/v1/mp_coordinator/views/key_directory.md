@@ -100,11 +100,11 @@ The lookups this serves:
   window is verified against `binding.token_ids` (exact), and the
   binding's keys give the placements. Discovery uses blend's cheap
   polynomial hash family; the index itself never needs a
-  content-addressed key because every hit is token-verified. It takes
-  the same tokens form as the prefix lookup and reads its
-  `model_name`/`cache_salt`/`world_size` as the namespace to scope
-  matches to, so a match names a chunk the caller's own key expansion
-  can reach. Implemented as a derived view over these bindings — see
+  content-addressed key because every hit is token-verified. The query
+  carries the caller's `model_name`/`cache_salt`/`world_size` as the
+  namespace to scope matches to, so a match names a chunk the caller's
+  own key expansion can reach. Implemented as a derived view over these
+  bindings — see
   [blend_index.md](blend_index.md), served by `POST
   /directory/blend-lookup`.
 

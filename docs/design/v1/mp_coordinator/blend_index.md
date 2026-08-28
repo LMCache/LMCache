@@ -173,16 +173,18 @@ application.
 
 ## HTTP surface
 
-`POST /directory/blend-lookup` takes **the same tokens form as
-`POST /directory/lookup`** — `token_ids`, `model_name`, `world_size`,
-`cache_salt`, shared as `TokenSequenceForm` in `schemas.py`. The two
-questions differ in where the content may sit, not in how it is
-described, and both need the same identity for the same reason: a
-`chunk_hash` names content only. Prefix lookup uses those fields to
-*build* keys; fragment lookup uses them to keep matches inside the
-namespace the caller can retrieve from. Only the tokens form exists here
-— a fragment query is a search over content, so there is nothing to name
-by key.
+`POST /directory/blend-lookup` takes `tokens_b64` (base64 little-endian
+`uint32`, ~1.4x smaller than a JSON list and decoded in one
+`np.frombuffer`) plus the caller's `model_name`, `world_size`, and
+`cache_salt`.
+
+Those three are the same fields `/directory/lookup`'s tokens form
+carries, for a related but distinct reason: prefix lookup uses them to
+*build* the keys it looks up, while a fragment match already names a
+stored `chunk_hash` and uses them to stay inside the namespace the caller
+can retrieve from. The token encodings deliberately differ for now — a
+fragment query is the request's whole sequence, so the compact form earns
+its place — and the two endpoints are free to converge later.
 
 It returns matches as `(chunk_hash, old_st, cur_st)`:
 

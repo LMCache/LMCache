@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.mp_coordinator.app import create_app
 from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
+from lmcache.v1.mp_coordinator.schemas import encode_tokens
 from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
 
 
@@ -255,7 +256,7 @@ def _blend_lookup(
     resp = client.post(
         "/directory/blend-lookup",
         json={
-            "token_ids": tokens,
+            "tokens_b64": encode_tokens(tokens),
             "model_name": model,
             "cache_salt": salt,
             "world_size": world_size,
@@ -291,14 +292,23 @@ def test_blend_lookup_without_a_match_is_empty():
         assert data["matches"] == []
 
 
-def test_blend_lookup_rejects_a_query_missing_its_identity():
-    """The tokens form of ``/directory/lookup`` needs a model to resolve
-    keys with; the fragment form needs the same one to scope matches."""
+def test_blend_lookup_rejects_a_malformed_token_buffer():
     with _blend_client() as client:
-        resp = client.post("/directory/blend-lookup", json={"token_ids": [1, 2, 3]})
+        resp = client.post(
+            "/directory/blend-lookup",
+            json={"tokens_b64": "not!b64", "model_name": MODEL},
+        )
         assert resp.status_code == 422
 
-        resp = client.post("/directory/blend-lookup", json={"model_name": MODEL})
+
+def test_blend_lookup_rejects_a_query_missing_its_namespace():
+    """Without a model there is no namespace to scope matches to, and an
+    unscoped match could name another model's or tenant's KV."""
+    with _blend_client() as client:
+        resp = client.post(
+            "/directory/blend-lookup",
+            json={"tokens_b64": encode_tokens([1, 2, 3])},
+        )
         assert resp.status_code == 422
 
 
