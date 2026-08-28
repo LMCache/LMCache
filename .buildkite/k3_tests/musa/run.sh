@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run the focused LMCache smoke suite on a self-hosted MUSA agent.
+# Run LMCache unit and focused smoke suites on a self-hosted MUSA agent.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -8,14 +8,68 @@ ARTIFACT_DIR="${REPO_ROOT}/${MUSA_CI_ARTIFACT_DIR:-musa-ci-artifacts}"
 SERVER_LOG="${ARTIFACT_DIR}/lmcache-server.log"
 VENV_DIR=""
 SERVER_PID=""
+INSTALL_CMD=()
+FREEZE_CMD=()
 
 log() {
     echo "--- :musa: $*"
 }
 
 fail() {
-    echo "[musa-ci] ERROR: $*" >&2
+    mkdir -p "${ARTIFACT_DIR}" 2>/dev/null || true
+    printf '[musa-ci] ERROR: %s\n' "$*" \
+        | tee -a "${ARTIFACT_DIR}/failure.log" >&2
     exit 1
+}
+
+check_musa_runtime() {
+    local phase="$1"
+    local output_file="$2"
+
+    log "Checking the MUSA runtime and hardware (${phase})"
+    python - "${phase}" <<'PY' 2>&1 | tee "${output_file}"
+import ctypes
+import importlib.metadata
+import os
+import sys
+
+import torch
+import torch_musa
+
+
+def package_version(name: str) -> str:
+    try:
+        return importlib.metadata.version(name)
+    except importlib.metadata.PackageNotFoundError:
+        return "unknown"
+
+
+assert hasattr(torch, "musa"), "torch.musa is unavailable after importing torch_musa"
+assert torch.musa.is_available(), "torch.musa.is_available() returned False"
+device_count = torch.musa.device_count()
+assert device_count > 0, "no MUSA device is visible"
+
+try:
+    ctypes.CDLL("libmusart.so")
+except OSError as exc:
+    raise AssertionError(f"libmusart.so is not loadable: {exc}") from exc
+
+print("phase=", sys.argv[1])
+print("python=", sys.executable)
+print("torch=", torch.__version__)
+print("torch_musa=", package_version("torch_musa"))
+print("torch_musa_module=", getattr(torch_musa, "__version__", "unknown"))
+print("MUSA_VISIBLE_DEVICES=", os.environ["MUSA_VISIBLE_DEVICES"])
+print("MUSA_HOME=", os.environ.get("MUSA_HOME", "<unset>"))
+print("musa_device_count=", device_count)
+for device_index in range(device_count):
+    try:
+        device_name = torch.musa.get_device_name(device_index)
+    except Exception as exc:
+        device_name = f"<unavailable: {exc}>"
+    print(f"musa_device_{device_index}=", device_name)
+print("libmusart.so=loadable")
+PY
 }
 
 wait_for_process_exit() {
@@ -67,76 +121,61 @@ cleanup() {
 
 trap cleanup EXIT
 
-command -v uv >/dev/null 2>&1 || fail "uv is required on the MUSA agent"
+mkdir -p "${ARTIFACT_DIR}"
 command -v python >/dev/null 2>&1 || fail "python is required on the MUSA agent"
-command -v curl >/dev/null 2>&1 || fail "curl is required for the server smoke test"
+if [[ "${MUSA_CI_UNIT_ONLY:-0}" != "1" ]]; then
+    command -v curl >/dev/null 2>&1 || \
+        fail "curl is required for the server smoke test"
+fi
 [[ -n "${MUSA_VISIBLE_DEVICES:-}" ]] || fail \
     "MUSA_VISIBLE_DEVICES must be set by the Buildkite agent or pipeline"
 
-mkdir -p "${ARTIFACT_DIR}"
 cd "${REPO_ROOT}"
 
 VENV_DIR="$(mktemp -d "${TMPDIR:-/tmp}/lmcache-musa-ci.XXXXXX")"
 log "Creating an isolated environment while preserving the pinned TorchMUSA stack"
-uv venv --system-site-packages --python "$(command -v python)" "${VENV_DIR}"
+BASE_PYTHON="$(command -v python)"
+if command -v uv >/dev/null 2>&1; then
+    log "Using uv for environment and package management"
+    uv venv --system-site-packages --python "${BASE_PYTHON}" "${VENV_DIR}" || \
+        fail "uv failed to create the temporary environment"
+    INSTALL_CMD=(uv pip install)
+    FREEZE_CMD=(uv pip freeze)
+else
+    log "uv is unavailable; using the standard venv and pip fallback"
+    "${BASE_PYTHON}" -m venv --system-site-packages "${VENV_DIR}" || \
+        fail "python -m venv failed; install the Python venv module on the agent"
+    INSTALL_CMD=(python -m pip install)
+    FREEZE_CMD=(python -m pip freeze)
+fi
 # shellcheck disable=SC1091
-source "${VENV_DIR}/bin/activate"
+source "${VENV_DIR}/bin/activate" || \
+    fail "failed to activate the temporary environment"
+python -m pip --version >/dev/null 2>&1 || \
+    python -m ensurepip --upgrade >/dev/null || \
+    fail "pip is unavailable and ensurepip could not install it"
 
-log "Checking the MUSA runtime and hardware"
-python - <<'PY' 2>&1 | tee "${ARTIFACT_DIR}/runtime-preflight.txt"
-import ctypes
-import importlib.metadata
-import os
-
-import torch
-import torch_musa
-
-
-def package_version(name: str) -> str:
-    try:
-        return importlib.metadata.version(name)
-    except importlib.metadata.PackageNotFoundError:
-        return "unknown"
-
-
-assert hasattr(torch, "musa"), "torch.musa is unavailable after importing torch_musa"
-assert torch.musa.is_available(), "torch.musa.is_available() returned False"
-device_count = torch.musa.device_count()
-assert device_count > 0, "no MUSA device is visible"
-
-try:
-    ctypes.CDLL("libmusart.so")
-except OSError as exc:
-    raise AssertionError(f"libmusart.so is not loadable: {exc}") from exc
-
-print("torch=", torch.__version__)
-print("torch_musa=", package_version("torch_musa"))
-print("torch_musa_module=", getattr(torch_musa, "__version__", "unknown"))
-print("MUSA_VISIBLE_DEVICES=", os.environ["MUSA_VISIBLE_DEVICES"])
-print("MUSA_HOME=", os.environ.get("MUSA_HOME", "<unset>"))
-print("musa_device_count=", device_count)
-for device_index in range(device_count):
-    try:
-        device_name = torch.musa.get_device_name(device_index)
-    except Exception as exc:
-        device_name = f"<unavailable: {exc}>"
-    print(f"musa_device_{device_index}=", device_name)
-print("libmusart.so=loadable")
-PY
+check_musa_runtime \
+    "before dependency installation" \
+    "${ARTIFACT_DIR}/runtime-preflight.txt"
 
 log "Installing LMCache build and test dependencies"
-uv pip install \
+"${INSTALL_CMD[@]}" \
     -r requirements/build.txt \
     -r requirements/common.txt \
     -r requirements/test.txt
+
+check_musa_runtime \
+    "after dependency installation" \
+    "${ARTIFACT_DIR}/runtime-post-install.txt"
 
 log "Building LMCache from the current checkout with the MUSA profile"
 BUILD_WITH_MUSA=1 \
 BUILD_MOONCAKE=0 \
 SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE=0.0.0+ci \
-    uv pip install --no-deps -e . --no-build-isolation
+    "${INSTALL_CMD[@]}" --no-deps -e . --no-build-isolation
 
-uv pip freeze > "${ARTIFACT_DIR}/pip-freeze.txt"
+"${FREEZE_CMD[@]}" > "${ARTIFACT_DIR}/pip-freeze.txt"
 
 log "Verifying LMCache selected the MUSA backend and built native support"
 python - <<'PY' 2>&1 | tee "${ARTIFACT_DIR}/lmcache-preflight.txt"

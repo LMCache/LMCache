@@ -61,16 +61,18 @@ The self-hosted agent must provide:
 2. A compatible, pinned `torch` and `torch_musa` installation in the agent's
    default Python environment.
 3. `libmusart.so` on the dynamic linker search path.
-4. `uv`, Python, a C++ compiler, Ninja, and curl.
+4. Python with `venv`/`pip`, a C++ compiler, Ninja, and curl. `uv` is optional.
 5. Access to the configured Python package index, or an equivalent internal
    dependency mirror.
 6. An explicit `MUSA_VISIBLE_DEVICES` value exposing one device.
 
-The test script creates a temporary `uv` virtual environment with
-`--system-site-packages`. This preserves the agent's pinned TorchMUSA stack.
-LMCache is installed with `BUILD_WITH_MUSA=1`, `BUILD_MOONCAKE=0`, and
-`--no-deps` so the editable install cannot replace that stack with upstream
-PyTorch. Build and test dependencies are installed before the editable package.
+The test script creates a temporary virtual environment with
+`--system-site-packages`, using `uv` when available and the standard
+`python -m venv` plus `pip` otherwise. This preserves the agent's pinned
+TorchMUSA stack. The script checks the MUSA runtime both before and after
+dependency installation. LMCache is installed with `BUILD_WITH_MUSA=1`,
+`BUILD_MOONCAKE=0`, and `--no-deps` so the editable install cannot replace that
+stack with upstream PyTorch.
 
 ## Buildkite UI snippet
 
@@ -100,8 +102,8 @@ step, so two jobs cannot contend for the same device.
 - Focused MUSA connector, pin-memory, real-device block-transfer, and MP tests
   pass.
 - The LMCache MP server reaches `/healthcheck` and terminates cleanly.
-- Runtime versions, `pip freeze`, pytest output, and server logs are uploaded
-  from `musa-ci-artifacts/`.
+- Runtime versions, `pip freeze`, pytest output, early-failure diagnostics, and
+  server logs are uploaded from `musa-ci-artifacts/`.
 
 The initial PR gate does not run vLLM/SGLang model serving, GDS/MuFile,
 MUSA memory/event IPC, multi-GPU tests, or native-transfer performance gates.
