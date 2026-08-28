@@ -31,11 +31,14 @@ class LMCacheMPRequestState(enum.Enum):
     State machine:
     PREFETCHING -- update_state_after_alloc --> WAITING_FOR_LOAD
     WAITING_FOR_LOAD -- process_loading_requests --> READY
+    READY -- failed async load --> BYPASS_LMCACHE
+    BYPASS_LMCACHE -- update_state_after_alloc --> READY
     """
 
     PREFETCHING = enum.auto()
     WAITING_FOR_LOAD = enum.auto()
     READY = enum.auto()
+    BYPASS_LMCACHE = enum.auto()
 
 
 @dataclass
@@ -96,7 +99,11 @@ class LMCacheMPRequestTracker:
         update_stage_after_alloc"""
         return (
             self.num_lmcache_hit_tokens > self.num_vllm_hit_tokens
-            and self.state != LMCacheMPRequestState.READY
+            and self.state
+            not in (
+                LMCacheMPRequestState.READY,
+                LMCacheMPRequestState.BYPASS_LMCACHE,
+            )
         )
 
     def is_ready_for_retrieving(self) -> bool:

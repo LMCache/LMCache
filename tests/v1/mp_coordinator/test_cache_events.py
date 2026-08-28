@@ -37,6 +37,7 @@ from lmcache.v1.mp_coordinator.cache_events import (
     HttpCacheEventSink,
 )
 from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
+from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventBus, EventBusConfig
 import lmcache.v1.mp_coordinator.cache_events as cache_events
@@ -789,7 +790,7 @@ def test_token_bindings_feed_the_key_directory_end_to_end():
     )
     subscriber.flush()
 
-    key_directory = app.state.ctx.key_directory
+    key_directory = app.state.ctx.views.get(KeyDirectory)
     assert key_directory.get_token_ids([_key(1).chunk_hash, _key(2).chunk_hash]) == [
         (1, 2),
         (3, 4),
