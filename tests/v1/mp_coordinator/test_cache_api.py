@@ -159,7 +159,7 @@ def test_pin_then_unpin_tracks_l2_eviction():
                     ],
                 )
             )
-        assert eviction.compute_eviction_plan()["alice"]
+        assert eviction.compute_eviction_plan(Tier.L2)["alice"]
 
         resp = client.post("/cache/pins", json=_pin_body())
         assert resp.status_code == 200, resp.text
@@ -169,7 +169,7 @@ def test_pin_then_unpin_tracks_l2_eviction():
             "status": "pinned",
         }
         # Pinned: the keys drop out of the eviction plan.
-        assert eviction.compute_eviction_plan() == {}
+        assert eviction.compute_eviction_plan(Tier.L2) == {}
 
         resp = client.request("DELETE", "/cache/pins", json=_pin_body())
         assert resp.status_code == 200, resp.text
@@ -179,7 +179,7 @@ def test_pin_then_unpin_tracks_l2_eviction():
             "status": "unpinned",
         }
         # Unpinned: the keys are eligible for eviction again.
-        assert eviction.compute_eviction_plan()["alice"]
+        assert eviction.compute_eviction_plan(Tier.L2)["alice"]
 
 
 def test_pin_short_sequence_is_noop():

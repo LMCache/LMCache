@@ -186,25 +186,26 @@ it. It holds no cache state itself. See [ingest.md](ingest.md).
   emitter stream, `reconcile()` for a scan that has no stream position.
 - `event_broadcaster.py` — fans admitted batches (and fence
   notifications) to its registered `CacheEventConsumer`s: the key
-  directory and the eviction manager. Adding a consumer is a wiring
-  change in `app.py`, not a router or gate change.
+  directory, the usage view, and the per-tier eviction controllers.
+  Adding a consumer is a wiring change in `app.py`, not a router or
+  gate change.
 
 ## Controllers (`controllers/`)
 
 Where the coordinator's fleet-level *doing* lives — the counterpart to
 `distributed/storage_controllers/` one scope down.
 
-- `eviction_controller.py` — `FleetEvictionController`, the fleet L2
-  control loop: it holds the target (`QuotaManager` budgets), observes
-  the value (`CacheUsageManager` byte totals, on the `l2` tier), and
-  acts to close the gap.
-  Its `run()` wakes every `EVICTION_CHECK_INTERVAL` seconds, walks salts
-  over their trigger watermark, and dispatches `DELETE /cache/objects`
-  requests (chunked at `MAX_DELETE_BATCH`) to a uniformly random registered
-  mp server (all servers share the backing L2, so one dispatch evicts the
-  fleet). Also tracks the pins taken via `POST /cache/pins` so pinned keys
-  are excluded from eviction and delete. Reachable as
-  `ctx.eviction_controller`, with `.quota` for the `/quota` endpoints.
+- `eviction_controller.py` — `FleetEvictionController`, the per-`cache_salt`
+  quota → usage → evict machine for **both tiers**: it holds the target
+  (a `QuotaManager` per tier), observes the value (`CacheUsageManager` byte
+  totals on that tier), and acts to close the gap. Its `run()` wakes every
+  `EVICTION_CHECK_INTERVAL` seconds, walks each tier's salts over their
+  trigger watermark, and dispatches `DELETE /cache/objects` (chunked at
+  `MAX_DELETE_BATCH`). One controller, because only two answers differ by
+  tier: L2 deletes go to any registered member and a restart voids nothing,
+  while L1 deletes go to every node `KeyDirectory` says holds the key and a
+  restart drops what that node last held. It also tracks the pins taken via
+  `POST /cache/pins`, which hold L2 keys back from eviction and delete.
 - `views/usage_manager.py` — `CacheUsageManager`, byte totals per tier rolled
   up per `cache_salt` (the tenant axis the eviction controller enforces
   against) and per `(instance_id, backend)` (the capacity axis: how full
@@ -277,11 +278,11 @@ The previous design — `blend_directory.py` (`GlobalBlendMatcher`) with its own
 - The health-check loop is an asyncio task started in the app lifespan; it
   evicts instances whose heartbeat lapsed (`instance_timeout`) and is cancelled
   on shutdown. `HEALTH_CHECK_INTERVAL = 0` disables the stale-instance loop
-  (it does not affect the L2 eviction loop, which is gated separately by
+  (it does not affect the eviction loops, which are gated separately by
   `EVICTION_CHECK_INTERVAL`).
-- The L2 eviction loop is the controller's own, not the app's: the lifespan
+- The eviction loops are the controllers' own, not the app's: the lifespan
   enters every controller's `run` and names none of them.
-  `EVICTION_CHECK_INTERVAL = 0` makes `FleetEvictionController.start`
+  `EVICTION_CHECK_INTERVAL = 0` makes both the L2 and the L1 controller
   create no task.
 - Registration is idempotent: re-registering replaces the entry. The registry
   is ephemeral — rebuilt from heartbeats after a coordinator restart. Durable

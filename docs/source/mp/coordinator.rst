@@ -56,18 +56,20 @@ keeps the default below.
      - ``10``
      - Seconds between health-check sweeps that expire stale MP-server
        registrations. ``0`` disables the stale-instance eviction loop; it does
-       **not** affect the ``/quota`` L2 eviction loop (see
+       **not** affect the ``/quota`` eviction loops (see
        ``--eviction-check-interval`` below).
    * - ``--eviction-check-interval``
      - ``5``
-     - Seconds between L2 eviction sweeps. ``0`` disables the loop.
+     - Seconds between quota eviction sweeps, on both the L1 and L2 loops.
+       ``0`` disables them.
    * - ``--eviction-ratio``
      - ``0.2``
-     - Fraction of tracked keys (by count) to evict per cycle (0.0 to 1.0).
+     - Fraction of a salt's tracked keys (by count) to evict per cycle
+       (0.0 to 1.0). Applies to both tiers.
    * - ``--trigger-watermark``
      - ``1.0``
      - Eviction fires when usage reaches this fraction of the quota
-       (0.0 exclusive to 1.0).
+       (0.0 exclusive to 1.0). Applies to both tiers.
    * - ``--chunk-size``
      - ``256``
      - Tokens per KV chunk: the CacheBlend match unit and the unit used to
@@ -99,8 +101,8 @@ keeps the default below.
        written whenever pins or quotas change.
    * - ``--metadata-path``
      - (empty)
-     - File the operator-set state (L2 pins and per-``cache_salt`` quotas)
-       is stored in. Empty means that state is lost on restart.
+     - File the operator-set state (L2 pins and the per-``cache_salt`` quotas
+       of both tiers) is stored in. Empty means that state is lost on restart.
    * - ``--extra-config``
      - (empty)
      - JSON object of settings the core flags do not name, read by whichever
@@ -243,8 +245,8 @@ Kubernetes downward API); an explicit flag wins over the env var.
    * - ``--coordinator-event-reporting``
      - ``LMCACHE_COORDINATOR_EVENT_REPORTING``
      - Stream cache store/access/delete events to the coordinator,
-       feeding the key directory (fleet-wide placement tracking) and,
-       for L2 events, usage/quota tracking and eviction.
+       feeding the key directory (fleet-wide placement tracking) and the
+       per-tier usage/quota tracking and eviction.
    * - ``--coordinator-event-flush-interval``
      - ``LMCACHE_COORDINATOR_EVENT_FLUSH_INTERVAL``
      - Seconds between cache-event batch flushes (must be ``> 0``, default
@@ -475,6 +477,24 @@ eviction. (The MP server exposes a node-local ``/quota`` with the same shape;
 this is its fleet-wide counterpart.) Use ``_default`` as the path parameter to
 target the empty-string salt.
 
+Every endpoint takes a ``tier`` — ``l1`` or ``l2``, default ``l2`` — as a query
+parameter on reads and deletes, and a body field on writes. **The two tiers
+have completely separate budgets**: an L2 quota bounds what a tenant holds on
+the shared backing storage, an L1 quota what it holds across the fleet's
+memory. Setting one says nothing about the other, and a key resident in both
+tiers spends against both. ``all`` is rejected with ``400`` — on a read it
+would double-count such a key, and on a write there would be no single budget
+to apply it to.
+
+L1 quotas are a *tenant* bound, not a capacity one. Each MP server still runs
+its own node-local L1 eviction to keep its memory from filling; what no server
+can see is how much of the fleet's total memory one tenant is holding, which is
+the number this enforces. When a victim is chosen, the coordinator sends the
+delete to the nodes the key directory says hold it — L1 bytes are those
+processes' memory, so nothing else can free them. Objects under an active read
+or write lock are reported as skipped and retried on the next cycle rather than
+force-dropped.
+
 .. warning::
 
    Do **not** use the MP server's node-local ``/quota`` API together with the
@@ -510,7 +530,10 @@ cycle):
     # 2. arm eviction of everything else
     curl -s -X PUT http://localhost:9300/quota/config \
         -H 'Content-Type: application/json' -d '{"default_limit_gb": 0}'
-    # -> {"default_limit_gb": 0.0}
+    # -> {"default_limit_gb": 0.0, "tier": "l2"}
+
+Each tier is armed separately — the default limit above governs ``l2`` only.
+Repeat both steps with ``"tier": "l1"`` to bound tenants in memory as well.
 
 When MP servers enable ``--coordinator-event-reporting``, they stream cache
 ``store``, ``access``, and ``delete`` events to the coordinator's
@@ -521,18 +544,25 @@ selects LRU keys to evict. Each batch carries the server's ``instance_id``,
 scoped to that instance, so replays are deduplicated and lost batches are
 detected.
 
-**Active eviction loop.** Every ``--eviction-check-interval`` seconds, the
-coordinator inspects per-salt usage against the registered quotas and,
-for any salt over the trigger watermark, picks LRU victims and
-dispatches a single ``DELETE /cache/objects`` to a uniformly random registered MP
-server. Because all MP servers share the same backing L2 (e.g. one S3
-bucket), one dispatch evicts the keys for the whole fleet. The MP
-server's L2 adapter fires ``on_l2_keys_deleted`` listeners after the
-delete completes; those listeners ship ``delete`` events back through
-``POST /events``, which is what updates the coordinator's LRU +
-per-salt totals. Dispatch failures or no-instances-registered fall
-through to the next cycle — at-least-once semantics, safe because the
-S3 delete is idempotent.
+**Active eviction loop.** Every ``--eviction-check-interval`` seconds, one loop
+per tier inspects per-salt usage against that tier's registered quotas and, for
+any salt over the trigger watermark, picks LRU victims and dispatches
+``DELETE /cache/objects`` requests. Where they go is the one thing the tiers do
+differently:
+
+- **L2** — a single request to a uniformly random registered MP server. All
+  servers share the same backing L2 (e.g. one S3 bucket), so one dispatch
+  evicts the keys for the whole fleet.
+- **L1** — one request per node the key directory says holds the key, since
+  L1 bytes live in those processes' memory. A key cached on several nodes is
+  deleted on all of them; every copy spends against the tenant's budget.
+
+The MP server reports the deletion back through ``POST /events`` (its L2
+adapter fires ``on_l2_keys_deleted`` listeners, and L1 deletes publish
+``l1.keys.evicted``), which is what updates the coordinator's LRU + per-salt
+totals. Dispatch failures, locked L1 objects, and no-instances-registered all
+fall through to the next cycle — at-least-once semantics, safe because the
+delete is idempotent.
 
 **Cold start.** The coordinator's trackers are in-memory and are built
 only from the cache-event stream, so after a restart per-salt usage
@@ -565,24 +595,29 @@ Set / read the default limit applied to salts with no explicit quota entry.
        that byte budget.
    * - ``tier``
      - string
-     - Optional (default ``l2``). Only ``l2`` is supported today.
+     - Optional (default ``l2``). Cache tier this default governs (``l1`` or
+       ``l2``); each tier keeps its own.
 
 **Response** (``200 OK``):
 
 .. code-block:: json
 
-    {"default_limit_gb": 0.0}
+    {"default_limit_gb": 0.0, "tier": "l2"}
 
 **Example:**
 
 .. code-block:: bash
 
     curl -s http://localhost:9300/quota/config
-    # -> {"default_limit_gb": null}          (boot state: unquota'd exempt)
+    # -> {"default_limit_gb": null, "tier": "l2"}   (boot state: unquota'd exempt)
 
     curl -s -X PUT http://localhost:9300/quota/config \
         -H 'Content-Type: application/json' -d '{"default_limit_gb": 0}'
-    # -> {"default_limit_gb": 0.0}           (allowlist enforcement armed)
+    # -> {"default_limit_gb": 0.0, "tier": "l2"}    (allowlist enforcement armed)
+
+    # L1 is armed independently.
+    curl -s "http://localhost:9300/quota/config?tier=l1"
+    # -> {"default_limit_gb": null, "tier": "l1"}
 
 ``PUT /quota/{cache_salt}``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -607,19 +642,19 @@ empty salt).
        the next eviction cycle).
    * - ``tier``
      - string
-     - Optional (default ``l2``). Cache tier the quota applies to; only ``l2`` is
-       supported today.
+     - Optional (default ``l2``). Cache tier the quota applies to (``l1`` or
+       ``l2``); the two are independent budgets.
 
 **Response** (``200 OK``):
 
 .. code-block:: json
 
-    {"cache_salt": "user-a", "limit_gb": 10.0, "status": "ok"}
+    {"cache_salt": "user-a", "limit_gb": 10.0, "status": "ok", "tier": "l2"}
 
 **HTTP status codes:**
 
 - ``200``: quota applied.
-- ``400``: invalid limit (negative or non-finite).
+- ``400``: invalid limit (negative or non-finite), or ``tier`` is ``all``.
 - ``422``: request body fails field-level validation.
 
 **Example:**
@@ -629,7 +664,13 @@ empty salt).
     curl -s -X PUT http://localhost:9300/quota/user-a \
         -H 'Content-Type: application/json' \
         -d '{"limit_gb": 10.0}'
-    # -> {"cache_salt": "user-a", "limit_gb": 10.0, "status": "ok"}
+    # -> {"cache_salt": "user-a", "limit_gb": 10.0, "status": "ok", "tier": "l2"}
+
+    # Bound the same tenant's fleet-wide L1 memory at 2 GiB.
+    curl -s -X PUT http://localhost:9300/quota/user-a \
+        -H 'Content-Type: application/json' \
+        -d '{"limit_gb": 2.0, "tier": "l1"}'
+    # -> {"cache_salt": "user-a", "limit_gb": 2.0, "status": "ok", "tier": "l1"}
 
 ``DELETE /quota/{cache_salt}``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -640,28 +681,29 @@ on the next eviction cycle (effective limit drops to ``0``).
 **Path parameters:** ``cache_salt`` — tenant identifier (``_default`` for the
 empty salt).
 
-**Query parameters:** ``tier`` — optional (default ``l2``); cache tier the quota
-applies to.
+**Query parameters:** ``tier`` — optional (default ``l2``); cache tier the entry
+belongs to. Removing one tier's quota leaves the other's untouched.
 
 **Response** (``200 OK``):
 
 .. code-block:: json
 
-    {"cache_salt": "user-a", "limit_gb": 0.0, "status": "removed"}
+    {"cache_salt": "user-a", "limit_gb": 0.0, "status": "removed", "tier": "l2"}
 
-When no quota was registered for the salt, ``status`` is ``"not_found"`` (still
-``200 OK``).
+When no quota was registered for the salt **on that tier**, ``status`` is
+``"not_found"`` (still ``200 OK``).
 
 **HTTP status codes:**
 
 - ``200``: removed, or ``not_found`` if no quota existed.
+- ``400``: ``tier`` is ``all``.
 
 **Example:**
 
 .. code-block:: bash
 
     curl -s -X DELETE http://localhost:9300/quota/user-a
-    # -> {"cache_salt": "user-a", "limit_gb": 0.0, "status": "removed"}
+    # -> {"cache_salt": "user-a", "limit_gb": 0.0, "status": "removed", "tier": "l2"}
 
 ``GET /quota/{cache_salt}``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -672,15 +714,16 @@ Read the quota and live usage for a single salt.
 empty salt).
 
 **Query parameters:** ``tier`` — ``l1`` or ``l2`` (default ``l2``). Every field
-describes the requested tier. Quotas are enforced on L2 only, so an ``l1`` read
-reports L1 usage with ``quota_exists: false`` and ``quota_limit_gb: 0.0`` --
-never the L2 budget, which governs different bytes.
+describes the requested tier, read from that tier's own registry: a salt
+budgeted on L2 alone reports ``quota_exists: false`` and
+``quota_limit_gb: 0.0`` on an ``l1`` read, never the L2 budget, which governs
+different bytes.
 
 **Response** (``200 OK``):
 
 .. code-block:: json
 
-    {"cache_salt": "user-a", "quota_limit_gb": 10.0, "quota_exists": true, "usage_gb": 0.001}
+    {"cache_salt": "user-a", "quota_limit_gb": 10.0, "quota_exists": true, "usage_gb": 0.001, "tier": "l2"}
 
 ``quota_limit_gb`` is the configured limit in GiB (``0.0`` when no quota is set),
 ``quota_exists`` whether an explicit quota is registered, and ``usage_gb`` the
@@ -689,13 +732,17 @@ current aggregate usage. This endpoint never returns ``404`` for an unknown salt
 **HTTP status codes:**
 
 - ``200``: quota and usage reported.
+- ``400``: ``tier`` is ``all``.
 
 **Example:**
 
 .. code-block:: bash
 
     curl -s http://localhost:9300/quota/user-a
-    # -> {"cache_salt": "user-a", "quota_limit_gb": 10.0, "quota_exists": true, "usage_gb": 0.001}
+    # -> {"cache_salt": "user-a", "quota_limit_gb": 10.0, "quota_exists": true, "usage_gb": 0.001, "tier": "l2"}
+
+    curl -s "http://localhost:9300/quota/user-a?tier=l1"
+    # -> {"cache_salt": "user-a", "quota_limit_gb": 2.0, "quota_exists": true, "usage_gb": 0.4, "tier": "l1"}
 
 ``GET /quota``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -704,10 +751,9 @@ List total usage and a per-salt breakdown.
 
 **Query parameters:** ``tier`` — ``l1`` or ``l2`` (default ``l2``). Every field
 describes the requested tier, and rows come from that tier's usage plus the
-quotas that apply to it -- so an ``l1`` listing holds only salts with L1 bytes,
-each with ``quota_exists: false``. ``all`` is rejected with ``400``, because a
-key resident in both tiers holds bytes in both and a cross-tier total would
-count it twice.
+quotas registered for it. ``all`` is rejected with ``400``, because a key
+resident in both tiers holds bytes in both and a cross-tier total would count
+it twice.
 
 **Response** (``200 OK``):
 
@@ -715,8 +761,9 @@ count it twice.
 
     {
       "total_gb": 0.005,
+      "tier": "l2",
       "by_cache_salt": [
-        {"cache_salt": "user-a", "quota_limit_gb": 10.0, "quota_exists": true, "usage_gb": 0.001}
+        {"cache_salt": "user-a", "quota_limit_gb": 10.0, "quota_exists": true, "usage_gb": 0.001, "tier": "l2"}
       ]
     }
 

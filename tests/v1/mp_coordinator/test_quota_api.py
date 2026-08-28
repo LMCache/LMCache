@@ -8,8 +8,12 @@ view and to the eviction controller, which owns quota)."""
 from fastapi.testclient import TestClient
 
 # First Party
+from lmcache.v1.distributed.api import Tier
 from lmcache.v1.mp_coordinator.app import create_app
 from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
+from lmcache.v1.mp_coordinator.controllers.eviction_controller import (
+    FleetEvictionController,
+)
 
 
 def _client() -> TestClient:
@@ -121,15 +125,18 @@ def test_quota_config_defaults_to_null():
     with _client() as client:
         resp = client.get("/quota/config")
         assert resp.status_code == 200
-        assert resp.json() == {"default_limit_gb": None}
+        assert resp.json() == {"default_limit_gb": None, "tier": "l2"}
 
 
 def test_quota_config_set_and_read_back():
     with _client() as client:
         resp = client.put("/quota/config", json={"default_limit_gb": 0})
         assert resp.status_code == 200
-        assert resp.json() == {"default_limit_gb": 0.0}
-        assert client.get("/quota/config").json() == {"default_limit_gb": 0.0}
+        assert resp.json() == {"default_limit_gb": 0.0, "tier": "l2"}
+        assert client.get("/quota/config").json() == {
+            "default_limit_gb": 0.0,
+            "tier": "l2",
+        }
 
 
 def test_quota_config_positive_value_round_trips():
@@ -144,7 +151,7 @@ def test_quota_config_resettable_to_null():
         client.put("/quota/config", json={"default_limit_gb": 0})
         resp = client.put("/quota/config", json={"default_limit_gb": None})
         assert resp.status_code == 200
-        assert resp.json() == {"default_limit_gb": None}
+        assert resp.json() == {"default_limit_gb": None, "tier": "l2"}
 
 
 def test_quota_config_negative_rejected():
@@ -158,7 +165,10 @@ def test_quota_config_path_not_captured_as_salt():
     default must not create a quota entry named ``config``."""
     with _client() as client:
         client.put("/quota/config", json={"default_limit_gb": 1.0})
-        assert client.get("/quota/config").json() == {"default_limit_gb": 1.0}
+        assert client.get("/quota/config").json() == {
+            "default_limit_gb": 1.0,
+            "tier": "l2",
+        }
         salts = {e["cache_salt"] for e in client.get("/quota").json()["by_cache_salt"]}
         assert "config" not in salts
 
@@ -182,11 +192,11 @@ def test_quota_config_arms_unquotad_eviction_flow():
         # Boot state: default null — user-b is exempt (nothing to assert
         # via HTTP beyond config state; eviction-plan behavior is covered
         # in test_eviction_controller.py).
-        assert client.get("/quota/config").json() == {"default_limit_gb": None}
+        assert client.get("/quota/config").json()["default_limit_gb"] is None
 
         # Controller arms allowlist enforcement.
         resp = client.put("/quota/config", json={"default_limit_gb": 0})
-        assert resp.json() == {"default_limit_gb": 0.0}
+        assert resp.json() == {"default_limit_gb": 0.0, "tier": "l2"}
 
 
 # -- Usage event ingestion ---------------------------------------------------
@@ -296,9 +306,9 @@ def test_l1_batches_are_accounted_on_the_l1_tier_only():
 
 
 def test_l1_status_never_reports_the_l2_quota():
-    """The quota fields describe the requested tier. Quotas are enforced
-    on L2, so an L1 read reports none rather than the L2 budget, which
-    governs different bytes."""
+    """The quota fields describe the requested tier. Each tier has its
+    own registry, so a salt budgeted on L2 alone reads as unquota'd on
+    L1 rather than borrowing the L2 budget, which governs other bytes."""
     with _client() as client:
         client.put("/quota/user-a", json={"limit_gb": 10.0})
         assert _post_events(client, [_l1_store("user-a", 1000)]).json()["applied"] == 1
@@ -349,11 +359,115 @@ def test_status_read_rejects_the_all_tier():
         assert client.get("/quota/user-a", params={"tier": "all"}).status_code == 400
 
 
-def test_quota_writes_stay_l2_only():
+def test_quota_writes_reject_the_all_tier():
+    """A write to ``all`` would have to pick one of two budgets."""
     with _client() as client:
-        resp = client.put("/quota/user-a", json={"limit_gb": 1.0, "tier": "l1"})
+        resp = client.put("/quota/user-a", json={"limit_gb": 1.0, "tier": "all"})
         assert resp.status_code == 400
-        assert client.delete("/quota/user-a", params={"tier": "l1"}).status_code == 400
+        assert client.delete("/quota/user-a", params={"tier": "all"}).status_code == 400
+        assert (
+            client.put(
+                "/quota/config", json={"default_limit_gb": 0, "tier": "all"}
+            ).status_code
+            == 400
+        )
+
+
+# -- L1 quotas ---------------------------------------------------------------
+
+
+def test_l1_quota_writes_land_in_the_l1_registry():
+    """An L1 quota is real and separate: it shows up on an L1 read and
+    leaves the L2 table untouched."""
+    with _client() as client:
+        resp = client.put("/quota/user-a", json={"limit_gb": 4.0, "tier": "l1"})
+        assert resp.status_code == 200
+        assert resp.json()["tier"] == "l1"
+
+        l1 = client.get("/quota/user-a", params={"tier": "l1"}).json()
+        assert l1["quota_exists"] is True
+        assert abs(l1["quota_limit_gb"] - 4.0) < 1e-6
+
+        l2 = client.get("/quota/user-a", params={"tier": "l2"}).json()
+        assert l2["quota_exists"] is False
+
+
+def test_l1_and_l2_quotas_for_one_salt_are_independent():
+    """The same tenant can hold different budgets per tier; neither read
+    nor delete crosses over."""
+    with _client() as client:
+        client.put("/quota/user-a", json={"limit_gb": 4.0, "tier": "l1"})
+        client.put("/quota/user-a", json={"limit_gb": 10.0, "tier": "l2"})
+
+        assert (
+            client.delete("/quota/user-a", params={"tier": "l1"}).json()["status"]
+            == "removed"
+        )
+        assert (
+            client.get("/quota/user-a", params={"tier": "l1"}).json()["quota_exists"]
+            is False
+        )
+        l2 = client.get("/quota/user-a", params={"tier": "l2"}).json()
+        assert l2["quota_exists"] is True
+        assert abs(l2["quota_limit_gb"] - 10.0) < 1e-6
+
+
+def test_l1_default_limit_is_separate_from_l2():
+    """Arming allowlist eviction on one tier must not arm the other."""
+    with _client() as client:
+        assert (
+            client.put(
+                "/quota/config", json={"default_limit_gb": 0, "tier": "l1"}
+            ).status_code
+            == 200
+        )
+        assert client.get("/quota/config", params={"tier": "l1"}).json() == {
+            "default_limit_gb": 0.0,
+            "tier": "l1",
+        }
+        assert (
+            client.get("/quota/config", params={"tier": "l2"}).json()[
+                "default_limit_gb"
+            ]
+            is None
+        )
+
+
+def test_l1_quota_arms_eviction_end_to_end():
+    """The whole path through the app: L1 events land as L1 usage, an L1
+    quota registered over HTTP is what that usage is measured against,
+    and the L1 controller plans against both."""
+    app = create_app(
+        MPCoordinatorConfig(health_check_interval=0.0, eviction_check_interval=0.0)
+    )
+    with TestClient(app) as client:
+        gib = 1024**3
+        assert (
+            _post_events(client, [_l1_store("user-a", 4 * gib)]).json()["applied"] == 1
+        )
+        client.put("/quota/user-a", json={"limit_gb": 1.0, "tier": "l1"})
+
+        status = client.get("/quota/user-a", params={"tier": "l1"}).json()
+        assert status["quota_exists"] is True
+        assert abs(status["usage_gb"] - 4.0) < 1e-6
+
+        controller = app.state.ctx.controllers.get(FleetEvictionController)
+        assert "user-a" in controller.compute_eviction_plan(Tier.L1)
+
+
+def test_l1_listing_reports_l1_quotas():
+    """A salt with an L1 quota but no L1 bytes is still an L1 row."""
+    with _client() as client:
+        client.put("/quota/user-a", json={"limit_gb": 4.0, "tier": "l1"})
+        assert _post_events(client, [_l1_store("user-b", 1000)]).json()["applied"] == 1
+
+        rows = {
+            e["cache_salt"]: e
+            for e in client.get("/quota", params={"tier": "l1"}).json()["by_cache_salt"]
+        }
+        assert set(rows) == {"user-a", "user-b"}
+        assert rows["user-a"]["quota_exists"] is True
+        assert rows["user-b"]["quota_exists"] is False
 
 
 def test_replayed_batch_does_not_double_count():

@@ -176,12 +176,14 @@ not built a second time behind its owner's back.
 
 ## What a controller may depend on
 
-Views, and nothing else. The eviction controller reads the usage view, and its
+Views, and nothing else. An eviction controller reads the usage view, and its
 plan is only correct if that is the same view the fleet reported into, so the
 registry builds **on first request**: `FleetEvictionController.from_config`
 asks for `CacheUsageManager` and gets it, built if needed. That removes
 construction order as a thing anyone has to reason about -- no topological
 sort, no "declare your dependencies", no relying on the alphabet.
+It asks for `KeyDirectory` too, since only the node holding an L1 key can
+delete it.
 
 `from_config` cannot reach another controller: one that named a peer would
 break when that peer shipped elsewhere. Shared *state* is what a view is for;
@@ -230,7 +232,7 @@ using it.
 ## What discovery does not own
 
 **Ingest order.** `create_app` registers cache-event consumers explicitly,
-because the order is load-bearing: the eviction controller reads the usage view
+because the order is load-bearing: an eviction controller reads the usage view
 for the batch the usage view has just consumed. Discovery returns controllers
 in class-name order, which happens to be correct today and would be a trap to
 depend on.

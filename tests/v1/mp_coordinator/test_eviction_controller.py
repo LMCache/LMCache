@@ -29,7 +29,9 @@ from lmcache.v1.mp_coordinator.views.instance_registry import (
     InstanceRegistry,
     MPInstance,
 )
+from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
 from lmcache.v1.mp_coordinator.views.usage_manager import CacheUsageManager
+import lmcache.v1.mp_coordinator.controllers.eviction_controller as eviction_controller
 
 
 def _make_key(salt: str, model: str = "m", rank: int = 0, h: str = "aa") -> ObjectKey:
@@ -60,13 +62,14 @@ def _setup(
     usage = CacheUsageManager()
     ctrl = FleetEvictionController(
         usage_manager=usage,
+        key_directory=KeyDirectory(),
         registry=_make_registry(*instances),
         eviction_ratio=eviction_ratio,
         trigger_watermark=trigger_watermark,
         check_interval=check_interval,
     )
-    ctrl.quota.set_default_limit_bytes(default_limit_bytes)
-    return ctrl, ctrl.quota, usage
+    ctrl.quota(Tier.L2).set_default_limit_bytes(default_limit_bytes)
+    return ctrl, ctrl.quota(Tier.L2), usage
 
 
 def _l2_batch(
@@ -113,7 +116,7 @@ def test_on_store_tracks_key():
     ctrl, _, kd = _setup(eviction_ratio=1.0)
     k = _make_key("a")
     _store(ctrl, kd, k, 100)
-    result = ctrl.compute_eviction_plan()
+    result = ctrl.compute_eviction_plan(Tier.L2)
     assert result["a"] == [k]
 
 
@@ -123,21 +126,21 @@ def test_on_lookup_touches_key():
     k2 = _make_key("a", h="02")
     _store(ctrl, kd, k1, 100)
     _store(ctrl, kd, k2, 100)
-    ctrl.on_lookup(k1)
-    result = ctrl.compute_eviction_plan()
+    ctrl.on_lookup(Tier.L2, k1)
+    result = ctrl.compute_eviction_plan(Tier.L2)
     assert result["a"][0] == k2
 
 
 def test_on_lookup_unknown_key_is_noop():
     ctrl, _, kd = _setup(eviction_ratio=1.0)
     k = _make_key("a")
-    ctrl.on_lookup(k)
+    ctrl.on_lookup(Tier.L2, k)
     # Lookup without prior store ⇒ key never tracked. Add an
     # unrelated key so the salt has some usage, but the unknown key
     # mustn't show up in the plan.
     other = _make_key("a", h="ff")
     _store(ctrl, kd, other, 100)
-    result = ctrl.compute_eviction_plan()
+    result = ctrl.compute_eviction_plan(Tier.L2)
     assert k not in result.get("a", [])
 
 
@@ -151,7 +154,7 @@ def test_on_remove():
     # _remove drops k1 from both the LRU and the directory's ledger.
     assert kd.get_key_bytes(Tier.L2, k1) == 0
     assert kd.get_key_bytes(Tier.L2, k2) > 0
-    result = ctrl.compute_eviction_plan()
+    result = ctrl.compute_eviction_plan(Tier.L2)
     assert result["a"] == [k2]
 
 
@@ -173,7 +176,7 @@ def test_on_remove_cleans_empty_bucket():
     _store(ctrl, kd, k, 100)
     _remove(ctrl, kd, k)
     assert kd.get_salt_bytes(Tier.L2, "a") == 0
-    result = ctrl.compute_eviction_plan()
+    result = ctrl.compute_eviction_plan(Tier.L2)
     assert result == {}
 
 
@@ -182,7 +185,7 @@ def test_no_quota_evicts_all_when_default_armed():
     ctrl, _, kd = _setup(eviction_ratio=1.0)
     k = _make_key("a")
     _store(ctrl, kd, k, 1000)
-    result = ctrl.compute_eviction_plan()
+    result = ctrl.compute_eviction_plan(Tier.L2)
     assert "a" in result
     assert result["a"] == [k]
 
@@ -199,7 +202,7 @@ def test_unquotad_salt_exempt_until_default_set():
     ctrl, _, kd = _setup(eviction_ratio=1.0, default_limit_bytes=None)
     _store(ctrl, kd, _make_key("a", h="01"), 1000)
     _store(ctrl, kd, _make_key("b", h="02"), 2000)
-    assert ctrl.compute_eviction_plan() == {}
+    assert ctrl.compute_eviction_plan(Tier.L2) == {}
 
 
 def test_explicit_quota_enforced_even_while_default_unset():
@@ -212,7 +215,7 @@ def test_explicit_quota_enforced_even_while_default_unset():
     _store(ctrl, kd, ka, 1000)
     _store(ctrl, kd, kb, 1000)
     qs.set_quota("a", 500)  # over quota
-    result = ctrl.compute_eviction_plan()
+    result = ctrl.compute_eviction_plan(Tier.L2)
     assert result.get("a") == [ka]
     assert "b" not in result  # unquota'd, default unset ⇒ exempt
 
@@ -223,10 +226,10 @@ def test_setting_default_zero_arms_allowlist_eviction():
     ctrl, qs, kd = _setup(eviction_ratio=1.0, default_limit_bytes=None)
     k = _make_key("a")
     _store(ctrl, kd, k, 1000)
-    assert ctrl.compute_eviction_plan() == {}
+    assert ctrl.compute_eviction_plan(Tier.L2) == {}
 
     qs.set_default_limit_bytes(0)
-    result = ctrl.compute_eviction_plan()
+    result = ctrl.compute_eviction_plan(Tier.L2)
     assert result.get("a") == [k]
 
 
@@ -238,7 +241,7 @@ def test_positive_default_acts_as_budget_for_unquotad_salts():
     over = _make_key("b", h="02")
     _store(ctrl, kd, under, 1000)  # under the 1500 default
     _store(ctrl, kd, over, 2000)  # over it
-    result = ctrl.compute_eviction_plan()
+    result = ctrl.compute_eviction_plan(Tier.L2)
     assert "a" not in result
     assert result.get("b") == [over]
 
@@ -247,7 +250,7 @@ def test_under_quota():
     ctrl, qs, kd = _setup()
     qs.set_quota("a", 2000)
     _store(ctrl, kd, _make_key("a"), 1000)
-    result = ctrl.compute_eviction_plan()
+    result = ctrl.compute_eviction_plan(Tier.L2)
     assert result == {}
 
 
@@ -258,7 +261,7 @@ def test_over_quota():
     k2 = _make_key("a", h="02")
     _store(ctrl, kd, k1, 400)
     _store(ctrl, kd, k2, 600)
-    result = ctrl.compute_eviction_plan()
+    result = ctrl.compute_eviction_plan(Tier.L2)
     assert "a" in result
     assert k1 in result["a"]
     assert k2 in result["a"]
@@ -271,7 +274,7 @@ def test_eviction_ratio():
     k2 = _make_key("a", h="02")
     _store(ctrl, kd, k1, 200)
     _store(ctrl, kd, k2, 800)
-    result = ctrl.compute_eviction_plan()
+    result = ctrl.compute_eviction_plan(Tier.L2)
     assert "a" in result
     assert len(result["a"]) == 1
     assert result["a"][0] == k1
@@ -282,7 +285,7 @@ def test_zero_quota_evicts_all():
     qs.set_quota("a", 0)
     k = _make_key("a")
     _store(ctrl, kd, k, 1000)
-    result = ctrl.compute_eviction_plan()
+    result = ctrl.compute_eviction_plan(Tier.L2)
     assert "a" in result
     assert result["a"] == [k]
 
@@ -295,7 +298,7 @@ def test_multiple_salts_independent():
     kb = _make_key("b", h="02")
     _store(ctrl, kd, ka, 500)
     _store(ctrl, kd, kb, 1000)
-    result = ctrl.compute_eviction_plan()
+    result = ctrl.compute_eviction_plan(Tier.L2)
     assert "a" in result
     assert "b" not in result
 
@@ -304,7 +307,7 @@ def test_watermark_below_threshold_skips():
     ctrl, qs, kd = _setup(trigger_watermark=0.8)
     qs.set_quota("a", 1000)
     _store(ctrl, kd, _make_key("a"), 700)
-    result = ctrl.compute_eviction_plan()
+    result = ctrl.compute_eviction_plan(Tier.L2)
     assert result == {}
 
 
@@ -313,7 +316,7 @@ def test_watermark_above_threshold_evicts():
     qs.set_quota("a", 1000)
     k = _make_key("a")
     _store(ctrl, kd, k, 900)
-    result = ctrl.compute_eviction_plan()
+    result = ctrl.compute_eviction_plan(Tier.L2)
     assert "a" in result
     assert result["a"] == [k]
 
@@ -369,7 +372,7 @@ async def test_execute_evictions_dispatches_to_registered_instance():
         # to actually issue the HTTP call before the client closes.
         await ctrl.wait_for_in_flight_dispatches()
 
-    assert plan == {"alice": [k]}
+    assert plan == {Tier.L2: {"alice": [k]}}
     # Hit the single registered instance.
     assert captured["url"] == "http://10.0.0.7:8765/cache/objects"
     # Body shape matches the MP endpoint's contract.
@@ -386,12 +389,14 @@ async def test_execute_evictions_dispatches_to_registered_instance():
                 "object_group_id": 0,
                 "cache_salt": "alice",
             }
-        ]
+        ],
+        "tier": "l2",
+        "force": False,
     }
     # LRU + usage are UNCHANGED at this point — the DELETE event hasn't
     # arrived yet. Cleanup happens once the MP server flushes its
     # ``on_l2_keys_deleted`` events back through the cache-event stream.
-    assert ctrl.compute_eviction_plan() == {"alice": [k]}
+    assert ctrl.compute_eviction_plan(Tier.L2) == {"alice": [k]}
     assert kd.get_salt_bytes(Tier.L2, "alice") == 100
 
 
@@ -412,9 +417,9 @@ async def test_execute_evictions_no_instances_skips_dispatch_and_keeps_lru():
         plan = await ctrl.execute_evictions(client)
         await ctrl.wait_for_in_flight_dispatches()
 
-    assert plan == {"alice": [k]}
+    assert plan == {Tier.L2: {"alice": [k]}}
     # LRU UNCHANGED — the same plan should re-emerge next cycle.
-    assert ctrl.compute_eviction_plan() == {"alice": [k]}
+    assert ctrl.compute_eviction_plan(Tier.L2) == {"alice": [k]}
 
 
 @pytest.mark.asyncio
@@ -433,9 +438,9 @@ async def test_execute_evictions_http_failure_keeps_lru():
         plan = await ctrl.execute_evictions(client)
         await ctrl.wait_for_in_flight_dispatches()
 
-    assert plan == {"alice": [k]}
+    assert plan == {Tier.L2: {"alice": [k]}}
     # LRU UNCHANGED — retry on the next cycle.
-    assert ctrl.compute_eviction_plan() == {"alice": [k]}
+    assert ctrl.compute_eviction_plan(Tier.L2) == {"alice": [k]}
 
 
 @pytest.mark.asyncio
@@ -444,10 +449,7 @@ async def test_execute_evictions_chunks_large_plan(monkeypatch):
     requests, each within the cap, together covering every key. Guards against
     the MP endpoint's per-request key limit (object_service.MAX_DELETE_BATCH),
     which rejects an oversized single request with HTTP 400."""
-    # First Party
-    import lmcache.v1.mp_coordinator.controllers.eviction_controller as em
-
-    monkeypatch.setattr(em, "MAX_DELETE_BATCH", 2)
+    monkeypatch.setattr(eviction_controller, "MAX_DELETE_BATCH", 2)
 
     ctrl, qs, kd = _setup(eviction_ratio=1.0, instances=(_instance("mp-1"),))
     keys = [_make_key("alice", h=f"{i:02x}") for i in range(5)]
@@ -469,7 +471,7 @@ async def test_execute_evictions_chunks_large_plan(monkeypatch):
         plan = await ctrl.execute_evictions(client)
         await ctrl.wait_for_in_flight_dispatches()
 
-    assert plan == {"alice": keys}
+    assert plan == {Tier.L2: {"alice": keys}}
     # 5 keys, cap 2 → three requests of 2, 2, 1; none exceeds the cap.
     assert sum(batch_sizes) == 5
     assert all(n <= 2 for n in batch_sizes)
@@ -506,7 +508,7 @@ def test_pin_excludes_key_from_eviction_plan():
     _store(ctrl, kd, k2, 100)
 
     ctrl.pin([k1])
-    plan = ctrl.compute_eviction_plan()
+    plan = ctrl.compute_eviction_plan(Tier.L2)
     assert k1 not in plan.get("a", [])
     assert k2 in plan["a"]
 
@@ -518,10 +520,10 @@ def test_unpin_restores_eviction_eligibility():
     _store(ctrl, kd, k, 100)
 
     ctrl.pin([k])
-    assert ctrl.compute_eviction_plan() == {}
+    assert ctrl.compute_eviction_plan(Tier.L2) == {}
 
     ctrl.unpin([k])
-    assert ctrl.compute_eviction_plan()["a"] == [k]
+    assert ctrl.compute_eviction_plan(Tier.L2)["a"] == [k]
 
 
 def test_pin_is_reference_counted():
@@ -532,13 +534,13 @@ def test_pin_is_reference_counted():
 
     ctrl.pin([k])
     ctrl.pin([k])
-    assert ctrl.compute_eviction_plan() == {}
+    assert ctrl.compute_eviction_plan(Tier.L2) == {}
 
     ctrl.unpin([k])
-    assert ctrl.compute_eviction_plan() == {}  # still pinned once
+    assert ctrl.compute_eviction_plan(Tier.L2) == {}  # still pinned once
 
     ctrl.unpin([k])
-    assert ctrl.compute_eviction_plan()["a"] == [k]
+    assert ctrl.compute_eviction_plan(Tier.L2)["a"] == [k]
 
 
 def test_unpin_unknown_key_is_noop():
@@ -548,7 +550,7 @@ def test_unpin_unknown_key_is_noop():
     _store(ctrl, kd, k, 100)
 
     ctrl.unpin([_make_key("a", h="ff")])  # never pinned
-    assert ctrl.compute_eviction_plan()["a"] == [k]
+    assert ctrl.compute_eviction_plan(Tier.L2)["a"] == [k]
 
 
 # =============================================================================
@@ -577,7 +579,7 @@ def test_drop_pins_purges_pin_regardless_of_count():
 
     ctrl.drop_pins([k])
     # A single drop clears all pin counts: the key is evictable again.
-    assert ctrl.compute_eviction_plan()["a"] == [k]
+    assert ctrl.compute_eviction_plan(Tier.L2)["a"] == [k]
     assert ctrl.filter_unpinned([k]) == [k]
 
 
@@ -600,11 +602,11 @@ def test_consume_maps_l2_events_onto_the_lru():
     for k in (k1, k2):
         _broadcast(ctrl, kd, _l2_batch(CacheEventType.STORE, k, 100))
     _broadcast(ctrl, kd, _l2_batch(CacheEventType.ACCESS, k1))
-    plan = ctrl.compute_eviction_plan()
+    plan = ctrl.compute_eviction_plan(Tier.L2)
     assert plan["a"][0] == k2  # k1 touched to MRU
 
     _broadcast(ctrl, kd, _l2_batch(CacheEventType.DELETE, k2))
-    assert ctrl.compute_eviction_plan()["a"] == [k1]
+    assert ctrl.compute_eviction_plan(Tier.L2)["a"] == [k1]
 
 
 def test_consume_keeps_key_in_lru_while_another_placement_remains():
@@ -631,7 +633,7 @@ def test_consume_keeps_key_in_lru_while_another_placement_remains():
     # Delete the private copy; the shared copy remains.
     _broadcast(ctrl, kd, _l2_batch(CacheEventType.DELETE, k))
     assert kd.get_key_bytes(Tier.L2, k) == 100
-    assert ctrl.compute_eviction_plan()["a"] == [k]  # still evictable
+    assert ctrl.compute_eviction_plan(Tier.L2)["a"] == [k]  # still evictable
 
     # Delete the last placement: now the LRU lets go.
     delete_shared = CacheEventBatch(
@@ -646,7 +648,7 @@ def test_consume_keeps_key_in_lru_while_another_placement_remains():
     )
     _broadcast(ctrl, kd, delete_shared)
     assert kd.get_key_bytes(Tier.L2, k) == 0
-    assert ctrl.compute_eviction_plan() == {}
+    assert ctrl.compute_eviction_plan(Tier.L2) == {}
 
 
 def test_consume_ignores_l1_batches():
@@ -662,7 +664,7 @@ def test_consume_ignores_l1_batches():
         entries=[CacheEventEntry(key=k.to_encoded_object_key(), size_bytes=100)],
     )
     _broadcast(ctrl, kd, batch)
-    assert ctrl.compute_eviction_plan() == {}
+    assert ctrl.compute_eviction_plan(Tier.L2) == {}
 
 
 def test_l1_batches_leave_the_l2_rollup_untouched():
@@ -696,7 +698,7 @@ def test_broadcast_order_feeds_usage_before_the_lru():
     _store(ctrl, kd, k, 100)
 
     assert kd.get_salt_bytes(Tier.L2, "a") == 100
-    assert ctrl.compute_eviction_plan()["a"] == [k]
+    assert ctrl.compute_eviction_plan(Tier.L2)["a"] == [k]
 
 
 def test_fence_instance_keeps_l2_usage_and_lru():
@@ -709,7 +711,7 @@ def test_fence_instance_keeps_l2_usage_and_lru():
     ctrl.fence_instance("node-a")
 
     assert kd.get_salt_bytes(Tier.L2, "a") == 100
-    assert ctrl.compute_eviction_plan()["a"] == [k]
+    assert ctrl.compute_eviction_plan(Tier.L2)["a"] == [k]
 
 
 # ============================================================================
@@ -839,7 +841,7 @@ async def test_the_controller_dispatches_to_the_shared_membership_view():
     views.get(InstanceRegistry).register(_instance("mp-late", ip="10.9.9.9"))
 
     k = _make_key("alice", h="aa")
-    ctrl.quota.set_default_limit_bytes(0)
+    ctrl.quota(Tier.L2).set_default_limit_bytes(0)
     _store(ctrl, usage, k, 100)
 
     dispatched: list[str] = []
@@ -849,7 +851,7 @@ async def test_the_controller_dispatches_to_the_shared_membership_view():
         return httpx.Response(200, json={"requested": 1, "adapter": "s3", "ok": True})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        assert await ctrl.execute_evictions(client) == {"alice": [k]}
+        assert await ctrl.execute_evictions(client) == {Tier.L2: {"alice": [k]}}
         await ctrl.wait_for_in_flight_dispatches()
 
     assert dispatched == ["http://10.9.9.9:8000/cache/objects"]

@@ -15,9 +15,15 @@ contract below and restores itself from its own section:
 | `KeyDirectory` | `key_directory` | A restarted MP server re-announces its L1, but nothing re-announces bytes already resting in L2 |
 | `CacheUsageManager` | `cache_usage` | Byte accounting for those same placements; quota enforcement is blind without it |
 | `EventGate` | `stream_cursors` | Fencing compares an arriving batch against a prior incarnation; with no cursor there is nothing to compare, and a restarted server's stale L1 slice is advertised forever |
-| `IsolatedLRUEvictionPolicy` | `lru_order` | Recency is position, not a timestamp |
+| `IsolatedLRUEvictionPolicy` | `lru_order` / `l1_lru_order` | Recency is position, not a timestamp |
 | `FleetEvictionController` | `pins` | Operator intent |
-| `QuotaManager` | `quotas` | Operator intent |
+| `FleetEvictionController` | `l1_placement_owners` | Which node holds which L1 placement — the only thing that can tell a fenced key's last copy from a surviving one once the views have dropped it |
+| `QuotaManager` | `quotas` / `l1_quotas` | Operator intent |
+
+The two policies and the two quota registries are one class each, held once
+per enforced tier; each instance is given its section name at construction,
+because a document keys sections by name and a collision would make one
+silently overwrite the other.
 
 Nothing in `create_app` enumerates them. Controllers are discovered by
 scanning `controllers/`, each advertises what it needs persisted, and each
