@@ -75,9 +75,11 @@ Source: ``lmcache/v1/multiprocess/config.py``
      - ``false``
      - Assume engine workers and this server run in containers that share
        no host IPC namespace (``hostIPC``) and no common ``/dev/shm``, and
-       use IPC mechanisms that work there: on CUDA, timeline-semaphore
-       events (over CUDA IPC *memory* handles) instead of CUDA
-       interprocess *event* handles. Must match the workers'
+       use IPC mechanisms that work there: on CUDA, raw CUDA IPC memory
+       handles for KV-cache registration (instead of PyTorch storage IPC,
+       which needs a shared ``/dev/shm``) and timeline-semaphore events
+       (instead of CUDA interprocess *event* handles). Must match the
+       workers'
        ``lmcache.mp.isolated_ipc`` setting -- the two mechanisms exchange
        incompatible event handles, and a mismatch fails at event import
        on whichever side receives the foreign handle. Currently supported
@@ -731,9 +733,10 @@ All connector-level options are passed through
      - ``false``
      - Assume the vLLM workers and the LMCache server run in containers
        that share no host IPC namespace (``hostIPC``) and no common
-       ``/dev/shm``, and use IPC mechanisms that work there: on CUDA,
-       timeline-semaphore events (over CUDA IPC *memory* handles) instead
-       of CUDA interprocess *event* handles. Set it together with the
+       ``/dev/shm``, and use IPC mechanisms that work there: on CUDA, raw
+       CUDA IPC memory handles for KV-cache registration and
+       timeline-semaphore events instead of CUDA interprocess *event*
+       handles. Set it together with the
        server's ``--isolated-ipc`` flag -- a mismatch fails at event
        import on whichever side receives the foreign handle.
 
