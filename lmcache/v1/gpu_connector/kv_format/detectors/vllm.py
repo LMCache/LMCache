@@ -19,6 +19,7 @@ from lmcache.v1.gpu_connector.kv_format.types import (
     KV_LAYOUT_NAMES,
     DiscoverableKVCache,
     LayoutHints,
+    is_hnd_kv_layout,
 )
 import lmcache.lmcache_native as lmcache_native
 
@@ -33,8 +34,9 @@ def resolve_vllm_kv_layout(
             f"kv_layout hint {kv_layout!r} is not a layout LMCache supports; "
             f"expected one of {', '.join(KV_LAYOUT_NAMES)}."
         )
-    # The CPU attention backend allocates HND but hints NHD.
-    if cpu_attention_backend and kv_layout in ("NHD", "HND"):
+    # Pre-#51718 vLLM misreports the CPU backend's layout as NHD; since
+    # #51718 the backend declares LBHNC and this override is a no-op.
+    if cpu_attention_backend and kv_layout not in ("BLHNC", "BLNHC"):
         return "HND"
     return kv_layout
 
@@ -50,7 +52,7 @@ class VLLM_Detector(EngineDetector):
         kv_layout = resolve_vllm_kv_layout(
             layout_hints, cpu_attention_backend=torch_device_type == "cpu"
         )
-        is_hnd = kv_layout in ("HND", "BLHNC")
+        is_hnd = is_hnd_kv_layout(kv_layout)
 
         # Fused K/V is the only rank-4 vLLM layout, so its raw rank
         # identifies it unambiguously (a 5-D split would collide with

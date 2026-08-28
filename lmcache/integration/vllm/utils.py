@@ -19,7 +19,6 @@ from lmcache.logging import init_logger
 from lmcache.utils import get_size_bytes as get_size_bytes
 from lmcache.v1.config import LMCacheEngineConfig, load_ec_engine_config
 from lmcache.v1.config_base import apply_remote_configs, fetch_remote_config
-from lmcache.v1.gpu_connector.kv_format.types import KVLayoutName
 
 if TYPE_CHECKING:
     # First Party
@@ -47,38 +46,10 @@ def vllm_layout_hints(vllm_config: "VllmConfig | None" = None) -> "LayoutHints":
     return hints  # type: ignore[return-value]
 
 
-def translate_vllm_kv_cache_layout(kv_cache_layout: str) -> KVLayoutName:
-    """Map a vLLM ``KVCacheLayout`` member name to LMCache's name
-    (``LBNHC`` -> ``NHD``, ``LBHNC`` -> ``HND``).
-
-    Raises:
-        NotImplementedError: for layouts LMCache cannot transfer.
-    """
-    names = {
-        "NHD": "NHD",
-        "HND": "HND",
-        "LBNHC": "NHD",
-        "LBHNC": "HND",
-        "BLHNC": "BLHNC",
-        "BLNHC": "BLNHC",
-    }
-    translated = names.get(kv_cache_layout)
-    if translated is not None:
-        return translated  # type: ignore[return-value]
-    # TODO: support heads-outermost layouts; the transfer kernels address
-    # one contiguous run per (layer, block), which these fragment per head.
-    raise NotImplementedError(
-        f"LMCache does not support the {kv_cache_layout!r} KV cache "
-        "layout: per-block content is fragmented per head. If it was "
-        "selected via VLLM_KV_CACHE_LAYOUT, unset it or choose LBNHC, "
-        "LBHNC, BLHNC, or BLNHC."
-    )
-
-
 def try_get_vllm_kv_cache_layout(
     vllm_config: "VllmConfig | None" = None,
-) -> KVLayoutName | None:
-    """Return vLLM's resolved KV cache layout as LMCache's name.
+) -> "str | None":
+    """Return vLLM's resolved KV cache layout member name.
 
     Returns ``None`` when vLLM is unavailable (i.e. the MP server).
 
@@ -101,21 +72,30 @@ def try_get_vllm_kv_cache_layout(
         return None
 
     # vllm#51718 and later: vLLM owns alias resolution, unknown-name
-    # validation, and the not-yet-resolved error.
+    # validation, and the not-yet-resolved error. The member name is the
+    # hint as-is; there is no LMCache spelling.
     if hasattr(cache_config, "get_resolved_kv_cache_layout"):
-        return translate_vllm_kv_cache_layout(
-            cache_config.get_resolved_kv_cache_layout().name
+        kv_layout = cache_config.get_resolved_kv_cache_layout().name
+    else:
+        try:
+            # Third Party
+            from vllm.v1.attention.backends.utils import (  # type: ignore[import-untyped]
+                get_kv_cache_layout,
+            )
+        except Exception:
+            logger.error("Could not query the KV cache layout from this vLLM version")
+            return None
+        kv_layout = get_kv_cache_layout()
+    # TODO: support heads-outermost layouts; the transfer kernels address
+    # one contiguous run per (layer, block), which these fragment per head.
+    if kv_layout in ("LHBNC", "BHLNC"):
+        raise NotImplementedError(
+            f"LMCache does not support the {kv_layout!r} KV cache layout: "
+            "per-block content is fragmented per head. If it was selected "
+            "via VLLM_KV_CACHE_LAYOUT, unset it or choose LBNHC, LBHNC, "
+            "BLHNC, or BLNHC."
         )
-
-    try:
-        # Third Party
-        from vllm.v1.attention.backends.utils import (  # type: ignore[import-untyped]
-            get_kv_cache_layout,
-        )
-    except Exception:
-        logger.error("Could not query the KV cache layout from this vLLM version")
-        return None
-    return translate_vllm_kv_cache_layout(get_kv_cache_layout())
+    return kv_layout
 
 
 def lmcache_get_or_create_config() -> LMCacheEngineConfig:
