@@ -4,6 +4,7 @@
 env:
   LMCACHE_DEVICE_BACKEND: "musa"
   LMCACHE_TRACK_USAGE: "false"
+  MUSA_VISIBLE_DEVICES: "0"
 
 steps:
   - label: "MUSA Unit Tests (Serialized)"

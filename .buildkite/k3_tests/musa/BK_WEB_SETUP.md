@@ -15,15 +15,15 @@ Both the upload step and the dynamically uploaded test steps explicitly target
 the existing `MooreThreads` queue. This repository change reuses that queue; it
 does not create, rename, or replace it.
 
-Configure this environment variable on the pipeline or agent:
+The uploaded pipeline binds both jobs to the first MUSA device:
 
 ```text
 MUSA_VISIBLE_DEVICES=0
 ```
 
-The unit and smoke steps fail immediately when this value is absent. If the
-agent maps a different device, use that explicit device index instead. Do not
-expose more than one GPU to this lane.
+No Buildkite UI environment variable is required. If the agent maps a
+different device, change this value in `pipeline.yml` to that explicit device
+index. Do not expose more than one GPU to this lane.
 
 Optional debugging overrides:
 
@@ -64,7 +64,8 @@ The self-hosted agent must provide:
 4. Python with `venv`/`pip`, a C++ compiler, Ninja, and curl. `uv` is optional.
 5. Access to the configured Python package index, or an equivalent internal
    dependency mirror.
-6. An explicit `MUSA_VISIBLE_DEVICES` value exposing one device.
+6. Device index `0` available to the pipeline's explicit
+   `MUSA_VISIBLE_DEVICES=0` binding.
 
 The test script creates a temporary virtual environment with
 `--system-site-packages`, using `uv` when available and the standard
