@@ -35,6 +35,7 @@ def _lookup_key(world_size: int) -> IPCCacheServerKey:
         end=0,
         request_id="req-1",
         cache_salt="salt",
+        num_kv_readers=1,
     )
 
 
