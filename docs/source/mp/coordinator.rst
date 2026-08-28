@@ -135,9 +135,10 @@ created:
 
 Set ``--otlp-endpoint http://collector:4317`` to push metrics to an
 OpenTelemetry Collector instead. In OTLP push mode, and when
-``--disable-metrics`` is set, ``GET /metrics`` returns 404. This infrastructure
-does not itself define coordinator business metrics; instruments register with
-the shared OpenTelemetry provider as coordinator capabilities add them.
+``--disable-metrics`` is set, ``GET /metrics`` returns 404. The Coordinator
+exports Key Directory placement-count and reported-logical-byte gauges for the
+``l1`` and ``l2`` tiers. See :doc:`observability/metrics` for their exact names
+and semantics.
 
 Connecting MP servers
 ---------------------

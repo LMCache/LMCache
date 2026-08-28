@@ -102,6 +102,23 @@ class DirectoryStats:
     blend: BlendIndexStats
 
 
+@dataclass(frozen=True)
+class PlacementStats:
+    """A point-in-time summary of placements by cache tier.
+
+    Attributes:
+        l1_count: Placements currently recorded in L1.
+        l1_size_bytes: Reported logical bytes across the L1 placements.
+        l2_count: Placements currently recorded in L2.
+        l2_size_bytes: Reported logical bytes across the L2 placements.
+    """
+
+    l1_count: int
+    l1_size_bytes: int
+    l2_count: int
+    l2_size_bytes: int
+
+
 @dataclass
 class _KeyRecord:
     """Directory value for one key: its placements plus recency."""
@@ -136,6 +153,10 @@ class KeyDirectory(View):
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._directory: dict[ObjectKey, _KeyRecord] = {}
+        self._l1_placement_count = 0
+        self._l1_placement_size_bytes = 0
+        self._l2_placement_count = 0
+        self._l2_placement_size_bytes = 0
         # instance_id → keys it reported L1 placements for. The reverse
         # index that makes fencing proportional to the instance's own
         # keys instead of a full directory scan.
@@ -413,6 +434,7 @@ class KeyDirectory(View):
 
         Raises:
             ValueError: If the directory already holds keys, or the
+                captured state contains an invalid placement tier, or the
                 reverse index cites a key position that does not exist.
         """
         captured_keys = cast("list[tuple[object, float, list[object]]]", state["keys"])
@@ -429,10 +451,27 @@ class KeyDirectory(View):
             for encoded_key, last_access, placements in captured_keys:
                 key = decode_key(encoded_key)
                 key_table.append(key)
+                decoded_placements = [_decode_placement(p) for p in placements]
+                invalid_tiers = [
+                    placement.tier
+                    for placement in decoded_placements
+                    if placement.tier not in (Tier.L1, Tier.L2)
+                ]
+                if invalid_tiers:
+                    raise ValueError(
+                        "captured placements must use tier l1 or l2, got "
+                        f"{invalid_tiers[0]}"
+                    )
                 self._directory[key] = _KeyRecord(
-                    placements=[_decode_placement(p) for p in placements],
+                    placements=decoded_placements,
                     last_access=last_access,
                 )
+                for placement in decoded_placements:
+                    self._adjust_placement_stats(
+                        placement,
+                        count_delta=1,
+                        size_bytes_delta=placement.size_bytes,
+                    )
                 self._add_token_binding(key)
             for chunk_hash, token_offset, raw_tokens in bindings:
                 binding = self._token_bindings.get(chunk_hash)
@@ -475,6 +514,21 @@ class KeyDirectory(View):
                 blend=blend,
             )
 
+    def placement_stats(self) -> PlacementStats:
+        """Return current placement counts and logical bytes by tier.
+
+        Returns:
+            An immutable snapshot derived from the placements currently
+            recorded in this directory. Taking the snapshot is O(1).
+        """
+        with self._lock:
+            return PlacementStats(
+                l1_count=self._l1_placement_count,
+                l1_size_bytes=self._l1_placement_size_bytes,
+                l2_count=self._l2_placement_count,
+                l2_size_bytes=self._l2_placement_size_bytes,
+            )
+
     # -- Internals (call with self._lock held) --------------------------------
 
     def _apply_entry(
@@ -503,8 +557,19 @@ class KeyDirectory(View):
             index = self._find_placement(record.placements, batch)
             if index is None:
                 record.placements.append(placement)
+                self._adjust_placement_stats(
+                    placement,
+                    count_delta=1,
+                    size_bytes_delta=placement.size_bytes,
+                )
             else:
+                old_placement = record.placements[index]
                 record.placements[index] = placement
+                self._adjust_placement_stats(
+                    placement,
+                    count_delta=0,
+                    size_bytes_delta=placement.size_bytes - old_placement.size_bytes,
+                )
             if entry.token_ids:
                 self._create_token_binding(key.chunk_hash, entry)
             record.last_access = max(record.last_access, batch.ts)
@@ -516,7 +581,12 @@ class KeyDirectory(View):
                 return
             index = self._find_placement(record.placements, batch)
             if index is not None:
-                record.placements.pop(index)
+                placement = record.placements.pop(index)
+                self._adjust_placement_stats(
+                    placement,
+                    count_delta=-1,
+                    size_bytes_delta=-placement.size_bytes,
+                )
             if not record.placements:
                 del self._directory[key]
                 self._remove_token_binding(key)
@@ -556,12 +626,17 @@ class KeyDirectory(View):
             record = self._directory.get(key)
             if record is None:
                 continue
-            kept = [
-                p
-                for p in record.placements
-                if p.tier != Tier.L1 or p.instance_id != instance_id
-            ]
-            removed += len(record.placements) - len(kept)
+            kept = []
+            for placement in record.placements:
+                if placement.tier == Tier.L1 and placement.instance_id == instance_id:
+                    self._adjust_placement_stats(
+                        placement,
+                        count_delta=-1,
+                        size_bytes_delta=-placement.size_bytes,
+                    )
+                    removed += 1
+                else:
+                    kept.append(placement)
             if kept:
                 record.placements = kept
             else:
@@ -569,6 +644,22 @@ class KeyDirectory(View):
                 self._remove_token_binding(key)
         l1_keys.clear()
         return removed
+
+    def _adjust_placement_stats(
+        self,
+        placement: Placement,
+        count_delta: int,
+        size_bytes_delta: int,
+    ) -> None:
+        """Adjust one tier's aggregate under the directory lock."""
+        if placement.tier == Tier.L1:
+            self._l1_placement_count += count_delta
+            self._l1_placement_size_bytes += size_bytes_delta
+        elif placement.tier == Tier.L2:
+            self._l2_placement_count += count_delta
+            self._l2_placement_size_bytes += size_bytes_delta
+        else:
+            raise ValueError(f"placement tier must be l1 or l2, got {placement.tier}")
 
     def _create_token_binding(self, chunk_hash: bytes, entry: CacheEventEntry) -> None:
         """Record ``entry``'s token content on ``chunk_hash``'s binding.
