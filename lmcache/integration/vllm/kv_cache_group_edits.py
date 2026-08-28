@@ -404,10 +404,12 @@ class _MambaUnifiedViewEdit(KVCacheGroupEdit):
         padding, and any sibling layers on a shared pool, live between
         row and S).
 
-        Output for NHD: [num_blocks, block_size, 1, head_size] with
-        strides (S, head_size, head_size, 1). HND swaps dims 1 and 2:
-        [num_blocks, 1, block_size, head_size] with strides
-        (S, block_size * head_size, head_size, 1).
+        Output for NHD/BLNHC: [num_blocks, block_size, 1, head_size]
+        with strides (S, head_size, head_size, 1). HND/BLHNC swaps dims
+        1 and 2: [num_blocks, 1, block_size, head_size] with strides
+        (S, block_size * head_size, head_size, 1). Blocks-first layouts
+        preserve the input's block stride so it can continue spanning
+        sibling layers and object groups in the shared pool.
 
         head_size = ceil(row / block_size), rounded up to the kernels'
         vector alignment, and block_size * head_size may exceed the row
@@ -418,9 +420,10 @@ class _MambaUnifiedViewEdit(KVCacheGroupEdit):
             "single-layer KV cache must be a torch.Tensor"
         )
         kv_layout = layout_hints.get("kv_layout", "none")
-        if kv_layout not in ("NHD", "HND"):
+        if kv_layout not in ("NHD", "HND", "BLHNC", "BLNHC"):
             raise ValueError(
-                f"Unsupported kv_layout: {kv_layout}. Only NHD and HND are supported."
+                f"Unsupported kv_layout: {kv_layout}. Expected NHD, HND, "
+                "BLHNC, or BLNHC."
             )
         num_blocks = kv_cache.shape[0]
         row = kv_cache[0].numel()
@@ -447,7 +450,7 @@ class _MambaUnifiedViewEdit(KVCacheGroupEdit):
                 f"cannot tile a {row}-element state row into {block_size} "
                 f"aligned tokens within the {page_bytes}-byte page"
             )
-        if kv_layout == "NHD":
+        if kv_layout in ("NHD", "BLNHC"):
             inner = (block_size, 1, head_size)
             inner_strides = (head_size, head_size, 1)
         else:
