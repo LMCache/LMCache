@@ -6,12 +6,12 @@ nvcc-compatible wrapper (cu-bridge, rooted at ``$MACA_PATH/tools/cu-bridge``);
 no hipify-style source translation is required. Detection deliberately does
 not use ``shutil.which("nvcc")`` -- MACA's cu-bridge shim installs an
 ``nvcc``-named executable on ``PATH`` too, which would be indistinguishable
-from a real CUDA toolchain and would let ``CudaProfile.detect()`` (which
-*does* check for ``nvcc``) win auto-detection first, since profiles are
-discovered in filesystem/alphabetical order and ``cuda`` sorts before
-``maca``. Detection instead keys off ``torch.utils.cpp_extension.MACA_HOME``,
-mirroring how vLLM-metax's own ``setup.py`` distinguishes a MACA-enabled
-torch build from a vanilla CUDA one.
+from a real CUDA toolchain. LMCache's auto-detection may also select the
+CUDA profile when an ``nvcc`` shim is present, so MACA builds should be
+explicitly enabled via ``BUILD_WITH_MACA=1``. Detection instead keys off
+``torch.utils.cpp_extension.MACA_HOME``, mirroring how vLLM-metax's own
+``setup.py`` distinguishes a MACA-enabled torch build from a vanilla CUDA
+one.
 
 The extension is built as ``lmcache.cuda_ops`` -- the same module name the
 CUDA profile uses -- because MACA reports ``device_type == "cuda"`` to
@@ -118,15 +118,16 @@ class MacaProfile(BuildProfile):
         Unlike CUDA (which defaults to the CXX11 ABI via the
         ``ENABLE_CXX11_ABI`` env var), MACA's torch ABI convention isn't
         independently confirmed, so this introspects the actual active
-        torch build via ``torch._C._GLIBCXX_USE_CXX11_ABI`` instead of
-        assuming a default -- avoids an ABI mismatch between this
-        extension and the MACA torch build sharing the same process.
+        torch build via the public ``torch.compiled_with_cxx11_abi()``
+        helper instead of assuming a default -- avoids an ABI mismatch
+        between this extension and the MACA torch build sharing the same
+        process.
         """
         # Third Party
         import torch
 
-        abi = int(bool(torch._C._GLIBCXX_USE_CXX11_ABI))
-        return ["-D_GLIBCXX_USE_CXX11_ABI=%d" % abi]
+        abi = int(torch.compiled_with_cxx11_abi())
+        return [f"-D_GLIBCXX_USE_CXX11_ABI={abi}"]
 
     def requirements_file(self) -> Optional[str]:
         """MACA core requirements file."""
