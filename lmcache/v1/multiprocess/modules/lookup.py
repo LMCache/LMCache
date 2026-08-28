@@ -32,46 +32,6 @@ from lmcache.v1.multiprocess.token_hasher import TokenHasher
 logger = init_logger(__name__)
 
 
-def compute_extra_count(
-    tp_size: int,
-    world_size: int,
-) -> int:
-    """Compute extra count for MLA multi-reader locking.
-
-    Non-MLA: each TP worker owns a distinct KV shard,
-      so each ObjectKey is retrieved by exactly 1
-      worker -> extra_count = 0.
-    MLA: TP does not split KV caches, all TP workers
-      share the same object. vLLM passes world_size
-      already divided by tp_size (e.g. world_size=1
-      for TP=4 PP=1), so ipc_keys_to_object_keys
-      only produces 1 ObjectKey per chunk.  All TP
-      workers retrieve that same ObjectKey, hence
-      extra_count = tp_size - 1.
-
-    Detection: tp > world_size means MLA (world_size
-    was divided by tp on the vLLM side).
-
-    Fallback: old vLLM (<= 0.8.5) does not send
-    tp_size (defaults to 1); we fall back to
-    world_size which gives extra_count = 0
-    (safe but may under-lock for MLA).
-
-    TODO: world_size currently carries an overloaded
-    meaning (total ranks for non-MLA vs total/tp for
-    MLA). Consider a dedicated field in the future.
-
-    Args:
-        tp_size: Tensor-parallel size from the client.
-        world_size: World size from the cache key.
-
-    Returns:
-        Number of extra count (0 for non-MLA).
-    """
-    tp = tp_size if tp_size > 1 else world_size
-    return tp - 1 if tp > world_size else 0
-
-
 def resolve_prefetched_obj_keys(
     ctx: MPCacheServerContext,
     key: IPCCacheServerKey,
@@ -233,7 +193,7 @@ class LookupModule:
 
         Args:
             key: Cache key with request_id embedded.
-            tp_size: Tensor-parallel size for MLA multi-reader locking.
+            tp_size: Legacy wire field; ignored (kept for payload arity).
         """
         model_name, world_size = key.model_name, key.world_size
         self._ctx.event_bus.publish(
@@ -275,7 +235,7 @@ class LookupModule:
             )
             return
 
-        extra_count = compute_extra_count(tp_size, world_size)
+        num_kv_readers = key.require_num_kv_readers()
 
         chunk_hashes = self._ctx.token_hasher.compute_chunk_hashes(list(key.token_ids))
         if not chunk_hashes:
@@ -368,7 +328,7 @@ class LookupModule:
             PrefetchRequestSpec(
                 keys=obj_keys,
                 group_layout_descs=group_layout_descs,
-                extra_count=extra_count,
+                num_kv_readers=num_kv_readers,
                 attn_desc=attn_desc,
             ),
             external_request_id=key.request_id,
@@ -530,14 +490,12 @@ class LookupModule:
 
         Only the keys the prefetch actually read-locked are released.
 
-        Computes the extra reader count from ``tp_size`` and
-        ``world_size`` the same way :meth:`lookup` does, so
-        the correct number of locks is released.
+        Releases the same per-object count the lookup reserved
+        (``key.num_kv_readers``).
 
         Args:
             key: Cache key whose read locks should be released.
-            tp_size: Tensor-parallel size for MLA
-                multi-reader locking.
+            tp_size: Legacy wire field; ignored (kept for payload arity).
         """
         if key.start >= key.end:
             return
@@ -563,10 +521,8 @@ class LookupModule:
         if not obj_keys:
             return
 
-        extra_count = compute_extra_count(tp_size, key.world_size)
-
         self._ctx.storage_manager.finish_read_prefetched(
-            obj_keys, extra_count=extra_count
+            obj_keys, read_locks=key.require_num_kv_readers()
         )
 
     def end_session(self, request_id: str) -> None:

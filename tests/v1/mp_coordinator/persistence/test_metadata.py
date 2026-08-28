@@ -14,9 +14,9 @@ from lmcache.v1.distributed.quota_manager import QuotaManager
 from lmcache.v1.mp_coordinator.controllers.eviction_controller import (
     FleetEvictionController,
 )
-from lmcache.v1.mp_coordinator.controllers.usage_manager import CacheUsageManager
 from lmcache.v1.mp_coordinator.persistence.metadata import MetadataPersister
 from lmcache.v1.mp_coordinator.persistence.store import LocalArtifactStore
+from lmcache.v1.mp_coordinator.views.usage_manager import CacheUsageManager
 
 
 def _key(chunk_id: int) -> ObjectKey:

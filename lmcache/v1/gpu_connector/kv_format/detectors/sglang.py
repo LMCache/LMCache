@@ -27,15 +27,18 @@ class SGLANG_Detector(EngineDetector):
         layout_hints: LayoutHints,
     ) -> "tuple[Optional[lmcache_native.EngineKVFormat], DiscoverableKVCache]":
         # MP path: a flat list[2*NL] of 3-D tensors (K layers then V layers)
-        # plus a tokens_per_block hint. Regroup into [K_layers, V_layers] and
-        # reshape each (PBS, NH, HS) -> (NB, BS, NH, HS).
+        # plus explicit K/V-list-layout and tokens-per-block hints. Regroup
+        # into [K_layers, V_layers] and reshape each
+        # (PBS, NH, HS) -> (NB, BS, NH, HS). The explicit layout hint is
+        # required because NH can be 1 after tensor parallelism, which is
+        # otherwise indistinguishable by shape from SGLang MLA.
         if (
             isinstance(kv_caches, list)
             and len(kv_caches) > 0
             and len(kv_caches) % 2 == 0
             and isinstance(kv_caches[0], torch.Tensor)
             and kv_caches[0].dim() == 3
-            and kv_caches[0].shape[1] > 1
+            and layout_hints.get("kv_list_layout") == "k_v"
             and "tokens_per_block" in layout_hints
         ):
             block_size = layout_hints["tokens_per_block"]

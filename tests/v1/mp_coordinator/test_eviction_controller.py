@@ -20,8 +20,8 @@ from lmcache.v1.mp_coordinator.api import (
 from lmcache.v1.mp_coordinator.controllers.eviction_controller import (
     FleetEvictionController,
 )
-from lmcache.v1.mp_coordinator.controllers.usage_manager import CacheUsageManager
 from lmcache.v1.mp_coordinator.registry import InstanceRegistry, MPInstance
+from lmcache.v1.mp_coordinator.views.usage_manager import CacheUsageManager
 
 
 def _make_key(salt: str, model: str = "m", rank: int = 0, h: str = "aa") -> ObjectKey:

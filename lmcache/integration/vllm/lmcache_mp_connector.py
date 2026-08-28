@@ -34,7 +34,6 @@ import torch
 import zmq
 
 # First Party
-from lmcache import torch_dev
 from lmcache.banner import print_banner_once
 from lmcache.integration.vllm.experimental import dispatch
 from lmcache.integration.vllm.kv_cache_group_edits import (
@@ -43,6 +42,7 @@ from lmcache.integration.vllm.kv_cache_group_edits import (
 )
 from lmcache.integration.vllm.kv_cache_groups import (
     create_engine_group_infos_from_vllm,
+    get_tokens_per_block,
 )
 from lmcache.integration.vllm.lazy_offload_pending_store import (
     LazyOffloadPendingStore,
@@ -181,6 +181,48 @@ def validate_mamba_step_alignment(vllm_config: VllmConfig) -> None:
         )
 
 
+def validate_dcp_support(vllm_config: VllmConfig, n_servers: int) -> None:
+    """Reject decode-context-parallel topologies this connector cannot serve.
+
+    These would silently store wrong or incomplete KV, so fail at startup
+    instead. ``dcp > tp`` is not re-checked; vLLM's ``ParallelConfig``
+    already rejects it.
+
+    Raises:
+        ValueError: On an unsupported DCP topology (``dcp_size == 1``
+            always passes).
+    """
+    pc = vllm_config.parallel_config
+    dcp_size = getattr(pc, "decode_context_parallel_size", 1)
+    if dcp_size <= 1:
+        return
+
+    pcp_size = getattr(pc, "prefill_context_parallel_size", 1)
+    if pcp_size > 1:
+        raise ValueError(
+            "LMCacheMPConnector does not support prefill-context parallelism "
+            f"together with DCP (got pcp={pcp_size}, dcp={dcp_size})."
+        )
+
+    # Fail-closed, not fundamental: the interleave sets each object's byte
+    # layout but is absent from cache identity, and k != 1 is unvalidated.
+    interleave = getattr(pc, "cp_kv_cache_interleave_size", 1)
+    if interleave != 1:
+        raise ValueError(
+            "LMCacheMPConnector requires cp_kv_cache_interleave_size == 1 "
+            f"under DCP (got {interleave})."
+        )
+
+    ranks_per_server = pc.world_size // n_servers
+    if ranks_per_server < dcp_size:
+        raise ValueError(
+            f"Each LMCache server needs at least decode_context_parallel_size "
+            f"({dcp_size}) ranks to hold a complete set of shards, but "
+            f"{n_servers} server(s) leave only {ranks_per_server} rank(s) "
+            "each. Use fewer servers or a smaller DCP size."
+        )
+
+
 def build_parallel_strategy_from_vllm_config(
     vllm_config: "VllmConfig",
     n_servers: int,
@@ -204,6 +246,7 @@ def build_parallel_strategy_from_vllm_config(
         tp_size=pc.tensor_parallel_size,
         pp_size=pc.pipeline_parallel_size,
         n_servers=n_servers,
+        dcp_size=getattr(pc, "decode_context_parallel_size", 1),
     )
 
 
@@ -297,6 +340,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # The server count is derived from lmcache.mp.server_urls.
         n_servers = len(server_urls)
 
+        validate_dcp_support(vllm_config, n_servers)
+
         assert vllm_config.parallel_config.world_size % n_servers == 0, (
             f"world_size ({vllm_config.parallel_config.world_size}) must be "
             f"divisible by n_servers ({n_servers})"
@@ -333,6 +378,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         self.dispatcher = None
 
+        dcp_size = parallel_strategy.dcp_size
+        self._dcp_size = dcp_size
+
         # Lazy offload configuration: when enabled, store operations are
         # deferred until some threshold is reached, rather than submitted at every step
         self.lazy_offload = vllm_config.kv_transfer_config.get_from_extra_config(
@@ -347,7 +395,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 server_urls=server_urls,
                 context=zmq_context,
                 model_name=vllm_config.model_config.model,
-                vllm_block_size=vllm_config.cache_config.block_size,
+                vllm_block_size=vllm_config.cache_config.block_size * dcp_size,
                 parallel_strategy=parallel_strategy,
                 extra_config=vllm_config.kv_transfer_config.kv_connector_extra_config,
             )
@@ -374,7 +422,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 server_url=local_server_url,
                 context=zmq_context,
                 model_name=vllm_config.model_config.model,
-                vllm_block_size=vllm_config.cache_config.block_size,
+                vllm_block_size=vllm_config.cache_config.block_size * dcp_size,
                 parallel_strategy=parallel_strategy,
                 extra_config=vllm_config.kv_transfer_config.kv_connector_extra_config,
             )
@@ -411,8 +459,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # the engine's base block size when no group metadata is available
         # (single non-hybrid group).
         self._group_tokens_per_block: list[int] = [
-            group.kv_cache_spec.block_size for group in vllm_groups
-        ] or [vllm_config.cache_config.block_size]
+            get_tokens_per_block(group.kv_cache_spec, dcp_size) for group in vllm_groups
+        ] or [vllm_config.cache_config.block_size * dcp_size]
         for engine_group_idx, tokens_per_block in enumerate(
             self._group_tokens_per_block
         ):
@@ -481,7 +529,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         kv_cache_config = getattr(self, "_kv_cache_config", None)
         # Must precede both group-info creation and transfer registration so
         # they see the same edited views.
-        layout_hints = vllm_layout_hints()
+        layout_hints = vllm_layout_hints(self._vllm_config)
         kv_caches = apply_kv_cache_group_edits(
             kv_cache_config, kv_caches, layout_hints=layout_hints
         )
@@ -489,9 +537,12 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             kv_cache_config,
             kv_caches,
             layout_hints=layout_hints,
+            dcp_size=self._dcp_size,
         )
         self.worker_adapter.register_kv_caches(
-            kv_caches, engine_group_infos=engine_group_infos
+            kv_caches,
+            engine_group_infos=engine_group_infos,
+            layout_hints=layout_hints,
         )
         if self.dispatcher is not None:
             dispatch(
@@ -535,8 +586,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         if len(request_ids) == 0:
             return
 
-        event = torch_dev.Event(interprocess=True)
-        event.record()
+        event = self.worker_adapter.create_recorded_event()
 
         self.worker_adapter.batched_submit_retrieve_requests(
             request_ids, ops, event, cache_salts=cache_salts
@@ -611,8 +661,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 dispatch(self.dispatcher, "wait_for_save", event=None)
             return
 
-        event = torch_dev.Event(interprocess=True)
-        event.record()
+        event = self.worker_adapter.create_recorded_event()
 
         self.worker_adapter.batched_submit_store_requests(
             request_ids, ops, event, cache_salts=cache_salts
@@ -906,7 +955,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             tracker.state = LMCacheMPRequestState.READY
             return
 
-        condition = tracker.needs_retrieve()
+        condition = num_external_tokens > 0 and tracker.needs_retrieve()
         if tracker.state == LMCacheMPRequestState.PREFETCHING:
             # If need to retrieve, change to WAITING_FOR_LOAD
             # Otherwise, change to READY
@@ -1066,22 +1115,14 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> str | None:
-        """
-        Get the required KV cache layout for this connector.
-        Args:
-            vllm_config (VllmConfig): the vllm config.
-
-        Returns:
-            str: the required KV cache layout. e.g. HND, or NHD.
-            None if the connector does not require a specific layout.
-        """
-
-        if cls is KVConnectorBase_V1:
-            raise TypeError(
-                "get_required_kvcache_layout should not be called "
-                "on the abstract base class"
-            )
-        return None
+        """Prefer the head-contiguous layout; None (MLA) defers to vLLM."""
+        model_config = getattr(vllm_config, "model_config", None)
+        if model_config is None or model_config.use_mla:
+            return None
+        if not hasattr(vllm_config.cache_config, "get_resolved_kv_cache_layout"):
+            return "HND"
+        # Not "HND": MultiConnector compares preference strings verbatim.
+        return "LBHNC"
 
     def get_finished_count(self) -> int | None:
         """
