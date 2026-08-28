@@ -43,6 +43,14 @@ func ConnectionConfigMapName(engineName string) string {
 func BuildConnectionConfigMap(engine *lmcachev1alpha1.LMCacheEngine) *corev1.ConfigMap {
 	port := derefInt32(getServerPort(&engine.Spec), 5555)
 
+	// Mirror the engine's isolated-IPC mode onto the workers: the connector
+	// must pick the driver-level IPC transports when the server runs with
+	// --isolated-ipc (see the isolatedIPC field documentation).
+	var extra map[string]any
+	if engine.Spec.IsolatedIPCEnabled() {
+		extra = map[string]any{"lmcache.mp.isolated_ipc": true}
+	}
+
 	if engine.Spec.PD != nil {
 		return buildPDConnectionConfigMap(
 			engine.Name,
@@ -51,7 +59,7 @@ func BuildConnectionConfigMap(engine *lmcachev1alpha1.LMCacheEngine) *corev1.Con
 			"lmcache.integration.vllm.lmcache_mp_connector",
 			port,
 			engine.Spec.PD,
-			nil,
+			extra,
 		)
 	}
 
@@ -61,7 +69,7 @@ func BuildConnectionConfigMap(engine *lmcachev1alpha1.LMCacheEngine) *corev1.Con
 		"LMCacheMPConnector",
 		"lmcache.integration.vllm.lmcache_mp_connector",
 		port,
-		nil,
+		extra,
 	)
 }
 

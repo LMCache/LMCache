@@ -146,7 +146,8 @@ func (p *CacheBlendPodInjector) Handle(ctx context.Context, req admission.Reques
 
 	// M0: share the host's /dev/shm for CUDA IPC with the node-local engine,
 	// mirroring the engine's spec.hostIPC mode (hostPath mount by default).
-	applyIPCSharing(pod, target, derefBool(engine.Spec.HostIPC))
+	// CacheBlendEngine has no isolatedIPC field yet; keep the legacy wiring.
+	applyIPCSharing(pod, target, derefBool(engine.Spec.HostIPC), false)
 
 	// M1: shared emptyDir volume.
 	pod.Spec.Volumes = appendVolumeIfAbsent(pod.Spec.Volumes, BuildCBPluginVolume())

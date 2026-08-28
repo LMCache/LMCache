@@ -968,6 +968,11 @@ func (in *LMCacheEngineSpec) DeepCopyInto(out *LMCacheEngineSpec) {
 		*out = new(bool)
 		**out = **in
 	}
+	if in.IsolatedIPC != nil {
+		in, out := &in.IsolatedIPC, &out.IsolatedIPC
+		*out = new(bool)
+		**out = **in
+	}
 	if in.Privileged != nil {
 		in, out := &in.Privileged, &out.Privileged
 		*out = new(bool)

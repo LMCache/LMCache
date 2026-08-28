@@ -61,7 +61,12 @@ const (
 // surfaced separately (Blend via BuildCBConnectionConfigMap, Injection via the
 // admission webhook).
 func cbSpecToEngineSpec(spec *lmcachev1alpha1.CacheBlendEngineSpec) *lmcachev1alpha1.LMCacheEngineSpec {
+	// CacheBlendEngine has no isolatedIPC field yet and keeps the legacy
+	// /dev/shm-sharing wiring; pin the projection to false so the shared
+	// builders' nil-means-auto resolution cannot flip its behavior.
+	isolatedIPC := false
 	return &lmcachev1alpha1.LMCacheEngineSpec{
+		IsolatedIPC:        &isolatedIPC,
 		GPUVendor:          spec.GPUVendor,
 		Image:              spec.Image,
 		ImagePullSecrets:   spec.ImagePullSecrets,
