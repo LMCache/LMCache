@@ -8,7 +8,7 @@ Could be implemented by native code in the future
 
 # Standard
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal, get_args
 import enum
 
 # Third Party
@@ -272,6 +272,43 @@ class EncodedObjectKey:
 
 
 @dataclass(frozen=True)
+class ModuleMemoryCapacity:
+    """One compartment's configured capacity: an L1 medium or an L2 adapter.
+
+    Keyed on the same ``(tier, backend)`` axis cache events use.
+
+    Attributes:
+        tier: ``Tier.L1`` or ``Tier.L2``.
+        backend: Medium within the tier (``"dram"``, ``"devdax"``,
+            ``"gds"``, or an L2 adapter type such as ``"s3"``).
+        capacity_bytes: Configured capacity. ``0`` means undeclared --
+            reported as unknown, not as full.
+        shared: Set when instances mount this pool, so its capacity must
+            not be summed across them.
+    """
+
+    tier: "Tier"
+    backend: str
+    capacity_bytes: int
+    shared: bool = False
+
+
+@dataclass(frozen=True)
+class CapacitySnapshot:
+    """This server's memory capacities at one point in time.
+
+    Carries no revision: the cache-event subscriber numbers declarations as
+    it emits them, on the single event-bus drain thread, so the number and
+    the topology it labels cannot come apart.
+
+    Attributes:
+        modules: One entry per memory compartment.
+    """
+
+    modules: tuple["ModuleMemoryCapacity", ...]
+
+
+@dataclass(frozen=True)
 class KeyEntry:
     """One entry in a :class:`KeyListPage` including the encoded object
     key and its object size."""
@@ -308,6 +345,11 @@ class MemoryLayoutDesc:
             )
 
 
+GroupKind = Literal["attention", "recurrent", "standalone"]
+"""Object-group kind label: attention KV, recurrent state pages, or a
+connector-private standalone group."""
+
+
 @dataclass(frozen=True)
 class AttnWindowDesc:
     """Per-object-group cross-chunk attention windows, in LMCache chunks.
@@ -321,7 +363,16 @@ class AttnWindowDesc:
     num_chunks_in_sw: list[int]
 
     world_size: int = 1
-    """Number of kv_rank shards per chunk (tensor-parallel world size)."""
+    """Number of kv_rank shards per chunk (the ``fold_unfold_ranked``
+    fan-out): the TP world size for head-sharded models, pipeline stages
+    times DCP size for MLA."""
+
+    group_kinds: tuple[GroupKind, ...] = ()
+    """Optional per-group kind labels parallel to ``num_chunks_in_sw``.
+    Empty when the producer predates kinds (treat every group as
+    attention)."""
+
+    _VALID_GROUP_KINDS = frozenset(get_args(GroupKind))
 
     def __post_init__(self) -> None:
         if self.world_size < 1:
@@ -334,6 +385,16 @@ class AttnWindowDesc:
                     "AttnWindowDesc: each window must be -1 (full attention) "
                     f"or >= 1 chunk, got {w}"
                 )
+        if self.group_kinds:
+            if len(self.group_kinds) != len(self.num_chunks_in_sw):
+                raise ValueError(
+                    f"AttnWindowDesc: group_kinds has {len(self.group_kinds)} "
+                    f"entries but num_chunks_in_sw has "
+                    f"{len(self.num_chunks_in_sw)}"
+                )
+            bad = set(self.group_kinds) - self._VALID_GROUP_KINDS
+            if bad:
+                raise ValueError(f"AttnWindowDesc: unknown group kinds {bad!r}")
 
     @property
     def num_object_groups(self) -> int:
@@ -369,27 +430,38 @@ class PrefetchRequestSpec:
     Attributes:
         keys: Object keys to prefetch; order defines the prefix.
         group_layout_descs: Maps object_group_id to that group's memory
-            layout for L1 write-buffer allocation; one entry per object
-            group in ``attn_desc``.
-        extra_count: Extra read locks per key beyond the default 1.
+            layout for L1 write-buffer allocation; entries beyond
+            ``attn_desc``'s groups are harmless.
+        num_kv_readers: Total read locks to take per key -- one per
+            reader that will retrieve the object.
         policy: Retained-subset policy (see :class:`TrimPolicy`).
-        attn_desc: Cross-chunk attention windows, in object-group order.
+        attn_desc: Cross-chunk attention windows for the groups ``keys``
+            covers; a caller prefetching a subset of the registration's
+            groups must narrow it to that subset (it drives the fold
+            stride).
         mode: Prefetch intent (see :class:`PrefetchMode`).
     """
 
     keys: list[ObjectKey]
     group_layout_descs: dict[int, MemoryLayoutDesc]
-    extra_count: int = 0
+    num_kv_readers: int = 1
     policy: TrimPolicy = TrimPolicy.PREFIX
     attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC
     mode: PrefetchMode = PrefetchMode.LOOKUP
 
     def __post_init__(self) -> None:
-        expected = set(range(self.attn_desc.num_object_groups))
-        if set(self.group_layout_descs) != expected:
+        if self.num_kv_readers < 1:
             raise ValueError(
-                "PrefetchRequestSpec: group_layout_descs must map exactly the "
-                f"object groups {sorted(expected)}, got "
+                f"PrefetchRequestSpec: num_kv_readers={self.num_kv_readers} "
+                "must be >= 1 (total read locks per key)"
+            )
+        # A caller prefetching a SUBSET of the groups narrows attn_desc, so
+        # extra layout entries are harmless; too FEW is the real mistake.
+        expected = set(range(self.attn_desc.num_object_groups))
+        if not expected <= set(self.group_layout_descs):
+            raise ValueError(
+                "PrefetchRequestSpec: group_layout_descs must cover at least "
+                f"the object groups {sorted(expected)}, got "
                 f"{sorted(self.group_layout_descs)}"
             )
 

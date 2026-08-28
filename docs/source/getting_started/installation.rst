@@ -60,7 +60,7 @@ Install LMCache
                             ``--extra-index-url https://download.pytorch.org/whl/cu129`` ensures the CUDA 12.9
                             build of PyTorch is resolved. Without it, pip may select a mismatched CUDA variant.
 
-                    .. tab-item:: ROCm
+                    .. tab-item:: ROCm / torch 2.11
 
                         The ROCm wheel targets AMD Instinct **gfx942** (MI300X / MI325X) and
                         **gfx950** (MI350X / MI355X) in one fat binary, and is ABI-matched to the
@@ -94,6 +94,82 @@ Install LMCache
                             build can be requested explicitly. A bare ``lmcache==${VERSION}``
                             also resolves it, since ``==`` ignores the local segment.
 
+                    .. tab-item:: Intel XPU
+
+                        The Intel XPU wheel is ABI-matched to the upstream
+                        ``vllm/vllm-openai-xpu:v0.26.0`` image (torch 2.12.0+xpu and oneAPI/SYCL).
+                        It is published to a dedicated
+                        `GitHub Release <https://github.com/LMCache/LMCache/releases>`__ rather than PyPI.
+
+                        Install directly inside the matching upstream vLLM XPU container. Torch and the
+                        oneAPI/SYCL runtime are already present, so ``--no-deps`` preserves that runtime stack:
+
+                        .. code-block:: bash
+
+                            docker run -it --device /dev/dri --shm-size=4g \
+                                --entrypoint bash vllm/vllm-openai-xpu:v0.26.0
+
+                            VERSION=0.5.3  # replace with target release
+                            pip install lmcache==${VERSION}+xpu --no-deps \
+                                --no-index \
+                                --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/v${VERSION}-xpu
+
+                        .. note::
+
+                            The wheel excludes torch and oneAPI/SYCL runtime libraries, which bind to the
+                            host image at runtime. Match the wheel's torch and oneAPI versions to the
+                            container; for other bases, use the **From Source** tab.
+
+                            ``--no-index`` restricts pip to the GitHub Release asset, preventing it from
+                            selecting a same-version CUDA wheel from PyPI.
+
+                        .. note::
+
+                            The XPU wheel carries a ``+xpu`` PEP 440 local version, so
+                            ``pip show lmcache`` reports which build is installed and the XPU
+                            build can be requested explicitly. A bare ``lmcache==${VERSION}``
+                            also resolves it, since ``==`` ignores the local segment.
+
+                    .. tab-item:: ROCm 7.2.4 / torch 2.10
+
+                        This wheel targets AMD Instinct **gfx942** (MI300X / MI325X) and
+                        **gfx950** (MI350X / MI355X). It is built and smoke-tested in the
+                        public AMD PyTorch image
+                        ``rocm/pytorch:rocm7.2.4_ubuntu24.04_py3.12_pytorch_release_2.10.0``
+                        pinned at digest
+                        ``sha256:4449f856653602317e4101a76fce599c7fcd58ccec2e539951fce5f73083179e``.
+                        It does not require the ATOM image.
+
+                        The supported ABI tuple is exact:
+
+                        * AMD wheel source:
+                          `torch-2.10.0+rocm7.2.4.lw.git3d3aa833-cp312-cp312-linux_x86_64.whl
+                          <https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.4/torch-2.10.0%2Brocm7.2.4.lw.git3d3aa833-cp312-cp312-linux_x86_64.whl>`__
+                        * torch runtime version: ``2.10.0+rocm7.2.4.git3d3aa833``
+                          (git ``3d3aa833db84eed6b7f5595cb5f162c2f78300a4``)
+                        * ROCm ``7.2.4`` with HIP runtime ``7.2.53211``
+                        * Python/platform tag: ``cp312-cp312-manylinux_2_39_x86_64``
+                        * C++ ABI: ``_GLIBCXX_USE_CXX11_ABI=1``
+
+                        Install the matching wheel inside that pinned image:
+
+                        .. code-block:: bash
+
+                            docker run -it --device /dev/kfd --device /dev/dri \
+                                --group-add video --security-opt seccomp=unconfined \
+                                --entrypoint bash \
+                                rocm/pytorch:rocm7.2.4_ubuntu24.04_py3.12_pytorch_release_2.10.0@sha256:4449f856653602317e4101a76fce599c7fcd58ccec2e539951fce5f73083179e
+
+                            VERSION=0.5.4  # replace with target release
+                            pip install \
+                                lmcache==${VERSION}+rocm7.2.4.torch2.10.git3d3aa833.cxx11abi1 \
+                                --no-deps \
+                                --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/v${VERSION}-rocm-torch210
+
+                        The wheel links torch and ROCm libraries from the container at runtime.
+                        Other torch 2.10, ROCm 7.2.x, Python, or C++ ABI combinations are not
+                        covered by this artifact; build from source for those environments.
+
             .. tab-item:: Nightly
 
                 Nightly wheels are built from the latest ``dev`` branch each day at 07:30 UTC
@@ -123,6 +199,34 @@ Install LMCache
                                 --extra-index-url https://download.pytorch.org/whl/cu129 \
                                 --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/nightly-cu129 \
                                 --index-strategy unsafe-best-match
+
+                    .. tab-item:: ROCm 7.2
+
+                        Run inside an upstream vLLM ROCm container so torch and the ROCm
+                        runtime are already present, then install with ``--no-deps``:
+
+                        .. code-block:: bash
+
+                            docker run -it --device /dev/kfd --device /dev/dri \
+                                --group-add video --security-opt seccomp=unconfined \
+                                --entrypoint bash vllm/vllm-openai-rocm:v0.26.0
+
+                            pip install lmcache --pre --no-deps --no-index \
+                                --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/nightly-rocm
+
+                        Nightly ROCm wheels are versioned like the CUDA nightlies with the
+                        ROCm local segment appended, e.g. ``0.5.4.dev15+rocm7.2``.
+
+                        .. note::
+
+                            ``--no-index`` is required here. ``--find-links`` only *adds* a
+                            source, so without it pip also considers PyPI — and under PEP 440 a
+                            pre-release such as ``0.5.4rc4`` outranks ``0.5.4.dev15+rocm7.2``, so
+                            ``--pre`` would install the CUDA wheel instead. The stable tab does
+                            not need it because ``lmcache==${VERSION}+rocm7.2`` is an exact pin
+                            that only the ROCm release can satisfy. ``--no-deps`` is what makes
+                            ``--no-index`` safe here: torch and the ROCm runtime come from the
+                            container, so nothing else needs resolving.
 
             .. tab-item:: From Source
 
@@ -257,7 +361,7 @@ Install LMCache
 
                 .. code-block:: bash
 
-                    docker pull intel/vllm:0.17.0-xpu
+                    docker pull vllm/vllm-openai-xpu:v0.26.0
 
         See :ref:`docker_deployment` for running the container and ROCm images.
 

@@ -22,14 +22,14 @@ def measure_list_depth_until_tensor(
 ) -> tuple[int, int, DiscoverableKVCache]:
     """Return ``(list_depth, tensor_ndim, first_tensor)`` for *kv_caches*.
 
-    Descends the first element of each list down to the inner tensor, counting
-    the list-nesting depth on the way.
+    Descends the first element of each list or tuple down to the inner tensor,
+    counting the list/tuple-nesting depth on the way.
     """
     list_depth = 0
     node = kv_caches
-    while isinstance(node, list):
+    while isinstance(node, (list, tuple)):
         if not node:
-            raise ValueError("encountered an empty kv_caches list")
+            raise ValueError("encountered an empty kv_caches list or tuple")
         list_depth += 1
         node = node[0]
     return list_depth, node.ndim, node
@@ -42,7 +42,9 @@ class EngineDetector(ABC):
 
     @abstractmethod
     def discover(
-        self, kv_caches: DiscoverableKVCache, layout_hints: LayoutHints
+        self,
+        kv_caches: DiscoverableKVCache,
+        layout_hints: LayoutHints,
     ) -> "tuple[Optional[lmcache_native.EngineKVFormat], DiscoverableKVCache]":
         """Return ``(format, canonical_kv_caches)``, or ``(None, kv_caches)``.
 
