@@ -39,8 +39,8 @@ def _key(
     salt: str = "",
     world_size: int = WORLD_SIZE,
 ) -> dict:
-    """A key shaped the way a server emits one -- ``kv_rank`` packs the
-    parallel setup, which the blend namespace is derived from."""
+    """A key shaped the way a server emits one: ``kv_rank`` packs the
+    parallel setup the blend namespace is derived from."""
     return {
         "chunk_hash_hex": h,
         "model_name": model,
@@ -302,8 +302,7 @@ def test_blend_lookup_rejects_a_malformed_token_buffer():
 
 
 def test_blend_lookup_rejects_a_query_missing_its_namespace():
-    """Without a model there is no namespace to scope matches to, and an
-    unscoped match could name another model's or tenant's KV."""
+    """Without a model there is no namespace to scope matches to."""
     with _blend_client() as client:
         resp = client.post(
             "/directory/blend-lookup",
@@ -313,9 +312,8 @@ def test_blend_lookup_rejects_a_query_missing_its_namespace():
 
 
 def test_blend_lookup_does_not_match_across_namespaces():
-    """The chunk was stored by another model, so its hash expands into
-    keys this caller has nothing under -- offering it would only buy a
-    confirmed miss."""
+    """The chunk was stored by another model, so its hash expands into keys
+    this caller has nothing under."""
     chunk_size = MPCoordinatorConfig().chunk_size
     content = _chunk_tokens(1000, chunk_size)
     with _blend_client() as client:

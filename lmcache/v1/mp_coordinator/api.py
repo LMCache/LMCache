@@ -45,16 +45,9 @@ class CacheEventType(str, Enum):
 class BlendNamespace:
     """The retrieval namespace a chunk hash is reachable in.
 
-    A ``chunk_hash`` is content-and-prefix only: everything that decides
-    *whose* KV it names lives on :class:`ObjectKey` beside it. A blend
-    match is therefore usable only by a requester whose key expansion
-    lands in the same namespace -- another model's KV is not
-    interchangeable, another tenant's salt is isolated on purpose, and
-    another parallel setup shards heads differently.
-
-    ``object_group_id`` is deliberately absent: groups partition a
-    server's own layout rather than the fleet, and blend servers must not
-    enable ``--separate-object-groups``.
+    A blend match is usable only by a requester whose key expansion lands
+    in the same namespace. ``object_group_id`` is excluded: blend servers
+    must not enable ``--separate-object-groups``.
 
     Attributes:
         model_name: Model the KV belongs to.

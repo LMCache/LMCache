@@ -6,10 +6,8 @@ request's tokens contain, and where? A strided rolling-hash probe
 discovers candidates; each is then verified token-exact.
 
 One content can be held by several chunk hashes (the same text stored
-after different prefixes), each claimed by the namespaces that stored it.
-A match therefore names a ``chunk_hash`` the *requester's* namespace
-claims, so it expands into keys that exist rather than into another
-model's or tenant's.
+after different prefixes), each claimed by the namespaces that stored it;
+a match names one the requester's own namespace claims.
 
 Owns its lock and never calls back into the directory, so the only lock
 order is directory → index.
@@ -57,8 +55,7 @@ class BlendIndexStats:
     Attributes:
         num_contents: Distinct chunk contents indexed.
         num_chunks: Chunks indexed across those contents.
-        num_claims: ``(chunk, namespace)`` pairs across those chunks —
-            what a chunk stored by several models or tenants costs.
+        num_claims: ``(chunk, namespace)`` pairs across those chunks.
         num_namespaces: Distinct namespaces holding indexed content.
         table_size: Slots in the occupancy filter.
     """
@@ -75,11 +72,9 @@ class _Occupant:
     """One chunk hash holding an entry's content.
 
     Attributes:
-        token_offset: The chunk's position in its stored sequence;
-            per chunk, since identical content can be stored at
-            different positions.
-        namespaces: Every namespace that stored this chunk. A match is
-            offered only to a requester in one of them, and the occupant
+        token_offset: The chunk's position in its stored sequence; per
+            chunk, since identical content can sit at different offsets.
+        namespaces: Every namespace that stored this chunk. The occupant
             is dropped when the last one goes.
     """
 
@@ -147,9 +142,8 @@ class BlendIndex:
         """Record that ``namespace`` stores ``chunk_hash`` with this content.
 
         Idempotent, and additive in the namespace: a second namespace
-        storing the same chunk joins the existing occupant rather than
-        replacing its claim. Content whose length is not ``chunk_size``
-        is ignored.
+        joins the existing occupant rather than replacing its claim.
+        Content whose length is not ``chunk_size`` is ignored.
 
         Args:
             token_ids: The chunk's tokens. Held by reference, so the
@@ -221,9 +215,8 @@ class BlendIndex:
     def remove_chunk(self, token_ids: np.ndarray, chunk_hash: bytes) -> None:
         """Drop ``chunk_hash`` and every namespace's claim on it.
 
-        Serves the one case where the chunk itself stops holding this
-        content — a re-store under the same hash with different tokens —
-        which invalidates every namespace's claim at once.
+        For a re-store under the same hash with different tokens, which
+        invalidates every claim at once.
 
         Args:
             token_ids: The content the chunk was indexed under.
@@ -243,8 +236,7 @@ class BlendIndex:
 
         Every candidate is verified token-exact, then narrowed to the
         occupants ``namespace`` stores. Content held only by other
-        namespaces yields nothing: its keys do not exist for this
-        requester, so offering it would buy a confirmed miss.
+        namespaces yields nothing.
 
         Args:
             tokens: The query token ids (any dtype castable to
@@ -275,10 +267,8 @@ class BlendIndex:
                 if not np.array_equal(query[cur_st : cur_st + window], entry.token_ids):
                     continue  # fingerprint collision: content differs
                 for chunk_hash, occupant in entry.occupants.items():
-                    # Walk past occupants this namespace cannot retrieve —
-                    # the same content stored under another model, tenant,
-                    # or parallel setup, or already emitted elsewhere in
-                    # the query.
+                    # Skip occupants this namespace cannot retrieve, and
+                    # chunks already emitted elsewhere in the query.
                     if chunk_hash in seen or namespace not in occupant.namespaces:
                         continue
                     seen.add(chunk_hash)

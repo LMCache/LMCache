@@ -218,8 +218,7 @@ def test_pending_sentinel_distinct():
 
 
 def test_match_carries_the_namespace_to_the_coordinator():
-    """The server's own model, salt, and world size travel with the query
-    so the coordinator can scope matches to keys this server can expand."""
+    """The server's model, salt, and world size travel with the query."""
     sent: list[dict] = []
 
     def capture(method: str, path: str, payload: dict) -> dict:
