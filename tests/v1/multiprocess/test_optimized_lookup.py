@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Optimized vs current V3 lookup — pure-Python module test.
+"""Optimized vs current lookup — pure-Python module test.
 
-Compares two lookup designs over the same V3 matcher state:
+Compares two lookup designs over the same matcher state:
 
-* ``current_v3_lookup`` — single ``match_sub_sequence`` call returning one
+* ``current_lookup`` — single ``match_sub_sequence`` call returning one
   flat list; each result is classified as prefix/non-prefix at retrieve
   time via ``old_st == cur_st``.
 
@@ -12,7 +12,7 @@ Compares two lookup designs over the same V3 matcher state:
   ``prefix_hits`` / ``cb_aligned`` / ``cb_shifted``.
 
 Both paths share the same matcher (same registrations, same hashes), so the
-union of optimal's buckets must equal the V3 result set (after dedupe).
+union of optimal's buckets must equal the the current lookup result set (after dedupe).
 Re-rope decisions must match: ``cb_shifted`` ↔ ``old_st != cur_st``,
 ``prefix_hits ∪ cb_aligned`` ↔ ``old_st == cur_st``.
 """
@@ -29,7 +29,7 @@ import pytest
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.multiprocess.custom_types import CBMatchResult
-from lmcache.v1.multiprocess.modules.blend_v3 import BlendTokenRangeMatcherV3
+from lmcache.v1.multiprocess.modules.blend import BlendTokenRangeMatcher
 from lmcache.v1.multiprocess.token_hasher import rolling_hash_windows_numba
 
 CHUNK_SIZE = 256
@@ -43,7 +43,7 @@ BLOCK_SIZE = 16
 
 
 def _greedy_leftmost_dedupe(matches: list[CBMatchResult]) -> list[CBMatchResult]:
-    """Drop overlapping matches keeping the leftmost — same as V2/V3 lookup."""
+    """Drop overlapping matches keeping the leftmost — same as the current lookup."""
     matches = sorted(matches, key=lambda r: r.cur_st)
     out: list[CBMatchResult] = []
     covered_end = -1
@@ -54,11 +54,11 @@ def _greedy_leftmost_dedupe(matches: list[CBMatchResult]) -> list[CBMatchResult]
     return out
 
 
-def current_v3_lookup(
-    matcher: BlendTokenRangeMatcherV3,
+def current_lookup(
+    matcher: BlendTokenRangeMatcher,
     query: list[int],
 ) -> list[CBMatchResult]:
-    """Mirror of the V3 lookup body (without the storage-prefetch round)."""
+    """Mirror of the current lookup body (without the storage-prefetch round)."""
     matches = matcher.match_sub_sequence(query)
     return _greedy_leftmost_dedupe(matches)
 
@@ -92,7 +92,7 @@ def _simulate_chain_walk(
 
 
 def optimal_lookup(
-    matcher: BlendTokenRangeMatcherV3,
+    matcher: BlendTokenRangeMatcher,
     query: list[int],
     chunk_size: int,
     chain_walk_fn=None,
@@ -100,7 +100,7 @@ def optimal_lookup(
     """Chain walk + filtered matcher probe + three-bucket partition.
 
     Args:
-        matcher: V3 matcher with registered chunks.
+        matcher: matcher with registered chunks.
         query: Query token sequence.
         chunk_size: Chunk size.
         chain_walk_fn: Optional callable ``(query, chunk_size) -> list[CBMatchResult]``
@@ -188,16 +188,16 @@ def make_chain_walk_storage(
 
 
 def match_strided(
-    matcher: BlendTokenRangeMatcherV3,
+    matcher: BlendTokenRangeMatcher,
     query: list[int],
     chunk_size: int,
     stride: int,
     start_pos: int = 0,
 ) -> list[CBMatchResult]:
-    """Aligned-only probe — same hash function as V3 but only probes
+    """Aligned-only probe — same hash function as the current lookup but only probes
     positions ``{start_pos, start_pos + stride, start_pos + 2*stride, ...}``.
 
-    Equivalent to V3 ``match_sub_sequence`` post-filtered to
+    Equivalent to the current ``match_sub_sequence`` post-filtered to
     ``cur_st % stride == 0 and cur_st >= start_pos``, except this version
     does not visit non-strided positions in its probe loop, so it scales
     as ``O(N / stride)`` instead of ``O(N)``.
@@ -205,7 +205,7 @@ def match_strided(
     Accesses matcher internals directly — module test only.
 
     Args:
-        matcher: V3 matcher with registered chunks.
+        matcher: matcher with registered chunks.
         query: Query token sequence.
         chunk_size: Chunk size (must match matcher.chunk_size).
         stride: Step between probe positions (e.g., BLOCK_SIZE).
@@ -252,7 +252,7 @@ def match_strided(
 
 
 def optimal_lookup_aligned(
-    matcher: BlendTokenRangeMatcherV3,
+    matcher: BlendTokenRangeMatcher,
     query: list[int],
     chunk_size: int,
     block_size: int,
@@ -262,7 +262,7 @@ def optimal_lookup_aligned(
 
     Implements Opts 1–3 from the design discussion:
     * Probe only at ``block_size`` stride (Opt 1) — zero coverage loss vs
-      V3 because retrieve already drops non-block-aligned ``cur_st``.
+      the current lookup because retrieve already drops non-block-aligned ``cur_st``.
     * Trim probe range to skip ``[0, K * chunk_size)`` (Opt 2) — the
       chain walk already covers it.
     * Partition into aligned/shifted in the same pass as the probe
@@ -304,18 +304,19 @@ def _match_key(m: CBMatchResult) -> tuple[int, int, bytes]:
 
 
 def assert_equivalent(
-    v3_result: list[CBMatchResult],
+    cur_result: list[CBMatchResult],
     opt: OptimalLookupResult,
 ) -> None:
-    """Optimal's three buckets cover the V3 list with no overlap and same classes."""
+    """Optimal's three buckets cover the current lookup's list with no overlap
+    and the same classes."""
     union = opt.prefix_hits + opt.cb_aligned + opt.cb_shifted
 
-    # 1. Union == V3 (same set of match keys).
-    v3_keys = {_match_key(m) for m in v3_result}
+    # 1. Union == the current lookup (same set of match keys).
+    cur_keys = {_match_key(m) for m in cur_result}
     union_keys = {_match_key(m) for m in union}
-    assert union_keys == v3_keys, (
-        f"Union mismatch:\n  V3 only:   {v3_keys - union_keys}\n  "
-        f"Opt only:  {union_keys - v3_keys}"
+    assert union_keys == cur_keys, (
+        f"Union mismatch:\n  Current only:   {cur_keys - union_keys}\n  "
+        f"Opt only:  {union_keys - cur_keys}"
     )
 
     # 2. No bucket overlap.
@@ -347,7 +348,7 @@ def assert_equivalent(
 
 
 def _register(
-    matcher: BlendTokenRangeMatcherV3,
+    matcher: BlendTokenRangeMatcher,
     tokens: list[int],
     chunk_hash_seeds: list[int],
     position_offset: int = 0,
@@ -377,28 +378,28 @@ class TestOptimizedLookupEquivalence:
 
     def test_full_prefix_hit(self):
         """Query == stored sequence verbatim → all chunks become prefix_hits."""
-        matcher = BlendTokenRangeMatcherV3(chunk_size=CHUNK_SIZE)
+        matcher = BlendTokenRangeMatcher(chunk_size=CHUNK_SIZE)
         stored = _chunk(1) + _chunk(2) + _chunk(3) + _chunk(4)
         _register(matcher, stored, [101, 102, 103, 104])
 
-        v3 = current_v3_lookup(matcher, stored)
+        cur = current_lookup(matcher, stored)
         opt = optimal_lookup(matcher, stored, CHUNK_SIZE)
 
-        assert_equivalent(v3, opt)
+        assert_equivalent(cur, opt)
         assert len(opt.prefix_hits) == 4
         assert opt.cb_aligned == []
         assert opt.cb_shifted == []
 
     def test_no_hits(self):
         """Disjoint query → empty result, empty buckets."""
-        matcher = BlendTokenRangeMatcherV3(chunk_size=CHUNK_SIZE)
+        matcher = BlendTokenRangeMatcher(chunk_size=CHUNK_SIZE)
         _register(matcher, _chunk(1) + _chunk(2), [201, 202])
 
         query = _chunk(9) + _chunk(8)
-        v3 = current_v3_lookup(matcher, query)
+        cur = current_lookup(matcher, query)
         opt = optimal_lookup(matcher, query, CHUNK_SIZE)
 
-        assert v3 == []
+        assert cur == []
         assert opt.prefix_hits == []
         assert opt.cb_aligned == []
         assert opt.cb_shifted == []
@@ -410,16 +411,16 @@ class TestOptimizedLookupEquivalence:
         Query:  [X B C D] — chunk 0 differs, chunks 1..3 are aligned hits.
         Expected: prefix_hits=[], cb_aligned=[chunk1..chunk3], cb_shifted=[].
         """
-        matcher = BlendTokenRangeMatcherV3(chunk_size=CHUNK_SIZE)
+        matcher = BlendTokenRangeMatcher(chunk_size=CHUNK_SIZE)
         a, b, c, d, x = _chunk(1), _chunk(2), _chunk(3), _chunk(4), _chunk(99)
         stored = a + b + c + d
         _register(matcher, stored, [301, 302, 303, 304])
 
         query = x + b + c + d
-        v3 = current_v3_lookup(matcher, query)
+        cur = current_lookup(matcher, query)
         opt = optimal_lookup(matcher, query, CHUNK_SIZE)
 
-        assert_equivalent(v3, opt)
+        assert_equivalent(cur, opt)
         assert opt.prefix_hits == []
         assert len(opt.cb_aligned) == 3
         assert opt.cb_shifted == []
@@ -429,7 +430,7 @@ class TestOptimizedLookupEquivalence:
 
     def test_pure_non_prefix_shifted(self):
         """Stored chunk reappears at a different position → cb_shifted only."""
-        matcher = BlendTokenRangeMatcherV3(chunk_size=CHUNK_SIZE)
+        matcher = BlendTokenRangeMatcher(chunk_size=CHUNK_SIZE)
         a, b = _chunk(1), _chunk(2)
         stored = a + b
         _register(matcher, stored, [401, 402])
@@ -437,10 +438,10 @@ class TestOptimizedLookupEquivalence:
         # Insert two filler chunks before chunk 'b' — pushes it to position 3*c.
         f1, f2, f3 = _chunk(50), _chunk(51), _chunk(52)
         query = f1 + f2 + f3 + b
-        v3 = current_v3_lookup(matcher, query)
+        cur = current_lookup(matcher, query)
         opt = optimal_lookup(matcher, query, CHUNK_SIZE)
 
-        assert_equivalent(v3, opt)
+        assert_equivalent(cur, opt)
         assert opt.prefix_hits == []
         assert opt.cb_aligned == []
         assert len(opt.cb_shifted) == 1
@@ -450,7 +451,7 @@ class TestOptimizedLookupEquivalence:
 
     def test_mixed_prefix_then_shifted(self):
         """Contiguous prefix hit, chain break, shifted hit past the break."""
-        matcher = BlendTokenRangeMatcherV3(chunk_size=CHUNK_SIZE)
+        matcher = BlendTokenRangeMatcher(chunk_size=CHUNK_SIZE)
         a, b, c, d = _chunk(1), _chunk(2), _chunk(3), _chunk(4)
         stored_main = a + b + c + d  # registered as a single 4-chunk run
         _register(matcher, stored_main, [501, 502, 503, 504])
@@ -461,10 +462,10 @@ class TestOptimizedLookupEquivalence:
         # Query: a, b, unrelated, d. Prefix hits = [a, b]; shifted = [d@0 → 3c].
         g1 = _chunk(60)
         query = a + b + g1 + d
-        v3 = current_v3_lookup(matcher, query)
+        cur = current_lookup(matcher, query)
         opt = optimal_lookup(matcher, query, CHUNK_SIZE)
 
-        assert_equivalent(v3, opt)
+        assert_equivalent(cur, opt)
         # 'd' has multiple stored registrations; matcher picks one. Just check shapes.
         assert len(opt.prefix_hits) == 2
         # 'd' at query position 3c could match either old_st=3c (aligned) or
@@ -473,7 +474,7 @@ class TestOptimizedLookupEquivalence:
 
     def test_mixed_prefix_gap_shifted(self):
         """Prefix hit at chunk 0, gap, aligned hit, shifted hit — all three buckets."""
-        matcher = BlendTokenRangeMatcherV3(chunk_size=CHUNK_SIZE)
+        matcher = BlendTokenRangeMatcher(chunk_size=CHUNK_SIZE)
         a, b, c = _chunk(1), _chunk(2), _chunk(3)
         # Register one sequence [a, b, c] with positions 0, c, 2c
         _register(matcher, a + b + c, [601, 602, 603])
@@ -483,10 +484,10 @@ class TestOptimizedLookupEquivalence:
         # Query: a (prefix), unrelated (gap), c at 2c (aligned), c again at 3c.
         g = _chunk(70)
         query = a + g + c + c
-        v3 = current_v3_lookup(matcher, query)
+        cur = current_lookup(matcher, query)
         opt = optimal_lookup(matcher, query, CHUNK_SIZE)
 
-        assert_equivalent(v3, opt)
+        assert_equivalent(cur, opt)
         # Prefix walk reaches chunk 0 only (chunk 1 is unrelated).
         assert len(opt.prefix_hits) == 1
         assert opt.prefix_hits[0].cur_st == 0
@@ -494,7 +495,7 @@ class TestOptimizedLookupEquivalence:
 
     def test_partial_sequence_registration(self):
         """Registration with position_offset > 0; queries find at that offset."""
-        matcher = BlendTokenRangeMatcherV3(chunk_size=CHUNK_SIZE)
+        matcher = BlendTokenRangeMatcher(chunk_size=CHUNK_SIZE)
         b, c = _chunk(2), _chunk(3)
         # Pretend b, c were stored at absolute positions [c, 2c] — register with offset.
         _register(matcher, b + c, [701, 702], position_offset=CHUNK_SIZE)
@@ -502,10 +503,10 @@ class TestOptimizedLookupEquivalence:
         # Query containing b, c at positions c, 2c — both aligned (cb_aligned).
         a = _chunk(80)
         query = a + b + c
-        v3 = current_v3_lookup(matcher, query)
+        cur = current_lookup(matcher, query)
         opt = optimal_lookup(matcher, query, CHUNK_SIZE)
 
-        assert_equivalent(v3, opt)
+        assert_equivalent(cur, opt)
         # Chunk 0 (a) has no registration → prefix walk stops at 0.
         assert opt.prefix_hits == []
         # b, c found at their original positions → both aligned.
@@ -535,7 +536,7 @@ class TestOptimizedLookupTiming:
         ],
     )
     def test_timing(self, n_chunks, scenario, capsys):
-        matcher = BlendTokenRangeMatcherV3(chunk_size=CHUNK_SIZE)
+        matcher = BlendTokenRangeMatcher(chunk_size=CHUNK_SIZE)
         stored: list[int] = []
         seeds = []
         chunks_for_storage: list[tuple[int, list[int]]] = []
@@ -569,8 +570,8 @@ class TestOptimizedLookupTiming:
         n_iter = 50
         t0 = time.perf_counter()
         for _ in range(n_iter):
-            current_v3_lookup(matcher, query)
-        t_v3 = (time.perf_counter() - t0) / n_iter * 1e6  # µs
+            current_lookup(matcher, query)
+        t_cur = (time.perf_counter() - t0) / n_iter * 1e6  # µs
 
         t0 = time.perf_counter()
         for _ in range(n_iter):
@@ -580,8 +581,8 @@ class TestOptimizedLookupTiming:
         with capsys.disabled():
             print(
                 f"\n  [{scenario:>20s}] N={n_chunks:>4d} chunks  "
-                f"V3={t_v3:8.1f}µs  OPT={t_opt:8.1f}µs  "
-                f"OPT/V3={t_opt / t_v3:.2f}x"
+                f"CUR={t_cur:8.1f}µs  OPT={t_opt:8.1f}µs  "
+                f"OPT/CUR={t_opt / t_cur:.2f}x"
             )
 
 
@@ -590,27 +591,30 @@ class TestOptimizedLookupTiming:
 # =============================================================================
 
 
-def _v3_filtered_to_block_aligned(
-    v3_result: list[CBMatchResult], block_size: int
+def _current_filtered_to_block_aligned(
+    cur_result: list[CBMatchResult], block_size: int
 ) -> set[tuple[int, int, bytes]]:
-    """Set of V3 matches that survive retrieve's ``cur_st % block_size == 0`` drop.
+    """Set of current-lookup matches that survive retrieve's
+    ``cur_st % block_size == 0`` drop.
 
     Strided probe's correctness target: it must find at least every
-    block-aligned chunk-content occurrence in the query. V3's first-cur_st
+    block-aligned chunk-content occurrence in the query. The current lookup's
+    first-cur_st
     behavior may keep a non-block-aligned position for a chunk that also
     has a block-aligned occurrence; the strided probe will find the
     block-aligned occurrence instead. So the strided probe is a superset
-    by **content** (hash) of what V3 surfaces after the retrieve filter.
+    by **content** (hash) of what the current lookup surfaces after the retrieve filter.
     """
-    return {_match_key(m) for m in v3_result if m.cur_st % block_size == 0}
+    return {_match_key(m) for m in cur_result if m.cur_st % block_size == 0}
 
 
 class TestStridedProbe:
-    """Block-aligned probe must give zero-loss coverage vs V3 + retrieve filter."""
+    """Block-aligned probe must give zero-loss coverage vs the current lookup +
+    retrieve filter."""
 
     def test_returns_only_block_aligned_cur_st(self):
         """Every match has cur_st divisible by BLOCK_SIZE."""
-        matcher = BlendTokenRangeMatcherV3(chunk_size=CHUNK_SIZE)
+        matcher = BlendTokenRangeMatcher(chunk_size=CHUNK_SIZE)
         a, b = _chunk(1), _chunk(2)
         _register(matcher, a + b, [801, 802])
 
@@ -626,9 +630,10 @@ class TestStridedProbe:
     def test_finds_block_aligned_shifted_match(self):
         """Stored chunk at block-aligned, non-chunk-aligned query pos → found.
 
-        V3 (stride=1) finds these too; strided (stride=block) must as well.
+        The current probe (stride=1) finds these too; strided (stride=block) must
+        as well.
         """
-        matcher = BlendTokenRangeMatcherV3(chunk_size=CHUNK_SIZE)
+        matcher = BlendTokenRangeMatcher(chunk_size=CHUNK_SIZE)
         a = _chunk(1)
         _register(matcher, a, [901])
 
@@ -642,9 +647,10 @@ class TestStridedProbe:
         assert results[0].cur_st == 32
         assert results[0].cur_st % BLOCK_SIZE == 0
 
-    def test_zero_loss_vs_v3_filtered(self):
-        """Strided probe content-hash set ⊇ V3 set filtered to block-aligned cur_st."""
-        matcher = BlendTokenRangeMatcherV3(chunk_size=CHUNK_SIZE)
+    def test_zero_loss_vs_current_filtered(self):
+        """Strided probe content-hash set ⊇ the current lookup's set filtered to
+        block-aligned cur_st."""
+        matcher = BlendTokenRangeMatcher(chunk_size=CHUNK_SIZE)
         chunks = [_chunk(i) for i in range(5)]
         stored = sum(chunks, [])
         _register(matcher, stored, [1100 + i for i in range(5)])
@@ -653,25 +659,27 @@ class TestStridedProbe:
         shim = list(range(90000, 90048))
         query = shim + stored
 
-        v3 = current_v3_lookup(matcher, query)
-        v3_block_aligned = _v3_filtered_to_block_aligned(v3, BLOCK_SIZE)
+        cur = current_lookup(matcher, query)
+        cur_block_aligned = _current_filtered_to_block_aligned(cur, BLOCK_SIZE)
         strided = match_strided(matcher, query, CHUNK_SIZE, BLOCK_SIZE)
         strided_hashes = {m.hash for m in strided}
-        v3_block_aligned_hashes = {key[2] for key in v3_block_aligned}
+        cur_block_aligned_hashes = {key[2] for key in cur_block_aligned}
 
-        # Every block-aligned-cur_st hit that V3 surfaces must be discoverable
+        # Every block-aligned-cur_st hit that the current lookup surfaces must be
+        # discoverable
         # by the strided probe (same hash). Strided may discover additional
-        # block-aligned occurrences that V3 dropped in favor of an earlier
+        # block-aligned occurrences that the current lookup dropped in favor of an
+        # earlier
         # non-block-aligned cur_st.
-        assert v3_block_aligned_hashes <= strided_hashes, (
-            f"Strided missed hashes V3 found:\n"
-            f"  v3 block-aligned: {v3_block_aligned_hashes}\n"
+        assert cur_block_aligned_hashes <= strided_hashes, (
+            f"Strided missed hashes the current lookup found:\n"
+            f"  cur block-aligned: {cur_block_aligned_hashes}\n"
             f"  strided:          {strided_hashes}"
         )
 
     def test_trim_skips_prefix_range(self):
         """``start_pos > 0`` skips the chain-walk-covered prefix."""
-        matcher = BlendTokenRangeMatcherV3(chunk_size=CHUNK_SIZE)
+        matcher = BlendTokenRangeMatcher(chunk_size=CHUNK_SIZE)
         a, b, c = _chunk(1), _chunk(2), _chunk(3)
         _register(matcher, a + b + c, [1201, 1202, 1203])
 
@@ -690,7 +698,7 @@ class TestOptimalLookupAligned:
     """End-to-end equivalence for optimal_lookup_aligned."""
 
     def _make(self):
-        matcher = BlendTokenRangeMatcherV3(chunk_size=CHUNK_SIZE)
+        matcher = BlendTokenRangeMatcher(chunk_size=CHUNK_SIZE)
         chunks = [_chunk(i) for i in range(4)]
         stored = sum(chunks, [])
         _register(matcher, stored, [1300 + i for i in range(4)])
@@ -737,7 +745,8 @@ class TestOptimalLookupAligned:
 
 
 class TestOptimalLookupAlignedTiming:
-    """Cost of optimal_lookup_aligned vs current V3, with chain-walk early-out."""
+    """Cost of optimal_lookup_aligned vs the current lookup, with chain-walk
+    early-out."""
 
     @pytest.mark.parametrize(
         "n_chunks,scenario",
@@ -748,7 +757,7 @@ class TestOptimalLookupAlignedTiming:
         ],
     )
     def test_timing(self, n_chunks, scenario, capsys):
-        matcher = BlendTokenRangeMatcherV3(chunk_size=CHUNK_SIZE)
+        matcher = BlendTokenRangeMatcher(chunk_size=CHUNK_SIZE)
         stored: list[int] = []
         seeds = []
         chunks_for_storage: list[tuple[int, list[int]]] = []
@@ -783,8 +792,8 @@ class TestOptimalLookupAlignedTiming:
         n_iter = 50
         t0 = time.perf_counter()
         for _ in range(n_iter):
-            current_v3_lookup(matcher, query)
-        t_v3 = (time.perf_counter() - t0) / n_iter * 1e6
+            current_lookup(matcher, query)
+        t_cur = (time.perf_counter() - t0) / n_iter * 1e6
 
         t0 = time.perf_counter()
         for _ in range(n_iter):
@@ -794,6 +803,6 @@ class TestOptimalLookupAlignedTiming:
         with capsys.disabled():
             print(
                 f"\n  [{scenario:>20s}] N={n_chunks:>4d} chunks  "
-                f"V3={t_v3:8.1f}µs  ALIGNED={t_opt:8.1f}µs  "
-                f"speedup={t_v3 / t_opt:.1f}x"
+                f"CUR={t_cur:8.1f}µs  ALIGNED={t_opt:8.1f}µs  "
+                f"speedup={t_cur / t_opt:.1f}x"
             )

@@ -104,13 +104,18 @@ def create_recorded_connector_event(
 ) -> "IPCEvent":
     """Create a recorded producer event, tolerating vendored adapter fallbacks.
 
-    Recent LMCache-owned adapters expose ``create_and_record_event`` directly,
-    but older/vendored vLLM adapters may not. In that case, rebuild the event
-    from the adapter's public state so connector code stays compatible.
+    LMCache-owned adapters expose ``create_and_record_event`` so the helper can
+    preserve engine-driven local events. Upstream/vendored adapters may expose
+    only ``create_recorded_event``; older ones may expose neither. In the last
+    case, rebuild the event from the adapter's public state so connector code
+    stays compatible.
     """
     create_and_record = getattr(worker_adapter, "create_and_record_event", None)
     if callable(create_and_record):
         return cast("IPCEvent", create_and_record(stream))
+    create_recorded = getattr(worker_adapter, "create_recorded_event", None)
+    if callable(create_recorded):
+        return cast("IPCEvent", create_recorded())
     return create_recorded_transfer_event(worker_adapter, stream)
 
 

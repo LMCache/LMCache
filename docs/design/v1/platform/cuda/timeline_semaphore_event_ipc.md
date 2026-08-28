@@ -130,32 +130,49 @@ exists. Two empirically verified requirements for reviving it:
   ~20 µs vs ~10 µs for CUDA events (an earlier 100 µs-poll implementation
   measured ~174 µs). The sync streams live for the process lifetime.
 
-## Integration constraints (must be resolved before spec binding)
+## Selection: the isolated-IPC switch
+
+`CudaDeviceSpec.event_ipc_backend` returns this backend when the
+process-global isolated-IPC switch is on (see
+`lmcache/v1/platform/isolated_ipc.py`; off by default until the
+integrations listed below migrate), and `DefaultEventIPCBackend`
+otherwise. The switch is set at process initialization — before the first
+backend resolution, which caches the choice — from `lmcache.mp.isolated_ipc`
+(vLLM connector extra_config) and `--isolated-ipc` (MP server CLI). Both
+processes must select the same backend: the wire carries no backend
+negotiation, and the handle formats are mutually unparsable (64 vs 81
+bytes), so a mismatch fails loudly at `import_event` on whichever side
+receives the foreign handle (the exporter side hangs until its mq timeout
+when the failure is on the server).
+
+## Integration constraints
 
 `DefaultEventIPCBackend.export_event` accepts any interprocess-capable
-device event; this backend only exports its own event objects. Call sites that
-bypass the backend break the moment `CudaDeviceSpec.event_ipc_backend`
-returns it:
+device event; this backend only exports its own event objects. Call sites
+that bypass the backend break under isolated IPC:
 
-- vLLM MP connectors now create producer events through the shared LMCache
-  helper, which selects an IPC event only for `lmcache_driven` transfers and a
-  normal local event for `engine_driven` transfers. That keeps the existing
-  `IPCEvent` duck-typed `event.wait(stream)` contract while staying compatible
-  with older vendored adapters that do not yet expose the helper method.
-- SGLang and TRT-LLM adapters already route producer-event creation through
-  `backend.create_event` / `record_event`.
-- CacheBlend/qstore server modules return raw `event.ipc_handle()` bytes
-  instead of `export_event(...)`; already outside the event-IPC
-  abstraction (see `event_ipc_abstraction.md` non-goals), must migrate
-  first.
-
-Only `lmcache_driven_transfer.py` (server) and `futures.py` route every
-event operation through the backend today.
+- **Migrated**: the vLLM MP connector (`lmcache_mp_connector.py`) creates
+- **Migrated**: the vLLM MP connectors create producer events through the
+  shared LMCache helper, which prefers
+  `LMCacheMPWorkerAdapter.create_and_record_event` when available and
+  falls back to `create_recorded_event` or public-state reconstruction
+  for vendored adapters. That preserves engine-driven local events while
+  routing LMCache-driven transfers through `create_event` /
+  `record_event` on the resolved backend. The event objects still satisfy
+  the existing `IPCEvent` duck protocol, so `event.wait(stream)` call
+  sites keep working. Server (`lmcache_driven_transfer.py`) and worker
+  futures (`futures.py`) were already fully backend-routed.
+- **Migrated**: SGLang and TRT-LLM adapters already route producer-event
+  creation through backend `create_event` / `record_event`.
+- **Not migrated** (the reason the switch defaults to off): CacheBlend
+  and qstore server modules still return raw `event.ipc_handle()` bytes
+  instead of `export_event(...)` (already outside the event-IPC
+  abstraction, see `event_ipc_abstraction.md` non-goals). The raw
+  KV-wrapper work also remains before hostIPC-free deployment is complete.
 
 ## Status
 
-Standalone implementation, not yet bound to
-`CudaDeviceSpec.event_ipc_backend`. The vLLM connector call sites now route
-through the platform event helper, but selection/config plumbing and the
-remaining raw KV-wrapper / raw-event exporters are still follow-up work for
-hostIPC-free deployment.
+Bound to `CudaDeviceSpec.event_ipc_backend` behind the isolated-IPC switch,
+off by default (opt in per deployment). The raw KV-wrapper work (removing
+the remaining shared-memory assumptions from KV-cache registration) is the
+follow-up for fully hostIPC-free deployment.
