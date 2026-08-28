@@ -1,19 +1,19 @@
 # Buildkite Web UI Setup: MUSA Unit and Hardware Smoke
 
 This lane runs a serialized MUSA unit-test step followed by the focused LMCache
-hardware/server smoke on the maintainer-provisioned MUSA agent. It deliberately
-uses bare-metal execution: the shared K3 harness is
+hardware/server smoke on the maintainer-provisioned `MooreThreads` queue. It
+deliberately uses bare-metal execution: the shared K3 harness is
 NVIDIA-specific and must not be reused until the MUSA queue has a supported
 Kubernetes device plugin and runtime image.
 
 ## Pipeline settings
 
-**Steps editor**: paste the contents of `buildkite-pipeline.yml`.
+**Steps editor**: paste the contents of `buildkite-pipeline.yml`. Its upload
+command must point to `.buildkite/k3_tests/musa/pipeline.yml`.
 
-Keep the existing MUSA runner and queue assignment in the Buildkite pipeline
-configuration. Neither `buildkite-pipeline.yml` nor `pipeline.yml` declares a
-queue, so this repository change does not create, rename, or replace the queue
-that the maintainer already provisioned.
+Both the upload step and the dynamically uploaded test steps explicitly target
+the existing `MooreThreads` queue. This repository change reuses that queue; it
+does not create, rename, or replace it.
 
 Configure this environment variable on the pipeline or agent:
 
@@ -77,15 +77,17 @@ PyTorch. Build and test dependencies are installed before the editable package.
 Paste this into the existing pipeline's Steps editor:
 
 ```yaml
+agents:
+  queue: "MooreThreads"
+
 steps:
   - label: ":pipeline: Upload pipeline"
     command: bash .buildkite/k3_tests/common_scripts/upload-pipeline.sh .buildkite/k3_tests/musa/pipeline.yml
 ```
 
-Keep queue routing in the Buildkite pipeline configuration. The dynamically
-uploaded unit and smoke steps use a shared global concurrency limit of one and
-the smoke depends on the unit step, so two jobs cannot contend for the same
-device.
+The dynamically uploaded unit and smoke steps also target `MooreThreads`, use a
+shared global concurrency limit of one, and make the smoke depend on the unit
+step, so two jobs cannot contend for the same device.
 
 ## What this pipeline validates
 

@@ -1,5 +1,5 @@
 # MUSA bare-metal unit and hardware smoke tests.
-# Queue routing remains in the maintainer-owned Buildkite pipeline settings.
+# Both steps use the maintainer-provisioned MooreThreads queue.
 
 env:
   LMCACHE_DEVICE_BACKEND: "musa"
@@ -8,10 +8,13 @@ env:
 steps:
   - label: "MUSA Unit Tests (Serialized)"
     key: "musa_unit_tests"
-    command: bash "${BUILDKITE_BUILD_CHECKOUT_PATH:-.}/.buildkite/k3_tests/musa/run-unit-tests.sh"
+    command: bash .buildkite/k3_tests/musa/run-unit-tests.sh
     timeout_in_minutes: 60
     concurrency: 1
     concurrency_group: "lmcache/musa-hardware-smoke"
+
+    agents:
+      queue: "MooreThreads"
 
     env:
       MUSA_CI_ARTIFACT_DIR: "musa-ci-artifacts/unit"
@@ -22,10 +25,13 @@ steps:
   - label: "MUSA Hardware Smoke"
     key: "musa_hardware_smoke"
     depends_on: "musa_unit_tests"
-    command: bash "${BUILDKITE_BUILD_CHECKOUT_PATH:-.}/.buildkite/k3_tests/musa/run.sh"
+    command: bash .buildkite/k3_tests/musa/run.sh
     timeout_in_minutes: 60
     concurrency: 1
     concurrency_group: "lmcache/musa-hardware-smoke"
+
+    agents:
+      queue: "MooreThreads"
 
     env:
       MUSA_CI_ARTIFACT_DIR: "musa-ci-artifacts/smoke"
