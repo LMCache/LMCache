@@ -1309,10 +1309,10 @@ of a backing medium, or one L2 adapter. It is identified by
 
 Two inputs are joined, and both ride the cache-event stream. **Usage** is
 derived from the events the servers already publish. **Capacity** arrives as
-a capacity report on the same stream -- once at startup, then whenever an
-adapter is added, removed, or reconfigured. Both are automatic; there is
-nothing to configure beyond pointing servers at a coordinator and leaving
-event reporting enabled.
+a capacity report on the same stream -- after registration, when a Device-DAX
+L1 arena is added or starts draining, and whenever an L2 adapter is added,
+removed, or reconfigured. Both are automatic; there is nothing to configure
+beyond pointing servers at a coordinator and leaving event reporting enabled.
 
 .. note::
 
@@ -1332,9 +1332,9 @@ on them.
    ``capacity_bytes``. A ``null`` means *unknown*, never *empty* -- do not
    treat it as ``0``.
 
-   Ratios above ``1.0`` are reported as-is rather than capped. A compartment
-   holding more than its declared capacity means the declaration is wrong, and
-   that is worth seeing.
+   Ratios above ``1.0`` are reported as-is rather than capped. They can expose
+   an incorrect declaration, and are also expected while a draining Device-DAX
+   arena still holds live bytes that no longer count as usable capacity.
 
 ``GET /instances/usage``
 ~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1410,6 +1410,8 @@ above.
 A server whose L1 pool uses the default lazy allocator grows its heap on
 demand. Capacity here is the **configured** size, not the grown heap, so a
 freshly started server correctly reads near ``0``\% rather than near full.
+Device-DAX L1 capacity is the sum of active arenas; draining arenas are
+excluded.
 
 CacheBlend fragment lookup
 --------------------------

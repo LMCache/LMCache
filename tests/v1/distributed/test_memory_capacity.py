@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for the MP server's memory-capacity declaration.
 
-Capacity comes from config, not from the lazily grown heap, and a tier
-spanning several mediums declares one compartment per medium.
+CPU and GDS capacity comes from config rather than the lazily grown heap;
+Device-DAX capacity follows its active arenas. A tier spanning several
+mediums declares one compartment per medium.
 """
 
 # Standard
+from dataclasses import replace
 from typing import cast
 import threading
 
@@ -22,7 +24,14 @@ from lmcache.v1.distributed.config import (
 )
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.memory_manager.l1_manager_protocol import L1ManagerProtocol
+from lmcache.v1.distributed.memory_manager.reconfiguration import (
+    L1ReconfigureError,
+)
 from lmcache.v1.distributed.storage_manager import StorageManager
+from lmcache.v1.memory_allocators.devdax_memory_allocator import (
+    DevDaxArenaState,
+    DevDaxArenaStatus,
+)
 from lmcache.v1.mp_observability.event import Event, EventType
 
 GIB = 1 << 30
@@ -63,6 +72,25 @@ class _FakeAdapter:
         return _FakeUsage(self._capacity_bytes)
 
 
+class _FakeL1Manager:
+    """An L1 manager that reports a fixed per-medium capacity snapshot."""
+
+    def __init__(self, capacities: dict[L1BackendType, int]) -> None:
+        self._capacities = capacities
+
+    def get_capacity_bytes_by_backend(self) -> dict[L1BackendType, int]:
+        return self._capacities.copy()
+
+    def get_devdax_arena_statuses(self) -> list[DevDaxArenaStatus]:
+        return []
+
+    def get_devdax_arena_status(self, device_path: str) -> DevDaxArenaStatus:
+        for status in self.get_devdax_arena_statuses():
+            if status.device_path == device_path:
+                return status
+        raise L1ReconfigureError(404, f"no Device-DAX arena mapped at {device_path}")
+
+
 class _RecordingBus:
     """Captures what the publish path emits."""
 
@@ -81,10 +109,14 @@ class _StorageManagerStub:
         l1: dict[L1BackendType, int],
         adapters: list[tuple[_FakeDescriptor, _FakeAdapter]],
     ) -> None:
-        # A real config, so the stub exercises the actual L1 derivation.
-        self._l1_config = _config_yielding(l1)
+        self._l1_manager = _FakeL1Manager(l1)
         self._adapters = adapters
+        self._adapter_descriptors = {
+            index: desc for index, (desc, _adapter) in enumerate(adapters)
+        }
         self._lifecycle_lock = threading.Lock()
+        self._adapters_lock = threading.Lock()
+        self._capacity_publish_lock = threading.Lock()
         self._event_bus = _RecordingBus()
 
     def _build_capacities(self) -> list[ModuleMemoryCapacity]:
@@ -92,6 +124,17 @@ class _StorageManagerStub:
 
     def _publish_capacity_changed(self) -> None:
         StorageManager._publish_capacity_changed(cast("StorageManager", self))
+
+    def _single_region_adapter_names(self) -> list[str]:
+        return StorageManager._single_region_adapter_names(cast("StorageManager", self))
+
+    def _l2_device_owner_names(self, _device_path: str) -> list[str]:
+        return []
+
+    def _l1_devdax_arena_is_active(self, device_path: str) -> bool:
+        return StorageManager._l1_devdax_arena_is_active(
+            cast("StorageManager", self), device_path
+        )
 
     def _snapshot_adapters(
         self,
@@ -109,7 +152,7 @@ def _capacities(
     """Run ``StorageManager._build_capacities`` against fakes.
 
     Args:
-        l1: Configured L1 capacity per backing medium.
+        l1: Current declared L1 capacity per backing medium.
         adapters: The L2 adapters to report, as ``(descriptor, adapter)``.
 
     Returns:
@@ -158,7 +201,7 @@ def _config_yielding(capacities: dict[L1BackendType, int]) -> L1ManagerConfig:
 
 
 class TestConfiguredL1Capacity:
-    """The single derivation of "how large is L1", from config alone."""
+    """The boot-capacity derivation for each L1 configuration."""
 
     def _config(self, **memory: object) -> L1ManagerConfig:
         """Build an L1ManagerConfig with the given memory-config fields."""
@@ -235,7 +278,7 @@ class TestConfiguredL1Capacity:
         assert derived[L1BackendType.DRAM] == local_size
 
     def test_total_matches_what_usage_telemetry_reports(self) -> None:
-        # usage_telemetry sums the same derivation; drift would split the views.
+        # Startup telemetry records the same boot-configured total.
         memory_config = L1MemoryManagerConfig(
             size_in_bytes=10 * GIB,
             devdax_path="/dev/dax0.0",
@@ -332,9 +375,8 @@ class TestReportStatusSharesTheSource:
 
         manager = L1Manager.__new__(L1Manager)
         manager._memory_manager = cast("L1ManagerProtocol", _MemoryManager())
-        # report_status reads the total precomputed at construction.
-        manager._configured_capacity_bytes = sum(
-            get_configured_capacity_bytes(_config_yielding(configured)).values()
+        manager._boot_capacity_bytes_by_backend = get_configured_capacity_bytes(
+            _config_yielding(configured)
         )
         manager._objects = {}
         manager._write_ttl_seconds = 600
@@ -357,8 +399,7 @@ class TestReportStatusSharesTheSource:
         assert manager.report_status()["memory_configured_bytes"] == 110 * GIB
 
     def test_status_and_capacity_report_agree(self) -> None:
-        # The point of one shared derivation: the two consumers of it --
-        # report_status and the coordinator capacity report -- cannot drift.
+        # Both consumers use the same point-in-time capacity derivation.
         configured = {L1BackendType.DEVDAX: 100 * GIB, L1BackendType.DRAM: 10 * GIB}
         manager = self._l1_manager(configured)
         reported = sum(
@@ -384,18 +425,6 @@ class TestCapacityChangePublishing:
         """A stub wired with the bus plumbing the publish path needs."""
         return _StorageManagerStub({L1BackendType.DRAM: 40 * GIB}, [])
 
-    def test_publish_emits_one_event_per_call(self) -> None:
-        # The snapshot carries no revision: the cache-event subscriber
-        # numbers declarations as it emits them, on the one bus thread.
-        stub = self._stub()
-        StorageManager._publish_capacity_changed(cast("StorageManager", stub))
-        StorageManager._publish_capacity_changed(cast("StorageManager", stub))
-        assert len(stub._event_bus.events) == 2
-        assert all(
-            not hasattr(e.metadata["snapshot"], "revision")
-            for e in stub._event_bus.events
-        )
-
     def test_published_event_carries_the_whole_declaration(self) -> None:
         # A delta would leave the coordinator permanently wrong if dropped.
         stub = self._stub()
@@ -405,16 +434,101 @@ class TestCapacityChangePublishing:
             (Tier.L1, "dram", 40 * GIB)
         ]
 
-    def test_event_type_is_the_capacity_one(self) -> None:
-        stub = self._stub()
-        StorageManager._publish_capacity_changed(cast("StorageManager", stub))
-        assert stub._event_bus.events[0].event_type == EventType.SM_CAPACITY_CHANGED
+    def test_reconfigure_publishes_post_operation_capacity(self) -> None:
+        active = DevDaxArenaStatus(
+            "/dev/dax0.1", 4096, 0, 4096, 0, DevDaxArenaState.ACTIVE, False
+        )
 
-    def test_snapshot_carries_the_whole_topology(self) -> None:
-        stub = self._stub()
-        StorageManager._publish_capacity_changed(cast("StorageManager", stub))
-        snapshot = stub._event_bus.events[0].metadata["snapshot"]
-        assert len(snapshot.modules) == 1
+        class _ReconfigurableL1Manager(_FakeL1Manager):
+            def __init__(self) -> None:
+                super().__init__({L1BackendType.DEVDAX: 4096})
+
+            def get_devdax_arena_statuses(self) -> list[DevDaxArenaStatus]:
+                return (
+                    [active] if self._capacities[L1BackendType.DEVDAX] == 8192 else []
+                )
+
+            def add_devdax_device(
+                self, _device_path: str, _size_in_bytes: int
+            ) -> DevDaxArenaStatus:
+                self._capacities = {L1BackendType.DEVDAX: 8192}
+                return active
+
+            def remove_devdax_device(
+                self, _device_path: str, _mode: object
+            ) -> DevDaxArenaStatus:
+                if self._capacities[L1BackendType.DEVDAX] == 4096:
+                    raise ValueError("Device-DAX arena is not mapped")
+                self._capacities = {L1BackendType.DEVDAX: 4096}
+                return replace(active, state=DevDaxArenaState.REMOVED)
+
+        stub = _StorageManagerStub({L1BackendType.DEVDAX: 4096}, [])
+        stub._l1_manager = _ReconfigurableL1Manager()  # type: ignore[assignment]
+
+        StorageManager.add_l1_devdax_device(
+            cast("StorageManager", stub), active.device_path, 4096
+        )
+        StorageManager.remove_l1_devdax_device(
+            cast("StorageManager", stub), active.device_path
+        )
+        with pytest.raises(ValueError, match="not mapped"):
+            StorageManager.remove_l1_devdax_device(
+                cast("StorageManager", stub), active.device_path
+            )
+
+        events = stub._event_bus.events
+        assert [event.event_type for event in events] == [
+            EventType.SM_CAPACITY_CHANGED,
+            EventType.SM_CAPACITY_CHANGED,
+        ]
+        assert [
+            next(
+                module.capacity_bytes
+                for module in event.metadata["snapshot"].modules
+                if module.tier is Tier.L1
+                and module.backend == L1BackendType.DEVDAX.value
+            )
+            for event in events
+        ] == [8192, 4096]
+
+    def test_remove_transition_is_published_when_total_is_unchanged(self) -> None:
+        class _FailingRemoveL1Manager(_FakeL1Manager):
+            def __init__(self) -> None:
+                super().__init__({L1BackendType.DEVDAX: 40 * GIB})
+                self._target_state = DevDaxArenaState.ACTIVE
+
+            def get_devdax_arena_statuses(self) -> list[DevDaxArenaStatus]:
+                return [
+                    DevDaxArenaStatus(
+                        device_path="/dev/dax0.1",
+                        size_in_bytes=20 * GIB,
+                        used_bytes=0,
+                        free_bytes=20 * GIB,
+                        active_allocations=0,
+                        state=self._target_state,
+                        is_primary=False,
+                    )
+                ]
+
+            def remove_devdax_device(self, _device_path: str, _mode: object) -> None:
+                self._target_state = DevDaxArenaState.DRAINING
+                raise RuntimeError("cleanup failed after drain started")
+
+        stub = _StorageManagerStub({L1BackendType.DEVDAX: 40 * GIB}, [])
+        stub._l1_manager = _FailingRemoveL1Manager()  # type: ignore[assignment]
+
+        with pytest.raises(RuntimeError, match="cleanup failed"):
+            StorageManager.remove_l1_devdax_device(
+                cast("StorageManager", stub), "/dev/dax0.1"
+            )
+
+        assert len(stub._event_bus.events) == 1
+        event = stub._event_bus.events[0]
+        assert event.event_type == EventType.SM_CAPACITY_CHANGED
+        # A concurrent same-sized add can keep the aggregate unchanged. The
+        # target arena's ACTIVE -> DRAINING transition still needs an event to
+        # supersede any older declaration already queued by that add.
+        assert event.metadata["snapshot"].modules[0].capacity_bytes == 40 * GIB
 
     def test_publish_capacity_declares_without_any_reconfiguration(self) -> None:
         # The only path by which a server that never reconfigures reaches
@@ -426,13 +540,13 @@ class TestCapacityChangePublishing:
         assert [(m.tier, m.backend) for m in snapshot.modules] == [(Tier.L1, "dram")]
 
 
-class TestCapacityPublishTakesNoLock:
+class TestCapacityPublishDoesNotTakeLifecycleLock:
     """Publishing must not queue behind adapter lifecycle work."""
 
     def test_publish_does_not_take_the_lifecycle_lock(self) -> None:
-        # add/delete/reconfigure hold _lifecycle_lock, and delete can hold
-        # it for its full timeout. Publishing runs on every registration, so
-        # taking that lock would stall registration behind a teardown.
+        # Add/delete hold _lifecycle_lock, and delete can hold it for its full
+        # timeout. Publishing runs on every registration, so taking that lock
+        # would stall registration behind a teardown.
         stub = _StorageManagerStub({L1BackendType.DRAM: 8 * GIB}, [])
         stub._lifecycle_lock.acquire()
         try:

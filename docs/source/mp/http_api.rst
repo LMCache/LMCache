@@ -1403,7 +1403,10 @@ default ``drain``).
 - ``404``: device is not mapped.
 - ``409``: incompatible L1 or device state, or mapping validation failure.
 - ``422``: invalid request body.
+- ``500``: synchronization or cleanup failure after draining starts.
 - ``503``: engine not initialized.
+
+See :doc:`coordinator` for capacity reporting.
 
 Observability
 -------------

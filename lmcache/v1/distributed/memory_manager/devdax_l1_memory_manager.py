@@ -64,9 +64,6 @@ class DevDaxL1MemoryManager(L1MemoryManager):
             shm_name=config.shm_name or None,
             align_bytes=config.align_bytes,
         )
-        # Retained so runtime reconfiguration can report the configured topology
-        # alongside the live arena pool.
-        self._config = config
         self._size_in_bytes = config.size_in_bytes
         self._align_bytes = config.align_bytes
 
@@ -162,6 +159,24 @@ class DevDaxL1MemoryManager(L1MemoryManager):
             raise L1ReconfigureError(404, str(exc)) from exc
         except ValueError as exc:
             raise L1ReconfigureError(409, str(exc)) from exc
+
+    def get_arena_status(self, device_path: str) -> DevDaxArenaStatus:
+        """Return the status of the Device-DAX arena mapped at ``device_path``.
+
+        Args:
+            device_path: Path (or any alias) of the mapped device.
+
+        Returns:
+            The arena's current status.
+
+        Raises:
+            L1ReconfigureError: 404 when no arena is mapped at ``device_path``.
+        """
+        allocator = cast(DevDaxMemoryAllocator, self._allocator)
+        try:
+            return allocator.arena_status(device_path)
+        except DevDaxNotMappedError as exc:
+            raise L1ReconfigureError(404, str(exc)) from exc
 
     def memory_region_count(self) -> int:
         """Return the number of memory regions backing L1.

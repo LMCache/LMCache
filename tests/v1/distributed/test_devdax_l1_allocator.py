@@ -20,7 +20,11 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.distributed.api import L1BackendType, MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import (
+    L1BackendType,
+    MemoryLayoutDesc,
+    ObjectKey,
+)
 from lmcache.v1.distributed.config import (
     EvictionConfig,
     L1ManagerConfig,
@@ -1445,21 +1449,39 @@ def test_draining_arena_capacity_excluded_from_total(tmp_path):
     # count as used. Otherwise the eviction watermark (used / total) is diluted
     # by capacity that is going away and eviction never triggers.
     primary = _make_mmap_file(tmp_path, size=4096, name="primary.bin")
-    manager = _pure_devdax_manager(primary)
+    manager = L1Manager(
+        L1ManagerConfig(
+            memory_config=L1MemoryManagerConfig(
+                size_in_bytes=4096,
+                use_lazy=False,
+                shm_name="",
+                align_bytes=4096,
+                devdax_path=primary,
+            )
+        )
+    )
+    first_key = _key(1)
+    second_key = _key(2)
 
-    error, first = manager.allocate(_layout(4096), count=1)
-    assert error == L1Error.SUCCESS
+    first = manager.reserve_write([first_key], [False], _layout(4096))
+    assert first[first_key][0] == L1Error.SUCCESS
+    assert manager.finish_write([first_key])[first_key] == L1Error.SUCCESS
+    del first
 
     extra = _make_mmap_file(tmp_path, size=8192, name="extra.bin")
-    manager.add_device(extra, 8192)
-    error, second = manager.allocate(_layout(4096), count=1)
-    assert error == L1Error.SUCCESS
+    manager.add_devdax_device(extra, 8192)
+    second = manager.reserve_write([second_key], [False], _layout(4096))
+    assert second[second_key][0] == L1Error.SUCCESS
+    assert manager.finish_write([second_key])[second_key] == L1Error.SUCCESS
+    del second
 
     # Both arenas active: total counts all capacity.
     used, total = manager.get_memory_usage()
     assert (used, total) == (8192, 12288)
+    assert manager.get_capacity_bytes_by_backend() == {L1BackendType.DEVDAX: 12288}
+    assert manager.report_status()["memory_configured_bytes"] == 12288
 
-    status = manager.remove_device(extra)
+    status = manager.remove_devdax_device(extra)
     assert status.state == DevDaxArenaState.DRAINING
 
     # Draining: the extra arena's 8192 bytes leave the total, but its live 4096
@@ -1467,16 +1489,16 @@ def test_draining_arena_capacity_excluded_from_total(tmp_path):
     # watermark is satisfied.
     used, total = manager.get_memory_usage()
     assert (used, total) == (8192, 4096)
+    assert manager.get_capacity_bytes_by_backend() == {L1BackendType.DEVDAX: 4096}
+    assert manager.report_status()["memory_configured_bytes"] == 4096
 
     # Once the draining arena is unmapped, both totals reflect the primary only.
-    manager.free(second)
-    del second
+    assert manager.delete([second_key])[second_key] == L1Error.SUCCESS
     gc.collect()
     used, total = manager.get_memory_usage()
     assert (used, total) == (4096, 4096)
 
-    manager.free(first)
-    del first
+    assert manager.delete([first_key])[first_key] == L1Error.SUCCESS
     gc.collect()
     manager.close()
 
@@ -1653,30 +1675,40 @@ def test_hybrid_initial_devdax_arena_is_removable(tmp_path):
     # In hybrid mode DRAM is the primary L1 region, so the initial Device-DAX
     # arena is removable overflow rather than primary.
     path = _make_mmap_file(tmp_path, size=4096)
-    manager = DevDaxL1MemoryManager(
-        L1MemoryManagerConfig(
-            size_in_bytes=4096,
-            use_lazy=False,
-            shm_name="",
-            align_bytes=4096,
-            devdax_path=path,
-            devdax_size_in_bytes=4096,
+    manager = L1Manager(
+        L1ManagerConfig(
+            memory_config=L1MemoryManagerConfig(
+                size_in_bytes=4096,
+                use_lazy=False,
+                shm_name="",
+                align_bytes=4096,
+                devdax_path=path,
+                devdax_size_in_bytes=4096,
+            )
         )
     )
 
-    statuses = manager.get_arena_statuses()
+    statuses = manager.get_devdax_arena_statuses()
     assert len(statuses) == 1
     assert statuses[0].is_primary is False
+    assert manager.get_capacity_bytes_by_backend() == {
+        L1BackendType.DEVDAX: 4096,
+        L1BackendType.DRAM: 4096,
+    }
 
-    status = manager.remove_device(path)
+    status = manager.remove_devdax_device(path)
     assert status.state == DevDaxArenaState.REMOVED
-    assert manager.get_arena_statuses() == []
+    assert manager.get_devdax_arena_statuses() == []
+    assert manager.get_capacity_bytes_by_backend() == {L1BackendType.DRAM: 4096}
+    assert manager.report_status()["memory_configured_bytes"] == 4096
 
     # DRAM still serves allocations after the overflow arena is gone.
-    error, objs = manager.allocate(_layout(4096), count=1)
-    assert error == L1Error.SUCCESS
-    manager.free(objs)
-    del objs
+    key = _key(3)
+    result = manager.reserve_write([key], [False], _layout(4096))
+    assert result[key][0] == L1Error.SUCCESS
+    assert manager.finish_write([key])[key] == L1Error.SUCCESS
+    del result
+    assert manager.delete([key])[key] == L1Error.SUCCESS
     gc.collect()
     manager.close()
 

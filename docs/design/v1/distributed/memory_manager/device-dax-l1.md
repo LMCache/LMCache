@@ -22,10 +22,8 @@ process keeps running.
 `DevDaxL1MemoryManager`, the L1 tier object. It is thin: it stores its config,
 delegates `allocate` / `free` / `get_memory_usage` / `get_l1_memory_desc` to the
 pooled allocator, and exposes the runtime-reconfigure surface
-(`add_device`, `remove_device`, `get_arena_statuses`). The manager translates
-allocator failures into the HTTP-mappable `L1ReconfigureError`
-(`memory_manager/reconfiguration.py`); the allocator itself remains HTTP-free
-and raises plain `ValueError` / `RuntimeError` / `OSError`.
+(`add_device`, `remove_device`, `get_arena_statuses`). It also owns the
+reconfiguration error boundary, keeping HTTP concerns out of the allocator.
 
 `lmcache/v1/memory_allocators/devdax_memory_allocator.py` defines
 `DevDaxMemoryAllocator`, which owns the arena pool, the `host_mem_lock`, the
@@ -37,9 +35,8 @@ reconfigure types.
 `lmcache/v1/distributed/l1_manager.py` selects `DevDaxL1MemoryManager` when
 `memory_config.devdax_path` is set and GDS L1 is not configured. It exposes
 Device-DAX status, add, and remove as narrow delegation methods.
-`lmcache/v1/distributed/storage_manager.py` provides matching public methods
-for the HTTP layer, so HTTP handlers do not access either manager's private
-state.
+`lmcache/v1/distributed/storage_manager.py` provides the HTTP-facing delegates
+and publishes capacity after add and drain transitions.
 
 The runtime-reconfigure HTTP surface lives in
 `lmcache/v1/multiprocess/http_apis/l1_reconfigure_api.py` as backend-first,
@@ -49,9 +46,10 @@ Handlers stay thin -- request-shape validation (422 schema / 400 size values)
 happens at the HTTP layer, domain status-code decisions (404 lookup miss, 409
 state conflict or non-Device-DAX L1) come from the manager via
 `L1ReconfigureError`, the HTTP resolver answers 503 before engine or storage
-manager initialization, and arena mechanics stay in the allocator. The current
-L1 surface fixes `dax` as the backend and `l1` as the tier segment, keeping it
-disjoint from the parametric L2 family (`/reconfigure/{backend}/l2/*`).
+manager initialization, and arena mechanics stay in the allocator. The HTTP
+layer fixes `dax` as the backend and `l1` as the tier segment, keeping it
+disjoint from the parametric L2 family
+(`/reconfigure/{backend}/l2/*`).
 Additional L1 backends are not exposed by this API and require corresponding
 routing and delegation support. A URL that omits the tier segment, such as
 `/reconfigure/dax/status`, returns `404`. See
@@ -103,8 +101,9 @@ local allocator.
 
 ## Runtime Reconfigure
 
-The manager and allocator expose the same return values; the manager translates
-allocator failures into `L1ReconfigureError` for the HTTP layer:
+The manager and allocator expose the same return values. The manager translates
+request-validation and pre-transition state failures into
+`L1ReconfigureError` for the HTTP layer:
 
 - `add_device(device_path, size_in_bytes) -> DevDaxArenaStatus`
 - `remove_device(device_path, mode=DevDaxRemoveMode.DRAIN) -> DevDaxArenaStatus`
@@ -123,6 +122,8 @@ Add:
    `TensorMemoryAllocator` and best-effort pin it.
 3. Append the arena as `active` and non-primary. It is immediately available as
    overflow. Existing allocations are untouched.
+4. The `StorageManager` entry point publishes the current whole capacity
+   topology.
 
 If any setup step fails (mapping, allocator construction, or pin registration),
 the freshly opened fd and mmap are released before the error propagates.
@@ -136,6 +137,9 @@ Remove (drain):
    automatically (auto-reap). If the unmap is blocked by lingering external
    views into the mapping (e.g. freed tensors awaiting garbage collection), the
    arena stays `draining` and later frees retry the reap.
+4. After drain begins, the `StorageManager` entry point publishes the
+   post-transition capacity topology even if synchronization or cleanup later
+   fails; a later remove retries cleanup while the path remains mapped.
 
 State machine: `active -> draining -> removed`. `removed` is a report-only
 terminal value; a removed arena has already left the pool, so it is never
@@ -168,8 +172,9 @@ l1 = L1Manager(
 )
 ```
 
-Reconfiguration is available over HTTP (`/reconfigure/dax/l1/*`) and through
-the `L1Manager` delegation methods:
+Reconfiguration is available over HTTP (`/reconfigure/dax/l1/*`).
+`StorageManager` is the system entry point that publishes capacity changes;
+the `L1Manager` methods below are lower-level delegation methods:
 
 ```python
 # Grow: map an already-provisioned device and add it to the pool. It serves
@@ -262,12 +267,23 @@ above total (ratio > 1), which is intentional -- it keeps the eviction
 watermark tracking real pressure on the active pool instead of being diluted
 by capacity that is being removed.
 
+`L1Manager.get_capacity_bytes_by_backend()` is also used by `report_status()`
+and `StorageManager` capacity snapshots. CPU, GDS, and the DRAM half of a hybrid
+tier retain their boot-configured values; the Device-DAX entry is the sum of
+active arena sizes. Capacity-changing calls through `StorageManager` publish
+`SM_CAPACITY_CHANGED` with the whole topology. Delivery is asynchronous and
+best-effort, so operation success confirms the local topology change rather
+than coordinator receipt.
+
 ## Verification
 
 `tests/v1/distributed/test_devdax_l1_allocator.py` unit-tests the pool:
 add/remove lifecycle, drain gating, per-arena usage, deferred unmap while
 external views are alive, mapping release on setup failure, and the
 `StorageManager` reconfiguration delegates.
+`tests/v1/distributed/test_memory_capacity.py` verifies capacity reporting and
+whole-topology `SM_CAPACITY_CHANGED` publication after successful add/remove
+and after a drain transition whose cleanup fails.
 `tests/v1/distributed/test_devdax_l1_reconfigure_integration.py` (opt-in via
 `RUN_DEVDAX_L1_INTEGRATION=1`) drives real mmap-backed devices end to end,
 at the memory-manager level, through the `L1Manager` KV-cache path, and through
@@ -286,17 +302,3 @@ the last cached entry is deleted. It accepts real `/dev/dax` devices via
   (`add_device` / `remove_device`).
 - Runtime reconfigure maps and unmaps already-provisioned Device-DAX devices;
   it does not perform kernel-level CXL/DAX namespace reconfiguration.
-- The HTTP control surface is `/reconfigure/dax/l1/*`
-  (`l1_reconfigure_api.py`); the `L1Manager` delegation methods remain the
-  programmatic entry point.
-
-## Open Decisions / Deferred Work
-
-Decisions intentionally left to the upstream RFC; the behavior described here
-is what the code does today.
-
-- **Coordinator-owned shared pools (upstream RFC #4307).** These endpoints assume
-  the server privately owns its Device-DAX L1. In a shared-pool deployment the
-  region lifecycle belongs to the coordinator, so local reconfiguration must be
-  refused there. Guard insertion point: the public L1 Device-DAX methods on
-  `StorageManager`; not implemented until the shared-pool design lands upstream.
