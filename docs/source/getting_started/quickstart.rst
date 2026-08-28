@@ -479,5 +479,9 @@ copy path that the server only loads when started with
 Next Steps
 ----------
 
+- **Share a cache across engines**: Point two vLLM instances at one
+  ``lmcache server`` — see :doc:`quickstart/share_kv_cache_mp`. Use a
+  prompt that fills at least one ``chunk_size`` (default 256 tokens), or
+  the second engine will miss.
 - **Performance Testing**: Try the :doc:`benchmarking` section to experience LMCache's performance benefits with more comprehensive examples
 - **Production**: Deploy LMCache with Docker or Kubernetes, plus observability and tuning -- see :doc:`../mp/deployment`
