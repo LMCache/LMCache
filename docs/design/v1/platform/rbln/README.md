@@ -110,21 +110,33 @@ registered and detection needs no RBLN knowledge. Chunks stay in the canonical
 single-plane wire layout `[L, T, HS]`, so -- as with HND -- a chunk stored
 from an RBLN MLA cache is byte-compatible with every other device.
 
-What is RBLN-specific is the **op sequence**, not the layout. The shared torch
-MLA path stages its gather through `torch.empty(device=...)` +
-`index_select(out=...)`, but on RBLN a raw `torch.empty` on the device is a
-lazy SHM tensor: ops against it run on the CPU-fallback path, never on the
-chip. `kv_ops.py` therefore builds the gather *functionally* --
-`index_select` per layer, `stack` across layers, both device-native v2v
-kernels -- and crosses the device boundary with one `copy_` per chunk. The
-scatter mirrors it: one `.to(device)` DMA for the chunk window, then a
-device-native `index_copy_` per layer.
+What is RBLN-specific is the **DMA shape**, not the layout. The shared torch
+MLA path issues one `index_select` / `index_copy_` per layer. On torch-rbln
+each of those is a separate v2v submission (the index is read back to the
+host to build the copy descriptors), the gather result / `.to(device)` window
+is a fresh device allocation per chunk, and every one of those ops carries a
+whole-layer CPU fallback behind it (`submit_or_fallback`) should the runtime
+reject a copy. Measured on a real vLLM-RBLN DeepSeek-V3 KV cache the fallback
+never fires and the shared path is correct, so the RBLN sequence exists for
+cost, not correctness: `kv_ops.py` fans the `L * B` blocks of a chunk into
+(or out of) a persistent per-thread *device* staging buffer with one batched
+`_foreach_copy_` of whole contiguous blocks -- direct `memcpy_v2v`, no index
+tensor, no fallback path -- and crosses the device boundary in one contiguous
+DMA. With one block per chunk this is on par with the shared path (the extra
+d2d hop cancels the saved submissions); with two or more blocks per chunk it
+is 3.5-5x faster (61-layer DeepSeek-V3, 137-549 MiB chunks: 10-41 ms vs
+37-213 ms per chunk).
 
 How the two layouts relate inside the backend:
 
-- **No transpose to hoist.** The HND sequence exists to move the head<->token
-  transpose to the host; MLA has no head axis, so its sequence exists purely
-  for the op ordering above. It uses no host staging buffers at all.
+- **No transpose to hoist, so the staging moves to the device.** The HND
+  sequence exists to move the head<->token transpose to the host, which is why
+  its staging buffer is host memory. MLA has no head axis and its chunk is the
+  blocks laid end to end, so the only cost left is the number of DMAs; its
+  staging buffer is device memory (per thread, like the HND host buffer) so
+  that the block-granular copies stay on the device and the chunk crosses the
+  boundary once. The paged layers must be contiguous for those whole-block
+  copies to be direct; `validate_mla_layers` pins that too.
 - **Nothing to squeeze, so the rank is pinned instead.**
   `validate_mla_layers` in `kv_layout.py` mirrors `squeeze_singleton_axis`'s
   strictness -- the detected format has already established what the caller

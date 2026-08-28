@@ -18,12 +18,14 @@ For HND, what the override replaces is the shared path's strided device
 indexing: RBLN stores heads before block tokens, and the head<->token
 transpose is hoisted to the host. The MLA layout (``NL_X_NB_BS_HS``, single
 latent plane, no head axis) has no transpose to hoist; its RBLN sequence in
-:mod:`kv_ops` exists for the op ordering. The shared torch path stages through
-``torch.empty(device=...)`` + ``index_select(out=...)``, and on RBLN a raw
-``torch.empty`` on the device is a lazy SHM tensor -- ops against it run on
-the CPU-fallback path, never on the chip. The MLA sequence builds the gather
-functionally instead (``index_select`` + ``stack``, both device-native v2v
-kernels) and crosses the device boundary with one DMA per chunk.
+:mod:`kv_ops` exists for the DMA shape. The shared torch path issues one
+``index_select`` / ``index_copy_`` per layer, which on torch-rbln means one
+v2v submission plus one index read-back per layer and a fresh device
+allocation per chunk, with a whole-layer CPU fallback behind each op should
+the runtime reject a copy. The MLA sequence instead fans blocks in and out of
+a persistent device staging buffer with one batch of contiguous block copies
+(direct ``memcpy_v2v``, no index tensor, no fallback path) and crosses the
+device boundary with one DMA per chunk.
 
 Both layouts require the engine's KV caches to be real device tensors
 (vLLM-RBLN: ``VLLM_RBLN_USE_DEVICE_TENSOR=1``). With the default compile-mode

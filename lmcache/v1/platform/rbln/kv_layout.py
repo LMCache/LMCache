@@ -100,6 +100,11 @@ def validate_mla_layers(
     Unlike the HND path there is no axis to squeeze -- the tensors are
     returned unchanged.
 
+    Contiguity is pinned as well: the MLA transfer copies ``layer[block]`` as
+    one whole ``[BS, HS]`` run, which is only a direct device copy when the
+    layer is contiguous. A permuted view would silently send every block copy
+    down torch-rbln's strided path, which has a CPU fallback behind it.
+
     Args:
         kv_caches: Per-layer tensors shaped ``[NB, BS, HS]``.
 
@@ -107,12 +112,17 @@ def validate_mla_layers(
         list[torch.Tensor]: The same tensors, as a list.
 
     Raises:
-        ValueError: If a tensor is not 3-D.
+        ValueError: If a tensor is not 3-D or not contiguous.
     """
     for tensor in kv_caches:
         if tensor.ndim != RBLN_MLA_KV_NDIM:
             raise ValueError(
                 "RBLN MLA KV caches must be [NB, BS, HS]; got "
                 + str(tuple(tensor.shape))
+            )
+        if not tensor.is_contiguous():
+            raise ValueError(
+                "RBLN MLA KV caches must be contiguous [NB, BS, HS]; got strides "
+                + str(tuple(tensor.stride()))
             )
     return list(kv_caches)

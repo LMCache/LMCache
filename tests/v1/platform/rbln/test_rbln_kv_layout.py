@@ -204,3 +204,13 @@ def test_validate_mla_layers_rejects_other_ranks(shape: tuple[int, ...]) -> None
 
     with pytest.raises(ValueError, match=r"\[NB, BS, HS\]"):
         validate_mla_layers([torch.zeros(shape)])
+
+
+def test_validate_mla_layers_rejects_a_non_contiguous_layer() -> None:
+    """A permuted 3-D view would break the whole-block copies; fail loudly."""
+    # First Party
+    from lmcache.v1.platform.rbln.kv_layout import validate_mla_layers
+
+    permuted = torch.zeros(8, 4, 16).permute(1, 0, 2)  # still rank 3
+    with pytest.raises(ValueError, match="contiguous"):
+        validate_mla_layers([permuted])
