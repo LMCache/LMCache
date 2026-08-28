@@ -34,6 +34,7 @@ import torch
 import zmq
 
 # First Party
+from lmcache import torch_dev
 from lmcache.banner import print_banner_once
 from lmcache.integration.vllm.experimental import dispatch
 from lmcache.integration.vllm.kv_cache_group_edits import (
