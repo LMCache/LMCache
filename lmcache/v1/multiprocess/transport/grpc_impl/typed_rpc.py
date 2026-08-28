@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Declarative Python/protobuf bindings for the multiprocess gRPC protocol.
+"""Python value codecs for the multiprocess gRPC protocol.
 
-The protobuf service descriptor and ``ProtocolDefinition`` are the two sources
-of truth.  Every ordinary RPC is bound automatically from those definitions;
-codecs below describe reusable Python value types rather than individual RPCs.
+The protobuf descriptor is the source of truth for services, methods, and wire
+messages.  This module only records how those protobuf messages map to LMCache's
+Python domain objects and how each method should be scheduled on the server.
 """
 
 # Standard
@@ -26,18 +26,32 @@ import msgspec
 import torch
 
 # First Party
-from lmcache.v1.distributed.api import MemoryLayoutDesc
+from lmcache.utils import EngineType
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
+from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import (
+    BlockAllocationRecord,
+    CBMatchResult,
+    CBUnifiedLookupResult,
     DeviceIPCWrapper,
+    IPCCacheServerKey,
+    KVCache,
+    RegisterEngineDrivenContextPayload,
     get_customized_decoder,
     get_customized_encoder,
 )
+from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.protocol import (
     RPC_METHODS,
+    HandlerType,
     RpcMethod,
     coerce_rpc_method,
-    get_payload_classes,
-    get_response_class,
+)
+from lmcache.v1.multiprocess.protocols.engine import (
+    PrepareRetrieveResponse,
+    PrepareStoreResponse,
+    RegisterEngineDrivenContextResponse,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
     lmcache_mq_pb2 as _pb2_typed,
@@ -47,6 +61,208 @@ from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
 lmcache_mq_pb2: Any = _pb2_typed
 
 _NONE_TYPE = type(None)
+
+
+@dataclass(frozen=True)
+class _PythonRpcContract:
+    """Python-side value and scheduling contract for one protobuf method."""
+
+    payload_types: tuple[Any, ...]
+    response_type: Any
+    handler_type: HandlerType
+    requires_client_affinity: bool = False
+
+
+_PYTHON_RPC_CONTRACTS: dict[str, _PythonRpcContract] = {
+    "RegisterKvCache": _PythonRpcContract(
+        (
+            int,
+            KVCache,
+            str,
+            int,
+            EngineType,
+            LayoutHints,
+            list[EngineGroupInfo],
+        ),
+        None,
+        HandlerType.SYNC,
+    ),
+    "RegisterQCache": _PythonRpcContract(
+        (
+            int,
+            KVCache,
+            str,
+            int,
+            EngineType,
+            LayoutHints,
+            list[EngineGroupInfo],
+        ),
+        None,
+        HandlerType.SYNC,
+    ),
+    "UnregisterKvCache": _PythonRpcContract((int,), None, HandlerType.SYNC),
+    "UnregisterQCache": _PythonRpcContract((int,), None, HandlerType.SYNC),
+    "StoreQ": _PythonRpcContract(
+        (IPCCacheServerKey, int, list[list[int]], bytes),
+        tuple[bytes, bool],
+        HandlerType.BLOCKING,
+        requires_client_affinity=True,
+    ),
+    "Store": _PythonRpcContract(
+        (IPCCacheServerKey, int, list[list[int]], bytes),
+        tuple[bytes, bool],
+        HandlerType.BLOCKING,
+        requires_client_affinity=True,
+    ),
+    "Retrieve": _PythonRpcContract(
+        (IPCCacheServerKey, int, list[list[int]], bytes, int),
+        tuple[bytes, bool],
+        HandlerType.BLOCKING,
+        requires_client_affinity=True,
+    ),
+    "Lookup": _PythonRpcContract(
+        (IPCCacheServerKey, int),
+        None,
+        HandlerType.BLOCKING,
+    ),
+    "QueryPrefetchStatus": _PythonRpcContract(
+        (str,),
+        int | None,
+        HandlerType.BLOCKING,
+    ),
+    "WaitPrefetchStatus": _PythonRpcContract(
+        (str, float),
+        int | None,
+        HandlerType.BLOCKING,
+    ),
+    "QueryPrefetchLookupHits": _PythonRpcContract(
+        (str,),
+        int | None,
+        HandlerType.BLOCKING,
+    ),
+    "FreeLookupLocks": _PythonRpcContract(
+        (IPCCacheServerKey, int),
+        None,
+        HandlerType.BLOCKING,
+    ),
+    "EndSession": _PythonRpcContract((str,), None, HandlerType.BLOCKING),
+    "RegisterKvCacheEngineDrivenContext": _PythonRpcContract(
+        (RegisterEngineDrivenContextPayload,),
+        RegisterEngineDrivenContextResponse,
+        HandlerType.SYNC,
+    ),
+    "UnregisterKvCacheEngineDrivenContext": _PythonRpcContract(
+        (int,),
+        None,
+        HandlerType.SYNC,
+    ),
+    "PrepareStore": _PythonRpcContract(
+        (IPCCacheServerKey, int),
+        PrepareStoreResponse,
+        HandlerType.BLOCKING,
+        requires_client_affinity=True,
+    ),
+    "CommitStore": _PythonRpcContract(
+        (IPCCacheServerKey, int, bytes),
+        bool,
+        HandlerType.BLOCKING,
+        requires_client_affinity=True,
+    ),
+    "PrepareRetrieve": _PythonRpcContract(
+        (IPCCacheServerKey, int),
+        PrepareRetrieveResponse,
+        HandlerType.BLOCKING,
+        requires_client_affinity=True,
+    ),
+    "CommitRetrieve": _PythonRpcContract(
+        (IPCCacheServerKey, int),
+        bool,
+        HandlerType.BLOCKING,
+        requires_client_affinity=True,
+    ),
+    "Clear": _PythonRpcContract((), None, HandlerType.BLOCKING),
+    "GetChunkSize": _PythonRpcContract((), int, HandlerType.SYNC),
+    "GetExperimental": _PythonRpcContract((), list[str], HandlerType.SYNC),
+    "Ping": _PythonRpcContract((int | None,), bool, HandlerType.BLOCKING),
+    "ReportBlockAllocation": _PythonRpcContract(
+        (int, str, list[BlockAllocationRecord]),
+        None,
+        HandlerType.BLOCKING,
+    ),
+    "Noop": _PythonRpcContract((), str, HandlerType.SYNC),
+    "CbRegisterKvCache": _PythonRpcContract(
+        (int, KVCache, str, int),
+        None,
+        HandlerType.SYNC,
+    ),
+    "CbUnregisterKvCache": _PythonRpcContract((int,), None, HandlerType.SYNC),
+    "CbStorePreComputed": _PythonRpcContract(
+        (IPCCacheServerKey, int, int, bytes),
+        tuple[bytes, bool],
+        HandlerType.BLOCKING,
+        requires_client_affinity=True,
+    ),
+    "CbLookupPreComputed": _PythonRpcContract(
+        (IPCCacheServerKey,),
+        list[tuple[int, int]],
+        HandlerType.BLOCKING,
+    ),
+    "CbRetrievePreComputed": _PythonRpcContract(
+        (IPCCacheServerKey, list[tuple[int, int]], int, int, bytes),
+        tuple[bytes, bool],
+        HandlerType.BLOCKING,
+        requires_client_affinity=True,
+    ),
+    "CbStoreFinal": _PythonRpcContract(
+        (IPCCacheServerKey, int, int, bytes),
+        tuple[bytes, bool],
+        HandlerType.BLOCKING,
+        requires_client_affinity=True,
+    ),
+    "CbLookupPreComputedV2": _PythonRpcContract(
+        (IPCCacheServerKey,),
+        list[CBMatchResult],
+        HandlerType.BLOCKING,
+    ),
+    "CbRetrievePreComputedV2": _PythonRpcContract(
+        (IPCCacheServerKey, list[CBMatchResult], int, int, bytes),
+        tuple[bytes, bool],
+        HandlerType.BLOCKING,
+        requires_client_affinity=True,
+    ),
+    "CbRegisterRopeV3": _PythonRpcContract(
+        (int, list[DeviceIPCWrapper], int, bool, list[int], list[list[int]]),
+        None,
+        HandlerType.SYNC,
+    ),
+    "CbUnregisterRopeV3": _PythonRpcContract((int,), None, HandlerType.SYNC),
+    "CbRetrievePreComputedV3": _PythonRpcContract(
+        (IPCCacheServerKey, list[CBMatchResult], list[list[int]], int, bytes),
+        tuple[bytes, bool],
+        HandlerType.BLOCKING,
+        requires_client_affinity=True,
+    ),
+    "CbUnifiedLookup": _PythonRpcContract(
+        (IPCCacheServerKey, int),
+        CBUnifiedLookupResult | None,
+        HandlerType.BLOCKING,
+    ),
+    "P2PLookupAndLock": _PythonRpcContract(
+        (list[ObjectKey], dict[int, MemoryLayoutDesc]),
+        int,
+        HandlerType.BLOCKING,
+    ),
+    "P2PQueryLookupResults": _PythonRpcContract(
+        (int,),
+        list[TransferChannelAddress] | None,
+        HandlerType.BLOCKING,
+    ),
+    "P2PUnlockObjects": _PythonRpcContract(
+        (list[ObjectKey],),
+        None,
+        HandlerType.BLOCKING,
+    ),
+}
 
 
 def request_type_to_method_name(request_type: RpcMethod | str) -> str:
@@ -565,6 +781,8 @@ class TypedRpcSpec:
     response_message: Any
     payload_types: tuple[Any, ...]
     response_type: Any
+    handler_type: HandlerType
+    requires_client_affinity: bool
     python_to_request: RequestEncoder
     request_to_python: RequestDecoder
     python_to_response: ResponseEncoder
@@ -577,7 +795,7 @@ class TypedRpcSpec:
 
 
 def _build_typed_rpcs() -> dict[RpcMethod, TypedRpcSpec]:
-    expected_methods = {request_type_to_method_name(item) for item in RPC_METHODS}
+    expected_methods = {str(item) for item in RPC_METHODS}
     service_methods: dict[str, Any] = {}
     for service in lmcache_mq_pb2.DESCRIPTOR.services_by_name.values():
         for method in service.methods:
@@ -586,26 +804,30 @@ def _build_typed_rpcs() -> dict[RpcMethod, TypedRpcSpec]:
             service_methods[method.name] = method
 
     actual_methods = set(service_methods)
-    if actual_methods != expected_methods:
+    contract_methods = set(_PYTHON_RPC_CONTRACTS)
+    if actual_methods != expected_methods or actual_methods != contract_methods:
         missing = sorted(expected_methods - actual_methods)
         extra = sorted(actual_methods - expected_methods)
+        missing_contracts = sorted(actual_methods - contract_methods)
+        extra_contracts = sorted(contract_methods - actual_methods)
         raise RuntimeError(
-            f"gRPC service/RpcMethod mismatch: missing={missing}, extra={extra}"
+            "gRPC service/RpcMethod/codec mismatch: "
+            f"missing={missing}, extra={extra}, "
+            f"missing_contracts={missing_contracts}, extra_contracts={extra_contracts}"
         )
 
     specs: dict[RpcMethod, TypedRpcSpec] = {}
     for rpc_method in RPC_METHODS:
-        method_name = request_type_to_method_name(rpc_method)
+        method_name = str(rpc_method)
         method = service_methods[method_name]
         request_message = getattr(lmcache_mq_pb2, method.input_type.name)
         response_message = getattr(lmcache_mq_pb2, method.output_type.name)
-        payload_types = tuple(get_payload_classes(rpc_method))
-        response_type = get_response_class(rpc_method)
+        contract = _PYTHON_RPC_CONTRACTS[method_name]
         request_encoder, request_decoder = _compile_request_codec(
-            request_message, payload_types
+            request_message, contract.payload_types
         )
         response_encoder, response_decoder = _compile_response_codec(
-            response_message, response_type
+            response_message, contract.response_type
         )
         specs[rpc_method] = TypedRpcSpec(
             rpc_method=rpc_method,
@@ -613,8 +835,10 @@ def _build_typed_rpcs() -> dict[RpcMethod, TypedRpcSpec]:
             method_name=method_name,
             request_message=request_message,
             response_message=response_message,
-            payload_types=payload_types,
-            response_type=response_type,
+            payload_types=contract.payload_types,
+            response_type=contract.response_type,
+            handler_type=contract.handler_type,
+            requires_client_affinity=contract.requires_client_affinity,
             python_to_request=request_encoder,
             request_to_python=request_decoder,
             python_to_response=response_encoder,
@@ -623,7 +847,7 @@ def _build_typed_rpcs() -> dict[RpcMethod, TypedRpcSpec]:
     return specs
 
 
-# Generated once from descriptors; no per-RPC adapter registry is maintained.
+# Generated once from protobuf descriptors plus Python value contracts.
 TYPED_RPCS = _build_typed_rpcs()
 
 

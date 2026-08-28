@@ -20,7 +20,6 @@ from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
 )
 from lmcache.v1.multiprocess.mq import (
-    BlockingRequestHandler,
     MultiprocessGrpcClient,
     MultiprocessGrpcServer,
     _parse_grpc_compression,
@@ -28,6 +27,7 @@ from lmcache.v1.multiprocess.mq import (
 )
 from lmcache.v1.multiprocess.protocol import (
     RPC,
+    HandlerType,
     RpcMethod,
     get_handler_type,
     get_payload_classes,
@@ -668,7 +668,7 @@ def test_add_normal_thread_pool():
     server.add_handler(RPC.Noop, test_mq_handler_helpers.noop_handler)
 
     lookup_handler = server.handlers[RPC.Lookup]
-    assert isinstance(lookup_handler, BlockingRequestHandler)
+    assert lookup_handler.handler_type is HandlerType.BLOCKING
     assert lookup_handler.executor is None
 
     server.add_normal_thread_pool([RPC.Lookup], max_workers=4)
@@ -694,8 +694,8 @@ def test_add_affinity_thread_pool():
 
     store_handler = server.handlers[RPC.Store]
     retrieve_handler = server.handlers[RPC.Retrieve]
-    assert isinstance(store_handler, BlockingRequestHandler)
-    assert isinstance(retrieve_handler, BlockingRequestHandler)
+    assert store_handler.handler_type is HandlerType.BLOCKING
+    assert retrieve_handler.handler_type is HandlerType.BLOCKING
     assert store_handler.executor is None
 
     server.add_affinity_thread_pool([RPC.Store, RPC.Retrieve], max_workers=2)
@@ -716,7 +716,7 @@ def test_normal_pool_error_on_sync_handler():
 
     server.add_handler(RPC.Noop, test_mq_handler_helpers.noop_handler)
 
-    with pytest.raises(TypeError, match="not BlockingRequestHandler"):
+    with pytest.raises(TypeError, match="not BLOCKING"):
         server.add_normal_thread_pool([RPC.Noop], max_workers=1)
 
     server.close()
@@ -731,7 +731,7 @@ def test_affinity_pool_error_on_sync_handler():
 
     server.add_handler(RPC.Noop, test_mq_handler_helpers.noop_handler)
 
-    with pytest.raises(TypeError, match="not BlockingRequestHandler"):
+    with pytest.raises(TypeError, match="not BLOCKING"):
         server.add_affinity_thread_pool([RPC.Noop], max_workers=1)
 
     server.close()
@@ -773,9 +773,9 @@ def test_multiple_pools():
     store_handler = server.handlers[RPC.Store]
     retrieve_handler = server.handlers[RPC.Retrieve]
     lookup_handler = server.handlers[RPC.Lookup]
-    assert isinstance(store_handler, BlockingRequestHandler)
-    assert isinstance(retrieve_handler, BlockingRequestHandler)
-    assert isinstance(lookup_handler, BlockingRequestHandler)
+    assert store_handler.handler_type is HandlerType.BLOCKING
+    assert retrieve_handler.handler_type is HandlerType.BLOCKING
+    assert lookup_handler.handler_type is HandlerType.BLOCKING
 
     # STORE/RETRIEVE share affinity pool
     assert isinstance(store_handler.executor, AffinityThreadPool)

@@ -3,8 +3,8 @@
 // Wire format for LMCache mp-mode gRPC.
 //
 // Every service method uses concrete request and response messages. Python
-// bindings are derived from this descriptor and the public ProtocolDefinition,
-// so ordinary RPCs do not need hand-written transport adapters.
+// RPC tokens are derived from this descriptor; Python value codecs only map
+// those messages to LMCache domain objects.
 
 syntax = "proto3";
 

@@ -9,9 +9,9 @@ request/response messages now define the wire protocol.
 """
 
 # Standard
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Any, Callable, Generic, Optional, Sequence, TypeVar, get_type_hints
+from typing import Any, Callable, Optional, Sequence, TypeVar, get_type_hints
 from urllib.parse import parse_qs, urlparse
 import inspect
 import threading
@@ -28,10 +28,6 @@ from lmcache.v1.multiprocess.protocol import (
     HandlerType,
     RpcMethod,
     coerce_rpc_method,
-    get_handler_type,
-    get_payload_classes,
-    get_response_class,
-    requires_client_affinity,
 )
 from lmcache.v1.multiprocess.service import MPService
 from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
@@ -116,6 +112,9 @@ _RPC_METHODS_BY_SERVICE: dict[str, tuple[RpcMethod, ...]] = {
         if rpc_method.service_name == service_name
     )
     for service_name in {rpc_method.service_name for rpc_method in RPC_METHODS}
+}
+_TYPED_RPCS_BY_METHOD_NAME: dict[str, TypedRpcSpec] = {
+    typed_spec.method_name: typed_spec for typed_spec in _TYPED_RPCS.values()
 }
 
 
@@ -447,178 +446,238 @@ _install_client_rpc_methods()
 
 
 # ---------------------------------------------------------------------------
-# Server: RequestHandlerBase + concrete handler types (unchanged interface)
+# Server: direct gRPC method dispatch
 # ---------------------------------------------------------------------------
 
 
-ResponseType = TypeVar("ResponseType", covariant=True)
-StateType = TypeVar("StateType", covariant=True)
+@dataclass
+class GrpcRequestHandler:
+    """Registered Python implementation for one protobuf service method.
+
+    Args:
+        spec: Typed RPC binding for the protobuf method.
+        handler: Python callable implementing the method.
+        handler_type: Scheduler mode for the registered handler.
+        requires_client_affinity: Whether blocking calls need client affinity.
+        executor: Dedicated executor for blocking handlers, if assigned.
+    """
+
+    spec: TypedRpcSpec
+    handler: Callable[..., Any]
+    handler_type: HandlerType
+    requires_client_affinity: bool
+    executor: ThreadPoolExecutor | AffinityThreadPool | None = None
+
+    @property
+    def payload_types(self) -> tuple[Any, ...]:
+        """Return the Python payload types accepted by the handler."""
+        return self.spec.payload_types
+
+    @property
+    def response_type(self) -> Any:
+        """Return the Python response type produced by the handler."""
+        return self.spec.response_type
+
+    def run(self, payloads: tuple[Any, ...], affinity_key: int) -> Any:
+        """Execute the registered Python handler and return its result.
+
+        Args:
+            payloads: Decoded Python payloads from the protobuf request.
+            affinity_key: Stable client key used by affinity executors.
+
+        Returns:
+            The Python result returned by the handler.
+
+        Raises:
+            RuntimeError: If a blocking handler has no executor.
+            NotImplementedError: If the handler type is not implemented.
+        """
+        if self.handler_type is HandlerType.SYNC:
+            return self.handler(*payloads)
+        if self.handler_type is HandlerType.BLOCKING:
+            if self.executor is None:
+                raise RuntimeError(
+                    f"Blocking handler for {self.spec.method_name} has no "
+                    "thread pool assigned."
+                )
+            if isinstance(self.executor, AffinityThreadPool):
+                future = self.executor.submit(
+                    self.handler, *payloads, affinity_key=affinity_key
+                )
+            else:
+                future = self.executor.submit(self.handler, *payloads)
+            return future.result()
+        raise NotImplementedError(f"handler_type {self.handler_type} not supported")
 
 
-class RequestHandlerBase(Generic[ResponseType]):
-    def __call__(self, payloads: tuple[Any, ...]):
-        raise NotImplementedError
+class _GrpcServicer:
+    """Concrete servicer implementing all generated LMCache gRPC methods."""
 
-    def get_response_class(self) -> ResponseType:
-        raise NotImplementedError
-
-    def get_handler_type(self) -> HandlerType:
-        raise NotImplementedError
-
-
-class SyncRequestHandler(RequestHandlerBase[ResponseType]):
-    """Handler that runs in the calling grpc worker thread."""
-
-    def __init__(
-        self,
-        payload_clss: list[Any],
-        response_cls: ResponseType,
-        handler: Callable[..., ResponseType],
-    ):
-        self.payload_clss = payload_clss
-        self.response_cls = response_cls
-        self.handler = handler
-
-    def __call__(self, payloads: tuple[Any, ...]) -> ResponseType:
-        return self.handler(*payloads)
-
-    def get_response_class(self) -> ResponseType:
-        return self.response_cls
-
-    def get_handler_type(self) -> HandlerType:
-        return HandlerType.SYNC
-
-
-class BlockingRequestHandler(RequestHandlerBase[ResponseType]):
-    """Handler dispatched to a dedicated thread pool (normal or affinity)."""
-
-    def __init__(
-        self,
-        payload_clss: list[Any],
-        response_cls: ResponseType,
-        handler: Callable[..., ResponseType],
-    ):
-        self.executor: ThreadPoolExecutor | AffinityThreadPool | None = None
-        self.payload_clss = payload_clss
-        self.handler = handler
-        self.response_cls = response_cls
-
-    def __call__(
-        self, payloads: tuple[Any, ...], affinity_key: Any = 0
-    ) -> Future[ResponseType]:
-        assert self.executor is not None, (
-            "BlockingRequestHandler has no executor assigned. "
-            "Call add_normal_thread_pool or add_affinity_thread_pool first."
-        )
-        if isinstance(self.executor, AffinityThreadPool):
-            return self.executor.submit(
-                self.handler, *payloads, affinity_key=affinity_key
-            )
-        return self.executor.submit(self.handler, *payloads)
-
-    def get_response_class(self) -> ResponseType:
-        return self.response_cls
-
-    def get_handler_type(self) -> HandlerType:
-        return HandlerType.BLOCKING
-
-
-class NonBlockingRequestHandler(Generic[ResponseType, StateType]):
-    """Reserved for future async handlers; not currently instantiated."""
-
-    pass
-
-
-# ---------------------------------------------------------------------------
-# Server: gRPC servicer bridging RpcMethod -> RequestHandlerBase
-# ---------------------------------------------------------------------------
-
-
-class _RequestHandlerServicer:
-    """Bridge every rpc method to its registered ``RequestHandlerBase``."""
-
-    def __init__(
-        self,
-        handlers: dict[RpcMethod, RequestHandlerBase[Any]],
-    ):
+    def __init__(self, handlers: dict[RpcMethod, GrpcRequestHandler]) -> None:
         self._handlers = handlers
 
-    @staticmethod
-    def _submit_handler(
-        handler: RequestHandlerBase[Any],
-        payloads: tuple[Any, ...],
-        affinity_key: int,
-    ) -> Any:
-        handler_type = handler.get_handler_type()
-        if handler_type is HandlerType.SYNC:
-            assert isinstance(handler, SyncRequestHandler)
-            return handler(payloads)
-        if handler_type is HandlerType.BLOCKING:
-            assert isinstance(handler, BlockingRequestHandler)
-            return handler(payloads, affinity_key=affinity_key)
-        raise NotImplementedError(f"handler_type {handler_type} not supported")
-
-    def _run_handler(
+    def _dispatch(
         self,
-        handler: RequestHandlerBase[Any],
-        payloads: tuple[Any, ...],
-        context: "grpc.ServicerContext",
-    ) -> Any:
-        """Route typed Python payloads into the registered request handler."""
-        affinity_key = 0
-        if isinstance(handler, BlockingRequestHandler) and isinstance(
-            handler.executor, AffinityThreadPool
-        ):
-            # Stable client metadata keeps old DEALER affinity semantics.
-            affinity_key = _grpc_affinity_key(context)
-        execution = self._submit_handler(handler, payloads, affinity_key)
-        return execution.result() if isinstance(execution, Future) else execution
-
-    def _dispatch_typed(
-        self,
+        method_name: str,
         request: Any,
         context: "grpc.ServicerContext",
-        request_type: RpcMethod,
-        spec: TypedRpcSpec,
     ) -> Any:
-        """Decode a typed request, run its handler, and encode the response."""
-        handler = self._handlers.get(request_type)
+        """Decode a protobuf request, call its handler, and encode the response."""
+        spec = _TYPED_RPCS_BY_METHOD_NAME[method_name]
+        handler = self._handlers.get(spec.rpc_method)
         if handler is None:
             context.abort(
                 grpc.StatusCode.UNIMPLEMENTED,
-                f"No handler registered for {request_type}",
+                f"No handler registered for {method_name}",
             )
             raise RuntimeError("unreachable")
 
+        affinity_key = (
+            _grpc_affinity_key(context)
+            if isinstance(handler.executor, AffinityThreadPool)
+            else 0
+        )
         py_args = spec.request_to_python(request)
-        result = self._run_handler(handler, py_args, context)
+        result = handler.run(py_args, affinity_key)
         return spec.python_to_response(result)
 
+    def RegisterKvCache(self, request: Any, context: "grpc.ServicerContext") -> Any:
+        return self._dispatch("RegisterKvCache", request, context)
 
-def _install_servicer_methods() -> None:
-    """Attach one typed dispatch method per RpcMethod to the servicer."""
-    for rt in RPC_METHODS:
-        method_name = _RPC_METHOD_NAMES[rt]
-        typed_spec = _TYPED_RPCS[rt]
-        method: Callable[..., Any]
-        _resolved_spec: TypedRpcSpec = typed_spec
+    def RegisterQCache(self, request: Any, context: "grpc.ServicerContext") -> Any:
+        return self._dispatch("RegisterQCache", request, context)
 
-        def _typed_method(  # noqa: E501 (captured ``rt`` / ``spec`` via default arg)
-            self: _RequestHandlerServicer,
-            request: Any,
-            context: "grpc.ServicerContext",
-            _rt: RpcMethod = rt,
-            _spec: TypedRpcSpec = _resolved_spec,
-        ) -> Any:
-            return self._dispatch_typed(request, context, _rt, _spec)
+    def UnregisterKvCache(self, request: Any, context: "grpc.ServicerContext") -> Any:
+        return self._dispatch("UnregisterKvCache", request, context)
 
-        method = _typed_method
-        method.__name__ = method_name
-        method.__qualname__ = f"_RequestHandlerServicer.{method_name}"
-        setattr(_RequestHandlerServicer, method_name, method)
+    def UnregisterQCache(self, request: Any, context: "grpc.ServicerContext") -> Any:
+        return self._dispatch("UnregisterQCache", request, context)
 
+    def StoreQ(self, request: Any, context: "grpc.ServicerContext") -> Any:
+        return self._dispatch("StoreQ", request, context)
 
-_install_servicer_methods()
+    def Store(self, request: Any, context: "grpc.ServicerContext") -> Any:
+        return self._dispatch("Store", request, context)
+
+    def Retrieve(self, request: Any, context: "grpc.ServicerContext") -> Any:
+        return self._dispatch("Retrieve", request, context)
+
+    def Lookup(self, request: Any, context: "grpc.ServicerContext") -> Any:
+        return self._dispatch("Lookup", request, context)
+
+    def QueryPrefetchStatus(self, request: Any, context: "grpc.ServicerContext") -> Any:
+        return self._dispatch("QueryPrefetchStatus", request, context)
+
+    def WaitPrefetchStatus(self, request: Any, context: "grpc.ServicerContext") -> Any:
+        return self._dispatch("WaitPrefetchStatus", request, context)
+
+    def QueryPrefetchLookupHits(
+        self, request: Any, context: "grpc.ServicerContext"
+    ) -> Any:
+        return self._dispatch("QueryPrefetchLookupHits", request, context)
+
+    def FreeLookupLocks(self, request: Any, context: "grpc.ServicerContext") -> Any:
+        return self._dispatch("FreeLookupLocks", request, context)
+
+    def EndSession(self, request: Any, context: "grpc.ServicerContext") -> Any:
+        return self._dispatch("EndSession", request, context)
+
+    def RegisterKvCacheEngineDrivenContext(
+        self, request: Any, context: "grpc.ServicerContext"
+    ) -> Any:
+        return self._dispatch("RegisterKvCacheEngineDrivenContext", request, context)
+
+    def UnregisterKvCacheEngineDrivenContext(
+        self, request: Any, context: "grpc.ServicerContext"
+    ) -> Any:
+        return self._dispatch("UnregisterKvCacheEngineDrivenContext", request, context)
+
+    def PrepareStore(self, request: Any, context: "grpc.ServicerContext") -> Any:
+        return self._dispatch("PrepareStore", request, context)
+
+    def CommitStore(self, request: Any, context: "grpc.ServicerContext") -> Any:
+        return self._dispatch("CommitStore", request, context)
+
+    def PrepareRetrieve(self, request: Any, context: "grpc.ServicerContext") -> Any:
+        return self._dispatch("PrepareRetrieve", request, context)
+
+    def CommitRetrieve(self, request: Any, context: "grpc.ServicerContext") -> Any:
+        return self._dispatch("CommitRetrieve", request, context)
+
+    def Clear(self, request: Any, context: "grpc.ServicerContext") -> Any:
+        return self._dispatch("Clear", request, context)
+
+    def GetChunkSize(self, request: Any, context: "grpc.ServicerContext") -> Any:
+        return self._dispatch("GetChunkSize", request, context)
+
+    def GetExperimental(self, request: Any, context: "grpc.ServicerContext") -> Any:
+        return self._dispatch("GetExperimental", request, context)
+
+    def Ping(self, request: Any, context: "grpc.ServicerContext") -> Any:
+        return self._dispatch("Ping", request, context)
+
+    def ReportBlockAllocation(
+        self, request: Any, context: "grpc.ServicerContext"
+    ) -> Any:
+        return self._dispatch("ReportBlockAllocation", request, context)
+
+    def Noop(self, request: Any, context: "grpc.ServicerContext") -> Any:
+        return self._dispatch("Noop", request, context)
+
+    def CbRegisterKvCache(self, request: Any, context: "grpc.ServicerContext") -> Any:
+        return self._dispatch("CbRegisterKvCache", request, context)
+
+    def CbUnregisterKvCache(self, request: Any, context: "grpc.ServicerContext") -> Any:
+        return self._dispatch("CbUnregisterKvCache", request, context)
+
+    def CbStorePreComputed(self, request: Any, context: "grpc.ServicerContext") -> Any:
+        return self._dispatch("CbStorePreComputed", request, context)
+
+    def CbLookupPreComputed(self, request: Any, context: "grpc.ServicerContext") -> Any:
+        return self._dispatch("CbLookupPreComputed", request, context)
+
+    def CbRetrievePreComputed(
+        self, request: Any, context: "grpc.ServicerContext"
+    ) -> Any:
+        return self._dispatch("CbRetrievePreComputed", request, context)
+
+    def CbStoreFinal(self, request: Any, context: "grpc.ServicerContext") -> Any:
+        return self._dispatch("CbStoreFinal", request, context)
+
+    def CbLookupPreComputedV2(
+        self, request: Any, context: "grpc.ServicerContext"
+    ) -> Any:
+        return self._dispatch("CbLookupPreComputedV2", request, context)
+
+    def CbRetrievePreComputedV2(
+        self, request: Any, context: "grpc.ServicerContext"
+    ) -> Any:
+        return self._dispatch("CbRetrievePreComputedV2", request, context)
+
+    def CbRegisterRopeV3(self, request: Any, context: "grpc.ServicerContext") -> Any:
+        return self._dispatch("CbRegisterRopeV3", request, context)
+
+    def CbUnregisterRopeV3(self, request: Any, context: "grpc.ServicerContext") -> Any:
+        return self._dispatch("CbUnregisterRopeV3", request, context)
+
+    def CbRetrievePreComputedV3(
+        self, request: Any, context: "grpc.ServicerContext"
+    ) -> Any:
+        return self._dispatch("CbRetrievePreComputedV3", request, context)
+
+    def CbUnifiedLookup(self, request: Any, context: "grpc.ServicerContext") -> Any:
+        return self._dispatch("CbUnifiedLookup", request, context)
+
+    def P2PLookupAndLock(self, request: Any, context: "grpc.ServicerContext") -> Any:
+        return self._dispatch("P2PLookupAndLock", request, context)
+
+    def P2PQueryLookupResults(
+        self, request: Any, context: "grpc.ServicerContext"
+    ) -> Any:
+        return self._dispatch("P2PQueryLookupResults", request, context)
+
+    def P2PUnlockObjects(self, request: Any, context: "grpc.ServicerContext") -> Any:
+        return self._dispatch("P2PUnlockObjects", request, context)
 
 
 # ---------------------------------------------------------------------------
@@ -660,7 +719,7 @@ class MultiprocessGrpcServer:
         del context, transport  # legacy positional slots, no longer used
         self._bind_url = bind_url
         self._grpc_max_workers = grpc_max_workers
-        self.handlers: dict[RpcMethod, RequestHandlerBase[Any]] = {}
+        self.handlers: dict[RpcMethod, GrpcRequestHandler] = {}
         self.extra_pools: list[ThreadPoolExecutor | AffinityThreadPool] = []
         self._server: grpc.Server | None = None
         self._closed = threading.Event()
@@ -672,8 +731,7 @@ class MultiprocessGrpcServer:
     def _inspect_handler_signature(
         self, request_type: RpcMethod | str, handler: Callable[..., Any]
     ) -> bool:
-        """Verify a handler's parameter / return annotations match the
-        registered ``ProtocolDefinition``.
+        """Verify that handler annotations match the typed gRPC spec.
 
         Returns:
             True if the signature matches or the annotations are omitted
@@ -681,6 +739,8 @@ class MultiprocessGrpcServer:
         """
 
         def same_type(a: Any, b: Any) -> bool:
+            if a is inspect.Signature.empty:
+                return True
             if a is None:
                 a = type(None)
             if b is None:
@@ -688,6 +748,7 @@ class MultiprocessGrpcServer:
             return a == b
 
         rpc_method = coerce_rpc_method(request_type)
+        typed_spec = _TYPED_RPCS[rpc_method]
         sig = inspect.signature(handler)
         hints = get_type_hints(handler)
         params = [
@@ -700,18 +761,18 @@ class MultiprocessGrpcServer:
             )
         ]
 
-        payload_clss = get_payload_classes(rpc_method)
-        if len(params) != len(payload_clss):
+        payload_types = typed_spec.payload_types
+        if len(params) != len(payload_types):
             logger.error(
                 "Handler for %s expects %d args, but got %d",
                 rpc_method,
-                len(payload_clss),
+                len(payload_types),
                 len(params),
             )
             return False
 
         for i, (param, expected_cls) in enumerate(
-            zip(params, payload_clss, strict=False)
+            zip(params, payload_types, strict=False)
         ):
             ann = hints.get(param.name, param.annotation)
             if not same_type(ann, expected_cls):
@@ -725,7 +786,7 @@ class MultiprocessGrpcServer:
                 return False
 
         return_ann = hints.get("return", sig.return_annotation)
-        expected_return_cls = get_response_class(rpc_method)
+        expected_return_cls = typed_spec.response_type
         if not same_type(return_ann, expected_return_cls):
             logger.error(
                 "Handler for %s expects return %s, got %s",
@@ -742,12 +803,16 @@ class MultiprocessGrpcServer:
         *args: Any,
     ) -> None:
         rpc_method = coerce_rpc_method(request_type)
+        typed_spec = _TYPED_RPCS[rpc_method]
         if len(args) == 1 and callable(args[0]):
             handler = args[0]
-            payload_clss = get_payload_classes(rpc_method)
-            handler_type = get_handler_type(rpc_method)
+            handler_type = typed_spec.handler_type
         elif len(args) == 3:
             payload_clss, handler_type, handler = args
+            if tuple(payload_clss) != typed_spec.payload_types:
+                raise ValueError(
+                    f"Payload classes do not match for request type: {rpc_method}"
+                )
         else:
             raise TypeError(
                 "add_handler expects either (rpc_method, handler) or "
@@ -776,9 +841,11 @@ class MultiprocessGrpcServer:
         handler: Callable[..., Any],
     ) -> None:
         rpc_method = coerce_rpc_method(request_type)
-        response_cls = get_response_class(rpc_method)
-        self.handlers[rpc_method] = SyncRequestHandler(
-            get_payload_classes(rpc_method), response_cls, handler
+        self.handlers[rpc_method] = GrpcRequestHandler(
+            spec=_TYPED_RPCS[rpc_method],
+            handler=handler,
+            handler_type=HandlerType.SYNC,
+            requires_client_affinity=False,
         )
 
     def add_blocking_handler(
@@ -787,9 +854,12 @@ class MultiprocessGrpcServer:
         handler: Callable[..., Any],
     ) -> None:
         rpc_method = coerce_rpc_method(request_type)
-        response_cls = get_response_class(rpc_method)
-        self.handlers[rpc_method] = BlockingRequestHandler(
-            get_payload_classes(rpc_method), response_cls, handler
+        typed_spec = _TYPED_RPCS[rpc_method]
+        self.handlers[rpc_method] = GrpcRequestHandler(
+            spec=typed_spec,
+            handler=handler,
+            handler_type=HandlerType.BLOCKING,
+            requires_client_affinity=typed_spec.requires_client_affinity,
         )
 
     def add_nonblocking_handler(
@@ -841,14 +911,14 @@ class MultiprocessGrpcServer:
         affinity_types = [
             rpc_method
             for rpc_method in mounted_types
-            if get_handler_type(rpc_method) is HandlerType.BLOCKING
-            and requires_client_affinity(rpc_method)
+            if self.handlers[rpc_method].handler_type is HandlerType.BLOCKING
+            and self.handlers[rpc_method].requires_client_affinity
         ]
         normal_types = [
             rpc_method
             for rpc_method in mounted_types
-            if get_handler_type(rpc_method) is HandlerType.BLOCKING
-            and not requires_client_affinity(rpc_method)
+            if self.handlers[rpc_method].handler_type is HandlerType.BLOCKING
+            and not self.handlers[rpc_method].requires_client_affinity
         ]
         if affinity_types:
             self.add_affinity_thread_pool(
@@ -874,10 +944,10 @@ class MultiprocessGrpcServer:
                     f"No handler registered for request type: {rpc_method}. "
                     f"Register handlers before calling {method_name}."
                 )
-            if not isinstance(handler, BlockingRequestHandler):
+            if handler.handler_type is not HandlerType.BLOCKING:
                 raise TypeError(
                     f"Handler for {rpc_method} is "
-                    f"{type(handler).__name__}, not BlockingRequestHandler."
+                    f"{handler.handler_type.name}, not BLOCKING."
                 )
 
     def add_normal_thread_pool(
@@ -897,7 +967,6 @@ class MultiprocessGrpcServer:
         for request_type in request_types:
             rpc_method = coerce_rpc_method(request_type)
             handler = self.handlers[rpc_method]
-            assert isinstance(handler, BlockingRequestHandler)
             handler.executor = pool
 
         logger.debug(
@@ -923,7 +992,6 @@ class MultiprocessGrpcServer:
         for request_type in request_types:
             rpc_method = coerce_rpc_method(request_type)
             handler = self.handlers[rpc_method]
-            assert isinstance(handler, BlockingRequestHandler)
             handler.executor = pool
 
         logger.debug(
@@ -939,11 +1007,14 @@ class MultiprocessGrpcServer:
     def start(self) -> None:
         _ensure_grpc_runtime()
         for rt, handler in self.handlers.items():
-            if isinstance(handler, BlockingRequestHandler) and handler.executor is None:
+            if (
+                handler.handler_type is HandlerType.BLOCKING
+                and handler.executor is None
+            ):
                 raise RuntimeError(
-                    f"BlockingRequestHandler for {rt} has no thread pool "
-                    "assigned. Call add_normal_thread_pool or "
-                    "add_affinity_thread_pool before start()."
+                    f"Blocking handler for {rt} has no thread pool assigned. "
+                    "Call add_normal_thread_pool or add_affinity_thread_pool "
+                    "before start()."
                 )
 
         target = _parse_grpc_url(self._bind_url)
@@ -956,7 +1027,7 @@ class MultiprocessGrpcServer:
             options=_GRPC_UNLIMITED_MSG_OPTS,
             compression=compression,
         )
-        servicer = _RequestHandlerServicer(self.handlers)
+        servicer = _GrpcServicer(self.handlers)
         for service_name in sorted(
             {typed_spec.service_name for typed_spec in _TYPED_RPCS.values()}
         ):

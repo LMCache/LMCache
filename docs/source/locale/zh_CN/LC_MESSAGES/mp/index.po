@@ -1020,22 +1020,28 @@ msgstr "添加新的 gRPC 方法"
 
 #: ../../source/mp/index.rst:564
 msgid ""
-"Add the method metadata to the appropriate ``protocols/*.py`` file "
-"(``engine``, ``controller``, ``observability``, ``debug``, ``blend``, "
-"``blend_v2``, ``blend_v3``, or ``p2p``) and create its "
-"``ProtocolDefinition``."
-msgstr ""
-"在适当的 ``protocols/*.py`` 文件（``engine``、``controller``、``observability``、"
-"``debug``、``blend``、``blend_v2``、``blend_v3`` 或 ``p2p``）中添加方法元数据，并创建对应的 "
-"``ProtocolDefinition``。"
-
-#: ../../source/mp/index.rst:565
-msgid ""
 "Add the request/response messages and method to the matching service in "
 "``transport/grpc_impl/proto/lmcache_mq.proto``."
 msgstr ""
 "在 ``transport/grpc_impl/proto/lmcache_mq.proto`` 的匹配 service 中添加 "
 "request/response message 和 method。"
+
+#: ../../source/mp/index.rst:565
+msgid ""
+"Regenerate the protobuf stubs:"
+msgstr ""
+"重新生成 protobuf stubs："
+
+#: ../../source/mp/index.rst:572
+msgid ""
+"Add the Python value mapping and handler scheduling mode in "
+"``transport/grpc_impl/typed_rpc.py``. The proto descriptor remains the "
+"source of truth for service and method names; this mapping only describes "
+"LMCache Python domain objects such as ``IPCCacheServerKey`` and ``KVCache``."
+msgstr ""
+"在 ``transport/grpc_impl/typed_rpc.py`` 中添加 Python 值映射和 handler 调度模式。"
+"proto descriptor 仍然是 service 和 method 名称的 source of truth；这个映射只描述 "
+"``IPCCacheServerKey`` 和 ``KVCache`` 等 LMCache Python 领域对象。"
 
 #: ../../source/mp/index.rst:569
 msgid ""
@@ -1166,12 +1172,20 @@ msgid ""
 msgstr "``MPRuntimePluginLauncher`` 通过将完整的服务器配置序列化为环境变量来生成运行时插件"
 
 #: ../../source/mp/index.rst:613
-msgid "``lmcache/v1/multiprocess/protocols/base.py``"
-msgstr "``lmcache/v1/multiprocess/protocols/base.py``"
+msgid "``lmcache/v1/multiprocess/protocol.py``"
+msgstr "``lmcache/v1/multiprocess/protocol.py``"
 
 #: ../../source/mp/index.rst:614
-msgid "RPC method metadata, HandlerType, ProtocolDefinition"
-msgstr "RPC 方法元数据，处理程序类型，协议定义"
+msgid "Descriptor-derived ``RpcMethod`` tokens and compatibility helpers"
+msgstr "从 descriptor 派生的 ``RpcMethod`` token 和兼容 helper"
+
+#: ../../source/mp/index.rst:615
+msgid "``lmcache/v1/multiprocess/transport/grpc_impl/typed_rpc.py``"
+msgstr "``lmcache/v1/multiprocess/transport/grpc_impl/typed_rpc.py``"
+
+#: ../../source/mp/index.rst:616
+msgid "Python value codecs and handler scheduling metadata for gRPC methods"
+msgstr "gRPC method 的 Python 值 codec 和 handler 调度元数据"
 
 #: ../../source/mp/index.rst:616
 msgid "StorageManager (top-level manager)"

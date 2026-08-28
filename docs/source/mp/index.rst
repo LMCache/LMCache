@@ -571,19 +571,26 @@ Adding an observability subscriber
 Adding a new gRPC method
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-1. Add the method metadata to the appropriate ``protocols/*.py`` file
-   (``engine``, ``controller``, ``observability``, ``debug``, ``blend``,
-   ``blend_v2``, ``blend_v3``, or ``p2p``) and create its
-   ``ProtocolDefinition``.
-2. Add the request/response messages and method to the matching service in
+1. Add the request/response messages and method to the matching service in
    ``transport/grpc_impl/proto/lmcache_mq.proto``.
-3. Implement the handler method on the appropriate ``MPService``
+2. Regenerate the protobuf stubs:
+
+   .. code-block:: bash
+
+      pip install -r requirements/proto.txt
+      python -m lmcache.v1.multiprocess.transport.grpc_impl._proto_gen._generate
+
+3. Add the Python value mapping and handler scheduling mode in
+   ``transport/grpc_impl/typed_rpc.py``. The proto descriptor remains the
+   source of truth for service and method names; this mapping only describes
+   LMCache Python domain objects such as ``IPCCacheServerKey`` and ``KVCache``.
+4. Implement the handler method on the appropriate ``MPService``
    (e.g. ``LookupModule``, ``LMCacheDrivenTransferModule``, ``BlendV3Module``)
    using the lower-case request name
    (``QUERY_PREFETCH_STATUS`` -> ``query_prefetch_status``). If the Python
    method name is intentionally different, add a short ``GRPC_METHOD_ALIASES``
    entry on that service class.
-4. ``run_cache_server()`` passes loaded services to
+5. ``run_cache_server()`` passes loaded services to
    ``MultiprocessGrpcServer.mount_services()``; the transport reads each service's
    ``GRPC_SERVICE_NAMES`` and binds generated gRPC methods from the descriptor.
 
@@ -623,8 +630,10 @@ Key Source Files
    * - ``lmcache/v1/multiprocess/mp_runtime_plugin_launcher.py``
      - ``MPRuntimePluginLauncher`` that spawns runtime plugins with the
        full server config serialized into environment variables
-   * - ``lmcache/v1/multiprocess/protocols/base.py``
-     - RPC method metadata, HandlerType, ProtocolDefinition
+   * - ``lmcache/v1/multiprocess/protocol.py``
+     - Descriptor-derived ``RpcMethod`` tokens and compatibility helpers
+   * - ``lmcache/v1/multiprocess/transport/grpc_impl/typed_rpc.py``
+     - Python value codecs and handler scheduling metadata for gRPC methods
    * - ``lmcache/v1/distributed/storage_manager.py``
      - StorageManager (top-level manager)
    * - ``lmcache/v1/distributed/config.py``
