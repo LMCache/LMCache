@@ -39,97 +39,6 @@ def resolve_vllm_kv_layout(
     return kv_layout
 
 
-def _reconstruct_blocks_first(
-    kv_caches: DiscoverableKVCache, kv_layout: str
-) -> "tuple[lmcache_native.EngineKVFormat, torch.Tensor]":
-    """Stack the per-layer views into one blocks-first tensor.
-
-    Args:
-        kv_caches: one rank-4 view per layer into a single shared buffer,
-            shaped [num_blocks, num_heads, block_size, content_size] for
-            BLHNC or [num_blocks, block_size, num_heads, content_size] for
-            BLNHC. All views share shape, strides, and storage; layer i
-            starts i * layer_step elements after layer 0.
-        kv_layout: "BLHNC" or "BLNHC".
-
-    Returns:
-        NB_NL_NH_BS_CS and an as_strided view shaped
-        [num_blocks, num_layers, num_heads, block_size, content_size] for
-        BLHNC; NB_NL_BS_NH_CS and
-        [num_blocks, num_layers, block_size, num_heads, content_size] for
-        BLNHC.
-
-    Raises:
-        ValueError: if the views don't match this pattern.
-    """
-    fmt = (
-        lmcache_native.EngineKVFormat.NB_NL_NH_BS_CS
-        if kv_layout == "BLHNC"
-        else lmcache_native.EngineKVFormat.NB_NL_BS_NH_CS
-    )
-    if not (
-        isinstance(kv_caches, list)
-        and kv_caches
-        and all(isinstance(t, torch.Tensor) and t.dim() == 4 for t in kv_caches)
-    ):
-        raise ValueError(
-            f"{kv_layout} declared but kv_caches is not a list of rank-4 "
-            "per-layer views."
-        )
-    layers = sorted(kv_caches, key=lambda t: t.storage_offset())
-    base = layers[0]
-    num_layers = len(layers)
-    inner = tuple(base.shape[1:])
-    chunk = 1
-    for dim in inner:
-        chunk *= int(dim)
-    tight_inner = []
-    stride = 1
-    for dim in reversed(inner):
-        tight_inner.append(stride)
-        stride *= int(dim)
-    tight_inner.reverse()
-
-    def _drift(reason: str) -> ValueError:
-        return ValueError(
-            f"{kv_layout} declared but the registered views disagree: "
-            f"{reason}. shape={tuple(base.shape)}, stride={base.stride()}, "
-            f"num_layers={num_layers}."
-        )
-
-    if tuple(base.stride()[1:]) != tuple(tight_inner):
-        raise _drift("per-(layer, block) content is not contiguous")
-    # >= not ==: HMA pools put other groups' bytes between this group's
-    # layers within each block.
-    layer_step = (
-        layers[1].storage_offset() - layers[0].storage_offset()
-        if num_layers > 1
-        else chunk
-    )
-    if layer_step < chunk:
-        raise _drift(f"layer step {layer_step} < per-layer block chunk {chunk}")
-    if base.stride(0) < (num_layers - 1) * layer_step + chunk:
-        raise _drift(
-            f"block step {base.stride(0)} cannot hold {num_layers} layers "
-            f"{layer_step} apart"
-        )
-    storage_ptr = base.untyped_storage().data_ptr()
-    for i, t in enumerate(layers):
-        if t.untyped_storage().data_ptr() != storage_ptr:
-            raise _drift("layer views do not share one storage")
-        if tuple(t.shape) != tuple(base.shape) or t.stride() != base.stride():
-            raise _drift(f"layer {i} shape/stride mismatch")
-        if t.storage_offset() != base.storage_offset() + i * layer_step:
-            raise _drift(f"layer {i} is not at offset base + {i} * layer step")
-
-    full = base.as_strided(
-        (base.shape[0], num_layers, *inner),
-        (base.stride(0), layer_step, *tight_inner),
-        storage_offset=base.storage_offset(),
-    )
-    return fmt, full
-
-
 class VLLM_Detector(EngineDetector):
     engine_type = EngineType.VLLM
 
@@ -141,16 +50,16 @@ class VLLM_Detector(EngineDetector):
         kv_layout = resolve_vllm_kv_layout(
             layout_hints, cpu_attention_backend=torch_device_type == "cpu"
         )
-        if kv_layout in ("BLHNC", "BLNHC"):
-            return _reconstruct_blocks_first(kv_caches, kv_layout)
-        is_hnd = kv_layout == "HND"
+        is_hnd = kv_layout in ("HND", "BLHNC")
 
-        # Blocks-first fused K/V is the only rank-4 vLLM layout, so its raw rank
+        # Fused K/V is the only rank-4 vLLM layout, so its raw rank
         # identifies it unambiguously (a 5-D split would collide with
         # flash-infer when num_heads == 2). The two middle axes are NH/BS
         # (HND) or BS/NH (NHD) -- indistinguishable from the shape alone, so the
         # resolved kv_layout decides. The tensor is kept raw: the trailing axis
-        # is the per-head content size (2 * head_size, K/V packed).
+        # is the per-head content size (2 * head_size, K/V packed). Blocks-first
+        # views (BLHNC / BLNHC) have the same per-layer shape and differ only
+        # in stride(0), which resolve_block_stride_and_log_layout reads.
         if (
             isinstance(kv_caches, list)
             and kv_caches

@@ -300,28 +300,24 @@ page_buffer_offset(const int k_or_v, const int token_idx,
     const int head_idx = scalar_offset / hs2;
     const int head_offset = scalar_offset % hs2;
     const int num_heads = scalars_per_token / hs2;
-    return block_idx * num_heads * block_size * hs2 +
-           head_idx * block_size * hs2 + block_offset * hs2 + head_offset;
+    // vLLM blocks-first pools pass the real per-block step; 0 means tight.
+    const int64_t block_step =
+        block_stride_xwords > 0
+            ? block_stride_xwords
+            : static_cast<int64_t>(num_heads) * block_size * hs2;
+    return block_idx * block_step + head_idx * block_size * hs2 +
+           block_offset * hs2 + head_offset;
   } else if constexpr (format == EngineKVFormat::NL_X_NB_BS_NH_TWO_HS ||
                        format == EngineKVFormat::NL_X_NB_BS_NH_CS) {
-    return token_idx * scalars_per_token + scalar_offset;
-  }
-  // [NB, NL, NH, BS, CS]: per-layer base pointers, block step in
-  // block_stride_xwords.
-  else if constexpr (format == EngineKVFormat::NB_NL_NH_BS_CS) {
-    const int hs2 = 2 * head_size;
     const int block_idx = token_idx / block_size;
     const int block_offset = token_idx % block_size;
-    const int head_idx = scalar_offset / hs2;
-    const int head_offset = scalar_offset % hs2;
-    return block_idx * block_stride_xwords + head_idx * block_size * hs2 +
-           block_offset * hs2 + head_offset;
-  }
-  // [NB, NL, BS, NH, CS]: NHD within-block math.
-  else if constexpr (format == EngineKVFormat::NB_NL_BS_NH_CS) {
-    const int block_idx = token_idx / block_size;
-    const int block_offset = token_idx % block_size;
-    return block_idx * block_stride_xwords + block_offset * scalars_per_token +
+    // vLLM blocks-first pools pass the real per-block step; 0 means tight.
+    const int64_t block_step =
+        block_stride_xwords > 0
+            ? block_stride_xwords
+            : static_cast<int64_t>(block_size) * scalars_per_token;
+    return block_idx * block_step +
+           static_cast<int64_t>(block_offset) * scalars_per_token +
            scalar_offset;
   }
   // DSA indexer: page [BSxvals][BSxscales]; 4B units, so scale == 1 unit
@@ -658,12 +654,8 @@ void multi_layer_kv_transfer_templated(
 
   lmc::check_block_size(engine_kv_format, block_size);
   lmc::check_head_size(engine_kv_format, head_size_xword);
-  // 0 means tight (num_layers * block_size * scalars_per_token).
-  int64_t block_stride_xwords = block_stride_elems / elements_per_xword;
-  if (block_stride_xwords == 0) {
-    block_stride_xwords =
-        static_cast<int64_t>(num_layers) * block_size * num_xwords;
-  }
+  // 0 means tight; the per-format offset entries compute their own tight step.
+  const int64_t block_stride_xwords = block_stride_elems / elements_per_xword;
   TORCH_CHECK(
       engine_kv_format != EngineKVFormat::NL_X_NB_BSV_BSS || sizeof(T) == 4,
       "NL_X_NB_BSV_BSS requires 4-byte transfer units (row bytes "
@@ -682,12 +674,6 @@ void multi_layer_kv_transfer_templated(
 
   if (direction == TransferDirection::H2D) {
     switch (engine_kv_format) {
-      case EngineKVFormat::NB_NL_NH_BS_CS:
-        LAUNCH_KERNEL_WITH_FORMAT(T, false, EngineKVFormat::NB_NL_NH_BS_CS);
-        break;
-      case EngineKVFormat::NB_NL_BS_NH_CS:
-        LAUNCH_KERNEL_WITH_FORMAT(T, false, EngineKVFormat::NB_NL_BS_NH_CS);
-        break;
       case EngineKVFormat::NB_NL_TWO_BS_NH_HS:
         LAUNCH_KERNEL_WITH_FORMAT(T, false, EngineKVFormat::NB_NL_TWO_BS_NH_HS);
         break;
@@ -735,12 +721,6 @@ void multi_layer_kv_transfer_templated(
     }
   } else {
     switch (engine_kv_format) {
-      case EngineKVFormat::NB_NL_NH_BS_CS:
-        LAUNCH_KERNEL_WITH_FORMAT(T, true, EngineKVFormat::NB_NL_NH_BS_CS);
-        break;
-      case EngineKVFormat::NB_NL_BS_NH_CS:
-        LAUNCH_KERNEL_WITH_FORMAT(T, true, EngineKVFormat::NB_NL_BS_NH_CS);
-        break;
       case EngineKVFormat::NB_NL_TWO_BS_NH_HS:
         LAUNCH_KERNEL_WITH_FORMAT(T, true, EngineKVFormat::NB_NL_TWO_BS_NH_HS);
         break;
@@ -826,12 +806,8 @@ void multi_layer_kv_transfer_fused_templated(
 
   lmc::check_block_size(engine_kv_format, block_size);
   lmc::check_head_size(engine_kv_format, head_size_xword);
-  // 0 means tight (num_layers * block_size * scalars_per_token).
-  int64_t block_stride_xwords = block_stride_elems / elements_per_xword;
-  if (block_stride_xwords == 0) {
-    block_stride_xwords =
-        static_cast<int64_t>(num_layers) * block_size * num_xwords;
-  }
+  // 0 means tight; the per-format offset entries compute their own tight step.
+  const int64_t block_stride_xwords = block_stride_elems / elements_per_xword;
   TORCH_CHECK(
       engine_kv_format != EngineKVFormat::NL_X_NB_BSV_BSS || sizeof(T) == 4,
       "NL_X_NB_BSV_BSS requires 4-byte transfer units (row bytes "
@@ -860,12 +836,6 @@ void multi_layer_kv_transfer_fused_templated(
 #ifndef FUSED_FORMAT_SWITCH
   #define FUSED_FORMAT_SWITCH(T_, DIR)                                        \
     switch (engine_kv_format) {                                               \
-      case EngineKVFormat::NB_NL_NH_BS_CS:                                    \
-        LAUNCH_FUSED_WITH_FORMAT(T_, DIR, EngineKVFormat::NB_NL_NH_BS_CS)     \
-        break;                                                                \
-      case EngineKVFormat::NB_NL_BS_NH_CS:                                    \
-        LAUNCH_FUSED_WITH_FORMAT(T_, DIR, EngineKVFormat::NB_NL_BS_NH_CS)     \
-        break;                                                                \
       case EngineKVFormat::NB_NL_TWO_BS_NH_HS:                                \
         LAUNCH_FUSED_WITH_FORMAT(T_, DIR, EngineKVFormat::NB_NL_TWO_BS_NH_HS) \
         break;                                                                \

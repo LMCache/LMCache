@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
-"""GPU round-trip for the blocks-first cross-layer formats.
+"""GPU round-trip for blocks-first pools through the per-layer CS formats.
 
 Paged pool -> LMCache staging (D2H direction of the kernel) must equal a
 pure-torch gather, and writing it back into a zeroed pool (H2D) must
 restore the original bytes. Exercises the inflated per-block step that
-distinguishes NB_NL_* from the per-layer formats.
+distinguishes a blocks-first pool from a layer-compact cache: the step
+rides in block_stride_elems, taken from the views' stride(0).
 """
 
 # Third Party
@@ -14,7 +15,7 @@ import torch
 # First Party
 from lmcache import device_ops
 from lmcache.utils import EngineType
-from lmcache.v1.gpu_connector.kv_format import detect_format, get_spec
+from lmcache.v1.gpu_connector.kv_format import detect_format
 import lmcache.lmcache_native as lmcache_native
 
 cuda_only = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
@@ -65,11 +66,17 @@ def torch_gather(buf: torch.Tensor, order: str, slots: torch.Tensor) -> torch.Te
 def test_kernel_roundtrip_matches_torch(order, pad_layers):
     buf, views = make_pool(order, pad_layers)
     fmt, kv = detect_format(views, EngineType.VLLM, {"kv_layout": order})
-    assert kv.stride(0) == buf.stride(0)
-    spec = get_spec(kv, fmt)
-    ptrs = torch.tensor(
-        spec.data_ptrs(list(range(NL))), dtype=torch.int64, device="cuda"
+    expected_fmt = (
+        lmcache_native.EngineKVFormat.NL_X_NB_NH_BS_CS
+        if order == "BLHNC"
+        else lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_CS
     )
+    assert fmt == expected_fmt
+    assert kv[0].stride(0) == buf.stride(0)
+    ptrs = torch.tensor([v.data_ptr() for v in kv], dtype=torch.int64, device="cuda")
+    # A blocks-first pool always needs its real step: every block packs all
+    # layers, so stride(0) exceeds the per-layer tight step even unpadded.
+    block_stride = kv[0].stride(0)
     slots = torch.tensor([5, 6, 7, 12, 13, 14, 15, 28], device="cuda")
     staging = torch.zeros(1, NL, len(slots), SPT, dtype=torch.float32, device="cuda")
 
@@ -84,7 +91,7 @@ def test_kernel_roundtrip_matches_torch(order, pad_layers):
         BS,
         CS // 2,
         0,
-        kv.stride(0),
+        block_stride,
     )
     torch.cuda.synchronize()
     ref = torch_gather(buf, order, slots.cpu())
@@ -105,7 +112,7 @@ def test_kernel_roundtrip_matches_torch(order, pad_layers):
         BS,
         CS // 2,
         0,
-        kv.stride(0),
+        block_stride,
     )
     torch.cuda.synchronize()
     touched = sorted({int(s) // BS for s in slots.cpu()})

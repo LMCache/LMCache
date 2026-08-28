@@ -269,14 +269,8 @@ def normalize_and_discover_per_layer_formats(
                 serving_engine,
                 layout_hints,
             )
-            if lmcache_native.is_layer_list(fmt):
-                for sub_idx, layer_idx in enumerate(same_shape_indices):
-                    detected[layer_idx] = (normalized[sub_idx], fmt)
-            else:
-                # Every layer of the sub-group maps to the one cross-layer
-                # tensor; identity grouping later folds them into one group.
-                for layer_idx in same_shape_indices:
-                    detected[layer_idx] = (normalized, fmt)
+            for sub_idx, layer_idx in enumerate(same_shape_indices):
+                detected[layer_idx] = (normalized[sub_idx], fmt)
 
     # A layer in no group (cross-layer KV sharing) keeps its own tensor and is
     # skipped downstream; give it any detected format so every layer has one.
@@ -289,23 +283,6 @@ def normalize_and_discover_per_layer_formats(
         for i in range(len(kv_caches))
     ]
     return normalized_per_layer, engine_kv_formats
-
-
-def _resolve_spec_view(
-    kv_caches: DiscoverableKVCache,
-    engine_kv_format: "lmcache_native.EngineKVFormat",
-    layer_idx: int = 0,
-) -> DiscoverableKVCache:
-    """Return the structure the format's spec reads.
-
-    Normalized per-layer lists hold a cross-layer group's tensor at every
-    layer index: return the tensor at ``layer_idx``. Anything else passes
-    through unchanged. Cross-layer spec accessors ignore per-call layer
-    indices, so callers keep passing their own.
-    """
-    if lmcache_native.is_cross_layer(engine_kv_format) and isinstance(kv_caches, list):
-        return kv_caches[layer_idx]
-    return kv_caches
 
 
 def get_num_layers(
@@ -323,7 +300,6 @@ def get_num_blocks(
     Raises:
         ValueError: For NBBS-fused formats with no separate block axis.
     """
-    kv_caches = _resolve_spec_view(kv_caches, engine_kv_format)
     return get_spec(kv_caches, engine_kv_format).num_blocks()
 
 
@@ -342,7 +318,6 @@ def get_block_size(
     Raises:
         ValueError: For NBBS-fused formats with no separate block axis.
     """
-    kv_caches = _resolve_spec_view(kv_caches, engine_kv_format, layer_idx)
     return get_spec(kv_caches, engine_kv_format).block_size(layer_idx)
 
 
@@ -370,7 +345,6 @@ def get_num_heads(
     layer_idx: int = 0,
 ) -> int:
     """Return the number of heads for a layer (defaults to layer 0)."""
-    kv_caches = _resolve_spec_view(kv_caches, engine_kv_format, layer_idx)
     return get_spec(kv_caches, engine_kv_format).num_heads(layer_idx)
 
 
@@ -389,7 +363,6 @@ def get_head_size(
     layer_idx: int = 0,
 ) -> int:
     """Return the head size for a layer (defaults to layer 0)."""
-    kv_caches = _resolve_spec_view(kv_caches, engine_kv_format, layer_idx)
     return get_spec(kv_caches, engine_kv_format).head_size(layer_idx)
 
 
@@ -413,7 +386,6 @@ def get_dtype(
     layer_idx: int = 0,
 ) -> torch.dtype:
     """Return the dtype for a layer (defaults to layer 0)."""
-    kv_caches = _resolve_spec_view(kv_caches, engine_kv_format, layer_idx)
     return get_spec(kv_caches, engine_kv_format).dtype(layer_idx)
 
 
@@ -438,13 +410,6 @@ def get_group_data_ptrs(
     Raises:
         ValueError: If *engine_kv_format* is not recognized.
     """
-    if lmcache_native.is_cross_layer(engine_kv_format):
-        # A cross-layer group's spec sees its own tensor: layer indices are
-        # local to the group.
-        source = _resolve_spec_view(kv_caches, engine_kv_format, layer_indices[0])
-        return get_spec(source, engine_kv_format).data_ptrs(
-            list(range(len(layer_indices)))
-        )
     return get_spec(kv_caches, engine_kv_format).data_ptrs(layer_indices)
 
 
@@ -530,10 +495,11 @@ _BLOCK_AXIS_FORMATS: frozenset = frozenset(
     {
         lmcache_native.EngineKVFormat.NL_X_NB_BS_HS,
         lmcache_native.EngineKVFormat.NL_X_NB_BSV_BSS,
-        # Blocks-first cross-layer: stride(0) of the reconstructed tensor is
-        # the per-block step including every layer's bytes.
-        lmcache_native.EngineKVFormat.NB_NL_NH_BS_CS,
-        lmcache_native.EngineKVFormat.NB_NL_BS_NH_CS,
+        # Under vLLM's blocks-first layouts (BLHNC / BLNHC) these views'
+        # stride(0) spans every layer's bytes for the block; when the cache
+        # is layer-compact, stride(0) is simply the tight per-block step.
+        lmcache_native.EngineKVFormat.NL_X_NB_NH_BS_CS,
+        lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_CS,
     }
 )
 
@@ -584,13 +550,12 @@ def resolve_block_stride_and_log_layout(
         #   per-layer; K & V share shape/stride by construction.
         # - Other formats: ``kv_caches`` is already a per-layer list.
         if lmcache_native.is_cross_layer(engine_kv_format):
-            source = _resolve_spec_view(kv_caches, engine_kv_format, layer_idx)
-            if not isinstance(source, torch.Tensor):
+            if not isinstance(kv_caches, torch.Tensor):
                 raise TypeError(
                     "Cross-layer EngineKVFormat expects a single backing "
-                    f"torch.Tensor, got {type(source).__name__}."
+                    f"torch.Tensor, got {type(kv_caches).__name__}."
                 )
-            return source
+            return kv_caches
         if lmcache_native.is_kv_list(engine_kv_format):
             return kv_caches[0][layer_idx]  # type: ignore[index,return-value]
         if lmcache_native.is_kv_second_tuple(engine_kv_format):

@@ -567,9 +567,8 @@ def multi_layer_kv_transfer(
     Fully vectorized Python fallback for multi_layer_kv_transfer.
     Eliminates ALL token- and KV-level Python loops.
 
-    ``block_stride_elems`` mirrors the cuda_ops signature (physical per-block
-    step for blocks-first cross-layer formats); those formats are not
-    implemented in this fallback.
+    ``block_stride_elems`` mirrors the cuda_ops signature; pointer-based
+    paged reconstruction rejects non-tight pools in _normalize_paged_layers.
     """
     if not isinstance(key_value_ptrs, (torch.Tensor, list)):
         raise TypeError(
@@ -587,12 +586,6 @@ def multi_layer_kv_transfer(
             "are not supported in the non-CUDA fallback. "
             "head_size parameter is required but not implemented in this path."
         )
-    if _is_cross_layer_fused_format(engine_kv_format):
-        raise NotImplementedError(
-            "Cross-layer fused layouts (NB_NL_NH_BS_CS, NB_NL_BS_NH_CS) "
-            "are not supported in the non-CUDA fallback."
-        )
-
     # 1. Filter out invalid slots.
     #    valid_mask_kv:  on key_value.device, used to index key_value
     #    valid_slots:    on paged_memory_device, used to index paged_tensor
@@ -775,12 +768,6 @@ def _is_hnd_format(engine_kv_format: EngineKVFormat) -> bool:
     return _format_spec(engine_kv_format).is_hnd
 
 
-def _is_cross_layer_fused_format(engine_kv_format: EngineKVFormat) -> bool:
-    """Return True for cross-layer formats with fused K/V (no 2 axis)."""
-    spec = _format_spec(engine_kv_format)
-    return spec.is_cross_layer and spec.is_fused_packed
-
-
 def _is_fused_kv_format(engine_kv_format: EngineKVFormat) -> bool:
     """Return True for formats whose K/V pair is packed in the trailing dim
     (kv_size == 1, shape_desc.hs == 2 * head_size)."""
@@ -955,15 +942,8 @@ def _normalize_paged_layers(
                 bs = int(shape_desc.bs)
                 nh = int(shape_desc.nh)
                 hs = int(shape_desc.hs)
-                if _is_fused_kv_format(engine_kv_format):
-                    # Fused K/V: no separate 2 axis; hs is the packed content.
-                    shape: tuple[int, ...] = (
-                        (nb, nl, nh, bs, hs)
-                        if _is_hnd_format(engine_kv_format)
-                        else (nb, nl, bs, nh, hs)
-                    )
-                elif _is_hnd_format(engine_kv_format):
-                    shape = (nb, nl, 2, nh, bs, hs)
+                if _is_hnd_format(engine_kv_format):
+                    shape: tuple[int, ...] = (nb, nl, 2, nh, bs, hs)
                 else:
                     shape = (nb, nl, 2, bs, nh, hs)
                 ptr = int(paged_buffer_ptrs_tensor[0].item())
@@ -1053,6 +1033,13 @@ def _normalize_paged_layers(
         nh = int(shape_desc.nh)
         hs = int(shape_desc.hs)
         per_shape = _per_layer_paged_shape(engine_kv_format, nb, bs, nh, hs)
+        block_stride = int(getattr(shape_desc, "block_stride_elems", 0) or 0)
+        if block_stride and block_stride != bs * nh * hs:
+            raise NotImplementedError(
+                "Non-tight per-block strides (vLLM blocks-first pools) are "
+                "not supported when reconstructing paged tensors from raw "
+                "pointers in the non-CUDA fallback."
+            )
         return [
             _tensor_from_ptr(int(p.item()), per_shape, dtype, device)
             for p in paged_buffer_ptrs_tensor

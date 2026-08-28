@@ -153,21 +153,6 @@ enum class EngineKVFormat : int {
   One list entry per layer; each entry is a (K, V) pair of paged tensors.
   */
   NL_X_TWO_X_NB_BS_NH_HS = 16,
-  /*
-  used by:
-  - vLLM BLHNC layout (fused KV, blocks outermost)
-  physical shape: [num_blocks, num_layers, num_heads, block_size, content_size]
-  Per-block step is carried via block_stride_elems.
-  */
-  NB_NL_NH_BS_CS = 17,
-
-  /*
-  used by:
-  - vLLM BLNHC layout (fused KV, blocks outermost)
-  physical shape: [num_blocks, num_layers, block_size, num_heads, content_size]
-  */
-  NB_NL_BS_NH_CS = 18,
-
 };
 
 // __host__ __device__ under CUDA/HIP so the kernels can call these; the guard
@@ -283,16 +268,6 @@ LMC_KV_FORMAT_HD constexpr FormatFacts format_facts(EngineKVFormat f) {
     case EngineKVFormat::NL_X_TWO_X_NB_BS_NH_HS:
       facts.is_layer_list = true;
       facts.is_kv_second_tuple = true;
-      break;
-    case EngineKVFormat::NB_NL_NH_BS_CS:
-      facts.is_cross_layer = true;
-      facts.is_hnd = true;
-      facts.is_fused_packed = true;
-      break;
-    case EngineKVFormat::NB_NL_BS_NH_CS:
-      facts.is_cross_layer = true;
-      facts.is_fused_packed = true;
-
       break;
     default:
       unsupported_engine_kv_format();

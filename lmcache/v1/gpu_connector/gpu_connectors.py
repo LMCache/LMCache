@@ -27,7 +27,6 @@ from lmcache.v1.gpu_connector.utils import (
     get_num_blocks,
     get_num_layers,
     get_page_buffer_size,
-    get_spec,
     get_tokens_per_layer,
     normalize_and_discover_per_layer_formats,
     normalize_kv_and_discover_format,
@@ -255,8 +254,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
             kv_caches, EngineType.VLLM, layout_hints=self.layout_hints
         )
 
-        spec = get_spec(kv_caches, self.engine_kv_format)
-        self.kv_cache_pointers.numpy()[:] = spec.data_ptrs(list(range(self.num_layers)))
+        self.kv_cache_pointers.numpy()[:] = [t.data_ptr() for t in kv_caches]
         self.kv_cache_pointers_on_gpu[idx] = torch.empty(
             self.num_layers, dtype=torch.int64, device=self.device
         )
