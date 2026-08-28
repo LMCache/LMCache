@@ -477,8 +477,8 @@ def get_device(kv_caches: DiscoverableKVCache) -> torch.device:
 # Formats whose per-layer tensor dim-0 is the *block* axis AND for
 # which we currently support dim-0 padding (e.g. DeepSeek V4
 # compressor / indexer caches sharing a KV pool with larger attn
-# groups). Today only the MLA layout (``NL_X_NB_BS_HS``, kv_size==1)
-# is exercised by real mixed-compression workloads.
+# groups). This includes MLA layouts and blocks-first fused NHD attention
+# layouts whose physical row width can be inherited from a larger KV group.
 #
 # ``NL_X_NB_TWO_BS_NH_HS`` *could* in principle also be the block
 # axis on dim-0, but no real serving engine emits a padded layout of
@@ -495,6 +495,7 @@ _BLOCK_AXIS_FORMATS: frozenset = frozenset(
     {
         lmcache_native.EngineKVFormat.NL_X_NB_BS_HS,
         lmcache_native.EngineKVFormat.NL_X_NB_BSV_BSS,
+        lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_CS,
     }
 )
 
@@ -574,8 +575,7 @@ def resolve_block_stride_and_log_layout(
                     "resolve_block_stride_and_log_layout: group's probe "
                     f"tensor has dim-0 padding ({padding} elements per "
                     f"block) but engine_kv_format={engine_kv_format!r} is not "
-                    "a supported dim-0-padded format (only "
-                    "NL_X_NB_BS_HS is); downstream transfer kernels "
+                    "a supported dim-0-padded format; downstream transfer kernels "
                     "cannot honour this padding and would read/write "
                     "wrong bytes. "
                     f"layer_idx={layer_idx}, shape={tuple(rep.shape)}, "

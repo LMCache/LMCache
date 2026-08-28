@@ -83,6 +83,7 @@ def _tensor_from_ptr(
     shape: tuple[int, ...],
     dtype: torch.dtype,
     device: torch.device | str | None = None,
+    stride: tuple[int, ...] | None = None,
 ) -> torch.Tensor:
     """
     Create a tensor view over a raw pointer (zero-copy where possible).
@@ -98,6 +99,8 @@ def _tensor_from_ptr(
                 - "cuda" / "cuda:N" / torch.device("cuda", N) → CUDA pointer
                 - "musa" / "musa:N" / torch.device("musa", N) → MUSA pointer
                   If None and ptr looks like a CUDA/MUSA ptr, pass device explicitly.
+        stride: Optional physical strides in elements. When provided, the raw
+            storage span is reconstructed and returned through ``as_strided``.
 
     Returns:
         A tensor that shares memory with the original pointer.
@@ -130,33 +133,50 @@ def _tensor_from_ptr(
     # ------------------------------------------------------------------ #
     # Compute size                                                       #
     # ------------------------------------------------------------------ #
-    numel = 1
-    for dim in shape:
-        numel *= int(dim)
+    if stride is not None and len(stride) != len(shape):
+        raise ValueError("stride and shape must have the same rank")
+    if stride is None:
+        numel = 1
+        for dim in shape:
+            numel *= int(dim)
+    elif any(int(dim) == 0 for dim in shape):
+        numel = 0
+    else:
+        numel = 1 + sum(
+            (int(dim) - 1) * int(dim_stride)
+            for dim, dim_stride in zip(shape, stride, strict=True)
+        )
     element_size = torch.empty((), dtype=dtype).element_size()
     total_bytes = numel * element_size
+    storage_shape = shape if stride is None else (numel,)
 
     # ------------------------------------------------------------------ #
     # CPU path                                                           #
     # ------------------------------------------------------------------ #
     if device.type == "cpu":
-        return _tensor_from_cpu_ptr(ptr, shape, dtype, numel, total_bytes)
+        tensor = _tensor_from_cpu_ptr(ptr, storage_shape, dtype, numel, total_bytes)
 
     # ------------------------------------------------------------------ #
     # CUDA path                                                          #
     # ------------------------------------------------------------------ #
     if device.type == "cuda":
-        return _tensor_from_cuda_ptr(ptr, shape, dtype, device, numel, total_bytes)
+        tensor = _tensor_from_cuda_ptr(
+            ptr, storage_shape, dtype, device, numel, total_bytes
+        )
 
     # ------------------------------------------------------------------ #
     # MUSA path                                                          #
     # ------------------------------------------------------------------ #
     if device.type == "musa":
-        return _tensor_from_musa_ptr(ptr, shape, dtype, device, total_bytes)
+        tensor = _tensor_from_musa_ptr(ptr, storage_shape, dtype, device, total_bytes)
 
-    raise ValueError(
-        f"Unsupported device type: {device.type!r}. Expected 'cpu', 'cuda', or 'musa'."
-    )
+    if device.type not in ("cpu", "cuda", "musa"):
+        raise ValueError(
+            f"Unsupported device type: {device.type!r}. "
+            "Expected 'cpu', 'cuda', or 'musa'."
+        )
+
+    return tensor.as_strided(shape, stride) if stride is not None else tensor
 
 
 # ====================================================================== #
@@ -855,6 +875,25 @@ def _per_layer_paged_shape(
     return (nb, 2, bs, nh, hs)
 
 
+def _per_layer_paged_stride(
+    engine_kv_format: EngineKVFormat,
+    shape_desc: PageBufferShapeDesc,
+) -> tuple[int, ...] | None:
+    """Return a physical per-layer stride when dim 0 is padded."""
+    block_stride = int(getattr(shape_desc, "block_stride_elems", 0))
+    if block_stride <= 0:
+        return None
+
+    nh = int(shape_desc.nh)
+    hs = int(shape_desc.hs)
+    fmt = int(engine_kv_format)
+    if fmt == int(EngineKVFormat.NL_X_NB_BS_HS):
+        return (block_stride, hs, 1)
+    if fmt == int(EngineKVFormat.NL_X_NB_BS_NH_CS):
+        return (block_stride, nh * hs, hs, 1)
+    return None
+
+
 def _infer_kv_dtype(
     paged_buffer_ptrs_tensor: object,
     lmcache_objects_ptrs: object,
@@ -1030,8 +1069,9 @@ def _normalize_paged_layers(
         nh = int(shape_desc.nh)
         hs = int(shape_desc.hs)
         per_shape = _per_layer_paged_shape(engine_kv_format, nb, bs, nh, hs)
+        per_stride = _per_layer_paged_stride(engine_kv_format, shape_desc)
         return [
-            _tensor_from_ptr(int(p.item()), per_shape, dtype, device)
+            _tensor_from_ptr(int(p.item()), per_shape, dtype, device, stride=per_stride)
             for p in paged_buffer_ptrs_tensor
         ]
     if isinstance(paged_buffer_ptrs_tensor, list):

@@ -36,6 +36,23 @@ def _raw_blocks_first_caches(device: str = "cpu") -> list[torch.Tensor]:
     return [torch.randn(NB, NH, BS, 2 * HS, device=device) for _ in range(NL)]
 
 
+def _padded_nhd_caches(
+    *, canary: float = -123.0
+) -> tuple[list[torch.Tensor], list[torch.Tensor], int]:
+    """Build NHD cache views whose dim-0 stride includes trailing padding."""
+    block_elems = BS * NH * 2 * HS
+    physical_stride = block_elems + 32
+    backings = [torch.full((NB, physical_stride), canary) for _ in range(NL)]
+    views = [
+        backing.as_strided(
+            (NB, BS, NH, 2 * HS),
+            (physical_stride, NH * 2 * HS, 2 * HS, 1),
+        )
+        for backing in backings
+    ]
+    return views, backings, physical_stride
+
+
 def test_discovery_keeps_raw_shape():
     fmt, norm = U.normalize_kv_and_discover_format(
         _raw_blocks_first_caches(), EngineType.VLLM, HINTS
@@ -166,3 +183,61 @@ def test_multi_layer_block_kv_transfer_roundtrip():
 
     for original, recovered in zip(norm, out, strict=True):
         assert torch.equal(original, recovered)
+
+
+def test_padded_nhd_registration_and_pointer_transfer_preserve_padding():
+    """Padded NHD fused caches register and transfer without touching padding."""
+    fmt = lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_CS
+    caches, _, physical_stride = _padded_nhd_caches()
+    for layer_idx, cache in enumerate(caches):
+        cache.copy_(
+            torch.arange(cache.numel(), dtype=cache.dtype).reshape(cache.shape)
+            + layer_idx * cache.numel()
+        )
+
+    block_stride = U.resolve_block_stride_and_log_layout(caches, fmt, 0, 0)
+    assert block_stride == physical_stride
+
+    sd = U.make_page_buffer_shape_desc(
+        caches,
+        fmt,
+        layer_idx=0,
+        num_layers_in_group=NL,
+        num_blocks=NB,
+        block_size=BS,
+        block_stride_elems=block_stride,
+    )
+    assert sd.block_stride_elems == physical_stride
+
+    chunk_tokens = NB * BS
+    obj = torch.zeros((NL, chunk_tokens, NH * 2 * HS), dtype=caches[0].dtype)
+    cache_ptrs = torch.tensor([cache.data_ptr() for cache in caches])
+    fallback_multi_layer_block_kv_transfer(
+        cache_ptrs,
+        [obj.data_ptr()],
+        list(range(NB)),
+        torch.device("cpu"),
+        lmcache_native.TransferDirection.D2H,
+        sd,
+        chunk_tokens,
+        fmt,
+        0,
+    )
+
+    out, out_backings, _ = _padded_nhd_caches()
+    out_ptrs = torch.tensor([cache.data_ptr() for cache in out])
+    fallback_multi_layer_block_kv_transfer(
+        out_ptrs,
+        [obj.data_ptr()],
+        list(range(NB)),
+        torch.device("cpu"),
+        lmcache_native.TransferDirection.H2D,
+        sd,
+        chunk_tokens,
+        fmt,
+        0,
+    )
+
+    for original, recovered, backing in zip(caches, out, out_backings, strict=True):
+        assert torch.equal(original, recovered)
+        assert torch.all(backing[:, original.shape[1] * NH * 2 * HS :] == -123.0)
