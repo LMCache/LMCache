@@ -23,7 +23,6 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (
     DEFAULT_MQ_TIMEOUT,
     HeartbeatThread,
     get_lmcache_chunk_size,
-    send_lmcache_request,
 )
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType
@@ -34,7 +33,6 @@ from lmcache.v1.multiprocess.custom_types import (
 )
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.mq import MultiprocessGrpcClient
-from lmcache.v1.multiprocess.protocol import RPC
 from lmcache.v1.platform import get_device_spec
 from lmcache.v1.platform.kv_wrap import wrap_one_kv_cache
 
@@ -217,18 +215,14 @@ class LMCacheMPConnector:
         # SGLang is non-hybrid (a single KV cache group), so engine_group_infos is the
         # empty list -- which the server treats as one group spanning all layers
         # (matching the vLLM non-hybrid and TensorRT-LLM register paths).
-        send_lmcache_request(
-            self.mq_client,
-            RPC.RegisterKvCache,
-            [
-                self.instance_id,
-                _wrap_sglang_kv_caches(k_pool, v_pool),
-                self.model_name,
-                self.tp_size,
-                EngineType.SGLANG,
-                {"tokens_per_block": self.page_size},
-                [],
-            ],
+        self.mq_client.register_kv_cache(
+            self.instance_id,
+            _wrap_sglang_kv_caches(k_pool, v_pool),
+            self.model_name,
+            self.tp_size,
+            EngineType.SGLANG,
+            {"tokens_per_block": self.page_size},
+            [],
         ).result(timeout=self._mq_timeout)
         self._registered = True
         self._start_heartbeat()
@@ -309,10 +303,8 @@ class LMCacheMPConnector:
         """
         # The daemon blocks up to ``self._mq_timeout`` for the result, so give
         # the response itself a little longer than that to cover the round trip.
-        matched_chunks = send_lmcache_request(
-            self.mq_client,
-            RPC.WaitPrefetchStatus,
-            [request_id, self._mq_timeout],
+        matched_chunks = self.mq_client.wait_prefetch_status(
+            request_id, self._mq_timeout
         ).result(timeout=self._mq_timeout + _WAIT_LOOKUP_RESPONSE_BUFFER_S)
         if matched_chunks is None:
             raise LMCacheTimeoutError(
@@ -330,19 +322,15 @@ class LMCacheMPConnector:
     ) -> None:
         if start >= end or not self.is_healthy:
             return
-        send_lmcache_request(
-            self.mq_client,
-            RPC.FreeLookupLocks,
-            [
-                self._create_key(
-                    token_ids,
-                    start=start,
-                    end=end,
-                    request_id=request_id,
-                    no_worker_id=True,
-                ),
-                self.tp_size,
-            ],
+        self.mq_client.free_lookup_locks(
+            self._create_key(
+                token_ids,
+                start=start,
+                end=end,
+                request_id=request_id,
+                no_worker_id=True,
+            ),
+            self.tp_size,
         )
 
     def lookup_kv(self, token_ids: list[int], request_id: str) -> int:
@@ -388,11 +376,7 @@ class LMCacheMPConnector:
             request_id=request_id,
             no_worker_id=True,
         )
-        send_lmcache_request(
-            self.mq_client,
-            RPC.Lookup,
-            [lookup_key, self.tp_size],
-        ).result(timeout=self._mq_timeout)
+        self.mq_client.lookup(lookup_key, self.tp_size).result(timeout=self._mq_timeout)
         matched = self._wait_for_lookup(request_id)
         matched = self._global_min_tokens(matched)
 
@@ -444,7 +428,7 @@ class LMCacheMPConnector:
             self._free_lookup_locks(
                 pending.token_ids, 0, pending.matched_token_num, request_id
             )
-        send_lmcache_request(self.mq_client, RPC.EndSession, [request_id])
+        self.mq_client.end_session(request_id)
 
     def _submit_retrieve(
         self,
@@ -457,23 +441,19 @@ class LMCacheMPConnector:
     ) -> MessagingFuture[bool]:
         event = torch_dev.Event(interprocess=True)
         event.record(torch_dev.current_stream())
-        future = send_lmcache_request(
-            self.mq_client,
-            RPC.Retrieve,
-            [
-                self._create_key(
-                    token_ids,
-                    start=offset,
-                    end=matched_end,
-                    request_id=request_id,
-                ),
-                self.instance_id,
-                # RETRIEVE takes per-group block IDs (list[list[int]]); SGLang is
-                # non-hybrid, so wrap the flat list as a single group.
-                [block_ids],
-                event.ipc_handle(),
-                skip_prefix_n_blocks,
-            ],
+        future = self.mq_client.retrieve(
+            self._create_key(
+                token_ids,
+                start=offset,
+                end=matched_end,
+                request_id=request_id,
+            ),
+            self.instance_id,
+            # RETRIEVE takes per-group block IDs (list[list[int]]); SGLang is
+            # non-hybrid, so wrap the flat list as a single group.
+            [block_ids],
+            event.ipc_handle(),
+            skip_prefix_n_blocks,
         ).to_device_future(device=self.device)
         # The daemon imports this IPC event after the request crosses the wire.
         # Retain the exporting event until the returned future is released so
@@ -606,22 +586,18 @@ class LMCacheMPConnector:
         )
         event = torch_dev.Event(interprocess=True)
         event.record(torch_dev.current_stream())
-        future = send_lmcache_request(
-            self.mq_client,
-            RPC.Store,
-            [
-                self._create_key(
-                    store_metadata.token_ids,
-                    start=0,
-                    end=aligned_end,
-                    request_id=request_id,
-                ),
-                self.instance_id,
-                # STORE takes per-group block IDs (list[list[int]]); SGLang is
-                # non-hybrid, so wrap the flat list as a single group.
-                [block_ids],
-                event.ipc_handle(),
-            ],
+        future = self.mq_client.store(
+            self._create_key(
+                store_metadata.token_ids,
+                start=0,
+                end=aligned_end,
+                request_id=request_id,
+            ),
+            self.instance_id,
+            # STORE takes per-group block IDs (list[list[int]]); SGLang is
+            # non-hybrid, so wrap the flat list as a single group.
+            [block_ids],
+            event.ipc_handle(),
         ).to_device_future(device=self.device)
         # Keep the exporting device event alive until the caller releases the
         # future. Since we return without blocking, the local ``event`` would
@@ -647,22 +623,18 @@ class LMCacheMPConnector:
         event = torch_dev.Event(interprocess=True)
         event.record(torch_dev.current_stream())
         success = (
-            send_lmcache_request(
-                self.mq_client,
-                RPC.Store,
-                [
-                    self._create_key(
-                        store_metadata.token_ids,
-                        start=0,
-                        end=aligned_end,
-                        request_id=request_id,
-                    ),
-                    self.instance_id,
-                    # STORE takes per-group block IDs (list[list[int]]); SGLang is
-                    # non-hybrid, so wrap the flat list as a single group.
-                    [block_ids],
-                    event.ipc_handle(),
-                ],
+            self.mq_client.store(
+                self._create_key(
+                    store_metadata.token_ids,
+                    start=0,
+                    end=aligned_end,
+                    request_id=request_id,
+                ),
+                self.instance_id,
+                # STORE takes per-group block IDs (list[list[int]]); SGLang is
+                # non-hybrid, so wrap the flat list as a single group.
+                [block_ids],
+                event.ipc_handle(),
             )
             .to_device_future(device=self.device)
             .result(timeout=self._mq_timeout)
@@ -683,11 +655,9 @@ class LMCacheMPConnector:
             self._heartbeat = None
         if self._registered:
             try:
-                send_lmcache_request(
-                    self.mq_client,
-                    RPC.UnregisterKvCache,
-                    [self.instance_id],
-                ).result(timeout=self._mq_timeout)
+                self.mq_client.unregister_kv_cache(self.instance_id).result(
+                    timeout=self._mq_timeout
+                )
             except Exception:
                 logger.warning("Failed to unregister SGLang MP KV cache", exc_info=True)
             self._registered = False

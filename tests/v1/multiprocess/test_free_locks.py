@@ -309,7 +309,7 @@ def test_adapter_free_lookup_locks_sends_request():
 
     mock_client = MagicMock(spec=MultiprocessGrpcClient)
     mock_future = MagicMock()
-    mock_client.submit_request.return_value = mock_future
+    mock_client.free_lookup_locks.return_value = mock_future
     adapter.mq_clients = {"tcp://test:0": mock_client}
     adapter._pending_lookups = set()
 
@@ -321,22 +321,18 @@ def test_adapter_free_lookup_locks_sends_request():
         request_id="req-1",
     )
 
-    mock_client.submit_request.assert_called_once()
-    call_args = mock_client.submit_request.call_args
-    req_type = call_args[0][0]
-    payloads = call_args[0][1]
-    assert req_type == RPC.FreeLookupLocks
+    mock_client.free_lookup_locks.assert_called_once()
+    call_args = mock_client.free_lookup_locks.call_args
 
-    # Payload should be [key, tp_size]
-    assert isinstance(payloads, list)
-    assert len(payloads) == 2
+    # Payload should be (key, tp_size)
+    assert len(call_args.args) == 2
 
-    key = payloads[0]
+    key = call_args.args[0]
     assert isinstance(key, IPCCacheServerKey)
     assert key.worker_id is None
     assert key.model_name == "test_model"
     assert key.request_id == "req-1"
-    assert payloads[1] == 1  # tp_size
+    assert call_args.args[1] == 1  # tp_size
 
 
 def test_adapter_free_lookup_locks_key_matches_lookup():
@@ -364,7 +360,8 @@ def test_adapter_free_lookup_locks_key_matches_lookup():
     mock_client = MagicMock(spec=MultiprocessGrpcClient)
     mock_future = MagicMock()
     mock_future.result.return_value = None  # LOOKUP returns None
-    mock_client.submit_request.return_value = mock_future
+    mock_client.lookup.return_value = mock_future
+    mock_client.free_lookup_locks.return_value = mock_future
     adapter.mq_clients = {"tcp://test:0": mock_client}
     adapter._pending_lookups = set()
     adapter._lookup_params = {}
@@ -374,11 +371,10 @@ def test_adapter_free_lookup_locks_key_matches_lookup():
     # Submit lookup – patch heartbeat to avoid spawning a real thread
     with patch.object(adapter, "_ensure_heartbeat_started"):
         adapter.maybe_submit_lookup_request("req-1", token_ids)
-    lookup_call = mock_client.submit_request.call_args
-    lookup_payloads = lookup_call[0][1]
-    lookup_key = lookup_payloads[0]
+    lookup_call = mock_client.lookup.call_args
+    lookup_key = lookup_call.args[0]
 
-    mock_client.submit_request.reset_mock()
+    mock_client.free_lookup_locks.reset_mock()
 
     # Submit free_lookup_locks with aligned end
     tokens_per_chunk = adapter.lmcache_tokens_per_chunk
@@ -389,11 +385,10 @@ def test_adapter_free_lookup_locks_key_matches_lookup():
         end=aligned_end,
         request_id="req-1",
     )
-    free_call = mock_client.submit_request.call_args
-    free_payloads = free_call[0][1]
-    assert len(free_payloads) == 2
-    free_key = free_payloads[0]
-    assert free_payloads[1] == 1  # tp_size
+    free_call = mock_client.free_lookup_locks.call_args
+    assert len(free_call.args) == 2
+    free_key = free_call.args[0]
+    assert free_call.args[1] == 1  # tp_size
 
     # Keys should be identical
     assert lookup_key.model_name == free_key.model_name

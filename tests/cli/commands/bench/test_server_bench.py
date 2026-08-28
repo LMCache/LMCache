@@ -9,6 +9,7 @@ Covers:
 
 # Standard
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from types import SimpleNamespace
 import argparse
 import json
 import socket
@@ -968,16 +969,35 @@ class TestProcessRequestMultiWorker:
             success = True
             context: dict = {}
 
-        # ``_call`` returns different shapes per RpcMethod:
+        class _FakeRpc:
+            def __init__(self, name: str) -> None:
+                self.name = name
+
+            def __call__(self, *_args):
+                raise AssertionError("_call should be mocked in this test")
+
+        client = SimpleNamespace(
+            lookup=_FakeRpc("LOOKUP"),
+            query_prefetch_status=_FakeRpc("QUERY_PREFETCH_STATUS"),
+            store=_FakeRpc("STORE"),
+            retrieve=_FakeRpc("RETRIEVE"),
+            prepare_store=_FakeRpc("PREPARE_STORE"),
+            commit_store=_FakeRpc("COMMIT_STORE"),
+            prepare_retrieve=_FakeRpc("PREPARE_RETRIEVE"),
+            commit_retrieve=_FakeRpc("COMMIT_RETRIEVE"),
+            end_session=_FakeRpc("END_SESSION"),
+        )
+
+        # ``_call`` returns different shapes per RPC method:
         #   LOOKUP -> None (void)
         #   QUERY_PREFETCH_STATUS -> hit_chunks (int) or None
         #   STORE / RETRIEVE (handle) -> (worker_id, True)
         #   PREPARE_* -> _FakePrep()
         #   COMMIT_* -> True
         #   END_SESSION -> None
-        def fake_call(_client, req_type, payloads):
-            calls.append((req_type, payloads))
-            name = req_type.name
+        def fake_call(rpc, payloads):
+            calls.append((rpc, payloads))
+            name = rpc.name
             if name == "QUERY_PREFETCH_STATUS":
                 # No cache hits -> only STORE side fires.
                 return 0
@@ -1017,7 +1037,7 @@ class TestProcessRequestMultiWorker:
             patch.object(sv_helpers, "_make_event_handle", return_value=b""),
         ):
             _process_request(
-                client=None,  # type: ignore[arg-type]  # unused: _call mocked
+                client=client,  # type: ignore[arg-type]
                 seq_no=0,
                 num_tokens=32,
                 chunk_size=16,

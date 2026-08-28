@@ -14,7 +14,6 @@ import torch
 
 # First Party
 from lmcache.v1.multiprocess.futures import DeviceMessagingFuture, MessagingFuture
-from lmcache.v1.multiprocess.protocol import RPC, RpcMethod
 
 
 class _FakeEventBackend:
@@ -123,17 +122,24 @@ def test_worker_exports_events_through_platform_backend(
         lambda kv_caches: list(kv_caches.values()),
     )
 
-    sent: list[tuple[RpcMethod, list[object]]] = []
+    sent: list[tuple[str, list[object]]] = []
+    mq_client = MagicMock()
 
-    def send_request(
-        _client: object,
-        request_type: RpcMethod,
-        payload: list[object],
-    ) -> MessagingFuture:
-        sent.append((request_type, payload))
-        if request_type == RPC.RegisterKvCache:
-            return _resolved_future(True)
+    def register_kv_cache(*payload: object) -> MessagingFuture:
+        sent.append(("register_kv_cache", list(payload)))
+        return _resolved_future(True)
+
+    def store(*payload: object) -> MessagingFuture:
+        sent.append(("store", list(payload)))
         return MessagingFuture()
+
+    def retrieve(*payload: object) -> MessagingFuture:
+        sent.append(("retrieve", list(payload)))
+        return MessagingFuture()
+
+    mq_client.register_kv_cache.side_effect = register_kv_cache
+    mq_client.store.side_effect = store
+    mq_client.retrieve.side_effect = retrieve
 
     context = worker_transfer.LMCacheDrivenTransferContext()
     kv_caches = {"layer_0": torch.empty(1)}
@@ -143,9 +149,8 @@ def test_worker_exports_events_through_platform_backend(
         "model",
         1,
         1,
-        MagicMock(),
+        mq_client,
         1.0,
-        send_request,
     )
 
     store_future = context.submit_store(
@@ -171,11 +176,11 @@ def test_worker_exports_events_through_platform_backend(
     assert isinstance(store_future, DeviceMessagingFuture)
     assert isinstance(retrieve_future, DeviceMessagingFuture)
     assert sent[1] == (
-        RPC.Store,
+        "store",
         ["key", 1, [[0]], b"completion-handle"],
     )
     assert sent[2] == (
-        RPC.Retrieve,
+        "retrieve",
         ["key", 1, [[0]], b"completion-handle", 2],
     )
     assert [call[0] for call in backend.calls] == [

@@ -35,7 +35,6 @@ from lmcache.v1.distributed.transfer_channel import get_transfer_channel_context
 from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.multiprocess.mq import MultiprocessGrpcClient
-from lmcache.v1.multiprocess.protocol import RPC, get_response_class
 from lmcache.v1.platform import HAS_EVENTFD, create_event_notifier
 
 logger = init_logger(__name__)
@@ -220,11 +219,7 @@ class P2PL2Adapter(L2AdapterInterface):
             )
             return task_id
 
-        future = self._mq_client.submit_request(
-            RPC.P2PLookupAndLock,
-            [keys, group_layout_descs],
-            get_response_class(RPC.P2PLookupAndLock),
-        )
+        future = self._mq_client.p2p_lookup_and_lock(keys, group_layout_descs)
         failed = False
         remote_task_id = -1
         try:
@@ -256,11 +251,7 @@ class P2PL2Adapter(L2AdapterInterface):
             logger.warning("P2P lookup task %d timed out; treating as a miss", task_id)
             return Bitmap(len(task.keys))
 
-        future = self._mq_client.submit_request(
-            RPC.P2PQueryLookupResults,
-            [task.remote_task_id],
-            get_response_class(RPC.P2PQueryLookupResults),
-        )
+        future = self._mq_client.p2p_query_lookup_results(task.remote_task_id)
         try:
             addresses = future.result(timeout=_LOOKUP_RPC_TIMEOUT_S)
         except TimeoutError:
@@ -280,11 +271,7 @@ class P2PL2Adapter(L2AdapterInterface):
     def submit_unlock(self, keys: list[ObjectKey]) -> None:
         if not keys:
             return
-        self._mq_client.submit_request(
-            RPC.P2PUnlockObjects,
-            [keys],
-            get_response_class(RPC.P2PUnlockObjects),
-        )
+        self._mq_client.p2p_unlock_objects(keys)
         for key in keys:
             self._remote_addresses.pop(key, None)
 

@@ -26,7 +26,6 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (
     ParallelStrategy,
 )
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
-from lmcache.v1.multiprocess.protocol import RPC, RpcMethod
 
 
 class FakeCudaEvent:
@@ -146,10 +145,9 @@ def _patch_transfer_context_factory(
 @pytest.fixture
 def fake_adapter(monkeypatch):
     """Build an adapter with the network boundary stubbed. Returns
-    ``(adapter, send_mock, future)``; ``future.result()`` defaults to succeed.
+    ``(adapter, mq_client, future)``; ``future.result()`` defaults to succeed.
     ``HeartbeatThread`` is replaced by ``FakeHeartbeatThread``."""
-    # Stub the MQ boundary so __init__'s chunk-size query and any later
-    # send_lmcache_request call don't touch a real socket.
+    # Stub the MQ boundary so RPC methods don't touch a real socket.
     fake_client = MagicMock(name="mq_client")
     monkeypatch.setattr(
         adapter_mod, "MultiprocessGrpcClient", lambda *a, **kw: fake_client
@@ -159,8 +157,10 @@ def fake_adapter(monkeypatch):
 
     future = MagicMock(name="future")
     future.result.return_value = None
-    send_mock = MagicMock(name="send_lmcache_request", return_value=future)
-    monkeypatch.setattr(adapter_mod, "send_lmcache_request", send_mock)
+    fake_client.register_kv_cache.return_value = future
+    fake_client.register_kv_cache_engine_driven_context.return_value = future
+    fake_client.unregister_kv_cache.return_value = future
+    fake_client.unregister_kv_cache_engine_driven_context.return_value = future
 
     FakeHeartbeatThread.instances.clear()
     FakeHeartbeatThread.start_hook = None
@@ -185,13 +185,13 @@ def fake_adapter(monkeypatch):
     adapter = _make_worker_adapter()
     # __init__ issues exactly one MQ call (the chunk-size query). Reset
     # so individual tests start with a clean call count.
-    send_mock.reset_mock()
-    return adapter, send_mock, future
+    fake_client.reset_mock()
+    return adapter, fake_client, future
 
 
 def test_register_kv_caches_updates_kv_caches_and_submits(fake_adapter):
     """Public register_kv_caches stores the dict and submits one request."""
-    adapter, send_mock, _ = fake_adapter
+    adapter, mq_client, _ = fake_adapter
     fake_tensor = MagicMock()
     fake_tensor.device.type = "cuda"
     new_caches = {"layer.0": fake_tensor, "layer.1": fake_tensor}
@@ -199,9 +199,7 @@ def test_register_kv_caches_updates_kv_caches_and_submits(fake_adapter):
     adapter.register_kv_caches(new_caches)
 
     assert adapter.kv_caches is new_caches
-    assert send_mock.call_count == 1
-    args, _kwargs = send_mock.call_args
-    assert args[1] == RPC.RegisterKvCache
+    mq_client.register_kv_cache.assert_called_once()
 
 
 def test_register_kv_caches_raises_connection_error_on_timeout(fake_adapter):
@@ -219,7 +217,7 @@ def test_register_kv_caches_cpu_submits_engine_driven_context_registration(
     fake_adapter, monkeypatch
 ):
     """CPU KV cache registration routes to REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT."""
-    adapter, send_mock, _ = fake_adapter
+    adapter, mq_client, _ = fake_adapter
     monkeypatch.setattr(
         "lmcache.integration.vllm.utils.vllm_layout_hints",
         lambda: {},
@@ -230,10 +228,9 @@ def test_register_kv_caches_cpu_submits_engine_driven_context_registration(
     adapter.register_kv_caches(cpu_kv)
 
     assert adapter.kv_caches is cpu_kv
-    assert send_mock.call_count == 1
-    args, _kwargs = send_mock.call_args
-    assert args[1] == RPC.RegisterKvCacheEngineDrivenContext
-    assert len(args[2]) == 1
+    mq_client.register_kv_cache_engine_driven_context.assert_called_once()
+    args, _kwargs = mq_client.register_kv_cache_engine_driven_context.call_args
+    assert len(args) == 1
 
 
 def test_submit_store_request_tracks_returned_future(fake_adapter, monkeypatch):
@@ -530,21 +527,19 @@ def test_dropped_retrieve_reported_once_via_healthy_get_finished(
 def test_shutdown_stops_heartbeat_before_unregister(fake_adapter) -> None:
     """shutdown() stops the heartbeat before sending UNREGISTER, so no
     stray heartbeat ping can race the closing mq_client."""
-    adapter, send_mock, future = fake_adapter
+    adapter, mq_client, future = fake_adapter
     adapter.transfer_ctx = MagicMock()
     adapter.submit_store_request("req-1", _op([[0]]), MagicMock())
     heartbeat = FakeHeartbeatThread.instances[0]
 
     stop_state_at_unregister: list[bool] = []
 
-    def record_send(
-        mq_client: object, request_type: RpcMethod, payloads: list[object]
-    ) -> MagicMock:
-        if request_type == RPC.UnregisterKvCache:
-            stop_state_at_unregister.append(heartbeat.stop_requested)
+    def record_unregister(instance_id: int) -> MagicMock:
+        assert instance_id == adapter.instance_id
+        stop_state_at_unregister.append(heartbeat.stop_requested)
         return future
 
-    send_mock.side_effect = record_send
+    mq_client.unregister_kv_cache.side_effect = record_unregister
 
     adapter.shutdown()
 
@@ -556,15 +551,12 @@ def test_shutdown_without_heartbeat_sends_unregister(fake_adapter) -> None:
     """shutdown() on an adapter whose heartbeat was never lazily started
     (cold shutdown before any traffic) still sends UNREGISTER and does
     not raise."""
-    adapter, send_mock, _future = fake_adapter
+    adapter, mq_client, _future = fake_adapter
 
     adapter.shutdown()
 
     assert FakeHeartbeatThread.instances == []
-    assert send_mock.call_count == 1
-    args, _kwargs = send_mock.call_args
-    assert args[1] == RPC.UnregisterKvCache
-    assert args[2] == [adapter.instance_id]
+    mq_client.unregister_kv_cache.assert_called_once_with(adapter.instance_id)
 
 
 def test_straggler_cycle_after_stop_skips_callback_and_event(monkeypatch) -> None:
@@ -660,7 +652,9 @@ def test_register_uses_local_context_when_self_transfer_ctx_nulled(
     monkeypatch.setattr(adapter_mod, "get_experimental", lambda *a, **kw: set())
     future = MagicMock(name="future")
     future.result.return_value = None
-    monkeypatch.setattr(adapter_mod, "send_lmcache_request", lambda *a, **kw: future)
+    fake_client.register_kv_cache.return_value = future
+    fake_client.register_kv_cache_engine_driven_context.return_value = future
+    fake_client.unregister_kv_cache.return_value = future
     monkeypatch.setattr(adapter_mod, "HeartbeatThread", FakeHeartbeatThread)
     # First Party
     from lmcache.v1.multiprocess.transfer_context import worker_transfer

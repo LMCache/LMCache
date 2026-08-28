@@ -17,7 +17,6 @@ from lmcache.logging import init_logger
 from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.mq import MultiprocessGrpcClient
-from lmcache.v1.multiprocess.protocol import RPC, get_response_class
 from lmcache.v1.multiprocess.transfer_context.base import (
     EngineDrivenContext,
     EngineDrivenContextMetadata,
@@ -160,11 +159,7 @@ class EngineDrivenContextShm(EngineDrivenContext):
     def prepare_store(
         self, key: IPCCacheServerKey, instance_id: int
     ) -> tuple[list[torch.Tensor], list[int]] | None:
-        future = self.mq_client.submit_request(
-            RPC.PrepareStore,
-            [key, instance_id],
-            get_response_class(RPC.PrepareStore),
-        )
+        future = self.mq_client.prepare_store(key, instance_id)
         # wait() first so a timeout raises exactly one LMCacheTimeoutError
         # (one event); result() then returns without its own timeout.
         if not future.wait(timeout=self.mq_timeout):
@@ -187,11 +182,7 @@ class EngineDrivenContextShm(EngineDrivenContext):
     def commit_store(
         self, key: IPCCacheServerKey, instance_id: int, _chunks: list[torch.Tensor]
     ) -> bool:
-        future = self.mq_client.submit_request(
-            RPC.CommitStore,
-            [key, instance_id, b""],
-            get_response_class(RPC.CommitStore),
-        )
+        future = self.mq_client.commit_store(key, instance_id, b"")
         try:
             return bool(future.result(timeout=self.mq_timeout))
         except TimeoutError:
@@ -200,11 +191,7 @@ class EngineDrivenContextShm(EngineDrivenContext):
     def prepare_retrieve(
         self, key: IPCCacheServerKey, instance_id: int
     ) -> list[torch.Tensor] | None:
-        future = self.mq_client.submit_request(
-            RPC.PrepareRetrieve,
-            [key, instance_id],
-            get_response_class(RPC.PrepareRetrieve),
-        )
+        future = self.mq_client.prepare_retrieve(key, instance_id)
         try:
             response = future.result(timeout=self.mq_timeout)
         except TimeoutError:
@@ -215,11 +202,7 @@ class EngineDrivenContextShm(EngineDrivenContext):
         return self._build_slot_tensors(slots) if slots else None
 
     def commit_retrieve(self, key: IPCCacheServerKey, instance_id: int) -> bool:
-        future = self.mq_client.submit_request(
-            RPC.CommitRetrieve,
-            [key, instance_id],
-            get_response_class(RPC.CommitRetrieve),
-        )
+        future = self.mq_client.commit_retrieve(key, instance_id)
         try:
             return bool(future.result(timeout=self.mq_timeout))
         except TimeoutError:

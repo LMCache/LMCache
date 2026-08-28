@@ -27,7 +27,6 @@ from lmcache.v1.gpu_connector.utils import (
 )
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.mq import MultiprocessGrpcClient
-from lmcache.v1.multiprocess.protocol import RPC, get_response_class
 from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
     EngineDrivenTransferContext,
     create_transfer_context,
@@ -223,11 +222,6 @@ class LMCacheSDKContext:
             head_dim=head_dim,
         )
 
-        # First Party
-        from lmcache.integration.vllm.vllm_multi_process_adapter import (
-            send_lmcache_request,
-        )
-
         transfer_ctx.register(
             self.instance_id,
             self._kv_caches,
@@ -236,7 +230,6 @@ class LMCacheSDKContext:
             self.blocks_in_chunk,
             self._mq_client,
             self._mq_timeout,
-            send_request=send_lmcache_request,
             layout_hints=layout_hints,
         )
 
@@ -298,11 +291,7 @@ class LMCacheSDKContext:
             cache_salt=cache_salt,
         ).no_worker_id_version()
 
-        future = self._mq_client.submit_request(
-            RPC.Lookup,
-            [key, self._world_size],
-            get_response_class(RPC.Lookup),
-        )
+        future = self._mq_client.lookup(key, self._world_size)
         try:
             future.result(timeout=self._mq_timeout)
         except TimeoutError:
@@ -336,11 +325,9 @@ class LMCacheSDKContext:
             return self._finished_lookups[request_id]
 
         try:
-            result = self._mq_client.submit_request(
-                RPC.QueryPrefetchStatus,
-                [request_id],
-                get_response_class(RPC.QueryPrefetchStatus),
-            ).result(timeout=self._mq_timeout)
+            result = self._mq_client.query_prefetch_status(request_id).result(
+                timeout=self._mq_timeout
+            )
         except TimeoutError:
             logger.warning(
                 "QUERY_PREFETCH_STATUS timed out after %ss.",
@@ -365,11 +352,7 @@ class LMCacheSDKContext:
         self._pending_lookups.discard(request_id)
         self._finished_lookups.pop(request_id, None)
         try:
-            self._mq_client.submit_request(
-                RPC.EndSession,
-                [request_id],
-                get_response_class(RPC.EndSession),
-            ).result(timeout=self._mq_timeout)
+            self._mq_client.end_session(request_id).result(timeout=self._mq_timeout)
         except TimeoutError:
             logger.warning(
                 "END_SESSION timed out after %ss for request_id=%s.",

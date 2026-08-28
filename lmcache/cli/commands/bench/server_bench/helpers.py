@@ -18,7 +18,7 @@ from __future__ import annotations
 
 # Standard
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 import ctypes
 import hashlib
 import json
@@ -62,7 +62,6 @@ try:
     from lmcache.v1.multiprocess.group_view import EngineGroupInfo
     from lmcache.v1.multiprocess.mq import MultiprocessGrpcClient
     from lmcache.v1.multiprocess.posix_shm import shm_open_pool_as_mmap
-    from lmcache.v1.multiprocess.protocol import RPC, RpcMethod
     from lmcache.v1.multiprocess.protocols.engine import (
         RegisterEngineDrivenContextResponse,
     )
@@ -189,17 +188,16 @@ _TIMEOUT = object()
 
 
 def _call(
-    client: MultiprocessGrpcClient,
-    request_type: RpcMethod,
-    payloads: list,
+    rpc: Callable[..., MessagingFuture[Any]],
+    payloads: list[Any],
     timeout_s: float = _DEFAULT_RPC_TIMEOUT_S,
 ) -> Any:
-    """Submit a request through ``MultiprocessGrpcClient`` and block.
+    """Submit a typed client RPC and block.
 
     Returns the decoded response (possibly ``None`` for void replies)
     on success, or the sentinel ``_TIMEOUT`` on RPC timeout.
     """
-    future: MessagingFuture[Any] = client.submit_request(request_type, payloads)
+    future = rpc(*payloads)
     try:
         return future.result(timeout=timeout_s)
     except TimeoutError:
@@ -472,7 +470,7 @@ def _send_register_kv_cache(
             hints,
             list(engine_group_infos or ()),
         ]
-        result = _call(client, RPC.RegisterKvCache, payloads)
+        result = _call(client.register_kv_cache, payloads)
         return result is not _TIMEOUT
 
     # CPU mode: use the non-GPU context registration protocol.
@@ -508,7 +506,7 @@ def _send_register_kv_cache(
         dtype_str=dtype_str,
         use_mla=use_mla,
     )
-    result = _call(client, RPC.RegisterKvCacheEngineDrivenContext, [payload])
+    result = _call(client.register_kv_cache_engine_driven_context, [payload])
     if result is _TIMEOUT:
         return False
     # The data-mode register reply carries the server's SHM pool name
@@ -550,12 +548,12 @@ def _send_unregister_kv_cache(
         ``True`` if the server acknowledged the call, ``False`` on RPC
         timeout.
     """
-    request_type = (
-        RPC.UnregisterKvCache
+    rpc = (
+        client.unregister_kv_cache
         if use_handle
-        else RPC.UnregisterKvCacheEngineDrivenContext
+        else client.unregister_kv_cache_engine_driven_context
     )
-    result = _call(client, request_type, [instance_id])
+    result = _call(rpc, [instance_id])
     return result is not _TIMEOUT
 
 
@@ -578,7 +576,7 @@ def _send_lookup(
     The server-side handler returns ``None`` (void) on success, so
     we only distinguish RPC timeout from a completed call.
     """
-    result = _call(client, RPC.Lookup, [key, tp_size])
+    result = _call(client.lookup, [key, tp_size])
     return result is not _TIMEOUT
 
 
@@ -596,8 +594,7 @@ def _poll_prefetch_status(
     """
     for _ in range(max_polls):
         result = _call(
-            client,
-            RPC.QueryPrefetchStatus,
+            client.query_prefetch_status,
             [request_id],
         )
         if result is _TIMEOUT:
@@ -857,13 +854,13 @@ def _send_store(
             [block_ids] * num_engine_group_infos,
             _make_event_handle(),
         ]
-        result = _call(client, RPC.Store, payloads)
+        result = _call(client.store, payloads)
         if result is _TIMEOUT:
             return "timeout"
         return "stored" if result[1] else "store_failed"
 
     # CPU mode: PREPARE_STORE -> COMMIT_STORE
-    prep = _call(client, RPC.PrepareStore, [key, instance_id])
+    prep = _call(client.prepare_store, [key, instance_id])
     if prep is _TIMEOUT:
         return "timeout"
     if server_pool is not None and client_tensors is not None and chunk_size > 0:
@@ -883,7 +880,7 @@ def _send_store(
             for slot_view, chunk_idx in zip(slot_views, chunk_indices, strict=False):
                 if 0 <= chunk_idx < len(full_chunks):
                     slot_view.copy_(full_chunks[chunk_idx].view(slot_view.shape))
-    commit = _call(client, RPC.CommitStore, [key, instance_id, b""])
+    commit = _call(client.commit_store, [key, instance_id, b""])
     if commit is _TIMEOUT:
         return "timeout"
     return "stored" if commit else "store_failed"
@@ -928,13 +925,13 @@ def _send_retrieve(
             _make_event_handle(),
             0,  # skip_first_n_tokens
         ]
-        result = _call(client, RPC.Retrieve, payloads)
+        result = _call(client.retrieve, payloads)
         if result is _TIMEOUT:
             return "timeout"
         return "retrieved" if result[1] else "retrieve_failed"
 
     # CPU mode: PREPARE_RETRIEVE -> COMMIT_RETRIEVE
-    prep = _call(client, RPC.PrepareRetrieve, [key, instance_id])
+    prep = _call(client.prepare_retrieve, [key, instance_id])
     if prep is _TIMEOUT:
         return "timeout"
     if not prep.success:
@@ -954,7 +951,7 @@ def _send_retrieve(
                 )
             except (RuntimeError, ValueError) as exc:
                 print("  [WARNING] retrieve scatter failed: %s" % exc)
-    commit = _call(client, RPC.CommitRetrieve, [key, instance_id])
+    commit = _call(client.commit_retrieve, [key, instance_id])
     if commit is _TIMEOUT:
         return "timeout"
     return "retrieved" if commit else "retrieve_failed"
@@ -965,7 +962,7 @@ def _send_end_session(
     request_id: str,
 ) -> None:
     """END_SESSION — clean up server-side session state."""
-    _call(client, RPC.EndSession, [request_id])
+    _call(client.end_session, [request_id])
 
 
 # ------------------------------------------------------------------ #
@@ -1389,7 +1386,7 @@ def _process_request(
 
 def _get_chunk_size(client: MultiprocessGrpcClient) -> int:
     """Query the server's chunk size."""
-    result = _call(client, RPC.GetChunkSize, [])
+    result = _call(client.get_chunk_size, [])
     if result is _TIMEOUT or result is None:
         return 256  # fallback
     return int(result)

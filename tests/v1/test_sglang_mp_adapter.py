@@ -229,14 +229,9 @@ def test_mp_connector_validates_pools_before_opening_mq(
         )
 
 
-def test_store_kv_async_unhealthy_returns_failed_future_no_send(monkeypatch) -> None:
-    adapter_mod, _, _, _, _, _ = _import_adapter_symbols()
+def test_store_kv_async_unhealthy_returns_failed_future_no_send() -> None:
     conn = _make_connector(healthy=False)
-
-    def _fail_send(*args, **kwargs):
-        pytest.fail("send_lmcache_request must not be called when unhealthy")
-
-    monkeypatch.setattr(adapter_mod, "send_lmcache_request", _fail_send)
+    conn.mq_client = MagicMock(name="mq_client")
 
     future = conn.store_kv_async(_store_metadata(num_tokens=4 * _CHUNK_SIZE))
 
@@ -244,24 +239,19 @@ def test_store_kv_async_unhealthy_returns_failed_future_no_send(monkeypatch) -> 
     assert future.query() is True
     # Unhealthy connector stored nothing -> the future must report failure.
     assert future.result(timeout=0) is False
+    conn.mq_client.store.assert_not_called()
 
 
-def test_store_kv_async_no_aligned_range_returns_completed_future_no_send(
-    monkeypatch,
-) -> None:
-    adapter_mod, _, _, _, _, _ = _import_adapter_symbols()
+def test_store_kv_async_no_aligned_range_returns_completed_future_no_send() -> None:
     conn = _make_connector(healthy=True)
-
-    def _fail_send(*args, **kwargs):
-        pytest.fail("send_lmcache_request must not be called with no aligned range")
-
-    monkeypatch.setattr(adapter_mod, "send_lmcache_request", _fail_send)
+    conn.mq_client = MagicMock(name="mq_client")
 
     # Fewer tokens than one chunk -> aligned_end == 0 -> no wire send.
     future = conn.store_kv_async(_store_metadata(num_tokens=_CHUNK_SIZE - 1))
 
     assert isinstance(future, MessagingFuture)
     assert future.result(timeout=0) is True
+    conn.mq_client.store.assert_not_called()
 
 
 def test_store_kv_async_happy_path_returns_daemon_future_without_blocking(
@@ -269,7 +259,7 @@ def test_store_kv_async_happy_path_returns_daemon_future_without_blocking(
 ) -> None:
     adapter_mod, _, _, _, _, _ = _import_adapter_symbols()
     conn = _make_connector(healthy=True)
-    conn.mq_client = object()  # type: ignore[assignment]
+    conn.mq_client = MagicMock(name="mq_client")
     conn.instance_id = 123
     conn.device = "cpu"
     # Stub the helpers store_kv_async calls so we exercise only its own logic.
@@ -278,11 +268,7 @@ def test_store_kv_async_happy_path_returns_daemon_future_without_blocking(
 
     sentinel = _SpyFuture()
     monkeypatch.setattr(adapter_mod, "torch_dev", _FakeTorchDev)
-    monkeypatch.setattr(
-        adapter_mod,
-        "send_lmcache_request",
-        lambda mq_client, request_type, payload: _FakeRaw(sentinel),
-    )
+    conn.mq_client.store.return_value = _FakeRaw(sentinel)
 
     future = conn.store_kv_async(_store_metadata(num_tokens=4 * _CHUNK_SIZE))
 
@@ -299,7 +285,7 @@ def test_submit_retrieve_retains_exported_device_event(monkeypatch) -> None:
     """The producer event outlives daemon import through the returned future."""
     adapter_mod, _, _, _, _, _ = _import_adapter_symbols()
     connector = _make_connector(healthy=True)
-    connector.mq_client = object()  # type: ignore[assignment]
+    connector.mq_client = MagicMock(name="mq_client")
     connector.instance_id = 123
     connector.device = "cpu"
     connector.model_name = "test-model"
@@ -307,11 +293,7 @@ def test_submit_retrieve_retains_exported_device_event(monkeypatch) -> None:
     connector.worker_id = 0
     sentinel = _SpyFuture()
     monkeypatch.setattr(adapter_mod, "torch_dev", _FakeTorchDev)
-    monkeypatch.setattr(
-        adapter_mod,
-        "send_lmcache_request",
-        lambda mq_client, request_type, payload: _FakeRaw(sentinel),
-    )
+    connector.mq_client.retrieve.return_value = _FakeRaw(sentinel)
 
     future = connector._submit_retrieve(
         request_id="request-1",

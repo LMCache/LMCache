@@ -21,7 +21,6 @@ from lmcache.v1.multiprocess.posix_shm import (
     shm_open_pool_as_mmap,
     shm_unlink,
 )
-from lmcache.v1.multiprocess.protocol import RPC
 from lmcache.v1.multiprocess.protocols.engine import (
     PrepareRetrieveResponse,
     PrepareStoreResponse,
@@ -466,6 +465,8 @@ def test_musa_data_context_keeps_layout_validation_device_agnostic(
     )
     future = MagicMock()
     future.result.return_value = RegisterEngineDrivenContextResponse()
+    mq_client = MagicMock()
+    mq_client.register_kv_cache_engine_driven_context.return_value = future
     ctx = EngineDrivenTransferContext()
 
     ctx.register(
@@ -474,9 +475,8 @@ def test_musa_data_context_keeps_layout_validation_device_agnostic(
         model_name="m",
         world_size=1,
         blocks_in_chunk=2,
-        mq_client=MagicMock(),
+        mq_client=mq_client,
         mq_timeout=1.0,
-        send_request=MagicMock(return_value=future),
     )
 
 
@@ -504,6 +504,8 @@ def test_musa_data_context_store_uses_device_agnostic_gather(
     captured_kwargs: dict[str, Any] = {}
     future = MagicMock()
     future.result.return_value = RegisterEngineDrivenContextResponse()
+    mq_client = MagicMock()
+    mq_client.register_kv_cache_engine_driven_context.return_value = future
     monkeypatch.setattr(
         worker_transfer,
         "compute_kv_layout",
@@ -534,9 +536,8 @@ def test_musa_data_context_store_uses_device_agnostic_gather(
         model_name="m",
         world_size=1,
         blocks_in_chunk=2,
-        mq_client=MagicMock(),
+        mq_client=mq_client,
         mq_timeout=1.0,
-        send_request=MagicMock(return_value=future),
     )
 
     result = ctx.submit_store(
@@ -577,6 +578,8 @@ def test_musa_data_context_retrieve_uses_device_agnostic_scatter(
     captured_kwargs: dict[str, Any] = {}
     future = MagicMock()
     future.result.return_value = RegisterEngineDrivenContextResponse()
+    mq_client = MagicMock()
+    mq_client.register_kv_cache_engine_driven_context.return_value = future
     monkeypatch.setattr(
         worker_transfer,
         "compute_kv_layout",
@@ -606,9 +609,8 @@ def test_musa_data_context_retrieve_uses_device_agnostic_scatter(
         model_name="m",
         world_size=1,
         blocks_in_chunk=2,
-        mq_client=MagicMock(),
+        mq_client=mq_client,
         mq_timeout=1.0,
-        send_request=MagicMock(return_value=future),
     )
 
     result = ctx.submit_retrieve(
@@ -1528,26 +1530,19 @@ def test_engine_driven_context_shm_store_retrieve_flow_with_mocked_mq() -> None:
 
     mq_client = MagicMock()
 
-    def _submit_request(req_type, payload, response_cls):  # noqa: ARG001
-        if req_type == RPC.PrepareStore:
-            return _CompletedFuture(
-                PrepareStoreResponse(context={"slots": slots, "chunk_indices": [0]})
-            )
-        if req_type == RPC.CommitStore:
-            _, _, commit_cpu_data = payload
-            assert commit_cpu_data == b""
-            return _CompletedFuture(True)
-        if req_type == RPC.PrepareRetrieve:
-            return _CompletedFuture(
-                PrepareRetrieveResponse(
-                    success=True, data=b"", context={"slots": slots}
-                )
-            )
-        if req_type == RPC.CommitRetrieve:
-            return _CompletedFuture(True)
-        raise AssertionError(f"Unexpected request type: {req_type}")
+    mq_client.prepare_store.return_value = _CompletedFuture(
+        PrepareStoreResponse(context={"slots": slots, "chunk_indices": [0]})
+    )
 
-    mq_client.submit_request.side_effect = _submit_request
+    def _commit_store(_key, _instance_id, commit_cpu_data):
+        assert commit_cpu_data == b""
+        return _CompletedFuture(True)
+
+    mq_client.commit_store.side_effect = _commit_store
+    mq_client.prepare_retrieve.return_value = _CompletedFuture(
+        PrepareRetrieveResponse(success=True, data=b"", context={"slots": slots})
+    )
+    mq_client.commit_retrieve.return_value = _CompletedFuture(True)
 
     context = EngineDrivenContextShm(
         metadata=EngineDrivenContextMetadata(

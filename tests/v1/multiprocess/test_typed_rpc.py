@@ -120,6 +120,13 @@ def test_service_descriptor_covers_every_typed_rpc() -> None:
         assert spec.response_type == get_response_class(request_type)
 
 
+def test_client_installs_function_style_rpc_methods() -> None:
+    """Every protocol method is directly callable on the client."""
+    for request_type in RpcMethod:
+        method = getattr(MultiprocessGrpcClient, request_type.name.lower(), None)
+        assert callable(method), request_type.name
+
+
 def test_service_descriptor_has_no_legacy_batch_rpc() -> None:
     """The transport contract is unary-only; Batch is no longer part of it."""
     services = lmcache_mq_pb2.DESCRIPTOR.services_by_name
@@ -589,9 +596,7 @@ def test_free_lookup_locks_typed_roundtrip() -> None:
     try:
         client = MultiprocessGrpcClient(server_url)
         key = _sample_key(cache_salt="wave2")
-        fut: MessagingFuture[None] = client.submit_request(
-            RPC.FreeLookupLocks, [key, 2]
-        )
+        fut: MessagingFuture[None] = client.free_lookup_locks(key, 2)
         assert fut.result(timeout=5.0) is None
         assert seen == [(key, 2)]
         client.close()
@@ -617,7 +622,7 @@ def test_get_chunk_size_typed_roundtrip() -> None:
     server.start()
     try:
         client = MultiprocessGrpcClient(server_url)
-        fut: MessagingFuture[int] = client.submit_request(RPC.GetChunkSize, [])
+        fut: MessagingFuture[int] = client.get_chunk_size()
         assert fut.result(timeout=5.0) == 256
         client.close()
     finally:
@@ -645,12 +650,8 @@ def test_query_prefetch_status_typed_roundtrip() -> None:
     server.start()
     try:
         client = MultiprocessGrpcClient(server_url)
-        fut1: MessagingFuture[Optional[int]] = client.submit_request(
-            RPC.QueryPrefetchStatus, ["req-1"]
-        )
-        fut2: MessagingFuture[Optional[int]] = client.submit_request(
-            RPC.QueryPrefetchStatus, ["req-2"]
-        )
+        fut1: MessagingFuture[Optional[int]] = client.query_prefetch_status("req-1")
+        fut2: MessagingFuture[Optional[int]] = client.query_prefetch_status("req-2")
         assert fut1.result(timeout=5.0) == 7
         assert fut2.result(timeout=5.0) is None
         client.close()

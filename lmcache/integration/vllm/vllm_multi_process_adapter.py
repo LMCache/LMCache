@@ -27,7 +27,6 @@ from lmcache.v1.multiprocess.group_view import (
     expand_engine_block_ids,
 )
 from lmcache.v1.multiprocess.mq import MessagingFuture, MultiprocessGrpcClient
-from lmcache.v1.multiprocess.protocol import RPC, RpcMethod, get_response_class
 from lmcache.v1.multiprocess.transfer_context import (
     EngineDrivenTransferContext,
     TransferContext,
@@ -136,29 +135,6 @@ class _IpcEvent(Protocol):
     def wait(self, stream: Any = None) -> None: ...
 
 
-def send_lmcache_request(
-    mq_client: MultiprocessGrpcClient,
-    request_type: RpcMethod,
-    payloads: list[Any],
-) -> MessagingFuture[Any]:
-    """
-    Helper function to send the request to the LMCache multiprocess server
-
-    Args:
-        mq_client: The LMCache multiprocess mode gRPC client.
-        request_type: The request type
-        payloads: The request payloads
-
-    Returns:
-        A messaging future for the request
-    """
-
-    future = mq_client.submit_request(
-        request_type, payloads, get_response_class(request_type)
-    )
-    return future
-
-
 def get_lmcache_chunk_size(
     mq_client: MultiprocessGrpcClient,
     timeout: float = DEFAULT_MQ_TIMEOUT,
@@ -173,7 +149,7 @@ def get_lmcache_chunk_size(
     Returns:
         An integer representing the LMCache chunk size
     """
-    future = send_lmcache_request(mq_client, RPC.GetChunkSize, [])
+    future = mq_client.get_chunk_size()
     lmcache_tokens_per_chunk = future.result(timeout=timeout)
     return lmcache_tokens_per_chunk
 
@@ -191,7 +167,7 @@ def get_experimental(
     Returns:
         Experimental features built into the server (now `transfer_query`).
     """
-    future = send_lmcache_request(mq_client, RPC.GetExperimental, [])
+    future = mq_client.get_experimental()
     try:
         return set(future.result(timeout=timeout))
     except TimeoutError:
@@ -250,7 +226,7 @@ def send_ping(
         True if server is healthy, False on timeout or error.
     """
     try:
-        future = send_lmcache_request(mq_client, RPC.Ping, [instance_id])
+        future = mq_client.ping(instance_id)
         return future.result(timeout=timeout)
     except TimeoutError:
         return False
@@ -723,11 +699,7 @@ class LMCacheMPSchedulerAdapter:
         ).no_worker_id_version()
 
         futures: dict[str, MessagingFuture[Any]] = {
-            url: send_lmcache_request(
-                self.mq_clients[url],
-                RPC.Lookup,
-                [key, self.tp_size],
-            )
+            url: self.mq_clients[url].lookup(key, self.tp_size)
             for url in self._server_urls
         }
 
@@ -780,11 +752,7 @@ class LMCacheMPSchedulerAdapter:
                     request_id=request_id,
                     cache_salt=cs or "",
                 ).no_worker_id_version()
-                send_lmcache_request(
-                    self.mq_clients[url],
-                    RPC.FreeLookupLocks,
-                    [tail_key, self.tp_size],
-                )
+                self.mq_clients[url].free_lookup_locks(tail_key, self.tp_size)
 
     @_lmcache_nvtx_annotate
     def check_lookup_result(self, request_id: str) -> int | None:
@@ -824,11 +792,7 @@ class LMCacheMPSchedulerAdapter:
         unresolved_urls = [u for u in self._server_urls if u not in per_server]
 
         futures: dict[str, MessagingFuture[Any]] = {
-            url: send_lmcache_request(
-                self.mq_clients[url],
-                RPC.QueryPrefetchStatus,
-                [request_id],
-            )
+            url: self.mq_clients[url].query_prefetch_status(request_id)
             for url in unresolved_urls
         }
 
@@ -931,11 +895,7 @@ class LMCacheMPSchedulerAdapter:
             cache_salt=cache_salt,
         ).no_worker_id_version()
         for url in self._server_urls:
-            send_lmcache_request(
-                self.mq_clients[url],
-                RPC.FreeLookupLocks,
-                [base_key, self.tp_size],
-            )
+            self.mq_clients[url].free_lookup_locks(base_key, self.tp_size)
 
     def end_session(self, request_id: str) -> None:
         """
@@ -947,11 +907,7 @@ class LMCacheMPSchedulerAdapter:
             return
 
         for url in self._server_urls:
-            send_lmcache_request(
-                self.mq_clients[url],
-                RPC.EndSession,
-                [request_id],
-            )
+            self.mq_clients[url].end_session(request_id)
 
     def report_block_allocations(
         self,
@@ -970,10 +926,8 @@ class LMCacheMPSchedulerAdapter:
             return
 
         for url in self._server_urls:
-            send_lmcache_request(
-                self.mq_clients[url],
-                RPC.ReportBlockAllocation,
-                [os.getpid(), self.model_name, records],
+            self.mq_clients[url].report_block_allocation(
+                os.getpid(), self.model_name, records
             )
 
     # Helper functions
@@ -1303,7 +1257,6 @@ class LMCacheMPWorkerAdapter:
                 self.blocks_in_chunk,
                 self.mq_client,
                 self._mq_timeout,
-                send_request=send_lmcache_request,
                 layout_hints=layout_hints,
                 engine_group_infos=self.engine_group_infos,
                 engine_type=EngineType.VLLM,
@@ -1878,16 +1831,13 @@ class LMCacheMPWorkerAdapter:
 
         logger.info("Unregistering kv caches")
         try:
-            unregister_type = (
-                RPC.UnregisterKvCacheEngineDrivenContext
-                if isinstance(self.transfer_ctx, EngineDrivenTransferContext)
-                else RPC.UnregisterKvCache
-            )
-            send_lmcache_request(
-                self.mq_client,
-                unregister_type,
-                [self.instance_id],
-            ).result(timeout=self._mq_timeout)
+            if isinstance(self.transfer_ctx, EngineDrivenTransferContext):
+                future = self.mq_client.unregister_kv_cache_engine_driven_context(
+                    self.instance_id
+                )
+            else:
+                future = self.mq_client.unregister_kv_cache(self.instance_id)
+            future.result(timeout=self._mq_timeout)
         except TimeoutError:
             logger.warning(
                 "LMCache server did not respond to unregister within %ss. "

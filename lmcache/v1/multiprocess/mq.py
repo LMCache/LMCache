@@ -64,6 +64,7 @@ _grpc_runtime_lock = threading.Lock()
 logger = init_logger(__name__)
 
 T = TypeVar("T")
+ClientRpcCallable = Callable[..., MessagingFuture[Any]]
 
 # gRPC channel/server options. LMCache multiprocess is a loopback
 # (localhost TCP or unix socket) IPC boundary carrying KV cache
@@ -100,6 +101,13 @@ def _ensure_grpc_runtime() -> None:
 
 _RPC_METHOD_NAMES = {
     rpc_method: request_type_to_method_name(rpc_method) for rpc_method in RPC_METHODS
+}
+_CLIENT_RPC_METHOD_NAMES = {
+    rpc_method: rpc_method.name.lower() for rpc_method in RPC_METHODS
+}
+_CLIENT_RPC_METHODS_BY_NAME = {
+    method_name: rpc_method
+    for rpc_method, method_name in _CLIENT_RPC_METHOD_NAMES.items()
 }
 _RPC_METHODS_BY_SERVICE: dict[str, tuple[RpcMethod, ...]] = {
     service_name: tuple(
@@ -277,13 +285,40 @@ class MultiprocessGrpcClient:
             for rpc_method, typed_spec in _TYPED_RPCS.items()
         }
 
+    def __getattr__(self, name: str) -> ClientRpcCallable:
+        """Resolve dynamically generated snake_case RPC methods for type checkers.
+
+        Args:
+            name: Attribute name being looked up.
+
+        Returns:
+            Callable RPC method returning a :class:`MessagingFuture`.
+
+        Raises:
+            AttributeError: If ``name`` is not a known RPC method.
+        """
+        rpc_method = _CLIENT_RPC_METHODS_BY_NAME.get(name)
+        if rpc_method is None:
+            raise AttributeError(
+                f"{self.__class__.__name__!r} has no attribute {name!r}"
+            )
+
+        def _rpc_call(*request_payloads: Any) -> MessagingFuture[Any]:
+            return self._call_rpc(rpc_method, *request_payloads)
+
+        return _rpc_call
+
+    def __dir__(self) -> list[str]:
+        """Include generated RPC method names in introspection output."""
+        return sorted(set(super().__dir__()) | set(_CLIENT_RPC_METHODS_BY_NAME))
+
     def submit_request(
         self,
         request_type: RpcMethod | str,
         request_payloads: list[Any],
         response_cls: Optional[T] = None,
     ) -> MessagingFuture[T]:
-        """Submit a request and return a future for its response.
+        """Submit a request through the legacy request-token API.
 
         Args:
             request_type: Which RPC to invoke.
@@ -297,6 +332,22 @@ class MultiprocessGrpcClient:
         """
         del response_cls
         rpc_method = coerce_rpc_method(request_type)
+        return self._call_rpc(rpc_method, *request_payloads)
+
+    def _call_rpc(
+        self,
+        rpc_method: RpcMethod,
+        *request_payloads: Any,
+    ) -> MessagingFuture[T]:
+        """Submit one typed RPC by its protocol method.
+
+        Args:
+            rpc_method: Descriptor-derived RPC method token.
+            request_payloads: Positional Python payloads for the method.
+
+        Returns:
+            A ``MessagingFuture`` completed by the gRPC callback.
+        """
         method_name, stub_method, typed_spec = self._rpc_methods[rpc_method]
         future: MessagingFuture[T] = MessagingFuture()
 
@@ -360,6 +411,39 @@ class MultiprocessGrpcClient:
             pending.future.set_exception(exc)
             return
         pending.future.set_result(decoded)
+
+
+def _make_client_rpc_method(rpc_method: RpcMethod) -> ClientRpcCallable:
+    method_name = _CLIENT_RPC_METHOD_NAMES[rpc_method]
+
+    def _rpc_method(
+        self: MultiprocessGrpcClient,
+        *request_payloads: Any,
+    ) -> MessagingFuture[Any]:
+        return self._call_rpc(rpc_method, *request_payloads)
+
+    _rpc_method.__name__ = method_name
+    _rpc_method.__qualname__ = f"MultiprocessGrpcClient.{method_name}"
+    _rpc_method.__doc__ = (
+        f"Submit the {rpc_method.name} RPC and return a ``MessagingFuture``."
+    )
+    return _rpc_method
+
+
+def _install_client_rpc_methods() -> None:
+    """Install one snake_case method per RPC on ``MultiprocessGrpcClient``."""
+    for rpc_method, method_name in _CLIENT_RPC_METHOD_NAMES.items():
+        if hasattr(MultiprocessGrpcClient, method_name):
+            raise RuntimeError(
+                f"RPC client method {method_name!r} conflicts with an existing "
+                "MultiprocessGrpcClient attribute"
+            )
+        setattr(
+            MultiprocessGrpcClient, method_name, _make_client_rpc_method(rpc_method)
+        )
+
+
+_install_client_rpc_methods()
 
 
 # ---------------------------------------------------------------------------
