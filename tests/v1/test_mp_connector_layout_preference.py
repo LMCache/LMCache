@@ -22,14 +22,16 @@ def connector_cls():
 
 
 class LegacyCacheConfig:
-    """Cache config without ``kv_cache_layout`` (pre-vllm#51718)."""
+    """Cache config without the resolved-layout accessor (pre-vllm#51718)."""
 
 
 def make_config(use_mla: bool = False, legacy: bool = False) -> SimpleNamespace:
     return SimpleNamespace(
         model_config=SimpleNamespace(use_mla=use_mla),
         cache_config=(
-            LegacyCacheConfig() if legacy else SimpleNamespace(kv_cache_layout=None)
+            LegacyCacheConfig()
+            if legacy
+            else SimpleNamespace(get_resolved_kv_cache_layout=lambda: None)
         ),
     )
 

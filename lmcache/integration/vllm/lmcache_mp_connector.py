@@ -1122,7 +1122,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         model_config = getattr(vllm_config, "model_config", None)
         if model_config is None or model_config.use_mla:
             return None
-        if not hasattr(vllm_config.cache_config, "kv_cache_layout"):
+        if not hasattr(vllm_config.cache_config, "get_resolved_kv_cache_layout"):
             return "HND"
         # Not "HND": MultiConnector compares preference strings verbatim.
         return "LBHNC"

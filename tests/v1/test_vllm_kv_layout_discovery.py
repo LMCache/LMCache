@@ -24,12 +24,24 @@ from lmcache.integration.vllm.utils import (
 UNSUPPORTED_LAYOUTS = ("LHBNC", "BHLNC")
 
 
-def make_vllm_config(**cache_attrs: object) -> SimpleNamespace:
-    return SimpleNamespace(cache_config=SimpleNamespace(**cache_attrs))
+def make_vllm_config(resolved_layout_name: str) -> SimpleNamespace:
+    """Fake config whose accessor returns a resolved layout member name."""
+    member = SimpleNamespace(name=resolved_layout_name)
+    cache_config = SimpleNamespace(get_resolved_kv_cache_layout=lambda: member)
+    return SimpleNamespace(cache_config=cache_config)
+
+
+def make_unresolved_vllm_config() -> SimpleNamespace:
+    def _raise() -> SimpleNamespace:
+        raise ValueError("KV cache layout has not been resolved yet")
+
+    return SimpleNamespace(
+        cache_config=SimpleNamespace(get_resolved_kv_cache_layout=_raise)
+    )
 
 
 class LegacyCacheConfig:
-    """Cache config without ``kv_cache_layout`` (pre-vllm#51718)."""
+    """Cache config without the resolved-layout accessor (pre-vllm#51718)."""
 
 
 def stub_module(
@@ -61,33 +73,28 @@ class TestTranslateVllmKVCacheLayout:
         with pytest.raises(NotImplementedError, match=name):
             translate_vllm_kv_cache_layout(name)
 
-    def test_unknown_name_raises_value_error(self):
-        with pytest.raises(ValueError, match="XYZ"):
+    def test_unknown_name_raises(self):
+        with pytest.raises(NotImplementedError, match="XYZ"):
             translate_vllm_kv_cache_layout("XYZ")
 
 
 class TestTryGetVllmKVCacheLayout:
     def test_resolved_layout_from_explicit_config(self):
-        config = make_vllm_config(kv_cache_layout="LBNHC")
+        config = make_vllm_config("LBNHC")
         assert try_get_vllm_kv_cache_layout(config) == "NHD"
 
-    def test_stored_alias_from_explicit_config(self):
-        config = make_vllm_config(kv_cache_layout="HND")
-        assert try_get_vllm_kv_cache_layout(config) == "HND"
-
-    def test_unresolved_layout_fails_loudly(self):
-        config = make_vllm_config(kv_cache_layout=None)
-        with pytest.raises(ValueError, match="not resolved"):
-            try_get_vllm_kv_cache_layout(config)
+    def test_unresolved_layout_error_passes_through(self):
+        with pytest.raises(ValueError, match="resolved"):
+            try_get_vllm_kv_cache_layout(make_unresolved_vllm_config())
 
     @pytest.mark.parametrize("name", UNSUPPORTED_LAYOUTS)
     def test_unsupported_resolved_layout_raises(self, name):
-        config = make_vllm_config(kv_cache_layout=name)
+        config = make_vllm_config(name)
         with pytest.raises(NotImplementedError, match=name):
             try_get_vllm_kv_cache_layout(config)
 
     def test_ambient_config_is_used_when_not_passed(self, monkeypatch):
-        config = make_vllm_config(kv_cache_layout="LBHNC")
+        config = make_vllm_config("LBHNC")
         stub_module(monkeypatch, "vllm.config", get_current_vllm_config=lambda: config)
         assert try_get_vllm_kv_cache_layout() == "HND"
 
@@ -108,13 +115,12 @@ class TestTryGetVllmKVCacheLayout:
 
 class TestVllmLayoutHints:
     def test_hint_present_and_translated(self):
-        config = make_vllm_config(kv_cache_layout="LBHNC")
+        config = make_vllm_config("LBHNC")
         assert vllm_layout_hints(config) == {"kv_layout": "HND"}
 
     def test_unresolved_layout_raises_through_hints(self):
-        config = make_vllm_config(kv_cache_layout=None)
-        with pytest.raises(ValueError, match="not resolved"):
-            vllm_layout_hints(config)
+        with pytest.raises(ValueError, match="resolved"):
+            vllm_layout_hints(make_unresolved_vllm_config())
 
 
 class TestResolveVllmKVLayout:

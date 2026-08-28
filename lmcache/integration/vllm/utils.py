@@ -19,7 +19,7 @@ from lmcache.logging import init_logger
 from lmcache.utils import get_size_bytes as get_size_bytes
 from lmcache.v1.config import LMCacheEngineConfig, load_ec_engine_config
 from lmcache.v1.config_base import apply_remote_configs, fetch_remote_config
-from lmcache.v1.gpu_connector.kv_format.types import KV_LAYOUT_NAMES, KVLayoutName
+from lmcache.v1.gpu_connector.kv_format.types import KVLayoutName
 
 if TYPE_CHECKING:
     # First Party
@@ -47,38 +47,31 @@ def vllm_layout_hints(vllm_config: "VllmConfig | None" = None) -> "LayoutHints":
     return hints  # type: ignore[return-value]
 
 
-def translate_vllm_kv_cache_layout(
-    kv_cache_layout: str | None,
-) -> KVLayoutName:
-    """Translate a vLLM ``KVCacheLayout`` name to LMCache's (``LBNHC`` ->
-    ``NHD``, ``LBHNC`` -> ``HND``).
+def translate_vllm_kv_cache_layout(kv_cache_layout: str) -> KVLayoutName:
+    """Map a vLLM ``KVCacheLayout`` member name to LMCache's name
+    (``LBNHC`` -> ``NHD``, ``LBHNC`` -> ``HND``).
 
     Raises:
         NotImplementedError: for layouts LMCache cannot transfer.
-        ValueError: for ``None`` or unknown names.
     """
-    if kv_cache_layout is None:
-        raise ValueError(
-            "vLLM has not resolved a KV cache layout yet; layout hints must "
-            "be built at KV-cache registration time, after resolution."
-        )
-    aliases = {"LBNHC": "NHD", "LBHNC": "HND"}
-    translated = aliases.get(kv_cache_layout, kv_cache_layout)
-    if translated in KV_LAYOUT_NAMES:
+    names = {
+        "NHD": "NHD",
+        "HND": "HND",
+        "LBNHC": "NHD",
+        "LBHNC": "HND",
+        "BLHNC": "BLHNC",
+        "BLNHC": "BLNHC",
+    }
+    translated = names.get(kv_cache_layout)
+    if translated is not None:
         return translated  # type: ignore[return-value]
     # TODO: support heads-outermost layouts; the transfer kernels address
     # one contiguous run per (layer, block), which these fragment per head.
-    if translated in ("LHBNC", "BHLNC"):
-        raise NotImplementedError(
-            f"LMCache does not support the {kv_cache_layout!r} KV cache "
-            "layout: per-block content is fragmented per head. If it was "
-            "selected via VLLM_KV_CACHE_LAYOUT, unset it or choose LBNHC, "
-            "LBHNC, BLHNC, or BLNHC."
-        )
-    raise ValueError(
-        f"Unknown KV cache layout {kv_cache_layout!r}; expected a vLLM "
-        "KVCacheLayout name (NHD, HND, LBNHC, LBHNC, LHBNC, BLHNC, BLNHC, "
-        "BHLNC)."
+    raise NotImplementedError(
+        f"LMCache does not support the {kv_cache_layout!r} KV cache "
+        "layout: per-block content is fragmented per head. If it was "
+        "selected via VLLM_KV_CACHE_LAYOUT, unset it or choose LBNHC, "
+        "LBHNC, BLHNC, or BLNHC."
     )
 
 
@@ -88,6 +81,10 @@ def try_get_vllm_kv_cache_layout(
     """Return vLLM's resolved KV cache layout as LMCache's name.
 
     Returns ``None`` when vLLM is unavailable (i.e. the MP server).
+
+    Raises:
+        ValueError: from vLLM, if the layout has not been resolved yet;
+            hints must be built at KV-cache registration time.
     """
     try:
         if vllm_config is None:
@@ -103,9 +100,12 @@ def try_get_vllm_kv_cache_layout(
         )
         return None
 
-    # vllm#51718 and later resolve the layout once into CacheConfig.
-    if hasattr(cache_config, "kv_cache_layout"):
-        return translate_vllm_kv_cache_layout(cache_config.kv_cache_layout)
+    # vllm#51718 and later: vLLM owns alias resolution, unknown-name
+    # validation, and the not-yet-resolved error.
+    if hasattr(cache_config, "get_resolved_kv_cache_layout"):
+        return translate_vllm_kv_cache_layout(
+            cache_config.get_resolved_kv_cache_layout().name
+        )
 
     try:
         # Third Party
