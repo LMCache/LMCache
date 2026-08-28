@@ -16,12 +16,13 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.utils import get_size_bytes as get_size_bytes
 from lmcache.v1.config import LMCacheEngineConfig, load_ec_engine_config
 from lmcache.v1.config_base import apply_remote_configs, fetch_remote_config
+from lmcache.v1.gpu_connector.kv_format.types import KV_LAYOUT_NAMES, KVLayoutName
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.gpu_connector.kv_format.types import KVLayoutName
     from lmcache.v1.gpu_connector.utils import LayoutHints
 
 logger = init_logger(__name__)
@@ -48,7 +49,7 @@ def vllm_layout_hints(vllm_config: "VllmConfig | None" = None) -> "LayoutHints":
 
 def translate_vllm_kv_cache_layout(
     kv_cache_layout: str | None,
-) -> "KVLayoutName":
+) -> KVLayoutName:
     """Translate a vLLM ``KVCacheLayout`` name to LMCache's (``LBNHC`` ->
     ``NHD``, ``LBHNC`` -> ``HND``).
 
@@ -61,11 +62,6 @@ def translate_vllm_kv_cache_layout(
             "vLLM has not resolved a KV cache layout yet; layout hints must "
             "be built at KV-cache registration time, after resolution."
         )
-    # Import here to break a circular import via
-    # lmcache.v1.gpu_connector.__init__ -> memory allocators -> this module.
-    # First Party
-    from lmcache.v1.gpu_connector.kv_format.types import KV_LAYOUT_NAMES
-
     aliases = {"LBNHC": "NHD", "LBHNC": "HND"}
     translated = aliases.get(kv_cache_layout, kv_cache_layout)
     if translated in KV_LAYOUT_NAMES:
@@ -88,7 +84,7 @@ def translate_vllm_kv_cache_layout(
 
 def try_get_vllm_kv_cache_layout(
     vllm_config: "VllmConfig | None" = None,
-) -> "KVLayoutName | None":
+) -> KVLayoutName | None:
     """Return vLLM's resolved KV cache layout as LMCache's name.
 
     Returns ``None`` when vLLM is unavailable (i.e. the MP server).
@@ -397,20 +393,6 @@ def extract_mm_features(
             return (request.mm_hashes, request.mm_positions)
     else:
         return ([], [])
-
-
-def get_size_bytes(shapes: list[torch.Size], kv_dtypes: list[torch.dtype]):
-    """
-    Calculate the size in bytes with the given shapes and dtypes.
-    """
-    assert len(shapes) == len(kv_dtypes), (
-        f"shapes and dtypes must have the same length, "
-        f"but got {len(shapes)} and {len(kv_dtypes)}"
-    )
-    return sum(
-        shape.numel() * kv_dtype.itemsize
-        for shape, kv_dtype in zip(shapes, kv_dtypes, strict=True)
-    )
 
 
 def calculate_local_rank_and_world_size(vllm_config: "VllmConfig") -> Tuple[int, int]:
