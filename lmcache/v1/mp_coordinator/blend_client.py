@@ -21,6 +21,7 @@ import threading
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.mp_coordinator.api import BlendMatch, BlendNamespace
+from lmcache.v1.mp_coordinator.schemas import encode_tokens
 
 logger = init_logger(__name__)
 
@@ -207,7 +208,7 @@ class BlendCoordinatorClient:
                 "POST",
                 "/directory/blend-lookup",
                 {
-                    "token_ids": item.tokens,
+                    "tokens_b64": encode_tokens(item.tokens),
                     "model_name": item.namespace.model_name,
                     "cache_salt": item.namespace.cache_salt,
                     "world_size": item.namespace.world_size,

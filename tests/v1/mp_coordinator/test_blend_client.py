@@ -11,7 +11,6 @@ from collections.abc import Callable
 import time
 
 # Third Party
-import numpy as np
 import pytest
 
 # First Party
@@ -26,6 +25,7 @@ from lmcache.v1.mp_coordinator.blend_client import (
     PENDING,
     BlendCoordinatorClient,
 )
+from lmcache.v1.mp_coordinator.schemas import decode_tokens, encode_tokens
 from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
 
 CHUNK = 3
@@ -46,8 +46,9 @@ def _directory_request(
                 cache_salt=payload["cache_salt"],
                 world_size=payload["world_size"],
             )
-            tokens = np.asarray(payload["token_ids"], dtype=np.uint64)
-            matches = directory.blend_match(tokens, namespace)
+            matches = directory.blend_match(
+                decode_tokens(payload["tokens_b64"]), namespace
+            )
             return {
                 "matches": [
                     {
@@ -234,7 +235,7 @@ def test_match_carries_the_namespace_to_the_coordinator():
         _wait_match(client, "r1")
         assert sent == [
             {
-                "token_ids": [1, 2, 3],
+                "tokens_b64": encode_tokens([1, 2, 3]),
                 "model_name": "llama",
                 "cache_salt": "tenant-a",
                 "world_size": 4,
