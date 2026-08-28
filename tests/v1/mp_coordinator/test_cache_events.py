@@ -25,6 +25,7 @@ from lmcache.v1.distributed.api import (
 from lmcache.v1.distributed.internal_api import L1ObjectMeta
 from lmcache.v1.mp_coordinator.api import (
     UNKNOWN_TOKEN_OFFSET,
+    BlendNamespace,
     CacheEventBatch,
     CacheEventEntry,
     CacheEventType,
@@ -45,6 +46,10 @@ import lmcache.v1.mp_coordinator.cache_events as cache_events
 
 def _key(hash_byte: int) -> ObjectKey:
     return ObjectKey(chunk_hash=bytes([hash_byte]) * 4, model_name="m", kv_rank=0)
+
+
+# The namespace ``_key`` stores in; fragment queries must ask from it.
+NS = BlendNamespace.from_object_key(_key(0))
 
 
 def _entry(hash_byte: int, size_bytes: int = 0) -> CacheEventEntry:
@@ -797,8 +802,8 @@ def test_token_bindings_feed_the_key_directory_end_to_end():
     ]
     # The offsets survive the emitter -> HTTP -> directory round trip, and
     # reach a match as the re-RoPE source position.
-    (first,) = key_directory.blend_match(np.asarray([1, 2], dtype=np.uint64))
-    (second,) = key_directory.blend_match(np.asarray([3, 4], dtype=np.uint64))
+    (first,) = key_directory.blend_match(np.asarray([1, 2], dtype=np.uint64), NS)
+    (second,) = key_directory.blend_match(np.asarray([3, 4], dtype=np.uint64), NS)
     assert (first.old_st, second.old_st) == (0, 256)
 
 

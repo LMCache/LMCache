@@ -246,11 +246,21 @@ class TestOtherApis:
         body = {
             "num_keys": 3,
             "num_placements": 4,
-            "blend": {"num_contents": 1, "num_chunks": 2, "table_size": 1024},
+            "blend": {
+                "num_contents": 1,
+                "num_chunks": 2,
+                "num_claims": 3,
+                "num_namespaces": 2,
+                "table_size": 1024,
+            },
         }
         metrics = _json(_render("directory", body))["metrics"]
         assert metrics["num_keys"] == 3
         assert metrics["blend"]["table_size"] == 1024
+        # Claims exceed chunks when tenants share content -- the signal
+        # num_chunks alone cannot give.
+        assert metrics["blend"]["num_claims"] == 3
+        assert metrics["blend"]["num_namespaces"] == 2
 
 
 class TestPaths:

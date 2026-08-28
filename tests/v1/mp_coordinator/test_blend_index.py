@@ -14,6 +14,7 @@ import pytest
 # First Party
 from lmcache.v1.distributed.api import ObjectKey, Tier
 from lmcache.v1.mp_coordinator.api import (
+    BlendNamespace,
     CacheEventBatch,
     CacheEventEntry,
     CacheEventType,
@@ -22,6 +23,11 @@ from lmcache.v1.mp_coordinator.blend_index import BlendIndex
 from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
 
 CHUNK = 4
+
+# The namespace most index-level tests store and query in; matches are
+# scoped to it, so a test that does not care about identity uses one.
+NS = BlendNamespace(model_name="m", world_size=1)
+OTHER_NS = BlendNamespace(model_name="other", world_size=1)
 
 
 def _content(*tokens: int) -> np.ndarray:
@@ -41,9 +47,9 @@ def _tuples(matches) -> list[tuple[bytes, int, int]]:
 
 def test_content_is_found_at_its_query_offset():
     index = _index()
-    index.add(_content(10, 11, 12, 13), b"A", token_offset=0)
+    index.add(_content(10, 11, 12, 13), b"A", token_offset=0, namespace=NS)
 
-    matches = index.match(np.asarray([7, 8, 10, 11, 12, 13, 9], dtype=np.uint64))
+    matches = index.match(np.asarray([7, 8, 10, 11, 12, 13, 9], dtype=np.uint64), NS)
     assert _tuples(matches) == [(b"A", 0, 2)]
 
 
@@ -51,41 +57,41 @@ def test_old_st_is_the_stored_position_not_the_query_position():
     """re-RoPE shifts from where the chunk was stored to where it is
     needed, so the two positions must be reported independently."""
     index = _index()
-    index.add(_content(10, 11, 12, 13), b"A", token_offset=1024)
+    index.add(_content(10, 11, 12, 13), b"A", token_offset=1024, namespace=NS)
 
-    [match] = index.match(np.asarray([0, 10, 11, 12, 13], dtype=np.uint64))
+    [match] = index.match(np.asarray([0, 10, 11, 12, 13], dtype=np.uint64), NS)
     assert (match.old_st, match.cur_st) == (1024, 1)
 
 
 def test_several_chunks_are_found_in_one_query_ascending():
     index = _index()
-    index.add(_content(1, 2, 3, 4), b"A", token_offset=0)
-    index.add(_content(5, 6, 7, 8), b"B", token_offset=4)
+    index.add(_content(1, 2, 3, 4), b"A", token_offset=0, namespace=NS)
+    index.add(_content(5, 6, 7, 8), b"B", token_offset=4, namespace=NS)
 
-    matches = index.match(np.asarray([9, 5, 6, 7, 8, 1, 2, 3, 4], dtype=np.uint64))
+    matches = index.match(np.asarray([9, 5, 6, 7, 8, 1, 2, 3, 4], dtype=np.uint64), NS)
     assert _tuples(matches) == [(b"B", 4, 1), (b"A", 0, 5)]
 
 
 def test_repeated_content_matches_once_at_its_first_position():
     index = _index()
-    index.add(_content(1, 2, 3, 4), b"A", token_offset=0)
+    index.add(_content(1, 2, 3, 4), b"A", token_offset=0, namespace=NS)
 
-    matches = index.match(np.asarray([1, 2, 3, 4, 1, 2, 3, 4], dtype=np.uint64))
+    matches = index.match(np.asarray([1, 2, 3, 4, 1, 2, 3, 4], dtype=np.uint64), NS)
     assert _tuples(matches) == [(b"A", 0, 0)]
 
 
 def test_query_shorter_than_the_window_matches_nothing():
     index = _index()
-    index.add(_content(1, 2, 3, 4), b"A", token_offset=0)
+    index.add(_content(1, 2, 3, 4), b"A", token_offset=0, namespace=NS)
 
-    assert index.match(np.asarray([1, 2, 3], dtype=np.uint64)) == []
+    assert index.match(np.asarray([1, 2, 3], dtype=np.uint64), NS) == []
 
 
 def test_absent_content_matches_nothing():
     index = _index()
-    index.add(_content(1, 2, 3, 4), b"A", token_offset=0)
+    index.add(_content(1, 2, 3, 4), b"A", token_offset=0, namespace=NS)
 
-    assert index.match(np.asarray([5, 6, 7, 8, 9], dtype=np.uint64)) == []
+    assert index.match(np.asarray([5, 6, 7, 8, 9], dtype=np.uint64), NS) == []
 
 
 # -- Token-exact verification ------------------------------------------------
@@ -95,17 +101,17 @@ def test_near_miss_content_is_rejected():
     """Discovery is by hash but acceptance is by content, so a window
     differing in one token must not match."""
     index = _index()
-    index.add(_content(10, 11, 12, 13), b"A", token_offset=0)
+    index.add(_content(10, 11, 12, 13), b"A", token_offset=0, namespace=NS)
 
-    assert index.match(np.asarray([10, 11, 12, 99], dtype=np.uint64)) == []
+    assert index.match(np.asarray([10, 11, 12, 99], dtype=np.uint64), NS) == []
 
 
 def test_verification_uses_the_indexed_content_not_the_stored_length():
     index = _index()
-    index.add(_content(10, 11, 12, 13), b"A", token_offset=0)
+    index.add(_content(10, 11, 12, 13), b"A", token_offset=0, namespace=NS)
 
     # A superset window containing the content still matches at its offset.
-    [match] = index.match(np.asarray([10, 11, 12, 13, 14], dtype=np.uint64))
+    [match] = index.match(np.asarray([10, 11, 12, 13, 14], dtype=np.uint64), NS)
     assert match.cur_st == 0
 
 
@@ -115,8 +121,8 @@ def test_verification_uses_the_indexed_content_not_the_stored_length():
 def test_add_is_idempotent():
     index = _index()
     content = _content(1, 2, 3, 4)
-    index.add(content, b"A", token_offset=0)
-    index.add(content, b"A", token_offset=0)
+    index.add(content, b"A", token_offset=0, namespace=NS)
+    index.add(content, b"A", token_offset=0, namespace=NS)
 
     stats = index.stats()
     assert (stats.num_contents, stats.num_chunks) == (1, 1)
@@ -125,10 +131,10 @@ def test_add_is_idempotent():
 def test_readding_a_chunk_updates_its_offset():
     index = _index()
     content = _content(1, 2, 3, 4)
-    index.add(content, b"A", token_offset=0)
-    index.add(content, b"A", token_offset=256)
+    index.add(content, b"A", token_offset=0, namespace=NS)
+    index.add(content, b"A", token_offset=256, namespace=NS)
 
-    [match] = index.match(np.asarray([1, 2, 3, 4], dtype=np.uint64))
+    [match] = index.match(np.asarray([1, 2, 3, 4], dtype=np.uint64), NS)
     assert match.old_st == 256
     assert index.stats().num_chunks == 1
 
@@ -136,22 +142,22 @@ def test_readding_a_chunk_updates_its_offset():
 def test_remove_makes_content_undiscoverable():
     index = _index()
     content = _content(1, 2, 3, 4)
-    index.add(content, b"A", token_offset=0)
-    index.remove(content, b"A")
+    index.add(content, b"A", token_offset=0, namespace=NS)
+    index.remove(content, b"A", NS)
 
-    assert index.match(np.asarray([1, 2, 3, 4], dtype=np.uint64)) == []
+    assert index.match(np.asarray([1, 2, 3, 4], dtype=np.uint64), NS) == []
     assert index.stats().num_contents == 0
 
 
 def test_remove_of_unknown_chunk_or_content_is_a_noop():
     index = _index()
     content = _content(1, 2, 3, 4)
-    index.add(content, b"A", token_offset=0)
+    index.add(content, b"A", token_offset=0, namespace=NS)
 
-    index.remove(content, b"UNKNOWN")
-    index.remove(_content(9, 9, 9, 9), b"A")
+    index.remove(content, b"UNKNOWN", NS)
+    index.remove(_content(9, 9, 9, 9), b"A", NS)
 
-    assert _tuples(index.match(np.asarray([1, 2, 3, 4], dtype=np.uint64))) == [
+    assert _tuples(index.match(np.asarray([1, 2, 3, 4], dtype=np.uint64), NS)) == [
         (b"A", 0, 0)
     ]
 
@@ -162,13 +168,13 @@ def test_identical_content_under_two_prefixes_survives_one_eviction():
     other discoverable."""
     index = _index()
     content = _content(1, 2, 3, 4)
-    index.add(content, b"A", token_offset=0)
-    index.add(content, b"B", token_offset=512)
+    index.add(content, b"A", token_offset=0, namespace=NS)
+    index.add(content, b"B", token_offset=512, namespace=NS)
     assert index.stats().num_chunks == 2
 
-    index.remove(content, b"A")
+    index.remove(content, b"A", NS)
 
-    assert _tuples(index.match(np.asarray([1, 2, 3, 4], dtype=np.uint64))) == [
+    assert _tuples(index.match(np.asarray([1, 2, 3, 4], dtype=np.uint64), NS)) == [
         (b"B", 512, 0)
     ]
 
@@ -176,8 +182,8 @@ def test_identical_content_under_two_prefixes_survives_one_eviction():
 def test_content_of_the_wrong_length_is_not_indexed():
     """Only full-chunk content can match a full-chunk window."""
     index = _index()
-    index.add(_content(1, 2, 3), b"SHORT", token_offset=0)
-    index.add(_content(1, 2, 3, 4, 5), b"LONG", token_offset=0)
+    index.add(_content(1, 2, 3), b"SHORT", token_offset=0, namespace=NS)
+    index.add(_content(1, 2, 3, 4, 5), b"LONG", token_offset=0, namespace=NS)
 
     assert index.stats().num_contents == 0
 
@@ -189,21 +195,23 @@ def test_many_contents_stay_matchable_across_growth_and_compaction():
     index = _index()
     contents = {bytes([i]): _content(i, i + 1, i + 2, i + 3) for i in range(1, 200)}
     for chunk_hash, content in contents.items():
-        index.add(content, chunk_hash, token_offset=0)
+        index.add(content, chunk_hash, token_offset=0, namespace=NS)
 
     for chunk_hash, content in contents.items():
-        matches = index.match(content.astype(np.uint64))
+        matches = index.match(content.astype(np.uint64), NS)
         assert _tuples(matches) == [(chunk_hash, 0, 0)]
 
     # Drop most of them: compaction must not lose the survivors.
     survivors = {k: v for k, v in contents.items() if k[0] % 20 == 0}
     for chunk_hash, content in contents.items():
         if chunk_hash not in survivors:
-            index.remove(content, chunk_hash)
+            index.remove(content, chunk_hash, NS)
 
     assert index.stats().num_contents == len(survivors)
     for chunk_hash, content in survivors.items():
-        assert _tuples(index.match(content.astype(np.uint64))) == [(chunk_hash, 0, 0)]
+        assert _tuples(index.match(content.astype(np.uint64), NS)) == [
+            (chunk_hash, 0, 0)
+        ]
 
 
 # -- Stride ------------------------------------------------------------------
@@ -211,12 +219,12 @@ def test_many_contents_stay_matchable_across_growth_and_compaction():
 
 def test_stride_skips_offsets_between_probes():
     index = _index(probe_stride=CHUNK)
-    index.add(_content(10, 11, 12, 13), b"A", token_offset=0)
+    index.add(_content(10, 11, 12, 13), b"A", token_offset=0, namespace=NS)
 
     # Aligned with a probe position -> found.
-    assert index.match(np.asarray([10, 11, 12, 13], dtype=np.uint64))
+    assert index.match(np.asarray([10, 11, 12, 13], dtype=np.uint64), NS)
     # One token off a probe position -> missed (recall traded for CPU).
-    assert index.match(np.asarray([0, 10, 11, 12, 13], dtype=np.uint64)) == []
+    assert index.match(np.asarray([0, 10, 11, 12, 13], dtype=np.uint64), NS) == []
 
 
 # -- Construction ------------------------------------------------------------
@@ -266,7 +274,7 @@ def test_matches_a_brute_force_scan_on_random_input():
         chunk_hash = f"c{i}".encode()
         offset = i * chunk
         contents[chunk_hash] = (content, offset)
-        index.add(content, chunk_hash, token_offset=offset)
+        index.add(content, chunk_hash, token_offset=offset, namespace=NS)
 
     for _ in range(20):
         query: list[int] = []
@@ -277,7 +285,7 @@ def test_matches_a_brute_force_scan_on_random_input():
             else:
                 query.extend(rng.randrange(1, 5000) for _ in range(chunk))
         expected = _reference(contents, query, chunk)
-        actual = _tuples(index.match(np.asarray(query, dtype=np.uint64)))
+        actual = _tuples(index.match(np.asarray(query, dtype=np.uint64), NS))
         assert actual == expected
 
 
@@ -292,7 +300,7 @@ def test_concurrent_add_and_match_stay_consistent():
     def writer() -> None:
         try:
             for i in range(1, 400):
-                index.add(_content(i, i + 1, i + 2, i + 3), bytes([i % 256]), i)
+                index.add(_content(i, i + 1, i + 2, i + 3), bytes([i % 256]), i, NS)
         except BaseException as exc:  # noqa: BLE001 — surfaced below
             errors.append(exc)
         finally:
@@ -302,7 +310,7 @@ def test_concurrent_add_and_match_stay_consistent():
         try:
             probe = np.asarray([5, 6, 7, 8], dtype=np.uint64)
             while not stop.is_set():
-                index.match(probe)
+                index.match(probe, NS)
         except BaseException as exc:  # noqa: BLE001 — surfaced below
             errors.append(exc)
 
@@ -313,14 +321,32 @@ def test_concurrent_add_and_match_stay_consistent():
         thread.join(timeout=30)
 
     assert not errors
-    assert index.match(np.asarray([5, 6, 7, 8], dtype=np.uint64))
+    assert index.match(np.asarray([5, 6, 7, 8], dtype=np.uint64), NS)
 
 
 # -- Key directory integration -----------------------------------------------
 
 
-def _key(hash_byte: int, kv_rank: int = 0) -> ObjectKey:
-    return ObjectKey(chunk_hash=bytes([hash_byte]) * 4, model_name="m", kv_rank=kv_rank)
+def _key(
+    hash_byte: int,
+    rank: int = 0,
+    world_size: int = 1,
+    model_name: str = "m",
+    cache_salt: str = "",
+) -> ObjectKey:
+    """Build a key the way a server would, so ``kv_rank`` carries the
+    world size the namespace is derived from."""
+    return ObjectKey(
+        chunk_hash=bytes([hash_byte]) * 4,
+        model_name=model_name,
+        kv_rank=ObjectKey.ComputeKVRank(
+            world_size=world_size,
+            global_rank=rank,
+            local_world_size=world_size,
+            local_rank=rank,
+        ),
+        cache_salt=cache_salt,
+    )
 
 
 def _store(
@@ -349,6 +375,11 @@ def _store(
     )
 
 
+# The namespace ``_key`` stores in, and therefore the one directory-level
+# queries must ask from.
+DIR_NS = BlendNamespace(model_name="m", world_size=1)
+
+
 def _directory() -> KeyDirectory:
     directory = KeyDirectory()
     directory.enable_blend_lookup(chunk_size=CHUNK, probe_stride=1)
@@ -359,7 +390,9 @@ def test_a_stored_chunk_becomes_fragment_matchable():
     directory = _directory()
     directory.consume(_store([_key(1)], [10, 11, 12, 13], seq=1, token_offset=256))
 
-    matches = directory.blend_match(np.asarray([0, 10, 11, 12, 13], dtype=np.uint64))
+    matches = directory.blend_match(
+        np.asarray([0, 10, 11, 12, 13], dtype=np.uint64), DIR_NS
+    )
     assert _tuples(matches) == [(_key(1).chunk_hash, 256, 1)]
 
 
@@ -370,26 +403,48 @@ def test_deleting_the_last_placement_removes_it_from_fragment_matching():
     directory.consume(_store([_key(1)], [10, 11, 12, 13], seq=1))
     directory.consume(_store([_key(1)], [], seq=2, event_type=CacheEventType.DELETE))
 
-    assert directory.blend_match(np.asarray([10, 11, 12, 13], dtype=np.uint64)) == []
+    assert (
+        directory.blend_match(np.asarray([10, 11, 12, 13], dtype=np.uint64), DIR_NS)
+        == []
+    )
     assert directory.blend_stats().num_contents == 0
 
 
 def test_chunk_stays_matchable_while_any_rank_holds_it():
+    """Ranks of one namespace hold the same bytes, so the claim survives
+    until the last of them is deleted."""
     directory = _directory()
+    namespace = BlendNamespace(model_name="m", world_size=2)
     directory.consume(
-        _store([_key(1, kv_rank=0), _key(1, kv_rank=1)], [10, 11, 12, 13], seq=1)
+        _store(
+            [_key(1, rank=0, world_size=2), _key(1, rank=1, world_size=2)],
+            [10, 11, 12, 13],
+            seq=1,
+        )
     )
     directory.consume(
-        _store([_key(1, kv_rank=0)], [], seq=2, event_type=CacheEventType.DELETE)
+        _store(
+            [_key(1, rank=0, world_size=2)],
+            [],
+            seq=2,
+            event_type=CacheEventType.DELETE,
+        )
     )
 
     query = np.asarray([10, 11, 12, 13], dtype=np.uint64)
-    assert _tuples(directory.blend_match(query)) == [(_key(1).chunk_hash, 0, 0)]
+    assert _tuples(directory.blend_match(query, namespace)) == [
+        (_key(1).chunk_hash, 0, 0)
+    ]
 
     directory.consume(
-        _store([_key(1, kv_rank=1)], [], seq=3, event_type=CacheEventType.DELETE)
+        _store(
+            [_key(1, rank=1, world_size=2)],
+            [],
+            seq=3,
+            event_type=CacheEventType.DELETE,
+        )
     )
-    assert directory.blend_match(query) == []
+    assert directory.blend_match(query, namespace) == []
 
 
 def test_restoring_a_chunk_with_new_content_retires_the_old_fingerprint():
@@ -399,9 +454,12 @@ def test_restoring_a_chunk_with_new_content_retires_the_old_fingerprint():
     directory.consume(_store([_key(1)], [10, 11, 12, 13], seq=1))
     directory.consume(_store([_key(1)], [20, 21, 22, 23], seq=2))
 
-    assert directory.blend_match(np.asarray([10, 11, 12, 13], dtype=np.uint64)) == []
+    assert (
+        directory.blend_match(np.asarray([10, 11, 12, 13], dtype=np.uint64), DIR_NS)
+        == []
+    )
     assert _tuples(
-        directory.blend_match(np.asarray([20, 21, 22, 23], dtype=np.uint64))
+        directory.blend_match(np.asarray([20, 21, 22, 23], dtype=np.uint64), DIR_NS)
     ) == [(_key(1).chunk_hash, 0, 0)]
     assert directory.blend_stats().num_contents == 1
 
@@ -413,7 +471,10 @@ def test_a_tokenless_store_is_not_fragment_matchable():
     directory.consume(_store([_key(1)], [], seq=1))
 
     assert directory.blend_stats().num_contents == 0
-    assert directory.blend_match(np.asarray([10, 11, 12, 13], dtype=np.uint64)) == []
+    assert (
+        directory.blend_match(np.asarray([10, 11, 12, 13], dtype=np.uint64), DIR_NS)
+        == []
+    )
 
 
 def test_incarnation_fencing_removes_fragment_matches():
@@ -422,7 +483,10 @@ def test_incarnation_fencing_removes_fragment_matches():
 
     directory.fence_instance("node-a")
 
-    assert directory.blend_match(np.asarray([10, 11, 12, 13], dtype=np.uint64)) == []
+    assert (
+        directory.blend_match(np.asarray([10, 11, 12, 13], dtype=np.uint64), DIR_NS)
+        == []
+    )
 
 
 def test_chunk_with_unreported_offset_is_not_fragment_matchable():
@@ -453,7 +517,10 @@ def test_chunk_with_unreported_offset_is_not_fragment_matchable():
     # Content known, but with no position it cannot be indexed.
     assert directory.get_token_ids([_key(1).chunk_hash]) == [(10, 11, 12, 13)]
     assert directory.blend_stats().num_chunks == 0
-    assert directory.blend_match(np.asarray([10, 11, 12, 13], dtype=np.uint64)) == []
+    assert (
+        directory.blend_match(np.asarray([10, 11, 12, 13], dtype=np.uint64), DIR_NS)
+        == []
+    )
 
 
 def test_a_later_offset_bearing_store_makes_the_chunk_matchable():
@@ -465,7 +532,9 @@ def test_a_later_offset_bearing_store_makes_the_chunk_matchable():
 
     directory.consume(_store([_key(1)], [10, 11, 12, 13], seq=2, token_offset=256))
 
-    matches = directory.blend_match(np.asarray([10, 11, 12, 13], dtype=np.uint64))
+    matches = directory.blend_match(
+        np.asarray([10, 11, 12, 13], dtype=np.uint64), DIR_NS
+    )
     assert _tuples(matches) == [(_key(1).chunk_hash, 256, 0)]
 
 
@@ -477,7 +546,10 @@ def test_blend_lookup_is_off_until_enabled():
     directory.consume(_store([_key(1)], [10, 11, 12, 13], seq=1, token_offset=0))
 
     assert directory.blend_stats().num_chunks == 0
-    assert directory.blend_match(np.asarray([10, 11, 12, 13], dtype=np.uint64)) == []
+    assert (
+        directory.blend_match(np.asarray([10, 11, 12, 13], dtype=np.uint64), DIR_NS)
+        == []
+    )
     # The token binding itself is still recorded for introspection.
     assert directory.get_token_ids([_key(1).chunk_hash]) == [(10, 11, 12, 13)]
 
@@ -490,6 +562,167 @@ def test_enabling_does_not_retroactively_index_earlier_stores():
 
     directory.enable_blend_lookup(chunk_size=CHUNK, probe_stride=1)
 
-    assert directory.blend_match(np.asarray([10, 11, 12, 13], dtype=np.uint64)) == []
+    assert (
+        directory.blend_match(np.asarray([10, 11, 12, 13], dtype=np.uint64), DIR_NS)
+        == []
+    )
     directory.consume(_store([_key(2)], [20, 21, 22, 23], seq=2, token_offset=0))
-    assert directory.blend_match(np.asarray([20, 21, 22, 23], dtype=np.uint64))
+    assert directory.blend_match(np.asarray([20, 21, 22, 23], dtype=np.uint64), DIR_NS)
+
+
+# -- Namespace scoping -------------------------------------------------------
+
+
+def test_content_stored_by_another_namespace_is_not_offered():
+    """A chunk hash names content only; the model, salt, and parallel
+    setup that make it retrievable live on the key beside it. Offering
+    another namespace's chunk would expand into keys that exist nowhere,
+    buying a confirmed miss and a burned blend slot."""
+    index = _index()
+    index.add(_content(1, 2, 3, 4), b"A", token_offset=0, namespace=OTHER_NS)
+
+    assert index.match(np.asarray([1, 2, 3, 4], dtype=np.uint64), NS) == []
+    assert _tuples(
+        index.match(np.asarray([1, 2, 3, 4], dtype=np.uint64), OTHER_NS)
+    ) == [(b"A", 0, 0)]
+
+
+def test_the_requester_s_own_chunk_is_found_behind_another_namespace_s():
+    """The regression this scoping exists for: the same text stored after
+    different prefixes yields several chunk hashes for one content. With
+    a single untagged occupant the first-indexed one wins and hides the
+    requester's own copy, which is a lost hit, not just a wasted one."""
+    index = _index()
+    content = _content(1, 2, 3, 4)
+    index.add(content, b"THEIRS", token_offset=0, namespace=OTHER_NS)
+    index.add(content, b"MINE", token_offset=512, namespace=NS)
+
+    assert _tuples(index.match(np.asarray([1, 2, 3, 4], dtype=np.uint64), NS)) == [
+        (b"MINE", 512, 0)
+    ]
+
+
+def test_one_chunk_shared_by_two_namespaces_serves_both():
+    """Identical prefixes across namespaces produce the same chunk hash,
+    so both claims ride on one occupant and one copy of the content."""
+    index = _index()
+    content = _content(1, 2, 3, 4)
+    index.add(content, b"A", token_offset=0, namespace=NS)
+    index.add(content, b"A", token_offset=0, namespace=OTHER_NS)
+
+    query = np.asarray([1, 2, 3, 4], dtype=np.uint64)
+    assert _tuples(index.match(query, NS)) == [(b"A", 0, 0)]
+    assert _tuples(index.match(query, OTHER_NS)) == [(b"A", 0, 0)]
+    stats = index.stats()
+    assert (stats.num_chunks, stats.num_claims, stats.num_namespaces) == (1, 2, 2)
+
+
+def test_releasing_one_namespace_leaves_the_other_matching():
+    index = _index()
+    content = _content(1, 2, 3, 4)
+    index.add(content, b"A", token_offset=0, namespace=NS)
+    index.add(content, b"A", token_offset=0, namespace=OTHER_NS)
+
+    index.remove(content, b"A", NS)
+
+    query = np.asarray([1, 2, 3, 4], dtype=np.uint64)
+    assert index.match(query, NS) == []
+    assert _tuples(index.match(query, OTHER_NS)) == [(b"A", 0, 0)]
+    assert index.stats().num_contents == 1
+
+
+def test_releasing_the_last_namespace_drops_the_content():
+    index = _index()
+    content = _content(1, 2, 3, 4)
+    index.add(content, b"A", token_offset=0, namespace=NS)
+    index.add(content, b"A", token_offset=0, namespace=OTHER_NS)
+
+    index.remove(content, b"A", NS)
+    index.remove(content, b"A", OTHER_NS)
+
+    assert index.match(np.asarray([1, 2, 3, 4], dtype=np.uint64), OTHER_NS) == []
+    assert index.stats().num_contents == 0
+
+
+def test_remove_chunk_retires_every_namespace_at_once():
+    """Re-storing a chunk hash with different content invalidates it for
+    everyone, not just the namespace that re-stored it."""
+    index = _index()
+    content = _content(1, 2, 3, 4)
+    index.add(content, b"A", token_offset=0, namespace=NS)
+    index.add(content, b"A", token_offset=0, namespace=OTHER_NS)
+
+    index.remove_chunk(content, b"A")
+
+    query = np.asarray([1, 2, 3, 4], dtype=np.uint64)
+    assert index.match(query, NS) == []
+    assert index.match(query, OTHER_NS) == []
+    assert index.stats().num_contents == 0
+
+
+@pytest.mark.parametrize(
+    "requester",
+    [
+        BlendNamespace(model_name="other", world_size=1),
+        BlendNamespace(model_name="m", cache_salt="tenant-b", world_size=1),
+        BlendNamespace(model_name="m", world_size=2),
+    ],
+    ids=["other-model", "other-salt", "other-world-size"],
+)
+def test_directory_does_not_offer_matches_across_namespaces(
+    requester: BlendNamespace,
+):
+    """Each dimension of the namespace is one the requester's own key
+    expansion would miss on: another model's KV is not interchangeable,
+    another tenant's salt is isolated by design, and another parallel
+    setup shards heads differently."""
+    directory = _directory()
+    directory.consume(_store([_key(1)], [10, 11, 12, 13], seq=1))
+
+    query = np.asarray([10, 11, 12, 13], dtype=np.uint64)
+    assert directory.blend_match(query, requester) == []
+    assert _tuples(directory.blend_match(query, DIR_NS)) == [(_key(1).chunk_hash, 0, 0)]
+
+
+def test_directory_offers_a_chunk_two_tenants_stored_to_each_of_them():
+    directory = _directory()
+    tenant_a = _key(1, cache_salt="a")
+    tenant_b = _key(1, cache_salt="b")
+    directory.consume(_store([tenant_a, tenant_b], [10, 11, 12, 13], seq=1))
+
+    query = np.asarray([10, 11, 12, 13], dtype=np.uint64)
+    for salt in ("a", "b"):
+        namespace = BlendNamespace(model_name="m", cache_salt=salt, world_size=1)
+        assert _tuples(directory.blend_match(query, namespace)) == [
+            (tenant_a.chunk_hash, 0, 0)
+        ]
+    assert directory.blend_stats().num_claims == 2
+
+
+def test_directory_releases_a_namespace_claim_when_its_last_key_goes():
+    """The other tenant still holds the chunk, so the content stays
+    indexed — but the departing tenant must stop matching it."""
+    directory = _directory()
+    tenant_a = _key(1, cache_salt="a")
+    tenant_b = _key(1, cache_salt="b")
+    directory.consume(_store([tenant_a, tenant_b], [10, 11, 12, 13], seq=1))
+    directory.consume(_store([tenant_a], [], seq=2, event_type=CacheEventType.DELETE))
+
+    query = np.asarray([10, 11, 12, 13], dtype=np.uint64)
+    ns_a = BlendNamespace(model_name="m", cache_salt="a", world_size=1)
+    ns_b = BlendNamespace(model_name="m", cache_salt="b", world_size=1)
+    assert directory.blend_match(query, ns_a) == []
+    assert _tuples(directory.blend_match(query, ns_b)) == [(tenant_b.chunk_hash, 0, 0)]
+
+
+def test_a_namespace_joining_a_bound_chunk_without_tokens_still_claims_it():
+    """The second storer's emitter had already evicted the tokens, so its
+    store carries none. The content is already known, so the claim must
+    be recorded from the key alone rather than waiting for a re-store."""
+    directory = _directory()
+    directory.consume(_store([_key(1, cache_salt="a")], [10, 11, 12, 13], seq=1))
+    directory.consume(_store([_key(1, cache_salt="b")], [], seq=2))
+
+    query = np.asarray([10, 11, 12, 13], dtype=np.uint64)
+    ns_b = BlendNamespace(model_name="m", cache_salt="b", world_size=1)
+    assert _tuples(directory.blend_match(query, ns_b)) == [(_key(1).chunk_hash, 0, 0)]
