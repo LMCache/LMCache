@@ -108,6 +108,18 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
         if max_capacity_gb <= 0:
             raise ValueError("backend_params must include a positive 'max_capacity_gb'")
         super().__init__(max_capacity_bytes=int(max_capacity_gb * (1024**3)))
+
+        # Initialize the storage agent before allocating event notifiers or
+        # starting the event-loop thread. Backend validation, storage setup,
+        # or NIXL registration may fail during construction; failing here
+        # avoids leaking adapter-owned file descriptors or a background thread.
+        self.nixl_agent = _create_dynamic_nixl_storage_agent(
+            device="cpu",
+            backend=config.backend,
+            backend_params=config.backend_params,
+            l1_memory_desc=l1_memory_desc,
+        )
+
         self._config = config
 
         self._store_efd = create_event_notifier()
@@ -130,13 +142,6 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
         self._loop = asyncio.new_event_loop()
         self._loop_thread = threading.Thread(target=self._run_event_loop, daemon=True)
         self._loop_thread.start()
-
-        self.nixl_agent = _create_dynamic_nixl_storage_agent(
-            device="cpu",
-            backend=config.backend,
-            backend_params=config.backend_params,
-            l1_memory_desc=l1_memory_desc,
-        )
 
         self._persist_enabled = config.persist_config.persist_enabled
 
