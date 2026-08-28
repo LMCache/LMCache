@@ -1,4 +1,4 @@
-0.27.1
-short_sha=
-full_sha=
-archive_index_url=
+0.28.1rc1.dev43+g6f7df92a8
+short_sha=6f7df92a8
+full_sha=6f7df92a8e6cdc74a725b8f10b4d0b48ba2b37ef
+archive_index_url=https://wheels.vllm.ai/6f7df92a8e6cdc74a725b8f10b4d0b48ba2b37ef/cu130
