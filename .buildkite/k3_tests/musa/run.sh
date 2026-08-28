@@ -1,0 +1,286 @@
+#!/usr/bin/env bash
+# Run the focused LMCache smoke suite on a self-hosted MUSA agent.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+ARTIFACT_DIR="${REPO_ROOT}/${MUSA_CI_ARTIFACT_DIR:-musa-ci-artifacts}"
+SERVER_LOG="${ARTIFACT_DIR}/lmcache-server.log"
+VENV_DIR=""
+SERVER_PID=""
+
+log() {
+    echo "--- :musa: $*"
+}
+
+fail() {
+    echo "[musa-ci] ERROR: $*" >&2
+    exit 1
+}
+
+wait_for_process_exit() {
+    local process_id="$1"
+    local timeout_seconds="$2"
+    local elapsed
+
+    for ((elapsed = 0; elapsed < timeout_seconds; elapsed++)); do
+        if ! kill -0 "${process_id}" 2>/dev/null; then
+            wait "${process_id}"
+            return $?
+        fi
+        sleep 1
+    done
+
+    return 124
+}
+
+run_pytest() {
+    python - "$@" <<'PY'
+import sys
+
+import pytest
+import torch_musa  # noqa: F401 - registers torch.musa before test collection
+
+raise SystemExit(pytest.main(sys.argv[1:]))
+PY
+}
+
+cleanup() {
+    local exit_code=$?
+    set +e
+
+    if [[ -n "${SERVER_PID}" ]]; then
+        kill "${SERVER_PID}" 2>/dev/null
+        wait_for_process_exit "${SERVER_PID}" 10
+        if [[ $? -eq 124 ]]; then
+            kill -KILL "${SERVER_PID}" 2>/dev/null
+            wait "${SERVER_PID}" 2>/dev/null
+        fi
+    fi
+
+    if [[ -n "${VENV_DIR}" && -d "${VENV_DIR}" ]]; then
+        rm -rf -- "${VENV_DIR}"
+    fi
+
+    return "${exit_code}"
+}
+
+trap cleanup EXIT
+
+command -v uv >/dev/null 2>&1 || fail "uv is required on the MUSA agent"
+command -v python >/dev/null 2>&1 || fail "python is required on the MUSA agent"
+command -v curl >/dev/null 2>&1 || fail "curl is required for the server smoke test"
+[[ -n "${MUSA_VISIBLE_DEVICES:-}" ]] || fail \
+    "MUSA_VISIBLE_DEVICES must be set by the Buildkite agent or pipeline"
+
+mkdir -p "${ARTIFACT_DIR}"
+cd "${REPO_ROOT}"
+
+VENV_DIR="$(mktemp -d "${TMPDIR:-/tmp}/lmcache-musa-ci.XXXXXX")"
+log "Creating an isolated environment while preserving the pinned TorchMUSA stack"
+uv venv --system-site-packages --python "$(command -v python)" "${VENV_DIR}"
+# shellcheck disable=SC1091
+source "${VENV_DIR}/bin/activate"
+
+log "Checking the MUSA runtime and hardware"
+python - <<'PY' 2>&1 | tee "${ARTIFACT_DIR}/runtime-preflight.txt"
+import ctypes
+import importlib.metadata
+import os
+
+import torch
+import torch_musa
+
+
+def package_version(name: str) -> str:
+    try:
+        return importlib.metadata.version(name)
+    except importlib.metadata.PackageNotFoundError:
+        return "unknown"
+
+
+assert hasattr(torch, "musa"), "torch.musa is unavailable after importing torch_musa"
+assert torch.musa.is_available(), "torch.musa.is_available() returned False"
+device_count = torch.musa.device_count()
+assert device_count > 0, "no MUSA device is visible"
+
+try:
+    ctypes.CDLL("libmusart.so")
+except OSError as exc:
+    raise AssertionError(f"libmusart.so is not loadable: {exc}") from exc
+
+print("torch=", torch.__version__)
+print("torch_musa=", package_version("torch_musa"))
+print("torch_musa_module=", getattr(torch_musa, "__version__", "unknown"))
+print("MUSA_VISIBLE_DEVICES=", os.environ["MUSA_VISIBLE_DEVICES"])
+print("MUSA_HOME=", os.environ.get("MUSA_HOME", "<unset>"))
+print("musa_device_count=", device_count)
+for device_index in range(device_count):
+    try:
+        device_name = torch.musa.get_device_name(device_index)
+    except Exception as exc:
+        device_name = f"<unavailable: {exc}>"
+    print(f"musa_device_{device_index}=", device_name)
+print("libmusart.so=loadable")
+PY
+
+log "Installing LMCache build and test dependencies"
+uv pip install \
+    -r requirements/build.txt \
+    -r requirements/common.txt \
+    -r requirements/test.txt
+
+log "Building LMCache from the current checkout with the MUSA profile"
+BUILD_WITH_MUSA=1 \
+BUILD_MOONCAKE=0 \
+SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE=0.0.0+ci \
+    uv pip install --no-deps -e . --no-build-isolation
+
+uv pip freeze > "${ARTIFACT_DIR}/pip-freeze.txt"
+
+log "Verifying LMCache selected the MUSA backend and built native support"
+python - <<'PY' 2>&1 | tee "${ARTIFACT_DIR}/lmcache-preflight.txt"
+import lmcache
+import lmcache.lmcache_native as lmcache_native
+
+assert lmcache.torch_device_type == "musa", (
+    f"LMCache selected {lmcache.torch_device_type!r}, expected 'musa'"
+)
+print("lmcache_version=", lmcache.__version__)
+print("lmcache_device=", lmcache.torch_device_type)
+print("lmcache_native=", lmcache_native.__file__)
+PY
+
+PYTEST_ARGS=(-q --maxfail=1 -rs)
+if [[ -n "${TEST_SELECTOR:-}" ]]; then
+    PYTEST_ARGS+=(-k "${TEST_SELECTOR}")
+fi
+
+if [[ "${MUSA_CI_UNIT_ONLY:-0}" == "1" ]]; then
+    discover_unit_tests() {
+        python - <<'PY'
+from pathlib import Path
+
+allowlist = (
+    "tests/test_*.py",
+    "tests/cli/**/test_*.py",
+    "tests/v1/**/test_*.py",
+)
+excluded = {
+    # These modules import optional CUDA/Triton/vLLM components during
+    # collection and are covered by their platform-specific jobs.
+    "tests/v1/compute/attention/test_triton_kernels.py",
+    "tests/v1/test_pos_kernels.py",
+    # These lanes require CUDA/NIXL-specific host services.
+    "tests/v1/test_device_id_race.py",
+    "tests/v1/test_nixl_batched_contains.py",
+    "tests/v1/test_nixl_multipath.py",
+    "tests/v1/storage_backend/test_eic.py",
+}
+
+selected: set[str] = set()
+for pattern in allowlist:
+    selected.update(
+        path.as_posix()
+        for path in Path(".").glob(pattern)
+        if path.is_file()
+    )
+
+for path in sorted(selected - excluded):
+    print(path)
+PY
+    }
+
+    mapfile -t UNIT_TEST_FILES < <(discover_unit_tests)
+    if [ "${#UNIT_TEST_FILES[@]}" -eq 0 ]; then
+        fail "no MUSA unit-test files found under tests"
+    fi
+
+    log "Running ${#UNIT_TEST_FILES[@]} MUSA-compatible unit-test files"
+    printf '  %s\n' "${UNIT_TEST_FILES[@]}"
+    run_pytest "${PYTEST_ARGS[@]}" \
+        -m "not cuda and not xpu and not sglang" \
+        "${UNIT_TEST_FILES[@]}" \
+        2>&1 | tee "${ARTIFACT_DIR}/pytest.log"
+    log "MUSA unit tests finished successfully"
+    exit 0
+fi
+
+log "Running focused MUSA connector and transfer tests"
+run_pytest "${PYTEST_ARGS[@]}" \
+    tests/v1/test_musa_support.py \
+    tests/v1/test_musa_connector.py \
+    tests/v1/test_musa_native.py \
+    tests/v1/platform/musa/test_musa_pin_memory.py \
+    tests/v1/platform/musa/test_musa_staging_copy.py \
+    tests/v1/platform/musa/test_musa_mp_block_transfer.py::test_musa_block_transfer_device_non_mla_d2h_and_h2d \
+    tests/v1/platform/musa/test_musa_mp_block_transfer.py::test_musa_block_transfer_device_mla_d2h_and_h2d \
+    tests/v1/multiprocess/test_engine_driven_transfer.py::test_musa_data_context_keeps_layout_validation_device_agnostic \
+    tests/v1/multiprocess/test_engine_driven_transfer.py::test_musa_data_context_store_uses_device_agnostic_gather \
+    tests/v1/multiprocess/test_engine_driven_transfer.py::test_musa_data_context_retrieve_uses_device_agnostic_scatter \
+    2>&1 | tee "${ARTIFACT_DIR}/pytest.log"
+
+ZMQ_PORT="${MUSA_CI_ZMQ_PORT:-6555}"
+HTTP_PORT="${MUSA_CI_HTTP_PORT:-7555}"
+
+log "Starting the LMCache multiprocess server smoke test"
+lmcache server \
+    --host 127.0.0.1 \
+    --port "${ZMQ_PORT}" \
+    --http-host 127.0.0.1 \
+    --http-port "${HTTP_PORT}" \
+    --l1-size-gb 0.25 \
+    --no-l1-use-lazy \
+    --eviction-policy LRU \
+    --chunk-size 128 \
+    --disable-metrics \
+    > "${SERVER_LOG}" 2>&1 &
+SERVER_PID=$!
+
+for _ in $(seq 1 60); do
+    if ! kill -0 "${SERVER_PID}" 2>/dev/null; then
+        tail -n 200 "${SERVER_LOG}" >&2
+        fail "LMCache server exited before becoming healthy"
+    fi
+
+    if curl -fsS "http://127.0.0.1:${HTTP_PORT}/healthcheck" >/dev/null; then
+        log "LMCache server is healthy"
+        break
+    fi
+
+    sleep 1
+done
+
+if ! curl -fsS "http://127.0.0.1:${HTTP_PORT}/healthcheck" >/dev/null; then
+    tail -n 200 "${SERVER_LOG}" >&2
+    fail "LMCache server did not become healthy within 60 seconds"
+fi
+
+kill "${SERVER_PID}"
+set +e
+wait_for_process_exit "${SERVER_PID}" 30
+SERVER_EXIT_CODE=$?
+set -e
+
+if [[ "${SERVER_EXIT_CODE}" -eq 124 ]]; then
+    tail -n 200 "${SERVER_LOG}" >&2
+    kill -KILL "${SERVER_PID}" 2>/dev/null || true
+    wait "${SERVER_PID}" 2>/dev/null || true
+    SERVER_PID=""
+    fail "LMCache server did not stop within 30 seconds"
+fi
+
+if [[ "${SERVER_EXIT_CODE}" -ne 0 && "${SERVER_EXIT_CODE}" -ne 143 ]]; then
+    tail -n 200 "${SERVER_LOG}" >&2
+    SERVER_PID=""
+    fail "LMCache server exited with status ${SERVER_EXIT_CODE} during shutdown"
+fi
+
+if ! grep -q "LMCache HTTP server stopped" "${SERVER_LOG}"; then
+    tail -n 200 "${SERVER_LOG}" >&2
+    SERVER_PID=""
+    fail "LMCache server did not report a clean HTTP shutdown"
+fi
+
+SERVER_PID=""
+log "MUSA hardware smoke test finished successfully"
