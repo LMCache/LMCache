@@ -495,6 +495,11 @@ _BLOCK_AXIS_FORMATS: frozenset = frozenset(
     {
         lmcache_native.EngineKVFormat.NL_X_NB_BS_HS,
         lmcache_native.EngineKVFormat.NL_X_NB_BSV_BSS,
+        # Under vLLM's blocks-first layouts (BLHNC / BLNHC) these views'
+        # stride(0) spans every layer's bytes for the block; when the cache
+        # is layer-compact, stride(0) is simply the tight per-block step.
+        lmcache_native.EngineKVFormat.NL_X_NB_NH_BS_CS,
+        lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_CS,
     }
 )
 

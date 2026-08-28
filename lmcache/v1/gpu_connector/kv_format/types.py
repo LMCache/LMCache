@@ -8,7 +8,7 @@ sites.
 """
 
 # Standard
-from typing import Literal, TypedDict, Union
+from typing import Literal, TypedDict, Union, get_args
 
 # Third Party
 import torch
@@ -21,6 +21,9 @@ import torch
 # containers (e.g. vLLM's ``dict[str, torch.Tensor]``) are responsible
 # for unwrapping to this form before calling the helpers.
 DiscoverableKVCache = Union[torch.Tensor, list["DiscoverableKVCache"]]
+
+KVLayoutName = Literal["NHD", "HND", "BLHNC", "BLNHC"]
+KV_LAYOUT_NAMES: tuple[str, ...] = get_args(KVLayoutName)
 
 
 class LayoutHints(TypedDict, total=False):
@@ -35,6 +38,8 @@ class LayoutHints(TypedDict, total=False):
             ``"NHD"`` -- heads after block-size (default for most
             vLLM builds).
             ``"HND"`` -- heads before block-size (``VLLM_KV_CACHE_LAYOUT=HND``).
+            ``"BLHNC"`` / ``"BLNHC"`` -- blocks outermost, all layers
+            packed per block (vLLM standardized layouts).
         num_kv_heads: Number of KV heads per layer. Used by TRT-LLM to
             reshape its 4-D pool tensor into the canonical 6-D form.
         tokens_per_block: Tokens per paged block. Used by TRT-LLM (to
@@ -49,7 +54,7 @@ class LayoutHints(TypedDict, total=False):
         head_dim: Per-head dimension. Used by TRT-LLM (same).
     """
 
-    kv_layout: Literal["NHD", "HND"]
+    kv_layout: KVLayoutName
     num_kv_heads: int
     tokens_per_block: int
     kv_list_layout: Literal["k_v"]
