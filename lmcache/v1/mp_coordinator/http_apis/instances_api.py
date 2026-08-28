@@ -25,6 +25,9 @@ from lmcache.v1.mp_coordinator.schemas import (
     RegisterRequest,
     RegisterResponse,
 )
+from lmcache.v1.mp_coordinator.views.server_config import (
+    ServerConfigRegistry,
+)
 
 logger = init_logger(__name__)
 
@@ -45,11 +48,14 @@ async def register_instance(
         A :class:`RegisterResponse` carrying the (possibly generated) id.
     """
     instance_id = body.instance_id or f"mp-{uuid.uuid4().hex}"
+    ctx = get_context(request)
+    # Capacity is not taken here: it arrives as a report on the cache-event
+    # stream, fenced by (incarnation, revision).
     # Wall-clock registration_time for display; monotonic last_heartbeat_time for
     # NTP-safe stale detection (see registry.stale). register() does the
     # exists-check and write under one lock, so the re_registered flag is correct
     # even under concurrent registrations of the same id.
-    re_registered = get_context(request).registry.register(
+    re_registered = ctx.registry.register(
         MPInstance(
             instance_id=instance_id,
             ip=body.ip,
@@ -91,10 +97,19 @@ async def deregister_instance(instance_id: str, request: Request) -> Response:
     Returns:
         An empty 204 response.
     """
-    if get_context(request).registry.deregister(instance_id) is not None:
+    ctx = get_context(request)
+    if ctx.registry.deregister(instance_id) is not None:
         logger.info("Deregistered instance %s", instance_id)
     else:
         logger.info("Instance %s not registered, skipping deregistration", instance_id)
+    # A departing process takes its L1 pool with it, so its reported L1
+    # bytes are void. Only the stale-eviction loop fenced them before, and
+    # it never sees an instance that left cleanly -- deregistration already
+    # removed it from the registry, so its bytes lingered for good.
+    ctx.event_gate.drop_instance(instance_id)
+    # Dropped with the membership, or declarations grow without bound
+    # across a churning fleet. Surviving L2 bytes lose their ratio.
+    ctx.views.get(ServerConfigRegistry).forget(instance_id)
     return Response(status_code=204)
 
 

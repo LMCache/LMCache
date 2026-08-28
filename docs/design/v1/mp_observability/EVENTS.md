@@ -242,17 +242,15 @@ inside `metadata` discriminates ops.
 
 ## Blend Server Lifecycle Sentinels
 
-CPU-synchronous sentinels published by `blend_server_v2.py` to bracket
-request scope and guard GPU callback races.  Published via `EventBus.publish()`
-(not `publish_on_stream`).
+CPU-synchronous sentinels published by `modules/blend.py` (`BlendModule`) to
+bracket request scope and guard GPU callback races.  Published via
+`EventBus.publish()` (not `publish_on_stream`).
 
 | EventType | Metadata keys | Types | Published by / when |
 |---|---|---|---|
-| `CB_REQUEST_START` | *(none)* | — | `BlendEngineV2.cb_lookup_pre_computed` — at request arrival |
-| `CB_STORE_PRE_COMPUTED_SUBMITTED` | `instance_id` | `int` | `BlendEngineV2.cb_store_pre_computed` — before GPU store enqueue |
-| `CB_RETRIEVE_SUBMITTED` | `instance_id` | `int` | `BlendEngineV2.cb_retrieve_pre_computed` — before GPU retrieve enqueue |
-| `CB_STORE_FINAL_SUBMITTED` | `instance_id` | `int` | `BlendEngineV2.cb_store_final` — before GPU store enqueue |
-| `CB_REQUEST_END` | *(none)* | — | `BlendEngineV2.cb_lookup_pre_computed` (early return: no matches or no GPU context) **or** `BlendEngineV2.cb_store_final` — after SUBMITTED, before GPU work |
+| `CB_REQUEST_START` | *(none)* | — | `BlendModule.cb_unified_lookup` — first (submitting) call |
+| `CB_RETRIEVE_SUBMITTED` | `instance_id` | `int` | `BlendModule.cb_retrieve_pre_computed` — before GPU retrieve enqueue. Holds `cb.request` open across the scatter so a sibling TP worker's early `CB_REQUEST_END` cannot close the root; the root closes on the last `CB_RETRIEVE_END` |
+| `CB_REQUEST_END` | *(none)* | — | `BlendModule.cb_unified_lookup` when the finalized result carries nothing to retrieve (miss / prefix-only — no retrieve will follow), otherwise `BlendModule.cb_retrieve_pre_computed` on every exit (no-op success, read failure, exception, success — the last on the GPU stream) |
 
 ---
 
@@ -265,11 +263,69 @@ These events use `session_id` on the `Event` dataclass (sourced from
 |---|---|---|
 | `CB_LOOKUP_START` | `num_tokens` | `int` |
 | `CB_LOOKUP_END` | `num_tokens`, `requested_tokens`, `hit_tokens`, `fingerprint_hits`, `storage_hits`, `stale_chunks`, `no_gpu_context` | `int`, `int`, `int`, `int`, `int`, `int`, `bool` |
-| `CB_STORE_PRE_COMPUTED_START` | `instance_id`, `num_tokens` | `int`, `int` |
-| `CB_STORE_PRE_COMPUTED_END` | `instance_id`, `num_tokens`, `stored_chunks`, `success` | `int`, `int`, `int`, `bool` |
-| `CB_RETRIEVE_START` | `instance_id`, `num_chunks` | `int`, `int` |
-| `CB_RETRIEVE_END` | `instance_id`, `num_chunks`, `success` | `int`, `int`, `bool` |
-| `CB_STORE_FINAL_START` | `instance_id`, `num_tokens` | `int`, `int` |
-| `CB_STORE_FINAL_END` | `instance_id`, `num_tokens`, `stored_chunks`, `success` | `int`, `int`, `int`, `bool` |
+| `CB_RETRIEVE_START` | `num_chunks`, `model_name`, `worker_id` | `int`, `str`, `int \| None` |
+| `CB_RETRIEVE_END` | `success`, `worker_id` | `bool`, `int \| None` |
 | `CB_FINGERPRINTS_REGISTERED` | `num_chunks`, `num_tokens` | `int`, `int` |
 | `CB_CHUNKS_EVICTED` | `num_chunks` | `int` |
+
+`CB_LOOKUP_END` also carries `prefix_hit_tokens`,
+`segmented_prefix_hit_tokens`, `non_prefix_hit_tokens`, `prefix_hits` and
+`prefix_chunks` (all `int`), with `hit_tokens` their sum.  A `no_gpu_context`
+lookup still reports the real `requested_tokens`, so such a request lands in
+the hit-rate denominator as a miss.
+
+`CB_FINGERPRINTS_REGISTERED` is published by the fingerprint-queue
+drainers from what `on_new_token_hashes` returned, so `num_chunks` counts only
+chunks *newly indexed*: it excludes the chunks the store skipped **and** chunks
+the matcher deduplicated (already registered by an earlier store); `num_tokens`
+is `num_chunks × chunk_size`.  A job that indexed nothing (a re-store of known
+content) publishes no event.  `session_id` is the enqueuing store's request —
+generally *not* the request that drained the queue.
+
+The retrieve and scatter events (`CB_RETRIEVE_START/END`,
+`CB_SCATTER_START/END`) also carry `worker_id` (`int | None`, the
+`IPCCacheServerKey.worker_id` of the calling rank).  At TP>1 every rank issues
+its own retrieve under the shared `request_id`, so a consumer that pairs
+START/END by `session_id` alone stitches one interval out of two ranks.  The
+metrics subscriber pairs on `(session_id, worker_id)`; the tracing subscriber
+still keys `cb.retrieve` / `cb.scatter` spans by session only (known follow-up
+— `worker_id` is on the events, so the fix is mechanical).  Two caveats for
+consumers: these events travel through `publish_on_stream`, whose native
+recorder carries non-`int` metadata as strings, so a `None` `worker_id` can
+arrive as the string `"None"` — treat any non-`int` value as "no worker".
+
+### Blend Server sub-phase events
+
+Published by `blend.py` around the legs of the unified lookup and the
+retrieve scatter, correlated by `session_id` (plus `worker_id` for the scatter
+pair, see above).  The scatter pair goes through `publish_on_stream`, so its
+timing is GPU-accurate.
+
+| EventType | Metadata keys | Types |
+|---|---|---|
+| `CB_FINGERPRINT_MATCH_START` | *(none)* | — |
+| `CB_FINGERPRINT_MATCH_END` | `matches` | `int` |
+| `CB_PREFIX_LOOKUP_START` | *(none)* | — |
+| `CB_PREFIX_LOOKUP_END` | `prefix_chunks` | `int` |
+| `CB_COORDINATOR_MATCH_START` | *(none)* | — |
+| `CB_COORDINATOR_MATCH_END` | `matches`, `timed_out` | `int`, `bool` |
+| `CB_SPARSE_PREFETCH_START` | `n_chunks`, `world_size`, `n_keys`, `l2_keys` | `int`, `int`, `int`, `int` |
+| `CB_SPARSE_PREFETCH_END` | `found_keys`, `l2_keys` | `int`, `int` |
+| `CB_SCATTER_START` | `scattered_tokens`, `n_prefix`, `n_shifted`, `dropped`, `worker_id` | `int`, `int`, `int`, `int`, `int \| None` |
+| `CB_SCATTER_END` | `success`, `worker_id` | `bool`, `int \| None` |
+| `CB_RETRIEVE_NOOP` | `reason`, `dropped_matches` | `str`, `int` |
+
+Notes:
+
+- The fingerprint-match and coordinator-match legs are **mutually exclusive**:
+  with a coordinator configured the fleet directory is the only match source.
+  That leg is async — START at submit, END on the resolving poll or at its
+  deadline (`timed_out=True`).
+- The sparse-prefetch pair is emitted **only when the prefetch reads L2**
+  (`l2_keys > 0`).
+- `CB_RETRIEVE_NOOP` is a point event: the retrieve returned success without
+  scattering anything, so every match degrades to a full recompute.  `reason` is
+  a fixed code (`beyond_slot_bound`, `no_object_keys`), safe as a metric
+  attribute.  Not published when the no-op dropped nothing (ranges already
+  scattered by an earlier retrieve for this worker), so the event always means
+  reuse was lost.

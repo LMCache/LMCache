@@ -12,6 +12,10 @@
 #   SETUPTOOLS_SCM_PRETEND_VERSION  wheel version   (default 0.0.0.dev0)
 set -euxo pipefail
 
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=.github/scripts/rocm_wheel_common.sh
+source "${SCRIPT_DIR}/rocm_wheel_common.sh"
+
 PYTORCH_ROCM_ARCH="${PYTORCH_ROCM_ARCH:-gfx942;gfx950}"
 TORCH_ROCM_SPEC="${TORCH_ROCM_SPEC:-torch==2.11.0+rocm7.2}"
 TORCH_ROCM_INDEX="${TORCH_ROCM_INDEX:-https://download.pytorch.org/whl/rocm7.2}"
@@ -20,8 +24,12 @@ export MAX_JOBS="${MAX_JOBS:-$(nproc)}"
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -q
+# patchelf deliberately NOT installed from apt: jammy ships 0.14.3, and
+# auditwheel enforces a minimum patchelf version at repair time (6.8.1 raised
+# it to >= 0.14.5). It is installed from PyPI below so both tools come from the
+# same index and move together.
 apt-get install -y -q --no-install-recommends \
-    software-properties-common curl ca-certificates patchelf git
+    software-properties-common curl ca-certificates git
 add-apt-repository -y ppa:deadsnakes/ppa
 apt-get update -q
 # Match the upstream vllm/vllm-openai-rocm interpreter (cp312).
@@ -40,8 +48,15 @@ $PY --version
 # Build against the public ROCm torch whose ABI matches the vLLM image.
 $PY -m pip install --no-cache-dir "${TORCH_ROCM_SPEC}" --index-url "${TORCH_ROCM_INDEX}"
 $PY -m pip install --no-cache-dir \
-    ninja "setuptools>=77.0.3,<81.0.0" setuptools_scm wheel pybind11 auditwheel
+    ninja "setuptools>=77.0.3,<81.0.0" setuptools_scm wheel pybind11
+install_rocm_repair_tools "$PY"
 $PY -c 'import torch; print("BUILD TORCH:", torch.__version__, "hip:", torch.version.hip, "cxx11abi:", torch._C._GLIBCXX_USE_CXX11_ABI)'
+
+# Preflight the repair toolchain before the ~12-minute compile. auditwheel only
+# checks patchelf when `repair` runs, which is the very last step -- so a version
+# mismatch otherwise costs a full build before surfacing. Report versions either
+# way; they are the first thing to look at when a wheel misbehaves.
+preflight_rocm_repair_tools "$PY"
 
 cd /work/LMCache
 rm -rf build dist dist_rocm csrc_hip
@@ -60,26 +75,14 @@ $PY setup.py bdist_wheel --dist-dir=dist_rocm
 # versioned SONAMEs (e.g. libamdhip64.so.7) -- an unversioned "libamdhip64.so"
 # exclude silently misses them and the HIP runtime gets vendored into the
 # wheel, which then couples to the build host's KFD driver.
-$PY -m auditwheel repair \
-    --plat manylinux_2_35_x86_64 \
-    --exclude 'libtorch*.so*' \
-    --exclude 'libc10*.so*' \
-    --exclude 'libamdhip64.so*' \
-    --exclude 'libhsa-runtime64.so*' \
-    --exclude 'librocprofiler-register.so*' \
-    --exclude 'libamd_comgr.so*' \
-    --exclude 'librocm-core.so*' \
-    --exclude 'librocblas.so*' \
-    --exclude 'libhipblas.so*' \
-    --exclude 'libMIOpen.so*' \
-    --exclude 'libdrm.so*' \
-    --exclude 'libdrm_amdgpu.so*' \
-    -w dist dist_rocm/*.whl
+raw_wheels=(dist_rocm/*.whl)
+test "${#raw_wheels[@]}" -eq 1
+repair_rocm_wheel "$PY" manylinux_2_35_x86_64 "${raw_wheels[0]}" dist
 
 echo "=== ROCm code-object targets in the built extension ==="
-python3 -c "import zipfile,glob,sys; w=glob.glob('dist/*.whl')[0]; zipfile.ZipFile(w).extractall('/tmp/whcheck')"
-SO=$(find /tmp/whcheck -name 'cuda_ops*.so')
-/opt/rocm/llvm/bin/llvm-objdump --offloading "$SO" 2>/dev/null | grep -oE 'gfx[0-9a-z]+' | sort -u
+repaired_wheels=(dist/*.whl)
+test "${#repaired_wheels[@]}" -eq 1
+assert_rocm_offload_arches "$PY" "${repaired_wheels[0]}" "$PYTORCH_ROCM_ARCH"
 
 echo "=== final ROCm wheel ==="
 ls -la /work/LMCache/dist/

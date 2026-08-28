@@ -108,7 +108,7 @@ kv_format/
 
 1. Add the enum value in `csrc/kv_transfer_types.h` (the single
    backend-agnostic definition shared by every accelerator backend), then
-   register it in each backend's pybind module — `csrc/cuda/pybind.cpp` (CUDA)
+   register it in the common native pybind module — `csrc/lmcache_native/pybind.cpp`
    and `csrc/sycl/pybind_sycl.cpp` (SYCL/XPU).
 2. Add a branch in the engine's `detectors/<engine>.py` `discover()`. It keys
    off `(list_depth, tensor_ndim)` from `measure_list_depth_until_tensor`,
