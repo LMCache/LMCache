@@ -152,9 +152,10 @@ __device__ inline size_t calculate_lmcache_local_offset(
 }
 
 __device__ inline uint4 ld_cs(const uint4* addr) {
-#if defined(__CUDA_ARCH__) && !defined(USE_MACA)
-  // Cache-streaming load: MetaX's compiler does not support this raw PTX
-  // asm, so MACA builds (USE_MACA) fall through to the plain deref below.
+#if defined(__CUDA_ARCH__) && !defined(LMCACHE_DISABLE_STREAMING_IO)
+  // Cache-streaming load: some compilers (e.g. MetaX's) don't support this
+  // raw PTX asm; define LMCACHE_DISABLE_STREAMING_IO to fall through to the
+  // plain deref below.
   uint4 val;
   asm volatile("ld.global.cs.v4.u32 {%0, %1, %2, %3}, [%4];"
                : "=r"(val.x), "=r"(val.y), "=r"(val.z), "=r"(val.w)
@@ -166,7 +167,7 @@ __device__ inline uint4 ld_cs(const uint4* addr) {
 }
 
 __device__ inline void st_cs(uint4* addr, uint4 val) {
-#if defined(__CUDA_ARCH__) && !defined(USE_MACA)
+#if defined(__CUDA_ARCH__) && !defined(LMCACHE_DISABLE_STREAMING_IO)
   asm volatile("st.global.cs.v4.u32 [%0], {%1, %2, %3, %4};"
                :
                : "l"(addr), "r"(val.x), "r"(val.y), "r"(val.z), "r"(val.w));
