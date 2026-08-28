@@ -84,3 +84,4 @@ fi
 log "running XPU-related tests"
 pytest "${PYTEST_ARGS[@]}" "${XPU_TEST_FILES[@]}"
 log "xpu smoke test finished successfully"
+
