@@ -18,6 +18,9 @@ from fastapi.responses import JSONResponse
 # First Party
 from lmcache.v1.distributed.api import Tier
 from lmcache.v1.distributed.quota_manager import QuotaManager
+from lmcache.v1.mp_coordinator.controllers.eviction_controller import (
+    FleetEvictionController,
+)
 from lmcache.v1.mp_coordinator.http_apis.dependencies import get_context
 from lmcache.v1.mp_coordinator.schemas import (
     QuotaConfigRequest,
@@ -27,6 +30,7 @@ from lmcache.v1.mp_coordinator.schemas import (
     StatusListResponse,
     StatusResponse,
 )
+from lmcache.v1.mp_coordinator.views.usage_manager import CacheUsageManager
 
 router = APIRouter()
 
@@ -113,7 +117,8 @@ async def set_quota_config(
         None if body.default_limit_gb is None else int(body.default_limit_gb * _GB)
     )
     ctx = get_context(request)
-    ctx.eviction_controller.quota.set_default_limit_bytes(default_limit_bytes)
+    eviction = ctx.controllers.get(FleetEvictionController)
+    eviction.quota.set_default_limit_bytes(default_limit_bytes)
     ctx.metadata_persister.save()
     return QuotaConfigResponse(default_limit_gb=body.default_limit_gb)
 
@@ -132,7 +137,7 @@ async def get_quota_config(
         unquota'd salts are exempt from eviction (the boot default).
     """
     _require_quota_tier(tier)
-    quota = get_context(request).eviction_controller.quota
+    quota = get_context(request).controllers.get(FleetEvictionController).quota
     default_limit = quota.get_default_limit_bytes()
     return QuotaConfigResponse(
         default_limit_gb=None if default_limit is None else _gb(default_limit)
@@ -159,8 +164,9 @@ async def set_quota(
     cache_salt = _resolve_salt_from_api_path(cache_salt)
     limit_bytes = int(body.limit_gb * _GB)
     ctx = get_context(request)
+    eviction = ctx.controllers.get(FleetEvictionController)
     try:
-        ctx.eviction_controller.quota.set_quota(cache_salt, limit_bytes)
+        eviction.quota.set_quota(cache_salt, limit_bytes)
     except ValueError:
         return JSONResponse(status_code=400, content={"error": "invalid quota limit"})
     ctx.metadata_persister.save()
@@ -183,7 +189,8 @@ async def delete_quota(
     _require_quota_tier(tier)
     cache_salt = _resolve_salt_from_api_path(cache_salt)
     ctx = get_context(request)
-    removed = ctx.eviction_controller.quota.delete_quota(cache_salt)
+    eviction = ctx.controllers.get(FleetEvictionController)
+    removed = eviction.quota.delete_quota(cache_salt)
     ctx.metadata_persister.save()
     return QuotaResponse(
         cache_salt=cache_salt,
@@ -214,8 +221,8 @@ async def get_status(
     _require_accounted_tier(tier)
     cache_salt = _resolve_salt_from_api_path(cache_salt)
     ctx = get_context(request)
-    quota = ctx.eviction_controller.quota
-    usage = ctx.usage_manager.get_salt_bytes(tier, cache_salt)
+    quota = ctx.controllers.get(FleetEvictionController).quota
+    usage = ctx.views.get(CacheUsageManager).get_salt_bytes(tier, cache_salt)
     exists = tier == _QUOTA_TIER and quota.has_quota(cache_salt)
     limit = quota.get_limit_bytes(cache_salt) if exists else 0
     return StatusResponse(
@@ -241,10 +248,12 @@ async def list_status(request: Request, tier: Tier = Tier.L2) -> StatusListRespo
     """
     _require_accounted_tier(tier)
     ctx = get_context(request)
-    usage_view = ctx.usage_manager
+    usage = ctx.views.get(CacheUsageManager)
+    eviction = ctx.controllers.get(FleetEvictionController)
+    usage_view = usage
     by_salt = usage_view.get_bytes_by_salt(tier)
     total = usage_view.get_total_bytes(tier)
-    quota_entries = _quota_entries_for_tier(ctx.eviction_controller.quota, tier)
+    quota_entries = _quota_entries_for_tier(eviction.quota, tier)
     all_salts = sorted(set(by_salt) | set(quota_entries))
     return StatusListResponse(
         total_gb=_gb(total),

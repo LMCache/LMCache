@@ -15,7 +15,7 @@ import torch
 from lmcache import torch_dev
 from lmcache.utils import EngineType, init_logger
 from lmcache.v1.distributed.api import MemoryLayoutDesc
-from lmcache.v1.gpu_connector.utils import LayoutHints
+from lmcache.v1.gpu_connector.utils import LayoutHints, get_device
 from lmcache.v1.multiprocess.custom_types import RegisterEngineDrivenContextPayload
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
@@ -869,7 +869,7 @@ def create_transfer_context(
     """
     if not kv_caches:
         raise ValueError("kv_caches is empty")
-    device_types = {tensor.device.type for tensor in kv_caches.values()}
+    device_types = {get_device(v).type for v in kv_caches.values()}
     if len(device_types) != 1:
         raise ValueError(
             f"All KV cache tensors must share one device type, got {device_types}"
