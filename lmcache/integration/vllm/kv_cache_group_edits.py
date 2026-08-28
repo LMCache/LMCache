@@ -409,19 +409,54 @@ class _MambaUnifiedViewEdit(KVCacheGroupEdit):
         Convert [num_blocks, 1, 1, context_size] to
         [num_blocks, 1, vllm_block_size, head_size] for HND layout, or
         [num_blocks, vllm_block_size, 1, head_size] for NHD layout.
+
+        The state row need not divide evenly by the block size: under
+        mamba-cache-mode=align vLLM pads each page up to the attention page
+        size but registers the state as a tight view, with the padding
+        expressed only in stride(0). The per-token tiling rounds head_size
+        up, spilling at most block_size - 1 elements into that padding, and
+        keeps stride(0) as the dim-0 step, which the transfer path honours.
         """
         assert isinstance(kv_cache, torch.Tensor), (
             "single-layer KV cache must be a torch.Tensor"
         )
         kv_layout = layout_hints.get("kv_layout", "none")
-        if kv_layout == "NHD":
-            return kv_cache.view(kv_cache.shape[0], spec.block_size, 1, -1)
-        elif kv_layout == "HND":
-            return kv_cache.view(kv_cache.shape[0], 1, spec.block_size, -1)
-        else:
+        if kv_layout not in ("NHD", "HND"):
             raise ValueError(
                 f"Unsupported kv_layout: {kv_layout}. Only NHD and HND are supported."
             )
+        num_blocks = kv_cache.shape[0]
+        row = kv_cache[0].numel()
+        block_size = spec.block_size
+        elem = kv_cache.element_size()
+        block_step = kv_cache.stride(0)
+        base = -(-row // block_size)
+        # The transfer kernels vectorize by token width, so round it up to
+        # the widest alignment that still tiles within the block step and
+        # divides it (the extra columns land in the page padding).
+        head_size = 0
+        for align_bytes in (16, 8, 4, 2):
+            if align_bytes % elem != 0 or (block_step * elem) % align_bytes != 0:
+                continue
+            step = align_bytes // elem
+            candidate = -(-base // step) * step
+            if candidate * block_size <= block_step:
+                head_size = candidate
+                break
+        if head_size == 0:
+            raise ValueError(
+                f"cannot tile a {row}-element state row into {block_size} "
+                f"aligned tokens within the {block_step}-element block step"
+            )
+        if kv_layout == "NHD":
+            inner = (block_size, 1, head_size)
+            inner_strides = (head_size, head_size, 1)
+        else:
+            inner = (1, block_size, head_size)
+            inner_strides = (block_size * head_size, head_size, 1)
+        return kv_cache.as_strided(
+            (num_blocks, *inner), (kv_cache.stride(0), *inner_strides)
+        )
 
 
 class _SubpagedMLAAttentionViewEdit(KVCacheGroupEdit):
