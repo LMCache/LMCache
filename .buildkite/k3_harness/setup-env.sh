@@ -118,7 +118,12 @@ else
     VLLM_INSTALL_SPEC="vllm[runai,tensorizer,flashinfer]>=0.0.0.dev0"
     echo "Installing latest vLLM nightly (no pin)"
 fi
-uv pip install -U "${VLLM_INSTALL_SPEC}" \
+# flashinfer resolves unpinned by the vllm extra, so a flashinfer release
+# can flip the environment under an unchanged vLLM pin. 0.6.17 broke
+# DeepSeek-V4 sparse decode on SM120 ("eidx must be contiguous",
+# _sparse_mla_sm120.py); dsv4_flash_tp was green on 0.6.16 the same
+# morning with the same vLLM. TODO: unpin once flashinfer ships the fix.
+uv pip install -U "${VLLM_INSTALL_SPEC}" "flashinfer-python==0.6.16" \
     --reinstall-package transformers \
     --reinstall-package tokenizers \
     --reinstall-package huggingface-hub \
