@@ -5,6 +5,7 @@ from __future__ import annotations
 
 # Standard
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Optional
 import ctypes
@@ -198,6 +199,14 @@ class RawBlockCoreConfig:
     use_uring_cmd: bool = False
     meta_checkpoint_placement_id: PlacementId = None
     fdp_slot_affinity_enabled: bool = False
+    # Number of KV objects whose reads may be in flight concurrently in
+    # load_many_into (1 = serial, the default). Each object is a
+    # large transfer that WE split into max_data_transfer_size-sized commands
+    # (this engine is NVMe passthrough: no block layer, so userspace owns the
+    # split, bounded above by the device's MDTS); issuing several objects'
+    # reads at once keeps the device queue busy instead of submitting one
+    # command and waiting for it (QD~1). See load_many_into.
+    load_parallelism: int = 1
 
 
 @dataclass
@@ -270,6 +279,7 @@ class RawBlockCore:
         self.meta_verify_on_load = bool(config.meta_verify_on_load)
         self.io_engine = normalize_raw_block_io_engine(config.io_engine)
         self.iouring_queue_depth = int(config.iouring_queue_depth)
+        self.load_parallelism = max(1, int(getattr(config, "load_parallelism", 1)))
         self.use_uring_cmd = bool(config.use_uring_cmd)
         self.fdp_slot_affinity_enabled = bool(config.fdp_slot_affinity_enabled)
         self.meta_checkpoint_placement_id = normalize_raw_block_placement_ids(
@@ -381,6 +391,19 @@ class RawBlockCore:
 
         self._raw = None
         self._closed = False
+
+        # Optional pool used by load_many_into to issue several objects' reads
+        # concurrently against the shared device (the per-object read releases
+        # self._lock before doing I/O, and the Rust io_uring binding drops the
+        # GIL during the wait, so this is real concurrency).
+        self._load_pool: Optional[ThreadPoolExecutor] = (
+            ThreadPoolExecutor(
+                max_workers=self.load_parallelism,
+                thread_name_prefix="raw-block-load",
+            )
+            if self.load_parallelism > 1
+            else None
+        )
 
         self._meta_seq: int = 0
         self._meta_dirty_total: int = 0
@@ -877,59 +900,98 @@ class RawBlockCore:
             self._inflight_io_count += 1
 
         results = [False] * len(encoded_keys)
+        pending = [
+            (i, encoded_key, entry)
+            for i, (encoded_key, entry) in enumerate(items)
+            if entry is not None
+        ]
         try:
-            for i, (encoded_key, entry) in enumerate(items):
-                if entry is None:
-                    continue
-                try:
-                    payload_len = int(entry.size)
-                    total_len = (
-                        round_up(payload_len, self.block_align)
-                        if self._requires_transfer_alignment
-                        else payload_len
+            if self._load_pool is not None and len(pending) > 1:
+                # Issue the objects' reads concurrently; each _load_one_into
+                # does its own device I/O with no shared mutable state beyond
+                # the distinct results[i] / objs[i] slots. Propagate the first
+                # exception only when raise_on_error was requested (matching the
+                # serial path, which otherwise logs and continues).
+                futures = [
+                    self._load_pool.submit(
+                        self._load_one_into,
+                        i,
+                        encoded_key,
+                        entry,
+                        objs,
+                        results,
+                        raise_on_error,
                     )
-                    buf = memoryview(objs[i].byte_array)
-                    try:
-                        buf = buf.cast("B")
-                    except Exception:
-                        pass
-
-                    direct_view = self._build_direct_odirect_view(
-                        memory_obj=objs[i],
-                        payload_len=payload_len,
-                        total_len=total_len,
-                        buffer_len=len(buf),
-                        zero_tail=False,
+                    for (i, encoded_key, entry) in pending
+                ]
+                for fut in futures:
+                    fut.result()
+            else:
+                for i, encoded_key, entry in pending:
+                    self._load_one_into(
+                        i, encoded_key, entry, objs, results, raise_on_error
                     )
-                    if direct_view is not None:
-                        self._read_buffers(
-                            [entry.offset + self.header_bytes],
-                            [direct_view],
-                            [
-                                total_len
-                                if len(direct_view) >= total_len
-                                else payload_len
-                            ],
-                            [total_len],
-                        )
-                    else:
-                        self._read_buffers(
-                            [entry.offset + self.header_bytes],
-                            [buf],
-                            [payload_len],
-                            [total_len],
-                        )
-                    objs[i].metadata.cached_positions = entry.meta.cached_positions
-                    results[i] = True
-                except Exception as e:
-                    if raise_on_error:
-                        raise
-                    logger.error("RawBlockCore load failed for %s: %s", encoded_key, e)
         finally:
             with self._lock:
                 self._inflight_io_count -= 1
                 self._last_io_ts = time.monotonic()
         return results
+
+    def _load_one_into(
+        self,
+        i: int,
+        encoded_key: str,
+        entry: "_Entry",
+        objs: Sequence[MemoryObj],
+        results: list[bool],
+        raise_on_error: bool,
+    ) -> None:
+        """Read one indexed object into ``objs[i]``; set ``results[i]``.
+
+        Extracted from load_many_into so the object loop can run either serially
+        or across the load pool. Touches only the caller-provided ``objs[i]`` and
+        ``results[i]``, so concurrent invocations for distinct ``i`` are safe.
+        """
+        try:
+            payload_len = int(entry.size)
+            total_len = (
+                round_up(payload_len, self.block_align)
+                if self._requires_transfer_alignment
+                else payload_len
+            )
+            buf = memoryview(objs[i].byte_array)
+            try:
+                buf = buf.cast("B")
+            except Exception:
+                pass
+
+            direct_view = self._build_direct_odirect_view(
+                memory_obj=objs[i],
+                payload_len=payload_len,
+                total_len=total_len,
+                buffer_len=len(buf),
+                zero_tail=False,
+            )
+            if direct_view is not None:
+                self._read_buffers(
+                    [entry.offset + self.header_bytes],
+                    [direct_view],
+                    [total_len if len(direct_view) >= total_len else payload_len],
+                    [total_len],
+                )
+            else:
+                self._read_buffers(
+                    [entry.offset + self.header_bytes],
+                    [buf],
+                    [payload_len],
+                    [total_len],
+                )
+            objs[i].metadata.cached_positions = entry.meta.cached_positions
+            results[i] = True
+        except Exception as e:
+            if raise_on_error:
+                raise
+            logger.error("RawBlockCore load failed for %s: %s", encoded_key, e)
 
     def unlock_many(self, encoded_keys: Sequence[str]) -> None:
         """Release L2 lock references for encoded keys.
@@ -1065,6 +1127,10 @@ class RawBlockCore:
             self._meta_thread.join(timeout=5)
             self._meta_thread = None
 
+        if self._load_pool is not None:
+            self._load_pool.shutdown(wait=True)
+            self._load_pool = None
+
         try:
             self._checkpoint_once(force=True)
         except Exception as e:
@@ -1086,6 +1152,9 @@ class RawBlockCore:
         if self._meta_thread is not None:
             self._meta_thread.join(timeout=5)
             self._meta_thread = None
+        if self._load_pool is not None:
+            self._load_pool.shutdown(wait=False)
+            self._load_pool = None
         if self._raw is not None:
             try:
                 self._raw.close()
@@ -1353,6 +1422,15 @@ class RawBlockCore:
     ) -> None:
         """Read buffers as bounded NVMe raw-command chunks.
 
+        Each object is split into ``max_data_transfer_size`` chunks; all of an
+        object's (and all objects') chunk reads are submitted together through
+        ``batched_read()`` + a single ``wait_iouring()``. The chunks are
+        independent reads into non-overlapping destination ranges, so letting
+        the ring pipeline them keeps the device queue busy. The previous
+        implementation issued one chunk per ``read_uring()`` call and blocked
+        on its completion before the next, pinning the device at QD~1 (~1.3 GB/s
+        vs ~5 GB/s single-threaded on a Gen5 drive).
+
         Args:
             offsets: Device offsets for each logical read.
             buffers: Destination buffers.
@@ -1364,7 +1442,12 @@ class RawBlockCore:
             Exception: Propagates Rust raw-device read errors.
         """
         raw_dev = self._rawdev()
-        read_uring = raw_dev.read_uring
+
+        chunk_offsets: list[int] = []
+        chunk_buffers: list[Any] = []
+        chunk_lens: list[int] = []
+        keepalive: list[Any] = []  # hold bounce targets alive until wait returns
+        copybacks: list[tuple[Any, memoryview, int]] = []
 
         for offset, buf, payload_len, total_len in zip(
             offsets, buffers, payload_lens, total_lens, strict=True
@@ -1379,25 +1462,28 @@ class RawBlockCore:
                 if len(dst) < payload_len:
                     raise ValueError("output buffer shorter than payload_len")
                 target = self._allocate_aligned_buffer(total_len)
-                copy_back = True
+                keepalive.append(target)
+                copybacks.append((dst, target, payload_len))
             else:
                 target = dst[:total_len]
-                copy_back = False
 
             cursor = 0
             while cursor < total_len:
                 chunk_len = min(self.max_data_transfer_size, total_len - cursor)
                 self._validate_uring_cmd_chunk(offset + cursor, chunk_len)
-                read_uring(
-                    offset + cursor,
-                    target[cursor : cursor + chunk_len],
-                    chunk_len,
-                    chunk_len,
-                )
+                chunk_offsets.append(offset + cursor)
+                chunk_buffers.append(target[cursor : cursor + chunk_len])
+                chunk_lens.append(chunk_len)
                 cursor += chunk_len
 
-            if copy_back:
-                dst[:payload_len] = target[:payload_len]
+        if not chunk_offsets:
+            return
+
+        batch_id = raw_dev.batched_read(chunk_offsets, chunk_buffers, chunk_lens)
+        raw_dev.wait_iouring(batch_id)
+
+        for dst, target, payload_len in copybacks:
+            dst[:payload_len] = target[:payload_len]
 
     def _write_buffers(
         self,
