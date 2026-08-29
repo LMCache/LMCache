@@ -14,7 +14,6 @@ else
 fi
 INNER_SCRIPT=""
 DOCKER_ENV_ARGS=(
-    -e "LMCACHE_DEVICE_BACKEND=${LMCACHE_DEVICE_BACKEND:-musa}"
     -e "LMCACHE_TRACK_USAGE=${LMCACHE_TRACK_USAGE:-false}"
     -e "MUSA_CI_ARTIFACT_DIR=/musa-ci-artifacts"
     -e "MUSA_CI_PREPROVISIONED=1"
@@ -48,7 +47,8 @@ esac
 mkdir -p "${ARTIFACT_DIR}"
 command -v docker >/dev/null 2>&1 || fail "docker is required on the MUSA agent"
 
-for optional_variable in TEST_SELECTOR MUSA_CI_ZMQ_PORT MUSA_CI_HTTP_PORT; do
+for optional_variable in \
+    LMCACHE_DEVICE_BACKEND TEST_SELECTOR MUSA_CI_ZMQ_PORT MUSA_CI_HTTP_PORT; do
     if [[ -n "${!optional_variable:-}" ]]; then
         DOCKER_ENV_ARGS+=(-e "${optional_variable}=${!optional_variable}")
     fi

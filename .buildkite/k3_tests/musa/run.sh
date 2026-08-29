@@ -212,6 +212,8 @@ SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE=0.0.0+ci \
 
 log "Verifying LMCache selected the MUSA backend and built native support"
 "${PYTHON_BIN}" - <<'PY' 2>&1 | tee "${ARTIFACT_DIR}/lmcache-preflight.txt"
+import torch_musa  # noqa: F401 - registers torch.musa for auto-detection
+
 import lmcache
 import lmcache.lmcache_native as lmcache_native
 
@@ -296,7 +298,7 @@ ZMQ_PORT="${MUSA_CI_ZMQ_PORT:-6555}"
 HTTP_PORT="${MUSA_CI_HTTP_PORT:-7555}"
 
 log "Starting the LMCache multiprocess server smoke test"
-lmcache server \
+LMCACHE_DEVICE_BACKEND=musa lmcache server \
     --host 127.0.0.1 \
     --port "${ZMQ_PORT}" \
     --http-host 127.0.0.1 \

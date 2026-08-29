@@ -2,7 +2,6 @@
 # The broad unit suite runs in the separate unit-tests-musa pipeline.
 
 env:
-  LMCACHE_DEVICE_BACKEND: "musa"
   LMCACHE_TRACK_USAGE: "false"
   MUSA_VISIBLE_DEVICES: "0"
 

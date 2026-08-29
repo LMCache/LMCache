@@ -35,6 +35,7 @@ Optional debugging overrides:
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
+| `LMCACHE_DEVICE_BACKEND` | unset | Explicit backend override for debugging; normal tests exercise auto-detection |
 | `TEST_SELECTOR` | unset | Pass a pytest `-k` selector to the selected suite |
 | `MUSA_CI_IMAGE` | pinned MUSA full-test image | Override the pre-provisioned TorchMUSA container image |
 | `MUSA_CI_PYTHON` | `python3` | Override the Python executable inside the MUSA image |

@@ -2,7 +2,6 @@
 # This pipeline mirrors the dedicated unit-tests-xpu Buildkite lane.
 
 env:
-  LMCACHE_DEVICE_BACKEND: "musa"
   LMCACHE_TRACK_USAGE: "false"
   MUSA_VISIBLE_DEVICES: "0"
 
