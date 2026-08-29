@@ -6,4 +6,4 @@ steps:
     command: echo "hello from the MUSA pipeline"
     timeout_in_minutes: 5
     agents:
-      queue: "MUSA"
+      queue: "MooreThreads"

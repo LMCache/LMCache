@@ -8,7 +8,7 @@
 - Skip queued / cancel running branch builds: Yes
 
 This pipeline is intentionally minimal. It validates that the dedicated
-`MUSA` queue, upload wrapper, and repo-hosted pipeline wiring are all
+`MooreThreads` queue, upload wrapper, and repo-hosted pipeline wiring are all
 working by running a single hello step.
 
 ### Trigger strategy
@@ -36,19 +36,19 @@ Steps editor:
 
 ```yaml
 agents:
-  queue: "MUSA"
+  queue: "MooreThreads"
 
 steps:
 - label: ":pipeline: Upload pipeline"
   command: bash .buildkite/k3_tests/common_scripts/upload-pipeline.sh .buildkite/k3_tests/musa/pipeline.yml
 ```
 
-Keep the Buildkite runner / queue assignment aligned with `MUSA`; this
-repository change only updates the repo-side files.
+Keep the existing `MooreThreads` Buildkite runner / queue assignment; this
+repository change only updates the repo-side files and pipeline naming.
 
 ## What this pipeline does
 
-- Routes the upload step through the `MUSA` queue
+- Routes the upload step through the `MooreThreads` queue
 - Reuses the shared path filter in `common_scripts/upload-pipeline.sh`
 - Uploads `.buildkite/k3_tests/musa/pipeline.yml`
 - Runs a single hello smoke test on the MUSA agent
