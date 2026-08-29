@@ -1,0 +1,9 @@
+# MUSA smoke test.
+# Minimal validation for pipeline upload and queue routing.
+
+steps:
+  - label: ":wave: MUSA Hello"
+    command: echo "hello from the MUSA pipeline"
+    timeout_in_minutes: 5
+    agents:
+      queue: "MUSA"

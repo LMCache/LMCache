@@ -1,22 +1,22 @@
-# Buildkite Web UI Setup: MooreThreads Smoke Test
+# Buildkite Web UI Setup: MUSA Smoke Test
 
 **Steps editor**: paste the contents of `buildkite-pipeline.yml`.
 
 **GitHub trigger settings**:
-- Filter: `build.pull_request.labels includes "mthread" || build.pull_request.base_branch == "mbl/mthread-ci-test-dev"`
+- Filter: `build.pull_request.labels includes "musa" || build.pull_request.base_branch == "mbl/musa-ci-test-dev"`
 - Rebuild on PR label change: Yes
 - Skip queued / cancel running branch builds: Yes
 
 This pipeline is intentionally minimal. It validates that the dedicated
-`MooreThreads` queue, upload wrapper, and repo-hosted pipeline wiring are all
+`MUSA` queue, upload wrapper, and repo-hosted pipeline wiring are all
 working by running a single hello step.
 
 ### Trigger strategy
 
 | Condition | Result |
 |-----------|--------|
-| PR label includes `mthread` | upload the MooreThreads pipeline |
-| PR base branch is `mbl/mthread-ci-test-dev` | upload the MooreThreads pipeline |
+| PR label includes `musa` | upload the MUSA pipeline |
+| PR base branch is `mbl/musa-ci-test-dev` | upload the MUSA pipeline |
 | any docs/asset-only change | path filter skips upload |
 | any change under `.buildkite/` | path filter forces upload |
 
@@ -36,19 +36,19 @@ Steps editor:
 
 ```yaml
 agents:
-  queue: "MooreThreads"
+  queue: "MUSA"
 
 steps:
 - label: ":pipeline: Upload pipeline"
-  command: bash .buildkite/k3_tests/common_scripts/upload-pipeline.sh .buildkite/k3_tests/mthread/pipeline.yml
+  command: bash .buildkite/k3_tests/common_scripts/upload-pipeline.sh .buildkite/k3_tests/musa/pipeline.yml
 ```
 
-Keep the existing MooreThreads runner / queue assignment in the Buildkite
-pipeline configuration; this repository change only adds the repo-side files.
+Keep the Buildkite runner / queue assignment aligned with `MUSA`; this
+repository change only updates the repo-side files.
 
 ## What this pipeline does
 
-- Routes the upload step through the `MooreThreads` queue
+- Routes the upload step through the `MUSA` queue
 - Reuses the shared path filter in `common_scripts/upload-pipeline.sh`
-- Uploads `.buildkite/k3_tests/mthread/pipeline.yml`
-- Runs a single hello smoke test on the MooreThreads agent
+- Uploads `.buildkite/k3_tests/musa/pipeline.yml`
+- Runs a single hello smoke test on the MUSA agent
