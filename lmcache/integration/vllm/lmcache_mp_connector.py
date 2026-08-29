@@ -466,6 +466,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
       enters vLLM's waiting queue. Disabled by default.
     """
 
+    # Worker adapter implementation; subclasses override to swap transports.
+    _worker_adapter_cls: type[LMCacheMPWorkerAdapter] = LMCacheMPWorkerAdapter
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
@@ -612,7 +615,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             local_server_url = server_urls[
                 parallel_strategy.vllm_worker_id // ranks_per_node
             ]
-            self.worker_adapter = LMCacheMPWorkerAdapter(
+            self.worker_adapter = self._worker_adapter_cls(
                 server_url=local_server_url,
                 context=zmq_context,
                 model_name=cache_model_name,

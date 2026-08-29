@@ -359,18 +359,23 @@ class MessageQueueClient:
         response_cls = get_response_class(request_type)
 
         if request_uid in self.pending_futures:
+            # Pop first, exactly as the single-frame path always did, so a
+            # decode failure below cannot strand the entry in the dict.
             future = self.pending_futures.pop(request_uid)
-            if b_response:
-                response = msgspec_decode(b_response[0], cls=response_cls)
-                future.set_result(response)
-            else:
-                future.set_result(None)
+            response = (
+                msgspec_decode(b_response[0], cls=response_cls) if b_response else None
+            )
+            # A handler may answer with more than one frame; re-arm the entry
+            # until the future says the exchange is over.
+            if not future.deliver(response):
+                self.pending_futures[request_uid] = future
 
     def submit_request(
         self,
         request_type: RequestType,
         request_payloads: list[Any],
         response_cls: Optional[T] = None,
+        future: Optional[MessagingFuture[T]] = None,
     ) -> MessagingFuture[T]:
         """Submit a request to the server.
 
@@ -379,11 +384,18 @@ class MessageQueueClient:
             request_payloads (list[Any]): The payloads of the request.
             response_cls (Optional[T]): The expected response class.
                 This should be get from `get_response_class(request_type)`.
+            future (Optional[MessagingFuture[T]]): Pre-created future to
+                complete with the response.  Callers that must attach state
+                to the future *before* it can receive anything have to build
+                it themselves: this method makes the request visible to the
+                polling loop before it returns, so a response can already be
+                dispatched by the time the caller gets the future back.
 
         Returns:
             MessagingFuture[T]: A future that will hold the response.
         """
-        future: MessagingFuture[T] = MessagingFuture()
+        if future is None:
+            future = MessagingFuture()
         request_uid = next(self._request_counter)
         self.input_queue.put(
             MessageQueueClient.WrappedRequest(
@@ -462,9 +474,13 @@ class BlockingRequestHandler(RequestHandlerBase[ResponseType]):
         self.payload_clss = payload_clss
         self.handler = handler
         self.response_cls = response_cls
+        # Handlers answering with several frames declare a ``response_channel``.
+        self.accepts_response_channel = (
+            "response_channel" in inspect.signature(handler).parameters
+        )
 
     def __call__(
-        self, payloads: list[bytes], affinity_key: int = 0
+        self, payloads: list[bytes], affinity_key: int = 0, **extra: Any
     ) -> Future[ResponseType]:
         assert self.executor is not None, (
             "BlockingRequestHandler has no executor assigned. "
@@ -473,9 +489,9 @@ class BlockingRequestHandler(RequestHandlerBase[ResponseType]):
         decoded_payloads = unwrap_request_payloads(payloads, self.payload_clss)
         if isinstance(self.executor, AffinityThreadPool):
             return self.executor.submit(
-                self.handler, *decoded_payloads, affinity_key=affinity_key
+                self.handler, *decoded_payloads, affinity_key=affinity_key, **extra
             )
-        return self.executor.submit(self.handler, *decoded_payloads)
+        return self.executor.submit(self.handler, *decoded_payloads, **extra)
 
     def get_response_class(self) -> ResponseType:
         return self.response_cls
@@ -569,22 +585,27 @@ class MessageQueueServer:
                 prefix_frames[0] is the zmq identity used as affinity key.
         """
         affinity_key = hash(prefix_frames[0])
-        future = handler_entry(payloads, affinity_key=affinity_key)
+
+        def _send_response(response: Any) -> None:
+            frames_to_send = list(prefix_frames)
+            if response is not None:
+                response_cls = handler_entry.get_response_class()
+                frames_to_send.append(msgspec_encode(response, cls=response_cls))
+            self.output_queue.put(frames_to_send)
+            self._output_efd.notify()
+
+        if handler_entry.accepts_response_channel:
+            future = handler_entry(
+                payloads, affinity_key=affinity_key, response_channel=_send_response
+            )
+        else:
+            # Unchanged from before multi-frame support: no ``**kwargs``, so
+            # single-frame handlers keep the fast vectorcall path.
+            future = handler_entry(payloads, affinity_key=affinity_key)
 
         def _notify_response(fut: Future):
             try:
-                response = fut.result()
-                response_cls = handler_entry.get_response_class()
-                b_response = msgspec_encode(response, cls=response_cls)
-                frames_to_send = (
-                    prefix_frames + [b_response]
-                    if response is not None
-                    else prefix_frames
-                )
-
-                self.output_queue.put(frames_to_send)
-                self._output_efd.notify()
-
+                _send_response(fut.result())
             except Exception:
                 logger.exception("Error in blocking handler")
 

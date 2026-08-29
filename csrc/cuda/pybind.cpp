@@ -132,19 +132,19 @@ PYBIND11_MODULE(cuda_ops, m) {
          std::vector<int64_t> lmcache_objects_ptrs,
          const torch::Tensor& block_ids, const torch::Device& device,
          int direction, PageBufferShapeDesc shape_desc, int lmcache_chunk_size,
-         int engine_kv_format, int skip_prefix_n_blocks) {
+         int engine_kv_format, int skip_prefix_n_blocks, bool layerwise) {
         return multi_layer_block_kv_transfer(
             paged_buffer_ptrs_tensor, std::move(lmcache_objects_ptrs),
             block_ids, device, static_cast<TransferDirection>(direction),
             shape_desc, lmcache_chunk_size,
-            static_cast<EngineKVFormat>(engine_kv_format),
-            skip_prefix_n_blocks);
+            static_cast<EngineKVFormat>(engine_kv_format), skip_prefix_n_blocks,
+            layerwise);
       },
       py::arg("paged_buffer_ptrs_tensor"), py::arg("lmcache_objects_ptrs"),
       py::arg("block_ids"), py::arg("device"), py::arg("direction"),
       py::arg("shape_desc"), py::arg("lmcache_chunk_size"),
       py::arg("engine_kv_format"), py::arg("skip_prefix_n_blocks"),
-      py::call_guard<py::gil_scoped_release>());
+      py::arg("layerwise") = false, py::call_guard<py::gil_scoped_release>());
   // Object-group transfer plan types (see mp_mem_kernels.cuh). Built on the
   // Python side and consumed by execute_object_group_transfer.
   py::class_<StagingCopy>(m, "StagingCopy")
@@ -175,14 +175,14 @@ PYBIND11_MODULE(cuda_ops, m) {
       [](int direction, const torch::Device& device,
          size_t host_buffer_alignment,
          const std::vector<KernelGroupSpec>& kernel_group_specs,
-         const std::vector<BatchStep>& batch_steps) {
+         const std::vector<BatchStep>& batch_steps, bool layerwise) {
         return execute_object_group_transfer(
             static_cast<TransferDirection>(direction), device,
-            host_buffer_alignment, kernel_group_specs, batch_steps);
+            host_buffer_alignment, kernel_group_specs, batch_steps, layerwise);
       },
       py::arg("direction"), py::arg("device"), py::arg("host_buffer_alignment"),
       py::arg("kernel_group_specs"), py::arg("batch_steps"),
-      py::call_guard<py::gil_scoped_release>());
+      py::arg("layerwise") = false, py::call_guard<py::gil_scoped_release>());
   // CB retrieve plan spec (see blend_kernels.cuh). Built on the Python side
   // (blend.cb_retrieve_pre_computed) and consumed by
   // execute_cb_retrieve_plan_flat.

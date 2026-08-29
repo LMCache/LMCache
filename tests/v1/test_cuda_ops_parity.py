@@ -288,18 +288,36 @@ def test_function_signature_parity(func_name):
 
     c_has_names = _has_real_names(c_params)
 
-    # 1. Always check parameter count
-    assert len(c_params) == len(py_params), (
-        f"{func_name}: parameter count mismatch\n"
-        f"  cuda_ops ({len(c_params)}): {[p[0] for p in c_params]}\n"
-        f"  fallback ({len(py_params)}): {[p[0] for p in py_params]}"
-    )
+    # 1. Check parameter count.  cuda_ops may expose extra *trailing*
+    # parameters that all carry defaults (e.g. ``layerwise=False`` added
+    # only to the native kernel dispatcher).  The fallback is not required
+    # to mirror them because callers reaching the fallback path never pass
+    # those arguments.
+    n_extra = len(c_params) - len(py_params)
+    if n_extra < 0:
+        # fallback has MORE params than cuda_ops — always wrong
+        raise AssertionError(
+            f"{func_name}: fallback has more parameters than cuda_ops\n"
+            f"  cuda_ops ({len(c_params)}): {[p[0] for p in c_params]}\n"
+            f"  fallback ({len(py_params)}): {[p[0] for p in py_params]}"
+        )
+    if n_extra > 0:
+        # Known native-only trailing parameters that the fallback is not
+        # required to mirror.  Keyed by (param_name, default_value).
+        _ALLOWED_NATIVE_ONLY = {("layerwise", False)}
 
-    # 2. Check each parameter
+        for extra_name, _, extra_default in c_params[len(py_params) :]:
+            assert (extra_name, extra_default) in _ALLOWED_NATIVE_ONLY, (
+                f"{func_name}: cuda_ops has unexpected extra param "
+                f"'{extra_name}' (default={extra_default!r}); add it to "
+                f"_ALLOWED_NATIVE_ONLY or update the fallback signature"
+            )
+
+    # 2. Check each *shared* parameter (up to fallback length)
     for i, (
         (c_name, c_has_def, c_default),
         (py_name, py_has_def, py_default),
-    ) in enumerate(zip(c_params, py_params, strict=False)):
+    ) in enumerate(zip(c_params[: len(py_params)], py_params, strict=False)):
         # Check names only when cuda_ops has real py::arg() names
         if c_has_names:
             assert c_name == py_name, (
