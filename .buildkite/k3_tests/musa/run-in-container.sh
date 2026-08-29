@@ -69,5 +69,5 @@ docker run --rm \
     --entrypoint /bin/bash \
     "${IMAGE}" \
     -lc \
-        'workdir="$(mktemp -d /tmp/lmcache-ci.XXXXXX)" && cp -a /mnt/LMCache-src/. "${workdir}" && cd "${workdir}" && bash "$1"' \
+        'workdir="$(mktemp -d /tmp/lmcache-ci.XXXXXX)" && cp -R /mnt/LMCache-src/. "${workdir}" && cd "${workdir}" && bash "$1"' \
         musa-ci "${INNER_SCRIPT}" || fail "MUSA ${MODE} container failed"
