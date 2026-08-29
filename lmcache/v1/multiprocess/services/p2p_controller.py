@@ -99,8 +99,6 @@ class P2PController:
             discovered peer set.
     """
 
-    GRPC_SERVICE_NAMES = ("P2PService",)
-
     def __init__(
         self,
         ctx: MPCacheServerContext,
@@ -159,7 +157,7 @@ class P2PController:
         return self._ctx
 
     def report_status(self) -> dict[str, object]:
-        """Return module-specific status information.
+        """Return service-specific status information.
 
         Returns:
             Dictionary with the active lookup-job count, the P2P registration

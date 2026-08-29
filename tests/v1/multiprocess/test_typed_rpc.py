@@ -168,13 +168,13 @@ def test_concurrent_mixed_requests_roundtrip_over_unary_rpcs() -> None:
     client = MultiprocessGrpcClient(server_url)
 
     try:
-        first: MessagingFuture[bool] = client.submit_request(RPC.Ping, [0])
+        first: MessagingFuture[bool] = client.ping(0)
         assert first_ping_entered.wait(timeout=5.0)
         futures: list[MessagingFuture[Any]] = [
-            client.submit_request(RPC.Ping, [1]),
-            client.submit_request(RPC.Noop, []),
-            client.submit_request(RPC.Ping, [2]),
-            client.submit_request(RPC.Noop, []),
+            client.ping(1),
+            client.noop(),
+            client.ping(2),
+            client.noop(),
         ]
         release_first_ping.set()
 
@@ -223,8 +223,8 @@ def test_unix_clients_keep_distinct_grpc_affinity() -> None:
         try:
             futures: list[MessagingFuture[bool]] = []
             for index in range(8):
-                futures.append(clients[0].submit_request(RPC.Ping, [100 + index]))
-                futures.append(clients[1].submit_request(RPC.Ping, [200 + index]))
+                futures.append(clients[0].ping(100 + index))
+                futures.append(clients[1].ping(200 + index))
             assert all(future.result(timeout=5.0) is True for future in futures)
             assert all(len(names) == 1 for names in threads_by_client.values())
             assert threads_by_client[1] != threads_by_client[2]
@@ -268,10 +268,10 @@ def test_unary_item_error_surfaces_as_grpc_failure() -> None:
     client = MultiprocessGrpcClient(server_url)
 
     try:
-        first: MessagingFuture[bool] = client.submit_request(RPC.Ping, [0])
+        first: MessagingFuture[bool] = client.ping(0)
         assert first_ping_entered.wait(timeout=5.0)
-        failed: MessagingFuture[str] = client.submit_request(RPC.Noop, [])
-        succeeded: MessagingFuture[bool] = client.submit_request(RPC.Ping, [1])
+        failed: MessagingFuture[str] = client.noop()
+        succeeded: MessagingFuture[bool] = client.ping(1)
         release_first_ping.set()
 
         assert first.result(timeout=5.0) is True
@@ -310,9 +310,9 @@ def test_client_works_with_minimal_unary_servicer() -> None:
     client = MultiprocessGrpcClient(server_url)
 
     try:
-        first: MessagingFuture[bool] = client.submit_request(RPC.Ping, [0])
+        first: MessagingFuture[bool] = client.ping(0)
         assert first_ping_entered.wait(timeout=5.0)
-        second: MessagingFuture[bool] = client.submit_request(RPC.Ping, [1])
+        second: MessagingFuture[bool] = client.ping(1)
         release_first_ping.set()
 
         assert first.result(timeout=5.0) is True
@@ -353,13 +353,13 @@ def test_ping_typed_roundtrip() -> None:
         client = MultiprocessGrpcClient(server_url)
 
         # Case 1: real instance id.  Should reach the handler as int.
-        fut: MessagingFuture[bool] = client.submit_request(RPC.Ping, [42])
+        fut: MessagingFuture[bool] = client.ping(42)
         assert fut.result(timeout=5.0) is True
         assert seen_calls[-1] == 42
 
         # Case 2: untracked prober.  The wire sentinel is -1 but the
         # handler should still see Python ``None``.
-        fut = client.submit_request(RPC.Ping, [None])
+        fut = client.ping(None)
         assert fut.result(timeout=5.0) is True  # type: ignore[union-attr]
         assert seen_calls[-1] is None
 
@@ -410,8 +410,8 @@ def test_distinct_typed_rpcs_coexist() -> None:
     try:
         client = MultiprocessGrpcClient(server_url)
 
-        fut_typed: MessagingFuture[bool] = client.submit_request(RPC.Ping, [7])
-        fut_noop: MessagingFuture[str] = client.submit_request(RPC.Noop, [])
+        fut_typed: MessagingFuture[bool] = client.ping(7)
+        fut_noop: MessagingFuture[str] = client.noop()
 
         assert fut_typed.result(timeout=5.0) is True
         assert fut_noop.result(timeout=5.0) == "ok"
@@ -520,7 +520,7 @@ def test_lookup_typed_roundtrip() -> None:
         client = MultiprocessGrpcClient(server_url)
         key = _sample_key(cache_salt="tenant-b")
 
-        fut: MessagingFuture[None] = client.submit_request(RPC.Lookup, [key, 8])
+        fut: MessagingFuture[None] = client.lookup(key, 8)
         assert fut.result(timeout=5.0) is None
         assert seen == [(key, 8)]
 
@@ -805,8 +805,8 @@ def test_store_typed_grpc_roundtrip() -> None:
     try:
         client = MultiprocessGrpcClient(server_url)
         key = _sample_key(cache_salt="wave3")
-        fut: MessagingFuture[tuple[bytes, bool]] = client.submit_request(
-            RPC.Store, [key, 42, [[1, 2], [3]], b"ev"]
+        fut: MessagingFuture[tuple[bytes, bool]] = client.store(
+            key, 42, [[1, 2], [3]], b"ev"
         )
         assert fut.result(timeout=5.0) == (b"handle-back", True)
         assert seen == [(key, 42, [[1, 2], [3]], b"ev")]
@@ -1181,9 +1181,8 @@ def test_register_kv_cache_grpc_roundtrip() -> None:
                 sw_size_tokens=-1,
             ),
         ]
-        fut: MessagingFuture = client.submit_request(
-            RPC.RegisterKvCache,
-            [5, kv, "opt-125m", 2, EngineType.VLLM, hints, groups],
+        fut: MessagingFuture = client.register_kv_cache(
+            5, kv, "opt-125m", 2, EngineType.VLLM, hints, groups
         )
         assert fut.result(timeout=5.0) is None
         assert len(seen) == 1
@@ -1210,7 +1209,7 @@ def test_grpc_request_waits_for_server_startup() -> None:
     port = _find_free_port()
     server_url = f"grpc://127.0.0.1:{port}"
     client = MultiprocessGrpcClient(server_url)
-    future: MessagingFuture[bool] = client.submit_request(RPC.Ping, [None])
+    future: MessagingFuture[bool] = client.ping(None)
     time.sleep(0.25)
     assert not future.query()
 
@@ -1255,7 +1254,7 @@ def test_grpc_request_stays_pending_when_server_stops_mid_call() -> None:
     )
     server.start()
     client = MultiprocessGrpcClient(server_url)
-    future: MessagingFuture[bool] = client.submit_request(RPC.Ping, [None])
+    future: MessagingFuture[bool] = client.ping(None)
     assert handler_entered.wait(timeout=5.0)
 
     server.close()

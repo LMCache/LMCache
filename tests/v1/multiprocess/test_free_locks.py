@@ -122,14 +122,14 @@ def _make_free_locks_ctx(
 
 
 def test_server_free_lookup_locks_calls_finish_read_prefetched():
-    """LookupModule.free_lookup_locks should resolve hash keys and call
+    """EngineLookupService.free_lookup_locks should resolve hash keys and call
     finish_read_prefetched on the storage manager."""
     # First Party
-    from lmcache.v1.multiprocess.services.lookup import LookupModule
+    from lmcache.v1.multiprocess.services.lookup import EngineLookupService
 
     ctx = _make_free_locks_ctx([b"hash0"], windows=[-1], hit_chunks=1)
 
-    module = LookupModule(ctx)
+    module = EngineLookupService(ctx)
 
     # Build a key
     key = create_cache_key(0).no_worker_id_version()
@@ -174,11 +174,11 @@ def test_server_free_lookup_locks_sliding_window_skips_unlocked_chunks():
     full-attention group's chunks 0-2 are released.
     """
     # First Party
-    from lmcache.v1.multiprocess.services.lookup import LookupModule
+    from lmcache.v1.multiprocess.services.lookup import EngineLookupService
 
     hashes = [b"h0", b"h1", b"h2"]
     ctx = _make_free_locks_ctx(hashes, windows=[1, -1], hit_chunks=4)
-    module = LookupModule(ctx)
+    module = EngineLookupService(ctx)
 
     module.free_lookup_locks(_free_locks_key(1024, start=0, end=768), 1)
 
@@ -193,11 +193,11 @@ def test_server_free_lookup_locks_sliding_window_releases_locked_suffix():
     releases chunk 3, the full-attention group releases chunks 0-3.
     """
     # First Party
-    from lmcache.v1.multiprocess.services.lookup import LookupModule
+    from lmcache.v1.multiprocess.services.lookup import EngineLookupService
 
     hashes = [b"h0", b"h1", b"h2", b"h3"]
     ctx = _make_free_locks_ctx(hashes, windows=[1, -1], hit_chunks=4)
-    module = LookupModule(ctx)
+    module = EngineLookupService(ctx)
 
     module.free_lookup_locks(_free_locks_key(1024, start=0, end=1024), 1)
 
@@ -214,11 +214,11 @@ def test_server_free_lookup_locks_sliding_window_releases_locked_suffix():
 def test_server_free_lookup_locks_caps_release_at_hit_length():
     """Chunks beyond the hit length were never locked and must not be freed."""
     # First Party
-    from lmcache.v1.multiprocess.services.lookup import LookupModule
+    from lmcache.v1.multiprocess.services.lookup import EngineLookupService
 
     hashes = [b"h0", b"h1", b"h2", b"h3"]
     ctx = _make_free_locks_ctx(hashes, windows=[-1], hit_chunks=2)
-    module = LookupModule(ctx)
+    module = EngineLookupService(ctx)
 
     module.free_lookup_locks(_free_locks_key(1024, start=0, end=1024), 1)
 
@@ -235,11 +235,11 @@ def test_server_free_lookup_locks_unknown_hit_skips_window_groups():
     concurrent reader's lock).
     """
     # First Party
-    from lmcache.v1.multiprocess.services.lookup import LookupModule
+    from lmcache.v1.multiprocess.services.lookup import EngineLookupService
 
     hashes = [b"h0", b"h1", b"h2"]
     ctx = _make_free_locks_ctx(hashes, windows=[1, -1], hit_chunks=-1)
-    module = LookupModule(ctx)
+    module = EngineLookupService(ctx)
 
     module.free_lookup_locks(_free_locks_key(1024, start=0, end=768), 1)
 
@@ -248,15 +248,15 @@ def test_server_free_lookup_locks_unknown_hit_skips_window_groups():
 
 
 def test_server_free_lookup_locks_no_matching_chunks():
-    """LookupModule.free_lookup_locks with no chunks in range should be a no-op."""
+    """EngineLookupService.free_lookup_locks no-ops with no chunks in range."""
     # First Party
-    from lmcache.v1.multiprocess.services.lookup import LookupModule
+    from lmcache.v1.multiprocess.services.lookup import EngineLookupService
 
     ctx = MagicMock()
     ctx.token_hasher.chunk_size = 256
     ctx.token_hasher.compute_chunk_hashes.return_value = []
 
-    module = LookupModule(ctx)
+    module = EngineLookupService(ctx)
 
     # Key with start == end means no chunks to free
     key = IPCCacheServerKey(
@@ -275,12 +275,12 @@ def test_server_free_lookup_locks_no_matching_chunks():
 
 
 def test_server_handler_registered():
-    """LookupModule should have a free_lookup_locks method."""
+    """EngineLookupService should have a free_lookup_locks method."""
     # First Party
-    from lmcache.v1.multiprocess.services.lookup import LookupModule
+    from lmcache.v1.multiprocess.services.lookup import EngineLookupService
 
-    assert hasattr(LookupModule, "free_lookup_locks")
-    assert callable(LookupModule.free_lookup_locks)
+    assert hasattr(EngineLookupService, "free_lookup_locks")
+    assert callable(EngineLookupService.free_lookup_locks)
 
 
 # ============================================================================
@@ -407,13 +407,13 @@ def test_server_free_lookup_locks_honors_the_session_lock_model():
     releasing an unlocked group would drop another request's lock on the
     shared object key."""
     # First Party
-    from lmcache.v1.multiprocess.services.lookup import LookupModule
+    from lmcache.v1.multiprocess.services.lookup import EngineLookupService
 
     hashes = [b"h0", b"h1", b"h2"]
     ctx = _make_free_locks_ctx(
         hashes, windows=[1, -1, -1], hit_chunks=3, locked_gids=(0, 1)
     )
-    module = LookupModule(ctx)
+    module = EngineLookupService(ctx)
     key = _free_locks_key(768, 0, 768)
 
     with patch(

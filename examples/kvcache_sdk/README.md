@@ -33,7 +33,7 @@ The core SDK pattern used by the end-to-end example is:
 import lmcache.sdk.kvcache as lmc_sdk
 
 ctx = lmc_sdk.connect(
-    url="tcp://localhost:6555",        # ZMQ message queue
+    url="grpc://localhost:6555",       # gRPC multiprocess server
     http_url="http://localhost:8080",  # HTTP config / status
     model_name="...",
 )

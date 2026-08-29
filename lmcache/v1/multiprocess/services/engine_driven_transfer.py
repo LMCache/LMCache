@@ -59,22 +59,16 @@ class EngineDrivenContextEntry:
     has_liveness_signal: bool = False
 
 
-class EngineDrivenTransferModule(InstanceLivenessTarget):
+class EngineDrivenTransferService(InstanceLivenessTarget):
     """Handles Engine-driven KV cache transfer operations.
 
-    Owns non-GPU context registrations and provides handlers for
-    register, unregister, prepare/commit store, and prepare/commit retrieve
-    of CPU-serialized KV caches.
+    Owns non-GPU context registrations and implements register, unregister,
+    prepare/commit store, and prepare/commit retrieve of CPU-serialized KV
+    caches.
 
     Args:
         ctx: The shared engine context.
     """
-
-    GRPC_SERVICE_NAMES = ("EngineService",)
-    GRPC_METHOD_ALIASES = {
-        "UnregisterKvCacheEngineDrivenContext": "unregister_kv_cache",
-    }
-    GRPC_SKIP_METHODS = frozenset({"UnregisterKvCache"})
 
     def __init__(self, ctx: MPCacheServerContext) -> None:
         self._ctx = ctx
@@ -99,7 +93,7 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         return self._ctx
 
     def report_status(self) -> dict:
-        """Return non-GPU transfer module status information.
+        """Return non-GPU transfer service status information.
 
         Returns:
             A dict containing registered non-CUDA instance IDs and
@@ -125,7 +119,7 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         }
 
     def close(self) -> None:
-        """Release resources owned by this module."""
+        """Release resources owned by this service."""
         with self._lock:
             self._engine_driven_contexts.clear()
             self._strategies.clear()

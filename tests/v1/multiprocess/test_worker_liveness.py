@@ -21,32 +21,32 @@ from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.services import engine_driven_transfer as non_gpu_mod
 from lmcache.v1.multiprocess.services import lmcache_driven_transfer as gpu_mod
 from lmcache.v1.multiprocess.services.engine_driven_transfer import (
-    EngineDrivenTransferModule,
+    EngineDrivenTransferService,
 )
 from lmcache.v1.multiprocess.services.lmcache_driven_transfer import (
     ContextEntry,
-    LMCacheDrivenTransferModule,
+    LMCacheDrivenTransferService,
 )
-from lmcache.v1.multiprocess.services.management import ManagementModule
+from lmcache.v1.multiprocess.services.management import ManagementService
 from lmcache.v1.periodic_thread import PeriodicThreadRegistry
 
 
-def _bare_gpu_module() -> LMCacheDrivenTransferModule:
-    """A LMCacheDrivenTransferModule with only the liveness state initialized.
+def _bare_gpu_module() -> LMCacheDrivenTransferService:
+    """A LMCacheDrivenTransferService with only the liveness state initialized.
 
     Bypasses __init__ (which starts a CUDA host-func dispatcher) so the
     liveness methods can be exercised without GPU hardware.
     """
-    module = LMCacheDrivenTransferModule.__new__(LMCacheDrivenTransferModule)
+    module = LMCacheDrivenTransferService.__new__(LMCacheDrivenTransferService)
     module._ctx = MagicMock(name="ctx")
     module._cache_contexts = {}
     module._lock = threading.Lock()
     return module
 
 
-def _bare_non_gpu_module() -> EngineDrivenTransferModule:
-    """A EngineDrivenTransferModule with only the liveness state initialized."""
-    module = EngineDrivenTransferModule.__new__(EngineDrivenTransferModule)
+def _bare_non_gpu_module() -> EngineDrivenTransferService:
+    """A EngineDrivenTransferService with only the liveness state initialized."""
+    module = EngineDrivenTransferService.__new__(EngineDrivenTransferService)
     module._ctx = MagicMock(name="ctx")
     module._engine_driven_contexts = {}
     module._strategies = {}
@@ -233,7 +233,7 @@ def _reset_periodic_registry():
 def test_management_ping_touches_targets() -> None:
     """ping refreshes every target for a real id; None is ignored."""
     target = _FakeTarget()
-    mgmt = ManagementModule(MagicMock(), liveness_targets=[target])
+    mgmt = ManagementService(MagicMock(), liveness_targets=[target])
 
     assert mgmt.ping(42) is True
     assert mgmt.ping(None) is True
@@ -243,7 +243,7 @@ def test_management_ping_touches_targets() -> None:
 def test_management_reaper_reaps_and_drops() -> None:
     """The reaper scans targets and calls drop_instance_state for reaped ids."""
     target = _FakeTarget()
-    mgmt = ManagementModule(
+    mgmt = ManagementService(
         MagicMock(),
         liveness_targets=[target],
         worker_reap_timeout_seconds=0.4,
@@ -261,7 +261,7 @@ def test_management_reaper_reaps_and_drops() -> None:
 
 def test_management_reaper_disabled_when_timeout_zero() -> None:
     """timeout == 0 starts no reaper thread."""
-    mgmt = ManagementModule(
+    mgmt = ManagementService(
         MagicMock(),
         liveness_targets=[_FakeTarget()],
         worker_reap_timeout_seconds=0.0,
@@ -274,7 +274,7 @@ def test_management_report_status_summarizes_liveness() -> None:
     """report_status reports a worker_liveness summary when targets exist."""
     target = _FakeTarget()
     target.count = 3
-    mgmt = ManagementModule(
+    mgmt = ManagementService(
         MagicMock(),
         liveness_targets=[target],
         worker_reap_timeout_seconds=120.0,
@@ -288,19 +288,19 @@ def test_management_report_status_summarizes_liveness() -> None:
     finally:
         mgmt.close()
 
-    assert ManagementModule(MagicMock()).report_status() == {}
+    assert ManagementService(MagicMock()).report_status() == {}
 
 
 def test_blend_drop_instance_state_drops_rope_state() -> None:
     """drop_instance_state pops the reaped instance's CB rope state.
 
-    The GPU context is no longer mirrored in BlendV3Module (reaping the GPU
+    The GPU context is no longer mirrored in BlendV3Service (reaping the GPU
     entry frees it directly), so only the rope state is dropped here.
     """
     # First Party
-    from lmcache.v1.multiprocess.services.blend_v3 import BlendV3Module
+    from lmcache.v1.multiprocess.services.blend_v3 import BlendV3Service
 
-    module = BlendV3Module.__new__(BlendV3Module)
+    module = BlendV3Service.__new__(BlendV3Service)
     module._cb_rope_state = {5: MagicMock()}
 
     module.drop_instance_state(5)

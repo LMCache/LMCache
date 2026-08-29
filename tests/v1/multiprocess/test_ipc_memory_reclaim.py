@@ -23,7 +23,7 @@ import weakref
 
 # First Party
 from lmcache.v1.multiprocess.services.lmcache_driven_transfer import (
-    LMCacheDrivenTransferModule,
+    LMCacheDrivenTransferService,
 )
 import lmcache.v1.multiprocess.services.lmcache_driven_transfer as gpu_mod
 
@@ -45,14 +45,14 @@ class _FakeTorchDev:
             )
 
 
-def _module(monkeypatch) -> LMCacheDrivenTransferModule:
+def _module(monkeypatch) -> LMCacheDrivenTransferService:
     """Construct the module through the real __init__ with stubbed deps."""
     monkeypatch.setattr(gpu_mod, "DeviceHostFuncDispatcher", MagicMock())
-    return LMCacheDrivenTransferModule(MagicMock(name="ctx"))
+    return LMCacheDrivenTransferService(MagicMock(name="ctx"))
 
 
 def _register(
-    module: LMCacheDrivenTransferModule,
+    module: LMCacheDrivenTransferService,
     monkeypatch,
     instance_id: int,
     model: str = "m",

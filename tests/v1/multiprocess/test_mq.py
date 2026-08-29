@@ -189,9 +189,11 @@ def _run_client_test(
 
     try:
         futures = []
+        rpc = getattr(client, request_type.name.lower())
+
         # Submit requests
         for _ in range(num_requests):
-            future = client.submit_request(request_type, payloads)  # type: ignore
+            future = rpc(*payloads)
             futures.append(future)
 
         # Validate responses

@@ -39,7 +39,7 @@ MPCacheServer (server)
 │    ├─ EventBus
 │    ├─ LayoutDescRegistry
 │    └─ shm_pool_info (pre-computed once)
-└─ EngineDrivenTransferModule (services/engine_driven_transfer.py)
+└─ EngineDrivenTransferService (services/engine_driven_transfer.py)
      └─ TransferStrategy (services/server_transfer.py)
           ├─ PickleTransferStrategy
           └─ ShmTransferStrategy
@@ -157,11 +157,11 @@ mixed-device configurations by raising an error.
 | EngineDrivenTransferContext | Actual CPU chunk data | Worker gather/scatter + transport commit | Synchronous worker-side flow |
 | AsyncEngineDrivenTransferContext | Actual CPU chunk data | Worker gather/scatter (copy stream) + background commit | Async future (resolved in background thread) |
 
-### 2.3 Server Side: LMCache-Driven Module vs Engine-Driven Module
+### 2.3 Server Side: LMCache-Driven Service vs Engine-Driven Service
 
-- **LMCache-driven module (existing path):** server uses `LMCacheDrivenTransferModule`
+- **LMCache-driven module (existing path):** server uses `LMCacheDrivenTransferService`
   with CUDA IPC handles to access worker device memory directly.
-- **Engine-driven module:** server uses `EngineDrivenTransferModule`, which
+- **Engine-driven module:** server uses `EngineDrivenTransferService`, which
   stores per-instance `EngineDrivenContextEntry` metadata and delegates transfer
   logic to a `TransferStrategy`.
 
@@ -205,7 +205,7 @@ It also computes `shm_pool_info` once from `StorageManagerConfig`:
 
 ### 2.5 Current File Layout (Key Components)
 
-- `lmcache/v1/multiprocess/services/engine_driven_transfer.py`: `EngineDrivenTransferModule`
+- `lmcache/v1/multiprocess/services/engine_driven_transfer.py`: `EngineDrivenTransferService`
 - `lmcache/v1/multiprocess/services/server_transfer.py`: `TransferStrategy`, `PickleTransferStrategy`, `ShmTransferStrategy`
 - `lmcache/v1/multiprocess/transfer_context/worker_transfer.py`: `EngineDrivenTransferContext`, `LMCacheDrivenTransferContext`, `create_transfer_context`, `MPTransferMode`
 - `lmcache/v1/multiprocess/transfer_context/async_engine_driven.py`: `AsyncEngineDrivenTransferContext`

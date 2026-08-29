@@ -46,7 +46,7 @@ format:
 
 The receiving server therefore needs no per-type branching: a
 `list[DeviceIPCWrapper]` arriving at
-`LMCacheDrivenTransferModule.register_kv_cache` contains any mix of
+`LMCacheDrivenTransferService.register_kv_cache` contains any mix of
 concrete wrappers, and `to_tensor()` does the right thing.
 
 ## Sender-side validation

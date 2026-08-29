@@ -321,9 +321,10 @@ in `lmcache/cli/corpora/`.
   - *Second-level:* Create a new `.py` file (or sub-package with `__init__.py`)
     under the parent command's package with a concrete `BaseCommand` subclass.
     Done. No edits to the parent's `__init__.py` required.
-- **`send_request()` helper:** Creates a temporary `MessageQueueClient`, submits
-  a ZMQ request, waits with timeout (default 5s), tears down. All ZMQ commands
-  use this. Extended to handle HTTP targets alongside ZMQ.
+- **RPC helpers:** Commands that need the multiprocess server create a
+  temporary `MultiprocessGrpcClient`, call the generated RPC method directly,
+  wait with timeout (default 5s), then tear down. HTTP commands use the
+  matching HTTP client path.
 - **Framework:** `argparse` with subparsers (no new deps). Reuses existing
   `add_*_args()` helpers.
 - **`--url` flag:** Configured per-subcommand (ZMQ vs HTTP semantics vary).

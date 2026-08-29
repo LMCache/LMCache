@@ -14,7 +14,7 @@ Retrieve / store / close are **methods** on the context.
 import lmcache.sdk.kvcache as kvcache   # query tensors: lmcache.sdk.qcache
 
 ctx = kvcache.connect(
-    url="tcp://localhost:5555",       # ZMQ url
+    url="grpc://localhost:5555",      # gRPC url
     http_url="http://localhost:9000", # HTTP url for retrieving KV cache shape
     model_name="Qwen/Qwen3-8B",
 )
@@ -38,13 +38,13 @@ SDK process                                  LMCache MP server
 -----------                                  -----------------
 LMCacheSDKContext
   ├ ContiguousTransferWrapper
-  │   └ EngineDrivenContext{Shm,Pickle} ──MQ──▶ EngineDrivenTransferModule
+  │   └ EngineDrivenContext{Shm,Pickle} ─gRPC─▶ EngineServiceImpl.Prepare*/Commit*
   │                                             └ StorageManager (L1 pool, locks, prefetch)
-  └ MessageQueueClient ──────────────────ZMQ──▶ LookupModule (LOOKUP / QUERY_PREFETCH_STATUS)
+  └ MultiprocessGrpcClient ──────────────gRPC─▶ EngineServiceImpl.Lookup/QueryPrefetchStatus
   SharedMemory(name) ◀────────────────────────  L1 POSIX segment (SHM transport only)
 ```
 
-- **Control plane (ZMQ):** lookup/prefetch, slot reservation, lock release, session end.
+- **Control plane (gRPC):** lookup/prefetch, slot reservation, lock release, session end.
 - **Data plane:** **SHM** when the server exposes an L1 pool, otherwise **pickle** over the
   MQ — both driven through one `EngineDrivenContext`, so the SDK never branches on transport.
 - **`ContiguousTransferWrapper`** ([wrapper/contiguous.py](../../../lmcache/sdk/wrapper/contiguous.py))

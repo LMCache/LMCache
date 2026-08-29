@@ -1,39 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Protocol and types for pluggable server services."""
+"""Shared protocols for multiprocess server services."""
 
 # Future
 from __future__ import annotations
 
 # Standard
-from typing import TYPE_CHECKING, Protocol
-
-if TYPE_CHECKING:
-    # First Party
-    from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
-
-
-class MPService(Protocol):
-    """Protocol for pluggable server services.
-
-    Each service owns its internal state and declares which generated gRPC
-    service descriptors it implements. The transport discovers concrete
-    handler methods from those descriptors by converting gRPC method names to
-    snake_case method names, with optional class-level aliases for Python
-    method names that intentionally differ.
-    """
-
-    @property
-    def context(self) -> MPCacheServerContext:
-        """Return the shared engine context. Exposed for testing only."""
-        ...
-
-    def report_status(self) -> dict:
-        """Return service-specific status information."""
-        ...
-
-    def close(self) -> None:
-        """Release resources owned by this service."""
-        ...
+from typing import Protocol
 
 
 class InstanceLivenessTarget(Protocol):
@@ -45,7 +17,7 @@ class InstanceLivenessTarget(Protocol):
       ``tracked_instance_count``). The transfer services fill this role.
     * **State mirror** -- holds a second reference to a reaped instance's
       resources and releases it on demand (``drop_instance_state``).
-      ``BlendV3Module`` fills this role for its per-instance CB state.
+      ``BlendV3Service`` fills this role for its per-instance CB state.
 
     Every method defaults to a no-op, so an implementer subclasses this
     protocol and overrides only the role it fills. The management service
@@ -93,7 +65,7 @@ class InstanceLivenessTarget(Protocol):
 
         Called for every reaped ``instance_id``. A no-op unless the target
         keeps a second reference to that instance's resources (only mirrors
-        such as ``BlendV3Module`` override this).
+        such as ``BlendV3Service`` override this).
 
         Args:
             instance_id: The reaped worker's instance ID.

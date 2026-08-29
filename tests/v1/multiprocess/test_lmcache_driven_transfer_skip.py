@@ -17,7 +17,7 @@ from unittest.mock import MagicMock
 from lmcache.v1.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.multiprocess.services import lmcache_driven_transfer as mod
 from lmcache.v1.multiprocess.services.lmcache_driven_transfer import (
-    LMCacheDrivenTransferModule,
+    LMCacheDrivenTransferService,
     all_null_chunk_masks,
 )
 
@@ -96,12 +96,12 @@ def test_object_group_null_only_when_all_its_kernel_groups_null():
 
 
 def _make_module(monkeypatch, num_chunks, num_chunks_in_sw, group_kinds=()):
-    """Build an LMCacheDrivenTransferModule with its collaborators mocked, and
+    """Build an LMCacheDrivenTransferService with its collaborators mocked, and
     return (module, read_calls, transfer_calls) capturing what retrieve reads
     and transfers per object group."""
     num_object_groups = len(num_chunks_in_sw)
 
-    module = LMCacheDrivenTransferModule.__new__(LMCacheDrivenTransferModule)
+    module = LMCacheDrivenTransferService.__new__(LMCacheDrivenTransferService)
 
     kvlgm = SimpleNamespace(
         num_object_groups=num_object_groups,

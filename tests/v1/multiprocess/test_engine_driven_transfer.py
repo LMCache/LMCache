@@ -44,11 +44,11 @@ if TYPE_CHECKING:
     )
     from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
     from lmcache.v1.multiprocess.services.engine_driven_transfer import (
-        EngineDrivenTransferModule,
+        EngineDrivenTransferService,
     )
 
 
-class ServerModuleFactory(Protocol):
+class ServerServiceFactory(Protocol):
     """Typed callable contract for creating patched server test modules.
 
     Args:
@@ -58,7 +58,7 @@ class ServerModuleFactory(Protocol):
         mock_storage: Optional storage mock; defaults to a new ``MagicMock``.
         mock_session: Optional session mock; defaults to a new ``MagicMock``.
 
-    Returns a tuple of ``(EngineDrivenTransferModule, storage MagicMock,
+    Returns a tuple of ``(EngineDrivenTransferService, storage MagicMock,
     session MagicMock, MPCacheServerContext)``.
     """
 
@@ -71,7 +71,7 @@ class ServerModuleFactory(Protocol):
         mock_storage: MagicMock | None = None,
         mock_session: MagicMock | None = None,
     ) -> tuple[
-        "EngineDrivenTransferModule", MagicMock, MagicMock, "MPCacheServerContext"
+        "EngineDrivenTransferService", MagicMock, MagicMock, "MPCacheServerContext"
     ]: ...
 
 
@@ -1012,17 +1012,17 @@ def stub_lmcache_native() -> Any:
 
 
 @pytest.fixture
-def server_module_factory(
+def server_service_factory(
     stub_lmcache_native: Any,
-) -> Iterator[ServerModuleFactory]:
-    """Create a patched server module/context with configurable mocks."""
+) -> Iterator[ServerServiceFactory]:
+    """Create a patched server service/context with configurable mocks."""
     # Standard
     from contextlib import ExitStack
 
     # First Party
     from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
     from lmcache.v1.multiprocess.services.engine_driven_transfer import (
-        EngineDrivenTransferModule,
+        EngineDrivenTransferService,
     )
 
     stack = ExitStack()
@@ -1035,9 +1035,9 @@ def server_module_factory(
         mock_storage: MagicMock | None = None,
         mock_session: MagicMock | None = None,
     ) -> tuple[
-        "EngineDrivenTransferModule", MagicMock, MagicMock, "MPCacheServerContext"
+        "EngineDrivenTransferService", MagicMock, MagicMock, "MPCacheServerContext"
     ]:
-        """Create a patched module/context plus storage/session mocks.
+        """Create a patched service/context plus storage/session mocks.
 
         Args:
             storage_manager_config: Optional engine storage config override.
@@ -1084,7 +1084,7 @@ def server_module_factory(
             storage_manager_config=storage_manager_config,
             chunk_size=chunk_size,
         )
-        module = EngineDrivenTransferModule(ctx)
+        module = EngineDrivenTransferService(ctx)
 
         return module, mock_storage, mock_session, ctx
 
@@ -1139,10 +1139,10 @@ def test_engine_context_shm_pool_info(
 
 def test_server_register_and_find_non_cuda_context_layout(
     stub_lmcache_native: Any,
-    server_module_factory: ServerModuleFactory,
+    server_service_factory: ServerServiceFactory,
 ) -> None:
     """Ensure backend-agnostic registration stores metadata and lookup finds layout."""
-    module, _, _, ctx = server_module_factory(chunk_size=16)
+    module, _, _, ctx = server_service_factory(chunk_size=16)
     response = module.register_kv_cache_engine_driven_context(
         _default_register_payload(instance_id=1)
     )
@@ -1156,7 +1156,7 @@ def test_server_register_and_find_non_cuda_context_layout(
 
 def test_server_store_and_retrieve_cpu_chunks(
     stub_lmcache_native: Any,
-    server_module_factory: ServerModuleFactory,
+    server_service_factory: ServerServiceFactory,
 ) -> None:
     """Validate mocked server-side CPU chunk store and retrieve behavior."""
     mock_storage = MagicMock()
@@ -1172,7 +1172,7 @@ def test_server_store_and_retrieve_cpu_chunks(
     mock_storage.read_prefetched_results.side_effect = _read_prefetched_results
     mock_session = MagicMock()
     mock_session.get_hashes.return_value = [b"h"]
-    module, _, _, _ = server_module_factory(
+    module, _, _, _ = server_service_factory(
         mock_storage=mock_storage,
         mock_session=mock_session,
     )
@@ -1197,7 +1197,7 @@ def test_server_store_and_retrieve_cpu_chunks(
 
 def test_server_shm_commit_store_allows_noop_when_all_keys_exist(
     stub_lmcache_native: Any,
-    server_module_factory: ServerModuleFactory,
+    server_service_factory: ServerServiceFactory,
 ) -> None:
     """Regression: repeated prompt after worker restart should no-op-store cleanly.
 
@@ -1212,7 +1212,7 @@ def test_server_shm_commit_store_allows_noop_when_all_keys_exist(
     mock_session = MagicMock()
     mock_session.get_hashes.return_value = [b"h"]
 
-    module, _, _, _ = server_module_factory(
+    module, _, _, _ = server_service_factory(
         storage_manager_config=_make_storage_manager_config(
             shm_name="lmcache_test_pool", pool_size=1024
         ),
@@ -1233,7 +1233,7 @@ def test_server_shm_commit_store_allows_noop_when_all_keys_exist(
 
 def test_server_prepare_store_releases_unused_reserved_write_locks(
     stub_lmcache_native: Any,
-    server_module_factory: ServerModuleFactory,
+    server_service_factory: ServerServiceFactory,
 ) -> None:
     """Ensure SHM prepare_store releases reserved keys that have no writable tensor."""
     # First Party
@@ -1248,7 +1248,7 @@ def test_server_prepare_store_releases_unused_reserved_write_locks(
     mock_session = MagicMock()
     mock_session.get_hashes.return_value = [b"h"]
 
-    module, _, _, _ = server_module_factory(
+    module, _, _, _ = server_service_factory(
         storage_manager_config=_make_storage_manager_config(
             shm_name="lmcache_test_pool", pool_size=1024
         ),
@@ -1268,7 +1268,7 @@ def test_server_prepare_store_releases_unused_reserved_write_locks(
 
 def test_server_shm_transport_uses_engine_level_config(
     stub_lmcache_native: Any,
-    server_module_factory: ServerModuleFactory,
+    server_service_factory: ServerServiceFactory,
 ) -> None:
     """Ensure all instances share the same engine-level SHM transport setting."""
     mock_storage = MagicMock()
@@ -1282,7 +1282,7 @@ def test_server_shm_transport_uses_engine_level_config(
     mock_session = MagicMock()
     mock_session.get_hashes.return_value = [b"h"]
 
-    module, _, _, _ = server_module_factory(
+    module, _, _, _ = server_service_factory(
         storage_manager_config=_make_storage_manager_config(
             shm_name="lmcache_test_pool", pool_size=1024
         ),
@@ -1303,10 +1303,10 @@ def test_server_shm_transport_uses_engine_level_config(
 
 def test_server_engine_driven_reregister_returns_existing_shm_response(
     stub_lmcache_native: Any,
-    server_module_factory: ServerModuleFactory,
+    server_service_factory: ServerServiceFactory,
 ) -> None:
     """Ensure duplicate non-GPU registration returns existing SHM response."""
-    module, _, _, _ = server_module_factory(
+    module, _, _, _ = server_service_factory(
         storage_manager_config=_make_storage_manager_config(
             shm_name="lmcache_test_pool", pool_size=2048
         ),
@@ -1323,7 +1323,7 @@ def test_server_engine_driven_reregister_returns_existing_shm_response(
 
 def test_server_unregister_engine_driven_context_releases_pending_shm_locks(
     stub_lmcache_native: Any,
-    server_module_factory: ServerModuleFactory,
+    server_service_factory: ServerServiceFactory,
 ) -> None:
     """Ensure unregister releases pending SHM read/write reservations."""
     mock_storage = MagicMock()
@@ -1341,7 +1341,7 @@ def test_server_unregister_engine_driven_context_releases_pending_shm_locks(
     mock_session = MagicMock()
     mock_session.get_hashes.return_value = [b"h"]
 
-    module, _, _, _ = server_module_factory(
+    module, _, _, _ = server_service_factory(
         storage_manager_config=_make_storage_manager_config(
             shm_name="lmcache_test_pool", pool_size=4096
         ),
@@ -1415,7 +1415,7 @@ def test_gather_paged_kv_with_chunk_indices_subset() -> None:
 
 def test_server_prepare_store_includes_chunk_indices(
     stub_lmcache_native: Any,
-    server_module_factory: ServerModuleFactory,
+    server_service_factory: ServerServiceFactory,
 ) -> None:
     """prepare_store response context includes chunk_indices for SHM mode.
 
@@ -1434,7 +1434,7 @@ def test_server_prepare_store_includes_chunk_indices(
     mock_session = MagicMock()
     mock_session.get_hashes.return_value = [b"h1", b"h2"]
 
-    module, _, _, _ = server_module_factory(
+    module, _, _, _ = server_service_factory(
         storage_manager_config=_make_storage_manager_config(
             shm_name="lmcache_test_pool", pool_size=4096
         ),

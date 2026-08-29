@@ -26,19 +26,19 @@ import lmcache.lmcache_native as lmcache_native
 
 
 def _make_engine_with_mocked_matcher():
-    """Construct a real BlendV3Module with the matcher mocked so we can
+    """Construct a real BlendV3Service with the matcher mocked so we can
     observe `on_new_token_hashes` calls without setting up storage."""
     # First Party
     from lmcache.v1.multiprocess.services import blend_v3 as v3_mod
 
-    eng_mock = MagicMock(spec=v3_mod.BlendV3Module)
+    eng_mock = MagicMock(spec=v3_mod.BlendV3Service)
     eng_mock._fingerprint_stop = threading.Event()
     eng_mock._token_range_matcher = MagicMock()
     eng_mock._pending_fp_lock = threading.Lock()
     eng_mock._pending_fp_hashes = set()
     # Bind the real drainer method to our mock.
     eng_mock._drain_fingerprint_queue = (
-        v3_mod.BlendV3Module._drain_fingerprint_queue.__get__(eng_mock)
+        v3_mod.BlendV3Service._drain_fingerprint_queue.__get__(eng_mock)
     )
     return eng_mock
 
@@ -271,8 +271,8 @@ def test_batched_rope_calls_kernel_per_group_per_slot():
         group_to_cache=[],
     )
 
-    eng = MagicMock(spec=v3_mod.BlendV3Module)
-    eng._apply_cb_rope_batched = v3_mod.BlendV3Module._apply_cb_rope_batched.__get__(
+    eng = MagicMock(spec=v3_mod.BlendV3Service)
+    eng._apply_cb_rope_batched = v3_mod.BlendV3Service._apply_cb_rope_batched.__get__(
         eng
     )
 
@@ -321,8 +321,8 @@ def test_batched_rope_noop_on_empty_slots():
         cos_sin_caches=[MagicMock()],
         group_to_cache=[],
     )
-    eng = MagicMock(spec=v3_mod.BlendV3Module)
-    eng._apply_cb_rope_batched = v3_mod.BlendV3Module._apply_cb_rope_batched.__get__(
+    eng = MagicMock(spec=v3_mod.BlendV3Service)
+    eng._apply_cb_rope_batched = v3_mod.BlendV3Service._apply_cb_rope_batched.__get__(
         eng
     )
 
@@ -355,8 +355,8 @@ def test_batched_rope_raises_on_compressed_layout():
         group_to_cache=[],
     )
 
-    eng = MagicMock(spec=v3_mod.BlendV3Module)
-    eng._apply_cb_rope_batched = v3_mod.BlendV3Module._apply_cb_rope_batched.__get__(
+    eng = MagicMock(spec=v3_mod.BlendV3Service)
+    eng._apply_cb_rope_batched = v3_mod.BlendV3Service._apply_cb_rope_batched.__get__(
         eng
     )
 
@@ -370,19 +370,19 @@ def test_batched_rope_raises_on_compressed_layout():
 
 
 def _coord_engine(chunk_size: int = 4):
-    """A BlendV3Module mock with the coordinator-leg methods bound."""
+    """A BlendV3Service mock with the coordinator-leg methods bound."""
     # First Party
     from lmcache.v1.multiprocess.services import blend_v3 as v3_mod
 
-    eng = MagicMock(spec=v3_mod.BlendV3Module)
+    eng = MagicMock(spec=v3_mod.BlendV3Service)
     eng._ctx = SimpleNamespace(chunk_size=chunk_size)
     # _event_bus is an instance attr (set in __init__), so spec= omits it;
     # _poll_coordinator_match publishes CB_COORDINATOR_MATCH_END through it.
     eng._event_bus = MagicMock()
-    eng._build_global_segments = v3_mod.BlendV3Module._build_global_segments.__get__(
+    eng._build_global_segments = v3_mod.BlendV3Service._build_global_segments.__get__(
         eng
     )
-    eng._poll_coordinator_match = v3_mod.BlendV3Module._poll_coordinator_match.__get__(
+    eng._poll_coordinator_match = v3_mod.BlendV3Service._poll_coordinator_match.__get__(
         eng
     )
     return eng
@@ -450,7 +450,7 @@ def test_non_overlapping_after_prefix():
     from lmcache.v1.multiprocess.custom_types import CBMatchResult
     from lmcache.v1.multiprocess.services import blend_v3 as v3_mod
 
-    f = v3_mod.BlendV3Module._non_overlapping_after_prefix
+    f = v3_mod.BlendV3Service._non_overlapping_after_prefix
 
     def m(cur_st: int, cur_ed: int) -> CBMatchResult:
         return CBMatchResult(
@@ -505,12 +505,12 @@ def test_cache_for_group_uniform_and_mapped():
 
 
 def _rope_registration_engine(engine_group_indices: list[int]):
-    """A BlendV3Module mock with ``cb_register_rope`` bound and a registered
+    """A BlendV3Service mock with ``cb_register_rope`` bound and a registered
     instance whose kernel groups span the given engine group indices."""
     # First Party
     from lmcache.v1.multiprocess.services import blend_v3 as v3_mod
 
-    eng = MagicMock(spec=v3_mod.BlendV3Module)
+    eng = MagicMock(spec=v3_mod.BlendV3Service)
     eng._cb_rope_state = {}
     eng._transfer_module = MagicMock()
     entry = SimpleNamespace(
@@ -524,7 +524,7 @@ def _rope_registration_engine(engine_group_indices: list[int]):
         )
     )
     eng._transfer_module.get_and_touch_context_entry.return_value = entry
-    eng.cb_register_rope = v3_mod.BlendV3Module.cb_register_rope.__get__(eng)
+    eng.cb_register_rope = v3_mod.BlendV3Service.cb_register_rope.__get__(eng)
     return eng
 
 
@@ -621,8 +621,8 @@ def _build_scatter_engine_and_context(
     # First Party
     from lmcache.v1.multiprocess.services import blend_v3 as v3_mod
 
-    eng = MagicMock(spec=v3_mod.BlendV3Module)
-    eng._scatter_batch_to_paged = v3_mod.BlendV3Module._scatter_batch_to_paged.__get__(
+    eng = MagicMock(spec=v3_mod.BlendV3Service)
+    eng._scatter_batch_to_paged = v3_mod.BlendV3Service._scatter_batch_to_paged.__get__(
         eng
     )
 
@@ -772,14 +772,14 @@ def _build_plan_engine_and_context(
     # First Party
     from lmcache.v1.multiprocess.services import blend_v3 as v3_mod
 
-    eng = MagicMock(spec=v3_mod.BlendV3Module)
+    eng = MagicMock(spec=v3_mod.BlendV3Service)
     for name in (
         "_build_cb_retrieve_plan_flat",
         "_resolve_cb_plan_invariants",
         "_cb_slot_buffers",
         "_cb_staged_groups",
     ):
-        setattr(eng, name, getattr(v3_mod.BlendV3Module, name).__get__(eng))
+        setattr(eng, name, getattr(v3_mod.BlendV3Service, name).__get__(eng))
     eng._cb_plan_invariants = weakref.WeakKeyDictionary()
     eng._cb_slot_staging = weakref.WeakKeyDictionary()
     eng._cb_plan_done_events = weakref.WeakKeyDictionary()
@@ -1122,7 +1122,7 @@ def test_union_of_local_and_fleet_matches_collapses_duplicates():
     from lmcache.v1.multiprocess.custom_types import CBMatchResult
     from lmcache.v1.multiprocess.services import blend_v3 as v3_mod
 
-    dedup = v3_mod.BlendV3Module._non_overlapping_after_prefix
+    dedup = v3_mod.BlendV3Service._non_overlapping_after_prefix
     shared = CBMatchResult(old_st=0, old_ed=4, cur_st=8, cur_ed=12, hash=b"\x01")
     local_only = CBMatchResult(old_st=4, old_ed=8, cur_st=12, cur_ed=16, hash=b"\x02")
     fleet_only = CBMatchResult(old_st=8, old_ed=12, cur_st=16, cur_ed=20, hash=b"\x03")
@@ -1141,7 +1141,7 @@ def test_union_recall_is_at_least_either_source_alone():
     from lmcache.v1.multiprocess.custom_types import CBMatchResult
     from lmcache.v1.multiprocess.services import blend_v3 as v3_mod
 
-    dedup = v3_mod.BlendV3Module._non_overlapping_after_prefix
+    dedup = v3_mod.BlendV3Service._non_overlapping_after_prefix
     local = [CBMatchResult(old_st=0, old_ed=4, cur_st=4, cur_ed=8, hash=b"\x01")]
     fleet = [CBMatchResult(old_st=0, old_ed=4, cur_st=12, cur_ed=16, hash=b"\x02")]
 

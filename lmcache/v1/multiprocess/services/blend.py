@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Blend (context-blend / cross-request KV reuse) module for MPCacheServer."""
+"""Blend (context-blend / cross-request KV reuse) support for MPCacheServer."""
 
 # Standard
 from typing import Any
@@ -307,27 +307,15 @@ def _unique_token_coverage(results: list[CBMatchResult]) -> int:
     return coverage
 
 
-class BlendModule:
+class LegacyBlendService:
     """Handles blend (context-blend / cross-request KV reuse) operations.
 
     Owns CB-specific GPU context registrations and the token range matcher.
-    Provides handlers for CB register, unregister, store, retrieve, and lookup.
+    Implements CB register, unregister, store, retrieve, and lookup logic.
 
     Args:
         ctx: The shared engine context.
     """
-
-    GRPC_SERVICE_NAMES = ("BlendService", "BlendV2Service")
-    GRPC_METHOD_ALIASES = {
-        "CbLookupPreComputedV2": "cb_lookup_pre_computed",
-        "CbRetrievePreComputedV2": "cb_retrieve_pre_computed",
-    }
-    GRPC_SKIP_METHODS = frozenset(
-        {
-            "CbLookupPreComputed",
-            "CbRetrievePreComputed",
-        }
-    )
 
     def __init__(self, ctx: MPCacheServerContext) -> None:
         self._ctx = ctx
@@ -342,7 +330,7 @@ class BlendModule:
         return self._ctx
 
     def report_status(self) -> dict:
-        """Return blend module status information.
+        """Return blend service status information.
 
         Returns:
             A dict containing registered CB GPU instance IDs and
@@ -378,7 +366,7 @@ class BlendModule:
         }
 
     def close(self) -> None:
-        """Release resources owned by this module."""
+        """Release resources owned by this service."""
         self._cb_gpu_contexts.clear()
         self._cb_gpu_context_meta.clear()
 

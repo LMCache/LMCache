@@ -52,8 +52,8 @@ class _LayoutDescEntry:
 class LayoutDescRegistry:
     """Thread-safe registry mapping (model_name, world_size) to MemoryLayoutDesc.
 
-    Modules write to this registry when KV caches are registered.
-    Consumers (e.g. LookupModule) read from it to find layout descriptors
+    Services write to this registry when KV caches are registered.
+    Consumers (e.g. EngineLookupService) read from it to find layout descriptors
     for prefetch tasks. Multiple worker instances can share the same
     ``(model_name, world_size)`` entry, so the registry keeps the descriptor
     until the last matching registration is unregistered.
@@ -187,7 +187,7 @@ class MPCacheServerContext:
     """Shared infrastructure for all server services.
 
     Holds the storage manager, token hasher, session manager, event bus,
-    and layout descriptor registry. Modules receive this context at init
+    and layout descriptor registry. Services receive this context at init
     and use it for shared operations.
 
     Args:

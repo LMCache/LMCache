@@ -103,7 +103,7 @@ def test_multi_layer_block_kv_transfer_roundtrip():
     """Server-side copy (handle mode) D2H + H2D round-trip.
 
     Regression for the CI ``cpu_e2e_validation (server-side copy)`` failure:
-    ``LMCacheDrivenTransferModule.store`` calls ``multi_layer_block_kv_transfer`` for
+    ``LMCacheDrivenTransferService.store`` calls ``multi_layer_block_kv_transfer`` for
     this format, so the fallback must transfer it as a single fused plane
     (kv_size == 1, hs == 2 * head_size).
     """

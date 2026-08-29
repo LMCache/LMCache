@@ -29,7 +29,6 @@ from lmcache.v1.multiprocess.protocol import (
     RpcMethod,
     coerce_rpc_method,
 )
-from lmcache.v1.multiprocess.service import MPService
 from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
     lmcache_mq_pb2 as _pb2_typed,
 )
@@ -116,26 +115,6 @@ _RPC_METHODS_BY_SERVICE: dict[str, tuple[RpcMethod, ...]] = {
 _TYPED_RPCS_BY_METHOD_NAME: dict[str, TypedRpcSpec] = {
     typed_spec.method_name: typed_spec for typed_spec in _TYPED_RPCS.values()
 }
-
-
-def _service_handler_name(service: MPService, rpc_method: RpcMethod) -> str | None:
-    """Resolve the Python handler name for a service/rpc pair."""
-    service_type = type(service)
-    skipped: frozenset[str] = getattr(service_type, "GRPC_SKIP_METHODS", frozenset())
-    method_name = str(rpc_method)
-    if method_name in skipped or rpc_method.name in skipped:
-        return None
-    aliases: dict[str, str] = getattr(service_type, "GRPC_METHOD_ALIASES", {})
-    return aliases.get(method_name, rpc_method.name.lower())
-
-
-def _has_declared_handler(service: MPService, handler_name: str) -> bool:
-    """Return True only for methods declared by the concrete service class."""
-    try:
-        inspect.getattr_static(service, handler_name)
-    except AttributeError:
-        return False
-    return callable(getattr(service, handler_name))
 
 
 # ---------------------------------------------------------------------------
@@ -310,28 +289,6 @@ class MultiprocessGrpcClient:
     def __dir__(self) -> list[str]:
         """Include generated RPC method names in introspection output."""
         return sorted(set(super().__dir__()) | set(_CLIENT_RPC_METHODS_BY_NAME))
-
-    def submit_request(
-        self,
-        request_type: RpcMethod | str,
-        request_payloads: list[Any],
-        response_cls: Optional[T] = None,
-    ) -> MessagingFuture[T]:
-        """Submit a request through the legacy request-token API.
-
-        Args:
-            request_type: Which RPC to invoke.
-            request_payloads: Positional payloads matching
-                ``get_payload_classes(request_type)``.
-            response_cls: Kept for signature compatibility; ignored
-                (the response class is resolved from ``request_type``).
-
-        Returns:
-            A ``MessagingFuture`` completed by the gRPC callback.
-        """
-        del response_cls
-        rpc_method = coerce_rpc_method(request_type)
-        return self._call_rpc(rpc_method, *request_payloads)
 
     def _call_rpc(
         self,
@@ -538,7 +495,11 @@ class _GrpcServicer:
             else 0
         )
         py_args = spec.request_to_python(request)
-        result = handler.run(py_args, affinity_key)
+        try:
+            result = handler.run(py_args, affinity_key)
+        except NotImplementedError as exc:
+            context.abort(grpc.StatusCode.UNIMPLEMENTED, str(exc))
+            raise RuntimeError("unreachable") from exc
         return spec.python_to_response(result)
 
     def RegisterKvCache(self, request: Any, context: "grpc.ServicerContext") -> Any:
@@ -692,12 +653,12 @@ class _ServerConfig:
 
 
 class MultiprocessGrpcServer:
-    """gRPC server that mounts descriptor-derived service methods.
+    """gRPC server that registers concrete Python gRPC service implementations.
 
-    The normal path is ``mount_services()``: services declare generated gRPC
-    service names, and the transport discovers the Python handler method for
-    each protobuf method from that descriptor. Direct ``add_handler`` remains
-    available for focused transport tests and external compatibility.
+    The normal path is ``add_service()``: callers provide the generated
+    protobuf service name and an implementation object with same-named
+    CamelCase RPC methods. Direct ``add_handler`` remains available for focused
+    transport tests and external compatibility.
 
     Args:
         bind_url: Either ``grpc://host:port`` or a bare ``host:port``.
@@ -870,44 +831,43 @@ class MultiprocessGrpcServer:
         del request_type, handler
         raise NotImplementedError
 
-    def mount_services(
+    def add_service(self, service_name: str, implementation: object) -> None:
+        """Register a generated gRPC service implementation.
+
+        Args:
+            service_name: Generated protobuf service name, for example
+                ``"EngineService"``.
+            implementation: Python object implementing every protobuf method
+                in the service with the same CamelCase method name.
+
+        Raises:
+            ValueError: If ``service_name`` is not in the protobuf descriptor.
+            TypeError: If the implementation is missing a required method.
+        """
+        if service_name not in _RPC_METHODS_BY_SERVICE:
+            raise ValueError(f"Unknown gRPC service {service_name!r}")
+        for rpc_method in _RPC_METHODS_BY_SERVICE[service_name]:
+            handler = getattr(implementation, str(rpc_method), None)
+            if not callable(handler):
+                raise TypeError(
+                    f"{implementation.__class__.__name__} must implement "
+                    f"{service_name}.{rpc_method}"
+                )
+            self.add_handler(rpc_method, handler)
+
+    def assign_thread_pools(
         self,
-        services: Sequence[MPService],
         *,
         max_cpu_workers: int,
         max_gpu_workers: int,
     ) -> None:
-        """Mount RPC handlers implemented by service objects.
-
-        Services declare generated gRPC service names through
-        ``GRPC_SERVICE_NAMES``. For each method in those descriptors, the
-        transport binds a same-named Python method using the lower-case
-        request name (``P2P_LOOKUP_AND_LOCK`` -> ``p2p_lookup_and_lock``),
-        with optional class-level aliases for Python method names that
-        intentionally differ.
+        """Assign thread pools for all currently registered blocking handlers.
 
         Args:
-            services: Service objects implementing generated gRPC operations.
             max_cpu_workers: Worker count for normal blocking handlers.
             max_gpu_workers: Worker count for affinity-routed blocking handlers.
         """
-        mounted_types: list[RpcMethod] = []
-        mounted_seen: set[RpcMethod] = set()
-        for service in services:
-            for service_name in getattr(type(service), "GRPC_SERVICE_NAMES", ()):
-                if service_name not in _RPC_METHODS_BY_SERVICE:
-                    raise ValueError(f"Unknown gRPC service {service_name!r}")
-                for rpc_method in _RPC_METHODS_BY_SERVICE[service_name]:
-                    handler_name = _service_handler_name(service, rpc_method)
-                    if handler_name is None or not _has_declared_handler(
-                        service, handler_name
-                    ):
-                        continue
-                    self.add_handler(rpc_method, getattr(service, handler_name))
-                    if rpc_method not in mounted_seen:
-                        mounted_types.append(rpc_method)
-                        mounted_seen.add(rpc_method)
-
+        mounted_types = list(self.handlers)
         affinity_types = [
             rpc_method
             for rpc_method in mounted_types
@@ -1050,9 +1010,3 @@ class MultiprocessGrpcServer:
             self._server = None
         for pool in self.extra_pools:
             pool.shutdown(wait=False)
-
-
-# Compatibility aliases for existing public imports. New code should use the
-# gRPC names above; these aliases intentionally carry no separate behavior.
-MessageQueueClient = MultiprocessGrpcClient
-MessageQueueServer = MultiprocessGrpcServer

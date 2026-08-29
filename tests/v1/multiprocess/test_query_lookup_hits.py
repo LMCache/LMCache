@@ -24,7 +24,7 @@ from lmcache.v1.multiprocess.protocol import (
     get_response_class,
 )
 from lmcache.v1.multiprocess.protocols.base import HandlerType
-from lmcache.v1.multiprocess.services.lookup import LookupModule, _PrefetchJob
+from lmcache.v1.multiprocess.services.lookup import EngineLookupService, _PrefetchJob
 
 # Test helpers
 from tests.v1.multiprocess.test_mq import (
@@ -113,15 +113,15 @@ def test_mq_query_prefetch_lookup_hits_none_response():
 
 def _make_module_with_job(
     world_size: int, storage_return: int | None, num_object_groups: int = 1
-) -> tuple[LookupModule, str]:
-    """Create a LookupModule with a mock context and a single prefetch job.
+) -> tuple[EngineLookupService, str]:
+    """Create a EngineLookupService with a mock context and a single prefetch job.
 
     Returns:
         (module, request_id)
     """
     ctx = MagicMock()
     ctx.token_hasher.chunk_size = 256
-    module = LookupModule(ctx)
+    module = EngineLookupService(ctx)
 
     handle = PrefetchHandle(
         prefetch_request_id=0,
@@ -190,7 +190,7 @@ def test_server_lookup_hits_returns_zero_for_invalid_request():
     """Returns 0 for a request_id that doesn't exist (prevents infinite spin)."""
     ctx = MagicMock()
     ctx.token_hasher.chunk_size = 256
-    module = LookupModule(ctx)
+    module = EngineLookupService(ctx)
 
     result = module.query_prefetch_lookup_hits("nonexistent-req")
 
@@ -224,9 +224,9 @@ def test_server_lookup_hits_zero_count():
 
 
 def test_server_handler_registered():
-    """LookupModule should have a query_prefetch_lookup_hits method."""
-    assert hasattr(LookupModule, "query_prefetch_lookup_hits")
-    assert callable(LookupModule.query_prefetch_lookup_hits)
+    """EngineLookupService should have a query_prefetch_lookup_hits method."""
+    assert hasattr(EngineLookupService, "query_prefetch_lookup_hits")
+    assert callable(EngineLookupService.query_prefetch_lookup_hits)
 
 
 # ============================================================================
@@ -270,7 +270,7 @@ def _captured_lookup_object_keys(
     )
     ctx.token_hasher.compute_chunk_hashes.return_value = chunk_hashes
 
-    module = LookupModule(ctx)
+    module = EngineLookupService(ctx)
     module.lookup(_lookup_key(world_size=world_size), tp_size=1)
 
     ctx.storage_manager.submit_prefetch_task.assert_called_once()

@@ -2,7 +2,7 @@
 """Unit tests for the ``WAIT_PREFETCH_STATUS`` request handler path.
 
 The prefetch-controller tests cover the condition-variable wait in isolation;
-these cover the ``LookupModule`` handler that ``WAIT_PREFETCH_STATUS`` dispatches
+these cover the ``EngineLookupService`` handler that ``WAIT_PREFETCH_STATUS`` dispatches
 to, i.e. the ``wait_prefetch_status -> query_prefetch_status`` path: count
 computation, event emission, and exactly-once job consumption. The storage
 manager is mocked, so no GPU or native bitmap is needed.
@@ -15,7 +15,7 @@ import threading
 # First Party
 from lmcache.lmcache_native import Bitmap
 from lmcache.v1.distributed.api import PrefetchHandle
-from lmcache.v1.multiprocess.services.lookup import LookupModule, _PrefetchJob
+from lmcache.v1.multiprocess.services.lookup import EngineLookupService, _PrefetchJob
 
 
 def _make_ctx(wait_result=True, found=None):
@@ -32,7 +32,7 @@ def _make_ctx(wait_result=True, found=None):
 def _make_module(ctx):
     # Bypass __init__ (which wires up otel metrics needing a full context); the
     # handler methods only touch _ctx, _prefetch_jobs, and _prefetch_job_lock.
-    module = object.__new__(LookupModule)
+    module = object.__new__(EngineLookupService)
     module._ctx = ctx
     module._prefetch_jobs = {}
     module._prefetch_job_lock = threading.Lock()

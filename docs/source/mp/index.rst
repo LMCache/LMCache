@@ -93,25 +93,27 @@ Engine and Services
 
 All server entry points share the same ``MPCacheServer`` and
 ``StorageManager`` core. ``MPCacheServer`` is now a thin compositor:
-it holds an ``MPCacheServerContext`` and a list of ``MPService``
-instances assembled by ``_build_services()`` (in ``server.py``)
-based on ``--engine-type`` and ``--supported-transfer-mode``.
+it holds an ``MPCacheServerContext`` plus the lifecycle/status objects
+assembled by ``_build_rpc_services()`` (in ``server.py``) based on
+``--engine-type`` and ``--supported-transfer-mode``.
 
 **``server.py``** -- The default gRPC server.  Creates an
-``MPCacheServer``, assembles the server services
-(``LookupModule`` + ``ManagementModule`` + ``LMCacheDrivenTransferModule``
-and/or ``EngineDrivenTransferModule`` depending on
+``MPCacheServer`` and registers concrete Python implementations of the
+generated gRPC services (``EngineServiceImpl``, ``ControllerServiceImpl``,
+``P2PServiceImpl``, and optional Blend service implementations). Transfer
+backends such as ``LMCacheDrivenTransferService`` and
+``EngineDrivenTransferService`` are called by ``EngineServiceImpl`` based on
 ``--supported-transfer-mode`` — ``lmcache_driven`` (default) or
 ``engine_driven`` loads just one,
 ``auto`` loads both — plus a CacheBlend service when
-``--engine-type`` is set: ``blend`` appends ``BlendV3Module`` (the
+``--engine-type`` is set: ``blend`` appends ``BlendV3Service`` (the
 current paged-aware implementation), and ``blend_legacy`` appends
-``BlendModule`` (the original)). Starts a ``MultiprocessGrpcServer``,
-mounts generated gRPC methods exposed by the loaded services, and blocks in a
-keep-alive loop. The concrete gRPC service boundary is defined in
+``LegacyBlendService`` (the original). Starts a ``MultiprocessGrpcServer``,
+registers generated gRPC service implementations, and blocks in a keep-alive
+loop. The concrete gRPC service boundary is defined in
 ``transport/grpc_impl/proto/lmcache_mq.proto``.
 
-**``services/blend.py``** -- Defines ``BlendModule`` and ``BlendEngineV2``,
+**``services/blend.py``** -- Defines ``LegacyBlendService`` and ``BlendEngineV2``,
 which add the original CacheBlend operations (``CB_REGISTER_KV_CACHE``,
 ``CB_LOOKUP_PRE_COMPUTED``, ``CB_STORE_PRE_COMPUTED``,
 ``CB_RETRIEVE_PRE_COMPUTED``, ``CB_STORE_FINAL`` and their V2
@@ -119,12 +121,12 @@ variants). Enables non-prefix KV cache reuse across document
 paragraphs. Selected by passing ``--engine-type blend_legacy`` to
 ``lmcache server``.
 
-**``services/blend_v3.py``** -- Defines ``BlendV3Module``, the
+**``services/blend_v3.py``** -- Defines ``BlendV3Service``, the
 paged-aware CacheBlend V3 pipeline that runs on the sparse-prefetch
 path. Adds the V3 RPCs (``CB_REGISTER_ROPE_V3``,
 ``CB_UNREGISTER_ROPE_V3``, ``CB_RETRIEVE_PRE_COMPUTED_V3``,
 ``CB_UNIFIED_LOOKUP``) and reuses the existing
-``LMCacheDrivenTransferModule`` and ``LookupModule``. Selected by
+``LMCacheDrivenTransferService`` and ``EngineLookupService``. Selected by
 passing ``--engine-type blend`` to
 ``lmcache server``.
 
@@ -344,8 +346,8 @@ Each config module exposes a composable triple:
 ``lmcache server`` CLI. CacheBlend is no longer a separate entry point —
 it is opted into at runtime by passing ``--engine-type`` to
 ``server.py`` (or ``lmcache server``). ``--engine-type blend`` appends
-``BlendV3Module`` (the current paged-aware implementation), while
-``--engine-type blend_legacy`` appends ``BlendModule`` (the original).
+``BlendV3Service`` (the current paged-aware implementation), while
+``--engine-type blend_legacy`` appends ``LegacyBlendService`` (the original).
 
 Distributed Storage
 -------------------
@@ -584,15 +586,15 @@ Adding a new gRPC method
    ``transport/grpc_impl/typed_rpc.py``. The proto descriptor remains the
    source of truth for service and method names; this mapping only describes
    LMCache Python domain objects such as ``IPCCacheServerKey`` and ``KVCache``.
-4. Implement the handler method on the appropriate ``MPService``
-   (e.g. ``LookupModule``, ``LMCacheDrivenTransferModule``, ``BlendV3Module``)
-   using the lower-case request name
-   (``QUERY_PREFETCH_STATUS`` -> ``query_prefetch_status``). If the Python
-   method name is intentionally different, add a short ``GRPC_METHOD_ALIASES``
-   entry on that service class.
-5. ``run_cache_server()`` passes loaded services to
-   ``MultiprocessGrpcServer.mount_services()``; the transport reads each service's
-   ``GRPC_SERVICE_NAMES`` and binds generated gRPC methods from the descriptor.
+4. Implement the generated RPC method on the matching Python service
+   implementation in ``services/rpc_services.py`` using the protobuf method
+   name exactly (for example, ``EngineServiceImpl.QueryPrefetchStatus``).
+   Put reusable backend logic in the narrower service file only when it is not
+   itself the generated gRPC service surface.
+5. Register the service implementation from ``run_cache_server()`` with
+   ``MultiprocessGrpcServer.add_service("ServiceName", impl)``. The transport
+   binds protobuf methods by exact CamelCase method name; it does not read
+   per-backend service-name declarations or aliases.
 
 Key Source Files
 ----------------
@@ -608,17 +610,20 @@ Key Source Files
    * - ``lmcache/v1/multiprocess/config.py``
      - MPServerConfig, HTTPFrontendConfig
    * - ``lmcache/v1/multiprocess/engine_context.py``
-     - MPCacheServerContext (shared state passed to every ``MPService``)
+     - MPCacheServerContext (shared state passed to server implementations)
    * - ``lmcache/v1/multiprocess/service.py``
-     - ``MPService`` protocol and gRPC service declaration contract
+     - Shared lifecycle/liveness protocols for server implementations
+   * - ``lmcache/v1/multiprocess/services/rpc_services.py``
+     - Generated gRPC service implementations such as ``EngineServiceImpl``
+       and ``P2PServiceImpl``
    * - ``lmcache/v1/multiprocess/services/``
-     - Server service implementations: ``lookup.py`` (``LookupModule``),
-       ``management.py`` (``ManagementModule``), ``lmcache_driven_transfer.py``
-       (``LMCacheDrivenTransferModule``), ``engine_driven_transfer.py``
-       (``EngineDrivenTransferModule``), ``blend.py``
-       (``BlendModule`` / ``BlendEngineV2``, selected by
+     - Backend service implementations: ``lookup.py``
+       (``EngineLookupService``), ``management.py`` (``ManagementService``),
+       ``lmcache_driven_transfer.py`` (``LMCacheDrivenTransferService``),
+       ``engine_driven_transfer.py`` (``EngineDrivenTransferService``),
+       ``blend.py`` (``LegacyBlendService``, selected by
        ``--engine-type blend_legacy``), and ``blend_v3.py``
-       (``BlendV3Module``, the paged-aware CacheBlend V3 pipeline
+       (``BlendV3Service``, the paged-aware CacheBlend V3 pipeline
        selected by ``--engine-type blend``).
    * - ``lmcache/v1/multiprocess/http_server.py``
      - FastAPI wrapper with health check and many other useful APIs

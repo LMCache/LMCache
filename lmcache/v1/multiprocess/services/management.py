@@ -21,7 +21,7 @@ from lmcache.v1.periodic_thread import (
 logger = init_logger(__name__)
 
 
-class ManagementModule:
+class ManagementService:
     """Handles management and utility operations for the cache engine.
 
     Owns the lock used during cache clearing and provides handlers for
@@ -31,9 +31,9 @@ class ManagementModule:
 
     Args:
         ctx: The shared engine context.
-        liveness_targets: Modules the reaper drives -- the transfer modules
+        liveness_targets: Services the reaper drives -- the transfer services
             whose per-instance registrations are refreshed on PING and scanned
-            for staleness, plus any state mirror (e.g. ``BlendV3Module``)
+            for staleness, plus any state mirror (e.g. ``BlendV3Service``)
             notified via ``drop_instance_state`` when an instance is reaped.
         worker_reap_timeout_seconds: Silence budget for a ping-proven worker;
             0 disables reaping (no thread is started).
@@ -42,16 +42,6 @@ class ManagementModule:
         experimental_transfer: Types of experimental intermediate tensor
             transfer built in the server.
     """
-
-    GRPC_SERVICE_NAMES = (
-        "ControllerService",
-        "DebugService",
-        "ObservabilityService",
-    )
-    GRPC_METHOD_ALIASES = {
-        "Noop": "debug",
-        "ReportBlockAllocation": "report_block_allocations",
-    }
 
     def __init__(
         self,
@@ -88,7 +78,7 @@ class ManagementModule:
         return self._ctx
 
     def report_status(self) -> dict:
-        """Return module-specific status information.
+        """Return service-specific status information.
 
         Returns:
             A dict with a ``worker_liveness`` summary when reaping targets

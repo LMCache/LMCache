@@ -36,6 +36,7 @@ from lmcache.v1.multiprocess.services.p2p_controller import (
     _P2PState,
     _PeerInstance,
 )
+from lmcache.v1.multiprocess.services.rpc_services import P2PServiceImpl
 
 
 def _make_key(i: int) -> ObjectKey:
@@ -321,12 +322,13 @@ def test_report_status_counts_active_jobs():
     assert status["p2p_state"] == _P2PState.UNREGISTERED.value
 
 
-def test_mount_services_covers_all_p2p_request_types():
-    """mount_services wires exactly the three P2P request types."""
+def test_add_service_covers_all_p2p_request_types():
+    """add_service wires exactly the three P2P request types."""
     controller, _ = _make_controller()
     server = MultiprocessGrpcServer("grpc://127.0.0.1:1")
 
-    server.mount_services([controller], max_cpu_workers=1, max_gpu_workers=1)
+    server.add_service("P2PService", P2PServiceImpl(controller))
+    server.assign_thread_pools(max_cpu_workers=1, max_gpu_workers=1)
 
     assert set(server.handlers) == {
         RPC.P2PLookupAndLock,

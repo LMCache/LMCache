@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Unit tests for QStoreModule: the server side of query-tensor transfer.
+"""Unit tests for QStoreService: the server side of query-tensor transfer.
 Covers Q ring registration/liveness/reaping, IPC release ordering, handler and
 protocol wiring, and store_q's fail-closed guards.
 """
@@ -19,14 +19,14 @@ from lmcache.v1.multiprocess import server as server_mod
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.services.experimental import TRANSFER_QUERY
 from lmcache.v1.multiprocess.services.experimental import qstore as qstore_mod
-from lmcache.v1.multiprocess.services.experimental.qstore import QStoreModule
+from lmcache.v1.multiprocess.services.experimental.qstore import QStoreService
 from lmcache.v1.multiprocess.services.lmcache_driven_transfer import ContextEntry
 
 REGISTER_ARGS = ("model##query", 2)
 
 
 def _ctx() -> MagicMock:
-    """Creates a context stub to test QStoreModule."""
+    """Creates a context stub to test QStoreService."""
     ctx = MagicMock(name="ctx")
     ctx.chunk_size = 256
     ctx.separate_object_groups = False
@@ -34,9 +34,9 @@ def _ctx() -> MagicMock:
     return ctx
 
 
-def _module(ctx: MagicMock | None = None) -> QStoreModule:
-    """Creates a QStoreModule with a stub context."""
-    return QStoreModule(ctx or _ctx())
+def _module(ctx: MagicMock | None = None) -> QStoreService:
+    """Creates a QStoreService with a stub context."""
+    return QStoreService(ctx or _ctx())
 
 
 def _stub_registration(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
@@ -48,7 +48,7 @@ def _stub_registration(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     return create
 
 
-def _register(module: QStoreModule, instance_id: int = 1) -> None:
+def _register(module: QStoreService, instance_id: int = 1) -> None:
     """Registers a Q ring with the module, using the stubbed
     create_cache_context."""
     module.register_q_cache(
@@ -237,21 +237,21 @@ class _FakeQStore:
 
 @pytest.fixture
 def stub_server_services(monkeypatch):
-    """Stub server service constructors. Returns the ManagementModule mock.
-    The transfer services stay real classes: _build_services isinstance-checks
-    them to pick liveness targets and the lmcache-driven service."""
-    monkeypatch.setattr(server_mod, "LookupModule", lambda ctx: MagicMock())
+    """Stub server service constructors. Returns the ManagementService mock.
+    The transfer services stay fake but concrete: _build_rpc_services wires
+    them into liveness targets and the EngineService implementation."""
+    monkeypatch.setattr(server_mod, "EngineLookupService", lambda ctx: MagicMock())
     monkeypatch.setattr(server_mod, "P2PController", lambda *a, **kw: MagicMock())
-    monkeypatch.setattr(server_mod, "LMCacheDrivenTransferModule", _FakeLMCacheDriven)
-    monkeypatch.setattr(server_mod, "EngineDrivenTransferModule", _FakeEngineDriven)
-    monkeypatch.setattr(server_mod, "QStoreModule", _FakeQStore)
-    management = MagicMock(name="ManagementModule")
-    monkeypatch.setattr(server_mod, "ManagementModule", management)
+    monkeypatch.setattr(server_mod, "LMCacheDrivenTransferService", _FakeLMCacheDriven)
+    monkeypatch.setattr(server_mod, "EngineDrivenTransferService", _FakeEngineDriven)
+    monkeypatch.setattr(server_mod, "QStoreService", _FakeQStore)
+    management = MagicMock(name="ManagementService")
+    monkeypatch.setattr(server_mod, "ManagementService", management)
     return management
 
 
-def _build(stub_server_services, **config) -> list:
-    return server_mod._build_services(
+def _build(stub_server_services, **config):
+    return server_mod._build_rpc_services(
         MagicMock(name="ctx"), MPServerConfig(**config), MagicMock(url="")
     )
 
@@ -276,14 +276,14 @@ def test_server_requires_lmcache_driven_transfer(stub_server_services) -> None:
 
 def test_server_builds_q_store_service(stub_server_services) -> None:
     """Check that the server builds the Q store service and puts it to the
-    ManagementModule."""
-    services = _build(
+    ManagementService."""
+    built = _build(
         stub_server_services,
         enable=[TRANSFER_QUERY],
         supported_transfer_mode="lmcache_driven",
     )
 
-    assert any(isinstance(s, _FakeQStore) for s in services)
+    assert any(isinstance(s, _FakeQStore) for s in built.status_reporters)
     kwargs = stub_server_services.call_args.kwargs
     assert kwargs["experimental_transfer"] == [TRANSFER_QUERY]
     assert any(isinstance(t, _FakeQStore) for t in kwargs["liveness_targets"])
@@ -293,7 +293,7 @@ def test_server_builds_nothing_when_no_feature_is_enabled(
     stub_server_services,
 ) -> None:
     """Check that the server builds nothing when no feature is enabled."""
-    services = _build(stub_server_services)
+    built = _build(stub_server_services)
 
-    assert not any(isinstance(s, _FakeQStore) for s in services)
+    assert not any(isinstance(s, _FakeQStore) for s in built.status_reporters)
     assert stub_server_services.call_args.kwargs["experimental_transfer"] == []

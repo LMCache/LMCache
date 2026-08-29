@@ -33,7 +33,7 @@ which re-registers — a noop when the entry survived.
 ```
 engine worker adapter                            MP server
 +---------------------------+                   +--------------------------------------+
-| HeartbeatThread           |   PING [id]       | ManagementModule                     |
+| HeartbeatThread           |   PING [id]       | ManagementService                     |
 |  (instance_id, 10s)  -----+------------------>|  ping(id) -> touch_instance(id)      |
 |  lazy start on first req, |   (NORMAL pool)   |  reaper thread (scan = timeout/4)    |
 |   (starts healthy)        |                   |   -> reap_stale_instances(           |
@@ -89,7 +89,7 @@ The reaper runs on its own thread, so the per-instance dicts are now mutated off
 the MQ handler threads. Each transfer module gains one `threading.Lock` so the
 reaper's scan-and-pop cannot race a concurrent register/unregister/transfer (which
 would otherwise corrupt the dict or hand out a half-removed entry). In
-`EngineDrivenTransferModule` the context and strategy dicts mutate as a pair under
+`EngineDrivenTransferService` the context and strategy dicts mutate as a pair under
 that lock, so a reap racing a re-register can never strand a fresh context without its
 strategy. It is a leaf lock — never held across context construction, storage
 calls, or any other component — so no thread ever holds two locks. External
@@ -98,12 +98,12 @@ readers use the locked accessors `get_and_touch_context_entry` (get-and-refresh)
 
 ### 5.3 Reaper
 
-`ManagementModule` (the PING owner) owns the reaper thread, scanning every
+`ManagementService` (the PING owner) owns the reaper thread, scanning every
 `reap_timeout / 4`. Each scan calls `reap_stale_instances` on every target: under
 the module lock, collect ids whose staleness exceeds their window and pop them;
 outside the lock, run the same cleanup as a client unregister and log a WARNING
 per instance (repeated reaps of one id signal a too-small timeout). Reaped ids are
-then passed to `drop_instance_state(id)` on every target; `BlendV3Module` drops
+then passed to `drop_instance_state(id)` on every target; `BlendV3Service` drops
 the reaped instance's per-instance CB state (e.g. rope state) there. (It no longer
 mirrors the GPU cache context — that mirror was removed upstream, so reaping the
 GPU entry now frees the context directly.) Collect+pop shares the module lock with
@@ -124,11 +124,11 @@ class InstanceLivenessTarget(Protocol):
 ```
 
 One protocol covers both reaper-driven roles. The transfer modules override the
-liveness methods (`touch`/`reap`/`count`); `BlendV3Module` overrides only
-`drop_instance_state` to drop its mirrored CB state. `ManagementModule` receives
+liveness methods (`touch`/`reap`/`count`); `BlendV3Service` overrides only
+`drop_instance_state` to drop its mirrored CB state. `ManagementService` receives
 all targets in a single injected list. (Earlier a separate one-method
 `InstanceReapListener` held `drop_instance_state`; it was folded in since only
-`BlendV3Module` ever implemented it.)
+`BlendV3Service` ever implemented it.)
 
 Config: `worker_reap_timeout_seconds` (default `120.0`; `0` disables, otherwise
 `>= 30.0`) and `worker_registration_grace_seconds` (default `3600.0`; `>=` the

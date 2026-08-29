@@ -61,6 +61,7 @@ from lmcache.v1.multiprocess.config import (  # noqa: E402
 )
 from lmcache.v1.multiprocess.mq import MultiprocessGrpcServer  # noqa: E402
 from lmcache.v1.multiprocess.services.p2p_controller import P2PController  # noqa: E402
+from lmcache.v1.multiprocess.services.rpc_services import P2PServiceImpl  # noqa: E402
 
 _PAGE = 4096
 _NUM_KEYS = 3
@@ -151,8 +152,8 @@ def test_p2p_adapter_end_to_end():
         )
         peer_mq_url = f"tcp://{_next_url()}"
         mq_server = MultiprocessGrpcServer(peer_mq_url)
-        mq_server.mount_services(
-            [controller],
+        mq_server.add_service("P2PService", P2PServiceImpl(controller))
+        mq_server.assign_thread_pools(
             max_cpu_workers=4,
             max_gpu_workers=1,
         )

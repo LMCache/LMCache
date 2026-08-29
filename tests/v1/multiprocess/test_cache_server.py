@@ -26,10 +26,6 @@ from lmcache.v1.multiprocess.custom_types import (
     KVCache,
 )
 from lmcache.v1.multiprocess.mq import MultiprocessGrpcClient
-from lmcache.v1.multiprocess.protocol import (
-    RPC,
-    get_response_class,
-)
 from lmcache.v1.multiprocess.server import run_cache_server
 
 # Configuration constants
@@ -169,18 +165,12 @@ def lookup_all(
     for key in keys:
         lookup_key = key.no_worker_id_version()
         # Phase 1: Submit lookup (server tracks by request_id, returns None)
-        client.submit_request(
-            RPC.Lookup,
-            [lookup_key, 1],
-            get_response_class(RPC.Lookup),
-        ).result(timeout=timeout)
+        client.lookup(lookup_key, 1).result(timeout=timeout)
         # Phase 2: Poll by request_id until done
         while True:
-            result = client.submit_request(
-                RPC.QueryPrefetchStatus,
-                [lookup_key.request_id],
-                get_response_class(RPC.QueryPrefetchStatus),
-            ).result(timeout=timeout)
+            result = client.query_prefetch_status(lookup_key.request_id).result(
+                timeout=timeout
+            )
             if result is not None:
                 total += result
                 break
@@ -200,11 +190,7 @@ def store_keys(
         start = i * BLOCKS_PER_KEY
         end = start + BLOCKS_PER_KEY
         block_ids = gpu_block_ids[start:end]
-        future = client.submit_request(
-            RPC.Store,
-            [key, instance_id, [block_ids], event.ipc_handle()],
-            get_response_class(RPC.Store),
-        )
+        future = client.store(key, instance_id, [block_ids], event.ipc_handle())
         result = future.to_device_future().result(timeout=timeout)
         assert result is True, f"Store should succeed for key {i}"
 
@@ -223,11 +209,7 @@ def retrieve_keys(
         start = i * BLOCKS_PER_KEY
         end = start + BLOCKS_PER_KEY
         block_ids = gpu_block_ids[start:end]
-        future = client.submit_request(
-            RPC.Retrieve,
-            [key, instance_id, [block_ids], event.ipc_handle(), 0],
-            get_response_class(RPC.Retrieve),
-        )
+        future = client.retrieve(key, instance_id, [block_ids], event.ipc_handle(), 0)
         result = future.to_device_future().result(timeout=timeout)
         results.append(result)
     return results
@@ -300,7 +282,7 @@ def client(
     server_process: mp.Process, zmq_context: zmq.Context
 ) -> Generator[MultiprocessGrpcClient, None, None]:
     """
-    Fixture that provides a message queue client for each test function.
+    Fixture that provides a gRPC client for each test function.
     """
     client = MultiprocessGrpcClient(server_url=SERVER_URL, context=zmq_context)
     yield client
@@ -335,18 +317,14 @@ def registered_instance(
     # Register KV cache. No engine group infos are sent, so the server
     # detects ``slots_per_block`` from the tensors and treats every group
     # as uncompressed (``compress_ratio == 1``).
-    future = client.submit_request(
-        RPC.RegisterKvCache,
-        [
-            instance_id,
-            client_context.get_kv_cache(),
-            "testmodel",
-            1,
-            EngineType.VLLM,
-            {},
-            [],
-        ],
-        get_response_class(RPC.RegisterKvCache),
+    future = client.register_kv_cache(
+        instance_id,
+        client_context.get_kv_cache(),
+        "testmodel",
+        1,
+        EngineType.VLLM,
+        {},
+        [],
     )
     result = future.result(timeout=DEFAULT_TIMEOUT)
     assert result is None, "Register should return None"
@@ -355,14 +333,8 @@ def registered_instance(
 
     # Unregister KV cache
     try:
-        client.submit_request(RPC.Clear, [], get_response_class(RPC.Clear)).result(
-            timeout=DEFAULT_TIMEOUT
-        )
-        future = client.submit_request(
-            RPC.UnregisterKvCache,
-            [instance_id],
-            get_response_class(RPC.UnregisterKvCache),
-        )
+        client.clear().result(timeout=DEFAULT_TIMEOUT)
+        future = client.unregister_kv_cache(instance_id)
         future.result(timeout=DEFAULT_TIMEOUT)
     except Exception as e:
         print(f"Error during unregister: {e}")
@@ -390,28 +362,20 @@ def test_register_unregister_kv_cache(
 
     # Register. No engine group infos: geometry is detected from the
     # tensors (uncompressed).
-    future = client.submit_request(
-        RPC.RegisterKvCache,
-        [
-            instance_id,
-            client_context.get_kv_cache(),
-            "testmodel",
-            1,
-            EngineType.VLLM,
-            {},
-            [],
-        ],
-        get_response_class(RPC.RegisterKvCache),
+    future = client.register_kv_cache(
+        instance_id,
+        client_context.get_kv_cache(),
+        "testmodel",
+        1,
+        EngineType.VLLM,
+        {},
+        [],
     )
     result = future.result(timeout=DEFAULT_TIMEOUT)
     assert result is None
 
     # Unregister
-    future = client.submit_request(
-        RPC.UnregisterKvCache,
-        [instance_id],
-        get_response_class(RPC.UnregisterKvCache),
-    )
+    future = client.unregister_kv_cache(instance_id)
     result = future.result(timeout=DEFAULT_TIMEOUT)
     assert result is None
 
@@ -468,15 +432,11 @@ def test_store_fails_closed_on_incomplete_block_ids(
     event.record()
 
     result = (
-        client.submit_request(
-            RPC.Store,
-            [
-                key,
-                registered_instance,
-                [list(range(BLOCKS_PER_KEY // 2))],
-                event.ipc_handle(),
-            ],
-            get_response_class(RPC.Store),
+        client.store(
+            key,
+            registered_instance,
+            [list(range(BLOCKS_PER_KEY // 2))],
+            event.ipc_handle(),
         )
         .to_device_future()
         .result(timeout=DEFAULT_TIMEOUT)
@@ -716,10 +676,6 @@ def test_get_chunk_size(
     """
     Test retrieving the chunk size from the server.
     """
-    chunk_size = client.submit_request(
-        RPC.GetChunkSize,
-        [],
-        get_response_class(RPC.GetChunkSize),
-    ).result(timeout=DEFAULT_TIMEOUT)
+    chunk_size = client.get_chunk_size().result(timeout=DEFAULT_TIMEOUT)
 
     assert chunk_size == CHUNK_SIZE, f"Chunk size should be {CHUNK_SIZE}"

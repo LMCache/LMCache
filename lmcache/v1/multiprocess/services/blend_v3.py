@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Blend V3: paged-aware CacheBlend as an MPService.
+"""Blend V3: paged-aware CacheBlend support for the multiprocess server.
 
 Plugs into the unified MPCacheServer; standard REGISTER_KV_CACHE +
 CB_REGISTER_ROPE_V3 for setup; STORE wrapper registers fingerprints;
@@ -53,7 +53,7 @@ from lmcache.v1.multiprocess.custom_types import (
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.service import InstanceLivenessTarget
 from lmcache.v1.multiprocess.services.lmcache_driven_transfer import (
-    LMCacheDrivenTransferModule,
+    LMCacheDrivenTransferService,
 )
 from lmcache.v1.multiprocess.services.lookup import compute_extra_count
 from lmcache.v1.multiprocess.token_hasher import (
@@ -664,22 +664,15 @@ def _cb_chunk_major_object_keys(
     return out
 
 
-class BlendV3Module(InstanceLivenessTarget):
+class BlendV3Service(InstanceLivenessTarget):
     """Paged-aware V3 CacheBlend. Wraps LMCacheDrivenTransfer STORE to register
-    fingerprints; serves CB rope/lookup/retrieve RPCs; reads cross-module
-    GPU state via :class:`LMCacheDrivenTransferModule.cache_contexts`."""
-
-    GRPC_SERVICE_NAMES = ("EngineService", "BlendV3Service")
-    GRPC_METHOD_ALIASES = {
-        "CbRegisterRopeV3": "cb_register_rope",
-        "CbUnregisterRopeV3": "cb_unregister_rope",
-        "CbRetrievePreComputedV3": "cb_retrieve_pre_computed",
-    }
+    fingerprints; serves CB rope/lookup/retrieve RPCs; reads transfer-service
+    GPU state via :class:`LMCacheDrivenTransferService.cache_contexts`."""
 
     def __init__(
         self,
         ctx: MPCacheServerContext,
-        lmcache_driven_transfer: LMCacheDrivenTransferModule,
+        lmcache_driven_transfer: LMCacheDrivenTransferService,
         coordinator: "BlendCoordinatorClient | None" = None,
         enable_segmented_prefix: bool = False,
     ):
@@ -757,7 +750,7 @@ class BlendV3Module(InstanceLivenessTarget):
         self._STALE_STRIKE_THRESHOLD = 2
 
     # ------------------------------------------------------------------
-    # MPService protocol
+    # Server lifecycle/status surface
     # ------------------------------------------------------------------
 
     @property
@@ -968,7 +961,7 @@ class BlendV3Module(InstanceLivenessTarget):
         """Drop blend state for a reaped instance (InstanceLivenessTarget hook).
 
         Only the CB rope state is held per instance; the GPU cache context is
-        owned by ``LMCacheDrivenTransferModule`` (no mirror here), so reaping
+        owned by ``LMCacheDrivenTransferService`` (no mirror here), so reaping
         the GPU entry frees it directly. A no-op if no rope state is held.
 
         Args:

@@ -4,7 +4,7 @@
 The paged Q ring buffer (QRingBuffer) is a temporary buffer for query tensors,
 made to be paged in GPU such that it's compatible with the existing LMCache
 paged KV store/retrieve machinery. This implementation is copied and modified
-from the LMCache-driven KV transfer module.
+from the LMCache-driven KV transfer service.
 """
 
 # Standard
@@ -40,17 +40,15 @@ import lmcache.lmcache_native as lmcache_native
 logger = init_logger(__name__)
 
 
-class QStoreModule(InstanceLivenessTarget):
+class QStoreService(InstanceLivenessTarget):
     """Handles paged Q ring registration and store operations.
 
-    Owns Q context registrations and provides handlers for register,
-    unregister, and store of the paged Q ring.
+    Owns Q context registrations and implements register, unregister, and
+    store operations for the paged Q ring.
 
     Args:
         ctx: The shared engine context.
     """
-
-    GRPC_SERVICE_NAMES = ("EngineService",)
 
     def __init__(self, ctx: MPCacheServerContext) -> None:
         self._ctx = ctx
@@ -189,7 +187,7 @@ class QStoreModule(InstanceLivenessTarget):
             ipc_collect()
 
     def report_status(self) -> dict:
-        """Return Q transfer module status information.
+        """Return Q transfer service status information.
 
         Returns:
             A dict containing registered Q instance IDs and
@@ -213,7 +211,7 @@ class QStoreModule(InstanceLivenessTarget):
         }
 
     def close(self) -> None:
-        """Release GPU resources owned by this module."""
+        """Release GPU resources owned by this service."""
         with self._lock:
             entries = list(self._q_contexts.values())
             self._q_contexts.clear()

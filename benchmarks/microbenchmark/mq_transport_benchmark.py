@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""Microbenchmark for the gRPC-backed mp mode message queue.
+"""Microbenchmark for the gRPC-backed multiprocess RPC transport.
 
 Compares canonical gRPC endpoint and compression configurations on the exact
-same ``MessageQueueClient`` / ``MessageQueueServer`` PING path, isolating RPC
-overhead from cache business logic. The historical ``ipc://`` and ``tcp://``
+same ``MultiprocessGrpcClient`` / ``MultiprocessGrpcServer`` PING path,
+isolating RPC overhead from cache business logic. The historical ``ipc://`` and ``tcp://``
 schemes are now compatibility aliases for gRPC, so they are intentionally not
 reported as separate transports. Use an equivalent PING harness against the
 pre-gRPC branch when collecting a ZMQ baseline.
@@ -44,8 +44,8 @@ import time
 # First Party
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.mq import (
-    MessageQueueClient,
-    MessageQueueServer,
+    MultiprocessGrpcClient,
+    MultiprocessGrpcServer,
 )
 from lmcache.v1.multiprocess.protocol import RPC, get_payload_classes
 from lmcache.v1.multiprocess.protocols.base import HandlerType
@@ -63,7 +63,7 @@ def _pick_free_port() -> int:
 
 @contextlib.contextmanager
 def _running_server(url: str) -> Iterator[None]:
-    server = MessageQueueServer(url)
+    server = MultiprocessGrpcServer(url)
     server.add_handler(
         RPC.Ping,
         get_payload_classes(RPC.Ping),
@@ -80,12 +80,12 @@ def _running_server(url: str) -> Iterator[None]:
 
 
 def _run_client(url: str, requests: int, concurrency: int) -> dict[str, float]:
-    client = MessageQueueClient(url)
+    client = MultiprocessGrpcClient(url)
     lat_ms: list[float] = []
 
     def one_call() -> float:
         start = time.perf_counter()
-        future: MessagingFuture[bool] = client.submit_request(RPC.Ping, [None])
+        future: MessagingFuture[bool] = client.ping(None)
         future.result(timeout=10)
         return (time.perf_counter() - start) * 1000.0
 
@@ -118,10 +118,10 @@ def _bench_one(
 ) -> dict[str, float]:
     with _running_server(url):
         # Warm-up so JIT / connection-establishment don't skew the numbers.
-        warmup_client = MessageQueueClient(url)
+        warmup_client = MultiprocessGrpcClient(url)
         try:
             for _ in range(200):
-                warmup_client.submit_request(RPC.Ping, [None]).result(
+                warmup_client.ping(None).result(
                     timeout=5,
                 )
         finally:

@@ -65,7 +65,7 @@ ignored rather than disabling the whole step's capture.
 ## Lifecycle
 
 1. **Register**: `setup_q_ring` → `register_q_ring` → `REGISTER_Q_CACHE`; the
-   server's `QStoreModule` builds the Q cache context.
+   server's `QStoreService` builds the Q cache context.
 2. **Capture**: each attention layer's `save_q_layer` scatters Q into the
    ring blocks reserved for that step's store requests.
 3. **Store**: `batched_submit_qstore_requests` sends `STORE_Q` per request;

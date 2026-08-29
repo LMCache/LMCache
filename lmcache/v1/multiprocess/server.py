@@ -1,7 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 """MPCacheServer compositor and unified cache server entry point."""
 
+# Future
+from __future__ import annotations
+
 # Standard
+from collections.abc import Sequence
+from dataclasses import dataclass
+from typing import Protocol
 import argparse
 import shutil
 import signal
@@ -43,45 +49,96 @@ from lmcache.v1.multiprocess.config import (
 )
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.mq import MultiprocessGrpcServer
-from lmcache.v1.multiprocess.service import (
-    InstanceLivenessTarget,
-    MPService,
-)
+from lmcache.v1.multiprocess.service import InstanceLivenessTarget
 from lmcache.v1.multiprocess.services.engine_driven_transfer import (
-    EngineDrivenTransferModule,
+    EngineDrivenTransferService,
 )
-from lmcache.v1.multiprocess.services.experimental import EXPERIMENTAL_TRANSFER
-from lmcache.v1.multiprocess.services.experimental.qstore import QStoreModule
+from lmcache.v1.multiprocess.services.experimental import (
+    EXPERIMENTAL_TRANSFER,
+    TRANSFER_QUERY,
+)
+from lmcache.v1.multiprocess.services.experimental.qstore import QStoreService
 from lmcache.v1.multiprocess.services.lmcache_driven_transfer import (
-    LMCacheDrivenTransferModule,
+    LMCacheDrivenTransferService,
 )
-from lmcache.v1.multiprocess.services.lookup import LookupModule
-from lmcache.v1.multiprocess.services.management import ManagementModule
+from lmcache.v1.multiprocess.services.lookup import EngineLookupService
+from lmcache.v1.multiprocess.services.management import ManagementService
 from lmcache.v1.multiprocess.services.p2p_controller import P2PController
+from lmcache.v1.multiprocess.services.rpc_services import (
+    BlendServiceImpl,
+    BlendV2ServiceImpl,
+    BlendV3ServiceImpl,
+    ControllerServiceImpl,
+    DebugServiceImpl,
+    EngineServiceImpl,
+    ObservabilityServiceImpl,
+    P2PServiceImpl,
+)
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 
 logger = init_logger(__name__)
 
 
-class MPCacheServer:
-    """Compositor that assembles pluggable server services.
+class _StatusReporter(Protocol):
+    """Public status surface exposed by server-side implementation objects."""
 
-    Holds the shared :class:`MPCacheServerContext` and a list of
-    :class:`MPService` instances.  Provides aggregated
-    ``report_status()`` and ``close()`` across all services.
+    def report_status(self) -> dict:
+        """Return service-specific status information."""
+        ...
+
+
+class _Closeable(Protocol):
+    """Public close surface exposed by server-side implementation objects."""
+
+    def close(self) -> None:
+        """Release resources owned by this object."""
+        ...
+
+
+@dataclass(frozen=True)
+class _BuiltRpcServices:
+    """Concrete gRPC services plus lifecycle objects for the cache server."""
+
+    engine_service: EngineServiceImpl
+    controller_service: ControllerServiceImpl
+    debug_service: DebugServiceImpl
+    observability_service: ObservabilityServiceImpl
+    p2p_service: P2PServiceImpl
+    blend_service: BlendServiceImpl | None
+    blend_v2_service: BlendV2ServiceImpl | None
+    blend_v3_service: BlendV3ServiceImpl | None
+    management: ManagementService
+    lmcache_driven_transfer: LMCacheDrivenTransferService | None
+    status_reporters: Sequence[_StatusReporter]
+    closeables: Sequence[_Closeable]
+
+
+class MPCacheServer:
+    """Compositor for the cache server's shared context and lifecycle.
 
     Args:
         context: The shared engine context.
-        services: List of server services to compose.
+        status_reporters: Objects contributing status fields.
+        closeables: Objects that must release resources before context close.
+        management: Management implementation used by HTTP passthroughs.
+        lmcache_driven_transfer: Optional LMCache-driven transfer backend used
+            by HTTP cache checksum inspection.
     """
 
     def __init__(
         self,
         context: MPCacheServerContext,
-        services: list[MPService],
+        *,
+        status_reporters: Sequence[_StatusReporter],
+        closeables: Sequence[_Closeable],
+        management: ManagementService,
+        lmcache_driven_transfer: LMCacheDrivenTransferService | None,
     ) -> None:
         self._context = context
-        self._services = services
+        self._status_reporters = tuple(status_reporters)
+        self._closeables = tuple(closeables)
+        self._management = management
+        self._lmcache_driven_transfer = lmcache_driven_transfer
 
     @property
     def context(self) -> MPCacheServerContext:
@@ -104,14 +161,14 @@ class MPCacheServer:
             "active_sessions": self._context.session_manager.active_count(),
             "storage_manager": sm,
         }
-        for service in self._services:
-            status.update(service.report_status())
+        for reporter in self._status_reporters:
+            status.update(reporter.report_status())
         return status
 
     def close(self) -> None:
-        """Close all services and release shared resources."""
-        for service in self._services:
-            service.close()
+        """Close implementation objects and release shared resources."""
+        for closeable in self._closeables:
+            closeable.close()
         self._context.close()
         logger.info("MPCacheServer closed")
 
@@ -125,44 +182,40 @@ class MPCacheServer:
     @property
     def cache_contexts(self) -> dict[int, BaseCacheContext] | None:
         """Used by ``/cache/checksums``; unwraps :class:`ContextEntry`."""
-        for service in self._services:
-            if isinstance(service, LMCacheDrivenTransferModule):
-                return {
-                    i: e.cache_context
-                    for i, e in service.context_entries_snapshot().items()
-                }
-        return None
+        if self._lmcache_driven_transfer is None:
+            return None
+        return {
+            i: e.cache_context
+            for i, e in self._lmcache_driven_transfer.context_entries_snapshot().items()
+        }
 
     def clear(self) -> None:
-        """Used by ``/cache/clear``; delegates to :class:`ManagementModule`."""
-        for service in self._services:
-            if isinstance(service, ManagementModule):
-                service.clear()
-                return
-        raise RuntimeError("MPCacheServer.clear: no ManagementModule registered")
+        """Used by ``/cache/clear``."""
+        self._management.clear()
 
 
-def _build_services(
+def _build_rpc_services(
     ctx: MPCacheServerContext,
     mp_config: MPServerConfig,
     coordinator_config: CoordinatorConfig,
-) -> list[MPService]:
-    """Assemble the list of server services based on configuration.
+) -> _BuiltRpcServices:
+    """Build concrete gRPC service implementations based on configuration.
 
     Args:
         ctx: The shared engine context.
-        mp_config: Server configuration determining which services to load.
+        mp_config: Server configuration determining which implementations to
+            load.
         coordinator_config: Coordinator connection used by the P2P controller
             for peer discovery.
 
     Returns:
-        List of initialized server services.
+        Concrete gRPC services plus lifecycle objects.
 
     Raises:
         ValueError: If blend engine is requested with
         supported_transfer_mode="engine_driven".
     """
-    lookup_service = LookupModule(ctx)
+    lookup_service = EngineLookupService(ctx)
     p2p_controller = P2PController(
         ctx,
         mp_config.p2p_config,
@@ -170,17 +223,17 @@ def _build_services(
         mp_config.instance_id,
     )
 
-    # Build the transfer and blend services first so the ManagementModule can
-    # be constructed with them as liveness targets / reap listeners. They are
-    # the InstanceLivenessTargets the reaper scans.
-    transfer_services: list[MPService] = []
+    # Build transfer and blend implementations first so ManagementService can
+    # receive the liveness targets the reaper scans.
+    lmcache_driven_transfer: LMCacheDrivenTransferService | None = None
+    engine_driven_transfer: EngineDrivenTransferService | None = None
     if mp_config.supported_transfer_mode == "lmcache_driven":
-        transfer_services.append(LMCacheDrivenTransferModule(ctx))
+        lmcache_driven_transfer = LMCacheDrivenTransferService(ctx)
     elif mp_config.supported_transfer_mode == "engine_driven":
-        transfer_services.append(EngineDrivenTransferModule(ctx))
+        engine_driven_transfer = EngineDrivenTransferService(ctx)
     elif mp_config.supported_transfer_mode == "auto":
-        transfer_services.append(LMCacheDrivenTransferModule(ctx))
-        transfer_services.append(EngineDrivenTransferModule(ctx))
+        lmcache_driven_transfer = LMCacheDrivenTransferService(ctx)
+        engine_driven_transfer = EngineDrivenTransferService(ctx)
     else:
         raise ValueError(
             f"Unsupported supported_transfer_mode '{mp_config.supported_transfer_mode}'"
@@ -188,18 +241,15 @@ def _build_services(
 
     logger.info("Supported transfer mode: %s", mp_config.supported_transfer_mode)
 
-    # Targets the reaper scans (and reap-notifies). The transfer services own
-    # per-instance liveness; BlendV3Module is appended below as a state mirror.
-    liveness_targets: list[InstanceLivenessTarget] = [
-        service
-        for service in transfer_services
-        if isinstance(
-            service, (LMCacheDrivenTransferModule, EngineDrivenTransferModule)
-        )
-    ]
+    liveness_targets: list[InstanceLivenessTarget] = []
+    if lmcache_driven_transfer is not None:
+        liveness_targets.append(lmcache_driven_transfer)
+    if engine_driven_transfer is not None:
+        liveness_targets.append(engine_driven_transfer)
 
     # At most one blend service is ever built (engine_type selects one).
-    blend_service: MPService | None = None
+    legacy_blend: LegacyBlendService | None = None
+    blend_v3: BlendV3Service | None = None
 
     if mp_config.engine_type == "blend_legacy":
         if mp_config.supported_transfer_mode == "engine_driven":
@@ -209,9 +259,9 @@ def _build_services(
                 f"'{mp_config.supported_transfer_mode}'"
             )
         # First Party
-        from lmcache.v1.multiprocess.services.blend import BlendModule
+        from lmcache.v1.multiprocess.services.blend import LegacyBlendService
 
-        blend_service = BlendModule(ctx)
+        legacy_blend = LegacyBlendService(ctx)
 
     # "blend" selects CacheBlend V3 (the current implementation).
     if mp_config.engine_type == "blend":
@@ -225,13 +275,12 @@ def _build_services(
         from lmcache.v1.mp_coordinator.blend_client import (
             BlendCoordinatorClient,
         )
-        from lmcache.v1.multiprocess.services.blend_v3 import BlendV3Module
+        from lmcache.v1.multiprocess.services.blend_v3 import BlendV3Service
 
-        transfer_service = next(
-            service
-            for service in transfer_services
-            if isinstance(service, LMCacheDrivenTransferModule)
-        )
+        if lmcache_driven_transfer is None:
+            raise ValueError(
+                "blend (V3) engine requires LMCache-driven transfer support"
+            )
         # Opt-in: enabled when a coordinator URL is configured (flag or
         # LMCACHE_COORDINATOR_URL, resolved at config parsing); otherwise
         # None and the blend service matches purely locally.
@@ -251,45 +300,38 @@ def _build_services(
             timeout=coordinator_config.blend_timeout,
             match_concurrency=coordinator_config.blend_match_concurrency,
         )
-        blend_v3 = BlendV3Module(
+        blend_v3 = BlendV3Service(
             ctx,
-            transfer_service,
+            lmcache_driven_transfer,
             coordinator=coordinator,
             enable_segmented_prefix=mp_config.enable_segmented_prefix,
         )
-        blend_service = blend_v3
         # blend_v3 mirrors per-instance CB rope state, so the reaper must
         # notify it via drop_instance_state when an instance is reaped.
         liveness_targets.append(blend_v3)
 
     # Experimental intermediate tensor transfer services.
-    lmcache_driven_service = next(
-        (
-            service
-            for service in transfer_services
-            if isinstance(service, LMCacheDrivenTransferModule)
-        ),
-        None,
-    )
     enabled_features = set(mp_config.enable)
     experimental_transfer: list[str] = []
-    experimental_services: list[MPService] = []
+    qstore: QStoreService | None = None
     for enabled_feature in enabled_features:
         if enabled_feature not in EXPERIMENTAL_TRANSFER:
             raise ValueError(
                 f"Unknown --enable experimental service '{enabled_feature}'."
             )
-        if lmcache_driven_service is None:
+        if lmcache_driven_transfer is None:
             raise ValueError(
                 f"Experimental service '{enabled_feature}' requires "
                 "supported_transfer_mode='lmcache_driven' or 'auto'."
             )
-        service = QStoreModule(ctx)
-        experimental_services.append(service)
-        liveness_targets.append(service)
+        if enabled_feature == TRANSFER_QUERY:
+            qstore = QStoreService(ctx)
+            liveness_targets.append(qstore)
+        else:
+            raise ValueError(f"Unsupported experimental service '{enabled_feature}'.")
         experimental_transfer.append(enabled_feature)
 
-    management = ManagementModule(
+    management = ManagementService(
         ctx,
         liveness_targets=liveness_targets,
         worker_reap_timeout_seconds=mp_config.worker_reap_timeout_seconds,
@@ -297,18 +339,59 @@ def _build_services(
         experimental_transfer=experimental_transfer,
     )
 
-    # ManagementModule precedes the transfer/blend services so close() stops
-    # and joins the reaper before those services clear their state and before
-    # storage_manager.close() runs.
-    blend_services = [blend_service] if blend_service is not None else []
-    return [
+    engine_service = EngineServiceImpl(
+        lookup_service,
+        lmcache_driven_transfer=lmcache_driven_transfer,
+        engine_driven_transfer=engine_driven_transfer,
+        qstore=qstore,
+        blend_v3=blend_v3,
+    )
+    controller_service = ControllerServiceImpl(management)
+    debug_service = DebugServiceImpl(management)
+    observability_service = ObservabilityServiceImpl(management)
+    p2p_service = P2PServiceImpl(p2p_controller)
+    blend_service = BlendServiceImpl(legacy_blend) if legacy_blend is not None else None
+    blend_v2_service = (
+        BlendV2ServiceImpl(legacy_blend) if legacy_blend is not None else None
+    )
+    blend_v3_service = BlendV3ServiceImpl(blend_v3) if blend_v3 is not None else None
+
+    status_reporters: list[_StatusReporter] = [
         lookup_service,
         p2p_controller,
         management,
-        *transfer_services,
-        *experimental_services,
-        *blend_services,
     ]
+    closeables: list[_Closeable] = [
+        # Stop the reaper before transfer/blend services release their state.
+        management,
+        lookup_service,
+        p2p_controller,
+    ]
+    for item in (
+        lmcache_driven_transfer,
+        engine_driven_transfer,
+        qstore,
+        legacy_blend,
+        blend_v3,
+    ):
+        if item is not None:
+            status_reporters.append(item)
+            closeables.append(item)
+
+    return _BuiltRpcServices(
+        engine_service=engine_service,
+        controller_service=controller_service,
+        debug_service=debug_service,
+        observability_service=observability_service,
+        p2p_service=p2p_service,
+        blend_service=blend_service,
+        blend_v2_service=blend_v2_service,
+        blend_v3_service=blend_v3_service,
+        management=management,
+        lmcache_driven_transfer=lmcache_driven_transfer,
+        status_reporters=status_reporters,
+        closeables=closeables,
+    )
 
 
 def run_cache_server(
@@ -392,8 +475,14 @@ def run_cache_server(
         full_sw_kv=is_blend,
     )
 
-    services = _build_services(ctx, mp_config, coordinator_config)
-    engine = MPCacheServer(ctx, services)
+    rpc_services = _build_rpc_services(ctx, mp_config, coordinator_config)
+    engine = MPCacheServer(
+        ctx,
+        status_reporters=rpc_services.status_reporters,
+        closeables=rpc_services.closeables,
+        management=rpc_services.management,
+        lmcache_driven_transfer=rpc_services.lmcache_driven_transfer,
+    )
 
     InitializeMPUsageContext(mp_config, storage_manager_config)
     InitializeMPContinuousUsage(event_bus, mp_config.chunk_size)
@@ -407,8 +496,18 @@ def run_cache_server(
     bind_prefix = host if "://" in host else "grpc://" + host
     bind_url = bind_prefix + ":" + str(mp_config.port)
     server = MultiprocessGrpcServer(bind_url=bind_url)
-    server.mount_services(
-        services,
+    server.add_service("EngineService", rpc_services.engine_service)
+    server.add_service("ControllerService", rpc_services.controller_service)
+    server.add_service("DebugService", rpc_services.debug_service)
+    server.add_service("ObservabilityService", rpc_services.observability_service)
+    server.add_service("P2PService", rpc_services.p2p_service)
+    if rpc_services.blend_service is not None:
+        server.add_service("BlendService", rpc_services.blend_service)
+    if rpc_services.blend_v2_service is not None:
+        server.add_service("BlendV2Service", rpc_services.blend_v2_service)
+    if rpc_services.blend_v3_service is not None:
+        server.add_service("BlendV3Service", rpc_services.blend_v3_service)
+    server.assign_thread_pools(
         max_cpu_workers=mp_config.max_cpu_workers,
         max_gpu_workers=mp_config.max_gpu_workers,
     )

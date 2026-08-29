@@ -646,17 +646,15 @@ class ContextEntry:
     event_backend: EventIPCBackend | None = None
 
 
-class LMCacheDrivenTransferModule(InstanceLivenessTarget):
+class LMCacheDrivenTransferService(InstanceLivenessTarget):
     """Handles LMCache-driven KV cache transfer operations.
 
-    Owns GPU context registrations and provides handlers for
-    register, unregister, store, and retrieve of GPU KV caches.
+    Owns GPU context registrations and implements LMCache-driven register,
+    unregister, store, and retrieve operations.
 
     Args:
         ctx: The shared engine context.
     """
-
-    GRPC_SERVICE_NAMES = ("EngineService",)
 
     def __init__(self, ctx: MPCacheServerContext) -> None:
         self._ctx = ctx
@@ -810,7 +808,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             ipc_collect()
 
     def report_status(self) -> dict:
-        """Return GPU transfer module status information.
+        """Return GPU transfer service status information.
 
         Returns:
             A dict containing registered GPU instance IDs and
@@ -834,7 +832,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         }
 
     def close(self) -> None:
-        """Release GPU resources owned by this module."""
+        """Release GPU resources owned by this service."""
         # Stop the drain thread before storage_manager.close() so any
         # in-flight completions reach a live storage manager.
         self._device_host_func_dispatcher.stop()

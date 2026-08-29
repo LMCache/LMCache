@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""LookupModule: lookup, prefetch polling, and session lifecycle."""
+"""EngineLookupService: lookup, prefetch polling, and session lifecycle."""
 
 # Standard
 from dataclasses import dataclass
@@ -88,21 +88,18 @@ class _PrefetchJob:
     cache_salt: str = ""
 
 
-class LookupModule:
+class EngineLookupService:
     """Handles lookup, prefetch polling, lock release, and session lifecycle.
 
-    Owns the prefetch-job bookkeeping (``_prefetch_jobs``) and exposes
-    handlers for the LOOKUP, QUERY_PREFETCH_STATUS,
-    QUERY_PREFETCH_LOOKUP_HITS, FREE_LOOKUP_LOCKS, and END_SESSION
-    request types.
+    Owns the prefetch-job bookkeeping used by ``EngineServiceImpl`` for
+    LOOKUP, QUERY_PREFETCH_STATUS, QUERY_PREFETCH_LOOKUP_HITS,
+    FREE_LOOKUP_LOCKS, and END_SESSION.
 
     Args:
         ctx: Shared engine context providing storage manager, token hasher,
             session manager, event bus, layout descriptor registry, and
             chunk size.
     """
-
-    GRPC_SERVICE_NAMES = ("EngineService",)
 
     def __init__(self, ctx: MPCacheServerContext) -> None:
         self._ctx = ctx
@@ -116,7 +113,7 @@ class LookupModule:
         return self._ctx
 
     def report_status(self) -> dict[str, int]:
-        """Return module-specific status information.
+        """Return service-specific status information.
 
         Returns:
             Dictionary with the count of active prefetch jobs.
@@ -126,7 +123,7 @@ class LookupModule:
         }
 
     def close(self) -> None:
-        """Release resources owned by this module (no-op)."""
+        """Release resources owned by this service (no-op)."""
         pass
 
     # -----------------------------------------------------------------
@@ -602,7 +599,7 @@ class LookupModule:
             return len(self._prefetch_jobs)
 
     def _setup_metrics(self) -> None:
-        """Register OTel observable gauges for lookup module metrics."""
+        """Register OTel observable gauges for lookup service metrics."""
         _gauge = partial(register_gauge, "lmcache.mp_server")
         _gauge(
             "lmcache_mp.active_prefetch_jobs",

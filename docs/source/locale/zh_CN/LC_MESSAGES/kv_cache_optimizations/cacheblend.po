@@ -42,11 +42,11 @@ msgstr "使用 blend 引擎启动 LMCache 服务器："
 
 #: ../../source/kv_cache_optimizations/cacheblend.rst:18
 msgid ""
-"The ``blend`` engine composes a ``BlendModule`` into the server and "
+"The ``blend`` engine composes a ``LegacyBlendService`` into the server and "
 "requires ``--supported-transfer-mode`` to be ``lmcache_driven`` or "
 "``auto`` (the default). See :doc:`/mp/configuration` for the related "
 "server flags."
-msgstr "``blend`` 引擎将 ``BlendModule`` 组合到服务器中，并要求 ``--supported-transfer-mode`` 设置为 ``lmcache_driven`` 或 ``auto``\\ （默认值）。有关相关服务器标志，请参见 :doc:`/mp/configuration`。"
+msgstr "``blend`` 引擎将 ``LegacyBlendService`` 组合到服务器中，并要求 ``--supported-transfer-mode`` 设置为 ``lmcache_driven`` 或 ``auto``\\ （默认值）。有关相关服务器标志，请参见 :doc:`/mp/configuration`。"
 
 #: ../../source/kv_cache_optimizations/cacheblend.rst:24
 msgid ""

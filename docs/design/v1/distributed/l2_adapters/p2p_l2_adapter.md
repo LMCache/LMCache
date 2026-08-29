@@ -17,7 +17,7 @@ the full system context.
 
 | Dependency | Used for |
 |---|---|
-| `MessageQueueClient` → peer's P2P controller | lookup-and-lock, unlock RPCs |
+| `MultiprocessGrpcClient` → peer's `P2PServiceImpl` | lookup-and-lock, unlock RPCs |
 | `TransferChannelContext` / `TransferChannelClient` | translating local L1 addresses + reading the peer's L1 |
 | `PeriodicEventNotifier` | pulsing the lookup / load event fds (see below) |
 

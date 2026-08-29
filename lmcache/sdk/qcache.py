@@ -21,7 +21,7 @@ def connect(
     however, specific model name prefix needs to be used.
 
     Args:
-        url: The MQ URL of the LMCache server.
+        url: The gRPC URL of the LMCache multiprocess server.
         http_url: The HTTP URL of the LMCache server.
         model_name: The original model name.
         timeout: The timeout for the connection.

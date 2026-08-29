@@ -30,8 +30,9 @@ protocols/
 
 3. Add the Python value mapping and handler scheduling mode to
    `transport/grpc_impl/typed_rpc.py`.
-4. Implement the handler method on the service object that declares the
-   matching `GRPC_SERVICE_NAMES` entry.
+4. Implement the generated RPC method on the matching class in
+   `services/rpc_services.py` using the protobuf method name exactly, for
+   example `EngineServiceImpl.Lookup`.
 
 The server registers generated gRPC services directly. It does not collect
-per-module request-name definitions before starting.
+per-backend request-name definitions before starting.
