@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 # Standard
-from typing import Protocol, TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, Protocol, TypeVar
 
 # First Party
 from lmcache.utils import EngineType
