@@ -2,8 +2,8 @@ name: Build XPU Artifacts
 
 # Reusable workflow that builds the Intel XPU/SYCL wheel.
 #
-# The wheel is built inside the supplied vLLM XPU runtime image so its C++ ABI
-# matches that exact runtime. auditwheel excludes
+# The wheel is built against a pinned XPU PyTorch and oneAPI compiler image so
+# its C++ ABI matches the target Intel vLLM XPU runtime. auditwheel excludes
 # torch and oneAPI/SYCL runtime libraries, so the wheel binds to the host torch
 # and userspace drivers at runtime -- like the ROCm/CUDA variant flows.
 #

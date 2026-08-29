@@ -88,7 +88,7 @@ rate, StorageManager read/write rates, and the live trace panel. The collapsed
 ## CacheBlend (blend server) traces
 
 When LMCache runs the **blend** engine (`lmcache server --engine-type blend`),
-CacheBlend V3 emits its own span tree to Tempo alongside the standard spans.
+CacheBlend emits its own span tree to Tempo alongside the standard spans.
 Expand the collapsed **CacheBlend** row on the dashboard, or query Tempo:
 
 ```
@@ -112,11 +112,9 @@ cb.request
                            (emitted only on an actual L2 load; carries l2_keys)
   cb.retrieve
     cb.scatter             L1 -> paged KV per-token slot-scatter + re-RoPE
-  cb.store_pre_computed
-  cb.store_final
 ```
 
-The root `cb.request` span carries the V3 hit-rate breakdown
+The root `cb.request` span carries the hit-rate breakdown
 (`hit_rate = prefix + non-prefix`):
 
 | Attribute | Type | Description |

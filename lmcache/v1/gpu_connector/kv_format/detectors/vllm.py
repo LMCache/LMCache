@@ -15,17 +15,28 @@ from lmcache.v1.gpu_connector.kv_format.detectors.base import (
     EngineDetector,
     measure_list_depth_until_tensor,
 )
-from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache, LayoutHints
+from lmcache.v1.gpu_connector.kv_format.types import (
+    KV_LAYOUT_NAMES,
+    DiscoverableKVCache,
+    LayoutHints,
+)
 import lmcache.lmcache_native as lmcache_native
 
 
 def resolve_vllm_kv_layout(
     layout_hints: LayoutHints, cpu_attention_backend: bool
 ) -> str:
-    """Resolve vLLM's KV layout from engine hints and backend behavior."""
-    if cpu_attention_backend:
+    """Validate the ``kv_layout`` hint and apply the CPU-backend override."""
+    kv_layout = layout_hints.get("kv_layout", "NHD")
+    if kv_layout not in KV_LAYOUT_NAMES:
+        raise ValueError(
+            f"kv_layout hint {kv_layout!r} is not a layout LMCache supports; "
+            f"expected one of {', '.join(KV_LAYOUT_NAMES)}."
+        )
+    # The CPU attention backend allocates HND but hints NHD.
+    if cpu_attention_backend and kv_layout in ("NHD", "HND"):
         return "HND"
-    return layout_hints.get("kv_layout", "NHD")
+    return kv_layout
 
 
 class VLLM_Detector(EngineDetector):
@@ -36,19 +47,19 @@ class VLLM_Detector(EngineDetector):
         kv_caches: DiscoverableKVCache,
         layout_hints: LayoutHints,
     ) -> "tuple[Optional[lmcache_native.EngineKVFormat], DiscoverableKVCache]":
-        # vLLM's CPU attention backend stores KV in HND but misreports it, so
-        # force HND there; otherwise honor the hint, defaulting to NHD.
         kv_layout = resolve_vllm_kv_layout(
             layout_hints, cpu_attention_backend=torch_device_type == "cpu"
         )
-        is_hnd = kv_layout == "HND"
+        is_hnd = kv_layout in ("HND", "BLHNC")
 
-        # Blocks-first fused K/V is the only rank-4 vLLM layout, so its raw rank
+        # Fused K/V is the only rank-4 vLLM layout, so its raw rank
         # identifies it unambiguously (a 5-D split would collide with
         # flash-infer when num_heads == 2). The two middle axes are NH/BS
         # (HND) or BS/NH (NHD) -- indistinguishable from the shape alone, so the
         # resolved kv_layout decides. The tensor is kept raw: the trailing axis
-        # is the per-head content size (2 * head_size, K/V packed).
+        # is the per-head content size (2 * head_size, K/V packed). Blocks-first
+        # views (BLHNC / BLNHC) have the same per-layer shape and differ only
+        # in stride(0), which resolve_block_stride_and_log_layout reads.
         if (
             isinstance(kv_caches, list)
             and kv_caches
@@ -87,4 +98,6 @@ class VLLM_Detector(EngineDetector):
             if first_tensor.dtype == torch.uint8 and int(first_tensor.shape[-1]) == 132:
                 return lmcache_native.EngineKVFormat.NL_X_NB_BSV_BSS, kv_caches
             return lmcache_native.EngineKVFormat.NL_X_NB_BS_HS, kv_caches
+        if list_depth == 2 and tensor_ndim == 4 and len(kv_caches[0]) == 2:
+            return lmcache_native.EngineKVFormat.NL_X_TWO_X_NB_BS_NH_HS, kv_caches
         return None, kv_caches
