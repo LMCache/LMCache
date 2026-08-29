@@ -189,14 +189,14 @@ check_musa_runtime \
     "${ARTIFACT_DIR}/runtime-preflight.txt"
 
 if [[ "${MUSA_CI_PREPROVISIONED:-0}" == "1" ]]; then
-    log "Using build and test dependencies preinstalled in the CI image"
+    log "Installing current LMCache dependencies around the pinned TorchMUSA stack"
 else
     log "Installing LMCache build and test dependencies"
-    "${INSTALL_CMD[@]}" \
-        -r requirements/build.txt \
-        -r requirements/common.txt \
-        -r requirements/test.txt
 fi
+"${INSTALL_CMD[@]}" \
+    -r requirements/build.txt \
+    -r requirements/common.txt \
+    -r requirements/test.txt
 
 check_musa_runtime \
     "after dependency setup" \
