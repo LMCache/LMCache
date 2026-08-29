@@ -19,6 +19,20 @@ export BUILD_WITH_HIP=1
 export TORCH_DONT_CHECK_COMPILER_ABI=1
 export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE="${SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE:-0.0.0+ci}"
 
+case "${AMD_KERNEL_MODE:?AMD_KERNEL_MODE must be set}" in
+    serialized)
+        [[ "${AMD_SERIALIZE_KERNEL:-}" == "1" ]]
+        ;;
+    unserialized)
+        [[ -z "${AMD_SERIALIZE_KERNEL+x}" ]]
+        ;;
+    *)
+        echo "Unknown AMD kernel mode: ${AMD_KERNEL_MODE}" >&2
+        exit 2
+        ;;
+esac
+echo "AMD kernel mode: ${AMD_KERNEL_MODE}"
+
 uv pip install --system --no-cache -r requirements/build.txt
 uv pip install --system --no-cache --no-build-isolation -e .
 uv pip install --system --no-cache openai pandas matplotlib

@@ -17,7 +17,7 @@ multiprocess (MP) mode.
 │                           │                                     │
 │                     torch_dev (unified entry)                   │
 │              torch_device_type (e.g. "cuda"/"musa"/"xpu"/       │
-│                                 "hpu"/"cpu"; auto-discoverable) │
+│                          "hpu"/"neuron"/"cpu"; auto-discoverable)│
 │                                                                 │
 │  [Registry Discovery Point]                                     │
 │  Built-in DeviceSpecs are discovered under lmcache.v1.platform; │
@@ -189,7 +189,7 @@ default raises `NotImplementedError`.
 ## CPU-Only Stub Fallback
 
 `_detect_device()` also accepts a CPU-only environment where none of the
-supported accelerators (CUDA, MUSA, XPU, HPU) is available. In that case
+supported accelerators (CUDA, MUSA, XPU, HPU, Neuron) is available. In that case
 `torch_device_type` is `"cpu"` and `torch_dev` is either:
 
 - `lmcache.v1.platform.cpu.stub_cpu_device.StubCPUDevice` — when `torch`

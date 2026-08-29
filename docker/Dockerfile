@@ -56,7 +56,7 @@ ARG max_jobs=2
 ENV MAX_JOBS=${max_jobs}
 
 # Number of threads used by nvcc
-ARG nvcc_threads=8
+ARG nvcc_threads=auto
 ENV NVCC_THREADS=$nvcc_threads
 
 ARG CUDA_VERSION

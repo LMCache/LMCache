@@ -22,14 +22,14 @@ from lmcache.v1.mp_coordinator.api import (
 from lmcache.v1.mp_coordinator.controllers.eviction_controller import (
     FleetEvictionController,
 )
-from lmcache.v1.mp_coordinator.controllers.usage_manager import CacheUsageManager
 from lmcache.v1.mp_coordinator.ingest.event_broadcaster import CacheEventBroadcaster
 from lmcache.v1.mp_coordinator.ingest.event_gate import EventGate
-from lmcache.v1.mp_coordinator.key_directory import KeyDirectory
 from lmcache.v1.mp_coordinator.persistence.durable_component import (
     PersistenceType,
 )
 from lmcache.v1.mp_coordinator.persistence.quiesce import QuiesceLock
+from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
+from lmcache.v1.mp_coordinator.views.usage_manager import CacheUsageManager
 from tests.v1.mp_coordinator.persistence.conftest import capture_consistently
 
 

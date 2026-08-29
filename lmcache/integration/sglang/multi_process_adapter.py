@@ -28,6 +28,7 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (
 )
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType
+from lmcache.v1.gpu_connector.kv_format.types import LayoutHints
 from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
@@ -93,10 +94,11 @@ def _wrap_sglang_kv_caches(
     """Flatten SGLang's KV pools into a single flat ``KVCache`` for the wire
     ``KVCache`` payload type. The daemon's
     :func:`normalize_kv_and_discover_format` detects the layout from
-    ``EngineType.SGLANG`` plus a ``tokens_per_block`` ``LayoutHints`` field:
-    split MHA (non-empty ``v_pool``) is a depth-2 ``[K_layers, V_layers]`` list
-    split back at its midpoint; fused MLA (empty ``v_pool``) is the ``k_pool``
-    latent buffers as a depth-1 list, detected as the single-buffer MLA format.
+    ``EngineType.SGLANG`` plus ``LayoutHints``: split MHA (non-empty
+    ``v_pool``) carries ``kv_list_layout="k_v"`` and is split back at its
+    midpoint; fused MLA (empty ``v_pool``) stays a depth-1 list of latent
+    buffers. Both layouts carry ``tokens_per_block`` so the folded page-buffer
+    dimension can be reshaped into explicit block axes.
 
     Raises:
         ValueError: If ``k_pool`` is empty, the pools use different devices, or
@@ -224,14 +226,15 @@ class LMCacheMPConnector:
         # ([K_layers, V_layers]); we flatten it on the wire to fit
         # ``KVCache = list[DeviceIPCWrapper]``. The daemon recognizes the
         # SGLang-MHA flat-of-2NL pattern from ``EngineType.SGLANG`` plus the
-        # ``tokens_per_block`` hint and un-flattens + reshapes per layer -- for
-        # both split MHA ([K_layers, V_layers]) and fused MLA (empty ``v_pool``,
-        # the latent buffers as a depth-1 list). The hint carries the page size,
-        # which the daemon uses to un-fuse the MLA tensor's dim-0
-        # (num_blocks*block_size) into a real block axis.
+        # ``kv_list_layout="k_v"`` hint, then un-flattens and reshapes it. Fused
+        # MLA has an empty ``v_pool`` and must not carry that hint; its depth-1
+        # latent buffers are instead un-fused using ``tokens_per_block``.
         # SGLang is non-hybrid (a single KV cache group), so engine_group_infos is
         # the empty list -- the server treats it as one group spanning all layers
         # (matching the vLLM non-hybrid and TensorRT-LLM register paths).
+        layout_hints: LayoutHints = {"tokens_per_block": self.page_size}
+        if v_pool:
+            layout_hints["kv_list_layout"] = "k_v"
         send_lmcache_request(
             self.mq_client,
             RequestType.REGISTER_KV_CACHE,
@@ -241,7 +244,7 @@ class LMCacheMPConnector:
                 self.model_name,
                 self.tp_size,
                 EngineType.SGLANG,
-                {"tokens_per_block": self.page_size},
+                layout_hints,
                 [],
             ],
         ).result(timeout=self._mq_timeout)
@@ -285,6 +288,9 @@ class LMCacheMPConnector:
         return IPCCacheServerKey(
             model_name=self.model_name,
             world_size=self.tp_size,
+            # Each worker stores and reads only its own object (no MLA-style
+            # sharing in this adapter yet).
+            num_kv_readers=1,
             worker_id=None if no_worker_id else self.worker_id,
             token_ids=tuple(token_ids),
             start=start,
@@ -469,10 +475,13 @@ class LMCacheMPConnector:
         matched_end: int,
         block_ids: list[int],
         skip_prefix_n_blocks: int = 0,
-    ) -> MessagingFuture[bool]:
+    ) -> tuple[
+        MessagingFuture[tuple[bytes, bool]],
+        MessagingFuture[bool],
+    ]:
         event = torch_dev.Event(interprocess=True)
         event.record(torch_dev.current_stream())
-        future = send_lmcache_request(
+        raw_future: MessagingFuture[tuple[bytes, bool]] = send_lmcache_request(
             self.mq_client,
             RequestType.RETRIEVE,
             [
@@ -489,12 +498,13 @@ class LMCacheMPConnector:
                 event.ipc_handle(),
                 skip_prefix_n_blocks,
             ],
-        ).to_device_future(device=self.device)
+        )
+        future = raw_future.to_device_future(device=self.device)
         # The daemon imports this IPC event after the request crosses the wire.
         # Retain the exporting event until the returned future is released so
         # its underlying handle cannot be destroyed during that interval.
         future.retain_reference(event)
-        return future
+        return raw_future, future
 
     def retrieve_kv(self, load_metadata: LoadMetadata) -> int:
         """Phase 2 of the two-phase load — fires RETRIEVE only.
@@ -506,8 +516,9 @@ class LMCacheMPConnector:
         consumes the held read locks via ``finish_read_prefetched`` —
         we don't separately free them on the success path.
 
-        Failure paths free the still-held trailing read locks
-        explicitly to avoid leaking them in the daemon.
+        Failure paths free the still-held trailing read locks explicitly,
+        except when an event-free terminal response confirms that the daemon
+        already released this worker's share.
 
         Returns ``matched - offset`` (tokens covered by the chunks
         whose RETRIEVE was issued, equivalent to the legacy
@@ -548,12 +559,13 @@ class LMCacheMPConnector:
 
         # Successful RETRIEVE releases the trailing read locks via
         # ``finish_read_prefetched`` inside the daemon. The trailing
-        # ``_free_lookup_locks`` is the failure path's cleanup — calling
-        # it after a successful RETRIEVE would double-release and trigger
-        # "finish read on non-read-locked key".
+        # ``_free_lookup_locks`` is the fallback failure cleanup — calling it
+        # after a successful RETRIEVE or an event-free terminal failure would
+        # double-release locks already consumed by the daemon.
         retrieve_succeeded = False
+        server_released_locks = False
         try:
-            future = self._submit_retrieve(
+            raw_future, future = self._submit_retrieve(
                 request_id=request_id,
                 token_ids=token_ids,
                 offset=offset,
@@ -562,12 +574,17 @@ class LMCacheMPConnector:
                 skip_prefix_n_blocks=prefix_pad_pages,
             )
             if not future.result(timeout=self._mq_timeout):
+                event_handle, _ = raw_future.result(timeout=0)
+                # An event-free False is the missing-registration response.
+                # Its server-side path already released this worker's share;
+                # sending FREE_LOOKUP_LOCKS here would release every rank again.
+                server_released_locks = not event_handle
                 raise RuntimeError(
                     f"LMCache MP retrieve failed for request_id={request_id}"
                 )
             retrieve_succeeded = True
         finally:
-            if not retrieve_succeeded:
+            if not retrieve_succeeded and not server_released_locks:
                 self._free_lookup_locks(
                     token_ids, offset, retrieve_token_num, request_id
                 )

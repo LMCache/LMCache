@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.mp_coordinator.controllers.base import Controller
 
 if TYPE_CHECKING:
     # Third Party
@@ -29,7 +30,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class PrefetchManager:
+class PrefetchManager(Controller):
     """Submit warm-prefetch requests to MP servers and proxy their status."""
 
     async def submit_prefetch(
