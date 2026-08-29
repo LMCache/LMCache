@@ -34,7 +34,6 @@ import torch
 import zmq
 
 # First Party
-from lmcache import torch_dev
 from lmcache.banner import print_banner_once
 from lmcache.integration.vllm.experimental import dispatch
 from lmcache.integration.vllm.kv_cache_group_edits import (
@@ -530,7 +529,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         kv_cache_config = getattr(self, "_kv_cache_config", None)
         # Must precede both group-info creation and transfer registration so
         # they see the same edited views.
-        layout_hints = vllm_layout_hints()
+        layout_hints = vllm_layout_hints(self._vllm_config)
         kv_caches = apply_kv_cache_group_edits(
             kv_cache_config, kv_caches, layout_hints=layout_hints
         )
@@ -541,7 +540,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             dcp_size=self._dcp_size,
         )
         self.worker_adapter.register_kv_caches(
-            kv_caches, engine_group_infos=engine_group_infos
+            kv_caches,
+            engine_group_infos=engine_group_infos,
+            layout_hints=layout_hints,
         )
         if self.dispatcher is not None:
             dispatch(
@@ -585,8 +586,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         if len(request_ids) == 0:
             return
 
-        event = torch_dev.Event(interprocess=True)
-        event.record()
+        event = self.worker_adapter.create_recorded_event()
 
         self.worker_adapter.batched_submit_retrieve_requests(
             request_ids, ops, event, cache_salts=cache_salts
@@ -661,8 +661,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 dispatch(self.dispatcher, "wait_for_save", event=None)
             return
 
-        event = torch_dev.Event(interprocess=True)
-        event.record()
+        event = self.worker_adapter.create_recorded_event()
 
         self.worker_adapter.batched_submit_store_requests(
             request_ids, ops, event, cache_salts=cache_salts
@@ -956,7 +955,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             tracker.state = LMCacheMPRequestState.READY
             return
 
-        condition = tracker.needs_retrieve()
+        condition = num_external_tokens > 0 and tracker.needs_retrieve()
         if tracker.state == LMCacheMPRequestState.PREFETCHING:
             # If need to retrieve, change to WAITING_FOR_LOAD
             # Otherwise, change to READY
@@ -1116,22 +1115,14 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> str | None:
-        """
-        Get the required KV cache layout for this connector.
-        Args:
-            vllm_config (VllmConfig): the vllm config.
-
-        Returns:
-            str: the required KV cache layout. e.g. HND, or NHD.
-            None if the connector does not require a specific layout.
-        """
-
-        if cls is KVConnectorBase_V1:
-            raise TypeError(
-                "get_required_kvcache_layout should not be called "
-                "on the abstract base class"
-            )
-        return None
+        """Prefer the head-contiguous layout; None (MLA) defers to vLLM."""
+        model_config = getattr(vllm_config, "model_config", None)
+        if model_config is None or model_config.use_mla:
+            return None
+        if not hasattr(vllm_config.cache_config, "get_resolved_kv_cache_layout"):
+            return "HND"
+        # Not "HND": MultiConnector compares preference strings verbatim.
+        return "LBHNC"
 
     def get_finished_count(self) -> int | None:
         """

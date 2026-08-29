@@ -148,7 +148,7 @@ Settings related to cache blending functionality.
 
 .. note::
 
-    We have an end-to-end `example <https://github.com/LMCache/LMCache/tree/dev/examples/blend_kv_v1>`_.
+    We have an end-to-end `example <https://github.com/LMCache/LMCache/tree/dev/examples/blend_in_process>`_.
     We also have more :doc:`detailed documentation <../kv_cache_optimizations/blending>`.
 
 .. list-table::
