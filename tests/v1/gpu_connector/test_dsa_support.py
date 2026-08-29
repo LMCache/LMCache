@@ -69,9 +69,7 @@ class TestSGLangDSADetection:
     def test_dsa_indexer_larger_multiple_of_132(self):
         """A last axis that is a larger multiple of 132 (e.g. 2 * 132) is
         also valid -- the detector infers page_size from the quotient."""
-        kv = [
-            torch.zeros(NB, 2 * INDEX_DIM, dtype=torch.uint8) for _ in range(NL)
-        ]
+        kv = [torch.zeros(NB, 2 * INDEX_DIM, dtype=torch.uint8) for _ in range(NL)]
         fmt, out = detect_format(kv, EngineType.SGLANG, {"tokens_per_block": BS})
         assert fmt == F.NL_X_NB_BSV_BSS
         assert tuple(out[0].shape) == (NB, 2, INDEX_DIM)
@@ -164,12 +162,8 @@ class TestBuildEngineGroupInfos:
     def test_dsa_returns_two_groups(self):
         """DSA (use_mla=True, num_kv_tensors > num_layers) returns two
         ``EngineGroupInfo`` entries, both with ``engine_group_id=0``."""
-        kv = [_t(NB * BS, 1, HS) for _ in range(NL)] + [
-            _dsa_t(NB) for _ in range(NL)
-        ]
-        conn = self._make_connector(
-            kv, use_mla=True, num_layers=NL, page_size=BS
-        )
+        kv = [_t(NB * BS, 1, HS) for _ in range(NL)] + [_dsa_t(NB) for _ in range(NL)]
+        conn = self._make_connector(kv, use_mla=True, num_layers=NL, page_size=BS)
         infos = conn._build_engine_group_infos()
         assert len(infos) == 2
         # Both share engine_group_id=0 (same page address space)
@@ -184,18 +178,14 @@ class TestBuildEngineGroupInfos:
     def test_mla_returns_empty(self):
         """MLA (use_mla=True, num_kv_tensors == num_layers) returns empty."""
         kv = [_t(NB * BS, 1, HS) for _ in range(NL)]
-        conn = self._make_connector(
-            kv, use_mla=True, num_layers=NL, page_size=BS
-        )
+        conn = self._make_connector(kv, use_mla=True, num_layers=NL, page_size=BS)
         infos = conn._build_engine_group_infos()
         assert infos == []
 
     def test_mha_returns_empty(self):
         """MHA (use_mla=False) returns empty regardless of tensor count."""
         kv = [_t(NB * BS, NH, HS) for _ in range(2 * NL)]
-        conn = self._make_connector(
-            kv, use_mla=False, num_layers=NL, page_size=BS
-        )
+        conn = self._make_connector(kv, use_mla=False, num_layers=NL, page_size=BS)
         infos = conn._build_engine_group_infos()
         assert infos == []
 
@@ -319,7 +309,10 @@ class TestLayerwiseMLAGuard:
             kv_shape=(NL, 1, 256, 1, HS),
             use_mla=True,
         )
-        with pytest.raises(ValueError, match="Layerwise mode.*not yet supported.*MLA/DSA"):
+        with pytest.raises(
+            ValueError,
+            match="Layerwise mode.*not yet supported.*MLA/DSA",
+        ):
             CreateGPUConnector(
                 config=config,
                 metadata=metadata,

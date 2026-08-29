@@ -149,7 +149,12 @@ def test_wrap_sglang_kv_caches_uses_platform_wrapper_in_kv_order(
 ) -> None:
     """Registration dispatches each tensor through the platform wrapper."""
     adapter_mod, _, _, _, _, _ = _import_adapter_symbols()
-    kv_caches = [torch.tensor([1]), torch.tensor([2]), torch.tensor([3]), torch.tensor([4])]
+    kv_caches = [
+        torch.tensor([1]),
+        torch.tensor([2]),
+        torch.tensor([3]),
+        torch.tensor([4]),
+    ]
     wrapped_tensors: list[torch.Tensor] = []
 
     def wrap_one(tensor: torch.Tensor) -> object:

@@ -113,7 +113,7 @@ def pack_metadata(
         # Multi-group: data_size covers all groups' raw bytes so that
         # data_offsets[1] - data_offsets[0] matches the on-disk blob.
         data_size = sum(
-            s.numel() * d.element_size() for s, d in zip(shapes, dtypes)
+            s.numel() * d.element_size() for s, d in zip(shapes, dtypes, strict=True)
         )
     else:
         data_size = tensor.numel() * tensor.element_size()
@@ -796,8 +796,14 @@ class GdsBackend(AllocatorBackendInterface):
         with self.hot_lock:
             # TODO(Jiayi): need to support `cached_positions`.
             self.hot_cache[key] = DiskCacheMetadata(
-                path, size, shape, dtype, None, fmt,
-                shapes=shapes, dtypes=dtypes,
+                path,
+                size,
+                shape,
+                dtype,
+                None,
+                fmt,
+                shapes=shapes,
+                dtypes=dtypes,
             )
 
     def submit_prefetch_task(
@@ -858,8 +864,13 @@ class GdsBackend(AllocatorBackendInterface):
         # correct group_prefix_sum for get_tensor(i).
         if entry.shapes is not None and entry.dtypes is not None:
             return self._load_bytes_from_disk_with_allocation(
-                key, path, dtype=dtype, shape=shape, fmt=fmt,
-                shapes=entry.shapes, dtypes=entry.dtypes,
+                key,
+                path,
+                dtype=dtype,
+                shape=shape,
+                fmt=fmt,
+                shapes=entry.shapes,
+                dtypes=entry.dtypes,
             )
         return self._load_bytes_from_disk_with_allocation(
             key, path, dtype=dtype, shape=shape, fmt=fmt
@@ -1017,9 +1028,7 @@ class GdsBackend(AllocatorBackendInterface):
                 memory_objs.append(None)
                 continue
             if m_shapes is not None and m_dtypes is not None:
-                memory_obj = self.memory_allocator.allocate(
-                    m_shapes, m_dtypes, fmt=fmt
-                )
+                memory_obj = self.memory_allocator.allocate(m_shapes, m_dtypes, fmt=fmt)
             else:
                 memory_obj = self.memory_allocator.allocate(shape, dtype, fmt=fmt)
             if memory_obj is None:
@@ -1065,7 +1074,8 @@ class GdsBackend(AllocatorBackendInterface):
         # allocator paths).
         if shapes is not None and dtypes is not None:
             write_nbytes = sum(
-                s.numel() * d.element_size() for s, d in zip(shapes, dtypes)
+                s.numel() * d.element_size()
+                for s, d in zip(shapes, dtypes, strict=True)
             )
         else:
             write_nbytes = kv_chunk.nbytes
@@ -1081,7 +1091,10 @@ class GdsBackend(AllocatorBackendInterface):
         # TODO: We can add the chunk's metadata here, e.g. Tensor parallelism shard
         # and pipeline parallelism index.
         metadata = pack_metadata(
-            kv_chunk, fmt=fmt, shapes=shapes, dtypes=dtypes,
+            kv_chunk,
+            fmt=fmt,
+            shapes=shapes,
+            dtypes=dtypes,
             lmcache_version=str(_METADATA_VERSION),
         )
         try:

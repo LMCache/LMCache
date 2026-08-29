@@ -93,7 +93,10 @@ def test_init_lmcache_engine_rejects_mla_without_pool_width(
         model_path="test-model",
     )
 
-    with pytest.raises(ValueError, match="kv_cache_dim must be provided when use_mla=True"):
+    with pytest.raises(
+        ValueError,
+        match="kv_cache_dim must be provided when use_mla=True",
+    ):
         adapter_mod.init_lmcache_engine(
             model_config,
             tp_size=1,

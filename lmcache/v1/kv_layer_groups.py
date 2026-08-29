@@ -406,9 +406,9 @@ class KVLayerGroupsManager:
             except ValueError:
                 # NBBS-fused formats have no separate block axis; derive
                 # num_blocks from page_buffer_size // block_size.
-                group_num_blocks = get_page_buffer_size(
-                    [kv_caches[indices[0]]], group_format
-                ) // bs
+                group_num_blocks = (
+                    get_page_buffer_size([kv_caches[indices[0]]], group_format) // bs
+                )
             block_stride_elems = resolve_block_stride_and_log_layout(
                 kv_caches,
                 group_format,
@@ -425,7 +425,9 @@ class KVLayerGroupsManager:
                 block_stride_elems=block_stride_elems,
             )
 
-            info = engine_group_infos[group_idx] if engine_group_infos else None
+            info: "EngineGroupInfo | None" = (
+                engine_group_infos[group_idx] if engine_group_infos else None
+            )
             if info is not None and tuple(indices) != tuple(info.layer_indices):
                 raise ValueError(
                     f"group {group_idx}: engine group info covers layers "

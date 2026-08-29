@@ -25,8 +25,6 @@ from lmcache.v1.gpu_connector.utils import (
     get_group_data_ptrs,
     get_head_size,
     get_num_blocks,
-    get_num_layers,
-    get_page_buffer_size,
     get_tokens_per_layer,
     normalize_and_discover_per_layer_formats,
     normalize_kv_and_discover_format,
@@ -481,6 +479,7 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
                 engine_kv_formats=engine_kv_formats,
             )
         klg_manager = self.metadata.kv_layer_groups_manager
+        assert klg_manager is not None
 
         # Heterogeneous-block_size sanity check.
         #
@@ -546,6 +545,7 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         self._initialize_kv_cache_pointers()
         assert self.group_kv_cache_pointers_on_gpu is not None
         klg_manager = self.metadata.kv_layer_groups_manager
+        assert klg_manager is not None
 
         # avoid read/write stream race condition for shared block
         # this will only be potentially non-zero for the first
@@ -582,6 +582,7 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         self._initialize_kv_cache_pointers()
         assert self.group_kv_cache_pointers_on_gpu is not None
         klg_manager = self.metadata.kv_layer_groups_manager
+        assert klg_manager is not None
         with torch.cuda.stream(self.store_stream):
             if not self.use_gpu or end - start != self.chunk_size:
                 for i, kv_cache_pointer in enumerate(
@@ -1494,9 +1495,7 @@ class SGLangGPUConnector(GPUConnectorInterface):
                     "chunk_size should be provided to create a GPU buffer."
                 )
             if "device" not in kwargs:
-                raise ValueError(
-                    "device should be provided to create a GPU buffer."
-                )
+                raise ValueError("device should be provided to create a GPU buffer.")
             shape = self.get_shape(kwargs["chunk_size"])
             self.gpu_buffer = torch.empty(
                 shape, dtype=kwargs["dtype"], device=kwargs["device"]
@@ -1511,7 +1510,9 @@ class SGLangGPUConnector(GPUConnectorInterface):
 
         self.kvcaches: Optional[List[torch.Tensor]] = None
 
-    def _initialize_pointers(self, kv_caches: DiscoverableKVCache) -> list[torch.Tensor]:
+    def _initialize_pointers(
+        self, kv_caches: DiscoverableKVCache
+    ) -> list[torch.Tensor]:
         """Discover per-layer formats, build the layer-groups manager, and
         capture per-group GPU pointer tensors.
 
@@ -1569,7 +1570,10 @@ class SGLangGPUConnector(GPUConnectorInterface):
                 engine_kv_formats=engine_kv_formats,
                 engine_group_infos=engine_group_infos,
             )
-        klg_manager = self.metadata.kv_layer_groups_manager if self.metadata is not None else None
+        if self.metadata is not None:
+            klg_manager = self.metadata.kv_layer_groups_manager
+        else:
+            klg_manager = None
         if klg_manager is None:
             raise RuntimeError(
                 "SGLangGPUConnector requires metadata with a KVLayerGroupsManager"
@@ -1662,6 +1666,7 @@ class SGLangGPUConnector(GPUConnectorInterface):
         self.initialize_kvcaches_ptr(**kwargs)
         group_pointers = self._initialize_pointers(self.kvcaches)
         klg_manager = self.metadata.kv_layer_groups_manager
+        assert klg_manager is not None
         device = get_device(kvcaches)
 
         for i, group in enumerate(klg_manager.kernel_groups):
@@ -1723,6 +1728,7 @@ class SGLangGPUConnector(GPUConnectorInterface):
         self.initialize_kvcaches_ptr(**kwargs)
         group_pointers = self._initialize_pointers(self.kvcaches)
         klg_manager = self.metadata.kv_layer_groups_manager
+        assert klg_manager is not None
         device = get_device(kvcaches)
 
         with torch.cuda.stream(self.store_stream):
