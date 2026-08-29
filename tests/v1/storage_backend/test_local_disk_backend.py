@@ -630,7 +630,6 @@ class TestSubmitPutTask:
         backend.dict = {key: resident_metadata}
         backend.cache_policy = MagicMock()
         backend.disk_worker = MagicMock()
-        backend.exists_in_put_tasks = MagicMock(return_value=put_in_progress)
         backend.current_cache_size = 4096
         backend.usage = 4096
 
@@ -638,17 +637,20 @@ class TestSubmitPutTask:
         memory_obj.tensor = torch.empty(1, dtype=torch.bfloat16)
         callback = MagicMock()
 
-        result = backend.submit_put_task(
-            key,
-            memory_obj,
-            on_complete_callback=callback,
-        )
+        with patch.object(
+            backend, "exists_in_put_tasks", return_value=put_in_progress
+        ) as mock_exists_in_put_tasks:
+            result = backend.submit_put_task(
+                key,
+                memory_obj,
+                on_complete_callback=callback,
+            )
 
         assert result is None
         assert backend.current_cache_size == 4096
         assert backend.usage == 4096
         backend.cache_policy.update_on_hit.assert_called_once_with(key, backend.dict)
-        backend.exists_in_put_tasks.assert_not_called()
+        mock_exists_in_put_tasks.assert_not_called()
         backend.disk_worker.insert_put_task.assert_not_called()
         backend.disk_worker.submit_task.assert_not_called()
         memory_obj.get_physical_size.assert_not_called()
