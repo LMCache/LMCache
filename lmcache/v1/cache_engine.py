@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -12,6 +12,7 @@ from typing import (
     Optional,
     Tuple,
     Union,
+    cast,
 )
 
 if TYPE_CHECKING:
@@ -1541,6 +1542,32 @@ class LMCacheEngine:
         return num_tokens
 
     @_lmcache_nvtx_annotate
+    def lookup_hidden_states(
+        self,
+        tokens: Optional[Union[torch.Tensor, List[int]]] = None,
+        hashes: Optional[List[int]] = None,
+        offsets: Optional[List[int]] = None,
+        layer_idxs: Sequence[int] = (0,),
+        request_configs: Optional[dict] = None,
+    ) -> int:
+        """How many prefix tokens have hidden states for every requested layer.
+
+        Same chunking and prefix semantics as :meth:`lookup`, so a caller can
+        compare the two directly and only commit to the smaller.
+        """
+        if self.hidden_state_store is None:
+            return 0
+        chunk_info_iterator = self.token_database.process_tokens(
+            tokens=tokens,
+            hashes=hashes,
+            offsets=offsets,
+            request_configs=request_configs,
+        )
+        return self.hidden_state_store.coverage(
+            cast("Iterable[tuple[int, int, CacheEngineKey]]", chunk_info_iterator),
+            layer_idxs,
+        )
+
     def lookup_unpin(self, lookup_id: str) -> None:
         if lookup_id in self.lookup_pins:
             assert self.storage_manager is not None
