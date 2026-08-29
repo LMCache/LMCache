@@ -16,7 +16,7 @@
 // request instead of once per copy/launch. Same plan-then-execute shape as
 // the object-group transfer in mp_mem_kernels.cuh, plus K-only re-RoPE and a
 // per-token scatter (CB matches are not block-aligned). Plans are built in
-// blend_v3.py (cb_retrieve_pre_computed).
+// blend.py (cb_retrieve_pre_computed).
 // ---------------------------------------------------------------------------
 
 // Per-kernel-group invariants, resolved once on the Python side; only the

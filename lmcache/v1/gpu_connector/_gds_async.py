@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 """Platform dispatch for the GDS async backend.
 
-Selects the GDSContext-facing backend from cuFile, hipFile, or uGDS. Automatic
-selection chooses cuFile on NVIDIA and hipFile on AMD ROCm; GDS L1 config can
-explicitly select uGDS for a raw ``/dev/ugds_drvX`` slab. uGDS can be used on
-either platform with a matching platform-specific build. All implementations
-expose an identical API -- :class:`AsyncHandle`, :class:`Submission`, and the
-``register_*`` / ``deregister_*`` / ``close_driver`` functions -- so
+Selects the GDSContext-facing backend from cuFile, hipFile, uGDS, or Phoenix.
+Automatic selection chooses cuFile on NVIDIA and hipFile on AMD ROCm; GDS L1
+config can explicitly select uGDS for a raw ``/dev/ugds_drvX`` slab, or
+``phx`` for the Phoenix phxfs DMA path over a regular filesystem slab. uGDS
+and phx can be used on either platform with a matching library build. All
+implementations expose an identical API -- :class:`AsyncHandle`,
+:class:`Submission`, and the ``register_*`` / ``deregister_*`` /
+``close_driver`` functions -- so
 :mod:`lmcache.v1.gpu_connector.gds_context` remains backend-agnostic.
 The uGDS-only :func:`get_ugds_device_capacity` helper is intentionally separate
 from that common backend surface.
@@ -26,7 +28,7 @@ from typing import TYPE_CHECKING, Literal
 # Third Party
 import torch
 
-BackendName = Literal["auto", "cufile", "hipfile", "ugds"]
+BackendName = Literal["auto", "cufile", "hipfile", "ugds", "phx"]
 _backend: ModuleType
 _selected_backend: str
 _selection_finalized = False
@@ -66,6 +68,11 @@ def _load_backend(name: BackendName) -> tuple[str, ModuleType]:
         from lmcache.v1.gpu_connector import _ugds_async
 
         backend = _ugds_async
+    elif selected == "phx":
+        # First Party
+        from lmcache.v1.gpu_connector import _phx_async
+
+        backend = _phx_async
     else:
         raise ValueError(f"unsupported GDS L1 backend: {name}")
     return selected, backend
@@ -87,6 +94,8 @@ def _validate_backend_platform(selected: str) -> None:
     elif (
         selected == "ugds" and torch.version.hip is None and torch.version.cuda is None
     ):
+        raise ValueError(f"{selected} requires a ROCm or CUDA PyTorch build")
+    elif selected == "phx" and torch.version.hip is None and torch.version.cuda is None:
         raise ValueError(f"{selected} requires a ROCm or CUDA PyTorch build")
 
 

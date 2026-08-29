@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Unit tests for the CB V3 observability emission sites.
+"""Unit tests for the blend observability emission sites.
 
 These cover the event *contracts* the metrics/tracing subscribers depend on —
 what each site publishes and with which metadata — without touching CUDA or the
 storage controller.  See
-``docs/design/v1/mp_observability/blend_v3_observability.md``.
+``docs/design/v1/mp_observability/blend_observability.md``.
 """
 
 # Standard
@@ -20,14 +20,14 @@ import time
 from lmcache.v1.distributed.api import AttnWindowDesc, TrimPolicy
 from lmcache.v1.mp_observability.event import EventType
 from lmcache.v1.multiprocess.custom_types import CBMatchResult
-from lmcache.v1.multiprocess.modules import blend_v3 as v3_mod
+from lmcache.v1.multiprocess.modules import blend as blend_mod
 
 _CHUNK = 256
 
 
 def _make_engine():
-    """A BlendV3Module mock with only the attributes these paths touch."""
-    eng = MagicMock(spec=v3_mod.BlendV3Module)
+    """A BlendModule mock with only the attributes these paths touch."""
+    eng = MagicMock(spec=blend_mod.BlendModule)
     # Instance attrs (set in __init__) are omitted by spec=; add the ones used.
     eng._event_bus = MagicMock()
     eng._token_range_matcher = MagicMock()
@@ -36,8 +36,8 @@ def _make_engine():
 
 
 def _bind(eng, name):
-    """Bind a real BlendV3Module method to the mock engine."""
-    return getattr(v3_mod.BlendV3Module, name).__get__(eng)
+    """Bind a real BlendModule method to the mock engine."""
+    return getattr(blend_mod.BlendModule, name).__get__(eng)
 
 
 def _published(eng):
@@ -54,7 +54,7 @@ def _published(eng):
 
 class TestFingerprintsRegisteredEvent:
     """The registration event feeds ``lmcache_blend.fingerprints_registered``,
-    which stayed flat under V3 until this site existed. It must count only the
+    which stayed flat until this site existed. It must count only the
     chunks the matcher actually indexed."""
 
     def test_reports_indexed_chunks_and_their_tokens(self):
@@ -143,7 +143,7 @@ class TestMatcherRegistrationCount:
     number the registration event reports."""
 
     def test_first_store_counts_indexed_chunks_and_restore_counts_zero(self):
-        matcher = v3_mod.BlendTokenRangeMatcherV3(chunk_size=4)
+        matcher = blend_mod.BlendTokenRangeMatcher(chunk_size=4)
         tokens = list(range(16))
         hashes = [b"h0", b"h1", b"h2", b"h3"]
 
@@ -157,14 +157,15 @@ class TestMatcherRegistrationCount:
         )
 
     def test_no_full_chunk_counts_zero(self):
-        matcher = v3_mod.BlendTokenRangeMatcherV3(chunk_size=4)
+        matcher = blend_mod.BlendTokenRangeMatcher(chunk_size=4)
 
         assert matcher.on_new_token_hashes([1, 2, 3], [], 0, 0) == 0
         assert matcher.on_new_token_hashes(list(range(4)), [b"h0"], 1, 0) == 0
 
 
 class TestPrefixLegNoGpuContext:
-    """``no_gpu_context`` drives ``lookup_no_gpu_context_errors``; V3 hardcoded
+    """``no_gpu_context`` drives ``lookup_no_gpu_context_errors``; the blend
+    module hardcoded
     it to False, so a server with no registered CB KV cache looked healthy."""
 
     def _key(self):
@@ -197,7 +198,7 @@ class TestPrefixLegNoGpuContext:
         # Legacy fused layout: one object group, full attention.
         eng._resolve_cb_read_layouts = MagicMock(
             return_value=(
-                v3_mod._classify_cb_read_groups(1, ()),
+                blend_mod._classify_cb_read_groups(1, ()),
                 {0: MagicMock()},
                 AttnWindowDesc(num_chunks_in_sw=[-1], world_size=2),
             )
@@ -234,7 +235,7 @@ class TestCoordinatorMatchTimeoutEvent:
     def test_deadline_publishes_timed_out_end(self):
         eng = _make_engine()
         coordinator = MagicMock()
-        coordinator.poll_match.return_value = v3_mod.PENDING
+        coordinator.poll_match.return_value = blend_mod.PENDING
         eng._coordinator = coordinator
         job = SimpleNamespace(
             coord_submitted=True,
@@ -251,7 +252,7 @@ class TestCoordinatorMatchTimeoutEvent:
     def test_pending_within_deadline_defers_without_event(self):
         eng = _make_engine()
         coordinator = MagicMock()
-        coordinator.poll_match.return_value = v3_mod.PENDING
+        coordinator.poll_match.return_value = blend_mod.PENDING
         eng._coordinator = coordinator
         job = SimpleNamespace(
             coord_submitted=True,
@@ -314,7 +315,7 @@ class TestRetrieveEventsCarryWorkerId:
     }
 
     def test_every_retrieve_and_scatter_publish_stamps_worker_id(self):
-        tree = ast.parse(inspect.getsource(v3_mod))
+        tree = ast.parse(inspect.getsource(blend_mod))
         sites: list[tuple[str, int, bool]] = []
         for node in ast.walk(tree):
             if not (
@@ -335,12 +336,13 @@ class TestRetrieveEventsCarryWorkerId:
         missing = [(n, ln) for n, ln, ok in sites if not ok]
         assert missing == [], f"publish sites without worker_id: {missing}"
         # One START and three END sites for retrieve, one START + two END for
-        # scatter: keep this in step with blend_v3.cb_retrieve_pre_computed.
+        # scatter: keep this in step with BlendModule.cb_retrieve_pre_computed.
         assert len(sites) == 7, sites
 
 
 class TestLookupOnlyRequestEnds:
-    """``cb.request`` closes on ``CB_REQUEST_END``, which V3 otherwise publishes
+    """``cb.request`` closes on ``CB_REQUEST_END``, which the blend module
+    otherwise publishes
     only from the retrieve path. A request the connector will never retrieve for
     (miss, prefix-only) must be ended by the lookup itself, or its root span
     leaks until shutdown (seen e2e: 5 of 6 roots never exported)."""
@@ -365,7 +367,7 @@ class TestLookupOnlyRequestEnds:
     def test_prefix_only_lookup_ends_the_request(self):
         rid = "req-prefix-only"
         # Both legs done: prefix landed 4 chunks, sparse leg had nothing to fetch.
-        job = v3_mod._CBUnifiedJob(
+        job = blend_mod._CBUnifiedJob(
             matches=[],
             num_tokens=4 * _CHUNK,
             prefix_chunks=4,
@@ -389,7 +391,7 @@ class TestLookupOnlyRequestEnds:
 
     def test_miss_ends_the_request(self):
         rid = "req-miss"
-        job = v3_mod._CBUnifiedJob(
+        job = blend_mod._CBUnifiedJob(
             matches=[],
             num_tokens=2 * _CHUNK,
             prefix_chunks=0,
@@ -411,7 +413,7 @@ class TestLookupOnlyRequestEnds:
         match = CBMatchResult(
             old_st=0, old_ed=_CHUNK, cur_st=_CHUNK, cur_ed=2 * _CHUNK, hash=b"h"
         )
-        job = v3_mod._CBUnifiedJob(
+        job = blend_mod._CBUnifiedJob(
             matches=[match],
             num_tokens=3 * _CHUNK,
             prefix_chunks=1,

@@ -992,7 +992,7 @@ for the technique itself.
 
 It has two halves the operator runs together:
 
-- a GPU-resident CacheBlend V3 engine (``lmcache server --engine-type blend``),
+- a GPU-resident CacheBlend engine (``lmcache server --engine-type blend``),
   deployed as a DaemonSet with the **same GPU model as** ``LMCacheEngine``
   (``runtimeClassName: nvidia`` + ``NVIDIA_VISIBLE_DEVICES=all`` + the host
   ``/dev/shm`` mount -- or ``hostIPC`` when ``spec.hostIPC`` is set -- plus
