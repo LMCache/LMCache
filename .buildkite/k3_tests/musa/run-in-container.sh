@@ -18,6 +18,7 @@ DOCKER_ENV_ARGS=(
     -e "LMCACHE_TRACK_USAGE=${LMCACHE_TRACK_USAGE:-false}"
     -e "MUSA_CI_ARTIFACT_DIR=/musa-ci-artifacts"
     -e "MUSA_CI_PREPROVISIONED=1"
+    -e "MUSA_CI_PYTHON=${MUSA_CI_PYTHON:-python3}"
     -e "MUSA_VISIBLE_DEVICES=${MUSA_VISIBLE_DEVICES:-0}"
 )
 
@@ -65,7 +66,8 @@ docker run --rm \
     -v "${REPO_ROOT}:/mnt/LMCache-src:ro" \
     -v "${ARTIFACT_DIR}:/musa-ci-artifacts" \
     -w /tmp \
+    --entrypoint /bin/bash \
     "${IMAGE}" \
-    bash -lc \
+    -lc \
         'workdir="$(mktemp -d /tmp/lmcache-ci.XXXXXX)" && cp -a /mnt/LMCache-src/. "${workdir}" && cd "${workdir}" && bash "$1"' \
         musa-ci "${INNER_SCRIPT}" || fail "MUSA ${MODE} container failed"

@@ -13,6 +13,7 @@ fi
 SERVER_LOG="${ARTIFACT_DIR}/lmcache-server.log"
 VENV_DIR=""
 SERVER_PID=""
+PYTHON_BIN="${MUSA_CI_PYTHON:-python}"
 INSTALL_CMD=()
 FREEZE_CMD=()
 
@@ -32,7 +33,7 @@ check_musa_runtime() {
     local output_file="$2"
 
     log "Checking the MUSA runtime and hardware (${phase})"
-    if python - "${phase}" <<'PY' 2>&1 | tee "${output_file}"; then
+    if "${PYTHON_BIN}" - "${phase}" <<'PY' 2>&1 | tee "${output_file}"; then
 import ctypes
 import importlib.metadata
 import os
@@ -62,11 +63,13 @@ except OSError as exc:
 print("phase=", sys.argv[1])
 print("python=", sys.executable)
 print("torch=", torch.__version__)
+print("torch_musa_runtime=", getattr(torch.version, "musa", "unknown"))
 print("torch_musa=", package_version("torch_musa"))
 print("torch_musa_module=", getattr(torch_musa, "__version__", "unknown"))
 print("MUSA_VISIBLE_DEVICES=", os.environ["MUSA_VISIBLE_DEVICES"])
 print("MUSA_HOME=", os.environ.get("MUSA_HOME", "<unset>"))
 print("musa_device_count=", device_count)
+print("musa_current_device=", torch.musa.current_device())
 for device_index in range(device_count):
     try:
         device_name = torch.musa.get_device_name(device_index)
@@ -74,6 +77,14 @@ for device_index in range(device_count):
         device_name = f"<unavailable: {exc}>"
     print(f"musa_device_{device_index}=", device_name)
 print("libmusart.so=loadable")
+
+probe = torch.arange(6, dtype=torch.float32, device="musa:0").reshape(2, 3)
+probe_result = probe @ probe.T
+torch.musa.synchronize()
+probe_result_cpu = probe_result.cpu().tolist()
+assert probe_result_cpu == [[5.0, 14.0], [14.0, 50.0]], probe_result_cpu
+print("musa_tensor_device=", probe.device)
+print("musa_matmul_result=", probe_result_cpu)
 PY
         return
     fi
@@ -99,7 +110,7 @@ wait_for_process_exit() {
 }
 
 run_pytest() {
-    python - "$@" <<'PY'
+    "${PYTHON_BIN}" - "$@" <<'PY'
 import sys
 
 import pytest
@@ -132,7 +143,8 @@ cleanup() {
 trap cleanup EXIT
 
 mkdir -p "${ARTIFACT_DIR}"
-command -v python >/dev/null 2>&1 || fail "python is required in the MUSA environment"
+command -v "${PYTHON_BIN}" >/dev/null 2>&1 || \
+    fail "${PYTHON_BIN} is required in the MUSA environment"
 if [[ "${MUSA_CI_UNIT_ONLY:-0}" != "1" ]]; then
     command -v curl >/dev/null 2>&1 || \
         fail "curl is required for the server smoke test"
@@ -144,12 +156,12 @@ cd "${REPO_ROOT}"
 
 if [[ "${MUSA_CI_PREPROVISIONED:-0}" == "1" ]]; then
     log "Using the pre-provisioned container Python and TorchMUSA stack"
-    INSTALL_CMD=(python -m pip install)
-    FREEZE_CMD=(python -m pip freeze)
+    INSTALL_CMD=("${PYTHON_BIN}" -m pip install)
+    FREEZE_CMD=("${PYTHON_BIN}" -m pip freeze)
 else
     VENV_DIR="$(mktemp -d "${TMPDIR:-/tmp}/lmcache-musa-ci.XXXXXX")"
     log "Creating an isolated environment while preserving the pinned TorchMUSA stack"
-    BASE_PYTHON="$(command -v python)"
+    BASE_PYTHON="$(command -v "${PYTHON_BIN}")"
     if command -v uv >/dev/null 2>&1; then
         log "Using uv for environment and package management"
         uv venv --system-site-packages --python "${BASE_PYTHON}" "${VENV_DIR}" || \
@@ -166,6 +178,7 @@ else
     # shellcheck disable=SC1091
     source "${VENV_DIR}/bin/activate" || \
         fail "failed to activate the temporary environment"
+    PYTHON_BIN=python
     python -m pip --version >/dev/null 2>&1 || \
         python -m ensurepip --upgrade >/dev/null || \
         fail "pip is unavailable and ensurepip could not install it"
@@ -198,7 +211,7 @@ SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE=0.0.0+ci \
 "${FREEZE_CMD[@]}" > "${ARTIFACT_DIR}/pip-freeze.txt"
 
 log "Verifying LMCache selected the MUSA backend and built native support"
-python - <<'PY' 2>&1 | tee "${ARTIFACT_DIR}/lmcache-preflight.txt"
+"${PYTHON_BIN}" - <<'PY' 2>&1 | tee "${ARTIFACT_DIR}/lmcache-preflight.txt"
 import lmcache
 import lmcache.lmcache_native as lmcache_native
 
@@ -217,7 +230,7 @@ fi
 
 if [[ "${MUSA_CI_UNIT_ONLY:-0}" == "1" ]]; then
     discover_unit_tests() {
-        python - <<'PY'
+        "${PYTHON_BIN}" - <<'PY'
 from pathlib import Path
 
 allowlist = (

@@ -30,6 +30,7 @@ Optional debugging overrides:
 |----------|---------|---------|
 | `TEST_SELECTOR` | unset | Pass a pytest `-k` selector to the focused suite |
 | `MUSA_CI_IMAGE` | pinned MUSA full-test image | Override the pre-provisioned TorchMUSA container image |
+| `MUSA_CI_PYTHON` | `python3` | Override the Python executable inside the MUSA image |
 | `MUSA_CI_ZMQ_PORT` | `6555` | Override the MP server ZMQ port |
 | `MUSA_CI_HTTP_PORT` | `7555` | Override the MP server HTTP port |
 
@@ -79,10 +80,13 @@ itself is rebuilt from that working copy with
 cannot replace the image's pinned TorchMUSA stack.
 
 The Docker invocation uses the maintainer-validated `--ipc=host` and
-`--network=host` flags. The MooreThreads agent must retain the same host-side
-Docker/MUSA device integration used to validate that command; an environment
-variable alone cannot add device nodes to an otherwise unconfigured Docker
-daemon.
+`--network=host` flags. It explicitly sets `--entrypoint /bin/bash` because the
+image already has `/bin/bash` as its entrypoint; appending another `bash`
+causes the image to misinterpret it as a script. The wrapper uses `python3`,
+which resolves to the verified `/usr/bin/python3` interpreter in this image.
+The MooreThreads agent must retain the same host-side Docker/MUSA device
+integration used to validate that command; an environment variable alone
+cannot add device nodes to an otherwise unconfigured Docker daemon.
 
 ## Buildkite UI snippet
 
@@ -104,6 +108,7 @@ step, so two jobs cannot contend for the same device.
 ## What this pipeline validates
 
 - `torch_musa` imports and real MUSA hardware is visible.
+- A small tensor allocation and matrix multiplication completes on `musa:0`.
 - `libmusart.so` loads successfully.
 - LMCache builds its common native extensions with the MUSA build profile.
 - LMCache selects the `musa` device backend.
