@@ -1,0 +1,432 @@
+# Layerwise Batch KV Loading: Design
+
+## 1. Overview
+
+`--layerwise-batch N` enables layer-major H2D KV cache transfer in
+LMCache's multiprocess (ZMQ) mode.  Instead of copying all layers for
+each chunk (chunk-major), the server copies all chunks for N layers at
+a time (layer-major), records one IPC event per batch, and streams
+the event handle to the worker immediately so worker can start attention
+on those layers while later batches are still transferring.
+
+Key parameters:
+- `N = 0` (default): layerwise disabled; all layers transferred at once
+  per chunk (chunk-major, original path).
+- `N = 1`: per-layer transfer; one event per layer.
+- `N > 1`: batch N consecutive layers per H2D + scatter, one event per
+  batch, best balance of event overhead vs. pipeline granularity.
+
+For a model with L total layers and `--layerwise-batch N`,
+the server produces `ceil(L / N)` batches, each covering up to N
+consecutive same-kernel-group layers.  Each batch triggers one IPC
+event and one intermediate response frame to the worker.
+
+### 1.1 Supported Scope
+
+Layer-wise loading is supported for the **LMCache-driven transfer mode on
+CUDA only**. It is not supported with `--supported-transfer-mode
+engine_driven`, which never loads the layer-wise module, nor on non-CUDA
+platforms: only the CUDA and ROCm build profiles compile
+`csrc/cuda/mp_mem_kernels_layerwise.cu`, and the `layerwise` argument exists
+only in the `cuda_ops` bindings.
+
+Neither restriction is enforced at startup today. `--layerwise-batch N` is
+accepted and silently ignored under `engine_driven`, and on a non-CUDA build
+the server starts and registers normally but the first layer-wise retrieve
+fails inside the native call. Widening the scope -- and enforcing it -- is
+deferred until the CUDA path is validated upstream.
+
+---
+
+## 2. Architecture
+
+```
++----------------------- Server Process (lmcache_server) ----------------------+
+|                                                                              |
+|  +----------------------+    +------------------------------------------+    |
+|  |  MQ Main-Loop Thread |    |  Affinity Pool Thread                    |    |
+|  |  (mq-server-thread)  |    |  (one per ZMQ client, i.e. per vLLM wkr) |    |
+|  |                      |    |                                          |    |
+|  |  * zmq ROUTER recv   |    |  Runs: retrieve() handler                |    |
+|  |  * dispatch to pool  |    |                                          |    |
+|  |  * zmq ROUTER send   |    |  (Conditional) CPU: read chunks from L2  |    |
+|  |    (per-batch frames)|    |                                          |    |
+|  |                      |    |  +-- per batch (N layers) -----------+   |    |
+|  |  Drains output_queue |    |  | 1. GPU: H2D memcpy                |   |    |
+|  |  into ZMQ socket     |    |  | 2. GPU: scatter kernel            |   |    |
+|  |                      |    |  | 3. CPU: record_event(pool[i])     |   |    |
+|  |                      |    |  | 4. CPU: response_channel(pool_idx)|   |    |
+|  |                      |    |  |      +-> output_queue.put()       |   |    |
+|  |                      |    |  +-----------------------------------+   |    |
+|  +------+---------------+    +------------------------------------------+    |
+|         | ZMQ ipc://                                                         |
++---------+--------------------------------------------------------------------+
+          |
+          |  partial frames (pool index, int)
+          |  or final frame  (completion status)
+          |
++---------+-------------------- Worker Process (vLLM) -------------------------+
+|         |                                                                    |
+|  +------v---------------+    +------------------------------------------+    |
+|  |  Client Polling Loop |    |  vLLM Model Runner Thread                |    |
+|  |  (singleton thread)  |    |                                          |    |
+|  |                      |    |  +-- per layer (0..L-1) -------------+   |    |
+|  |  * zmq DEALER recv   |    |  |                                   |   |    |
+|  |  * !final -> queue   |    |  | 1. CPU: wait_for_layer(layer_idx) |   |    |
+|  |  * final  -> set_rslt|    |  |    1st in batch: drain _partial_q |   |    |
+|  |                      |    |  |  + pool.event_at(idx) + wait_event|   |    |
+|  |  queue.Queue links:  |    |  |    rest N-1: cached event, no-op  |   |    |
+|  |   -> _partial_queue  |    |  |                                   |   |    |
+|  |                      |    |  | 2. GPU: attention(layer_idx)      |   |    |
+|  |   -> set_result()    |    |  +-----------------------------------+   |    |
+|  |                      |    |                                          |    |
+|  |                      |    |  Reads from:                             |    |
+|  |                      |    |   LayerwiseDeviceMessagingFuture         |    |
+|  +-----------------------+    +------------------------------------------+   |
+|                                                                              |
++------------------------------------------------------------------------------+
+```
+
+---
+
+## 3. Pipeline: Streaming ZMQ Partial Frames
+
+With `--layerwise-batch N` and L total layers (ceil(L/N) batches), the per-batch
+flow on the server affinity pool thread is:
+
+```
+Batch 0 (layers 0 .. N-1):
+  +-- H2D memcpy: num_chunks x N x per_layer_bytes        (GPU)
+  +-- scatter kernel: interleaved -> per-layer KV blocks  (GPU)
+  +-- record_event(layer_events[0], server_stream)        (CPU)
+  +-- response_channel(pack(0, N, pool_idx=0))            (CPU)
+       +-> output_queue -> MQ main loop -> ZMQ ROUTER -> wire
+
+Batch 1 (layers N .. 2N-1):
+  +-- H2D memcpy ...
+  +-- scatter kernel ...
+  +-- record_event(layer_events[N], server_stream)
+  +-- response_channel(pack(N, N, pool_idx=N))
+
+  ... (batches 2 .. ceil(L/N)-2 identical pattern) ...
+
+Batch ceil(L/N)-1 (last N layers):
+  +-- H2D + scatter + record_event(pool[last])
+  +-- response_channel(pack((ceil(L/N)-1)*N, N, pool_idx))
+
+Handler returns ([], True)
+  +-> done-callback -> output_queue -> final frame
+```
+
+**Worker-side** (vLLM model runner thread), concurrently:
+
+```
+Layer  0: wait_for_layer(0)
+            -> _drain_until_layer(0) blocks on partial_queue.get()
+            -> receives frame (0, N, pool_idx) -> pool.event_at(idx) -> wait_event
+          attention(layer 0)  <-- GPU, overlaps with server batch 1 H2D
+
+Layer  1: wait_for_layer(1)
+            -> already in _layer_event_map (same batch as layer 0)
+            -> evt is _last_waited_event -> skip (dedup)
+          attention(layer 1)
+
+  ... layers 2 .. N-1: same event, all dedup-skipped ...
+
+Layer  N: wait_for_layer(N)
+            -> not in map -> drain queue -> receives frame (N, N, pool_idx)
+            -> pool.event_at(idx) -> wait_event
+          attention(layer N)  <-- GPU, overlaps with server batch 2 H2D
+
+  ... layers N+1 .. L-1: same pattern ...
+
+All layers done -> future.wait() -> drain remaining -> synchronize last event
+```
+
+---
+
+## 4. Contiguous Per-Batch H2D Memcpy
+
+### 4.1 Host Memory Layout: kv_interleaved
+
+When `--layerwise-batch > 0`, the store path (D2H) writes CPU
+cache chunks in per-layer interleaved layout:
+
+```
+Per-chunk (kv_interleaved=False, default):
+  chunk = [K_layer0, K_layer1, ..., K_layerN, V_layer0, V_layer1, ..., V_layerN]
+
+Per-layer interleaved (kv_interleaved=True, layerwise mode):
+  chunk = [K_layer0, V_layer0, K_layer1, V_layer1, ..., K_layerN, V_layerN]
+```
+
+This interleaved layout is carried by `PageBufferShapeDesc.kv_interleaved`
+(`lmcache/v1/platform/ops_types.py`).
+
+The flag is a **deployment-wide invariant**, not a per-call argument: it
+is set once in `register_kv_cache()` on every kernel group's
+`shape_desc` when `layerwise_loading` (i.e. `layerwise_batch > 0`) is
+true.  Both the store (D2H) and retrieve (H2D) paths then simply read
+it.  Configuring it at registration — rather than latching it on the
+first store — also keeps cold-start retrieves correct when a process
+reads chunks written by a previous run before storing anything itself.
+
+Consequently the per-chunk transfer helpers
+(`_run_object_group_transfer_plan`, `transfer_kv_per_object_group`)
+take no layout parameter and are byte-identical to the pre-layerwise
+implementation.
+
+### 4.2 Interleaved Enables Contiguous Batch Memcpy
+
+With the interleaved layout, N consecutive layers in one chunk occupy
+a contiguous byte range in the CPU buffer:
+
+```
+chunk memory (interleaved):
+  offset 0:                      [K0, V0]          <-- layer 0
+  offset per_layer_bytes:        [K1, V1]          <-- layer 1
+  ...
+  offset (N-1)*per_layer_bytes:  [K_{N-1}, V_{N-1}]  <-- layer N-1
+
+For batch of layers [i, i+N):
+  src = chunk.data_ptr + kg_byte_offset + i * per_layer_bytes
+  len = N * per_layer_bytes
+  -> single contiguous memcpy per chunk
+```
+
+### 4.3 Merged H2D Path
+
+When native ops are available and the staging buffer is large enough,
+`transfer_kv_layerwise` uses the N-layer merged path:
+
+1. **StagingCopy per batch N-layer per chunk**: source = `memory_obj.data_ptr +
+   src_layer_offset`, size = `n_in_batch * per_layer_bytes`.  One
+   contiguous memcpy copies N layers from one chunk in a single call.
+
+2. **Scatter kernel**: `execute_object_group_transfer` with
+   `PageBufferShapeDesc(nl=n_in_batch, kv_interleaved=True)`.  The
+   GPU kernel reads the interleaved staging buffer and scatters to
+   per-layer K/V paged block tensors.
+
+3. **Fallback**: when native ops are absent or the staging buffer
+   overflows, a per-layer fallback loop does N separate H2D copies
+   (`multi_layer_block_kv_transfer` with single-layer sd).
+
+---
+
+## 5. IPC Event Pool
+
+### 5.1 Motivation
+
+Without pooling, each layerwise retrieve creates L events
+(`cudaEventCreate`), exports B handles (`cudaIpcGetEventHandle`), 
+and the worker imports B handles (`cudaIpcOpenEventHandle`). 
+
+### 5.2 Design
+
+A fixed pool of `EVENT_POOL_SIZE = 256` interprocess events is
+pre-allocated per (context, worker) pair at **registration time**:
+
+```
+register_layerwise_ipc_event_pool(instance_id):
+  1. pool = _ensure_event_pool(instance_id)     # creates pool on first call:
+     a. assert num_total_layers <= EVENT_POOL_SIZE
+     b. pool = EventPool(backend, device)        # 256 x cudaEventCreate
+     c. pool.handles -> export all 256 events    # 256 x cudaIpcGetEventHandle
+  2. return (layerwise_batch, pool.handles)      # REGISTER_LAYERWISE_IPC_EVENT_POOL response
+```
+
+The worker sends `REGISTER_LAYERWISE_IPC_EVENT_POOL` right after
+`REGISTER_KV_CACHE` and imports all 256 handles **once**:
+
+```
+LMCacheLayerwiseTransferContext.register():
+  1. super().register(...)                       # REGISTER_KV_CACHE -> None
+  2. send_request(REGISTER_LAYERWISE_IPC_EVENT_POOL, [instance_id])
+  3. layerwise_batch, pool_handles = future.result(timeout=mq_timeout)
+  4. pool = EventPool.import_pool(backend, device, pool_handles)
+     # 256 x cudaIpcOpenEventHandle — one-time cost at startup
+```
+
+### 5.3 Per-Request Hot Path (Zero Driver Calls)
+
+During retrieve, the server indexes into the pre-allocated pool:
+
+```
+layer_events = [pool.event_at(i) for i in range(num_total_layers)]
+...
+record_event(pool_event[batch_leader], stream)   # cudaEventRecord only
+response_channel((struct.pack("<3i", first_layer, count, batch_leader),
+                  False, False))                 # int index, not a handle
+```
+
+The worker receives a pool index (int) and looks up the pre-imported
+event — no `cudaIpcOpenEventHandle` on the forward path:
+
+```
+first_layer, count, pool_idx = struct.unpack("<3i", payload)
+evt = pool.event_at(pool_idx)
+stream.wait_event(evt)
+```
+
+### 5.4 Wire Encoding
+
+Every frame is a `tuple[bytes, bool, bool]` -- `(payload, is_final,
+succeeded)` -- so intermediate and closing frames share one response class:
+- **Intermediate frame:** `payload = struct.pack("<3i", first_layer, count,
+  pool_idx)`, `is_final = False`.
+- **Closing frame:** `payload = struct.pack(f"<{L}i", *indices)` where L is the
+  number of total layers (empty when indices were already reported
+  frame by frame), `is_final = True`.
+
+### 5.5 Invariants
+
+- `num_total_layers <= EVENT_POOL_SIZE` — validated at registration; fails
+  loudly otherwise.
+- Pool is always present when layerwise is enabled (`assert event_pool`
+  in retrieve).
+- No fallback path exists — if the pool can't be created, registration
+  fails.
+
+---
+
+## 6. `--layerwise-batch N` Configuration Flow
+
+```
+--layerwise-batch N
+    |
+    v
+MPServerConfig(layerwise_batch=N)
+    |
+    v
+MPCacheServerContext._layerwise_batch = N
+    |
+    +---> N = 0: server.py loads LMCacheDrivenTransferModule
+    |            serves RETRIEVE (per-chunk) only
+    |
+    +---> N > 0: server.py loads LMCacheLayerwiseTransferModule
+                 serves RETRIEVE_LAYERWISE; store writes kv_interleaved
+```
+
+The two modes are **mutually exclusive per server node**. A node started
+with `N > 0` serves the layer-wise path exclusively and does not serve
+per-chunk retrieves.
+
+### 6.1 Pairing the Worker With the Server
+
+The worker's mode is **not** negotiated at registration. It is fixed at
+process start by which connector vLLM imports, so the operator must pair
+the two sides explicitly:
+
+| MP server | vLLM `--kv-transfer-config` |
+|---|---|
+| `--layerwise-batch 0` (or omitted) | `"kv_connector": "LMCacheMPConnector"` — no `kv_connector_module_path` |
+| `--layerwise-batch N` (N > 0) | `"kv_connector": "LMCacheLayerwiseMPConnector"` **and** `"kv_connector_module_path": "lmcache.integration.vllm.lmcache_mp_connector_layerwise"` |
+
+Layer-wise launch example:
+
+```bash
+vllm serve $MODEL \
+  --kv-transfer-config '{
+    "kv_connector": "LMCacheLayerwiseMPConnector",
+    "kv_connector_module_path":
+        "lmcache.integration.vllm.lmcache_mp_connector_layerwise",
+    "kv_role": "kv_both",
+    "kv_connector_extra_config": {
+      "lmcache.mp.host": "tcp://localhost",
+      "lmcache.mp.port": 5555
+    }
+  }'
+```
+
+Confirm the pairing took effect: a correct layer-wise worker logs
+
+```
+Layerwise transfer context registered (batch=N, pool_size=...)
+```
+
+
+Notes: Keeping mode off `REGISTER_KV_CACHE` is deliberate: it leaves the
+per-chunk protocol byte-for-byte unchanged when layer-wise is disabled.
+
+---
+
+## 7. Layout Uniformity & Mixed-Mode Considerations
+
+### 7.1 Current Invariant
+
+Layout is fixed per deployment: a server is uniformly per-layer
+(`kv_interleaved=True`) or uniformly per-chunk
+(`kv_interleaved=False`).  The `store` handler writes D2H in the
+layout dictated by `layerwise_loading`, and the `retrieve` handler
+reads the same layout.
+
+This works because `layerwise_loading` is a server-level config, not
+a per-request flag.  All chunks stored by this server instance use
+the same interleaving.
+
+### 7.2 Note: Rolling Upgrades & Shared L2
+
+If servers sharing persistent L2 storage are upgraded from
+`--layerwise-batch 0` to `N > 0` (or vice versa), stale chunks with
+the old layout may remain.  Reading a chunk with mismatched layout
+produces corrupt KV data.
+
+In practice this is a non-issue: mixed deployments offer no benefit,
+and old chunks are naturally evicted.  If rolling upgrades are needed,
+flushing L2 between mode changes is sufficient.
+
+**Future alternative:** store a `kv_interleaved` flag in each chunk's
+`MemoryObjMetadata` at D2H time.  The token database lookup can then
+compare the chunk's stored layout against the server's current setting
+and treat a mismatch as a cache miss — the stale entry is never read,
+and a subsequent store overwrites it in the correct layout.  This
+avoids both silent corruption and wasted L2 read I/O, and lets the
+system self-heal without a manual flush.
+
+---
+
+## 8. Multi-Frame ZMQ Responses
+
+### 8.1 Request Types
+
+| Request Type | Frames per request | Used By |
+|---|---|---|
+| `RETRIEVE` | 1 | Per-chunk retrieve (existing path; unchanged) |
+| `RETRIEVE_LAYERWISE` | ceil(L/N) + 1 | Layerwise retrieve |
+
+Both share identical `payload_classes`.  A dedicated request type keeps the
+plain `RETRIEVE` dispatch path completely untouched.
+
+### 8.2 How the Message Queue Stays Neutral
+
+`mq.py` has no notion of a partial result.  It gained two generic
+capabilities instead:
+
+1. **The result decides completion.**  `MessagingFuture.deliver(response)`
+   returns True when the exchange is over; the client pops the pending
+   future only then.  The default implementation calls `set_result` and
+   returns True, so single-frame requests behave exactly as before.
+   `LayerwiseDeviceMessagingFuture` installs itself as the raw future's
+   delivery sink via `set_delivery_sink()`, so buffering the intermediate
+   frames lives entirely inside that future.
+2. **A handler may answer more than once.**  A blocking handler opts in by
+   declaring a keyword-only `response_channel` parameter; the server
+   detects it by signature and passes the same frame-emitting closure it
+   already uses for the final response.  Handlers that do not declare it
+   are called unchanged.
+
+### 8.3 Frame Formats
+
+All frames are identical in shape, so no marker byte or length probe is
+needed:
+
+```
+[zmq_identity, request_uid, request_type, msgpack((payload, is_final, succeeded))]
+```
+
+**Intermediate** (ceil(L/N) of them, one per batch): `is_final = False`,
+`payload = struct.pack("<3i", first_layer, count, pool_index)`.
+
+**Closing** (one, emitted after the handler returns): `is_final = True`,
+`payload` empty when the indices were already reported.

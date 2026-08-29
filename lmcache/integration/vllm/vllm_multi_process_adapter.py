@@ -1388,6 +1388,10 @@ class LMCacheMPWorkerAdapter:
     def _block_ids_per_group(self, op: LoadStoreOp) -> list[list[int]]:
         return expand_engine_block_ids(self.engine_group_infos, op.block_ids)
 
+    def _create_transfer_context(self, kv_caches: dict) -> TransferContext:
+        """Build the worker-side transfer context; subclasses swap transports."""
+        return create_transfer_context(kv_caches, mode=self._mp_transfer_mode)
+
     def _send_register_kv_caches_request(
         self,
         kv_caches: dict[str, torch.Tensor],
@@ -1405,7 +1409,7 @@ class LMCacheMPWorkerAdapter:
                 mq_timeout.
         """
         self.kv_caches = kv_caches
-        transfer_ctx = create_transfer_context(kv_caches, mode=self._mp_transfer_mode)
+        transfer_ctx = self._create_transfer_context(kv_caches)
         layout_hints = self._layout_hints
         self.transfer_ctx = transfer_ctx
         try:

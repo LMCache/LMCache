@@ -86,6 +86,10 @@ class RequestType(enum.Enum):
     # Experimental transfer intermediate tensor
     GET_EXPERIMENTAL = enum.auto()
 
+    # Layer-wise transfer operations (protocols/layerwise.py)
+    REGISTER_LAYERWISE_IPC_EVENT_POOL = enum.auto()
+    RETRIEVE_LAYERWISE = enum.auto()
+
     # Deprecated aliases must follow every auto-valued member. On Python 3.10,
     # placing aliases before auto() can reuse the preceding member's value.
     CB_REGISTER_ROPE_V3 = CB_REGISTER_ROPE

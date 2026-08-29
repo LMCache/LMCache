@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import Any, Generic, Optional, TypeVar, cast
+from typing import Any, Callable, Generic, Optional, TypeVar, cast
 import threading
 
 # First Party
@@ -18,6 +18,7 @@ class MessagingFuture(Generic[T]):
         self.result_: T | None = None
         self.exception_: BaseException | None = None
         self._retained_references: list[object] = []
+        self._delivery_sink: Callable[[Any], bool] | None = None
 
     def query(self) -> bool:
         """
@@ -61,6 +62,21 @@ class MessagingFuture(Generic[T]):
         if self.exception_ is not None:
             raise self.exception_
         return cast(T, self.result_)
+
+    def set_delivery_sink(self, sink: Callable[[Any], bool]) -> None:
+        """Route each response frame to ``sink`` instead of completing directly.
+
+        The sink is called once per frame, owns calling :meth:`set_result`,
+        and returns True when the exchange is over.
+        """
+        self._delivery_sink = sink
+
+    def deliver(self, result: T) -> bool:
+        """Accept one response frame; return True when the request is done."""
+        if self._delivery_sink is not None:
+            return self._delivery_sink(result)
+        self.set_result(result)
+        return True
 
     def set_result(self, result: T) -> None:
         """

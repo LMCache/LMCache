@@ -43,7 +43,7 @@ void execute_object_group_transfer(
     TransferDirection direction, const torch::Device& device,
     size_t host_buffer_alignment,
     const std::vector<KernelGroupSpec>& kernel_group_specs,
-    const std::vector<BatchStep>& batch_steps);
+    const std::vector<BatchStep>& batch_steps, bool layerwise = false);
 
 /**
  * Block-level multi-layer KV transfer between vLLM paged buffers and
@@ -66,4 +66,5 @@ void multi_layer_block_kv_transfer(
     std::vector<int64_t> lmcache_objects_ptrs, const torch::Tensor& block_ids,
     const torch::Device& device, TransferDirection direction,
     PageBufferShapeDesc shape_desc, int lmcache_chunk_size,
-    EngineKVFormat engine_kv_format, int skip_prefix_n_blocks);
+    EngineKVFormat engine_kv_format, int skip_prefix_n_blocks,
+    bool layerwise = false);
