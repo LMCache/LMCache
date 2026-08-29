@@ -67,6 +67,15 @@ class LookupClientInterface(metaclass=abc.ABCMeta):
         """
         return False
 
+    def lookup_hidden_state_coverage(self, lookup_id: str) -> Optional[int]:
+        """How many prefix tokens have hidden states cached, if known.
+
+        ``None`` means the client cannot answer -- either it does not implement
+        the query or the server did not report it -- and callers should fall
+        back to the KV hit length alone.
+        """
+        return None
+
     def clear_lookup_status(self, lookup_id: str) -> None:
         """
         Clear temporary lookup status for a given lookup ID.
