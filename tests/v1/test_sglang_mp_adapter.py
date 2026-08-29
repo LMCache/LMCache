@@ -69,6 +69,10 @@ def _make_connector(healthy: bool = True) -> Any:
         conn._health_event.set()
     conn._lmcache_chunk_size = _CHUNK_SIZE
     conn._mq_timeout = 5.0
+    # store_kv_async and _submit_retrieve call expand_engine_block_ids with
+    # self.engine_group_infos. Set an empty list (single-group, MLA/MHA
+    # default) so the stubbed connector works without a full __init__.
+    conn.engine_group_infos = []
     return conn
 
 
@@ -145,8 +149,7 @@ def test_wrap_sglang_kv_caches_uses_platform_wrapper_in_kv_order(
 ) -> None:
     """Registration dispatches each tensor through the platform wrapper."""
     adapter_mod, _, _, _, _, _ = _import_adapter_symbols()
-    k_pool = [torch.tensor([1]), torch.tensor([2])]
-    v_pool = [torch.tensor([3]), torch.tensor([4])]
+    kv_caches = [torch.tensor([1]), torch.tensor([2]), torch.tensor([3]), torch.tensor([4])]
     wrapped_tensors: list[torch.Tensor] = []
 
     def wrap_one(tensor: torch.Tensor) -> object:
@@ -160,11 +163,11 @@ def test_wrap_sglang_kv_caches_uses_platform_wrapper_in_kv_order(
         raising=False,
     )
 
-    wrapped = adapter_mod._wrap_sglang_kv_caches(k_pool, v_pool)
+    wrapped = adapter_mod._wrap_sglang_kv_caches(kv_caches)
     wrapped_namespaces = cast(list[SimpleNamespace], wrapped)
 
-    assert wrapped_tensors == [*k_pool, *v_pool]
-    assert [wrapper.tensor for wrapper in wrapped_namespaces] == [*k_pool, *v_pool]
+    assert wrapped_tensors == kv_caches
+    assert [wrapper.tensor for wrapper in wrapped_namespaces] == kv_caches
 
 
 def test_wrap_sglang_kv_caches_requires_full_handle_capability(
@@ -183,49 +186,37 @@ def test_wrap_sglang_kv_caches_requires_full_handle_capability(
     with pytest.raises(ValueError, match="required memory IPC, event IPC"):
         adapter_mod._wrap_sglang_kv_caches(
             [torch.tensor([1])],
-            [torch.tensor([2])],
         )
 
 
-def test_wrap_sglang_kv_caches_rejects_mismatched_layers() -> None:
-    """Registration rejects a wire payload that cannot split into K/V pairs."""
+def test_wrap_sglang_kv_caches_rejects_empty_list() -> None:
+    """Registration rejects an empty KV cache list."""
     adapter_mod, _, _, _, _, _ = _import_adapter_symbols()
-    with pytest.raises(ValueError, match="matching K and V layers"):
-        adapter_mod._wrap_sglang_kv_caches(
-            [torch.tensor([1]), torch.tensor([2])],
-            [torch.tensor([3])],
-        )
+    with pytest.raises(ValueError, match="non-empty KV caches"):
+        adapter_mod._wrap_sglang_kv_caches([])
 
 
 @pytest.mark.parametrize(
-    ("k_pool", "v_pool", "message"),
+    ("kv_caches", "message"),
     [
-        ([], [torch.tensor([1])], "non-empty K and V pools"),
-        ([torch.tensor([1])], [], "non-empty K and V pools"),
-        (
-            [torch.tensor([1]), torch.tensor([2])],
-            [torch.tensor([3])],
-            "matching K and V layers",
-        ),
+        ([], "non-empty KV caches"),
     ],
 )
 def test_mp_connector_validates_pools_before_opening_mq(
-    k_pool: list[torch.Tensor],
-    v_pool: list[torch.Tensor],
+    kv_caches: list[torch.Tensor],
     message: str,
 ) -> None:
     """Invalid registration fails before reading the first tensor or opening MQ."""
     _, LMCacheMPConnector, _, _, _, _ = _import_adapter_symbols()
     with pytest.raises(ValueError, match=message):
         LMCacheMPConnector(
-            sgl_config=SimpleNamespace(model_path="test-model"),
+            sgl_config=SimpleNamespace(model_path="test-model", num_hidden_layers=2),
             tp_size=1,
             rank=0,
             page_size=2,
             host="127.0.0.1",
             port=5556,
-            k_pool=k_pool,
-            v_pool=v_pool,
+            kv_caches=kv_caches,
         )
 
 

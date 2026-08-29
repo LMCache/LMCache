@@ -20,6 +20,6 @@ import lmcache.lmcache_native as lmcache_native
 
 class NL_X_NB_BSV_BSS_Spec(NL_X_NB_BS_HS_Spec):
     engine_kv_format = lmcache_native.EngineKVFormat.NL_X_NB_BSV_BSS
-    attention_backends = ("vLLM MLA",)
+    attention_backends = ("vLLM MLA", "SGLang MLA")
     is_layer_list = True
     is_mla = True
