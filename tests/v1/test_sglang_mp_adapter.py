@@ -329,6 +329,90 @@ def test_mp_connector_validates_pools_before_opening_mq(
         )
 
 
+@pytest.mark.parametrize("worker_id", [0, 1])
+def test_tp_worker_namespaces_daemon_lookup_lifecycle(
+    worker_id: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every daemon-side lookup/session operation uses the worker-scoped RID."""
+    adapter_mod, _, _, _, _, _ = _import_adapter_symbols()
+    connector = _make_connector(healthy=True)
+    connector.mq_client = object()  # type: ignore[assignment]
+    connector.model_name = "test-model"
+    connector.tp_size = 2
+    connector.worker_id = worker_id
+    connector._pending_lookups = {}
+    connector._pending_lookups_lock = threading.Lock()
+    connector._global_min_tokens = lambda matched: matched  # type: ignore[method-assign]
+
+    requests: list[tuple[object, list[Any]]] = []
+
+    def send_request(
+        _mq_client: object,
+        request_type: object,
+        payload: list[Any],
+    ) -> MessagingFuture[Any]:
+        requests.append((request_type, payload))
+        future: MessagingFuture[Any] = MessagingFuture()
+        future.set_result(
+            2
+            if request_type is adapter_mod.RequestType.WAIT_PREFETCH_STATUS
+            else True
+        )
+        return future
+
+    monkeypatch.setattr(adapter_mod, "send_lmcache_request", send_request)
+
+    request_id = "request-1"
+    daemon_rid = f"{request_id}#{worker_id}"
+    assert connector.lookup_kv(list(range(2 * _CHUNK_SIZE)), request_id) == (
+        2 * _CHUNK_SIZE
+    )
+    connector.release_pending(request_id)
+    connector.end_session(request_id)
+
+    assert [request_type for request_type, _ in requests] == [
+        adapter_mod.RequestType.LOOKUP,
+        adapter_mod.RequestType.WAIT_PREFETCH_STATUS,
+        adapter_mod.RequestType.FREE_LOOKUP_LOCKS,
+        adapter_mod.RequestType.END_SESSION,
+    ]
+    assert requests[0][1][0].request_id == daemon_rid
+    assert requests[1][1][0] == daemon_rid
+    assert requests[2][1][0].request_id == daemon_rid
+    assert requests[3][1][0] == daemon_rid
+
+
+def test_retrieve_uses_worker_scoped_daemon_request_id() -> None:
+    """RETRIEVE must consume the same worker-scoped session as LOOKUP."""
+    _, _, _completed_future, _, LoadMetadata, _ = _import_adapter_symbols()
+    connector = _make_connector(healthy=True)
+    connector.worker_id = 1
+    connector.page_size = _CHUNK_SIZE
+    connector._pending_lookups = {
+        "request-1": SimpleNamespace(
+            token_ids=list(range(_CHUNK_SIZE)),
+            matched_token_num=_CHUNK_SIZE,
+            locks_held=True,
+        )
+    }
+    connector._pending_lookups_lock = threading.Lock()
+    connector._slot_mapping_to_block_ids = MagicMock(return_value=[1])
+    raw_future: MessagingFuture[tuple[bytes, bool]] = MessagingFuture()
+    connector._submit_retrieve = MagicMock(
+        return_value=(raw_future, _completed_future(True))
+    )
+
+    metadata = LoadMetadata(
+        token_ids=list(range(_CHUNK_SIZE)),
+        slot_mapping=torch.arange(_CHUNK_SIZE),
+        offset=0,
+        request_id="request-1",
+    )
+
+    assert connector.retrieve_kv(metadata) == _CHUNK_SIZE
+    assert connector._submit_retrieve.call_args.kwargs["request_id"] == "request-1#1"
+
+
 def test_store_kv_async_unhealthy_returns_failed_future_no_send(monkeypatch) -> None:
     adapter_mod, _, _, _, _, _ = _import_adapter_symbols()
     conn = _make_connector(healthy=False)
