@@ -203,6 +203,12 @@ class L1EvictionPolicy(L1ManagerListener):
     def on_l1_keys_finish_write_and_reserve_read(self, keys: list[ObjectKey]):
         self._policy.on_keys_created(keys)
 
+    def note_key_positions(self, keys: list[ObjectKey], positions: list[int]) -> None:
+        """Forward prefix positions to the policy, if it consumes them."""
+        fn = getattr(self._policy, "note_key_positions", None)
+        if fn is not None:
+            fn(keys, positions)
+
     def on_l1_keys_accessed(self, keys: list[ObjectKey]):
         self._policy.on_keys_touched(keys)
 
