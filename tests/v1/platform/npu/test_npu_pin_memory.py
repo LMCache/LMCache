@@ -5,6 +5,7 @@
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
+import os
 import sys
 
 # Third Party
@@ -16,8 +17,17 @@ from lmcache.v1.platform.npu import NpuDeviceSpec
 from lmcache.v1.platform.npu import pin_memory as pin_memory_module
 from lmcache.v1.platform.npu.pin_memory import NpuPinMemoryBackend
 
-#: Page size the module under test computes alignments against.
-PAGE = 0x1000
+#: Page size, computed exactly like the module under test so alignment
+#: expectations hold on any host (e.g. aarch64 64K-page kernels).
+try:
+    PAGE = os.sysconf("SC_PAGESIZE")
+except (AttributeError, ValueError, OSError):
+    PAGE = 4096
+
+#: None of these tests allocate through the shared allocator, and the
+#: autouse fixture's 5GB pinned allocation fails on hosts where the
+#: lmcache_ascend plugin is installed but no ACL context can be established.
+pytestmark = pytest.mark.no_shared_allocator
 
 
 class _FakeAclRt:
@@ -99,12 +109,14 @@ def test_pin_widens_region_to_whole_pages_and_unpin_uses_base(
     rt = _FakeAclRt()
     backend = _make_backend(monkeypatch, rt)
 
-    ptr, size = 0x2ABC, 0x1000
+    # An offset region spanning two pages: the registration must cover
+    # exactly the page containing the pointer plus the one it spills into.
+    ptr, size = 2 * PAGE + 0xABC, PAGE
     assert backend.pin_memory(ptr, size) is True
-    assert rt.register_calls == [(0x2000, 0x2000, 0)]
+    assert rt.register_calls == [(2 * PAGE, 2 * PAGE, 0)]
 
     assert backend.unpin_memory(ptr) is True
-    assert rt.unregister_calls == [0x2000]
+    assert rt.unregister_calls == [2 * PAGE]
 
 
 def test_unpin_of_never_pinned_pointer_is_noop_success(
@@ -113,7 +125,7 @@ def test_unpin_of_never_pinned_pointer_is_noop_success(
     """A pointer that was never pinned unpins as a no-op success."""
     rt = _FakeAclRt()
     backend = _make_backend(monkeypatch, rt)
-    backend.pin_memory(0x2000, PAGE)
+    backend.pin_memory(PAGE, PAGE)
 
     assert backend.unpin_memory(0x99999) is True
     assert rt.unregister_calls == []
@@ -125,11 +137,11 @@ def test_failed_unregister_keeps_region_for_retry(
     """A failed unregistration stays undoable instead of being dropped."""
     rt = _FakeAclRt(unregister_codes=[507911, 0])
     backend = _make_backend(monkeypatch, rt)
-    backend.pin_memory(0x2000, PAGE)
+    backend.pin_memory(PAGE, PAGE)
 
-    assert backend.unpin_memory(0x2000) is False
-    assert backend.unpin_memory(0x2000) is True
-    assert rt.unregister_calls == [0x2000, 0x2000]
+    assert backend.unpin_memory(PAGE) is False
+    assert backend.unpin_memory(PAGE) is True
+    assert rt.unregister_calls == [PAGE, PAGE]
 
 
 def test_pin_returns_false_on_acl_error_code(
@@ -138,8 +150,8 @@ def test_pin_returns_false_on_acl_error_code(
     """A nonzero AscendCL registration status is not reported as success."""
     backend = _make_backend(monkeypatch, _FakeAclRt(register_code=507899))
 
-    assert backend.pin_memory(0x1000, PAGE) is False
-    assert backend.unpin_memory(0x1000) is True
+    assert backend.pin_memory(PAGE, PAGE) is False
+    assert backend.unpin_memory(PAGE) is True
 
 
 def test_pin_fails_without_raising_and_latches_when_npu_unavailable(
@@ -150,9 +162,29 @@ def test_pin_fails_without_raising_and_latches_when_npu_unavailable(
     monkeypatch.delattr(torch, "npu", raising=False)
     assert backend.is_pin_supported is True
 
-    assert backend.pin_memory(0x2000, PAGE) is False
+    assert backend.pin_memory(PAGE, PAGE) is False
     assert backend.is_pin_supported is False
-    assert backend.pin_memory(0x2000, PAGE) is False
+    assert backend.pin_memory(PAGE, PAGE) is False
+
+
+def test_unavailable_npu_latches_at_construction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Construction-time unavailability flips the gate without a pin attempt.
+
+    ``is_pin_supported`` must be accurate before any ``pin_memory`` call,
+    because callers such as the ``use_lazy`` auto-disable guard consult it
+    ahead of the first registration.
+    """
+    rt = _FakeAclRt()
+    _install_acl_rt(monkeypatch, rt)
+    monkeypatch.delattr(torch, "npu", raising=False)
+
+    backend = NpuPinMemoryBackend()
+
+    assert backend.is_pin_supported is False
+    assert backend.pin_memory(PAGE, PAGE) is False
+    assert rt.register_calls == []
 
 
 def test_backend_without_acl_or_lib_is_unsupported(
@@ -169,8 +201,8 @@ def test_backend_without_acl_or_lib_is_unsupported(
     backend = NpuPinMemoryBackend()
 
     assert backend.is_pin_supported is False
-    assert backend.pin_memory(0x2000, PAGE) is False
-    assert backend.unpin_memory(0x2000) is False
+    assert backend.pin_memory(PAGE, PAGE) is False
+    assert backend.unpin_memory(PAGE) is False
 
 
 def test_ctypes_fallback_used_when_acl_module_missing(
@@ -197,14 +229,14 @@ def test_ctypes_fallback_used_when_acl_module_missing(
     assert backend.is_pin_supported is True
     assert dlopen_paths == ["/opt/ascend/ascend-toolkit/lib64/libascendcl.so"]
 
-    assert backend.pin_memory(0x2000, PAGE) is True
+    assert backend.pin_memory(PAGE, PAGE) is True
     base_arg = register.call_args.args[0]
     size_arg = register.call_args.args[1]
-    assert base_arg.value == 0x2000
+    assert base_arg.value == PAGE
     assert size_arg.value == PAGE
 
-    assert backend.unpin_memory(0x2000) is True
-    assert unregister.call_args.args[0].value == 0x2000
+    assert backend.unpin_memory(PAGE) is True
+    assert unregister.call_args.args[0].value == PAGE
 
 
 @pytest.mark.npu

@@ -165,6 +165,34 @@ def _load_libascendcl() -> _AclRuntime | None:
     return _LibascendclRuntime(lib)
 
 
+def _torch_npu_available() -> bool:
+    """Whether ``torch`` exposes a usable ``torch.npu``.
+
+    Returns:
+        True when ``torch.npu`` is present and reports at least one usable
+        device, False otherwise.
+    """
+    try:
+        # Third Party
+        import torch
+
+        npu = getattr(torch, "npu", None)
+        if npu is not None and npu.is_available():
+            return True
+        logger.info(
+            "NpuPinMemoryBackend: NPU unavailable; host pinning disabled "
+            "(copies will be synchronous)"
+        )
+        return False
+    except Exception as exc:
+        logger.warning(
+            "NpuPinMemoryBackend: cannot probe NPU availability for "
+            "pinning: %r; copies will be synchronous",
+            exc,
+        )
+        return False
+
+
 class NpuPinMemoryBackend(PinMemoryBackend):
     """Pin host memory for NPU DMA via AscendCL ``aclrtHostRegister``.
 
@@ -177,9 +205,9 @@ class NpuPinMemoryBackend(PinMemoryBackend):
         _rt: ``acl.rt``-shaped runtime, or ``None`` when unavailable.
         _registered_bases: Maps the caller's original pointer to the
             page-aligned registered base.
-        _no_npu: Latched when the NPU is unavailable or no ACL context can be
-            established; makes :attr:`is_pin_supported` report ``False``
-            thereafter.
+        _no_npu: Latched at construction when the NPU is unavailable (or
+            later, when context setup fails on a broken installation); makes
+            :attr:`is_pin_supported` report ``False``.
         _tls: Per-thread "context ensured" flag; ACL contexts are
             thread-local.
     """
@@ -189,12 +217,16 @@ class NpuPinMemoryBackend(PinMemoryBackend):
 
         Notes:
             Discovery prefers the vendor ``acl`` module and falls back to
-            ``libascendcl`` via :mod:`ctypes`. When both fail the backend
-            stays unsupported and pin/unpin return ``False``.
+            ``libascendcl`` via :mod:`ctypes`. NPU availability is probed
+            here so :attr:`is_pin_supported` is accurate before any pin
+            attempt -- callers such as the ``use_lazy`` auto-disable guard
+            consult it ahead of the first registration. When the runtime
+            binding or the NPU is unavailable the backend stays unsupported
+            and pin/unpin return ``False``.
         """
         self._rt: _AclRuntime | None = _load_acl_rt() or _load_libascendcl()
         self._registered_bases: dict[int, int] = {}
-        self._no_npu: bool = False
+        self._no_npu: bool = not _torch_npu_available()
         self._tls = threading.local()
 
     def _ensure_context(self) -> bool:
@@ -204,11 +236,12 @@ class NpuPinMemoryBackend(PinMemoryBackend):
         context) when the thread has never touched the device. Worker threads
         are covered (torch_npu creates the context on first device op), but a
         cache-server thread that only manages host memory may have none, so
-        the first pin attempt on each thread establishes one.
+        the first pin attempt on each thread establishes one. Availability
+        itself was already probed in ``__init__``.
 
         Returns:
-            True when a context is current, False when the NPU is unavailable
-            (latched into ``_no_npu``).
+            True when a context is current, False when the NPU is
+            unavailable or context setup fails (latched into ``_no_npu``).
         """
         if self._no_npu:
             return False
@@ -219,11 +252,13 @@ class NpuPinMemoryBackend(PinMemoryBackend):
             import torch
 
             npu = getattr(torch, "npu", None)
-            if npu is None or not npu.is_available():
+            if npu is None:
+                # Defensive: torch.npu vanished after __init__ (e.g. tests
+                # monkeypatching it away); treat as unavailable.
                 self._no_npu = True
-                logger.info(
-                    "NpuPinMemoryBackend: NPU unavailable; host pinning "
-                    "disabled (copies will be synchronous)"
+                logger.warning(
+                    "NpuPinMemoryBackend: torch.npu disappeared after "
+                    "construction; host pinning disabled"
                 )
                 return False
             try:
@@ -235,8 +270,7 @@ class NpuPinMemoryBackend(PinMemoryBackend):
                 # device 0 is the fallback.
                 npu.set_device(0)
         except Exception as exc:
-            # Accessing torch.npu lazily imports torch_npu, which can itself
-            # raise on a broken CANN setup.
+            # set_device can raise on a broken CANN setup.
             self._no_npu = True
             logger.warning(
                 "NpuPinMemoryBackend: cannot establish NPU context for "
@@ -326,7 +360,7 @@ class NpuPinMemoryBackend(PinMemoryBackend):
         """Whether AscendCL host registration is usable.
 
         Returns:
-            True when a runtime binding loaded and the NPU has not been found
-            unavailable, False otherwise.
+            True when a runtime binding loaded and construction found the
+            NPU available, False otherwise.
         """
         return self._rt is not None and not self._no_npu
