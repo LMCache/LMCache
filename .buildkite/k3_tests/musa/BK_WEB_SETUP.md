@@ -1,34 +1,41 @@
 # Buildkite Web UI Setup: MUSA Unit and Hardware Smoke
 
-This lane runs a serialized MUSA unit-test step followed by the focused LMCache
-hardware/server smoke on the maintainer-provisioned `MooreThreads` queue. The
-agent launches the tests in the pinned TorchMUSA image; the shared K3 harness
-is NVIDIA-specific and is not reused for this lane.
+This directory backs two MUSA pipelines on the maintainer-provisioned
+`MooreThreads` queue. `unit-tests-musa` runs the broad MUSA-compatible unit
+suite, mirroring `unit-tests-xpu`, while `musa-mp-test` runs the focused
+LMCache hardware/server smoke. The agent launches both in the pinned TorchMUSA
+image; the shared K3 harness is NVIDIA-specific and is not reused here.
 
 ## Pipeline settings
 
-**Steps editor**: paste the contents of `buildkite-pipeline.yml`. Its upload
-command must point to `.buildkite/k3_tests/musa/pipeline.yml`.
+Configure the two Buildkite pipelines as follows:
 
-Both the upload step and the dynamically uploaded test steps explicitly target
-the existing `MooreThreads` queue. This repository change reuses that queue; it
-does not create, rename, or replace it.
+| Pipeline slug | Steps editor source | Uploaded definition |
+|---------------|---------------------|---------------------|
+| `unit-tests-musa` | `buildkite-unit-tests-pipeline.yml` | `.buildkite/k3_tests/musa/unit-pipeline.yml` |
+| `musa-mp-test` | `buildkite-pipeline.yml` | `.buildkite/k3_tests/musa/pipeline.yml` |
 
-The uploaded pipeline binds both jobs to the first MUSA device:
+Both upload steps and both dynamically uploaded test steps explicitly target
+the existing `MooreThreads` queue. They share one global concurrency group, so
+the unit and smoke jobs cannot contend for the same device. This repository
+change reuses that queue; it does not create, rename, or replace it.
+
+Both uploaded pipelines bind their job to the first MUSA device:
 
 ```text
 MUSA_VISIBLE_DEVICES=0
 ```
 
 No Buildkite UI environment variable is required. If the agent maps a
-different device, change this value in `pipeline.yml` to that explicit device
-index. Do not expose more than one GPU to this lane.
+different device, change this value in both `pipeline.yml` and
+`unit-pipeline.yml` to that explicit device index. Do not expose more than one
+GPU to either lane.
 
 Optional debugging overrides:
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `TEST_SELECTOR` | unset | Pass a pytest `-k` selector to the focused suite |
+| `TEST_SELECTOR` | unset | Pass a pytest `-k` selector to the selected suite |
 | `MUSA_CI_IMAGE` | pinned MUSA full-test image | Override the pre-provisioned TorchMUSA container image |
 | `MUSA_CI_PYTHON` | `python3` | Override the Python executable inside the MUSA image |
 | `MUSA_CI_ZMQ_PORT` | `6555` | Override the MP server ZMQ port |
@@ -63,19 +70,21 @@ The self-hosted agent must provide:
 3. Access to the pinned
    `sh-harbor.mthreads.com/ai-kv/kuae-lmcache-vllm:20260819-kuae-ssd-e2e-full-tests`
    image, or an equivalent image configured through `MUSA_CI_IMAGE`.
-4. A compatible, pinned `torch`, `torch_musa`, `libmusart.so`, compiler,
-   Ninja, curl, and test dependencies inside that image.
-5. Access to the configured Python package index only if the image does not
-   already contain all LMCache build requirements.
+4. A compatible, pinned `torch`, `torch_musa`, `libmusart.so`, compiler, pip,
+   and curl inside that image.
+5. Access to the configured Python package index so the job can synchronize
+   the current LMCache build and test requirements.
 6. Device index `0` available to the pipeline's explicit
    `MUSA_VISIBLE_DEVICES=0` binding.
 
 The wrapper mounts the current Buildkite checkout read-only and copies it to an
 ephemeral container working directory, so tests exercise the PR rather than
 the copy baked into the image without leaving root-owned build files on the
-agent. The script directly uses the pre-provisioned Python environment: it
-does not create a venv and does not reinstall `torch` or `torch_musa`. LMCache
-itself is rebuilt from that working copy with
+agent. The script directly uses the pre-provisioned Python environment and
+does not create a venv. It installs the repository's current build, common,
+and test requirements without requesting upgrades; the image's installed
+TorchMUSA build satisfies the unpinned `torch` requirement. LMCache itself is
+rebuilt from that working copy with
 `BUILD_WITH_MUSA=1`, `BUILD_MOONCAKE=0`, and `--no-deps`, so installation
 cannot replace the image's pinned TorchMUSA stack.
 
@@ -88,9 +97,20 @@ The MooreThreads agent must retain the same host-side Docker/MUSA device
 integration used to validate that command; an environment variable alone
 cannot add device nodes to an otherwise unconfigured Docker daemon.
 
-## Buildkite UI snippet
+## Buildkite UI snippets
 
-Paste this into the existing pipeline's Steps editor:
+Paste this into the new `unit-tests-musa` pipeline's Steps editor:
+
+```yaml
+agents:
+  queue: "MooreThreads"
+
+steps:
+  - label: ":pipeline: Upload pipeline"
+    command: bash .buildkite/k3_tests/common_scripts/upload-pipeline.sh .buildkite/k3_tests/musa/unit-pipeline.yml
+```
+
+Keep this in the existing `musa-mp-test` pipeline's Steps editor:
 
 ```yaml
 agents:
@@ -101,11 +121,11 @@ steps:
     command: bash .buildkite/k3_tests/common_scripts/upload-pipeline.sh .buildkite/k3_tests/musa/pipeline.yml
 ```
 
-The dynamically uploaded unit and smoke steps also target `MooreThreads`, use a
-shared global concurrency limit of one, and make the smoke depend on the unit
-step, so two jobs cannot contend for the same device.
+The dynamically uploaded unit and smoke steps also target `MooreThreads` and
+use a shared global concurrency limit of one, so two jobs cannot contend for
+the same device even though their GitHub status contexts are independent.
 
-## What this pipeline validates
+## What these pipelines validate
 
 - `torch_musa` imports and real MUSA hardware is visible.
 - A small tensor allocation and matrix multiplication completes on `musa:0`.
