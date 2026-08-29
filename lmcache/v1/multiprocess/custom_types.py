@@ -60,6 +60,10 @@ class IPCCacheServerKey:
     # ObjectKey.cache_salt). Validated in __post_init__.
     cache_salt: str = ""
 
+    # Request-scoped LMCache configuration passed across the IPC boundary.
+    # It is metadata, not part of cache identity.
+    request_configs: dict[str, Any] | None = field(default=None, compare=False)
+
     # Number of workers that retrieve this key's object; the server reserves
     # that many read locks (see ``require_num_kv_readers``). 0 = not sent;
     # lookups reject it.
@@ -95,6 +99,7 @@ class IPCCacheServerKey:
         request_id: str = "",
         cache_salt: str = "",
         num_kv_readers: int = 1,
+        request_configs: dict[str, Any] | None = None,
     ) -> "IPCCacheServerKey":
         """Create a key from token ids. Only used by the tests."""
         return cls(
@@ -107,6 +112,7 @@ class IPCCacheServerKey:
             end=end,
             request_id=request_id,
             cache_salt=cache_salt,
+            request_configs=request_configs,
         )
 
     def require_num_kv_readers(self) -> int:
@@ -138,6 +144,7 @@ class IPCCacheServerKey:
             end=self.end,
             request_id=self.request_id,
             cache_salt=self.cache_salt,
+            request_configs=self.request_configs,
         )
 
 
