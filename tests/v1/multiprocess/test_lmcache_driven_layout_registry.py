@@ -50,17 +50,23 @@ class _FakeDeviceHostFuncDispatcher:
 
 
 @pytest.fixture
-def stub_native_storage_ops() -> Any:
+def stub_lmcache_native() -> Any:
     """Stub native modules so MP server imports work in source-only test runs."""
-    module = types.ModuleType("lmcache.native_storage_ops")
+    module = types.ModuleType("lmcache.lmcache_native")
     module_any = cast(Any, module)
+    module_any.PageBufferShapeDesc = type("PageBufferShapeDesc", (), {})
+    module_any.KernelGroupSpec = type(
+        "KernelGroupSpec",
+        (),
+        {"__init__": lambda self, *args, **kwargs: None},
+    )
     module_any.TTLLock = type("TTLLock", (), {})
     module_any.Bitmap = type("Bitmap", (), {})
     module_any.PeriodicEventNotifier = type("PeriodicEventNotifier", (), {})
     with patch.dict(
         sys.modules,
         {
-            "lmcache.native_storage_ops": module,
+            "lmcache.lmcache_native": module,
             "cupy": MagicMock(),
         },
     ):
@@ -69,7 +75,7 @@ def stub_native_storage_ops() -> Any:
 
 def test_unregister_one_shared_gpu_layout_keeps_registry_until_last_instance(
     monkeypatch: pytest.MonkeyPatch,
-    stub_native_storage_ops: Any,
+    stub_lmcache_native: Any,
 ) -> None:
     """Unregistering one shared GPU instance must not remove the shared layout."""
     # First Party
@@ -162,7 +168,28 @@ def test_registry_attn_desc_roundtrip() -> None:
         "m", 2, _layout(), attn_desc=AttnWindowDesc(num_chunks_in_sw=[-1, 2])
     )
 
-    assert registry.find_attn_desc("m", 2).num_chunks_in_sw == [-1, 2]
+    desc = registry.find_attn_desc("m", 2)
+    assert desc.num_chunks_in_sw == [-1, 2]
+    assert desc.world_size == 2
+
+
+def test_registry_derives_group_layout_descs_when_not_given() -> None:
+    """A registration without group_layout_descs (engine-driven, blend,
+    qstore) still yields one shared-layout entry per object group, so
+    lookups never hit the missing-group-layouts error path."""
+    # First Party
+    from lmcache.v1.distributed.api import AttnWindowDesc
+    from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
+
+    registry = LayoutDescRegistry()
+    layout = _layout()
+    registry.register("m", 1, layout)
+    assert registry.find_group_layout_descs("m", 1) == {0: layout}
+
+    registry.register(
+        "m2", 1, layout, attn_desc=AttnWindowDesc(num_chunks_in_sw=[-1, 2])
+    )
+    assert registry.find_group_layout_descs("m2", 1) == {0: layout, 1: layout}
 
 
 def test_registry_attn_desc_raises_when_unregistered() -> None:

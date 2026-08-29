@@ -248,7 +248,7 @@ class HeartbeatService:
             Dict containing ``running`` (bool), ``local_ip``,
             ``startup_time`` and ``current_time`` (ISO-8601 strings).
         """
-        is_running = self.thread and self.thread.is_alive()
+        is_running = self.thread is not None and self.thread.is_alive()
         return {
             "running": is_running,
             "local_ip": self.get_local_ip(),

@@ -33,10 +33,13 @@ def _musa_event_ipc_available() -> bool:
     return module is not None and musa_ipc.check_torch_musa_event_support(module)
 
 
-pytestmark = pytest.mark.skipif(
-    not _musa_event_ipc_available(),
-    reason="MUSA hardware and the TorchMUSA event IPC API are required",
-)
+pytestmark = [
+    pytest.mark.musa,
+    pytest.mark.skipif(
+        not _musa_event_ipc_available(),
+        reason="MUSA hardware and the TorchMUSA event IPC API are required",
+    ),
+]
 
 
 def _produce_event_handle(

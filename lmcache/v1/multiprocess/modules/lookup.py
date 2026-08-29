@@ -10,11 +10,14 @@ import time
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import (
+    DEFAULT_ATTN_WINDOW_DESC,
+    AttnWindowDesc,
     ObjectKey,
     PrefetchHandle,
     PrefetchRequestSpec,
     ipc_key_to_object_keys,
 )
+from lmcache.v1.distributed.bitmap_ops.fold import fold_unfold_ranked
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.otel_init import register_gauge
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
@@ -29,81 +32,53 @@ from lmcache.v1.multiprocess.token_hasher import TokenHasher
 logger = init_logger(__name__)
 
 
-def compute_extra_count(
-    tp_size: int,
-    world_size: int,
-) -> int:
-    """Compute extra count for MLA multi-reader locking.
+def resolve_prefetched_obj_keys(
+    ctx: MPCacheServerContext,
+    key: IPCCacheServerKey,
+    hit_chunks: int,
+    locked_gids: tuple,
+    group_windows: tuple[int, ...] | None = None,
+) -> list[ObjectKey]:
+    """Resolve the subset of a request range that lookup actually locked.
 
-    Non-MLA: each TP worker owns a distinct KV shard,
-      so each ObjectKey is retrieved by exactly 1
-      worker -> extra_count = 0.
-    MLA: TP does not split KV caches, all TP workers
-      share the same object. vLLM passes world_size
-      already divided by tp_size (e.g. world_size=1
-      for TP=4 PP=1), so ipc_keys_to_object_keys
-      only produces 1 ObjectKey per chunk.  All TP
-      workers retrieve that same ObjectKey, hence
-      extra_count = tp_size - 1.
-
-    Detection: tp > world_size means MLA (world_size
-    was divided by tp on the vLLM side).
-
-    Fallback: old vLLM (<= 0.8.5) does not send
-    tp_size (defaults to 1); we fall back to
-    world_size which gives extra_count = 0
-    (safe but may under-lock for MLA).
-
-    TODO: world_size currently carries an overloaded
-    meaning (total ranks for non-MLA vs total/tp for
-    MLA). Consider a dedicated field in the future.
-
-    Args:
-        tp_size: Tensor-parallel size from the client.
-        world_size: World size from the cache key.
-
-    Returns:
-        Number of extra count (0 for non-MLA).
+    ``key.worker_id=None`` resolves every KV rank for scheduler-owned cleanup.
+    A worker-specific key resolves only that worker's shard (or one MLA reader
+    share), which is required for per-instance RETRIEVE failure cleanup.
     """
-    tp = tp_size if tp_size > 1 else world_size
-    return tp - 1 if tp > world_size else 0
+    chunk_hashes = ctx.token_hasher.compute_chunk_hashes(
+        list(key.token_ids), start=key.start, end=key.end
+    )
+    if not chunk_hashes:
+        return []
 
+    start_chunk = key.start // ctx.chunk_size
+    end_chunk = start_chunk + len(chunk_hashes)
+    if group_windows is None:
+        group_windows = tuple(
+            ctx.layout_desc_registry.find_attn_desc(
+                key.model_name, key.world_size
+            ).num_chunks_in_sw
+        )
 
-def _get_prefix_hit_length(
-    found_prefix_len: int,
-    world_size: int,
-    num_object_groups: int,
-) -> int:
-    """Return the prefix hit length in chunks.
-
-    The chunk-major key layout packs ``world_size * num_object_groups`` keys per
-    chunk, so a fully-present prefix of ``found_prefix_len`` keys hits
-    ``found_prefix_len // (world_size * num_object_groups)`` chunks.
-
-    Args:
-        found_prefix_len: Length, in keys, of the contiguous found-key prefix.
-        world_size: Number of kv_rank shards per chunk.
-        num_object_groups: Number of object groups in the chunk-major layout.
-
-    Returns:
-        The prefix hit length in chunks (fully-present chunks of the prefix).
-
-    Example (2 object groups ``g0,g1``; 2 kv_ranks ``r0,r1`` -> 4 keys per
-    chunk). A found-key prefix of 6 keys covers one full chunk plus half the
-    next::
-
-        [c0g0r0, c0g0r1, c0g1r0, c0g1r1,   # chunk 0: fully present
-         c1g0r0, c1g0r1]                    # chunk 1: 2 of 4 -> partial, dropped
-
-    so ``found_prefix_len=6`` hits ``6 // (2 * 2) = 1`` whole chunk.
-
-    Note:
-        Correct only under full attention -- every object group present for
-        every hit chunk. Once sliding-window prefetch lands, the hit is no
-        longer a uniform contiguous key prefix and the hit length must come
-        from the fold's reported hit length instead.
-    """
-    return found_prefix_len // (world_size * num_object_groups)
+    obj_keys: list[ObjectKey] = []
+    for group_idx, window in enumerate(group_windows):
+        if locked_gids and group_idx not in locked_gids:
+            continue
+        if hit_chunks < 0:
+            if window >= 0:
+                continue
+            lo, hi = start_chunk, end_chunk
+        else:
+            # Locked range per ``unfold``: the whole hit prefix for full
+            # attention, its trailing ``window`` chunks otherwise.
+            lo = 0 if window < 0 else max(0, hit_chunks - window)
+            lo = max(lo, start_chunk)
+            hi = min(hit_chunks, end_chunk)
+        if lo >= hi:
+            continue
+        group_hashes = chunk_hashes[lo - start_chunk : hi - start_chunk]
+        obj_keys.extend(ipc_key_to_object_keys(key, group_hashes, [group_idx])[0])
+    return obj_keys
 
 
 @dataclass
@@ -118,6 +93,7 @@ class _PrefetchJob:
     # emission time in ``query_prefetch_status``.
     requested_tokens: int
     num_object_groups: int = 1
+    attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC
     # Captured at lookup time so the ``MP_LOOKUP_PREFETCH_END`` event can
     # carry them as labels.  ``model_name`` lets dashboards slice hit rate
     # per model in multi-model deployments; ``cache_salt`` slices per
@@ -217,7 +193,7 @@ class LookupModule:
 
         Args:
             key: Cache key with request_id embedded.
-            tp_size: Tensor-parallel size for MLA multi-reader locking.
+            tp_size: Legacy wire field; ignored (kept for payload arity).
         """
         model_name, world_size = key.model_name, key.world_size
         self._ctx.event_bus.publish(
@@ -246,6 +222,7 @@ class LookupModule:
                         prefetch_request_id=-1,
                         external_request_id=key.request_id,
                         l1_found_indices=(),
+                        l1_hit_chunks=0,
                         total_requested_keys=0,
                         submit_time=time.monotonic(),
                     ),
@@ -258,7 +235,7 @@ class LookupModule:
             )
             return
 
-        extra_count = compute_extra_count(tp_size, world_size)
+        num_kv_readers = key.require_num_kv_readers()
 
         chunk_hashes = self._ctx.token_hasher.compute_chunk_hashes(list(key.token_ids))
         if not chunk_hashes:
@@ -268,6 +245,7 @@ class LookupModule:
                         prefetch_request_id=-1,
                         external_request_id=key.request_id,
                         l1_found_indices=(),
+                        l1_hit_chunks=0,
                         total_requested_keys=0,
                         submit_time=time.monotonic(),
                     ),
@@ -307,22 +285,50 @@ class LookupModule:
                 )
             )
 
-        session = self._ctx.session_manager.get_or_create(key.request_id)
-        session.set_tokens(list(key.token_ids))
-        session.lookup_ipc_key = key
-
         # Lay keys out chunk-major across object groups (see
         # _chunk_major_object_keys); pass the windows to the prefetch policy.
         attn_desc = self._ctx.layout_desc_registry.find_attn_desc(
             model_name, world_size
         )
+        session = self._ctx.session_manager.get_or_create(key.request_id)
+        session.set_tokens(list(key.token_ids))
+        session.begin_lookup(key, tuple(attn_desc.num_chunks_in_sw))
         obj_keys = self._chunk_major_object_keys(key, chunk_hashes)
+
+        group_layout_descs = self._ctx.layout_desc_registry.find_group_layout_descs(
+            model_name, world_size
+        )
+        if not group_layout_descs:
+            logger.error(
+                "No group layout descs found for model %s with world size %d "
+                "during lookup!",
+                model_name,
+                world_size,
+            )
+            self._register_prefetch_job(
+                _PrefetchJob(
+                    handle=PrefetchHandle(
+                        prefetch_request_id=-1,
+                        external_request_id=key.request_id,
+                        l1_found_indices=(),
+                        l1_hit_chunks=0,
+                        total_requested_keys=0,
+                        submit_time=time.monotonic(),
+                    ),
+                    world_size=1,
+                    request_id=key.request_id,
+                    requested_tokens=0,
+                    model_name=model_name,
+                    cache_salt=key.cache_salt,
+                )
+            )
+            return
 
         handle = self._ctx.storage_manager.submit_prefetch_task(
             PrefetchRequestSpec(
                 keys=obj_keys,
-                layout_desc=layout_desc,
-                extra_count=extra_count,
+                group_layout_descs=group_layout_descs,
+                num_kv_readers=num_kv_readers,
                 attn_desc=attn_desc,
             ),
             external_request_id=key.request_id,
@@ -334,6 +340,7 @@ class LookupModule:
                 request_id=key.request_id,
                 requested_tokens=requested_tokens,
                 num_object_groups=attn_desc.num_object_groups,
+                attn_desc=attn_desc,
                 model_name=model_name,
                 cache_salt=key.cache_salt,
             )
@@ -363,11 +370,8 @@ class LookupModule:
             )
             return 0
 
-        found = self._ctx.storage_manager.query_prefetch_lookup_hits(job.handle)
-        if found is None:
-            return None
-
-        return _get_prefix_hit_length(found, job.world_size, job.num_object_groups)
+        # Result is already in chunk-level units (l1_hit_chunks + l2_hit_chunks).
+        return self._ctx.storage_manager.query_prefetch_lookup_hits(job.handle)
 
     def query_prefetch_status(
         self,
@@ -401,12 +405,23 @@ class LookupModule:
         if found is None:
             return None
 
-        # NOTE(Kuntai): this assumes two things:
-        # 1. the world size is the same between keys
-        # 2. the lookup sort the keys in prefix order and breaks at the
-        #    first failure
-        found_count = _get_prefix_hit_length(
-            found.count_leading_ones(), job.world_size, job.num_object_groups
+        stride = job.attn_desc.num_object_groups * job.world_size
+        num_chunks = job.handle.total_requested_keys // stride
+        found_count, _retain = fold_unfold_ranked(
+            found,
+            num_chunks,
+            job.world_size,
+            job.attn_desc.num_chunks_in_sw,
+        )
+
+        # Record the model-wide hit length on the session so a later
+        # free_lookup_locks can reconstruct which keys the prefetch
+        # read-locked (see ``unfold``: full-attention groups lock the whole
+        # hit prefix, sliding-window groups only its in-window suffix).
+        session = self._ctx.session_manager.get_or_create(job.request_id)
+        session.record_prefetch_result(
+            found_count,
+            tuple(range(job.attn_desc.num_object_groups)),
         )
 
         self._ctx.event_bus.publish(
@@ -473,35 +488,41 @@ class LookupModule:
         ``start`` and ``end`` must be aligned to ``chunk_size``; it is the
         caller's responsibility to align the boundaries as desired.
 
-        Computes the extra reader count from ``tp_size`` and
-        ``world_size`` the same way :meth:`lookup` does, so
-        the correct number of locks is released.
+        Only the keys the prefetch actually read-locked are released.
+
+        Releases the same per-object count the lookup reserved
+        (``key.num_kv_readers``).
 
         Args:
             key: Cache key whose read locks should be released.
-            tp_size: Tensor-parallel size for MLA
-                multi-reader locking.
+            tp_size: Legacy wire field; ignored (kept for payload arity).
         """
-        chunk_hashes = self._ctx.token_hasher.compute_chunk_hashes(
-            list(key.token_ids), start=key.start, end=key.end
-        )
-        if not chunk_hashes:
+        if key.start >= key.end:
             return
-        # Release across every object group, mirroring lookup, which locks keys
-        # in every group; releasing only group 0 would leak the rest.
-        #
-        # NOTE: correct only for full attention, where every locked chunk is a
-        # hit chunk. Sliding-window groups do not retain chunks outside their
-        # window, so once SWA prefetch lands this must skip those chunks instead
-        # of releasing every one -- otherwise chunks the engine still holds can
-        # be over-released (e.g. window=512, LMCache hit 1024, vLLM hit 768 ->
-        # chunks 512..768 may leak). Revisit when sliding-window prefetch is on.
-        obj_keys = self._chunk_major_object_keys(key, chunk_hashes)
 
-        extra_count = compute_extra_count(tp_size, key.world_size)
+        hit_chunks = self._ctx.session_manager.get_or_create(
+            key.request_id
+        ).prefetch_hit_chunks
+        if hit_chunks < 0:
+            logger.warning(
+                "free_lookup_locks for request %s before its prefetch result "
+                "was consumed; releasing full-attention groups only",
+                key.request_id,
+            )
+
+        # Release exactly the groups the prefetch locked (std lookup: all;
+        # CB prefix leg: its prefix set) -- releasing an unlocked group
+        # would drop another request's lock on the shared object key.
+        locked_gids = self._ctx.session_manager.get_or_create(
+            key.request_id
+        ).prefetch_locked_gids
+        obj_keys = resolve_prefetched_obj_keys(self._ctx, key, hit_chunks, locked_gids)
+
+        if not obj_keys:
+            return
 
         self._ctx.storage_manager.finish_read_prefetched(
-            obj_keys, extra_count=extra_count
+            obj_keys, read_locks=key.require_num_kv_readers()
         )
 
     def end_session(self, request_id: str) -> None:

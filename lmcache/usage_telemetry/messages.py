@@ -176,6 +176,7 @@ class MPServerMessage(UsageMessage):
     hash_algorithm: str
     engine_type: str
     enable_segmented_prefix: bool
+    enable_dedup_content: bool
     supported_transfer_mode: str
     separate_object_groups: bool
     max_gpu_workers: int
@@ -215,19 +216,19 @@ class MPServerMessage(UsageMessage):
         # load it).
         # First Party
         from lmcache import __version__
+        from lmcache.v1.distributed.config import get_configured_capacity_bytes
         from lmcache.v1.distributed.l2_adapters.config import (
             get_type_name_for_config,
         )
 
         l1_config = storage_manager_config.l1_manager_config
         memory_config = l1_config.memory_config
+        # Shared derivation, so this and the fleet memory view agree. The
+        # medium label stays here: its exact strings are wire format.
+        l1_size_bytes = sum(get_configured_capacity_bytes(l1_config).values())
         if l1_config.gds_l1_config is not None:
-            l1_size_bytes = l1_config.gds_l1_config.size_in_bytes
             l1_medium = "gds"
         else:
-            l1_size_bytes = (
-                memory_config.size_in_bytes + memory_config.devdax_size_in_bytes
-            )
             l1_medium = "dram+devdax" if memory_config.devdax_path else "dram"
         adapter_configs = storage_manager_config.l2_adapter_config.adapters
         l2_adapter_types = ",".join(
@@ -246,6 +247,7 @@ class MPServerMessage(UsageMessage):
             hash_algorithm=mp_config.hash_algorithm,
             engine_type=mp_config.engine_type,
             enable_segmented_prefix=mp_config.enable_segmented_prefix,
+            enable_dedup_content=mp_config.enable_dedup_content,
             supported_transfer_mode=mp_config.supported_transfer_mode,
             separate_object_groups=mp_config.separate_object_groups,
             max_gpu_workers=mp_config.max_gpu_workers,
@@ -260,6 +262,62 @@ class MPServerMessage(UsageMessage):
             l2_store_policy=storage_manager_config.store_policy,
             l2_prefetch_policy=storage_manager_config.prefetch_policy,
         )
+
+
+@dataclass
+class L2ConnectorUsageMessage(UsageMessage):
+    """Interval usage of one L2 adapter type on an MP cache server.
+
+    One message per active (or trafficked) adapter type per flush
+    interval; all messages of a flush share a ``sequence_number``. Key
+    counts are chunks, not tokens.
+    """
+
+    ENDPOINT: ClassVar[str] = "l2-usage"
+
+    l2_name: str
+    """Adapter type name from the factory registry (e.g. ``"dax"``)."""
+    active_seconds: float
+    """Seconds of this interval the type was active; sub-interval
+    add/remove rounds to the full interval."""
+    interval_stored_bytes: int
+    interval_store_succeeded_keys: int
+    interval_store_failed_keys: int
+    interval_load_submitted_keys: int
+    interval_load_submitted_bytes: int
+    """Bytes *requested* from L2 (load completions carry no byte count)."""
+    bytes_used: int
+    """Occupancy probe: bytes held by this type; ``-1`` when the probe
+    was unavailable for this type."""
+    capacity_bytes: int
+    """Summed capacity of the type's capacity-bounded adapters; ``0``
+    when every adapter is unbounded/unknown."""
+    unbounded_adapters: int
+    """Adapters of this type without a known capacity; nonzero means
+    ``bytes_used / capacity_bytes`` is not a meaningful ratio."""
+    sequence_number: int
+    uptime_seconds: float
+    """Seconds since the reporting process started."""
+
+
+@dataclass
+class L1UsageMessage(UsageMessage):
+    """Interval occupancy of an MP cache server's L1 pool.
+
+    One message per flush interval, probed at flush time.
+    """
+
+    ENDPOINT: ClassVar[str] = "l1-usage"
+
+    active_seconds: float
+    """Seconds covered by this interval."""
+    bytes_used: int
+    """Bytes currently held in L1; ``-1`` when the probe failed."""
+    capacity_bytes: int
+    """Total L1 pool capacity in bytes; ``0`` when the probe failed."""
+    sequence_number: int
+    uptime_seconds: float
+    """Seconds since the reporting process started."""
 
 
 @dataclass

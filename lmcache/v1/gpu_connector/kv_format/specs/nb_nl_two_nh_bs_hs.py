@@ -16,12 +16,14 @@ import torch
 
 # First Party
 from lmcache.v1.gpu_connector.kv_format.specs.base import KVFormatSpec
-import lmcache.c_ops as lmc_ops
+import lmcache.lmcache_native as lmcache_native
 
 
 class NB_NL_TWO_NH_BS_HS_Spec(KVFormatSpec):
-    engine_kv_format = lmc_ops.EngineKVFormat.NB_NL_TWO_NH_BS_HS
+    engine_kv_format = lmcache_native.EngineKVFormat.NB_NL_TWO_NH_BS_HS
     attention_backends = ("TRT-LLM cross-layer (HND layout)",)
+    is_cross_layer = True
+    is_hnd = True
 
     def num_layers(self) -> int:
         return self.kv_caches.shape[1]

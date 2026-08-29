@@ -41,6 +41,9 @@ const (
 	testPayloadRepo = "registry.example.com/lmcache/lmcache-payload"
 	// testPayloadPullSecret is the engine's default payload pull secret name.
 	testPayloadPullSecret = "lmcache-payload-pull"
+	// testDevShmVolumeName is the injected /dev/shm volume name (mirrors the
+	// unexported resources constant; drift would fail the assertions below).
+	testDevShmVolumeName = "lmcache-dev-shm"
 )
 
 // newLMCacheInjector returns an LMCachePodInjector backed by a fake client,
@@ -145,18 +148,27 @@ var _ = Describe("LMCachePodInjector", func() {
 	ctx := context.Background()
 
 	Describe("full injection", func() {
-		It("injects hostIPC, --kv-transfer-config, and PYTHONHASHSEED for an opted-in pod", func() {
+		It("injects the /dev/shm mount, --kv-transfer-config, and PYTHONHASHSEED for an opted-in pod", func() {
 			injector := newLMCacheInjector(true)
 			pod := lmcachePod(nil)
 
 			resp := injector.Handle(ctx, makeRequest(pod))
 			out := applyResponse(pod, resp)
 
-			By("hostIPC")
-			Expect(out.Spec.HostIPC).To(BeTrue())
+			By("no hostIPC by default; the host's /dev/shm is shared via hostPath")
+			Expect(out.Spec.HostIPC).To(BeFalse())
+			shm := findVolume(out, testDevShmVolumeName)
+			Expect(shm).NotTo(BeNil())
+			Expect(shm.HostPath).NotTo(BeNil())
+			Expect(shm.HostPath.Path).To(Equal("/dev/shm"))
 
 			c := findContainer(out, testContainerVLLM)
 			Expect(c).NotTo(BeNil())
+
+			By("the lmcache-dev-shm volume is mounted at /dev/shm")
+			shmMount := findVolumeMount(c, testDevShmVolumeName)
+			Expect(shmMount).NotTo(BeNil())
+			Expect(shmMount.MountPath).To(Equal("/dev/shm"))
 
 			By("--kv-transfer-config carries LMCacheMPConnector + tcp:// host")
 			kv := argsFlagValue(c.Args, lmcFlagKVTransferConfig)
@@ -188,6 +200,84 @@ var _ = Describe("LMCachePodInjector", func() {
 			c := findContainer(out, testContainerVLLM)
 
 			Expect(envValue(c, pythonHashSeedEnvName)).To(Equal("42"))
+		})
+
+		It("mirrors the engine's hostIPC opt-in instead of mounting /dev/shm", func() {
+			hostIPC := true
+			engine := lmcacheEngineWithInjection("")
+			engine.Spec.HostIPC = &hostIPC
+			injector := newLMCacheInjectorForEngine(engine)
+			pod := lmcachePod(nil)
+
+			resp := injector.Handle(ctx, makeRequest(pod))
+			out := applyResponse(pod, resp)
+
+			Expect(out.Spec.HostIPC).To(BeTrue())
+			Expect(findVolume(out, testDevShmVolumeName)).To(BeNil())
+		})
+
+		It("preserves the pod's hostIPC opt-in without mounting /dev/shm", func() {
+			injector := newLMCacheInjector(true)
+			pod := lmcachePod(func(p *corev1.Pod) {
+				p.Spec.HostIPC = true
+			})
+
+			resp := injector.Handle(ctx, makeRequest(pod))
+			out := applyResponse(pod, resp)
+
+			Expect(out.Spec.HostIPC).To(BeTrue())
+			Expect(findVolume(out, testDevShmVolumeName)).To(BeNil())
+			c := findContainer(out, testContainerVLLM)
+			Expect(findVolumeMount(c, testDevShmVolumeName)).To(BeNil())
+			Expect(out.Annotations[LMCacheAnnotationInjected]).To(Equal(valueTrue))
+		})
+
+		It("leaves a user-supplied /dev/shm mount untouched", func() {
+			injector := newLMCacheInjector(true)
+			pod := lmcachePod(func(p *corev1.Pod) {
+				p.Spec.Volumes = []corev1.Volume{{
+					Name: "my-shm",
+					VolumeSource: corev1.VolumeSource{
+						HostPath: &corev1.HostPathVolumeSource{Path: "/dev/shm"},
+					},
+				}}
+				p.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{{
+					Name:      "my-shm",
+					MountPath: "/dev/shm",
+				}}
+			})
+
+			resp := injector.Handle(ctx, makeRequest(pod))
+			out := applyResponse(pod, resp)
+
+			Expect(findVolume(out, testDevShmVolumeName)).To(BeNil())
+			c := findContainer(out, testContainerVLLM)
+			Expect(findVolumeMount(c, "my-shm")).NotTo(BeNil())
+		})
+
+		It("does not mount a user volume that is merely named lmcache-dev-shm", func() {
+			injector := newLMCacheInjector(true)
+			pod := lmcachePod(func(p *corev1.Pod) {
+				p.Spec.Volumes = []corev1.Volume{{
+					Name: testDevShmVolumeName,
+					VolumeSource: corev1.VolumeSource{
+						EmptyDir: &corev1.EmptyDirVolumeSource{},
+					},
+				}}
+			})
+
+			resp := injector.Handle(ctx, makeRequest(pod))
+			out := applyResponse(pod, resp)
+
+			By("the injection still proceeds (connection wiring)")
+			Expect(out.Annotations[LMCacheAnnotationInjected]).To(Equal(valueTrue))
+
+			By("but the user's lmcache-dev-shm volume is not mounted at /dev/shm")
+			c := findContainer(out, testContainerVLLM)
+			for _, m := range c.VolumeMounts {
+				Expect(m.MountPath).NotTo(Equal("/dev/shm"))
+			}
+			Expect(out.Spec.Volumes).To(HaveLen(1))
 		})
 	})
 
@@ -224,6 +314,7 @@ var _ = Describe("LMCachePodInjector", func() {
 			Expect(out.Annotations[LMCacheAnnotationSkipReason]).To(Equal(SkipReasonEngineNotFound))
 			Expect(out.Annotations).NotTo(HaveKey(LMCacheAnnotationInjected))
 			Expect(out.Spec.HostIPC).To(BeFalse())
+			Expect(findVolume(out, testDevShmVolumeName)).To(BeNil())
 		})
 
 		It("skips + stamps command-override when the target container overrides command", func() {
@@ -238,6 +329,7 @@ var _ = Describe("LMCachePodInjector", func() {
 			Expect(out.Annotations[LMCacheAnnotationSkipReason]).To(Equal(SkipReasonCommandOverride))
 			Expect(out.Annotations).NotTo(HaveKey(LMCacheAnnotationInjected))
 			Expect(out.Spec.HostIPC).To(BeFalse())
+			Expect(findVolume(out, testDevShmVolumeName)).To(BeNil())
 		})
 
 		It("skips + stamps target-container-not-found for an unknown container name", func() {
@@ -252,11 +344,12 @@ var _ = Describe("LMCachePodInjector", func() {
 			Expect(out.Annotations[LMCacheAnnotationSkipReason]).To(Equal(SkipReasonTargetContainerNotFound))
 			Expect(out.Annotations).NotTo(HaveKey(LMCacheAnnotationInjected))
 			Expect(out.Spec.HostIPC).To(BeFalse())
+			Expect(findVolume(out, testDevShmVolumeName)).To(BeNil())
 		})
 	})
 
 	Describe("user-supplied --kv-transfer-config", func() {
-		It("skips + stamps but still applies hostIPC + PYTHONHASHSEED", func() {
+		It("skips + stamps but still applies /dev/shm sharing + PYTHONHASHSEED", func() {
 			injector := newLMCacheInjector(true)
 			pod := lmcachePod(func(p *corev1.Pod) {
 				p.Spec.Containers[0].Args = []string{"--kv-transfer-config", `{"kv_connector":"Other"}`}
@@ -273,7 +366,7 @@ var _ = Describe("LMCachePodInjector", func() {
 			By("the skip reason is stamped but the rest of the injection still applies")
 			Expect(out.Annotations[LMCacheAnnotationSkipReason]).To(Equal(SkipReasonKVTransferConfigPresent))
 			Expect(out.Annotations[LMCacheAnnotationInjected]).To(Equal(valueTrue))
-			Expect(out.Spec.HostIPC).To(BeTrue())
+			Expect(findVolume(out, testDevShmVolumeName)).NotTo(BeNil())
 			Expect(envValue(c, pythonHashSeedEnvName)).To(Equal(pythonHashSeedValue))
 		})
 	})
@@ -345,7 +438,7 @@ var _ = Describe("LMCachePodInjector", func() {
 			Expect(out.Spec.ImagePullSecrets).To(ContainElement(corev1.LocalObjectReference{Name: testPayloadPullSecret}))
 
 			By("connection wiring still applied")
-			Expect(out.Spec.HostIPC).To(BeTrue())
+			Expect(findVolume(out, testDevShmVolumeName)).NotTo(BeNil())
 			Expect(argsFlagValue(c.Args, lmcFlagKVTransferConfig)).To(ContainSubstring("LMCacheMPConnector"))
 			Expect(envValue(c, pythonHashSeedEnvName)).To(Equal(pythonHashSeedValue))
 			Expect(out.Annotations[LMCacheAnnotationInjected]).To(Equal(valueTrue))
@@ -364,7 +457,7 @@ var _ = Describe("LMCachePodInjector", func() {
 			Expect(envValue(c, pythonPathEnvName)).To(BeEmpty())
 
 			By("connection wiring still applied")
-			Expect(out.Spec.HostIPC).To(BeTrue())
+			Expect(findVolume(out, testDevShmVolumeName)).NotTo(BeNil())
 			Expect(argsFlagValue(c.Args, lmcFlagKVTransferConfig)).To(ContainSubstring("LMCacheMPConnector"))
 		})
 
@@ -377,7 +470,7 @@ var _ = Describe("LMCachePodInjector", func() {
 
 			Expect(out.Spec.InitContainers).To(BeEmpty())
 			Expect(findVolume(out, lmcPayloadVolumeName)).To(BeNil())
-			Expect(out.Spec.HostIPC).To(BeTrue())
+			Expect(findVolume(out, testDevShmVolumeName)).NotTo(BeNil())
 			Expect(out.Annotations[LMCacheAnnotationInjected]).To(Equal(valueTrue))
 		})
 
@@ -467,7 +560,10 @@ var _ = Describe("LMCachePodInjector", func() {
 			resp := injector.Handle(ctx, makeRequest(pod))
 			out := applyResponse(pod, resp)
 
-			Expect(out.Spec.Volumes).To(HaveLen(1))
+			By("the pre-staged payload volume is not duplicated (only lmcache-dev-shm is added)")
+			Expect(out.Spec.Volumes).To(HaveLen(2))
+			names := []string{out.Spec.Volumes[0].Name, out.Spec.Volumes[1].Name}
+			Expect(names).To(ConsistOf(lmcPayloadVolumeName, testDevShmVolumeName))
 			Expect(out.Spec.InitContainers).To(HaveLen(1))
 		})
 	})

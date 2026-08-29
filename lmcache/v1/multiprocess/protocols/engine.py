@@ -166,7 +166,8 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         #   - gpu_block_ids: list[list[int]] - GPU block IDs containing the
         #     data, indexed by LMCache KV group index.
         #   - event_ipc_handle: bytes - CUDA event IPC handle for synchronization
-        # Returns: tuple[bytes, bool] - (CUDA event handle, success flag)
+        # Returns: tuple[bytes, bool] - (device event handle, success flag).
+        #   The handle is empty when the server submitted no device work.
         "STORE": ProtocolDefinition(
             payload_classes=[KeyType, int, list[list[int]], bytes],
             response_class=tuple[bytes, bool],
@@ -181,7 +182,8 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         #   - event_ipc_handle: bytes - CUDA event IPC handle for synchronization
         #   - skip_first_n_tokens: int - Number of tokens to skip writing at the
         #     start of the retrieve range (to avoid overwriting APC-shared blocks)
-        # Returns: tuple[bytes, bool] - (CUDA event handle, success flag)
+        # Returns: tuple[bytes, bool] - (device event handle, success flag).
+        #   The handle is empty when the server submitted no device work.
         "RETRIEVE": ProtocolDefinition(
             payload_classes=[KeyType, int, list[list[int]], bytes, int],
             response_class=tuple[bytes, bool],
