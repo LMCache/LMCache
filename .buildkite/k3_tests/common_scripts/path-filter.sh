@@ -65,8 +65,13 @@ _path_filter_should_skip_for_pipeline() {
     case "$pipeline_kind" in
         unit)
             case "$changed_file" in
-                tests/v1/platform/musa/*|tests/v1/platform/rbln/*|tests/v1/platform/xpu/*)
-                    return 0
+                tests/v1/platform/*)
+                    # skip all files under second-level platform dirs
+                    if [[ "$changed_file" == tests/v1/platform/*/* ]]; then
+                        return 0
+                    fi
+                    # direct pytest file under tests/v1/platform/ still counts
+                    return 1
                     ;;
                 .buildkite/k3_tests/unit/*|tests/*)
                     return 1
@@ -138,8 +143,58 @@ _path_filter_should_skip_for_pipeline() {
                 tests/v1/platform/xpu/*|.buildkite/k3_tests/xpu/*)
                     return 1
                     ;;
-                tests/platform/*|tests/v1/platform/musa/*|tests/v1/platform/rbln/*)
+                tests/v1/platform/*)
+                    # Keep the generic platform root as a non-target for xpu;
+                    # nested platform dirs remain the only platform-specific skip.
                     return 0
+                    ;;
+                tests/*)
+                    return 1
+                    ;;
+            esac
+            ;;
+        musa)
+            # TODO: real MUSA pipeline is not implemented yet; this is only a
+            # placeholder so the path filter recognizes the platform kind.
+            case "$changed_file" in
+                tests/v1/platform/musa/*|.buildkite/k3_tests/musa/*)
+                    return 1
+                    ;;
+                tests/v1/platform/*)
+                    return 0
+                    ;;
+                tests/*)
+                    return 1
+                    ;;
+            esac
+            ;;
+        rbln)
+            # TODO: real RBLN pipeline is not implemented yet; keep this as a
+            # placeholder until the backend-specific CI job is added.
+            case "$changed_file" in
+                tests/v1/platform/rbln/*|.buildkite/k3_tests/rbln/*)
+                    return 1
+                    ;;
+                tests/v1/platform/*)
+                    return 0
+                    ;;
+                tests/*)
+                    return 1
+                    ;;
+            esac
+            ;;
+        neuron)
+            # TODO: real Neuron pipeline is not implemented yet; this placeholder
+            # preserves the platform kind and the intent for the future job.
+            case "$changed_file" in
+                tests/v1/platform/neuron/*|.buildkite/k3_tests/neuron/*)
+                    return 1
+                    ;;
+                tests/v1/platform/*)
+                    return 0
+                    ;;
+                tests/*)
+                    return 1
                     ;;
             esac
             ;;
