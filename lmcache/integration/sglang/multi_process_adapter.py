@@ -322,6 +322,17 @@ class LMCacheMPConnector:
     def chunk_size(self) -> int:
         return self._lmcache_chunk_size
 
+    def _daemon_rid(self, request_id: str) -> str:
+        """Return a daemon-side request_id unique per TP worker.
+
+        All TP workers share the same external ``request_id`` (from
+        ``req.rid``). The daemon's ``_prefetch_jobs`` dict is keyed by
+        request_id, so concurrent LOOKUPs from different workers for the
+        same request overwrite each other. Appending ``#worker_id``
+        makes the daemon-side key unique per worker.
+        """
+        return f"{request_id}#{self.worker_id}"
+
     @torch.no_grad()
     def _global_min_tokens(self, local_tokens: int) -> int:
         if self.tp_size == 1:
@@ -443,7 +454,8 @@ class LMCacheMPConnector:
             stale = self._pending_lookups.pop(request_id, None)
         if stale is not None and stale.locks_held:
             self._free_lookup_locks(
-                stale.token_ids, 0, stale.matched_token_num, request_id
+                stale.token_ids, 0, stale.matched_token_num,
+                self._daemon_rid(request_id),
             )
 
         aligned_end = (len(token_ids) // self._lmcache_chunk_size) * (
@@ -452,11 +464,12 @@ class LMCacheMPConnector:
         if aligned_end == 0:
             return 0  # too few tokens; no chunk-aligned range to LOOKUP
 
+        daemon_rid = self._daemon_rid(request_id)
         lookup_key = self._create_key(
             token_ids,
             start=0,
             end=aligned_end,
-            request_id=request_id,
+            request_id=daemon_rid,
             no_worker_id=True,
         )
         send_lmcache_request(
@@ -464,7 +477,7 @@ class LMCacheMPConnector:
             RequestType.LOOKUP,
             [lookup_key, self.tp_size],
         ).result(timeout=self._mq_timeout)
-        matched = self._wait_for_lookup(request_id)
+        matched = self._wait_for_lookup(daemon_rid)
         matched = self._global_min_tokens(matched)
 
         # Daemon now holds read locks for the matched chunks. Record
@@ -491,7 +504,9 @@ class LMCacheMPConnector:
             token_ids = pending.token_ids
             matched = pending.matched_token_num
         if matched > 0:
-            self._free_lookup_locks(token_ids, 0, matched, request_id)
+            self._free_lookup_locks(
+                token_ids, 0, matched, self._daemon_rid(request_id),
+            )
 
     def end_session(self, request_id: str) -> None:
         """Tell the daemon we're done with this request_id.
@@ -513,9 +528,13 @@ class LMCacheMPConnector:
             return
         if pending.locks_held and pending.matched_token_num > 0:
             self._free_lookup_locks(
-                pending.token_ids, 0, pending.matched_token_num, request_id
+                pending.token_ids, 0, pending.matched_token_num,
+                self._daemon_rid(request_id),
             )
-        send_lmcache_request(self.mq_client, RequestType.END_SESSION, [request_id])
+        send_lmcache_request(
+            self.mq_client, RequestType.END_SESSION,
+            [self._daemon_rid(request_id)],
+        )
 
     def _submit_retrieve(
         self,
@@ -600,7 +619,7 @@ class LMCacheMPConnector:
         fresh_start = offset + prefix_pad
         prefix_pad_pages = prefix_pad // self.page_size
 
-        self._free_lookup_locks(token_ids, 0, offset, request_id)
+        self._free_lookup_locks(token_ids, 0, offset, self._daemon_rid(request_id))
         fresh_block_ids = self._slot_mapping_to_block_ids(
             load_metadata.slot_mapping[fresh_start:retrieve_token_num]
         )
@@ -614,7 +633,7 @@ class LMCacheMPConnector:
         retrieve_succeeded = False
         try:
             future = self._submit_retrieve(
-                request_id=request_id,
+                request_id=self._daemon_rid(request_id),
                 token_ids=token_ids,
                 offset=offset,
                 matched_end=retrieve_token_num,
@@ -629,7 +648,8 @@ class LMCacheMPConnector:
         finally:
             if not retrieve_succeeded:
                 self._free_lookup_locks(
-                    token_ids, offset, retrieve_token_num, request_id
+                    token_ids, offset, retrieve_token_num,
+                    self._daemon_rid(request_id),
                 )
             with self._pending_lookups_lock:
                 if request_id in self._pending_lookups:
@@ -695,7 +715,7 @@ class LMCacheMPConnector:
                     store_metadata.token_ids,
                     start=0,
                     end=aligned_end,
-                    request_id=request_id,
+                    request_id=self._daemon_rid(request_id),
                 ),
                 self.instance_id,
                 block_ids_per_group,
@@ -740,7 +760,7 @@ class LMCacheMPConnector:
                         store_metadata.token_ids,
                         start=0,
                         end=aligned_end,
-                        request_id=request_id,
+                        request_id=self._daemon_rid(request_id),
                     ),
                     self.instance_id,
                     block_ids_per_group,
