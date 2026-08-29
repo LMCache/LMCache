@@ -135,7 +135,9 @@ class RustRawBlockBackend(StoragePluginInterface):
             self.device_path = device_path
         else:
             self.device_path = str(extra.get("rust_raw_block.device_path", "") or "")
-            if not self.device_path:
+            # For SPDK mode, device_path is not required (SPDK manages NVMe connection)
+            use_spdk = bool(extra.get("rust_raw_block.use_spdk", False))
+            if not self.device_path and not use_spdk:
                 raise ValueError(
                     "extra_config['rust_raw_block.device_path'] is required"
                 )
@@ -155,6 +157,21 @@ class RustRawBlockBackend(StoragePluginInterface):
                     "buffers: %s. Falling back to non-fixed buffer mode.",
                     e,
                 )
+
+        # Register LocalCPUBackend's hugepage-allocated buffer with SPDK
+        # for zero-copy DMA operations (same pattern as io_uring fixed buffers)
+        if self._core.io_engine == "spdk":
+            try:
+                self._core.register_spdk_external_buffers(
+                    self.local_cpu_backend.get_memory_allocator()
+                )
+            except Exception as e:
+                logger.warning(
+                    "RustRawBlockBackend: failed to register SPDK external "
+                    "buffers: %s. SPDK DMA operations may use internal buffers.",
+                    e,
+                )
+
         self._warn_if_loaded_metadata_looks_cross_rank()
 
         self._put_lock = threading.Lock()
@@ -245,11 +262,16 @@ class RustRawBlockBackend(StoragePluginInterface):
         use_odirect = bool(extra.get("rust_raw_block.use_odirect", False))
         enable_zero_copy = bool(extra.get("rust_raw_block.enable_zero_copy", True))
         capacity_bytes = int(extra.get("rust_raw_block.capacity_bytes", 0))
+
+        # Normalize I/O engine with SPDK support
+        use_spdk = bool(extra.get("rust_raw_block.use_spdk", False))
         io_engine = normalize_raw_block_io_engine(
             extra.get("rust_raw_block.io_engine"),
             use_iouring=extra.get("rust_raw_block.use_iouring"),
             use_uring=extra.get("rust_raw_block.use_uring"),
+            use_spdk=use_spdk,
         )
+
         iouring_queue_depth = int(
             extra.get("rust_raw_block.iouring_queue_depth", DEFAULT_IOURING_QUEUE_DEPTH)
         )
@@ -289,6 +311,18 @@ class RustRawBlockBackend(StoragePluginInterface):
         default_slot_bytes = round_up(header_bytes + full_chunk_bytes, block_align)
         slot_bytes = int(extra.get("rust_raw_block.slot_bytes", default_slot_bytes))
 
+        # SPDK-specific configuration
+        spdk_transport_type = str(
+            extra.get("rust_raw_block.spdk_transport_type", "tcp")
+        )
+        spdk_target_ip = str(extra.get("rust_raw_block.spdk_target_ip", "127.0.0.1"))
+        spdk_target_port = str(extra.get("rust_raw_block.spdk_target_port", "4420"))
+        spdk_target_nqn = str(
+            extra.get("rust_raw_block.spdk_target_nqn", "nqn.2019-04.pos:subsystem1")
+        )
+        spdk_core_mask = str(extra.get("rust_raw_block.spdk_core_mask", ""))
+        spdk_mem_size_mb = int(extra.get("rust_raw_block.spdk_mem_size_mb", 4096))
+
         return RawBlockCoreConfig(
             device_path=self.device_path,
             capacity_bytes=capacity_bytes,
@@ -319,6 +353,12 @@ class RustRawBlockBackend(StoragePluginInterface):
             io_engine=io_engine,
             iouring_queue_depth=iouring_queue_depth,
             use_uring_cmd=use_uring_cmd,
+            spdk_transport_type=spdk_transport_type,
+            spdk_target_ip=spdk_target_ip,
+            spdk_target_port=spdk_target_port,
+            spdk_target_nqn=spdk_target_nqn,
+            spdk_core_mask=spdk_core_mask,
+            spdk_mem_size_mb=spdk_mem_size_mb,
         )
 
     def _warn_if_loaded_metadata_looks_cross_rank(self) -> None:
@@ -443,7 +483,7 @@ class RustRawBlockBackend(StoragePluginInterface):
         # release their ref / put-task entry in their coroutine's finally.
         scheduled_count = 0
         try:
-            if self._core.io_engine == "io_uring" and len(pending) > 1:
+            if self._core.io_engine in ("io_uring", "spdk") and len(pending) > 1:
                 coro = self._submit_put_many(pending, on_complete_callback)
                 try:
                     fut = asyncio.run_coroutine_threadsafe(coro, loop)

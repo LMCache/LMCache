@@ -38,6 +38,65 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+# SPDK default mem_size in MB if not configured
+SPDK_DEFAULT_MEM_SIZE_MB = 4096
+# Default hugepage size in bytes (2 MiB)
+HUGEPAGE_SIZE = 2 * 1024 * 1024
+# Hugepage size in MB (2 MiB = 2 MB)
+HUGEPAGE_SIZE_MB = HUGEPAGE_SIZE // (1024 * 1024)
+
+
+def _check_hugepage_availability(
+    required_cpu_bytes: int,
+    spdk_mem_size_mb: int,
+) -> None:
+    """Check if sufficient hugepages are available for SPDK operations.
+
+    SPDK requires hugepages for both its own memory allocation (mem_size)
+    and for zero-copy DMA registration of the LMCache CPU buffer.
+
+    Args:
+        required_cpu_bytes: Bytes required for LMCache KV cache buffer.
+        spdk_mem_size_mb: MB required for SPDK internal memory allocation.
+
+    Raises:
+        RuntimeError: If insufficient hugepages are available.
+    """
+    try:
+        with open("/proc/sys/vm/nr_hugepages", "r") as f:
+            available_hugepages = int(f.read().strip())
+    except (FileNotFoundError, ValueError, OSError) as e:
+        logger.warning(
+            "Could not read /proc/sys/vm/nr_hugepages: %s. "
+            "Skipping hugepage availability check.",
+            e,
+        )
+        return
+
+    required_cpu_pages = (required_cpu_bytes + HUGEPAGE_SIZE - 1) // HUGEPAGE_SIZE
+    required_spdk_pages = (
+        spdk_mem_size_mb // HUGEPAGE_SIZE_MB
+    )  # mem_size in MB / 2 MB per page
+    total_required_pages = required_cpu_pages + required_spdk_pages
+
+    logger.debug(
+        "SPDK hugepage check: available=%d, required (CPU=%d + SPDK=%d) = %d",
+        available_hugepages,
+        required_cpu_pages,
+        required_spdk_pages,
+        total_required_pages,
+    )
+
+    if available_hugepages < total_required_pages:
+        cpu_mb = required_cpu_bytes / (1024**2)
+        raise RuntimeError(
+            f"Insufficient hugepages: {available_hugepages} available, "
+            f"{total_required_pages} required "
+            f"(CPU: {required_cpu_pages} pages ({cpu_mb:.0f} MB), "
+            f"SPDK: {required_spdk_pages} pages ({spdk_mem_size_mb} MB)). "
+            f"Set /proc/sys/vm/nr_hugepages to at least {total_required_pages}."
+        )
+
 
 class LocalCPUBackend(AllocatorBackendInterface):
     """
@@ -471,6 +530,30 @@ class LocalCPUBackend(AllocatorBackendInterface):
                     config.get_extra_config_value("rust_raw_block.use_uring", False)
                 )
             )
+
+            # Check if SPDK is enabled (io_engine="spdk"). If so, use hugepages for DMA
+            use_hugepages = False
+            use_spdk = io_engine == "spdk" or bool(
+                config.get_extra_config_value("rust_raw_block.use_spdk", False)
+            )
+            if use_spdk:
+                logger.info(
+                    "LocalCPUBackend: SPDK enabled, using hugepages for "
+                    "zero-copy DMA operations"
+                )
+                use_hugepages = True
+                # Align size to hugepage boundary (2 MiB) for SPDK DMA registration
+                hugepage_size = 2 * 1024 * 1024  # 2 MiB
+                cpu_size_bytes = (
+                    (cpu_size_bytes + hugepage_size - 1) // hugepage_size
+                ) * hugepage_size
+
+                # Check hugepage availability
+                spdk_mem_size_mb = int(
+                    config.get_extra_config_value("rust_raw_block.spdk_mem_size_mb", 0)
+                    or SPDK_DEFAULT_MEM_SIZE_MB
+                )
+                _check_hugepage_availability(cpu_size_bytes, spdk_mem_size_mb)
 
             # Check if lazy memory allocator should be enabled
             use_lazy = (
