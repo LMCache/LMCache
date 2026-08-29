@@ -395,6 +395,33 @@ def test_create_recorded_event_before_registration_raises(fake_adapter):
         adapter.create_recorded_event()
 
 
+def test_register_kv_caches_survives_a_device_without_event_ipc(
+    fake_adapter, monkeypatch
+):
+    """A device with no event IPC still registers and gets a local event.
+
+    ``torch.xpu`` has no interprocess events, so ``get_event_ipc_backend``
+    raises, but the engine-driven path it uses only needs a local event.
+    """
+    adapter, _send_mock, _future = fake_adapter
+    _patch_transfer_context_factory(monkeypatch)
+
+    def no_event_ipc(device: object) -> MagicMock:
+        raise RuntimeError("Device type 'xpu' does not support event IPC.")
+
+    monkeypatch.setattr(adapter_mod, "get_event_ipc_backend", no_event_ipc)
+    current_stream = MagicMock(name="current_stream")
+    fake_torch_dev = MagicMock(name="torch_dev")
+    fake_torch_dev.current_stream.return_value = current_stream
+    monkeypatch.setattr(adapter_mod, "torch_dev", fake_torch_dev)
+
+    adapter.register_kv_caches({"layer.0": torch.zeros(1)})
+    event = adapter.create_recorded_event()
+
+    assert event is fake_torch_dev.Event.return_value
+    event.record.assert_called_once_with(current_stream)
+
+
 def test_store_keeps_event_until_future_finishes(fake_adapter):
     """Store requests keep the exported CUDA event alive while pending."""
     adapter, _send_mock, _future = fake_adapter

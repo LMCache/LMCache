@@ -1372,7 +1372,14 @@ class LMCacheMPWorkerAdapter:
         """
         self.kv_caches = kv_caches
         self._kv_device = next(iter(kv_caches.values())).device
-        self._event_ipc_backend = get_event_ipc_backend(self._kv_device)
+        # A device without event IPC (xpu) still runs the engine-driven path,
+        # which only needs a local event. Raising here would take that path down
+        # too; the handle path keeps its own check_event_support in
+        # LMCacheDrivenTransferContext.register.
+        try:
+            self._event_ipc_backend = get_event_ipc_backend(self._kv_device)
+        except RuntimeError:
+            self._event_ipc_backend = None
         transfer_ctx = create_transfer_context(kv_caches, mode=self._mp_transfer_mode)
         layout_hints = self._layout_hints
         self.transfer_ctx = transfer_ctx
@@ -1482,7 +1489,11 @@ class LMCacheMPWorkerAdapter:
         return True
 
     def create_recorded_event(self) -> _IpcEvent:
-        """Create an IPC event recorded on the current stream with configured backend.
+        """Create an event recorded on the current stream with configured backend.
+
+        Devices with no event IPC backend get a plain local event: the
+        engine-driven path only needs stream ordering and never exports the
+        handle.
 
         Returns:
             An event recorded on the current stream, ready for
@@ -1491,11 +1502,15 @@ class LMCacheMPWorkerAdapter:
         Raises:
             RuntimeError: If called before ``register_kv_caches()``.
         """
-        if self._kv_device is None or self._event_ipc_backend is None:
+        if self._kv_device is None:
             raise RuntimeError(
                 "KV caches are not registered. Call register_kv_caches() "
                 "before creating transfer events."
             )
+        if self._event_ipc_backend is None:
+            local_event = torch_dev.Event()
+            local_event.record(torch_dev.current_stream())
+            return cast(_IpcEvent, local_event)
         event = self._event_ipc_backend.create_event(self._kv_device)
         self._event_ipc_backend.record_event(event, torch_dev.current_stream())
         return cast(_IpcEvent, event)
