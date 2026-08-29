@@ -5,7 +5,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 MODE="${1:-}"
-IMAGE="${MUSA_CI_IMAGE:-sh-harbor.mthreads.com/ai-kv/kuae-lmcache-vllm:20260819-kuae-ssd-e2e-full-tests}"
+IMAGE="${MUSA_CI_IMAGE:-sh-harbor.mthreads.com/ai-kv/kuae-lmcache-vllm:20260819-kuae-ssd-e2e-full-tests-musa-aiter-ipc}"
 ARTIFACT_PATH="${MUSA_CI_ARTIFACT_DIR:-musa-ci-artifacts}"
 if [[ "${ARTIFACT_PATH}" == /* ]]; then
     ARTIFACT_DIR="${ARTIFACT_PATH}"

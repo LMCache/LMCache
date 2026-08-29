@@ -69,7 +69,7 @@ The self-hosted agent must provide:
 1. A Linux MUSA host with a working driver and SDK.
 2. Docker access and permission to use the MUSA devices from containers.
 3. Access to the pinned
-   `sh-harbor.mthreads.com/ai-kv/kuae-lmcache-vllm:20260819-kuae-ssd-e2e-full-tests`
+   `sh-harbor.mthreads.com/ai-kv/kuae-lmcache-vllm:20260819-kuae-ssd-e2e-full-tests-musa-aiter-ipc`
    image, or an equivalent image configured through `MUSA_CI_IMAGE`.
 4. A compatible, pinned `torch`, `torch_musa`, `libmusart.so`, compiler, pip,
    and curl inside that image.
