@@ -1,10 +1,9 @@
 # Buildkite Web UI Setup: MUSA Unit and Hardware Smoke
 
 This lane runs a serialized MUSA unit-test step followed by the focused LMCache
-hardware/server smoke on the maintainer-provisioned `MooreThreads` queue. It
-deliberately uses bare-metal execution: the shared K3 harness is
-NVIDIA-specific and must not be reused until the MUSA queue has a supported
-Kubernetes device plugin and runtime image.
+hardware/server smoke on the maintainer-provisioned `MooreThreads` queue. The
+agent launches the tests in the pinned TorchMUSA image; the shared K3 harness
+is NVIDIA-specific and is not reused for this lane.
 
 ## Pipeline settings
 
@@ -30,6 +29,7 @@ Optional debugging overrides:
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `TEST_SELECTOR` | unset | Pass a pytest `-k` selector to the focused suite |
+| `MUSA_CI_IMAGE` | pinned MUSA full-test image | Override the pre-provisioned TorchMUSA container image |
 | `MUSA_CI_ZMQ_PORT` | `6555` | Override the MP server ZMQ port |
 | `MUSA_CI_HTTP_PORT` | `7555` | Override the MP server HTTP port |
 
@@ -58,22 +58,31 @@ docs-only PR still needs the MUSA lane.
 The self-hosted agent must provide:
 
 1. A Linux MUSA host with a working driver and SDK.
-2. A compatible, pinned `torch` and `torch_musa` installation in the agent's
-   default Python environment.
-3. `libmusart.so` on the dynamic linker search path.
-4. Python with `venv`/`pip`, a C++ compiler, Ninja, and curl. `uv` is optional.
-5. Access to the configured Python package index, or an equivalent internal
-   dependency mirror.
+2. Docker access and permission to use the MUSA devices from containers.
+3. Access to the pinned
+   `sh-harbor.mthreads.com/ai-kv/kuae-lmcache-vllm:20260819-kuae-ssd-e2e-full-tests`
+   image, or an equivalent image configured through `MUSA_CI_IMAGE`.
+4. A compatible, pinned `torch`, `torch_musa`, `libmusart.so`, compiler,
+   Ninja, curl, and test dependencies inside that image.
+5. Access to the configured Python package index only if the image does not
+   already contain all LMCache build requirements.
 6. Device index `0` available to the pipeline's explicit
    `MUSA_VISIBLE_DEVICES=0` binding.
 
-The test script creates a temporary virtual environment with
-`--system-site-packages`, using `uv` when available and the standard
-`python -m venv` plus `pip` otherwise. This preserves the agent's pinned
-TorchMUSA stack. The script checks the MUSA runtime both before and after
-dependency installation. LMCache is installed with `BUILD_WITH_MUSA=1`,
-`BUILD_MOONCAKE=0`, and `--no-deps` so the editable install cannot replace that
-stack with upstream PyTorch.
+The wrapper mounts the current Buildkite checkout read-only and copies it to an
+ephemeral container working directory, so tests exercise the PR rather than
+the copy baked into the image without leaving root-owned build files on the
+agent. The script directly uses the pre-provisioned Python environment: it
+does not create a venv and does not reinstall `torch` or `torch_musa`. LMCache
+itself is rebuilt from that working copy with
+`BUILD_WITH_MUSA=1`, `BUILD_MOONCAKE=0`, and `--no-deps`, so installation
+cannot replace the image's pinned TorchMUSA stack.
+
+The Docker invocation uses the maintainer-validated `--ipc=host` and
+`--network=host` flags. The MooreThreads agent must retain the same host-side
+Docker/MUSA device integration used to validate that command; an environment
+variable alone cannot add device nodes to an otherwise unconfigured Docker
+daemon.
 
 ## Buildkite UI snippet
 

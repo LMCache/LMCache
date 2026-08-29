@@ -4,7 +4,12 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
-ARTIFACT_DIR="${REPO_ROOT}/${MUSA_CI_ARTIFACT_DIR:-musa-ci-artifacts}"
+ARTIFACT_PATH="${MUSA_CI_ARTIFACT_DIR:-musa-ci-artifacts}"
+if [[ "${ARTIFACT_PATH}" == /* ]]; then
+    ARTIFACT_DIR="${ARTIFACT_PATH}"
+else
+    ARTIFACT_DIR="${REPO_ROOT}/${ARTIFACT_PATH}"
+fi
 SERVER_LOG="${ARTIFACT_DIR}/lmcache-server.log"
 VENV_DIR=""
 SERVER_PID=""
@@ -27,7 +32,7 @@ check_musa_runtime() {
     local output_file="$2"
 
     log "Checking the MUSA runtime and hardware (${phase})"
-    python - "${phase}" <<'PY' 2>&1 | tee "${output_file}"
+    if python - "${phase}" <<'PY' 2>&1 | tee "${output_file}"; then
 import ctypes
 import importlib.metadata
 import os
@@ -70,6 +75,11 @@ for device_index in range(device_count):
     print(f"musa_device_{device_index}=", device_name)
 print("libmusart.so=loadable")
 PY
+        return
+    fi
+
+    fail "MUSA runtime check failed during ${phase}; see "\
+"${output_file#"${REPO_ROOT}/"}"
 }
 
 wait_for_process_exit() {
@@ -122,7 +132,7 @@ cleanup() {
 trap cleanup EXIT
 
 mkdir -p "${ARTIFACT_DIR}"
-command -v python >/dev/null 2>&1 || fail "python is required on the MUSA agent"
+command -v python >/dev/null 2>&1 || fail "python is required in the MUSA environment"
 if [[ "${MUSA_CI_UNIT_ONLY:-0}" != "1" ]]; then
     command -v curl >/dev/null 2>&1 || \
         fail "curl is required for the server smoke test"
@@ -132,41 +142,51 @@ fi
 
 cd "${REPO_ROOT}"
 
-VENV_DIR="$(mktemp -d "${TMPDIR:-/tmp}/lmcache-musa-ci.XXXXXX")"
-log "Creating an isolated environment while preserving the pinned TorchMUSA stack"
-BASE_PYTHON="$(command -v python)"
-if command -v uv >/dev/null 2>&1; then
-    log "Using uv for environment and package management"
-    uv venv --system-site-packages --python "${BASE_PYTHON}" "${VENV_DIR}" || \
-        fail "uv failed to create the temporary environment"
-    INSTALL_CMD=(uv pip install)
-    FREEZE_CMD=(uv pip freeze)
-else
-    log "uv is unavailable; using the standard venv and pip fallback"
-    "${BASE_PYTHON}" -m venv --system-site-packages "${VENV_DIR}" || \
-        fail "python -m venv failed; install the Python venv module on the agent"
+if [[ "${MUSA_CI_PREPROVISIONED:-0}" == "1" ]]; then
+    log "Using the pre-provisioned container Python and TorchMUSA stack"
     INSTALL_CMD=(python -m pip install)
     FREEZE_CMD=(python -m pip freeze)
+else
+    VENV_DIR="$(mktemp -d "${TMPDIR:-/tmp}/lmcache-musa-ci.XXXXXX")"
+    log "Creating an isolated environment while preserving the pinned TorchMUSA stack"
+    BASE_PYTHON="$(command -v python)"
+    if command -v uv >/dev/null 2>&1; then
+        log "Using uv for environment and package management"
+        uv venv --system-site-packages --python "${BASE_PYTHON}" "${VENV_DIR}" || \
+            fail "uv failed to create the temporary environment"
+        INSTALL_CMD=(uv pip install)
+        FREEZE_CMD=(uv pip freeze)
+    else
+        log "uv is unavailable; using the standard venv and pip fallback"
+        "${BASE_PYTHON}" -m venv --system-site-packages "${VENV_DIR}" || \
+            fail "python -m venv failed; install the Python venv module on the agent"
+        INSTALL_CMD=(python -m pip install)
+        FREEZE_CMD=(python -m pip freeze)
+    fi
+    # shellcheck disable=SC1091
+    source "${VENV_DIR}/bin/activate" || \
+        fail "failed to activate the temporary environment"
+    python -m pip --version >/dev/null 2>&1 || \
+        python -m ensurepip --upgrade >/dev/null || \
+        fail "pip is unavailable and ensurepip could not install it"
 fi
-# shellcheck disable=SC1091
-source "${VENV_DIR}/bin/activate" || \
-    fail "failed to activate the temporary environment"
-python -m pip --version >/dev/null 2>&1 || \
-    python -m ensurepip --upgrade >/dev/null || \
-    fail "pip is unavailable and ensurepip could not install it"
 
 check_musa_runtime \
-    "before dependency installation" \
+    "before dependency setup" \
     "${ARTIFACT_DIR}/runtime-preflight.txt"
 
-log "Installing LMCache build and test dependencies"
-"${INSTALL_CMD[@]}" \
-    -r requirements/build.txt \
-    -r requirements/common.txt \
-    -r requirements/test.txt
+if [[ "${MUSA_CI_PREPROVISIONED:-0}" == "1" ]]; then
+    log "Using build and test dependencies preinstalled in the CI image"
+else
+    log "Installing LMCache build and test dependencies"
+    "${INSTALL_CMD[@]}" \
+        -r requirements/build.txt \
+        -r requirements/common.txt \
+        -r requirements/test.txt
+fi
 
 check_musa_runtime \
-    "after dependency installation" \
+    "after dependency setup" \
     "${ARTIFACT_DIR}/runtime-post-install.txt"
 
 log "Building LMCache from the current checkout with the MUSA profile"

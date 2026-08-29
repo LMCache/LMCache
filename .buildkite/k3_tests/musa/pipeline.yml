@@ -1,4 +1,4 @@
-# MUSA bare-metal unit and hardware smoke tests.
+# MUSA containerized unit and hardware smoke tests.
 # Both steps use the maintainer-provisioned MooreThreads queue.
 
 env:
@@ -9,7 +9,7 @@ env:
 steps:
   - label: "MUSA Unit Tests (Serialized)"
     key: "musa_unit_tests"
-    command: bash .buildkite/k3_tests/musa/run-unit-tests.sh
+    command: bash .buildkite/k3_tests/musa/run-in-container.sh unit
     timeout_in_minutes: 60
     concurrency: 1
     concurrency_group: "lmcache/musa-hardware-smoke"
@@ -26,7 +26,7 @@ steps:
   - label: "MUSA Hardware Smoke"
     key: "musa_hardware_smoke"
     depends_on: "musa_unit_tests"
-    command: bash .buildkite/k3_tests/musa/run.sh
+    command: bash .buildkite/k3_tests/musa/run-in-container.sh smoke
     timeout_in_minutes: 60
     concurrency: 1
     concurrency_group: "lmcache/musa-hardware-smoke"
