@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import TYPE_CHECKING, Literal, Optional, Tuple
+from typing import TYPE_CHECKING, Optional, Tuple
 import hashlib
 import os
 import string
@@ -16,8 +16,10 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.utils import get_size_bytes as get_size_bytes
 from lmcache.v1.config import LMCacheEngineConfig, load_ec_engine_config
 from lmcache.v1.config_base import apply_remote_configs, fetch_remote_config
+from lmcache.v1.gpu_connector.kv_format.types import KVLayoutName
 
 if TYPE_CHECKING:
     # First Party
@@ -36,40 +38,84 @@ def is_false(value: str) -> bool:
     return value.lower() in ("false", "0", "no", "n", "off")
 
 
-def vllm_layout_hints() -> "LayoutHints":
+def vllm_layout_hints(vllm_config: "VllmConfig | None" = None) -> "LayoutHints":
     """Build layout_hints dict by querying vLLM at runtime."""
     hints: dict[str, str] = {}
-    kv_layout = try_get_vllm_kv_cache_layout()
+    kv_layout = try_get_vllm_kv_cache_layout(vllm_config)
     if kv_layout is not None:
         hints["kv_layout"] = kv_layout
     return hints  # type: ignore[return-value]
 
 
-def try_get_vllm_kv_cache_layout() -> Literal["NHD", "HND"] | None:
-    """Try to query the KV cache layout from vLLM at runtime.
+def translate_vllm_kv_cache_layout(kv_cache_layout: str) -> KVLayoutName:
+    """Map a vLLM ``KVCacheLayout`` member name to LMCache's name
+    (``LBNHC`` -> ``NHD``, ``LBHNC`` -> ``HND``).
 
-    Returns ``"NHD"`` or ``"HND"`` if vLLM is available and the layout
-    has been configured, otherwise ``None``.
-
-    Please only call this where vllm is available (i.e. not in the MP server)
-    We will print an error if we try to get vllm kv layout where vllm
-    is not available.
+    Raises:
+        NotImplementedError: for layouts LMCache cannot transfer.
     """
+    names = {
+        "NHD": "NHD",
+        "HND": "HND",
+        "LBNHC": "NHD",
+        "LBHNC": "HND",
+        "BLHNC": "BLHNC",
+        "BLNHC": "BLNHC",
+    }
+    translated = names.get(kv_cache_layout)
+    if translated is not None:
+        return translated  # type: ignore[return-value]
+    # TODO: support heads-outermost layouts; the transfer kernels address
+    # one contiguous run per (layer, block), which these fragment per head.
+    raise NotImplementedError(
+        f"LMCache does not support the {kv_cache_layout!r} KV cache "
+        "layout: per-block content is fragmented per head. If it was "
+        "selected via VLLM_KV_CACHE_LAYOUT, unset it or choose LBNHC, "
+        "LBHNC, BLHNC, or BLNHC."
+    )
 
-    # Third Party
+
+def try_get_vllm_kv_cache_layout(
+    vllm_config: "VllmConfig | None" = None,
+) -> KVLayoutName | None:
+    """Return vLLM's resolved KV cache layout as LMCache's name.
+
+    Returns ``None`` when vLLM is unavailable (i.e. the MP server).
+
+    Raises:
+        ValueError: from vLLM, if the layout has not been resolved yet;
+            hints must be built at KV-cache registration time.
+    """
     try:
-        # Third Party
-        from vllm.v1.attention.backends.utils import (  # type: ignore[import-untyped]
-            get_kv_cache_layout,
-        )
+        if vllm_config is None:
+            # Third Party
+            from vllm.config import get_current_vllm_config
 
-        return get_kv_cache_layout()
+            vllm_config = get_current_vllm_config()
+        cache_config = vllm_config.cache_config
     except Exception:
         logger.error(
             "vLLM is not available but tried to query kv cache "
             "layout information, cannot get KV cache layout"
         )
         return None
+
+    # vllm#51718 and later: vLLM owns alias resolution, unknown-name
+    # validation, and the not-yet-resolved error.
+    if hasattr(cache_config, "get_resolved_kv_cache_layout"):
+        return translate_vllm_kv_cache_layout(
+            cache_config.get_resolved_kv_cache_layout().name
+        )
+
+    try:
+        # Third Party
+        from vllm.v1.attention.backends.utils import (  # type: ignore[import-untyped]
+            get_kv_cache_layout,
+        )
+    except Exception:
+        logger.error("Could not query the KV cache layout from this vLLM version")
+        return None
+    return translate_vllm_kv_cache_layout(get_kv_cache_layout())
 
 
 def lmcache_get_or_create_config() -> LMCacheEngineConfig:
@@ -347,20 +393,6 @@ def extract_mm_features(
             return (request.mm_hashes, request.mm_positions)
     else:
         return ([], [])
-
-
-def get_size_bytes(shapes: list[torch.Size], kv_dtypes: list[torch.dtype]):
-    """
-    Calculate the size in bytes with the given shapes and dtypes.
-    """
-    assert len(shapes) == len(kv_dtypes), (
-        f"shapes and dtypes must have the same length, "
-        f"but got {len(shapes)} and {len(kv_dtypes)}"
-    )
-    return sum(
-        shape.numel() * kv_dtype.itemsize
-        for shape, kv_dtype in zip(shapes, kv_dtypes, strict=True)
-    )
 
 
 def calculate_local_rank_and_world_size(vllm_config: "VllmConfig") -> Tuple[int, int]:
