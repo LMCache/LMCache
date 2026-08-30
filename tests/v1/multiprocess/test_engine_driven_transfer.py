@@ -389,6 +389,31 @@ def test_create_transfer_context_force_lmcache_driven_mode() -> None:
     assert isinstance(context, LMCacheDrivenTransferContext)
 
 
+def test_lmcache_driven_preemption_waits_for_remote_store_futures() -> None:
+    """Handle-path flush waits on remote completion, not the worker device."""
+    # First Party
+    from lmcache.v1.multiprocess.transfer_context import LMCacheDrivenTransferContext
+
+    context = LMCacheDrivenTransferContext()
+    context._mq_timeout = 2.5
+    pending = MagicMock(name="pending_store_future")
+    context._inflight_store_futures.add(pending)
+
+    context.flush_inflight_stores()
+
+    pending.result.assert_called_once_with(timeout=2.5)
+    assert not context._inflight_store_futures
+
+
+def test_lmcache_driven_preemption_without_stores_is_noop() -> None:
+    # First Party
+    from lmcache.v1.multiprocess.transfer_context import LMCacheDrivenTransferContext
+
+    context = LMCacheDrivenTransferContext()
+
+    context.flush_inflight_stores()
+
+
 def test_create_transfer_context_force_engine_driven_mode_on_cpu() -> None:
     """``mode='engine_driven'`` on CPU returns EngineDrivenTransferContext
     (data path; no wrapper-factory capability check is performed)."""

@@ -411,6 +411,13 @@ class LMCacheDrivenTransferContext(TransferContext):
         self._send_request: SendRequest | None = None
         self._device: torch.device | None = None
         self._event_backend: EventIPCBackend | None = None
+        self._mq_timeout: float | None = None
+        # The server reads paged KV asynchronously through exported device
+        # handles. Keep outstanding stores alive here so preemption can wait
+        # for the actual remote reads before vLLM reuses their blocks. This
+        # cannot rely on the adapter's per-request map: a later chunk may
+        # replace that entry while the earlier store is still in flight.
+        self._inflight_store_futures: set[MessagingFuture[Any]] = set()
 
     def register(
         self,
@@ -467,6 +474,7 @@ class LMCacheDrivenTransferContext(TransferContext):
         future.result(timeout=mq_timeout)
         self._device = device
         self._event_backend = event_backend
+        self._mq_timeout = mq_timeout
 
     def register_q(
         self,
@@ -538,11 +546,16 @@ class LMCacheDrivenTransferContext(TransferContext):
                 "Call register() before submit_store()."
             )
         event_ipc_handle = self._event_backend.export_event(event, self._device)
-        return self._send_request(
+        self._inflight_store_futures = {
+            future for future in self._inflight_store_futures if not future.query()
+        }
+        future = self._send_request(
             self._mq_client,
             RequestType.STORE,
             [key, instance_id, block_ids, event_ipc_handle],
         ).to_device_future(device=self._device)
+        self._inflight_store_futures.add(future)
+        return future
 
     def submit_q_store(
         self,
@@ -625,9 +638,22 @@ class LMCacheDrivenTransferContext(TransferContext):
         self._send_request = None
         self._device = None
         self._event_backend = None
+        self._mq_timeout = None
+        self._inflight_store_futures.clear()
 
     def flush_inflight_stores(self) -> None:
-        pass
+        """Wait for server-side device reads that preemption could overwrite.
+
+        LMCache-driven stores execute in the server process, so synchronizing
+        the worker's device does not order or complete them. Their device-aware
+        futures do: each resolves only after the server response and imported
+        completion event. Usually this set is empty, making preemption handling
+        a true no-op instead of a device-wide barrier.
+        """
+        timeout = self._mq_timeout
+        for future in list(self._inflight_store_futures):
+            future.result(timeout=timeout)
+            self._inflight_store_futures.discard(future)
 
 
 class EngineDrivenTransferContext(TransferContext):
