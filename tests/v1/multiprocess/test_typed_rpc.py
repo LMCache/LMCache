@@ -869,7 +869,7 @@ def test_register_edc_roundtrip() -> None:
     assert spec.response_to_python(proto_resp) == resp
 
 
-def test_prepare_store_pickle_context_roundtrip() -> None:
+def test_prepare_store_encoded_context_roundtrip() -> None:
     # First Party
     from lmcache.v1.multiprocess.protocols.engine import PrepareStoreResponse
 
@@ -882,16 +882,16 @@ def test_prepare_store_pickle_context_roundtrip() -> None:
 
     # Empty dict must land as empty bytes on the wire.
     proto_resp = spec.python_to_response(PrepareStoreResponse(context={}))
-    assert proto_resp.pickled_context == b""
+    assert proto_resp.encoded_context == b""
     assert spec.response_to_python(proto_resp).context == {}
 
-    # Non-empty dict survives pickle.
+    # Non-empty dict survives msgspec msgpack encoding.
     ctx = {"slots": [1, 2, 3], "chunk_indices": [0, 5]}
     proto_resp = spec.python_to_response(PrepareStoreResponse(context=ctx))
     assert spec.response_to_python(proto_resp).context == ctx
 
 
-def test_prepare_retrieve_pickle_context_roundtrip() -> None:
+def test_prepare_retrieve_encoded_context_roundtrip() -> None:
     # First Party
     from lmcache.v1.multiprocess.protocols.engine import (
         PrepareRetrieveResponse,
@@ -1096,7 +1096,7 @@ def test_register_kv_cache_roundtrip() -> None:
 
     # Empty LayoutHints -> empty wire bytes.
     proto_req = spec.python_to_request(1, [], "m", 1, EngineType.MOCK, {}, [])
-    assert proto_req.pickled_layout_hints == b""
+    assert proto_req.encoded_layout_hints == b""
 
 
 def test_cb_register_kv_cache_roundtrip() -> None:

@@ -360,24 +360,23 @@ message RegisterKvCacheEngineDrivenContextResponse {
 //
 // ``context`` here is an opaque strategy-owned dict; the SHM strategy
 // packs slot / chunk-index bookkeeping into it, the pickle strategy
-// keeps it empty.  Rather than schematising every possible key today,
-// the wire carries the pickled bytes and the mq boundary transparently
-// (de)serialises -- this keeps the strategy layer free to add fields
-// without touching the .proto.  Empty dict maps to empty bytes on the
-// wire, so a fresh client hitting an old server (or vice versa) works.
+// keeps it empty. Rather than schematising every possible key today,
+// the wire carries msgpack-encoded bytes and the mq boundary
+// transparently serializes/deserializes them. Empty dict maps to empty
+// bytes on the wire.
 message PrepareStoreRequest {
   IpcCacheServerKey key = 1;
   int64 instance_id = 2;
 }
 
 message PrepareStoreResponse {
-  bytes pickled_context = 1;
+  bytes encoded_context = 1;
 }
 
 message CommitStoreRequest {
   IpcCacheServerKey key = 1;
   int64 instance_id = 2;
-  bytes pickled_context = 3;
+  bytes encoded_context = 3;
 }
 
 message CommitStoreResponse {
@@ -392,7 +391,7 @@ message PrepareRetrieveRequest {
 message PrepareRetrieveResponse {
   bool success = 1;
   bytes data = 2;
-  bytes pickled_context = 3;
+  bytes encoded_context = 3;
 }
 
 message CommitRetrieveRequest {
@@ -493,7 +492,7 @@ message EngineGroupInfo {
 // carried as the enum's string value (``"vllm"`` / ``"sglang"`` /
 // ``"trtllm"`` / ``"mock"``) -- matches how msgspec encoded it and
 // keeps forward-compat cheap when new engines land.  ``LayoutHints``
-// is a ``TypedDict``: pickle bytes so the schema layer stays free to
+// is a ``TypedDict``: msgpack bytes so the schema layer stays free to
 // evolve without touching the .proto.
 message RegisterKvCacheRequest {
   int64 instance_id = 1;
@@ -501,7 +500,7 @@ message RegisterKvCacheRequest {
   string model_name = 3;
   int64 world_size = 4;
   string engine_type = 5;
-  bytes pickled_layout_hints = 6;
+  bytes encoded_layout_hints = 6;
   repeated EngineGroupInfo engine_group_infos = 7;
 }
 

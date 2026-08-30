@@ -229,14 +229,88 @@ The remaining `typed_rpc.py` layer is not a second protocol. It is a codec and
 scheduling table. The wire protocol is still the proto descriptor; the table
 only explains how wire messages become LMCache Python objects.
 
-## 5. Adding a New RPC
+## 5. Review Concerns and Design Responses
+
+This design addresses the main maintainability concerns raised during the
+earlier gRPC transport review.
+
+### 5.1 Conversion Code Size
+
+The transport does not use per-RPC Python conversion wrappers. The proto
+descriptor and `_PYTHON_RPC_CONTRACTS` are compiled once into `TypedRpcSpec`
+objects. Reusable structural codecs handle dataclasses, `msgspec.Struct`,
+`TypedDict`, lists, tuples, maps, optional fields, enums, `torch.dtype`,
+`torch.Size`, and selected LMCache IPC wrapper types.
+
+This means adding an ordinary RPC is not a new conversion-function exercise.
+The developer declares the wire messages in proto, declares the Python
+payload/response types once in `_PythonRpcContract`, and the shared codec
+compiler validates the mapping at import time.
+
+### 5.2 `mq.py` Ownership
+
+`mq.py` owns transport control flow only:
+
+- client channel creation and unary future submission,
+- server handler registration,
+- protobuf request decode / response encode dispatch,
+- thread-pool and affinity execution,
+- gRPC server lifecycle.
+
+Business behavior lives in service implementation classes and backend services.
+Python/protobuf value conversion lives in `typed_rpc.py`. This prevents `mq.py`
+from becoming a mix of networking, schema conversion, and cache logic.
+
+### 5.3 Proto Organization
+
+The proto is kept as one checked-in source-of-truth file, but it is organized by
+explicit gRPC services. Splitting the schema into many proto files is possible
+later, but the current single-file layout avoids cross-file import churn while
+the transport is still being reviewed. The important API boundaries are the
+service declarations: `EngineService`, `ControllerService`, `DebugService`,
+`ObservabilityService`, `P2PService`, and the Blend services.
+
+### 5.4 Pickle Avoidance
+
+New RPCs should not use pickle for regular request or response fields.
+Opaque strategy-owned dictionaries, such as engine-driven transfer context
+metadata and `LayoutHints`, are encoded with msgspec msgpack bytes. Concrete
+protobuf messages are preferred whenever the structure is stable enough to
+describe in the schema.
+
+The remaining `DeviceIPCWrapper` pickle path is a separate polymorphic
+IPC-handle compatibility boundary: the receiver needs the concrete wrapper
+subclass to reconstruct device memory correctly. Replacing that with an
+explicit protobuf `oneof` is a separable follow-up and should not be copied by
+new RPCs.
+
+### 5.5 ZMQ Removal Risk
+
+The transport intentionally makes gRPC the single mp-mode wire protocol. Keeping
+ZMQ and gRPC live in parallel would keep two dispatch stacks, two failure
+models, and the old request-type envelope alive during the most sensitive part
+of the migration.
+
+Risk is reduced in other ways:
+
+- legacy `tcp://` and `ipc://` configuration strings still parse as gRPC
+  loopback TCP and Unix socket targets, so most operator config does not change;
+- gRPC `wait_for_ready=True` preserves the old startup behavior where requests
+  submitted during daemon startup remain pending;
+- missing feature implementations return standard gRPC `UNIMPLEMENTED`;
+- typed protocol tests exercise every descriptor-derived method, request arity,
+  encode/decode path, and selected real client/server round trips;
+- the design document defines a small mechanical process for adding future
+  methods without reintroducing custom request envelopes.
+
+## 6. Adding a New RPC
 
 Adding a new RPC to an existing service is a small mechanical change. The
 important rule is that the proto method name, Python contract key, `_GrpcServicer`
 forwarding method, and service implementation method all use the same CamelCase
 name.
 
-### 5.1 Choose the Service
+### 6.1 Choose the Service
 
 Pick the service that owns the behavior:
 
@@ -253,7 +327,7 @@ Create a new service only when the new methods form a separate stable API
 surface. Otherwise, add the method to the existing service that already owns
 the lifecycle and state.
 
-### 5.2 Update the Proto
+### 6.2 Update the Proto
 
 Add request/response messages and the `rpc` entry in
 `transport/grpc_impl/proto/lmcache_mq.proto`.
@@ -266,9 +340,11 @@ Guidelines:
 - Use `repeated` for Python `list[...]`.
 - Use `map<...>` for Python dictionaries when the value can be described by
   proto fields.
-- Prefer concrete messages over opaque bytes. Use pickled bytes only when the
-  Python object is intentionally strategy-owned or not stable enough to expose
-  as wire schema.
+- Prefer concrete messages over opaque bytes. For intentionally opaque
+  strategy-owned dictionaries, use msgspec msgpack bytes rather than pickle.
+  `DeviceIPCWrapper` is the separate polymorphic IPC-handle exception today;
+  replacing that with an explicit `oneof` is a follow-up to the transport
+  cleanup, not the default pattern for new RPCs.
 
 After changing the proto, regenerate local stubs for validation:
 
@@ -280,7 +356,7 @@ python -m lmcache.v1.multiprocess.transport.grpc_impl._proto_gen._generate
 The generated `lmcache_mq_pb2.py` and `lmcache_mq_pb2_grpc.py` files are local
 build artifacts and are not checked into Git.
 
-### 5.3 Add the Python Contract
+### 6.3 Add the Python Contract
 
 Add one `_PythonRpcContract` entry in `typed_rpc.py`:
 
@@ -306,7 +382,7 @@ Importing `typed_rpc.py` validates that:
 - request/response fields can be encoded to and decoded from the declared
   Python types.
 
-### 5.4 Add the Transport Forwarder
+### 6.4 Add the Transport Forwarder
 
 Add a same-named thin method on `_GrpcServicer` in `mq.py`:
 
@@ -318,7 +394,7 @@ def GetServerVersion(self, request: Any, context: "grpc.ServicerContext") -> Any
 This method is the entry point that the generated gRPC runtime calls. It should
 contain no business logic.
 
-### 5.5 Implement the Service Method
+### 6.5 Implement the Service Method
 
 Implement the same CamelCase method in the Python service implementation class
 that corresponds to the proto service.
@@ -352,7 +428,7 @@ If the implementation needs shared state, inject a backend service or
 should describe the RPC surface; larger reusable behavior can live in a
 narrower backend service.
 
-### 5.6 Register the Service
+### 6.6 Register the Service
 
 For a new service, add it to `_BuiltRpcServices`, construct it in
 `_build_rpc_services()`, and register it from `run_cache_server()`:
@@ -365,7 +441,7 @@ server.add_service("MaintenanceService", rpc_services.maintenance_service)
 three RPC methods, the implementation object must provide all three same-named
 CamelCase methods. Missing methods fail server startup with a clear `TypeError`.
 
-### 5.7 Call It From the Client
+### 6.7 Call It From the Client
 
 The client method appears automatically from the descriptor-derived
 `RpcMethod` list:
@@ -378,7 +454,7 @@ version = future.result(timeout=5.0)
 No caller should pass `request_type` or a positional payload list. The Python
 method name is the lower-case snake_case form of the operation name.
 
-### 5.8 Add Tests
+### 6.8 Add Tests
 
 At minimum, add tests for:
 
@@ -403,12 +479,12 @@ SKIP=rust-fmt,rust-clippy pre-commit run --all-files
 
 On Linux with a working Rust toolchain, the Rust hooks can be left enabled.
 
-## 6. Complete Example: Add `MaintenanceService.GetServerVersion`
+## 7. Complete Example: Add `MaintenanceService.GetServerVersion`
 
 This example adds a small new service to show the full path. It is intentionally
 simple: no payloads, scalar string response, no blocking work.
 
-### 6.1 Proto
+### 7.1 Proto
 
 Add messages and a service to `lmcache_mq.proto`:
 
@@ -431,7 +507,7 @@ Regenerate stubs locally:
 python -m lmcache.v1.multiprocess.transport.grpc_impl._proto_gen._generate
 ```
 
-### 6.2 Python Contract
+### 7.2 Python Contract
 
 Add the contract to `_PYTHON_RPC_CONTRACTS`:
 
@@ -447,7 +523,7 @@ Because `GetServerVersionRequest` has no fields, the client method takes no
 payloads. Because `GetServerVersionResponse` has one string field, the future
 returns `str`.
 
-### 6.3 Transport Forwarder
+### 7.3 Transport Forwarder
 
 Add the gRPC entry point in `_GrpcServicer`:
 
@@ -458,7 +534,7 @@ def GetServerVersion(self, request: Any, context: "grpc.ServicerContext") -> Any
 
 This is the only transport-level code needed for the new method.
 
-### 6.4 Service Implementation
+### 7.4 Service Implementation
 
 Add the implementation class:
 
@@ -474,7 +550,7 @@ class MaintenanceServiceImpl:
         return self._version
 ```
 
-### 6.5 Server Registration
+### 7.5 Server Registration
 
 Extend `_BuiltRpcServices`:
 
@@ -501,7 +577,7 @@ No routing table or request-type switch is needed. The proto descriptor tells
 `add_service()` which methods belong to `MaintenanceService`; the implementation
 provides the same method names.
 
-### 6.6 Client Usage
+### 7.6 Client Usage
 
 The client call is direct:
 
@@ -513,7 +589,7 @@ version = future.result(timeout=5.0)
 That is the intended developer experience: adding a new RPC creates a named
 function-like client method and a same-named server method.
 
-### 6.7 Minimal Round-Trip Test
+### 7.7 Minimal Round-Trip Test
 
 ```python
 def test_get_server_version_roundtrip() -> None:
@@ -540,7 +616,7 @@ The exact server URL helper may differ by test fixture, but the important part
 is the shape: register the service implementation, start the gRPC server, call
 the generated client method, and assert the Python response value.
 
-## 7. Design Rules
+## 8. Design Rules
 
 - The `.proto` file is the wire-protocol source of truth.
 - Generated stubs are build artifacts, not reviewed source.

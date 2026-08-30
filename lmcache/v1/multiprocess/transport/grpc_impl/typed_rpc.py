@@ -18,7 +18,6 @@ from typing import (
     is_typeddict,
 )
 import enum
-import pickle
 import types
 
 # Third Party
@@ -342,18 +341,18 @@ def _is_map_field(field: Any) -> bool:
     )
 
 
-def _pickle_mapping(value: Any) -> bytes:
+def _encode_mapping(value: Any) -> bytes:
     if not value:
         return b""
-    return pickle.dumps(dict(value))
+    return msgspec.msgpack.encode(dict(value))
 
 
-def _unpickle_mapping(value: bytes) -> dict[Any, Any]:
+def _decode_mapping(value: bytes) -> dict[Any, Any]:
     if not value:
         return {}
-    decoded = pickle.loads(value)
+    decoded = msgspec.msgpack.decode(value)
     if not isinstance(decoded, dict):
-        raise TypeError(f"expected a pickled dict, got {type(decoded)!r}")
+        raise TypeError(f"expected a msgpack dict, got {type(decoded)!r}")
     return decoded
 
 
@@ -380,7 +379,7 @@ def _compile_scalar_codec(
         if py_type is bytes:
             return bytes, bytes
         if py_type is dict or get_origin(py_type) is dict or is_typeddict(py_type):
-            return _pickle_mapping, _unpickle_mapping
+            return _encode_mapping, _decode_mapping
     if field.type == field.TYPE_STRING:
         if _is_enum_type(py_type):
 
@@ -592,7 +591,7 @@ def _compile_message_codec(
 
     struct_codecs: list[tuple[str, FieldWriter, FieldReader]] = []
     for (name, field_type), field in zip(py_fields, proto_fields, strict=True):
-        if field.name not in (name, f"pickled_{name}"):
+        if field.name not in (name, f"encoded_{name}"):
             raise TypeError(
                 f"{py_type.__name__}.{name} does not match "
                 f"{descriptor.full_name}.{field.name}"
