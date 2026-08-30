@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// Entry point for the layer-wise multi-layer block KV transfer kernels.
-// Defined in mp_mem_kernels_layerwise.cu, which is the only translation unit
-// that instantiates the layer-wise kernels.
+// Entry points for the layer-wise multi-layer block KV transfer.
+//
+// Both are defined in mp_mem_kernels_layerwise.cu -- the only translation unit
+// that instantiates the layer-wise kernels. The object-group executor shares a
+// plan-walking driver with its per-chunk twin via mp_mem_kernels_common.cuh.
 
 #pragma once
 
@@ -33,3 +35,17 @@ void multi_layer_block_kv_transfer_layerwise(
     TransferDirection direction, PageBufferShapeDesc shape_desc,
     int lmcache_chunk_size, EngineKVFormat engine_kv_format,
     int skip_prefix_n_blocks);
+
+/**
+ * Layer-wise variant of execute_object_group_transfer.
+ *
+ * Dispatches every launch to multi_layer_block_kv_transfer_layerwise, which
+ * supports more than four objects per launch and the interleaved KV layout.
+ * A separate entry point so the per-chunk signature stays untouched; shares
+ * the plan-walking driver via execute_object_group_transfer_common.
+ */
+void execute_object_group_transfer_layerwise(
+    TransferDirection direction, const torch::Device& device,
+    size_t host_buffer_alignment,
+    const std::vector<KernelGroupSpec>& kernel_group_specs,
+    const std::vector<BatchStep>& batch_steps);

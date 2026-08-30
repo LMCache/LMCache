@@ -1,12 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// Shared device-side helpers for the multi-layer block KV transfer kernels.
+// Internals shared by the per-chunk and layer-wise multi-layer block KV
+// transfer kernels.
 //
-// Extracted into a header so the default (per-chunk) kernels in
-// mp_mem_kernels.cu and the layer-wise kernels in
-// mp_mem_kernels_layerwise.cu can both use them without duplicating code.
-// Everything here is a template or marked inline, so including it from
+// The per-chunk kernels live in mp_mem_kernels.cu and the layer-wise ones in
+// mp_mem_kernels_layerwise.cu; neither translation unit includes the other.
+// What they genuinely share lives here: the device-side offset and copy
+// helpers, the launch geometry, and the host-side driver that walks a batch
+// plan. Everything is a template or marked inline, so including it from
 // several translation units is ODR-safe.
+//
+// Included only by those two .cu files -- nothing here is part of a public
+// header or the pybind surface.
 
 #pragma once
 
@@ -422,3 +427,138 @@ inline MultiLayerLaunchConfig make_multi_layer_launch_config(
       TORCH_CHECK(false, "Unsupported EngineKVFormat: ",                       \
                   static_cast<int>(engine_kv_format));                         \
   }
+
+/**
+ * Transfer-unit (vectorisation width) selection, shared by both kernel entry
+ * points.
+ *
+ * Picks the widest scalar type a head row can be copied in and invokes ``fn``
+ * with a ``TransferUnit<T>`` tag carrying that choice, so the caller recovers
+ * the type via ``typename decltype(tag)::type``. A tag is used rather than an
+ * explicit template argument because C++17 has no templated lambdas.
+ *
+ * Centralised deliberately: this ladder used to be duplicated in both entry
+ * points, where adding an EngineKVFormat or changing the vectorisation rule in
+ * only one place left the other silently copying at the old width -- a wrong
+ * answer at runtime rather than a build failure.
+ */
+template <typename T>
+struct TransferUnit {
+  using type = T;
+};
+
+template <typename Fn>
+void dispatch_by_transfer_unit(const PageBufferShapeDesc& shape_desc,
+                               EngineKVFormat engine_kv_format, const Fn& fn) {
+  const int head_bytes = shape_desc.hs * shape_desc.element_size;
+  TORCH_CHECK(head_bytes % sizeof(uint16_t) == 0, "head_size * element_size (",
+              head_bytes, ") must be divisible by 2 for vectorized access");
+
+  if (engine_kv_format == EngineKVFormat::NL_X_NB_BSV_BSS) {
+    // Blocked-scale indexer cache: the per-token fp32 scale must be a whole
+    // number of transfer units, so pin 4-byte units regardless of row width.
+    TORCH_CHECK(head_bytes % sizeof(uint32_t) == 0,
+                "NL_X_NB_BSV_BSS row bytes (", head_bytes,
+                ") must be divisible by 4");
+    fn(TransferUnit<uint32_t>{});
+    return;
+  }
+
+  if (head_bytes % sizeof(uint4) == 0) {
+    fn(TransferUnit<uint4>{});  // 16 bytes per copy
+  } else if (head_bytes % sizeof(uint32_t) == 0) {
+    fn(TransferUnit<uint32_t>{});  // 4 bytes per copy
+  } else {
+    fn(TransferUnit<uint16_t>{});  // 2 bytes per copy (minimum granularity)
+  }
+}
+
+/**
+ * Shared driver behind both object-group transfer entry points.
+ *
+ * Walks the batch plan, validates every launch, and materialises the
+ * non-owning tensor views each kernel needs. ``launch_fn`` performs the kernel
+ * dispatch -- the only thing that differs between the per-chunk executor in
+ * mp_mem_kernels.cu and the layer-wise one in mp_mem_kernels_layerwise.cu --
+ * and is invoked once per launch as
+ * ``launch_fn(group, launch, paged_buffer_ptrs_tensor, block_ids)``. It is
+ * taken by const reference, not forwarded, because it is re-invoked in a loop.
+ *
+ * Only those two translation units include this header, so nothing here
+ * reaches a public header or the pybind surface.
+ */
+template <typename LaunchFn>
+void execute_object_group_transfer_common(
+    TransferDirection direction, const torch::Device& device,
+    size_t host_buffer_alignment,
+    const std::vector<KernelGroupSpec>& kernel_group_specs,
+    const std::vector<BatchStep>& batch_steps, const LaunchFn& launch_fn) {
+  // Set the device guard once for the whole plan so every staging copy and
+  // kernel launch below is enqueued on this device's current stream, in order.
+  const at::cuda::OptionalCUDAGuard device_guard(device);
+  const bool is_h2d = (direction == TransferDirection::H2D);
+  const auto int64_opts = at::TensorOptions().dtype(at::kLong).device(device);
+
+  const auto do_staging = [&](const std::vector<StagingCopy>& staging) {
+    for (const auto& copy : staging) {
+      lmcache_memcpy_async(copy.dest, copy.src, copy.nbytes, direction,
+                           copy.host_offset, host_buffer_alignment);
+    }
+  };
+
+  for (const auto& step : batch_steps) {
+    // H2D stages CPU->GPU temp buffers before the kernel reads them; D2H stages
+    // GPU->CPU after the kernel writes them. The per-step ordering must be
+    // preserved because temp buffers are reused across steps.
+    if (is_h2d) {
+      do_staging(step.staging);
+    }
+    for (const auto& launch : step.launches) {
+      TORCH_CHECK(
+          launch.group_idx >= 0 &&
+              launch.group_idx < static_cast<int>(kernel_group_specs.size()),
+          "LaunchVar.group_idx out of range: ", launch.group_idx);
+      const KernelGroupSpec& group = kernel_group_specs[launch.group_idx];
+      TORCH_CHECK(launch.num_objects >= 1 &&
+                      launch.num_objects <=
+                          static_cast<int>(group.lmcache_objects_ptrs.size()),
+                  "LaunchVar.num_objects (", launch.num_objects,
+                  ") exceeds available temp buffers (",
+                  group.lmcache_objects_ptrs.size(), ")");
+      // Bounds-check the block_ids slice before the kernel dereferences it on
+      // device: an out-of-range offset/length would otherwise be a silent
+      // out-of-bounds device read (CUDA fault or garbage), not a clean error.
+      TORCH_CHECK(launch.block_ids_offset >= 0,
+                  "LaunchVar.block_ids_offset must be non-negative, got ",
+                  launch.block_ids_offset);
+      TORCH_CHECK(launch.total_blocks >= 0,
+                  "LaunchVar.total_blocks must be non-negative, got ",
+                  launch.total_blocks);
+      TORCH_CHECK(launch.block_ids_offset + launch.total_blocks <=
+                      group.block_ids_capacity,
+                  "LaunchVar block_ids slice [", launch.block_ids_offset, ", ",
+                  launch.block_ids_offset + launch.total_blocks,
+                  ") exceeds block_ids capacity ", group.block_ids_capacity);
+
+      // Wrap the plan's pre-resolved raw device addresses as non-owning tensor
+      // views so we can reuse the existing kernel entry points without touching
+      // any of their code. The backing storage is owned by the caller's tensors
+      // (kept alive for the duration of this call); these views only carry the
+      // pointer/shape each launch needs. Downstream only reads
+      // paged_buffer_ptrs_tensor.data_ptr() and block_ids.{data_ptr, size(0)}.
+      const uintptr_t block_ids_addr =
+          group.block_ids_base +
+          static_cast<uintptr_t>(launch.block_ids_offset) * sizeof(int64_t);
+      const at::Tensor paged_buffer_ptrs_tensor = at::from_blob(
+          reinterpret_cast<void*>(group.paged_buffer_ptrs), {1}, int64_opts);
+      const at::Tensor block_ids = at::from_blob(
+          reinterpret_cast<void*>(block_ids_addr),
+          {static_cast<int64_t>(launch.total_blocks)}, int64_opts);
+
+      launch_fn(group, launch, paged_buffer_ptrs_tensor, block_ids);
+    }
+    if (!is_h2d) {
+      do_staging(step.staging);
+    }
+  }
+}
