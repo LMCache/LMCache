@@ -13,6 +13,7 @@ logged and retried, and it never takes the MP server down.
 """
 
 # Standard
+from collections.abc import Callable
 import asyncio
 import contextlib
 
@@ -26,6 +27,7 @@ from lmcache.v1.mp_coordinator.schemas import RegisterRequest, RegisterResponse
 from lmcache.v1.rpc_utils import get_ip
 
 logger = init_logger(__name__)
+
 
 _DEFAULT_HEARTBEAT_INTERVAL = 5.0
 
@@ -67,7 +69,9 @@ async def register(
         p2p_advertised_url=p2p_advertised_url,
         mq_port=mq_port,
     )
-    response = await client.post(f"{base_url}/instances", json=body.model_dump())
+    response = await client.post(
+        f"{base_url}/instances", json=body.model_dump(mode="json")
+    )
     response.raise_for_status()
     return RegisterResponse.model_validate(response.json()).instance_id
 
@@ -82,6 +86,7 @@ async def keep_registered(
     heartbeat_interval: float = _DEFAULT_HEARTBEAT_INTERVAL,
     p2p_advertised_url: str = "",
     mq_port: int = 0,
+    on_registered: Callable[[], None],
 ) -> None:
     """Register, heartbeat on a timer, and deregister on cancellation.
 
@@ -105,6 +110,11 @@ async def keep_registered(
             when P2P is disabled.
         mq_port: Port of this server's ZMQ message-queue server for P2P lookup
             RPCs. 0 when P2P is disabled.
+        on_registered: Called after every successful registration, including
+            a re-registration. Required, not defaulted: the coordinator keeps
+            some state only in memory -- capacity declarations above all --
+            and a caller that republishes nothing has to say so. Pass
+            ``lambda: None`` to mean it.
     """
     base_url = coordinator_url.rstrip("/")
     ip = advertise_ip or get_ip()
@@ -123,6 +133,7 @@ async def keep_registered(
                         mq_port=mq_port,
                     )
                     logger.info("Registered with coordinator as %s", assigned_id)
+                    on_registered()
                 else:
                     response = await client.put(
                         f"{base_url}/instances/{assigned_id}/heartbeat"

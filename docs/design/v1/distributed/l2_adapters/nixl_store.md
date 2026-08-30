@@ -152,23 +152,31 @@ and using deterministic file names derived from `ObjectKey`.
 
 #### `DynamicNixlStorageAgent`
 
-Similar to `NixlStorageAgent` but only registers L1 memory at init. Storage
-file registration is per-operation:
+Base class for dynamic NIXL storage agents. It owns the NIXL agent, L1 memory
+registration, page-index calculation, transfer lifecycle, and shutdown. The
+backend-specific subclasses operate on `ObjectKey` values rather than exposing
+storage paths to the adapter; this keeps the shared mechanics reusable by both
+file and object-storage backends.
 
-- `dynamic_store_file(mem_indices, file_path, page_size)` — create file,
+#### `FileDynamicNixlStorageAgent`
+
+The file-backed implementation registers L1 memory at initialization and
+performs file registration per operation:
+
+- `dynamic_store(mem_indices, key)` — create the key's data file,
   register with Nixl, DMA write, deregister, close fd.
-- `dynamic_load_file(mem_indices, file_path, page_size)` — open existing
-  file, register, DMA read, deregister, close fd.
-- `dynamic_delete_file(file_path)` — `os.unlink()`.
+- `dynamic_load(mem_indices, key)` — open the key's existing data file,
+  register, DMA read, deregister, close fd.
+- `dynamic_delete(key)` — delete the key's data file with `os.unlink()`.
 
 #### `DynamicNixlStoreL2Adapter`
 
 Same `L2AdapterInterface` contract as the static adapter. Differences:
 
-- **Store:** Iterates per key, calling `dynamic_store_file` for each.
+- **Store:** Iterates per key, calling `dynamic_store` for each.
   Checks `_total_bytes + obj_size > _max_capacity_bytes` before each write;
   stops the batch if capacity is exceeded.
-- **Delete:** Removes the file from disk via `dynamic_delete_file` in
+- **Delete:** Removes the file from disk via `dynamic_delete` in
   addition to removing the key from `_memory_objects`.
 - **Capacity:** Tracks `_total_bytes` (incremented on store and on
   secondary lookup, decremented on delete). `get_usage()` returns

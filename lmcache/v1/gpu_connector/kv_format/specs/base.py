@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 """Per-format geometry interface for GPU KV caches.
 
-Each :class:`KVFormatSpec` holds the geometry accessors for one
-``EngineKVFormat`` -- methods that read shape off a normalized ``kv_caches``.
-The format's static facts (MLA and the structural shape) live on the
-``EngineKVFormat`` enum itself (``csrc/engine_kv_format.h``, read via
-``lmc_ops``), shared with the device kernels. The enum is the single source of
-truth for which formats exist; engine identity lives only in detection. The
-format -> spec table is in ``registry.py``.
+Each :class:`KVFormatSpec` owns everything that is true of one
+``EngineKVFormat``: the geometry accessors (methods that read shape off a
+normalized ``kv_caches``) plus the static layout facts (``is_mla``, ``is_hnd``,
+the structural shape, ...) as class attributes. The facts are mirrored for the
+device kernels in ``csrc/engine_kv_format.h``; Python call sites read them from
+the spec via ``get_spec_class`` instead of re-listing formats inline, and
+``tests/v1/gpu_connector/test_kv_format_classification.py`` pins the two sides
+together. The enum is the single source of truth for which formats exist;
+engine identity lives only in detection. The format -> spec table is in
+``registry.py``.
 """
 
 # Standard
@@ -20,7 +23,7 @@ import torch
 
 # First Party
 from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache
-import lmcache.c_ops as lmc_ops
+import lmcache.lmcache_native as lmcache_native
 
 # A format's enum name *is* its shape: ``_``-joined tokens, with ``X`` marking a
 # list level. ``TWO_X_NL_X_NBBS_NH_HS`` reads as ``2 x NL x [PBS, NH, HS]``.
@@ -35,6 +38,10 @@ _LABELS = {
     "NH": "NH",
     "HS": "HS",
     "CS": "CS",
+    # Blocked-scale indexer cache: per-block value / scale regions. Rendered
+    # symbolically; the logical per-layer tensor is [NB, BS, HS(=132)].
+    "BSV": "BSxVALS",
+    "BSS": "BSxSCALES",
 }
 _ACCESSORS = {
     "NB": "num_blocks",
@@ -44,26 +51,34 @@ _ACCESSORS = {
     "HS": "head_size",
     "CS": "head_size",
     "PBS": "page_buffer_size",
+    # Blocked-scale regions: sized by tokens per block (the value/scale byte
+    # widths are format constants, not per-model geometry).
+    "BSxVALS": "block_size",
+    "BSxSCALES": "block_size",
 }
 
 
-def _render_shape(fmt: "lmc_ops.EngineKVFormat", token: Callable[[str], str]) -> str:
+def _render_shape(
+    fmt: "lmcache_native.EngineKVFormat", token: Callable[[str], str]
+) -> str:
     *lists, inner = fmt.name.split("_X_")
     body = ", ".join(token(t) for t in inner.split("_"))
     return " x ".join([token(t) for t in lists] + [f"[{body}]"])
 
 
-def describe_shape(fmt: "lmc_ops.EngineKVFormat") -> str:
+def describe_shape(fmt: "lmcache_native.EngineKVFormat") -> str:
     """Symbolic shape of a format, e.g. ``NL_X_NB_BS_HS`` -> ``NL x [NB, BS, HS]``.
 
     Named ``describe_shape`` (not ``shape_desc``) to avoid confusion with the
-    unrelated :class:`lmc_ops.PageBufferShapeDesc` and its ``shape_desc``
+    unrelated :class:`device_ops.PageBufferShapeDesc` and its ``shape_desc``
     instances used on the transfer path.
     """
     return _render_shape(fmt, lambda t: _LABELS[t])
 
 
-def concrete_shape(fmt: "lmc_ops.EngineKVFormat", size: Callable[[str], int]) -> str:
+def concrete_shape(
+    fmt: "lmcache_native.EngineKVFormat", size: Callable[[str], int]
+) -> str:
     """Numeric shape of a format; ``size(label)`` gives each axis's dimension.
 
     E.g. ``NL_X_TWO_NB_BS_NH_HS`` with ``NL=32, NB=2048, BS=16, NH=8, HS=128``
@@ -82,11 +97,14 @@ class KVFormatSpec(ABC):
     since one format may come from many (engine, backend) pairs.
 
     Class attributes: ``engine_kv_format`` (the format this describes, its
-    identity) and ``attention_backends`` (diagnostic labels; first is the
-    representative). The format's static facts -- ``is_mla`` and the structural
-    shape ``is_cross_layer`` / ``is_kv_list`` / ``is_layer_list`` -- live on the
-    ``EngineKVFormat`` itself (``csrc/engine_kv_format.h``, read via ``lmc_ops``),
-    shared with the device kernels.
+    identity), ``attention_backends`` (diagnostic labels; first is the
+    representative) and the format's **static layout facts** -- the structural
+    shape (``is_cross_layer`` / ``is_kv_list`` / ``is_layer_list``, exactly one
+    true) plus the ``is_mla`` / ``is_hnd`` / ``is_fused_packed`` /
+    ``is_two_major`` / ``is_pbs_fused`` modifiers. They default to ``False``, so
+    a spec only declares what applies to it, and every consumer reads them
+    through ``get_spec_class(fmt)`` -- no format lists at call sites. The device
+    kernels keep their own copy in ``csrc/engine_kv_format.h``.
 
     Method usage by mode -- every spec is consumed through the ``get_*``
     facade in ``gpu_connector.utils``:
@@ -107,8 +125,34 @@ class KVFormatSpec(ABC):
     object: that would keep the engine's GPU KV tensors alive past disconnect.
     """
 
-    engine_kv_format: ClassVar["lmc_ops.EngineKVFormat"]
+    engine_kv_format: ClassVar["lmcache_native.EngineKVFormat"]
     attention_backends: ClassVar[tuple[str, ...]] = ()
+
+    # ── Static layout facts (see the class docstring) ──────────────────
+    # Structural shape of the normalized ``kv_caches``: exactly one is true.
+    # All layers in one fused tensor.
+    is_cross_layer: ClassVar[bool] = False
+    # Keys and values in two top-level lists: ``[key_layers, value_layers]``.
+    is_kv_list: ClassVar[bool] = False
+    # One list entry per layer: ``kv_caches[layer_idx]`` is that layer.
+    is_layer_list: ClassVar[bool] = False
+
+    # Modifiers, orthogonal to the structural shape.
+    # Multi-head Latent Attention: one latent plane, no K/V split.
+    is_mla: ClassVar[bool] = False
+    # Heads stored before block tokens within a layer (HND, not NHD).
+    is_hnd: ClassVar[bool] = False
+    # K and V packed into the trailing content dim, so ``kv_size == 1``.
+    is_fused_packed: ClassVar[bool] = False
+    # The size-2 K/V axis comes before the block axis (``TWO_NB``, not
+    # ``NB_TWO``), so K and V are two contiguous planes per layer.
+    is_two_major: ClassVar[bool] = False
+    # ``num_blocks`` and ``block_size`` are folded into one PBS axis, which
+    # leaves both of them undefined for this format.
+    is_pbs_fused: ClassVar[bool] = False
+    # Each per-layer list entry is a ``(K, V)`` tuple of paged tensors, rather
+    # than a single stacked per-layer tensor.
+    is_kv_second_tuple: ClassVar[bool] = False
 
     def __init__(self, kv_caches: DiscoverableKVCache) -> None:
         # Borrowed, not owned: see the class docstring's "Lifetime" note. The
@@ -174,9 +218,12 @@ class KVFormatSpec(ABC):
     def data_ptrs(self, layer_indices: list[int]) -> list[int]:
         """Return device pointers for ``layer_indices`` in kernel-expected order.
 
-        Per-layer formats: one pointer per layer. SGLang two-list MHA: all K
-        pointers then all V. Cross-layer: a single base pointer (the kernel
-        walks layers itself, so ``layer_indices`` is ignored).
+        Per-layer formats: one pointer per layer.
+
+        SGLang two-list MHA: all K pointers, then all V pointers.
+
+        Cross-layer with a K/V axis: a single base pointer; the kernel walks
+        layers itself, so ``layer_indices`` is ignored.
         """
 
     def concrete_shape_str(self) -> str:

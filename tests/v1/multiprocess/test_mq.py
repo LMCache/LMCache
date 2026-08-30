@@ -4,19 +4,23 @@ from multiprocessing.synchronize import Event as EventClass
 from typing import Any, Callable
 import multiprocessing as mp
 import sys
+import threading
 import time
 
 # Third Party
+import msgspec
 import pytest
 import torch
 import zmq
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.utils import EngineType
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
     IPCCacheServerKey,
 )
+from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.mq import (
     BlockingRequestHandler,
     MessageQueueClient,
@@ -28,7 +32,6 @@ from lmcache.v1.multiprocess.protocol import (
     get_payload_classes,
 )
 from lmcache.v1.multiprocess.server import add_handler_helper
-from lmcache.v1.platform.cuda.ipc_wrapper import CudaIPCWrapper
 
 # Test helpers
 from tests.v1.multiprocess import test_mq_handler_helpers
@@ -358,19 +361,23 @@ def test_mq_noop_multiple_clients():
     )
 
 
+@pytest.mark.cuda
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="CUDA is required for REGISTER_KV_CACHE tests",
+    not (torch_dev.is_available() and torch_device_type == "cuda"),
+    reason="requires available CUDA runtime",
 )
 def test_mq_register_kv_cache():
     """
     Test MessageQueue with REGISTER_KV_CACHE request type.
     REGISTER_KV_CACHE takes (gpu_id: int, kv_cache: KVCache) and returns None.
     """
+    # First Party
+    from lmcache.v1.platform.cuda.ipc_wrapper import CudaIPCWrapper
+
     # Create test KV cache (list of CudaIPCWrapper objects)
     kv_cache = []
     for _ in range(3):
-        tensor = torch.randn(2, 4, device="cuda")
+        tensor = torch.randn(2, 4, device=torch_device_type)
         wrapper = CudaIPCWrapper(tensor)
         kv_cache.append(wrapper)
 
@@ -681,6 +688,65 @@ def test_shared_loop_dispatch():
         assert ClientPollingLoop._instance is None
     finally:
         server.close()
+
+
+def test_client_survives_undecodable_response() -> None:
+    """
+    Test that an undecodable response does not stop later requests working.
+
+    RequestType is an enum.auto() enum, so its wire values are declaration
+    positions. A peer running a newer protocol can answer with a value this
+    build's enum does not contain, which fails to decode on arrival.
+
+    All MessageQueueClient instances in a process are serviced by one shared
+    polling loop, so if such a response tears that loop down every client is
+    stranded. The observable contract is that only the offending request is
+    lost: a later, well-formed request must still complete normally.
+    """
+    server_url = "tcp://127.0.0.1:16030"
+    context = zmq.Context.instance()
+
+    unknown_value = max(member.value for member in RequestType) + 1
+    b_unknown = msgspec.msgpack.encode(unknown_value)
+    chunk_size = 256
+
+    router = context.socket(zmq.ROUTER)
+    router.bind(server_url)
+
+    def serve() -> None:
+        """Answer the first request undecodably, then the second correctly."""
+        identity, b_uid, _b_type, *_ = router.recv_multipart()
+        router.send_multipart([identity, b_uid, b_unknown])
+
+        identity, b_uid, b_type, *_ = router.recv_multipart()
+        router.send_multipart(
+            [identity, b_uid, b_type, msgspec.msgpack.encode(chunk_size)]
+        )
+
+    threading.Thread(target=serve, daemon=True).start()
+
+    try:
+        client = MessageQueueClient(server_url, context)
+
+        # The poisoned request cannot be resolved: without a decodable
+        # request_type there is no way to match it to its future, so it times
+        # out. That much is expected -- what matters is what happens after.
+        poisoned: MessagingFuture[int] = client.submit_request(
+            RequestType.GET_CHUNK_SIZE, []
+        )
+        with pytest.raises(TimeoutError):
+            poisoned.result(timeout=1)
+
+        # A later, well-formed request must still be served. If the bad
+        # response tore down the shared polling loop, this times out too.
+        healthy: MessagingFuture[int] = client.submit_request(
+            RequestType.GET_CHUNK_SIZE, []
+        )
+        assert healthy.result(timeout=5) == chunk_size
+
+        client.close()
+    finally:
+        router.close()
 
 
 def test_shared_loop_recreate():

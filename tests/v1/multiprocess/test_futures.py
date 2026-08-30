@@ -1,34 +1,84 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+import gc
 import multiprocessing as mp
 import threading
 import time
+import weakref
 
 # Third Party
 import pytest
-import torch
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.v1.multiprocess.futures import CUDAMessagingFuture, MessagingFuture
+
+
+def _event_ipc_supported_for_active_device() -> bool:
+    """Return True when the active device runtime supports event IPC."""
+    # First Party
+    from lmcache.v1.platform.base.event_ipc import get_event_ipc_backend
+
+    try:
+        backend = get_event_ipc_backend(torch_device_type)
+        backend.check_event_support(0)
+        return True
+    except Exception:
+        return False
+
+
+REQUIRES_EVENT_IPC = pytest.mark.skipif(
+    not _event_ipc_supported_for_active_device(),
+    reason=(
+        "Event IPC is not supported for the active runtime device; "
+        "skip IPC-dependent CUDAMessagingFuture tests."
+    ),
+)
 
 # ==============================================================================
 # Helper Functions for CUDAMessagingFuture Tests
 # ==============================================================================
 
 
-def _create_cuda_event_in_process(event_queue: mp.Queue, delay: float = 0.0):
-    """Helper process that creates a CUDA event and sends the IPC handle."""
-    torch.cuda.init()
-    if delay > 0:
-        time.sleep(delay)
+def _create_device_event_in_process(event_queue: mp.Queue, release) -> None:
+    """Helper process: create and record an event through the process's
+    resolved event backend, export its IPC handle, and stay alive until
+    released -- exported handles are only importable while the exporting
+    process (and its backing device resources) is alive.
+    """
+    # First Party
+    from lmcache.v1.platform.base.event_ipc import get_event_ipc_backend
 
-    # Create and record a CUDA event with interprocess flag
-    event = torch.cuda.Event(interprocess=True)
-    event.record()
-    event_bytes = event.ipc_handle()
+    torch_dev.init()
+    backend = get_event_ipc_backend(0)
+    event = backend.create_event(0)
+    backend.record_event(event, None)
+    event_queue.put(backend.export_event(event, 0))
+    release.wait(timeout=120)
 
-    # Send the event handle to the main process
-    event_queue.put(event_bytes)
+
+@pytest.fixture
+def remote_event_bytes():
+    """A recorded event handle exported by a live helper process.
+
+    The producer stays alive for the duration of the test and is released
+    on teardown.
+    """
+    ctx = mp.get_context("spawn")
+    event_queue = ctx.Queue()
+    release = ctx.Event()
+    process = ctx.Process(
+        target=_create_device_event_in_process, args=(event_queue, release)
+    )
+    process.start()
+    try:
+        yield event_queue.get(timeout=30)
+    finally:
+        release.set()
+        process.join(timeout=10)
+        if process.is_alive():
+            process.kill()
+            process.join()
 
 
 def test_messaging_future_basic_usage():
@@ -173,28 +223,42 @@ def test_messaging_future_complex_type():
     thread.join()
 
 
+def test_messaging_future_retains_reference_for_its_lifetime() -> None:
+    """A retained resource stays alive until its future is released."""
+
+    class Resource:
+        pass
+
+    resource = Resource()
+    resource_ref = weakref.ref(resource)
+    future = MessagingFuture[bool]()
+
+    future.retain_reference(resource)
+    del resource
+    gc.collect()
+    assert resource_ref() is not None
+
+    del future
+    gc.collect()
+    assert resource_ref() is None
+
+
 # ==============================================================================
 # CUDAMessagingFuture Tests
 # ==============================================================================
 
 
+@pytest.mark.cuda
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="CUDA is required for CUDAMessagingFuture tests",
+    not torch_dev.is_available(),
+    reason=f"requires available {torch_device_type} runtime",
 )
-def test_cuda_messaging_future_basic_usage():
+@REQUIRES_EVENT_IPC
+def test_cuda_messaging_future_basic_usage(remote_event_bytes):
     """Test basic usage of CUDAMessagingFuture: create, wait, and get result."""
-    torch.cuda.init()
+    torch_dev.init()
 
-    # Create CUDA event in a separate process
-    ctx = mp.get_context("spawn")
-    event_queue = ctx.Queue()
-    process = ctx.Process(target=_create_cuda_event_in_process, args=(event_queue,))
-    process.start()
-
-    # Get event bytes from the process
-    event_bytes = event_queue.get(timeout=30)
-    process.join(timeout=2)
+    event_bytes = remote_event_bytes
 
     # Create the raw future that will return (event_bytes, result_value)
     raw_future = MessagingFuture[tuple[bytes, int]]()
@@ -220,23 +284,17 @@ def test_cuda_messaging_future_basic_usage():
     assert cuda_future.query(), "CUDAMessagingFuture should be done after wait"
 
 
+@pytest.mark.cuda
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="CUDA is required for CUDAMessagingFuture tests",
+    not torch_dev.is_available(),
+    reason=f"requires available {torch_device_type} runtime",
 )
-def test_cuda_messaging_future_with_thread():
+@REQUIRES_EVENT_IPC
+def test_cuda_messaging_future_with_thread(remote_event_bytes):
     """Test CUDAMessagingFuture with result set from another thread."""
-    torch.cuda.init()
+    torch_dev.init()
 
-    # Create CUDA event in a separate process
-    ctx = mp.get_context("spawn")
-    event_queue = ctx.Queue()
-    process = ctx.Process(target=_create_cuda_event_in_process, args=(event_queue,))
-    process.start()
-
-    # Get event bytes from the process
-    event_bytes = event_queue.get(timeout=30)
-    process.join(timeout=2)
+    event_bytes = remote_event_bytes
 
     raw_future = MessagingFuture[tuple[bytes, str]]()
     cuda_future = CUDAMessagingFuture.FromMessagingFuture(raw_future)
@@ -264,25 +322,19 @@ def test_cuda_messaging_future_with_thread():
     thread.join()
 
 
+@pytest.mark.cuda
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="CUDA is required for CUDAMessagingFuture tests",
+    not torch_dev.is_available(),
+    reason=f"requires available {torch_device_type} runtime",
 )
-def test_cuda_messaging_future_wait_no_timeout():
+@REQUIRES_EVENT_IPC
+def test_cuda_messaging_future_wait_no_timeout(remote_event_bytes):
     """Test wait method without timeout (waits indefinitely
     until result is set).
     """
-    torch.cuda.init()
+    torch_dev.init()
 
-    # Create CUDA event in a separate process
-    ctx = mp.get_context("spawn")
-    event_queue = ctx.Queue()
-    process = ctx.Process(target=_create_cuda_event_in_process, args=(event_queue,))
-    process.start()
-
-    # Get event bytes from the process
-    event_bytes = event_queue.get(timeout=30)
-    process.join(timeout=2)
+    event_bytes = remote_event_bytes
 
     raw_future = MessagingFuture[tuple[bytes, float]]()
     cuda_future = CUDAMessagingFuture.FromMessagingFuture(raw_future)
@@ -302,23 +354,17 @@ def test_cuda_messaging_future_wait_no_timeout():
     thread.join()
 
 
+@pytest.mark.cuda
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="CUDA is required for CUDAMessagingFuture tests",
+    not torch_dev.is_available(),
+    reason=f"requires available {torch_device_type} runtime",
 )
-def test_cuda_messaging_future_wait_with_timeout_success():
+@REQUIRES_EVENT_IPC
+def test_cuda_messaging_future_wait_with_timeout_success(remote_event_bytes):
     """Test that wait method works correctly with timeout when result is available."""
-    torch.cuda.init()
+    torch_dev.init()
 
-    # Create CUDA event in a separate process
-    ctx = mp.get_context("spawn")
-    event_queue = ctx.Queue()
-    process = ctx.Process(target=_create_cuda_event_in_process, args=(event_queue,))
-    process.start()
-
-    # Get event bytes from the process
-    event_bytes = event_queue.get(timeout=30)
-    process.join(timeout=2)
+    event_bytes = remote_event_bytes
 
     raw_future = MessagingFuture[tuple[bytes, int]]()
     cuda_future = CUDAMessagingFuture.FromMessagingFuture(raw_future)
@@ -338,13 +384,15 @@ def test_cuda_messaging_future_wait_with_timeout_success():
     thread.join()
 
 
+@pytest.mark.cuda
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="CUDA is required for CUDAMessagingFuture tests",
+    not torch_dev.is_available(),
+    reason=f"requires available {torch_device_type} runtime",
 )
+@REQUIRES_EVENT_IPC
 def test_cuda_messaging_future_wait_timeout_reached():
     """Test that wait method returns False when timeout is reached."""
-    torch.cuda.init()
+    torch_dev.init()
 
     raw_future = MessagingFuture[tuple[bytes, int]]()
     cuda_future = CUDAMessagingFuture.FromMessagingFuture(raw_future)
@@ -359,23 +407,17 @@ def test_cuda_messaging_future_wait_timeout_reached():
     assert 0.15 < elapsed < 0.4, f"Wait should respect timeout, elapsed: {elapsed}"
 
 
+@pytest.mark.cuda
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="CUDA is required for CUDAMessagingFuture tests",
+    not torch_dev.is_available(),
+    reason=f"requires available {torch_device_type} runtime",
 )
-def test_cuda_messaging_future_result_with_timeout_success():
+@REQUIRES_EVENT_IPC
+def test_cuda_messaging_future_result_with_timeout_success(remote_event_bytes):
     """Test that result method works correctly with timeout when result is available."""
-    torch.cuda.init()
+    torch_dev.init()
 
-    # Create CUDA event in a separate process
-    ctx = mp.get_context("spawn")
-    event_queue = ctx.Queue()
-    process = ctx.Process(target=_create_cuda_event_in_process, args=(event_queue,))
-    process.start()
-
-    # Get event bytes from the process
-    event_bytes = event_queue.get(timeout=30)
-    process.join(timeout=2)
+    event_bytes = remote_event_bytes
 
     raw_future = MessagingFuture[tuple[bytes, int]]()
     cuda_future = CUDAMessagingFuture.FromMessagingFuture(raw_future)
@@ -394,13 +436,15 @@ def test_cuda_messaging_future_result_with_timeout_success():
     thread.join()
 
 
+@pytest.mark.cuda
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="CUDA is required for CUDAMessagingFuture tests",
+    not torch_dev.is_available(),
+    reason=f"requires available {torch_device_type} runtime",
 )
+@REQUIRES_EVENT_IPC
 def test_cuda_messaging_future_result_timeout_reached():
     """Test that result method raises TimeoutError when timeout is reached."""
-    torch.cuda.init()
+    torch_dev.init()
 
     raw_future = MessagingFuture[tuple[bytes, int]]()
     cuda_future = CUDAMessagingFuture.FromMessagingFuture(raw_future)
@@ -412,23 +456,17 @@ def test_cuda_messaging_future_result_timeout_reached():
         cuda_future.result(timeout=0.2)
 
 
+@pytest.mark.cuda
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="CUDA is required for CUDAMessagingFuture tests",
+    not torch_dev.is_available(),
+    reason=f"requires available {torch_device_type} runtime",
 )
-def test_cuda_messaging_future_multiple_result_calls():
+@REQUIRES_EVENT_IPC
+def test_cuda_messaging_future_multiple_result_calls(remote_event_bytes):
     """Test that result can be retrieved multiple times after being set."""
-    torch.cuda.init()
+    torch_dev.init()
 
-    # Create CUDA event in a separate process
-    ctx = mp.get_context("spawn")
-    event_queue = ctx.Queue()
-    process = ctx.Process(target=_create_cuda_event_in_process, args=(event_queue,))
-    process.start()
-
-    # Get event bytes from the process
-    event_bytes = event_queue.get(timeout=30)
-    process.join(timeout=2)
+    event_bytes = remote_event_bytes
 
     raw_future = MessagingFuture[tuple[bytes, str]]()
     cuda_future = CUDAMessagingFuture.FromMessagingFuture(raw_future)
@@ -445,23 +483,17 @@ def test_cuda_messaging_future_multiple_result_calls():
     )
 
 
+@pytest.mark.cuda
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="CUDA is required for CUDAMessagingFuture tests",
+    not torch_dev.is_available(),
+    reason=f"requires available {torch_device_type} runtime",
 )
-def test_cuda_messaging_future_query_before_and_after():
+@REQUIRES_EVENT_IPC
+def test_cuda_messaging_future_query_before_and_after(remote_event_bytes):
     """Test query method returns False before completion and True after."""
-    torch.cuda.init()
+    torch_dev.init()
 
-    # Create CUDA event in a separate process
-    ctx = mp.get_context("spawn")
-    event_queue = ctx.Queue()
-    process = ctx.Process(target=_create_cuda_event_in_process, args=(event_queue,))
-    process.start()
-
-    # Get event bytes from the process
-    event_bytes = event_queue.get(timeout=30)
-    process.join(timeout=2)
+    event_bytes = remote_event_bytes
 
     raw_future = MessagingFuture[tuple[bytes, int]]()
     cuda_future = CUDAMessagingFuture.FromMessagingFuture(raw_future)
@@ -481,23 +513,17 @@ def test_cuda_messaging_future_query_before_and_after():
     )
 
 
+@pytest.mark.cuda
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="CUDA is required for CUDAMessagingFuture tests",
+    not torch_dev.is_available(),
+    reason=f"requires available {torch_device_type} runtime",
 )
-def test_cuda_messaging_future_complex_type():
+@REQUIRES_EVENT_IPC
+def test_cuda_messaging_future_complex_type(remote_event_bytes):
     """Test CUDAMessagingFuture with complex types like lists and dicts."""
-    torch.cuda.init()
+    torch_dev.init()
 
-    # Create CUDA event in a separate process
-    ctx = mp.get_context("spawn")
-    event_queue = ctx.Queue()
-    process = ctx.Process(target=_create_cuda_event_in_process, args=(event_queue,))
-    process.start()
-
-    # Get event bytes from the process
-    event_bytes = event_queue.get(timeout=30)
-    process.join(timeout=2)
+    event_bytes = remote_event_bytes
 
     complex_data = {"key1": [1, 2, 3], "key2": {"nested": "value"}, "key3": 42}
 
@@ -517,25 +543,19 @@ def test_cuda_messaging_future_complex_type():
     thread.join()
 
 
+@pytest.mark.cuda
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="CUDA is required for CUDAMessagingFuture tests",
+    not torch_dev.is_available(),
+    reason=f"requires available {torch_device_type} runtime",
 )
-def test_messaging_future_to_device_future():
+@REQUIRES_EVENT_IPC
+def test_messaging_future_to_device_future(remote_event_bytes):
     """Test converting MessagingFuture to DeviceMessagingFuture
     using to_device_future method.
     """
-    torch.cuda.init()
+    torch_dev.init()
 
-    # Create CUDA event in a separate process
-    ctx = mp.get_context("spawn")
-    event_queue = ctx.Queue()
-    process = ctx.Process(target=_create_cuda_event_in_process, args=(event_queue,))
-    process.start()
-
-    # Get event bytes from the process
-    event_bytes = event_queue.get(timeout=30)
-    process.join(timeout=2)
+    event_bytes = remote_event_bytes
 
     raw_future = MessagingFuture[tuple[bytes, int]]()
 
@@ -554,25 +574,19 @@ def test_messaging_future_to_device_future():
     assert result == 999, f"Expected result 999, got {result}"
 
 
+@pytest.mark.cuda
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="CUDA is required for CUDAMessagingFuture tests",
+    not torch_dev.is_available(),
+    reason=f"requires available {torch_device_type} runtime",
 )
-def test_cuda_messaging_future_with_explicit_device():
+@REQUIRES_EVENT_IPC
+def test_cuda_messaging_future_with_explicit_device(remote_event_bytes):
     """Test CUDAMessagingFuture with explicit device parameter."""
-    torch.cuda.init()
+    torch_dev.init()
 
-    # Create CUDA event in a separate process
-    ctx = mp.get_context("spawn")
-    event_queue = ctx.Queue()
-    process = ctx.Process(target=_create_cuda_event_in_process, args=(event_queue,))
-    process.start()
+    event_bytes = remote_event_bytes
 
-    # Get event bytes from the process
-    event_bytes = event_queue.get(timeout=30)
-    process.join(timeout=2)
-
-    device = torch.cuda.current_device()
+    device = torch_dev.current_device()
     raw_future = MessagingFuture[tuple[bytes, str]]()
 
     # Create CUDA future with explicit device
@@ -584,6 +598,25 @@ def test_cuda_messaging_future_with_explicit_device():
     # Get result
     result = cuda_future.result()
     assert result == "explicit device", f"Expected 'explicit device', got {result}"
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(
+    not torch_dev.is_available(),
+    reason=f"requires available {torch_device_type} runtime",
+)
+@REQUIRES_EVENT_IPC
+def test_device_future_empty_handle_is_terminal_without_event_import():
+    """An event-free response completes on a real device event backend."""
+    torch_dev.init()
+
+    raw_future = MessagingFuture[tuple[bytes, bool]]()
+    device_future = raw_future.to_device_future()
+    raw_future.set_result((b"", False))
+
+    assert device_future.query() is True
+    assert device_future.wait(timeout=1.0) is True
+    assert device_future.result(timeout=1.0) is False
 
 
 # ==============================================================================
@@ -660,6 +693,83 @@ def test_device_future_delegates_to_backend(monkeypatch):
     assert ("check", "dev") in calls
     assert ("import", b"h", "dev") in calls
     assert any(c[0] == "sync" for c in calls)
+
+
+def test_device_future_empty_handle_is_terminal(monkeypatch):
+    """An empty handle completes without importing a device event."""
+    # First Party
+    from lmcache.v1.multiprocess.futures import DeviceMessagingFuture
+
+    calls = []
+
+    class _FakeBackend:
+        device_type = "fake"
+
+        def check_event_support(self, device):
+            calls.append(("check", device))
+
+        def import_event(self, handle, device):
+            calls.append(("import", handle, device))
+            raise AssertionError("an empty event handle must not be imported")
+
+        def synchronize_event(self, event, device):
+            calls.append(("sync", event, device))
+
+        def query_event(self, event):
+            calls.append(("query", event))
+            return True
+
+    monkeypatch.setattr(
+        "lmcache.v1.multiprocess.futures.get_event_ipc_backend",
+        lambda device=None: _FakeBackend(),
+    )
+
+    raw = MessagingFuture[tuple[bytes, bool]]()
+    fut = DeviceMessagingFuture.FromMessagingFuture(raw, device="dev")
+    raw.set_result((b"", False))
+
+    assert fut.query() is True
+    assert fut.wait() is True
+    assert fut.result() is False
+    assert calls == [("check", "dev")]
+
+
+def test_device_future_false_with_event_still_waits(monkeypatch):
+    """A False result with a nonempty handle still waits for device work."""
+    # First Party
+    from lmcache.v1.multiprocess.futures import DeviceMessagingFuture
+
+    calls = []
+
+    class _FakeBackend:
+        device_type = "fake"
+
+        def check_event_support(self, device):
+            calls.append(("check", device))
+
+        def import_event(self, handle, device):
+            calls.append(("import", handle, device))
+            return "EVT"
+
+        def synchronize_event(self, event, device):
+            calls.append(("sync", event, device))
+
+        def query_event(self, event):
+            calls.append(("query", event))
+            return True
+
+    monkeypatch.setattr(
+        "lmcache.v1.multiprocess.futures.get_event_ipc_backend",
+        lambda device=None: _FakeBackend(),
+    )
+
+    raw = MessagingFuture[tuple[bytes, bool]]()
+    fut = DeviceMessagingFuture.FromMessagingFuture(raw, device="dev")
+    raw.set_result((b"completion-event", False))
+
+    assert fut.result() is False
+    assert ("import", b"completion-event", "dev") in calls
+    assert ("sync", "EVT", "dev") in calls
 
 
 def test_device_future_checks_backend_support_during_initialization(

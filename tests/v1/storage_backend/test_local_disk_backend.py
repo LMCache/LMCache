@@ -12,6 +12,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache import torch_device_type
 from lmcache.utils import CacheEngineKey, DiskCacheMetadata
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.config_base import _parse_local_disk
@@ -118,7 +119,7 @@ def local_disk_backend(temp_disk_path, async_loop, local_cpu_backend):
         config=config,
         loop=async_loop,
         local_cpu_backend=local_cpu_backend,
-        dst_device="cuda:0",
+        dst_device=f"{torch_device_type}:0",
     )
 
 
@@ -132,10 +133,10 @@ class TestLocalDiskBackend:
             config=config,
             loop=async_loop,
             local_cpu_backend=local_cpu_backend,
-            dst_device="cuda:0",
+            dst_device=f"{torch_device_type}:0",
         )
 
-        assert backend.dst_device == "cuda:0"
+        assert backend.dst_device == f"{torch_device_type}:0"
         assert backend.local_cpu_backend == local_cpu_backend
         assert backend.path == temp_disk_path
         assert os.path.exists(temp_disk_path)
@@ -157,7 +158,7 @@ class TestLocalDiskBackend:
             config=config,
             loop=async_loop,
             local_cpu_backend=local_cpu_backend,
-            dst_device="cuda:0",
+            dst_device=f"{torch_device_type}:0",
             lmcache_worker=lmcache_worker,
         )
 
@@ -212,7 +213,7 @@ class TestMultiPathDiskBackend:
                 config=config,
                 loop=async_loop,
                 local_cpu_backend=local_cpu_backend,
-                dst_device="cuda:0",
+                dst_device=f"{torch_device_type}:0",
             )
 
             # Path selected by device_id (0 % 2 = 0 -> dir_a)
@@ -228,7 +229,7 @@ class TestMultiPathDiskBackend:
             local_cpu_backend.memory_allocator.close()
 
     def test_gpu_affinity_selects_path(self, async_loop, local_cpu_backend):
-        """Different cuda devices select different paths via modulo."""
+        """Different accelerator device indices select different paths via modulo."""
         dir_a = tempfile.mkdtemp()
         dir_b = tempfile.mkdtemp()
         try:
@@ -236,7 +237,7 @@ class TestMultiPathDiskBackend:
             config = create_test_config(combined)
 
             dirs_by_gpu = {}
-            for device in ("cuda:0", "cuda:1"):
+            for device in (f"{torch_device_type}:0", f"{torch_device_type}:1"):
                 backend = LocalDiskBackend(
                     config=config,
                     loop=async_loop,
@@ -245,8 +246,8 @@ class TestMultiPathDiskBackend:
                 )
                 dirs_by_gpu[device] = backend.path
 
-            assert dirs_by_gpu["cuda:0"] == dir_a
-            assert dirs_by_gpu["cuda:1"] == dir_b
+            assert dirs_by_gpu[f"{torch_device_type}:0"] == dir_a
+            assert dirs_by_gpu[f"{torch_device_type}:1"] == dir_b
         finally:
             shutil.rmtree(dir_a, ignore_errors=True)
             shutil.rmtree(dir_b, ignore_errors=True)
@@ -263,7 +264,7 @@ class TestMultiPathDiskBackend:
                 config=config,
                 loop=async_loop,
                 local_cpu_backend=local_cpu_backend,
-                dst_device="cuda:0",
+                dst_device=f"{torch_device_type}:0",
             )
             for p in paths:
                 assert os.path.isdir(p), f"{p} should exist"
@@ -280,7 +281,7 @@ class TestMultiPathDiskBackend:
             config=config,
             loop=async_loop,
             local_cpu_backend=local_cpu_backend,
-            dst_device="cuda:0",
+            dst_device=f"{torch_device_type}:0",
         )
         assert backend.path == temp_disk_path
         local_cpu_backend.memory_allocator.close()
@@ -292,7 +293,7 @@ class TestMultiPathDiskBackend:
             config=config,
             loop=async_loop,
             local_cpu_backend=local_cpu_backend,
-            dst_device="cuda:0",
+            dst_device=f"{torch_device_type}:0",
         )
         assert backend.path == temp_disk_path
         local_cpu_backend.memory_allocator.close()
@@ -306,7 +307,7 @@ class TestMultiPathDiskBackend:
             config=config,
             loop=async_loop,
             local_cpu_backend=local_cpu_backend,
-            dst_device="cuda:0",
+            dst_device=f"{torch_device_type}:0",
         )
         assert backend.path == temp_disk_path
         local_cpu_backend.memory_allocator.close()
@@ -323,7 +324,7 @@ class TestMultiPathDiskBackend:
                 config=config,
                 loop=async_loop,
                 local_cpu_backend=local_cpu_backend,
-                dst_device="cuda:0",
+                dst_device=f"{torch_device_type}:0",
             )
 
     def test_cpu_dst_device_defaults_to_first_path(self, async_loop, local_cpu_backend):

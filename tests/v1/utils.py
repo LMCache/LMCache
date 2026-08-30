@@ -18,6 +18,7 @@ import uuid
 import torch
 
 # First Party
+from lmcache import torch_device_type
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.gpu_connector.gpu_connectors import VLLMPagedMemGPUConnectorV2
@@ -27,36 +28,7 @@ from lmcache.v1.memory_management import (
     MemoryObj,
 )
 from lmcache.v1.metadata import LMCacheMetadata
-
-# Conditional import for CUDA-only operations
-if torch.cuda.is_available() or torch.xpu.is_available():
-    try:
-        # First Party
-        import lmcache.c_ops as lmc_ops
-    except ImportError:
-        # If c_ops is not built, create a mock
-        lmc_ops = None
-else:
-    # Mock c_ops when CUDA is not available
-    # First Party
-    lmc_ops = None
-
-# Define mock EngineKVFormat enum if c_ops is not available
-if lmc_ops is None:
-
-    class MockEngineKVFormat:
-        NL_X_TWO_NB_BS_NH_HS = 0
-        NL_X_NB_TWO_BS_NH_HS = 1
-        NL_X_NB_BS_HS = 2
-        NL_X_TWO_NB_NH_BS_HS = 3
-        NL_X_NB_TWO_NH_BS_HS = 4
-        NL_X_NB_NH_BS_TWO_HS = 5
-
-    class MockCOps:
-        EngineKVFormat = MockEngineKVFormat
-        GPUKVFormat = MockEngineKVFormat
-
-    lmc_ops = MockCOps()
+import lmcache.lmcache_native as lmcache_native
 
 
 def _probe_cufile_register() -> bool:
@@ -296,7 +268,7 @@ def generate_kv_cache_paged_list_tensors(
     num_layers=32,
     head_size=128,
     # default vllm non-MLA flash attention
-    engine_kv_format=lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
+    engine_kv_format=lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
 ):
     """
     Instead of Tuple[Tuple[Tensor, Tensor]], return List[Tensor]
@@ -304,20 +276,20 @@ def generate_kv_cache_paged_list_tensors(
     """
     ret = []
     # only support vllm MLA format for now
-    use_mla = engine_kv_format == lmc_ops.EngineKVFormat.NL_X_NB_BS_HS
+    use_mla = engine_kv_format == lmcache_native.EngineKVFormat.NL_X_NB_BS_HS
     num_heads = 1 if use_mla else 8
     if use_mla:
         shape = [num_blocks, block_size, head_size]
     else:
-        if engine_kv_format == lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS:
+        if engine_kv_format == lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS:
             shape = [2, num_blocks, block_size, num_heads, head_size]
-        elif engine_kv_format == lmc_ops.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS:
+        elif engine_kv_format == lmcache_native.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS:
             shape = [num_blocks, 2, block_size, num_heads, head_size]
-        elif engine_kv_format == lmc_ops.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS:
+        elif engine_kv_format == lmcache_native.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS:
             shape = [2, num_blocks, num_heads, block_size, head_size]
-        elif engine_kv_format == lmc_ops.EngineKVFormat.NL_X_NB_TWO_NH_BS_HS:
+        elif engine_kv_format == lmcache_native.EngineKVFormat.NL_X_NB_TWO_NH_BS_HS:
             shape = [num_blocks, 2, num_heads, block_size, head_size]
-        elif engine_kv_format == lmc_ops.EngineKVFormat.NL_X_NB_NH_BS_TWO_HS:
+        elif engine_kv_format == lmcache_native.EngineKVFormat.NL_X_NB_NH_BS_TWO_HS:
             # blocks-first, K/V fused into the trailing dim
             shape = [num_blocks, num_heads, block_size, 2, head_size]
         else:
@@ -341,7 +313,7 @@ def generate_sglang_kv_cache_paged_list_tensors(
     num_heads,
     head_size,
     use_mla=False,
-    device="cuda",
+    device=torch_device_type,
     dtype=torch.bfloat16,
 ):
     """
@@ -450,13 +422,13 @@ def check_paged_kv_cache_equal(
     slot_mapping,
     num_heads=8,
     head_size=128,
-    engine_kv_format=lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
+    engine_kv_format=lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
 ):
     """
     check whether two paged kv caches are the same at slot_mapping
     """
 
-    if engine_kv_format == lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS:
+    if engine_kv_format == lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS:
         token_dim = 0
         num_tokens = slot_mapping.shape[0]
         for left_kv_layer, right_kv_layer in zip(left, right, strict=False):
@@ -478,7 +450,7 @@ def check_paged_kv_cache_equal(
             assert (left_k[slot_mapping, :, :] == right_k[slot_mapping, :, :]).all()
             assert (left_v[slot_mapping, :, :] == right_v[slot_mapping, :, :]).all()
 
-    elif engine_kv_format == lmc_ops.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS:
+    elif engine_kv_format == lmcache_native.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS:
         token_dim = 0
         num_tokens = slot_mapping.shape[0]
         for left_kv_layer, right_kv_layer in zip(left, right, strict=False):
@@ -504,7 +476,7 @@ def check_paged_kv_cache_equal(
             assert (left_k[slot_mapping, :, :] == right_k[slot_mapping, :, :]).all()
             assert (left_v[slot_mapping, :, :] == right_v[slot_mapping, :, :]).all()
 
-    elif engine_kv_format == lmc_ops.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS:
+    elif engine_kv_format == lmcache_native.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS:
         # HND flash attention: [2, num_blocks, num_heads, block_size, head_size]
         # Flatten [num_blocks, num_heads, block_size, head_size] ->
         #   swap to [num_blocks, block_size, num_heads, head_size] ->
@@ -540,7 +512,7 @@ def check_paged_kv_cache_equal(
             assert (left_k[slot_mapping, :, :] == right_k[slot_mapping, :, :]).all()
             assert (left_v[slot_mapping, :, :] == right_v[slot_mapping, :, :]).all()
 
-    elif engine_kv_format == lmc_ops.EngineKVFormat.NL_X_NB_TWO_NH_BS_HS:
+    elif engine_kv_format == lmcache_native.EngineKVFormat.NL_X_NB_TWO_NH_BS_HS:
         # HND flash infer: [num_blocks, 2, num_heads, block_size, head_size]
         # left_kv_layer[:, 0] -> [num_blocks, num_heads, block_size, head_size]
         num_tokens = slot_mapping.shape[0]
@@ -643,6 +615,23 @@ def create_xpu_connector(hidden_dim, num_layers):
     from lmcache.v1.gpu_connector.xpu_connectors import VLLMPagedMemXPUConnectorV2
 
     return VLLMPagedMemXPUConnectorV2(hidden_dim, num_layers)
+
+
+def create_musa_connector(
+    hidden_dim: int, num_layers: int
+) -> VLLMPagedMemGPUConnectorV2:
+    """Create the MUSA connector used by benchmark tests.
+
+    The MUSA connector discovers model dimensions from the paged KV cache, so
+    ``hidden_dim`` and ``num_layers`` are accepted only to keep the test helper
+    interface consistent across accelerators.
+    """
+    # First Party
+    from lmcache.v1.gpu_connector.musa_connectors import (
+        VLLMPagedMemMUSAConnectorV2,
+    )
+
+    return VLLMPagedMemMUSAConnectorV2(use_gpu=False)
 
 
 def get_all_methods_from_base(base_class):

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import Generator
+from typing import Any, Generator
 import multiprocessing as mp
 import os
 import time
@@ -11,6 +11,7 @@ import torch
 import zmq
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.utils import EngineType
 from lmcache.v1.distributed.config import (
     EvictionConfig,
@@ -30,7 +31,7 @@ from lmcache.v1.multiprocess.protocol import (
     get_response_class,
 )
 from lmcache.v1.multiprocess.server import run_cache_server
-from lmcache.v1.platform.cuda.ipc_wrapper import CudaIPCWrapper
+from lmcache.v1.platform.base.event_ipc import get_event_ipc_backend
 
 # Configuration constants
 SERVER_HOST = "localhost"
@@ -39,24 +40,30 @@ SERVER_URL = f"tcp://{SERVER_HOST}:{SERVER_PORT}"
 CHUNK_SIZE = 256
 CPU_BUFFER_SIZE = 5.0
 DEFAULT_TIMEOUT = 20.0
+pytestmark = pytest.mark.cuda
 
 
 def _has_working_new_shared_cuda() -> bool:
-    if not torch.cuda.is_available():
-        print("CUDA is not available, skipping tests that require new_shared_cuda")
-        return False
     try:
-        # Minimal sanity check — adapt to your real API
-        buf = torch.empty(1024, device="cuda")
-        shared = buf.untyped_storage()._share_cuda_()  # or your exact call
+        buf = torch.empty(1024, device=torch_device_type)
+        shared = buf.untyped_storage()._share_cuda_()
         return shared is not None
     except Exception:
         return False
 
 
+if not (torch_dev.is_available() and torch_device_type == "cuda"):
+    pytest.skip(
+        "requires available CUDA runtime",
+        allow_module_level=True,
+    )
+
+# First Party
+from lmcache.v1.platform.cuda.ipc_wrapper import CudaIPCWrapper  # noqa: E402
+
 if not _has_working_new_shared_cuda():
     pytest.skip(
-        "new_shared_cuda is not available or not working on this system",
+        ("new_shared_cuda is not available or not working on this system"),
         allow_module_level=True,
     )
 
@@ -181,12 +188,31 @@ def lookup_all(
     return total
 
 
+#: Exported event objects kept alive for the session: CUDA event handles are
+#: only importable while the exporting event object is alive (the timeline
+#: backend has no such requirement, but this keeps the harness valid for
+#: both backends).
+_EXPORTED_EVENT_KEEPALIVE: list[Any] = []
+
+
+def _recorded_event_handle() -> bytes:
+    """Create and record an event via this process's resolved event backend
+    and export its handle -- the client-side equivalent of what the worker
+    adapter does in production.
+    """
+    backend = get_event_ipc_backend(0)
+    event = backend.create_event(0)
+    backend.record_event(event, None)
+    _EXPORTED_EVENT_KEEPALIVE.append(event)
+    return backend.export_event(event, 0)
+
+
 def store_keys(
     client: MessageQueueClient,
     keys: list[IPCCacheServerKey],
     instance_id: int,
     gpu_block_ids: list[int],
-    event: torch.cuda.Event,
+    event_handle: bytes,
     timeout: float = DEFAULT_TIMEOUT,
 ) -> None:
     """Store keys one at a time using the single-key API."""
@@ -196,7 +222,7 @@ def store_keys(
         block_ids = gpu_block_ids[start:end]
         future = client.submit_request(
             RequestType.STORE,
-            [key, instance_id, [block_ids], event.ipc_handle()],
+            [key, instance_id, [block_ids], event_handle],
             get_response_class(RequestType.STORE),
         )
         result = future.to_device_future().result(timeout=timeout)
@@ -208,7 +234,7 @@ def retrieve_keys(
     keys: list[IPCCacheServerKey],
     instance_id: int,
     gpu_block_ids: list[int],
-    event: torch.cuda.Event,
+    event_handle: bytes,
     timeout: float = DEFAULT_TIMEOUT,
 ) -> list[bool]:
     """Retrieve keys one at a time using the single-key API."""
@@ -219,7 +245,7 @@ def retrieve_keys(
         block_ids = gpu_block_ids[start:end]
         future = client.submit_request(
             RequestType.RETRIEVE,
-            [key, instance_id, [block_ids], event.ipc_handle(), 0],
+            [key, instance_id, [block_ids], event_handle, 0],
             get_response_class(RequestType.RETRIEVE),
         )
         result = future.to_device_future().result(timeout=timeout)
@@ -307,16 +333,13 @@ def client_context() -> Generator[ClientContext, None, None]:
     """
     Fixture that provides a client context with initialized KV cache.
     """
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is not available")
-
-    device = torch.device("cuda:0")
+    device = torch.device(torch_device_type)
     ctx = ClientContext(device=device)
     yield ctx
 
     # Cleanup GPU memory
     del ctx.gpu_kv_caches
-    torch.cuda.empty_cache()
+    torch_dev.empty_cache()
 
 
 @pytest.fixture(scope="function")
@@ -377,10 +400,6 @@ def test_server_running(server_process: mp.Process):
     assert server_process.is_alive(), "Server process should be running"
 
 
-@pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="Register/Unregister KV cache requires CUDA",
-)
 def test_register_unregister_kv_cache(
     client: MessageQueueClient, client_context: ClientContext
 ):
@@ -417,10 +436,6 @@ def test_register_unregister_kv_cache(
     assert result is None
 
 
-@pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="Store and Lookup require CUDA",
-)
 def test_store_and_lookup(
     client: MessageQueueClient,
     client_context: ClientContext,
@@ -432,11 +447,10 @@ def test_store_and_lookup(
     num_keys = 10
     keys = [create_cache_key(i) for i in range(num_keys)]
     gpu_block_ids = list(range(0, 16 * num_keys))
-    event = torch.cuda.Event(interprocess=True)
-    event.record()
+    event_handle = _recorded_event_handle()
 
     # Store
-    store_keys(client, keys, registered_instance, gpu_block_ids, event)
+    store_keys(client, keys, registered_instance, gpu_block_ids, event_handle)
 
     # Lookup - keys that exist
     lookup_result = lookup_all(client, keys)
@@ -448,10 +462,6 @@ def test_store_and_lookup(
     assert lookup_result2 == 0, "Non-existent keys should not be found"
 
 
-@pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="Store requires CUDA",
-)
 def test_store_fails_closed_on_incomplete_block_ids(
     client: MessageQueueClient,
     client_context: ClientContext,
@@ -473,8 +483,7 @@ def test_store_fails_closed_on_incomplete_block_ids(
     # One-chunk key (256 tokens == BLOCKS_PER_KEY blocks) but only half the
     # block IDs needed, so the chunk is not fully covered.
     key = create_cache_key(90001)
-    event = torch.cuda.Event(interprocess=True)
-    event.record()
+    event_handle = _recorded_event_handle()
 
     result = (
         client.submit_request(
@@ -483,7 +492,7 @@ def test_store_fails_closed_on_incomplete_block_ids(
                 key,
                 registered_instance,
                 [list(range(BLOCKS_PER_KEY // 2))],
-                event.ipc_handle(),
+                event_handle,
             ],
             get_response_class(RequestType.STORE),
         )
@@ -494,10 +503,6 @@ def test_store_fails_closed_on_incomplete_block_ids(
     assert lookup_all(client, [key]) == 0, "An uncovered chunk must not be committed"
 
 
-@pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="Store, Retrieve, and Verify require CUDA",
-)
 def test_store_retrieve_verify(
     client: MessageQueueClient,
     client_context: ClientContext,
@@ -508,15 +513,13 @@ def test_store_retrieve_verify(
     """
     num_keys = 20
     keys = [create_cache_key(i) for i in range(num_keys)]
-    event = torch.cuda.Event(interprocess=True)
-    event.record()
+    event_handle = _recorded_event_handle()
 
     # Store at the beginning of the cache
     store_block_ids = list(range(0, 16 * num_keys))
-    store_keys(client, keys, registered_instance, store_block_ids, event)
+    store_keys(client, keys, registered_instance, store_block_ids, event_handle)
 
-    event = torch.cuda.Event(interprocess=True)
-    event.record()
+    event_handle = _recorded_event_handle()
 
     # Call look up to ensure the data is ready to be retrieved
     lookup_result = lookup_all(client, keys)
@@ -527,7 +530,7 @@ def test_store_retrieve_verify(
     retrieve_offset = 40 * 16
     retrieve_block_ids = list(range(retrieve_offset, retrieve_offset + 16 * num_keys))
     retrieve_result = retrieve_keys(
-        client, keys, registered_instance, retrieve_block_ids, event
+        client, keys, registered_instance, retrieve_block_ids, event_handle
     )
 
     assert len(retrieve_result) == num_keys
@@ -551,10 +554,6 @@ def test_store_retrieve_verify(
             )
 
 
-@pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="Partial miss retrieval requires CUDA",
-)
 def test_retrieve_partial_miss(
     client: MessageQueueClient,
     client_context: ClientContext,
@@ -568,10 +567,9 @@ def test_retrieve_partial_miss(
     num_stored = 30
     stored_keys = [create_cache_key(i) for i in range(num_stored)]
     store_block_ids = list(range(0, 16 * num_stored))
-    event = torch.cuda.Event(interprocess=True)
-    event.record()
+    event_handle = _recorded_event_handle()
 
-    store_keys(client, stored_keys, registered_instance, store_block_ids, event)
+    store_keys(client, stored_keys, registered_instance, store_block_ids, event_handle)
 
     # Lookup to ensure keys are stored
     lookup_result = lookup_all(client, stored_keys)
@@ -587,11 +585,10 @@ def test_retrieve_partial_miss(
         range(retrieve_offset_keys * 16, (retrieve_offset_keys + num_requested) * 16)
     )
 
-    event = torch.cuda.Event(interprocess=True)
-    event.record()
+    event_handle = _recorded_event_handle()
 
     retrieve_result = retrieve_keys(
-        client, all_keys, registered_instance, retrieve_block_ids, event
+        client, all_keys, registered_instance, retrieve_block_ids, event_handle
     )
 
     assert len(retrieve_result) == num_requested
@@ -607,19 +604,14 @@ def test_retrieve_partial_miss(
 
     # Try to retrieve the first 30 keys only (all exist)
     retrieve_block_ids_2 = list(range(0, 16 * num_stored))
-    event = torch.cuda.Event(interprocess=True)
-    event.record()
+    event_handle = _recorded_event_handle()
     retrieve_result_2 = retrieve_keys(
-        client, stored_keys, registered_instance, retrieve_block_ids_2, event
+        client, stored_keys, registered_instance, retrieve_block_ids_2, event_handle
     )
     assert len(retrieve_result_2) == num_stored
     assert all(retrieve_result_2), "All stored keys should be retrieved successfully"
 
 
-@pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="Multiple retrieve operations require CUDA",
-)
 def test_multiple_retrieve_operations(
     client: MessageQueueClient,
     client_context: ClientContext,
@@ -653,9 +645,8 @@ def test_multiple_retrieve_operations(
                 (batch_idx * keys_per_batch + keys_per_batch) * 16,
             )
         )
-        event = torch.cuda.Event(interprocess=True)
-        event.record()
-        store_keys(client, keys, registered_instance, blocks, event)
+        event_handle = _recorded_event_handle()
+        store_keys(client, keys, registered_instance, blocks, event_handle)
 
     # Doing look up to ensure data is ready to be retrieved
     all_keys = [
@@ -668,8 +659,7 @@ def test_multiple_retrieve_operations(
 
     # Retrieve in batches
     retrieve_offset = 32  # Start retrieving at offset of 32 chunks
-    event = torch.cuda.Event(interprocess=True)
-    event.record()
+    event_handle = _recorded_event_handle()
     for batch_idx in range(num_batches):
         keys = [
             create_cache_key(batch_idx * keys_per_batch + i)
@@ -684,7 +674,7 @@ def test_multiple_retrieve_operations(
         )
 
         retrieve_result = retrieve_keys(
-            client, keys, registered_instance, blocks, event
+            client, keys, registered_instance, blocks, event_handle
         )
         assert len(retrieve_result) == keys_per_batch
         assert all(retrieve_result), "All keys should be retrieved successfully"
@@ -703,10 +693,6 @@ def test_multiple_retrieve_operations(
             ), f"Mismatch in batch {batch_idx}, layer {layer}"
 
 
-@pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="Multiple store operations require CUDA",
-)
 def test_multiple_store_operations(
     client: MessageQueueClient,
     client_context: ClientContext,
@@ -718,16 +704,15 @@ def test_multiple_store_operations(
     # Store batch 1
     keys1 = [create_cache_key(i) for i in range(30)]
     blocks1 = list(range(0, 16 * 30))
-    event = torch.cuda.Event(interprocess=True)
-    event.record()
-    store_keys(client, keys1, registered_instance, blocks1, event)
+    event_handle = _recorded_event_handle()
+    store_keys(client, keys1, registered_instance, blocks1, event_handle)
 
     # Store batch 2
     keys2 = [create_cache_key(i + 30) for i in range(20)]
     blocks2 = list(range(30 * 16, 50 * 16))
 
     # Test with the same event for 2 store requests
-    store_keys(client, keys2, registered_instance, blocks2, event)
+    store_keys(client, keys2, registered_instance, blocks2, event_handle)
 
     # Verify all keys exist
     all_keys = keys1 + keys2
@@ -735,9 +720,6 @@ def test_multiple_store_operations(
     assert lookup_result == 50, "All stored keys from both batches should exist"
 
 
-@pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="Get chunk size requires CUDA"
-)
 def test_get_chunk_size(
     client: MessageQueueClient,
 ):

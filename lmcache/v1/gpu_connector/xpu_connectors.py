@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 import torch
 
 # First Party
+from lmcache import device_ops
 from lmcache.integration.vllm.utils import ENGINE_NAME
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType, _lmcache_nvtx_annotate
@@ -22,7 +23,7 @@ from lmcache.v1.gpu_connector.utils import (
 )
 from lmcache.v1.memory_allocators.gpu_memory_allocator import GPUMemoryAllocator
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
-import lmcache.c_ops as lmc_ops
+import lmcache.lmcache_native as lmcache_native
 
 if TYPE_CHECKING:
     # First Party
@@ -193,13 +194,13 @@ class VLLMPagedMemXPUConnectorV2(GPUConnectorInterface):
         vllm_cached = kwargs.get("vllm_cached_tokens", 0)
         skip_prefix_n_tokens = min(end - start, max(0, vllm_cached - start))
 
-        lmc_ops.multi_layer_kv_transfer(
+        device_ops.multi_layer_kv_transfer(
             memory_obj.tensor,
             kv_cache_pointers,
             slot_mapping[start:end],
             self.device,
             self.page_buffer_size,
-            lmc_ops.TransferDirection.H2D,
+            lmcache_native.TransferDirection.H2D,
             self.engine_kv_format,
             self.block_size,
             skip_prefix_n_tokens,
@@ -240,13 +241,13 @@ class VLLMPagedMemXPUConnectorV2(GPUConnectorInterface):
 
         with torch.xpu.stream(self.store_stream):
             if self.gpu_buffer is None or end - start != self.gpu_buffer.shape[2]:
-                lmc_ops.multi_layer_kv_transfer(
+                device_ops.multi_layer_kv_transfer(
                     memory_obj.tensor,
                     kv_cache_pointers,
                     slot_mapping[start:end],
                     self.kvcaches[0].device,
                     self.page_buffer_size,
-                    lmc_ops.TransferDirection.D2H,
+                    lmcache_native.TransferDirection.D2H,
                     self.engine_kv_format,
                     self.block_size,
                 )
@@ -254,13 +255,13 @@ class VLLMPagedMemXPUConnectorV2(GPUConnectorInterface):
                 # kvcaches -> gpu_buffer -> memobj
                 assert self.gpu_buffer.device == self.kvcaches[0].device
                 tmp_gpu_buffer = self.gpu_buffer[:, :, : end - start, :]
-                lmc_ops.multi_layer_kv_transfer(
+                device_ops.multi_layer_kv_transfer(
                     tmp_gpu_buffer,
                     kv_cache_pointers,
                     slot_mapping[start:end],
                     self.kvcaches[0].device,
                     self.page_buffer_size,
-                    lmc_ops.TransferDirection.D2H,
+                    lmcache_native.TransferDirection.D2H,
                     self.engine_kv_format,
                     self.block_size,
                 )
@@ -393,13 +394,13 @@ class VLLMPagedMemXPUConnectorV3(GPUConnectorInterface):
         for i, kv_cache_pointer in enumerate(self.group_kv_cache_pointers_on_gpu):
             memory_obj_tensor = memory_obj.get_tensor(i)
             assert memory_obj_tensor is not None
-            lmc_ops.multi_layer_kv_transfer(
+            device_ops.multi_layer_kv_transfer(
                 memory_obj_tensor,
                 kv_cache_pointer,
                 slot_mapping[start:end],
                 self.device,
                 self.page_buffer_size,
-                lmc_ops.TransferDirection.H2D,
+                lmcache_native.TransferDirection.H2D,
                 self.engine_kv_format,
                 self.block_size,
                 skip_prefix_n_tokens,
@@ -423,13 +424,13 @@ class VLLMPagedMemXPUConnectorV3(GPUConnectorInterface):
                 ):
                     memory_obj_tensor = memory_obj.get_tensor(i)
                     assert memory_obj_tensor is not None
-                    lmc_ops.multi_layer_kv_transfer(
+                    device_ops.multi_layer_kv_transfer(
                         memory_obj_tensor,
                         kv_cache_pointer,
                         slot_mapping[start:end],
                         self.device,
                         self.page_buffer_size,
-                        lmc_ops.TransferDirection.D2H,
+                        lmcache_native.TransferDirection.D2H,
                         self.engine_kv_format,
                         self.block_size,
                     )
@@ -440,13 +441,13 @@ class VLLMPagedMemXPUConnectorV3(GPUConnectorInterface):
                     self.group_kv_cache_pointers_on_gpu
                 ):
                     tmp_gpu_buffer = self.group_tmp_buffer[i][:, :, : end - start, :]
-                    lmc_ops.multi_layer_kv_transfer(
+                    device_ops.multi_layer_kv_transfer(
                         tmp_gpu_buffer,
                         kv_cache_pointer,
                         slot_mapping[start:end],
                         self.device,
                         self.page_buffer_size,
-                        lmc_ops.TransferDirection.D2H,
+                        lmcache_native.TransferDirection.D2H,
                         self.engine_kv_format,
                         self.block_size,
                     )
@@ -680,11 +681,11 @@ class VLLMBufferLayerwiseXPUConnector(GPUConnectorInterface):
             )
         for layer_id in range(self.num_layers + 2):
             if layer_id > 1:
-                lmc_ops.single_layer_kv_transfer(
+                device_ops.single_layer_kv_transfer(
                     self.buffer_mapping[layer_id - 2].tensor,
                     self.kvcaches[layer_id - 2],
                     slot_mapping_full,
-                    lmc_ops.TransferDirection.H2D,
+                    lmcache_native.TransferDirection.H2D,
                     self.engine_kv_format,
                     token_major=False,  # shape is [2, num_tokens, hidden_dim]
                 )
@@ -840,11 +841,11 @@ class VLLMBufferLayerwiseXPUConnector(GPUConnectorInterface):
             # kvcaches -> gpu_buffer -> memobj
             with torch.xpu.stream(self.store_stream):
                 self.store_stream.wait_stream(current_stream)
-                lmc_ops.single_layer_kv_transfer(
+                device_ops.single_layer_kv_transfer(
                     tmp_gpu_buffer_obj.tensor,
                     self.kvcaches[layer_id],
                     slot_mapping_full,
-                    lmc_ops.TransferDirection.D2H,
+                    lmcache_native.TransferDirection.D2H,
                     self.engine_kv_format,
                     token_major=False,  # shape is [2, num_tokens, hidden_dim]
                 )
@@ -1079,21 +1080,21 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
                             memory_obj.tensor, non_blocking=True
                         )
                     else:
-                        lmc_ops.single_layer_kv_transfer(
+                        device_ops.single_layer_kv_transfer(
                             memory_obj.tensor,
                             self.kvcaches[layer_id],
                             slot_mapping[start:end],
-                            lmc_ops.TransferDirection.H2D,
+                            lmcache_native.TransferDirection.H2D,
                             self.engine_kv_format,
                             token_major=True,
                         )
 
                 if self.use_gpu:
-                    lmc_ops.single_layer_kv_transfer(
+                    device_ops.single_layer_kv_transfer(
                         tmp_gpu_buffer_obj.tensor,
                         self.kvcaches[layer_id],
                         slot_mapping_full,
-                        lmc_ops.TransferDirection.H2D,
+                        lmcache_native.TransferDirection.H2D,
                         self.engine_kv_format,
                         token_major=True,
                     )
@@ -1187,11 +1188,11 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
             with torch.xpu.stream(self.store_stream):
                 self.store_stream.wait_stream(current_stream)
                 if self.use_gpu:
-                    lmc_ops.single_layer_kv_transfer(
+                    device_ops.single_layer_kv_transfer(
                         tmp_gpu_buffer_obj.tensor,
                         self.kvcaches[layer_id],
                         slot_mapping_full,
-                        lmc_ops.TransferDirection.D2H,
+                        lmcache_native.TransferDirection.D2H,
                         self.engine_kv_format,
                         token_major=True,
                     )
@@ -1205,11 +1206,11 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
                             non_blocking=True,
                         )
                     else:
-                        lmc_ops.single_layer_kv_transfer(
+                        device_ops.single_layer_kv_transfer(
                             memory_obj.tensor,
                             self.kvcaches[layer_id],
                             slot_mapping[start:end],
-                            lmc_ops.TransferDirection.D2H,
+                            lmcache_native.TransferDirection.D2H,
                             self.engine_kv_format,
                             token_major=True,
                         )
@@ -1290,7 +1291,7 @@ class SGLangXPUConnector(GPUConnectorInterface):
 
         # For TWO_X_NL_X_NBBS_NH_HS format, kv_caches is [[k_list], [v_list]]
         # We need to flatten it to [k0, k1, ..., v0, v1, ...]
-        if self.engine_kv_format == lmc_ops.EngineKVFormat.TWO_X_NL_X_NBBS_NH_HS:
+        if self.engine_kv_format == lmcache_native.EngineKVFormat.TWO_X_NL_X_NBBS_NH_HS:
             flat_kv_caches = kv_caches[0] + kv_caches[1]  # [k_list] + [v_list]
             device = flat_kv_caches[0].device
         else:
@@ -1361,13 +1362,13 @@ class SGLangXPUConnector(GPUConnectorInterface):
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
 
         kv_cache_pointers = self._initialize_pointers(kvcaches)
-        lmc_ops.multi_layer_kv_transfer_unilateral(
+        device_ops.multi_layer_kv_transfer_unilateral(
             memory_obj.tensor,
             kv_cache_pointers,
             slot_mapping[start - offset : end - offset],
             kvcaches[0][0].device,
             self.page_buffer_size,
-            lmc_ops.TransferDirection.H2D,
+            lmcache_native.TransferDirection.H2D,
             self.engine_kv_format,
         )
 
@@ -1404,26 +1405,26 @@ class SGLangXPUConnector(GPUConnectorInterface):
         kv_cache_pointers = self._initialize_pointers(kvcaches)
 
         if self.gpu_buffer is None or end - start != self.gpu_buffer.shape[2]:
-            lmc_ops.multi_layer_kv_transfer_unilateral(
+            device_ops.multi_layer_kv_transfer_unilateral(
                 memory_obj.tensor,
                 kv_cache_pointers,
                 slot_mapping[start:end],
                 kvcaches[0][0].device,
                 self.page_buffer_size,
-                lmc_ops.TransferDirection.D2H,
+                lmcache_native.TransferDirection.D2H,
                 self.engine_kv_format,
             )
         else:
             # kvcaches -> gpu_buffer -> memobj
             assert self.gpu_buffer.device == kvcaches[0][0].device
             tmp_gpu_buffer = self.gpu_buffer[:, :, : end - start, :]
-            lmc_ops.multi_layer_kv_transfer_unilateral(
+            device_ops.multi_layer_kv_transfer_unilateral(
                 tmp_gpu_buffer,
                 kv_cache_pointers,
                 slot_mapping[start:end],
                 kvcaches[0][0].device,
                 self.page_buffer_size,
-                lmc_ops.TransferDirection.D2H,
+                lmcache_native.TransferDirection.D2H,
                 self.engine_kv_format,
             )
             memory_obj.tensor.copy_(tmp_gpu_buffer, non_blocking=True)
@@ -1605,42 +1606,42 @@ class SGLangLayerwiseXPUConnector(GPUConnectorInterface):
                     )
                 else:
                     if self.use_mla:
-                        lmc_ops.single_layer_kv_transfer(
+                        device_ops.single_layer_kv_transfer(
                             memory_obj.tensor,
                             self.kvcaches[layer_id],
                             slot_mapping[start:end],
-                            lmc_ops.TransferDirection.H2D,
+                            lmcache_native.TransferDirection.H2D,
                             self.engine_kv_format,
                             token_major=True,
                         )
                     else:
-                        lmc_ops.single_layer_kv_transfer_sgl(
+                        device_ops.single_layer_kv_transfer_sgl(
                             memory_obj.tensor,
                             self.kvcaches[0][layer_id],
                             self.kvcaches[1][layer_id],
                             slot_mapping[start:end],
-                            lmc_ops.TransferDirection.H2D,
+                            lmcache_native.TransferDirection.H2D,
                             token_major=True,
                         )
 
             if self.use_gpu:
                 if self.use_mla:
-                    lmc_ops.single_layer_kv_transfer(
+                    device_ops.single_layer_kv_transfer(
                         tmp_gpu_buffer_obj.tensor,
                         self.kvcaches[layer_id],
                         slot_mapping_full,
-                        lmc_ops.TransferDirection.H2D,
+                        lmcache_native.TransferDirection.H2D,
                         self.engine_kv_format,
                         token_major=True,
                     )
                 else:
                     t, h, d = self.kvcaches[0][layer_id].shape
-                    lmc_ops.single_layer_kv_transfer_sgl(
+                    device_ops.single_layer_kv_transfer_sgl(
                         tmp_gpu_buffer_obj.tensor,
                         self.kvcaches[0][layer_id].view(t, 1, h, d),
                         self.kvcaches[1][layer_id].view(t, 1, h, d),
                         slot_mapping_full,
-                        lmc_ops.TransferDirection.H2D,
+                        lmcache_native.TransferDirection.H2D,
                         token_major=True,
                     )
 
@@ -1728,22 +1729,22 @@ class SGLangLayerwiseXPUConnector(GPUConnectorInterface):
             # kvcaches -> gpu_buffer -> memobj
             if self.use_gpu:
                 if self.use_mla:
-                    lmc_ops.single_layer_kv_transfer(
+                    device_ops.single_layer_kv_transfer(
                         tmp_gpu_buffer_obj.tensor,
                         self.kvcaches[layer_id],
                         slot_mapping_full,
-                        lmc_ops.TransferDirection.D2H,
+                        lmcache_native.TransferDirection.D2H,
                         self.engine_kv_format,
                         token_major=True,
                     )
                 else:
                     t, h, d = self.kvcaches[0][layer_id].shape
-                    lmc_ops.single_layer_kv_transfer_sgl(
+                    device_ops.single_layer_kv_transfer_sgl(
                         tmp_gpu_buffer_obj.tensor,
                         self.kvcaches[0][layer_id].view(t, 1, h, d),
                         self.kvcaches[1][layer_id].view(t, 1, h, d),
                         slot_mapping_full,
-                        lmc_ops.TransferDirection.D2H,
+                        lmcache_native.TransferDirection.D2H,
                         token_major=True,
                     )
 
@@ -1762,21 +1763,21 @@ class SGLangLayerwiseXPUConnector(GPUConnectorInterface):
                     start_idx += chunk_len
                 else:
                     if self.use_mla:
-                        lmc_ops.single_layer_kv_transfer(
+                        device_ops.single_layer_kv_transfer(
                             memory_obj.tensor,
                             self.kvcaches[layer_id],
                             slot_mapping[start:end],
-                            lmc_ops.TransferDirection.D2H,
+                            lmcache_native.TransferDirection.D2H,
                             self.engine_kv_format,
                             token_major=True,
                         )
                     else:
-                        lmc_ops.single_layer_kv_transfer_sgl(
+                        device_ops.single_layer_kv_transfer_sgl(
                             memory_obj.tensor,
                             self.kvcaches[0][layer_id],
                             self.kvcaches[1][layer_id],
                             slot_mapping[start:end],
-                            lmc_ops.TransferDirection.D2H,
+                            lmcache_native.TransferDirection.D2H,
                             token_major=True,
                         )
 

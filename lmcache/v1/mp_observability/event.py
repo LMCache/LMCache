@@ -25,6 +25,7 @@ class EventType(Enum):
     L1_WRITE_FINISHED = "l1.write.finished"
     L1_WRITE_FINISHED_AND_READ_RESERVED = "l1.write_finished_and_read_reserved"
     L1_KEYS_EVICTED = "l1.keys.evicted"
+    L1_KEYS_ACCESSED = "l1.keys.accessed"
     L1_EVICTION_LOOP_TICK = "l1.eviction.loop_tick"
 
     # L1 failure events (LM-291 health monitoring)
@@ -55,6 +56,14 @@ class EventType(Enum):
     # L2 Eviction Controller events
     L2_KEYS_EVICTED = "l2.keys.evicted"
 
+    # L2 adapter key-level events.
+    # Capacity topology changed (adapter added/removed/reconfigured).
+    SM_CAPACITY_CHANGED = "sm.capacity.changed"
+
+    L2_KEYS_STORED = "l2.keys.stored"
+    L2_KEYS_ACCESSED = "l2.keys.accessed"
+    L2_KEYS_DELETED = "l2.keys.deleted"
+
     # L2 failure events (LM-291 health monitoring)
     L2_PREFETCH_FAILED = "l2.prefetch.failed"
 
@@ -68,6 +77,10 @@ class EventType(Enum):
 
     # Chunk hash logging events
     MP_LOOKUP = "mp.lookup"
+
+    # Per-chunk token bindings. Metadata (parallel lists):
+    # chunk_hashes (list[bytes]) and token_chunks (list[list[int]]).
+    MP_TOKENS = "mp.tokens"
 
     # MP Server lifecycle sentinels (CPU-synchronous)
     MP_REQUEST_START = "mp.request.start"
@@ -98,24 +111,21 @@ class EventType(Enum):
     #                         event later
     TRACE_CALL = "trace.call"
 
-    # Cache Blending (CB) events — GPU operation start/end pairs
+    # Cache Blending (CB) events — lookup / retrieve start/end pairs
     CB_LOOKUP_START = "cb.lookup.start"
     CB_LOOKUP_END = "cb.lookup.end"
-    CB_STORE_PRE_COMPUTED_START = "cb.store_pre_computed.start"
-    CB_STORE_PRE_COMPUTED_END = "cb.store_pre_computed.end"
     CB_RETRIEVE_START = "cb.retrieve.start"
     CB_RETRIEVE_END = "cb.retrieve.end"
-    CB_STORE_FINAL_START = "cb.store_final.start"
-    CB_STORE_FINAL_END = "cb.store_final.end"
     CB_FINGERPRINTS_REGISTERED = "cb.fingerprints.registered"
     CB_CHUNKS_EVICTED = "cb.chunks.evicted"
 
-    # CB V3 lookup sub-spans (CPU) — nest under cb.lookup. Submitted-once but
+    # CB lookup sub-spans (CPU) — nest under cb.lookup. Submitted-once but
     # END may fire on a later poll (the non-blocking lookup re-issues), so the
     # span captures submit→resident incl. poll-wait.
     CB_FINGERPRINT_MATCH_START = "cb.fingerprint_match.start"
     CB_FINGERPRINT_MATCH_END = "cb.fingerprint_match.end"
-    # Prefix leg: blend_v3 owns the submit/poll (direct storage_manager), so the
+    # Prefix leg: the blend module owns the submit/poll (direct
+    # storage_manager), so the
     # prefix lookup is a CB-namespace span under cb.lookup. Its hit tokens ride
     # the CB hit-rate metric via CB_LOOKUP_END (CB requests no longer feed the
     # MP mp.lookup_prefetch span / hit-rate aggregate).
@@ -128,16 +138,22 @@ class EventType(Enum):
     CB_SPARSE_PREFETCH_START = "cb.sparse_prefetch.start"
     CB_SPARSE_PREFETCH_END = "cb.sparse_prefetch.end"
 
-    # CB V3 retrieve sub-span (GPU) — nest under cb.retrieve. Emitted via
+    # CB retrieve sub-span (GPU) — nest under cb.retrieve. Emitted via
     # publish_on_stream for GPU-accurate timing of the L1->paged scatter.
     CB_SCATTER_START = "cb.scatter.start"
     CB_SCATTER_END = "cb.scatter.end"
 
-    # Cache Blending (CB) events — lifecycle sentinels (CPU-synchronous)
+    # CB retrieve that returned success without scattering anything, so the
+    # request degrades to a full recompute. Point event (CPU), published only
+    # when reuse was actually lost. Metadata: ``reason`` (str, a fixed
+    # low-cardinality code — it is a metric attribute), ``dropped_matches``.
+    CB_RETRIEVE_NOOP = "cb.retrieve.noop"
+
+    # Cache Blending (CB) events — lifecycle sentinels (CPU-synchronous).
+    # CB_RETRIEVE_SUBMITTED holds cb.request open across the GPU scatter so a
+    # sibling TP worker's early CB_REQUEST_END cannot close the root.
     CB_REQUEST_START = "cb.request.start"
-    CB_STORE_PRE_COMPUTED_SUBMITTED = "cb.store_pre_computed.submitted"
     CB_RETRIEVE_SUBMITTED = "cb.retrieve.submitted"
-    CB_STORE_FINAL_SUBMITTED = "cb.store_final.submitted"
     CB_REQUEST_END = "cb.request.end"
 
 

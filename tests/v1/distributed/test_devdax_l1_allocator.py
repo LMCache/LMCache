@@ -18,7 +18,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import L1BackendType, MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import (
     EvictionConfig,
     L1ManagerConfig,
@@ -990,3 +990,55 @@ def test_allocator_batched_allocation_spans_arenas(tmp_path):
     del objs
     gc.collect()
     allocator.close()
+
+
+def test_hybrid_allocator_reports_per_object_medium(tmp_path):
+    """DRAM fills first; overflow objects land in (and report) the DAX
+    arena, so per-key medium attribution is exact."""
+    path = _make_mmap_file(tmp_path)
+    allocator = DevDaxMemoryAllocator(
+        size=1024 * 1024,
+        device_path=path,
+        local_size=2 * 4096,  # DRAM pool fits exactly two objects
+        shm_name=None,
+        align_bytes=4096,
+    )
+    try:
+        objs = allocator.batched_allocate(torch.Size([4096]), torch.uint8, 4)
+        assert objs is not None
+        media = [allocator.is_devdax_obj(obj) for obj in objs]
+        assert media == [False, False, True, True]
+        allocator.batched_free(objs)
+        del objs
+        gc.collect()
+    finally:
+        allocator.close()
+
+
+def test_hybrid_manager_get_backend_type_reports_per_object_medium(tmp_path):
+    """DevDaxL1MemoryManager.get_backend_type maps the allocator's answer onto
+    the L1BackendType enum for hybrid DRAM+DAX."""
+    path = _make_mmap_file(tmp_path)
+    config = L1MemoryManagerConfig(
+        size_in_bytes=2 * 4096,  # DRAM pool fits exactly two objects
+        use_lazy=False,
+        shm_name="",
+        devdax_path=path,
+        devdax_size_in_bytes=1024 * 1024,
+    )
+    manager = DevDaxL1MemoryManager(config)
+    try:
+        err, objs = manager.allocate(_layout(4096), 4)
+        assert err == L1Error.SUCCESS
+        backends = [manager.get_backend_type(obj) for obj in objs]
+        assert backends == [
+            L1BackendType.DRAM,
+            L1BackendType.DRAM,
+            L1BackendType.DEVDAX,
+            L1BackendType.DEVDAX,
+        ]
+        manager.free(objs)
+        del objs
+        gc.collect()
+    finally:
+        manager.close()

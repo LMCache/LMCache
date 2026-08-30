@@ -16,7 +16,7 @@ from lmcache.v1.platform.base.event_ipc import (
 )
 
 
-class MusaEventIPCBackend:
+class MusaEventIPCBackend(EventIPCBackend):
     """Event IPC backend backed by TorchMUSA interprocess events."""
 
     device_type: str = "musa"
@@ -68,23 +68,22 @@ class MusaEventIPCBackend:
         return backend
 
     def check_event_support(self, device: object) -> None:
-        """Fail closed unless MUSA handle and event IPC are available.
+        """Fail closed unless the opt-in MUSA event IPC API is available.
 
         Args:
             device: Target MUSA device.
 
         Raises:
-            RuntimeError: If the MUSA handle path or TorchMUSA event API is
-                unavailable.
+            RuntimeError: If the TorchMUSA event IPC API is unavailable.
         """
-        is_available = getattr(self._ipc(), "is_musa_handle_transfer_available", None)
+        is_available = getattr(self._ipc(), "is_musa_event_ipc_available", None)
         if not callable(is_available) or not is_available():
             raise RuntimeError(
                 "Device backend 'musa' does not support interprocess events: "
-                "MUSA handle transfer is unavailable."
+                "TorchMUSA event IPC is unavailable."
             )
         try:
-            self._default_backend().check_event_support(device)
+            self._default_backend()
         except RuntimeError as exc:
             raise RuntimeError(
                 f"Device backend 'musa' does not support interprocess events: {exc}"
@@ -117,6 +116,3 @@ class MusaEventIPCBackend:
     def synchronize_event(self, event: object, device: object) -> None:
         """Block the host until a TorchMUSA event completes."""
         self._default_backend().synchronize_event(event, device)
-
-
-assert isinstance(MusaEventIPCBackend(), EventIPCBackend)

@@ -3,9 +3,10 @@
 
 Instead of each handler reaching into ``request.app.state`` with stringly-typed
 ``getattr`` calls, handlers resolve a single :class:`CoordinatorContext` via
-:func:`get_context`. The context is built in ``create_app``; ``outbound_client``
-is filled in by the lifespan (it must bind to the running event loop), so a
-dedicated accessor narrows that ``Optional`` for the dispatch handlers.
+:func:`get_context`. The context is built complete in ``create_app``. The
+outbound HTTP client is deliberately *not* part of it: it must bind to the
+running event loop, so the lifespan parks it on ``app.state`` and dispatch
+handlers fetch it via :func:`get_outbound_client`.
 """
 
 # Standard
@@ -16,12 +17,12 @@ from fastapi import Request
 import httpx
 
 # First Party
-from lmcache.v1.distributed.quota_manager import QuotaManager
-from lmcache.v1.mp_coordinator.cache_control.eviction_manager import L2EvictionManager
-from lmcache.v1.mp_coordinator.cache_control.prefetch_manager import PrefetchManager
-from lmcache.v1.mp_coordinator.cache_control.usage_manager import L2UsageManager
-from lmcache.v1.mp_coordinator.key_directory import KeyDirectory
+from lmcache.v1.mp_coordinator.controllers.base import Controller
+from lmcache.v1.mp_coordinator.discovery import Registry
+from lmcache.v1.mp_coordinator.ingest.event_gate import EventGate
+from lmcache.v1.mp_coordinator.persistence.metadata import MetadataPersister
 from lmcache.v1.mp_coordinator.registry import InstanceRegistry
+from lmcache.v1.mp_coordinator.views.base import View
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
 
@@ -31,27 +32,31 @@ class CoordinatorContext:
 
     Attributes:
         registry: Fleet membership (``MPInstance`` by ``instance_id``).
-        quota_manager: Per-``cache_salt`` L2 quota state.
-        usage_manager: Per-``cache_salt`` L2 usage tracking.
-        eviction_manager: Quota/LRU L2 eviction dispatcher; also holds the L2
-            pin set consulted when computing eviction plans.
-        prefetch_manager: Warm-prefetch proxy to MP servers.
+        controllers: The coordinator's controllers, addressed by type --
+            ``controllers.get(FleetEvictionController)`` for the fleet L2
+            eviction loop (which owns the quota registry and the L2 pin
+            set, enforced against the ``l2`` half of the usage view), and
+            ``PrefetchManager`` for warm prefetch.
         token_hasher: Resolves a pin request's ``token_ids`` to object keys
             (configured to match the fleet's ``chunk_size`` / ``hash_algorithm``).
-        key_directory: Fleet-wide key → placements directory built from
-            MP-server cache events (eventually consistent).
-        outbound_client: Shared async client for coordinator -> MP calls. Set by
-            the lifespan (bound to the running loop); ``None`` until then.
+        views: The fleet's read models, addressed by type --
+            ``views.get(KeyDirectory)`` for key → placements,
+            ``CacheUsageManager`` for per-tier byte usage, and
+            ``ServerConfigRegistry`` for the declared capacities a usage
+            ratio divides by.
+        event_gate: Ingest entry point for the fleet cache-event stream
+            (``POST /events``).
+        metadata_persister: Durable store for operator intent. Every
+            handler that changes a pin or a quota must ``save`` so the
+            change survives a restart.
     """
 
     registry: InstanceRegistry
-    quota_manager: QuotaManager
-    usage_manager: L2UsageManager
-    eviction_manager: L2EvictionManager
-    prefetch_manager: PrefetchManager
+    controllers: Registry[Controller]
     token_hasher: TokenHasher
-    key_directory: KeyDirectory
-    outbound_client: httpx.AsyncClient | None = None
+    views: Registry[View]
+    event_gate: EventGate
+    metadata_persister: MetadataPersister
 
 
 def get_context(request: Request) -> CoordinatorContext:
@@ -86,7 +91,7 @@ def get_outbound_client(request: Request) -> httpx.AsyncClient:
         RuntimeError: If accessed before the lifespan filled it in (e.g. a bare
             app with no startup).
     """
-    client = get_context(request).outbound_client
+    client = getattr(request.app.state, "outbound_client", None)
     if client is None:
         raise RuntimeError("outbound client not initialized")
     return client

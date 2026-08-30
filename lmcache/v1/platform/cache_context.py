@@ -11,14 +11,13 @@ The concrete implementations live in their respective sub-packages:
 :func:`create_cache_context` keeps the dispatch out of the call site
 in :mod:`lmcache.v1.multiprocess.server`. Selection is data-driven
 and delegated to the :class:`~lmcache.v1.platform.base.device_spec.
-DeviceSpec` registry maintained by :mod:`lmcache.v1.platform`: each
-backend sub-package ships a ``DeviceSpec`` subclass whose
+DeviceSpec` registry maintained by :mod:`lmcache.v1.platform`: each built-in
+backend sub-package or external device plugin ships a ``DeviceSpec`` whose
 ``create_cache_context`` hook lazy-imports and instantiates the
 matching :class:`~lmcache.v1.platform.base.cache_context.
 BaseCacheContext`. Adding a new accelerator therefore requires
-*zero* edits to this module -- just implement
-``DeviceSpec.create_cache_context`` in the sub-package's
-``__init__.py``.
+*zero* edits to this module -- implement the hook in the built-in backend or
+external plugin.
 """
 
 # Future
@@ -49,8 +48,20 @@ def _detect_device_type(kv_caches: KVCache) -> str:
     All wrappers in *kv_caches* must materialize tensors on the same
     device type; mixed-device batches are not supported by any
     downstream cache-context implementation.
+
+    Reads each wrapper's ``device_type`` class constant instead of
+    materializing tensors: reconstruction can hold device resources
+    (raw CUDA IPC mappings) whose rollback belongs to the cache
+    context, so nothing may import before the context is constructed.
+    Wrappers from external device plugins that lack the constant fall
+    back to a (context-managed-later) ``to_tensor`` probe.
     """
-    device_types = {w.to_tensor().device.type for w in kv_caches}
+    device_types = set()
+    for w in kv_caches:
+        device_type = getattr(type(w), "device_type", None)
+        if device_type is None:
+            device_type = w.to_tensor().device.type
+        device_types.add(device_type)
     if len(device_types) != 1:
         raise ValueError(
             "create_cache_context requires all kv_caches to share one "
@@ -65,7 +76,7 @@ def create_cache_context(
     layout_hints: LayoutHints | None = None,
     engine_group_infos: "Sequence[EngineGroupInfo]" = (),
     engine_type: EngineType = EngineType.VLLM,
-    separate_object_groups: bool = True,
+    separate_object_groups: bool = False,
     full_sw_kv: bool = False,
 ) -> BaseCacheContext:
     """Create the appropriate cache context for *kv_caches*.
@@ -88,9 +99,9 @@ def create_cache_context(
             Forwarded verbatim to the concrete context constructor.
         engine_group_infos: Engine-neutral KV cache group metadata.
         engine_type: Which serving engine produced the caches.
-        separate_object_groups: When True (default), split kernel groups into
-            one object group per sliding-window size; when False, a single
-            full-attention object group.
+        separate_object_groups: When True, split kernel groups into
+            one object group per sliding-window size; when False (default),
+            a single full-attention object group.
         full_sw_kv: When True, sliding-window groups store/transfer full
             per-chunk KV (no sub-chunk window cutting) so chunks stay valid for
             reuse at any position; see
@@ -111,8 +122,8 @@ def create_cache_context(
     if spec is None:
         raise ValueError(
             "No cache-context class registered for device type %r. "
-            "Make sure ``lmcache.v1.platform.<backend>.__init__`` "
-            "ships a DeviceSpec subclass whose ``create_cache_context`` "
+            "Make sure a built-in backend or installed lmcache.device_plugins "
+            "entry point provides a DeviceSpec whose ``create_cache_context`` "
             "hook returns a BaseCacheContext instance." % device_type
         )
     return spec.create_cache_context(

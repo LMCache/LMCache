@@ -21,8 +21,8 @@ from nixl._api import (
 )
 
 # First Party
+from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
-from lmcache.native_storage_ops import Bitmap
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.internal_api import L1MemoryDesc, L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
@@ -367,7 +367,7 @@ class NixlStorageAgent:
         if state == "ERR":
             raise RuntimeError("NIXL transfer failed")
 
-    async def post_non_blocking(self, handle: NixlXferHandle):
+    async def post_non_blocking(self, handle: NixlXferHandle) -> None:
         """Post a Nixl transfer handle and await until the transfer is done."""
 
         state = self.nixl_agent.transfer(handle)
@@ -379,7 +379,8 @@ class NixlStorageAgent:
                 raise
 
             # TODO(Jiayi): Tune this for better perf
-            await asyncio.sleep(0.01)
+            if state != "DONE" and state != "ERR":
+                await asyncio.sleep(0.01)
 
         if state == "ERR":
             raise RuntimeError("NIXL transfer failed")
@@ -530,7 +531,7 @@ class NixlStoreL2Adapter(L2AdapterInterface):
     #####################
 
     def submit_lookup_and_lock_task(
-        self, keys: list[ObjectKey], layout_desc: MemoryLayoutDesc
+        self, keys: list[ObjectKey], group_layout_descs: dict[int, MemoryLayoutDesc]
     ) -> L2TaskId:
         with self._lock:
             task_id = self._get_next_task_id()
