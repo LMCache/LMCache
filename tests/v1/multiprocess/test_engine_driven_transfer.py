@@ -211,11 +211,14 @@ def _make_storage_manager_config(
 
 def _default_register_payload(
     instance_id: int = 1,
+    num_physical_slots: int | None = None,
 ) -> "RegisterEngineDrivenContextPayload":
     """Build a default non-GPU registration payload for server-side tests.
 
     Args:
         instance_id: Worker instance id to register. Defaults to ``1``.
+        num_physical_slots: Physical slots per gathered chunk. ``None`` uses
+            the legacy protocol behavior.
 
     Uses fixed values ``model_name="m"``, ``world_size=1``, ``block_size=4``,
     ``num_layers=2``, ``hidden_dim_size=16``, ``dtype_str="float32"``, and
@@ -233,6 +236,7 @@ def _default_register_payload(
         hidden_dim_size=16,
         dtype_str="float32",
         use_mla=False,
+        num_physical_slots=num_physical_slots,
     )
 
 
@@ -713,8 +717,7 @@ def test_compute_kv_layout_and_gather_scatter_roundtrip(
 
         return torch_device_type if torch_device_type != "cpu" else "cuda"
 
-    # Bypass the CPU-host HND safeguard so the layout hint drives detection
-    # regardless of the host running the test.
+    # Keep format discovery independent of the host running the test.
     monkeypatch.setattr(
         "lmcache.v1.gpu_connector.kv_format.detectors.vllm.torch_device_type",
         _vllm_detector_device_type(),
@@ -762,7 +765,7 @@ def test_compute_kv_layout_and_gather_scatter_roundtrip(
             assert torch.allclose(source[name][1], destination[name][5])
 
 
-def test_authoritative_cpu_nhd_layout_matches_engine_driven_chunk(
+def test_explicit_cpu_nhd_layout_matches_engine_driven_chunk(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Regression for DeepSeek MLA on post-vllm#51718 CPU layouts.
@@ -788,10 +791,7 @@ def test_authoritative_cpu_nhd_layout_matches_engine_driven_chunk(
         num_heads=1,
         head_size=288,
     )
-    layout_hints: LayoutHints = {
-        "kv_layout": "NHD",
-        "kv_layout_is_authoritative": True,
-    }
+    layout_hints: LayoutHints = {"kv_layout": "NHD"}
 
     block_size, num_layers, hidden_dim, _, _, kv_size = compute_kv_layout(
         source, layout_hints=layout_hints
@@ -805,6 +805,57 @@ def test_authoritative_cpu_nhd_layout_matches_engine_driven_chunk(
 
     assert (block_size, num_layers, hidden_dim, kv_size) == (16, 2, 576, 1)
     assert tuple(gathered[0].shape) == (2, 128, 576)
+
+
+def test_engine_driven_register_sends_num_physical_slots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Worker registration must describe its gathered chunk, not just tokens."""
+    # First Party
+    from lmcache.v1.multiprocess.custom_types import (
+        RegisterEngineDrivenContextPayload,
+    )
+    from lmcache.v1.multiprocess.transfer_context import (
+        EngineDrivenTransferContext,
+        worker_transfer,
+    )
+
+    monkeypatch.setattr(
+        worker_transfer,
+        "compute_kv_layout",
+        lambda *_args, **_kwargs: (
+            16,
+            2,
+            576,
+            "float32",
+            lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_CS,
+            1,
+        ),
+    )
+    monkeypatch.setattr(
+        worker_transfer,
+        "create_engine_driven_context",
+        lambda *_args, **_kwargs: MagicMock(),
+    )
+    future = MagicMock()
+    future.result.return_value = RegisterEngineDrivenContextResponse()
+    send_request = MagicMock(return_value=future)
+
+    EngineDrivenTransferContext().register(
+        instance_id=1,
+        kv_caches=_make_fused_nhd_kv_caches(),
+        model_name="m",
+        world_size=1,
+        blocks_in_chunk=8,
+        mq_client=MagicMock(),
+        mq_timeout=1.0,
+        send_request=send_request,
+        layout_hints={"kv_layout": "NHD"},
+    )
+
+    payload = send_request.call_args.args[2][0]
+    assert isinstance(payload, RegisterEngineDrivenContextPayload)
+    assert payload.num_physical_slots == 128
 
 
 @pytest.mark.parametrize(
@@ -1195,6 +1246,21 @@ def test_server_register_and_find_non_cuda_context_layout(
     layout = ctx.layout_desc_registry.find("m", 1)
     assert layout is not None
     assert layout.shapes[0] == torch.Size([2, 2, 16, 16])
+
+
+def test_server_register_uses_worker_physical_slots(
+    stub_lmcache_native: Any,
+    server_module_factory: ServerModuleFactory,
+) -> None:
+    """Server must not substitute its logical token chunk for physical slots."""
+    module, _, _, ctx = server_module_factory(chunk_size=256)
+    payload = _default_register_payload(instance_id=11, num_physical_slots=128)
+
+    module.register_kv_cache_engine_driven_context(payload)
+
+    layout = ctx.layout_desc_registry.find("m", 1)
+    assert layout is not None
+    assert layout.shapes[0] == torch.Size([2, 2, 128, 16])
 
 
 def test_server_store_and_retrieve_cpu_chunks(

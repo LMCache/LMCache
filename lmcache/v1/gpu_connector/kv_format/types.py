@@ -40,9 +40,6 @@ class LayoutHints(TypedDict, total=False):
             ``"HND"`` -- heads before block-size (``VLLM_KV_CACHE_LAYOUT=HND``).
             ``"BLHNC"`` / ``"BLNHC"`` -- blocks outermost, all layers
             packed per block (vLLM standardized layouts).
-        kv_layout_is_authoritative: Whether ``kv_layout`` came from an
-            engine-owned, resolved layout descriptor. When false or absent,
-            compatibility workarounds may correct legacy backend hints.
         num_kv_heads: Number of KV heads per layer. Used by TRT-LLM to
             reshape its 4-D pool tensor into the canonical 6-D form.
         tokens_per_block: Tokens per paged block. Used by TRT-LLM (to
@@ -58,7 +55,6 @@ class LayoutHints(TypedDict, total=False):
     """
 
     kv_layout: KVLayoutName
-    kv_layout_is_authoritative: bool
     num_kv_heads: int
     tokens_per_block: int
     kv_list_layout: Literal["k_v"]

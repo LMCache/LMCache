@@ -719,6 +719,7 @@ class EngineDrivenTransferContext(TransferContext):
                     hidden_dim_size=hidden_dim_size,
                     dtype_str=dtype_str,
                     use_mla=use_mla_flag,
+                    num_physical_slots=blocks_in_chunk * block_size,
                 )
             ],
         )

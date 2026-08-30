@@ -157,6 +157,9 @@ class RegisterEngineDrivenContextPayload(msgspec.Struct):
         hidden_dim_size: Flattened hidden dimension per token.
         dtype_str: Torch dtype name (e.g. ``"float16"``).
         use_mla: Whether the worker KV format is MLA.
+        num_physical_slots: Number of physical KV slots gathered into one
+            LMCache chunk. ``None`` accepts the legacy protocol, where the
+            server assumed one physical slot per logical token.
     """
 
     instance_id: int
@@ -167,6 +170,7 @@ class RegisterEngineDrivenContextPayload(msgspec.Struct):
     hidden_dim_size: int
     dtype_str: str
     use_mla: bool
+    num_physical_slots: int | None = None
 
 
 @dataclass

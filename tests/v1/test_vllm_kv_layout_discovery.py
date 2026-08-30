@@ -99,10 +99,21 @@ class TestTryGetVllmKVCacheLayout:
         assert try_get_vllm_kv_cache_layout() == "HND"
 
     def test_legacy_vllm_falls_back_to_backend_query(self, monkeypatch):
+        monkeypatch.setattr("lmcache.integration.vllm.utils.torch_device_type", "cuda")
         stub_module(
             monkeypatch,
             "vllm.v1.attention.backends.utils",
             get_kv_cache_layout=lambda: "HND",
+        )
+        config = SimpleNamespace(cache_config=LegacyCacheConfig())
+        assert try_get_vllm_kv_cache_layout(config) == "HND"
+
+    def test_legacy_cpu_nhd_is_normalized_at_vllm_boundary(self, monkeypatch):
+        monkeypatch.setattr("lmcache.integration.vllm.utils.torch_device_type", "cpu")
+        stub_module(
+            monkeypatch,
+            "vllm.v1.attention.backends.utils",
+            get_kv_cache_layout=lambda: "NHD",
         )
         config = SimpleNamespace(cache_config=LegacyCacheConfig())
         assert try_get_vllm_kv_cache_layout(config) == "HND"
@@ -116,19 +127,17 @@ class TestTryGetVllmKVCacheLayout:
 class TestVllmLayoutHints:
     def test_hint_present_and_translated(self):
         config = make_vllm_config("LBHNC")
-        assert vllm_layout_hints(config) == {
-            "kv_layout": "HND",
-            "kv_layout_is_authoritative": True,
-        }
+        assert vllm_layout_hints(config) == {"kv_layout": "HND"}
 
-    def test_legacy_hint_is_not_marked_authoritative(self, monkeypatch):
+    def test_legacy_cpu_hint_is_normalized(self, monkeypatch):
+        monkeypatch.setattr("lmcache.integration.vllm.utils.torch_device_type", "cpu")
         stub_module(
             monkeypatch,
             "vllm.v1.attention.backends.utils",
             get_kv_cache_layout=lambda: "NHD",
         )
         config = SimpleNamespace(cache_config=LegacyCacheConfig())
-        assert vllm_layout_hints(config) == {"kv_layout": "NHD"}
+        assert vllm_layout_hints(config) == {"kv_layout": "HND"}
 
     def test_unresolved_layout_raises_through_hints(self):
         with pytest.raises(ValueError, match="resolved"):
@@ -143,15 +152,14 @@ class TestResolveVllmKVLayout:
         )
         return detectors_vllm.resolve_vllm_kv_layout
 
-    def test_cpu_backend_forces_head_contiguous(self, resolve):
-        assert resolve({"kv_layout": "NHD"}, cpu_attention_backend=True) == "HND"
-
-    def test_cpu_backend_honors_authoritative_layout(self, resolve):
-        hints = {"kv_layout": "NHD", "kv_layout_is_authoritative": True}
-        assert resolve(hints, cpu_attention_backend=True) == "NHD"
+    def test_cpu_backend_honors_explicit_layout(self, resolve):
+        assert resolve({"kv_layout": "NHD"}, cpu_attention_backend=True) == "NHD"
 
     def test_missing_hint_defaults_to_nhd(self, resolve):
         assert resolve({}, cpu_attention_backend=False) == "NHD"
+
+    def test_missing_cpu_hint_keeps_legacy_hnd_default(self, resolve):
+        assert resolve({}, cpu_attention_backend=True) == "HND"
 
     def test_hnd_hint_passes_through(self, resolve):
         assert resolve({"kv_layout": "HND"}, cpu_attention_backend=False) == "HND"
