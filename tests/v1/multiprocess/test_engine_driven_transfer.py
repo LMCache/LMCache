@@ -393,6 +393,69 @@ def test_create_transfer_context_force_lmcache_driven_mode() -> None:
     assert isinstance(context, LMCacheDrivenTransferContext)
 
 
+def test_lmcache_driven_preemption_waits_for_remote_store_futures() -> None:
+    """Handle-path flush waits on remote completion, not the worker device."""
+    # First Party
+    from lmcache.v1.multiprocess.transfer_context import (
+        LMCacheDrivenTransferContext,
+        worker_transfer,
+    )
+
+    context = LMCacheDrivenTransferContext()
+    registration_future = MagicMock(name="registration_future")
+    raw_store_future = MagicMock(name="raw_store_future")
+    pending = MagicMock(name="pending_store_future")
+    raw_store_future.to_device_future.return_value = pending
+    send_request = MagicMock(
+        name="send_request", side_effect=[registration_future, raw_store_future]
+    )
+    event_backend = MagicMock(name="event_backend")
+    event_backend.export_event.return_value = b"event"
+
+    with (
+        patch.object(
+            worker_transfer,
+            "get_event_ipc_backend",
+            return_value=event_backend,
+        ),
+        patch.object(worker_transfer, "wrap_kv_caches", return_value=[]),
+    ):
+        context.register(
+            instance_id=1,
+            kv_caches={"layer_0": torch.zeros(1)},
+            model_name="model",
+            world_size=1,
+            _blocks_in_chunk=1,
+            mq_client=MagicMock(name="mq_client"),
+            mq_timeout=2.5,
+            send_request=send_request,
+        )
+        context.submit_store(
+            _request_id="request",
+            key="key",
+            instance_id=1,
+            kv_caches={},
+            block_ids=[[0]],
+            event=MagicMock(name="event"),
+            _blocks_in_chunk=1,
+        )
+
+    context.flush_inflight_stores()
+
+    pending.result.assert_called_once_with(timeout=2.5)
+    context.flush_inflight_stores()
+    pending.result.assert_called_once()
+
+
+def test_lmcache_driven_preemption_without_stores_is_noop() -> None:
+    # First Party
+    from lmcache.v1.multiprocess.transfer_context import LMCacheDrivenTransferContext
+
+    context = LMCacheDrivenTransferContext()
+
+    context.flush_inflight_stores()
+
+
 def test_create_transfer_context_force_engine_driven_mode_on_cpu() -> None:
     """``mode='engine_driven'`` on CPU returns EngineDrivenTransferContext
     (data path; no wrapper-factory capability check is performed)."""

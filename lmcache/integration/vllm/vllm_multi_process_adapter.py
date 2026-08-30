@@ -15,7 +15,6 @@ import torch
 import zmq
 
 # First Party
-from lmcache import torch_dev
 from lmcache.integration.request_telemetry.factory import RequestTelemetryFactory
 from lmcache.integration.vllm.experimental import dispatch
 from lmcache.integration.vllm.utils import vllm_layout_hints
@@ -1978,8 +1977,6 @@ class LMCacheMPWorkerAdapter:
         if not self.is_healthy or self.transfer_ctx is None:
             return
         self.transfer_ctx.flush_inflight_stores()
-        # Force device sync here, compare to preemption, perf panelty is trivial
-        torch_dev.synchronize()
 
     def shutdown(self) -> None:
         """
