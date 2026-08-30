@@ -875,8 +875,8 @@ class TestReserveWrite:
 
         manager.close()
 
-    def test_reserve_write_out_of_memory(self, small_l1_config, large_layout):
-        """Test that reserve_write returns OUT_OF_MEMORY when allocation fails."""
+    def test_reserve_write_uses_available_prefix(self, small_l1_config, large_layout):
+        """Test that a partial prefix is retained after batch allocation fails."""
         manager = L1Manager(small_l1_config)
         keys = [make_object_key(i) for i in range(10)]
         is_temporary = [False] * 10
@@ -884,10 +884,12 @@ class TestReserveWrite:
         # Request more memory than available (8MB * 10 = 80MB > 64MB)
         result = manager.reserve_write(keys, is_temporary, large_layout)
 
-        # All keys should return OUT_OF_MEMORY
-        for key in keys:
-            assert result[key][0] == L1Error.OUT_OF_MEMORY
-            assert result[key][1] is None
+        statuses = [result[key][0] for key in keys]
+        num_success = statuses.count(L1Error.SUCCESS)
+        assert 0 < num_success < len(keys)
+        assert statuses == [L1Error.SUCCESS] * num_success + [L1Error.OUT_OF_MEMORY] * (
+            len(keys) - num_success
+        )
 
         manager.close()
 

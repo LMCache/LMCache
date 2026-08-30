@@ -463,7 +463,9 @@ class L1Manager:
 
         Errors:
             KEY_NOT_WRITABLE: The key exists but is not writable.
-            OUT_OF_MEMORY: Not enough memory to allocate for the object.
+            OUT_OF_MEMORY: Not enough memory to allocate for the object. When a
+                multi-key batch only partially fits, the longest allocatable
+                prefix succeeds and the remaining keys return this error.
         """
         need_to_allocate: list[tuple[ObjectKey, bool]] = []
         ret: dict[ObjectKey, L1OperationResult] = {}
@@ -501,6 +503,24 @@ class L1Manager:
             layout_desc, len(need_to_allocate)
         )
 
+        # A full-batch failure should not collapse a large L2-to-L1 restore to
+        # zero hits when most of its contiguous prefix still fits. Memory
+        # managers provide all-or-nothing batch allocation, so under the L1
+        # lock feasibility is monotonic and can be probed safely.
+        if err != L1Error.SUCCESS and len(need_to_allocate) > 1:
+            if allocated_objs:
+                self._memory_manager.free(allocated_objs)
+                allocated_objs = []
+            err, allocated_objs = self._allocate_largest_prefix(
+                layout_desc, len(need_to_allocate)
+            )
+            if err == L1Error.SUCCESS:
+                logger.warning(
+                    "Partial L1 allocation: %d/%d objects (prefix) allocated",
+                    len(allocated_objs),
+                    len(need_to_allocate),
+                )
+
         if err != L1Error.SUCCESS:
             for key, _ in need_to_allocate:
                 ret[key] = (L1Error.OUT_OF_MEMORY, None)
@@ -510,6 +530,8 @@ class L1Manager:
                 self._memory_manager.free(allocated_objs)
 
         else:
+            for key, _ in need_to_allocate[len(allocated_objs) :]:
+                ret[key] = (L1Error.OUT_OF_MEMORY, None)
             for (key, is_temp), mem_obj in zip(
                 need_to_allocate, allocated_objs, strict=False
             ):
@@ -532,6 +554,43 @@ class L1Manager:
             )
         )
         return ret
+
+    def _allocate_largest_prefix(
+        self, layout_desc: MemoryLayoutDesc, want: int
+    ) -> tuple[L1Error, list[MemoryObj]]:
+        """Allocate the largest prefix below a failed full-batch request.
+
+        Successful probes are released before the final allocation. This is
+        called only while the L1 manager lock is held, after ``want`` objects
+        failed to allocate, so fixed-layout batch feasibility is monotonic.
+
+        Args:
+            layout_desc: Memory layout shared by every requested object.
+            want: Size of the already-failed full batch.
+
+        Returns:
+            The final allocation result for the largest fitting prefix, or
+            ``OUT_OF_MEMORY`` with an empty list when no object fits.
+        """
+        low = 1
+        high = want - 1
+        largest = 0
+
+        while low <= high:
+            candidate = (low + high) // 2
+            err, objects = self._memory_manager.allocate(layout_desc, candidate)
+            if err == L1Error.SUCCESS:
+                largest = candidate
+                self._memory_manager.free(objects)
+                low = candidate + 1
+            else:
+                if objects:
+                    self._memory_manager.free(objects)
+                high = candidate - 1
+
+        if largest == 0:
+            return L1Error.OUT_OF_MEMORY, []
+        return self._memory_manager.allocate(layout_desc, largest)
 
     @l1_mgr_synchronized
     def finish_write(
