@@ -10,6 +10,7 @@ Covers:
 # Standard
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from types import SimpleNamespace
+from typing import Any
 import argparse
 import json
 import socket
@@ -34,16 +35,22 @@ from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
     RegisterEngineDrivenContextPayload,
 )
-from lmcache.v1.multiprocess.mq import (
+from lmcache.v1.multiprocess.grpc import (
     MultiprocessGrpcClient,
     MultiprocessGrpcServer,
 )
-from lmcache.v1.multiprocess.protocol import RPC, RpcMethod, get_payload_classes
-from lmcache.v1.multiprocess.protocols.base import HandlerType
-from lmcache.v1.multiprocess.protocols.engine import (
-    RegisterEngineDrivenContextResponse,
+from lmcache.v1.multiprocess.protocol import (
+    RPC,
+    HandlerType,
+    RpcMethod,
+    get_payload_classes,
+)
+from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
+    lmcache_mp_pb2 as _pb2_typed,
 )
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
+
+lmcache_mp_pb2: Any = _pb2_typed
 
 
 def _make_shape_desc(
@@ -361,7 +368,7 @@ class TestQueryChecksum:
 
 @pytest.fixture
 def router_endpoint() -> str:
-    """Allocate an ephemeral endpoint for a gRPC message queue server."""
+    """Allocate an ephemeral endpoint for an mp-mode gRPC server."""
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
@@ -694,11 +701,12 @@ class _RegisterEngineDrivenRouter:
     def stop(self) -> None:
         self._server.close()
 
-    def _register(
-        self, payload: RegisterEngineDrivenContextPayload
-    ) -> RegisterEngineDrivenContextResponse:
+    def _register(self, payload: RegisterEngineDrivenContextPayload) -> Any:
         self.last_payload = payload
-        return RegisterEngineDrivenContextResponse(shm_name="", pool_size=0)
+        return lmcache_mp_pb2.RegisterKvCacheEngineDrivenContextResponse(
+            shm_name="",
+            pool_size=0,
+        )
 
 
 class TestRegisterKVCacheMLA:

@@ -30,7 +30,7 @@ from lmcache.v1.multiprocess.protocol import (
     get_grpc_method_options,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
-    lmcache_mq_pb2 as _pb2_typed,
+    lmcache_mp_pb2 as _pb2_typed,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl.proto_codec import (
     RequestDecoder,
@@ -59,9 +59,9 @@ from lmcache.v1.multiprocess.transport.grpc_impl.proto_codec import (
 # Message classes come out of the protobuf descriptor pool at runtime
 # and are invisible to static analysis; rebind through Any so mypy
 # does not chase every attribute lookup.
-lmcache_mq_pb2: Any = _pb2_typed
+lmcache_mp_pb2: Any = _pb2_typed
 grpc: Any = None
-lmcache_mq_pb2_grpc: Any = None
+lmcache_mp_pb2_grpc: Any = None
 _grpc_runtime_lock = threading.Lock()
 
 logger = init_logger(__name__)
@@ -82,7 +82,7 @@ _GRPC_CLIENT_ID_METADATA_KEY = "lmcache-client-id-bin"
 
 def _ensure_grpc_runtime() -> None:
     """Load gRPC and generated service bindings on first transport use."""
-    global grpc, lmcache_mq_pb2_grpc
+    global grpc, lmcache_mp_pb2_grpc
 
     if grpc is not None:
         return
@@ -95,10 +95,10 @@ def _ensure_grpc_runtime() -> None:
 
         # First Party
         from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
-            lmcache_mq_pb2_grpc as pb2_grpc_module,
+            lmcache_mp_pb2_grpc as pb2_grpc_module,
         )
 
-        lmcache_mq_pb2_grpc = pb2_grpc_module
+        lmcache_mp_pb2_grpc = pb2_grpc_module
         grpc = grpc_module
 
 
@@ -252,7 +252,7 @@ class MultiprocessGrpcClient:
             compression=compression,
         )
         self._stubs = {
-            service_name: getattr(lmcache_mq_pb2_grpc, f"{service_name}Stub")(
+            service_name: getattr(lmcache_mp_pb2_grpc, f"{service_name}Stub")(
                 self._channel
             )
             for service_name in get_service_names()
@@ -834,7 +834,7 @@ class MultiprocessGrpcServer:
         servicer = _GrpcServicer(self.handlers)
         for service_name in sorted(get_service_names()):
             add_servicer = getattr(
-                lmcache_mq_pb2_grpc,
+                lmcache_mp_pb2_grpc,
                 f"add_{service_name}Servicer_to_server",
             )
             add_servicer(servicer, server)

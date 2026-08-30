@@ -59,7 +59,7 @@ from lmcache.v1.multiprocess.config import (  # noqa: E402
     CoordinatorConfig,
     P2PConfig,
 )
-from lmcache.v1.multiprocess.mq import MultiprocessGrpcServer  # noqa: E402
+from lmcache.v1.multiprocess.grpc import MultiprocessGrpcServer  # noqa: E402
 from lmcache.v1.multiprocess.services.p2p_controller import P2PController  # noqa: E402
 from lmcache.v1.multiprocess.services.rpc_services import P2PServiceImpl  # noqa: E402
 

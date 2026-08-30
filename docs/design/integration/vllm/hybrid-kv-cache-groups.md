@@ -184,4 +184,4 @@ no cross-backend cache sharing).
 | Group metadata edits (Mamba, sub-paged attention) | `lmcache/integration/vllm/kv_cache_group_edits.py` |
 | Register / store / retrieve | `lmcache/integration/vllm/{lmcache_mp_connector,vllm_multi_process_adapter}.py` |
 | Server GPU context / transfer | `lmcache/v1/multiprocess/{gpu_context,services/lmcache_driven_transfer}.py` |
-| ZMQ protocol | `lmcache/v1/multiprocess/protocols/engine.py` |
+| gRPC protocol | `lmcache/v1/multiprocess/transport/grpc_impl/protos/*.proto` |

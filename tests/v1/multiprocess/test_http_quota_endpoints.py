@@ -4,7 +4,7 @@ Unit tests for the quota CRUD HTTP endpoints.
 
 Uses ``fastapi.testclient.TestClient`` against the module's ``app``
 with a hand-built stub engine on ``app.state.engine`` — bypasses the
-lifespan so we don't spin up the full ZMQ cache server. The stub
+lifespan so we don't spin up the full MP cache server. The stub
 exposes just the two attributes the endpoints touch:
 ``storage_manager.quota_manager`` and
 ``storage_manager.get_usage_bytes_by_cache_salt()``.

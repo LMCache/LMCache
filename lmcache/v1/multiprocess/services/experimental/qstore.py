@@ -54,7 +54,7 @@ class QStoreService(InstanceLivenessTarget):
         self._ctx = ctx
         self._q_contexts: dict[int, ContextEntry] = {}
         # Guards all reads/writes of _q_contexts. The reaper mutates it
-        # off the MQ main loop, so register/unregister/store and
+        # off the gRPC dispatch path, so register/unregister/store and
         # report_status all serialize through this lock. Held only for dict
         # ops -- never across context creation, layout-registry calls, or
         # empty_cache (leaf-lock invariant: no thread holds two locks).

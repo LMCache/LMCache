@@ -12,8 +12,8 @@ Run as a module so relative paths resolve correctly::
 
 Requires the pinned ``requirements/proto.txt`` dependencies. The generated
 files are patched so their internal imports use the full package path and so
-mypy skips them. This script also writes compatibility aggregate modules named
-``lmcache_mq_pb2`` and ``lmcache_mq_pb2_grpc`` so the runtime can consume one
+mypy skips them. This script also writes aggregate modules named
+``lmcache_mp_pb2`` and ``lmcache_mp_pb2_grpc`` so the runtime can consume one
 descriptor surface even though the source schema is split by service.
 """
 
@@ -26,8 +26,8 @@ import sys
 
 HERE = Path(__file__).resolve().parent
 PROTO_DIR = HERE.parent / "protos"
-AGGREGATE_PB2 = HERE / "lmcache_mq_pb2.py"
-AGGREGATE_PB2_GRPC = HERE / "lmcache_mq_pb2_grpc.py"
+AGGREGATE_PB2 = HERE / "lmcache_mp_pb2.py"
+AGGREGATE_PB2_GRPC = HERE / "lmcache_mp_pb2_grpc.py"
 
 SPDX_HEADER = "# SPDX-License-Identifier: Apache-2.0\n"
 MYPY_IGNORE = "# mypy: ignore-errors\n"
@@ -265,9 +265,9 @@ def main() -> int:
             "-c",
             (
                 "from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen "
-                "import lmcache_mq_pb2, lmcache_mq_pb2_grpc; "
-                "assert lmcache_mq_pb2.DESCRIPTOR.services_by_name; "
-                "assert hasattr(lmcache_mq_pb2_grpc, 'EngineServiceStub')"
+                "import lmcache_mp_pb2, lmcache_mp_pb2_grpc; "
+                "assert lmcache_mp_pb2.DESCRIPTOR.services_by_name; "
+                "assert hasattr(lmcache_mp_pb2_grpc, 'EngineServiceStub')"
             ),
         ],
     )

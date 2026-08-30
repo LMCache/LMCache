@@ -25,7 +25,7 @@ from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
     KVCache,
 )
-from lmcache.v1.multiprocess.mq import MultiprocessGrpcClient
+from lmcache.v1.multiprocess.grpc import MultiprocessGrpcClient
 from lmcache.v1.multiprocess.server import run_cache_server
 
 # Configuration constants
@@ -270,11 +270,11 @@ def server_process() -> Generator[mp.Process, None, None]:
 @pytest.fixture(scope="module")
 def zmq_context() -> Generator[zmq.Context, None, None]:
     """
-    Fixture that provides a ZMQ context for the test module.
+    Fixture that provides a legacy constructor context for the test module.
     """
     context = zmq.Context.instance()
     yield context
-    # Context cleanup is handled by ZMQ
+    # Context cleanup is handled by the legacy context owner.
 
 
 @pytest.fixture(scope="function")

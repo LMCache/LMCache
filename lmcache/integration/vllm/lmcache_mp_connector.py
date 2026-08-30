@@ -250,9 +250,9 @@ def build_parallel_strategy_from_vllm_config(
 
 
 def _ensure_transport_scheme(server_url: str) -> str:
-    """Ensure a MessageQueue server URL carries a transport scheme.
+    """Ensure an mp-mode server URL carries a transport scheme.
 
-    The mp-mode message queue now dispatches over gRPC exclusively. Users
+    The mp-mode control plane now dispatches over gRPC exclusively. Users
     still write ``lmcache.mp.host`` as a plain IP or hostname, so we
     prepend ``grpc://`` when the caller did not spell out a scheme; an
     already-qualified ``grpc://<host>`` is left untouched.
@@ -282,7 +282,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
     - lmcache.mp.host: the host of the LMCache server.
     - lmcache.mp.port: the port of the LMCache server.
 
-    - lmcache.mp.mq_timeout: timeout (seconds) for message queue requests.
+    - lmcache.mp.mq_timeout: timeout (seconds) for mp-mode gRPC requests.
     - lmcache.mp.heartbeat_interval: interval (seconds) between server
       heartbeat pings.
     - lmcache.mp.eager_prefetch: submit the LMCache lookup when a request

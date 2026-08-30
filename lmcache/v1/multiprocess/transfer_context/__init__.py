@@ -17,7 +17,7 @@ from .base import (
     scatter_cpu_to_paged_kv,
 )
 from .pickle import EngineDrivenContextPickle
-from .shm import EngineDrivenContextShm, ShmSlotDescriptor
+from .shm import EngineDrivenContextShm
 from .worker_transfer import (
     EngineDrivenTransferContext,
     LMCacheDrivenTransferContext,
@@ -35,7 +35,6 @@ __all__ = [
     "EngineDrivenContextMetadata",
     "EngineDrivenContextPickle",
     "EngineDrivenContextShm",
-    "ShmSlotDescriptor",
     "TransferContext",
     "compute_kv_layout",
     "create_engine_driven_context",

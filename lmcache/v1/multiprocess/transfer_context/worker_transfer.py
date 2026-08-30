@@ -19,8 +19,7 @@ from lmcache.v1.gpu_connector.utils import LayoutHints, get_device
 from lmcache.v1.multiprocess.custom_types import RegisterEngineDrivenContextPayload
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
-from lmcache.v1.multiprocess.mq import MultiprocessGrpcClient
-from lmcache.v1.multiprocess.protocols.engine import RegisterEngineDrivenContextResponse
+from lmcache.v1.multiprocess.grpc import MultiprocessGrpcClient
 from lmcache.v1.multiprocess.transfer_context.base import (
     EngineDrivenContext,
     EngineDrivenContextMetadata,
@@ -391,7 +390,7 @@ class TransferContext(ABC):
 
 
 class LMCacheDrivenTransferContext(TransferContext):
-    """LMCache-driven IPC + MQ future transport context.
+    """LMCache-driven IPC plus gRPC future transport context.
 
     In this mode the serving engine provides device handles (accelerator IPC,
     or SHM wrappers for CPU with IPC-like semantics) and the LMCache server
@@ -424,7 +423,7 @@ class LMCacheDrivenTransferContext(TransferContext):
             model_name: Model identifier used by the server.
             world_size: Tensor-parallel world size.
             _blocks_in_chunk: Engine blocks per LMCache chunk.
-            mq_client: Message-queue client used for requests.
+            mq_client: gRPC client used for requests.
             mq_timeout: Timeout for the registration response.
             layout_hints: Optional KV-layout metadata.
             engine_group_infos: Optional engine KV-group metadata.
@@ -686,11 +685,8 @@ class EngineDrivenTransferContext(TransferContext):
             )
         )
         response = future.result(timeout=mq_timeout)
-        shm_name = ""
-        pool_size = 0
-        if isinstance(response, RegisterEngineDrivenContextResponse):
-            shm_name = response.shm_name
-            pool_size = response.pool_size
+        shm_name = str(getattr(response, "shm_name", ""))
+        pool_size = int(getattr(response, "pool_size", 0) or 0)
 
         metadata = EngineDrivenContextMetadata(
             layout_desc=layout_desc,

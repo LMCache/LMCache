@@ -3,17 +3,17 @@
 
 # Standard
 from typing import Any, Callable, ClassVar, TypeVar
+import enum
 import re
 
 # First Party
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.protocols.base import HandlerType
 from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
-    lmcache_mq_pb2 as _pb2_typed,
+    lmcache_mp_pb2 as _pb2_typed,
 )
 
 # Generated protobuf classes are dynamic and opaque to static analysis.
-lmcache_mq_pb2: Any = _pb2_typed
+lmcache_mp_pb2: Any = _pb2_typed
 
 # Type aliases kept for older callers.
 InstanceID = int
@@ -23,6 +23,20 @@ F = TypeVar("F", bound=Callable[..., Any])
 
 _GRPC_HANDLER_TYPE_ATTR = "__lmcache_grpc_handler_type__"
 _GRPC_REQUIRES_CLIENT_AFFINITY_ATTR = "__lmcache_grpc_requires_client_affinity__"
+
+
+class HandlerType(enum.Enum):
+    """
+    Defines how an RPC handler should be executed.
+
+    - SYNC: Handler runs directly in the gRPC worker thread.
+    - BLOCKING: Handler runs in a dedicated thread pool.
+    - NON_BLOCKING: Reserved for future async handlers.
+    """
+
+    SYNC = enum.auto()
+    BLOCKING = enum.auto()
+    NON_BLOCKING = enum.auto()
 
 
 def grpc_method(
@@ -142,7 +156,7 @@ def _method_name_to_client_method_name(method_name: str) -> str:
 def _build_rpc_methods() -> tuple[RpcMethod, ...]:
     methods: list[RpcMethod] = []
     seen_method_names: set[str] = set()
-    for service in lmcache_mq_pb2.DESCRIPTOR.services_by_name.values():
+    for service in lmcache_mp_pb2.DESCRIPTOR.services_by_name.values():
         for method in service.methods:
             if method.name in seen_method_names:
                 raise RuntimeError(f"Duplicate gRPC method name: {method.name}")

@@ -109,14 +109,22 @@ message PrepareStoreRequest {
   int64 instance_id = 2;
 }
 
+message ShmSlotDescriptor {
+  int64 offset = 1;
+  int64 length = 2;
+  repeated int64 shape = 3;
+  string dtype = 4;
+}
+
 message PrepareStoreResponse {
-  bytes encoded_context = 1;
+  repeated ShmSlotDescriptor slots = 1;
+  repeated int64 chunk_indices = 2;
 }
 
 message CommitStoreRequest {
   IpcCacheServerKey key = 1;
   int64 instance_id = 2;
-  bytes encoded_context = 3;
+  bytes data = 3;
 }
 
 message CommitStoreResponse {
@@ -131,7 +139,7 @@ message PrepareRetrieveRequest {
 message PrepareRetrieveResponse {
   bool success = 1;
   bytes data = 2;
-  bytes encoded_context = 3;
+  repeated ShmSlotDescriptor slots = 3;
 }
 
 message CommitRetrieveRequest {

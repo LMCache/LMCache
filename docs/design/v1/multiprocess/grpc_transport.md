@@ -66,10 +66,10 @@ Main source files:
 | File | Role |
 |---|---|
 | `lmcache/v1/multiprocess/transport/grpc_impl/protos/*.proto` | Source of truth for gRPC services, methods, requests, and responses. Each service has its own proto file; shared messages live in `common.proto`. |
-| `lmcache/v1/multiprocess/transport/grpc_impl/_proto_gen/_generate.py` | Local stub generation helper. It scans `protos/*.proto`, generates service-specific stubs, and writes compatibility aggregate modules. Generated `*_pb2.py` files are not checked into Git. |
+| `lmcache/v1/multiprocess/transport/grpc_impl/_proto_gen/_generate.py` | Local stub generation helper. It scans `protos/*.proto`, generates service-specific stubs, and writes aggregate modules. Generated `*_pb2.py` files are not checked into Git. |
 | `lmcache/v1/multiprocess/protocol.py` | Derives `RpcMethod` tokens and client method names from the protobuf descriptor. Also provides the `@grpc_method` scheduling decorator. |
 | `lmcache/v1/multiprocess/transport/grpc_impl/proto_codec.py` | Generic protobuf/Python value conversion. It has no per-RPC registry. |
-| `lmcache/v1/multiprocess/mq.py` | Implements the gRPC client, server, dispatch, futures, and thread-pool assignment. |
+| `lmcache/v1/multiprocess/grpc.py` | Implements the gRPC client, server, dispatch, futures, and thread-pool assignment. |
 | `lmcache/v1/multiprocess/services/rpc_services.py` | Concrete Python implementations of generated gRPC service surfaces. |
 | `lmcache/v1/multiprocess/services/*.py` | Backend service logic, such as lookup, management, transfer, blend, and P2P controller behavior. |
 | `lmcache/v1/multiprocess/server.py` | Builds concrete service implementations and registers them on the gRPC server. |
@@ -148,8 +148,9 @@ A call to `client.lookup(key, tp_size)` does the following:
 4. The generated gRPC stub sends `EngineServiceStub.Lookup.future(...)` with
    `wait_for_ready=True`. Calls submitted while the daemon is starting remain
    pending until the server becomes reachable.
-5. The completion callback decodes the protobuf response into the Python shape
-   expected by current callers and completes an LMCache `MessagingFuture`.
+5. The completion callback completes an LMCache `MessagingFuture`. Empty
+   responses become `None`, legacy single-field responses still unwrap to that
+   field, and structured multi-field responses stay protobuf-native.
 
 The caller only sees the LMCache future:
 
@@ -267,6 +268,11 @@ Prefer concrete protobuf fields:
   fields.
 - Prefer concrete messages over opaque bytes.
 
+For example, engine-driven SHM transfer returns concrete
+`ShmSlotDescriptor` messages plus `chunk_indices` directly in
+`PrepareStoreResponse` / `PrepareRetrieveResponse`; it no longer wraps a
+Python `dict` in an opaque bytes field.
+
 Regenerate local stubs for validation:
 
 ```bash
@@ -275,8 +281,8 @@ python -m lmcache.v1.multiprocess.transport.grpc_impl._proto_gen._generate
 ```
 
 The generator emits service-specific modules such as `engine_service_pb2.py`
-and `engine_service_pb2_grpc.py`, plus compatibility aggregate modules named
-`lmcache_mq_pb2.py` and `lmcache_mq_pb2_grpc.py`. All generated modules are
+and `engine_service_pb2_grpc.py`, plus aggregate modules named
+`lmcache_mp_pb2.py` and `lmcache_mp_pb2_grpc.py`. All generated modules are
 local build artifacts and are not checked into Git.
 
 ### 2. Implement the Service Method

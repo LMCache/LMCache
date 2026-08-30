@@ -661,7 +661,7 @@ class LMCacheDrivenTransferService(InstanceLivenessTarget):
         self._ctx = ctx
         self._cache_contexts: dict[int, ContextEntry] = {}
         # Guards all reads/writes of _cache_contexts. The reaper mutates it
-        # off the MQ main loop, so register/unregister/store/retrieve and
+        # off the gRPC dispatch path, so register/unregister/store/retrieve and
         # report_status all serialize through this lock. Held only for dict
         # ops -- never across context creation, layout-registry calls, or
         # empty_cache (leaf-lock invariant: no thread holds two locks).
@@ -917,7 +917,7 @@ class LMCacheDrivenTransferService(InstanceLivenessTarget):
         # NOOP-register: an already-registered instance (e.g. a recovering
         # worker re-registering on its first ping) refreshes its last-seen
         # time so a stale entry is not reaped right after recovery. REGISTER
-        # is SYNC-serialized on the MQ main loop, so it is the sole inserter.
+        # is SYNC-serialized on the gRPC dispatch path, so it is the sole inserter.
         with self._lock:
             existing = self._cache_contexts.get(instance_id)
             if existing is not None:
@@ -1044,7 +1044,7 @@ class LMCacheDrivenTransferService(InstanceLivenessTarget):
             # The worker can reconnect to a replacement server before its next
             # registration probe. No device work was submitted in that window,
             # so return an empty completion-event handle and a terminal False
-            # response instead of leaving the MQ future unanswered. Echoing the
+            # response instead of leaving the transport future unanswered. Echoing the
             # producer handle would make the originating process import its own
             # IPC event, which is invalid on HIP.
             logger.warning(
@@ -1293,7 +1293,7 @@ class LMCacheDrivenTransferService(InstanceLivenessTarget):
             except Exception:
                 # A cleanup failure must never suppress the terminal response:
                 # the client otherwise waits forever because blocking-handler
-                # exceptions are only logged by the MQ server.
+                # exceptions are only logged by the gRPC server.
                 logger.exception(
                     "Failed to release RETRIEVE locks for unregistered "
                     "GPU instance ID %d",

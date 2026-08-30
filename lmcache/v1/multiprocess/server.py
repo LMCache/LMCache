@@ -48,7 +48,7 @@ from lmcache.v1.multiprocess.config import (
     parse_args_to_mp_server_config,
 )
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
-from lmcache.v1.multiprocess.mq import MultiprocessGrpcServer
+from lmcache.v1.multiprocess.grpc import MultiprocessGrpcServer
 from lmcache.v1.multiprocess.service import InstanceLivenessTarget
 from lmcache.v1.multiprocess.services.engine_driven_transfer import (
     EngineDrivenTransferService,

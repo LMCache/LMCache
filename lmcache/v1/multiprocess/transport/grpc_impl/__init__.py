@@ -3,6 +3,6 @@
 
 Generated stubs live in ``_proto_gen`` and descriptor-driven protobuf adapters
 live in ``proto_codec``. The old ``GrpcClientTransport`` /
-``GrpcServerTransport`` classes are gone; ``lmcache.v1.multiprocess.mq``
+``GrpcServerTransport`` classes are gone; ``lmcache.v1.multiprocess.grpc``
 contains only client/server transport control flow.
 """

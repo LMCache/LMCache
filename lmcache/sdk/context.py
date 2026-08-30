@@ -26,7 +26,7 @@ from lmcache.v1.gpu_connector.utils import (
     get_num_heads,
 )
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.mq import MultiprocessGrpcClient
+from lmcache.v1.multiprocess.grpc import MultiprocessGrpcClient
 from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
     EngineDrivenTransferContext,
     create_transfer_context,

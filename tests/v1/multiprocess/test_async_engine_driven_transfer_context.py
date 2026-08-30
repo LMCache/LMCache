@@ -363,7 +363,7 @@ def test_commit_store_serialized_by_commit_lock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Concurrent commit_store calls must be serialized by _commit_lock to
-    protect ZMQ socket access."""
+    protect the ordered prepare/commit transfer contract."""
     gather_gate = threading.Event()
     gather_gate.set()
     concurrent_commits = threading.Event()

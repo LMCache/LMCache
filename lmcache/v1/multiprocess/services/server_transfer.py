@@ -15,12 +15,10 @@ import torch
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.protocols.engine import (
-    PrepareRetrieveResponse,
-    PrepareStoreResponse,
-)
 from lmcache.v1.multiprocess.transfer_context.base import EngineDrivenContextMetadata
-from lmcache.v1.multiprocess.transfer_context.shm import ShmSlotDescriptor
+from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
+    lmcache_mp_pb2 as _pb2_typed,
+)
 
 if TYPE_CHECKING:
     # First Party
@@ -28,10 +26,29 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+# Generated protobuf classes are dynamic and opaque to static analysis.
+lmcache_mp_pb2: Any = _pb2_typed
+
 
 def _dtype_to_name(dtype: torch.dtype) -> str:
     """Return a stable torch dtype name without module prefix."""
     return str(dtype).split(".")[-1]
+
+
+def _append_shm_slot(
+    slots: Any,
+    *,
+    offset: int,
+    length: int,
+    shape: torch.Size,
+    dtype: torch.dtype,
+) -> None:
+    """Append one shared-memory slot descriptor to a protobuf container."""
+    slot = slots.add()
+    slot.offset = int(offset)
+    slot.length = int(length)
+    slot.shape.extend(int(dim) for dim in shape)
+    slot.dtype = _dtype_to_name(dtype)
 
 
 def create_transfer_strategy(
@@ -92,7 +109,7 @@ class TransferStrategy(abc.ABC):
         instance_id: int,
         context: EngineDrivenContextMetadata,
         resolve_obj_keys: Callable[[IPCCacheServerKey], list[ObjectKey]],
-    ) -> PrepareStoreResponse:
+    ) -> Any:
         """Prepare destination resources for a store request.
 
         Args:
@@ -133,7 +150,7 @@ class TransferStrategy(abc.ABC):
         key: IPCCacheServerKey,
         instance_id: int,
         resolve_obj_keys: Callable[[IPCCacheServerKey], list[ObjectKey]],
-    ) -> PrepareRetrieveResponse:
+    ) -> Any:
         """Prepare source resources for a retrieve request.
 
         Args:
@@ -188,12 +205,12 @@ class PickleTransferStrategy(TransferStrategy):
         instance_id: int,
         context: EngineDrivenContextMetadata,
         resolve_obj_keys: Callable[[IPCCacheServerKey], list[ObjectKey]],
-    ) -> PrepareStoreResponse:
+    ) -> Any:
         """Return empty store context for pickle mode.
 
         Pickle transport does not pre-allocate SHM slots during prepare.
         """
-        return PrepareStoreResponse(context={})
+        return lmcache_mp_pb2.PrepareStoreResponse()
 
     def commit_store(
         self,
@@ -239,7 +256,7 @@ class PickleTransferStrategy(TransferStrategy):
         key: IPCCacheServerKey,
         instance_id: int,
         resolve_obj_keys: Callable[[IPCCacheServerKey], list[ObjectKey]],
-    ) -> PrepareRetrieveResponse:
+    ) -> Any:
         """Read prefetched objects and return serialized pickle payload."""
         obj_keys = resolve_obj_keys(key)
         prefetched_keys: list[ObjectKey] = []
@@ -247,17 +264,15 @@ class PickleTransferStrategy(TransferStrategy):
             read_ctx = self._storage_manager.read_prefetched_results(obj_keys)
             with read_ctx as maybe_memory_objs:
                 if not maybe_memory_objs or len(maybe_memory_objs) != len(obj_keys):
-                    return PrepareRetrieveResponse(success=False, data=b"", context={})
+                    return lmcache_mp_pb2.PrepareRetrieveResponse(success=False)
                 prefetched_keys = obj_keys[: len(maybe_memory_objs)]
                 chunks = []
                 for memory_obj in maybe_memory_objs:
                     if memory_obj.tensor is None:
-                        return PrepareRetrieveResponse(
-                            success=False, data=b"", context={}
-                        )
+                        return lmcache_mp_pb2.PrepareRetrieveResponse(success=False)
                     chunks.append(memory_obj.tensor.cpu().clone())
-                return PrepareRetrieveResponse(
-                    success=True, data=pickle.dumps(chunks), context={}
+                return lmcache_mp_pb2.PrepareRetrieveResponse(
+                    success=True, data=pickle.dumps(chunks)
                 )
         finally:
             if prefetched_keys:
@@ -315,7 +330,7 @@ class ShmTransferStrategy(TransferStrategy):
         instance_id: int,
         context: EngineDrivenContextMetadata,
         resolve_obj_keys: Callable[[IPCCacheServerKey], list[ObjectKey]],
-    ) -> PrepareStoreResponse:
+    ) -> Any:
         """Reserve SHM-backed objects and return slot descriptors.
 
         Returns:
@@ -325,7 +340,7 @@ class ShmTransferStrategy(TransferStrategy):
         reserved = self._storage_manager.reserve_write(
             obj_keys, context.layout_desc, "new"
         )
-        slots: list[dict[str, Any]] = []
+        response = lmcache_mp_pb2.PrepareStoreResponse()
         chunk_indices: list[int] = []
         reserved_keys: list[ObjectKey] = []
         try:
@@ -333,13 +348,12 @@ class ShmTransferStrategy(TransferStrategy):
                 memory_obj = reserved.get(obj_key)
                 if memory_obj is None or memory_obj.tensor is None:
                     continue
-                slots.append(
-                    ShmSlotDescriptor(
-                        offset=memory_obj.shm_offset,
-                        length=memory_obj.shm_byte_length,
-                        shape=list(memory_obj.tensor.shape),
-                        dtype=_dtype_to_name(memory_obj.tensor.dtype),
-                    ).to_dict()
+                _append_shm_slot(
+                    response.slots,
+                    offset=memory_obj.shm_offset,
+                    length=memory_obj.shm_byte_length,
+                    shape=memory_obj.tensor.shape,
+                    dtype=memory_obj.tensor.dtype,
                 )
                 chunk_indices.append(idx)
                 reserved_keys.append(obj_key)
@@ -351,13 +365,12 @@ class ShmTransferStrategy(TransferStrategy):
             if unused_keys:
                 self._storage_manager.finish_write(unused_keys)
         if not reserved_keys:
-            return PrepareStoreResponse(context={"slots": [], "chunk_indices": []})
+            return response
         transfer_key = self._transfer_key_factory(key, instance_id)
         with self._pending_lock:
             self._pending_writes[transfer_key] = reserved_keys
-        return PrepareStoreResponse(
-            context={"slots": slots, "chunk_indices": chunk_indices}
-        )
+        response.chunk_indices.extend(chunk_indices)
+        return response
 
     def commit_store(
         self,
@@ -394,7 +407,7 @@ class ShmTransferStrategy(TransferStrategy):
         key: IPCCacheServerKey,
         instance_id: int,
         resolve_obj_keys: Callable[[IPCCacheServerKey], list[ObjectKey]],
-    ) -> PrepareRetrieveResponse:
+    ) -> Any:
         """Read SHM objects and return slot descriptors for worker access."""
         obj_keys = resolve_obj_keys(key)
         shm_prefetched_keys, shm_memory_objs = self._storage_manager.unsafe_read(
@@ -407,24 +420,23 @@ class ShmTransferStrategy(TransferStrategy):
         ):
             if shm_prefetched_keys:
                 self._storage_manager.finish_read_prefetched(shm_prefetched_keys)
-            return PrepareRetrieveResponse(success=False, data=b"", context={})
-        slots: list[dict[str, Any]] = []
+            return lmcache_mp_pb2.PrepareRetrieveResponse(success=False)
+        response = lmcache_mp_pb2.PrepareRetrieveResponse(success=True)
         for memory_obj in shm_memory_objs:
             if memory_obj.tensor is None:
                 self._storage_manager.finish_read_prefetched(shm_prefetched_keys)
-                return PrepareRetrieveResponse(success=False, data=b"", context={})
-            slots.append(
-                ShmSlotDescriptor(
-                    offset=memory_obj.shm_offset,
-                    length=memory_obj.shm_byte_length,
-                    shape=list(memory_obj.tensor.shape),
-                    dtype=_dtype_to_name(memory_obj.tensor.dtype),
-                ).to_dict()
+                return lmcache_mp_pb2.PrepareRetrieveResponse(success=False)
+            _append_shm_slot(
+                response.slots,
+                offset=memory_obj.shm_offset,
+                length=memory_obj.shm_byte_length,
+                shape=memory_obj.tensor.shape,
+                dtype=memory_obj.tensor.dtype,
             )
         transfer_key = self._transfer_key_factory(key, instance_id)
         with self._pending_lock:
             self._pending_reads[transfer_key] = shm_prefetched_keys
-        return PrepareRetrieveResponse(success=True, data=b"", context={"slots": slots})
+        return response
 
     def commit_retrieve(
         self,

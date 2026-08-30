@@ -18,20 +18,20 @@ from lmcache.v1.distributed.storage_manager import PrefetchHandle
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.protocol import (
     RPC,
+    HandlerType,
     RpcMethod,
     get_grpc_method_options,
     get_payload_classes,
     get_response_class,
     grpc_method,
 )
-from lmcache.v1.multiprocess.protocols.base import HandlerType
 from lmcache.v1.multiprocess.services.lookup import EngineLookupService, _PrefetchJob
 from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
-    lmcache_mq_pb2,
+    lmcache_mp_pb2,
 )
 
 # Test helpers
-from tests.v1.multiprocess.test_mq import (
+from tests.v1.multiprocess.test_grpc_client_server import (
     MessageQueueTestHelper,
 )
 
@@ -48,13 +48,13 @@ def test_query_prefetch_lookup_hits_is_descriptor_rpc_method():
 def test_query_prefetch_lookup_hits_payload_classes():
     """QUERY_PREFETCH_LOOKUP_HITS payload is the generated request."""
     payload_classes = get_payload_classes(RPC.QueryPrefetchLookupHits)
-    assert payload_classes == [lmcache_mq_pb2.QueryPrefetchLookupHitsRequest]
+    assert payload_classes == [lmcache_mp_pb2.QueryPrefetchLookupHitsRequest]
 
 
 def test_query_prefetch_lookup_hits_response_class():
     """QUERY_PREFETCH_LOOKUP_HITS response is the generated response."""
     response_class = get_response_class(RPC.QueryPrefetchLookupHits)
-    assert response_class is lmcache_mq_pb2.QueryPrefetchLookupHitsResponse
+    assert response_class is lmcache_mp_pb2.QueryPrefetchLookupHitsResponse
 
 
 def test_query_prefetch_lookup_hits_handler_type():
@@ -66,7 +66,7 @@ def test_query_prefetch_lookup_hits_handler_type():
 
 
 # ============================================================================
-# Message-queue round-trip test
+# gRPC round-trip test
 # ============================================================================
 
 
@@ -77,7 +77,7 @@ def _query_lookup_hits_handler(request_id: str) -> int | None:
     return 42
 
 
-def test_mq_query_prefetch_lookup_hits():
+def test_grpc_query_prefetch_lookup_hits():
     """Test MessageQueue with QUERY_PREFETCH_LOOKUP_HITS request type."""
     helper = MessageQueueTestHelper(server_url="grpc://127.0.0.1:5575")
     helper.register_handler(RPC.QueryPrefetchLookupHits, _query_lookup_hits_handler)
@@ -96,7 +96,7 @@ def _query_lookup_hits_none_handler(request_id: str) -> int | None:
     return None
 
 
-def test_mq_query_prefetch_lookup_hits_none_response():
+def test_grpc_query_prefetch_lookup_hits_none_response():
     """Test MessageQueue returns None when lookup is still in progress."""
     helper = MessageQueueTestHelper(server_url="grpc://127.0.0.1:5576")
     helper.register_handler(

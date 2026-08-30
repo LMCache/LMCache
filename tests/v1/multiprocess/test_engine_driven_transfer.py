@@ -21,17 +21,15 @@ from lmcache.v1.multiprocess.posix_shm import (
     shm_open_pool_as_mmap,
     shm_unlink,
 )
-from lmcache.v1.multiprocess.protocols.engine import (
-    PrepareRetrieveResponse,
-    PrepareStoreResponse,
-    RegisterEngineDrivenContextResponse,
-)
 from lmcache.v1.multiprocess.transfer_context.base import (
     EngineDrivenContextMetadata,
     create_engine_driven_context,
 )
 from lmcache.v1.multiprocess.transfer_context.pickle import EngineDrivenContextPickle
 from lmcache.v1.multiprocess.transfer_context.shm import EngineDrivenContextShm
+from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
+    lmcache_mp_pb2 as _pb2_typed,
+)
 import lmcache.lmcache_native as lmcache_native
 
 if TYPE_CHECKING:
@@ -46,6 +44,51 @@ if TYPE_CHECKING:
     from lmcache.v1.multiprocess.services.engine_driven_transfer import (
         EngineDrivenTransferService,
     )
+
+
+lmcache_mp_pb2: Any = _pb2_typed
+
+
+def _register_response(
+    shm_name: str = "",
+    pool_size: int = 0,
+) -> Any:
+    return lmcache_mp_pb2.RegisterKvCacheEngineDrivenContextResponse(
+        shm_name=shm_name,
+        pool_size=pool_size,
+    )
+
+
+def _add_slot(slots: Any, slot_data: dict[str, Any]) -> None:
+    slot = slots.add()
+    slot.offset = int(slot_data["offset"])
+    slot.length = int(slot_data["length"])
+    slot.shape.extend(int(dim) for dim in slot_data["shape"])
+    slot.dtype = str(slot_data["dtype"])
+
+
+def _prepare_store_response(
+    *,
+    slots: list[dict[str, Any]] | None = None,
+    chunk_indices: list[int] | None = None,
+) -> Any:
+    response = lmcache_mp_pb2.PrepareStoreResponse()
+    for slot_data in slots or []:
+        _add_slot(response.slots, slot_data)
+    response.chunk_indices.extend(chunk_indices or [])
+    return response
+
+
+def _prepare_retrieve_response(
+    *,
+    success: bool,
+    data: bytes = b"",
+    slots: list[dict[str, Any]] | None = None,
+) -> Any:
+    response = lmcache_mp_pb2.PrepareRetrieveResponse(success=success, data=data)
+    for slot_data in slots or []:
+        _add_slot(response.slots, slot_data)
+    return response
 
 
 class ServerServiceFactory(Protocol):
@@ -464,7 +507,7 @@ def test_musa_data_context_keeps_layout_validation_device_agnostic(
         lambda *_args, **_kwargs: MagicMock(),
     )
     future = MagicMock()
-    future.result.return_value = RegisterEngineDrivenContextResponse()
+    future.result.return_value = _register_response()
     mq_client = MagicMock()
     mq_client.register_kv_cache_engine_driven_context.return_value = future
     ctx = EngineDrivenTransferContext()
@@ -503,7 +546,7 @@ def test_musa_data_context_store_uses_device_agnostic_gather(
 
     captured_kwargs: dict[str, Any] = {}
     future = MagicMock()
-    future.result.return_value = RegisterEngineDrivenContextResponse()
+    future.result.return_value = _register_response()
     mq_client = MagicMock()
     mq_client.register_kv_cache_engine_driven_context.return_value = future
     monkeypatch.setattr(
@@ -577,7 +620,7 @@ def test_musa_data_context_retrieve_uses_device_agnostic_scatter(
 
     captured_kwargs: dict[str, Any] = {}
     future = MagicMock()
-    future.result.return_value = RegisterEngineDrivenContextResponse()
+    future.result.return_value = _register_response()
     mq_client = MagicMock()
     mq_client.register_kv_cache_engine_driven_context.return_value = future
     monkeypatch.setattr(
@@ -1225,7 +1268,8 @@ def test_server_shm_commit_store_allows_noop_when_all_keys_exist(
     key = _default_key()
     prepare_response = module.prepare_store(key, 3)
     # Server signals all-cached via empty slots list (not missing "slots" key).
-    assert prepare_response.context == {"slots": [], "chunk_indices": []}
+    assert list(prepare_response.slots) == []
+    assert list(prepare_response.chunk_indices) == []
 
     # commit_store without a matching prepare must fail (no entry leaked).
     assert module.commit_store(key, 3, b"") is False
@@ -1236,9 +1280,6 @@ def test_server_prepare_store_releases_unused_reserved_write_locks(
     server_service_factory: ServerServiceFactory,
 ) -> None:
     """Ensure SHM prepare_store releases reserved keys that have no writable tensor."""
-    # First Party
-    from lmcache.v1.multiprocess.protocols.engine import PrepareStoreResponse
-
     mock_storage = MagicMock()
     memory_obj = MagicMock()
     memory_obj.tensor = None
@@ -1260,8 +1301,9 @@ def test_server_prepare_store_releases_unused_reserved_write_locks(
     )
     key = _default_key()
     prepare_response = module.prepare_store(key, 5)
-    assert isinstance(prepare_response, PrepareStoreResponse)
-    assert prepare_response.context == {"slots": [], "chunk_indices": []}
+    assert prepare_response.DESCRIPTOR.name == "PrepareStoreResponse"
+    assert list(prepare_response.slots) == []
+    assert list(prepare_response.chunk_indices) == []
     reserved_keys = mock_storage.reserve_write.call_args[0][0]
     mock_storage.finish_write.assert_called_once_with(reserved_keys)
 
@@ -1296,8 +1338,8 @@ def test_server_shm_transport_uses_engine_level_config(
         _default_register_payload(instance_id=7)
     )
     key = _default_key()
-    assert module.prepare_store(key, 6).context.get("slots")
-    assert module.prepare_store(key, 7).context.get("slots")
+    assert module.prepare_store(key, 6).slots
+    assert module.prepare_store(key, 7).slots
     assert mock_storage.reserve_write.call_count == 2
 
 
@@ -1352,7 +1394,7 @@ def test_server_unregister_engine_driven_context_releases_pending_shm_locks(
         _default_register_payload(instance_id=4)
     )
     key = _default_key()
-    assert module.prepare_store(key, 4).context.get("slots")
+    assert module.prepare_store(key, 4).slots
     assert module.prepare_retrieve(key, 4).success is True
 
     module.unregister_kv_cache(4)
@@ -1447,12 +1489,10 @@ def test_server_prepare_store_includes_chunk_indices(
     )
     key = _default_key(tokens=16)
     response = module.prepare_store(key, 10)
-    response_context = response.context
-
     # slots should have 1 entry (only obj2 reserved)
-    assert len(response_context.get("slots", [])) == 1
+    assert len(response.slots) == 1
     # chunk_indices should be [1] (position of obj2 in [obj1, obj2])
-    assert response_context.get("chunk_indices") == [1]
+    assert list(response.chunk_indices) == [1]
 
 
 class _CompletedFuture:
@@ -1516,7 +1556,7 @@ def test_engine_driven_context_shm_tensor_view_from_buffer() -> None:
         shm_unlink(shm_name)
 
 
-def test_engine_driven_context_shm_store_retrieve_flow_with_mocked_mq() -> None:
+def test_engine_driven_context_shm_store_retrieve_flow_with_mocked_grpc() -> None:
     shm_name = f"lmcache_test_flow_{os.getpid()}"
     addr = _create_shm_segment(shm_name, 4096)
     slots = [
@@ -1531,7 +1571,7 @@ def test_engine_driven_context_shm_store_retrieve_flow_with_mocked_mq() -> None:
     mq_client = MagicMock()
 
     mq_client.prepare_store.return_value = _CompletedFuture(
-        PrepareStoreResponse(context={"slots": slots, "chunk_indices": [0]})
+        _prepare_store_response(slots=slots, chunk_indices=[0])
     )
 
     def _commit_store(_key, _instance_id, commit_cpu_data):
@@ -1540,7 +1580,7 @@ def test_engine_driven_context_shm_store_retrieve_flow_with_mocked_mq() -> None:
 
     mq_client.commit_store.side_effect = _commit_store
     mq_client.prepare_retrieve.return_value = _CompletedFuture(
-        PrepareRetrieveResponse(success=True, data=b"", context={"slots": slots})
+        _prepare_retrieve_response(success=True, slots=slots)
     )
     mq_client.commit_retrieve.return_value = _CompletedFuture(True)
 

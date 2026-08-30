@@ -83,7 +83,7 @@ def _cache_key(
 def test_missing_registration_returns_terminal_false(method_name: str) -> None:
     """An absent context returns an event-free response instead of raising.
 
-    The MQ blocking-handler exception path does not send an error response.
+    The gRPC blocking-handler exception path does not send an error response.
     Returning a normal response therefore ensures the caller's future reaches
     a terminal state during the restart-before-registration window. The empty
     handle indicates that the server submitted no device work.

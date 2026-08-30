@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""End-to-end tests for descriptor-driven gRPC on the mp-mode message queue."""
+"""End-to-end tests for descriptor-driven gRPC on the mp-mode gRPC transport."""
 
 # Standard
 from concurrent.futures import ThreadPoolExecutor
@@ -30,21 +30,17 @@ from lmcache.v1.multiprocess.custom_types import (
 )
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
-from lmcache.v1.multiprocess.mq import (
+from lmcache.v1.multiprocess.grpc import (
     MultiprocessGrpcClient,
     MultiprocessGrpcServer,
     request_type_to_method_name,
 )
 from lmcache.v1.multiprocess.protocol import RPC, HandlerType, RpcMethod
-from lmcache.v1.multiprocess.protocols.engine import (
-    PrepareRetrieveResponse,
-    RegisterEngineDrivenContextResponse,
+from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
+    lmcache_mp_pb2 as _pb2_typed,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
-    lmcache_mq_pb2 as _pb2_typed,
-)
-from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
-    lmcache_mq_pb2_grpc,
+    lmcache_mp_pb2_grpc as _pb2_grpc_typed,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl.proto_codec import (
     compile_request_decoder,
@@ -55,19 +51,20 @@ from lmcache.v1.multiprocess.transport.grpc_impl.proto_codec import (
 
 # Generated message classes are dynamic; rebind through Any so static analysis
 # stops complaining about attribute lookups.
-lmcache_mq_pb2: Any = _pb2_typed
+lmcache_mp_pb2: Any = _pb2_typed
+lmcache_mp_pb2_grpc: Any = _pb2_grpc_typed
 
 
-def test_mq_import_does_not_load_grpc_runtime() -> None:
-    """Importing MQ helpers must not initialize gRPC native libraries."""
+def test_grpc_import_does_not_load_grpc_runtime() -> None:
+    """Importing gRPC helpers must not initialize gRPC native libraries."""
     script = """
 import sys
-from lmcache.v1.multiprocess import mq
+from lmcache.v1.multiprocess import grpc
 
 assert "grpc" not in sys.modules
 assert "grpc_tools" not in sys.modules
-assert mq.grpc is None
-assert mq.request_type_to_method_name("Ping") == "Ping"
+assert grpc.grpc is None
+assert grpc.request_type_to_method_name("Ping") == "Ping"
 """
     subprocess.run([sys.executable, "-c", script], check=True)
 
@@ -99,7 +96,7 @@ def _sample_key(
 
 def test_service_descriptor_covers_every_protocol_rpc() -> None:
     """The protocol method namespace is derived from generated services."""
-    services = lmcache_mq_pb2.DESCRIPTOR.services_by_name
+    services = lmcache_mp_pb2.DESCRIPTOR.services_by_name
     service_methods = {
         method.name: (service.name, method)
         for service in services.values()
@@ -124,7 +121,7 @@ def test_client_installs_function_style_rpc_methods() -> None:
 
 def test_service_descriptor_has_no_legacy_batch_rpc() -> None:
     """The transport contract is unary-only; Batch is no longer part of it."""
-    services = lmcache_mq_pb2.DESCRIPTOR.services_by_name
+    services = lmcache_mp_pb2.DESCRIPTOR.services_by_name
     assert "MessageQueue" not in services
     assert all("Batch" not in service.methods_by_name for service in services.values())
 
@@ -192,8 +189,8 @@ def test_concurrent_mixed_requests_roundtrip_over_unary_rpcs() -> None:
 
 def test_unix_clients_keep_distinct_grpc_affinity() -> None:
     """Stable client metadata preserves affinity over Unix sockets."""
-    with tempfile.TemporaryDirectory(prefix="lmcache-mq-test-") as directory:
-        server_url = f"grpc+unix://{directory}/mq.sock"
+    with tempfile.TemporaryDirectory(prefix="lmcache-grpc-", dir="/tmp") as directory:
+        server_url = f"grpc+unix://{directory}/grpc.sock"
         threads_by_client: dict[int, set[str]] = {1: set(), 2: set()}
         seen_lock = threading.Lock()
 
@@ -292,16 +289,16 @@ def test_client_works_with_minimal_unary_servicer() -> None:
     first_ping_entered = threading.Event()
     release_first_ping = threading.Event()
 
-    class LegacyServicer(lmcache_mq_pb2_grpc.ControllerServiceServicer):
+    class LegacyServicer(lmcache_mp_pb2_grpc.ControllerServiceServicer):
         def Ping(self, request: Any, context: Any) -> Any:
             del context
             if request.instance_id == 0:
                 first_ping_entered.set()
                 release_first_ping.wait(timeout=5.0)
-            return lmcache_mq_pb2.PingResponse(ok=True)
+            return lmcache_mp_pb2.PingResponse(ok=True)
 
     server = grpc.server(ThreadPoolExecutor(max_workers=2))
-    lmcache_mq_pb2_grpc.add_ControllerServiceServicer_to_server(
+    lmcache_mp_pb2_grpc.add_ControllerServiceServicer_to_server(
         LegacyServicer(), server
     )
     server.add_insecure_port(target)
@@ -366,7 +363,7 @@ def test_lookup_request_codec_uses_handler_annotations() -> None:
     request = encode_request_from_call(request_cls, (_sample_key(), 4), {})
     decoder, payload_types = compile_request_decoder(request_cls, lookup_handler)
 
-    assert isinstance(request, lmcache_mq_pb2.LookupRequest)
+    assert isinstance(request, lmcache_mp_pb2.LookupRequest)
     assert payload_types == (IPCCacheServerKey, int)
     assert decoder(request) == (_sample_key(), 4)
 
@@ -467,27 +464,35 @@ def test_store_typed_grpc_roundtrip() -> None:
 
 
 def test_engine_driven_struct_responses_roundtrip() -> None:
-    """Struct-like request/response objects remain Python objects to callers."""
+    """Structured engine-driven responses remain protobuf-native to callers."""
     port = _find_free_port()
     server_url = f"grpc://127.0.0.1:{port}"
 
     def register_handler(
         payload: RegisterEngineDrivenContextPayload,
-    ) -> RegisterEngineDrivenContextResponse:
+    ) -> lmcache_mp_pb2.RegisterKvCacheEngineDrivenContextResponse:
         assert payload.instance_id == 9
-        return RegisterEngineDrivenContextResponse(shm_name="shm-a", pool_size=1024)
+        return lmcache_mp_pb2.RegisterKvCacheEngineDrivenContextResponse(
+            shm_name="shm-a",
+            pool_size=1024,
+        )
 
     def prepare_retrieve_handler(
         key: IPCCacheServerKey,
         instance_id: int,
-    ) -> PrepareRetrieveResponse:
+    ) -> lmcache_mp_pb2.PrepareRetrieveResponse:
         assert key.request_id == "req-42"
         assert instance_id == 9
-        return PrepareRetrieveResponse(
+        response = lmcache_mp_pb2.PrepareRetrieveResponse(
             success=True,
             data=b"payload",
-            context={"slots": [{"offset": 0}]},
         )
+        slot = response.slots.add()
+        slot.offset = 7
+        slot.length = 16
+        slot.shape.extend([2, 2])
+        slot.dtype = "float32"
+        return response
 
     server = MultiprocessGrpcServer(server_url)
     server.add_handler(RPC.RegisterKvCacheEngineDrivenContext, register_handler)
@@ -514,16 +519,17 @@ def test_engine_driven_struct_responses_roundtrip() -> None:
                 use_mla=False,
             )
         ).result(timeout=5.0)
-        assert registration == RegisterEngineDrivenContextResponse(
-            shm_name="shm-a", pool_size=1024
-        )
+        assert registration.shm_name == "shm-a"
+        assert registration.pool_size == 1024
 
         prepared = client.prepare_retrieve(_sample_key(), 9).result(timeout=5.0)
-        assert prepared == PrepareRetrieveResponse(
-            success=True,
-            data=b"payload",
-            context={"slots": [{"offset": 0}]},
-        )
+        assert prepared.success is True
+        assert prepared.data == b"payload"
+        prepared_slots = [
+            (slot.offset, slot.length, list(slot.shape), slot.dtype)
+            for slot in prepared.slots
+        ]
+        assert prepared_slots == [(7, 16, [2, 2], "float32")]
     finally:
         client.close()
         server.close()

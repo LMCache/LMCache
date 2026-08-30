@@ -28,7 +28,7 @@ from lmcache.v1.multiprocess.group_view import (
     EngineGroupInfo,
     expand_engine_block_ids,
 )
-from lmcache.v1.multiprocess.mq import MessagingFuture, MultiprocessGrpcClient
+from lmcache.v1.multiprocess.grpc import MessagingFuture, MultiprocessGrpcClient
 from lmcache.v1.multiprocess.transfer_context import (
     EngineDrivenTransferContext,
     TransferContext,

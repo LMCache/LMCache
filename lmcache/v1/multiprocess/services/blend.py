@@ -844,8 +844,8 @@ class BlendService(InstanceLivenessTarget):
         head_size: int,
         is_neox_style: bool,
         group_to_cache: list[int],
-        # Annotation must equal the protocol payload class exactly — the MQ
-        # server's add_handler signature check (mq.py same_type) is strict.
+        # Annotation must equal the protocol payload class exactly — the gRPC
+        # server's add_handler signature check (grpc.py same_type) is strict.
         # Direct (non-wire) callers may still pass tuples/None entries; the
         # normalization below accepts them.
         group_rot: list[list[int]] = _EMPTY_GROUP_ROT,

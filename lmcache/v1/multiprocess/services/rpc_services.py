@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 # Standard
-from typing import TYPE_CHECKING, Protocol, TypeVar
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 
 # First Party
 from lmcache.utils import EngineType
@@ -23,11 +23,6 @@ from lmcache.v1.multiprocess.custom_types import (
 )
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.protocol import HandlerType, grpc_method
-from lmcache.v1.multiprocess.protocols.engine import (
-    PrepareRetrieveResponse,
-    PrepareStoreResponse,
-    RegisterEngineDrivenContextResponse,
-)
 from lmcache.v1.multiprocess.services.engine_driven_transfer import (
     EngineDrivenTransferService,
 )
@@ -38,6 +33,9 @@ from lmcache.v1.multiprocess.services.lmcache_driven_transfer import (
 from lmcache.v1.multiprocess.services.lookup import EngineLookupService
 from lmcache.v1.multiprocess.services.management import ManagementService
 from lmcache.v1.multiprocess.services.p2p_controller import P2PController
+from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
+    lmcache_mp_pb2 as _pb2_typed,
+)
 
 if TYPE_CHECKING:
     # First Party
@@ -45,6 +43,9 @@ if TYPE_CHECKING:
 
 
 T = TypeVar("T")
+
+# Generated protobuf classes are dynamic and opaque to static analysis.
+lmcache_mp_pb2: Any = _pb2_typed
 
 
 class _StoreService(Protocol):
@@ -221,7 +222,7 @@ class EngineServiceImpl:
     def RegisterKvCacheEngineDrivenContext(
         self,
         payload: RegisterEngineDrivenContextPayload,
-    ) -> RegisterEngineDrivenContextResponse:
+    ) -> lmcache_mp_pb2.RegisterKvCacheEngineDrivenContextResponse:
         """Register an engine-driven KV context."""
         return _require(
             self._engine_driven_transfer, "engine-driven KV transfer"
@@ -238,7 +239,7 @@ class EngineServiceImpl:
         self,
         key: IPCCacheServerKey,
         instance_id: int,
-    ) -> PrepareStoreResponse:
+    ) -> lmcache_mp_pb2.PrepareStoreResponse:
         """Prepare an engine-driven store."""
         return _require(
             self._engine_driven_transfer, "engine-driven KV transfer"
@@ -249,19 +250,19 @@ class EngineServiceImpl:
         self,
         key: IPCCacheServerKey,
         instance_id: int,
-        cpu_data: bytes,
+        data: bytes,
     ) -> bool:
         """Commit an engine-driven store."""
         return _require(
             self._engine_driven_transfer, "engine-driven KV transfer"
-        ).commit_store(key, instance_id, cpu_data)
+        ).commit_store(key, instance_id, data)
 
     @grpc_method(HandlerType.BLOCKING, requires_client_affinity=True)
     def PrepareRetrieve(
         self,
         key: IPCCacheServerKey,
         instance_id: int,
-    ) -> PrepareRetrieveResponse:
+    ) -> lmcache_mp_pb2.PrepareRetrieveResponse:
         """Prepare an engine-driven retrieve."""
         return _require(
             self._engine_driven_transfer, "engine-driven KV transfer"

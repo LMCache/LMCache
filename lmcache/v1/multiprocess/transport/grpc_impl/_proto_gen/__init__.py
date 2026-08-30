@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Generated protobuf and gRPC stubs for the multiprocess message queue.
+"""Generated protobuf and gRPC stubs for the multiprocess gRPC transport.
 
 The stub modules are created during package builds and test setup. They are
 never checked into Git; ``../protos/*.proto`` are the source of truth.
@@ -21,7 +21,7 @@ def _is_generated_stub_module_name(name: str) -> bool:
     return (
         name.endswith("_pb2")
         or name.endswith("_pb2_grpc")
-        or name in ("lmcache_mq_pb2", "lmcache_mq_pb2_grpc")
+        or name in ("lmcache_mp_pb2", "lmcache_mp_pb2_grpc")
     )
 
 
@@ -45,4 +45,4 @@ def __getattr__(name: str) -> Any:
     return module
 
 
-__all__ = ["lmcache_mq_pb2", "lmcache_mq_pb2_grpc"]
+__all__ = ["lmcache_mp_pb2", "lmcache_mp_pb2_grpc"]

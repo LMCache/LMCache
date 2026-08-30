@@ -25,7 +25,7 @@ from lmcache.v1.multiprocess.group_view import (
     EngineGroupInfo,
     expand_engine_block_ids,
 )
-from lmcache.v1.multiprocess.mq import MultiprocessGrpcClient
+from lmcache.v1.multiprocess.grpc import MultiprocessGrpcClient
 from lmcache.v1.multiprocess.transfer_context import (
     TransferContext,
     create_transfer_context,
@@ -272,14 +272,14 @@ class AtomMPSchedulerAdapter:
         self._client.end_session(request_id)
 
     def shutdown(self) -> None:
-        """Close the scheduler-side message queue client."""
+        """Close the scheduler-side gRPC client."""
         if self._closed:
             return
         self._closed = True
         try:
             self._client.close()
         except Exception:
-            logger.warning("Failed to close ATOM scheduler MQ client", exc_info=True)
+            logger.warning("Failed to close ATOM scheduler gRPC client", exc_info=True)
 
     def _create_key(
         self,

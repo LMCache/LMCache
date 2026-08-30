@@ -23,12 +23,12 @@ pytest.importorskip(
 from lmcache.integration.vllm.lmcache_mp_connector import (  # noqa: E402
     _ensure_transport_scheme,
 )
-from lmcache.v1.multiprocess.mq import (  # noqa: E402
+from lmcache.v1.multiprocess.grpc import (  # noqa: E402
     request_type_to_method_name,
 )
 from lmcache.v1.multiprocess.protocol import RPC, RpcMethod  # noqa: E402
 from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (  # noqa: E402
-    lmcache_mq_pb2_grpc,
+    lmcache_mp_pb2_grpc,
 )
 
 
@@ -71,7 +71,7 @@ def test_every_request_type_maps_to_a_real_grpc_method():
         (rt.service_name, rt.name, request_type_to_method_name(rt))
         for rt in RpcMethod
         if request_type_to_method_name(rt)
-        not in dir(getattr(lmcache_mq_pb2_grpc, f"{rt.service_name}Servicer"))
+        not in dir(getattr(lmcache_mp_pb2_grpc, f"{rt.service_name}Servicer"))
     ]
     assert not missing, (
         f"RpcMethod members without a matching proto rpc method: {missing}"

@@ -125,8 +125,8 @@ def _run_cli_and_signal(
             shm_path.unlink()
 
 
-def test_zmq_cli_sigterm_unlinks_shm_pool(tmp_path: Path) -> None:
-    """A ready ZMQ-only MP CLI must unlink its SHM pool after SIGTERM."""
+def test_grpc_cli_sigterm_unlinks_shm_pool(tmp_path: Path) -> None:
+    """A ready gRPC MP CLI must unlink its SHM pool after SIGTERM."""
     return_code, log = _run_cli_and_signal(
         tmp_path,
         module="lmcache.v1.multiprocess.server",

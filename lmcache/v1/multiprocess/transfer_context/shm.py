@@ -2,7 +2,6 @@
 """Shared-memory EngineDrivenContext implementation for multiprocess mode."""
 
 # Standard
-from dataclasses import dataclass
 from multiprocessing import shared_memory
 from multiprocessing.resource_tracker import unregister
 from typing import Any
@@ -16,7 +15,7 @@ from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.mq import MultiprocessGrpcClient
+from lmcache.v1.multiprocess.grpc import MultiprocessGrpcClient
 from lmcache.v1.multiprocess.transfer_context.base import (
     EngineDrivenContext,
     EngineDrivenContextMetadata,
@@ -24,59 +23,6 @@ from lmcache.v1.multiprocess.transfer_context.base import (
 from lmcache.v1.platform import current_device_spec
 
 logger = init_logger(__name__)
-
-
-@dataclass(frozen=True)
-class ShmSlotDescriptor:
-    """Describe one tensor slot in the shared-memory pool.
-
-    Args:
-        offset: Byte offset into the shared-memory pool.
-        length: Byte length of the slot.
-        shape: Logical tensor shape to view at the slot.
-        dtype: Torch dtype attribute name, such as ``"bfloat16"``.
-    """
-
-    offset: int
-    length: int
-    shape: list[int]
-    dtype: str
-
-    def to_dict(self) -> dict[str, Any]:
-        """Serialize the slot descriptor into the MQ context schema.
-
-        Returns:
-            Dict payload shared between the server and worker for one SHM slot.
-        """
-        return {
-            "offset": self.offset,
-            "length": self.length,
-            "shape": self.shape,
-            "dtype": self.dtype,
-        }
-
-    @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> "ShmSlotDescriptor":
-        """Parse a slot descriptor from the MQ context schema.
-
-        Args:
-            d: Mapping containing ``offset``, ``length``, ``shape``, and
-                ``dtype`` fields.
-
-        Returns:
-            Parsed immutable slot descriptor.
-
-        Raises:
-            KeyError: If any required field is missing.
-            TypeError: If ``shape`` cannot be converted with ``list(...)``.
-            ValueError: If numeric fields cannot be coerced to integers.
-        """
-        return cls(
-            offset=int(d["offset"]),
-            length=int(d["length"]),
-            shape=list(d["shape"]),
-            dtype=str(d["dtype"]),
-        )
 
 
 class EngineDrivenContextShm(EngineDrivenContext):
@@ -144,16 +90,15 @@ class EngineDrivenContextShm(EngineDrivenContext):
         )
         return tensor_1d.view(torch.Size(shape))
 
-    def _build_slot_tensors(self, slots: list[dict[str, Any]]) -> list[torch.Tensor]:
-        descriptors = [ShmSlotDescriptor.from_dict(slot) for slot in slots]
+    def _build_slot_tensors(self, slots: Any) -> list[torch.Tensor]:
         return [
             self._make_tensor_view(
-                offset=descriptor.offset,
-                length=descriptor.length,
-                shape=descriptor.shape,
-                dtype_str=descriptor.dtype,
+                offset=int(slot.offset),
+                length=int(slot.length),
+                shape=list(slot.shape),
+                dtype_str=str(slot.dtype),
             )
-            for descriptor in descriptors
+            for slot in slots
         ]
 
     def prepare_store(
@@ -169,15 +114,13 @@ class EngineDrivenContextShm(EngineDrivenContext):
                 session_id=key.request_id,
             )
         response = future.result()
-        context = response.context if isinstance(response.context, dict) else {}
-        slots = context.get("slots")
-        if not isinstance(slots, list):
+        if response is None or not hasattr(response, "slots"):
             return None
+        slots = list(response.slots)
         if not slots:
             # Server explicitly signals all chunks are already cached.
             return [], []
-        chunk_indices: list[int] = context["chunk_indices"]
-        return self._build_slot_tensors(slots), chunk_indices
+        return self._build_slot_tensors(slots), list(response.chunk_indices)
 
     def commit_store(
         self, key: IPCCacheServerKey, instance_id: int, _chunks: list[torch.Tensor]
@@ -198,7 +141,7 @@ class EngineDrivenContextShm(EngineDrivenContext):
             return None
         if not response.success:
             return None
-        slots = response.context.get("slots", [])
+        slots = list(response.slots)
         return self._build_slot_tensors(slots) if slots else None
 
     def commit_retrieve(self, key: IPCCacheServerKey, instance_id: int) -> bool:

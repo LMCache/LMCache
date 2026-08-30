@@ -3,6 +3,7 @@
 
 # Standard
 from dataclasses import dataclass
+from typing import Any
 import threading
 import time
 
@@ -21,13 +22,11 @@ from lmcache.v1.multiprocess.custom_types import (
     RegisterEngineDrivenContextPayload,
 )
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext, ShmPoolInfo
-from lmcache.v1.multiprocess.protocols.engine import (
-    PrepareRetrieveResponse,
-    PrepareStoreResponse,
-    RegisterEngineDrivenContextResponse,
-)
 from lmcache.v1.multiprocess.service import InstanceLivenessTarget
 from lmcache.v1.multiprocess.transfer_context.base import EngineDrivenContextMetadata
+from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
+    lmcache_mp_pb2 as _pb2_typed,
+)
 
 # Local
 from .server_transfer import (
@@ -36,6 +35,9 @@ from .server_transfer import (
 )
 
 logger = init_logger(__name__)
+
+# Generated protobuf classes are dynamic and opaque to static analysis.
+lmcache_mp_pb2: Any = _pb2_typed
 
 
 @dataclass
@@ -75,7 +77,7 @@ class EngineDrivenTransferService(InstanceLivenessTarget):
         self._engine_driven_contexts: dict[int, EngineDrivenContextEntry] = {}
         self._strategies: dict[int, TransferStrategy] = {}
         # Guards _engine_driven_contexts and _strategies together (the reaper
-        # mutates them off the MQ main loop). Leaf lock, never held with
+        # mutates them off the gRPC dispatch path). Leaf lock, never held with
         # _pending_shm_lock.
         self._lock = threading.Lock()
         self._pending_shm_writes: dict[
@@ -255,7 +257,7 @@ class EngineDrivenTransferService(InstanceLivenessTarget):
     def register_kv_cache_engine_driven_context(
         self,
         payload: RegisterEngineDrivenContextPayload,
-    ) -> RegisterEngineDrivenContextResponse:
+    ) -> Any:
         """Register non-CUDA KV layout metadata for non-GPU context mode.
 
         Args:
@@ -278,7 +280,7 @@ class EngineDrivenTransferService(InstanceLivenessTarget):
                     "Instance %d already registered (non-GPU); refreshing liveness",
                     payload.instance_id,
                 )
-                return RegisterEngineDrivenContextResponse(
+                return lmcache_mp_pb2.RegisterKvCacheEngineDrivenContextResponse(
                     shm_name=shm_name, pool_size=pool_size
                 )
 
@@ -338,7 +340,7 @@ class EngineDrivenTransferService(InstanceLivenessTarget):
         self._ctx.layout_desc_registry.register(
             payload.model_name, payload.world_size, layout_desc
         )
-        return RegisterEngineDrivenContextResponse(
+        return lmcache_mp_pb2.RegisterKvCacheEngineDrivenContextResponse(
             shm_name=shm_name, pool_size=pool_size
         )
 
@@ -367,7 +369,7 @@ class EngineDrivenTransferService(InstanceLivenessTarget):
         self,
         key: IPCCacheServerKey,
         instance_id: int,
-    ) -> PrepareStoreResponse:
+    ) -> Any:
         """Prepare a store operation.
 
         Args:
@@ -375,7 +377,7 @@ class EngineDrivenTransferService(InstanceLivenessTarget):
             instance_id: Worker instance identifier.
 
         Returns:
-            PrepareStoreResponse with empty slots for pickle mode.
+            Generated ``PrepareStoreResponse`` with slot descriptors for SHM mode.
         """
         entry, strategy = self._resolve_for_transfer(instance_id)
         response = strategy.prepare_store(
@@ -435,7 +437,7 @@ class EngineDrivenTransferService(InstanceLivenessTarget):
         self,
         key: IPCCacheServerKey,
         instance_id: int,
-    ) -> PrepareRetrieveResponse:
+    ) -> Any:
         """Retrieve prefetched chunks and return serialized CPU tensors.
 
         Args:
@@ -443,7 +445,7 @@ class EngineDrivenTransferService(InstanceLivenessTarget):
             instance_id: Worker instance identifier.
 
         Returns:
-            PrepareRetrieveResponse with serialized data on hit.
+            Generated ``PrepareRetrieveResponse`` with serialized data or SHM slots.
 
         Raises:
             ValueError: If no non-GPU context is registered for the given

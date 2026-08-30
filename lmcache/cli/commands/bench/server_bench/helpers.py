@@ -60,12 +60,8 @@ try:
     )
     from lmcache.v1.multiprocess.futures import MessagingFuture
     from lmcache.v1.multiprocess.group_view import EngineGroupInfo
-    from lmcache.v1.multiprocess.mq import MultiprocessGrpcClient
+    from lmcache.v1.multiprocess.grpc import MultiprocessGrpcClient
     from lmcache.v1.multiprocess.posix_shm import shm_open_pool_as_mmap
-    from lmcache.v1.multiprocess.protocols.engine import (
-        RegisterEngineDrivenContextResponse,
-    )
-    from lmcache.v1.multiprocess.transfer_context.shm import ShmSlotDescriptor
     from lmcache.v1.platform.cpu.shm import (
         CpuShmTensorWrapper,
         shm_create_readwrite,
@@ -430,7 +426,7 @@ def _send_register_kv_cache(
     use_gpu: bool = True,
     use_handle: bool | None = None,
     engine_group_infos: "list[EngineGroupInfo] | None" = None,
-) -> "bool | RegisterEngineDrivenContextResponse":
+) -> Any:
     """Register a KV cache context with the MP server.
 
     Dispatches to the correct protocol based on ``use_handle``:
@@ -622,31 +618,42 @@ def _make_event_handle(use_gpu: bool = True) -> bytes:
     return event.ipc_handle()
 
 
+def _slot_field(slot: Any, name: str) -> Any:
+    """Read one SHM slot field from a protobuf message or test mapping."""
+    if isinstance(slot, dict):
+        return slot[name]
+    return getattr(slot, name)
+
+
 def _build_server_slot_views(
     server_pool: "mmap.mmap",
-    slots: list[dict[str, Any]],
+    slots: Any,
 ) -> list["torch.Tensor"]:
     """Build zero-copy tensor views over server SHM slot descriptors.
 
-    Each ``ShmSlotDescriptor`` carries the ``(offset, length, shape,
+    Each proto ``ShmSlotDescriptor`` carries the ``(offset, length, shape,
     dtype)`` of one chunk inside the server-owned SHM pool; we wrap
     them with ``torch.frombuffer`` so the bench can read or overwrite
     that chunk without going through pickle.
     """
     views: list[torch.Tensor] = []
-    for raw in slots:
-        desc = ShmSlotDescriptor.from_dict(raw)
-        dtype = getattr(torch, desc.dtype, None)
+    for slot in slots:
+        dtype_name = str(_slot_field(slot, "dtype"))
+        dtype = getattr(torch, dtype_name, None)
         if not isinstance(dtype, torch.dtype):
-            raise ValueError("invalid torch dtype string: %s" % desc.dtype)
+            raise ValueError("invalid torch dtype string: %s" % dtype_name)
         itemsize = torch.empty((), dtype=dtype).element_size()
         if itemsize <= 0:
-            raise ValueError("invalid dtype size for %s" % desc.dtype)
-        count = desc.length // itemsize
+            raise ValueError("invalid dtype size for %s" % dtype_name)
+        length = int(_slot_field(slot, "length"))
+        count = length // itemsize
         flat = torch.frombuffer(
-            server_pool, dtype=dtype, count=count, offset=desc.offset
+            server_pool,
+            dtype=dtype,
+            count=count,
+            offset=int(_slot_field(slot, "offset")),
         )
-        views.append(flat.view(torch.Size(desc.shape)))
+        views.append(flat.view(torch.Size(list(_slot_field(slot, "shape")))))
     return views
 
 
@@ -865,9 +872,8 @@ def _send_store(
     if prep is _TIMEOUT:
         return "timeout"
     if server_pool is not None and client_tensors is not None and chunk_size > 0:
-        ctx = prep.context if isinstance(prep.context, dict) else {}
-        slots = ctx.get("slots", []) or []
-        chunk_indices = ctx.get("chunk_indices", []) or []
+        slots = list(getattr(prep, "slots", []))
+        chunk_indices = list(getattr(prep, "chunk_indices", []))
         if slots and chunk_indices:
             num_blocks = (key.end - key.start) // block_size
             full_chunks = _gather_paged_to_flat_chunks(
@@ -938,8 +944,7 @@ def _send_retrieve(
     if not prep.success:
         return "retrieve_failed"
     if server_pool is not None and client_tensors is not None:
-        ctx = prep.context if isinstance(prep.context, dict) else {}
-        slots = ctx.get("slots", []) or []
+        slots = list(getattr(prep, "slots", []))
         if slots:
             try:
                 slot_views = _build_server_slot_views(server_pool, slots)

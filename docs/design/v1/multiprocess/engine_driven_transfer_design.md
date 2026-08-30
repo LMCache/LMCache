@@ -129,8 +129,9 @@ and block-id flattening), then submits all three phases to a background
 `MessagingFuture`
 - **submit_retrieve**: `prepare_retrieve` → `scatter_cpu_to_paged_kv` → `commit_retrieve`
 
-During `register`, worker receives `RegisterEngineDrivenContextResponse(shm_name, pool_size)`
-from server and then calls `create_engine_driven_context(...)` to construct
+During `register`, worker receives the generated protobuf
+`RegisterKvCacheEngineDrivenContextResponse(shm_name, pool_size)` from server and
+then calls `create_engine_driven_context(...)` to construct
 `EngineDrivenContextPickle` or `EngineDrivenContextShm`.
 
 Why `prepare → data operation → commit`:

@@ -64,7 +64,7 @@ High-Level Architecture
          |
          | typed gRPC
          v
-    MultiprocessGrpcServer (mq.py)
+    MultiprocessGrpcServer (grpc.py)
          |
          | protobuf service/method dispatch
          v
@@ -159,7 +159,7 @@ annotations declare handler type and dispatch affinity.
      - Register an engine-driven KV cache context (CPU/accelerator
        workers using the PREPARE/COMMIT transfer path). Loaded only when
        ``--supported-transfer-mode`` is ``engine_driven`` or ``auto``.
-       Returns a ``RegisterEngineDrivenContextResponse`` carrying the
+       Returns a generated protobuf ``RegisterKvCacheEngineDrivenContextResponse`` carrying the
        SHM segment name and pool size when the SHM path is in use
        (empty for the pickle path).
    * - ``UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT``

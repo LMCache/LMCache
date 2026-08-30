@@ -11,22 +11,22 @@ import threading
 # First Party
 from lmcache.v1.distributed.api import AttnWindowDesc
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.mq import MultiprocessGrpcClient
+from lmcache.v1.multiprocess.grpc import MultiprocessGrpcClient
 from lmcache.v1.multiprocess.protocol import (
     RPC,
+    HandlerType,
     RpcMethod,
     get_grpc_method_options,
     get_payload_classes,
     get_response_class,
 )
-from lmcache.v1.multiprocess.protocols.base import HandlerType
 from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
-    lmcache_mq_pb2,
+    lmcache_mp_pb2,
 )
 
 # Test helpers
-from tests.v1.multiprocess import test_mq_handler_helpers
-from tests.v1.multiprocess.test_mq import (
+from tests.v1.multiprocess import test_grpc_handler_helpers
+from tests.v1.multiprocess.test_grpc_client_server import (
     MessageQueueTestHelper,
     create_cache_key,
 )
@@ -44,29 +44,29 @@ def test_free_locks_is_descriptor_rpc_method():
 def test_free_locks_payload_classes():
     """FREE_LOOKUP_LOCKS payload is the generated protobuf request."""
     payload_classes = get_payload_classes(RPC.FreeLookupLocks)
-    assert payload_classes == [lmcache_mq_pb2.FreeLookupLocksRequest]
+    assert payload_classes == [lmcache_mp_pb2.FreeLookupLocksRequest]
 
 
 def test_free_locks_response_class():
     """FREE_LOOKUP_LOCKS response is the generated protobuf response."""
     response_class = get_response_class(RPC.FreeLookupLocks)
-    assert response_class is lmcache_mq_pb2.FreeLookupLocksResponse
+    assert response_class is lmcache_mp_pb2.FreeLookupLocksResponse
 
 
 def test_free_locks_handler_type():
     """FREE_LOOKUP_LOCKS should use BLOCKING handler type."""
     handler_type, _requires_affinity = get_grpc_method_options(
-        test_mq_handler_helpers.free_locks_handler
+        test_grpc_handler_helpers.free_locks_handler
     )
     assert handler_type == HandlerType.BLOCKING
 
 
 # ============================================================================
-# Message-queue round-trip test
+# gRPC round-trip test
 # ============================================================================
 
 
-def test_mq_free_locks():
+def test_grpc_free_locks():
     """
     Test MessageQueue with FREE_LOOKUP_LOCKS request type.
     FREE_LOOKUP_LOCKS takes (key: KeyType) and returns None.
@@ -75,7 +75,7 @@ def test_mq_free_locks():
 
     helper = MessageQueueTestHelper(server_url="grpc://127.0.0.1:5570")
     helper.register_handler(
-        RPC.FreeLookupLocks, test_mq_handler_helpers.free_locks_handler
+        RPC.FreeLookupLocks, test_grpc_handler_helpers.free_locks_handler
     )
 
     helper.run_test(

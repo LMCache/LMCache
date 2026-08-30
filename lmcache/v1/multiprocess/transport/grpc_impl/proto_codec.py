@@ -41,17 +41,12 @@ from lmcache.v1.multiprocess.protocol import (
     RpcMethod,
     coerce_rpc_method,
 )
-from lmcache.v1.multiprocess.protocols.engine import (
-    PrepareRetrieveResponse,
-    PrepareStoreResponse,
-    RegisterEngineDrivenContextResponse,
-)
 from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
-    lmcache_mq_pb2 as _pb2_typed,
+    lmcache_mp_pb2 as _pb2_typed,
 )
 
 # Generated protobuf classes are dynamic and opaque to static analysis.
-lmcache_mq_pb2: Any = _pb2_typed
+lmcache_mp_pb2: Any = _pb2_typed
 
 _NONE_TYPE = type(None)
 
@@ -67,7 +62,7 @@ ResponseDecoder = Callable[[Any], Any]
 
 def _build_service_methods() -> dict[str, tuple[str, Any]]:
     methods: dict[str, tuple[str, Any]] = {}
-    for service in lmcache_mq_pb2.DESCRIPTOR.services_by_name.values():
+    for service in lmcache_mp_pb2.DESCRIPTOR.services_by_name.values():
         for method in service.methods:
             if method.name in methods:
                 raise RuntimeError(f"Duplicate gRPC method name: {method.name}")
@@ -93,13 +88,13 @@ def request_type_to_method_name(request_type: RpcMethod | str) -> str:
 def get_request_message_class(request_type: RpcMethod | str) -> Any:
     """Return the generated protobuf request class for an RPC method."""
     method = _SERVICE_METHODS[str(coerce_rpc_method(request_type))][1]
-    return getattr(lmcache_mq_pb2, method.input_type.name)
+    return getattr(lmcache_mp_pb2, method.input_type.name)
 
 
 def get_response_message_class(request_type: RpcMethod | str) -> Any:
     """Return the generated protobuf response class for an RPC method."""
     method = _SERVICE_METHODS[str(coerce_rpc_method(request_type))][1]
-    return getattr(lmcache_mq_pb2, method.output_type.name)
+    return getattr(lmcache_mp_pb2, method.output_type.name)
 
 
 def get_service_name(request_type: RpcMethod | str) -> str:
@@ -110,7 +105,7 @@ def get_service_name(request_type: RpcMethod | str) -> str:
 def get_service_names() -> set[str]:
     """Return all generated protobuf service names."""
     return {
-        service.name for service in lmcache_mq_pb2.DESCRIPTOR.services_by_name.values()
+        service.name for service in lmcache_mp_pb2.DESCRIPTOR.services_by_name.values()
     }
 
 
@@ -747,6 +742,10 @@ def _write_response_value(
     response_type: Any,
     result: Any,
 ) -> None:
+    if _proto_has_same_descriptor(result, message.DESCRIPTOR):
+        message.CopyFrom(result)
+        return
+
     py_fields = _structured_fields(response_type)
     if py_fields is not None and len(py_fields) == len(proto_fields):
         writer, _reader = _compile_message_codec(message.DESCRIPTOR, response_type)
@@ -817,25 +816,15 @@ def encode_request_from_call(
 
 
 def decode_response_to_python(response: Any) -> Any:
-    """Decode a protobuf response into LMCache's historical Python shape."""
+    """Decode a protobuf response into LMCache's Python-facing result shape."""
     descriptor = response.DESCRIPTOR
     proto_fields = tuple(descriptor.fields)
     if not proto_fields:
         return None
 
-    if descriptor.name == "RegisterKvCacheEngineDrivenContextResponse":
-        return RegisterEngineDrivenContextResponse(
-            shm_name=response.shm_name,
-            pool_size=response.pool_size,
-        )
-    if descriptor.name == "PrepareStoreResponse":
-        return PrepareStoreResponse(context=_decode_mapping(response.encoded_context))
-    if descriptor.name == "PrepareRetrieveResponse":
-        return PrepareRetrieveResponse(
-            success=response.success,
-            data=response.data,
-            context=_decode_mapping(response.encoded_context),
-        )
+    if descriptor.name.endswith("Response") and len(proto_fields) > 1:
+        return response
+
     if descriptor.name == "CbUnifiedLookupResponse":
         if not response.HasField("payload"):
             return None
@@ -905,7 +894,7 @@ def _read_transfer_channel_address(message: Any) -> TransferChannelAddress:
     return TransferChannelAddress(offset=message.offset, size=message.size)
 
 
-# These serializers remain part of ``multiprocess.mq``'s compatibility API.
+# These serializers remain part of ``multiprocess.grpc``'s compatibility API.
 _SPECIAL_ENCODER_DECODERS = {
     DeviceIPCWrapper: (
         get_customized_encoder(DeviceIPCWrapper),
