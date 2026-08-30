@@ -21,6 +21,79 @@ from setup_extensions.build_profiles import BuildProfile
 ENABLE_CXX11_ABI = os.environ.get("ENABLE_CXX11_ABI", "1") == "1"
 CSRC_DIR = str(Path(__file__).resolve().parents[2] / "csrc")
 
+# Peak memory of one nvcc compile (heaviest .cu, CUDA 13.0: 2.7--3.0 GiB).
+# Concurrent compiles = MAX_JOBS x NVCC_THREADS, so a fixed 2 x 8 needed ~48 GiB
+# and got the 16 GB GitHub runner SIGTERMed (nightly #500).
+NVCC_SLOT_GIB = 3.0
+# Reserved for the OS, docker and the CI runner agent.
+BUILD_MEM_HEADROOM_GIB = 3.0
+# Ninja's default job count when MAX_JOBS is unset is cpu_count + 2.
+NINJA_DEFAULT_EXTRA_JOBS = 2
+
+
+def _cpu_count() -> int:
+    """Return the number of CPUs this process may run on (>= 1)."""
+    try:
+        return max(1, len(os.sched_getaffinity(0)))
+    except (AttributeError, OSError):
+        return max(1, os.cpu_count() or 1)
+
+
+def _memory_budget_gib() -> float | None:
+    """Return min(physical RAM, cgroup v2 limit) in GiB, or None if unknown."""
+    candidates: list[int] = []
+    try:
+        raw = Path("/sys/fs/cgroup/memory.max").read_text().strip()
+        if raw.isdigit():
+            candidates.append(int(raw))
+    except OSError:
+        pass
+    try:
+        candidates.append(os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE"))
+    except (AttributeError, OSError, ValueError):
+        pass
+    if not candidates:
+        return None
+    return min(candidates) / 2**30
+
+
+def resolve_build_parallelism() -> tuple[int, int, bool]:
+    """Resolve ``MAX_JOBS`` and nvcc ``--threads`` for this host.
+
+    Concurrent compiles (``jobs x threads``) are capped at
+    ``min(cpus, (memory - headroom) / NVCC_SLOT_GIB)``. Explicit
+    ``MAX_JOBS=<n>`` / ``NVCC_THREADS=<n>`` are used as-is; unset, empty,
+    ``0`` or ``auto`` ``NVCC_THREADS`` is sized to fill the remaining cap.
+
+    Returns:
+        ``(max_jobs, nvcc_threads, export_max_jobs)``; the last is True when
+        ``MAX_JOBS`` was derived here and must be exported for ninja.
+
+    Raises:
+        ValueError: If ``NVCC_THREADS`` is neither an integer nor ``auto``.
+    """
+    cpus = _cpu_count()
+    slots = cpus
+    budget = _memory_budget_gib()
+    if budget is not None:
+        slots = min(slots, int((budget - BUILD_MEM_HEADROOM_GIB) // NVCC_SLOT_GIB))
+    slots = max(1, slots)
+
+    raw_jobs = os.environ.get("MAX_JOBS")
+    if raw_jobs is not None and raw_jobs.isdigit():
+        jobs = max(1, int(raw_jobs))
+        export_jobs = False
+    else:
+        jobs = min(cpus + NINJA_DEFAULT_EXTRA_JOBS, slots)
+        export_jobs = True
+
+    raw_threads = os.environ.get("NVCC_THREADS", "").strip().lower()
+    if raw_threads in ("", "0", "auto"):
+        threads = max(1, slots // jobs)
+    else:
+        threads = max(1, int(raw_threads))
+    return jobs, threads, export_jobs
+
 
 class CudaProfile(BuildProfile):
     """CUDA GPU extension build profile."""
@@ -63,6 +136,18 @@ class CudaProfile(BuildProfile):
             "csrc/cuda/event_recorder.cpp",
             "csrc/cuda/completion_recorder.cpp",
         ]
+        max_jobs, nvcc_threads, export_jobs = resolve_build_parallelism()
+        if export_jobs:
+            # torch's BuildExtension reads MAX_JOBS from os.environ at ninja time.
+            os.environ["MAX_JOBS"] = str(max_jobs)
+        print(
+            "CUDA build parallelism: MAX_JOBS=%d NVCC_THREADS=%d"
+            % (max_jobs, nvcc_threads)
+        )
+        nvcc_flags = [flag_cxx_abi]
+        # --threads=1 is a no-op; omit it to keep the historical command line.
+        if nvcc_threads > 1:
+            nvcc_flags.append(f"--threads={nvcc_threads}")
         ext_modules = [
             cpp_extension.CUDAExtension(
                 "lmcache.cuda_ops",
@@ -70,7 +155,7 @@ class CudaProfile(BuildProfile):
                 include_dirs=[CSRC_DIR],
                 extra_compile_args={
                     "cxx": [flag_cxx_abi, "-std=c++17"],
-                    "nvcc": [flag_cxx_abi],
+                    "nvcc": nvcc_flags,
                 },
             ),
         ]

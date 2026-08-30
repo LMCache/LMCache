@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 from lmcache.v1.platform.base.device_spec import DeviceSpec
 from lmcache.v1.platform.base.pin_memory import PinMemoryBackend
 from lmcache.v1.platform.cuda.pin_memory import CudaPinMemoryBackend
+from lmcache.v1.platform.isolated_ipc import is_isolated_ipc
 
 if TYPE_CHECKING:
     # First Party
@@ -18,6 +19,58 @@ if TYPE_CHECKING:
     from lmcache.v1.platform.base.device_ops import DeviceOps
     from lmcache.v1.platform.base.event_ipc import EventIPCBackend
     from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
+
+# ---------------------------------------------------------------------------
+# Event IPC backend selection
+# ---------------------------------------------------------------------------
+
+
+def _select_event_ipc_backend(device_type: str) -> "EventIPCBackend":
+    """Construct the event IPC backend for the current isolated-IPC setting.
+
+    Args:
+        device_type: Device-type label passed through to the backend.
+
+    Returns:
+        The timeline-semaphore backend when isolated IPC is enabled (see
+        ``lmcache/v1/platform/isolated_ipc.py``), otherwise the CUDA
+        interprocess event handle backend.
+    """
+    if is_isolated_ipc():
+        # First Party
+        from lmcache.v1.platform.cuda.timeline_semaphore_event_ipc import (
+            TimelineSemaphoreEventIPCBackend,
+        )
+
+        return TimelineSemaphoreEventIPCBackend()
+
+    # Third Party
+    import torch
+
+    # First Party
+    from lmcache.v1.platform.base.event_ipc import DefaultEventIPCBackend
+
+    return DefaultEventIPCBackend(
+        event_module=torch.cuda,
+        device_type=device_type,
+    )
+
+
+def _select_ipc_wrapper_cls() -> "type[DeviceIPCWrapper]":
+    """Return the KV-cache IPC wrapper class for the current
+    isolated-IPC setting.
+
+    Returns:
+        :class:`RawCudaIPCWrapper` (driver-level CUDA IPC mem handles,
+        no shared ``/dev/shm`` assumed) when isolated IPC is enabled,
+        otherwise :class:`CudaIPCWrapper` (PyTorch storage IPC).
+    """
+
+    # First Party
+    from lmcache.v1.platform.cuda.ipc_wrapper import CudaIPCWrapper, RawCudaIPCWrapper
+
+    return RawCudaIPCWrapper if is_isolated_ipc() else CudaIPCWrapper
+
 
 # ---------------------------------------------------------------------------
 # Device detection registry entry
@@ -49,16 +102,7 @@ class CudaDeviceSpec(DeviceSpec):
         """Return the CUDA event IPC backend."""
         backend = self._event_backend_cache
         if backend is None:
-            # Third Party
-            import torch
-
-            # First Party
-            from lmcache.v1.platform.base.event_ipc import DefaultEventIPCBackend
-
-            backend = DefaultEventIPCBackend(
-                event_module=torch.cuda,
-                device_type=self.device_type,
-            )
+            backend = _select_event_ipc_backend(self.device_type)
             self._event_backend_cache = backend
         return backend
 
@@ -68,10 +112,8 @@ class CudaDeviceSpec(DeviceSpec):
 
     @property
     def ipc_wrapper_cls(self) -> type[DeviceIPCWrapper] | None:
-        # First Party
-        from lmcache.v1.platform.cuda.ipc_wrapper import CudaIPCWrapper
-
-        return CudaIPCWrapper
+        """Return the KV-cache IPC wrapper class (isolated-IPC aware)."""
+        return _select_ipc_wrapper_cls()
 
     def is_available(self) -> bool:
         """Check CUDA availability without importing lmcache.__init__."""

@@ -610,14 +610,14 @@ def run_server_bench(
         workers: list[WorkerContext] = []
         registered_instance_ids: list[int] = []
 
-        # Import the wrapper class once per mode, outside the per-rank
-        # loop: importing ``CudaIPCWrapper`` on a non-CUDA host pulls in
+        # Import the wrapper machinery once per mode, outside the per-rank
+        # loop: importing CUDA wrapper symbols on a non-CUDA host pulls in
         # CUDA-specific symbols from torch and can crash, so it must stay
         # behind the ``use_gpu`` gate; keeping it in the loop just paid
         # the same cost every rank without adding any safety.
         if use_gpu:
             # First Party
-            from lmcache.v1.platform.cuda.ipc_wrapper import CudaIPCWrapper
+            from lmcache.v1.platform.kv_wrap import wrap_one_kv_cache
         else:
             # First Party
             from lmcache.v1.platform.cpu.shm import CpuShmTensorWrapper
@@ -633,7 +633,10 @@ def run_server_bench(
                     "[rank %d] Allocated %d GPU tensors on %s"
                     % (rank, len(allocated), allocated[0].device)
                 )
-                kv_wrappers: KVCache = [CudaIPCWrapper(t) for t in allocated]
+                # Route through the platform factory so the wrapper follows
+                # the isolated-IPC switch, exactly like production
+                # registration (wrap_kv_caches in worker_transfer).
+                kv_wrappers: KVCache = [wrap_one_kv_cache(t) for t in allocated]
                 client_kv_tensors = allocated
             else:
                 shm_prefix = CpuShmTensorWrapper.SHM_NAME_PREFIX + "%s_r%d" % (
