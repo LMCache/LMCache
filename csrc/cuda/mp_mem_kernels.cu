@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "mp_mem_kernels_common.cuh"
+#include "mp_mem_kernels.cuh"
 
 namespace {
 
