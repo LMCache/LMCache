@@ -15,7 +15,11 @@
 
 #pragma once
 
-#include "mp_mem_kernels.cuh"
+#include <c10/cuda/CUDAGuard.h>
+
+#include "kv_transfer_plan_types.h"
+#include "mem_kernels.cuh"
+#include "transfer_plan_types.cuh"
 
 #include <algorithm>
 
