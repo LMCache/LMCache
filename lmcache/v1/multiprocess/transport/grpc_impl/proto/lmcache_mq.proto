@@ -28,12 +28,12 @@ message PingResponse {
 }
 
 // -----------------------------------------------------------------------
-// Shared: cache key used by 9+ engine rpcs (Lookup / Store / Retrieve /
+// Shared: cache key used by engine rpcs (Lookup / Store / Retrieve /
 // FreeLookupLocks / PrepareStore / CommitStore / PrepareRetrieve /
-// CommitRetrieve / EndSession / CB_LOOKUP_PRE_COMPUTED / ...).  Kept
-// here so those rpcs can embed it instead of each redeclaring the same
-// eight fields. Field numbers mirror the dataclass declaration order
-// in ``lmcache/v1/multiprocess/custom_types.py`` for readability.
+// CommitRetrieve / EndSession / CacheBlend retrieve / ...). Kept here so
+// those rpcs can embed it instead of each redeclaring the same fields.
+// Field numbers mirror the dataclass declaration order in
+// ``lmcache/v1/multiprocess/custom_types.py`` for readability.
 //
 // ``worker_id`` is optional to preserve the ``int | None`` semantics
 // used for tp-fan-out lookups (the sentinel is a missing field, not
@@ -48,6 +48,7 @@ message IpcCacheServerKey {
   int64 end = 6;
   string request_id = 7;
   string cache_salt = 8;
+  int64 num_kv_readers = 9;
 }
 
 // Lookup: submit a prefix lookup and return once the job is registered.
@@ -156,21 +157,13 @@ message EventIpcHandleResult {
   bool success = 2;
 }
 
-// LMCache KV-group's block ID list: STORE / RETRIEVE / CB_RETRIEVE_V3
+// LMCache KV-group's block ID list: Store / Retrieve / CbRetrievePreComputed
 // all send one entry per KV group in kernel order.
 message BlockIdGroup {
   repeated int64 block_ids = 1;
 }
 
-// (start, end) match range for the V1 CB lookup/retrieve rpcs.  A
-// dedicated message keeps the wire self-describing (proto has no
-// native tuple type).
-message MatchRange {
-  int64 start = 1;
-  int64 end = 2;
-}
-
-// CBMatchResult: V2/V3 lookup returns one per matched sub-sequence.
+// CBMatchResult: one per matched CacheBlend sub-sequence.
 message CbMatchResult {
   int64 old_st = 1;
   int64 old_ed = 2;
@@ -220,56 +213,17 @@ message ReportBlockAllocationRequest {
 
 message ReportBlockAllocationResponse {}
 
-// CB Unregister family — same [int] -> None shape as UnregisterKvCache.
-message CbUnregisterKvCacheRequest {
+message CbUnregisterRopeRequest {
   int64 instance_id = 1;
 }
 
-message CbUnregisterKvCacheResponse {}
+message CbUnregisterRopeResponse {}
 
-message CbUnregisterRopeV3Request {
-  int64 instance_id = 1;
-}
-
-message CbUnregisterRopeV3Response {}
-
-// Blend V1 lookup: returns per-match ranges.
-message CbLookupPreComputedRequest {
-  IpcCacheServerKey key = 1;
-}
-
-message CbLookupPreComputedResponse {
-  repeated MatchRange ranges = 1;
-}
-
-// Blend V1 store family (StorePreComputed + StoreFinal share the shape).
-message CbStorePreComputedRequest {
-  IpcCacheServerKey key = 1;
-  int64 offset = 2;
-  int64 instance_id = 3;
-  bytes event_ipc_handle = 4;
-}
-
-message CbStorePreComputedResponse {
-  EventIpcHandleResult result = 1;
-}
-
-message CbStoreFinalRequest {
-  IpcCacheServerKey key = 1;
-  int64 offset = 2;
-  int64 instance_id = 3;
-  bytes event_ipc_handle = 4;
-}
-
-message CbStoreFinalResponse {
-  EventIpcHandleResult result = 1;
-}
-
-// Blend V1 retrieve: pulls the pre-computed chunks into the CB buffer.
+// CacheBlend retrieve into paged blocks (per LMCache KV group).
 message CbRetrievePreComputedRequest {
   IpcCacheServerKey key = 1;
-  repeated MatchRange ranges = 2;
-  int64 offset = 3;
+  repeated CbMatchResult cb_match_result = 2;
+  repeated BlockIdGroup gpu_block_ids = 3;
   int64 instance_id = 4;
   bytes event_ipc_handle = 5;
 }
@@ -278,41 +232,7 @@ message CbRetrievePreComputedResponse {
   EventIpcHandleResult result = 1;
 }
 
-// Blend V2: uses CbMatchResult everywhere plain (start,end) was used.
-message CbLookupPreComputedV2Request {
-  IpcCacheServerKey key = 1;
-}
-
-message CbLookupPreComputedV2Response {
-  repeated CbMatchResult matches = 1;
-}
-
-message CbRetrievePreComputedV2Request {
-  IpcCacheServerKey key = 1;
-  repeated CbMatchResult cb_match_result = 2;
-  int64 offset = 3;
-  int64 instance_id = 4;
-  bytes event_ipc_handle = 5;
-}
-
-message CbRetrievePreComputedV2Response {
-  EventIpcHandleResult result = 1;
-}
-
-// Blend V3: retrieve into paged blocks (per LMCache KV group).
-message CbRetrievePreComputedV3Request {
-  IpcCacheServerKey key = 1;
-  repeated CbMatchResult cb_match_result = 2;
-  repeated BlockIdGroup gpu_block_ids = 3;
-  int64 instance_id = 4;
-  bytes event_ipc_handle = 5;
-}
-
-message CbRetrievePreComputedV3Response {
-  EventIpcHandleResult result = 1;
-}
-
-// Blend V3 unified lookup: same input shape as LOOKUP; the response
+// CacheBlend unified lookup: same input shape as Lookup; the response
 // carries prefix coverage and non-prefix segment matches together, or
 // is absent while either leg is still loading.
 message CbUnifiedLookupRequest {
@@ -506,26 +426,14 @@ message RegisterKvCacheRequest {
 
 message RegisterKvCacheResponse {}
 
-// CbRegisterKvCache: the CB-path registration.  Same shape as the
-// GPU path but without the format-detection metadata (CB flow is
-// engine-agnostic once the wrapper list is registered).
-message CbRegisterKvCacheRequest {
-  int64 instance_id = 1;
-  repeated DeviceIpcWrapper kv_cache = 2;
-  string model_name = 3;
-  int64 world_size = 4;
-}
-
-message CbRegisterKvCacheResponse {}
-
-// CbRegisterRopeV3: publish per-engine rope caches (dual-RoPE models
+// CbRegisterRope: publish per-engine rope caches (dual-RoPE models
 // send two).  ``group_to_cache`` maps engine group idx -> cache idx;
 // empty means "all groups use cache 0".
 message RopeWindow {
   repeated int64 values = 1;
 }
 
-message CbRegisterRopeV3Request {
+message CbRegisterRopeRequest {
   int64 instance_id = 1;
   repeated DeviceIpcWrapper cos_sin_caches_ipc = 2;
   int64 head_size = 3;
@@ -534,14 +442,11 @@ message CbRegisterRopeV3Request {
   repeated RopeWindow group_rot = 6;
 }
 
-message CbRegisterRopeV3Response {}
+message CbRegisterRopeResponse {}
 
 // -----------------------------------------------------------------------
-// Services. Each service is one protocol module boundary; gRPC service names
-// carry the grouping that the old Python-side request registry used to own.
-// Method names remain the CamelCase form of the historical ALL_CAPS request
-// names (STORE -> Store, CB_LOOKUP_PRE_COMPUTED_V2 ->
-// CbLookupPreComputedV2, etc.).
+// Services. Each service is a generated gRPC boundary implemented by the
+// matching Python *ServiceImpl class.
 // -----------------------------------------------------------------------
 
 service EngineService {
@@ -592,33 +497,11 @@ service DebugService {
 }
 
 service BlendService {
-  rpc CbRegisterKvCache(CbRegisterKvCacheRequest)
-      returns (CbRegisterKvCacheResponse);
-  rpc CbUnregisterKvCache(CbUnregisterKvCacheRequest)
-      returns (CbUnregisterKvCacheResponse);
-  rpc CbStorePreComputed(CbStorePreComputedRequest)
-      returns (CbStorePreComputedResponse);
-  rpc CbLookupPreComputed(CbLookupPreComputedRequest)
-      returns (CbLookupPreComputedResponse);
+  rpc CbRegisterRope(CbRegisterRopeRequest) returns (CbRegisterRopeResponse);
+  rpc CbUnregisterRope(CbUnregisterRopeRequest)
+      returns (CbUnregisterRopeResponse);
   rpc CbRetrievePreComputed(CbRetrievePreComputedRequest)
       returns (CbRetrievePreComputedResponse);
-  rpc CbStoreFinal(CbStoreFinalRequest) returns (CbStoreFinalResponse);
-}
-
-service BlendV2Service {
-  rpc CbLookupPreComputedV2(CbLookupPreComputedV2Request)
-      returns (CbLookupPreComputedV2Response);
-  rpc CbRetrievePreComputedV2(CbRetrievePreComputedV2Request)
-      returns (CbRetrievePreComputedV2Response);
-}
-
-service BlendV3Service {
-  rpc CbRegisterRopeV3(CbRegisterRopeV3Request)
-      returns (CbRegisterRopeV3Response);
-  rpc CbUnregisterRopeV3(CbUnregisterRopeV3Request)
-      returns (CbUnregisterRopeV3Response);
-  rpc CbRetrievePreComputedV3(CbRetrievePreComputedV3Request)
-      returns (CbRetrievePreComputedV3Response);
   rpc CbUnifiedLookup(CbUnifiedLookupRequest) returns (CbUnifiedLookupResponse);
 }
 

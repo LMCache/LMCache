@@ -189,53 +189,13 @@ _PYTHON_RPC_CONTRACTS: dict[str, _PythonRpcContract] = {
         HandlerType.BLOCKING,
     ),
     "Noop": _PythonRpcContract((), str, HandlerType.SYNC),
-    "CbRegisterKvCache": _PythonRpcContract(
-        (int, KVCache, str, int),
-        None,
-        HandlerType.SYNC,
-    ),
-    "CbUnregisterKvCache": _PythonRpcContract((int,), None, HandlerType.SYNC),
-    "CbStorePreComputed": _PythonRpcContract(
-        (IPCCacheServerKey, int, int, bytes),
-        tuple[bytes, bool],
-        HandlerType.BLOCKING,
-        requires_client_affinity=True,
-    ),
-    "CbLookupPreComputed": _PythonRpcContract(
-        (IPCCacheServerKey,),
-        list[tuple[int, int]],
-        HandlerType.BLOCKING,
-    ),
-    "CbRetrievePreComputed": _PythonRpcContract(
-        (IPCCacheServerKey, list[tuple[int, int]], int, int, bytes),
-        tuple[bytes, bool],
-        HandlerType.BLOCKING,
-        requires_client_affinity=True,
-    ),
-    "CbStoreFinal": _PythonRpcContract(
-        (IPCCacheServerKey, int, int, bytes),
-        tuple[bytes, bool],
-        HandlerType.BLOCKING,
-        requires_client_affinity=True,
-    ),
-    "CbLookupPreComputedV2": _PythonRpcContract(
-        (IPCCacheServerKey,),
-        list[CBMatchResult],
-        HandlerType.BLOCKING,
-    ),
-    "CbRetrievePreComputedV2": _PythonRpcContract(
-        (IPCCacheServerKey, list[CBMatchResult], int, int, bytes),
-        tuple[bytes, bool],
-        HandlerType.BLOCKING,
-        requires_client_affinity=True,
-    ),
-    "CbRegisterRopeV3": _PythonRpcContract(
+    "CbRegisterRope": _PythonRpcContract(
         (int, list[DeviceIPCWrapper], int, bool, list[int], list[list[int]]),
         None,
         HandlerType.SYNC,
     ),
-    "CbUnregisterRopeV3": _PythonRpcContract((int,), None, HandlerType.SYNC),
-    "CbRetrievePreComputedV3": _PythonRpcContract(
+    "CbUnregisterRope": _PythonRpcContract((int,), None, HandlerType.SYNC),
+    "CbRetrievePreComputed": _PythonRpcContract(
         (IPCCacheServerKey, list[CBMatchResult], list[list[int]], int, bytes),
         tuple[bytes, bool],
         HandlerType.BLOCKING,
@@ -265,13 +225,13 @@ _PYTHON_RPC_CONTRACTS: dict[str, _PythonRpcContract] = {
 
 
 def request_type_to_method_name(request_type: RpcMethod | str) -> str:
-    """Return the protobuf service method name for a request type.
+    """Return the protobuf service method name for an RPC method.
 
     Args:
         request_type: Multiprocess protocol operation.
 
     Returns:
-        The CamelCase method name used by ``MessageQueue``.
+        The CamelCase protobuf method name.
     """
     return str(coerce_rpc_method(request_type))
 

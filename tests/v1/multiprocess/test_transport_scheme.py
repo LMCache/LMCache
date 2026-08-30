@@ -56,7 +56,7 @@ def test_ensure_transport_scheme_preserves_existing_scheme(url):
         (RPC.Store, "Store"),
         (RPC.Retrieve, "Retrieve"),
         (RPC.PrepareStore, "PrepareStore"),
-        (RPC.CbLookupPreComputedV2, "CbLookupPreComputedV2"),
+        (RPC.CbRetrievePreComputed, "CbRetrievePreComputed"),
         (RPC.P2PLookupAndLock, "P2PLookupAndLock"),
     ],
 )

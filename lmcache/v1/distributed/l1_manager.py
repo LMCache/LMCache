@@ -92,31 +92,29 @@ L1OperationResult = tuple[L1Error, MemoryObj | None]
 MAX_READ_LOCK_COUNT = 128
 
 
-def _validate_extra_count(extra_count: int) -> int:
-    """Validate and clamp extra_count.
+def _validate_read_locks(read_locks: int) -> int:
+    """Validate and clamp a per-key read-lock count.
 
     Args:
-        extra_count: Extra lock count on top of the
-            default 1 lock.
+        read_locks: Total read locks to take or release per key.
 
     Returns:
-        Clamped value in [0, MAX_READ_LOCK_COUNT - 1].
+        Clamped value in [1, MAX_READ_LOCK_COUNT].
     """
-    if extra_count < 0:
+    if read_locks < 1:
         logger.warning(
-            "L1Manager: extra_count=%d is invalid, clamping to 0",
-            extra_count,
+            "L1Manager: read_locks=%d is invalid, clamping to 1",
+            read_locks,
         )
-        return 0
-    upper = MAX_READ_LOCK_COUNT - 1
-    if extra_count > upper:
+        return 1
+    if read_locks > MAX_READ_LOCK_COUNT:
         logger.warning(
-            "L1Manager: extra_count=%d exceeds limit=%d, clamping",
-            extra_count,
-            upper,
+            "L1Manager: read_locks=%d exceeds limit=%d, clamping",
+            read_locks,
+            MAX_READ_LOCK_COUNT,
         )
-        return upper
-    return extra_count
+        return MAX_READ_LOCK_COUNT
+    return read_locks
 
 
 def _l1_usage_ratio_or_zero(target: "L1Manager | None") -> float:
@@ -248,18 +246,17 @@ class L1Manager:
     def reserve_read(
         self,
         keys: list[ObjectKey],
-        extra_count: int = 0,
+        read_locks: int = 1,
     ) -> dict[ObjectKey, L1OperationResult]:
         """Reserve read access for the given keys.
 
         Args:
             keys: The list of object keys to reserve
                 read access for.
-            extra_count: Extra read locks on top of the
-                default 1 lock.  Total locks acquired per
-                key = 1 + extra_count.  Useful when multiple
-                workers each consume one read lock for the
-                same key (e.g. MLA models with TP > 1).
+            read_locks: Total read locks acquired per key --
+                one per worker that consumes a read lock
+                for the same key (e.g. MLA models with
+                TP > 1).
 
         Returns:
             A dictionary mapping each object key to a tuple
@@ -270,8 +267,7 @@ class L1Manager:
             KEY_NOT_READABLE: The key exists but is not
                 readable.
         """
-        extra_count = _validate_extra_count(extra_count)
-        total = 1 + extra_count
+        total = _validate_read_locks(read_locks)
         ret: dict[ObjectKey, L1OperationResult] = {}
         successful_keys: list[ObjectKey] = []
         for key in keys:
@@ -344,7 +340,7 @@ class L1Manager:
     def finish_read(
         self,
         keys: list[ObjectKey],
-        extra_count: int = 0,
+        read_locks: int = 1,
     ) -> dict[ObjectKey, L1Error]:
         """Finish read access for the given keys.
 
@@ -354,10 +350,11 @@ class L1Manager:
         Args:
             keys: The list of object keys to finish read
                 access for.
-            extra_count: Extra read locks to release on top
-                of the default 1.  Must match the
-                ``extra_count`` used in the corresponding
-                ``reserve_read`` call.
+            read_locks: Read locks to release per key.  A caller
+                releasing only its own read lock passes 1 (the
+                default); the reservation owner releasing the
+                whole reservation passes the ``reserve_read``
+                total.
 
         Returns:
             A dictionary mapping each object key to an
@@ -369,8 +366,7 @@ class L1Manager:
                 non-read-locked, which means the reader may
                 read inconsistent data.
         """
-        extra_count = _validate_extra_count(extra_count)
-        total = 1 + extra_count
+        total = _validate_read_locks(read_locks)
         need_to_free: list[MemoryObj] = []
         need_to_free_keys: list[ObjectKey] = []
         ret: dict[ObjectKey, L1Error] = {}
@@ -602,7 +598,7 @@ class L1Manager:
     def finish_write_and_reserve_read(
         self,
         keys: list[ObjectKey],
-        extra_count: int = 0,
+        read_locks: int = 1,
     ) -> dict[ObjectKey, L1OperationResult]:
         """Atomically finish write and acquire read lock for the given keys.
 
@@ -613,10 +609,9 @@ class L1Manager:
 
         Args:
             keys: Keys to transition from write-locked to read-locked.
-            extra_count: Extra read locks on top of the default 1 lock.
-                Total locks acquired per key = 1 + extra_count.  Useful
-                when multiple TP workers each consume one read lock for
-                the same key (e.g. MLA models with TP > 1).
+            read_locks: Total read locks acquired per key -- one per TP
+                worker that consumes a read lock for the same key
+                (e.g. MLA models with TP > 1).
 
         Returns:
             A dictionary mapping each object key to a tuple of
@@ -627,8 +622,7 @@ class L1Manager:
             KEY_IN_WRONG_STATE: The key is not write-locked, or it already
                 has read locks.
         """
-        extra_count = _validate_extra_count(extra_count)
-        total = 1 + extra_count
+        total = _validate_read_locks(read_locks)
         ret: dict[ObjectKey, L1OperationResult] = {}
         successful_keys: list[ObjectKey] = []
         successful_keys_meta: list[L1ObjectMeta] = []

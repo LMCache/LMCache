@@ -33,9 +33,8 @@ from tests.v1.multiprocess.test_mq import (
 # ============================================================================
 
 
-def test_free_locks_in_request_type():
-    """FREE_LOOKUP_LOCKS should be a member of RpcMethod."""
-    assert hasattr(RpcMethod, "FREE_LOOKUP_LOCKS")
+def test_free_locks_is_descriptor_rpc_method():
+    """FreeLookupLocks should be a descriptor-derived RpcMethod."""
     assert isinstance(RPC.FreeLookupLocks, RpcMethod)
 
 
@@ -142,7 +141,7 @@ def test_server_free_lookup_locks_calls_finish_read_prefetched():
         module.free_lookup_locks(key, 1)
 
     module.context.storage_manager.finish_read_prefetched.assert_called_once_with(
-        sentinel_obj_keys, extra_count=0
+        sentinel_obj_keys, read_locks=1
     )
 
 
@@ -151,6 +150,7 @@ def _free_locks_key(num_tokens: int, start: int, end: int) -> IPCCacheServerKey:
     return IPCCacheServerKey(
         model_name="testmodel",
         world_size=1,
+        num_kv_readers=1,
         worker_id=None,
         token_ids=tuple(range(num_tokens)),
         start=start,
@@ -162,7 +162,7 @@ def _free_locks_key(num_tokens: int, start: int, end: int) -> IPCCacheServerKey:
 def _released_chunks(finish_read_mock: MagicMock) -> set[tuple[int, bytes]]:
     """Collect (object_group_id, chunk_hash) pairs released by the module."""
     (obj_keys,), kwargs = finish_read_mock.call_args
-    assert kwargs == {"extra_count": 0}
+    assert kwargs == {"read_locks": 1}
     return {(k.object_group_id, k.chunk_hash) for k in obj_keys}
 
 
@@ -262,6 +262,7 @@ def test_server_free_lookup_locks_no_matching_chunks():
     key = IPCCacheServerKey(
         model_name="testmodel",
         world_size=1,
+        num_kv_readers=1,
         worker_id=None,
         token_ids=tuple(range(256)),
         start=0,

@@ -57,12 +57,10 @@ Source: ``lmcache/v1/multiprocess/config.py``
    * - ``--engine-type``
      - ``default``
      - Cache engine backend type. ``default`` uses standard prefix
-       caching; ``blend`` selects the current CacheBlend V3 implementation
-       (composes a ``BlendV3Service`` into the engine);
-       ``blend_legacy`` selects the original CacheBlend
-       (composes a ``LegacyBlendService``). Both blend variants require
+       caching; ``blend`` selects the current CacheBlend implementation
+       (composes a ``BlendService`` into the engine). CacheBlend requires
        ``--supported-transfer-mode`` to be ``lmcache_driven`` or ``auto``.
-       Choices: ``default``, ``blend``, ``blend_legacy``.
+       Choices: ``default``, ``blend``.
    * - ``--supported-transfer-mode``
      - ``lmcache_driven``
      - Which worker → server transfer paths the server loads.

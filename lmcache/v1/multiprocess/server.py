@@ -7,7 +7,7 @@ from __future__ import annotations
 # Standard
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 import argparse
 import shutil
 import signal
@@ -66,8 +66,6 @@ from lmcache.v1.multiprocess.services.management import ManagementService
 from lmcache.v1.multiprocess.services.p2p_controller import P2PController
 from lmcache.v1.multiprocess.services.rpc_services import (
     BlendServiceImpl,
-    BlendV2ServiceImpl,
-    BlendV3ServiceImpl,
     ControllerServiceImpl,
     DebugServiceImpl,
     EngineServiceImpl,
@@ -77,6 +75,10 @@ from lmcache.v1.multiprocess.services.rpc_services import (
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 
 logger = init_logger(__name__)
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.multiprocess.services.blend import BlendService
 
 
 class _StatusReporter(Protocol):
@@ -105,8 +107,6 @@ class _BuiltRpcServices:
     observability_service: ObservabilityServiceImpl
     p2p_service: P2PServiceImpl
     blend_service: BlendServiceImpl | None
-    blend_v2_service: BlendV2ServiceImpl | None
-    blend_v3_service: BlendV3ServiceImpl | None
     management: ManagementService
     lmcache_driven_transfer: LMCacheDrivenTransferService | None
     status_reporters: Sequence[_StatusReporter]
@@ -247,27 +247,11 @@ def _build_rpc_services(
     if engine_driven_transfer is not None:
         liveness_targets.append(engine_driven_transfer)
 
-    # At most one blend service is ever built (engine_type selects one).
-    legacy_blend: LegacyBlendService | None = None
-    blend_v3: BlendV3Service | None = None
-
-    if mp_config.engine_type == "blend_legacy":
-        if mp_config.supported_transfer_mode == "engine_driven":
-            raise ValueError(
-                "Legacy blend engine requires supported_transfer_mode to be "
-                f"'lmcache_driven' or 'auto', got "
-                f"'{mp_config.supported_transfer_mode}'"
-            )
-        # First Party
-        from lmcache.v1.multiprocess.services.blend import LegacyBlendService
-
-        legacy_blend = LegacyBlendService(ctx)
-
-    # "blend" selects CacheBlend V3 (the current implementation).
+    blend: BlendService | None = None
     if mp_config.engine_type == "blend":
         if mp_config.supported_transfer_mode == "engine_driven":
             raise ValueError(
-                "blend (V3) engine requires supported_transfer_mode "
+                "blend engine requires supported_transfer_mode "
                 f"'lmcache_driven' or 'auto', got "
                 f"'{mp_config.supported_transfer_mode}'"
             )
@@ -275,12 +259,10 @@ def _build_rpc_services(
         from lmcache.v1.mp_coordinator.blend_client import (
             BlendCoordinatorClient,
         )
-        from lmcache.v1.multiprocess.services.blend_v3 import BlendV3Service
+        from lmcache.v1.multiprocess.services.blend import BlendService
 
         if lmcache_driven_transfer is None:
-            raise ValueError(
-                "blend (V3) engine requires LMCache-driven transfer support"
-            )
+            raise ValueError("blend engine requires LMCache-driven transfer support")
         # Opt-in: enabled when a coordinator URL is configured (flag or
         # LMCACHE_COORDINATOR_URL, resolved at config parsing); otherwise
         # None and the blend service matches purely locally.
@@ -300,15 +282,16 @@ def _build_rpc_services(
             timeout=coordinator_config.blend_timeout,
             match_concurrency=coordinator_config.blend_match_concurrency,
         )
-        blend_v3 = BlendV3Service(
+        blend = BlendService(
             ctx,
             lmcache_driven_transfer,
             coordinator=coordinator,
             enable_segmented_prefix=mp_config.enable_segmented_prefix,
+            enable_dedup_content=mp_config.enable_dedup_content,
         )
-        # blend_v3 mirrors per-instance CB rope state, so the reaper must
+        # The blend service mirrors per-instance CB rope state, so the reaper must
         # notify it via drop_instance_state when an instance is reaped.
-        liveness_targets.append(blend_v3)
+        liveness_targets.append(blend)
 
     # Experimental intermediate tensor transfer services.
     enabled_features = set(mp_config.enable)
@@ -344,17 +327,13 @@ def _build_rpc_services(
         lmcache_driven_transfer=lmcache_driven_transfer,
         engine_driven_transfer=engine_driven_transfer,
         qstore=qstore,
-        blend_v3=blend_v3,
+        blend=blend,
     )
     controller_service = ControllerServiceImpl(management)
     debug_service = DebugServiceImpl(management)
     observability_service = ObservabilityServiceImpl(management)
     p2p_service = P2PServiceImpl(p2p_controller)
-    blend_service = BlendServiceImpl(legacy_blend) if legacy_blend is not None else None
-    blend_v2_service = (
-        BlendV2ServiceImpl(legacy_blend) if legacy_blend is not None else None
-    )
-    blend_v3_service = BlendV3ServiceImpl(blend_v3) if blend_v3 is not None else None
+    blend_service = BlendServiceImpl(blend) if blend is not None else None
 
     status_reporters: list[_StatusReporter] = [
         lookup_service,
@@ -371,8 +350,7 @@ def _build_rpc_services(
         lmcache_driven_transfer,
         engine_driven_transfer,
         qstore,
-        legacy_blend,
-        blend_v3,
+        blend,
     ):
         if item is not None:
             status_reporters.append(item)
@@ -385,8 +363,6 @@ def _build_rpc_services(
         observability_service=observability_service,
         p2p_service=p2p_service,
         blend_service=blend_service,
-        blend_v2_service=blend_v2_service,
-        blend_v3_service=blend_v3_service,
         management=management,
         lmcache_driven_transfer=lmcache_driven_transfer,
         status_reporters=status_reporters,
@@ -503,10 +479,6 @@ def run_cache_server(
     server.add_service("P2PService", rpc_services.p2p_service)
     if rpc_services.blend_service is not None:
         server.add_service("BlendService", rpc_services.blend_service)
-    if rpc_services.blend_v2_service is not None:
-        server.add_service("BlendV2Service", rpc_services.blend_v2_service)
-    if rpc_services.blend_v3_service is not None:
-        server.add_service("BlendV3Service", rpc_services.blend_v3_service)
     server.assign_thread_pools(
         max_cpu_workers=mp_config.max_cpu_workers,
         max_gpu_workers=mp_config.max_gpu_workers,

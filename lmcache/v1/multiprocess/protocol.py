@@ -25,7 +25,6 @@ class _RpcMethodMeta(type):
 
     _members: tuple["RpcMethod", ...]
     _by_method_name: dict[str, "RpcMethod"]
-    _by_request_name: dict[str, "RpcMethod"]
 
     def __iter__(cls):
         return iter(cls._members)
@@ -42,20 +41,17 @@ class RpcMethod(str, metaclass=_RpcMethodMeta):  # type: ignore[misc]
 
     _members: ClassVar[tuple["RpcMethod", ...]] = ()
     _by_method_name: ClassVar[dict[str, "RpcMethod"]] = {}
-    _by_request_name: ClassVar[dict[str, "RpcMethod"]] = {}
-    _request_name: str
     _service_name: str
 
-    def __new__(cls, method_name: str, request_name: str, service_name: str):
+    def __new__(cls, method_name: str, service_name: str):
         instance = str.__new__(cls, method_name)
-        instance._request_name = request_name
         instance._service_name = service_name
         return instance
 
     @property
     def name(self) -> str:
-        """Return the historical ALL_CAPS operation name."""
-        return self._request_name
+        """Return the protobuf method name."""
+        return str(self)
 
     @property
     def value(self) -> str:
@@ -67,9 +63,14 @@ class RpcMethod(str, metaclass=_RpcMethodMeta):  # type: ignore[misc]
         """Return the generated protobuf service that owns this method."""
         return self._service_name
 
-    def __getnewargs__(self) -> tuple[str, str, str]:  # type: ignore[override]
-        """Preserve the request-name metadata across pickle/spawn."""
-        return (str(self), self.name, self.service_name)
+    @property
+    def client_method_name(self) -> str:
+        """Return the snake_case client method name for this RPC."""
+        return _method_name_to_client_method_name(str(self))
+
+    def __getnewargs__(self) -> tuple[str, str]:  # type: ignore[override]
+        """Preserve service metadata across pickle/spawn."""
+        return (str(self), self.service_name)
 
 
 class _RpcNamespace:
@@ -93,11 +94,11 @@ class _RpcNamespace:
         raise AttributeError(f"{self.__class__.__name__!r} has no attribute {name!r}")
 
 
-def _method_name_to_request_name(method_name: str) -> str:
-    """Convert a protobuf CamelCase method name to the legacy ALL_CAPS token."""
-    request_name = re.sub(r"(.)([A-Z][a-z]+)", r"\1_\2", method_name)
-    request_name = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", request_name)
-    return request_name.upper().replace("P2_P", "P2P")
+def _method_name_to_client_method_name(method_name: str) -> str:
+    """Convert a protobuf CamelCase method name to a snake_case client method."""
+    client_name = re.sub(r"(.)([A-Z][a-z]+)", r"\1_\2", method_name)
+    client_name = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", client_name)
+    return client_name.lower().replace("p2_p", "p2p")
 
 
 def _build_rpc_methods() -> tuple[RpcMethod, ...]:
@@ -108,15 +109,13 @@ def _build_rpc_methods() -> tuple[RpcMethod, ...]:
             if method.name in seen_method_names:
                 raise RuntimeError(f"Duplicate gRPC method name: {method.name}")
             seen_method_names.add(method.name)
-            request_name = _method_name_to_request_name(method.name)
-            rpc_method = RpcMethod(method.name, request_name, service.name)
+            rpc_method = RpcMethod(method.name, service.name)
             methods.append(rpc_method)
-            setattr(RpcMethod, request_name, rpc_method)
+            setattr(RpcMethod, method.name, rpc_method)
 
     members = tuple(methods)
     RpcMethod._members = members
     RpcMethod._by_method_name = {str(method): method for method in members}
-    RpcMethod._by_request_name = {method.name: method for method in members}
     return members
 
 
@@ -125,16 +124,13 @@ RPC = _RpcNamespace(RPC_METHODS)
 
 
 def coerce_rpc_method(req_type: RpcMethod | str) -> RpcMethod:
-    """Resolve an operation from either legacy or protobuf-native spelling."""
+    """Resolve a protobuf RPC method token."""
     if isinstance(req_type, RpcMethod):
         return req_type
     method = RpcMethod._by_method_name.get(req_type)
     if method is not None:
         return method
-    method = RpcMethod._by_request_name.get(req_type)
-    if method is not None:
-        return method
-    raise ValueError(f"Invalid request type: {req_type}")
+    raise ValueError(f"Invalid RPC method: {req_type}")
 
 
 def _get_typed_spec(req_type: RpcMethod | str) -> Any:
@@ -146,7 +142,7 @@ def _get_typed_spec(req_type: RpcMethod | str) -> Any:
     try:
         return TYPED_RPCS[rpc_method]
     except KeyError as exc:
-        raise ValueError(f"Invalid request type: {req_type}") from exc
+        raise ValueError(f"Invalid RPC method: {req_type}") from exc
 
 
 def get_payload_classes(req_type: RpcMethod | str) -> list[Any]:
@@ -154,13 +150,13 @@ def get_payload_classes(req_type: RpcMethod | str) -> list[Any]:
     Get the expected Python payload classes for an RPC method.
 
     Args:
-        req_type: The legacy operation name or protobuf method to look up.
+        req_type: The protobuf RPC method to look up.
 
     Returns:
         The payload classes expected by the service implementation.
 
     Raises:
-        ValueError: If the request type is not recognized.
+        ValueError: If the RPC method is not recognized.
     """
     return list(_get_typed_spec(req_type).payload_types)
 
@@ -170,13 +166,13 @@ def get_response_class(req_type: RpcMethod | str) -> Optional[Any]:
     Get the expected Python response class for an RPC method.
 
     Args:
-        req_type: The legacy operation name or protobuf method to look up.
+        req_type: The protobuf RPC method to look up.
 
     Returns:
         Expected response class, or None when the RPC has no response payload.
 
     Raises:
-        ValueError: If the request type is not recognized.
+        ValueError: If the RPC method is not recognized.
     """
     return _get_typed_spec(req_type).response_type
 
@@ -186,13 +182,13 @@ def get_handler_type(req_type: RpcMethod | str) -> HandlerType:
     Get the execution mode for an RPC method.
 
     Args:
-        req_type: The legacy operation name or protobuf method to look up.
+        req_type: The protobuf RPC method to look up.
 
     Returns:
         The handler execution mode.
 
     Raises:
-        ValueError: If the request type is not recognized.
+        ValueError: If the RPC method is not recognized.
     """
     return _get_typed_spec(req_type).handler_type
 
@@ -201,13 +197,13 @@ def requires_client_affinity(req_type: RpcMethod | str) -> bool:
     """Return whether an RPC must run on a stable per-client worker slot.
 
     Args:
-        req_type: The legacy operation name or protobuf method to look up.
+        req_type: The protobuf RPC method to look up.
 
     Returns:
         True when the blocking handler requires client affinity.
 
     Raises:
-        ValueError: If the request type is not recognized.
+        ValueError: If the RPC method is not recognized.
     """
     return _get_typed_spec(req_type).requires_client_affinity
 

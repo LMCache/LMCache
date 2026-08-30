@@ -295,7 +295,7 @@ def test_submit_retrieve_retains_exported_device_event(monkeypatch) -> None:
     monkeypatch.setattr(adapter_mod, "torch_dev", _FakeTorchDev)
     connector.mq_client.retrieve.return_value = _FakeRaw(sentinel)
 
-    future = connector._submit_retrieve(
+    raw_future, future = connector._submit_retrieve(
         request_id="request-1",
         token_ids=[1, 2],
         offset=0,
@@ -303,6 +303,7 @@ def test_submit_retrieve_retains_exported_device_event(monkeypatch) -> None:
         block_ids=[0],
     )
 
+    assert raw_future is connector.mq_client.retrieve.return_value
     assert future is sentinel
     assert len(sentinel.retained_references) == 1
     assert isinstance(sentinel.retained_references[0], _FakeEvent)

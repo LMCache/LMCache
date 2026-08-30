@@ -40,8 +40,7 @@ from lmcache.v1.multiprocess.services.p2p_controller import P2PController
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.multiprocess.services.blend import LegacyBlendService
-    from lmcache.v1.multiprocess.services.blend_v3 import BlendV3Service
+    from lmcache.v1.multiprocess.services.blend import BlendService
 
 
 T = TypeVar("T")
@@ -78,14 +77,14 @@ class EngineServiceImpl:
         lmcache_driven_transfer: LMCacheDrivenTransferService | None = None,
         engine_driven_transfer: EngineDrivenTransferService | None = None,
         qstore: QStoreService | None = None,
-        blend_v3: BlendV3Service | None = None,
+        blend: BlendService | None = None,
     ) -> None:
         self._lookup = lookup
         self._lmcache_driven_transfer = lmcache_driven_transfer
         self._engine_driven_transfer = engine_driven_transfer
         self._qstore = qstore
         self._store_service: _StoreService | None = (
-            blend_v3 if blend_v3 is not None else lmcache_driven_transfer
+            blend if blend is not None else lmcache_driven_transfer
         )
 
     def RegisterKvCache(
@@ -161,7 +160,7 @@ class EngineServiceImpl:
         gpu_block_ids: list[list[int]],
         event_ipc_handle: bytes,
     ) -> tuple[bytes, bool]:
-        """Store KV blocks, using the blend V3 store path when enabled."""
+        """Store KV blocks, using the blend store path when enabled."""
         return _require(self._store_service, "LMCache-driven KV transfer").store(
             key, instance_id, gpu_block_ids, event_ipc_handle
         )
@@ -341,107 +340,12 @@ class P2PServiceImpl:
 
 
 class BlendServiceImpl:
-    """Implementation of the generated legacy ``BlendService`` RPC surface."""
+    """Implementation of the generated ``BlendService`` RPC surface."""
 
-    def __init__(self, blend: LegacyBlendService) -> None:
+    def __init__(self, blend: BlendService) -> None:
         self._blend = blend
 
-    def CbRegisterKvCache(
-        self,
-        instance_id: int,
-        kv_caches: KVCache,
-        model_name: str,
-        world_size: int,
-    ) -> None:
-        """Register a legacy CacheBlend KV cache context."""
-        return self._blend.cb_register_kv_cache(
-            instance_id, kv_caches, model_name, world_size
-        )
-
-    def CbUnregisterKvCache(self, instance_id: int) -> None:
-        """Unregister a legacy CacheBlend KV cache context."""
-        return self._blend.cb_unregister_kv_cache(instance_id)
-
-    def CbStorePreComputed(
-        self,
-        key: IPCCacheServerKey,
-        offset: int,
-        instance_id: int,
-        event_ipc_handle: bytes,
-    ) -> tuple[bytes, bool]:
-        """Store pre-computed legacy CacheBlend chunks."""
-        return self._blend.cb_store_pre_computed(
-            key, offset, instance_id, event_ipc_handle
-        )
-
-    def CbLookupPreComputed(
-        self,
-        key: IPCCacheServerKey,
-    ) -> list[tuple[int, int]]:
-        """Reject the superseded legacy lookup RPC."""
-        del key
-        raise NotImplementedError(
-            "BlendService.CbLookupPreComputed is superseded by "
-            "BlendV2Service.CbLookupPreComputedV2"
-        )
-
-    def CbRetrievePreComputed(
-        self,
-        key: IPCCacheServerKey,
-        token_ranges: list[tuple[int, int]],
-        offset: int,
-        instance_id: int,
-        event_ipc_handle: bytes,
-    ) -> tuple[bytes, bool]:
-        """Reject the superseded legacy retrieve RPC."""
-        del key, token_ranges, offset, instance_id, event_ipc_handle
-        raise NotImplementedError(
-            "BlendService.CbRetrievePreComputed is superseded by "
-            "BlendV2Service.CbRetrievePreComputedV2"
-        )
-
-    def CbStoreFinal(
-        self,
-        key: IPCCacheServerKey,
-        offset: int,
-        instance_id: int,
-        event_ipc_handle: bytes,
-    ) -> tuple[bytes, bool]:
-        """Store final legacy CacheBlend chunks."""
-        return self._blend.cb_store_final(key, offset, instance_id, event_ipc_handle)
-
-
-class BlendV2ServiceImpl:
-    """Implementation of the generated ``BlendV2Service`` RPC surface."""
-
-    def __init__(self, blend: LegacyBlendService) -> None:
-        self._blend = blend
-
-    def CbLookupPreComputedV2(self, key: IPCCacheServerKey) -> list[CBMatchResult]:
-        """Lookup pre-computed CacheBlend chunks."""
-        return self._blend.cb_lookup_pre_computed(key)
-
-    def CbRetrievePreComputedV2(
-        self,
-        key: IPCCacheServerKey,
-        cb_match_result: list[CBMatchResult],
-        offset: int,
-        instance_id: int,
-        event_ipc_handle: bytes,
-    ) -> tuple[bytes, bool]:
-        """Retrieve pre-computed CacheBlend chunks."""
-        return self._blend.cb_retrieve_pre_computed(
-            key, cb_match_result, offset, instance_id, event_ipc_handle
-        )
-
-
-class BlendV3ServiceImpl:
-    """Implementation of the generated ``BlendV3Service`` RPC surface."""
-
-    def __init__(self, blend: BlendV3Service) -> None:
-        self._blend = blend
-
-    def CbRegisterRopeV3(
+    def CbRegisterRope(
         self,
         instance_id: int,
         cos_sin_caches_ipc: list[DeviceIPCWrapper],
@@ -450,7 +354,7 @@ class BlendV3ServiceImpl:
         group_to_cache: list[int],
         group_rot: list[list[int]],
     ) -> None:
-        """Register rope metadata for CacheBlend V3 re-RoPE."""
+        """Register rope metadata for CacheBlend re-RoPE."""
         return self._blend.cb_register_rope(
             instance_id,
             cos_sin_caches_ipc,
@@ -460,11 +364,11 @@ class BlendV3ServiceImpl:
             group_rot,
         )
 
-    def CbUnregisterRopeV3(self, instance_id: int) -> None:
-        """Unregister CacheBlend V3 rope metadata."""
+    def CbUnregisterRope(self, instance_id: int) -> None:
+        """Unregister CacheBlend rope metadata."""
         return self._blend.cb_unregister_rope(instance_id)
 
-    def CbRetrievePreComputedV3(
+    def CbRetrievePreComputed(
         self,
         key: IPCCacheServerKey,
         cb_match_result: list[CBMatchResult],
@@ -472,7 +376,7 @@ class BlendV3ServiceImpl:
         instance_id: int,
         event_ipc_handle: bytes,
     ) -> tuple[bytes, bool]:
-        """Retrieve pre-computed CacheBlend V3 chunks."""
+        """Retrieve pre-computed CacheBlend chunks."""
         return self._blend.cb_retrieve_pre_computed(
             key, cb_match_result, gpu_block_ids, instance_id, event_ipc_handle
         )
@@ -482,5 +386,5 @@ class BlendV3ServiceImpl:
         key: IPCCacheServerKey,
         tp_size: int,
     ) -> CBUnifiedLookupResult | None:
-        """Run the CacheBlend V3 unified lookup RPC."""
+        """Run the CacheBlend unified lookup RPC."""
         return self._blend.cb_unified_lookup(key, tp_size)

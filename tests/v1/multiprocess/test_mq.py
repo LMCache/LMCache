@@ -189,7 +189,7 @@ def _run_client_test(
 
     try:
         futures = []
-        rpc = getattr(client, request_type.name.lower())
+        rpc = getattr(client, request_type.client_method_name)
 
         # Submit requests
         for _ in range(num_requests):

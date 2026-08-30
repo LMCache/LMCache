@@ -59,15 +59,14 @@ def _make_layout_desc() -> MemoryLayoutDesc:
 # ============================================================================
 
 
-def test_p2p_request_types_registered():
-    """The three P2P request types should be members of RpcMethod."""
-    for name in (
-        "P2P_LOOKUP_AND_LOCK",
-        "P2P_QUERY_LOOKUP_RESULTS",
-        "P2P_UNLOCK_OBJECTS",
+def test_p2p_rpc_methods_registered():
+    """The three P2P proto methods should be RpcMethod members."""
+    for rpc_method in (
+        RPC.P2PLookupAndLock,
+        RPC.P2PQueryLookupResults,
+        RPC.P2PUnlockObjects,
     ):
-        assert hasattr(RpcMethod, name)
-        assert isinstance(getattr(RpcMethod, name), RpcMethod)
+        assert isinstance(rpc_method, RpcMethod)
 
 
 def test_p2p_lookup_and_lock_protocol():
@@ -322,8 +321,8 @@ def test_report_status_counts_active_jobs():
     assert status["p2p_state"] == _P2PState.UNREGISTERED.value
 
 
-def test_add_service_covers_all_p2p_request_types():
-    """add_service wires exactly the three P2P request types."""
+def test_add_service_covers_all_p2p_rpc_methods():
+    """add_service wires exactly the three P2P RPC methods."""
     controller, _ = _make_controller()
     server = MultiprocessGrpcServer("grpc://127.0.0.1:1")
 

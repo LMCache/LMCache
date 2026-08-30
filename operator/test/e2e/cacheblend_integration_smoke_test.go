@@ -202,7 +202,7 @@ var _ = Describe("vLLM + CacheBlendEngine integration smoke (GPU)", Ordered, fun
 		Expect(postCompletion(ctx, vllmBaseURL, model, buildLongPrompt())).To(Succeed())
 
 		By("verifying the engine logged 'Registered CB rope state for instance N'")
-		// The forward pass drives vLLM's connector to send CB_REGISTER_ROPE_V3,
+		// The forward pass drives vLLM's connector to send CB_REGISTER_ROPE,
 		// which the engine handles and logs. kubectl log streaming buffers a
 		// beat behind, so poll.
 		Eventually(func() int {
@@ -224,8 +224,8 @@ var cbServerListeningLine = regexp.MustCompile(
 )
 
 // cbRopeRegisteredLine matches the engine-side log emitted by
-// BlendV3.cb_register_rope on every CB_REGISTER_ROPE_V3 message
-// (modules/blend_v3.py). Its presence proves the vLLM connector negotiated
+// BlendModule.cb_register_rope on every CB_REGISTER_ROPE message
+// (modules/blend.py). Its presence proves the vLLM connector negotiated
 // the CacheBlend rope handshake with the engine.
 var cbRopeRegisteredLine = regexp.MustCompile(`Registered CB rope state for instance \d+`)
 

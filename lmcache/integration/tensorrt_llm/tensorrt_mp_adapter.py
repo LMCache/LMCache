@@ -111,6 +111,7 @@ class LMCacheMPKvConnectorScheduler(KvCacheConnectorScheduler):
             start=start,
             end=end,
             request_id=str(request_id),
+            num_kv_readers=1,
         )
 
     def get_num_new_matched_tokens(
@@ -287,6 +288,7 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
             start=0,
             end=aligned_end,
             request_id=str(request_id),
+            num_kv_readers=1,
         )
 
     def register_kv_caches(self, kv_cache_tensor: torch.Tensor) -> None:
@@ -372,19 +374,29 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
 
             key = self._create_key(spec.tokens, req_id)
             try:
-                self._mq_client.retrieve(
-                    key,
-                    self._instance_id,
-                    [spec.block_ids],
-                    event.ipc_handle(),
-                    0,  # skip_first_n_tokens
-                ).result(timeout=self._mq_timeout)
+                success = (
+                    self._mq_client.retrieve(
+                        key,
+                        self._instance_id,
+                        [spec.block_ids],
+                        event.ipc_handle(),
+                        0,  # skip_first_n_tokens
+                    )
+                    .to_device_future()
+                    .result(timeout=self._mq_timeout)
+                )
+                if not success:
+                    raise RuntimeError(
+                        "LMCache MP worker: retrieve returned False for req "
+                        f"{req_id}; refusing to use unloaded KV blocks"
+                    )
             except Exception as e:
-                logger.warning(
+                logger.error(
                     "LMCache MP worker: retrieve failed for req %d: %s",
                     req_id,
                     e,
                 )
+                raise
 
         logger.debug(
             "LMCache MP worker: start_load_kv retrieve=%.3fms num_loads=%d",
@@ -418,12 +430,21 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
 
             key = self._create_key(spec.tokens, req_id)
             try:
-                self._mq_client.store(
-                    key,
-                    self._instance_id,
-                    [spec.block_ids],
-                    event.ipc_handle(),
-                ).result(timeout=self._mq_timeout)
+                success = (
+                    self._mq_client.store(
+                        key,
+                        self._instance_id,
+                        [spec.block_ids],
+                        event.ipc_handle(),
+                    )
+                    .to_device_future()
+                    .result(timeout=self._mq_timeout)
+                )
+                if not success:
+                    logger.warning(
+                        "LMCache MP worker: store returned False for req %d",
+                        req_id,
+                    )
             except Exception as e:
                 logger.warning(
                     "LMCache MP worker: store failed for req %d: %s",

@@ -294,13 +294,13 @@ def test_management_report_status_summarizes_liveness() -> None:
 def test_blend_drop_instance_state_drops_rope_state() -> None:
     """drop_instance_state pops the reaped instance's CB rope state.
 
-    The GPU context is no longer mirrored in BlendV3Service (reaping the GPU
+    The GPU context is no longer mirrored in BlendService (reaping the GPU
     entry frees it directly), so only the rope state is dropped here.
     """
     # First Party
-    from lmcache.v1.multiprocess.services.blend_v3 import BlendV3Service
+    from lmcache.v1.multiprocess.services.blend import BlendService
 
-    module = BlendV3Service.__new__(BlendV3Service)
+    module = BlendService.__new__(BlendService)
     module._cb_rope_state = {5: MagicMock()}
 
     module.drop_instance_state(5)

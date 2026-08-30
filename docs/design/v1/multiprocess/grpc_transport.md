@@ -67,7 +67,7 @@ The main source files are:
 |---|---|
 | `lmcache/v1/multiprocess/transport/grpc_impl/proto/lmcache_mq.proto` | Source of truth for gRPC services, methods, requests, and responses. |
 | `lmcache/v1/multiprocess/transport/grpc_impl/_proto_gen/_generate.py` | Local stub generation helper. Generated `*_pb2.py` files are not checked into Git. |
-| `lmcache/v1/multiprocess/protocol.py` | Derives `RpcMethod` tokens from the protobuf descriptor. Historical ALL_CAPS names are compatibility metadata, not the wire protocol. |
+| `lmcache/v1/multiprocess/protocol.py` | Derives `RpcMethod` tokens and client method names from the protobuf descriptor. |
 | `lmcache/v1/multiprocess/transport/grpc_impl/typed_rpc.py` | Maps protobuf messages to Python payload/response types and records scheduling metadata. |
 | `lmcache/v1/multiprocess/mq.py` | Implements `MultiprocessGrpcClient`, `MultiprocessGrpcServer`, request encoding/decoding, dispatch, and thread-pool assignment. |
 | `lmcache/v1/multiprocess/services/rpc_services.py` | Contains the Python service implementation classes that match generated gRPC service surfaces. |
@@ -114,8 +114,8 @@ Server startup follows this sequence:
    server.add_service("P2PService", rpc_services.p2p_service)
    ```
 
-   Optional services, such as `BlendService`, `BlendV2Service`, and
-   `BlendV3Service`, are registered only when their feature is enabled.
+   Optional services, such as `BlendService`, are registered only when their
+   feature is enabled.
 
 5. `MultiprocessGrpcServer.add_service()` looks up the service in the proto
    descriptor and requires the implementation object to provide every method
@@ -129,7 +129,7 @@ Server startup follows this sequence:
 ### 3.2 Client Call
 
 The client exposes one Python method per proto RPC. Method names are the
-snake_case form of the historical operation name, so:
+snake_case form of the protobuf method name, so:
 
 | Proto method | Client method |
 |---|---|
@@ -268,7 +268,7 @@ explicit gRPC services. Splitting the schema into many proto files is possible
 later, but the current single-file layout avoids cross-file import churn while
 the transport is still being reviewed. The important API boundaries are the
 service declarations: `EngineService`, `ControllerService`, `DebugService`,
-`ObservabilityService`, `P2PService`, and the Blend services.
+`ObservabilityService`, `P2PService`, and `BlendService`.
 
 ### 5.4 Pickle Avoidance
 
@@ -321,7 +321,7 @@ Pick the service that owns the behavior:
 | Debug-only calls | `DebugService` |
 | Observability/event ingestion | `ObservabilityService` |
 | Peer-to-peer lookup/lock operations | `P2PService` |
-| CacheBlend legacy or V3 calls | `BlendService`, `BlendV2Service`, `BlendV3Service` |
+| CacheBlend calls | `BlendService` |
 
 Create a new service only when the new methods form a separate stable API
 surface. Otherwise, add the method to the existing service that already owns

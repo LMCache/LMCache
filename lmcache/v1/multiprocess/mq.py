@@ -98,7 +98,7 @@ _RPC_METHOD_NAMES = {
     rpc_method: request_type_to_method_name(rpc_method) for rpc_method in RPC_METHODS
 }
 _CLIENT_RPC_METHOD_NAMES = {
-    rpc_method: rpc_method.name.lower() for rpc_method in RPC_METHODS
+    rpc_method: rpc_method.client_method_name for rpc_method in RPC_METHODS
 }
 _CLIENT_RPC_METHODS_BY_NAME = {
     method_name: rpc_method
@@ -585,46 +585,16 @@ class _GrpcServicer:
     def Noop(self, request: Any, context: "grpc.ServicerContext") -> Any:
         return self._dispatch("Noop", request, context)
 
-    def CbRegisterKvCache(self, request: Any, context: "grpc.ServicerContext") -> Any:
-        return self._dispatch("CbRegisterKvCache", request, context)
+    def CbRegisterRope(self, request: Any, context: "grpc.ServicerContext") -> Any:
+        return self._dispatch("CbRegisterRope", request, context)
 
-    def CbUnregisterKvCache(self, request: Any, context: "grpc.ServicerContext") -> Any:
-        return self._dispatch("CbUnregisterKvCache", request, context)
-
-    def CbStorePreComputed(self, request: Any, context: "grpc.ServicerContext") -> Any:
-        return self._dispatch("CbStorePreComputed", request, context)
-
-    def CbLookupPreComputed(self, request: Any, context: "grpc.ServicerContext") -> Any:
-        return self._dispatch("CbLookupPreComputed", request, context)
+    def CbUnregisterRope(self, request: Any, context: "grpc.ServicerContext") -> Any:
+        return self._dispatch("CbUnregisterRope", request, context)
 
     def CbRetrievePreComputed(
         self, request: Any, context: "grpc.ServicerContext"
     ) -> Any:
         return self._dispatch("CbRetrievePreComputed", request, context)
-
-    def CbStoreFinal(self, request: Any, context: "grpc.ServicerContext") -> Any:
-        return self._dispatch("CbStoreFinal", request, context)
-
-    def CbLookupPreComputedV2(
-        self, request: Any, context: "grpc.ServicerContext"
-    ) -> Any:
-        return self._dispatch("CbLookupPreComputedV2", request, context)
-
-    def CbRetrievePreComputedV2(
-        self, request: Any, context: "grpc.ServicerContext"
-    ) -> Any:
-        return self._dispatch("CbRetrievePreComputedV2", request, context)
-
-    def CbRegisterRopeV3(self, request: Any, context: "grpc.ServicerContext") -> Any:
-        return self._dispatch("CbRegisterRopeV3", request, context)
-
-    def CbUnregisterRopeV3(self, request: Any, context: "grpc.ServicerContext") -> Any:
-        return self._dispatch("CbUnregisterRopeV3", request, context)
-
-    def CbRetrievePreComputedV3(
-        self, request: Any, context: "grpc.ServicerContext"
-    ) -> Any:
-        return self._dispatch("CbRetrievePreComputedV3", request, context)
 
     def CbUnifiedLookup(self, request: Any, context: "grpc.ServicerContext") -> Any:
         return self._dispatch("CbUnifiedLookup", request, context)
@@ -772,7 +742,7 @@ class MultiprocessGrpcServer:
             payload_clss, handler_type, handler = args
             if tuple(payload_clss) != typed_spec.payload_types:
                 raise ValueError(
-                    f"Payload classes do not match for request type: {rpc_method}"
+                    f"Payload classes do not match for RPC method: {rpc_method}"
                 )
         else:
             raise TypeError(
@@ -784,7 +754,7 @@ class MultiprocessGrpcServer:
             raise TypeError("handler must be callable")
         if not self._inspect_handler_signature(rpc_method, handler):
             raise ValueError(
-                f"Handler signature does not match for request type: {rpc_method}"
+                f"Handler signature does not match for RPC method: {rpc_method}"
             )
 
         if handler_type is HandlerType.SYNC:
@@ -901,7 +871,7 @@ class MultiprocessGrpcServer:
             handler = self.handlers.get(rpc_method)
             if handler is None:
                 raise ValueError(
-                    f"No handler registered for request type: {rpc_method}. "
+                    f"No handler registered for RPC method: {rpc_method}. "
                     f"Register handlers before calling {method_name}."
                 )
             if handler.handler_type is not HandlerType.BLOCKING:

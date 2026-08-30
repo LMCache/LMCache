@@ -145,6 +145,9 @@ class LMCacheSDKContext:
 
         try:
             self._world_size = int(entry.get("world_size", 1))
+            # Readers per stored object; registrations that do not publish it
+            # get 1 (single reader).
+            self._num_kv_readers = int(entry.get("num_kv_readers", 1))
             kv_cache_layout = entry.get("kv_cache_layout", {})
             if not kv_cache_layout:
                 raise LMCacheSDKError(
@@ -507,6 +510,7 @@ class LMCacheSDKContext:
         return IPCCacheServerKey(
             model_name=self._model_name,
             world_size=self._world_size,
+            num_kv_readers=self._num_kv_readers,
             worker_id=worker_id,
             token_ids=tuple(token_ids),
             start=start,

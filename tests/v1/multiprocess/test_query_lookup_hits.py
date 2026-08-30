@@ -36,9 +36,8 @@ from tests.v1.multiprocess.test_mq import (
 # ============================================================================
 
 
-def test_query_prefetch_lookup_hits_in_request_type():
-    """QUERY_PREFETCH_LOOKUP_HITS should be a member of RpcMethod."""
-    assert hasattr(RpcMethod, "QUERY_PREFETCH_LOOKUP_HITS")
+def test_query_prefetch_lookup_hits_is_descriptor_rpc_method():
+    """QueryPrefetchLookupHits should be a descriptor-derived RpcMethod."""
     assert isinstance(RPC.QueryPrefetchLookupHits, RpcMethod)
 
 
@@ -239,6 +238,7 @@ def _lookup_key(world_size: int) -> IPCCacheServerKey:
     return IPCCacheServerKey(
         model_name="m",
         world_size=world_size,
+        num_kv_readers=1,
         worker_id=None,
         token_ids=(0,),
         start=0,

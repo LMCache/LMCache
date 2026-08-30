@@ -71,7 +71,7 @@ from lmcache.v1.multiprocess import mq
 assert "grpc" not in sys.modules
 assert "grpc_tools" not in sys.modules
 assert mq.grpc is None
-assert mq.request_type_to_method_name("PING") == "Ping"
+assert mq.request_type_to_method_name("Ping") == "Ping"
 """
     subprocess.run([sys.executable, "-c", script], check=True)
 
@@ -123,7 +123,7 @@ def test_service_descriptor_covers_every_typed_rpc() -> None:
 def test_client_installs_function_style_rpc_methods() -> None:
     """Every protocol method is directly callable on the client."""
     for request_type in RpcMethod:
-        method = getattr(MultiprocessGrpcClient, request_type.name.lower(), None)
+        method = getattr(MultiprocessGrpcClient, request_type.client_method_name, None)
         assert callable(method), request_type.name
 
 
@@ -660,9 +660,8 @@ def test_query_prefetch_status_typed_roundtrip() -> None:
 
 
 # ---------------------------------------------------------------------
-# Wave 3: Store/Retrieve, CB v1/v2/v3 lookup+store+retrieve family,
-# ReportBlockAllocation.  Adapter roundtrip tests only — full e2e
-# happens in the vllm-driven suite.
+# Wave 3: Store/Retrieve, current CacheBlend RPCs, ReportBlockAllocation.
+# Adapter roundtrip tests only — full e2e happens in the vllm-driven suite.
 # ---------------------------------------------------------------------
 
 
@@ -673,15 +672,9 @@ def test_query_prefetch_status_typed_roundtrip() -> None:
         RPC.Store,
         RPC.Retrieve,
         RPC.ReportBlockAllocation,
-        RPC.CbUnregisterKvCache,
-        RPC.CbUnregisterRopeV3,
-        RPC.CbLookupPreComputed,
-        RPC.CbStorePreComputed,
-        RPC.CbStoreFinal,
+        RPC.CbRegisterRope,
+        RPC.CbUnregisterRope,
         RPC.CbRetrievePreComputed,
-        RPC.CbLookupPreComputedV2,
-        RPC.CbRetrievePreComputedV2,
-        RPC.CbRetrievePreComputedV3,
         RPC.CbUnifiedLookup,
     ],
 )
@@ -734,25 +727,27 @@ def test_report_block_allocation_roundtrip() -> None:
     assert out == records
 
 
-def test_cb_lookup_v1_and_v2_roundtrip() -> None:
-    """(start,end) tuples and CBMatchResult both survive the wire."""
+def test_cb_retrieve_pre_computed_roundtrip() -> None:
+    """CBMatchResult lists and block ids survive the CacheBlend retrieve wire."""
     key = _sample_key()
-
-    v1 = _TYPED_RPCS[RPC.CbLookupPreComputed]
-    ranges = [(0, 8), (16, 24)]
-    proto_resp = v1.python_to_response(ranges)
-    assert v1.response_to_python(proto_resp) == ranges
-
-    v2 = _TYPED_RPCS[RPC.CbLookupPreComputedV2]
     matches = [
         CBMatchResult(old_st=0, old_ed=8, cur_st=0, cur_ed=8, hash=b"h1"),
         CBMatchResult(old_st=8, old_ed=16, cur_st=16, cur_ed=24, hash=b"h2"),
     ]
-    proto_req = v2.python_to_request(key)
-    (round_key,) = v2.request_to_python(proto_req)
+    spec = _TYPED_RPCS[RPC.CbRetrievePreComputed]
+    proto_req = spec.python_to_request(key, matches, [[1, 2], [3]], 9, b"event")
+    round_key, round_matches, block_ids, instance_id, event = spec.request_to_python(
+        proto_req
+    )
     assert round_key == key
-    proto_resp = v2.python_to_response(matches)
-    assert v2.response_to_python(proto_resp) == matches
+    assert round_matches == matches
+    assert block_ids == [[1, 2], [3]]
+    assert instance_id == 9
+    assert event == b"event"
+    assert spec.response_to_python(spec.python_to_response((b"done", True))) == (
+        b"done",
+        True,
+    )
 
 
 def test_cb_unified_lookup_nullable() -> None:
@@ -1011,12 +1006,11 @@ class _FakeIPCWrapper(DeviceIPCWrapper):
     [
         RPC.RegisterKvCache,
         RPC.RegisterQCache,
-        RPC.CbRegisterKvCache,
-        RPC.CbRegisterRopeV3,
+        RPC.CbRegisterRope,
     ],
 )
 def test_wave5_rpc_is_typed(request_type: RpcMethod) -> None:
-    """Wave 5 finishes the migration: all request types use typed RPCs."""
+    """Wave 5 finishes the migration: all RPC methods use typed RPCs."""
     assert request_type in _TYPED_RPCS
     spec = _TYPED_RPCS[request_type]
     assert spec.request_message.DESCRIPTOR.file is lmcache_mq_pb2.DESCRIPTOR
@@ -1026,7 +1020,7 @@ def test_wave5_rpc_is_typed(request_type: RpcMethod) -> None:
 def test_typed_rpc_coverage_is_complete() -> None:
     """Enforce the migration invariant: every RpcMethod is typed."""
     missing = [rt.name for rt in RpcMethod if rt not in _TYPED_RPCS]
-    assert not missing, f"legacy rpcs remain: {missing}"
+    assert not missing, f"untyped RPC methods remain: {missing}"
 
 
 @pytest.mark.parametrize("request_type", list(RpcMethod))
@@ -1099,18 +1093,8 @@ def test_register_kv_cache_roundtrip() -> None:
     assert proto_req.encoded_layout_hints == b""
 
 
-def test_cb_register_kv_cache_roundtrip() -> None:
-    spec = _TYPED_RPCS[RPC.CbRegisterKvCache]
-    kv_cache = [_FakeIPCWrapper("cb")]
-    proto_req = spec.python_to_request(9, kv_cache, "llama", 2)
-    iid, r_kv, model, world = spec.request_to_python(proto_req)
-    assert (iid, model, world) == (9, "llama", 2)
-    assert isinstance(r_kv[0], _FakeIPCWrapper)
-    assert r_kv[0].device_uuid == "test-uuid-cb"
-
-
-def test_cb_register_rope_v3_roundtrip() -> None:
-    spec = _TYPED_RPCS[RPC.CbRegisterRopeV3]
+def test_cb_register_rope_roundtrip() -> None:
+    spec = _TYPED_RPCS[RPC.CbRegisterRope]
     caches = [_FakeIPCWrapper("rope-0"), _FakeIPCWrapper("rope-1")]
     group_rot = [[0, 64], [], [128, 32]]
     proto_req = spec.python_to_request(3, caches, 128, True, [0, 1, 0], group_rot)
