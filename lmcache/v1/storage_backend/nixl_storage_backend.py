@@ -102,6 +102,32 @@ _CONTAINS_BATCH_SIZE = 16
 B128_MAX_POOL_SIZE = 0x100000000  # 2**32
 
 
+def _get_allocator_layout(
+    config: LMCacheEngineConfig,
+    metadata: LMCacheMetadata,
+) -> tuple[list[torch.Size], list[torch.dtype], MemoryFormat]:
+    if not config.use_layerwise:
+        return (
+            [torch.Size(metadata.kv_shape)],
+            [metadata.kv_dtype],
+            MemoryFormat.KV_2LTD,
+        )
+
+    hidden_dim = metadata.kv_shape[3] * metadata.kv_shape[4]
+    chunk_tokens = metadata.kv_shape[2]
+    if metadata.use_mla:
+        shape = torch.Size([chunk_tokens, hidden_dim])
+        fmt = MemoryFormat.KV_MLA_FMT
+    elif config.enable_blending:
+        shape = torch.Size([metadata.kv_shape[1], chunk_tokens, hidden_dim])
+        fmt = MemoryFormat.KV_2TD
+    else:
+        shape = torch.Size([chunk_tokens, metadata.kv_shape[1], hidden_dim])
+        fmt = MemoryFormat.KV_T2D
+
+    return [shape], [metadata.kv_dtype], fmt
+
+
 @dataclass
 class NixlStorageConfig:
     buffer_size: int
@@ -222,9 +248,10 @@ class NixlStorageConfig:
         if config.nixl_buffer_device == "cpu":
             buffer_size = 0
         else:
-            align_bytes = get_size_bytes(
-                [torch.Size(metadata.kv_shape)], [metadata.kv_dtype]
+            allocator_shapes, allocator_dtypes, _ = _get_allocator_layout(
+                config, metadata
             )
+            align_bytes = get_size_bytes(allocator_shapes, allocator_dtypes)
             if config.nixl_buffer_size % align_bytes != 0:
                 buffer_size = (
                     (config.nixl_buffer_size + align_bytes - 1) // align_bytes
@@ -367,15 +394,15 @@ class SetPresenceCache:
     """Default presence cache using a thread-safe Python set."""
 
     def __init__(self) -> None:
-        self._keys: set[int] = set()
+        self._keys: set[str] = set()
 
-    def add(self, key: int) -> None:
+    def add(self, key: str) -> None:
         self._keys.add(key)
 
-    def discard(self, key: int) -> None:
+    def discard(self, key: str) -> None:
         self._keys.discard(key)
 
-    def contains(self, key: int) -> bool:
+    def contains(self, key: str) -> bool:
         return key in self._keys
 
 
@@ -492,6 +519,8 @@ class NixlStorageAgent(ABC):
             mem_type = "DRAM"
         else:
             mem_type = "VRAM"
+        self.buffer_mem_type = mem_type
+        self.buffer_device_id = device_id
 
         reg_descs = self.nixl_agent.register_memory(reg_list, mem_type=mem_type)
         xfer_descs = self.nixl_agent.get_xfer_descs(xfer_desc, mem_type=mem_type)
@@ -503,22 +532,30 @@ class NixlStorageAgent(ABC):
         self.mem_xfer_handler = xfer_handler
 
     def get_mem_to_storage_handle(
-        self, mem_indices, storage_xfer_handler, storage_indices
+        self,
+        mem_indices,
+        storage_xfer_handler,
+        storage_indices,
+        mem_xfer_handler: Optional[NixlDlistHandle] = None,
     ) -> NixlXferHandle:
         return self.nixl_agent.make_prepped_xfer(
             "WRITE",
-            self.mem_xfer_handler,
+            mem_xfer_handler or self.mem_xfer_handler,
             mem_indices,
             storage_xfer_handler,
             storage_indices,
         )
 
     def get_storage_to_mem_handle(
-        self, mem_indices, storage_xfer_handler, storage_indices
+        self,
+        mem_indices,
+        storage_xfer_handler,
+        storage_indices,
+        mem_xfer_handler: Optional[NixlDlistHandle] = None,
     ) -> NixlXferHandle:
         return self.nixl_agent.make_prepped_xfer(
             "READ",
-            self.mem_xfer_handler,
+            mem_xfer_handler or self.mem_xfer_handler,
             mem_indices,
             storage_xfer_handler,
             storage_indices,
@@ -648,13 +685,26 @@ class NixlDynamicStorageAgent(NixlStorageAgent):
         else:
             self.mem_type = "FILE"
 
-    def create_batched_storage_handler(self, descs: list[NixlDesc], page_size: int):
+    def create_batched_storage_handler(
+        self, descs: list[NixlDesc], xfer_sizes: Sequence[int] | int
+    ):
+        if isinstance(xfer_sizes, int):
+            sizes = [xfer_sizes] * len(descs)
+        else:
+            sizes = list(xfer_sizes)
+        if len(sizes) != len(descs):
+            raise ValueError(
+                "xfer_sizes length must match descs length: "
+                f"{len(sizes)} != {len(descs)}"
+            )
+
         reg_list = []
         xfer_desc = []
 
         for i in range(len(descs)):
-            reg_list.append((0, page_size, descs[i].device_id, descs[i].meta_info))
-            xfer_desc.append((0, page_size, descs[i].device_id))
+            size = sizes[i]
+            reg_list.append((0, size, descs[i].device_id, descs[i].meta_info))
+            xfer_desc.append((0, size, descs[i].device_id))
 
         reg_descs = self.nixl_agent.register_memory(reg_list, self.mem_type)
         xfer_descs = self.nixl_agent.get_xfer_descs(xfer_desc, self.mem_type)
@@ -662,6 +712,35 @@ class NixlDynamicStorageAgent(NixlStorageAgent):
             self.agent_name, xfer_descs, mem_type=self.mem_type
         )
         return reg_descs, xfer_handler
+
+    def create_batched_mem_handler(
+        self, mem_objs: Sequence[MemoryObj], xfer_sizes: Sequence[int]
+    ) -> NixlDlistHandle:
+        """Create a memory transfer handler for a dynamic batch.
+
+        :param mem_objs: Memory objects that will be read from or written into.
+        :param xfer_sizes: Logical transfer size, in bytes, for each memory object.
+        :return: Prepared NIXL dlist handle for the batch memory descriptors.
+        :raises Exception: Propagates NIXL descriptor creation/preparation failures.
+        """
+        xfer_desc = [
+            (mem_obj.data_ptr, size, self.buffer_device_id)
+            for mem_obj, size in zip(mem_objs, xfer_sizes, strict=True)
+        ]
+        xfer_descs = self.nixl_agent.get_xfer_descs(
+            xfer_desc, mem_type=self.buffer_mem_type
+        )
+        return self.nixl_agent.prep_xfer_dlist(
+            "", xfer_descs, mem_type=self.buffer_mem_type
+        )
+
+    def release_mem_handler(self, xfer_handler: NixlDlistHandle) -> None:
+        """Release a dynamic memory transfer handler.
+
+        :param xfer_handler: Prepared NIXL dlist handle to release.
+        :raises Exception: Propagates NIXL release failures.
+        """
+        self.nixl_agent.release_dlist_handle(xfer_handler)
 
     def post_async(self, handle: NixlXferHandle):
         """Non-blocking async post for WRITE operations."""
@@ -681,8 +760,14 @@ class NixlDynamicStorageAgent(NixlStorageAgent):
         :param xfer_handler: Transfer dlist handle to release.
         :param descs: Descriptors used for this transfer.
         """
-        self.nixl_agent.release_dlist_handle(xfer_handler)
-        self.nixl_agent.deregister_memory(reg_descs)
+        try:
+            self.nixl_agent.release_dlist_handle(xfer_handler)
+        except Exception as e:
+            logger.warning(f"Failed to release storage dlist handle: {e}")
+        try:
+            self.nixl_agent.deregister_memory(reg_descs)
+        except Exception as e:
+            logger.warning(f"Failed to deregister storage memory: {e}")
         if self.mem_type == "FILE":
             _close_file_descs(descs)
 
@@ -810,6 +895,7 @@ class NixlStorageBackend(AllocatorBackendInterface, ABC):
         self.progress_set: Set[CacheEngineKey] = set()
 
         self.nixl_config = nixl_config
+        self.config = config
         self._local_cpu_backend: Optional["LocalCPUBackend"] = None
 
         if nixl_config.buffer_device != "cpu":
@@ -877,11 +963,14 @@ class NixlStorageBackend(AllocatorBackendInterface, ABC):
             self.base_buffer = base_buffer  # Prevents early GC of the aligned tensor.
             self.free_pinned_buffer = False
 
+        allocator_shapes, allocator_dtypes, allocator_fmt = _get_allocator_layout(
+            config, metadata
+        )
         return PagedTensorMemoryAllocator(
             self.buffer,
-            [torch.Size(metadata.kv_shape)],
-            [metadata.kv_dtype],
-            MemoryFormat.KV_2LTD,
+            allocator_shapes,
+            allocator_dtypes,
+            allocator_fmt,
         )
 
     def get_memory_allocator(self):
@@ -1437,6 +1526,9 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         self.meta_shape: Optional[torch.Size] = None
         self.meta_dtype: Optional[torch.dtype] = None
         self.meta_fmt: Optional[MemoryFormat] = None
+        self.layer_meta_shape: Optional[torch.Size] = None
+        self.layer_meta_dtype: Optional[torch.dtype] = None
+        self.layer_meta_fmt: Optional[MemoryFormat] = None
         self.init_chunk_meta(metadata)
 
         # Monotonically increasing counter for OBJ device_id values.
@@ -1479,25 +1571,28 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
             self._device_id_counter += count
         return list(range(start, start + count))
 
-    def _cache_contains(self, chunk_hash: int) -> bool:
+    def _presence_cache_key(self, key: CacheEngineKey) -> str:
+        return self._format_object_key(key)
+
+    def _cache_contains(self, key: CacheEngineKey) -> bool:
         if not self.enable_presence_cache or self.key_presence_cache is None:
             return False
-        found = self.key_presence_cache.contains(chunk_hash)
+        found = self.key_presence_cache.contains(self._presence_cache_key(key))
         self.hit_counter += 1 if found else 0
         self.total_counter += 1
         if self.total_counter % 100 == 0:
             logger.debug(f"Cache hit: {self.hit_counter} vs {self.total_counter}")
         return found
 
-    def _cache_add(self, chunk_hash: int) -> None:
+    def _cache_add(self, key: CacheEngineKey) -> None:
         if not self.enable_presence_cache or self.key_presence_cache is None:
             return
-        self.key_presence_cache.add(chunk_hash)
+        self.key_presence_cache.add(self._presence_cache_key(key))
 
-    def _cache_discard(self, chunk_hash: int) -> None:
+    def _cache_discard(self, key: CacheEngineKey) -> None:
         if not self.enable_presence_cache or self.key_presence_cache is None:
             return
-        self.key_presence_cache.discard(chunk_hash)
+        self.key_presence_cache.discard(self._presence_cache_key(key))
 
     def init_chunk_meta(
         self,
@@ -1519,6 +1614,10 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         self.meta_fmt = (
             MemoryFormat.KV_MLA_FMT if metadata.use_mla else MemoryFormat.KV_2LTD
         )
+        layer_shapes, _, layer_fmt = _get_allocator_layout(self.config, metadata)
+        self.layer_meta_shape = layer_shapes[0]
+        self.layer_meta_dtype = metadata.kv_dtype
+        self.layer_meta_fmt = layer_fmt
         logger.info(
             f"Initialized nixl object backend metadata: "
             f"shape: {self.meta_shape}, "
@@ -1597,20 +1696,21 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         # Already validated in validate_nixl_backend
         raise ValueError(f"unexpected mem_type: {self.agent.mem_type}")
 
-    def _acquire_storage_handle(
+    def _acquire_transfer_handle(
         self,
         keys: Sequence[CacheEngineKey],
-        mem_indices: List[int],
+        mem_objs: List[MemoryObj],
         storage_indices: Sequence[int],
-        page_size: int,
+        xfer_sizes: Sequence[int],
         write: bool,
     ) -> Tuple[
         List[NixlDesc],
         nixlBind.nixlRegDList,
         NixlDlistHandle,
+        NixlDlistHandle,
         NixlXferHandle,
     ]:
-        """Open FDs, register the storage handler, and build the transfer handle.
+        """Open FDs and build matching memory/storage transfer handles.
 
         On any failure, releases everything already acquired (FDs, NIXL
         state, and any FILE-write files created with ``O_CREAT``) before
@@ -1620,7 +1720,7 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         descs = self._build_descs(keys, write=write)
         try:
             reg_descs, xfer_handler = self.agent.create_batched_storage_handler(
-                descs, page_size
+                descs, xfer_sizes
             )
         except Exception:
             if self.agent.mem_type == "FILE":
@@ -1628,57 +1728,141 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
                 _unlink_file_descs(descs)
             raise
 
+        mem_xfer_handler: Optional[NixlDlistHandle] = None
         try:
+            mem_xfer_handler = self.agent.create_batched_mem_handler(
+                mem_objs, xfer_sizes
+            )
+            mem_indices = list(range(len(mem_objs)))
             if write:
                 handle = self.agent.get_mem_to_storage_handle(
-                    mem_indices, xfer_handler, storage_indices
+                    mem_indices,
+                    xfer_handler,
+                    storage_indices,
+                    mem_xfer_handler=mem_xfer_handler,
                 )
             else:
                 handle = self.agent.get_storage_to_mem_handle(
-                    mem_indices, xfer_handler, storage_indices
+                    mem_indices,
+                    xfer_handler,
+                    storage_indices,
+                    mem_xfer_handler=mem_xfer_handler,
                 )
         except Exception:
-            # release_storage_handler closes the FDs and releases the dlist.
-            self.agent.release_storage_handler(reg_descs, xfer_handler, descs)
+            self._release_transfer_resources(
+                None, mem_xfer_handler, reg_descs, xfer_handler, descs
+            )
             if self.agent.mem_type == "FILE":
                 _unlink_file_descs(descs)
             raise
 
-        return descs, reg_descs, xfer_handler, handle
+        return descs, reg_descs, xfer_handler, mem_xfer_handler, handle
 
     def key_exists(self, key: CacheEngineKey) -> bool:
         meta_info = self._format_object_key(key)
 
         return self.agent.nixl_desc_exists(meta_info, self.path)
 
-    def _allocate_for_read(
-        self, keys: Sequence[CacheEngineKey]
-    ) -> Tuple[Optional[List[MemoryObj]], List[int], List[int]]:
-        """Allocate one MemoryObj per key.
+    def _format_query_meta_info(self, key: CacheEngineKey) -> str:
+        meta_info = self._format_object_key(key)
+        if self.agent.mem_type == "FILE":
+            return os.path.join(self.path, meta_info)
+        return meta_info
 
-        Returns ``(None, [], [])`` if any allocation fails, after freeing
-        what was already taken; otherwise returns the allocated objects
-        and the parallel mem/storage index lists.
-        """
+    def _is_layerwise_key(self, key: CacheEngineKey) -> bool:
+        return self.config.use_layerwise and getattr(key, "layer_id", None) is not None
+
+    def _read_metadata_for_key(
+        self, key: CacheEngineKey
+    ) -> Tuple[torch.Size, torch.dtype, MemoryFormat]:
+        if self._is_layerwise_key(key):
+            assert self.layer_meta_shape is not None
+            assert self.layer_meta_dtype is not None
+            assert self.layer_meta_fmt is not None
+            return self.layer_meta_shape, self.layer_meta_dtype, self.layer_meta_fmt
+
         assert self.meta_shape is not None
         assert self.meta_dtype is not None
         assert self.meta_fmt is not None
+        return self.meta_shape, self.meta_dtype, self.meta_fmt
+
+    @staticmethod
+    def _logical_xfer_size(mem_obj: MemoryObj) -> int:
+        return mem_obj.metadata.get_size()
+
+    @staticmethod
+    def _release_memory_objs(mem_objs: Sequence[MemoryObj]) -> None:
+        for mem_obj in mem_objs:
+            try:
+                mem_obj.ref_count_down()
+            except Exception as e:
+                logger.warning(f"Failed to release memory object reference: {e}")
+
+    def _discard_progress(self, keys: Sequence[CacheEngineKey]) -> None:
+        with self.progress_lock:
+            for key in keys:
+                self.progress_set.discard(key)
+
+    @staticmethod
+    def _safe_cleanup(action: str, cleanup: Callable[[], None]) -> None:
+        try:
+            cleanup()
+        except Exception as e:
+            logger.warning(f"Failed to {action}: {e}")
+
+    def _release_transfer_resources(
+        self,
+        handle: Optional[NixlXferHandle],
+        mem_xfer_handler: Optional[NixlDlistHandle],
+        storage_reg_descs: Optional[nixlBind.nixlRegDList],
+        storage_xfer_handler: Optional[NixlDlistHandle],
+        descs: Optional[List[NixlDesc]],
+    ) -> None:
+        if handle is not None:
+            self._safe_cleanup(
+                "release transfer handle",
+                lambda: self.agent.release_handle(handle),
+            )
+        if mem_xfer_handler is not None:
+            self._safe_cleanup(
+                "release memory handler",
+                lambda: self.agent.release_mem_handler(mem_xfer_handler),
+            )
+        if (
+            storage_reg_descs is not None
+            and storage_xfer_handler is not None
+            and descs is not None
+        ):
+            self._safe_cleanup(
+                "release storage handler",
+                lambda: self.agent.release_storage_handler(
+                    storage_reg_descs, storage_xfer_handler, descs
+                ),
+            )
+
+    def _allocate_for_read(
+        self, keys: Sequence[CacheEngineKey]
+    ) -> Tuple[Optional[List[MemoryObj]], List[int]]:
+        """Allocate one MemoryObj per key.
+
+        Returns ``(None, [])`` if any allocation fails, after freeing
+        what was already taken; otherwise returns the allocated objects
+        and their logical transfer sizes.
+        """
         obj_list: List[MemoryObj] = []
-        mem_indices: List[int] = []
-        storage_indices: List[int] = []
-        for idx in range(len(keys)):
+        xfer_sizes: List[int] = []
+        for key in keys:
+            shape, dtype, fmt = self._read_metadata_for_key(key)
             if self._local_cpu_backend is not None:
                 obj = self._local_cpu_backend.allocate(
-                    self.meta_shape,
-                    self.meta_dtype,
-                    self.meta_fmt,
+                    shape,
+                    dtype,
+                    fmt,
                     eviction=True,
                     busy_loop=False,
                 )
             else:
-                obj = self.memory_allocator.allocate(
-                    self.meta_shape, self.meta_dtype, self.meta_fmt
-                )
+                obj = self.memory_allocator.allocate(shape, dtype, fmt)
             if obj is None:
                 if self._local_cpu_backend is not None:
                     logger.warning(
@@ -1691,39 +1875,39 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
                         "Failed to allocate memory, consider increasing the "
                         "`nixl_buffer_size` value"
                     )
-                for obj in obj_list:
-                    if obj is not None:
-                        obj.ref_count_down()
-                return None, [], []
+                self._release_memory_objs(obj_list)
+                return None, []
             obj_list.append(obj)
-            mem_indices.append(obj.meta.address)
-            storage_indices.append(idx)
-        return obj_list, mem_indices, storage_indices
+            xfer_sizes.append(self._logical_xfer_size(obj))
+        return obj_list, xfer_sizes
 
     def storage_to_mem(
         self, keys: list[CacheEngineKey], pin: bool = False
     ) -> list[Optional[MemoryObj]]:
-        page_size = self.memory_allocator.align_bytes
         start_time = time.time()
 
-        obj_list, mem_indices, storage_indices = self._allocate_for_read(keys)
+        obj_list, xfer_sizes = self._allocate_for_read(keys)
         if obj_list is None:
             return [None] * len(keys)
+        storage_indices = list(range(len(keys)))
 
         try:
-            descs, reg_descs, xfer_handler, handle = self._acquire_storage_handle(
-                keys, mem_indices, storage_indices, page_size, write=False
+            descs, reg_descs, xfer_handler, mem_xfer_handler, handle = (
+                self._acquire_transfer_handle(
+                    keys, obj_list, storage_indices, xfer_sizes, write=False
+                )
             )
         except FileNotFoundError:
             # FILE backend: at least one key's file does not exist,
             # treat the whole batch as a miss.
             logger.warning("storage_to_mem: missing file in FILE backend")
-            for obj in obj_list:
-                if obj is not None:
-                    obj.ref_count_down()
+            self._release_memory_objs(obj_list)
             for key in keys:
-                self._cache_discard(key.chunk_hash)
+                self._cache_discard(key)
             return [None] * len(keys)
+        except Exception:
+            self._release_memory_objs(obj_list)
+            raise
 
         try:
             try:
@@ -1735,30 +1919,26 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
                 # miss rather than raising and terminating the program.
                 xfer_state = False
             finally:
-                self.agent.release_handle(handle)
-                self.agent.release_storage_handler(reg_descs, xfer_handler, descs)
+                self._release_transfer_resources(
+                    handle, mem_xfer_handler, reg_descs, xfer_handler, descs
+                )
         except Exception:
-            # Acquisition or transfer raised; return the allocated MemoryObj
-            # slots to the allocator so they aren't leaked.
-            for obj in obj_list:
-                if obj is not None:
-                    obj.ref_count_down()
+            # Transfer raised; return allocated MemoryObj slots to the allocator.
+            self._release_memory_objs(obj_list)
             raise
 
         if not xfer_state:
-            for obj in obj_list:
-                if obj is not None:
-                    obj.ref_count_down()
+            self._release_memory_objs(obj_list)
             for key in keys:
-                self._cache_discard(key.chunk_hash)
+                self._cache_discard(key)
             return [None] * len(keys)
 
         for key in keys:
-            self._cache_add(key.chunk_hash)
+            self._cache_add(key)
         duration = time.time() - start_time
         logger.debug(
             f"storage_to_mem for {len(keys)} objects size "
-            f"{page_size * len(keys)} took {duration:.6f} seconds"
+            f"{sum(xfer_sizes)} took {duration:.6f} seconds"
         )
         return cast(list[Optional[MemoryObj]], obj_list)
 
@@ -1769,6 +1949,7 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         keys: Sequence[CacheEngineKey],
         storage_reg_descs: nixlBind.nixlRegDList,
         storage_xfer_handler: NixlDlistHandle,
+        mem_xfer_handler: NixlDlistHandle,
         descs: List[NixlDesc],
         mem_objs: List[MemoryObj],
     ):
@@ -1788,22 +1969,26 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
                 raise RuntimeError("NIXL transfer failed")
 
         finally:
-            # Release the handle after transfer completes (success or failure)
-            self.agent.release_handle(handle)
-            self.agent.release_storage_handler(
-                storage_reg_descs, storage_xfer_handler, descs
-            )
+            try:
+                # Release the handle after transfer completes (success or failure).
+                self._release_transfer_resources(
+                    handle,
+                    mem_xfer_handler,
+                    storage_reg_descs,
+                    storage_xfer_handler,
+                    descs,
+                )
 
-            if state == "DONE":
-                for key in keys:
-                    with self.progress_lock:
-                        self.progress_set.discard(key)
-                    self._cache_add(key.chunk_hash)
-            elif self.agent.mem_type == "FILE":
-                _unlink_file_descs(descs)
-
-            for mem_obj in mem_objs:
-                mem_obj.ref_count_down()
+                if state == "DONE":
+                    self._discard_progress(keys)
+                    for key in keys:
+                        self._cache_add(key)
+                else:
+                    self._discard_progress(keys)
+                    if self.agent.mem_type == "FILE":
+                        _unlink_file_descs(descs)
+            finally:
+                self._release_memory_objs(mem_objs)
 
     async def mem_to_storage(
         self, keys: Sequence[CacheEngineKey], mem_objs: List[MemoryObj]
@@ -1811,21 +1996,40 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         if not keys:
             return
 
-        page_size = self.memory_allocator.align_bytes
         storage_indices = range(len(keys))
-        mem_indices = [mem_obj.meta.address for mem_obj in mem_objs]
+        xfer_sizes = [self._logical_xfer_size(mem_obj) for mem_obj in mem_objs]
 
-        descs, reg_descs, xfer_handler, handle = self._acquire_storage_handle(
-            keys, mem_indices, storage_indices, page_size, write=True
-        )
+        try:
+            descs, reg_descs, xfer_handler, mem_xfer_handler, handle = (
+                self._acquire_transfer_handle(
+                    keys, mem_objs, storage_indices, xfer_sizes, write=True
+                )
+            )
+        except Exception:
+            self._discard_progress(keys)
+            if self.async_mode:
+                self._release_memory_objs(mem_objs)
+            raise
 
         if self.async_mode:
             self._submit_async_mem_to_storage(
-                handle, keys, reg_descs, xfer_handler, descs, mem_objs
+                handle,
+                keys,
+                reg_descs,
+                xfer_handler,
+                mem_xfer_handler,
+                descs,
+                mem_objs,
             )
         else:
             self._run_sync_mem_to_storage(
-                handle, keys, reg_descs, xfer_handler, descs, page_size
+                handle,
+                keys,
+                reg_descs,
+                xfer_handler,
+                mem_xfer_handler,
+                descs,
+                sum(xfer_sizes),
             )
 
     def _submit_async_mem_to_storage(
@@ -1834,6 +2038,7 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         keys: Sequence[CacheEngineKey],
         reg_descs: nixlBind.nixlRegDList,
         xfer_handler: NixlDlistHandle,
+        mem_xfer_handler: NixlDlistHandle,
         descs: List[NixlDesc],
         mem_objs: List[MemoryObj],
     ) -> None:
@@ -1852,15 +2057,19 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
                     keys,
                     reg_descs,
                     xfer_handler,
+                    mem_xfer_handler,
                     descs,
                     mem_objs,
                 )
             )
         except Exception:
-            self.agent.release_handle(handle)
-            self.agent.release_storage_handler(reg_descs, xfer_handler, descs)
+            self._release_transfer_resources(
+                handle, mem_xfer_handler, reg_descs, xfer_handler, descs
+            )
             if self.agent.mem_type == "FILE":
                 _unlink_file_descs(descs)
+            self._discard_progress(keys)
+            self._release_memory_objs(mem_objs)
             raise
 
     def _run_sync_mem_to_storage(
@@ -1869,8 +2078,9 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         keys: Sequence[CacheEngineKey],
         reg_descs: nixlBind.nixlRegDList,
         xfer_handler: NixlDlistHandle,
+        mem_xfer_handler: NixlDlistHandle,
         descs: List[NixlDesc],
-        page_size: int,
+        total_size: int,
     ) -> None:
         start_time = time.time()
         try:
@@ -1878,20 +2088,22 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         except Exception:
             if self.agent.mem_type == "FILE":
                 _unlink_file_descs(descs)
+            self._discard_progress(keys)
             raise
         finally:
-            self.agent.release_handle(handle)
-            self.agent.release_storage_handler(reg_descs, xfer_handler, descs)
+            self._release_transfer_resources(
+                handle, mem_xfer_handler, reg_descs, xfer_handler, descs
+            )
 
         duration = time.time() - start_time
         logger.debug(
             f"mem_to_storage for {len(keys)} objects size "
-            f"{page_size * len(keys)} took {duration:.3f} seconds"
+            f"{total_size} took {duration:.3f} seconds"
         )
         for key in keys:
             with self.progress_lock:
                 self.progress_set.discard(key)
-            self._cache_add(key.chunk_hash)
+            self._cache_add(key)
 
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
         """
@@ -1920,8 +2132,8 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
             logger.debug(f"Key {key.chunk_hash:x} is in put tasks")
             return True, False
 
-        # Check presence cache before issuing a query_memory call if not prefetching
-        if self._cache_contains(key.chunk_hash):
+        # Check presence cache before hitting remote storage if not prefetching
+        if self._cache_contains(key):
             return True, True
 
         return False, False
@@ -1955,7 +2167,7 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
 
         xfer_state = self.key_exists(key)
         if xfer_state:
-            self._cache_add(key.chunk_hash)
+            self._cache_add(key)
 
         return xfer_state
 
@@ -2011,14 +2223,16 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
 
         # For remaining keys, use the new batched_nixl_desc_exists method
         remaining_keys = keys[true_count:]
-        reg_list = [(0, 0, 0, self._format_object_key(key)) for key in remaining_keys]
+        reg_list = [
+            (0, 0, 0, self._format_query_meta_info(key)) for key in remaining_keys
+        ]
 
         # Use the agent's batched_nixl_desc_exists method
         consecutive_hits = self.agent.batched_nixl_desc_exists(reg_list, self.path)
 
         # Update cache for the hits and return total count
         for i in range(consecutive_hits):
-            self._cache_add(remaining_keys[i].chunk_hash)
+            self._cache_add(remaining_keys[i])
 
         return true_count + consecutive_hits
 
@@ -2156,7 +2370,7 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         :param force: Whether to force removal (not used in this implementation)
         :return: True if the key is removed, False otherwise.
         """
-        self._cache_discard(key.chunk_hash)
+        self._cache_discard(key)
         if self.agent.mem_type == "FILE":
             try:
                 os.unlink(os.path.join(self.path, self._format_object_key(key)))

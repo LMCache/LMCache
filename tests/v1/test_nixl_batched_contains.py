@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# ruff: noqa: E402
 """Tests for ``batched_contains()`` and ``batched_nixl_desc_exists()``.
 
 All tests use lightweight mocks so they run without NIXL or CUDA hardware.
@@ -10,6 +11,7 @@ dependencies (NIXL agent, memory allocators) are replaced by mocks.
 # Standard
 from typing import List
 from unittest.mock import Mock
+import os
 
 # Third Party
 import pytest
@@ -22,6 +24,7 @@ from lmcache.utils import CacheEngineKey
 from lmcache.v1.storage_backend.nixl_storage_backend import (
     NixlDynamicStorageAgent,
     NixlDynamicStorageBackend,
+    SetPresenceCache,
 )
 
 # ---------------------------------------------------------------------------
@@ -54,11 +57,16 @@ def _mock_backend(**overrides) -> Mock:
     """
     backend = Mock(spec=NixlDynamicStorageBackend)
     backend.agent = Mock()
+    backend.agent.mem_type = "OBJ"
+    backend.path = "/tmp/nixl-test-cache"
     backend._cache_add = Mock()
     backend.presence_cache_only = False
     # Default: _format_object_key returns a predictable string
     backend._format_object_key = Mock(
         side_effect=lambda key: f"formatted_{key.chunk_hash}"
+    )
+    backend._format_query_meta_info = (
+        lambda key: NixlDynamicStorageBackend._format_query_meta_info(backend, key)
     )
     backend.agent.batched_nixl_desc_exists = Mock(return_value=0)
     # batched_contains() reads self.path to pass it to the agent; the value
@@ -165,6 +173,51 @@ class TestBatchedNixlDescExists:
 
 
 # ---------------------------------------------------------------------------
+# Presence cache
+# ---------------------------------------------------------------------------
+
+
+class TestPresenceCache:
+    """Presence cache keys must match the full storage identity."""
+
+    @staticmethod
+    def _make_backend() -> Mock:
+        backend = Mock(spec=NixlDynamicStorageBackend)
+        backend.enable_presence_cache = True
+        backend.key_presence_cache = SetPresenceCache()
+        backend.hit_counter = 0
+        backend.total_counter = 0
+        backend._use_b128_object_keys = False
+        backend._format_object_key_url_safe = (
+            lambda key: NixlDynamicStorageBackend._format_object_key_url_safe(
+                backend, key
+            )
+        )
+        backend._format_object_key = (
+            lambda key: NixlDynamicStorageBackend._format_object_key(backend, key)
+        )
+        backend._presence_cache_key = (
+            lambda key: NixlDynamicStorageBackend._presence_cache_key(backend, key)
+        )
+        return backend
+
+    def test_layerwise_keys_do_not_collide_on_chunk_hash(self) -> None:
+        backend = self._make_backend()
+        layer0, layer1 = _make_key(7).split_layers(2)
+
+        NixlDynamicStorageBackend._cache_add(backend, layer0)
+
+        assert NixlDynamicStorageBackend._cache_contains(backend, layer0) is True
+        assert NixlDynamicStorageBackend._cache_contains(backend, layer1) is False
+
+        NixlDynamicStorageBackend._cache_add(backend, layer1)
+        NixlDynamicStorageBackend._cache_discard(backend, layer0)
+
+        assert NixlDynamicStorageBackend._cache_contains(backend, layer0) is False
+        assert NixlDynamicStorageBackend._cache_contains(backend, layer1) is True
+
+
+# ---------------------------------------------------------------------------
 # NixlDynamicStorageBackend.contains (refactored)
 # ---------------------------------------------------------------------------
 
@@ -201,7 +254,7 @@ class TestContains:
         key = _make_key(42)
         assert self._call(backend, key) is True
         backend.key_exists.assert_called_once_with(key)
-        backend._cache_add.assert_called_once_with(key.chunk_hash)
+        backend._cache_add.assert_called_once_with(key)
 
     def test_fallback_to_key_exists_miss(self) -> None:
         """When key_exists also returns False, return False and don't cache."""
@@ -333,7 +386,9 @@ class TestBatchedContains:
         self._call(backend, keys)
         # _cache_add should be called for each remote hit
         assert backend._cache_add.call_count == 3
-        cached_hashes = [c.args[0] for c in backend._cache_add.call_args_list]
+        cached_hashes = [
+            c.args[0].chunk_hash for c in backend._cache_add.call_args_list
+        ]
         assert cached_hashes == [0, 1, 2]
 
     # -- key formatting (catches the original chunk_hash vs formatted-key bug)
@@ -359,6 +414,28 @@ class TestBatchedContains:
         meta_infos = [t[3] for t in call_args]
         assert meta_infos == ["formatted_0", "formatted_1", "formatted_2"]
         assert all(isinstance(m, str) for m in meta_infos)
+
+    def test_file_backend_reg_list_uses_full_paths(self) -> None:
+        """FILE backends query by filename, so dynamic batched lookup must pass
+        absolute paths that match where writes created the files.
+        """
+        keys = _make_keys(2)
+        backend = _mock_backend()
+        backend.agent.mem_type = "FILE"
+        backend.path = "/tmp/nixl-cache"
+        backend._exists_in_put_tasks_or_cache.side_effect = [
+            (False, False),
+        ]
+        backend.agent.batched_nixl_desc_exists.return_value = 0
+
+        self._call(backend, keys)
+
+        call_args = backend.agent.batched_nixl_desc_exists.call_args[0][0]
+        meta_infos = [t[3] for t in call_args]
+        assert meta_infos == [
+            os.path.join("/tmp/nixl-cache", "formatted_0"),
+            os.path.join("/tmp/nixl-cache", "formatted_1"),
+        ]
 
     def test_format_object_key_called_for_each_remaining_key(self) -> None:
         """_format_object_key must be called once per key that goes remote."""
