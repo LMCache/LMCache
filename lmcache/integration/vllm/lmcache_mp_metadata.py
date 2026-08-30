@@ -19,7 +19,10 @@ from lmcache.integration.vllm.utils import (
     extract_mm_features,
 )
 from lmcache.integration.vllm.vllm_multi_process_adapter import LoadStoreOp
+from lmcache.logging import init_logger
 from lmcache.v1.multiprocess.group_view import slice_block_ids_per_group
+
+logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     # Third Party
@@ -314,6 +317,25 @@ class LMCacheMPRequestMetadata:
             "number of LMCache hit tokens. "
         )
         if end_token_idx > start_token_idx:
+            short_groups = [
+                group_idx
+                for group_idx, tokens_per_block in enumerate(group_tokens_per_block)
+                if len(tracker.allocated_block_ids.get(group_idx, []))
+                * tokens_per_block
+                < end_token_idx
+            ]
+            if short_groups:
+                # Slicing a short Python list truncates silently. Emitting a
+                # partial retrieve would acknowledge a load vLLM expects to
+                # cover the full range, so suppress it and recompute instead.
+                logger.warning(
+                    "LMCache retrieve suppressed for request_id=%s: engine "
+                    "group(s) %s do not cover end_token_idx=%d",
+                    tracker.request_id,
+                    short_groups,
+                    end_token_idx,
+                )
+                return None
             block_ids = slice_block_ids_per_group(
                 tracker.allocated_block_ids,
                 group_tokens_per_block,

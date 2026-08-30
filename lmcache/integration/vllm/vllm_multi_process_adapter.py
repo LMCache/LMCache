@@ -1193,8 +1193,10 @@ class LMCacheMPWorkerAdapter:
         self.store_events: dict[str, _IpcEvent] = {}
         self.retrieve_events: dict[str, _IpcEvent] = {}
 
-        # Block IDs that failed due to retrieve timeout
+        # Block IDs whose retrieve failed, consumed by the scheduler's
+        # invalid-block recompute path.
         self.error_block_ids: set[int] = set()
+        self.retrieve_failure_count = 0
 
         # Retrieve request ids dropped by the unhealthy early-return of
         # submit_retrieve_request. get_finished must still report each id
@@ -1741,37 +1743,8 @@ class LMCacheMPWorkerAdapter:
             ret_stores -= finished_retrieves
             return ret_stores, finished_retrieves
 
-        finished_stores = set()
-        finished_retrieves = set()
-        for request_id, s_future in self.store_futures.items():
-            if not s_future.query():
-                continue
-
-            s_result = s_future.result(timeout=60)
-            finished_stores.add(request_id)
-
-            if not s_result:
-                logger.error(
-                    "Something went wrong when processing the "
-                    "store request for request_id=%s",
-                    request_id,
-                )
-
-        for request_id, (r_future, r_block_ids) in self.retrieve_futures.items():
-            if not r_future.query():
-                continue
-
-            r_result = r_future.result(timeout=60)
-            finished_retrieves.add(request_id)
-
-            if not r_result:
-                self.error_block_ids.update(r_block_ids)
-                logger.error(
-                    "Something went wrong when processing the "
-                    "retrieve request for request_id=%s, result=%s",
-                    request_id,
-                    r_result,
-                )
+        finished_stores = self._poll_store_futures()
+        finished_retrieves = self._poll_retrieve_futures()
 
         # Remove the finished requests from the tracking dicts
         for request_id in finished_stores:
@@ -1862,37 +1835,8 @@ class LMCacheMPWorkerAdapter:
                 self._completed_store_requests[req_id] = 1
             return None, finished_retrieves
 
-        finished_stores = set()
-        finished_retrieves = set()
-        for request_id, s_future in self.store_futures.items():
-            if not s_future.query():
-                continue
-
-            s_result = s_future.result(timeout=60)
-            finished_stores.add(request_id)
-
-            if not s_result:
-                logger.error(
-                    "Something went wrong when processing the "
-                    "store request for request_id=%s",
-                    request_id,
-                )
-
-        for request_id, (r_future, r_block_ids) in self.retrieve_futures.items():
-            if not r_future.query():
-                continue
-
-            r_result = r_future.result(timeout=60)
-            finished_retrieves.add(request_id)
-
-            if not r_result:
-                self.error_block_ids.update(r_block_ids)
-                logger.error(
-                    "Something went wrong when processing the "
-                    "retrieve request for request_id=%s, result=%s",
-                    request_id,
-                    r_result,
-                )
+        finished_stores = self._poll_store_futures()
+        finished_retrieves = self._poll_retrieve_futures()
 
         # Remove the finished requests from the tracking dicts
         for request_id in finished_stores:
@@ -1944,8 +1888,11 @@ class LMCacheMPWorkerAdapter:
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         """
-        Returns the block IDs that failed due to retrieve timeout,
-        then clears the internal set.
+        Return block IDs from failed retrieves, then clear the internal set.
+
+        Server-reported failures and future exceptions use the same path as
+        timeouts so vLLM recomputes the affected span instead of decoding over
+        blocks LMCache did not populate.
         """
         errors = self.error_block_ids.copy()
         self.error_block_ids.clear()
@@ -2012,6 +1959,54 @@ class LMCacheMPWorkerAdapter:
         self.request_telemetry.close()
 
     # Helper functions
+    def _poll_store_futures(self) -> set[str]:
+        """Return terminal store request IDs and log unsuccessful stores."""
+        finished: set[str] = set()
+        for request_id, future in self.store_futures.items():
+            if not future.query():
+                continue
+            result = future.result(timeout=60)
+            finished.add(request_id)
+            if not result:
+                logger.error("LMCache store failed for request_id=%s", request_id)
+        return finished
+
+    def _poll_retrieve_futures(self) -> set[str]:
+        """Return terminal retrieves and mark every failed span invalid."""
+        finished: set[str] = set()
+        for request_id, (future, block_ids) in self.retrieve_futures.items():
+            try:
+                if not future.query():
+                    continue
+                result = future.result(timeout=60)
+            except Exception:
+                finished.add(request_id)
+                self.error_block_ids.update(block_ids)
+                self.retrieve_failure_count += 1
+                logger.exception(
+                    "LMCache retrieve raised for request_id=%s; marking %d "
+                    "block(s) invalid for scheduler recompute "
+                    "(worker failure count=%d)",
+                    request_id,
+                    len(block_ids),
+                    self.retrieve_failure_count,
+                )
+                continue
+
+            finished.add(request_id)
+            if not result:
+                self.error_block_ids.update(block_ids)
+                self.retrieve_failure_count += 1
+                logger.error(
+                    "LMCache retrieve failed for request_id=%s; marked %d "
+                    "block(s) invalid for scheduler recompute "
+                    "(worker failure count=%d)",
+                    request_id,
+                    len(block_ids),
+                    self.retrieve_failure_count,
+                )
+        return finished
+
     def _update_and_get_finished_store(
         self,
     ) -> set[str]:
