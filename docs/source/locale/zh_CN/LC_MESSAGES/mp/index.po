@@ -1032,16 +1032,22 @@ msgid ""
 msgstr ""
 "重新生成 protobuf stubs："
 
-#: ../../source/mp/index.rst:572
+#: ../../source/mp/index.rst:545
 msgid ""
-"Add the Python value mapping and handler scheduling mode in "
-"``transport/grpc_impl/typed_rpc.py``. The proto descriptor remains the "
-"source of truth for service and method names; this mapping only describes "
-"LMCache Python domain objects such as ``IPCCacheServerKey`` and ``KVCache``."
+"Implement the generated RPC method on the matching Python service "
+"implementation in ``services/rpc_services.py`` using the protobuf method "
+"name exactly (for example, ``EngineServiceImpl.QueryPrefetchStatus``). Use "
+"``@grpc_method(HandlerType.BLOCKING)`` on methods that must run in the server "
+"worker pool; methods without the decorator run synchronously. Put reusable "
+"backend logic in the narrower service file only when it is not itself the "
+"generated gRPC service surface."
 msgstr ""
-"在 ``transport/grpc_impl/typed_rpc.py`` 中添加 Python 值映射和 handler 调度模式。"
-"proto descriptor 仍然是 service 和 method 名称的 source of truth；这个映射只描述 "
-"``IPCCacheServerKey`` 和 ``KVCache`` 等 LMCache Python 领域对象。"
+"在匹配的 Python service implementation（``services/rpc_services.py``）中按 "
+"protobuf method 名称精确实现生成的 RPC method（例如 "
+"``EngineServiceImpl.QueryPrefetchStatus``）。需要在 server worker pool 中运行的 "
+"method 使用 ``@grpc_method(HandlerType.BLOCKING)``；没有该 decorator 的 method "
+"同步运行。只有当可复用 backend logic 本身不是生成的 gRPC service surface 时，"
+"才把它放到更窄的 service 文件中。"
 
 #: ../../source/mp/index.rst:569
 msgid ""
@@ -1179,9 +1185,9 @@ msgstr "``lmcache/v1/multiprocess/protocol.py``"
 msgid "Descriptor-derived ``RpcMethod`` tokens and compatibility helpers"
 msgstr "从 descriptor 派生的 ``RpcMethod`` token 和兼容 helper"
 
-#: ../../source/mp/index.rst:615
-msgid "``lmcache/v1/multiprocess/transport/grpc_impl/typed_rpc.py``"
-msgstr "``lmcache/v1/multiprocess/transport/grpc_impl/typed_rpc.py``"
+#: ../../source/mp/index.rst:600
+msgid "``lmcache/v1/multiprocess/transport/grpc_impl/proto_codec.py``"
+msgstr "``lmcache/v1/multiprocess/transport/grpc_impl/proto_codec.py``"
 
 #: ../../source/mp/index.rst:616
 msgid "Python value codecs and handler scheduling metadata for gRPC methods"

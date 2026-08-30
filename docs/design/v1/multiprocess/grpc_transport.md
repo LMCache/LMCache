@@ -233,8 +233,8 @@ The gRPC design improves the boundary in concrete ways:
 | Tooling | LMCache-specific wire format. | Standard protobuf/gRPC tooling and generated stubs. |
 | Extensibility | New request types required touching custom routing conventions. | New methods follow proto -> implementation -> registration. |
 
-This also removes the old `typed_rpc.py` maintenance cost. There is no manual
-`_PythonRpcContract` row to update when adding a field or method. The proto
+This also removes the old per-RPC conversion registry maintenance cost. There
+is no manual contract row to update when adding a field or method. The proto
 descriptor and the concrete implementation method are the contract.
 
 ## Adding A New RPC
