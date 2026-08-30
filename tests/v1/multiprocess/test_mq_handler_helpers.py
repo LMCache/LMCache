@@ -29,6 +29,16 @@ def noop_handler() -> str:
     return "NOOP_OK"
 
 
+def failing_noop_handler() -> str:
+    """Raise a deterministic synchronous-handler failure."""
+    raise ValueError("intentional sync handler failure")
+
+
+def oversized_noop_failure_handler() -> str:
+    """Raise a handler failure whose message must be bounded on the wire."""
+    raise ValueError("x" * 8192)
+
+
 # ==============================================================================
 # REGISTER_KV_CACHE Request Handlers
 # ==============================================================================
@@ -201,6 +211,12 @@ def lookup_handler(key: KeyType, tp_size: int) -> None:
     # For testing, we just validate the input
     assert isinstance(key, KeyType), f"Expected key to be KeyType, got {type(key)}"
     assert isinstance(tp_size, int), f"Expected tp_size to be int, got {type(tp_size)}"
+
+
+def failing_lookup_handler(key: KeyType, tp_size: int) -> None:
+    """Raise a deterministic blocking-handler failure."""
+    del key, tp_size
+    raise OSError("intentional blocking handler failure")
 
 
 # ==============================================================================

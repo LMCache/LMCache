@@ -25,6 +25,7 @@ from lmcache.v1.multiprocess.mq import (
     BlockingRequestHandler,
     MessageQueueClient,
     MessageQueueServer,
+    RemoteHandlerError,
 )
 from lmcache.v1.multiprocess.protocol import (
     RequestType,
@@ -687,6 +688,127 @@ def test_shared_loop_dispatch():
         client_b.close()
         assert ClientPollingLoop._instance is None
     finally:
+        server.close()
+
+
+def test_sync_handler_failure_completes_future_and_loop_recovers() -> None:
+    """A synchronous handler error is terminal and does not poison the loop."""
+    context = zmq.Context.instance()
+    server = MessageQueueServer("tcp://127.0.0.1:16021", context)
+    add_handler_helper(
+        server, RequestType.NOOP, test_mq_handler_helpers.failing_noop_handler
+    )
+    server.start()
+    client = MessageQueueClient("tcp://127.0.0.1:16021", context)
+
+    try:
+        failed: MessagingFuture[str] = client.submit_request(RequestType.NOOP, [])
+        with pytest.raises(
+            RemoteHandlerError, match="intentional sync handler failure"
+        ) as exc_info:
+            failed.result(timeout=2)
+        assert exc_info.value.request_type is RequestType.NOOP
+        assert exc_info.value.error_type == "ValueError"
+
+        server.add_sync_handler(
+            RequestType.NOOP, [], test_mq_handler_helpers.noop_handler
+        )
+        assert (
+            client.submit_request(RequestType.NOOP, []).result(timeout=2) == "NOOP_OK"
+        )
+    finally:
+        client.close()
+        server.close()
+
+
+def test_blocking_handler_failure_completes_future() -> None:
+    context = zmq.Context.instance()
+    server = MessageQueueServer("tcp://127.0.0.1:16022", context)
+    add_handler_helper(
+        server, RequestType.LOOKUP, test_mq_handler_helpers.failing_lookup_handler
+    )
+    server.add_normal_thread_pool([RequestType.LOOKUP], max_workers=1)
+    server.start()
+    client = MessageQueueClient("tcp://127.0.0.1:16022", context)
+
+    try:
+        future: MessagingFuture[None] = client.submit_request(
+            RequestType.LOOKUP, [create_cache_key(1), 1]
+        )
+        with pytest.raises(
+            RemoteHandlerError, match="intentional blocking handler failure"
+        ) as exc_info:
+            future.result(timeout=2)
+        assert exc_info.value.request_type is RequestType.LOOKUP
+        assert exc_info.value.error_type == "OSError"
+    finally:
+        client.close()
+        server.close()
+
+
+def test_missing_handler_completes_future_with_remote_error() -> None:
+    context = zmq.Context.instance()
+    server = MessageQueueServer("tcp://127.0.0.1:16023", context)
+    server.start()
+    client = MessageQueueClient("tcp://127.0.0.1:16023", context)
+
+    try:
+        with pytest.raises(RemoteHandlerError, match="No handler registered"):
+            client.submit_request(RequestType.NOOP, []).result(timeout=2)
+    finally:
+        client.close()
+        server.close()
+
+
+def test_malformed_error_frame_completes_future_and_loop_recovers() -> None:
+    """A matched malformed response fails its future instead of stranding it."""
+    # First Party
+    from lmcache.v1.multiprocess.mq import _ERROR_RESPONSE_MARKER
+
+    server_url = "tcp://127.0.0.1:16024"
+    context = zmq.Context.instance()
+    router = context.socket(zmq.ROUTER)
+    router.bind(server_url)
+
+    def serve() -> None:
+        identity, b_uid, b_type, *_ = router.recv_multipart()
+        router.send_multipart([identity, b_uid, b_type, _ERROR_RESPONSE_MARKER])
+        identity, b_uid, b_type, *_ = router.recv_multipart()
+        router.send_multipart(
+            [identity, b_uid, b_type, msgspec.msgpack.encode("NOOP_OK")]
+        )
+
+    threading.Thread(target=serve, daemon=True).start()
+    client = MessageQueueClient(server_url, context)
+    try:
+        malformed: MessagingFuture[str] = client.submit_request(RequestType.NOOP, [])
+        with pytest.raises(RuntimeError, match="Malformed LMCache RPC error"):
+            malformed.result(timeout=2)
+        assert (
+            client.submit_request(RequestType.NOOP, []).result(timeout=2) == "NOOP_OK"
+        )
+    finally:
+        client.close()
+        router.close()
+
+
+def test_remote_error_message_is_bounded() -> None:
+    context = zmq.Context.instance()
+    server = MessageQueueServer("tcp://127.0.0.1:16025", context)
+    add_handler_helper(
+        server,
+        RequestType.NOOP,
+        test_mq_handler_helpers.oversized_noop_failure_handler,
+    )
+    server.start()
+    client = MessageQueueClient("tcp://127.0.0.1:16025", context)
+
+    try:
+        with pytest.raises(RemoteHandlerError) as exc_info:
+            client.submit_request(RequestType.NOOP, []).result(timeout=2)
+        assert len(exc_info.value.remote_message.encode("utf-8")) <= 4096
+    finally:
+        client.close()
         server.close()
 
 

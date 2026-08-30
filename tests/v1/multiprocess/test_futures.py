@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from unittest.mock import MagicMock
 import gc
 import multiprocessing as mp
 import threading
@@ -221,6 +222,50 @@ def test_messaging_future_complex_type():
     assert result == complex_data, "Complex types should be preserved"
 
     thread.join()
+
+
+def test_messaging_future_exception_is_terminal_and_re_raised() -> None:
+    """A messaging failure completes the future without becoming a timeout."""
+    future = MessagingFuture[int]()
+    error = RuntimeError("remote operation failed")
+
+    future.set_exception(error)
+
+    assert future.query()
+    assert future.wait(timeout=0.1)
+    with pytest.raises(RuntimeError, match="remote operation failed") as exc_info:
+        future.result(timeout=0.1)
+    assert exc_info.value is error
+
+
+def test_messaging_future_rejects_non_exception() -> None:
+    future = MessagingFuture[int]()
+
+    with pytest.raises(TypeError, match="must derive from BaseException"):
+        future.set_exception("not an exception")  # type: ignore[arg-type]
+
+
+def test_device_future_query_reports_remote_exception_as_done(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Readiness checks stay non-raising; result preserves the root failure."""
+    # First Party
+    from lmcache.v1.multiprocess import futures as futures_mod
+    from lmcache.v1.multiprocess.futures import DeviceMessagingFuture
+
+    backend = MagicMock(name="event_backend")
+    monkeypatch.setattr(futures_mod, "get_event_ipc_backend", lambda _device: backend)
+    raw = MessagingFuture[tuple[bytes, bool]]()
+    wrapped = DeviceMessagingFuture.FromMessagingFuture(raw, device="cpu")
+    error = RuntimeError("remote handler failed")
+
+    raw.set_exception(error)
+
+    assert wrapped.query()
+    assert wrapped.wait(timeout=0.1)
+    with pytest.raises(RuntimeError, match="remote handler failed") as exc_info:
+        wrapped.result(timeout=0.1)
+    assert exc_info.value is error
 
 
 def test_messaging_future_retains_reference_for_its_lifetime() -> None:
