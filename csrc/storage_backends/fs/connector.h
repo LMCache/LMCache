@@ -52,17 +52,20 @@ class FSConnector : public ConnectorBase<WorkerFSConn> {
   // Build the filesystem-safe filename from a serialized key string.
   //
   // Input key (from NativeConnectorL2Adapter._object_key_to_string):
-  //   Unsalted: "{model}@{kv_rank:08x}@{hash.hex()}"
-  //   Salted  : "{model}@{kv_rank:08x}@{hash.hex()}@{cache_salt}"
+  //   Current unsalted:
+  //     "{model}@{kv_rank:08x}@{object_group:x}@{hash.hex()}"
+  //   Current salted appends "@{cache_salt}". Legacy three/four-field keys
+  //   without object_group_id remain supported.
   //
   // Output filename (matching fs_l2_adapter.py._object_key_to_filename):
-  //   Unsalted: "{safe_model}@{kv_rank:#010x}@{hash.hex()}.data"
-  //   Salted  : "{safe_model}@{kv_rank:#010x}@{hash.hex()}@{cache_salt}.data"
+  //   Current unsalted:
+  //     "{safe_model}@{kv_rank:#010x}@{object_group:x}@{hash.hex()}.data"
+  //   Current salted appends "@{cache_salt}" before ".data".
   //
   // Differences from the input: '/' in model becomes '-SEP-', kv_rank
-  // gains a '0x' prefix, and '.data' is appended. Both model_name and
-  // cache_salt are forbidden from containing '@' (enforced on the
-  // Python side), so the parse is unambiguous.
+  // gains a '0x' prefix, and '.data' is appended. All fields after kv_rank
+  // are preserved because four fields can represent either a legacy salted
+  // key or a current unsalted key.
   static std::string key_to_filename(const std::string& key);
 
   static std::string replace_all(const std::string& str,
