@@ -48,8 +48,20 @@ def _detect_device_type(kv_caches: KVCache) -> str:
     All wrappers in *kv_caches* must materialize tensors on the same
     device type; mixed-device batches are not supported by any
     downstream cache-context implementation.
+
+    Reads each wrapper's ``device_type`` class constant instead of
+    materializing tensors: reconstruction can hold device resources
+    (raw CUDA IPC mappings) whose rollback belongs to the cache
+    context, so nothing may import before the context is constructed.
+    Wrappers from external device plugins that lack the constant fall
+    back to a (context-managed-later) ``to_tensor`` probe.
     """
-    device_types = {w.to_tensor().device.type for w in kv_caches}
+    device_types = set()
+    for w in kv_caches:
+        device_type = getattr(type(w), "device_type", None)
+        if device_type is None:
+            device_type = w.to_tensor().device.type
+        device_types.add(device_type)
     if len(device_types) != 1:
         raise ValueError(
             "create_cache_context requires all kv_caches to share one "

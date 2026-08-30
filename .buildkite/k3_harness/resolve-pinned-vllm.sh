@@ -81,6 +81,20 @@ if [[ -z "${PINNED_VLLM_VERSION}" && "${USE_PINNED_VLLM}" == "true" ]]; then
     fi
 fi
 
+# The 0.28.1rc1 nightlies break DeepSeek-V4-Flash sparse decode on SM120
+# ("eidx must be contiguous", flashinfer _sparse_mla_sm120) at engine start.
+# The canary verifies nightlies with vllm_bench only, so it green-lit that
+# range and dsv4_flash_tp went red from the re-pin onward -- it was green on
+# 0.27.1 the same morning with everything else equal, and the same stack
+# passes on SM90. Clamp back to the last good release until a nightly passes
+# dsv4 again. TODO: drop the clamp and have the canary verify dsv4_flash_tp.
+if [[ "${PINNED_VLLM_VERSION}" == 0.28.1rc1.* ]]; then
+    echo "[resolve-pinned-vllm] pin ${PINNED_VLLM_VERSION} is in the"          "known-bad 0.28.1rc1 range for dsv4_flash_tp; clamping to 0.27.1" >&2
+    PINNED_VLLM_VERSION="0.27.1"
+    PINNED_VLLM_ARCHIVE_INDEX_URL=""
+    PINNED_VLLM_FULL_SHA=""
+fi
+
 export PINNED_VLLM_VERSION
 export PINNED_VLLM_ARCHIVE_INDEX_URL
 export PINNED_VLLM_FULL_SHA

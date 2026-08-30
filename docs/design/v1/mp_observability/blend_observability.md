@@ -1,6 +1,6 @@
-# CacheBlend V3 Observability — Design
+# Blend Server Observability — Design
 
-**Status:** Proposal · **Scope:** unify CB V3 tracing across the vLLM plugin
+**Status:** Proposal · **Scope:** unify blend server tracing across the vLLM plugin
 (scheduler + worker) and the LMCache blend server into one distributed trace,
 plus the metrics each side exposes.
 
@@ -10,7 +10,7 @@ A single CB request touches **three processes**:
 
 ```
 vLLM scheduler ──CB_UNIFIED_LOOKUP──▶ LMCache blend server
-vLLM worker    ──CB_RETRIEVE_V3─────▶ LMCache blend server
+vLLM worker    ──CB_RETRIEVE_PRE_COMPUTED▶ LMCache blend server
 vLLM worker    ── model forward (FULL_RECOMP → CHECK → PARTIAL)
 ```
 
@@ -90,7 +90,7 @@ chunk granularity — which is what the spans/attrs below must reflect:
 The server already emits `cb.request` / `cb.lookup` / `cb.retrieve` via the
 EventBus. Two changes:
 
-**(a) Finer V3 events for the lookup/retrieve subtrees.** V3 currently emits only
+**Finer events for the lookup/retrieve subtrees.** The server currently emits only
 `CB_LOOKUP_START/END` and `CB_RETRIEVE_START/END` — too coarse for the subtree in
 §2. Add paired events (CPU-sync for compute, `publish_on_stream` for GPU ops so
 timing is GPU-accurate):
@@ -99,19 +99,12 @@ timing is GPU-accurate):
 |---|---|---|
 | `CB_FINGERPRINT_MATCH_*` | `cb.fingerprint_match` | CPU |
 | `CB_COORDINATOR_MATCH_*` | `cb.coordinator_match` (fleet directory leg; mutually exclusive with the local matcher) | CPU + IO |
-| `CB_PREFIX_LOOKUP_*` | `cb.prefix_lookup` (blend_v3 owns the submit/poll, so it is a CB span, not `mp.lookup_prefetch`) | CPU + IO |
+| `CB_PREFIX_LOOKUP_*` | `cb.prefix_lookup` (the blend module owns the submit/poll, so it is a CB span, not `mp.lookup_prefetch`) | CPU + IO |
 | `CB_SPARSE_PREFETCH_*` | `cb.sparse_prefetch` (+ existing L2 prefetch span as `cb.l2_load`) | CPU + IO |
 | `CB_SCATTER_*` | `cb.scatter` (re-RoPE folded in via `n_shifted`) | `publish_on_stream` (GPU) |
 
 `BlendTracingSubscriber.SPAN_DEFS` gains the matching entries; all nest under
 `cb.lookup` / `cb.retrieve` via the existing `SpanRegistry`.
-
-**(b) Simplify the deferral logic for the V3 model.** The current root-close
-deferral (`_waiting_for_store_final`, the `STORE_FINAL_SUBMITTED` bridge) is V2-only
-and **inert under V3** (V3 never emits those). Under V3 the request ends at
-`CB_RETRIEVE_END` (no async store-final after inference). Gate the `cb.request`
-close on `_pending_gpu_ops[sid] == 0` only, and drop the V2 store-final bridge
-from the V3 path. (The V2-only event handlers stay for `blend_legacy`.)
 
 **Span attributes (server):** `request_id`, `prefix_coverage_tokens`,
 `fingerprint_hits`, `storage_hits`, `stale_chunks`, `hit_tokens`,
@@ -129,25 +122,26 @@ split prefix-reuse vs re-RoPE'd non-prefix reuse.
 **Metrics.** The existing `lmcache_blend.*` counters stay.  Every sub-span event
 above also feeds a metric — a `*_duration` histogram per leg plus counters for
 their payloads — so the phase breakdown survives trace sampling.  See
-[METRICS.md](METRICS.md) § *CB V3 Phase Metrics* for the full list.
+[METRICS.md](METRICS.md) § *CB Phase Metrics* for the full list.
 
-Three V3-specific wiring points that are easy to get wrong:
+Wiring points that are easy to get wrong:
 
 - **No-op retrieves.** A retrieve that drops its matches returns *success*, so
   `CB_RETRIEVE_NOOP` → `lmcache_blend.retrieve_noops{reason}` is the only signal.
   `reason` must stay a fixed code, never interpolated — it is a metric attribute.
-- **`CB_RETRIEVE_SUBMITTED`.** V3 must publish it with
-  `expects_store_final=False`: at TP>1 a worker whose retrieve is a no-op
-  publishes `CB_REQUEST_END` on the CPU while another worker's scatter is still
-  on the stream, which would otherwise close `cb.request` early.
+- **`CB_RETRIEVE_SUBMITTED`.** The retrieve must publish it before enqueuing
+  GPU work: at TP>1 a worker whose retrieve is a no-op publishes
+  `CB_REQUEST_END` on the CPU while another worker's scatter is still on the
+  stream, which would otherwise close `cb.request` early.
 - **Lookup-only requests end at the lookup.** `CB_REQUEST_END` is otherwise
   published only by `cb_retrieve_pre_computed`, so a request whose unified
   lookup returns nothing to retrieve (miss, or prefix-only) would never close
   `cb.request` — `cb_unified_lookup` publishes it itself when the finalized
   result has neither non-prefix segments nor a segmented tail.
-- **The V2-only store counters** (`store_pre_computed_*`, `store_final_*`) stay
-  flat under V3, whose store goes through `LMCacheDrivenTransfer` and is already
-  observed by `mp.store`.  What V3 adds is `CB_FINGERPRINTS_REGISTERED`.
+- **No blend store counters.** The store goes through `LMCacheDrivenTransfer`
+  and is already observed by `mp.store`; the legacy `store_pre_computed_*` /
+  `store_final_*` counters were removed with the original engine. What the
+  blend module adds is `CB_FINGERPRINTS_REGISTERED`.
 
 ## 4. vLLM-plugin side — what to expose
 
@@ -200,10 +194,10 @@ each side; Option A only adds the *cross*-process edge.
 
 1. **Plugin OTel** — make `_cb_span` dual-mode (OTel + JSONL); reuse vLLM's tracer;
    gate with `CB_TRACING`. (plugin repo)
-2. **V3 server sub-spans** — add the §3(a) events + `SPAN_DEFS`; simplify the
-   §3(b) V3 deferral. (LMCache) — **DONE**: `cb.fingerprint_match`,
+2. **Server sub-spans** — add the §3 events + `SPAN_DEFS`. (LMCache) — **DONE**:
+   `cb.fingerprint_match`,
    `cb.prefix_lookup` and `cb.sparse_prefetch` nest under `cb.lookup`
-   (blend_v3 owns the prefix leg, so it is a CB-namespace span rather than
+   (the blend module owns the prefix leg, so it is a CB-namespace span rather than
    `mp.lookup_prefetch`); `cb.coordinator_match` replaces the local matcher when
    a coordinator is configured; `cb.scatter` (re-RoPE folded) nests under
    `cb.retrieve`; `hit_rate` = prefix + segmented-prefix + non-prefix.

@@ -561,10 +561,14 @@ def multi_layer_kv_transfer(
     block_size: int = 0,
     head_size: int = 0,
     skip_prefix_n_tokens: int = 0,
+    block_stride_elems: int = 0,
 ):
     """
     Fully vectorized Python fallback for multi_layer_kv_transfer.
     Eliminates ALL token- and KV-level Python loops.
+
+    ``block_stride_elems`` mirrors the cuda_ops signature; pointer-based
+    paged reconstruction rejects non-tight pools in _normalize_paged_layers.
     """
     if not isinstance(key_value_ptrs, (torch.Tensor, list)):
         raise TypeError(
@@ -582,7 +586,6 @@ def multi_layer_kv_transfer(
             "are not supported in the non-CUDA fallback. "
             "head_size parameter is required but not implemented in this path."
         )
-
     # 1. Filter out invalid slots.
     #    valid_mask_kv:  on key_value.device, used to index key_value
     #    valid_slots:    on paged_memory_device, used to index paged_tensor
@@ -1030,6 +1033,13 @@ def _normalize_paged_layers(
         nh = int(shape_desc.nh)
         hs = int(shape_desc.hs)
         per_shape = _per_layer_paged_shape(engine_kv_format, nb, bs, nh, hs)
+        block_stride = int(getattr(shape_desc, "block_stride_elems", 0) or 0)
+        if block_stride and block_stride != bs * nh * hs:
+            raise NotImplementedError(
+                "Non-tight per-block strides (vLLM blocks-first pools) are "
+                "not supported when reconstructing paged tensors from raw "
+                "pointers in the non-CUDA fallback."
+            )
         return [
             _tensor_from_ptr(int(p.item()), per_shape, dtype, device)
             for p in paged_buffer_ptrs_tensor

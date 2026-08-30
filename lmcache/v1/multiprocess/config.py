@@ -47,9 +47,8 @@ class MPServerConfig:
     """Hash algorithm for token-based operations (builtin, sha256_cbor, blake3)."""
 
     engine_type: str = "default"
-    """Cache engine backend type
-    ('default' for standard prefix caching, 'blend' when cacheblend is enabled).
-    """
+    """Cache engine backend type: 'default' for standard prefix caching,
+    'blend' to compose the blend module (non-prefix KV reuse)."""
 
     separate_object_groups: bool = False
     """When True, split kernel groups into one object group per
@@ -73,6 +72,11 @@ class MPServerConfig:
     """Transfer mode: 'lmcache_driven' for server-driven transfer
     (STORE/RETRIEVE, supports CUDA IPC and CPU SHM), 'engine_driven' for
     engine-driven transfer (PREPARE/COMMIT), or 'auto' to enable both."""
+
+    isolated_ipc: bool = False
+    """Whether IPC mechanisms must work across isolated containers (no shared
+    host IPC namespace or /dev/shm); see lmcache/v1/platform/isolated_ipc.py.
+    Must match the engine workers' ``lmcache.mp.isolated_ipc`` setting."""
 
     runtime_plugin_config: "RuntimePluginConfig" = field(
         default_factory=lambda: RuntimePluginConfig()
@@ -321,10 +325,10 @@ def add_mp_server_args(
         "--engine-type",
         type=str,
         default="default",
-        choices=["default", "blend", "blend_legacy"],
+        choices=["default", "blend"],
         help="Cache engine backend type. 'default' uses standard prefix caching; "
-        "'blend' selects CacheBlend V3 (the current implementation); "
-        "'blend_legacy' selects the original CacheBlend. Default is 'default'.",
+        "'blend' composes the blend module for non-prefix KV reuse. "
+        "Default is 'default'.",
     )
     mp_group.add_argument(
         "--supported-transfer-mode",
@@ -336,6 +340,16 @@ def add_mp_server_args(
         "'engine_driven' for engine-driven transfer (PREPARE/COMMIT), "
         "or 'auto' to enable both transfer paths. "
         "Default is 'lmcache_driven'.",
+    )
+    mp_group.add_argument(
+        "--isolated-ipc",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Assume engine workers and this server run in containers that "
+        "share no host IPC namespace or /dev/shm, and use IPC mechanisms "
+        "that work there (CUDA: timeline-semaphore events instead of "
+        "interprocess event handles). Must match the engine workers' "
+        "lmcache.mp.isolated_ipc setting. (Default is False)",
     )
     mp_group.add_argument(
         "--runtime-plugin-locations",
@@ -454,6 +468,7 @@ def parse_args_to_mp_server_config(
         enable_segmented_prefix=args.enable_segmented_prefix,
         enable_dedup_content=args.enable_dedup_content,
         supported_transfer_mode=args.supported_transfer_mode,
+        isolated_ipc=args.isolated_ipc,
         runtime_plugin_config=RuntimePluginConfig(
             locations=(args.runtime_plugin_locations or []),
             extra_config=plugin_extra,

@@ -27,6 +27,7 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (
 )
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.protocol import RequestType
+from lmcache.v1.platform.isolated_ipc import is_isolated_ipc, set_isolated_ipc
 
 
 class FakeCudaEvent:
@@ -323,6 +324,75 @@ def test_load_store_op_accepts_per_group_block_ids():
 
     assert op.block_ids == [[0, 1], [10, 11]]
     assert op.flat_block_ids == [0, 1, 10, 11]
+
+
+@pytest.fixture
+def restore_isolated_ipc():
+    """Restore the process-global isolated-IPC switch after the test."""
+    previous = is_isolated_ipc()
+    yield
+    set_isolated_ipc(previous)
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [(False, False), (True, True), ("false", False), ("true", True)],
+)
+def test_isolated_ipc_extra_config_sets_process_switch(
+    fake_adapter, restore_isolated_ipc, raw, expected
+):
+    """The lmcache.mp.isolated_ipc key drives the process-global switch,
+    accepting both JSON booleans and their string spellings."""
+    _make_worker_adapter(extra_config={"lmcache.mp.isolated_ipc": raw})
+    assert is_isolated_ipc() is expected
+
+
+def test_isolated_ipc_untouched_without_extra_config(
+    fake_adapter, restore_isolated_ipc
+):
+    """Legacy callers passing no extra_config leave the process switch alone."""
+    set_isolated_ipc(True)
+    _make_worker_adapter(extra_config=None)
+    assert is_isolated_ipc() is True
+
+
+def test_create_recorded_event_routes_through_backend(fake_adapter, monkeypatch):
+    """create_recorded_event uses the backend resolved once at registration."""
+    adapter, _send_mock, _future = fake_adapter
+    _patch_transfer_context_factory(monkeypatch)
+    kv = torch.zeros(1)
+
+    backend = MagicMock(name="event_backend")
+    created_event = MagicMock(name="event")
+    backend.create_event.return_value = created_event
+    resolve_calls: list[object] = []
+
+    def fake_get_backend(device: object) -> MagicMock:
+        resolve_calls.append(device)
+        return backend
+
+    monkeypatch.setattr(adapter_mod, "get_event_ipc_backend", fake_get_backend)
+    current_stream = MagicMock(name="current_stream")
+    fake_torch_dev = MagicMock(name="torch_dev")
+    fake_torch_dev.current_stream.return_value = current_stream
+    monkeypatch.setattr(adapter_mod, "torch_dev", fake_torch_dev)
+
+    adapter.register_kv_caches({"layer.0": kv})
+    event = adapter.create_recorded_event()
+    adapter.create_recorded_event()
+
+    assert event is created_event
+    # Backend lookup happens once at registration, not per event.
+    assert resolve_calls == [kv.device]
+    backend.create_event.assert_called_with(kv.device)
+    assert backend.create_event.call_count == 2
+    backend.record_event.assert_called_with(created_event, current_stream)
+
+
+def test_create_recorded_event_before_registration_raises(fake_adapter):
+    adapter, _send_mock, _future = fake_adapter
+    with pytest.raises(RuntimeError, match="register_kv_caches"):
+        adapter.create_recorded_event()
 
 
 def test_store_keeps_event_until_future_finishes(fake_adapter):
