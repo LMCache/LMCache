@@ -551,6 +551,15 @@ def _write_message_from_runtime_value(
         _write_field_from_runtime_value(message, field, field_value)
 
 
+def _is_structured_runtime_value(value: Any, descriptor: Any) -> bool:
+    return (
+        _proto_has_same_descriptor(value, descriptor)
+        or is_dataclass(value)
+        or isinstance(value, (dict, msgspec.Struct))
+        or (isinstance(value, tuple) and len(value) == len(tuple(descriptor.fields)))
+    )
+
+
 def _compile_request_codec(
     message_cls: Any,
     payload_types: tuple[Any, ...],
@@ -789,16 +798,20 @@ def encode_request_from_call(
             _write_field_from_runtime_value(message, field, value)
         return message
 
-    if len(args) == 1 and len(proto_fields) != 1:
+    if (
+        len(args) == 1
+        and len(proto_fields) != 1
+        and _is_structured_runtime_value(args[0], message_cls.DESCRIPTOR)
+    ):
         _write_message_from_runtime_value(message, message_cls.DESCRIPTOR, args[0])
         return message
 
-    if len(args) != len(proto_fields):
+    if len(args) > len(proto_fields):
         raise TypeError(
-            f"{message_cls.DESCRIPTOR.full_name} expects {len(proto_fields)} "
-            f"positional values, got {len(args)}"
+            f"{message_cls.DESCRIPTOR.full_name} accepts at most "
+            f"{len(proto_fields)} positional values, got {len(args)}"
         )
-    for field, value in zip(proto_fields, args, strict=True):
+    for field, value in zip(proto_fields, args, strict=False):
         _write_field_from_runtime_value(message, field, value)
     return message
 

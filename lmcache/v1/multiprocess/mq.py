@@ -479,7 +479,7 @@ class GrpcRequestHandler:
 
 
 class _GrpcServicer:
-    """Concrete servicer implementing all generated LMCache gRPC methods."""
+    """Concrete servicer implementing generated LMCache gRPC methods."""
 
     def __init__(self, handlers: dict[RpcMethod, GrpcRequestHandler]) -> None:
         self._handlers = handlers
@@ -511,113 +511,14 @@ class _GrpcServicer:
             context.abort(grpc.StatusCode.UNIMPLEMENTED, str(exc))
             raise RuntimeError("unreachable") from exc
 
-    def RegisterKvCache(self, request: Any, context: "grpc.ServicerContext") -> Any:
-        return self._dispatch("RegisterKvCache", request, context)
+    def __getattr__(self, method_name: str) -> Callable[[Any, Any], Any]:
+        if method_name not in _RPC_METHODS_BY_METHOD_NAME:
+            raise AttributeError(method_name)
 
-    def RegisterQCache(self, request: Any, context: "grpc.ServicerContext") -> Any:
-        return self._dispatch("RegisterQCache", request, context)
+        def rpc_method(request: Any, context: "grpc.ServicerContext") -> Any:
+            return self._dispatch(method_name, request, context)
 
-    def UnregisterKvCache(self, request: Any, context: "grpc.ServicerContext") -> Any:
-        return self._dispatch("UnregisterKvCache", request, context)
-
-    def UnregisterQCache(self, request: Any, context: "grpc.ServicerContext") -> Any:
-        return self._dispatch("UnregisterQCache", request, context)
-
-    def StoreQ(self, request: Any, context: "grpc.ServicerContext") -> Any:
-        return self._dispatch("StoreQ", request, context)
-
-    def Store(self, request: Any, context: "grpc.ServicerContext") -> Any:
-        return self._dispatch("Store", request, context)
-
-    def Retrieve(self, request: Any, context: "grpc.ServicerContext") -> Any:
-        return self._dispatch("Retrieve", request, context)
-
-    def Lookup(self, request: Any, context: "grpc.ServicerContext") -> Any:
-        return self._dispatch("Lookup", request, context)
-
-    def QueryPrefetchStatus(self, request: Any, context: "grpc.ServicerContext") -> Any:
-        return self._dispatch("QueryPrefetchStatus", request, context)
-
-    def WaitPrefetchStatus(self, request: Any, context: "grpc.ServicerContext") -> Any:
-        return self._dispatch("WaitPrefetchStatus", request, context)
-
-    def QueryPrefetchLookupHits(
-        self, request: Any, context: "grpc.ServicerContext"
-    ) -> Any:
-        return self._dispatch("QueryPrefetchLookupHits", request, context)
-
-    def FreeLookupLocks(self, request: Any, context: "grpc.ServicerContext") -> Any:
-        return self._dispatch("FreeLookupLocks", request, context)
-
-    def EndSession(self, request: Any, context: "grpc.ServicerContext") -> Any:
-        return self._dispatch("EndSession", request, context)
-
-    def RegisterKvCacheEngineDrivenContext(
-        self, request: Any, context: "grpc.ServicerContext"
-    ) -> Any:
-        return self._dispatch("RegisterKvCacheEngineDrivenContext", request, context)
-
-    def UnregisterKvCacheEngineDrivenContext(
-        self, request: Any, context: "grpc.ServicerContext"
-    ) -> Any:
-        return self._dispatch("UnregisterKvCacheEngineDrivenContext", request, context)
-
-    def PrepareStore(self, request: Any, context: "grpc.ServicerContext") -> Any:
-        return self._dispatch("PrepareStore", request, context)
-
-    def CommitStore(self, request: Any, context: "grpc.ServicerContext") -> Any:
-        return self._dispatch("CommitStore", request, context)
-
-    def PrepareRetrieve(self, request: Any, context: "grpc.ServicerContext") -> Any:
-        return self._dispatch("PrepareRetrieve", request, context)
-
-    def CommitRetrieve(self, request: Any, context: "grpc.ServicerContext") -> Any:
-        return self._dispatch("CommitRetrieve", request, context)
-
-    def Clear(self, request: Any, context: "grpc.ServicerContext") -> Any:
-        return self._dispatch("Clear", request, context)
-
-    def GetChunkSize(self, request: Any, context: "grpc.ServicerContext") -> Any:
-        return self._dispatch("GetChunkSize", request, context)
-
-    def GetExperimental(self, request: Any, context: "grpc.ServicerContext") -> Any:
-        return self._dispatch("GetExperimental", request, context)
-
-    def Ping(self, request: Any, context: "grpc.ServicerContext") -> Any:
-        return self._dispatch("Ping", request, context)
-
-    def ReportBlockAllocation(
-        self, request: Any, context: "grpc.ServicerContext"
-    ) -> Any:
-        return self._dispatch("ReportBlockAllocation", request, context)
-
-    def Noop(self, request: Any, context: "grpc.ServicerContext") -> Any:
-        return self._dispatch("Noop", request, context)
-
-    def CbRegisterRope(self, request: Any, context: "grpc.ServicerContext") -> Any:
-        return self._dispatch("CbRegisterRope", request, context)
-
-    def CbUnregisterRope(self, request: Any, context: "grpc.ServicerContext") -> Any:
-        return self._dispatch("CbUnregisterRope", request, context)
-
-    def CbRetrievePreComputed(
-        self, request: Any, context: "grpc.ServicerContext"
-    ) -> Any:
-        return self._dispatch("CbRetrievePreComputed", request, context)
-
-    def CbUnifiedLookup(self, request: Any, context: "grpc.ServicerContext") -> Any:
-        return self._dispatch("CbUnifiedLookup", request, context)
-
-    def P2PLookupAndLock(self, request: Any, context: "grpc.ServicerContext") -> Any:
-        return self._dispatch("P2PLookupAndLock", request, context)
-
-    def P2PQueryLookupResults(
-        self, request: Any, context: "grpc.ServicerContext"
-    ) -> Any:
-        return self._dispatch("P2PQueryLookupResults", request, context)
-
-    def P2PUnlockObjects(self, request: Any, context: "grpc.ServicerContext") -> Any:
-        return self._dispatch("P2PUnlockObjects", request, context)
+        return rpc_method
 
 
 # ---------------------------------------------------------------------------
