@@ -118,10 +118,9 @@ def try_get_vllm_kv_cache_layout(
         return None
 
     kv_layout = translate_vllm_kv_cache_layout(get_kv_cache_layout())
-    # Before vllm#51718, the CPU attention backend allocated the layer-compact
-    # layout as HND while the legacy helper could still report NHD. Normalize
-    # that version-specific compatibility issue at the vLLM boundary so an
-    # explicit layout hint is always the physical layout LMCache should trust.
+    # Legacy vLLM could report NHD on CPU even though the CPU attention backend
+    # physically allocated [B, H, N, C] (HND). Post-vllm#51718 layouts are
+    # returned from CacheConfig above, so normalize only this legacy fallback.
     if torch_device_type == "cpu" and kv_layout in ("NHD", "HND"):
         return "HND"
     return kv_layout
