@@ -262,6 +262,7 @@ class AttentionSpec:
     """Double for vLLM's AttentionSpec base; detection is by class name."""
 
     block_size: int
+    dcp_replicated: bool = False
 
 
 @dataclass
@@ -295,6 +296,12 @@ def test_mamba_group_never_scaled():
     spec = _FakeMambaSpec(block_size=1024)
     assert get_tokens_per_block(spec, 2) == 1024
     assert get_tokens_per_block(spec, 8) == 1024
+
+
+def test_dcp_replicated_attention_group_never_scaled():
+    """Replicated DFlash draft KV keeps ordinary DCP1 block coordinates."""
+    spec = FullAttentionSpec(block_size=16, dcp_replicated=True)
+    assert get_tokens_per_block(spec, 4) == 16
 
 
 def test_dcp_one_is_identity_for_every_spec_type():
@@ -398,20 +405,25 @@ def test_mamba_alignment_uses_resolved_page_not_cli_block_size():
 
 @requires_vllm
 @pytest.mark.parametrize(
-    ("kv_layout", "expected_shape"),
-    [
-        ("BLHNC", (3, 1, 4, 4)),
-        ("BLNHC", (3, 4, 1, 4)),
-    ],
+    "kv_layout",
+    ["BLHNC", "BLNHC"],
 )
 def test_mamba_unified_view_preserves_blocks_first_pool_stride(
-    kv_layout: Literal["BLHNC", "BLNHC"], expected_shape: tuple[int, ...]
+    kv_layout: Literal["BLHNC", "BLNHC"],
 ):
-    """Jovian's shared blocks-first pool remains a zero-copy strided view."""
+    """Jovian Mamba pages use the padded-stride-capable opaque format."""
+    # Third Party
+    from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec
+    from vllm.v1.kv_cache_interface import MambaSpec as VllmMambaSpec
+
     # First Party
     from lmcache.integration.vllm.kv_cache_group_edits import (
-        _MambaUnifiedViewEdit,
+        apply_kv_cache_group_edits,
     )
+    from lmcache.v1.gpu_connector.utils import (
+        resolve_block_stride_and_log_layout,
+    )
+    import lmcache.lmcache_native as lmcache_native
 
     num_blocks, num_layers, row, page_elems = 3, 2, 13, 16
     pool = torch.arange(num_blocks * num_layers * page_elems, dtype=torch.float32)
@@ -420,13 +432,194 @@ def test_mamba_unified_view_preserves_blocks_first_pool_stride(
         (num_layers * page_elems, row, row, 1),
         storage_offset=page_elems,
     )
-    spec = SimpleNamespace(block_size=4, page_size_bytes=64)
+    spec = VllmMambaSpec(
+        block_size=4,
+        shapes=((row,),),
+        dtypes=(torch.float32,),
+        page_size_padded=page_elems * torch.float32.itemsize,
+        mamba_cache_mode="align",
+    )
+    kv_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["mamba"], spec)],
+        kv_cache_layout=kv_layout,
+    )
 
-    edited = _MambaUnifiedViewEdit().apply(spec, layer, {"kv_layout": kv_layout})
+    edited = apply_kv_cache_group_edits(
+        kv_config,
+        {"mamba": layer},
+        {"kv_layout": kv_layout},
+    )["mamba"]
 
-    assert edited.shape == expected_shape
+    assert isinstance(edited, torch.Tensor)
+    assert edited.shape == (3, 4, 4)
+    assert edited.stride() == (num_layers * page_elems, 4, 1)
     assert edited.stride(0) == num_layers * page_elems
     assert edited.data_ptr() == layer.data_ptr()
+    assert (
+        resolve_block_stride_and_log_layout(
+            [edited],
+            lmcache_native.EngineKVFormat.NL_X_NB_BS_HS,
+            layer_idx=0,
+            group_idx=0,
+        )
+        == num_layers * page_elems
+    )
+
+
+@requires_vllm
+@pytest.mark.parametrize(
+    ("kv_layout", "target_shape", "target_strides"),
+    [
+        ("BLHNC", (3, 1, 4, 8), (80, 32, 8, 1)),
+        ("BLNHC", (3, 4, 1, 8), (80, 8, 32, 1)),
+    ],
+)
+def test_padded_attention_page_views_preserve_hma_block_padding(
+    kv_layout: Literal["BLHNC", "BLNHC"],
+    target_shape: tuple[int, ...],
+    target_strides: tuple[int, ...],
+):
+    """Jovian HMA MLA and DFlash pages become padded rank-3 tensors."""
+    # Third Party
+    from vllm.v1.kv_cache_interface import (
+        FullAttentionSpec,
+        KVCacheConfig,
+        KVCacheGroupSpec,
+    )
+    from vllm.v1.kv_cache_interface import MambaSpec as VllmMambaSpec
+    from vllm.v1.kv_cache_interface import (
+        MLAAttentionSpec,
+    )
+
+    # First Party
+    from lmcache.integration.vllm.kv_cache_group_edits import (
+        apply_kv_cache_group_edits,
+    )
+    from lmcache.v1.gpu_connector.utils import (
+        resolve_block_stride_and_log_layout,
+    )
+    import lmcache.lmcache_native as lmcache_native
+
+    target_pool = torch.arange(3 * 80, dtype=torch.uint8)
+    target = target_pool.as_strided(target_shape, target_strides)
+    draft_shape = (*target_shape[:-1], 16)
+    if kv_layout == "BLHNC":
+        draft_strides = (96, 64, 16, 1)
+    else:
+        draft_strides = (96, 16, 64, 1)
+    draft_pool = torch.arange(3 * 96, dtype=torch.uint8)
+    draft = draft_pool.as_strided(draft_shape, draft_strides)
+    if kv_layout == "BLHNC":
+        dflash_shape = (3, 2, 4, 16)
+        dflash_strides = (160, 64, 16, 1)
+    else:
+        dflash_shape = (3, 4, 2, 16)
+        dflash_strides = (160, 32, 16, 1)
+    dflash_pool = torch.arange(3 * 160, dtype=torch.uint8)
+    dflash = dflash_pool.as_strided(dflash_shape, dflash_strides)
+    plain_strides = (64, 64, 16, 1) if kv_layout == "BLHNC" else (64, 16, 64, 1)
+    plain_pool = torch.arange(3 * 64, dtype=torch.uint8)
+    plain = plain_pool.as_strided(draft_shape, plain_strides)
+    mamba_pool = torch.arange(3 * 32, dtype=torch.float32)
+    mamba = mamba_pool.as_strided((3, 1, 1, 13), (32, 13, 13, 1))
+    mla_spec = MLAAttentionSpec(
+        block_size=4,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.uint8,
+    )
+    mamba_spec = VllmMambaSpec(
+        block_size=4,
+        shapes=((13,),),
+        dtypes=(torch.float32,),
+        page_size_padded=64,
+        mamba_cache_mode="align",
+    )
+    draft_spec = FullAttentionSpec(
+        block_size=4,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.uint8,
+    )
+    dflash_spec = FullAttentionSpec(
+        block_size=8,
+        num_kv_heads=2,
+        head_size=4,
+        dtype=torch.uint8,
+    )
+    kv_config = KVCacheConfig(
+        num_blocks=3,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["target"], mla_spec),
+            KVCacheGroupSpec(["draft"], draft_spec),
+            KVCacheGroupSpec(["dflash"], dflash_spec),
+            KVCacheGroupSpec(["plain"], draft_spec),
+            KVCacheGroupSpec(["mamba"], mamba_spec),
+        ],
+        kv_cache_layout=kv_layout,
+    )
+
+    edited_caches = apply_kv_cache_group_edits(
+        kv_config,
+        {
+            "target": target,
+            "draft": draft,
+            "dflash": dflash,
+            "plain": plain,
+            "mamba": mamba,
+        },
+        {"kv_layout": kv_layout},
+    )
+    edited = edited_caches["target"]
+    edited_draft = edited_caches["draft"]
+    edited_dflash = edited_caches["dflash"]
+
+    assert isinstance(edited, torch.Tensor)
+    assert edited.shape == (3, 4, 8)
+    assert edited.stride() == (80, 8, 1)
+    assert edited.data_ptr() == target.data_ptr()
+    assert torch.equal(edited[1].reshape(-1), target[1].reshape(-1))
+    assert isinstance(edited_draft, torch.Tensor)
+    assert edited_draft.shape == (3, 4, 16)
+    assert edited_draft.stride() == (96, 16, 1)
+    assert edited_draft.data_ptr() == draft.data_ptr()
+    assert torch.equal(edited_draft[1].reshape(-1), draft[1].reshape(-1))
+    assert isinstance(edited_dflash, torch.Tensor)
+    assert edited_dflash.shape == (3, 8, 16)
+    assert edited_dflash.stride() == (160, 16, 1)
+    assert edited_dflash.data_ptr() == dflash.data_ptr()
+    assert torch.equal(edited_dflash[1].reshape(-1), dflash[1].reshape(-1))
+    assert edited_caches["plain"] is plain
+    assert (
+        resolve_block_stride_and_log_layout(
+            [edited],
+            lmcache_native.EngineKVFormat.NL_X_NB_BS_HS,
+            layer_idx=0,
+            group_idx=0,
+        )
+        == 80
+    )
+    assert (
+        resolve_block_stride_and_log_layout(
+            [edited_draft],
+            lmcache_native.EngineKVFormat.NL_X_NB_BS_HS,
+            layer_idx=0,
+            group_idx=1,
+        )
+        == 96
+    )
+    assert (
+        resolve_block_stride_and_log_layout(
+            [edited_dflash],
+            lmcache_native.EngineKVFormat.NL_X_NB_BS_HS,
+            layer_idx=0,
+            group_idx=2,
+        )
+        == 160
+    )
 
 
 @requires_vllm
@@ -622,6 +815,16 @@ def test_uniform_type_wrapper_still_scales_under_dcp():
     )
     assert get_tokens_per_block(wrapped, 2) == 2048
     assert get_tokens_per_block(wrapped, 1) == 1024
+
+
+def test_uniform_type_wrapper_of_replicated_attention_is_not_scaled():
+    """Wrapped DFlash leaves retain replicated block coordinates."""
+    inner = FullAttentionSpec(block_size=16, dcp_replicated=True)
+    wrapped = UniformTypeKVCacheSpecs(
+        block_size=16,
+        kv_cache_specs={"draft.0": inner, "draft.1": inner},
+    )
+    assert get_tokens_per_block(wrapped, 4) == 16
 
 
 def test_uniform_type_wrapper_of_mamba_is_not_scaled():

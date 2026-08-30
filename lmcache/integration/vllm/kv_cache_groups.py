@@ -32,17 +32,32 @@ def _is_attention_spec(spec: Any) -> bool:
     return any(cls.__name__ == "AttentionSpec" for cls in type(spec).__mro__)
 
 
+def _is_dcp_replicated_spec(spec: Any) -> bool:
+    """Return whether every layer represented by ``spec`` is DCP-replicated.
+
+    DFlash draft attention marks its cache spec ``dcp_replicated=True``: every
+    DCP rank stores the complete sequence, so one block ID still covers only
+    ``block_size`` tokens. ``UniformTypeKVCacheSpecs`` may wrap those leaf
+    specs; inspect the leaves directly instead of relying on a vLLM-version-
+    specific convenience property on the wrapper.
+    """
+    inner = getattr(spec, "kv_cache_specs", None)
+    specs = list(inner.values()) if isinstance(inner, dict) else [spec]
+    return bool(specs) and all(getattr(leaf, "dcp_replicated", False) for leaf in specs)
+
+
 def get_tokens_per_block(kv_cache_spec: Any, dcp_size: int) -> int:
     """Global tokens covered by one block id of ``kv_cache_spec``.
 
     Attention blocks span ``block_size * dcp_size`` tokens under DCP
-    (vLLM's ``resolve_kv_cache_block_sizes`` rule); recurrent state is
-    replicated, not sharded, and stays at ``block_size``.
+    (vLLM's ``resolve_kv_cache_block_sizes`` rule), except attention specs
+    explicitly marked ``dcp_replicated`` (e.g. DFlash draft KV). Replicated
+    attention and recurrent state both stay at ``block_size``.
     """
     block_size = kv_cache_spec.block_size
     if dcp_size <= 1:
         return block_size
-    if _is_attention_spec(kv_cache_spec):
+    if _is_attention_spec(kv_cache_spec) and not _is_dcp_replicated_spec(kv_cache_spec):
         return block_size * dcp_size
     return block_size
 

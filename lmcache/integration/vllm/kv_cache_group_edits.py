@@ -374,9 +374,14 @@ class _SubpagedAttentionViewEdit(KVCacheGroupEdit):
 
 
 class _MambaUnifiedViewEdit(KVCacheGroupEdit):
-    """Re-view mamba's unified state as a per-token paged tensor.
+    """Re-view Mamba's unified state as an opaque rank-3 page tensor.
 
     For vLLM >= 0.26.0, where the unified KV cache layout is implemented.
+
+    Rank 3 deliberately selects LMCache's ``NL_X_NB_BS_HS`` format: it is the
+    block-axis format whose transfer path carries the authoritative dim-0
+    stride. This is required for vLLM's blocks-first HMA pools, where sibling
+    layer pages pad the gap between consecutive blocks.
     """
 
     name = "mamba-unified-view"
@@ -395,7 +400,7 @@ class _MambaUnifiedViewEdit(KVCacheGroupEdit):
         self,
         spec: KVCacheSpec,
         kv_cache: RegisteredKVCache,
-        layout_hints: LayoutHints,
+        _layout_hints: LayoutHints,
     ) -> torch.Tensor:
         """Re-view the per-block state row as block_size tokens.
 
@@ -404,12 +409,10 @@ class _MambaUnifiedViewEdit(KVCacheGroupEdit):
         padding, and any sibling layers on a shared pool, live between
         row and S).
 
-        Output for NHD/BLNHC: [num_blocks, block_size, 1, head_size]
-        with strides (S, head_size, head_size, 1). HND/BLHNC swaps dims
-        1 and 2: [num_blocks, 1, block_size, head_size] with strides
-        (S, block_size * head_size, head_size, 1). Blocks-first layouts
-        preserve the input's block stride so it can continue spanning
-        sibling layers and object groups in the shared pool.
+        Output: [num_blocks, block_size, head_size] with strides
+        (S, head_size, 1). The rank-3 opaque format preserves the input's
+        block stride so it can continue spanning sibling layers and object
+        groups in the shared pool.
 
         head_size = ceil(row / block_size), rounded up to the kernels'
         vector alignment, and block_size * head_size may exceed the row
@@ -419,11 +422,10 @@ class _MambaUnifiedViewEdit(KVCacheGroupEdit):
         assert isinstance(kv_cache, torch.Tensor), (
             "single-layer KV cache must be a torch.Tensor"
         )
-        kv_layout = layout_hints.get("kv_layout", "none")
-        if kv_layout not in ("NHD", "HND", "BLHNC", "BLNHC"):
+        if tuple(kv_cache.shape[1:3]) != (1, 1):
             raise ValueError(
-                f"Unsupported kv_layout: {kv_layout}. Expected NHD, HND, "
-                "BLHNC, or BLNHC."
+                "unified Mamba cache must have singleton head and token axes, "
+                f"got shape {tuple(kv_cache.shape)}"
             )
         num_blocks = kv_cache.shape[0]
         row = kv_cache[0].numel()
@@ -450,14 +452,63 @@ class _MambaUnifiedViewEdit(KVCacheGroupEdit):
                 f"cannot tile a {row}-element state row into {block_size} "
                 f"aligned tokens within the {page_bytes}-byte page"
             )
-        if kv_layout in ("NHD", "BLNHC"):
-            inner = (block_size, 1, head_size)
-            inner_strides = (head_size, head_size, 1)
-        else:
-            inner = (1, block_size, head_size)
-            inner_strides = (block_size * head_size, head_size, 1)
         return kv_cache.as_strided(
-            (num_blocks, *inner), (kv_cache.stride(0), *inner_strides)
+            (num_blocks, block_size, head_size),
+            (kv_cache.stride(0), head_size, 1),
+        )
+
+
+class _PaddedAttentionPageViewEdit(KVCacheGroupEdit):
+    """Canonicalize a padded attention layer as an opaque rank-3 page.
+
+    Current vLLM HMA layouts expose MLA as ``[B, H=1, N, C]`` and a replicated
+    DFlash page as e.g. ``[B, H=2, N=16, C=256]``. In both cases the inner page
+    is tightly packed, while sibling pages create a gap between dim-0 rows.
+    LMCache's opaque ``[B, N, C]`` format supports that authoritative padded
+    block stride. Re-factoring all inner page elements over the engine's
+    logical block size is a zero-copy view and preserves every payload byte;
+    the resulting dimensions are addressing metadata, not semantic K/V axes.
+    """
+
+    name = "padded-attention-page-view"
+
+    def matches(self, spec: KVCacheSpec, kv_cache: RegisteredKVCache) -> bool:
+        kind = get_kv_cache_spec_kind(spec)
+        return (
+            (
+                kind == KVCacheSpecKind.MLA_ATTENTION
+                or kind in _SUBPAGEABLE_ATTENTION_KINDS
+            )
+            and not _declares_slot_compression(spec)
+            and isinstance(kv_cache, torch.Tensor)
+            and kv_cache.ndim == 4
+            and kv_cache[0].is_contiguous()
+            and kv_cache.stride(0) > kv_cache.shape[1:].numel()
+        )
+
+    def apply(
+        self,
+        spec: KVCacheSpec,
+        kv_cache: RegisteredKVCache,
+        _layout_hints: LayoutHints,
+    ) -> torch.Tensor:
+        """Return a padded-stride-preserving opaque ``[B, BS, HS]`` view.
+
+        Raises:
+            ValueError: If one physical page cannot be factored evenly over
+                the engine's logical block size.
+        """
+        assert isinstance(kv_cache, torch.Tensor)
+        page_elems = kv_cache.shape[1:].numel()
+        if page_elems % spec.block_size:
+            raise ValueError(
+                f"a {page_elems}-element attention page cannot be factored "
+                f"over block_size={spec.block_size}"
+            )
+        hidden_size = page_elems // spec.block_size
+        return kv_cache.as_strided(
+            (kv_cache.shape[0], spec.block_size, hidden_size),
+            (kv_cache.stride(0), hidden_size, 1),
         )
 
 
@@ -536,6 +587,7 @@ class _SubpagedMLAAttentionViewEdit(KVCacheGroupEdit):
 _EDITS: tuple[KVCacheGroupEdit, ...] = (
     _MambaUnifiedViewEdit(),
     _MambaPageViewEdit(),
+    _PaddedAttentionPageViewEdit(),
     _SubpagedMLAAttentionViewEdit(),
     _SubpagedAttentionViewEdit(),
 )
