@@ -38,6 +38,9 @@ from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import (
     MockL2Adapter,
     MockL2AdapterConfig,
 )
+from lmcache.v1.distributed.storage_controllers import (
+    prefetch_controller as prefetch_controller_module,
+)
 from lmcache.v1.distributed.storage_controllers.prefetch_controller import (
     PrefetchController,
     build_trim_mask,
@@ -367,7 +370,7 @@ class TestSingleAdapterPrefetch:
         ctrl.stop()
         adapter.close()
 
-    def test_fault_inject_load_gap_segmented_vs_prefix(self, l1_manager):
+    def test_fault_inject_load_gap_segmented_vs_prefix(self, l1_manager, monkeypatch):
         """fault_inject (load fails at index 2) drives the segmented path.
 
         Lookup reports all 5 keys present; the *load* of index 2 fails (the L2
@@ -375,6 +378,14 @@ class TestSingleAdapterPrefetch:
         post-gap keys {0,1,3,4}; PREFIX truncates at the hole to {0,1}. Distinct
         key ranges per policy keep the shared L1 from serving the second pass.
         """
+        warning_messages: list[str] = []
+
+        def capture_warning(message, *args, **_kwargs):
+            warning_messages.append(message % args)
+
+        monkeypatch.setattr(
+            prefetch_controller_module.logger, "warning", capture_warning
+        )
         layout = make_layout()
         for base, trim, expected in (
             (0, TrimPolicy.SEGMENTED_PREFIX, [0, 1, 3, 4]),
@@ -407,6 +418,11 @@ class TestSingleAdapterPrefetch:
                 l1_manager.finish_read(held)
             ctrl.stop()
             fault.close()
+
+        assert any(
+            "1/5 plan keys failed to load from L2" in message and "sample:" in message
+            for message in warning_messages
+        )
 
     def test_key0_missing(self, l1_manager):
         """L2 has keys {1,2,3} but not 0 → prefix = 0, nothing loaded."""
