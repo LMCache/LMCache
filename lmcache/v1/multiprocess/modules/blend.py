@@ -37,6 +37,7 @@ from lmcache.v1.distributed.api import (
 from lmcache.v1.distributed.bitmap_ops.fold import fold_unfold_ranked
 from lmcache.v1.distributed.storage_manager import PrefetchHandle
 from lmcache.v1.gpu_connector.gpu_ops import lmcache_memcpy_async_h2d
+from lmcache.v1.gpu_connector.kv_format import get_spec_class
 from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.mp_coordinator.blend_client import PENDING
 from lmcache.v1.mp_observability.event import Event, EventType
@@ -576,17 +577,12 @@ def _cb_group_rope_geometry(
             "(2), fused-packed K/V, key-only (1), and declared-MLA "
             "layouts are supported."
         )
-    _ekf = getattr(group, "engine_kv_format", None)
-    # Both spellings of blocks-first fused K/V must be recognised. The vLLM
-    # detector used to split the trailing 2*head_size axis and report
-    # *_TWO_HS; it now keeps the tensor raw and reports *_CS. Matching only
-    # *_TWO_HS leaves fused_packed False on current vLLM, which halves
-    # per_head, doubles n_heads, and re-RoPEs across the V plane.
-    fused_packed = _ekf is not None and int(_ekf) in (
-        int(lmcache_native.EngineKVFormat.NL_X_NB_NH_BS_TWO_HS),
-        int(lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_TWO_HS),
-        int(lmcache_native.EngineKVFormat.NL_X_NB_NH_BS_CS),
-        int(lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_CS),
+    # Use the spec fact, not a format list: a missed fused format is treated
+    # as split K/V and the V half of every head gets re-RoPE'd.
+    engine_kv_format = getattr(group, "engine_kv_format", None)
+    fused_packed = (
+        engine_kv_format is not None
+        and get_spec_class(engine_kv_format).is_fused_packed
     )
     per_head = head_size * (2 if fused_packed else 1)
     n_heads = hidden_dim // per_head

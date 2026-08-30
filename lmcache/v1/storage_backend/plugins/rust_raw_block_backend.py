@@ -606,7 +606,6 @@ class RustRawBlockBackend(StoragePluginInterface):
             load_results = self._core.load_many_into(
                 [spec.encoded for spec in load_specs],
                 allocated,
-                raise_on_error=True,
             )
             loaded_count = 0
             for ok in load_results:
@@ -645,7 +644,6 @@ class RustRawBlockBackend(StoragePluginInterface):
 
         Raises:
             RuntimeError: If the local CPU allocator backend is unavailable.
-            Exception: Propagates raw-device load failures from the core.
         """
         if not keys:
             return []
@@ -694,7 +692,6 @@ class RustRawBlockBackend(StoragePluginInterface):
 
         Raises:
             RuntimeError: If the local CPU allocator backend is unavailable.
-            Exception: Propagates raw-device load failures from the core.
         """
         del lookup_id, transfer_spec
         return await asyncio.to_thread(self._batched_get_prefix, keys)
