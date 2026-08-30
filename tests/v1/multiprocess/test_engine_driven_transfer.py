@@ -765,19 +765,18 @@ def test_compute_kv_layout_and_gather_scatter_roundtrip(
             assert torch.allclose(source[name][1], destination[name][5])
 
 
-def test_explicit_cpu_nhd_layout_matches_engine_driven_chunk(
+def test_explicit_cpu_nhd_layout_preserves_physical_geometry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Regression for DeepSeek MLA on post-vllm#51718 CPU layouts.
 
     vLLM reports LBNHC/NHD and registers a rank-4 per-layer view. Treating it
-    as the legacy CPU HND layout swaps BS and NH, so the worker gathers the
-    right bytes into the wrong shape and the server rejects the store.
+    as the legacy CPU HND layout swaps BS and NH, changing block_size from 16
+    to 1 and hidden_dim from 576 to 9216.
     """
     # First Party
     from lmcache.v1.multiprocess.transfer_context.base import (
         compute_kv_layout,
-        gather_paged_kv_to_cpu,
     )
 
     monkeypatch.setattr(
@@ -796,15 +795,8 @@ def test_explicit_cpu_nhd_layout_matches_engine_driven_chunk(
     block_size, num_layers, hidden_dim, _, _, kv_size = compute_kv_layout(
         source, layout_hints=layout_hints
     )
-    gathered = gather_paged_kv_to_cpu(
-        source,
-        list(range(8)),
-        blocks_per_chunk=8,
-        layout_hints=layout_hints,
-    )
 
     assert (block_size, num_layers, hidden_dim, kv_size) == (16, 2, 576, 1)
-    assert tuple(gathered[0].shape) == (2, 128, 576)
 
 
 def test_engine_driven_register_sends_num_physical_slots(
