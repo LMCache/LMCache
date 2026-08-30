@@ -10,6 +10,7 @@
 #include "mp_mem_kernels_common.cuh"
 #include "mp_mem_kernels_layerwise.cuh"
 
+#include <array>
 #include <cstring>
 
 namespace {
@@ -44,6 +45,105 @@ __global__ void multi_layer_block_transfer_kernel_layerwise(
       shape_desc, lmcache_chunk_size);
 }
 
+// Upper bound on LMCache objects per layer-wise launch.  The pointer array is
+// far too large for kernel parameter space, so it is staged through pinned
+// host memory and uploaded to the device.
+constexpr int kMaxObjects = 1024;
+
+// Independent staging slots kept per thread.  One slot is occupied per
+// distinct pointer array, so this need only cover the number of kernel groups
+// a thread interleaves -- in practice one or two.
+constexpr int kUploadSlots = 4;
+
+// Uploads num_objects LMCache object pointers and returns their device address.
+//
+// The host side of an in-flight cudaMemcpyAsync must not be rewritten before
+// the copy actually runs, and nothing on this path synchronises with the
+// stream.  A single shared staging buffer would therefore let one launch
+// overwrite pointers that an earlier launch has queued but not yet copied.
+// Slots are handed out per distinct pointer array instead: a kernel group's
+// staging-slot pointers are identical for every layer, so repeat launches find
+// their array already resident, reuse that slot and upload nothing, while a
+// different kernel group lands in a slot of its own.  Wrapping past
+// kUploadSlots distinct arrays waits on that slot's previous upload, so
+// correctness never depends on the host staying behind the device.
+int64_t* upload_object_ptrs(const int64_t* lmcache_objects_ptrs,
+                            int num_objects, const torch::Device& device,
+                            cudaStream_t stream) {
+  TORCH_CHECK(num_objects <= kMaxObjects, "Layerwise path supports at most ",
+              kMaxObjects, " objects, got ", num_objects);
+
+  static thread_local int64_t* pinned_host_ptr = nullptr;
+  static thread_local torch::Tensor dev_buf_tensor;
+  static thread_local int dev_buf_device_index = -1;
+  static thread_local std::array<cudaEvent_t, kUploadSlots> slot_uploaded{};
+  static thread_local std::array<cudaStream_t, kUploadSlots> slot_stream{};
+  static thread_local std::array<int, kUploadSlots> slot_len{};
+  static thread_local int next_slot = 0;
+
+  const size_t nbytes = static_cast<size_t>(num_objects) * sizeof(int64_t);
+
+  // One-time allocation of the pinned host buffer and the per-slot events.
+  if (!pinned_host_ptr) {
+    auto err = cudaHostAlloc(
+        reinterpret_cast<void**>(&pinned_host_ptr),
+        static_cast<size_t>(kMaxObjects) * kUploadSlots * sizeof(int64_t),
+        cudaHostAllocDefault);
+    TORCH_CHECK(err == cudaSuccess,
+                "cudaHostAlloc failed: ", cudaGetErrorString(err));
+    for (int i = 0; i < kUploadSlots; ++i) {
+      err = cudaEventCreateWithFlags(&slot_uploaded[i], cudaEventDisableTiming);
+      TORCH_CHECK(err == cudaSuccess,
+                  "cudaEventCreateWithFlags failed: ", cudaGetErrorString(err));
+    }
+  }
+
+  // One-time allocation of the device buffer (or on device change).  Resident
+  // copies do not survive the reallocation, so the slot state is dropped.
+  if (dev_buf_device_index != device.index()) {
+    dev_buf_tensor = torch::empty(
+        {static_cast<int64_t>(kMaxObjects) * kUploadSlots},
+        torch::TensorOptions().dtype(torch::kInt64).device(device));
+    dev_buf_device_index = device.index();
+    slot_len.fill(0);
+    next_slot = 0;
+  }
+
+  int64_t* dev_base = static_cast<int64_t*>(dev_buf_tensor.data_ptr());
+
+  // Already resident from an earlier launch on this stream: reuse it and skip
+  // the upload entirely.  Same stream, so the earlier copy is ordered ahead of
+  // the kernel about to be launched.  A longer resident array also serves a
+  // shorter one, since the kernel only reads the first num_objects entries --
+  // that is the trailing partial pass of a chunk sweep, whose pointers are a
+  // prefix of the full passes before it.
+  for (int i = 0; i < kUploadSlots; ++i) {
+    if (slot_len[i] >= num_objects && slot_stream[i] == stream &&
+        std::memcmp(pinned_host_ptr + static_cast<size_t>(i) * kMaxObjects,
+                    lmcache_objects_ptrs, nbytes) == 0) {
+      return dev_base + static_cast<size_t>(i) * kMaxObjects;
+    }
+  }
+
+  const int slot = next_slot;
+  next_slot = (next_slot + 1) % kUploadSlots;
+  if (slot_len[slot] != 0) {
+    // Reclaiming a slot: its previous upload must have drained the host side
+    // before we overwrite it.
+    cudaEventSynchronize(slot_uploaded[slot]);
+  }
+
+  int64_t* host_slot =
+      pinned_host_ptr + static_cast<size_t>(slot) * kMaxObjects;
+  int64_t* dev_slot = dev_base + static_cast<size_t>(slot) * kMaxObjects;
+  std::memcpy(host_slot, lmcache_objects_ptrs, nbytes);
+  cudaMemcpyAsync(dev_slot, host_slot, nbytes, cudaMemcpyHostToDevice, stream);
+  cudaEventRecord(slot_uploaded[slot], stream);
+  slot_stream[slot] = stream;
+  slot_len[slot] = num_objects;
+  return dev_slot;
+}
+
 template <typename ScalarType>
 void multi_layer_block_kv_transfer_layerwise_templated(
     const torch::Tensor& paged_buffer_ptrs_tensor,
@@ -75,48 +175,9 @@ void multi_layer_block_kv_transfer_layerwise_templated(
   const dim3 block = launch_cfg.block;
   const dim3 grid = launch_cfg.grid;
 
-  // Per-layer path: reusable pinned+device buffer for pointer upload.
-  // Avoids per-launch torch::empty (caching allocator overhead) and
-  // pageable copy_ (which forces a CPU-blocking bounce buffer in the
-  // CUDA driver).  Fixed 1024-element buffers (8 KB each) are allocated
-  // once on first use and reused forever; the pinned→device copy is
-  // truly async with zero CPU stall.
-  static constexpr int kMaxObjects = 1024;
-  static thread_local int64_t* pinned_host_ptr = nullptr;
-  static thread_local torch::Tensor dev_buf_tensor;
-  static thread_local int dev_buf_device_index = -1;
+  ScalarType** lmcache_ptrs_dev = reinterpret_cast<ScalarType**>(
+      upload_object_ptrs(lmcache_objects_ptrs, num_objects, device, stream));
 
-  TORCH_CHECK(num_objects <= kMaxObjects, "Layerwise path supports at most ",
-              kMaxObjects, " objects, got ", num_objects);
-
-  const int dev_idx = device.index();
-
-  // One-time allocation of pinned host buffer
-  if (!pinned_host_ptr) {
-    auto err =
-        cudaHostAlloc(reinterpret_cast<void**>(&pinned_host_ptr),
-                      kMaxObjects * sizeof(int64_t), cudaHostAllocDefault);
-    TORCH_CHECK(err == cudaSuccess,
-                "cudaHostAlloc failed: ", cudaGetErrorString(err));
-  }
-
-  // One-time allocation of device buffer (or on device change)
-  if (dev_buf_device_index != dev_idx) {
-    dev_buf_tensor = torch::empty(
-        {kMaxObjects},
-        torch::TensorOptions().dtype(torch::kInt64).device(device));
-    dev_buf_device_index = dev_idx;
-  }
-
-  // pinned staging → device (truly async, zero CPU stall)
-  std::memcpy(pinned_host_ptr, lmcache_objects_ptrs,
-              num_objects * sizeof(int64_t));
-  cudaMemcpyAsync(dev_buf_tensor.data_ptr(), pinned_host_ptr,
-                  num_objects * sizeof(int64_t), cudaMemcpyHostToDevice,
-                  stream);
-
-  ScalarType** lmcache_ptrs_dev =
-      reinterpret_cast<ScalarType**>(dev_buf_tensor.data_ptr());
   if (direction == TransferDirection::H2D) {
     DISPATCH_FORMAT(multi_layer_block_transfer_kernel_layerwise, true,
                     lmcache_ptrs_dev);
