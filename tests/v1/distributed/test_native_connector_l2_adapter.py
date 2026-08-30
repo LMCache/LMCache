@@ -10,6 +10,7 @@ C++ IStorageConnector interface, so no Redis or C++ build is needed.
 import ctypes
 import select
 import threading
+import time
 
 # Third Party
 import pytest
@@ -58,11 +59,18 @@ class MockNativeConnector:
         self._closed = False
         self.fail_set_keys: set[str] = set()
         self.report_set_per_key_results = False
+        self.suppress_set_completion = False
+        self.raise_set_submit = False
+        self._suppressed_set_completions: list[
+            tuple[int, bool, str, list[bool] | None]
+        ] = []
 
     def event_fd(self) -> int:
         return self._efd.fileno()
 
     def submit_batch_set(self, keys: list[str], memoryviews: list) -> int:
+        if self.raise_set_submit:
+            raise RuntimeError("injected submit failure")
         with self._lock:
             fid = self._next_id
             self._next_id += 1
@@ -76,16 +84,26 @@ class MockNativeConnector:
                 self._store[key] = bytes(mv)
                 results.append(True)
             ok = all(results)
-            self._push_completion(
+            completion = (
                 fid,
                 ok,
                 "" if ok else "injected set failure",
                 results if self.report_set_per_key_results else None,
             )
+            if self.suppress_set_completion:
+                self._suppressed_set_completions.append(completion)
+            else:
+                self._push_completion(*completion)
         except Exception as e:
             self._push_completion(fid, False, str(e), None)
 
         return fid
+
+    def complete_suppressed_sets(self) -> None:
+        completions = self._suppressed_set_completions
+        self._suppressed_set_completions = []
+        for completion in completions:
+            self._push_completion(*completion)
 
     def submit_batch_get(self, keys: list[str], memoryviews: list) -> int:
         with self._lock:
@@ -213,6 +231,14 @@ def adapter():
     mock_client = MockNativeConnector()
     adp = NativeConnectorL2Adapter(mock_client)
     yield adp
+    adp.close()
+
+
+@pytest.fixture
+def adapter_and_mock():
+    mock_client = MockNativeConnector()
+    adp = NativeConnectorL2Adapter(mock_client)
+    yield adp, mock_client
     adp.close()
 
 
@@ -1390,3 +1416,237 @@ class TestUsageTracking:
             _object_key_to_string(keys[0]),
             _object_key_to_string(keys[2]),
         }
+
+
+class _BlockingStoreListener:
+    def __init__(self):
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def on_l2_keys_stored(self, keys, sizes) -> None:
+        self.entered.set()
+        assert self.release.wait(timeout=5.0)
+
+
+def _wait_until(predicate, timeout: float = 5.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return predicate()
+
+
+class TestStoreObjectsSync:
+    def test_success_uses_private_completion(self, adapter):
+        keys = [create_object_key(i) for i in range(2)]
+        objects = [create_memory_obj(fill_value=float(i)) for i in range(2)]
+
+        ok, persisted, bytes_written = adapter.store_objects_sync(keys, objects)
+
+        assert ok is True
+        assert persisted == 2
+        assert bytes_written == sum(obj.get_size() for obj in objects)
+        assert adapter.get_usage().total_bytes_used == bytes_written
+        assert adapter.pop_completed_store_tasks() == {}
+
+    def test_partial_failure_accounts_only_persisted_keys(self, adapter_and_mock):
+        adapter, mock_client = adapter_and_mock
+        mock_client.report_set_per_key_results = True
+        keys = [create_object_key(i) for i in range(2)]
+        objects = [create_memory_obj(fill_value=float(i)) for i in range(2)]
+        mock_client.fail_set_keys = {_object_key_to_string(keys[1])}
+
+        ok, persisted, bytes_written = adapter.store_objects_sync(keys, objects)
+
+        assert ok is False
+        assert persisted == 1
+        assert bytes_written == objects[0].get_size()
+        assert adapter.get_usage().total_bytes_used == objects[0].get_size()
+
+    def test_batch_fallback_without_per_key_results(self, adapter_and_mock):
+        adapter, mock_client = adapter_and_mock
+        mock_client.report_set_per_key_results = False
+        keys = [create_object_key(i) for i in range(2)]
+        objects = [create_memory_obj(fill_value=float(i)) for i in range(2)]
+
+        assert adapter.store_objects_sync(keys, objects) == (
+            True,
+            2,
+            sum(obj.get_size() for obj in objects),
+        )
+
+    def test_restore_reports_transferred_bytes_without_double_accounting(self, adapter):
+        key = create_object_key(1)
+        obj = create_memory_obj(size=100)
+        assert adapter.store_objects_sync([key], [obj]) == (True, 1, obj.get_size())
+
+        assert adapter.store_objects_sync([key], [obj]) == (True, 1, obj.get_size())
+        assert adapter.get_usage().total_bytes_used == obj.get_size()
+
+    def test_validates_inputs(self, adapter):
+        with pytest.raises(ValueError, match="length mismatch"):
+            adapter.store_objects_sync([create_object_key(1)], [])
+        with pytest.raises(ValueError, match="timeout must be positive"):
+            adapter.store_objects_sync(
+                [create_object_key(1)], [create_memory_obj()], timeout=0
+            )
+        assert adapter.store_objects_sync([], []) == (True, 0, 0)
+
+    def test_timeout_retains_buffers_and_reservation_until_late_completion(self):
+        mock_client = MockNativeConnector()
+        mock_client.suppress_set_completion = True
+        obj = create_memory_obj(size=100)
+        adapter = NativeConnectorL2Adapter(
+            mock_client,
+            max_capacity_gb=obj.get_size() / (1024**3),
+        )
+        try:
+            result = adapter.store_objects_sync(
+                [create_object_key(1)], [obj], timeout=0.02
+            )
+
+            assert result == (False, 0, 0)
+            assert adapter.get_reserved_store_bytes() == obj.get_size()
+            with adapter._lock:
+                pending = next(iter(adapter._pending_store_sizes.values()))
+                assert pending.buffer_owners == [obj]
+
+            mock_client.complete_suppressed_sets()
+            assert _wait_until(lambda: adapter.get_reserved_store_bytes() == 0)
+            assert adapter.get_usage().total_bytes_used == obj.get_size()
+            assert adapter._pending_store_sizes == {}
+        finally:
+            adapter.close()
+
+    def test_completion_does_not_wait_for_observer(self, adapter):
+        listener = _BlockingStoreListener()
+        adapter.register_listener(listener)
+        result = []
+        worker = threading.Thread(
+            target=lambda: result.append(
+                adapter.store_objects_sync(
+                    [create_object_key(1)],
+                    [create_memory_obj()],
+                    timeout=0.05,
+                )
+            )
+        )
+        worker.start()
+        assert listener.entered.wait(timeout=5.0)
+        worker.join(timeout=0.5)
+        assert not worker.is_alive()
+        assert result[0][0] is True
+        assert adapter.get_usage().total_bytes_used == result[0][2]
+
+        listener.release.set()
+
+    def test_close_unblocks_waiter_and_releases_reservation(self):
+        mock_client = MockNativeConnector()
+        mock_client.suppress_set_completion = True
+        adapter = NativeConnectorL2Adapter(mock_client, max_capacity_gb=1)
+        result = []
+        worker = threading.Thread(
+            target=lambda: result.append(
+                adapter.store_objects_sync(
+                    [create_object_key(1)], [create_memory_obj()], timeout=10.0
+                )
+            )
+        )
+        worker.start()
+        assert _wait_until(lambda: adapter.get_reserved_store_bytes() > 0)
+
+        adapter.close()
+        worker.join(timeout=5.0)
+
+        assert not worker.is_alive()
+        assert result == [(False, 0, 0)]
+        assert adapter.get_reserved_store_bytes() == 0
+
+
+class TestStoreCapacityReservation:
+    def test_inflight_stores_cannot_exceed_capacity(self):
+        mock_client = MockNativeConnector()
+        mock_client.suppress_set_completion = True
+        capacity = 800
+        adapter = NativeConnectorL2Adapter(
+            mock_client,
+            max_capacity_gb=capacity / (1024**3),
+        )
+        try:
+            obj = create_memory_obj(size=100)  # 400 bytes
+            first = adapter.submit_store_task([create_object_key(1)], [obj])
+            second = adapter.submit_store_task([create_object_key(2)], [obj])
+            rejected = adapter.submit_store_task([create_object_key(3)], [obj])
+
+            assert first != second != rejected
+            assert adapter.get_reserved_store_bytes() == capacity
+            assert wait_for_event_fd(adapter.get_store_event_fd(), timeout=1.0)
+            result = adapter.pop_completed_store_tasks()[rejected]
+            assert result.is_successful() is False
+            assert result.bytes_transferred() == 0
+        finally:
+            adapter.close()
+
+    def test_failed_store_releases_capacity_reservation(self):
+        mock_client = MockNativeConnector()
+        mock_client.report_set_per_key_results = True
+        capacity = 400
+        adapter = NativeConnectorL2Adapter(
+            mock_client,
+            max_capacity_gb=capacity / (1024**3),
+        )
+        try:
+            first_key = create_object_key(1)
+            mock_client.fail_set_keys = {_object_key_to_string(first_key)}
+            first = adapter.submit_store_task(
+                [first_key], [create_memory_obj(size=100)]
+            )
+            assert wait_for_event_fd(adapter.get_store_event_fd(), timeout=1.0)
+            assert adapter.pop_completed_store_tasks()[first].is_successful() is False
+            assert adapter.get_reserved_store_bytes() == 0
+
+            mock_client.fail_set_keys.clear()
+            second = adapter.submit_store_task(
+                [create_object_key(2)], [create_memory_obj(size=100)]
+            )
+            assert wait_for_event_fd(adapter.get_store_event_fd(), timeout=1.0)
+            assert adapter.pop_completed_store_tasks()[second].is_successful() is True
+            assert adapter.get_usage().total_bytes_used == capacity
+        finally:
+            adapter.close()
+
+    def test_submit_exception_releases_capacity_reservation(self):
+        mock_client = MockNativeConnector()
+        mock_client.raise_set_submit = True
+        adapter = NativeConnectorL2Adapter(mock_client, max_capacity_gb=1)
+        try:
+            with pytest.raises(RuntimeError, match="injected submit failure"):
+                adapter.submit_store_task(
+                    [create_object_key(1)], [create_memory_obj(size=100)]
+                )
+            assert adapter.get_reserved_store_bytes() == 0
+        finally:
+            adapter.close()
+
+    def test_synchronous_store_respects_capacity(self):
+        mock_client = MockNativeConnector()
+        capacity = 400
+        adapter = NativeConnectorL2Adapter(
+            mock_client,
+            max_capacity_gb=capacity / (1024**3),
+        )
+        try:
+            first = adapter.store_objects_sync(
+                [create_object_key(1)], [create_memory_obj(size=100)]
+            )
+            rejected = adapter.store_objects_sync(
+                [create_object_key(2)], [create_memory_obj(size=100)]
+            )
+
+            assert first == (True, 1, capacity)
+            assert rejected == (False, 0, 0)
+            assert len(mock_client._store) == 1
+            assert adapter.get_usage().total_bytes_used == capacity
+        finally:
+            adapter.close()

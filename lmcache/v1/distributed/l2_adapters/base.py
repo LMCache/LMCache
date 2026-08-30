@@ -140,6 +140,7 @@ class L2AdapterInterface(ABC):
         # every adapter exposes the same shape via ``get_usage()``.
         self._max_capacity_bytes: int = max_capacity_bytes
         self._total_bytes_used: int = 0
+        self._reserved_store_bytes: int = 0
         self._bytes_by_cache_salt: dict[str, int] = {}
         self._usage_lock = threading.Lock()
 
@@ -380,13 +381,11 @@ class L2AdapterInterface(ABC):
         self._backend_name = name
         self._shared = shared
 
-    def _notify_keys_stored(self, keys: list[ObjectKey], sizes: list[int]) -> None:
-        """Update byte accounting and notify listeners that ``keys`` were
-        stored. ``sizes[i]`` is the byte size of ``keys[i]``.
-
-        Accounting is held under ``_usage_lock``; listener callbacks fire
-        outside the lock so a slow listener cannot stall further notifies.
-        """
+    @staticmethod
+    def _stored_byte_deltas(
+        keys: list[ObjectKey], sizes: list[int]
+    ) -> tuple[int, dict[str, int]]:
+        """Aggregate stored bytes globally and by cache salt."""
         # Aggregate per-salt deltas before touching
         # ``_bytes_by_cache_salt`` — one dict read/write per unique
         # salt instead of one per key. This matters when the registry is
@@ -396,13 +395,29 @@ class L2AdapterInterface(ABC):
         for key, size in zip(keys, sizes, strict=True):
             delta[key.cache_salt] = delta.get(key.cache_salt, 0) + size
             total_delta += size
+        return total_delta, delta
+
+    def _apply_stored_byte_deltas(
+        self, total_delta: int, delta: dict[str, int]
+    ) -> None:
+        """Apply pre-aggregated stored-byte deltas under ``_usage_lock``."""
+        self._total_bytes_used += total_delta
+        for salt, size in delta.items():
+            self._bytes_by_cache_salt[salt] = (
+                self._bytes_by_cache_salt.get(salt, 0) + size
+            )
+
+    def _account_keys_stored(self, keys: list[ObjectKey], sizes: list[int]) -> None:
+        """Apply stored-key byte accounting without notifying observers."""
+        total_delta, delta = self._stored_byte_deltas(keys, sizes)
 
         with self._usage_lock:
-            self._total_bytes_used += total_delta
-            for salt, d in delta.items():
-                self._bytes_by_cache_salt[salt] = (
-                    self._bytes_by_cache_salt.get(salt, 0) + d
-                )
+            self._apply_stored_byte_deltas(total_delta, delta)
+
+    def _notify_keys_stored_observers(
+        self, keys: list[ObjectKey], sizes: list[int]
+    ) -> None:
+        """Notify stored-key listeners and observability subscribers."""
         for listener in self._listeners:
             listener.on_l2_keys_stored(keys, sizes)
         self._event_bus.publish(
@@ -416,6 +431,66 @@ class L2AdapterInterface(ABC):
                 },
             )
         )
+
+    def _notify_keys_stored(self, keys: list[ObjectKey], sizes: list[int]) -> None:
+        """Update byte accounting and notify observers that ``keys`` stored.
+
+        Accounting is committed under ``_usage_lock`` before callbacks fire.
+        Splitting these phases lets durability-sensitive adapters release a
+        synchronous caller after persistence and accounting without making a
+        slow listener part of the caller's storage deadline.
+        """
+        self._account_keys_stored(keys, sizes)
+        self._notify_keys_stored_observers(keys, sizes)
+
+    def _try_reserve_store_bytes(self, size: int) -> bool:
+        """Reserve capacity before an asynchronous L2 store is submitted."""
+        if size < 0:
+            raise ValueError("store reservation size must be non-negative")
+        with self._usage_lock:
+            projected = self._total_bytes_used + self._reserved_store_bytes + size
+            if self._max_capacity_bytes > 0 and projected > self._max_capacity_bytes:
+                return False
+            self._reserved_store_bytes += size
+            return True
+
+    def _settle_store_reservation(
+        self,
+        reserved_bytes: int,
+        keys: list[ObjectKey],
+        sizes: list[int],
+    ) -> None:
+        """Atomically release a reservation and account successfully stored keys."""
+        if reserved_bytes < 0:
+            raise ValueError("reserved_bytes must be non-negative")
+        total_delta, delta = self._stored_byte_deltas(keys, sizes)
+        with self._usage_lock:
+            if reserved_bytes > self._reserved_store_bytes:
+                raise RuntimeError(
+                    "store reservation accounting underflow: "
+                    f"settling {reserved_bytes} bytes with only "
+                    f"{self._reserved_store_bytes} reserved"
+                )
+            self._reserved_store_bytes -= reserved_bytes
+            self._apply_stored_byte_deltas(total_delta, delta)
+
+    def _release_store_reservation(self, reserved_bytes: int) -> None:
+        """Release capacity for a store that cannot produce a completion."""
+        if reserved_bytes < 0:
+            raise ValueError("reserved_bytes must be non-negative")
+        with self._usage_lock:
+            if reserved_bytes > self._reserved_store_bytes:
+                raise RuntimeError(
+                    "store reservation accounting underflow: "
+                    f"releasing {reserved_bytes} bytes with only "
+                    f"{self._reserved_store_bytes} reserved"
+                )
+            self._reserved_store_bytes -= reserved_bytes
+
+    def get_reserved_store_bytes(self) -> int:
+        """Return bytes reserved by stores awaiting native completion."""
+        with self._usage_lock:
+            return self._reserved_store_bytes
 
     def _notify_keys_accessed(self, keys: list[ObjectKey]) -> None:
         # ``_notify_keys_accessed`` carries no byte impact — only LRU

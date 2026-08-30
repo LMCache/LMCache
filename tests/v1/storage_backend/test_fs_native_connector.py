@@ -11,6 +11,15 @@ import time
 # Third Party
 import pytest
 
+# First Party
+from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.l2_adapters.fs_l2_adapter import (
+    _object_key_to_filename,
+)
+from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
+    NativeConnectorL2Adapter,
+)
+
 
 def _import_fs_client() -> type:
     try:
@@ -51,6 +60,20 @@ def _misaligned_memoryview(
 
 def _fill(view: memoryview) -> None:
     view[:] = bytes(i % 251 for i in range(len(view)))
+
+
+class _BufferObj:
+    """Minimal MemoryObj-compatible owner for native adapter integration."""
+
+    def __init__(self, payload: bytes):
+        self._buffer = bytearray(payload)
+
+    @property
+    def byte_array(self) -> memoryview:
+        return memoryview(self._buffer)
+
+    def get_size(self) -> int:
+        return len(self._buffer)
 
 
 def _wait_for_completion(
@@ -106,6 +129,34 @@ def test_batch_set_reports_partial_results_and_continues(tmp_path) -> None:
         assert (tmp_path / "model@0x00000000@03.data").read_bytes() == b"last"
     finally:
         client.close()
+
+
+def test_sync_adapter_waits_for_compiled_fs_completion(tmp_path) -> None:
+    """The Python durability API consumes real native SET completions."""
+    LMCacheFSClient = _import_fs_client()
+    keys = [
+        ObjectKey(
+            chunk_hash=ObjectKey.IntHash2Bytes(i),
+            model_name="compiled-sync",
+            kv_rank=0,
+        )
+        for i in range(2)
+    ]
+    objects: Any = [_BufferObj(b"first"), _BufferObj(b"other")]
+    adapter = NativeConnectorL2Adapter(LMCacheFSClient(str(tmp_path), 1))
+    try:
+        ok, persisted, bytes_written = adapter.store_objects_sync(keys, objects)
+
+        assert ok is True
+        assert persisted == 2
+        assert bytes_written == 10
+        assert adapter.get_usage().total_bytes_used == 10
+        assert adapter.get_reserved_store_bytes() == 0
+        assert (tmp_path / _object_key_to_filename(keys[0])).read_bytes() == b"first"
+        assert (tmp_path / _object_key_to_filename(keys[1])).read_bytes() == b"other"
+    finally:
+        adapter.close()
+
 
 def test_odirect_read_does_not_split_for_read_ahead(tmp_path) -> None:
     """O_DIRECT reads should ignore read_ahead_size and use one aligned read."""
