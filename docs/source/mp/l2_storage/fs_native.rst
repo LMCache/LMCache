@@ -27,6 +27,18 @@ I/O queue depth on a single Python thread.
 - ``max_capacity_gb`` (float, default ``0``): Maximum L2 capacity in GB
   for client-side usage tracking.  Default ``0`` disables tracking.
 
+Atomic publication
+------------------
+
+Both filesystem adapters write each store into a writer-owned temporary inode
+opened with create-exclusive semantics. After the write is closed, a hard link
+publishes that complete inode only if the final key does not already exist.
+Concurrent or cross-process duplicate stores therefore succeed without sharing
+writable storage or replacing an established value; readers see either no key
+or one complete value. Temporary files live under ``base_path`` (or its
+``relative_tmp_dir`` child) so publication remains on one filesystem, and each
+writer removes its temporary link after winning or losing the publish race.
+
 .. important::
 
    ``O_DIRECT`` has two independent alignment requirements:
