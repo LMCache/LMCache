@@ -40,6 +40,37 @@ T = TypeVar("T")
 # Internal type used for the client-server communication
 RequestUID = int
 
+_ERROR_RESPONSE_MARKER = b"LMCACHE_RPC_ERROR_V1"
+_MAX_REMOTE_ERROR_MESSAGE_BYTES = 4096
+
+
+class RemoteHandlerError(RuntimeError):
+    """A request handler failed in the remote LMCache process.
+
+    Args:
+        request_type: Request whose remote handler failed.
+        error_type: Remote exception class name.
+        message: Bounded remote exception message.
+    """
+
+    def __init__(
+        self,
+        request_type: RequestType,
+        error_type: str,
+        message: str,
+    ) -> None:
+        self.request_type = request_type
+        self.error_type = error_type
+        self.remote_message = message
+        super().__init__(f"{request_type.name} handler failed: {error_type}: {message}")
+
+
+class _RemoteErrorPayload(msgspec.Struct, frozen=True):
+    """Version-one bounded handler-error payload."""
+
+    error_type: str
+    message: str
+
 
 # Helper functions
 def encode_request_uid(uid: RequestUID) -> bytes:
@@ -360,11 +391,33 @@ class MessageQueueClient:
 
         if request_uid in self.pending_futures:
             future = self.pending_futures.pop(request_uid)
-            if b_response:
-                response = msgspec_decode(b_response[0], cls=response_cls)
-                future.set_result(response)
-            else:
-                future.set_result(None)
+            try:
+                if b_response and b_response[0] == _ERROR_RESPONSE_MARKER:
+                    if len(b_response) != 2:
+                        raise RuntimeError(
+                            "Malformed LMCache RPC error response: expected "
+                            "marker and one payload frame"
+                        )
+                    error = msgspec_decode(b_response[1], cls=_RemoteErrorPayload)
+                    future.set_exception(
+                        RemoteHandlerError(
+                            request_type=request_type,
+                            error_type=error.error_type,
+                            message=error.message,
+                        )
+                    )
+                elif b_response:
+                    response = msgspec_decode(b_response[0], cls=response_cls)
+                    future.set_result(response)
+                else:
+                    future.set_result(None)
+            except Exception as exc:
+                # A matching response owns this future. Never leave it pending
+                # after malformed wire data or a response-decoding failure.
+                future.set_exception(exc)
+                logger.exception(
+                    "Failed to decode response for request type %s", request_type
+                )
 
     def submit_request(
         self,
@@ -530,6 +583,26 @@ class MessageQueueServer:
         # Thread pools assigned via add_normal_thread_pool / add_affinity_thread_pool
         self.extra_pools: list[ThreadPoolExecutor | AffinityThreadPool] = []
 
+    def _queue_error_response(
+        self,
+        prefix_frames: list[bytes],
+        exception: BaseException,
+    ) -> None:
+        """Queue a bounded handler error without touching ZMQ off-thread."""
+        message = str(exception).encode("utf-8")[:_MAX_REMOTE_ERROR_MESSAGE_BYTES]
+        payload = _RemoteErrorPayload(
+            error_type=type(exception).__name__,
+            message=message.decode("utf-8", errors="replace"),
+        )
+        self.output_queue.put(
+            prefix_frames
+            + [
+                _ERROR_RESPONSE_MARKER,
+                msgspec_encode(payload, cls=_RemoteErrorPayload),
+            ]
+        )
+        self._output_efd.notify()
+
     def _call_sync_handler(
         self,
         handler_entry: SyncRequestHandler[Any],
@@ -585,8 +658,9 @@ class MessageQueueServer:
                 self.output_queue.put(frames_to_send)
                 self._output_efd.notify()
 
-            except Exception:
+            except Exception as exc:
                 logger.exception("Error in blocking handler")
+                self._queue_error_response(prefix_frames, exc)
 
         future.add_done_callback(_notify_response)
 
@@ -633,13 +707,23 @@ class MessageQueueServer:
                             payloads=payloads,
                             prefix_frames=[identity, b_request_uid, b_request_type],
                         )
-                    except Exception:
+                    except Exception as exc:
                         logger.exception("Error handling request %s", request_type)
+                        self._queue_error_response(
+                            [identity, b_request_uid, b_request_type], exc
+                        )
                 else:
                     logger.error(
                         "No handler registered for request type %s", request_type
                     )
                     logger.error("Available handlers: %s", list(self.handlers.keys()))
+                    self._queue_error_response(
+                        [identity, b_request_uid, b_request_type],
+                        RuntimeError(
+                            "No handler registered for request type "
+                            f"{request_type.name}"
+                        ),
+                    )
 
             # Send the responses
             if outbound_state and outbound_state & zmq.POLLIN:
