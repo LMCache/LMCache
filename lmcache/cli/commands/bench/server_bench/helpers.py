@@ -229,6 +229,7 @@ def _make_key(
     return IPCCacheServerKey(
         model_name=_MODEL_NAME,
         world_size=world_size,
+        num_kv_readers=world_size,
         worker_id=worker_id,
         token_ids=token_ids,
         start=start,
