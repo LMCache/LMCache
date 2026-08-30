@@ -56,6 +56,8 @@ class MockNativeConnector:
         self._completions: list[tuple[int, bool, str, list[bool] | None]] = []
         self._lock = threading.Lock()
         self._closed = False
+        self.fail_set_keys: set[str] = set()
+        self.report_set_per_key_results = False
 
     def event_fd(self) -> int:
         return self._efd.fileno()
@@ -66,9 +68,20 @@ class MockNativeConnector:
             self._next_id += 1
 
         try:
+            results: list[bool] = []
             for key, mv in zip(keys, memoryviews, strict=False):
+                if key in self.fail_set_keys:
+                    results.append(False)
+                    continue
                 self._store[key] = bytes(mv)
-            self._push_completion(fid, True, "", None)
+                results.append(True)
+            ok = all(results)
+            self._push_completion(
+                fid,
+                ok,
+                "" if ok else "injected set failure",
+                results if self.report_set_per_key_results else None,
+            )
         except Exception as e:
             self._push_completion(fid, False, str(e), None)
 
@@ -1358,3 +1371,22 @@ class TestUsageTracking:
         usage = adp.get_usage()
         assert usage.usage_fraction == pytest.approx(0.2)
         assert usage.total_bytes_used == 400
+
+    def test_partial_store_accounts_only_successful_keys(self, adapter_with_capacity):
+        adp = adapter_with_capacity
+        mock_client = adp._client
+        mock_client.report_set_per_key_results = True
+        keys = [create_object_key(i) for i in range(3)]
+        objects = [create_memory_obj(size=100, fill_value=float(i)) for i in range(3)]
+        mock_client.fail_set_keys = {_object_key_to_string(keys[1])}
+
+        task_id = adp.submit_store_task(keys, objects)
+        assert wait_for_event_fd(adp.get_store_event_fd(), timeout=5.0)
+
+        result = adp.pop_completed_store_tasks()[task_id]
+        assert result.is_successful() is False
+        assert adp.get_usage().total_bytes_used == 800
+        assert set(mock_client._store) == {
+            _object_key_to_string(keys[0]),
+            _object_key_to_string(keys[2]),
+        }

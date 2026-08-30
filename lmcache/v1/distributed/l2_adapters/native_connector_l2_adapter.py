@@ -452,9 +452,25 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                     if op_type == self._OP_STORE:
                         store_info = self._pending_store_sizes.pop(fid, None)
                         task_bytes = 0
-                        if ok and store_info is not None:
+                        completion_ok = False
+                        if store_info is not None:
                             store_keys, sizes = store_info
-                            for key, size in zip(store_keys, sizes, strict=True):
+                            if result_bools is None:
+                                stored_flags = [bool(ok)] * len(store_keys)
+                            else:
+                                stored_flags = [bool(value) for value in result_bools]
+                                if len(stored_flags) < len(store_keys):
+                                    stored_flags.extend(
+                                        [False] * (len(store_keys) - len(stored_flags))
+                                    )
+                                elif len(stored_flags) > len(store_keys):
+                                    stored_flags = stored_flags[: len(store_keys)]
+                            completion_ok = bool(ok) and all(stored_flags)
+                            for key, size, stored in zip(
+                                store_keys, sizes, stored_flags, strict=True
+                            ):
+                                if not stored:
+                                    continue
                                 # First-store wins for byte accounting:
                                 # a re-store of an existing key adds 0
                                 # bytes (the backend already holds it).
@@ -470,7 +486,9 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                                 else:
                                     keys_stored.append(key)
                                     sizes_stored.append(0)
-                        self._completed_stores[task_id] = L2StoreResult(ok, task_bytes)
+                        self._completed_stores[task_id] = L2StoreResult(
+                            completion_ok, task_bytes
+                        )
                         self._store_efd.notify()
 
                     elif op_type == self._OP_LOOKUP:

@@ -82,6 +82,31 @@ def _submit_and_wait(
     return _wait_for_completion(client, future_id)
 
 
+def test_batch_set_reports_partial_results_and_continues(tmp_path) -> None:
+    """A failed key must not hide or prevent successful siblings."""
+    LMCacheFSClient = _import_fs_client()
+    keys = [
+        "model@00000000@01",
+        "malformed-key",
+        "model@00000000@03",
+    ]
+    payloads = [bytearray(b"first"), bytearray(b"bad"), bytearray(b"last")]
+    client = LMCacheFSClient(str(tmp_path), 1)
+    try:
+        future_id = client.submit_batch_set(
+            keys, [memoryview(payload) for payload in payloads]
+        )
+        completed_id, ok, error, results = _wait_for_completion(client, future_id)
+
+        assert completed_id == future_id
+        assert ok is False
+        assert "partially failed" in error
+        assert results == [True, False, True]
+        assert (tmp_path / "model@0x00000000@01.data").read_bytes() == b"first"
+        assert (tmp_path / "model@0x00000000@03.data").read_bytes() == b"last"
+    finally:
+        client.close()
+
 def test_odirect_read_does_not_split_for_read_ahead(tmp_path) -> None:
     """O_DIRECT reads should ignore read_ahead_size and use one aligned read."""
     if not hasattr(os, "O_DIRECT"):
