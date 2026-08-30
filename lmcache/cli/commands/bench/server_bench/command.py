@@ -43,6 +43,10 @@ import time
 
 # First Party
 from lmcache import torch_dev
+from lmcache.cli.commands.bench.server_bench.config import (
+    WorkerSpec,
+    parse_args_to_config,
+)
 
 # Heavy imports reused by the orchestrator. ``DTYPE_MAP`` is required
 # for the ``--kvcache-shape-spec`` help string at parser-registration
@@ -389,14 +393,15 @@ def run_server_bench(
     from lmcache.v1.multiprocess.group_view import EngineGroupInfo
     from lmcache.v1.multiprocess.mq import MessageQueueClient
 
-    quiet = getattr(args, "quiet", False)
+    config = parse_args_to_config(args)
+    quiet = config.quiet
 
     def log(msg: str) -> None:
         """Print progress messages; suppressed by --quiet."""
         if not quiet:
             print(msg)
 
-    use_gpu = args.mode == "gpu"
+    use_gpu = config.is_gpu
     if use_gpu and not torch_dev.is_available():
         print("ERROR: --mode gpu requires CUDA")
         sys.exit(1)
@@ -404,13 +409,7 @@ def run_server_bench(
     # Resolve transfer mode. ``auto`` reproduces the historical
     # behaviour: gpu -> lmcache_driven path, cpu -> engine_driven path.
     # ``lmcache_driven`` / ``engine_driven`` are explicit overrides.
-    transfer_mode = getattr(args, "transfer_mode", "auto")
-    if transfer_mode == "auto":
-        use_handle = use_gpu
-    elif transfer_mode == "lmcache_driven":
-        use_handle = True
-    else:
-        use_handle = False
+    use_handle = config.uses_handle_transfer
     if use_handle and not use_gpu:
         log(
             "  [info] --transfer-mode=lmcache_driven on cpu mode: "
@@ -434,9 +433,9 @@ def run_server_bench(
     warm_lookup_ms: list[float] = []
     warm_retrieve_ms: list[float] = []
 
-    url = args.rpc_url
+    url = config.rpc_url
     log(
-        "Connecting to LMCache MP Server at %s (mode=%s) ..." % (url, args.mode),
+        "Connecting to LMCache MP Server at %s (mode=%s) ..." % (url, config.mode),
     )
 
     ctx = zmq.Context()
@@ -452,7 +451,7 @@ def run_server_bench(
         log("Server chunk_size = %d" % chunk_size)
 
         # Parse KV shape spec
-        layer_groups = parse_kvcache_shape_spec(args.kvcache_shape_spec)
+        layer_groups = parse_kvcache_shape_spec(config.kvcache_shape_spec)
         # One block-id list is sent per LMCache KV group; each shape-spec
         # group becomes its own group server-side.
         num_engine_group_infos = len(layer_groups) or 1
@@ -479,17 +478,17 @@ def run_server_bench(
         num_layers = sum(g.num_layers for g in layer_groups)
         spec_nb = getattr(first.shape_desc, "nb", 0) or 0
         spec_bs = getattr(first.shape_desc, "bs", 0) or 0
-        num_blocks = spec_nb if spec_nb > 0 else args.num_blocks
-        block_size = spec_bs if spec_bs > 0 else args.block_size
-        if spec_nb and spec_nb != args.num_blocks:
+        num_blocks = spec_nb if spec_nb > 0 else config.num_blocks
+        block_size = spec_bs if spec_bs > 0 else config.block_size
+        if spec_nb and spec_nb != config.num_blocks:
             log(
                 "  [info] spec nb=%d overrides --num-blocks=%d"
-                % (spec_nb, args.num_blocks)
+                % (spec_nb, config.num_blocks)
             )
-        if spec_bs and spec_bs != args.block_size:
+        if spec_bs and spec_bs != config.block_size:
             log(
                 "  [info] spec bs=%d overrides --block-size=%d"
-                % (spec_bs, args.block_size)
+                % (spec_bs, config.block_size)
             )
         # For display / legacy hint fields only: collapse to the first
         # group when homogeneous, otherwise report "mixed".
@@ -549,7 +548,7 @@ def run_server_bench(
             for group_idx, group in enumerate(layer_groups)
         ]
 
-        num_tokens = args.num_tokens
+        num_tokens = config.num_tokens
         log(
             "Each request: %d tokens (%d full chunks)"
             % (
@@ -577,13 +576,13 @@ def run_server_bench(
         # multi-process worker layout in vLLM. shm_names aggregates every
         # rank's per-layer SHM segments for a best-effort cleanup on
         # shutdown.
-        tp_size = max(1, int(getattr(args, "tp_size", 1)))
+        tp_size = config.tp_size
         # Explicit --use-mla wins; otherwise infer MLA from the shape
         # spec via ``_is_mla_kv_size`` (kv_size == 1 marks an MLA
         # single-plane group). Routing all shape-derived MLA checks
         # through ``_is_mla_kv_size`` keeps this file, the helpers
         # module, and the server detector agreeing on one contract.
-        use_mla = bool(getattr(args, "use_mla", False)) or (
+        use_mla = config.use_mla or (
             isinstance(kv_size_disp, int) and _is_mla_kv_size(kv_size_disp)
         )
         # Fail fast when --use-mla is set but the shape spec still
@@ -687,13 +686,16 @@ def run_server_bench(
 
             workers.append(
                 WorkerContext(
-                    kv_worker_id=kv_worker_id,
-                    kv_world_size=kv_world_size,
-                    instance_id=instance_id,
+                    spec=WorkerSpec(
+                        rank=rank,
+                        kv_worker_id=kv_worker_id,
+                        kv_world_size=kv_world_size,
+                        instance_id=instance_id,
+                        store_enabled=(rank == 0) if use_mla else True,
+                        retrieve_enabled=True,
+                    ),
                     client_tensors=None if use_handle else client_kv_tensors,
                     server_pool=rank_server_pool,
-                    # MLA: only rank 0 stores; non-MLA: every rank stores.
-                    is_kv_writer=(rank == 0) if use_mla else True,
                 )
             )
         log("")
@@ -702,12 +704,12 @@ def run_server_bench(
         # concrete instance-id list to send matching UNREGISTERs.
         registered = bool(registered_instance_ids)
 
-        if args.end is not None:
-            seq_iter: itertools.count | range = range(args.start, args.end)
+        if config.end is not None:
+            seq_iter: itertools.count | range = range(config.start, config.end)
         else:
-            seq_iter = itertools.count(args.start)
+            seq_iter = itertools.count(config.start)
 
-        http_base = args.url.rstrip("/")
+        http_base = config.http_url.rstrip("/")
 
         # Record only the steady-state load, not the one-time registration.
         if profiler is not None:
@@ -733,10 +735,9 @@ def run_server_bench(
                 world_size=kv_world_size,
             )
             if cold_result is not None:
-                if cold_result.lookup_ms is not None:
-                    cold_lookup_ms.append(cold_result.lookup_ms)
-                if cold_result.store_ms is not None:
-                    cold_store_ms.append(cold_result.store_ms)
+                cold_lookup_ms.append(cold_result.lookup.latency_ms)
+                if cold_result.store is not None:
+                    cold_store_ms.append(cold_result.store.latency_ms)
 
             time.sleep(args.interval)
 
@@ -757,10 +758,9 @@ def run_server_bench(
                 world_size=kv_world_size,
             )
             if warm_result is not None:
-                if warm_result.lookup_ms is not None:
-                    warm_lookup_ms.append(warm_result.lookup_ms)
-                if warm_result.retrieve_ms is not None:
-                    warm_retrieve_ms.append(warm_result.retrieve_ms)
+                warm_lookup_ms.append(warm_result.lookup.latency_ms)
+                if warm_result.retrieve is not None:
+                    warm_retrieve_ms.append(warm_result.retrieve.latency_ms)
 
             # Compare checksums
             total_requests += 1
