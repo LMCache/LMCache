@@ -354,9 +354,7 @@ def test_tp_worker_namespaces_daemon_lookup_lifecycle(
         requests.append((request_type, payload))
         future: MessagingFuture[Any] = MessagingFuture()
         future.set_result(
-            2
-            if request_type is adapter_mod.RequestType.WAIT_PREFETCH_STATUS
-            else True
+            2 if request_type is adapter_mod.RequestType.WAIT_PREFETCH_STATUS else True
         )
         return future
 

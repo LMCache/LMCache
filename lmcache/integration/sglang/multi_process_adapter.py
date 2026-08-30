@@ -455,9 +455,7 @@ class LMCacheMPConnector:
             token_ids = pending.token_ids
             matched = pending.matched_token_num
         if matched > 0:
-            self._free_lookup_locks(
-                token_ids, 0, matched, self._daemon_rid(request_id)
-            )
+            self._free_lookup_locks(token_ids, 0, matched, self._daemon_rid(request_id))
 
     def end_session(self, request_id: str) -> None:
         """Tell the daemon we're done with this request_id.
