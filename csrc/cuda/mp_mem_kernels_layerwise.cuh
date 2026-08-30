@@ -4,11 +4,14 @@
 //
 // Both are defined in mp_mem_kernels_layerwise.cu -- the only translation unit
 // that instantiates the layer-wise kernels. The object-group executor shares a
-// plan-walking driver with its per-chunk twin via mp_mem_kernels_common.cuh.
+// plan-walking driver with its per-chunk twin via mp_mem_kernels_detail.cuh.
 
 #pragma once
 
-#include "mp_mem_kernels.cuh"
+#include <torch/types.h>
+
+#include "kv_transfer_plan_types.h"
+#include "transfer_plan_types.cuh"
 
 /**
  * Layer-wise variant of multi_layer_block_kv_transfer.

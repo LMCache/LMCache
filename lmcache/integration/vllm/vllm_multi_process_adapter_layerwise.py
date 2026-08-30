@@ -13,11 +13,11 @@ import re
 # First Party
 from lmcache.integration.vllm.vllm_multi_process_adapter import LMCacheMPWorkerAdapter
 from lmcache.utils import _lmcache_nvtx_annotate, init_logger
-from lmcache.v1.multiprocess.layerwise_futures import LayerwiseDeviceMessagingFuture
-from lmcache.v1.multiprocess.transfer_context.worker_layerwise_transfer import (
+from lmcache.v1.multiprocess.futures_layerwise import LayerwiseDeviceMessagingFuture
+from lmcache.v1.multiprocess.transfer_context.worker_transfer import TransferContext
+from lmcache.v1.multiprocess.transfer_context.worker_transfer_layerwise import (
     LMCacheLayerwiseTransferContext,
 )
-from lmcache.v1.multiprocess.transfer_context.worker_transfer import TransferContext
 
 logger = init_logger(__name__)
 

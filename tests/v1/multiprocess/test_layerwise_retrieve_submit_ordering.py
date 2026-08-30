@@ -19,8 +19,8 @@ import pytest
 # First Party
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.protocol import RequestType
-from lmcache.v1.multiprocess.transfer_context import worker_layerwise_transfer
-from lmcache.v1.multiprocess.transfer_context.worker_layerwise_transfer import (
+from lmcache.v1.multiprocess.transfer_context import worker_transfer_layerwise
+from lmcache.v1.multiprocess.transfer_context.worker_transfer_layerwise import (
     LMCacheLayerwiseTransferContext,
 )
 
@@ -93,7 +93,7 @@ def patched_future(monkeypatch):
             raw_future.set_delivery_sink(lambda response: True)
 
     monkeypatch.setattr(
-        worker_layerwise_transfer,
+        worker_transfer_layerwise,
         "LayerwiseDeviceMessagingFuture",
         _StubLayerwiseFuture,
     )

@@ -5,9 +5,9 @@
 // Kept in its own translation unit so the layer-wise kernel templates are
 // instantiated exactly once, independently of the per-chunk ones in
 // mp_mem_kernels.cu. What the two paths share -- the device-side helpers and
-// the plan-walking driver -- lives in mp_mem_kernels_common.cuh.
+// the plan-walking driver -- lives in mp_mem_kernels_detail.cuh.
 
-#include "mp_mem_kernels_common.cuh"
+#include "mp_mem_kernels_detail.cuh"
 #include "mp_mem_kernels_layerwise.cuh"
 
 #include <array>
