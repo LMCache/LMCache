@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// Layer-wise multi-layer block KV transfer kernels.
+// Layer-wise multi-layer block KV transfer.
 //
-// Kept in its own translation unit so the default (per-chunk) transfer path
-// in mp_mem_kernels.cu never has to know that layer-wise mode exists. The
-// device-side helpers both paths share live in mp_mem_kernels_device.cuh.
+// Kept in its own translation unit so the layer-wise kernel templates are
+// instantiated exactly once, independently of the per-chunk ones in
+// mp_mem_kernels.cu. What the two paths share -- the device-side helpers and
+// the plan-walking driver -- lives in mp_mem_kernels_common.cuh.
 
-#include "mp_mem_kernels_device.cuh"
+#include "mp_mem_kernels_common.cuh"
 #include "mp_mem_kernels_layerwise.cuh"
 
 #include <cstring>
@@ -130,14 +131,6 @@ void multi_layer_block_kv_transfer_layerwise_templated(
 
 }  // namespace
 
-#define LAUNCH_TEMPLATED_LAYERWISE(type)                              \
-  do {                                                                \
-    multi_layer_block_kv_transfer_layerwise_templated<type>(          \
-        paged_buffer_ptrs_tensor, lmcache_objects_ptrs, num_objects,  \
-        block_ids, device, direction, shape_desc, lmcache_chunk_size, \
-        engine_kv_format, skip_prefix_n_blocks);                      \
-  } while (0)
-
 void multi_layer_block_kv_transfer_layerwise(
     const torch::Tensor& paged_buffer_ptrs_tensor,
     const int64_t* lmcache_objects_ptrs, int num_objects,
@@ -145,32 +138,32 @@ void multi_layer_block_kv_transfer_layerwise(
     TransferDirection direction, PageBufferShapeDesc shape_desc,
     int lmcache_chunk_size, EngineKVFormat engine_kv_format,
     int skip_prefix_n_blocks) {
-  // Transfer-unit selection. Deliberately duplicated rather than shared:
-  // the two paths expand different launch macros. Keep in sync with
-  // multi_layer_block_kv_transfer() in mp_mem_kernels.cu -- a new
-  // EngineKVFormat or a change to the vectorization rule must be applied in
-  // both places, or this path silently keeps the old width.
-  int head_bytes = shape_desc.hs * shape_desc.element_size;
-  TORCH_CHECK(head_bytes % sizeof(uint16_t) == 0, "head_size * element_size (",
-              head_bytes, ") must be divisible by 2 for vectorized access");
-
-  if (engine_kv_format == EngineKVFormat::NL_X_NB_BSV_BSS) {
-    // Blocked-scale indexer cache: the per-token fp32 scale must be a whole
-    // number of transfer units, so pin 4-byte units regardless of row width.
-    TORCH_CHECK(head_bytes % sizeof(uint32_t) == 0,
-                "NL_X_NB_BSV_BSS row bytes (", head_bytes,
-                ") must be divisible by 4");
-    LAUNCH_TEMPLATED_LAYERWISE(uint32_t);
-    return;
-  }
-
-  if (head_bytes % sizeof(uint4) == 0) {
-    LAUNCH_TEMPLATED_LAYERWISE(uint4);  // 16 bytes per copy
-  } else if (head_bytes % sizeof(uint32_t) == 0) {
-    LAUNCH_TEMPLATED_LAYERWISE(uint32_t);  // 4 bytes per copy
-  } else {
-    LAUNCH_TEMPLATED_LAYERWISE(uint16_t);  // 2 bytes per copy
-  }
+  dispatch_by_transfer_unit(
+      shape_desc, engine_kv_format, [&](auto transfer_unit) {
+        using ScalarType = typename decltype(transfer_unit)::type;
+        multi_layer_block_kv_transfer_layerwise_templated<ScalarType>(
+            paged_buffer_ptrs_tensor, lmcache_objects_ptrs, num_objects,
+            block_ids, device, direction, shape_desc, lmcache_chunk_size,
+            engine_kv_format, skip_prefix_n_blocks);
+      });
 }
 
-#undef LAUNCH_TEMPLATED_LAYERWISE
+void execute_object_group_transfer_layerwise(
+    TransferDirection direction, const torch::Device& device,
+    size_t host_buffer_alignment,
+    const std::vector<KernelGroupSpec>& kernel_group_specs,
+    const std::vector<BatchStep>& batch_steps) {
+  execute_object_group_transfer_common(
+      direction, device, host_buffer_alignment, kernel_group_specs, batch_steps,
+      [&](const KernelGroupSpec& group, const LaunchVar& launch,
+          const at::Tensor& paged_buffer_ptrs_tensor,
+          const at::Tensor& block_ids) {
+        // The layer-wise kernel reads the first num_objects entries directly,
+        // so no slice copy is needed (num_objects is bounds-checked above).
+        multi_layer_block_kv_transfer_layerwise(
+            paged_buffer_ptrs_tensor, group.lmcache_objects_ptrs.data(),
+            launch.num_objects, block_ids, device, direction, group.shape_desc,
+            group.lmcache_chunk_size, group.engine_kv_format,
+            launch.skip_prefix_n_blocks);
+      });
+}

@@ -419,13 +419,12 @@ def transfer_kv_layerwise(
                 chunk_pass_start = chunk_pass_end
 
             # Single native call for all chunk sub-passes
-            device_ops.execute_object_group_transfer(
+            device_ops.execute_object_group_transfer_layerwise(
                 lmcache_native.TransferDirection.H2D,
                 cache_context.device,
                 pin_chunk_size,
                 [layer_spec],
                 batch_steps,
-                layerwise=True,
             )
         else:
             # --- Per-layer fallback (N=1, no native ops, or buffer overflow) ---
@@ -493,13 +492,12 @@ def transfer_kv_layerwise(
                         len(all_gpu_ptrs_fb),
                         info["all_skip_blocks"],
                     )
-                    device_ops.execute_object_group_transfer(
+                    device_ops.execute_object_group_transfer_layerwise(
                         lmcache_native.TransferDirection.H2D,
                         cache_context.device,
                         pin_chunk_size,
                         [layer_spec],
                         [device_ops.BatchStep(staging_fb, [layer_launch])],
-                        layerwise=True,
                     )
                 elif info["single_launch"]:
                     buffer_base = cache_context.get_temp_kernel_group_buffer(
@@ -521,10 +519,9 @@ def transfer_kv_layerwise(
                         )
                         all_gpu_ptrs_fb.append(gpu_dst)
 
-                    # ``device_ops`` is rebound to the native CUDA entry
-                    # points at init; those accept ``layerwise``, which the
-                    # pure-torch fallback signature does not model.
-                    cast(Any, device_ops).multi_layer_block_kv_transfer(
+                    # CUDA-only entry point, resolved at runtime through
+                    # DeviceOps.__getattr__ (see the guard above).
+                    device_ops.multi_layer_block_kv_transfer_layerwise(
                         single_layer_kv_ptr,
                         all_gpu_ptrs_fb,
                         info["all_block_ids"],
@@ -534,7 +531,6 @@ def transfer_kv_layerwise(
                         slots_per_chunk,
                         cache_context.get_engine_kv_format(kernel_group_id),
                         info["all_skip_blocks"],
-                        layerwise=True,
                     )
                 else:
                     # Batched fallback for very long sequences
@@ -583,7 +579,7 @@ def transfer_kv_layerwise(
                             start_block_pos:end_block_pos
                         ]
 
-                        cast(Any, device_ops).multi_layer_block_kv_transfer(
+                        device_ops.multi_layer_block_kv_transfer_layerwise(
                             single_layer_kv_ptr,
                             tmp_gpu_buffers,
                             block_ids_curr,
@@ -593,7 +589,6 @@ def transfer_kv_layerwise(
                             slots_per_chunk,
                             cache_context.get_engine_kv_format(kernel_group_id),
                             recalculated_skip_blocks,
-                            layerwise=True,
                         )
 
         # Record 1 IPC event per batch (all layers in batch share it)
