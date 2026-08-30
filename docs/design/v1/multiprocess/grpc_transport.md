@@ -48,7 +48,7 @@ Generated gRPC stub: EngineServiceStub.Lookup.future(...)
   v
 MultiprocessGrpcServer
   |
-  | generated gRPC runtime calls _GrpcServicer.Lookup(...)
+  | generated gRPC runtime resolves _GrpcServicer.Lookup via __getattr__
   v
 _GrpcServicer._dispatch("Lookup", request, context)
   |
@@ -65,8 +65,8 @@ Main source files:
 
 | File | Role |
 |---|---|
-| `lmcache/v1/multiprocess/transport/grpc_impl/proto/lmcache_mq.proto` | Source of truth for gRPC services, methods, requests, and responses. |
-| `lmcache/v1/multiprocess/transport/grpc_impl/_proto_gen/_generate.py` | Local stub generation helper. Generated `*_pb2.py` files are not checked into Git. |
+| `lmcache/v1/multiprocess/transport/grpc_impl/protos/*.proto` | Source of truth for gRPC services, methods, requests, and responses. Each service has its own proto file; shared messages live in `common.proto`. |
+| `lmcache/v1/multiprocess/transport/grpc_impl/_proto_gen/_generate.py` | Local stub generation helper. It scans `protos/*.proto`, generates service-specific stubs, and writes compatibility aggregate modules. Generated `*_pb2.py` files are not checked into Git. |
 | `lmcache/v1/multiprocess/protocol.py` | Derives `RpcMethod` tokens and client method names from the protobuf descriptor. Also provides the `@grpc_method` scheduling decorator. |
 | `lmcache/v1/multiprocess/transport/grpc_impl/proto_codec.py` | Generic protobuf/Python value conversion. It has no per-RPC registry. |
 | `lmcache/v1/multiprocess/mq.py` | Implements the gRPC client, server, dispatch, futures, and thread-pool assignment. |
@@ -76,9 +76,10 @@ Main source files:
 
 There are two server layers:
 
-1. `_GrpcServicer` is transport glue. It owns gRPC method entry points,
-   protobuf request decoding, scheduling, protobuf response encoding, and gRPC
-   status mapping. It has no cache business logic.
+1. `_GrpcServicer` is transport glue. It dynamically exposes generated gRPC
+   method entry points, handles protobuf request decoding, scheduling,
+   protobuf response encoding, and gRPC status mapping. It has no cache
+   business logic and no per-RPC forwarding method list.
 2. `EngineServiceImpl`, `ControllerServiceImpl`, `P2PServiceImpl`, and
    `BlendServiceImpl` are the generated service implementations. Their public
    methods are named exactly like the proto RPCs and delegate to narrower
@@ -243,7 +244,7 @@ Use a new `EngineService.GetServerVersion` unary RPC as an example.
 ### 1. Update the Proto
 
 Add request/response messages and the RPC to
-`transport/grpc_impl/proto/lmcache_mq.proto`:
+`transport/grpc_impl/protos/engine_service.proto`:
 
 ```proto
 message GetServerVersionRequest {}
@@ -273,8 +274,10 @@ pip install -r requirements/proto.txt
 python -m lmcache.v1.multiprocess.transport.grpc_impl._proto_gen._generate
 ```
 
-The generated `lmcache_mq_pb2.py` and `lmcache_mq_pb2_grpc.py` files are local
-build artifacts and are not checked into Git.
+The generator emits service-specific modules such as `engine_service_pb2.py`
+and `engine_service_pb2_grpc.py`, plus compatibility aggregate modules named
+`lmcache_mq_pb2.py` and `lmcache_mq_pb2_grpc.py`. All generated modules are
+local build artifacts and are not checked into Git.
 
 ### 2. Implement the Service Method
 
@@ -344,6 +347,8 @@ Use a new `DemoService.Demo` RPC as an example.
 
 ### 1. Update the Proto
 
+Create `transport/grpc_impl/protos/demo_service.proto`:
+
 ```proto
 message DemoRequest {
   string probe_token = 1;
@@ -395,7 +400,8 @@ global RPC contract table to update.
 ## Notes
 
 - Generated protobuf stubs are local artifacts. After switching branches that
-  modify `lmcache_mq.proto`, regenerate stubs before running tests.
+  modify any file under `transport/grpc_impl/protos/`, regenerate stubs before
+  running tests.
 - The public `RpcMethod` namespace is descriptor-derived. Adding a proto method
   automatically gives the client a snake_case method with the same semantic
   name.

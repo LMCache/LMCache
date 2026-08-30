@@ -2,10 +2,10 @@
 """LMCache mp-mode gRPC transport.
 
 Each RPC method maps to a distinct typed unary gRPC method on one of the
-services defined in ``proto/lmcache_mq.proto``. Concurrent control-plane calls
-go directly over typed unary RPCs. The old msgspec envelope (uid + request type
-+ payload frames) is gone; gRPC service/method routing and protobuf
-request/response messages now define the wire protocol.
+services defined in ``transport/grpc_impl/protos/*.proto``. Concurrent
+control-plane calls go directly over typed unary RPCs. The old msgspec envelope
+(uid + request type + payload frames) is gone; gRPC service/method routing and
+protobuf request/response messages now define the wire protocol.
 """
 
 # Standard

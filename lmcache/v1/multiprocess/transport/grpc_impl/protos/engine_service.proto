@@ -1,0 +1,187 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// EngineService wire contract for LMCache mp-mode gRPC.
+
+syntax = "proto3";
+
+package lmcache.mp;
+
+import "common.proto";
+
+message LookupRequest {
+  IpcCacheServerKey key = 1;
+  int64 tp_size = 2;
+}
+
+message LookupResponse {}
+
+message FreeLookupLocksRequest {
+  IpcCacheServerKey key = 1;
+  int64 tp_size = 2;
+}
+
+message FreeLookupLocksResponse {}
+
+message EndSessionRequest {
+  string request_id = 1;
+}
+
+message EndSessionResponse {}
+
+message UnregisterKvCacheRequest {
+  int64 instance_id = 1;
+}
+
+message UnregisterKvCacheResponse {}
+
+message UnregisterKvCacheEngineDrivenContextRequest {
+  int64 instance_id = 1;
+}
+
+message UnregisterKvCacheEngineDrivenContextResponse {}
+
+message QueryPrefetchStatusRequest {
+  string request_id = 1;
+}
+
+message QueryPrefetchStatusResponse {
+  optional int64 chunk_count = 1;
+}
+
+message WaitPrefetchStatusRequest {
+  string request_id = 1;
+  double timeout = 2;
+}
+
+message WaitPrefetchStatusResponse {
+  optional int64 chunk_count = 1;
+}
+
+message QueryPrefetchLookupHitsRequest {
+  string request_id = 1;
+}
+
+message QueryPrefetchLookupHitsResponse {
+  optional int64 chunk_count = 1;
+}
+
+message StoreRequest {
+  IpcCacheServerKey key = 1;
+  int64 instance_id = 2;
+  repeated BlockIdGroup gpu_block_ids = 3;
+  bytes event_ipc_handle = 4;
+}
+
+message StoreResponse {
+  EventIpcHandleResult result = 1;
+}
+
+message RetrieveRequest {
+  IpcCacheServerKey key = 1;
+  int64 instance_id = 2;
+  repeated BlockIdGroup gpu_block_ids = 3;
+  bytes event_ipc_handle = 4;
+  int64 skip_first_n_tokens = 5;
+}
+
+message RetrieveResponse {
+  EventIpcHandleResult result = 1;
+}
+
+message RegisterKvCacheEngineDrivenContextRequest {
+  int64 instance_id = 1;
+  string model_name = 2;
+  int64 world_size = 3;
+  int64 block_size = 4;
+  int64 num_layers = 5;
+  int64 hidden_dim_size = 6;
+  string dtype_str = 7;
+  bool use_mla = 8;
+}
+
+message RegisterKvCacheEngineDrivenContextResponse {
+  string shm_name = 1;
+  int64 pool_size = 2;
+}
+
+message PrepareStoreRequest {
+  IpcCacheServerKey key = 1;
+  int64 instance_id = 2;
+}
+
+message PrepareStoreResponse {
+  bytes encoded_context = 1;
+}
+
+message CommitStoreRequest {
+  IpcCacheServerKey key = 1;
+  int64 instance_id = 2;
+  bytes encoded_context = 3;
+}
+
+message CommitStoreResponse {
+  bool success = 1;
+}
+
+message PrepareRetrieveRequest {
+  IpcCacheServerKey key = 1;
+  int64 instance_id = 2;
+}
+
+message PrepareRetrieveResponse {
+  bool success = 1;
+  bytes data = 2;
+  bytes encoded_context = 3;
+}
+
+message CommitRetrieveRequest {
+  IpcCacheServerKey key = 1;
+  int64 instance_id = 2;
+}
+
+message CommitRetrieveResponse {
+  bool success = 1;
+}
+
+message RegisterKvCacheRequest {
+  int64 instance_id = 1;
+  repeated DeviceIpcWrapper kv_cache = 2;
+  string model_name = 3;
+  int64 world_size = 4;
+  string engine_type = 5;
+  bytes encoded_layout_hints = 6;
+  repeated EngineGroupInfo engine_group_infos = 7;
+}
+
+message RegisterKvCacheResponse {}
+
+service EngineService {
+  rpc RegisterKvCache(RegisterKvCacheRequest) returns (RegisterKvCacheResponse);
+  rpc RegisterQCache(RegisterKvCacheRequest) returns (RegisterKvCacheResponse);
+  rpc UnregisterKvCache(UnregisterKvCacheRequest)
+      returns (UnregisterKvCacheResponse);
+  rpc UnregisterQCache(UnregisterKvCacheRequest)
+      returns (UnregisterKvCacheResponse);
+  rpc StoreQ(StoreRequest) returns (StoreResponse);
+  rpc Store(StoreRequest) returns (StoreResponse);
+  rpc Retrieve(RetrieveRequest) returns (RetrieveResponse);
+  rpc Lookup(LookupRequest) returns (LookupResponse);
+  rpc QueryPrefetchStatus(QueryPrefetchStatusRequest)
+      returns (QueryPrefetchStatusResponse);
+  rpc WaitPrefetchStatus(WaitPrefetchStatusRequest)
+      returns (WaitPrefetchStatusResponse);
+  rpc QueryPrefetchLookupHits(QueryPrefetchLookupHitsRequest)
+      returns (QueryPrefetchLookupHitsResponse);
+  rpc FreeLookupLocks(FreeLookupLocksRequest) returns (FreeLookupLocksResponse);
+  rpc EndSession(EndSessionRequest) returns (EndSessionResponse);
+  rpc RegisterKvCacheEngineDrivenContext(
+      RegisterKvCacheEngineDrivenContextRequest)
+      returns (RegisterKvCacheEngineDrivenContextResponse);
+  rpc UnregisterKvCacheEngineDrivenContext(
+      UnregisterKvCacheEngineDrivenContextRequest)
+      returns (UnregisterKvCacheEngineDrivenContextResponse);
+  rpc PrepareStore(PrepareStoreRequest) returns (PrepareStoreResponse);
+  rpc CommitStore(CommitStoreRequest) returns (CommitStoreResponse);
+  rpc PrepareRetrieve(PrepareRetrieveRequest) returns (PrepareRetrieveResponse);
+  rpc CommitRetrieve(CommitRetrieveRequest) returns (CommitRetrieveResponse);
+}

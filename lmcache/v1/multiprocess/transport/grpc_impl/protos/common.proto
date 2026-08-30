@@ -1,0 +1,46 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// Shared message types for LMCache mp-mode gRPC.
+
+syntax = "proto3";
+
+package lmcache.mp;
+
+// Cache key used by engine and CacheBlend RPCs.
+message IpcCacheServerKey {
+  string model_name = 1;
+  int64 world_size = 2;
+  optional int64 worker_id = 3;
+  repeated int64 token_ids = 4;
+  int64 start = 5;
+  int64 end = 6;
+  string request_id = 7;
+  string cache_salt = 8;
+  int64 num_kv_readers = 9;
+}
+
+// Store / Retrieve and CacheBlend retrieve share this reply shape.
+message EventIpcHandleResult {
+  bytes event_ipc_handle = 1;
+  bool success = 2;
+}
+
+// One list of block IDs per KV group in kernel order.
+message BlockIdGroup {
+  repeated int64 block_ids = 1;
+}
+
+// Device IPC wrappers preserve concrete Python subclass identity.
+message DeviceIpcWrapper {
+  bytes pickled_payload = 1;
+}
+
+// EngineGroupInfo mirrors the Python msgspec.Struct field-by-field.
+message EngineGroupInfo {
+  int64 engine_group_id = 1;
+  repeated int64 layer_indices = 2;
+  int64 tokens_per_block = 3;
+  int64 sw_size_tokens = 4;
+  int64 extra_object_group_tag = 5;
+  bool recurrent_state = 6;
+}

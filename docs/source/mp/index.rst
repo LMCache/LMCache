@@ -108,8 +108,8 @@ backends such as ``LMCacheDrivenTransferService`` and
 ``auto`` loads both — plus a CacheBlend service when
 ``--engine-type blend`` is set. Starts a ``MultiprocessGrpcServer``,
 registers generated gRPC service implementations, and blocks in a keep-alive
-loop. The concrete gRPC service boundary is defined in
-``transport/grpc_impl/proto/lmcache_mq.proto``.
+loop. The concrete gRPC service boundaries are defined by the files under
+``transport/grpc_impl/protos/``.
 
 **``services/blend.py``** -- Defines ``BlendService``, the current paged-aware
 CacheBlend pipeline that runs on the sparse-prefetch path. It implements
@@ -135,9 +135,9 @@ gRPC Protocol
 -------------
 
 Communication between vLLM and LMCache uses typed unary gRPC methods defined in
-``transport/grpc_impl/proto/lmcache_mq.proto``. Python-side protocol metadata
-in ``protocols/*.py`` declares handler type, payload conversion, and dispatch
-affinity for each generated method.
+``transport/grpc_impl/protos/*.proto``. Python-side protocol metadata is
+derived from those protobuf descriptors, while concrete service method
+annotations declare handler type and dispatch affinity.
 
 **RPC methods**:
 
@@ -533,8 +533,8 @@ Adding an observability subscriber
 Adding a new gRPC method
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-1. Add the request/response messages and method to the matching service in
-   ``transport/grpc_impl/proto/lmcache_mq.proto``.
+1. Add the request/response messages and method to the matching service file
+   under ``transport/grpc_impl/protos/``.
 2. Regenerate the protobuf stubs:
 
    .. code-block:: bash
@@ -549,10 +549,12 @@ Adding a new gRPC method
    server worker pool; methods without the decorator run synchronously.
    Put reusable backend logic in the narrower service file only when it is not
    itself the generated gRPC service surface.
-4. Register a new service implementation from ``run_cache_server()`` with
-   ``MultiprocessGrpcServer.add_service("ServiceName", impl)``. The transport
-   binds protobuf methods by exact CamelCase method name; it does not read
-   per-backend service-name declarations or aliases.
+4. If the change adds a new service, register its implementation from
+   ``run_cache_server()`` with
+   ``MultiprocessGrpcServer.add_service("ServiceName", impl)``. Adding a
+   method to an existing service does not require a transport registration
+   change. The transport binds protobuf methods by exact CamelCase method name;
+   it does not read per-backend service-name declarations or aliases.
    Existing services do not need transport changes when adding another method.
 
 Key Source Files

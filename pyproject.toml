@@ -71,8 +71,8 @@ line-length = 88
 exclude = [
     "lmcache/integration/vllm/lmcache_mp_connector_*.py",
     # protobuf / gRPC stubs generated during build/test and ignored by Git.
-    "lmcache/v1/multiprocess/transport/grpc_impl/_proto_gen/lmcache_mq_pb2.py",
-    "lmcache/v1/multiprocess/transport/grpc_impl/_proto_gen/lmcache_mq_pb2_grpc.py",
+    "lmcache/v1/multiprocess/transport/grpc_impl/_proto_gen/*_pb2.py",
+    "lmcache/v1/multiprocess/transport/grpc_impl/_proto_gen/*_pb2_grpc.py",
 ]
 
 [tool.ruff.lint]

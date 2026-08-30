@@ -1,7 +1,7 @@
 # Multiprocess Protocol Helpers
 
 The gRPC protocol is defined by
-`lmcache/v1/multiprocess/transport/grpc_impl/proto/lmcache_mq.proto`.
+`lmcache/v1/multiprocess/transport/grpc_impl/protos/*.proto`.
 `protocol.py` derives `RpcMethod` and the `RPC` namespace from that protobuf
 descriptor. `transport/grpc_impl/proto_codec.py` maps protobuf fields to
 LMCache Python domain objects from concrete service method annotations, not
@@ -21,7 +21,7 @@ protocols/
 ## Adding a gRPC Method
 
 1. Add the request/response messages and unary method to
-   `transport/grpc_impl/proto/lmcache_mq.proto`.
+   the matching service file under `transport/grpc_impl/protos/`.
 2. Regenerate protobuf stubs:
 
    ```bash
