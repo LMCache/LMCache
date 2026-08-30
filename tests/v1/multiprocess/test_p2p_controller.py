@@ -25,7 +25,7 @@ from lmcache.v1.multiprocess.mq import (
 from lmcache.v1.multiprocess.protocol import (
     RPC,
     RpcMethod,
-    get_handler_type,
+    get_grpc_method_options,
     get_payload_classes,
     get_response_class,
 )
@@ -37,6 +37,9 @@ from lmcache.v1.multiprocess.services.p2p_controller import (
     _PeerInstance,
 )
 from lmcache.v1.multiprocess.services.rpc_services import P2PServiceImpl
+from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
+    lmcache_mq_pb2,
+)
 
 
 def _make_key(i: int) -> ObjectKey:
@@ -70,30 +73,44 @@ def test_p2p_rpc_methods_registered():
 
 
 def test_p2p_lookup_and_lock_protocol():
-    """P2P_LOOKUP_AND_LOCK payload is [list[ObjectKey],
-    dict[int, MemoryLayoutDesc]], returns int, and is BLOCKING."""
+    """P2P_LOOKUP_AND_LOCK uses generated protobuf messages and is BLOCKING."""
     payload_classes = get_payload_classes(RPC.P2PLookupAndLock)
-    assert payload_classes == [list[ObjectKey], dict[int, MemoryLayoutDesc]]
-    assert get_response_class(RPC.P2PLookupAndLock) is int
-    assert get_handler_type(RPC.P2PLookupAndLock) == HandlerType.BLOCKING
+    assert payload_classes == [lmcache_mq_pb2.P2pLookupAndLockRequest]
+    assert get_response_class(RPC.P2PLookupAndLock) is (
+        lmcache_mq_pb2.P2pLookupAndLockResponse
+    )
+    handler_type, _requires_affinity = get_grpc_method_options(
+        P2PServiceImpl(MagicMock()).P2PLookupAndLock
+    )
+    assert handler_type == HandlerType.BLOCKING
 
 
 def test_p2p_query_lookup_results_protocol():
-    """P2P_QUERY_LOOKUP_RESULTS payload is [int], returns the optional address
-    list, and is BLOCKING."""
-    assert get_payload_classes(RPC.P2PQueryLookupResults) == [int]
-    assert (
-        get_response_class(RPC.P2PQueryLookupResults)
-        == list[TransferChannelAddress] | None
+    """P2P_QUERY_LOOKUP_RESULTS uses generated protobuf messages and is BLOCKING."""
+    assert get_payload_classes(RPC.P2PQueryLookupResults) == [
+        lmcache_mq_pb2.P2pQueryLookupResultsRequest
+    ]
+    assert get_response_class(RPC.P2PQueryLookupResults) is (
+        lmcache_mq_pb2.P2pQueryLookupResultsResponse
     )
-    assert get_handler_type(RPC.P2PQueryLookupResults) == HandlerType.BLOCKING
+    handler_type, _requires_affinity = get_grpc_method_options(
+        P2PServiceImpl(MagicMock()).P2PQueryLookupResults
+    )
+    assert handler_type == HandlerType.BLOCKING
 
 
 def test_p2p_unlock_objects_protocol():
-    """P2P_UNLOCK_OBJECTS payload is [list[ObjectKey]], returns None, BLOCKING."""
-    assert get_payload_classes(RPC.P2PUnlockObjects) == [list[ObjectKey]]
-    assert get_response_class(RPC.P2PUnlockObjects) is None
-    assert get_handler_type(RPC.P2PUnlockObjects) == HandlerType.BLOCKING
+    """P2P_UNLOCK_OBJECTS uses generated protobuf messages and is BLOCKING."""
+    assert get_payload_classes(RPC.P2PUnlockObjects) == [
+        lmcache_mq_pb2.P2pUnlockObjectsRequest
+    ]
+    assert get_response_class(RPC.P2PUnlockObjects) is (
+        lmcache_mq_pb2.P2pUnlockObjectsResponse
+    )
+    handler_type, _requires_affinity = get_grpc_method_options(
+        P2PServiceImpl(MagicMock()).P2PUnlockObjects
+    )
+    assert handler_type == HandlerType.BLOCKING
 
 
 # ============================================================================

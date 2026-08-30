@@ -19,12 +19,16 @@ from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.protocol import (
     RPC,
     RpcMethod,
-    get_handler_type,
+    get_grpc_method_options,
     get_payload_classes,
     get_response_class,
+    grpc_method,
 )
 from lmcache.v1.multiprocess.protocols.base import HandlerType
 from lmcache.v1.multiprocess.services.lookup import EngineLookupService, _PrefetchJob
+from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
+    lmcache_mq_pb2,
+)
 
 # Test helpers
 from tests.v1.multiprocess.test_mq import (
@@ -42,21 +46,22 @@ def test_query_prefetch_lookup_hits_is_descriptor_rpc_method():
 
 
 def test_query_prefetch_lookup_hits_payload_classes():
-    """QUERY_PREFETCH_LOOKUP_HITS payload should be [str]."""
+    """QUERY_PREFETCH_LOOKUP_HITS payload is the generated request."""
     payload_classes = get_payload_classes(RPC.QueryPrefetchLookupHits)
-    assert len(payload_classes) == 1
-    assert payload_classes[0] is str
+    assert payload_classes == [lmcache_mq_pb2.QueryPrefetchLookupHitsRequest]
 
 
 def test_query_prefetch_lookup_hits_response_class():
-    """QUERY_PREFETCH_LOOKUP_HITS response should be int | None."""
+    """QUERY_PREFETCH_LOOKUP_HITS response is the generated response."""
     response_class = get_response_class(RPC.QueryPrefetchLookupHits)
-    assert response_class == int | None
+    assert response_class is lmcache_mq_pb2.QueryPrefetchLookupHitsResponse
 
 
 def test_query_prefetch_lookup_hits_handler_type():
     """QUERY_PREFETCH_LOOKUP_HITS should use BLOCKING handler type."""
-    handler_type = get_handler_type(RPC.QueryPrefetchLookupHits)
+    handler_type, _requires_affinity = get_grpc_method_options(
+        _query_lookup_hits_handler
+    )
     assert handler_type == HandlerType.BLOCKING
 
 
@@ -65,6 +70,7 @@ def test_query_prefetch_lookup_hits_handler_type():
 # ============================================================================
 
 
+@grpc_method(HandlerType.BLOCKING)
 def _query_lookup_hits_handler(request_id: str) -> int | None:
     """Dummy handler for QUERY_PREFETCH_LOOKUP_HITS requests."""
     assert isinstance(request_id, str)

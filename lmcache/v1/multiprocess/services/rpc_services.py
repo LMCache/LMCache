@@ -22,6 +22,7 @@ from lmcache.v1.multiprocess.custom_types import (
     RegisterEngineDrivenContextPayload,
 )
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
+from lmcache.v1.multiprocess.protocol import HandlerType, grpc_method
 from lmcache.v1.multiprocess.protocols.engine import (
     PrepareRetrieveResponse,
     PrepareStoreResponse,
@@ -141,6 +142,7 @@ class EngineServiceImpl:
         """Unregister an experimental paged-Q cache context."""
         _require(self._qstore, "QStore transfer").unregister_q_cache(instance_id)
 
+    @grpc_method(HandlerType.BLOCKING, requires_client_affinity=True)
     def StoreQ(
         self,
         key: IPCCacheServerKey,
@@ -153,6 +155,7 @@ class EngineServiceImpl:
             key, instance_id, gpu_block_ids, event_ipc_handle
         )
 
+    @grpc_method(HandlerType.BLOCKING, requires_client_affinity=True)
     def Store(
         self,
         key: IPCCacheServerKey,
@@ -165,6 +168,7 @@ class EngineServiceImpl:
             key, instance_id, gpu_block_ids, event_ipc_handle
         )
 
+    @grpc_method(HandlerType.BLOCKING, requires_client_affinity=True)
     def Retrieve(
         self,
         key: IPCCacheServerKey,
@@ -180,14 +184,17 @@ class EngineServiceImpl:
             key, instance_id, gpu_block_ids, event_ipc_handle, skip_first_n_tokens
         )
 
+    @grpc_method(HandlerType.BLOCKING)
     def Lookup(self, key: IPCCacheServerKey, tp_size: int) -> None:
         """Start a prefix lookup/prefetch for ``key``."""
         return self._lookup.lookup(key, tp_size)
 
+    @grpc_method(HandlerType.BLOCKING)
     def QueryPrefetchStatus(self, request_id: str) -> int | None:
         """Poll prefix prefetch completion for ``request_id``."""
         return self._lookup.query_prefetch_status(request_id)
 
+    @grpc_method(HandlerType.BLOCKING)
     def WaitPrefetchStatus(
         self,
         request_id: str,
@@ -196,14 +203,17 @@ class EngineServiceImpl:
         """Wait for prefix prefetch completion for ``request_id``."""
         return self._lookup.wait_prefetch_status(request_id, timeout)
 
+    @grpc_method(HandlerType.BLOCKING)
     def QueryPrefetchLookupHits(self, request_id: str) -> int | None:
         """Return the lookup hit count for a completed prefetch."""
         return self._lookup.query_prefetch_lookup_hits(request_id)
 
+    @grpc_method(HandlerType.BLOCKING)
     def FreeLookupLocks(self, key: IPCCacheServerKey, n: int) -> None:
         """Release lookup locks held for ``key``."""
         return self._lookup.free_lookup_locks(key, n)
 
+    @grpc_method(HandlerType.BLOCKING)
     def EndSession(self, request_id: str) -> None:
         """End an active request session."""
         return self._lookup.end_session(request_id)
@@ -223,6 +233,7 @@ class EngineServiceImpl:
             self._engine_driven_transfer, "engine-driven KV transfer"
         ).unregister_kv_cache(instance_id)
 
+    @grpc_method(HandlerType.BLOCKING, requires_client_affinity=True)
     def PrepareStore(
         self,
         key: IPCCacheServerKey,
@@ -233,6 +244,7 @@ class EngineServiceImpl:
             self._engine_driven_transfer, "engine-driven KV transfer"
         ).prepare_store(key, instance_id)
 
+    @grpc_method(HandlerType.BLOCKING, requires_client_affinity=True)
     def CommitStore(
         self,
         key: IPCCacheServerKey,
@@ -244,6 +256,7 @@ class EngineServiceImpl:
             self._engine_driven_transfer, "engine-driven KV transfer"
         ).commit_store(key, instance_id, cpu_data)
 
+    @grpc_method(HandlerType.BLOCKING, requires_client_affinity=True)
     def PrepareRetrieve(
         self,
         key: IPCCacheServerKey,
@@ -254,6 +267,7 @@ class EngineServiceImpl:
             self._engine_driven_transfer, "engine-driven KV transfer"
         ).prepare_retrieve(key, instance_id)
 
+    @grpc_method(HandlerType.BLOCKING, requires_client_affinity=True)
     def CommitRetrieve(self, key: IPCCacheServerKey, instance_id: int) -> bool:
         """Commit an engine-driven retrieve."""
         return _require(
@@ -267,6 +281,7 @@ class ControllerServiceImpl:
     def __init__(self, management: ManagementService) -> None:
         self._management = management
 
+    @grpc_method(HandlerType.BLOCKING)
     def Clear(self) -> None:
         """Clear all stored KV cache data."""
         return self._management.clear()
@@ -279,6 +294,7 @@ class ControllerServiceImpl:
         """Return enabled experimental server features."""
         return self._management.get_experimental()
 
+    @grpc_method(HandlerType.BLOCKING)
     def Ping(self, instance_id: int | None) -> bool:
         """Refresh worker liveness and report server reachability."""
         return self._management.ping(instance_id)
@@ -301,6 +317,7 @@ class ObservabilityServiceImpl:
     def __init__(self, management: ManagementService) -> None:
         self._management = management
 
+    @grpc_method(HandlerType.BLOCKING)
     def ReportBlockAllocation(
         self,
         instance_id: int,
@@ -319,6 +336,7 @@ class P2PServiceImpl:
     def __init__(self, controller: P2PController) -> None:
         self._controller = controller
 
+    @grpc_method(HandlerType.BLOCKING)
     def P2PLookupAndLock(
         self,
         keys: list[ObjectKey],
@@ -327,6 +345,7 @@ class P2PServiceImpl:
         """Start a peer-to-peer lookup and lock matching L1 objects."""
         return self._controller.p2p_lookup_and_lock(keys, group_layout_descs)
 
+    @grpc_method(HandlerType.BLOCKING)
     def P2PQueryLookupResults(
         self,
         task_id: int,
@@ -334,6 +353,7 @@ class P2PServiceImpl:
         """Poll the result of a peer-to-peer lookup."""
         return self._controller.p2p_query_lookup_results(task_id)
 
+    @grpc_method(HandlerType.BLOCKING)
     def P2PUnlockObjects(self, keys: list[ObjectKey]) -> None:
         """Release peer-to-peer read locks for object keys."""
         return self._controller.p2p_unlock_objects(keys)
@@ -368,6 +388,7 @@ class BlendServiceImpl:
         """Unregister CacheBlend rope metadata."""
         return self._blend.cb_unregister_rope(instance_id)
 
+    @grpc_method(HandlerType.BLOCKING, requires_client_affinity=True)
     def CbRetrievePreComputed(
         self,
         key: IPCCacheServerKey,
@@ -381,6 +402,7 @@ class BlendServiceImpl:
             key, cb_match_result, gpu_block_ids, instance_id, event_ipc_handle
         )
 
+    @grpc_method(HandlerType.BLOCKING)
     def CbUnifiedLookup(
         self,
         key: IPCCacheServerKey,

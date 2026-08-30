@@ -15,11 +15,14 @@ from lmcache.v1.multiprocess.mq import MultiprocessGrpcClient
 from lmcache.v1.multiprocess.protocol import (
     RPC,
     RpcMethod,
-    get_handler_type,
+    get_grpc_method_options,
     get_payload_classes,
     get_response_class,
 )
 from lmcache.v1.multiprocess.protocols.base import HandlerType
+from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
+    lmcache_mq_pb2,
+)
 
 # Test helpers
 from tests.v1.multiprocess import test_mq_handler_helpers
@@ -39,22 +42,22 @@ def test_free_locks_is_descriptor_rpc_method():
 
 
 def test_free_locks_payload_classes():
-    """FREE_LOOKUP_LOCKS payload should be [IPCCacheServerKey, int]."""
+    """FREE_LOOKUP_LOCKS payload is the generated protobuf request."""
     payload_classes = get_payload_classes(RPC.FreeLookupLocks)
-    assert len(payload_classes) == 2
-    assert payload_classes[0] is IPCCacheServerKey
-    assert payload_classes[1] is int
+    assert payload_classes == [lmcache_mq_pb2.FreeLookupLocksRequest]
 
 
 def test_free_locks_response_class():
-    """FREE_LOOKUP_LOCKS should have no response (None)."""
+    """FREE_LOOKUP_LOCKS response is the generated protobuf response."""
     response_class = get_response_class(RPC.FreeLookupLocks)
-    assert response_class is None
+    assert response_class is lmcache_mq_pb2.FreeLookupLocksResponse
 
 
 def test_free_locks_handler_type():
     """FREE_LOOKUP_LOCKS should use BLOCKING handler type."""
-    handler_type = get_handler_type(RPC.FreeLookupLocks)
+    handler_type, _requires_affinity = get_grpc_method_options(
+        test_mq_handler_helpers.free_locks_handler
+    )
     assert handler_type == HandlerType.BLOCKING
 
 

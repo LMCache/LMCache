@@ -14,7 +14,7 @@ from lmcache.v1.multiprocess.custom_types import (
     KVCache,
 )
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
-from lmcache.v1.multiprocess.protocol import KeyType
+from lmcache.v1.multiprocess.protocol import HandlerType, KeyType, grpc_method
 
 # ==============================================================================
 # NOOP Request Handlers
@@ -109,6 +109,7 @@ def unregister_kv_cache_handler(gpu_id: int) -> None:
 # ==============================================================================
 
 
+@grpc_method(HandlerType.BLOCKING, requires_client_affinity=True)
 def store_handler(
     key: KeyType, gpu_id: int, gpu_block_ids: list[list[int]], ipc_handle: bytes
 ) -> tuple[bytes, bool]:
@@ -143,6 +144,7 @@ def store_handler(
 # ==============================================================================
 
 
+@grpc_method(HandlerType.BLOCKING, requires_client_affinity=True)
 def retrieve_handler(
     key: KeyType,
     gpu_id: int,
@@ -185,6 +187,7 @@ def retrieve_handler(
 # ==============================================================================
 
 
+@grpc_method(HandlerType.BLOCKING)
 def lookup_handler(key: KeyType, tp_size: int) -> None:
     """
     Dummy handler for LOOKUP requests.
@@ -208,6 +211,7 @@ def lookup_handler(key: KeyType, tp_size: int) -> None:
 # ==============================================================================
 
 
+@grpc_method(HandlerType.BLOCKING)
 def free_locks_handler(key: KeyType, tp_size: int) -> None:
     """
     Dummy handler for FREE_LOOKUP_LOCKS requests.
@@ -229,6 +233,7 @@ def free_locks_handler(key: KeyType, tp_size: int) -> None:
 # ==============================================================================
 
 
+@grpc_method(HandlerType.BLOCKING)
 def report_block_allocations_handler(
     instance_id: int,
     model_name: str,

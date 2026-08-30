@@ -11,9 +11,8 @@ request/response messages now define the wire protocol.
 # Standard
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Any, Callable, Optional, Sequence, TypeVar, get_type_hints
+from typing import Any, Callable, Optional, Sequence, TypeVar
 from urllib.parse import parse_qs, urlparse
-import inspect
 import threading
 import uuid
 
@@ -28,24 +27,33 @@ from lmcache.v1.multiprocess.protocol import (
     HandlerType,
     RpcMethod,
     coerce_rpc_method,
+    get_grpc_method_options,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
     lmcache_mq_pb2 as _pb2_typed,
 )
-from lmcache.v1.multiprocess.transport.grpc_impl.typed_rpc import (
-    TYPED_RPCS as _TYPED_RPCS,
+from lmcache.v1.multiprocess.transport.grpc_impl.proto_codec import (
+    RequestDecoder,
+    ResponseEncoder,
+    compile_request_decoder,
+    compile_response_encoder,
+    decode_response_to_python,
+    encode_request_from_call,
+    get_request_message_class,
+    get_response_message_class,
+    get_service_names,
 )
-from lmcache.v1.multiprocess.transport.grpc_impl.typed_rpc import (
-    TypedRpcSpec,
-)
-from lmcache.v1.multiprocess.transport.grpc_impl.typed_rpc import (
+from lmcache.v1.multiprocess.transport.grpc_impl.proto_codec import (
     msgspec_decode as msgspec_decode,
 )
-from lmcache.v1.multiprocess.transport.grpc_impl.typed_rpc import (
+from lmcache.v1.multiprocess.transport.grpc_impl.proto_codec import (
     msgspec_encode as msgspec_encode,
 )
-from lmcache.v1.multiprocess.transport.grpc_impl.typed_rpc import (
+from lmcache.v1.multiprocess.transport.grpc_impl.proto_codec import (
     request_type_to_method_name as request_type_to_method_name,
+)
+from lmcache.v1.multiprocess.transport.grpc_impl.proto_codec import (
+    validate_protocol_descriptor,
 )
 
 # Message classes come out of the protobuf descriptor pool at runtime
@@ -112,9 +120,11 @@ _RPC_METHODS_BY_SERVICE: dict[str, tuple[RpcMethod, ...]] = {
     )
     for service_name in {rpc_method.service_name for rpc_method in RPC_METHODS}
 }
-_TYPED_RPCS_BY_METHOD_NAME: dict[str, TypedRpcSpec] = {
-    typed_spec.method_name: typed_spec for typed_spec in _TYPED_RPCS.values()
+_RPC_METHODS_BY_METHOD_NAME: dict[str, RpcMethod] = {
+    str(rpc_method): rpc_method for rpc_method in RPC_METHODS
 }
+
+validate_protocol_descriptor()
 
 
 # ---------------------------------------------------------------------------
@@ -206,7 +216,6 @@ class _PendingUnaryRequest:
     rpc_method: RpcMethod
     method_name: str
     stub_method: Any
-    spec: TypedRpcSpec
     proto_request: Any
     future: MessagingFuture[Any]
 
@@ -246,21 +255,19 @@ class MultiprocessGrpcClient:
             service_name: getattr(lmcache_mq_pb2_grpc, f"{service_name}Stub")(
                 self._channel
             )
-            for service_name in {
-                typed_spec.service_name for typed_spec in _TYPED_RPCS.values()
-            }
+            for service_name in get_service_names()
         }
         self._call_metadata = ((_GRPC_CLIENT_ID_METADATA_KEY, uuid.uuid4().bytes),)
         self._rpc_methods = {
             rpc_method: (
                 _RPC_METHOD_NAMES[rpc_method],
                 getattr(
-                    self._stubs[typed_spec.service_name],
+                    self._stubs[rpc_method.service_name],
                     _RPC_METHOD_NAMES[rpc_method],
                 ),
-                typed_spec,
+                get_request_message_class(rpc_method),
             )
-            for rpc_method, typed_spec in _TYPED_RPCS.items()
+            for rpc_method in RPC_METHODS
         }
 
     def __getattr__(self, name: str) -> ClientRpcCallable:
@@ -281,8 +288,10 @@ class MultiprocessGrpcClient:
                 f"{self.__class__.__name__!r} has no attribute {name!r}"
             )
 
-        def _rpc_call(*request_payloads: Any) -> MessagingFuture[Any]:
-            return self._call_rpc(rpc_method, *request_payloads)
+        def _rpc_call(
+            *request_payloads: Any, **request_fields: Any
+        ) -> MessagingFuture[Any]:
+            return self._call_rpc(rpc_method, *request_payloads, **request_fields)
 
         return _rpc_call
 
@@ -294,6 +303,7 @@ class MultiprocessGrpcClient:
         self,
         rpc_method: RpcMethod,
         *request_payloads: Any,
+        **request_fields: Any,
     ) -> MessagingFuture[T]:
         """Submit one typed RPC by its protocol method.
 
@@ -304,15 +314,18 @@ class MultiprocessGrpcClient:
         Returns:
             A ``MessagingFuture`` completed by the gRPC callback.
         """
-        method_name, stub_method, typed_spec = self._rpc_methods[rpc_method]
+        method_name, stub_method, request_message_class = self._rpc_methods[rpc_method]
         future: MessagingFuture[T] = MessagingFuture()
 
-        proto_request = typed_spec.python_to_request(*request_payloads)
+        proto_request = encode_request_from_call(
+            request_message_class,
+            request_payloads,
+            request_fields,
+        )
         pending = _PendingUnaryRequest(
             rpc_method=rpc_method,
             method_name=method_name,
             stub_method=stub_method,
-            spec=typed_spec,
             proto_request=proto_request,
             future=future,
         )
@@ -359,10 +372,10 @@ class MultiprocessGrpcClient:
             return
 
         try:
-            decoded = pending.spec.response_to_python(proto_response)
+            decoded = decode_response_to_python(proto_response)
         except Exception as exc:
             logger.exception(
-                "failed to decode typed response for %s", pending.method_name
+                "failed to decode protobuf response for %s", pending.method_name
             )
             pending.future.set_exception(exc)
             return
@@ -375,8 +388,9 @@ def _make_client_rpc_method(rpc_method: RpcMethod) -> ClientRpcCallable:
     def _rpc_method(
         self: MultiprocessGrpcClient,
         *request_payloads: Any,
+        **request_fields: Any,
     ) -> MessagingFuture[Any]:
-        return self._call_rpc(rpc_method, *request_payloads)
+        return self._call_rpc(rpc_method, *request_payloads, **request_fields)
 
     _rpc_method.__name__ = method_name
     _rpc_method.__qualname__ = f"MultiprocessGrpcClient.{method_name}"
@@ -412,49 +426,46 @@ class GrpcRequestHandler:
     """Registered Python implementation for one protobuf service method.
 
     Args:
-        spec: Typed RPC binding for the protobuf method.
+        method_name: Protobuf service method name.
         handler: Python callable implementing the method.
         handler_type: Scheduler mode for the registered handler.
         requires_client_affinity: Whether blocking calls need client affinity.
+        request_decoder: Converts protobuf requests to handler args.
+        response_encoder: Converts handler results to protobuf responses.
         executor: Dedicated executor for blocking handlers, if assigned.
     """
 
-    spec: TypedRpcSpec
+    method_name: str
     handler: Callable[..., Any]
     handler_type: HandlerType
     requires_client_affinity: bool
+    request_decoder: RequestDecoder
+    response_encoder: ResponseEncoder
+    payload_types: tuple[Any, ...]
+    response_type: Any
     executor: ThreadPoolExecutor | AffinityThreadPool | None = None
 
-    @property
-    def payload_types(self) -> tuple[Any, ...]:
-        """Return the Python payload types accepted by the handler."""
-        return self.spec.payload_types
-
-    @property
-    def response_type(self) -> Any:
-        """Return the Python response type produced by the handler."""
-        return self.spec.response_type
-
-    def run(self, payloads: tuple[Any, ...], affinity_key: int) -> Any:
+    def run(self, request: Any, affinity_key: int) -> Any:
         """Execute the registered Python handler and return its result.
 
         Args:
-            payloads: Decoded Python payloads from the protobuf request.
+            request: Protobuf request from gRPC.
             affinity_key: Stable client key used by affinity executors.
 
         Returns:
-            The Python result returned by the handler.
+            The protobuf response encoded from the handler's Python result.
 
         Raises:
             RuntimeError: If a blocking handler has no executor.
             NotImplementedError: If the handler type is not implemented.
         """
+        payloads = self.request_decoder(request)
         if self.handler_type is HandlerType.SYNC:
-            return self.handler(*payloads)
+            return self.response_encoder(self.handler(*payloads))
         if self.handler_type is HandlerType.BLOCKING:
             if self.executor is None:
                 raise RuntimeError(
-                    f"Blocking handler for {self.spec.method_name} has no "
+                    f"Blocking handler for {self.method_name} has no "
                     "thread pool assigned."
                 )
             if isinstance(self.executor, AffinityThreadPool):
@@ -463,7 +474,7 @@ class GrpcRequestHandler:
                 )
             else:
                 future = self.executor.submit(self.handler, *payloads)
-            return future.result()
+            return self.response_encoder(future.result())
         raise NotImplementedError(f"handler_type {self.handler_type} not supported")
 
 
@@ -480,8 +491,8 @@ class _GrpcServicer:
         context: "grpc.ServicerContext",
     ) -> Any:
         """Decode a protobuf request, call its handler, and encode the response."""
-        spec = _TYPED_RPCS_BY_METHOD_NAME[method_name]
-        handler = self._handlers.get(spec.rpc_method)
+        rpc_method = _RPC_METHODS_BY_METHOD_NAME[method_name]
+        handler = self._handlers.get(rpc_method)
         if handler is None:
             context.abort(
                 grpc.StatusCode.UNIMPLEMENTED,
@@ -494,13 +505,11 @@ class _GrpcServicer:
             if isinstance(handler.executor, AffinityThreadPool)
             else 0
         )
-        py_args = spec.request_to_python(request)
         try:
-            result = handler.run(py_args, affinity_key)
+            return handler.run(request, affinity_key)
         except NotImplementedError as exc:
             context.abort(grpc.StatusCode.UNIMPLEMENTED, str(exc))
             raise RuntimeError("unreachable") from exc
-        return spec.python_to_response(result)
 
     def RegisterKvCache(self, request: Any, context: "grpc.ServicerContext") -> Any:
         return self._dispatch("RegisterKvCache", request, context)
@@ -656,94 +665,33 @@ class MultiprocessGrpcServer:
         self._closed = threading.Event()
 
     # ------------------------------------------------------------------
-    # Direct handler registration for transport tests and compatibility.
+    # Direct handler registration for transport tests.
     # ------------------------------------------------------------------
-
-    def _inspect_handler_signature(
-        self, request_type: RpcMethod | str, handler: Callable[..., Any]
-    ) -> bool:
-        """Verify that handler annotations match the typed gRPC spec.
-
-        Returns:
-            True if the signature matches or the annotations are omitted
-            in a way that keeps us backwards compatible; False otherwise.
-        """
-
-        def same_type(a: Any, b: Any) -> bool:
-            if a is inspect.Signature.empty:
-                return True
-            if a is None:
-                a = type(None)
-            if b is None:
-                b = type(None)
-            return a == b
-
-        rpc_method = coerce_rpc_method(request_type)
-        typed_spec = _TYPED_RPCS[rpc_method]
-        sig = inspect.signature(handler)
-        hints = get_type_hints(handler)
-        params = [
-            p
-            for p in sig.parameters.values()
-            if p.kind
-            in (
-                inspect.Parameter.POSITIONAL_ONLY,
-                inspect.Parameter.POSITIONAL_OR_KEYWORD,
-            )
-        ]
-
-        payload_types = typed_spec.payload_types
-        if len(params) != len(payload_types):
-            logger.error(
-                "Handler for %s expects %d args, but got %d",
-                rpc_method,
-                len(payload_types),
-                len(params),
-            )
-            return False
-
-        for i, (param, expected_cls) in enumerate(
-            zip(params, payload_types, strict=False)
-        ):
-            ann = hints.get(param.name, param.annotation)
-            if not same_type(ann, expected_cls):
-                logger.error(
-                    "Handler for %s arg %d expects %s, got %s",
-                    rpc_method,
-                    i,
-                    expected_cls,
-                    ann,
-                )
-                return False
-
-        return_ann = hints.get("return", sig.return_annotation)
-        expected_return_cls = typed_spec.response_type
-        if not same_type(return_ann, expected_return_cls):
-            logger.error(
-                "Handler for %s expects return %s, got %s",
-                rpc_method,
-                expected_return_cls,
-                return_ann,
-            )
-            return False
-        return True
 
     def add_handler(
         self,
         request_type: RpcMethod | str,
         *args: Any,
     ) -> None:
+        """Register one protobuf method handler.
+
+        Args:
+            request_type: Descriptor-derived protobuf method token.
+            *args: Either ``(handler,)`` or the legacy test-only
+                ``(_payload_classes, handler_type, handler)`` shape.
+
+        Raises:
+            TypeError: If arguments are malformed.
+            NotImplementedError: If non-blocking handlers are requested.
+            ValueError: If the handler type is unknown.
+        """
         rpc_method = coerce_rpc_method(request_type)
-        typed_spec = _TYPED_RPCS[rpc_method]
         if len(args) == 1 and callable(args[0]):
             handler = args[0]
-            handler_type = typed_spec.handler_type
+            handler_type, requires_client_affinity = get_grpc_method_options(handler)
         elif len(args) == 3:
-            payload_clss, handler_type, handler = args
-            if tuple(payload_clss) != typed_spec.payload_types:
-                raise ValueError(
-                    f"Payload classes do not match for RPC method: {rpc_method}"
-                )
+            _payload_clss, handler_type, handler = args
+            _decorated_type, requires_client_affinity = get_grpc_method_options(handler)
         else:
             raise TypeError(
                 "add_handler expects either (rpc_method, handler) or "
@@ -752,28 +700,53 @@ class MultiprocessGrpcServer:
 
         if not callable(handler):
             raise TypeError("handler must be callable")
-        if not self._inspect_handler_signature(rpc_method, handler):
-            raise ValueError(
-                f"Handler signature does not match for RPC method: {rpc_method}"
-            )
 
         if handler_type is HandlerType.SYNC:
             self.add_sync_handler(rpc_method, handler)
         elif handler_type is HandlerType.BLOCKING:
-            self.add_blocking_handler(rpc_method, handler)
+            self.add_blocking_handler(
+                rpc_method,
+                handler,
+                requires_client_affinity=requires_client_affinity,
+            )
         elif handler_type is HandlerType.NON_BLOCKING:
             raise NotImplementedError("Non-blocking handler is not supported yet")
         else:
             raise ValueError(f"Unknown handler type: {handler_type}")
+
+    def _register_handler(
+        self,
+        request_type: RpcMethod | str,
+        handler: Callable[..., Any],
+        *,
+        handler_type: HandlerType,
+        requires_client_affinity: bool,
+    ) -> None:
+        rpc_method = coerce_rpc_method(request_type)
+        request_cls = get_request_message_class(rpc_method)
+        response_cls = get_response_message_class(rpc_method)
+        request_decoder, payload_types = compile_request_decoder(request_cls, handler)
+        response_encoder, response_type = compile_response_encoder(
+            response_cls, handler
+        )
+        self.handlers[rpc_method] = GrpcRequestHandler(
+            method_name=str(rpc_method),
+            handler=handler,
+            handler_type=handler_type,
+            requires_client_affinity=requires_client_affinity,
+            request_decoder=request_decoder,
+            response_encoder=response_encoder,
+            payload_types=payload_types,
+            response_type=response_type,
+        )
 
     def add_sync_handler(
         self,
         request_type: RpcMethod | str,
         handler: Callable[..., Any],
     ) -> None:
-        rpc_method = coerce_rpc_method(request_type)
-        self.handlers[rpc_method] = GrpcRequestHandler(
-            spec=_TYPED_RPCS[rpc_method],
+        self._register_handler(
+            request_type,
             handler=handler,
             handler_type=HandlerType.SYNC,
             requires_client_affinity=False,
@@ -783,14 +756,14 @@ class MultiprocessGrpcServer:
         self,
         request_type: RpcMethod | str,
         handler: Callable[..., Any],
+        *,
+        requires_client_affinity: bool = False,
     ) -> None:
-        rpc_method = coerce_rpc_method(request_type)
-        typed_spec = _TYPED_RPCS[rpc_method]
-        self.handlers[rpc_method] = GrpcRequestHandler(
-            spec=typed_spec,
+        self._register_handler(
+            request_type,
             handler=handler,
             handler_type=HandlerType.BLOCKING,
-            requires_client_affinity=typed_spec.requires_client_affinity,
+            requires_client_affinity=requires_client_affinity,
         )
 
     def add_nonblocking_handler(
@@ -958,9 +931,7 @@ class MultiprocessGrpcServer:
             compression=compression,
         )
         servicer = _GrpcServicer(self.handlers)
-        for service_name in sorted(
-            {typed_spec.service_name for typed_spec in _TYPED_RPCS.values()}
-        ):
+        for service_name in sorted(get_service_names()):
             add_servicer = getattr(
                 lmcache_mq_pb2_grpc,
                 f"add_{service_name}Servicer_to_server",

@@ -6,7 +6,10 @@ import pytest
 
 # First Party
 from lmcache.v1.multiprocess.protocol import RPC, RPC_METHODS, coerce_rpc_method
-from lmcache.v1.multiprocess.transport.grpc_impl.typed_rpc import TYPED_RPCS
+from lmcache.v1.multiprocess.transport.grpc_impl.proto_codec import (
+    get_request_message_class,
+    get_response_message_class,
+)
 
 CB_METHODS = [
     "CbRegisterRope",
@@ -25,9 +28,15 @@ DEPRECATED_CB_NAMES = [
 ]
 
 
-def test_every_descriptor_rpc_has_a_typed_contract() -> None:
-    """Every protobuf RPC has exactly one Python contract."""
-    assert set(RPC_METHODS) == set(TYPED_RPCS)
+def test_every_descriptor_rpc_has_generated_messages() -> None:
+    """Every protobuf RPC resolves to generated request/response messages."""
+    for rpc_method in RPC_METHODS:
+        assert get_request_message_class(rpc_method).DESCRIPTOR.full_name.startswith(
+            "lmcache.mp."
+        )
+        assert get_response_message_class(rpc_method).DESCRIPTOR.full_name.startswith(
+            "lmcache.mp."
+        )
 
 
 def test_blend_methods_are_registered_on_blend_service() -> None:
@@ -35,7 +44,6 @@ def test_blend_methods_are_registered_on_blend_service() -> None:
     for name in CB_METHODS:
         rpc_method = getattr(RPC, name)
         assert coerce_rpc_method(name) is rpc_method
-        assert rpc_method in TYPED_RPCS
         assert rpc_method.service_name == "BlendService"
 
 

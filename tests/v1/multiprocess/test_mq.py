@@ -29,8 +29,7 @@ from lmcache.v1.multiprocess.protocol import (
     RPC,
     HandlerType,
     RpcMethod,
-    get_handler_type,
-    get_payload_classes,
+    get_grpc_method_options,
 )
 
 # Test helpers
@@ -120,18 +119,14 @@ def _server_process(
         shutdown_event: Event to signal server shutdown
         request_handlers: Dict mapping RpcMethod to handler functions
     """
-    # First Party
-    from lmcache.v1.multiprocess.protocol import HandlerType
-
     context = zmq.Context.instance()
     server = MultiprocessGrpcServer(server_url, context)
 
     # Register all handlers
     blocking_types: list[RpcMethod] = []
     for request_type, handler in request_handlers.items():
-        payload_classes = get_payload_classes(request_type)
-        handler_type = get_handler_type(request_type)
-        server.add_handler(request_type, payload_classes, handler_type, handler)
+        handler_type, _requires_client_affinity = get_grpc_method_options(handler)
+        server.add_handler(request_type, handler)
         if handler_type == HandlerType.BLOCKING:
             blocking_types.append(request_type)
 

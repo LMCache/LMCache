@@ -2,7 +2,7 @@
 """Descriptor-native RPC method tokens for the LMCache gRPC transport."""
 
 # Standard
-from typing import Any, ClassVar, Optional
+from typing import Any, Callable, ClassVar, TypeVar
 import re
 
 # First Party
@@ -18,6 +18,44 @@ lmcache_mq_pb2: Any = _pb2_typed
 # Type aliases kept for older callers.
 InstanceID = int
 KeyType = IPCCacheServerKey
+
+F = TypeVar("F", bound=Callable[..., Any])
+
+_GRPC_HANDLER_TYPE_ATTR = "__lmcache_grpc_handler_type__"
+_GRPC_REQUIRES_CLIENT_AFFINITY_ATTR = "__lmcache_grpc_requires_client_affinity__"
+
+
+def grpc_method(
+    handler_type: HandlerType = HandlerType.SYNC,
+    *,
+    requires_client_affinity: bool = False,
+) -> Callable[[F], F]:
+    """Attach server scheduling metadata to a concrete gRPC method.
+
+    Args:
+        handler_type: How the server should run this RPC implementation.
+        requires_client_affinity: Whether blocking calls must keep requests from
+            one client on the same worker thread.
+
+    Returns:
+        A decorator that preserves the wrapped function.
+    """
+
+    def decorate(func: F) -> F:
+        setattr(func, _GRPC_HANDLER_TYPE_ATTR, handler_type)
+        setattr(func, _GRPC_REQUIRES_CLIENT_AFFINITY_ATTR, requires_client_affinity)
+        return func
+
+    return decorate
+
+
+def get_grpc_method_options(handler: Callable[..., Any]) -> tuple[HandlerType, bool]:
+    """Return scheduling metadata attached by :func:`grpc_method`."""
+    source = getattr(handler, "__func__", handler)
+    return (
+        getattr(source, _GRPC_HANDLER_TYPE_ATTR, HandlerType.SYNC),
+        getattr(source, _GRPC_REQUIRES_CLIENT_AFFINITY_ATTR, False),
+    )
 
 
 class _RpcMethodMeta(type):
@@ -133,79 +171,40 @@ def coerce_rpc_method(req_type: RpcMethod | str) -> RpcMethod:
     raise ValueError(f"Invalid RPC method: {req_type}")
 
 
-def _get_typed_spec(req_type: RpcMethod | str) -> Any:
-    """Return the typed RPC spec without making protocol import typed_rpc eagerly."""
-    # First Party
-    from lmcache.v1.multiprocess.transport.grpc_impl.typed_rpc import TYPED_RPCS
-
-    rpc_method = coerce_rpc_method(req_type)
-    try:
-        return TYPED_RPCS[rpc_method]
-    except KeyError as exc:
-        raise ValueError(f"Invalid RPC method: {req_type}") from exc
-
-
 def get_payload_classes(req_type: RpcMethod | str) -> list[Any]:
     """
-    Get the expected Python payload classes for an RPC method.
+    Get the protobuf request class for an RPC method.
 
     Args:
         req_type: The protobuf RPC method to look up.
 
     Returns:
-        The payload classes expected by the service implementation.
-
-    Raises:
-        ValueError: If the RPC method is not recognized.
+        A single-item list containing the generated protobuf request class.
     """
-    return list(_get_typed_spec(req_type).payload_types)
+    # First Party
+    from lmcache.v1.multiprocess.transport.grpc_impl.proto_codec import (
+        get_request_message_class,
+    )
+
+    return [get_request_message_class(req_type)]
 
 
-def get_response_class(req_type: RpcMethod | str) -> Optional[Any]:
+def get_response_class(req_type: RpcMethod | str) -> Any:
     """
-    Get the expected Python response class for an RPC method.
+    Get the protobuf response class for an RPC method.
 
     Args:
         req_type: The protobuf RPC method to look up.
 
     Returns:
-        Expected response class, or None when the RPC has no response payload.
-
-    Raises:
-        ValueError: If the RPC method is not recognized.
+        The generated protobuf response class.
     """
-    return _get_typed_spec(req_type).response_type
+    # First Party
+    from lmcache.v1.multiprocess.transport.grpc_impl.proto_codec import (
+        get_response_message_class,
+    )
 
-
-def get_handler_type(req_type: RpcMethod | str) -> HandlerType:
-    """
-    Get the execution mode for an RPC method.
-
-    Args:
-        req_type: The protobuf RPC method to look up.
-
-    Returns:
-        The handler execution mode.
-
-    Raises:
-        ValueError: If the RPC method is not recognized.
-    """
-    return _get_typed_spec(req_type).handler_type
-
-
-def requires_client_affinity(req_type: RpcMethod | str) -> bool:
-    """Return whether an RPC must run on a stable per-client worker slot.
-
-    Args:
-        req_type: The protobuf RPC method to look up.
-
-    Returns:
-        True when the blocking handler requires client affinity.
-
-    Raises:
-        ValueError: If the RPC method is not recognized.
-    """
-    return _get_typed_spec(req_type).requires_client_affinity
+    return get_response_message_class(req_type)
 
 
 __all__ = [
@@ -216,8 +215,8 @@ __all__ = [
     "KeyType",
     "RpcMethod",
     "coerce_rpc_method",
-    "get_handler_type",
+    "get_grpc_method_options",
     "get_payload_classes",
     "get_response_class",
-    "requires_client_affinity",
+    "grpc_method",
 ]

@@ -542,19 +542,18 @@ Adding a new gRPC method
       pip install -r requirements/proto.txt
       python -m lmcache.v1.multiprocess.transport.grpc_impl._proto_gen._generate
 
-3. Add the Python value mapping and handler scheduling mode in
-   ``transport/grpc_impl/typed_rpc.py``. The proto descriptor remains the
-   source of truth for service and method names; this mapping only describes
-   LMCache Python domain objects such as ``IPCCacheServerKey`` and ``KVCache``.
-4. Implement the generated RPC method on the matching Python service
+3. Implement the generated RPC method on the matching Python service
    implementation in ``services/rpc_services.py`` using the protobuf method
    name exactly (for example, ``EngineServiceImpl.QueryPrefetchStatus``).
+   Use ``@grpc_method(HandlerType.BLOCKING)`` on methods that must run in the
+   server worker pool; methods without the decorator run synchronously.
    Put reusable backend logic in the narrower service file only when it is not
    itself the generated gRPC service surface.
-5. Register the service implementation from ``run_cache_server()`` with
+4. Register a new service implementation from ``run_cache_server()`` with
    ``MultiprocessGrpcServer.add_service("ServiceName", impl)``. The transport
    binds protobuf methods by exact CamelCase method name; it does not read
    per-backend service-name declarations or aliases.
+   Existing services do not need transport changes when adding another method.
 
 Key Source Files
 ----------------
@@ -594,9 +593,11 @@ Key Source Files
      - ``MPRuntimePluginLauncher`` that spawns runtime plugins with the
        full server config serialized into environment variables
    * - ``lmcache/v1/multiprocess/protocol.py``
-     - Descriptor-derived ``RpcMethod`` tokens and compatibility helpers
-   * - ``lmcache/v1/multiprocess/transport/grpc_impl/typed_rpc.py``
-     - Python value codecs and handler scheduling metadata for gRPC methods
+     - Descriptor-derived ``RpcMethod`` tokens and ``@grpc_method`` scheduling
+       metadata
+   * - ``lmcache/v1/multiprocess/transport/grpc_impl/proto_codec.py``
+     - Generic protobuf value codecs driven by descriptors and service method
+       annotations
    * - ``lmcache/v1/distributed/storage_manager.py``
      - StorageManager (top-level manager)
    * - ``lmcache/v1/distributed/config.py``
