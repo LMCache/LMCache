@@ -613,7 +613,9 @@ def _compile_request_codec(
     )
 
 
-def _handler_payload_types(handler: Callable[..., Any]) -> tuple[Any, ...]:
+def _handler_params_and_payload_types(
+    handler: Callable[..., Any],
+) -> tuple[list[inspect.Parameter], tuple[Any, ...]]:
     sig = inspect.signature(handler)
     hints = get_type_hints(handler)
     params = [
@@ -626,8 +628,11 @@ def _handler_payload_types(handler: Callable[..., Any]) -> tuple[Any, ...]:
         )
     ]
     payload_types = tuple(hints.get(param.name, param.annotation) for param in params)
-    return tuple(
-        Any if item is inspect.Signature.empty else item for item in payload_types
+    return (
+        params,
+        tuple(
+            Any if item is inspect.Signature.empty else item for item in payload_types
+        ),
     )
 
 
@@ -644,9 +649,34 @@ def compile_request_decoder(
         Callable that decodes one protobuf request into handler positional args,
         plus the payload types inferred from the handler.
     """
-    payload_types = _handler_payload_types(handler)
-    _encoder, decoder = _compile_request_codec(message_cls, payload_types)
-    return decoder, payload_types
+    params, payload_types = _handler_params_and_payload_types(handler)
+    proto_fields = tuple(message_cls.DESCRIPTOR.fields)
+
+    if not params:
+        return (lambda _message: ()), payload_types
+
+    if len(params) == len(proto_fields) or len(params) == 1:
+        _encoder, decoder = _compile_request_codec(message_cls, payload_types)
+        return decoder, payload_types
+
+    fields_by_name = message_cls.DESCRIPTOR.fields_by_name
+    selected_codecs: list[tuple[Any, FieldReader]] = []
+    for param, py_type in zip(params, payload_types, strict=True):
+        field = fields_by_name.get(param.name)
+        if field is None:
+            field = fields_by_name.get(f"encoded_{param.name}")
+        if field is None:
+            raise TypeError(
+                f"{message_cls.DESCRIPTOR.full_name} has no field matching "
+                f"handler parameter {param.name!r}"
+            )
+        _writer, reader = _compile_field_codec(field, py_type)
+        selected_codecs.append((field, reader))
+
+    def decode_subset(message: Any) -> tuple[Any, ...]:
+        return tuple(reader(message) for _field, reader in selected_codecs)
+
+    return decode_subset, payload_types
 
 
 def compile_response_encoder(
