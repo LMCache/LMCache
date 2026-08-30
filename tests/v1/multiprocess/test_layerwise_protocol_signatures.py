@@ -21,7 +21,7 @@ import pytest
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
 )
-from lmcache.v1.multiprocess.modules.lmcache_layerwise_transfer import (
+from lmcache.v1.multiprocess.modules.lmcache_driven_transfer_layerwise import (
     LMCacheLayerwiseTransferModule,
 )
 from lmcache.v1.multiprocess.mq import MessageQueueServer

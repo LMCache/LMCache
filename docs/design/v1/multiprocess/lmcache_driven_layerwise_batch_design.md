@@ -430,3 +430,84 @@ needed:
 
 **Closing** (one, emitted after the handler returns): `is_final = True`,
 `payload` empty when the indices were already reported.
+
+### 8.4 Frame Sequence for One Request
+
+A single `RETRIEVE_LAYERWISE` request produces every frame.  The
+multiplexing is done by reusing the request UID: the server copies the
+same `prefix_frames` for each send, and the client re-arms the pending
+entry under that UID until the future reports the exchange is over.
+
+```
+client                                  server (affinity pool thread)
+  |                                        |
+  |-- RETRIEVE_LAYERWISE (uid=7) --------->|
+  |   pending_futures[7] = future          |
+  |                                        |  batch 0: H2D + scatter
+  |                                        |           record_event(e0)
+  |<-- [7, type, (first=0, cnt=N, idx=0)] -|  response_channel(...)
+  |   deliver() -> False -> re-arm [7]     |
+  |                                        |  batch 1: H2D + scatter
+  |                                        |           record_event(e1)
+  |<-- [7, type, (first=N, cnt=N, idx=N)] -|  response_channel(...)
+  |   deliver() -> False -> re-arm [7]     |
+  |             ...                        |             ...
+  |                                        |  handler returns
+  |<-- [7, type, (b"", True, succeeded)] --|  done-callback
+  |   deliver() -> True  -> drop [7]       |
+  |                                        |
+```
+
+Client dispatch, in `MessageQueueClient.process_inbound`:
+
+```python
+b_request_uid, b_request_type, *b_response = msg
+...
+if request_uid in self.pending_futures:
+    future = self.pending_futures.pop(request_uid)
+    response = msgspec_decode(b_response[0], cls=response_cls) if b_response else None
+    if not future.deliver(response):
+        self.pending_futures[request_uid] = future   # put it back
+```
+
+The entry is popped and re-inserted under the **same** UID until
+`deliver()` returns True.  There is no second request and no side
+channel.
+
+Server dispatch, in `MessageQueueServer._call_blocking_handler`: the
+same closure serves both frame kinds, so intermediate and closing
+frames are indistinguishable on the wire apart from `is_final`:
+
+```python
+def _send_response(response):
+    frames_to_send = list(prefix_frames)     # [identity, uid, type]
+    if response is not None:
+        frames_to_send.append(msgspec_encode(response, cls=response_cls))
+    self.output_queue.put(frames_to_send)
+    self._output_efd.notify()
+```
+
+The ROUTER socket consumes `identity` for routing, so the client's
+DEALER receives `[uid, type, *response]`.
+
+**Why the future must be pre-created.**  This is the reason
+`submit_request` accepts a `future=` argument.  The delivery sink has to
+be installed *before* the request becomes visible to the polling loop:
+
+```python
+raw_future.set_delivery_sink(self._deliver_frame)
+```
+
+If `submit_request` built the future internally, a frame could arrive
+and be dispatched before the caller got the object back to attach the
+sink.  The first intermediate frame would then complete the future
+outright and the remaining frames would be dropped.
+
+**Frames signal enqueue, not completion.**  Each intermediate frame is
+emitted immediately after `record_event`, which follows an *enqueue-only*
+native call.  The closing frame therefore means "no more frames", not
+"the H2D copies have landed".  Completion is carried by the events:
+`wait_for_layer` inserts a stream-ordered `wait_event` (the host does not
+block), and `LayerwiseDeviceMessagingFuture.wait()` calls
+`synchronize_event` on the last layer's event -- that is the only point
+at which all transfers are provably done.

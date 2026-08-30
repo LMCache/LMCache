@@ -4,7 +4,7 @@ Layer-wise transfer protocol definitions.
 
 This module defines the protocol for the layer-wise KV retrieve path, which
 is served by ``LMCacheLayerwiseTransferModule`` in
-``lmcache.v1.multiprocess.modules.lmcache_layerwise_transfer``.
+``lmcache.v1.multiprocess.modules.lmcache_driven_transfer_layerwise``.
 
 Keeping these definitions out of ``protocols/engine.py`` means the default
 (per-chunk) transfer protocol is byte-for-byte unchanged when layer-wise mode

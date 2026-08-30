@@ -21,8 +21,8 @@ import torch
 from lmcache.utils import EngineType, init_logger
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.futures import MessagingFuture
+from lmcache.v1.multiprocess.futures_layerwise import LayerwiseDeviceMessagingFuture
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
-from lmcache.v1.multiprocess.layerwise_futures import LayerwiseDeviceMessagingFuture
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
 from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
