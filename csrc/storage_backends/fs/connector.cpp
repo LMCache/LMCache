@@ -128,8 +128,7 @@ static bool try_enable_odirect(int& flags, const void* buf, size_t len,
   }
   auto addr = reinterpret_cast<std::uintptr_t>(buf);
   if (addr % disk_block_size != 0) {
-    throw std::runtime_error(
-        "O_DIRECT buffer address is not aligned to filesystem block size");
+    return false;
   }
   flags |= O_DIRECT;
   return true;
