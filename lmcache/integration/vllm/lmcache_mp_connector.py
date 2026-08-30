@@ -289,6 +289,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
       heartbeat pings.
     - lmcache.mp.eager_prefetch: submit the LMCache lookup when a request
       enters vLLM's waiting queue. Disabled by default.
+    - lmcache.mp.report_block_allocations: publish per-step GPU block allocation
+      records for L0 observability. Enabled by default.
     """
 
     def __init__(
@@ -308,6 +310,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         self._eager_prefetch: bool = bool(
             vllm_config.kv_transfer_config.get_from_extra_config(
                 "lmcache.mp.eager_prefetch", False
+            )
+        )
+        self._report_block_allocations_enabled: bool = bool(
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "lmcache.mp.report_block_allocations", True
             )
         )
 
@@ -1307,6 +1314,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         For cached requests: only newly appended block_ids and token_ids.
         The L0 allocation telemetry is flat today, so HMA reports engine group 0.
         """
+        if not self._report_block_allocations_enabled:
+            return
+
         records: list[RequestAllocationRecord] = []
 
         # New requests: send all tokens covering all allocated blocks so
