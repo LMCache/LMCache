@@ -569,7 +569,6 @@ class UnifiedLMCacheMPConnector:
             cache_salt=cache_salt,
         )
         self._lookups[request_id] = operation
-        self._active_sessions.add(request_id)
         aligned_end = len(token_ids) // self.chunk_size * self.chunk_size
         if aligned_end == 0:
             operation.total_hit_tokens = 0
@@ -589,7 +588,11 @@ class UnifiedLMCacheMPConnector:
             except Exception:
                 logger.exception("LMCache lookup submission failed for %s", request_id)
                 submitted = False
-        if not self._sync_success(submitted):
+        if self._sync_success(submitted):
+            # This lookup has reached the server and will create/update its
+            # Session. STORE tracks its own actual submissions separately.
+            self._active_sessions.add(request_id)
+        else:
             operation.total_hit_tokens = 0
         return operation
 
@@ -870,7 +873,6 @@ class UnifiedLMCacheMPConnector:
         start = start // self.chunk_size * self.chunk_size
         if aligned_end <= start:
             return None
-        self._active_sessions.add(request_id)
         lookup = LMCacheLookupOperation(
             request_id=request_id,
             token_ids=list(token_ids),
@@ -920,6 +922,7 @@ class UnifiedLMCacheMPConnector:
             lookup, start=start, end=aligned_end, worker_id=self.worker_id
         )
         try:
+            submitted = True
             event = self._new_event()
             future = self._transfer_ctx.submit_store(
                 request_id,
@@ -932,8 +935,14 @@ class UnifiedLMCacheMPConnector:
             )
         except Exception:
             logger.exception("LMCache store submission failed for %s", request_id)
+            submitted = False
             future = _ImmediateFuture(False)
             event = None
+        # STORE also creates a server-side Session via resolve_obj_keys().
+        # Track it only after an RPC was actually submitted. MAX is required:
+        # one successful TP/PP worker is enough for the shared Session to exist.
+        if self._sync_leader_int(int(submitted)) > 0:
+            self._active_sessions.add(request_id)
         if event is not None:
             future.retain_reference(event)
         self._store_submitted_tokens[request_id] = aligned_end
@@ -972,7 +981,10 @@ class UnifiedLMCacheMPConnector:
         # First Party
         from lmcache.v1.multiprocess.protocol import RequestType
 
-        was_active = request_id in self._active_sessions or request_id in self._lookups
+        # A local lookup object can represent an aligned-empty lookup for
+        # which no LOOKUP RPC was sent. Only _active_sessions proves that a
+        # LOOKUP or STORE reached the server and requires END_SESSION.
+        was_active = request_id in self._active_sessions
         self.end_lookup(request_id)
         if was_active and self.is_lookup_leader:
             self._track_control_future(

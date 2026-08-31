@@ -3,7 +3,7 @@
 
 # Standard
 from types import ModuleType
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import unittest
 
 # Third Party
@@ -48,6 +48,11 @@ class _IPCCacheServerKey:
         self.__dict__.update(kwargs)
 
 
+class _RequestType:
+    LOOKUP = object()
+    END_SESSION = object()
+
+
 class TestUnifiedLMCacheMPConnector(unittest.TestCase):
     def setUp(self):
         self.connector = object.__new__(UnifiedLMCacheMPConnector)
@@ -89,6 +94,53 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         self.assertIs(
             all_reduce.call_args_list[1].kwargs["group"], self.connector.pp_group
         )
+
+    def test_aligned_empty_lookup_does_not_send_end_session(self):
+        self.connector.chunk_size = 8
+        self.connector._lookups = {}
+        self.connector._active_sessions = set()
+        self.connector._lookup_leader = True
+        self.connector._mq_client = object()
+        self.connector._send_request = Mock()
+        self.connector._track_control_future = Mock()
+
+        protocol = ModuleType("lmcache.v1.multiprocess.protocol")
+        protocol.RequestType = _RequestType
+        with patch.dict("sys.modules", {"lmcache.v1.multiprocess.protocol": protocol}):
+            operation = self.connector.submit_lookup(
+                "short-request",
+                [1, 2, 3],
+                local_hit_tokens=0,
+                cache_salt="",
+            )
+            self.connector.end_session("short-request")
+
+        self.assertEqual(operation.total_hit_tokens, 0)
+        self.connector._send_request.assert_not_called()
+        self.connector._track_control_future.assert_not_called()
+
+    def test_submitted_lookup_tracks_server_session(self):
+        self.connector.chunk_size = 4
+        self.connector.world_size = 1
+        self.connector._lookups = {}
+        self.connector._active_sessions = set()
+        self.connector._lookup_leader = True
+        self.connector._mq_client = object()
+        self.connector._create_key = Mock(return_value=object())
+        self.connector._send_request = Mock(return_value=_Future(False))
+        self.connector._sync_success = lambda success: success
+
+        protocol = ModuleType("lmcache.v1.multiprocess.protocol")
+        protocol.RequestType = _RequestType
+        with patch.dict("sys.modules", {"lmcache.v1.multiprocess.protocol": protocol}):
+            self.connector.submit_lookup(
+                "lookup-request",
+                [1, 2, 3, 4],
+                local_hit_tokens=0,
+                cache_salt="",
+            )
+
+        self.assertIn("lookup-request", self.connector._active_sessions)
 
     def test_slots_to_blocks_rejects_partial_page(self):
         with self.assertRaisesRegex(ValueError, "complete SGLang pages"):
@@ -229,6 +281,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         connector._new_event = lambda: object()
         connector._create_key = lambda *args, **kwargs: object()
         connector._sync_success = lambda success: success
+        connector._sync_leader_int = lambda value: value
 
         operation = connector.submit_store(
             "request",
@@ -241,6 +294,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         )
 
         self.assertIsNotNone(operation)
+        self.assertIn("request", connector._active_sessions)
         self.assertEqual(
             connector._transfer_ctx.store_args[4],
             [[1, 2], [3, 5]],
@@ -270,6 +324,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         )
 
         self.assertIsNone(operation)
+        self.assertNotIn("request", connector._active_sessions)
         self.assertNotIn("request", connector._store_submitted_tokens)
 
     def test_submit_store_accepts_dummy_mamba_blocks(self):
@@ -298,6 +353,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         connector._new_event = lambda: object()
         connector._create_key = lambda *args, **kwargs: object()
         connector._sync_success = lambda success: success
+        connector._sync_leader_int = lambda value: value
 
         operation = connector.submit_store(
             "request",
