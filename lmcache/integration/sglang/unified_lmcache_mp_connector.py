@@ -121,9 +121,12 @@ class UnifiedLMCacheMPConnector:
         *,
         config_file: Optional[str],
         model_name: str,
-        world_size: int,
-        worker_id: int,
+        tp_size: int,
+        tp_rank: int,
         tp_group: Optional[dist.ProcessGroup],
+        pp_size: int = 1,
+        pp_rank: int = 0,
+        pp_group: Optional[dist.ProcessGroup] = None,
         page_size: int,
         kv_groups: list[LMCacheKVGroup],
     ) -> None:
@@ -271,22 +274,39 @@ class UnifiedLMCacheMPConnector:
             )
 
         self.model_name = model_name
-        self.world_size = int(world_size)
-        self.worker_id = int(worker_id)
+        # Match vLLM's non-replicated ParallelStrategy: each TP x PP process
+        # owns one globally unique LMCache object piece. This also keeps MLA
+        # correct (at the cost of retaining its TP replicas) without assuming
+        # that every SGLang component in a hybrid model is TP-replicated.
+        (
+            self.tp_size,
+            self.tp_rank,
+            self.pp_size,
+            self.pp_rank,
+            self.world_size,
+            self.worker_id,
+        ) = self._resolve_parallel_geometry(tp_size, tp_rank, pp_size, pp_rank)
         self.tp_group = tp_group
-        if self.world_size > 1:
+        self.pp_group = pp_group
+        if self.tp_size > 1:
             if self.tp_group is None:
                 raise ValueError("LMCache TP>1 requires a CPU TP process group")
             group_size = dist.get_world_size(group=self.tp_group)
-            if group_size != self.world_size:
-                raise NotImplementedError(
-                    "LMCache MP requires its synchronization group to match "
-                    f"the registered world size, got {group_size=} and "
-                    f"{self.world_size=}"
+            if group_size != self.tp_size:
+                raise ValueError(
+                    "LMCache MP TP synchronization group has the wrong size: "
+                    f"got {group_size=}, expected {self.tp_size}"
                 )
-            self._lookup_leader = dist.get_rank(group=self.tp_group) == 0
-        else:
-            self._lookup_leader = True
+        if self.pp_size > 1:
+            if self.pp_group is None:
+                raise ValueError("LMCache PP>1 requires a CPU PP process group")
+            group_size = dist.get_world_size(group=self.pp_group)
+            if group_size != self.pp_size:
+                raise ValueError(
+                    "LMCache MP PP synchronization group has the wrong size: "
+                    f"got {group_size=}, expected {self.pp_size}"
+                )
+        self._lookup_leader = self.tp_rank == 0 and self.pp_rank == 0
         self.page_size = int(page_size)
         # Every registered wire row is one complete engine block/page.
         self._layout_slots_per_block = 1
@@ -324,6 +344,27 @@ class UnifiedLMCacheMPConnector:
         self.blocks_in_chunk = self.chunk_size
         self.register_kv_cache()
         self._start_heartbeat()
+
+    @staticmethod
+    def _resolve_parallel_geometry(
+        tp_size: int, tp_rank: int, pp_size: int, pp_rank: int
+    ) -> tuple[int, int, int, int, int, int]:
+        tp_size = int(tp_size)
+        tp_rank = int(tp_rank)
+        pp_size = int(pp_size)
+        pp_rank = int(pp_rank)
+        if tp_size <= 0 or not 0 <= tp_rank < tp_size:
+            raise ValueError(f"Invalid LMCache TP topology: {tp_size=}, {tp_rank=}")
+        if pp_size <= 0 or not 0 <= pp_rank < pp_size:
+            raise ValueError(f"Invalid LMCache PP topology: {pp_size=}, {pp_rank=}")
+        return (
+            tp_size,
+            tp_rank,
+            pp_size,
+            pp_rank,
+            tp_size * pp_size,
+            pp_rank * tp_size + tp_rank,
+        )
 
     @staticmethod
     def _to_wire_block_tensor(
@@ -392,18 +433,27 @@ class UnifiedLMCacheMPConnector:
         return self._mq_timeout
 
     def _sync_leader_int(self, value: int) -> int:
-        if self.world_size == 1:
-            return value
         tensor = torch.tensor([value], dtype=torch.int64, device="cpu")
-        dist.all_reduce(tensor, op=dist.ReduceOp.MAX, group=self.tp_group)
+        self._parallel_all_reduce(tensor, dist.ReduceOp.MAX)
         return int(tensor.item())
 
     def _sync_success(self, success: bool) -> bool:
-        if self.world_size == 1:
-            return success
         tensor = torch.tensor([int(success)], dtype=torch.int32, device="cpu")
-        dist.all_reduce(tensor, op=dist.ReduceOp.MIN, group=self.tp_group)
+        self._parallel_all_reduce(tensor, dist.ReduceOp.MIN)
         return bool(tensor.item())
+
+    def _parallel_all_reduce(self, tensor: torch.Tensor, op: dist.ReduceOp) -> None:
+        """Reduce over the Cartesian TP x PP scheduler mesh.
+
+        TP groups contain one pipeline stage; PP groups contain the same TP
+        rank from every stage. Reducing over both dimensions gives every
+        scheduler the same lookup/readiness/failure result without requiring
+        an additional global process group.
+        """
+        if self.tp_size > 1:
+            dist.all_reduce(tensor, op=op, group=self.tp_group)
+        if self.pp_size > 1:
+            dist.all_reduce(tensor, op=op, group=self.pp_group)
 
     def register_kv_cache(self) -> None:
         """Export the SGLang GPU tensors to the LMCache MP server once."""
@@ -487,9 +537,8 @@ class UnifiedLMCacheMPConnector:
             model_name=self.model_name,
             world_size=self.world_size,
             worker_id=worker_id,
-            # TODO(chunxiaozheng): optimie MLA
-            # Each TP rank registers and retrieves its own worker_id-scoped
-            # object, so every stored KV object has exactly one reader.
+            # Each TP x PP rank registers and retrieves its own globally
+            # worker_id-scoped object, so each object has exactly one reader.
             num_kv_readers=1,
             token_ids=tuple(operation.token_ids),
             start=start,
@@ -764,7 +813,7 @@ class UnifiedLMCacheMPConnector:
                 skip_first_n_tokens=prefix_pad,
             )
         except Exception:
-            # Every TP rank must enqueue one operation in the same order. A
+            # Every TP x PP rank must enqueue one operation in the same order. A
             # ready-false future lets completion consensus fail the operation
             # after successful peers finish their already-submitted retrieve.
             logger.exception(
@@ -853,16 +902,18 @@ class UnifiedLMCacheMPConnector:
         # the SWA page has already been tombstoned, so defer the store. Mamba is
         # deliberately sparse: only the final checkpoint is real and LMCache's
         # recurrent object group skips all-null earlier chunks.
-        if any(
+        can_submit = not any(
             0 in blocks
             for group, blocks in zip(self._kv_groups, engine_group_blocks, strict=True)
             if not group.recurrent_state
-        ):
-            logger.debug(
-                "LMCache store deferred for %s: transfer range contains an "
-                "unmapped component page",
-                request_id,
-            )
+        )
+        if not self._sync_success(can_submit):
+            if not can_submit:
+                logger.debug(
+                    "LMCache store deferred for %s: transfer range contains an "
+                    "unmapped component page",
+                    request_id,
+                )
             return None
         blocks = self._expand_engine_group_block_ids(engine_group_blocks)
         key = self._create_key(

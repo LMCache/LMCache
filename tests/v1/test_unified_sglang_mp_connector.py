@@ -57,6 +57,39 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         slots = torch.tensor([4, 5, 6, 7, 12, 13, 14, 15])
         self.assertEqual(self.connector._slots_to_blocks(slots), [1, 3])
 
+    def test_pp_parallel_geometry_uses_global_worker_ids(self):
+        actual = []
+        for pp_rank in range(2):
+            for tp_rank in range(2):
+                geometry = self.connector._resolve_parallel_geometry(
+                    2, tp_rank, 2, pp_rank
+                )
+                actual.append((geometry[4], geometry[5]))
+
+        self.assertEqual(actual, [(4, 0), (4, 1), (4, 2), (4, 3)])
+
+    def test_parallel_geometry_rejects_invalid_pp_rank(self):
+        with self.assertRaisesRegex(ValueError, "Invalid LMCache PP topology"):
+            self.connector._resolve_parallel_geometry(2, 0, 2, 2)
+
+    def test_parallel_all_reduce_covers_tp_then_pp(self):
+        self.connector.tp_size = 2
+        self.connector.pp_size = 2
+        self.connector.tp_group = object()
+        self.connector.pp_group = object()
+        value = torch.tensor([1], dtype=torch.int32)
+
+        with patch.object(torch.distributed, "all_reduce") as all_reduce:
+            self.connector._parallel_all_reduce(value, torch.distributed.ReduceOp.MIN)
+
+        self.assertEqual(all_reduce.call_count, 2)
+        self.assertIs(
+            all_reduce.call_args_list[0].kwargs["group"], self.connector.tp_group
+        )
+        self.assertIs(
+            all_reduce.call_args_list[1].kwargs["group"], self.connector.pp_group
+        )
+
     def test_slots_to_blocks_rejects_partial_page(self):
         with self.assertRaisesRegex(ValueError, "complete SGLang pages"):
             self.connector._slots_to_blocks(torch.tensor([4, 5, 6]))
@@ -195,6 +228,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         connector._transfer_ctx = _TransferContext()
         connector._new_event = lambda: object()
         connector._create_key = lambda *args, **kwargs: object()
+        connector._sync_success = lambda success: success
 
         operation = connector.submit_store(
             "request",
@@ -223,6 +257,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         connector._kernel_group_to_engine_group = (0, 1)
         connector._store_submitted_tokens = {}
         connector._active_sessions = set()
+        connector._sync_success = lambda success: success
 
         operation = connector.submit_store(
             "request",
@@ -262,6 +297,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         connector._transfer_ctx = _TransferContext()
         connector._new_event = lambda: object()
         connector._create_key = lambda *args, **kwargs: object()
+        connector._sync_success = lambda success: success
 
         operation = connector.submit_store(
             "request",
