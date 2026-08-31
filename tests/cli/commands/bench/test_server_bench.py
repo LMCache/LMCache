@@ -22,6 +22,7 @@ import torch
 
 # First Party
 from lmcache.cli.commands.bench import BenchCommand
+from lmcache.cli.commands.bench.server_bench.config import WorkerSpec
 from lmcache.cli.commands.bench.server_bench.helpers import (
     _allocate_kv_cache,
     _build_token_ids,
@@ -1022,13 +1023,16 @@ class TestProcessRequestMultiWorker:
         for rank in range(tp_size):
             workers.append(
                 WorkerContext(
-                    kv_worker_id=0 if is_mla else rank,
-                    kv_world_size=kv_world_size,
-                    instance_id=_INSTANCE_ID_BASE + rank,
+                    spec=WorkerSpec(
+                        rank=rank,
+                        kv_worker_id=0 if is_mla else rank,
+                        kv_world_size=kv_world_size,
+                        instance_id=_INSTANCE_ID_BASE + rank,
+                        store_enabled=(rank == 0) if is_mla else True,
+                        retrieve_enabled=True,
+                    ),
                     client_tensors=None,
                     server_pool=None,
-                    # MLA: only rank 0 stores; non-MLA: every rank stores.
-                    is_kv_writer=(rank == 0) if is_mla else True,
                 )
             )
 
@@ -1044,7 +1048,7 @@ class TestProcessRequestMultiWorker:
             patch.object(sv_helpers, "_call", side_effect=fake_call),
             patch.object(sv_helpers, "_make_event_handle", return_value=b""),
         ):
-            _process_request(
+            result = _process_request(
                 client=client,  # type: ignore[arg-type]
                 seq_no=0,
                 num_tokens=32,
@@ -1060,10 +1064,11 @@ class TestProcessRequestMultiWorker:
                 world_size=kv_world_size,
             )
 
-        return calls
+        assert result is not None
+        return calls, result
 
     def test_mla_tp2_store_only_from_rank0(self) -> None:
-        calls = self._run(is_mla=True, tp_size=2)
+        calls, result = self._run(is_mla=True, tp_size=2)
         # Extract STORE + RETRIEVE calls with their instance_id argument.
         stores = [c for c in calls if c[0].name == "STORE"]
         retrieves = [c for c in calls if c[0].name == "RETRIEVE"]
@@ -1086,9 +1091,14 @@ class TestProcessRequestMultiWorker:
         )
         # No hits in the fake -> RETRIEVE is skipped entirely.
         assert retrieves == []
+        assert result.lookup.is_full_miss
+        assert result.store is not None
+        assert result.store.attempted_worker_ranks == (0,)
+        assert result.store.successful_worker_ranks == (0,)
+        assert result.store.succeeded
 
     def test_non_mla_tp2_store_on_every_rank(self) -> None:
-        calls = self._run(is_mla=False, tp_size=2)
+        calls, result = self._run(is_mla=False, tp_size=2)
         stores = [c for c in calls if c[0].name == "STORE"]
         # Non-MLA: every rank stores.
         assert len(stores) == 2
@@ -1105,11 +1115,15 @@ class TestProcessRequestMultiWorker:
             )
         worker_ids = sorted(c[1][0].worker_id for c in stores)
         assert worker_ids == [0, 1]
+        assert result.store is not None
+        assert result.store.attempted_worker_ranks == (0, 1)
+        assert result.store.successful_worker_ranks == (0, 1)
+        assert result.store.succeeded
 
     def test_lookup_called_once_regardless_of_tp(self) -> None:
         for is_mla in (True, False):
             for tp in (1, 2, 4):
-                calls = self._run(is_mla=is_mla, tp_size=tp)
+                calls, _result = self._run(is_mla=is_mla, tp_size=tp)
                 lookups = [c for c in calls if c[0].name == "LOOKUP"]
                 assert len(lookups) == 1, (
                     "LOOKUP should fire exactly once regardless of tp_size "
