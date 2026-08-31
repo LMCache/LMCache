@@ -30,6 +30,11 @@ import urllib.request
 
 # First Party
 from lmcache import torch_dev, torch_device_type
+from lmcache.cli.commands.bench.server_bench.config import WorkerSpec
+from lmcache.cli.commands.bench.server_bench.runtime import (
+    LookupResult,
+    TransferResult,
+)
 
 # ``lmcache bench server`` allocates real CUDA tensors and talks to
 # the MP server via ZMQ, both of which are absent from the thin
@@ -132,47 +137,39 @@ _DEFAULT_SHAPE_SPEC = "(2,1024,16,8,128):float16:32"
 
 @dataclass
 class WorkerContext:
-    """Per-rank state for a single simulated TP worker.
+    """Live resources for a single simulated TP Worker.
 
-    Mirrors what ``LMCacheMPWorkerAdapter`` holds per vLLM worker in a
-    real deployment. Two identifiers matter here and they are *not* the
-    same as the vLLM rank:
+    ``WorkerSpec`` owns the logical identity and routing roles. This temporary
+    context keeps the existing tensor and SHM resources together until
+    ``WorkerRuntime`` is introduced in the next refactor step.
 
-    * ``kv_worker_id`` is the identifier used in ``IPCCacheServerKey``.
+    Two identifiers in ``spec`` matter and are not the same as the vLLM rank:
+
+    * ``spec.kv_worker_id`` is the identifier used in ``IPCCacheServerKey``.
       In vLLM this is ``ParallelStrategy.kv_worker_id`` --
       ``vllm_worker_id // tp_size`` under MLA (all TP ranks fold into
       one kv_worker) and ``vllm_worker_id`` otherwise.
-    * ``kv_world_size`` is the world_size the server uses to index
+    * ``spec.kv_world_size`` is the world_size the server uses to index
       cache entries. Also from ``ParallelStrategy``: for MLA it is
       ``vllm_world_size // tp_size`` (typically 1 for pure TP-MLA)
       and ``vllm_world_size`` otherwise.
 
-    ``instance_id`` stays per-simulated-rank so each vLLM process still
+    ``spec.instance_id`` stays per simulated rank so each vLLM process still
     gets its own ``REGISTER_KV_CACHE`` context; multiple TP ranks
     inside the same MLA kv_worker share the same ``kv_worker_id`` but
     keep distinct ``instance_id`` values.
 
     Attributes:
-        kv_worker_id: The KV worker id (``ParallelStrategy.kv_worker_id``).
-        kv_world_size: The KV world size (``ParallelStrategy.kv_world_size``).
-        instance_id: Unique server-side context id for this simulated
-            vLLM rank; matches what would be ``os.getpid()`` in a real
-            deployment.
+        spec: Immutable logical Worker identity and routing roles.
         client_tensors: Paged KV tensors owned by this worker (data-mode
             self-check source/sink). ``None`` in handle mode.
         server_pool: mmap of the server's SHM pool for this worker's
             engine-driven context. ``None`` outside data mode.
-        is_kv_writer: Whether this worker participates in STORE. For MLA
-            only ranks with ``vllm_worker_id % tp_size == 0`` write; non-
-            MLA writes on every rank. RETRIEVE runs on every rank.
     """
 
-    kv_worker_id: int
-    kv_world_size: int
-    instance_id: int
+    spec: WorkerSpec
     client_tensors: "list[torch.Tensor] | None" = None
     server_pool: "mmap.mmap | None" = None
-    is_kv_writer: bool = True
 
 
 # ------------------------------------------------------------------ #
@@ -1056,14 +1053,10 @@ class RequestResult:
     per-operation latency measurements (for metrics aggregation).
     """
 
+    lookup: LookupResult
     checksums: list[str] | None = None
-    lookup_ms: float | None = None
-    retrieve_ms: float | None = None
-    store_ms: float | None = None
-    hit_chunks: int = 0
-    total_chunks: int = 0
-    store_tokens: int = 0
-    retrieve_tokens: int = 0
+    retrieve: TransferResult | None = None
+    store: TransferResult | None = None
 
 
 def _process_request(
@@ -1101,9 +1094,10 @@ def _process_request(
 
     ``workers`` (optional) drives multi-rank TP simulation: LOOKUP
     stays scheduler-scoped (single call, worker_id=None) while
-    STORE fans out to every ``is_kv_writer`` rank and RETRIEVE fans
-    out to every rank -- mirroring how ``LMCacheMPWorkerAdapter``
-    routes requests in a real vLLM deployment. When ``None`` the
+    STORE fans out to every Worker with ``spec.store_enabled`` and
+    RETRIEVE fans out to every Worker with ``spec.retrieve_enabled`` --
+    mirroring how ``LMCacheMPWorkerAdapter`` routes requests in a real
+    vLLM deployment. When ``None`` the
     bench synthesises a single worker from ``client_tensors`` /
     ``server_pool`` so single-rank runs stay unchanged.
     """
@@ -1113,12 +1107,16 @@ def _process_request(
     if workers is None:
         workers = [
             WorkerContext(
-                kv_worker_id=0,
-                kv_world_size=world_size,
-                instance_id=_INSTANCE_ID,
+                spec=WorkerSpec(
+                    rank=0,
+                    kv_worker_id=0,
+                    kv_world_size=world_size,
+                    instance_id=_INSTANCE_ID,
+                    store_enabled=True,
+                    retrieve_enabled=True,
+                ),
                 client_tensors=client_tensors,
                 server_pool=server_pool,
-                is_kv_writer=True,
             )
         ]
     # ``client_tensors is not None`` gates client-side self-check (data
@@ -1198,7 +1196,7 @@ def _process_request(
             store_num_blocks = (num_full_tokens - hit_tokens) // block_size
             cold_parts: list[str] = []
             for w in workers:
-                if not w.is_kv_writer or w.client_tensors is None:
+                if not w.spec.store_enabled or w.client_tensors is None:
                     continue
                 cold_parts.extend(
                     _compute_client_checksums(
@@ -1213,7 +1211,7 @@ def _process_request(
         if pass_label == "warm" and hit_chunks > 0:
             retr_num_blocks = hit_tokens // block_size
             for w in workers:
-                if w.client_tensors is not None:
+                if w.spec.retrieve_enabled and w.client_tensors is not None:
                     _zero_fill_client_blocks(
                         w.client_tensors,
                         block_offset,
@@ -1221,18 +1219,24 @@ def _process_request(
                     )
 
     # 3. RETRIEVE hit portion — every rank retrieves its own KV shard.
-    retrieve_ms: float = 0.0
-    store_ms: float = 0.0
+    retrieve_result: TransferResult | None = None
+    store_result: TransferResult | None = None
     if hit_chunks > 0:
         t1 = time.monotonic()
         status = "retrieved"
+        attempted_ranks: list[int] = []
+        successful_ranks: list[int] = []
+        failed_ranks: list[int] = []
         for w in workers:
+            if not w.spec.retrieve_enabled:
+                continue
+            attempted_ranks.append(w.spec.rank)
             retrieve_key = _make_key(
                 token_ids,
                 request_id,
                 start=0,
                 end=hit_tokens,
-                worker_id=w.kv_worker_id,
+                worker_id=w.spec.kv_worker_id,
                 world_size=world_size,
             )
             w_status = _send_retrieve(
@@ -1247,11 +1251,22 @@ def _process_request(
                 use_handle=use_handle,
                 client_tensors=w.client_tensors,
                 server_pool=w.server_pool,
-                instance_id=w.instance_id,
+                instance_id=w.spec.instance_id,
             )
-            if w_status != "retrieved":
+            if w_status == "retrieved":
+                successful_ranks.append(w.spec.rank)
+            else:
+                failed_ranks.append(w.spec.rank)
                 status = w_status
         retrieve_ms = (time.monotonic() - t1) * 1000
+        retrieve_result = TransferResult(
+            operation="retrieve",
+            token_count=hit_tokens,
+            latency_ms=retrieve_ms,
+            attempted_worker_ranks=tuple(attempted_ranks),
+            successful_worker_ranks=tuple(successful_ranks),
+            failed_worker_ranks=tuple(failed_ranks),
+        )
         print(
             "  [seq %d/%s] RETRIEVE: %s "
             "(%d tokens, %.1f ms, %d workers)"
@@ -1261,7 +1276,7 @@ def _process_request(
                 status,
                 hit_tokens,
                 retrieve_ms,
-                len(workers),
+                len(attempted_ranks),
             )
         )
 
@@ -1273,17 +1288,19 @@ def _process_request(
         t2 = time.monotonic()
         store_block_off = block_offset + (hit_tokens // block_size)
         status = "stored"
-        n_store_workers = 0
+        attempted_ranks = []
+        successful_ranks = []
+        failed_ranks = []
         for w in workers:
-            if not w.is_kv_writer:
+            if not w.spec.store_enabled:
                 continue
-            n_store_workers += 1
+            attempted_ranks.append(w.spec.rank)
             store_key = _make_key(
                 token_ids,
                 request_id,
                 start=store_start,
                 end=store_end,
-                worker_id=w.kv_worker_id,
+                worker_id=w.spec.kv_worker_id,
                 world_size=world_size,
             )
             w_status = _send_store(
@@ -1297,11 +1314,22 @@ def _process_request(
                 client_tensors=w.client_tensors,
                 chunk_size=chunk_size,
                 server_pool=w.server_pool,
-                instance_id=w.instance_id,
+                instance_id=w.spec.instance_id,
             )
-            if w_status != "stored":
+            if w_status == "stored":
+                successful_ranks.append(w.spec.rank)
+            else:
+                failed_ranks.append(w.spec.rank)
                 status = w_status
         store_ms = (time.monotonic() - t2) * 1000
+        store_result = TransferResult(
+            operation="store",
+            token_count=store_end - store_start,
+            latency_ms=store_ms,
+            attempted_worker_ranks=tuple(attempted_ranks),
+            successful_worker_ranks=tuple(successful_ranks),
+            failed_worker_ranks=tuple(failed_ranks),
+        )
         print(
             "  [seq %d/%s] STORE: %s "
             "(%d tokens, %.1f ms, %d writers)"
@@ -1311,7 +1339,7 @@ def _process_request(
                 status,
                 store_end - store_start,
                 store_ms,
-                n_store_workers,
+                len(attempted_ranks),
             )
         )
 
@@ -1331,7 +1359,7 @@ def _process_request(
             retr_num_blocks = hit_tokens // block_size
             warm_parts: list[str] = []
             for w in workers:
-                if not w.is_kv_writer or w.client_tensors is None:
+                if not w.spec.store_enabled or w.client_tensors is None:
                     continue
                 warm_parts.extend(
                     _compute_client_checksums(
@@ -1354,7 +1382,7 @@ def _process_request(
             num_blocks,
             block_size,
             chunk_size,
-            instance_id=workers[0].instance_id,
+            instance_id=workers[0].spec.instance_id,
         )
     if checksums:
         digest = hashlib.md5("".join(checksums).encode()).hexdigest()[:16]
@@ -1371,14 +1399,14 @@ def _process_request(
     # 6. END_SESSION
     _send_end_session(client, request_id)
     return RequestResult(
+        lookup=LookupResult(
+            hit_chunks=hit_chunks,
+            total_chunks=total_chunks,
+            latency_ms=lookup_ms,
+        ),
         checksums=checksums,
-        lookup_ms=lookup_ms,
-        retrieve_ms=retrieve_ms if hit_chunks > 0 else None,
-        store_ms=store_ms if miss_chunks > 0 else None,
-        hit_chunks=hit_chunks,
-        total_chunks=total_chunks,
-        store_tokens=(num_full_tokens - hit_tokens) if miss_chunks > 0 else 0,
-        retrieve_tokens=hit_tokens if hit_chunks > 0 else 0,
+        retrieve=retrieve_result,
+        store=store_result,
     )
 
 

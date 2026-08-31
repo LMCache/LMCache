@@ -102,6 +102,36 @@ _CONTAINS_BATCH_SIZE = 16
 B128_MAX_POOL_SIZE = 0x100000000  # 2**32
 
 
+def _release_handle_best_effort(
+    agent: "NixlStorageAgent", handle: NixlXferHandle
+) -> None:
+    """Release a transfer handle without blocking logical put cleanup."""
+    try:
+        agent.release_handle(handle)
+    except Exception:
+        # release_xfer_handle can fail while an active transfer cannot be
+        # cancelled. The NIXL handle remains unreleased in that case and its
+        # finalizer retries; LMCache must still clear its own state and refs.
+        logger.exception("Failed to release NIXL transfer handle")
+
+
+def _release_dynamic_transfer_resources_best_effort(
+    agent: "NixlDynamicStorageAgent",
+    handle: NixlXferHandle,
+    reg_descs: nixlBind.nixlRegDList,
+    xfer_handler: NixlDlistHandle,
+    descs: List["NixlDesc"],
+) -> None:
+    """Release per-transfer dynamic resources without interrupting cleanup."""
+    _release_handle_best_effort(agent, handle)
+    try:
+        agent.release_storage_handler(reg_descs, xfer_handler, descs)
+    except Exception:
+        # NixlDynamicStorageAgent handles each NIXL call independently, but
+        # keep this guard for alternate/mock agents and future implementations.
+        logger.exception("Failed to release NIXL dynamic storage resources")
+
+
 @dataclass
 class NixlStorageConfig:
     buffer_size: int
@@ -648,7 +678,9 @@ class NixlDynamicStorageAgent(NixlStorageAgent):
         else:
             self.mem_type = "FILE"
 
-    def create_batched_storage_handler(self, descs: list[NixlDesc], page_size: int):
+    def create_batched_storage_handler(
+        self, descs: list[NixlDesc], page_size: int
+    ) -> tuple[nixlBind.nixlRegDList, NixlDlistHandle]:
         reg_list = []
         xfer_desc = []
 
@@ -657,10 +689,20 @@ class NixlDynamicStorageAgent(NixlStorageAgent):
             xfer_desc.append((0, page_size, descs[i].device_id))
 
         reg_descs = self.nixl_agent.register_memory(reg_list, self.mem_type)
-        xfer_descs = self.nixl_agent.get_xfer_descs(xfer_desc, self.mem_type)
-        xfer_handler = self.nixl_agent.prep_xfer_dlist(
-            self.agent_name, xfer_descs, mem_type=self.mem_type
-        )
+        try:
+            xfer_descs = self.nixl_agent.get_xfer_descs(xfer_desc, self.mem_type)
+            xfer_handler = self.nixl_agent.prep_xfer_dlist(
+                self.agent_name, xfer_descs, mem_type=self.mem_type
+            )
+        except Exception:
+            # Registration ownership starts as soon as register_memory returns.
+            # If descriptor/handler preparation fails, roll it back here because
+            # the caller never receives reg_descs and cannot release it.
+            try:
+                self.nixl_agent.deregister_memory(reg_descs)
+            except Exception:
+                logger.exception("Failed to roll back NIXL storage memory registration")
+            raise
         return reg_descs, xfer_handler
 
     def post_async(self, handle: NixlXferHandle):
@@ -681,8 +723,17 @@ class NixlDynamicStorageAgent(NixlStorageAgent):
         :param xfer_handler: Transfer dlist handle to release.
         :param descs: Descriptors used for this transfer.
         """
-        self.nixl_agent.release_dlist_handle(xfer_handler)
-        self.nixl_agent.deregister_memory(reg_descs)
+        # NIXL's Python bindings raise on non-success statuses. Treat each
+        # release as best-effort so one failure does not prevent the remaining
+        # resources (especially FILE descriptors) from being released.
+        try:
+            self.nixl_agent.release_dlist_handle(xfer_handler)
+        except Exception:
+            logger.exception("Failed to release NIXL storage dlist handle")
+        try:
+            self.nixl_agent.deregister_memory(reg_descs)
+        except Exception:
+            logger.exception("Failed to deregister NIXL storage memory")
         if self.mem_type == "FILE":
             _close_file_descs(descs)
 
@@ -1111,21 +1162,46 @@ class NixlStaticStorageBackend(NixlStorageBackend):
     async def mem_to_storage(
         self, keys: Sequence[CacheEngineKey], mem_objs: List[MemoryObj]
     ) -> None:
-        mem_indices = [mem_obj.meta.address for mem_obj in mem_objs]
+        added_keys: List[CacheEngineKey] = []
+        popped_indices: List[int] = []
+        handle: Optional[NixlXferHandle] = None
+        try:
+            mem_indices = [mem_obj.meta.address for mem_obj in mem_objs]
 
-        storage_indices = []
-        for i in range(len(keys)):
-            index = self.pool.pop()
-            storage_indices.append(index)
-            self.add_key_to_dict(keys[i], mem_objs[i].meta, index)
+            storage_indices = []
+            for i in range(len(keys)):
+                index = self.pool.pop()
+                popped_indices.append(index)
+                storage_indices.append(index)
+                self.add_key_to_dict(keys[i], mem_objs[i].meta, index)
+                added_keys.append(keys[i])
 
-        handle = self.agent.get_mem_to_storage_handle(mem_indices, storage_indices)
-        self.agent.post_blocking(handle)
-        self.agent.release_handle(handle)
-
-        for key in keys:
+            handle = self.agent.get_mem_to_storage_handle(mem_indices, storage_indices)
+            self.agent.post_blocking(handle)
+        except Exception:
+            # The slots were never (fully) written: drop the key_dict
+            # entries so lookups don't serve garbage, and return the
+            # slots to the pool.
+            logger.exception(
+                "mem_to_storage failed for %d keys; rolling back", len(keys)
+            )
+            for key in added_keys:
+                self.remove(key, force=True)
+            for index in popped_indices[len(added_keys) :]:
+                self.pool.push(index)
+            raise
+        finally:
+            if handle is not None:
+                _release_handle_best_effort(self.agent, handle)
+            # Remove the in-flight entries on success AND failure — a
+            # failed put must not stay marked in-flight forever.
             with self.progress_lock:
-                self.progress_set.discard(key)
+                for key in keys:
+                    self.progress_set.discard(key)
+            # Release the reference taken in batched_submit_put_task; the
+            # source buffer may be recycled from here on.
+            for mem_obj in mem_objs:
+                mem_obj.ref_count_down()
 
     def _collect_metadata_with_lock(
         self, keys: list[CacheEngineKey]
@@ -1194,9 +1270,22 @@ class NixlStaticStorageBackend(NixlStorageBackend):
         if not mem_indices:
             return obj_list
 
-        handle = self.agent.get_storage_to_mem_handle(mem_indices, storage_indices)
-        self.agent.post_blocking(handle)
-        self.agent.release_handle(handle)
+        handle: Optional[NixlXferHandle] = None
+        transfer_succeeded = False
+        try:
+            handle = self.agent.get_storage_to_mem_handle(mem_indices, storage_indices)
+            self.agent.post_blocking(handle)
+            transfer_succeeded = True
+        finally:
+            if handle is not None:
+                _release_handle_best_effort(self.agent, handle)
+            if not transfer_succeeded:
+                # Release/cancel the transfer handle before returning its
+                # destination pages to the allocator; an in-progress transfer
+                # must not write into a page that has already been recycled.
+                for obj in obj_list:
+                    if obj is not None:
+                        obj.ref_count_down()
 
         return obj_list
 
@@ -1281,9 +1370,33 @@ class NixlStaticStorageBackend(NixlStorageBackend):
 
             self.progress_set.update(keys)
 
-        asyncio.run_coroutine_threadsafe(
-            self.mem_to_storage(keys, memory_objs), self.loop
-        )
+        # Hold a reference on each source buffer for the duration of the
+        # transfer: the caller drops its reference as soon as this method
+        # returns, and without ours the allocator could recycle the page
+        # while NIXL is still reading it. Released in mem_to_storage.
+        for memory_obj in memory_objs:
+            memory_obj.ref_count_up()
+
+        coroutine = self.mem_to_storage(keys, memory_objs)
+        try:
+            asyncio.run_coroutine_threadsafe(coroutine, self.loop)
+        except Exception as e:
+            # The loop rejected the coroutine before mem_to_storage could
+            # assume ownership. Close it to avoid an un-awaited-coroutine
+            # warning, then roll back everything acquired above.
+            coroutine.close()
+            with self.progress_lock:
+                for key in keys:
+                    self.progress_set.discard(key)
+            for memory_obj in memory_objs:
+                memory_obj.ref_count_down()
+            logger.warning(
+                "NIXL batched put could not be scheduled for %d key(s); "
+                "skipping best-effort offload: %s",
+                len(keys),
+                e,
+            )
+            return
         # TODO: Add callback support for async NIXL operations
 
     def get_blocking(self, key: CacheEngineKey) -> Optional[MemoryObj]:
@@ -1786,21 +1899,38 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
                 await asyncio.sleep(0.001)  # Avoid busy-waiting, yield to event loop
             if state == "ERR":
                 raise RuntimeError("NIXL transfer failed")
-
+        except Exception:
+            # Async puts are best-effort and nobody awaits this task. Log the
+            # failure here, but do not re-raise it into the event loop's
+            # exception handler.
+            logger.exception(
+                "async mem_to_storage transfer failed for %d keys",
+                len(keys),
+            )
         finally:
             # Release the handle after transfer completes (success or failure)
-            self.agent.release_handle(handle)
-            self.agent.release_storage_handler(
-                storage_reg_descs, storage_xfer_handler, descs
+            _release_dynamic_transfer_resources_best_effort(
+                self.agent,
+                handle,
+                storage_reg_descs,
+                storage_xfer_handler,
+                descs,
             )
 
             if state == "DONE":
+                # Publish to the presence cache BEFORE removing the
+                # in-flight entries, so a concurrent lookup always finds
+                # the key in at least one of the two structures.
                 for key in keys:
-                    with self.progress_lock:
-                        self.progress_set.discard(key)
                     self._cache_add(key.chunk_hash)
             elif self.agent.mem_type == "FILE":
                 _unlink_file_descs(descs)
+
+            # Remove the in-flight entries on success AND failure — a
+            # failed put must not stay marked in-flight forever.
+            with self.progress_lock:
+                for key in keys:
+                    self.progress_set.discard(key)
 
             for mem_obj in mem_objs:
                 mem_obj.ref_count_down()
@@ -1815,9 +1945,28 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         storage_indices = range(len(keys))
         mem_indices = [mem_obj.meta.address for mem_obj in mem_objs]
 
-        descs, reg_descs, xfer_handler, handle = self._acquire_storage_handle(
-            keys, mem_indices, storage_indices, page_size, write=True
-        )
+        try:
+            descs, reg_descs, xfer_handler, handle = self._acquire_storage_handle(
+                keys, mem_indices, storage_indices, page_size, write=True
+            )
+        except Exception:
+            # The transfer never started: remove the in-flight entries and,
+            # in async mode, release the references taken at submit time
+            # (sync mode takes none — the blocked caller holds one). In
+            # async mode nobody queries the submit-side future, so log the
+            # failure here or it is invisible.
+            logger.exception(
+                "mem_to_storage handle acquisition failed for %d keys",
+                len(keys),
+            )
+            with self.progress_lock:
+                for key in keys:
+                    self.progress_set.discard(key)
+            if self.async_mode:
+                for mem_obj in mem_objs:
+                    mem_obj.ref_count_down()
+                return
+            raise
 
         if self.async_mode:
             self._submit_async_mem_to_storage(
@@ -1843,25 +1992,43 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         transferred, so we release everything ourselves -- including any
         FILE-write files just created at the final key path.
         """
+        transfer_coroutine = None
         try:
             initial_state = self.agent.post_async(handle)
-            asyncio.create_task(
-                self._wait_for_transfer(
-                    handle,
-                    initial_state,
-                    keys,
-                    reg_descs,
-                    xfer_handler,
-                    descs,
-                    mem_objs,
-                )
+            transfer_coroutine = self._wait_for_transfer(
+                handle,
+                initial_state,
+                keys,
+                reg_descs,
+                xfer_handler,
+                descs,
+                mem_objs,
             )
+            asyncio.create_task(transfer_coroutine)
         except Exception:
-            self.agent.release_handle(handle)
-            self.agent.release_storage_handler(reg_descs, xfer_handler, descs)
+            # Fire-and-forget: the submit-side future is never queried, so
+            # this exception is invisible upstream — log it, and clear the
+            # in-flight state ourselves (a failed put must not stay marked
+            # in-flight forever, nor pin its buffer).
+            logger.exception(
+                "async mem_to_storage post failed for %d keys; rolling back",
+                len(keys),
+            )
+            if transfer_coroutine is not None:
+                transfer_coroutine.close()
+            _release_dynamic_transfer_resources_best_effort(
+                self.agent, handle, reg_descs, xfer_handler, descs
+            )
             if self.agent.mem_type == "FILE":
                 _unlink_file_descs(descs)
-            raise
+            with self.progress_lock:
+                for key in keys:
+                    self.progress_set.discard(key)
+            for mem_obj in mem_objs:
+                mem_obj.ref_count_down()
+            # Fire-and-forget async puts are best-effort. Cleanup and logging
+            # above are the complete failure contract; do not surface an
+            # unobserved task exception to the event loop.
 
     def _run_sync_mem_to_storage(
         self,
@@ -1875,23 +2042,32 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         start_time = time.time()
         try:
             self.agent.post_blocking(handle)
+            # Publish to the presence cache BEFORE the in-flight entries
+            # are removed (finally below), so a concurrent lookup always
+            # finds the key in at least one of the two structures. Skipped
+            # on failure: the raise bypasses it, so a failed write is
+            # never published.
+            for key in keys:
+                self._cache_add(key.chunk_hash)
         except Exception:
             if self.agent.mem_type == "FILE":
                 _unlink_file_descs(descs)
             raise
         finally:
-            self.agent.release_handle(handle)
-            self.agent.release_storage_handler(reg_descs, xfer_handler, descs)
+            _release_dynamic_transfer_resources_best_effort(
+                self.agent, handle, reg_descs, xfer_handler, descs
+            )
+            # Remove the in-flight entries on success AND failure — a
+            # failed put must not stay marked in-flight forever.
+            with self.progress_lock:
+                for key in keys:
+                    self.progress_set.discard(key)
 
         duration = time.time() - start_time
         logger.debug(
             f"mem_to_storage for {len(keys)} objects size "
             f"{page_size * len(keys)} took {duration:.3f} seconds"
         )
-        for key in keys:
-            with self.progress_lock:
-                self.progress_set.discard(key)
-            self._cache_add(key.chunk_hash)
 
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
         """
@@ -2072,35 +2248,53 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         if self.async_mode:
             for mem_obj in memory_objs:
                 mem_obj.ref_count_up()
-            asyncio.run_coroutine_threadsafe(
-                self.mem_to_storage(keys, memory_objs), self.loop
-            )
-            # Note: callback not supported in async mode
-        else:
-            future = asyncio.run_coroutine_threadsafe(
-                self.mem_to_storage(keys, memory_objs), self.loop
-            )
-            try:
-                future.result()
-            except Exception as e:
-                with self.progress_lock:
-                    for key in keys:
-                        self.progress_set.discard(key)
-                logger.warning(
-                    f"NIXL batched put failed for {len(keys)} key(s); "
-                    f"skipping best-effort offload: {e}"
-                )
-                return
 
-            # Call completion callback for sync mode
-            if on_complete_callback is not None:
+        coroutine = self.mem_to_storage(keys, memory_objs)
+        try:
+            future = asyncio.run_coroutine_threadsafe(coroutine, self.loop)
+        except Exception as e:
+            # The loop rejected the coroutine before mem_to_storage could
+            # assume ownership. Close it and undo submit-side state.
+            coroutine.close()
+            with self.progress_lock:
                 for key in keys:
-                    try:
-                        on_complete_callback(key)
-                    except Exception as e:
-                        logger.warning(
-                            f"on_complete_callback failed for key {key}: {e}"
-                        )
+                    self.progress_set.discard(key)
+            if self.async_mode:
+                for mem_obj in memory_objs:
+                    mem_obj.ref_count_down()
+            logger.warning(
+                "NIXL batched put could not be scheduled for %d key(s); "
+                "skipping best-effort offload: %s",
+                len(keys),
+                e,
+            )
+            return
+
+        if self.async_mode:
+            # Note: callback not supported in async mode
+            return
+
+        try:
+            future.result()
+        except Exception as e:
+            with self.progress_lock:
+                for key in keys:
+                    self.progress_set.discard(key)
+            logger.warning(
+                "NIXL batched put failed for %d key(s); "
+                "skipping best-effort offload: %s",
+                len(keys),
+                e,
+            )
+            return
+
+        # Call completion callback for sync mode
+        if on_complete_callback is not None:
+            for key in keys:
+                try:
+                    on_complete_callback(key)
+                except Exception as e:
+                    logger.warning(f"on_complete_callback failed for key {key}: {e}")
 
     def get_blocking(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         """
