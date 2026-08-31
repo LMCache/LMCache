@@ -163,11 +163,12 @@ that bypass the backend break under isolated IPC:
   futures (`futures.py`) were already fully backend-routed.
 - **Migrated**: SGLang and TRT-LLM adapters already route producer-event
   creation through backend `create_event` / `record_event`.
-- **Not migrated** (the reason the switch defaults to off): CacheBlend
-  and qstore server modules still return raw `event.ipc_handle()` bytes
-  instead of `export_event(...)` (already outside the event-IPC
-  abstraction, see `event_ipc_abstraction.md` non-goals). The raw
-  KV-wrapper work also remains before hostIPC-free deployment is complete.
+- **Migrated for event handles**: CacheBlend and qstore server modules now
+  return `export_event(...)` on the resolved backend instead of raw
+  `event.ipc_handle()` bytes. The switch still defaults to off because the
+  raw KV-wrapper work (already outside the event-IPC abstraction; see
+  `event_ipc_abstraction.md` non-goals) remains before hostIPC-free
+  deployment is complete.
 
 ## Status
 
