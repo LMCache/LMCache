@@ -360,6 +360,7 @@ class KVCacheDescriber:
 # Engine describer
 # -------------------------------------------------------------------
 
+
 class EngineDescriber:
     """Builds the ``describe engine`` output from vLLM server responses.
 
