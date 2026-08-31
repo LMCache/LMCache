@@ -19,9 +19,11 @@ from prometheus_client.parser import text_string_to_metric_families
 # First Party
 from lmcache.cli.commands.base import BaseCommand
 from lmcache.cli.http import (
-    CLIHTTPError,
     DEFAULT_URLS,
-    fetch_json as _fetch_json,
+    CLIHTTPError,
+)
+from lmcache.cli.http import fetch_json as _fetch_json
+from lmcache.cli.http import (
     normalize_url,
 )
 
@@ -357,7 +359,6 @@ class KVCacheDescriber:
 # -------------------------------------------------------------------
 # Engine describer
 # -------------------------------------------------------------------
-
 
 class EngineDescriber:
     """Builds the ``describe engine`` output from vLLM server responses.
