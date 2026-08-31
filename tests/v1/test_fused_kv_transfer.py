@@ -234,8 +234,8 @@ def test_non_fused_format_rejects_layout(layout):
 
 
 def test_unknown_layout_value_rejected():
-    # Bare int on purpose: MemObjKVLayout(99) would raise in the IntEnum
-    # constructor before reaching the entry point's own validation.
+    # Bare int for symmetry with the cuda case below: MemObjKVLayout is a
+    # pybind11 enum and accepts 99, so either form reaches the validation.
     args = _dummy_transfer_args()
     args["engine_kv_format"] = EngineKVFormat.NL_X_NB_BS_NH_CS
     args["mem_obj_kv_layout"] = 99

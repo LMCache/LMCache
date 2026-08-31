@@ -571,6 +571,22 @@ def multi_layer_kv_transfer(
 
     ``block_stride_elems`` mirrors the cuda_ops signature; pointer-based
     paged reconstruction rejects non-tight pools in _normalize_paged_layers.
+
+    Args:
+        mem_obj_kv_layout: Declared layout of ``key_value``, as the integer
+            value of a ``MemObjKVLayout``: 0 ``UNSPECIFIED``, 1
+            ``SPLIT_KV_2LTD`` (``[2, L, T, NH*HS]``), 2 ``FUSED_PACKED``
+            (``[1, L, T, NH*CS]``). Fused-packed formats must declare 1 or
+            2; every other format must pass 0.
+
+    Raises:
+        TypeError: If ``key_value_ptrs`` is neither a tensor nor a list.
+        ValueError: If ``mem_obj_kv_layout`` does not satisfy the contract
+            for ``engine_kv_format``.
+        NotImplementedError: If a fused-packed format is given a non-zero
+            ``block_stride_elems`` — padded pools are CUDA-only, and this
+            is raised at entry, before any data is copied — or for the
+            unsupported HND layouts.
     """
     if not isinstance(key_value_ptrs, (torch.Tensor, list)):
         raise TypeError(
