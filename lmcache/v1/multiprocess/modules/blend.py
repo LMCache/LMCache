@@ -108,38 +108,13 @@ _EMPTY_GROUP_ROT: list[list[int]] = []
 
 #: ``Session.extras`` key holding the lookup's TP-expanded obj_keys per found
 #: chunk hash — sparse-prefetch READ-LOCKED keys awaiting the retrieve.
-#: Written once by ``_sparse_classify``, consumed once by the retrieve
-#: (:func:`_take_unretrieved_keys`); whatever remains when the session is
-#: destroyed is released by ``BlendModule._release_unretrieved_locks``, so a
-#: client that never retrieves (e.g. every match shadowed by vLLM's local
-#: prefix cache) cannot leak the locks.
+#: Contract: written once by ``_sparse_classify``; consumed at most once via
+#: an atomic ``extras.pop`` (the retrieve, or the session destroy listener
+#: ``BlendModule._release_unretrieved_locks``), so nothing releases twice.
+#: Whatever remains when the session is destroyed is released by that
+#: listener, so a client that never retrieves (e.g. every match shadowed by
+#: vLLM's local prefix cache) cannot leak the locks.
 _UNRETRIEVED_KEYS_EXTRA = "cb.unretrieved_read_locked_keys"
-
-
-def _record_unretrieved_keys(session, per_hash: "dict[bytes, list]") -> None:
-    """Stash the read-locked obj_keys on the request session (replace-once).
-
-    Args:
-        session: The request's :class:`~lmcache.v1.multiprocess.session.Session`.
-        per_hash: All-ranks-expanded object keys per found chunk hash.
-    """
-    session.extras[_UNRETRIEVED_KEYS_EXTRA] = per_hash
-
-
-def _take_unretrieved_keys(session) -> "dict[bytes, list] | None":
-    """Consume the stashed obj_keys (at most once; dict.pop is atomic).
-
-    Args:
-        session: The request's session, or None when it no longer exists.
-
-    Returns:
-        The per-hash object-key map, or None if the session is gone, nothing
-        was stashed, or it was already taken — so a later taker (the session
-        destroy listener after a successful retrieve) releases nothing twice.
-    """
-    if session is None:
-        return None
-    return session.extras.pop(_UNRETRIEVED_KEYS_EXTRA, None)
 
 
 @dataclass
@@ -911,7 +886,7 @@ class BlendModule(InstanceLivenessTarget):
         Args:
             session: The session being destroyed by the session manager.
         """
-        per_hash = _take_unretrieved_keys(session)
+        per_hash = session.extras.pop(_UNRETRIEVED_KEYS_EXTRA, None)
         if not per_hash:
             return
         keys = [key for hash_keys in per_hash.values() for key in hash_keys]
@@ -1387,10 +1362,9 @@ class BlendModule(InstanceLivenessTarget):
                 for r in found_cb_match_result
                 if r.hash in per_hash_obj_keys
             }
-            _record_unretrieved_keys(
-                self._ctx.session_manager.get_or_create(key.request_id),
-                cache_entry,
-            )
+            self._ctx.session_manager.get_or_create(key.request_id).extras[
+                _UNRETRIEVED_KEYS_EXTRA
+            ] = cache_entry
 
         return found_cb_match_result
 
@@ -2878,7 +2852,12 @@ class BlendModule(InstanceLivenessTarget):
         # (take-once; later calls fall back to re-resolve). ``get`` not
         # ``get_or_create``: a retrieve after session end must not recreate
         # ownership state.
-        cached = _take_unretrieved_keys(self._ctx.session_manager.get(key.request_id))
+        session = self._ctx.session_manager.get(key.request_id)
+        cached = (
+            session.extras.pop(_UNRETRIEVED_KEYS_EXTRA, None)
+            if session is not None
+            else None
+        )
         if cached is not None and all(r.hash in cached for r in cb_match_result):
             # The lookup cached all-ranks obj keys (group-major, rank-minor).
             # Select THIS rank's key per read group, else the pairing mispairs
