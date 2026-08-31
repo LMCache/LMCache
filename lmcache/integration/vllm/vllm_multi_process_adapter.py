@@ -1174,6 +1174,11 @@ class LMCacheMPWorkerAdapter:
         # Request IDs already returned as finished_sending to the scheduler.
         # Prevents re-reporting the same ID after drain clears tracking sets.
         self._returned_finished: set[str] = set()
+        # Request IDs whose STORE metadata was seen by this worker
+        # (submit_store_request was called).  Used to distinguish between
+        # kv_writer=False workers (called but no future) and requests with
+        # no STORE metadata at all (never called, e.g. MultiConnector).
+        self._submitted_stores: set[str] = set()
 
         self.model_name = model_name
         self.parallel_strategy = parallel_strategy
@@ -1486,6 +1491,7 @@ class LMCacheMPWorkerAdapter:
                 the IPC key.
         """
         self._ensure_heartbeat_started()
+        self._submitted_stores.add(request_id)
 
         if not self.is_kv_writer:
             return
@@ -1691,10 +1697,11 @@ class LMCacheMPWorkerAdapter:
                 continue
             if req_id in self.finished_stores or req_id in self.store_futures:
                 self.previously_finished.add(req_id)
-            else:
+            elif req_id in self._submitted_stores:
                 ret_stores.add(req_id)
         ret_stores.update(self._update_and_get_finished_store())
         self._returned_finished.update(ret_stores)
+        self._submitted_stores -= self._returned_finished
         return ret_stores
 
     @_lmcache_nvtx_annotate
