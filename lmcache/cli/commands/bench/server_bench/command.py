@@ -42,6 +42,11 @@ import sys
 import time
 
 # First Party
+from lmcache.cli.commands.bench.server_bench.client import (
+    LookupResult,
+    ServerBenchClient,
+    TransferResult,
+)
 from lmcache.cli.commands.bench.server_bench.config import parse_args_to_config
 
 # Heavy imports reused by the orchestrator. ``DTYPE_MAP`` is required
@@ -53,11 +58,6 @@ from lmcache.cli.commands.bench.server_bench.helpers import (
     _DEFAULT_SHAPE_SPEC,
     DTYPE_MAP,
     _require_full_install,
-)
-from lmcache.cli.commands.bench.server_bench.runtime import (
-    BenchRuntime,
-    LookupResult,
-    TransferResult,
 )
 
 if TYPE_CHECKING:
@@ -404,9 +404,9 @@ def run_server_bench(
     warm_lookup_ms: list[float] = []
     warm_retrieve_ms: list[float] = []
 
-    runtime = BenchRuntime(config, log)
+    client = ServerBenchClient(config, log)
     try:
-        runtime.start()
+        client.start()
 
         # Record only the steady-state load, not the one-time registration.
         if profiler is not None:
@@ -421,7 +421,7 @@ def run_server_bench(
             log("=== Request seq=%d ===" % seq_no)
 
             # Pass 1: cold (miss -> store)
-            cold_result = _run_request_pass(runtime, seq_no, "cold")
+            cold_result = _run_request_pass(client, seq_no, "cold")
             if cold_result is not None:
                 cold_lookup_ms.append(cold_result.lookup.latency_ms)
                 if cold_result.store is not None:
@@ -430,7 +430,7 @@ def run_server_bench(
             time.sleep(args.interval)
 
             # Pass 2: warm (hit -> retrieve)
-            warm_result = _run_request_pass(runtime, seq_no, "warm")
+            warm_result = _run_request_pass(client, seq_no, "warm")
             if warm_result is not None:
                 warm_lookup_ms.append(warm_result.lookup.latency_ms)
                 if warm_result.retrieve is not None:
@@ -475,7 +475,7 @@ def run_server_bench(
         # Stop recording once load ends, before teardown
         if profiler is not None:
             profiler.stop(log)
-        runtime.close()
+        client.close()
 
     # Emit structured metrics summary.
     _emit_server_bench_metrics(
@@ -493,18 +493,18 @@ def run_server_bench(
 
 
 def _run_request_pass(
-    runtime: BenchRuntime,
+    client: ServerBenchClient,
     seq_no: int,
     pass_label: str,
 ) -> _RequestPassResult | None:
-    """Run one current baseline pass using neutral Runtime operations.
+    """Run one current baseline pass using neutral client operations.
 
     This is the only temporary owner of the cold/warm branching. Step 3 moves
-    this ordering unchanged into ``BaselineScenario``; ``BenchRuntime`` remains
-    unaware of either label.
+    this ordering unchanged into ``BaselineBenchCase``; ``ServerBenchClient``
+    remains unaware of either label.
 
     Args:
-        runtime: Started data-plane runtime.
+        client: Started Server Bench client.
         seq_no: Synthetic sequence number.
         pass_label: ``"cold"`` or ``"warm"`` for the current baseline.
 
@@ -518,7 +518,7 @@ def _run_request_pass(
     if pass_label not in ("cold", "warm"):
         raise ValueError("unsupported baseline pass: %s" % pass_label)
 
-    request = runtime.create_request(
+    request = client.create_request(
         seq_no,
         request_id="req-%d-%s" % (seq_no, pass_label),
         label=pass_label,
@@ -526,7 +526,7 @@ def _run_request_pass(
     if request is None:
         return None
 
-    lookup = runtime.lookup(request)
+    lookup = client.lookup(request)
     if not lookup.succeeded:
         return None
 
@@ -535,37 +535,37 @@ def _run_request_pass(
 
     checksums: list[str] | None = None
     if pass_label == "cold" and miss_tokens > 0:
-        checksums = runtime.compute_checksums(
+        checksums = client.compute_checksums(
             request,
             start_token=hit_tokens,
             token_count=miss_tokens,
         )
     if pass_label == "warm" and hit_tokens > 0:
-        runtime.zero_destination(
+        client.zero_destination(
             request,
             start_token=0,
             token_count=hit_tokens,
         )
 
-    retrieve = runtime.retrieve(
+    retrieve = client.retrieve(
         request,
         start_token=0,
         token_count=hit_tokens,
     )
-    store = runtime.store(
+    store = client.store(
         request,
         start_token=hit_tokens,
         token_count=miss_tokens,
     )
 
     if pass_label == "warm" and hit_tokens > 0:
-        checksums = runtime.compute_checksums(
+        checksums = client.compute_checksums(
             request,
             start_token=0,
             token_count=hit_tokens,
         )
 
-    runtime.end_session(request)
+    client.end_session(request)
     return _RequestPassResult(
         lookup=lookup,
         checksums=checksums,

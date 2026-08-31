@@ -107,8 +107,8 @@ class TestCommandMetadata:
         assert callable(sv_cmd.run_server_bench)
 
 
-class TestRuntimeDelegation:
-    def test_cold_warm_flow_uses_one_runtime_and_closes(
+class TestClientDelegation:
+    def test_cold_warm_flow_uses_one_client_and_closes(
         self,
         cmd: BenchCommand,
         parser: argparse.ArgumentParser,
@@ -119,26 +119,26 @@ class TestRuntimeDelegation:
 
         # First Party
         from lmcache.cli.commands.bench.server_bench import command as sv_cmd
-        from lmcache.cli.commands.bench.server_bench.runtime import (
+        from lmcache.cli.commands.bench.server_bench.client import (
             BenchRequest,
             LookupResult,
             TransferResult,
         )
 
-        runtime = MagicMock()
+        client = MagicMock()
         cold_request = BenchRequest(0, "req-0-cold", "cold", (1, 2), 2, 1, 2, 0, 1)
         warm_request = BenchRequest(0, "req-0-warm", "warm", (1, 2), 2, 1, 2, 0, 1)
-        runtime.create_request.side_effect = [cold_request, warm_request]
-        runtime.lookup.side_effect = [
+        client.create_request.side_effect = [cold_request, warm_request]
+        client.lookup.side_effect = [
             LookupResult(0, 1, 0.0),
             LookupResult(1, 1, 0.0),
         ]
-        runtime.compute_checksums.side_effect = [["same"], ["same"]]
-        runtime.store.return_value = TransferResult("store", 2, 0.0, (0,), (0,), ())
-        runtime.retrieve.return_value = TransferResult(
+        client.compute_checksums.side_effect = [["same"], ["same"]]
+        client.store.return_value = TransferResult("store", 2, 0.0, (0,), (0,), ())
+        client.retrieve.return_value = TransferResult(
             "retrieve", 2, 0.0, (0,), (0,), ()
         )
-        monkeypatch.setattr(sv_cmd, "BenchRuntime", lambda *_args: runtime)
+        monkeypatch.setattr(sv_cmd, "ServerBenchClient", lambda *_args: client)
         args = parser.parse_args(
             [
                 "bench",
@@ -157,20 +157,20 @@ class TestRuntimeDelegation:
 
         sv_cmd.run_server_bench(cmd, args)
 
-        runtime.start.assert_called_once_with()
-        assert runtime.create_request.call_args_list == [
+        client.start.assert_called_once_with()
+        assert client.create_request.call_args_list == [
             call(0, request_id="req-0-cold", label="cold"),
             call(0, request_id="req-0-warm", label="warm"),
         ]
-        assert runtime.lookup.call_count == 2
-        runtime.zero_destination.assert_called_once_with(
+        assert client.lookup.call_count == 2
+        client.zero_destination.assert_called_once_with(
             warm_request, start_token=0, token_count=2
         )
-        assert runtime.end_session.call_args_list == [
+        assert client.end_session.call_args_list == [
             call(cold_request),
             call(warm_request),
         ]
-        runtime.close.assert_called_once_with()
+        client.close.assert_called_once_with()
 
 
 # ------------------------------------------------------------------ #
@@ -1045,7 +1045,7 @@ class TestAllocShapeContract:
 # ------------------------------------------------------------------ #
 
 
-class TestRuntimeMultiWorker:
+class TestClientMultiWorker:
     """LOOKUP is scheduler-scoped (single call, worker_id=None) while
     STORE / RETRIEVE fan out per-rank, mirroring how
     ``LMCacheMPWorkerAdapter`` routes requests in a real vLLM
@@ -1063,8 +1063,8 @@ class TestRuntimeMultiWorker:
 
         # First Party
         from lmcache.cli.commands.bench.server_bench import helpers as sv_helpers
+        from lmcache.cli.commands.bench.server_bench.client import ServerBenchClient
         from lmcache.cli.commands.bench.server_bench.config import BenchConfig
-        from lmcache.cli.commands.bench.server_bench.runtime import BenchRuntime
         from lmcache.v1.multiprocess import mq
 
         tensor_refs: list[weakref.ReferenceType[torch.Tensor]] = []
@@ -1084,7 +1084,7 @@ class TestRuntimeMultiWorker:
                 self.closed = True
 
         context = FakeContext()
-        client = FakeClient()
+        transport = FakeClient()
 
         def fake_allocate(*, groups, shm_prefix):
             del groups, shm_prefix
@@ -1098,7 +1098,7 @@ class TestRuntimeMultiWorker:
             return True
 
         monkeypatch.setattr(zmq, "Context", lambda: context)
-        monkeypatch.setattr(mq, "MessageQueueClient", lambda *_args: client)
+        monkeypatch.setattr(mq, "MessageQueueClient", lambda *_args: transport)
         monkeypatch.setattr(sv_helpers, "_get_chunk_size", lambda _client: 16)
         monkeypatch.setattr(
             sv_helpers,
@@ -1116,7 +1116,7 @@ class TestRuntimeMultiWorker:
             fake_unregister,
         )
 
-        runtime = BenchRuntime(
+        bench_client = ServerBenchClient(
             BenchConfig(
                 rpc_url="ipc:///tmp/test-runtime-rollback",
                 http_url="",
@@ -1136,11 +1136,11 @@ class TestRuntimeMultiWorker:
         )
 
         with pytest.raises(RuntimeError, match="rank 1"):
-            runtime.start()
+            bench_client.start()
 
         gc.collect()
         assert unregistered == [1000]
-        assert client.closed
+        assert transport.closed
         assert context.terminated
         assert all(ref() is None for ref in tensor_refs)
 
@@ -1150,7 +1150,7 @@ class TestRuntimeMultiWorker:
         is_mla: bool,
         tp_size: int,
     ):
-        """Run the public Runtime operations against mocked transport."""
+        """Run the public client operations against mocked transport."""
         # Standard
         from unittest.mock import MagicMock
         import gc
@@ -1158,10 +1158,10 @@ class TestRuntimeMultiWorker:
 
         # First Party
         from lmcache.cli.commands.bench.server_bench import helpers as sv_helpers
-        from lmcache.cli.commands.bench.server_bench.config import BenchConfig
-        from lmcache.cli.commands.bench.server_bench.runtime import (
-            BenchRuntime,
+        from lmcache.cli.commands.bench.server_bench.client import (
+            ServerBenchClient,
         )
+        from lmcache.cli.commands.bench.server_bench.config import BenchConfig
         from lmcache.v1.multiprocess import mq
 
         calls: list[tuple] = []
@@ -1222,7 +1222,7 @@ class TestRuntimeMultiWorker:
         monkeypatch.setattr(mq, "MessageQueueClient", lambda *_args: FakeClient())
 
         kv_size = 1 if is_mla else 2
-        runtime = BenchRuntime(
+        bench_client = ServerBenchClient(
             BenchConfig(
                 rpc_url="ipc:///tmp/test-runtime",
                 http_url="",
@@ -1240,22 +1240,22 @@ class TestRuntimeMultiWorker:
             ),
             MagicMock(),
         )
-        runtime.start()
+        bench_client.start()
         gc.collect()
         assert all(ref() is not None for ref in tensor_refs)
         try:
-            request = runtime.create_request(0, "req-0-test", "test")
+            request = bench_client.create_request(0, "req-0-test", "test")
             assert request is not None
-            lookup = runtime.lookup(request)
-            store = runtime.store(
+            lookup = bench_client.lookup(request)
+            store = bench_client.store(
                 request,
                 start_token=0,
                 token_count=request.num_full_tokens,
             )
-            runtime.end_session(request)
+            bench_client.end_session(request)
             result = (lookup, store)
         finally:
-            runtime.close()
+            bench_client.close()
         gc.collect()
         assert all(ref() is None for ref in tensor_refs)
 

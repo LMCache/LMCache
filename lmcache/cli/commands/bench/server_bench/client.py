@@ -135,7 +135,7 @@ class BenchRequest:
 
 
 @dataclass
-class WorkerRuntime:
+class WorkerContext:
     """Live resources owned by one simulated Worker.
 
     Attributes:
@@ -153,11 +153,11 @@ class WorkerRuntime:
     shm_mappings: list[tuple[int, int]] = field(default_factory=list)
 
 
-class BenchRuntime:
-    """Own the live client, Workers, and resources for one benchmark run.
+class ServerBenchClient:
+    """Own the MQ client, Workers, and resources for one benchmark run.
 
     Construction has no external side effects. Call :meth:`start` before
-    running operations and :meth:`close` when the run ends. The runtime keeps
+    running operations and :meth:`close` when the run ends. The client keeps
     the CLI independent from ZMQ, tensor allocation, Worker registration, IPC,
     SHM, and multi-Worker dispatch details.
     """
@@ -167,7 +167,7 @@ class BenchRuntime:
         config: BenchConfig,
         log: Callable[[str], None],
     ) -> None:
-        """Create a stopped runtime.
+        """Create a stopped client.
 
         Args:
             config: Resolved configuration for one server-bench run.
@@ -176,8 +176,8 @@ class BenchRuntime:
         self._config = config
         self._log = log
         self._zmq_context: Any | None = None
-        self._client: "MessageQueueClient | None" = None
-        self._workers: list[WorkerRuntime] = []
+        self._mq_client: "MessageQueueClient | None" = None
+        self._workers: list[WorkerContext] = []
         self._registered_instance_ids: list[int] = []
         self._shm_names: list[str] = []
         self._started = False
@@ -195,10 +195,10 @@ class BenchRuntime:
             ValueError: If the KV layout is invalid or incompatible with the
                 selected MLA routing.
             RuntimeError: If GPU mode is unavailable, registration fails, or
-                this runtime has already been started.
+                this client has already been started.
         """
         if self._started:
-            raise RuntimeError("BenchRuntime has already been started")
+            raise RuntimeError("ServerBenchClient has already been started")
 
         try:
             self._initialize()
@@ -269,7 +269,7 @@ class BenchRuntime:
         Raises:
             RuntimeError: If :meth:`start` has not completed.
         """
-        client = self._require_started()
+        transport = self._require_started()
 
         # Standard
         import time
@@ -289,7 +289,7 @@ class BenchRuntime:
             world_size=self._kv_world_size,
         )
         started_at = time.monotonic()
-        if not _send_lookup(client, lookup_key, tp_size=len(self._workers)):
+        if not _send_lookup(transport, lookup_key, tp_size=len(self._workers)):
             latency_ms = (time.monotonic() - started_at) * 1000
             self._log("  [seq %d/%s] LOOKUP timeout" % (request.seq_no, request.label))
             return LookupResult(
@@ -299,7 +299,7 @@ class BenchRuntime:
                 error="timeout",
             )
 
-        hit_chunks = _poll_prefetch_status(client, lookup_key.request_id)
+        hit_chunks = _poll_prefetch_status(transport, lookup_key.request_id)
         if hit_chunks is None:
             hit_chunks = 0
         latency_ms = (time.monotonic() - started_at) * 1000
@@ -341,7 +341,7 @@ class BenchRuntime:
             ValueError: If the token range is outside the request or is not
                 chunk-aligned.
         """
-        client = self._require_started()
+        transport = self._require_started()
         if token_count == 0:
             return None
         self._validate_token_range(request, start_token, token_count)
@@ -374,7 +374,7 @@ class BenchRuntime:
                 world_size=self._kv_world_size,
             )
             worker_status = _send_store(
-                client,
+                transport,
                 key,
                 block_offset=block_offset,
                 block_size=self._block_size,
@@ -436,7 +436,7 @@ class BenchRuntime:
             ValueError: If the token range is outside the request or is not
                 chunk-aligned.
         """
-        client = self._require_started()
+        transport = self._require_started()
         if token_count == 0:
             return None
         self._validate_token_range(request, start_token, token_count)
@@ -470,7 +470,7 @@ class BenchRuntime:
                 world_size=self._kv_world_size,
             )
             worker_status = _send_retrieve(
-                client,
+                transport,
                 key,
                 self._chunk_size,
                 hit_chunks,
@@ -639,15 +639,15 @@ class BenchRuntime:
         Raises:
             RuntimeError: If :meth:`start` has not completed.
         """
-        client = self._require_started()
+        transport = self._require_started()
 
         # First Party
         from lmcache.cli.commands.bench.server_bench.helpers import _send_end_session
 
-        _send_end_session(client, request.request_id)
+        _send_end_session(transport, request.request_id)
 
     def close(self) -> None:
-        """Unregister Workers and release all local runtime resources.
+        """Unregister Workers and release all local client resources.
 
         The method is idempotent and can clean up a partially completed
         :meth:`start`, making it safe to call from a ``finally`` block.
@@ -657,11 +657,11 @@ class BenchRuntime:
             _send_unregister_kv_cache,
         )
 
-        if self._client is not None:
+        if self._mq_client is not None:
             for instance_id in self._registered_instance_ids:
                 try:
                     ok = _send_unregister_kv_cache(
-                        self._client,
+                        self._mq_client,
                         instance_id=instance_id,
                         use_handle=self._config.uses_handle_transfer,
                     )
@@ -698,13 +698,13 @@ class BenchRuntime:
                     except OSError:
                         pass
 
-        if self._client is not None:
+        if self._mq_client is not None:
             try:
-                self._client.close()
+                self._mq_client.close()
             except Exception as exc:
-                self._log("  [warning] client close failed: %s" % exc)
+                self._log("  [warning] MessageQueueClient close failed: %s" % exc)
             finally:
-                self._client = None
+                self._mq_client = None
         if self._zmq_context is not None:
             try:
                 self._zmq_context.term()
@@ -729,7 +729,7 @@ class BenchRuntime:
         self._started = False
 
     def _initialize(self) -> None:
-        """Allocate and register every resource required by the runtime."""
+        """Allocate and register every resource required by the client."""
 
         # Heavy imports stay inside start so the slim lmcache-cli package can
         # still import the command parser and show its install hint.
@@ -770,9 +770,9 @@ class BenchRuntime:
             % (config.rpc_url, config.mode)
         )
         self._zmq_context = zmq.Context()
-        self._client = MessageQueueClient(config.rpc_url, self._zmq_context)
+        self._mq_client = MessageQueueClient(config.rpc_url, self._zmq_context)
 
-        self._chunk_size = _get_chunk_size(self._client)
+        self._chunk_size = _get_chunk_size(self._mq_client)
         self._log("Server chunk_size = %d" % self._chunk_size)
 
         layer_groups = parse_kvcache_shape_spec(config.kvcache_shape_spec)
@@ -926,7 +926,7 @@ class BenchRuntime:
                 kv_wrappers = list(cpu_wrappers)
                 client_kv_tensors = cpu_tensors
 
-            worker = WorkerRuntime(
+            worker = WorkerContext(
                 spec=WorkerSpec(
                     rank=rank,
                     kv_worker_id=kv_worker_id,
@@ -942,7 +942,7 @@ class BenchRuntime:
             self._workers.append(worker)
 
             register_result = _send_register_kv_cache(
-                self._client,
+                self._mq_client,
                 instance_id=instance_id,
                 world_size=self._kv_world_size,
                 layout_hints=layout_hints,
@@ -973,10 +973,10 @@ class BenchRuntime:
         self._log("")
 
     def _require_started(self) -> "MessageQueueClient":
-        """Return the live client or raise before successful startup."""
-        if not self._started or self._client is None:
-            raise RuntimeError("BenchRuntime must be started before use")
-        return self._client
+        """Return the live MessageQueueClient or raise before startup."""
+        if not self._started or self._mq_client is None:
+            raise RuntimeError("ServerBenchClient must be started before use")
+        return self._mq_client
 
     def _validate_token_range(
         self,
@@ -992,7 +992,7 @@ class BenchRuntime:
         if start_token % self._chunk_size or token_count % self._chunk_size:
             raise ValueError("token range must be chunk-aligned")
 
-    def _data_tensors(self, worker: WorkerRuntime) -> "list[torch.Tensor] | None":
+    def _data_tensors(self, worker: WorkerContext) -> "list[torch.Tensor] | None":
         """Return tensors only for the engine-driven transfer path."""
         if self._config.uses_handle_transfer:
             return None
