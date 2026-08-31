@@ -142,11 +142,14 @@ class _PendingLookup:
         locks_held: True iff the daemon still holds the read locks
             reserved by this LOOKUP. RETRIEVE consumes them; explicit
             FREE_LOOKUP_LOCKS releases them.
+        cache_salt: Per-tenant isolation salt captured by LOOKUP and reused by
+            RETRIEVE and every lock-release path for this request.
     """
 
     token_ids: list[int]
     matched_token_num: int
     locks_held: bool
+    cache_salt: str
 
 
 class LMCacheMPConnector:
@@ -166,7 +169,12 @@ class LMCacheMPConnector:
     - ``end_session``: per-request cleanup. Frees any still-held
       locks then sends END_SESSION so the daemon doesn't leak
       read-lock reservations.
+
+    ``supports_cache_salt`` is a connector capability flag for integrations
+    that must fail closed rather than silently use unsalted external keys.
     """
+
+    supports_cache_salt: bool = True
 
     def __init__(
         self,
@@ -269,8 +277,22 @@ class LMCacheMPConnector:
         start: int,
         end: int,
         request_id: str,
+        cache_salt: str = "",
         no_worker_id: bool = False,
     ) -> IPCCacheServerKey:
+        """Build an IPC cache key for an SGLang MP request.
+
+        Args:
+            token_ids: Complete token sequence used to hash cache chunks.
+            start: Inclusive token offset for this operation.
+            end: Exclusive token offset for this operation.
+            request_id: Request identifier used for session tracking.
+            cache_salt: Per-tenant isolation salt included in cache identity.
+            no_worker_id: Whether the key represents all tensor-parallel workers.
+
+        Returns:
+            The cache-server key sent over the multi-process protocol.
+        """
         return IPCCacheServerKey(
             model_name=self.model_name,
             world_size=self.tp_size,
@@ -282,6 +304,7 @@ class LMCacheMPConnector:
             start=start,
             end=end,
             request_id=request_id,
+            cache_salt=cache_salt,
         )
 
     def _slot_mapping_to_block_ids(self, slot_mapping: torch.Tensor) -> list[int]:
@@ -334,6 +357,7 @@ class LMCacheMPConnector:
         start: int,
         end: int,
         request_id: str,
+        cache_salt: str,
     ) -> None:
         if start >= end or not self.is_healthy:
             return
@@ -346,13 +370,19 @@ class LMCacheMPConnector:
                     start=start,
                     end=end,
                     request_id=request_id,
+                    cache_salt=cache_salt,
                     no_worker_id=True,
                 ),
                 self.tp_size,
             ],
         )
 
-    def lookup_kv(self, token_ids: list[int], request_id: str) -> int:
+    def lookup_kv(
+        self,
+        token_ids: list[int],
+        request_id: str,
+        cache_salt: str = "",
+    ) -> int:
         """Phase 1 of the two-phase load — fires LOOKUP only.
 
         The daemon prefetches missing chunks L2 → L1 (DRAM), creates a
@@ -365,9 +395,14 @@ class LMCacheMPConnector:
         its read locks released before the new LOOKUP fires, so locks
         don't accumulate.
 
-        Returns the chunk-aligned matched-token count (0 if no
-        chunk-aligned hit, including the ``aligned_end == 0`` short-
-        prompt case).
+        Args:
+            token_ids: Complete token sequence to look up.
+            request_id: Request identifier used for session tracking.
+            cache_salt: Per-tenant isolation salt included in cache identity.
+
+        Returns:
+            The chunk-aligned matched-token count, or zero if no aligned hit
+            exists, the connector is unhealthy, or ``request_id`` is empty.
         """
         if not self.is_healthy or not request_id:
             return 0
@@ -379,7 +414,11 @@ class LMCacheMPConnector:
             stale = self._pending_lookups.pop(request_id, None)
         if stale is not None and stale.locks_held:
             self._free_lookup_locks(
-                stale.token_ids, 0, stale.matched_token_num, request_id
+                stale.token_ids,
+                0,
+                stale.matched_token_num,
+                request_id,
+                stale.cache_salt,
             )
 
         aligned_end = (len(token_ids) // self._lmcache_chunk_size) * (
@@ -393,6 +432,7 @@ class LMCacheMPConnector:
             start=0,
             end=aligned_end,
             request_id=request_id,
+            cache_salt=cache_salt,
             no_worker_id=True,
         )
         send_lmcache_request(
@@ -411,6 +451,7 @@ class LMCacheMPConnector:
                 token_ids=list(token_ids),
                 matched_token_num=matched,
                 locks_held=matched > 0,
+                cache_salt=cache_salt,
             )
         return matched
 
@@ -426,8 +467,15 @@ class LMCacheMPConnector:
             pending.locks_held = False
             token_ids = pending.token_ids
             matched = pending.matched_token_num
+            cache_salt = pending.cache_salt
         if matched > 0:
-            self._free_lookup_locks(token_ids, 0, matched, request_id)
+            self._free_lookup_locks(
+                token_ids,
+                0,
+                matched,
+                request_id,
+                cache_salt,
+            )
 
     def end_session(self, request_id: str) -> None:
         """Tell the daemon we're done with this request_id.
@@ -449,7 +497,11 @@ class LMCacheMPConnector:
             return
         if pending.locks_held and pending.matched_token_num > 0:
             self._free_lookup_locks(
-                pending.token_ids, 0, pending.matched_token_num, request_id
+                pending.token_ids,
+                0,
+                pending.matched_token_num,
+                request_id,
+                pending.cache_salt,
             )
         send_lmcache_request(self.mq_client, RequestType.END_SESSION, [request_id])
 
@@ -461,6 +513,7 @@ class LMCacheMPConnector:
         matched_end: int,
         block_ids: list[int],
         skip_prefix_n_blocks: int = 0,
+        cache_salt: str = "",
     ) -> tuple[
         MessagingFuture[tuple[bytes, bool]],
         MessagingFuture[bool],
@@ -476,6 +529,7 @@ class LMCacheMPConnector:
                     start=offset,
                     end=matched_end,
                     request_id=request_id,
+                    cache_salt=cache_salt,
                 ),
                 self.instance_id,
                 # RETRIEVE takes per-group block IDs (list[list[int]]); SGLang is
@@ -524,6 +578,7 @@ class LMCacheMPConnector:
 
         retrieve_token_num = pending.matched_token_num
         token_ids = pending.token_ids
+        cache_salt = pending.cache_salt
         offset = load_metadata.offset
 
         # ``slot_mapping[offset : offset + prefix_pad)`` is sentinel ``-1`` —
@@ -537,7 +592,13 @@ class LMCacheMPConnector:
         fresh_start = offset + prefix_pad
         prefix_pad_pages = prefix_pad // self.page_size
 
-        self._free_lookup_locks(token_ids, 0, offset, request_id)
+        self._free_lookup_locks(
+            token_ids,
+            0,
+            offset,
+            request_id,
+            cache_salt,
+        )
         fresh_block_ids = self._slot_mapping_to_block_ids(
             load_metadata.slot_mapping[fresh_start:retrieve_token_num]
         )
@@ -558,6 +619,7 @@ class LMCacheMPConnector:
                 matched_end=retrieve_token_num,
                 block_ids=block_ids,
                 skip_prefix_n_blocks=prefix_pad_pages,
+                cache_salt=cache_salt,
             )
             if not future.result(timeout=self._mq_timeout):
                 event_handle, _ = raw_future.result(timeout=0)
@@ -572,7 +634,11 @@ class LMCacheMPConnector:
         finally:
             if not retrieve_succeeded and not server_released_locks:
                 self._free_lookup_locks(
-                    token_ids, offset, retrieve_token_num, request_id
+                    token_ids,
+                    offset,
+                    retrieve_token_num,
+                    request_id,
+                    cache_salt,
                 )
             with self._pending_lookups_lock:
                 if request_id in self._pending_lookups:
@@ -601,8 +667,8 @@ class LMCacheMPConnector:
         (see :meth:`end_session`); it is not fired here.
 
         Args:
-            store_metadata: tokens, request id, and KV slot indices for
-                the finished request.
+            store_metadata: Tokens, request id, tenant salt, and KV slot
+                indices for the finished request.
 
         Returns:
             A future resolving to ``True`` when the store completes
@@ -633,6 +699,7 @@ class LMCacheMPConnector:
                     start=0,
                     end=aligned_end,
                     request_id=request_id,
+                    cache_salt=store_metadata.cache_salt,
                 ),
                 self.instance_id,
                 # STORE takes per-group block IDs (list[list[int]]); SGLang is
@@ -649,6 +716,15 @@ class LMCacheMPConnector:
         return future
 
     def store_kv(self, store_metadata: StoreMetadata) -> None:
+        """Store a chunk-aligned SGLang KV prefix and wait for completion.
+
+        Args:
+            store_metadata: Tokens, request id, tenant salt, and KV slot
+                indices for the finished request.
+
+        Raises:
+            RuntimeError: If the daemon reports that the store failed.
+        """
         if not self.is_healthy:
             return
 
@@ -674,6 +750,7 @@ class LMCacheMPConnector:
                         start=0,
                         end=aligned_end,
                         request_id=request_id,
+                        cache_salt=store_metadata.cache_salt,
                     ),
                     self.instance_id,
                     # STORE takes per-group block IDs (list[list[int]]); SGLang is

@@ -215,9 +215,7 @@ def _make_public_connector(
     monkeypatch.setattr(
         adapter_mod,
         "get_device_spec",
-        lambda _device_type: SimpleNamespace(
-            is_handle_transfer_available=lambda: True
-        ),
+        lambda _device_type: SimpleNamespace(is_handle_transfer_available=lambda: True),
     )
     monkeypatch.setattr(adapter_mod, "wrap_one_kv_cache", lambda tensor: tensor)
     monkeypatch.setattr(adapter_mod, "send_lmcache_request", send_request)
@@ -528,6 +526,7 @@ def test_retrieve_failure_uses_single_cleanup_owner(
             token_ids=list(range(2 * _CHUNK_SIZE)),
             matched_token_num=2 * _CHUNK_SIZE,
             locks_held=True,
+            cache_salt="",
         )
     }
     connector._pending_lookups_lock = threading.Lock()
