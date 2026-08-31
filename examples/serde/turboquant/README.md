@@ -30,6 +30,29 @@ The pytest suite includes TurboQuant serde tests that exercise direct CUDA, Mock
 CUDA_VISIBLE_DEVICES=0 python -m pytest tests/v1/distributed/serde/test_turboquant.py -q -s
 ```
 
+## Compare codecs for a deployment bandwidth
+
+Use the baseline benchmark to compare FP8 and TurboQuant quality, codec
+latency, and transfer savings. Pass the effective bandwidths of the deployment
+path rather than the link's advertised peak rate:
+
+```bash
+python examples/serde/turboquant/bench_serde_baselines.py \
+  --device cuda \
+  --bandwidth-gbps 10 25 100 200
+```
+
+The JSON output includes a `service_profiles` entry for every codec and
+bandwidth. `encode_transfer_decode_ms` models one compressed transfer plus
+the measured median encode/decode time, while `beneficial` reports whether
+that estimate beats transferring the original KV bytes. The
+`break_even_bandwidth_gbps` value is the bandwidth above which codec cost is
+expected to exceed its transfer savings.
+
+This is a component-level estimate: storage latency, protocol overhead, and
+contention with inference are intentionally excluded. Measure those separately
+before selecting a production profile.
+
 ## Requirements
 
 - vLLM installed (`vllm serve` works)

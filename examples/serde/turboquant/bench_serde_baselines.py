@@ -5,9 +5,11 @@
 
 # Standard
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 import argparse
 import json
+import math
+import statistics
 import time
 
 # Third Party
@@ -15,6 +17,7 @@ import torch
 
 # First Party
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.serde.base import Deserializer, Serializer
 from lmcache.v1.distributed.serde.fp8 import (
     Fp8QuantizationDeserializer,
     Fp8QuantizationSerializer,
@@ -24,6 +27,7 @@ from lmcache.v1.distributed.serde.turboquant import (
     TurboQuantSerdeConfig,
     TurboQuantSerializer,
 )
+from lmcache.v1.memory_management import MemoryObj
 
 
 @dataclass
@@ -31,12 +35,14 @@ class _FakeMemoryObj:
     tensor: torch.Tensor
 
 
-def sync() -> None:
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
+def sync(device: torch.device) -> None:
+    """Synchronize benchmark work on accelerator devices."""
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
 
 
 def corrcoef(a: torch.Tensor, b: torch.Tensor) -> float:
+    """Return the Pearson correlation between two tensors."""
     a = a.float().flatten()
     b = b.float().flatten()
     a = a - a.mean()
@@ -47,9 +53,117 @@ def corrcoef(a: torch.Tensor, b: torch.Tensor) -> float:
     return ((a @ b) / denom).item()
 
 
+def percentile(values: list[float], quantile: float) -> float:
+    """Return a linearly interpolated percentile for benchmark samples.
+
+    Args:
+        values: Non-empty collection of latency samples.
+        quantile: Percentile expressed as a value in ``[0, 1]``.
+
+    Returns:
+        The interpolated percentile value.
+
+    Raises:
+        ValueError: If ``values`` is empty or ``quantile`` is out of range.
+    """
+    if not values:
+        raise ValueError("values must not be empty")
+    if not 0 <= quantile <= 1:
+        raise ValueError("quantile must be between 0 and 1")
+
+    ordered = sorted(values)
+    position = (len(ordered) - 1) * quantile
+    lower = math.floor(position)
+    upper = math.ceil(position)
+    if lower == upper:
+        return ordered[lower]
+    weight = position - lower
+    return ordered[lower] * (1 - weight) + ordered[upper] * weight
+
+
+def transfer_time_ms(num_bytes: int, bandwidth_gbps: float) -> float:
+    """Estimate one-way transfer time at a link bandwidth.
+
+    Args:
+        num_bytes: Payload size in bytes.
+        bandwidth_gbps: Effective link bandwidth in gigabits per second.
+
+    Returns:
+        Estimated transfer time in milliseconds.
+
+    Raises:
+        ValueError: If ``num_bytes`` is negative or bandwidth is not positive.
+    """
+    if num_bytes < 0:
+        raise ValueError("num_bytes must be non-negative")
+    if bandwidth_gbps <= 0:
+        raise ValueError("bandwidth_gbps must be positive")
+    return num_bytes * 8 / (bandwidth_gbps * 1_000_000)
+
+
+def build_service_profiles(
+    *,
+    raw_bytes: int,
+    serialized_bytes: int,
+    encode_ms: float,
+    decode_ms: float,
+    bandwidths_gbps: list[float],
+) -> list[dict[str, float | bool]]:
+    """Model codec latency and break-even behavior across link bandwidths.
+
+    The estimate intentionally uses measured codec latency plus ideal payload
+    transfer time. It excludes storage and protocol overhead, so consumers can
+    combine the JSON output with deployment-specific measurements.
+
+    Args:
+        raw_bytes: Uncompressed payload size.
+        serialized_bytes: Serialized payload size.
+        encode_ms: Measured median serialization latency.
+        decode_ms: Measured median deserialization latency.
+        bandwidths_gbps: Effective link bandwidths to evaluate.
+
+    Returns:
+        One profile per requested bandwidth.
+
+    Raises:
+        ValueError: If sizes or latencies are invalid.
+    """
+    if raw_bytes <= 0:
+        raise ValueError("raw_bytes must be positive")
+    if serialized_bytes < 0:
+        raise ValueError("serialized_bytes must be non-negative")
+    if encode_ms < 0 or decode_ms < 0:
+        raise ValueError("codec latencies must be non-negative")
+
+    codec_ms = encode_ms + decode_ms
+    saved_bytes = raw_bytes - serialized_bytes
+    break_even_bandwidth_gbps = (
+        math.inf if codec_ms == 0 else max(saved_bytes, 0) * 8 / (codec_ms * 1_000_000)
+    )
+    profiles: list[dict[str, float | bool]] = []
+    for bandwidth_gbps in bandwidths_gbps:
+        raw_transfer_ms = transfer_time_ms(raw_bytes, bandwidth_gbps)
+        serialized_transfer_ms = transfer_time_ms(serialized_bytes, bandwidth_gbps)
+        total_ms = codec_ms + serialized_transfer_ms
+        speedup = math.inf if total_ms == 0 else raw_transfer_ms / total_ms
+        profiles.append(
+            {
+                "bandwidth_gbps": bandwidth_gbps,
+                "raw_transfer_ms": raw_transfer_ms,
+                "serialized_transfer_ms": serialized_transfer_ms,
+                "encode_transfer_decode_ms": total_ms,
+                "speedup_vs_raw_transfer": speedup,
+                "beneficial": total_ms < raw_transfer_ms,
+                "break_even_bandwidth_gbps": break_even_bandwidth_gbps,
+            }
+        )
+    return profiles
+
+
 def make_serde(
     name: str, preset: str | None, fp8_dtype: str, head_dim: int, block_size: int
-):
+) -> tuple[Serializer, Deserializer]:
+    """Create the synchronous serde pair for one benchmark configuration."""
     if name == "fp8":
         dtype = getattr(torch, fp8_dtype)
         return (
@@ -80,6 +194,7 @@ def benchmark_one(
     head_dim: int,
     block_size: int,
     fp8_dtype: str,
+    bandwidths_gbps: list[float],
 ) -> dict[str, Any]:
     torch.manual_seed(2026)
     original = torch.randn(shape, dtype=dtype, device=device)
@@ -105,27 +220,27 @@ def benchmark_one(
     key = ObjectKey(chunk_hash=b"", model_name="", kv_rank=0)
 
     for _ in range(warmup):
-        written = serializer.serialize(src, enc, key)
+        written = serializer.serialize(cast(MemoryObj, src), cast(MemoryObj, enc), key)
         if written != n_bytes:
             raise RuntimeError(f"written={written}, expected={n_bytes}")
-        deserializer.deserialize(enc, dec, key)
-    sync()
+        deserializer.deserialize(cast(MemoryObj, enc), cast(MemoryObj, dec), key)
+    sync(device)
 
     encode_times = []
     decode_times = []
 
     for _ in range(iters):
-        sync()
+        sync(device)
         t0 = time.perf_counter()
-        written = serializer.serialize(src, enc, key)
-        sync()
+        written = serializer.serialize(cast(MemoryObj, src), cast(MemoryObj, enc), key)
+        sync(device)
         t1 = time.perf_counter()
 
         if written != n_bytes:
             raise RuntimeError(f"written={written}, expected={n_bytes}")
 
-        deserializer.deserialize(enc, dec, key)
-        sync()
+        deserializer.deserialize(cast(MemoryObj, enc), cast(MemoryObj, dec), key)
+        sync(device)
         t2 = time.perf_counter()
 
         encode_times.append((t1 - t0) * 1000)
@@ -135,7 +250,9 @@ def benchmark_one(
     orig_f = original.float()
     rec_f = recovered.float()
 
-    return {
+    encode_p50_ms = statistics.median(encode_times)
+    decode_p50_ms = statistics.median(decode_times)
+    result = {
         "serde": serde_name,
         "preset": preset or fp8_dtype,
         "shape": "x".join(map(str, shape)),
@@ -144,11 +261,23 @@ def benchmark_one(
         "serialized_MB": n_bytes / 1024 / 1024,
         "compression_ratio": raw_bytes / n_bytes,
         "encode_ms": sum(encode_times) / len(encode_times),
+        "encode_p50_ms": encode_p50_ms,
+        "encode_p95_ms": percentile(encode_times, 0.95),
         "decode_ms": sum(decode_times) / len(decode_times),
+        "decode_p50_ms": decode_p50_ms,
+        "decode_p95_ms": percentile(decode_times, 0.95),
         "corr": corrcoef(orig_f, rec_f),
         "mean_abs_err": torch.mean(torch.abs(orig_f - rec_f)).item(),
         "max_abs_err": torch.max(torch.abs(orig_f - rec_f)).item(),
     }
+    result["service_profiles"] = build_service_profiles(
+        raw_bytes=raw_bytes,
+        serialized_bytes=n_bytes,
+        encode_ms=encode_p50_ms,
+        decode_ms=decode_p50_ms,
+        bandwidths_gbps=bandwidths_gbps,
+    )
+    return result
 
 
 def main() -> None:
@@ -164,6 +293,13 @@ def main() -> None:
     parser.add_argument("--head-dim", type=int, default=64)
     parser.add_argument("--warmup", type=int, default=3)
     parser.add_argument("--iters", type=int, default=10)
+    parser.add_argument(
+        "--bandwidth-gbps",
+        type=float,
+        nargs="+",
+        default=[10.0, 25.0, 100.0, 200.0],
+        help="Effective one-way bandwidths used for service-aware estimates.",
+    )
     parser.add_argument("--fp8-dtype", default="float8_e4m3fn")
     parser.add_argument(
         "--turboquant-presets",
@@ -176,6 +312,13 @@ def main() -> None:
         ],
     )
     args = parser.parse_args()
+
+    if args.warmup < 0:
+        parser.error("--warmup must be non-negative")
+    if args.iters <= 0:
+        parser.error("--iters must be positive")
+    if any(bandwidth <= 0 for bandwidth in args.bandwidth_gbps):
+        parser.error("--bandwidth-gbps values must be positive")
 
     if args.device == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA is not available")
@@ -206,6 +349,7 @@ def main() -> None:
             head_dim=args.head_dim,
             block_size=args.block_size,
             fp8_dtype=args.fp8_dtype,
+            bandwidths_gbps=args.bandwidth_gbps,
         )
         for serde_name, preset in configs
     ]
@@ -244,6 +388,36 @@ def main() -> None:
                 ]
             )
         )
+
+    print()
+    profile_headers = [
+        "serde",
+        "preset",
+        "bandwidth_Gbps",
+        "raw_transfer_ms",
+        "codec_transfer_ms",
+        "speedup",
+        "beneficial",
+        "break_even_Gbps",
+    ]
+    print(" | ".join(profile_headers))
+    print(" | ".join(["---"] * len(profile_headers)))
+    for row in rows:
+        for profile in row["service_profiles"]:
+            print(
+                " | ".join(
+                    [
+                        str(row["serde"]),
+                        str(row["preset"]),
+                        f"{profile['bandwidth_gbps']:.2f}",
+                        f"{profile['raw_transfer_ms']:.3f}",
+                        f"{profile['encode_transfer_decode_ms']:.3f}",
+                        f"{profile['speedup_vs_raw_transfer']:.3f}",
+                        str(profile["beneficial"]),
+                        f"{profile['break_even_bandwidth_gbps']:.3f}",
+                    ]
+                )
+            )
 
 
 if __name__ == "__main__":
