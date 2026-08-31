@@ -7,6 +7,7 @@ from typing import Any
 from unittest.mock import MagicMock
 import os
 import sys
+import threading
 
 # Third Party
 import pytest
@@ -185,6 +186,69 @@ def test_unavailable_npu_latches_at_construction(
     assert backend.is_pin_supported is False
     assert backend.pin_memory(PAGE, PAGE) is False
     assert rt.register_calls == []
+
+
+def test_unavailable_npu_skips_library_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Construction never probes for ACL bindings without ``torch.npu``.
+
+    No ACL context can be established without ``torch.npu``, so library
+    discovery would be dead work -- and its ``ctypes`` fallback forks
+    ``ldconfig`` on every Ascend-less construction.
+    """
+    load_acl_rt = MagicMock(return_value=None)
+    load_libascendcl = MagicMock(return_value=None)
+    monkeypatch.setattr(pin_memory_module, "_load_acl_rt", load_acl_rt)
+    monkeypatch.setattr(pin_memory_module, "_load_libascendcl", load_libascendcl)
+    monkeypatch.delattr(torch, "npu", raising=False)
+
+    backend = NpuPinMemoryBackend()
+
+    assert backend.is_pin_supported is False
+    load_acl_rt.assert_not_called()
+    load_libascendcl.assert_not_called()
+
+
+def test_unpin_refuses_after_context_failure_latch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A context-failure latch stops unpin from touching AscendCL.
+
+    The latch clears the runtime binding, so ``unpin_memory`` for an
+    earlier registration returns False instead of issuing an unregister
+    against the broken runtime; the page-lock is abandoned with it.
+    """
+    rt = _FakeAclRt()
+    backend = _make_backend(monkeypatch, rt)
+    assert backend.pin_memory(PAGE, PAGE) is True
+
+    def broken_set_device(device: int) -> None:
+        raise RuntimeError("CANN broken")
+
+    monkeypatch.setattr(
+        torch,
+        "npu",
+        SimpleNamespace(
+            is_available=lambda: True,
+            current_device=lambda: 0,
+            set_device=broken_set_device,
+        ),
+    )
+
+    # A thread that has never pinned runs the full context-setup path.
+    pin_results: list[bool] = []
+
+    def pin_on_fresh_thread() -> None:
+        pin_results.append(backend.pin_memory(2 * PAGE, PAGE))
+
+    thread = threading.Thread(target=pin_on_fresh_thread)
+    thread.start()
+    thread.join()
+
+    assert pin_results == [False]
+    assert backend.unpin_memory(PAGE) is False
+    assert rt.unregister_calls == []
 
 
 def test_backend_without_acl_or_lib_is_unsupported(

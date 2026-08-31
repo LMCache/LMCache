@@ -32,11 +32,11 @@ except (AttributeError, ValueError, OSError):
 class _AclRuntime(Protocol):
     """``acl.rt`` surface required for host-memory registration.
 
-    Satisfied by the CANN ``acl.rt`` module and by :class:`_LibascendclRuntime`.
-    ``host_register`` mirrors the C ``aclrtHostRegister`` including its
-    out-param: it returns ``(dev_ptr, ret_code)``. The device-mapped alias is
-    unused -- torch ``copy_`` keeps addressing the original host pointer, which
-    the registration page-locks for DMA.
+    Satisfied by the CANN ``acl.rt`` module and by
+    :class:`_LibascendclRuntime`. ``host_register`` returns
+    ``(dev_ptr, ret_code)`` mirroring the C out-param; the device-mapped
+    alias is unused -- torch ``copy_`` keeps addressing the original host
+    pointer.
     """
 
     def host_register(self, ptr: int, size: int, flags: int) -> tuple[int, int]:
@@ -74,9 +74,9 @@ class _LibascendclRuntime:
 def _load_acl_rt() -> _AclRuntime | None:
     """Return the CANN ``acl.rt`` runtime module for host registration.
 
-    The vendor module ships with CANN and shares the runtime instance
-    ``torch_npu`` already loaded, so registrations issued through it are
-    visible to ``copy_(..., non_blocking=True)``.
+    The vendor module shares the runtime instance ``torch_npu`` already
+    loaded, so registrations issued through it are visible to
+    ``copy_(..., non_blocking=True)``.
 
     Returns:
         ``acl.rt``, or ``None`` when the module or its register/unregister
@@ -104,9 +104,8 @@ def _candidate_lib_paths() -> list[str]:
     """Return ``libascendcl`` search candidates, most-specific first.
 
     Honors ``$ASCEND_HOME_PATH`` and the standard CANN install layout
-    (``/usr/local/Ascend/cann*/<arch>-linux/lib64``). Filesystem probes only:
-    :func:`ctypes.util.find_library` is intentionally not used here because it
-    forks ``ldconfig``.
+    (``/usr/local/Ascend/cann*/<arch>-linux/lib64``). Filesystem probes
+    only: :func:`ctypes.util.find_library` forks ``ldconfig``.
     """
     home = os.environ.get("ASCEND_HOME_PATH")
     if home:
@@ -145,8 +144,8 @@ def _bind_libascendcl(paths: list[str]) -> ctypes.CDLL | None:
 def _load_libascendcl() -> _AclRuntime | None:
     """Load ``libascendcl`` via ctypes as an ``acl.rt``-shaped fallback.
 
-    The :func:`ctypes.util.find_library` probe is only paid when the cheap
-    candidates fail, because it forks ``ldconfig``.
+    The :func:`ctypes.util.find_library` probe forks ``ldconfig`` and is
+    only paid when the cheap candidates fail.
 
     Returns:
         The adapted runtime, or ``None`` when no usable library is found.
@@ -196,55 +195,42 @@ def _torch_npu_available() -> bool:
 class NpuPinMemoryBackend(PinMemoryBackend):
     """Pin host memory for NPU DMA via AscendCL ``aclrtHostRegister``.
 
-    AscendCL requires a page-aligned ``ptr`` and a page-multiple ``size``, so
-    every registration is widened to whole pages; the caller's original
-    pointer is kept as the bookkeeping key so :meth:`unpin_memory` can reverse
-    the registration when handed that same pointer.
-
-    Attributes:
-        _rt: ``acl.rt``-shaped runtime, or ``None`` when unavailable.
-        _registered_bases: Maps the caller's original pointer to the
-            page-aligned registered base.
-        _no_npu: Latched at construction when the NPU is unavailable (or
-            later, when context setup fails on a broken installation); makes
-            :attr:`is_pin_supported` report ``False``.
-        _tls: Per-thread "context ensured" flag; ACL contexts are
-            thread-local.
+    AscendCL requires a page-aligned ``ptr`` and a page-multiple ``size``,
+    so registrations are widened to whole pages and keyed by the caller's
+    original pointer (:meth:`unpin_memory` reverses them with that key).
+    ``_rt`` is the single availability flag -- ``None`` when the NPU is
+    unavailable, no binding loaded, or a context failure latched the
+    backend off. ACL contexts are thread-local; ``_tls`` tracks which
+    threads already have one.
     """
 
     def __init__(self) -> None:
         """Discover a runtime binding without raising on Ascend-less hosts.
 
-        Notes:
-            Discovery prefers the vendor ``acl`` module and falls back to
-            ``libascendcl`` via :mod:`ctypes`. NPU availability is probed
-            here so :attr:`is_pin_supported` is accurate before any pin
-            attempt -- callers such as the ``use_lazy`` auto-disable guard
-            consult it ahead of the first registration. When the runtime
-            binding or the NPU is unavailable the backend stays unsupported
-            and pin/unpin return ``False``.
+        The NPU is probed first because no ACL context can be established
+        without ``torch.npu``; library discovery (the ``acl`` module, then
+        ``libascendcl`` via ctypes) is skipped when it is absent. Probing
+        here keeps :attr:`is_pin_supported` accurate before the first pin.
         """
-        self._rt: _AclRuntime | None = _load_acl_rt() or _load_libascendcl()
         self._registered_bases: dict[int, int] = {}
-        self._no_npu: bool = not _torch_npu_available()
         self._tls = threading.local()
+        if _torch_npu_available():
+            self._rt: _AclRuntime | None = _load_acl_rt() or _load_libascendcl()
+        else:
+            self._rt = None
 
     def _ensure_context(self) -> bool:
         """Ensure an ACL device context is current on the calling thread.
 
-        ``aclrtHostRegister`` fails with AscendCL ``107002`` (no current
-        context) when the thread has never touched the device. Worker threads
-        are covered (torch_npu creates the context on first device op), but a
-        cache-server thread that only manages host memory may have none, so
-        the first pin attempt on each thread establishes one. Availability
-        itself was already probed in ``__init__``.
+        ``aclrtHostRegister`` fails with ``107002`` when the thread has no
+        current context, and torch_npu only creates one on first device
+        use -- so a thread that only manages host memory establishes one
+        here on its first pin.
 
         Returns:
-            True when a context is current, False when the NPU is
-            unavailable or context setup fails (latched into ``_no_npu``).
+            True when a context is current. False latches the backend off
+            by clearing ``_rt``.
         """
-        if self._no_npu:
-            return False
         if getattr(self._tls, "ensured", False):
             return True
         try:
@@ -255,7 +241,7 @@ class NpuPinMemoryBackend(PinMemoryBackend):
             if npu is None:
                 # Defensive: torch.npu vanished after __init__ (e.g. tests
                 # monkeypatching it away); treat as unavailable.
-                self._no_npu = True
+                self._rt = None
                 logger.warning(
                     "NpuPinMemoryBackend: torch.npu disappeared after "
                     "construction; host pinning disabled"
@@ -271,7 +257,7 @@ class NpuPinMemoryBackend(PinMemoryBackend):
                 npu.set_device(0)
         except Exception as exc:
             # set_device can raise on a broken CANN setup.
-            self._no_npu = True
+            self._rt = None
             logger.warning(
                 "NpuPinMemoryBackend: cannot establish NPU context for "
                 "pinning: %r; copies will be synchronous",
@@ -360,7 +346,7 @@ class NpuPinMemoryBackend(PinMemoryBackend):
         """Whether AscendCL host registration is usable.
 
         Returns:
-            True when a runtime binding loaded and construction found the
-            NPU available, False otherwise.
+            True while a runtime binding is loaded; construction-time
+            unavailability or a context-failure latch clears it.
         """
-        return self._rt is not None and not self._no_npu
+        return self._rt is not None
