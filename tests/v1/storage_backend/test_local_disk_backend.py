@@ -198,6 +198,7 @@ class TestLocalDiskBackend:
 
         local_disk_backend.local_cpu_backend.memory_allocator.close()
 
+
 class TestMultiPathDiskBackend:
     """Test cases for multi-path (multi-device) LocalDiskBackend."""
 
@@ -596,6 +597,7 @@ class TestBatchedGetBlocking:
             local_disk_backend, "read_file", side_effect=tracking_read_file
         ):
             results = local_disk_backend.batched_get_blocking(keys)
+
         assert all(r is not None for r in results)
         # With 4 keys and 4 threads, we should see more than 1 unique thread.
         assert len(set(thread_ids)) > 1, (
