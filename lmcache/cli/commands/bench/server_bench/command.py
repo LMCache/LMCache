@@ -404,9 +404,9 @@ def run_server_bench(
     warm_lookup_ms: list[float] = []
     warm_retrieve_ms: list[float] = []
 
-    client = ServerBenchClient(config, log)
+    bench_client = ServerBenchClient(config, log)
     try:
-        client.start()
+        bench_client.start()
 
         # Record only the steady-state load, not the one-time registration.
         if profiler is not None:
@@ -421,7 +421,7 @@ def run_server_bench(
             log("=== Request seq=%d ===" % seq_no)
 
             # Pass 1: cold (miss -> store)
-            cold_result = _run_request_pass(client, seq_no, "cold")
+            cold_result = _run_request_pass(bench_client, seq_no, "cold")
             if cold_result is not None:
                 cold_lookup_ms.append(cold_result.lookup.latency_ms)
                 if cold_result.store is not None:
@@ -430,7 +430,7 @@ def run_server_bench(
             time.sleep(args.interval)
 
             # Pass 2: warm (hit -> retrieve)
-            warm_result = _run_request_pass(client, seq_no, "warm")
+            warm_result = _run_request_pass(bench_client, seq_no, "warm")
             if warm_result is not None:
                 warm_lookup_ms.append(warm_result.lookup.latency_ms)
                 if warm_result.retrieve is not None:
@@ -475,7 +475,7 @@ def run_server_bench(
         # Stop recording once load ends, before teardown
         if profiler is not None:
             profiler.stop(log)
-        client.close()
+        bench_client.close()
 
     # Emit structured metrics summary.
     _emit_server_bench_metrics(
@@ -493,7 +493,7 @@ def run_server_bench(
 
 
 def _run_request_pass(
-    client: ServerBenchClient,
+    bench_client: ServerBenchClient,
     seq_no: int,
     pass_label: str,
 ) -> _RequestPassResult | None:
@@ -501,7 +501,7 @@ def _run_request_pass(
     if pass_label not in ("cold", "warm"):
         raise ValueError("unsupported baseline pass: %s" % pass_label)
 
-    request = client.create_request(
+    request = bench_client.create_request(
         seq_no,
         request_id="req-%d-%s" % (seq_no, pass_label),
         label=pass_label,
@@ -509,7 +509,7 @@ def _run_request_pass(
     if request is None:
         return None
 
-    lookup = client.lookup(request)
+    lookup = bench_client.lookup(request)
     if not lookup.succeeded:
         return None
 
@@ -518,37 +518,37 @@ def _run_request_pass(
 
     checksums: list[str] | None = None
     if pass_label == "cold" and miss_tokens > 0:
-        checksums = client.compute_checksums(
+        checksums = bench_client.compute_checksums(
             request,
             start_token=hit_tokens,
             token_count=miss_tokens,
         )
     if pass_label == "warm" and hit_tokens > 0:
-        client.zero_destination(
+        bench_client.zero_destination(
             request,
             start_token=0,
             token_count=hit_tokens,
         )
 
-    retrieve = client.retrieve(
+    retrieve = bench_client.retrieve(
         request,
         start_token=0,
         token_count=hit_tokens,
     )
-    store = client.store(
+    store = bench_client.store(
         request,
         start_token=hit_tokens,
         token_count=miss_tokens,
     )
 
     if pass_label == "warm" and hit_tokens > 0:
-        checksums = client.compute_checksums(
+        checksums = bench_client.compute_checksums(
             request,
             start_token=0,
             token_count=hit_tokens,
         )
 
-    client.end_session(request)
+    bench_client.end_session(request)
     return _RequestPassResult(
         lookup=lookup,
         checksums=checksums,
