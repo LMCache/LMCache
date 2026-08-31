@@ -274,6 +274,13 @@ class LocalDiskBackend(StorageBackendInterface):
             os.remove(path)
 
             if force:
+                # The internal eviction loop in `submit_put_task` already
+                # deducts the chunk before calling `batched_remove(...,
+                # force=False)`; every other caller reaches us with the default
+                # `force=True` and must release the reservation here, otherwise
+                # `current_cache_size` only ever grows and the capacity gate in
+                # `submit_put_task` eventually rejects every put.
+                self.current_cache_size -= size
                 self.cache_policy.update_on_force_evict(key)
 
         # Push kv evict msg with batching
