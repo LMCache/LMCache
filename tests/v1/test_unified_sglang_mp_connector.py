@@ -29,6 +29,18 @@ class _Future:
         self.value = value
 
 
+class _ResultFuture(_Future):
+    def __init__(self, ready: bool, value):
+        super().__init__(ready)
+        self.value = value
+
+    def result(self, timeout=None):
+        del timeout
+        if not self.ready:
+            raise TimeoutError("future is not ready")
+        return self.value
+
+
 class _TransferContext:
     def __init__(self):
         self.store_args = None
@@ -50,6 +62,8 @@ class _IPCCacheServerKey:
 
 class _RequestType:
     LOOKUP = object()
+    QUERY_PREFETCH_STATUS = object()
+    WAIT_PREFETCH_STATUS = object()
     END_SESSION = object()
 
 
@@ -141,6 +155,46 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
             )
 
         self.assertIn("lookup-request", self.connector._active_sessions)
+
+    def test_poll_lookup_uses_short_lived_status_queries(self):
+        self.connector.chunk_size = 4
+        self.connector._lookup_leader = True
+        self.connector._mq_client = object()
+        self.connector._sync_leader_int = lambda value: value
+        pending_query = _ResultFuture(False, None)
+        completed_query = _ResultFuture(True, 3)
+        self.connector._send_request = Mock(
+            side_effect=[pending_query, completed_query]
+        )
+        operation = LMCacheLookupOperation(
+            request_id="lookup-request",
+            token_ids=list(range(16)),
+            local_hit_tokens=0,
+            cache_salt="",
+            submission_future=_ResultFuture(True, None),
+        )
+
+        protocol = ModuleType("lmcache.v1.multiprocess.protocol")
+        protocol.RequestType = _RequestType
+        with patch.dict("sys.modules", {"lmcache.v1.multiprocess.protocol": protocol}):
+            # Submit one non-blocking status query. An outstanding query must
+            # not be duplicated by subsequent scheduler polls.
+            self.assertIsNone(self.connector.poll_lookup(operation))
+            self.assertIsNone(self.connector.poll_lookup(operation))
+            self.assertEqual(self.connector._send_request.call_count, 1)
+
+            # A None response means prefetch is still running. The following
+            # scheduler pass issues a fresh query, which returns the final hit.
+            pending_query.ready = True
+            self.assertIsNone(self.connector.poll_lookup(operation))
+            self.assertIsNone(self.connector.poll_lookup(operation))
+            self.assertEqual(self.connector.poll_lookup(operation), 12)
+
+        self.assertEqual(self.connector._send_request.call_count, 2)
+        for call in self.connector._send_request.call_args_list:
+            self.assertIs(call.args[1], _RequestType.QUERY_PREFETCH_STATUS)
+            self.assertEqual(call.args[2], ["lookup-request"])
+        self.assertTrue(operation.locks_held)
 
     def test_slots_to_blocks_rejects_partial_page(self):
         with self.assertRaisesRegex(ValueError, "complete SGLang pages"):

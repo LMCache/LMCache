@@ -614,16 +614,22 @@ class UnifiedLMCacheMPConnector:
                     operation.submission_future.result(timeout=0)
                     operation.completion_future = self._send_request(
                         self._mq_client,
-                        RequestType.WAIT_PREFETCH_STATUS,
-                        [operation.request_id, self._mq_timeout],
+                        RequestType.QUERY_PREFETCH_STATUS,
+                        [operation.request_id],
                     )
                     result = -1
                 elif not operation.completion_future.query():
                     result = -1
                 else:
                     matched_chunks = operation.completion_future.result(timeout=0)
+                    # QUERY_PREFETCH_STATUS returns None while the server-side
+                    # prefetch is still running. Retire this short-lived query
+                    # future so a later scheduler pass submits another poll;
+                    # unlike WAIT_PREFETCH_STATUS, no server worker remains
+                    # blocked for the lifetime of the prefetch operation.
+                    operation.completion_future = None
                     result = (
-                        0
+                        -1
                         if matched_chunks is None
                         else int(matched_chunks) * self.chunk_size
                     )
