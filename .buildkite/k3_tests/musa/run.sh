@@ -272,13 +272,34 @@ PY
 
     log "Running ${#UNIT_TEST_FILES[@]} MUSA-compatible unit-test files"
     printf '  %s\n' "${UNIT_TEST_FILES[@]}"
+    UNIT_REPORT_ARGS=(
+        --cov=lmcache
+        --cov-report=term
+        "--cov-report=xml:${ARTIFACT_DIR}/coverage.xml"
+        "--cov-report=html:${ARTIFACT_DIR}/coverage-html"
+        "--junitxml=${ARTIFACT_DIR}/junit.xml"
+        "--html=${ARTIFACT_DIR}/pytest.html"
+        --self-contained-html
+    )
     run_pytest "${PYTEST_ARGS[@]}" \
+        "${UNIT_REPORT_ARGS[@]}" \
         -m "not cuda and not xpu and not sglang" \
         "${UNIT_TEST_FILES[@]}" \
         2>&1 | tee "${ARTIFACT_DIR}/pytest.log"
     log "MUSA unit tests finished successfully"
     exit 0
 fi
+
+case "${MUSA_CI_E2E_KIND:-}" in
+    vllm|sglang)
+        exec bash "${SCRIPT_DIR}/run-${MUSA_CI_E2E_KIND}-e2e.sh"
+        ;;
+    "")
+        ;;
+    *)
+        fail "unsupported MUSA_CI_E2E_KIND=${MUSA_CI_E2E_KIND@Q}"
+        ;;
+esac
 
 log "Running focused MUSA connector and transfer tests"
 run_pytest "${PYTEST_ARGS[@]}" \

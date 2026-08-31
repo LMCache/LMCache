@@ -1,13 +1,16 @@
-# MUSA containerized hardware smoke test.
-# The broad unit suite runs in the separate unit-tests-musa pipeline.
+# MUSA end-to-end pipeline. The broad unit suite runs in the separate
+# unit-tests-musa pipeline.
 
 env:
   LMCACHE_TRACK_USAGE: "false"
+  # Small deterministic model; override in Buildkite for an image-cached model.
+  MUSA_E2E_MODEL: "Qwen/Qwen3-0.6B"
+  MUSA_E2E_ENABLE_SGLANG: "1"
   MUSA_VISIBLE_DEVICES: "0"
 
 steps:
-  - label: "MUSA Hardware Smoke"
-    key: "musa_hardware_smoke"
+  - label: "MUSA Runtime + Transfer Smoke"
+    key: "musa_transfer_smoke"
     command: bash .buildkite/k3_tests/musa/run-in-container.sh smoke
     timeout_in_minutes: 60
     concurrency: 1
@@ -21,3 +24,37 @@ steps:
 
     artifact_paths:
       - "musa-ci-artifacts/smoke/**/*"
+
+  - label: "MUSA vLLM E2E"
+    key: "musa_vllm_e2e"
+    depends_on: "musa_transfer_smoke"
+    command: bash .buildkite/k3_tests/musa/run-in-container.sh vllm-e2e
+    timeout_in_minutes: 90
+    concurrency: 1
+    concurrency_group: "lmcache/musa-hardware-smoke"
+
+    agents:
+      queue: "MooreThreads"
+
+    env:
+      MUSA_CI_ARTIFACT_DIR: "musa-ci-artifacts/vllm-e2e"
+
+    artifact_paths:
+      - "musa-ci-artifacts/vllm-e2e/**/*"
+
+  - label: "MUSA SGLang E2E"
+    key: "musa_sglang_e2e"
+    depends_on: "musa_transfer_smoke"
+    command: bash .buildkite/k3_tests/musa/run-in-container.sh sglang-e2e
+    timeout_in_minutes: 90
+    concurrency: 1
+    concurrency_group: "lmcache/musa-hardware-smoke"
+
+    agents:
+      queue: "MooreThreads"
+
+    env:
+      MUSA_CI_ARTIFACT_DIR: "musa-ci-artifacts/sglang-e2e"
+
+    artifact_paths:
+      - "musa-ci-artifacts/sglang-e2e/**/*"
