@@ -198,7 +198,6 @@ class TestLocalDiskBackend:
 
         local_disk_backend.local_cpu_backend.memory_allocator.close()
 
-
 class TestMultiPathDiskBackend:
     """Test cases for multi-path (multi-device) LocalDiskBackend."""
 
@@ -597,7 +596,6 @@ class TestBatchedGetBlocking:
             local_disk_backend, "read_file", side_effect=tracking_read_file
         ):
             results = local_disk_backend.batched_get_blocking(keys)
-
         assert all(r is not None for r in results)
         # With 4 keys and 4 threads, we should see more than 1 unique thread.
         assert len(set(thread_ids)) > 1, (
@@ -620,9 +618,7 @@ class TestSubmitPutTask:
         [False, True],
         ids=["resident_only", "resident_and_inflight"],
     )
-    def test_already_stored_key_is_not_rewritten(
-        self, put_in_progress: bool
-    ) -> None:
+    def test_already_stored_key_is_not_rewritten(self, put_in_progress: bool) -> None:
         key = create_test_key(1)
         resident_metadata = MagicMock()
         backend = object.__new__(LocalDiskBackend)
