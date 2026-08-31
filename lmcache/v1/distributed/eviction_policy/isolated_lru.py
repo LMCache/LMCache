@@ -32,6 +32,9 @@ from lmcache.v1.distributed.internal_api import (
 from lmcache.v1.mp_coordinator.persistence.durable_component import PersistenceType
 from lmcache.v1.mp_coordinator.utils.encoding import decode_key, encode_key
 
+# Local
+from ._selection import ChunkFamilyTopology, select_chunk_coherent_victims
+
 
 class IsolatedLRUEvictionPolicy(EvictionPolicy):
     """Per-``cache_salt`` LRU eviction policy.
@@ -56,6 +59,7 @@ class IsolatedLRUEvictionPolicy(EvictionPolicy):
         self._lock = threading.Lock()
         # cache_salt -> ordered {ObjectKey: None} (oldest first).
         self._per_salt_order: dict[str, OrderedDict[ObjectKey, None]] = {}
+        self._family_topology = ChunkFamilyTopology()
         # Registered destinations (first one wins if any are registered,
         # matching LRUEvictionPolicy semantics).
         self._destinations: list[EvictionDestination] = []
@@ -82,6 +86,7 @@ class IsolatedLRUEvictionPolicy(EvictionPolicy):
                     order.move_to_end(key)
                 else:
                     order[key] = None
+            self._family_topology.observe(keys)
 
     def on_keys_touched(self, keys: list[ObjectKey]) -> None:
         if not keys:
@@ -146,25 +151,22 @@ class IsolatedLRUEvictionPolicy(EvictionPolicy):
             )
         with self._lock:
             order = self._per_salt_order.get(cache_salt)
-            pool = list(order.keys()) if order else []
-
-            if not pool:
+            if not order:
                 return []
 
             expected_ratio = max(0.0, min(1.0, expected_ratio))
-            target_count = int(len(pool) * expected_ratio)
+            target_count = int(len(order) * expected_ratio)
             if expected_ratio > 0 and target_count == 0:
                 target_count = 1
             if target_count == 0:
                 return []
 
-            keys_to_evict: list[ObjectKey] = []
-            for key in pool:
-                if key_eligible_filter is not None and not key_eligible_filter(key):
-                    continue
-                keys_to_evict.append(key)
-                if len(keys_to_evict) >= target_count:
-                    break
+            keys_to_evict = select_chunk_coherent_victims(
+                order,
+                target_count,
+                self._family_topology,
+                key_eligible_filter,
+            )
 
             if not keys_to_evict:
                 return []
@@ -240,6 +242,9 @@ class IsolatedLRUEvictionPolicy(EvictionPolicy):
                 )
                 for cache_salt, ordered in buckets.items()
             }
+            self._family_topology = ChunkFamilyTopology()
+            for order in self._per_salt_order.values():
+                self._family_topology.observe(order)
 
 
 # -- Internals ----------------------------------------------------------------
