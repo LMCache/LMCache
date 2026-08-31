@@ -57,7 +57,8 @@ class StoreMetadata:
         offset: First token index eligible for storage.
         request_id: Request identifier used for LMCache session tracking.
         cache_salt: Per-tenant isolation salt. The empty string preserves the
-            historical unsalted key behavior.
+            historical unsalted key behavior. Non-empty values must be at most
+            128 characters and must not contain ``@``, ``/``, ``\\``, or NUL.
     """
 
     last_node: object

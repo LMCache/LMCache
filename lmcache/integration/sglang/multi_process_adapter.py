@@ -403,6 +403,9 @@ class LMCacheMPConnector:
         Returns:
             The chunk-aligned matched-token count, or zero if no aligned hit
             exists, the connector is unhealthy, or ``request_id`` is empty.
+
+        Raises:
+            ValueError: If ``cache_salt`` violates the cache-key constraints.
         """
         if not self.is_healthy or not request_id:
             return 0
@@ -674,6 +677,10 @@ class LMCacheMPConnector:
             A future resolving to ``True`` when the store completes
             successfully (or there was nothing to store), or ``False``
             on daemon-side failure or an unhealthy connector.
+
+        Raises:
+            ValueError: If ``store_metadata.cache_salt`` violates the
+                cache-key constraints.
         """
         if not self.is_healthy:
             return _completed_future(False)
@@ -723,6 +730,8 @@ class LMCacheMPConnector:
                 indices for the finished request.
 
         Raises:
+            ValueError: If ``store_metadata.cache_salt`` violates the
+                cache-key constraints.
             RuntimeError: If the daemon reports that the store failed.
         """
         if not self.is_healthy:

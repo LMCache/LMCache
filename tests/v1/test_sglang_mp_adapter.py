@@ -179,6 +179,7 @@ def _make_public_connector(
     monkeypatch: pytest.MonkeyPatch,
     *,
     retrieve_succeeds: bool = True,
+    matched_chunks: int = 1,
 ) -> tuple[Any, list[tuple[object, list[object]]]]:
     """Create a connector through its public constructor with stubbed I/O."""
     adapter_mod, LMCacheMPConnector, _, _, _, _ = _import_adapter_symbols()
@@ -192,7 +193,7 @@ def _make_public_connector(
     ) -> _WireResponse:
         requests.append((request_type, payload))
         if request_type is adapter_mod.RequestType.WAIT_PREFETCH_STATUS:
-            return _WireResponse(raw_result=1)
+            return _WireResponse(raw_result=matched_chunks)
         if request_type is adapter_mod.RequestType.RETRIEVE:
             return _WireResponse(
                 raw_result=(b"completion-event", retrieve_succeeds),
@@ -689,6 +690,45 @@ def test_retrieve_and_failure_cleanup_preserve_lookup_cache_salt(
     ]
     assert [key.cache_salt for key in retrieve_keys] == ["tenant-a"]
     assert [key.cache_salt for key in free_keys] == ["tenant-a"]
+
+
+def test_retrieve_prefix_cleanup_preserves_lookup_cache_salt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Prefix lock release and retrieve share lookup's saved tenant salt."""
+    adapter_mod, _, _, _, LoadMetadata, _ = _import_adapter_symbols()
+    connector, requests = _make_public_connector(monkeypatch, matched_chunks=2)
+    token_ids = list(range(8))
+
+    assert connector.lookup_kv(token_ids, "request-1", cache_salt="tenant-a") == 8
+    assert (
+        connector.retrieve_kv(
+            LoadMetadata(
+                token_ids=token_ids,
+                slot_mapping=torch.arange(8),
+                offset=4,
+                request_id="request-1",
+            )
+        )
+        == 4
+    )
+
+    free_keys = [
+        payload[0]
+        for request_type, payload in requests
+        if request_type is adapter_mod.RequestType.FREE_LOOKUP_LOCKS
+    ]
+    retrieve_keys = [
+        payload[0]
+        for request_type, payload in requests
+        if request_type is adapter_mod.RequestType.RETRIEVE
+    ]
+    assert [(key.start, key.end, key.cache_salt) for key in free_keys] == [
+        (0, 4, "tenant-a")
+    ]
+    assert [(key.start, key.end, key.cache_salt) for key in retrieve_keys] == [
+        (4, 8, "tenant-a")
+    ]
 
 
 @pytest.mark.parametrize("store_method", ["store_kv", "store_kv_async"])
