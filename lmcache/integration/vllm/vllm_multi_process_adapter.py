@@ -172,7 +172,7 @@ class _IpcEvent(Protocol):
 
 def send_lmcache_request(
     mq_client: MultiprocessGrpcClient,
-    request_type: RpcMethod | str,
+    request_type: RpcMethod | str | enum.Enum,
     payloads: list[Any],
 ) -> MessagingFuture[Any]:
     """Submit a legacy helper-style request through the typed gRPC client.
@@ -185,7 +185,8 @@ def send_lmcache_request(
 
     Args:
         mq_client: The LMCache multiprocess mode gRPC client.
-        request_type: Descriptor-derived RPC method token or method name.
+        request_type: Descriptor-derived RPC method token, method name, or legacy
+            ``RequestType`` enum member.
         payloads: Positional payloads for the typed RPC method.
 
     Returns:
