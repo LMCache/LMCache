@@ -102,20 +102,18 @@ jobs:
             hf_overrides: ""
             trust_remote_code: "0"
             mla_disable: "0"
-          # DeepSeek-V2-Lite-Chat with MLA DISABLED (vLLM CPU backend
-          # currently raises NotImplementedError for MLA on CPU, see
-          # vllm/platforms/cpu.py:get_attn_backend_cls). MLA is a
-          # runtime attention-backend decision inside vLLM, not a HF
-          # config field, so the only way to short-circuit it is the
-          # `VLLM_MLA_DISABLE=1` env var vLLM checks in
-          # `get_attn_backend_cls`. We still exercise the DeepSeek
-          # architecture (MoE + custom modelling code) on the CPU e2e
-          # path; MLA validation is deferred until vLLM CPU supports
-          # it. Weights are random (`--load-format dummy`) and served
-          # from a weight-less GitHub mirror (opendataio/deepseek_v2_lite
-          # tag `v1.0`, GitHub auto-generates the tar.gz).
-          # `hf_overrides` shrinks the model to 2 layers / 4 routed
-          # experts so CPU runners can host it.
+            run_engine_driven_e2e: true
+          # DeepSeek-V2-Lite-Chat with MLA ENABLED. vLLM merged a CPU MLA
+          # backend (vllm-project/vllm#49453), so the model can now route
+          # through MLA on CPU instead of falling back to MHA. We use this
+          # leg to validate LMCache's KV format / transfer path against a
+          # real MLA attention backend on CPU. MLA is a runtime
+          # attention-backend decision inside vLLM, not a HF config field,
+          # so `VLLM_MLA_DISABLE=0` lets it take the MLA path. Weights are
+          # random (`--load-format dummy`) and served from a weight-less
+          # GitHub mirror (opendataio/deepseek_v2_lite tag `v1.0`, GitHub
+          # auto-generates the tar.gz). `hf_overrides` shrinks the model to
+          # 2 layers / 4 routed experts so CPU runners can host it.
           - name: deepseek-v2-lite
             id: deepseek-ai/DeepSeek-V2-Lite-Chat
             tarball_url: https://github.com/opendataio/deepseek_v2_lite/archive/refs/tags/v1.0.tar.gz
@@ -125,7 +123,11 @@ jobs:
               {"num_hidden_layers": 2, "n_routed_experts": 4,
                "first_k_dense_replace": 0, "num_experts_per_tok": 2}
             trust_remote_code: "1"
-            mla_disable: "1"
+            mla_disable: "0"
+            # First validate CPU MLA through the LMCache-driven path that
+            # vLLM already covers. Engine-driven MLA is isolated until its
+            # KV-format/store path is fixed.
+            run_engine_driven_e2e: false
 
     env:
       # Threaded to run-cpu-e2e-validation.sh; server_bench ignores them.
@@ -251,14 +253,17 @@ jobs:
           CACHE_MARKER: ${{ matrix.model.cache_marker }}
         run: bash .github/scripts/download_gh_release_model.sh
 
-      # The three e2e steps below cover the three worker-side transfer
-      # paths exactly once: engine-driven splits into pickle and shm data
-      # modes, and lmcache-driven is the IPC handle path.
+      # The three e2e steps below cover the worker-side transfer paths:
+      # engine-driven splits into pickle and shm data modes, and
+      # lmcache-driven is the IPC handle path. MLA profiles temporarily run
+      # only lmcache-driven so Engine-driven format/store issues can be
+      # investigated independently.
       #
       # Never pass a bare `engine_driven` here: LMCACHE_E2E_DATA_MODE then
       # defaults to shm, so the step silently becomes a second copy of the
       # shm leg below instead of testing anything new.
       - name: vLLM e2e — Engine-driven (pickle)
+        if: matrix.model.run_engine_driven_e2e
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
@@ -273,6 +278,7 @@ jobs:
       # mislabelled `engine_driven` step this replaces, which reports
       # "Transport mode confirmed: shm" on Darwin.
       - name: vLLM e2e — Engine-driven (shm)
+        if: matrix.model.run_engine_driven_e2e
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |

@@ -1115,14 +1115,16 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> str | None:
-        """Prefer the head-contiguous layout; None (MLA) defers to vLLM."""
-        model_config = getattr(vllm_config, "model_config", None)
-        if model_config is None or model_config.use_mla:
-            return None
-        if not hasattr(vllm_config.cache_config, "get_resolved_kv_cache_layout"):
-            return "HND"
-        # Not "HND": MultiConnector compares preference strings verbatim.
-        return "LBHNC"
+        """Defer to vLLM; a connector preference is unsafe for now.
+
+        Connector preferences outrank the default in vLLM's layout
+        resolution, but backends that assume a layout without declaring it
+        via ``supported_kv_cache_layouts`` (e.g. the DeepSeek V4 sparse
+        attention, which hardcodes NHD) silently read a pool laid out
+        differently. LMCache handles every resolved layout, so express no
+        preference until such backends declare theirs.
+        """
+        return None
 
     def get_finished_count(self) -> int | None:
         """

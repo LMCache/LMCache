@@ -1,0 +1,9 @@
+# MooreThreads smoke test.
+# Minimal validation for pipeline upload and queue routing.
+
+steps:
+  - label: ":wave: MooreThreads Hello"
+    command: echo "hello from the mthread pipeline"
+    timeout_in_minutes: 5
+    agents:
+      queue: "MooreThreads"
