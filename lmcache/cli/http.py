@@ -18,7 +18,14 @@ class CLIHTTPError(Exception):
 
 
 def normalize_url(url: str) -> str:
-    """Ensure *url* has an ``http://`` or ``https://`` scheme."""
+    """Ensure *url* has an ``http://`` or ``https://`` scheme.
+
+    Args:
+        url: The URL string to normalize.
+
+    Returns:
+        The normalized URL string with a scheme and without trailing slashes.
+    """
     if not url.startswith(("http://", "https://")):
         url = f"http://{url}"
     return url.rstrip("/")
@@ -27,8 +34,15 @@ def normalize_url(url: str) -> str:
 def fetch_json(url: str, timeout: int = 10) -> dict[str, Any]:
     """GET *url* and return the parsed JSON body.
 
+    Args:
+        url: The URL to fetch.
+        timeout: Request timeout in seconds.
+
+    Returns:
+        The parsed JSON response as a dictionary.
+
     Raises:
-        CLIHTTPError: On network/HTTP errors.
+        CLIHTTPError: On network, HTTP, or JSON decoding errors.
     """
     req = urllib.request.Request(url)
     try:
@@ -45,5 +59,7 @@ def fetch_json(url: str, timeout: int = 10) -> dict[str, Any]:
         raise CLIHTTPError(f"HTTP {exc.code} from {url}: {exc.reason}") from exc
     except urllib.error.URLError as exc:
         raise CLIHTTPError(f"Cannot connect to {url}: {exc.reason}") from exc
+    except ValueError as exc:
+        raise CLIHTTPError(f"Invalid JSON response from {url}: {exc}") from exc
     except OSError as exc:
         raise CLIHTTPError(f"Cannot connect to {url}: {exc}") from exc
