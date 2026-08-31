@@ -289,9 +289,10 @@ def _make_turboquant_storage_manager(preset: str) -> StorageManager:
 
 
 @pytest.mark.skipif(
-    not torch_dev.is_available(),
-    reason="Requires torch_device_type",
+    not (torch_dev.is_available() and torch_device_type == "cuda"),
+    reason="requires available CUDA runtime",
 )
+@pytest.mark.cuda
 @pytest.mark.parametrize(
     ("preset", "corr_lower_bound"),
     [
@@ -410,9 +411,10 @@ class _FakeMemoryObj:
 
 
 @pytest.mark.skipif(
-    not torch_dev.is_available(),
-    reason="Requires torch_device_type",
+    not (torch_dev.is_available() and torch_device_type == "cuda"),
+    reason="requires available CUDA runtime",
 )
+@pytest.mark.cuda
 @pytest.mark.parametrize(
     ("preset", "expected_ratio_lower_bound", "corr_lower_bound"),
     [
@@ -530,9 +532,10 @@ def _make_turboquant_fs_storage_manager(
 
 
 @pytest.mark.skipif(
-    not torch_dev.is_available(),
-    reason="Requires torch_device_type",
+    not (torch_dev.is_available() and torch_device_type == "cuda"),
+    reason="requires available CUDA runtime",
 )
+@pytest.mark.cuda
 @pytest.mark.parametrize(
     ("preset", "corr_lower_bound"),
     [
