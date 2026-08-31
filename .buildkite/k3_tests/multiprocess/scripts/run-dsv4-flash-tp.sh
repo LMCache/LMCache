@@ -220,7 +220,24 @@ count_retrieves() {
     grep -c "Retrieved" "$LMCACHE_LOG" 2>/dev/null || true
 }
 
-# ── 0. Provision DeepGEMM (SM120 only) ──────────────────────
+# ── 0a. Pin vLLM for this test only ─────────────────────────
+# The 0.28.1rc1 nightlies break DeepSeek-V4-Flash sparse decode on SM120
+# ("eidx must be contiguous", flashinfer _sparse_mla_sm120) at engine start;
+# 0.27.1 is the last release that passes, and every other k3 test is green
+# on the nightlies, so the downgrade is scoped to this test. Same torch
+# (2.13.0+cu130), so the LMCache native build stays valid. Set
+# DSV4_VLLM_VERSION="" to run the ambient vLLM instead.
+# TODO: drop once a nightly passes this test again.
+DSV4_VLLM_VERSION="${DSV4_VLLM_VERSION-0.27.1}"
+if [ -n "$DSV4_VLLM_VERSION" ]; then
+    echo "=== Pinning vLLM ${DSV4_VLLM_VERSION} for dsv4_flash_tp ==="
+    uv pip install "vllm[runai,tensorizer,flashinfer]==${DSV4_VLLM_VERSION}" \
+        --extra-index-url https://download.pytorch.org/whl/cu130 \
+        --index-strategy unsafe-best-match
+    python3 -c "import vllm; print('vLLM for this test:', vllm.__version__)"
+fi
+
+# ── 0b. Provision DeepGEMM (SM120 only) ──────────────────────
 # vLLM's _import_deep_gemm() prefers a `deep_gemm` in site-packages over the
 # copy bundled in the wheel, so installing one overrides the arch-incomplete
 # bundled build without rebuilding vLLM. Build steps mirror vLLM's own
