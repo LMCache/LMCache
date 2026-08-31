@@ -314,6 +314,56 @@ Install LMCache
                             # Build LMCache with SYCL backend.
                             BUILD_WITH_SYCL=1 uv pip install --no-build-isolation -e .
 
+                    .. tab-item:: MetaX MACA
+
+                        MACA is CUDA-compatible: a MACA-enabled torch build reports
+                        ``device.type == "cuda"``, so LMCache's existing CUDA-compatible
+                        connector path works without a separate device backend. There is no
+                        prebuilt MACA wheel or CI build -- this is a self-compile-only path,
+                        built with a MACA-enabled torch already installed via MetaX's own
+                        toolchain (not from PyPI).
+
+                        .. code-block:: bash
+
+                            # Puts the MACA SDK's cu-bridge nvcc-compatible compiler on PATH
+                            # and its runtime libs on LD_LIBRARY_PATH -- required before the
+                            # build step below, so torch.utils.cpp_extension can locate it.
+                            # Adjust MACA_PATH to your actual MACA SDK install root.
+                            export MACA_PATH=/opt/maca
+                            export CUCC_PATH=${MACA_PATH}/tools/cu-bridge
+                            export PATH=${CUCC_PATH}/bin:${CUCC_PATH}/tools:${MACA_PATH}/mxgpu_llvm/bin:${MACA_PATH}/bin:${PATH}
+                            export LD_LIBRARY_PATH=${MACA_PATH}/lib:${MACA_PATH}/mxgpu_llvm/lib:${MACA_PATH}/ompi/lib:${LD_LIBRARY_PATH}
+
+                            git clone https://github.com/LMCache/LMCache.git
+                            cd LMCache
+
+                            # Assumes a MACA-enabled torch is already installed/active in this
+                            # environment (e.g. inside a vllm-metax container).
+
+                            # Need to install these packages manually to avoid build isolation
+                            pip install -r requirements/build.txt
+
+                            # --no-deps skips install_requires entirely, including
+                            # requirements/common.txt's cufile-python/nvtx (NVIDIA-only,
+                            # not needed on MACA) and the unpinned generic "torch" entry
+                            # (which would otherwise risk resolving over the MACA build).
+                            # Install any other runtime deps you actually need yourself first --
+                            # MP mode needs mcpy (MetaX's cupy equivalent), published on MetaX's
+                            # own pip index rather than PyPI:
+                            #   pip install mcpy -i https://repos.metax-tech.com/r/maca-pypi/simple \
+                            #       --trusted-host repos.metax-tech.com
+
+                            # SETUPTOOLS_SCM_PRETEND_VERSION makes the wheel filename and
+                            # lmcache.__version__ carry the MACA build identity (mirrors how
+                            # torch's own ROCm wheels are named e.g. torch-2.11.0+rocm7.2-...).
+                            # Derives the base version from this checkout's own git tag (so
+                            # it never needs manual updates across releases) and appends a
+                            # +maca<build> local segment -- set MACA_AI_VERSION to your MACA
+                            # SDK/build number, or leave it at the default below.
+                            BASE_VERSION=$(python -m setuptools_scm)
+                            SETUPTOOLS_SCM_PRETEND_VERSION="${BASE_VERSION}+maca${MACA_AI_VERSION:-0.0.0.0}" \
+                            BUILD_WITH_MACA=1 pip install --no-deps --no-build-isolation -e .
+
 
     .. tab-item:: Docker
 
