@@ -177,6 +177,15 @@ Kubernetes downward API); an explicit flag wins over the env var.
      - ``LMCACHE_COORDINATOR_EVENT_FLUSH_INTERVAL``
      - Seconds between cache-event batch flushes (must be ``> 0``, default
        ``1``).
+   * - ``--coordinator-blend-timeout``
+     - *(none)*
+     - Seconds a fleet CacheBlend lookup to the coordinator may take, used as
+       both the per-request HTTP timeout and the per-lookup match budget (must
+       be ``> 0``, default ``1``).
+   * - ``--coordinator-blend-match-concurrency``
+     - *(none)*
+     - Max fleet CacheBlend match round-trips the blend client keeps in flight
+       at once (must be ``>= 1``, default ``8``).
 
 The server registers under its stable identity (``--instance-id`` / OTel
 ``service.instance.id``); if the flag is not passed, the server mints a
