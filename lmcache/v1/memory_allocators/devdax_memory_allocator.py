@@ -13,8 +13,7 @@ import threading
 import torch
 
 # First Party
-from lmcache.integration.vllm.utils import get_size_bytes
-from lmcache.utils import _lmcache_nvtx_annotate
+from lmcache.utils import _lmcache_nvtx_annotate, get_size_bytes
 from lmcache.v1.memory_allocators.buffer_allocator import BufferAllocator
 from lmcache.v1.memory_allocators.mixed_memory_allocator import MixedMemoryAllocator
 from lmcache.v1.memory_allocators.tensor_memory_allocator import TensorMemoryAllocator
@@ -424,7 +423,18 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
             and memory_obj.parent() is self.local_allocator
         )
 
-    def _is_devdax_obj(self, memory_obj: MemoryObj) -> bool:
+    def is_devdax_obj(self, memory_obj: MemoryObj) -> bool:
+        """Return whether ``memory_obj`` lives in the Device-DAX arena.
+
+        ``False`` means the object landed in the local DRAM pool of a
+        hybrid DRAM+DAX configuration.
+
+        Args:
+            memory_obj: An object allocated by this allocator.
+
+        Returns:
+            ``True`` for the Device-DAX arena, ``False`` for local DRAM.
+        """
         return memory_obj.parent() is self
 
     def _available_count(
@@ -646,7 +656,7 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
                 assert self.local_allocator is not None
                 self.local_allocator.free(memory_obj)
                 return
-            if self._is_devdax_obj(memory_obj):
+            if self.is_devdax_obj(memory_obj):
                 self._free_devdax_obj(memory_obj)
                 return
             raise ValueError("Memory object does not belong to DevDaxMemoryAllocator")
@@ -681,7 +691,7 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
             devdax_objs = [
                 memory_obj
                 for memory_obj in memory_objs
-                if self._is_devdax_obj(memory_obj)
+                if self.is_devdax_obj(memory_obj)
             ]
             if len(local_objs) + len(devdax_objs) != len(memory_objs):
                 raise ValueError(

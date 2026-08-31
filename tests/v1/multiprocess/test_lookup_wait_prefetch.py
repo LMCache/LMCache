@@ -13,6 +13,8 @@ from unittest import mock
 import threading
 
 # First Party
+from lmcache.lmcache_native import Bitmap
+from lmcache.v1.distributed.api import PrefetchHandle
 from lmcache.v1.multiprocess.modules.lookup import LookupModule, _PrefetchJob
 
 
@@ -38,25 +40,37 @@ def _make_module(ctx):
 
 
 def test_wait_prefetch_status_returns_count_and_consumes_job():
-    found = mock.Mock()
-    found.count_leading_ones.return_value = 8
+    # 8 keys = 4 chunks with world_size=2, 1 object group (stride=2).
+    # All 8 bits set -> fold_unfold_ranked returns hit_length=4.
+    num_keys = 8
+    found = Bitmap(num_keys, num_keys)
+    handle = PrefetchHandle(
+        prefetch_request_id=0,
+        external_request_id="req",
+        l1_found_indices=(),
+        l1_hit_chunks=0,
+        total_requested_keys=num_keys,
+        submit_time=0.0,
+    )
     ctx = _make_ctx(wait_result=True, found=found)
     module = _make_module(ctx)
     module._prefetch_jobs["req"] = _PrefetchJob(
-        handle=mock.sentinel.handle,
+        handle=handle,
         world_size=2,
         request_id="req",
         requested_tokens=512,
     )
 
-    # wait succeeds -> query returns the bitmap -> count_leading_ones() // world_size.
     assert module.wait_prefetch_status("req", timeout=1.0) == 4
-    ctx.storage_manager.wait_prefetch_status.assert_called_once_with(
-        mock.sentinel.handle, 1.0
-    )
+    ctx.storage_manager.wait_prefetch_status.assert_called_once_with(handle, 1.0)
     ctx.event_bus.publish.assert_called_once()
     # Exactly-once: the job is removed after a non-None result.
     assert "req" not in module._prefetch_jobs
+    # The hit length is recorded on the session so free_lookup_locks can
+    # later reconstruct which keys the prefetch read-locked.
+    ctx.session_manager.get_or_create.assert_called_once_with("req")
+    session = ctx.session_manager.get_or_create.return_value
+    session.record_prefetch_result.assert_called_once_with(4, (0,))
 
 
 def test_wait_prefetch_status_timeout_returns_none_and_keeps_job():

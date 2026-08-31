@@ -6,6 +6,7 @@ from typing import cast
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.distributed.api import L1BackendType
 from lmcache.v1.distributed.config import L1MemoryManagerConfig
 from lmcache.v1.distributed.internal_api import L1MemoryDesc
 from lmcache.v1.distributed.memory_manager.l1_memory_manager import L1MemoryManager
@@ -14,6 +15,7 @@ from lmcache.v1.memory_allocators.devdax_memory_allocator import (
     DevDaxMemoryAllocator,
     DevDaxRemoveMode,
 )
+from lmcache.v1.memory_management import MemoryObj
 
 logger = init_logger(__name__)
 
@@ -63,6 +65,22 @@ class DevDaxL1MemoryManager(L1MemoryManager):
         self._config = config
         self._size_in_bytes = config.size_in_bytes
         self._align_bytes = config.align_bytes
+
+    def get_backend_type(self, memory_obj: MemoryObj) -> L1BackendType:
+        """Return the storage medium backing ``memory_obj``.
+
+        Args:
+            memory_obj: An object allocated by this manager.
+
+        Returns:
+            ``L1BackendType.DEVDAX`` for objects in the Device-DAX arena,
+            ``L1BackendType.DRAM`` for objects in the local DRAM pool of a
+            hybrid configuration.
+        """
+        allocator = cast(DevDaxMemoryAllocator, self._allocator)
+        if allocator.is_devdax_obj(memory_obj):
+            return L1BackendType.DEVDAX
+        return L1BackendType.DRAM
 
     def get_l1_memory_desc(self) -> L1MemoryDesc:
         """Return a descriptor for the primary L1 buffer.

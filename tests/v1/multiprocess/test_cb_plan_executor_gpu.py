@@ -22,18 +22,22 @@ import numpy as np
 import pytest
 import torch
 
-if not torch.cuda.is_available():
+# First Party
+from lmcache import torch_dev, torch_device_type
+import lmcache.lmcache_native as lmcache_native
+
+if not (torch_dev.is_available() and torch_device_type == "cuda"):
     pytest.skip(
         "CUDA is not available, skipping the test",
         allow_module_level=True,
     )
 
 # First Party
-import lmcache.c_ops as lmc_ops  # noqa: E402
+import lmcache.cuda_ops as cuda_ops  # noqa: E402
 
-if not hasattr(lmc_ops, "execute_cb_retrieve_plan_flat"):
+if not hasattr(cuda_ops, "execute_cb_retrieve_plan_flat"):
     pytest.skip(
-        "c_ops build lacks execute_cb_retrieve_plan_flat",
+        "cuda_ops build lacks execute_cb_retrieve_plan_flat",
         allow_module_level=True,
     )
 
@@ -46,7 +50,7 @@ _DTYPE = torch.bfloat16
 class _FmtCase:
     """Per-format geometry: chunk plane count, widths, and paged shape."""
 
-    fmt: "lmc_ops.EngineKVFormat"
+    fmt: "lmcache_native.EngineKVFormat"
     kv_size: int  # chunk leading planes (1 = K/V fused, 2 = split)
     hidden: int  # per-plane scalars per token
     head_stride: int  # rope stride between heads in the K plane
@@ -56,7 +60,7 @@ class _FmtCase:
 _CASES = {
     # Fused-packed HND: [NB, NH, BS, 2*HS], K is the first HS of each head.
     "packed": _FmtCase(
-        fmt=lmc_ops.EngineKVFormat.NL_X_NB_NH_BS_TWO_HS,
+        fmt=lmcache_native.EngineKVFormat.NL_X_NB_NH_BS_TWO_HS,
         kv_size=1,
         hidden=_NH * 2 * _HS,
         head_stride=2 * _HS,
@@ -64,7 +68,7 @@ _CASES = {
     ),
     # Un-fused flash-attention HND: [2, NB, NH, BS, HS], separate K/V planes.
     "split": _FmtCase(
-        fmt=lmc_ops.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS,
+        fmt=lmcache_native.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS,
         kv_size=2,
         hidden=_NH * _HS,
         head_stride=_HS,
@@ -82,7 +86,7 @@ def _reference_scatter(
     for i, host in enumerate(host_chunks):
         buf = host.to(dev)
         k_view = buf[0].reshape(_NL * _SPC, _NH, case.head_stride)
-        lmc_ops.rotary_embedding_k_fused_strided(
+        cuda_ops.rotary_embedding_k_fused_strided(
             old_sts[i] + ramp,
             cur_sts[i] + ramp,
             k_view,
@@ -91,18 +95,18 @@ def _reference_scatter(
             cos_sin,
             True,
         )
-        lmc_ops.multi_layer_kv_transfer(
+        cuda_ops.multi_layer_kv_transfer(
             buf,
             paged_ptrs,
             slot_mapping[i * _SPC : (i + 1) * _SPC],
             slot_mapping.device,
             _NB * _BS,
-            lmc_ops.TransferDirection.H2D,
+            lmcache_native.TransferDirection.H2D,
             case.fmt,
             block_size=_BS,
             head_size=_HS,
         )
-    torch.cuda.synchronize()
+    torch_dev.synchronize()
 
 
 def _run_plan(
@@ -120,7 +124,7 @@ def _run_plan(
     """Drive the production flat-table entry point with the planner's
     double-buffer wave layout."""
     chunk_bytes = case.kv_size * _NL * _SPC * case.hidden * _DTYPE.itemsize
-    spec = lmc_ops.CBGroupSpec(
+    spec = cuda_ops.CBGroupSpec(
         paged_kv_ptrs=paged_ptrs.data_ptr(),
         temp_buffer_ptrs=[s.data_ptr() for s in slots],
         num_layers=_NL,
@@ -153,7 +157,7 @@ def _run_plan(
             ropes.append((0, slot, old_sts[ci], cur_sts[ci]))
             scatters.append((0, slot, ci * _SPC, _SPC))
         step_offsets.append((len(staging), len(ropes), len(scatters)))
-    lmc_ops.execute_cb_retrieve_plan_flat(
+    cuda_ops.execute_cb_retrieve_plan_flat(
         slot_mapping.device,
         1 << 26,
         [spec],
@@ -162,7 +166,7 @@ def _run_plan(
         np.asarray(scatters, dtype=np.int64),
         np.asarray(step_offsets, dtype=np.int64),
     )
-    torch.cuda.synchronize()
+    torch_dev.synchronize()
 
 
 @pytest.mark.parametrize("fmt_key", sorted(_CASES))
@@ -174,7 +178,7 @@ def test_overlap_slot_reuse_is_bit_exact(n_chunks, max_batch, fmt_key):
     Covers full packs, partial tail packs, and deep reuse, on both the
     fused-packed and un-fused split-K/V paged layouts."""
     case = _CASES[fmt_key]
-    dev = torch.device("cuda:0")
+    dev = torch.device(torch_device_type)
     torch.manual_seed(n_chunks)
 
     paged_ref = [

@@ -353,9 +353,42 @@ class GPUCacheContext(BaseCacheContext):
         layout_hints: LayoutHints | None = None,
         engine_group_infos: Sequence[EngineGroupInfo] = (),
         engine_type: EngineType = EngineType.VLLM,
-        separate_object_groups: bool = True,
+        separate_object_groups: bool = False,
         full_sw_kv: bool = False,
     ):
+        # Kept for close(): raw-IPC wrappers hold driver-level mappings
+        # that pin the exporter's device memory until explicitly closed.
+        self._kv_wrappers: KVCache = list(kv_caches)
+        try:
+            self._init_impl(
+                kv_caches,
+                lmcache_tokens_per_chunk,
+                layout_hints,
+                engine_group_infos,
+                engine_type,
+                separate_object_groups,
+                full_sw_kv,
+            )
+        except BaseException:
+            # Partial construction may have imported some mappings
+            # already; roll them back so a failed registration does not
+            # pin the worker's KV pool.
+            self._close_kv_wrappers()
+            raise
+
+    def _init_impl(
+        self,
+        kv_caches: KVCache,
+        lmcache_tokens_per_chunk: int,
+        layout_hints: LayoutHints | None,
+        engine_group_infos: Sequence[EngineGroupInfo],
+        engine_type: EngineType,
+        separate_object_groups: bool,
+        full_sw_kv: bool,
+    ) -> None:
+        """Body of ``__init__``; split out so the constructor can roll
+        back partially imported KV mappings on failure.
+        """
         unwrapped = unwrap_kv_cache_tensors(kv_caches)
         kv_caches_norm, engine_kv_formats = normalize_and_discover_per_layer_formats(
             unwrapped,
@@ -434,11 +467,30 @@ class GPUCacheContext(BaseCacheContext):
         )
 
     def close(self) -> None:
+        """Drain the context stream, deregister the GDS staging buffer and
+        release the imported KV mappings (reverse of __init__).
+
+        The stream is synchronized first so no in-flight kernel still
+        touches the mappings when they are unmapped. The wrapper close
+        unmaps raw CUDA IPC imports; without it a dead worker's KV pool
+        stays resident on this process's GPUs for the process lifetime.
+        The tensors built over those mappings must not be dereferenced
+        afterwards -- the caller (``_release_entries``) drops the context
+        right after this call.
         """
-        Deregister this context's GDS staging buffer (reverse of __init__).
-        """
+        self.cuda_stream_.synchronize()
         with torch_dev.stream(self.cuda_stream_):
             get_gds_context().deregister_gpu_buffer(self._temp_buffer.buffer)
+        self._close_kv_wrappers()
+
+    def _close_kv_wrappers(self) -> None:
+        """Close every KV wrapper, continuing past per-wrapper failures."""
+        for wrapper in self._kv_wrappers:
+            try:
+                wrapper.close()
+            except Exception:
+                logger.warning("KV wrapper close failed", exc_info=True)
+        self._kv_wrappers = []
 
     @property
     def stream(self) -> Any:
@@ -529,100 +581,3 @@ class GPUCacheContext(BaseCacheContext):
         from integer division is acceptable.
         """
         return self._temp_buffer.get_cache_size_per_token()
-
-
-class PlainGPUCacheContext:
-    """
-    A plain GPU cache context that have a single contiguous 2LTD buffer
-    """
-
-    def __init__(self, kv_caches: KVCache, lmcache_tokens_per_chunk: int = 256):
-        assert len(kv_caches) == 1, (
-            "PlainGPUCacheContext only supports a single KV cache tensor"
-        )
-
-        # KV cache basics
-        self._kv_cache = unwrap_kv_cache_tensors(kv_caches)[0]
-        self._device = self._kv_cache.device
-
-        # Shape related
-        shape = self._kv_cache.shape
-        assert len(shape) == 4, "Expected [2, L, T, D] for plain GPU cache"
-
-        self._num_layers = shape[1]
-        self._num_tokens = shape[2]
-        self._hidden_dim_size = shape[3]
-
-        # Temporary buffer
-        tmp_buffer_shape = self.get_kv_buffer_shape(lmcache_tokens_per_chunk)
-        self._tmp_gpu_buffer = torch.empty(
-            tmp_buffer_shape, dtype=self.dtype, device=self.device
-        )
-
-        # GPU streams
-        self._cuda_stream = torch_dev.Stream(device=self._device)
-        # Third Party
-        import cupy
-
-        self._cupy_stream: "cupy.cuda.Stream" = cupy.cuda.ExternalStream(
-            self._cuda_stream.cuda_stream, self._device.index
-        )
-
-        # Extra initialization
-        self._cupy_stream.launch_host_func(
-            lambda logger: logger.info(
-                "Initialized cuda stream on device %s", str(self._device)
-            ),
-            logger,
-        )
-
-    def get_kv_buffer_shape(self, num_tokens: int) -> torch.Size:
-        """
-        Returns the shape of the KV buffer for the given number of tokens
-        """
-        return torch.Size((2, self._num_layers, num_tokens, self._hidden_dim_size))
-
-    def get_tmp_gpu_buffer(self, num_tokens: int) -> torch.Tensor:
-        """
-        Returns the temporary GPU buffer for transfers
-        """
-        return self._tmp_gpu_buffer[:, :, :num_tokens, :]
-
-    def slice_kv_cache_on_tokens(self, start: int, end: int) -> torch.Tensor:
-        """
-        Slices the KV cache tensor on the token dimension
-        """
-        return self._kv_cache[:, :, start:end, :]
-
-    @property
-    def dtype(self) -> torch.dtype:
-        return self._kv_cache.dtype
-
-    @property
-    def device(self) -> torch.device:
-        return self._device
-
-    @property
-    def stream(self) -> Any:
-        """Returns the device-specific GPU stream (e.g., torch_dev.Stream)."""
-        return self._cuda_stream
-
-    @property
-    def cupy_stream(self) -> "cupy.cuda.Stream":
-        return self._cupy_stream
-
-    @property
-    def num_layers(self) -> int:
-        return self._num_layers
-
-    @property
-    def num_tokens(self) -> int:
-        return self._num_tokens
-
-    @property
-    def hidden_dim_size(self) -> int:
-        return self._hidden_dim_size
-
-    @property
-    def kv_cache_tensor(self) -> torch.Tensor:
-        return self._kv_cache

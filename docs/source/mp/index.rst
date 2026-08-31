@@ -101,35 +101,24 @@ based on ``--engine-type`` and ``--supported-transfer-mode``.
 ``MPCacheServer``, assembles the engine modules
 (``LookupModule`` + ``ManagementModule`` + ``LMCacheDrivenTransferModule``
 and/or ``EngineDrivenTransferModule`` depending on
-``--supported-transfer-mode`` — ``lmcache_driven`` or ``engine_driven`` loads
-just one,
-``auto`` (default) loads both — plus a CacheBlend module when
-``--engine-type`` is set: ``blend`` appends ``BlendV3Module`` (the
-current paged-aware implementation), and ``blend_legacy`` appends
-``BlendModule`` (the original)). Starts a ``MessageQueueServer``,
+``--supported-transfer-mode`` — ``lmcache_driven`` (default) or
+``engine_driven`` loads just one,
+``auto`` loads both — plus the blend module when
+``--engine-type blend`` is set). Starts a ``MessageQueueServer``,
 registers handlers for every ``RequestType`` exposed by the loaded
 modules, and blocks in a keep-alive loop.
 
-**``modules/blend.py``** -- Defines ``BlendModule`` and ``BlendEngineV2``,
-which add the original CacheBlend operations (``CB_REGISTER_KV_CACHE``,
-``CB_LOOKUP_PRE_COMPUTED``, ``CB_STORE_PRE_COMPUTED``,
-``CB_RETRIEVE_PRE_COMPUTED``, ``CB_STORE_FINAL`` and their V2
-variants). Enables non-prefix KV cache reuse across document
-paragraphs. Selected by passing ``--engine-type blend_legacy`` to
-``lmcache server``.
-
-**``modules/blend_v3.py``** -- Defines ``BlendV3Module``, the
-paged-aware CacheBlend V3 pipeline that runs on the sparse-prefetch
-path. Adds the V3 RPCs (``CB_REGISTER_ROPE_V3``,
-``CB_UNREGISTER_ROPE_V3``, ``CB_RETRIEVE_PRE_COMPUTED_V3``,
-``CB_UNIFIED_LOOKUP``) and reuses the existing
-``LMCacheDrivenTransferModule`` and ``LookupModule``. Selected by
-passing ``--engine-type blend`` to
-``lmcache server``.
-
-Both blend variants require ``--supported-transfer-mode`` to be
-``lmcache_driven`` or ``auto`` and will refuse to load when it is
-``engine_driven``.
+**``modules/blend.py``** -- Defines ``BlendModule``, the paged-aware
+blend pipeline that enables non-prefix KV cache reuse (e.g. across
+document paragraphs) on the sparse-prefetch path. KV-cache registration
+rides the standard ``REGISTER_KV_CACHE``; the module adds only the CB RPCs
+(``CB_REGISTER_ROPE``, ``CB_UNREGISTER_ROPE``,
+``CB_RETRIEVE_PRE_COMPUTED``, ``CB_UNIFIED_LOOKUP``) and wraps
+``STORE`` to register chunk fingerprints, reusing the existing
+``LMCacheDrivenTransferModule`` and ``LookupModule``. Selected by passing
+``--engine-type blend`` to ``lmcache server``; requires
+``--supported-transfer-mode`` to be ``lmcache_driven`` or ``auto`` and
+refuses to load when it is ``engine_driven``.
 
 **``http_server.py``** -- Wraps ``run_cache_server()`` (from ``server.py``)
 inside a FastAPI application.  Endpoints are contributed by modules under
@@ -243,48 +232,21 @@ Communication between vLLM and LMCache uses ZMQ (DEALER/ROUTER pattern).
    * - ``NOOP``
      - SYNC
      - Debug heartbeat -- returns a confirmation string.
-   * - ``CB_REGISTER_KV_CACHE``
+   * - ``CB_REGISTER_ROPE``
      - SYNC
-     - (Blend) Register CacheBlend KV buffer.
-   * - ``CB_UNREGISTER_KV_CACHE``
+     - (Blend) Share the RoPE cos/sin cache onto a context already
+       registered via ``REGISTER_KV_CACHE``.
+   * - ``CB_UNREGISTER_ROPE``
      - SYNC
-     - (Blend) Unregister CacheBlend KV buffer.
-   * - ``CB_STORE_PRE_COMPUTED``
-     - BLOCKING
-     - (Blend) Store pre-computed paragraph chunks.
-   * - ``CB_LOOKUP_PRE_COMPUTED``
-     - BLOCKING
-     - (Blend) Lookup pre-computed paragraph chunks.
+     - (Blend) Drop the RoPE state (paged KV cache lives on; use
+       ``UNREGISTER_KV_CACHE`` to release that).
    * - ``CB_RETRIEVE_PRE_COMPUTED``
      - BLOCKING
-     - (Blend) Retrieve pre-computed paragraph chunks to GPU.
-   * - ``CB_STORE_FINAL``
-     - BLOCKING
-     - (Blend) Store final blended chunks.
-   * - ``CB_LOOKUP_PRE_COMPUTED_V2``
-     - BLOCKING
-     - (Blend V2) Lookup pre-computed chunks; returns
-       ``CBMatchResult`` entries (with old/cur ranges and per-chunk hashes)
-       so the retrieve step can skip re-hashing.
-   * - ``CB_RETRIEVE_PRE_COMPUTED_V2``
-     - BLOCKING
-     - (Blend V2) Retrieve pre-computed chunks using the
-       ``CBMatchResult`` list returned by ``CB_LOOKUP_PRE_COMPUTED_V2``.
-   * - ``CB_REGISTER_ROPE_V3``
-     - SYNC
-     - (Blend V3) Share the RoPE cos/sin cache onto a context already
-       registered via ``REGISTER_KV_CACHE``.
-   * - ``CB_UNREGISTER_ROPE_V3``
-     - SYNC
-     - (Blend V3) Drop the RoPE state (paged KV cache lives on; use
-       ``UNREGISTER_KV_CACHE`` to release that).
-   * - ``CB_RETRIEVE_PRE_COMPUTED_V3``
-     - BLOCKING
-     - (Blend V3) Scatter all matched chunks (prefix- and non-prefix-hit)
+     - (Blend) Scatter all matched chunks (prefix- and non-prefix-hit)
        into paged KV by per-token block ID; re-RoPE only the shifted subset.
    * - ``CB_UNIFIED_LOOKUP``
      - BLOCKING
-     - (Blend V3) Sole live lookup path: one RPC runs prefix + non-prefix
+     - (Blend) Sole lookup path: one RPC runs prefix + non-prefix
        match, reconciles, issues one sparse-coalesced prefetch, and
        classifies per-TP-rank. Returns ``CBUnifiedLookupResult`` (or
        ``None`` while the prefetch is still in flight).
@@ -339,9 +301,8 @@ Each config module exposes a composable triple:
 ``add_http_frontend_args()`` and ``add_coordinator_args()`` for the
 ``lmcache server`` CLI. CacheBlend is no longer a separate entry point —
 it is opted into at runtime by passing ``--engine-type`` to
-``server.py`` (or ``lmcache server``). ``--engine-type blend`` appends
-``BlendV3Module`` (the current paged-aware implementation), while
-``--engine-type blend_legacy`` appends ``BlendModule`` (the original).
+``server.py`` (or ``lmcache server``): ``--engine-type blend`` appends
+``BlendModule``.
 
 Distributed Storage
 -------------------
@@ -570,10 +531,9 @@ Adding a new request type
 1. Add a new member to ``RequestType`` in ``protocols/base.py``.
 2. Create a ``ProtocolDefinition`` in the appropriate ``protocols/*.py`` file
    (``engine``, ``controller``, ``observability``, ``debug``, ``blend``,
-   ``blend_v2``, ``blend_v3``, or ``p2p``) and add the request name to that
-   module's ``REQUEST_NAMES``.
+   or ``p2p``) and add the request name to that module's ``REQUEST_NAMES``.
 3. Implement the handler method on the appropriate ``EngineModule``
-   (e.g. ``LookupModule``, ``LMCacheDrivenTransferModule``, ``BlendV3Module``) and
+   (e.g. ``LookupModule``, ``LMCacheDrivenTransferModule``, ``BlendModule``) and
    expose it as a ``HandlerSpec`` from that module's ``get_handlers()``.
 4. ``run_cache_server()`` registers every ``HandlerSpec`` returned by the
    loaded modules via ``add_handler_helper()`` — no manual registration
@@ -601,11 +561,9 @@ Key Source Files
      - Engine module implementations: ``lookup.py`` (``LookupModule``),
        ``management.py`` (``ManagementModule``), ``lmcache_driven_transfer.py``
        (``LMCacheDrivenTransferModule``), ``engine_driven_transfer.py``
-       (``EngineDrivenTransferModule``), ``blend.py``
-       (``BlendModule`` / ``BlendEngineV2``, selected by
-       ``--engine-type blend_legacy``), and ``blend_v3.py``
-       (``BlendV3Module``, the paged-aware CacheBlend V3 pipeline
-       selected by ``--engine-type blend``).
+       (``EngineDrivenTransferModule``), and ``blend.py``
+       (``BlendModule``, the paged-aware blend pipeline selected by
+       ``--engine-type blend``).
    * - ``lmcache/v1/multiprocess/http_server.py``
      - FastAPI wrapper with health check and many other useful APIs
    * - ``lmcache/v1/multiprocess/http_api_registry.py``

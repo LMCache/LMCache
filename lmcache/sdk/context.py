@@ -33,7 +33,7 @@ from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
     EngineDrivenTransferContext,
     create_transfer_context,
 )
-import lmcache.c_ops as lmc_ops
+import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
 
@@ -148,6 +148,9 @@ class LMCacheSDKContext:
 
         try:
             self._world_size = int(entry.get("world_size", 1))
+            # Readers per stored object; registrations that do not publish it
+            # get 1 (single reader).
+            self._num_kv_readers = int(entry.get("num_kv_readers", 1))
             kv_cache_layout = entry.get("kv_cache_layout", {})
             if not kv_cache_layout:
                 raise LMCacheSDKError(
@@ -174,9 +177,11 @@ class LMCacheSDKContext:
                 .split(",")
             ]
 
-            fmt = getattr(lmc_ops.EngineKVFormat, kernel_group["engine_kv_format"])
+            fmt = getattr(
+                lmcache_native.EngineKVFormat, kernel_group["engine_kv_format"]
+            )
             probe: list[DiscoverableKVCache] = [torch.empty(inner, device="meta")]
-            use_mla = lmc_ops.is_mla(fmt)
+            use_mla = lmcache_native.is_mla(fmt)
             single_tensor = use_mla or self._kind is LMCacheSDKCacheKind.QUERY
             num_kv_heads = 1 if single_tensor else get_num_heads(probe, fmt)
             block_size = get_block_size(probe, fmt)
@@ -524,6 +529,7 @@ class LMCacheSDKContext:
         return IPCCacheServerKey(
             model_name=self._model_name,
             world_size=self._world_size,
+            num_kv_readers=self._num_kv_readers,
             worker_id=worker_id,
             token_ids=tuple(token_ids),
             start=start,

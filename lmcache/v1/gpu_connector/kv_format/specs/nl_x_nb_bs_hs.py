@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Per-layer MLA: ``NL x [NB, BS, HS]`` (e.g. vLLM MLA).
+"""Per-layer MLA: ``NL x [NB, BS, HS]``.
 
 A ``list[NL]`` of a 3-D tensor; K and V share one latent (``num_heads == 1``).
+Used by vLLM MLA and normalized SGLang MP MLA.
 """
 
 # Each spec indexes ``kv_caches`` (Tensor | nested list) per its format, so the
@@ -15,12 +16,14 @@ import torch
 
 # First Party
 from lmcache.v1.gpu_connector.kv_format.specs.base import KVFormatSpec
-import lmcache.c_ops as lmc_ops
+import lmcache.lmcache_native as lmcache_native
 
 
 class NL_X_NB_BS_HS_Spec(KVFormatSpec):
-    engine_kv_format = lmc_ops.EngineKVFormat.NL_X_NB_BS_HS
-    attention_backends = ("vLLM MLA",)
+    engine_kv_format = lmcache_native.EngineKVFormat.NL_X_NB_BS_HS
+    attention_backends = ("vLLM MLA / SGLang MLA (MP)",)
+    is_layer_list = True
+    is_mla = True
 
     def num_layers(self) -> int:
         return len(self.kv_caches)

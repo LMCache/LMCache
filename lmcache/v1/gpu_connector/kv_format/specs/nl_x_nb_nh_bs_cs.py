@@ -18,12 +18,15 @@ import torch
 
 # First Party
 from lmcache.v1.gpu_connector.kv_format.specs.base import KVFormatSpec
-import lmcache.c_ops as lmc_ops
+import lmcache.lmcache_native as lmcache_native
 
 
 class NL_X_NB_NH_BS_CS_Spec(KVFormatSpec):
-    engine_kv_format = lmc_ops.EngineKVFormat.NL_X_NB_NH_BS_CS
+    engine_kv_format = lmcache_native.EngineKVFormat.NL_X_NB_NH_BS_CS
     attention_backends = ("vLLM non-MLA blocks-first, fused K/V (HND)",)
+    is_layer_list = True
+    is_hnd = True
+    is_fused_packed = True
 
     def num_layers(self) -> int:
         return len(self.kv_caches)

@@ -20,12 +20,16 @@ import time
 import pytest
 import torch
 
+# First Party
+from lmcache import torch_dev, torch_device_type
+
+if not torch_dev.is_available():
+    pytest.skip(
+        f"Requires available {torch_device_type} runtime",
+        allow_module_level=True,
+    )
+
 nixl = pytest.importorskip("nixl")
-
-pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="CUDA is not available"
-)
-
 # Third Party
 import zmq  # noqa: E402
 
@@ -177,7 +181,7 @@ def test_p2p_adapter_end_to_end():
         )
 
         # Lookup: every key is resident on the peer.
-        lookup_id = adapter.submit_lookup_and_lock_task(keys, layout)
+        lookup_id = adapter.submit_lookup_and_lock_task(keys, {0: layout})
         bitmap = _poll(lambda: adapter.query_lookup_and_lock_result(lookup_id))
         assert bitmap is not None
         for i in range(_NUM_KEYS):

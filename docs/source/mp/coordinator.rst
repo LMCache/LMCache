@@ -25,96 +25,119 @@ Expected log output:
 
     LMCache INFO: MP coordinator listening on http://0.0.0.0:9300
 
-The CLI accepts ``--host``, ``--port``, ``--instance-timeout``,
-``--health-check-interval``, ``--eviction-check-interval``,
-``--eviction-ratio``, ``--trigger-watermark``, ``--chunk-size``,
-``--hash-algorithm``, ``--blend-probe-stride``, and ``--timeout-keep-alive``;
-any flag overrides the matching environment variable below. See
-:doc:`/cli/coordinator` for details.
-Equivalently, the coordinator can still be launched as a module with
-``python3 -m lmcache.v1.mp_coordinator``.
+See :doc:`/cli/coordinator` for the full flag list. Equivalently, the
+coordinator can be launched as a module with
+``python3 -m lmcache.v1.mp_coordinator``, which accepts the same flags.
 
 Configuration
 -------------
 
-The coordinator is configured through ``LMCACHE_MP_COORDINATOR_*`` environment
-variables:
+The coordinator is configured through CLI flags only; every flag left unset
+keeps the default below.
 
 .. list-table::
    :header-rows: 1
    :widths: 38 14 48
 
-   * - Environment variable
+   * - Flag
      - Default
      - Description
-   * - ``LMCACHE_MP_COORDINATOR_HOST``
+   * - ``--host``
      - ``0.0.0.0``
      - Host the HTTP server binds to.
-   * - ``LMCACHE_MP_COORDINATOR_PORT``
+   * - ``--port``
      - ``9300``
      - Port the HTTP server binds to.
-   * - ``LMCACHE_MP_COORDINATOR_INSTANCE_TIMEOUT``
+   * - ``--instance-timeout``
      - ``30``
      - Seconds without a heartbeat after which a server is dropped from the
        fleet.
-   * - ``LMCACHE_MP_COORDINATOR_HEALTH_CHECK_INTERVAL``
+   * - ``--health-check-interval``
      - ``10``
      - Seconds between health-check sweeps that expire stale MP-server
        registrations. ``0`` disables the stale-instance eviction loop; it does
        **not** affect the ``/quota`` L2 eviction loop (see
-       ``LMCACHE_MP_COORDINATOR_EVICTION_CHECK_INTERVAL`` below).
-   * - ``LMCACHE_MP_COORDINATOR_EVICTION_CHECK_INTERVAL``
+       ``--eviction-check-interval`` below).
+   * - ``--eviction-check-interval``
      - ``5``
      - Seconds between L2 eviction sweeps. ``0`` disables the loop.
-   * - ``LMCACHE_MP_COORDINATOR_EVICTION_RATIO``
+   * - ``--eviction-ratio``
      - ``0.2``
      - Fraction of tracked keys (by count) to evict per cycle (0.0 to 1.0).
-   * - ``LMCACHE_MP_COORDINATOR_TRIGGER_WATERMARK``
+   * - ``--trigger-watermark``
      - ``1.0``
      - Eviction fires when usage reaches this fraction of the quota
        (0.0 exclusive to 1.0).
-   * - ``LMCACHE_MP_COORDINATOR_CHUNK_SIZE``
+   * - ``--chunk-size``
      - ``256``
      - Tokens per KV chunk: the CacheBlend match unit and the unit used to
        resolve pin ``token_ids`` to keys. Must equal the MP servers'
        ``--chunk-size``.
-   * - ``LMCACHE_MP_COORDINATOR_HASH_ALGORITHM``
+   * - ``--hash-algorithm``
      - ``blake3``
      - Token hash algorithm for pin key resolution. Must equal the MP servers'
        ``--hash-algorithm``. ``blake3`` is self-contained; other algorithms
        require vLLM importable in the coordinator process.
-   * - ``LMCACHE_MP_COORDINATOR_BLEND_PROBE_STRIDE``
+   * - ``--enable-blend-lookup``
+     - off
+     - Index stored chunk content so ``POST /directory/blend-lookup`` can serve
+       fleet CacheBlend reuse. Off by default: hashing content costs CPU on
+       every store. Also requires the MP servers'
+       ``--coordinator-event-reporting``.
+   * - ``--blend-probe-stride``
      - ``1``
      - Positions between CacheBlend match probes. ``1`` probes every offset
-       for full recall.
-   * - ``LMCACHE_MP_COORDINATOR_TIMEOUT_KEEP_ALIVE``
+       for full recall. Ignored unless blend lookup is on.
+   * - ``--checkpoint-path``
+     - (empty)
+     - File the coordinator's derived state is checkpointed to. Empty
+       disables it and the coordinator starts cold after every restart.
+   * - ``--checkpoint-interval``
+     - ``60``
+     - Seconds between checkpoint writes; ``0`` writes only on a clean stop.
+       Ignored without a path. Does not affect the metadata file, which is
+       written whenever pins or quotas change.
+   * - ``--metadata-path``
+     - (empty)
+     - File the operator-set state (L2 pins and per-``cache_salt`` quotas)
+       is stored in. Empty means that state is lost on restart.
+   * - ``--extra-config``
+     - (empty)
+     - JSON object of settings the core flags do not name, read by whichever
+       view or controller looks for them.
+   * - ``--timeout-keep-alive``
      - ``10``
      - Seconds the HTTP server keeps idle connections open before closing
        them. Must be greater than the MP servers' heartbeat interval
        (default ``5``), otherwise heartbeat requests may hit a closing
        connection and fail with ``Server disconnected without sending a
        response``.
-   * - ``LMCACHE_MP_COORDINATOR_ENABLE_STARTUP_RESYNC``
-     - ``True``
-     - When ``True``, the coordinator runs a one-shot L2 resync on
-       startup that paginates an MP server's ``GET /cache/objects`` and
-       backfills usage + eviction trackers from existing L2 contents.
-       Disable to start from empty trackers (handy for tests, or
-       deployments that start the coordinator before any MP server).
-   * - ``LMCACHE_MP_COORDINATOR_RESYNC_POLL_INTERVAL``
-     - ``1``
-     - Seconds between registry checks while waiting for the first
-       MP server to register so startup resync can begin.
-   * - ``LMCACHE_MP_COORDINATOR_RESYNC_MAX_WAIT``
-     - ``60``
-     - Maximum seconds startup resync waits for an MP server before
-       giving up. The coordinator keeps running with empty trackers
-       until normal usage events fill them in.
-   * - ``LMCACHE_MP_COORDINATOR_RESYNC_PAGE_SIZE``
-     - ``1000``
-     - ``page_size`` forwarded to the MP server's ``GET /cache/objects``
-       during resync. Larger values reduce RTT count; the server
-       clamps to its own ceiling.
+   * - ``--disable-metrics``
+     - off
+     - Skip OpenTelemetry metrics initialization. Metrics are on by default;
+       pass this flag and the local ``/metrics`` endpoint returns 404.
+   * - ``--otlp-endpoint``
+     - unset
+     - OTLP gRPC endpoint for metrics push mode. When unset, Prometheus pull
+       mode exposes ``/metrics`` on the coordinator HTTP port. When set, the
+       local ``/metrics`` endpoint returns 404.
+
+Coordinator metrics export
+--------------------------
+
+Metrics are enabled by default. Without an OTLP endpoint, Prometheus scrapes
+the coordinator's existing FastAPI port; no separate metrics server or port is
+created:
+
+.. code-block:: bash
+
+   curl http://localhost:9300/metrics
+
+Set ``--otlp-endpoint http://collector:4317`` to push metrics to an
+OpenTelemetry Collector instead. In OTLP push mode, and when
+``--disable-metrics`` is set, ``GET /metrics`` returns 404. This infrastructure
+does not itself define coordinator business metrics; instruments register with
+the shared OpenTelemetry provider as coordinator capabilities add them.
 
 Connecting MP servers
 ---------------------
@@ -145,13 +168,15 @@ Kubernetes downward API); an explicit flag wins over the env var.
      - ``LMCACHE_COORDINATOR_HEARTBEAT_INTERVAL``
      - Seconds between heartbeats (must be ``> 0``, default ``5``). Keep it well
        below the coordinator's ``INSTANCE_TIMEOUT``.
-   * - ``--coordinator-l2-event-reporting``
-     - ``LMCACHE_COORDINATOR_L2_EVENT_REPORTING``
-     - Enable reporting L2 store/lookup events to the coordinator for
-       fleet-wide usage tracking and quota-based eviction.
-   * - ``--coordinator-l2-event-flush-interval``
-     - ``LMCACHE_COORDINATOR_L2_EVENT_FLUSH_INTERVAL``
-     - Seconds between L2 event batch flushes (must be ``> 0``, default ``1``).
+   * - ``--coordinator-event-reporting``
+     - ``LMCACHE_COORDINATOR_EVENT_REPORTING``
+     - Stream cache store/access/delete events to the coordinator,
+       feeding the key directory (fleet-wide placement tracking) and,
+       for L2 events, usage/quota tracking and eviction.
+   * - ``--coordinator-event-flush-interval``
+     - ``LMCACHE_COORDINATOR_EVENT_FLUSH_INTERVAL``
+     - Seconds between cache-event batch flushes (must be ``> 0``, default
+       ``1``).
 
 The server registers under its stable identity (``--instance-id`` / OTel
 ``service.instance.id``); if the flag is not passed, the server mints a
@@ -173,13 +198,26 @@ The coordinator's HTTP surface (base URL ``http://localhost:9300``) groups into:
   eviction.
 - **Cache control** -- the ``/cache`` group: cache operations dispatched to a
   named server (warm prefetch, pin/unpin, and delete, with more to come).
-- **CacheBlend fingerprint directory** -- the ``/blend`` group: the fleet-wide
-  fingerprint index blend-enabled MP servers publish to on STORE and query on
-  LOOKUP. Server-to-coordinator only; not usually called by hand.
+- **Fleet memory** -- the ``/instances/usage`` endpoints: how full each
+  server's memory compartments are, joining event-derived usage against the
+  capacity each server declares on the same event stream. Read-only.
+- **CacheBlend fragment lookup** -- ``POST /directory/blend-lookup``: finds
+  cached chunk content anywhere inside a query sequence, using the blend index
+  derived from the key directory's token bindings. Server-to-coordinator only;
+  not usually called by hand.
 
 Each endpoint is documented below. Success is ``200`` unless noted, and
 ``{cache_salt}`` uses the ``_default`` sentinel for the empty salt. The wire
 types live in ``lmcache/v1/mp_coordinator/schemas.py``.
+
+.. tip::
+
+   The read-only endpoints below can be read without ``curl`` and ``jq``.
+   ``lmcache query coordinator --api NAME`` fetches one of them — ``usage``,
+   ``instances``, ``health``, ``directory``, ``keys``, ``quota``,
+   ``quota-config``, ``prefetch``, or ``metrics`` — and prints it as an
+   aligned table with byte counts and ratios already formatted. See
+   :doc:`/cli/query`.
 
 Fleet membership and health
 ---------------------------
@@ -225,7 +263,6 @@ startup.
      - int
      - Optional (default ``0``). ZMQ message-queue port P2P peers send
        lookup/unlock RPCs to; ``0`` when P2P is disabled.
-
 **Response** (``200 OK``):
 
 .. code-block:: json
@@ -403,14 +440,16 @@ cycle):
         -H 'Content-Type: application/json' -d '{"default_limit_gb": 0}'
     # -> {"default_limit_gb": 0.0}
 
-When MP servers enable ``--coordinator-l2-event-reporting``, they stream L2
-``store``, ``lookup``, and ``delete`` events to the coordinator, which aggregates
-per-``cache_salt`` usage, enforces quotas, and selects LRU keys to evict. Each
-batch carries the server's ``instance_id`` and a monotonically increasing
-sequence number (``seq``) scoped to that instance, enabling future gap detection.
+When MP servers enable ``--coordinator-event-reporting``, they stream cache
+``store``, ``access``, and ``delete`` events to the coordinator's
+``POST /events``. Applied ``l2`` batches also feed the quota side:
+the coordinator aggregates per-``cache_salt`` usage, enforces quotas, and
+selects LRU keys to evict. Each batch carries the server's ``instance_id``,
+``incarnation``, and a monotonically increasing sequence number (``seq``)
+scoped to that instance, so replays are deduplicated and lost batches are
+detected.
 
-**Active eviction loop.** Every
-``LMCACHE_MP_COORDINATOR_EVICTION_CHECK_INTERVAL`` seconds, the
+**Active eviction loop.** Every ``--eviction-check-interval`` seconds, the
 coordinator inspects per-salt usage against the registered quotas and,
 for any salt over the trigger watermark, picks LRU victims and
 dispatches a single ``DELETE /cache/objects`` to a uniformly random registered MP
@@ -418,21 +457,19 @@ server. Because all MP servers share the same backing L2 (e.g. one S3
 bucket), one dispatch evicts the keys for the whole fleet. The MP
 server's L2 adapter fires ``on_l2_keys_deleted`` listeners after the
 delete completes; those listeners ship ``delete`` events back through
-``POST /quota/events``, which is what updates the coordinator's LRU +
+``POST /events``, which is what updates the coordinator's LRU +
 per-salt totals. Dispatch failures or no-instances-registered fall
 through to the next cycle — at-least-once semantics, safe because the
 S3 delete is idempotent.
 
-**Startup resync.** On boot, the coordinator waits up to
-``LMCACHE_MP_COORDINATOR_RESYNC_MAX_WAIT`` seconds for the first MP
-server to register, then paginates its
-``GET /cache/objects`` and seeds the in-memory usage + eviction trackers
-with whatever is already resident in L2 — so a fresh coordinator
-does not start from zero usage. Set
-``LMCACHE_MP_COORDINATOR_ENABLE_STARTUP_RESYNC=False`` to skip this
-phase. Best-effort: resync failures are logged and the manager gives
-up; the ongoing usage-event stream from MP servers eventually corrects
-any initial blind spots.
+**Cold start.** The coordinator's trackers are in-memory and are built
+only from the cache-event stream, so after a restart per-salt usage
+starts at zero even though the bytes are still resident in L2. Quotas
+under-report until enough events accumulate. Unquota'd salts are exempt
+from eviction until the quota controller sets a default limit, so a cold
+coordinator cannot mass-evict — but it can under-evict, and an operator
+re-arming quotas right after a restart should expect the usage numbers
+to climb toward the true value rather than start at it.
 
 ``PUT /quota/config`` / ``GET /quota/config``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -562,7 +599,10 @@ Read the quota and live usage for a single salt.
 **Path parameters:** ``cache_salt`` — tenant identifier (``_default`` for the
 empty salt).
 
-**Query parameters:** ``tier`` — optional (default ``l2``).
+**Query parameters:** ``tier`` — ``l1`` or ``l2`` (default ``l2``). Every field
+describes the requested tier. Quotas are enforced on L2 only, so an ``l1`` read
+reports L1 usage with ``quota_exists: false`` and ``quota_limit_gb: 0.0`` --
+never the L2 budget, which governs different bytes.
 
 **Response** (``200 OK``):
 
@@ -590,7 +630,12 @@ current aggregate usage. This endpoint never returns ``404`` for an unknown salt
 
 List total usage and a per-salt breakdown.
 
-**Query parameters:** ``tier`` — optional (default ``l2``).
+**Query parameters:** ``tier`` — ``l1`` or ``l2`` (default ``l2``). Every field
+describes the requested tier, and rows come from that tier's usage plus the
+quotas that apply to it -- so an ``l1`` listing holds only salts with L1 bytes,
+each with ``quota_exists: false``. ``all`` is rejected with ``400``, because a
+key resident in both tiers holds bytes in both and a cross-tier total would
+count it twice.
 
 **Response** (``200 OK``):
 
@@ -617,68 +662,198 @@ entry has the same fields as the ``GET /quota/{cache_salt}`` response.
     curl -s http://localhost:9300/quota
     # -> {"total_gb": 0.005, "by_cache_salt": [...]}
 
-``POST /quota/events``
+Usage events arrive on the fleet cache-event stream
+(``POST /events``); there is no separate quota ingestion
+endpoint. See ``docs/design/v1/mp_coordinator/cache_events.md`` for the
+batch format and routing semantics.
+
+Key directory
+-------------
+
+The ``/directory`` group is a read-only operator view of the fleet-wide key
+directory: which keys are cached, where (instance / tier / backend), and what
+token ids each chunk holds. The directory is **eventually consistent soft
+state** built from the servers' cache-event stream -- every answer is a hint to
+be validated at the owning server, never a guarantee.
+
+``GET /directory/keys``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Ingest a batch of usage events. Sent automatically by reporting MP servers; not
-usually called by hand.
+List cached keys and their placements, one page at a time.
 
-**Request body:**
+**Query parameters:**
 
 .. list-table::
    :header-rows: 1
-   :widths: 18 16 66
+   :widths: 22 14 64
 
-   * - Field
-     - Type
+   * - Parameter
+     - Default
      - Description
-   * - ``instance_id``
-     - string
-     - The MP server that produced this batch.
-   * - ``seq``
-     - int
-     - Monotonic per-instance sequence number (``>= 1``); supports future gap
-       detection of lost batches.
    * - ``tier``
-     - string
-     - Optional (default ``l2``). Cache tier the events apply to.
-   * - ``events``
-     - list[object]
-     - The events to record. Each is ``{"type", "key", "bytes"}``: ``type`` is
-       ``"store"``, ``"lookup"``, or ``"delete"``; ``key`` is the encoded object
-       key; ``bytes`` (``>= 0``) is the stored size — counted for ``store`` and
-       ignored for ``lookup`` / ``delete`` (a ``delete`` subtracts the size
-       recorded at the original ``store``).
+     - ``all``
+     - Keep placements on this tier (``l1`` / ``l2``; ``all`` keeps every
+       tier).
+   * - ``instance_id``
+     - *(empty)*
+     - Keep placements reported by this MP server (empty keeps every
+       instance).
+   * - ``backend``
+     - *(empty)*
+     - Keep placements on this backend, e.g. ``dram`` / ``fs`` (empty keeps
+       every backend).
+   * - ``offset``
+     - ``0``
+     - Matching keys to skip (pagination).
+   * - ``limit``
+     - ``1000``
+     - Maximum keys to return (1 to 10000).
 
 **Response** (``200 OK``):
 
 .. code-block:: json
 
-    {"recorded": 3}
+    {
+      "total": 2,
+      "keys": [
+        {
+          "key": {
+            "chunk_hash_hex": "aa12...",
+            "model_name": "meta-llama/Llama-3.1-8B-Instruct",
+            "kv_rank": 0,
+            "object_group_id": 0,
+            "cache_salt": ""
+          },
+          "placements": [
+            {
+              "instance_id": "server-1",
+              "incarnation": 1719000000,
+              "tier": "l1",
+              "backend": "dram",
+              "size_bytes": 1048576,
+              "shared": false
+            }
+          ],
+          "num_tokens": 256
+        }
+      ]
+    }
 
-``recorded`` is the number of events processed.
+``total`` counts every key with at least one placement matching the filters;
+``keys`` is the requested page of them, each with **only its matching
+placements**. ``num_tokens`` reports how many token ids the directory knows for
+the key's chunk (``0`` = unknown) -- fetch the actual tokens via
+``POST /directory/lookup``, which exists precisely so listing pages stay
+small. Pages of a changing directory may skip or repeat keys (snapshot
+semantics).
 
 **HTTP status codes:**
 
-- ``200``: events processed.
-- ``422``: request body fails field-level validation.
+- ``200``: page returned (an empty directory returns ``{"total": 0, "keys": []}``).
+- ``422``: invalid parameter (negative ``offset``, ``limit`` out of range,
+  unknown ``tier``).
 
 **Example:**
 
 .. code-block:: bash
 
-    curl -s -X POST http://localhost:9300/quota/events \
-        -H 'Content-Type: application/json' \
-        -d '{
-            "instance_id": "server-1",
-            "seq": 1,
-            "events": [
-                {"type": "store",  "key": {"chunk_hash_hex": "aa", "model_name": "m", "kv_rank": 0, "cache_salt": "user-a"}, "bytes": 1024},
-                {"type": "lookup", "key": {"chunk_hash_hex": "aa", "model_name": "m", "kv_rank": 0, "cache_salt": "user-a"}, "bytes": 0},
-                {"type": "delete", "key": {"chunk_hash_hex": "aa", "model_name": "m", "kv_rank": 0, "cache_salt": "user-a"}, "bytes": 0}
-            ]
-        }'
-    # -> {"recorded": 3}
+    # Everything on server-1's L1:
+    curl -s "http://localhost:9300/directory/keys?tier=l1&instance_id=server-1&limit=100"
+
+``POST /directory/lookup``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Resolve cache content to its placements and token ids. One endpoint, two
+forms -- supply exactly one:
+
+* **keys form** -- ``{"keys": [...]}``: resolve keys you already have (e.g.
+  from ``GET /directory/keys``).
+* **tokens form** -- ``{"token_ids": [...], "model_name": ..., "world_size":
+  ..., "cache_salt": ...}``: resolve a request's tokens to the keys of its
+  complete chunks (the same fan-out the pin APIs use).
+
+.. important::
+
+   ``token_ids`` must be the request's **whole** token sequence from position
+   0, not one chunk's worth. Chunk hashes are prefix-chained -- each chunk's
+   key depends on every token before it -- so a mid-request slice resolves to
+   different (nonexistent) keys. Trailing tokens that do not fill a chunk are
+   ignored.
+
+**Request body** (tokens form):
+
+.. code-block:: json
+
+    {
+      "token_ids": [15496, 11, 995, 314],
+      "model_name": "meta-llama/Llama-3.1-8B-Instruct",
+      "world_size": 1,
+      "cache_salt": ""
+    }
+
+**Request body** (keys form):
+
+.. code-block:: json
+
+    {
+      "keys": [
+        {
+          "chunk_hash_hex": "aa12...",
+          "model_name": "meta-llama/Llama-3.1-8B-Instruct",
+          "kv_rank": 0,
+          "object_group_id": 0,
+          "cache_salt": ""
+        }
+      ]
+    }
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {
+      "chunks": 1,
+      "results": [
+        {
+          "key": {"chunk_hash_hex": "aa12...", "model_name": "...", "kv_rank": 0,
+                  "object_group_id": 0, "cache_salt": ""},
+          "placements": [
+            {"instance_id": "server-1", "incarnation": 1770000000, "tier": "l1",
+             "backend": "dram", "size_bytes": 8388608, "shared": false}
+          ],
+          "token_ids": [15496, 11, 995]
+        }
+      ]
+    }
+
+``chunks`` is the number of complete chunks the tokens resolved to (keys form:
+the number of keys requested); ``results`` has one entry per resolved key, in
+request order (tokens form: ``chunks`` x the per-rank fan-out). ``placements``
+is empty for keys the directory does not know; ``token_ids`` is empty when the
+directory has no tokens for the key's chunk (never stored with token reporting
+on, or not yet re-reported after an event gap).
+
+**HTTP status codes:**
+
+- ``200``: results returned.
+- ``400``: the token sequence exceeds the per-request cap, or a resolution
+  parameter is invalid (e.g. ``model_name`` contains ``@``).
+- ``422``: neither or both forms supplied, ``model_name`` missing with
+  ``token_ids``, or a key is malformed (e.g. ``chunk_hash_hex`` is not hex).
+
+**Examples:**
+
+.. code-block:: bash
+
+    # Tokens form -- where is this prompt cached, and what does each chunk hold?
+    curl -s -X POST http://localhost:9300/directory/lookup \
+      -H 'Content-Type: application/json' \
+      -d '{"token_ids": [15496, 11, 995], "model_name": "m", "world_size": 1}'
+
+    # Keys form -- keys taken from GET /directory/keys:
+    curl -s -X POST http://localhost:9300/directory/lookup \
+      -H 'Content-Type: application/json' \
+      -d '{"keys": [{"chunk_hash_hex": "aa12...", "model_name": "m", "kv_rank": 0}]}'
 
 Cache control
 -------------
@@ -902,9 +1077,9 @@ of L2 keys pinned (chunks times the per-rank fan-out).
 
 .. note::
 
-   **Requires L2 event reporting.** The coordinator can only exclude keys from
+   **Requires event reporting.** The coordinator can only exclude keys from
    eviction for a salt it is tracking, which requires the MP servers started with
-   ``--coordinator-l2-event-reporting`` (see `Connecting MP servers`_).
+   ``--coordinator-event-reporting`` (see `Connecting MP servers`_).
 
 ``DELETE /cache/pins``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -988,97 +1163,135 @@ sequence returns ``status`` ``"noop"``.
         }'
     # -> {"instance_id": "server-1", "requested": 12, "affected": 24, "skipped": 0, "status": "deleted"}
 
-CacheBlend fingerprint directory
---------------------------------
+Fleet memory
+------------
 
-The ``/blend`` group is the fleet-wide fingerprint index behind CacheBlend
-cross-request reuse. Blend-enabled MP servers publish chunk fingerprints on
-STORE (``POST /blend/fingerprints``) and query them on LOOKUP
-(``POST /blend/match``); the index is chunked at
-``LMCACHE_MP_COORDINATOR_CHUNK_SIZE`` tokens and rolling-hash-matched at
-``LMCACHE_MP_COORDINATOR_BLEND_PROBE_STRIDE``. These endpoints are
-server-to-coordinator; they are not usually called by hand.
+The ``/instances/usage`` endpoints report how full each MP server's memory
+compartments are. A **compartment** is one thing that owns bytes: the L1 pool
+of a backing medium, or one L2 adapter. It is identified by
+``(tier, backend)`` -- the same pair cache events tag placements with.
 
-The wire types (``StoreRangeModel``, ``BlendFingerprintRequest``,
-``BlendMatchRequest``, ``GlobalMatchModel`` and their responses) live in
-``lmcache/v1/mp_coordinator/schemas.py``.
+Two inputs are joined, and both ride the cache-event stream. **Usage** is
+derived from the events the servers already publish. **Capacity** arrives as
+a capacity report on the same stream -- once at startup, then whenever an
+adapter is added, removed, or reconfigured. Both are automatic; there is
+nothing to configure beyond pointing servers at a coordinator and leaving
+event reporting enabled.
 
-``POST /blend/fingerprints``
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+.. note::
 
-Register stored chunk fingerprints (idempotent).
+   Capacity travels on the event stream, so disabling event reporting
+   disables both halves together: every ``usage_ratio`` reads ``null``
+   (*unknown*) rather than a ratio against a stale declaration.
 
-**Request body:**
+These endpoints are read-only. The coordinator never evicts or throttles based
+on them.
 
-.. list-table::
-   :header-rows: 1
-   :widths: 22 14 64
+.. note::
 
-   * - Field
-     - Type
-     - Description
-   * - ``ranges``
-     - list
-     - Stored token ranges. Each entry carries ``model_scope`` (the reuse
-       scope, typically the model name), ``tokens`` (the raw stored token
-       ids), ``object_keys`` (the shared-L2 storage key per chunk, in order),
-       and ``old_st_base`` (the token position of the range's first token).
-       The directory chunks ``tokens`` at the coordinator's chunk size and
-       hashes each chunk; chunk ``i`` maps to ``object_keys[i]``.
+   ``usage_ratio`` is ``null`` whenever the server declared no capacity for a
+   compartment, and this is common: the ``fs``, ``mooncake``, ``p2p``, and
+   ``sagemaker`` adapters expose no capacity setting at all, and ``s3`` /
+   ``raw_block`` report one only when you set ``max_capacity_gb`` /
+   ``capacity_bytes``. A ``null`` means *unknown*, never *empty* -- do not
+   treat it as ``0``.
 
-**Response** (``200 OK``):
+   Ratios above ``1.0`` are reported as-is rather than capped. A compartment
+   holding more than its declared capacity means the declaration is wrong, and
+   that is worth seeing.
 
-.. code-block:: json
+``GET /instances/usage``
+~~~~~~~~~~~~~~~~~~~~~~~~
 
-    {"inserted": 3}
-
-``inserted`` reports how many fingerprints were newly registered (existing
-entries are left in place; re-publishing is safe).
-
-**HTTP status codes:**
-
-- ``200``: fingerprints processed.
-- ``422``: request body fails field-level validation.
-
-``DELETE /blend/fingerprints``
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Evict fingerprints by shared-L2 storage key (idempotent). MP servers call this
-when the underlying L2 objects are dropped, so the directory does not keep
-handing out stale matches.
-
-**Request body:**
-
-.. list-table::
-   :header-rows: 1
-   :widths: 22 14 64
-
-   * - Field
-     - Type
-     - Description
-   * - ``object_keys``
-     - list[string]
-     - Storage keys whose fingerprint entries should be removed. Unknown keys
-       are ignored.
+The whole fleet: every server's compartments, plus the shared pools.
 
 **Response** (``200 OK``):
 
 .. code-block:: json
 
-    {"removed": 2}
+    {
+      "instances": [
+        {
+          "instance_id": "server-1",
+          "registered": true,
+          "declared_capacity": true,
+          "modules": [
+            {"tier": "l1", "backend": "dram", "shared": false,
+             "used_bytes": 10737418240, "capacity_bytes": 42949672960,
+             "usage_ratio": 0.25},
+            {"tier": "l2", "backend": "fs", "shared": false,
+             "used_bytes": 7516192768, "capacity_bytes": 0,
+             "usage_ratio": null}
+          ]
+        }
+      ],
+      "shared_modules": [
+        {"tier": "l2", "backend": "s3", "shared": true,
+         "used_bytes": 4398046511104, "capacity_bytes": 17592186044416,
+         "usage_ratio": 0.25}
+      ]
+    }
 
-``removed`` reports how many entries were actually evicted.
+``shared_modules`` holds storage several servers mount -- one S3 bucket, one
+CXL region. These are counted **once for the fleet** and appear in no
+instance's ``modules``. Summing them per mounting server would multiply both
+the bytes and the capacity by the number of mounts.
+
+A server appears when it is registered, when it still holds bytes, or when it
+declared capacity. ``registered: false`` therefore means a departed server
+whose L2 data outlived it; its L1 bytes are dropped when it goes.
+
+**Example:**
+
+.. code-block:: bash
+
+    # Which servers are most heavily loaded?
+    curl -s http://localhost:9300/instances/usage | jq -r '
+      .instances[] | .instance_id as $i | .modules[]
+      | select(.usage_ratio != null)
+      | "\($i) \(.tier)/\(.backend) \((.usage_ratio*100|floor))%"'
+    # -> server-1 l1/dram 25%
+    # -> server-2 l1/dram 81%
+
+``GET /instances/{instance_id}/usage``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+One server's compartments, in the same shape as an entry of ``instances``
+above.
 
 **HTTP status codes:**
 
-- ``200``: keys processed.
-- ``422``: request body fails field-level validation.
+- ``200``: found.
+- ``404``: the coordinator knows nothing about this id -- it is not
+  registered, holds no bytes, and declared no capacity.
 
-``POST /blend/match``
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+**Example:**
 
-Match a request's token buffer against the directory and return the reusable
-chunks.
+.. code-block:: bash
+
+    curl -s http://localhost:9300/instances/server-1/usage
+
+A server whose L1 pool uses the default lazy allocator grows its heap on
+demand. Capacity here is the **configured** size, not the grown heap, so a
+freshly started server correctly reads near ``0``\% rather than near full.
+
+CacheBlend fragment lookup
+--------------------------
+
+``POST /directory/blend-lookup`` is the fragment counterpart to
+``/directory/lookup``: the query need not be a prefix, and each match reports
+where the content sits in the query and where it sat when stored, so the caller
+can re-RoPE it.
+
+It is served from the blend index, derived from the key directory's token
+bindings — the coordinator learns content from the cache-event stream, not from
+a separate publish call. Both feeds default to off and both are required: the
+coordinator needs ``--enable-blend-lookup``, and every MP server whose chunks
+should be discoverable needs ``--coordinator-event-reporting`` (a server with a
+coordinator URL but no event reporting warns at startup and matches locally
+only). Matching is chunked at the coordinator's ``--chunk-size`` — which must
+equal the MP servers' ``--chunk-size`` — probing every
+``--blend-probe-stride`` positions.
 
 **Request body:**
 
@@ -1089,16 +1302,10 @@ chunks.
    * - Field
      - Type
      - Description
-   * - ``model_scope``
-     - string
-     - Reuse scope to match within (typically the model name).
    * - ``tokens_b64``
      - string
-     - Request tokens packed as base64 little-endian ``uint32`` (see
-       ``encode_tokens`` / ``decode_tokens`` in ``schemas.py``). The
-       coordinator hashes them at
-       ``LMCACHE_MP_COORDINATOR_CHUNK_SIZE`` positions striding by
-       ``LMCACHE_MP_COORDINATOR_BLEND_PROBE_STRIDE``.
+     - Query tokens packed as base64 little-endian ``uint32`` (see
+       ``encode_tokens`` / ``decode_tokens`` in ``schemas.py``).
 
 **Response** (``200 OK``):
 
@@ -1106,19 +1313,23 @@ chunks.
 
     {
       "matches": [
-        {"object_key": "ab12...", "old_st": 0,    "cur_st": 512},
-        {"object_key": "cd34...", "old_st": 256,  "cur_st": 768}
+        {"chunk_hash": "ab12...", "old_st": 0,   "cur_st": 512},
+        {"chunk_hash": "cd34...", "old_st": 256, "cur_st": 768}
       ]
     }
 
-Each entry names one reusable chunk: ``object_key`` is the shared-L2 key,
-``old_st`` is its token position in the stored sequence (re-RoPE source), and
-``cur_st`` is the position in the request (re-RoPE target). Matches are sorted
-ascending by ``cur_st``. An empty request or an unknown ``model_scope``
-returns ``{"matches": []}``.
+``chunk_hash`` is the chunk's content hash, which the caller expands to
+per-rank object keys with its own model, salt, and world size; ``old_st`` is
+its position in the stored sequence (re-RoPE source) and ``cur_st`` its
+position in the query (re-RoPE target). Matches are sorted ascending by
+``cur_st``, at most one per chunk, and may overlap — a caller that scatters
+them resolves overlaps itself. A query shorter than one chunk, or a coordinator
+without ``--enable-blend-lookup``, returns ``{"matches": []}``.
 
 **HTTP status codes:**
 
-- ``200``: match completed (an empty match list is not an error).
+- ``200``: lookup completed (an empty match list is not an error).
 - ``422``: ``tokens_b64`` is not valid base64 or not a whole number of
   ``uint32`` tokens.
+
+Index counts are reported under the ``blend`` key of ``GET /directory/stats``.

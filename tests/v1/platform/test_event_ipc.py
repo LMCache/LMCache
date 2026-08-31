@@ -15,7 +15,16 @@ from lmcache.v1.platform.base.event_ipc import (
 )
 from lmcache.v1.platform.cpu import CpuDeviceSpec
 from lmcache.v1.platform.cuda import CudaDeviceSpec
+from lmcache.v1.platform.cuda.timeline_semaphore_event_ipc import (
+    TimelineSemaphoreEventIPCBackend,
+)
+from lmcache.v1.platform.isolated_ipc import is_isolated_ipc, set_isolated_ipc
 import lmcache.v1.platform as platform
+
+pytestmark = pytest.mark.skipif(
+    torch_device_type == "xpu",
+    reason="Event IPC tests are not supported on XPU",
+)
 
 
 class _FakeEvent:
@@ -136,7 +145,11 @@ def test_get_event_ipc_backend_accepts_string_device_type():
     [
         pytest.param(0, torch_device_type, id="integer-index"),
         pytest.param(2, torch_device_type, id="nonzero-integer-index"),
-        pytest.param("cuda:0", "cuda", id="indexed-cuda-string"),
+        pytest.param(
+            f"{torch_device_type}:0",
+            torch_device_type,
+            id="indexed-active-device-string",
+        ),
         pytest.param("musa:3", "musa", id="indexed-musa-string"),
     ],
 )
@@ -211,11 +224,44 @@ def test_cpu_device_spec_exposes_cached_default_event_backend() -> None:
     assert spec.event_ipc_backend is spec.event_ipc_backend
 
 
-def test_cuda_device_spec_exposes_cached_default_event_backend() -> None:
+@pytest.fixture
+def restore_isolated_ipc():
+    """Restore the process-global isolated-IPC switch after the test."""
+    previous = is_isolated_ipc()
+    yield
+    set_isolated_ipc(previous)
+
+
+def test_cuda_device_spec_exposes_timeline_backend_when_isolated(
+    restore_isolated_ipc,
+) -> None:
+    set_isolated_ipc(True)
+    spec = CudaDeviceSpec()
+    assert isinstance(spec.event_ipc_backend, TimelineSemaphoreEventIPCBackend)
+    assert spec.event_ipc_backend.device_type == "cuda"
+    assert spec.event_ipc_backend is spec.event_ipc_backend
+
+
+def test_cuda_device_spec_exposes_default_backend_by_default(
+    restore_isolated_ipc,
+) -> None:
+    """Isolated IPC defaults to off, keeping CUDA interprocess event handles."""
+    set_isolated_ipc(False)
     spec = CudaDeviceSpec()
     assert isinstance(spec.event_ipc_backend, DefaultEventIPCBackend)
     assert spec.event_ipc_backend.device_type == "cuda"
     assert spec.event_ipc_backend is spec.event_ipc_backend
+
+
+def test_cuda_device_spec_backend_cache_ignores_later_switch_changes(
+    restore_isolated_ipc,
+) -> None:
+    """The backend is cached on first read; later switch flips are ignored."""
+    set_isolated_ipc(True)
+    spec = CudaDeviceSpec()
+    backend = spec.event_ipc_backend
+    set_isolated_ipc(False)
+    assert spec.event_ipc_backend is backend
 
 
 def test_default_backend_stub_end_to_end():

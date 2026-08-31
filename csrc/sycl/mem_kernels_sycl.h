@@ -56,7 +56,8 @@ void reshape_and_cache_back_flash(torch::Tensor& key_value,
                                   const int layer_idx);
 
 // SYCL/XPU pinned (USM host) allocation. Same name/signature as the CUDA
-// alloc_pinned_ptr (csrc/mem_alloc.cpp) so lmcache._get_backend() overrides it
-// by name; `flags` is accepted for signature parity and ignored on XPU.
+// alloc_pinned_ptr (csrc/cuda/mem_alloc.cpp) so lmcache._get_backend()
+// overrides it by name; `flags` is accepted for signature parity and ignored on
+// XPU.
 uintptr_t alloc_pinned_ptr(size_t size, unsigned int flags = 0);
 void free_pinned_ptr(uintptr_t ptr);

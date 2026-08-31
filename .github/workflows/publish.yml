@@ -62,8 +62,17 @@ jobs:
                         - '.github/workflows/code_quality_checks.yml'
                         - '.github/workflows/publish.yml'
                         - '.github/workflows/build_main_artifacts.yml'
+                        - '.github/workflows/build_main_artifacts_arm64.yml'
                         - '.github/workflows/build_cli_artifacts.yml'
                         - '.github/workflows/build_cu129_artifacts.yml'
+                        - '.github/workflows/build_rocm_artifacts.yml'
+                        - '.github/workflows/build_xpu_artifacts.yml'
+                        - '.github/workflows/build_rocm_torch210_artifacts.yml'
+                        - '.github/scripts/build_rocm_wheel.sh'
+                        - '.github/scripts/rocm_wheel_common.sh'
+                        - '.github/scripts/build_xpu_wheel.sh'
+                        - '.github/scripts/build_rocm_torch210_wheel.sh'
+                        - '.github/scripts/validate_rocm_torch210_wheel.py'
                         - '!operator/**'
 
     # Build each artifact group in its own reusable workflow so that a
@@ -74,6 +83,12 @@ jobs:
         if: needs.changes.outputs.lmcache == 'true'
         name: Build main
         uses: ./.github/workflows/build_main_artifacts.yml
+
+    build-main-arm64:
+        needs: changes
+        if: needs.changes.outputs.lmcache == 'true'
+        name: Build main (arm64)
+        uses: ./.github/workflows/build_main_artifacts_arm64.yml
 
     build-cli:
         needs: changes
@@ -88,6 +103,33 @@ jobs:
         uses: ./.github/workflows/build_cu129_artifacts.yml
         # DockerHub creds needed for the cu12.9 manylinux image pull;
         # reusable workflows do not auto-inherit secrets.
+        secrets: inherit
+
+    build-rocm:
+        needs: changes
+        if: needs.changes.outputs.lmcache == 'true'
+        name: Build ROCm
+        uses: ./.github/workflows/build_rocm_artifacts.yml
+        # DockerHub creds avoid anonymous rate limits pulling the ROCm
+        # dev image; reusable workflows do not auto-inherit secrets.
+        secrets: inherit
+
+    build-xpu:
+        needs: changes
+        if: needs.changes.outputs.lmcache == 'true'
+        name: Build XPU
+        uses: ./.github/workflows/build_xpu_artifacts.yml
+        # DockerHub creds avoid anonymous rate limits pulling the oneAPI image;
+        # reusable workflows do not auto-inherit secrets.
+        secrets: inherit
+
+    build-rocm-torch210:
+        needs: changes
+        if: needs.changes.outputs.lmcache == 'true'
+        name: Build ROCm torch 2.10
+        uses: ./.github/workflows/build_rocm_torch210_artifacts.yml
+        # DockerHub credentials avoid rate limits when pulling the pinned
+        # torch 2.10 builder image; forks can still pull it anonymously.
         secrets: inherit
 
     # Run tests and code quality checks before publishing
@@ -112,6 +154,7 @@ jobs:
         # doesn't trigger a publish that fails on the missing artifact.
         if: |
             needs.build-main.result == 'success' &&
+            needs.build-main-arm64.result == 'success' &&
             needs.test.result == 'success' &&
             needs.code-quality.result == 'success' &&
             needs.changes.outputs.lmcache == 'true' &&
@@ -122,7 +165,7 @@ jobs:
             # see https://docs.pypi.org/trusted-publishers/
             id-token: write
         runs-on: ubuntu-latest
-        needs: [changes, build-main, test, code-quality]
+        needs: [changes, build-main, build-main-arm64, test, code-quality]
 
         steps:
             - name: Harden Runner
@@ -135,6 +178,12 @@ jobs:
               uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
               with:
                   name: release-artifacts
+                  path: dist
+
+            - name: Fetch arm64 release artifacts
+              uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+              with:
+                  name: release-artifacts-arm64
                   path: dist
 
             - name: Upload to Test PyPI
@@ -183,6 +232,7 @@ jobs:
         name: Publish release to pypi.org
         if: |
             needs.build-main.result == 'success' &&
+            needs.build-main-arm64.result == 'success' &&
             needs.test.result == 'success' &&
             needs.code-quality.result == 'success' &&
             needs.changes.outputs.lmcache == 'true' &&
@@ -194,7 +244,7 @@ jobs:
             contents: write
 
         runs-on: ubuntu-latest
-        needs: [changes, build-main, test, code-quality]
+        needs: [changes, build-main, build-main-arm64, test, code-quality]
 
         steps:
             - name: Harden Runner
@@ -207,6 +257,12 @@ jobs:
               uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
               with:
                   name: release-artifacts
+                  path: dist
+
+            - name: Fetch arm64 release artifacts
+              uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+              with:
+                  name: release-artifacts-arm64
                   path: dist
 
             - name: Upload release artifacts to GitHub release
@@ -290,7 +346,8 @@ jobs:
                   GITHUB_TOKEN: ${{ github.token }}
               run: |
                   gh release create "${{ github.ref_name }}-cu129" \
-                    --repo ${{ github.repository }} \
+                    --repo "${{ github.repository }}" \
+                    --target "$GITHUB_SHA" \
                     --latest=false \
                     --title "Release ${{ github.ref_name }} · CUDA 12.9" \
                     --notes "CUDA 12.9 wheel for LMCache ${{ github.ref_name }}.
@@ -302,6 +359,165 @@ jobs:
                     --find-links https://github.com/${{ github.repository }}/releases/expanded_assets/${VERSION}-cu129 \\
                     --index-strategy unsafe-best-match
                   \`\`\`" \
+                    dist/*.whl
+
+    # Publish ROCm wheel to GitHub Release (not PyPI) when a release is published.
+    # gfx942 (MI300X/MI325X) + gfx950 (MI350X/MI355X), ABI-matched to the
+    # upstream vllm/vllm-openai-rocm image. Mirrors the cu129 flow.
+    publish-rocm-github-release:
+        name: Publish ROCm wheel to GitHub Release
+        if: |
+            needs.build-rocm.result == 'success' &&
+            needs.test.result == 'success' &&
+            needs.code-quality.result == 'success' &&
+            needs.changes.outputs.lmcache == 'true' &&
+            github.repository_owner == 'LMCache' && github.event.action == 'published'
+        permissions:
+            contents: write
+        runs-on: ubuntu-latest
+        needs: [changes, build-rocm, test, code-quality]
+
+        steps:
+            - name: Harden Runner
+              uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+              with:
+                  disable-sudo-and-containers: false
+                  egress-policy: audit
+
+            - name: Fetch ROCm release artifacts
+              uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+              with:
+                  name: release-rocm-artifacts
+                  path: dist
+
+            - name: Publish ROCm wheel to dedicated GitHub Release
+              env:
+                  GITHUB_TOKEN: ${{ github.token }}
+              run: |
+                  gh release create "${{ github.ref_name }}-rocm" \
+                    --repo "${{ github.repository }}" \
+                    --target "$GITHUB_SHA" \
+                    --latest=false \
+                    --title "Release ${{ github.ref_name }} · ROCm (gfx942, gfx950)" \
+                    --notes "ROCm 7.2 wheel for LMCache ${{ github.ref_name }}, built for AMD
+                  Instinct gfx942 (MI300X/MI325X) and gfx950 (MI350X/MI355X). ABI-matched
+                  to the upstream \`vllm/vllm-openai-rocm\` image (torch 2.11, cp312).
+
+                  Install into an upstream vLLM ROCm container:
+                  \`\`\`
+                  VERSION=${{ github.ref_name }}
+                  pip install lmcache==${{ needs.build-rocm.outputs.rocm_version }} --no-deps \\
+                    --find-links https://github.com/${{ github.repository }}/releases/expanded_assets/\${VERSION}-rocm
+                  \`\`\`" \
+                    dist/*.whl
+
+    # Publish XPU wheel to GitHub Release (not PyPI) when a release is published.
+    # Built with oneAPI + torch xpu pins; runtime binds to host oneAPI/SYCL libs.
+    publish-xpu-github-release:
+        name: Publish XPU wheel to GitHub Release
+        if: |
+            needs.build-xpu.result == 'success' &&
+            needs.test.result == 'success' &&
+            needs.code-quality.result == 'success' &&
+            needs.changes.outputs.lmcache == 'true' &&
+            github.repository_owner == 'LMCache' && github.event.action == 'published'
+        permissions:
+            contents: write
+        runs-on: ubuntu-latest
+        needs: [changes, build-xpu, test, code-quality]
+
+        steps:
+            - name: Harden Runner
+              uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+              with:
+                  disable-sudo-and-containers: false
+                  egress-policy: audit
+
+            - name: Fetch XPU release artifacts
+              uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+              with:
+                  name: release-xpu-artifacts
+                  path: dist
+
+            - name: Publish XPU wheel to dedicated GitHub Release
+              env:
+                  GITHUB_TOKEN: ${{ github.token }}
+              run: |
+                  gh release create "${{ github.ref_name }}-xpu" \
+                    --repo "${{ github.repository }}" \
+                    --target "$GITHUB_SHA" \
+                    --latest=false \
+                    --title "Release ${{ github.ref_name }} · Intel XPU (SYCL)" \
+                    --notes "Intel XPU/SYCL wheel for LMCache ${{ github.ref_name }}.
+
+                  Built against pinned torch-xpu + oneAPI toolchain; runtime binds to host oneAPI/SYCL libraries.
+
+                  Install into an upstream Intel vLLM XPU container:
+                  \`\`\`
+                  VERSION=${{ github.ref_name }}
+                  pip install lmcache==${{ needs.build-xpu.outputs.xpu_version }} --no-deps \\
+                    --no-index \\
+                    --find-links https://github.com/${{ github.repository }}/releases/expanded_assets/\${VERSION}-xpu
+                  \`\`\`" \
+                    dist/*.whl
+
+    # Publish the general ROCm wheel built against the torch 2.10 ABI.
+    publish-rocm-torch210-github-release:
+        name: Publish ROCm torch 2.10 wheel to GitHub Release
+        if: |
+            needs.build-rocm-torch210.result == 'success' &&
+            needs.test.result == 'success' &&
+            needs.code-quality.result == 'success' &&
+            needs.changes.outputs.lmcache == 'true' &&
+            github.repository_owner == 'LMCache' && github.event.action == 'published'
+        permissions:
+            contents: write
+        runs-on: ubuntu-latest
+        needs: [changes, build-rocm-torch210, test, code-quality]
+
+        steps:
+            - name: Harden Runner
+              uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+              with:
+                  disable-sudo-and-containers: false
+                  egress-policy: audit
+
+            - name: Fetch ROCm torch 2.10 release artifacts
+              uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+              with:
+                  name: release-rocm-torch210-artifacts
+                  path: dist
+
+            - name: Publish ROCm torch 2.10 wheel to dedicated GitHub Release
+              env:
+                  GITHUB_TOKEN: ${{ github.token }}
+              run: |
+                  gh release create "${{ github.ref_name }}-rocm-torch210" \
+                    --repo "${{ github.repository }}" \
+                    --target "$GITHUB_SHA" \
+                    --latest=false \
+                    --title "Release ${{ github.ref_name }} · AMD ROCm 7.2.4 / torch 2.10.0 git3d3aa833 / cp312 / CXX11 ABI=1" \
+                    --notes "ROCm wheel for LMCache ${{ github.ref_name }}, built and tested in
+                  \`rocm/pytorch:rocm7.2.4_ubuntu24.04_py3.12_pytorch_release_2.10.0\`
+                  at digest \`sha256:4449f856653602317e4101a76fce599c7fcd58ccec2e539951fce5f73083179e\`.
+
+                  Supported ABI (exact):
+                  - AMD torch wheel source: https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.4/torch-2.10.0%2Brocm7.2.4.lw.git3d3aa833-cp312-cp312-linux_x86_64.whl
+                  - torch runtime: \`2.10.0+rocm7.2.4.git3d3aa833\` (git \`3d3aa833db84eed6b7f5595cb5f162c2f78300a4\`)
+                  - ROCm: \`7.2.4\` (HIP runtime \`7.2.53211\`)
+                  - Python/platform: \`cp312-cp312-manylinux_2_39_x86_64\`
+                  - C++ ABI: \`_GLIBCXX_USE_CXX11_ABI=1\`
+
+                  It includes gfx942/gfx950 GPU code objects and all integrations shipped
+                  by the corresponding LMCache release.
+
+                  Install into the pinned AMD PyTorch container:
+                  \`\`\`bash
+                  VERSION=${{ github.ref_name }}
+                  pip install lmcache==${{ needs.build-rocm-torch210.outputs.rocm_torch210_version }} --no-deps \\
+                    --find-links https://github.com/${{ github.repository }}/releases/expanded_assets/\${VERSION}-rocm-torch210
+                  \`\`\`
+                  " \
                     dist/*.whl
 
     # Build container image and push to DockerHub when:

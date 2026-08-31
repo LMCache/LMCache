@@ -132,7 +132,7 @@ func (p *CacheBlendPodInjector) Handle(ctx context.Context, req admission.Reques
 	// LMCache injector).
 	kvTransferConfigJSON, containerIdx, resp, ok := prepareInjection(
 		ctx, p.Client, req, pod, cacheBlendKeys, engineName, engineNamespace,
-		engine.Spec.Injection.TargetContainer)
+		engine.Spec.Injection.TargetContainer, "")
 	if !ok {
 		return resp
 	}
@@ -144,8 +144,9 @@ func (p *CacheBlendPodInjector) Handle(ctx context.Context, req admission.Reques
 
 	// --- Apply mutations M0–M7 ---
 
-	// M0: pod hostIPC for CUDA IPC with the node-local engine.
-	pod.Spec.HostIPC = true
+	// M0: share the host's /dev/shm for CUDA IPC with the node-local engine,
+	// mirroring the engine's spec.hostIPC mode (hostPath mount by default).
+	applyIPCSharing(pod, target, derefBool(engine.Spec.HostIPC))
 
 	// M1: shared emptyDir volume.
 	pod.Spec.Volumes = appendVolumeIfAbsent(pod.Spec.Volumes, BuildCBPluginVolume())
@@ -275,6 +276,14 @@ func deref(s *string) string {
 		return ""
 	}
 	return *s
+}
+
+// derefBool returns the value pointed to by b, or false if b is nil.
+func derefBool(b *bool) bool {
+	if b == nil {
+		return false
+	}
+	return *b
 }
 
 // resolvePayloadImage builds the "<repository>:<tag>" reference and pull policy

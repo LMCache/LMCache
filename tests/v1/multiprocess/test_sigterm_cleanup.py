@@ -13,7 +13,9 @@ import time
 
 # Third Party
 import pytest
-import torch
+
+# First Party
+from lmcache import torch_dev, torch_device_type
 
 PROJECT_ROOT = Path(__file__).parents[3]
 STARTUP_TIMEOUT_SECONDS = 90.0
@@ -21,7 +23,8 @@ SHUTDOWN_TIMEOUT_SECONDS = 60.0
 SHM_SIZE_BYTES = 64 << 20
 
 pytestmark = pytest.mark.skipif(
-    not sys.platform.startswith("linux") or not torch.cuda.is_available(),
+    not sys.platform.startswith("linux")
+    or not (torch_dev.is_available() and torch_device_type == "cuda"),
     reason="Mixed-allocator POSIX SHM requires Linux and an accelerator device",
 )
 
@@ -51,6 +54,11 @@ def _run_cli_and_signal(
     env["PYTHONPATH"] = os.pathsep.join(
         part for part in (str(PROJECT_ROOT), python_path) if part
     )
+    # The default --shm-name "" disables the SHM pool, so request one with
+    # an explicit, per-run-unique segment name.
+    shm_suffix = (
+        f"{module.rsplit('.', 1)[-1]}_{shutdown_signal.name.lower()}_{os.getpid()}"
+    )
     command = [
         sys.executable,
         "-m",
@@ -64,6 +72,8 @@ def _run_cli_and_signal(
         "--no-l1-use-lazy",
         "--supported-transfer-mode",
         "auto",
+        "--shm-name",
+        shm_suffix,
         "--eviction-policy",
         "LRU",
         "--disable-observability",
@@ -80,7 +90,7 @@ def _run_cli_and_signal(
             stderr=subprocess.STDOUT,
         )
 
-    shm_path = shm_dir / f"lmcache_l1_pool_{process.pid}"
+    shm_path = shm_dir / f"lmcache_l1_pool_{shm_suffix}"
     try:
         deadline = time.monotonic() + STARTUP_TIMEOUT_SECONDS
         while time.monotonic() < deadline:

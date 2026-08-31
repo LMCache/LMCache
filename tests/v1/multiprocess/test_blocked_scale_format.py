@@ -1,0 +1,138 @@
+# SPDX-License-Identifier: Apache-2.0
+"""NL_X_NB_BSV_BSS: blocked-scale DSA indexer cache transfers.
+
+vLLM lays an indexer-cache page out blocked — per 64-token block, all tokens'
+128-byte fp8 values first, then all tokens' 4-byte fp32 scales. LMCache's
+chunk rows are canonical token-major ``[vals | scale]`` (132 B). These tests
+build a synthetic blocked page, gather it token-granular (D2H), scatter to a
+DIFFERENTLY-ALIGNED destination (H2D), and require value-exactness — the
+mod-block_size misalignment that silently garbled GLM CacheBlend reuse.
+"""
+
+# Third Party
+import pytest
+import torch
+
+# First Party
+from lmcache import torch_dev, torch_device_type  # noqa: E402
+
+if torch_device_type != "cuda" or not torch_dev.is_available():
+    pytest.skip(
+        f"blocked-scale format test requires CUDA runtime, got {torch_device_type}",
+        allow_module_level=True,
+    )
+
+# First Party
+import lmcache.cuda_ops as cuda_ops  # noqa: E402
+import lmcache.lmcache_native as lmcache_native
+
+if not hasattr(lmcache_native.EngineKVFormat, "NL_X_NB_BSV_BSS"):
+    pytest.skip("cuda_ops build lacks NL_X_NB_BSV_BSS", allow_module_level=True)
+
+_BS = 64  # tokens per block
+_HD = 128  # fp8 value bytes per token
+_ROW = _HD + 4  # + fp32 scale
+_NB = 8
+_NL = 3
+
+
+def _blocked_page_write(cache, layer, slot, row_bytes):
+    """Write one token's 132-byte row into the BLOCKED page layout (the
+    ground truth from vllm's indexer_k_quant_and_cache)."""
+    b, off = slot // _BS, slot % _BS
+    flat = cache[layer].view(-1)
+    base = b * _BS * _ROW
+    flat[base + off * _HD : base + off * _HD + _HD] = row_bytes[:_HD]
+    sbase = base + _BS * _HD
+    flat[sbase + off * 4 : sbase + off * 4 + 4] = row_bytes[_HD:]
+
+
+def _blocked_page_read(cache, layer, slot):
+    b, off = slot // _BS, slot % _BS
+    flat = cache[layer].view(-1)
+    base = b * _BS * _ROW
+    vals = flat[base + off * _HD : base + off * _HD + _HD]
+    sbase = base + _BS * _HD
+    scale = flat[sbase + off * 4 : sbase + off * 4 + 4]
+    return torch.cat([vals, scale])
+
+
+def _make_paged():
+    """Per-layer [NB, BS, 132] uint8 tensors + a pointer array."""
+    caches = [
+        torch.zeros(_NB, _BS, _ROW, dtype=torch.uint8, device=torch_device_type)
+        for _ in range(_NL)
+    ]
+    ptrs = torch.tensor(
+        [c.data_ptr() for c in caches], dtype=torch.uint64, device=torch_device_type
+    )
+    return caches, ptrs
+
+
+def _write_all(caches, slots, rows):
+    for layer in range(_NL):
+        for i, slot in enumerate(slots.tolist()):
+            _blocked_page_write(caches, layer, slot, rows[layer, i])
+
+
+def _read_all(caches, slots):
+    out = []
+    for layer in range(_NL):
+        out.append(
+            torch.stack([_blocked_page_read(caches, layer, s) for s in slots.tolist()])
+        )
+    return torch.stack(out)
+
+
+def test_blocked_roundtrip_value_exact_across_alignments():
+    torch.manual_seed(0)
+    n_tok = 96
+    src, src_ptrs = _make_paged()
+    rows = torch.randint(
+        0, 255, (_NL, n_tok, _ROW), dtype=torch.uint8, device=torch_device_type
+    )
+    src_slots = torch.arange(
+        32, 32 + n_tok, dtype=torch.int64, device=torch_device_type
+    )
+    _write_all(src, src_slots, rows)
+
+    # D2H-style gather into a token-major chunk buffer (kv=1, NL, n_tok, 132).
+    chunk = torch.zeros(
+        1, _NL, n_tok, _ROW, dtype=torch.uint8, device=torch_device_type
+    )
+    cuda_ops.multi_layer_kv_transfer(
+        chunk,
+        src_ptrs,
+        src_slots,
+        torch.device(torch_device_type),
+        _NB * _BS,
+        lmcache_native.TransferDirection.D2H,
+        lmcache_native.EngineKVFormat.NL_X_NB_BSV_BSS,
+        block_size=_BS,
+        head_size=0,
+    )
+    torch_dev.synchronize()
+    assert torch.equal(chunk[0], rows), "gather must produce token-major rows"
+
+    # H2D scatter to a DIFFERENT intra-block alignment (delta 17 mod 64 != 0).
+    dst, dst_ptrs = _make_paged()
+    dst_slots = torch.arange(
+        17, 17 + n_tok, dtype=torch.int64, device=torch_device_type
+    )
+    cuda_ops.multi_layer_kv_transfer(
+        chunk,
+        dst_ptrs,
+        dst_slots,
+        torch.device(torch_device_type),
+        _NB * _BS,
+        lmcache_native.TransferDirection.H2D,
+        lmcache_native.EngineKVFormat.NL_X_NB_BSV_BSS,
+        block_size=_BS,
+        head_size=0,
+    )
+    torch_dev.synchronize()
+    got = _read_all(dst, dst_slots)
+    assert torch.equal(got, rows), (
+        "misaligned scatter must land every token's values AND scale at the "
+        "blocked-layout positions of the destination slots"
+    )

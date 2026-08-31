@@ -13,7 +13,6 @@ from lmcache.v1.multiprocess.token_hasher import (
     TokenHasher,
     chunk_hash_windows_numba,
     rolling_hash_windows_numba,
-    unique_hits_direct_id_numba,
     update_table_id_numba,
 )
 
@@ -302,74 +301,3 @@ class TestUpdateTableIdNumba:
         vals = np.empty(0, dtype=np.int64)
         update_table_id_numba(hashes, table, vals)
         assert all(v == -1 for v in table)
-
-
-class TestUniqueHitsDirectIdNumba:
-    def _table(self, size: int = 8) -> np.ndarray:
-        return np.full(size, -1, dtype=np.int64)
-
-    def test_no_hits_all_empty(self) -> None:
-        table = self._table()
-        hashes = np.array([0, 1, 2], dtype=np.uint64)
-        out = unique_hits_direct_id_numba(hashes, table, np.uint64(7), 4)
-        assert len(out) == 0
-
-    def test_single_hit(self) -> None:
-        table = self._table()
-        table[1] = 5
-        hashes = np.array([1], dtype=np.uint64)  # 1 & 7 = 1 → ID 5
-        out = unique_hits_direct_id_numba(hashes, table, np.uint64(7), 10)
-        assert len(out) == 1
-        assert out[0] == 5
-
-    def test_deduplication(self) -> None:
-        """Same ID reached via two different hashes is returned only once."""
-        table = self._table()
-        table[1] = 3  # index 1 → ID 3
-        # hash 1 and hash 9 both map to index 1 (& 7 == 1)
-        hashes = np.array([1, 9], dtype=np.uint64)
-        out = unique_hits_direct_id_numba(hashes, table, np.uint64(7), 5)
-        assert len(out) == 1
-        assert out[0] == 3
-
-    def test_multiple_unique_ids(self) -> None:
-        table = self._table()
-        table[0] = 0
-        table[1] = 1
-        table[2] = 2
-        hashes = np.array([0, 1, 2], dtype=np.uint64)
-        out = unique_hits_direct_id_numba(hashes, table, np.uint64(7), 5)
-        assert len(out) == 3
-        assert set(out) == {0, 1, 2}
-
-    def test_mixed_hits_and_misses(self) -> None:
-        table = self._table()
-        table[2] = 10
-        # indices 0 (miss), 2 (hit → 10), 5 (miss)
-        hashes = np.array([0, 2, 5], dtype=np.uint64)
-        out = unique_hits_direct_id_numba(hashes, table, np.uint64(7), 15)
-        assert len(out) == 1
-        assert out[0] == 10
-
-    def test_order_of_first_encounter_preserved(self) -> None:
-        """IDs appear in the order they are first seen in the hash stream."""
-        table = self._table()
-        table[0] = 2
-        table[1] = 0
-        table[2] = 1
-        hashes = np.array([0, 1, 2], dtype=np.uint64)
-        out = unique_hits_direct_id_numba(hashes, table, np.uint64(7), 3)
-        np.testing.assert_array_equal(out, [2, 0, 1])
-
-    def test_empty_hashes(self) -> None:
-        table = self._table()
-        hashes = np.empty(0, dtype=np.uint64)
-        out = unique_hits_direct_id_numba(hashes, table, np.uint64(7), 4)
-        assert len(out) == 0
-
-    def test_output_dtype(self) -> None:
-        table = self._table()
-        table[0] = 0
-        hashes = np.array([0], dtype=np.uint64)
-        out = unique_hits_direct_id_numba(hashes, table, np.uint64(7), 1)
-        assert out.dtype == np.int64

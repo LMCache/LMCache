@@ -20,7 +20,11 @@ from fastapi.responses import JSONResponse
 import httpx
 
 # First Party
-from lmcache.v1.distributed.tiers import Tier
+from lmcache.v1.distributed.api import Tier
+from lmcache.v1.mp_coordinator.controllers.eviction_controller import (
+    FleetEvictionController,
+)
+from lmcache.v1.mp_coordinator.controllers.prefetch_manager import PrefetchManager
 from lmcache.v1.mp_coordinator.http_apis.dependencies import (
     get_context,
     get_outbound_client,
@@ -62,6 +66,7 @@ async def request_prefetch(body: PrefetchRequest, request: Request) -> PrefetchR
             target server is unreachable or rejects the submit.
     """
     ctx = get_context(request)
+    prefetch = ctx.controllers.get(PrefetchManager)
     target = ctx.registry.get(body.instance_id)
     if target is None:
         raise HTTPException(
@@ -70,7 +75,7 @@ async def request_prefetch(body: PrefetchRequest, request: Request) -> PrefetchR
         )
 
     try:
-        result = await ctx.prefetch_manager.submit_prefetch(
+        result = await prefetch.submit_prefetch(
             target=target,
             http_client=get_outbound_client(request),
             model_name=body.model_name,
@@ -115,6 +120,7 @@ async def get_prefetch_status(
             target server is unreachable.
     """
     ctx = get_context(request)
+    prefetch = ctx.controllers.get(PrefetchManager)
     target = ctx.registry.get(instance_id)
     if target is None:
         raise HTTPException(
@@ -123,7 +129,7 @@ async def get_prefetch_status(
         )
 
     try:
-        code, payload = await ctx.prefetch_manager.get_status(
+        code, payload = await prefetch.get_status(
             target=target,
             http_client=get_outbound_client(request),
             request_id=request_id,
@@ -158,6 +164,7 @@ async def request_pin(body: PinRequest, request: Request) -> PinResponse:
         HTTPException: 400 if the token cap is exceeded or a key field is invalid.
     """
     ctx = get_context(request)
+    eviction = ctx.controllers.get(FleetEvictionController)
     try:
         resolved, chunks = resolve_object_keys(
             ctx.token_hasher,
@@ -169,7 +176,8 @@ async def request_pin(body: PinRequest, request: Request) -> PinResponse:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
 
-    ctx.eviction_manager.pin(resolved)
+    eviction.pin(resolved)
+    ctx.metadata_persister.save()
     return PinResponse(
         requested=chunks,
         affected=len(resolved),
@@ -194,6 +202,7 @@ async def request_unpin(body: PinRequest, request: Request) -> PinResponse:
         HTTPException: 400 if the token cap is exceeded or a key field is invalid.
     """
     ctx = get_context(request)
+    eviction = ctx.controllers.get(FleetEvictionController)
     try:
         resolved, chunks = resolve_object_keys(
             ctx.token_hasher,
@@ -205,7 +214,8 @@ async def request_unpin(body: PinRequest, request: Request) -> PinResponse:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
 
-    ctx.eviction_manager.unpin(resolved)
+    eviction.unpin(resolved)
+    ctx.metadata_persister.save()
     return PinResponse(
         requested=chunks,
         affected=len(resolved),
@@ -235,6 +245,7 @@ async def request_delete(body: DeleteRequest, request: Request) -> DeleteRespons
             unreachable or rejects the delete.
     """
     ctx = get_context(request)
+    eviction = ctx.controllers.get(FleetEvictionController)
     target = ctx.registry.get(body.instance_id)
     if target is None:
         raise HTTPException(
@@ -266,7 +277,7 @@ async def request_delete(body: DeleteRequest, request: Request) -> DeleteRespons
     # tiers; ``force`` deletes them and clears the pins.
     touches_l2 = body.tier in (Tier.L2, Tier.ALL)
     if touches_l2 and not body.force:
-        delete_keys = ctx.eviction_manager.filter_unpinned(resolved)
+        delete_keys = eviction.filter_unpinned(resolved)
         pin_skipped = len(resolved) - len(delete_keys)
     else:
         delete_keys = resolved
@@ -296,7 +307,8 @@ async def request_delete(body: DeleteRequest, request: Request) -> DeleteRespons
         node_skipped = result.get("skipped", 0)
 
     if touches_l2 and body.force:
-        ctx.eviction_manager.drop_pins(resolved)
+        eviction.drop_pins(resolved)
+        ctx.metadata_persister.save()
 
     # ``skipped`` = L1 keys the node refused (locks) + L2 keys the coordinator
     # held back for a pin.
