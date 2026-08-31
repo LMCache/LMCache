@@ -79,7 +79,7 @@ __all__ = (
 
 @dataclass
 class _RequestPassResult:
-    """Aggregate results for one temporary CLI-owned baseline pass."""
+    """Results for one baseline pass."""
 
     lookup: LookupResult
     checksums: list[str] | None = None
@@ -497,24 +497,7 @@ def _run_request_pass(
     seq_no: int,
     pass_label: str,
 ) -> _RequestPassResult | None:
-    """Run one current baseline pass using neutral client operations.
-
-    This is the only temporary owner of the cold/warm branching. Step 3 moves
-    this ordering unchanged into ``BaselineBenchCase``; ``ServerBenchClient``
-    remains unaware of either label.
-
-    Args:
-        client: Started Server Bench client.
-        seq_no: Synthetic sequence number.
-        pass_label: ``"cold"`` or ``"warm"`` for the current baseline.
-
-    Returns:
-        Aggregate operation results, or ``None`` when no full chunk can be
-        tested or LOOKUP times out.
-
-    Raises:
-        ValueError: If ``pass_label`` is not part of the current baseline.
-    """
+    """Run one cold or warm baseline pass."""
     if pass_label not in ("cold", "warm"):
         raise ValueError("unsupported baseline pass: %s" % pass_label)
 

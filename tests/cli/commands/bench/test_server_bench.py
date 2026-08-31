@@ -120,14 +120,14 @@ class TestClientDelegation:
         # First Party
         from lmcache.cli.commands.bench.server_bench import command as sv_cmd
         from lmcache.cli.commands.bench.server_bench.client import (
-            BenchRequest,
             LookupResult,
+            RequestContext,
             TransferResult,
         )
 
         client = MagicMock()
-        cold_request = BenchRequest(0, "req-0-cold", "cold", (1, 2), 2, 1, 2, 0, 1)
-        warm_request = BenchRequest(0, "req-0-warm", "warm", (1, 2), 2, 1, 2, 0, 1)
+        cold_request = RequestContext(0, "req-0-cold", "cold", (1, 2), 2, 1, 2, 0, 1)
+        warm_request = RequestContext(0, "req-0-warm", "warm", (1, 2), 2, 1, 2, 0, 1)
         client.create_request.side_effect = [cold_request, warm_request]
         client.lookup.side_effect = [
             LookupResult(0, 1, 0.0),
@@ -1046,12 +1046,7 @@ class TestAllocShapeContract:
 
 
 class TestClientMultiWorker:
-    """LOOKUP is scheduler-scoped (single call, worker_id=None) while
-    STORE / RETRIEVE fan out per-rank, mirroring how
-    ``LMCacheMPWorkerAdapter`` routes requests in a real vLLM
-    deployment. MLA marks only rank 0 as a KV writer (matching
-    ``ParallelStrategy.is_kv_writer``); non-MLA writes on every rank.
-    """
+    """Test scheduler LOOKUP and per-rank STORE/RETRIEVE fan-out."""
 
     def test_start_rolls_back_partial_registration(
         self,
@@ -1336,9 +1331,7 @@ class TestClientMultiWorker:
             "LOOKUP should fire exactly once regardless of tp_size "
             "(is_mla=%s, tp=%d)" % (is_mla, tp)
         )
-        # LOOKUP payload is ``[key, tp_size]``. The server reserves
-        # ``key.num_kv_readers`` read locks per chunk; tp_size is a
-        # legacy wire field kept for compatibility.
+        # Reader count comes from the key; tp_size is a legacy wire field.
         assert lookups[0][1][1] == tp, (
             "LOOKUP payload tp_size must equal simulated tp "
             "(is_mla=%s, tp=%d, got=%s)" % (is_mla, tp, lookups[0][1][1])

@@ -343,9 +343,7 @@ def _allocate_cpu_shm_kv_cache(
     zero-copy across processes (matching the GPU CUDA-IPC path).
 
     Returns:
-        ``(tensors, wrappers, shm_names, shm_mappings)``. Names are retained
-        for ``shm_unlink`` and each ``(address, size)`` mapping is retained for
-        ``shm_munmap`` during Runtime shutdown.
+        Tensors, wrappers, SHM names, and ``(address, size)`` mappings.
     """
     # Fixed seed so the deterministic random fill below produces
     # reproducible checksums across cold/warm bench iterations.

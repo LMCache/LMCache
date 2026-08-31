@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Runtime ownership and operation results for ``lmcache bench server``."""
+"""Client and data models for ``lmcache bench server``."""
 
 # Future
 from __future__ import annotations
@@ -116,12 +116,8 @@ class TransferResult:
 
 
 @dataclass(frozen=True)
-class BenchRequest:
-    """Resolved token and block geometry for one data-plane request.
-
-    ``label`` is used only in progress output. Runtime operations never branch
-    on it, so callers may use any descriptive value.
-    """
+class RequestContext:
+    """Resolved token and block geometry for one request."""
 
     seq_no: int
     request_id: str
@@ -136,15 +132,7 @@ class BenchRequest:
 
 @dataclass
 class WorkerContext:
-    """Live resources owned by one simulated Worker.
-
-    Attributes:
-        spec: Logical Worker identity and STORE/RETRIEVE routing roles.
-        kv_tensors: Paged KV tensors retained for the Worker lifetime.
-        ipc_wrappers: IPC descriptions retained with their source tensors.
-        server_pool: Mapping of the Server-owned SHM pool for that Worker.
-        shm_mappings: Client-owned POSIX SHM mappings as ``(address, size)``.
-    """
+    """Live resources for one simulated Worker."""
 
     spec: WorkerSpec
     kv_tensors: "list[torch.Tensor]"
@@ -154,24 +142,18 @@ class WorkerContext:
 
 
 class ServerBenchClient:
-    """Own the MQ client, Workers, and resources for one benchmark run.
-
-    Construction has no external side effects. Call :meth:`start` before
-    running operations and :meth:`close` when the run ends. The client keeps
-    the CLI independent from ZMQ, tensor allocation, Worker registration, IPC,
-    SHM, and multi-Worker dispatch details.
-    """
+    """Manage Workers and data-plane operations for one benchmark run."""
 
     def __init__(
         self,
         config: BenchConfig,
         log: Callable[[str], None],
     ) -> None:
-        """Create a stopped client.
+        """Create a client without connecting to the Server.
 
         Args:
-            config: Resolved configuration for one server-bench run.
-            log: Progress logger that already applies the CLI quiet policy.
+            config: Benchmark configuration.
+            log: Progress logger.
         """
         self._config = config
         self._log = log
@@ -189,13 +171,11 @@ class ServerBenchClient:
         self._kv_world_size = 0
 
     def start(self) -> None:
-        """Connect to the Server, allocate KV resources, and register Workers.
+        """Connect, allocate KV resources, and register Workers.
 
         Raises:
-            ValueError: If the KV layout is invalid or incompatible with the
-                selected MLA routing.
-            RuntimeError: If GPU mode is unavailable, registration fails, or
-                this client has already been started.
+            ValueError: If the KV layout is invalid.
+            RuntimeError: If startup fails or the client is already started.
         """
         if self._started:
             raise RuntimeError("ServerBenchClient has already been started")
@@ -213,21 +193,19 @@ class ServerBenchClient:
         seq_no: int,
         request_id: str,
         label: str,
-    ) -> BenchRequest | None:
-        """Resolve tokens and block locations for one request.
+    ) -> RequestContext | None:
+        """Create a request with resolved token and block ranges.
 
         Args:
-            seq_no: Synthetic sequence number used to generate tokens and
-                choose Device blocks.
-            request_id: Server session identifier.
-            label: Descriptive text used only in progress output.
+            seq_no: Sequence number used to generate tokens and block offsets.
+            request_id: Server session ID.
+            label: Label used in logs.
 
         Returns:
-            A resolved request, or ``None`` when it contains no full Server
-            chunk.
+            The request, or ``None`` if it has no full chunk.
 
         Raises:
-            RuntimeError: If :meth:`start` has not completed.
+            RuntimeError: If the client is not started.
         """
         self._require_started()
 
@@ -245,7 +223,7 @@ class ServerBenchClient:
 
         num_blocks = num_full_tokens // self._block_size
         usable_blocks = max(self._num_blocks - num_blocks, 1)
-        return BenchRequest(
+        return RequestContext(
             seq_no=seq_no,
             request_id=request_id,
             label=label,
@@ -257,19 +235,19 @@ class ServerBenchClient:
             num_blocks=num_blocks,
         )
 
-    def lookup(self, request: BenchRequest) -> LookupResult:
-        """Run one scheduler-scoped LOOKUP and wait for its hit count.
+    def lookup(self, request: RequestContext) -> LookupResult:
+        """Run LOOKUP and wait for its hit count.
 
         Args:
-            request: Resolved request returned by :meth:`create_request`.
+            request: Request to look up.
 
         Returns:
-            The hit count, total chunk count, latency, and timeout status.
+            LOOKUP result and latency.
 
         Raises:
-            RuntimeError: If :meth:`start` has not completed.
+            RuntimeError: If the client is not started.
         """
-        transport = self._require_started()
+        mq_client = self._require_started()
 
         # Standard
         import time
@@ -289,7 +267,7 @@ class ServerBenchClient:
             world_size=self._kv_world_size,
         )
         started_at = time.monotonic()
-        if not _send_lookup(transport, lookup_key, tp_size=len(self._workers)):
+        if not _send_lookup(mq_client, lookup_key, tp_size=len(self._workers)):
             latency_ms = (time.monotonic() - started_at) * 1000
             self._log("  [seq %d/%s] LOOKUP timeout" % (request.seq_no, request.label))
             return LookupResult(
@@ -299,7 +277,7 @@ class ServerBenchClient:
                 error="timeout",
             )
 
-        hit_chunks = _poll_prefetch_status(transport, lookup_key.request_id)
+        hit_chunks = _poll_prefetch_status(mq_client, lookup_key.request_id)
         if hit_chunks is None:
             hit_chunks = 0
         latency_ms = (time.monotonic() - started_at) * 1000
@@ -321,27 +299,25 @@ class ServerBenchClient:
 
     def store(
         self,
-        request: BenchRequest,
+        request: RequestContext,
         start_token: int,
         token_count: int,
     ) -> TransferResult | None:
-        """STORE a token range through every write-enabled Worker.
+        """STORE a token range on every write-enabled Worker.
 
         Args:
-            request: Resolved request returned by :meth:`create_request`.
-            start_token: Token offset within the request.
-            token_count: Number of tokens to store.
+            request: Request to store.
+            start_token: Start offset in the request.
+            token_count: Number of tokens.
 
         Returns:
-            Aggregate per-Worker transfer status, or ``None`` for an empty
-            range.
+            Worker results, or ``None`` for an empty range.
 
         Raises:
-            RuntimeError: If :meth:`start` has not completed.
-            ValueError: If the token range is outside the request or is not
-                chunk-aligned.
+            RuntimeError: If the client is not started.
+            ValueError: If a non-empty range is invalid or not chunk-aligned.
         """
-        transport = self._require_started()
+        mq_client = self._require_started()
         if token_count == 0:
             return None
         self._validate_token_range(request, start_token, token_count)
@@ -374,7 +350,7 @@ class ServerBenchClient:
                 world_size=self._kv_world_size,
             )
             worker_status = _send_store(
-                transport,
+                mq_client,
                 key,
                 block_offset=block_offset,
                 block_size=self._block_size,
@@ -416,27 +392,25 @@ class ServerBenchClient:
 
     def retrieve(
         self,
-        request: BenchRequest,
+        request: RequestContext,
         start_token: int,
         token_count: int,
     ) -> TransferResult | None:
-        """RETRIEVE a token range through every read-enabled Worker.
+        """RETRIEVE a token range on every read-enabled Worker.
 
         Args:
-            request: Resolved request returned by :meth:`create_request`.
-            start_token: Token offset within the request.
-            token_count: Number of tokens to retrieve.
+            request: Request to retrieve.
+            start_token: Start offset in the request.
+            token_count: Number of tokens.
 
         Returns:
-            Aggregate per-Worker transfer status, or ``None`` for an empty
-            range.
+            Worker results, or ``None`` for an empty range.
 
         Raises:
-            RuntimeError: If :meth:`start` has not completed.
-            ValueError: If the token range is outside the request or is not
-                chunk-aligned.
+            RuntimeError: If the client is not started.
+            ValueError: If a non-empty range is invalid or not chunk-aligned.
         """
-        transport = self._require_started()
+        mq_client = self._require_started()
         if token_count == 0:
             return None
         self._validate_token_range(request, start_token, token_count)
@@ -470,7 +444,7 @@ class ServerBenchClient:
                 world_size=self._kv_world_size,
             )
             worker_status = _send_retrieve(
-                transport,
+                mq_client,
                 key,
                 self._chunk_size,
                 hit_chunks,
@@ -513,24 +487,22 @@ class ServerBenchClient:
 
     def zero_destination(
         self,
-        request: BenchRequest,
+        request: RequestContext,
         start_token: int,
         token_count: int,
     ) -> None:
         """Clear an engine-driven destination range before RETRIEVE.
 
-        Handle mode intentionally remains a no-op to preserve the current
-        baseline behavior.
+        This is a no-op in handle mode.
 
         Args:
-            request: Resolved request returned by :meth:`create_request`.
-            start_token: Token offset within the request.
-            token_count: Number of tokens to clear.
+            request: Request to clear.
+            start_token: Start offset in the request.
+            token_count: Number of tokens.
 
         Raises:
-            RuntimeError: If :meth:`start` has not completed.
-            ValueError: If the token range is outside the request or is not
-                chunk-aligned.
+            RuntimeError: If the client is not started.
+            ValueError: If a non-empty data-mode range is invalid.
         """
         self._require_started()
         if token_count == 0 or self._config.uses_handle_transfer:
@@ -554,29 +526,25 @@ class ServerBenchClient:
 
     def compute_checksums(
         self,
-        request: BenchRequest,
+        request: RequestContext,
         start_token: int,
         token_count: int,
     ) -> list[str] | None:
-        """Compute checksums for a request range without exposing hardware.
+        """Compute checksums for a request range.
 
-        Engine-driven mode hashes write-enabled Worker tensors locally.
-        Handle mode queries the Server checksum endpoint for the registered
-        Device slots.
+        Data mode hashes local tensors; handle mode queries the Server.
 
         Args:
-            request: Resolved request returned by :meth:`create_request`.
-            start_token: Token offset within the request.
-            token_count: Number of tokens to hash.
+            request: Request to hash.
+            start_token: Start offset in the request.
+            token_count: Number of tokens.
 
         Returns:
-            One digest per Server chunk, or ``None`` if checksums are not
-            available.
+            One digest per chunk, or ``None`` if unavailable.
 
         Raises:
-            RuntimeError: If :meth:`start` has not completed.
-            ValueError: If the token range is outside the request or is not
-                chunk-aligned.
+            RuntimeError: If the client is not started.
+            ValueError: If a non-empty range is invalid or not chunk-aligned.
         """
         self._require_started()
         if token_count == 0:
@@ -630,28 +598,24 @@ class ServerBenchClient:
             )
         return checksums
 
-    def end_session(self, request: BenchRequest) -> None:
-        """Release Server-side state associated with one request session.
+    def end_session(self, request: RequestContext) -> None:
+        """End one Server-side request session.
 
         Args:
-            request: Resolved request returned by :meth:`create_request`.
+            request: Request whose session should end.
 
         Raises:
-            RuntimeError: If :meth:`start` has not completed.
+            RuntimeError: If the client is not started.
         """
-        transport = self._require_started()
+        mq_client = self._require_started()
 
         # First Party
         from lmcache.cli.commands.bench.server_bench.helpers import _send_end_session
 
-        _send_end_session(transport, request.request_id)
+        _send_end_session(mq_client, request.request_id)
 
     def close(self) -> None:
-        """Unregister Workers and release all local client resources.
-
-        The method is idempotent and can clean up a partially completed
-        :meth:`start`, making it safe to call from a ``finally`` block.
-        """
+        """Idempotently release resources, including after partial startup."""
         # First Party
         from lmcache.cli.commands.bench.server_bench.helpers import (
             _send_unregister_kv_cache,
@@ -683,7 +647,7 @@ class ServerBenchClient:
             except (BufferError, ValueError):
                 pass
 
-        # Drop tensor/buffer owners before unmapping their client-side SHM.
+        # Drop buffer owners before unmapping SHM.
         for worker in self._workers:
             worker.kv_tensors.clear()
             worker.ipc_wrappers.clear()
@@ -729,10 +693,9 @@ class ServerBenchClient:
         self._started = False
 
     def _initialize(self) -> None:
-        """Allocate and register every resource required by the client."""
+        """Allocate resources and register Workers."""
 
-        # Heavy imports stay inside start so the slim lmcache-cli package can
-        # still import the command parser and show its install hint.
+        # Keep heavy imports out of the thin CLI package path.
         # Third Party
         import zmq
 
@@ -980,7 +943,7 @@ class ServerBenchClient:
 
     def _validate_token_range(
         self,
-        request: BenchRequest,
+        request: RequestContext,
         start_token: int,
         token_count: int,
     ) -> None:
